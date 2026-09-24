@@ -267,6 +267,10 @@ fn in_place_inference_allowed(
 
 /// Run the pipeline now against `main_store`, store the run + report, and update
 /// the pipeline's last-run bookkeeping. `triggered_by` is "manual" | "schedule".
+///
+/// The caller first checks that the principal may read the pipeline's scope
+/// ([`super::read_scope::pipeline_unreadable`]): the caller of a manual run,
+/// the creator of a scheduled one. The report carries the data it validated.
 pub fn execute_pipeline(
     main_store: &TripleStore,
     auth_db: &AuthDb,
@@ -547,7 +551,8 @@ fn snapshot_affected_versions(
 /// Run the pipeline now but **do not persist** anything: no run row is written
 /// and the pipeline's last-run bookkeeping is left untouched. Used by the
 /// "test run" mode so users can check what a pipeline would report without it
-/// counting officially. Returns a transient `PipelineRun` (id `"test"`).
+/// counting officially. Returns a transient `PipelineRun` (id `"test"`). The
+/// caller checks the read scope first, as for [`execute_pipeline`].
 pub fn execute_pipeline_dry(
     main_store: &TripleStore,
     auth_db: &AuthDb,

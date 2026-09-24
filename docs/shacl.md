@@ -280,13 +280,18 @@ A binding **gates on its own**: a write to a graph (or to any graph of a dataset
 
 ### Discovering & composing shapes
 
-A shape graph *is* a named graph of SHACL, so the **Shapes catalog** sweeps every non-system graph — including shapes embedded in data graphs ("joined with instance data") — for `sh:NodeShape` / `sh:PropertyShape` subjects:
+A shape graph *is* a named graph of SHACL, so the **Shapes catalog** sweeps every non-system graph the caller may read — including shapes embedded in data graphs ("joined with instance data") — for `sh:NodeShape` / `sh:PropertyShape` subjects. It is graph-first: without `?graph=` it lists the graphs holding shapes, with counts; `?graph=<iri>` returns one graph's shapes:
 
 ```bash
 curl http://localhost:7878/api/shacl/shapes -H 'Authorization: Bearer <token>'
-# → [{ graph, shape, kind:"node"|"property", label?, target_classes, path?,
-#      registered, shape_graph_id?, shape_graph_name? }, …]
+# → { graphs: [{ graph, node_count, property_count, total,
+#                registered, shape_graph_id?, shape_graph_name? }, …] }
+curl "http://localhost:7878/api/shacl/shapes?graph=<url-encoded iri>" -H 'Authorization: Bearer <token>'
+# → { graph, shapes: [{ graph, shape, kind:"node"|"property", label?, target_classes, path?,
+#                       registered, shape_graph_id?, shape_graph_name? }, …] }
 ```
+
+A graph registered in the Library is listed to whoever the Library shows its entry to. Any other graph is listed only to a caller who may read it by the rule `/sparql` applies — dataset visibility (a private graph only for its dataset's writers) plus graph-ACL read grants; admins read every graph — and `?graph=` on any other graph answers 403.
 
 **Compose** — copy picked shapes (each with its full blank-node closure) into a shape graph (create an empty one first, or pick an existing one):
 
@@ -311,6 +316,8 @@ Impact — *what data a shape graph is applied to* — is the reverse binding lo
 ### Pipelines & targets
 
 A pipeline is a saved, runnable validation. Its scope is a set of **targets** — any mix of datasets, graphs, and shape graphs — plus composed shape graphs, a severity threshold, and triggers (manual, on-write, cron). When `gate_writes` is set, writes covered by the pipeline are gated. See `POST /api/shacl/pipelines`; the request body's `targets` is an array of `{ "kind": "dataset"|"graph"|"shapegraph", "id": "…" }`.
+
+A run's report carries the data it validated (focus nodes and values), so a pipeline's whole scope — every dataset, every data graph it resolves to and every shape graph it composes — must be readable by whoever creates or updates it, runs or test-runs it, or opens a stored run's report (`GET /api/shacl/pipelines/{id}/runs/{run_id}`); anything else answers 403. Reading follows the `/sparql` rule above, and a Library shape graph is readable by whoever the Library shows it to. The check is made each time, so a revoked grant takes effect at the next run. A scheduled run is checked against the pipeline's creator and skipped when they may no longer read its scope. Run summaries (`…/runs`, counts only) are listed to everyone who can see the pipeline.
 
 ### Meta-validation (SHACL-SHACL)
 

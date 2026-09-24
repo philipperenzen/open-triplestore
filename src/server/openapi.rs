@@ -1783,7 +1783,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
         ]);
     }
     mount(paths, "/api/shacl/shapes", vec![
-        (M::Get, o("Validation", "Shapes catalog", "Graph-first discovery of every SHACL shape in the store, including shapes embedded in data graphs. Without `graph` a summary of the graphs holding shapes, with node/property counts and registration; with `?graph=<iri>` that graph's shapes. Registered shape graphs the caller cannot read are hidden.",
+        (M::Get, o("Validation", "Shapes catalog", "Graph-first discovery of every SHACL shape in the store, including shapes embedded in data graphs. Without `graph` a summary of the graphs holding shapes, with node/property counts and registration; with `?graph=<iri>` that graph's shapes. Lists only graphs the caller may read: a Library entry by the Library's rule, any other graph by the `/sparql` rule (admins read all); `?graph=` on any other graph answers 403.",
             vec![qp("graph", false, "Graph IRI whose shapes to list")],
             vec![("200", "`{graphs}` or `{graph, shapes}`")], true)),
     ]);
@@ -1807,8 +1807,8 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     mount(paths, "/api/shacl/pipelines", vec![
         (M::Get, o("Validation", "List pipelines", "The saved validation pipelines the caller may read.",
             vec![], vec![("200", "Array of pipelines")], true)),
-        (M::Post, o("Validation", "Create a pipeline", "Body: `{name, description?, visibility?, owner_type?, owner_id?, targets: [{kind, id}], shape_graph_ids, severity_threshold?, run_inference?, max_results?, gate_writes?, triggers…}`. A target is a dataset, a graph or a shape graph.",
-            vec![], vec![("201", "The pipeline"), ("400", "Invalid body")], true)),
+        (M::Post, o("Validation", "Create a pipeline", "Body: `{name, description?, visibility?, owner_type?, owner_id?, targets: [{kind, id}], shape_graph_ids, severity_threshold?, run_inference?, max_results?, gate_writes?, triggers…}`. A target is a dataset, a graph or a shape graph. Every dataset, data graph and shape graph in the scope must be readable by the caller.",
+            vec![], vec![("201", "The pipeline"), ("400", "Invalid body"), ("403", "Scope not readable, or a write target not writable")], true)),
     ]);
     mount(
         paths,
@@ -1830,11 +1830,11 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Validation",
                     "Update a pipeline",
-                    "Same body as creation.",
+                    "Same body as creation. Every dataset, data graph and shape graph in the scope must be readable by the caller.",
                     vec![],
                     vec![
                         ("200", "The pipeline"),
-                        ("403", "Not manageable"),
+                        ("403", "Not manageable, or scope not readable"),
                         ("404", "Not found"),
                     ],
                     true,
@@ -1865,10 +1865,11 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Run a pipeline",
-                "Validates every target against the composed shape graphs and stores the run.",
+                "Validates every target against the composed shape graphs and stores the run. The report carries the data it validated, so the caller must be able to read the pipeline's whole scope.",
                 vec![],
                 vec![
                     ("200", "The run, with its report"),
+                    ("403", "Scope not readable"),
                     ("404", "Not found"),
                     ("503", "Server overloaded"),
                 ],
@@ -1899,9 +1900,13 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Get a run",
-                "One run with its full validation report.",
+                "One run with its full validation report, for a caller who may read the pipeline's scope.",
                 vec![],
-                vec![("200", "The run"), ("404", "Pipeline or run not found")],
+                vec![
+                    ("200", "The run"),
+                    ("403", "Scope not readable"),
+                    ("404", "Pipeline or run not found"),
+                ],
                 true,
             ),
         )],
