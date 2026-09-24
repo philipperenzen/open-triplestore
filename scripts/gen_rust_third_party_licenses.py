@@ -118,8 +118,8 @@ def cargo_flags(args: argparse.Namespace) -> list[str]:
 def linked_crates(args: argparse.Namespace) -> set[tuple[str, str, str]]:
     """(name, version, source-or-path) of every crate in the normal,
     non-proc-macro dependency tree of the root package, root included."""
-    # `--color never`: with CARGO_TERM_COLOR=always (as CI sets it) cargo
-    # colours the `(*)` dedup marker even into a pipe.
+    # `--color never`: CI sets CARGO_TERM_COLOR=always, which colours the
+    # `(*)` duplicate marker and breaks the parse below.
     out = run(
         ["cargo", "tree", *cargo_flags(args), "-p", args.package, "--target", args.target,
          "-e", "normal,no-proc-macro", "--prefix", "none", "--format", "{p}",
