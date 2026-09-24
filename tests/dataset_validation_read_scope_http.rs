@@ -288,25 +288,25 @@ async fn a_report_on_public_graphs_is_the_datasets_to_share() {
         .remove_dataset_graph("pub-ds", PRIV_DATA)
         .unwrap();
 
-    // bob sees every graph: his official run is recorded.
-    let (st, j) = validate(&state, &bob, false, Value::Null).await;
+    // alice, the owner, records the official run (recording needs write
+    // access; a viewer's own run would be refused).
+    let (st, j) = validate(&state, &alice, false, Value::Null).await;
     assert_eq!(st, StatusCode::OK, "{j}");
     let run = j["run_id"].as_str().expect("official").to_string();
     assert!(j["test"].is_null() || j["test"] == json!(false), "{j}");
 
+    // bob, a viewer who sees every graph, reads the report graph and the
+    // stored run in full.
     let seen = sparql_values(&state, &bob).await;
     assert!(seen.contains(PUBLIC_VALUE), "{seen}");
-    let (st, text) = get(
-        &state,
-        &format!("/api/datasets/pub-ds/validation/runs/{run}"),
-        &bob,
-    )
-    .await;
-    assert_eq!(st, StatusCode::OK, "{text}");
-    assert!(text.contains(PUBLIC_VALUE), "full report: {text}");
-    let (st, text) = get(&state, "/api/datasets/pub-ds/validation/latest", &alice).await;
-    assert_eq!(st, StatusCode::OK, "{text}");
-    assert!(text.contains(PUBLIC_VALUE), "full report: {text}");
+    for uri in [
+        format!("/api/datasets/pub-ds/validation/runs/{run}"),
+        "/api/datasets/pub-ds/validation/latest".to_string(),
+    ] {
+        let (st, text) = get(&state, &uri, &bob).await;
+        assert_eq!(st, StatusCode::OK, "{uri}: {text}");
+        assert!(text.contains(PUBLIC_VALUE), "{uri}: full report: {text}");
+    }
 }
 
 /// A stored run's full report reaches a viewer only if they may read every
