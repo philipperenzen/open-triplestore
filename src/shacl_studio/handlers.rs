@@ -20,6 +20,7 @@ use crate::server::AppState;
 
 use super::access::*;
 use super::models::*;
+use super::read_scope::ReadScope;
 use super::store::ShaclStudioStore;
 
 type ApiErr = (StatusCode, String);
@@ -1086,8 +1087,11 @@ pub async fn dataset_effective_shapes(
 /// `?graph=` parameter this returns a cheap *summary* of the graphs that contain
 /// shapes (`{ "graphs": [...] }`, each with node/property counts + registration);
 /// with `?graph=<iri>` it returns that one graph's shapes (`{ "graph", "shapes" }`).
-/// Either way, graphs that are registered shape graphs the caller cannot access
-/// are hidden.
+/// Either way, a graph appears only to a caller who may read it: a graph
+/// registered in the Library to whoever the Library shows its entry to, any
+/// other graph by the rule a `/sparql` query is scoped to (dataset visibility
+/// plus graph-ACL read grants; admins read every graph). A shape's IRI, label,
+/// target classes and path are data from its graph.
 pub async fn list_shapes_catalog(
     Extension(user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -1103,15 +1107,19 @@ pub async fn list_shapes_catalog(
             reg_access.insert(s.graph_iri.clone(), (s.id.clone(), s.name.clone()));
         }
     }
-    let hidden = |g: &str| reg_all.contains(g) && !reg_access.contains_key(g);
+    let reader = ReadScope::for_user(&state.auth_db, &user).map_err(e500)?;
+    let visible = |g: &str| {
+        if reg_all.contains(g) {
+            reg_access.contains_key(g)
+        } else {
+            reader.may_read_graph(g)
+        }
+    };
 
     // Drill-down: one graph's shapes.
     if let Some(graph) = params.get("graph") {
-        if hidden(graph) {
-            return Err((
-                StatusCode::FORBIDDEN,
-                "Access denied for that shape graph".into(),
-            ));
+        if !visible(graph) {
+            return Err((StatusCode::FORBIDDEN, "Access denied for that graph".into()));
         }
         let reg = reg_access.get(graph);
         let shapes: Vec<serde_json::Value> = super::catalog::catalog_shapes(&state.store, graph)
@@ -1134,7 +1142,7 @@ pub async fn list_shapes_catalog(
     // Default: the cheap graph summary.
     let graphs: Vec<serde_json::Value> = super::catalog::catalog_graph_summary(&state.store)
         .into_iter()
-        .filter(|g| !hidden(&g.graph))
+        .filter(|g| visible(&g.graph))
         .map(|g| {
             let reg = reg_access.get(&g.graph);
             serde_json::json!({
@@ -1475,6 +1483,37 @@ fn authorize_pipeline_targets(
     Ok(())
 }
 
+/// Authorize a pipeline's *read* surface against `user`: every dataset, data
+/// graph and shape graph in its scope ([`super::read_scope::pipeline_unreadable`]).
+///
+/// A run's report carries its data graphs' focus nodes and values to whoever
+/// runs the pipeline or opens the run. So this is checked when a pipeline is
+/// created or updated (its author decides what it reads), when it runs (the
+/// caller receives the report) and when a stored run's report is opened, each
+/// time afresh: a grant since revoked, or a pipeline stored before this check,
+/// gives no more than the caller may read. The scheduler applies the same
+/// check to the pipeline's creator.
+fn authorize_pipeline_reads(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    pipeline: &ValidationPipeline,
+) -> Result<(), ApiErr> {
+    let reader = ReadScope::for_user(&state.auth_db, user).map_err(e500)?;
+    let unreadable =
+        super::read_scope::pipeline_unreadable(&state.auth_db, &studio(state), pipeline, &reader)
+            .map_err(e500)?;
+    match unreadable {
+        None => Ok(()),
+        Some(what) => Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "Read access denied for {what}: a pipeline's report carries the data it \
+                 validates, so everything in its scope must be readable by you"
+            ),
+        )),
+    }
+}
+
 pub async fn create_pipeline(
     Extension(user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -1523,6 +1562,7 @@ pub async fn create_pipeline(
         created_at: now.clone(),
         updated_at: now,
     };
+    authorize_pipeline_reads(&state, &user, &pipeline)?;
     authorize_pipeline_targets(&state, &user, &pipeline)?;
     studio(&state).insert_pipeline(&pipeline).map_err(e500)?;
     Ok((StatusCode::CREATED, Json(pipeline)))
@@ -1615,6 +1655,7 @@ pub async fn update_pipeline(
             .or_else(|| existing.results_target_graph.clone()),
         ..existing
     };
+    authorize_pipeline_reads(&state, &user, &updated)?;
     authorize_pipeline_targets(&state, &user, &updated)?;
     studio(&state).update_pipeline(&updated).map_err(e500)?;
     Ok(Json(updated))
@@ -1637,6 +1678,9 @@ pub async fn run_pipeline(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, ApiErr> {
     let pipeline = load_pipeline_checked(&state, &user, &id, false).await?;
+    // Seeing a shared pipeline is not reading its data: the report goes to
+    // the caller, so the caller must be able to read its scope.
+    authorize_pipeline_reads(&state, &user, &pipeline)?;
     let store = state.store.clone();
     let auth_db = state.auth_db.clone();
     let base_url = state.base_url.to_string();
@@ -1708,7 +1752,10 @@ pub async fn get_pipeline_run(
     State(state): State<AppState>,
     Path((id, run_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiErr> {
-    load_pipeline_checked(&state, &user, &id, false).await?;
+    let pipeline = load_pipeline_checked(&state, &user, &id, false).await?;
+    // The full report is data from the pipeline's scope (run summaries, which
+    // carry only counts, stay listed to everyone who sees the pipeline).
+    authorize_pipeline_reads(&state, &user, &pipeline)?;
     let run = studio(&state)
         .get_pipeline_run(&run_id)
         .map_err(e500)?

@@ -2057,6 +2057,41 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The dataset of a shape's query is now replaced outright with the run's data
   graphs, and no named graph is available, so a `GRAPH` block inside one
   matches nothing.
+- **The SHACL Studio shapes catalogue listed shapes from graphs the caller
+  could not read.** `GET /api/shacl/shapes` hid only Library entries the
+  caller could not see. Any other graph holding shapes (a private dataset's
+  graph with embedded shapes, a graph an admin loaded) was listed to every
+  signed-in user, and `?graph=` returned its shape IRIs, labels, target
+  classes and paths. A graph not in the Library is now listed, and drilled
+  into, only for a caller who may read it by the rule `/sparql` applies
+  (dataset visibility, a private graph only for its dataset's writers, plus
+  graph-ACL read grants; admins read every graph); any other graph answers
+  403. Library entries keep the Library's own rule.
+- **A validation pipeline could read another tenant's data.** A pipeline's
+  graphs, datasets and shape graphs were never checked for read access, and a
+  run returns its report (focus nodes and values) to the caller. So any user
+  could validate a private graph with shapes of their own and read its values
+  back, and anyone who could see a shared pipeline could run it, or open a
+  stored run, over data they could not read. Creating, updating, running and
+  test-running a pipeline, and opening a run's report, now need read access to
+  every dataset, data graph and shape graph in its scope (403 otherwise). The
+  check runs each time, so a grant revoked since, or a pipeline stored before
+  this release, gives no more than the caller may read. A scheduled run is
+  checked against the pipeline's creator and skipped when they may no longer
+  read its scope. Run summaries (counts only) stay listed to everyone who can
+  see the pipeline.
+- **A pipeline's persisted report was readable by everyone who could read its
+  dataset.** A run that persists its report as RDF (`results_target`), or its
+  inferred triples in a new graph, attached that graph to the dataset holding
+  its data, non-private, even when the run had validated one of the
+  dataset's private graphs or a graph that belongs to no dataset. So a
+  public dataset's viewers read the private graph's focus nodes and values
+  over `/sparql`. A derived graph is now attached to a dataset only when that
+  dataset holds every graph the run validated, and is private there when any
+  of them is. A pipeline's own report or inferred graph collects every run,
+  so before a run over other data it is detached, and it is newly attached
+  only while empty. A graph the pipeline's owner named as the target keeps
+  its registrations; it is attached only when nothing in the scope is private.
 - **Detaching or deleting a dataset could wipe graphs it never owned.**
   `DELETE /api/datasets/{id}/graphs` deleted any graph no other dataset
   claimed, so any user who could create a dataset could wipe the model

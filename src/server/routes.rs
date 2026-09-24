@@ -1064,23 +1064,11 @@ pub(crate) fn accessible_read_graphs(
     state: &AppState,
     user: Option<&AuthenticatedUser>,
 ) -> Result<std::collections::HashSet<String>, AppError> {
-    let user_id = user.map(|u| u.user_id.as_str());
-    let cached = state
-        .auth_db
-        .get_accessible_graph_iris_cached(user_id)
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-    let mut accessible = cached.0.clone();
-    if let Some(u) = user {
-        if let Ok(acl_iris) = state
-            .auth_db
-            .get_graph_acl_readable_iris(&u.user_id, u.role.as_str())
-        {
-            accessible.extend(acl_iris);
-        }
-    } else if let Ok(acl_iris) = state.auth_db.get_graph_acl_readable_iris("", "public") {
-        accessible.extend(acl_iris);
-    }
-    Ok(accessible)
+    crate::auth::acl::readable_graph_iris(
+        &state.auth_db,
+        user.map(|u| (u.user_id.as_str(), u.role.as_str())),
+    )
+    .map_err(|e| AppError::Internal(e.to_string()))
 }
 
 /// What [`authorize_update`] found a SPARQL UPDATE may do.
