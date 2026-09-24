@@ -138,7 +138,7 @@ pub fn encode_glb(features: &[GlbFeature]) -> Vec<u8> {
     // alike. Positions are big absolute ECEF metres but the demo features are
     // large flat-faced solids, so f32 face normals are accurate enough to shade.
     let mut normals = vec![0.0f32; positions.len()];
-    for tri in indices.chunks_exact(3) {
+    for tri in indices.as_chunks::<3>().0 {
         let (i0, i1, i2) = (
             tri[0] as usize * 3,
             tri[1] as usize * 3,
@@ -159,7 +159,7 @@ pub fn encode_glb(features: &[GlbFeature]) -> Vec<u8> {
             normals[i + 2] += nz;
         }
     }
-    for n in normals.chunks_exact_mut(3) {
+    for n in normals.as_chunks_mut::<3>().0 {
         let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
         if len > 0.0 {
             n[0] /= len;
@@ -274,7 +274,7 @@ pub fn encode_glb(features: &[GlbFeature]) -> Vec<u8> {
 
     // POSITION accessor needs min/max for the bounding box (cgltf/Cesium require it).
     let (mut min, mut max) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
-    for tri in positions.chunks_exact(3) {
+    for tri in positions.as_chunks::<3>().0 {
         for i in 0..3 {
             min[i] = min[i].min(tri[i]);
             max[i] = max[i].max(tri[i]);

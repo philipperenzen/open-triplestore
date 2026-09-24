@@ -366,6 +366,7 @@ fn audit_forbidden(audit: &AuditLogger, ctx: &DenialContext, resp: &Response) {
 
 /// Middleware that requires a valid JWT or API token. Returns 401 if missing or invalid.
 #[allow(clippy::too_many_arguments)] // axum substate extractors, one per capability
+#[allow(clippy::result_large_err)]
 pub async fn require_auth(
     State(jwt_config): State<Arc<JwtConfig>>,
     State(auth_db): State<Arc<AuthDb>>,
@@ -442,6 +443,7 @@ pub async fn optional_auth(
 }
 
 /// Middleware that requires admin privileges. Must be used after `require_auth`.
+#[allow(clippy::result_large_err)]
 pub async fn require_admin(req: Request, next: Next) -> Result<Response, Response> {
     let user = req
         .extensions()
@@ -478,6 +480,7 @@ fn enforce_write_scope_for_mutation(
 
 /// Middleware that requires publisher privileges (publisher, admin, or super-admin).
 /// Must be used after `require_auth`.
+#[allow(clippy::result_large_err)]
 pub async fn require_publisher(req: Request, next: Next) -> Result<Response, Response> {
     let user = req
         .extensions()
@@ -497,6 +500,7 @@ pub async fn require_publisher(req: Request, next: Next) -> Result<Response, Res
 /// `AuthenticatedUser` extension is populated.  If the DB contains no rules
 /// that match the current request, access is allowed (fail-open, with role
 /// middleware still applying separately).
+#[allow(clippy::result_large_err)]
 pub async fn endpoint_acl_guard(
     State(auth_db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<crate::auth::audit::AuditLogger>>,
