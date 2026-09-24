@@ -759,7 +759,7 @@ mod tests {
         ex:Bridge a ex:Brug ; rdfs:label "Bridge" ;
             bot:containsElement ex:Arch ;
             geo:hasGeometry [ geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> LINESTRING(187320 428330, 187610 428690)"^^geo:wktLiteral ] .
-        ex:Arch a ex:Boog ; rdfs:label "Arch" ;
+        ex:Arch a ex:BridgeComponent ; rdfs:label "Arch" ;
             ex:ifcGuid "1aB2cD3eF4gH5iJ6kL7mNo" ;
             geo:hasGeometry [ geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(187420 428470)"^^geo:wktLiteral ] ;
             omg:hasGeometry [ a omg:Geometry ;

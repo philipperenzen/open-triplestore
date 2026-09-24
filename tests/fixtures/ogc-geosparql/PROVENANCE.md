@@ -6,5 +6,6 @@
 - License/rights: (c) Open Geospatial Consortium, https://www.ogc.org/license
   (validator is informative as of GeoSPARQL 1.1)
 - Runner: `tests/ogc_geosparql_shacl_roundtrip.rs` — validates (1) the OGC's own
-  Sxx-valid / Sxx-invalid example files and (2) the Waalbrug dataset against the
-  official validator shapes, using this repo's native SHACL engine.
+  Sxx-valid / Sxx-invalid example files and (2) the reference example dataset
+  (`tests/fixtures/example-bridge/`) against the official validator shapes, using
+  this repo's native SHACL engine.

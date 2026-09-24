@@ -1,7 +1,8 @@
-//! End-to-end test for the R6 product capabilities (brief §M6 / DoD item 4):
-//! load the Waalbrug dataset, fetch the **viewer feed** (per-element geometry,
-//! reprojected, + glTF/IFC references), run **validation**, and read the
-//! persisted `sh:ValidationReport` back **as RDF** plus the severity rollup.
+//! End-to-end test of the viewer and validation product surface: load the
+//! reference example (a fictional arch bridge), fetch the **viewer feed**
+//! (per-element geometry, reprojected, + glTF/IFC references), run
+//! **validation**, and read the persisted `sh:ValidationReport` back **as RDF**
+//! plus the severity rollup.
 
 mod common;
 
@@ -13,11 +14,11 @@ use oxigraph::io::RdfFormat;
 use oxigraph::sparql::QueryResults;
 use tower::ServiceExt as _;
 
-const VOCAB: &str = include_str!("fixtures/waalbrug/vocab.ttl");
-const ABOX: &str = include_str!("fixtures/waalbrug/waalbrug.trig");
-const SHAPES_CORE: &str = include_str!("fixtures/waalbrug/shapes-core.ttl");
-const SHAPES_SPARQL: &str = include_str!("fixtures/waalbrug/shapes-sparql.ttl");
-const SHAPES_AF: &str = include_str!("fixtures/waalbrug/shapes-af.ttl");
+const VOCAB: &str = include_str!("fixtures/example-bridge/vocab.ttl");
+const ABOX: &str = include_str!("fixtures/example-bridge/example-bridge.ttl");
+const SHAPES_CORE: &str = include_str!("fixtures/example-bridge/shapes-core.ttl");
+const SHAPES_SPARQL: &str = include_str!("fixtures/example-bridge/shapes-sparql.ttl");
+const SHAPES_AF: &str = include_str!("fixtures/example-bridge/shapes-af.ttl");
 
 fn req(method: &str, uri: &str, token: Option<&str>) -> Request<Body> {
     let mut b = Request::builder().method(method).uri(uri);
@@ -27,14 +28,15 @@ fn req(method: &str, uri: &str, token: Option<&str>) -> Request<Body> {
     b.body(Body::empty()).unwrap()
 }
 
-/// Build a dataset `wb` holding the Waalbrug ABox (urn:wb:data) + shapes (urn:wb:shapes).
-fn waalbrug_state() -> (open_triplestore::server::AppState, String) {
+/// Build a dataset `eb` holding the reference example's ABox (urn:eb:data) + shapes
+/// (urn:eb:shapes).
+fn example_bridge_state() -> (open_triplestore::server::AppState, String) {
     let (state, token) = admin_state();
     state
         .auth_db
         .create_dataset(
-            "wb",
-            "Waalbrug",
+            "eb",
+            "Example Bridge",
             None,
             OwnerType::User,
             "adm",
@@ -44,25 +46,25 @@ fn waalbrug_state() -> (open_triplestore::server::AppState, String) {
         .unwrap();
     state
         .auth_db
-        .update_dataset_shacl("wb", false, Some("urn:wb:shapes"))
+        .update_dataset_shacl("eb", false, Some("urn:eb:shapes"))
         .unwrap();
     state
         .auth_db
-        .add_dataset_graph("wb", "urn:wb:data")
+        .add_dataset_graph("eb", "urn:eb:data")
         .unwrap();
 
     state
         .store
-        .load_str(VOCAB, RdfFormat::Turtle, Some("urn:wb:data"))
+        .load_str(VOCAB, RdfFormat::Turtle, Some("urn:eb:data"))
         .unwrap();
     state
         .store
-        .load_str(ABOX, RdfFormat::Turtle, Some("urn:wb:data"))
+        .load_str(ABOX, RdfFormat::Turtle, Some("urn:eb:data"))
         .unwrap();
     for shapes in [VOCAB, SHAPES_CORE, SHAPES_SPARQL, SHAPES_AF] {
         state
             .store
-            .load_str(shapes, RdfFormat::Turtle, Some("urn:wb:shapes"))
+            .load_str(shapes, RdfFormat::Turtle, Some("urn:eb:shapes"))
             .unwrap();
     }
     (state, token)
@@ -70,9 +72,9 @@ fn waalbrug_state() -> (open_triplestore::server::AppState, String) {
 
 #[tokio::test]
 async fn viewer_feed_returns_elements_with_gltf_and_reprojected_geometry() {
-    let (state, token) = waalbrug_state();
+    let (state, token) = example_bridge_state();
     let resp = test_app(state)
-        .oneshot(req("GET", "/api/datasets/wb/viewer-feed", Some(&token)))
+        .oneshot(req("GET", "/api/datasets/eb/viewer-feed", Some(&token)))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -84,18 +86,18 @@ async fn viewer_feed_returns_elements_with_gltf_and_reprojected_geometry() {
         elements.len()
     );
 
-    let boog = elements
+    let arch = elements
         .iter()
-        .find(|e| e["id"].as_str().unwrap_or("").ends_with("Boog-Noord"))
-        .expect("Boog-Noord in feed");
+        .find(|e| e["id"].as_str().unwrap_or("").ends_with("Arch-North"))
+        .expect("Arch-North in feed");
     assert_eq!(
-        boog["gltf_url"].as_str(),
-        Some("https://data.example.nl/files/boog-noord.glb"),
-        "boog glTF URL: {boog}"
+        arch["gltf_url"].as_str(),
+        Some("https://example.org/files/arch-north.glb"),
+        "arch glTF URL: {arch}"
     );
-    assert_eq!(boog["ifc_guid"].as_str(), Some("1aB2cD3eF4gH5iJ6kL7mNo"));
-    // RD New point reprojected to WGS84 near Nijmegen (~5.86, ~51.85).
-    let wkt = boog["wkt4326"].as_str().expect("wkt4326 present");
+    assert_eq!(arch["ifc_guid"].as_str(), Some("1aB2cD3eF4gH5iJ6kL7mNo"));
+    // RD New point reprojected to WGS84 in Nijmegen (~5.84, ~51.84).
+    let wkt = arch["wkt4326"].as_str().expect("wkt4326 present");
     let nums: Vec<f64> = wkt
         .trim_start_matches("POINT(")
         .trim_end_matches(')')
@@ -103,43 +105,46 @@ async fn viewer_feed_returns_elements_with_gltf_and_reprojected_geometry() {
         .filter_map(|t| t.parse().ok())
         .collect();
     assert_eq!(nums.len(), 2, "POINT coords: {wkt}");
-    assert!((nums[0] - 5.86).abs() < 0.05, "lon near Nijmegen: {wkt}");
-    assert!((nums[1] - 51.85).abs() < 0.05, "lat near Nijmegen: {wkt}");
+    assert!((nums[0] - 5.84).abs() < 0.05, "lon near Nijmegen: {wkt}");
+    assert!((nums[1] - 51.84).abs() < 0.05, "lat near Nijmegen: {wkt}");
 
-    // The GML-only Landhoofd-Noord also gets a reprojected geometry (srsName-aware).
-    let landhoofd = elements
+    // The GML-only Abutment-North also gets a reprojected geometry (srsName-aware).
+    let abutment = elements
         .iter()
-        .find(|e| e["id"].as_str().unwrap_or("").ends_with("Landhoofd-Noord"))
-        .expect("Landhoofd-Noord in feed");
+        .find(|e| e["id"].as_str().unwrap_or("").ends_with("Abutment-North"))
+        .expect("Abutment-North in feed");
     assert!(
-        landhoofd["wkt4326"]
+        abutment["wkt4326"]
             .as_str()
             .unwrap_or("")
             .starts_with("POINT"),
-        "GML geometry reprojected: {landhoofd}"
+        "GML geometry reprojected: {abutment}"
     );
 
     // The root has no parent; children point at it.
     let root = elements
         .iter()
-        .find(|e| e["id"].as_str().unwrap_or("").ends_with("/Waalbrug"))
+        .find(|e| e["id"].as_str().unwrap_or("").ends_with("/ExampleBridge"))
         .expect("root in feed");
     assert!(root["parent"].is_null(), "root has no parent: {root}");
     assert!(
-        boog["parent"].as_str().unwrap_or("").ends_with("/Waalbrug"),
-        "boog parented to root: {boog}"
+        arch["parent"]
+            .as_str()
+            .unwrap_or("")
+            .ends_with("/ExampleBridge"),
+        "arch parented to root: {arch}"
     );
 }
 
 #[tokio::test]
 async fn validate_persists_report_as_queryable_rdf_with_rollup() {
-    let (state, token) = waalbrug_state();
+    let (state, token) = example_bridge_state();
     let app = test_app(state.clone());
 
     // Official validation run (canonical dataset → conforms).
     let resp = app
         .clone()
-        .oneshot(req("POST", "/api/datasets/wb/validate", Some(&token)))
+        .oneshot(req("POST", "/api/datasets/eb/validate", Some(&token)))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -147,14 +152,14 @@ async fn validate_persists_report_as_queryable_rdf_with_rollup() {
     assert_eq!(
         j["report"]["conforms"].as_bool(),
         Some(true),
-        "canonical Waalbrug conforms: {j}"
+        "the canonical reference example conforms: {j}"
     );
 
-    // §7.4 — the report is queryable as RDF from the per-dataset report graph.
+    // The report is queryable as RDF from the per-dataset report graph.
     let conforms_as_rdf = matches!(
         state.store.query(
             "PREFIX sh: <http://www.w3.org/ns/shacl#> \
-             ASK { GRAPH <urn:system:reports:dataset:wb> { ?r a sh:ValidationReport ; sh:conforms true } }"
+             ASK { GRAPH <urn:system:reports:dataset:eb> { ?r a sh:ValidationReport ; sh:conforms true } }"
         ),
         Ok(QueryResults::Boolean(true))
     );
@@ -164,7 +169,7 @@ async fn validate_persists_report_as_queryable_rdf_with_rollup() {
     let resp = app
         .oneshot(req(
             "GET",
-            "/api/datasets/wb/validation/latest",
+            "/api/datasets/eb/validation/latest",
             Some(&token),
         ))
         .await
@@ -406,9 +411,9 @@ fn seed_copies_match_canonical_fixtures() {
 
 #[tokio::test]
 async fn viewer_feed_requires_access_on_private_dataset() {
-    let (state, _token) = waalbrug_state();
+    let (state, _token) = example_bridge_state();
     let resp = test_app(state)
-        .oneshot(req("GET", "/api/datasets/wb/viewer-feed", None))
+        .oneshot(req("GET", "/api/datasets/eb/viewer-feed", None))
         .await
         .unwrap();
     assert_eq!(

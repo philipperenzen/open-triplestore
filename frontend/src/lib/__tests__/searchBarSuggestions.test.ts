@@ -27,7 +27,7 @@ beforeEach(() => {
 });
 
 const DATASETS = [
-  { id: 'waalbrug-bridges', name: 'Waalbrug Bridges' },
+  { id: 'riverside-bridges', name: 'Riverside Bridges' },
   { id: 'geo-basis', name: 'Geo Basisregistratie' },
   { id: 'unrelated', name: 'Personnel Records' },
 ];
@@ -50,10 +50,10 @@ describe('SearchBar dataset suggestions', () => {
     listDatasets.mockResolvedValue(DATASETS);
     const { container } = render(SearchBar);
 
-    await type(container, 'waal');
+    await type(container, 'rive');
 
     await waitFor(() => {
-      expect(rows(container)).toEqual([['dataset', 'Waalbrug Bridges']]);
+      expect(rows(container)).toEqual([['dataset', 'Riverside Bridges']]);
     });
     expect(listDatasets).toHaveBeenCalled();
   });
@@ -91,7 +91,7 @@ describe('SearchBar dataset suggestions', () => {
     await type(container, 'w');
     await type(container, 'wa');
     await type(container, 'waa');
-    await type(container, 'waal');
+    await type(container, 'rive');
 
     await waitFor(() => expect(rows(container).length).toBe(1));
     expect(listDatasets).toHaveBeenCalledTimes(1);
@@ -107,35 +107,35 @@ describe('SearchBar dataset suggestions', () => {
   });
 
   it('stays usable on an API failure, falling back to recent searches', async () => {
-    localStorage.setItem('recentSearches', JSON.stringify(['waalbrug']));
+    localStorage.setItem('recentSearches', JSON.stringify(['riverside']));
     listDatasets.mockRejectedValue(new Error('403 Forbidden'));
     const { container } = render(SearchBar);
 
-    await type(container, 'waal');
+    await type(container, 'rive');
 
     await waitFor(() => expect(listDatasets).toHaveBeenCalled());
     // The rejection is swallowed: the recent search still shows, and the input
     // still accepts typing.
-    expect(rows(container)).toEqual([['recent', 'waalbrug']]);
+    expect(rows(container)).toEqual([['recent', 'riverside']]);
 
-    const input = await type(container, 'waalb');
-    expect(input.value).toBe('waalb');
+    const input = await type(container, 'rivers');
+    expect(input.value).toBe('rivers');
   });
 
   it('lists recent searches alongside datasets without repeating one', async () => {
-    localStorage.setItem('recentSearches', JSON.stringify(['Waalbrug Bridges', 'waalbrug deck']));
+    localStorage.setItem('recentSearches', JSON.stringify(['Riverside Bridges', 'riverside deck']));
     listDatasets.mockResolvedValue(DATASETS);
     const { container } = render(SearchBar);
 
-    await type(container, 'waal');
+    await type(container, 'rive');
 
     await waitFor(() => expect(listDatasets).toHaveBeenCalled());
     await waitFor(() => {
-      // "Waalbrug Bridges" is both a recent search and a dataset name; it must
+      // "Riverside Bridges" is both a recent search and a dataset name; it must
       // appear once, under whichever source came first.
       expect(rows(container)).toEqual([
-        ['recent', 'Waalbrug Bridges'],
-        ['recent', 'waalbrug deck'],
+        ['recent', 'Riverside Bridges'],
+        ['recent', 'riverside deck'],
       ]);
     });
   });
@@ -145,20 +145,20 @@ describe('SearchBar dataset suggestions', () => {
     listDatasets.mockResolvedValue(DATASETS);
     const { container } = render(SearchBar);
 
-    await type(container, 'waal');
+    await type(container, 'rive');
 
     // An unrelated recent must not take a slot from a real dataset match.
     await waitFor(() => {
-      expect(rows(container)).toEqual([['dataset', 'Waalbrug Bridges']]);
+      expect(rows(container)).toEqual([['dataset', 'Riverside Bridges']]);
     });
   });
 
   it('keeps arrow-key navigation over the suggestion list', async () => {
-    localStorage.setItem('recentSearches', JSON.stringify(['waalbrug deck']));
+    localStorage.setItem('recentSearches', JSON.stringify(['riverside deck']));
     listDatasets.mockResolvedValue(DATASETS);
     const { container } = render(SearchBar);
 
-    const input = await type(container, 'waal');
+    const input = await type(container, 'rive');
     await waitFor(() => expect(rows(container).length).toBe(2));
 
     const highlighted = () =>

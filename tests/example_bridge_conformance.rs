@@ -1,19 +1,11 @@
-//! Waalbrug reference-example conformance oracle (R0).
+//! Reference-example conformance oracle: a fictional arch bridge.
 //!
-//! Encodes the §6 fixture→constraint→expected-outcome matrix from the implementation
-//! brief against the fixtures in `tests/fixtures/waalbrug/`. This is the authoritative
-//! acceptance gate for the GeoSPARQL + SHACL (Core/SPARQL/AF) work: as each engine gap
-//! closes, the corresponding `#[ignore]` is removed.
-//!
-//! Known gaps blocking cases (see docs/notes/recon.md §8), confirmed empirically by the
-//! first R0 run (4 active pass, 8 ignored pending the listed milestone):
-//!   G1  — sh:prefixes not injected into SHACL-SPARQL bodies → prefixed queries silently skip (R1)
-//!   G2  — complex property paths (sequence/inverse/sh:alternativePath) not parsed from RDF (R2)
-//!   G3  — sh:expression node expressions unimplemented (R5)
-//!   G5  — geo:gmlLiteral not parsed (WKT-only) (R3)
-//!   G10 — inline blank-node sh:qualifiedValueShape not resolved (looked up in the top-level
-//!         shape list, where an inline `[ sh:class … ]` never appears) → constraint skipped.
-//!         NEW, discovered by this oracle; sh:not/and/or use load_inline_shape but qvs does not.
+//! Encodes a fixture → constraint → expected-outcome matrix against the fixtures in
+//! `tests/fixtures/example-bridge/`, covering SHACL Core, SHACL-SPARQL (with
+//! `sh:prefixes`, aggregates and GeoSPARQL functions) and SHACL Advanced Features
+//! (`sh:SPARQLFunction`, `sh:SPARQLTarget`, `sh:SPARQLRule`, `sh:expression`), plus a
+//! complex property path, an inline qualified value shape and a GML geometry.
+//! Every case in `pass/` must conform and every case in `fail/` must be reported.
 //!
 //! Convention mirrors tests/shacl_conformance.rs: shapes → `urn:shapes`, data → `urn:data`,
 //! then `validate(store, "urn:shapes", &["urn:data"])`.
@@ -23,15 +15,15 @@ use open_triplestore::shacl::{infer, validate};
 use open_triplestore::store::TripleStore;
 use oxigraph::io::RdfFormat;
 
-const VOCAB: &str = include_str!("fixtures/waalbrug/vocab.ttl");
-const SHAPES_CORE: &str = include_str!("fixtures/waalbrug/shapes-core.ttl");
-const SHAPES_SPARQL: &str = include_str!("fixtures/waalbrug/shapes-sparql.ttl");
-const SHAPES_AF: &str = include_str!("fixtures/waalbrug/shapes-af.ttl");
+const VOCAB: &str = include_str!("fixtures/example-bridge/vocab.ttl");
+const SHAPES_CORE: &str = include_str!("fixtures/example-bridge/shapes-core.ttl");
+const SHAPES_SPARQL: &str = include_str!("fixtures/example-bridge/shapes-sparql.ttl");
+const SHAPES_AF: &str = include_str!("fixtures/example-bridge/shapes-af.ttl");
 
 // ── harness ──────────────────────────────────────────────────────────────────
 
 /// Build a store: `vocab` + each `shapes` file into `urn:shapes`, `data` into `urn:data`,
-/// then validate. `data_graph` selects whether validation scopes to `urn:data`.
+/// then validate.
 fn validate_case(shapes: &[&str], data: &str) -> ValidationReport {
     let store = TripleStore::in_memory().unwrap();
     store
@@ -66,17 +58,17 @@ fn has_severity(r: &ValidationReport, sev: Severity) -> bool {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SHACL Core (§4) — expected to work today.
+// SHACL Core
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn pass_boog_noord_guid_conforms() {
+fn pass_arch_north_guid_conforms() {
     let r = validate_case(
         &[SHAPES_CORE],
-        include_str!("fixtures/waalbrug/pass/boog-noord-guid.ttl"),
+        include_str!("fixtures/example-bridge/pass/arch-north-guid.ttl"),
     );
     assert_eq!(
-        focus_violations(&r, "Boog-Noord"),
+        focus_violations(&r, "Arch-North"),
         0,
         "valid 22-char GUID conforms: {:?}",
         r.results
@@ -84,13 +76,13 @@ fn pass_boog_noord_guid_conforms() {
 }
 
 #[test]
-fn fail_foutbrug_core_violations() {
+fn fail_bad_bridge_core_violations() {
     let r = validate_case(
         &[SHAPES_CORE],
-        include_str!("fixtures/waalbrug/fail/foutbrug.ttl"),
+        include_str!("fixtures/example-bridge/fail/bad-bridge.ttl"),
     );
     assert!(
-        focus_violations(&r, "FoutBrug") >= 4,
+        focus_violations(&r, "BadBridge") >= 4,
         "expected ≥4 violations, got {:?}",
         r.results
     );
@@ -109,13 +101,13 @@ fn fail_foutbrug_core_violations() {
 }
 
 #[test]
-fn fail_boog_fout_pattern() {
+fn fail_arch_bad_guid_pattern() {
     let r = validate_case(
         &[SHAPES_CORE],
-        include_str!("fixtures/waalbrug/fail/boog-fout.ttl"),
+        include_str!("fixtures/example-bridge/fail/arch-bad-guid.ttl"),
     );
     assert_eq!(
-        focus_violations(&r, "Boog-Fout"),
+        focus_violations(&r, "Arch-Bad"),
         1,
         "exactly one pattern violation: {:?}",
         r.results
@@ -127,10 +119,10 @@ fn fail_boog_fout_pattern() {
 fn fail_label_unique_lang() {
     let r = validate_case(
         &[SHAPES_CORE],
-        include_str!("fixtures/waalbrug/fail/label-dup.ttl"),
+        include_str!("fixtures/example-bridge/fail/label-dup.ttl"),
     );
     assert!(
-        focus_violations(&r, "Waalbrug") >= 1,
+        focus_violations(&r, "ExampleBridge") >= 1,
         "uniqueLang violation: {:?}",
         r.results
     );
@@ -138,13 +130,13 @@ fn fail_label_unique_lang() {
 }
 
 #[test]
-fn fail_duiker_qualified_min_count() {
+fn fail_culvert_qualified_min_count() {
     let r = validate_case(
         &[SHAPES_CORE],
-        include_str!("fixtures/waalbrug/fail/duiker-als-brug.ttl"),
+        include_str!("fixtures/example-bridge/fail/culvert-as-bridge.ttl"),
     );
     assert!(
-        focus_violations(&r, "DuikerAlsBrug") >= 1,
+        focus_violations(&r, "CulvertAsBridge") >= 1,
         "qualifiedMinCount violation: {:?}",
         r.results
     );
@@ -152,30 +144,30 @@ fn fail_duiker_qualified_min_count() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SHACL-SPARQL (§5) — blocked by G1 (sh:prefixes injection) until R1.
+// SHACL-SPARQL — every constraint reaches its prefixes through `sh:prefixes`.
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn fail_boog_zuid_ifc_requires_guid() {
+fn fail_arch_south_ifc_requires_guid() {
     let r = validate_case(
         &[SHAPES_SPARQL],
-        include_str!("fixtures/waalbrug/fail/boog-zuid-no-guid.ttl"),
+        include_str!("fixtures/example-bridge/fail/arch-south-no-guid.ttl"),
     );
     assert!(
-        focus_violations(&r, "Boog-Zuid") >= 1,
+        focus_violations(&r, "Arch-South") >= 1,
         "IFC⇒ifcGuid SPARQL violation: {:?}",
         r.results
     );
 }
 
 #[test]
-fn fail_beweegbaar_without_operating_object() {
+fn fail_movable_without_operating_mechanism() {
     let r = validate_case(
         &[SHAPES_SPARQL],
-        include_str!("fixtures/waalbrug/fail/beweegbaar-no-bediening.ttl"),
+        include_str!("fixtures/example-bridge/fail/movable-no-mechanism.ttl"),
     );
     assert!(
-        focus_violations(&r, "DraaiBrug") >= 1,
+        focus_violations(&r, "SwingBridge") >= 1,
         "cross-property SPARQL violation: {:?}",
         r.results
     );
@@ -185,10 +177,10 @@ fn fail_beweegbaar_without_operating_object() {
 fn fail_span_sum_mismatch_warning() {
     let r = validate_case(
         &[SHAPES_SPARQL],
-        include_str!("fixtures/waalbrug/fail/span-sum-mismatch.ttl"),
+        include_str!("fixtures/example-bridge/fail/span-sum-mismatch.ttl"),
     );
     assert!(
-        focus_violations(&r, "SpanBrug") >= 1,
+        focus_violations(&r, "SpanBridge") >= 1,
         "aggregate SPARQL result: {:?}",
         r.results
     );
@@ -199,54 +191,57 @@ fn fail_span_sum_mismatch_warning() {
 }
 
 #[test]
-fn fail_onderdeel_off_trace_geosparql() {
+fn fail_component_off_alignment_geosparql() {
     let r = validate_case(
         &[SHAPES_SPARQL],
-        include_str!("fixtures/waalbrug/fail/onderdeel-off-trace.ttl"),
+        include_str!("fixtures/example-bridge/fail/component-off-alignment.ttl"),
     );
     assert!(
-        focus_violations(&r, "OffBrug") >= 1,
+        focus_violations(&r, "OffBridge") >= 1,
         "geof:distance >25m SPARQL violation: {:?}",
         r.results
     );
 }
 
 #[test]
-fn fail_bogen_too_close_geosparql() {
+fn fail_arches_too_close_geosparql() {
     let r = validate_case(
         &[SHAPES_SPARQL],
-        include_str!("fixtures/waalbrug/fail/bogen-too-close.ttl"),
+        include_str!("fixtures/example-bridge/fail/arches-too-close.ttl"),
     );
     assert!(
-        focus_violations(&r, "DubbelBrug") >= 1,
+        focus_violations(&r, "DoubleBridge") >= 1,
         "geof:distance <10m SPARQL violation: {:?}",
         r.results
     );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SHACL-AF (§6) — sh:expression (G3) + SPARQLRule/target (G1) until R5/R1.
+// SHACL-AF — node expression, SPARQL function, SPARQL target + rule.
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn fail_doorvaarthoogte_expression() {
+fn fail_clearance_expression() {
+    // Both files: shapes-af.ttl's own header says its rule, target and
+    // function bodies use the `ex:prefixes` declaration that lives in
+    // shapes-sparql.ttl, so the two are always loaded together.
     let r = validate_case(
-        &[SHAPES_AF],
-        include_str!("fixtures/waalbrug/fail/doorvaarthoogte-laag.ttl"),
+        &[SHAPES_SPARQL, SHAPES_AF],
+        include_str!("fixtures/example-bridge/fail/clearance-too-low.ttl"),
     );
     assert!(
-        focus_violations(&r, "LageBrug") >= 1,
+        focus_violations(&r, "LowBridge") >= 1,
         "sh:expression minExclusive violation: {:?}",
         r.results
     );
 }
 
-/// §6.1 — the user-defined sh:SPARQLFunction ex:afstandMeter is callable from SPARQL and
+/// The user-defined sh:SPARQLFunction ex:distanceMetres is callable from SPARQL and
 /// returns the same value as the raw geof:distance it wraps.
 #[test]
-fn sparql_function_afstandmeter_callable() {
+fn sparql_function_distance_metres_callable() {
     let store = TripleStore::in_memory().unwrap();
-    // shapes-sparql provides ex:prefixes; shapes-af defines ex:afstandMeter.
+    // shapes-sparql provides ex:prefixes; shapes-af defines ex:distanceMetres.
     store
         .load_str(SHAPES_SPARQL, RdfFormat::Turtle, Some("urn:shapes"))
         .unwrap();
@@ -258,7 +253,7 @@ fn sparql_function_afstandmeter_callable() {
         PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
         PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
         PREFIX uom:  <http://www.opengis.net/def/uom/OGC/1.0/>
-        SELECT (ex:afstandMeter("POINT(0 0)"^^geo:wktLiteral, "POINT(3 4)"^^geo:wktLiteral) AS ?d)
+        SELECT (ex:distanceMetres("POINT(0 0)"^^geo:wktLiteral, "POINT(3 4)"^^geo:wktLiteral) AS ?d)
                (geof:distance("POINT(0 0)"^^geo:wktLiteral, "POINT(3 4)"^^geo:wktLiteral, uom:metre) AS ?ref)
         WHERE {}
     "#;
@@ -273,17 +268,18 @@ fn sparql_function_afstandmeter_callable() {
     let r = r.unwrap_or_default();
     assert!(
         d.contains('5'),
-        "ex:afstandMeter should return 5, got {:?}",
+        "ex:distanceMetres should return 5, got {:?}",
         d
     );
     assert_eq!(
         d.split('"').nth(1),
         r.split('"').nth(1),
-        "ex:afstandMeter must equal geof:distance (d={d:?}, ref={r:?})"
+        "ex:distanceMetres must equal geof:distance (d={d:?}, ref={r:?})"
     );
 }
 
-/// §6.3 rule fires on a 5/6 condition (positive) and not on ≤4 (negative).
+/// The inspection-priority rule fires on a 5/6 condition (positive) and not on ≤4
+/// (negative).
 fn infer_priority(data: &str) -> bool {
     let store = TripleStore::in_memory().unwrap();
     store
@@ -299,7 +295,7 @@ fn infer_priority(data: &str) -> bool {
     store.load_str(data, RdfFormat::Turtle, None).unwrap();
     infer(&store, "urn:shapes", &[]).unwrap();
     matches!(
-        store.query("ASK { ?b <https://data.example.nl/def/inspectieprioriteit> \"hoog\" }"),
+        store.query("ASK { ?b <https://example.org/def/inspectionPriority> \"high\" }"),
         Ok(oxigraph::sparql::QueryResults::Boolean(true))
     )
 }
@@ -307,18 +303,20 @@ fn infer_priority(data: &str) -> bool {
 #[test]
 fn rule_fires_on_poor_condition() {
     assert!(
-        infer_priority(include_str!("fixtures/waalbrug/pass/conditie-hoog.ttl")),
-        "cs5 part must infer da:inspectieprioriteit hoog"
+        infer_priority(include_str!(
+            "fixtures/example-bridge/pass/condition-poor.ttl"
+        )),
+        "a cs5 part must infer def:inspectionPriority high"
     );
 }
 
-// NOTE: currently passes vacuously — G1 blocks the rule from firing at all. Once R1 lands,
-// this must keep passing for the right reason (cs3 ≤ 4 ⇒ no inference). Kept active as the
-// negative half of the rule oracle and a regression guard against over-firing.
+/// The negative half of the rule oracle: a regression guard against over-firing.
 #[test]
-fn rule_does_not_fire_on_good_condition() {
+fn rule_does_not_fire_on_fair_condition() {
     assert!(
-        !infer_priority(include_str!("fixtures/waalbrug/pass/conditie-laag.ttl")),
-        "cs3 part must NOT infer a priority"
+        !infer_priority(include_str!(
+            "fixtures/example-bridge/pass/condition-fair.ttl"
+        )),
+        "a cs3 part must NOT infer a priority"
     );
 }

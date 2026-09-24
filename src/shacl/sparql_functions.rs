@@ -3,7 +3,7 @@
 //! A `sh:SPARQLFunction` defines a user function whose body is a SPARQL `SELECT`
 //! projecting a single variable (or `sh:ask`). Each is registered as an Oxigraph
 //! custom function so it is callable from queries, SHACL-SPARQL constraints and
-//! rules — e.g. the Waalbrug `ex:afstandMeter(geomA, geomB)` wrapping `geof:distance`.
+//! rules — e.g. the reference example's `ex:distanceMetres(geomA, geomB)` wrapping `geof:distance`.
 //!
 //! **Evaluation model.** Definitions are discovered through the raw quad index
 //! (never via `store.query`, which would recurse through `query_options`). The body

@@ -31,7 +31,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Security
 - None.
 
-## [0.6.0] — 2026-07-31
+## [0.6.0] — 2026-09-24
+
+Tagged after the fact from `main`: besides the changes of the original 0.6.0
+release commit, this release contains everything merged to `main` up to the
+vocabulary clean-up (#262–#267, #285, #288–#296), and its reference example is
+a fictional bridge. Known issue: it ships `lru` 0.16 (RUSTSEC-2026-0253), which
+0.7.0 fixes.
 
 ### Added
 - **The store as an OIDC provider** (Unified Accounts): client apps sign
@@ -60,10 +66,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Configurable guest capabilities and OIDC token authority**: both principals
   carried more authority than their names implied, and the right limit differs
   per deployment, so both become policy with a conservative default (new
-  `auth::policy` module, documented in `.env.example`).
+  `auth::policy` module, both knobs documented in `.env.example`).
   `OTS_GUEST_CAPABILITIES` selects from `write` / `create_datasets` /
   `api_tokens` / `publish` / `all` and defaults to read-only, applied as a clamp
-  on every authentication path.
+  on every authentication path — a guest is equally limited arriving by session
+  cookie, API token or OIDC token, and the clamp can only ever remove authority.
+  `OTS_OIDC_SESSION_POLICY` decides what an OIDC access token may do: `session`
+  (the default — reads and writes like an interactive session, but never mints
+  API tokens), `scoped` (writes only when the token's `scope` grants it; issuers
+  that namespace their scopes list the extra spellings in
+  `OTS_OIDC_WRITE_SCOPES`) or `full` (the previous behaviour, kept as an escape
+  hatch). `session` is the default deliberately: first-party apps commonly
+  request only `openid profile email`, so enforcing scope by default would
+  silently turn existing clients read-only, while blocking the token exchange
+  closes the escalation (see Security) at no compatibility cost. An API token
+  also no longer mints further API tokens. (#257)
 - **Membership-aware introspection**: `GET /api/auth/me` now includes
   `organisations` and `groups` arrays, and the new
   `GET /api/datasets/:id/permissions/me` reports the caller's effective
@@ -78,6 +95,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   always surface a real violation. Validation issues are now openable in 3D:
   `IssueResults` gains a **Show in 3D** action and `DatasetViewer` honours
   `?focus=<iri>`, framing and highlighting the element by IRI or IFC GlobalId.
+- **SHACL Studio shape builder**: an add-property template menu, a
+  relation/value/target legend, value-type hints, grouped advanced sections and
+  a per-shape *Used by* (bindings plus live instance counts); the Studio
+  overview's Datasets KPI opens the validation list. The round-trip engine is
+  untouched. (#226)
 - **Plugin accounts capability**: `ots-plugin-api` 0.2 adds
   `PluginContext::auth` (`PluginAuth`: bearer introspection + admin-gated
   users/organisations/LLM-stats overviews, enforced host-side), plus the new
@@ -86,32 +108,278 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `/ext/accounts-dashboard/ui`, merging the store's own AI-request log with
   an external LLM gateway's usage ledger (fail-soft). The Docker image gained
   a `CARGO_FEATURES` build arg to enable plugin features without patching.
-- **Seed-bundle `[prefixes]` table**: a bundle may declare
-  `prefix → namespace` mappings, seeded into the prefix registry's persisted
-  cache tier at boot (existing entries win) — so bundled datasets render
-  prefixed names out of the box.
+- **Seed-bundle `[prefixes]` table**: a bundle may declare `prefix → namespace`
+  mappings. Seeds form their own tier in the prefix registry, directly below the
+  platform overlay and above the bundled prefix.cc snapshot — a deployment
+  naming its own namespace outranks a community list — and the tier applies to
+  forward lookup, reverse lookup and CURIE shrinking alike, so bundled datasets
+  render prefixed names out of the box and their IRIs shrink back to CURIEs.
+  Seeds are re-applied from the installed bundles on every start and never
+  written to the on-disk cache; the first seed of a label wins, an override of
+  a snapshot mapping is logged, and validation is unchanged. (#225, #258)
+- **3D viewer sidebar grouping**: group elements by structure, location, format
+  or type, with per-format badges (IFC / STL / CityJSON / glTF) instead of a
+  bare "3D". Groups start closed, so regrouping 5k elements renders headers
+  rather than 5k rows (7–21 ms measured, was seconds); *Structure* no longer
+  vanishes during the two-phase feed load; the location lens is fed by
+  server-side place inference (schema.org / ifcOWL address statements and
+  `owl:sameAs` authorities such as BAG → a minted country/region/city path,
+  never guessed from coordinates). The sidebar is responsive (`clamp()` width,
+  `dvh` heights, coarse-pointer hit targets) and the group-by select follows
+  the theme. (#233)
+- **Volumetric WKT on the map**: `POLYHEDRALSURFACE Z` solids only ever appeared
+  in the Cesium 3D-Tiles view — the viewer feed's reprojection went through the
+  2-D geo crate, which cannot represent them, so the literals were silently
+  dropped. The feed carries them in a dedicated `wkt3d` field (each `x y z`
+  transformed on x/y, z kept as metres, structure untouched, malformed input
+  fails closed) and the map builds real geometry from it — fan-triangulated
+  faces in local metres about the footprint centroid, through the same entry
+  contract models use, so fit, theming, suppression and picking need no special
+  cases. (#233)
+- **Spark widgets bind to retrieved rows**: ```` ```chart
+  {"source":"query","x":"g","y":"n"} ```` and ```` ```map
+  {"source":"query","wkt":"…"} ```` render the columns of the turn's last
+  successful query exactly, so retrieved numbers can no longer be transcribed
+  wrong — "chart the number of triples per named graph" used to produce a bar
+  chart of 38 zeros (the model wrote `COUNT(?trip)` with `?trip` unbound and
+  faithfully charted the result), and a 7B model corrupts digits when retyping
+  30+ values. Column matching is name-based (a leading `?` tolerated) with
+  auto-detection fallbacks; missing rows fail loudly. Chart labels show IRIs by
+  their distinguishing tail segments instead of dozens of identical front-
+  truncated ticks. (#233)
+- **Spark grounding**: graphs of the datasets a question mentions take
+  vocabulary and prompt slots before the positional truncation windows (on a
+  200-graph instance the asked-about dataset never got a vocabulary block, so
+  the model invented predicates and every query returned zero rows);
+  vocabulary sampling is frequency-ordered and deeper (8 classes / 20
+  predicates, was the first 6/12 in storage order — the BAG graph's
+  construction-year predicate never made the prompt); the platform context
+  lists each in-scope graph with its cached triple count and the dataset's
+  **public** assets (the asset listing has no ACL, and a private filename in an
+  anonymous prompt would be a disclosure), so "show me the IFC files" is
+  answered from the inventory instead of by guessing graph shapes; inventories
+  (datasets, graphs, files, services) are explicitly authoritative, graphs are
+  for contents; a zero-row result, an all-zero aggregate and a parse error each
+  get a targeted repair hint; the prompt teaches `/resource?iri=` entity links
+  and carries worked query patterns; `model3d` specs accept an explicit
+  `format` so extension-less asset download paths are loadable. Per-message and
+  whole-conversation copy buttons. (#233)
+- **Guest chat rate limit**: `LLM_RATE_LIMIT_ANON_PER_MIN` (default 5 per minute
+  per IP) beside the signed-in `LLM_RATE_LIMIT_PER_MIN` (20); both are reported
+  by `GET /api/llm/health` and shown in the chat UI (guest note and About
+  panel), and the 429 message names the budget. (#233)
+- **The vocabulary recommender accepts plain strings** — `{"terms": ["bridge"]}`
+  beside the `{term, category}` objects — documented with a `curl` example in
+  docs/vocabulary-search.md, in the OpenAPI description and in the Recommender
+  tab. (#233)
+- **`ots-geof:isClosed3d(geom)`** — a manifold closure test on the parsed
+  geometry: a face set is watertight iff every undirected edge of its face
+  rings is shared by exactly two faces (vertices matched on coordinates
+  quantised to ~1e-9 of the geometry's magnitude, so WKT round-trips never
+  split a shared vertex; unbound for face-less geometry). The seeded "3D
+  solid closure" example shape used to count `((` face openers in the WKT
+  text, so any open shell with four or more faces passed; it now calls the
+  function, keeping the face-count guard as a fallback for builds without
+  `geometry3d`, and the validation demo gains `OpenTank` — a five-face box
+  missing one wall — as the case the heuristic waved through. (#267)
+- **Labels follow the UI language.** `rdfs:label` / `rdfs:comment` and
+  vocabulary titles were hardcoded to prefer English, so a Dutch UI showed
+  English labels; every display surface (resource page, vocabulary cards,
+  SPARQL completion tooltips, ontology header, model browser) now ranks
+  exact locale tag > same primary subtag > English > untagged, and the viewer
+  feed takes the client's language as `?lang=` so an element carrying
+  `"Deur"@nl` and `"Door"@en` shows "Deur" to a Dutch reader (omitting the
+  parameter keeps English-first). The light markup real vocabularies put in
+  `rdfs:comment` / `skos:definition` — paragraphs, markdown links, bare URLs,
+  `[[term]]` references — is rendered on the resource page and in the model
+  browser instead of shown as a wall of text with brackets. (#265)
+- **Shareable viewer links and reorderable inspector tabs.** The address bar
+  mirrors the focused element as `?focus=<iri>` and the inspector has a
+  copy-link action (the link carries no credentials — recipients still pass
+  the dataset checks); inspector tabs can be reordered by dragging along the
+  strip, with `Ctrl+Arrow` and menu items as the non-pointer equivalents;
+  leaf parts (a door, a hinge) get *View in walkthrough*, which walks the
+  ancestor building and spawns facing the part. (#265)
+- **Spark shows its work.** A verbosity toggle in the chat header (eye icon,
+  persisted) opens the retrieval trail by default and prints each query as it
+  runs, so a turn that queries three times, fails once and retries shows
+  exactly that, live; an explicit per-turn open/close still wins. Queries the
+  model emits on one line are re-indented for the query card — layout only,
+  token stream preserved, literals/IRIs/comments split out first — and the
+  card's Run / copy / open-in-workspace use the formatted text, so what you
+  see is what runs. IRIs in an answer are chips that open the resource page.
+  (#288)
+- **Resource hover cards wherever an IRI is shown.** Every IRI cell in a
+  result table and every resource reference in a Spark answer shows a hover
+  card — label in the UI language, up to three type chips, description, and
+  how many facts the store holds — via one bounded, ACL-scoped
+  `/api/browse/triples` fetch per IRI (350 ms show / 150 ms hide intent, a
+  five-minute per-IRI cache, in-flight dedup); an IRI the store does not know
+  renders an explicit "external link" card. (#295)
+- **`LLM_CONTEXT_TOKENS`** declares the serving model's context window. When
+  set, a turn budgets its prompt to window − `max_tokens` − margin: over
+  budget, the oldest conversation turns are dropped first (the current
+  question always survives), then graph-vocabulary blocks. Local runtimes
+  (Ollama, vLLM, llama.cpp) truncate an over-long prompt silently from the
+  top — deleting the execution protocol first — which from the outside looks
+  like the assistant flipping mid-conversation from grounded answers into
+  confident fabrication. Unset keeps the previous behaviour for large-context
+  hosted APIs (and see the gateway discovery below). See docs/spark.md. (#295)
+- **Spark re-surfaces question-matched API services at the prompt's tail.**
+  Asked "is there an API service about cities?", a small model walked past a
+  mid-prompt service literally named "Cities within a bounding box" and burned
+  its rounds writing SPARQL. Up to three services whose name or description
+  overlaps the question ride at the end of the system prompt with an
+  instruction to answer with the `GET` path or an ```` ```api ```` widget
+  before writing any SPARQL; no match, no section. The hint survives the
+  over-budget vocabulary drop. (#295)
+- **`LLM_CHAT_MODEL`** selects a model for Spark specifically (chat is the most
+  demanding task; an instance running a small local model for NL→SPARQL often
+  wants a stronger one here) and **`LLM_TIMEOUT_SECONDS`** raises the
+  per-completion budget past the 120 s default a 20B+ model on local hardware
+  needs. (#263)
 
 ### Changed
 - Login accepts an internal-path `?next=` redirect (used by the OIDC
   authorize flow); absolute URLs are ignored (no open redirect).
-- **The performance gate now compares a change against its own merge base**,
-  both benched in the same job, instead of against the stored baseline — runner
-  hardware drift no longer reads as a regression. It fails at +10 %, with a
-  small-benchmark floor below 1 µs (where a percentage bar is meaningless) and
-  per-benchmark tolerances for the three benchmarks measured to be bimodal on
-  these runners. See [`docs/performance.md`](docs/performance.md).
-- **Dependencies**: a coordinated aws-sdk/aws-smithy bump, and a batch of 19
-  further updates including `age` 0.12, `hmac` 0.13 (with `sha1` 0.11 in
-  lockstep — the digest 0.11 trait family), `tower-http` 0.7, `geos` 11.1 and
-  `eslint-plugin-svelte` 3. `jsdom` 30 and TypeScript 7 are deliberately held:
-  the former requires a Node baseline past this project's Node 20, and
-  typescript-eslint does not yet support the latter.
+- **The performance gate compares a change against its own merge base**, both
+  benched in the same job (two passes a side, alternated, fastest median per
+  benchmark), instead of against the stored baseline — runner hardware drift no
+  longer reads as a regression. The default bar is 1.15: it was 1.25 against
+  the stored baseline before this release, and briefly 1.10 within it, which
+  produced four false regressions in one afternoon on benchmarks the changes
+  could not reach. Benchmarks whose reference side is under 1 µs fall back to a
+  1.35 floor, where a percentage bar is meaningless — a floor documented since
+  #229 that had never run, because the baseline refresh silently dropped its
+  keys until #260. Three benchmarks measured to be bimodal on these runners
+  carry their own tolerances (`query_simple_lookup/100000` 1.45,
+  `query_group_concat` 1.35, `query_alternative_path/10000` 1.5), and the
+  baseline-refresh job measures the gated subset under the gate's own
+  conditions. See [`docs/performance.md`](docs/performance.md). (#228, #229,
+  #230, #231, #232, #260)
+- **MSRV 1.88 → 1.94.1.** The coordinated aws-sdk/aws-smithy bump (`aws-sdk-s3`
+  1.46 → 1.140, `aws-smithy-runtime` 1.7 → 1.12, `aws-credential-types` 1.3,
+  the rest in lockstep — 1.3.0 cannot land alone) declares
+  `rust-version = "1.94.1"`, so the package's own `rust-version` and the pinned
+  builder images follow (Dockerfile and `.gitlab-ci.yml`: `rust:1.91-*` →
+  `rust:1.94-*`). The plugin crates are untouched and still build on 1.88. The
+  S3 client is handed an explicit ring-backed HTTP client instead of the SDK's
+  default aws-lc-rs one — no CMake/C build, and one rustls crypto provider in
+  the process, as before — and the never-imported `aws-config` is dropped.
+  (#227)
+- **Node 24.** Node 20 is end of life and receives no security patches; CI,
+  GitLab CI and the production image's frontend stage were all on it. All six
+  pins move to Node 24 LTS, `package.json` declares `engines.node >= 24` so a
+  too-old Node warns instead of failing obscurely inside jsdom, and
+  CONTRIBUTING / docs/windows.md say 24+. (#261)
+- **Dependencies**: a batch of 19 updates including `age` 0.12
+  (`Encryptor::with_recipients` takes an iterator and returns `Result`), `hmac`
+  0.13 (with `sha1` 0.11 in lockstep — the digest 0.11 trait family, putting
+  TOTP on the same generation as `sha2`/`hkdf`), `tower-http` 0.7, `geos` 11.1,
+  `eslint-plugin-svelte` 3 (its ~430 new-rule hits on pre-existing code are
+  staged as warnings pending triage; the lint gate is unchanged), `clap`,
+  `uuid`, `svelte` 5.56, `vite` 8.2, `vitest` 4.1, `cesium` 1.143, the three
+  `@codemirror` packages and `docker/login-action`; and `jsdom` 30, which the
+  Node 24 move unblocked. TypeScript 7 is deliberately held: typescript-eslint
+  does not yet support it. (#259, #261)
+- **Dataset and organisation pages rebuilt around what a visitor came for.** The
+  dataset page puts Files third instead of fourteenth: format badges (IFC / STL
+  / CityJSON / RDF / image) from the viewer's own detector, size, date,
+  restricted state, a plain download link to the streaming route, and **View
+  in 3D** on model files, which mounts the viewer in the preview modal; four
+  honest states (loading skeletons, a sign-in prompt, a retryable error, a real
+  empty state) replace the one lie; a KPI strip (triples, graphs, files,
+  versions, 3D elements) and a sticky section nav sit under the hero; Validation
+  and Access are gated to the roles that can use them. The organisation page
+  promotes datasets above the fold, finally shows the uploadable logo, omits KPI
+  counts whose auth-gated fetch did not run rather than showing 0, shows
+  members and groups to signed-in users only, gates manager controls, and
+  confirms member removal; the organisations list no longer flashes "0
+  organisations" before its first fetch. (#233)
+- **Uploads inherit the dataset's visibility.** A file added to a public dataset
+  is public by default (bulk import already did this); a manager can still opt
+  one out. (#233)
+- **Demo content and licences.** The Schependomlaan design model is replaced as
+  the demo's headline IFC: its repository's LICENSE says CC BY 4.0, but the
+  README records the grant the data owners actually gave — "for scientific and
+  academic purposes" — so it cannot be redistributed here. The replacement is
+  the Esplanades project (Maleva 18, Tallinn; CC BY 4.0 from the copyright
+  holder via buildingSMART's community samples, 4× smaller and richer),
+  anchored on the real building's OSM footprint. The other demo assets' terms
+  are corrected to what upstream grants (Duplex Apartment from buildingSMART's
+  CC BY 4.0 republication with the mandated credit; FZK-Haus / Smiley West
+  pointing at KIT's actual terms; the Wikimedia landmark STLs recording
+  `dcterms:license`/`creator`/`source` — four are CC BY 4.0 by Microsoft and
+  carried no credit; the 3DBAG credit linking their copyright page). Demo
+  geometry is traced from OSM (street line, park polygon, the WKT-Z solids on
+  the real 68.2° street grid) and model orientation is measured. The demo
+  refresh (content v13) purges the demo dataset's stale assets before
+  reseeding — including the withdrawn 47 MB Schependomlaan.ifc, which the graph
+  swap alone had left stored and publicly downloadable — refreshes the
+  dataset's name and description, and seeds the five landmark STLs as
+  first-class assets. `LICENSE` and `NOTICE` ship in the runtime image at
+  `/app/`, and `NOTICE` is rewritten (web-ifc's MPL-2.0 source pointer,
+  per-publisher vocabulary terms, IMBOR's real licences, the CLARIAH claim
+  corrected, the demo-content section). (#233)
+- **The bundled Ollama context window is 16k** (`OLLAMA_CONTEXT_LENGTH` in
+  docker-compose): the 4096 default silently truncated Spark's grounded system
+  prompt from the top, cutting the retrieval instructions themselves, so the
+  model answered from dataset descriptions and never queried. (#233)
+- **The reference example is a fictional bridge.** The SHACL/GeoSPARQL
+  conformance oracle, the viewer-feed end-to-end test and the OGC GeoSPARQL
+  round-trip run on `tests/fixtures/example-bridge/`: a made-up arch bridge
+  with an English vocabulary (`https://example.org/def/`) and illustrative
+  coordinates, in place of a real structure. The docs examples, Spark's prompt
+  examples and the unit-test fixtures use fictional names as well.
+- **The performance gate confirms before it fails.** A benchmark the four-pass
+  screen flags is re-benched on both revisions before the gate fails, so a
+  fluke on one of the benchmarks clears and a real regression repeats — three
+  consecutive PRs had been failed on regressions their diffs could not reach
+  (#266).
+- **Spark no longer streams what it writes before its first retrieval.**
+  Whatever the model writes before its first query cannot be grounded in
+  data; streaming it painted a confident answer the next event had to wipe —
+  the "it answers, then retracts and apologises" experience. Post-retrieval
+  rounds still stream live. Result tables rendered into follow-up prompts get
+  a total cap (`CHAT_TABLE_MAX_CHARS`): per-cell truncation alone let a wide
+  50-row result reach several thousand tokens per round. (#295)
+- **UI wording and layout.** The triple browser's "facets" are called
+  "terms", matching the rail's *Terms in scope* heading; the Settings page is
+  four hash-linkable tabs behind an identity header, on a two-column grid
+  from 1024px instead of one 800px column with the token and danger-zone
+  cards spanning the full width (#265). The walkthrough's two permanent cards
+  are replaced by one quiet aim line (type · name · what a click does) and a
+  detail card that opens only for a selected element the crosshair rests on
+  for 1.6 s; models longer than ~120 m spawn over their own middle and let
+  gravity settle the camera onto the deck, instead of 215 m past the end of a
+  viaduct at ground level (#267).
+- **Dependencies.** A batch supersedes 19 Dependabot PRs (#289), with the code
+  migrations they require: `rand` 0.10 (`thread_rng()` → `rng()`; still the
+  ChaCha12 CSPRNG, so token, TOTP and JWT-secret generation is unchanged) and
+  `symphonia` 0.6, plus `base64` 0.23, `wkt` 0.14, `infer` 0.22, `zip` 8,
+  `parry3d-f64` 0.30 and the semver-compatible Rust and npm updates; `ipnet`
+  2.12.1 (#285). The never-imported `utoipa-swagger-ui` crate is gone (#291) —
+  the OpenAPI document is still served at `/api-docs/openapi.json` and the
+  interactive UI is the frontend's own page — which also removes the duplicate
+  `axum` 0.8 and `zip` 3 from the tree.
 
 ### Deprecated
 - None.
 
 ### Removed
-- None.
+- **The invented vocabulary term sets.** The seeded registry, the bundled
+  `vocab/` files and the term-lookup map lose the four hand-authored files
+  that had no authoritative source to copy from — `bag` (a "3DBAG
+  Vocabulary" excerpt under `https://data.3dbag.nl/def/`) and `otl` (an
+  "Object Type Library" excerpt under `https://example.org/vocab/def/`),
+  whose IRIs were invented outright; the IMBOR `def/` excerpt version
+  (`https://data.crow.nl/imbor/def/`, a namespace that serves no RDF; the
+  full IMBOR 2025 `term/` vocabulary stays); and the alignment bridge that
+  only existed to link them — together with the demo dataset's `assets`
+  graph built on top of them. The VoID vocabulary file goes too: its
+  canonical Turtle is no longer published at a stable URL, so only the curated
+  `void` prefix entry remains. Existing installs keep whatever the registry
+  already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
 - **3D models were unreachable from any device but the host**: the viewer feed
@@ -124,11 +392,50 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Blank basemap under MapLibre 6**, which moved its worker out of the bundle
   and resolved it at runtime — Vite never emitted the file, the SPA fallback
   served `index.html`, and the worker died silently.
-- **Buildings sliced in half by basemap suppression**: suppression now hides
-  whole buildings by feature id rather than by a `distance` filter evaluated per
-  tile fragment, and resets across entry rebuilds. Model orientation is now
-  measured rather than guessed — `ots:modelHeading` flows RDF → feed → placement
-  matrix, with landmark bearings taken from real OSM footprints.
+- **Basemap suppression, model orientation and ground line.** Suppression hides
+  basemap buildings with MapLibre's viewport-independent `distance` filter and
+  keeps a feature-id set only as the fallback for engines without it — an id
+  set collected at one zoom hid unrelated buildings at other zooms, since
+  planetiler feature ids are not stable across zoom levels; suppression resets
+  during entry rebuilds (the phase-2 feed swap left whole blocks hidden for
+  seconds with no models standing in) and footprints turn with a model's
+  heading. Model orientation is measured rather than guessed —
+  `ots:modelHeading` (the bearing of the model's +X axis) flows RDF → feed →
+  placement matrix, landmark bearings are taken from real OSM footprints (the
+  Empire State Building was 29° off the Manhattan grid), the Dragon Bridge's
+  wrong `upAxis` no longer lays it on its side, and
+  `IfcGeometricRepresentationContext.TrueNorth` is deliberately not applied
+  (web-ifc already resolves placements, so it double-rotates). IFC buildings
+  stand on their real ground line: web-ifc recentres a model arbitrarily in Y
+  and `normalise()` rested the bounding-box minimum on the ground, so a
+  building with foundations below grade stood lifted by that depth; the parse
+  records the file's own elevation zero, placement rests the model on it when
+  plausible, and the map clips geometry below the basemap plane (the modal and
+  walkthrough keep the below-grade parts visible). (#233)
+- **Dataset files were unreachable logged-out.** `GET /api/datasets/:id/assets`
+  was mounted behind `require_auth`, so every anonymous visitor got a 401,
+  which the dataset page swallowed and rendered as "No assets yet" — a public
+  dataset's IFC and STL originals were invisible to exactly the audience the
+  demo exists for. The list sits behind `optional_auth` like every other public
+  dataset surface and filters to public assets for anonymous callers; download
+  and metadata reject non-public assets outright; write handlers still require
+  a real user. (#233)
+- **Walkthrough jump and crouch work everywhere**: a missed floor raycast froze
+  gravity — `grounded` never became true, which silently disabled both — and
+  now falls back to the scene ground plane. (#233)
+- **Vocabularies tab, relevance and dark mode.** The Vocabularies tab died on a
+  Svelte `each_key_duplicate` (the catalogue can legitimately return two
+  entries with the same prefix+namespace — a platform copy and a LOV record)
+  and snapped back to the Terms tab; relevance was a bare 70px bar that made
+  results incomparable and vanished on dark surfaces, and is now the normalised
+  score as a number beside a small meter; the search inputs hardcoded a white
+  background under the theme's near-white text, so typed text was invisible in
+  dark mode. (#233)
+- **Embedded 3D answers no longer hijack page scrolling**: wheel-zoom in the chat
+  and inspector viewers is gated behind a click (OrbitControls' always-on wheel
+  handler took over the moment the cursor crossed a 3D answer), and a model
+  that fails to load is named in the console instead of rendering a silent
+  wireframe cube. (#233)
 - **The query cache deep-copied results it then discarded**: `QueryCache::put`
   decomposed every solution into a row vector *while* pulling, before it could
   know whether the result fit under the cap. Every SELECT over the 10 000-row
@@ -136,13 +443,163 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nothing. Solutions are now buffered untouched and decomposed only in the
   branch that actually caches; variable lookup also stops being quadratic in
   projection width.
-- **Seeded prefixes now outrank the bundled snapshot**, so a bundle's own
-  `[prefixes]` mappings are not shadowed by stale snapshot entries.
 - The default-features build (`cargo check`/`cargo test` with no flags) broke
   on a `text-search`-gated `AtomicBool` import used by an ungated field, and
   on an ungated `Term::Triple` match arm in the SPARQL-functions conformance
   test. Both are feature-gated correctly now; CI's explicit feature list had
   masked them.
+- **Full-text search returned nothing.** The index reader was never reloaded
+  after a commit, so the request that had just rebuilt the index searched its
+  emptied state; and the `text:search` magic-property expansion kept the `(?s
+  ?score)` tuple in front of the generated `VALUES`, which SPARQL parsed as an
+  RDF collection and matched nothing. Alongside: `ft:search` (documented,
+  unimplemented) works in both spellings and their IRI forms; the
+  `CONTAINS`/`STRSTARTS` push-down silently dropped correct rows (token
+  matching is not a superset of substring matching — `CONTAINS "bridge"`
+  missed "drawbridge" — and filters were hoisted out of
+  `OPTIONAL`/`UNION`/`NOT EXISTS`), so candidates now come from a regex over
+  an un-tokenised field and the rewrite is skipped whenever supersetness
+  cannot be proven; `REGEX` is no longer pushed down at all (SPARQL uses XPath
+  regexes, the index does not); the index is built at boot after the seed
+  chain (a server booting with a populated store answered "no results" until
+  the first write); and rebuilds are serialised. Spark's queries go through
+  the same preprocessing. See docs/full-text-search.md. (#293)
+- **Spark grounds on evidence and bounds each round.** Vocabulary sampling
+  was all-or-nothing under one 3 s budget, so one slow graph discarded every
+  sample — including ones that returned in milliseconds — and nothing was
+  cached, so it failed identically every turn; each graph is now sampled
+  against a shared deadline and kept as it lands. Slot selection ignored
+  graph size, so a few huge derived layers displaced the small hand-authored
+  graphs questions are about; non-priority slots fill smallest-first, and an
+  uncounted graph counts as large rather than small. Identifier-shaped terms
+  in the question are looked up in the text index to find the graphs that
+  hold them. A retrieval round no longer inherits the endpoint's whole SPARQL
+  timeout (one hallucinated pattern spent 120 s of a 222 s turn); it is
+  bounded per round (`LLM_CHAT_QUERY_MAX_SECS`) and the bound that fired is
+  reported so the model repairs against it. (#292)
+- **Spark verifies model-written SPARQL before running or showing it.**
+  Solution modifiers written inside the `WHERE` block (`} LIMIT 50 }`, which
+  the parser reports as a baffling "expected OPTIONAL") are hoisted, and an
+  IRI that differs from a sampled term by letter case alone is corrected
+  (small models tidy `local_name` into camelCase, which parses and matches
+  nothing). (#292, #295)
+- **Spark retrieval works with weaker models.** A reply that writes its query
+  in a ```` ```sparql ```` fence instead of emitting the `SPARQL:` directive is
+  executed as long as no round has succeeded this turn (a fenced query in a
+  final answer stays the query card the user is meant to see) — both a 1.5B
+  and a 7.6B model, live, answered a failed round with prose plus a correct
+  fenced query and then answered from memory. A turn that asks for no query
+  at all gets one short, explicit nudge to query first; the model may decline
+  (conceptual questions need no data) and its original answer is kept when it
+  does, so the nudge can only add retrieval. (#263)
+- **A failed Spark turn keeps its retrieval trail and offers a retry.** A
+  transport error mid-turn replaced the whole assistant bubble with the error
+  text and discarded the query chips the user had just watched run. The error
+  bubble keeps the trail (those rounds really ran; only the answer was lost)
+  and gains *Try again*, which re-runs the question in place with the failed
+  pair removed first, so the replayed conversation is identical to a first
+  attempt. (#295)
+- **An empty Spark retrieval is "could not find", never "does not exist".**
+  With its rounds exhausted the final-answer instruction said "answer as well
+  as you can", and a small model turned three empty retrievals into "there
+  are no cities in this dataset" — right past a platform-context section
+  listing a cities API service. Both exhausted-round follow-ups now say that
+  empty or failed retrieval means *could not find*, and point at the
+  Datasets, API Services and Files sections before anything is declared
+  absent. (#295)
+- **Spark API blocks with parameters are runnable, and chart labels
+  readable.** The endpoint parser stopped at the first space, so a GeoSPARQL
+  call whose query string carries WKT (`?from=POLYGON((3.5 51, …))`) rendered
+  as inert text while the same endpoint without parameters was runnable.
+  Dense category axes draw every Nth label, steeper when dense, instead of a
+  smear no label could be read in; every bar keeps its full label on hover.
+  (#288)
+- **The Model Registry page renders again.** `GET /api/models` returned one
+  record per combination of a model's optional properties, so a stray second
+  `dct:created` on 44 entries produced 89 records for 45 models with repeated
+  ids — and the page, keyed by id, threw Svelte's `each_key_duplicate`, never
+  cleared `loading`, and sat on "Loading models…" forever. One record per
+  model; the read path is repaired rather than assuming single-valued
+  optionals. (#296)
+- **The triple browser works for blank-node resources.** Opening a blank
+  node (`/browse?subject=_:abc`, the resource page's own deep link) compiled
+  to `FILTER(?s = <_:abc>)` — a relative IRI — and the whole request was a
+  400 SPARQL parse error; a blank node as an *object* filter returned 200
+  with an empty page. Neither is expressible in SPARQL (a `_:x` is a fresh
+  variable, `<_:x>` a parse error, `STR()` of a blank node a type error), so a
+  blank-node-pinned request is answered from the quad index over the same
+  ACL-resolved graph set the query path uses — a node in a graph the caller
+  cannot read stays invisible — with the remaining filters applied in Rust;
+  the `q` mini-language is parsed to an AST both paths evaluate identically,
+  filters the scan cannot anchor on are a readable 400, and rows are ordered
+  before paging. (#290)
+- **The facet rail no longer hammers `/api/prefixes/reverse` into a 429.**
+  Reverse-prefix results were cached by *prefix*, so a namespace whose label
+  was already taken (`https://w3id.org/props#` → "w3id") was dropped on the
+  floor, the caller re-requested it, and every success re-ran the reactive
+  block — an infinite loop stopped only by the rate limiter (~15 identical
+  requests per URL per page load). Results are keyed by namespace, concurrent
+  callers share one in-flight request, and only definitive misses (404, or
+  200 with no prefix) are cached — a 429 or a network blip is not, since that
+  would blank the label for the 24 h negative TTL. (#290)
+- **The command palette suggests real datasets.** Its dataset suggestions
+  were a hardcoded array ("public-data", "linked-open-data", "geo-data");
+  they come from `/api/datasets` now (scoped server-side, loaded once on the
+  first keystroke, matched by the shared accent-folding filter on id and
+  name), recent searches are filtered by the query too, and the suggestion
+  panel is no longer clipped to an 11px sliver by the modal's overflow.
+  (#293)
+- **3D viewer: models measured at the wrong scale.** Since three r177
+  `updateWorldMatrix()` skips nodes whose local matrix did not change, so
+  after `normalise()` scaled a merged IFC model's group every `Box3`
+  measurement read the meshes' pre-scale world matrices: the modal's
+  post-load fit parked the camera ~40× too far out (the "model does not
+  load" reports for Esplanades and Smiley West — an empty scene with the
+  building a speck), models floated above their ground plane, and the map's
+  shadow disc and footprint suppression were sized at raw scale. Volumetric
+  WKT meshes are drawn double-sided: GeoSPARQL puts no winding requirement on
+  polyhedral rings, and an extruded solid whose walls wound the other way
+  rendered as its roof lying flat on the map. (#267)
+- **Walkthrough is offered for every IFC model.** The action was gated on
+  the exporter having nested its BOT containment, so an `IfcBridge` and its
+  roads at the root of an IFC 4.3 infrastructure file offered no way in;
+  linking an IFC file is the only requirement there ever was. (#267)
+- **An `?element=` embed opens on the element, not the world.** The camera
+  was aimed only after the full feed resolved (14k elements: tens of seconds
+  at the dataset's whole extent, which for a globe-spanning demo is the
+  globe), and the map placed — downloaded and parsed — a model per located
+  element, so a one-building embed pulled every other building with it. The
+  embed frames from the located feed, fits its first view to the link's
+  subject, and shows the element, the ancestors it inherits geometry from and
+  its own sub-elements. The map also observes its container: MapLibre sizes
+  its canvas at construction and listens for window resizes only, so an
+  iframe laid out afterwards kept a 400×300 canvas painted into one corner.
+  (#267)
+- **Viewer framing, the term filter, and a few dead controls.** The
+  bounding-sphere fit sized by the largest axis left wide, shallow footprints
+  filling well under half the frame; the fit is exact against the box's
+  eight corners and the viewport aspect, zoom follows the cursor, near/far
+  track the model so close-ups no longer clip, and a busy indicator replaces
+  the empty grid during long IFC loads. The triple browser's term filter did
+  nothing — the reactive statements read the query only inside a helper, so
+  Svelte never tracked it. The admin token scope is not rendered for
+  non-admins (the server rejects it with 403). Floating surfaces (the Spark
+  info popover, the memory modal) get an opaque background instead of showing
+  the chat through. (#265)
+- **The dataset map is usable on a phone.** The layers/legend panel was a
+  permanent ~170×220 overlay covering a third of a phone-width map; below
+  700px it collapses behind one 40px button and opens as a two-column sheet
+  anchored under it (a bottom-anchored sheet opened off-screen on a short
+  phone); the basemap toggle and the layers button meet the 44px touch
+  target; the page title takes its own row instead of wrapping to three lines
+  in a 50px column; the phone breakpoint moves 620 → 700px so page and map
+  chrome switch together. (#262)
+- **Streamed SPARQL results are written in 64 KiB chunks.** The result
+  serializers write in very small pieces (the JSON writer as little as one
+  byte per call) and each became a heap allocation, a cross-thread channel
+  handoff and its own HTTP chunk: a 500-row `SELECT` produced ~115k chunks
+  averaging one byte, making JSON ~95× slower to serialise than the same rows
+  as CSV. (#264)
 
 ### Security
 - **SPARQL injection through version strings** (`insert_version` and
@@ -161,6 +618,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   consulted it, so a self-registered guest could create datasets, write graph
   data, publish and mint API tokens like a full user. Guest authority is now
   clamped on every authentication path and defaults to read-only.
+- **OIDC access tokens were full-power credentials that could be exchanged for
+  permanent ones.** The `scope` claim was minted into every token and never
+  read back, and `write_access` was hardcoded true, so a token a user consented
+  to for `openid profile email` could read and write like a session — and
+  could be exchanged at `POST /api/auth/tokens` for a long-lived `ots_` token
+  with write (or admin) scope, turning a read-only delegation into permanent
+  account access. The default `OTS_OIDC_SESSION_POLICY=session` blocks the
+  exchange while keeping existing clients working; `scoped` enforces the
+  scope (see Added). An API token no longer mints further API tokens either.
+  (#257)
+- **Full-text search hits are filtered by the caller's read scope.** The text
+  index stored no graph IRI, and an expanded `text:search` can be nothing but
+  a `VALUES` clause — no triple pattern for the query's `FROM` scoping to
+  constrain — so a guest could enumerate subjects whose literals matched in
+  private graphs. Hits are filtered by the caller's readable graphs inside the
+  index, and Spark's evidence lookup passes the same scope rather than
+  filtering afterwards (hits from unreadable graphs no longer consume its
+  evidence slots either). (#293, #294)
+- **`rand` 0.10 clears RUSTSEC-2026-0097** (an unsoundness in `rand` 0.8),
+  as part of the dependency batch (#289).
 
 ## [0.5.0] — 2026-07-24
 
@@ -284,7 +761,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`src/ifc/`). Graph Store reads gain `?format=` (turtle/jsonld/rdfxml/ntriples/
   trig/nquads) with download disposition, and assets gain an anonymous-capable
   `…/download` route gated by dataset visibility.
-- **Schependomlaan demo** replaces the Waalbrug example: the canonical open Dutch
+- **Schependomlaan demo** replaces the bridge example: the canonical open Dutch
   BIM dataset (Nijmegen, CC BY 4.0) is fetched on first boot (`SEED_IFC_URL`),
   with the real 3DBAG LoD2.2 city block (CC BY 4.0) bundled for the map.
 - **Viewer**: in-browser IFC rendering (web-ifc) with per-element picking —
@@ -371,8 +848,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   names (`da:`, `geo:`, `geof:` …) parse instead of being silently skipped.
 - Per-constraint `sh:severity` on a `sh:SPARQLConstraint` node (e.g. `sh:Warning`) now
   overrides the shape-level severity for that constraint's results.
-- Waalbrug reference-example conformance fixtures (`tests/fixtures/waalbrug/`) and an
-  oracle (`tests/waalbrug_conformance.rs`) encoding the IMBOR/NEN 2660-2 GeoSPARQL +
+- Reference-example conformance fixtures (a bridge; now `tests/fixtures/example-bridge/`) and an
+  oracle (now `tests/example_bridge_conformance.rs`) encoding a GeoSPARQL +
   SHACL (Core/SPARQL/AF) pass/fail matrix.
 - SHACL **complex property paths** are now parsed from RDF: sequence paths `( p1 p2 … )`,
   `sh:inversePath`, `sh:alternativePath`, `sh:zeroOrMorePath`, `sh:oneOrMorePath` and
@@ -391,7 +868,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (e.g. `sh:minExclusive`), reported with the expression's `sh:message`.
 - SHACL-AF **`sh:SPARQLFunction`**: user-defined functions (`sh:parameter`/`sh:order`/
   `sh:select` + `sh:prefixes`) are registered as callable SPARQL functions, usable from
-  queries, SHACL-SPARQL constraints and rules (e.g. `ex:afstandMeter`). Bodies are
+  queries, SHACL-SPARQL constraints and rules (e.g. `ex:distanceMetres`). Bodies are
   evaluated against a fresh in-memory store, fully supporting expression-style functions.
 - **Viewer feed** endpoint `GET /api/datasets/:id/viewer-feed`: per-element geometry +
   3D-file references resolved from the BOT/OMG/FOG/GeoSPARQL layering — labels, types,
@@ -401,7 +878,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `sh:ValidationReport` as RDF into `urn:system:reports:dataset:{id}` (replaced per run),
   so dashboards can query failures via SPARQL; severity rollup stays on the run rows.
 - **3D & Map Viewer demo dataset** (`viewer-3d-demo`) in the standards demo seed: the
-  Waalbrug bridge (EPSG:28992, IFC/glTF refs) plus real Wikidata landmarks (CC0 —
+  reference bridge (EPSG:28992, IFC/glTF refs) plus real Wikidata landmarks (CC0 —
   Dragon Bridge Da Nang, Big Ben, White House, Empire State Building, Sannō Shrine)
   whose open 3D models live on Wikimedia Commons, and a synthetic CityJSON LoD2
   demo block (EPSG:7415, semantic roof/wall/ground surfaces) bundled with the
@@ -427,7 +904,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   overlay. Resource detail pages show a 3D model (BIM) card with IFC GlobalId and
   file links (following named `hasGeometry` nodes one hop), and the geometry map
   gains a *to scale* toggle driven by the model's measured real-world size.
-  **Projected-CRS WKT (e.g. the Waalbrug demo's EPSG:28992) is now reprojected
+  **Projected-CRS WKT (e.g. EPSG:28992 RD New) is now reprojected
   client-side before plotting** — previously raw map previews plotted projected
   coordinates as lon/lat. Dark mode is supported across all maps and 3D scenes.
 - **Official conformance suites in CI**: the W3C SHACL core test suite and the OGC
@@ -435,7 +912,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tests/fixtures/{w3c-shacl,ogc-geosparql}/` and run with a two-way ratchet (unlisted
   tests must pass, listed known-failures must still fail). Scorecards:
   W3C core 46 pass / 52 known-fail / 15 aux skips; OGC examples 44/48 matching, and the
-  Waalbrug dataset round-trips through the official GeoSPARQL validator. See
+  reference bridge dataset round-trips through the official GeoSPARQL validator. See
   `docs/conformance/`.
 
 - **Spark chat is now an interactive linked-data canvas.** Assistant answers render

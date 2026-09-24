@@ -1,0 +1,10 @@
+# ❌ The sum of span lengths (90) deviates >0.5 m from the total length (100). Warning.
+@prefix def: <https://example.org/def/> .
+@prefix eb:  <https://example.org/id/example-bridge/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+eb:SpanBridge a def:Bridge ;
+    def:totalLength "100.0"^^xsd:decimal ;
+    def:hasSpan
+        [ def:length "30.0"^^xsd:decimal ] ,
+        [ def:length "30.0"^^xsd:decimal ] ,
+        [ def:length "30.0"^^xsd:decimal ] .

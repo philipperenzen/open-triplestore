@@ -63,8 +63,8 @@ A JSON `features` array rendered as an interactive map. Each feature carries a `
 
 ````markdown
 ```map
-{"features": [{"label": "Waalbrug", "wkt": "POINT(5.8645 51.8519)",
-               "iri": "http://example.org/id/waalbrug"}],
+{"features": [{"label": "Example Bridge", "wkt": "POINT(4.9 52.37)",
+               "iri": "http://example.org/id/example-bridge"}],
  "models": [{"label": "Schependomlaan", "wkt": "POINT(5.8354 51.8473)",
              "url": "/api/datasets/viewer-3d-demo/assets/…/download"}]}
 ```
@@ -96,9 +96,9 @@ An info card for a single entity — ideal for "tell me about X" answers: a `tit
 
 ````markdown
 ```card
-{"title": "Waalbrug", "subtitle": "Arch bridge across the Waal in Nijmegen",
- "iri": "http://example.org/id/waalbrug",
- "facts": [{"label": "Type", "value": "Bridge"}, {"label": "Opened", "value": "1936"}]}
+{"title": "Example Bridge", "subtitle": "Arch bridge across a river",
+ "iri": "http://example.org/id/example-bridge",
+ "facts": [{"label": "Type", "value": "Bridge"}, {"label": "Opened", "value": "1962"}]}
 ```
 ````
 

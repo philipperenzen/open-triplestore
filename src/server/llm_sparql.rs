@@ -1059,10 +1059,10 @@ together instead of querying twice), and ALWAYS add a LIMIT (at most 50 rows com
 for listings — aggregates like COUNT need no LIMIT). When a \"Graph vocabulary\" section is provided, \
 build patterns from EXACTLY those class and property IRIs — never invent vocabulary.\n\
 Search by name with the full-text index, not by scanning. The platform indexes every literal and \
-exposes it as a magic property: `(?s ?score) text:search (\"waalbrug\" 20) .` binds ?s to the 20 \
+exposes it as a magic property: `(?s ?score) text:search (\"bridge\" 20) .` binds ?s to the 20 \
 best-matching subjects and ?score to their relevance, already restricted to the graphs you may read. \
 Narrow it to one predicate with a second argument: \
-`(?s ?score) text:search (\"waalbrug\" <http://www.w3.org/2000/01/rdf-schema#label> 20) .` \
+`(?s ?score) text:search (\"bridge\" <http://www.w3.org/2000/01/rdf-schema#label> 20) .` \
 Reach for it whenever the user is LOOKING FOR something by name or keyword and you do not know the \
 IRI — it is ranked and indexed, where `FILTER(CONTAINS(…))` reads every literal in scope. Keep \
 `FILTER(CONTAINS(…))` for narrowing a set you are already matching on. Always pair a text:search with \
@@ -1102,7 +1102,7 @@ name, or an IRI's distinguishing tail segments (e.g. `viewer-3d-demo/building`),
 platform builds the features from your rows. The source:\"query\" forms (chart and map) are ONLY \
 valid after a successful `SPARQL:` round THIS turn — with no query they render an error card. \
 Inline form for hand-stated features: \
-{\"features\":[{\"label\":\"Waalbrug\",\"wkt\":\"POINT(5.8645 51.8519)\",\"iri\":\"http://…\"}]}. \
+{\"features\":[{\"label\":\"Example Bridge\",\"wkt\":\"POINT(4.9 52.37)\",\"iri\":\"http://…\"}]}. \
 WKT must be WGS84 with longitude before latitude. Prefer points or centroids; skip geometries whose WKT \
 was truncated. When elements have 3D model files, add \"models\":[{\"label\":\"…\",\"url\":\"…\",\
 \"wkt\":\"POINT(lon lat)\"}] to place those models on the map at their anchor — the map then renders \
@@ -3284,7 +3284,7 @@ mod tests {
             "<http://www.opengis.net/def/crs/EPSG/0/4326> POLYGON((0 0, 1 0, 1 1, 0 0))"
         ));
         assert!(looks_like_wkt("  MULTIPOLYGON(((0 0,1 0,1 1,0 0)))"));
-        assert!(!looks_like_wkt("Waalbrug"));
+        assert!(!looks_like_wkt("Voorbeeldbrug"));
         assert!(!looks_like_wkt("http://example.org/bridge/1"));
         // Multi-byte content must not panic the prefix check.
         assert!(!looks_like_wkt("héllo wörld"));
@@ -3318,13 +3318,13 @@ mod tests {
                 ok: true,
                 error: None,
                 columns: Some(vec!["name".into(), "count".into()]),
-                rows: Some(vec![vec!["Waalbrug".into(), "3".into()]]),
+                rows: Some(vec![vec!["Voorbeeldbrug".into(), "3".into()]]),
                 truncated: false,
             },
         ];
         let s = fallback_answer(&runs);
         assert!(s.contains("| name | count |"), "markdown header: {s}");
-        assert!(s.contains("| Waalbrug | 3 |"), "row: {s}");
+        assert!(s.contains("| Voorbeeldbrug | 3 |"), "row: {s}");
         assert!(
             !s.to_uppercase().contains("SPARQL:"),
             "no directive leaks: {s}"

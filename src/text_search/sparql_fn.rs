@@ -859,11 +859,11 @@ mod tests {
     #[test]
     fn lcase_wrapped_contains_is_matched_case_insensitively() {
         let (_d, idx) = indexed(&[
-            ("http://ex.org/a", LABEL, "urn:g", "Waalbrug"),
+            ("http://ex.org/a", LABEL, "urn:g", "Voorbeeldbrug"),
             ("http://ex.org/b", LABEL, "urn:g", "Tunnel"),
         ]);
         let q = "SELECT ?s WHERE {\n  ?s <http://www.w3.org/2000/01/rdf-schema#label> ?l .\n  \
-                 FILTER(CONTAINS(LCASE(?l), \"waalbrug\"))\n}";
+                 FILTER(CONTAINS(LCASE(?l), \"voorbeeldbrug\"))\n}";
         let out = pushdown(q, &idx);
         assert!(out.contains("<http://ex.org/a>"), "got:\n{out}");
         assert!(!out.contains("<http://ex.org/b>"), "got:\n{out}");
@@ -963,11 +963,11 @@ mod tests {
     #[test]
     fn strstarts_pushdown_anchors_at_the_start() {
         let (_d, idx) = indexed(&[
-            ("http://ex.org/a", LABEL, "urn:g", "Waalbrug"),
-            ("http://ex.org/b", LABEL, "urn:g", "de Waalbrug"),
+            ("http://ex.org/a", LABEL, "urn:g", "Voorbeeldbrug"),
+            ("http://ex.org/b", LABEL, "urn:g", "de Voorbeeldbrug"),
         ]);
         let q = "SELECT ?s WHERE {\n  ?s <http://www.w3.org/2000/01/rdf-schema#label> ?l .\n  \
-                 FILTER(STRSTARTS(?l, \"Waalbrug\"))\n}";
+                 FILTER(STRSTARTS(?l, \"Voorbeeldbrug\"))\n}";
         let out = pushdown(q, &idx);
         assert!(out.contains("<http://ex.org/a>"), "got:\n{out}");
         assert!(!out.contains("<http://ex.org/b>"), "got:\n{out}");
