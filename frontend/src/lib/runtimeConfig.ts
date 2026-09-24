@@ -9,10 +9,11 @@
 //
 //   {
 //     "services": { "triplestore": "https://api.example.com" },
-//     "branding": { "title": "Acme Graph", "logoUrl": "/acme-logo.svg", "accent": "#7a2fe0" }
+//     "branding": { "title": "Acme Graph", "logoUrl": "/acme-logo.svg", "accent": "#7a2fe0" },
+//     "basemaps": { "esriApiKey": "AAPT…" }
 //   }
 //
-// Both keys are optional; anything omitted keeps the existing default/registry
+// Every key is optional; anything omitted keeps the existing default/registry
 // value. Fail-soft: no file (this app's own SPA fallback then serves
 // `index.html`'s `text/html` instead of JSON) or a malformed one is treated as
 // "no runtime config" — never a hard error, never a broken boot.
@@ -37,11 +38,25 @@ const DEFAULT_BRANDING: RuntimeBranding = { title: 'Open Triplestore', logoUrl: 
 /** Reactive branding — components (e.g. the header/title) subscribe to this. */
 export const runtimeBranding = writable<RuntimeBranding>(DEFAULT_BRANDING);
 
+export interface RuntimeBasemaps {
+  /**
+   * An ArcGIS Location Platform API key of this deployment's own. With one,
+   * the map viewers offer Esri World Imagery (satellite); without, they show
+   * OpenFreeMap streets only. Esri's terms tie its imagery to an ArcGIS
+   * account and key, so no key is ever built in.
+   */
+  esriApiKey: string | null;
+}
+
+/** Reactive basemap settings — the map viewers subscribe to this. */
+export const runtimeBasemaps = writable<RuntimeBasemaps>({ esriApiKey: null });
+
 let started = false;
 
 interface RuntimeConfigDoc {
   services?: Record<string, string>;
   branding?: { title?: string; logoUrl?: string; accent?: string };
+  basemaps?: { esriApiKey?: string };
 }
 
 function applyBranding(branding: RuntimeConfigDoc['branding']): void {
@@ -87,6 +102,8 @@ export function loadRuntimeConfig(): void {
       if (!doc) return;
       if (doc.services) setRuntimeServiceOverrides(doc.services);
       applyBranding(doc.branding);
+      const esriApiKey = doc.basemaps?.esriApiKey?.trim();
+      if (esriApiKey) runtimeBasemaps.set({ esriApiKey });
     })
     .catch(() => { /* no runtime config — keep built-in defaults */ });
 }

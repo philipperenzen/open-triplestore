@@ -70,10 +70,8 @@ const RS: &str = "http://www.w3.org/2001/sw/DataAccess/tests/result-set#";
 
 /// Entries that currently fail, with the engine gap they sit behind. Keep
 /// sorted. Removing an entry requires the entry to actually pass (the ratchet
-/// asserts both directions). All ten are oxigraph 0.5 evaluator behaviours,
+/// asserts both directions). Each is an oxigraph 0.5 evaluator behaviour,
 /// reproduced against the raw engine; none is in the platform layer.
-///
-/// Empirical baseline: 475 pass / 10 known-fail / 0 aux skips
 const KNOWN_FAILURES: &[(&str, &str)] = &[
     ("aggregates/manifest#agg-empty-group-count-graph", "oxigraph 0.5: `GRAPH ?g { <aggregate sub-select> }` does not enumerate the named graphs when the inner pattern binds no quads, so ?g stays unbound and the empty-group count is one row instead of one per graph"),
     ("aggregates/manifest#agg-groupconcat-04", "oxigraph 0.5 implements the SPARQL 1.2 GROUP_CONCAT (a language tag shared by every input is kept: \"1 2\"@en); the 1.1 suite expects the plain literal \"1 2\""),
@@ -89,7 +87,7 @@ const KNOWN_FAILURES: &[(&str, &str)] = &[
 
 /// Pass floor: a loader or parser regression turns passes into skips or
 /// failures; the two ratchet asserts alone would not notice a wholesale skip.
-/// 475 pass today; 450 leaves headroom for corpus churn.
+/// It sits below the current count, with headroom for corpus churn.
 const PASS_FLOOR: usize = 450;
 
 #[derive(Debug, PartialEq)]
