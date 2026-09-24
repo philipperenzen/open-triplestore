@@ -11,6 +11,16 @@ ignore = [
     # (`saml` via samael, `alerting` via lettre, and their TLS/crypto stack). Tracked
     # for upgrade; the rsa "Marvin" advisory currently has no fixed upstream release.
     "RUSTSEC-2023-0071",  # rsa — Marvin timing side-channel (no upstream fix; via `saml`)
+    # rustls 0.21 / rustls-webpki 0.101 / rustls-pemfile 1, pinned by tiberius 0.12.3 (the
+    # latest release) behind `plugin-mssql`, which is off by default and not in the release
+    # image. The webpki name-constraint flaws need a misissuing name-constrained CA; the CRL
+    # panic needs CRL parsing, which tiberius never configures. Kept on rustls rather than
+    # tiberius's `native-tls`, which would add `options.sslrootcert` to the system roots
+    # instead of trusting only that CA. Revisit when tiberius moves to rustls >= 0.23.
+    "RUSTSEC-2026-0098",  # rustls-webpki 0.101 — URI name constraints accepted (via tiberius)
+    "RUSTSEC-2026-0099",  # rustls-webpki 0.101 — wildcard vs DNS name constraints (via tiberius)
+    "RUSTSEC-2026-0104",  # rustls-webpki 0.101 — panic parsing a CRL (via tiberius)
+    "RUSTSEC-2025-0134",  # rustls-pemfile — unmaintained (via tiberius)
     # quick-xml 0.37.5 DoS advisories. The fix is in quick-xml >= 0.41, but the vulnerable
     # 0.37.5 is pinned transitively by the Oxigraph stack (oxrdfxml / sparesults, via
     # oxigraph 0.4.11) — bumping our own direct `quick-xml` dep would leave Oxigraph's copy
