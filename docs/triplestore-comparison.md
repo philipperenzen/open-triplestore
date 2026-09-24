@@ -101,8 +101,8 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
   conformance pass (see [`docs/standards.md`](standards.md) and the `tests/*_conformance.rs`
   suites) found that several are **Partial**, not Full: **SHACL Core** silently ignores
   blank-node property shapes (the standard idiom) — use named shapes (HIGH-severity, fix
-  pending); **GeoSPARQL 1.1** lacks `geof:relate`/`metricDistance`/`metricArea`/`transform`/
-  `aggUnion` and GML/GeoJSON literals (WKT only); **OWL 2 DL** runs RL+extension rules in
+  pending); **GeoSPARQL 1.1** lacks the geodesic `metricDistance`/`metricArea` family and
+  `aggUnion` (it has `relate`, `transform` and WKT/GML/GeoJSON literals); **OWL 2 DL** runs RL+extension rules in
   process with full tableau only via the optional Konclude bridge; **SPARQL 1.2 / RDF-star**
   is the CG `<< >>` model, not the RDF 1.2 triple-term draft. The ✅ marks in §4/§10/§11
   predate that pass and should be read with `docs/standards.md` as the source of truth.

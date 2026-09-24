@@ -2,8 +2,9 @@
 //!
 //! All functions are registered as custom SPARQL functions via Oxigraph's
 //! `QueryOptions::with_custom_function` API. Each function takes oxrdf Terms
-//! as arguments, parses geometry WKT literals, performs spatial operations
-//! using the GEOS library, and returns result Terms.
+//! as arguments, parses geometry literals (WKT, GML or GeoJSON — see
+//! [`super::datatypes::literal_wkt`]), performs spatial operations using the
+//! GEOS library, and returns result Terms.
 //!
 //! Implements:
 //! - Simple Features (SF) topological relations
@@ -11,6 +12,7 @@
 //! - RCC8 topological relations
 //! - Non-topological / constructive functions
 //! - Scalar measurement functions
+//! - Serialisation (`geof:asGeoJSON`)
 
 use std::sync::Arc;
 
@@ -70,6 +72,8 @@ pub fn all_functions() -> Vec<(NamedNode, FnHandler)> {
         make_fn(vocab::RELATE, fn_relate),
         // ─── CRS transform ───
         make_fn(vocab::TRANSFORM, fn_transform),
+        // ─── Serialisation ───
+        make_fn(vocab::AS_GEOJSON, fn_as_geojson),
     ]
 }
 
@@ -118,33 +122,19 @@ fn parse_two_geoms(args: &[Term]) -> Option<(GeosGeometry, GeosGeometry)> {
     ))
 }
 
-/// The CRS URI carried by a geometry literal, if it has a `<crs>` prefix.
-///
-/// Only `geo:wktLiteral` (and the plain strings accepted for convenience) use
-/// that prefix form. A `geo:gmlLiteral` value also starts with `<` — its opening
-/// tag — so it must be excluded, or the tag is mistaken for a CRS URI. GML
-/// carries its CRS in `srsName`, which this build does not yet read: treating it
-/// as unspecified keeps the previous behaviour for GML operands.
+/// The CRS URI carried by a geometry literal, if it has a `<crs>` prefix — see
+/// [`literal_crs_uri`] for which serialisations can carry one.
 fn term_crs_uri(term: &Term) -> Option<String> {
-    match term {
-        Term::Literal(l) if l.datatype().as_str() != vocab::GML_LITERAL => {
-            extract_crs(l.value()).map(str::to_string)
-        }
-        _ => None,
-    }
+    literal_crs_uri(term).map(str::to_string)
 }
 
-/// Reproject a geometry literal from `from` to `to`, returning a new literal
-/// carrying the target CRS prefix.
+/// Reproject a geometry literal of any serialisation from `from` to `to`,
+/// returning a WKT literal carrying the target CRS prefix.
 fn reproject_literal(term: &Term, from: Crs, to: Crs) -> Option<Term> {
     use geo::MapCoords;
     use wkt::{ToWkt, TryFromWkt};
 
-    let value = match term {
-        Term::Literal(l) => l.value(),
-        _ => return None,
-    };
-    let geom: geo::Geometry<f64> = geo::Geometry::try_from_wkt_str(extract_wkt(value)).ok()?;
+    let geom: geo::Geometry<f64> = geo::Geometry::try_from_wkt_str(&literal_wkt(term)?).ok()?;
     let out = geom.map_coords(|c| {
         let (x, y) = super::crs::transform_xy(from, to, c.x, c.y).unwrap_or((c.x, c.y));
         geo::Coord { x, y }
@@ -482,19 +472,16 @@ fn uom_metres_per_unit(term: &Term) -> Option<f64> {
 
 /// `geof:transform(geom, targetCrsIri)` — reproject a geometry literal to the target
 /// CRS (OGC GeoSPARQL Geometry Extension). The source CRS is taken from the literal's
-/// `<crs>` prefix (defaulting to CRS84); supported CRS are EPSG:28992 / 4326 / 3857
-/// (see [`super::crs`]). Returns a `geo:wktLiteral` prefixed with the target CRS, or
-/// `None` if either CRS is unsupported or the geometry does not parse.
+/// `<crs>` prefix (defaulting to CRS84, which a GML or GeoJSON literal always has
+/// here); supported CRS are EPSG:28992 / 4326 / 3857 (see [`super::crs`]). Returns a
+/// `geo:wktLiteral` prefixed with the target CRS, or `None` if either CRS is
+/// unsupported or the geometry does not parse.
 fn fn_transform(args: &[Term]) -> Option<Term> {
     use geo::MapCoords;
     use wkt::{ToWkt, TryFromWkt};
 
-    let lit = match args.first()? {
-        Term::Literal(l) => l,
-        _ => return None,
-    };
-    let value = lit.value();
-    let source = extract_crs(value)
+    let term = args.first()?;
+    let source = literal_crs_uri(term)
         .and_then(Crs::from_uri)
         .unwrap_or(Crs::Wgs84);
 
@@ -504,14 +491,7 @@ fn fn_transform(args: &[Term]) -> Option<Term> {
     };
     let target = Crs::from_uri(target_iri)?;
 
-    // Strip the optional CRS prefix to get the bare WKT, then parse via geo-types.
-    let trimmed = value.trim();
-    let wkt_body = if trimmed.starts_with('<') {
-        trimmed.split_once('>').map(|(_, rest)| rest.trim())?
-    } else {
-        trimmed
-    };
-    let geom: geo::Geometry<f64> = geo::Geometry::try_from_wkt_str(wkt_body).ok()?;
+    let geom: geo::Geometry<f64> = geo::Geometry::try_from_wkt_str(&literal_wkt(term)?).ok()?;
 
     let out = geom.map_coords(|c| {
         let (x, y) = super::crs::transform_xy(source, target, c.x, c.y).unwrap_or((c.x, c.y));
@@ -525,6 +505,25 @@ fn fn_transform(args: &[Term]) -> Option<Term> {
     )))
 }
 
+/// `geof:asGeoJSON(geom)` — the geometry as a `geo:geoJSONLiteral` (GeoSPARQL 1.1
+/// Geometry Extension). GeoJSON is CRS84 by definition (RFC 7946), so the
+/// geometry is reprojected from its literal's CRS on the way out; `None` for a
+/// CRS this build cannot reproject, or a geometry that does not parse.
+fn fn_as_geojson(args: &[Term]) -> Option<Term> {
+    let term = args.first()?;
+    let source = match literal_crs_uri(term) {
+        Some(uri) => Crs::from_uri(uri)?,
+        None => Crs::Wgs84,
+    };
+    let geom = parse_wkt_literal(term)?;
+    let to_crs84 = |x: f64, y: f64| super::crs::transform_xy(source, Crs::Wgs84, x, y);
+    let json = super::geojson::geometry_to_geojson(&geom, &to_crs84)?;
+    Some(Term::Literal(oxrdf::Literal::new_typed_literal(
+        json.to_string(),
+        NamedNode::new_unchecked(vocab::GEOJSON_LITERAL),
+    )))
+}
+
 fn fn_area(args: &[Term]) -> Option<Term> {
     let g = parse_one_geom(args)?;
     let area = g.area().ok()?;
@@ -532,17 +531,14 @@ fn fn_area(args: &[Term]) -> Option<Term> {
 }
 
 fn fn_get_srid(args: &[Term]) -> Option<Term> {
-    // Extract CRS URI from the WKT literal
-    if let Some(Term::Literal(lit)) = args.first() {
-        let value = lit.value();
-        if let Some(crs) = extract_crs(value) {
-            Some(Term::NamedNode(NamedNode::new_unchecked(crs)))
-        } else {
-            // Default CRS is CRS84
-            Some(Term::NamedNode(NamedNode::new_unchecked(vocab::CRS84)))
-        }
-    } else {
-        None
+    // The CRS URI of the literal's `<crs>` prefix; the default is CRS84, which
+    // is also what a GeoJSON literal always has. (Reading the prefix from any
+    // literal took a GML literal's opening tag for a CRS URI.)
+    match args.first()? {
+        term @ Term::Literal(_) => Some(Term::NamedNode(NamedNode::new_unchecked(
+            literal_crs_uri(term).unwrap_or(vocab::CRS84),
+        ))),
+        _ => None,
     }
 }
 
@@ -718,6 +714,46 @@ mod tests {
         } else {
             panic!("Expected NamedNode");
         }
+    }
+
+    #[test]
+    fn test_get_srid_of_gml_and_geojson() {
+        let gml = Term::Literal(Literal::new_typed_literal(
+            "<gml:Point srsName='urn:ogc:def:crs:EPSG::4326'><gml:pos>1 2</gml:pos></gml:Point>",
+            NamedNode::new_unchecked(vocab::GML_LITERAL),
+        ));
+        let json = Term::Literal(Literal::new_typed_literal(
+            r#"{"type":"Point","coordinates":[1,2]}"#,
+            NamedNode::new_unchecked(vocab::GEOJSON_LITERAL),
+        ));
+        for term in [gml, json] {
+            assert_eq!(
+                fn_get_srid(&[term]),
+                Some(Term::NamedNode(NamedNode::new_unchecked(vocab::CRS84)))
+            );
+        }
+    }
+
+    #[test]
+    fn test_as_geojson_reprojects_to_crs84() {
+        let rd = Term::Literal(Literal::new_typed_literal(
+            "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(187420 428470)",
+            NamedNode::new_unchecked(vocab::WKT_LITERAL),
+        ));
+        let Some(Term::Literal(out)) = fn_as_geojson(&[rd]) else {
+            panic!("a literal")
+        };
+        assert_eq!(out.datatype().as_str(), vocab::GEOJSON_LITERAL);
+        let json: serde_json::Value = serde_json::from_str(out.value()).unwrap();
+        assert_eq!(json["type"], "Point");
+        let (lon, lat) = (
+            json["coordinates"][0].as_f64().unwrap(),
+            json["coordinates"][1].as_f64().unwrap(),
+        );
+        assert!(
+            (lon - 5.86).abs() < 0.05 && (lat - 51.85).abs() < 0.05,
+            "{json}"
+        );
     }
 
     #[test]

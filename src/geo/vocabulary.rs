@@ -14,6 +14,18 @@ pub const WKT_LITERAL: &str = "http://www.opengis.net/ont/geosparql#wktLiteral";
 /// GML literal datatype IRI
 pub const GML_LITERAL: &str = "http://www.opengis.net/ont/geosparql#gmlLiteral";
 
+/// GeoJSON literal datatype IRI (GeoSPARQL 1.1; an RFC 7946 geometry object).
+pub const GEOJSON_LITERAL: &str = "http://www.opengis.net/ont/geosparql#geoJSONLiteral";
+
+// ─── Geometry serialisation properties ───
+
+/// `geo:asWKT`
+pub const AS_WKT_PROPERTY: &str = "http://www.opengis.net/ont/geosparql#asWKT";
+/// `geo:asGML`
+pub const AS_GML_PROPERTY: &str = "http://www.opengis.net/ont/geosparql#asGML";
+/// `geo:asGeoJSON`
+pub const AS_GEOJSON_PROPERTY: &str = "http://www.opengis.net/ont/geosparql#asGeoJSON";
+
 // ─── 3D / volumetric datatypes (additive; spec §3.3) ───
 // Canonical datatype IRIs the platform defines and advertises; emitted by the
 // CityJSON converter (which inlines the same string) and consumed by external
@@ -126,6 +138,10 @@ pub const GET_SRID: &str = "http://www.opengis.net/def/function/geosparql/getSRI
 pub const AREA: &str = "http://www.opengis.net/def/function/geosparql/area";
 pub const RELATE: &str = "http://www.opengis.net/def/function/geosparql/relate";
 pub const TRANSFORM: &str = "http://www.opengis.net/def/function/geosparql/transform";
+
+// ─── Serialisation function IRIs ───
+
+pub const AS_GEOJSON: &str = "http://www.opengis.net/def/function/geosparql/asGeoJSON";
 
 // ─── Spatial Measure Units ───
 

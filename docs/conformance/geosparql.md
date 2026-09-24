@@ -4,14 +4,16 @@ Two complementary layers, both in CI.
 
 ## 1. Functional coverage (in-house, OGC-requirement-mapped)
 
-[`tests/geosparql_conformance.rs`](../../tests/geosparql_conformance.rs) — **101 tests**
+[`tests/geosparql_conformance.rs`](../../tests/geosparql_conformance.rs) — **114 tests**
 mapping OGC GeoSPARQL 1.1 requirements 1–30: Simple Features / Egenhofer / RCC8 relation
-families, constructive and metric functions, `geo:wktLiteral` + `geo:gmlLiteral` parsing,
-`geof:getSRID`, and `geof:transform` (EPSG:28992 ↔ 4326 ↔ 3857, pure-Rust closed-form).
+families, constructive and metric functions, `geo:wktLiteral`, `geo:gmlLiteral` and
+`geo:geoJSONLiteral` parsing (every RFC 7946 geometry type, malformed input unbound
+rather than a panic) with `geof:asGeoJSON` round trips, `geof:getSRID`, and
+`geof:transform` (EPSG:28992 ↔ 4326 ↔ 3857, pure-Rust closed-form).
 
 Tracked functional gaps (encoded as tests that flip when implemented):
 `geof:metricDistance`/`geof:metricArea` (need geodesic math), `geof:aggUnion` (needs
-SPARQL aggregate extension hooks), `geo:geoJSONLiteral` parsing.
+SPARQL aggregate extension hooks).
 
 ## 2. Official OGC SHACL validator (vendored) — the round-trip
 

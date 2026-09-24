@@ -1620,9 +1620,10 @@ fn geo_data_model_property_path_wkt() {
 //
 // Grounded in OGC GeoSPARQL 1.1 (22-047r1) and adversarially fact-checked.
 // The verifier corrected geos-09 (line-on-boundary ehCovers/ehCoveredBy = FALSE,
-// matching the engine's DE-9IM mask T*TFT*FF*). Tests for GeoSPARQL-1.1 functions
-// that this engine does not implement (geof:relate, metricDistance, metricArea,
-// transform, aggUnion, geoJSONLiteral) are encoded as documented gaps.
+// matching the engine's DE-9IM mask T*TFT*FF*). Of the GeoSPARQL-1.1 functions once
+// encoded here as documented gaps, geof:relate, transform and geo:geoJSONLiteral are
+// implemented and their tests assert results; the metric family and aggUnion remain
+// tracked gaps.
 // ═══════════════════════════════════════════════════════════
 
 /// Evaluate a single geof: expression. Returns None if unsupported (query error or
@@ -1650,6 +1651,16 @@ fn num_of(disp: Option<&str>) -> f64 {
         .nth(1)
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(f64::NAN)
+}
+
+/// The numeric value of one `geof:` expression, NaN when unbound.
+fn geof_num(s: &open_triplestore::store::TripleStore, expr: &str) -> f64 {
+    num_of(geof_opt(s, expr).as_deref())
+}
+
+/// A geometry literal in RD New (EPSG:28992), a projected CRS in metres.
+fn rd(wkt_body: &str) -> String {
+    format!("\"<http://www.opengis.net/def/crs/EPSG/0/28992> {wkt_body}\"^^geo:wktLiteral")
 }
 
 // geos-08: getSRID returns the OGC CRS IRI (default CRS84; explicit SRS preserved).
@@ -1917,24 +1928,316 @@ fn geos_cx_transform_rd_to_wgs84() {
     assert!((lat - 51.85).abs() < 0.1, "lat {lat}");
 }
 
-// geos-11: geo:geoJSONLiteral is not parsed by the geof functions (WKT-only). Gap.
+// geos-11: a geo:geoJSONLiteral (RFC 7946, always CRS84 lon/lat) is a geometry like
+// a WKT or GML one: the London point written as GeoJSON lies within the box. (Was a
+// tracked gap — the literal was not parsed and the relation came back unbound.)
 #[test]
-fn geos_cx_geojson_literal_is_gap() {
+fn geos_cx_geojson_literal_sfwithin() {
     let s = ts();
     let q = format!(
         "{}\n{}",
         GEO_PFX,
         r#"SELECT ?r WHERE { BIND(geof:sfWithin("{\"type\":\"Point\",\"coordinates\":[-0.1278,51.5074]}"^^geo:geoJSONLiteral, "POLYGON((-1 51, 1 51, 1 52, -1 52, -1 51))"^^geo:wktLiteral) AS ?r) }"#
     );
-    let bound = match s.query(&q) {
-        Ok(QueryResults::Solutions(sols)) => {
-            sols.filter_map(|x| x.ok()).any(|b| b.get("r").is_some())
-        }
-        _ => false,
+    let r = match s.query(&q) {
+        Ok(QueryResults::Solutions(sols)) => sols
+            .filter_map(|x| x.ok())
+            .find_map(|b| b.get("r").map(|t| t.to_string())),
+        _ => None,
     };
     assert!(
-        !bound,
-        "geoJSONLiteral support in geof functions is a tracked gap"
+        r.as_deref().unwrap_or("").contains("true"),
+        "a GeoJSON point within a WKT box, got {r:?}"
+    );
+}
+
+/// A `geo:geoJSONLiteral` in SPARQL — single-quoted so the JSON needs no escaping.
+fn gj(json: &str) -> String {
+    format!("'{json}'^^geo:geoJSONLiteral")
+}
+
+// GeoJSON operands measure and compare exactly like their WKT twins, and their CRS
+// is always CRS84.
+#[test]
+fn geojson_literal_measures_and_compares_like_wkt() {
+    let s = ts();
+    let p = gj(r#"{"type":"Point","coordinates":[0,0]}"#);
+    let q = gj(r#"{"type":"Point","coordinates":[3,4]}"#);
+    let d = geof_num(&s, &format!("geof:distance({p}, {q})"));
+    assert!((d - 5.0).abs() < 1e-12, "planar CRS84 distance: {d}");
+    let eq =
+        geof_opt(&s, &format!("geof:sfEquals({q}, {})", wkt("POINT(3 4)"))).unwrap_or_default();
+    assert!(eq.contains("true"), "GeoJSON and WKT forms are equal: {eq}");
+    let square = gj(r#"{"type":"Polygon","coordinates":[[[0,0],[2,0],[2,2],[0,2],[0,0]]]}"#);
+    let a = geof_num(&s, &format!("geof:area({square})"));
+    assert!((a - 4.0).abs() < 1e-12, "area: {a}");
+    let contains = geof_opt(
+        &s,
+        &format!("geof:sfContains({square}, {})", wkt("POINT(1 1)")),
+    )
+    .unwrap_or_default();
+    assert!(contains.contains("true"), "{contains}");
+    let srid = geof_opt(&s, &format!("geof:getSRID({p})")).unwrap_or_default();
+    assert!(srid.contains("CRS84"), "GeoJSON is always CRS84: {srid}");
+}
+
+// Every RFC 7946 geometry type, the Multi* forms and GeometryCollection included.
+// (Relations with a GeometryCollection operand need GEOS >= 3.13, so the collection
+// is checked through its envelope, which every GEOS computes.)
+#[test]
+fn geojson_multi_geometries_and_collections() {
+    let s = ts();
+    let multi_polygon = gj(
+        r#"{"type":"MultiPolygon","coordinates":[[[[0,0],[1,0],[1,1],[0,1],[0,0]]],[[[5,5],[6,5],[6,6],[5,6],[5,5]]]]}"#,
+    );
+    for (pt, expect) in [
+        ("POINT(0.5 0.5)", "true"),
+        ("POINT(5.5 5.5)", "true"),
+        ("POINT(3 3)", "false"),
+    ] {
+        let r = geof_opt(
+            &s,
+            &format!("geof:sfContains({multi_polygon}, {})", wkt(pt)),
+        )
+        .unwrap_or_default();
+        assert!(r.contains(expect), "MultiPolygon contains {pt}: {r}");
+    }
+    let multi_line =
+        gj(r#"{"type":"MultiLineString","coordinates":[[[0,0],[2,2]],[[10,10],[11,11]]]}"#);
+    let crosses = geof_opt(
+        &s,
+        &format!(
+            "geof:sfCrosses({multi_line}, {})",
+            wkt("LINESTRING(0 2, 2 0)")
+        ),
+    )
+    .unwrap_or_default();
+    assert!(
+        crosses.contains("true"),
+        "MultiLineString crosses: {crosses}"
+    );
+    let multi_point = gj(r#"{"type":"MultiPoint","coordinates":[[1,1],[20,20]]}"#);
+    let intersects = geof_opt(
+        &s,
+        &format!(
+            "geof:sfIntersects({multi_point}, {})",
+            wkt("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))")
+        ),
+    )
+    .unwrap_or_default();
+    assert!(
+        intersects.contains("true"),
+        "MultiPoint intersects: {intersects}"
+    );
+    let line = gj(r#"{"type":"LineString","coordinates":[[0,0],[3,4]]}"#);
+    let length_as_distance = geof_num(&s, &format!("geof:distance({line}, {})", wkt("POINT(3 4)")));
+    assert_eq!(length_as_distance, 0.0, "the line reaches (3 4)");
+    let collection = gj(
+        r#"{"type":"GeometryCollection","geometries":[{"type":"Point","coordinates":[40,40]},{"type":"LineString","coordinates":[[0,0],[1,1]]}]}"#,
+    );
+    let envelope_area = geof_num(&s, &format!("geof:area(geof:envelope({collection}))"));
+    assert!(
+        (envelope_area - 1600.0).abs() < 1e-9,
+        "collection envelope: {envelope_area}"
+    );
+}
+
+// geof:asGeoJSON serialises any geometry as a geo:geoJSONLiteral in CRS84, and the
+// literal reads back as the same geometry.
+#[test]
+fn geof_as_geojson_round_trips() {
+    let s = ts();
+    for w in [
+        "POINT(1.5 -2)",
+        "LINESTRING(0 0, 1 1, 2 0)",
+        "POLYGON((0 0, 4 0, 4 4, 0 4, 0 0), (1 1, 1 2, 2 2, 2 1, 1 1))",
+        "MULTIPOINT((1 2), (3 4))",
+        "MULTILINESTRING((0 0, 1 1), (2 2, 3 3))",
+        "MULTIPOLYGON(((0 0, 1 0, 1 1, 0 0)), ((2 2, 3 2, 3 3, 2 2)))",
+    ] {
+        let eq = geof_opt(
+            &s,
+            &format!("geof:sfEquals(geof:asGeoJSON({}), {})", wkt(w), wkt(w)),
+        )
+        .unwrap_or_default();
+        assert!(eq.contains("true"), "{w} round-trips through GeoJSON: {eq}");
+    }
+    let dt = geof_opt(
+        &s,
+        &format!("DATATYPE(geof:asGeoJSON({}))", wkt("POINT(1 2)")),
+    )
+    .unwrap_or_default();
+    assert_eq!(dt, "<http://www.opengis.net/ont/geosparql#geoJSONLiteral>");
+    let text =
+        geof_opt(&s, &format!("STR(geof:asGeoJSON({}))", wkt("POINT(1 2)"))).unwrap_or_default();
+    // The display form escapes the JSON's quotes: {\"type\":\"Point\",…}.
+    assert!(
+        text.contains(r#"\"type\":\"Point\""#) && text.contains(r#"\"coordinates\":[1.0,2.0]"#),
+        "a GeoJSON Point object: {text}"
+    );
+    let collection = geof_num(
+        &s,
+        &format!(
+            "geof:area(geof:envelope(geof:asGeoJSON({})))",
+            wkt("GEOMETRYCOLLECTION(POINT(0 0), LINESTRING(1 1, 2 3))")
+        ),
+    );
+    assert!(
+        (collection - 6.0).abs() < 1e-9,
+        "collection round trip: {collection}"
+    );
+    // A GeoJSON operand passes through unchanged in meaning.
+    let again = geof_opt(
+        &s,
+        &format!(
+            "geof:sfEquals(geof:asGeoJSON({}), {})",
+            gj(r#"{"type":"Point","coordinates":[7,8]}"#),
+            wkt("POINT(7 8)")
+        ),
+    )
+    .unwrap_or_default();
+    assert!(again.contains("true"), "{again}");
+}
+
+// GeoJSON is CRS84 by definition, so asGeoJSON reprojects: an RD New point in
+// Nijmegen comes out near (5.86, 51.85), and an EPSG:4326 (lat lon) literal
+// comes out in lon/lat order.
+#[test]
+fn geof_as_geojson_reprojects_to_crs84() {
+    let s = ts();
+    let near = |geojson: &str, lon: f64, lat: f64| -> bool {
+        let q = format!(
+            "geof:sfWithin({geojson}, {})",
+            wkt(&format!(
+                "POLYGON(({} {}, {} {}, {} {}, {} {}, {} {}))",
+                lon - 0.05,
+                lat - 0.05,
+                lon + 0.05,
+                lat - 0.05,
+                lon + 0.05,
+                lat + 0.05,
+                lon - 0.05,
+                lat + 0.05,
+                lon - 0.05,
+                lat - 0.05
+            ))
+        );
+        geof_opt(&s, &q).unwrap_or_default().contains("true")
+    };
+    assert!(near(
+        &format!("geof:asGeoJSON({})", rd("POINT(187420 428470)")),
+        5.86,
+        51.85
+    ));
+    assert!(near(
+        "geof:asGeoJSON(\"<http://www.opengis.net/def/crs/EPSG/0/4326> POINT(52.36 4.885)\"^^geo:wktLiteral)",
+        4.885,
+        52.36
+    ));
+    // A CRS this build cannot reproject has no CRS84 form: unbound.
+    let r = geof_opt(
+        &s,
+        "geof:asGeoJSON(\"<http://www.opengis.net/def/crs/EPSG/0/2154> POINT(650000 6860000)\"^^geo:wktLiteral)",
+    );
+    assert!(r.is_none(), "unsupported CRS: {r:?}");
+}
+
+// A GeoJSON operand is harmonised with a projected one like any other CRS84 operand,
+// and geof:transform accepts it.
+#[test]
+fn geojson_literal_harmonises_with_a_projected_operand() {
+    let s = ts();
+    // RD New (121 800, 487 400) is the Rijksmuseum, CRS84 (4.885, 52.360).
+    let box_gj = gj(
+        r#"{"type":"Polygon","coordinates":[[[4.80,52.30],[4.95,52.30],[4.95,52.42],[4.80,52.42],[4.80,52.30]]]}"#,
+    );
+    let within = geof_opt(
+        &s,
+        &format!("geof:sfWithin({}, {box_gj})", rd("POINT(121800 487400)")),
+    )
+    .unwrap_or_default();
+    assert!(
+        within.contains("true"),
+        "RD point within a GeoJSON box: {within}"
+    );
+    let out = geof_opt(
+        &s,
+        &format!(
+            "geof:transform({}, <http://www.opengis.net/def/crs/EPSG/0/28992>)",
+            gj(r#"{"type":"Point","coordinates":[4.885,52.36]}"#)
+        ),
+    )
+    .unwrap_or_default();
+    assert!(out.contains("28992") && out.contains("POINT"), "{out}");
+}
+
+// A malformed GeoJSON literal is not a geometry: every function over it is unbound,
+// and none of them panics — the query itself still succeeds.
+#[test]
+fn malformed_geojson_literal_is_unbound_not_a_panic() {
+    let s = ts();
+    for bad in [
+        "not json",
+        "{",
+        r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[0,0]}}"#,
+        r#"{"type":"Point"}"#,
+        r#"{"type":"Point","coordinates":[0]}"#,
+        r#"{"type":"Point","coordinates":["a","b"]}"#,
+        r#"{"type":"LineString","coordinates":[[0,0]]}"#,
+        r#"{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,1]]]}"#,
+        r#"{"type":"Circle","coordinates":[0,0]}"#,
+    ] {
+        for f in [
+            "geof:sfIntersects({g}, {w})",
+            "geof:distance({g}, {w})",
+            "geof:asGeoJSON({g})",
+            "geof:envelope({g})",
+        ] {
+            let expr = f
+                .replace("{g}", &gj(bad))
+                .replace("{w}", &wkt("POINT(0 0)"));
+            let q = format!("{GEO_PFX}\nSELECT ?r WHERE {{ BIND({expr} AS ?r) }}");
+            match s.query(&q) {
+                Ok(QueryResults::Solutions(sols)) => {
+                    for sol in sols {
+                        let sol = sol.expect("the query still evaluates");
+                        assert!(sol.get("r").is_none(), "{expr} must be unbound");
+                    }
+                }
+                other => panic!("{expr}: the query must evaluate, got {:?}", other.err()),
+            }
+        }
+    }
+}
+
+// Data stored with geo:asGeoJSON is queryable: a feature's GeoJSON geometry is
+// filtered spatially like its WKT neighbour.
+#[test]
+fn stored_geojson_geometries_are_queryable() {
+    let s = ts();
+    load(
+        &s,
+        r#"
+        ex:inside geo:hasGeometry [ geo:asGeoJSON '{"type":"Point","coordinates":[0.5,0.5]}'^^geo:geoJSONLiteral ] .
+        ex:outside geo:hasGeometry [ geo:asGeoJSON '{"type":"Point","coordinates":[5,5]}'^^geo:geoJSONLiteral ] .
+        ex:wkt geo:hasGeometry [ geo:asWKT "POINT(0.25 0.25)"^^geo:wktLiteral ] .
+    "#,
+    );
+    let r = sel(
+        &s,
+        r#"SELECT ?f WHERE {
+            ?f geo:hasGeometry ?g .
+            { ?g geo:asGeoJSON ?geom } UNION { ?g geo:asWKT ?geom }
+            FILTER(geof:sfWithin(?geom, "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))"^^geo:wktLiteral))
+        } ORDER BY ?f"#,
+    );
+    let found: Vec<String> = r.into_iter().map(|row| row[0].clone()).collect();
+    assert_eq!(
+        found,
+        vec![
+            "<http://example.org/inside>".to_string(),
+            "<http://example.org/wkt>".to_string()
+        ]
     );
 }
 

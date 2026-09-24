@@ -14,6 +14,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`geo:geoJSONLiteral` geometries (GeoSPARQL 1.1).** A GeoJSON literal — an
+  RFC 7946 geometry object, `Point` through `GeometryCollection`, always CRS84
+  longitude/latitude — is a geometry wherever a WKT or GML literal is: every
+  `geof:` function takes it, binary functions harmonise it with a projected
+  operand, `geof:transform` reprojects it, and the spatial index and the map
+  viewer feed read `geo:asGeoJSON` next to `geo:asWKT`/`geo:asGML`. It is
+  translated to WKT on the way in, so it takes the same GEOS path; a malformed
+  one (bad JSON, a `Feature`, a short position, an unclosed ring) is not a
+  geometry, and functions over it are unbound rather than a panic. New
+  **`geof:asGeoJSON`** serialises any geometry as a `geo:geoJSONLiteral`,
+  reprojecting it to CRS84 first. Both were tracked gaps.
 - **An admin page for prefix overrides** (`/admin/prefixes`). Lists what this
   deployment has decided its prefixes mean, adds one, repoints one and removes
   one. While a label is being typed it resolves that label live and says what
@@ -734,6 +745,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **`geof:getSRID` of a GML literal returned its opening tag as a CRS IRI**
+  (`<gml:Point srsName=…>` read as a `<crs>` prefix — an invalid IRI in the
+  results). It returns CRS84 now, the CRS the other functions already treat a
+  GML literal as being in (`srsName` is not read yet); a GeoJSON literal is
+  CRS84 by definition.
 - **A Raft member's vote survives a restart.** The vote was kept in memory with
   the log, so a member that restarted could vote a second time in the same
   term. The consequences were bounded and documented — the election timeout

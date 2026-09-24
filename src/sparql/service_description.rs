@@ -108,6 +108,9 @@ pub fn generate(
         "distance",
         "area",
         "getSRID",
+        "relate",
+        "transform",
+        "asGeoJSON",
     ];
 
     for (i, func) in geo_functions.iter().enumerate() {
@@ -198,6 +201,32 @@ mod tests {
         assert!(desc.contains("void:triples 42"));
         assert!(desc.contains("geof:sfContains"));
         assert!(desc.contains("geof:distance"));
+        assert!(desc.contains("geof:asGeoJSON"));
+    }
+
+    /// Every advertised `geof:` function is one the engine registers.
+    #[test]
+    fn advertised_functions_are_registered() {
+        let registered: Vec<String> = crate::geo::functions::all_functions()
+            .into_iter()
+            .map(|(iri, _)| iri.as_str().to_string())
+            .collect();
+        let desc = generate(0, &[], &[], false);
+        let listed = desc
+            .lines()
+            .map(str::trim)
+            .filter_map(|l| l.strip_prefix("geof:"))
+            .map(|l| l.trim_end_matches([',', ';', ' ']));
+        let mut n = 0;
+        for name in listed {
+            n += 1;
+            let iri = format!("http://www.opengis.net/def/function/geosparql/{name}");
+            assert!(
+                registered.contains(&iri),
+                "advertised but not registered: {name}"
+            );
+        }
+        assert!(n > 30, "the list was read: {n}");
     }
 
     #[test]
