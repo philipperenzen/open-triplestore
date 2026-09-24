@@ -66,6 +66,7 @@ pub fn is_proposer_query(method: &Method, path: &str) -> bool {
 
 /// The sources router's gate: admins pass; a scoped service token passes the
 /// routes its scopes name; everyone else is refused.
+#[allow(clippy::result_large_err)] // Err is an axum Response, returned on the cold deny path
 pub async fn guard(req: Request, next: Next) -> Result<Response, Response> {
     let user = req
         .extensions()
