@@ -1460,6 +1460,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as an operand.
 
 ### Security
+- **Any signed-in user could block writes to a graph with a gating
+  pipeline.** A SHACL Studio pipeline with `gate_writes` refuses (422) every
+  write its shapes reject to the graphs it covers, for everyone, the graphs'
+  owners and editors included. Creating or updating one checked only the
+  graphs the pipeline writes itself (inference and report targets), so any
+  signed-in user could gate a public dataset, or any graph they could name,
+  with shapes that reject everything and block every write to it. Setting a
+  gate now needs what a validation-layer binding, which gates writes the same
+  way, needs: write access to every dataset it covers (dataset targets, and
+  `dataset_ids` while no `graph_iris` narrow the scope) and a graph-ACL write
+  grant on every graph it names (graph targets, `graph_iris`). Admins pass.
+  Anything else answers 403, and a dataset that does not exist 404. A
+  pipeline that only validates needs no write access. The gate acts with its
+  creator's authority, checked at every write, so a gating pipeline stored
+  before this release, or one whose creator has since lost that write access
+  or been deactivated, no longer gates. The server logs a warning at each
+  write such a pipeline would have gated.
 - **`POST /api/shaclc/serialize` read any named graph, for anyone.** It took
   a graph IRI from the request body and handed it straight to the serialiser
   — no authentication, no authorisation — so any caller could name any named
