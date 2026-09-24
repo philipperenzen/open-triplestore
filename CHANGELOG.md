@@ -1460,6 +1460,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as an operand.
 
 ### Security
+- **A write-scoped user could write into any named graph, bypassing the graph
+  ACL.** The SPARQL UPDATE path resolves and ACL-checks every named-graph write,
+  but two data-loading paths did not, because they loaded the request body while
+  keeping its embedded graph names. The Graph Store Protocol default-graph write
+  (`PUT`/`POST /store` with no `?graph`) accepted TriG, N-Quads and JSON-LD and
+  kept their graph names, and an LDP RDF Source loaded from `application/ld+json`
+  kept the body's JSON-LD named graphs (`{"@id":"<victim graph>","@graph":[…]}`).
+  The default graph and one's own LDP resource are writable without a per-graph
+  grant, so any write-scoped user — a self-registered account included — could
+  write into another tenant's private dataset graph or a `urn:system:*` graph.
+  Both paths now load **triples only**: a body that names a graph of its own is
+  rejected (`400`) and nothing is written. A `?graph`-targeted Graph Store write
+  is unaffected (every quad is forced into that one graph, which is ACL-checked),
+  and multi-graph loads still go through the dataset import API, which enforces the
+  per-graph boundary. Every released version was affected. *(Note: LDP resources
+  still follow the global RBAC rather than per-resource ACLs — see `docs/ldp.md`;
+  tightening that is tracked separately.)*
 - **`POST /api/shaclc/serialize` read any named graph, for anyone.** It took
   a graph IRI from the request body and handed it straight to the serialiser
   — no authentication, no authorisation — so any caller could name any named
