@@ -726,6 +726,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **Release tags keep their section headers.** `auto-tag.yml` created the
+  annotated tag with git's default message cleanup, which deletes every line
+  that starts with `#`: the v0.5.0 tag lost all of its `### Added` …
+  `### Security` headers. The workflow and the manual command in
+  `docs/release-process.md` now pass `--cleanup=whitespace`.
 - **A Raft member's vote survives a restart.** The vote was kept in memory with
   the log, so a member that restarted could vote a second time in the same
   term. The consequences were bounded and documented — the election timeout
