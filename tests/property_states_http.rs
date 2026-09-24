@@ -203,7 +203,7 @@ async fn states_keep_history_and_the_data_graph_keeps_the_current_value() {
 
     // Typed and IRI values; an unknown reliability is refused.
     let (st, _, txt) = req(&app, Method::POST, "/api/datasets/ps/properties/state", Some(&token), Some(json!({
-        "entity": E, "property": "https://example.org/ps/inspectedBy", "value": "https://example.org/ps/org/rws", "datatype": "iri"
+        "entity": E, "property": "https://example.org/ps/inspectedBy", "value": "https://example.org/ps/org/inspector", "datatype": "iri"
     }))).await;
     assert_eq!(st, StatusCode::CREATED, "{txt}");
     let (st, _, txt) = req(

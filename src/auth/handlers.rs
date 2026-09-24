@@ -3835,7 +3835,7 @@ pub async fn list_datasets(
 /// ownership, org/group membership × visibility, grants, public readability).
 ///
 /// For services that must answer "may this user write this dataset?"
-/// server-side — e.g. the validation platform's owner-gated runs — without
+/// server-side — e.g. an external validation service's owner-gated runs — without
 /// re-deriving ACL logic. Anonymous callers get the public-visibility answer;
 /// an existing-but-invisible dataset answers 404 (not 403) so the endpoint
 /// cannot be used to probe private dataset ids.

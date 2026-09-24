@@ -27,7 +27,7 @@ fn sample_icdd() -> Vec<u8> {
   <ct:ContainerDescription rdf:about="urn:icdd:bridge-handover">
     <ct:description>Handover of the Waalbrug inspection</ct:description>
     <ct:conformanceIndicator>ICDD-Part1-Container</ct:conformanceIndicator>
-    <ct:publishedBy><ct:Party rdf:about="urn:party:rws"><ct:name>Rijkswaterstaat</ct:name></ct:Party></ct:publishedBy>
+    <ct:publishedBy><ct:Party rdf:about="urn:party:example-authority"><ct:name>Example Road Authority</ct:name></ct:Party></ct:publishedBy>
     <ct:containsDocument>
       <ct:InternalDocument rdf:about="urn:icdd:doc:report">
         <ct:filename>report.txt</ct:filename><ct:filetype>txt</ct:filetype>

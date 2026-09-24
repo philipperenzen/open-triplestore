@@ -51,7 +51,7 @@ Cargo.toml:104 pins `oxigraph = "0.5"`. Stale 0.4 references: docs/standards.md:
 docs/standards.md:29 grades 'RML / R2RML' as Full⁹. docs/rml.md:296 states 'Only file-based sources (CSV, JSON, XML) are supported. R2RML SQL source and SPARQL-based sources are not implemented.' R2RML is by definition an RDB-to-RDF mapping language, so 'R2RML: Full' is not a defensible claim. docs/rml.md:295 additionally excludes rr:joinCondition, echoed by docs/standards.md:96.
 
 **[LOW] docs/overview.md links a demo guide directory that does not exist**  
-docs/overview.md (final 'Where to start' bullet) says 'A full multi-app demo walkthrough lives in `docs/demo-guide/` at the workspace root.' Verified absent: neither ./docs/demo-guide nor ../docs/demo-guide exists.
+docs/overview.md (final 'Where to start' bullet) linked a demo walkthrough that is not part of this repository.
 
 **[LOW] docs/reasoning.md omits owl2-dl from the ?entailment= query-parameter list**  
 docs/reasoning.md documents '?entailment=rdfs|owl2-rl|owl2-el|owl2-ql' while README.md:752 and docs/owl2-dl.md:101-104 both document `?entailment=owl2-dl`. One of the three is wrong about the supported parameter values.
@@ -1501,7 +1501,7 @@ tests/rml_conformance.rs:472-474 — `match m { Err(_) => { /* gap: referencing 
 
 ### Verification steps
 
-- Prove the opengraph gap: `cd /Users/rws/Code/open-triplestore && cargo test -p opengraph --all-features 2>&1 | tail -20` — runs 59 unit tests plus opengraph/tests/oxigraph_bnode_behavior.rs that no CI job has ever executed. Then `cargo clippy -p opengraph --all-targets -- -D warnings` to see whether it is even lint-clean.
+- Prove the opengraph gap: `cargo test -p opengraph --all-features 2>&1 | tail -20` — runs 59 unit tests plus opengraph/tests/oxigraph_bnode_behavior.rs that no CI job has ever executed. Then `cargo clippy -p opengraph --all-targets -- -D warnings` to see whether it is even lint-clean.
 - Prove the ignored tests are failing, not merely deferred: `cargo test --features full,test-utils,backup-encrypt,alerting,plugin-hello --locked -- --ignored 2>&1 | tail -40`. Expect the 5 tests/sparql12_conformance.rs cases to fail (their ignore reasons say the semantics changed).
 - Prove the default build is untested: `cargo build --no-default-features 2>&1 | tail -20 && cargo test --no-default-features --features test-utils 2>&1 | tail -20`. No CI job runs either command.
 - Quantify the security-gate blind spot: `cargo test --features full,test-utils,backup-encrypt,alerting,plugin-hello --locked security -- --list | wc -l` versus `cargo test --features full,test-utils,backup-encrypt,alerting,plugin-hello --test 'security_*' -- --list | wc -l`. The second set is what ci.yml:88-99 does not cover.
@@ -1769,7 +1769,7 @@ Every claim surface now states what the code and tests prove:
 - **Federation:** `sd:BasicFederatedQuery` removed from the service description
   (test-pinned); README says `SERVICE` is disabled by design.
 - **Stale docs:** SPARQL 1.2 guide (nonexistent builder API, unpublished
-  crate version), comparison footnote, Oxigraph 0.4 references, the demo-guide
+  crate version), comparison footnote, Oxigraph 0.4 references, a dead demo
   link, the W3C script's download claim (dead code removed).
 - **Build matrix:** docs/build-features.md; `plugin-accounts-dashboard` now
   compiled by GitHub CI; Dockerfile comment no longer lists SAML.
