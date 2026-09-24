@@ -1460,6 +1460,32 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as an operand.
 
 ### Security
+- **`GET /api/shacl/detect-shapes?graph=<iri>` counted the SHACL shapes in any
+  named graph, for any signed-in caller.** The handler took a graph IRI from
+  the query string and scanned it for `sh:NodeShape`/`sh:PropertyShape`
+  declarations with no read check at all, so a signed-in principal could learn
+  the shape count of another tenant's private shapes graph — or of a
+  `urn:system:*` graph — simply by naming it. It now applies
+  `check_graph_read_access`, the same visibility helper that gates `/store`,
+  `/sparql` and `POST /api/shaclc/serialize`: a graph the caller may not read
+  answers `403` whether or not it exists, so it cannot be used to discover which
+  graph IRIs are present either. Admins keep their bypass, because that helper
+  denies `urn:system:*` and unregistered graphs even to them, and an admin's own
+  imports land in unregistered graphs — exactly the graph the importer probes
+  right after writing it.
+- **`POST /api/reasoning/materialize` over a `dataset` reasoned across the
+  dataset's private graphs and wrote the consequences into a graph the caller
+  can read.** The handler checked only that the caller could *access* the
+  dataset, then took its whole reasoning layer from `conformance::resolve`,
+  which lists every dataset graph without regard to who is asking. A viewer of a
+  public dataset could therefore materialise a private graph's triples — the
+  RDFS/OWL closure over data they were never allowed to see — into a
+  caller-chosen target they could read back, laundering the private data out.
+  The reasoning source set is now filtered to the graphs the caller may read
+  (admins still read all; the model registry's own visibility rule still admits
+  model graphs), exactly as the endpoint already checks any explicitly named
+  `source_graphs`. A dataset owner or other writer still reasons over the whole
+  dataset.
 - **`POST /api/shaclc/serialize` read any named graph, for anyone.** It took
   a graph IRI from the request body and handed it straight to the serialiser
   — no authentication, no authorisation — so any caller could name any named
