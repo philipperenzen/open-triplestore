@@ -2124,6 +2124,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     private when it holds the graph and cleared when it does not. A data
     graph made private after a run used to leave that run's report graph
     readable to the dataset's viewers.
+- **A SQL-source dry run was shaped by any graph its caller named.**
+  `POST /api/sources/{id}/dry-run` validates a sample of a mapping and returns
+  the report: the shapes' IRIs, paths and messages. Any user may mint the
+  `mappings:propose` token it accepts, and it validated against whatever
+  shapes graph the request or the mapping named (a proposer writes mappings
+  too): a graph of a private dataset, a graph registered to no dataset, or a
+  private model's shapes named through `model` + `modelVersion`. Now a named
+  shapes graph applies only when the caller may read it by the rule `/sparql`
+  applies, or through the endpoint that already serves it to them (a SHACL
+  Studio Library entry they are shown, a graph of a model version they may
+  read). A model's shapes apply only when the caller may read the model. For
+  anyone else they are left out with a warning. Admins read every graph.
 - **Detaching or deleting a dataset could wipe graphs it never owned.**
   `DELETE /api/datasets/{id}/graphs` deleted any graph no other dataset
   claimed, so any user who could create a dataset could wipe the model

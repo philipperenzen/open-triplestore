@@ -37,6 +37,8 @@ use crate::auth::middleware::AuthenticatedUser;
 use crate::rml::sample::{execute_sample, SampleSpec, SampledMap, MAX_SAMPLE_ROWS};
 use crate::server::AppState;
 use crate::shacl::report::{Severity, ValidationReport, ValidationResult};
+use crate::shacl_studio::read_scope::ReadScope;
+use crate::shacl_studio::store::ShaclStudioStore;
 use crate::store::{escape_sparql_iri, TripleStore};
 
 use super::gates::MappingGates;
@@ -143,7 +145,9 @@ pub struct DryRunRequest {
     pub rml: Option<String>,
     pub yarrrml: Option<String>,
     /// The shapes to validate against. Explicit, else the registered
-    /// mapping's, else the model version's.
+    /// mapping's, else the model version's. Only a graph the caller may read
+    /// applies (the rule `/sparql` applies, a Library entry they are shown, a
+    /// model version they may read); anything else is left out with a warning.
     pub shapes_graph: Option<String>,
     pub model: Option<String>,
     pub model_version: Option<String>,
@@ -493,7 +497,23 @@ fn choose(
 }
 
 /// The shapes graphs the sample is validated against, with a warning for
-/// each one that resolved to nothing.
+/// each one that resolved to nothing or that the caller may not read.
+///
+/// A report names its shapes, their paths and messages, so a dry run is
+/// shaped only by graphs its caller may read, whoever named them: the request,
+/// or the mapping, which a proposer writes too.
+///
+/// * A named shapes graph: by the rule `/sparql` scopes a query to (a graph
+///   of a dataset they can access, a private one only for its writers, or a
+///   graph-ACL read grant), or through the endpoint that already serves it to
+///   them: a SHACL Studio Library entry they are shown
+///   ([`ReadScope::may_read_set`]) or a graph of a model version they may
+///   read. A graph registered nowhere and served by nothing is an admin's.
+/// * A model version's shapes only when they may read the model (an unknown
+///   model and one they may not read are answered alike), and of the shapes
+///   bound to it those the model profile admits for them.
+///
+/// Admins read every graph. A lookup error applies no named graph.
 fn shapes_for(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -502,15 +522,21 @@ fn shapes_for(
     warnings: &mut Vec<String>,
 ) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    if let Some(g) = body
+    let named = body
         .shapes_graph
         .as_deref()
         .map(str::trim)
         .filter(|g| !g.is_empty())
-    {
-        out.push(g.to_string());
-    } else if let Some(g) = record.and_then(|r| r.shapes_graph.clone()) {
-        out.push(g);
+        .map(str::to_string)
+        .or_else(|| record.and_then(|r| r.shapes_graph.clone()));
+    if let Some(g) = named {
+        if may_read_shapes_graph(state, user, &g) {
+            out.push(g);
+        } else {
+            warnings.push(format!(
+                "shapes graph <{g}> is not one you may read; nothing validated against it"
+            ));
+        }
     }
     let model = body
         .model
@@ -521,12 +547,19 @@ fn shapes_for(
         .clone()
         .or_else(|| record.and_then(|r| r.model_version.clone()));
     if let (Some(model), Some(version)) = (model, version) {
-        match crate::data_models::registry::get_version(
-            &state.store,
-            &state.base_url,
-            &model,
-            &version,
-        ) {
+        let readable =
+            crate::data_models::profile::readable_model(state, Some(&user.user_id), &model).is_ok();
+        let found = readable
+            .then(|| {
+                crate::data_models::registry::get_version(
+                    &state.store,
+                    &state.base_url,
+                    &model,
+                    &version,
+                )
+            })
+            .flatten();
+        match found {
             Some(v) => {
                 let sources =
                     crate::data_models::profile::shape_sources(state, Some(user), &model, &v);
@@ -544,19 +577,6 @@ fn shapes_for(
     }
     out.sort();
     out.dedup();
-    // A report names its shapes, their paths and messages: a graph some
-    // dataset holds as private shapes only the dry runs of who may read it,
-    // whoever named it (the request, the mapping). A lookup error applies none.
-    let withheld = crate::auth::acl::withheld_private_graphs(&state.auth_db, Some(user));
-    out.retain(|g| {
-        let readable = withheld.as_ref().is_ok_and(|w| !w.contains(g));
-        if !readable {
-            warnings.push(format!(
-                "shapes graph <{g}> is not one you may read; nothing validated against it"
-            ));
-        }
-        readable
-    });
     out.retain(|g| {
         let present = state.store.count_graph(Some(g)).unwrap_or(0) > 0;
         if !present {
@@ -567,6 +587,29 @@ fn shapes_for(
         present
     });
     out
+}
+
+/// Whether `user` may read the shapes graph `graph_iri` a dry run names (see
+/// [`shapes_for`]). Never a graph some dataset holds as private that they may
+/// not read, whatever else serves it.
+fn may_read_shapes_graph(state: &AppState, user: &AuthenticatedUser, graph_iri: &str) -> bool {
+    let reader = match ReadScope::for_user(&state.auth_db, user) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("dry run: the caller's read scope could not be settled: {e}");
+            return false;
+        }
+    };
+    if reader.withholds(graph_iri) {
+        return false;
+    }
+    reader.may_read_graph(graph_iri)
+        || ShaclStudioStore::new(state.auth_db.pool())
+            .get_shape_graph_by_iri(graph_iri)
+            .ok()
+            .flatten()
+            .is_some_and(|set| reader.may_read_set(&set))
+        || crate::conformance::model_graph_readable(state, Some(&user.user_id), graph_iri)
 }
 
 // ───────────────────────────── Handler ─────────────────────────────
