@@ -87,9 +87,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     as comments (IMBOR: headers only), and the server serves
     `/vocab/NOTICE.md` itself. Seeded and LOV-installed graphs are loaded
     unchanged: the loader used to add an `owl:versionInfo` triple to files
-    that state none. Earlier installs keep it, seeded and LOV alike:
-    their licence records say the copy differs from the file or may have been
-    modified.
+    that state none. On earlier installs, a seeded copy whose only difference
+    from its file is that triple has it removed at the next start and is
+    recorded as unchanged; a copy with any other difference, and every LOV
+    install, keeps it, and their licence records say the copy differs from
+    the file or may have been modified.
     A download calls its content the bundled file, unchanged, only when the
     seeder has checked it: each seeded version's record keeps the SHA-256 of
     its file and a digest of the stored triples, and `attribution.unchanged`
@@ -1104,6 +1106,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   seed no longer provides any of them. (`f20a87b`)
 
 ### Fixed
+- **Street maps no longer show "API KEY REQUIRED" tiles.** CARTO watermarks
+  every keyless basemap tile since September 2026, which covered the 3D globe
+  and the map previews. Those maps now draw OpenFreeMap's vector tiles into
+  raster tiles in the browser, in the app's light or dark theme. No key is
+  needed, and every map carries the credit "OpenFreeMap © OpenMapTiles Data
+  from OpenStreetMap". Satellite imagery (Esri World Imagery) is offered only
+  when the deployment sets its own ArcGIS key in `/config.json`
+  (`basemaps.esriApiKey`), because Esri's terms tie the imagery to one.
+  Without a key, the 2D map, the globe and embeds show streets and no
+  satellite toggle. `?basemap=satellite` on an embed falls back to streets.
 - **`public = false` in a seed-bundle manifest reaches entries an earlier
   build registered public** (NEN 2660-2 and the NEN relation profile, whose
   models the example bundles now keep private because NEN grants no licence to
@@ -1120,9 +1132,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one carries a registry marker, and a record from an earlier release counts
   only when its creator, id, version, graph, notes and creation date all read
   as that seeder wrote them. A copy whose licence allows other copies and that
-  differs from the bundled file (an admin's edit, an earlier file, the
-  `owl:versionInfo` triple earlier loaders added) is never modified, only
-  labelled as possibly modified. IMBOR is checked on every start, also with
+  differs from the bundled file (an admin's edit, an earlier file) is never
+  modified, only labelled as possibly modified. The one exception is a copy
+  whose only difference is the `owl:versionInfo` triple earlier loaders
+  added: that triple is removed, and the copy is the file again. IMBOR is checked on every start, also with
   `SEED_STANDARD_VOCABS=false`: a copy that differs, such as the altered source
   note installs seeded by 0.5.0 and 0.6.0 hold, is first kept as a private,
   deprecated version `2025-kept-<n>`, served only to the entry's writers, and
