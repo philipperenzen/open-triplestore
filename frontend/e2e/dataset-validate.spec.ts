@@ -189,9 +189,13 @@ test.describe('Dataset SHACL validation', () => {
     await expect(report).toContainText('Does not conform');
     const rows = report.locator('tbody tr');
     expect(await rows.count()).toBeGreaterThanOrEqual(3);
-    // Focus nodes for both bad instances appear in the results table.
-    await expect(report.locator('code', { hasText: 'e2e#bob' }).first()).toBeVisible();
-    await expect(report.locator('code', { hasText: 'e2e#carol' }).first()).toBeVisible();
+    // Focus nodes for both bad instances appear in the results table. A cell
+    // shows the shortened name (`e2e:bob`) and carries the full IRI in its title.
+    for (const who of ['bob', 'carol']) {
+      await expect(
+        report.locator(`code[title="http://example.org/e2e#${who}"]`).first(),
+      ).toBeVisible();
+    }
 
     await dialog.getByRole('button', { name: 'Close' }).click();
     await expect(dialog).not.toBeVisible();
