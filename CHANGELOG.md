@@ -1460,6 +1460,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as an operand.
 
 ### Security
+- **Saved-query (API service) private-graph and lifecycle leaks.** Four fixes in
+  the `…/api-services/…/run` subsystem:
+  - A run over a **version snapshot** (`?version=<label>`, or the default run of a
+    dataset that has any version) leaked private graphs. A snapshot copies private
+    graphs into version-scoped IRIs, and the reader filter compared them against
+    *live* private IRIs, so it removed nothing — a viewer, or an anonymous caller
+    on a public dataset's API service, read them. The filter is now version-aware:
+    it maps each snapshot back to its live source graph and drops the private ones
+    for a non-writer.
+  - An **organisation/group-scoped** service read the union of *every* graph in
+    the owner's datasets, private ones included. It now includes a private graph
+    only for a caller who can write that dataset.
+  - A dataset **Editor** could make a service `public`, exposing the dataset's
+    (non-private) data to anonymous callers, without the publish rights
+    `create_dataset` requires. Setting `visibility=public` now needs manage rights
+    on the scope (and, for a dataset, the publish capability); the value is also
+    validated.
+  - Deleting a dataset, organisation or group left its API services behind, and
+    ids are reusable slugs — so a `public` service planted on an id could, after
+    the id was reused by an unrelated tenant, read the new resource's data.
+    Deletes now remove the owner's services in the same transaction, a one-time
+    sweep drops pre-existing orphans, and a dataset-scoped run/read requires the
+    dataset to exist even for a public service. Every released version was
+    affected.
 - **`POST /api/shaclc/serialize` read any named graph, for anyone.** It took
   a graph IRI from the request body and handed it straight to the serialiser
   — no authentication, no authorisation — so any caller could name any named
