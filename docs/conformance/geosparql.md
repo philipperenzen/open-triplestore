@@ -4,7 +4,7 @@ Two complementary layers, both in CI.
 
 ## 1. Functional coverage (in-house, OGC-requirement-mapped)
 
-[`tests/geosparql_conformance.rs`](../../tests/geosparql_conformance.rs) — **121 tests**
+[`tests/geosparql_conformance.rs`](../../tests/geosparql_conformance.rs) — **130 tests**
 mapping OGC GeoSPARQL 1.1 requirements 1–30: Simple Features / Egenhofer / RCC8 relation
 families, constructive and metric functions, `geo:wktLiteral`, `geo:gmlLiteral` and
 `geo:geoJSONLiteral` parsing (every RFC 7946 geometry type, malformed input unbound
@@ -14,10 +14,16 @@ metric functions (`metricDistance`, `metricLength`, `metricPerimeter`, `metricAr
 `metricBuffer`) are checked against published WGS84 geodesic values — GeographicLib's
 JFK–LHR (5 551 759.400 m) and nearly antipodal Wellington–Salamanca (19 959 679.267 m),
 the equatorial degree and the meridian arc — and the `uom:` units of `geof:distance` /
-`geof:buffer` on geographic and projected CRSs.
+`geof:buffer` on geographic and projected CRSs. The `geof:aggUnion` aggregate is tested
+for overlapping polygons (area), duplicates, `GROUP BY`/`HAVING`, the empty group, mixed
+WKT/GML/GeoJSON and mixed-CRS groups, SPARQL error semantics, and on every path a query
+can take — the subject shards and the columnar copy (both decline it), the full
+in-memory copy, the engine, the result cache, scoped queries and updates — with
+byte-identical answers across them; `tests/standards_conformance.rs` runs it over HTTP.
 
-Tracked functional gap (encoded as a test that flips when implemented):
-`geof:aggUnion` (needs SPARQL aggregate extension hooks).
+No functional gap is tracked in this suite any more. What GeoSPARQL 1.1 still lacks
+here — KML/DGGS literals, the Query Rewrite Extension, the other aggregates and several
+non-metric functions — is listed in [standards.md](../standards.md#known-limitations--conformance-findings).
 
 ## 2. Official OGC SHACL validator (vendored) — the round-trip
 

@@ -1028,7 +1028,7 @@ fn trim_at_parse_error(sparql: &str) -> Option<String> {
 /// parser's message on failure. Undeclared prefixes fail here — which is exactly why
 /// [`finalize_sparql`] runs first.
 pub(crate) fn validate_sparql(sparql: &str) -> Result<(), String> {
-    spargebra::SparqlParser::new()
+    crate::sparql::parser()
         .parse_query(sparql)
         .map(|_| ())
         .map_err(|e| e.to_string())

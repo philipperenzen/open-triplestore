@@ -35,7 +35,6 @@ pub use eval::{accepts, evaluate, evaluate_semantics};
 pub use index::{Columnar, Dictionary, DEFAULT_GRAPH};
 
 use crate::parallel::ParAnswer;
-use spargebra::SparqlParser;
 
 impl Columnar {
     /// Evaluate `sparql`. `Ok(None)` when the query is declined (the caller
@@ -48,7 +47,7 @@ impl Columnar {
         if uses_reserved_names(sparql) {
             return Ok(None);
         }
-        let query = SparqlParser::new()
+        let query = crate::sparql_parser()
             .parse_query(sparql)
             .map_err(|e| e.to_string())?;
         evaluate_semantics(self, &query)
@@ -58,7 +57,7 @@ impl Columnar {
         if uses_reserved_names(sparql) {
             return Ok(None);
         }
-        let query = SparqlParser::new()
+        let query = crate::sparql_parser()
             .parse_query(sparql)
             .map_err(|e| e.to_string())?;
         evaluate(self, &query)
@@ -71,7 +70,7 @@ pub fn accepts_text(sparql: &str) -> bool {
     if uses_reserved_names(sparql) {
         return false;
     }
-    SparqlParser::new()
+    crate::sparql_parser()
         .parse_query(sparql)
         .ok()
         .map(|q| accepts(&q).is_ok())
@@ -96,5 +95,19 @@ mod tests {
             "SELECT ?__og_bnode_x WHERE { ?__og_bnode_x ?p ?o }"
         ));
         assert!(accepts_text("SELECT ?s WHERE { ?s ?p ?o }"));
+    }
+
+    /// The evaluator has no custom aggregates: a query using a registered one
+    /// is declined (and reaches the engine), with or without GROUP BY.
+    #[test]
+    fn a_registered_custom_aggregate_is_declined() {
+        let agg = "http://example.org/test/columnar/agg";
+        crate::register_custom_aggregate(oxrdf::NamedNode::new_unchecked(agg));
+        assert!(!accepts_text(&format!(
+            "SELECT (<{agg}>(?o) AS ?u) WHERE {{ ?s ?p ?o }}"
+        )));
+        assert!(!accepts_text(&format!(
+            "SELECT ?s (<{agg}>(?o) AS ?u) WHERE {{ ?s ?p ?o }} GROUP BY ?s"
+        )));
     }
 }

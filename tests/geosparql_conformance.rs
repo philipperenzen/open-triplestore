@@ -1621,9 +1621,8 @@ fn geo_data_model_property_path_wkt() {
 // Grounded in OGC GeoSPARQL 1.1 (22-047r1) and adversarially fact-checked.
 // The verifier corrected geos-09 (line-on-boundary ehCovers/ehCoveredBy = FALSE,
 // matching the engine's DE-9IM mask T*TFT*FF*). The GeoSPARQL-1.1 functions once
-// encoded here as documented gaps — geof:relate, transform, the metric family and
-// geo:geoJSONLiteral — are implemented, and their tests assert results;
-// geof:aggUnion remains a tracked gap.
+// encoded here as documented gaps — geof:relate, transform, the metric family,
+// aggUnion and geo:geoJSONLiteral — are implemented, and their tests assert results.
 // ═══════════════════════════════════════════════════════════
 
 /// Evaluate a single geof: expression. Returns None if unsupported (query error or
@@ -2905,5 +2904,398 @@ fn transform_into_epsg4326_emits_lat_lon() {
     assert!(
         out.contains("EPSG/0/4326"),
         "the output must carry the EPSG:4326 prefix it was transformed into: {out}"
+    );
+}
+
+// ─── geof:aggUnion — the GeoSPARQL 1.1 spatial aggregate ──────────────────────
+//
+// A real SPARQL aggregate: `geof:aggUnion(?g)` folds a group's geometries into their
+// union (GEOS unary union) and yields one `geo:wktLiteral`. It was a tracked gap —
+// the name parsed as a plain function call, which was unbound or a syntax error
+// under GROUP BY.
+
+/// Two overlapping 2×2 squares in the north (union area 6), a 1×1 square in the south.
+const PARCELS: &str = r#"
+    ex:a ex:region ex:north ; geo:hasGeometry ex:ga .
+    ex:ga geo:asWKT "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))"^^geo:wktLiteral .
+    ex:b ex:region ex:north ; geo:hasGeometry ex:gb .
+    ex:gb geo:asWKT "POLYGON((1 0, 3 0, 3 2, 1 2, 1 0))"^^geo:wktLiteral .
+    ex:c ex:region ex:south ; geo:hasGeometry ex:gc .
+    ex:gc geo:asWKT "POLYGON((10 10, 11 10, 11 11, 10 11, 10 10))"^^geo:wktLiteral .
+"#;
+
+/// A store whose in-memory accelerator builds its copies eagerly, so a query is
+/// offered to the shards, the columnar copy and the full copy before the engine.
+fn accelerated() -> open_triplestore::store::TripleStore {
+    open_triplestore::store::TripleStore::in_memory()
+        .unwrap()
+        .with_query_cache(false, 0, 0)
+        .with_parallel_query(true, 4, 10_000_000)
+        .with_parallel_rebuild_quiet_ms(0)
+}
+
+/// The same store with the accelerator and the cache off: the engine answers.
+fn engine_only() -> open_triplestore::store::TripleStore {
+    open_triplestore::store::TripleStore::in_memory()
+        .unwrap()
+        .with_query_cache(false, 0, 0)
+        .with_parallel_query(false, 1, 0)
+}
+
+/// Every solution of a SELECT, as display strings, in the engine's order.
+fn solutions(r: QueryResults<'static>) -> Vec<Vec<Option<String>>> {
+    let QueryResults::Solutions(sols) = r else {
+        panic!("expected SELECT results")
+    };
+    let vars: Vec<String> = sols
+        .variables()
+        .iter()
+        .map(|v| v.as_str().to_string())
+        .collect();
+    sols.map(|sol| {
+        let sol = sol.unwrap();
+        vars.iter()
+            .map(|v| sol.get(v.as_str()).map(|t| t.to_string()))
+            .collect()
+    })
+    .collect()
+}
+
+#[test]
+fn agg_union_of_overlapping_polygons() {
+    let s = ts();
+    load(&s, PARCELS);
+    let r = sel(
+        &s,
+        "SELECT (geof:aggUnion(?w) AS ?u) WHERE { ?f ex:region ex:north ; geo:hasGeometry/geo:asWKT ?w }",
+    );
+    assert_eq!(r.len(), 1, "one group, one row: {r:?}");
+    assert!(
+        r[0][0].contains("POLYGON")
+            && r[0][0].ends_with("^^<http://www.opengis.net/ont/geosparql#wktLiteral>"),
+        "the union is one WKT polygon: {:?}",
+        r[0][0]
+    );
+    // The overlap is counted once: 4 + 4 - 2.
+    let r = sel(
+        &s,
+        "SELECT (geof:area(geof:aggUnion(?w)) AS ?a) WHERE { ?f ex:region ex:north ; geo:hasGeometry/geo:asWKT ?w }",
+    );
+    assert!((extract_f64(&r[0][0]) - 6.0).abs() < 1e-9, "{r:?}");
+    // Over everything: the disjoint southern square adds 1.
+    let r = sel(
+        &s,
+        "SELECT (geof:area(geof:aggUnion(?w)) AS ?a) WHERE { ?f geo:hasGeometry/geo:asWKT ?w }",
+    );
+    assert!((extract_f64(&r[0][0]) - 7.0).abs() < 1e-9, "{r:?}");
+    // Every geometry twice: a union absorbs duplicates, so the answer is the same.
+    // (Which is as well: the SPARQL parser (spargebra) does not accept DISTINCT
+    // inside a custom aggregate's call.)
+    let r = sel(
+        &s,
+        "SELECT (geof:area(geof:aggUnion(?w)) AS ?a) WHERE {
+            { ?f geo:hasGeometry/geo:asWKT ?w } UNION { ?f geo:hasGeometry/geo:asWKT ?w }
+         }",
+    );
+    assert!((extract_f64(&r[0][0]) - 7.0).abs() < 1e-9, "{r:?}");
+}
+
+#[test]
+fn agg_union_group_by() {
+    let s = ts();
+    load(&s, PARCELS);
+    let r = sel(
+        &s,
+        "SELECT ?region (geof:area(geof:aggUnion(?w)) AS ?a) (COUNT(?f) AS ?n)
+         WHERE { ?f ex:region ?region ; geo:hasGeometry/geo:asWKT ?w }
+         GROUP BY ?region ORDER BY ?region",
+    );
+    assert_eq!(r.len(), 2, "{r:?}");
+    assert!(
+        r[0][0].contains("north") && (extract_f64(&r[0][1]) - 6.0).abs() < 1e-9,
+        "{r:?}"
+    );
+    assert!(r[0][2].contains('2'), "{r:?}");
+    assert!(
+        r[1][0].contains("south") && (extract_f64(&r[1][1]) - 1.0).abs() < 1e-9,
+        "{r:?}"
+    );
+    // HAVING over the aggregate.
+    let r = sel(
+        &s,
+        "SELECT ?region WHERE { ?f ex:region ?region ; geo:hasGeometry/geo:asWKT ?w }
+         GROUP BY ?region HAVING (geof:area(geof:aggUnion(?w)) > 2)",
+    );
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert!(r[0][0].contains("north"), "{r:?}");
+}
+
+// The union of no geometries is the empty geometry — the identity of the union, as
+// 0 is SUM's — for the implicit group of a query without GROUP BY. With GROUP BY, no
+// solutions means no groups at all.
+#[test]
+fn agg_union_empty_group() {
+    let s = ts();
+    load(&s, PARCELS);
+    let r = sel(
+        &s,
+        "SELECT (geof:aggUnion(?w) AS ?u) WHERE { ?f ex:nothing ?w }",
+    );
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(
+        r[0][0],
+        "\"GEOMETRYCOLLECTION EMPTY\"^^<http://www.opengis.net/ont/geosparql#wktLiteral>"
+    );
+    let r = sel(
+        &s,
+        "SELECT ?k (geof:aggUnion(?w) AS ?u) WHERE { ?f ex:nothing ?w ; ex:key ?k } GROUP BY ?k",
+    );
+    assert!(r.is_empty(), "{r:?}");
+}
+
+// WKT, GML and GeoJSON serialisations union together: [0,2]², [1,3]² and [2,4]²
+// cover 4 + 4 + 4 - 1 - 1 = 10.
+#[test]
+fn agg_union_mixes_wkt_gml_and_geojson() {
+    let s = ts();
+    load(
+        &s,
+        r#"
+        ex:w geo:hasGeometry [ geo:asWKT "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))"^^geo:wktLiteral ] .
+        ex:g geo:hasGeometry [ geo:asGML "<gml:Polygon><gml:exterior><gml:LinearRing><gml:posList>1 1 3 1 3 3 1 3 1 1</gml:posList></gml:LinearRing></gml:exterior></gml:Polygon>"^^geo:gmlLiteral ] .
+        ex:j geo:hasGeometry [ geo:asGeoJSON '{"type":"Polygon","coordinates":[[[2,2],[4,2],[4,4],[2,4],[2,2]]]}'^^geo:geoJSONLiteral ] .
+    "#,
+    );
+    let r = sel(
+        &s,
+        "SELECT (geof:area(geof:aggUnion(?geom)) AS ?a) WHERE {
+            ?f geo:hasGeometry ?g . ?g ?p ?geom .
+            FILTER(?p IN (geo:asWKT, geo:asGML, geo:asGeoJSON))
+         }",
+    );
+    assert!((extract_f64(&r[0][0]) - 10.0).abs() < 1e-9, "{r:?}");
+}
+
+// One CRS in, the same CRS out; operands in different CRSs are unioned in CRS84 (the
+// GeoSPARQL default), each reprojected first.
+#[test]
+fn agg_union_keeps_or_harmonises_the_crs() {
+    let s = ts();
+    let rd =
+        |w: &str| format!("\"<http://www.opengis.net/def/crs/EPSG/0/28992> {w}\"^^geo:wktLiteral");
+    let same = format!(
+        "SELECT (geof:getSRID(geof:aggUnion(?w)) AS ?srid) WHERE {{ VALUES ?w {{ {} {} }} }}",
+        rd("POLYGON((155000 463000, 155100 463000, 155100 463100, 155000 463100, 155000 463000))"),
+        rd("POLYGON((155050 463000, 155150 463000, 155150 463100, 155050 463100, 155050 463000))")
+    );
+    let r = sel(&s, &same);
+    assert!(r[0][0].contains("28992"), "an all-RD group stays RD: {r:?}");
+    let area = sel(&s, &same.replace("geof:getSRID(", "geof:area("));
+    assert!(
+        (extract_f64(&area[0][0]) - 15_000.0).abs() < 1e-6,
+        "{area:?}"
+    );
+    // The Rijksmuseum in RD New with a CRS84 box around it: harmonised to CRS84.
+    let mixed = format!(
+        "SELECT (geof:getSRID(geof:aggUnion(?w)) AS ?srid) (geof:sfContains(geof:aggUnion(?w), {}) AS ?in) WHERE {{ VALUES ?w {{ {} {} }} }}",
+        wkt("POINT(4.885 52.36)"),
+        rd("POINT(121800 487400)"),
+        wkt("POLYGON((4.80 52.30, 4.95 52.30, 4.95 52.42, 4.80 52.42, 4.80 52.30))")
+    );
+    let r = sel(&s, &mixed);
+    assert!(
+        r[0][0].contains("CRS84"),
+        "a mixed group is unioned in CRS84: {r:?}"
+    );
+    assert!(r[0][1].contains("true"), "{r:?}");
+    // An operand this build cannot reproject makes a mixed group unbound.
+    let r = sel(
+        &s,
+        &format!(
+            "SELECT (geof:aggUnion(?w) AS ?u) WHERE {{ VALUES ?w {{ {} {} }} }}",
+            "\"<http://www.opengis.net/def/crs/EPSG/0/2154> POINT(650000 6860000)\"^^geo:wktLiteral",
+            wkt("POINT(2.35 48.85)")
+        ),
+    );
+    assert_eq!(r[0][0], "", "{r:?}");
+}
+
+// SPARQL aggregate error semantics: a value that is not a geometry makes its group's
+// union unbound (as a non-number does to SUM); other groups are unaffected, and
+// nothing panics.
+#[test]
+fn agg_union_over_a_non_geometry_is_unbound() {
+    let s = ts();
+    load(&s, PARCELS);
+    load(
+        &s,
+        r#"
+        ex:x ex:region ex:broken ; geo:hasGeometry ex:gx .
+        ex:gx geo:asWKT "POLYGON((this is not wkt))"^^geo:wktLiteral .
+        ex:y ex:region ex:broken ; geo:hasGeometry ex:gy .
+        ex:gy geo:asWKT "POINT(1 1)"^^geo:wktLiteral .
+        ex:z ex:region ex:odd ; geo:hasGeometry ex:gz .
+        ex:gz geo:asWKT 42 .
+        ex:q ex:region ex:json ; geo:hasGeometry ex:gq .
+        ex:gq geo:asWKT '{"type":"Point"}'^^geo:geoJSONLiteral .
+    "#,
+    );
+    let r = sel(
+        &s,
+        "SELECT ?region (geof:aggUnion(?w) AS ?u) WHERE { ?f ex:region ?region ; geo:hasGeometry/geo:asWKT ?w }
+         GROUP BY ?region ORDER BY ?region",
+    );
+    let by: std::collections::BTreeMap<String, String> = r
+        .into_iter()
+        .map(|row| (row[0].clone(), row[1].clone()))
+        .collect();
+    assert_eq!(by.len(), 5, "{by:?}");
+    for bad in ["broken", "odd", "json"] {
+        assert_eq!(
+            by[&format!("<http://example.org/{bad}>")],
+            "",
+            "{bad}: {by:?}"
+        );
+    }
+    assert!(
+        by["<http://example.org/north>"].contains("POLYGON"),
+        "{by:?}"
+    );
+    assert!(
+        by["<http://example.org/south>"].contains("POLYGON"),
+        "{by:?}"
+    );
+}
+
+// Every path a query can take. On an accelerated store the aggregate is declined by
+// the subject shards and the columnar copy — neither can evaluate it — and answered
+// by the full in-memory copy, with byte-identical results to the engine alone; a
+// repeated query is a cache hit with the same answer.
+#[test]
+fn agg_union_takes_every_query_path() {
+    let queries = [
+        "SELECT (geof:aggUnion(?w) AS ?u) WHERE { ?g geo:asWKT ?w }",
+        "SELECT ?region (geof:aggUnion(?w) AS ?u) WHERE { ?f ex:region ?region ; geo:hasGeometry ?g . ?g geo:asWKT ?w } GROUP BY ?region",
+        "SELECT (geof:area(geof:aggUnion(?w)) AS ?a) (COUNT(?w) AS ?n) WHERE { ?g geo:asWKT ?w }",
+        "SELECT ?u WHERE { { SELECT (geof:aggUnion(?w) AS ?u) WHERE { ?g geo:asWKT ?w } } FILTER(geof:sfIntersects(?u, \"POINT(1 1)\"^^geo:wktLiteral)) }",
+    ];
+    let fast = accelerated();
+    load(&fast, PARCELS);
+    let plain = engine_only();
+    load(&plain, PARCELS);
+    // The first query after the load builds the copies.
+    let _ = fast.query("SELECT ?s WHERE { ?s ?p ?o } LIMIT 1").unwrap();
+    let before = fast.telemetry().summary().queries.by_served;
+    for q in queries {
+        let q = format!("{GEO_PFX}\n{q}");
+        let mut a = solutions(fast.query(&q).unwrap());
+        let mut b = solutions(plain.query(&q).unwrap());
+        a.sort();
+        b.sort();
+        assert!(!a.is_empty(), "{q}");
+        assert_eq!(a, b, "accelerated vs engine: {q}");
+    }
+    let by = &fast.telemetry().summary().queries.by_served;
+    let served =
+        |exit: &str| by.get(exit).copied().unwrap_or(0) - before.get(exit).copied().unwrap_or(0);
+    assert_eq!(
+        served("shards"),
+        0,
+        "the shards cannot merge a union: {by:?}"
+    );
+    assert_eq!(
+        served("columnar"),
+        0,
+        "the columnar copy has no custom aggregates: {by:?}"
+    );
+    assert_eq!(
+        served("full_copy"),
+        queries.len() as u64,
+        "the full copy evaluates the aggregate: {by:?}"
+    );
+    let by = &plain.telemetry().summary().queries.by_served;
+    assert_eq!(
+        by.get("engine").copied().unwrap_or(0),
+        queries.len() as u64,
+        "{by:?}"
+    );
+
+    // The result cache.
+    let cached = open_triplestore::store::TripleStore::in_memory()
+        .unwrap()
+        .with_query_cache(true, 16, 1000)
+        .with_parallel_query(false, 1, 0);
+    load(&cached, PARCELS);
+    let q = format!("{GEO_PFX}\n{}", queries[1]);
+    let mut first = solutions(cached.query(&q).unwrap());
+    let mut second = solutions(cached.query(&q).unwrap());
+    first.sort();
+    second.sort();
+    assert_eq!(first, second);
+    let by = &cached.telemetry().summary().queries.by_served;
+    assert_eq!(by.get("cache_hit").copied().unwrap_or(0), 1, "{by:?}");
+}
+
+// The trap a text-blind shard planner falls into: parsed without the aggregate, the
+// sub-select looks like a row-local BIND over one triple pattern, so COUNT(*) over it
+// would be summed across the shards — one union per shard, counted four times. The
+// shared parser knows the aggregate, so the planner declines.
+#[test]
+fn agg_union_is_not_decomposed_across_shards() {
+    let fast = accelerated();
+    load(&fast, PARCELS);
+    let _ = fast.query("SELECT ?s WHERE { ?s ?p ?o } LIMIT 1").unwrap();
+    let q = format!(
+        "{GEO_PFX}\nSELECT (COUNT(*) AS ?n) WHERE {{ {{ SELECT (geof:aggUnion(?w) AS ?u) WHERE {{ ?g geo:asWKT ?w }} }} }}"
+    );
+    let r = solutions(fast.query(&q).unwrap());
+    assert_eq!(
+        r,
+        vec![vec![Some(
+            "\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>".to_string()
+        )]],
+        "one union, counted once"
+    );
+}
+
+// An UPDATE whose WHERE aggregates, and a scoped query, go through the same parser.
+#[test]
+fn agg_union_in_update_and_scoped_query() {
+    let s = ts();
+    load(&s, PARCELS);
+    s.update(&format!(
+        "{GEO_PFX}\nINSERT {{ ?region ex:footprint ?u }} WHERE {{
+            SELECT ?region (geof:aggUnion(?w) AS ?u)
+            WHERE {{ ?f ex:region ?region ; geo:hasGeometry/geo:asWKT ?w }}
+            GROUP BY ?region
+        }}"
+    ))
+    .unwrap();
+    let r = sel(
+        &s,
+        "SELECT ?region (geof:area(?u) AS ?a) WHERE { ?region ex:footprint ?u } ORDER BY ?region",
+    );
+    assert_eq!(r.len(), 2, "{r:?}");
+    assert!((extract_f64(&r[0][1]) - 6.0).abs() < 1e-9, "{r:?}");
+    let g = "http://example.org/parcels";
+    s.load_str(
+        &format!("{TTL_PREFIXES}{PARCELS}"),
+        RdfFormat::Turtle,
+        Some(g),
+    )
+    .unwrap();
+    let scoped = s
+        .query_scoped(
+            &format!(
+                "{GEO_PFX}\nSELECT ?region (geof:area(geof:aggUnion(?w)) AS ?a) WHERE {{ ?f ex:region ?region ; geo:hasGeometry/geo:asWKT ?w }} GROUP BY ?region ORDER BY ?region"
+            ),
+            &[g.to_string()],
+        )
+        .unwrap();
+    let rows = solutions(scoped);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(
+        (extract_f64(rows[0][1].as_deref().unwrap_or("")) - 6.0).abs() < 1e-9,
+        "{rows:?}"
     );
 }

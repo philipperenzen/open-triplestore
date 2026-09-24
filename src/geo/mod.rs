@@ -1,3 +1,4 @@
+pub mod aggregates;
 pub mod crs;
 pub mod datatypes;
 pub mod functions;

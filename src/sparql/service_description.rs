@@ -126,6 +126,8 @@ pub fn generate(
         };
         desc.push_str(&format!("        geof:{}{}\n", func, sep));
     }
+    // GeoSPARQL aggregates (SPARQL 1.1 Service Description `sd:extensionAggregate`).
+    desc.push_str("    sd:extensionAggregate geof:aggUnion ;\n");
 
     // Dataset description
     desc.push_str(&format!(
@@ -207,6 +209,29 @@ mod tests {
         assert!(desc.contains("geof:sfContains"));
         assert!(desc.contains("geof:distance"));
         assert!(desc.contains("geof:asGeoJSON"));
+        assert!(desc.contains("sd:extensionAggregate geof:aggUnion"));
+    }
+
+    /// The advertised aggregate is one the engine registers, and the whole
+    /// description is Turtle that parses.
+    #[test]
+    fn advertised_aggregate_is_registered_and_the_description_parses() {
+        let aggregates: Vec<String> = crate::geo::aggregates::all_aggregates()
+            .into_iter()
+            .map(|(iri, _)| iri.as_str().to_string())
+            .collect();
+        assert!(aggregates
+            .contains(&"http://www.opengis.net/def/function/geosparql/aggUnion".to_string()));
+        let desc = generate(3, &[("http://example.org/g", 1)], &[], true);
+        let store = oxigraph::store::Store::new().unwrap();
+        store
+            .load_from_slice(
+                oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::Turtle)
+                    .with_base_iri("http://localhost/sparql")
+                    .unwrap(),
+                &desc,
+            )
+            .unwrap_or_else(|e| panic!("service description must be Turtle: {e}\n{desc}"));
     }
 
     /// Every advertised `geof:` function is one the engine registers.

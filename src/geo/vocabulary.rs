@@ -151,6 +151,10 @@ pub const METRIC_BUFFER: &str = "http://www.opengis.net/def/function/geosparql/m
 
 pub const AS_GEOJSON: &str = "http://www.opengis.net/def/function/geosparql/asGeoJSON";
 
+// ─── Aggregate function IRIs (GeoSPARQL 1.1) ───
+
+pub const AGG_UNION: &str = "http://www.opengis.net/def/function/geosparql/aggUnion";
+
 // ─── Spatial Measure Units ───
 
 pub const METRE: &str = "http://www.opengis.net/def/uom/OGC/1.0/metre";

@@ -14,6 +14,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`geof:aggUnion`, the GeoSPARQL 1.1 spatial aggregate.** A real SPARQL
+  aggregate: `SELECT ?k (geof:aggUnion(?geom) AS ?u) … GROUP BY ?k` folds each
+  group's geometries into their union (GEOS unary union), one
+  `geo:wktLiteral` — with or without `GROUP BY`, in `HAVING`, in sub-selects
+  and in the `WHERE` of an update, over WKT, GML and GeoJSON alike. A group in
+  one CRS keeps it; a group mixing CRSs is unioned in CRS84. It follows
+  SPARQL's aggregate error rules (a value that is not a geometry makes the
+  group's union unbound, as a non-number does to `SUM`), the union of no
+  geometries is `GEOMETRYCOLLECTION EMPTY`, and the result does not depend on
+  the order the solutions arrive in. `geof:aggUnion(DISTINCT ?g)` does not
+  parse — spargebra takes no `DISTINCT` in a custom aggregate's call — and
+  would change nothing: a union absorbs duplicates. Every parse of a query
+  now goes through one parser that knows the aggregate (`opengraph::sparql_parser`, fed by a
+  registry the store fills when it opens): undeclared, `geof:aggUnion(?g)` read
+  as a plain function call — a syntax error under `GROUP BY`, and on the
+  accelerator's planners a different query, a row-local `BIND` that a
+  surrounding `COUNT` could have summed across the subject shards. The shards
+  and the columnar copy decline the aggregate; the full in-memory copy and the
+  engine evaluate it. The service description advertises it as
+  `sd:extensionAggregate`. It was a tracked gap.
 - **The GeoSPARQL 1.1 metric functions** — `geof:metricDistance`,
   `metricLength`, `metricPerimeter`, `metricArea` and `metricBuffer` — measure in
   metres (square metres) on the WGS84 ellipsoid whatever CRS the operand is
