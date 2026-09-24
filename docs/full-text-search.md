@@ -21,7 +21,7 @@ LIMIT 20
 `(?subject ?score) ft:search("query" [<predicate-iri>] [limit])` binds `?subject` to matching subjects and `?score` to their BM25 relevance. The optional second argument restricts matching to one predicate, and the optional third caps the number of subjects returned (default 10):
 
 ```sparql
-(?s ?score) ft:search("waalbrug" <http://www.w3.org/2000/01/rdf-schema#label> 20) .
+(?s ?score) ft:search("bridge" <http://www.w3.org/2000/01/rdf-schema#label> 20) .
 ```
 
 The pattern is rewritten into a `VALUES` clause before the query reaches the SPARQL engine, so it is not a join over the store — it is a bounded list of subjects the rest of the pattern then constrains. Two consequences worth knowing:

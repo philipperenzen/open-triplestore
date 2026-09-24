@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn rd_to_wgs84_nijmegen() {
-        // Waalbrug Boog-Noord, RD POINT(187420 428470) → near Nijmegen (~51.85, ~5.86).
+        // An RD New point in Nijmegen, POINT(187420 428470) → (~51.85, ~5.86).
         let (lon, lat) = transform_xy(Crs::RdNew, Crs::Wgs84, 187420.0, 428470.0).unwrap();
         assert!((lat - 51.85).abs() < 0.05, "lat {lat}");
         assert!((lon - 5.86).abs() < 0.05, "lon {lon}");

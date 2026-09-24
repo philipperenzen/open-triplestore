@@ -1,0 +1,11 @@
+# ❌ A bridge with no def:Arch fails sh:qualifiedMinCount on ex:BridgeStructureShape.
+@prefix def: <https://example.org/def/> .
+@prefix eb:  <https://example.org/id/example-bridge/> .
+@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+@prefix bot: <https://w3id.org/bot#> .
+eb:CulvertAsBridge a def:Bridge ;
+    bot:containsElement eb:Deck , eb:Abutment-North ;   # no def:Arch
+    geo:hasGeometry [ a geo:Geometry ;
+        geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(185820 427330)"^^geo:wktLiteral ] .
+eb:Deck a def:Deck .
+eb:Abutment-North a def:Abutment .

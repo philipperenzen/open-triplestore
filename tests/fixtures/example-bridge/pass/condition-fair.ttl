@@ -1,0 +1,8 @@
+# Rule NEGATIVE — a bridge over water with only cs3 parts must NOT infer a priority.
+@prefix def: <https://example.org/def/> .
+@prefix eb:  <https://example.org/id/example-bridge/> .
+@prefix bot: <https://w3id.org/bot#> .
+@prefix skos:<http://www.w3.org/2004/02/skos/core#> .
+eb:FairBridge a def:Bridge ; def:crossesWaterway eb:ExampleRiver ; bot:containsElement eb:FairPart .
+eb:FairPart a def:BridgeComponent ; def:conditionScore eb:cs3 .
+eb:cs3 a skos:Concept ; skos:notation "3" .

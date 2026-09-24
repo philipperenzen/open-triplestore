@@ -1,0 +1,10 @@
+# ❌ Four/five Core violations against the def:NavigableBridge shape.
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix def: <https://example.org/def/> .
+@prefix eb:  <https://example.org/id/example-bridge/> .
+eb:BadBridge a def:NavigableBridge ;
+    def:constructionYear "1962"^^xsd:integer ;  # wrong datatype (not gYear)
+    def:spanCount 0 ;                           # < minInclusive 1
+    def:movable "yes" .                         # not a boolean
+    # missing: geo:hasGeometry      -> minCount violation
+    # missing: def:clearanceHeight  -> minCount violation

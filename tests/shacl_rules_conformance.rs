@@ -384,7 +384,7 @@ fn triple_rule_binds_focus_node_in_object_position() {
 /// prologue the rule's `sh:prefixes` expands to must stay *before* `WITH`
 /// (SPARQL 1.1 Update grammar: `Prologue ( Update1 … )`, `WITH` being part of
 /// `Modify`), otherwise the update fails to parse and `infer` errors out. This
-/// is the `ex:PrioriteitRegel` shape of `tests/fixtures/waalbrug/shapes-af.ttl`.
+/// is the `ex:InspectionPriorityRule` shape of `tests/fixtures/example-bridge/shapes-af.ttl`.
 #[test]
 fn sparql_rule_with_prefixes_infers_into_single_named_graph() {
     let shapes = r#"

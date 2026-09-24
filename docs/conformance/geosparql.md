@@ -19,8 +19,8 @@ The OGC's own **GeoSPARQL 1.1 validator shapes** (54 shapes) and its **valid/inv
 example corpus** (48 files) are vendored under
 [`tests/fixtures/ogc-geosparql/`](../../tests/fixtures/ogc-geosparql/PROVENANCE.md) and run
 via [`tests/ogc_geosparql_shacl_roundtrip.rs`](../../tests/ogc_geosparql_shacl_roundtrip.rs)
-— **using this repo's native SHACL engine**, which closes the loop the implementation
-brief asked for: *GeoSPARQL data, validated by GeoSPARQL's own SHACL shapes, by our own
+— **using this repo's native SHACL engine**, which closes the loop:
+*GeoSPARQL data, validated by GeoSPARQL's own SHACL shapes, by our own
 validator.*
 
 ### Scorecard (2026-06-11)
@@ -30,7 +30,7 @@ validator.*
 | **Examples matching the OGC oracle** | **46** |
 | Known deviations (ratcheted) | 2 |
 | Total examples | 48 |
-| **Waalbrug dataset round-trip** | **conforms ✓** |
+| **Reference-example round-trip** ([`example-bridge`](../../tests/fixtures/example-bridge/)) | **conforms ✓** |
 
 Known deviations (same two-way ratchet as the W3C suite): two validator
 `sh:sparql` subtleties. The two node-level lexical-form/datatype deviations were

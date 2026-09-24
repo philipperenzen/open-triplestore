@@ -1146,10 +1146,10 @@ numbered line per data need (at most 6, each a short phrase), then immediately y
 line. The platform repeats your plan back to you each round so you can work through it; questions \
 answerable with one query need no plan.\n\
 Search by name with the full-text index, not by scanning. The platform indexes every literal and \
-exposes it as a magic property: `(?s ?score) text:search (\"waalbrug\" 20) .` binds ?s to the 20 \
+exposes it as a magic property: `(?s ?score) text:search (\"bridge\" 20) .` binds ?s to the 20 \
 best-matching subjects and ?score to their relevance, already restricted to the graphs you may read. \
 Narrow it to one predicate with a second argument: \
-`(?s ?score) text:search (\"waalbrug\" <http://www.w3.org/2000/01/rdf-schema#label> 20) .` \
+`(?s ?score) text:search (\"bridge\" <http://www.w3.org/2000/01/rdf-schema#label> 20) .` \
 Reach for it whenever the user is LOOKING FOR something by name or keyword and you do not know the \
 IRI — it is ranked and indexed, where `FILTER(CONTAINS(…))` reads every literal in scope. Keep \
 `FILTER(CONTAINS(…))` for narrowing a set you are already matching on. Always pair a text:search with \
@@ -1195,7 +1195,7 @@ name, or an IRI's distinguishing tail segments (e.g. `viewer-3d-demo/building`),
 platform builds the features from your rows. The source:\"query\" forms (chart and map) are ONLY \
 valid after a successful `SPARQL:` round THIS turn — with no query they render an error card. \
 Inline form for hand-stated features: \
-{\"features\":[{\"label\":\"Waalbrug\",\"wkt\":\"POINT(5.8645 51.8519)\",\"iri\":\"http://…\"}]}. \
+{\"features\":[{\"label\":\"Example Bridge\",\"wkt\":\"POINT(4.9 52.37)\",\"iri\":\"http://…\"}]}. \
 WKT must be WGS84 with longitude before latitude. Prefer points or centroids; skip geometries whose WKT \
 was truncated. When elements have 3D model files, add \"models\":[{\"label\":\"…\",\"url\":\"…\",\
 \"wkt\":\"POINT(lon lat)\"}] to place those models on the map at their anchor — the map then renders \
@@ -3509,7 +3509,7 @@ const ANCHOR_STOPWORDS: &[&str] = &[
 ];
 
 /// Ordinary content words from the question worth anchoring in the full-text
-/// index — the complement of [`evidence_terms`]: "beheerobject" or "waalbrug"
+/// index — the complement of [`evidence_terms`]: "beheerobject" or "draaibrug"
 /// rather than identifier-shaped tokens. `exclude` (the identifier terms) and
 /// the stopword list keep the few slots for words that name DOMAIN things.
 fn salient_terms(text: &str, exclude: &[String], cap: usize) -> Vec<String> {
@@ -5018,7 +5018,7 @@ mod tests {
             "<http://www.opengis.net/def/crs/EPSG/0/4326> POLYGON((0 0, 1 0, 1 1, 0 0))"
         ));
         assert!(looks_like_wkt("  MULTIPOLYGON(((0 0,1 0,1 1,0 0)))"));
-        assert!(!looks_like_wkt("Waalbrug"));
+        assert!(!looks_like_wkt("Voorbeeldbrug"));
         assert!(!looks_like_wkt("http://example.org/bridge/1"));
         // Multi-byte content must not panic the prefix check.
         assert!(!looks_like_wkt("héllo wörld"));
@@ -5052,13 +5052,13 @@ mod tests {
                 ok: true,
                 error: None,
                 columns: Some(vec!["name".into(), "count".into()]),
-                rows: Some(vec![vec!["Waalbrug".into(), "3".into()]]),
+                rows: Some(vec![vec!["Voorbeeldbrug".into(), "3".into()]]),
                 truncated: false,
             },
         ];
         let s = fallback_answer(&runs);
         assert!(s.contains("| name | count |"), "markdown header: {s}");
-        assert!(s.contains("| Waalbrug | 3 |"), "row: {s}");
+        assert!(s.contains("| Voorbeeldbrug | 3 |"), "row: {s}");
         assert!(
             !s.to_uppercase().contains("SPARQL:"),
             "no directive leaks: {s}"
@@ -5519,21 +5519,21 @@ The pattern above checks whether any triple exists.";
         let iris: Vec<String> = Vec::new();
         let terms = salient_terms(
             "ik zoek alle beheerobject types uit de dataset met hun labels en relaties \
-             rond de waalbrug",
+             rond de voorbeeldbrug",
             &iris,
             4,
         );
         assert_eq!(
             terms,
-            vec!["beheerobject".to_string(), "waalbrug".to_string()],
+            vec!["beheerobject".to_string(), "voorbeeldbrug".to_string()],
             "function words, and meta words like types/labels/relaties/dataset, never \
              take an anchor slot"
         );
         // Fragments of an identifier evidence_terms already anchors are not
         // re-anchored as words.
-        let exclude = vec!["waalbrug-01".to_string()];
+        let exclude = vec!["voorbeeldbrug-01".to_string()];
         assert_eq!(
-            salient_terms("zoek waalbrug-01 documenten", &exclude, 4),
+            salient_terms("zoek voorbeeldbrug-01 documenten", &exclude, 4),
             vec!["documenten".to_string()]
         );
     }
@@ -5542,8 +5542,8 @@ The pattern above checks whether any triple exists.";
         let store = crate::store::TripleStore::in_memory().unwrap();
         store
             .load_str(
-                r#"<http://ex.org/id/waalbrug> <http://ex.org/def/naam> "Waalbrug" .
-                   <http://ex.org/id/waalbrug> a <http://ex.org/def/Brug> ."#,
+                r#"<http://ex.org/id/voorbeeldbrug> <http://ex.org/def/naam> "Voorbeeldbrug" .
+                   <http://ex.org/id/voorbeeldbrug> a <http://ex.org/def/Brug> ."#,
                 oxigraph::io::RdfFormat::Turtle,
                 Some("urn:test:bridges"),
             )
@@ -5555,10 +5555,10 @@ The pattern above checks whether any triple exists.";
     fn iri_occurrence_probes_cover_every_position_and_graphs() {
         let store = orientation_store();
         for real in [
-            "http://ex.org/id/waalbrug", // subject
-            "http://ex.org/def/naam",    // predicate
-            "http://ex.org/def/Brug",    // object
-            "urn:test:bridges",          // named graph
+            "http://ex.org/id/voorbeeldbrug", // subject
+            "http://ex.org/def/naam",         // predicate
+            "http://ex.org/def/Brug",         // object
+            "urn:test:bridges",               // named graph
         ] {
             assert!(iri_occurs_blocking(&store, real), "{real} must be found");
         }
@@ -5569,7 +5569,7 @@ The pattern above checks whether any triple exists.";
     fn locating_a_pasted_iri_names_only_readable_graphs() {
         let store = orientation_store();
         let iris = vec![
-            "http://ex.org/id/waalbrug".to_string(),
+            "http://ex.org/id/voorbeeldbrug".to_string(),
             "http://ex.org/def/Brug".to_string(),
             "http://ex.org/def/Verzonnen".to_string(),
         ];
@@ -5824,11 +5824,11 @@ The pattern above checks whether any triple exists.";
         assert_eq!(calls[0].arguments["query"], "ASK { ?s ?p ?o }");
         // Lenient shape: a gateway that inlines the arguments object.
         let inline = json!({"tool_calls": [
-            {"id": "c2", "function": {"name": "text_search", "arguments": {"query": "waalbrug"}}}
+            {"id": "c2", "function": {"name": "text_search", "arguments": {"query": "voorbeeldbrug"}}}
         ]});
         assert_eq!(
             extract_tool_calls(&inline)[0].arguments["query"],
-            "waalbrug"
+            "voorbeeldbrug"
         );
         // No calls, malformed entries: empty, never a panic.
         assert!(extract_tool_calls(&json!({"content": "hi"})).is_empty());

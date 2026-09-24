@@ -777,7 +777,7 @@ mod tests {
         // and a candidate set that misses it is not safe to restrict a query.
         let (_d, idx) = indexed(&[
             ("http://ex.org/a", LABEL, "urn:g", "Drawbridge"),
-            ("http://ex.org/b", LABEL, "urn:g", "Waalbrug"),
+            ("http://ex.org/b", LABEL, "urn:g", "Voorbeeldbrug"),
         ]);
 
         let got = idx
@@ -802,18 +802,18 @@ mod tests {
     #[test]
     fn substring_search_honours_case_and_anchor() {
         let (_d, idx) = indexed(&[
-            ("http://ex.org/a", LABEL, "urn:g", "Waalbrug"),
+            ("http://ex.org/a", LABEL, "urn:g", "Voorbeeldbrug"),
             (
                 "http://ex.org/b",
                 LABEL,
                 "urn:g",
-                "de waalbrug bij Nijmegen",
+                "de voorbeeldbrug over de rivier",
             ),
         ]);
 
         let sensitive = idx
             .search_substring(
-                "Waalbrug",
+                "Voorbeeldbrug",
                 MatchAnchor::Anywhere,
                 MatchCase::Sensitive,
                 GraphScope::All,
@@ -823,7 +823,7 @@ mod tests {
 
         let insensitive = idx
             .search_substring(
-                "waalbrug",
+                "voorbeeldbrug",
                 MatchAnchor::Anywhere,
                 MatchCase::Insensitive,
                 GraphScope::All,
@@ -833,7 +833,7 @@ mod tests {
 
         let prefix = idx
             .search_substring(
-                "Waalbrug",
+                "Voorbeeldbrug",
                 MatchAnchor::Prefix,
                 MatchCase::Sensitive,
                 GraphScope::All,

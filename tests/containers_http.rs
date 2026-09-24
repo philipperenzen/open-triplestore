@@ -25,7 +25,7 @@ fn sample_icdd() -> Vec<u8> {
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:ct="{CT}">
   <ct:ContainerDescription rdf:about="urn:icdd:bridge-handover">
-    <ct:description>Handover of the Waalbrug inspection</ct:description>
+    <ct:description>Handover of the bridge inspection</ct:description>
     <ct:conformanceIndicator>ICDD-Part1-Container</ct:conformanceIndicator>
     <ct:publishedBy><ct:Party rdf:about="urn:party:rws"><ct:name>Rijkswaterstaat</ct:name></ct:Party></ct:publishedBy>
     <ct:containsDocument>
@@ -47,7 +47,7 @@ fn sample_icdd() -> Vec<u8> {
     let links = format!(
         "@prefix ls: <{LS}> .\n<urn:icdd:link:1> a ls:Link ; ls:hasLinkElement [ a ls:LinkElement ; ls:hasDocument <urn:icdd:doc:report> ] , [ a ls:LinkElement ; ls:hasDocument <urn:icdd:doc:norm> ] .\n"
     );
-    let data = "<urn:asset:waalbrug> a <urn:Bridge> ; <urn:span> 244 .\n";
+    let data = "<urn:asset:bridge-1> a <urn:Bridge> ; <urn:span> 120 .\n";
     let mut buf = Vec::new();
     {
         let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
@@ -186,7 +186,7 @@ async fn icdd_container_imports_exports_and_round_trips() {
     let r: Value = serde_json::from_str(&txt).unwrap();
     assert_eq!(r["profile"], "icdd");
     assert_eq!(r["container"], "urn:icdd:bridge-handover");
-    assert_eq!(r["description"], "Handover of the Waalbrug inspection");
+    assert_eq!(r["description"], "Handover of the bridge inspection");
     let docs = r["documents"].as_array().unwrap();
     let report = docs
         .iter()
@@ -220,7 +220,7 @@ async fn icdd_container_imports_exports_and_round_trips() {
     let (data_role, data_iri) = role_of("data.ttl").expect("payload graph");
     assert_eq!(data_role, "instances");
     assert!(ask(&format!(
-        "ASK {{ GRAPH <{data_iri}> {{ <urn:asset:waalbrug> <urn:span> 244 }} }}"
+        "ASK {{ GRAPH <{data_iri}> {{ <urn:asset:bridge-1> <urn:span> 120 }} }}"
     )));
     assert!(ask(&format!(
         "ASK {{ GRAPH <{links_iri}> {{ <urn:icdd:link:1> a <{LS}Link> }} }}"
@@ -319,7 +319,7 @@ async fn icdd_container_imports_exports_and_round_trips() {
         .to_string();
     assert!(
         ask(&format!(
-            "ASK {{ GRAPH <{data_b}> {{ <urn:asset:waalbrug> <urn:span> 244 }} }}"
+            "ASK {{ GRAPH <{data_b}> {{ <urn:asset:bridge-1> <urn:span> 120 }} }}"
         )),
         "{txt}"
     );
