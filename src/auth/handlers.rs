@@ -4204,8 +4204,12 @@ pub async fn list_dataset_commits(
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
     }
 
+    // Scope the commit log to the graphs this caller may READ: a viewer (or an
+    // anonymous caller on a public dataset) must not see private graphs' commit
+    // history (graph IRI, message, add/remove counts, actor). Writers still see
+    // every registered graph's provenance.
     let graphs = db
-        .list_dataset_graphs(&dataset_id)
+        .list_readable_dataset_graphs(user_id, &dataset)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let scope = crate::commit_log::CommitScope::Graphs(graphs);
     let mut commits = crate::commit_log::list_commits(&state.store, &scope, &params.to_query());

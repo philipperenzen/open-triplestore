@@ -4282,6 +4282,33 @@ impl AuthDb {
         Ok(entries)
     }
 
+    /// Graphs of `dataset` the caller may read: all of them for a writer
+    /// (owner / maintainer / admin), non-private ones for everyone else
+    /// (a viewer, or an anonymous caller on a public dataset).
+    ///
+    /// This is the read-scope companion to [`list_dataset_graphs`], which
+    /// returns the *raw* registration list and therefore leaks private-graph
+    /// content when a read handler scopes on it after only checking dataset
+    /// access. It applies the exact rule the `GET /api/datasets/:id/graphs`
+    /// handler uses. Errors propagate (a lookup failure is surfaced, never
+    /// swallowed into an empty or full list).
+    pub fn list_readable_dataset_graphs(
+        &self,
+        user_id: Option<&str>,
+        dataset: &Dataset,
+    ) -> anyhow::Result<Vec<String>> {
+        let can_see_private = self
+            .effective_dataset_role(user_id, dataset)?
+            .map(|r| r.can_write())
+            .unwrap_or(false);
+        Ok(self
+            .list_dataset_graph_entries(&dataset.id)?
+            .into_iter()
+            .filter(|e| can_see_private || !e.private)
+            .map(|e| e.graph_iri)
+            .collect())
+    }
+
     /// Return the distinct, non-null `graph_role` values for every dataset that
     /// has at least one role-tagged graph, keyed by `dataset_id`. Used to show
     /// the mix of roles a dataset contains on the datasets list. Roles are
