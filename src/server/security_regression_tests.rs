@@ -771,6 +771,15 @@ mod tests {
             .unwrap();
         let tok = token("u1", "user", "user"); // JWT session: write_access, but no graph grants
 
+        // Read grants only: a pipeline's scope must be readable by its author, so
+        // with read in hand the refusal below can come only from the write gate.
+        for (id, graph) in [("r1", "urn:victim:data"), ("r2", "urn:my:data")] {
+            state
+                .auth_db
+                .grant_graph_permission(id, graph, "user", "u1", "read", "adm")
+                .unwrap();
+        }
+
         // run_inference materialises in place + writes a chosen target graph the user can't write.
         let attack = r#"{"name":"evil","visibility":"private","run_inference":true,
             "inferred_target":"new_graph","inferred_target_graph":"urn:victim:secret",
@@ -779,8 +788,8 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN,
             "a non-admin must not create an inference/write pipeline targeting a graph they cannot write");
 
-        // Positive control: a read-only pipeline (no inference, no explicit write target) is fine,
-        // so the gate doesn't break the ordinary validate-only case.
+        // Positive control: a read-only pipeline (no inference, no explicit write target) over a
+        // graph the user may read is fine, so the gate doesn't break the ordinary validate-only case.
         let benign = r#"{"name":"ok","visibility":"private","graph_iris":["urn:my:data"]}"#;
         let status = create_pipeline(test_app(state), &tok, benign).await;
         assert_eq!(
