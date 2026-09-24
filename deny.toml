@@ -22,10 +22,11 @@ ignore = [
     "RUSTSEC-2026-0104",  # rustls-webpki 0.101 — panic parsing a CRL (via tiberius)
     "RUSTSEC-2025-0134",  # rustls-pemfile — unmaintained (via tiberius)
     # quick-xml 0.37.5 DoS advisories. The fix is in quick-xml >= 0.41, but the vulnerable
-    # 0.37.5 is pinned transitively by the Oxigraph stack (oxrdfxml / sparesults, via
-    # oxigraph 0.4.11) — bumping our own direct `quick-xml` dep would leave Oxigraph's copy
-    # in the tree, so the advisory can't clear until Oxigraph upgrades. Tracked; revisit on
-    # the next Oxigraph bump.
+    # 0.37.5 is pinned transitively by the Oxigraph stack (oxrdfxml / sparesults) — bumping
+    # our own direct `quick-xml` dep would leave Oxigraph's copy in the tree, so the
+    # advisory can't clear until Oxigraph upgrades. Re-checked on the oxigraph 0.5.11 bump:
+    # oxrdfxml 0.2.4 and sparesults 0.3.4 still require quick-xml 0.37, and 0.37.5 is the
+    # last 0.37.x. Revisit on the next Oxigraph bump.
     "RUSTSEC-2026-0194",  # quick-xml — quadratic duplicate-attribute check (via oxigraph)
     "RUSTSEC-2026-0195",  # quick-xml — NsReader namespace-decl memory-exhaustion (via oxigraph)
 ]
