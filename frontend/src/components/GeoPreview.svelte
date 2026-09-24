@@ -10,7 +10,8 @@
   import { isDark } from '../lib/theme.js';
   import { geometryCoords } from '../lib/ontology/valueType.js';
   import { parseWktAsWgs84 } from '../lib/viewer/crs';
-  import { leafletTiles } from '../lib/viewer/basemaps';
+  import { ofmLeafletLayer } from '../lib/viewer/leafletOfm';
+  import { DARK, LIGHT } from '../lib/viewer/ofmRaster';
   import { creditHtml, is3dbagUrl, THREEDBAG_CREDIT } from '../lib/viewer/attribution';
 
   export let wkts = [];
@@ -70,12 +71,13 @@
     .map(w => parseWktAsWgs84(w))
     .filter(Boolean);
 
-  // Tiles follow the app theme (light OSM / dark Carto) and swap live.
+  // Tiles are OpenFreeMap's, drawn in the browser in the app's theme (light or
+  // dark), and swap live. Keyless: CARTO watermarks keyless tiles, and the
+  // OpenStreetMap tile servers refuse app traffic.
   const unsubTheme = isDark.subscribe((dark) => {
     if (!map) return;
     if (tiles) tiles.remove();
-    const t = leafletTiles(dark);
-    tiles = L.tileLayer(t.url, { maxZoom: 19, attribution: t.attribution }).addTo(map);
+    tiles = ofmLeafletLayer(dark ? DARK : LIGHT).addTo(map);
   });
 
   const toLatLng = (coords) => coords.map(([lng, lat]) => [lat, lng]);
@@ -157,12 +159,12 @@
   }
 
   // Leaflet is a bundled npm dependency (was: CDN-loaded at runtime), so the
-  // map works offline and under a strict CSP; only the OSM tiles need network.
+  // map works offline and under a strict CSP; only the OpenFreeMap tiles need
+  // network.
   function initMap() {
     try {
       map = L.map(mapEl, { scrollWheelZoom: false, attributionControl: true });
-      const t = leafletTiles($isDark);
-      tiles = L.tileLayer(t.url, { maxZoom: 19, attribution: t.attribution }).addTo(map);
+      tiles = ofmLeafletLayer($isDark ? DARK : LIGHT).addTo(map);
       observeSize();
     } catch (_) {
       failed = true;

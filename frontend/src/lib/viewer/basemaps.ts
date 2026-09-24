@@ -4,8 +4,8 @@
 // detailed, no API key). Streets, dark theme — a compact custom style over the
 // same OpenFreeMap vector tiles: a midnight-blue base that keeps *colour*
 // (teal water, green parks, amber motorways, warm road hierarchy) instead of
-// the usual grayscale dark map. Satellite — Esri World Imagery (+ reference
-// labels at low zoom), available in both themes. The vector styles get an OSM
+// the usual grayscale dark map. Satellite — Esri World Imagery, in both
+// themes, only when the deployment configures an Esri API key. The vector styles get an OSM
 // 3D-building fill-extrusion layer so models stand in a real cityscape.
 
 import type { StyleSpecification, LayerSpecification, Map as MlMap } from 'maplibre-gl';
@@ -229,36 +229,47 @@ export function darkStyle(): StyleSpecification {
   };
 }
 
-/** Esri World Imagery, with reference labels up to mid zooms. Theme-agnostic. */
-export function satelliteStyle(): StyleSpecification {
+/**
+ * Esri World Imagery through ArcGIS Location Platform, with the deployment's
+ * own API key (`runtimeBasemaps.esriApiKey`). Esri's terms tie the imagery to
+ * an account and key, so without one there is no satellite basemap.
+ */
+export function esriImageryUrl(apiKey: string): string {
+  return `https://ibasemaps-api.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}?token=${encodeURIComponent(apiKey)}`;
+}
+
+/** Esri World Imagery (needs `esriApiKey`). Theme-agnostic. */
+export function satelliteStyle(esriApiKey: string): StyleSpecification {
   return {
     version: 8,
     glyphs: OFM_GLYPHS, // the viewer's own symbol layers need glyphs
     sources: {
       'esri-imagery': {
         type: 'raster',
-        tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+        tiles: [esriImageryUrl(esriApiKey)],
         tileSize: 256,
         maxzoom: 19,
         attribution: ESRI_ATTRIBUTION,
       },
-      'esri-reference': {
-        type: 'raster',
-        tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'],
-        tileSize: 256,
-        maxzoom: 12,
-      },
     },
-    layers: [
-      { id: 'imagery', type: 'raster', source: 'esri-imagery' },
-      { id: 'reference', type: 'raster', source: 'esri-reference', maxzoom: 14, paint: { 'raster-opacity': 0.9 } },
-    ],
+    layers: [{ id: 'imagery', type: 'raster', source: 'esri-imagery' }],
   };
 }
 
-/** The style for a basemap/theme combination. */
-export function styleFor(kind: BasemapKind, dark: boolean): StyleSpecification | string {
-  if (kind === 'satellite') return satelliteStyle();
+/** The basemap to show: satellite only when a key makes it available. */
+export function effectiveBasemap(kind: BasemapKind, esriApiKey: string | null): BasemapKind {
+  return kind === 'satellite' && esriApiKey ? 'satellite' : 'streets';
+}
+
+/** The style for a basemap/theme combination (streets without an Esri key). */
+export function styleFor(
+  kind: BasemapKind,
+  dark: boolean,
+  esriApiKey: string | null = null,
+): StyleSpecification | string {
+  if (effectiveBasemap(kind, esriApiKey) === 'satellite' && esriApiKey) {
+    return satelliteStyle(esriApiKey);
+  }
   return dark ? darkStyle() : LIGHT_STYLE_URL;
 }
 
@@ -329,22 +340,4 @@ export function add3dBuildings(map: MlMap, dark: boolean): string | null {
     firstSymbol
   );
   return BUILDINGS_LAYER_ID;
-}
-
-/** Raster tile sources for the lightweight Leaflet previews (GeoPreview),
- *  themed to match the MapLibre styles above. */
-export function leafletTiles(dark: boolean): { url: string; attribution: string } {
-  return dark
-    ? {
-        url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-        attribution:
-          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
-      }
-    : {
-        // Carto Voyager, not tile.openstreetmap.org — the OSM tile policy 403s
-        // app/localhost traffic, which broke the light preview basemap.
-        url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
-        attribution:
-          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
-      };
 }

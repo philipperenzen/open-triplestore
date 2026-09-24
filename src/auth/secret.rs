@@ -157,4 +157,24 @@ mod tests {
         // Different nonces → different ciphertext
         assert_ne!(enc1, enc2);
     }
+
+    /// A blob written by this module under aes-gcm 0.11.0 — the stored form of
+    /// an OAuth client secret already in the database. Stored secrets must keep
+    /// decrypting across AES-GCM / HKDF / SHA-2 upgrades, and a flipped tag bit
+    /// must still be rejected (0.11.1 swapped the constant-time tag comparison
+    /// from `subtle` to `ctutils`).
+    #[test]
+    fn decrypts_a_blob_stored_before_an_upgrade() {
+        const JWT_SECRET: &str = "old-jwt-secret";
+        const BLOB: &str = "FYLUiBnEG8mXxQrOoecLRi57loRG5XqMMqlvJkJm3K/44FITMF59S8mEEHcrEiQm";
+        assert_eq!(
+            decrypt_secret(BLOB, JWT_SECRET).unwrap(),
+            "stored-client-secret"
+        );
+        assert!(decrypt_secret(BLOB, "other-jwt-secret").is_err());
+
+        let mut tampered = B64.decode(BLOB).unwrap();
+        *tampered.last_mut().unwrap() ^= 1;
+        assert!(decrypt_secret(&B64.encode(&tampered), JWT_SECRET).is_err());
+    }
 }
