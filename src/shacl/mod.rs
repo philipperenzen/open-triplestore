@@ -5,4 +5,4 @@ pub mod shapes;
 pub mod sparql_functions;
 pub(crate) mod view;
 
-pub use engine::{infer, validate};
+pub use engine::{infer, infer_into, validate};
