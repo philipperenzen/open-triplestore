@@ -917,7 +917,8 @@ impl AuthDb {
                 quads INTEGER,
                 source_kind TEXT,
                 run_index INTEGER,
-                data_graphs TEXT
+                data_graphs TEXT,
+                shapes_graphs TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_shacl_runs_dataset ON shacl_validation_runs(dataset_id);
             CREATE INDEX IF NOT EXISTS idx_shacl_runs_ts ON shacl_validation_runs(dataset_id, run_timestamp DESC);
@@ -1279,6 +1280,9 @@ impl AuthDb {
             // The graphs a validation run validated (a JSON array), so its
             // report goes only to who may read them all. NULL on older runs.
             "ALTER TABLE shacl_validation_runs ADD COLUMN data_graphs TEXT",
+            // The shapes graphs it validated against (a JSON array): its report
+            // names their shapes, paths and messages. NULL on older runs.
+            "ALTER TABLE shacl_validation_runs ADD COLUMN shapes_graphs TEXT",
             "ALTER TABLE datasets ADD COLUMN conforms_to_model TEXT",
             "ALTER TABLE datasets ADD COLUMN conforms_to_version TEXT",
             "ALTER TABLE datasets ADD COLUMN graph_role TEXT",
@@ -3628,15 +3632,47 @@ impl AuthDb {
         Ok(())
     }
 
-    /// Record the graphs validation run `run_id` validated (see
-    /// [`Self::get_validation_run_graphs`]).
-    pub fn set_validation_run_graphs(&self, run_id: &str, graphs: &[String]) -> anyhow::Result<()> {
+    /// Record the graphs validation run `run_id` validated, and the shapes
+    /// graphs it validated them against (see [`Self::get_validation_run_graphs`]
+    /// and [`Self::get_validation_run_shapes_graphs`]).
+    pub fn set_validation_run_graphs(
+        &self,
+        run_id: &str,
+        graphs: &[String],
+        shapes_graphs: &[String],
+    ) -> anyhow::Result<()> {
         let conn = self.pool.get()?;
         conn.execute(
-            "UPDATE shacl_validation_runs SET data_graphs = ?2 WHERE id = ?1",
-            params![run_id, serde_json::to_string(graphs)?],
+            "UPDATE shacl_validation_runs SET data_graphs = ?2, shapes_graphs = ?3 WHERE id = ?1",
+            params![
+                run_id,
+                serde_json::to_string(graphs)?,
+                serde_json::to_string(shapes_graphs)?
+            ],
         )?;
         Ok(())
+    }
+
+    /// The shapes graphs validation run `run_id` validated against, and so the
+    /// graphs whose shapes, paths and messages its report may carry. `None`
+    /// for a run stored before runs recorded them (or an unknown run).
+    pub fn get_validation_run_shapes_graphs(
+        &self,
+        run_id: &str,
+    ) -> anyhow::Result<Option<Vec<String>>> {
+        let conn = self.pool.get()?;
+        let stored: Option<Option<String>> = conn
+            .query_row(
+                "SELECT shapes_graphs FROM shacl_validation_runs WHERE id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        stored
+            .flatten()
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(Into::into)
     }
 
     /// The graphs validation run `run_id` validated, and so the graphs whose
@@ -4490,6 +4526,24 @@ impl AuthDb {
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<_, _>>()?;
         Ok(iris)
+    }
+
+    /// The datasets that have their validation report graph
+    /// (`urn:system:reports:dataset:{id}`) registered, with the latest
+    /// validation run of each, if any.
+    pub fn list_datasets_with_report_graph(&self) -> anyhow::Result<Vec<(String, Option<String>)>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT g.dataset_id,
+                    (SELECT r.id FROM shacl_validation_runs r WHERE r.dataset_id = g.dataset_id
+                     ORDER BY r.run_timestamp DESC LIMIT 1)
+             FROM dataset_graphs g
+             WHERE g.graph_iri = 'urn:system:reports:dataset:' || g.dataset_id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
     }
 
     /// Whether some dataset holds `graph_iri` as private.

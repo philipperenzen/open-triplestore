@@ -528,12 +528,8 @@ fn shapes_for(
             &version,
         ) {
             Some(v) => {
-                let sources = crate::data_models::profile::shape_sources(
-                    state,
-                    Some(&user.user_id),
-                    &model,
-                    &v,
-                );
+                let sources =
+                    crate::data_models::profile::shape_sources(state, Some(user), &model, &v);
                 if sources.is_empty() {
                     warnings.push(format!(
                         "model '{model}' version '{version}' has no shapes graph bound to it"
@@ -548,6 +544,19 @@ fn shapes_for(
     }
     out.sort();
     out.dedup();
+    // A report names its shapes, their paths and messages: a graph some
+    // dataset holds as private shapes only the dry runs of who may read it,
+    // whoever named it (the request, the mapping). A lookup error applies none.
+    let withheld = crate::auth::acl::withheld_private_graphs(&state.auth_db, Some(user));
+    out.retain(|g| {
+        let readable = withheld.as_ref().is_ok_and(|w| !w.contains(g));
+        if !readable {
+            warnings.push(format!(
+                "shapes graph <{g}> is not one you may read; nothing validated against it"
+            ));
+        }
+        readable
+    });
     out.retain(|g| {
         let present = state.store.count_graph(Some(g)).unwrap_or(0) > 0;
         if !present {

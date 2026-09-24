@@ -2097,10 +2097,33 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     Marking the graph public again gives the entry back.
   - Linking a private graph the caller may not read as a shapes graph is
     refused (403).
-  - When a dataset's writer links its private shapes graph into another
-    dataset, official runs there count it among the graphs they read: the
-    stored run's full report and the report graph are no more readable than
-    the shapes graph.
+  - A validation report names its shapes, their paths and messages, so it
+    follows the same rule:
+    - A write a gate refuses (Graph Store `PUT`/`POST`, validate-and-commit,
+      bulk import; by a binding, a gating pipeline or `shacl_on_write`)
+      answers a writer who may not read one of that gate's private shapes
+      graphs with only that the write does not conform, and by how many
+      results. The write is refused all the same.
+    - A stored run records the shapes graphs it used. Its full report is
+      withheld from anyone but an admin who may not read one of them that is
+      private when they ask, the dataset's writers included: a dataset's
+      writer may link its private shapes graph into another dataset, whose
+      writers need not be allowed to read it.
+    - An official run shaped by another dataset's private graph writes no
+      report graph, and clears the last one.
+    - A pipeline with such a graph bound to a dataset or graph in its scope
+      is refused (403) to whoever may not read it.
+    - The model profile (`GET /api/models/{id}/versions/{ver}/profile`, which
+      any user may read with a `sources:read` token they mint) and the SQL
+      source dry run leave out a private shapes graph the caller may not
+      read, whether it is bound to the model or named in the request or the
+      mapping.
+  - Making a graph private (`PATCH /api/datasets/{id}/graphs`) takes the
+    validation reports on it along. A dataset whose latest official run
+    validated the graph, or was shaped by it, has its report graph made
+    private when it holds the graph and cleared when it does not. A data
+    graph made private after a run used to leave that run's report graph
+    readable to the dataset's viewers.
 - **Detaching or deleting a dataset could wipe graphs it never owned.**
   `DELETE /api/datasets/{id}/graphs` deleted any graph no other dataset
   claimed, so any user who could create a dataset could wipe the model

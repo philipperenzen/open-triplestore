@@ -4422,6 +4422,19 @@ pub async fn patch_dataset_graph_role(
     if let Some(private) = req.private {
         db.set_dataset_graph_private(&dataset_id, &req.graph_iri, private)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        // A validation report on the graph goes with it.
+        if private {
+            crate::server::routes::report_graphs_follow_private_graph(&state, &req.graph_iri)
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!(
+                            "The graph is private now, but the validation reports on it could \
+                             not all follow: {e}"
+                        ),
+                    )
+                })?;
+        }
     } else {
         let graph_role = parse_graph_role(req.graph_role.as_deref())?;
         db.set_dataset_graph_role(&dataset_id, &req.graph_iri, graph_role)

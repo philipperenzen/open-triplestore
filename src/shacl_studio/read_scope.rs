@@ -19,6 +19,7 @@ use std::collections::HashSet;
 use crate::auth::db::AuthDb;
 use crate::auth::middleware::AuthenticatedUser;
 use crate::auth::models::Dataset;
+use crate::store::TripleStore;
 
 use super::access::can_access_set;
 use super::models::{ShapeGraph, TargetKind, ValidationPipeline};
@@ -124,11 +125,16 @@ impl ReadScope {
 /// graph it composes (`shape_graph_ids`). A dataset or shape graph that no
 /// longer exists is no part of it: it contributes nothing to a run.
 ///
-/// Shapes bound to a target in the validation layer are not checked: they
-/// come with the target, whoever validates it.
+/// Shapes bound to a target in the validation layer come with the target,
+/// whoever validates it, and are not checked: except a graph some dataset
+/// holds as private that `reader` may not read ([`ReadScope::withholds`]),
+/// such as another dataset's private shapes graph linked to a dataset in
+/// scope. A report names its shapes, their paths and messages.
 pub fn pipeline_unreadable(
+    store: &TripleStore,
     auth_db: &AuthDb,
     studio: &ShaclStudioStore,
+    base_url: &str,
     pipeline: &ValidationPipeline,
     reader: &ReadScope,
 ) -> anyhow::Result<Option<String>> {
@@ -171,6 +177,12 @@ pub fn pipeline_unreadable(
             .is_some_and(|set| reader.may_read_set(&set));
         if !library_readable {
             return Ok(Some(format!("graph <{g}>")));
+        }
+    }
+
+    for g in super::exec::resolve_shape_graphs(store, auth_db, studio, base_url, pipeline) {
+        if reader.withholds(&g) {
+            return Ok(Some(format!("shapes graph <{g}>")));
         }
     }
     Ok(None)

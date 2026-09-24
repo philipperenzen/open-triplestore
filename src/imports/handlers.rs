@@ -480,6 +480,7 @@ pub async fn bulk_import(
     let gate_store = state.store.clone();
     let gate_db = state.auth_db.clone();
     let gate_base = state.base_url.clone();
+    let gate_writer = user.clone();
 
     let text_state = state.clone();
     let text_outcome = outcome.clone();
@@ -490,6 +491,7 @@ pub async fn bulk_import(
             auth_db: &gate_db,
             studio: &studio,
             base_url: &gate_base,
+            writer: Some(&gate_writer),
         };
         let gate = WriteGate {
             applies: Box::new(|g| crate::shacl_studio::gate::import_gates_apply(gate_ctx, g)),

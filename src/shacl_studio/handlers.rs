@@ -1532,9 +1532,15 @@ fn authorize_pipeline_reads(
     pipeline: &ValidationPipeline,
 ) -> Result<(), ApiErr> {
     let reader = ReadScope::for_user(&state.auth_db, user).map_err(e500)?;
-    let unreadable =
-        super::read_scope::pipeline_unreadable(&state.auth_db, &studio(state), pipeline, &reader)
-            .map_err(e500)?;
+    let unreadable = super::read_scope::pipeline_unreadable(
+        &state.store,
+        &state.auth_db,
+        &studio(state),
+        &state.base_url,
+        pipeline,
+        &reader,
+    )
+    .map_err(e500)?;
     match unreadable {
         None => Ok(()),
         Some(what) => Err((

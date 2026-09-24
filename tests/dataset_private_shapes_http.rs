@@ -11,14 +11,21 @@
 //!   to whoever the entry's visibility admits: its Turtle, revisions, clone,
 //!   bindings, catalogue and pipelines. An entry adopted before the graph was
 //!   made private (or before this rule) follows the graph too;
-//! * linking a graph as another dataset's shapes graph, which is a read.
+//! * linking a graph as another dataset's shapes graph, which is a read;
+//! * a validation report, which names its shapes, their paths and messages:
+//!   a write gate's refusal, a stored run (the dataset's writers included,
+//!   and a graph made private after the run too), the report graph, and a
+//!   pipeline run over a dataset the graph is bound to;
+//! * the model profile, which profiles every shapes graph bound to a model.
 
 mod common;
 
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use common::*;
-use open_triplestore::auth::models::{GraphKind, OwnerType, SystemRole, Visibility};
+use open_triplestore::auth::models::{GraphKind, OwnerType, ResourceRole, SystemRole, Visibility};
+use open_triplestore::data_models::models::{DataModelVersion, VersionStatus};
+use open_triplestore::data_models::registry as dmr;
 use open_triplestore::server::AppState;
 use open_triplestore::store::TripleStore;
 use serde_json::{json, Value};
@@ -30,6 +37,8 @@ const SHAPES: &str = "http://pub.example/shapes";
 const DATA: &str = "http://pub.example/data";
 /// Data in bob's own dataset `bob-ds`.
 const BOB_DATA: &str = "http://bob.example/data";
+/// Data in alice's other public dataset `alice-pub`.
+const ALICE_DATA: &str = "http://alice.example/data";
 
 /// Every data node of class `ex:Thing` breaks the private shape, so a report
 /// on public data carries the shape's IRI, path and message.
@@ -371,15 +380,9 @@ async fn another_datasets_private_shapes_graph_is_not_read_through_a_link() {
     assert!(!text.contains(SHAPES), "{text}");
 }
 
-/// A writer of `pub-ds` reads its private shapes graph, so may link it into a
-/// public dataset of theirs, and it shapes their official runs there. Those
-/// runs' reports carry its messages and paths, so a stored run and the report
-/// graph are no more readable than the shapes graph, and its viewers get
-/// neither the graph nor its entry.
-#[tokio::test]
-async fn a_private_shapes_graph_linked_by_a_writer_stays_with_its_readers() {
-    let (state, _admin, alice, bob) = fixture();
-    const ALICE_DATA: &str = "http://alice.example/data";
+/// Alice's PUBLIC dataset `alice-pub`, holding one public data graph that
+/// `PRIVATE_SHAPES` finds fault with.
+fn alice_pub(state: &AppState) {
     state
         .auth_db
         .create_dataset(
@@ -401,12 +404,15 @@ async fn a_private_shapes_graph_linked_by_a_writer_stays_with_its_readers() {
         .auth_db
         .add_dataset_graph("alice-pub", ALICE_DATA)
         .unwrap();
+}
 
+/// Alice, who may read `SHAPES`, links it as `alice-pub`'s shapes graph.
+async fn link_shapes_into_alice_pub(state: &AppState, alice: &str) {
     let (st, text) = send(
-        &state,
+        state,
         Method::PUT,
         "/api/datasets/alice-pub/shacl",
-        Some(&alice),
+        Some(alice),
         json!({ "shacl_on_write": false, "shapes_graph_iri": SHAPES }),
     )
     .await;
@@ -414,18 +420,41 @@ async fn a_private_shapes_graph_linked_by_a_writer_stays_with_its_readers() {
         st.is_success(),
         "alice may read it, so link it: {st}: {text}"
     );
+}
+
+/// An official run of `alice-pub` by alice; returns its id.
+async fn validate_alice_pub(state: &AppState, alice: &str) -> String {
     let (st, text) = send(
-        &state,
+        state,
         Method::POST,
         "/api/datasets/alice-pub/validate",
-        Some(&alice),
+        Some(alice),
         Value::Null,
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{text}");
-    let j: Value = serde_json::from_str(&text).unwrap();
-    let run = j["run_id"].as_str().expect("an official run").to_string();
     assert!(leaks(&text), "alice's run is shaped by it: {text}");
+    let j: Value = serde_json::from_str(&text).unwrap();
+    j["run_id"].as_str().expect("an official run").to_string()
+}
+
+fn report_messages() -> String {
+    let q = "SELECT ?m WHERE { GRAPH ?g { ?r <http://www.w3.org/ns/shacl#resultMessage> ?m } }";
+    format!("/sparql?query={}", url_encode(q))
+}
+
+/// A writer of `pub-ds` reads its private shapes graph, so may link it into a
+/// public dataset of theirs, and it shapes their official runs there. Those
+/// runs' reports carry its messages and paths, so a stored run is no more
+/// readable than the shapes graph, and its viewers get neither the graph nor
+/// its entry. The report graph is not written at all: it would be readable
+/// by `alice-pub`'s writers, and they need not be readers of `pub-ds`.
+#[tokio::test]
+async fn a_private_shapes_graph_linked_by_a_writer_stays_with_its_readers() {
+    let (state, _admin, alice, bob) = fixture();
+    alice_pub(&state);
+    link_shapes_into_alice_pub(&state, &alice).await;
+    let run = validate_alice_pub(&state, &alice).await;
 
     for uri in [
         "/api/datasets/alice-pub/validation/latest".to_string(),
@@ -437,13 +466,11 @@ async fn a_private_shapes_graph_linked_by_a_writer_stays_with_its_readers() {
         let (_, text) = get(&state, &uri, &alice).await;
         assert!(leaks(&text), "alice reads her run in full: {uri}: {text}");
     }
-    let q = "SELECT ?m WHERE { GRAPH ?g { ?r <http://www.w3.org/ns/shacl#resultMessage> ?m } }";
-    let sparql = format!("/sparql?query={}", url_encode(q));
-    let (st, text) = get(&state, &sparql, &bob).await;
-    assert_eq!(st, StatusCode::OK, "{text}");
-    assert!(!leaks(&text), "the report graph: {text}");
-    let (_, text) = get(&state, &sparql, &alice).await;
-    assert!(leaks(&text), "the report graph is alice's to read: {text}");
+    for (who, token) in [("bob", &bob), ("alice", &alice)] {
+        let (st, text) = get(&state, &report_messages(), token).await;
+        assert_eq!(st, StatusCode::OK, "{text}");
+        assert!(!leaks(&text), "the report graph, to {who}: {text}");
+    }
 
     let (st, text) = get(&state, "/api/datasets/alice-pub/shapes", &bob).await;
     assert_eq!(st, StatusCode::NOT_FOUND, "{text}");
@@ -461,4 +488,280 @@ async fn a_private_shapes_graph_linked_by_a_writer_stays_with_its_readers() {
     let (st, text) = get(&state, "/api/shacl/shape-graphs", &bob).await;
     assert_eq!(st, StatusCode::OK, "{text}");
     assert!(!text.contains(SHAPES), "{text}");
+}
+
+// ─── Where else a private shapes graph is named ──────────────────────────────
+
+async fn put_data(state: &AppState, token: &str, graph: &str, ttl: &str) -> (StatusCode, String) {
+    let resp = test_app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/store?graph={}", url_encode(graph)))
+                .header(header::CONTENT_TYPE, "text/turtle")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(ttl.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, body_text(resp.into_body()).await)
+}
+
+fn make_writer(state: &AppState, dataset: &str, user: &str) {
+    state
+        .auth_db
+        .set_resource_grant(
+            "dataset",
+            dataset,
+            "user",
+            user,
+            ResourceRole::Editor,
+            "adm",
+        )
+        .unwrap();
+    state.auth_db.invalidate_accessible_graphs_cache();
+}
+
+/// A gate that refuses a write tells the writer what their data broke, so its
+/// report carries the gate's shapes: their IRIs, paths and messages. From a
+/// private shapes graph they may not read, a writer learns only that the write
+/// was refused, whether the graph gates as the dataset's `shacl_on_write`
+/// shapes graph or through a validation-layer binding.
+#[tokio::test]
+async fn a_write_refused_by_a_private_shapes_graph_does_not_show_it() {
+    let (state, _admin, alice, bob) = fixture();
+    for who in ["alice", "bob"] {
+        state
+            .auth_db
+            .grant_graph_permission(&format!("w-{who}"), DATA, "user", who, "write", "adm")
+            .unwrap();
+    }
+    let broken = "<http://ex.org/t9> a <http://ex.org/Thing> .";
+    let fixed = "<http://ex.org/t9> a <http://ex.org/Thing> ; <http://ex.org/secretCode> \"x\" .";
+
+    let refusals = |gate: &'static str| {
+        let (state, alice, bob) = (&state, &alice, &bob);
+        async move {
+            let (st, text) = put_data(state, bob, DATA, broken).await;
+            assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{gate}: {text}");
+            assert!(!leaks(&text), "{gate}: bob's refusal: {text}");
+            let (st, text) = put_data(state, alice, DATA, broken).await;
+            assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{gate}: {text}");
+            assert!(leaks(&text), "{gate}: alice reads the shapes: {text}");
+            let (st, text) = put_data(state, bob, DATA, fixed).await;
+            assert!(
+                st.is_success(),
+                "{gate}: conforming data is written: {st}: {text}"
+            );
+        }
+    };
+
+    // The legacy gate: the dataset's shapes graph, with `shacl_on_write`.
+    state
+        .auth_db
+        .update_dataset_shacl("pub-ds", true, Some(SHAPES))
+        .unwrap();
+    refusals("shacl_on_write").await;
+
+    // A binding: the one alice's validation run makes when it adopts the
+    // graph (over data it finds fault with again), legacy gate off.
+    state
+        .auth_db
+        .update_dataset_shacl("pub-ds", false, None)
+        .unwrap();
+    let (st, text) = put_data(&state, &alice, DATA, broken).await;
+    assert!(st.is_success(), "no gate yet: {st}: {text}");
+    adopt(&state, &alice).await;
+    refusals("binding").await;
+}
+
+/// The model profile profiles every shapes graph bound to a model version:
+/// its shapes, paths and value sets. Any user may mint the `sources:read`
+/// token that reads it, so a private dataset graph bound to a public model is
+/// profiled only for who may read the graph.
+#[tokio::test]
+async fn a_private_shapes_graph_bound_to_a_model_is_not_profiled() {
+    let (state, admin, _alice, bob) = fixture();
+    let base = state.base_url.to_string();
+    dmr::insert_data_model(
+        &state.store,
+        &base,
+        "m-pub",
+        "Public model",
+        "http://example.org/m-pub#",
+        None,
+        true,
+        Some("user"),
+        Some("adm"),
+        None,
+        "2026-01-01T00:00:00Z",
+    )
+    .unwrap();
+    let version_graph = format!("{base}/data-model/m-pub/version/1.0.0");
+    dmr::insert_version(
+        &state.store,
+        &base,
+        &DataModelVersion {
+            data_model_id: "m-pub".to_string(),
+            version: "1.0.0".to_string(),
+            status: VersionStatus::Published,
+            graph_iri: version_graph.clone(),
+            sub_graphs: vec![version_graph.clone()],
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            created_by: None,
+            derived_from: None,
+            notes: None,
+            branch: None,
+            sub_graph_status: vec![],
+        },
+    )
+    .unwrap();
+    open_triplestore::shacl_studio::bindings::add_binding(&state.store, &version_graph, SHAPES)
+        .unwrap();
+
+    let (st, text) = send(
+        &state,
+        Method::POST,
+        "/api/auth/tokens",
+        Some(&bob),
+        json!({ "name": "bob's reader", "scopes": ["sources:read"] }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{text}");
+    let bob_reader = serde_json::from_str::<Value>(&text).unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let uri = "/api/models/m-pub/versions/1.0.0/profile";
+    let (st, text) = get(&state, uri, &bob_reader).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert!(!leaks(&text), "profiled for bob: {text}");
+    assert!(!text.contains(SHAPES), "listed for bob: {text}");
+    let (st, text) = get(&state, uri, &admin).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert!(text.contains("secretCode"), "the admin's profile: {text}");
+}
+
+/// A stored run's report carries its shapes: it is withheld from whoever may
+/// not read a private shapes graph the run used, the dataset's writers too (a
+/// writer of `alice-pub` need not read `pub-ds`'s private graph), and from
+/// then on when a shapes graph is made private after the run.
+#[tokio::test]
+async fn a_stored_run_is_no_more_readable_than_the_shapes_it_used() {
+    let (state, _admin, alice, bob) = fixture();
+    let carol = make_user(&state, "carol");
+    alice_pub(&state);
+    make_writer(&state, "alice-pub", "carol");
+    link_shapes_into_alice_pub(&state, &alice).await;
+    let run = validate_alice_pub(&state, &alice).await;
+    for uri in [
+        "/api/datasets/alice-pub/validation/latest".to_string(),
+        format!("/api/datasets/alice-pub/validation/runs/{run}"),
+    ] {
+        let (st, text) = get(&state, &uri, &carol).await;
+        assert_eq!(st, StatusCode::OK, "{uri}: {text}");
+        assert!(!leaks(&text), "{uri}: to a writer of alice-pub: {text}");
+    }
+    let (st, text) = get(&state, &report_messages(), &carol).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert!(!leaks(&text), "the report graph, to carol: {text}");
+
+    // Linked while public, made private after the run.
+    set_private(&state, false);
+    let run = validate_alice_pub(&state, &alice).await;
+    let uri = format!("/api/datasets/alice-pub/validation/runs/{run}");
+    let (_, text) = get(&state, &uri, &bob).await;
+    assert!(leaks(&text), "public shapes: the report is bob's: {text}");
+    let (_, text) = get(&state, &report_messages(), &bob).await;
+    assert!(leaks(&text), "and so is the report graph: {text}");
+    let (st, text) = send(
+        &state,
+        Method::PATCH,
+        "/api/datasets/pub-ds/graphs",
+        Some(&alice),
+        json!({ "graph_iri": SHAPES, "private": true }),
+    )
+    .await;
+    assert!(st.is_success(), "{st}: {text}");
+    for (who, token) in [("bob", &bob), ("carol", &carol)] {
+        let (_, text) = get(&state, &uri, token).await;
+        assert!(!leaks(&text), "the stored run, to {who}: {text}");
+        let (_, text) = get(&state, &report_messages(), token).await;
+        assert!(!leaks(&text), "the report graph, to {who}: {text}");
+    }
+}
+
+/// The report graph an official run wrote follows the graphs it reports on:
+/// a data graph made private after the run makes the report graph private.
+#[tokio::test]
+async fn a_data_graph_made_private_after_a_run_takes_the_report_graph_with_it() {
+    let (state, _admin, alice, bob) = fixture();
+    set_private(&state, false);
+    let (st, text) = send(
+        &state,
+        Method::POST,
+        "/api/datasets/pub-ds/validate",
+        Some(&alice),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let q = "SELECT ?f WHERE { GRAPH ?g { ?r <http://www.w3.org/ns/shacl#focusNode> ?f } }";
+    let focus = format!("/sparql?query={}", url_encode(q));
+    let (_, text) = get(&state, &focus, &bob).await;
+    assert!(
+        text.contains("http://ex.org/t1"),
+        "all public so far: {text}"
+    );
+
+    let (st, text) = send(
+        &state,
+        Method::PATCH,
+        "/api/datasets/pub-ds/graphs",
+        Some(&alice),
+        json!({ "graph_iri": DATA, "private": true }),
+    )
+    .await;
+    assert!(st.is_success(), "{st}: {text}");
+    let (_, text) = get(&state, &focus, &bob).await;
+    assert!(
+        !text.contains("http://ex.org/t1"),
+        "the report graph: {text}"
+    );
+    let (_, text) = get(&state, &focus, &alice).await;
+    assert!(text.contains("http://ex.org/t1"), "still alice's: {text}");
+}
+
+/// A pipeline over a dataset validates it with the shapes bound to it. A
+/// private shapes graph linked into `alice-pub` is bound to it, so bob, who
+/// may read all of `alice-pub` but not that graph, may not define a pipeline
+/// over it: its reports would carry that graph's shapes.
+#[tokio::test]
+async fn a_pipeline_is_not_shaped_by_a_private_graph_bound_to_its_target() {
+    let (state, _admin, alice, bob) = fixture();
+    alice_pub(&state);
+    link_shapes_into_alice_pub(&state, &alice).await;
+    let body = json!({ "name": "p", "targets": [{ "kind": "dataset", "id": "alice-pub" }] });
+    let (st, text) = send(
+        &state,
+        Method::POST,
+        "/api/shacl/pipelines",
+        Some(&bob),
+        body.clone(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{text}");
+    assert!(!leaks(&text), "{text}");
+    let (st, text) = send(
+        &state,
+        Method::POST,
+        "/api/shacl/pipelines",
+        Some(&alice),
+        body,
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "alice may read it all: {text}");
 }
