@@ -416,6 +416,28 @@ ex:Adult a sh:NodeShape ;
   sh:property [ sh:path ex:age ; sh:minInclusive 18 ] .
 ```
 
+### What a rule may read and write
+
+A shapes graph is data: anyone who may write a dataset may upload one and run
+it. A rule therefore runs with the authority of the dataset it runs for, not
+that of the store.
+
+* **`sh:construct` must be a CONSTRUCT query** — `CONSTRUCT { … } WHERE { … }`,
+  or the equivalent `INSERT { … } WHERE { … }` form this store also accepts.
+  Anything else (a `DELETE`/`INSERT` update, `DROP`, `LOAD`, several
+  operations) is refused when the shapes graph loads, naming the shape.
+* **It reads the run's data graphs and nothing else.** Whatever `FROM` /
+  `FROM NAMED` the query declares is replaced by them, and no named graph is
+  available — so a `GRAPH <g>` block inside a rule matches nothing. The same
+  holds for a `sh:sparql` constraint and a `sh:SPARQLTarget`.
+* **The engine writes, not the rule.** A CONSTRUCT template cannot name a
+  graph, and derived triples go to exactly one: the dataset's single data
+  graph when it has one, otherwise its own `urn:dataset:{id}:inferred`
+  (registered with the `entailment` role, so it is ACL'd, listed and deleted
+  with the dataset).
+* **`$this` is bound as a term**, never pasted into the query text, so a focus
+  node with a hostile lexical form (`sh:targetNode "…"`) is just a term.
+
 ---
 
 ## SPARQL-based constraints and constraint components

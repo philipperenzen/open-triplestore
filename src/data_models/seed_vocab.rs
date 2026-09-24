@@ -1361,19 +1361,57 @@ fn file_triples(ver: &StdVersion) -> anyhow::Result<(Vec<Quad>, Vec<Triple>)> {
     Ok((quads, triples))
 }
 
+/// The `owl:versionInfo` triple loaders before 0.7 added to a seeded copy of
+/// a file that states none: `<ontology> owl:versionInfo "<version>"`, on the
+/// subject [`upload::injected_version_info`] names. Returned only when the
+/// stored graph holds that triple and exactly one triple more than the file
+/// (a cheap pre-check; the caller compares the triples themselves).
+fn loader_stamp(
+    state: &AppState,
+    v: &StdVocab,
+    ver: &StdVersion,
+    graph: &str,
+    quads: &[oxigraph::model::Quad],
+    file: &[oxigraph::model::Triple],
+) -> Option<oxigraph::model::Triple> {
+    use oxigraph::model::{Literal, NamedNode, Triple};
+    let subject = upload::injected_version_info(quads, &state.base_url, v.id)?;
+    let stamp = Triple::new(
+        subject,
+        NamedNode::new_unchecked("http://www.w3.org/2002/07/owl#versionInfo"),
+        Literal::new_simple_literal(ver.version),
+    );
+    let count = state.store.graph_count_cached(Some(graph))?;
+    if count != file.len() + 1 {
+        return None;
+    }
+    let ask = format!(
+        "ASK {{ GRAPH <{graph}> {{ {} {} {} }} }}",
+        stamp.subject, stamp.predicate, stamp.object
+    );
+    matches!(
+        state.store.query(&ask),
+        Ok(oxigraph::sparql::QueryResults::Boolean(true))
+    )
+    .then_some(stamp)
+}
+
 /// Check a seeded copy whose licence allows other copies against its bundled
-/// file, and record the check ([`registry::set_seed_check`]). Nothing is
-/// modified, whatever the check finds:
+/// file, and record the check ([`registry::set_seed_check`]):
 ///
 /// * checked against this very file on an earlier start: its record holds the
 ///   outcome, and every change since (a PATCH, a publish, a direct write) has
-///   marked it — no read of the graph;
+///   marked it — no read of the graph (unless the record says modified and the
+///   copy may be the next case);
 /// * the stored triples equal the file's: unchanged;
-/// * they differ: the copy may hold an admin's edit, or an earlier build's
-///   file (with the `owl:versionInfo` triple releases before 0.7 added). It is
-///   kept exactly as stored, and its record says it differs from the file or
-///   may have been modified. To take the current file instead, delete the
-///   entry: the next start seeds it anew.
+/// * they equal the file's plus the `owl:versionInfo` triple a loader before
+///   0.7 added ([`loader_stamp`]) and nothing else: that triple, which the
+///   server wrote and nobody asked for, is removed, and the copy is the file
+///   again — unchanged;
+/// * they differ otherwise: the copy may hold an admin's edit. Nothing is
+///   modified: it is kept exactly as stored, and its record says it differs
+///   from the file or may have been modified. To take the current file
+///   instead, delete the entry: the next start seeds it anew.
 fn check_copy(
     state: &AppState,
     v: &StdVocab,
@@ -1389,19 +1427,28 @@ fn check_copy(
         .as_ref()
         .filter(|a| !a.unchanged)
         .map(|a| a.stored_copy.clone());
+    let graph = registry::version_record_iri(&state.base_url, v.id, ver.version);
+    let recorded_unchanged = recorded.as_ref().is_none_or(|a| a.unchanged);
     // Open Triplestore's own vocabulary has no record to hold the outcome.
-    if p.seed_source_sha256.as_deref() == Some(file_sha.as_str())
-        && (recorded.is_some() || !ver.file.third_party)
-    {
+    let checked_before = p.seed_source_sha256.as_deref() == Some(file_sha.as_str())
+        && (recorded.is_some() || !ver.file.third_party);
+    if checked_before && recorded_unchanged {
         return Ok(Checked {
-            unchanged: recorded.as_ref().is_none_or(|a| a.unchanged),
+            unchanged: true,
             keep_text,
             writes: 0,
         });
     }
-    let graph = registry::version_record_iri(&state.base_url, v.id, ver.version);
+    let (quads, file) = file_triples(ver)?;
+    let stamp = loader_stamp(state, v, ver, &graph, &quads, &file);
+    if checked_before && stamp.is_none() {
+        return Ok(Checked {
+            unchanged: false,
+            keep_text,
+            writes: 0,
+        });
+    }
     let stored = content_digest::graph_triples(&state.store, &graph)?;
-    let (_, file) = file_triples(ver)?;
     if content_digest::same_triples(&stored, &file) {
         let digest = content_digest::triples_digest(&stored);
         registry::set_seed_check(&state.store, &graph, &file_sha, Some(&digest))?;
@@ -1410,6 +1457,33 @@ fn check_copy(
             keep_text: None,
             writes: 1,
         });
+    }
+    if let Some(stamp) = stamp {
+        let mut with_stamp = file.clone();
+        with_stamp.extend(content_digest::as_stored(std::slice::from_ref(&stamp))?);
+        if content_digest::same_triples(&stored, &with_stamp) {
+            state.store.update(&format!(
+                "DELETE DATA {{ GRAPH <{graph}> {{ {} {} {} }} }}",
+                stamp.subject, stamp.predicate, stamp.object
+            ))?;
+            let repaired = content_digest::graph_triples(&state.store, &graph)?;
+            if content_digest::same_triples(&repaired, &file) {
+                let digest = content_digest::triples_digest(&repaired);
+                registry::set_seed_check(&state.store, &graph, &file_sha, Some(&digest))?;
+                tracing::info!(
+                    "vocabulary '{}' version '{}': removed the owl:versionInfo triple an earlier \
+                     loader added; the copy is vocab/{} again",
+                    v.id,
+                    ver.version,
+                    ver.file.path
+                );
+                return Ok(Checked {
+                    unchanged: true,
+                    keep_text: None,
+                    writes: 2,
+                });
+            }
+        }
     }
     // An earlier digest stays: it still names what the seeder last vouched for.
     registry::set_seed_check(&state.store, &graph, &file_sha, None)?;
@@ -2422,11 +2496,12 @@ mod tests {
     /// `owl:versionInfo` triple the old loader added, and notes in an older
     /// wording. The next boot proves the records are the seeder's and marks
     /// them, adds the licence records and rewords only notes nobody edited.
-    /// The graphs are never modified: the added triple stays, and the records
-    /// say the copies differ from the file. Records created through the API
-    /// are left alone.
+    /// The added triple — the only difference from the file — is removed, so
+    /// the copies are the files again and their records say unchanged. A
+    /// copy that also holds an edit is kept exactly as stored. Records
+    /// created through the API are left alone.
     #[test]
-    fn an_older_install_gets_licence_records_and_keeps_its_graphs() {
+    fn an_older_install_gets_licence_records_and_loses_the_loaders_triple() {
         let state = fresh();
         seed_standard_vocabularies(&state);
         let rdf = vocab("rdf");
@@ -2447,6 +2522,12 @@ mod tests {
                 ),
             );
         }
+        // One copy also holds an admin's edit.
+        let edited = version_iri(&state, "rdf", "1.0");
+        update(
+            &state,
+            &format!("INSERT DATA {{ GRAPH <{edited}> {{ <urn:ex:s> <urn:ex:p> \"edit\" }} }}"),
+        );
         registry::update_version_notes(
             &state.store,
             &state.base_url,
@@ -2486,22 +2567,32 @@ mod tests {
             let iri = version_iri(&state, "rdf", ver.version);
             assert_eq!(seeded_by(&state, &iri).as_deref(), Some(SEEDED_BY));
             let a = record(&state, "rdf", ver.version);
-            assert!(!a.unchanged, "{}: it holds an added triple", ver.version);
             assert_eq!(a.licenses, ver.attribution(true).unwrap().licenses);
-            assert!(
-                ask(
-                    &state,
-                    &format!("ASK {{ GRAPH <{iri}> {{ ?s <{owl_version_info}> ?o }} }}")
+            let stamped = ask(
+                &state,
+                &format!(
+                    "ASK {{ GRAPH <{iri}> {{ <{s}> <{owl_version_info}> ?o }} }}",
+                    s = subject.as_str()
                 ),
-                "the graph is kept exactly as stored: {iri}"
             );
+            if iri == edited {
+                assert!(!a.unchanged, "{}: it holds an edit", ver.version);
+                assert!(stamped, "an edited copy is kept exactly as stored");
+            } else {
+                assert!(a.unchanged, "{}: the added triple is gone", ver.version);
+                assert!(!stamped, "{iri}");
+            }
         }
         let entry = registry::get_attribution(
             &state.store,
             &registry::data_model_iri(&state.base_url, "rdf"),
         )
         .unwrap();
-        assert!(!entry.unchanged);
+        let latest = rdf.versions.iter().find(|v| v.latest).unwrap();
+        assert_eq!(
+            entry.unchanged,
+            version_iri(&state, "rdf", latest.version) != edited
+        );
         let notes = |ver: &str| {
             registry::get_version(&state.store, &state.base_url, "rdf", ver)
                 .unwrap()
@@ -2515,6 +2606,51 @@ mod tests {
         assert!(registry::get_attribution(&state.store, &user_graph).is_none());
         assert!(seeded_by(&state, &user_graph).is_none());
         // Labelled once; the next boot writes nothing.
+        assert_eq!(sync_seeded_records(&state, rdf, Mode::Seed).unwrap(), 0);
+    }
+
+    /// An install that the previous release already checked: its record says
+    /// "may have been modified" for a copy that differs from the file only by
+    /// the old loader's `owl:versionInfo` triple. The next start removes the
+    /// triple and the record says unchanged again; the start after that
+    /// writes nothing.
+    #[test]
+    fn a_copy_flagged_for_the_loaders_triple_alone_is_repaired() {
+        let state = fresh();
+        seed_standard_vocabularies(&state);
+        let rdf = vocab("rdf");
+        let ver = rdf.versions.iter().find(|v| v.latest).unwrap();
+        let iri = version_iri(&state, "rdf", ver.version);
+        let quads = upload::parse_rdf(ver.file.ttl.as_bytes(), "text/turtle", "rdf").unwrap();
+        let subject = upload::injected_version_info(&quads, &state.base_url, "rdf").unwrap();
+        update(
+            &state,
+            &format!(
+                "INSERT DATA {{ GRAPH <{iri}> {{ <{s}> \
+                 <http://www.w3.org/2002/07/owl#versionInfo> \"{v}\" }} }}",
+                s = subject.as_str(),
+                v = ver.version
+            ),
+        );
+        let flagged = ver.record(false, None);
+        let current = registry::attribution_json(&state.store, &iri);
+        assert!(registry::replace_attribution_if(
+            &state.store,
+            &iri,
+            current.as_deref(),
+            flagged.as_ref()
+        )
+        .unwrap());
+        assert!(!record(&state, "rdf", ver.version).unchanged);
+
+        assert!(sync_seeded_records(&state, rdf, Mode::Seed).unwrap() > 0);
+        assert!(record(&state, "rdf", ver.version).unchanged);
+        assert!(!ask(
+            &state,
+            &format!(
+                "ASK {{ GRAPH <{iri}> {{ ?s <http://www.w3.org/2002/07/owl#versionInfo> ?o }} }}"
+            )
+        ));
         assert_eq!(sync_seeded_records(&state, rdf, Mode::Seed).unwrap(), 0);
     }
 

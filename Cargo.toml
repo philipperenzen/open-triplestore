@@ -137,6 +137,9 @@ libc = "0.2"
 oxigraph = "0.5"
 oxrdf = "0.3"
 # Needed only to name `Iri` in the federation service-handler trait; already in the tree.
+# Must stay on the oxiri line Oxigraph itself uses (0.2 as of oxigraph 0.5.11): the
+# `DefaultServiceHandler::handle` signature and `spargebra::Query::Select { base_iri }`
+# take Oxigraph's `Iri`, so a newer oxiri here is a distinct type and does not compile.
 oxiri = "0.2.11"
 spargebra = "0.4"
 
@@ -197,7 +200,7 @@ jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 # ES256 keypair generation for the OIDC provider (also rustls's crypto backend
 # in this tree; no longer jsonwebtoken's, which moved off ring in v10).
 ring = "0.17"
-argon2 = "0.5"
+argon2 = "0.6"
 uuid = { version = "1", features = ["v4", "v5"] }
 chrono = { version = "0.4", features = ["serde"] }
 # Kept in lockstep with `hkdf` (below): both ride the RustCrypto `digest` 0.11

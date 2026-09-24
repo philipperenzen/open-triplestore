@@ -465,11 +465,22 @@ impl<'a> DataView<'a> {
     /// `TripleStore::query` would have applied and this does not — the same
     /// trade every native probe in the run already makes.
     pub(crate) fn query(&self, query: &str) -> Result<oxigraph::sparql::QueryResults<'_>, String> {
-        let prepared = self
+        let mut prepared = self
             .evaluator
             .clone()
             .parse_query(query)
             .map_err(|e| e.to_string())?;
+        // The query text comes from the shapes graph — `sh:select`, `sh:ask`,
+        // a `sh:SPARQLTarget` — which any writer of a dataset can upload. The
+        // callers prepend `FROM <data graph>` clauses, but a prologue cannot
+        // take away what the text itself asks for: a `FROM NAMED <victim>`
+        // written into the shape would simply be added to it, and a `GRAPH`
+        // block would then read a graph this run may not. Replacing the
+        // dataset outright is what confines it.
+        if !self.data_graphs.is_empty() {
+            crate::store::engine::confine_dataset(prepared.dataset_mut(), self.data_graphs)
+                .map_err(|e| e.to_string())?;
+        }
         match &self.raw {
             RawSource::Snapshot(tx) => prepared.on_transaction(tx).execute(),
             RawSource::Mirror(store) => prepared.on_store(store).execute(),
