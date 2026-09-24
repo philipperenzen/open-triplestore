@@ -188,6 +188,26 @@ Response:
 }
 ```
 
+### What a run reads, and who sees its report
+
+A report carries the focus nodes and values of the graphs it validated, so a
+run reads only the dataset graphs the caller may read, by the rule `/sparql`
+applies: a private graph only for the dataset's writers, plus graph-ACL read
+grants. Admins read every graph. A run that could not read every graph of the
+dataset is not official: it is answered as a test run (`"test": true,
+"partial": true`), is not recorded, and leaves the dataset's validation status
+as it was. An explicit `shapes_graph` in the body must be readable by the same
+rule.
+
+An official run is recorded with the graphs it validated, and its report is
+written as RDF to `urn:system:reports:dataset:<id>`. That graph is private in
+the dataset whenever the run validated a private graph (or a model graph not
+everyone may read), and it stays private. `GET …/validation/latest` and
+`GET …/validation/runs/<run_id>` return the full report to the dataset's
+writers and to callers who may read every graph the run validated; anyone else
+gets the run's summary (counts, `conforms`) with `"report": null` and
+`"report_withheld": true`.
+
 ---
 
 ## Validation on Write
