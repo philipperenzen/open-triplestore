@@ -27,9 +27,10 @@ Which corpus results are published is a licence question, not a style one:
   of the name W3C" without a special licence from W3C
   (https://www.w3.org/copyright/test-suites-licenses/). This project runs a
   subset, so its row says only that the corpus runs in CI as a regression
-  ratchet: no case count, pass count, pass rate or floor. The runner states no
-  pass count either: its ratchet is its KNOWN_FAILURES list and the floor it
-  asserts, so this script has no baseline of it to cross-check or print.
+  ratchet: no case count, pass count, pass rate or floor. The runner keeps no
+  pass count either, not even in a comment; its known-failure list and pass
+  floor drive the ratchet in the test itself, and this script reads nothing
+  from it.
 - The SHACL sections are under the W3C Software and Document License, which
   sets no such condition, so that row keeps its counts (`PUBLISH_SCORE`).
 - The OGC validator shapes are under the Apache License 2.0; only the OGC
@@ -85,9 +86,9 @@ def count(path: Path) -> tuple[int, int]:
     return len(TEST_ATTR.findall(text)), len(IGNORE_ATTR.findall(text))
 
 
-# Manifest-driven runners record their own scorecard: the pass floor they
-# assert and, for a runner whose score is published, the `Empirical baseline`
-# comment above their KNOWN_FAILURES list.
+# Manifest-driven runners and the pass floor they assert. A runner whose score
+# is published (PUBLISH_SCORE) also records an `Empirical baseline` comment
+# above its KNOWN_FAILURES list, which this script reads and cross-checks.
 CORPUS_RUNNERS = {
     "w3c_shacl_conformance": 90,
     "w3c_sparql11_manifests": 450,
@@ -106,17 +107,14 @@ UNSCORED_NOTE = (
 )
 
 
-def corpus(stem: str) -> tuple[int, int, int, int] | None:
+def corpus(stem: str) -> tuple[int, int, int, int]:
     """(cases, pass, known failures, runner-side skips) from the runner's own
     recorded baseline (`Empirical baseline: N pass / N known-fail / N aux skips`
     in tests/<stem>.rs) and its KNOWN_FAILURES list. File counts are not used:
-    the corpus directories hold shared/aux files beyond the cases. `None` for a
-    runner whose score is not published and which states no baseline."""
+    the corpus directories hold shared/aux files beyond the cases."""
     src = (TESTS / f"{stem}.rs").read_text(encoding="utf-8")
     m = re.search(r"baseline: (\d+) pass / (\d+) known-fail / (\d+) aux skips", src)
     if not m:
-        if stem not in PUBLISH_SCORE:
-            return None
         raise SystemExit(f"{stem}.rs: baseline comment not found")
     passed, failed, skipped = (int(x) for x in m.groups())
     block = src.split("const KNOWN_FAILURES", 1)[1].split("];", 1)[0]
@@ -136,10 +134,9 @@ def render() -> str:
             std, basis = SUITES[stem]
             note = ""
             if stem in CORPUS_RUNNERS:
-                # Always parsed, so a stale baseline fails --check either way.
-                scorecard = corpus(stem)
-                if stem in PUBLISH_SCORE and scorecard is not None:
-                    cases, passed, failed, skipped = scorecard
+                if stem in PUBLISH_SCORE:
+                    # Parsed on every run, so a stale baseline fails --check.
+                    cases, passed, failed, skipped = corpus(stem)
                     plural = "" if failed == 1 else "s"
                     note = f"{cases} corpus cases: {passed} pass, {failed} known failure{plural}, {skipped} runner-side skips (floor ≥{CORPUS_RUNNERS[stem]} asserted)"
                 else:

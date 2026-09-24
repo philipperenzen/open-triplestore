@@ -4,9 +4,10 @@
 //!
 //! Those sections are a subset of a W3C test suite, used under the W3C 3-clause
 //! BSD licence for development and bug tracking only. W3C's test-suite licence
-//! policy allows no public performance claims on a subset, so the baseline
-//! below drives the ratchet and is not published as a score (see
-//! `scripts/conformance_table.py` and docs/conformance/sparql11.md).
+//! policy allows no public performance claims on a subset, so the runner
+//! states no pass count: the known-failure list and the pass floor below drive
+//! the ratchet, and no score is published (see `scripts/conformance_table.py`
+//! and docs/conformance/sparql11.md).
 //!
 //! The two top-level manifests — `manifest-sparql11-query.ttl` and
 //! `manifest-sparql11-update.ttl` — are walked through `mf:include`; every
