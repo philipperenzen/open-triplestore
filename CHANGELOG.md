@@ -1460,6 +1460,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as an operand.
 
 ### Security
+- **A dataset version's data dump and diff leaked private graphs.** A version
+  snapshot copies every graph the dataset held at the time — private ones
+  included — into version-scoped IRIs that never appear in the dataset's graph
+  list, so the private-graph filter that guards `/sparql` and the dataset-service
+  version reads was a no-op on two other version endpoints. `GET
+  /api/datasets/{id}/versions/{ver}/data` served every snapshot graph's triples,
+  and `GET /api/datasets/{id}/versions/{ver}/diff/{other}` returned private
+  triples (as an RDF-Patch) and per-graph add/remove counts keyed by the private
+  source graph's IRI, to anyone who could read the dataset — a viewer, or an
+  anonymous caller on a public dataset. Both now map each snapshot back to its
+  live source graph and drop the ones flagged private for a caller who cannot
+  write the dataset; a writer (and an admin) still sees everything. A dataset
+  with no private graph is unaffected, so legacy versions with no source map keep
+  working. Every released version was affected.
 - **`POST /api/shaclc/serialize` read any named graph, for anyone.** It took
   a graph IRI from the request body and handed it straight to the serialiser
   — no authentication, no authorisation — so any caller could name any named
