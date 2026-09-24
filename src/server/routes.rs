@@ -8294,6 +8294,69 @@ pub async fn get_shapes(
     Ok((StatusCode::OK, [(CONTENT_TYPE, "text/turtle")], data).into_response())
 }
 
+/// Whether `user` may replace `dataset_id`'s shapes graph `shapes_iri` through
+/// `PUT /api/datasets/:id/shapes` (see there). `Ok(None)` when the dataset
+/// already holds the graph (or it is a Library graph the caller may edit),
+/// `Ok(Some(claim))` when the write claims it for the dataset (register it
+/// with that claim if `claim_registers_with_dataset` agrees: an admin's
+/// write of a new graph leaves it to the dataset's editors, of anyone
+/// else's graph does not), 403 otherwise.
+fn authorize_shapes_graph_write(
+    state: &AppState,
+    dataset_id: &str,
+    shapes_iri: &str,
+    user: &AuthenticatedUser,
+) -> Result<Option<crate::auth::dataset_graph::GraphClaim>, (StatusCode, String)> {
+    use crate::auth::dataset_graph;
+    let forbidden = |m: String| (StatusCode::FORBIDDEN, m);
+    dataset_graph::refuse_model_registry_graph(
+        &state.store,
+        &state.base_url,
+        dataset_id,
+        shapes_iri,
+    )
+    .map_err(forbidden)?;
+    if dataset_graph::dataset_holds_graph(&state.auth_db, &state.base_url, dataset_id, shapes_iri) {
+        return Ok(None);
+    }
+    if shapes_iri.starts_with("urn:shapes:") {
+        let orgs = state
+            .auth_db
+            .get_user_org_ids(&user.user_id)
+            .unwrap_or_default();
+        let manageable = user.is_admin()
+            || crate::shacl_studio::store::ShaclStudioStore::new(state.auth_db.pool())
+                .get_shape_graph_by_iri(shapes_iri)
+                .ok()
+                .flatten()
+                .is_some_and(|set| {
+                    crate::shacl_studio::access::can_manage_set(
+                        &set,
+                        Some(&user.user_id),
+                        &orgs,
+                        false,
+                    )
+                });
+        return if manageable {
+            Ok(None)
+        } else {
+            Err(forbidden(format!(
+                "Shapes graph <{shapes_iri}> is a SHACL Studio Library graph you may not edit."
+            )))
+        };
+    }
+    dataset_graph::gate_dataset_graph_target(
+        &state.store,
+        &state.auth_db,
+        &state.base_url,
+        dataset_id,
+        shapes_iri,
+        user,
+    )
+    .map(Some)
+    .map_err(forbidden)
+}
+
 /// PUT /api/datasets/:dataset_id/shapes — upload shapes graph
 pub async fn put_shapes(
     Extension(current_user): Extension<AuthenticatedUser>,
@@ -8322,6 +8385,18 @@ pub async fn put_shapes(
         .shapes_graph_iri
         .clone()
         .unwrap_or_else(|| format!("urn:dataset:{}:shapes", dataset_id));
+
+    // The shapes graph is replaced below, on the dataset's authority. That
+    // covers a graph the dataset holds (its namespace, or registered to it) and
+    // a SHACL Studio Library graph the caller may edit there. A shapes graph
+    // that is only linked (`PUT /shacl`) is someone else's to write: it is
+    // claimed through the dataset graph gate like any other target, so it
+    // holds no data yet or the caller may write it directly, and it is then
+    // registered to the dataset (after an admin's write, only a new graph a
+    // non-admin could have claimed). A model-registry graph is refused for
+    // everyone — an old setting may still name one.
+    let shapes_claim =
+        authorize_shapes_graph_write(&state, &dataset_id, &shapes_iri, &current_user)?;
 
     let raw = String::from_utf8(body.to_vec())
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid UTF-8".to_string()))?;
@@ -8358,6 +8433,29 @@ pub async fn put_shapes(
         .auth_db
         .update_dataset_shacl(&dataset_id, dataset.shacl_on_write, Some(&shapes_iri))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(claim) = shapes_claim.filter(|claim| {
+        crate::auth::dataset_graph::claim_registers_with_dataset(
+            &state.auth_db,
+            &state.base_url,
+            &dataset_id,
+            &shapes_iri,
+            *claim,
+            current_user.is_admin(),
+        )
+    }) {
+        crate::auth::dataset_graph::register_claimed_graph(
+            &state.auth_db,
+            &dataset_id,
+            &shapes_iri,
+            claim,
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let _ = state.auth_db.set_dataset_graph_role(
+            &dataset_id,
+            &shapes_iri,
+            Some(crate::auth::models::GraphKind::Shapes),
+        );
+    }
 
     // Adopt the uploaded shapes into the SHACL Studio Library + validation
     // layer so they are visible and effective (idempotent, best-effort).
@@ -8642,24 +8740,27 @@ pub async fn execute_rml_mapping(
     // execution. Without this a writer of any dataset could inject triples into
     // another tenant's graph. A model-registry graph is refused for everyone,
     // admins included: this path runs none of the registry's licence checks.
-    if let Err(msg) = crate::auth::dataset_graph::gate_dataset_graph_target(
+    let target_claim = match crate::auth::dataset_graph::gate_dataset_graph_target(
         &state.store,
         &state.auth_db,
         &state.base_url,
         &dataset_id,
         &target_graph,
-        current_user.is_admin(),
+        &current_user,
     ) {
-        state.audit.log_denied(
-            Some(current_user.user_id.clone()),
-            None,
-            "dataset_graph",
-            &dataset_id,
-            "rml_execute",
-            None,
-        );
-        return Err((StatusCode::FORBIDDEN, msg));
-    }
+        Ok(claim) => claim,
+        Err(msg) => {
+            state.audit.log_denied(
+                Some(current_user.user_id.clone()),
+                None,
+                "dataset_graph",
+                &dataset_id,
+                "rml_execute",
+                None,
+            );
+            return Err((StatusCode::FORBIDDEN, msg));
+        }
+    };
 
     // Parse multipart: collect mapping override and source files
     let mut mapping_turtle_override: Option<String> = None;
@@ -8738,31 +8839,73 @@ pub async fn execute_rml_mapping(
     // Execute into the real store, enforcing the same boundary on every effective
     // (graphMap-overridden) destination graph — a mapping's `rml:graphMap` can name
     // a target other than `?graph=`, so the gate must cover the resolved set too.
-    let is_admin = current_user.is_admin();
+    // Each destination the gate lets through is recorded with its claim, so
+    // the run registers every graph it writes and the next run finds them
+    // held by the dataset (an unregistered graph that now holds data would
+    // refuse it).
+    let authz_user = current_user.clone();
     let authz_base = state.base_url.clone();
     let authz_db = state.auth_db.clone();
     let authz_store = state.store.clone();
     let authz_ds = dataset_id.clone();
+    let claims = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let authz_claims = claims.clone();
     let count = crate::rml::execute_authorized(
         &mapping,
         &source_data,
         &state.store,
         Some(&target_graph),
         move |g: &str| {
-            crate::auth::dataset_graph::gate_dataset_graph_target(
+            let claim = crate::auth::dataset_graph::gate_dataset_graph_target(
                 &authz_store,
                 &authz_db,
                 &authz_base,
                 &authz_ds,
                 g,
-                is_admin,
-            )
+                &authz_user,
+            )?;
+            authz_claims
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push((g.to_string(), claim));
+            Ok(())
         },
     )
     .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
-    // Register target graph in dataset
-    let _ = state.auth_db.add_dataset_graph(&dataset_id, &target_graph);
+    // Register the target graph in the dataset, and every graphMap
+    // destination the dataset may hold, with how the gate found each (created
+    // by this run, or taken over by a caller who may write it). The stored
+    // mapping is the dataset's editors' to write, so an admin's run registers
+    // only destinations a non-admin could have claimed (see
+    // `claim_registers_with_dataset`).
+    let _ = crate::auth::dataset_graph::register_claimed_graph(
+        &state.auth_db,
+        &dataset_id,
+        &target_graph,
+        target_claim,
+    );
+    let written = claims.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    for (g, claim) in written {
+        if g == target_graph
+            || !crate::auth::dataset_graph::claim_registers_with_dataset(
+                &state.auth_db,
+                &state.base_url,
+                &dataset_id,
+                &g,
+                claim,
+                current_user.is_admin(),
+            )
+        {
+            continue;
+        }
+        let _ = crate::auth::dataset_graph::register_claimed_graph(
+            &state.auth_db,
+            &dataset_id,
+            &g,
+            claim,
+        );
+    }
 
     Ok(Json(serde_json::json!({
         "triples_inserted": count,

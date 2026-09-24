@@ -25,6 +25,38 @@ fn iri_tail(iri: &str) -> &str {
         .unwrap_or(iri)
 }
 
+/// Graphs never adopted into the Library on a dataset's behalf: a graph the
+/// Studio mints for an entry of its own (`urn:shapes:`; without an entry, the
+/// entry went and took its content with it), a system graph, and a
+/// model-registry graph (bind a model's shapes instead). An adopted entry is
+/// owned by the dataset's owner, whose managers the Studio then lets edit a
+/// `urn:shapes:` graph outright.
+pub(crate) fn never_adopted(
+    store: &crate::store::TripleStore,
+    base_url: &str,
+    graph_iri: &str,
+) -> bool {
+    graph_iri.starts_with("urn:shapes:")
+        || graph_iri.starts_with("urn:system:")
+        || crate::auth::dataset_graph::graph_held_by_model_registry(store, base_url, graph_iri)
+}
+
+/// Whether `dataset` may have `graph_iri` adopted into the Library on its
+/// behalf (see [`auto_register_dataset_shapes_graph`]).
+fn dataset_may_adopt(state: &AppState, dataset: &Dataset, graph_iri: &str) -> bool {
+    use crate::auth::dataset_graph;
+    if never_adopted(&state.store, &state.base_url, graph_iri) {
+        return false;
+    }
+    dataset.shapes_graph_iri.as_deref() == Some(graph_iri)
+        || dataset_graph::dataset_holds_graph(
+            &state.auth_db,
+            &state.base_url,
+            &dataset.id,
+            graph_iri,
+        )
+}
+
 /// Idempotently adopt `graph_iri` (a graph holding SHACL shapes that belongs to
 /// `dataset`) as a Library [`ShapeGraph`] *in place* (no copy) and bind it to
 /// the dataset in the validation layer.
@@ -45,6 +77,22 @@ pub fn auto_register_dataset_shapes_graph(
     if let Some(existing) = studio.get_shape_graph_by_iri(graph_iri)? {
         bindings::add_binding(&state.store, &target_iri, graph_iri)?;
         return Ok(Some(existing));
+    }
+
+    // A new entry is owned by the dataset's owner, and its managers may edit
+    // it through the Studio as far as `handlers::may_write_shape_graph_content`
+    // lets them. Only a graph the dataset actually uses as its shapes is
+    // adopted: one it holds (namespace, registered) or links as its shapes
+    // graph. Never a graph the Studio mints for an entry of its own
+    // (`urn:shapes:`, whose entry went with it), a system graph or a
+    // model-registry graph (bind a model's shapes instead).
+    if !dataset_may_adopt(state, dataset, graph_iri) {
+        tracing::info!(
+            dataset = %dataset.id,
+            graph = %graph_iri,
+            "shacl_studio: not adopting a graph the dataset does not hold into the Library"
+        );
+        return Ok(None);
     }
 
     let (targets, count) = super::run::analyze_shapes_graph(&state.store, graph_iri);

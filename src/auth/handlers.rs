@@ -3204,19 +3204,34 @@ pub async fn delete_organisation(
             .auth_db
             .list_dataset_graphs(dataset_id)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        // The shapes graph lives only in the datasets table; it goes through
-        // the same filter as the registered graphs.
-        if let Some(shapes_iri) = dataset.as_ref().and_then(|d| d.shapes_graph_iri.clone()) {
+        // The shapes graph lives only in the datasets table; one the dataset
+        // owns goes through the same filter as the registered graphs (any
+        // other one is only linked; see `shapes_graph_goes_with_dataset`).
+        if let Some(shapes_iri) = dataset
+            .as_ref()
+            .and_then(|d| d.shapes_graph_iri.clone())
+            .filter(|g| {
+                dataset_graph::shapes_graph_goes_with_dataset(
+                    &state.auth_db,
+                    &state.base_url,
+                    dataset_id,
+                    g,
+                )
+            })
+        {
             graph_iris.push(shapes_iri);
         }
-        // Drop only graphs no other dataset uses and that are neither system
-        // nor model-registry graphs (see `graphs_deletable_with_dataset`).
+        // Drop only the dataset's own graphs (or those the caller may delete
+        // directly) that no other dataset uses and that are neither system,
+        // SHACL Studio nor model-registry graphs (see
+        // `graphs_deletable_with_dataset`).
         for iri in dataset_graph::graphs_deletable_with_dataset(
             &state.store,
             &state.auth_db,
             &state.base_url,
             dataset_id,
             &graph_iris,
+            &current_user,
         ) {
             let _ = state.store.graph_store_delete(Some(iri.as_str()));
         }
@@ -4078,7 +4093,8 @@ pub async fn delete_dataset(
     }
 
     // Delete the named graphs associated with this dataset from Oxigraph, but only
-    // those no other dataset still uses and that are neither system nor
+    // those that are the dataset's own (or the caller may delete directly), that
+    // no other dataset still uses and that are neither system, SHACL Studio nor
     // model-registry graphs (`graphs_deletable_with_dataset`; a lookup error keeps
     // the graph). Run the whole sequence off the async runtime under the write
     // timeout: this can touch many (potentially large) graphs, and a stalled store
@@ -4090,15 +4106,26 @@ pub async fn delete_dataset(
         .list_dataset_graphs(&dataset_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     // The shapes graph is stored only in the datasets table (not listed in
-    // dataset_graphs), so it is added explicitly or it is orphaned in Oxigraph; it
-    // goes through the same filter.
-    if let Some(shapes_iri) = dataset.shapes_graph_iri.clone() {
+    // dataset_graphs), so it is added explicitly or it is orphaned in Oxigraph;
+    // it goes through the same filter. Only a shapes graph the dataset owns
+    // is a candidate (`shapes_graph_goes_with_dataset`): any other one is
+    // merely linked (a shapes graph the dataset wrote outside its namespace
+    // is registered to it, and listed above).
+    if let Some(shapes_iri) = dataset.shapes_graph_iri.clone().filter(|g| {
+        dataset_graph::shapes_graph_goes_with_dataset(
+            &state.auth_db,
+            &state.base_url,
+            &dataset_id,
+            g,
+        )
+    }) {
         graph_iris.push(shapes_iri);
     }
     let store = state.store.clone();
     let auth_db = state.auth_db.clone();
     let base_url = state.base_url.clone();
     let del_dataset_id = dataset_id.clone();
+    let actor = current_user.clone();
     let meta_graph = dataset_graph::dataset_metadata_graph_iri(&dataset_id);
     let write_timeout = std::time::Duration::from_secs(state.write_timeout_secs);
     tokio::time::timeout(
@@ -4110,6 +4137,7 @@ pub async fn delete_dataset(
                 &base_url,
                 &del_dataset_id,
                 &graph_iris,
+                &actor,
             ) {
                 let _ = store.graph_store_delete(Some(iri.as_str()));
             }
@@ -4245,29 +4273,35 @@ pub async fn add_dataset_graph(
     // private graph IRI to their own dataset and then read it, since
     // `get_accessible_graph_iris` makes any graph registered to an accessible
     // dataset readable (cross-tenant read — the IDOR the bulk-import path already
-    // defends against). A model-registry graph is refused for everyone, admins
-    // included: registered, it could be bulk-imported over past the registry's
-    // licence checks and wiped by a detach. Admins are otherwise unrestricted.
-    if let Err(msg) = crate::auth::dataset_graph::gate_dataset_graph_target(
+    // defends against), and write or delete it, since a dataset's editors
+    // import into and detach its graphs: a graph that already holds data is
+    // attached only by a caller who may write it directly. A model-registry
+    // graph is refused for everyone, admins included: registered, it could be
+    // bulk-imported over past the registry's licence checks and wiped by a
+    // detach. Admins are otherwise unrestricted.
+    let claim = match crate::auth::dataset_graph::gate_dataset_graph_target(
         &state.store,
         &db,
         &state.base_url,
         &dataset_id,
         &req.graph_iri,
-        current_user.is_admin(),
+        &current_user,
     ) {
-        state.audit.log_denied(
-            Some(current_user.user_id.clone()),
-            None,
-            "dataset_graph",
-            &dataset_id,
-            "register_graph",
-            None,
-        );
-        return Err((StatusCode::FORBIDDEN, msg));
-    }
+        Ok(claim) => claim,
+        Err(msg) => {
+            state.audit.log_denied(
+                Some(current_user.user_id.clone()),
+                None,
+                "dataset_graph",
+                &dataset_id,
+                "register_graph",
+                None,
+            );
+            return Err((StatusCode::FORBIDDEN, msg));
+        }
+    };
 
-    db.add_dataset_graph(&dataset_id, &req.graph_iri)
+    crate::auth::dataset_graph::register_claimed_graph(&db, &dataset_id, &req.graph_iri, claim)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Rewrite DCAT metadata graph to include the new void:subset entry.
@@ -4298,6 +4332,25 @@ pub async fn remove_dataset_graph(
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
     }
 
+    // Whether the stored graph goes too, decided while the registration (and
+    // the origin it records) still exists: only a graph that is the dataset's
+    // own — in its namespace, created by it, or one the caller may delete
+    // directly — that no other dataset uses, that is not this dataset's own
+    // shapes graph, and that is neither a system, SHACL Studio nor
+    // model-registry graph (a registration made before registry graphs were
+    // refused only loses its row). Any lookup error keeps the graph.
+    let own_shapes_graph = dataset.shapes_graph_iri.as_deref() == Some(req.graph_iri.as_str());
+    let deletable = !own_shapes_graph
+        && !dataset_graph::graphs_deletable_with_dataset(
+            &state.store,
+            &state.auth_db,
+            &state.base_url,
+            &dataset_id,
+            std::slice::from_ref(&req.graph_iri),
+            &current_user,
+        )
+        .is_empty();
+
     // Only a registration this dataset actually had is removed, and only then may
     // the stored graph go: detaching a graph the dataset never registered must not
     // delete whatever graph of that name exists (the model registry, a kept
@@ -4315,21 +4368,6 @@ pub async fn remove_dataset_graph(
             ),
         ));
     }
-
-    // Remove the Oxigraph graph too when nothing else holds it: no other dataset
-    // uses it, it is not this dataset's own shapes graph, and it is neither a
-    // system nor a model-registry graph (a registration made before registry
-    // graphs were refused only loses its row). Any lookup error keeps the graph.
-    let own_shapes_graph = dataset.shapes_graph_iri.as_deref() == Some(req.graph_iri.as_str());
-    let deletable = !own_shapes_graph
-        && !dataset_graph::graphs_deletable_with_dataset(
-            &state.store,
-            &state.auth_db,
-            &state.base_url,
-            &dataset_id,
-            std::slice::from_ref(&req.graph_iri),
-        )
-        .is_empty();
     if deletable {
         let _ = state.store.graph_store_delete(Some(req.graph_iri.as_str()));
     }
@@ -4360,6 +4398,23 @@ pub async fn patch_dataset_graph_role(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     {
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
+    }
+
+    // Only a graph registered to this dataset has a role or a privacy flag
+    // here. The role update below adopts a shapes graph into the SHACL Studio
+    // Library, owned by the dataset's owner, so naming any other graph would
+    // hand the dataset's members the Studio's hold on someone else's graph.
+    if !db
+        .dataset_has_graph(&dataset_id, &req.graph_iri)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!(
+                "Graph <{}> is not registered to dataset '{dataset_id}'",
+                req.graph_iri
+            ),
+        ));
     }
 
     // A request carrying `private` is a privacy toggle and leaves the role
@@ -4823,6 +4878,155 @@ pub async fn delete_user(
 
 // ─── Dataset SHACL config handler ─────────────────────────────────────────────
 
+/// The gate for linking `graph_iri` as `dataset_id`'s shapes graph
+/// (`PUT /api/datasets/:id/shacl`). A link is a read: validation reads the
+/// shapes, and `GET /api/datasets/:id/shapes` serves them to the dataset's
+/// readers. So the graph must be one the caller may read, and the link never
+/// makes it the dataset's to write or delete (`PUT /shapes` and a dataset
+/// delete check that separately).
+///
+/// * Everyone, admins included: a valid IRI that is not a model-registry
+///   graph (bind a model's shapes through the SHACL Studio instead).
+/// * Non-admins, in addition:
+///   - the dataset's own namespace is always fine;
+///   - a SHACL Studio Library graph (`urn:shapes:`) only when the caller may
+///     see its Library entry;
+///   - never a graph in another reserved namespace, or one registered to
+///     another dataset;
+///   - a graph that already holds data only when the caller may read it: a
+///     graph-ACL read grant, a Library entry they may see, or the shapes
+///     graph of a dataset they may read (sharing one dataset's shapes with
+///     another).
+fn gate_shapes_graph_link(
+    state: &AppState,
+    dataset_id: &str,
+    graph_iri: &str,
+    user: &AuthenticatedUser,
+) -> Result<(), String> {
+    if oxigraph::model::NamedNode::new(graph_iri).is_err() {
+        return Err(format!(
+            "Shapes graph <{graph_iri}> is not a valid IRI, so it cannot be linked to dataset \
+             '{dataset_id}'."
+        ));
+    }
+    dataset_graph::refuse_model_registry_graph(
+        &state.store,
+        &state.base_url,
+        dataset_id,
+        graph_iri,
+    )?;
+    if user.is_admin() || dataset_graph::dataset_owns_graph(&state.base_url, dataset_id, graph_iri)
+    {
+        return Ok(());
+    }
+    let db = &state.auth_db;
+    let refused = || {
+        format!(
+            "Graph <{graph_iri}> cannot be linked as the shapes graph of dataset '{dataset_id}': \
+             you may not read it, or it belongs to another dataset, the system or a server \
+             feature."
+        )
+    };
+    let orgs = db.get_user_org_ids(&user.user_id).unwrap_or_default();
+    let library_entry_visible = || {
+        crate::shacl_studio::store::ShaclStudioStore::new(db.pool())
+            .get_shape_graph_by_iri(graph_iri)
+            .ok()
+            .flatten()
+            .is_some_and(|set| {
+                crate::shacl_studio::access::can_access_set(&set, Some(&user.user_id), &orgs)
+            })
+    };
+    if graph_iri.starts_with("urn:shapes:") {
+        return if library_entry_visible() {
+            Ok(())
+        } else {
+            Err(refused())
+        };
+    }
+    // Whether `d` uses the graph as its shapes (its shapes graph setting, or
+    // registered with the shapes role) and the caller may read `d`: sharing
+    // one dataset's shapes with another.
+    let readable_shapes_of = |d: &crate::auth::models::Dataset| {
+        let as_shapes = d.shapes_graph_iri.as_deref() == Some(graph_iri)
+            || db
+                .list_dataset_graph_entries(&d.id)
+                .unwrap_or_default()
+                .iter()
+                .any(|e| e.graph_iri == graph_iri && e.graph_role == Some(GraphKind::Shapes));
+        as_shapes
+            && db
+                .can_access_dataset(Some(&user.user_id), d)
+                .unwrap_or(false)
+    };
+    // Another dataset's own shapes graph (its default `urn:dataset:{id}:shapes`,
+    // say) is shared the same way; any other graph in a reserved namespace is
+    // refused.
+    if dataset_graph::graph_in_foreign_reserved_namespace(&state.base_url, dataset_id, graph_iri) {
+        let shared = dataset_graph::namespace_dataset_id(&state.base_url, graph_iri)
+            .filter(|owner| *owner != dataset_id)
+            .is_some_and(
+                |owner| matches!(db.get_dataset(owner), Ok(Some(ref d)) if readable_shapes_of(d)),
+            );
+        return if shared { Ok(()) } else { Err(refused()) };
+    }
+    // A graph other datasets hold is linked only as their shapes, and only
+    // when the caller may read every one of them.
+    let Ok(holders) = db.datasets_with_graph(graph_iri) else {
+        return Err(refused());
+    };
+    let others: Vec<String> = holders.into_iter().filter(|id| id != dataset_id).collect();
+    if !others.is_empty() {
+        let all_readable_shapes = others
+            .iter()
+            .all(|id| matches!(db.get_dataset(id), Ok(Some(ref d)) if readable_shapes_of(d)));
+        return if all_readable_shapes {
+            Ok(())
+        } else {
+            Err(refused())
+        };
+    }
+    let shapes_of_readable_dataset = || {
+        db.list_datasets()
+            .unwrap_or_default()
+            .iter()
+            .any(|d| d.id != dataset_id && readable_shapes_of(d))
+    };
+    let registered_here = db.dataset_has_graph(dataset_id, graph_iri).unwrap_or(false);
+    let empty = !dataset_graph::graph_holds_data(&state.store, graph_iri);
+    // An empty graph another dataset links is that dataset's pending shapes
+    // graph: a second link now would stop it from writing them (a graph
+    // another dataset uses is not claimed for a write). Link it once the
+    // shapes exist.
+    let linked_elsewhere = || {
+        db.list_datasets().map_or(true, |all| {
+            all.iter()
+                .any(|d| d.id != dataset_id && d.shapes_graph_iri.as_deref() == Some(graph_iri))
+        })
+    };
+    if empty && !registered_here && linked_elsewhere() {
+        return Err(format!(
+            "Graph <{graph_iri}> is the shapes graph another dataset links, and it holds no shapes \
+             yet. Link it once they have been written."
+        ));
+    }
+    // A graph with no data yet is fine to link, unless the graph ACL already
+    // hands it to someone: then, as for a graph that holds data, the caller
+    // must be able to read it.
+    let unclaimed_and_empty = empty && !dataset_graph::graph_named_in_acl(db, graph_iri);
+    if registered_here
+        || unclaimed_and_empty
+        || db
+            .check_graph_permission(&user.user_id, user.role.as_str(), graph_iri, "read")
+            .unwrap_or(false)
+        || library_entry_visible()
+        || shapes_of_readable_dataset()
+    {
+        return Ok(());
+    }
+    Err(refused())
+}
+
 /// PUT /api/datasets/:dataset_id/shacl
 pub async fn update_dataset_shacl(
     Extension(current_user): Extension<AuthenticatedUser>,
@@ -4847,26 +5051,22 @@ pub async fn update_dataset_shacl(
     // GET /shapes, so it is a read target on this dataset just like a registered
     // graph. `can_write_dataset` only proves the caller may write *into this
     // dataset*; without this gate a writer could point shapes_graph_iri at another
-    // tenant's private graph and exfiltrate it via get_shapes. Constrain non-admins
-    // to the dataset's own namespace or an unclaimed external graph, reusing the
-    // same boundary as add_dataset_graph. A model-registry graph is refused for
-    // everyone, admins included: as the shapes graph it would be dumped by GET
-    // /shapes, adopted in place into the SHACL Studio Library (and so edited past
-    // the registry's licence checks) and dropped by a dataset delete. A blank IRI
-    // clears the setting and names no graph.
+    // tenant's private graph and exfiltrate it via get_shapes (see
+    // `gate_shapes_graph_link`). A model-registry graph is refused for everyone,
+    // admins included: as the shapes graph it would be dumped by GET /shapes,
+    // adopted in place into the SHACL Studio Library and dropped by a dataset
+    // delete. Linking is read-only: `PUT /shapes` writes the graph only if the
+    // dataset holds it or the caller may write it. A blank IRI clears the
+    // setting and names no graph.
+    // Resending the link the dataset already has (toggling `shacl_on_write`)
+    // changes no one's access, so it is not gated again.
     if let Some(shapes_iri) = req
         .shapes_graph_iri
         .as_deref()
         .filter(|s| !s.trim().is_empty())
+        .filter(|s| dataset.shapes_graph_iri.as_deref() != Some(*s))
     {
-        if let Err(msg) = crate::auth::dataset_graph::gate_dataset_graph_target(
-            &state.store,
-            &db,
-            &state.base_url,
-            &dataset_id,
-            shapes_iri,
-            current_user.is_admin(),
-        ) {
+        if let Err(msg) = gate_shapes_graph_link(&state, &dataset_id, shapes_iri, &current_user) {
             state.audit.log_denied(
                 Some(current_user.user_id.clone()),
                 None,

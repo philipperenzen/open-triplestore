@@ -1762,9 +1762,15 @@ pub fn latest_published_attributions(
 /// that errors, counts as held, so a caller never deletes or claims a graph
 /// it could not rule out.
 pub fn graph_held_by_version(store: &TripleStore, graph_iri: &str) -> bool {
-    if NamedNode::new(graph_iri).is_err() {
-        return true;
-    }
+    graph_held_by_version_checked(store, graph_iri).unwrap_or(true)
+}
+
+/// [`graph_held_by_version`] without the fail-closed default: `None` when the
+/// name is not a valid IRI or the registry query fails. For a caller that
+/// removes something when a graph IS held (a cleanup), where a lookup that
+/// could not answer must change nothing.
+pub fn graph_held_by_version_checked(store: &TripleStore, graph_iri: &str) -> Option<bool> {
+    NamedNode::new(graph_iri).ok()?;
     let q = format!(
         r#"
         PREFIX ver: <{VER}>
@@ -1773,7 +1779,47 @@ pub fn graph_held_by_version(store: &TripleStore, graph_iri: &str) -> bool {
         }} }}
         "#
     );
-    !matches!(store.query(&q), Ok(QueryResults::Boolean(false)))
+    match store.query(&q) {
+        Ok(QueryResults::Boolean(held)) => Some(held),
+        _ => None,
+    }
+}
+
+/// The id of a registry entry holding `graph_iri`: the entry a version graph
+/// `{base}/data-model/{id}/version/{ver}` (or a graph under it) is named
+/// after, else the entry of a version record naming it as its base graph or
+/// a sub-graph. `None` when no entry holds it or the lookup fails.
+pub fn data_model_holding_graph(
+    store: &TripleStore,
+    base_url: &str,
+    graph_iri: &str,
+) -> Option<String> {
+    NamedNode::new(graph_iri).ok()?;
+    let conventional = graph_iri
+        .strip_prefix(&format!("{}/data-model/", base_url.trim_end_matches('/')))
+        .and_then(|rest| rest.split_once("/version/"))
+        .map(|(id, _)| id)
+        .filter(|id| !id.is_empty() && !id.contains('/'));
+    if let Some(id) = conventional {
+        return Some(id.to_string());
+    }
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        SELECT ?m WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{
+          {{ ?v ver:graphIri <{graph_iri}> }} UNION {{ ?v ver:subGraph <{graph_iri}> }}
+          ?v ver:dataModel ?m .
+        }} }} LIMIT 1
+        "#
+    );
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(&q) {
+        if let Some(row) = solutions.flatten().next() {
+            let vals: Vec<Option<Term>> = row.values().to_vec();
+            let model = var_str(&vals, 0)?;
+            return Some(model.rsplit('/').next().unwrap_or(&model).to_string());
+        }
+    }
+    None
 }
 
 #[cfg(test)]

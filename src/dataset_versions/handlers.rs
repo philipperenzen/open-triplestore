@@ -398,13 +398,51 @@ pub async fn restore_version(
             "Version has no graph mapping to restore".to_string(),
         ));
     }
-    let restored_graphs: Vec<String> = record
-        .source_map
-        .iter()
-        .map(|m| m.source_graph.clone())
-        .collect();
+    // A restore overwrites (or, from an empty snapshot, deletes) each source
+    // graph and registers it to the dataset again, so every one goes through
+    // the gate a new target graph does. Since the snapshot, a graph may have
+    // left the dataset: detached and taken up by someone else, a source run
+    // graph a later promotion replaced, or a graph that became part of the
+    // model registry. Such a graph is skipped — it is no longer one of the
+    // dataset's live graphs — and reported; the rest is restored.
+    let mut mappings = Vec::with_capacity(record.source_map.len());
+    let mut claims = Vec::with_capacity(record.source_map.len());
+    let mut skipped = Vec::new();
+    for m in &record.source_map {
+        let g = &m.source_graph;
+        let registered = state
+            .auth_db
+            .dataset_has_graph(&id, g)
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let claim = if registered {
+            crate::auth::dataset_graph::refuse_model_registry_graph(
+                &state.store,
+                &state.base_url,
+                &id,
+                g,
+            )
+            .map(|_| crate::auth::dataset_graph::GraphClaim::Registered)
+        } else {
+            crate::auth::dataset_graph::gate_dataset_graph_target(
+                &state.store,
+                &state.auth_db,
+                &state.base_url,
+                &id,
+                g,
+                &user,
+            )
+        };
+        match claim {
+            Ok(claim) => {
+                mappings.push(m.clone());
+                claims.push((g.clone(), claim));
+            }
+            Err(reason) => skipped.push(json!({ "graph": g, "reason": reason })),
+        }
+    }
+    let restored_graphs: Vec<String> = mappings.iter().map(|m| m.source_graph.clone()).collect();
     let ldes_before = crate::ldes::capture::before(&state, &restored_graphs);
-    let restored = snapshot::restore(&state.store, &record.source_map).map_err(AppError::from)?;
+    let restored = snapshot::restore(&state.store, &mappings).map_err(AppError::from)?;
     crate::ldes::capture::after(&state, ldes_before);
     crate::entailment::after_write(&state, &restored_graphs);
     // The full-text index followed writes but never a restore, so searches kept
@@ -412,8 +450,11 @@ pub async fn restore_version(
     #[cfg(feature = "text-search")]
     state.refresh_text_index_graphs(&restored);
     // Ensure restored graphs are registered to the dataset.
-    for g in &restored {
-        let _ = state.auth_db.add_dataset_graph(&id, g);
+    for (g, claim) in &claims {
+        if restored.contains(g) {
+            let _ =
+                crate::auth::dataset_graph::register_claimed_graph(&state.auth_db, &id, g, *claim);
+        }
     }
     // Re-apply the version's validation-layer bindings (best-effort, tolerant of
     // shape graphs deleted since the snapshot).
@@ -436,7 +477,9 @@ pub async fn restore_version(
         Some(&ver),
         format!("Restored version {ver}"),
     );
-    Ok(Json(json!({ "restored": restored, "version": ver })))
+    Ok(Json(
+        json!({ "restored": restored, "skipped": skipped, "version": ver }),
+    ))
 }
 
 // ─── branches ─────────────────────────────────────────────────────────────

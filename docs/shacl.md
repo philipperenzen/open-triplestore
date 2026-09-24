@@ -296,13 +296,15 @@ curl -X POST http://localhost:7878/api/shacl/shape-graphs/<shape_graph_id>/impor
      -d '{"shapes":[{"source_graph":"urn:shapes:other","shape":"http://ex/PersonShape"}]}'
 ```
 
-**Register in place** — adopt a pre-existing shapes-bearing graph as a Library shape graph without copying (idempotent; returns the existing record if already known):
+**Register in place** — adopt a pre-existing shapes-bearing graph as a Library shape graph without copying (idempotent; returns the existing record, to a caller who may see it, if already known). The caller becomes the entry's owner, and owners edit the graph in place. So registering needs the right to change the graph, not only to read it: an admin, a graph-ACL write grant, write access to a dataset that holds the graph (in its namespace or registered to it), or write access to the registry entry holding it. Graphs named `urn:shapes:…` are registered only by admins:
 
 ```bash
 curl -X POST http://localhost:7878/api/shacl/register-shape-graph \
      -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' \
      -d '{"graph_iri":"http://example.org/graph/my-shapes","name":"My shapes"}'
 ```
+
+Every Studio write checks that right again: save, restore, import shapes, and a visibility change of an adopted graph. Managing a Library entry is enough on its own only for a graph the Studio minted for it (`urn:shapes:…`). So a dataset's shapes graph is edited in the Studio by the members who may write the dataset, not by an org viewer, as with `PUT /api/datasets/{id}/shapes`.
 
 Impact — *what data a shape graph is applied to* — is the reverse binding lookup: `GET /api/shacl/bindings?shape_graph_id=<shape_graph_id>` → `{ shape_graph_id, targets: [ …IRIs ] }`.
 

@@ -10,6 +10,8 @@
 //! * a registration made before that refusal existed only loses its row on a
 //!   detach, a dataset delete or an organisation delete: the stored graph
 //!   stays;
+//! * a one-time boot cleanup releases those old registrations, keeping a
+//!   shapes-role graph bound for validation;
 //! * a dataset still deletes its own graphs, and keeps a graph another dataset
 //!   still uses.
 
@@ -19,7 +21,8 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use common::*;
 use open_triplestore::auth::dataset_graph;
-use open_triplestore::auth::models::{OwnerType, Role, SystemRole, Visibility};
+use open_triplestore::auth::middleware::AuthenticatedUser;
+use open_triplestore::auth::models::{GraphKind, OwnerType, Role, SystemRole, Visibility};
 use open_triplestore::data_models::models::{DataModelVersion, VersionStatus};
 use open_triplestore::data_models::{content_digest, registry, seed_vocab};
 use open_triplestore::server::AppState;
@@ -421,11 +424,12 @@ async fn a_dataset_still_deletes_its_own_graphs() {
     make_dataset(&state, "theirs", OwnerType::User, "owner");
     let db = &state.auth_db;
 
-    // Register through the API, then detach: the graph goes.
+    // Register through the API, then detach: the graph goes. The external
+    // graph is new, so the dataset creates it (a graph that already held data
+    // would need the caller's direct write access).
     let own = format!("{base}/dataset/mine/g1");
     let external = "http://external.example/g";
     for g in [own.as_str(), external] {
-        put_triple(&state.store, g, "data");
         let (status, body) = send(
             &state,
             json(
@@ -437,6 +441,7 @@ async fn a_dataset_still_deletes_its_own_graphs() {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED, "<{g}>: {body}");
+        put_triple(&state.store, g, "data");
     }
     let (status, body) = send(
         &state,
@@ -456,23 +461,24 @@ async fn a_dataset_still_deletes_its_own_graphs() {
     );
 
     // A graph another dataset also registered stays on detach, and goes with
-    // the last dataset that holds it.
+    // the last dataset that holds it — the one that created it.
     db.add_dataset_graph("theirs", external).unwrap();
     let (status, _) = send(
         &state,
         json(
             Method::DELETE,
-            "/api/datasets/mine/graphs",
+            "/api/datasets/theirs/graphs",
             &user,
             serde_json::json!({ "graph_iri": external }),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(triple_count(&state, external), 1, "still used by 'theirs'");
+    assert_eq!(triple_count(&state, external), 1, "still used by 'mine'");
 
-    // A shapes graph two datasets share stays until the second is deleted; the
-    // dataset's report graph and registered graphs go with it.
+    // A shapes graph two datasets share stays until the second is deleted
+    // (its namespace's dataset is gone by then); the dataset's report graph
+    // goes with it.
     let shapes = format!("{base}/dataset/theirs/shapes");
     put_triple(&state.store, &shapes, "shape");
     db.update_dataset_shacl("theirs", false, Some(&shapes))
@@ -485,7 +491,6 @@ async fn a_dataset_still_deletes_its_own_graphs() {
     db.add_dataset_graph("theirs", reports).unwrap();
     let (status, body) = send(&state, delete("/api/datasets/theirs", &user)).await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
-    assert_eq!(triple_count(&state, external), 0, "the last holder took it");
     assert_eq!(
         triple_count(&state, reports),
         0,
@@ -496,13 +501,67 @@ async fn a_dataset_still_deletes_its_own_graphs() {
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
     assert_eq!(triple_count(&state, &shapes), 0);
 
-    // Another dataset's system graphs are never deleted with this one.
+    // Another dataset's system graphs are never deleted with this one; the
+    // external graph it created goes with it, as its last holder.
     let foreign_system = "urn:system:reports:dataset:elsewhere";
     put_triple(&state.store, foreign_system, "report");
     db.add_dataset_graph("mine", foreign_system).unwrap();
     let (status, body) = send(&state, delete("/api/datasets/mine", &user)).await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
     assert_eq!(triple_count(&state, foreign_system), 1);
+    assert_eq!(triple_count(&state, external), 0, "the last holder took it");
+}
+
+/// The one-time boot cleanup: registrations of registry graphs made before
+/// they were refused are released. The graphs stop being dataset-scoped for
+/// reads, a shapes-role row stays bound for validation, the dataset's shapes
+/// graph setting (which scopes no reads) is kept for its validation, other
+/// registrations are untouched, and the sweep runs once.
+#[tokio::test]
+async fn the_boot_cleanup_releases_old_registrations_of_registry_graphs() {
+    let f = fixture().await;
+    let base = f.state.base_url.to_string();
+    let db = &f.state.auth_db;
+    let own = format!("{base}/dataset/mine/instances");
+    db.add_dataset_graph("mine", &own).unwrap();
+    for (g, _) in &f.protected {
+        db.add_dataset_graph("mine", g).unwrap();
+    }
+    db.set_dataset_graph_role("mine", BUNDLE_SUB_GRAPH, Some(GraphKind::Shapes))
+        .unwrap();
+    db.update_dataset_shacl("mine", true, Some(BUNDLE_GRAPH))
+        .unwrap();
+    let (_, all_registered) = db.get_accessible_graph_iris(None).unwrap();
+    assert!(all_registered.contains(BUNDLE_GRAPH));
+    assert!(!dataset_graph::model_registry_claims_released(db));
+
+    let released = dataset_graph::release_model_registry_claims(&f.state.store, db, &base).unwrap();
+    assert_eq!(released, f.protected.len(), "every registry row");
+    assert!(dataset_graph::model_registry_claims_released(db));
+    assert_eq!(db.list_dataset_graphs("mine").unwrap(), vec![own.clone()]);
+    let ds = db.get_dataset("mine").unwrap().unwrap();
+    assert_eq!(ds.shapes_graph_iri.as_deref(), Some(BUNDLE_GRAPH));
+    assert!(ds.shacl_on_write);
+    let bound = open_triplestore::shacl_studio::bindings::bindings_for_target(
+        &f.state.store,
+        &open_triplestore::shacl_studio::bindings::dataset_target_iri(&base, "mine"),
+    );
+    assert!(bound.contains(&BUNDLE_SUB_GRAPH.to_string()), "{bound:?}");
+    let (_, all_registered) = db.get_accessible_graph_iris(None).unwrap();
+    assert!(!all_registered.contains(BUNDLE_GRAPH));
+    f.assert_untouched("after the cleanup");
+
+    // Once: a row made afterwards (by a path that bypasses the gate) stays for
+    // the gate and the delete filter to deal with.
+    db.add_dataset_graph("mine", BUNDLE_GRAPH).unwrap();
+    assert_eq!(
+        dataset_graph::release_model_registry_claims(&f.state.store, db, &base).unwrap(),
+        0
+    );
+    assert!(db
+        .list_dataset_graphs("mine")
+        .unwrap()
+        .contains(&BUNDLE_GRAPH.to_string()));
 }
 
 /// The registry lookup names a version's base graph and sub-graphs, and fails
@@ -551,13 +610,25 @@ fn the_dataset_graph_gate_refuses_registry_graphs_for_admins_too() {
     make_user(&state, "u");
     make_dataset(&state, "mine", OwnerType::User, "u");
     let gate = |g: &str, admin: bool| {
+        let user = AuthenticatedUser {
+            user_id: if admin { "adm" } else { "u" }.to_string(),
+            role: if admin {
+                SystemRole::SuperAdmin
+            } else {
+                SystemRole::User
+            },
+            can_publish: admin,
+            write_access: true,
+            can_mint_api_tokens: true,
+            scopes: Vec::new(),
+        };
         dataset_graph::gate_dataset_graph_target(
             &state.store,
             &state.auth_db,
             &base,
             "mine",
             g,
-            admin,
+            &user,
         )
     };
     for admin in [false, true] {
@@ -594,4 +665,6 @@ fn the_dataset_graph_gate_refuses_registry_graphs_for_admins_too() {
     assert!(!kept("urn:system:metadata:dataset:mine"));
     assert!(!kept(&format!("{base}/dataset/mine/g")));
     assert!(!kept("http://unclaimed.example/g"));
+    // A SHACL Studio Library graph goes only with its Library entry.
+    assert!(kept("urn:shapes:0000"));
 }

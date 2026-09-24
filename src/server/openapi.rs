@@ -786,7 +786,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Datasets",
                     "Delete dataset",
-                    "Delete the dataset and its registered graphs.",
+                    "Delete the dataset and the graphs it owns: its registered graphs that are in its namespace, that it created, or that the caller may delete directly (an admin, or a graph-ACL write grant), unless another dataset still uses them; and its shapes graph when that is in its namespace. System, SHACL Studio Library and model-registry graphs, and graphs it only links or took over from someone else, lose only their registration.",
                     vec![],
                     vec![
                         ("204", "Deleted"),
@@ -818,7 +818,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 ob(
                     "Datasets",
                     "Add graph to dataset",
-                    "Register an existing named graph with the dataset.",
+                    "Register a named graph with the dataset: one in its own namespace, a new graph (which the dataset creates), or — for a caller who may write it directly (an admin, or a graph-ACL write grant) — an existing graph that already holds data. The dataset's editors can then write it and a detach can delete it, so a graph someone else made is never attached on dataset authority alone. A new graph the graph ACL already grants to someone counts as theirs, like one that holds data. Graphs of another dataset, the system, the model registry or a server feature (`urn:shapes:`, `urn:source:`, `urn:mapping:`, `urn:run:`, `urn:dryrun:`, `urn:ots:`, `urn:config:`, `urn:entailment:`, another dataset's assets graph) are refused.",
                     vec![],
                     ref_body(
                         "GraphIriRequest",
@@ -827,7 +827,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     vec![
                         ("201", "Graph added"),
                         ("401", "Authentication required"),
-                        ("403", "Graph outside the dataset's boundary, or a model-registry graph (refused for admins too)"),
+                        ("403", "Graph outside the dataset's boundary, one that already holds data the caller may not write, or a model-registry graph (refused for admins too)"),
                     ],
                     true,
                 ),
@@ -837,7 +837,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 ob(
                     "Datasets",
                     "Set graph role / privacy",
-                    "Set a registered graph's box role (abox/tbox/shapes/…) or private flag.",
+                    "Set a registered graph's box role (abox/tbox/shapes/…) or private flag. Role `shapes` adopts the graph into the SHACL Studio Library.",
                     vec![],
                     ref_body(
                         "PatchDatasetGraphRoleRequest",
@@ -845,7 +845,11 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                             "graph_iri": "https://data.example.org/graphs/catalogue", "graph_role": "abox", "private": false
                         }),
                     ),
-                    vec![("200", "Graph updated"), ("401", "Authentication required")],
+                    vec![
+                        ("204", "Graph updated"),
+                        ("401", "Authentication required"),
+                        ("404", "Graph not registered to this dataset"),
+                    ],
                     true,
                 ),
             ),
@@ -854,7 +858,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 ob(
                     "Datasets",
                     "Remove graph from dataset",
-                    "Unregister a named graph from the dataset. The stored graph is also deleted when this dataset had it registered, no other dataset uses it (registered or as its shapes graph), it is not this dataset's shapes graph, and it is neither a system graph nor a model-registry graph. Otherwise only the registration is removed.",
+                    "Unregister a named graph from the dataset. The stored graph is also deleted when this dataset had it registered, the graph is the dataset's own (in its namespace, created by it, or one the caller may delete directly: an admin, or a graph-ACL write grant), no other dataset uses it (registered or as its shapes graph), it is not this dataset's shapes graph, and it is neither a system, SHACL Studio Library nor model-registry graph. Otherwise only the registration is removed.",
                     vec![],
                     ref_body(
                         "GraphIriRequest",
@@ -1429,9 +1433,9 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Versions",
                 "Restore version",
-                "Restore the dataset's live data to this version's snapshot.",
+                "Restore the dataset's live data to this version's snapshot. Each snapshot graph goes through the dataset graph gate: one the dataset no longer holds and may not take back (someone else's since, a source run a later promotion replaced, a model-registry graph) is skipped. The response is `{restored, skipped: [{graph, reason}], version}`.",
                 vec![],
-                vec![("200", "Restored"), ("401", "Authentication required")],
+                vec![("200", "Restored (see `skipped`)"), ("401", "Authentication required")],
                 true,
             ),
         )],
@@ -1538,7 +1542,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Validation",
                     "Upload shapes graph",
-                    "Replace the dataset's SHACL shapes graph (Turtle, or SHACL-C with Content-Type: text/shaclc). SHACL-C is parsed strictly: unrecognised input is a 400 naming its position and nothing is stored.",
+                    "Replace the dataset's SHACL shapes graph (Turtle, or SHACL-C with Content-Type: text/shaclc). SHACL-C is parsed strictly: unrecognised input is a 400 naming its position and nothing is stored. A shapes graph the dataset only links (set with `PUT /shacl`, outside its namespace and not registered to it) is written only when it holds no data yet or the caller may write it directly; it is then registered to the dataset with the shapes role (an admin's write too), so the dataset's editors write it from then on. A SHACL Studio Library graph is written by those who may edit its Library entry.",
                     vec![qp(
                         "lenient",
                         false,
@@ -1548,6 +1552,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                         ("204", "Shapes graph updated"),
                         ("400", "SHACL-C parse error (position named)"),
                         ("401", "Authentication required"),
+                        ("403", "The shapes graph is linked, not the dataset's, and the caller may not write it; or it is a model-registry graph"),
                     ],
                     true,
                 ),
@@ -1562,7 +1567,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             ob(
                 "Validation",
                 "Configure SHACL-on-write",
-                "Enable/disable validation on write and choose the shapes graph.",
+                "Enable/disable validation on write and choose the shapes graph. Linking is a read: for a non-admin the graph must be in the dataset's namespace, a SHACL Studio Library graph they may see, new (and granted to no one through the graph ACL), or one they may read (a graph-ACL read grant, or the shapes graph of a dataset they may read). Another dataset's shapes graph (its default `urn:dataset:{id}:shapes` included) is linkable by those who may read that dataset; an empty graph another dataset links is linkable only once its shapes are written. Resending the link the dataset already has is not checked again. Never a model-registry graph (bind a model's shapes in the SHACL Studio instead).",
                 vec![],
                 ref_body(
                     "DatasetShaclRequest",
@@ -1570,7 +1575,11 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                         "shacl_on_write": true, "shapes_graph_iri": "https://data.example.org/shapes"
                     }),
                 ),
-                vec![("200", "Updated"), ("401", "Authentication required")],
+                vec![
+                    ("204", "Updated"),
+                    ("401", "Authentication required"),
+                    ("403", "The caller may not link that graph"),
+                ],
                 true,
             ),
         )],
@@ -1700,18 +1709,18 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     mount(paths, "/api/shacl/shape-graphs/:id", vec![
         (M::Get, o("Validation", "Get a shape graph", "The record: name, description, visibility, tags, status, owner, backing graph IRI and facets.",
             vec![], vec![("200", "The shape graph"), ("403", "Not readable"), ("404", "Not found")], true)),
-        (M::Put, o("Validation", "Update a shape graph's metadata", "Body: `{name, description?, visibility?, tags?}`. The content is written through `/turtle`.",
-            vec![], vec![("200", "The updated shape graph"), ("403", "Not manageable"), ("404", "Not found")], true)),
-        (M::Delete, o("Validation", "Delete a shape graph", "Removes the record and clears its backing graph.",
+        (M::Put, o("Validation", "Update a shape graph's metadata", "Body: `{name, description?, visibility?, tags?}`. The content is written through `/turtle`. Changing the visibility of an entry whose graph the Studio did not mint needs the right to change that graph (see `/turtle`).",
+            vec![], vec![("200", "The updated shape graph"), ("403", "Not manageable, or a visibility change of a graph the caller may not change"), ("404", "Not found")], true)),
+        (M::Delete, o("Validation", "Delete a shape graph", "Removes the record, and clears its backing graph when the Studio minted it (`urn:shapes:`); an adopted graph keeps its content.",
             vec![], vec![("204", "Deleted"), ("403", "Not manageable"), ("404", "Not found")], true)),
     ]);
     mount(paths, "/api/shacl/shape-graphs/:id/turtle", vec![
         (M::Get, o("Validation", "Read a shape graph's content", "The shapes as Turtle, with an `@prefix` header built from the prefix registry for the namespaces the graph actually uses. `?format=shaclc` (or `Accept: text/shaclc`) serialises to SHACL Compact Syntax instead.",
             vec![qp("format", false, "`shaclc` for SHACL Compact Syntax; otherwise Turtle")],
             vec![("200", "Turtle (`text/turtle`) or SHACL-C (`text/shaclc`)"), ("403", "Not readable"), ("404", "Not found")], true)),
-        (M::Put, o("Validation", "Replace a shape graph's content", "Body is the whole document: Turtle, or SHACL Compact Syntax with `Content-Type: text/shaclc` (parsed strictly before anything is stored). Writes a new revision and a Shapes commit.",
+        (M::Put, o("Validation", "Replace a shape graph's content", "Body is the whole document: Turtle, or SHACL Compact Syntax with `Content-Type: text/shaclc` (parsed strictly before anything is stored). Writes a new revision and a Shapes commit. Managing the entry is not enough for a graph the Studio did not mint: the caller must be able to change that graph — an admin, write access to a dataset holding it (its namespace or registered to it), write access to the registry entry holding it, or a graph-ACL write grant. Restore and import-shapes follow the same rule.",
             vec![qp("message", false, "Revision note shown in the history (default `Edited`); trimmed, control characters removed, at most 200 characters")],
-            vec![("200", "`{version}` — the new revision number"), ("400", "Invalid UTF-8, Turtle or SHACL-C"), ("403", "Not manageable"), ("404", "Not found")], true)),
+            vec![("200", "`{version}` — the new revision number"), ("400", "Invalid UTF-8, Turtle or SHACL-C"), ("403", "Not manageable, or the caller may not change the graph"), ("404", "Not found")], true)),
     ]);
     mount(paths, "/api/shacl/shape-graphs/:id/revisions", vec![
         (M::Get, o("Validation", "List revisions", "Every stored revision of the shape graph, newest first: version, note, author, timestamp.",
@@ -1737,7 +1746,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     );
     mount(paths, "/api/shacl/shape-graphs/:id/restore/:rev", vec![
         (M::Post, o("Validation", "Restore a revision", "Writes the revision's snapshot back as a new revision (the history is never rewritten).",
-            vec![], vec![("200", "`{version}`"), ("403", "Not manageable"), ("404", "Shape graph or revision not found")], true)),
+            vec![], vec![("200", "`{version}`"), ("403", "Not manageable, or the caller may not change the graph"), ("404", "Shape graph or revision not found")], true)),
     ]);
     mount(paths, "/api/shacl/shape-graphs/:id/clone", vec![
         (M::Post, o("Validation", "Clone a shape graph", "Copies the content into a new private shape graph owned by the caller. Body: `{name?}` (default: the source name with \" (copy)\").",
@@ -1745,7 +1754,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     ]);
     mount(paths, "/api/shacl/shape-graphs/:id/import-shapes", vec![
         (M::Post, o("Validation", "Import shapes from other graphs", "Copies picked shapes — each with its full blank-node closure — into this shape graph. Body: `{shapes: [{source_graph, shape}], note?}`. Records a revision and a Shapes commit.",
-            vec![], vec![("200", "`{imported, version}`"), ("400", "No shapes given"), ("403", "Not manageable"), ("404", "Not found")], true)),
+            vec![], vec![("200", "`{imported, version}`"), ("400", "No shapes given"), ("403", "Not manageable, a source the caller may not read, or a graph they may not change"), ("404", "Not found")], true)),
     ]);
     mount(paths, "/api/shacl/shape-graphs/:id/validate", vec![
         (M::Post, o("Validation", "Meta-validate a shape graph", "Validates the shape graph *as data* against the built-in SHACL-SHACL shapes. Nothing is persisted.",
@@ -1779,8 +1788,8 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             vec![("200", "`{graphs}` or `{graph, shapes}`")], true)),
     ]);
     mount(paths, "/api/shacl/register-shape-graph", vec![
-        (M::Post, o("Validation", "Register an existing graph as a shape graph", "Adopts a named graph that already holds SHACL as a shape graph *in place* — no copy; the record points at the graph. Idempotent. Body: `{graph_iri, name, description?, visibility?, tags?, owner_type?, owner_id?}`.",
-            vec![], vec![("200", "The existing record"), ("201", "The new shape graph"), ("403", "The graph is not writable by the caller")], true)),
+        (M::Post, o("Validation", "Register an existing graph as a shape graph", "Adopts a named graph that already holds SHACL as a shape graph *in place* — no copy; the record points at the graph, and its owner edits it there. So the caller must be able to change the graph: an admin, a graph-ACL write grant, write access to a dataset holding it, or write access to the registry entry holding it. `urn:shapes:` graphs are registered only by admins. Every Studio write checks that right again. Idempotent: the existing record is returned to a caller who may see it. Body: `{graph_iri, name, description?, visibility?, tags?, owner_type?, owner_id?}`.",
+            vec![], vec![("200", "The existing record"), ("201", "The new shape graph"), ("400", "Not a valid graph IRI, or no shapes in it"), ("403", "The graph is not writable by the caller, or its existing record is not visible to them")], true)),
     ]);
     mount(paths, "/api/shacl/bindings", vec![
         (M::Get, o("Validation", "List bindings", "The validation layer. `?target_kind=&target_id=` lists the shape graphs bound to a target (`dataset` | `graph` | `shapegraph`); `?shape_graph_id=` lists the targets a shape graph validates.",

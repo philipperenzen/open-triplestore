@@ -93,6 +93,92 @@ fn guard_registry_graph_write(state: &AppState, graph_iri: &str) -> Result<(), A
     Ok(())
 }
 
+/// Whether `user` may change the content of `graph_iri`, the graph of a
+/// Library entry they manage, through the Studio. Managing the entry is not
+/// enough on its own: an entry is also made for a graph that already exists
+/// (`register_shape_graph`, a dataset's shapes graph, a seed bundle's
+/// binding), and its owner is whoever made it. So the authority follows the
+/// graph, as it does for a Graph Store write:
+///
+/// * an admin;
+/// * a graph the Studio minted for its entry (`urn:shapes:…`): the entry is
+///   its only ACL;
+/// * a model-registry graph: whoever may write the registry entry holding it
+///   (`can_write_ontology`); nobody else;
+/// * a graph a dataset holds — in its namespace or registered to it — for
+///   whoever may write that dataset (org members editing their dataset's
+///   shapes graph, as `PUT /api/datasets/:id/shapes` allows them);
+/// * any other graph: a graph-ACL write grant.
+///
+/// Evaluated at every write, so an entry made before this rule, or a grant
+/// since revoked, gives no more than the rule does.
+fn may_write_shape_graph_content(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    graph_iri: &str,
+) -> Result<bool, ApiErr> {
+    use crate::auth::dataset_graph;
+    use crate::data_models::registry;
+    if user.is_admin() || owns_backing_graph(graph_iri) {
+        return Ok(true);
+    }
+    if dataset_graph::graph_held_by_model_registry(&state.store, &state.base_url, graph_iri) {
+        let Some(id) = registry::data_model_holding_graph(&state.store, &state.base_url, graph_iri)
+        else {
+            return Ok(false);
+        };
+        let Some(entry) = registry::get_data_model(&state.store, &state.base_url, &id) else {
+            return Ok(false);
+        };
+        return state
+            .auth_db
+            .can_write_ontology(
+                &user.user_id,
+                entry.owner_type.as_deref(),
+                entry.owner_id.as_deref(),
+            )
+            .map_err(e500);
+    }
+    for id in dataset_graph::datasets_holding_graph(&state.auth_db, &state.base_url, graph_iri) {
+        if let Some(ds) = state.auth_db.get_dataset(&id).map_err(e500)? {
+            if state
+                .auth_db
+                .can_write_dataset(&user.user_id, &ds)
+                .map_err(e500)?
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(dataset_graph::may_write_graph_directly(
+        &state.auth_db,
+        user,
+        graph_iri,
+    ))
+}
+
+/// A Studio write into `graph_iri` by `user` (a save, a restore, an import,
+/// the clear on delete): refused (403) unless
+/// [`may_write_shape_graph_content`] allows it, then the registry's licence
+/// rule ([`guard_registry_graph_write`]).
+fn guard_shape_graph_write(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    graph_iri: &str,
+) -> Result<(), ApiErr> {
+    if !may_write_shape_graph_content(state, user, graph_iri)? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "You may not change graph <{graph_iri}>: managing its Library entry is not \
+                 enough. Its content can be changed by an admin, by whoever may write the \
+                 dataset or registry entry that holds it, or with write access to the graph."
+            ),
+        ));
+    }
+    guard_registry_graph_write(state, graph_iri)
+}
+
 /// Copying shapes out of `graph_iri` into an editable graph (a clone, an
 /// import): refused (403) when the graph holds a registered model version
 /// whose licence allows no altered copies, as the registry refuses a draft or
@@ -353,13 +439,30 @@ pub async fn update_shape_graph(
     Path(id): Path<String>,
     Json(body): Json<UpdateShapeGraphBody>,
 ) -> Result<impl IntoResponse, ApiErr> {
-    load_set_checked(&state, &user, &id, true).await?;
+    let set = load_set_checked(&state, &user, &id, true).await?;
+    // The entry's visibility decides who may read its graph through the
+    // Studio (`GET …/turtle`). For a graph the Studio did not mint, widening
+    // it is a decision for whoever may change that graph.
+    let visibility = parse_visibility(&body.visibility);
+    if visibility != set.visibility
+        && !owns_backing_graph(&set.graph_iri)
+        && !may_write_shape_graph_content(&state, &user, &set.graph_iri)?
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "You may not change who can read graph <{}> through the Library: it is not a \
+                 graph the Studio made, and you may not change it.",
+                set.graph_iri
+            ),
+        ));
+    }
     studio(&state)
         .update_shape_graph_meta(
             &id,
             &body.name,
             body.description.as_deref(),
-            parse_visibility(&body.visibility),
+            visibility,
             &body.tags,
         )
         .map_err(e500)?;
@@ -379,7 +482,7 @@ pub async fn delete_shape_graph(
     // shapes graph) belongs to someone else, perhaps to a registry model:
     // only the Library's rows go, never its data.
     if owns_backing_graph(&set.graph_iri) {
-        guard_registry_graph_write(&state, &set.graph_iri)?;
+        guard_shape_graph_write(&state, &user, &set.graph_iri)?;
         let _ = state
             .store
             .update(&format!("CLEAR SILENT GRAPH <{}>", set.graph_iri));
@@ -471,21 +574,24 @@ pub async fn put_shape_graph_turtle(
         &id,
         &turtle,
         Some(note.as_deref().unwrap_or("Edited")),
-        &user.user_id,
+        &user,
     )?;
     Ok(Json(serde_json::json!({ "version": version })))
 }
 
 /// Write Turtle to a shape graph's graph, recompute facets, and snapshot it.
+/// The caller has checked that `by` manages the entry; whether they may
+/// change its graph is checked here ([`guard_shape_graph_write`]).
 fn write_shapes_revision(
     state: &AppState,
     graph_iri: &str,
     set_id: &str,
     turtle: &str,
     note: Option<&str>,
-    by: &str,
+    user: &AuthenticatedUser,
 ) -> Result<i64, ApiErr> {
-    guard_registry_graph_write(state, graph_iri)?;
+    guard_shape_graph_write(state, user, graph_iri)?;
+    let by = user.user_id.as_str();
     state
         .store
         .graph_store_put(Some(graph_iri), turtle, oxigraph::io::RdfFormat::Turtle)
@@ -578,7 +684,7 @@ pub async fn restore_shape_graph_revision(
         &id,
         &snapshot.turtle,
         Some(&format!("Restored revision {rev}")),
-        &user.user_id,
+        &user,
     )?;
     Ok(Json(serde_json::json!({ "version": version })))
 }
@@ -624,7 +730,7 @@ pub async fn clone_shape_graph(
         &set.id,
         &turtle,
         Some(&format!("Cloned from {}", src.id)),
-        &user.user_id,
+        &user,
     )?;
     let set = st.get_shape_graph(&set.id).map_err(e500)?;
     Ok((StatusCode::CREATED, Json(set)))
@@ -1095,7 +1201,7 @@ pub async fn import_shapes(
     for g in sources {
         refuse_no_derivatives_copy(&state, g)?;
     }
-    guard_registry_graph_write(&state, &set.graph_iri)?;
+    guard_shape_graph_write(&state, &user, &set.graph_iri)?;
     let refs: Vec<(String, String)> = body
         .shapes
         .iter()
@@ -1153,7 +1259,15 @@ pub struct RegisterShapeGraphBody {
 /// POST /api/shacl/register-shape-graph — adopt an existing named graph that
 /// already holds SHACL as a first-class shape graph, *in place* (no copy): the
 /// record points at the graph. Powers "this existing shapes graph should be in
-/// the Library too". Idempotent: re-registering returns the existing record.
+/// the Library too". Idempotent: re-registering returns the existing record
+/// to a caller who may see it.
+///
+/// The caller becomes the entry's owner, and an owner edits the entry's graph
+/// in place, so registering needs the right to change that graph
+/// ([`may_write_shape_graph_content`]), not only to read it; the Studio checks
+/// that right again at every write. A graph named like one the Studio mints
+/// (`urn:shapes:…`) is left to admins: the Studio clears such a graph when
+/// its entry is deleted, so it must be one the Studio made.
 pub async fn register_shape_graph(
     Extension(user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -1161,18 +1275,34 @@ pub async fn register_shape_graph(
 ) -> Result<impl IntoResponse, ApiErr> {
     let st = studio(&state);
     if let Some(existing) = st.get_shape_graph_by_iri(&body.graph_iri).map_err(e500)? {
+        let orgs = org_ids(&state, &user.user_id);
+        if !user.is_admin() && !can_access_set(&existing, Some(&user.user_id), &orgs) {
+            return Err((StatusCode::FORBIDDEN, "Access denied".into()));
+        }
         return Ok((StatusCode::OK, Json(existing)));
     }
-    if !crate::auth::acl::check_graph_permission(
-        Some(&user),
-        &body.graph_iri,
-        "read",
-        &state.auth_db,
-    ) {
-        return Err((
+    let denied = || {
+        (
             StatusCode::FORBIDDEN,
-            format!("Read access denied for graph <{}>", body.graph_iri),
+            format!(
+                "Graph <{}> is not writable by you, so it cannot become your Library shape graph: \
+                 its owner edits it in place. Ask for write access to it, or import its shapes \
+                 into a shape graph of your own.",
+                body.graph_iri
+            ),
+        )
+    };
+    if oxigraph::model::NamedNode::new(&body.graph_iri).is_err() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("<{}> is not a valid graph IRI", body.graph_iri),
         ));
+    }
+    if !user.is_admin() && owns_backing_graph(&body.graph_iri) {
+        return Err(denied());
+    }
+    if !may_write_shape_graph_content(&state, &user, &body.graph_iri)? {
+        return Err(denied());
     }
     let (targets, count) = super::run::analyze_shapes_graph(&state.store, &body.graph_iri);
     if count == 0 {

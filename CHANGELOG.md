@@ -1922,6 +1922,84 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as an operand.
 
 ### Security
+- **A graph-ACL read grant let a user write the graph through the SHACL
+  Studio.** `POST /api/shacl/register-shape-graph` checked only read access,
+  then made the caller the owner of a Library entry over the graph, and the
+  Studio's save, restore and import checked only who owns the entry. Reading
+  a graph was enough to overwrite it, or to make it world-readable by setting
+  the entry public. Now the right to write follows the graph. Registering
+  needs it, and every Studio write checks it again: save, restore, import
+  shapes, and a visibility change of an entry whose graph the Studio did not
+  mint. The right is held by an admin, by whoever manages a graph the Studio
+  minted (`urn:shapes:…`), by whoever may write a dataset that holds the
+  graph (its namespace, or registered to it), by whoever may write the
+  registry entry holding a model graph, or through a graph-ACL write grant.
+  Entries made before this change give their owners no more than that. Org
+  members still edit their dataset's shapes graph in the Studio without a
+  grant. An org viewer, who may not write the dataset, no longer can. In the
+  same pass:
+  - `PATCH /api/datasets/{id}/graphs` with role `shapes` answers 404 for a
+    graph not registered to the dataset. Before, it adopted any graph holding
+    a shape into the Library, owned by the dataset's owner.
+  - Registering a graph named `urn:shapes:…` is for admins only.
+  - Asking to register a graph that already has an entry returns that entry
+    only to a caller who may see it.
+- **A dataset could take over, then delete, graphs it did not make.**
+  `POST /api/datasets/{id}/graphs` let a non-admin attach any graph that no
+  other dataset had registered: a graph an admin loaded over the Graph Store,
+  another user's SHACL Studio shape graph, a source run, or another dataset's
+  entailment, property-states or assets graph. Attaching one made it
+  writable through the dataset (bulk import, RML, RDF Patch, validate-and-
+  commit, LDES) and deleted it on detach. The same held for a shapes graph set
+  with `PUT /shacl`, which `PUT /shapes` then overwrote. Now:
+  - A graph that already holds data, or that the graph ACL grants to
+    someone, is attached only by a caller who may write it directly: an
+    admin, or a graph-ACL write grant.
+  - The graphs the server names for its own features are never attached:
+    `urn:shapes:`, `urn:source:`, `urn:mapping:`, `urn:run:`, `urn:dryrun:`,
+    `urn:ots:`, `urn:config:` (the mapping gates), `urn:entailment:`, and
+    other datasets' `{base}/datasets/{id}/…`.
+  - `dataset_graphs` records whether the dataset created each graph it adds.
+  - A detach, or a dataset or organisation delete, deletes a graph only if it
+    is the dataset's own (its namespace, or a graph it created) or the caller
+    may delete it directly. Anything else loses only its registration. Older
+    registrations outside the namespace count as not created.
+  - Linking a shapes graph is a read: the caller must be able to read the
+    graph, and another dataset's shapes graph (its default one included) may
+    be shared by those who can read that dataset; an empty graph another
+    dataset links is linkable once its shapes are written. `PUT /shapes`
+    writes a linked graph only if it is new or the caller may write it; that
+    write registers the graph to the dataset for its editors (an admin's
+    write only when a non-admin could have claimed the graph as new). A
+    dataset delete does not delete a graph it only links, except one left in
+    a deleted dataset's namespace, as its last user. Resending an unchanged
+    link (toggling `shacl_on_write`) is not checked again. A linked shapes graph outside the
+    namespace that was filled before this release is not registered, so
+    non-admin editors can no longer write it; an admin can attach it to the
+    dataset to hand it back.
+  - An RML run registers every `rml:graphMap` destination it creates, not
+    only `?graph=`, so the mapping runs again (an admin's run of a stored
+    mapping only those a non-admin could have claimed). A `rml:graphMap`
+    output written before this release is not registered, so a non-admin's
+    re-run is refused until an admin attaches it to the dataset.
+  - A version restore goes through the same gate as a new target graph. A
+    graph the dataset has since let go is skipped and listed under
+    `skipped`; the rest is restored.
+  - IFC and CityJSON imports compared their target with the dataset's IRI
+    without a trailing slash (dataset `bridge` could write
+    `{base}/dataset/bridge-inventory/…`). They now use the dataset boundary
+    and refuse model-registry graphs. The bulk IFC import's derived
+    `{target}/ifcowl` graph is now checked too; it was written unchecked.
+- **Old registrations of model-registry graphs are released at startup.**
+  `dataset_graphs` rows that named a registry graph before registration
+  refused them still made that graph dataset-scoped for reads, and hid it
+  from everyone else. A one-time sweep at the leader's boot removes them (on a
+  Raft cluster, once a member leads). A shapes-role row released this way
+  stays bound to its dataset in the SHACL Studio, so validation keeps reading
+  it. A dataset's shapes graph setting naming a registry graph is kept: it
+  scopes no reads, and every path that could write or delete it refuses
+  registry graphs. The boot adoption of legacy shapes graph settings into the
+  Library no longer adopts registry, system or `urn:shapes:` graphs.
 - **Detaching or deleting a dataset could wipe graphs it never owned.**
   `DELETE /api/datasets/{id}/graphs` deleted any graph no other dataset
   claimed, so any user who could create a dataset could wipe the model

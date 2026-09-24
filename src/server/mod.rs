@@ -2538,6 +2538,46 @@ pub async fn run(
             state.auth_db.clone(),
             state.base_url.to_string(),
         );
+        // A Raft cluster member boots as a follower and skips the boot seed,
+        // so the one-time release of dataset claims on model-registry graphs
+        // runs here instead, once this member leads (the marker it sets on the
+        // shared identity database makes every later leader skip it).
+        if state.store.replication().role() == crate::store::replication::Role::Cluster {
+            let claims_state = state.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+                loop {
+                    tick.tick().await;
+                    if crate::auth::dataset_graph::model_registry_claims_released(
+                        &claims_state.auth_db,
+                    ) {
+                        break;
+                    }
+                    if claims_state.store.replication().read_only() {
+                        continue;
+                    }
+                    let st = claims_state.clone();
+                    let released = tokio::task::spawn_blocking(move || {
+                        crate::auth::dataset_graph::release_model_registry_claims(
+                            &st.store,
+                            &st.auth_db,
+                            &st.base_url,
+                        )
+                    })
+                    .await;
+                    match released {
+                        Ok(Ok(n)) if n > 0 => tracing::warn!(
+                            "released {n} dataset claim(s) on model-registry graphs made before \
+                             they were refused"
+                        ),
+                        Ok(Err(e)) => tracing::warn!(
+                            "releasing dataset claims on model-registry graphs failed: {e}"
+                        ),
+                        _ => {}
+                    }
+                }
+            });
+        }
     }
 
     // GDPR/AVG: pseudonymise old audit rows daily.
@@ -2835,6 +2875,16 @@ pub fn run_boot_seed(
     // 1. SHACL Studio meta-shapes, legacy shape import, per-standard shapes.
     if let Err(e) = crate::shacl_studio::seed::seed_shacl_shacl(store, auth) {
         tracing::warn!("shacl_studio: SHACL-SHACL seed failed: {e}");
+    }
+    // Registrations of model-registry graphs made before the dataset graph
+    // gate refused them go first, so the Library adoptions below no longer
+    // treat those graphs as a dataset's (runs once; see the function).
+    match crate::auth::dataset_graph::release_model_registry_claims(store, auth, base) {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!(
+            "released {n} dataset claim(s) on model-registry graphs made before they were refused"
+        ),
+        Err(e) => tracing::warn!("releasing dataset claims on model-registry graphs failed: {e}"),
     }
     if let Err(e) = crate::shacl_studio::migrate::migrate_legacy(store, auth, base) {
         tracing::warn!("shacl_studio: legacy migration failed: {e}");

@@ -657,6 +657,7 @@ impl AuthDb {
                 graph_iri TEXT NOT NULL,
                 graph_role TEXT,
                 private INTEGER NOT NULL DEFAULT 0,
+                origin TEXT,
                 PRIMARY KEY (dataset_id, graph_iri)
             );
 
@@ -1327,6 +1328,13 @@ impl AuthDb {
             // Per-graph privacy: a private graph is hidden from dataset viewers and
             // the public — only principals who can write the owning dataset see it.
             "ALTER TABLE dataset_graphs ADD COLUMN private INTEGER NOT NULL DEFAULT 0",
+            // How a dataset came to hold a graph outside its own namespace:
+            // 'created' (the graph was empty and the dataset made it) or
+            // 'adopted' (it held data, and whoever attached it could write it).
+            // NULL on rows made before this column existed, and on rows the
+            // server itself registers: such a graph is deleted with the
+            // dataset only by a caller who could delete it directly.
+            "ALTER TABLE dataset_graphs ADD COLUMN origin TEXT",
             // Rename old role strings to the new canonical names.
             "UPDATE datasets SET graph_role = 'model' WHERE graph_role = 'tbox'",
             "UPDATE datasets SET graph_role = 'instances' WHERE graph_role = 'abox'",
@@ -4235,6 +4243,91 @@ impl AuthDb {
         )?;
         self.invalidate_accessible_graphs_cache();
         Ok(())
+    }
+
+    /// Register `graph_iri` to `dataset_id` and record how the dataset came to
+    /// hold it (`origin`: `'created'` or `'adopted'`, see the
+    /// `dataset_graphs.origin` column). A registration that already records
+    /// an origin keeps it; one that records none (the write path registered
+    /// the graph before its caller could) takes this one.
+    pub fn add_dataset_graph_with_origin(
+        &self,
+        dataset_id: &str,
+        graph_iri: &str,
+        origin: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "INSERT INTO dataset_graphs (dataset_id, graph_iri, origin) VALUES (?1,?2,?3) \
+             ON CONFLICT(dataset_id, graph_iri) DO UPDATE SET \
+             origin = COALESCE(dataset_graphs.origin, excluded.origin)",
+            params![dataset_id, graph_iri, origin],
+        )?;
+        self.invalidate_accessible_graphs_cache();
+        Ok(())
+    }
+
+    /// Whether `graph_iri` is registered to `dataset_id`.
+    pub fn dataset_has_graph(&self, dataset_id: &str, graph_iri: &str) -> anyhow::Result<bool> {
+        let conn = self.pool.get()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM dataset_graphs WHERE dataset_id=?1 AND graph_iri=?2",
+            params![dataset_id, graph_iri],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// The origin recorded for `graph_iri`'s registration to `dataset_id`:
+    /// `None` when the graph is not registered to it, `Some(None)` when the
+    /// row records none (it predates the column, or the server made it).
+    pub fn dataset_graph_origin(
+        &self,
+        dataset_id: &str,
+        graph_iri: &str,
+    ) -> anyhow::Result<Option<Option<String>>> {
+        let conn = self.pool.get()?;
+        conn.query_row(
+            "SELECT origin FROM dataset_graphs WHERE dataset_id=?1 AND graph_iri=?2",
+            params![dataset_id, graph_iri],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Ids of the datasets `graph_iri` is registered to.
+    pub fn datasets_with_graph(&self, graph_iri: &str) -> anyhow::Result<Vec<String>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT dataset_id FROM dataset_graphs WHERE graph_iri=?1 ORDER BY dataset_id",
+        )?;
+        let ids = stmt
+            .query_map(params![graph_iri], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(ids)
+    }
+
+    /// Every `(dataset_id, graph_iri, graph_role)` registration.
+    pub fn list_all_dataset_graph_rows(
+        &self,
+    ) -> anyhow::Result<Vec<(String, String, Option<GraphKind>)>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT dataset_id, graph_iri, graph_role FROM dataset_graphs \
+             ORDER BY dataset_id, graph_iri",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                let role: Option<String> = row.get(2)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    role.as_deref().and_then(GraphKind::from_str),
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// Remove `graph_iri`'s registration from `dataset_id`. Returns `true` when

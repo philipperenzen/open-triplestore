@@ -157,14 +157,76 @@ curl -X POST http://localhost:7878/api/datasets \
 
 ## Adding Graphs to a Dataset
 
-Graphs that belong to the model registry cannot be added to a dataset, by
-anyone including admins: the registry graph, anything under
+A graph registered to a dataset is the dataset's: its readers can query it,
+everyone else stops seeing it, its editors can write it (bulk import, RML,
+RDF Patch, LDES, commits, the SHACL Studio), and removing it or deleting the
+dataset can delete it. So which graphs a dataset may take on is limited.
+
+What a dataset writer who is not an admin may add:
+
+- any graph in the dataset's own namespace (`{base}/dataset/{id}/…` or
+  `urn:dataset:{id}:…`), and its own assets, property-states and entailment
+  graphs;
+- a new graph (one that holds no triples yet, and that the graph ACL grants
+  to no one), which the dataset creates;
+- an existing graph that already holds data, or that the graph ACL grants to
+  someone, **only if they may write it directly**: a graph-ACL write grant
+  (`POST /api/admin/acl/graphs`). A dataset role never counts. A graph an admin
+  loaded over the Graph Store, or another user's graph, is not attached on
+  dataset authority alone. An admin may attach it, or grant write access to
+  it.
+
+Never allowed for a non-admin: a graph registered to another dataset or used
+as its shapes graph, a system graph (`urn:system:…`), another dataset's
+namespace or its server-kept graphs, and graphs the server names for its own
+features (the SHACL Studio Library's `urn:shapes:…`, datasources, mappings,
+runs and dry runs, `urn:ots:…` and `urn:config:…`).
+
+The same rule applies wherever a dataset names a new graph to write: an RML
+mapping's `?graph=` and every `rml:graphMap` destination, validate-and-commit,
+an LDES sync, and a version restore. A graph a mapping run creates is
+registered to the dataset, so the next run writes it again. (An admin's run
+of a stored mapping registers a `rml:graphMap` destination only if a
+non-admin could have claimed it as new. Outputs of `rml:graphMap`
+destinations written before this rule are not registered: an admin can
+attach them.) A restore skips
+a graph the dataset no longer holds and may not take back (someone else's
+since, a source run graph a later promotion replaced), restores the rest, and
+lists what it skipped under `skipped`.
+
+Graphs that belong to the model registry cannot be added to a dataset by
+anyone, admins included: the registry graph, anything under
 `{base}/data-model/`, and any graph a model version names. Manage models
-through the data-model API. Removing a graph unregisters it and deletes its
-triples only when this dataset had it registered, no other dataset uses it,
-and it is not a system or model-registry graph; removing a graph the dataset
-never registered answers 404. Bulk imports and LDES syncs may not target a
-model-registry graph either.
+through the data-model API. Bulk imports and LDES syncs may not target a
+model-registry graph either. Registrations of registry graphs made before
+this rule existed are released once at startup. A shapes-role registration
+released this way stays bound to the dataset in the SHACL Studio for
+validation. A shapes graph *setting* that names a registry graph stays: it
+scopes no reads, and the paths that could write or delete the graph refuse
+registry graphs.
+
+### Removing a graph
+
+Removing a graph always unregisters it. Its triples are deleted only when all
+of these hold:
+
+- this dataset had it registered (removing a graph the dataset never
+  registered answers 404);
+- the graph is the dataset's own: in its namespace, created by it (it held no
+  data when it was added), or one the caller may delete directly (an admin, or
+  a graph-ACL write grant);
+- no other dataset uses it, and it is not this dataset's shapes graph;
+- it is not a system, SHACL Studio Library or model-registry graph.
+
+Otherwise only the registration goes and the data stays, for its owner or an
+admin. Deleting a dataset or an organisation applies the same rule to every
+graph of its datasets, and to its shapes graph setting when that graph is in
+the dataset's namespace: a shapes graph it only links is never deleted with
+it. A registration made before the dataset recorded whether it created a
+graph counts as not created. Such a graph outside the dataset's namespace is
+deleted only by an admin or a graph-ACL writer. (One exception to "never
+deleted with it": a linked shapes graph left in the namespace of a dataset
+that was deleted earlier goes with its last user.)
 
 ```bash
 # Add a graph (without specifying role)
@@ -206,6 +268,27 @@ curl -X PUT http://localhost:7878/api/datasets/<dataset_id>/shapes \
   -H 'Content-Type: application/turtle' \
   --data-binary @shapes.ttl
 ```
+
+Without a shapes graph setting this writes `urn:dataset:{id}:shapes`, the
+dataset's own. `PUT /api/datasets/<dataset_id>/shacl` with `shapes_graph_iri`
+*links* another graph instead. A link is a read: validation reads the graph,
+and the dataset's readers can fetch it from `GET …/shapes`. So a non-admin
+may link only a graph they may read: a SHACL Studio Library graph they can
+see, a graph-ACL read grant, or another dataset's shapes graph (its default
+`urn:dataset:{id}:shapes` included) if they can read that dataset. An empty
+graph another dataset already links is that dataset's pending shapes graph:
+link it once the shapes are written. `PUT …/shapes` then writes a linked graph only if it holds
+no data yet, or if the caller may write it directly (for a Library graph:
+edit its Library entry). A graph it writes that way, an admin's write
+included, becomes the dataset's (registered with the shapes role), and the
+dataset's editors write it from then on. Resending the link a dataset
+already has (to toggle `shacl_on_write`) is not checked again. Deleting the
+dataset never deletes a graph it only links.
+
+A shapes graph linked outside the dataset's namespace before this rule, and
+filled by `PUT …/shapes`, is not registered to the dataset, so non-admin
+editors can no longer write it there. An admin can attach it to the dataset
+(`POST /api/datasets/<dataset_id>/graphs`) to hand it back.
 
 See [shacl.md](shacl.md) for full SHACL documentation.
 

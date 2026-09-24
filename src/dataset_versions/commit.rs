@@ -134,14 +134,14 @@ fn authorize_target_graph(
     user: &AuthenticatedUser,
     dataset_id: &str,
     graph_iri: &str,
-) -> Result<(), AppError> {
+) -> Result<crate::auth::dataset_graph::GraphClaim, AppError> {
     crate::auth::dataset_graph::gate_dataset_graph_target(
         &state.store,
         &state.auth_db,
         &state.base_url,
         dataset_id,
         graph_iri,
-        user.is_admin(),
+        user,
     )
     .map_err(AppError::Forbidden)
 }
@@ -225,11 +225,14 @@ pub async fn validate_and_commit(
             // owns: the graph is REPLACED by the graph_store_put below, so
             // without this the "create a dataset, name someone else's graph"
             // path is a whole-graph overwrite.
-            authorize_target_graph(&state, &user, &ds_id, &graph_iri)?;
-            state
-                .auth_db
-                .add_dataset_graph(&ds_id, &graph_iri)
-                .map_err(|e| AppError::Internal(e.to_string()))?;
+            let claim = authorize_target_graph(&state, &user, &ds_id, &graph_iri)?;
+            crate::auth::dataset_graph::register_claimed_graph(
+                &state.auth_db,
+                &ds_id,
+                &graph_iri,
+                claim,
+            )
+            .map_err(|e| AppError::Internal(e.to_string()))?;
             (ds, graph_iri)
         }
         "dataset" => {
@@ -266,11 +269,14 @@ pub async fn validate_and_commit(
                 // the register-then-overwrite bypass that every other write path
                 // gates. `can_write_dataset` above only proves the caller owns
                 // *this* dataset, not that the graph is theirs to claim.
-                authorize_target_graph(&state, &user, &ds_id, &graph_iri)?;
-                state
-                    .auth_db
-                    .add_dataset_graph(&ds_id, &graph_iri)
-                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                let claim = authorize_target_graph(&state, &user, &ds_id, &graph_iri)?;
+                crate::auth::dataset_graph::register_claimed_graph(
+                    &state.auth_db,
+                    &ds_id,
+                    &graph_iri,
+                    claim,
+                )
+                .map_err(|e| AppError::Internal(e.to_string()))?;
             } else {
                 // Already registered: still never replace a model-registry graph
                 // (a registration made before such graphs were refused).
