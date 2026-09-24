@@ -2168,7 +2168,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (e.g. `sh:minExclusive`), reported with the expression's `sh:message`.
 - SHACL-AF **`sh:SPARQLFunction`**: user-defined functions (`sh:parameter`/`sh:order`/
   `sh:select` + `sh:prefixes`) are registered as callable SPARQL functions, usable from
-  queries, SHACL-SPARQL constraints and rules (e.g. `ex:afstandMeter`). Bodies are
+  queries, SHACL-SPARQL constraints and rules (e.g. `ex:distanceMetres`). Bodies are
   evaluated against a fresh in-memory store, fully supporting expression-style functions.
 - **Viewer feed** endpoint `GET /api/datasets/:id/viewer-feed`: per-element geometry +
   3D-file references resolved from the BOT/OMG/FOG/GeoSPARQL layering — labels, types,
