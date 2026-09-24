@@ -243,11 +243,14 @@ host — is served with **zero backend code changes and zero rebuild**:
     "title": "Acme Graph",
     "logoUrl": "/acme-logo.svg",
     "accent": "#7a2fe0"
+  },
+  "basemaps": {
+    "esriApiKey": "AAPT…"
   }
 }
 ```
 
-Both top-level keys are optional; anything omitted keeps its existing
+Every top-level key is optional; anything omitted keeps its existing
 default/registry value. The frontend fetches this once at boot
 ([`runtimeConfig.ts`](../frontend/src/lib/runtimeConfig.ts)) and applies it
 immediately — `branding.title` becomes the page `<title>` and sidebar
@@ -257,6 +260,16 @@ tab favicon, and `branding.accent` overrides the app's primary brand color
 fetch either 404s or, on this app's own backend, hits the SPA fallback and
 returns HTML instead of JSON — the frontend detects that by content-type and
 ignores it either way).
+
+`basemaps.esriApiKey` turns on satellite imagery in the map viewers (the 2D
+map, the 3D globe and embeds): Esri World Imagery, which Esri's terms tie to
+an ArcGIS account and key. Create a key of your own for this deployment in
+ArcGIS Location Platform, with the basemap/imagery privilege, and restrict it
+to your site's referrer; the key reaches every visitor's browser in tile
+URLs, as browser map keys do. Without a key the viewers show street maps only.
+Those are drawn from [OpenFreeMap](https://openfreemap.org)'s vector tiles,
+which need no key, with the credit "OpenFreeMap © OpenMapTiles Data from
+OpenStreetMap" on every map.
 
 ### Docker example
 

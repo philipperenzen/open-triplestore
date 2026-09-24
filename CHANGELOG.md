@@ -87,9 +87,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     as comments (IMBOR: headers only), and the server serves
     `/vocab/NOTICE.md` itself. Seeded and LOV-installed graphs are loaded
     unchanged: the loader used to add an `owl:versionInfo` triple to files
-    that state none. Earlier installs keep it, seeded and LOV alike:
-    their licence records say the copy differs from the file or may have been
-    modified.
+    that state none. On earlier installs, a seeded copy whose only difference
+    from its file is that triple has it removed at the next start and is
+    recorded as unchanged; a copy with any other difference, and every LOV
+    install, keeps it, and their licence records say the copy differs from
+    the file or may have been modified.
     A download calls its content the bundled file, unchanged, only when the
     seeder has checked it: each seeded version's record keeps the SHA-256 of
     its file and a digest of the stored triples, and `attribution.unchanged`
@@ -1053,7 +1055,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   served at `/api-docs/openapi.json` and the interactive UI is the frontend's
   own page — which also removes the duplicate `axum` 0.8 and `zip` 3 from the
   tree. TypeScript 7 remains held: typescript-eslint has no release that
-  supports it.
+  supports it. A fourth batch, in September, brings `argon2` 0.6 (on
+  `password-hash` 0.6 the hasher draws its own 16-byte salt; password hashes
+  stored under 0.5 still verify — pinned by a regression test on real
+  0.5-minted PHC strings — and new hashes keep the same
+  `$argon2id$v=19$m=19456,t=2,p=1$` form, so a rollback reads them too),
+  `vitest` 5 (no config or test changes needed), `oxigraph` 0.5.11 with its
+  `oxrdf` / `spargebra` / `spareval` / `sparopt` / `sparesults` / `oxttl`
+  siblings in lockstep, `aes-gcm` 0.11.1 (stored OAuth client-secret blobs
+  still decrypt, pinned by a known-answer test), `tower-http` 0.7.1, `flate2`
+  1.1.10, `lru` 0.18.4, `aws-sdk-s3` 1.142, `svelte` 5.57, `vite` 8.2.2, `n3`
+  2.6, `marked`, `devalue` past GHSA-9rgm-9g3h-6x36, `uuid`,
+  `aws-smithy-http-client`, `proj4`, `dompurify`, `@codemirror/search`,
+  `@codemirror/state`, `@typescript-eslint/parser`, and the SHA-pinned
+  `softprops/action-gh-release` 3.0.3. `oxiri` 0.3 is held: its `Iri` type
+  crosses the federation service-handler API, so it has to stay on the 0.2
+  line Oxigraph still uses.
 - **Lint.** eslint 10's new `no-useless-assignment` now runs at its recommended
   `error` severity for `.js`/`.ts`, and the nine genuine dead stores it found —
   five in `.js`/`.ts`, four in plain helper functions inside components — are
@@ -1104,6 +1121,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   seed no longer provides any of them. (`f20a87b`)
 
 ### Fixed
+- **Street maps no longer show "API KEY REQUIRED" tiles.** CARTO watermarks
+  every keyless basemap tile since September 2026, which covered the 3D globe
+  and the map previews. Those maps now draw OpenFreeMap's vector tiles into
+  raster tiles in the browser, in the app's light or dark theme. No key is
+  needed, and every map carries the credit "OpenFreeMap © OpenMapTiles Data
+  from OpenStreetMap". Satellite imagery (Esri World Imagery) is offered only
+  when the deployment sets its own ArcGIS key in `/config.json`
+  (`basemaps.esriApiKey`), because Esri's terms tie the imagery to one.
+  Without a key, the 2D map, the globe and embeds show streets and no
+  satellite toggle. `?basemap=satellite` on an embed falls back to streets.
 - **`public = false` in a seed-bundle manifest reaches entries an earlier
   build registered public** (NEN 2660-2 and the NEN relation profile, whose
   models the example bundles now keep private because NEN grants no licence to
@@ -1120,9 +1147,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one carries a registry marker, and a record from an earlier release counts
   only when its creator, id, version, graph, notes and creation date all read
   as that seeder wrote them. A copy whose licence allows other copies and that
-  differs from the bundled file (an admin's edit, an earlier file, the
-  `owl:versionInfo` triple earlier loaders added) is never modified, only
-  labelled as possibly modified. IMBOR is checked on every start, also with
+  differs from the bundled file (an admin's edit, an earlier file) is never
+  modified, only labelled as possibly modified. The one exception is a copy
+  whose only difference is the `owl:versionInfo` triple earlier loaders
+  added: that triple is removed, and the copy is the file again. IMBOR is checked on every start, also with
   `SEED_STANDARD_VOCABS=false`: a copy that differs, such as the altered source
   note installs seeded by 0.5.0 and 0.6.0 hold, is first kept as a private,
   deprecated version `2025-kept-<n>`, served only to the entry's writers, and
@@ -2000,6 +2028,35 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   scopes no reads, and every path that could write or delete it refuses
   registry graphs. The boot adoption of legacy shapes graph settings into the
   Library no longer adopts registry, system or `urn:shapes:` graphs.
+- **A SHACL-AF rule was a SPARQL UPDATE with the store's own authority.** The
+  `sh:construct` body of a `sh:SPARQLRule` was rewritten textually and handed
+  to `TripleStore::update`, which authorizes nothing and confines nothing — so
+  a shapes graph, which any writer of a dataset may upload
+  (`PUT /api/datasets/{id}/shapes`) and then run
+  (`POST /api/datasets/{id}/infer`, or a SHACL Studio pipeline), could read and
+  write every graph in the store: another tenant's private data, `urn:system:*`,
+  the model registry. `DROP ALL` was a rule; with one data graph the `WITH <g>`
+  prefix the engine added confined nothing, since
+  `WITH <g> INSERT { GRAPH <any> { … } } WHERE { GRAPH <any> { … } }` is valid
+  SPARQL. A `sh:TripleRule` was reachable the same way, because the focus node
+  was pasted into the generated update as `<{focus}>` and a focus node may be a
+  literal (`sh:targetNode "…"`) whose lexical form the shapes author writes.
+  Now: `sh:construct` must parse as the CONSTRUCT query SHACL-AF says it is
+  (the `INSERT { … } WHERE { … }` convenience form still parses as one;
+  anything else is refused by name, at load time), it is evaluated **read-only**
+  over the run's data graphs with its own `FROM`/`FROM NAMED` clauses replaced,
+  `$this` is bound as a term instead of being pasted in, and the engine — not
+  the rule — inserts the derived triples, into one graph the dataset holds.
+  `POST /api/datasets/{id}/infer` names that graph: the single data graph as
+  before, or, over several, the dataset's own `urn:dataset:{id}:inferred`
+  (registered with the `entailment` role) instead of the store's global default
+  graph, where derived triples were both unowned and unreadable.
+- **A `sh:sparql` constraint or `sh:SPARQLTarget` could read graphs the run may
+  not.** Their queries were scoped by prepending `FROM` clauses, which a
+  `FROM NAMED <someone-elses-graph>` written into the shape simply added to.
+  The dataset of a shape's query is now replaced outright with the run's data
+  graphs, and no named graph is available, so a `GRAPH` block inside one
+  matches nothing.
 - **The SHACL Studio shapes catalogue listed shapes from graphs the caller
   could not read.** `GET /api/shacl/shapes` hid only Library entries the
   caller could not see. Any other graph holding shapes (a private dataset's

@@ -44,7 +44,7 @@ this snippet for the view you are looking at.
 | Param | Applies to | Meaning |
 | --- | --- | --- |
 | `element=<IRI>` | map, 3d, cesium | Pre-select (and fly to) one element |
-| `basemap=streets\|satellite` | map | Initial basemap |
+| `basemap=streets\|satellite` | map | Initial basemap (satellite only when the deployment configures an Esri key, see [plugins.md](plugins.md#configjson); streets otherwise) |
 | `theme=light\|dark` | all | Force a theme (defaults to the visitor's OS preference) |
 | `src=<url>` | model | The model file to load (glTF/GLB, IFC, CityJSON, CityGML, STL) |
 | `format=gltf\|ifc\|cityjson\|citygml\|stl` | model | Required when `src` has no file extension (e.g. an asset `/download` URL) |

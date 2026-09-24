@@ -8654,10 +8654,67 @@ pub async fn infer_dataset(
         .filter(|g| !g.starts_with("urn:system:reports:"))
         .collect();
 
+    // A dataset with no graphs has nothing to infer over. Running anyway would
+    // hand the rules the store's *default* graph as their scope — every
+    // tenant's data is outside it, but so is anything this dataset owns, so
+    // there is nothing to gain and a boundary to lose.
+    if data_graphs.is_empty() {
+        return Ok(Json(serde_json::json!({ "inferred_triples": 0 })));
+    }
+
+    // Where the derived triples go. One data graph: into it, in place, as
+    // always. Several: into the dataset's own inference graph — never the
+    // store's global default graph, which no dataset holds and which
+    // `scope_query_to_authorized` puts out of reach of every reader, so
+    // triples materialised there were both unowned and invisible.
+    let target_graph = match data_graphs.as_slice() {
+        [one] => one.clone(),
+        _ => {
+            let iri = crate::auth::dataset_graph::dataset_inference_graph_iri(&dataset_id);
+            // Registered so it is a graph of the dataset like any other:
+            // ACL'd, listed, versioned, and removed with the dataset. It is
+            // inside the dataset's own namespace, so the dataset makes it —
+            // `origin = created`, which is what lets a detach delete it.
+            crate::auth::dataset_graph::register_claimed_graph(
+                &state.auth_db,
+                &dataset_id,
+                &iri,
+                crate::auth::dataset_graph::GraphClaim::Created,
+            )
+            .and_then(|()| {
+                state.auth_db.set_dataset_graph_role(
+                    &dataset_id,
+                    &iri,
+                    Some(crate::auth::models::GraphKind::Entailment),
+                )
+            })
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            iri
+        }
+    };
+    // The engine writes only here, so this is the one graph to authorize. The
+    // rules come from a shapes graph the caller may have uploaded themselves.
+    if !crate::auth::dataset_graph::dataset_holds_graph(
+        &state.auth_db,
+        &state.base_url,
+        &dataset_id,
+        &target_graph,
+    ) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!("Graph <{target_graph}> is not a graph of dataset '{dataset_id}'"),
+        ));
+    }
+
     let mut count = 0usize;
     for shapes_graph_iri in &shapes_graphs {
-        count += crate::shacl::infer(&state.store, shapes_graph_iri, &data_graphs)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        count += crate::shacl::infer_into(
+            &state.store,
+            shapes_graph_iri,
+            &data_graphs,
+            Some(&target_graph),
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
 
     Ok(Json(serde_json::json!({
