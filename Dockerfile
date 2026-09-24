@@ -33,6 +33,13 @@ COPY frontend/package.json frontend/package-lock.json* ./
 RUN --mount=type=cache,id=npm,target=/root/.npm \
     npm ci --no-audit --no-fund --prefer-offline
 COPY frontend/ ./
+# Besides the bundle, the build writes dist/THIRD-PARTY-LICENSES.txt: the
+# licence and notice files of every npm package it bundles or copies into dist/
+# (frontend/scripts/third-party-licenses.mjs), and fails if that file is missing.
+# The build copies the licence texts of material it ships outside npm
+# (web-ifc.wasm's linked libraries, inline icons) from LICENSES/ and fails
+# without them.
+COPY LICENSES/ /app/LICENSES/
 RUN npm run build
 
 # ─── Stage 2: Builder (cargo-chef for reliable dependency-layer caching) ───
@@ -64,6 +71,10 @@ COPY opengraph/ opengraph/
 # including the default `--features full` release image, which does not enable
 # `plugin-hello` but still needs `plugins/api` to resolve.
 COPY plugins/ plugins/
+# `tools/*` is a workspace member glob too: without the directory cargo cannot
+# load the workspace at all ("failed to read tools/*/Cargo.toml"). The image
+# does not build the tools; they only have to be present.
+COPY tools/ tools/
 RUN cargo chef prepare --recipe-path recipe.json
 
 # Stage 2b: cook dependencies (cached unless recipe.json changes), then build.
@@ -97,6 +108,7 @@ COPY src/ src/
 COPY benches/ benches/
 COPY opengraph/ opengraph/
 COPY plugins/ plugins/
+COPY tools/ tools/
 # The binary embeds the user-facing docs at compile time — src/docs/mod.rs uses
 # include_str!("../../docs/*.md") — so the docs/ tree must be present for the build.
 # (.dockerignore's `*.md` only excludes root-level markdown, not docs/.)
@@ -117,29 +129,63 @@ COPY assets/ assets/
 RUN --mount=type=cache,id=cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git,sharing=locked,target=/usr/local/cargo/git \
     cargo build --profile ${CARGO_PROFILE} --features "${CARGO_FEATURES}"
+# The licence notices of the crates linked into the binary: MIT, BSD, ISC and
+# Apache-2.0 require their copyright lines, licence texts and NOTICE files to
+# travel with it. The generator lists the crates `cargo tree` resolves for the
+# same features and target as the build (no dev/build-only crates, no proc
+# macros) and copies their licence files from the registry cache. Plain Python 3
+# and cargo, both in this image; a separate layer, so editing the script never
+# rebuilds the binary. It may fetch crate sources the build itself did not need
+# (`cargo metadata` resolves the whole workspace).
+COPY scripts/gen_rust_third_party_licenses.py scripts/
+RUN --mount=type=cache,id=cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git,sharing=locked,target=/usr/local/cargo/git \
+    python3 scripts/gen_rust_third_party_licenses.py --features "${CARGO_FEATURES}" \
+        --output /app/THIRD-PARTY-LICENSES-server.txt
 
-# ─── Stage 2c: LOV corpus (best-effort, checksum-verified) ───
-# Bakes the full Linked Open Vocabularies N-Quads corpus (~18 MB) into the
-# image so vocabulary term search + offline vocabulary install work without
-# any runtime network access.  Best-effort: when the download fails the image
-# still builds — the server can fetch the corpus itself at boot
-# (VOCAB_CORPUS_URL) or an operator can mount one at /app/assets/vocab/.
+# ─── Stage 2c: LOV corpus (best-effort, checksum-verified, licence-filtered) ───
+# Bakes the Linked Open Vocabularies N-Quads corpus into the image so
+# vocabulary term search + offline vocabulary install work without any runtime
+# network access — but only the vocabularies we may redistribute. LOV's
+# CC BY 4.0 covers LOV's own metadata; each vocabulary graph stays under the
+# licence its publisher declares, and many allow no redistribution
+# (NonCommercial, all rights reserved, copyleft, or no licence at all).
+# assets/vocab/lov-redistributable.txt, generated from the pinned dump by
+# scripts/build_lov_catalog.py, lists the graphs we may redistribute: their
+# licence allows an unmodified copy and LOV's copy can be shipped under it
+# (each with the notice it requires). The filter keeps exactly those graphs'
+# quads, unchanged, and
+# drops the rest, LOV's metadata graph included (the server embeds its own
+# catalog). The list ships next to the corpus as its manifest.
+# Best-effort: when the download fails the image still builds — the server can
+# fetch the full corpus itself at boot (VOCAB_CORPUS_URL) or an operator can
+# supply one (VOCAB_CORPUS_PATH, or {data_dir}/vocab/lov.nq.gz).
 # Set --build-arg LOV_CORPUS_URL= (empty) to skip the bake entirely.
 FROM debian:bookworm-slim AS lovcorpus
 RUN apt-get update && apt-get install -y curl ca-certificates && rm -rf /var/lib/apt/lists/*
 ARG LOV_CORPUS_URL=https://web.archive.org/web/20251218081818id_/https://lov.linkeddata.es/lov.nq.gz
 ARG LOV_CORPUS_SHA256=7b5522b4f86d642d7e48df289f3d3330898e9aa021cc4d4ef0ad38f0f039c233
+COPY assets/vocab/lov-redistributable.txt /lov-redistributable.txt
+# Every N-Quads line of the dump ends "<graph> .", so the graph is $(NF-1);
+# the allowlist's first column is the graph IRI.
 RUN mkdir -p /corpus && \
     if [ -n "$LOV_CORPUS_URL" ] \
-       && curl -fSL --retry 5 --retry-delay 5 --max-time 600 "$LOV_CORPUS_URL" -o /corpus/lov.nq.gz \
-       && echo "$LOV_CORPUS_SHA256  /corpus/lov.nq.gz" | sha256sum -c -; then \
-        echo "LOV corpus baked into image"; \
+       && curl -fSL --retry 5 --retry-delay 5 --max-time 600 "$LOV_CORPUS_URL" -o /tmp/lov-full.nq.gz \
+       && echo "$LOV_CORPUS_SHA256  /tmp/lov-full.nq.gz" | sha256sum -c - \
+       && gzip -dc /tmp/lov-full.nq.gz > /tmp/lov-full.nq \
+       && awk 'FNR == NR { if ($0 !~ /^#/ && NF) keep["<" $1 ">"] = 1; next } ($(NF-1) in keep)' \
+              /lov-redistributable.txt /tmp/lov-full.nq > /tmp/lov.nq \
+       && [ -s /tmp/lov.nq ] \
+       && gzip -9n -c /tmp/lov.nq > /corpus/lov.nq.gz; then \
+        cp /lov-redistributable.txt /corpus/lov-redistributable.txt; \
+        echo "LOV corpus baked into image: $(grep -vc '^#' /lov-redistributable.txt) redistributable vocabularies"; \
     else \
         echo "WARNING: LOV corpus not baked (download failed or disabled)." \
              "Term search covers platform vocabularies only until the server" \
              "downloads the corpus at boot (VOCAB_CORPUS_URL)."; \
         rm -f /corpus/lov.nq.gz; \
-    fi
+    fi; \
+    rm -f /tmp/lov-full.nq.gz /tmp/lov-full.nq /tmp/lov.nq
 
 # ─── Stage 3: Runtime ───
 FROM debian:bookworm-slim
@@ -162,17 +208,25 @@ RUN apt-get update && apt-get install -y \
 COPY --from=builder /app/target/${CARGO_PROFILE}/open-triplestore /usr/local/bin/open-triplestore
 
 # Ship the licence and attribution texts with the artifact. The image bundles
-# W3C vocabularies, an MPL-2.0 wasm binary, CC BY datasets (LOV, 3DBAG, IMBOR)
-# and Apache-2.0 frontend libraries — every one of those licences conditions
-# redistribution on the notice travelling with the distribution, and NOTICE is
+# third-party vocabularies (W3C, DCMI, OGC, …, and the filtered LOV corpus),
+# an MPL-2.0 wasm binary with its statically linked libraries, CC BY datasets
+# (3DBAG, IMBOR) and permissively licensed frontend code — those licences
+# condition redistribution on their notices and texts travelling with the
+# distribution: NOTICE lists them, LICENSES/ holds the texts, and NOTICE is
 # also what scopes the Commons Clause away from the bundled components.
 COPY LICENSE NOTICE /app/
+COPY LICENSES/ /app/LICENSES/
+# Generated notices of the Rust crates linked into the binary (builder stage).
+# The web UI's own are in /app/frontend/dist/THIRD-PARTY-LICENSES.txt, copied
+# with the frontend build below and served at /THIRD-PARTY-LICENSES.txt.
+COPY --from=builder /app/THIRD-PARTY-LICENSES-server.txt /app/
 
 # Copy frontend build
 COPY --from=frontend /app/frontend/dist /app/frontend/dist
 
-# LOV corpus for vocabulary term search + offline installs (may be absent —
-# see the lovcorpus stage above; the server degrades gracefully without it).
+# LOV corpus for vocabulary term search + offline installs, filtered to the
+# redistributable vocabularies, with its manifest (may be absent — see the
+# lovcorpus stage above; the server degrades gracefully without it).
 COPY --from=lovcorpus /corpus/ /app/assets/vocab/
 
 # Create non-root user

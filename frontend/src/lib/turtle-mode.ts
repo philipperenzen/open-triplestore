@@ -1,4 +1,4 @@
-import { StreamLanguage, foldService } from '@codemirror/language';
+import { StreamLanguage, foldService, type StreamParser } from '@codemirror/language';
 import { autocompletion } from '@codemirror/autocomplete';
 import { linter } from '@codemirror/lint';
 import { tags } from '@lezer/highlight';
@@ -19,8 +19,16 @@ const NS: Record<string, string> = NAMESPACES;
  */
 const PN_LOCAL = /(?:[A-Za-z0-9_:\-.À-￿]|%[0-9A-Fa-f]{2}|\\[_~.\-!$&'()*+,;=/?#@%])*/;
 
-// Turtle/N3 StreamLanguage tokenizer
-export const turtleLanguage = StreamLanguage.define({
+interface TurtleState {
+  inString: boolean;
+  stringChar: string | null;
+  tripleQuoted: boolean;
+  inIri: boolean;
+}
+
+// Turtle/N3 tokenizer. Exported on its own so tests can drive it line by line:
+// the StreamLanguage built from it keeps the spec internal.
+export const turtleStreamParser: StreamParser<TurtleState> = {
   name: 'turtle',
 
   startState() {
@@ -143,7 +151,9 @@ export const turtleLanguage = StreamLanguage.define({
     string2: tags.regexp,
     namespace: tags.namespace,
   },
-});
+};
+
+export const turtleLanguage = StreamLanguage.define(turtleStreamParser);
 
 // ─── Prefix declarations ────────────────────────────────────────────────────
 

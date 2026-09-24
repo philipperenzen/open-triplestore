@@ -1,7 +1,9 @@
 # Supported Standards
 
-The following W3C and OGC standards are implemented. Support levels reflect a
-golden-standard conformance pass (engine + high-complexity edge cases):
+The following W3C and OGC standards are implemented. Support levels are this
+project's own grades, from its test suites and a conformance review of the
+engine and high-complexity edge cases. They are not W3C or OGC conformance
+claims, and nothing here is OGC-certified:
 
 - **Full** — the normative core plus tested edge cases pass.
 - **Partial** — core works; specific features are unimplemented or deviate (see
@@ -23,7 +25,7 @@ golden-standard conformance pass (engine + high-complexity edge cases):
 | OWL 2 RL | Profile reasoning (materialised) | Partial¹¹ |
 | OWL 2 DL | Description-logic expressivity | Partial⁴ |
 | GeoSPARQL 1.1 | Spatial RDF, relation/metric functions | Partial⁵ |
-| SHACL Core | Structural constraint validation | Full⁶ |
+| SHACL Core | Structural constraint validation | Partial⁶ |
 | SHACL Advanced (AF / SPARQL) | SPARQL constraints, rules, targets | Partial⁷ |
 | SHACL-C | Compact-syntax parser/serializer | Partial⁸ |
 | OPM (Ontology for Property Management) | Property states with history | Partial — `opm:Property` / `opm:PropertyState` / current-outdated / reliability classes via the property-state API; no `opm:Calculation` or derived-property inference. See [datasets.md](datasets.md#time-evolving-properties-opm-profile). |
@@ -45,13 +47,16 @@ Conformance and high-complexity stress tests live in `tests/`. Each suite encode
 expected results taken from the specification text; intentional non-conformances
 are encoded as documented, flip-when-fixed tests. Two things the table makes
 explicit: only the **vendored** rows run a published test corpus (the W3C SPARQL
-1.1 query and update manifests, the W3C SHACL Core manifests and the OGC
+1.1 query and update manifests, the W3C SHACL core and sparql manifests and the OGC
 GeoSPARQL validator shapes) — every other suite is hand-written and *derived
 from* its spec, not the W3C/OGC corpus — and the counts are generated from the
-suites themselves, so they cannot drift from the code. The vendored corpora are
-scored in [conformance/sparql11.md](conformance/sparql11.md),
-[conformance/shacl.md](conformance/shacl.md) and
-[conformance/geosparql.md](conformance/geosparql.md).
+suites themselves, so they cannot drift from the code. Results on the vendored
+SHACL and GeoSPARQL corpora are in [conformance/shacl.md](conformance/shacl.md)
+and [conformance/geosparql.md](conformance/geosparql.md).
+[conformance/sparql11.md](conformance/sparql11.md) describes the SPARQL run and
+tracks its known gaps; it publishes no score, because the vendored SPARQL
+sections are a subset of a W3C test suite and W3C's test-suite licence policy
+allows no performance claims on a subset.
 
 <!-- conformance-table:start -->
 | Standard | Suite | Basis | Tests | Notes |
@@ -61,7 +66,7 @@ scored in [conformance/sparql11.md](conformance/sparql11.md),
 | GeoSPARQL 1.1 | `tests/geosparql_conformance.rs` | spec-derived | 107 |  |
 | LDP 1.0 (store level) | `tests/ldp_conformance.rs` | spec-derived | 43 |  |
 | LDP 1.0 (HTTP) | `tests/ldp_http_conformance.rs` | spec-derived | 13 |  |
-| OGC GeoSPARQL 1.1 validator shapes | `tests/ogc_geosparql_shacl_roundtrip.rs` | **vendored OGC corpus** | 2 |  |
+| OGC GeoSPARQL 1.1 validator shapes | `tests/ogc_geosparql_shacl_roundtrip.rs` | **vendored OGC corpus** (unmodified) | 2 |  |
 | OWL 2 DL extension rules | `tests/owl2_dl_conformance.rs` | spec-derived | 34 |  |
 | OWL 2 EL | `tests/owl2_el_conformance.rs` | spec-derived | 14 |  |
 | OWL 2 QL | `tests/owl2_ql_conformance.rs` | spec-derived | 21 |  |
@@ -79,11 +84,11 @@ scored in [conformance/sparql11.md](conformance/sparql11.md),
 | SPARQL engine coverage (sparqloscope) | `tests/sparqloscope_conformance.rs` | sparqloscope-derived | 67 |  |
 | Cross-standard HTTP smoke | `tests/standards_conformance.rs` | spec-derived | 25 |  |
 | SWRL | `tests/swrl_conformance.rs` | spec-derived | 4 |  |
-| SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (manifest-driven) | 1 | 136 corpus cases: 119 pass, 2 known failures, 15 runner-side skips (floor ≥90 asserted) |
+| SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (core + sparql sections, manifest-driven) | 1 | 136 corpus cases: 119 pass, 2 known failures, 15 runner-side skips (floor ≥90 asserted) |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 125 |  |
-| SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C corpus** (manifest-driven) | 1 | 485 corpus cases: 475 pass, 10 known failures, 0 runner-side skips (floor ≥450 asserted) |
+| SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 
-728 conformance tests across 26 suites; a further 563 tests in 78 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 3 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text.
+728 conformance tests across 26 suites; a further 592 tests in 86 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 3 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. The SHACL and GeoSPARQL corpus results are development and regression results on the vendored sections (`docs/conformance/`), not W3C or OGC conformance claims. The SPARQL 1.1 sections are a subset of a W3C test suite, so under W3C's test-suite licence policy they are used for development and bug tracking only, and no score is published for them.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->
@@ -131,10 +136,16 @@ behavior and will flip green when the limitation is resolved.
    geodesic *metric* family (`geof:metricDistance`, `metricArea`, …),
    `geof:aggUnion`, GeoJSON/KML/DGGS literals, and the Query Rewrite Extension.
    `geof:distance` is planar (CRS units), not geodetic.
-6. **SHACL Core** — *fixed.* Blank-node property shapes (`sh:property [ … ]`, the
-   standard idiom) are now enforced: the loader dereferences blank nodes through the
-   raw quad index rather than via invalid `<_:bn>` SPARQL. Applies to SHACL-on-write
-   too.
+6. **SHACL Core** — the Core constraint components are implemented, and
+   blank-node property shapes (`sh:property [ … ]`, the standard idiom) are
+   enforced (the loader dereferences blank nodes through the raw quad index;
+   this applies to SHACL-on-write too). Graded *Partial* on the results of the
+   W3C SHACL test suite's core section ([conformance/shacl.md](conformance/shacl.md)):
+   one known failure remains, `core/property/uniqueLang-002` (storage reads
+   `"1"^^xsd:boolean` back as `"true"`, so `sh:uniqueLang "1"` activates the
+   constraint), and results are compared on `sh:conforms` and the violation
+   focus nodes only, not on full result-set equality (constraint-component
+   IRIs, `sh:resultPath`, `sh:value`).
 7. **SHACL Advanced** — SPARQL-based targets (`sh:target` with `sh:select`),
    SPARQL constraints (`sh:sparql` with `sh:select`; `$this` is pre-bound via
    `VALUES` + `FROM <data-graph>`), rules, and `sh:qualifiedValueShape` counting

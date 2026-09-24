@@ -274,8 +274,23 @@ pub async fn bulk_import(
     let authz_namespace = authz_dataset_id
         .as_deref()
         .map(|ds_id| format!("{}/", dataset_graph::dataset_iri(&state.base_url, ds_id)));
+    let authz_store = state.store.clone();
+    let authz_base = state.base_url.clone();
     let authorize = move |graphs: &[String]| -> Result<(), String> {
-        // Admins and unmanaged (admin-only) imports may target any graph.
+        // No import writes a model-registry graph — the registry graph, a model
+        // version's graph, or anything under {base}/data-model/ — admins
+        // included: models change through the data-model API, which keeps
+        // their licence records true and refuses altered copies of content
+        // whose licence allows none (IMBOR).
+        for g in graphs {
+            if dataset_graph::graph_held_by_model_registry(&authz_store, &authz_base, g) {
+                return Err(format!(
+                    "Target graph <{g}> belongs to the model registry; change models through the \
+                     data-model API (/api/models), not a bulk import."
+                ));
+            }
+        }
+        // Admins and unmanaged (admin-only) imports may target any other graph.
         if authz_is_admin || authz_dataset_id.is_none() {
             return Ok(());
         }

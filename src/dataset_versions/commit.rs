@@ -121,25 +121,27 @@ async fn run_validation(
         .map_err(|e| AppError::Internal(format!("bad validator response: {e}")))
 }
 
-/// Refuse a commit target graph that belongs to another dataset or to the
-/// system. Both commit branches register the caller-supplied graph and then
-/// `graph_store_put` (replace) it, so an unchecked graph name is a whole-graph
-/// overwrite of whoever owns it. Admins are unrestricted, matching the same
-/// gate on the import and mapping-execution paths in `server::routes`.
+/// Refuse a commit target graph that belongs to another dataset, to the
+/// system or to the model registry. Both commit branches register the
+/// caller-supplied graph and then `graph_store_put` (replace) it, so an
+/// unchecked graph name is a whole-graph overwrite of whoever owns it. A
+/// model-registry graph is refused for everyone, admins included (this path
+/// runs none of the registry's licence checks); admins are otherwise
+/// unrestricted, matching the same gate on the mapping-execution path in
+/// `server::routes`.
 fn authorize_target_graph(
     state: &AppState,
     user: &AuthenticatedUser,
     dataset_id: &str,
     graph_iri: &str,
 ) -> Result<(), AppError> {
-    if user.is_admin() {
-        return Ok(());
-    }
-    crate::auth::dataset_graph::authorize_dataset_graph_target(
+    crate::auth::dataset_graph::gate_dataset_graph_target(
+        &state.store,
         &state.auth_db,
         &state.base_url,
         dataset_id,
         graph_iri,
+        user.is_admin(),
     )
     .map_err(AppError::Forbidden)
 }
@@ -269,6 +271,16 @@ pub async fn validate_and_commit(
                     .auth_db
                     .add_dataset_graph(&ds_id, &graph_iri)
                     .map_err(|e| AppError::Internal(e.to_string()))?;
+            } else {
+                // Already registered: still never replace a model-registry graph
+                // (a registration made before such graphs were refused).
+                crate::auth::dataset_graph::refuse_model_registry_graph(
+                    &state.store,
+                    &state.base_url,
+                    &ds_id,
+                    &graph_iri,
+                )
+                .map_err(AppError::Forbidden)?;
             }
             (ds, graph_iri)
         }

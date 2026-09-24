@@ -157,6 +157,15 @@ curl -X POST http://localhost:7878/api/datasets \
 
 ## Adding Graphs to a Dataset
 
+Graphs that belong to the model registry cannot be added to a dataset, by
+anyone including admins: the registry graph, anything under
+`{base}/data-model/`, and any graph a model version names. Manage models
+through the data-model API. Removing a graph unregisters it and deletes its
+triples only when this dataset had it registered, no other dataset uses it,
+and it is not a system or model-registry graph; removing a graph the dataset
+never registered answers 404. Bulk imports and LDES syncs may not target a
+model-registry graph either.
+
 ```bash
 # Add a graph (without specifying role)
 curl -X POST http://localhost:7878/api/datasets/<dataset_id>/graphs \

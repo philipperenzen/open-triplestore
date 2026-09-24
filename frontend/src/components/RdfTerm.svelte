@@ -201,7 +201,7 @@
 
   function showGeo(e) {
     e.stopPropagation();
-    openPreview({ kind: 'geo', wkts: [geoWkt], title: $i18nT('viewer.geometry') });
+    openPreview({ kind: 'geo', wkts: [geoWkt], title: $i18nT('viewer.geometry'), sources: graph ? [graph] : [] });
   }
   function showModel(e) {
     e.stopPropagation();

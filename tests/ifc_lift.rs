@@ -470,9 +470,11 @@ fn classifications_become_skos_concepts_and_the_flat_literal_the_ids_importer_ex
     let a = i("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
     // The leaf has no Location, so it is minted under the model; its parent
     // and the scheme have absolute Locations and keep them.
-    let leaf = i(&format!("{BASE}classification/Uniclass_2015/Ss_25_10_30"));
-    let parent = i("https://uniclass.thenbs.com/taxon/ss");
-    let scheme = i("https://uniclass.thenbs.com");
+    let leaf = i(&format!(
+        "{BASE}classification/Example_Classification/EX_20_10"
+    ));
+    let parent = i("https://example.org/classification/ex");
+    let scheme = i("https://example.org/classification");
     assert_has(
         &bot,
         &t(&wall, &i(&format!("{LIFT}hasClassification")), &leaf),
@@ -482,29 +484,29 @@ fn classifications_become_skos_concepts_and_the_flat_literal_the_ids_importer_ex
         &t(
             &wall,
             &i(&format!("{PROPS}ifcClassification")),
-            "\"Ss_25_10_30\"",
+            "\"EX_20_10\"",
         ),
     );
     assert_has(&bot, &t(&leaf, &a, &i(&format!("{SKOS}Concept"))));
     assert_has(
         &bot,
-        &t(&leaf, &i(&format!("{SKOS}notation")), "\"Ss_25_10_30\""),
+        &t(&leaf, &i(&format!("{SKOS}notation")), "\"EX_20_10\""),
     );
     assert_has(
         &bot,
-        &t(&leaf, &i(&format!("{SKOS}prefLabel")), "\"Wall systems\""),
+        &t(&leaf, &i(&format!("{SKOS}prefLabel")), "\"Brick walls\""),
     );
     assert_has(
         &bot,
         &t(
             &leaf,
             &i(&format!("{SKOS}definition")),
-            "\"Wall and barrier systems\"",
+            "\"Load-bearing walls of brick or block\"",
         ),
     );
     assert_has(&bot, &t(&leaf, &i(&format!("{SKOS}broader")), &parent));
     assert_has(&bot, &t(&leaf, &i(&format!("{SKOS}inScheme")), &scheme));
-    assert_has(&bot, &t(&parent, &i(&format!("{SKOS}notation")), "\"Ss\""));
+    assert_has(&bot, &t(&parent, &i(&format!("{SKOS}notation")), "\"EX\""));
     assert_has(
         &bot,
         &t(&parent, &i(&format!("{SKOS}topConceptOf")), &scheme),
@@ -515,7 +517,7 @@ fn classifications_become_skos_concepts_and_the_flat_literal_the_ids_importer_ex
         &t(
             &scheme,
             &i("http://purl.org/dc/terms/title"),
-            "\"Uniclass 2015\"",
+            "\"Example Classification\"",
         ),
     );
     assert_has(
@@ -523,12 +525,16 @@ fn classifications_become_skos_concepts_and_the_flat_literal_the_ids_importer_ex
         &t(
             &scheme,
             &i("http://purl.org/dc/terms/hasVersion"),
-            "\"2015\"",
+            "\"1.0\"",
         ),
     );
     assert_has(
         &bot,
-        &t(&scheme, &i("http://purl.org/dc/terms/publisher"), "\"NBS\""),
+        &t(
+            &scheme,
+            &i("http://purl.org/dc/terms/publisher"),
+            "\"Example Publisher\"",
+        ),
     );
     assert_eq!(stats.classifications, 1);
 }

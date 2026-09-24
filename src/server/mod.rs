@@ -2862,6 +2862,11 @@ pub fn run_boot_seed(
     }
     // 4. Standard RDF vocabularies into the model registry.
     crate::data_models::seed_vocab::seed_standard_vocabularies(seed_state);
+    // 4b. A copy the registry calls unchanged that no longer is — a write whose
+    //     re-check a crash cut short — is labelled before it is served as such.
+    if crate::data_models::write_guard::reverify_checked_copies(&seed_state.store) > 0 {
+        seed_state.mark_vocab_registry_dirty();
+    }
     // 5. Canonical dataset-metadata IRIs, then audit/repair — datasets exist now.
     crate::auth::dataset_graph::reconcile_all_dataset_metadata(store, &seed_state.base_url, auth);
     // 5b. Model/Vocabulary/Instance reframe: reclassify stored property

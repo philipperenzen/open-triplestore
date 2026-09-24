@@ -24,6 +24,7 @@
   import { navigate } from '../../lib/router/index.js';
   import { openSparkExplain } from '../../lib/sparkHelp.js';
   import { isDark } from '../../lib/theme.js';
+  import { creditHtml, tilesetCredits } from '../../lib/viewer/attribution';
 
   // Open the resource page for a predicate/object IRI (in-app navigation so it
   // shares the SPA session) — bnodes (_:…) are not dereferenceable, so callers
@@ -66,13 +67,18 @@
   // tile.openstreetmap.org — the OSM tile policy 403s app/localhost traffic,
   // which rendered the whole globe as "broken 3D Tiles" for users.
   const CARTO_STREETS = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png';
-  const CARTO_CREDIT = '© OpenStreetMap contributors © CARTO';
+  // On screen, not behind Cesium's "Data attribution" pop-up: OpenStreetMap's
+  // attribution guidelines ask for a visible, linked credit on the map itself.
+  const CARTO_CREDIT =
+    '<a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a> © <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>';
 
   let containerEl;
   let viewer = null;
   let tileset = null;
   let Cesium = null;
   let handler = null;
+  /** On-screen credits for the loaded tileset's data (see showDataCredits). */
+  let dataCredits = [];
 
   let loading = true;
   let error = '';
@@ -159,13 +165,13 @@
           ? new Cesium.UrlTemplateImageryProvider({
               url: ESRI_IMAGERY,
               maximumLevel: 19,
-              credit: ESRI_CREDIT,
+              credit: new Cesium.Credit(ESRI_CREDIT, true),
             })
           : new Cesium.UrlTemplateImageryProvider({
               url: CARTO_STREETS,
               subdomains: ['a', 'b', 'c', 'd'],
               maximumLevel: 19,
-              credit: CARTO_CREDIT,
+              credit: new Cesium.Credit(CARTO_CREDIT, true),
             });
       layers.addImageryProvider(provider);
       // If satellite tiles fail (network/provider outage), drop back to the
@@ -201,6 +207,7 @@
     // element that ISN'T a tileset feature — under REPLACE that would dim the
     // whole block to grey on every selection, defeating the COLOR_0 polish.
     viewer.scene.primitives.add(tileset);
+    showDataCredits();
     // A fresh tileset has no style; drop the idempotency cache so the current
     // selection re-applies onto it.
     lastStyledIri = null;
@@ -218,6 +225,18 @@
     }
     applyHighlight(embedded ? selected : selectedIri);
     viewer.scene.requestRender();
+  }
+
+  /**
+   * Put the credits the tileset declares (asset.extras.credits — e.g. 3DBAG's
+   * CC BY line for its block) on screen as linked Cesium credits. The GLB's
+   * glTF copyright carries the same notice, but Cesium lists content credits
+   * unlinked, behind its "Data attribution" pop-up.
+   */
+  function showDataCredits() {
+    for (const c of dataCredits) viewer.creditDisplay.removeStaticCredit(c);
+    dataCredits = tilesetCredits(tileset?.asset).map((c) => new Cesium.Credit(creditHtml(c), true));
+    for (const c of dataCredits) viewer.creditDisplay.addStaticCredit(c);
   }
 
   /** Fixed Nijmegen pose so the camera always frames *something*, even when the
@@ -547,6 +566,12 @@
     font-size: 0.62rem;
     opacity: 0.7;
   }
+  /* Right-align the credits, where 3DBAG asks for its credit on a browsable
+     map. Cesium pins the bar's box across the bottom with inline styles, so
+     aligning its text is what moves them from the default bottom-left. */
+  :global(.cesium-canvas .cesium-viewer-bottom) {
+    text-align: right;
+  }
 
   .cesium-overlay-zone {
     position: absolute;
@@ -715,7 +740,8 @@
     position: absolute;
     top: 10px;
     right: 10px;
-    bottom: 10px;
+    /* Clear the credit bar, so the data credit stays visible while inspecting. */
+    bottom: 26px;
     z-index: 6;
     width: min(340px, 42%);
     display: flex;

@@ -1,6 +1,6 @@
 # GeoSPARQL
 
-Full OGC GeoSPARQL 1.1 support via the GEOS C++ library. Store geometry data as WKT or GML literals and query it using standard spatial relation functions.
+Implements OGC GeoSPARQL 1.1 (in part — see the conformance table in the README) via the GEOS C++ library; this is not an OGC compliance certification. Store geometry data as WKT or GML literals and query it using standard spatial relation functions.
 
 ## Supported functions
 

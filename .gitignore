@@ -12,8 +12,10 @@ node_modules/
 *.sqlite
 *.sqlite3
 
-# The full LOV corpus (~18 MB) is baked into the Docker image / downloaded at
-# boot, never committed — only the derived catalog (lov-catalog.json.gz) is.
+# The LOV corpus is never committed: the Docker image bakes a filtered extract
+# of the pinned dump (the graphs listed in lov-redistributable.txt), and a full
+# dump is operator-supplied or downloaded at boot. Only the derived catalog
+# (lov-catalog.json.gz) and that list are committed.
 /assets/vocab/lov.nq.gz
 
 # ─── Test / CI artifacts ────────────────────────────────────────────────────

@@ -9,6 +9,12 @@
 # Irreflexivity and acyclicity are NOT declared here: OWL 2 DL forbids
 # irreflexive/asymmetric on a transitive property, so they are SHACL shapes
 # (shapes.ttl). Containment, constitution and connection are not transitive.
+#
+# The relation IRIs and their English labels are NEN 2660-2:2022's (© NEN,
+# which grants no licence; its files are fetched, never vendored — see
+# manifest.toml). The characteristics and the scope notes are this project's
+# own words, not NEN's definitions, and NEN has not published or endorsed
+# this profile.
 @prefix nen2660: <https://w3id.org/nen2660/def#> .
 @prefix owl:     <http://www.w3.org/2002/07/owl#> .
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
@@ -23,7 +29,7 @@ prof: a owl:Ontology ;
 
 nen2660:hasPart a owl:ObjectProperty , owl:TransitiveProperty ;
     rdfs:label "has part"@en ;
-    skos:scopeNote "Proper parthood between concrete concepts: the deck is part of the bridge, the bearing part of the deck, so — transitively — the bearing is part of the bridge. Never reflexive, never cyclic (shapes)."@en .
+    skos:scopeNote "Proper parthood: the deck is part of the bridge, the bearing part of the deck, so — transitively — the bearing is part of the bridge. Never reflexive, never cyclic (shapes)."@en .
 
 nen2660:hasFunctionalPart a owl:ObjectProperty ;
     rdfs:subPropertyOf nen2660:hasPart ;
@@ -39,20 +45,20 @@ nen2660:hasTechnicalPart a owl:ObjectProperty ;
 
 nen2660:contains a owl:ObjectProperty ;
     rdfs:label "contains"@en ;
-    skos:scopeNote "A spatial region contains the real objects located in it. Location is not parthood: the pump in the service building is contained in it, not part of it, and containment does not chain through parts. Not transitive; irreflexive by shape; a contained object lies within the region's geometry (shape)."@en .
+    skos:scopeNote "Location: a spatial region (a room, a service area) holds whatever sits inside it. Location is not parthood: the pump in the service building is contained in it, not part of it, and containment does not chain through parts. Not transitive; irreflexive by shape; a contained object lies within the region's geometry (shape)."@en .
 
 # ── Constitution ─────────────────────────────────────────────────────────────
 
 nen2660:consistsOf a owl:ObjectProperty ;
     rdfs:label "consists of"@en ;
-    skos:scopeNote "The matter a real object or mixture is made of (steel, concrete). Constitution is not parthood: the steel is not a part of the beam. Not transitive."@en .
+    skos:scopeNote "Constitution: what something is made of — a beam of steel, a deck of concrete. Constitution is not parthood: the steel is not a part of the beam. Not transitive."@en .
 
 # ── Connection ───────────────────────────────────────────────────────────────
 
 nen2660:connectsObject a owl:ObjectProperty ;
     rdfs:label "connects object"@en ;
-    skos:scopeNote "A connection or interface connects physical objects. No hierarchy, no transitivity; a connection never connects an object to itself (shape)."@en .
+    skos:scopeNote "Joining: a coupling, weld or other interface ties two objects together — a pipe to a pump, a girder to a bearing. No hierarchy, no transitivity; a connection never connects an object to itself (shape)."@en .
 
 nen2660:connectsPort a owl:ObjectProperty ;
     rdfs:label "connects port"@en ;
-    skos:scopeNote "A connection or interface connects ports of physical objects. No hierarchy, no transitivity."@en .
+    skos:scopeNote "Joining at a port: the interface ties specific ports together (a pump's outlet to a pipe's inlet) rather than whole objects. No hierarchy, no transitivity."@en .

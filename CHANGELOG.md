@@ -14,6 +14,111 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Third-party data carries its licences, and the image ships only what may
+  be redistributed.** A licence audit of every vendored dataset, vocabulary,
+  test suite and bundled binary (each verdict challenged against the rights
+  holder's own terms) led to:
+  - **LOV:** the catalogue records each vocabulary's own licence
+    (`license`, `license_declared`, `license_status`, `redistributable` on
+    every vocabulary record; `license_url`, `license_scope` and
+    `modifications` on the source) instead of stamping LOV's CC BY 4.0 on
+    everything. Descriptions copied from vocabularies whose licence does not
+    allow redistribution are gone. The Docker image bakes only the corpus
+    graphs whose licence allows a verbatim copy (listed in
+    `assets/vocab/lov-redistributable.txt`); the full dump still works when an
+    operator supplies it (`VOCAB_CORPUS_PATH`). An install records the
+    vocabulary's own licence, and one whose licence does not allow
+    redistribution installs privately. The vocabulary search shows each
+    licence.
+  - **Notices and licence texts:** a rewritten `NOTICE` with correct holders,
+    licences, sources and modification statements; `LICENSES/` with the texts
+    the bundled material requires (shipped at `/app/LICENSES/`);
+    `frontend/public/vocab/NOTICE.md` (served at `/vocab/NOTICE.md`) with one
+    entry per bundled vocabulary and the notices their licences require, also
+    in the header of each file that has one (imbor.ttl is shipped unmodified,
+    with no header); licence files and provenance for the W3C SPARQL, W3C
+    SHACL and OGC GeoSPARQL test suites; the libraries statically linked into
+    `web-ifc.wasm`; the Lucide/Feather icons, IFC schema names, EPSG
+    parameters and LOINC codes credited where they are used.
+  - **Credits on screen:** the 3DBAG credit shows on the Cesium globe, embeds
+    and 3D previews as well as the map, and 3D Tiles carry it as glTF
+    `asset.copyright`; the OpenStreetMap/CARTO and Esri basemap credits on the
+    globe are shown on screen instead of behind a pop-up.
+  - **Term search serves only what may be redistributed.** The term index
+    skips every LOV vocabulary whose licence does not allow redistribution,
+    whatever corpus is mounted (a full dump included); existing indexes are
+    rebuilt on first boot. Each shipped graph's required notice is filled in
+    per graph (catalogue `license_notice`, and a notice column in
+    `lov-redistributable.txt`); four vocabularies are withheld because LOV's
+    copy is not faithful to a work that allows no modification, the licence's
+    required copyright line is not published, or the licence's version is not
+    stated (`redistribution_withheld`). The OGL, Flemish-licence and ISA
+    graphs carry their required notices, the ISA No Warranty disclaimer
+    included; where LOV mis-decoded characters in a graph whose licence allows
+    modification (14 graphs), its notice says so. The catalogue adds
+    `license_uris`, `no_derivatives` and `lov_misdecoded`.
+  - **LOV installs carry a licence record; earlier installs are checked.**
+    Each version installed from the LOV corpus gets a licence record (licences
+    with URIs, the required notice, the source, and a link to the new
+    `/api/vocab/notice` licence page); downloads carry `rel="license"` links,
+    and a CC BY-ND or OGC Document Notice vocabulary cannot be drafted,
+    branched or edited (403). The copy check compares with LOV's copy as the
+    store holds it (typed literals in its canonical form, with the same
+    values). Every start checks for LOV installs of earlier releases,
+    recognised only when everything their installer did holds (its exact
+    note, an entry with no owner under the LOV prefix and namespace, the
+    conventional version graph, an admin creator), so a user's model that
+    copies the note is never touched. Vocabularies that may not be
+    redistributed, and no-derivatives ones, are made private once (each is
+    logged; an admin may make them public again, and later starts leave that
+    alone), and each earlier install gets a licence record that names the
+    vocabulary's own licence and says the earlier release may have added an
+    `owl:versionInfo` triple and that the graph may have been modified. Their
+    graphs and notes are not changed. Followers and Raft members that do not
+    lead leave the check to the leader. Superseded LOV term indexes are
+    removed from disk.
+  - **Seeded vocabularies carry their licence.** Each bundled vocabulary
+    seeded into the model registry has a licence and attribution record
+    (licence names and URIs, copyright, required notice, document status,
+    source, changes, a link to `/vocab/NOTICE.md`), stored as registry
+    metadata — never in the vocabulary graph — and returned as `attribution`
+    by `/api/models`; the model pages show it and the term card's source pill
+    links to the notice. Downloads carry `Link` headers and the file's header
+    as comments (IMBOR: headers only), and the server serves
+    `/vocab/NOTICE.md` itself. Seeded and LOV-installed graphs are loaded
+    unchanged: the loader used to add an `owl:versionInfo` triple to files
+    that state none. Earlier installs keep it, seeded and LOV alike:
+    their licence records say the copy differs from the file or may have been
+    modified.
+    A download calls its content the bundled file, unchanged, only when the
+    seeder has checked it: each seeded version's record keeps the SHA-256 of
+    its file and a digest of the stored triples, and `attribution.unchanged`
+    says whether the check passed. Drafts, branches, merges, rebases and
+    edited copies keep the licence records of the versions they draw on, and
+    say they may have been modified. In the IMBOR entry (and any entry whose
+    licence record allows no altered copies), uploading, editing, drafting,
+    branching, merging, rebasing and publishing are refused (403), and only
+    the checked copy is served to users who cannot write the entry.
+  - **Seed bundles can declare a model's licence.** A `[data_models.license]`
+    table (`licenses`, `copyright`, `source`, `notice`, `changes`, `remarks`,
+    `notice_url`, `no_derivatives`) becomes the model's licence record, checked
+    against the bundle's files on every start; the `nen2660-imbor` example
+    declares CROW's licence with `no_derivatives = true` for `imbor-otl`. A
+    bundle model may no longer use the id of a vocabulary the server seeds.
+  - **Dependency notices ship with the build.** `npm run build` writes
+    `dist/THIRD-PARTY-LICENSES.txt` (served at `/THIRD-PARTY-LICENSES.txt`)
+    with the licence and notice files of every npm package the web UI bundles
+    or copies, Cesium's third-party modules included, and of the material
+    bundled outside npm — the libraries statically linked into
+    `web-ifc.wasm`, the Lucide/Feather icon shapes drawn inline and the EPSG
+    attribution, whose texts the build takes from `LICENSES/`; the Docker builder
+    writes `/app/THIRD-PARTY-LICENSES-server.txt` for every crate linked into
+    the server (`scripts/gen_rust_third_party_licenses.py`).
+  - **The prefix snapshot documents its sources:** prefix.cc (no licence
+    published for the data; the operator's stated public-domain intent) and
+    the LOV-derived entries (CC BY 4.0, with the modification statement); the
+    Turtle and SPARQL exports of `/api/prefixes/all` open with a credit
+    comment.
 - **The database connectors run against live servers in CI.** A
   `live-sources` job (GitHub Actions and GitLab alike) starts PostgreSQL 16,
   MySQL 8.4, MariaDB 11.4 and SQL Server 2022 as service containers and runs
@@ -412,13 +517,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rdfs:seeAlso`) never feed the equality rules. The OWL 2 DL reasoner's RL
   phase now reads the caller's scope (it ran over the default graph only).
   See docs/reasoning.md.
-- **Official W3C SPARQL 1.1 test suite in CI.** The query and update
-  sections of `w3c/rdf-tests` (485 entries) are vendored under
+- **W3C SPARQL 1.1 test suite (query and update sections) in CI.** The query
+  and update sections of `w3c/rdf-tests` are vendored unmodified under
   `tests/fixtures/w3c-sparql11/` and run manifest-driven through the store
-  by `tests/w3c_sparql11_manifests.rs`: 475 pass, 10 known failures (all
-  oxigraph 0.5 evaluator behaviours, listed in docs/conformance/sparql11.md),
-  two-way ratchet with a pass floor. The generated conformance table now
-  scores three vendored corpora.
+  by `tests/w3c_sparql11_manifests.rs` as a two-way regression ratchet with a
+  pass floor; the known failures (all oxigraph 0.5 evaluator behaviours) are
+  tracked in docs/conformance/sparql11.md. No score is published for this
+  subset: W3C's test-suite licence policy allows no performance claims on a
+  subset of a W3C test suite, so it is used for development and bug tracking
+  only.
 - **SQL sources: datasources, standard RML mappings and store-native runs.**
   `/api/sources` registers a SQL database as RDF in `urn:system:sources` —
   dialect, location, a read-only account, a mandatory statement timeout and a
@@ -904,10 +1011,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rounds still stream live. Result tables rendered into follow-up prompts get
   a total cap (`CHAT_TABLE_MAX_CHARS`): per-cell truncation alone let a wide
   50-row result reach several thousand tokens per round. (#295)
-- **Bundled vocabularies are verbatim upstream copies.** `sosa` and `ssn`
+- **Bundled vocabularies are complete upstream copies.** `sosa` and `ssn`
   (the W3C SDW source), `saref` (ETSI SAREF core 3.1.1), `bot` (W3C LBD CG
   0.3.2), `omg` (0.3, was a 0.0.1 excerpt) and `fog` (0.0.4, was 0.0.1) are
-  complete copies from their publishers. They used to be hand-authored
+  complete copies from their publishers, unchanged below an added comment
+  header. They used to be hand-authored
   excerpts whose class and property IRIs were modelled plausibly against the
   namespace rather than copied from the source, and nothing in the UI or the
   registry told them apart from real terms. The files with no authoritative
@@ -991,9 +1099,66 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   graph built on top of them. The VoID vocabulary file goes too: its
   canonical Turtle is no longer published at a stable URL, so only the curated
   `void` prefix entry remains. Existing installs keep whatever the registry
-  already holds; only the seed no longer provides these. (`f20a87b`)
+  already holds. The IMBOR excerpt is kept too, deprecated and served to no one
+  who may not write the `imbor` entry, because it is not CROW's content. The
+  seed no longer provides any of them. (`f20a87b`)
 
 ### Fixed
+- **`public = false` in a seed-bundle manifest reaches entries an earlier
+  build registered public** (NEN 2660-2 and the NEN relation profile, whose
+  models the example bundles now keep private because NEN grants no licence to
+  redistribute them). At the next start an entry the bundle provably created
+  is made private once; only its visibility changes, and an admin who makes it
+  public again is not overruled.
+- **IMBOR is shipped unmodified.** `frontend/public/vocab/imbor.ttl` had an
+  added comment header and one altered definition while being described as
+  verbatim; CROW's management plan names CC BY-ND 4.0, which allows no altered
+  copies. The file is now byte-identical to CROW's release, with its
+  provenance and licence in the notices instead.
+- **Existing installs get CROW's IMBOR release back, and nothing stored is
+  lost.** On every start the seeder checks the copies it created itself: each
+  one carries a registry marker, and a record from an earlier release counts
+  only when its creator, id, version, graph, notes and creation date all read
+  as that seeder wrote them. A copy whose licence allows other copies and that
+  differs from the bundled file (an admin's edit, an earlier file, the
+  `owl:versionInfo` triple earlier loaders added) is never modified, only
+  labelled as possibly modified. IMBOR is checked on every start, also with
+  `SEED_STANDARD_VOCABS=false`: a copy that differs, such as the altered source
+  note installs seeded by 0.5.0 and 0.6.0 hold, is first kept as a private,
+  deprecated version `2025-kept-<n>`, served only to the entry's writers, and
+  only then is version `2025` restored from a staging graph in one
+  transaction. The hand-authored IMBOR "excerpt" is kept, deprecated and
+  withheld. Models the seeder did not create (made through the API, promoted
+  from a dataset, or registered by a bundle or a LOV install, even under an id
+  like `imbor`) are never touched. Replicas and non-leading cluster members
+  leave all of this to the leader. Merge and rebase no longer get around the
+  IMBOR refusal or drop the licence record, and a merge of a version into
+  itself is refused (400).
+- **Accurate licence statements.** GWSW's ontology was described as CC0 (the
+  CC0 covers RIONED's server data, not the ontology); several vocabularies
+  were credited to the wrong holder or licence; test-suite results were
+  presented as official conformance; a Uniclass code in an IFC test fixture
+  was paired with a title that is not its own (the fixture now uses a
+  made-up classification); a NEN 2660-2 definition was quoted in the
+  relations profile (now in the project's own words).
+- **The Turtle and SPARQL prefix exports parse.** One prefix.cc namespace is
+  not an IRI (it carries two `#`) and made the whole export unparseable; the
+  loader and the snapshot build leave it out.
+- **The main map's data credit shows on first load.** The map read its
+  attribution once, before the dataset feed had arrived, so the 3DBAG credit
+  never appeared; it now follows the feed.
+- **The Docker image builds again.** The workspace gained `tools/*` (the
+  writeback worker) but the image's planner and builder stages never copied
+  `tools/`, so cargo could not load the workspace.
+- **Claims match the results.** SHACL Core and GeoSPARQL are graded Partial
+  where the suites show gaps, GeoSPARQL is described as implemented in part
+  and not OGC-certified, and the comparison matrix's own cells follow the
+  same grades.
+- **Map credits.** The Leaflet streets basemap credits "OpenStreetMap
+  contributors" with a link to the copyright page, as OSM asks.
+- **Frontend typecheck.** A test read CodeMirror's internal `streamParser`,
+  which `tsc` rejects; the Turtle tokenizer is exported as
+  `turtleStreamParser` and the language is built from it.
 - **The IMBOR bundle's sample conforms to the real Kern.** Every IMBOR
   beheerobject inherits NEN 3610 `identificatie` and `domein`, a `geometrie`
   and a Geo-object `status` from its superclasses; the three sample trees
@@ -1757,6 +1922,45 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as an operand.
 
 ### Security
+- **Detaching or deleting a dataset could wipe graphs it never owned.**
+  `DELETE /api/datasets/{id}/graphs` deleted any graph no other dataset
+  claimed, so any user who could create a dataset could wipe the model
+  registry, IMBOR, the copies the seeder keeps aside, or another user's model
+  with one request. It now deletes the stored graph only when the dataset had
+  it registered (otherwise 404, nothing changes), and never a registry or
+  system graph. Deleting a dataset or an organisation applies the same rule to
+  every registered graph and to the shapes graph, keeps any graph another
+  dataset still uses, and fails closed where it used to fail open.
+- **Model-registry graphs cannot be attached to or written by a dataset.**
+  Registering one to a dataset, setting it as a shapes graph, or targeting it
+  with a dataset's RML mapping, validate-and-commit, a bulk import or an LDES
+  sync answers 403, for admins too. Registry graphs are the registry graph,
+  anything under `{base}/data-model/`, and any graph a model version names.
+- **SHACL Studio could alter and serve a no-derivatives model graph.** A seed
+  bundle binds a model's graph as a Studio shape graph in place (the
+  nen2660-imbor bundle binds CROW's IMBOR Kern). Studio save, restore and
+  import into it, a clone of it, an import of its shapes, and a pipeline's
+  in-place inference or report into it now answer 403 for a version whose
+  licence allows no altered copies, admins included; a Studio write into any
+  other attributed version marks its licence record first. The Studio serves
+  such a graph to everyone only while it is the checked, unchanged copy, and
+  deleting a Library entry clears only a graph the Studio created.
+- **The re-check after an admin update that writes unnamed graphs could be
+  skipped.** It now runs in the write's own task right after the write (so a
+  timeout or a dropped client cannot skip it), and again at the leader's boot
+  (so a crash cannot); it runs only for writes to graphs that cannot be named
+  in advance.
+- **Public term search served text from no-derivatives content that
+  downloads withhold.** Vocabulary search and autocomplete index such an entry
+  only while its latest published version is a checked, unchanged copy.
+- **Direct writes cannot alter content whose licence allows no altered
+  copies.** SPARQL Update, `/sparql/batch`, Graph Store PUT/POST/DELETE, and
+  reasoning and SWRL targets aimed at the graph of a model version whose
+  licence record allows no altered copies (IMBOR, no-derivatives LOV installs,
+  bundle models declared so) answer 403, for admins too. Writes into other
+  attributed versions mark their licence record "may have been modified"
+  before they run, and an admin update that names no graph is followed by a
+  re-check of every checked copy.
 - **`POST /api/shaclc/serialize` read any named graph, for anyone.** It took
   a graph IRI from the request body and handed it straight to the serialiser
   — no authentication, no authorisation — so any caller could name any named

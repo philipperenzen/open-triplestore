@@ -14,6 +14,7 @@
   import { refsSignature, guidsSignature } from '../../lib/viewer/refsSignature';
   import { buildHighlightOverlay, disposeHighlightOverlay } from '../../lib/viewer/highlight';
   import { fitDistance } from '../../lib/viewer/fitCamera';
+  import { THREEDBAG_CREDIT, carries3dbag } from '../../lib/viewer/attribution';
 
   /** Models to show: [{ id, label, url, format, slot?: [x, z] }]. */
   export let refs = [];
@@ -451,10 +452,20 @@
     lastHighlightSig = highlightSig;
     applyGuidHighlight();
   }
+
+  // 3DBAG's CC BY credit travels with its models into every host (inspector,
+  // previews, embeds). Fixed wording — the rights holder's, not i18n.
+  $: credit = carries3dbag(refs) ? THREEDBAG_CREDIT : null;
 </script>
 
-<div class="model-3d" style:height>
+<div class="model-3d" class:has-credit={credit} style:height>
   <canvas bind:this={canvasEl} on:click={onClick} aria-label="3D model viewer"></canvas>
+  {#if credit}
+    <p class="data-credit">
+      <a href={credit.url} target="_blank" rel="noopener noreferrer">{credit.text}</a>
+      (<a href={credit.licenseUrl} target="_blank" rel="noopener noreferrer">{credit.license}</a>{credit.modified ? ', modified' : ''})
+    </p>
+  {/if}
   {#if refs.length === 0}
     <div class="overlay">{$i18nT('viewer.noModels')}</div>
   {:else if pending > 0}
@@ -503,6 +514,26 @@
   }
   .overlay.subtle {
     opacity: 0.8;
+  }
+  /* The data credit owns the bottom-right corner; status chips stack above it. */
+  .has-credit .overlay {
+    bottom: 32px;
+  }
+  .data-credit {
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+    max-width: calc(100% - 16px);
+    margin: 0;
+    padding: 2px 8px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.5);
+    color: #dbe4ee;
+    font-size: 0.68rem;
+    line-height: 1.5;
+  }
+  .data-credit a {
+    color: inherit;
   }
   /* Busy state while models fetch + tessellate. Centred and unmissable: the
      point is that the viewer is working, not broken. */

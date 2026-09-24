@@ -1,11 +1,3 @@
-# IMBOR Vocabulaire — the concept framework of CROW's Informatiemodel Beheer
-# Openbare Ruimte (IMBOR): 8,949 SKOS concepts with Dutch preferred terms and
-# definitions for the asset types and properties used to manage public space.
-# Verbatim copy of imbor2025-vocabulaire.ttl from the official IMBOR 2025
-# Linked Data release (Stichting CROW, published 2025-07-01):
-# https://github.com/Stichting-CROW/imbor/releases/tag/2025
-# Browse it at https://imbor-viewer.app.crow.nl/
-# Source: https://www.crow.nl/kennisproducten/imbor/  (ns https://data.crow.nl/imbor/term/)
 @prefix dc: <http://purl.org/dc/terms/>.
 @prefix imbor-term: <https://data.crow.nl/imbor/term/>.
 @prefix nen2660-term: <https://w3id.org/nen2660/term#>.
@@ -24625,7 +24617,7 @@ imbor-term:74e5252f-1a8f-4977-95b9-4b41cfcb1d67 a skos:Concept;
   skos:prefLabel "Ledigingsvoorziening"@nl.
 
 imbor-term:74e825e1-9b93-4dd5-8fab-52783fdb758b a skos:Concept;
-  skos:definition "Langgerekte verlaging in het terrein van natuurlijke of kunstmatige oorsprong die permanent of periodiek stromend water bevat. (Bron: CB-NL/asset-management 2016)."@nl;
+  skos:definition "Langgerekte verlaging in het terrein van natuurlijke of kunstmatige oorsprong die permanent of periodiek stromend water bevat. (Bron: CB-NL/RWS-OTL 2016)."@nl;
   skos:inScheme imbor-term:term-schema;
   skos:prefLabel "Vaart"@nl.
 

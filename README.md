@@ -33,7 +33,7 @@
 
 > **Status:** current release **`0.6.0`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
 
-**Open Triplestore** is a modern, high-performance RDF triple store with full **SPARQL 1.1**, **SPARQL 1.2 (RDF-star)**, **GeoSPARQL 1.1**, **OWL 2** reasoning (RL natively + DL extension rules; an optional, experimental bridge to an external tableau reasoner such as Konclude), and **LDP 1.0** support — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
+**Open Triplestore** is a modern, high-performance RDF triple store with **SPARQL 1.1** and **LDP 1.0** support, plus partial support for **SPARQL 1.2 (RDF-star)**, **GeoSPARQL 1.1** (not OGC-certified) and **OWL 2** reasoning (RL natively + DL extension rules; an optional, experimental bridge to an external tableau reasoner such as Konclude) — grades and known gaps per standard in [docs/standards.md](docs/standards.md) — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
 
 ## Demo
 
@@ -86,7 +86,7 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | **RML mapping** | [RDF Mapping Language](https://rml.io/specs/rml/) — CSV, JSON (JSONPath), XML (XPath) → RDF with template expansion |
 | **OpenAPI docs** | Interactive Swagger UI at `/api-docs/` with JWT Bearer auth; machine-readable spec at `/api-docs/openapi.json` |
 | **AI assistant** *(optional)* | Natural-language → SPARQL, a grounded knowledge-graph chat, and a SHACL drafting assistant — run the **bundled local model** (`docker compose --profile llm up`, GPU-accelerated on NVIDIA) or **bring your own** OpenAI-compatible API (OpenAI, vLLM, Azure, …) via `LLM_GATEWAY_URL`; off by default, hidden until reachable ([docs](docs/api-services.md), [chat](docs/spark.md)) |
-| **Vocabulary search** | Internal [LOV](https://lov.linkeddata.es/) mirror: search 900+ vocabularies and their terms, CLARIAH-style vocabulary recommender, one-click offline install into the registry ([docs](docs/vocabulary-search.md)) |
+| **Vocabulary search** | Internal [LOV](https://lov.linkeddata.es/) mirror: a catalogue of ~900 vocabularies, each with its licence status (the licence the vocabulary declares or, where it names none, its publisher's published terms); term search and one-click offline install into the registry for those whose licence lets the image ship them (install also works for the others from a dump you supply, privately); CLARIAH-style vocabulary recommender ([docs](docs/vocabulary-search.md)) |
 | **Prefix service** | Internal prefix.cc replacement: ~3,700 bundled prefix↔namespace mappings + platform vocabularies, powering SPARQL auto-prefixing and a public lookup API — no third-party calls |
 | **Multiple RDF formats** | Turtle, N-Triples, N-Quads, TriG, RDF/XML |
 | **Storage backends** | In-memory (fast) and persistent RocksDB |
@@ -477,7 +477,7 @@ curl -X DELETE http://localhost:7878/api/admin/users/<user_id> \
 ## Automatic Prefix Resolution
 
 Write SPARQL without declaring prefixes — they resolve against the built-in
-prefix service (a bundled snapshot of the full prefix.cc registry + the LOV
+prefix service (a bundled snapshot of the prefix.cc registry + the LOV
 catalog, ~3,700 mappings, plus every vocabulary registered on the instance):
 
 ```sparql
@@ -492,6 +492,16 @@ the live prefix.cc for labels the local tiers don't know (cached in
 `{data-dir}/prefix_cache.json`). Lookup API: `GET /api/prefixes?q=…`,
 `/api/prefixes/{label}`, `/api/prefixes/reverse?uri=…` — see
 [docs/vocabulary-search.md](docs/vocabulary-search.md).
+
+Provenance of the bundled mappings: prefix.cc publishes no licence for its
+data. The pairs are facts, and its operator has said the data is considered
+public domain (CC0) in [cygri/prefix.cc#13](https://github.com/cygri/prefix.cc/issues/13),
+without publishing a licence or dedication; the snapshot records exactly that
+and credits prefix.cc. The LOV mappings are CC BY 4.0 and credited as such.
+Both statements are in the snapshot's `sources` block
+(`src/prefixes/data/prefixes-snapshot.json`) and in [`NOTICE`](NOTICE); the
+Turtle and SPARQL bulk exports open with its credit lines, and the CSV export
+names each row's source.
 
 ---
 
@@ -838,7 +848,7 @@ open-triplestore
 ├── docs/               Feature guides (SHACL, DCAT 2, RML, performance, administration)
 ├── tests/              Conformance & benchmark test suites
 ├── benches/            Criterion performance benchmarks
-└── scripts/            Test runners, W3C conformance tester
+└── scripts/            Test runners, conformance-table generator, benchmark tooling
 ```
 
 ---
@@ -848,6 +858,9 @@ open-triplestore
 The table below is generated from the test suites (`scripts/conformance_table.py`,
 checked in CI), so the counts are what `cargo test` runs. Grades per standard,
 and the known gaps behind them, are in [docs/standards.md](docs/standards.md).
+None of this is a W3C or OGC conformance claim; for the vendored SPARQL 1.1
+sections of the W3C test suite no score is published, as W3C's test-suite
+licence policy allows no performance claims on a subset.
 
 <!-- conformance-table:start -->
 | Standard | Suite | Basis | Tests | Notes |
@@ -857,7 +870,7 @@ and the known gaps behind them, are in [docs/standards.md](docs/standards.md).
 | GeoSPARQL 1.1 | `tests/geosparql_conformance.rs` | spec-derived | 107 |  |
 | LDP 1.0 (store level) | `tests/ldp_conformance.rs` | spec-derived | 43 |  |
 | LDP 1.0 (HTTP) | `tests/ldp_http_conformance.rs` | spec-derived | 13 |  |
-| OGC GeoSPARQL 1.1 validator shapes | `tests/ogc_geosparql_shacl_roundtrip.rs` | **vendored OGC corpus** | 2 |  |
+| OGC GeoSPARQL 1.1 validator shapes | `tests/ogc_geosparql_shacl_roundtrip.rs` | **vendored OGC corpus** (unmodified) | 2 |  |
 | OWL 2 DL extension rules | `tests/owl2_dl_conformance.rs` | spec-derived | 34 |  |
 | OWL 2 EL | `tests/owl2_el_conformance.rs` | spec-derived | 14 |  |
 | OWL 2 QL | `tests/owl2_ql_conformance.rs` | spec-derived | 21 |  |
@@ -875,11 +888,11 @@ and the known gaps behind them, are in [docs/standards.md](docs/standards.md).
 | SPARQL engine coverage (sparqloscope) | `tests/sparqloscope_conformance.rs` | sparqloscope-derived | 67 |  |
 | Cross-standard HTTP smoke | `tests/standards_conformance.rs` | spec-derived | 25 |  |
 | SWRL | `tests/swrl_conformance.rs` | spec-derived | 4 |  |
-| SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (manifest-driven) | 1 | 136 corpus cases: 119 pass, 2 known failures, 15 runner-side skips (floor ≥90 asserted) |
+| SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (core + sparql sections, manifest-driven) | 1 | 136 corpus cases: 119 pass, 2 known failures, 15 runner-side skips (floor ≥90 asserted) |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 125 |  |
-| SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C corpus** (manifest-driven) | 1 | 485 corpus cases: 475 pass, 10 known failures, 0 runner-side skips (floor ≥450 asserted) |
+| SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 
-728 conformance tests across 26 suites; a further 563 tests in 78 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 3 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text.
+728 conformance tests across 26 suites; a further 592 tests in 86 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 3 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. The SHACL and GeoSPARQL corpus results are development and regression results on the vendored sections (`docs/conformance/`), not W3C or OGC conformance claims. The SPARQL 1.1 sections are a subset of a W3C test suite, so under W3C's test-suite licence policy they are used for development and bug tracking only, and no score is published for them.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->
@@ -959,6 +972,8 @@ In short:
 - ✅ **Free to use, self-host, study, and modify** — for anyone, including companies, at no cost.
 - ✅ **Contribute back** — if you run a modified version as a network service, the AGPL (§ 13) requires you to make your changes available to its users.
 - ❌ **No selling** — the Commons Clause forbids selling the software, offering it as a paid or hosted service, or charging for support whose value derives substantially from it.
+
+Third-party material in this repository keeps its own licence and is not under AGPL-3.0 or the Commons Clause: the bundled vocabularies (per file in [`frontend/public/vocab/NOTICE.md`](frontend/public/vocab/NOTICE.md)), the vendored test suites under `tests/fixtures/`, the demo datasets and the bundled libraries — see [`NOTICE`](NOTICE), with licence texts in [`LICENSES/`](LICENSES).
 
 If you need terms beyond these, contact the author.
 

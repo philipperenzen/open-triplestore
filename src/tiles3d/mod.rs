@@ -25,6 +25,15 @@
 //! terrain the viewer renders), and `(lon, lat, h)` is mapped to ECEF by the
 //! standard WGS84 ellipsoidal formula [`wgs84_to_ecef`].
 //!
+//! ## Credits
+//!
+//! Both routes are public for public datasets, so licensed content must carry
+//! its attribution with it. A dataset holding 3DBAG-derived geometry (CC BY 4.0)
+//! gets the licensor's credit in the GLB's glTF `asset.copyright` — the field
+//! Cesium and other clients display — and, because 3D Tiles 1.1 has no copyright
+//! member, as structured `asset.extras.credits` in the tileset for the app's own
+//! viewer to link. See [`dataset_credits`].
+//!
 //! TODO: implicit tiling (quadtree/octree subdivision) for large datasets; Draco
 //! mesh compression; per-feature batching beyond one GLB; true
 //! orthometric→ellipsoidal height correction via a geoid + terrain model instead
@@ -64,6 +73,121 @@ pub fn wgs84_to_ecef(lon_deg: f64, lat_deg: f64, h: f64) -> [f64; 3] {
     let y = (n + h) * cos_lat * lon.sin();
     let z = (n * (1.0 - e2) + h) * sin_lat;
     [x, y, z]
+}
+
+/// An attribution the served tiles must carry for licensed content.
+#[derive(Debug, PartialEq)]
+struct DataCredit {
+    /// The credit line, worded exactly as the rights holder requires.
+    text: &'static str,
+    /// The rights holder's copyright page, which they ask digital media to link.
+    url: &'static str,
+    license: &'static str,
+    license_url: &'static str,
+}
+
+/// 3DBAG, CC BY 4.0 (https://docs.3dbag.nl/en/copyright/): fixed credit
+/// wording plus a link to that page; its 3D Tiles docs add "The Copyright
+/// notice is required."
+const THREEDBAG_CREDIT: DataCredit = DataCredit {
+    text: "© 3DBAG by tudelft3d and 3DGI",
+    url: "https://docs.3dbag.nl/en/copyright/",
+    license: "CC BY 4.0",
+    license_url: "https://creativecommons.org/licenses/by/4.0/",
+};
+
+impl DataCredit {
+    /// Plain-text notice for glTF `asset.copyright`. The tiles are always an
+    /// adaptation (triangulated, reprojected, grounded), so CC BY 4.0
+    /// §3(a)(1)(B) wants "modified" said. No ';' — Cesium splits on it.
+    fn notice(&self) -> String {
+        format!(
+            "{} ({}), {} ({}), modified",
+            self.text, self.url, self.license, self.license_url
+        )
+    }
+}
+
+/// Credits owed for the dataset's content. 3DBAG-derived graphs are recognised
+/// by their provenance: the seeded lift stamps `prov:wasDerivedFrom` on every
+/// geometry node and `dct:source` on the building layer, both pointing into
+/// 3dbag.nl — the same "3dbag" match the frontend applies to file links.
+fn dataset_credits(
+    store: &crate::store::TripleStore,
+    data_graphs: &[String],
+) -> Vec<&'static DataCredit> {
+    let from: String = data_graphs.iter().map(|g| format!("FROM <{g}> ")).collect();
+    let query = format!(
+        "PREFIX prov: <http://www.w3.org/ns/prov#>\n\
+         PREFIX dct: <http://purl.org/dc/terms/>\n\
+         ASK {from}WHERE {{ ?s prov:wasDerivedFrom|dct:source ?src \
+         FILTER(isIRI(?src) && CONTAINS(LCASE(STR(?src)), \"3dbag\")) }}"
+    );
+    match store.query(&query) {
+        Ok(oxigraph::sparql::QueryResults::Boolean(true)) => vec![&THREEDBAG_CREDIT],
+        _ => Vec::new(),
+    }
+}
+
+/// The tileset `asset`. 3D Tiles 1.1 defines no copyright member, so credits
+/// ride in `extras` (the app's Cesium viewer turns them into linked on-screen
+/// credits); the GLB content carries the same notice in glTF's own field.
+fn tileset_asset(credits: &[&DataCredit]) -> serde_json::Value {
+    // gltfUpAxis Z: our GLB POSITION accessors are already absolute ECEF
+    // (Z-up geocentric, EPSG:4978) with an identity tile transform, so Cesium
+    // must NOT apply the default glTF Y-up→Z-up rotation.
+    let mut asset =
+        serde_json::json!({ "version": "1.1", "tilesetVersion": "1.0", "gltfUpAxis": "Z" });
+    if !credits.is_empty() {
+        let list: Vec<serde_json::Value> = credits
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "text": c.text,
+                    "url": c.url,
+                    "license": c.license,
+                    "licenseUrl": c.license_url,
+                    "modified": true,
+                })
+            })
+            .collect();
+        asset["extras"] = serde_json::json!({ "credits": list });
+    }
+    asset
+}
+
+/// Set glTF `asset.copyright` ("a copyright message suitable for display to
+/// credit the content creator", glTF 2.0) on an encoded GLB by rewriting its
+/// JSON chunk; the BIN chunk is carried over byte for byte. Anything that is
+/// not a well-formed GLB comes back unchanged.
+fn with_gltf_copyright(glb: Vec<u8>, copyright: &str) -> Vec<u8> {
+    const JSON_CHUNK: [u8; 4] = *b"JSON";
+    if glb.len() < 20 || glb[16..20] != JSON_CHUNK {
+        return glb;
+    }
+    let json_len = u32::from_le_bytes([glb[12], glb[13], glb[14], glb[15]]) as usize;
+    let Some(json_bytes) = glb.get(20..20 + json_len) else {
+        return glb;
+    };
+    let Ok(mut gltf) = serde_json::from_slice::<serde_json::Value>(json_bytes) else {
+        return glb;
+    };
+    gltf["asset"]["copyright"] = copyright.into();
+    let Ok(mut json) = serde_json::to_vec(&gltf) else {
+        return glb;
+    };
+    // Chunks stay 4-byte aligned; the JSON chunk pads with spaces.
+    json.resize(json.len().next_multiple_of(4), b' ');
+    let rest = &glb[20 + json_len..];
+    let total = 20 + json.len() + rest.len();
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(&glb[..8]); // magic + container version
+    out.extend_from_slice(&(total as u32).to_le_bytes());
+    out.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    out.extend_from_slice(&JSON_CHUNK);
+    out.extend_from_slice(&json);
+    out.extend_from_slice(rest);
+    out
 }
 
 /// The 3D Tiles routes (anonymous-capable for public datasets via the
@@ -447,12 +571,10 @@ async fn tileset_json(
     };
 
     let content_uri = format!("/api/datasets/{dataset_id}/3dtiles/content.glb");
+    let credits = dataset_credits(&state.store, &data_graphs);
 
     let tileset = serde_json::json!({
-        // gltfUpAxis Z: our GLB POSITION accessors are already absolute ECEF
-        // (Z-up geocentric, EPSG:4978) with an identity tile transform, so Cesium
-        // must NOT apply the default glTF Y-up→Z-up rotation.
-        "asset": { "version": "1.1", "tilesetVersion": "1.0", "gltfUpAxis": "Z" },
+        "asset": tileset_asset(&credits),
         "geometricError": geometric_error,
         "root": {
             "boundingVolume": { "region": region_arr },
@@ -504,7 +626,13 @@ async fn content_glb(
         })
         .collect();
 
-    let bytes = encode_glb(&glb_features);
+    let mut bytes = encode_glb(&glb_features);
+    let credits = dataset_credits(&state.store, &data_graphs);
+    if !credits.is_empty() {
+        let notice: Vec<String> = credits.iter().map(|c| c.notice()).collect();
+        // "; " separates credits: Cesium splits asset.copyright on ';'.
+        bytes = with_gltf_copyright(bytes, &notice.join("; "));
+    }
 
     axum::http::Response::builder()
         .status(StatusCode::OK)
@@ -640,6 +768,98 @@ mod tests {
         assert!(blob.contains("example.org/a") && blob.contains("example.org/b"));
     }
 
+    #[test]
+    fn credits_follow_3dbag_provenance_per_graph() {
+        // The seeded lift's shape: 3DBAG geometry nodes in their own graph,
+        // derived from the 3DBAG copyright page; another graph without it.
+        let bag = r#"
+            @prefix geo:  <http://www.opengis.net/ont/geosparql#> .
+            @prefix prov: <http://www.w3.org/ns/prov#> .
+            @prefix ex:   <http://example.org/> .
+            ex:b geo:hasGeometry ex:g .
+            ex:g prov:wasDerivedFrom <https://docs.3dbag.nl/en/copyright/> .
+        "#;
+        let other = r#"
+            <http://example.org/h> <http://www.w3.org/ns/prov#wasDerivedFrom> <https://ex.org/src.city.json> .
+        "#;
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(bag, RdfFormat::Turtle, Some("http://example.org/bag"))
+            .unwrap();
+        store
+            .load_str(other, RdfFormat::Turtle, Some("http://example.org/other"))
+            .unwrap();
+
+        let with_bag = [
+            "http://example.org/other".to_string(),
+            "http://example.org/bag".to_string(),
+        ];
+        assert_eq!(dataset_credits(&store, &with_bag), vec![&THREEDBAG_CREDIT]);
+        assert!(
+            dataset_credits(&store, &["http://example.org/other".to_string()]).is_empty(),
+            "a dataset without 3DBAG content owes no 3DBAG credit"
+        );
+
+        // The tileset carries the credit as structured extras; 3D Tiles' own
+        // asset members are unchanged, and a credit-free asset has no extras.
+        let asset = tileset_asset(&dataset_credits(&store, &with_bag));
+        assert_eq!(asset["version"], "1.1");
+        assert_eq!(asset["gltfUpAxis"], "Z");
+        let c = &asset["extras"]["credits"][0];
+        assert_eq!(c["text"], "© 3DBAG by tudelft3d and 3DGI");
+        assert_eq!(c["url"], "https://docs.3dbag.nl/en/copyright/");
+        assert_eq!(c["license"], "CC BY 4.0");
+        assert_eq!(
+            c["licenseUrl"],
+            "https://creativecommons.org/licenses/by/4.0/"
+        );
+        assert_eq!(c["modified"], true);
+        assert!(tileset_asset(&[]).get("extras").is_none());
+    }
+
+    #[test]
+    fn gltf_copyright_is_stamped_into_the_json_chunk() {
+        let chunk_len = |b: &[u8]| u32::from_le_bytes([b[12], b[13], b[14], b[15]]) as usize;
+        let glb = encode_glb(&[GlbFeature {
+            iri: "http://example.org/a".to_string(),
+            positions: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            indices: Vec::new(),
+        }]);
+        let notice = THREEDBAG_CREDIT.notice();
+        assert!(
+            !notice.contains(';'),
+            "Cesium would split the credit on ';'"
+        );
+
+        let out = with_gltf_copyright(glb.clone(), &notice);
+        let json_len = chunk_len(&out);
+        assert_eq!(json_len % 4, 0, "JSON chunk stays 4-byte aligned");
+        assert_eq!(
+            u32::from_le_bytes([out[8], out[9], out[10], out[11]]) as usize,
+            out.len(),
+            "header length matches the rewritten container"
+        );
+        let gltf: serde_json::Value = serde_json::from_slice(&out[20..20 + json_len]).unwrap();
+        assert_eq!(
+            gltf["asset"]["copyright"],
+            "© 3DBAG by tudelft3d and 3DGI (https://docs.3dbag.nl/en/copyright/), \
+             CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/), modified"
+        );
+        assert_eq!(gltf["asset"]["version"], "2.0");
+        assert!(gltf["extensions"]["EXT_structural_metadata"].is_object());
+        assert_eq!(
+            &out[20 + json_len..],
+            &glb[20 + chunk_len(&glb)..],
+            "the BIN chunk is carried over byte for byte"
+        );
+
+        // Not a GLB: returned untouched rather than mangled.
+        assert_eq!(
+            with_gltf_copyright(b"not a glb".to_vec(), &notice),
+            b"not a glb"
+        );
+    }
+
     /// End-to-end over the REAL bundled 3DBAG sample (the one the seed lifts): a
     /// volumetric-only CityJSON conversion must mesh the whole block, and the GLB
     /// must carry one property-table row + a colour per feature. This pins the
@@ -653,7 +873,8 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(data).unwrap();
         let opts = CityJsonOptions {
             inst_base: "http://localhost/dataset/viewer-3d-demo/".to_string(),
-            source_url: None,
+            // The seed's provenance (CITYJSON_ZONES), which the credit keys on.
+            source_url: Some("https://docs.3dbag.nl/en/copyright/".to_string()),
             generated_at: None,
             volumetric_only: true, // drop the 78 flat LoD0 footprints, keep the solids
         };
@@ -678,6 +899,11 @@ mod tests {
                 .iter()
                 .all(|f| !f.iri.is_empty() && !f.tri_lonlath.is_empty()),
             "every feature carries its IRI and triangles"
+        );
+        assert_eq!(
+            dataset_credits(&store, &[]),
+            vec![&THREEDBAG_CREDIT],
+            "the lifted block owes the 3DBAG credit"
         );
 
         let glb_features: Vec<GlbFeature> = features

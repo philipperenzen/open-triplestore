@@ -5,8 +5,10 @@
 //! Two physical indexes share one schema:
 //!
 //! * **LOV index** — built once per corpus snapshot from `lov.nq.gz` into
-//!   `{data_dir}/vocab_index/lov-v{SCHEMA_VERSION}-{sha8}/` (reopened
-//!   instantly on later boots).  Built in a background task at boot; term
+//!   `{data_dir}/vocab_index/lov-v{SCHEMA_VERSION}-{sha8}-{policy8}/`
+//!   (reopened instantly on later boots).  It holds only the vocabularies the
+//!   catalog marks redistributable; `policy8` is a digest of that set, so a
+//!   catalog that changes it rebuilds the index.  Built in a background task at boot; term
 //!   search serves platform results (with `lov_index_ready: false` in the
 //!   envelope) until it finishes.
 //! * **Platform index** — in-RAM, rebuilt from the latest published version
@@ -51,7 +53,27 @@ use tracing::warn;
 use super::corpus::{ExtractionStats, TermDoc, TermType};
 
 /// Bump to force LOV index rebuilds after schema/extraction changes.
-const SCHEMA_VERSION: u32 = 1;
+/// 2: only redistributable LOV vocabularies are indexed.
+const SCHEMA_VERSION: u32 = 2;
+
+/// Whether `name` is a LOV index directory name the engine gives
+/// ([`VocabSearchEngine::lov_index_dir`]): `lov-v<n>-<hex>` or
+/// `lov-v<n>-<hex>-<hex>` (schema version 1 had no policy digest).
+fn is_lov_index_dir_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("lov-v") else {
+        return false;
+    };
+    let mut parts = rest.split('-');
+    let version_ok = parts
+        .next()
+        .is_some_and(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()));
+    let digests: Vec<&str> = parts.collect();
+    version_ok
+        && (1..=2).contains(&digests.len())
+        && digests
+            .iter()
+            .all(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_hexdigit()))
+}
 
 /// Candidates fetched per index before re-scoring (also the facet basis).
 const CANDIDATE_CAP: usize = 1_500;
@@ -613,12 +635,52 @@ impl VocabSearchEngine {
         self.corpus_available.store(available, Ordering::Relaxed);
     }
 
-    /// Directory for the persisted LOV index of the given corpus digest.
-    pub fn lov_index_dir(&self, corpus_sha256: &str) -> PathBuf {
+    /// Directory for the persisted LOV index of the given corpus digest and
+    /// the catalog's redistributable set
+    /// ([`VocabCatalog::redistributable_digest`](super::catalog::VocabCatalog::redistributable_digest)).
+    pub fn lov_index_dir(&self, corpus_sha256: &str, policy: &str) -> PathBuf {
         let sha8 = &corpus_sha256[..corpus_sha256.len().min(8)];
+        let policy8 = &policy[..policy.len().min(8)];
         self.data_dir
             .join("vocab_index")
-            .join(format!("lov-v{SCHEMA_VERSION}-{sha8}"))
+            .join(format!("lov-v{SCHEMA_VERSION}-{sha8}-{policy8}"))
+    }
+
+    /// Remove the persisted LOV indexes this build will never open again:
+    /// every `vocab_index/lov-v*` directory of another schema version and,
+    /// when `keep` (the index in use) is given, every other one too — an
+    /// index of another corpus or catalogue policy, which may hold
+    /// vocabularies this build may not serve.  Only directories whose names
+    /// the engine itself gives are touched; symlinks and files are left
+    /// alone.  Returns how many were removed.
+    pub fn remove_stale_lov_indexes(&self, keep: Option<&Path>) -> std::io::Result<usize> {
+        let root = self.data_dir.join("vocab_index");
+        let current = format!("lov-v{SCHEMA_VERSION}-");
+        let keep_name = keep.and_then(|k| k.file_name()).map(|n| n.to_owned());
+        let entries = match std::fs::read_dir(&root) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e),
+        };
+        let mut removed = 0;
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(n) = name.to_str() else { continue };
+            if !is_lov_index_dir_name(n) || keep_name.as_deref() == Some(name.as_os_str()) {
+                continue;
+            }
+            if keep.is_none() && n.starts_with(&current) {
+                continue;
+            }
+            // file_type() does not follow symlinks.
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            std::fs::remove_dir_all(entry.path())?;
+            removed += 1;
+        }
+        Ok(removed)
     }
 
     /// Sidecar written only after a successful build — its presence is the
@@ -971,9 +1033,55 @@ mod tests {
                 vocabularies: 1,
                 terms: docs.len(),
                 instances_dropped: 0,
+                not_redistributable: 0,
             },
         );
         engine
+    }
+
+    #[test]
+    fn lov_index_dir_names_are_recognised() {
+        assert!(is_lov_index_dir_name("lov-v1-7b5522b4"));
+        assert!(is_lov_index_dir_name("lov-v2-7b5522b4-0a1b2c3d"));
+        assert!(!is_lov_index_dir_name("lov-v2-7b5522b4-0a1b2c3d-ff"));
+        assert!(!is_lov_index_dir_name("lov-v2"));
+        assert!(!is_lov_index_dir_name("lov-vx-7b5522b4"));
+        assert!(!is_lov_index_dir_name("lov-v2-notes"));
+        assert!(!is_lov_index_dir_name("platform"));
+    }
+
+    #[test]
+    fn superseded_lov_indexes_are_removed() {
+        let root =
+            std::env::temp_dir().join(format!("ots-vocab-index-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let engine = VocabSearchEngine::new(root.clone());
+        // Nothing there yet: nothing to do.
+        assert_eq!(engine.remove_stale_lov_indexes(None).unwrap(), 0);
+        let idx = root.join("vocab_index");
+        let current = engine.lov_index_dir("7b5522b4f86d", "0a1b2c3d");
+        let other_policy = engine.lov_index_dir("7b5522b4f86d", "99999999");
+        for d in [
+            current.clone(),
+            other_policy.clone(),
+            idx.join("lov-v1-7b5522b4"),
+            idx.join("unrelated"),
+        ] {
+            std::fs::create_dir_all(d.join("sub")).unwrap();
+        }
+        std::fs::write(idx.join("lov-v1-deadbeef"), b"a file, not an index").unwrap();
+
+        // Without an index in use, only earlier schema versions go.
+        assert_eq!(engine.remove_stale_lov_indexes(None).unwrap(), 1);
+        assert!(!idx.join("lov-v1-7b5522b4").exists());
+        assert!(current.exists() && other_policy.exists());
+        // With one in use, every other LOV index goes; nothing else is touched.
+        assert_eq!(engine.remove_stale_lov_indexes(Some(&current)).unwrap(), 1);
+        assert!(current.exists());
+        assert!(!other_policy.exists());
+        assert!(idx.join("unrelated").exists());
+        assert!(idx.join("lov-v1-deadbeef").is_file());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

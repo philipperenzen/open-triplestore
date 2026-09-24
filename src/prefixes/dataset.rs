@@ -7,13 +7,34 @@
 //! the registry enforces.  Entries keep the prefix.cc popularity order as a
 //! `rank`, which drives search ordering and reverse-lookup tie-breaks
 //! (prefix.cc itself resolves a namespace to its most-used prefix).
+//!
+//! # Provenance and licences
+//!
+//! The snapshot's `sources` block is the record of where each tier came from
+//! and on what terms; this loader reads only each source's one-line `credit`,
+//! which the bulk exports repeat (see `routes.rs`).
+//!
+//! * **prefix.cc** — no licence is published for the data. Prefix-to-namespace
+//!   pairs are facts, and the operator's own issue
+//!   <https://github.com/cygri/prefix.cc/issues/13> says all data is considered
+//!   public domain (CC0), though that was never published as a licence. The
+//!   Unlicense on the prefix.cc repository covers the site's code, not the
+//!   data. Credited as a courtesy: maintained by Richard Cyganiak, developed
+//!   at DERI, NUI Galway.
+//! * **LOV** — CC BY 4.0 (<https://creativecommons.org/licenses/by/4.0/>), and
+//!   a modified extract (only valid pairs whose label prefix.cc does not
+//!   already bind), so the block carries the credit, the licence URI and that
+//!   modification statement, as the licence requires.
+//!
+//! Snapshot dates and counts live in the block. Rebuild with
+//! `scripts/build_prefix_dataset.py`, which writes the block too.
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
 /// Where a prefix mapping came from, in resolution-priority order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PrefixSource {
     /// Set by an administrator of this deployment, stored in the identity
@@ -53,9 +74,19 @@ struct SnapshotEntry {
     source: String,
 }
 
+/// One entry of the snapshot's `sources` block. The block records more
+/// (licence, rights, modifications); the credit line is what the server
+/// itself needs to repeat.
+#[derive(Deserialize)]
+struct SnapshotSourceInfo {
+    credit: String,
+}
+
 #[derive(Deserialize)]
 struct Snapshot {
     format_version: u32,
+    #[serde(default)]
+    sources: HashMap<String, SnapshotSourceInfo>,
     prefixes: Vec<SnapshotEntry>,
 }
 
@@ -65,6 +96,17 @@ pub struct PrefixDataset {
     by_label: HashMap<String, usize>,
     /// Namespace → best-ranked entry index.
     by_namespace: HashMap<String, usize>,
+    /// Credit line per bundled source, from the snapshot's `sources` block.
+    credits: HashMap<PrefixSource, String>,
+}
+
+/// The snapshot's `sources` key for a bundled tier.
+fn source_from_key(key: &str) -> Option<PrefixSource> {
+    match key {
+        "prefix.cc" => Some(PrefixSource::PrefixCc),
+        "lov" => Some(PrefixSource::Lov),
+        _ => None,
+    }
 }
 
 const SNAPSHOT_JSON: &str = include_str!("data/prefixes-snapshot.json");
@@ -83,6 +125,7 @@ impl PrefixDataset {
             entries: Vec::new(),
             by_label: HashMap::new(),
             by_namespace: HashMap::new(),
+            credits: HashMap::new(),
         }
     }
 
@@ -95,11 +138,14 @@ impl PrefixDataset {
         );
         let mut entries = Vec::with_capacity(snapshot.prefixes.len());
         for e in snapshot.prefixes {
-            let source = match e.source.as_str() {
-                "prefix.cc" => PrefixSource::PrefixCc,
-                "lov" => PrefixSource::Lov,
-                other => anyhow::bail!("unknown prefix source {other:?}"),
+            let Some(source) = source_from_key(&e.source) else {
+                anyhow::bail!("unknown prefix source {:?}", e.source);
             };
+            // A namespace that is not an IRI (one prefix.cc entry carries two
+            // '#') would make every Turtle and SPARQL export unparseable.
+            if oxigraph::model::NamedNode::new(e.namespace.as_str()).is_err() {
+                continue;
+            }
             entries.push(PrefixEntry {
                 prefix: e.prefix,
                 namespace: e.namespace,
@@ -115,11 +161,23 @@ impl PrefixDataset {
             by_label.entry(e.prefix.clone()).or_insert(i);
             by_namespace.entry(e.namespace.clone()).or_insert(i);
         }
+        let credits = snapshot
+            .sources
+            .into_iter()
+            .filter_map(|(key, info)| source_from_key(&key).map(|s| (s, info.credit)))
+            .collect();
         Ok(Self {
             entries,
             by_label,
             by_namespace,
+            credits,
         })
+    }
+
+    /// The credit line recorded for a bundled source: who to thank and on
+    /// what terms the data is shared. `None` for the runtime tiers.
+    pub fn credit(&self, source: PrefixSource) -> Option<&str> {
+        self.credits.get(&source).map(String::as_str)
     }
 
     pub fn len(&self) -> usize {
@@ -216,6 +274,25 @@ mod tests {
     }
 
     #[test]
+    fn a_namespace_that_is_not_an_iri_is_left_out() {
+        // prefix.cc once bound `ontologia` to `…/Cinema#Cinemes#` (two
+        // fragments); the build now drops it, and so does the loader.
+        let ds = PrefixDataset::from_json(
+            r#"{"format_version": 1, "prefixes": [
+                {"prefix": "foaf", "namespace": "http://xmlns.com/foaf/0.1/", "rank": 1, "source": "prefix.cc"},
+                {"prefix": "ontologia", "namespace": "http://ub.edu/dades/ontologia/Cinema#Cinemes#", "rank": 2, "source": "prefix.cc"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(ds.len(), 1);
+        assert!(ds.entries.iter().all(|e| e.prefix == "foaf"));
+        assert!(PrefixDataset::bundled()
+            .entries
+            .iter()
+            .all(|e| oxigraph::model::NamedNode::new(e.namespace.as_str()).is_ok()));
+    }
+
+    #[test]
     fn well_known_lookups() {
         let ds = PrefixDataset::bundled();
         assert_eq!(
@@ -246,6 +323,45 @@ mod tests {
         let hits = ds.search("foaf", 10);
         assert_eq!(hits[0].prefix, "foaf");
         assert!(hits.len() > 1, "substring matches should follow");
+    }
+
+    #[test]
+    fn every_bundled_source_is_credited() {
+        let ds = PrefixDataset::bundled();
+        for source in [PrefixSource::PrefixCc, PrefixSource::Lov] {
+            assert!(
+                ds.entries().iter().any(|e| e.source == source),
+                "{source:?} contributes entries"
+            );
+            let credit = ds.credit(source).expect("credit line");
+            assert!(!credit.contains(['\n', '\r']), "one line: {credit:?}");
+        }
+        // CC BY 4.0 §3(a)(1): the licence URI and the modification statement.
+        let lov = ds.credit(PrefixSource::Lov).unwrap();
+        assert!(lov.contains("https://creativecommons.org/licenses/by/4.0/"));
+        assert!(lov.contains("Modified"));
+        assert!(ds
+            .credit(PrefixSource::PrefixCc)
+            .unwrap()
+            .contains("https://github.com/cygri/prefix.cc/issues/13"));
+        assert!(ds.credit(PrefixSource::Admin).is_none());
+    }
+
+    #[test]
+    fn sources_block_states_no_licence_for_prefix_cc_data() {
+        // The Unlicense covers prefix.cc's code; the block must not read as
+        // though it licensed the data.
+        let raw: serde_json::Value = serde_json::from_str(SNAPSHOT_JSON).unwrap();
+        let pcc = &raw["sources"]["prefix.cc"];
+        assert!(pcc["license"].is_null());
+        assert!(pcc["code_license"]
+            .as_str()
+            .unwrap()
+            .ends_with("not its data."));
+        assert_eq!(
+            raw["sources"]["lov"]["license_url"],
+            "https://creativecommons.org/licenses/by/4.0/"
+        );
     }
 
     #[test]

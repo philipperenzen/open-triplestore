@@ -404,6 +404,17 @@ pub async fn sync_handler(
     {
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
     }
+    // The same gate as registering the graph to the dataset: inside its
+    // boundary for non-admins, and never a model-registry graph for anyone.
+    crate::auth::dataset_graph::gate_dataset_graph_target(
+        &state.store,
+        &state.auth_db,
+        &state.base_url,
+        &body.dataset_id,
+        &body.graph_iri,
+        user.is_admin(),
+    )
+    .map_err(|m| (StatusCode::FORBIDDEN, m))?;
     if !crate::remote::is_allowed(&body.url) {
         return Err((
             StatusCode::FORBIDDEN,

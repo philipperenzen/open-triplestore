@@ -98,7 +98,7 @@
         {#await geoPreview()}
           <p class="loading">…</p>
         {:then mod}
-          <svelte:component this={mod.default} wkts={$preview.wkts} height="100%" />
+          <svelte:component this={mod.default} wkts={$preview.wkts} sources={$preview.sources || []} height="100%" />
         {/await}
       {/if}
     </div>

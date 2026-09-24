@@ -11,7 +11,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/third-party-licenses.mjs --check dist",
     "preview": "vite preview",
     "lint": "eslint src --ext .js,.ts,.svelte",
     "test": "vitest run",

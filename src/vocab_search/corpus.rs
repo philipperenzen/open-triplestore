@@ -2,12 +2,20 @@
 //!
 //! Two corpora feed the index:
 //!
-//! * **LOV corpus** — the full `lov.nq.gz` N-Quads dump (one named graph per
+//! * **LOV corpus** — a `lov.nq.gz` N-Quads dump (one named graph per
 //!   vocabulary).  Located via `VOCAB_CORPUS_PATH`, `{data_dir}/vocab/`, or
 //!   the image-baked `assets/vocab/` copy; optionally downloaded once at boot
-//!   (`VOCAB_CORPUS_URL`, sha256-verified) when absent.  Missing corpus is a
-//!   supported degraded mode: term search then covers platform vocabularies
-//!   only.
+//!   (`VOCAB_CORPUS_URL`, sha256-verified) when absent.  The image-baked copy
+//!   is filtered to the vocabularies this project may redistribute
+//!   (`assets/vocab/lov-redistributable.txt`); the full dump an operator
+//!   downloads or mounts also holds vocabularies whose licence does not
+//!   allow that.  [`corpus_graphs`] tells the catalog which vocabularies the
+//!   corpus in use holds (all of them installable, the others privately), but
+//!   the term index takes only the redistributable ones: its labels and
+//!   definitions are served to anyone.  Only the vocabulary graphs are read —
+//!   LOV's metadata graph is not needed at runtime (the catalog is
+//!   embedded).  Missing corpus is a supported degraded mode: term search
+//!   then covers platform vocabularies only.
 //! * **Platform vocabularies** — the latest published version graphs of every
 //!   *public* model/vocabulary registry entry, read directly from the store
 //!   (version graphs are not visible through `/sparql`; direct reads are the
@@ -19,7 +27,7 @@
 //! title) and secondary text (comments, descriptions, altLabels,
 //! definitions) kept per document.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -246,6 +254,10 @@ pub struct ExtractionStats {
     pub vocabularies: usize,
     pub terms: usize,
     pub instances_dropped: usize,
+    /// LOV vocabularies in the corpus left out of the term index because
+    /// this project may not redistribute them (a full dump holds them).
+    #[serde(default)]
+    pub not_redistributable: usize,
 }
 
 fn local_name(iri: &str) -> &str {
@@ -382,7 +394,15 @@ fn finish_vocab(
 // ─── LOV corpus extraction ───────────────────────────────────────────────────
 
 /// Stream-parse the LOV N-Quads dump and produce term docs for every
-/// vocabulary the catalog knows.
+/// vocabulary the catalog knows and marks redistributable.
+///
+/// The term index serves each term's labels and definitions on the public
+/// `/api/vocab/terms/*` and `/api/vocab/recommend` routes, so a vocabulary
+/// whose licence does not let this project redistribute it (NonCommercial,
+/// all rights reserved, copyleft, none at all, or withheld — see
+/// [`LovVocab::redistributable`](super::catalog::LovVocab)) is left out, even
+/// when an operator's full dump holds it.  Such a vocabulary can still be
+/// installed, privately (see [`super::install`]).
 pub fn extract_lov_terms(
     corpus_path: &Path,
     catalog: &VocabCatalog,
@@ -399,6 +419,8 @@ pub fn extract_lov_terms_from_reader<R: Read>(
 ) -> anyhow::Result<(Vec<TermDoc>, ExtractionStats)> {
     // graph uri -> subject iri -> accumulator
     let mut graphs: HashMap<String, HashMap<String, TermAcc>> = HashMap::new();
+    // Catalogued graphs skipped because they may not be redistributed.
+    let mut skipped: HashSet<String> = HashSet::new();
 
     let parser = RdfParser::from_format(RdfFormat::NQuads).lenient();
     for quad in parser.for_reader(reader) {
@@ -409,10 +431,18 @@ pub fn extract_lov_terms_from_reader<R: Read>(
         let GraphName::NamedNode(g) = &quad.graph_name else {
             continue;
         };
-        // Only vocabulary graphs the catalog knows (skips the metadata graph).
+        // Only vocabulary graphs the catalog knows (skips the metadata
+        // graph), and of those only the ones that may be redistributed.
         let g_str = g.as_str();
-        if catalog.lov_by_uri(g_str).is_none() {
-            continue;
+        match catalog.lov_by_uri(g_str) {
+            Some(v) if v.redistributable => {}
+            Some(_) => {
+                if !skipped.contains(g_str) {
+                    skipped.insert(g_str.to_string());
+                }
+                continue;
+            }
+            None => continue,
         }
         let Quad {
             subject,
@@ -431,10 +461,13 @@ pub fn extract_lov_terms_from_reader<R: Read>(
         accumulate(acc, predicate.as_str(), &object);
     }
 
-    let mut stats = ExtractionStats::default();
+    let mut stats = ExtractionStats {
+        not_redistributable: skipped.len(),
+        ..ExtractionStats::default()
+    };
     let mut out = Vec::new();
     for (graph_uri, subjects) in graphs {
-        let Some(vocab) = catalog.lov_by_uri(&graph_uri) else {
+        let Some(vocab) = catalog.lov_by_uri(&graph_uri).filter(|v| v.redistributable) else {
             continue;
         };
         stats.vocabularies += 1;
@@ -468,6 +501,29 @@ pub fn extract_lov_terms_from_reader<R: Read>(
         );
     }
     Ok((out, stats))
+}
+
+/// The named graphs a corpus holds — which vocabularies can be installed
+/// from it (the image's filtered corpus holds fewer than the catalog lists).
+pub fn corpus_graphs(corpus_path: &Path) -> anyhow::Result<HashSet<String>> {
+    let file = std::fs::File::open(corpus_path)?;
+    let reader = std::io::BufReader::new(flate2::read::GzDecoder::new(file));
+    Ok(corpus_graphs_from_reader(reader))
+}
+
+/// Testable core of [`corpus_graphs`].
+pub fn corpus_graphs_from_reader<R: Read>(reader: R) -> HashSet<String> {
+    let parser = RdfParser::from_format(RdfFormat::NQuads).lenient();
+    let mut graphs = HashSet::new();
+    for quad in parser.for_reader(reader) {
+        let Ok(quad) = quad else { continue };
+        if let GraphName::NamedNode(g) = quad.graph_name {
+            if !graphs.contains(g.as_str()) {
+                graphs.insert(g.into_string());
+            }
+        }
+    }
+    graphs
 }
 
 /// Extract the raw quads of one vocabulary graph from the corpus (for the
@@ -635,5 +691,64 @@ mod tests {
         assert!(person.vocab_occurrences > 0, "vocab metrics attached");
         let name = docs.iter().find(|d| d.local_name == "name").unwrap();
         assert_eq!(name.ttype, TermType::Property);
+    }
+
+    #[test]
+    fn lov_extraction_skips_vocabularies_that_may_not_be_redistributed() {
+        let catalog = VocabCatalog::bundled();
+        // A full dump holds vocabularies the image leaves out: REACT (CC
+        // BY-NC 4.0), VoID (no licence) and drammar (CC BY-ND, but LOV's copy
+        // is not faithful).  Their terms must not reach the public index,
+        // while FOAF's in the same corpus do.
+        let react = catalog.lov_by_prefix("react").expect("react").clone();
+        let void = catalog.lov_by_prefix("void").expect("void").clone();
+        let drama = catalog.lov_by_prefix("drama").expect("drama").clone();
+        for v in [&react, &void, &drama] {
+            assert!(!v.redistributable, "{}", v.prefix);
+        }
+        let term = |vocab: &super::super::catalog::LovVocab, local: &str| {
+            let iri = format!("{}{local}", vocab.nsp);
+            format!(
+                "<{iri}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Class> <{g}> .\n\
+                 <{iri}> <http://www.w3.org/2000/01/rdf-schema#comment> \"Text under the vocabulary's own licence\" <{g}> .\n",
+                g = vocab.uri
+            )
+        };
+        let mut nq = String::from(
+            "<http://xmlns.com/foaf/0.1/Person> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Class> <http://xmlns.com/foaf/0.1/> .\n",
+        );
+        nq.push_str(&term(&react, "Restricted"));
+        nq.push_str(&term(&void, "Unlicensed"));
+        nq.push_str(&term(&drama, "Altered"));
+
+        let (docs, stats) =
+            extract_lov_terms_from_reader(std::io::Cursor::new(nq.as_bytes()), &catalog).unwrap();
+        assert_eq!(stats.vocabularies, 1, "only FOAF is indexed");
+        assert_eq!(stats.not_redistributable, 3);
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].prefixed, "foaf:Person");
+        assert!(docs
+            .iter()
+            .all(|d| !["react", "void", "drama"].contains(&d.vocab_prefix.as_str())));
+    }
+
+    #[test]
+    fn corpus_graphs_lists_named_graphs() {
+        // A filtered corpus holds only some vocabularies; default-graph
+        // triples and literals that look like IRIs must not count.
+        let nq = br#"<http://xmlns.com/foaf/0.1/Person> <http://www.w3.org/2000/01/rdf-schema#label> "Person <http://example.org/not-a-graph>" <http://xmlns.com/foaf/0.1/> .
+<http://purl.org/goodrelations/v1#Offering> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Class> <http://purl.org/goodrelations/v1> .
+<http://example.org/s> <http://example.org/p> <http://example.org/default-object> .
+"#;
+        let graphs = corpus_graphs_from_reader(std::io::Cursor::new(&nq[..]));
+        let mut got: Vec<&str> = graphs.iter().map(String::as_str).collect();
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            vec![
+                "http://purl.org/goodrelations/v1",
+                "http://xmlns.com/foaf/0.1/"
+            ]
+        );
     }
 }

@@ -3200,24 +3200,25 @@ pub async fn delete_organisation(
             .auth_db
             .get_dataset(dataset_id)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let graph_iris = state
+        let mut graph_iris = state
             .auth_db
             .list_dataset_graphs(dataset_id)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        for iri in &graph_iris {
-            let shared = state
-                .auth_db
-                .graph_has_other_dataset_refs(iri.as_str(), dataset_id)
-                .unwrap_or(false);
-            if !shared {
-                let _ = state.store.graph_store_delete(Some(iri.as_str()));
-            }
+        // The shapes graph lives only in the datasets table; it goes through
+        // the same filter as the registered graphs.
+        if let Some(shapes_iri) = dataset.as_ref().and_then(|d| d.shapes_graph_iri.clone()) {
+            graph_iris.push(shapes_iri);
         }
-        // Also delete shapes graph when present.
-        if let Some(ref d) = dataset {
-            if let Some(ref shapes_iri) = d.shapes_graph_iri {
-                let _ = state.store.graph_store_delete(Some(shapes_iri.as_str()));
-            }
+        // Drop only graphs no other dataset uses and that are neither system
+        // nor model-registry graphs (see `graphs_deletable_with_dataset`).
+        for iri in dataset_graph::graphs_deletable_with_dataset(
+            &state.store,
+            &state.auth_db,
+            &state.base_url,
+            dataset_id,
+            &graph_iris,
+        ) {
+            let _ = state.store.graph_store_delete(Some(iri.as_str()));
         }
         state
             .auth_db
@@ -4076,37 +4077,41 @@ pub async fn delete_dataset(
         return Err((StatusCode::FORBIDDEN, "Manage access required".to_string()));
     }
 
-    // Delete all named graphs associated with this dataset from Oxigraph, but only
-    // when no other dataset still references the same graph IRI. Run the whole
-    // sequence off the async runtime under the write timeout: this can touch many
-    // (potentially large) graphs, and a stalled store must not pin a Tokio worker or
-    // block reads/liveness. Individual deletes stay best-effort (a graph may already
-    // be absent); a timeout aborts the batch with 503.
-    let graph_iris = state
+    // Delete the named graphs associated with this dataset from Oxigraph, but only
+    // those no other dataset still uses and that are neither system nor
+    // model-registry graphs (`graphs_deletable_with_dataset`; a lookup error keeps
+    // the graph). Run the whole sequence off the async runtime under the write
+    // timeout: this can touch many (potentially large) graphs, and a stalled store
+    // must not pin a Tokio worker or block reads/liveness. Individual deletes stay
+    // best-effort (a graph may already be absent); a timeout aborts the batch with
+    // 503.
+    let mut graph_iris = state
         .auth_db
         .list_dataset_graphs(&dataset_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // The shapes graph is stored only in the datasets table (not listed in
+    // dataset_graphs), so it is added explicitly or it is orphaned in Oxigraph; it
+    // goes through the same filter.
+    if let Some(shapes_iri) = dataset.shapes_graph_iri.clone() {
+        graph_iris.push(shapes_iri);
+    }
     let store = state.store.clone();
     let auth_db = state.auth_db.clone();
+    let base_url = state.base_url.clone();
     let del_dataset_id = dataset_id.clone();
-    let shapes_iri = dataset.shapes_graph_iri.clone();
     let meta_graph = dataset_graph::dataset_metadata_graph_iri(&dataset_id);
     let write_timeout = std::time::Duration::from_secs(state.write_timeout_secs);
     tokio::time::timeout(
         write_timeout,
         tokio::task::spawn_blocking(move || {
-            for iri in &graph_iris {
-                let shared = auth_db
-                    .graph_has_other_dataset_refs(iri.as_str(), &del_dataset_id)
-                    .unwrap_or(false);
-                if !shared {
-                    let _ = store.graph_store_delete(Some(iri.as_str()));
-                }
-            }
-            // The shapes graph is stored only in the datasets table (not listed in
-            // dataset_graphs), so delete it explicitly or it is orphaned in Oxigraph.
-            if let Some(ref shapes_iri) = shapes_iri {
-                let _ = store.graph_store_delete(Some(shapes_iri.as_str()));
+            for iri in dataset_graph::graphs_deletable_with_dataset(
+                &store,
+                &auth_db,
+                &base_url,
+                &del_dataset_id,
+                &graph_iris,
+            ) {
+                let _ = store.graph_store_delete(Some(iri.as_str()));
             }
             // The DCAT metadata named graph for this dataset.
             let _ = store.graph_store_delete(Some(&meta_graph));
@@ -4240,24 +4245,26 @@ pub async fn add_dataset_graph(
     // private graph IRI to their own dataset and then read it, since
     // `get_accessible_graph_iris` makes any graph registered to an accessible
     // dataset readable (cross-tenant read — the IDOR the bulk-import path already
-    // defends against). Admins are unrestricted.
-    if !current_user.is_admin() {
-        if let Err(msg) = crate::auth::dataset_graph::authorize_dataset_graph_target(
-            &db,
-            &state.base_url,
+    // defends against). A model-registry graph is refused for everyone, admins
+    // included: registered, it could be bulk-imported over past the registry's
+    // licence checks and wiped by a detach. Admins are otherwise unrestricted.
+    if let Err(msg) = crate::auth::dataset_graph::gate_dataset_graph_target(
+        &state.store,
+        &db,
+        &state.base_url,
+        &dataset_id,
+        &req.graph_iri,
+        current_user.is_admin(),
+    ) {
+        state.audit.log_denied(
+            Some(current_user.user_id.clone()),
+            None,
+            "dataset_graph",
             &dataset_id,
-            &req.graph_iri,
-        ) {
-            state.audit.log_denied(
-                Some(current_user.user_id.clone()),
-                None,
-                "dataset_graph",
-                &dataset_id,
-                "register_graph",
-                None,
-            );
-            return Err((StatusCode::FORBIDDEN, msg));
-        }
+            "register_graph",
+            None,
+        );
+        return Err((StatusCode::FORBIDDEN, msg));
     }
 
     db.add_dataset_graph(&dataset_id, &req.graph_iri)
@@ -4291,18 +4298,39 @@ pub async fn remove_dataset_graph(
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
     }
 
-    state
+    // Only a registration this dataset actually had is removed, and only then may
+    // the stored graph go: detaching a graph the dataset never registered must not
+    // delete whatever graph of that name exists (the model registry, a kept
+    // no-derivatives copy, another user's model).
+    let removed = state
         .auth_db
         .remove_dataset_graph(&dataset_id, &req.graph_iri)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !removed {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!(
+                "Graph <{}> is not registered to dataset '{dataset_id}'",
+                req.graph_iri
+            ),
+        ));
+    }
 
-    // If no other dataset references this graph IRI, remove the Oxigraph graph too.
-    // The DB row is already gone, so exclude_dataset_id="" — any hit means another dataset.
-    let shared = state
-        .auth_db
-        .graph_has_other_dataset_refs(&req.graph_iri, "")
-        .unwrap_or(true); // default to keeping the graph on error
-    if !shared {
+    // Remove the Oxigraph graph too when nothing else holds it: no other dataset
+    // uses it, it is not this dataset's own shapes graph, and it is neither a
+    // system nor a model-registry graph (a registration made before registry
+    // graphs were refused only loses its row). Any lookup error keeps the graph.
+    let own_shapes_graph = dataset.shapes_graph_iri.as_deref() == Some(req.graph_iri.as_str());
+    let deletable = !own_shapes_graph
+        && !dataset_graph::graphs_deletable_with_dataset(
+            &state.store,
+            &state.auth_db,
+            &state.base_url,
+            &dataset_id,
+            std::slice::from_ref(&req.graph_iri),
+        )
+        .is_empty();
+    if deletable {
         let _ = state.store.graph_store_delete(Some(req.graph_iri.as_str()));
     }
 
@@ -4821,25 +4849,33 @@ pub async fn update_dataset_shacl(
     // dataset*; without this gate a writer could point shapes_graph_iri at another
     // tenant's private graph and exfiltrate it via get_shapes. Constrain non-admins
     // to the dataset's own namespace or an unclaimed external graph, reusing the
-    // same boundary as add_dataset_graph. Admins are unrestricted.
-    if !current_user.is_admin() {
-        if let Some(shapes_iri) = req.shapes_graph_iri.as_deref() {
-            if let Err(msg) = crate::auth::dataset_graph::authorize_dataset_graph_target(
-                &db,
-                &state.base_url,
+    // same boundary as add_dataset_graph. A model-registry graph is refused for
+    // everyone, admins included: as the shapes graph it would be dumped by GET
+    // /shapes, adopted in place into the SHACL Studio Library (and so edited past
+    // the registry's licence checks) and dropped by a dataset delete. A blank IRI
+    // clears the setting and names no graph.
+    if let Some(shapes_iri) = req
+        .shapes_graph_iri
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        if let Err(msg) = crate::auth::dataset_graph::gate_dataset_graph_target(
+            &state.store,
+            &db,
+            &state.base_url,
+            &dataset_id,
+            shapes_iri,
+            current_user.is_admin(),
+        ) {
+            state.audit.log_denied(
+                Some(current_user.user_id.clone()),
+                None,
+                "dataset_shacl",
                 &dataset_id,
-                shapes_iri,
-            ) {
-                state.audit.log_denied(
-                    Some(current_user.user_id.clone()),
-                    None,
-                    "dataset_shacl",
-                    &dataset_id,
-                    "set_shapes_graph",
-                    None,
-                );
-                return Err((StatusCode::FORBIDDEN, msg));
-            }
+                "set_shapes_graph",
+                None,
+            );
+            return Err((StatusCode::FORBIDDEN, msg));
         }
     }
 
@@ -5012,6 +5048,18 @@ fn promote_dataset_to_registry(
                 anyhow::bail!(
                     "registry entry '{registry_id}' already exists and is owned by \
                      another account; refusing to promote dataset {dataset_id} into it"
+                );
+            }
+            // An entry whose licence allows no altered copies (IMBOR) holds only
+            // the checked bundled file: a promoted dataset would be a new,
+            // different version of it.
+            if let Some(a) =
+                registry::no_derivatives_attribution(&state.store, &state.base_url, registry_id)
+            {
+                anyhow::bail!(
+                    "registry entry '{registry_id}' holds {}, whose licence allows no altered \
+                     copies; refusing to promote dataset {dataset_id} into it",
+                    a.file
                 );
             }
         }

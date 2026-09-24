@@ -766,7 +766,11 @@ pub(crate) async fn execute_update(
 
     // H-1: enforce the per-graph ACL on BOTH the write targets and the WHERE/USING
     // read side, and admin-gate variable-graph / SERVICE / all-graph operations.
-    let (graph_iris, requires_admin) = authorize_update(state, user, &parsed)?;
+    let authorized = authorize_update(state, user, &parsed)?;
+    let (graph_iris, requires_admin) = (authorized.write_iris, authorized.requires_admin);
+    // A write into a model version's graph: its licence record stops calling
+    // the content unchanged before the write runs.
+    mark_model_versions_written(state, &authorized.model_versions)?;
 
     // M-5: Use targeted graph index update (only re-count affected graphs).
     // W4-21: Wrap in a configurable timeout to abort runaway UPDATE operations.
@@ -782,21 +786,51 @@ pub(crate) async fn execute_update(
     };
     let timeout = std::time::Duration::from_secs(state.query_timeout_secs);
     let ctx = write_context(state, user, crate::commit_log::CommitKind::Sparql);
-    let delta = tokio::time::timeout(
-        timeout,
-        tokio::task::spawn_blocking(move || {
+    // A write whose graphs could not be named before it ran: the model copies
+    // a check vouched for are re-checked after it. The re-check runs in the
+    // write's own blocking task, right after the write: that task cannot be
+    // cancelled and commits even when this request stops waiting (the timeout
+    // below, a client that goes away), so the re-check runs whenever the write
+    // did. The result is handed over before the re-check, which therefore does
+    // not count toward the timeout.
+    let reverify = authorized.writes_unnamed_graphs;
+    let st = state.clone();
+    let (result_tx, result_rx) = oneshot::channel();
+    let write = tokio::task::spawn_blocking(move || {
+        let result = {
             let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
             store.update_targeted_delta(&effective, &affected, requires_admin)
-        }),
-    )
-    .await
-    .map_err(|_| AppError::BadRequest("Update execution timed out".to_string()))?
-    .map_err(|e| AppError::Internal(e.to_string()))?
-    .map_err(|e| match e {
-        // A replica refuses every write: 503, not a client error.
-        crate::store::engine::StoreError::ReadOnly(_) => AppError::from(e),
-        other => AppError::BadRequest(other.to_string()),
-    })?;
+        };
+        // A replica refuses every write before anything is written.
+        let may_have_written =
+            !matches!(result, Err(crate::store::engine::StoreError::ReadOnly(_)));
+        let _ = result_tx.send(result);
+        if reverify && may_have_written {
+            reverify_model_copies_after_write(&st);
+        }
+    });
+    let delta = tokio::time::timeout(timeout, result_rx)
+        .await
+        .map_err(|_| {
+            // Only the wait ends here: the write cannot be cancelled.
+            AppError::BadRequest(
+                "Update execution timed out: the server stopped waiting for it, but an update \
+                 cannot be cancelled once it runs and may still complete; check the data before \
+                 running it again"
+                    .to_string(),
+            )
+        })?
+        .map_err(|_| AppError::Internal("the update task ended without a result".to_string()))?
+        .map_err(|e| match e {
+            // A replica refuses every write: 503, not a client error.
+            crate::store::engine::StoreError::ReadOnly(_) => AppError::from(e),
+            other => AppError::BadRequest(other.to_string()),
+        })?;
+    if reverify {
+        // Answer once the re-check is done, so a read right after this
+        // response sees the records it marked.
+        let _ = write.await;
+    }
     // Writer-pays text-index maintenance: a ground update (INSERT DATA /
     // DELETE DATA) knows its exact quads, so just those documents change;
     // any other update with known target graphs refreshes exactly those; a
@@ -881,6 +915,10 @@ struct UpdateGraphAccess {
     /// of affected graphs cannot be bounded statically, so the operation is
     /// restricted to admins (non-admins must name explicit graphs).
     unscoped: bool,
+    /// A variable graph in a DELETE/INSERT template: the graphs the update
+    /// WRITES cannot be named before it runs (a variable graph read only in
+    /// the WHERE clause leaves every write target named).
+    unnamed_write: bool,
 }
 
 /// Recursively collect the named graphs a `WHERE` pattern reads, flagging a
@@ -977,7 +1015,10 @@ fn analyze_update_graph_access(update: &spargebra::Update) -> UpdateGraphAccess 
                         GraphNamePattern::NamedNode(nn) => {
                             acc.write_iris.insert(nn.as_str().to_string());
                         }
-                        GraphNamePattern::Variable(_) => acc.unscoped = true,
+                        GraphNamePattern::Variable(_) => {
+                            acc.unscoped = true;
+                            acc.unnamed_write = true;
+                        }
                         GraphNamePattern::DefaultGraph => {
                             // Resolves to the WITH/USING default graph(s); with no
                             // USING it is the unnamed default graph (allowed, like a
@@ -1042,14 +1083,30 @@ pub(crate) fn accessible_read_graphs(
     Ok(accessible)
 }
 
+/// What [`authorize_update`] found a SPARQL UPDATE may do.
+struct AuthorizedUpdate {
+    /// Ground write-target IRIs (for index recount, audit, and provenance).
+    write_iris: Vec<String>,
+    /// An all-graph operation (CLEAR/DROP ALL or NAMED).
+    requires_admin: bool,
+    /// The update writes graphs that cannot be named before it runs (a
+    /// variable graph in a DELETE/INSERT template, CLEAR/DROP ALL or NAMED):
+    /// admin only, and followed by a re-check of the model copies a check
+    /// vouched for, since no guard could look at those graphs beforehand.
+    writes_unnamed_graphs: bool,
+    /// Model versions with a licence record among the write targets, to mark
+    /// as possibly modified before the write runs.
+    model_versions: Vec<crate::data_models::registry::AttributedVersion>,
+}
+
 /// Enforce the per-graph ACL for both the write and read side of a parsed
-/// SPARQL UPDATE (H-1). Returns the ground write-target IRIs (for index recount,
-/// audit, and provenance) and whether the update is an all-graph operation.
+/// SPARQL UPDATE (H-1), and the model registry's guard on each ground write
+/// target (a version whose licence allows no altered copies is refused).
 fn authorize_update(
     state: &AppState,
     user: Option<&AuthenticatedUser>,
     parsed: &spargebra::Update,
-) -> Result<(Vec<String>, bool), AppError> {
+) -> Result<AuthorizedUpdate, AppError> {
     let access = analyze_update_graph_access(parsed);
     let is_admin = user.map(|u| u.is_admin()).unwrap_or(false);
 
@@ -1072,8 +1129,11 @@ fn authorize_update(
     }
 
     // Write permission for every ground target graph.
+    let mut model_versions = Vec::new();
     for iri in &access.write_iris {
-        require_graph_write(state, user, Some(iri.as_str()))?;
+        if let Some(v) = require_graph_write_for(state, user, Some(iri.as_str()))? {
+            model_versions.push(v);
+        }
     }
 
     // H-1: read permission for every ground graph the WHERE/USING reads. Prevents
@@ -1089,10 +1149,56 @@ fn authorize_update(
         }
     }
 
-    Ok((
-        access.write_iris.into_iter().collect(),
-        access.requires_admin,
-    ))
+    Ok(AuthorizedUpdate {
+        write_iris: access.write_iris.into_iter().collect(),
+        requires_admin: access.requires_admin,
+        writes_unnamed_graphs: access.requires_admin || access.unnamed_write,
+        model_versions,
+    })
+}
+
+#[cfg(test)]
+mod update_graph_access_tests {
+    use super::analyze_update_graph_access;
+
+    fn access(update: &str) -> super::UpdateGraphAccess {
+        analyze_update_graph_access(&spargebra::SparqlParser::new().parse_update(update).unwrap())
+    }
+
+    /// Only a write whose graphs cannot be named before it runs is followed by
+    /// the re-check of the checked model copies: a variable graph in a
+    /// DELETE/INSERT template (`DELETE WHERE` included), or CLEAR/DROP ALL or
+    /// NAMED. A variable graph read only in the WHERE clause leaves every
+    /// write target named, and each of those went through the write guard.
+    #[test]
+    fn only_writes_into_unnamed_graphs_need_the_recheck() {
+        let a = access("INSERT { GRAPH <urn:mine> { ?s ?p ?o } } WHERE { GRAPH ?g { ?s ?p ?o } }");
+        assert!(a.unscoped, "admin only: the read side is unbounded");
+        assert!(!a.unnamed_write && !a.requires_admin);
+        assert!(a.write_iris.contains("urn:mine"));
+
+        for update in [
+            "INSERT { GRAPH ?g { ?s <urn:p> 1 } } WHERE { GRAPH ?g { ?s ?p ?o } }",
+            "DELETE { GRAPH ?g { ?s ?p ?o } } WHERE { GRAPH ?g { ?s ?p ?o } }",
+            "DELETE WHERE { GRAPH ?g { ?s <urn:p> ?o } }",
+        ] {
+            let a = access(update);
+            assert!(a.unnamed_write && a.unscoped, "{update}");
+        }
+        for update in ["CLEAR ALL", "DROP NAMED", "CLEAR SILENT ALL"] {
+            let a = access(update);
+            assert!(a.requires_admin && !a.unnamed_write, "{update}");
+        }
+        for update in [
+            "INSERT DATA { GRAPH <urn:g> { <urn:s> <urn:p> 1 } }",
+            "WITH <urn:g> DELETE { ?s ?p ?o } WHERE { ?s ?p ?o }",
+            "CLEAR GRAPH <urn:g>",
+            "COPY <urn:a> TO <urn:b>",
+        ] {
+            let a = access(update);
+            assert!(!a.unnamed_write && !a.requires_admin, "{update}");
+        }
+    }
 }
 
 // ─── Batch SPARQL UPDATE ──────────────────────────────────────────────────────
@@ -1132,15 +1238,28 @@ async fn sparql_batch_update(
             "This API token does not have write scope".to_string(),
         ));
     }
+    let mut model_versions = Vec::new();
+    let mut writes_unnamed_graphs = false;
     for stmt in &resolved {
         let parsed = spargebra::SparqlParser::new()
             .parse_update(stmt.as_str())
             .map_err(|e| AppError::BadRequest(format!("Invalid SPARQL UPDATE: {}", e)))?;
         // H-1: per-graph read+write ACL, admin-gate variable-graph/SERVICE/all-graph ops.
-        authorize_update(&state, Some(&user), &parsed)?;
+        let authorized = authorize_update(&state, Some(&user), &parsed)?;
+        writes_unnamed_graphs |= authorized.writes_unnamed_graphs;
+        model_versions.extend(authorized.model_versions);
     }
+    // Every statement is authorized: the model versions the batch writes stop
+    // being called unchanged before it runs.
+    mark_model_versions_written(&state, &model_versions)?;
 
     let results = state.store.batch_update(&resolved)?;
+    if writes_unnamed_graphs {
+        // In a blocking task of its own, which runs to the end even when the
+        // client goes away while this request waits for it.
+        let st = state.clone();
+        let _ = tokio::task::spawn_blocking(move || reverify_model_copies_after_write(&st)).await;
+    }
 
     // Build per-statement status
     use crate::store::engine::BatchStatement;
@@ -1589,15 +1708,34 @@ pub(crate) fn validate_on_write(
     Ok(())
 }
 
-/// Check graph-level write permission for a caller.
-/// Admins always pass; non-admins must have an explicit write/admin grant
-/// in `graph_acl` (dataset-visibility grants read-only access to SPARQL
-/// queries — explicit write grants are required for Graph Store writes).
+/// Check graph-level write permission for a caller, for a write that runs
+/// right after the check: [`require_graph_write_for`], then the model-registry
+/// mark of [`mark_model_versions_written`].
 fn require_graph_write(
     state: &AppState,
     user: Option<&AuthenticatedUser>,
     graph_iri: Option<&str>,
 ) -> Result<(), AppError> {
+    let model_version = require_graph_write_for(state, user, graph_iri)?;
+    mark_model_versions_written(state, model_version.as_slice())
+}
+
+/// Check graph-level write permission for a caller.
+/// Admins pass the graph ACL; non-admins must have an explicit write/admin
+/// grant in `graph_acl` (dataset-visibility grants read-only access to SPARQL
+/// queries — explicit write grants are required for Graph Store writes).
+///
+/// Then the model registry's guard, for admins too: a graph holding a
+/// registered version whose licence allows no altered copies (IMBOR) is never
+/// written directly (403). A graph holding any other version with a licence
+/// record is returned, so the caller can mark that record as possibly
+/// modified ([`mark_model_versions_written`]) once the whole request is
+/// authorized and before its write runs. One registry query per graph.
+fn require_graph_write_for(
+    state: &AppState,
+    user: Option<&AuthenticatedUser>,
+    graph_iri: Option<&str>,
+) -> Result<Option<crate::data_models::registry::AttributedVersion>, AppError> {
     // M-8: a read-only API token may never write, even to the default graph or a
     // graph it holds a stale grant on. SPARQL UPDATE enforces this separately too,
     // but centralising it here also covers the Graph Store Protocol PUT/POST/DELETE
@@ -1612,20 +1750,45 @@ fn require_graph_write(
 
     let iri = match graph_iri {
         Some(i) => i,
-        None => return Ok(()), // default graph — handled by require_auth layer
+        None => return Ok(None), // default graph — handled by require_auth layer
     };
 
     // Admins bypass graph ACL
-    if user.map(|u| u.is_admin()).unwrap_or(false) {
-        return Ok(());
+    let is_admin = user.map(|u| u.is_admin()).unwrap_or(false);
+    if !is_admin && !check_graph_permission(user, iri, "write", &state.auth_db) {
+        return Err(AppError::Unauthorized(format!(
+            "Write access denied for graph <{iri}>"
+        )));
     }
 
-    if check_graph_permission(user, iri, "write", &state.auth_db) {
-        Ok(())
-    } else {
-        Err(AppError::Unauthorized(format!(
-            "Write access denied for graph <{iri}>"
-        )))
+    crate::data_models::write_guard::check(&state.store, &state.base_url, iri)
+        .map_err(AppError::Forbidden)
+}
+
+/// Mark the licence records of the model versions an authorized direct write
+/// is about to change as possibly modified (see
+/// `crate::data_models::write_guard`).
+fn mark_model_versions_written(
+    state: &AppState,
+    versions: &[crate::data_models::registry::AttributedVersion],
+) -> Result<(), AppError> {
+    if versions.is_empty() {
+        return Ok(());
+    }
+    crate::data_models::write_guard::mark(&state.store, versions).map_err(AppError::from)?;
+    state.mark_vocab_registry_dirty();
+    Ok(())
+}
+
+/// After an admin's write whose graphs could not be named in advance (a
+/// variable graph in a DELETE/INSERT template, `CLEAR ALL`): re-check every
+/// model copy a check vouched for, and mark each one that changed; the
+/// registry-derived vocab state is then rebuilt. Blocking: the callers run it
+/// in the write's own blocking task, or one of its own, so it is never skipped
+/// because the request stopped waiting.
+fn reverify_model_copies_after_write(state: &AppState) {
+    if crate::data_models::write_guard::reverify_checked_copies(&state.store) > 0 {
+        state.mark_vocab_registry_dirty();
     }
 }
 
@@ -1660,7 +1823,7 @@ async fn graph_store_put(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    require_graph_write(&state, user.as_deref(), params.graph_iri())?;
+    let model_version = require_graph_write_for(&state, user.as_deref(), params.graph_iri())?;
     let commit_graph = params.graph_iri().map(str::to_string);
     let before = commit_graph
         .as_deref()
@@ -1694,6 +1857,7 @@ async fn graph_store_put(
         format,
         crate::shacl_studio::gate::WriteMode::Replace,
     )?;
+    mark_model_versions_written(&state, model_version.as_slice())?;
 
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
@@ -1750,7 +1914,7 @@ async fn graph_store_post(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    require_graph_write(&state, user.as_deref(), params.graph_iri())?;
+    let model_version = require_graph_write_for(&state, user.as_deref(), params.graph_iri())?;
     let commit_graph = params.graph_iri().map(str::to_string);
     let before = commit_graph
         .as_deref()
@@ -1784,6 +1948,7 @@ async fn graph_store_post(
         format,
         crate::shacl_studio::gate::WriteMode::Merge,
     )?;
+    mark_model_versions_written(&state, model_version.as_slice())?;
 
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
@@ -1850,7 +2015,8 @@ async fn graph_store_delete(
     user: Option<Extension<AuthenticatedUser>>,
     Query(params): Query<GraphStoreParams>,
 ) -> Result<Response, AppError> {
-    require_graph_write(&state, user.as_deref(), params.graph_iri())?;
+    let model_version = require_graph_write_for(&state, user.as_deref(), params.graph_iri())?;
+    mark_model_versions_written(&state, model_version.as_slice())?;
     let commit_graph = params.graph_iri().map(str::to_string);
     let before = commit_graph
         .as_deref()
@@ -8474,24 +8640,25 @@ pub async fn execute_rml_mapping(
     // targets. A non-admin may therefore only write the dataset's own namespaced
     // graphs: gate the `?graph=` target here, and every `rml:graphMap` override at
     // execution. Without this a writer of any dataset could inject triples into
-    // another tenant's graph. Admins are unrestricted.
-    if !current_user.is_admin() {
-        if let Err(msg) = crate::auth::dataset_graph::authorize_dataset_graph_target(
-            &state.auth_db,
-            &state.base_url,
+    // another tenant's graph. A model-registry graph is refused for everyone,
+    // admins included: this path runs none of the registry's licence checks.
+    if let Err(msg) = crate::auth::dataset_graph::gate_dataset_graph_target(
+        &state.store,
+        &state.auth_db,
+        &state.base_url,
+        &dataset_id,
+        &target_graph,
+        current_user.is_admin(),
+    ) {
+        state.audit.log_denied(
+            Some(current_user.user_id.clone()),
+            None,
+            "dataset_graph",
             &dataset_id,
-            &target_graph,
-        ) {
-            state.audit.log_denied(
-                Some(current_user.user_id.clone()),
-                None,
-                "dataset_graph",
-                &dataset_id,
-                "rml_execute",
-                None,
-            );
-            return Err((StatusCode::FORBIDDEN, msg));
-        }
+            "rml_execute",
+            None,
+        );
+        return Err((StatusCode::FORBIDDEN, msg));
     }
 
     // Parse multipart: collect mapping override and source files
@@ -8574,6 +8741,7 @@ pub async fn execute_rml_mapping(
     let is_admin = current_user.is_admin();
     let authz_base = state.base_url.clone();
     let authz_db = state.auth_db.clone();
+    let authz_store = state.store.clone();
     let authz_ds = dataset_id.clone();
     let count = crate::rml::execute_authorized(
         &mapping,
@@ -8581,16 +8749,14 @@ pub async fn execute_rml_mapping(
         &state.store,
         Some(&target_graph),
         move |g: &str| {
-            if is_admin {
-                Ok(())
-            } else {
-                crate::auth::dataset_graph::authorize_dataset_graph_target(
-                    &authz_db,
-                    &authz_base,
-                    &authz_ds,
-                    g,
-                )
-            }
+            crate::auth::dataset_graph::gate_dataset_graph_target(
+                &authz_store,
+                &authz_db,
+                &authz_base,
+                &authz_ds,
+                g,
+                is_admin,
+            )
         },
     )
     .map_err(|e| (StatusCode::BAD_REQUEST, e))?;

@@ -1,9 +1,22 @@
-# Semantically-Interlinked Online Communities — SIOC is an ontology for
-# describing the information in online communities.
-# Full vocabulary as published in the Linked Open Vocabularies (LOV) corpus
-# snapshot of 2025-12-18 (https://lov.linkeddata.es/ — dataset CC BY 4.0),
-# version v1.35 (2010-03-25).
-# Source: http://rdfs.org/sioc/ns#  (ns http://rdfs.org/sioc/ns#)
+# SIOC Core Ontology Namespace (Semantically-Interlinked Online Communities),
+# Revision 1.35 (2010-03-25) — describes the information in online communities.
+# Source: http://rdfs.org/sioc/ns — triples identical to Revision 1.35 as
+# published there in 2010 (the current document is Revision 1.36).
+# Obtained via the Linked Open Vocabularies (LOV) corpus snapshot of 2025-12-18
+# (https://lov.linkeddata.es/), which re-serialized it as Turtle. LOV's own
+# CC BY 4.0 licence covers LOV's catalogue; it does not relicense this vocabulary.
+# Copyright © 2004-2010 by DERI, NUI Galway. (the specification's notice at
+# Revision 1.35; http://rdfs.org/sioc/spec/ now names the holder as Data Science
+# Institute (formerly DERI), NUI Galway.) Editors: Uldis Bojārs, John G. Breslin.
+# Licence: Creative Commons Attribution 1.0 (CC BY 1.0),
+# http://creativecommons.org/licenses/by/1.0/, as stated at
+# http://rdfs.org/sioc/spec/ for the SIOC Core Ontology Specification and
+# accompanying documentation; the publisher states that this copyright does not
+# apply to SIOC data formats, ontology terms, or technology.
+# Changes: re-serialized as Turtle by LOV (triples unchanged); this comment
+# header was written by Open Triplestore (2026-07-24, revised 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The vocabulary, as re-serialized by LOV, starts below this line. ----
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .

@@ -167,16 +167,76 @@ pub fn parse_and_load(
 /// Load already-parsed quads into versioned named graphs (steps 3–5 of
 /// `parse_and_load`). Split out so a caller that already parsed the input for
 /// another reason — vocab seeding parses once for kind detection — doesn't reparse.
+///
+/// When the content states no `owl:versionInfo`, one is added to it (see
+/// [`injected_version_info`]). Third-party content whose licence asks for
+/// unaltered copies goes through [`load_parsed_verbatim`] instead.
 pub fn load_parsed(
+    store: &TripleStore,
+    base_url: &str,
+    data_model_id: &str,
+    version_override: Option<&str>,
+    quads: Vec<Quad>,
+    merge: bool,
+) -> Result<LoadResult, String> {
+    load_parsed_inner(
+        store,
+        base_url,
+        data_model_id,
+        version_override,
+        quads,
+        merge,
+        true,
+    )
+}
+
+/// [`load_parsed`] without adding anything: the stored graph holds exactly the
+/// given triples. For content that must stay unaltered (the bundled
+/// vocabularies seeded as reference models, some of which allow no derivatives).
+pub fn load_parsed_verbatim(
+    store: &TripleStore,
+    base_url: &str,
+    data_model_id: &str,
+    version: &str,
+    quads: Vec<Quad>,
+    merge: bool,
+) -> Result<LoadResult, String> {
+    load_parsed_inner(
+        store,
+        base_url,
+        data_model_id,
+        Some(version),
+        quads,
+        merge,
+        false,
+    )
+}
+
+/// The subject of the `owl:versionInfo "<version>"` triple [`load_parsed`] adds
+/// to content that states none: the declared `owl:Ontology`, else the entry's
+/// own IRI. `None` when the content has its own `owl:versionInfo`.
+pub fn injected_version_info(
+    quads: &[Quad],
+    base_url: &str,
+    data_model_id: &str,
+) -> Option<NamedNode> {
+    if extract_owl_version_info(quads).is_some() {
+        return None;
+    }
+    detect_ontology_subject(quads)
+        .or_else(|| NamedNode::new(format!("{base_url}/data-model/{data_model_id}")).ok())
+}
+
+fn load_parsed_inner(
     store: &TripleStore,
     base_url: &str,
     data_model_id: &str,
     version_override: Option<&str>,
     mut quads: Vec<Quad>,
     merge: bool,
+    stamp_version_info: bool,
 ) -> Result<LoadResult, String> {
     // 3. Determine version
-    let file_has_version_info = extract_owl_version_info(&quads).is_some();
     let version = version_override
         .map(|v| v.to_string())
         .or_else(|| extract_owl_version_info(&quads))
@@ -191,21 +251,19 @@ pub fn load_parsed(
 
     // Inject owl:versionInfo into the linked data if not already present.
     // Use the declared owl:Ontology subject, or fall back to the ontology's canonical IRI.
-    if !file_has_version_info {
-        let subject_nn = detect_ontology_subject(&quads).unwrap_or_else(|| {
-            NamedNode::new(format!("{base_url}/data-model/{data_model_id}").as_str())
-                .expect("base ontology IRI is always valid")
-        });
-        let version_info_pred = NamedNode::new("http://www.w3.org/2002/07/owl#versionInfo")
-            .expect("owl:versionInfo IRI is always valid");
-        let version_literal = Literal::new_simple_literal(version.as_str());
-        // Insert into the default graph slot; it will be re-routed to base_graph below.
-        quads.push(Quad::new(
-            NamedOrBlankNode::NamedNode(subject_nn),
-            version_info_pred,
-            Term::Literal(version_literal),
-            GraphName::DefaultGraph,
-        ));
+    if stamp_version_info {
+        if let Some(subject_nn) = injected_version_info(&quads, base_url, data_model_id) {
+            let version_info_pred = NamedNode::new("http://www.w3.org/2002/07/owl#versionInfo")
+                .expect("owl:versionInfo IRI is always valid");
+            let version_literal = Literal::new_simple_literal(version.as_str());
+            // Insert into the default graph slot; it will be re-routed to base_graph below.
+            quads.push(Quad::new(
+                NamedOrBlankNode::NamedNode(subject_nn),
+                version_info_pred,
+                Term::Literal(version_literal),
+                GraphName::DefaultGraph,
+            ));
+        }
     }
 
     // 4. Group quads by target graph

@@ -1483,6 +1483,50 @@ export function isLoggedIn() {
 // ── Model Registry (OWL/RDFS ontologies and SKOS vocabularies) ─────────────────
 // Each entry carries a `kind` ("data-model" | "vocabulary"), auto-detected on upload.
 
+/** A licence by name and canonical URI. */
+export interface ModelLicenseRef {
+  name: string;
+  uri: string;
+}
+
+/**
+ * Licence and attribution of the content a registry entry or version holds:
+ * set for the bundled standard vocabularies the server seeds (and drafts
+ * copied from them), `null` otherwise. Registry metadata, not part of the
+ * stored graph. Mirrors `ContentAttribution` in src/data_models/models.rs.
+ */
+export interface ModelAttribution {
+  /** The bundled file, relative to /vocab/ (e.g. "dcat/2.0.0.ttl"). */
+  file: string;
+  /** Empty when no licence is known (DOAP). */
+  licenses: ModelLicenseRef[];
+  /** Copyright notices or, where a source states none, its creator credit. */
+  copyright: string[];
+  /** The statement the licence asks every copy to carry, verbatim. */
+  notice: string | null;
+  /** The source document's status (the W3C Document License asks for it). */
+  status: string | null;
+  source_url: string;
+  specification_url: string | null;
+  /** How the bundled file differs from its source. */
+  changes: string | null;
+  /** How the stored copy relates to the bundled file. */
+  stored_copy: string;
+  /**
+   * The server checked that the stored triples are the bundled file's.
+   * False for drafts, branches, merges, rebases and edited copies, which may
+   * have been modified. Absent from older servers' records.
+   */
+  unchanged?: boolean;
+  remarks: string | null;
+  /** The rights holder allows no altered copies (IMBOR). */
+  no_derivatives: boolean;
+  /** The bundled file's own comment header, verbatim. */
+  header: string | null;
+  /** Full attribution and licence texts (/vocab/NOTICE.md on this server). */
+  notice_url: string;
+}
+
 export const listDataModels = () => request('GET', '/api/models');
 
 // A prefix candidate derived from an on-platform registered model/vocabulary.
@@ -1737,7 +1781,28 @@ export interface VocabCatalogEntry {
   }[];
   source: 'platform' | 'lov';
   model_id?: string | null;
+  /** Its graph is in this instance's corpus (the image ships only
+   *  vocabularies this platform may redistribute). */
   installable: boolean;
+  /** The vocabulary's licence: the one its own graph declares or, where it
+   *  names none, its publisher's published terms (`license_source`). LOV
+   *  entries only; null status on platform entries. LOV's CC BY 4.0 covers
+   *  only LOV's metadata, not the vocabularies. */
+  license: string[];
+  license_declared: string[];
+  license_status: 'open' | 'restricted' | 'unrecognised' | 'copyright-only' | 'none' | null;
+  /** This platform may redistribute it (and term-indexes it). */
+  redistributable: boolean;
+  /** `graph`: the licence fields are what the vocabulary's own graph states;
+   *  `publisher-terms`: the graph names none and the publisher states its
+   *  terms elsewhere (`license_source_url`). */
+  license_source?: 'graph' | 'publisher-terms' | null;
+  license_source_url?: string | null;
+  /** The statement the licence requires on copies (a copyright line, the
+   *  W3C or OGC document notice, …), whatever the licence's source. */
+  license_notice?: string | null;
+  /** Why an openly licensed vocabulary is still not redistributed. */
+  redistribution_withheld?: string | null;
 }
 
 export interface VocabTermHit {

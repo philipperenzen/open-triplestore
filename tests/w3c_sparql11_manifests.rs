@@ -1,5 +1,12 @@
-//! W3C SPARQL 1.1 test-suite runner over the vendored official suite
-//! (`tests/fixtures/w3c-sparql11`, see PROVENANCE.md there).
+//! Runner for the query and update sections of the W3C SPARQL 1.1 test suite
+//! (w3c/rdf-tests), vendored unmodified under `tests/fixtures/w3c-sparql11`
+//! (see PROVENANCE.md and LICENSE.md there).
+//!
+//! Those sections are a subset of a W3C test suite, used under the W3C 3-clause
+//! BSD licence for development and bug tracking only. W3C's test-suite licence
+//! policy allows no public performance claims on a subset, so the baseline
+//! below drives the ratchet and is not published as a score (see
+//! `scripts/conformance_table.py` and docs/conformance/sparql11.md).
 //!
 //! The two top-level manifests — `manifest-sparql11-query.ttl` and
 //! `manifest-sparql11-update.ttl` — are walked through `mf:include`; every

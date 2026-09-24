@@ -78,6 +78,12 @@ jobs:
       - name: Build
         run: cargo build --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked
 
+      # The Docker builder stage writes the crates' licence notices with this
+      # generator; run it here too so a change that breaks it fails a PR, not
+      # the next image release.
+      - name: Third-party licence notices (server)
+        run: python3 scripts/gen_rust_third_party_licenses.py --features full --output "$RUNNER_TEMP/THIRD-PARTY-LICENSES-server.txt"
+
       # No test is ignored (scripts/no-ignored-tests.sh says why): the source
       # scan catches an `#[ignore]` behind a cfg_attr for another platform,
       # the summary check catches everything this run skipped, doctests too.

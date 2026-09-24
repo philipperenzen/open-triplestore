@@ -94,6 +94,7 @@ Three facts worth knowing before an instance is exposed:
 | `DELETE` | `/api/admin/prefixes/{label}` | **admin** | Drop this deployment's opinion of a shorthand, so it falls back to the platform overlay, an installed bundle's seeds or the community snapshot. The prefix itself does not go away. |
 | `GET` | `/api/vocab/search` | **none** | Bundled vocabulary search; rate-limited. |
 | `POST` | `/api/vocab/install` | **admin** | Installs a vocabulary into the instance. |
+| `GET` | `/api/vocab/notice` | **none** | Plain-text licence page of one LOV vocabulary (catalogue data). |
 | `GET` | `/api/admin/telemetry` | **admin** | Store counters across every tenant. |
 | `GET` | `/api/admin/changes` | **admin** | Change-log rows carry quads from every tenant. |
 | `GET` | `/api/admin/changes/status` | **admin** | Capture state, epoch, cursors, caps. |

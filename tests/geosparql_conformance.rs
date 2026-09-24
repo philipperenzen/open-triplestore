@@ -1,4 +1,5 @@
-//! OGC GeoSPARQL 1.1 Conformance Tests
+//! GeoSPARQL 1.1 tests — hand-written and derived from the OGC GeoSPARQL 1.1
+//! standard. Not the OGC's compliance tests, and not an OGC certification.
 //!
 //! Derived from:
 //! - OGC GeoSPARQL 1.1 standard: https://docs.ogc.org/is/22-047r1/22-047r1.html
@@ -6,7 +7,8 @@
 //!   https://github.com/SoftwareImpacts/SIMPAC-2021-29
 //!   206 SPARQL queries targeting 30 specific GeoSPARQL requirements
 //!
-//! The 30 OGC requirements covered:
+//! The 30 requirements covered (this file's own numbering, not the OGC
+//! conformance classes):
 //!   Req 1:  Core – WKT literal support (geo:wktLiteral)
 //!   Req 2:  Core – GML literal support (geo:gmlLiteral) [parse only]
 //!   Req 3:  Simple Features - sfContains

@@ -88,7 +88,11 @@
       </ul>
     </div>
   {:else if valid.length}
-    <GeoPreview wkts={valid.map((f) => f.wkt)} height="260px" />
+    <GeoPreview
+      wkts={valid.map((f) => f.wkt)}
+      sources={[...valid.map((f) => f.iri), ...(models || []).map((m) => m.url)].filter(Boolean)}
+      height="260px"
+    />
     <div class="legend-row">
       <span class="count"><MapPin size={11} /> {$t('components.chat.mapFeatures', { values: { count: valid.length } })}</span>
       {#if labelled.length}

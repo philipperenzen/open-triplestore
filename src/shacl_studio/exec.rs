@@ -195,6 +195,76 @@ fn owner_can_write(auth_db: &AuthDb, created_by: &Option<String>, graph: &str) -
     }
 }
 
+/// The model registry's guard on a pipeline's write into `graphs` (see
+/// `crate::data_models::write_guard`): `false` when any of them holds a
+/// registered model version whose licence allows no altered copies (IMBOR, a
+/// no-derivatives LOV install or seed-bundle model), for every owner, admins
+/// included. Otherwise the licence records of the attributed versions among
+/// them stop calling their content unchanged before the write runs, and
+/// `true` (`false` when that fails: nothing is written then).
+fn registry_permits_write(
+    store: &TripleStore,
+    base_url: &str,
+    pipeline_id: &str,
+    graphs: &[String],
+) -> bool {
+    let mut versions = Vec::new();
+    for g in graphs {
+        match crate::data_models::write_guard::check(store, base_url, g) {
+            Ok(Some(v)) => versions.push(v),
+            Ok(None) => {}
+            Err(refusal) => {
+                tracing::warn!("shacl pipeline {pipeline_id}: {refusal}");
+                return false;
+            }
+        }
+    }
+    match crate::data_models::write_guard::mark(store, &versions) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(
+                "shacl pipeline {pipeline_id}: the licence records of the graphs it would write \
+                 could not be marked ({e}); nothing is written"
+            );
+            false
+        }
+    }
+}
+
+/// Whether this run may materialise SHACL-AF inference in place into
+/// `data_graphs`: the pipeline asks for it, its owner may write every one of
+/// them, and the registry's guard allows (and has marked) them.
+fn in_place_inference_allowed(
+    main_store: &TripleStore,
+    auth_db: &AuthDb,
+    base_url: &str,
+    pipeline: &ValidationPipeline,
+    data_graphs: &[String],
+) -> bool {
+    if !pipeline.run_inference {
+        return false;
+    }
+    if !data_graphs
+        .iter()
+        .all(|g| owner_can_write(auth_db, &pipeline.created_by, g))
+    {
+        tracing::warn!(
+            "shacl pipeline {}: inference disabled this run — owner lacks write on all data graphs",
+            pipeline.id
+        );
+        return false;
+    }
+    if !registry_permits_write(main_store, base_url, &pipeline.id, data_graphs) {
+        tracing::warn!(
+            "shacl pipeline {}: inference disabled this run — a data graph holds a model version \
+             whose licence allows no altered copies",
+            pipeline.id
+        );
+        return false;
+    }
+    true
+}
+
 /// Run the pipeline now against `main_store`, store the run + report, and update
 /// the pipeline's last-run bookkeeping. `triggered_by` is "manual" | "schedule".
 pub fn execute_pipeline(
@@ -213,17 +283,10 @@ pub fn execute_pipeline(
     // In-place SHACL-AF inference mutates the data graphs themselves; only allow it when the
     // pipeline's owner may write every data graph in scope, otherwise validate read-only. This
     // stops a pipeline (manual or scheduled) from materialising triples into graphs its owner
-    // cannot write — the cross-tenant in-place-tamper path.
-    let infer_ok = pipeline.run_inference
-        && data_graphs
-            .iter()
-            .all(|g| owner_can_write(auth_db, &pipeline.created_by, g));
-    if pipeline.run_inference && !infer_ok {
-        tracing::warn!(
-            "shacl pipeline {}: inference disabled this run — owner lacks write on all data graphs",
-            pipeline.id
-        );
-    }
+    // cannot write — the cross-tenant in-place-tamper path — or into a registered model
+    // version whose licence allows no altered copies.
+    let infer_ok =
+        in_place_inference_allowed(main_store, auth_db, base_url, pipeline, &data_graphs);
 
     let read_graphs = resolve_read_graphs(main_store, auth_db, studio, base_url, pipeline);
     let _path = crate::store::telemetry::ValidationPathGuard::set("pipeline");
@@ -308,8 +371,11 @@ fn persist_derived(
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| format!("urn:system:inferred:{}", pipeline.id));
         if !explicit || owner_can_write(auth_db, &pipeline.created_by, &target) {
-            write_quads_to_graph(store, inferred, &target);
-            register_derived_graph(auth_db, data_graphs, &target, GraphKind::Entailment);
+            if registry_permits_write(store, base_url, &pipeline.id, std::slice::from_ref(&target))
+            {
+                write_quads_to_graph(store, inferred, &target);
+                register_derived_graph(auth_db, data_graphs, &target, GraphKind::Entailment);
+            }
         } else {
             tracing::warn!(
                 "shacl pipeline {}: skipped inferred write to <{}> (owner lacks write access)",
@@ -342,7 +408,12 @@ fn persist_derived(
                 pipeline.id,
                 target
             );
-        } else {
+        } else if registry_permits_write(
+            store,
+            base_url,
+            &pipeline.id,
+            std::slice::from_ref(&target),
+        ) {
             let report_iri = format!("{target}#run-{run_id}");
             let ttl = super::report_rdf::report_to_turtle(report, &report_iri);
             // POST (append) so successive runs accumulate rather than overwrite.
@@ -490,11 +561,9 @@ pub fn execute_pipeline_dry(
     let shape_graphs = resolve_shape_graphs(main_store, auth_db, studio, base_url, pipeline);
 
     // Even a "test" run materialises inference in place against the live store, so apply the same
-    // owner-write gate as a real run before letting it mutate any data graph.
-    let infer_ok = pipeline.run_inference
-        && data_graphs
-            .iter()
-            .all(|g| owner_can_write(auth_db, &pipeline.created_by, g));
+    // owner-write and registry gates as a real run before letting it mutate any data graph.
+    let infer_ok =
+        in_place_inference_allowed(main_store, auth_db, base_url, pipeline, &data_graphs);
 
     let read_graphs = resolve_read_graphs(main_store, auth_db, studio, base_url, pipeline);
     let _path = crate::store::telemetry::ValidationPathGuard::set("pipeline");

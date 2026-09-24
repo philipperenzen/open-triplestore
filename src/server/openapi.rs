@@ -179,6 +179,15 @@ minted at `POST /api/auth/tokens`. Send it as `Authorization: Bearer <token>`.",
             super::routes::BrowseTripleParams,
             super::routes::BrowseResourceParams,
             super::routes::DatasetSparqlParams,
+            // Model registry responses (with the licence record of seeded vocabularies)
+            crate::data_models::models::DataModelResponse,
+            crate::data_models::models::DataModelVersionResponse,
+            crate::data_models::models::DataModelRecord,
+            crate::data_models::models::DataModelVersion,
+            crate::data_models::models::VersionStatus,
+            crate::data_models::models::SubGraphStatus,
+            crate::data_models::models::ContentAttribution,
+            crate::data_models::models::LicenseRef,
         )
     )
 )]
@@ -462,12 +471,12 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
         (M::Post, o("SPARQL", "SPARQL query or update (POST)",
             "Content-Type selects the operation:\n- `application/sparql-query` — query in body\n- `application/sparql-update` — update in body (requires authentication)\n- `application/x-www-form-urlencoded` — `query` or `update` form field",
             vec![],
-            vec![("200", "Query results"), ("204", "Update executed"), ("401", "Authentication required for updates")], false)),
+            vec![("200", "Query results"), ("204", "Update executed"), ("401", "Authentication required for updates"), ("403", "The target graph holds a model version whose licence allows no altered copies")], false)),
     ]);
     mount(paths, "/sparql/batch", vec![
         (M::Post, o("SPARQL", "Batched SPARQL update",
             "Apply several SPARQL updates (`{\"updates\": [\"…\", …]}`, at most 1000) as ONE transaction: either every statement is applied or none is. Statements run in order and each sees the effect of the previous ones. Requires authentication.",
-            vec![], vec![("200", "`status: ok` — every statement applied"), ("422", "`status: rolled_back` — a statement failed at execution and nothing was applied; `error` says which statement and why, and the per-statement `results` mark the failing one `error` and every other one `rolled_back` (`ok` never appears there)"), ("400", "A statement does not parse or is not authorised for this caller; nothing applied"), ("401", "Authentication required")], true)),
+            vec![], vec![("200", "`status: ok` — every statement applied"), ("422", "`status: rolled_back` — a statement failed at execution and nothing was applied; `error` says which statement and why, and the per-statement `results` mark the failing one `error` and every other one `rolled_back` (`ok` never appears there)"), ("400", "A statement does not parse or is not authorised for this caller; nothing applied"), ("401", "Authentication required"), ("403", "The target graph holds a model version whose licence allows no altered copies")], true)),
     ]);
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -505,6 +514,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     vec![
                         ("204", "Graph replaced"),
                         ("401", "Authentication required"),
+                        ("403", "The target graph holds a model version whose licence allows no altered copies"),
                     ],
                     true,
                 ),
@@ -519,6 +529,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     vec![
                         ("204", "Triples merged"),
                         ("401", "Authentication required"),
+                        ("403", "The target graph holds a model version whose licence allows no altered copies"),
                     ],
                     true,
                 ),
@@ -530,7 +541,11 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     "Delete graph",
                     "Delete the graph. Requires authentication.",
                     vec![gp()],
-                    vec![("204", "Graph deleted"), ("401", "Authentication required")],
+                    vec![
+                        ("204", "Graph deleted"),
+                        ("401", "Authentication required"),
+                        ("403", "The target graph holds a model version whose licence allows no altered copies"),
+                    ],
                     true,
                 ),
             ),
@@ -809,7 +824,11 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                         "GraphIriRequest",
                         json!({ "graph_iri": "https://data.example.org/graphs/catalogue" }),
                     ),
-                    vec![("201", "Graph added"), ("401", "Authentication required")],
+                    vec![
+                        ("201", "Graph added"),
+                        ("401", "Authentication required"),
+                        ("403", "Graph outside the dataset's boundary, or a model-registry graph (refused for admins too)"),
+                    ],
                     true,
                 ),
             ),
@@ -835,13 +854,17 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 ob(
                     "Datasets",
                     "Remove graph from dataset",
-                    "Unregister a named graph (does not delete its triples unless requested).",
+                    "Unregister a named graph from the dataset. The stored graph is also deleted when this dataset had it registered, no other dataset uses it (registered or as its shapes graph), it is not this dataset's shapes graph, and it is neither a system graph nor a model-registry graph. Otherwise only the registration is removed.",
                     vec![],
                     ref_body(
                         "GraphIriRequest",
                         json!({ "graph_iri": "https://data.example.org/graphs/catalogue" }),
                     ),
-                    vec![("204", "Graph removed"), ("401", "Authentication required")],
+                    vec![
+                        ("204", "Graph removed"),
+                        ("401", "Authentication required"),
+                        ("404", "Graph not registered to this dataset"),
+                    ],
                     true,
                 ),
             ),
@@ -3070,7 +3093,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Vocabularies",
                 "List vocabularies",
-                "Every vocabulary in the catalog: platform-registered entries first, then the bundled LOV catalog (~900 vocabularies).",
+                "Every vocabulary in the catalog: platform-registered entries first, then the bundled LOV catalog (~900 vocabularies). LOV entries carry the vocabulary's licence (license, with each licence's URI in license_uris, same order, null where a label names no licence document; license_declared, license_status: open|restricted|unrecognised|copyright-only|none), where it comes from (license_source: graph — the vocabulary's own graph — or publisher-terms — the graph names none and the publisher states its terms elsewhere, cited by license_source_url), the notice that licence requires on copies (license_notice), whether every licence offered allows only unaltered copies (no_derivatives), how many literals of LOV's copy hold mis-decoded characters (lov_misdecoded; the notice then says so) and whether this platform may redistribute the vocabulary (redistributable; redistribution_withheld says why an openly licensed one is not). Descriptions are included only for redistributable vocabularies. The source block's license (CC BY 4.0, license_url) is LOV's, for LOV's own metadata only (license_scope).",
                 vec![],
                 vec![("200", "Catalog listing")],
                 false,
@@ -3085,9 +3108,24 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Vocabularies",
                 "Vocabulary info",
-                "Full record for one vocabulary, looked up by prefix, ontology URI or namespace (LOV `vocabulary/info` semantics).",
+                "Full record for one vocabulary, looked up by prefix, ontology URI or namespace (LOV `vocabulary/info` semantics). Includes the vocabulary's licence (license, license_uris, license_declared, license_status, license_source: graph|publisher-terms, license_source_url, license_notice, no_derivatives, lov_misdecoded, redistributable, redistribution_withheld) and installable (its graph is in this instance's corpus).",
                 vec![qp("vocab", true, "Prefix, ontology URI or namespace")],
                 vec![("200", "Vocabulary record"), ("404", "Unknown vocabulary")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/vocab/notice",
+        vec![(
+            M::Get,
+            o(
+                "Vocabularies",
+                "Vocabulary licence page",
+                "Plain-text licence page of one LOV vocabulary, looked up by prefix, registry id of an install, ontology URI or namespace: its licences with their URIs, where they are stated, the notice copies must carry, whether this platform redistributes it, where LOV's copy comes from, and LOV's own attribution. The licence record (attribution.notice_url) of every version installed from the LOV corpus links here.",
+                vec![qp("vocab", true, "Prefix, registry id, ontology URI or namespace")],
+                vec![("200", "Licence page (text/plain)"), ("404", "Unknown LOV vocabulary")],
                 false,
             ),
         )],
@@ -3154,7 +3192,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Vocabularies",
                 "Service status",
-                "Catalog size, prefix dataset size, corpus availability and term-index build state.",
+                "Catalog size, prefix dataset size, corpus availability, how many catalog vocabularies the corpus holds (corpus_vocabularies — the image ships only the redistributable ones), term-index build state (engine.lov_vocabularies: how many of them are term-indexed — only redistributable ones are, whatever the corpus) and the catalog source (LOV's CC BY 4.0 for its own metadata).",
                 vec![],
                 vec![("200", "Status")],
                 false,
@@ -3169,7 +3207,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Vocabularies",
                 "Search terms",
-                "LOV-style term search across all vocabularies: BM25 text relevance blended with LOD-corpus reuse metrics and local usage. Requires the vocab-search feature (503 otherwise).",
+                "LOV-style term search across the LOV vocabularies in this instance's corpus that this platform may redistribute (the image ships those) and the public vocabularies registered here: BM25 text relevance blended with LOD-corpus reuse metrics and local usage. Requires the vocab-search feature (503 otherwise).",
                 vec![
                     qp("q", false, "Search text (empty browses by popularity)"),
                     qp("type", false, "Comma-separated: class,property,datatype,instance (default class,property)"),
@@ -3247,7 +3285,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Vocabularies",
                 "Install vocabulary",
-                "Copy a vocabulary from the bundled LOV corpus into the model registry as a public entry (admin only, fully offline). Body: {vocab}.",
+                "Copy a vocabulary from this instance's LOV corpus into the model registry (admin only, fully offline). Body: {vocab}. A vocabulary this platform may redistribute becomes a public entry; any other (from a full dump mounted with VOCAB_CORPUS_PATH) is installed private, owned by the installing admin, so the instance does not re-serve it publicly (is_public: false). The outcome (license, license_status, license_source, license_source_url, license_notice, redistributable, no_derivatives, redistribution_withheld, is_public, note) and the version notes record the licence, the notice it requires and the visibility. The installed version also gets a licence record (attribution on /api/models/{id}/versions): its licences with their URIs, the notice, where the copy comes from and whether the store holds LOV's copy unchanged. A vocabulary whose every licence allows only unaltered copies (no_derivatives: CC BY-ND, the OGC Document Notice) cannot then be copied into a draft or branch or otherwise edited (403). 503 when the corpus lacks the vocabulary — the image's corpus holds only vocabularies this platform may redistribute.",
                 vec![],
                 vec![
                     ("200", "Install outcome"),
@@ -3377,12 +3415,64 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
     // ═══════════════════════════════════════════════════════════════════════
     // One unified registry. Each entry carries a `kind` (data-model | vocabulary)
     // and is dereferenced per-term via `/term` (SKOS concepts included).
+    //
+    // Entries and versions carry `attribution`: for the bundled vocabularies the
+    // server seeds, the licence record of their content (ContentAttribution).
+
+    /// A JSON response whose body is a registered component schema, or an
+    /// array of it.
+    fn json_response(desc: &str, schema: &str, array: bool) -> Response {
+        let body: RefOr<Schema> = if array {
+            ArrayBuilder::new()
+                .items(Ref::from_schema_name(schema))
+                .into()
+        } else {
+            Ref::from_schema_name(schema).into()
+        };
+        ResponseBuilder::new()
+            .description(desc)
+            .content(
+                "application/json",
+                ContentBuilder::new().schema(Some(body)).build(),
+            )
+            .build()
+    }
+    const ATTRIBUTION_NOTE: &str = "`attribution` is the licence record of the content: for the \
+        bundled standard vocabularies the server seeds (and drafts copied from them), their \
+        licence(s) with URIs, copyright, the notice the licence requires, the source document's \
+        status, the source, the changes, the bundled file's own header and a link to the full \
+        notice (/vocab/NOTICE.md); null otherwise. It is registry metadata, never part of the \
+        stored graph. `unchanged` is true only when the seeder checked that the stored triples \
+        are the bundled file's; drafts, branches, merges, rebases and edited copies keep the \
+        record with `unchanged: false`, and so does a version whose graph was written directly \
+        (SPARQL Update, /sparql/batch, the Graph Store Protocol). A direct write into the graph \
+        of a version whose record allows no altered copies is refused (403). A seed bundle's \
+        model can carry a record too (`[data_models.license]`). An entry's record describes its \
+        latest published version's content.";
+    const DOWNLOAD_NOTE: &str = "For content with a licence record, `Link` headers name its \
+        licence(s) (rel=license), source (rel=via) and full notice (rel=describedby), and the \
+        body starts with the bundled file's header as `#` comments, then a line saying whether \
+        the content is that file's triples, unchanged, or a copy that may have been modified. \
+        Content whose licence allows no altered copies (IMBOR) gets the headers only; in its \
+        entry only the checked, unchanged copy is served to callers who may not write the entry \
+        (403 for any other version, here and on /diff, /merge/preview and /term), including a \
+        copy the seeder kept aside (`{version}-kept-{n}`) when the stored copy differed from the \
+        file.";
+    // Every way of creating, changing or publishing content in an entry whose
+    // content allows no altered copies (IMBOR) is refused.
+    const NO_DERIVATIVES_403: (&str, &str) = (
+        "403",
+        "The entry holds content whose licence allows no altered copies (IMBOR): no upload, \
+         edit, draft, branch, merge, rebase or publish",
+    );
+
     for (tag, base, lookup, lookup_summary, lookup_desc) in [(
         "Models",
         "/api/models",
         "term",
         "Look up a term",
-        "Resolve a class/property or SKOS concept within the model.",
+        "Resolve a class/property or SKOS concept within the model. For content with a licence \
+         record, `Link` headers name its licence(s), source and full notice.",
     )] {
         mount(
             paths,
@@ -3393,10 +3483,14 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                     o(
                         tag,
                         &format!("List ({tag})"),
-                        "List registry entries visible to the caller.",
+                        &format!("List registry entries visible to the caller. {ATTRIBUTION_NOTE}"),
                         vec![],
-                        vec![("200", "Array of entries")],
+                        vec![],
                         false,
+                    )
+                    .response(
+                        "200",
+                        json_response("Array of entries", "DataModelResponse", true),
                     ),
                 ),
                 (
@@ -3425,11 +3519,12 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                     o(
                         tag,
                         &format!("Get ({tag})"),
-                        "Registry entry details.",
+                        &format!("Registry entry details. {ATTRIBUTION_NOTE}"),
                         vec![],
-                        vec![("200", "Entry"), ("404", "Not found")],
+                        vec![("404", "Not found")],
                         false,
-                    ),
+                    )
+                    .response("200", json_response("Entry", "DataModelResponse", false)),
                 ),
                 (
                     M::Patch,
@@ -3505,11 +3600,13 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                     o(
                         tag,
                         &format!("Create branch ({tag})"),
-                        "Create a branch from a commit or head.",
+                        "Create a branch from a commit or head. It keeps the licence record \
+                         of the version it copies.",
                         vec![],
                         vec![
                             ("201", "Created branch"),
                             ("401", "Authentication required"),
+                            NO_DERIVATIVES_403,
                         ],
                         true,
                     ),
@@ -3557,11 +3654,14 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 o(
                     tag,
                     &format!("Merge ({tag})"),
-                    "Merge one branch into another.",
+                    "Merge one version into another as a new draft, which carries the licence \
+                     records of the versions it draws on. `from` and `into` must differ (400).",
                     vec![],
                     vec![
-                        ("200", "Merge result"),
+                        ("201", "Merged draft"),
+                        ("400", "from and into are the same version"),
                         ("401", "Authentication required"),
+                        NO_DERIVATIVES_403,
                         ("409", "Merge conflict"),
                     ],
                     true,
@@ -3594,7 +3694,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 o(
                     tag,
                     &format!("Download latest data ({tag})"),
-                    "RDF data of the latest published version.",
+                    &format!("RDF data of the latest published version. {DOWNLOAD_NOTE}"),
                     vec![],
                     vec![("200", "RDF data")],
                     false,
@@ -3610,10 +3710,14 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                     o(
                         tag,
                         &format!("List versions ({tag})"),
-                        "Version snapshots of the entry.",
+                        &format!("Version snapshots of the entry. {ATTRIBUTION_NOTE}"),
                         vec![],
-                        vec![("200", "Array of versions")],
+                        vec![],
                         false,
+                    )
+                    .response(
+                        "200",
+                        json_response("Array of versions", "DataModelVersionResponse", true),
                     ),
                 ),
                 (
@@ -3626,6 +3730,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                         vec![
                             ("201", "Created version"),
                             ("401", "Authentication required"),
+                            NO_DERIVATIVES_403,
                         ],
                         true,
                     ),
@@ -3641,10 +3746,14 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                     o(
                         tag,
                         &format!("Get version ({tag})"),
-                        "Metadata for one version.",
+                        &format!("Metadata for one version. {ATTRIBUTION_NOTE}"),
                         vec![],
-                        vec![("200", "Version metadata"), ("404", "Not found")],
+                        vec![("404", "Not found")],
                         false,
+                    )
+                    .response(
+                        "200",
+                        json_response("Version metadata", "DataModelVersionResponse", false),
                     ),
                 ),
                 (
@@ -3669,7 +3778,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                     o(
                         tag,
                         &format!("Download version data ({tag})"),
-                        "RDF data captured in this version.",
+                        &format!("RDF data captured in this version. {DOWNLOAD_NOTE}"),
                         vec![],
                         vec![("200", "RDF data")],
                         false,
@@ -3680,9 +3789,15 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                     o(
                         tag,
                         &format!("Update version data ({tag})"),
-                        "Replace the draft version's data.",
+                        "Replace the draft version's data. A licence record that called the \
+                         content the bundled file, unchanged, then says it may have been \
+                         modified.",
                         vec![],
-                        vec![("200", "Updated"), ("401", "Authentication required")],
+                        vec![
+                            ("200", "Updated"),
+                            ("401", "Authentication required"),
+                            NO_DERIVATIVES_403,
+                        ],
                         true,
                     ),
                 ),
@@ -3705,7 +3820,15 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                         &format!("{summary} ({tag})"),
                         &format!("Transition a version to the `{state}` lifecycle state."),
                         vec![],
-                        vec![("200", "Transitioned"), ("401", "Authentication required")],
+                        if matches!(state, "draft" | "publish" | "rebase") {
+                            vec![
+                                ("200", "Transitioned"),
+                                ("401", "Authentication required"),
+                                NO_DERIVATIVES_403,
+                            ]
+                        } else {
+                            vec![("200", "Transitioned"), ("401", "Authentication required")]
+                        },
                         true,
                     ),
                 )],
@@ -3719,6 +3842,22 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             ]);
         }
     }
+    mount(
+        paths,
+        crate::data_models::vocab_files::NOTICE_PATH,
+        vec![(
+            M::Get,
+            o(
+                "Models",
+                "Bundled vocabulary notice",
+                "Attribution and licence texts of every bundled vocabulary the server seeds as a \
+                 reference model, as plain text. Each licence record's notice_url links here.",
+                vec![],
+                vec![("200", "The notice (text/plain)")],
+                false,
+            ),
+        )],
+    );
 
     // ═══════════════════════════════════════════════════════════════════════
     // Search

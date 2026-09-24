@@ -1,10 +1,21 @@
-# Data Quality Vocabulary — The Data Quality Vocabulary (DQV) is seen as an
-# extension to DCAT to cover the quality of the data, how frequently is it
-# updated, whether it accepts user corrections, persistence commitments etc.
-# Full vocabulary as published in the Linked Open Vocabularies (LOV) corpus
-# snapshot of 2025-12-18 (https://lov.linkeddata.es/ — dataset CC BY 4.0),
-# version v2016-08-26 (2016-08-26).
-# Source: http://www.w3.org/ns/dqv  (ns http://www.w3.org/ns/dqv#)
+# Data Quality Vocabulary (DQV) — an extension of DCAT for describing the quality
+# of data (version 2016-08-26).
+# Source: http://www.w3.org/ns/dqv — triples identical to
+# https://www.w3.org/ns/dqv.ttl (checked 2026-09-23).
+# Obtained via the Linked Open Vocabularies (LOV) corpus snapshot of 2025-12-18
+# (https://lov.linkeddata.es/), which re-serialized it as Turtle. LOV's own
+# CC BY 4.0 licence covers LOV's catalogue; it does not relicense this vocabulary.
+# Defined in Data on the Web Best Practices: Data Quality Vocabulary, W3C Working
+# Group Note 15 December 2016, https://www.w3.org/TR/2016/NOTE-vocab-dqv-20161215/
+# Copyright © 2016 World Wide Web Consortium. https://www.w3.org/copyright/document-license-2023/
+# Copyright © 2023 W3C®. This software or document includes material copied from
+# or derived from Data Quality Vocabulary,
+# https://www.w3.org/ns/dqv.
+# Licence: W3C Document License (2023), https://www.w3.org/copyright/document-license-2023/
+# Changes: re-serialized as Turtle by LOV (triples unchanged); this comment
+# header was written by Open Triplestore (2026-07-24, revised 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The vocabulary, as re-serialized by LOV, starts below this line. ----
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix dqv: <http://www.w3.org/ns/dqv#> .
 @prefix foaf: <http://xmlns.com/foaf/0.1/> .

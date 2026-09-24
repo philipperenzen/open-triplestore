@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Fetch the GWSW Totaal Turtle export next to manifest.toml. RIONED serves
 # every sub-model as https://data.gwsw.nl/<version>/<Module>/ontologie.ttl
-# (CC0, no login); Totaal is the combined one. Override GWSW_TTL_URL for
+# (no login); Totaal is the combined one. The ontology states no licence —
+# RIONED's CC0 covers the data on the GWSW Server, not this file — so it is
+# fetched, never committed (see manifest.toml). Override GWSW_TTL_URL for
 # another version or module (e.g. .../1.7.0/Basis/ontologie.ttl).
 set -euo pipefail
 cd "$(dirname "$0")"

@@ -8,6 +8,15 @@
 //!
 //! Mounted with the anonymous SPARQL rate-limit tier — everything here is
 //! in-memory and cheap, but unauthenticated.
+//!
+//! `/api/prefixes/all` and `/api/prefixes/context.jsonld` re-serve the whole
+//! bundled snapshot, so every deployment passes on third-party data: prefix.cc
+//! mappings (no licence published; the operator has stated they are considered
+//! CC0) and LOV-derived ones (CC BY 4.0, which asks for credit, the licence URI
+//! and a note of modification). The Turtle and SPARQL exports open with the
+//! snapshot's credit lines as comments, and the CSV export names each row's
+//! source; JSON, JSON-LD and plain text have nowhere to put a credit without
+//! changing what clients parse, so the docs and NOTICE carry it for those.
 
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
@@ -18,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::server::error::AppError;
 use crate::server::AppState;
 
-use super::{is_valid_label, ResolvedPrefix};
+use super::{is_valid_label, PrefixRegistry, PrefixSource, ResolvedPrefix};
 
 pub fn prefix_routes() -> Router<AppState> {
     Router::new()
@@ -212,9 +221,38 @@ async fn export_all(
     Query(params): Query<ExportParams>,
 ) -> Result<Response, AppError> {
     crate::vocab_search::routes::ensure_fresh(&state).await;
-    let entries = state.prefix_registry.all_prefixes();
     let format = params.format.as_deref().unwrap_or("json");
-    let (body, content_type) = match format {
+    let (body, content_type) = render_export(&state.prefix_registry, format)?;
+    Ok(([(axum::http::header::CONTENT_TYPE, content_type)], body).into_response())
+}
+
+/// `#` comment lines crediting the bundled third-party sources that `entries`
+/// draw on, empty when none do. Turtle and SPARQL both allow comments, so the
+/// credit travels with a saved export.
+fn credit_comment(registry: &PrefixRegistry, entries: &[ResolvedPrefix]) -> String {
+    let mut out = String::new();
+    for source in [PrefixSource::PrefixCc, PrefixSource::Lov] {
+        if !entries.iter().any(|e| e.source == source) {
+            continue;
+        }
+        if let Some(credit) = registry.source_credit(source) {
+            if out.is_empty() {
+                out.push_str("# Includes prefix mappings from:\n");
+            }
+            // A line break would end the comment and leave the rest as syntax.
+            out.push_str(&format!("# - {}\n", credit.replace(['\r', '\n'], " ")));
+        }
+    }
+    out
+}
+
+/// Body and content type of one bulk-export format.
+fn render_export(
+    registry: &PrefixRegistry,
+    format: &str,
+) -> Result<(String, &'static str), AppError> {
+    let entries = registry.all_prefixes();
+    Ok(match format {
         "json" => {
             let map: serde_json::Map<String, serde_json::Value> = entries
                 .iter()
@@ -231,20 +269,20 @@ async fn export_all(
             )
         }
         "jsonld" => (jsonld_context_body(&entries), "application/ld+json"),
-        "ttl" => (
-            entries
-                .iter()
-                .map(|e| format!("@prefix {}: <{}> .\n", e.prefix, e.namespace))
-                .collect(),
-            "text/turtle",
-        ),
-        "sparql" => (
-            entries
-                .iter()
-                .map(|e| format!("PREFIX {}: <{}>\n", e.prefix, e.namespace))
-                .collect(),
-            "text/plain; charset=utf-8",
-        ),
+        "ttl" => {
+            let mut s = credit_comment(registry, &entries);
+            for e in &entries {
+                s.push_str(&format!("@prefix {}: <{}> .\n", e.prefix, e.namespace));
+            }
+            (s, "text/turtle")
+        }
+        "sparql" => {
+            let mut s = credit_comment(registry, &entries);
+            for e in &entries {
+                s.push_str(&format!("PREFIX {}: <{}>\n", e.prefix, e.namespace));
+            }
+            (s, "text/plain; charset=utf-8")
+        }
         "csv" => {
             // RFC 4180: quote fields containing delimiters (commas are legal,
             // un-encoded characters in namespace IRIs).
@@ -282,8 +320,7 @@ async fn export_all(
                 "Unsupported format {other:?} (expected json, jsonld, ttl, sparql, csv or txt)"
             )))
         }
-    };
-    Ok(([(axum::http::header::CONTENT_TYPE, content_type)], body).into_response())
+    })
 }
 
 fn jsonld_context_body(entries: &[ResolvedPrefix]) -> String {
@@ -459,4 +496,87 @@ async fn delete_override(
     }
     refresh_admin_overlay(&state)?;
     Ok(axum::http::StatusCode::NO_CONTENT.into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turtle_and_sparql_exports_open_with_the_source_credits() {
+        let registry = PrefixRegistry::bundled_only();
+        for (format, directive) in [("ttl", "@prefix "), ("sparql", "PREFIX ")] {
+            let (body, _) = render_export(&registry, format).unwrap();
+            assert!(body.starts_with("# Includes prefix mappings from:\n"));
+            assert!(body.contains("prefix.cc (https://prefix.cc/)"));
+            assert!(body.contains("https://github.com/cygri/prefix.cc/issues/13"));
+            assert!(body.contains("CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)"));
+            assert!(body.contains(&format!("{directive}foaf: <http://xmlns.com/foaf/0.1/>")));
+        }
+    }
+
+    #[test]
+    fn credit_header_parses_as_turtle_and_sparql() {
+        // Comments only: a client reading the export as Turtle or as a SPARQL
+        // prologue must not notice it.
+        let registry = PrefixRegistry::bundled_only();
+        let header = credit_comment(&registry, &registry.all_prefixes());
+        assert!(header.lines().count() >= 3, "{header}");
+        let ttl = format!("{header}@prefix foaf: <http://xmlns.com/foaf/0.1/> .\n");
+        let parsed: Result<Vec<_>, _> =
+            oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::Turtle)
+                .for_reader(ttl.as_bytes())
+                .collect();
+        assert!(parsed.is_ok(), "{parsed:?}");
+        spargebra::SparqlParser::new()
+            .parse_query(&format!(
+                "{header}PREFIX foaf: <http://xmlns.com/foaf/0.1/>\n\
+                 SELECT * WHERE {{ ?s foaf:name ?o }}"
+            ))
+            .expect("header works in a SPARQL prologue");
+    }
+
+    #[test]
+    fn the_whole_turtle_export_parses() {
+        // Every bundled namespace is an IRI (the loader leaves out the one
+        // prefix.cc entry that is not), so a strict parser reads it all.
+        let registry = PrefixRegistry::bundled_only();
+        let (body, _) = render_export(&registry, "ttl").unwrap();
+        let parsed: Result<Vec<_>, _> =
+            oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::Turtle)
+                .for_reader(body.as_bytes())
+                .collect();
+        assert!(parsed.is_ok(), "{:?}", parsed.err());
+    }
+
+    #[test]
+    fn json_export_stays_a_plain_prefix_map() {
+        // The frontend reads this as prefix → namespace; a credit key would
+        // turn into a bogus prefix there.
+        let registry = PrefixRegistry::bundled_only();
+        let (body, content_type) = render_export(&registry, "json").unwrap();
+        assert_eq!(content_type, "application/json");
+        let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&body).unwrap();
+        assert!(map
+            .values()
+            .all(|v| v.as_str().is_some_and(|ns| ns.starts_with("http"))));
+        assert_eq!(map["foaf"], "http://xmlns.com/foaf/0.1/");
+    }
+
+    #[test]
+    fn no_credit_header_without_bundled_entries() {
+        let registry = PrefixRegistry::empty();
+        registry.set_admin_prefixes([("ex".to_string(), "https://example.org/".to_string())]);
+        let (body, _) = render_export(&registry, "ttl").unwrap();
+        assert_eq!(body, "@prefix ex: <https://example.org/> .\n");
+    }
+
+    #[test]
+    fn unknown_export_format_is_refused() {
+        let registry = PrefixRegistry::empty();
+        assert!(matches!(
+            render_export(&registry, "xml"),
+            Err(AppError::BadRequest(_))
+        ));
+    }
 }

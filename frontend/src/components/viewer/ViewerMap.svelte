@@ -1615,9 +1615,9 @@
     map = new maplibregl.Map({
       container: mapEl,
       style: styleFor(basemap, dark),
-      attributionControl: extraAttribution
-        ? { compact: true, customAttribution: extraAttribution }
-        : { compact: true },
+      // Added by syncAttribution below: the Map option is read once, at
+      // construction, before a host's feed (and so its data credit) arrives.
+      attributionControl: false,
       maxPitch: 80, // low angle for inspecting building facades
       maxZoom: 23.5, // zoom right in on individual walls/beams (basemap over-zooms)
     });
@@ -1690,6 +1690,25 @@
   });
 
   $: if (map && elements) rebuildData();
+
+  // A data credit (extraAttribution, e.g. 3DBAG's CC BY line) usually lands
+  // after mount, so the attribution control is rebuilt whenever it changes.
+  // With a credit the control uses MapLibre's responsive default instead of
+  // compact: it stays expanded where the map has room, as 3DBAG asks for its
+  // credit on a browsable map; narrow maps still collapse it to the (i) button.
+  let attribCtrl = null;
+  let attribFor = null;
+  function syncAttribution(extra) {
+    if (!map || extra === attribFor) return;
+    if (attribCtrl) map.removeControl(attribCtrl);
+    attribCtrl = new maplibregl.AttributionControl(
+      extra ? { customAttribution: extra } : { compact: true },
+    );
+    map.addControl(attribCtrl, 'bottom-right');
+    attribFor = extra;
+  }
+  $: if (map) syncAttribution(extraAttribution);
+
   /** Label for the selection chip; falls back to the IRI's last segment. */
   $: selectedLabel = selected
     ? elements.find((e) => e.id === selected)?.label || String(selected).split(/[/#]/).pop()

@@ -11,12 +11,21 @@
   import { geometryCoords } from '../lib/ontology/valueType.js';
   import { parseWktAsWgs84 } from '../lib/viewer/crs';
   import { leafletTiles } from '../lib/viewer/basemaps';
+  import { creditHtml, is3dbagUrl, THREEDBAG_CREDIT } from '../lib/viewer/attribution';
 
   export let wkts = [];
   export let height = '220px';
   /** When set (metres), a "to scale" toggle draws point markers as real-size
    *  circles (L.circle, radius in metres) instead of fixed-pixel markers. */
   export let scaleMeters = 0;
+  /** Credits owed for the geometry shown (lib/viewer/attribution DataCredit
+   *  objects), rendered in the map's attribution control, bottom-right. */
+  export let credits = [];
+  /** IRIs and URLs the geometry comes from: the resource, its `dct:source` /
+   *  `prov:wasDerivedFrom` values, model file links. Any 3DBAG link adds the
+   *  3DBAG credit (CC BY 4.0), the same "3dbag" match the server applies to
+   *  tilesets and the other viewers apply to file links. */
+  export let sources = [];
 
   let mapEl;
   let map = null;
@@ -35,6 +44,25 @@
   // behind, but bounded so a permanently zero-sized host (a collapsed accordion,
   // a hidden tab) cannot leave us spinning a requestAnimationFrame loop forever.
   const MAX_DRAW_RETRY_FRAMES = 30;
+
+  // The attribution HTML owed for this geometry, de-duplicated.
+  $: creditHtmls = [
+    ...(credits || []),
+    ...((sources || []).some(is3dbagUrl) ? [THREEDBAG_CREDIT] : []),
+  ]
+    .map(creditHtml)
+    .filter((html, i, all) => all.indexOf(html) === i);
+  // What the attribution control currently shows, so a changed set (the reused
+  // preview-overlay instance) replaces the previous credits instead of piling up.
+  let shownCredits = [];
+  function syncCredits() {
+    const control = map?.attributionControl;
+    if (!control) return;
+    for (const html of shownCredits) if (!creditHtmls.includes(html)) control.removeAttribution(html);
+    for (const html of creditHtmls) if (!shownCredits.includes(html)) control.addAttribution(html);
+    shownCredits = creditHtmls;
+  }
+  $: if (map && creditHtmls) syncCredits();
 
   // CRS-aware: projected WKT (e.g. the Waalbrug demo's EPSG:28992) is
   // reprojected to WGS84 before plotting.
@@ -174,6 +202,7 @@
     map = null;
     tiles = null;
     drawnLayers = [];
+    shownCredits = [];
   }
 
   onDestroy(() => {
@@ -210,6 +239,11 @@
         {/if}
       {/each}
     </ul>
+    {#if creditHtmls.length}
+      <!-- The credits still travel with the coordinates when there is no map. -->
+      <!-- eslint-disable-next-line svelte/no-at-html-tags -- creditHtml() escapes all text and keeps only http(s) links -->
+      <div class="credits">{@html creditHtmls.join(' · ')}</div>
+    {/if}
   </div>
 {:else}
   <div class="geo-wrap" style="height: {height}">
@@ -248,5 +282,6 @@
     font-size: 0.85rem;
   }
   .geo-fallback ul { margin: 0.4rem 0 0; padding-left: 1rem; }
+  .geo-fallback .credits { margin-top: 0.4rem; font-size: 0.75rem; color: var(--muted, #64748b); }
   .muted { color: var(--muted, #64748b); }
 </style>

@@ -1,12 +1,25 @@
-# The Open Digital Rights Language (ODRL) Ontology — The Open Digital Rights
-# Language (ODRL) provides flexible and interoperable mechanisms to support
-# transparent and innovative use of digital content in publishing,
-# distribution, and consumption of of digital media across all sectors and
-# communities.
-# Full vocabulary as published in the Linked Open Vocabularies (LOV) corpus
-# snapshot of 2025-12-18 (https://lov.linkeddata.es/ — dataset CC BY 4.0),
-# version v2.2 (2017-09-16).
-# Source: http://www.w3.org/ns/odrl/2/  (ns http://www.w3.org/ns/odrl/2/)
+# ODRL Version 2.2 ontology (Open Digital Rights Language) — the ODRL Vocabulary
+# & Expression 2.2 terms for permission and obligation statements about content.
+# Source: http://www.w3.org/ns/odrl/2/ — this copy's triples are identical to
+# https://github.com/w3c/poe/blob/f14648fb/vocab/ODRL22.ttl (2018-03-30), an
+# older revision than the current https://www.w3.org/ns/odrl/2/ODRL22.ttl.
+# Obtained via the Linked Open Vocabularies (LOV) corpus snapshot of 2025-12-18
+# (https://lov.linkeddata.es/), which re-serialized it as Turtle. LOV's own
+# CC BY 4.0 licence covers LOV's catalogue; it does not relicense this vocabulary.
+# Defined in ODRL Vocabulary & Expression 2.2, W3C Recommendation 15 February
+# 2018, https://www.w3.org/TR/2018/REC-odrl-vocab-20180215/
+# Licence: W3C Software and Document License (2015),
+# https://www.w3.org/copyright/software-license-2015/, as applied by that
+# Recommendation and by the w3c/poe repository (full text: NOTICE.md in this
+# directory). The file's own dcterms:license, kept below, points to W3C's 2002
+# IPR notice.
+# This software or document includes material copied from or derived from ODRL
+# Version 2.2, http://www.w3.org/ns/odrl/2/.
+# Copyright © 2018 W3C® (MIT, ERCIM, Keio, Beihang).
+# Changes: re-serialized as Turtle by LOV (triples unchanged); this comment
+# header was written by Open Triplestore (2026-07-24, revised 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The vocabulary, as re-serialized by LOV, starts below this line. ----
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
 @prefix odrl: <http://www.w3.org/ns/odrl/2/> .

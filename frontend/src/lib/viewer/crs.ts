@@ -11,6 +11,11 @@ import { parseWktGeometry, type WktGeometry } from '../ontology/valueType';
 // EPSG definitions (proj4 strings, epsg.io). Compound 3D codes (horizontal +
 // height) are aliased to their horizontal member — heights are metres in all of
 // them, which is what the scene needs.
+//
+// The parameters here and in defFor() derive from the EPSG Geodetic Parameter
+// Dataset, which is owned by IOGP (https://epsg.org) and used under the EPSG
+// Dataset Terms of Use (https://epsg.org/terms-of-use.html). epsg.io/PROJ
+// recast them as proj4 strings, so they are not verbatim EPSG records.
 const EPSG_DEFS: Record<number, string> = {
   // Netherlands — Amersfoort / RD New (CityJSON's most common CRS; 7415 = +NAP).
   28992:

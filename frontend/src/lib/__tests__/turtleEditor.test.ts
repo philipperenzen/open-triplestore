@@ -14,6 +14,7 @@ import {
   turtleDiagnostics,
   turtleFolding,
   turtleLanguage,
+  turtleStreamParser,
 } from '../turtle-mode.ts';
 import { NAMESPACES, allBuiltinTerms } from '../ontology/vocabularies.ts';
 import { SHACL_CONSTRAINT_CARDS } from '../shaclConstraints.ts';
@@ -366,7 +367,7 @@ describe('turtleFoldRange', () => {
 
 /** Run the Turtle tokenizer over one line: `[text, style]` per token. */
 function tokens(line: string): Array<[string, string | null]> {
-  const parser = turtleLanguage.streamParser;
+  const parser = turtleStreamParser;
   const state = parser.startState!(2);
   const stream = new StringStream(line, 2, 2);
   const out: Array<[string, string | null]> = [];

@@ -7,6 +7,7 @@
   import OntologyBrowserPanel from '../components/OntologyBrowserPanel.svelte';
   import ContentKindWarning from '../components/ContentKindWarning.svelte';
   import Select from '../components/Select.svelte';
+  import ModelAttributionCard from '../components/ModelAttributionCard.svelte';
 
   export let id;
   export let versionId = '';
@@ -69,6 +70,9 @@
   {:else if error}
     <div class="p-4 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm">{error}</div>
   {:else if selectedVersion}
+    {#if selectedVersion.attribution}
+      <ModelAttributionCard attribution={selectedVersion.attribution} variant="compact" />
+    {/if}
     <ContentKindWarning
       graphs={[selectedVersion.graph_iri, ...(selectedVersion.sub_graphs || [])]}
       expected="model"

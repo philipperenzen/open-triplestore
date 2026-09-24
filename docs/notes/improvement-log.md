@@ -117,7 +117,7 @@ full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashbo
   `a_result_computed_before_a_write_is_not_cached_as_fresh` in
   `src/store/query_cache.rs`. No change.
 
-### 5. Official W3C SPARQL 1.1 manifests — implemented
+### 5. The rdf-tests SPARQL 1.1 manifests — implemented
 
 - Vendored (user-approved) the query and update sections of
   `w3c/rdf-tests` `sparql/sparql11` at commit `369a90d` (2026-08-28):
@@ -130,9 +130,10 @@ full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashbo
   `mf:include`, every entry through `TripleStore` (mirror and cache off);
   result-set isomorphism via the DAWG result-set vocabulary + oxrdf
   canonicalisation, graph/dataset isomorphism for CONSTRUCT and updates,
-  numeric literals by value. Two-way ratchet + floor 450, same policy as the
-  SHACL corpus. Baseline: **475 pass / 10 known-fail / 0 skips**; all ten
-  are oxigraph 0.5 evaluator behaviours, documented in
+  numeric literals by value. Two-way ratchet with a pass floor, same policy
+  as the SHACL corpus (no score is published for this subset: W3C's
+  test-suite policy allows no performance claims on a subset). Ten known
+  failures, all oxigraph 0.5 evaluator behaviours, documented in
   `docs/conformance/sparql11.md` (GRAPH ?g over quad-less patterns, 1.2
   GROUP_CONCAT language-tag rule, per-query BNODE(str), outer GRAPH implied
   into MINUS, zero-length paths on absent terms).
@@ -914,7 +915,7 @@ routes joined the OpenAPI document; `docs/api-reference.md` records the new
 
 Characterisation first: three hand-authored STEP fixtures (an IFC 4.3
 bridge with units and a map conversion; an IFC4 wall with every quantity
-and property kind, a Uniclass chain and a material; an IFC2x3 curtain wall
+and property kind, a classification chain and a material; an IFC2x3 curtain wall
 with the relations) and a test that pins the flat BOT / `props:` contract
 as exact triples before anything was added. Writing the unit resolver
 against the first fixture found a parser bug: `()` was parsed as a list

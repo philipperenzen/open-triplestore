@@ -1,10 +1,17 @@
-# File Ontology for Geometry formats (FOG) — a community ontology that links an
-# omg:Geometry to its serialization in a specific geometry file format/version.
-# It declares one datatype property per file format (named as<Format>, e.g.
-# fog:asObj, fog:asGltf_v2.0-glb), whose object is either an inline literal or a
-# reference to an external file in that format.
-# Complete vocabulary, verbatim from the canonical w3id.org release, version 0.0.4.
-# Source: https://w3id.org/fog  (ns https://w3id.org/fog#)
+# File Ontology for Geometry formats (FOG) 0.0.4 — a research ontology by Anna
+# Wagner, Mathias Bonduel and Pieter Pauwels that links an omg:Geometry to its
+# serialization in a specific geometry file format/version. It declares one
+# datatype property per file format (named as<Format>, e.g. fog:asObj,
+# fog:asGltf_v2.0-glb), whose object is either an inline literal or a reference
+# to an external file in that format.
+# Source: https://w3id.org/fog (https://mathib.github.io/fog-ontology/ontology.ttl,
+# repository https://github.com/mathib/fog-ontology)
+# Licence: CC BY 4.0, https://creativecommons.org/licenses/by/4.0/ (the file's
+# own cc:license); creators are named in the ontology header below.
+# Changes by Open Triplestore: this comment header was added; the rest of the
+# file is byte-identical to the source (checked 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The upstream file starts below this line. ----
 # baseURI: https://w3id.org/fog
 # prefix: fog
 

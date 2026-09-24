@@ -23,6 +23,9 @@
 //!    namespace, not whatever a community list says — and the same goes for
 //!    the platform naming its own.
 //! 3. **Bundled dataset** — the prefix.cc + LOV snapshot (~3.7k prefixes).
+//!    Third-party data on its own terms: prefix.cc publishes no licence for
+//!    its data (the operator has stated it is considered CC0), LOV's is
+//!    CC BY 4.0. See [`dataset`] for what each source is and how it is credited.
 //! 4. **Local cache** — mappings confirmed earlier (persisted JSON).
 //! 5. **prefix.cc network fallback** — opt-in only.
 //!
@@ -299,6 +302,11 @@ impl PrefixRegistry {
     /// Number of prefixes in the bundled dataset.
     pub fn dataset_len(&self) -> usize {
         self.dataset.len()
+    }
+
+    /// The bundled snapshot's credit line for `source` (see [`dataset`]).
+    pub fn source_credit(&self, source: PrefixSource) -> Option<&str> {
+        self.dataset.credit(source)
     }
 
     fn read_seeded(&self) -> std::sync::RwLockReadGuard<'_, PlatformPrefixes> {

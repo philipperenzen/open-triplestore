@@ -18,12 +18,286 @@ use crate::store::{escape_sparql_iri, escape_sparql_literal, TripleStore};
 use super::diff::{collect_triples, compute_diff, triple_delta, version_revision};
 use super::merge;
 use super::models::{
-    CreateDataModelRequest, CreateDraftRequest, DiffParams, PatchVersionRequest,
+    ContentAttribution, CreateDataModelRequest, CreateDraftRequest, DataModelRecord,
+    DataModelResponse, DataModelVersion, DataModelVersionResponse, DiffParams, PatchVersionRequest,
     SubGraphActionRequest, UpdateDataModelRequest, UpdateVersionRequest, VersionDataParams,
     VersionStatus,
 };
 use super::registry;
 use super::upload;
+use super::vocab_files;
+
+// ─── Licence and attribution in responses ─────────────────────────────────────
+
+/// An attribution as served: its NOTICE link made absolute against this
+/// server's base URL, so API clients can follow it.
+fn served_attribution(state: &AppState, mut a: ContentAttribution) -> ContentAttribution {
+    if a.notice_url.starts_with('/') {
+        a.notice_url = format!("{}{}", state.base_url, a.notice_url);
+    }
+    a
+}
+
+/// A registry entry with the attribution of the content it holds.
+fn model_response(state: &AppState, record: DataModelRecord) -> DataModelResponse {
+    let stored = registry::get_attribution(
+        &state.store,
+        &registry::data_model_iri(&state.base_url, &record.id),
+    );
+    let latest = record.latest_published.as_deref().and_then(|v| {
+        registry::get_attribution(
+            &state.store,
+            &registry::version_record_iri(&state.base_url, &record.id, v),
+        )
+    });
+    let attribution =
+        entry_attribution(&record, stored, latest).map(|a| served_attribution(state, a));
+    DataModelResponse {
+        record,
+        attribution,
+    }
+}
+
+/// The licence record an entry is served with. It describes the content the
+/// entry serves as its latest: the latest published version's own record
+/// when it has one (so an edited copy published as latest is not called the
+/// bundled file, unchanged). Otherwise the entry's own record; when the
+/// latest published version is content added in this registry, that record
+/// says it does not describe it.
+fn entry_attribution(
+    record: &DataModelRecord,
+    stored: Option<ContentAttribution>,
+    latest: Option<ContentAttribution>,
+) -> Option<ContentAttribution> {
+    if latest.is_some() {
+        return latest;
+    }
+    let mut a = stored?;
+    if let Some(v) = &record.latest_published {
+        a.unchanged = false;
+        a.stored_copy = format!(
+            "The latest published version, {v}, was added in this registry and has no licence \
+             record of its own; this record describes {}, which the entry's other versions hold.",
+            vocab_files::source_phrase(&a.file)
+        );
+    }
+    Some(a)
+}
+
+/// A version record with the attribution of its content.
+fn version_response(state: &AppState, version: DataModelVersion) -> DataModelVersionResponse {
+    let attribution = registry::get_attribution(
+        &state.store,
+        &registry::version_record_iri(&state.base_url, &version.data_model_id, &version.version),
+    )
+    .map(|a| served_attribution(state, a));
+    DataModelVersionResponse {
+        version,
+        attribution,
+    }
+}
+
+// ─── Content whose licence allows no altered copies ───────────────────────────
+
+/// The licence record that makes entry `id` hold content whose licence allows
+/// no altered copies (IMBOR).
+fn no_derivatives_record(state: &AppState, id: &str) -> Option<ContentAttribution> {
+    registry::no_derivatives_attribution(&state.store, &state.base_url, id)
+}
+
+fn no_derivatives_refusal(id: &str, a: &ContentAttribution, action: &str) -> AppError {
+    AppError::Forbidden(format!(
+        "{action} is refused: '{id}' holds {}, whose licence allows no altered copies, so this \
+         registry creates and publishes no content in it other than that content, unchanged. \
+         Build on it in a model of your own instead.",
+        vocab_files::source_phrase(&a.file)
+    ))
+}
+
+/// Refuse (403) an action that would create, change or publish content in an
+/// entry whose content allows no altered copies: an upload, an edit, a draft,
+/// a branch, a merge, a rebase or a publish there would make or share an
+/// altered copy.
+fn refuse_in_no_derivatives_entry(
+    state: &AppState,
+    id: &str,
+    action: &str,
+) -> Result<(), AppError> {
+    match no_derivatives_record(state, id) {
+        Some(a) => Err(no_derivatives_refusal(id, &a, action)),
+        None => Ok(()),
+    }
+}
+
+/// In an entry whose content allows no altered copies, only a version whose
+/// record says it is the bundled file, unchanged (checked by the seeder), is
+/// served to everyone. Any other version there — one an earlier release let
+/// an admin make — is kept, but served only to users who may write the entry.
+/// Applies to downloads, term look-ups, diffs and merge previews.
+pub(crate) fn ensure_servable(
+    state: &AppState,
+    id: &str,
+    parent: &DataModelRecord,
+    version: &str,
+    user: Option<&AuthenticatedUser>,
+) -> Result<(), AppError> {
+    let Some(nd) = no_derivatives_record(state, id) else {
+        return Ok(());
+    };
+    let own = registry::get_attribution(
+        &state.store,
+        &registry::version_record_iri(&state.base_url, id, version),
+    );
+    if own.is_some_and(|a| a.no_derivatives && a.unchanged) {
+        return Ok(());
+    }
+    let may_write = match user {
+        Some(u) => state
+            .auth_db
+            .can_write_ontology(
+                &u.user_id,
+                parent.owner_type.as_deref(),
+                parent.owner_id.as_deref(),
+            )
+            .map_err(|e| AppError::Internal(e.to_string()))?,
+        None => false,
+    };
+    if may_write {
+        return Ok(());
+    }
+    Err(AppError::Forbidden(format!(
+        "Version '{version}' of '{id}' is withheld: '{id}' holds {}, whose licence allows no \
+         altered copies, and this version is not a checked, unchanged copy of it.",
+        vocab_files::source_phrase(&nd.file)
+    )))
+}
+
+/// Append `extra` to `dst` unless `dst` already says it.
+fn merge_text(dst: &mut Option<String>, extra: Option<&str>, sep: &str) {
+    let Some(extra) = extra.filter(|e| !e.is_empty()) else {
+        return;
+    };
+    match dst {
+        Some(d) if d.contains(extra) => {}
+        Some(d) => {
+            d.push_str(sep);
+            d.push_str(extra);
+        }
+        None => *dst = Some(extra.to_string()),
+    }
+}
+
+/// The licence record of content this registry makes from other versions of
+/// the same entry: a draft or branch (one source), a merge or rebase (every
+/// version it draws on, the one it derives from first). `None` when none of
+/// them has a record. It keeps every licence, copyright line, notice and
+/// header of the sources, and says the content may have been modified, so a
+/// download never calls it the bundled file, unchanged. A source whose
+/// licence allows no altered copies is refused (403): an editable copy of it
+/// would be one.
+fn derived_attribution(
+    state: &AppState,
+    id: &str,
+    sources: &[&str],
+    how: &str,
+    action: &str,
+) -> Result<Option<ContentAttribution>, AppError> {
+    let mut records: Vec<ContentAttribution> = Vec::new();
+    for v in sources {
+        let iri = registry::version_record_iri(&state.base_url, id, v);
+        if let Some(a) = registry::get_attribution(&state.store, &iri) {
+            if a.no_derivatives {
+                return Err(no_derivatives_refusal(id, &a, action));
+            }
+            records.push(a);
+        }
+    }
+    let mut it = records.into_iter();
+    let Some(mut out) = it.next() else {
+        return Ok(None);
+    };
+    let mut files = vec![out.file.clone()];
+    for a in it {
+        if !files.contains(&a.file) {
+            files.push(a.file.clone());
+        }
+        for l in a.licenses {
+            if !out.licenses.contains(&l) {
+                out.licenses.push(l);
+            }
+        }
+        for c in a.copyright {
+            if !out.copyright.contains(&c) {
+                out.copyright.push(c);
+            }
+        }
+        merge_text(&mut out.notice, a.notice.as_deref(), " ");
+        merge_text(&mut out.status, a.status.as_deref(), " ");
+        merge_text(&mut out.changes, a.changes.as_deref(), " ");
+        merge_text(&mut out.remarks, a.remarks.as_deref(), " ");
+        merge_text(&mut out.header, a.header.as_deref(), "\n\n");
+    }
+    let all_bundled = files.iter().all(|f| vocab_files::is_bundled_path(f));
+    let names = files
+        .iter()
+        .map(|f| {
+            if vocab_files::is_bundled_path(f) {
+                format!("vocab/{f}")
+            } else {
+                f.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" and ");
+    out.stored_copy = match (files.len() > 1, all_bundled) {
+        (true, true) => format!(
+            "{how}. Its content derives from the bundled files {names}; it may have been \
+             modified in this registry, so it is none of those files."
+        ),
+        (false, true) => format!(
+            "{how}. Its content derives from the bundled file {names}; it may have been modified \
+             in this registry, so it is not that file."
+        ),
+        (true, false) => format!(
+            "{how}. Its content derives from {names}; it may have been modified in this \
+             registry, so it is none of those sources."
+        ),
+        (false, false) => format!(
+            "{how}. Its content derives from {names}; it may have been modified in this \
+             registry, so it is not that source."
+        ),
+    };
+    out.unchanged = false;
+    Ok(Some(out))
+}
+
+/// A version's content has just been changed in place (a PATCH, or version
+/// metadata stamped on publish): a record that called it the bundled file's
+/// triples, unchanged, now says it may have been modified. The seeder keeps
+/// that label (see `seed_vocab`).
+fn mark_possibly_modified(state: &AppState, id: &str, ver: &str) -> Result<(), AppError> {
+    let iri = registry::version_record_iri(&state.base_url, id, ver);
+    registry::mark_possibly_modified(&state.store, &iri, vocab_files::edited_stored_copy)
+        .map_err(AppError::from)
+}
+
+/// Record a derived licence record on a new version.
+fn set_version_attribution(
+    state: &AppState,
+    id: &str,
+    ver: &str,
+    a: Option<&ContentAttribution>,
+) -> Result<(), AppError> {
+    if let Some(a) = a {
+        registry::set_attribution(
+            &state.store,
+            &registry::version_record_iri(&state.base_url, id, ver),
+            Some(a),
+        )
+        .map_err(AppError::from)?;
+    }
+    Ok(())
+}
 
 // ─── Data Model CRUD ──────────────────────────────────────────────────────────
 
@@ -48,7 +322,21 @@ pub async fn list_data_models(
                 .unwrap_or(false)
         })
         .collect();
-    Ok(Json(filtered))
+    let mut attributions = registry::model_attributions(&state.store);
+    let mut latest = registry::latest_published_attributions(&state.store);
+    let body: Vec<DataModelResponse> = filtered
+        .into_iter()
+        .map(|record| DataModelResponse {
+            attribution: entry_attribution(
+                &record,
+                attributions.remove(&record.id),
+                latest.remove(&record.id),
+            )
+            .map(|a| served_attribution(&state, a)),
+            record,
+        })
+        .collect();
+    Ok(Json(body))
 }
 
 /// POST /api/models
@@ -140,7 +428,7 @@ pub async fn create_data_model(
 
     let record = registry::get_data_model(&state.store, &state.base_url, &id)
         .ok_or_else(|| AppError::Internal("Failed to retrieve created ontology".to_string()))?;
-    Ok((StatusCode::CREATED, Json(record)))
+    Ok((StatusCode::CREATED, Json(model_response(&state, record))))
 }
 
 /// GET /api/models/:id
@@ -164,7 +452,7 @@ pub async fn get_data_model(
     {
         return Err(AppError::NotFound(format!("Data model '{id}' not found")));
     }
-    Ok(Json(record))
+    Ok(Json(model_response(&state, record)))
 }
 
 /// DELETE /api/models/:id
@@ -262,7 +550,7 @@ pub async fn update_data_model(
     .await?;
     let record = registry::get_data_model(&state.store, &state.base_url, &id)
         .ok_or_else(|| AppError::Internal("Failed to retrieve updated ontology".to_string()))?;
-    Ok(Json(record))
+    Ok(Json(model_response(&state, record)))
 }
 
 // ─── Version listing and metadata ─────────────────────────────────────────────
@@ -289,7 +577,17 @@ pub async fn list_versions(
         return Err(AppError::NotFound(format!("Data model '{id}' not found")));
     }
     let versions = registry::list_versions(&state.store, &state.base_url, &id);
-    Ok(Json(versions))
+    let mut attributions = registry::version_attributions(&state.store, &state.base_url, &id);
+    let body: Vec<DataModelVersionResponse> = versions
+        .into_iter()
+        .map(|version| DataModelVersionResponse {
+            attribution: attributions
+                .remove(&version.version)
+                .map(|a| served_attribution(&state, a)),
+            version,
+        })
+        .collect();
+    Ok(Json(body))
 }
 
 /// GET /api/models/:id/versions/:ver
@@ -315,7 +613,7 @@ pub async fn get_version(
     }
     let record = registry::get_version(&state.store, &state.base_url, &id, &ver)
         .ok_or_else(|| AppError::NotFound(format!("Version '{ver}' not found")))?;
-    Ok(Json(record))
+    Ok(Json(version_response(&state, record)))
 }
 
 /// GET /api/models/:id/collaborators
@@ -419,7 +717,7 @@ pub async fn update_version_notes(
     .map_err(AppError::from)?;
     let record = registry::get_version(&state.store, &state.base_url, &id, &ver)
         .ok_or_else(|| AppError::Internal("Failed to retrieve updated version".to_string()))?;
-    Ok(Json(record))
+    Ok(Json(version_response(&state, record)))
 }
 
 // ─── Version data download ────────────────────────────────────────────────────
@@ -449,6 +747,7 @@ pub async fn get_version_data(
     }
     let record = registry::get_version(&state.store, &state.base_url, &id, &ver)
         .ok_or_else(|| AppError::NotFound(format!("Version '{ver}' not found")))?;
+    ensure_servable(&state, &id, &ontology, &record.version, user.as_deref())?;
 
     let format = match params.format.as_deref().unwrap_or("trig") {
         "turtle" | "ttl" => RdfFormat::Turtle,
@@ -493,7 +792,26 @@ pub async fn get_version_data(
             format
         };
 
+    // Seeded vocabularies carry their licence record: a download starts with
+    // the bundled file's header as comments (all four formats take `#`
+    // comments), except content that allows no altered copies, and every
+    // download names its licences and notice in `Link` headers. The preamble
+    // calls the content the bundled file, unchanged, only when the record
+    // says the seeder checked it; drafts, branches, merges and edited copies
+    // are said to be derived from it and possibly modified.
+    let attribution = registry::get_attribution(
+        &state.store,
+        &registry::version_record_iri(&state.base_url, &id, &record.version),
+    );
+    let notice_url = format!("{}{}", state.base_url, vocab_files::NOTICE_PATH);
+
     let mut output = Vec::new();
+    if let Some(pre) = attribution
+        .as_ref()
+        .and_then(|a| vocab_files::download_preamble(a, &notice_url))
+    {
+        output.extend_from_slice(pre.as_bytes());
+    }
     if graphs_to_dump.is_empty() {
         // Dump the base graph
         let data = state
@@ -542,7 +860,28 @@ pub async fn get_version_data(
     if let Ok(v) = HeaderValue::from_str(&etag) {
         resp.headers_mut().insert(header::ETAG, v);
     }
+    if let Some(a) = &attribution {
+        for link in vocab_files::link_header_values(a, &state.base_url) {
+            if let Ok(v) = HeaderValue::from_str(&link) {
+                resp.headers_mut().append(header::LINK, v);
+            }
+        }
+    }
     Ok(resp)
+}
+
+// ─── Bundled vocabulary notice ────────────────────────────────────────────────
+
+/// GET /vocab/NOTICE.md — attribution and licence texts of the bundled
+/// vocabularies the server seeds as reference models. Every seeded entry's
+/// licence record links here; the server serves the compiled-in copy so the
+/// link resolves even when it does not serve the web UI. Plain text, so every
+/// browser displays it rather than downloading it.
+pub async fn vocab_notice() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        vocab_files::NOTICE_MD,
+    )
 }
 
 // ─── Latest published data shortcut ───────────────────────────────────────────
@@ -599,6 +938,8 @@ pub async fn upload_version(
             "Write access to this data model required".to_string(),
         ));
     }
+
+    refuse_in_no_derivatives_entry(&state, &id, "Uploading a version")?;
 
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut content_type_field = String::from("application/trig");
@@ -886,6 +1227,7 @@ pub async fn patch_version_data(
 
     let record = registry::get_version(&state.store, &state.base_url, &id, &ver)
         .ok_or_else(|| AppError::NotFound(format!("Version '{ver}' not found")))?;
+    refuse_in_no_derivatives_entry(&state, &id, "Editing a version")?;
 
     if record.status != VersionStatus::Draft {
         return Err(AppError::BadRequest(
@@ -957,6 +1299,11 @@ pub async fn patch_version_data(
                 .map_err(|e| AppError::BadRequest(e.to_string()))?;
             affected.insert(graph);
         }
+    }
+
+    // A seeded copy the record called unchanged is no longer known to be.
+    if !affected.is_empty() {
+        mark_possibly_modified(&state, &id, &ver)?;
     }
 
     // Return the post-edit revision so the client can advance its If-Match token.
@@ -1292,6 +1639,14 @@ pub async fn create_draft(
 
     let _source = registry::get_version(&state.store, &state.base_url, &id, &source_ver)
         .ok_or_else(|| AppError::NotFound(format!("Source version '{source_ver}' not found")))?;
+    refuse_in_no_derivatives_entry(&state, &id, "Creating a draft")?;
+    let attribution = derived_attribution(
+        &state,
+        &id,
+        &[&source_ver],
+        &format!("Copied in this registry from version {source_ver}"),
+        "Creating a draft",
+    )?;
 
     let target_ver = body.target_version.trim().to_string();
     if target_ver.is_empty() {
@@ -1318,7 +1673,6 @@ pub async fn create_draft(
         state.base_url, id, target_ver
     );
 
-    use super::models::DataModelVersion;
     let record = DataModelVersion {
         data_model_id: id.clone(),
         version: target_ver.clone(),
@@ -1334,6 +1688,7 @@ pub async fn create_draft(
     };
 
     registry::insert_version(&state.store, &state.base_url, &record).map_err(AppError::from)?;
+    set_version_attribution(&state, &id, &target_ver, attribution.as_ref())?;
     registry::update_latest_draft(&state.store, &state.base_url, &id, &target_ver)
         .map_err(AppError::from)?;
 
@@ -1406,6 +1761,14 @@ pub async fn create_branch(
     registry::get_version(&state.store, &state.base_url, &id, &body.from_version).ok_or_else(
         || AppError::NotFound(format!("Source version '{}' not found", body.from_version)),
     )?;
+    refuse_in_no_derivatives_entry(&state, &id, "Creating a branch")?;
+    let attribution = derived_attribution(
+        &state,
+        &id,
+        &[&body.from_version],
+        &format!("Copied in this registry from version {}", body.from_version),
+        "Creating a branch",
+    )?;
 
     let target_ver = body
         .target_version
@@ -1448,6 +1811,7 @@ pub async fn create_branch(
         sub_graph_status: Vec::new(),
     };
     registry::insert_version(&state.store, &state.base_url, &record).map_err(AppError::from)?;
+    set_version_attribution(&state, &id, &target_ver, attribution.as_ref())?;
 
     let msg = body
         .message
@@ -1557,6 +1921,8 @@ pub async fn merge_preview(
     {
         return Err(AppError::NotFound(format!("Data model '{id}' not found")));
     }
+    ensure_servable(&state, &id, &parent, &params.from, user.as_deref())?;
+    ensure_servable(&state, &id, &parent, &params.into, user.as_deref())?;
     let preview = compute_merge_preview(
         &state.store,
         &state.base_url,
@@ -1594,11 +1960,33 @@ pub async fn merge_apply(
         .ok_or_else(|| AppError::NotFound(format!("Version '{}' not found", body.from)))?;
     let into_rec = registry::get_version(&state.store, &state.base_url, &id, &body.into)
         .ok_or_else(|| AppError::NotFound(format!("Version '{}' not found", body.into)))?;
+    if body.from == body.into {
+        return Err(AppError::BadRequest(
+            "from and into are the same version".to_string(),
+        ));
+    }
+    refuse_in_no_derivatives_entry(&state, &id, "Merging")?;
 
     let base_ver = merge::lca(
         &ancestor_chain(&state.store, &state.base_url, &id, &body.from),
         &ancestor_chain(&state.store, &state.base_url, &id, &body.into),
     );
+    // The merge draws on both sides and, through "base" resolutions, on their
+    // common ancestor: it carries all of their licence records.
+    let mut sources: Vec<&str> = vec![&body.into, &body.from];
+    if let Some(b) = base_ver.as_deref() {
+        sources.push(b);
+    }
+    let attribution = derived_attribution(
+        &state,
+        &id,
+        &sources,
+        &format!(
+            "Merged in this registry from version {} into version {}",
+            body.from, body.into
+        ),
+        "Merging",
+    )?;
     let base = base_ver
         .as_deref()
         .and_then(|v| registry::get_version(&state.store, &state.base_url, &id, v))
@@ -1646,6 +2034,7 @@ pub async fn merge_apply(
         sub_graph_status: Vec::new(),
     };
     registry::insert_version(&state.store, &state.base_url, &record).map_err(AppError::from)?;
+    set_version_attribution(&state, &id, &target_ver, attribution.as_ref())?;
 
     // Record the merge in the commit log, with the triple delta vs the `into` parent.
     let new_graphs = version_graphs(&record);
@@ -1782,12 +2171,26 @@ pub async fn rebase_version(
 
     let onto_rec = registry::get_version(&state.store, &state.base_url, &id, &onto_ver)
         .ok_or_else(|| AppError::NotFound(format!("Rebase target '{onto_ver}' not found")))?;
+    refuse_in_no_derivatives_entry(&state, &id, "Rebasing")?;
 
     // Compute lowest common ancestor.
     let base_ver = merge::lca(
         &ancestor_chain(&state.store, &state.base_url, &id, &ver),
         &ancestor_chain(&state.store, &state.base_url, &id, &onto_ver),
     );
+    // The result derives from the new base and the branch tip (and their
+    // common ancestor): it carries all of their licence records.
+    let mut sources: Vec<&str> = vec![&onto_ver, &ver];
+    if let Some(b) = base_ver.as_deref() {
+        sources.push(b);
+    }
+    let attribution = derived_attribution(
+        &state,
+        &id,
+        &sources,
+        &format!("Rebased in this registry: version {ver} onto version {onto_ver}"),
+        "Rebasing",
+    )?;
     let base = base_ver
         .as_deref()
         .and_then(|v| registry::get_version(&state.store, &state.base_url, &id, v))
@@ -1837,6 +2240,7 @@ pub async fn rebase_version(
         sub_graph_status: Vec::new(),
     };
     registry::insert_version(&state.store, &state.base_url, &record).map_err(AppError::from)?;
+    set_version_attribution(&state, &id, &target_ver, attribution.as_ref())?;
 
     // Record the rebase in the commit log, with the triple delta vs the `onto` base.
     let new_graphs = version_graphs(&record);
@@ -1942,6 +2346,7 @@ pub async fn publish_version(
 
     let record = registry::get_version(&state.store, &state.base_url, &id, &ver)
         .ok_or_else(|| AppError::NotFound(format!("Version '{ver}' not found")))?;
+    refuse_in_no_derivatives_entry(&state, &id, "Publishing a version")?;
 
     if !matches!(record.status, VersionStatus::Staged | VersionStatus::Draft) {
         return Err(AppError::BadRequest(
@@ -2008,6 +2413,8 @@ pub async fn publish_version(
         data_model.kind,
     )
     .map_err(AppError::from)?;
+    // Stamping added triples: a seeded copy is no longer the bundled file.
+    mark_possibly_modified(&state, &id, &ver)?;
 
     Ok(Json(json!({
         "status": "published",
@@ -2100,6 +2507,9 @@ async fn transition_sub_graph(
 
     let record = registry::get_version(&state.store, &state.base_url, &id, &ver)
         .ok_or_else(|| AppError::NotFound(format!("Version '{ver}' not found")))?;
+    if new_status == VersionStatus::Published {
+        refuse_in_no_derivatives_entry(&state, &id, "Publishing a subgraph")?;
+    }
     let sub_graph_iri = resolve_sub_graph(&record, &graph).ok_or_else(|| {
         AppError::BadRequest(format!("Subgraph '{graph}' not found in version '{ver}'"))
     })?;
@@ -2207,6 +2617,8 @@ pub async fn diff_versions(
 
     let to_record = registry::get_version(&state.store, &state.base_url, &id, &params.to)
         .ok_or_else(|| AppError::NotFound(format!("Version '{}' not found", params.to)))?;
+    ensure_servable(&state, &id, &parent, &params.from, user.as_deref())?;
+    ensure_servable(&state, &id, &parent, &params.to, user.as_deref())?;
 
     let from_graphs = if from_record.sub_graphs.is_empty() {
         vec![from_record.graph_iri]

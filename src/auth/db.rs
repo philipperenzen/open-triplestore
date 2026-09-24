@@ -4237,14 +4237,18 @@ impl AuthDb {
         Ok(())
     }
 
-    pub fn remove_dataset_graph(&self, dataset_id: &str, graph_iri: &str) -> anyhow::Result<()> {
+    /// Remove `graph_iri`'s registration from `dataset_id`. Returns `true` when
+    /// a row was removed, `false` when the graph was not registered to that
+    /// dataset: a caller that goes on to delete the stored graph must do so
+    /// only for a registration it actually removed.
+    pub fn remove_dataset_graph(&self, dataset_id: &str, graph_iri: &str) -> anyhow::Result<bool> {
         let conn = self.pool.get()?;
-        conn.execute(
+        let removed = conn.execute(
             "DELETE FROM dataset_graphs WHERE dataset_id=?1 AND graph_iri=?2",
             params![dataset_id, graph_iri],
         )?;
         self.invalidate_accessible_graphs_cache();
-        Ok(())
+        Ok(removed > 0)
     }
 
     pub fn list_dataset_graphs(&self, dataset_id: &str) -> anyhow::Result<Vec<String>> {
