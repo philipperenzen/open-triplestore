@@ -5176,11 +5176,15 @@ async fn execute_dataset_query(
         return Err(AppError::NotFound("Dataset not found".to_string()));
     }
 
-    // Find the service and its graphs
+    // Find the service and its graphs. A deactivated service answers exactly like
+    // a missing one, for every caller — the dataset's writers included: switching
+    // a service off is how an owner stops its endpoint answering (the dataset page
+    // stops showing its URL), and a writer can reactivate it or use /sparql.
     let service = state
         .auth_db
         .get_sparql_service_by_slug(dataset_id, service_slug)
         .map_err(|e| AppError::Internal(e.to_string()))?
+        .filter(|s| s.is_active)
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
 
     // When a version is pinned, scope to that version's snapshot graphs instead of

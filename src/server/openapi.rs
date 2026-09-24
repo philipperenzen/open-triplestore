@@ -1142,7 +1142,9 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 ob(
                     "SPARQL Services",
                     "Update SPARQL service",
-                    "Rename, re-describe or (de)activate the service.",
+                    "Rename, re-describe or (de)activate the service. `is_active: false` \
+                     switches its SPARQL endpoint off (it answers 404 until reactivated); \
+                     omitting `is_active` leaves it as it was.",
                     vec![],
                     ref_body(
                         "UpdateServiceRequest",
@@ -1226,9 +1228,19 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "SPARQL Services",
                     "Query a SPARQL service (GET)",
-                    "Run a SPARQL query restricted to the service's graphs.",
+                    "Run a SPARQL query restricted to the service's graphs. A service \
+                     that has been deactivated (`is_active: false`) answers `404 Service \
+                     not found`, exactly like one that does not exist, to every caller \
+                     including the dataset's owner and writers; reactivate it to query \
+                     it again.",
                     vec![qp("query", true, "SPARQL query string")],
-                    vec![("200", "SPARQL results")],
+                    vec![
+                        ("200", "SPARQL results"),
+                        (
+                            "404",
+                            "Dataset or service not found, or the service is inactive",
+                        ),
+                    ],
                     false,
                 ),
             ),
@@ -1237,9 +1249,17 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "SPARQL Services",
                     "Query a SPARQL service (POST)",
-                    "Run a SPARQL query (body or form) restricted to the service's graphs.",
+                    "Run a SPARQL query (body or form) restricted to the service's graphs. \
+                     A deactivated service answers `404 Service not found` to every caller, \
+                     as for GET.",
                     vec![],
-                    vec![("200", "SPARQL results")],
+                    vec![
+                        ("200", "SPARQL results"),
+                        (
+                            "404",
+                            "Dataset or service not found, or the service is inactive",
+                        ),
+                    ],
                     false,
                 ),
             ),
