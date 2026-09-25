@@ -10,6 +10,7 @@ use oxigraph::io::RdfFormat;
 use oxigraph::model::{GraphName, NamedNode, Quad};
 
 use crate::auth::db::AuthDb;
+use crate::auth::models::Dataset;
 use crate::shacl::report::ValidationReport;
 use crate::store::TripleStore;
 
@@ -273,7 +274,8 @@ fn discover_gates(
     // pipelines scoped by dataset and for dataset-level bindings.
     let owning_dataset = auth_db.find_dataset_by_graph_iri(graph_iri).ok().flatten();
 
-    // (a) Gating pipelines whose scope covers this graph.
+    // (a) Gating pipelines whose scope covers this graph, by a route their
+    // creator may still write.
     let pipelines: Vec<ValidationPipeline> = studio
         .list_gating_pipelines()
         .unwrap_or_default()
@@ -281,6 +283,27 @@ fn discover_gates(
         .filter(|p| {
             pipeline_covers_graph(p, graph_iri, owning_dataset.as_ref().map(|d| d.id.as_str()))
         })
+        .filter(
+            |p| match creator_may_gate(auth_db, p, graph_iri, owning_dataset.as_ref()) {
+                Ok(true) => true,
+                Ok(false) => {
+                    tracing::warn!(
+                        "shacl gate: pipeline {} does not gate this write to <{graph_iri}>: \
+                         its creator may no longer write what it covers",
+                        p.id
+                    );
+                    false
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "shacl gate: pipeline {}: checking its creator's write access failed \
+                         ({e}); the gate applies",
+                        p.id
+                    );
+                    true
+                }
+            },
+        )
         .collect();
 
     // (b) Bindings that apply to this write: shapes on the written graph itself
@@ -448,36 +471,87 @@ fn evaluate_gates(
     Ok(())
 }
 
+/// What a `gate_writes` pipeline gates: the graphs it names and the datasets
+/// whose graphs it covers. Shape-graph targets gate nothing.
+pub(crate) struct GatedScope<'a> {
+    /// Graph targets and the legacy `graph_iris`.
+    pub graphs: BTreeSet<&'a str>,
+    /// Dataset targets, which always cover their graphs, and the legacy
+    /// `dataset_ids`, which do only when no explicit `graph_iris` narrow the
+    /// scope (preserving the historical "empty graph_iris = all dataset
+    /// graphs").
+    pub datasets: BTreeSet<&'a str>,
+}
+
+/// The scope `p` gates, read by the gate ([`pipeline_covers_graph`],
+/// [`creator_may_gate`]) and by the authority its author needs
+/// (`handlers::authorize_pipeline_gate`), so the two cannot drift apart.
+pub(crate) fn gated_scope(p: &ValidationPipeline) -> GatedScope<'_> {
+    let targets = move |kind: TargetKind| {
+        p.targets
+            .iter()
+            .filter(move |t| t.kind == kind)
+            .map(|t| t.id.as_str())
+    };
+    let graphs = p
+        .graph_iris
+        .iter()
+        .map(String::as_str)
+        .chain(targets(TargetKind::Graph))
+        .collect();
+    let mut datasets: BTreeSet<&str> = targets(TargetKind::Dataset).collect();
+    if p.graph_iris.is_empty() {
+        datasets.extend(p.dataset_ids.iter().map(String::as_str));
+    }
+    GatedScope { graphs, datasets }
+}
+
 fn pipeline_covers_graph(
     p: &ValidationPipeline,
     graph_iri: &str,
     dataset_id: Option<&str>,
 ) -> bool {
-    // Explicit graph coverage — legacy `graph_iris` or a `Graph` target.
-    if p.graph_iris.iter().any(|g| g == graph_iri) {
-        return true;
+    let scope = gated_scope(p);
+    scope.graphs.contains(graph_iri) || dataset_id.is_some_and(|ds| scope.datasets.contains(ds))
+}
+
+/// Whether `p`'s creator may still gate a write to `graph_iri`, held by
+/// `dataset`: they may write what makes `p` cover it — the graph, for a graph
+/// `p` names (a graph-ACL write grant); the dataset, for a dataset `p` names
+/// (`can_write_dataset`). Admins may gate anything.
+///
+/// A gate refuses writes for everyone who writes the graph, so it acts with
+/// the authority its author needed to set it (`handlers::authorize_pipeline_gate`),
+/// checked here at every write as `exec::owner_can_write` checks a pipeline's
+/// own writes at every run: a gate stored before that check, or one whose
+/// creator has since lost the grant, been deactivated or deleted, gates
+/// nothing. `Err` when a lookup fails; the caller keeps the gate then, since
+/// a lookup error must not lift a gate.
+fn creator_may_gate(
+    auth_db: &AuthDb,
+    p: &ValidationPipeline,
+    graph_iri: &str,
+    dataset: Option<&Dataset>,
+) -> anyhow::Result<bool> {
+    let Some(creator) = p.created_by.as_deref() else {
+        return Ok(false);
+    };
+    let Some(user) = auth_db.get_user_by_id(creator)?.filter(|u| u.is_active) else {
+        return Ok(false);
+    };
+    if user.is_admin() {
+        return Ok(true);
     }
-    if p.targets
-        .iter()
-        .any(|t| t.kind == TargetKind::Graph && t.id == graph_iri)
+    let scope = gated_scope(p);
+    if scope.graphs.contains(graph_iri)
+        && auth_db.check_graph_permission(&user.id, user.role.as_str(), graph_iri, "write")?
     {
-        return true;
+        return Ok(true);
     }
-    // Dataset coverage — a `Dataset` target always covers its graphs; the legacy
-    // `dataset_ids` only do so when no explicit `graph_iris` narrow the scope
-    // (preserving the historical "empty graph_iris = all dataset graphs").
-    if let Some(ds) = dataset_id {
-        if p.targets
-            .iter()
-            .any(|t| t.kind == TargetKind::Dataset && t.id == ds)
-        {
-            return true;
-        }
-        if p.graph_iris.is_empty() && p.dataset_ids.iter().any(|d| d == ds) {
-            return true;
-        }
+    match dataset.filter(|ds| scope.datasets.contains(ds.id.as_str())) {
+        Some(ds) => auth_db.can_write_dataset(&user.id, ds),
+        None => Ok(false),
     }
-    false
 }
 
 #[cfg(test)]
@@ -498,7 +572,7 @@ mod tests {
             base_url: base,
         }
     }
-    use crate::auth::models::{OwnerType, Visibility};
+    use crate::auth::models::{OwnerType, SystemRole, Visibility};
     use crate::shacl_studio::models::ValidationTarget;
 
     fn pipe(
@@ -531,7 +605,8 @@ mod tests {
             results_target_graph: None,
             last_run_at: None,
             last_conforms: None,
-            created_by: None,
+            // An admin: `studio_with_shapes` creates the user.
+            created_by: Some(CREATOR.into()),
             created_at: String::new(),
             updated_at: String::new(),
         }
@@ -659,7 +734,12 @@ mod tests {
         quads
     }
 
+    /// The creator of every `pipe()`, whose authority a gate acts with.
+    const CREATOR: &str = "u";
+
     fn studio_with_shapes(store: &TripleStore, auth: &AuthDb) -> (ShaclStudioStore, ShapeGraph) {
+        auth.create_user(CREATOR, CREATOR, "u@t.com", "hash", SystemRole::Admin)
+            .unwrap();
         let studio = ShaclStudioStore::new(auth.pool());
         let set = studio
             .create_shape_graph(
@@ -818,6 +898,62 @@ mod tests {
             "gate-evaluation-failure"
         );
         assert!(report.results[0].message.contains("was not applied"));
+    }
+
+    /// A gate acts with its creator's write authority, checked at every
+    /// write: a gate covers a graph only for a creator who may write what
+    /// makes it cover the graph — the dataset for a dataset target, the graph
+    /// (a graph-ACL write grant) for a graph target — or an admin.
+    #[test]
+    fn a_gate_gates_only_with_its_creators_write_access() {
+        let store = TripleStore::in_memory().unwrap();
+        let auth = AuthDb::in_memory().unwrap();
+        let (studio, set) = studio_with_shapes(&store, &auth);
+        let base = "http://x";
+        for id in ["owner", "reader"] {
+            auth.create_user(id, id, &format!("{id}@t.com"), "hash", SystemRole::User)
+                .unwrap();
+        }
+        auth.create_dataset(
+            "d1",
+            "D1",
+            None,
+            OwnerType::User,
+            "owner",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+        auth.add_dataset_graph("d1", DATA_GRAPH).unwrap();
+
+        let gates = |target: ValidationTarget, creator: Option<&str>| {
+            let mut p = pipe(vec![target], vec![], vec![]);
+            p.shape_graph_ids = vec![set.id.clone()];
+            p.created_by = creator.map(String::from);
+            studio.insert_pipeline(&p).unwrap();
+            let applies = import_gates_apply(ctx(&store, &auth, &studio, base), DATA_GRAPH);
+            studio.delete_pipeline(&p.id).unwrap();
+            applies
+        };
+
+        // The dataset's owner may write it; a reader of the public dataset
+        // may not.
+        assert!(gates(dataset_target("d1"), Some("owner")));
+        assert!(!gates(dataset_target("d1"), Some("reader")));
+        // A graph target needs a graph-ACL write grant, which covers the
+        // graph it names and not the dataset holding it.
+        assert!(!gates(graph_target(DATA_GRAPH), Some("reader")));
+        auth.grant_graph_permission("w1", DATA_GRAPH, "user", "reader", "write", CREATOR)
+            .unwrap();
+        assert!(gates(graph_target(DATA_GRAPH), Some("reader")));
+        assert!(!gates(dataset_target("d1"), Some("reader")));
+        // No creator, an unknown one, or a deactivated one: no authority.
+        assert!(!gates(graph_target(DATA_GRAPH), None));
+        assert!(!gates(graph_target(DATA_GRAPH), Some("ghost")));
+        auth.set_user_active("reader", false).unwrap();
+        assert!(!gates(graph_target(DATA_GRAPH), Some("reader")));
+        // Admins gate anything.
+        assert!(gates(graph_target(DATA_GRAPH), Some(CREATOR)));
     }
 
     #[test]
