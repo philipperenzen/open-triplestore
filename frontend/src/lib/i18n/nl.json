@@ -3470,6 +3470,10 @@
       "roleClass": "Klasse",
       "rolePredicate": "Predicaat"
     },
+    "partialRunNote": {
+      "validate": "Gedeeltelijke uitvoering: sommige grafen of shape-grafen van deze dataset mag u niet lezen, dus deze uitvoering heeft ze overgeslagen. Ze is niet vastgelegd en de validatiestatus van de dataset is ongewijzigd.",
+      "infer": "Gedeeltelijke uitvoering: sommige shape-grafen van deze dataset mag u niet lezen, dus hun regels zijn niet uitgevoerd."
+    },
     "prefixSearch": {
       "placeholder": "Zoek prefixen & vocabulaires…",
       "ariaSearch": "Zoek prefixen en vocabulaires",

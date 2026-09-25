@@ -75,6 +75,7 @@
   import DatasetVersions from '../components/DatasetVersions.svelte';
   import SectionNav from '../components/SectionNav.svelte';
   import Select from '../components/Select.svelte';
+  import PartialRunNote from '../components/PartialRunNote.svelte';
   import { findLicense, LICENSE_CATEGORY_LABEL } from '../lib/vocab/licenses';
   import { findTheme, findAdmsStatus } from '../lib/vocab/themes';
 
@@ -464,6 +465,8 @@
   let shapesGraphIri = '';
   let validationError = '';
   let validationRanAt = null;
+  // The shown run left out graphs the caller may not read (not recorded).
+  let validationPartial = false;
   let validationHistory = [];
   // Set after a graph's role becomes 'shapes': the backend auto-registers it
   // in the SHACL Studio library, so we surface a pointer to it.
@@ -485,6 +488,7 @@
         if (run.report) {
           validationReport = run.report;
           validationRanAt = run.ranAt;
+          validationPartial = false;
         }
       }
     } catch (_) { /* non-fatal — the card still allows running validation */ }
@@ -1122,6 +1126,7 @@
       const run = unwrapValidationRun(res);
       validationReport = run.report;
       validationRanAt = run.ranAt;
+      validationPartial = run.partial;
       // The run may have resolved shapes that weren't listed yet (e.g. freshly
       // auto-registered imported shapes) — refresh the panel and the history.
       await Promise.all([
@@ -1882,6 +1887,7 @@
       <p><strong>{#if validationReport.conforms}<Check size={14} /> {$i18nT('pages.datasetDetail.conforms')}{:else}<XIcon size={14} /> {$i18nT('pages.datasetDetail.doesNotConform')}{/if}</strong>
         — {validationReport.results_count} {$i18nT('pages.datasetDetail.results')}
         {#if validationRanAt}<span class="run-meta" title={validationRanAt}> · {fmtDateTime(validationRanAt)}</span>{/if}</p>
+      {#if validationPartial}<PartialRunNote />{/if}
       {#if validationReport.results.length > 0}
         <table>
           <thead>
@@ -2174,7 +2180,8 @@
         {#if validationReport}
           <div class="report" class:conforms={validationReport.conforms}>
             <p><strong>{#if validationReport.conforms}<Check size={14} /> {$i18nT('pages.datasetDetail.conforms')}{:else}<XIcon size={14} /> {$i18nT('pages.datasetDetail.doesNotConform')}{/if}</strong>
-              \u2014 {validationReport.results_count} {$i18nT('pages.datasetDetail.results')}</p>
+              — {validationReport.results_count} {$i18nT('pages.datasetDetail.results')}</p>
+            {#if validationPartial}<PartialRunNote />{/if}
             {#if validationReport.results.length > 0}
               <table>
                 <thead><tr><th>{$i18nT('pages.datasetDetail.severity')}</th><th>{$i18nT('pages.datasetDetail.focusNode')}</th><th>{$i18nT('pages.datasetDetail.path')}</th><th>{$i18nT('pages.datasetDetail.message')}</th></tr></thead>

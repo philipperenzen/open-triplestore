@@ -1119,6 +1119,20 @@ on longitude/latitude geometry is now geodesic metres.
   CROW's content.
 
 ### Fixed
+- **The UI says when a validation or inference run left graphs out.** A run
+  that could not read every graph or shapes graph of a dataset answers
+  `partial: true`: a validation run is then a test run, not recorded, and an
+  inference run skips the rules it may not read. The dataset page, the
+  Validation page, the SHACL results page, the import wizard's pre-validation
+  and the shapes editor's Infer now show a note when that happens. Asking for
+  an official run on the SHACL results page used to reload the unchanged
+  latest run, so the click seemed to do nothing; the page now shows the test
+  run it got. In the same pass:
+  - The import wizard's pre-validation read the verdict off the response
+    envelope instead of its report, so it always showed "undefined issue(s)
+    found", even for conforming data.
+  - The dataset page's validation dialog showed the escape `\u2014` as text
+    where its summary line has a dash.
 - **Street maps no longer show "API KEY REQUIRED" tiles.** CARTO watermarks
   every keyless basemap tile since September 2026, which covered the 3D globe
   and the map previews. Those maps now draw OpenFreeMap's vector tiles into
