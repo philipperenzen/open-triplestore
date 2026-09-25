@@ -8,13 +8,18 @@
 //!
 //! A Library shape graph is also readable by whoever the Library shows its
 //! entry to ([`can_access_set`]): `GET /api/shacl/shape-graphs/{id}/turtle`
-//! already serves it to them.
+//! already serves it to them. Except a graph some dataset holds as private:
+//! the Library adopts a dataset's shapes graph in place, and an entry's
+//! visibility says nothing about who may read a graph it did not mint, so such
+//! a graph is read by who may read it by the `/sparql` rule, whatever its
+//! entry says ([`crate::auth::acl::withheld_private_graphs`]).
 
 use std::collections::HashSet;
 
 use crate::auth::db::AuthDb;
 use crate::auth::middleware::AuthenticatedUser;
 use crate::auth::models::Dataset;
+use crate::store::TripleStore;
 
 use super::access::can_access_set;
 use super::models::{ShapeGraph, TargetKind, ValidationPipeline};
@@ -26,6 +31,8 @@ pub struct ReadScope {
     admin: bool,
     orgs: Vec<String>,
     graphs: HashSet<String>,
+    /// Graphs some dataset holds as private that are not in `graphs`.
+    withheld: HashSet<String>,
 }
 
 impl ReadScope {
@@ -44,27 +51,43 @@ impl ReadScope {
         };
         match user {
             Some(u) => Self::resolve(auth_db, &u.id, u.role.as_str(), u.is_admin()),
-            None => Ok(Self {
-                user_id: None,
-                admin: false,
-                orgs: Vec::new(),
-                graphs: crate::auth::acl::readable_graph_iris(auth_db, None)?,
-            }),
+            None => {
+                let graphs = crate::auth::acl::readable_graph_iris(auth_db, None)?;
+                Ok(Self {
+                    user_id: None,
+                    admin: false,
+                    orgs: Vec::new(),
+                    withheld: Self::withheld(auth_db, &graphs)?,
+                    graphs,
+                })
+            }
         }
     }
 
     fn resolve(auth_db: &AuthDb, user_id: &str, role: &str, admin: bool) -> anyhow::Result<Self> {
-        let graphs = if admin {
-            HashSet::new()
+        let (graphs, withheld) = if admin {
+            (HashSet::new(), HashSet::new())
         } else {
-            crate::auth::acl::readable_graph_iris(auth_db, Some((user_id, role)))?
+            let graphs = crate::auth::acl::readable_graph_iris(auth_db, Some((user_id, role)))?;
+            let withheld = Self::withheld(auth_db, &graphs)?;
+            (graphs, withheld)
         };
         Ok(Self {
             user_id: Some(user_id.to_string()),
             admin,
             orgs: auth_db.get_user_org_ids(user_id).unwrap_or_default(),
             graphs,
+            withheld,
         })
+    }
+
+    /// The private dataset graphs outside `readable`.
+    fn withheld(auth_db: &AuthDb, readable: &HashSet<String>) -> anyhow::Result<HashSet<String>> {
+        Ok(auth_db
+            .list_private_dataset_graph_iris()?
+            .into_iter()
+            .filter(|g| !readable.contains(g))
+            .collect())
     }
 
     /// Whether the principal may read `graph_iri` by the `/sparql` rule. A
@@ -73,9 +96,19 @@ impl ReadScope {
         self.admin || self.graphs.contains(graph_iri)
     }
 
-    /// Whether the principal may read a Library shape graph.
+    /// Whether the principal may read a Library shape graph: its entry is
+    /// shown to them, and its graph is not a private dataset graph they may
+    /// not read ([`Self::withholds`]).
     pub fn may_read_set(&self, set: &ShapeGraph) -> bool {
-        self.admin || can_access_set(set, self.user_id.as_deref(), &self.orgs)
+        self.admin
+            || (can_access_set(set, self.user_id.as_deref(), &self.orgs)
+                && !self.withholds(&set.graph_iri))
+    }
+
+    /// Whether `graph_iri` is a graph some dataset holds as private that the
+    /// principal may not read: withheld whatever Library entry names it.
+    pub fn withholds(&self, graph_iri: &str) -> bool {
+        self.withheld.contains(graph_iri)
     }
 
     /// Whether the principal may access `dataset`.
@@ -92,11 +125,16 @@ impl ReadScope {
 /// graph it composes (`shape_graph_ids`). A dataset or shape graph that no
 /// longer exists is no part of it: it contributes nothing to a run.
 ///
-/// Shapes bound to a target in the validation layer are not checked: they
-/// come with the target, whoever validates it.
+/// Shapes bound to a target in the validation layer come with the target,
+/// whoever validates it, and are not checked: except a graph some dataset
+/// holds as private that `reader` may not read ([`ReadScope::withholds`]),
+/// such as another dataset's private shapes graph linked to a dataset in
+/// scope. A report names its shapes, their paths and messages.
 pub fn pipeline_unreadable(
+    store: &TripleStore,
     auth_db: &AuthDb,
     studio: &ShaclStudioStore,
+    base_url: &str,
     pipeline: &ValidationPipeline,
     reader: &ReadScope,
 ) -> anyhow::Result<Option<String>> {
@@ -139,6 +177,12 @@ pub fn pipeline_unreadable(
             .is_some_and(|set| reader.may_read_set(&set));
         if !library_readable {
             return Ok(Some(format!("graph <{g}>")));
+        }
+    }
+
+    for g in super::exec::resolve_shape_graphs(store, auth_db, studio, base_url, pipeline) {
+        if reader.withholds(&g) {
+            return Ok(Some(format!("shapes graph <{g}>")));
         }
     }
     Ok(None)

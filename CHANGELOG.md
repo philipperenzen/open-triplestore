@@ -87,9 +87,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     as comments (IMBOR: headers only), and the server serves
     `/vocab/NOTICE.md` itself. Seeded and LOV-installed graphs are loaded
     unchanged: the loader used to add an `owl:versionInfo` triple to files
-    that state none. Earlier installs keep it, seeded and LOV alike:
-    their licence records say the copy differs from the file or may have been
-    modified.
+    that state none. On earlier installs, a seeded copy whose only difference
+    from its file is that triple has it removed at the next start and is
+    recorded as unchanged; a copy with any other difference, and every LOV
+    install, keeps it, and their licence records say the copy differs from
+    the file or may have been modified.
     A download calls its content the bundled file, unchanged, only when the
     seeder has checked it: each seeded version's record keeps the SHA-256 of
     its file and a digest of the stored triples, and `attribution.unchanged`
@@ -1053,7 +1055,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   served at `/api-docs/openapi.json` and the interactive UI is the frontend's
   own page — which also removes the duplicate `axum` 0.8 and `zip` 3 from the
   tree. TypeScript 7 remains held: typescript-eslint has no release that
-  supports it.
+  supports it. A fourth batch, in September, brings `argon2` 0.6 (on
+  `password-hash` 0.6 the hasher draws its own 16-byte salt; password hashes
+  stored under 0.5 still verify — pinned by a regression test on real
+  0.5-minted PHC strings — and new hashes keep the same
+  `$argon2id$v=19$m=19456,t=2,p=1$` form, so a rollback reads them too),
+  `vitest` 5 (no config or test changes needed), `oxigraph` 0.5.11 with its
+  `oxrdf` / `spargebra` / `spareval` / `sparopt` / `sparesults` / `oxttl`
+  siblings in lockstep, `aes-gcm` 0.11.1 (stored OAuth client-secret blobs
+  still decrypt, pinned by a known-answer test), `tower-http` 0.7.1, `flate2`
+  1.1.10, `lru` 0.18.4, `aws-sdk-s3` 1.142, `svelte` 5.57, `vite` 8.2.2, `n3`
+  2.6, `marked`, `devalue` past GHSA-9rgm-9g3h-6x36, `uuid`,
+  `aws-smithy-http-client`, `proj4`, `dompurify`, `@codemirror/search`,
+  `@codemirror/state`, `@typescript-eslint/parser`, and the SHA-pinned
+  `softprops/action-gh-release` 3.0.3. `oxiri` 0.3 is held: its `Iri` type
+  crosses the federation service-handler API, so it has to stay on the 0.2
+  line Oxigraph still uses.
 - **Lint.** eslint 10's new `no-useless-assignment` now runs at its recommended
   `error` severity for `.js`/`.ts`, and the nine genuine dead stores it found —
   five in `.js`/`.ts`, four in plain helper functions inside components — are
@@ -1104,6 +1121,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   seed no longer provides any of them. (`f20a87b`)
 
 ### Fixed
+- **Street maps no longer show "API KEY REQUIRED" tiles.** CARTO watermarks
+  every keyless basemap tile since September 2026, which covered the 3D globe
+  and the map previews. Those maps now draw OpenFreeMap's vector tiles into
+  raster tiles in the browser, in the app's light or dark theme. No key is
+  needed, and every map carries the credit "OpenFreeMap © OpenMapTiles Data
+  from OpenStreetMap". Satellite imagery (Esri World Imagery) is offered only
+  when the deployment sets its own ArcGIS key in `/config.json`
+  (`basemaps.esriApiKey`), because Esri's terms tie the imagery to one.
+  Without a key, the 2D map, the globe and embeds show streets and no
+  satellite toggle. `?basemap=satellite` on an embed falls back to streets.
 - **`public = false` in a seed-bundle manifest reaches entries an earlier
   build registered public** (NEN 2660-2 and the NEN relation profile, whose
   models the example bundles now keep private because NEN grants no licence to
@@ -1120,9 +1147,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one carries a registry marker, and a record from an earlier release counts
   only when its creator, id, version, graph, notes and creation date all read
   as that seeder wrote them. A copy whose licence allows other copies and that
-  differs from the bundled file (an admin's edit, an earlier file, the
-  `owl:versionInfo` triple earlier loaders added) is never modified, only
-  labelled as possibly modified. IMBOR is checked on every start, also with
+  differs from the bundled file (an admin's edit, an earlier file) is never
+  modified, only labelled as possibly modified. The one exception is a copy
+  whose only difference is the `owl:versionInfo` triple earlier loaders
+  added: that triple is removed, and the copy is the file again. IMBOR is checked on every start, also with
   `SEED_STANDARD_VOCABS=false`: a copy that differs, such as the altered source
   note installs seeded by 0.5.0 and 0.6.0 hold, is first kept as a private,
   deprecated version `2025-kept-<n>`, served only to the entry's writers, and
@@ -2000,6 +2028,35 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   scopes no reads, and every path that could write or delete it refuses
   registry graphs. The boot adoption of legacy shapes graph settings into the
   Library no longer adopts registry, system or `urn:shapes:` graphs.
+- **A SHACL-AF rule was a SPARQL UPDATE with the store's own authority.** The
+  `sh:construct` body of a `sh:SPARQLRule` was rewritten textually and handed
+  to `TripleStore::update`, which authorizes nothing and confines nothing — so
+  a shapes graph, which any writer of a dataset may upload
+  (`PUT /api/datasets/{id}/shapes`) and then run
+  (`POST /api/datasets/{id}/infer`, or a SHACL Studio pipeline), could read and
+  write every graph in the store: another tenant's private data, `urn:system:*`,
+  the model registry. `DROP ALL` was a rule; with one data graph the `WITH <g>`
+  prefix the engine added confined nothing, since
+  `WITH <g> INSERT { GRAPH <any> { … } } WHERE { GRAPH <any> { … } }` is valid
+  SPARQL. A `sh:TripleRule` was reachable the same way, because the focus node
+  was pasted into the generated update as `<{focus}>` and a focus node may be a
+  literal (`sh:targetNode "…"`) whose lexical form the shapes author writes.
+  Now: `sh:construct` must parse as the CONSTRUCT query SHACL-AF says it is
+  (the `INSERT { … } WHERE { … }` convenience form still parses as one;
+  anything else is refused by name, at load time), it is evaluated **read-only**
+  over the run's data graphs with its own `FROM`/`FROM NAMED` clauses replaced,
+  `$this` is bound as a term instead of being pasted in, and the engine — not
+  the rule — inserts the derived triples, into one graph the dataset holds.
+  `POST /api/datasets/{id}/infer` names that graph: the single data graph as
+  before, or, over several, the dataset's own `urn:dataset:{id}:inferred`
+  (registered with the `entailment` role) instead of the store's global default
+  graph, where derived triples were both unowned and unreadable.
+- **A `sh:sparql` constraint or `sh:SPARQLTarget` could read graphs the run may
+  not.** Their queries were scoped by prepending `FROM` clauses, which a
+  `FROM NAMED <someone-elses-graph>` written into the shape simply added to.
+  The dataset of a shape's query is now replaced outright with the run's data
+  graphs, and no named graph is available, so a `GRAPH` block inside one
+  matches nothing.
 - **The SHACL Studio shapes catalogue listed shapes from graphs the caller
   could not read.** `GET /api/shacl/shapes` hid only Library entries the
   caller could not see. Any other graph holding shapes (a private dataset's
@@ -2050,6 +2107,135 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   any other gate the server cannot evaluate does; a bulk import is refused
   before anything is written. The Graph Store path's `shacl_on_write` gate
   refuses the same way when its own dataset lookup fails.
+- **A pipeline's persisted report was readable by everyone who could read its
+  dataset.** A run that persists its report as RDF (`results_target`), or its
+  inferred triples in a new graph, attached that graph to the dataset holding
+  its data, non-private, even when the run had validated one of the
+  dataset's private graphs or a graph that belongs to no dataset. So a
+  public dataset's viewers read the private graph's focus nodes and values
+  over `/sparql`. A derived graph is now attached to a dataset only when that
+  dataset holds every graph the run validated, and is private there when any
+  of them is. A pipeline's own report or inferred graph collects every run,
+  so before a run over other data it is detached, and it is newly attached
+  only while empty. A graph the pipeline's owner named as the target keeps
+  its registrations; it is attached only when nothing in the scope is private.
+- **Validating a dataset showed its private graphs to anyone who could view
+  it.** `POST /api/datasets/{id}/validate` checked only that the caller could
+  see the dataset, then validated every graph in it, private ones included,
+  and returned the report (focus nodes and values). An official run was also
+  recorded, overwriting the dataset's validation status, and its report was
+  written as RDF to `urn:system:reports:dataset:{id}`, attached to the dataset
+  non-private. So a public dataset's viewers read its private graphs' values
+  in the response, over `/sparql`, and from `…/validation/latest` and
+  `…/validation/runs/{run_id}`. Now:
+  - A run validates only the dataset graphs the caller may read by the rule
+    `/sparql` applies (a private graph only for the dataset's writers, plus
+    graph-ACL read grants; admins read every graph). A private shapes-role
+    graph shapes no run of a caller who may not read it.
+  - A run that could not read every graph of the dataset is not official: it
+    answers as a test run (`test: true`, `partial: true`), records nothing and
+    leaves the dataset's validation status as it was.
+  - Recording an official run requires write access to the dataset. A reader
+    whose run *was* complete (nothing hidden) would otherwise overwrite the
+    dataset's status and history or forge a verdict, so a non-writer's non-test
+    request is now refused (`403` — retry with `?test=true`) rather than
+    recorded. The self-heal that adopts and binds a dataset's shapes graph into
+    the Studio Library likewise runs only for a writer, never under a reader's
+    authority.
+  - The report graph is private in the dataset whenever the run validated a
+    private graph, or a model graph not everyone may read, and it is never
+    made public again.
+  - A stored run records the graphs it validated. Its full report goes to the
+    dataset's writers and to callers who may read each of those graphs when
+    they ask; anyone else gets the run's summary with `report: null` and
+    `report_withheld: true`. A run stored before this release goes in full to
+    the dataset's writers only.
+  - An explicit `shapes_graph` must be readable by the same rule. It used to
+    need a graph-ACL grant, so a graph of a dataset the caller may read now
+    works too.
+- **A dataset's private shapes graph reached everyone who could view the
+  dataset.** A graph marked private in a dataset is its writers' to read, but
+  four paths served a private shapes graph to the dataset's viewers:
+  - `GET /api/datasets/{id}/shapes` returned it.
+  - The SHACL Studio Library adopts a dataset's shapes graph in place when the
+    dataset is validated or imported into, or when its shapes graph or graph
+    roles change, and gave the entry the dataset's visibility. A public
+    dataset's private shapes graph became a public Library entry: its Turtle,
+    its revisions (revision 1 is a copy), a clone, the Library list, bindings,
+    effective shapes, the catalogue and pipelines were open to every signed-in
+    user.
+  - That adoption also bound the graph to the dataset, and the form manifest
+    (`GET /api/datasets/{id}/form-manifest`, anonymous for a public dataset)
+    carries the Turtle of every bound shapes graph, so anonymous callers got it.
+  - `PUT /api/datasets/{id}/shacl` let anyone who could see a dataset link its
+    shapes graph as the shapes graph of a dataset of their own, then read it
+    from there.
+
+  Now a graph some dataset holds as private is read only by those who may read
+  it by the rule `/sparql` applies (its dataset's writers, graph-ACL read
+  grants, admins), whatever names it:
+  - `GET …/shapes`, validation runs and the form manifest leave out a private
+    shapes graph the caller may not read, whether it is this dataset's or
+    another's linked or bound here. `GET …/shapes` answers 404 when nothing is
+    left, the manifest no longer lists private data graphs to them either, and
+    a validation run that leaves out a shapes graph is a test run.
+  - A private graph is adopted as a `private` Library entry. Every Library path
+    that reads an entry (the entry, its Turtle, revisions, clone, the list,
+    bindings, effective shapes, the catalogue, pipelines, re-registration)
+    withholds an entry of a private graph from those who may not read the
+    graph, whatever the entry's visibility. That covers entries adopted before
+    this release and graphs marked private after adoption, with no migration.
+    Marking the graph public again gives the entry back.
+  - Linking a private graph the caller may not read as a shapes graph is
+    refused (403).
+  - A validation report names its shapes, their paths and messages, so it
+    follows the same rule:
+    - A write a gate refuses (Graph Store `PUT`/`POST`, validate-and-commit,
+      bulk import; by a binding, a gating pipeline or `shacl_on_write`)
+      answers a writer who may not read one of that gate's private shapes
+      graphs with only that the write does not conform, and by how many
+      results. The write is refused all the same.
+    - A stored run records the shapes graphs it used. Its full report is
+      withheld from anyone but an admin who may not read one of them that is
+      private when they ask, the dataset's writers included: a dataset's
+      writer may link its private shapes graph into another dataset, whose
+      writers need not be allowed to read it.
+    - An official run shaped by another dataset's private graph writes no
+      report graph, and clears the last one.
+    - A pipeline with such a graph bound to a dataset or graph in its scope
+      is refused (403) to whoever may not read it.
+    - The model profile (`GET /api/models/{id}/versions/{ver}/profile`, which
+      any user may read with a `sources:read` token they mint) and the SQL
+      source dry run leave out a private shapes graph the caller may not
+      read, whether it is bound to the model or named in the request or the
+      mapping.
+  - Making a graph private (`PATCH /api/datasets/{id}/graphs`) takes the
+    validation reports on it along. A dataset whose latest official run
+    validated the graph, or was shaped by it, has its report graph made
+    private when it holds the graph and cleared when it does not. A data
+    graph made private after a run used to leave that run's report graph
+    readable to the dataset's viewers.
+- **Inference ran a private shapes graph's rules for a writer who may not
+  read it.** `POST /api/datasets/{id}/infer` runs the SHACL-AF rules of every
+  shapes graph of the dataset and writes what they derive into the dataset,
+  where its writers and readers read the rules' constants and structure back.
+  A writer of two datasets may link one's private shapes graph into the other,
+  whose other writers need not be allowed to read it, and they could run its
+  rules. Now a run leaves out a private shapes graph the caller may not read,
+  by the rule validation applies. It answers 400 when no shapes graph is left,
+  and says `partial: true` when it left one out.
+- **A SQL-source dry run was shaped by any graph its caller named.**
+  `POST /api/sources/{id}/dry-run` validates a sample of a mapping and returns
+  the report: the shapes' IRIs, paths and messages. Any user may mint the
+  `mappings:propose` token it accepts, and it validated against whatever
+  shapes graph the request or the mapping named (a proposer writes mappings
+  too): a graph of a private dataset, a graph registered to no dataset, or a
+  private model's shapes named through `model` + `modelVersion`. Now a named
+  shapes graph applies only when the caller may read it by the rule `/sparql`
+  applies, or through the endpoint that already serves it to them (a SHACL
+  Studio Library entry they are shown, a graph of a model version they may
+  read). A model's shapes apply only when the caller may read the model. For
+  anyone else they are left out with a warning. Admins read every graph.
 - **Detaching or deleting a dataset could wipe graphs it never owned.**
   `DELETE /api/datasets/{id}/graphs` deleted any graph no other dataset
   claimed, so any user who could create a dataset could wipe the model

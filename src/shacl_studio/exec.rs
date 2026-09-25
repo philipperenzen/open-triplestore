@@ -377,8 +377,22 @@ fn persist_derived(
         if !explicit || owner_can_write(auth_db, &pipeline.created_by, &target) {
             if registry_permits_write(store, base_url, &pipeline.id, std::slice::from_ref(&target))
             {
-                write_quads_to_graph(store, inferred, &target);
-                register_derived_graph(auth_db, data_graphs, &target, GraphKind::Entailment);
+                match place_derived_graph(
+                    store,
+                    auth_db,
+                    data_graphs,
+                    &target,
+                    !explicit,
+                    Some(GraphKind::Entailment),
+                ) {
+                    Ok(()) => write_quads_to_graph(store, inferred, &target),
+                    Err(e) => tracing::warn!(
+                        "shacl pipeline {}: skipped inferred write to <{}>: who may read it \
+                         could not be settled: {e}",
+                        pipeline.id,
+                        target
+                    ),
+                }
             }
         } else {
             tracing::warn!(
@@ -418,15 +432,24 @@ fn persist_derived(
             &pipeline.id,
             std::slice::from_ref(&target),
         ) {
-            let report_iri = format!("{target}#run-{run_id}");
-            let ttl = super::report_rdf::report_to_turtle(report, &report_iri);
-            // POST (append) so successive runs accumulate rather than overwrite.
-            let _ = store.graph_store_post(Some(&target), &ttl, RdfFormat::Turtle);
-            if matches!(
+            let attach_as = matches!(
                 pipeline.results_target,
                 ResultsTarget::InPlace | ResultsTarget::NewGraph
-            ) {
-                register_derived_graph(auth_db, data_graphs, &target, GraphKind::System);
+            )
+            .then_some(GraphKind::System);
+            match place_derived_graph(store, auth_db, data_graphs, &target, !explicit, attach_as) {
+                Ok(()) => {
+                    let report_iri = format!("{target}#run-{run_id}");
+                    let ttl = super::report_rdf::report_to_turtle(report, &report_iri);
+                    // POST (append) so successive runs accumulate rather than overwrite.
+                    let _ = store.graph_store_post(Some(&target), &ttl, RdfFormat::Turtle);
+                }
+                Err(e) => tracing::warn!(
+                    "shacl pipeline {}: skipped report write to <{}>: who may read it could \
+                     not be settled: {e}",
+                    pipeline.id,
+                    target
+                ),
             }
         }
     }
@@ -460,23 +483,98 @@ fn write_quads_to_graph(store: &TripleStore, quads: &[Quad], target: &str) {
     let _ = store.bulk_insert_quads(rehomed, &[target.to_string()]);
 }
 
-/// Attach a derived graph to its owning dataset (with a role) — but only when
-/// the pipeline's data scope maps to exactly one dataset, so we never guess
-/// which dataset a cross-dataset derived graph belongs to.
-fn register_derived_graph(auth_db: &AuthDb, data_graphs: &[String], target: &str, role: GraphKind) {
-    let mut owner: Option<String> = None;
-    for g in data_graphs {
-        if let Ok(Some(ds)) = auth_db.find_dataset_by_graph_iri(g) {
-            match &owner {
-                None => owner = Some(ds.id),
-                Some(existing) if *existing == ds.id => {}
-                Some(_) => return, // scope spans multiple datasets — leave unattached
-            }
+/// The dataset a run's derived graph (its report, its inferred triples) may be
+/// read through, and whether it must be private there. A derived graph
+/// carries data from every graph the run validated, so its home is a dataset
+/// that holds every one of them — its readers could read them all — and it is
+/// private there when any of them is. `None` when no dataset holds them all
+/// (the scope spans datasets, or takes in a graph of none): the graph then
+/// stays with admins and the run endpoints, which check their caller.
+fn derived_graph_home(
+    auth_db: &AuthDb,
+    data_graphs: &[String],
+) -> anyhow::Result<Option<(String, bool)>> {
+    let Some(first) = data_graphs.first() else {
+        return Ok(None);
+    };
+    for ds in auth_db.datasets_with_graph(first)? {
+        let private: std::collections::HashMap<String, bool> = auth_db
+            .list_dataset_graph_entries(&ds)?
+            .into_iter()
+            .map(|e| (e.graph_iri, e.private))
+            .collect();
+        let held: Option<Vec<bool>> = data_graphs
+            .iter()
+            .map(|g| private.get(g).copied())
+            .collect();
+        if let Some(held) = held {
+            return Ok(Some((ds, held.contains(&true))));
         }
     }
-    if let Some(ds_id) = owner {
-        let _ = auth_db.add_dataset_graph(&ds_id, target);
-        let _ = auth_db.set_dataset_graph_role(&ds_id, target, Some(role));
+    Ok(None)
+}
+
+/// Settle who may read `target` before a run writes derived data into it
+/// ([`derived_graph_home`]); on `Err` nothing is written.
+///
+/// A graph the pipeline owns (`owned`: `urn:system:reports:{id}`,
+/// `urn:system:inferred:{id}`) accumulates every run, so each run: detaches it
+/// from any dataset other than this run's home, makes it private at home when
+/// this run's data requires it (never public again), and attaches it
+/// (`attach_as`) only while it is still empty, since earlier runs may have
+/// covered other data. A caller-supplied graph is the pipeline owner's own:
+/// its registrations are left alone, and it is attached to the home only when
+/// not already there and nothing in the scope is private.
+fn place_derived_graph(
+    store: &TripleStore,
+    auth_db: &AuthDb,
+    data_graphs: &[String],
+    target: &str,
+    owned: bool,
+    attach_as: Option<GraphKind>,
+) -> anyhow::Result<()> {
+    let home = derived_graph_home(auth_db, data_graphs)?;
+    let home_id = home.as_ref().map(|(id, _)| id.as_str());
+    let mut at_home = false;
+    for ds in auth_db.datasets_with_graph(target)? {
+        if Some(ds.as_str()) == home_id {
+            at_home = true;
+        } else if owned {
+            auth_db.remove_dataset_graph(&ds, target)?;
+        }
+    }
+    let Some((ds, private)) = home else {
+        return Ok(());
+    };
+    if at_home {
+        if owned && private {
+            auth_db.set_dataset_graph_private(&ds, target, true)?;
+        }
+        return Ok(());
+    }
+    let Some(role) = attach_as else {
+        return Ok(());
+    };
+    let attachable = if owned {
+        graph_is_empty(store, target)?
+    } else {
+        !private
+    };
+    if !attachable {
+        return Ok(());
+    }
+    auth_db.add_dataset_graph(&ds, target)?;
+    auth_db.set_dataset_graph_private(&ds, target, private)?;
+    auth_db.set_dataset_graph_role(&ds, target, Some(role))?;
+    Ok(())
+}
+
+fn graph_is_empty(store: &TripleStore, graph: &str) -> anyhow::Result<bool> {
+    NamedNode::new(graph)?;
+    match store.query(&format!("ASK {{ GRAPH <{graph}> {{ ?s ?p ?o }} }}")) {
+        Ok(oxigraph::sparql::QueryResults::Boolean(any)) => Ok(!any),
+        Ok(_) => Err(anyhow::anyhow!("ASK returned no boolean")),
+        Err(e) => Err(anyhow::anyhow!("{e}")),
     }
 }
 

@@ -731,3 +731,283 @@ async fn the_mapping_list_filters_by_datasource_in_either_spelling() {
     .await;
     assert!(other.as_array().unwrap().is_empty());
 }
+
+/// A plain user's service token with the proposer's scopes: any user may mint
+/// one.
+async fn proposer_token(
+    app: &Router,
+    state: &open_triplestore::server::AppState,
+    id: &str,
+) -> String {
+    state
+        .auth_db
+        .create_user(id, id, &format!("{id}@test.com"), "hash", SystemRole::User)
+        .unwrap();
+    let (st, v, txt) = req(
+        app,
+        Method::POST,
+        "/api/auth/tokens",
+        &mint_token(id, id, "user"),
+        json!({ "name": "proposer", "scopes": ["sources:read", "mappings:propose"] }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    v["token"].as_str().unwrap().to_string()
+}
+
+/// A report names its shapes, their paths and messages, so a dry run is shaped
+/// only by graphs its caller may read: a graph some dataset holds as private
+/// is left out, with a warning, for a proposer who may not read it, whoever
+/// named it. Any user may mint the `mappings:propose` token.
+#[tokio::test]
+async fn a_private_dataset_graph_shapes_no_dry_run_of_who_may_not_read_it() {
+    use open_triplestore::auth::models::{OwnerType, Visibility};
+    const PRIVATE_SHAPES_GRAPH: &str = "http://pub.example/private-shapes";
+    const SECRET_SHAPES: &str = "@prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+        @prefix ex: <http://example.org/products/ontology#> .\n\
+        ex:SecretShape a sh:NodeShape ; sh:targetClass ex:Product ;\n\
+          sh:property [ sh:path ex:secretCode ; sh:minCount 1 ;\n\
+                        sh:message \"SECRET-RULE-7\" ] .\n";
+    sources_dir();
+    let (state, admin) = admin_state();
+    let app = test_app(state.clone());
+    let db = fresh_sqlite("private-shapes", false);
+    register_source(&app, &admin, "private-shapes", &db).await;
+    put_turtle(&app, &admin, PRIVATE_SHAPES_GRAPH, SECRET_SHAPES).await;
+    state
+        .auth_db
+        .create_dataset(
+            "pub-ds",
+            "pub-ds",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    state
+        .auth_db
+        .add_dataset_graph("pub-ds", PRIVATE_SHAPES_GRAPH)
+        .unwrap();
+    state
+        .auth_db
+        .set_dataset_graph_private("pub-ds", PRIVATE_SHAPES_GRAPH, true)
+        .unwrap();
+
+    let proposer = proposer_token(&app, &state, "prop").await;
+
+    let body = json!({
+        "rml": mapping_for("private-shapes", "xsd:decimal"),
+        "shapesGraph": PRIVATE_SHAPES_GRAPH, "table": "products", "sampleSize": 1,
+    });
+    let (st, v, txt) = dry_run(&app, &proposer, "private-shapes", body.clone()).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert!(
+        !txt.contains("SECRET-RULE-7") && !txt.contains("secretCode"),
+        "{txt}"
+    );
+    assert_eq!(v["shapesGraphs"], json!([]), "{txt}");
+    assert!(
+        txt.contains("not one you may read"),
+        "a warning says so: {txt}"
+    );
+
+    let (st, _, txt) = dry_run(&app, &admin, "private-shapes", body).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert!(txt.contains("SECRET-RULE-7"), "the admin's dry run: {txt}");
+}
+
+/// Shapes that find fault with every sampled product, with a message of their
+/// own: the report carries it exactly when the graph shaped the dry run.
+fn rule_shapes(rule: &str) -> String {
+    format!(
+        "@prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+         @prefix ex: <http://example.org/products/ontology#> .\n\
+         ex:Shape{rule} a sh:NodeShape ; sh:targetClass ex:Product ;\n\
+           sh:property [ sh:path ex:code{rule} ; sh:minCount 1 ; sh:message \"{rule}\" ] .\n"
+    )
+}
+
+/// A dry run is shaped only by graphs its caller may read, whoever named them
+/// (the request, a mapping a proposer wrote, a model): by the rule `/sparql`
+/// scopes a query to, a graph of a dataset they can access or a graph-ACL
+/// grant; or through the endpoint that already serves the graph to them, a
+/// SHACL Studio Library entry they are shown or a model they may read. A
+/// graph of a private dataset, one registered nowhere, or a private model's
+/// shapes validate an admin's dry run, not a proposer's.
+#[tokio::test]
+async fn a_dry_run_is_shaped_only_by_graphs_its_caller_may_read() {
+    use open_triplestore::auth::models::{OwnerType, Visibility};
+    use open_triplestore::data_models::models::{DataModelVersion, VersionStatus};
+    use open_triplestore::data_models::registry as dmr;
+    sources_dir();
+    let (state, admin) = admin_state();
+    let app = test_app(state.clone());
+    let db = fresh_sqlite("read-rule", false);
+    register_source(&app, &admin, "read-rule", &db).await;
+    let proposer = proposer_token(&app, &state, "prop").await;
+
+    // Graphs of a private and a public dataset, a graph-ACL grant, a graph
+    // registered nowhere.
+    let graphs = [
+        (
+            "http://priv.example/shapes",
+            "RULE-PRIVATE-DS",
+            Some("priv-ds"),
+        ),
+        (
+            "http://pub.example/shapes",
+            "RULE-PUBLIC-DS",
+            Some("pub-ds"),
+        ),
+        ("urn:test:granted-shapes", "RULE-GRANTED", None),
+        ("urn:test:unregistered-shapes", "RULE-UNREGISTERED", None),
+    ];
+    for (id, vis) in [
+        ("priv-ds", Visibility::Private),
+        ("pub-ds", Visibility::Public),
+    ] {
+        state
+            .auth_db
+            .create_dataset(id, id, None, OwnerType::User, "adm", vis, None)
+            .unwrap();
+    }
+    for (g, rule, ds) in graphs {
+        put_turtle(&app, &admin, g, &rule_shapes(rule)).await;
+        if let Some(ds) = ds {
+            state.auth_db.add_dataset_graph(ds, g).unwrap();
+        }
+    }
+    state
+        .auth_db
+        .grant_graph_permission(
+            "r-1",
+            "urn:test:granted-shapes",
+            "user",
+            "prop",
+            "read",
+            "adm",
+        )
+        .unwrap();
+    state.auth_db.invalidate_accessible_graphs_cache();
+
+    // A public Library entry.
+    let (st, v, txt) = req(
+        &app,
+        Method::POST,
+        "/api/shacl/shape-graphs",
+        &admin,
+        json!({ "name": "public shapes", "visibility": "public", "turtle": rule_shapes("RULE-LIBRARY") }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    let library_graph = v["graph_iri"].as_str().unwrap().to_string();
+
+    let sample = |shapes: Value| {
+        let mut b = json!({ "rml": mapping_for("read-rule", "xsd:decimal"), "table": "products",
+                            "sampleSize": 1 });
+        b.as_object_mut()
+            .unwrap()
+            .extend(shapes.as_object().unwrap().clone());
+        b
+    };
+    let cases = [
+        ("http://priv.example/shapes", "RULE-PRIVATE-DS", false),
+        ("urn:test:unregistered-shapes", "RULE-UNREGISTERED", false),
+        ("http://pub.example/shapes", "RULE-PUBLIC-DS", true),
+        ("urn:test:granted-shapes", "RULE-GRANTED", true),
+        (library_graph.as_str(), "RULE-LIBRARY", true),
+    ];
+    for (g, rule, readable) in cases {
+        let body = sample(json!({ "shapesGraph": g }));
+        let (st, v, txt) = dry_run(&app, &proposer, "read-rule", body.clone()).await;
+        assert_eq!(st, StatusCode::OK, "{g}: {txt}");
+        assert_eq!(txt.contains(rule), readable, "<{g}> to the proposer: {txt}");
+        let applied = v["shapesGraphs"] == json!([g]);
+        assert_eq!(applied, readable, "<{g}>: {txt}");
+        if !readable {
+            assert!(txt.contains("not one you may read"), "<{g}>: {txt}");
+        }
+        let (_, _, txt) = dry_run(&app, &admin, "read-rule", body).await;
+        assert!(
+            txt.contains(rule),
+            "<{g}> shapes the admin's dry run: {txt}"
+        );
+    }
+
+    // A mapping the proposer wrote names the shapes graph the same way.
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/mappings",
+        &proposer,
+        json!({ "id": "proposal", "title": "proposal", "rml": mapping_for("read-rule", "xsd:decimal"),
+                "shapesGraph": "http://priv.example/shapes", "state": "proposed" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    let (st, _, txt) = dry_run(
+        &app,
+        &proposer,
+        "read-rule",
+        json!({ "mapping": "proposal", "table": "products", "sampleSize": 1 }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert!(!txt.contains("RULE-PRIVATE-DS"), "through a mapping: {txt}");
+
+    // A private model's shapes.
+    let base = state.base_url.to_string();
+    dmr::insert_data_model(
+        &state.store,
+        &base,
+        "m-priv",
+        "Private model",
+        "http://example.org/m-priv#",
+        None,
+        false,
+        Some("user"),
+        Some("adm"),
+        None,
+        "2026-01-01T00:00:00Z",
+    )
+    .unwrap();
+    let version_graph = format!("{base}/data-model/m-priv/version/1.0.0");
+    let model_shapes = format!("{version_graph}/shapes");
+    dmr::insert_version(
+        &state.store,
+        &base,
+        &DataModelVersion {
+            data_model_id: "m-priv".to_string(),
+            version: "1.0.0".to_string(),
+            status: VersionStatus::Published,
+            graph_iri: version_graph.clone(),
+            sub_graphs: vec![version_graph.clone(), model_shapes.clone()],
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            created_by: None,
+            derived_from: None,
+            notes: None,
+            branch: None,
+            sub_graph_status: vec![],
+        },
+    )
+    .unwrap();
+    state
+        .store
+        .load_str(
+            &rule_shapes("RULE-MODEL"),
+            oxigraph::io::RdfFormat::Turtle,
+            Some(&model_shapes),
+        )
+        .unwrap();
+    let body = sample(json!({ "model": "m-priv", "modelVersion": "1.0.0" }));
+    let (st, _, txt) = dry_run(&app, &proposer, "read-rule", body.clone()).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert!(
+        !txt.contains("RULE-MODEL"),
+        "a private model's shapes: {txt}"
+    );
+    let (_, _, txt) = dry_run(&app, &admin, "read-rule", body).await;
+    assert!(txt.contains("RULE-MODEL"), "the admin's dry run: {txt}");
+}

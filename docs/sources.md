@@ -696,6 +696,8 @@ Shapes are found in the version's own graphs and through the SHACL Studio
 validation layer, and every entry says which. A bound shape graph the Studio
 has a record for is admitted only when the caller may read that shape set:
 being bound to a readable model version is not consent to read a private one.
+Whatever the Studio says, a graph some dataset holds as private is profiled
+only for a caller who may read it by the rule `/sparql` applies.
 
 Two calls on unchanged data return byte-identical JSON — the field names are a
 contract an external proposer depends on.
@@ -764,6 +766,17 @@ same index fallback, the same term evaluation.
 mapping's shapes graph, else the model version's (`model` + `modelVersion`,
 from the request or the mapping). With none, nothing is validated, and the
 response says so in `warnings` rather than reporting a conforming sample.
+
+A report names its shapes, their paths and messages, so a dry run is shaped
+only by graphs its caller may read, whoever named them: the request, or the
+mapping, which a proposer writes too. A named shapes graph must be readable by
+the rule `/sparql` applies (a graph of a dataset the caller can access, a
+private one only for its writers, or a graph-ACL read grant), or be served to
+the caller already: a SHACL Studio Library entry they are shown, or a graph of
+a model version they may read. A model's shapes apply only when the caller may
+read the model. Anything else is left out with a warning, so a graph loaded
+for a proposer to validate against needs a dataset, a Library entry or a read
+grant. Admins read every graph.
 
 **Classification.** Results are grouped by what fired — shape, path and
 constraint — and each group is measured against the subjects of its focus

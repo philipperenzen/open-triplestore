@@ -384,13 +384,28 @@ pub async fn list_shape_graphs(
 ) -> Result<impl IntoResponse, ApiErr> {
     let st = studio(&state);
     let orgs = org_ids(&state, &user.user_id);
+    let withheld = withheld_graphs(&state, &user)?;
     let sets: Vec<ShapeGraph> = st
         .list_shape_graphs()
         .map_err(e500)?
         .into_iter()
-        .filter(|s| can_access_set(s, Some(&user.user_id), &orgs))
+        .filter(|s| {
+            can_access_set(s, Some(&user.user_id), &orgs) && !withheld.contains(&s.graph_iri)
+        })
         .collect();
     Ok(Json(sets))
+}
+
+/// The graphs some dataset holds as private that `user` may not read
+/// ([`crate::auth::acl::withheld_private_graphs`]). The Library adopts a
+/// dataset's shapes graph in place, and an entry's visibility does not decide
+/// who reads a graph the Studio did not mint: no entry of one of these is
+/// served to `user`, whatever its visibility.
+fn withheld_graphs(
+    state: &AppState,
+    user: &AuthenticatedUser,
+) -> Result<std::collections::HashSet<String>, ApiErr> {
+    crate::auth::acl::withheld_private_graphs(&state.auth_db, Some(user)).map_err(e500)
 }
 
 async fn load_set_checked(
@@ -410,7 +425,12 @@ async fn load_set_checked(
     } else {
         can_access_set(&set, Some(&user.user_id), &orgs)
     };
-    if !ok {
+    // Reading or managing an entry is working with its graph: an entry of a
+    // private dataset graph is only for who may read that graph.
+    if !ok
+        || crate::auth::acl::private_graph_withheld(&state.auth_db, Some(user), &set.graph_iri)
+            .map_err(e500)?
+    {
         return Err((StatusCode::FORBIDDEN, "Access denied".into()));
     }
     Ok(set)
@@ -1040,9 +1060,11 @@ pub async fn list_bindings(
     let target_iri = resolve_target_for_read(&state, &user, &target).await?;
     let st = studio(&state);
     let orgs = org_ids(&state, &user.user_id);
+    let withheld = withheld_graphs(&state, &user)?;
     // Resolve bound shape-graph graphs back to records the caller may access.
     let sets: Vec<ShapeGraph> = super::bindings::bindings_for_target(&state.store, &target_iri)
         .into_iter()
+        .filter(|giri| !withheld.contains(giri))
         .filter_map(|giri| st.get_shape_graph_by_iri(&giri).ok().flatten())
         .filter(|s| can_access_set(s, Some(&user.user_id), &orgs))
         .collect();
@@ -1070,13 +1092,20 @@ pub async fn dataset_effective_shapes(
     {
         return Err((StatusCode::FORBIDDEN, "Access denied".into()));
     }
-    let sets = super::bindings::effective_shape_graphs_for_dataset(
+    // Bound shapes come with the dataset, but an entry names its graph and
+    // carries its target classes: not one of a private graph the caller may
+    // not read.
+    let withheld = withheld_graphs(&state, &user)?;
+    let sets: Vec<ShapeGraph> = super::bindings::effective_shape_graphs_for_dataset(
         &state.store,
         &state.auth_db,
         &studio(&state),
         &state.base_url,
         &ds,
-    );
+    )
+    .into_iter()
+    .filter(|s| !withheld.contains(&s.graph_iri))
+    .collect();
     Ok(Json(sets))
 }
 
@@ -1099,15 +1128,15 @@ pub async fn list_shapes_catalog(
 ) -> Result<impl IntoResponse, ApiErr> {
     let st = studio(&state);
     let orgs = org_ids(&state, &user.user_id);
+    let reader = ReadScope::for_user(&state.auth_db, &user).map_err(e500)?;
     let mut reg_all: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut reg_access: HashMap<String, (String, String)> = HashMap::new();
     for s in st.list_shape_graphs().map_err(e500)? {
         reg_all.insert(s.graph_iri.clone());
-        if can_access_set(&s, Some(&user.user_id), &orgs) {
+        if can_access_set(&s, Some(&user.user_id), &orgs) && !reader.withholds(&s.graph_iri) {
             reg_access.insert(s.graph_iri.clone(), (s.id.clone(), s.name.clone()));
         }
     }
-    let reader = ReadScope::for_user(&state.auth_db, &user).map_err(e500)?;
     let visible = |g: &str| {
         if reg_all.contains(g) {
             reg_access.contains_key(g)
@@ -1284,7 +1313,11 @@ pub async fn register_shape_graph(
     let st = studio(&state);
     if let Some(existing) = st.get_shape_graph_by_iri(&body.graph_iri).map_err(e500)? {
         let orgs = org_ids(&state, &user.user_id);
-        if !user.is_admin() && !can_access_set(&existing, Some(&user.user_id), &orgs) {
+        let withheld =
+            crate::auth::acl::private_graph_withheld(&state.auth_db, Some(&user), &body.graph_iri)
+                .map_err(e500)?;
+        if !user.is_admin() && (!can_access_set(&existing, Some(&user.user_id), &orgs) || withheld)
+        {
             return Err((StatusCode::FORBIDDEN, "Access denied".into()));
         }
         return Ok((StatusCode::OK, Json(existing)));
@@ -1499,9 +1532,15 @@ fn authorize_pipeline_reads(
     pipeline: &ValidationPipeline,
 ) -> Result<(), ApiErr> {
     let reader = ReadScope::for_user(&state.auth_db, user).map_err(e500)?;
-    let unreadable =
-        super::read_scope::pipeline_unreadable(&state.auth_db, &studio(state), pipeline, &reader)
-            .map_err(e500)?;
+    let unreadable = super::read_scope::pipeline_unreadable(
+        &state.store,
+        &state.auth_db,
+        &studio(state),
+        &state.base_url,
+        pipeline,
+        &reader,
+    )
+    .map_err(e500)?;
     match unreadable {
         None => Ok(()),
         Some(what) => Err((
@@ -2002,12 +2041,18 @@ pub async fn form_manifest(
     {
         return Err((StatusCode::FORBIDDEN, "Access denied".into()));
     }
+    let withheld = crate::auth::acl::withheld_private_graphs(
+        &state.auth_db,
+        user.as_ref().map(|Extension(u)| u),
+    )
+    .map_err(e500)?;
     let manifest = super::manifest::build_manifest(
         &state.store,
         &state.auth_db,
         &state.base_url,
         &studio(&state),
         &dataset,
+        &withheld,
     );
     Ok(Json(manifest))
 }

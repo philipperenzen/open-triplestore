@@ -23,6 +23,41 @@ use crate::store::replication::{self, Replication, ReplicationConfig};
 use crate::store::telemetry::{QueryShape, Served, Telemetry};
 use opengraph::parallel::{self, ParClass};
 
+/// Force a prepared query's dataset to read `scope` and nothing else.
+///
+/// The default graph becomes the union of `scope` — the unnamed default graph
+/// when `scope` is empty — and the set of available named graphs becomes
+/// *empty*, so a `GRAPH <g>` (or `GRAPH ?g`) block inside the query matches
+/// nothing whatever `g` is. Whatever dataset the query declared is replaced,
+/// which is the point: a `FROM NAMED <someone-elses-graph>` written into a
+/// shape, a rule or any other stored query text must not widen what that query
+/// can read.
+///
+/// This is the read boundary for SPARQL that arrives as data. Queries a *user*
+/// sends to `/sparql` are scoped the other way round, by intersecting the
+/// dataset they ask for with the graphs they may read
+/// (`routes::scope_query_to_authorized`).
+pub(crate) fn confine_dataset(
+    dataset: &mut oxigraph::sparql::QueryDataset,
+    scope: &[String],
+) -> Result<(), StoreError> {
+    let default: Vec<GraphName> = if scope.is_empty() {
+        vec![GraphName::DefaultGraph]
+    } else {
+        scope
+            .iter()
+            .map(|g| {
+                NamedNode::new(g)
+                    .map(GraphName::NamedNode)
+                    .map_err(|e| StoreError::Parse(format!("scope graph <{g}>: {e}")))
+            })
+            .collect::<Result<_, _>>()?
+    };
+    dataset.set_default_graph(default);
+    dataset.set_available_named_graphs(Vec::new());
+    Ok(())
+}
+
 /// Outcome of one statement of a [`TripleStore::batch_update`] batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BatchStatement {
@@ -1283,6 +1318,65 @@ impl TripleStore {
             .for_query(parsed)
             .on_store(&self.store)
             .execute()?)
+    }
+
+    /// Evaluate a caller-supplied CONSTRUCT query read-only, confined to `scope`.
+    ///
+    /// This is the safe way to run SPARQL that came from *data* — a SHACL-AF
+    /// rule body, say, which any writer of a dataset can upload. Three things
+    /// make it safe, and all three matter:
+    ///
+    /// * it is a **query**, so the grammar itself rules out writing, dropping
+    ///   or naming a destination graph — a CONSTRUCT template cannot carry a
+    ///   `GRAPH` clause. The caller decides where the resulting triples go;
+    /// * the dataset is [confined](confine_dataset) to `scope`, *replacing*
+    ///   whatever `FROM` / `FROM NAMED` the query declared — unlike
+    ///   [`query_scoped`](Self::query_scoped), which only fills in a dataset
+    ///   the query left unset and leaves every named graph reachable;
+    /// * variables are bound as **terms** through `bindings`, never pasted
+    ///   into the text, so a focus node whose lexical form is hostile (a
+    ///   literal `sh:targetNode`) cannot close a clause and open another.
+    pub fn construct_confined(
+        &self,
+        query: &SpargebraQuery,
+        scope: &[String],
+        bindings: &[(&str, Term)],
+    ) -> Result<Vec<Triple>, StoreError> {
+        if !matches!(query, SpargebraQuery::Construct { .. }) {
+            return Err(StoreError::Parse(
+                "only a CONSTRUCT query can be evaluated confined".to_string(),
+            ));
+        }
+        let mut prepared = self.query_options().for_query(query.clone());
+        confine_dataset(prepared.dataset_mut(), scope)?;
+        let mut bound = prepared.on_store(&self.store);
+        for (name, term) in bindings {
+            let var = oxigraph::sparql::Variable::new(*name)
+                .map_err(|e| StoreError::Parse(e.to_string()))?;
+            bound = bound.substitute_variable(var, term.clone());
+        }
+        match bound.execute()? {
+            QueryResults::Graph(triples) => Ok(triples.collect::<Result<Vec<_>, _>>()?),
+            // A CONSTRUCT always evaluates to a graph; the other arms cannot
+            // happen, and an empty result is the honest answer if they did.
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// As [`Self::bulk_insert_quads`], with the graphs to re-count taken from
+    /// the quads themselves — including the unnamed default graph, which a
+    /// caller cannot name in `affected_graphs`.
+    pub fn insert_quads(&self, quads: Vec<Quad>) -> Result<(), StoreError> {
+        let mut graphs: Vec<Option<String>> = quads.iter().map(Self::graph_key_of).collect();
+        graphs.sort();
+        graphs.dedup();
+        let named: Vec<String> = graphs.iter().flatten().cloned().collect();
+        self.bulk_insert_quads(quads, &named)?;
+        if graphs.iter().any(Option::is_none) {
+            self.graph_index
+                .recount_specific_graphs(&self.store, &[None]);
+        }
+        Ok(())
     }
 
     fn scope_graphs(scope: &[String]) -> Result<Vec<oxigraph::model::NamedNode>, StoreError> {

@@ -1113,9 +1113,12 @@
     validationError = '';
     try {
       // The endpoint returns an envelope { report, run_id, ran_at } — unwrap it.
+      // Recording an official run requires write access; a reader gets a test
+      // (dry) run instead of a 403 — it validates what they may read but is not
+      // recorded and does not touch the dataset's official status.
       const res = await validateDataset(id, {
         shapes_graph: shapesGraphIri || null,
-      });
+      }, { test: !canWrite });
       const run = unwrapValidationRun(res);
       validationReport = run.report;
       validationRanAt = run.ranAt;

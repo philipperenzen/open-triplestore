@@ -1509,7 +1509,10 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Validate dataset (SHACL)",
-                "Run SHACL validation against the dataset's shapes graph.",
+                "Run SHACL validation against the dataset's shapes graph. The run reads only the \
+                 dataset graphs the caller may read (a private graph only for the dataset's \
+                 writers); a run that could not read all of them is answered as a test run \
+                 (`test: true`, `partial: true`) and not recorded.",
                 vec![],
                 vec![
                     ("200", "Validation report"),
@@ -1528,11 +1531,12 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Validation",
                     "Get shapes graph",
-                    "The dataset's SHACL shapes graph in Turtle.",
+                    "The dataset's SHACL shapes graph in Turtle. A shapes graph some dataset holds as private is served only to those who may read it (the `/sparql` rule: its dataset's writers, graph-ACL read grants, admins).",
                     vec![],
                     vec![
                         ("200", "Shapes graph (text/turtle)"),
                         ("401", "Authentication required"),
+                        ("404", "No shapes graph, or none the caller may read"),
                     ],
                     true,
                 ),
@@ -1592,11 +1596,19 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Run SHACL-AF inference",
-                "Materialise inferred triples using SHACL-AF rules.",
+                "Materialise inferred triples using SHACL-AF rules. Needs write access to the \
+                 dataset. The rules of a shapes graph some dataset holds as private run only for \
+                 who may read it (its dataset's writers, graph-ACL readers, admins); a run that \
+                 leaves one out answers `partial: true`.",
                 vec![],
                 vec![
-                    ("200", "Inference result with count"),
+                    ("200", "Inference result with count and `partial`"),
+                    (
+                        "400",
+                        "The dataset has no shapes graph, or none the caller may read",
+                    ),
                     ("401", "Authentication required"),
+                    ("403", "Write access to the dataset required"),
                 ],
                 true,
             ),
@@ -1655,7 +1667,9 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Latest validation",
-                "The most recent validation run for the dataset.",
+                "The most recent validation run for the dataset. Its full report goes to the \
+                 dataset's writers and to callers who may read every graph the run validated; \
+                 others get the summary with `report: null` and `report_withheld: true`.",
                 vec![],
                 vec![("200", "Latest run"), ("404", "No runs yet")],
                 false,
@@ -1670,7 +1684,9 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Get validation run",
-                "Details of one validation run.",
+                "Details of one validation run. Its full report goes to the dataset's writers \
+                 and to callers who may read every graph the run validated; others get the \
+                 summary with `report: null` and `report_withheld: true`.",
                 vec![],
                 vec![("200", "Run details"), ("404", "Not found")],
                 false,
@@ -1801,7 +1817,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             vec![], vec![("204", "Removed"), ("403", "Not allowed")], true)),
     ]);
     mount(paths, "/api/datasets/:id/effective-shapes", vec![
-        (M::Get, o("Validation", "A dataset's effective shapes", "The shape graphs that apply to the dataset: its own bindings and the bindings of every graph it contains. This set gates writes, runs in pipelines and drives the form manifest.",
+        (M::Get, o("Validation", "A dataset's effective shapes", "The shape graphs that apply to the dataset: its own bindings and the bindings of every graph it contains. This set gates writes, runs in pipelines and drives the form manifest. An entry of a private dataset graph is listed only to those who may read that graph.",
             vec![], vec![("200", "Array of shape graphs"), ("403", "Not readable"), ("404", "Dataset not found")], true)),
     ]);
     mount(paths, "/api/shacl/pipelines", vec![

@@ -398,3 +398,113 @@ async fn running_a_pipeline_or_opening_its_report_needs_read_access_to_its_scope
     assert_eq!(st, StatusCode::FORBIDDEN, "after the revoke: {text}");
     assert!(!text.contains(SECRET_VALUE), "{text}");
 }
+
+// ─── A run's persisted report ────────────────────────────────────────────────
+
+/// Every `sh:value` a caller can read over `/sparql`.
+async fn sparql_values(state: &AppState, token: &str) -> String {
+    let q = "SELECT ?v WHERE { GRAPH ?g { ?r <http://www.w3.org/ns/shacl#value> ?v } }";
+    let (st, body) = get(state, &format!("/sparql?query={}", url_encode(q)), token).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    body
+}
+
+/// A report persisted as RDF (`results_target`) and attached to a dataset is
+/// read by that dataset's readers, so it may be no more readable than the
+/// data it reports on: not when the scope takes in a private graph of the
+/// dataset, nor a graph outside it.
+#[tokio::test]
+async fn a_persisted_report_is_no_more_readable_than_what_it_reports_on() {
+    const PUB_DATA: &str = "http://pub.example/data";
+    const PRIV_DATA: &str = "http://pub.example/private-data";
+    let (state, admin) = admin_state();
+    let alice = make_user(&state, "alice");
+    let bob = make_user(&state, "bob");
+    make_dataset(&state, "pub-ds", "alice", Visibility::Public);
+    load(
+        &state.store,
+        PUB_DATA,
+        "<http://ex.org/p0> a <http://ex.org/Patient> ; <http://ex.org/ssn> \"public-ok\" .",
+    );
+    load(&state.store, PRIV_DATA, &secret_ttl());
+    for g in [PUB_DATA, PRIV_DATA] {
+        state.auth_db.add_dataset_graph("pub-ds", g).unwrap();
+    }
+    state
+        .auth_db
+        .set_dataset_graph_private("pub-ds", PRIV_DATA, true)
+        .unwrap();
+
+    // Alice may read her private graph; her pipeline over the dataset
+    // persists its report in place.
+    let sg = create_shape_graph(&state, &alice, "public", SSN_SHAPES).await;
+    let (st, text) = create_pipeline(
+        &state,
+        &alice,
+        json!({ "name": "whole-dataset", "targets": [{ "kind": "dataset", "id": "pub-ds" }],
+                "shape_graph_ids": [sg], "results_target": "in_place" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{text}");
+    let (st, text) = send(
+        &state,
+        Method::POST,
+        &format!("/api/shacl/pipelines/{}/run", id_of(&text)),
+        &alice,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert!(
+        sparql_values(&state, &alice).await.contains(SECRET_VALUE),
+        "the report was persisted, and alice reads it"
+    );
+    let seen = sparql_values(&state, &bob).await;
+    assert!(
+        !seen.contains(SECRET_VALUE),
+        "bob may not read the private graph, nor a report on it: {seen}"
+    );
+
+    // An admin's pipeline over the dataset's public graph: its report is the
+    // dataset's to share, and bob reads it.
+    load(
+        &state.store,
+        ADMIN_GRAPH,
+        "<http://ex.org/p9> a <http://ex.org/Patient> ; <http://ex.org/ssn> \"admin-only-9999\" .",
+    );
+    let sg = create_shape_graph(&state, &admin, "public", SSN_SHAPES).await;
+    let body = |graphs: Value| {
+        json!({ "name": "mixed", "graph_iris": graphs, "shape_graph_ids": [sg],
+                "results_target": "in_place" })
+    };
+    let (st, text) = create_pipeline(&state, &admin, body(json!([PUB_DATA]))).await;
+    assert_eq!(st, StatusCode::CREATED, "{text}");
+    let pid = id_of(&text);
+    let run = format!("/api/shacl/pipelines/{pid}/run");
+    let (st, text) = send(&state, Method::POST, &run, &admin, Value::Null).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert!(
+        sparql_values(&state, &bob).await.contains("public-ok"),
+        "a report on the dataset's public graph is attached to it"
+    );
+
+    // Widened to a graph of no dataset, the same accumulating report graph
+    // is no longer the dataset's to share: nothing of it reaches bob.
+    let (st, text) = send(
+        &state,
+        Method::PUT,
+        &format!("/api/shacl/pipelines/{pid}"),
+        &admin,
+        body(json!([PUB_DATA, ADMIN_GRAPH])),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let (st, text) = send(&state, Method::POST, &run, &admin, Value::Null).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert!(text.contains("admin-only-9999"), "the run saw it: {text}");
+    let seen = sparql_values(&state, &bob).await;
+    assert!(
+        !seen.contains("admin-only-9999"),
+        "bob may not read the admin's graph, nor a report on it: {seen}"
+    );
+}

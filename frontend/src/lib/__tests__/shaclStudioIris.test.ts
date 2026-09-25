@@ -90,7 +90,7 @@ beforeEach(() => {
     target_classes: [SH_NODE_SHAPE, EX_NODE_SHAPE],
   });
   listBindingsForShapeGraph.mockResolvedValue({ targets: [DATASET_IRI, GRAPH_IRI] });
-  listDatasets.mockResolvedValue([{ id: 'ds-7f3a1c', name: 'Waalbrug Bridges' }]);
+  listDatasets.mockResolvedValue([{ id: 'ds-7f3a1c', name: 'Riverside Bridges' }]);
   listShapeGraphs.mockResolvedValue([]);
   listOrganisations.mockResolvedValue([]);
   listPipelines.mockResolvedValue([]);
@@ -136,8 +136,8 @@ describe('ShapeGraphEditor impact chips', () => {
     await waitFor(() => {
       const links = [...container.querySelectorAll('.impact-link')];
       expect(links.map((n) => n.textContent?.trim())).toEqual([
-        'Waalbrug Bridges',
-        'Waalbrug Bridges / instances',
+        'Riverside Bridges',
+        'Riverside Bridges / instances',
       ]);
     });
   });
@@ -176,10 +176,10 @@ describe('ShapeGraphEditor impact chips', () => {
       expect(container.querySelector('.impact-link')?.textContent?.trim()).toBe('ds-7f3a1c');
     });
 
-    releaseDatasets([{ id: 'ds-7f3a1c', name: 'Waalbrug Bridges' }]);
+    releaseDatasets([{ id: 'ds-7f3a1c', name: 'Riverside Bridges' }]);
 
     await waitFor(() => {
-      expect(container.querySelector('.impact-link')?.textContent?.trim()).toBe('Waalbrug Bridges');
+      expect(container.querySelector('.impact-link')?.textContent?.trim()).toBe('Riverside Bridges');
     });
   });
 });
@@ -195,7 +195,7 @@ describe('PipelinesList scope tooltip', () => {
     const { container } = render(PipelinesList);
 
     await waitFor(() => {
-      expect(tooltip(container)).toContain('Waalbrug Bridges');
+      expect(tooltip(container)).toContain('Riverside Bridges');
       expect(tooltip(container)).toContain('SHACL core meta-shapes');
     });
     expect(tooltip(container)).not.toContain('ds-7f3a1c');
