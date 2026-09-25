@@ -16,7 +16,9 @@
 //!   a write gate's refusal, a stored run (the dataset's writers included,
 //!   and a graph made private after the run too), the report graph, and a
 //!   pipeline run over a dataset the graph is bound to;
-//! * the model profile, which profiles every shapes graph bound to a model.
+//! * the model profile, which profiles every shapes graph bound to a model;
+//! * inference, which writes what a shapes graph's rules derive into the
+//!   dataset it runs over.
 
 mod common;
 
@@ -28,6 +30,7 @@ use open_triplestore::data_models::models::{DataModelVersion, VersionStatus};
 use open_triplestore::data_models::registry as dmr;
 use open_triplestore::server::AppState;
 use open_triplestore::store::TripleStore;
+use oxigraph::sparql::QueryResults;
 use serde_json::{json, Value};
 use tower::ServiceExt as _;
 
@@ -764,4 +767,91 @@ async fn a_pipeline_is_not_shaped_by_a_private_graph_bound_to_its_target() {
     )
     .await;
     assert_eq!(st, StatusCode::CREATED, "alice may read it all: {text}");
+}
+
+// ─── Inference ───────────────────────────────────────────────────────────────
+
+/// A SHACL-AF rule of the private shapes graph: every `ex:Thing` is given the
+/// secret code, so what it derives carries the graph's constants.
+const PRIVATE_RULE: &str = "@prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+    @prefix ex: <http://ex.org/> .\n\
+    ex:SecretShape sh:rule [ a sh:TripleRule ; sh:subject sh:this ;\n\
+      sh:predicate ex:secretCode ; sh:object \"SECRET-RULE-7\" ] .\n";
+
+/// A shapes-role graph of `alice-pub`'s own, which its writers read.
+const OWN_SHAPES: &str = "http://alice.example/shapes";
+const OWN_RULE: &str = "@prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+    @prefix ex: <http://ex.org/> .\n\
+    ex:OwnShape a sh:NodeShape ; sh:targetClass ex:Thing ;\n\
+      sh:rule [ a sh:TripleRule ; sh:subject sh:this ;\n\
+                sh:predicate ex:checked ; sh:object true ] .\n";
+
+/// Whether the store holds a triple with `predicate`, in any graph.
+fn derived(state: &AppState, predicate: &str) -> bool {
+    let q = format!(
+        "ASK {{ {{ ?s <{predicate}> ?o }} UNION {{ GRAPH ?g {{ ?s <{predicate}> ?o }} }} }}"
+    );
+    matches!(state.store.query(&q), Ok(QueryResults::Boolean(true)))
+}
+
+async fn infer_alice_pub(state: &AppState, token: &str) -> (StatusCode, String) {
+    send(
+        state,
+        Method::POST,
+        "/api/datasets/alice-pub/infer",
+        Some(token),
+        Value::Null,
+    )
+    .await
+}
+
+/// Inference runs a dataset's rules over its data and writes what they derive
+/// into the dataset, where its writers and readers read the rules' constants
+/// and structure back. A private shapes graph linked into `alice-pub` is no
+/// rule of a run by one of its writers who may not read that graph: with no
+/// other shapes graph the run is refused, and with one it runs that one and
+/// says it left some out (`partial`). Alice reads it, so her run applies it.
+#[tokio::test]
+async fn a_private_shapes_graph_linked_by_a_writer_infers_only_for_its_readers() {
+    let (state, _admin, alice, _bob) = fixture();
+    let carol = make_user(&state, "carol");
+    load(&state.store, SHAPES, PRIVATE_RULE);
+    alice_pub(&state);
+    make_writer(&state, "alice-pub", "carol");
+    link_shapes_into_alice_pub(&state, &alice).await;
+    let secret = "http://ex.org/secretCode";
+
+    let (st, text) = infer_alice_pub(&state, &carol).await;
+    assert!(
+        !derived(&state, secret),
+        "carol's run applied the private rule"
+    );
+    assert!(!leaks(&text), "{text}");
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{text}");
+
+    load(&state.store, OWN_SHAPES, OWN_RULE);
+    state
+        .auth_db
+        .add_dataset_graph("alice-pub", OWN_SHAPES)
+        .unwrap();
+    state
+        .auth_db
+        .set_dataset_graph_role("alice-pub", OWN_SHAPES, Some(GraphKind::Shapes))
+        .unwrap();
+    state.auth_db.invalidate_accessible_graphs_cache();
+    let (st, text) = infer_alice_pub(&state, &carol).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let j: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(j["partial"], json!(true), "{text}");
+    assert!(derived(&state, "http://ex.org/checked"), "her own rule ran");
+    assert!(
+        !derived(&state, secret),
+        "carol's run applied the private rule"
+    );
+
+    let (st, text) = infer_alice_pub(&state, &alice).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let j: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(j["partial"], json!(false), "{text}");
+    assert!(derived(&state, secret), "alice's run applies it");
 }

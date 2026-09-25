@@ -2188,6 +2188,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     private when it holds the graph and cleared when it does not. A data
     graph made private after a run used to leave that run's report graph
     readable to the dataset's viewers.
+- **Inference ran a private shapes graph's rules for a writer who may not
+  read it.** `POST /api/datasets/{id}/infer` runs the SHACL-AF rules of every
+  shapes graph of the dataset and writes what they derive into the dataset,
+  where its writers and readers read the rules' constants and structure back.
+  A writer of two datasets may link one's private shapes graph into the other,
+  whose other writers need not be allowed to read it, and they could run its
+  rules. Now a run leaves out a private shapes graph the caller may not read,
+  by the rule validation applies. It answers 400 when no shapes graph is left,
+  and says `partial: true` when it left one out.
 - **A SQL-source dry run was shaped by any graph its caller named.**
   `POST /api/sources/{id}/dry-run` validates a sample of a mapping and returns
   the report: the shapes' IRIs, paths and messages. Any user may mint the

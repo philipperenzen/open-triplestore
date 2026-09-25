@@ -1596,11 +1596,19 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Run SHACL-AF inference",
-                "Materialise inferred triples using SHACL-AF rules.",
+                "Materialise inferred triples using SHACL-AF rules. Needs write access to the \
+                 dataset. The rules of a shapes graph some dataset holds as private run only for \
+                 who may read it (its dataset's writers, graph-ACL readers, admins); a run that \
+                 leaves one out answers `partial: true`.",
                 vec![],
                 vec![
-                    ("200", "Inference result with count"),
+                    ("200", "Inference result with count and `partial`"),
+                    (
+                        "400",
+                        "The dataset has no shapes graph, or none the caller may read",
+                    ),
                     ("401", "Authentication required"),
+                    ("403", "Write access to the dataset required"),
                 ],
                 true,
             ),

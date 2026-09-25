@@ -415,8 +415,15 @@ Run SHACL Advanced Features rules to materialize inferred triples:
 ```bash
 curl -X POST http://localhost:7878/api/datasets/<dataset_id>/infer \
      -H 'Authorization: Bearer <token>'
-# → {"inferred_triples": 42}
+# → {"inferred_triples": 42, "partial": false}
 ```
+
+It needs write access to the dataset and runs the rules of the same shapes
+graphs validation uses (the configured shapes graph, SHACL Studio bindings and
+`shapes`-role graphs), less those the caller may not read: a graph some dataset
+holds as private (another dataset's, linked or bound here) runs only for that
+dataset's writers, graph-ACL readers and admins. `partial: true` says a shapes
+graph was left out; with none left the call answers 400.
 
 Supports `sh:SPARQLRule` (`sh:construct`) and `sh:TripleRule` (`sh:subject` /
 `sh:predicate` / `sh:object`, with `sh:this` standing for the focus node; a

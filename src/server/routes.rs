@@ -8792,6 +8792,11 @@ pub async fn put_shapes(
 }
 
 /// POST /api/datasets/:dataset_id/infer — run SHACL rules to materialize inferred triples
+///
+/// Runs the rules of the dataset's shapes graphs (resolved as for
+/// `validate_dataset`) that the caller may read: the rules of a graph some
+/// dataset holds as private run only for who may read it. `partial: true`
+/// says a shapes graph was left out; 400 when none is left.
 pub async fn infer_dataset(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -8820,10 +8825,28 @@ pub async fn infer_dataset(
 
     // Same shapes resolution as validate_dataset: configured field, Studio
     // bindings, and shapes-role graphs (union, deduped).
-    let shapes_graphs = resolve_shapes_graphs(dataset_shapes_sources(&state, &dataset));
-    if shapes_graphs.is_empty() {
+    let all = resolve_shapes_graphs(dataset_shapes_sources(&state, &dataset));
+    if all.is_empty() {
         return Err((StatusCode::BAD_REQUEST, NO_SHAPES_GRAPH_MSG.to_string()));
     }
+    // What the rules derive is written into the dataset, where its writers
+    // and readers read their constants and structure back. So a graph some
+    // dataset holds as private, linked or bound here by one of its writers,
+    // is no rule of a run by who may not read it (admins read every graph).
+    let withheld = crate::auth::acl::withheld_private_graphs(&state.auth_db, Some(&current_user))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let shapes_graphs: Vec<String> = all
+        .iter()
+        .filter(|g| !withheld.contains(*g))
+        .cloned()
+        .collect();
+    if shapes_graphs.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            NO_READABLE_SHAPES_GRAPH_MSG.to_string(),
+        ));
+    }
+    let partial = shapes_graphs.len() < all.len();
 
     let data_graphs: Vec<String> = state
         .auth_db
@@ -8838,7 +8861,10 @@ pub async fn infer_dataset(
     // tenant's data is outside it, but so is anything this dataset owns, so
     // there is nothing to gain and a boundary to lose.
     if data_graphs.is_empty() {
-        return Ok(Json(serde_json::json!({ "inferred_triples": 0 })));
+        return Ok(Json(serde_json::json!({
+            "inferred_triples": 0,
+            "partial": partial,
+        })));
     }
 
     // Where the derived triples go. One data graph: into it, in place, as
@@ -8898,6 +8924,7 @@ pub async fn infer_dataset(
 
     Ok(Json(serde_json::json!({
         "inferred_triples": count,
+        "partial": partial,
     })))
 }
 
