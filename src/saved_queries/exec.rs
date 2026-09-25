@@ -112,32 +112,64 @@ fn caller_can_write_dataset(state: &AppState, dataset_id: &str, user_id: Option<
         .unwrap_or(false)
 }
 
-/// Drop graphs flagged `private` for callers who cannot write the dataset, so a
-/// viewer (or anonymous user on a public dataset API service) cannot read a
-/// sub-graph the owner marked private. Mirrors the dataset-service filter in
-/// `routes.rs` (`list_dataset_graph_entries` + the `private` flag). Writers and
-/// admins keep full visibility.
-fn filter_private_for_reader(
-    state: &AppState,
-    dataset_id: &str,
-    user_id: Option<&str>,
-    graphs: HashSet<String>,
-) -> HashSet<String> {
-    if caller_can_write_dataset(state, dataset_id, user_id) {
-        return graphs;
-    }
-    let private: HashSet<String> = state
+/// The live graphs flagged `private` for `dataset_id`. Fails closed: a lookup
+/// error propagates rather than defaulting to "nothing private" (the old
+/// `unwrap_or_default` failed open, so a DB blip served every private graph).
+fn private_live_graphs(state: &AppState, dataset_id: &str) -> Result<HashSet<String>, AppError> {
+    Ok(state
         .auth_db
         .list_dataset_graph_entries(dataset_id)
-        .unwrap_or_default()
+        .map_err(|e| AppError::Internal(e.to_string()))?
         .into_iter()
         .filter(|e| e.private)
         .map(|e| e.graph_iri)
-        .collect();
-    graphs
-        .into_iter()
-        .filter(|g| !private.contains(g))
-        .collect()
+        .collect())
+}
+
+/// The **live** graphs of `dataset_id` readable by a caller: all of them for a
+/// writer (`can_write`), only the non-private ones otherwise. Mirrors the
+/// dataset-service filter in `routes.rs`, and is shared by the dataset live-read
+/// path and the organisation/group union.
+fn readable_live_graphs(
+    state: &AppState,
+    dataset_id: &str,
+    can_write: bool,
+) -> Result<HashSet<String>, AppError> {
+    let all = live_graphs(state, dataset_id)?;
+    if can_write {
+        return Ok(all);
+    }
+    let private = private_live_graphs(state, dataset_id)?;
+    Ok(all.into_iter().filter(|g| !private.contains(g)).collect())
+}
+
+/// The **snapshot** graphs of `ver` readable by a caller. A snapshot copies every
+/// graph the dataset held at capture time — private ones included — into
+/// version-scoped IRIs that never appear in `list_dataset_graph_entries`, so the
+/// live private filter is a no-op on them. This maps each snapshot back to its
+/// live source graph and drops the ones whose source is private, for a non-writer.
+/// Writers see all. A dataset with no private graph is returned unchanged, so the
+/// common case (and a legacy version with an empty `source_map`) is untouched.
+/// Fails closed: a lookup error propagates.
+fn readable_snapshot_graphs(
+    state: &AppState,
+    dataset_id: &str,
+    can_write: bool,
+    ver: &crate::dataset_versions::models::DatasetVersion,
+) -> Result<HashSet<String>, AppError> {
+    if can_write {
+        return Ok(ver.snapshot_graphs.iter().cloned().collect());
+    }
+    let private = private_live_graphs(state, dataset_id)?;
+    if private.is_empty() {
+        return Ok(ver.snapshot_graphs.iter().cloned().collect());
+    }
+    Ok(ver
+        .source_map
+        .iter()
+        .filter(|m| !private.contains(&m.source_graph))
+        .map(|m| m.snapshot_graph.clone())
+        .collect())
 }
 
 fn resolve_dataset_scope(
@@ -149,25 +181,32 @@ fn resolve_dataset_scope(
     req: &VersionRequest,
 ) -> Result<(HashSet<String>, Option<String>, bool), AppError> {
     let base = state.base_url.as_str();
-    let (graphs, version_label, is_live) = match req {
-        VersionRequest::Latest => (live_graphs(state, dataset_id)?, None, true),
+    // Private-graph visibility follows write access, as on the dataset-service
+    // path. Computed once here and threaded into the version-aware filters below,
+    // which subtract private graphs for a non-writer — a snapshot can still hold a
+    // graph the owner has since (or always) marked private, mapped through the
+    // version's source graph.
+    let can_write = caller_can_write_dataset(state, dataset_id, user_id);
+    match req {
+        VersionRequest::Latest => Ok((
+            readable_live_graphs(state, dataset_id, can_write)?,
+            None,
+            true,
+        )),
         VersionRequest::Pinned(v) => {
             let ver = registry::get_version(&state.store, base, dataset_id, v)
                 .ok_or_else(|| AppError::NotFound(format!("dataset version '{v}' not found")))?;
-            (
-                ver.snapshot_graphs.into_iter().collect(),
-                Some(ver.version),
+            let label = ver.version.clone();
+            Ok((
+                readable_snapshot_graphs(state, dataset_id, can_write, &ver)?,
+                Some(label),
                 false,
-            )
+            ))
         }
-        VersionRequest::Default => resolve_default_scope(state, sq_store, query_id, dataset_id)?,
-    };
-
-    // Subtract private graphs for non-writers, regardless of whether the graphs
-    // came from live data or a frozen snapshot — a snapshot can still contain a
-    // graph the owner has since (or always) marked private.
-    let graphs = filter_private_for_reader(state, dataset_id, user_id, graphs);
-    Ok((graphs, version_label, is_live))
+        VersionRequest::Default => {
+            resolve_default_scope(state, sq_store, query_id, dataset_id, can_write)
+        }
+    }
 }
 
 /// Resolve the graph set for a `Default` version request: the newest version with
@@ -178,6 +217,7 @@ fn resolve_default_scope(
     sq_store: &SavedQueryStore,
     query_id: &str,
     dataset_id: &str,
+    can_write: bool,
 ) -> Result<(HashSet<String>, Option<String>, bool), AppError> {
     let base = state.base_url.as_str();
     let versions = registry::list_versions(&state.store, base, dataset_id);
@@ -189,7 +229,7 @@ fn resolve_default_scope(
         {
             if t.status == "ok" {
                 return Ok((
-                    v.snapshot_graphs.iter().cloned().collect(),
+                    readable_snapshot_graphs(state, dataset_id, can_write, v)?,
                     Some(v.version.clone()),
                     false,
                 ));
@@ -201,7 +241,7 @@ fn resolve_default_scope(
     if let Some(pl) = published {
         if let Some(ver) = registry::get_version(&state.store, base, dataset_id, &pl) {
             return Ok((
-                ver.snapshot_graphs.into_iter().collect(),
+                readable_snapshot_graphs(state, dataset_id, can_write, &ver)?,
                 Some(ver.version),
                 false,
             ));
@@ -210,13 +250,17 @@ fn resolve_default_scope(
     // Else the newest version that exists.
     if let Some(v) = versions.first() {
         return Ok((
-            v.snapshot_graphs.iter().cloned().collect(),
+            readable_snapshot_graphs(state, dataset_id, can_write, v)?,
             Some(v.version.clone()),
             false,
         ));
     }
     // Else live data (no versions captured yet).
-    Ok((live_graphs(state, dataset_id)?, None, true))
+    Ok((
+        readable_live_graphs(state, dataset_id, can_write)?,
+        None,
+        true,
+    ))
 }
 
 /// Graphs an organisation/group query may read: the union of the live graphs of
@@ -246,11 +290,18 @@ fn resolve_owner_union(
             .can_access_dataset(user_id, &ds)
             .map_err(|e| AppError::Internal(e.to_string()))?
         {
-            for g in state
-                .auth_db
-                .list_dataset_graphs(&ds.id)
-                .map_err(|e| AppError::Internal(e.to_string()))?
-            {
+            // Include a private graph only for a caller who can write this
+            // dataset. Without this, an org/group service exposed every private
+            // graph of every dataset the scope owns to any member — or anyone,
+            // for a public org service.
+            let can_write = match user_id {
+                Some(uid) => state
+                    .auth_db
+                    .can_write_dataset(uid, &ds)
+                    .map_err(|e| AppError::Internal(e.to_string()))?,
+                None => false,
+            };
+            for g in readable_live_graphs(state, &ds.id, can_write)? {
                 graphs.insert(g);
             }
         }

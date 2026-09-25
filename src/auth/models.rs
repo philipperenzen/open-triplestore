@@ -789,6 +789,8 @@ pub struct SparqlService {
     pub slug: String,
     pub sparql_endpoint: String,
     pub description: Option<String>,
+    /// Whether the service's SPARQL endpoint answers. An inactive service
+    /// answers 404 "Service not found" to every caller, writers included.
     pub is_active: bool,
     pub created_at: String,
 }

@@ -608,7 +608,13 @@ pub async fn ldp_post(
 
             // Parse with the new member's IRI as base so an idiomatic relative
             // `<>` subject resolves to it instead of being rejected as schemeless.
-            if let Err(e) = state.store.load_str_with_base(text, fmt, &member_iri, None) {
+            // Triples-only: an LDP RDF Source is a single graph, so a body that
+            // names its own graph (e.g. a JSON-LD `@graph` with an `@id`) must not
+            // write into another named graph past the graph ACL.
+            if let Err(e) = state
+                .store
+                .load_str_triples_only(text, fmt, Some(&member_iri))
+            {
                 return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
             }
         } else {

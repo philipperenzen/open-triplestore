@@ -1560,9 +1560,9 @@ fn authorize_pipeline_reads(
 /// included. So setting a gate needs what a validation-layer binding, which
 /// gates writes the same way, needs ([`resolve_target_for_write`]): write
 /// access to every dataset and graph the gate covers
-/// ([`super::gate::gated_scope`]). Admins pass. Read access, which is enough
-/// to validate a public dataset, must not be enough to block its editors'
-/// writes with shapes that reject everything.
+/// ([`super::gate::gated_scope`]). Admins pass. Whoever may name a dataset in
+/// a pipeline — every signed-in user, for a public one — must not be able to
+/// block its editors' writes with shapes that reject everything.
 ///
 /// A dataset that does not exist is refused (404), as a binding to one is:
 /// a later dataset with that id would otherwise inherit the gate. The gate
