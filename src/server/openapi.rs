@@ -4642,9 +4642,9 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "LLM",
                 "LLM health",
-                "Reachability of the LLM gateway.",
+                "Reachability of the LLM gateway, whether LLM_GATEWAY_URL is configured, and per AI feature (chat, sparql, shacl) the configured model and whether the gateway's /v1/models list serves it (listed: true/false, or null when there is no list to judge by). Makes no request beyond the gateway probe.",
                 vec![],
-                vec![("200", "{ reachable, gateway }")],
+                vec![("200", "{ gateway, configured, reachable, detail, chat_model, context_tokens, services: [{ id, model, listed }], … }")],
                 false,
             ),
         )],

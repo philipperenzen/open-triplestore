@@ -14,6 +14,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **LLM services in Service health.** The sidebar's Service health popover now
+  lists the LLM gateway and each AI feature — Spark chat, NL→SPARQL and the
+  SHACL assistant — with the model it sends and a note when the gateway's
+  `/v1/models` list does not serve that model, so a mistyped model name shows
+  up before the first failed completion. `GET /api/llm/health` gains
+  `configured` (is `LLM_GATEWAY_URL` set) and `services` (`id`, `model`,
+  `listed`: `true`/`false`, `null` when there is no list to judge by), read
+  from the probe it already makes. The popover fetches it only when opened or
+  refreshed and shows an absent or unreachable LLM in yellow, since the AI
+  features are optional; the health badge and `GET /health` never depend on
+  the gateway.
 - **An admin page for prefix overrides** (`/admin/prefixes`). Lists what this
   deployment has decided its prefixes mean, adds one, repoints one and removes
   one. While a label is being typed it resolves that label live and says what
@@ -741,6 +752,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **A blank `LLM_GATEWAY_URL` falls back to the built-in default.** It was used
+  as given, so `LLM_GATEWAY_URL=` (as an `--env-file` line with no value
+  produces) sent every probe and completion to a relative URL that could never
+  answer, instead of to `http://127.0.0.1:8000`; a value with surrounding
+  whitespace was not trimmed either. It is now read like the other `LLM_*`
+  settings: trimmed, and unset or blank means the default.
 - **Deactivating a SPARQL service did not stop it answering.** `PUT
   /api/datasets/:dataset_id/services/:service_id` with `"is_active": false`
   stored the flag, and the dataset page greyed the service out and stopped
