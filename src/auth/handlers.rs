@@ -4372,6 +4372,24 @@ pub async fn patch_dataset_graph_role(
 
 // ─── SPARQL Service handlers ──────────────────────────────────────────────────
 
+/// The SPARQL service `service_id`, provided it belongs to `dataset_id`.
+///
+/// Every `/api/datasets/:dataset_id/services/:service_id` handler authorizes
+/// the caller against the dataset in the path, so a service of any other
+/// dataset must be as absent as one that does not exist (404). Otherwise a
+/// writer of one dataset could read, rename, delete or re-scope another
+/// dataset's service through their own.
+fn dataset_service(
+    db: &AuthDb,
+    dataset_id: &str,
+    service_id: &str,
+) -> Result<SparqlService, (StatusCode, String)> {
+    db.get_sparql_service(service_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .filter(|s| s.dataset_id == dataset_id)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Service not found".to_string()))
+}
+
 /// POST /api/datasets/:dataset_id/services
 pub async fn create_service(
     user_opt: Option<Extension<AuthenticatedUser>>,
@@ -4458,10 +4476,7 @@ pub async fn get_service(
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
     }
 
-    let service = db
-        .get_sparql_service(&service_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "Service not found".to_string()))?;
+    let service = dataset_service(&db, &dataset_id, &service_id)?;
 
     Ok(Json(service))
 }
@@ -4485,6 +4500,7 @@ pub async fn update_service(
     {
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
     }
+    dataset_service(&db, &dataset_id, &service_id)?;
 
     db.update_sparql_service(
         &service_id,
@@ -4494,10 +4510,7 @@ pub async fn update_service(
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let service = db
-        .get_sparql_service(&service_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "Service not found".to_string()))?;
+    let service = dataset_service(&db, &dataset_id, &service_id)?;
 
     Ok(Json(service))
 }
@@ -4520,6 +4533,7 @@ pub async fn delete_service(
     {
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
     }
+    dataset_service(&db, &dataset_id, &service_id)?;
 
     db.delete_sparql_service(&service_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -4528,9 +4542,19 @@ pub async fn delete_service(
 }
 
 /// POST /api/datasets/:dataset_id/services/:service_id/graphs
+///
+/// A service serves its graphs to everyone who may read the dataset, so a
+/// writer may add only a graph the dataset holds
+/// ([`dataset_graph::dataset_holds_graph`]): otherwise any writer could scope
+/// a service of their own dataset to another tenant's private graph or a
+/// `urn:system:` graph and read it through the service. An admin may name
+/// any graph, but the service serves it only while the dataset holds it
+/// (the query path drops the rest), so exposing a foreign graph still takes
+/// registering it to the dataset.
 pub async fn add_service_graph(
     user_opt: Option<Extension<AuthenticatedUser>>,
     State(db): State<Arc<AuthDb>>,
+    State(state): State<AppState>,
     Path((dataset_id, service_id)): Path<(String, String)>,
     Json(req): Json<GraphIriRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -4545,6 +4569,29 @@ pub async fn add_service_graph(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     {
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
+    }
+    dataset_service(&db, &dataset_id, &service_id)?;
+
+    if !current_user.is_admin()
+        && !dataset_graph::dataset_holds_graph(&db, &state.base_url, &dataset_id, &req.graph_iri)
+    {
+        state.audit.log_denied(
+            Some(current_user.user_id.clone()),
+            None,
+            "sparql_service",
+            &service_id,
+            "add_service_graph",
+            None,
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "Graph <{}> is not a graph of dataset '{dataset_id}'. A service may serve only \
+                 the dataset's own graphs: inside its namespace, its metadata, report and asset \
+                 graphs, and the graphs registered to it.",
+                req.graph_iri
+            ),
+        ));
     }
 
     db.add_service_graph(&service_id, &req.graph_iri)
@@ -4572,6 +4619,9 @@ pub async fn remove_service_graph(
     {
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
     }
+    // Removing narrows the service, so any graph may go, including one the
+    // dataset no longer holds; only the service must be this dataset's.
+    dataset_service(&db, &dataset_id, &service_id)?;
 
     db.remove_service_graph(&service_id, &req.graph_iri)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -4597,6 +4647,7 @@ pub async fn list_service_graphs(
     {
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
     }
+    dataset_service(&db, &dataset_id, &service_id)?;
 
     let graphs = db
         .list_service_graphs(&service_id)
