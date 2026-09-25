@@ -288,25 +288,25 @@ async fn a_report_on_public_graphs_is_the_datasets_to_share() {
         .remove_dataset_graph("pub-ds", PRIV_DATA)
         .unwrap();
 
-    // bob sees every graph: his official run is recorded.
-    let (st, j) = validate(&state, &bob, false, Value::Null).await;
+    // alice, the owner, records the official run (recording needs write
+    // access; a viewer's own run would be refused).
+    let (st, j) = validate(&state, &alice, false, Value::Null).await;
     assert_eq!(st, StatusCode::OK, "{j}");
     let run = j["run_id"].as_str().expect("official").to_string();
     assert!(j["test"].is_null() || j["test"] == json!(false), "{j}");
 
+    // bob, a viewer who sees every graph, reads the report graph and the
+    // stored run in full.
     let seen = sparql_values(&state, &bob).await;
     assert!(seen.contains(PUBLIC_VALUE), "{seen}");
-    let (st, text) = get(
-        &state,
-        &format!("/api/datasets/pub-ds/validation/runs/{run}"),
-        &bob,
-    )
-    .await;
-    assert_eq!(st, StatusCode::OK, "{text}");
-    assert!(text.contains(PUBLIC_VALUE), "full report: {text}");
-    let (st, text) = get(&state, "/api/datasets/pub-ds/validation/latest", &alice).await;
-    assert_eq!(st, StatusCode::OK, "{text}");
-    assert!(text.contains(PUBLIC_VALUE), "full report: {text}");
+    for uri in [
+        format!("/api/datasets/pub-ds/validation/runs/{run}"),
+        "/api/datasets/pub-ds/validation/latest".to_string(),
+    ] {
+        let (st, text) = get(&state, &uri, &bob).await;
+        assert_eq!(st, StatusCode::OK, "{uri}: {text}");
+        assert!(text.contains(PUBLIC_VALUE), "{uri}: full report: {text}");
+    }
 }
 
 /// A stored run's full report reaches a viewer only if they may read every
@@ -390,4 +390,96 @@ async fn a_stored_run_is_served_in_full_only_to_who_may_read_all_it_covered() {
     let (st, text) = get(&state, &uri, &alice).await;
     assert_eq!(st, StatusCode::OK, "{text}");
     assert!(text.contains(SECRET_VALUE), "{text}");
+}
+
+/// Alice's FULLY-public dataset `open-ds`: a shapes graph and a public data
+/// graph, no private graph, so a viewer (bob) may read every graph of it and a
+/// run of theirs is complete — not partial. This isolates the write-authority
+/// rule from the read-scope rule the rest of this file exercises. Returns
+/// `(admin, alice, bob)`.
+fn public_only_fixture() -> (AppState, String, String, String) {
+    let (state, admin) = admin_state();
+    let alice = make_user(&state, "alice");
+    let bob = make_user(&state, "bob");
+    state
+        .auth_db
+        .create_dataset(
+            "open-ds",
+            "open-ds",
+            None,
+            OwnerType::User,
+            "alice",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    load(&state.store, SHAPES, SSN_SHAPES);
+    load(&state.store, PUB_DATA, &patient("p0", PUBLIC_VALUE));
+    for g in [SHAPES, PUB_DATA] {
+        state.auth_db.add_dataset_graph("open-ds", g).unwrap();
+    }
+    state
+        .auth_db
+        .set_dataset_graph_role("open-ds", SHAPES, Some(GraphKind::Shapes))
+        .unwrap();
+    (state, admin, alice, bob)
+}
+
+async fn open_history_ids(state: &AppState, token: &str) -> Vec<String> {
+    let (st, text) = get(state, "/api/datasets/open-ds/validation/history", token).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    serde_json::from_str::<Value>(&text)
+        .unwrap()
+        .as_array()
+        .expect("an array of run summaries")
+        .iter()
+        .filter_map(|r| r["id"].as_str().map(String::from))
+        .collect()
+}
+
+/// Recording an official run writes the dataset's stored status and history. A
+/// reader who may see the WHOLE dataset (so their run is complete, not partial)
+/// still may not record one — they could otherwise forge a verdict or evict the
+/// owner's run. They may run a *test* validation, which records nothing. The
+/// owner and an admin record officially.
+#[tokio::test]
+async fn a_reader_cannot_record_forge_or_evict_an_official_run() {
+    let (state, admin, alice, bob) = public_only_fixture();
+    let validate_uri = "/api/datasets/open-ds/validate";
+
+    // The owner records the official run.
+    let (st, text) = send(&state, Method::POST, validate_uri, &alice, Value::Null).await;
+    assert_eq!(st, StatusCode::OK, "owner records: {text}");
+    let alice_run = serde_json::from_str::<Value>(&text).unwrap()["run_id"]
+        .as_str()
+        .expect("an official run id")
+        .to_string();
+
+    // bob may read every graph of open-ds, but recording is a write he lacks:
+    // 403, so he can neither forge a verdict nor evict alice's run.
+    let (st, body) = send(&state, Method::POST, validate_uri, &bob, Value::Null).await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "a reader must not record: {body}"
+    );
+
+    // A test run is a read — bob may run it; it records nothing.
+    let test_uri = format!("{validate_uri}?test=true");
+    let (st, text) = send(&state, Method::POST, &test_uri, &bob, Value::Null).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let j: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(j["test"], json!(true), "{j}");
+    assert!(j["run_id"].is_null(), "a test run records nothing: {j}");
+
+    // An admin records too (a writer everywhere, though not the dataset owner).
+    let (st, text) = send(&state, Method::POST, validate_uri, &admin, Value::Null).await;
+    assert_eq!(st, StatusCode::OK, "admin records: {text}");
+
+    // Alice's official run survived every one of bob's attempts.
+    let ids = open_history_ids(&state, &alice).await;
+    assert!(
+        ids.contains(&alice_run),
+        "the owner's official run must still be in history: {ids:?}"
+    );
 }
