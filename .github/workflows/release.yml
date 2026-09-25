@@ -46,7 +46,16 @@ jobs:
             echo "::error::No CHANGELOG.md section found for [$ver]. Add a '## [$ver]' entry before tagging."
             exit 1
           fi
-          echo "----- release_notes.md -----"
+          # A GitHub Release body holds at most 125,000 characters, and this
+          # job must not fail on it: the image job below needs it. A longer
+          # section becomes a digest — the intro, each entry's bold title under
+          # its group, and a link to the full section in CHANGELOG.md at this
+          # tag. The annotated tag message keeps the section whole.
+          if [ "$(wc -m < release_notes.md)" -gt 120000 ]; then
+            python3 .github/scripts/release_notes_digest.py \
+              "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY" release_notes.md
+          fi
+          echo "----- release_notes.md ($(wc -m < release_notes.md) characters) -----"
           cat release_notes.md
 
       # Non-fatal nudge: a release ought to call out security-relevant and

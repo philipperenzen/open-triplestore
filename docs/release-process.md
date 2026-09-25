@@ -160,7 +160,11 @@ and are mirrored in [`.gitlab-ci.yml`](../.gitlab-ci.yml). Pushing a `v*` tag fi
   `ghcr.io/philipperenzen/open-triplestore:{X.Y.Z, X.Y, latest}`. A tag with a hyphen
   is published as a pre-release and does not get the `latest` tag. The job also emits a
   non-fatal warning if the release notes lack a `### Security` or `### Deprecated`
-  section.
+  section. A GitHub Release body holds at most 125,000 characters; a longer section
+  is published as a digest ([`.github/scripts/release_notes_digest.py`](../.github/scripts/release_notes_digest.py)):
+  the intro, one line per entry, `### Security` and `### Deprecated` in full, and a
+  link to the whole section in `CHANGELOG.md`. The tag message always carries the
+  section whole.
 - **`perf-baseline.yml`** — re-anchors the authoritative performance baseline
   ([`benches/perf_baseline.json`](../benches/perf_baseline.json)) by running the full
   Criterion suite and opening a `chore/perf-baseline-refresh` PR back to `develop`. The
