@@ -1165,6 +1165,62 @@ fn authorize_pipeline_targets(
     Ok(())
 }
 
+/// Authorize a pipeline's *write gate* against `user`, when it has one.
+///
+/// A pipeline with `gate_writes` refuses (422) every write its shapes reject
+/// to the graphs it covers, whoever makes it — the graphs' owners and editors
+/// included. So setting a gate needs what a validation-layer binding, which
+/// gates writes the same way, needs ([`resolve_target_for_write`]): write
+/// access to every dataset and graph the gate covers
+/// ([`super::gate::gated_scope`]). Admins pass. Whoever may name a dataset in
+/// a pipeline — every signed-in user, for a public one — must not be able to
+/// block its editors' writes with shapes that reject everything.
+///
+/// A dataset that does not exist is refused (404), as a binding to one is:
+/// a later dataset with that id would otherwise inherit the gate. The gate
+/// checks its creator's authority again at every write
+/// (`gate::creator_may_gate`), so a grant revoked since, or a pipeline stored
+/// before this check, gates nothing.
+fn authorize_pipeline_gate(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    pipeline: &ValidationPipeline,
+) -> Result<(), ApiErr> {
+    const WHY: &str = "a pipeline that gates writes refuses them for everyone who writes \
+                       what it covers, so gating needs the right to write it";
+    if !pipeline.gate_writes {
+        return Ok(());
+    }
+    let scope = super::gate::gated_scope(pipeline);
+    for id in &scope.datasets {
+        let ds = state
+            .auth_db
+            .get_dataset(id)
+            .map_err(e500)?
+            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Dataset '{id}' not found")))?;
+        if !user.is_admin()
+            && !state
+                .auth_db
+                .can_write_dataset(&user.user_id, &ds)
+                .map_err(e500)?
+        {
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!("Write access denied for dataset '{id}': {WHY}"),
+            ));
+        }
+    }
+    for g in &scope.graphs {
+        if !crate::auth::acl::check_graph_permission(Some(user), g, "write", &state.auth_db) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!("Write access denied for graph <{g}>: {WHY}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub async fn create_pipeline(
     Extension(user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -1214,6 +1270,7 @@ pub async fn create_pipeline(
         updated_at: now,
     };
     authorize_pipeline_targets(&state, &user, &pipeline)?;
+    authorize_pipeline_gate(&state, &user, &pipeline)?;
     studio(&state).insert_pipeline(&pipeline).map_err(e500)?;
     Ok((StatusCode::CREATED, Json(pipeline)))
 }
@@ -1306,6 +1363,7 @@ pub async fn update_pipeline(
         ..existing
     };
     authorize_pipeline_targets(&state, &user, &updated)?;
+    authorize_pipeline_gate(&state, &user, &updated)?;
     studio(&state).update_pipeline(&updated).map_err(e500)?;
     Ok(Json(updated))
 }

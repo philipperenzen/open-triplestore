@@ -14,6 +14,61 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`geof:aggUnion`, the GeoSPARQL 1.1 spatial aggregate.** A real SPARQL
+  aggregate: `SELECT ?k (geof:aggUnion(?geom) AS ?u) … GROUP BY ?k` folds each
+  group's geometries into their union (GEOS unary union), one
+  `geo:wktLiteral` — with or without `GROUP BY`, in `HAVING`, in sub-selects
+  and in the `WHERE` of an update, over WKT, GML and GeoJSON alike. A group in
+  one CRS keeps it; a group mixing CRSs is unioned in CRS84. It follows
+  SPARQL's aggregate error rules (a value that is not a geometry makes the
+  group's union unbound, as a non-number does to `SUM`), the union of no
+  geometries is `GEOMETRYCOLLECTION EMPTY`, and the result does not depend on
+  the order the solutions arrive in. `geof:aggUnion(DISTINCT ?g)` does not
+  parse — spargebra takes no `DISTINCT` in a custom aggregate's call — and
+  would change nothing: a union absorbs duplicates. Every parse of a query
+  now goes through one parser that knows the aggregate (`opengraph::sparql_parser`, fed by a
+  registry the store fills when it opens): undeclared, `geof:aggUnion(?g)` read
+  as a plain function call — a syntax error under `GROUP BY`, and on the
+  accelerator's planners a different query, a row-local `BIND` that a
+  surrounding `COUNT` could have summed across the subject shards. The shards
+  and the columnar copy decline the aggregate; the full in-memory copy and the
+  engine evaluate it. The service description advertises it as
+  `sd:extensionAggregate`. It was a tracked gap.
+- **The GeoSPARQL 1.1 metric functions** — `geof:metricDistance`,
+  `metricLength`, `metricPerimeter`, `metricArea` and `metricBuffer` — measure in
+  metres (square metres) on the WGS84 ellipsoid whatever CRS the operand is
+  written in: it is reprojected to CRS84 first, and a CRS this build cannot
+  reproject gives an unbound result, not a number in unknown units. Distances,
+  lengths and areas are Karney's geodesic algorithms (through the `geo` crate
+  already in the tree — no new dependency), exact to nanometres and convergent
+  for nearly antipodal points; the nearest points of two geometries and a
+  buffer are found in an ellipsoidal azimuthal equidistant plane around them,
+  and a buffer is returned in its operand's CRS. The suite checks them against
+  published values: GeographicLib's JFK–LHR (5 551 759.400 m) and
+  Wellington–Salamanca (19 959 679.267 m), the equatorial degree and the
+  meridian arc. They were tracked gaps.
+- **`geo:geoJSONLiteral` geometries (GeoSPARQL 1.1).** A GeoJSON literal — an
+  RFC 7946 geometry object, `Point` through `GeometryCollection`, always CRS84
+  longitude/latitude — is a geometry wherever a WKT or GML literal is: every
+  `geof:` function takes it, binary functions harmonise it with a projected
+  operand, `geof:transform` reprojects it, and the spatial index and the map
+  viewer feed read `geo:asGeoJSON` next to `geo:asWKT`/`geo:asGML`. It is
+  translated to WKT on the way in, so it takes the same GEOS path; a malformed
+  one (bad JSON, a `Feature`, a short position, an unclosed ring) is not a
+  geometry, and functions over it are unbound rather than a panic. New
+  **`geof:asGeoJSON`** serialises any geometry as a `geo:geoJSONLiteral`,
+  reprojecting it to CRS84 first. Both were tracked gaps.
+- **LLM services in Service health.** The sidebar's Service health popover now
+  lists the LLM gateway and each AI feature — Spark chat, NL→SPARQL and the
+  SHACL assistant — with the model it sends and a note when the gateway's
+  `/v1/models` list does not serve that model, so a mistyped model name shows
+  up before the first failed completion. `GET /api/llm/health` gains
+  `configured` (is `LLM_GATEWAY_URL` set) and `services` (`id`, `model`,
+  `listed`: `true`/`false`, `null` when there is no list to judge by), read
+  from the probe it already makes. The popover fetches it only when opened or
+  refreshed and shows an absent or unreachable LLM in yellow, since the AI
+  features are optional; the health badge and `GET /health` never depend on
+  the gateway.
 - **An admin page for prefix overrides** (`/admin/prefixes`). Lists what this
   deployment has decided its prefixes mean, adds one, repoints one and removes
   one. While a label is being typed it resolves that label live and says what
@@ -516,6 +571,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   term IRIs and labels before the model can coin one.
 
 ### Changed
+- **The reference example is a fictional bridge.** The SHACL/GeoSPARQL
+  conformance oracle, the viewer-feed end-to-end test and the OGC GeoSPARQL
+  round-trip run on `tests/fixtures/example-bridge/`: a made-up arch bridge with
+  an English vocabulary (`https://example.org/def/`) and illustrative
+  coordinates, in place of a real structure. Every case keeps its assertion;
+  the test binaries are now `example_bridge_conformance` and
+  `example_bridge_viewer_e2e`. The layered-reference seed bundle, Spark's prompt
+  examples, the docs and the unit-test fixtures use fictional names as well.
+- **`geof:distance` and `geof:buffer` honour a metre unit on a geographic
+  CRS.** With `uom:metre` (or `kilometre`, `centimetre`, `millimetre`) on a CRS84
+  or EPSG:4326 operand, `geof:distance` returned the planar distance in
+  *degrees* and `geof:buffer` buffered by that many degrees — the unit was
+  ignored. Both are geodesic on the WGS84 ellipsoid now, the same as
+  `geof:metricDistance` / `geof:metricBuffer`: London–Paris with `uom:metre` is
+  343 923.120, not 3.63, and a `uom:metre` radius of 1000 is a kilometre, not a
+  thousand degrees. On a projected CRS (RD New, Web Mercator) both stay planar in
+  the CRS's own metres, as before, but `geof:buffer` now converts a kilometre
+  (centimetre, millimetre) radius, which it used to take as metres. An angular
+  unit on a geographic CRS keeps the planar degree distance, now converted for
+  `uom:radian` (it was returned in degrees); without a unit nothing changes.
+  **This changes results** for every query, shape or saved query that passes
+  `uom:metre` with CRS84 or EPSG:4326 geometry — `FILTER(geof:distance(?a, ?b,
+  uom:metre) < 25)` over lon/lat data used to compare degrees with 25 and so
+  held for almost everything, and now compares metres. The bundled "Distance
+  from a city" saved query, labelled metres, now returns metres.
 - **The Triple Browser sends its whole scope, remembers it, and offers the
   query behind the view.** A selection mixing datasets with an organisation
   sent only part of itself — and one dataset plus one organisation matched no
@@ -679,7 +759,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   served at `/api-docs/openapi.json` and the interactive UI is the frontend's
   own page — which also removes the duplicate `axum` 0.8 and `zip` 3 from the
   tree. TypeScript 7 remains held: typescript-eslint has no release that
-  supports it.
+  supports it. A fourth batch, in September, brings `argon2` 0.6 (on
+  `password-hash` 0.6 the hasher draws its own 16-byte salt; password hashes
+  stored under 0.5 still verify — pinned by a regression test on real
+  0.5-minted PHC strings — and new hashes keep the same
+  `$argon2id$v=19$m=19456,t=2,p=1$` form, so a rollback reads them too),
+  `vitest` 5 (no config or test changes needed), `oxigraph` 0.5.11 with its
+  `oxrdf` / `spargebra` / `spareval` / `sparopt` / `sparesults` / `oxttl`
+  siblings in lockstep, `aes-gcm` 0.11.1 (stored OAuth client-secret blobs
+  still decrypt, pinned by a known-answer test), `tower-http` 0.7.1, `flate2`
+  1.1.10, `lru` 0.18.4, `aws-sdk-s3` 1.142, `svelte` 5.57, `vite` 8.2.2, `n3`
+  2.6, `marked`, `devalue` past GHSA-9rgm-9g3h-6x36, `uuid`,
+  `aws-smithy-http-client`, `proj4`, `dompurify`, `@codemirror/search`,
+  `@codemirror/state`, `@typescript-eslint/parser`, and the SHA-pinned
+  `softprops/action-gh-release` 3.0.3. `oxiri` 0.3 is held: its `Iri` type
+  crosses the federation service-handler API, so it has to stay on the 0.2
+  line Oxigraph still uses.
 - **Lint.** eslint 10's new `no-useless-assignment` now runs at its recommended
   `error` severity for `.js`/`.ts`, and the nine genuine dead stores it found —
   five in `.js`/`.ts`, four in plain helper functions inside components — are
@@ -726,6 +821,34 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **`geof:getSRID` of a GML literal returned its opening tag as a CRS IRI**
+  (`<gml:Point srsName=…>` read as a `<crs>` prefix — an invalid IRI in the
+  results). It returns CRS84 now, the CRS the other functions already treat a
+  GML literal as being in (`srsName` is not read yet); a GeoJSON literal is
+  CRS84 by definition.
+- **A blank `LLM_GATEWAY_URL` falls back to the built-in default.** It was used
+  as given, so `LLM_GATEWAY_URL=` (as an `--env-file` line with no value
+  produces) sent every probe and completion to a relative URL that could never
+  answer, instead of to `http://127.0.0.1:8000`; a value with surrounding
+  whitespace was not trimmed either. It is now read like the other `LLM_*`
+  settings: trimmed, and unset or blank means the default.
+- **Deactivating a SPARQL service did not stop it answering.** `PUT
+  /api/datasets/:dataset_id/services/:service_id` with `"is_active": false`
+  stored the flag, and the dataset page greyed the service out and stopped
+  showing its endpoint URL, but the query route
+  (`/api/datasets/:dataset_id/services/:service_slug/sparql`) never looked at
+  it. A public dataset's service switched off by its owner kept answering
+  anyone who had the URL. An inactive service now answers `404 Service not
+  found`, the same body as a service that does not exist, on `GET` and both
+  `POST` forms, with or without `?version=`. The same answer goes to every
+  caller: the dataset's owner, its writers and a super admin get it too,
+  because "inactive" is a property of the endpoint, not of who is asking. They
+  can reactivate the service or query the dataset through `/sparql`. This did
+  not widen what anyone could read: the route still required dataset access
+  and still filtered private graphs, so the flag was a switch that did not
+  work, not a read boundary that leaked. The SPARQL editor no longer offers
+  inactive services as endpoints, or routes a version-pinned query through
+  one.
 - **A Raft member's vote survives a restart.** The vote was kept in memory with
   the log, so a member that restarted could vote a second time in the same
   term. The consequences were bounded and documented — the election timeout
@@ -1460,6 +1583,186 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as an operand.
 
 ### Security
+- **A group's membership could be read and rewritten from any organisation's
+  path.** The three group-member endpoints — `GET` / `POST
+  /api/organisations/:org_id/groups/:group_id/members` and `DELETE
+  …/members/:user_id` — checked only the caller's role in the `org_id` taken from
+  the path (the segment the caller controls), never that `group_id` actually
+  belonged to that organisation. An admin of *any* organisation could therefore
+  list another org's group membership, add members to it — **including
+  themselves, escalating into a tenant they had no authority over** — or remove
+  members from it, simply by naming the foreign group under their own org's path.
+  The sibling `get_group` / `update_group` / `delete_group` handlers already
+  guarded this; the three member handlers now apply the same check, confirming
+  the group belongs to the path's organisation before any read or write and
+  answering `404` on a mismatch — for platform admins too, so the endpoints
+  cannot be used to probe which group ids exist either.
+- **A non-publisher could make a dataset public by editing it.** `PUT
+  /api/datasets/:id` gated a visibility change on *manage* rights alone, while
+  `create_dataset` gates public *creation* on the publish capability. A user who
+  could manage a dataset but held no publish capability could therefore create it
+  private and then `PUT` it public, bypassing the publisher gate that creation
+  enforces. `update_dataset` now requires publisher rights for the transition
+  into public, matching creation (`is_publisher()` still covers platform admins).
+  Only that transition is gated: an unchanged or narrowing visibility — including
+  editing an already-public dataset's metadata, which the frontend resends with
+  the current visibility on every save — is unaffected.
+- **Several read endpoints leaked private-graph content — and one leaked
+  non-public asset bytes — to anyone who could read the dataset.** A private
+  dataset graph is meant to be visible only to a writer (owner / maintainer /
+  admin); the rule `GET /api/datasets/:id/graphs` already enforces. But the
+  viewer feed, geo-stats (single and batched), 3D-Tiles, the OGC API – Features
+  collection/items, the triple-browser suggestions and the dataset commit log
+  each scoped on the *raw* registered-graph list after only checking dataset
+  access, so a plain viewer — or an anonymous caller on a public dataset — saw
+  private graphs' geometry, labels, feature IRIs, autocomplete values and commit
+  history (message, affected graph IRIs, add/remove counts, actor). Separately,
+  the ICDD **container export** zipped *every* asset regardless of its `public`
+  flag, so an anonymous export of a public dataset downloaded its non-public
+  files. Each read path now scopes to the graphs the caller may actually read
+  (a new fail-closed `AuthDb::list_readable_dataset_graphs`: all graphs for a
+  writer, non-private ones for everyone else — a lookup error propagates as
+  `500` rather than degrading to an empty or full list), and the container
+  export drops non-public assets from an anonymous export, matching
+  `list_assets` / the asset download route. A writer/owner still sees everything.
+- **A write-scoped user could write into any named graph, bypassing the graph
+  ACL.** The SPARQL UPDATE path resolves and ACL-checks every named-graph write,
+  but two data-loading paths did not, because they loaded the request body while
+  keeping its embedded graph names. The Graph Store Protocol default-graph write
+  (`PUT`/`POST /store` with no `?graph`) accepted TriG, N-Quads and JSON-LD and
+  kept their graph names, and an LDP RDF Source loaded from `application/ld+json`
+  kept the body's JSON-LD named graphs (`{"@id":"<victim graph>","@graph":[…]}`).
+  The default graph and one's own LDP resource are writable without a per-graph
+  grant, so any write-scoped user — a self-registered account included — could
+  write into another tenant's private dataset graph or a `urn:system:*` graph.
+  Both paths now load **triples only**: a body that names a graph of its own is
+  rejected (`400`) and nothing is written. A `?graph`-targeted Graph Store write
+  is unaffected (every quad is forced into that one graph, which is ACL-checked),
+  and multi-graph loads still go through the dataset import API, which enforces the
+  per-graph boundary. Every released version was affected. *(Note: LDP resources
+  still follow the global RBAC rather than per-resource ACLs — see `docs/ldp.md`;
+  tightening that is tracked separately.)*
+- **`GET /api/shacl/detect-shapes?graph=<iri>` counted the SHACL shapes in any
+  named graph, for any signed-in caller.** The handler took a graph IRI from
+  the query string and scanned it for `sh:NodeShape`/`sh:PropertyShape`
+  declarations with no read check at all, so a signed-in principal could learn
+  the shape count of another tenant's private shapes graph — or of a
+  `urn:system:*` graph — simply by naming it. It now applies
+  `check_graph_read_access`, the same visibility helper that gates `/store`,
+  `/sparql` and `POST /api/shaclc/serialize`: a graph the caller may not read
+  answers `403` whether or not it exists, so it cannot be used to discover which
+  graph IRIs are present either. Admins keep their bypass, because that helper
+  denies `urn:system:*` and unregistered graphs even to them, and an admin's own
+  imports land in unregistered graphs — exactly the graph the importer probes
+  right after writing it.
+- **`POST /api/reasoning/materialize` over a `dataset` reasoned across the
+  dataset's private graphs and wrote the consequences into a graph the caller
+  can read.** The handler checked only that the caller could *access* the
+  dataset, then took its whole reasoning layer from `conformance::resolve`,
+  which lists every dataset graph without regard to who is asking. A viewer of a
+  public dataset could therefore materialise a private graph's triples — the
+  RDFS/OWL closure over data they were never allowed to see — into a
+  caller-chosen target they could read back, laundering the private data out.
+  The reasoning source set is now filtered to the graphs the caller may read
+  (admins still read all; the model registry's own visibility rule still admits
+  model graphs), exactly as the endpoint already checks any explicitly named
+  `source_graphs`. A dataset owner or other writer still reasons over the whole
+  dataset.
+- **Saved-query (API service) private-graph and lifecycle leaks.** Four fixes in
+  the `…/api-services/…/run` subsystem:
+  - A run over a **version snapshot** (`?version=<label>`, or the default run of a
+    dataset that has any version) leaked private graphs. A snapshot copies private
+    graphs into version-scoped IRIs, and the reader filter compared them against
+    *live* private IRIs, so it removed nothing — a viewer, or an anonymous caller
+    on a public dataset's API service, read them. The filter is now version-aware:
+    it maps each snapshot back to its live source graph and drops the private ones
+    for a non-writer.
+  - An **organisation/group-scoped** service read the union of *every* graph in
+    the owner's datasets, private ones included. It now includes a private graph
+    only for a caller who can write that dataset.
+  - A dataset **Editor** could make a service `public`, exposing the dataset's
+    (non-private) data to anonymous callers, without the publish rights
+    `create_dataset` requires. Setting `visibility=public` now needs manage rights
+    on the scope (and, for a dataset, the publish capability); the value is also
+    validated.
+  - Deleting a dataset, organisation or group left its API services behind, and
+    ids are reusable slugs — so a `public` service planted on an id could, after
+    the id was reused by an unrelated tenant, read the new resource's data.
+    Deletes now remove the owner's services in the same transaction, a one-time
+    sweep drops pre-existing orphans, and a dataset-scoped run/read requires the
+    dataset to exist even for a public service. Every released version was
+    affected.
+- **A dataset version's data dump and diff leaked private graphs.** A version
+  snapshot copies every graph the dataset held at the time — private ones
+  included — into version-scoped IRIs that never appear in the dataset's graph
+  list, so the private-graph filter that guards `/sparql` and the dataset-service
+  version reads was a no-op on two other version endpoints. `GET
+  /api/datasets/{id}/versions/{ver}/data` served every snapshot graph's triples,
+  and `GET /api/datasets/{id}/versions/{ver}/diff/{other}` returned private
+  triples (as an RDF-Patch) and per-graph add/remove counts keyed by the private
+  source graph's IRI, to anyone who could read the dataset — a viewer, or an
+  anonymous caller on a public dataset. Both now map each snapshot back to its
+  live source graph and drop the ones flagged private for a caller who cannot
+  write the dataset; a writer (and an admin) still sees everything. A dataset
+  with no private graph is unaffected, so legacy versions with no source map keep
+  working. Every released version was affected.
+- **The `/sparql` read boundary could be tricked into reading any graph in the
+  store, unauthenticated.** A non-admin query is scoped by rewriting its text:
+  `scope_query_to_authorized` strips the caller's `FROM` / `FROM NAMED` clauses
+  and injects a prologue naming only the graphs the caller may read. Text
+  rewriting cannot be made perfect, and two inputs slipped through. A ` WHERE `
+  (or `{`) inside a string literal mis-anchored the injection, so the prologue
+  landed **inside** the literal and the query reached the engine with no dataset
+  clause at all — reading every named graph, including other tenants' private
+  datasets and graphs flagged private, with no graph IRI needing to be known
+  (`SELECT ?g ?o ("""x WHERE x""" AS ?z) WHERE { GRAPH ?g { ?s ?p ?o } }`). And a
+  `FROM NAMED` the scanner did not recognise — a prefixed-name source,
+  `FROM NAMED<iri>` with no space, or a comment between the keyword and the IRI —
+  survived unstripped, letting the caller name a private graph directly. The same
+  rewriter also backs the dataset-service SPARQL endpoint and the saved-query
+  `…/run` API, so the bypass reached those too. An anonymous request to a public
+  dataset was enough. Every non-admin query is now checked one more time, after
+  rewriting and immediately before it reaches the engine: the exact text is
+  parsed and refused with `403` unless its dataset names only graphs the caller
+  may read (a query left with no dataset clause, or a `FROM` without a matching
+  `FROM NAMED`, is refused as tampering). The check is fail-closed and does not
+  depend on the scanner being perfect. Admins are unchanged — they are scoped
+  additively over every registered graph and may read all of it. Every released
+  version was affected.
+- **Any signed-in user could block writes to a graph with a gating
+  pipeline.** A SHACL Studio pipeline with `gate_writes` refuses (422) every
+  write its shapes reject to the graphs it covers, for everyone, the graphs'
+  owners and editors included. Creating or updating one checked only the
+  graphs the pipeline writes itself (inference and report targets), so any
+  signed-in user could gate a public dataset, or any graph they could name,
+  with shapes that reject everything and block every write to it. Setting a
+  gate now needs what a validation-layer binding, which gates writes the same
+  way, needs: write access to every dataset it covers (dataset targets, and
+  `dataset_ids` while no `graph_iris` narrow the scope) and a graph-ACL write
+  grant on every graph it names (graph targets, `graph_iris`). Admins pass.
+  Anything else answers 403, and a dataset that does not exist 404. A
+  pipeline that only validates needs no write access. The gate acts with its
+  creator's authority, checked at every write, so a gating pipeline stored
+  before this release, or one whose creator has since lost that write access
+  or been deactivated, no longer gates. The server logs a warning at each
+  write such a pipeline would have gated.
+- **A dataset's SPARQL service could read any graph in the store.** Adding
+  a graph to a service (`POST /api/datasets/{id}/services/{service_id}/graphs`)
+  checked only that the caller could write the dataset in the path. It
+  checked neither the graph nor that the service belonged to that dataset.
+  So any user who could create a dataset could scope a service to another
+  tenant's private graph or a `urn:system:` graph and read it through the
+  service, and so could everyone who could read that dataset, anonymous
+  callers on a public one included. A writer of one dataset could also read,
+  rename, delete or re-scope another dataset's service by putting its id
+  under their own dataset's path. Every `/services/{service_id}` route now
+  answers 404 for a service of another dataset. Adding a graph needs the
+  dataset to hold it (its namespace, its well-known graphs, or registered
+  to it), except for admins. A service query serves only the service graphs
+  the dataset holds when it runs, so rows made before this fix, and rows
+  whose graph was detached since, serve nothing. A service left with no
+  such graph returns nothing; it does not fall back to the whole dataset.
+  Every released version was affected.
 - **`POST /api/shaclc/serialize` read any named graph, for anyone.** It took
   a graph IRI from the request body and handed it straight to the serialiser
   — no authentication, no authorisation — so any caller could name any named
@@ -2053,7 +2356,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`src/ifc/`). Graph Store reads gain `?format=` (turtle/jsonld/rdfxml/ntriples/
   trig/nquads) with download disposition, and assets gain an anonymous-capable
   `…/download` route gated by dataset visibility.
-- **Schependomlaan demo** replaces the Waalbrug example: the canonical open Dutch
+- **Schependomlaan demo** replaces the bridge example: the canonical open Dutch
   BIM dataset (Nijmegen, CC BY 4.0) is fetched on first boot (`SEED_IFC_URL`),
   with the real 3DBAG LoD2.2 city block (CC BY 4.0) bundled for the map.
 - **Viewer**: in-browser IFC rendering (web-ifc) with per-element picking —
@@ -2140,8 +2443,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   names (`da:`, `geo:`, `geof:` …) parse instead of being silently skipped.
 - Per-constraint `sh:severity` on a `sh:SPARQLConstraint` node (e.g. `sh:Warning`) now
   overrides the shape-level severity for that constraint's results.
-- Waalbrug reference-example conformance fixtures (`tests/fixtures/waalbrug/`) and an
-  oracle (`tests/waalbrug_conformance.rs`) encoding the IMBOR/NEN 2660-2 GeoSPARQL +
+- Reference-example conformance fixtures (a bridge; now `tests/fixtures/example-bridge/`) and an
+  oracle (now `tests/example_bridge_conformance.rs`) encoding a GeoSPARQL +
   SHACL (Core/SPARQL/AF) pass/fail matrix.
 - SHACL **complex property paths** are now parsed from RDF: sequence paths `( p1 p2 … )`,
   `sh:inversePath`, `sh:alternativePath`, `sh:zeroOrMorePath`, `sh:oneOrMorePath` and
@@ -2160,7 +2463,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (e.g. `sh:minExclusive`), reported with the expression's `sh:message`.
 - SHACL-AF **`sh:SPARQLFunction`**: user-defined functions (`sh:parameter`/`sh:order`/
   `sh:select` + `sh:prefixes`) are registered as callable SPARQL functions, usable from
-  queries, SHACL-SPARQL constraints and rules (e.g. `ex:afstandMeter`). Bodies are
+  queries, SHACL-SPARQL constraints and rules (e.g. `ex:distanceMetres`). Bodies are
   evaluated against a fresh in-memory store, fully supporting expression-style functions.
 - **Viewer feed** endpoint `GET /api/datasets/:id/viewer-feed`: per-element geometry +
   3D-file references resolved from the BOT/OMG/FOG/GeoSPARQL layering — labels, types,
@@ -2170,7 +2473,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `sh:ValidationReport` as RDF into `urn:system:reports:dataset:{id}` (replaced per run),
   so dashboards can query failures via SPARQL; severity rollup stays on the run rows.
 - **3D & Map Viewer demo dataset** (`viewer-3d-demo`) in the standards demo seed: the
-  Waalbrug bridge (EPSG:28992, IFC/glTF refs) plus real Wikidata landmarks (CC0 —
+  reference bridge (EPSG:28992, IFC/glTF refs) plus real Wikidata landmarks (CC0 —
   Dragon Bridge Da Nang, Big Ben, White House, Empire State Building, Sannō Shrine)
   whose open 3D models live on Wikimedia Commons, and a synthetic CityJSON LoD2
   demo block (EPSG:7415, semantic roof/wall/ground surfaces) bundled with the
@@ -2196,7 +2499,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   overlay. Resource detail pages show a 3D model (BIM) card with IFC GlobalId and
   file links (following named `hasGeometry` nodes one hop), and the geometry map
   gains a *to scale* toggle driven by the model's measured real-world size.
-  **Projected-CRS WKT (e.g. the Waalbrug demo's EPSG:28992) is now reprojected
+  **Projected-CRS WKT (e.g. EPSG:28992 RD New) is now reprojected
   client-side before plotting** — previously raw map previews plotted projected
   coordinates as lon/lat. Dark mode is supported across all maps and 3D scenes.
 - **Official conformance suites in CI**: the W3C SHACL core test suite and the OGC
@@ -2204,7 +2507,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tests/fixtures/{w3c-shacl,ogc-geosparql}/` and run with a two-way ratchet (unlisted
   tests must pass, listed known-failures must still fail). Scorecards:
   W3C core 46 pass / 52 known-fail / 15 aux skips; OGC examples 44/48 matching, and the
-  Waalbrug dataset round-trips through the official GeoSPARQL validator. See
+  reference bridge dataset round-trips through the official GeoSPARQL validator. See
   `docs/conformance/`.
 
 - **Spark chat is now an interactive linked-data canvas.** Assistant answers render

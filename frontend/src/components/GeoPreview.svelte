@@ -36,7 +36,7 @@
   // a hidden tab) cannot leave us spinning a requestAnimationFrame loop forever.
   const MAX_DRAW_RETRY_FRAMES = 30;
 
-  // CRS-aware: projected WKT (e.g. the Waalbrug demo's EPSG:28992) is
+  // CRS-aware: projected WKT (e.g. EPSG:28992 RD New) is
   // reprojected to WGS84 before plotting.
   $: geometries = (wkts || [])
     .map(w => parseWktAsWgs84(w))

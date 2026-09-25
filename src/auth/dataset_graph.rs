@@ -39,6 +39,28 @@ pub fn dataset_owns_graph(base_url: &str, dataset_id: &str, graph_iri: &str) -> 
     graph_iri.starts_with(&http_ns) || graph_iri.starts_with(&urn_ns)
 }
 
+/// True iff `graph_iri` is one of the graphs the server keeps for `dataset_id`
+/// outside its namespace: its DCAT metadata and validation-report graphs, its
+/// assets graph (`{base}/datasets/{id}/assets`, plural), its property-states
+/// graph and its entailment graphs (`urn:entailment:{regime}:{id}`).
+pub fn dataset_well_known_graph(base_url: &str, dataset_id: &str, graph_iri: &str) -> bool {
+    graph_iri == dataset_metadata_graph_iri(dataset_id)
+        || graph_iri == dataset_reports_graph_iri(dataset_id)
+        || graph_iri == crate::server::routes::assets_graph_iri(base_url, dataset_id)
+        || graph_iri
+            == crate::server::routes::assets_graph_iri(base_url.trim_end_matches('/'), dataset_id)
+        || graph_iri == crate::property_states::states_graph(dataset_id)
+        || graph_iri
+            .strip_prefix("urn:entailment:")
+            .and_then(|rest| rest.split_once(':'))
+            .is_some_and(|(_, id)| id == dataset_id)
+}
+
+/// Named graph IRI where a dataset's SHACL validation reports are kept.
+fn dataset_reports_graph_iri(dataset_id: &str) -> String {
+    format!("urn:system:reports:dataset:{dataset_id}")
+}
+
 /// True iff `graph_iri` is in a *reserved* namespace owned by another dataset or
 /// the system — `urn:system:*`, `urn:dataset:{other}:*`, or
 /// `{base}/dataset/{other}/*`. A non-admin may never register or write such a
@@ -59,6 +81,22 @@ fn graph_in_foreign_reserved_namespace(base_url: &str, dataset_id: &str, graph_i
         return other != dataset_id;
     }
     false
+}
+
+/// Whether `dataset_id` holds `graph_iri` as one of its own graphs: inside its
+/// namespace, one of its well-known graphs, or registered to it. A non-admin
+/// registers a graph to a dataset only past [`authorize_dataset_graph_target`],
+/// so this is what the dataset may expose to its readers — a SPARQL service
+/// of the dataset serves no other graph. A lookup error counts as not held.
+pub fn dataset_holds_graph(
+    db: &crate::auth::db::AuthDb,
+    base_url: &str,
+    dataset_id: &str,
+    graph_iri: &str,
+) -> bool {
+    dataset_owns_graph(base_url, dataset_id, graph_iri)
+        || dataset_well_known_graph(base_url, dataset_id, graph_iri)
+        || db.dataset_has_graph(dataset_id, graph_iri).unwrap_or(false)
 }
 
 /// Authorize a non-admin caller naming `graph_iri` as a write/registration target

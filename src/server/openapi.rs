@@ -1133,7 +1133,10 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     "Get SPARQL service",
                     "Service definition and its graph set.",
                     vec![],
-                    vec![("200", "Service"), ("404", "Not found")],
+                    vec![
+                        ("200", "Service"),
+                        ("404", "Service not found in this dataset"),
+                    ],
                     false,
                 ),
             ),
@@ -1142,7 +1145,9 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 ob(
                     "SPARQL Services",
                     "Update SPARQL service",
-                    "Rename, re-describe or (de)activate the service.",
+                    "Rename, re-describe or (de)activate the service. `is_active: false` \
+                     switches its SPARQL endpoint off (it answers 404 until reactivated); \
+                     omitting `is_active` leaves it as it was.",
                     vec![],
                     ref_body(
                         "UpdateServiceRequest",
@@ -1153,6 +1158,8 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     vec![
                         ("200", "Updated service"),
                         ("401", "Authentication required"),
+                        ("403", "Write access required"),
+                        ("404", "Service not found in this dataset"),
                     ],
                     true,
                 ),
@@ -1164,7 +1171,12 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     "Delete SPARQL service",
                     "Delete the service (its graphs are untouched).",
                     vec![],
-                    vec![("204", "Deleted"), ("401", "Authentication required")],
+                    vec![
+                        ("204", "Deleted"),
+                        ("401", "Authentication required"),
+                        ("403", "Write access required"),
+                        ("404", "Service not found in this dataset"),
+                    ],
                     true,
                 ),
             ),
@@ -1181,7 +1193,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     "List service graphs",
                     "Graphs included in the service's query scope.",
                     vec![],
-                    vec![("200", "Array of graph IRIs")],
+                    vec![("200", "Array of graph IRIs"), ("404", "Service not found in this dataset")],
                     false,
                 ),
             ),
@@ -1190,13 +1202,18 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 ob(
                     "SPARQL Services",
                     "Add graph to service",
-                    "Include a named graph in the service's scope.",
+                    "Include a named graph in the service's scope. The dataset must hold the graph: inside its namespace, one of its well-known graphs, or registered to it (admins may name any graph). A query serves only the service graphs the dataset holds at that moment.",
                     vec![],
                     ref_body(
                         "GraphIriRequest",
                         json!({ "graph_iri": "https://data.example.org/graphs/catalogue" }),
                     ),
-                    vec![("201", "Graph added"), ("401", "Authentication required")],
+                    vec![
+                        ("201", "Graph added"),
+                        ("401", "Authentication required"),
+                        ("403", "Write access required, or the dataset does not hold the graph"),
+                        ("404", "Service not found in this dataset"),
+                    ],
                     true,
                 ),
             ),
@@ -1211,7 +1228,12 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                         "GraphIriRequest",
                         json!({ "graph_iri": "https://data.example.org/graphs/catalogue" }),
                     ),
-                    vec![("204", "Graph removed"), ("401", "Authentication required")],
+                    vec![
+                        ("204", "Graph removed"),
+                        ("401", "Authentication required"),
+                        ("403", "Write access required"),
+                        ("404", "Service not found in this dataset"),
+                    ],
                     true,
                 ),
             ),
@@ -1226,9 +1248,19 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "SPARQL Services",
                     "Query a SPARQL service (GET)",
-                    "Run a SPARQL query restricted to the service's graphs.",
+                    "Run a SPARQL query restricted to the service's graphs. A service \
+                     that has been deactivated (`is_active: false`) answers `404 Service \
+                     not found`, exactly like one that does not exist, to every caller \
+                     including the dataset's owner and writers; reactivate it to query \
+                     it again.",
                     vec![qp("query", true, "SPARQL query string")],
-                    vec![("200", "SPARQL results")],
+                    vec![
+                        ("200", "SPARQL results"),
+                        (
+                            "404",
+                            "Dataset or service not found, or the service is inactive",
+                        ),
+                    ],
                     false,
                 ),
             ),
@@ -1237,9 +1269,17 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "SPARQL Services",
                     "Query a SPARQL service (POST)",
-                    "Run a SPARQL query (body or form) restricted to the service's graphs.",
+                    "Run a SPARQL query (body or form) restricted to the service's graphs. \
+                     A deactivated service answers `404 Service not found` to every caller, \
+                     as for GET.",
                     vec![],
-                    vec![("200", "SPARQL results")],
+                    vec![
+                        ("200", "SPARQL results"),
+                        (
+                            "404",
+                            "Dataset or service not found, or the service is inactive",
+                        ),
+                    ],
                     false,
                 ),
             ),
@@ -4602,9 +4642,9 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "LLM",
                 "LLM health",
-                "Reachability of the LLM gateway.",
+                "Reachability of the LLM gateway, whether LLM_GATEWAY_URL is configured, and per AI feature (chat, sparql, shacl) the configured model and whether the gateway's /v1/models list serves it (listed: true/false, or null when there is no list to judge by). Makes no request beyond the gateway probe.",
                 vec![],
-                vec![("200", "{ reachable, gateway }")],
+                vec![("200", "{ gateway, configured, reachable, detail, chat_model, context_tokens, services: [{ id, model, listed }], … }")],
                 false,
             ),
         )],

@@ -1196,7 +1196,9 @@ fn bench_geosparql_contains(c: &mut Criterion) {
     group.finish();
 }
 
-/// Measure geof:distance (Euclidean) for spatial proximity queries.
+/// Measure geof:distance for spatial proximity queries. The operands are CRS84
+/// and the unit is `uom:metre`, so this is the geodesic (WGS84 ellipsoid)
+/// distance — it was planar degrees, which made the 300 km filter keep every row.
 fn bench_geosparql_distance(c: &mut Criterion) {
     let mut group = c.benchmark_group("geosparql/distance");
 
