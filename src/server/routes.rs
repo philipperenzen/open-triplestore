@@ -777,7 +777,7 @@ pub(crate) async fn execute_update(
     let effective_str = effective_update.as_deref().unwrap_or(update);
 
     // Parse with spargebra to extract target graph IRIs for ACL checking.
-    let parsed = spargebra::SparqlParser::new()
+    let parsed = crate::sparql::parser()
         .parse_update(effective_str)
         .map_err(|e| AppError::BadRequest(format!("Invalid SPARQL UPDATE: {}", e)))?;
 
@@ -1255,7 +1255,7 @@ async fn sparql_batch_update(
     let mut model_versions = Vec::new();
     let mut writes_unnamed_graphs = false;
     for stmt in &resolved {
-        let parsed = spargebra::SparqlParser::new()
+        let parsed = crate::sparql::parser()
             .parse_update(stmt.as_str())
             .map_err(|e| AppError::BadRequest(format!("Invalid SPARQL UPDATE: {}", e)))?;
         // H-1: per-graph read+write ACL, admin-gate variable-graph/SERVICE/all-graph ops.

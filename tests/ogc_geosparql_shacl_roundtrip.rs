@@ -4,10 +4,11 @@
 //! Two layers:
 //! 1. **OGC's own oracle** — every `Sxx-valid.ttl` example must conform and
 //!    every `Sxx-invalid-*.ttl` must not, validated against the OGC GeoSPARQL
-//!    1.1 validator shapes. This closes the brief's loop: GeoSPARQL data
-//!    validated by GeoSPARQL's own shapes, through this repo's engine.
-//! 2. **Waalbrug round-trip** — the canonical Waalbrug dataset validates
-//!    against the OGC GeoSPARQL 1.1 validator shapes.
+//!    1.1 validator shapes. This closes the loop: GeoSPARQL data validated by
+//!    GeoSPARQL's own shapes, through this repo's engine.
+//! 2. **Reference-example round-trip** — the canonical example-bridge dataset
+//!    (`tests/fixtures/example-bridge/`) validates against the OGC GeoSPARQL
+//!    1.1 validator shapes.
 //!
 //! These are development tests, not an OGC compliance test: only the OGC
 //! authorises compliance marks for its standards.
@@ -21,7 +22,7 @@ use oxigraph::io::RdfFormat;
 use std::path::Path;
 
 const VALIDATOR: &str = include_str!("fixtures/ogc-geosparql/validator.ttl");
-const WAALBRUG: &str = include_str!("fixtures/waalbrug/waalbrug.trig");
+const EXAMPLE_BRIDGE: &str = include_str!("fixtures/example-bridge/example-bridge.ttl");
 const EXAMPLES: &str = "tests/fixtures/ogc-geosparql/examples";
 
 /// Example files whose verdict currently deviates from the OGC oracle, with the
@@ -107,15 +108,15 @@ fn ogc_examples_match_the_ogc_validator_oracle() {
     );
 }
 
-/// The canonical Waalbrug dataset round-trips through the OGC GeoSPARQL 1.1
+/// The canonical reference example round-trips through the OGC GeoSPARQL 1.1
 /// validator shapes: GeoSPARQL data, validated by GeoSPARQL's own SHACL shapes,
-/// by our engine (brief §7 / DoD item 5).
+/// by our engine.
 #[test]
-fn waalbrug_conforms_to_ogc_geosparql_validator_shapes() {
-    let conforms =
-        validate_against_ogc(WAALBRUG, RdfFormat::Turtle).expect("validation runs without error");
+fn example_bridge_conforms_to_ogc_geosparql_validator_shapes() {
+    let conforms = validate_against_ogc(EXAMPLE_BRIDGE, RdfFormat::Turtle)
+        .expect("validation runs without error");
     assert!(
         conforms,
-        "Waalbrug must conform to the OGC GeoSPARQL 1.1 validator shapes"
+        "the reference example must conform to the OGC GeoSPARQL 1.1 validator shapes"
     );
 }

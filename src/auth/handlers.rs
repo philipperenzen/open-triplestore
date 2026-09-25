@@ -3582,6 +3582,28 @@ pub async fn delete_group(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Confirm `group_id` names a group that belongs to `org_id`, returning it.
+///
+/// The membership/admin checks in the group-member handlers only prove authority
+/// over `org_id` (the path segment the caller controls); they say nothing about
+/// which org the group actually lives in. Without this guard an admin of *any*
+/// org could list, add or remove members of another org's group simply by
+/// naming that group under their own org's path — a cross-tenant IDOR (and, via
+/// add, a self-service privilege escalation). Called unconditionally, so a
+/// platform admin also gets a `404` on a mismatch, mirroring the org-scope guard
+/// already inlined in `get_group` / `update_group` / `delete_group`.
+fn group_in_org(db: &AuthDb, org_id: &str, group_id: &str) -> Result<Group, (StatusCode, String)> {
+    db.get_group(group_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .filter(|g| g.org_id == org_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                "Group not found in this organisation".to_string(),
+            )
+        })
+}
+
 /// GET /api/organisations/:org_id/groups/:group_id/members
 pub async fn list_group_members(
     Extension(current_user): Extension<AuthenticatedUser>,
@@ -3593,6 +3615,10 @@ pub async fn list_group_members(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
             .ok_or_else(|| (StatusCode::FORBIDDEN, "Not a member".to_string()))?;
     }
+
+    // The group must belong to the org in the path, or a member of any org could
+    // read another org's group membership through their own org's path.
+    group_in_org(&db, &org_id, &group_id)?;
 
     let members = db
         .list_group_members(&group_id)
@@ -3632,6 +3658,11 @@ pub async fn add_group_member(
         }
     }
 
+    // The group must belong to the org in the path. Otherwise an admin of any org
+    // could add members to another org's group — including themselves, escalating
+    // into a tenant they have no authority over.
+    group_in_org(&db, &org_id, &group_id)?;
+
     let role = Role::from_str(&req.role)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid role".to_string()))?;
 
@@ -3665,6 +3696,10 @@ pub async fn remove_group_member(
             _ => return Err((StatusCode::FORBIDDEN, "Admin access required".to_string())),
         }
     }
+
+    // The group must belong to the org in the path, or an admin of any org could
+    // remove members from another org's group through their own org's path.
+    group_in_org(&db, &org_id, &group_id)?;
 
     // Super admins cannot be removed from any group.
     let target = db
@@ -3717,7 +3752,9 @@ pub async fn create_dataset(
     // by an organisation/group they belong to — otherwise `owner_id` could be
     // forged to impersonate another principal or attribute data to a foreign
     // catalogue. Publishing (visibility=public) additionally requires publisher
-    // rights, mirroring the visibility gate in `update_dataset`.
+    // rights, so the public flag cannot be forged at creation; `update_dataset`
+    // enforces the same publisher gate on a later widening to public, so the two
+    // paths into a public dataset are gated identically.
     if !current_user.is_admin() {
         if !db
             .can_act_as_owner(&current_user.user_id, owner_type, &req.owner_id)
@@ -3853,7 +3890,7 @@ pub async fn list_datasets(
 /// ownership, org/group membership × visibility, grants, public readability).
 ///
 /// For services that must answer "may this user write this dataset?"
-/// server-side — e.g. the validation platform's owner-gated runs — without
+/// server-side — e.g. an external validation service's owner-gated runs — without
 /// re-deriving ACL logic. Anonymous callers get the public-visibility answer;
 /// an existing-but-invisible dataset answers 404 (not 403) so the endpoint
 /// cannot be used to probe private dataset ids.
@@ -4008,6 +4045,24 @@ pub async fn update_dataset(
         return Err((
             StatusCode::FORBIDDEN,
             "Manage access required to change visibility".to_string(),
+        ));
+    }
+
+    // Publishing (widening to public) additionally requires publisher rights —
+    // the same gate `create_dataset` applies to public creation. Manage access
+    // alone is not enough: an owner/manager without the publish capability could
+    // otherwise create a dataset private and then PUT it public, sidestepping the
+    // creation-time gate entirely. Only the transition *into* public is gated, so
+    // an unchanged or narrowing visibility (and editing an already-public
+    // dataset's metadata, which the frontend resends with the current visibility)
+    // is unaffected. `is_publisher()` already covers platform admins.
+    if visibility == Visibility::Public
+        && dataset.visibility != Visibility::Public
+        && !current_user.is_publisher()
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Publisher access is required to make a dataset public".to_string(),
         ));
     }
 

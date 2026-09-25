@@ -22,6 +22,7 @@
   (Apache-2.0).
 - Status: the validator is informative, not normative, as of GeoSPARQL 1.1.
 - Runner: `tests/ogc_geosparql_shacl_roundtrip.rs` — validates (1) the OGC's own
-  Sxx-valid / Sxx-invalid example files and (2) the Waalbrug dataset against the
-  validator shapes, using this repo's native SHACL engine. Passing them is not
-  an OGC compliance certification.
+  Sxx-valid / Sxx-invalid example files and (2) the reference example dataset
+  (`tests/fixtures/example-bridge/`) against the validator shapes, using this
+  repo's native SHACL engine. Passing them is not an OGC compliance
+  certification.

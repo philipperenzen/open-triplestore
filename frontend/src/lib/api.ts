@@ -742,16 +742,58 @@ export async function nlToSparql(question, schemaHint, currentQuery = null) {
   return res.json(); // { sparql, model }
 }
 
-// Is the NL→SPARQL LLM service reachable? Used to show LLM availability in service health.
-export async function llmHealth() {
+/** The LLM features the server reports on, one entry each, in this order. */
+export type LlmServiceId = 'chat' | 'sparql' | 'shacl';
+
+/** One LLM feature in `GET /api/llm/health`'s `services` array. */
+export interface LlmServiceStatus {
+  /** `chat` = Spark, `sparql` = natural language → SPARQL (and saved-query
+   *  repair), `shacl` = the SHACL Studio assistant. A newer server may add ids. */
+  id: LlmServiceId | string;
+  /** The model this feature sends to the gateway. */
+  model: string;
+  /** Whether the gateway's model list names that model: `null` when the
+   *  gateway is unreachable or answered without an OpenAI-style model list. */
+  listed: boolean | null;
+}
+
+/**
+ * `GET /api/llm/health`. Everything but `reachable` is optional: `llmHealth()`
+ * returns `{ reachable: false, error: true }` when the endpoint itself could
+ * not be read, and servers older than the `configured` / `services` fields
+ * leave them out.
+ */
+export interface LlmHealth {
+  reachable: boolean;
+  /** Set only by `llmHealth()`'s own fallback: the request failed, so nothing
+   *  is known about the gateway (never sent by the server). */
+  error?: true;
+  /** Gateway base URL the server talks to. */
+  gateway?: string;
+  /** Body of the gateway's `/v1/models` (or `/health`) response. */
+  detail?: unknown;
+  rate_limit_per_min?: number;
+  rate_limit_anon_per_min?: number;
+  caller?: 'user' | 'guest';
+  chat_model?: string;
+  context_tokens?: number | null;
+  /** `LLM_GATEWAY_URL` is set and not blank; `false` = the server falls back to its built-in default. */
+  configured?: boolean;
+  services?: LlmServiceStatus[];
+}
+
+// Is the LLM gateway reachable, and which model does each LLM feature use?
+// Used to show LLM availability in service health; never throws.
+export async function llmHealth(): Promise<LlmHealth> {
   try {
     const token = getAccessToken();
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
     const res = await fetchRetry429(`${API_BASE}/api/llm/health`, { headers });
-    if (!res.ok) return { reachable: false };
-    return res.json(); // { gateway, reachable, detail }
+    if (!res.ok) return { reachable: false, error: true };
+    // Awaited here so a body that is not JSON lands in the catch below.
+    return await res.json(); // LlmHealth
   } catch {
-    return { reachable: false };
+    return { reachable: false, error: true };
   }
 }
 

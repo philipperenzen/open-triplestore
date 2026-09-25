@@ -1073,7 +1073,7 @@ fn check_prebound_query(query: &str, vars: &[&str], with_path: bool) -> Result<(
         .collect();
     let path = with_path.then_some("<urn:ots:shacl:path>");
     let rewritten = prebind(query, &bound, path, &["urn:ots:shacl:data".to_string()]);
-    opengraph::spargebra::SparqlParser::new()
+    crate::sparql::parser()
         .parse_query(&rewritten)
         .map(|_| ())
         .map_err(|e| e.to_string())

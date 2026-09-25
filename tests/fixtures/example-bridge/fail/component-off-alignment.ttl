@@ -1,0 +1,10 @@
+# ❌ A component lies >25 m off the bridge alignment (SPARQL + geof:distance).
+@prefix def: <https://example.org/def/> .
+@prefix eb:  <https://example.org/id/example-bridge/> .
+@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+@prefix bot: <https://w3id.org/bot#> .
+eb:OffBridge a def:Bridge ;
+    geo:hasGeometry [ geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> LINESTRING(185820 427330, 186110 427690)"^^geo:wktLiteral ] ;
+    bot:containsElement eb:FarComponent .
+eb:FarComponent a def:BridgeComponent ;
+    geo:hasGeometry [ geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(186300 427900)"^^geo:wktLiteral ] .  # ~283 m off

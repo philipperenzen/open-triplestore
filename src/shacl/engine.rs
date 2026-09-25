@@ -1777,8 +1777,8 @@ fn execute_select_single(
 /// nodes and would let the shape pass over nothing.
 fn check_sparql_target(query: &str) -> Result<(), String> {
     use opengraph::spargebra::algebra::GraphPattern;
-    use opengraph::spargebra::{Query, SparqlParser};
-    let parsed = SparqlParser::new()
+    use opengraph::spargebra::Query;
+    let parsed = crate::sparql::parser()
         .parse_query(query)
         .map_err(|e| format!("sh:select does not parse: {e}"))?;
     let Query::Select { pattern, .. } = parsed else {

@@ -65,7 +65,7 @@
   }
   $: if (map && creditHtmls) syncCredits();
 
-  // CRS-aware: projected WKT (e.g. the Waalbrug demo's EPSG:28992) is
+  // CRS-aware: projected WKT (e.g. EPSG:28992 RD New) is
   // reprojected to WGS84 before plotting.
   $: geometries = (wkts || [])
     .map(w => parseWktAsWgs84(w))

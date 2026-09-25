@@ -50,7 +50,6 @@ use oxigraph::sparql::{
     QueryResults, QuerySolution, QuerySolutionIter, QueryTripleIter, SparqlEvaluator, Variable,
 };
 use oxigraph::store::Store;
-use spargebra::SparqlParser;
 use tracing::{debug, warn};
 
 /// Floor for the in-memory mirror cap when no explicit override is set. The
@@ -610,7 +609,7 @@ impl ParallelMirror {
         if opengraph::columnar::uses_reserved_names(sparql) {
             return None;
         }
-        let query = SparqlParser::new().parse_query(sparql).ok()?;
+        let query = crate::sparql::parser().parse_query(sparql).ok()?;
         if parallel::has_sum_or_avg_query(&query) || opengraph::columnar::accepts(&query).is_err() {
             return None;
         }

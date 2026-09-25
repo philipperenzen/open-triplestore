@@ -290,6 +290,61 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   runs, the model context and shape derivation were served without being
   documented. `GET …/turtle` documents `?format=shaclc`; `PUT …/turtle`
   documents `?message=`, the revision note the history shows.
+- **`geof:aggUnion`, the GeoSPARQL 1.1 spatial aggregate.** A real SPARQL
+  aggregate: `SELECT ?k (geof:aggUnion(?geom) AS ?u) … GROUP BY ?k` folds each
+  group's geometries into their union (GEOS unary union), one
+  `geo:wktLiteral` — with or without `GROUP BY`, in `HAVING`, in sub-selects
+  and in the `WHERE` of an update, over WKT, GML and GeoJSON alike. A group in
+  one CRS keeps it; a group mixing CRSs is unioned in CRS84. It follows
+  SPARQL's aggregate error rules (a value that is not a geometry makes the
+  group's union unbound, as a non-number does to `SUM`), the union of no
+  geometries is `GEOMETRYCOLLECTION EMPTY`, and the result does not depend on
+  the order the solutions arrive in. `geof:aggUnion(DISTINCT ?g)` does not
+  parse — spargebra takes no `DISTINCT` in a custom aggregate's call — and
+  would change nothing: a union absorbs duplicates. Every parse of a query
+  now goes through one parser that knows the aggregate (`opengraph::sparql_parser`, fed by a
+  registry the store fills when it opens): undeclared, `geof:aggUnion(?g)` read
+  as a plain function call — a syntax error under `GROUP BY`, and on the
+  accelerator's planners a different query, a row-local `BIND` that a
+  surrounding `COUNT` could have summed across the subject shards. The shards
+  and the columnar copy decline the aggregate; the full in-memory copy and the
+  engine evaluate it. The service description advertises it as
+  `sd:extensionAggregate`. It was a tracked gap.
+- **The GeoSPARQL 1.1 metric functions** — `geof:metricDistance`,
+  `metricLength`, `metricPerimeter`, `metricArea` and `metricBuffer` — measure in
+  metres (square metres) on the WGS84 ellipsoid whatever CRS the operand is
+  written in: it is reprojected to CRS84 first, and a CRS this build cannot
+  reproject gives an unbound result, not a number in unknown units. Distances,
+  lengths and areas are Karney's geodesic algorithms (through the `geo` crate
+  already in the tree — no new dependency), exact to nanometres and convergent
+  for nearly antipodal points; the nearest points of two geometries and a
+  buffer are found in an ellipsoidal azimuthal equidistant plane around them,
+  and a buffer is returned in its operand's CRS. The suite checks them against
+  published values: GeographicLib's JFK–LHR (5 551 759.400 m) and
+  Wellington–Salamanca (19 959 679.267 m), the equatorial degree and the
+  meridian arc. They were tracked gaps.
+- **`geo:geoJSONLiteral` geometries (GeoSPARQL 1.1).** A GeoJSON literal — an
+  RFC 7946 geometry object, `Point` through `GeometryCollection`, always CRS84
+  longitude/latitude — is a geometry wherever a WKT or GML literal is: every
+  `geof:` function takes it, binary functions harmonise it with a projected
+  operand, `geof:transform` reprojects it, and the spatial index and the map
+  viewer feed read `geo:asGeoJSON` next to `geo:asWKT`/`geo:asGML`. It is
+  translated to WKT on the way in, so it takes the same GEOS path; a malformed
+  one (bad JSON, a `Feature`, a short position, an unclosed ring) is not a
+  geometry, and functions over it are unbound rather than a panic. New
+  **`geof:asGeoJSON`** serialises any geometry as a `geo:geoJSONLiteral`,
+  reprojecting it to CRS84 first. Both were tracked gaps.
+- **LLM services in Service health.** The sidebar's Service health popover now
+  lists the LLM gateway and each AI feature — Spark chat, NL→SPARQL and the
+  SHACL assistant — with the model it sends and a note when the gateway's
+  `/v1/models` list does not serve that model, so a mistyped model name shows
+  up before the first failed completion. `GET /api/llm/health` gains
+  `configured` (is `LLM_GATEWAY_URL` set) and `services` (`id`, `model`,
+  `listed`: `true`/`false`, `null` when there is no list to judge by), read
+  from the probe it already makes. The popover fetches it only when opened or
+  refreshed and shows an absent or unreachable LLM in yellow, since the AI
+  features are optional; the health badge and `GET /health` never depend on
+  the gateway.
 - **An admin page for prefix overrides** (`/admin/prefixes`). Lists what this
   deployment has decided its prefixes mean, adds one, repoints one and removes
   one. While a label is being typed it resolves that label live and says what
@@ -891,6 +946,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A run's SHACL gate report carries the run metrics** (duration, quads read,
   source) the validation report gained, folded across the shapes graphs the
   gate evaluates the way the validate route folds them.
+- **The reference example is a fictional bridge.** The SHACL/GeoSPARQL
+  conformance oracle, the viewer-feed end-to-end test and the OGC GeoSPARQL
+  round-trip run on `tests/fixtures/example-bridge/`: a made-up arch bridge with
+  an English vocabulary (`https://example.org/def/`) and illustrative
+  coordinates, in place of a real structure. Every case keeps its assertion;
+  the test binaries are now `example_bridge_conformance` and
+  `example_bridge_viewer_e2e`. The layered-reference seed bundle, Spark's prompt
+  examples, the docs and the unit-test fixtures use fictional names as well.
+- **`geof:distance` and `geof:buffer` honour a metre unit on a geographic
+  CRS.** With `uom:metre` (or `kilometre`, `centimetre`, `millimetre`) on a CRS84
+  or EPSG:4326 operand, `geof:distance` returned the planar distance in
+  *degrees* and `geof:buffer` buffered by that many degrees — the unit was
+  ignored. Both are geodesic on the WGS84 ellipsoid now, the same as
+  `geof:metricDistance` / `geof:metricBuffer`: London–Paris with `uom:metre` is
+  343 923.120, not 3.63, and a `uom:metre` radius of 1000 is a kilometre, not a
+  thousand degrees. On a projected CRS (RD New, Web Mercator) both stay planar in
+  the CRS's own metres, as before, but `geof:buffer` now converts a kilometre
+  (centimetre, millimetre) radius, which it used to take as metres. An angular
+  unit on a geographic CRS keeps the planar degree distance, now converted for
+  `uom:radian` (it was returned in degrees); without a unit nothing changes.
+  **This changes results** for every query, shape or saved query that passes
+  `uom:metre` with CRS84 or EPSG:4326 geometry — `FILTER(geof:distance(?a, ?b,
+  uom:metre) < 25)` over lon/lat data used to compare degrees with 25 and so
+  held for almost everything, and now compares metres. The bundled "Distance
+  from a city" saved query, labelled metres, now returns metres.
 - **The Triple Browser sends its whole scope, remembers it, and offers the
   query behind the view.** A selection mixing datasets with an organisation
   sent only part of itself — and one dataset plus one organisation matched no
@@ -1216,6 +1296,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The shapes catalog's prompts and notices are translated.** The name
   prompts when composing or registering a shape graph, and the notices that
   followed, were English whatever the interface language.
+- **`geof:getSRID` of a GML literal returned its opening tag as a CRS IRI**
+  (`<gml:Point srsName=…>` read as a `<crs>` prefix — an invalid IRI in the
+  results). It returns CRS84 now, the CRS the other functions already treat a
+  GML literal as being in (`srsName` is not read yet); a GeoJSON literal is
+  CRS84 by definition.
+- **A blank `LLM_GATEWAY_URL` falls back to the built-in default.** It was used
+  as given, so `LLM_GATEWAY_URL=` (as an `--env-file` line with no value
+  produces) sent every probe and completion to a relative URL that could never
+  answer, instead of to `http://127.0.0.1:8000`; a value with surrounding
+  whitespace was not trimmed either. It is now read like the other `LLM_*`
+  settings: trimmed, and unset or blank means the default.
 - **Deactivating a SPARQL service did not stop it answering.** `PUT
   /api/datasets/:dataset_id/services/:service_id` with `"is_active": false`
   stored the flag, and the dataset page greyed the service out and stopped
@@ -2276,6 +2367,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   attributed versions mark their licence record "may have been modified"
   before they run, and an admin update that names no graph is followed by a
   re-check of every checked copy.
+- **A group's membership could be read and rewritten from any organisation's
+  path.** The three group-member endpoints — `GET` / `POST
+  /api/organisations/:org_id/groups/:group_id/members` and `DELETE
+  …/members/:user_id` — checked only the caller's role in the `org_id` taken from
+  the path (the segment the caller controls), never that `group_id` actually
+  belonged to that organisation. An admin of *any* organisation could therefore
+  list another org's group membership, add members to it — **including
+  themselves, escalating into a tenant they had no authority over** — or remove
+  members from it, simply by naming the foreign group under their own org's path.
+  The sibling `get_group` / `update_group` / `delete_group` handlers already
+  guarded this; the three member handlers now apply the same check, confirming
+  the group belongs to the path's organisation before any read or write and
+  answering `404` on a mismatch — for platform admins too, so the endpoints
+  cannot be used to probe which group ids exist either.
+- **A non-publisher could make a dataset public by editing it.** `PUT
+  /api/datasets/:id` gated a visibility change on *manage* rights alone, while
+  `create_dataset` gates public *creation* on the publish capability. A user who
+  could manage a dataset but held no publish capability could therefore create it
+  private and then `PUT` it public, bypassing the publisher gate that creation
+  enforces. `update_dataset` now requires publisher rights for the transition
+  into public, matching creation (`is_publisher()` still covers platform admins).
+  Only that transition is gated: an unchanged or narrowing visibility — including
+  editing an already-public dataset's metadata, which the frontend resends with
+  the current visibility on every save — is unaffected.
 - **Several read endpoints leaked private-graph content — and one leaked
   non-public asset bytes — to anyone who could read the dataset.** A private
   dataset graph is meant to be visible only to a writer (owner / maintainer /
@@ -3017,7 +3132,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **Opt-in port fallback** (`--port-fallback` / `PORT_FALLBACK`, default
     off): when the requested port is busy, bind any free port instead of
     refusing to start (`src/netutil.rs`), rewriting the advertised base URL
-    used for service-registry self-registration to match. Upstream's default
+    used for service-registry self-registration to match. The default
     "refuse to start on a busy port" behavior is unchanged unless this is set.
 - **IFC → linked data**: bulk import accepts `.ifc` files — stored as a downloadable
   dataset asset and transformed into a BOT topology graph (storeys/elements,
@@ -3025,7 +3140,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`src/ifc/`). Graph Store reads gain `?format=` (turtle/jsonld/rdfxml/ntriples/
   trig/nquads) with download disposition, and assets gain an anonymous-capable
   `…/download` route gated by dataset visibility.
-- **Schependomlaan demo** replaces the Waalbrug example: the canonical open Dutch
+- **Schependomlaan demo** replaces the bridge example: the canonical open Dutch
   BIM dataset (Nijmegen, CC BY 4.0) is fetched on first boot (`SEED_IFC_URL`),
   with the real 3DBAG LoD2.2 city block (CC BY 4.0) bundled for the map.
 - **Viewer**: in-browser IFC rendering (web-ifc) with per-element picking —
@@ -3112,8 +3227,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   names (`da:`, `geo:`, `geof:` …) parse instead of being silently skipped.
 - Per-constraint `sh:severity` on a `sh:SPARQLConstraint` node (e.g. `sh:Warning`) now
   overrides the shape-level severity for that constraint's results.
-- Waalbrug reference-example conformance fixtures (`tests/fixtures/waalbrug/`) and an
-  oracle (`tests/waalbrug_conformance.rs`) encoding the IMBOR/NEN 2660-2 GeoSPARQL +
+- Reference-example conformance fixtures (a bridge; now `tests/fixtures/example-bridge/`) and an
+  oracle (now `tests/example_bridge_conformance.rs`) encoding a GeoSPARQL +
   SHACL (Core/SPARQL/AF) pass/fail matrix.
 - SHACL **complex property paths** are now parsed from RDF: sequence paths `( p1 p2 … )`,
   `sh:inversePath`, `sh:alternativePath`, `sh:zeroOrMorePath`, `sh:oneOrMorePath` and
@@ -3132,7 +3247,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (e.g. `sh:minExclusive`), reported with the expression's `sh:message`.
 - SHACL-AF **`sh:SPARQLFunction`**: user-defined functions (`sh:parameter`/`sh:order`/
   `sh:select` + `sh:prefixes`) are registered as callable SPARQL functions, usable from
-  queries, SHACL-SPARQL constraints and rules (e.g. `ex:afstandMeter`). Bodies are
+  queries, SHACL-SPARQL constraints and rules (e.g. `ex:distanceMetres`). Bodies are
   evaluated against a fresh in-memory store, fully supporting expression-style functions.
 - **Viewer feed** endpoint `GET /api/datasets/:id/viewer-feed`: per-element geometry +
   3D-file references resolved from the BOT/OMG/FOG/GeoSPARQL layering — labels, types,
@@ -3142,7 +3257,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `sh:ValidationReport` as RDF into `urn:system:reports:dataset:{id}` (replaced per run),
   so dashboards can query failures via SPARQL; severity rollup stays on the run rows.
 - **3D & Map Viewer demo dataset** (`viewer-3d-demo`) in the standards demo seed: the
-  Waalbrug bridge (EPSG:28992, IFC/glTF refs) plus real Wikidata landmarks (CC0 —
+  reference bridge (EPSG:28992, IFC/glTF refs) plus real Wikidata landmarks (CC0 —
   Dragon Bridge Da Nang, Big Ben, White House, Empire State Building, Sannō Shrine)
   whose open 3D models live on Wikimedia Commons, and a synthetic CityJSON LoD2
   demo block (EPSG:7415, semantic roof/wall/ground surfaces) bundled with the
@@ -3168,7 +3283,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   overlay. Resource detail pages show a 3D model (BIM) card with IFC GlobalId and
   file links (following named `hasGeometry` nodes one hop), and the geometry map
   gains a *to scale* toggle driven by the model's measured real-world size.
-  **Projected-CRS WKT (e.g. the Waalbrug demo's EPSG:28992) is now reprojected
+  **Projected-CRS WKT (e.g. EPSG:28992 RD New) is now reprojected
   client-side before plotting** — previously raw map previews plotted projected
   coordinates as lon/lat. Dark mode is supported across all maps and 3D scenes.
 - **Official conformance suites in CI**: the W3C SHACL core test suite and the OGC
@@ -3176,7 +3291,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tests/fixtures/{w3c-shacl,ogc-geosparql}/` and run with a two-way ratchet (unlisted
   tests must pass, listed known-failures must still fail). Scorecards:
   W3C core 46 pass / 52 known-fail / 15 aux skips; OGC examples 44/48 matching, and the
-  Waalbrug dataset round-trips through the official GeoSPARQL validator. See
+  reference bridge dataset round-trips through the official GeoSPARQL validator. See
   `docs/conformance/`.
 
 - **Spark chat is now an interactive linked-data canvas.** Assistant answers render

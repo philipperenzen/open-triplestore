@@ -1,7 +1,7 @@
 //! Validate-and-commit orchestration (Unified Accounts plan, Phase 4).
 //!
 //! `POST /api/datasets/validate-and-commit` runs SHACL validation on an external
-//! validation platform (forwarding the caller's bearer token, on-behalf-of) and,
+//! validation service (forwarding the caller's bearer token, on-behalf-of) and,
 //! **only if the data conforms**, imports it and snapshots a new dataset version
 //! with a commit message — into a brand-new private dataset (default) or a
 //! caller-specified existing dataset (ACL-checked). Commit is gated on `conforms`
@@ -27,7 +27,7 @@ use super::models::{DatasetVersion, VersionStatus};
 use super::{registry, reports, snapshot};
 
 /// A graph supplied inline (`ttl`) or by OTS reference — forwarded verbatim to
-/// the Validation Platform, whose contract uses these exact (snake_case) fields.
+/// the external validation service, whose contract uses these exact (snake_case) fields.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct GraphSourceIn {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,7 +83,7 @@ struct ValidatorResponse {
     report: String,
 }
 
-/// Call the Validation Platform `/validate`, forwarding the caller's token.
+/// Call the external validation service's `/validate`, forwarding the caller's token.
 async fn run_validation(
     bearer: &str,
     body: &ValidateAndCommitRequest,
@@ -93,7 +93,7 @@ async fn run_validation(
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| {
             AppError::BadRequest(
-                "Validation Platform not configured (set VALIDATION_API_URL)".to_string(),
+                "External validation service not configured (set VALIDATION_API_URL)".to_string(),
             )
         })?;
     let req = ValidatorRequest {

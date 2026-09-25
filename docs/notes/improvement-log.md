@@ -450,7 +450,7 @@ top-level case — a check that cannot be evaluated is a failure, never a pass.
   unfiltered. `docs/security.md` says so.
 
 Two fixtures the change exposed, both fixed rather than worked around:
-`tests/waalbrug_conformance.rs` loaded `shapes-af.ttl` alone although that
+`tests/example_bridge_conformance.rs` loaded `shapes-af.ttl` alone although that
 file's own header says its rule, target and function bodies need the
 `ex:prefixes` declaration from `shapes-sparql.ttl` — so its SPARQL target had
 never parsed and that shape validated nothing; and a SPARQL target is
@@ -580,7 +580,7 @@ documenting that is the cheapest win in the whole analysis.
 
 | Check | Result |
 |---|---|
-| `cargo test` over the thirteen binaries the P0 follow-ups touch (shacl_conformance, api_protocol_conformance, w3c_shacl_conformance, shacl_studio_http, shacl_pipeline_integration, shacl_rules_conformance, shaclc_conformance, security_shacl_studio, ogc_geosparql_shacl_roundtrip, standards_conformance, standards_demo_e2e, nen2660_relations_bundle, waalbrug_conformance) | **139 passed, 0 failed, 0 ignored**; W3C SHACL 119 pass / 2 known-fail / 15 skips, unchanged |
+| `cargo test` over the thirteen binaries the P0 follow-ups touch (shacl_conformance, api_protocol_conformance, w3c_shacl_conformance, shacl_studio_http, shacl_pipeline_integration, shacl_rules_conformance, shaclc_conformance, security_shacl_studio, ogc_geosparql_shacl_roundtrip, standards_conformance, standards_demo_e2e, nen2660_relations_bundle, example_bridge_conformance) | **139 passed, 0 failed, 0 ignored**; W3C SHACL 119 pass / 2 known-fail / 15 skips, unchanged |
 | `cargo fmt --all --check` | clean |
 | `cargo clippy --workspace --all-targets --features <same> -- -D warnings` | clean |
 | `scripts/conformance_table.py --check` | regenerated (SHACL Core 13→15, Protocol 16→17), check passes |

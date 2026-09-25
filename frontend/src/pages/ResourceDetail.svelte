@@ -23,7 +23,7 @@
   const model3d = () => import('../components/viewer/Model3D.svelte');
 
   // GeoSPARQL/OMG geometry often hangs off a *named* node
-  // (wb:Boog geo:hasGeometry wb:geom-boog; wb:geom-boog geo:asWKT "...").
+  // (eb:Arch geo:hasGeometry eb:geom-arch; eb:geom-arch geo:asWKT "...").
   // browseResource only inlines blank nodes, so follow hasGeometry objects one
   // hop and harvest their WKT + model-file values too.
   let hopWkts = [];
