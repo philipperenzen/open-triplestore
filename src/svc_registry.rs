@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use tracing::{debug, info};
 
-/// The logical name this service advertises. Mirror of `service-registry/registry/names.py`.
+/// The logical name this service advertises in the service registry.
 const SERVICE_NAME: &str = "triplestore";
 const TTL_SECONDS: u64 = 30;
 

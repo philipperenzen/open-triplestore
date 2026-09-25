@@ -2348,7 +2348,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **Opt-in port fallback** (`--port-fallback` / `PORT_FALLBACK`, default
     off): when the requested port is busy, bind any free port instead of
     refusing to start (`src/netutil.rs`), rewriting the advertised base URL
-    used for service-registry self-registration to match. Upstream's default
+    used for service-registry self-registration to match. The default
     "refuse to start on a busy port" behavior is unchanged unless this is set.
 - **IFC → linked data**: bulk import accepts `.ifc` files — stored as a downloadable
   dataset asset and transformed into a BOT topology graph (storeys/elements,

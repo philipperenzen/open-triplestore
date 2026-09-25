@@ -1,7 +1,7 @@
 //! Networking helpers backing the opt-in `--port-fallback` / `PORT_FALLBACK`
 //! flag (default off — see `server::run`'s listener-bind step).
 //!
-//! Upstream's default behavior is to refuse to start when the requested port
+//! The default behaviour is to refuse to start when the requested port
 //! is already in use (see the `AddrInUse` branch in `server::run`), rather
 //! than silently binding somewhere else. Some deployments — e.g. a CI matrix
 //! or a fork that runs many instances on one host — prefer "just find a free
