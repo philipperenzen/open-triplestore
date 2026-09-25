@@ -504,6 +504,8 @@ pub struct CreateServiceRequest {
 pub struct UpdateServiceRequest {
     pub name: String,
     pub description: Option<String>,
+    /// `false` switches the service's SPARQL endpoint off (404 to every caller
+    /// until reactivated); omitted leaves it unchanged.
     pub is_active: Option<bool>,
 }
 
