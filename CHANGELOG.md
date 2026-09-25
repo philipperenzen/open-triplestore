@@ -2080,6 +2080,33 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checked against the pipeline's creator and skipped when they may no longer
   read its scope. Run summaries (counts only) stay listed to everyone who can
   see the pipeline.
+- **Any reader could block writes to a graph with a gating pipeline.** A
+  SHACL Studio pipeline with `gate_writes` refuses (422) every write its
+  shapes reject to the graphs it covers, for everyone, the graphs' owners and
+  editors included. Creating or updating one checked only read access to its
+  scope, so any signed-in user could gate a public dataset with shapes that
+  reject everything and block every write to it. Setting a gate now needs
+  what a validation-layer binding, which gates writes the same way, needs:
+  write access to every dataset it covers (dataset targets, and
+  `dataset_ids` while no `graph_iris` narrow the scope) and a graph-ACL write
+  grant on every graph it names (graph targets, `graph_iris`). Admins pass.
+  Anything else answers 403, and a dataset that does not exist 404. A
+  pipeline that only validates still needs read access alone. The gate acts
+  with its creator's authority, checked at every write, so a gating pipeline
+  stored before this release, or one whose creator has since lost that write
+  access or been deactivated, no longer gates. The server logs a warning at
+  each write such a pipeline would have gated.
+- **A database error lifted every SHACL write gate it touched.** Finding a
+  write's gates read a failed lookup as "nothing found": an error listing the
+  gating pipelines dropped every `gate_writes` pipeline, an error finding the
+  graph's dataset dropped the dataset-scoped pipelines, the dataset's
+  validation-layer bindings and its `shacl_on_write` gate, and a failed
+  binding query dropped the bindings. The write then landed unvalidated, on
+  the Graph Store path and on bulk import alike. A failed lookup now refuses
+  the write with the existing 422 and a `gate-evaluation-failure` report, as
+  any other gate the server cannot evaluate does; a bulk import is refused
+  before anything is written. The Graph Store path's `shacl_on_write` gate
+  refuses the same way when its own dataset lookup fails.
 - **A pipeline's persisted report was readable by everyone who could read its
   dataset.** A run that persists its report as RDF (`results_target`), or its
   inferred triples in a new graph, attached that graph to the dataset holding

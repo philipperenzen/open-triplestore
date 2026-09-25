@@ -1615,7 +1615,15 @@ pub(crate) fn validate_on_write(
 
     let dataset = match state.auth_db.find_dataset_by_graph_iri(iri) {
         Ok(Some(ds)) => ds,
-        _ => return Ok(()), // no owning dataset found — skip validation
+        Ok(None) => return Ok(()), // no owning dataset — no dataset gate
+        // A failed lookup is not "no dataset": it would skip the gate.
+        Err(e) => {
+            return Err(AppError::ValidationFailed(
+                crate::shacl_studio::gate::gate_error(format!(
+                    "looking up the dataset holding <{iri}>: {e}"
+                )),
+            ))
+        }
     };
 
     if !dataset.shacl_on_write {

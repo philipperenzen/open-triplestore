@@ -1823,8 +1823,8 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     mount(paths, "/api/shacl/pipelines", vec![
         (M::Get, o("Validation", "List pipelines", "The saved validation pipelines the caller may read.",
             vec![], vec![("200", "Array of pipelines")], true)),
-        (M::Post, o("Validation", "Create a pipeline", "Body: `{name, description?, visibility?, owner_type?, owner_id?, targets: [{kind, id}], shape_graph_ids, severity_threshold?, run_inference?, max_results?, gate_writes?, triggers…}`. A target is a dataset, a graph or a shape graph. Every dataset, data graph and shape graph in the scope must be readable by the caller.",
-            vec![], vec![("201", "The pipeline"), ("400", "Invalid body"), ("403", "Scope not readable, or a write target not writable")], true)),
+        (M::Post, o("Validation", "Create a pipeline", "Body: `{name, description?, visibility?, owner_type?, owner_id?, targets: [{kind, id}], shape_graph_ids, severity_threshold?, run_inference?, max_results?, gate_writes?, triggers…}`. A target is a dataset, a graph or a shape graph. Every dataset, data graph and shape graph in the scope must be readable by the caller. With `gate_writes`, every dataset and graph the gate covers must also be writable by the caller: the gate refuses writes for everyone who writes them.",
+            vec![], vec![("201", "The pipeline"), ("400", "Invalid body"), ("403", "Scope not readable, a write target not writable, or a gated dataset or graph not writable"), ("404", "A gated dataset does not exist")], true)),
     ]);
     mount(
         paths,
@@ -1846,12 +1846,12 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Validation",
                     "Update a pipeline",
-                    "Same body as creation. Every dataset, data graph and shape graph in the scope must be readable by the caller.",
+                    "Same body as creation. Every dataset, data graph and shape graph in the scope must be readable by the caller, and with `gate_writes` every dataset and graph the gate covers writable.",
                     vec![],
                     vec![
                         ("200", "The pipeline"),
-                        ("403", "Not manageable, or scope not readable"),
-                        ("404", "Not found"),
+                        ("403", "Not manageable, scope not readable, or a gated dataset or graph not writable"),
+                        ("404", "Not found, or a gated dataset does not exist"),
                     ],
                     true,
                 ),
