@@ -37,7 +37,7 @@ development trunk, and let the maintainer cut releases off it.
 | Branch | Role | Who writes to it | Protected |
 |---|---|---|---|
 | **`develop`** | Active development trunk and the repository's **default branch**. All feature/fix PRs target it; full CI and the perf-regression gate run here. | Contributors via PR (squash/merge by maintainer). | Yes |
-| **`main`** | Latest **stable release**. `develop` is merged into `main` at release time; every release is an annotated `vX.Y.Z` tag on `main`. The Docker `latest` tag tracks `main`. | Maintainer, via the release PR only. | Yes |
+| **`main`** | Latest **stable release**. `develop` is merged into `main` at release time; every release is an annotated `vX.Y.Z` tag on `main`. The Docker `latest` tag is built from the newest release tag (by `release.yml`), so it matches `main` only while `main` advances at release time alone. | Maintainer, via the release PR only. | Yes |
 | **`release/X.Y`** | Version/maintenance branch, cut from each minor's tag, for backporting security/critical fixes to older supported lines. Patch releases `vX.Y.(Z+1)` are cut here. | Maintainer, via backport PRs. | Yes |
 | **`<area>/<topic>`** | Short-lived feature/fix branches (e.g. `fix/…`, `security/…`, `frontend/…`). Opened as PRs against `develop`. | Contributors (on their fork) and maintainer. | No |
 
@@ -80,9 +80,14 @@ are DCO-signed (`git commit -s`), including the version bump.
    ```bash
    git switch main
    git pull --ff-only
-   git tag -a v0.2.1 -m "$(awk '/^## \[0.2.1\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md)"
+   git tag -a v0.2.1 --cleanup=whitespace \
+     -m "$(awk '/^## \[0.2.1\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md)"
    git push origin v0.2.1
    ```
+
+   `--cleanup=whitespace` matters: git's default cleanup mode for a tag message
+   strips every line that starts with `#`, which silently deletes the section's
+   `### Added` … `### Security` headers from the tag.
 
 5. **CI takes over.** Pushing the `vX.Y.Z` tag triggers the release automation (see
    [How CI reacts to tags](#how-ci-reacts-to-tags)): a GitHub Release is published
