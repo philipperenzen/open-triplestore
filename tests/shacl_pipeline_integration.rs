@@ -789,14 +789,16 @@ async fn g_explicit_shapes_graph_override() {
         "override must validate against the named graph only: {body}"
     );
 
-    // A non-admin without a read grant on the override graph gets 403.
+    // A non-admin without a read grant on the override graph gets 403. u2 is
+    // not a writer of dsg, so their runs are test runs (recording one needs
+    // write access): the only check left to refuse them is the shapes-graph read.
     let u2 = mk_user(&state, "u2");
     let (status, body) = validate(
         &state,
         Some(&u2),
         "dsg",
         Some(&json!({ "shapes_graph": lenient })),
-        false,
+        true,
     )
     .await;
     assert_eq!(
@@ -815,7 +817,7 @@ async fn g_explicit_shapes_graph_override() {
         Some(&u2),
         "dsg",
         Some(&json!({ "shapes_graph": lenient })),
-        false,
+        true,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "granted read must pass: {body}");
