@@ -1576,9 +1576,12 @@ fn apply_triple_label_filter(
 /// the dataset's shapes graph. Returns `Err(AppError::ValidationFailed)` if
 /// validation fails. Also enforces SHACL Studio write-gates (pipelines +
 /// validation-layer bindings). Shared with the validate-and-commit path so a
-/// commit cannot bypass the dataset's effective shapes.
+/// commit cannot bypass the dataset's effective shapes. A refusal's report
+/// goes to `writer` (`None`: anonymous) less the shapes they may not read
+/// ([`crate::shacl_studio::gate::report_for_writer`]).
 pub(crate) fn validate_on_write(
     state: &AppState,
+    writer: Option<&AuthenticatedUser>,
     graph_iri: Option<&str>,
     data: &str,
     format: oxigraph::io::RdfFormat,
@@ -1601,6 +1604,7 @@ pub(crate) fn validate_on_write(
             auth_db: &state.auth_db,
             studio: &studio,
             base_url: &state.base_url,
+            writer,
         };
         if let Err(report) =
             crate::shacl_studio::gate::check_write_gates(ctx, iri, data, format, mode)
@@ -1690,7 +1694,14 @@ pub(crate) fn validate_on_write(
     );
 
     if !report.conforms {
-        return Err(AppError::ValidationFailed(report));
+        return Err(AppError::ValidationFailed(
+            crate::shacl_studio::gate::report_for_writer(
+                &state.auth_db,
+                writer,
+                report,
+                &[shapes_graph_iri],
+            ),
+        ));
     }
 
     Ok(())
@@ -1840,6 +1851,7 @@ async fn graph_store_put(
 
     validate_on_write(
         &state,
+        user.as_deref(),
         params.graph_iri(),
         &data,
         format,
@@ -1931,6 +1943,7 @@ async fn graph_store_post(
 
     validate_on_write(
         &state,
+        user.as_deref(),
         params.graph_iri(),
         &data,
         format,
@@ -7810,6 +7823,8 @@ fn resolve_shapes_graphs(sources: DatasetShapesSources) -> Vec<String> {
 const NO_SHAPES_GRAPH_MSG: &str = "No shapes graph found for this dataset. Upload a SHACL \
      shapes file, set a graph's role to 'shapes', or bind a shape graph in SHACL Studio.";
 
+const NO_READABLE_SHAPES_GRAPH_MSG: &str = "No shapes graph of this dataset is one you may read.";
+
 /// Merge per-shapes-graph validation reports into one: conforms = all conform,
 /// results concatenated, results_count = sum.
 fn merge_validation_reports(
@@ -7846,10 +7861,12 @@ fn merge_validation_reports(
 /// validated, so a run reads only the dataset graphs its caller may read, by
 /// the rule a `/sparql` query is scoped to
 /// ([`crate::auth::acl::readable_graph_iris`]: a private graph only for the
-/// dataset's writers, plus graph-ACL read grants); admins read them all. A
-/// run that could not see every graph of the dataset is not official: it is
-/// answered as a test run (`test: true`, `partial: true`), records nothing and
-/// leaves the dataset's official status as it was.
+/// dataset's writers, plus graph-ACL read grants); admins read them all. The
+/// same goes for its shapes: a private graph of any dataset shapes only the
+/// runs of who may read it. A run that could not see every graph or shapes
+/// graph of the dataset is not official: it is answered as a test run
+/// (`test: true`, `partial: true`), records nothing and leaves the dataset's
+/// official status as it was.
 pub async fn validate_dataset(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -7915,6 +7932,15 @@ pub async fn validate_dataset(
         .map(|e| e.graph_iri.as_str())
         .filter(|g| !may_read(g))
         .collect();
+    // Graphs some dataset holds as private: a shapes graph may be another
+    // dataset's, linked or bound here.
+    let private_graphs = state
+        .auth_db
+        .list_private_dataset_graph_iris()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Whether the run leaves out a shapes graph of the dataset the caller may
+    // not read: then it is not the dataset's run either.
+    let mut shapes_withheld = false;
 
     // Resolve the shapes graph(s): explicit body override, else configured /
     // bound / shapes-role sources.
@@ -7950,16 +7976,22 @@ pub async fn validate_dataset(
             return Err((StatusCode::BAD_REQUEST, NO_SHAPES_GRAPH_MSG.to_string()));
         }
         // A graph of the dataset the caller may not read (a private
-        // shapes-role graph) shapes no run of theirs, whichever source names
-        // it: its messages and paths would reach them in the report.
-        let resolved: Vec<String> = resolve_shapes_graphs(sources)
-            .into_iter()
-            .filter(|g| !hidden.contains(g.as_str()))
+        // shapes-role graph), or another dataset's private graph linked or
+        // bound here, shapes no run of theirs, whichever source names it: its
+        // messages and paths would reach them in the report.
+        let all = resolve_shapes_graphs(sources);
+        let resolved: Vec<String> = all
+            .iter()
+            .filter(|g| {
+                !hidden.contains(g.as_str()) && (may_read(g) || !private_graphs.contains(*g))
+            })
+            .cloned()
             .collect();
+        shapes_withheld = resolved.len() < all.len();
         if resolved.is_empty() {
             return Err((
                 StatusCode::BAD_REQUEST,
-                "No shapes graph of this dataset is one you may read.".to_string(),
+                NO_READABLE_SHAPES_GRAPH_MSG.to_string(),
             ));
         }
         // Self-heal: shapes graphs that never made it into the Studio Library
@@ -8035,10 +8067,10 @@ pub async fn validate_dataset(
 
     // A test run validates but records nothing — no run row, so it doesn't
     // count officially and the dataset's stored status is left unchanged. A
-    // run that could not see every graph of the dataset is one: a caller who
-    // may not read the whole dataset must not overwrite its official status
-    // with a partial result.
-    let partial = !hidden.is_empty();
+    // run that could not see every graph or shapes graph of the dataset is
+    // one: a caller who may not read the whole dataset must not overwrite its
+    // official status with a partial result.
+    let partial = !hidden.is_empty() || shapes_withheld;
     // Recording an official run sets the dataset's stored status and history:
     // a write. A reader whose run was COMPLETE (nothing hidden) would otherwise
     // record it — evicting the owner's history, forging a verdict, or setting
@@ -8075,6 +8107,7 @@ pub async fn validate_dataset(
         &report,
         Some(current_user.user_id.as_str()),
         &data_graphs,
+        &shapes_graphs,
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -8093,22 +8126,39 @@ pub async fn validate_dataset(
                 !entries.iter().any(|e| &e.graph_iri == g)
                     && !crate::conformance::model_graph_readable(&state, None, g)
             });
-        match place_dataset_report_graph(&state.auth_db, &dataset_id, &report_graph, private) {
-            Ok(()) => {
-                let report_iri = format!("{report_graph}#run-{}", summary.id);
-                let ttl = crate::shacl_studio::report_rdf::report_to_turtle(&report, &report_iri);
-                if let Err(e) = state.store.graph_store_put(
-                    Some(&report_graph),
-                    &ttl,
-                    oxigraph::io::RdfFormat::Turtle,
-                ) {
-                    debug!("report-RDF persistence skipped: {e}");
-                }
+        // A shapes graph another dataset holds as private is read by that
+        // dataset's writers, not by this one's, and a graph registered here
+        // is read by this one's at least: no report of such a run is written,
+        // and the last one is cleared rather than left to stand for it.
+        let foreign_private_shapes = shapes_graphs
+            .iter()
+            .any(|g| private_graphs.contains(g) && !entries.iter().any(|e| &e.graph_iri == g));
+        if foreign_private_shapes {
+            if let Err(e) = clear_dataset_report_graph(&state, &dataset_id) {
+                tracing::warn!(
+                    "dataset {dataset_id}: the last report in <{report_graph}> could not be \
+                     cleared: {e}"
+                );
             }
-            Err(e) => tracing::warn!(
-                "dataset {dataset_id}: skipped report write to <{report_graph}>: who may read \
+        } else {
+            match place_dataset_report_graph(&state.auth_db, &dataset_id, &report_graph, private) {
+                Ok(()) => {
+                    let report_iri = format!("{report_graph}#run-{}", summary.id);
+                    let ttl =
+                        crate::shacl_studio::report_rdf::report_to_turtle(&report, &report_iri);
+                    if let Err(e) = state.store.graph_store_put(
+                        Some(&report_graph),
+                        &ttl,
+                        oxigraph::io::RdfFormat::Turtle,
+                    ) {
+                        debug!("report-RDF persistence skipped: {e}");
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    "dataset {dataset_id}: skipped report write to <{report_graph}>: who may read \
                  it could not be settled: {e}"
-            ),
+                ),
+            }
         }
     }
 
@@ -8162,14 +8212,76 @@ fn place_dataset_report_graph(
     Ok(())
 }
 
+/// Empty `dataset_id`'s report graph: its last report may not stand where the
+/// dataset's readers read it.
+fn clear_dataset_report_graph(state: &AppState, dataset_id: &str) -> anyhow::Result<()> {
+    let report_graph = format!("urn:system:reports:dataset:{dataset_id}");
+    state
+        .store
+        .update(&format!("CLEAR SILENT GRAPH <{report_graph}>"))
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// `graph_iri` has just been made private in a dataset: every dataset's report
+/// graph holding a report on it follows. A report graph holds its dataset's
+/// latest official run; when that run validated the graph, or was shaped by
+/// it, the report graph is made private where the dataset holds the graph
+/// privately (its writers read it), and cleared where the dataset does not
+/// hold it (a shapes graph linked from another dataset: see
+/// `validate_dataset`). Where the dataset holds it non-private, its readers
+/// read the graph through it anyway. A run stored before runs recorded their
+/// graphs counts as reading every graph of its dataset. Stored runs need
+/// nothing: `stored_run_view` checks at every read.
+pub(crate) fn report_graphs_follow_private_graph(
+    state: &AppState,
+    graph_iri: &str,
+) -> anyhow::Result<()> {
+    let db = &state.auth_db;
+    for (dataset_id, latest_run) in db.list_datasets_with_report_graph()? {
+        let entry = db
+            .list_dataset_graph_entries(&dataset_id)?
+            .into_iter()
+            .find(|e| e.graph_iri == graph_iri);
+        if entry.as_ref().is_some_and(|e| !e.private) {
+            continue;
+        }
+        let holds = entry.is_some();
+        let read = match &latest_run {
+            None => false,
+            Some(run) => match (
+                db.get_validation_run_graphs(run)?,
+                db.get_validation_run_shapes_graphs(run)?,
+            ) {
+                (None, _) => holds,
+                (Some(data), shapes) => {
+                    data.iter().any(|g| g == graph_iri)
+                        || shapes.is_some_and(|s| s.iter().any(|g| g == graph_iri))
+                }
+            },
+        };
+        if !read {
+            continue;
+        }
+        let report_graph = format!("urn:system:reports:dataset:{dataset_id}");
+        if holds {
+            db.set_dataset_graph_private(&dataset_id, &report_graph, true)?;
+        } else {
+            clear_dataset_report_graph(state, &dataset_id)?;
+        }
+    }
+    Ok(())
+}
+
 /// Count severities, serialize the report, and store a validation run with
-/// the graphs it validated (`data_graphs`).
+/// the graphs it validated (`data_graphs`) and the shapes graphs it validated
+/// them against (`shapes_graphs`).
 fn persist_validation_run(
     state: &AppState,
     dataset_id: &str,
     report: &crate::shacl::report::ValidationReport,
     triggered_by: Option<&str>,
     data_graphs: &[String],
+    shapes_graphs: &[String],
 ) -> anyhow::Result<crate::auth::models::ShaclRunSummary> {
     use crate::shacl::report::Severity;
     let mut violation_count = 0i64;
@@ -8206,11 +8318,12 @@ fn persist_validation_run(
             tracing::warn!("validation run {}: metrics not stored: {e}", summary.id);
         }
     }
-    // What the run validated: its report goes in full only to who may read
-    // all of it (`stored_run_view`). Unrecorded, it goes to writers only.
+    // What the run validated, and against what: its report goes in full only
+    // to who may read all of it (`stored_run_view`). Unrecorded, it goes to
+    // writers only.
     if let Err(e) = state
         .auth_db
-        .set_validation_run_graphs(&summary.id, data_graphs)
+        .set_validation_run_graphs(&summary.id, data_graphs, shapes_graphs)
     {
         tracing::warn!(
             "validation run {}: validated graphs not stored, so its report goes to the \
@@ -8225,30 +8338,48 @@ fn persist_validation_run(
 /// nodes and values of every graph the run validated, so it goes in full to
 /// admins, the dataset's writers, and callers who may read each of those
 /// graphs now (by the `/sparql` rule, or the model registry's for a model
-/// graph); a graph made private since the run counts as private. Anyone else
-/// gets the run's summary: `report` is null and `report_withheld` true. A run
-/// stored before runs recorded their graphs goes in full to writers only.
+/// graph); a graph made private since the run counts as private. It also
+/// names its shapes, their paths and messages, so it is withheld from anyone
+/// but an admin who may not read a shapes graph it used that some dataset
+/// holds as private now, the dataset's writers included: one linked from
+/// another dataset need not be theirs to read. Anyone else gets the run's
+/// summary: `report` is null and `report_withheld` true. A run stored before
+/// runs recorded their graphs goes in full to writers only.
 fn stored_run_view(
     state: &AppState,
     user: &AuthenticatedUser,
     dataset: &crate::auth::models::Dataset,
     run: crate::auth::models::ShaclValidationRun,
 ) -> anyhow::Result<serde_json::Value> {
-    let full = user.is_admin()
-        || state.auth_db.can_write_dataset(&user.user_id, dataset)?
-        || match state.auth_db.get_validation_run_graphs(&run.id)? {
+    let shapes_withheld = !user.is_admin()
+        && match state.auth_db.get_validation_run_shapes_graphs(&run.id)? {
             None => false,
-            Some(graphs) => {
-                let readable = crate::auth::acl::readable_graph_iris(
-                    &state.auth_db,
-                    Some((user.user_id.as_str(), user.role.as_str())),
-                )?;
-                graphs.iter().all(|g| {
-                    readable.contains(g)
-                        || crate::conformance::model_graph_readable(state, Some(&user.user_id), g)
-                })
+            Some(shapes) => {
+                let withheld =
+                    crate::auth::acl::withheld_private_graphs(&state.auth_db, Some(user))?;
+                shapes.iter().any(|g| withheld.contains(g))
             }
         };
+    let full = user.is_admin()
+        || (!shapes_withheld
+            && (state.auth_db.can_write_dataset(&user.user_id, dataset)?
+                || match state.auth_db.get_validation_run_graphs(&run.id)? {
+                    None => false,
+                    Some(graphs) => {
+                        let readable = crate::auth::acl::readable_graph_iris(
+                            &state.auth_db,
+                            Some((user.user_id.as_str(), user.role.as_str())),
+                        )?;
+                        graphs.iter().all(|g| {
+                            readable.contains(g)
+                                || crate::conformance::model_graph_readable(
+                                    state,
+                                    Some(&user.user_id),
+                                    g,
+                                )
+                        })
+                    }
+                }));
     let mut view = serde_json::to_value(run)?;
     if !full {
         view["report"] = serde_json::Value::Null;
@@ -8385,7 +8516,9 @@ pub async fn list_latest_validation_runs(
 /// GET /api/datasets/:dataset_id/shapes — get shapes graph
 ///
 /// Supports `Accept: text/shaclc` or `?format=shaclc` to return SHACLC compact syntax.
-/// Default is Turtle.
+/// Default is Turtle. A shapes graph some dataset holds as private is served
+/// only to who may read it, by the rule a `/sparql` query is scoped to; 404
+/// when that leaves none.
 pub async fn get_shapes(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -8409,9 +8542,25 @@ pub async fn get_shapes(
 
     // Same resolution order as validate_dataset: configured shapes_graph_iri,
     // Studio bindings, then shapes-role dataset graphs.
-    let shapes_graphs = resolve_shapes_graphs(dataset_shapes_sources(&state, &dataset));
-    if shapes_graphs.is_empty() {
+    let resolved = resolve_shapes_graphs(dataset_shapes_sources(&state, &dataset));
+    if resolved.is_empty() {
         return Err((StatusCode::NOT_FOUND, NO_SHAPES_GRAPH_MSG.to_string()));
+    }
+    // A graph some dataset holds as private goes only to who may read it, by
+    // the rule a `/sparql` query is scoped to (admins read every graph): this
+    // dataset's private shapes-role graph to its writers, not its viewers,
+    // and another dataset's, linked or bound here, to that one's.
+    let withheld = crate::auth::acl::withheld_private_graphs(&state.auth_db, Some(&current_user))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let shapes_graphs: Vec<String> = resolved
+        .into_iter()
+        .filter(|g| !withheld.contains(g))
+        .collect();
+    if shapes_graphs.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            NO_READABLE_SHAPES_GRAPH_MSG.to_string(),
+        ));
     }
 
     // Detect SHACLC format request via query param or Accept header

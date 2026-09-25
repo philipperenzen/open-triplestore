@@ -56,7 +56,7 @@ fn run_due(store: &TripleStore, auth_db: &AuthDb, base_url: &str) {
         // access to the pipeline's scope, or is no longer a user, gets no run,
         // and so no report for the pipeline's viewers to open.
         let unreadable = ReadScope::for_creator(auth_db, p.created_by.as_deref())
-            .and_then(|reader| pipeline_unreadable(auth_db, &studio, &p, &reader));
+            .and_then(|reader| pipeline_unreadable(store, auth_db, &studio, base_url, &p, &reader));
         match unreadable {
             Ok(None) => {}
             Ok(Some(what)) => {

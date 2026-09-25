@@ -304,6 +304,7 @@ pub async fn validate_and_commit(
     // the graph's whole future state.
     crate::server::routes::validate_on_write(
         &state,
+        Some(&user),
         Some(&graph_iri),
         &data_ttl,
         RdfFormat::Turtle,

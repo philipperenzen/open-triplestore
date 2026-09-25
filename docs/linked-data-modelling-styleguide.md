@@ -472,6 +472,8 @@ pipeline for trend analysis.
 
 The triplestore does **not** render forms. It publishes the dataset and its
 attached shapes so an external form platform can load them itself.
+A graph some dataset holds as private (a private shapes graph, a private data
+graph) is in the manifest only for a caller who may read it.
 The contract is one endpoint per dataset:
 
 ```

@@ -4422,6 +4422,19 @@ pub async fn patch_dataset_graph_role(
     if let Some(private) = req.private {
         db.set_dataset_graph_private(&dataset_id, &req.graph_iri, private)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        // A validation report on the graph goes with it.
+        if private {
+            crate::server::routes::report_graphs_follow_private_graph(&state, &req.graph_iri)
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!(
+                            "The graph is private now, but the validation reports on it could \
+                             not all follow: {e}"
+                        ),
+                    )
+                })?;
+        }
     } else {
         let graph_role = parse_graph_role(req.graph_role.as_deref())?;
         db.set_dataset_graph_role(&dataset_id, &req.graph_iri, graph_role)
@@ -4896,7 +4909,9 @@ pub async fn delete_user(
 ///   - a graph that already holds data only when the caller may read it: a
 ///     graph-ACL read grant, a Library entry they may see, or the shapes
 ///     graph of a dataset they may read (sharing one dataset's shapes with
-///     another).
+///     another);
+///   - never a graph some dataset holds as private that they may not read
+///     by the `/sparql` rule, however else they may see it.
 fn gate_shapes_graph_link(
     state: &AppState,
     dataset_id: &str,
@@ -4915,8 +4930,7 @@ fn gate_shapes_graph_link(
         dataset_id,
         graph_iri,
     )?;
-    if user.is_admin() || dataset_graph::dataset_owns_graph(&state.base_url, dataset_id, graph_iri)
-    {
+    if user.is_admin() {
         return Ok(());
     }
     let db = &state.auth_db;
@@ -4927,6 +4941,15 @@ fn gate_shapes_graph_link(
              feature."
         )
     };
+    // A private graph is read by its dataset's writers (and graph-ACL
+    // readers) only. Seeing that dataset, or a Library entry of the graph,
+    // does not make it the caller's to read. A lookup error refuses.
+    if crate::auth::acl::private_graph_withheld(db, Some(user), graph_iri).unwrap_or(true) {
+        return Err(refused());
+    }
+    if dataset_graph::dataset_owns_graph(&state.base_url, dataset_id, graph_iri) {
+        return Ok(());
+    }
     let orgs = db.get_user_org_ids(&user.user_id).unwrap_or_default();
     let library_entry_visible = || {
         crate::shacl_studio::store::ShaclStudioStore::new(db.pool())

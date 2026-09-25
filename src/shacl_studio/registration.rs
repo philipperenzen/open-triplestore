@@ -9,7 +9,7 @@
 //! `PUT /api/datasets/:id/shapes`, dataset-validation self-healing and the
 //! boot backfill in [`super::migrate`].
 
-use crate::auth::models::{Dataset, GraphKind};
+use crate::auth::models::{Dataset, GraphKind, Visibility};
 use crate::server::AppState;
 
 use super::bindings;
@@ -115,6 +115,16 @@ pub fn auto_register_dataset_shapes_graph(
         format!("{} shapes", dataset.name)
     };
 
+    // The entry takes the dataset's visibility, but a graph a dataset holds
+    // as private is its writers' to read, not its viewers': its entry is
+    // private (the owner and their organisation), and whoever may not read
+    // the graph gets no entry of it whatever its visibility says, then or
+    // after it is widened (`crate::auth::acl::withheld_private_graphs`).
+    let visibility = if state.auth_db.is_private_dataset_graph(graph_iri)? {
+        Visibility::Private
+    } else {
+        dataset.visibility
+    };
     let set = studio.create_shape_graph(
         &name,
         Some(&format!(
@@ -123,7 +133,7 @@ pub fn auto_register_dataset_shapes_graph(
         )),
         dataset.owner_type,
         &dataset.owner_id,
-        dataset.visibility,
+        visibility,
         graph_iri,
         &["imported".to_string(), format!("dataset:{}", dataset.id)],
         ShapeSource::Imported,

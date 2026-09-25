@@ -208,13 +208,34 @@ writers and to callers who may read every graph the run validated; anyone else
 gets the run's summary (counts, `conforms`) with `"report": null` and
 `"report_withheld": true`.
 
+A report also carries its shapes' messages, paths and shape IRIs, so shapes
+follow the same rule. A graph some dataset holds as private shapes only the
+runs of who may read it: the dataset's private shapes-role graph, or another
+dataset's private graph linked or bound as shapes here. A run that leaves one
+out is a test run too. `GET /api/datasets/<id>/shapes` and the form manifest
+serve such a graph only to who may read it (`GET …/shapes` answers 404 when
+that leaves none). Linking one as a dataset's shapes graph
+(`PUT /api/datasets/<id>/shacl`) needs that right too. Its readers may link
+it into another dataset all the same: that dataset's runs then use it, and its
+own writers need not be allowed to read it.
+
+So a stored run also records the shapes graphs it used, and its full report
+is withheld from anyone but an admin who may not read one of them that some
+dataset holds as private when they ask, the dataset's writers included. An
+official run shaped by another dataset's private graph writes no report
+graph, and clears the last one. Making a graph private
+(`PATCH /api/datasets/<id>/graphs` with `"private": true`) takes the report
+graphs on it along: a dataset whose latest official run validated the graph,
+or was shaped by it, has its report graph made private when it holds the
+graph and cleared when it does not.
+
 ---
 
 ## Validation on Write
 
 When `shacl_on_write` is `true` on a dataset and a `shapes_graph_iri` is configured, every `PUT` or `POST` to `/store?graph=<graph-iri>` that targets a graph belonging to the dataset is validated before the write is committed.
 
-If validation fails, the write is rejected with **422 Unprocessable Entity** and the JSON report is returned. The store is not modified.
+If validation fails, the write is rejected with **422 Unprocessable Entity** and the JSON report is returned. The store is not modified. A report names the gate's shapes, their paths and messages: when the shapes that refused the write include a graph some dataset holds as private that the writer may not read, the 422 says only that the write does not conform, and by how many results. The same holds for every write gate below, and for bulk import.
 
 The gate fails **closed**: a gate that cannot be evaluated refuses the write with the same 422 and a report naming the cause, never a 204. That covers a shapes graph that cannot be read or copied, a validation-engine error, and an ill-formed shapes graph — in particular a `sh:sparql` constraint whose `sh:select` does not parse (or errors at evaluation) is a violation of the focus node, not a constraint that silently never fires. Loading such a shapes graph for on-demand validation fails with an error for the same reason.
 
@@ -331,13 +352,15 @@ curl -X POST http://localhost:7878/api/shacl/register-shape-graph \
 
 Every Studio write checks that right again: save, restore, import shapes, and a visibility change of an adopted graph. Managing a Library entry is enough on its own only for a graph the Studio minted for it (`urn:shapes:…`). So a dataset's shapes graph is edited in the Studio by the members who may write the dataset, not by an org viewer, as with `PUT /api/datasets/{id}/shapes`.
 
+A dataset's shapes graph is adopted into the Library in place when the dataset is validated or imported into, or when its shapes graph or graph roles change. The entry takes the dataset's visibility, except for a graph the dataset holds as private, whose entry is `private`. An entry's visibility does not decide who reads a private graph, however: an entry of a graph some dataset holds as private is shown to, and worked on by, only those who may read that graph by the `/sparql` rule (its dataset's writers, graph-ACL read grants, admins). That covers the entry, its Turtle, revisions and clone, the Library list, bindings, effective shapes, the catalogue and pipelines. It holds for an entry made before the graph was marked private, too, and marking the graph public again gives the entry back.
+
 Impact — *what data a shape graph is applied to* — is the reverse binding lookup: `GET /api/shacl/bindings?shape_graph_id=<shape_graph_id>` → `{ shape_graph_id, targets: [ …IRIs ] }`.
 
 ### Pipelines & targets
 
 A pipeline is a saved, runnable validation. Its scope is a set of **targets** — any mix of datasets, graphs, and shape graphs — plus composed shape graphs, a severity threshold, and triggers (manual, on-write, cron). When `gate_writes` is set, writes covered by the pipeline are gated. See `POST /api/shacl/pipelines`; the request body's `targets` is an array of `{ "kind": "dataset"|"graph"|"shapegraph", "id": "…" }`.
 
-A run's report carries the data it validated (focus nodes and values), so a pipeline's whole scope — every dataset, every data graph it resolves to and every shape graph it composes — must be readable by whoever creates or updates it, runs or test-runs it, or opens a stored run's report (`GET /api/shacl/pipelines/{id}/runs/{run_id}`); anything else answers 403. Reading follows the `/sparql` rule above, and a Library shape graph is readable by whoever the Library shows it to. The check is made each time, so a revoked grant takes effect at the next run. A scheduled run is checked against the pipeline's creator and skipped when they may no longer read its scope. Run summaries (`…/runs`, counts only) are listed to everyone who can see the pipeline. A report persisted as RDF (`results_target`) or inferred triples written to a new graph are attached to a dataset only when that dataset holds every graph the run validated, and are private there when any of them is private. The pipeline's own report graph collects every run, so a run over other data first detaches it, and it is attached again only while empty.
+A run's report carries the data it validated (focus nodes and values), so a pipeline's whole scope — every dataset, every data graph it resolves to and every shape graph it composes — must be readable by whoever creates or updates it, runs or test-runs it, or opens a stored run's report (`GET /api/shacl/pipelines/{id}/runs/{run_id}`); anything else answers 403. Reading follows the `/sparql` rule above, and a Library shape graph is readable by whoever the Library shows it to. The shapes bound to a dataset or graph in scope come with it, except a graph some dataset holds as private that the caller may not read: a pipeline with one in scope answers 403. The check is made each time, so a revoked grant takes effect at the next run. A scheduled run is checked against the pipeline's creator and skipped when they may no longer read its scope. Run summaries (`…/runs`, counts only) are listed to everyone who can see the pipeline. A report persisted as RDF (`results_target`) or inferred triples written to a new graph are attached to a dataset only when that dataset holds every graph the run validated, and are private there when any of them is private. The pipeline's own report graph collects every run, so a run over other data first detaches it, and it is attached again only while empty.
 
 ### Meta-validation (SHACL-SHACL)
 

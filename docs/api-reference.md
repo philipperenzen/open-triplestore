@@ -68,7 +68,7 @@ Three facts worth knowing before an instance is exposed:
 | `POST` | `/api/datasets/{dataset_id}/assets` | **token** | Upload a file. |
 | `POST` | `/api/datasets/{dataset_id}/validate` | **token** | Run SHACL validation over the dataset graphs the caller may read; a run that could not read them all is a test run. |
 | `GET` | `/api/datasets/{dataset_id}/validation/latest` | **token** | The dataset's last validation run; its full report only for those who may read every graph it validated. |
-| `GET` | `/api/datasets/{dataset_id}/shapes` | **token** | The dataset's shapes graph. |
+| `GET` | `/api/datasets/{dataset_id}/shapes` | **token** | The dataset's shapes graph; a private one only for those who may read it. |
 | `PUT` | `/api/datasets/{dataset_id}/shapes` | **token** | Replace the shapes graph (`text/shaclc` or RDF). |
 | `GET` | `/api/organisations` | **none** | Anonymously, only organisations that own something public. |
 | `POST` | `/api/organisations` | **admin** | Provisioning an organisation is an operator action. |

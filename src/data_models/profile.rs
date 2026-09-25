@@ -1083,12 +1083,25 @@ pub fn readable_model(
 /// `sh:in` value sets and its labels are its owner's, and this endpoint would
 /// otherwise be a way around the Studio's own listing rule. A bound graph the
 /// Studio has no record for declares no owner and is admitted.
+///
+/// Whatever the Studio says, a graph some dataset holds as private is admitted
+/// only for who may read it by the `/sparql` rule
+/// ([`crate::auth::acl::withheld_private_graphs`]); if that cannot be settled,
+/// no shape graph is.
 pub(crate) fn shape_sources(
     state: &AppState,
-    user_id: Option<&str>,
+    user: Option<&AuthenticatedUser>,
     model_id: &str,
     version: &DataModelVersion,
 ) -> Vec<ShapeSourceRef> {
+    let user_id = user.map(|u| u.user_id.as_str());
+    let withheld = match crate::auth::acl::withheld_private_graphs(&state.auth_db, user) {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!("model profile: private graphs could not be settled, so no shapes: {e}");
+            return Vec::new();
+        }
+    };
     let mut version_graphs: Vec<String> = vec![version.graph_iri.clone()];
     version_graphs.extend(version.sub_graphs.iter().cloned());
     version_graphs.sort();
@@ -1096,6 +1109,7 @@ pub(crate) fn shape_sources(
 
     let mut out: Vec<ShapeSourceRef> = shape_bearing_graphs(&state.store, &version_graphs)
         .into_iter()
+        .filter(|g| !withheld.contains(g))
         .map(|graph_iri| ShapeSourceRef {
             graph_iri,
             origin: "version-graph",
@@ -1121,7 +1135,7 @@ pub(crate) fn shape_sources(
         .unwrap_or_default();
     let mut seen: BTreeSet<String> = out.iter().map(|s| s.graph_iri.clone()).collect();
     for (target, graph_iri) in bindings_for_targets(&state.store, &targets) {
-        if seen.contains(&graph_iri) {
+        if seen.contains(&graph_iri) || withheld.contains(&graph_iri) {
             continue;
         }
         // A graph the Studio has a record for carries an owner and a
@@ -1195,7 +1209,7 @@ fn bindings_for_targets(store: &TripleStore, targets: &[String]) -> Vec<(String,
 /// derivation is testable without an HTTP round trip.
 pub fn build_profile(
     state: &AppState,
-    user_id: Option<&str>,
+    user: Option<&AuthenticatedUser>,
     model: &DataModelRecord,
     version: &DataModelVersion,
 ) -> OntologyProfile {
@@ -1204,7 +1218,7 @@ pub fn build_profile(
     version_graphs.sort();
     version_graphs.dedup();
 
-    let sources = shape_sources(state, user_id, &model.id, version);
+    let sources = shape_sources(state, user, &model.id, version);
     let shape_graphs: Vec<String> = sources.iter().map(|s| s.graph_iri.clone()).collect();
 
     // Text and lists are read over both sets: a shape's `sh:in` members and
@@ -1287,11 +1301,11 @@ pub async fn get_model_profile(
     user: Option<Extension<AuthenticatedUser>>,
     Path((id, ver)): Path<(String, String)>,
 ) -> ApiResult<Json<OntologyProfile>> {
-    let uid = user.as_ref().map(|Extension(u)| u.user_id.as_str());
-    let model = readable_model(&state, uid, &id)?;
+    let user = user.as_ref().map(|Extension(u)| u);
+    let model = readable_model(&state, user.map(|u| u.user_id.as_str()), &id)?;
     let version = registry::get_version(&state.store, &state.base_url, &id, &ver)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Version '{ver}' not found")))?;
-    Ok(Json(build_profile(&state, uid, &model, &version)))
+    Ok(Json(build_profile(&state, user, &model, &version)))
 }
 
 pub fn routes() -> Router<AppState> {

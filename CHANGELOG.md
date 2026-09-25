@@ -2126,6 +2126,80 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - An explicit `shapes_graph` must be readable by the same rule. It used to
     need a graph-ACL grant, so a graph of a dataset the caller may read now
     works too.
+- **A dataset's private shapes graph reached everyone who could view the
+  dataset.** A graph marked private in a dataset is its writers' to read, but
+  four paths served a private shapes graph to the dataset's viewers:
+  - `GET /api/datasets/{id}/shapes` returned it.
+  - The SHACL Studio Library adopts a dataset's shapes graph in place when the
+    dataset is validated or imported into, or when its shapes graph or graph
+    roles change, and gave the entry the dataset's visibility. A public
+    dataset's private shapes graph became a public Library entry: its Turtle,
+    its revisions (revision 1 is a copy), a clone, the Library list, bindings,
+    effective shapes, the catalogue and pipelines were open to every signed-in
+    user.
+  - That adoption also bound the graph to the dataset, and the form manifest
+    (`GET /api/datasets/{id}/form-manifest`, anonymous for a public dataset)
+    carries the Turtle of every bound shapes graph, so anonymous callers got it.
+  - `PUT /api/datasets/{id}/shacl` let anyone who could see a dataset link its
+    shapes graph as the shapes graph of a dataset of their own, then read it
+    from there.
+
+  Now a graph some dataset holds as private is read only by those who may read
+  it by the rule `/sparql` applies (its dataset's writers, graph-ACL read
+  grants, admins), whatever names it:
+  - `GET …/shapes`, validation runs and the form manifest leave out a private
+    shapes graph the caller may not read, whether it is this dataset's or
+    another's linked or bound here. `GET …/shapes` answers 404 when nothing is
+    left, the manifest no longer lists private data graphs to them either, and
+    a validation run that leaves out a shapes graph is a test run.
+  - A private graph is adopted as a `private` Library entry. Every Library path
+    that reads an entry (the entry, its Turtle, revisions, clone, the list,
+    bindings, effective shapes, the catalogue, pipelines, re-registration)
+    withholds an entry of a private graph from those who may not read the
+    graph, whatever the entry's visibility. That covers entries adopted before
+    this release and graphs marked private after adoption, with no migration.
+    Marking the graph public again gives the entry back.
+  - Linking a private graph the caller may not read as a shapes graph is
+    refused (403).
+  - A validation report names its shapes, their paths and messages, so it
+    follows the same rule:
+    - A write a gate refuses (Graph Store `PUT`/`POST`, validate-and-commit,
+      bulk import; by a binding, a gating pipeline or `shacl_on_write`)
+      answers a writer who may not read one of that gate's private shapes
+      graphs with only that the write does not conform, and by how many
+      results. The write is refused all the same.
+    - A stored run records the shapes graphs it used. Its full report is
+      withheld from anyone but an admin who may not read one of them that is
+      private when they ask, the dataset's writers included: a dataset's
+      writer may link its private shapes graph into another dataset, whose
+      writers need not be allowed to read it.
+    - An official run shaped by another dataset's private graph writes no
+      report graph, and clears the last one.
+    - A pipeline with such a graph bound to a dataset or graph in its scope
+      is refused (403) to whoever may not read it.
+    - The model profile (`GET /api/models/{id}/versions/{ver}/profile`, which
+      any user may read with a `sources:read` token they mint) and the SQL
+      source dry run leave out a private shapes graph the caller may not
+      read, whether it is bound to the model or named in the request or the
+      mapping.
+  - Making a graph private (`PATCH /api/datasets/{id}/graphs`) takes the
+    validation reports on it along. A dataset whose latest official run
+    validated the graph, or was shaped by it, has its report graph made
+    private when it holds the graph and cleared when it does not. A data
+    graph made private after a run used to leave that run's report graph
+    readable to the dataset's viewers.
+- **A SQL-source dry run was shaped by any graph its caller named.**
+  `POST /api/sources/{id}/dry-run` validates a sample of a mapping and returns
+  the report: the shapes' IRIs, paths and messages. Any user may mint the
+  `mappings:propose` token it accepts, and it validated against whatever
+  shapes graph the request or the mapping named (a proposer writes mappings
+  too): a graph of a private dataset, a graph registered to no dataset, or a
+  private model's shapes named through `model` + `modelVersion`. Now a named
+  shapes graph applies only when the caller may read it by the rule `/sparql`
+  applies, or through the endpoint that already serves it to them (a SHACL
+  Studio Library entry they are shown, a graph of a model version they may
+  read). A model's shapes apply only when the caller may read the model. For
+  anyone else they are left out with a warning. Admins read every graph.
 - **Detaching or deleting a dataset could wipe graphs it never owned.**
   `DELETE /api/datasets/{id}/graphs` deleted any graph no other dataset
   claimed, so any user who could create a dataset could wipe the model
