@@ -566,6 +566,20 @@ async fn execute_query(
         Some(scope_query_to_authorized(query, &accessible))
     };
 
+    // Fail-closed read boundary (non-admins only). Capture the graphs the caller
+    // may read now, before the text-search block consumes `accessible`; the
+    // server-owned entailment graph (added additively below) is folded in once it
+    // is known. The final query is checked against this set just before execution,
+    // so a literal-spliced or unstripped `FROM` clause cannot widen the read past
+    // it. Admins are scoped additively over every registered graph, so they are
+    // exempt. See [`ensure_query_within_scope`].
+    let mut guard_scope: Option<std::collections::HashSet<String>> =
+        if user.map(|u| u.is_admin()).unwrap_or(false) {
+            None
+        } else {
+            Some(accessible.clone())
+        };
+
     // Full-text preprocessing: `text:search` expansion + CONTAINS/STRSTARTS
     // push-down (text-search feature). Runs on the already-scoped query, and
     // is handed the same graph set so index hits obey the same read boundary.
@@ -641,6 +655,11 @@ async fn execute_query(
     };
     let entailment_query: String;
     let query = if let Some(iri) = entailment_graph {
+        // The regime graph is server-owned and added additively, so it is part of
+        // the readable scope for the guard below.
+        if let Some(scope) = guard_scope.as_mut() {
+            scope.insert(iri.clone());
+        }
         entailment_query =
             inject_from_clauses(query, &format!("FROM <{iri}>\nFROM NAMED <{iri}>\n"));
         &entailment_query as &str
@@ -650,6 +669,13 @@ async fn execute_query(
 
     let effective_query = resolve_prefixes(state, query).await;
     let effective_query_str = effective_query.as_deref().unwrap_or(query).to_string();
+
+    // Fail-closed: the rewritten non-admin query must name only graphs the caller
+    // may read (see [`ensure_query_within_scope`]). Runs before the query reaches
+    // the store, so an out-of-scope graph is a 403, never a read.
+    if let Some(allowed) = &guard_scope {
+        ensure_query_within_scope(&effective_query_str, allowed)?;
+    }
 
     // M-1: Enforce a configurable SPARQL query timeout to prevent runaway queries.
     let timeout = std::time::Duration::from_secs(state.query_timeout_secs);
@@ -4963,10 +4989,13 @@ pub async fn browse_suggest(
                     .can_access_dataset(user_id, &ds)
                     .unwrap_or(false) =>
             {
+                // Scope to the graphs this caller may READ: a viewer (or an
+                // anonymous caller on a public dataset) must not get private
+                // graphs' values suggested. Writers still see everything.
                 Some(
                     state
                         .auth_db
-                        .list_dataset_graphs(ds_id)
+                        .list_readable_dataset_graphs(user_id, &ds)
                         .map_err(|e| AppError::Internal(e.to_string()))?,
                 )
             }
@@ -5176,11 +5205,15 @@ async fn execute_dataset_query(
         return Err(AppError::NotFound("Dataset not found".to_string()));
     }
 
-    // Find the service and its graphs
+    // Find the service and its graphs. A deactivated service answers exactly like
+    // a missing one, for every caller — the dataset's writers included: switching
+    // a service off is how an owner stops its endpoint answering (the dataset page
+    // stops showing its URL), and a writer can reactivate it or use /sparql.
     let service = state
         .auth_db
         .get_sparql_service_by_slug(dataset_id, service_slug)
         .map_err(|e| AppError::Internal(e.to_string()))?
+        .filter(|s| s.is_active)
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
 
     // When a version is pinned, scope to that version's snapshot graphs instead of
@@ -5200,7 +5233,23 @@ async fn execute_dataset_query(
                 .list_dataset_graphs(dataset_id)
                 .map_err(|e| AppError::Internal(e.to_string()))?
         } else {
+            // Serve only graphs the dataset holds. Adding a graph checks this,
+            // but a row made before it did, one an admin added ahead of
+            // registering its graph, or one whose graph was detached since
+            // would otherwise read a graph outside the dataset — another
+            // tenant's, or a `urn:system:` graph. A service left with none
+            // serves nothing; it does not widen to the whole dataset.
             service_graphs
+                .into_iter()
+                .filter(|g| {
+                    crate::auth::dataset_graph::dataset_holds_graph(
+                        &state.auth_db,
+                        &state.base_url,
+                        dataset_id,
+                        g,
+                    )
+                })
+                .collect()
         }
     };
 
@@ -5309,6 +5358,12 @@ pub(crate) async fn run_scoped_sparql(
     // Auto-resolve prefixes
     let resolved = resolve_prefixes(state, &effective_query).await;
     let final_query_str = resolved.as_deref().unwrap_or(&effective_query).to_string();
+
+    // Fail-closed read boundary: confirm the rewritten query names only `graph_set`
+    // (the service/saved-query scope), so a literal-spliced or unstripped `FROM`
+    // clause cannot widen it to graphs outside the service. See
+    // [`ensure_query_within_scope`].
+    ensure_query_within_scope(&final_query_str, graph_set)?;
 
     // Stream serialisation through a channel so large CONSTRUCT/DESCRIBE
     // results are not fully buffered before the first byte is sent.
@@ -5620,13 +5675,143 @@ pub(crate) fn scope_query_to_authorized(
     format!("{head_clean}{sep}{from_clauses}{tail}")
 }
 
+/// The IRI a scoped-but-empty caller is pinned to (see `scope_query_to_authorized`).
+/// Always allowed by [`ensure_query_within_scope`]: it is server-injected and holds
+/// no data, so a query pinned to it returns nothing.
+const EMPTY_SCOPE_GRAPH: &str = "urn:empty:graph";
+
+/// Fail-closed post-condition for the read boundary: after
+/// [`scope_query_to_authorized`] (and any server-owned `FROM` injection) has
+/// rewritten a non-admin query, parse the exact text about to reach the engine
+/// and confirm its effective dataset names only graphs in `allowed`.
+///
+/// This backstops the *textual* rewriter, which cannot be made perfect: if an
+/// injected `FROM` prologue landed inside a string literal (so the query ends up
+/// with no dataset clause and reads every named graph), or a caller's
+/// `FROM`/`FROM NAMED` clause slipped past the scanner (a prefixed-name source, no
+/// space before `<`, a comment between the keyword and the IRI), the parsed query
+/// would read graphs outside `allowed`. Rather than trusting the scanner, we
+/// re-derive the dataset from the final query and refuse anything wider than the
+/// caller may read. `allowed` is `EMPTY_SCOPE_GRAPH` plus the graphs the caller
+/// may read (for the entailment path, the server-owned regime graph too).
+///
+/// A correctly-scoped non-admin query always carries the injected
+/// `FROM <g>\nFROM NAMED <g>` prologue, so `dataset` and `dataset.named` are both
+/// `Some`; either being absent means the prologue was neutralised, which we treat
+/// as a scope violation. Admins never reach here — they are scoped additively over
+/// every registered graph and read everything.
+fn ensure_query_within_scope(
+    final_query: &str,
+    allowed: &std::collections::HashSet<String>,
+) -> Result<(), AppError> {
+    use spargebra::Query;
+
+    let scope_error = || {
+        AppError::Forbidden(
+            "Query scope could not be enforced; name the graphs to read in FROM / FROM NAMED"
+                .to_string(),
+        )
+    };
+
+    // Parse with the same grammar the store analyses queries with (`try_fast_count`,
+    // `validate_sparql`). A query the engine would also reject surfaces as a 400.
+    let parsed = spargebra::SparqlParser::new()
+        .parse_query(final_query)
+        .map_err(|e| AppError::BadRequest(format!("query parse: {e}")))?;
+    let dataset = match &parsed {
+        Query::Select { dataset, .. }
+        | Query::Construct { dataset, .. }
+        | Query::Describe { dataset, .. }
+        | Query::Ask { dataset, .. } => dataset.as_ref(),
+    };
+    // No dataset clause → the query reads the whole store's named graphs.
+    let dataset = dataset.ok_or_else(scope_error)?;
+    // `FROM` without `FROM NAMED` (`named: None`) leaves every named graph readable
+    // through `GRAPH ?g { … }`; the prologue always pairs the two, so treat the
+    // asymmetry as tampering.
+    let named = dataset.named.as_ref().ok_or_else(scope_error)?;
+    for iri in dataset.default.iter().chain(named.iter()) {
+        let g = iri.as_str();
+        if g != EMPTY_SCOPE_GRAPH && !allowed.contains(g) {
+            return Err(AppError::Forbidden(format!(
+                "Query names graph <{g}>, which is outside the graphs you may read"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod query_scoping_tests {
-    use super::{extract_and_strip_dataset, first_top_level_where, scope_query_to_authorized};
+    use super::{
+        ensure_query_within_scope, extract_and_strip_dataset, first_top_level_where,
+        scope_query_to_authorized,
+    };
     use std::collections::HashSet;
 
     fn authz(iris: &[&str]) -> HashSet<String> {
         iris.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `scope_query_to_authorized` followed by the fail-closed guard: whatever the
+    /// textual rewriter produces, the guard must reject any query that would read a
+    /// graph outside the authorized set. The tuple is (verdict, the scoped query).
+    fn scope_then_guard(query: &str, iris: &[&str]) -> (bool, String) {
+        let set = authz(iris);
+        let scoped = scope_query_to_authorized(query, &set);
+        (ensure_query_within_scope(&scoped, &set).is_ok(), scoped)
+    }
+
+    #[test]
+    fn guard_admits_a_normally_scoped_query() {
+        let iris = ["http://ex.org/g/a", "http://ex.org/g/b"];
+        let (ok, scoped) = scope_then_guard("SELECT * WHERE { ?s ?p ?o }", &iris);
+        assert!(ok, "a plainly scoped query must pass: {scoped}");
+        // A caller naming one of their own graphs is fine.
+        let (ok, scoped) = scope_then_guard(
+            "SELECT * FROM NAMED <http://ex.org/g/a> WHERE { GRAPH ?g { ?s ?p ?o } }",
+            &iris,
+        );
+        assert!(ok, "naming an authorized graph must pass: {scoped}");
+    }
+
+    #[test]
+    fn guard_admits_the_empty_scope_sentinel() {
+        // A caller with nothing readable is pinned to `urn:empty:graph`; that
+        // server-injected graph must not itself trip the guard.
+        let (ok, scoped) = scope_then_guard("SELECT * WHERE { ?s ?p ?o }", &[]);
+        assert!(scoped.contains("urn:empty:graph"), "{scoped}");
+        assert!(ok, "the empty-scope sentinel must pass: {scoped}");
+    }
+
+    #[test]
+    fn guard_rejects_a_from_named_that_the_scanner_left_in_place() {
+        // No space before `<`, so `extract_and_strip_dataset` never strips it and
+        // the caller's own graph survives beside the injected prologue.
+        let iris = ["http://ex.org/g/a"];
+        let (ok, scoped) = scope_then_guard(
+            "SELECT * FROM NAMED<http://secret/private> WHERE { GRAPH ?g { ?s ?p ?o } }",
+            &iris,
+        );
+        assert!(
+            !ok,
+            "an unstripped FROM NAMED of an unauthorized graph must be refused: {scoped}"
+        );
+    }
+
+    #[test]
+    fn guard_rejects_a_prologue_spliced_into_a_string_literal() {
+        // A ` WHERE ` inside a triple-quoted literal mis-anchors the rewriter, so
+        // the injected prologue lands inside the literal and the query is left with
+        // no dataset clause — which would read every named graph in the store.
+        let iris = ["http://ex.org/g/a"];
+        let attack = "SELECT ?g ?o (\"\"\"x WHERE x\"\"\" AS ?z) \
+             WHERE { GRAPH ?g { ?s ?p ?o } }";
+        let (ok, scoped) = scope_then_guard(attack, &iris);
+        assert!(
+            !ok,
+            "a query whose scope prologue was neutralised must be refused: {scoped}"
+        );
     }
 
     /// The scoped prologue must be byte-identical for the same SET of graphs,
@@ -9142,8 +9327,30 @@ async fn reasoning_materialize(
         if !visible {
             return Err(AppError::NotFound(format!("Dataset '{ds_id}' not found")));
         }
-        let (mut layer, effective) = crate::entailment::reasoning_sources(&state, &ds);
+        let (layer, effective) = crate::entailment::reasoning_sources(&state, &ds);
         identity = effective.policy;
+        // `reasoning_sources` (via `conformance::resolve`) hands back the
+        // dataset's whole reasoning layer, its private graphs included: it does
+        // not filter on who is asking. But materialisation writes the derived
+        // consequences into a caller-chosen target the caller can read, so a
+        // viewer could launder a private graph's triples out through it. Keep
+        // only the layer graphs the caller may read — the model registry's own
+        // visibility rule still admits model graphs — exactly as the explicit
+        // `source_graphs` below are read-checked. Admins read every graph.
+        let mut layer: Vec<String> = if user.is_admin() {
+            layer
+        } else {
+            let mut kept = Vec::with_capacity(layer.len());
+            for g in layer {
+                if check_graph_read_access(&state, Some(&user), &g)
+                    .map_err(|e| AppError::Internal(e.to_string()))?
+                    || crate::conformance::model_graph_readable(&state, Some(&user.user_id), &g)
+                {
+                    kept.push(g);
+                }
+            }
+            kept
+        };
         for g in body.source_graphs.clone().unwrap_or_default() {
             if !check_graph_read_access(&state, Some(&user), &g)
                 .map_err(|e| AppError::Internal(e.to_string()))?
@@ -9460,6 +9667,24 @@ pub async fn detect_shapes(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let graph_iri = &params.graph;
 
+    // The graph IRI comes from the caller, so its shape count is only theirs to
+    // learn if the same visibility rules that gate /store and /sparql say they
+    // may read it — otherwise any signed-in principal could probe the shape
+    // count of another tenant's private shapes graph or a `urn:system:*` graph.
+    // Same gate and answer as `shaclc_serialize`. Admins bypass, because
+    // `check_graph_read_access` denies `urn:system:*` and unregistered graphs
+    // even to them, and an admin's own imports land in unregistered graphs
+    // (which is exactly what `DataImport.svelte` probes right after writing).
+    if !current_user.is_admin()
+        && !check_graph_read_access(&state, Some(&current_user), graph_iri)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "No read access to that graph".to_string(),
+        ));
+    }
+
     // Count SHACL shapes in the graph. Direct index scans, not SPARQL: this
     // probe runs right after an import (per uploaded graph), exactly when the
     // in-memory query accelerator is stale — a SPARQL aggregate here used to
@@ -9610,7 +9835,7 @@ pub async fn viewer_feed(
     // lifted footprints here would double them up and swamp the element list.
     let data_graphs: Vec<String> = state
         .auth_db
-        .list_dataset_graphs(&dataset_id)
+        .list_readable_dataset_graphs(user_id, &dataset)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .into_iter()
         .filter(|g| !g.ends_with("/ifcowl") && !is_tiles3d_graph(g))
@@ -9675,7 +9900,7 @@ pub async fn geo_stats(
     // geometry the map view does not render (see viewer_feed).
     let data_graphs: Vec<String> = state
         .auth_db
-        .list_dataset_graphs(&dataset_id)
+        .list_readable_dataset_graphs(user_id, &dataset)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .into_iter()
         .filter(|g| !g.ends_with("/ifcowl") && !is_tiles3d_graph(g))
@@ -9743,7 +9968,7 @@ pub async fn geo_stats_batch(
         }
         for g in state
             .auth_db
-            .list_dataset_graphs(id)
+            .list_readable_dataset_graphs(user_id, &dataset)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
             .into_iter()
             .filter(|g| !g.ends_with("/ifcowl") && !is_tiles3d_graph(g))

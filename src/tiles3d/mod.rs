@@ -159,9 +159,11 @@ fn authorize(
     {
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
     }
+    // Only the graphs this caller may READ: a viewer (or an anonymous caller on
+    // a public dataset) must not get 3D-Tiles built from private graphs.
     state
         .auth_db
-        .list_dataset_graphs(dataset_id)
+        .list_readable_dataset_graphs(user_id, &dataset)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 

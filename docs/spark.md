@@ -141,9 +141,10 @@ Every LLM-backed request passes a guard before any completion is spent — the
 chat and streaming endpoints, NL→SPARQL, the SHACL assistant, the saved-query
 `…/repair` route and the `/api/llm/feedback` relay. The one LLM route outside
 it is `GET /api/llm/health`: a reachability probe that spends no completion and
-carries no caller text, which the UI polls every 30 s, so it sits under the
-per-IP request governor shared with `/sparql` rather than the per-principal
-LLM budget below.
+carries no caller text, which the UI requests on demand (when a page or panel
+with an AI feature opens, and when the Service health popover opens or is
+refreshed), so it sits under the per-IP request governor shared with `/sparql`
+rather than the per-principal LLM budget below.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -166,7 +167,7 @@ Spark uses the same bring-your-own-LLM gateway as the platform's other AI featur
 
 | Variable | Purpose |
 | --- | --- |
-| `LLM_GATEWAY_URL` | Base URL of any OpenAI-compatible `/v1/chat/completions` endpoint — OpenAI, OpenRouter, Azure OpenAI, Ollama, LM Studio, vLLM, llama.cpp, or a self-hosted gateway. Defaults to `http://127.0.0.1:8000`. |
+| `LLM_GATEWAY_URL` | Base URL of any OpenAI-compatible `/v1/chat/completions` endpoint — OpenAI, OpenRouter, Azure OpenAI, Ollama, LM Studio, vLLM, llama.cpp, or a self-hosted gateway. Defaults to `http://127.0.0.1:8000` when unset or blank. |
 | `LLM_MODEL` | Model name sent on every completion (an OpenAI model id, an Ollama tag, a vLLM-served name, …). |
 | `LLM_CHAT_MODEL` | Model for Spark specifically; falls back to `LLM_MODEL`. |
 | `LLM_API_KEY` | Optional bearer token for the endpoint. Required by hosted APIs; leave unset for local servers. |
@@ -210,6 +211,37 @@ query at all gets one explicit nudge to query before answering — the model may
 decline, and its original answer is kept when it does.
 
 Availability is probed at `GET /api/llm/health`. The chat streams over `POST /api/llm/chat/stream` (SSE) so the first tokens appear while the turn is still running; `POST /api/llm/chat` is the buffered fallback.
+
+Besides `reachable`, `gateway`, `chat_model` and `context_tokens`, the health
+response carries:
+
+- `configured` — whether `LLM_GATEWAY_URL` is set to a non-blank value.
+  `false` means nobody configured an endpoint (unset or blank) and the server
+  is probing its built-in default, `http://127.0.0.1:8000`. The bundled
+  `docker-compose.yml` always sets it (to the `ollama` service unless `.env`
+  says otherwise), so a compose deployment reports `configured: true` even
+  when the `llm` profile was never started.
+- `services` — always three entries, in this order: `chat` (Spark,
+  `LLM_CHAT_MODEL`), `sparql` (NL→SPARQL and saved-query repair,
+  `LLM_SPARQL_MODEL`) and `shacl` (the SHACL Studio assistant,
+  `LLM_SHACL_MODEL`), each falling back to `LLM_MODEL`. Each has the `model` it
+  sends and `listed`: `true` when the gateway's `/v1/models` list contains that
+  model, `false` when a list came back without it, and `null` when there is no
+  list to judge by (gateway unreachable, or only its `/health` answered). The
+  match is the exact id, or Ollama's implicit tag (`llama3.2` and
+  `llama3.2:latest` are the same model), nothing looser, so a `false` is
+  worth fixing before the first completion fails.
+
+`listed` is read from the response the probe already fetched; the endpoint makes
+no extra request per model and never returns `LLM_API_KEY`. The sidebar's
+**Service health** popover fetches it when opened (and on its refresh button)
+and lists each service with its model, with a "not listed" note under any
+whose model the gateway does not list. An unreachable gateway shows yellow
+("unreachable", or "not configured" when `configured` is `false`), never red:
+the AI features are optional, and on the compose deployment above that is
+simply what an LLM that was never started looks like. LLM state never changes
+the sidebar health badge, and the container healthcheck `GET /health` never
+calls the gateway.
 
 ## Performance & serving
 

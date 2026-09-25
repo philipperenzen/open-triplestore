@@ -1815,6 +1815,46 @@ impl TripleStore {
         self.load_reader(reader, format, to_graph)
     }
 
+    /// Error if any quad names a graph other than the default graph.
+    ///
+    /// Used on write paths where the caller was authorized for exactly one graph
+    /// — an LDP resource, or a default-graph Graph Store write — so a body that
+    /// smuggles triples into another named graph (TriG/N-Quads named graphs, a
+    /// JSON-LD `@graph` with an `@id`) must be refused rather than written there,
+    /// bypassing the per-graph ACL. Callers check this *before* inserting.
+    fn reject_named_graphs(quads: &[Quad]) -> Result<(), StoreError> {
+        if let Some(q) = quads
+            .iter()
+            .find(|q| !matches!(q.graph_name, GraphName::DefaultGraph))
+        {
+            let named = match &q.graph_name {
+                GraphName::NamedNode(n) => n.as_str().to_string(),
+                _ => "_:blank".to_string(),
+            };
+            return Err(StoreError::Parse(format!(
+                "named graphs are not allowed here: the body writes into graph <{named}>. \
+                 Load multi-graph data through the dataset import API."
+            )));
+        }
+        Ok(())
+    }
+
+    /// Load `data` into the **default graph only**, rejecting a body that names a
+    /// graph of its own (see [`Self::reject_named_graphs`]). Relative IRIs resolve
+    /// against `base_iri` when given. Parses the whole body before inserting, so a
+    /// rejected body writes nothing.
+    pub fn load_str_triples_only(
+        &self,
+        data: &str,
+        format: RdfFormat,
+        base_iri: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let quads = self.parse_quads(BufReader::new(data.as_bytes()), format, base_iri, None)?;
+        Self::reject_named_graphs(&quads)?;
+        self.insert_quads_and_reindex(quads, None)?;
+        Ok(())
+    }
+
     /// Load RDF data from a string, resolving relative IRIs against `base_iri`.
     pub fn load_str_with_base(
         &self,
@@ -1932,6 +1972,15 @@ impl TripleStore {
         // nothing extra and makes the replace all-or-nothing.
         let quads = self.parse_quads(BufReader::new(data.as_bytes()), format, None, graph_iri)?;
 
+        // A default-graph PUT (`graph_iri` is None) does not force a target graph,
+        // so a quad body (TriG/N-Quads/JSON-LD `@graph`) would keep its own graph
+        // names and write into another tenant's graph, bypassing the per-graph
+        // ACL. Refuse it. A named-graph PUT is safe: `parse_quads` forced every
+        // quad into `graph_iri` above.
+        if graph_iri.is_none() {
+            Self::reject_named_graphs(&quads)?;
+        }
+
         // An empty target (a first PUT, the boot-time seed) has nothing a
         // reader could observe half-replaced and nothing a crash could lose,
         // so it keeps the bulk loader — 2.4x faster per quad than
@@ -2039,7 +2088,12 @@ impl TripleStore {
     ) -> Result<Vec<Quad>, StoreError> {
         match graph_iri {
             Some(g) => self.load_str_delta(data, format, g),
-            None => self.load_str(data, format, None).map(|_| Vec::new()),
+            // Default-graph POST: like the default-graph PUT above, refuse a body
+            // that names its own graph so it cannot be routed past the per-graph
+            // ACL into another graph.
+            None => self
+                .load_str_triples_only(data, format, None)
+                .map(|_| Vec::new()),
         }
     }
 
