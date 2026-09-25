@@ -679,7 +679,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   served at `/api-docs/openapi.json` and the interactive UI is the frontend's
   own page — which also removes the duplicate `axum` 0.8 and `zip` 3 from the
   tree. TypeScript 7 remains held: typescript-eslint has no release that
-  supports it.
+  supports it. A fourth batch, in September, brings `argon2` 0.6 (on
+  `password-hash` 0.6 the hasher draws its own 16-byte salt; password hashes
+  stored under 0.5 still verify — pinned by a regression test on real
+  0.5-minted PHC strings — and new hashes keep the same
+  `$argon2id$v=19$m=19456,t=2,p=1$` form, so a rollback reads them too),
+  `vitest` 5 (no config or test changes needed), `oxigraph` 0.5.11 with its
+  `oxrdf` / `spargebra` / `spareval` / `sparopt` / `sparesults` / `oxttl`
+  siblings in lockstep, `aes-gcm` 0.11.1 (stored OAuth client-secret blobs
+  still decrypt, pinned by a known-answer test), `tower-http` 0.7.1, `flate2`
+  1.1.10, `lru` 0.18.4, `aws-sdk-s3` 1.142, `svelte` 5.57, `vite` 8.2.2, `n3`
+  2.6, `marked`, `devalue` past GHSA-9rgm-9g3h-6x36, `uuid`,
+  `aws-smithy-http-client`, `proj4`, `dompurify`, `@codemirror/search`,
+  `@codemirror/state`, `@typescript-eslint/parser`, and the SHA-pinned
+  `softprops/action-gh-release` 3.0.3. `oxiri` 0.3 is held: its `Iri` type
+  crosses the federation service-handler API, so it has to stay on the 0.2
+  line Oxigraph still uses.
 - **Lint.** eslint 10's new `no-useless-assignment` now runs at its recommended
   `error` severity for `.js`/`.ts`, and the nine genuine dead stores it found —
   five in `.js`/`.ts`, four in plain helper functions inside components — are
@@ -726,6 +741,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **Deactivating a SPARQL service did not stop it answering.** `PUT
+  /api/datasets/:dataset_id/services/:service_id` with `"is_active": false`
+  stored the flag, and the dataset page greyed the service out and stopped
+  showing its endpoint URL, but the query route
+  (`/api/datasets/:dataset_id/services/:service_slug/sparql`) never looked at
+  it. A public dataset's service switched off by its owner kept answering
+  anyone who had the URL. An inactive service now answers `404 Service not
+  found`, the same body as a service that does not exist, on `GET` and both
+  `POST` forms, with or without `?version=`. The same answer goes to every
+  caller: the dataset's owner, its writers and a super admin get it too,
+  because "inactive" is a property of the endpoint, not of who is asking. They
+  can reactivate the service or query the dataset through `/sparql`. This did
+  not widen what anyone could read: the route still required dataset access
+  and still filtered private graphs, so the flag was a switch that did not
+  work, not a read boundary that leaked. The SPARQL editor no longer offers
+  inactive services as endpoints, or routes a version-pinned query through
+  one.
 - **A Raft member's vote survives a restart.** The vote was kept in memory with
   the log, so a member that restarted could vote a second time in the same
   term. The consequences were bounded and documented — the election timeout
@@ -1478,6 +1510,144 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `500` rather than degrading to an empty or full list), and the container
   export drops non-public assets from an anonymous export, matching
   `list_assets` / the asset download route. A writer/owner still sees everything.
+- **A write-scoped user could write into any named graph, bypassing the graph
+  ACL.** The SPARQL UPDATE path resolves and ACL-checks every named-graph write,
+  but two data-loading paths did not, because they loaded the request body while
+  keeping its embedded graph names. The Graph Store Protocol default-graph write
+  (`PUT`/`POST /store` with no `?graph`) accepted TriG, N-Quads and JSON-LD and
+  kept their graph names, and an LDP RDF Source loaded from `application/ld+json`
+  kept the body's JSON-LD named graphs (`{"@id":"<victim graph>","@graph":[…]}`).
+  The default graph and one's own LDP resource are writable without a per-graph
+  grant, so any write-scoped user — a self-registered account included — could
+  write into another tenant's private dataset graph or a `urn:system:*` graph.
+  Both paths now load **triples only**: a body that names a graph of its own is
+  rejected (`400`) and nothing is written. A `?graph`-targeted Graph Store write
+  is unaffected (every quad is forced into that one graph, which is ACL-checked),
+  and multi-graph loads still go through the dataset import API, which enforces the
+  per-graph boundary. Every released version was affected. *(Note: LDP resources
+  still follow the global RBAC rather than per-resource ACLs — see `docs/ldp.md`;
+  tightening that is tracked separately.)*
+- **`GET /api/shacl/detect-shapes?graph=<iri>` counted the SHACL shapes in any
+  named graph, for any signed-in caller.** The handler took a graph IRI from
+  the query string and scanned it for `sh:NodeShape`/`sh:PropertyShape`
+  declarations with no read check at all, so a signed-in principal could learn
+  the shape count of another tenant's private shapes graph — or of a
+  `urn:system:*` graph — simply by naming it. It now applies
+  `check_graph_read_access`, the same visibility helper that gates `/store`,
+  `/sparql` and `POST /api/shaclc/serialize`: a graph the caller may not read
+  answers `403` whether or not it exists, so it cannot be used to discover which
+  graph IRIs are present either. Admins keep their bypass, because that helper
+  denies `urn:system:*` and unregistered graphs even to them, and an admin's own
+  imports land in unregistered graphs — exactly the graph the importer probes
+  right after writing it.
+- **`POST /api/reasoning/materialize` over a `dataset` reasoned across the
+  dataset's private graphs and wrote the consequences into a graph the caller
+  can read.** The handler checked only that the caller could *access* the
+  dataset, then took its whole reasoning layer from `conformance::resolve`,
+  which lists every dataset graph without regard to who is asking. A viewer of a
+  public dataset could therefore materialise a private graph's triples — the
+  RDFS/OWL closure over data they were never allowed to see — into a
+  caller-chosen target they could read back, laundering the private data out.
+  The reasoning source set is now filtered to the graphs the caller may read
+  (admins still read all; the model registry's own visibility rule still admits
+  model graphs), exactly as the endpoint already checks any explicitly named
+  `source_graphs`. A dataset owner or other writer still reasons over the whole
+  dataset.
+- **Saved-query (API service) private-graph and lifecycle leaks.** Four fixes in
+  the `…/api-services/…/run` subsystem:
+  - A run over a **version snapshot** (`?version=<label>`, or the default run of a
+    dataset that has any version) leaked private graphs. A snapshot copies private
+    graphs into version-scoped IRIs, and the reader filter compared them against
+    *live* private IRIs, so it removed nothing — a viewer, or an anonymous caller
+    on a public dataset's API service, read them. The filter is now version-aware:
+    it maps each snapshot back to its live source graph and drops the private ones
+    for a non-writer.
+  - An **organisation/group-scoped** service read the union of *every* graph in
+    the owner's datasets, private ones included. It now includes a private graph
+    only for a caller who can write that dataset.
+  - A dataset **Editor** could make a service `public`, exposing the dataset's
+    (non-private) data to anonymous callers, without the publish rights
+    `create_dataset` requires. Setting `visibility=public` now needs manage rights
+    on the scope (and, for a dataset, the publish capability); the value is also
+    validated.
+  - Deleting a dataset, organisation or group left its API services behind, and
+    ids are reusable slugs — so a `public` service planted on an id could, after
+    the id was reused by an unrelated tenant, read the new resource's data.
+    Deletes now remove the owner's services in the same transaction, a one-time
+    sweep drops pre-existing orphans, and a dataset-scoped run/read requires the
+    dataset to exist even for a public service. Every released version was
+    affected.
+- **A dataset version's data dump and diff leaked private graphs.** A version
+  snapshot copies every graph the dataset held at the time — private ones
+  included — into version-scoped IRIs that never appear in the dataset's graph
+  list, so the private-graph filter that guards `/sparql` and the dataset-service
+  version reads was a no-op on two other version endpoints. `GET
+  /api/datasets/{id}/versions/{ver}/data` served every snapshot graph's triples,
+  and `GET /api/datasets/{id}/versions/{ver}/diff/{other}` returned private
+  triples (as an RDF-Patch) and per-graph add/remove counts keyed by the private
+  source graph's IRI, to anyone who could read the dataset — a viewer, or an
+  anonymous caller on a public dataset. Both now map each snapshot back to its
+  live source graph and drop the ones flagged private for a caller who cannot
+  write the dataset; a writer (and an admin) still sees everything. A dataset
+  with no private graph is unaffected, so legacy versions with no source map keep
+  working. Every released version was affected.
+- **The `/sparql` read boundary could be tricked into reading any graph in the
+  store, unauthenticated.** A non-admin query is scoped by rewriting its text:
+  `scope_query_to_authorized` strips the caller's `FROM` / `FROM NAMED` clauses
+  and injects a prologue naming only the graphs the caller may read. Text
+  rewriting cannot be made perfect, and two inputs slipped through. A ` WHERE `
+  (or `{`) inside a string literal mis-anchored the injection, so the prologue
+  landed **inside** the literal and the query reached the engine with no dataset
+  clause at all — reading every named graph, including other tenants' private
+  datasets and graphs flagged private, with no graph IRI needing to be known
+  (`SELECT ?g ?o ("""x WHERE x""" AS ?z) WHERE { GRAPH ?g { ?s ?p ?o } }`). And a
+  `FROM NAMED` the scanner did not recognise — a prefixed-name source,
+  `FROM NAMED<iri>` with no space, or a comment between the keyword and the IRI —
+  survived unstripped, letting the caller name a private graph directly. The same
+  rewriter also backs the dataset-service SPARQL endpoint and the saved-query
+  `…/run` API, so the bypass reached those too. An anonymous request to a public
+  dataset was enough. Every non-admin query is now checked one more time, after
+  rewriting and immediately before it reaches the engine: the exact text is
+  parsed and refused with `403` unless its dataset names only graphs the caller
+  may read (a query left with no dataset clause, or a `FROM` without a matching
+  `FROM NAMED`, is refused as tampering). The check is fail-closed and does not
+  depend on the scanner being perfect. Admins are unchanged — they are scoped
+  additively over every registered graph and may read all of it. Every released
+  version was affected.
+- **Any signed-in user could block writes to a graph with a gating
+  pipeline.** A SHACL Studio pipeline with `gate_writes` refuses (422) every
+  write its shapes reject to the graphs it covers, for everyone, the graphs'
+  owners and editors included. Creating or updating one checked only the
+  graphs the pipeline writes itself (inference and report targets), so any
+  signed-in user could gate a public dataset, or any graph they could name,
+  with shapes that reject everything and block every write to it. Setting a
+  gate now needs what a validation-layer binding, which gates writes the same
+  way, needs: write access to every dataset it covers (dataset targets, and
+  `dataset_ids` while no `graph_iris` narrow the scope) and a graph-ACL write
+  grant on every graph it names (graph targets, `graph_iris`). Admins pass.
+  Anything else answers 403, and a dataset that does not exist 404. A
+  pipeline that only validates needs no write access. The gate acts with its
+  creator's authority, checked at every write, so a gating pipeline stored
+  before this release, or one whose creator has since lost that write access
+  or been deactivated, no longer gates. The server logs a warning at each
+  write such a pipeline would have gated.
+- **A dataset's SPARQL service could read any graph in the store.** Adding
+  a graph to a service (`POST /api/datasets/{id}/services/{service_id}/graphs`)
+  checked only that the caller could write the dataset in the path. It
+  checked neither the graph nor that the service belonged to that dataset.
+  So any user who could create a dataset could scope a service to another
+  tenant's private graph or a `urn:system:` graph and read it through the
+  service, and so could everyone who could read that dataset, anonymous
+  callers on a public one included. A writer of one dataset could also read,
+  rename, delete or re-scope another dataset's service by putting its id
+  under their own dataset's path. Every `/services/{service_id}` route now
+  answers 404 for a service of another dataset. Adding a graph needs the
+  dataset to hold it (its namespace, its well-known graphs, or registered
+  to it), except for admins. A service query serves only the service graphs
+  the dataset holds when it runs, so rows made before this fix, and rows
+  whose graph was detached since, serve nothing. A service left with no
+  such graph returns nothing; it does not fall back to the whole dataset.
+  Every released version was affected.
 - **`POST /api/shaclc/serialize` read any named graph, for anyone.** It took
   a graph IRI from the request body and handed it straight to the serialiser
   — no authentication, no authorisation — so any caller could name any named

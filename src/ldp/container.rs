@@ -448,8 +448,10 @@ pub fn describe_resource(store: &TripleStore, iri: &str) -> Result<Vec<u8>, Stri
 /// Relative IRIs resolve against `iri` so an idiomatic `<>` subject (LDP's way of
 /// referring to the resource being written) attaches to the resource itself.
 pub fn load_resource_turtle(store: &TripleStore, iri: &str, turtle: &str) -> Result<(), String> {
+    // Triples-only: an LDP resource is one graph, so the body may not name a graph
+    // of its own and write outside the resource, bypassing the graph ACL.
     store
-        .load_str_with_base(turtle, oxigraph::io::RdfFormat::Turtle, iri, None)
+        .load_str_triples_only(turtle, oxigraph::io::RdfFormat::Turtle, Some(iri))
         .map_err(|e| e.to_string())
 }
 
@@ -458,13 +460,12 @@ pub fn load_resource_turtle(store: &TripleStore, iri: &str, turtle: &str) -> Res
 /// Relative IRIs resolve against `iri` (see [`load_resource_turtle`]).
 pub fn load_resource_jsonld(store: &TripleStore, iri: &str, jsonld: &str) -> Result<(), String> {
     store
-        .load_str_with_base(
+        .load_str_triples_only(
             jsonld,
             oxigraph::io::RdfFormat::JsonLd {
                 profile: Default::default(),
             },
-            iri,
-            None,
+            Some(iri),
         )
         .map_err(|e| e.to_string())
 }
