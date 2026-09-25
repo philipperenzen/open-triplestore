@@ -1,3 +1,4 @@
+use crate::auth::middleware::AuthenticatedUser;
 use crate::auth::models::{Dataset, DatasetGraphEntry, GraphKind};
 use crate::store::engine::TripleStore;
 use crate::store::escape_sparql_iri;
@@ -39,6 +40,39 @@ pub fn dataset_owns_graph(base_url: &str, dataset_id: &str, graph_iri: &str) -> 
     graph_iri.starts_with(&http_ns) || graph_iri.starts_with(&urn_ns)
 }
 
+/// Named graph IRI where a dataset's SHACL-AF inference materialises when the
+/// run spans several data graphs and no single one of them is "the" graph.
+/// Inside the dataset's own reserved namespace, so it can never be another
+/// tenant's graph and [`dataset_holds_graph`] admits it.
+pub fn dataset_inference_graph_iri(dataset_id: &str) -> String {
+    format!("urn:dataset:{dataset_id}:inferred")
+}
+
+/// True iff `graph_iri` lies in the model registry's own graph namespace,
+/// `{base}/data-model/`: every version graph (`{base}/data-model/{id}/version/{v}`),
+/// its sub-graphs and the copies the seeder keeps aside (`…/version/{v}-kept-{n}`)
+/// live under it. The registry builds these names as `{base_url}/data-model/…`
+/// without trimming, so both spellings of a base URL with a trailing slash count.
+fn in_model_registry_namespace(base_url: &str, graph_iri: &str) -> bool {
+    graph_iri.starts_with(&format!("{}/data-model/", base_url.trim_end_matches('/')))
+        || graph_iri.starts_with(&format!("{base_url}/data-model/"))
+}
+
+/// True iff `graph_iri` belongs to the model registry: the registry graph
+/// itself, any graph under `{base}/data-model/`, or a graph a version record
+/// names as its base graph or a sub-graph (seed bundles and LOV installs keep
+/// their content in graphs named after the vocabulary, not the registry).
+///
+/// Such graphs are managed only through the data-model API, which enforces
+/// their owners and licences (no altered copy of a no-derivatives work). A
+/// dataset may not claim, write or delete them. Fails closed: a registry
+/// lookup that errors, or a name that is not a valid IRI, counts as held.
+pub fn graph_held_by_model_registry(store: &TripleStore, base_url: &str, graph_iri: &str) -> bool {
+    graph_iri == crate::data_models::registry::REGISTRY_GRAPH
+        || in_model_registry_namespace(base_url, graph_iri)
+        || crate::data_models::registry::graph_held_by_version(store, graph_iri)
+}
+
 /// True iff `graph_iri` is one of the graphs the server keeps for `dataset_id`
 /// outside its namespace: its DCAT metadata and validation-report graphs, its
 /// assets graph (`{base}/datasets/{id}/assets`, plural), its property-states
@@ -56,17 +90,67 @@ pub fn dataset_well_known_graph(base_url: &str, dataset_id: &str, graph_iri: &st
             .is_some_and(|(_, id)| id == dataset_id)
 }
 
-/// Named graph IRI where a dataset's SHACL validation reports are kept.
-fn dataset_reports_graph_iri(dataset_id: &str) -> String {
-    format!("urn:system:reports:dataset:{dataset_id}")
+/// The id of the dataset whose namespace (`{base}/dataset/{id}/…` or
+/// `urn:dataset:{id}:…`) holds `graph_iri`, if any.
+pub fn namespace_dataset_id<'a>(base_url: &str, graph_iri: &'a str) -> Option<&'a str> {
+    let http_root = format!("{}/dataset/", base_url.trim_end_matches('/'));
+    let id = if let Some(rest) = graph_iri.strip_prefix(&http_root) {
+        rest.split_once('/').map(|(id, _)| id)
+    } else if let Some(rest) = graph_iri.strip_prefix("urn:dataset:") {
+        rest.split_once(':').map(|(id, _)| id)
+    } else {
+        None
+    };
+    id.filter(|id| !id.is_empty())
 }
 
-/// True iff `graph_iri` is in a *reserved* namespace owned by another dataset or
-/// the system — `urn:system:*`, `urn:dataset:{other}:*`, or
-/// `{base}/dataset/{other}/*`. A non-admin may never register or write such a
-/// graph for `dataset_id`.
-fn graph_in_foreign_reserved_namespace(base_url: &str, dataset_id: &str, graph_iri: &str) -> bool {
+/// Prefixes of graphs the server names for its own features — the SHACL
+/// Studio Library's shape graphs, datasources, their mappings, runs and dry
+/// runs, its operational `urn:ots:` graphs and its `urn:config:` settings
+/// (the mapping gates). Those features attach them to a dataset themselves; a
+/// caller naming one never may.
+const SERVER_GRAPH_PREFIXES: [&str; 7] = [
+    "urn:shapes:",
+    "urn:source:",
+    "urn:mapping:",
+    "urn:run:",
+    "urn:dryrun:",
+    "urn:ots:",
+    "urn:config:",
+];
+
+/// True iff `graph_iri` is in a *reserved* namespace: owned by another
+/// dataset (`urn:dataset:{other}:*`, `{base}/dataset/{other}/*`, and its
+/// assets, property-states and entailment graphs), the system
+/// (`urn:system:*`), the model registry (`{base}/data-model/*`) or a server
+/// feature ([`SERVER_GRAPH_PREFIXES`]). A non-admin may never register or
+/// write such a graph for `dataset_id`; the dataset's own well-known graphs
+/// ([`dataset_well_known_graph`]) are not reserved for it.
+pub fn graph_in_foreign_reserved_namespace(
+    base_url: &str,
+    dataset_id: &str,
+    graph_iri: &str,
+) -> bool {
     if graph_iri.starts_with("urn:system:") {
+        return true;
+    }
+    if in_model_registry_namespace(base_url, graph_iri) {
+        return true;
+    }
+    if dataset_well_known_graph(base_url, dataset_id, graph_iri) {
+        return false;
+    }
+    if SERVER_GRAPH_PREFIXES
+        .iter()
+        .any(|p| graph_iri.starts_with(p))
+        || graph_iri.starts_with("urn:entailment:")
+    {
+        return true;
+    }
+    let assets_root = format!("{}/datasets/", base_url.trim_end_matches('/'));
+    if graph_iri.starts_with(&assets_root)
+        || graph_iri.starts_with(&format!("{base_url}/datasets/"))
+    {
         return true;
     }
     if let Some(rest) = graph_iri.strip_prefix("urn:dataset:") {
@@ -83,11 +167,49 @@ fn graph_in_foreign_reserved_namespace(base_url: &str, dataset_id: &str, graph_i
     false
 }
 
+/// Whether the store holds any triple in `graph_iri`. Fails closed: a store
+/// error, or a name that is not an IRI, counts as holding data.
+pub fn graph_holds_data(store: &TripleStore, graph_iri: &str) -> bool {
+    use oxigraph::model::{GraphNameRef, NamedNodeRef};
+    let Ok(g) = NamedNodeRef::new(graph_iri) else {
+        return true;
+    };
+    store
+        .store()
+        .quads_for_pattern(None, None, None, Some(GraphNameRef::NamedNode(g)))
+        .next()
+        .is_some()
+}
+
+/// Whether the graph ACL names `graph_iri`: someone was granted access to it
+/// (`POST /api/admin/acl/graphs`), so it is managed there, even while it holds
+/// no data. Fails closed: a lookup error counts as named.
+pub fn graph_named_in_acl(db: &crate::auth::db::AuthDb, graph_iri: &str) -> bool {
+    db.list_graph_acl_rules(Some(graph_iri))
+        .map(|rules| !rules.is_empty())
+        .unwrap_or(true)
+}
+
+/// Whether `user` may write `graph_iri` directly, outside any dataset: an
+/// admin, or a graph-ACL write grant — what a Graph Store or SPARQL UPDATE
+/// write of it requires. A dataset role never counts: it is authority over
+/// the dataset's own graphs, not over a graph someone else made.
+pub fn may_write_graph_directly(
+    db: &crate::auth::db::AuthDb,
+    user: &AuthenticatedUser,
+    graph_iri: &str,
+) -> bool {
+    user.is_admin()
+        || db
+            .check_graph_permission(&user.user_id, user.role.as_str(), graph_iri, "write")
+            .unwrap_or(false)
+}
+
 /// Whether `dataset_id` holds `graph_iri` as one of its own graphs: inside its
-/// namespace, one of its well-known graphs, or registered to it. A non-admin
-/// registers a graph to a dataset only past [`authorize_dataset_graph_target`],
-/// so this is what the dataset may expose to its readers — a SPARQL service
-/// of the dataset serves no other graph. A lookup error counts as not held.
+/// namespace, one of its well-known graphs, or registered to it. Every path
+/// that writes on the dataset's authority writes only such graphs, and a
+/// graph reaches the registry of a dataset only through
+/// [`gate_dataset_graph_target`]. A lookup error counts as not held.
 pub fn dataset_holds_graph(
     db: &crate::auth::db::AuthDb,
     base_url: &str,
@@ -99,6 +221,23 @@ pub fn dataset_holds_graph(
         || db.dataset_has_graph(dataset_id, graph_iri).unwrap_or(false)
 }
 
+/// The ids of the datasets that hold `graph_iri` ([`dataset_holds_graph`]):
+/// the ones it is registered to, and the one whose namespace it is in (when
+/// that dataset exists). A lookup error yields none.
+pub fn datasets_holding_graph(
+    db: &crate::auth::db::AuthDb,
+    base_url: &str,
+    graph_iri: &str,
+) -> Vec<String> {
+    let mut ids = db.datasets_with_graph(graph_iri).unwrap_or_default();
+    if let Some(id) = namespace_dataset_id(base_url, graph_iri) {
+        if !ids.iter().any(|i| i == id) && matches!(db.get_dataset(id), Ok(Some(_))) {
+            ids.push(id.to_string());
+        }
+    }
+    ids
+}
+
 /// Authorize a non-admin caller naming `graph_iri` as a write/registration target
 /// for `dataset_id`.
 ///
@@ -108,9 +247,14 @@ pub fn dataset_holds_graph(
 /// writer who attached *another tenant's* graph IRI to their own dataset could read
 /// (or, via RML, write) it. The rule, mirroring the bulk-import write boundary: the
 /// graph must be the dataset's own namespaced graph, or a non-reserved external IRI
-/// that no other dataset has claimed. Admins bypass (the caller checks `is_admin`).
-/// Returns `Err(message)` on rejection (map to HTTP 403); fails closed on a
-/// registry lookup error.
+/// that no other dataset uses (registered to it, or as its shapes graph).
+/// Admins bypass (the caller checks `is_admin`). Returns `Err(message)` on
+/// rejection (map to HTTP 403); fails closed on a lookup error.
+///
+/// This is the namespace boundary only (it has no store, so it can neither see
+/// which graphs a model version names nor whether a graph holds data). A path
+/// that names a target graph calls [`gate_dataset_graph_target`], which adds
+/// both.
 pub fn authorize_dataset_graph_target(
     db: &crate::auth::db::AuthDb,
     base_url: &str,
@@ -125,20 +269,478 @@ pub fn authorize_dataset_graph_target(
     if graph_in_foreign_reserved_namespace(base_url, dataset_id, graph_iri) {
         return Err(graph_boundary_error(dataset_id, graph_iri));
     }
-    // A non-reserved external graph is allowed only if no OTHER dataset claims it
+    // A non-reserved external graph is allowed only if no OTHER dataset uses it
     // (a lookup error fails closed — treat as foreign).
-    match db.graph_has_other_dataset_refs(graph_iri, dataset_id) {
-        Ok(false) => Ok(()),
-        _ => Err(graph_boundary_error(dataset_id, graph_iri)),
+    if graph_used_by_other_dataset(db, dataset_id, graph_iri) {
+        return Err(graph_boundary_error(dataset_id, graph_iri));
     }
+    Ok(())
 }
 
 fn graph_boundary_error(dataset_id: &str, graph_iri: &str) -> String {
     format!(
         "Target graph <{graph_iri}> is outside dataset '{dataset_id}'. A dataset may only use its \
          own namespaced graphs or an unclaimed external graph — not a graph owned by another \
-         dataset or the system."
+         dataset, the system, the model registry or a server feature such as the SHACL Studio \
+         Library."
     )
+}
+
+/// How a dataset holds a graph a caller named for it, as
+/// [`gate_dataset_graph_target`] found it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphClaim {
+    /// Already registered to the dataset.
+    Registered,
+    /// Inside the dataset's namespace, one of its well-known graphs, or a
+    /// graph that holds no data yet: the dataset makes it
+    /// (`origin = 'created'`).
+    Created,
+    /// A graph that already holds data, which the caller may write directly
+    /// (an admin, or a graph-ACL write grant): the dataset takes it over
+    /// (`origin = 'adopted'`).
+    Adopted,
+}
+
+impl GraphClaim {
+    /// The `dataset_graphs.origin` a new registration records.
+    pub fn origin(self) -> Option<&'static str> {
+        match self {
+            GraphClaim::Registered => None,
+            GraphClaim::Created => Some("created"),
+            GraphClaim::Adopted => Some("adopted"),
+        }
+    }
+}
+
+/// Whether a write that `claim` let through should also register
+/// `graph_iri` to `dataset_id`, when the dataset did not name the graph
+/// itself (a mapping's `rml:graphMap`, a linked shapes graph). For a
+/// non-admin, always: the gate applied every rule. An admin's claim skips
+/// those rules, and registering would hand the graph to the dataset's
+/// editors, so it registers only a graph a non-admin could have claimed as
+/// new: empty, outside every reserved namespace, used by no other dataset and
+/// named in no graph-ACL rule. Any other graph the admin writes stays theirs;
+/// they can attach it explicitly (`POST /api/datasets/{id}/graphs`).
+pub fn claim_registers_with_dataset(
+    db: &crate::auth::db::AuthDb,
+    base_url: &str,
+    dataset_id: &str,
+    graph_iri: &str,
+    claim: GraphClaim,
+    is_admin: bool,
+) -> bool {
+    if !is_admin {
+        return true;
+    }
+    match claim {
+        GraphClaim::Registered => true,
+        GraphClaim::Adopted => false,
+        GraphClaim::Created => {
+            authorize_dataset_graph_target(db, base_url, dataset_id, graph_iri).is_ok()
+                && !graph_named_in_acl(db, graph_iri)
+        }
+    }
+}
+
+/// Register `graph_iri` to `dataset_id` the way `claim` found it: with its
+/// origin when the claim is new, as a plain (idempotent) registration when it
+/// was already registered.
+pub fn register_claimed_graph(
+    db: &crate::auth::db::AuthDb,
+    dataset_id: &str,
+    graph_iri: &str,
+    claim: GraphClaim,
+) -> anyhow::Result<()> {
+    match claim.origin() {
+        Some(origin) => db.add_dataset_graph_with_origin(dataset_id, graph_iri, origin),
+        None => db.add_dataset_graph(dataset_id, graph_iri),
+    }
+}
+
+/// The gate for every path that names `graph_iri` as a graph of `dataset_id`:
+/// registering it (`POST /datasets/:id/graphs`), or writing it through the
+/// dataset's RML mapping, commit, LDES sync, version restore or shapes
+/// upload.
+///
+/// * For everyone, admins included: the name must be a valid IRI and must not
+///   be a model-registry graph ([`graph_held_by_model_registry`]). Registering
+///   one would let the dataset's bulk import overwrite it past the registry's
+///   licence checks, expose withheld and private versions to the dataset's
+///   readers, hide the model from everyone else, and let a later detach or
+///   dataset delete wipe it. Models are managed through the data-model API.
+/// * For non-admins, in addition, the namespace boundary of
+///   [`authorize_dataset_graph_target`], and: a graph that is not the
+///   dataset's own and already holds data is taken over only by a caller who
+///   may write it directly ([`may_write_graph_directly`]). Everything a
+///   dataset holds becomes writable by its editors (bulk import, RML, RDF
+///   Patch, the SHACL Studio) and deletable with it, so attaching an admin's
+///   or another user's graph would hand out write and delete rights nobody
+///   granted.
+///
+/// Returns how the dataset holds the graph ([`GraphClaim`]; record it with
+/// [`register_claimed_graph`]) or `Err(message)` on rejection (map to HTTP
+/// 403); fails closed on a registry, dataset or store lookup error.
+pub fn gate_dataset_graph_target(
+    store: &TripleStore,
+    db: &crate::auth::db::AuthDb,
+    base_url: &str,
+    dataset_id: &str,
+    graph_iri: &str,
+    user: &AuthenticatedUser,
+) -> Result<GraphClaim, String> {
+    if oxigraph::model::NamedNode::new(graph_iri).is_err() {
+        return Err(format!(
+            "Target graph <{graph_iri}> is not a valid IRI, so it cannot be a graph of dataset \
+             '{dataset_id}'."
+        ));
+    }
+    refuse_model_registry_graph(store, base_url, dataset_id, graph_iri)?;
+    let registered = db.dataset_has_graph(dataset_id, graph_iri).map_err(|e| {
+        format!("Could not check whether graph <{graph_iri}> belongs to '{dataset_id}': {e}")
+    })?;
+    if user.is_admin() {
+        return Ok(if registered {
+            GraphClaim::Registered
+        } else if graph_holds_data(store, graph_iri) {
+            GraphClaim::Adopted
+        } else {
+            GraphClaim::Created
+        });
+    }
+    authorize_dataset_graph_target(db, base_url, dataset_id, graph_iri)?;
+    if registered {
+        return Ok(GraphClaim::Registered);
+    }
+    if dataset_owns_graph(base_url, dataset_id, graph_iri)
+        || dataset_well_known_graph(base_url, dataset_id, graph_iri)
+    {
+        return Ok(GraphClaim::Created);
+    }
+    // A graph with no data yet is the dataset's to create — unless the graph
+    // ACL already hands it to someone (a grant made before its data arrives):
+    // then it is theirs, as a graph that holds data is.
+    let holds_data = graph_holds_data(store, graph_iri);
+    if !holds_data && !graph_named_in_acl(db, graph_iri) {
+        return Ok(GraphClaim::Created);
+    }
+    if may_write_graph_directly(db, user, graph_iri) {
+        return Ok(if holds_data {
+            GraphClaim::Adopted
+        } else {
+            GraphClaim::Created
+        });
+    }
+    Err(format!(
+        "Graph <{graph_iri}> already holds data, or access to it is granted through the graph \
+         ACL, and you may not write it, so it cannot become a graph of dataset '{dataset_id}': a \
+         dataset's editors can overwrite and delete its graphs. Ask an admin to attach it, or to \
+         grant you write access to it."
+    ))
+}
+
+/// The boundary of a write on dataset authority into a graph the caller
+/// names (bulk IFC and CityJSON imports): the graph must be held by
+/// `dataset_id` ([`dataset_holds_graph`]) and used by no other dataset, and
+/// is never a model-registry graph (admins included). Admins may otherwise
+/// write any graph. `Err(message)` maps to HTTP 403; fails closed.
+pub fn authorize_dataset_write_target(
+    store: &TripleStore,
+    db: &crate::auth::db::AuthDb,
+    base_url: &str,
+    dataset_id: &str,
+    graph_iri: &str,
+    is_admin: bool,
+) -> Result<(), String> {
+    refuse_model_registry_graph(store, base_url, dataset_id, graph_iri)?;
+    if is_admin {
+        return Ok(());
+    }
+    let in_scope = dataset_owns_graph(base_url, dataset_id, graph_iri)
+        || db.dataset_has_graph(dataset_id, graph_iri).unwrap_or(false);
+    if !in_scope || graph_used_by_other_dataset(db, dataset_id, graph_iri) {
+        return Err(format!(
+            "Target graph <{graph_iri}> is outside dataset '{dataset_id}'"
+        ));
+    }
+    Ok(())
+}
+
+/// `Err(message)` when `graph_iri` is a model-registry graph
+/// ([`graph_held_by_model_registry`]; fails closed). For a write into a graph
+/// that is already registered to the dataset, where the registration gate
+/// ([`gate_dataset_graph_target`]) no longer runs: a registration made before
+/// registry graphs were refused must not become a way to overwrite one.
+pub fn refuse_model_registry_graph(
+    store: &TripleStore,
+    base_url: &str,
+    dataset_id: &str,
+    graph_iri: &str,
+) -> Result<(), String> {
+    if graph_held_by_model_registry(store, base_url, graph_iri) {
+        return Err(format!(
+            "Target graph <{graph_iri}> belongs to the model registry, so it cannot be a graph of \
+             dataset '{dataset_id}'. Models and their versions are managed through the data-model \
+             API."
+        ));
+    }
+    Ok(())
+}
+
+/// Whether a dataset operation — detaching a graph, deleting the dataset or
+/// deleting its organisation — must leave the stored graph `graph_iri` in
+/// place and remove only the dataset's reference to it:
+///
+/// * a `urn:system:` graph, except the dataset's own metadata and validation
+///   report graphs (`urn:system:metadata:dataset:{id}`,
+///   `urn:system:reports:dataset:{id}`);
+/// * a SHACL Studio Library graph (`urn:shapes:`), which goes only with its
+///   Library entry;
+/// * a model-registry graph ([`graph_held_by_model_registry`]; fails closed).
+///
+/// Being registered to the dataset is not enough to delete a graph: rows made
+/// before registration refused registry graphs, or through a path that does
+/// not gate registration, must not turn a detach into a wipe of the model
+/// registry, a no-derivatives copy the seeder keeps, or another user's model.
+pub fn graph_kept_on_dataset_delete(
+    store: &TripleStore,
+    base_url: &str,
+    dataset_id: &str,
+    graph_iri: &str,
+) -> bool {
+    if graph_iri.starts_with("urn:system:") {
+        let own_system_graph = graph_iri == dataset_metadata_graph_iri(dataset_id)
+            || graph_iri == dataset_reports_graph_iri(dataset_id);
+        if !own_system_graph {
+            return true;
+        }
+    }
+    if graph_iri.starts_with("urn:shapes:") {
+        return true;
+    }
+    graph_held_by_model_registry(store, base_url, graph_iri)
+}
+
+/// Named graph IRI where a dataset's SHACL validation reports are kept (it is
+/// registered to the dataset, so deleting the dataset deletes it).
+fn dataset_reports_graph_iri(dataset_id: &str) -> String {
+    format!("urn:system:reports:dataset:{dataset_id}")
+}
+
+/// Whether a dataset other than `dataset_id` still uses `graph_iri`: registered
+/// to it, or set as its shapes graph (the shapes graph lives only in the
+/// `datasets` table). Fails closed: a lookup error counts as used.
+pub fn graph_used_by_other_dataset(
+    db: &crate::auth::db::AuthDb,
+    dataset_id: &str,
+    graph_iri: &str,
+) -> bool {
+    if !matches!(
+        db.graph_has_other_dataset_refs(graph_iri, dataset_id),
+        Ok(false)
+    ) {
+        return true;
+    }
+    match db.list_datasets() {
+        Ok(all) => all
+            .iter()
+            .any(|d| d.id != dataset_id && d.shapes_graph_iri.as_deref() == Some(graph_iri)),
+        Err(_) => true,
+    }
+}
+
+/// Whether `dataset_id`'s shapes graph setting `graph_iri` names a graph the
+/// dataset deletes with itself: one in its own namespace, or left behind in
+/// the namespace of a dataset that no longer exists. Any other shapes graph
+/// the dataset only links (one it wrote outside its namespace is registered
+/// to it, and deleted by that registration's rule).
+pub fn shapes_graph_goes_with_dataset(
+    db: &crate::auth::db::AuthDb,
+    base_url: &str,
+    dataset_id: &str,
+    graph_iri: &str,
+) -> bool {
+    dataset_owns_graph(base_url, dataset_id, graph_iri)
+        || namespace_dataset_id(base_url, graph_iri)
+            .is_some_and(|owner| matches!(db.get_dataset(owner), Ok(None)))
+}
+
+/// Whether a detach or delete of `dataset_id` by `actor` may delete the
+/// stored graph `graph_iri` (the caller has already ruled out the graphs
+/// [`graph_kept_on_dataset_delete`] keeps and those another dataset uses).
+/// Only a graph that is the dataset's own goes:
+///
+/// * inside its namespace, or one of its well-known graphs;
+/// * inside the namespace of a dataset that no longer exists (the last user
+///   of a shapes graph a deleted dataset left behind);
+/// * a graph the dataset created (`origin = 'created'`: it held no data when
+///   the dataset claimed it);
+/// * or any graph `actor` may delete directly anyway
+///   ([`may_write_graph_directly`]: an admin, or a graph-ACL write grant).
+///
+/// Everything else — a graph adopted with someone else's write authority, a
+/// registration older than origin tracking, a graph the server attached (a
+/// source run) or a shapes graph the dataset only links — loses only the
+/// dataset's reference. A lookup error keeps the graph.
+fn dataset_may_delete_graph(
+    db: &crate::auth::db::AuthDb,
+    base_url: &str,
+    dataset_id: &str,
+    graph_iri: &str,
+    actor: &AuthenticatedUser,
+) -> bool {
+    if dataset_owns_graph(base_url, dataset_id, graph_iri)
+        || dataset_well_known_graph(base_url, dataset_id, graph_iri)
+    {
+        return true;
+    }
+    if let Some(owner) = namespace_dataset_id(base_url, graph_iri) {
+        if matches!(db.get_dataset(owner), Ok(None)) {
+            return true;
+        }
+    }
+    if matches!(
+        db.dataset_graph_origin(dataset_id, graph_iri),
+        Ok(Some(Some(ref o))) if o == "created"
+    ) {
+        return true;
+    }
+    may_write_graph_directly(db, actor, graph_iri)
+}
+
+/// Of `candidates` (graphs registered to `dataset_id`, and its shapes graph),
+/// the ones a detach or dataset delete by `actor` may drop from the store:
+/// each is neither kept by [`graph_kept_on_dataset_delete`] nor still used by
+/// another dataset ([`graph_used_by_other_dataset`]), and is the dataset's
+/// own (`dataset_may_delete_graph`). Duplicates are dropped. Call it while
+/// the dataset's registrations still exist: it reads their recorded origin.
+pub fn graphs_deletable_with_dataset(
+    store: &TripleStore,
+    db: &crate::auth::db::AuthDb,
+    base_url: &str,
+    dataset_id: &str,
+    candidates: &[String],
+    actor: &AuthenticatedUser,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for g in candidates {
+        if g.is_empty() || out.contains(g) {
+            continue;
+        }
+        if graph_kept_on_dataset_delete(store, base_url, dataset_id, g) {
+            tracing::info!(
+                "dataset '{dataset_id}': graph <{g}> is kept in the store (a system, SHACL Studio \
+                 or model-registry graph); only the dataset's reference to it is removed"
+            );
+            continue;
+        }
+        if graph_used_by_other_dataset(db, dataset_id, g) {
+            continue;
+        }
+        if !dataset_may_delete_graph(db, base_url, dataset_id, g, actor) {
+            tracing::info!(
+                "dataset '{dataset_id}': graph <{g}> is kept in the store (the dataset did not \
+                 create it, and the caller may not delete it directly); only the dataset's \
+                 reference to it is removed"
+            );
+            continue;
+        }
+        out.push(g.clone());
+    }
+    out
+}
+
+/// The `app_settings` key [`release_model_registry_claims`] sets once it has
+/// swept every registration.
+const REGISTRY_CLAIMS_MARKER: &str = "cleanup.dataset_registry_claims.v1";
+
+/// Whether [`release_model_registry_claims`] has completed on this identity
+/// database (a lookup error counts as not yet).
+pub fn model_registry_claims_released(db: &crate::auth::db::AuthDb) -> bool {
+    matches!(db.get_app_setting(REGISTRY_CLAIMS_MARKER), Ok(Some(_)))
+}
+
+/// One-time boot cleanup: `dataset_graphs` rows naming a model-registry graph,
+/// made before the registration gate refused them. They still made the
+/// graph dataset-scoped for reads (`get_accessible_graph_iris`), hid it from
+/// everyone else, and made it one the dataset holds. Each such row goes; a
+/// shapes-role row stays in effect for validation as a SHACL Studio binding,
+/// which only reads the graph. Datasets that lost a row get their metadata
+/// graph rewritten.
+///
+/// A dataset's `shapes_graph_iri` naming a registry graph is left as it is:
+/// it does not scope reads, the paths that could write or delete it refuse
+/// registry graphs, and clearing it would weaken the dataset's validation
+/// (the `shacl_on_write` gate refuses any result, keeps an on-write report
+/// and checks source runs; a binding does not).
+///
+/// Runs once: a marker in `app_settings` records a sweep in which every
+/// registry lookup answered. A lookup that fails removes nothing (unlike the
+/// fail-closed [`graph_held_by_model_registry`]) and leaves the marker unset,
+/// so the next boot tries again. Returns the number of rows removed.
+pub fn release_model_registry_claims(
+    store: &TripleStore,
+    db: &crate::auth::db::AuthDb,
+    base_url: &str,
+) -> anyhow::Result<usize> {
+    if db.get_app_setting(REGISTRY_CLAIMS_MARKER)?.is_some() {
+        return Ok(0);
+    }
+    let mut undecided = false;
+    let mut held = |g: &str| -> bool {
+        if g == crate::data_models::registry::REGISTRY_GRAPH
+            || in_model_registry_namespace(base_url, g)
+        {
+            return true;
+        }
+        match crate::data_models::registry::graph_held_by_version_checked(store, g) {
+            Some(h) => h,
+            None => {
+                undecided |= oxigraph::model::NamedNode::new(g).is_ok();
+                false
+            }
+        }
+    };
+    let bind = |dataset_id: &str, g: &str| {
+        let target = crate::shacl_studio::bindings::dataset_target_iri(base_url, dataset_id);
+        if let Err(e) = crate::shacl_studio::bindings::add_binding(store, &target, g) {
+            tracing::warn!("could not keep <{g}> as a validation binding of '{dataset_id}': {e}");
+        }
+    };
+    let mut removed = 0usize;
+    let mut touched: Vec<String> = Vec::new();
+    for (dataset_id, g, role) in db.list_all_dataset_graph_rows()? {
+        if !held(&g) {
+            continue;
+        }
+        if role == Some(GraphKind::Shapes) {
+            bind(&dataset_id, &g);
+        }
+        if db.remove_dataset_graph(&dataset_id, &g)? {
+            tracing::warn!(
+                "dataset '{dataset_id}': removed its registration of model-registry graph <{g}>, \
+                 made before registry graphs were refused"
+            );
+            removed += 1;
+            if !touched.contains(&dataset_id) {
+                touched.push(dataset_id);
+            }
+        }
+    }
+    for id in &touched {
+        if let Ok(Some(d)) = db.get_dataset(id) {
+            let entries = db.list_dataset_graph_entries(id).unwrap_or_default();
+            write_dataset_metadata_graph(store, base_url, &d, &entries);
+        }
+    }
+    if undecided {
+        tracing::warn!(
+            "registry-claim cleanup: a model-registry lookup failed; it runs again next boot"
+        );
+    } else {
+        db.set_app_setting(REGISTRY_CLAIMS_MARKER, &chrono::Utc::now().to_rfc3339())?;
+    }
+    Ok(removed)
 }
 
 /// Write (or overwrite) the DCAT/ADMS/VoID/VCARD metadata named graph for a dataset.

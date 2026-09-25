@@ -1,9 +1,16 @@
-# SAREF (Smart Applications REFerence ontology) — the ETSI core ontology for the
-# Internet of Things: devices, the functions and properties they expose, and the
-# measurements they make.
-# Complete vocabulary, verbatim from the official ETSI release of SAREF core
-# v3.1.1.
-# Source: https://saref.etsi.org/core/v3.1.1/saref.ttl  (ns https://saref.etsi.org/core/)
+# SAREF (Smart Applications REFerence ontology) Core v3.1.1 — the ETSI core
+# ontology for the Internet of Things: devices, the functions and properties they
+# expose, and the measurements they make.
+# Source: https://saref.etsi.org/core/v3.1.1/saref.ttl
+# Copyright 2019 ETSI
+# Licence: BSD-3-Clause (https://forge.etsi.org/etsi-software-license, the
+# file's own dcterms:license). Its full text, with ETSI's copyright notice, list
+# of conditions and disclaimer: NOTICE.md in this directory and
+# LICENSES/BSD-3-Clause-ETSI-SAREF.txt in the Open Triplestore source.
+# Changes by Open Triplestore: this comment header was added; the rest of the
+# file is byte-identical to the source (checked 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The upstream file starts below this line. ----
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix xml: <http://www.w3.org/XML/1998/namespace> .

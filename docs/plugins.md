@@ -92,10 +92,16 @@ title = "Asset model"
 namespace = "https://example.org/layered/def#"
 kind = "model"                       # model (default) | vocabulary | shapes
 version = "1.0.0"                    # one published version; default 1.0.0
+public = true                        # registry entry public (default true)
 [[data_models.graphs]]               # first graph = the version's base graph,
 iri = "https://example.org/layered/model"   #   the rest are its sub-graphs
 role = "model"
 file = "model.ttl"
+[data_models.license]                # optional: the model's content is a third party's work
+no_derivatives = true                # the rights holder allows no altered copies
+copyright = ["© Stichting CROW"]
+source = "https://github.com/Stichting-CROW/imbor/releases/tag/2025"
+licenses = [{ name = "CC BY 4.0", uri = "https://creativecommons.org/licenses/by/4.0/" }]
 
 [[datasets]]
 slug = "assets"
@@ -112,6 +118,20 @@ Graph roles accept the whole convention: `instances`, `model` (alias
 domain-neutral example (run by `tests/layered_bundle_e2e.rs`);
 `examples/seed-bundles/nen2660-imbor` is the same mechanism with NEN 2660-2
 and IMBOR as payload (files fetched by its `fetch.sh`, not vendored).
+
+`public = false` keeps a model's registry entry private: use it for content
+you may use but not re-serve, as the NEN examples do (NEN grants no licence to
+redistribute NEN 2660-2). `[data_models.license]` records the licence of a
+third party's model: every graph of a licensed model must load from a `file`,
+the licence becomes the model's licence record, which is checked against the
+files on every start and never changed, and with `no_derivatives` the registry
+refuses every edit, draft, branch, merge, rebase, publish and direct SPARQL or
+Graph Store write in the entry. A bundle model may not use the id of a
+vocabulary the server seeds. An entry that an earlier build registered public
+is made private once at the next start when the manifest now says
+`public = false`; only its visibility changes, and an admin who makes it
+public again is not overruled. A model the manifest keeps private is never
+added to a registry entry the bundle's organisation does not own.
 
 ### Semantics
 
@@ -143,10 +163,10 @@ A domain profile is a bundle, not a code change. The repository ships:
 | Bundle | Domain | Payload |
 |---|---|---|
 | `layered-reference` | asset registry (toy) | vendored; loaded in CI by `tests/layered_bundle_e2e.rs` |
-| `clinical-reference` | clinical records (FHIR-shaped, LOINC-like codes) | vendored; loaded in CI by `tests/clinical_bundle_e2e.rs` |
+| `clinical-reference` | clinical records (FHIR-shaped, with three real LOINC codes carrying LOINC's required notice) | vendored; loaded in CI by `tests/clinical_bundle_e2e.rs` |
 | `nen2660-imbor` | Dutch infrastructure (NEN 2660-2 + IMBOR 2025) | fetched by `fetch.sh` (public downloads); the real-data Stage-1 benchmark |
 | `nen2660-relations` | NEN 2660-2 part-whole, containment and connection relations: a profile (transitivity on proper parthood only) and SHACL-SPARQL consistency shapes (acyclic, irreflexive, part within whole / RCC8 proper part, contained within region) with a sample | profile, shapes and sample vendored and run in CI by `tests/nen2660_relations_bundle.rs`; the NEN 2660-2 RDFS file fetched by `fetch.sh` |
-| `gwsw` | Dutch urban water (GWSW Totaal 1.7.0, RIONED) | `fetch.sh` downloads the CC0 Turtle export from data.gwsw.nl |
+| `gwsw` | Dutch urban water (GWSW Totaal 1.7.0, RIONED) | `fetch.sh` downloads the Turtle export from data.gwsw.nl; not vendored, since the ontology states no licence (RIONED's CC0 covers the GWSW Server data, not the ontology) |
 | `ifc-lift` | the IFC importer's own vocabulary: the IFC 4.3 facility spine under `bot:Zone`, typed quantities and properties with QUDT units, classifications, materials, the map conversion — everything the lift emits that BOT, props:, ifcOWL, QUDT, SKOS and NEN 2660-2 do not declare | vendored; minted under `{base_url}/ns/ifc-lift#` at seed time; every lift-namespace term the emitter produces is checked against it by `tests/ifc_lift.rs`; opt out with `SEED_IFC_LIFT=false` |
 | `dqv-quality` | data quality (W3C DQV): a profile of categories, dimensions and metrics, and the shapes that pin what a well-formed `dqv:QualityMeasurement` is — DQV's Note constrains nothing itself | vendored (DQV is already the seeded `dqv` vocabulary); profile, shapes and a seven-violation sample run in CI by `tests/dqv_quality_bundle.rs`; opt out with `SEED_DQV_QUALITY=false` |
 
@@ -223,11 +243,14 @@ host — is served with **zero backend code changes and zero rebuild**:
     "title": "Acme Graph",
     "logoUrl": "/acme-logo.svg",
     "accent": "#7a2fe0"
+  },
+  "basemaps": {
+    "esriApiKey": "AAPT…"
   }
 }
 ```
 
-Both top-level keys are optional; anything omitted keeps its existing
+Every top-level key is optional; anything omitted keeps its existing
 default/registry value. The frontend fetches this once at boot
 ([`runtimeConfig.ts`](../frontend/src/lib/runtimeConfig.ts)) and applies it
 immediately — `branding.title` becomes the page `<title>` and sidebar
@@ -237,6 +260,16 @@ tab favicon, and `branding.accent` overrides the app's primary brand color
 fetch either 404s or, on this app's own backend, hits the SPA fallback and
 returns HTML instead of JSON — the frontend detects that by content-type and
 ignores it either way).
+
+`basemaps.esriApiKey` turns on satellite imagery in the map viewers (the 2D
+map, the 3D globe and embeds): Esri World Imagery, which Esri's terms tie to
+an ArcGIS account and key. Create a key of your own for this deployment in
+ArcGIS Location Platform, with the basemap/imagery privilege, and restrict it
+to your site's referrer; the key reaches every visitor's browser in tile
+URLs, as browser map keys do. Without a key the viewers show street maps only.
+Those are drawn from [OpenFreeMap](https://openfreemap.org)'s vector tiles,
+which need no key, with the credit "OpenFreeMap © OpenMapTiles Data from
+OpenStreetMap" on every map.
 
 ### Docker example
 
@@ -307,6 +340,14 @@ dependency on this project's internal types:
   `plugins/accounts-dashboard` (feature `plugin-accounts-dashboard`) a full
   consumer: a deployment-wide accounts/entitlements/LLM-usage dashboard at
   `/ext/accounts-dashboard/ui`.
+- `Plugin::connectors` *(ots-plugin-api 0.3)* — datasource drivers for the
+  SQL sources feature ([docs/sources.md](sources.md)): a plugin hands the host
+  a `SourceConnector` per dialect, registered next to the built-in SQLite
+  driver. `plugins/postgres`, `plugins/mysql` and `plugins/mssql` (features
+  `plugin-postgres`, `plugin-mysql`, `plugin-mssql`) are the three shipped
+  drivers, built on the shared `INFORMATION_SCHEMA` catalogue and profiler in
+  `ots_plugin_api::sources::catalogue`; a driver for another dialect
+  implements `Executor` and `Dialect` there and owns only its wire protocol.
 
 ### Writing a new plugin (cookiecutter flow)
 

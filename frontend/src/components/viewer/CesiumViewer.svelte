@@ -24,6 +24,11 @@
   import { navigate } from '../../lib/router/index.js';
   import { openSparkExplain } from '../../lib/sparkHelp.js';
   import { isDark } from '../../lib/theme.js';
+  import { creditHtml, tilesetCredits } from '../../lib/viewer/attribution';
+  import { runtimeBasemaps } from '../../lib/runtimeConfig';
+  import { esriImageryUrl } from '../../lib/viewer/basemaps';
+  import { ofmImageryProvider } from '../../lib/viewer/cesiumOfm';
+  import { DARK, LIGHT } from '../../lib/viewer/ofmRaster';
 
   // Open the resource page for a predicate/object IRI (in-app navigation so it
   // shares the SPA session) — bnodes (_:…) are not dereferenceable, so callers
@@ -57,27 +62,30 @@
   // resolved 1.144.0: the 1.144 engine fetched 1.123 workers, and any
   // deployment without internet access got no globe at all.
   const CESIUM_BASE_URL = '/cesium/';
-  // Token-free Esri World Imagery — the same source the 2D map viewer uses — so
-  // the satellite base never depends on a Cesium Ion token.
-  const ESRI_IMAGERY =
-    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+  // Satellite: Esri World Imagery, only with the deployment's own ArcGIS key
+  // (runtime config `basemaps.esriApiKey`) — Esri's terms tie it to one.
   const ESRI_CREDIT = 'Esri, Maxar, Earthstar Geographics, and the GIS User Community';
-  // Streets base: Carto Voyager (keyless, usage-policy friendly). NOT
-  // tile.openstreetmap.org — the OSM tile policy 403s app/localhost traffic,
-  // which rendered the whole globe as "broken 3D Tiles" for users.
-  const CARTO_STREETS = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png';
-  const CARTO_CREDIT = '© OpenStreetMap contributors © CARTO';
+  // Streets: OpenFreeMap's vector tiles drawn into raster tiles in the browser
+  // (lib/viewer/ofmRaster.ts) — keyless. Not CARTO (it watermarks keyless
+  // tiles since September 2026) and not tile.openstreetmap.org (its tile policy
+  // refuses app traffic). The credit sits on the map itself, not behind
+  // Cesium's "Data attribution" pop-up, as OpenStreetMap's guidelines ask.
 
   let containerEl;
   let viewer = null;
   let tileset = null;
   let Cesium = null;
   let handler = null;
+  /** On-screen credits for the loaded tileset's data (see showDataCredits). */
+  let dataCredits = [];
 
   let loading = true;
   let error = '';
   let empty = false; // tileset has no renderable geometry
-  let baseLayer = 'streets'; // 'streets' | 'satellite' — token-free either way
+  let baseLayer = 'streets'; // 'streets' | 'satellite' (satellite needs an Esri key)
+  $: esriApiKey = $runtimeBasemaps.esriApiKey;
+  // Without a key there is no satellite layer to show or to switch to.
+  $: if (!esriApiKey && baseLayer === 'satellite') setBaseLayer('streets');
   let showHint = true; // "click a building to inspect", cleared on first pick
   let homeView = null; // captured bounding sphere for the Home button
 
@@ -95,7 +103,10 @@
 
   let dark = false;
   const unsubTheme = isDark.subscribe((v) => {
+    const changed = v !== dark;
     dark = v;
+    // The street map is drawn in the app's theme.
+    if (changed && baseLayer === 'streets') applyBaseLayer();
   });
 
   async function init() {
@@ -148,25 +159,21 @@
     }
   }
 
-  /** (Re)apply the current base imagery. Token-free in both modes. */
+  /** (Re)apply the current base imagery: OpenFreeMap streets in the app's
+   *  theme, or Esri satellite when the deployment has a key. */
   function applyBaseLayer() {
     if (!viewer || !Cesium) return;
     const layers = viewer.imageryLayers;
     layers.removeAll();
     try {
       const provider =
-        baseLayer === 'satellite'
+        baseLayer === 'satellite' && esriApiKey
           ? new Cesium.UrlTemplateImageryProvider({
-              url: ESRI_IMAGERY,
+              url: esriImageryUrl(esriApiKey),
               maximumLevel: 19,
-              credit: ESRI_CREDIT,
+              credit: new Cesium.Credit(ESRI_CREDIT, true),
             })
-          : new Cesium.UrlTemplateImageryProvider({
-              url: CARTO_STREETS,
-              subdomains: ['a', 'b', 'c', 'd'],
-              maximumLevel: 19,
-              credit: CARTO_CREDIT,
-            });
+          : ofmImageryProvider(Cesium, dark ? DARK : LIGHT);
       layers.addImageryProvider(provider);
       // If satellite tiles fail (network/provider outage), drop back to the
       // streets base once so the demo never silently shows a blank globe.
@@ -201,6 +208,7 @@
     // element that ISN'T a tileset feature — under REPLACE that would dim the
     // whole block to grey on every selection, defeating the COLOR_0 polish.
     viewer.scene.primitives.add(tileset);
+    showDataCredits();
     // A fresh tileset has no style; drop the idempotency cache so the current
     // selection re-applies onto it.
     lastStyledIri = null;
@@ -218,6 +226,18 @@
     }
     applyHighlight(embedded ? selected : selectedIri);
     viewer.scene.requestRender();
+  }
+
+  /**
+   * Put the credits the tileset declares (asset.extras.credits — e.g. 3DBAG's
+   * CC BY line for its block) on screen as linked Cesium credits. The GLB's
+   * glTF copyright carries the same notice, but Cesium lists content credits
+   * unlinked, behind its "Data attribution" pop-up.
+   */
+  function showDataCredits() {
+    for (const c of dataCredits) viewer.creditDisplay.removeStaticCredit(c);
+    dataCredits = tilesetCredits(tileset?.asset).map((c) => new Cesium.Credit(creditHtml(c), true));
+    for (const c of dataCredits) viewer.creditDisplay.addStaticCredit(c);
   }
 
   /** Fixed Nijmegen pose so the camera always frames *something*, even when the
@@ -357,10 +377,10 @@
     queryError = '';
   }
 
-  // Imagery toggle: streets (OSM) vs satellite (Esri). Cesium composites raster
-  // layers natively — no custom layer to rebuild.
+  // Imagery toggle: streets (OpenFreeMap) vs satellite (Esri, with a key).
+  // Cesium composites raster layers natively — no custom layer to rebuild.
   function setBaseLayer(kind) {
-    if (kind === baseLayer || !viewer || !Cesium) return;
+    if (kind === baseLayer) return;
     baseLayer = kind;
     applyBaseLayer();
   }
@@ -424,21 +444,24 @@
     </div>
   {/if}
 
-  <!-- Imagery toggle (streets vs satellite). Both token-free. -->
-  <div class="seg-toggle base-toggle" role="group" aria-label="Base imagery">
-    <button
-      class:active={baseLayer === 'streets'}
-      title="Street map"
-      aria-label="Street map"
-      on:click={() => setBaseLayer('streets')}
-    ><MapPin size={14} /></button>
-    <button
-      class:active={baseLayer === 'satellite'}
-      title="Satellite imagery"
-      aria-label="Satellite imagery"
-      on:click={() => setBaseLayer('satellite')}
-    ><Satellite size={14} /></button>
-  </div>
+  <!-- Imagery toggle (streets vs satellite), offered when the deployment
+       configures an Esri key; otherwise the globe shows streets only. -->
+  {#if esriApiKey}
+    <div class="seg-toggle base-toggle" role="group" aria-label="Base imagery">
+      <button
+        class:active={baseLayer === 'streets'}
+        title="Street map"
+        aria-label="Street map"
+        on:click={() => setBaseLayer('streets')}
+      ><MapPin size={14} /></button>
+      <button
+        class:active={baseLayer === 'satellite'}
+        title="Satellite imagery"
+        aria-label="Satellite imagery"
+        on:click={() => setBaseLayer('satellite')}
+      ><Satellite size={14} /></button>
+    </div>
+  {/if}
 
   <!-- Camera controls: home / zoom (and full-screen when embedded). There is no
        recovery otherwise once the user orbits away from a small tileset. -->
@@ -546,6 +569,12 @@
   :global(.cesium-canvas .cesium-widget-credits) {
     font-size: 0.62rem;
     opacity: 0.7;
+  }
+  /* Right-align the credits, where 3DBAG asks for its credit on a browsable
+     map. Cesium pins the bar's box across the bottom with inline styles, so
+     aligning its text is what moves them from the default bottom-left. */
+  :global(.cesium-canvas .cesium-viewer-bottom) {
+    text-align: right;
   }
 
   .cesium-overlay-zone {
@@ -715,7 +744,8 @@
     position: absolute;
     top: 10px;
     right: 10px;
-    bottom: 10px;
+    /* Clear the credit bar, so the data credit stays visible while inspecting. */
+    bottom: 26px;
     z-index: 6;
     width: min(340px, 42%);
     display: flex;

@@ -1,14 +1,16 @@
 # 3D Linked-Data Geospatial Platform
 
-Open Triplestore extends its spec-compliant **GeoSPARQL 1.1** core (2D/2.5D) with
+Open Triplestore extends its **GeoSPARQL 1.1** implementation (2D/2.5D; partial, not OGC-certified) with
 an **additive, namespaced 3D layer** — volumetric geometry, an OGC API – Features
 facade, a 3D Tiles tiling plane, and a CesiumJS viewer with click-to-SPARQL.
 
 > **Conformance posture.** Every 3D capability is additive and lives under its own
-> namespace (`ots-geof:`) and its own serialisations, so GeoSPARQL 1.1's `geof:`
-> functions and `geo:wktLiteral` semantics stay byte-for-byte conformant. A client
-> that knows only GeoSPARQL 1.1 keeps working; a 3D-aware client opts in. The full
-> OGC GeoSPARQL 1.1 suite (101 tests) runs green with the 3D layer enabled.
+> namespace (`ots-geof:`) and its own serialisations, so the GeoSPARQL 1.1 `geof:`
+> functions and `geo:wktLiteral` semantics are unchanged by it. A client that knows
+> only GeoSPARQL 1.1 keeps working; a 3D-aware client opts in. The spec-derived
+> GeoSPARQL suite (`tests/geosparql_conformance.rs`) and the OGC validator-shape
+> round-trip (`tests/ogc_geosparql_shacl_roundtrip.rs`) run with the 3D layer
+> enabled; they are development tests, not the OGC's compliance tests.
 
 ## 1. 3D geometry engine (`ots-geof:`)
 
@@ -57,7 +59,8 @@ parent/child topology + attributes, externalises geometry per LoD into **both**
 
 ## 3. OGC API – Features (Core)
 
-A thin, conformant facade over the SPARQL/Geo engine, under `/api/ogc`:
+A thin facade over the SPARQL/Geo engine implementing OGC API – Features Part 1
+(Core), under `/api/ogc` (not OGC-certified):
 
 | Path | Returns |
 |---|---|

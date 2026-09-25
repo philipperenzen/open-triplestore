@@ -50,7 +50,7 @@
   import { t as i18nT } from 'svelte-i18n';
   import { Link, navigate } from '../lib/router/index.js';
   import { isAuthenticated, user } from '../lib/stores.js';
-  import { graphResultsToElements, detectRdfFormat, normalizeGraphRole, graphRoleLabel } from '../lib/rdf-utils.js';
+  import { graphResultsToElements, detectRdfFormat, normalizeGraphRole, graphRoleLabel, shortenIRI } from '../lib/rdf-utils.js';
   import { datasetContentKind } from '../lib/content-kind.js';
   import { safeExternalUrl } from '../lib/safeUrl.js';
   import { copyToClipboard } from '../lib/clipboard.js';
@@ -1113,9 +1113,12 @@
     validationError = '';
     try {
       // The endpoint returns an envelope { report, run_id, ran_at } — unwrap it.
+      // Recording an official run requires write access; a reader gets a test
+      // (dry) run instead of a 403 — it validates what they may read but is not
+      // recorded and does not touch the dataset's official status.
       const res = await validateDataset(id, {
         shapes_graph: shapesGraphIri || null,
-      });
+      }, { test: !canWrite });
       const run = unwrapValidationRun(res);
       validationReport = run.report;
       validationRanAt = run.ranAt;
@@ -1853,7 +1856,10 @@
           {#each effectiveShapes as s (s.id)}
             <li class="eff-item">
               <ShieldCheck size={12} class="text-[var(--brand-500)]" />
-              <Link to={`/shacl/shape-graphs/${s.id}`} class="eff-name">{s.name}</Link>
+              <!-- /shacl/shapes/:id is the route; `/shacl/shape-graphs/` is the
+                   API path only, and App.svelte has no catch-all, so using it
+                   here navigated to a blank page. -->
+              <Link to={`/shacl/shapes/${s.id}`} class="eff-name">{s.name}</Link>
               {#if datasetBoundIds.has(s.id)}
                 <span class="eff-badge eff-dataset" title={$i18nT('pages.datasetDetail.boundDirectlyTitle')}>{$i18nT('pages.datasetDetail.datasetBadge')}</span>
               {:else}
@@ -1885,8 +1891,8 @@
             {#each validationReport.results as r}
               <tr>
                 <td><span class="sev sev-{r.severity}">{r.severity}</span></td>
-                <td><code>{r.focus_node}</code></td>
-                <td>{r.path || '—'}</td>
+                <td><code title={r.focus_node}>{shortenIRI(r.focus_node)}</code></td>
+                <td title={r.path}>{r.path ? shortenIRI(r.path) : '—'}</td>
                 <td>{r.message}</td>
               </tr>
             {/each}
@@ -2176,8 +2182,8 @@
                   {#each validationReport.results as r}
                     <tr>
                       <td><span class="sev sev-{r.severity}">{r.severity}</span></td>
-                      <td><code>{r.focus_node}</code></td>
-                      <td>{r.path || '\u2014'}</td>
+                      <td><code title={r.focus_node}>{shortenIRI(r.focus_node)}</code></td>
+                      <td title={r.path}>{r.path ? shortenIRI(r.path) : '\u2014'}</td>
                       <td>{r.message}</td>
                     </tr>
                   {/each}

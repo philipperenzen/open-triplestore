@@ -78,8 +78,27 @@ jobs:
       - name: Build
         run: cargo build --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked
 
+      # The Docker builder stage writes the crates' licence notices with this
+      # generator; run it here too so a change that breaks it fails a PR, not
+      # the next image release.
+      - name: Third-party licence notices (server)
+        run: python3 scripts/gen_rust_third_party_licenses.py --features full --output "$RUNNER_TEMP/THIRD-PARTY-LICENSES-server.txt"
+
+      # No test is ignored (scripts/no-ignored-tests.sh says why): the source
+      # scan catches an `#[ignore]` behind a cfg_attr for another platform,
+      # the summary check catches everything this run skipped, doctests too.
+      - name: No ignored tests
+        run: scripts/no-ignored-tests.sh
+
       - name: Test
-        run: cargo test --workspace --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked 2>&1 | tee test.log
+          if grep -E 'test result: .* [1-9][0-9]* ignored' test.log; then
+            echo "::error::Some tests were ignored — fix or delete them (scripts/no-ignored-tests.sh)."
+            exit 1
+          fi
 
       # Explicit, named gate for the security regression suite. These also run in
       # the step above; surfacing them separately makes a security regression
@@ -160,10 +179,102 @@ jobs:
       # features" guarantee — the "backend" job separately exercises plugin-hello
       # wired INTO the main crate via the `plugin-hello` feature.
       - name: Clippy (plugin crates)
-        run: cargo clippy -p ots-plugin-api -p ots-plugin-hello -p ots-plugin-accounts-dashboard --all-targets -- -D warnings
+        run: cargo clippy -p ots-plugin-api -p ots-plugin-hello -p ots-plugin-accounts-dashboard -p ots-plugin-postgres -p ots-plugin-mysql -p ots-plugin-mssql --all-targets -- -D warnings
 
       - name: Build & test (plugin crates)
-        run: cargo test -p ots-plugin-api -p ots-plugin-hello -p ots-plugin-accounts-dashboard --locked
+        run: cargo test -p ots-plugin-api -p ots-plugin-hello -p ots-plugin-accounts-dashboard -p ots-plugin-postgres -p ots-plugin-mysql -p ots-plugin-mssql --locked
+
+  # The database connectors against real servers. Each driver crate carries a
+  # live test that skips when its OTS_TEST_<DIALECT>_HOST is unset — which is
+  # every other job — so this one starts the servers as service containers and
+  # sets OTS_TEST_LIVE_REQUIRED: a missing or renamed variable fails here
+  # instead of skipping. The MySQL plugin serves MariaDB too, so its test runs
+  # against both. The passwords are throwaway values for these containers.
+  live-sources:
+    name: Database connectors against live servers
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ots-live-pw
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ots-live-pw
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pots-live-pw --silent"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: ots-live-pw
+        ports: ['3307:3306']
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          MSSQL_SA_PASSWORD: OtsLive-Passw0rd
+        ports: ['1433:1433']
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P OtsLive-Passw0rd -Q 'SELECT 1' -b"
+          --health-interval 10s --health-timeout 10s --health-retries 30
+    env:
+      OTS_TEST_LIVE_REQUIRED: '1'
+      OTS_TEST_POSTGRES_HOST: 127.0.0.1
+      OTS_TEST_POSTGRES_PASSWORD: ots-live-pw
+      OTS_TEST_MYSQL_HOST: 127.0.0.1
+      OTS_TEST_MYSQL_PASSWORD: ots-live-pw
+      OTS_TEST_MSSQL_HOST: 127.0.0.1
+      OTS_TEST_MSSQL_PASSWORD: OtsLive-Passw0rd
+      OTS_TEST_MSSQL_READER_PASSWORD: OtsLive-R3ader
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The HTTP pipeline test builds the main crate (see the backend job).
+      - name: Free up disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/.ghcup \
+            /usr/local/share/powershell /usr/share/swift
+          df -h /
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgeos-dev libsfcgal-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+
+      - name: PostgreSQL 16
+        run: cargo test -p ots-plugin-postgres --test live --locked
+
+      - name: MySQL 8.4
+        run: cargo test -p ots-plugin-mysql --test live --locked
+
+      - name: MariaDB 11.4
+        env:
+          OTS_TEST_MYSQL_PORT: '3307'
+        run: cargo test -p ots-plugin-mysql --test live --locked
+
+      - name: SQL Server 2022
+        run: cargo test -p ots-plugin-mssql --test live --locked
+
+      # Register, introspect, profile, map, dry-run, run and read the graph
+      # back — over HTTP, through the PostgreSQL plugin wired into the store.
+      - name: The whole pipeline over HTTP (PostgreSQL)
+        run: cargo test --features test-utils,plugin-postgres --test sources_postgres_http --locked
 
   conformance:
     name: Conformance suites
@@ -194,6 +305,23 @@ jobs:
       # exercises the optional reasoning, ldp, shex, swrl and text-search paths.
       - name: Run conformance tests
         run: cargo test --features full,saml,test-utils,backup-encrypt,alerting --locked --test '*conformance*'
+
+      # The seed bundles built on national-standard data (NEN 2660-2, IMBOR,
+      # GWSW) are not vendored — NEN 2660-2 carries no licence that allows
+      # redistributing it, GWSW's ontology states none — so their tests skip
+      # everywhere else. Here each bundle's fetch.sh downloads the payloads
+      # from the publisher and OTS_TEST_SEED_PAYLOADS_REQUIRED turns a missing
+      # payload into a failure instead of a skip.
+      - name: Fetch the seed-bundle payloads
+        run: |
+          examples/seed-bundles/nen2660-imbor/fetch.sh
+          examples/seed-bundles/nen2660-relations/fetch.sh
+          examples/seed-bundles/gwsw/fetch.sh
+
+      - name: Seed bundles on real data
+        env:
+          OTS_TEST_SEED_PAYLOADS_REQUIRED: '1'
+        run: cargo test --features full,saml,test-utils,backup-encrypt,alerting --locked --test nen2660_imbor_bundle --test nen2660_relations_bundle --test gwsw_bundle
 
   frontend:
     name: Frontend (lint, test, build)

@@ -1325,7 +1325,7 @@ pub(crate) fn prebind(
 
 /// Whether `query` uses the variable `name` (`$name` or `?name`) outside
 /// strings, IRIs and comments.
-fn mentions_variable(query: &str, name: &str) -> bool {
+pub(crate) fn mentions_variable(query: &str, name: &str) -> bool {
     let mut i = 0;
     let bytes = query.as_bytes();
     while i < bytes.len() {

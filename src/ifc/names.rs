@@ -5,6 +5,17 @@
 //!
 //! Attribute lists follow the IFC2X3 schema (which IFC4 keeps for these
 //! entities, with rare additions that then simply spill into `argNN`).
+//!
+//! The entity and attribute names are taken unchanged from the IFC2X3, IFC4
+//! and IFC4.3 schemas: "Copyright © 1996-2020 buildingSMART International
+//! Limited. All rights reserved." — a notice that lets the technical
+//! documentation be used in software development provided full attribution
+//! is given; the IFC4.x development repository
+//! (https://github.com/buildingSMART/IFC4.x-development, LICENSE.md) licenses
+//! it under CC BY-ND 4.0, http://creativecommons.org/licenses/by-nd/4.0/.
+//! Industry Foundation Class™, IFC™ and ifcXML™ are trademarks of
+//! buildingSMART International Limited. The BOT and lift mappings below are
+//! this project's own.
 
 /// Canonical CamelCase for entity names seen in the wild.
 pub const CAMEL: &[&str] = &[

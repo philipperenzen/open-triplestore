@@ -1,13 +1,20 @@
 # GWSW (Gegevenswoordenboek Stedelijk Water, Stichting RIONED).
 # RIONED publishes the ontology as linked data at https://data.gwsw.nl/ and,
 # per sub-model ("deelmodel"), as a plain Turtle file under
-# https://data.gwsw.nl/<version>/<Module>/ontologie.ttl (CC0, no login).
+# https://data.gwsw.nl/<version>/<Module>/ontologie.ttl (no login).
 # "Totaal" is the complete combined export; ./fetch.sh downloads it next to
 # this manifest as gwsw-totaal.ttl (2.7 MB, ~2 400 classes with their OWL
 # restrictions and properties). Until the file is present the bundle is
 # skipped at boot with a warning, like any bundle whose payloads are missing.
 # The GWSW model is built on NEN 2660-2, so it slots in beside
 # examples/seed-bundles/nen2660-imbor.
+#
+# The file is fetched, never committed or shipped: neither data.gwsw.nl nor
+# the Turtle states a licence for the ontology. RIONED's published CC0
+# statement covers the data on the GWSW Server (the datasets it serves), not
+# the ontology, and many of the ontology's definitions are marked as taken
+# from NEN and EN standards (EN 13508-2, NEN 3300, …), text RIONED could not
+# relicense anyway.
 
 id = "gwsw"
 opt_out_env = "SEED_GWSW"

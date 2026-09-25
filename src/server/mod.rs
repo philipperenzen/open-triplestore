@@ -1033,6 +1033,19 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
+    // SQL datasources, RML mapping registry and materialisation runs. Admin
+    // territory — a datasource carries a pointer to a production credential,
+    // and a run writes instance data — with one exception the guard knows: a
+    // service token scoped for the mapping proposer (src/sources/access.rs).
+    let source_routes = crate::sources::routes::source_routes()
+        .route_layer(middleware::from_fn(crate::sources::access::guard))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .with_state(state.clone());
+
     // Spark chat history + user memory (strictly per-user, so auth required).
     let llm_history_routes = llm_history::llm_history_routes()
         .route_layer(middleware::from_fn_with_state(
@@ -1890,6 +1903,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(studio_auth)
         .merge(studio_optional)
         .merge(rml_routes)
+        .merge(source_routes)
         .merge(browse_routes)
         .merge(sparql_routes)
         .merge(llm_history_routes)
@@ -2432,6 +2446,17 @@ pub async fn run(
     // once per process. A no-op with zero `plugin-*` features enabled.
     crate::plugins::boot_plugins(&crate::plugins::plugin_context(&state));
 
+    // Datasource drivers a plugin contributes (PostgreSQL, MySQL, SQL Server
+    // …) join core's SQLite one. Before any datasource is registered or run,
+    // so a dialect is either available from the first request or not at all.
+    crate::sources::connector::register_plugin_connectors();
+    // Virtual sources resolve `SERVICE <urn:source:id>`; their endpoints are
+    // read once here and kept in step by the registry from then on.
+    crate::sources::virtual_source::load_all(&state.store);
+    // Scratch graphs a dry-run left behind when an earlier process stopped
+    // before their TTL: unreachable through any dataset, so only occupying space.
+    crate::sources::dryrun::sweep_leftovers(&state.store);
+
     // Spawn a background task to periodically prune expired PKCE OAuth sessions (L-7)
     {
         let sessions = state.oauth_sessions.clone();
@@ -2513,6 +2538,46 @@ pub async fn run(
             state.auth_db.clone(),
             state.base_url.to_string(),
         );
+        // A Raft cluster member boots as a follower and skips the boot seed,
+        // so the one-time release of dataset claims on model-registry graphs
+        // runs here instead, once this member leads (the marker it sets on the
+        // shared identity database makes every later leader skip it).
+        if state.store.replication().role() == crate::store::replication::Role::Cluster {
+            let claims_state = state.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+                loop {
+                    tick.tick().await;
+                    if crate::auth::dataset_graph::model_registry_claims_released(
+                        &claims_state.auth_db,
+                    ) {
+                        break;
+                    }
+                    if claims_state.store.replication().read_only() {
+                        continue;
+                    }
+                    let st = claims_state.clone();
+                    let released = tokio::task::spawn_blocking(move || {
+                        crate::auth::dataset_graph::release_model_registry_claims(
+                            &st.store,
+                            &st.auth_db,
+                            &st.base_url,
+                        )
+                    })
+                    .await;
+                    match released {
+                        Ok(Ok(n)) if n > 0 => tracing::warn!(
+                            "released {n} dataset claim(s) on model-registry graphs made before \
+                             they were refused"
+                        ),
+                        Ok(Err(e)) => tracing::warn!(
+                            "releasing dataset claims on model-registry graphs failed: {e}"
+                        ),
+                        _ => {}
+                    }
+                }
+            });
+        }
     }
 
     // GDPR/AVG: pseudonymise old audit rows daily.
@@ -2811,6 +2876,16 @@ pub fn run_boot_seed(
     if let Err(e) = crate::shacl_studio::seed::seed_shacl_shacl(store, auth) {
         tracing::warn!("shacl_studio: SHACL-SHACL seed failed: {e}");
     }
+    // Registrations of model-registry graphs made before the dataset graph
+    // gate refused them go first, so the Library adoptions below no longer
+    // treat those graphs as a dataset's (runs once; see the function).
+    match crate::auth::dataset_graph::release_model_registry_claims(store, auth, base) {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!(
+            "released {n} dataset claim(s) on model-registry graphs made before they were refused"
+        ),
+        Err(e) => tracing::warn!("releasing dataset claims on model-registry graphs failed: {e}"),
+    }
     if let Err(e) = crate::shacl_studio::migrate::migrate_legacy(store, auth, base) {
         tracing::warn!("shacl_studio: legacy migration failed: {e}");
     }
@@ -2837,6 +2912,11 @@ pub fn run_boot_seed(
     }
     // 4. Standard RDF vocabularies into the model registry.
     crate::data_models::seed_vocab::seed_standard_vocabularies(seed_state);
+    // 4b. A copy the registry calls unchanged that no longer is — a write whose
+    //     re-check a crash cut short — is labelled before it is served as such.
+    if crate::data_models::write_guard::reverify_checked_copies(&seed_state.store) > 0 {
+        seed_state.mark_vocab_registry_dirty();
+    }
     // 5. Canonical dataset-metadata IRIs, then audit/repair — datasets exist now.
     crate::auth::dataset_graph::reconcile_all_dataset_metadata(store, &seed_state.base_url, auth);
     // 5b. Model/Vocabulary/Instance reframe: reclassify stored property

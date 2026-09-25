@@ -26,8 +26,12 @@ pub fn migrate_legacy(
         };
 
         // Wrap the legacy shapes graph in a Library ShapeGraph (idempotent: skip if
-        // a set already points at this graph).
-        if studio.get_shape_graph_by_iri(&iri)?.is_none() {
+        // a set already points at this graph), unless it is a graph the Library
+        // never adopts for a dataset (see `registration::never_adopted`); the
+        // binding below still keeps it in the dataset's validation.
+        if studio.get_shape_graph_by_iri(&iri)?.is_none()
+            && !super::registration::never_adopted(store, base_url, &iri)
+        {
             let (targets, count) = super::run::analyze_shapes_graph(store, &iri);
             let set = studio.create_shape_graph(
                 &format!("{} shapes", d.name),

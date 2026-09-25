@@ -1,24 +1,64 @@
+import { writable } from 'svelte/store';
+
 // In-memory store: namespace → prefix label, filled from the platform's own
 // prefix service (bundled prefix.cc + LOV snapshot; no third-party calls).
 const _prefixCcStore: Record<string, string> = {};
-let _prefixLoadStarted = false;
 
-/** Warm the namespace→prefix store from the internal prefix service
- *  (best-effort, once per session; shortenIRI works without it via
- *  COMMON_PREFIXES). */
-export function loadPrefixCcPrefixes(): void {
-  if (_prefixLoadStarted) return;
-  _prefixLoadStarted = true;
-  fetch('/api/prefixes/all?format=json')
-    .then((res) => (res.ok ? res.json() : null))
-    .then((map) => {
-      if (!map || typeof map !== 'object') return;
-      for (const [label, ns] of Object.entries(map)) {
-        if (typeof ns === 'string' && !(ns in _prefixCcStore)) _prefixCcStore[ns] = label;
-      }
-      _shortenCache.clear();
-    })
-    .catch(() => {});
+/** Bumped once the prefix store is warm.
+ *
+ *  `shortenIRI` reads a module-level map, which creates no Svelte dependency,
+ *  so a CURIE rendered before the ~3700-entry snapshot lands keeps its weaker
+ *  form for the life of the page. A component makes its labels recompute by
+ *  naming this in the reactive statement:
+ *
+ *      $: label = ($prefixesVersion, shortenIRI(iri));
+ *
+ *  The value itself carries no meaning — only the change does. */
+export const prefixesVersion = writable(0);
+// The one load, in flight or settled. Holding the promise (rather than a
+// started flag) is what lets concurrent callers share a single request instead
+// of racing, and lets an awaiting caller know when the store is actually warm.
+let _prefixLoad: Promise<void> | null = null;
+
+/** Warm the namespace→prefix store from the internal prefix service.
+ *  Best-effort and idempotent, so every page may call it on mount: concurrent
+ *  callers coalesce into one request, a warm store is never re-fetched, and a
+ *  failing endpoint resolves quietly (shortenIRI keeps working from
+ *  COMMON_PREFIXES) while leaving a later navigation free to retry. */
+export function loadPrefixCcPrefixes(): Promise<void> {
+  if (_prefixLoad) return _prefixLoad;
+  const load = (async () => {
+    const res = await fetch('/api/prefixes/all?format=json');
+    if (!res.ok) throw new Error(`prefix service responded ${res.status}`);
+    const map: unknown = await res.json();
+    // Treated as a failure, not a quiet success: an outcome that leaves the
+    // store cold must stay retryable rather than being remembered as done.
+    if (!map || typeof map !== 'object') throw new Error('prefix service returned no map');
+    // A label the well-known table already binds is skipped when the snapshot
+    // points it at a different namespace. Both tiers feed one label→namespace
+    // space: letting `void` mean http://www.w3.org/ns/void# here and
+    // http://rdfs.org/ns/void# there makes shortening and expanding stop being
+    // inverses, and a serializer that declares one and writes the other
+    // silently rewrites an IRI.
+    const claimed: Record<string, string> = {};
+    for (const [ns, label] of Object.entries(COMMON_PREFIXES)) claimed[label] = ns;
+    for (const [label, ns] of Object.entries(map as Record<string, unknown>)) {
+      if (typeof ns !== 'string' || ns in _prefixCcStore) continue;
+      if (claimed[label] && claimed[label] !== ns) continue;
+      _prefixCcStore[ns] = label;
+    }
+    // Anything shortened before the store was warm was cached in its weaker form.
+    _shortenCache.clear();
+    _labelIndex = null;
+    prefixesVersion.update((n) => n + 1);
+  })().catch(() => {
+    // Never reject: callers fire this from a mount path and must not have to
+    // guard it. Forgetting the failed attempt keeps the session retryable
+    // without turning a transient outage into a permanently degraded display.
+    _prefixLoad = null;
+  });
+  _prefixLoad = load;
+  return load;
 }
 
 // Common RDF namespace prefixes
@@ -47,6 +87,60 @@ export const COMMON_PREFIXES = {
 export const PREFIX_LABEL_MAP = Object.fromEntries(
   Object.entries(COMMON_PREFIXES).map(([ns, label]) => [label, ns])
 );
+
+// A prefix label worth showing: a plain name. A "label" carrying ':' or '/'
+// renders as a CURIE the reader cannot resolve, which is worse than the IRI.
+const SIMPLE_LABEL = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
+
+/** Split an IRI at its last '#' or '/', keeping the delimiter on the namespace
+ *  (the form prefix maps register). Null when there is no boundary to split on
+ *  — `urn:`/`mailto:`/`tag:` IRIs — or when the IRI ends at one. */
+function splitNamespace(iri: string): { namespace: string; local: string } | null {
+  const idx = Math.max(iri.lastIndexOf('#'), iri.lastIndexOf('/'));
+  if (idx <= 0 || idx >= iri.length - 1) return null;
+  return { namespace: iri.slice(0, idx + 1), local: iri.slice(idx + 1) };
+}
+
+/** Last name-like segment of a namespace: '…/ns/' → 'ns', 'urn:example:shp/' →
+ *  'shp'. Null when that segment isn't a plain name. */
+function lastNamespaceSegment(ns: string): string | null {
+  const seg = ns.split(/[/:#]/).filter(Boolean).pop();
+  return seg && SIMPLE_LABEL.test(seg) ? seg : null;
+}
+
+// Inverse of the prefix-service store (label → namespace), built on first use
+// and dropped whenever the store is (re)filled. Only expansion needs it, so it
+// is not paid for by sessions that never type a CURIE.
+let _labelIndex: Record<string, string> | null = null;
+
+function servicePrefixNamespace(label: string): string | undefined {
+  if (!_labelIndex) {
+    const index: Record<string, string> = Object.create(null);
+    // The store is keyed the other way round; on a duplicate label the first
+    // namespace wins, matching the order the service returned them in.
+    for (const [ns, lbl] of Object.entries(_prefixCcStore)) if (!(lbl in index)) index[lbl] = ns;
+    _labelIndex = index;
+  }
+  return _labelIndex[label];
+}
+
+/**
+ * Resolve an IRI against the well-known prefixes alone — COMMON_PREFIXES first,
+ * then the prefix-service store loadPrefixCcPrefixes() fills. Returns the
+ * namespace alongside the label so a caller that *emits* the CURIE (Turtle, a
+ * SPARQL query) can declare the prefix it just used.
+ */
+export function wellKnownCurie(
+  iri: string
+): { prefix: string; namespace: string; local: string } | null {
+  if (typeof iri !== 'string' || !iri) return null;
+  const split = splitNamespace(iri);
+  if (!split) return null;
+  // Exact namespace lookup rather than a scan: the store holds ~3.7k entries
+  // and every registered namespace ends at a '#' or '/' boundary anyway.
+  const prefix = COMMON_PREFIXES[split.namespace] ?? _prefixCcStore[split.namespace];
+  return prefix ? { prefix, namespace: split.namespace, local: split.local } : null;
+}
 
 /**
  * Shorten a full IRI using known prefixes.
@@ -96,14 +190,14 @@ export function shortenIRI(iri: string, extraPrefixes: Record<string, string> = 
   }
   if (!matched) {
     // Fallback: derive a short prefix label from the last namespace segment so
-    // unknown IRIs render as  showcase:BridgeDataset  instead of  …/BridgeDataset
-    const idx = Math.max(iri.lastIndexOf('#'), iri.lastIndexOf('/'));
-    if (idx > 0 && idx < iri.length - 1) {
-      const local = iri.slice(idx + 1);
-      const ns = iri.slice(0, idx);
-      const nsLabel = ns.replace(/[/#]+$/, '').split('/').filter(Boolean).pop() || 'ns';
-      result = `${nsLabel}:${local}`;
-    }
+    // unknown IRIs render as  showcase:BridgeDataset  instead of  …/BridgeDataset.
+    // Only when that segment is a plain name, and only for IRIs that have a
+    // namespace boundary at all: 'urn:uuid:…' has none, and inventing one from
+    // its NID ('uuid:…') would drop the scheme and read as a resolvable CURIE
+    // that isn't one. Such IRIs keep their full, honest form instead.
+    const split = splitNamespace(iri);
+    const nsLabel = split ? lastNamespaceSegment(split.namespace) : null;
+    if (split && nsLabel) result = `${nsLabel}:${split.local}`;
   }
   if (useCache) {
     if (_shortenCache.size >= _SHORTEN_CACHE_MAX) {
@@ -127,9 +221,21 @@ export function expandPrefix(prefixed: string, extraPrefixes: Record<string, str
   const colon = prefixed.indexOf(':');
   const label = prefixed.slice(0, colon);
   const local = prefixed.slice(colon + 1);
-  const allMap = { ...PREFIX_LABEL_MAP, ...extraPrefixes };
-  if (allMap[label]) return allMap[label] + local;
-  return null;
+  // Same order shortening uses — caller's own prefixes, then well-known, then
+  // the prefix service. Those three tiers are inverses of shortening: one label
+  // never means two namespaces, because the service fill refuses an entry whose
+  // label a well-known prefix already claims.
+  //
+  // `shortenIRI` has a FOURTH tier this one deliberately does not: when nothing
+  // matches it invents a label from the last namespace segment, so a table shows
+  // `showcase:Bridge` rather than a bare IRI. That label is display only and
+  // does not expand back — which is why anything that has to survive a round
+  // trip (a serializer, an editable field) must check `expandPrefix` agrees
+  // before trusting a shortened form.
+  if (extraPrefixes[label]) return extraPrefixes[label] + local;
+  if (PREFIX_LABEL_MAP[label]) return PREFIX_LABEL_MAP[label] + local;
+  const fromService = servicePrefixNamespace(label);
+  return fromService ? fromService + local : null;
 }
 
 /**
@@ -535,18 +641,34 @@ export function toNQuads(triples: Triple[]): string {
     .join('\n');
 }
 
-function ttlTerm(term: RdfTerm | undefined, prefixes: Record<string, string>): string {
+function ttlTerm(
+  term: RdfTerm | undefined,
+  prefixes: Record<string, string>,
+  declared: Set<string>,
+): string {
   if (!term) return '""';
   if (term.type === 'uri' || term.type === 'iri') {
     const short = shortenIRI(term.value || '', prefixes);
-    // Only use prefixed form if it's genuinely abbreviated (no <…> needed)
-    if (short !== term.value && !short.startsWith('\u2026') && /^[a-zA-Z0-9_.-]+:[a-zA-Z0-9_.-]+$/.test(short)) return short;
+    // A CURIE may only be written when the document DECLARES its label.
+    // `shortenIRI` also invents one from the last namespace segment for display
+    // — good in a table, fatal here: `shapes:PersonShape` with no
+    // `@prefix shapes:` line is a download that will not parse.
+    const label = short.slice(0, short.indexOf(':'));
+    if (
+      short !== term.value &&
+      !short.startsWith('\u2026') &&
+      /^[a-zA-Z0-9_.-]+:[a-zA-Z0-9_.-]+$/.test(short) &&
+      declared.has(label)
+    ) {
+      return short;
+    }
     return `<${term.value}>`;
   }
   if (term.type === 'bnode') return `_:${term.value}`;
   const esc = (term.value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
   if (term.language) return `"${esc}"@${term.language}`;
-  if (term.datatype && term.datatype !== 'http://www.w3.org/2001/XMLSchema#string') return `"${esc}"^^${ttlTerm({ type: 'uri', value: term.datatype }, prefixes)}`;
+  if (term.datatype && term.datatype !== 'http://www.w3.org/2001/XMLSchema#string')
+    return `"${esc}"^^${ttlTerm({ type: 'uri', value: term.datatype }, prefixes, declared)}`;
   return `"${esc}"`;
 }
 
@@ -557,8 +679,9 @@ export function toTurtle(triples: Triple[]): string {
     .map(([ns, label]) => `@prefix ${label}: <${ns}> .`)
     .join('\n');
 
+  const declared = new Set(Object.values(prefixes));
   const lines = triples.map(t =>
-    `${ttlTerm(t.subject, prefixes)} ${ttlTerm(t.predicate, prefixes)} ${ttlTerm(t.object, prefixes)} .`
+    `${ttlTerm(t.subject, prefixes, declared)} ${ttlTerm(t.predicate, prefixes, declared)} ${ttlTerm(t.object, prefixes, declared)} .`
   );
   return prefixBlock + '\n\n' + lines.join('\n');
 }
@@ -569,6 +692,8 @@ export function toTrig(triples: Triple[]): string {
   const prefixBlock = Object.entries(prefixes)
     .map(([ns, label]) => `@prefix ${label}: <${ns}> .`)
     .join('\n');
+
+  const declared = new Set(Object.values(prefixes));
 
   // Group by graph IRI (null key = default graph)
   const byGraph = new Map<string | null, Triple[]>();
@@ -581,7 +706,7 @@ export function toTrig(triples: Triple[]): string {
   const blocks: string[] = [];
   for (const [g, ts] of byGraph) {
     const inner = ts.map(t =>
-      `  ${ttlTerm(t.subject, prefixes)} ${ttlTerm(t.predicate, prefixes)} ${ttlTerm(t.object, prefixes)} .`
+      `  ${ttlTerm(t.subject, prefixes, declared)} ${ttlTerm(t.predicate, prefixes, declared)} ${ttlTerm(t.object, prefixes, declared)} .`
     ).join('\n');
     if (g) blocks.push(`<${g}> {\n${inner}\n}`);
     else   blocks.push(`{\n${inner}\n}`);

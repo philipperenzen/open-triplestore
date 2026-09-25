@@ -1,26 +1,30 @@
-# SPARQL 1.1 conformance — official W3C test suite
+# SPARQL 1.1 — rdf-tests regression ratchet and known gaps
 
-The official **W3C SPARQL 1.1 test suite** (query and update sections of
-`rdf-tests/sparql/sparql11`) is vendored under
+The query and update sections of the W3C SPARQL 1.1 test suite, from the
+[w3c/rdf-tests](https://github.com/w3c/rdf-tests) repository
+(`sparql/sparql11`), are vendored unmodified under
 [`tests/fixtures/w3c-sparql11/`](../../tests/fixtures/w3c-sparql11/PROVENANCE.md)
-and runs in CI via
+and run in CI via
 [`tests/w3c_sparql11_manifests.rs`](../../tests/w3c_sparql11_manifests.rs).
 It complements the hand-written, spec-derived suite in
 `tests/w3c_sparql11_conformance.rs`, which stays as the platform's own
 regression corpus (including the cx01–cx15 high-complexity cases).
 
-## Scorecard (2026-09-10)
+This page describes how that run works and tracks the gaps it has found. It
+publishes no score, on purpose. The vendored sections are a subset of a W3C
+test suite, redistributed under the W3C 3-clause BSD License (see
+[`LICENSE.md`](../../tests/fixtures/w3c-sparql11/LICENSE.md) there). W3C's
+[test-suite licence policy](https://www.w3.org/copyright/test-suites-licenses/)
+offers that licence for "software development, bug tracking, and other
+applications that do not require assertions of performance to the public", and
+a subset of a W3C test suite does not allow claims of performance or the use of
+the name W3C without a special licence from W3C. So the run is used for
+development and regression only, and no pass count, pass rate or conformance
+claim is published for it.
 
-| | count |
-|---|---|
-| **Pass** | **475** |
-| Known-fail (ratcheted) | 10 |
-| Skipped | 0 |
-| Total entries | 485 |
-
-Per section: query evaluation 225 entries, query syntax 111 (63 positive,
-48 negative), update evaluation 94, update syntax 55 (42 positive, 13
-negative).
+The run covers the query evaluation, query syntax (positive and negative),
+update evaluation and update syntax (positive and negative) entries of the two
+top-level manifests.
 
 **What runs:** every entry goes through `TripleStore` — the same evaluation
 path `/sparql` uses — against a fresh in-memory store with the result cache
@@ -44,16 +48,17 @@ federation (`service/`, `syntax-fed/`), result-format (`csv-tsv-res/`,
 runner does not cover. The Graph Store and SPARQL Protocol behaviour is
 pinned by `tests/api_protocol_conformance.rs`.
 
-**Gap policy:** a two-way ratchet with a pass floor of 450. Every entry not
-listed in `KNOWN_FAILURES` must pass, and every listed entry must still fail —
-silent regressions *and* silent fixes both turn CI red, so the list cannot go
-stale.
+**Gap policy:** a two-way ratchet. Every entry not listed in
+`KNOWN_FAILURES` must pass, and every listed entry must still fail — silent
+regressions *and* silent fixes both turn CI red, so the list cannot go stale.
+A pass floor in the runner guards against a loader regression turning passes
+into skips.
 
-## Known failures
+## Known failures (bug tracking)
 
-All ten are behaviours of the oxigraph 0.5 evaluator; none is in the platform
-layer. They are listed here so the engine question can be revisited with
-evidence rather than re-derived.
+Each entry below is a behaviour of the oxigraph 0.5 evaluator; none is in the
+platform layer. They are listed here so the engine question can be revisited
+with evidence rather than re-derived.
 
 | Entry | Gap |
 |---|---|

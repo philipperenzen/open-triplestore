@@ -1,4 +1,5 @@
-//! W3C RDF 1.1 Conformance Tests
+//! RDF 1.1 format tests — hand-written and derived from the RDF 1.1
+//! specifications; not the W3C test suites, whose categories they follow.
 //!
 //! Tests derived from:
 //! - https://github.com/w3c/rdf-tests
@@ -10,7 +11,7 @@
 //! - W3C TriG test suite
 //! - W3C RDF/XML test suite
 //!
-//! Each test corresponds to a W3C conformance test class:
+//! Each test corresponds to a test class of the W3C RDF test suites:
 //! - rdft:TestTurtlePositiveSyntax  — valid Turtle that must parse
 //! - rdft:TestTurtleNegativeSyntax  — invalid Turtle that must fail
 //! - rdft:TestTurtleEval            — parse and check resulting triples

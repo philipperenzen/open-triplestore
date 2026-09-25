@@ -94,8 +94,14 @@ pub(crate) fn chat_model() -> String {
 
 /// Optional bearer token for the endpoint (`LLM_API_KEY`). Required by hosted APIs
 /// (OpenAI, OpenRouter, …); leave unset for local servers (Ollama, LM Studio).
+///
+/// Read as a secret reference (`env:`, `file:`, `vault:`) and resolved per
+/// call, so a rotated gateway key takes effect without a restart. A raw value
+/// is still accepted outside the production posture, with a deprecation
+/// warning; an unresolvable reference disables the key rather than sending a
+/// literal `vault:…` string as a bearer token.
 fn api_key() -> Option<String> {
-    env_nonempty("LLM_API_KEY")
+    crate::secrets::env_secret_opt("LLM_API_KEY")
 }
 
 fn env_nonempty(key: &str) -> Option<String> {

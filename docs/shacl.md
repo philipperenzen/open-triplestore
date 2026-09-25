@@ -188,13 +188,54 @@ Response:
 }
 ```
 
+### What a run reads, and who sees its report
+
+A report carries the focus nodes and values of the graphs it validated, so a
+run reads only the dataset graphs the caller may read, by the rule `/sparql`
+applies: a private graph only for the dataset's writers, plus graph-ACL read
+grants. Admins read every graph. A run that could not read every graph of the
+dataset is not official: it is answered as a test run (`"test": true,
+"partial": true`), is not recorded, and leaves the dataset's validation status
+as it was. An explicit `shapes_graph` in the body must be readable by the same
+rule.
+
+An official run is recorded with the graphs it validated, and its report is
+written as RDF to `urn:system:reports:dataset:<id>`. That graph is private in
+the dataset whenever the run validated a private graph (or a model graph not
+everyone may read), and it stays private. `GET …/validation/latest` and
+`GET …/validation/runs/<run_id>` return the full report to the dataset's
+writers and to callers who may read every graph the run validated; anyone else
+gets the run's summary (counts, `conforms`) with `"report": null` and
+`"report_withheld": true`.
+
+A report also carries its shapes' messages, paths and shape IRIs, so shapes
+follow the same rule. A graph some dataset holds as private shapes only the
+runs of who may read it: the dataset's private shapes-role graph, or another
+dataset's private graph linked or bound as shapes here. A run that leaves one
+out is a test run too. `GET /api/datasets/<id>/shapes` and the form manifest
+serve such a graph only to who may read it (`GET …/shapes` answers 404 when
+that leaves none). Linking one as a dataset's shapes graph
+(`PUT /api/datasets/<id>/shacl`) needs that right too. Its readers may link
+it into another dataset all the same: that dataset's runs then use it, and its
+own writers need not be allowed to read it.
+
+So a stored run also records the shapes graphs it used, and its full report
+is withheld from anyone but an admin who may not read one of them that some
+dataset holds as private when they ask, the dataset's writers included. An
+official run shaped by another dataset's private graph writes no report
+graph, and clears the last one. Making a graph private
+(`PATCH /api/datasets/<id>/graphs` with `"private": true`) takes the report
+graphs on it along: a dataset whose latest official run validated the graph,
+or was shaped by it, has its report graph made private when it holds the
+graph and cleared when it does not.
+
 ---
 
 ## Validation on Write
 
 When `shacl_on_write` is `true` on a dataset and a `shapes_graph_iri` is configured, every `PUT` or `POST` to `/store?graph=<graph-iri>` that targets a graph belonging to the dataset is validated before the write is committed.
 
-If validation fails, the write is rejected with **422 Unprocessable Entity** and the JSON report is returned. The store is not modified.
+If validation fails, the write is rejected with **422 Unprocessable Entity** and the JSON report is returned. The store is not modified. A report names the gate's shapes, their paths and messages: when the shapes that refused the write include a graph some dataset holds as private that the writer may not read, the 422 says only that the write does not conform, and by how many results. The same holds for every write gate below, and for bulk import.
 
 The gate fails **closed**: a gate that cannot be evaluated refuses the write with the same 422 and a report naming the cause, never a 204. That covers a shapes graph that cannot be read or copied, a validation-engine error, and an ill-formed shapes graph — in particular a `sh:sparql` constraint whose `sh:select` does not parse (or errors at evaluation) is a violation of the focus node, not a constraint that silently never fires. Loading such a shapes graph for on-demand validation fails with an error for the same reason.
 
@@ -280,13 +321,18 @@ A binding **gates on its own**: a write to a graph (or to any graph of a dataset
 
 ### Discovering & composing shapes
 
-A shape graph *is* a named graph of SHACL, so the **Shapes catalog** sweeps every non-system graph — including shapes embedded in data graphs ("joined with instance data") — for `sh:NodeShape` / `sh:PropertyShape` subjects:
+A shape graph *is* a named graph of SHACL, so the **Shapes catalog** sweeps every non-system graph the caller may read — including shapes embedded in data graphs ("joined with instance data") — for `sh:NodeShape` / `sh:PropertyShape` subjects. It is graph-first: without `?graph=` it lists the graphs holding shapes, with counts; `?graph=<iri>` returns one graph's shapes:
 
 ```bash
 curl http://localhost:7878/api/shacl/shapes -H 'Authorization: Bearer <token>'
-# → [{ graph, shape, kind:"node"|"property", label?, target_classes, path?,
-#      registered, shape_graph_id?, shape_graph_name? }, …]
+# → { graphs: [{ graph, node_count, property_count, total,
+#                registered, shape_graph_id?, shape_graph_name? }, …] }
+curl "http://localhost:7878/api/shacl/shapes?graph=<url-encoded iri>" -H 'Authorization: Bearer <token>'
+# → { graph, shapes: [{ graph, shape, kind:"node"|"property", label?, target_classes, path?,
+#                       registered, shape_graph_id?, shape_graph_name? }, …] }
 ```
+
+A graph registered in the Library is listed to whoever the Library shows its entry to. Any other graph is listed only to a caller who may read it by the rule `/sparql` applies — dataset visibility (a private graph only for its dataset's writers) plus graph-ACL read grants; admins read every graph — and `?graph=` on any other graph answers 403.
 
 **Compose** — copy picked shapes (each with its full blank-node closure) into a shape graph (create an empty one first, or pick an existing one):
 
@@ -296,7 +342,7 @@ curl -X POST http://localhost:7878/api/shacl/shape-graphs/<shape_graph_id>/impor
      -d '{"shapes":[{"source_graph":"urn:shapes:other","shape":"http://ex/PersonShape"}]}'
 ```
 
-**Register in place** — adopt a pre-existing shapes-bearing graph as a Library shape graph without copying (idempotent; returns the existing record if already known):
+**Register in place** — adopt a pre-existing shapes-bearing graph as a Library shape graph without copying (idempotent; returns the existing record, to a caller who may see it, if already known). The caller becomes the entry's owner, and owners edit the graph in place. So registering needs the right to change the graph, not only to read it: an admin, a graph-ACL write grant, write access to a dataset that holds the graph (in its namespace or registered to it), or write access to the registry entry holding it. Graphs named `urn:shapes:…` are registered only by admins:
 
 ```bash
 curl -X POST http://localhost:7878/api/shacl/register-shape-graph \
@@ -304,13 +350,19 @@ curl -X POST http://localhost:7878/api/shacl/register-shape-graph \
      -d '{"graph_iri":"http://example.org/graph/my-shapes","name":"My shapes"}'
 ```
 
+Every Studio write checks that right again: save, restore, import shapes, and a visibility change of an adopted graph. Managing a Library entry is enough on its own only for a graph the Studio minted for it (`urn:shapes:…`). So a dataset's shapes graph is edited in the Studio by the members who may write the dataset, not by an org viewer, as with `PUT /api/datasets/{id}/shapes`.
+
+A dataset's shapes graph is adopted into the Library in place when the dataset is validated or imported into, or when its shapes graph or graph roles change. The entry takes the dataset's visibility, except for a graph the dataset holds as private, whose entry is `private`. An entry's visibility does not decide who reads a private graph, however: an entry of a graph some dataset holds as private is shown to, and worked on by, only those who may read that graph by the `/sparql` rule (its dataset's writers, graph-ACL read grants, admins). That covers the entry, its Turtle, revisions and clone, the Library list, bindings, effective shapes, the catalogue and pipelines. It holds for an entry made before the graph was marked private, too, and marking the graph public again gives the entry back.
+
 Impact — *what data a shape graph is applied to* — is the reverse binding lookup: `GET /api/shacl/bindings?shape_graph_id=<shape_graph_id>` → `{ shape_graph_id, targets: [ …IRIs ] }`.
 
 ### Pipelines & targets
 
 A pipeline is a saved, runnable validation. Its scope is a set of **targets** — any mix of datasets, graphs, and shape graphs — plus composed shape graphs, a severity threshold, and triggers (manual, on-write, cron). When `gate_writes` is set, writes covered by the pipeline are gated. See `POST /api/shacl/pipelines`; the request body's `targets` is an array of `{ "kind": "dataset"|"graph"|"shapegraph", "id": "…" }`.
 
-A pipeline with `gate_writes` refuses (422) every write its shapes reject to the graphs it covers, whoever makes it, the graphs' owners and editors included. So setting a gate (creating or updating a pipeline with `gate_writes`) needs what a validation-layer binding needs: write access to every dataset it covers (dataset targets, and `dataset_ids` while no `graph_iris` narrow the scope) and a graph-ACL write grant on every graph it names (graph targets, `graph_iris`). Admins pass. Anything else answers 403, and a dataset that does not exist 404. A pipeline that validates without gating needs no write access. The gate acts with its creator's authority, checked at every write: once the creator may no longer write what it covers (a revoked grant, a deactivated account), the pipeline stops gating, and the server logs a warning at each write it would have gated.
+A run's report carries the data it validated (focus nodes and values), so a pipeline's whole scope — every dataset, every data graph it resolves to and every shape graph it composes — must be readable by whoever creates or updates it, runs or test-runs it, or opens a stored run's report (`GET /api/shacl/pipelines/{id}/runs/{run_id}`); anything else answers 403. Reading follows the `/sparql` rule above, and a Library shape graph is readable by whoever the Library shows it to. The shapes bound to a dataset or graph in scope come with it, except a graph some dataset holds as private that the caller may not read: a pipeline with one in scope answers 403. The check is made each time, so a revoked grant takes effect at the next run. A scheduled run is checked against the pipeline's creator and skipped when they may no longer read its scope. Run summaries (`…/runs`, counts only) are listed to everyone who can see the pipeline. A report persisted as RDF (`results_target`) or inferred triples written to a new graph are attached to a dataset only when that dataset holds every graph the run validated, and are private there when any of them is private. The pipeline's own report graph collects every run, so a run over other data first detaches it, and it is attached again only while empty.
+
+A pipeline with `gate_writes` refuses (422) every write its shapes reject to the graphs it covers, whoever makes it, the graphs' owners and editors included. So setting a gate (creating or updating a pipeline with `gate_writes`) needs what a validation-layer binding needs: write access to every dataset it covers (dataset targets, and `dataset_ids` while no `graph_iris` narrow the scope) and a graph-ACL write grant on every graph it names (graph targets, `graph_iris`). Admins pass. Anything else answers 403, and a dataset that does not exist 404. Read access is enough only for a pipeline that validates without gating. The gate acts with its creator's authority, checked at every write: once the creator may no longer write what it covers (a revoked grant, a deactivated account), the pipeline stops gating, and the server logs a warning at each write it would have gated.
 
 ### Meta-validation (SHACL-SHACL)
 
@@ -336,6 +388,26 @@ curl http://localhost:7878/api/shacl/shape-graphs/<shape_graph_id>/commits -H 'A
 
 When a dataset version is snapshotted, the dataset's effective bindings are captured into a version-scoped `{base}/dataset/{id}/version/{ver}/validation` graph and re-applied on restore — so the validation layer versions and branches together with the data it governs.
 
+### Reading and writing a shape graph's content
+
+The content of a shape graph is served and replaced as one document:
+
+```bash
+# Turtle, with an @prefix header built from the prefix registry for the
+# namespaces the graph actually uses — sh:, xsd:, the deployment's own.
+curl http://localhost:7878/api/shacl/shape-graphs/<shape_graph_id>/turtle -H 'Authorization: Bearer <token>'
+
+# SHACL Compact Syntax instead: ?format=shaclc, or Accept: text/shaclc
+curl 'http://localhost:7878/api/shacl/shape-graphs/<shape_graph_id>/turtle?format=shaclc' -H 'Authorization: Bearer <token>'
+
+# Replace the content. The revision note is what the history shows for it.
+curl -X PUT 'http://localhost:7878/api/shacl/shape-graphs/<shape_graph_id>/turtle?message=Require%20a%20name' \
+     -H 'Authorization: Bearer <token>' -H 'Content-Type: text/turtle' --data-binary @shapes.ttl
+# → {"version": 4}
+```
+
+`message` is optional (the default note is `Edited`), trimmed, bounded to 200 characters and stripped of control characters before it reaches the commit log. A body sent as `Content-Type: text/shaclc` is parsed as SHACL-C first and stored as Turtle. Reading needs read access to the shape graph; writing needs manage access.
+
 ---
 
 ## SHACL-AF Inference
@@ -345,8 +417,15 @@ Run SHACL Advanced Features rules to materialize inferred triples:
 ```bash
 curl -X POST http://localhost:7878/api/datasets/<dataset_id>/infer \
      -H 'Authorization: Bearer <token>'
-# → {"inferred_triples": 42}
+# → {"inferred_triples": 42, "partial": false}
 ```
+
+It needs write access to the dataset and runs the rules of the same shapes
+graphs validation uses (the configured shapes graph, SHACL Studio bindings and
+`shapes`-role graphs), less those the caller may not read: a graph some dataset
+holds as private (another dataset's, linked or bound here) runs only for that
+dataset's writers, graph-ACL readers and admins. `partial: true` says a shapes
+graph was left out; with none left the call answers 400.
 
 Supports `sh:SPARQLRule` (`sh:construct`) and `sh:TripleRule` (`sh:subject` /
 `sh:predicate` / `sh:object`, with `sh:this` standing for the focus node; a
@@ -368,6 +447,28 @@ ex:VoterShape a sh:NodeShape ;
 ex:Adult a sh:NodeShape ;
   sh:property [ sh:path ex:age ; sh:minInclusive 18 ] .
 ```
+
+### What a rule may read and write
+
+A shapes graph is data: anyone who may write a dataset may upload one and run
+it. A rule therefore runs with the authority of the dataset it runs for, not
+that of the store.
+
+* **`sh:construct` must be a CONSTRUCT query** — `CONSTRUCT { … } WHERE { … }`,
+  or the equivalent `INSERT { … } WHERE { … }` form this store also accepts.
+  Anything else (a `DELETE`/`INSERT` update, `DROP`, `LOAD`, several
+  operations) is refused when the shapes graph loads, naming the shape.
+* **It reads the run's data graphs and nothing else.** Whatever `FROM` /
+  `FROM NAMED` the query declares is replaced by them, and no named graph is
+  available — so a `GRAPH <g>` block inside a rule matches nothing. The same
+  holds for a `sh:sparql` constraint and a `sh:SPARQLTarget`.
+* **The engine writes, not the rule.** A CONSTRUCT template cannot name a
+  graph, and derived triples go to exactly one: the dataset's single data
+  graph when it has one, otherwise its own `urn:dataset:{id}:inferred`
+  (registered with the `entailment` role, so it is ACL'd, listed and deleted
+  with the dataset).
+* **`$this` is bound as a term**, never pasted into the query text, so a focus
+  node with a hostile lexical form (`sh:targetNode "…"`) is just a term.
 
 ---
 

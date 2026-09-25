@@ -404,6 +404,17 @@ pub async fn sync_handler(
     {
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
     }
+    // The same gate as registering the graph to the dataset: inside its
+    // boundary for non-admins, and never a model-registry graph for anyone.
+    let claim = crate::auth::dataset_graph::gate_dataset_graph_target(
+        &state.store,
+        &state.auth_db,
+        &state.base_url,
+        &body.dataset_id,
+        &body.graph_iri,
+        &user,
+    )
+    .map_err(|m| (StatusCode::FORBIDDEN, m))?;
     if !crate::remote::is_allowed(&body.url) {
         return Err((
             StatusCode::FORBIDDEN,
@@ -412,9 +423,12 @@ pub async fn sync_handler(
     }
     // The target graph belongs to the dataset (registered if it is new), so
     // the dataset's own stream — if any — and its history see the sync.
-    let _ = state
-        .auth_db
-        .add_dataset_graph(&body.dataset_id, &body.graph_iri);
+    let _ = crate::auth::dataset_graph::register_claimed_graph(
+        &state.auth_db,
+        &body.dataset_id,
+        &body.graph_iri,
+        claim,
+    );
     let st = state.clone();
     let (url, ds_id, graph) = (
         body.url.clone(),

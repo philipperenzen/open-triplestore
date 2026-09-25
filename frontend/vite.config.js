@@ -4,6 +4,8 @@ import tailwindcss from '@tailwindcss/vite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import { otherBundledMaterial, thirdPartyLicenses } from './scripts/third-party-licenses.mjs';
 
 // ── Cesium runtime assets, served from this origin ────────────────────────────
 //
@@ -93,6 +95,28 @@ async function resolveRegistry() {
   }
 }
 
+// ── Third-party licence notices ────────────────────────────────────────────────
+//
+// The minifier strips the @license comments of the npm packages it bundles, so
+// the build writes their licence and notice files to dist/THIRD-PARTY-LICENSES.txt
+// instead (see scripts/third-party-licenses.mjs). The plugin records what the
+// bundler actually put into the main bundle and each web worker; the packages
+// below reach dist/ outside the module graph and are added explicitly, and so is
+// the third-party material no npm package covers (web-ifc.wasm's statically
+// linked libraries, inline icon shapes, EPSG parameters), whose licence texts
+// come from the repository's LICENSES/ directory: the build fails without it.
+const licenses = thirdPartyLicenses({
+  extraPackages: [
+    // cesiumAssets() copies Build/Cesium's runtime into dist/cesium; that build
+    // contains CesiumJS and the packages it depends on.
+    { name: 'cesium', withDependencies: true, reason: 'runtime assets copied to dist/cesium' },
+    // @tailwindcss/vite compiles Tailwind's base styles into the stylesheet.
+    { name: 'tailwindcss', reason: 'base styles compiled into dist/assets/*.css' },
+  ],
+  cesiumRuntimeDir: cesiumBuildDir(),
+  otherMaterial: otherBundledMaterial(fileURLToPath(new URL('../LICENSES', import.meta.url))),
+});
+
 export default defineConfig(async () => {
   // Only probe the registry when discovery is enabled — otherwise skip the startup round-trip.
   const reg = DISCOVERY ? await resolveRegistry() : {};
@@ -107,7 +131,9 @@ export default defineConfig(async () => {
     // Expose the opt-in flag to the browser bundle so serviceRegistry.ts only contacts the
     // registry when discovery is on (otherwise no /registry/events SSE reconnect loop, no noise).
     define: { __LD_DISCOVERY__: JSON.stringify(DISCOVERY) },
-    plugins: [tailwindcss(), svelte(), cesiumAssets()],
+    plugins: [tailwindcss(), svelte(), cesiumAssets(), licenses.plugin()],
+    // Web workers are separate bundles: record their third-party modules too.
+    worker: { plugins: () => [licenses.workerPlugin()] },
     server: {
       // --no-reload (LD_NO_HMR=1) turns off hot module reload while keeping the dev server + proxy.
       hmr: process.env.LD_NO_HMR === '1' ? false : undefined,
@@ -200,7 +226,8 @@ export default defineConfig(async () => {
       // Vitest owns unit tests under src/; Playwright (npm run e2e) owns e2e/.
       // Without this, vitest's default glob picks up e2e/*.spec.ts and crashes
       // because Playwright's test() can't run under vitest.
-      include: ['src/**/*.{test,spec}.{js,ts}'],
+      // scripts/*.test.mjs cover the build scripts (e.g. the licence notices).
+      include: ['src/**/*.{test,spec}.{js,ts}', 'scripts/**/*.test.mjs'],
     },
   };
 });

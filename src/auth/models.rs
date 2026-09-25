@@ -181,6 +181,9 @@ impl From<ApiScope> for AccessLevel {
             ApiScope::Read => AccessLevel::Read,
             ApiScope::Write => AccessLevel::Write,
             ApiScope::Admin => AccessLevel::Manage,
+            // A resource scope is not a rung of the ladder: what it may write
+            // is decided by the routes it names, never by a general grant.
+            ApiScope::SourcesRead | ApiScope::MappingsPropose => AccessLevel::Read,
         }
     }
 }
@@ -188,12 +191,24 @@ impl From<ApiScope> for AccessLevel {
 // ─── API token scopes ────────────────────────────────────────────────────────
 
 /// Scope for an API token.
+///
+/// `read` / `write` / `admin` are the capability ladder. The two
+/// resource-scoped ones exist for the mapping proposer — a service that runs
+/// against the store and nothing else: `sources:read` reads the datasource
+/// registry, profiles, mappings, runs and the mapping gates (never a
+/// datasource's location, credential reference or raw rows), and
+/// `mappings:propose` writes a mapping in the `proposed` state and dry-runs
+/// it. Neither confers any other write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ApiScope {
     Read,
     Write,
     Admin,
+    #[serde(rename = "sources:read")]
+    SourcesRead,
+    #[serde(rename = "mappings:propose")]
+    MappingsPropose,
 }
 
 impl ApiScope {
@@ -202,6 +217,8 @@ impl ApiScope {
             ApiScope::Read => "read",
             ApiScope::Write => "write",
             ApiScope::Admin => "admin",
+            ApiScope::SourcesRead => "sources:read",
+            ApiScope::MappingsPropose => "mappings:propose",
         }
     }
 
@@ -211,6 +228,8 @@ impl ApiScope {
             "read" => Some(ApiScope::Read),
             "write" => Some(ApiScope::Write),
             "admin" => Some(ApiScope::Admin),
+            "sources:read" => Some(ApiScope::SourcesRead),
+            "mappings:propose" => Some(ApiScope::MappingsPropose),
             _ => None,
         }
     }

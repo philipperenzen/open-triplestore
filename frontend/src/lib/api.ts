@@ -1045,9 +1045,22 @@ export async function getShapeGraphTurtle(id: string, format: 'turtle' | 'shaclc
   return res.text();
 }
 
-/** Save the shape graph's Turtle (or SHACLC via `contentType="text/shaclc"`). */
-export async function putShapeGraphTurtle(id: string, body: string, contentType = 'text/turtle'): Promise<{ version: number }> {
-  const res = await fetch(`/api/shacl/shape-graphs/${id}/turtle`, {
+export interface PutShapeGraphTurtleOptions {
+  /** Commit note for the revision. Omitted/blank lets the server name it. */
+  message?: string;
+  /** Body media type — `text/shaclc` to save SHACL Compact syntax. */
+  contentType?: string;
+}
+
+/** Save the shape graph's Turtle (or SHACLC via `contentType: "text/shaclc"`). */
+export async function putShapeGraphTurtle(
+  id: string,
+  body: string,
+  options: PutShapeGraphTurtleOptions = {},
+): Promise<{ version: number }> {
+  const { message = '', contentType = 'text/turtle' } = options;
+  const query = message.trim() ? `?message=${encodeURIComponent(message.trim())}` : '';
+  const res = await fetch(`/api/shacl/shape-graphs/${id}/turtle${query}`, {
     method: 'PUT',
     credentials: 'include',
     headers: { 'Content-Type': contentType },
@@ -1056,6 +1069,84 @@ export async function putShapeGraphTurtle(id: string, body: string, contentType 
   if (!res.ok) throw new Error(`Failed to save shape graph turtle: ${res.status} ${await res.text()}`);
   return res.json();
 }
+
+// ─── SQL datasources, RML mappings and materialisation runs ─────────────────
+// Admin-only (src/sources). A datasource response carries the credential
+// REFERENCE (env:/file:/vault:), never a value — there is no password field
+// anywhere in this surface.
+export const listSources = () => request('GET', '/api/sources');
+export const getSource = (id) => request('GET', `/api/sources/${encodeURIComponent(id)}`);
+export const createSource = (body) => request('POST', '/api/sources', body);
+export const updateSource = (id, body) => request('PUT', `/api/sources/${encodeURIComponent(id)}`, body);
+export const deleteSource = (id) => request('DELETE', `/api/sources/${encodeURIComponent(id)}`);
+/// Open a connection and throw it away. Never persists anything.
+export const testSource = (body) => request('POST', '/api/sources/test', body);
+export const introspectSource = (id) => request('GET', `/api/sources/${encodeURIComponent(id)}/introspect`);
+export const previewSourceTable = (id, table, limit = 20) =>
+  request('GET', `/api/sources/${encodeURIComponent(id)}/preview?table=${encodeURIComponent(table)}&limit=${limit}`);
+export const sourceMetrics = () => request('GET', '/api/sources/metrics');
+
+export const listSourceMappings = (sourceId) =>
+  request('GET', sourceId ? `/api/mappings?source=${encodeURIComponent(`urn:source:${sourceId}`)}` : '/api/mappings');
+export const getMapping = (id) => request('GET', `/api/mappings/${encodeURIComponent(id)}`);
+export const createMapping = (body) => request('POST', '/api/mappings', body);
+export const updateMapping = (id, body) => request('PUT', `/api/mappings/${encodeURIComponent(id)}`, body);
+export const deleteMapping = (id) => request('DELETE', `/api/mappings/${encodeURIComponent(id)}`);
+// `request` returns text when the response is not JSON, which the RML
+// endpoint (text/turtle) relies on.
+export const getMappingRml = (id, version?: number) =>
+  request('GET', `/api/mappings/${encodeURIComponent(id)}/rml${version ? `?version=${version}` : ''}`);
+
+// Profiling: counts and shapes per table, never rows. The profile is Turtle.
+export const profileSource = (sourceId, tables?: string[]) =>
+  request('POST', `/api/sources/${encodeURIComponent(sourceId)}/profile`, tables?.length ? { tables } : {});
+export const getSourceProfile = (sourceId, version?: number) =>
+  request('GET', `/api/sources/${encodeURIComponent(sourceId)}/profile${version ? `?version=${version}` : ''}`);
+// Drift between two profile versions, and the re-map tickets it opens.
+export const driftSource = (sourceId, body = {}) =>
+  request('POST', `/api/sources/${encodeURIComponent(sourceId)}/drift`, body);
+export const listSourceTickets = (sourceId) =>
+  request('GET', `/api/sources/${encodeURIComponent(sourceId)}/tickets`);
+export const closeTicket = (ticketId) => request('POST', `/api/tickets/${encodeURIComponent(ticketId)}/close`, {});
+// A sample of a mapping, validated and classified; registers nothing.
+export const dryRunSource = (sourceId, body) =>
+  request('POST', `/api/sources/${encodeURIComponent(sourceId)}/dry-run`, body);
+// The mapping gates config graph.
+export const getMappingGates = () => request('GET', '/api/sources/gates');
+export const updateMappingGates = (patch) => request('PUT', '/api/sources/gates', patch);
+// A legacy `mapping.sql2rdf.yaml` bundle as RML, registered nowhere.
+export const convertLegacyMapping = (body) => request('POST', '/api/mappings/convert', body);
+
+// Review decisions on a mapping — approve, edit, reject — as PROV, and the
+// calibration curve those decisions support.
+export const decideMapping = (mappingId, body) =>
+  request('POST', `/api/mappings/${encodeURIComponent(mappingId)}/decisions`, body);
+export const listMappingDecisions = (mappingId) =>
+  request('GET', `/api/mappings/${encodeURIComponent(mappingId)}/reviews`);
+export const calibrateConfidence = (body = {}) => request('POST', '/api/sources/calibration', body);
+
+export const listSourceRuns = (sourceId) => request('GET', `/api/sources/${encodeURIComponent(sourceId)}/runs`);
+export const startSourceRun = (sourceId, body) => request('POST', `/api/sources/${encodeURIComponent(sourceId)}/runs`, body);
+export const getRun = (runId) => request('GET', `/api/runs/${encodeURIComponent(runId)}`);
+export const rollbackRun = (runId) => request('POST', `/api/runs/${encodeURIComponent(runId)}/rollback`, {});
+export const deleteRun = (runId) => request('DELETE', `/api/runs/${encodeURIComponent(runId)}`);
+// A refused run's kept candidate, re-gated and swapped in after correction.
+export const promoteRun = (runId) => request('POST', `/api/runs/${encodeURIComponent(runId)}/promote`, {});
+
+// The review queue a refused run opens: one item per subject, with the
+// deterministic fixer (preview as an RDF Patch, or apply) and a human's
+// explicit status.
+export const listSourceReviews = (sourceId, status?: string) =>
+  request(
+    'GET',
+    `/api/sources/${encodeURIComponent(sourceId)}/reviews${status ? `?status=${encodeURIComponent(status)}` : ''}`,
+  );
+export const getReviewItem = (itemId) => request('GET', `/api/reviews/${encodeURIComponent(itemId)}`);
+export const setReviewStatus = (itemId, body) =>
+  request('POST', `/api/reviews/${encodeURIComponent(itemId)}/status`, body);
+export const autofixReviewItem = (itemId, apply: boolean) =>
+  request('POST', `/api/reviews/${encodeURIComponent(itemId)}/autofix`, { apply });
+export const suggestReviewFix = (itemId) => request('POST', `/api/reviews/${encodeURIComponent(itemId)}/suggest`, {});
 
 // ─── SHACL Studio: validation pipelines ─────────────────────────────────────
 export const listPipelines = () => request('GET', '/api/shacl/pipelines');
@@ -1434,6 +1525,50 @@ export function isLoggedIn() {
 // ── Model Registry (OWL/RDFS ontologies and SKOS vocabularies) ─────────────────
 // Each entry carries a `kind` ("data-model" | "vocabulary"), auto-detected on upload.
 
+/** A licence by name and canonical URI. */
+export interface ModelLicenseRef {
+  name: string;
+  uri: string;
+}
+
+/**
+ * Licence and attribution of the content a registry entry or version holds:
+ * set for the bundled standard vocabularies the server seeds (and drafts
+ * copied from them), `null` otherwise. Registry metadata, not part of the
+ * stored graph. Mirrors `ContentAttribution` in src/data_models/models.rs.
+ */
+export interface ModelAttribution {
+  /** The bundled file, relative to /vocab/ (e.g. "dcat/2.0.0.ttl"). */
+  file: string;
+  /** Empty when no licence is known (DOAP). */
+  licenses: ModelLicenseRef[];
+  /** Copyright notices or, where a source states none, its creator credit. */
+  copyright: string[];
+  /** The statement the licence asks every copy to carry, verbatim. */
+  notice: string | null;
+  /** The source document's status (the W3C Document License asks for it). */
+  status: string | null;
+  source_url: string;
+  specification_url: string | null;
+  /** How the bundled file differs from its source. */
+  changes: string | null;
+  /** How the stored copy relates to the bundled file. */
+  stored_copy: string;
+  /**
+   * The server checked that the stored triples are the bundled file's.
+   * False for drafts, branches, merges, rebases and edited copies, which may
+   * have been modified. Absent from older servers' records.
+   */
+  unchanged?: boolean;
+  remarks: string | null;
+  /** The rights holder allows no altered copies (IMBOR). */
+  no_derivatives: boolean;
+  /** The bundled file's own comment header, verbatim. */
+  header: string | null;
+  /** Full attribution and licence texts (/vocab/NOTICE.md on this server). */
+  notice_url: string;
+}
+
 export const listDataModels = () => request('GET', '/api/models');
 
 // A prefix candidate derived from an on-platform registered model/vocabulary.
@@ -1688,7 +1823,28 @@ export interface VocabCatalogEntry {
   }[];
   source: 'platform' | 'lov';
   model_id?: string | null;
+  /** Its graph is in this instance's corpus (the image ships only
+   *  vocabularies this platform may redistribute). */
   installable: boolean;
+  /** The vocabulary's licence: the one its own graph declares or, where it
+   *  names none, its publisher's published terms (`license_source`). LOV
+   *  entries only; null status on platform entries. LOV's CC BY 4.0 covers
+   *  only LOV's metadata, not the vocabularies. */
+  license: string[];
+  license_declared: string[];
+  license_status: 'open' | 'restricted' | 'unrecognised' | 'copyright-only' | 'none' | null;
+  /** This platform may redistribute it (and term-indexes it). */
+  redistributable: boolean;
+  /** `graph`: the licence fields are what the vocabulary's own graph states;
+   *  `publisher-terms`: the graph names none and the publisher states its
+   *  terms elsewhere (`license_source_url`). */
+  license_source?: 'graph' | 'publisher-terms' | null;
+  license_source_url?: string | null;
+  /** The statement the licence requires on copies (a copyright line, the
+   *  W3C or OGC document notice, …), whatever the licence's source. */
+  license_notice?: string | null;
+  /** Why an openly licensed vocabulary is still not redistributed. */
+  redistribution_withheld?: string | null;
 }
 
 export interface VocabTermHit {

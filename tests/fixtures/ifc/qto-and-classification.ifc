@@ -58,10 +58,12 @@ DATA;
 #90= IFCPROPERTYSET('0BBBBBBBBBBBBBBBBBBBT2',$,'Pset_Extra',$,(#91));
 #91= IFCPROPERTYSINGLEVALUE('Note',$,IFCTEXT('via the set form'),$);
 #92= IFCRELDEFINESBYPROPERTIES('0BBBBBBBBBBBBBBBBBBBR7',$,$,$,(#40),IFCPROPERTYSETDEFINITIONSET((#90)));
-/* A two-level Uniclass reference and a material. */
-#100= IFCCLASSIFICATION('NBS','2015',$,'Uniclass 2015',$,'https://uniclass.thenbs.com',$);
-#101= IFCCLASSIFICATIONREFERENCE('https://uniclass.thenbs.com/taxon/ss','Ss','Systems',#100,$,$);
-#102= IFCCLASSIFICATIONREFERENCE($,'Ss_25_10_30','Wall systems',#101,'Wall and barrier systems',$);
+/* A two-level classification reference and a material. The scheme, its codes
+   and titles are made up (example.org), shaped like a Uniclass table, so no
+   real classification table is reproduced or misquoted. */
+#100= IFCCLASSIFICATION('Example Publisher','1.0',$,'Example Classification',$,'https://example.org/classification',$);
+#101= IFCCLASSIFICATIONREFERENCE('https://example.org/classification/ex','EX','Example systems',#100,$,$);
+#102= IFCCLASSIFICATIONREFERENCE($,'EX_20_10','Brick walls',#101,'Load-bearing walls of brick or block',$);
 #103= IFCRELASSOCIATESCLASSIFICATION('0BBBBBBBBBBBBBBBBBBBR8',$,$,$,(#40),#102);
 #110= IFCMATERIAL('Brick',$,$);
 #111= IFCRELASSOCIATESMATERIAL('0BBBBBBBBBBBBBBBBBBBR9',$,$,$,(#40),#110);

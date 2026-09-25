@@ -1,3 +1,19 @@
+# SKOS Vocabulary — the SKOS RDF schema, namespace
+# http://www.w3.org/2004/02/skos/core#.
+# Source: http://www.w3.org/2004/02/skos/core.rdf, served as
+# https://www.w3.org/2009/08/skos-reference/skos.rdf
+# Defined in SKOS Simple Knowledge Organization System Reference, W3C
+# Recommendation 18 August 2009, https://www.w3.org/TR/2009/REC-skos-reference-20090818/
+# Copyright © 2009 World Wide Web Consortium. https://www.w3.org/copyright/document-license-2023/
+# Copyright © 2023 W3C®. This software or document includes material copied from
+# or derived from SKOS Vocabulary,
+# https://www.w3.org/2009/08/skos-reference/skos.rdf.
+# Licence: W3C Document License (2023), https://www.w3.org/copyright/document-license-2023/
+# Changes by Open Triplestore: converted from RDF/XML to Turtle (all 252 triples
+# unchanged, checked 2026-09-23; the source's XML comments, which note which
+# semantic conditions of the SKOS Reference the schema formalises, were not
+# carried over) and this comment header added.
+# Full attribution and licence texts: NOTICE.md in this directory.
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .

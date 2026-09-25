@@ -49,7 +49,7 @@ Three facts worth knowing before an instance is exposed:
 | `GET` | `/livez` | **none** | Liveness only; never touches the store. |
 | `GET` | `/sparql` | **none** | Query over the graphs the caller may read — anonymously, the public ones. |
 | `POST` | `/sparql` | **none** | The same query endpoint in the protocol's POST form. A body sent as `application/sparql-update` is a write and needs a **token**. |
-| `GET` | `/store?graph={graph_iri}` | **none** | Graph Store read of one named graph, scoped exactly like the query endpoint: a public graph answers anonymously, a private one `401`/`403`. |
+| `GET` | `/store?graph={graph_iri}` | **none** | Graph Store read of one named graph, scoped exactly like the query endpoint: a public graph answers anonymously, a private one `401`/`403`. Turtle and TriG carry an `@prefix` header built from the prefix registry for the namespaces the graph actually uses; the line-based formats write every IRI in full. |
 | `GET` | `/store` | **admin** | A read that names no graph dumps the **default graph**, which no per-graph ACL covers, so it is admin-only — a non-admin token is refused here too, with `401` rather than `403`. |
 | `PUT` | `/store` | **token** | Graph Store Protocol: replace a graph. |
 | `POST` | `/store` | **token** | Graph Store Protocol: merge into a graph. |
@@ -66,9 +66,9 @@ Three facts worth knowing before an instance is exposed:
 | `GET` | `/api/datasets/{dataset_id}` | **none** | A public dataset's metadata; a private one is `401` anonymously, `403` without a grant. |
 | `GET` | `/api/datasets/{dataset_id}/assets` | **none** | A public dataset's file list; per-file visibility still applies. |
 | `POST` | `/api/datasets/{dataset_id}/assets` | **token** | Upload a file. |
-| `POST` | `/api/datasets/{dataset_id}/validate` | **token** | Run SHACL validation over the dataset. |
-| `GET` | `/api/datasets/{dataset_id}/validation/latest` | **token** | The dataset's last validation run. |
-| `GET` | `/api/datasets/{dataset_id}/shapes` | **token** | The dataset's shapes graph. |
+| `POST` | `/api/datasets/{dataset_id}/validate` | **token** | Run SHACL validation over the dataset graphs the caller may read; a run that could not read them all is a test run. |
+| `GET` | `/api/datasets/{dataset_id}/validation/latest` | **token** | The dataset's last validation run; its full report only for those who may read every graph it validated. |
+| `GET` | `/api/datasets/{dataset_id}/shapes` | **token** | The dataset's shapes graph; a private one only for those who may read it. |
 | `PUT` | `/api/datasets/{dataset_id}/shapes` | **token** | Replace the shapes graph (`text/shaclc` or RDF). |
 | `GET` | `/api/organisations` | **none** | Anonymously, only organisations that own something public. |
 | `POST` | `/api/organisations` | **admin** | Provisioning an organisation is an operator action. |
@@ -94,6 +94,7 @@ Three facts worth knowing before an instance is exposed:
 | `DELETE` | `/api/admin/prefixes/{label}` | **admin** | Drop this deployment's opinion of a shorthand, so it falls back to the platform overlay, an installed bundle's seeds or the community snapshot. The prefix itself does not go away. |
 | `GET` | `/api/vocab/search` | **none** | Bundled vocabulary search; rate-limited. |
 | `POST` | `/api/vocab/install` | **admin** | Installs a vocabulary into the instance. |
+| `GET` | `/api/vocab/notice` | **none** | Plain-text licence page of one LOV vocabulary (catalogue data). |
 | `GET` | `/api/admin/telemetry` | **admin** | Store counters across every tenant. |
 | `GET` | `/api/admin/changes` | **admin** | Change-log rows carry quads from every tenant. |
 | `GET` | `/api/admin/changes/status` | **admin** | Capture state, epoch, cursors, caps. |

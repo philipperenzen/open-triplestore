@@ -59,6 +59,7 @@ minted at `POST /api/auth/tokens`. Send it as `Authorization: Bearer <token>`.",
         (name = "SHACL-C", description = "SHACL Compact Syntax parsing and serialisation"),
         (name = "Reasoning", description = "OWL 2 / RDFS entailment, SWRL rules and query rewriting"),
         (name = "Mappings", description = "RML mappings from non-RDF sources to RDF"),
+        (name = "Sources", description = "SQL datasources, RML mapping registry and materialisation runs — admin only. Credentials are secret REFERENCES (env:/file:/vault:); no endpoint accepts or returns a credential value."),
         (name = "Assets", description = "File asset management (S3 / local storage)"),
         (name = "Import", description = "Source analysis and bulk data import"),
         (name = "Catalog", description = "DCAT catalogue of datasets, models and vocabularies"),
@@ -88,6 +89,35 @@ minted at `POST /api/auth/tokens`. Send it as `Authorization: Bearer <token>`.",
             crate::auth::models::Visibility,
             crate::auth::models::OwnerType,
             crate::auth::models::GraphKind,
+            // SQL datasources, mappings and runs
+            crate::sources::model::SourceRequest,
+            crate::sources::model::SourceResponse,
+            crate::sources::model::MappingRequest,
+            crate::sources::model::MappingResponse,
+            crate::sources::model::MappingJoin,
+            crate::sources::model::MappingState,
+            crate::sources::model::RunRequest,
+            crate::sources::model::RunResponse,
+            crate::sources::model::RunPointer,
+            crate::sources::model::RunStatus,
+            crate::sources::model::RunMode,
+            crate::sources::model::MappingRef,
+            crate::sources::model::ShaclSummary,
+            crate::sources::decisions::DecisionRequest,
+            crate::sources::decisions::Decision,
+            crate::sources::decisions::Outcome,
+            crate::sources::decisions::CalibrationRequest,
+            crate::sources::decisions::CalibrationPoint,
+            crate::sources::decisions::Calibration,
+            crate::sources::decisions::CurvePoint,
+            crate::sources::decisions::BrierScore,
+            crate::sources::review::ReviewItem,
+            crate::sources::review::Violation,
+            crate::sources::review::Fix,
+            crate::sources::review::StatusRequest,
+            crate::sources::review::AutofixRequest,
+            crate::sources::review::AutofixResponse,
+            crate::sources::review::Suggestion,
             crate::auth::models::Dataset,
             crate::auth::models::SparqlService,
             crate::auth::models::Asset,
@@ -149,6 +179,15 @@ minted at `POST /api/auth/tokens`. Send it as `Authorization: Bearer <token>`.",
             super::routes::BrowseTripleParams,
             super::routes::BrowseResourceParams,
             super::routes::DatasetSparqlParams,
+            // Model registry responses (with the licence record of seeded vocabularies)
+            crate::data_models::models::DataModelResponse,
+            crate::data_models::models::DataModelVersionResponse,
+            crate::data_models::models::DataModelRecord,
+            crate::data_models::models::DataModelVersion,
+            crate::data_models::models::VersionStatus,
+            crate::data_models::models::SubGraphStatus,
+            crate::data_models::models::ContentAttribution,
+            crate::data_models::models::LicenseRef,
         )
     )
 )]
@@ -432,12 +471,12 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
         (M::Post, o("SPARQL", "SPARQL query or update (POST)",
             "Content-Type selects the operation:\n- `application/sparql-query` — query in body\n- `application/sparql-update` — update in body (requires authentication)\n- `application/x-www-form-urlencoded` — `query` or `update` form field",
             vec![],
-            vec![("200", "Query results"), ("204", "Update executed"), ("401", "Authentication required for updates")], false)),
+            vec![("200", "Query results"), ("204", "Update executed"), ("401", "Authentication required for updates"), ("403", "The target graph holds a model version whose licence allows no altered copies")], false)),
     ]);
     mount(paths, "/sparql/batch", vec![
         (M::Post, o("SPARQL", "Batched SPARQL update",
             "Apply several SPARQL updates (`{\"updates\": [\"…\", …]}`, at most 1000) as ONE transaction: either every statement is applied or none is. Statements run in order and each sees the effect of the previous ones. Requires authentication.",
-            vec![], vec![("200", "`status: ok` — every statement applied"), ("422", "`status: rolled_back` — a statement failed at execution and nothing was applied; `error` says which statement and why, and the per-statement `results` mark the failing one `error` and every other one `rolled_back` (`ok` never appears there)"), ("400", "A statement does not parse or is not authorised for this caller; nothing applied"), ("401", "Authentication required")], true)),
+            vec![], vec![("200", "`status: ok` — every statement applied"), ("422", "`status: rolled_back` — a statement failed at execution and nothing was applied; `error` says which statement and why, and the per-statement `results` mark the failing one `error` and every other one `rolled_back` (`ok` never appears there)"), ("400", "A statement does not parse or is not authorised for this caller; nothing applied"), ("401", "Authentication required"), ("403", "The target graph holds a model version whose licence allows no altered copies")], true)),
     ]);
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -475,6 +514,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     vec![
                         ("204", "Graph replaced"),
                         ("401", "Authentication required"),
+                        ("403", "The target graph holds a model version whose licence allows no altered copies"),
                     ],
                     true,
                 ),
@@ -489,6 +529,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     vec![
                         ("204", "Triples merged"),
                         ("401", "Authentication required"),
+                        ("403", "The target graph holds a model version whose licence allows no altered copies"),
                     ],
                     true,
                 ),
@@ -500,7 +541,11 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     "Delete graph",
                     "Delete the graph. Requires authentication.",
                     vec![gp()],
-                    vec![("204", "Graph deleted"), ("401", "Authentication required")],
+                    vec![
+                        ("204", "Graph deleted"),
+                        ("401", "Authentication required"),
+                        ("403", "The target graph holds a model version whose licence allows no altered copies"),
+                    ],
                     true,
                 ),
             ),
@@ -741,7 +786,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Datasets",
                     "Delete dataset",
-                    "Delete the dataset and its registered graphs.",
+                    "Delete the dataset and the graphs it owns: its registered graphs that are in its namespace, that it created, or that the caller may delete directly (an admin, or a graph-ACL write grant), unless another dataset still uses them; and its shapes graph when that is in its namespace. System, SHACL Studio Library and model-registry graphs, and graphs it only links or took over from someone else, lose only their registration.",
                     vec![],
                     vec![
                         ("204", "Deleted"),
@@ -773,13 +818,17 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 ob(
                     "Datasets",
                     "Add graph to dataset",
-                    "Register an existing named graph with the dataset.",
+                    "Register a named graph with the dataset: one in its own namespace, a new graph (which the dataset creates), or — for a caller who may write it directly (an admin, or a graph-ACL write grant) — an existing graph that already holds data. The dataset's editors can then write it and a detach can delete it, so a graph someone else made is never attached on dataset authority alone. A new graph the graph ACL already grants to someone counts as theirs, like one that holds data. Graphs of another dataset, the system, the model registry or a server feature (`urn:shapes:`, `urn:source:`, `urn:mapping:`, `urn:run:`, `urn:dryrun:`, `urn:ots:`, `urn:config:`, `urn:entailment:`, another dataset's assets graph) are refused.",
                     vec![],
                     ref_body(
                         "GraphIriRequest",
                         json!({ "graph_iri": "https://data.example.org/graphs/catalogue" }),
                     ),
-                    vec![("201", "Graph added"), ("401", "Authentication required")],
+                    vec![
+                        ("201", "Graph added"),
+                        ("401", "Authentication required"),
+                        ("403", "Graph outside the dataset's boundary, one that already holds data the caller may not write, or a model-registry graph (refused for admins too)"),
+                    ],
                     true,
                 ),
             ),
@@ -788,7 +837,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 ob(
                     "Datasets",
                     "Set graph role / privacy",
-                    "Set a registered graph's box role (abox/tbox/shapes/…) or private flag.",
+                    "Set a registered graph's box role (abox/tbox/shapes/…) or private flag. Role `shapes` adopts the graph into the SHACL Studio Library.",
                     vec![],
                     ref_body(
                         "PatchDatasetGraphRoleRequest",
@@ -796,7 +845,11 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                             "graph_iri": "https://data.example.org/graphs/catalogue", "graph_role": "abox", "private": false
                         }),
                     ),
-                    vec![("200", "Graph updated"), ("401", "Authentication required")],
+                    vec![
+                        ("204", "Graph updated"),
+                        ("401", "Authentication required"),
+                        ("404", "Graph not registered to this dataset"),
+                    ],
                     true,
                 ),
             ),
@@ -805,13 +858,17 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 ob(
                     "Datasets",
                     "Remove graph from dataset",
-                    "Unregister a named graph (does not delete its triples unless requested).",
+                    "Unregister a named graph from the dataset. The stored graph is also deleted when this dataset had it registered, the graph is the dataset's own (in its namespace, created by it, or one the caller may delete directly: an admin, or a graph-ACL write grant), no other dataset uses it (registered or as its shapes graph), it is not this dataset's shapes graph, and it is neither a system, SHACL Studio Library nor model-registry graph. Otherwise only the registration is removed.",
                     vec![],
                     ref_body(
                         "GraphIriRequest",
                         json!({ "graph_iri": "https://data.example.org/graphs/catalogue" }),
                     ),
-                    vec![("204", "Graph removed"), ("401", "Authentication required")],
+                    vec![
+                        ("204", "Graph removed"),
+                        ("401", "Authentication required"),
+                        ("404", "Graph not registered to this dataset"),
+                    ],
                     true,
                 ),
             ),
@@ -1416,9 +1473,9 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Versions",
                 "Restore version",
-                "Restore the dataset's live data to this version's snapshot.",
+                "Restore the dataset's live data to this version's snapshot. Each snapshot graph goes through the dataset graph gate: one the dataset no longer holds and may not take back (someone else's since, a source run a later promotion replaced, a model-registry graph) is skipped. The response is `{restored, skipped: [{graph, reason}], version}`.",
                 vec![],
-                vec![("200", "Restored"), ("401", "Authentication required")],
+                vec![("200", "Restored (see `skipped`)"), ("401", "Authentication required")],
                 true,
             ),
         )],
@@ -1492,7 +1549,10 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Validate dataset (SHACL)",
-                "Run SHACL validation against the dataset's shapes graph.",
+                "Run SHACL validation against the dataset's shapes graph. The run reads only the \
+                 dataset graphs the caller may read (a private graph only for the dataset's \
+                 writers); a run that could not read all of them is answered as a test run \
+                 (`test: true`, `partial: true`) and not recorded.",
                 vec![],
                 vec![
                     ("200", "Validation report"),
@@ -1511,11 +1571,12 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Validation",
                     "Get shapes graph",
-                    "The dataset's SHACL shapes graph in Turtle.",
+                    "The dataset's SHACL shapes graph in Turtle. A shapes graph some dataset holds as private is served only to those who may read it (the `/sparql` rule: its dataset's writers, graph-ACL read grants, admins).",
                     vec![],
                     vec![
                         ("200", "Shapes graph (text/turtle)"),
                         ("401", "Authentication required"),
+                        ("404", "No shapes graph, or none the caller may read"),
                     ],
                     true,
                 ),
@@ -1525,7 +1586,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Validation",
                     "Upload shapes graph",
-                    "Replace the dataset's SHACL shapes graph (Turtle, or SHACL-C with Content-Type: text/shaclc). SHACL-C is parsed strictly: unrecognised input is a 400 naming its position and nothing is stored.",
+                    "Replace the dataset's SHACL shapes graph (Turtle, or SHACL-C with Content-Type: text/shaclc). SHACL-C is parsed strictly: unrecognised input is a 400 naming its position and nothing is stored. A shapes graph the dataset only links (set with `PUT /shacl`, outside its namespace and not registered to it) is written only when it holds no data yet or the caller may write it directly; it is then registered to the dataset with the shapes role (an admin's write too), so the dataset's editors write it from then on. A SHACL Studio Library graph is written by those who may edit its Library entry.",
                     vec![qp(
                         "lenient",
                         false,
@@ -1535,6 +1596,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                         ("204", "Shapes graph updated"),
                         ("400", "SHACL-C parse error (position named)"),
                         ("401", "Authentication required"),
+                        ("403", "The shapes graph is linked, not the dataset's, and the caller may not write it; or it is a model-registry graph"),
                     ],
                     true,
                 ),
@@ -1549,7 +1611,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             ob(
                 "Validation",
                 "Configure SHACL-on-write",
-                "Enable/disable validation on write and choose the shapes graph.",
+                "Enable/disable validation on write and choose the shapes graph. Linking is a read: for a non-admin the graph must be in the dataset's namespace, a SHACL Studio Library graph they may see, new (and granted to no one through the graph ACL), or one they may read (a graph-ACL read grant, or the shapes graph of a dataset they may read). Another dataset's shapes graph (its default `urn:dataset:{id}:shapes` included) is linkable by those who may read that dataset; an empty graph another dataset links is linkable only once its shapes are written. Resending the link the dataset already has is not checked again. Never a model-registry graph (bind a model's shapes in the SHACL Studio instead).",
                 vec![],
                 ref_body(
                     "DatasetShaclRequest",
@@ -1557,7 +1619,11 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                         "shacl_on_write": true, "shapes_graph_iri": "https://data.example.org/shapes"
                     }),
                 ),
-                vec![("200", "Updated"), ("401", "Authentication required")],
+                vec![
+                    ("204", "Updated"),
+                    ("401", "Authentication required"),
+                    ("403", "The caller may not link that graph"),
+                ],
                 true,
             ),
         )],
@@ -1570,11 +1636,19 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Run SHACL-AF inference",
-                "Materialise inferred triples using SHACL-AF rules.",
+                "Materialise inferred triples using SHACL-AF rules. Needs write access to the \
+                 dataset. The rules of a shapes graph some dataset holds as private run only for \
+                 who may read it (its dataset's writers, graph-ACL readers, admins); a run that \
+                 leaves one out answers `partial: true`.",
                 vec![],
                 vec![
-                    ("200", "Inference result with count"),
+                    ("200", "Inference result with count and `partial`"),
+                    (
+                        "400",
+                        "The dataset has no shapes graph, or none the caller may read",
+                    ),
                     ("401", "Authentication required"),
+                    ("403", "Write access to the dataset required"),
                 ],
                 true,
             ),
@@ -1633,7 +1707,9 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Latest validation",
-                "The most recent validation run for the dataset.",
+                "The most recent validation run for the dataset. Its full report goes to the \
+                 dataset's writers and to callers who may read every graph the run validated; \
+                 others get the summary with `report: null` and `report_withheld: true`.",
                 vec![],
                 vec![("200", "Latest run"), ("404", "No runs yet")],
                 false,
@@ -1648,7 +1724,9 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Get validation run",
-                "Details of one validation run.",
+                "Details of one validation run. Its full report goes to the dataset's writers \
+                 and to callers who may read every graph the run validated; others get the \
+                 summary with `report: null` and `report_withheld: true`.",
                 vec![],
                 vec![("200", "Run details"), ("404", "Not found")],
                 false,
@@ -1673,6 +1751,234 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     mount(paths, "/api/shacl/dataset-shape-graphs", vec![
         (M::Get, o("Validation", "List datasets' shape graphs", "Datasets accessible to the user that have a shapes graph configured (Validation-page selector).",
             vec![], vec![("200", "Array of {dataset_id, dataset_name, shapes_graph_iri}")], false)),
+    ]);
+
+    // ── SHACL Studio: shape graphs, the validation layer, pipelines ──────────
+    // Every route here requires a token; visibility follows the shape graph's
+    // owner and visibility, and writing needs manage access to it.
+    mount(paths, "/api/shacl/shape-graphs", vec![
+        (M::Get, o("Validation", "List shape graphs", "The reusable shape graphs the caller may read: their own, their organisations' and the public ones.",
+            vec![], vec![("200", "Array of shape graphs")], true)),
+        (M::Post, o("Validation", "Create a shape graph", "Body: `{name, description?, visibility?, tags?, owner_type?, owner_id?, turtle?, source?}`. Without `turtle` the graph starts from an empty template. `owner_type` is `user` (default) or `organisation`.",
+            vec![], vec![("201", "The shape graph"), ("400", "Invalid Turtle"), ("403", "Not a member of the owning organisation")], true)),
+    ]);
+    mount(paths, "/api/shacl/shape-graphs/:id", vec![
+        (M::Get, o("Validation", "Get a shape graph", "The record: name, description, visibility, tags, status, owner, backing graph IRI and facets.",
+            vec![], vec![("200", "The shape graph"), ("403", "Not readable"), ("404", "Not found")], true)),
+        (M::Put, o("Validation", "Update a shape graph's metadata", "Body: `{name, description?, visibility?, tags?}`. The content is written through `/turtle`. Changing the visibility of an entry whose graph the Studio did not mint needs the right to change that graph (see `/turtle`).",
+            vec![], vec![("200", "The updated shape graph"), ("403", "Not manageable, or a visibility change of a graph the caller may not change"), ("404", "Not found")], true)),
+        (M::Delete, o("Validation", "Delete a shape graph", "Removes the record, and clears its backing graph when the Studio minted it (`urn:shapes:`); an adopted graph keeps its content.",
+            vec![], vec![("204", "Deleted"), ("403", "Not manageable"), ("404", "Not found")], true)),
+    ]);
+    mount(paths, "/api/shacl/shape-graphs/:id/turtle", vec![
+        (M::Get, o("Validation", "Read a shape graph's content", "The shapes as Turtle, with an `@prefix` header built from the prefix registry for the namespaces the graph actually uses. `?format=shaclc` (or `Accept: text/shaclc`) serialises to SHACL Compact Syntax instead.",
+            vec![qp("format", false, "`shaclc` for SHACL Compact Syntax; otherwise Turtle")],
+            vec![("200", "Turtle (`text/turtle`) or SHACL-C (`text/shaclc`)"), ("403", "Not readable"), ("404", "Not found")], true)),
+        (M::Put, o("Validation", "Replace a shape graph's content", "Body is the whole document: Turtle, or SHACL Compact Syntax with `Content-Type: text/shaclc` (parsed strictly before anything is stored). Writes a new revision and a Shapes commit. Managing the entry is not enough for a graph the Studio did not mint: the caller must be able to change that graph — an admin, write access to a dataset holding it (its namespace or registered to it), write access to the registry entry holding it, or a graph-ACL write grant. Restore and import-shapes follow the same rule.",
+            vec![qp("message", false, "Revision note shown in the history (default `Edited`); trimmed, control characters removed, at most 200 characters")],
+            vec![("200", "`{version}` — the new revision number"), ("400", "Invalid UTF-8, Turtle or SHACL-C"), ("403", "Not manageable, or the caller may not change the graph"), ("404", "Not found")], true)),
+    ]);
+    mount(paths, "/api/shacl/shape-graphs/:id/revisions", vec![
+        (M::Get, o("Validation", "List revisions", "Every stored revision of the shape graph, newest first: version, note, author, timestamp.",
+            vec![], vec![("200", "Array of revisions"), ("404", "Not found")], true)),
+    ]);
+    mount(
+        paths,
+        "/api/shacl/shape-graphs/:id/revisions/:rev",
+        vec![(
+            M::Get,
+            o(
+                "Validation",
+                "Get a revision",
+                "One revision with its Turtle snapshot.",
+                vec![],
+                vec![
+                    ("200", "The revision"),
+                    ("404", "Shape graph or revision not found"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(paths, "/api/shacl/shape-graphs/:id/restore/:rev", vec![
+        (M::Post, o("Validation", "Restore a revision", "Writes the revision's snapshot back as a new revision (the history is never rewritten).",
+            vec![], vec![("200", "`{version}`"), ("403", "Not manageable, or the caller may not change the graph"), ("404", "Shape graph or revision not found")], true)),
+    ]);
+    mount(paths, "/api/shacl/shape-graphs/:id/clone", vec![
+        (M::Post, o("Validation", "Clone a shape graph", "Copies the content into a new private shape graph owned by the caller. Body: `{name?}` (default: the source name with \" (copy)\").",
+            vec![], vec![("201", "The new shape graph"), ("404", "Not found")], true)),
+    ]);
+    mount(paths, "/api/shacl/shape-graphs/:id/import-shapes", vec![
+        (M::Post, o("Validation", "Import shapes from other graphs", "Copies picked shapes — each with its full blank-node closure — into this shape graph. Body: `{shapes: [{source_graph, shape}], note?}`. Records a revision and a Shapes commit.",
+            vec![], vec![("200", "`{imported, version}`"), ("400", "No shapes given"), ("403", "Not manageable, a source the caller may not read, or a graph they may not change"), ("404", "Not found")], true)),
+    ]);
+    mount(paths, "/api/shacl/shape-graphs/:id/validate", vec![
+        (M::Post, o("Validation", "Meta-validate a shape graph", "Validates the shape graph *as data* against the built-in SHACL-SHACL shapes. Nothing is persisted.",
+            vec![], vec![("200", "A validation report"), ("404", "Not found")], true)),
+    ]);
+    mount(paths, "/api/shacl/shape-graphs/:id/commits", vec![
+        (M::Get, o("Validation", "Commit history", "The shape graph's slice of the shared commit trail, newest first, with actor names resolved. Takes the commit-log paging parameters.",
+            vec![], vec![("200", "Array of commits"), ("404", "Not found")], true)),
+    ]);
+    for (path, verb, to) in [
+        ("/api/shacl/shape-graphs/:id/stage", "Stage", "staged"),
+        (
+            "/api/shacl/shape-graphs/:id/publish",
+            "Publish",
+            "published",
+        ),
+        (
+            "/api/shacl/shape-graphs/:id/deprecate",
+            "Deprecate",
+            "deprecated",
+        ),
+    ] {
+        mount(paths, path, vec![
+            (M::Post, o("Validation", &format!("{verb} a shape graph"), &format!("Moves the shape graph to the `{to}` status along `draft → staged → published → deprecated`."),
+                vec![], vec![("200", "`{status}`"), ("400", "Not a permitted transition"), ("403", "Not manageable"), ("404", "Not found")], true)),
+        ]);
+    }
+    mount(paths, "/api/shacl/shapes", vec![
+        (M::Get, o("Validation", "Shapes catalog", "Graph-first discovery of every SHACL shape in the store, including shapes embedded in data graphs. Without `graph` a summary of the graphs holding shapes, with node/property counts and registration; with `?graph=<iri>` that graph's shapes. Lists only graphs the caller may read: a Library entry by the Library's rule, any other graph by the `/sparql` rule (admins read all); `?graph=` on any other graph answers 403.",
+            vec![qp("graph", false, "Graph IRI whose shapes to list")],
+            vec![("200", "`{graphs}` or `{graph, shapes}`")], true)),
+    ]);
+    mount(paths, "/api/shacl/register-shape-graph", vec![
+        (M::Post, o("Validation", "Register an existing graph as a shape graph", "Adopts a named graph that already holds SHACL as a shape graph *in place* — no copy; the record points at the graph, and its owner edits it there. So the caller must be able to change the graph: an admin, a graph-ACL write grant, write access to a dataset holding it, or write access to the registry entry holding it. `urn:shapes:` graphs are registered only by admins. Every Studio write checks that right again. Idempotent: the existing record is returned to a caller who may see it. Body: `{graph_iri, name, description?, visibility?, tags?, owner_type?, owner_id?}`.",
+            vec![], vec![("200", "The existing record"), ("201", "The new shape graph"), ("400", "Not a valid graph IRI, or no shapes in it"), ("403", "The graph is not writable by the caller, or its existing record is not visible to them")], true)),
+    ]);
+    mount(paths, "/api/shacl/bindings", vec![
+        (M::Get, o("Validation", "List bindings", "The validation layer. `?target_kind=&target_id=` lists the shape graphs bound to a target (`dataset` | `graph` | `shapegraph`); `?shape_graph_id=` lists the targets a shape graph validates.",
+            vec![qp("target_kind", false, "`dataset`, `graph` or `shapegraph`"), qp("target_id", false, "Dataset id, graph IRI or shape graph id"), qp("shape_graph_id", false, "Reverse lookup: the targets of this shape graph")],
+            vec![("200", "Bindings")], true)),
+        (M::Post, o("Validation", "Bind a shape graph to a target", "Body: `{target: {kind, id}, shape_graph_id}`. Idempotent. The shape graph then gates writes to the target. Needs write access to the target and manage access to the shape graph.",
+            vec![], vec![("201", "`{target, shape_graph_id, shape_graph_graph}`"), ("403", "Not allowed")], true)),
+        (M::Delete, o("Validation", "Remove a binding", "Same body and access rules as creating one.",
+            vec![], vec![("204", "Removed"), ("403", "Not allowed")], true)),
+    ]);
+    mount(paths, "/api/datasets/:id/effective-shapes", vec![
+        (M::Get, o("Validation", "A dataset's effective shapes", "The shape graphs that apply to the dataset: its own bindings and the bindings of every graph it contains. This set gates writes, runs in pipelines and drives the form manifest. An entry of a private dataset graph is listed only to those who may read that graph.",
+            vec![], vec![("200", "Array of shape graphs"), ("403", "Not readable"), ("404", "Dataset not found")], true)),
+    ]);
+    mount(paths, "/api/shacl/pipelines", vec![
+        (M::Get, o("Validation", "List pipelines", "The saved validation pipelines the caller may read.",
+            vec![], vec![("200", "Array of pipelines")], true)),
+        (M::Post, o("Validation", "Create a pipeline", "Body: `{name, description?, visibility?, owner_type?, owner_id?, targets: [{kind, id}], shape_graph_ids, severity_threshold?, run_inference?, max_results?, gate_writes?, triggers…}`. A target is a dataset, a graph or a shape graph. Every dataset, data graph and shape graph in the scope must be readable by the caller. With `gate_writes`, every dataset and graph the gate covers must also be writable by the caller: the gate refuses writes for everyone who writes them.",
+            vec![], vec![("201", "The pipeline"), ("400", "Invalid body"), ("403", "Scope not readable, a write target not writable, or a gated dataset or graph not writable"), ("404", "A gated dataset does not exist")], true)),
+    ]);
+    mount(
+        paths,
+        "/api/shacl/pipelines/:id",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Validation",
+                    "Get a pipeline",
+                    "",
+                    vec![],
+                    vec![("200", "The pipeline"), ("404", "Not found")],
+                    true,
+                ),
+            ),
+            (
+                M::Put,
+                o(
+                    "Validation",
+                    "Update a pipeline",
+                    "Same body as creation. Every dataset, data graph and shape graph in the scope must be readable by the caller, and with `gate_writes` every dataset and graph the gate covers writable.",
+                    vec![],
+                    vec![
+                        ("200", "The pipeline"),
+                        ("403", "Not manageable, scope not readable, or a gated dataset or graph not writable"),
+                        ("404", "Not found, or a gated dataset does not exist"),
+                    ],
+                    true,
+                ),
+            ),
+            (
+                M::Delete,
+                o(
+                    "Validation",
+                    "Delete a pipeline",
+                    "",
+                    vec![],
+                    vec![
+                        ("204", "Deleted"),
+                        ("403", "Not manageable"),
+                        ("404", "Not found"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/shacl/pipelines/:id/run",
+        vec![(
+            M::Post,
+            o(
+                "Validation",
+                "Run a pipeline",
+                "Validates every target against the composed shape graphs and stores the run. The report carries the data it validated, so the caller must be able to read the pipeline's whole scope.",
+                vec![],
+                vec![
+                    ("200", "The run, with its report"),
+                    ("403", "Scope not readable"),
+                    ("404", "Not found"),
+                    ("503", "Server overloaded"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/shacl/pipelines/:id/runs",
+        vec![(
+            M::Get,
+            o(
+                "Validation",
+                "List a pipeline's runs",
+                "Newest first.",
+                vec![],
+                vec![("200", "Array of runs"), ("404", "Not found")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/shacl/pipelines/:id/runs/:run_id",
+        vec![(
+            M::Get,
+            o(
+                "Validation",
+                "Get a run",
+                "One run with its full validation report, for a caller who may read the pipeline's scope.",
+                vec![],
+                vec![
+                    ("200", "The run"),
+                    ("403", "Scope not readable"),
+                    ("404", "Pipeline or run not found"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(paths, "/api/shacl/pipelines/latest", vec![
+        (M::Post, o("Validation", "Latest run per pipeline", "Body: `{pipeline_ids}`. The newest run of each pipeline the caller may read, for dashboards.",
+            vec![], vec![("200", "Array of runs")], true)),
+    ]);
+    mount(paths, "/api/shacl/model-context", vec![
+        (M::Get, o("Validation", "Model context for shape authoring", "Classes, properties and datatypes found in a scope, for the shape builder's suggestions. Scope is `?dataset=<id>` or `?graphs=<iri,iri>`.",
+            vec![qp("dataset", false, "Dataset id"), qp("graphs", false, "Comma-separated graph IRIs")],
+            vec![("200", "The model context"), ("403", "Scope not readable")], true)),
+    ]);
+    mount(paths, "/api/shacl/derive", vec![
+        (M::Post, o("Validation", "Derive shapes from data", "Body: `{dataset_id?, graphs?, target_classes?}`. Infers candidate node and property shapes from instance data in the scope.",
+            vec![], vec![("200", "`{turtle, stats}` — the candidate shapes and what they were derived from"), ("403", "Scope not readable")], true)),
     ]);
     mount(
         paths,
@@ -2054,6 +2360,569 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     ]);
 
     // ═══════════════════════════════════════════════════════════════════════
+    // SQL sources, mappings and runs (admin only — see docs/sources.md)
+    // ═══════════════════════════════════════════════════════════════════════
+    const CRED_NOTE: &str = "The credential is a secret REFERENCE (env:NAME, file:/path, \
+vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns a secret.";
+
+    mount(
+        paths,
+        "/api/sources",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Sources",
+                    "List datasources",
+                    "Every registered SQL datasource, with its credential reference, whether its \
+                     endpoint passes the egress allowlist, and the graph it currently serves from.",
+                    vec![],
+                    vec![
+                        ("200", "Array of datasources"),
+                        ("401", "Authentication required"),
+                        ("403", "Admin access required"),
+                    ],
+                    true,
+                ),
+            ),
+            (
+                M::Post,
+                o(
+                    "Sources",
+                    "Register a datasource",
+                    "Register a datasource: a SQL database (`sqlite`, `postgresql`, `mysql`, \
+                     `mssql`), or a SPARQL endpoint (`sparql` — an Ontop virtual knowledge \
+                     graph, say) whose `host`, `port`, `database` (the path, `/sparql` by \
+                     default) and `tls` name the endpoint and whose `username` and credential \
+                     reference become HTTP Basic. The credential reference is validated — \
+                     well-formed and resolvable — before the record is stored. In the production \
+                     posture a raw secret, a missing statement timeout, a host outside the egress \
+                     allowlist and a file outside OTS_SOURCES_DIR are all refused; a `sparql` \
+                     endpoint must be on the allowlist in every posture, since every request to \
+                     it goes through the same door as SPARQL federation.",
+                    vec![],
+                    vec![
+                        ("201", "Registered"),
+                        (
+                            "400",
+                            "Invalid registration (the message never echoes a secret)",
+                        ),
+                        ("409", "A datasource with this id already exists"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/sources/test",
+        vec![(
+            M::Post,
+            o(
+                "Sources",
+                "Test a connection",
+                "Open a connection with the supplied settings and throw it away. Persists \
+                 nothing. Answers 200 with {\"ok\": false, \"error\": …} when the database will \
+                 not answer; the message is scrubbed of the credential, database, host and user.",
+                vec![],
+                vec![("200", "Probe result"), ("400", "Invalid settings")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/sources/metrics",
+        vec![(
+            M::Get,
+            o(
+                "Sources",
+                "Source metrics",
+                "Rows extracted, triples produced, run outcomes, total duration and the SHACL \
+                 pass rate across every datasource.",
+                vec![],
+                vec![("200", "Counters")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/sources/:id",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Sources",
+                    "Get a datasource",
+                    CRED_NOTE,
+                    vec![],
+                    vec![("200", "The datasource"), ("404", "Not found")],
+                    true,
+                ),
+            ),
+            (
+                M::Put,
+                o(
+                    "Sources",
+                    "Update a datasource",
+                    "Omit the credential to keep the reference already registered. Updating \
+                     clears the resolved-secret cache, so a rotation takes effect immediately.",
+                    vec![],
+                    vec![("200", "Updated"), ("400", "Invalid"), ("404", "Not found")],
+                    true,
+                ),
+            ),
+            (
+                M::Delete,
+                o(
+                    "Sources",
+                    "Delete a datasource",
+                    "Refused while mappings still reference it.",
+                    vec![],
+                    vec![
+                        ("204", "Deleted"),
+                        ("404", "Not found"),
+                        ("409", "Mappings still reference this datasource"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/sources/:id/introspect",
+        vec![(
+            M::Get,
+            o(
+                "Sources",
+                "Introspect the schema",
+                "Tables and views with columns (generic and native types, nullability, defaults, \
+                 comments), primary and foreign keys, indexes and a row estimate.",
+                vec![],
+                vec![
+                    ("200", "Schema"),
+                    ("404", "Not found"),
+                    ("502", "The datasource did not answer"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/sources/:id/preview",
+        vec![(
+            M::Get,
+            o(
+                "Sources",
+                "Preview raw rows",
+                "The first rows of a table, unmapped. This is pre-clean source data.",
+                vec![
+                    qp("table", true, "Table or view name"),
+                    qp("limit", false, "Rows to return (1-1000, default 20)"),
+                ],
+                vec![
+                    ("200", "Rows"),
+                    ("404", "Not found"),
+                    ("502", "The datasource did not answer"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/sources/:id/provenance",
+        vec![(
+            M::Get,
+            o(
+                "Sources",
+                "Datasource provenance",
+                "The datasource's PROV-O trail — every run and rollback — as Turtle. Served here \
+                 because these records live in a system graph, outside a caller's SPARQL scope.",
+                vec![],
+                vec![("200", "Turtle"), ("404", "Not found")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/sources/:id/runs",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Sources",
+                    "Run history",
+                    "Runs for this datasource, newest first.",
+                    vec![],
+                    vec![("200", "Array of runs"), ("404", "Not found")],
+                    true,
+                ),
+            ),
+            (
+                M::Post,
+                o(
+                    "Sources",
+                    "Start a run",
+                    "Materialise the mapping into a fresh graph urn:run:<id>, record a PROV \
+                     activity, apply the SHACL write gate to that graph, and — only on a pass — \
+                     give it the production role atomically. A failing gate answers 422 with the \
+                     report; production is untouched and the candidate graph is kept. `mode` is \
+                     `full` (default), `watermark` (only rows past the last cursor), or \
+                     `snapshot` — a virtual (`sparql`) source's whole graph as the endpoint \
+                     serves it, with no mapping involved; a snapshot run carries no `mapping`.",
+                    vec![],
+                    vec![
+                        ("201", "The run"),
+                        (
+                            "400",
+                            "Unknown mode, no mapping outside snapshot mode, a snapshot of a \
+                             database, or the mapping belongs to another datasource",
+                        ),
+                        ("404", "Datasource or mapping not found"),
+                        ("422", "The SHACL write gate refused the run"),
+                        ("503", "Server overloaded"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/sources/:id/profile",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Sources",
+                    "Get the newest profile",
+                    "The datasource's newest profile graph as Turtle. `?version=n` serves an \
+                     older one. Served here rather than over SPARQL because a profile graph \
+                     belongs to no dataset and is therefore outside a caller's query scope.",
+                    vec![qp(
+                        "version",
+                        false,
+                        "Profile version (1-based); defaults to the newest",
+                    )],
+                    vec![
+                        ("200", "Turtle"),
+                        ("400", "No such version"),
+                        ("404", "Datasource not found, or never profiled"),
+                    ],
+                    true,
+                ),
+            ),
+            (
+                M::Post,
+                o(
+                    "Sources",
+                    "Re-profile a datasource",
+                    "Write a new profile version: per-column distinct and NULL counts, \
+                     cardinality, length and numeric summaries, a sampled lexical-shape \
+                     detection, and a structural hash per table. An optional `tables` array \
+                     narrows what is scanned. Values appear only as the top-k of a genuinely \
+                     low-cardinality column, and never for a column whose values are longer than \
+                     a code plausibly is.",
+                    vec![],
+                    vec![
+                        ("201", "Counts and hashes for what was profiled"),
+                        ("400", "Unknown table, or a body that does not parse"),
+                        ("404", "Datasource not found"),
+                        ("502", "The datasource did not answer"),
+                        ("503", "Server overloaded"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/models/:id/versions/:ver/profile",
+        vec![(
+            M::Get,
+            o(
+                "Models",
+                "Ontology profile of a model version",
+                "The version flattened for a mapping proposer: classes with their full \
+                 superclass chains, properties with domain, range and datatype, every SHACL \
+                 property shape flattened past sh:node, and enumerations from owl:oneOf, SKOS \
+                 concept schemes and sh:in. A fixed number of SPARQL queries whatever the size \
+                 of the ontology, and byte-identical output for unchanged data. A shape graph \
+                 reached through the validation layer is included only when the caller may read \
+                 that shape set.",
+                vec![],
+                vec![
+                    ("200", "The profile"),
+                    ("404", "Unknown model or version, or not readable"),
+                ],
+                true,
+            ),
+        )],
+    );
+
+    mount(paths, "/api/sources/gates", vec![
+        (M::Get, o("Sources", "The mapping gates", "The thresholds a proposal is judged by, as a config graph (`urn:config:mapping-gates`): the confidence bands (`autoThreshold`, `reviewThreshold`), `datatypeMismatchCap`, `ambiguityMargin`, `enumMatchMinimum`, the dry-run classifier's `systematicShare` and `systematicMinSubjects`, `driftKlThreshold`, and the lexical scorer's weights. `source` says whether these are the built-in defaults or a saved configuration. `Accept: text/turtle` serves the graph itself. The proposer reads this; it is outside a caller's SPARQL scope.",
+            vec![], vec![("200", "The gates, JSON or Turtle")], true)),
+        (M::Put, o("Sources", "Change the mapping gates", "A partial update: every field optional, an unknown field refused rather than ignored. Bands that cross, a fraction outside `[0, 1]` or a weight set summing to zero are a 400. Recorded in the commit log.",
+            vec![], vec![("200", "The gates as they now stand"), ("400", "A value that cannot be applied"), ("422", "An unknown field")], true)),
+    ]);
+    mount(paths, "/api/sources/:id/dry-run", vec![
+        (M::Post, o("Sources", "Dry-run a mapping on a sample", "Materialises a sample into a scratch graph `urn:dryrun:<id>` (kept for `OTS_DRYRUN_TTL_SECS`, default fifteen minutes), validates it and classifies every violation. The mapping is named in exactly one of `mapping` (id or IRI, with optional `version`), `mappingGraph` (a version graph), `rml` or `yarrrml` (unregistered — what the proposer sends before it writes a proposal). `sampleSize` rows (default 20, at most 1 000) are taken from each triples map, or from those reading `table` / listed in `triplesMaps`; every row a sampled row references through `rr:parentTriplesMap` is pulled in as well, so a one-row preview of a child table does not fake an `sh:class` violation. Shapes come from `shapesGraph`, else the registered mapping's, else the model version's (`model` + `modelVersion`). A violation hitting at least `systematicShare` of a type's subjects over at least `systematicMinSubjects` of them is a **mapping defect**; anything sparser is a **data issue**. Returns per-entity Turtle with each entity's violations, the classification, the report, the produced triple count and what each triples map contributed. Nothing is registered, promoted or published.",
+            vec![], vec![("200", "The dry-run result"), ("400", "The request names no mapping, two, or a table nothing reads"), ("404", "Datasource or mapping not found"), ("502", "The datasource did not answer"), ("503", "Server overloaded")], true)),
+    ]);
+    mount(paths, "/api/sources/:id/drift", vec![
+        (M::Post, o("Sources", "Drift between two profile versions", "Compares `candidate` (default: the newest profile) with `baseline` (default: the profile version the named `mapping` was registered or approved against — `profileVersion` on the mapping — else the previous version). Per table: new and removed columns, type changes, code lists whose value distribution moved (KL divergence above `klThreshold`, default the gates' `driftKlThreshold`), code lists gained or lost, and whether the structural hash moved; plus new and removed tables, and a `modelVersionBump` when the mapping's model has published a newer version than the one it targets. Anything affected opens one re-map ticket for the (datasource, mapping) pair — a model bump lists every table on that one ticket — and a later check updates it rather than opening another. `openTicket: false` only reports.",
+            vec![], vec![("200", "The drift report, with the ticket it opened or updated"), ("400", "Fewer than two profile versions, or an unknown one"), ("404", "Datasource or mapping not found")], true)),
+    ]);
+    mount(paths, "/api/sources/:id/tickets", vec![
+        (M::Get, o("Sources", "Re-map tickets of a datasource", "Every ticket a drift check opened for the datasource, open and closed, newest first.",
+            vec![], vec![("200", "Array of tickets"), ("404", "Datasource not found")], true)),
+    ]);
+    mount(paths, "/api/tickets/:id", vec![
+        (M::Get, o("Sources", "Get a re-map ticket", "The ticket: datasource, mapping, status, reason (`schema-drift`, `model-version-bump` or `both`), affected tables, the profile versions compared, and who opened it.",
+            vec![], vec![("200", "The ticket"), ("404", "Not found")], true)),
+    ]);
+    mount(paths, "/api/tickets/:id/close", vec![
+        (M::Post, o("Sources", "Close a re-map ticket", "Marks the ticket closed and records it in the commit log. The next finding for the same mapping opens a new one.",
+            vec![], vec![("200", "The closed ticket"), ("404", "Not found")], true)),
+    ]);
+    mount(paths, "/api/mappings/convert", vec![
+        (M::Post, o("Sources", "Convert a legacy mapping bundle to RML", "Body: `{format: \"sql2rdf\", source, document, emptyAsNull?}`. Reads the legacy `mapping.sql2rdf.yaml` format — `entities` with `subject_iri`, `rdf_type`, `properties` (typed literals, `lookup`, `reference`, `enumeration` objects) and `nested` maps — and returns standard RML for the datasource, registered nowhere: register it with `POST /api/mappings` once reviewed. `{value_slug}` and `{column_slug}` placeholders become the `otsfn:mintIri` function. With `emptyAsNull` the logical sources become queries reading text columns through `NULLIF(col, '')`, for a mapping that must behave identically under another RML processor; by default they stay `rr:tableName`, which this store's engine already reads the legacy way and which keeps join pushdown and watermark runs available.",
+            vec![], vec![("200", "`{rml, triplesMaps, warnings}`"), ("400", "The document cannot be converted; the error names the entity and property"), ("404", "Datasource not found")], true)),
+    ]);
+    mount(
+        paths,
+        "/api/mappings",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Sources",
+                    "List mappings",
+                    "Registered RML mappings.",
+                    vec![qp(
+                        "source",
+                        false,
+                        "Filter by datasource IRI (urn:source:<id>)",
+                    )],
+                    vec![("200", "Array of mappings")],
+                    true,
+                ),
+            ),
+            (
+                M::Post,
+                o(
+                    "Sources",
+                    "Register a mapping",
+                    "Store RML as version 1, in its own named graph. The datasource is read from \
+                     the RML itself, so 'source' is optional. A mapping must read exactly one \
+                     registered datasource and may not declare rr:graphMap.",
+                    vec![],
+                    vec![
+                        ("201", "Registered"),
+                        ("400", "Invalid RML, or it reads the wrong datasource"),
+                        ("409", "A mapping with this id already exists"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/mappings/:id",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Sources",
+                    "Get a mapping",
+                    "Mapping metadata, its current version and its join structure.",
+                    vec![],
+                    vec![("200", "The mapping"), ("404", "Not found")],
+                    true,
+                ),
+            ),
+            (
+                M::Put,
+                o(
+                    "Sources",
+                    "Update a mapping",
+                    "New RML freezes the NEXT version; earlier versions are never rewritten, \
+                     because runs reference them. A metadata-only edit keeps the current version.",
+                    vec![],
+                    vec![
+                        ("200", "Updated"),
+                        ("400", "Invalid RML"),
+                        ("404", "Not found"),
+                    ],
+                    true,
+                ),
+            ),
+            (
+                M::Delete,
+                o(
+                    "Sources",
+                    "Delete a mapping",
+                    "Refused while runs reference it — their provenance would point at nothing.",
+                    vec![],
+                    vec![
+                        ("204", "Deleted"),
+                        ("404", "Not found"),
+                        ("409", "Runs reference this mapping"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/mappings/:id/rml",
+        vec![(
+            M::Get,
+            o(
+                "Sources",
+                "Get a mapping version's RML",
+                "The stored RML as Turtle. Defaults to the current version.",
+                vec![qp("version", false, "Version number (1-based)")],
+                vec![
+                    ("200", "Turtle"),
+                    ("400", "No such version"),
+                    ("404", "Not found"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/runs/:id",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Sources",
+                    "Get a run",
+                    "One run, including graphTriples — what its graph holds now, which is how a \
+                     caller tells a kept candidate from a collected one.",
+                    vec![],
+                    vec![("200", "The run"), ("404", "Not found")],
+                    true,
+                ),
+            ),
+            (
+                M::Delete,
+                o(
+                    "Sources",
+                    "Delete a run",
+                    "Removes the run record and its graph.",
+                    vec![],
+                    vec![
+                        ("204", "Deleted"),
+                        ("404", "Not found"),
+                        ("409", "The run is in production"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/runs/:id/provenance",
+        vec![(
+            M::Get,
+            o(
+                "Sources",
+                "Run provenance",
+                "The run's PROV-O trail as Turtle.",
+                vec![],
+                vec![("200", "Turtle"), ("404", "Not found")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/runs/:id/rollback",
+        vec![(
+            M::Post,
+            o(
+                "Sources",
+                "Roll a run back",
+                "Re-point the datasource at the graph it served before this run. Never re-runs \
+                 the mapping, so it cannot fail on a source that has since changed.",
+                vec![],
+                vec![
+                    ("200", "The datasource, re-pointed"),
+                    ("400", "Not the production run, or nothing to roll back to"),
+                    ("404", "Not found"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(paths, "/api/mappings/:id/decisions", vec![
+        (M::Post, o("Sources", "Record a review decision", "Body: `{decision, target?, confidence?, note?}` with `decision` one of `approve`, `edit`, `reject`. Each is a distinct PROV outcome: a `ds:ReviewDecision` activity at `urn:mapping:<id>:decision:<uuid>` that `prov:used` the mapping version it judged, with the reviewer, the confidence the proposal carried (`0..=1`) and the note. `approve` moves the mapping to `approved` and re-baselines its profile version for drift; `reject` moves it to `rejected`; `edit` records that the reviewer changed the proposal before accepting — the edit itself is a `PUT /api/mappings/{id}`. Administrators only: a `mappings:propose` token proposes, it never decides.",
+            vec![], vec![("201", "The decision"), ("400", "Unknown decision, or a confidence outside `[0, 1]`"), ("404", "Mapping not found")], true)),
+    ]);
+    mount(paths, "/api/mappings/:id/reviews", vec![
+        (M::Get, o("Sources", "The decisions taken on a mapping", "Every review decision on the mapping, newest first, each with its outcome, the version it judged, the target, the confidence, the note and the reviewer. The proposer's training data: readable with `sources:read`.",
+            vec![], vec![("200", "Array of decisions"), ("404", "Mapping not found")], true)),
+    ]);
+    mount(paths, "/api/mappings/:id/provenance", vec![
+        (M::Get, o("Sources", "Mapping provenance", "The mapping's PROV-O trail as Turtle: the mapping, its frozen versions, the runs that used them and the decisions taken on them. Served here because the records live in `urn:system:sources`, outside a caller's SPARQL scope.",
+            vec![], vec![("200", "Turtle"), ("404", "Mapping not found")], true)),
+    ]);
+    mount(paths, "/api/sources/calibration", vec![
+        (M::Post, o("Sources", "Calibrate proposal confidences", "Fits a monotone map from stated confidence to observed acceptance rate — isotonic regression by pool-adjacent-violators — over `points: [{confidence, accepted}]` from the body, or, without a body, over every recorded decision that carries a confidence (an approval counts as accepted; an edit or a rejection does not). Returns the counts, the curve (one point per distinct confidence, never decreasing) and the Brier score before and after. **One-class data is refused**: a set of only acceptances or only refusals would fit a curve that assigns that outcome to every confidence. Open to `sources:read`: it computes and writes nothing.",
+            vec![], vec![("200", "The calibration"), ("400", "A confidence outside `[0, 1]`"), ("422", "Fewer than two points, or one-class data")], true)),
+    ]);
+    mount(paths, "/api/sources/:id/reviews", vec![
+        (M::Get, o("Sources", "The review queue of a datasource", "Every review item a refused run opened for the datasource, newest first — one per subject with violations, carrying the violations, a snapshot of the subject as the candidate graph describes it (N-Triples, refreshed after every fix), the fixes applied so far, the status and the last decision. Items live in `urn:system:reviews:<id>`, outside SPARQL scope. Administrators only: a snapshot is instance data, which the proposer never receives.",
+            vec![qp("status", false, "One of needsHuman, gathering, corrected, valid, approved, rejected, promoted")], vec![("200", "Array of review items"), ("400", "Unknown status"), ("404", "Datasource not found")], true)),
+    ]);
+    mount(
+        paths,
+        "/api/reviews/:id",
+        vec![(
+            M::Get,
+            o(
+                "Sources",
+                "Get a review item",
+                "One item, whichever datasource it belongs to.",
+                vec![],
+                vec![("200", "The item"), ("404", "Not found")],
+                true,
+            ),
+        )],
+    );
+    mount(paths, "/api/reviews/:id/status", vec![
+        (M::Post, o("Sources", "Decide a review item", "Body: `{status, note?}`. Sets the status — `needsHuman`, `gathering`, `corrected`, `valid`, `approved`, `rejected` or `promoted` — records who decided and keeps the note as the decision. Recorded in the commit log.",
+            vec![], vec![("200", "The item as it now stands"), ("400", "Unknown status"), ("404", "Not found")], true)),
+    ]);
+    mount(paths, "/api/reviews/:id/autofix", vec![
+        (M::Post, o("Sources", "The deterministic fixer", "Body: `{apply}`. Two rules and no others: a negative value where `sh:minInclusive` names a non-negative bound is a **sign typo** and loses its sign; a value past an inclusive bound is **clamped** to it. Both turn a literal that exists into one the constraint names. Nothing is invented — a missing required value, a wrong class, a pattern — and an item with nothing to fix is a 422. With `apply: false` the change is returned as an RDF Patch (`TX` / `D` / `A` / `TC`) and nothing moves; with `apply: true` the patch is applied through the store's patch path into the candidate graph as one commit, the snapshot refreshed and the item marked `corrected`.",
+            vec![], vec![("200", "`{applied, status, fixes: [{rule, path, from, to, constraint}], patch, unfixable}`"), ("404", "Not found"), ("422", "Nothing can be fixed without inventing a value")], true)),
+    ]);
+    mount(paths, "/api/reviews/:id/suggest", vec![
+        (M::Post, o("Sources", "Ask the model about a review item", "Sends the item's constraints and paths to the configured LLM gateway and returns its suggestion — `{explanation, replacement}` when it answered as asked. Applies nothing. What leaves the deployment follows the datasource's `allowModelAssist`: with it, the offending values go along; without it, they are withheld and only the constraints and paths are sent. The snapshot and any credential never leave.",
+            vec![], vec![("200", "`{model, applied: false, valuesShared, suggestion}`"), ("404", "Not found"), ("503", "No LLM gateway reachable")], true)),
+    ]);
+    mount(paths, "/api/runs/:id/promote", vec![
+        (M::Post, o("Sources", "Promote a corrected candidate", "Runs the SHACL write gate again over the run's kept candidate graph as it now stands — after the fixer, a patch or a human edit — and, when it passes, gives it the production role exactly as a passing run would: one pointer swap, the previous graph demoted and kept, LDES members published. Recorded as a `ds:Promotion` activity on the run's PROV trail naming who promoted it; the run's review items are marked `promoted`.",
+            vec![], vec![("200", "`{promotion, run, source}`"), ("404", "Not found"), ("409", "The run is in production already, or has no candidate graph"), ("422", "The gate still refuses; the report says why and production is unchanged")], true)),
+    ]);
+
+    // ═══════════════════════════════════════════════════════════════════════
     // Assets
     // ═══════════════════════════════════════════════════════════════════════
     mount(
@@ -2294,7 +3163,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Vocabularies",
                 "List vocabularies",
-                "Every vocabulary in the catalog: platform-registered entries first, then the bundled LOV catalog (~900 vocabularies).",
+                "Every vocabulary in the catalog: platform-registered entries first, then the bundled LOV catalog (~900 vocabularies). LOV entries carry the vocabulary's licence (license, with each licence's URI in license_uris, same order, null where a label names no licence document; license_declared, license_status: open|restricted|unrecognised|copyright-only|none), where it comes from (license_source: graph — the vocabulary's own graph — or publisher-terms — the graph names none and the publisher states its terms elsewhere, cited by license_source_url), the notice that licence requires on copies (license_notice), whether every licence offered allows only unaltered copies (no_derivatives), how many literals of LOV's copy hold mis-decoded characters (lov_misdecoded; the notice then says so) and whether this platform may redistribute the vocabulary (redistributable; redistribution_withheld says why an openly licensed one is not). Descriptions are included only for redistributable vocabularies. The source block's license (CC BY 4.0, license_url) is LOV's, for LOV's own metadata only (license_scope).",
                 vec![],
                 vec![("200", "Catalog listing")],
                 false,
@@ -2309,9 +3178,24 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Vocabularies",
                 "Vocabulary info",
-                "Full record for one vocabulary, looked up by prefix, ontology URI or namespace (LOV `vocabulary/info` semantics).",
+                "Full record for one vocabulary, looked up by prefix, ontology URI or namespace (LOV `vocabulary/info` semantics). Includes the vocabulary's licence (license, license_uris, license_declared, license_status, license_source: graph|publisher-terms, license_source_url, license_notice, no_derivatives, lov_misdecoded, redistributable, redistribution_withheld) and installable (its graph is in this instance's corpus).",
                 vec![qp("vocab", true, "Prefix, ontology URI or namespace")],
                 vec![("200", "Vocabulary record"), ("404", "Unknown vocabulary")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/vocab/notice",
+        vec![(
+            M::Get,
+            o(
+                "Vocabularies",
+                "Vocabulary licence page",
+                "Plain-text licence page of one LOV vocabulary, looked up by prefix, registry id of an install, ontology URI or namespace: its licences with their URIs, where they are stated, the notice copies must carry, whether this platform redistributes it, where LOV's copy comes from, and LOV's own attribution. The licence record (attribution.notice_url) of every version installed from the LOV corpus links here.",
+                vec![qp("vocab", true, "Prefix, registry id, ontology URI or namespace")],
+                vec![("200", "Licence page (text/plain)"), ("404", "Unknown LOV vocabulary")],
                 false,
             ),
         )],
@@ -2378,7 +3262,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Vocabularies",
                 "Service status",
-                "Catalog size, prefix dataset size, corpus availability and term-index build state.",
+                "Catalog size, prefix dataset size, corpus availability, how many catalog vocabularies the corpus holds (corpus_vocabularies — the image ships only the redistributable ones), term-index build state (engine.lov_vocabularies: how many of them are term-indexed — only redistributable ones are, whatever the corpus) and the catalog source (LOV's CC BY 4.0 for its own metadata).",
                 vec![],
                 vec![("200", "Status")],
                 false,
@@ -2393,7 +3277,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Vocabularies",
                 "Search terms",
-                "LOV-style term search across all vocabularies: BM25 text relevance blended with LOD-corpus reuse metrics and local usage. Requires the vocab-search feature (503 otherwise).",
+                "LOV-style term search across the LOV vocabularies in this instance's corpus that this platform may redistribute (the image ships those) and the public vocabularies registered here: BM25 text relevance blended with LOD-corpus reuse metrics and local usage. Requires the vocab-search feature (503 otherwise).",
                 vec![
                     qp("q", false, "Search text (empty browses by popularity)"),
                     qp("type", false, "Comma-separated: class,property,datatype,instance (default class,property)"),
@@ -2471,7 +3355,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Vocabularies",
                 "Install vocabulary",
-                "Copy a vocabulary from the bundled LOV corpus into the model registry as a public entry (admin only, fully offline). Body: {vocab}.",
+                "Copy a vocabulary from this instance's LOV corpus into the model registry (admin only, fully offline). Body: {vocab}. A vocabulary this platform may redistribute becomes a public entry; any other (from a full dump mounted with VOCAB_CORPUS_PATH) is installed private, owned by the installing admin, so the instance does not re-serve it publicly (is_public: false). The outcome (license, license_status, license_source, license_source_url, license_notice, redistributable, no_derivatives, redistribution_withheld, is_public, note) and the version notes record the licence, the notice it requires and the visibility. The installed version also gets a licence record (attribution on /api/models/{id}/versions): its licences with their URIs, the notice, where the copy comes from and whether the store holds LOV's copy unchanged. A vocabulary whose every licence allows only unaltered copies (no_derivatives: CC BY-ND, the OGC Document Notice) cannot then be copied into a draft or branch or otherwise edited (403). 503 when the corpus lacks the vocabulary — the image's corpus holds only vocabularies this platform may redistribute.",
                 vec![],
                 vec![
                     ("200", "Install outcome"),
@@ -2601,12 +3485,64 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     // ═══════════════════════════════════════════════════════════════════════
     // One unified registry. Each entry carries a `kind` (data-model | vocabulary)
     // and is dereferenced per-term via `/term` (SKOS concepts included).
+    //
+    // Entries and versions carry `attribution`: for the bundled vocabularies the
+    // server seeds, the licence record of their content (ContentAttribution).
+
+    /// A JSON response whose body is a registered component schema, or an
+    /// array of it.
+    fn json_response(desc: &str, schema: &str, array: bool) -> Response {
+        let body: RefOr<Schema> = if array {
+            ArrayBuilder::new()
+                .items(Ref::from_schema_name(schema))
+                .into()
+        } else {
+            Ref::from_schema_name(schema).into()
+        };
+        ResponseBuilder::new()
+            .description(desc)
+            .content(
+                "application/json",
+                ContentBuilder::new().schema(Some(body)).build(),
+            )
+            .build()
+    }
+    const ATTRIBUTION_NOTE: &str = "`attribution` is the licence record of the content: for the \
+        bundled standard vocabularies the server seeds (and drafts copied from them), their \
+        licence(s) with URIs, copyright, the notice the licence requires, the source document's \
+        status, the source, the changes, the bundled file's own header and a link to the full \
+        notice (/vocab/NOTICE.md); null otherwise. It is registry metadata, never part of the \
+        stored graph. `unchanged` is true only when the seeder checked that the stored triples \
+        are the bundled file's; drafts, branches, merges, rebases and edited copies keep the \
+        record with `unchanged: false`, and so does a version whose graph was written directly \
+        (SPARQL Update, /sparql/batch, the Graph Store Protocol). A direct write into the graph \
+        of a version whose record allows no altered copies is refused (403). A seed bundle's \
+        model can carry a record too (`[data_models.license]`). An entry's record describes its \
+        latest published version's content.";
+    const DOWNLOAD_NOTE: &str = "For content with a licence record, `Link` headers name its \
+        licence(s) (rel=license), source (rel=via) and full notice (rel=describedby), and the \
+        body starts with the bundled file's header as `#` comments, then a line saying whether \
+        the content is that file's triples, unchanged, or a copy that may have been modified. \
+        Content whose licence allows no altered copies (IMBOR) gets the headers only; in its \
+        entry only the checked, unchanged copy is served to callers who may not write the entry \
+        (403 for any other version, here and on /diff, /merge/preview and /term), including a \
+        copy the seeder kept aside (`{version}-kept-{n}`) when the stored copy differed from the \
+        file.";
+    // Every way of creating, changing or publishing content in an entry whose
+    // content allows no altered copies (IMBOR) is refused.
+    const NO_DERIVATIVES_403: (&str, &str) = (
+        "403",
+        "The entry holds content whose licence allows no altered copies (IMBOR): no upload, \
+         edit, draft, branch, merge, rebase or publish",
+    );
+
     for (tag, base, lookup, lookup_summary, lookup_desc) in [(
         "Models",
         "/api/models",
         "term",
         "Look up a term",
-        "Resolve a class/property or SKOS concept within the model.",
+        "Resolve a class/property or SKOS concept within the model. For content with a licence \
+         record, `Link` headers name its licence(s), source and full notice.",
     )] {
         mount(
             paths,
@@ -2617,10 +3553,14 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     o(
                         tag,
                         &format!("List ({tag})"),
-                        "List registry entries visible to the caller.",
+                        &format!("List registry entries visible to the caller. {ATTRIBUTION_NOTE}"),
                         vec![],
-                        vec![("200", "Array of entries")],
+                        vec![],
                         false,
+                    )
+                    .response(
+                        "200",
+                        json_response("Array of entries", "DataModelResponse", true),
                     ),
                 ),
                 (
@@ -2649,11 +3589,12 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     o(
                         tag,
                         &format!("Get ({tag})"),
-                        "Registry entry details.",
+                        &format!("Registry entry details. {ATTRIBUTION_NOTE}"),
                         vec![],
-                        vec![("200", "Entry"), ("404", "Not found")],
+                        vec![("404", "Not found")],
                         false,
-                    ),
+                    )
+                    .response("200", json_response("Entry", "DataModelResponse", false)),
                 ),
                 (
                     M::Patch,
@@ -2729,11 +3670,13 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     o(
                         tag,
                         &format!("Create branch ({tag})"),
-                        "Create a branch from a commit or head.",
+                        "Create a branch from a commit or head. It keeps the licence record \
+                         of the version it copies.",
                         vec![],
                         vec![
                             ("201", "Created branch"),
                             ("401", "Authentication required"),
+                            NO_DERIVATIVES_403,
                         ],
                         true,
                     ),
@@ -2781,11 +3724,14 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     tag,
                     &format!("Merge ({tag})"),
-                    "Merge one branch into another.",
+                    "Merge one version into another as a new draft, which carries the licence \
+                     records of the versions it draws on. `from` and `into` must differ (400).",
                     vec![],
                     vec![
-                        ("200", "Merge result"),
+                        ("201", "Merged draft"),
+                        ("400", "from and into are the same version"),
                         ("401", "Authentication required"),
+                        NO_DERIVATIVES_403,
                         ("409", "Merge conflict"),
                     ],
                     true,
@@ -2818,7 +3764,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     tag,
                     &format!("Download latest data ({tag})"),
-                    "RDF data of the latest published version.",
+                    &format!("RDF data of the latest published version. {DOWNLOAD_NOTE}"),
                     vec![],
                     vec![("200", "RDF data")],
                     false,
@@ -2834,10 +3780,14 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     o(
                         tag,
                         &format!("List versions ({tag})"),
-                        "Version snapshots of the entry.",
+                        &format!("Version snapshots of the entry. {ATTRIBUTION_NOTE}"),
                         vec![],
-                        vec![("200", "Array of versions")],
+                        vec![],
                         false,
+                    )
+                    .response(
+                        "200",
+                        json_response("Array of versions", "DataModelVersionResponse", true),
                     ),
                 ),
                 (
@@ -2850,6 +3800,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                         vec![
                             ("201", "Created version"),
                             ("401", "Authentication required"),
+                            NO_DERIVATIVES_403,
                         ],
                         true,
                     ),
@@ -2865,10 +3816,14 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     o(
                         tag,
                         &format!("Get version ({tag})"),
-                        "Metadata for one version.",
+                        &format!("Metadata for one version. {ATTRIBUTION_NOTE}"),
                         vec![],
-                        vec![("200", "Version metadata"), ("404", "Not found")],
+                        vec![("404", "Not found")],
                         false,
+                    )
+                    .response(
+                        "200",
+                        json_response("Version metadata", "DataModelVersionResponse", false),
                     ),
                 ),
                 (
@@ -2893,7 +3848,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     o(
                         tag,
                         &format!("Download version data ({tag})"),
-                        "RDF data captured in this version.",
+                        &format!("RDF data captured in this version. {DOWNLOAD_NOTE}"),
                         vec![],
                         vec![("200", "RDF data")],
                         false,
@@ -2904,9 +3859,15 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     o(
                         tag,
                         &format!("Update version data ({tag})"),
-                        "Replace the draft version's data.",
+                        "Replace the draft version's data. A licence record that called the \
+                         content the bundled file, unchanged, then says it may have been \
+                         modified.",
                         vec![],
-                        vec![("200", "Updated"), ("401", "Authentication required")],
+                        vec![
+                            ("200", "Updated"),
+                            ("401", "Authentication required"),
+                            NO_DERIVATIVES_403,
+                        ],
                         true,
                     ),
                 ),
@@ -2929,7 +3890,15 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                         &format!("{summary} ({tag})"),
                         &format!("Transition a version to the `{state}` lifecycle state."),
                         vec![],
-                        vec![("200", "Transitioned"), ("401", "Authentication required")],
+                        if matches!(state, "draft" | "publish" | "rebase") {
+                            vec![
+                                ("200", "Transitioned"),
+                                ("401", "Authentication required"),
+                                NO_DERIVATIVES_403,
+                            ]
+                        } else {
+                            vec![("200", "Transitioned"), ("401", "Authentication required")]
+                        },
                         true,
                     ),
                 )],
@@ -2943,6 +3912,22 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             ]);
         }
     }
+    mount(
+        paths,
+        crate::data_models::vocab_files::NOTICE_PATH,
+        vec![(
+            M::Get,
+            o(
+                "Models",
+                "Bundled vocabulary notice",
+                "Attribution and licence texts of every bundled vocabulary the server seeds as a \
+                 reference model, as plain text. Each licence record's notice_url links here.",
+                vec![],
+                vec![("200", "The notice (text/plain)")],
+                false,
+            ),
+        )],
+    );
 
     // ═══════════════════════════════════════════════════════════════════════
     // Search
@@ -5028,6 +6013,7 @@ mod tests {
             can_publish: false,
             write_access: true,
             can_mint_api_tokens: true,
+            scopes: Vec::new(),
         }
     }
 

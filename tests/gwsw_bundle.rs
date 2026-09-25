@@ -2,8 +2,9 @@
 //! "Totaal" export: the model graph loads through the manifest-driven seed
 //! engine, is registered as a model-kind data model, and answers a query the
 //! way the published ontology does. The Turtle is not vendored (run the
-//! bundle's fetch.sh once, it is CC0); without it this test reports that it
-//! skipped and passes, so CI stays green.
+//! bundle's fetch.sh once); without it this test reports that it skipped. CI's
+//! conformance job fetches it and sets OTS_TEST_SEED_PAYLOADS_REQUIRED, which
+//! turns a missing payload into a failure.
 
 mod common;
 
@@ -20,6 +21,12 @@ const GWSW: &str = "http://data.gwsw.nl/1.7/totaal/";
 async fn gwsw_bundle_loads_the_totaal_export_as_a_model() {
     let bundles = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/seed-bundles");
     if !bundles.join("gwsw/gwsw-totaal.ttl").exists() {
+        // CI fetches the payload and sets OTS_TEST_SEED_PAYLOADS_REQUIRED, so
+        // a failed fetch fails there instead of skipping.
+        assert!(
+            std::env::var_os("OTS_TEST_SEED_PAYLOADS_REQUIRED").is_none(),
+            "OTS_TEST_SEED_PAYLOADS_REQUIRED is set but gwsw-totaal.ttl is not present"
+        );
         eprintln!("SKIP: gwsw-totaal.ttl is not present — run examples/seed-bundles/gwsw/fetch.sh");
         return;
     }

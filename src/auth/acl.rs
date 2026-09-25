@@ -170,6 +170,69 @@ pub fn check_endpoint_acl(
 
 // ─── Graph ACL ────────────────────────────────────────────────────────────────
 
+/// The named graphs `principal` — `(user_id, role)`, or `None` for an
+/// anonymous caller — may read: graphs of the datasets they can access (a
+/// private graph only for those who may write its dataset) merged with their
+/// `graph_acl` read grants. This is the set a `/sparql` query is scoped to
+/// (`server::routes::accessible_read_graphs` wraps it), and the one every
+/// other read path should agree with.
+///
+/// It lists only registered or granted graphs: an admin reads every graph,
+/// so callers check for an admin first.
+pub fn readable_graph_iris(
+    auth_db: &AuthDb,
+    principal: Option<(&str, &str)>,
+) -> anyhow::Result<std::collections::HashSet<String>> {
+    let cached = auth_db.get_accessible_graph_iris_cached(principal.map(|(id, _)| id))?;
+    let mut readable = cached.0.clone();
+    let (user_id, role) = principal.unwrap_or(("", "public"));
+    if let Ok(granted) = auth_db.get_graph_acl_readable_iris(user_id, role) {
+        readable.extend(granted);
+    }
+    Ok(readable)
+}
+
+/// The graphs some dataset holds as private that `user` (`None`: an anonymous
+/// caller) may not read by the rule of [`readable_graph_iris`]. A private
+/// graph is read by its dataset's writers and graph-ACL readers only, whatever
+/// else names it: a SHACL Studio Library entry adopting it in place, another
+/// dataset linking it as its shapes graph, a validation-layer binding. A path
+/// that serves a graph it did not find through [`readable_graph_iris`]
+/// withholds these. Empty for an admin, who reads every graph.
+pub fn withheld_private_graphs(
+    auth_db: &AuthDb,
+    user: Option<&AuthenticatedUser>,
+) -> anyhow::Result<std::collections::HashSet<String>> {
+    if user.is_some_and(|u| u.is_admin()) {
+        return Ok(Default::default());
+    }
+    let private = auth_db.list_private_dataset_graph_iris()?;
+    if private.is_empty() {
+        return Ok(private);
+    }
+    let readable =
+        readable_graph_iris(auth_db, user.map(|u| (u.user_id.as_str(), u.role.as_str())))?;
+    Ok(private
+        .into_iter()
+        .filter(|g| !readable.contains(g))
+        .collect())
+}
+
+/// Whether [`withheld_private_graphs`] would hold `graph_iri` for `user`,
+/// without listing them all.
+pub fn private_graph_withheld(
+    auth_db: &AuthDb,
+    user: Option<&AuthenticatedUser>,
+    graph_iri: &str,
+) -> anyhow::Result<bool> {
+    if user.is_some_and(|u| u.is_admin()) || !auth_db.is_private_dataset_graph(graph_iri)? {
+        return Ok(false);
+    }
+    let readable =
+        readable_graph_iris(auth_db, user.map(|u| (u.user_id.as_str(), u.role.as_str())))?;
+    Ok(!readable.contains(graph_iri))
+}
+
 /// Returns `true` if the caller may perform `required_permission` ("read" |
 /// "write" | "admin") on `graph_iri`.
 ///

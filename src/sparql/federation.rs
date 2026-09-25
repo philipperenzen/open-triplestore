@@ -48,7 +48,23 @@ impl DefaultServiceHandler for AllowlistedServiceHandler {
         pattern: &GraphPattern,
         base_iri: Option<&Iri<String>>,
     ) -> Result<QuerySolutionIter<'static>, Self::Error> {
-        let endpoint = service_name.as_str();
+        // `SERVICE <urn:source:id>` names a registered virtual datasource:
+        // its endpoint and its account stand in, and the allowlist applies
+        // to the endpoint exactly as to a URL written out.
+        let resolved = match crate::sources::virtual_source::resolve(service_name.as_str()) {
+            Some(Ok(r)) => Some(r),
+            Some(Err(reason)) => {
+                return Err(FederationError::Parse {
+                    url: service_name.as_str().to_string(),
+                    reason,
+                })
+            }
+            None => None,
+        };
+        let endpoint: &str = resolved
+            .as_ref()
+            .map(|r| r.endpoint.as_str())
+            .unwrap_or_else(|| service_name.as_str());
         if !crate::remote::is_allowed(endpoint) {
             return Err(crate::remote::RemoteError::NotAllowed(endpoint.to_string()).into());
         }
@@ -59,8 +75,22 @@ impl DefaultServiceHandler for AllowlistedServiceHandler {
         }
         .to_string();
         let bearer = crate::federation::assertion_for_identity(endpoint, self.identity.as_ref());
-        let body =
-            crate::remote::post_sparql_blocking_with_auth(endpoint, &query, bearer.as_deref())?;
+        let auth = match resolved.as_ref() {
+            Some(r) => match (&r.username, &r.secret) {
+                (Some(u), Some(s)) => crate::remote::Auth::Basic(u, s.expose()),
+                _ => crate::remote::Auth::None,
+            },
+            None => match bearer.as_deref() {
+                Some(b) => crate::remote::Auth::Bearer(b),
+                None => crate::remote::Auth::None,
+            },
+        };
+        let body = crate::remote::post_sparql_blocking(
+            endpoint,
+            &query,
+            "application/sparql-results+json",
+            auth,
+        )?;
         let parsed = QueryResultsParser::from_format(QueryResultsFormat::Json)
             .for_reader(body.as_bytes())
             .map_err(|e| FederationError::Parse {

@@ -1,3 +1,18 @@
+# SHACL vocabulary — namespace document of http://www.w3.org/ns/shacl#, version
+# of 2017-07-20. (The namespace URI itself now serves a SHACL 1.2 draft, which
+# is not this file.)
+# Source: https://www.w3.org/ns/shacl.ttl
+# Defined in Shapes Constraint Language (SHACL), W3C Recommendation 20 July 2017,
+# https://www.w3.org/TR/2017/REC-shacl-20170720/
+# Copyright © 2017 World Wide Web Consortium. https://www.w3.org/copyright/document-license-2023/
+# Copyright © 2023 W3C®. This software or document includes material copied from
+# or derived from W3C Shapes Constraint Language (SHACL) Vocabulary,
+# https://www.w3.org/ns/shacl.ttl.
+# Licence: W3C Document License (2023), https://www.w3.org/copyright/document-license-2023/
+# Changes by Open Triplestore: this comment header was added; the rest of the
+# file is byte-identical to the source (checked 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The upstream file starts below this line. ----
 # W3C Shapes Constraint Language (SHACL) Vocabulary
 # Version from 2017-07-20
 

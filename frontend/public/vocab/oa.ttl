@@ -1,11 +1,22 @@
-# Open Annotation Data Model — The Open Annotation Core Data Model specifies
-# an interoperable framework for creating associations between related
-# resources, annotations, using a methodology that conforms to the
-# Architecture of the World Wide Web.
-# Full vocabulary as published in the Linked Open Vocabularies (LOV) corpus
-# snapshot of 2025-12-18 (https://lov.linkeddata.es/ — dataset CC BY 4.0),
-# version W3C Recommendation (2016-11-12).
-# Source: http://www.w3.org/ns/oa#  (ns http://www.w3.org/ns/oa#)
+# Web Annotation Ontology — the terms of the Web Annotation Vocabulary
+# (dcterms:modified 2016-11-12). LOV lists it under its older name, "Open
+# Annotation Data Model".
+# Source: http://www.w3.org/ns/oa — triples identical to
+# https://www.w3.org/ns/oa.ttl (checked 2026-09-23).
+# Obtained via the Linked Open Vocabularies (LOV) corpus snapshot of 2025-12-18
+# (https://lov.linkeddata.es/), which re-serialized it as Turtle. LOV's own
+# CC BY 4.0 licence covers LOV's catalogue; it does not relicense this vocabulary.
+# Defined in Web Annotation Vocabulary, W3C Recommendation 23 February 2017,
+# https://www.w3.org/TR/2017/REC-annotation-vocab-20170223/
+# Copyright © 2016 World Wide Web Consortium. https://www.w3.org/copyright/document-license-2023/
+# Copyright © 2023 W3C®. This software or document includes material copied from
+# or derived from Web Annotation Vocabulary,
+# https://www.w3.org/ns/oa.
+# Licence: W3C Document License (2023), https://www.w3.org/copyright/document-license-2023/
+# Changes: re-serialized as Turtle by LOV (no triple changed); this comment
+# header was written by Open Triplestore (2026-07-24, revised 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The vocabulary, as re-serialized by LOV, starts below this line. ----
 @prefix dc: <http://purl.org/dc/elements/1.1/> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix foaf: <http://xmlns.com/foaf/0.1/> .

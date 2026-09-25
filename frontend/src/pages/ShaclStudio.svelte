@@ -5,6 +5,7 @@
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
   import { listShapeGraphs, listPipelines, listDatasets } from '../lib/api.js';
+  import { loadPrefixCcPrefixes } from '../lib/rdf-utils.js';
   import { FileCode, Workflow, Database, ShieldCheck, Plus, ArrowRight, AlertTriangle } from 'lucide-svelte';
   import { Link, navigate } from '../lib/router/index.js';
   import ShaclStudioNav from '../components/ShaclStudioNav.svelte';
@@ -22,6 +23,10 @@
   }
 
   onMount(async () => {
+    // Warm the full namespace→prefix store for the whole Studio; without it
+    // CURIEs elsewhere fall back to the 19 hard-coded common prefixes. Self-
+    // guarded and self-catching, so it neither blocks nor can fail loudly.
+    loadPrefixCcPrefixes();
     try {
       [sets, pipelines, datasets] = await Promise.all([
         listShapeGraphs().catch(() => []),

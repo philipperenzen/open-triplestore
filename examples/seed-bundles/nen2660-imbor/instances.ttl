@@ -1,24 +1,43 @@
 # Sample beheerobjecten for the IMBOR 2025 object-type library: three trees
 # (IMBOR "Boom", imbor:83a942f7-…), each with two Kern-shaped properties —
-# "boomkroonvolume eindbeeld" (xsd:decimal, m³) and "kiemjaar" (xsd:gYear).
+# "boomkroonvolume eindbeeld" (xsd:decimal, m³) and "kiemjaar" (xsd:gYear) —
+# plus what Kern requires of every beheerobject through its superclasses:
+# the NEN 3610 "identificatie" and "domein" (on Object), and a "geometrie"
+# (geo:wktLiteral) and "status" (a Geo-object status domain value; "In
+# gebruik" here) on Geo-object.
 # boom-3 carries its kiemjaar as a plain string, which the Kern property
 # shape (sh:datatype xsd:gYear) must report.
 @prefix imbor: <https://data.crow.nl/imbor/def/> .
+@prefix imbor-domeinwaarde: <https://data.crow.nl/imbor/id/domeinwaarden/> .
+@prefix nen3610: <http://modellen.geostandaarden.nl/def/nen3610-2022#> .
+@prefix geo: <http://www.opengis.net/ont/geosparql#> .
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix ex: <https://example.org/imbor-sample/> .
 
 ex:boom-1 a imbor:83a942f7-5291-42f0-afb1-9a57d0fb2f15 ;
     rdfs:label "Boom 1 — plataan, Waalkade"@nl ;
+    nen3610:identificatie "boom-1" ;
+    nen3610:domein "https://example.org/imbor-sample/"^^xsd:anyURI ;
+    imbor:888e13ae-214e-471e-839b-79d77d69d46e "POINT(5.8660 51.8490)"^^geo:wktLiteral ;
+    imbor:4e721262-e6e2-41df-bb99-0b6693e32435 imbor-domeinwaarde:01a31554-111c-4765-82cb-79f0b178eb8e ;
     imbor:6ddefdf8-acfe-49c8-9f08-b7636570f0be "120.5"^^xsd:decimal ;
     imbor:39231ace-3d00-4bcc-b4db-31dbb2c0bb6f "1975"^^xsd:gYear .
 
 ex:boom-2 a imbor:83a942f7-5291-42f0-afb1-9a57d0fb2f15 ;
     rdfs:label "Boom 2 — linde, Kronenburgerpark"@nl ;
+    nen3610:identificatie "boom-2" ;
+    nen3610:domein "https://example.org/imbor-sample/"^^xsd:anyURI ;
+    imbor:888e13ae-214e-471e-839b-79d77d69d46e "POINT(5.8590 51.8440)"^^geo:wktLiteral ;
+    imbor:4e721262-e6e2-41df-bb99-0b6693e32435 imbor-domeinwaarde:01a31554-111c-4765-82cb-79f0b178eb8e ;
     imbor:6ddefdf8-acfe-49c8-9f08-b7636570f0be "64"^^xsd:decimal ;
     imbor:39231ace-3d00-4bcc-b4db-31dbb2c0bb6f "1998"^^xsd:gYear .
 
 ex:boom-3 a imbor:83a942f7-5291-42f0-afb1-9a57d0fb2f15 ;
     rdfs:label "Boom 3 — es, Goffertpark (planted violation)"@nl ;
+    nen3610:identificatie "boom-3" ;
+    nen3610:domein "https://example.org/imbor-sample/"^^xsd:anyURI ;
+    imbor:888e13ae-214e-471e-839b-79d77d69d46e "POINT(5.8330 51.8290)"^^geo:wktLiteral ;
+    imbor:4e721262-e6e2-41df-bb99-0b6693e32435 imbor-domeinwaarde:01a31554-111c-4765-82cb-79f0b178eb8e ;
     imbor:6ddefdf8-acfe-49c8-9f08-b7636570f0be "30"^^xsd:decimal ;
     imbor:39231ace-3d00-4bcc-b4db-31dbb2c0bb6f "1998" .

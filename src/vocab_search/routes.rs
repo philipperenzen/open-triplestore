@@ -6,6 +6,19 @@
 //! (platform vs LOV), install-state on vocabulary records, the CLARIAH-style
 //! recommender, and an offline install endpoint.
 //!
+//! Every LOV record carries the vocabulary's own licence — the one its graph
+//! declares or, where it names none, its publisher's published terms
+//! (`license`, `license_declared`, `license_status`, `license_source`,
+//! `license_source_url`) — the notice that licence requires
+//! (`license_notice`), each licence's URI (`license_uris`), whether it allows
+//! only unaltered copies (`no_derivatives`), how many literals of LOV's copy
+//! LOV mis-decoded (`lov_misdecoded`) and whether this project may
+//! redistribute it (`redistributable`, `redistribution_withheld`); the
+//! `source` block's licence is LOV's, for LOV's own metadata only.
+//! `/api/vocab/notice` serves the same as a plain-text licence page, which
+//! the licence record of an installed copy links to.  Term search and the
+//! recommender cover only redistributable LOV vocabularies.
+//!
 //! Catalog-level endpoints (vocabulary list/info/search/autocomplete/tags)
 //! work on every build.  Term-level search and the recommender need the
 //! `vocab-search` feature (Tantivy) and answer `503` without it, mirroring
@@ -51,6 +64,7 @@ pub fn vocab_public_routes() -> Router<AppState> {
     Router::new()
         .route("/api/vocab/list", get(list_vocabs))
         .route("/api/vocab/info", get(vocab_info))
+        .route("/api/vocab/notice", get(vocab_notice))
         .route("/api/vocab/tags", get(vocab_tags))
         .route("/api/vocab/search", get(vocab_search))
         .route("/api/vocab/autocomplete", get(vocab_autocomplete))
@@ -137,6 +151,31 @@ async fn vocab_info(
         .info(&params.vocab, &viewer(&state, &user))
         .map(Json)
         .ok_or_else(|| AppError::NotFound(format!("Unknown vocabulary {:?}", params.vocab)))
+}
+
+/// GET /api/vocab/notice?vocab= — the licence page of one LOV vocabulary
+/// (prefix, registry id of an install, ontology URI or namespace), as plain
+/// text: its licences with their URIs, the notice copies must carry and where
+/// the copy comes from.  The licence record of every LOV install links here.
+async fn vocab_notice(
+    State(state): State<AppState>,
+    Query(params): Query<InfoParams>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let cat = &state.vocab_catalog;
+    let key = params.vocab.as_str();
+    let v = cat
+        .lov_by_prefix(key)
+        .or_else(|| cat.lov_by_model_id(key))
+        .or_else(|| cat.lov_by_uri(key))
+        .or_else(|| cat.lov_by_namespace(key))
+        .ok_or_else(|| AppError::NotFound(format!("Unknown LOV vocabulary {key:?}")))?;
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        cat.notice_text(v),
+    ))
 }
 
 #[derive(Serialize)]
@@ -244,6 +283,10 @@ struct StatusResponse {
     catalog_vocabularies: usize,
     prefix_dataset_size: usize,
     corpus_available: bool,
+    /// Catalog vocabularies whose graph the corpus holds (the image's corpus
+    /// carries only the redistributable ones; term search indexes only
+    /// those, whatever the corpus).
+    corpus_vocabularies: usize,
     term_search_enabled: bool,
     #[cfg(feature = "vocab-search")]
     engine: Option<super::index::EngineStatus>,
@@ -260,6 +303,7 @@ async fn vocab_status(State(state): State<AppState>) -> Json<StatusResponse> {
         catalog_vocabularies: state.vocab_catalog.lov_len(),
         prefix_dataset_size: state.prefix_registry.dataset_len(),
         corpus_available,
+        corpus_vocabularies: state.vocab_catalog.corpus_vocab_count(),
         term_search_enabled: cfg!(feature = "vocab-search"),
         #[cfg(feature = "vocab-search")]
         engine: state.vocab_engine.as_ref().map(|e| e.status()),
@@ -498,6 +542,7 @@ async fn install_vocab(
         Err(e) => Err(match e {
             super::install::InstallError::UnknownVocab(_) => AppError::NotFound(e.to_string()),
             super::install::InstallError::NotInCorpus(_)
+            | super::install::InstallError::NotRedistributed(_)
             | super::install::InstallError::CorpusUnavailable => {
                 AppError::ServiceUnavailable(e.to_string())
             }

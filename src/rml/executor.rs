@@ -10,11 +10,15 @@
 //!         ObjectMap.eval(row) → object (IRI/Literal/BNode)
 //!       → Quad(subject, predicate, object, graph)
 //! ```
-
-use oxigraph::model::{Literal, NamedNode};
+//!
+//! This is the **file-based** path (CSV / JSON / XML), where every row is
+//! self-contained. Relational sources stream through
+//! [`super::sql`](super::sql) instead, because they can join across triples
+//! maps; both share the term-map evaluation in [`super::terms`].
 
 use super::model::*;
-use super::sources::{load_rows, Row};
+use super::sources::load_rows;
+use super::terms::{BlankNodes, Row};
 use crate::store::engine::TripleStore;
 use std::collections::HashMap;
 
@@ -48,27 +52,25 @@ pub fn execute_authorized<A>(
 where
     A: Fn(&str) -> Result<(), String>,
 {
+    // A relational mapping needs a connection and a join planner, neither of
+    // which this path has. Saying so beats emitting zero triples and calling
+    // it success.
+    if mapping.has_sql_source() {
+        return Err(
+            "this mapping reads a registered datasource; run it through \
+             POST /api/sources/{id}/runs, which opens the connection and applies the write gate"
+                .to_string(),
+        );
+    }
+
     // Triples keyed by their target named graph (None = default/target_graph).
     let mut triples_by_graph: HashMap<Option<String>, Vec<String>> = HashMap::new();
-    let mut bnode_counter: usize = 0;
+    let mut bnodes = BlankNodes::new("b");
 
     for tm in &mapping.triples_maps {
         let source_key = match &tm.logical_source.source {
             SourceRef::File(path) => path.clone(),
-            SourceRef::Inline(content) => {
-                let fake_key = format!("__inline_{}", tm.iri);
-                let mut data = source_data.clone();
-                data.entry(fake_key.clone())
-                    .or_insert_with(|| content.clone());
-                execute_triples_map(
-                    tm,
-                    &data,
-                    &fake_key,
-                    &mut triples_by_graph,
-                    &mut bnode_counter,
-                )?;
-                continue;
-            }
+            SourceRef::Datasource(_) => unreachable!("guarded by has_sql_source above"),
         };
 
         execute_triples_map(
@@ -76,7 +78,7 @@ where
             source_data,
             &source_key,
             &mut triples_by_graph,
-            &mut bnode_counter,
+            &mut bnodes,
         )?;
     }
 
@@ -110,9 +112,9 @@ where
             Some(g) => Some(g.as_str()),
             None => target_graph,
         };
-        let turtle = build_turtle_doc(triples);
+        let doc = triples.join("\n");
         store
-            .load_str(&turtle, oxigraph::io::RdfFormat::Turtle, effective_graph)
+            .load_str(&doc, oxigraph::io::RdfFormat::NTriples, effective_graph)
             .map_err(|e| format!("Failed to load generated triples: {e}"))?;
         total += triples.len();
     }
@@ -125,7 +127,7 @@ fn execute_triples_map(
     source_data: &HashMap<String, String>,
     source_key: &str,
     out: &mut HashMap<Option<String>, Vec<String>>,
-    bnode_counter: &mut usize,
+    bnodes: &mut BlankNodes,
 ) -> Result<(), String> {
     let content = source_data
         .get(source_key)
@@ -139,7 +141,7 @@ fn execute_triples_map(
 
     for row_result in rows {
         let row = row_result?;
-        execute_row(tm, &row, out, bnode_counter);
+        execute_row(tm, &row, out, bnodes)?;
     }
 
     Ok(())
@@ -149,177 +151,20 @@ fn execute_row(
     tm: &TriplesMap,
     row: &Row,
     out: &mut HashMap<Option<String>, Vec<String>>,
-    bnode_counter: &mut usize,
-) {
+    bnodes: &mut BlankNodes,
+) -> Result<(), String> {
     // Blank nodes are scoped to a single row (R2RML §generated RDF term): two term
     // maps yielding the same value in this row must denote the SAME blank node, but
     // a fresh row produces distinct nodes. Keyed by the generated value; reset here
     // per row so cross-row blank nodes never collide.
     let mut row_bnodes: HashMap<String, String> = HashMap::new();
 
-    // Evaluate the TriplesMap-level graph_map once per row
-    let tm_graph: Option<String> = tm
-        .graph_map
-        .as_ref()
-        .and_then(|gm| eval_iri_raw(gm, row, bnode_counter, &mut row_bnodes));
-
-    // Evaluate subject
-    let subject = match eval_term(
-        &tm.subject_map.term_map,
-        row,
-        bnode_counter,
-        &mut row_bnodes,
-    ) {
-        Some(s) => s,
-        None => return,
-    };
-
-    // rr:class assertions go into the TriplesMap graph
-    for class_iri in &tm.subject_map.classes {
-        let triple = format!(
-            "{} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{}> .",
-            subject, class_iri
-        );
-        out.entry(tm_graph.clone()).or_default().push(triple);
+    // No column types (a file source reports none) and no join resolver: RML
+    // join conditions need a queryable source, which is the relational path.
+    for triple in super::sql::row_triples(tm, row, None, bnodes, &mut row_bnodes, &|_, _| None)? {
+        out.entry(triple.graph).or_default().push(triple.text);
     }
-
-    // Predicate-object maps
-    for pom in &tm.predicate_object_maps {
-        let predicate = match eval_term(&pom.predicate_map, row, bnode_counter, &mut row_bnodes) {
-            Some(p) => p,
-            None => continue,
-        };
-        let object = match eval_term(&pom.object_map, row, bnode_counter, &mut row_bnodes) {
-            Some(o) => o,
-            None => continue,
-        };
-
-        // POM-level graph_map overrides TriplesMap-level
-        let graph_key: Option<String> = pom
-            .graph_map
-            .as_ref()
-            .and_then(|gm| eval_iri_raw(gm, row, bnode_counter, &mut row_bnodes))
-            .or_else(|| tm_graph.clone());
-
-        let triple = format!("{subject} {predicate} {object} .");
-        out.entry(graph_key).or_default().push(triple);
-    }
-}
-
-/// Evaluate a TermMap as a raw IRI string (without angle brackets), or None.
-fn eval_iri_raw(
-    tm: &TermMap,
-    row: &Row,
-    bnode_counter: &mut usize,
-    row_bnodes: &mut HashMap<String, String>,
-) -> Option<String> {
-    let rendered = eval_term(tm, row, bnode_counter, row_bnodes)?;
-    // eval_term returns "<iri>" for IRI types; strip angle brackets
-    if rendered.starts_with('<') && rendered.ends_with('>') {
-        Some(rendered[1..rendered.len() - 1].to_string())
-    } else {
-        None
-    }
-}
-
-/// Evaluate a TermMap against a row, returning a Turtle-serialized term or None.
-///
-/// `row_bnodes` caches blank nodes generated in the current row, keyed by their
-/// generated value, so two term maps producing the same value co-refer to one
-/// blank node (R2RML blank-node scope is a single row).
-fn eval_term(
-    tm: &TermMap,
-    row: &Row,
-    bnode_counter: &mut usize,
-    row_bnodes: &mut HashMap<String, String>,
-) -> Option<String> {
-    let raw_value = match &tm.kind {
-        TermMapKind::Constant(val) => val.clone(),
-        TermMapKind::Template(template) => expand_template(template, row)?,
-        TermMapKind::Reference(col) => row.get(col)?.clone(),
-    };
-
-    if raw_value.is_empty() {
-        return None;
-    }
-
-    Some(match tm.term_type {
-        // Build the IRI through oxrdf so it is validated and serialised, not
-        // pasted between angle brackets. A `rml:reference`/`rr:column` value
-        // with `rr:termType rr:IRI` went in raw: a value containing a space
-        // produced invalid Turtle and failed the WHOLE mapping, and one
-        // containing `>` could terminate the IRI and inject further triples.
-        // Only `rr:template` values were percent-encoded.
-        TermType::IRI => NamedNode::new(&raw_value).ok()?.to_string(),
-        TermType::BlankNode => {
-            if let Some(existing) = row_bnodes.get(&raw_value) {
-                existing.clone()
-            } else {
-                *bnode_counter += 1;
-                let label = format!("_:b{}", bnode_counter);
-                row_bnodes.insert(raw_value, label.clone());
-                label
-            }
-        }
-        // Likewise for literals: hand-escaping only `\` and `"` left raw
-        // newlines, carriage returns and tabs in the output, which Turtle's
-        // STRING_LITERAL_QUOTE forbids — so one multi-line CSV field made the
-        // entire generated document unparseable and the mapping failed with
-        // "Failed to load generated triples" rather than skipping a row.
-        TermType::Literal => {
-            if let Some(ref lang) = tm.language {
-                match Literal::new_language_tagged_literal(&raw_value, lang) {
-                    Ok(l) => l.to_string(),
-                    // An invalid language tag is a mapping error, not a reason
-                    // to emit a broken document.
-                    Err(_) => return None,
-                }
-            } else if let Some(ref dt) = tm.datatype {
-                Literal::new_typed_literal(&raw_value, NamedNode::new(dt).ok()?).to_string()
-            } else {
-                Literal::new_simple_literal(&raw_value).to_string()
-            }
-        }
-    })
-}
-
-/// Expand an `rr:template` string: replace `{column}` with row values.
-fn expand_template(template: &str, row: &Row) -> Option<String> {
-    let mut result = String::with_capacity(template.len());
-    let mut chars = template.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '{' {
-            let mut col = String::new();
-            for inner in chars.by_ref() {
-                if inner == '}' {
-                    break;
-                }
-                col.push(inner);
-            }
-            let val = row.get(&col)?;
-            // URL-encode the value for IRI templates
-            result.push_str(&percent_encode(val));
-        } else {
-            result.push(c);
-        }
-    }
-    Some(result)
-}
-
-/// Simple percent-encoding for IRI template substitutions.
-fn percent_encode(s: &str) -> String {
-    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
-}
-
-/// Build a Turtle document from a list of triple strings (already serialized).
-fn build_turtle_doc(triples: &[String]) -> String {
-    let mut doc = String::with_capacity(triples.len() * 80);
-    for triple in triples {
-        doc.push_str(triple);
-        doc.push('\n');
-    }
-    doc
+    Ok(())
 }
 
 #[cfg(test)]

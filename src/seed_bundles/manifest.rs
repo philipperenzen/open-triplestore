@@ -53,7 +53,9 @@ use serde::Deserialize;
 use crate::auth::models::{GraphKind, Visibility};
 use crate::saved_queries::models::CreateSavedQueryRequest;
 
-use super::{Bundle, BundleDataModel, BundleDataset, BundleGraph, Fmt, OrgSpec, QuadsPayload};
+use super::{
+    Bundle, BundleDataModel, BundleDataset, BundleGraph, BundleLicense, Fmt, OrgSpec, QuadsPayload,
+};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -138,6 +140,63 @@ struct DataModelDoc {
     version: Option<String>,
     #[serde(default)]
     graphs: Vec<GraphDoc>,
+    /// The licence of the model's content (`[data_models.license]`), when it
+    /// is someone else's work. See [`LicenseDoc`].
+    #[serde(default)]
+    license: Option<LicenseDoc>,
+    /// Whether the registry entry is public; default `true`. Set `false` for
+    /// content the operator may use but not re-serve publicly (NEN 2660-2
+    /// carries no licence to redistribute).
+    #[serde(default)]
+    public: Option<bool>,
+}
+
+/// `[data_models.license]`: the licence and attribution of a bundle model
+/// whose content is a third party's work, recorded on the model's registry
+/// entry and version like the licence record of a bundled vocabulary.
+///
+/// ```toml
+/// [data_models.license]
+/// no_derivatives = true              # the rights holder allows no altered copies
+/// copyright = ["© Stichting CROW"]
+/// source = "https://github.com/Stichting-CROW/imbor/releases/tag/2025"
+/// licenses = [
+///   { name = "CC BY 4.0", uri = "https://creativecommons.org/licenses/by/4.0/" },
+/// ]
+/// remarks = "…"                      # optional; also `notice`, `changes`, `notice_url`
+/// ```
+///
+/// With `no_derivatives = true` the registry refuses every way of altering or
+/// adding content in the entry (uploads, edits, drafts, branches, merges,
+/// rebases, publishes, direct SPARQL / Graph Store writes to its graphs) and
+/// serves a version only while every graph still holds exactly its file's
+/// triples. Every graph of a licensed model must load from a `file`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LicenseDoc {
+    #[serde(default)]
+    licenses: Vec<LicenseRefDoc>,
+    #[serde(default)]
+    copyright: Vec<String>,
+    source: String,
+    #[serde(default)]
+    notice: Option<String>,
+    #[serde(default)]
+    changes: Option<String>,
+    #[serde(default)]
+    remarks: Option<String>,
+    /// Where the full attribution and licence texts are; defaults to `source`.
+    #[serde(default)]
+    notice_url: Option<String>,
+    #[serde(default)]
+    no_derivatives: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LicenseRefDoc {
+    name: String,
+    uri: String,
 }
 
 #[derive(Deserialize)]
@@ -264,6 +323,43 @@ pub fn parse_bundle(dir: &Path) -> anyhow::Result<Bundle> {
             bail!("data model '{}' declares no graphs", dm.id);
         }
 
+        let license = match dm.license {
+            None => None,
+            Some(l) => {
+                if l.source.trim().is_empty() {
+                    bail!("data model '{}': license.source must not be empty", dm.id);
+                }
+                for r in &l.licenses {
+                    oxigraph::model::NamedNode::new(r.uri.as_str()).with_context(|| {
+                        format!("data model '{}': licence URI '{}'", dm.id, r.uri)
+                    })?;
+                }
+                let mut files = Vec::with_capacity(dm.graphs.len());
+                for g in &dm.graphs {
+                    match &g.file {
+                        Some(f) => files.push(f.clone()),
+                        None => bail!(
+                            "data model '{}': graph <{}> has no file; every graph of a licensed \
+                             model must load from a file, so the registry can check it",
+                            dm.id,
+                            g.iri
+                        ),
+                    }
+                }
+                Some(BundleLicense {
+                    licenses: l.licenses.into_iter().map(|r| (r.name, r.uri)).collect(),
+                    copyright: l.copyright,
+                    notice_url: l.notice_url.unwrap_or_else(|| l.source.clone()),
+                    source: l.source,
+                    notice: l.notice,
+                    changes: l.changes,
+                    remarks: l.remarks,
+                    no_derivatives: l.no_derivatives,
+                    files,
+                })
+            }
+        };
+
         let graphs = resolve_graphs(dir, dm.graphs, &format!("data model '{}'", dm.id))?;
 
         data_models.push(BundleDataModel {
@@ -280,6 +376,10 @@ pub fn parse_bundle(dir: &Path) -> anyhow::Result<Bundle> {
             version: dm.version.unwrap_or_else(|| "1.0.0".to_string()),
 
             graphs,
+
+            license,
+
+            public: dm.public.unwrap_or(true),
         });
     }
 
@@ -386,6 +486,111 @@ fn quads_format(path: &Path, explicit: Option<&str>) -> anyhow::Result<RdfFormat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_bundle(dir: &Path, license: &str, graph_file: bool) {
+        std::fs::write(
+            dir.join("manifest.toml"),
+            format!(
+                r#"
+id = "lic"
+
+[organisation]
+slug = "lic-org"
+name = "Licence Org"
+
+[[data_models]]
+id = "lic-model"
+title = "Licensed"
+namespace = "https://example.org/lic#"
+version = "1"
+{license}
+
+[[data_models.graphs]]
+iri = "https://example.org/lic/def"
+{file}
+"#,
+                file = if graph_file { "file = \"m.ttl\"" } else { "" }
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("m.ttl"),
+            "<https://example.org/a> a <https://example.org/T> .",
+        )
+        .unwrap();
+    }
+
+    /// `[data_models.license]` parses into the bundle model; every graph of a
+    /// licensed model must load from a file, and a licence URI must be an IRI.
+    #[test]
+    fn a_data_model_licence_is_parsed_and_checked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let license = r#"
+[data_models.license]
+no_derivatives = true
+copyright = ["© Stichting CROW"]
+source = "https://github.com/Stichting-CROW/imbor/releases/tag/2025"
+licenses = [{ name = "CC BY 4.0", uri = "https://creativecommons.org/licenses/by/4.0/" }]
+"#;
+        write_bundle(tmp.path(), license, true);
+        let b = parse_bundle(tmp.path()).unwrap();
+        let l = b.data_models[0].license.as_ref().unwrap();
+        assert!(l.no_derivatives);
+        assert_eq!(l.files, vec!["m.ttl".to_string()]);
+        assert_eq!(l.notice_url, l.source);
+        assert_eq!(
+            l.licenses[0].1,
+            "https://creativecommons.org/licenses/by/4.0/"
+        );
+
+        write_bundle(tmp.path(), license, false);
+        assert!(parse_bundle(tmp.path()).is_err(), "a graph without a file");
+
+        write_bundle(
+            tmp.path(),
+            &license.replace("https://creativecommons.org/licenses/by/4.0/", "not an iri"),
+            true,
+        );
+        assert!(
+            parse_bundle(tmp.path()).is_err(),
+            "a licence URI that is no IRI"
+        );
+
+        write_bundle(tmp.path(), "", true);
+        assert!(parse_bundle(tmp.path()).unwrap().data_models[0]
+            .license
+            .is_none());
+    }
+
+    /// The shipped nen2660-imbor bundle declares IMBOR Kern's licence: CROW's,
+    /// with no altered copies.
+    #[test]
+    fn the_nen2660_imbor_manifest_declares_imbor_no_derivatives() {
+        let raw = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("examples/seed-bundles/nen2660-imbor/manifest.toml"),
+        )
+        .unwrap();
+        let doc: ManifestDoc = toml::from_str(&raw).unwrap();
+        let otl = doc
+            .data_models
+            .iter()
+            .find(|m| m.id == "imbor-otl")
+            .unwrap();
+        let l = otl
+            .license
+            .as_ref()
+            .expect("imbor-otl declares its licence");
+        assert!(l.no_derivatives);
+        assert_eq!(l.copyright, vec!["© Stichting CROW".to_string()]);
+        assert!(otl.graphs.iter().all(|g| g.file.is_some()));
+        let nen = doc
+            .data_models
+            .iter()
+            .find(|m| m.id == "nen2660-2")
+            .unwrap();
+        assert!(nen.license.is_none());
+    }
 
     #[test]
     fn rejects_path_traversal_in_payload_paths() {

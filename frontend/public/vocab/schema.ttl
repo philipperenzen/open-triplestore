@@ -1,3 +1,20 @@
+# Schema.org subset — 27 terms (12 classes, 15 properties) adapted from
+# Schema.org release 30.0 (2026-03-19),
+# https://github.com/schemaorg/schemaorg/tree/main/data/releases/30.0
+# Copyright Google, Inc., Yahoo, Inc., Microsoft Corporation and Yandex (the
+# Schema.org Sponsors). The Sponsors license their copyrights in the schema
+# under the Creative Commons Attribution-ShareAlike License 3.0,
+# http://creativecommons.org/licenses/by-sa/3.0/ (https://schema.org/docs/terms.html).
+# This is an adaptation made by Open Triplestore: it keeps only the 27 terms
+# below, each with all of its triples from release 30.0 unchanged, and states
+# each term a second time under its http://schema.org/ IRI (objects stay
+# https://schema.org/) so data using either namespace resolves. This comment
+# header was also added.
+# This adaptation is released under CC BY-SA 3.0,
+# http://creativecommons.org/licenses/by-sa/3.0/; the Open Triplestore licence
+# terms (AGPL-3.0 with the Commons Clause) do not apply to it. No endorsement by
+# Schema.org or its Sponsors is implied.
+# Full attribution and licence texts: NOTICE.md in this directory.
 @prefix dcat: <http://www.w3.org/ns/dcat#> .
 @prefix dcmitype: <http://purl.org/dc/dcmitype/> .
 @prefix dcterms: <http://purl.org/dc/terms/> .

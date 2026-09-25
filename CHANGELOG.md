@@ -14,6 +14,282 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Third-party data carries its licences, and the image ships only what may
+  be redistributed.** A licence audit of every vendored dataset, vocabulary,
+  test suite and bundled binary (each verdict challenged against the rights
+  holder's own terms) led to:
+  - **LOV:** the catalogue records each vocabulary's own licence
+    (`license`, `license_declared`, `license_status`, `redistributable` on
+    every vocabulary record; `license_url`, `license_scope` and
+    `modifications` on the source) instead of stamping LOV's CC BY 4.0 on
+    everything. Descriptions copied from vocabularies whose licence does not
+    allow redistribution are gone. The Docker image bakes only the corpus
+    graphs whose licence allows a verbatim copy (listed in
+    `assets/vocab/lov-redistributable.txt`); the full dump still works when an
+    operator supplies it (`VOCAB_CORPUS_PATH`). An install records the
+    vocabulary's own licence, and one whose licence does not allow
+    redistribution installs privately. The vocabulary search shows each
+    licence.
+  - **Notices and licence texts:** a rewritten `NOTICE` with correct holders,
+    licences, sources and modification statements; `LICENSES/` with the texts
+    the bundled material requires (shipped at `/app/LICENSES/`);
+    `frontend/public/vocab/NOTICE.md` (served at `/vocab/NOTICE.md`) with one
+    entry per bundled vocabulary and the notices their licences require, also
+    in the header of each file that has one (imbor.ttl is shipped unmodified,
+    with no header); licence files and provenance for the W3C SPARQL, W3C
+    SHACL and OGC GeoSPARQL test suites; the libraries statically linked into
+    `web-ifc.wasm`; the Lucide/Feather icons, IFC schema names, EPSG
+    parameters and LOINC codes credited where they are used.
+  - **Credits on screen:** the 3DBAG credit shows on the Cesium globe, embeds
+    and 3D previews as well as the map, and 3D Tiles carry it as glTF
+    `asset.copyright`; the OpenStreetMap/CARTO and Esri basemap credits on the
+    globe are shown on screen instead of behind a pop-up.
+  - **Term search serves only what may be redistributed.** The term index
+    skips every LOV vocabulary whose licence does not allow redistribution,
+    whatever corpus is mounted (a full dump included); existing indexes are
+    rebuilt on first boot. Each shipped graph's required notice is filled in
+    per graph (catalogue `license_notice`, and a notice column in
+    `lov-redistributable.txt`); four vocabularies are withheld because LOV's
+    copy is not faithful to a work that allows no modification, the licence's
+    required copyright line is not published, or the licence's version is not
+    stated (`redistribution_withheld`). The OGL, Flemish-licence and ISA
+    graphs carry their required notices, the ISA No Warranty disclaimer
+    included; where LOV mis-decoded characters in a graph whose licence allows
+    modification (14 graphs), its notice says so. The catalogue adds
+    `license_uris`, `no_derivatives` and `lov_misdecoded`.
+  - **LOV installs carry a licence record; earlier installs are checked.**
+    Each version installed from the LOV corpus gets a licence record (licences
+    with URIs, the required notice, the source, and a link to the new
+    `/api/vocab/notice` licence page); downloads carry `rel="license"` links,
+    and a CC BY-ND or OGC Document Notice vocabulary cannot be drafted,
+    branched or edited (403). The copy check compares with LOV's copy as the
+    store holds it (typed literals in its canonical form, with the same
+    values). Every start checks for LOV installs of earlier releases,
+    recognised only when everything their installer did holds (its exact
+    note, an entry with no owner under the LOV prefix and namespace, the
+    conventional version graph, an admin creator), so a user's model that
+    copies the note is never touched. Vocabularies that may not be
+    redistributed, and no-derivatives ones, are made private once (each is
+    logged; an admin may make them public again, and later starts leave that
+    alone), and each earlier install gets a licence record that names the
+    vocabulary's own licence and says the earlier release may have added an
+    `owl:versionInfo` triple and that the graph may have been modified. Their
+    graphs and notes are not changed. Followers and Raft members that do not
+    lead leave the check to the leader. Superseded LOV term indexes are
+    removed from disk.
+  - **Seeded vocabularies carry their licence.** Each bundled vocabulary
+    seeded into the model registry has a licence and attribution record
+    (licence names and URIs, copyright, required notice, document status,
+    source, changes, a link to `/vocab/NOTICE.md`), stored as registry
+    metadata — never in the vocabulary graph — and returned as `attribution`
+    by `/api/models`; the model pages show it and the term card's source pill
+    links to the notice. Downloads carry `Link` headers and the file's header
+    as comments (IMBOR: headers only), and the server serves
+    `/vocab/NOTICE.md` itself. Seeded and LOV-installed graphs are loaded
+    unchanged: the loader used to add an `owl:versionInfo` triple to files
+    that state none. On earlier installs, a seeded copy whose only difference
+    from its file is that triple has it removed at the next start and is
+    recorded as unchanged; a copy with any other difference, and every LOV
+    install, keeps it, and their licence records say the copy differs from
+    the file or may have been modified.
+    A download calls its content the bundled file, unchanged, only when the
+    seeder has checked it: each seeded version's record keeps the SHA-256 of
+    its file and a digest of the stored triples, and `attribution.unchanged`
+    says whether the check passed. Drafts, branches, merges, rebases and
+    edited copies keep the licence records of the versions they draw on, and
+    say they may have been modified. In the IMBOR entry (and any entry whose
+    licence record allows no altered copies), uploading, editing, drafting,
+    branching, merging, rebasing and publishing are refused (403), and only
+    the checked copy is served to users who cannot write the entry.
+  - **Seed bundles can declare a model's licence.** A `[data_models.license]`
+    table (`licenses`, `copyright`, `source`, `notice`, `changes`, `remarks`,
+    `notice_url`, `no_derivatives`) becomes the model's licence record, checked
+    against the bundle's files on every start; the `nen2660-imbor` example
+    declares CROW's licence with `no_derivatives = true` for `imbor-otl`. A
+    bundle model may no longer use the id of a vocabulary the server seeds.
+  - **Dependency notices ship with the build.** `npm run build` writes
+    `dist/THIRD-PARTY-LICENSES.txt` (served at `/THIRD-PARTY-LICENSES.txt`)
+    with the licence and notice files of every npm package the web UI bundles
+    or copies, Cesium's third-party modules included, and of the material
+    bundled outside npm — the libraries statically linked into
+    `web-ifc.wasm`, the Lucide/Feather icon shapes drawn inline and the EPSG
+    attribution, whose texts the build takes from `LICENSES/`; the Docker builder
+    writes `/app/THIRD-PARTY-LICENSES-server.txt` for every crate linked into
+    the server (`scripts/gen_rust_third_party_licenses.py`).
+  - **The prefix snapshot documents its sources:** prefix.cc (no licence
+    published for the data; the operator's stated public-domain intent) and
+    the LOV-derived entries (CC BY 4.0, with the modification statement); the
+    Turtle and SPARQL exports of `/api/prefixes/all` open with a credit
+    comment.
+- **The database connectors run against live servers in CI.** A
+  `live-sources` job (GitHub Actions and GitLab alike) starts PostgreSQL 16,
+  MySQL 8.4, MariaDB 11.4 and SQL Server 2022 as service containers and runs
+  each driver's live test plus the whole pipeline over HTTP through the
+  PostgreSQL plugin. `OTS_TEST_LIVE_REQUIRED=1` turns a missing server
+  variable into a failure instead of a skip, and each test retries its
+  administrator connection while a server starts.
+- **The real-data seed bundles run in CI.** NEN 2660-2 and GWSW are not
+  vendored — NEN 2660-2 carries no licence that allows redistributing it,
+  GWSW's ontology states none — so the conformance job downloads the NEN
+  2660-2, IMBOR and GWSW payloads from their publishers with each bundle's
+  `fetch.sh`, and `OTS_TEST_SEED_PAYLOADS_REQUIRED=1` fails a missing payload
+  where the tests used to skip green. The NEN 2660-2 fetch now reads from
+  NEN's own repository, which took the files over from DigiGO's.
+- **No test is ignored, and CI keeps it that way.** `scripts/no-ignored-tests.sh`
+  rejects an `#[ignore]` — plain, with a reason, or behind a `cfg_attr` for
+  one platform — and the backend test step fails when cargo reports any
+  ignored test, doctests included.
+- **`ots-writeback`, the external writeback worker** (`tools/writeback`, a
+  separate binary — never inside the store). It follows a dataset's LDES
+  stream from where it left off, reads an RML mapping backwards — a table
+  source, a one-placeholder subject template or a column subject, and
+  column-valued objects; anything else is reported and left alone — and
+  upserts the changed entities into SQLite or PostgreSQL with a writing
+  account of its own, one transaction per fragment, a tombstone as a delete.
+  Secrets are `env:` / `file:` references, never command-line values;
+  `--dry-run` prints the SQL, `--from-file` works without a store.
+- **Virtual sources: a SPARQL endpoint as a datasource** (dialect `sparql`,
+  in core). An Ontop virtual knowledge graph — or any endpoint — is
+  registered like a database, with the same secret reference and the same
+  allowlist, and introspected as class-tables: each class a table, `subject`
+  its key, the predicates its columns. A mapping reads a class with
+  `rr:tableName` or a SPARQL `SELECT` as `rml:query`; a run of it is a run
+  like any other. A **snapshot run** (`mode: snapshot`) materialises the
+  endpoint's whole graph with no mapping — gated, swapped in, reviewable —
+  and `SERVICE <urn:source:id>` in a local query resolves to the endpoint
+  with its credential, so the source is also queryable live.
+- **PostgreSQL, MySQL / MariaDB and SQL Server datasource connectors** as
+  plugins (`plugins/postgres`, `plugins/mysql`, `plugins/mssql`; features
+  `plugin-postgres`, `plugin-mysql`, `plugin-mssql`), each keeping the
+  connector contract in its dialect's terms: read-only enforced server-side
+  (`default_transaction_read_only`, `SESSION TRANSACTION READ ONLY`, and for
+  SQL Server a role check at connect that refuses a writing account), a
+  statement timeout on everything (a MySQL server that knows neither
+  `max_execution_time` nor `max_statement_time` is refused), rows streamed
+  in batches (PostgreSQL through a server-side cursor), every column typed
+  from the statement's own description and carried as text in the lexical
+  shape the natural datatype mapping expects, and TLS through rustls with
+  `options.sslrootcert` for a private CA and no trust-all switch. The three
+  share one `INFORMATION_SCHEMA` catalogue and one aggregate profiler in
+  `ots_plugin_api::sources::catalogue`. Each crate carries a live test that
+  runs when `OTS_TEST_<DIALECT>_HOST` is set.
+- **The mapping proposer's scoped access.** Two API-token scopes name what
+  an external proposer may do and nothing else: `sources:read` reads the
+  datasource registry, profiles, mappings, runs, tickets, the mapping gates
+  and the ontology profile, and `mappings:propose` creates and refines a
+  mapping in the `proposed` state and dry-runs it. A non-admin's view of a
+  datasource omits its location — host, port, database, account and the
+  credential reference — and never reaches `/preview` or the review queue:
+  the proposer never receives a DSN or a row. A proposer that names any
+  other state, or refines a mapping a reviewer has moved on, is refused.
+- **Review decisions as PROV, and calibration**
+  (`POST /api/mappings/{id}/decisions`, `GET /api/mappings/{id}/reviews`,
+  `GET /api/mappings/{id}/provenance`, `POST /api/sources/calibration`).
+  Approve, edit and reject are three distinct `ds:ReviewDecision`
+  activities, each naming the mapping version it judged, the reviewer, the
+  confidence the proposal carried and the note; an approval moves the
+  mapping on and re-baselines drift. The decisions list is the proposer's
+  training data, and the calibration endpoint fits stated confidence to
+  observed acceptance by isotonic regression — refusing one-class data,
+  which would assign its single outcome to every confidence.
+- **Review items, the deterministic fixer and promotion**
+  (`GET /api/sources/{id}/reviews`, `GET /api/reviews/{id}`,
+  `POST /api/reviews/{id}/status`, `POST /api/reviews/{id}/autofix`,
+  `POST /api/reviews/{id}/suggest`, `POST /api/runs/{id}/promote`). A run
+  the gate refuses opens one review item per subject with violations in
+  `urn:system:reviews:<datasource>`, with the violations and a snapshot of
+  the subject, capped per run by `OTS_REVIEW_MAX_ITEMS`. The fixer applies
+  two rules only — a sign typo against a non-negative `sh:minInclusive`, and
+  a clamp to an inclusive bound — previews the change as an RDF Patch and
+  applies it through the store's patch path; anything that would need an
+  invented value is left to a human with a 422. A human sets an explicit
+  status with a note; the model-assisted suggestion sends the constraints,
+  the values only where the datasource allows model assistance, and applies
+  nothing. Promotion re-gates the corrected candidate and gives it the
+  production role exactly as a passing run would, recorded as a
+  `ds:Promotion` activity on the run's PROV trail naming who released it.
+- **Studio: Explore, Map and Dry-run in the Sources workspace.** Explore
+  shows the profile the store computed — per table and column the counts,
+  code lists, detected patterns, keys and foreign keys, in a simple and an
+  advanced view — profiles on demand, checks drift against the mapping's
+  baseline and lists the re-map tickets it opens. Map is three views of one
+  mapping graph: a matrix of what each triples map reads, mints and asserts
+  with every predicate's object described in a word, the Turtle itself in
+  the editor (save as a new version, or register as a new mapping), and a
+  YARRRML composer; a legacy `mapping.sql2rdf.yaml` bundle converts straight
+  into the editor. Dry-run takes a registered mapping or the editor's
+  unsaved content, a table and a sample size, splits the result into
+  mapping defects and data issues, shows every entity with its own Turtle
+  and violations, and keeps each attempt as a round. The Sources page
+  carries the mapping gates as an editable card.
+- **Dry-run: a sample of a mapping, validated, with every violation
+  classified** (`POST /api/sources/{id}/dry-run`). A registered mapping, a
+  version graph, or unregistered RML / YARRRML — what the proposer sends
+  before it writes a proposal — is materialised into a scratch graph
+  `urn:dryrun:<id>` from a few rows per triples map, and the sample is closed
+  under its joins: every row a sampled row references through
+  `rr:parentTriplesMap` is fetched by key and mapped too, so one row of a
+  child table does not fake an `sh:class` violation on every reference. The
+  sample is validated against the shapes named in the request, the mapping's
+  or the model version's, and each violation is classified: one hitting at
+  least `systematicShare` of a type's subjects over at least
+  `systematicMinSubjects` of them is a **mapping defect**, anything sparser a
+  **data issue**. The response carries per-entity Turtle with each entity's
+  violations, the classification, the report and what each triples map
+  contributed. Scratch graphs live for `OTS_DRYRUN_TTL_SECS` (fifteen
+  minutes) and are swept at start-up. See [`docs/sources.md`](docs/sources.md).
+- **The mapping gates as a config graph** (`GET`/`PUT /api/sources/gates`,
+  `urn:config:mapping-gates`): the confidence bands, the datatype-mismatch
+  cap, the ambiguity margin, the enumeration match minimum, the dry-run
+  classifier's two numbers, the drift threshold and the deterministic lexical
+  scorer's weights, with documented defaults until an administrator saves
+  a configuration. `PUT` is a partial update that refuses an unknown field
+  and any value that cannot be applied. The proposer reads them from here.
+- **Drift between two profile versions, and the re-map tickets it opens**
+  (`POST /api/sources/{id}/drift`). Compared against the profile version the
+  mapping was registered or approved against — recorded as `profileVersion`
+  on the mapping — or the previous version: new and removed columns and
+  tables, type changes, code lists whose value distribution moved (KL
+  divergence above the gates' threshold), code lists gained or lost, the
+  structural hash, and a model-version bump when the mapping's model has
+  published a newer version. Anything affected opens **one** re-map ticket
+  per (datasource, mapping) — a model bump lists every table on it rather
+  than opening one per table — and a later check updates that ticket.
+  `GET /api/sources/{id}/tickets`, `GET /api/tickets/{id}`,
+  `POST /api/tickets/{id}/close`.
+- **A one-time converter for the legacy `mapping.sql2rdf.yaml` bundle**
+  (`POST /api/mappings/convert`). Entities, typed literals, `lookup`,
+  `reference` and `enumeration` objects and `nested` maps become standard RML
+  through the same description YARRRML translates into; `{value_slug}` and
+  `{column_slug}` placeholders become the new `otsfn:mintIri` function. The
+  converter's fixture reproduces the legacy transformer's triples byte for
+  byte. Empty cells: this engine emits no term for one, as the legacy
+  transformer did, so the default keeps `rr:tableName`; `emptyAsNull` turns
+  the logical sources into `NULLIF` queries for a mapping that must behave
+  the same under another processor.
+- **`otsfn:mintIri`**, the engine's second function: an IRI from a template
+  whose placeholders are `{column}` or `{column_slug}` — the value as an ASCII
+  slug — on an object map or, new for the engine, on a **subject map**
+  (`fnml:functionValue` on `rr:subjectMap`). A function-valued subject is
+  never pushed down as a join parent; it resolves through the index.
+- **The store's own vocabularies are known to the prefix registry.** `ds:`
+  (datasources), `dsprof:` (source profiles), `otsfn:` (mapping functions) and
+  `ots:` (the validation layer) are seeded into every registry at construction,
+  in the tier a seed bundle's declarations use, so a datasource IRI shortens to
+  `ds:SqlSource` and a CURIE typed against one of these labels expands to the
+  store's namespace rather than to whatever the community snapshot binds the
+  label to. `ds` shadows a defunct DCAT extension on purpose — a platform
+  naming its own namespace outranks a community list, as a bundle does. `fn`
+  and `prof` were *not* claimed: they are the XPath functions and W3C Profiles
+  namespaces everywhere else, which is why the labels are `otsfn:` and
+  `dsprof:`. An administrator's override still outranks all of it.
+- **SHACL Studio in the OpenAPI document.** The shape-graph family
+  (`/api/shacl/shape-graphs…`: content, revisions, restore, clone, import,
+  meta-validation, commits and lifecycle), the shapes catalog, in-place
+  registration, bindings, a dataset's effective shapes, pipelines and their
+  runs, the model context and shape derivation were served without being
+  documented. `GET …/turtle` documents `?format=shaclc`; `PUT …/turtle`
+  documents `?message=`, the revision note the history shows.
 - **`geof:aggUnion`, the GeoSPARQL 1.1 spatial aggregate.** A real SPARQL
   aggregate: `SELECT ?k (geof:aggUnion(?geom) AS ?u) … GROUP BY ?k` folds each
   group's geometries into their union (GEOS unary union), one
@@ -298,13 +574,95 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rdfs:seeAlso`) never feed the equality rules. The OWL 2 DL reasoner's RL
   phase now reads the caller's scope (it ran over the default graph only).
   See docs/reasoning.md.
-- **Official W3C SPARQL 1.1 test suite in CI.** The query and update
-  sections of `w3c/rdf-tests` (485 entries) are vendored under
+- **W3C SPARQL 1.1 test suite (query and update sections) in CI.** The query
+  and update sections of `w3c/rdf-tests` are vendored unmodified under
   `tests/fixtures/w3c-sparql11/` and run manifest-driven through the store
-  by `tests/w3c_sparql11_manifests.rs`: 475 pass, 10 known failures (all
-  oxigraph 0.5 evaluator behaviours, listed in docs/conformance/sparql11.md),
-  two-way ratchet with a pass floor. The generated conformance table now
-  scores three vendored corpora.
+  by `tests/w3c_sparql11_manifests.rs` as a two-way regression ratchet with a
+  pass floor; the known failures (all oxigraph 0.5 evaluator behaviours) are
+  tracked in docs/conformance/sparql11.md. No score is published for this
+  subset: W3C's test-suite licence policy allows no performance claims on a
+  subset of a W3C test suite, so it is used for development and bug tracking
+  only.
+- **SQL sources: datasources, standard RML mappings and store-native runs.**
+  `/api/sources` registers a SQL database as RDF in `urn:system:sources` —
+  dialect, location, a read-only account, a mandatory statement timeout and a
+  **reference** to the credential in an external secret store. Mappings are
+  standard RML stored as one graph per frozen version, whose IRI is the
+  version IRI, so a run's `prov:used` names exactly the triples that executed.
+  A run materialises into a fresh `urn:run:<id>`, records a PROV activity,
+  passes the SHACL write gate on that graph, and only then takes the
+  production role — in one update. A failing gate leaves production untouched
+  and keeps the candidate for inspection; `POST /api/runs/{id}/rollback`
+  re-points the datasource at the graph it served before, without re-running.
+  Drivers sit behind a `SourceConnector` trait in `ots-plugin-api`: SQLite is
+  in core, other dialects arrive as plugins. See [`docs/sources.md`](docs/sources.md).
+- **Secret references.** Every credential the server needs is configured as
+  `env:NAME`, `file:/path` or `vault:<mount>/data/<path>#<key>` (HashiCorp KV
+  v1 and v2, token from `VAULT_TOKEN_FILE` — the Vault Agent sink — or
+  `VAULT_TOKEN`, optional namespace and private CA) and resolved at the moment
+  of use. Resolved values are cached briefly, never persisted, never logged,
+  and stripped from any error that can reach a caller. OIDC client secrets,
+  `LLM_API_KEY`, `SMTP_PASSWORD`, `ALERT_SMTP_PASS` and `S3_SECRET_KEY` all
+  read references now; plaintext still works outside the production posture
+  with a deprecation warning.
+- **Production posture.** `OTS_ENV=production` turns the security rules into
+  startup and registration errors rather than warnings: a raw secret, an
+  unresolvable reference, a missing statement timeout, a datasource host
+  outside `OTS_REMOTE_ALLOWLIST` and a file-backed datasource outside
+  `OTS_SOURCES_DIR` are all refused.
+- **RML: relational logical sources.** `rr:tableName` / `rml:query` over a
+  registered datasource, streamed in batches; R2RML natural datatypes for bare
+  column references; and an RML-FNML function for enumerations with an explicit
+  policy for values the map does not cover (keep as a literal so SHACL flags
+  it, omit, or mint from an absolute template).
+- **Join planning.** `rr:parentTriplesMap` is pushed into the child's query
+  when the catalogue proves the parent's join columns cover a unique key — so
+  the join cannot duplicate a child row — and falls back to a bounded hash
+  index otherwise. Pushing down on a non-unique key would multiply the child
+  row and re-emit its own triples once per match, so the planner declines
+  unless it can prove otherwise.
+- **YARRRML authoring.** A mapping may be submitted as `yarrrml` instead of
+  `rml` and is translated on the way in; only RML is stored, so there is one
+  representation to version, diff, gate and execute. Includes a code-list
+  extension for SQL enumerations. Constructs outside the translated subset are
+  errors naming the construct, not silent omissions.
+- **Incremental runs.** `mode: "watermark"` copies the graph in production,
+  re-maps only the rows past the recorded cursor, and replaces those entities
+  wholesale — so the candidate is still a complete graph and the SHACL gate,
+  the atomic swap and rollback all behave as they do for a full run. The cursor
+  lives in the run log, so a rollback cannot silently strip rows it has passed.
+- **LDES members from runs.** A run whose dataset has a stream enabled now
+  publishes the entities it wrote, after the swap. A full run publishes every
+  entity, an incremental one only what moved. Previously a materialisation run
+  published nothing at all.
+- **Source profiling.** `POST /api/sources/{id}/profile` writes a versioned
+  profile graph per datasource — per-column distinct and NULL counts,
+  cardinality, length and numeric summaries, a sampled lexical-shape detection
+  with its confidence, and a structural hash per table that moves when the
+  schema does and not when a row is inserted. Aggregated in SQL, never by
+  streaming a table into the server. Values appear only as the top-k of a
+  genuinely low-cardinality column, and a column whose values are too long to
+  be codes yields none at all rather than a truncated list. Reusing csvw: for
+  structure and void: for counts, with a small `dsprof:` namespace for the
+  statistics.
+- **Ontology profile.** `GET /api/models/{id}/versions/{v}/profile` returns a
+  model version flattened for a mapping proposer: classes with full superclass
+  chains, properties with domain/range/datatype, every SHACL property shape
+  flattened past `sh:node`, and enumerations from `owl:oneOf`, SKOS schemes and
+  `sh:in`. A fixed number of queries whatever the size of the ontology, with
+  byte-identical output for unchanged data. A bound shape graph is included
+  only when the caller may read that shape set.
+- **SHACL Studio: prefixes, links and the editor.** Shape-graph Turtle is
+  served with an `@prefix` header resolved from the instance's prefix registry,
+  so IRIs read as CURIEs instead of full `<http://…>` in both the source view
+  and the visual builder; only namespaces the graph actually uses are declared.
+  The Studio pages now shorten IRIs through the shared helper (with the full
+  IRI on hover) instead of four private last-segment truncators, and resolve
+  dataset names instead of showing raw ids. A dataset's "effective shapes" link
+  pointed at a route that does not exist and went to a blank page. The editor
+  gains line wrapping, a Turtle/SHACL completer, parse errors as positioned
+  diagnostics, Cmd-S, an unsaved-changes guard, and a per-save revision message
+  (every revision previously read "Edited").
 - **OTL-scale benchmark.** `examples/scale_otl.rs` generates asset-shaped
   data at scale and measures load, six query shapes (cache off), SHACL over
   every asset and a concurrent writers-plus-readers phase;
@@ -571,6 +929,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   term IRIs and labels before the model can coin one.
 
 ### Changed
+- **Turtle served to people carries a prefix header.** Graph Store reads
+  (`GET /store?graph=`, Turtle and TriG, streamed and label-filtered alike), a
+  dataset's shapes graph, its RML mapping, the RML preview and execute
+  responses and a datasource's profile now declare an `@prefix` line for each
+  namespace the graph actually uses, resolved through the prefix registry,
+  the way SHACL Studio's shape-graph content already did. The line-based
+  formats are unchanged. A profile used to carry a header over a body of full
+  IRIs — a dead header — and now reads as CURIEs.
+- **The mapping-function label is `otsfn:`.** The RML-FNML enumeration
+  function's namespace is unchanged (`https://w3id.org/open-triplestore/fn#`);
+  the label the documentation, the YARRRML translator and the error messages
+  use is `otsfn:` rather than `fn:`, which is the XPath functions namespace in
+  every prefix list. A mapping may still declare any label it likes for the
+  namespace.
+- **A run's SHACL gate report carries the run metrics** (duration, quads read,
+  source) the validation report gained, folded across the shapes graphs the
+  gate evaluates the way the validate route folds them.
 - **The reference example is a fictional bridge.** The SHACL/GeoSPARQL
   conformance oracle, the viewer-feed end-to-end test and the OGC GeoSPARQL
   round-trip run on `tests/fixtures/example-bridge/`: a made-up arch bridge with
@@ -718,10 +1093,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rounds still stream live. Result tables rendered into follow-up prompts get
   a total cap (`CHAT_TABLE_MAX_CHARS`): per-cell truncation alone let a wide
   50-row result reach several thousand tokens per round. (#295)
-- **Bundled vocabularies are verbatim upstream copies.** `sosa` and `ssn`
+- **Bundled vocabularies are complete upstream copies.** `sosa` and `ssn`
   (the W3C SDW source), `saref` (ETSI SAREF core 3.1.1), `bot` (W3C LBD CG
   0.3.2), `omg` (0.3, was a 0.0.1 excerpt) and `fog` (0.0.4, was 0.0.1) are
-  complete copies from their publishers. They used to be hand-authored
+  complete copies from their publishers, unchanged below an added comment
+  header. They used to be hand-authored
   excerpts whose class and property IRIs were modelled plausibly against the
   namespace rather than copied from the source, and nothing in the UI or the
   registry told them apart from real terms. The files with no authoritative
@@ -798,6 +1174,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Removed
+- **The nightly ignored-tests job.** It ran `#[ignore]`d tests so the set
+  stayed visible; with none left, the gate above replaces it.
 - **The Triple Browser's Simple/Advanced switch.** Everything it gated is
   simply available, and in its place is one SPARQL button that opens the
   query behind the current view. The natural-language panel now appears on
@@ -818,9 +1196,106 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   graph built on top of them. The VoID vocabulary file goes too: its
   canonical Turtle is no longer published at a stable URL, so only the curated
   `void` prefix entry remains. Existing installs keep whatever the registry
-  already holds; only the seed no longer provides these. (`f20a87b`)
+  already holds. The IMBOR excerpt is kept too, deprecated and served to no one
+  who may not write the `imbor` entry, because it is not CROW's content. The
+  seed no longer provides any of them. (`f20a87b`)
 
 ### Fixed
+- **Street maps no longer show "API KEY REQUIRED" tiles.** CARTO watermarks
+  every keyless basemap tile since September 2026, which covered the 3D globe
+  and the map previews. Those maps now draw OpenFreeMap's vector tiles into
+  raster tiles in the browser, in the app's light or dark theme. No key is
+  needed, and every map carries the credit "OpenFreeMap © OpenMapTiles Data
+  from OpenStreetMap". Satellite imagery (Esri World Imagery) is offered only
+  when the deployment sets its own ArcGIS key in `/config.json`
+  (`basemaps.esriApiKey`), because Esri's terms tie the imagery to one.
+  Without a key, the 2D map, the globe and embeds show streets and no
+  satellite toggle. `?basemap=satellite` on an embed falls back to streets.
+- **`public = false` in a seed-bundle manifest reaches entries an earlier
+  build registered public** (NEN 2660-2 and the NEN relation profile, whose
+  models the example bundles now keep private because NEN grants no licence to
+  redistribute them). At the next start an entry the bundle provably created
+  is made private once; only its visibility changes, and an admin who makes it
+  public again is not overruled.
+- **IMBOR is shipped unmodified.** `frontend/public/vocab/imbor.ttl` had an
+  added comment header and one altered definition while being described as
+  verbatim; CROW's management plan names CC BY-ND 4.0, which allows no altered
+  copies. The file is now byte-identical to CROW's release, with its
+  provenance and licence in the notices instead.
+- **Existing installs get CROW's IMBOR release back, and nothing stored is
+  lost.** On every start the seeder checks the copies it created itself: each
+  one carries a registry marker, and a record from an earlier release counts
+  only when its creator, id, version, graph, notes and creation date all read
+  as that seeder wrote them. A copy whose licence allows other copies and that
+  differs from the bundled file (an admin's edit, an earlier file) is never
+  modified, only labelled as possibly modified. The one exception is a copy
+  whose only difference is the `owl:versionInfo` triple earlier loaders
+  added: that triple is removed, and the copy is the file again. IMBOR is checked on every start, also with
+  `SEED_STANDARD_VOCABS=false`: a copy that differs, such as the altered source
+  note installs seeded by 0.5.0 and 0.6.0 hold, is first kept as a private,
+  deprecated version `2025-kept-<n>`, served only to the entry's writers, and
+  only then is version `2025` restored from a staging graph in one
+  transaction. The hand-authored IMBOR "excerpt" is kept, deprecated and
+  withheld. Models the seeder did not create (made through the API, promoted
+  from a dataset, or registered by a bundle or a LOV install, even under an id
+  like `imbor`) are never touched. Replicas and non-leading cluster members
+  leave all of this to the leader. Merge and rebase no longer get around the
+  IMBOR refusal or drop the licence record, and a merge of a version into
+  itself is refused (400).
+- **Accurate licence statements.** GWSW's ontology was described as CC0 (the
+  CC0 covers RIONED's server data, not the ontology); several vocabularies
+  were credited to the wrong holder or licence; test-suite results were
+  presented as official conformance; a Uniclass code in an IFC test fixture
+  was paired with a title that is not its own (the fixture now uses a
+  made-up classification); a NEN 2660-2 definition was quoted in the
+  relations profile (now in the project's own words).
+- **The Turtle and SPARQL prefix exports parse.** One prefix.cc namespace is
+  not an IRI (it carries two `#`) and made the whole export unparseable; the
+  loader and the snapshot build leave it out.
+- **The main map's data credit shows on first load.** The map read its
+  attribution once, before the dataset feed had arrived, so the 3DBAG credit
+  never appeared; it now follows the feed.
+- **The Docker image builds again.** The workspace gained `tools/*` (the
+  writeback worker) but the image's planner and builder stages never copied
+  `tools/`, so cargo could not load the workspace.
+- **Claims match the results.** SHACL Core and GeoSPARQL are graded Partial
+  where the suites show gaps, GeoSPARQL is described as implemented in part
+  and not OGC-certified, and the comparison matrix's own cells follow the
+  same grades.
+- **Map credits.** The Leaflet streets basemap credits "OpenStreetMap
+  contributors" with a link to the copyright page, as OSM asks.
+- **Frontend typecheck.** A test read CodeMirror's internal `streamParser`,
+  which `tsc` rejects; the Turtle tokenizer is exported as
+  `turtleStreamParser` and the language is built from it.
+- **The IMBOR bundle's sample conforms to the real Kern.** Every IMBOR
+  beheerobject inherits NEN 3610 `identificatie` and `domein`, a `geometrie`
+  and a Geo-object `status` from its superclasses; the three sample trees
+  carried none of them, so validation reported every tree, not only the
+  planted violation. The sample now carries them and the test asserts that
+  the planted `kiemjaar` datatype violation is the only result.
+- **Two persistence tests ran nowhere on Apple silicon.** Their macOS arm64
+  `ignore` cited a RocksDB `TryFromIntError` that no longer occurs; they run
+  everywhere again.
+- **MySQL, MariaDB and SQL Server values come out in one spelling.**
+  Fractional seconds lose their trailing zeros (MySQL pads `DATETIME(6)` to
+  `…12:00:00.000000`) and doubles take their shortest round-trip form (SQL
+  Server's lossless style 3 printed `2.0000000000000000e+000`), in the shared
+  canonicaliser, so every driver writes the same lexical form for the same
+  value. On MariaDB a column default is reported the way MySQL reports it —
+  `'x'` unquoted, `DEFAULT NULL` as no default rather than the string
+  `NULL` — and the server version names MariaDB. The first runs against real
+  servers also corrected the live tests themselves: a reserved column name,
+  timeout probes that MySQL answers without an error and SQL Server's
+  optimiser answers instantly, and the `VIEW DEFINITION` a SQL Server reader
+  needs to see column defaults.
+- **The Turtle editor colours an escaped local name as one name.**
+  `ex:shapes\/PersonShape` — what the prefixed serializer writes for a
+  path-style IRI — was tokenised as a name, an operator and a stray word. The
+  tokenizer now reads Turtle's `PN_LOCAL`, backslash escapes and
+  percent-encoding included.
+- **The shapes catalog's prompts and notices are translated.** The name
+  prompts when composing or registering a shape graph, and the notices that
+  followed, were English whatever the interface language.
 - **Release tags keep their section headers.** `auto-tag.yml` created the
   annotated tag with git's default message cleanup, which deletes every line
   that starts with `#`: the v0.5.0 tag lost all of its `### Added` …
@@ -1588,6 +2063,315 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as an operand.
 
 ### Security
+- **A graph-ACL read grant let a user write the graph through the SHACL
+  Studio.** `POST /api/shacl/register-shape-graph` checked only read access,
+  then made the caller the owner of a Library entry over the graph, and the
+  Studio's save, restore and import checked only who owns the entry. Reading
+  a graph was enough to overwrite it, or to make it world-readable by setting
+  the entry public. Now the right to write follows the graph. Registering
+  needs it, and every Studio write checks it again: save, restore, import
+  shapes, and a visibility change of an entry whose graph the Studio did not
+  mint. The right is held by an admin, by whoever manages a graph the Studio
+  minted (`urn:shapes:…`), by whoever may write a dataset that holds the
+  graph (its namespace, or registered to it), by whoever may write the
+  registry entry holding a model graph, or through a graph-ACL write grant.
+  Entries made before this change give their owners no more than that. Org
+  members still edit their dataset's shapes graph in the Studio without a
+  grant. An org viewer, who may not write the dataset, no longer can. In the
+  same pass:
+  - `PATCH /api/datasets/{id}/graphs` with role `shapes` answers 404 for a
+    graph not registered to the dataset. Before, it adopted any graph holding
+    a shape into the Library, owned by the dataset's owner.
+  - Registering a graph named `urn:shapes:…` is for admins only.
+  - Asking to register a graph that already has an entry returns that entry
+    only to a caller who may see it.
+- **A dataset could take over, then delete, graphs it did not make.**
+  `POST /api/datasets/{id}/graphs` let a non-admin attach any graph that no
+  other dataset had registered: a graph an admin loaded over the Graph Store,
+  another user's SHACL Studio shape graph, a source run, or another dataset's
+  entailment, property-states or assets graph. Attaching one made it
+  writable through the dataset (bulk import, RML, RDF Patch, validate-and-
+  commit, LDES) and deleted it on detach. The same held for a shapes graph set
+  with `PUT /shacl`, which `PUT /shapes` then overwrote. Now:
+  - A graph that already holds data, or that the graph ACL grants to
+    someone, is attached only by a caller who may write it directly: an
+    admin, or a graph-ACL write grant.
+  - The graphs the server names for its own features are never attached:
+    `urn:shapes:`, `urn:source:`, `urn:mapping:`, `urn:run:`, `urn:dryrun:`,
+    `urn:ots:`, `urn:config:` (the mapping gates), `urn:entailment:`, and
+    other datasets' `{base}/datasets/{id}/…`.
+  - `dataset_graphs` records whether the dataset created each graph it adds.
+  - A detach, or a dataset or organisation delete, deletes a graph only if it
+    is the dataset's own (its namespace, or a graph it created) or the caller
+    may delete it directly. Anything else loses only its registration. Older
+    registrations outside the namespace count as not created.
+  - Linking a shapes graph is a read: the caller must be able to read the
+    graph, and another dataset's shapes graph (its default one included) may
+    be shared by those who can read that dataset; an empty graph another
+    dataset links is linkable once its shapes are written. `PUT /shapes`
+    writes a linked graph only if it is new or the caller may write it; that
+    write registers the graph to the dataset for its editors (an admin's
+    write only when a non-admin could have claimed the graph as new). A
+    dataset delete does not delete a graph it only links, except one left in
+    a deleted dataset's namespace, as its last user. Resending an unchanged
+    link (toggling `shacl_on_write`) is not checked again. A linked shapes graph outside the
+    namespace that was filled before this release is not registered, so
+    non-admin editors can no longer write it; an admin can attach it to the
+    dataset to hand it back.
+  - An RML run registers every `rml:graphMap` destination it creates, not
+    only `?graph=`, so the mapping runs again (an admin's run of a stored
+    mapping only those a non-admin could have claimed). A `rml:graphMap`
+    output written before this release is not registered, so a non-admin's
+    re-run is refused until an admin attaches it to the dataset.
+  - A version restore goes through the same gate as a new target graph. A
+    graph the dataset has since let go is skipped and listed under
+    `skipped`; the rest is restored.
+  - IFC and CityJSON imports compared their target with the dataset's IRI
+    without a trailing slash (dataset `bridge` could write
+    `{base}/dataset/bridge-inventory/…`). They now use the dataset boundary
+    and refuse model-registry graphs. The bulk IFC import's derived
+    `{target}/ifcowl` graph is now checked too; it was written unchecked.
+- **Old registrations of model-registry graphs are released at startup.**
+  `dataset_graphs` rows that named a registry graph before registration
+  refused them still made that graph dataset-scoped for reads, and hid it
+  from everyone else. A one-time sweep at the leader's boot removes them (on a
+  Raft cluster, once a member leads). A shapes-role row released this way
+  stays bound to its dataset in the SHACL Studio, so validation keeps reading
+  it. A dataset's shapes graph setting naming a registry graph is kept: it
+  scopes no reads, and every path that could write or delete it refuses
+  registry graphs. The boot adoption of legacy shapes graph settings into the
+  Library no longer adopts registry, system or `urn:shapes:` graphs.
+- **A SHACL-AF rule was a SPARQL UPDATE with the store's own authority.** The
+  `sh:construct` body of a `sh:SPARQLRule` was rewritten textually and handed
+  to `TripleStore::update`, which authorizes nothing and confines nothing — so
+  a shapes graph, which any writer of a dataset may upload
+  (`PUT /api/datasets/{id}/shapes`) and then run
+  (`POST /api/datasets/{id}/infer`, or a SHACL Studio pipeline), could read and
+  write every graph in the store: another tenant's private data, `urn:system:*`,
+  the model registry. `DROP ALL` was a rule; with one data graph the `WITH <g>`
+  prefix the engine added confined nothing, since
+  `WITH <g> INSERT { GRAPH <any> { … } } WHERE { GRAPH <any> { … } }` is valid
+  SPARQL. A `sh:TripleRule` was reachable the same way, because the focus node
+  was pasted into the generated update as `<{focus}>` and a focus node may be a
+  literal (`sh:targetNode "…"`) whose lexical form the shapes author writes.
+  Now: `sh:construct` must parse as the CONSTRUCT query SHACL-AF says it is
+  (the `INSERT { … } WHERE { … }` convenience form still parses as one;
+  anything else is refused by name, at load time), it is evaluated **read-only**
+  over the run's data graphs with its own `FROM`/`FROM NAMED` clauses replaced,
+  `$this` is bound as a term instead of being pasted in, and the engine — not
+  the rule — inserts the derived triples, into one graph the dataset holds.
+  `POST /api/datasets/{id}/infer` names that graph: the single data graph as
+  before, or, over several, the dataset's own `urn:dataset:{id}:inferred`
+  (registered with the `entailment` role) instead of the store's global default
+  graph, where derived triples were both unowned and unreadable.
+- **A `sh:sparql` constraint or `sh:SPARQLTarget` could read graphs the run may
+  not.** Their queries were scoped by prepending `FROM` clauses, which a
+  `FROM NAMED <someone-elses-graph>` written into the shape simply added to.
+  The dataset of a shape's query is now replaced outright with the run's data
+  graphs, and no named graph is available, so a `GRAPH` block inside one
+  matches nothing.
+- **The SHACL Studio shapes catalogue listed shapes from graphs the caller
+  could not read.** `GET /api/shacl/shapes` hid only Library entries the
+  caller could not see. Any other graph holding shapes (a private dataset's
+  graph with embedded shapes, a graph an admin loaded) was listed to every
+  signed-in user, and `?graph=` returned its shape IRIs, labels, target
+  classes and paths. A graph not in the Library is now listed, and drilled
+  into, only for a caller who may read it by the rule `/sparql` applies
+  (dataset visibility, a private graph only for its dataset's writers, plus
+  graph-ACL read grants; admins read every graph); any other graph answers
+  403. Library entries keep the Library's own rule.
+- **A validation pipeline could read another tenant's data.** A pipeline's
+  graphs, datasets and shape graphs were never checked for read access, and a
+  run returns its report (focus nodes and values) to the caller. So any user
+  could validate a private graph with shapes of their own and read its values
+  back, and anyone who could see a shared pipeline could run it, or open a
+  stored run, over data they could not read. Creating, updating, running and
+  test-running a pipeline, and opening a run's report, now need read access to
+  every dataset, data graph and shape graph in its scope (403 otherwise). The
+  check runs each time, so a grant revoked since, or a pipeline stored before
+  this release, gives no more than the caller may read. A scheduled run is
+  checked against the pipeline's creator and skipped when they may no longer
+  read its scope. Run summaries (counts only) stay listed to everyone who can
+  see the pipeline.
+- **A database error lifted every SHACL write gate it touched.** Finding a
+  write's gates read a failed lookup as "nothing found": an error listing the
+  gating pipelines dropped every `gate_writes` pipeline, an error finding the
+  graph's dataset dropped the dataset-scoped pipelines, the dataset's
+  validation-layer bindings and its `shacl_on_write` gate, and a failed
+  binding query dropped the bindings. The write then landed unvalidated, on
+  the Graph Store path and on bulk import alike. A failed lookup now refuses
+  the write with the existing 422 and a `gate-evaluation-failure` report, as
+  any other gate the server cannot evaluate does; a bulk import is refused
+  before anything is written. The Graph Store path's `shacl_on_write` gate
+  refuses the same way when its own dataset lookup fails.
+- **A pipeline's persisted report was readable by everyone who could read its
+  dataset.** A run that persists its report as RDF (`results_target`), or its
+  inferred triples in a new graph, attached that graph to the dataset holding
+  its data, non-private, even when the run had validated one of the
+  dataset's private graphs or a graph that belongs to no dataset. So a
+  public dataset's viewers read the private graph's focus nodes and values
+  over `/sparql`. A derived graph is now attached to a dataset only when that
+  dataset holds every graph the run validated, and is private there when any
+  of them is. A pipeline's own report or inferred graph collects every run,
+  so before a run over other data it is detached, and it is newly attached
+  only while empty. A graph the pipeline's owner named as the target keeps
+  its registrations; it is attached only when nothing in the scope is private.
+- **Validating a dataset showed its private graphs to anyone who could view
+  it.** `POST /api/datasets/{id}/validate` checked only that the caller could
+  see the dataset, then validated every graph in it, private ones included,
+  and returned the report (focus nodes and values). An official run was also
+  recorded, overwriting the dataset's validation status, and its report was
+  written as RDF to `urn:system:reports:dataset:{id}`, attached to the dataset
+  non-private. So a public dataset's viewers read its private graphs' values
+  in the response, over `/sparql`, and from `…/validation/latest` and
+  `…/validation/runs/{run_id}`. Now:
+  - A run validates only the dataset graphs the caller may read by the rule
+    `/sparql` applies (a private graph only for the dataset's writers, plus
+    graph-ACL read grants; admins read every graph). A private shapes-role
+    graph shapes no run of a caller who may not read it.
+  - A run that could not read every graph of the dataset is not official: it
+    answers as a test run (`test: true`, `partial: true`), records nothing and
+    leaves the dataset's validation status as it was.
+  - Recording an official run requires write access to the dataset. A reader
+    whose run *was* complete (nothing hidden) would otherwise overwrite the
+    dataset's status and history or forge a verdict, so a non-writer's non-test
+    request is now refused (`403` — retry with `?test=true`) rather than
+    recorded. The self-heal that adopts and binds a dataset's shapes graph into
+    the Studio Library likewise runs only for a writer, never under a reader's
+    authority.
+  - The report graph is private in the dataset whenever the run validated a
+    private graph, or a model graph not everyone may read, and it is never
+    made public again.
+  - A stored run records the graphs it validated. Its full report goes to the
+    dataset's writers and to callers who may read each of those graphs when
+    they ask; anyone else gets the run's summary with `report: null` and
+    `report_withheld: true`. A run stored before this release goes in full to
+    the dataset's writers only.
+  - An explicit `shapes_graph` must be readable by the same rule. It used to
+    need a graph-ACL grant, so a graph of a dataset the caller may read now
+    works too.
+- **A dataset's private shapes graph reached everyone who could view the
+  dataset.** A graph marked private in a dataset is its writers' to read, but
+  four paths served a private shapes graph to the dataset's viewers:
+  - `GET /api/datasets/{id}/shapes` returned it.
+  - The SHACL Studio Library adopts a dataset's shapes graph in place when the
+    dataset is validated or imported into, or when its shapes graph or graph
+    roles change, and gave the entry the dataset's visibility. A public
+    dataset's private shapes graph became a public Library entry: its Turtle,
+    its revisions (revision 1 is a copy), a clone, the Library list, bindings,
+    effective shapes, the catalogue and pipelines were open to every signed-in
+    user.
+  - That adoption also bound the graph to the dataset, and the form manifest
+    (`GET /api/datasets/{id}/form-manifest`, anonymous for a public dataset)
+    carries the Turtle of every bound shapes graph, so anonymous callers got it.
+  - `PUT /api/datasets/{id}/shacl` let anyone who could see a dataset link its
+    shapes graph as the shapes graph of a dataset of their own, then read it
+    from there.
+
+  Now a graph some dataset holds as private is read only by those who may read
+  it by the rule `/sparql` applies (its dataset's writers, graph-ACL read
+  grants, admins), whatever names it:
+  - `GET …/shapes`, validation runs and the form manifest leave out a private
+    shapes graph the caller may not read, whether it is this dataset's or
+    another's linked or bound here. `GET …/shapes` answers 404 when nothing is
+    left, the manifest no longer lists private data graphs to them either, and
+    a validation run that leaves out a shapes graph is a test run.
+  - A private graph is adopted as a `private` Library entry. Every Library path
+    that reads an entry (the entry, its Turtle, revisions, clone, the list,
+    bindings, effective shapes, the catalogue, pipelines, re-registration)
+    withholds an entry of a private graph from those who may not read the
+    graph, whatever the entry's visibility. That covers entries adopted before
+    this release and graphs marked private after adoption, with no migration.
+    Marking the graph public again gives the entry back.
+  - Linking a private graph the caller may not read as a shapes graph is
+    refused (403).
+  - A validation report names its shapes, their paths and messages, so it
+    follows the same rule:
+    - A write a gate refuses (Graph Store `PUT`/`POST`, validate-and-commit,
+      bulk import; by a binding, a gating pipeline or `shacl_on_write`)
+      answers a writer who may not read one of that gate's private shapes
+      graphs with only that the write does not conform, and by how many
+      results. The write is refused all the same.
+    - A stored run records the shapes graphs it used. Its full report is
+      withheld from anyone but an admin who may not read one of them that is
+      private when they ask, the dataset's writers included: a dataset's
+      writer may link its private shapes graph into another dataset, whose
+      writers need not be allowed to read it.
+    - An official run shaped by another dataset's private graph writes no
+      report graph, and clears the last one.
+    - A pipeline with such a graph bound to a dataset or graph in its scope
+      is refused (403) to whoever may not read it.
+    - The model profile (`GET /api/models/{id}/versions/{ver}/profile`, which
+      any user may read with a `sources:read` token they mint) and the SQL
+      source dry run leave out a private shapes graph the caller may not
+      read, whether it is bound to the model or named in the request or the
+      mapping.
+  - Making a graph private (`PATCH /api/datasets/{id}/graphs`) takes the
+    validation reports on it along. A dataset whose latest official run
+    validated the graph, or was shaped by it, has its report graph made
+    private when it holds the graph and cleared when it does not. A data
+    graph made private after a run used to leave that run's report graph
+    readable to the dataset's viewers.
+- **Inference ran a private shapes graph's rules for a writer who may not
+  read it.** `POST /api/datasets/{id}/infer` runs the SHACL-AF rules of every
+  shapes graph of the dataset and writes what they derive into the dataset,
+  where its writers and readers read the rules' constants and structure back.
+  A writer of two datasets may link one's private shapes graph into the other,
+  whose other writers need not be allowed to read it, and they could run its
+  rules. Now a run leaves out a private shapes graph the caller may not read,
+  by the rule validation applies. It answers 400 when no shapes graph is left,
+  and says `partial: true` when it left one out.
+- **A SQL-source dry run was shaped by any graph its caller named.**
+  `POST /api/sources/{id}/dry-run` validates a sample of a mapping and returns
+  the report: the shapes' IRIs, paths and messages. Any user may mint the
+  `mappings:propose` token it accepts, and it validated against whatever
+  shapes graph the request or the mapping named (a proposer writes mappings
+  too): a graph of a private dataset, a graph registered to no dataset, or a
+  private model's shapes named through `model` + `modelVersion`. Now a named
+  shapes graph applies only when the caller may read it by the rule `/sparql`
+  applies, or through the endpoint that already serves it to them (a SHACL
+  Studio Library entry they are shown, a graph of a model version they may
+  read). A model's shapes apply only when the caller may read the model. For
+  anyone else they are left out with a warning. Admins read every graph.
+- **Detaching or deleting a dataset could wipe graphs it never owned.**
+  `DELETE /api/datasets/{id}/graphs` deleted any graph no other dataset
+  claimed, so any user who could create a dataset could wipe the model
+  registry, IMBOR, the copies the seeder keeps aside, or another user's model
+  with one request. It now deletes the stored graph only when the dataset had
+  it registered (otherwise 404, nothing changes), and never a registry or
+  system graph. Deleting a dataset or an organisation applies the same rule to
+  every registered graph and to the shapes graph, keeps any graph another
+  dataset still uses, and fails closed where it used to fail open.
+- **Model-registry graphs cannot be attached to or written by a dataset.**
+  Registering one to a dataset, setting it as a shapes graph, or targeting it
+  with a dataset's RML mapping, validate-and-commit, a bulk import or an LDES
+  sync answers 403, for admins too. Registry graphs are the registry graph,
+  anything under `{base}/data-model/`, and any graph a model version names.
+- **SHACL Studio could alter and serve a no-derivatives model graph.** A seed
+  bundle binds a model's graph as a Studio shape graph in place (the
+  nen2660-imbor bundle binds CROW's IMBOR Kern). Studio save, restore and
+  import into it, a clone of it, an import of its shapes, and a pipeline's
+  in-place inference or report into it now answer 403 for a version whose
+  licence allows no altered copies, admins included; a Studio write into any
+  other attributed version marks its licence record first. The Studio serves
+  such a graph to everyone only while it is the checked, unchanged copy, and
+  deleting a Library entry clears only a graph the Studio created.
+- **The re-check after an admin update that writes unnamed graphs could be
+  skipped.** It now runs in the write's own task right after the write (so a
+  timeout or a dropped client cannot skip it), and again at the leader's boot
+  (so a crash cannot); it runs only for writes to graphs that cannot be named
+  in advance.
+- **Public term search served text from no-derivatives content that
+  downloads withhold.** Vocabulary search and autocomplete index such an entry
+  only while its latest published version is a checked, unchanged copy.
+- **Direct writes cannot alter content whose licence allows no altered
+  copies.** SPARQL Update, `/sparql/batch`, Graph Store PUT/POST/DELETE, and
+  reasoning and SWRL targets aimed at the graph of a model version whose
+  licence record allows no altered copies (IMBOR, no-derivatives LOV installs,
+  bundle models declared so) answer 403, for admins too. Writes into other
+  attributed versions mark their licence record "may have been modified"
+  before they run, and an admin update that names no graph is followed by a
+  re-check of every checked copy.
 - **A group's membership could be read and rewritten from any organisation's
   path.** The three group-member endpoints — `GET` / `POST
   /api/organisations/:org_id/groups/:group_id/members` and `DELETE

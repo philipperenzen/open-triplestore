@@ -10,13 +10,23 @@
   import { isDark } from '../lib/theme.js';
   import { geometryCoords } from '../lib/ontology/valueType.js';
   import { parseWktAsWgs84 } from '../lib/viewer/crs';
-  import { leafletTiles } from '../lib/viewer/basemaps';
+  import { ofmLeafletLayer } from '../lib/viewer/leafletOfm';
+  import { DARK, LIGHT } from '../lib/viewer/ofmRaster';
+  import { creditHtml, is3dbagUrl, THREEDBAG_CREDIT } from '../lib/viewer/attribution';
 
   export let wkts = [];
   export let height = '220px';
   /** When set (metres), a "to scale" toggle draws point markers as real-size
    *  circles (L.circle, radius in metres) instead of fixed-pixel markers. */
   export let scaleMeters = 0;
+  /** Credits owed for the geometry shown (lib/viewer/attribution DataCredit
+   *  objects), rendered in the map's attribution control, bottom-right. */
+  export let credits = [];
+  /** IRIs and URLs the geometry comes from: the resource, its `dct:source` /
+   *  `prov:wasDerivedFrom` values, model file links. Any 3DBAG link adds the
+   *  3DBAG credit (CC BY 4.0), the same "3dbag" match the server applies to
+   *  tilesets and the other viewers apply to file links. */
+  export let sources = [];
 
   let mapEl;
   let map = null;
@@ -36,18 +46,38 @@
   // a hidden tab) cannot leave us spinning a requestAnimationFrame loop forever.
   const MAX_DRAW_RETRY_FRAMES = 30;
 
+  // The attribution HTML owed for this geometry, de-duplicated.
+  $: creditHtmls = [
+    ...(credits || []),
+    ...((sources || []).some(is3dbagUrl) ? [THREEDBAG_CREDIT] : []),
+  ]
+    .map(creditHtml)
+    .filter((html, i, all) => all.indexOf(html) === i);
+  // What the attribution control currently shows, so a changed set (the reused
+  // preview-overlay instance) replaces the previous credits instead of piling up.
+  let shownCredits = [];
+  function syncCredits() {
+    const control = map?.attributionControl;
+    if (!control) return;
+    for (const html of shownCredits) if (!creditHtmls.includes(html)) control.removeAttribution(html);
+    for (const html of creditHtmls) if (!shownCredits.includes(html)) control.addAttribution(html);
+    shownCredits = creditHtmls;
+  }
+  $: if (map && creditHtmls) syncCredits();
+
   // CRS-aware: projected WKT (e.g. EPSG:28992 RD New) is
   // reprojected to WGS84 before plotting.
   $: geometries = (wkts || [])
     .map(w => parseWktAsWgs84(w))
     .filter(Boolean);
 
-  // Tiles follow the app theme (light OSM / dark Carto) and swap live.
+  // Tiles are OpenFreeMap's, drawn in the browser in the app's theme (light or
+  // dark), and swap live. Keyless: CARTO watermarks keyless tiles, and the
+  // OpenStreetMap tile servers refuse app traffic.
   const unsubTheme = isDark.subscribe((dark) => {
     if (!map) return;
     if (tiles) tiles.remove();
-    const t = leafletTiles(dark);
-    tiles = L.tileLayer(t.url, { maxZoom: 19, attribution: t.attribution }).addTo(map);
+    tiles = ofmLeafletLayer(dark ? DARK : LIGHT).addTo(map);
   });
 
   const toLatLng = (coords) => coords.map(([lng, lat]) => [lat, lng]);
@@ -129,12 +159,12 @@
   }
 
   // Leaflet is a bundled npm dependency (was: CDN-loaded at runtime), so the
-  // map works offline and under a strict CSP; only the OSM tiles need network.
+  // map works offline and under a strict CSP; only the OpenFreeMap tiles need
+  // network.
   function initMap() {
     try {
       map = L.map(mapEl, { scrollWheelZoom: false, attributionControl: true });
-      const t = leafletTiles($isDark);
-      tiles = L.tileLayer(t.url, { maxZoom: 19, attribution: t.attribution }).addTo(map);
+      tiles = ofmLeafletLayer($isDark ? DARK : LIGHT).addTo(map);
       observeSize();
     } catch (_) {
       failed = true;
@@ -174,6 +204,7 @@
     map = null;
     tiles = null;
     drawnLayers = [];
+    shownCredits = [];
   }
 
   onDestroy(() => {
@@ -210,6 +241,11 @@
         {/if}
       {/each}
     </ul>
+    {#if creditHtmls.length}
+      <!-- The credits still travel with the coordinates when there is no map. -->
+      <!-- eslint-disable-next-line svelte/no-at-html-tags -- creditHtml() escapes all text and keeps only http(s) links -->
+      <div class="credits">{@html creditHtmls.join(' · ')}</div>
+    {/if}
   </div>
 {:else}
   <div class="geo-wrap" style="height: {height}">
@@ -248,5 +284,6 @@
     font-size: 0.85rem;
   }
   .geo-fallback ul { margin: 0.4rem 0 0; padding-left: 1rem; }
+  .geo-fallback .credits { margin-top: 0.4rem; font-size: 0.75rem; color: var(--muted, #64748b); }
   .muted { color: var(--muted, #64748b); }
 </style>

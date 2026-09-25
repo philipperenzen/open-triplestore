@@ -3,7 +3,8 @@ use super::report::{RunMetrics, Severity, ValidationReport, ValidationResult};
 use super::shapes::*;
 use super::view::{DataView, GraphSel};
 use crate::store::TripleStore;
-use oxigraph::model::Term;
+use opengraph::spargebra::{Query as SpargebraQuery, SparqlParser};
+use oxigraph::model::{GraphName, NamedNode, NamedOrBlankNode, Quad, Term, Triple};
 use rayon::prelude::*;
 use tracing::{debug, info, warn};
 
@@ -249,13 +250,35 @@ fn apply_message(
     results
 }
 
-/// Apply SHACL-AF inference rules and materialise derived triples.
+/// Apply SHACL-AF inference rules and materialise derived triples, choosing the
+/// target graph the way a single-graph run always has: into the one data graph,
+/// or — with no data graph at all — into the store's unnamed default graph.
+///
+/// A caller that runs rules **for** someone (the `/infer` endpoint, for a
+/// dataset) should name the target itself with [`infer_into`]: it is the caller
+/// that knows which graphs the dataset holds, and a run over several data graphs
+/// has no "the" graph to fall back on.
 ///
 /// Returns the number of triples generated.
 pub fn infer(
     store: &TripleStore,
     shapes_graph: &str,
     data_graphs: &[String],
+) -> Result<usize, String> {
+    infer_into(store, shapes_graph, data_graphs, None)
+}
+
+/// [`infer`], materialising every derived triple into `target_graph`.
+///
+/// `target_graph` must be a graph the run is allowed to write — for a dataset,
+/// one it holds (`crate::auth::dataset_graph::dataset_holds_graph`). The engine
+/// writes nowhere else: rules read `data_graphs` and their output lands here,
+/// whatever the rule bodies say.
+pub fn infer_into(
+    store: &TripleStore,
+    shapes_graph: &str,
+    data_graphs: &[String],
+    target_graph: Option<&str>,
 ) -> Result<usize, String> {
     info!(
         "SHACL-AF inference: shapes_graph=<{}>, data_graphs={:?}",
@@ -273,12 +296,15 @@ pub fn infer(
     // the store. Once a whole round adds zero triples we are at the fixed point.
     // This both terminates early — instead of always running the full iteration
     // cap whenever any rule has a focus node — and reports an accurate count.
-    // SHACL-AF rules materialise into the data graph they infer over. With
-    // several data graphs there is no single "the" graph, so those keep the
-    // historical default-graph behaviour rather than silently picking one.
-    let target_graph: Option<&str> = match data_graphs {
-        [one] => Some(one.as_str()),
-        _ => None,
+    // Where derived triples land. A caller that knows the run's dataset names
+    // the graph (see `infer_into`); otherwise SHACL-AF rules materialise into
+    // the data graph they infer over, and with several data graphs there is no
+    // single "the" graph, so the run keeps the historical default-graph
+    // behaviour rather than silently picking one of them.
+    let target_graph: Option<&str> = match (target_graph, data_graphs) {
+        (Some(g), _) => Some(g),
+        (None, [one]) => Some(one.as_str()),
+        (None, _) => None,
     };
 
     for iteration in 0..100 {
@@ -322,13 +348,7 @@ pub fn infer(
                 if !conforms {
                     continue;
                 }
-                apply_rule(
-                    store,
-                    &term_to_lexical(focus_node),
-                    &rule.rule_type,
-                    &rule.body,
-                    target_graph,
-                )?;
+                apply_rule(store, focus_node, &rule.body, data_graphs, target_graph)?;
             }
         }
 
@@ -1372,10 +1392,38 @@ fn dedup_terms(terms: &mut Vec<Term>) {
 // SHACL-AF rules
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
-enum RuleType {
-    SparqlRule,
-    TripleRule,
+/// One term of a `sh:TripleRule`, kept as an RDF term rather than as text:
+/// `sh:this` stands for the focus node (SHACL-AF §4.3), anything else is the
+/// term the shapes graph gave.
+///
+/// It used to be a string, spliced into a generated `INSERT DATA { … }` with
+/// the focus node pasted in as `<{focus}>` — and a focus node may be a
+/// *literal* (`sh:targetNode "…"`), whose lexical form the shapes author
+/// writes. A literal holding `> } } ; DROP GRAPH <…> ; INSERT DATA { GRAPH <g> { <x`
+/// therefore closed the generated update and appended operations of its own.
+#[derive(Debug, Clone)]
+enum RuleTerm {
+    /// `sh:this` — the focus node this run of the rule fires for.
+    This,
+    Fixed(Term),
+}
+
+/// A SHACL-AF rule's executable body.
+enum RuleBody {
+    /// `sh:SPARQLRule`: its `sh:construct`, parsed as the CONSTRUCT query
+    /// SHACL-AF says it is, with its `sh:prefixes` prologue already in place.
+    /// `binds_this` records whether the query mentions `$this`, since the
+    /// evaluator refuses to substitute a variable the query never uses.
+    Construct {
+        query: Box<SpargebraQuery>,
+        binds_this: bool,
+    },
+    /// `sh:TripleRule`: the `sh:subject` / `sh:predicate` / `sh:object` terms.
+    Triple {
+        subject: RuleTerm,
+        predicate: RuleTerm,
+        object: RuleTerm,
+    },
 }
 
 /// A SHACL-AF rule ready to run: its shape's targets, the executable body,
@@ -1384,8 +1432,7 @@ enum RuleType {
 struct Rule {
     shape_iri: String,
     targets: Vec<Target>,
-    rule_type: RuleType,
-    body: String,
+    body: RuleBody,
     order: f64,
     conditions: Vec<Shape>,
 }
@@ -1457,11 +1504,19 @@ fn load_rules(store: &TripleStore, shapes_graph: &str) -> Result<Vec<Rule>, Stri
                     continue;
                 };
                 let prefixes = sparql_prefixes(store, shapes_graph, &rule_node);
+                let text = format!("{prefixes}{construct}");
+                // Parsed here, once, so a rule body that is not a CONSTRUCT
+                // query stops the run at load time with a message naming its
+                // shape — rather than reaching the evaluator per focus node.
+                let query = parse_construct_rule(&text)
+                    .map_err(|e| format!("rule of shape <{shape_iri}>: {e}"))?;
                 rules.push(Rule {
                     shape_iri: shape_iri.clone(),
                     targets: targets.clone(),
-                    rule_type: RuleType::SparqlRule,
-                    body: format!("{prefixes}{construct}"),
+                    body: RuleBody::Construct {
+                        binds_this: super::constraints::mentions_variable(&text, "this"),
+                        query: Box::new(query),
+                    },
                     order,
                     conditions,
                 });
@@ -1499,17 +1554,23 @@ fn load_rules(store: &TripleStore, shapes_graph: &str) -> Result<Vec<Rule>, Stri
             else {
                 continue;
             };
-            let subject = triple_rule_term(solution.get("subject"));
-            let predicate = triple_rule_term(solution.get("predicate"));
-            let object = triple_rule_term(solution.get("object"));
+            let (Some(subject), Some(predicate), Some(object)) = (
+                triple_rule_term(solution.get("subject")),
+                triple_rule_term(solution.get("predicate")),
+                triple_rule_term(solution.get("object")),
+            ) else {
+                continue;
+            };
 
-            let body = format!("{} {} {}", subject, predicate, object);
             let targets = load_targets(store, shapes_graph, &shape_iri).unwrap_or_default();
             rules.push(Rule {
                 shape_iri,
                 targets,
-                rule_type: RuleType::TripleRule,
-                body,
+                body: RuleBody::Triple {
+                    subject,
+                    predicate,
+                    object,
+                },
                 order,
                 conditions,
             });
@@ -1521,85 +1582,124 @@ fn load_rules(store: &TripleStore, shapes_graph: &str) -> Result<Vec<Rule>, Stri
     Ok(rules)
 }
 
-/// Apply one rule to one focus node. The number of *new* triples is not measured
-/// here — `infer` tracks it via the store's count delta per round (see there), so
-/// a rule whose output already exists costs nothing and the fixed point is exact.
+/// Apply one rule to one focus node: evaluate it read-only over `data_graphs`,
+/// and materialise what it derives into `target_graph` (the unnamed default
+/// graph when there is none). The number of *new* triples is not measured here —
+/// `infer` tracks it via the store's count delta per round (see there), so a
+/// rule whose output already exists costs nothing and the fixed point is exact.
 ///
-/// A single malformed/erroring rule is logged and skipped rather than failing the
-/// whole inference run; because it materialises nothing, it cannot prevent
-/// convergence.
+/// A rule's reach is the caller's, not the store's. Deriving triples is a read
+/// plus an insert the engine performs itself — never an UPDATE the rule text
+/// gets to write. That is the whole security boundary of SHACL-AF inference:
+/// the body is data that any writer of a dataset can upload, and it used to be
+/// handed to `TripleStore::update`, which authorizes nothing.
 fn apply_rule(
     store: &TripleStore,
-    focus_node: &str,
-    rule_type: &RuleType,
-    rule_body: &str,
+    focus_node: &Term,
+    body: &RuleBody,
+    data_graphs: &[String],
     target_graph: Option<&str>,
 ) -> Result<(), String> {
-    let update = match rule_type {
-        RuleType::SparqlRule => {
-            // Bind the focus node, then accept either the spec CONSTRUCT-template
-            // form (`CONSTRUCT { t } WHERE { p }`) or the convenience
-            // `INSERT { t } WHERE { p }` form — both materialise into the store.
-            let bound = rule_body.replace("$this", &format!("<{}>", focus_node));
-            let update = construct_to_update(&bound);
-            // `WITH <g>` makes <g> the update's default graph, so the template
-            // materialises INTO the data graph rather than beside it. Without
-            // this the INSERT had no GRAPH clause at all, so inferred triples
-            // landed in the store's default graph — outside every registered,
-            // ACL'd, dataset-owned graph, invisible to the very data graph the
-            // rule was inferring over.
-            // SPARQL 1.1 Update grammar is `Prologue ( Update1 … )` with `WITH`
-            // part of `Modify`, so the `PREFIX`/`BASE` prologue that `load_rules`
-            // expands from `sh:prefixes` must stay ahead of `WITH` — otherwise
-            // the update fails to parse and, as rule errors propagate, `infer`
-            // fails for every prefixed rule on a single-graph dataset.
-            match target_graph {
-                Some(g) => {
-                    let head = prologue_len(&update);
-                    format!("{}WITH <{g}> {}", &update[..head], &update[head..])
-                }
-                None => update,
-            }
+    let triples = match body {
+        RuleBody::Construct { query, binds_this } => {
+            // The focus node is bound as a *term*, never pasted into the query
+            // text, and the query reads `data_graphs` and nothing else.
+            let bindings: Vec<(&str, Term)> = if *binds_this {
+                vec![("this", focus_node.clone())]
+            } else {
+                Vec::new()
+            };
+            store
+                .construct_confined(query, data_graphs, &bindings)
+                // An erroring rule used to be logged and swallowed, so `infer`
+                // reported success with 0 inferred triples whether the rules ran
+                // or every one of them failed. Surface it: the caller decides.
+                .map_err(|e| format!("SHACL rule could not be evaluated: {e}"))?
         }
-        RuleType::TripleRule => {
-            // `$this` (from `sh:this`, mapped in `load_rules`) binds to the focus.
-            let body = rule_body.replace("$this", &format!("<{}>", focus_node));
-            // INSERT DATA takes no WITH clause, so name the graph inline.
-            match target_graph {
-                Some(g) => format!("INSERT DATA {{ GRAPH <{g}> {{ {body} }} }}"),
-                None => format!("INSERT DATA {{ {} }}", body),
-            }
-        }
+        RuleBody::Triple {
+            subject,
+            predicate,
+            object,
+        } => triple_rule_output(subject, predicate, object, focus_node)
+            .into_iter()
+            .collect(),
     };
-    // An erroring rule used to be logged and swallowed, so `infer` reported
-    // success with 0 inferred triples whether the rules ran or every one of them
-    // failed to parse. Surface it: the caller decides.
+    if triples.is_empty() {
+        return Ok(());
+    }
+
+    let graph = match target_graph {
+        Some(g) => GraphName::NamedNode(
+            NamedNode::new(g).map_err(|e| format!("inference target graph <{g}>: {e}"))?,
+        ),
+        None => GraphName::DefaultGraph,
+    };
+    let quads: Vec<Quad> = triples
+        .into_iter()
+        .map(|t| Quad::new(t.subject, t.predicate, t.object, graph.clone()))
+        .collect();
     store
-        .update(&update)
-        .map_err(|e| format!("SHACL rule application failed ({update}): {e}"))?;
-    Ok(())
+        .insert_quads(quads)
+        .map_err(|e| format!("SHACL rule output could not be materialised: {e}"))
 }
 
-/// Translate a `sh:construct` rule body into an executable SPARQL UPDATE.
+/// The triple a `sh:TripleRule` derives for one focus node, or `None` when the
+/// terms do not form one — `sh:subject sh:this` with a literal focus node, say,
+/// since RDF has no literal subjects. The rule simply does not fire there.
+fn triple_rule_output(
+    subject: &RuleTerm,
+    predicate: &RuleTerm,
+    object: &RuleTerm,
+    focus_node: &Term,
+) -> Option<Triple> {
+    let resolve = |t: &RuleTerm| match t {
+        RuleTerm::This => focus_node.clone(),
+        RuleTerm::Fixed(term) => term.clone(),
+    };
+    let subject = NamedOrBlankNode::try_from(resolve(subject)).ok()?;
+    let Term::NamedNode(predicate) = resolve(predicate) else {
+        return None;
+    };
+    Some(Triple::new(subject, predicate, resolve(object)))
+}
+
+/// Parse a `sh:construct` rule body as the CONSTRUCT query SHACL-AF says it is.
 ///
-/// SHACL-AF's `sh:construct` carries a SPARQL **CONSTRUCT** query
-/// (`CONSTRUCT { template } WHERE { pattern }`); its output is materialised by
-/// running it as `INSERT { template } WHERE { pattern }`. The convenience
-/// `INSERT { … } WHERE { … }` form is already an update and is passed through
-/// unchanged. `$this` is expected to be already substituted.
+/// SHACL-AF's `sh:construct` carries `CONSTRUCT { template } WHERE { pattern }`.
+/// This store has always also accepted the convenience form
+/// `INSERT { … } WHERE { … }`, which is the same query under a different
+/// keyword, so the leading keyword is rewritten and the result must still parse
+/// as a CONSTRUCT query. A `PREFIX`/`BASE` prologue is skipped first, so an
+/// `insert` substring inside a prefix IRI is never mistaken for the keyword.
 ///
-/// Only the leading `CONSTRUCT` query keyword is rewritten — the template and
-/// `WHERE` clause are kept verbatim. A `PREFIX`/`BASE` prologue is skipped first
-/// so a `construct` substring inside a prefix IRI is never mistaken for it.
-fn construct_to_update(body: &str) -> String {
+/// **Everything else is refused**, and that is the point. The body used to be
+/// rewritten into a SPARQL UPDATE textually — anything that was not a leading
+/// `CONSTRUCT` was passed through verbatim — and then executed with the store's
+/// own authority. `DROP ALL` was a rule. So was
+/// `INSERT { GRAPH <anywhere> { ?s ?p ?o } } WHERE { GRAPH <anywhere> { ?s ?p ?o } }`,
+/// which the `WITH <g>` prefix added for a single-graph run did nothing to
+/// confine. A CONSTRUCT query cannot write, cannot drop, and cannot name a
+/// destination graph: its template has no `GRAPH` clause in the grammar.
+fn parse_construct_rule(body: &str) -> Result<SpargebraQuery, String> {
     let head_len = prologue_len(body);
     let rest = &body[head_len..];
     let token = leading_token(rest);
-    if token.eq_ignore_ascii_case("construct") {
-        format!("{}INSERT{}", &body[..head_len], &rest[token.len()..])
+    let text = if token.eq_ignore_ascii_case("insert") {
+        format!("{}CONSTRUCT{}", &body[..head_len], &rest[token.len()..])
     } else {
         body.to_string()
+    };
+    let query = SparqlParser::new()
+        .parse_query(&text)
+        .map_err(|e| format!("sh:construct must be a CONSTRUCT query ({e})"))?;
+    if !matches!(query, SpargebraQuery::Construct { .. }) {
+        return Err(
+            "sh:construct must be a CONSTRUCT query (`CONSTRUCT { … } WHERE { … }`, or the \
+             equivalent `INSERT { … } WHERE { … }` form), not another query or an update"
+                .to_string(),
+        );
     }
+    Ok(query)
 }
 
 /// Byte length of the leading `PREFIX`/`BASE` prologue of a SPARQL body,
@@ -1627,16 +1727,16 @@ fn leading_token(s: &str) -> &str {
         .unwrap_or("")
 }
 
-/// Stringify a triple-rule term, mapping `sh:this` to the `$this` placeholder so
-/// `apply_rule` binds it to each focus node (SHACL-AF §4.3 — `sh:this` denotes the
+/// A triple-rule term, mapping `sh:this` to the focus-node placeholder so
+/// `apply_rule` resolves it per focus node (SHACL-AF §4.3 — `sh:this` denotes the
 /// focus node, not the literal `sh:this` IRI).
-fn triple_rule_term(term: Option<&oxigraph::model::Term>) -> String {
-    if let Some(oxigraph::model::Term::NamedNode(nn)) = term {
-        if nn.as_str() == "http://www.w3.org/ns/shacl#this" {
-            return "$this".to_string();
+fn triple_rule_term(term: Option<&Term>) -> Option<RuleTerm> {
+    match term? {
+        Term::NamedNode(nn) if nn.as_str() == "http://www.w3.org/ns/shacl#this" => {
+            Some(RuleTerm::This)
         }
+        other => Some(RuleTerm::Fixed(other.clone())),
     }
-    term_to_string(term)
 }
 
 // ---------------------------------------------------------------------------
@@ -1968,17 +2068,6 @@ fn term_to_lexical(term: &oxigraph::model::Term) -> String {
         oxigraph::model::Term::BlankNode(bn) => format!("_:{}", bn.as_str()),
         #[cfg(feature = "rdf-12")]
         oxigraph::model::Term::Triple(t) => t.to_string(),
-    }
-}
-
-fn term_to_string(term: Option<&oxigraph::model::Term>) -> String {
-    match term {
-        Some(oxigraph::model::Term::NamedNode(nn)) => format!("<{}>", nn.as_str()),
-        // The N-Triples form: datatype kept (`sh:object true` used to be
-        // inserted as the string "true") and quotes/backslashes escaped.
-        Some(oxigraph::model::Term::Literal(lit)) => lit.to_string(),
-        Some(oxigraph::model::Term::BlankNode(bn)) => format!("_:{}", bn.as_str()),
-        _ => "\"\"".to_string(),
     }
 }
 

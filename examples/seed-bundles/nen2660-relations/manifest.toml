@@ -12,9 +12,11 @@
 # missing. The profile, the shapes and the sample are still exercised on
 # every CI run by tests/nen2660_relations_bundle.rs.
 #
-# Source: NEN 2660-2:2022 — https://github.com/nl-digigo/nen2660 (gh-pages,
-# data/nen2660-rdfs.ttl), downloads page
-# https://nl-digigo.github.io/nen2660/-/downloads/
+# Source: NEN 2660-2:2022 —
+# https://github.com/NEN-Nederlands-Normalisatie-Instituut/nen2660 (gh-pages,
+# data/nen2660-rdfs.ttl; NEN took the files over from DigiGO's
+# nl-digigo/nen2660). © NEN; no licence allows redistributing it, so it is
+# fetched.
 
 id = "nen2660-relations"
 opt_out_env = "SEED_NEN2660_RELATIONS"
@@ -31,6 +33,9 @@ namespace = "https://w3id.org/nen2660/def#"
 kind = "model"
 version = "2022"
 description = "NEN 2660-2:2022 RDFS (hasPart, hasFunctionalPart, hasTechnicalPart, contains, consistsOf, connectsObject, connectsPort) plus a profile declaring which relations are transitive and which are not."
+# Its base graph is NEN's RDFS (© NEN, no licence to redistribute), fetched by
+# the operator for their own use, so the registry entry is not public.
+public = false
 
 # The published RDFS model (fetched), as the version's base graph.
 [[data_models.graphs]]

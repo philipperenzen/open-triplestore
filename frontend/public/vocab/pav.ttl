@@ -1,9 +1,22 @@
-# Provenance, Authoring and Versioning — PAV is a lightweight ontology for
-# tracking Provenance, Authoring and Versioning.
-# Full vocabulary as published in the Linked Open Vocabularies (LOV) corpus
-# snapshot of 2025-12-18 (https://lov.linkeddata.es/ — dataset CC BY 4.0),
-# version v2.3.1 (2014-08-28).
-# Source: http://purl.org/pav/  (ns http://purl.org/pav/)
+# PAV — Provenance, Authoring and Versioning 2.3.1 (2014-08-28): a lightweight
+# ontology for tracking provenance, authoring and versioning; by Paolo Ciccarese
+# and Stian Soiland-Reyes.
+# Source: http://purl.org/pav/ (https://pav-ontology.github.io/pav/pav.rdf,
+# repository https://github.com/pav-ontology/pav) — triples identical (checked
+# 2026-09-23).
+# Obtained via the Linked Open Vocabularies (LOV) corpus snapshot of 2025-12-18
+# (https://lov.linkeddata.es/), which re-serialized it as Turtle. LOV's own
+# CC BY 4.0 licence covers LOV's catalogue; it does not relicense this vocabulary.
+# Copyright 2008-2014 Massachusetts General Hospital; Harvard Medical School;
+# Balboa Systems; University of Manchester. (kept in the ontology header below)
+# Licence: Apache License 2.0, http://www.apache.org/licenses/LICENSE-2.0 (the
+# file's own dcterms:license); full text: LICENSES/Apache-2.0.txt in the Open
+# Triplestore source.
+# Changes (Apache-2.0 §4(b) notice): this file was changed — LOV converted it
+# from RDF/XML to Turtle (triples unchanged) and Open Triplestore added this
+# comment header (2026-07-24, revised 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The vocabulary, as re-serialized by LOV, starts below this line. ----
 @prefix dc: <http://purl.org/dc/elements/1.1/> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix foaf: <http://xmlns.com/foaf/0.1/> .

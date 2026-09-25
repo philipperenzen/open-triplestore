@@ -9,7 +9,7 @@
   import { navigate } from '../../lib/router/index.js';
   import { langToFlag } from '../../lib/i18n/langFlag.js';
   import { pickLang, groupByLang } from '../../lib/ontology/termDisplay.js';
-  import { lookupTerm, lookupTermSync } from '../../lib/ontology/termDictionary.js';
+  import { lookupTerm, lookupTermSync, VOCAB_FILES } from '../../lib/ontology/termDictionary.js';
   import { openSparkExplain } from '../../lib/sparkHelp.js';
   import AnnotationText from './AnnotationText.svelte';
 
@@ -48,6 +48,20 @@
   $: resolveMeta(iri, meta);
 
   $: lang = ($locale || 'en').split('-')[0];
+
+  // The source pill names the bundled vocabulary the definition comes from and
+  // links to its licence and attribution (vocab/NOTICE.md, next to the file).
+  function uiBase() {
+    try {
+      return import.meta.env?.BASE_URL || '/';
+    } catch {
+      return '/';
+    }
+  }
+  const noticeHref = `${uiBase()}vocab/NOTICE.md`;
+  $: sourceFile = resolved
+    ? (Object.values(VOCAB_FILES).find((spec) => spec.source === resolved.source)?.file || '')
+    : '';
 
   // Short, friendly badge text + colour class per RDF term type.
   const TYPE_BADGE = {
@@ -97,7 +111,16 @@
       <span class="tdc-label" title={iri}>{headLabel}</span>
       {#if badge}<span class="tdc-badge {badge.cls}">{$t(`components.termDefinitionCard.type.${badge.key}`)}</span>{/if}
       {#if resolved.deprecated}<span class="tdc-badge b-deprecated">{$t('components.termDefinitionCard.deprecated')}</span>{/if}
-      <span class="tdc-src" title={$t('components.termDefinitionCard.source')}>{resolved.source}</span>
+      <a
+        class="tdc-src"
+        href={noticeHref}
+        target="_blank"
+        rel="noopener"
+        title={sourceFile
+          ? $t('components.termDefinitionCard.sourceNotice', { values: { file: sourceFile } })
+          : $t('components.termDefinitionCard.source')}
+        on:click|stopPropagation
+      >{resolved.source}</a>
       <button
         class="tdc-spark"
         on:click|stopPropagation={() => openSparkExplain({ iri, label: headLabel })}
@@ -165,7 +188,8 @@
   .b-individual { background: #f1f5f9; color: #475569; }
   .b-term { background: #f1f5f9; color: #475569; }
   .b-deprecated { background: #fee2e2; color: #b91c1c; }
-  .tdc-src { margin-left: auto; font-size: 0.64rem; font-weight: 700; color: #64748b; background: #f1f5f9; border-radius: 999px; padding: 1px 7px; text-transform: lowercase; }
+  .tdc-src { margin-left: auto; font-size: 0.64rem; font-weight: 700; color: #64748b; background: #f1f5f9; border-radius: 999px; padding: 1px 7px; text-transform: lowercase; text-decoration: none; }
+  .tdc-src:hover { color: #1565c0; background: #e0ecff; text-decoration: underline; }
   /* "Ask Spark" term helper — sits after the source pill, kept unobtrusive. */
   .tdc-spark { display: inline-flex; align-items: center; justify-content: center; padding: 2px; border: none; background: none; color: #7c5cff; cursor: pointer; border-radius: 6px; }
   .tdc-spark:hover { background: #ede9fe; color: #6d28d9; }
@@ -199,6 +223,7 @@
   :global(html.dark) .tdc-val { color: #cbd5e1; }
   :global(html.dark) .tdc-lang { color: #cbd5e1; background: #1e293b; }
   :global(html.dark) .tdc-src { color: #94a3b8; background: #1e293b; }
+  :global(html.dark) .tdc-src:hover { color: #93c5fd; background: rgba(59,130,246,0.15); }
   :global(html.dark) .tdc-spark { color: #c4b5fd; }
   :global(html.dark) .tdc-spark:hover { background: rgba(124,58,237,0.22); color: #ddd6fe; }
   :global(html.dark) .tdc-sec, :global(html.dark) .tdc-rels, :global(html.dark) .tdc-version { border-top-color: #1e293b; }

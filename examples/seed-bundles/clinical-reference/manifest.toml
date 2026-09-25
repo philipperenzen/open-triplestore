@@ -4,7 +4,9 @@
 # shapes and a few records, one of which is deliberately incomplete. Nothing
 # in the platform knows this domain; it is a manifest and six Turtle files.
 # Replace the payloads with the FHIR RDF ontology and SNOMED CT (licensed —
-# not vendored) and the mechanism is unchanged.
+# not vendored) and the mechanism is unchanged. vocabulary.ttl carries three
+# real LOINC codes (LOINC 2.81) with LOINC's required notice: they are LOINC
+# content under https://loinc.org/license, not project content.
 #
 # Loaded by tests/clinical_bundle_e2e.rs on every CI run.
 

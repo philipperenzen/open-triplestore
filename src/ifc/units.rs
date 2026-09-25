@@ -8,6 +8,11 @@
 //!
 //! The IRIs are QUDT 2.1 (`http://qudt.org/vocab/unit/`). QUDT does retire
 //! IRIs between versions, so the table names its version.
+//!
+//! The `IfcSIUnitName`, `IfcSIPrefix` and `IfcUnitEnum` literals below are the
+//! IFC schema's enumeration values, unchanged, © buildingSMART International
+//! Ltd., used under its copyright notice, which requires full attribution (see
+//! `names.rs`).
 
 use std::collections::HashMap;
 

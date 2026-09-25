@@ -20,6 +20,7 @@ use crate::server::AppState;
 
 use super::access::*;
 use super::models::*;
+use super::read_scope::ReadScope;
 use super::store::ShaclStudioStore;
 
 type ApiErr = (StatusCode, String);
@@ -64,6 +65,211 @@ pub(crate) fn resolve_owner(
         }
         _ => Ok((OwnerType::User, user.user_id.clone())),
     }
+}
+
+// ─── Graphs of registered model versions ─────────────────────────────────────
+//
+// A shape graph can be a graph of a registered model version: a seed bundle
+// binds a model's graph in place (the nen2660-imbor bundle binds CROW's IMBOR
+// Kern), and `register_shape_graph` adopts any readable graph. The Studio
+// applies the registry's rules to such a graph, as the SPARQL and Graph Store
+// paths do (`crate::data_models::write_guard`): a version whose licence allows
+// no altered copies is never written, copied into an editable graph, or served
+// altered; any other version with a licence record is marked possibly
+// modified before a write.
+
+/// A Studio write into `graph_iri` (a save, a restore, an import, the clear on
+/// delete): refused (403) when the graph holds a registered model version
+/// whose licence allows no altered copies. For any other version with a
+/// licence record, the record stops calling the content unchanged before the
+/// write runs, so a write cut short never leaves a false "unchanged".
+fn guard_registry_graph_write(state: &AppState, graph_iri: &str) -> Result<(), ApiErr> {
+    let v = crate::data_models::write_guard::check(&state.store, &state.base_url, graph_iri)
+        .map_err(|m| (StatusCode::FORBIDDEN, m))?;
+    if let Some(v) = v {
+        crate::data_models::write_guard::mark(&state.store, std::slice::from_ref(&v))
+            .map_err(e500)?;
+        state.mark_vocab_registry_dirty();
+    }
+    Ok(())
+}
+
+/// Whether `user` may change the content of `graph_iri`, the graph of a
+/// Library entry they manage, through the Studio. Managing the entry is not
+/// enough on its own: an entry is also made for a graph that already exists
+/// (`register_shape_graph`, a dataset's shapes graph, a seed bundle's
+/// binding), and its owner is whoever made it. So the authority follows the
+/// graph, as it does for a Graph Store write:
+///
+/// * an admin;
+/// * a graph the Studio minted for its entry (`urn:shapes:…`): the entry is
+///   its only ACL;
+/// * a model-registry graph: whoever may write the registry entry holding it
+///   (`can_write_ontology`); nobody else;
+/// * a graph a dataset holds — in its namespace or registered to it — for
+///   whoever may write that dataset (org members editing their dataset's
+///   shapes graph, as `PUT /api/datasets/:id/shapes` allows them);
+/// * any other graph: a graph-ACL write grant.
+///
+/// Evaluated at every write, so an entry made before this rule, or a grant
+/// since revoked, gives no more than the rule does.
+fn may_write_shape_graph_content(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    graph_iri: &str,
+) -> Result<bool, ApiErr> {
+    use crate::auth::dataset_graph;
+    use crate::data_models::registry;
+    if user.is_admin() || owns_backing_graph(graph_iri) {
+        return Ok(true);
+    }
+    if dataset_graph::graph_held_by_model_registry(&state.store, &state.base_url, graph_iri) {
+        let Some(id) = registry::data_model_holding_graph(&state.store, &state.base_url, graph_iri)
+        else {
+            return Ok(false);
+        };
+        let Some(entry) = registry::get_data_model(&state.store, &state.base_url, &id) else {
+            return Ok(false);
+        };
+        return state
+            .auth_db
+            .can_write_ontology(
+                &user.user_id,
+                entry.owner_type.as_deref(),
+                entry.owner_id.as_deref(),
+            )
+            .map_err(e500);
+    }
+    for id in dataset_graph::datasets_holding_graph(&state.auth_db, &state.base_url, graph_iri) {
+        if let Some(ds) = state.auth_db.get_dataset(&id).map_err(e500)? {
+            if state
+                .auth_db
+                .can_write_dataset(&user.user_id, &ds)
+                .map_err(e500)?
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(dataset_graph::may_write_graph_directly(
+        &state.auth_db,
+        user,
+        graph_iri,
+    ))
+}
+
+/// A Studio write into `graph_iri` by `user` (a save, a restore, an import,
+/// the clear on delete): refused (403) unless
+/// [`may_write_shape_graph_content`] allows it, then the registry's licence
+/// rule ([`guard_registry_graph_write`]).
+fn guard_shape_graph_write(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    graph_iri: &str,
+) -> Result<(), ApiErr> {
+    if !may_write_shape_graph_content(state, user, graph_iri)? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "You may not change graph <{graph_iri}>: managing its Library entry is not \
+                 enough. Its content can be changed by an admin, by whoever may write the \
+                 dataset or registry entry that holds it, or with write access to the graph."
+            ),
+        ));
+    }
+    guard_registry_graph_write(state, graph_iri)
+}
+
+/// Copying shapes out of `graph_iri` into an editable graph (a clone, an
+/// import): refused (403) when the graph holds a registered model version
+/// whose licence allows no altered copies, as the registry refuses a draft or
+/// a branch of it: the editable copy would be one. Binding that shape graph to
+/// a dataset only reads it and stays allowed.
+fn refuse_no_derivatives_copy(state: &AppState, graph_iri: &str) -> Result<(), ApiErr> {
+    match crate::data_models::registry::attributed_version_of_graph(
+        &state.store,
+        &state.base_url,
+        graph_iri,
+    ) {
+        Some(v) if v.attribution.no_derivatives => Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "Copying shapes out of graph <{graph_iri}> is refused: it holds version '{}' of \
+                 registry entry '{}', {}, whose licence allows no altered copies, and an editable \
+                 copy would be one. Bind that shape graph to your dataset instead: validation \
+                 only reads it.",
+                v.version,
+                v.data_model_id,
+                crate::data_models::vocab_files::source_phrase(&v.attribution.file)
+            ),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Whether the Studio may serve `graph_iri`'s content to `user`. For a graph
+/// of a registered version in an entry whose licence allows no altered
+/// copies, the registry's rule applies (`data_models::handlers::
+/// ensure_servable`): only a checked, unchanged copy goes to everyone; any
+/// other state only to users who may write the entry. With `snapshot`, the
+/// content is a stored revision, which no check vouches for, so it goes only
+/// to those users whatever the record says.
+fn ensure_studio_servable(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    graph_iri: &str,
+    snapshot: bool,
+) -> Result<(), ApiErr> {
+    use crate::data_models::registry;
+    let Some(v) = registry::attributed_version_of_graph(&state.store, &state.base_url, graph_iri)
+    else {
+        return Ok(());
+    };
+    let nd = registry::no_derivatives_attribution(&state.store, &state.base_url, &v.data_model_id);
+    let Some(nd) = nd else {
+        return Ok(());
+    };
+    let withheld = || {
+        (
+            StatusCode::FORBIDDEN,
+            format!(
+                "The content of graph <{graph_iri}> is withheld: it holds version '{}' of registry \
+                 entry '{}', {}, whose licence allows no altered copies, and {}.",
+                v.version,
+                v.data_model_id,
+                crate::data_models::vocab_files::source_phrase(&nd.file),
+                if snapshot {
+                    "no check vouches for a stored revision of it"
+                } else {
+                    "this copy is not a checked, unchanged copy of it"
+                }
+            ),
+        )
+    };
+    let parent = registry::get_data_model(&state.store, &state.base_url, &v.data_model_id)
+        .ok_or_else(withheld)?;
+    if snapshot {
+        let may_write = state
+            .auth_db
+            .can_write_ontology(
+                &user.user_id,
+                parent.owner_type.as_deref(),
+                parent.owner_id.as_deref(),
+            )
+            .map_err(e500)?;
+        return if may_write { Ok(()) } else { Err(withheld()) };
+    }
+    crate::data_models::handlers::ensure_servable(
+        state,
+        &v.data_model_id,
+        &parent,
+        &v.version,
+        Some(user),
+    )
+    .map_err(|e| match e {
+        crate::server::error::AppError::Forbidden(_) => withheld(),
+        other => e500(other.message()),
+    })
 }
 
 // ─── Shape graphs ────────────────────────────────────────────────────────────
@@ -178,13 +384,28 @@ pub async fn list_shape_graphs(
 ) -> Result<impl IntoResponse, ApiErr> {
     let st = studio(&state);
     let orgs = org_ids(&state, &user.user_id);
+    let withheld = withheld_graphs(&state, &user)?;
     let sets: Vec<ShapeGraph> = st
         .list_shape_graphs()
         .map_err(e500)?
         .into_iter()
-        .filter(|s| can_access_set(s, Some(&user.user_id), &orgs))
+        .filter(|s| {
+            can_access_set(s, Some(&user.user_id), &orgs) && !withheld.contains(&s.graph_iri)
+        })
         .collect();
     Ok(Json(sets))
+}
+
+/// The graphs some dataset holds as private that `user` may not read
+/// ([`crate::auth::acl::withheld_private_graphs`]). The Library adopts a
+/// dataset's shapes graph in place, and an entry's visibility does not decide
+/// who reads a graph the Studio did not mint: no entry of one of these is
+/// served to `user`, whatever its visibility.
+fn withheld_graphs(
+    state: &AppState,
+    user: &AuthenticatedUser,
+) -> Result<std::collections::HashSet<String>, ApiErr> {
+    crate::auth::acl::withheld_private_graphs(&state.auth_db, Some(user)).map_err(e500)
 }
 
 async fn load_set_checked(
@@ -204,7 +425,12 @@ async fn load_set_checked(
     } else {
         can_access_set(&set, Some(&user.user_id), &orgs)
     };
-    if !ok {
+    // Reading or managing an entry is working with its graph: an entry of a
+    // private dataset graph is only for who may read that graph.
+    if !ok
+        || crate::auth::acl::private_graph_withheld(&state.auth_db, Some(user), &set.graph_iri)
+            .map_err(e500)?
+    {
         return Err((StatusCode::FORBIDDEN, "Access denied".into()));
     }
     Ok(set)
@@ -234,13 +460,30 @@ pub async fn update_shape_graph(
     Path(id): Path<String>,
     Json(body): Json<UpdateShapeGraphBody>,
 ) -> Result<impl IntoResponse, ApiErr> {
-    load_set_checked(&state, &user, &id, true).await?;
+    let set = load_set_checked(&state, &user, &id, true).await?;
+    // The entry's visibility decides who may read its graph through the
+    // Studio (`GET …/turtle`). For a graph the Studio did not mint, widening
+    // it is a decision for whoever may change that graph.
+    let visibility = parse_visibility(&body.visibility);
+    if visibility != set.visibility
+        && !owns_backing_graph(&set.graph_iri)
+        && !may_write_shape_graph_content(&state, &user, &set.graph_iri)?
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "You may not change who can read graph <{}> through the Library: it is not a \
+                 graph the Studio made, and you may not change it.",
+                set.graph_iri
+            ),
+        ));
+    }
     studio(&state)
         .update_shape_graph_meta(
             &id,
             &body.name,
             body.description.as_deref(),
-            parse_visibility(&body.visibility),
+            visibility,
             &body.tags,
         )
         .map_err(e500)?;
@@ -254,12 +497,25 @@ pub async fn delete_shape_graph(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiErr> {
     let set = load_set_checked(&state, &user, &id, true).await?;
-    // Best-effort clear of the backing graph, then drop the DB rows.
-    let _ = state
-        .store
-        .update(&format!("CLEAR SILENT GRAPH <{}>", set.graph_iri));
+    // Only a graph the Studio created (`urn:shapes:…`) is the shape graph's
+    // own, and is cleared with it (best-effort). A graph the Library adopted
+    // in place (a seed bundle's binding, `register_shape_graph`, a dataset's
+    // shapes graph) belongs to someone else, perhaps to a registry model:
+    // only the Library's rows go, never its data.
+    if owns_backing_graph(&set.graph_iri) {
+        guard_shape_graph_write(&state, &user, &set.graph_iri)?;
+        let _ = state
+            .store
+            .update(&format!("CLEAR SILENT GRAPH <{}>", set.graph_iri));
+    }
     studio(&state).delete_shape_graph(&id).map_err(e500)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Whether a shape graph's backing graph is one the Studio minted for it
+/// (create, clone), rather than an existing graph adopted in place.
+fn owns_backing_graph(graph_iri: &str) -> bool {
+    graph_iri.starts_with("urn:shapes:")
 }
 
 pub async fn get_shape_graph_turtle(
@@ -270,6 +526,7 @@ pub async fn get_shape_graph_turtle(
     headers: axum::http::HeaderMap,
 ) -> Result<Response, ApiErr> {
     let set = load_set_checked(&state, &user, &id, false).await?;
+    ensure_studio_servable(&state, &user, &set.graph_iri, false)?;
     let want_shaclc = q.get("format").map(|v| v == "shaclc").unwrap_or(false)
         || headers
             .get(ACCEPT)
@@ -280,17 +537,40 @@ pub async fn get_shape_graph_turtle(
         let shaclc = crate::shaclc::serialize(&state.store, &set.graph_iri).map_err(e500)?;
         return Ok((StatusCode::OK, [(CONTENT_TYPE, "text/shaclc")], shaclc).into_response());
     }
+    // Prefixed: this is the document a human reads in the source view, and the
+    // one the visual builder scans for the prefixes it offers. Serialised
+    // without a header it was a wall of full <http://…> IRIs.
     let data = state
         .store
-        .graph_store_get(Some(&set.graph_iri), oxigraph::io::RdfFormat::Turtle)
+        .dump_prefixed(
+            oxigraph::io::RdfFormat::Turtle,
+            Some(&set.graph_iri),
+            |ns| state.prefix_registry.declaration_for(ns),
+        )
         .map_err(e500)?;
     Ok((StatusCode::OK, [(CONTENT_TYPE, "text/turtle")], data).into_response())
+}
+
+/// Revision notes reach the commit log's RDF, so a caller-supplied one is
+/// bounded and stripped of control characters before it gets there.
+const MAX_REVISION_NOTE: usize = 200;
+
+/// Normalise a caller-supplied revision message, or `None` if nothing is left.
+fn revision_note(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_REVISION_NOTE)
+        .collect();
+    let trimmed = cleaned.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 pub async fn put_shape_graph_turtle(
     Extension(user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiErr> {
@@ -307,26 +587,32 @@ pub async fn put_shape_graph_turtle(
     } else {
         raw
     };
+    // Every history entry used to read "Edited": the note was hard-coded here.
+    let note = q.get("message").and_then(|m| revision_note(m));
     let version = write_shapes_revision(
         &state,
         &set.graph_iri,
         &id,
         &turtle,
-        Some("Edited"),
-        &user.user_id,
+        Some(note.as_deref().unwrap_or("Edited")),
+        &user,
     )?;
     Ok(Json(serde_json::json!({ "version": version })))
 }
 
 /// Write Turtle to a shape graph's graph, recompute facets, and snapshot it.
+/// The caller has checked that `by` manages the entry; whether they may
+/// change its graph is checked here ([`guard_shape_graph_write`]).
 fn write_shapes_revision(
     state: &AppState,
     graph_iri: &str,
     set_id: &str,
     turtle: &str,
     note: Option<&str>,
-    by: &str,
+    user: &AuthenticatedUser,
 ) -> Result<i64, ApiErr> {
+    guard_shape_graph_write(state, user, graph_iri)?;
+    let by = user.user_id.as_str();
     state
         .store
         .graph_store_put(Some(graph_iri), turtle, oxigraph::io::RdfFormat::Turtle)
@@ -394,7 +680,8 @@ pub async fn get_shape_graph_revision(
     State(state): State<AppState>,
     Path((id, rev)): Path<(String, i64)>,
 ) -> Result<impl IntoResponse, ApiErr> {
-    load_set_checked(&state, &user, &id, false).await?;
+    let set = load_set_checked(&state, &user, &id, false).await?;
+    ensure_studio_servable(&state, &user, &set.graph_iri, true)?;
     let rev = studio(&state)
         .get_shape_graph_revision(&id, rev)
         .map_err(e500)?
@@ -418,7 +705,7 @@ pub async fn restore_shape_graph_revision(
         &id,
         &snapshot.turtle,
         Some(&format!("Restored revision {rev}")),
-        &user.user_id,
+        &user,
     )?;
     Ok(Json(serde_json::json!({ "version": version })))
 }
@@ -435,6 +722,7 @@ pub async fn clone_shape_graph(
     Json(body): Json<CloneShapeGraphBody>,
 ) -> Result<impl IntoResponse, ApiErr> {
     let src = load_set_checked(&state, &user, &id, false).await?;
+    refuse_no_derivatives_copy(&state, &src.graph_iri)?;
     let st = studio(&state);
     let turtle = state
         .store
@@ -463,7 +751,7 @@ pub async fn clone_shape_graph(
         &set.id,
         &turtle,
         Some(&format!("Cloned from {}", src.id)),
-        &user.user_id,
+        &user,
     )?;
     let set = st.get_shape_graph(&set.id).map_err(e500)?;
     Ok((StatusCode::CREATED, Json(set)))
@@ -772,9 +1060,11 @@ pub async fn list_bindings(
     let target_iri = resolve_target_for_read(&state, &user, &target).await?;
     let st = studio(&state);
     let orgs = org_ids(&state, &user.user_id);
+    let withheld = withheld_graphs(&state, &user)?;
     // Resolve bound shape-graph graphs back to records the caller may access.
     let sets: Vec<ShapeGraph> = super::bindings::bindings_for_target(&state.store, &target_iri)
         .into_iter()
+        .filter(|giri| !withheld.contains(giri))
         .filter_map(|giri| st.get_shape_graph_by_iri(&giri).ok().flatten())
         .filter(|s| can_access_set(s, Some(&user.user_id), &orgs))
         .collect();
@@ -802,13 +1092,20 @@ pub async fn dataset_effective_shapes(
     {
         return Err((StatusCode::FORBIDDEN, "Access denied".into()));
     }
-    let sets = super::bindings::effective_shape_graphs_for_dataset(
+    // Bound shapes come with the dataset, but an entry names its graph and
+    // carries its target classes: not one of a private graph the caller may
+    // not read.
+    let withheld = withheld_graphs(&state, &user)?;
+    let sets: Vec<ShapeGraph> = super::bindings::effective_shape_graphs_for_dataset(
         &state.store,
         &state.auth_db,
         &studio(&state),
         &state.base_url,
         &ds,
-    );
+    )
+    .into_iter()
+    .filter(|s| !withheld.contains(&s.graph_iri))
+    .collect();
     Ok(Json(sets))
 }
 
@@ -819,8 +1116,11 @@ pub async fn dataset_effective_shapes(
 /// `?graph=` parameter this returns a cheap *summary* of the graphs that contain
 /// shapes (`{ "graphs": [...] }`, each with node/property counts + registration);
 /// with `?graph=<iri>` it returns that one graph's shapes (`{ "graph", "shapes" }`).
-/// Either way, graphs that are registered shape graphs the caller cannot access
-/// are hidden.
+/// Either way, a graph appears only to a caller who may read it: a graph
+/// registered in the Library to whoever the Library shows its entry to, any
+/// other graph by the rule a `/sparql` query is scoped to (dataset visibility
+/// plus graph-ACL read grants; admins read every graph). A shape's IRI, label,
+/// target classes and path are data from its graph.
 pub async fn list_shapes_catalog(
     Extension(user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -828,23 +1128,27 @@ pub async fn list_shapes_catalog(
 ) -> Result<impl IntoResponse, ApiErr> {
     let st = studio(&state);
     let orgs = org_ids(&state, &user.user_id);
+    let reader = ReadScope::for_user(&state.auth_db, &user).map_err(e500)?;
     let mut reg_all: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut reg_access: HashMap<String, (String, String)> = HashMap::new();
     for s in st.list_shape_graphs().map_err(e500)? {
         reg_all.insert(s.graph_iri.clone());
-        if can_access_set(&s, Some(&user.user_id), &orgs) {
+        if can_access_set(&s, Some(&user.user_id), &orgs) && !reader.withholds(&s.graph_iri) {
             reg_access.insert(s.graph_iri.clone(), (s.id.clone(), s.name.clone()));
         }
     }
-    let hidden = |g: &str| reg_all.contains(g) && !reg_access.contains_key(g);
+    let visible = |g: &str| {
+        if reg_all.contains(g) {
+            reg_access.contains_key(g)
+        } else {
+            reader.may_read_graph(g)
+        }
+    };
 
     // Drill-down: one graph's shapes.
     if let Some(graph) = params.get("graph") {
-        if hidden(graph) {
-            return Err((
-                StatusCode::FORBIDDEN,
-                "Access denied for that shape graph".into(),
-            ));
+        if !visible(graph) {
+            return Err((StatusCode::FORBIDDEN, "Access denied for that graph".into()));
         }
         let reg = reg_access.get(graph);
         let shapes: Vec<serde_json::Value> = super::catalog::catalog_shapes(&state.store, graph)
@@ -867,7 +1171,7 @@ pub async fn list_shapes_catalog(
     // Default: the cheap graph summary.
     let graphs: Vec<serde_json::Value> = super::catalog::catalog_graph_summary(&state.store)
         .into_iter()
-        .filter(|g| !hidden(&g.graph))
+        .filter(|g| visible(&g.graph))
         .map(|g| {
             let reg = reg_access.get(&g.graph);
             serde_json::json!({
@@ -926,6 +1230,15 @@ pub async fn import_shapes(
             ));
         }
     }
+    let sources: std::collections::BTreeSet<&str> = body
+        .shapes
+        .iter()
+        .map(|r| r.source_graph.as_str())
+        .collect();
+    for g in sources {
+        refuse_no_derivatives_copy(&state, g)?;
+    }
+    guard_shape_graph_write(&state, &user, &set.graph_iri)?;
     let refs: Vec<(String, String)> = body
         .shapes
         .iter()
@@ -983,7 +1296,15 @@ pub struct RegisterShapeGraphBody {
 /// POST /api/shacl/register-shape-graph — adopt an existing named graph that
 /// already holds SHACL as a first-class shape graph, *in place* (no copy): the
 /// record points at the graph. Powers "this existing shapes graph should be in
-/// the Library too". Idempotent: re-registering returns the existing record.
+/// the Library too". Idempotent: re-registering returns the existing record
+/// to a caller who may see it.
+///
+/// The caller becomes the entry's owner, and an owner edits the entry's graph
+/// in place, so registering needs the right to change that graph
+/// ([`may_write_shape_graph_content`]), not only to read it; the Studio checks
+/// that right again at every write. A graph named like one the Studio mints
+/// (`urn:shapes:…`) is left to admins: the Studio clears such a graph when
+/// its entry is deleted, so it must be one the Studio made.
 pub async fn register_shape_graph(
     Extension(user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -991,18 +1312,38 @@ pub async fn register_shape_graph(
 ) -> Result<impl IntoResponse, ApiErr> {
     let st = studio(&state);
     if let Some(existing) = st.get_shape_graph_by_iri(&body.graph_iri).map_err(e500)? {
+        let orgs = org_ids(&state, &user.user_id);
+        let withheld =
+            crate::auth::acl::private_graph_withheld(&state.auth_db, Some(&user), &body.graph_iri)
+                .map_err(e500)?;
+        if !user.is_admin() && (!can_access_set(&existing, Some(&user.user_id), &orgs) || withheld)
+        {
+            return Err((StatusCode::FORBIDDEN, "Access denied".into()));
+        }
         return Ok((StatusCode::OK, Json(existing)));
     }
-    if !crate::auth::acl::check_graph_permission(
-        Some(&user),
-        &body.graph_iri,
-        "read",
-        &state.auth_db,
-    ) {
-        return Err((
+    let denied = || {
+        (
             StatusCode::FORBIDDEN,
-            format!("Read access denied for graph <{}>", body.graph_iri),
+            format!(
+                "Graph <{}> is not writable by you, so it cannot become your Library shape graph: \
+                 its owner edits it in place. Ask for write access to it, or import its shapes \
+                 into a shape graph of your own.",
+                body.graph_iri
+            ),
+        )
+    };
+    if oxigraph::model::NamedNode::new(&body.graph_iri).is_err() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("<{}> is not a valid graph IRI", body.graph_iri),
         ));
+    }
+    if !user.is_admin() && owns_backing_graph(&body.graph_iri) {
+        return Err(denied());
+    }
+    if !may_write_shape_graph_content(&state, &user, &body.graph_iri)? {
+        return Err(denied());
     }
     let (targets, count) = super::run::analyze_shapes_graph(&state.store, &body.graph_iri);
     if count == 0 {
@@ -1109,11 +1450,14 @@ fn validate_cron(cron: &Option<String>) -> Result<(), ApiErr> {
 
 /// Authorize a pipeline's *write* surface against the acting user before it is stored/updated.
 ///
-/// Admins bypass. Otherwise every graph the pipeline would WRITE must be writable by the caller,
+/// Every graph the pipeline would WRITE must be writable by the caller (admins bypass this ACL),
 /// using the same authority as the SPARQL/Graph-Store write path (`check_graph_permission(write)`):
 /// - an explicit (caller-supplied) inferred/results target graph, and
 /// - every data graph in scope when `run_inference` is set — SHACL-AF inference
 ///   materialises triples *in place* into those graphs, so it is a write to them.
+///
+/// None of them may be a graph of a registered model version whose licence allows no altered
+/// copies (`data_models::write_guard::check`), for admins too.
 ///
 /// The pipeline's own auto-namespaced `urn:system:*:{id}` report/inference graphs are server-owned
 /// and exempt. `exec::owner_can_write` re-checks the same authority at run time (covering the
@@ -1123,9 +1467,6 @@ fn authorize_pipeline_targets(
     user: &AuthenticatedUser,
     pipeline: &ValidationPipeline,
 ) -> Result<(), ApiErr> {
-    if user.is_admin() {
-        return Ok(());
-    }
     use crate::auth::acl::check_graph_permission;
 
     let mut write_targets: Vec<String> = Vec::new();
@@ -1155,14 +1496,61 @@ fn authorize_pipeline_targets(
     write_targets.sort();
     write_targets.dedup();
     for g in &write_targets {
-        if !check_graph_permission(Some(user), g, "write", &state.auth_db) {
+        // Admins pass the graph ACL.
+        if !user.is_admin() && !check_graph_permission(Some(user), g, "write", &state.auth_db) {
             return Err((
                 StatusCode::FORBIDDEN,
                 format!("Write access denied for graph <{g}>"),
             ));
         }
+        // The model registry's guard, for admins too: a graph of a version
+        // whose licence allows no altered copies is never written, in place
+        // or as a target. `exec` applies it again at every run.
+        crate::data_models::write_guard::check(&state.store, &state.base_url, g).map_err(|m| {
+            (
+                StatusCode::FORBIDDEN,
+                format!("This pipeline would write: {m}"),
+            )
+        })?;
     }
     Ok(())
+}
+
+/// Authorize a pipeline's *read* surface against `user`: every dataset, data
+/// graph and shape graph in its scope ([`super::read_scope::pipeline_unreadable`]).
+///
+/// A run's report carries its data graphs' focus nodes and values to whoever
+/// runs the pipeline or opens the run. So this is checked when a pipeline is
+/// created or updated (its author decides what it reads), when it runs (the
+/// caller receives the report) and when a stored run's report is opened, each
+/// time afresh: a grant since revoked, or a pipeline stored before this check,
+/// gives no more than the caller may read. The scheduler applies the same
+/// check to the pipeline's creator.
+fn authorize_pipeline_reads(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    pipeline: &ValidationPipeline,
+) -> Result<(), ApiErr> {
+    let reader = ReadScope::for_user(&state.auth_db, user).map_err(e500)?;
+    let unreadable = super::read_scope::pipeline_unreadable(
+        &state.store,
+        &state.auth_db,
+        &studio(state),
+        &state.base_url,
+        pipeline,
+        &reader,
+    )
+    .map_err(e500)?;
+    match unreadable {
+        None => Ok(()),
+        Some(what) => Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "Read access denied for {what}: a pipeline's report carries the data it \
+                 validates, so everything in its scope must be readable by you"
+            ),
+        )),
+    }
 }
 
 /// Authorize a pipeline's *write gate* against `user`, when it has one.
@@ -1269,6 +1657,7 @@ pub async fn create_pipeline(
         created_at: now.clone(),
         updated_at: now,
     };
+    authorize_pipeline_reads(&state, &user, &pipeline)?;
     authorize_pipeline_targets(&state, &user, &pipeline)?;
     authorize_pipeline_gate(&state, &user, &pipeline)?;
     studio(&state).insert_pipeline(&pipeline).map_err(e500)?;
@@ -1362,6 +1751,7 @@ pub async fn update_pipeline(
             .or_else(|| existing.results_target_graph.clone()),
         ..existing
     };
+    authorize_pipeline_reads(&state, &user, &updated)?;
     authorize_pipeline_targets(&state, &user, &updated)?;
     authorize_pipeline_gate(&state, &user, &updated)?;
     studio(&state).update_pipeline(&updated).map_err(e500)?;
@@ -1385,6 +1775,9 @@ pub async fn run_pipeline(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, ApiErr> {
     let pipeline = load_pipeline_checked(&state, &user, &id, false).await?;
+    // Seeing a shared pipeline is not reading its data: the report goes to
+    // the caller, so the caller must be able to read its scope.
+    authorize_pipeline_reads(&state, &user, &pipeline)?;
     let store = state.store.clone();
     let auth_db = state.auth_db.clone();
     let base_url = state.base_url.to_string();
@@ -1456,7 +1849,10 @@ pub async fn get_pipeline_run(
     State(state): State<AppState>,
     Path((id, run_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiErr> {
-    load_pipeline_checked(&state, &user, &id, false).await?;
+    let pipeline = load_pipeline_checked(&state, &user, &id, false).await?;
+    // The full report is data from the pipeline's scope (run summaries, which
+    // carry only counts, stay listed to everyone who sees the pipeline).
+    authorize_pipeline_reads(&state, &user, &pipeline)?;
     let run = studio(&state)
         .get_pipeline_run(&run_id)
         .map_err(e500)?
@@ -1645,12 +2041,18 @@ pub async fn form_manifest(
     {
         return Err((StatusCode::FORBIDDEN, "Access denied".into()));
     }
+    let withheld = crate::auth::acl::withheld_private_graphs(
+        &state.auth_db,
+        user.as_ref().map(|Extension(u)| u),
+    )
+    .map_err(e500)?;
     let manifest = super::manifest::build_manifest(
         &state.store,
         &state.auth_db,
         &state.base_url,
         &studio(&state),
         &dataset,
+        &withheld,
     );
     Ok(Json(manifest))
 }

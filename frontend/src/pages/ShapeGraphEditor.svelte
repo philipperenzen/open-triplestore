@@ -4,7 +4,8 @@
   import { sanitizeHtml } from '../lib/ontology/sanitizeHtml.js';
   import { getShapeGraph, updateShapeGraph, listShapeGraphRevisions, getShapeGraphRevision, restoreShapeGraphRevision,
     validateShapeGraph, stageShapeGraph, publishShapeGraph, deprecateShapeGraph, listBindingsForShapeGraph,
-    getShapeGraphTurtle } from '../lib/api.js';
+    getShapeGraphTurtle, listDatasets } from '../lib/api.js';
+  import { shortenIRI, loadPrefixCcPrefixes, prefixesVersion } from '../lib/rdf-utils.js';
   import { ArrowLeft, History, Lock, Users, Globe, Save, Edit3, X, RotateCcw, Loader2, Sparkles, Database, ShieldCheck, Send, Archive, Check, Plus, Link2, ExternalLink } from 'lucide-svelte';
   import { Link, navigate } from '../lib/router/index.js';
   import { openPendingViewerTab, showShapesInViewer, viewerConfigured } from '../lib/graphViewer.ts';
@@ -47,13 +48,24 @@
   // SHACL sandbox. Only shown when VITE_GRAPH_VIEWER_URL is configured.
   let openingViewer = false;
 
+  // Datasets, only to put a name on a binding target: GET /api/shacl/bindings
+  // answers with bare target IRIs, so the dataset id parsed out of the IRI is
+  // all we have to join on.
+  let allDatasets = [];
+
   let _guardChecked = false;
   $: if ($authInitialized && !_guardChecked) {
     _guardChecked = true;
     if (!$isAuthenticated) navigate('/login');
   }
 
-  onMount(load);
+  onMount(() => {
+    loadPrefixCcPrefixes();
+    load();
+    // Names are decoration on the impact chips — never let this lookup delay
+    // or break the editor itself.
+    listDatasets().then((d) => (allDatasets = d || [])).catch(() => {});
+  });
 
   $: if (id) { load(); }
 
@@ -192,24 +204,36 @@
     return $i18nT('pages.shapeGraphEditor.monthsAgo', { values: { count: Math.round(day / 30) } });
   }
 
-  function shortIRI(iri) {
-    const m = String(iri).match(/[^#/]+$/);
-    return m ? m[0] : iri;
+  function datasetName(datasetId, datasets) {
+    return datasets.find((d) => String(d.id) === datasetId)?.name || datasetId;
   }
 
   /**
    * Classify a binding target IRI for display. Dataset targets are the
    * canonical `{base}/dataset/{id}` IRIs; graph targets nest under
    * `…/dataset/{id}/graphs/{tail}` — both link to the dataset page.
+   *
+   * The label used to be the raw dataset id (a slug/UUID); resolve it against
+   * the dataset list, falling back to the id when the lookup misses or the
+   * list has not landed yet.
    */
-  function parseTarget(iri) {
+  function parseTarget(iri, datasets) {
     const s = String(iri);
     const g = s.match(/\/dataset\/([^/]+)\/graphs\/(.+)$/);
-    if (g) return { datasetId: g[1], label: `${g[1]} / ${g[2]}` };
+    if (g) return { iri: s, datasetId: g[1], label: `${datasetName(g[1], datasets)} / ${g[2]}` };
     const d = s.match(/\/dataset\/([^/]+)$/);
-    if (d) return { datasetId: d[1], label: d[1] };
-    return { datasetId: null, label: shortIRI(s) };
+    if (d) return { iri: s, datasetId: d[1], label: datasetName(d[1], datasets) };
+    return { iri: s, datasetId: null, label: shortenIRI(s) };
   }
+
+  // Derived (not called inline in the markup) so the chips re-label themselves
+  // when the dataset list arrives after the bindings.
+  // `shortenIRI` reads a module-level prefix map, which creates no Svelte
+  // dependency. Naming the version store here is what makes these labels
+  // recompute once the ~3700-entry prefix snapshot lands, instead of keeping
+  // the weaker form they were first rendered with.
+  $: curie = ($prefixesVersion, (iri) => shortenIRI(iri));
+  $: impactChips = ($prefixesVersion, impact.map((iri) => parseTarget(iri, allDatasets)));
 </script>
 
 <div class="editor-page">
@@ -257,20 +281,19 @@
             </div>
             {#if (set.target_classes || []).length}
               <div class="targets">
-                {#each set.target_classes as tc}<span class="chip chip-target"><Database size={10} /> {shortIRI(tc)}</span>{/each}
+                {#each set.target_classes as tc}<span class="chip chip-target" title={tc}><Database size={10} /> {curie(tc)}</span>{/each}
               </div>
             {/if}
             {#if impact.length}
               <div class="impact">
                 <span class="impact-label"><Link2 size={11} /> {impact.length === 1 ? $i18nT('pages.shapeGraphEditor.appliedToTarget', { values: { count: impact.length } }) : $i18nT('pages.shapeGraphEditor.appliedToTargets', { values: { count: impact.length } })}</span>
                 <ul class="impact-list">
-                  {#each impact.slice(0, 12) as t}
-                    {@const tt = parseTarget(t)}
+                  {#each impactChips.slice(0, 12) as tt}
                     <li>
                       {#if tt.datasetId}
-                        <Link to={`/datasets/${tt.datasetId}`} class="impact-link" title={t}><Database size={10} /> {tt.label}</Link>
+                        <Link to={`/datasets/${tt.datasetId}`} class="impact-link" title={tt.iri}><Database size={10} /> {tt.label}</Link>
                       {:else}
-                        <span class="chip chip-applied" title={t}>{tt.label}</span>
+                        <span class="chip chip-applied" title={tt.iri}>{tt.label}</span>
                       {/if}
                     </li>
                   {/each}
@@ -307,7 +330,7 @@
 
     <div class="card editor-host">
       {#key editorReloadToken}
-        <ShapesEditor shapeGraphId={id} usageTargets={impact} height="calc(100vh - 360px)" />
+        <ShapesEditor shapeGraphId={id} usageTargets={impactChips} height="calc(100vh - 360px)" />
       {/key}
     </div>
 
@@ -352,8 +375,8 @@
                   {#each metaReport.results as r}
                     <tr>
                       <td><span class="sev sev-{r.severity}">{r.severity}</span></td>
-                      <td><code>{shortIRI(r.focus_node)}</code></td>
-                      <td>{r.path ? shortIRI(r.path) : '—'}</td>
+                      <td><code title={r.focus_node}>{curie(r.focus_node)}</code></td>
+                      <td title={r.path}>{r.path ? curie(r.path) : '—'}</td>
                       <td>{r.message}</td>
                     </tr>
                   {/each}

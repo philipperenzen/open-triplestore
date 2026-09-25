@@ -1,7 +1,19 @@
+# Three real LOINC terms (LOINC 2.81), each with its LOINC code and its LOINC
+# long common name, unchanged. They are LOINC content, not project content:
+# the AGPL/Commons Clause terms do not cover them, and the LOINC licence
+# forbids changing their field contents (translations have terms of their
+# own). The notice below is the one the LOINC licence requires of any product
+# that incorporates LOINC codes; dcterms:rights carries it into the graph so
+# it travels with the seeded dataset.
+#
+# This material contains content from LOINC (http://loinc.org). LOINC is copyright © Regenstrief Institute, Inc. and the Logical Observation Identifiers Names and Codes (LOINC) Committee and is available at no cost under the license at http://loinc.org/license. LOINC® is a registered United States trademark of Regenstrief Institute, Inc.
 @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix code: <https://example.org/clinical/code/> .
 
-code:scheme a skos:ConceptScheme ; skos:prefLabel "Observation codes (LOINC-like)"@en .
+code:scheme a skos:ConceptScheme ; skos:prefLabel "Observation codes (LOINC 2.81 subset)"@en ;
+    dcterms:license <https://loinc.org/license> ;
+    dcterms:rights "This material contains content from LOINC (http://loinc.org). LOINC is copyright © Regenstrief Institute, Inc. and the Logical Observation Identifiers Names and Codes (LOINC) Committee and is available at no cost under the license at http://loinc.org/license. LOINC® is a registered United States trademark of Regenstrief Institute, Inc."@en .
 code:body-weight a skos:Concept ; skos:inScheme code:scheme ; skos:prefLabel "Body weight"@en ; skos:notation "29463-7" .
 code:body-height a skos:Concept ; skos:inScheme code:scheme ; skos:prefLabel "Body height"@en ; skos:notation "8302-2" .
 code:heart-rate a skos:Concept ; skos:inScheme code:scheme ; skos:prefLabel "Heart rate"@en ; skos:notation "8867-4" .

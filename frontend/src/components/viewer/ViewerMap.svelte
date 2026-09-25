@@ -28,8 +28,10 @@
   import { parseWktZ, wktZCentroid, wktZToLocalTriangles } from '../../lib/viewer/wktz';
   import { lonLatToLocalMeters } from '../../lib/viewer/crs';
   import { applyStudioLook, studioEnvironment } from '../../lib/viewer/studio';
+  import { runtimeBasemaps } from '../../lib/runtimeConfig';
   import {
     styleFor,
+    effectiveBasemap,
     add3dBuildings,
     buildingLayerIds,
     OSM_BUILDING_SOURCE_LAYER,
@@ -92,8 +94,20 @@
   let mapEl;
   let map = null;
   let dark = false;
-  /** Initial basemap ('streets' | 'satellite') — the toggle still switches live. */
+  /** Initial basemap ('streets' | 'satellite') — the toggle still switches live.
+   *  Satellite needs the deployment's Esri key (runtime config); without one
+   *  the map shows streets and offers no satellite toggle. */
   export let basemap = 'streets';
+  $: esriApiKey = $runtimeBasemaps.esriApiKey;
+  $: shownBasemap = effectiveBasemap(basemap, esriApiKey);
+  // The runtime config arrives after mount: a satellite map waiting for the
+  // key switches once it is there.
+  let styledWithKey = null;
+  $: if (map && esriApiKey !== styledWithKey) {
+    const before = effectiveBasemap(basemap, styledWithKey);
+    styledWithKey = esriApiKey;
+    if (before !== shownBasemap) applyStyle();
+  }
   // Layer visibility (doubles as the legend). 3D models are a custom WebGL layer,
   // so they're toggled via each model group's `.visible` rather than a layout prop.
   let layersOn = { points: true, lines: true, areas: true, models: true, labels: true, osm3d: true };
@@ -1601,7 +1615,7 @@
     if (!map) return;
     hoverPopup?.remove();
     styleReady = false;
-    map.setStyle(styleFor(basemap, dark), { diff: false });
+    map.setStyle(styleFor(basemap, dark, esriApiKey), { diff: false });
     // Overlays, buildings and the model layer re-attach on 'style.load'.
   }
 
@@ -1614,10 +1628,10 @@
   onMount(() => {
     map = new maplibregl.Map({
       container: mapEl,
-      style: styleFor(basemap, dark),
-      attributionControl: extraAttribution
-        ? { compact: true, customAttribution: extraAttribution }
-        : { compact: true },
+      style: styleFor(basemap, dark, esriApiKey),
+      // Added by syncAttribution below: the Map option is read once, at
+      // construction, before a host's feed (and so its data credit) arrives.
+      attributionControl: false,
       maxPitch: 80, // low angle for inspecting building facades
       maxZoom: 23.5, // zoom right in on individual walls/beams (basemap over-zooms)
     });
@@ -1690,6 +1704,25 @@
   });
 
   $: if (map && elements) rebuildData();
+
+  // A data credit (extraAttribution, e.g. 3DBAG's CC BY line) usually lands
+  // after mount, so the attribution control is rebuilt whenever it changes.
+  // With a credit the control uses MapLibre's responsive default instead of
+  // compact: it stays expanded where the map has room, as 3DBAG asks for its
+  // credit on a browsable map; narrow maps still collapse it to the (i) button.
+  let attribCtrl = null;
+  let attribFor = null;
+  function syncAttribution(extra) {
+    if (!map || extra === attribFor) return;
+    if (attribCtrl) map.removeControl(attribCtrl);
+    attribCtrl = new maplibregl.AttributionControl(
+      extra ? { customAttribution: extra } : { compact: true },
+    );
+    map.addControl(attribCtrl, 'bottom-right');
+    attribFor = extra;
+  }
+  $: if (map) syncAttribution(extraAttribution);
+
   /** Label for the selection chip; falls back to the IRI's last segment. */
   $: selectedLabel = selected
     ? elements.find((e) => e.id === selected)?.label || String(selected).split(/[/#]/).pop()
@@ -1713,18 +1746,20 @@
 <div class="viewer-map-wrap" style:height>
   <div bind:this={mapEl} class="viewer-map" role="application" aria-label="map"></div>
   <div class="basemap-toggle" role="group" aria-label={$i18nT('viewer.basemap')}>
-    <button
-      class:active={basemap === 'streets'}
-      title={$i18nT('viewer.basemapStreets')}
-      aria-label={$i18nT('viewer.basemapStreets')}
-      on:click={() => setBasemap('streets')}
-    ><MapIcon size={14} /></button>
-    <button
-      class:active={basemap === 'satellite'}
-      title={$i18nT('viewer.basemapSatellite')}
-      aria-label={$i18nT('viewer.basemapSatellite')}
-      on:click={() => setBasemap('satellite')}
-    ><Satellite size={14} /></button>
+    {#if esriApiKey}
+      <button
+        class:active={shownBasemap === 'streets'}
+        title={$i18nT('viewer.basemapStreets')}
+        aria-label={$i18nT('viewer.basemapStreets')}
+        on:click={() => setBasemap('streets')}
+      ><MapIcon size={14} /></button>
+      <button
+        class:active={shownBasemap === 'satellite'}
+        title={$i18nT('viewer.basemapSatellite')}
+        aria-label={$i18nT('viewer.basemapSatellite')}
+        on:click={() => setBasemap('satellite')}
+      ><Satellite size={14} /></button>
+    {/if}
     <button
       class="fit-all-btn"
       title={$i18nT('viewer.fitAll')}

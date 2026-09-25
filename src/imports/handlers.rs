@@ -274,8 +274,23 @@ pub async fn bulk_import(
     let authz_namespace = authz_dataset_id
         .as_deref()
         .map(|ds_id| format!("{}/", dataset_graph::dataset_iri(&state.base_url, ds_id)));
+    let authz_store = state.store.clone();
+    let authz_base = state.base_url.clone();
     let authorize = move |graphs: &[String]| -> Result<(), String> {
-        // Admins and unmanaged (admin-only) imports may target any graph.
+        // No import writes a model-registry graph — the registry graph, a model
+        // version's graph, or anything under {base}/data-model/ — admins
+        // included: models change through the data-model API, which keeps
+        // their licence records true and refuses altered copies of content
+        // whose licence allows none (IMBOR).
+        for g in graphs {
+            if dataset_graph::graph_held_by_model_registry(&authz_store, &authz_base, g) {
+                return Err(format!(
+                    "Target graph <{g}> belongs to the model registry; change models through the \
+                     data-model API (/api/models), not a bulk import."
+                ));
+            }
+        }
+        // Admins and unmanaged (admin-only) imports may target any other graph.
         if authz_is_admin || authz_dataset_id.is_none() {
             return Ok(());
         }
@@ -465,6 +480,7 @@ pub async fn bulk_import(
     let gate_store = state.store.clone();
     let gate_db = state.auth_db.clone();
     let gate_base = state.base_url.clone();
+    let gate_writer = user.clone();
 
     let text_state = state.clone();
     let text_outcome = outcome.clone();
@@ -475,6 +491,7 @@ pub async fn bulk_import(
             auth_db: &gate_db,
             studio: &studio,
             base_url: &gate_base,
+            writer: Some(&gate_writer),
         };
         let gate = WriteGate {
             applies: Box::new(|g| crate::shacl_studio::gate::import_gates_apply(gate_ctx, g)),
@@ -531,23 +548,34 @@ pub async fn bulk_import(
             .cloned()
             .or_else(|| meta.default_target_graph.clone());
         // Same write-scope rule as the RDF path: non-admins may only target
-        // graphs registered solely to this dataset or under its IRI namespace.
-        if !authz_is_admin {
-            if let Some(t) = target.as_deref() {
-                let namespace =
-                    format!("{}/dataset/{}", state.base_url.trim_end_matches('/'), ds_id);
-                let registered = state.auth_db.list_dataset_graphs(ds_id).unwrap_or_default();
-                let owned_by_other = state
-                    .auth_db
-                    .graph_has_other_dataset_refs(t, ds_id)
-                    .unwrap_or(true);
-                let in_scope = registered.iter().any(|g| g == t) || t.starts_with(&namespace);
-                if owned_by_other || !in_scope {
-                    return Err(AppError::Forbidden(format!(
-                        "Target graph <{t}> is outside dataset '{ds_id}'"
-                    )));
-                }
-            }
+        // graphs registered solely to this dataset or under its IRI namespace,
+        // and nobody a model-registry graph. The import also writes the ifcOWL
+        // graph `{target}/ifcowl` next to the target, which the dataset takes
+        // up like any other new graph (see `gate_dataset_graph_target`).
+        let mut ifcowl_claim = None;
+        if let Some(t) = target.as_deref().filter(|t| !t.trim().is_empty()) {
+            dataset_graph::authorize_dataset_write_target(
+                &state.store,
+                &state.auth_db,
+                &state.base_url,
+                ds_id,
+                t,
+                authz_is_admin,
+            )
+            .map_err(AppError::Forbidden)?;
+            let ifcowl = format!("{t}/ifcowl");
+            ifcowl_claim = Some((
+                dataset_graph::gate_dataset_graph_target(
+                    &state.store,
+                    &state.auth_db,
+                    &state.base_url,
+                    ds_id,
+                    &ifcowl,
+                    &user,
+                )
+                .map_err(AppError::Forbidden)?,
+                ifcowl,
+            ));
         }
         match crate::imports::ifc::import_ifc_bytes(
             &state,
@@ -566,6 +594,14 @@ pub async fn bulk_import(
         {
             Ok(outcome) => {
                 result.success_count += 1;
+                if let Some((claim, ifcowl)) = &ifcowl_claim {
+                    let _ = dataset_graph::register_claimed_graph(
+                        &state.auth_db,
+                        ds_id,
+                        ifcowl,
+                        *claim,
+                    );
+                }
                 let mut graphs = vec![outcome.bot_graph.clone()];
                 if let Some(g) = &outcome.ifcowl_graph {
                     graphs.push(g.clone());
@@ -610,22 +646,16 @@ pub async fn bulk_import(
             .cloned()
             .or_else(|| meta.default_target_graph.clone());
         // Same write-scope rule as the IFC/RDF paths.
-        if !authz_is_admin {
-            if let Some(t) = target.as_deref() {
-                let namespace =
-                    format!("{}/dataset/{}", state.base_url.trim_end_matches('/'), ds_id);
-                let registered = state.auth_db.list_dataset_graphs(ds_id).unwrap_or_default();
-                let owned_by_other = state
-                    .auth_db
-                    .graph_has_other_dataset_refs(t, ds_id)
-                    .unwrap_or(true);
-                let in_scope = registered.iter().any(|g| g == t) || t.starts_with(&namespace);
-                if owned_by_other || !in_scope {
-                    return Err(AppError::Forbidden(format!(
-                        "Target graph <{t}> is outside dataset '{ds_id}'"
-                    )));
-                }
-            }
+        if let Some(t) = target.as_deref().filter(|t| !t.trim().is_empty()) {
+            dataset_graph::authorize_dataset_write_target(
+                &state.store,
+                &state.auth_db,
+                &state.base_url,
+                ds_id,
+                t,
+                authz_is_admin,
+            )
+            .map_err(AppError::Forbidden)?;
         }
         match crate::imports::cityjson::import_cityjson_bytes(
             &state,

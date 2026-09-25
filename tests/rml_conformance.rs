@@ -446,19 +446,25 @@ fn rml_blank_node_subject_shared_across_poms() {
     );
 }
 
-// Tracked gap: referencing object maps (rr:parentTriplesMap joins) are not modelled.
+// Referencing object maps (`rr:parentTriplesMap` + `rr:joinCondition`) are
+// modelled and executed for RELATIONAL logical sources, where the parent can be
+// streamed and indexed (see the `rml::sql` unit tests). For a FILE source there
+// is nothing to join against a second time, so the mapping parses and the
+// referencing triple is simply not produced.
 #[test]
-fn rml_referencing_object_map_join_is_gap() {
+fn rml_referencing_object_map_parses_but_file_sources_do_not_join() {
     let mapping = r#"
       ex:Child a rr:TriplesMap ;
         rml:logicalSource ex:CSrc ; rr:subjectMap ex:CSubj ;
-        rr:predicateObjectMap ex:ParentPOM .
+        rr:predicateObjectMap ex:ParentPOM, ex:OwnPOM .
       ex:CSrc rml:source "c.csv" ; rml:referenceFormulation ql:CSV .
       ex:CSubj rr:template "http://example.org/c/{id}" .
       ex:ParentPOM rr:predicate ex:parent ; rr:objectMap ex:ParentObj .
       ex:ParentObj rr:parentTriplesMap ex:Parent ;
         rr:joinCondition ex:Join .
       ex:Join rr:child "pid" ; rr:parent "id" .
+      ex:OwnPOM rr:predicate ex:own ; rr:objectMap ex:OwnObj .
+      ex:OwnObj rml:reference "pid" .
       ex:Parent a rr:TriplesMap ;
         rml:logicalSource ex:PSrc ; rr:subjectMap ex:PSubj ;
         rr:predicateObjectMap ex:NamePOM .
@@ -466,39 +472,62 @@ fn rml_referencing_object_map_join_is_gap() {
       ex:PSubj rr:template "http://example.org/p/{id}" .
       ex:NamePOM rr:predicate foaf:name ; rr:objectMap ex:NameObj .
       ex:NameObj rml:reference "name" ."#;
-    // Control: the same two maps WITHOUT the referencing object map parse fine, so
-    // an Err below is attributable to the join and not to an unrelated parser
-    // regression. (The Err arm used to be empty, so any parse failure at all —
-    // including one that broke every mapping — made this test pass.)
-    let control = mapping
-        .replace("rr:objectMap ex:ParentObj", "rr:objectMap ex:ParentConst")
-        .replace(
-            "ex:ParentObj rr:parentTriplesMap ex:Parent ;\n        rr:joinCondition ex:Join .",
-            "ex:ParentConst rr:constant ex:p .",
-        );
-    parse_rml(&format!("{PFX}{control}")).expect("the mapping without the join must parse");
-    // The referencing object map has no template/reference/constant, so the engine
-    // either fails to parse the mapping OR produces no joined triple — both confirm
-    // the gap. (Neither outcome is a join.)
-    let m = parse_rml(&format!("{PFX}{mapping}"));
-    match m {
-        Err(e) => {
-            let msg = e.to_string();
-            assert!(!msg.is_empty(), "a rejected join mapping must say why");
-        }
-        Ok(m) => {
-            let mut src = HashMap::new();
-            src.insert("c.csv".to_string(), "id,pid\n1,10\n".to_string());
-            src.insert("p.csv".to_string(), "id,name\n10,Pat\n".to_string());
-            let store = TripleStore::in_memory().unwrap();
-            let _ = execute(&m, &src, &store, None);
-            assert_eq!(
-                count(&store, "SELECT ?o WHERE { <http://example.org/c/1> ex:parent <http://example.org/p/10> }"),
-                0,
-                "tracked gap: rr:parentTriplesMap joins are not implemented"
-            );
-        }
-    }
+
+    let m = parse_rml(&format!("{PFX}{mapping}"))
+        .expect("a referencing object map is part of the model, so the mapping parses");
+    let mut src = HashMap::new();
+    src.insert("c.csv".to_string(), "id,pid\n1,10\n".to_string());
+    src.insert("p.csv".to_string(), "id,name\n10,Pat\n".to_string());
+    let store = TripleStore::in_memory().unwrap();
+    execute(&m, &src, &store, None).expect("the rest of the mapping still runs");
+
+    assert_eq!(
+        count(
+            &store,
+            "SELECT ?o WHERE { <http://example.org/c/1> ex:parent <http://example.org/p/10> }"
+        ),
+        0,
+        "a file logical source has no queryable parent to join to"
+    );
+    // The surrounding mapping is unaffected: the child's own properties and the
+    // parent triples map both produce their triples.
+    assert_eq!(
+        count(
+            &store,
+            "SELECT ?o WHERE { <http://example.org/c/1> ex:own \"10\" }"
+        ),
+        1,
+        "the child's own predicate-object map still fires"
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT ?o WHERE { <http://example.org/p/10> foaf:name \"Pat\" }"
+        ),
+        1,
+        "the parent triples map still produces its own triples"
+    );
+}
+
+// A relational logical source is executed through a connection, so the
+// file-based entry point refuses it rather than silently producing nothing.
+#[test]
+fn rml_relational_source_is_refused_by_the_file_executor() {
+    let m = parse_rml(&format!(
+        "{PFX}
+         ex:M a rr:TriplesMap ;
+           rml:logicalSource [ rml:source <urn:source:legacy> ; rr:tableName \"products\" ] ;
+           rr:subjectMap [ rr:template \"http://example.org/p/{{id}}\" ] ;
+           rr:predicateObjectMap [ rr:predicate ex:name ; rr:objectMap [ rr:column \"name\" ] ] ."
+    ))
+    .expect("a relational mapping parses");
+    let store = TripleStore::in_memory().unwrap();
+    let err = execute(&m, &HashMap::new(), &store, None).unwrap_err();
+    assert!(
+        err.contains("/api/sources/"),
+        "the error names the path that can run it: {err}"
+    );
+    assert_eq!(store.len().unwrap(), 0, "nothing was written");
 }
 
 // A quoted CSV field containing a newline must produce a correctly escaped

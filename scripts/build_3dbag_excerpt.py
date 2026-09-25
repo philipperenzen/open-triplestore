@@ -19,7 +19,10 @@ The LoD0 footprint vertices are LIFTED from z=0 to the building's ground level
 solids carry real NAP heights (~10 m here), and any viewer that grounds a model
 at its lowest vertex would otherwise float every solid a storey above the map.
 
-Data: (c) 3DBAG by tudelft3d and 3DGI, CC BY 4.0 - https://docs.3dbag.nl/en/copyright/
+Data: © 3DBAG by tudelft3d and 3DGI, CC BY 4.0
+(https://creativecommons.org/licenses/by/4.0/), https://docs.3dbag.nl/en/copyright/.
+The output is an adaptation, so its metadata.title says "modified", names the
+changes above and carries the licence URI (CC BY 4.0 §3(a)(1)).
 
 Usage:  python scripts/build_3dbag_excerpt.py
 """
@@ -34,6 +37,19 @@ API = "https://api.3dbag.nl/collections/pand/items"
 # (street centroid RD 185772,428156 per PDOK locatieserver, at the NE corner).
 BBOX = "185610,428010,185760,428160"
 OUT = Path(__file__).resolve().parent.parent / "frontend/public/samples/schependomlaan-3dbag.city.json"
+
+# The 3DBAG release the API serves, recorded in the output. Check it against
+# https://docs.3dbag.nl/en/overview/release_notes/ on every regeneration: the
+# API's own collection metadata (version.collection) still reported v2023.10.08
+# while serving 2025.09.03 data (b3_h_nok, first published in 2025.09.03).
+RELEASE = "2025.09.03"
+
+# Attribution + licence notice. The credit wording is 3DBAG's own
+# (https://docs.3dbag.nl/en/copyright/); CC BY 4.0 §3(a)(1) adds the licence
+# URI and the statement that this copy was modified.
+CREDIT = "© 3DBAG by tudelft3d and 3DGI"
+LICENSE_URI = "https://creativecommons.org/licenses/by/4.0/"
+COPYRIGHT_PAGE = "https://docs.3dbag.nl/en/copyright/"
 
 # Curated attribute allow-list: the BAG registry facts + the 3DBAG-derived
 # building metrics that make good linked data. Percentile/nodata/mutation
@@ -154,8 +170,11 @@ def main():
         "version": "2.0",
         "metadata": {
             "title": (
-                "Schependomlaan block, Nijmegen - 3DBAG LoD2.2 excerpt. "
-                "(c) 3DBAG by tudelft3d and 3DGI, CC BY 4.0 - https://docs.3dbag.nl/en/copyright/"
+                f"Schependomlaan block, Nijmegen - 3DBAG LoD2.2 excerpt, modified from 3DBAG {RELEASE} "
+                "(api.3dbag.nl): LoD1.2/1.3 geometry dropped, building attributes cut to an allow-list and "
+                "rounded to 3 decimals, LoD0 footprints raised from z=0 to ground level (b3_h_maaiveld), "
+                "merged into one CityJSON 2.0 document. "
+                f"{CREDIT}, CC BY 4.0 {LICENSE_URI} - {COPYRIGHT_PAGE}"
             ),
             "referenceSystem": ref,
         },
@@ -163,7 +182,8 @@ def main():
         "CityObjects": out_objects,
         "vertices": out_vertices,
     }
-    OUT.write_text(json.dumps(doc, separators=(",", ":")), encoding="utf-8")
+    # ensure_ascii=False writes the credit's "©" as-is, not as a "\u00a9" escape.
+    OUT.write_text(json.dumps(doc, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
     print(
         f"wrote {OUT} - {n_buildings} buildings / {n_parts} parts, "
         f"{len(out_vertices)} vertices, {OUT.stat().st_size / 1024:.0f} KiB",

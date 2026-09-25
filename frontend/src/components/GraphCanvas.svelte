@@ -1014,6 +1014,14 @@
     return out;
   }
 
+  // Provenance edges whose object names a geometry's source (see GeoPreview's
+  // `sources`: a licensed source's credit travels with the preview).
+  const PROVENANCE_PREDICATES = [
+    'http://www.w3.org/ns/prov#wasDerivedFrom',
+    'http://purl.org/dc/terms/source',
+    'http://purl.org/dc/elements/1.1/source',
+  ];
+
   function buildInspector(node) {
     if (!node || node.length === 0) return null;
     const nodeType = node.data('nodeType') || 'uri';
@@ -1601,6 +1609,11 @@
     </div>
   {/if}
 
+  <!-- The inline 24×24 icons here, in the zoom controls and on the settings close
+       button are copied Lucide icon geometry (ISC, © Lucide Contributors):
+       pin and rotate-ccw are Lucide's own; search, maximize-2, zoom-in,
+       zoom-out, download, settings and x are Feather's shapes (MIT, © Cole
+       Bemis). Licence texts: LICENSES/Lucide-ISC.txt, LICENSES/Feather-MIT.txt. -->
   <!-- Built-in node search (top-left) — minimised to an icon, expands on hover/click.
        Autocomplete is sourced only from nodes currently in the graph. -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -1682,7 +1695,7 @@
     </div>
   {/if}
 
-  <!-- Zoom controls (top-right) -->
+  <!-- Zoom controls (top-right); icon provenance is noted above the node search -->
   <div class="graph-controls">
     <button class="ctrl-btn" title={$t('pages.graphViz.fitAllTitle')} on:click={fitAll} aria-label={$t('pages.graphViz.fitAll')}>
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
@@ -1867,7 +1880,11 @@
           {#if p.model.geometries.length > 0}
             <div class="insp-section">
               <div class="insp-section-head"><MapPin size={12} /> {$t('pages.graphViz.inspectorConnectedData')}</div>
-              <GeoPreview wkts={p.model.geometries} height="150px" />
+              <GeoPreview
+                wkts={p.model.geometries}
+                sources={[p.model.iri, ...p.model.props.filter((pp) => PROVENANCE_PREDICATES.includes(pp.predicate)).map((pp) => pp.o?.value)].filter(Boolean)}
+                height="150px"
+              />
             </div>
           {/if}
 

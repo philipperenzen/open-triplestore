@@ -205,7 +205,7 @@ fn client() -> &'static reqwest::Client {
 /// A blocking request from synchronous code (the SPARQL evaluator runs on a
 /// blocking thread). It runs on the module's own runtime, on a scoped OS
 /// thread, so it is safe to call from inside or outside a tokio runtime.
-fn blocking<F, T>(fut: F) -> T
+pub(crate) fn blocking<F, T>(fut: F) -> T
 where
     F: std::future::Future<Output = T> + Send,
     T: Send,
@@ -217,28 +217,47 @@ where
     })
 }
 
-/// `POST` a SPARQL query to `endpoint` (SPARQL 1.1 Protocol, direct POST) and
-/// return the body as `application/sparql-results+json` text, optionally as
-/// the bearer of `bearer` (a federation identity assertion).
-pub fn post_sparql_blocking_with_auth(
+/// How an outbound SPARQL request identifies itself.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Auth<'a> {
+    None,
+    /// A federation identity assertion, or a token the caller holds.
+    Bearer(&'a str),
+    /// HTTP Basic — what a virtual datasource's account is, resolved from
+    /// its secret reference at the moment of use and never kept.
+    Basic(&'a str, &'a str),
+}
+
+/// `POST` a SPARQL query to `endpoint` and return the body as text in the
+/// format `accept` asks for — results JSON for a SELECT/ASK, N-Triples for
+/// a CONSTRUCT. Behind the allowlist, with the module's timeout.
+pub(crate) fn post_sparql_blocking(
     endpoint: &str,
     query: &str,
-    bearer: Option<&str>,
+    accept: &str,
+    auth: Auth<'_>,
 ) -> Result<String, RemoteError> {
     if !is_allowed(endpoint) {
         return Err(RemoteError::NotAllowed(endpoint.to_string()));
     }
     let endpoint = endpoint.to_string();
     let query = query.to_string();
-    let bearer = bearer.map(str::to_string);
+    let accept = accept.to_string();
+    let auth = match auth {
+        Auth::None => None,
+        Auth::Bearer(b) => Some((b.to_string(), None)),
+        Auth::Basic(u, p) => Some((u.to_string(), Some(p.to_string()))),
+    };
     blocking(async move {
         let mut req = client().post(&endpoint).timeout(timeout());
-        if let Some(b) = &bearer {
-            req = req.bearer_auth(b);
+        match &auth {
+            Some((bearer, None)) => req = req.bearer_auth(bearer),
+            Some((user, Some(password))) => req = req.basic_auth(user, Some(password)),
+            None => {}
         }
         let resp = req
             .header("Content-Type", "application/sparql-query")
-            .header("Accept", "application/sparql-results+json")
+            .header("Accept", accept)
             .body(query)
             .send()
             .await

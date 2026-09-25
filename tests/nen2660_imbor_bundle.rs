@@ -4,9 +4,11 @@
 //! against the model layer and validated through the bound shapes — through
 //! the real API, exactly like the domain-neutral layered-reference bundle.
 //!
-//! The RDF is not vendored (run the bundle's fetch.sh once). Without it this
-//! test reports that it skipped and passes, so CI stays green; with it, the
-//! benchmark runs on the real data.
+//! The RDF is not vendored: NEN 2660-2 carries no licence that allows
+//! redistributing it, so the bundle's fetch.sh downloads both payloads from
+//! their publishers. Without them this test reports that it skipped; CI's
+//! conformance job fetches them and sets OTS_TEST_SEED_PAYLOADS_REQUIRED, which
+//! turns a missing payload into a failure.
 
 mod common;
 
@@ -56,6 +58,12 @@ async fn nen2660_imbor_bundle_classifies_and_validates_real_data() {
     let bundle = bundles.join("nen2660-imbor");
     for needed in ["nen2660-rdfs.ttl", "imbor-release/imbor2025-kern.ttl"] {
         if !bundle.join(needed).exists() {
+            // CI fetches the payloads and sets OTS_TEST_SEED_PAYLOADS_REQUIRED,
+            // so a failed fetch fails there instead of skipping.
+            assert!(
+                std::env::var_os("OTS_TEST_SEED_PAYLOADS_REQUIRED").is_none(),
+                "OTS_TEST_SEED_PAYLOADS_REQUIRED is set but {needed} is not present"
+            );
             eprintln!(
                 "SKIP: {} is not present — run examples/seed-bundles/nen2660-imbor/fetch.sh to run the real-data benchmark",
                 needed
@@ -155,6 +163,21 @@ async fn nen2660_imbor_bundle_classifies_and_validates_real_data() {
     assert!(
         !txt.contains("imbor-sample/boom-1"),
         "boom-1 conforms: {txt}"
+    );
+    // The planted violation is the only one: the sample carries everything
+    // Kern requires of a beheerobject through its superclasses.
+    let results = report["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1, "{txt}");
+    assert_eq!(
+        results[0]["focus_node"], "https://example.org/imbor-sample/boom-3",
+        "{txt}"
+    );
+    assert!(
+        results[0]["path"]
+            .as_str()
+            .unwrap()
+            .contains("39231ace-3d00-4bcc-b4db-31dbb2c0bb6f"),
+        "the kiemjaar datatype: {txt}"
     );
 
     // 5. The catalogue advertises the conformance to the IMBOR model version.

@@ -28,12 +28,21 @@
   // hop and harvest their WKT + model-file values too.
   let hopWkts = [];
   let hopModels = [];
+  // Where the geometry came from (the geometry nodes and their provenance), so
+  // the map can carry the credit a licensed source requires (3DBAG's CC BY).
+  let hopSources = [];
+  const PROVENANCE_PREDICATES = [
+    'http://www.w3.org/ns/prov#wasDerivedFrom',
+    'http://purl.org/dc/terms/source',
+    'http://purl.org/dc/elements/1.1/source',
+  ];
   async function followGeometryHops(rows) {
     // Snapshot the IRI: the router reuses this component across navigations,
     // so a slow response for the previous resource must not overwrite state.
     const forIri = iri;
     hopWkts = [];
     hopModels = [];
+    hopSources = [];
     const targets = rows
       .filter((r) => isGeometryPredicate(r.p?.value))
       .map((r) => r.o)
@@ -47,9 +56,11 @@
     if (forIri !== iri) return; // navigated away while loading
     const wkts = [];
     const models = [];
+    const sources = [...targets];
     const scanRow = (r) => {
       if (isWktLiteral(r.o)) wkts.push(r.o.value);
       const v = r.o?.value;
+      if (typeof v === 'string' && PROVENANCE_PREDICATES.includes(r.p?.value)) sources.push(v);
       if (typeof v === 'string') {
         const format = modelFormatFromUrl(v);
         if (format) models.push({ id: v, label: shortenIRI(r.p?.value || ''), url: v, format });
@@ -62,6 +73,7 @@
     }
     hopWkts = wkts;
     hopModels = models;
+    hopSources = sources;
   }
   $: followGeometryHops(outgoing);
 
@@ -69,6 +81,14 @@
   $: allModels = [
     ...featuredModels,
     ...hopModels.filter((m) => !featuredModels.some((f) => f.url === m.url)),
+  ];
+  $: geoSources = [
+    iri,
+    ...outgoing
+      .filter((r) => PROVENANCE_PREDICATES.includes(r.p?.value) && typeof r.o?.value === 'string')
+      .map((r) => r.o.value),
+    ...hopSources,
+    ...allModels.map((m) => m.url),
   ];
 
   // Real-world footprint for the map's "to scale" toggle, measured from the
@@ -848,7 +868,7 @@
           <h3><MapPin size={14} /> {$i18nT('pages.resource.geometry')}</h3>
           {#await geoPreviewMod then GP}
             {#if GP}
-              <svelte:component this={GP.default} wkts={allWkts} scaleMeters={modelMeters} />
+              <svelte:component this={GP.default} wkts={allWkts} scaleMeters={modelMeters} sources={geoSources} />
             {/if}
           {/await}
         </div>

@@ -1,10 +1,17 @@
-# SHACL conformance — official W3C test suite
+# SHACL — results on the W3C SHACL test suite
 
-The official **W3C SHACL test suite** (`core` and `sparql` sections) is vendored under
-[`tests/fixtures/w3c-shacl/`](../../tests/fixtures/w3c-shacl/PROVENANCE.md) and runs in CI
+The `core` and `sparql` sections of the W3C Data Shapes Working Group's **SHACL test
+suite** are vendored under
+[`tests/fixtures/w3c-shacl/`](../../tests/fixtures/w3c-shacl/PROVENANCE.md) and run in CI
 via [`tests/w3c_shacl_conformance.rs`](../../tests/w3c_shacl_conformance.rs).
 
-## Scorecard (2026-09-10)
+The counts below are development and regression results on those sections, at the
+comparison level described below (not full result-set equality). They are not a claim
+of conformance to the W3C SHACL Recommendation, and W3C has not reviewed or endorsed
+them. The tests are redistributed under the W3C Software and Document License — see
+[`PROVENANCE.md`](../../tests/fixtures/w3c-shacl/PROVENANCE.md) there.
+
+## Results (2026-09-10)
 
 | | core | sparql | total |
 |---|---|---|---|
@@ -95,7 +102,7 @@ form / `_:label`), so the HTTP/JSON report shape is unchanged. What that fixed:
 
 ## Engine fixes driven by this suite
 
-Running the official suite (rather than only in-house tests) immediately surfaced and
+Running the W3C suite (rather than only in-house tests) immediately surfaced and
 fixed real engine bugs:
 
 - **Value-node semantics** for `sh:not`/`sh:and`/`sh:or`/`sh:xone`/`sh:node` in property

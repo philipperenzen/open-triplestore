@@ -1,3 +1,14 @@
+# FOAF Vocabulary Specification 0.99 (Paddington Edition, 14 January 2014) — the
+# Friend of a Friend (FOAF) vocabulary, namespace http://xmlns.com/foaf/0.1/.
+# Source: http://xmlns.com/foaf/spec/index.rdf (identical to
+# http://xmlns.com/foaf/spec/20140114.rdf); specification http://xmlns.com/foaf/spec/
+# Copyright © 2000-2014 Dan Brickley and Libby Miller. This copyright applies to
+# the FOAF Vocabulary Specification and accompanying documentation in RDF.
+# Licence: Creative Commons Attribution 1.0 (CC BY 1.0),
+# http://creativecommons.org/licenses/by/1.0/
+# Changes by Open Triplestore: converted from RDF/XML to Turtle (all 631 triples
+# unchanged, checked 2026-09-23) and this comment header added.
+# Full attribution and licence texts: NOTICE.md in this directory.
 @prefix dc: <http://purl.org/dc/elements/1.1/> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix foaf: <http://xmlns.com/foaf/0.1/> .

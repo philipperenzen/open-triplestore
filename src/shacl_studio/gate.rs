@@ -10,6 +10,7 @@ use oxigraph::io::RdfFormat;
 use oxigraph::model::{GraphName, NamedNode, Quad};
 
 use crate::auth::db::AuthDb;
+use crate::auth::middleware::AuthenticatedUser;
 use crate::auth::models::Dataset;
 use crate::shacl::report::ValidationReport;
 use crate::store::TripleStore;
@@ -22,9 +23,9 @@ use super::models::{SeverityThreshold, TargetKind, ValidationPipeline};
 use super::models::{ResultsTarget, WriteTarget};
 use super::store::ShaclStudioStore;
 
-/// The stores and configuration every gate lookup needs.
+/// The stores and configuration every gate lookup needs, and who is writing.
 ///
-/// These four travel together through `discover_gates`, `check_write_gates` and
+/// These travel together through `discover_gates`, `check_write_gates` and
 /// `check_import_gates`; bundling them keeps those signatures readable (and
 /// under clippy's argument-count limit) as gates gain parameters of their own.
 #[derive(Clone, Copy)]
@@ -33,6 +34,62 @@ pub struct GateContext<'a> {
     pub auth_db: &'a AuthDb,
     pub studio: &'a ShaclStudioStore,
     pub base_url: &'a str,
+    /// The writer a refusal's report goes to (`None`: an anonymous writer).
+    /// It carries the gate's shapes, so it is theirs only as far as they may
+    /// read them ([`report_for_writer`]).
+    pub writer: Option<&'a AuthenticatedUser>,
+}
+
+/// A gate's refusal: the failing gate's report, and the shape graphs that
+/// gate validated against (none for a gate that could not be evaluated).
+type Refusal = Box<(ValidationReport, Vec<String>)>;
+
+fn refusal(report: ValidationReport, shape_graphs: Vec<String>) -> Refusal {
+    Box::new((report, shape_graphs))
+}
+
+/// A refusal's report as `writer` (`None`: anonymous) may see it.
+///
+/// A report names its shapes (`sh:sourceShape`), their paths and their
+/// messages, and a default message quotes a constraint's parameters. So when
+/// the refusing gate validated against a graph some dataset holds as private
+/// that the writer may not read by the `/sparql` rule
+/// ([`crate::auth::acl::private_graph_withheld`]), the writer gets only that
+/// the write was refused, and by how many results. The gate still gates: this
+/// changes what the refusal says, never whether the write is refused. A
+/// lookup error withholds.
+pub(crate) fn report_for_writer(
+    auth_db: &AuthDb,
+    writer: Option<&AuthenticatedUser>,
+    report: ValidationReport,
+    shape_graphs: &[String],
+) -> ValidationReport {
+    use crate::shacl::report::{Severity, ValidationResult};
+    let withheld = shape_graphs
+        .iter()
+        .any(|g| crate::auth::acl::private_graph_withheld(auth_db, writer, g).unwrap_or(true));
+    if !withheld {
+        return report;
+    }
+    ValidationReport {
+        conforms: false,
+        results: vec![ValidationResult {
+            severity: Severity::Violation,
+            focus_node: String::new(),
+            path: None,
+            value: None,
+            source_shape: String::new(),
+            source_constraint: "withheld".to_string(),
+            message: format!(
+                "The write does not conform to the shapes that gate this graph ({} result(s)). \
+                 Some of those shapes are in a graph you may not read, so the details are \
+                 withheld: ask the dataset's writers.",
+                report.results_count
+            ),
+        }],
+        results_count: 1,
+        metrics: None,
+    }
 }
 
 /// How the incoming data will be applied to the target graph.
@@ -122,10 +179,11 @@ pub fn check_write_gates(
         auth_db,
         studio,
         base_url,
+        writer,
     } = ctx;
     // The legacy per-dataset `shacl_on_write` gate is handled separately by
     // `validate_on_write` on this path, so it is excluded here.
-    let gates = discover_gates(main_store, auth_db, studio, base_url, graph_iri, false);
+    let gates = discover_gates(main_store, auth_db, studio, base_url, graph_iri, false)?;
     if gates.is_empty() {
         return Ok(());
     }
@@ -148,7 +206,10 @@ pub fn check_write_gates(
     }
     copy_shape_graphs(main_store, &temp, &needed_graphs)?;
 
-    evaluate_gates(&temp, studio, &gates, graph_iri)
+    evaluate_gates(&temp, studio, &gates, graph_iri).map_err(|refusal| {
+        let (report, shapes) = *refusal;
+        report_for_writer(auth_db, writer, report, &shapes)
+    })
 }
 
 /// Cheap pre-check for bulk import: does *any* gate apply to writes into
@@ -156,16 +217,22 @@ pub fn check_write_gates(
 /// (graph- and dataset-level) and the owning dataset's legacy `shacl_on_write`
 /// shapes graph. Metadata lookups only — no quad scans, no temp store — so
 /// large imports with no gates configured (the common case) pay near-nothing.
+///
+/// `true` when a lookup fails: whether a gate applies is then unknown, so the
+/// import goes on to [`check_import_gates`], which discovers again and refuses
+/// it unless the lookup now succeeds.
 pub fn import_gates_apply(ctx: GateContext<'_>, graph_iri: &str) -> bool {
-    !discover_gates(
+    match discover_gates(
         ctx.main_store,
         ctx.auth_db,
         ctx.studio,
         ctx.base_url,
         graph_iri,
         true,
-    )
-    .is_empty()
+    ) {
+        Ok(gates) => !gates.is_empty(),
+        Err(_) => true,
+    }
 }
 
 /// Quad-based write gate for bulk import: validates `quads` (re-homed into
@@ -184,8 +251,9 @@ pub fn check_import_gates(
         auth_db,
         studio,
         base_url,
+        writer,
     } = ctx;
-    let gates = discover_gates(main_store, auth_db, studio, base_url, graph_iri, true);
+    let gates = discover_gates(main_store, auth_db, studio, base_url, graph_iri, true)?;
     if gates.is_empty() {
         return Ok(());
     }
@@ -214,7 +282,10 @@ pub fn check_import_gates(
         .map_err(|e| gate_error(format!("staging the incoming quads: {e}")))?;
     copy_shape_graphs(main_store, &temp, &needed_graphs)?;
 
-    evaluate_gates(&temp, studio, &gates, graph_iri)
+    evaluate_gates(&temp, studio, &gates, graph_iri).map_err(|refusal| {
+        let (report, shapes) = *refusal;
+        report_for_writer(auth_db, writer, report, &shapes)
+    })
 }
 
 /// Compact human-readable summary of a failed validation report, for error
@@ -262,6 +333,14 @@ impl GateSet {
     }
 }
 
+/// Every gate that applies to a write to `graph_iri`.
+///
+/// `Err` when a lookup fails. Each lookup used to fall back to "none" — the
+/// owning dataset on `.ok().flatten()`, the gating pipelines on
+/// `.unwrap_or_default()`, the bindings on an empty result — so a database
+/// error dropped the gates it would have found and the write landed
+/// unvalidated. A gate set that could not be discovered is a gate that could
+/// not be evaluated, and refuses the write like one.
 fn discover_gates(
     main_store: &TripleStore,
     auth_db: &AuthDb,
@@ -269,16 +348,18 @@ fn discover_gates(
     base_url: &str,
     graph_iri: &str,
     include_legacy_dataset_gate: bool,
-) -> GateSet {
+) -> Result<GateSet, ValidationReport> {
     // Which dataset (if any) owns the graph being written — needed both for
     // pipelines scoped by dataset and for dataset-level bindings.
-    let owning_dataset = auth_db.find_dataset_by_graph_iri(graph_iri).ok().flatten();
+    let owning_dataset = auth_db
+        .find_dataset_by_graph_iri(graph_iri)
+        .map_err(|e| gate_error(format!("looking up the dataset holding <{graph_iri}>: {e}")))?;
 
     // (a) Gating pipelines whose scope covers this graph, by a route their
     // creator may still write.
     let pipelines: Vec<ValidationPipeline> = studio
         .list_gating_pipelines()
-        .unwrap_or_default()
+        .map_err(|e| gate_error(format!("listing the gating pipelines: {e}")))?
         .into_iter()
         .filter(|p| {
             pipeline_covers_graph(p, graph_iri, owning_dataset.as_ref().map(|d| d.id.as_str()))
@@ -308,12 +389,17 @@ fn discover_gates(
 
     // (b) Bindings that apply to this write: shapes on the written graph itself
     // plus dataset-level shapes on its owner.
-    let mut binding_graphs: BTreeSet<String> = bindings::bindings_for_target(main_store, graph_iri)
-        .into_iter()
-        .collect();
+    let bindings_of = |target: &str| {
+        bindings::try_bindings_for_target(main_store, target).map_err(|e| {
+            gate_error(format!(
+                "reading the validation-layer bindings of <{target}>: {e}"
+            ))
+        })
+    };
+    let mut binding_graphs: BTreeSet<String> = bindings_of(graph_iri)?.into_iter().collect();
     if let Some(ds) = &owning_dataset {
         let ds_iri = bindings::dataset_target_iri(base_url, &ds.id);
-        binding_graphs.extend(bindings::bindings_for_target(main_store, &ds_iri));
+        binding_graphs.extend(bindings_of(&ds_iri)?);
     }
 
     // (c) Legacy per-dataset gate (`shacl_on_write` + `shapes_graph_iri`).
@@ -327,11 +413,11 @@ fn discover_gates(
         None
     };
 
-    GateSet {
+    Ok(GateSet {
         pipelines,
         binding_graphs,
         legacy_shapes_graph,
-    }
+    })
 }
 
 /// The graphs holding a pipeline's shapes, resolved from its shape-graph ids.
@@ -406,13 +492,13 @@ fn copy_shape_graphs(
 }
 
 /// Run every gate source against the prepared temp store. Returns the first
-/// failing gate's report.
+/// failing gate's report, with the shape graphs that gate validated against.
 fn evaluate_gates(
     temp: &TripleStore,
     studio: &ShaclStudioStore,
     gates: &GateSet,
     graph_iri: &str,
-) -> Result<(), ValidationReport> {
+) -> Result<(), Refusal> {
     let data_graphs = [graph_iri.to_string()];
     // Every run below is a gate, for the workload telemetry.
     let _path = crate::store::telemetry::ValidationPathGuard::set("gate");
@@ -423,7 +509,7 @@ fn evaluate_gates(
         // Resolved again rather than threaded through from
         // `needed_shape_graphs`, and with the same fail-closed rule: an
         // unresolvable pipeline is an error here too, never a skipped gate.
-        let shape_graphs = pipeline_shape_graphs(studio, p)?;
+        let shape_graphs = pipeline_shape_graphs(studio, p).map_err(|r| refusal(r, Vec::new()))?;
         match super::run::run_validation(
             temp,
             &shape_graphs,
@@ -431,11 +517,16 @@ fn evaluate_gates(
             p.severity_threshold,
             false,
         ) {
-            Ok(outcome) if !outcome.passes => return Err(outcome.report),
+            Ok(outcome) if !outcome.passes => return Err(refusal(outcome.report, shape_graphs)),
             Ok(_) => {}
             // `_ => {}` used to swallow this arm, so an engine error read as a
             // pass and the gate quietly stopped gating.
-            Err(e) => return Err(gate_error(format!("pipeline '{}': {e}", p.id))),
+            Err(e) => {
+                return Err(refusal(
+                    gate_error(format!("pipeline '{}': {e}", p.id)),
+                    Vec::new(),
+                ))
+            }
         }
     }
 
@@ -449,9 +540,14 @@ fn evaluate_gates(
             SeverityThreshold::Violation,
             false,
         ) {
-            Ok(outcome) if !outcome.passes => return Err(outcome.report),
+            Ok(outcome) if !outcome.passes => return Err(refusal(outcome.report, shape_graphs)),
             Ok(_) => {}
-            Err(e) => return Err(gate_error(format!("validation-layer binding: {e}"))),
+            Err(e) => {
+                return Err(refusal(
+                    gate_error(format!("validation-layer binding: {e}")),
+                    Vec::new(),
+                ))
+            }
         }
     }
 
@@ -461,10 +557,14 @@ fn evaluate_gates(
     if let Some(shapes_graph) = &gates.legacy_shapes_graph {
         // `if let Ok(..)` dropped the error case, so a failing engine run meant
         // "no violations" and the write sailed through ungated.
-        let report = crate::shacl::validate(temp, shapes_graph, &data_graphs)
-            .map_err(|e| gate_error(format!("dataset shapes graph <{shapes_graph}>: {e}")))?;
+        let report = crate::shacl::validate(temp, shapes_graph, &data_graphs).map_err(|e| {
+            refusal(
+                gate_error(format!("dataset shapes graph <{shapes_graph}>: {e}")),
+                Vec::new(),
+            )
+        })?;
         if !report.conforms {
-            return Err(report);
+            return Err(refusal(report, vec![shapes_graph.clone()]));
         }
     }
 
@@ -558,7 +658,8 @@ fn creator_may_gate(
 mod tests {
     use super::*;
 
-    /// Bundle the four shared handles the gate functions take.
+    /// Bundle the shared handles the gate functions take, for an anonymous
+    /// writer.
     fn ctx<'a>(
         store: &'a TripleStore,
         auth: &'a AuthDb,
@@ -570,6 +671,7 @@ mod tests {
             auth_db: auth,
             studio,
             base_url: base,
+            writer: None,
         }
     }
     use crate::auth::models::{OwnerType, SystemRole, Visibility};
@@ -898,6 +1000,105 @@ mod tests {
             "gate-evaluation-failure"
         );
         assert!(report.results[0].message.contains("was not applied"));
+    }
+
+    /// Make every query on `table` fail, as a database error would. The
+    /// in-memory pool holds one connection, so every later lookup sees it.
+    fn drop_table(auth: &AuthDb, table: &str) {
+        auth.pool()
+            .get()
+            .unwrap()
+            .execute_batch(&format!("DROP TABLE {table}"))
+            .unwrap();
+    }
+
+    /// With gate discovery failing, the import pre-check says a gate applies
+    /// and both write paths refuse conforming data with a report naming
+    /// `reason`.
+    fn assert_both_paths_refuse(
+        store: &TripleStore,
+        auth: &AuthDb,
+        studio: &ShaclStudioStore,
+        reason: &str,
+    ) {
+        let c = ctx(store, auth, studio, "http://x");
+        assert!(
+            import_gates_apply(c, DATA_GRAPH),
+            "a failed discovery must send the import on to check_import_gates"
+        );
+        let import = check_import_gates(c, DATA_GRAPH, &person_quads(true))
+            .expect_err("a failed discovery must block the import");
+        let write = check_write_gates(
+            c,
+            DATA_GRAPH,
+            "<http://example.org/p1> a <http://example.org/Person> ; \
+             <http://example.org/name> \"Ada\" .",
+            RdfFormat::Turtle,
+            WriteMode::Replace,
+        )
+        .expect_err("a failed discovery must block the write");
+        for report in [import, write] {
+            assert!(!report.conforms);
+            assert_eq!(
+                report.results[0].source_constraint,
+                "gate-evaluation-failure"
+            );
+            assert!(
+                report.results[0].message.contains(reason),
+                "the refusal names the failed lookup: {}",
+                report.results[0].message
+            );
+        }
+    }
+
+    /// A database error listing the gating pipelines refuses the write.
+    /// `.unwrap_or_default()` read it as "no gating pipelines", so every
+    /// `gate_writes` pipeline stopped gating and the write landed unvalidated.
+    #[test]
+    fn a_failed_pipeline_lookup_blocks_both_paths() {
+        let store = TripleStore::in_memory().unwrap();
+        let auth = AuthDb::in_memory().unwrap();
+        let (studio, set) = studio_with_shapes(&store, &auth);
+        let mut p = pipe(vec![graph_target(DATA_GRAPH)], vec![], vec![]);
+        p.shape_graph_ids = vec![set.id.clone()];
+        studio.insert_pipeline(&p).unwrap();
+
+        drop_table(&auth, "validation_pipelines");
+        assert!(studio.list_gating_pipelines().is_err());
+
+        assert_both_paths_refuse(&store, &auth, &studio, "listing the gating pipelines");
+    }
+
+    /// A database error finding the graph's dataset refuses the write.
+    /// `.ok().flatten()` read it as "no dataset", which dropped every gate
+    /// that comes with one: dataset-scoped pipelines, dataset-level bindings
+    /// and, on the import path, the legacy `shacl_on_write` gate.
+    #[test]
+    fn a_failed_dataset_lookup_blocks_both_paths() {
+        let store = TripleStore::in_memory().unwrap();
+        let auth = AuthDb::in_memory().unwrap();
+        let (studio, set) = studio_with_shapes(&store, &auth);
+        auth.create_dataset(
+            "d1",
+            "D1",
+            None,
+            OwnerType::User,
+            CREATOR,
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+        auth.add_dataset_graph("d1", DATA_GRAPH).unwrap();
+        auth.update_dataset_shacl("d1", true, Some(SHAPES_GRAPH))
+            .unwrap();
+        let mut p = pipe(vec![dataset_target("d1")], vec![], vec![]);
+        p.shape_graph_ids = vec![set.id.clone()];
+        studio.insert_pipeline(&p).unwrap();
+
+        drop_table(&auth, "dataset_graphs");
+        assert!(auth.find_dataset_by_graph_iri(DATA_GRAPH).is_err());
+
+        assert_both_paths_refuse(&store, &auth, &studio, "looking up the dataset holding");
     }
 
     /// A gate acts with its creator's write authority, checked at every

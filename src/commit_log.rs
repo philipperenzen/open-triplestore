@@ -36,6 +36,8 @@ pub enum CommitKind {
     Import,
     /// A backup restore — the whole store was replaced.
     Backup,
+    /// A datasource, RML mapping or materialisation run.
+    Source,
 }
 
 impl CommitKind {
@@ -49,6 +51,7 @@ impl CommitKind {
             CommitKind::GraphStore => "graph-store",
             CommitKind::Import => "import",
             CommitKind::Backup => "backup",
+            CommitKind::Source => "source",
         }
     }
 }

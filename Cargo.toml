@@ -3,7 +3,7 @@
 # copying `plugins/hello`) makes it a workspace member automatically — no edit
 # needed here. It still needs an optional dependency entry + feature flag
 # below, and a registration in `src/plugins.rs`, to actually be built in.
-members = [".", "opengraph", "plugins/*"]
+members = [".", "opengraph", "plugins/*", "tools/*"]
 resolver = "2"
 
 [package]
@@ -85,6 +85,11 @@ test-utils      = []
 plugin-hello    = ["dep:ots-plugin-hello"]
 ## Accounts dashboard: users/orgs/entitlements + merged LLM usage at /ext/accounts-dashboard
 plugin-accounts-dashboard = ["dep:ots-plugin-accounts-dashboard"]
+## Datasource connectors (docs/sources.md "Dialects"): PostgreSQL (`postgresql`),
+## MySQL / MariaDB (`mysql`) and SQL Server (`mssql`). Off by default.
+plugin-postgres = ["dep:ots-plugin-postgres"]
+plugin-mysql    = ["dep:ots-plugin-mysql"]
+plugin-mssql    = ["dep:ots-plugin-mssql"]
 ## Optional `age` X25519 backup encryption
 backup-encrypt  = ["dep:age"]
 ## Optional SMTP alerting (lettre itself is a core dependency — the auth
@@ -179,7 +184,7 @@ regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 # Authentication & Identity
-rusqlite = { version = "0.31", features = ["bundled", "backup"] }
+rusqlite = { version = "0.31", features = ["bundled", "backup", "hooks", "column_decltype"] }
 r2d2 = "0.8"
 r2d2_sqlite = { version = "0.24", features = ["bundled"] }
 
@@ -282,12 +287,23 @@ quick-xml = "0.42"
 # Seed bundle manifests (src/seed_bundles/manifest.rs)
 toml = "1"
 
+# YARRRML and the legacy sql2rdf mapping format are YAML (src/sources/yarrrml).
+# A parser, not a serde data format: those documents have variable shape, so
+# they are walked as a tree rather than deserialised into fixed structs.
+yaml-rust2 = "0.13"
+
 # Compile-time plugin architecture (src/plugins.rs). The API crate is always
 # present (the registry/mount code needs its types); individual plugin crates
 # are optional, enabled by their own `plugin-<name>` feature.
 ots-plugin-api = { path = "plugins/api" }
 ots-plugin-hello = { path = "plugins/hello", optional = true }
 ots-plugin-accounts-dashboard = { path = "plugins/accounts-dashboard", optional = true }
+# Datasource connectors for the networked SQL dialects (src/sources). SQLite
+# is in core; each of these is a driver decision an operator makes per
+# deployment rather than a dependency every build carries.
+ots-plugin-postgres = { path = "plugins/postgres", optional = true }
+ots-plugin-mysql = { path = "plugins/mysql", optional = true }
+ots-plugin-mssql = { path = "plugins/mssql", optional = true }
 
 # Asset metadata extraction (classify uploads by kind + per-kind detail).
 # imagesize/infer are pure-Rust and tiny; the heavier probers are feature-gated.

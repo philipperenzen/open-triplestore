@@ -10,7 +10,7 @@ use super::acl::check_endpoint_acl;
 use super::audit::{AuditEventBuilder, AuditEventType, AuditLogger, AuditOutcome};
 use super::db::AuthDb;
 use super::jwt::{hash_token, verify_token, JwtConfig};
-use super::models::{AccessLevel, SystemRole};
+use super::models::{AccessLevel, ApiScope, SystemRole};
 use super::oidc_rs::AuthExt;
 
 /// Authenticated user extracted from JWT token or API token.
@@ -29,12 +29,21 @@ pub struct AuthenticatedUser {
     /// scopes) must not be upgradable into permanent account access. See
     /// [`crate::auth::policy::OidcSessionPolicy`].
     pub can_mint_api_tokens: bool,
+    /// The scopes an API token was issued with. Empty for a session, whose
+    /// authority is the user's own; a resource scope (`sources:read`,
+    /// `mappings:propose`) is consulted by the routes it names.
+    pub scopes: Vec<ApiScope>,
 }
 
 impl AuthenticatedUser {
     /// Returns true if the user has admin-level or above privileges.
     pub fn is_admin(&self) -> bool {
         self.role.is_admin()
+    }
+
+    /// Whether the principal is an API token carrying `scope`.
+    pub fn has_scope(&self, scope: ApiScope) -> bool {
+        self.scopes.contains(&scope)
     }
 
     /// Returns true if the user can create/edit/upload/publish ontology versions.
@@ -164,6 +173,7 @@ fn resolve_token(
             // An API token is already a long-lived credential; it does not get to
             // mint more of them.
             can_mint_api_tokens: false,
+            scopes: api_token.scopes.clone(),
         }
         .clamped_to_role_policy())
     } else {
@@ -191,6 +201,7 @@ fn resolve_token(
             can_publish: user.can_publish,
             write_access: true,        // JWT sessions always have write access
             can_mint_api_tokens: true, // a first-party interactive session
+            scopes: Vec::new(),
         }
         .clamped_to_role_policy())
     }
@@ -231,6 +242,7 @@ async fn resolve_oidc_token(
         can_publish: user.can_publish,
         write_access: true, // interactive (OIDC) sessions always have write access
         can_mint_api_tokens: true,
+        scopes: Vec::new(),
     }
     .clamped_to_role_policy())
 }
@@ -350,6 +362,7 @@ async fn resolve_federated_token(
         // Federated principals read; writes need a local credential.
         write_access: false,
         can_mint_api_tokens: false,
+        scopes: Vec::new(),
     }
     .clamped_to_role_policy())
 }
@@ -411,6 +424,7 @@ async fn authenticate(
                 can_publish: user.can_publish,
                 write_access: policy.allows_write(&scope),
                 can_mint_api_tokens: policy.allows_api_token_minting(),
+                scopes: Vec::new(),
             }
             .clamped_to_role_policy());
         }
@@ -615,7 +629,14 @@ fn enforce_write_scope_for_mutation(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .starts_with("application/sparql-update");
-    if mutating && !sparql_post && !user.write_access && !user.is_admin() {
+    // A `mappings:propose` token may write exactly what proposing is: a
+    // mapping, and a dry-run of it. The sources guard narrows this further
+    // (a proposal is created and refined in the `proposed` state only).
+    let proposing = (user.has_scope(ApiScope::MappingsPropose)
+        && crate::sources::access::is_proposer_mutation(req.method(), req.uri().path()))
+        || (user.has_scope(ApiScope::SourcesRead)
+            && crate::sources::access::is_proposer_query(req.method(), req.uri().path()));
+    if mutating && !sparql_post && !proposing && !user.write_access && !user.is_admin() {
         return Err((
             StatusCode::FORBIDDEN,
             "This API token does not have write scope",
@@ -713,6 +734,7 @@ mod role_policy_tests {
             can_publish: true,
             write_access: true,
             can_mint_api_tokens: true,
+            scopes: Vec::new(),
         }
     }
 

@@ -16,10 +16,16 @@
 //!
 //! 1. **Platform** — prefixes derived from the model/vocabulary registry
 //!    (kept fresh by the registry seed and model mutations).
-//! 2. **Seeded** — declared by the seed bundles installed on this deployment.
-//!    Above the snapshot on purpose: an operator who declares a label for their
-//!    own namespace means that namespace, not whatever a community list says.
+//! 2. **Seeded** — declared by the seed bundles installed on this deployment,
+//!    and the store's own vocabularies ([`OWN_NAMESPACES`]), which every
+//!    registry knows from construction. Above the snapshot on purpose: an
+//!    operator who declares a label for their own namespace means that
+//!    namespace, not whatever a community list says — and the same goes for
+//!    the platform naming its own.
 //! 3. **Bundled dataset** — the prefix.cc + LOV snapshot (~3.7k prefixes).
+//!    Third-party data on its own terms: prefix.cc publishes no licence for
+//!    its data (the operator has stated it is considered CC0), LOV's is
+//!    CC BY 4.0. See [`dataset`] for what each source is and how it is credited.
 //! 4. **Local cache** — mappings confirmed earlier (persisted JSON).
 //! 5. **prefix.cc network fallback** — opt-in only.
 //!
@@ -78,6 +84,30 @@ const MAX_LABEL_LENGTH: usize = 64;
 
 /// URI schemes accepted in resolved prefix IRIs.
 const ALLOWED_SCHEMES: &[&str] = &["http", "https"];
+
+/// The store's own vocabularies and the labels they are documented under.
+///
+/// Seeded into every registry at construction (see
+/// `PrefixRegistry::seed_own_namespaces`), so a datasource, profile or
+/// mapping-function IRI shortens to the label the documentation uses and a
+/// CURIE typed against one of these labels expands to the store's namespace —
+/// not to whatever the community snapshot happens to bind the label to.
+///
+/// The labels are chosen to collide with nothing that matters: `fn` is the
+/// XPath functions namespace everywhere else, so the mapping functions are
+/// `otsfn:`; `prof` is the W3C Profiles Vocabulary, so the profile vocabulary
+/// is `dsprof:`. `ds` does shadow a defunct DCAT extension from the snapshot,
+/// on purpose: the platform naming its own namespace outranks a community list,
+/// exactly as a seed bundle's declaration does.
+pub const OWN_NAMESPACES: &[(&str, &str)] = &[
+    ("ots", crate::shacl_studio::bindings::OTS),
+    ("ds", crate::sources::model::DS),
+    (
+        crate::sources::profile::PROF_LABEL,
+        crate::sources::profile::PROF,
+    ),
+    (crate::rml::terms::FN_LABEL, crate::rml::terms::FN_NS),
+];
 
 // ─── Persistent cache ────────────────────────────────────────────────────────
 
@@ -185,7 +215,7 @@ impl PrefixRegistry {
             ))
             .build()?;
 
-        Ok(Self {
+        let registry = Self {
             cache_path,
             client,
             state: Mutex::new(RuntimeState {
@@ -197,7 +227,24 @@ impl PrefixRegistry {
             admin: RwLock::new(PlatformPrefixes::default()),
             seeded: RwLock::new(PlatformPrefixes::default()),
             allow_network,
-        })
+        };
+        registry.seed_own_namespaces();
+        Ok(registry)
+    }
+
+    /// Make the store's own vocabularies resolvable under their documented
+    /// labels, in the seeded tier, before any bundle or lookup runs.
+    ///
+    /// Two of them collide with the community snapshot — `ds` is bound there
+    /// to a long-defunct DCAT extension — and a platform that could not say
+    /// what its own `ds:SqlSource` means would shorten a datasource IRI to a
+    /// stranger's label, or not at all. Seeded first, so an installed bundle
+    /// cannot repoint them either; an administrator's override still can,
+    /// which is that tier's purpose.
+    fn seed_own_namespaces(&self) {
+        for (label, namespace) in OWN_NAMESPACES {
+            self.insert_seeded(label, namespace);
+        }
     }
 
     /// Create a no-op, purely in-memory registry with no backing file, no
@@ -218,7 +265,7 @@ impl PrefixRegistry {
     /// In-memory registry with the bundled dataset but no cache file and no
     /// network — the standard constructor for tests exercising local lookups.
     pub fn bundled_only() -> Self {
-        Self {
+        let registry = Self {
             cache_path: std::path::PathBuf::new(),
             client: reqwest::Client::new(),
             state: Mutex::new(RuntimeState::default()),
@@ -227,12 +274,39 @@ impl PrefixRegistry {
             admin: RwLock::new(PlatformPrefixes::default()),
             seeded: RwLock::new(PlatformPrefixes::default()),
             allow_network: false,
+        };
+        registry.seed_own_namespaces();
+        registry
+    }
+
+    /// The `(label, namespace)` to declare for a namespace a graph draws terms
+    /// from, or `None` to leave those terms in full IRI form. This is what a
+    /// prefixed Turtle dump asks once per distinct namespace.
+    ///
+    /// An exact registry hit answers itself. Everything else is a namespace
+    /// derived by splitting an IRI at its last delimiter, and those routinely
+    /// have no registry entry: the registry knows `ex: <http://example.org/>`,
+    /// while `http://example.org/shapes/PersonShape` — path-style IRIs are the
+    /// norm in SHACL — splits at `.../shapes/`. Asking only for an exact match
+    /// left every such IRI written out in full. The fallback declares the
+    /// longest registered namespace the derived one sits under instead, which
+    /// the serializer still matches (it tries declarations longest-namespace-
+    /// first and escapes what is left, giving `ex:shapes\/PersonShape`).
+    pub fn declaration_for(&self, ns: &str) -> Option<(String, String)> {
+        if let Some(p) = self.reverse_local(ns) {
+            return Some((p.prefix, p.namespace));
         }
+        self.shrink_iri(ns).map(|(p, _)| (p.prefix, p.namespace))
     }
 
     /// Number of prefixes in the bundled dataset.
     pub fn dataset_len(&self) -> usize {
         self.dataset.len()
+    }
+
+    /// The bundled snapshot's credit line for `source` (see [`dataset`]).
+    pub fn source_credit(&self, source: PrefixSource) -> Option<&str> {
+        self.dataset.credit(source)
     }
 
     fn read_seeded(&self) -> std::sync::RwLockReadGuard<'_, PlatformPrefixes> {
@@ -1390,6 +1464,73 @@ mod seeded_tier_tests {
         assert_eq!(
             (pref.prefix.as_str(), local.as_str()),
             (COLLIDING_LABEL, "Thing")
+        );
+    }
+
+    #[test]
+    fn the_store_s_own_vocabularies_resolve_under_their_documented_labels() {
+        for reg in [registry(), PrefixRegistry::bundled_only()] {
+            for (label, namespace) in OWN_NAMESPACES {
+                let resolved = reg
+                    .lookup_local(label)
+                    .unwrap_or_else(|| panic!("{label} resolves"));
+                assert_eq!(resolved.namespace, *namespace, "{label}");
+                assert_eq!(resolved.source, PrefixSource::Seeded, "{label}");
+                // Both directions, since both drive what a person sees.
+                let (pref, local) = reg
+                    .shrink_iri(&format!("{namespace}Thing"))
+                    .unwrap_or_else(|| panic!("{namespace}Thing shortens"));
+                assert_eq!((pref.prefix.as_str(), local.as_str()), (*label, "Thing"));
+                assert_eq!(
+                    reg.declaration_for(namespace),
+                    Some((label.to_string(), namespace.to_string()))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn own_labels_avoid_the_well_known_ones_and_win_the_rest() {
+        let reg = registry();
+        // `ds` is bound in the snapshot to a defunct DCAT extension; the store's
+        // own datasource vocabulary takes the label, as a seed bundle would.
+        assert_eq!(
+            reg.dataset.lookup("ds").map(|e| e.namespace.clone()),
+            Some("http://purl.org/ctic/dcat#".to_string()),
+            "the collision this seed resolves"
+        );
+        assert_eq!(
+            reg.expand_curie("ds:SqlSource").as_deref(),
+            Some("https://w3id.org/open-triplestore/datasource#SqlSource")
+        );
+        // `fn` is the XPath functions namespace and stays so: the mapping
+        // functions are `otsfn:`, so a SPARQL author's `fn:concat` is untouched.
+        assert_eq!(
+            reg.expand_curie("fn:concat").as_deref(),
+            Some("http://www.w3.org/2005/xpath-functions#concat")
+        );
+        assert!(
+            OWN_NAMESPACES
+                .iter()
+                .all(|(label, _)| *label != "fn" && *label != "prof"),
+            "a well-known label was claimed"
+        );
+        // Every label is one the snapshot does not bind, or `ds`.
+        for (label, _) in OWN_NAMESPACES {
+            assert!(
+                *label == "ds" || reg.dataset.lookup(label).is_none(),
+                "{label} shadows a bundled mapping without meaning to"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bundle_cannot_repoint_the_store_s_own_labels() {
+        let reg = registry();
+        assert!(!reg.insert_seeded("ds", "https://example.org/other/"));
+        assert_eq!(
+            reg.lookup_local("ds").unwrap().namespace,
+            crate::sources::model::DS
         );
     }
 

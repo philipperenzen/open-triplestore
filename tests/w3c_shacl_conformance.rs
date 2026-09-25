@@ -1,5 +1,7 @@
-//! W3C SHACL test-suite runner over the vendored official suite
-//! (`tests/fixtures/w3c-shacl/{core,sparql}`, see PROVENANCE.md there).
+//! Runner for the `core` and `sparql` sections of the W3C SHACL test suite,
+//! vendored under `tests/fixtures/w3c-shacl/{core,sparql}` (see PROVENANCE.md
+//! and LICENSE.md there). Its results are development and regression results
+//! at the comparison level below, not a W3C conformance claim.
 //!
 //! Each suite file is self-contained: data + shapes + an `mf:Manifest` entry
 //! (`sht:Validate`) + the expected `sh:ValidationReport` — or `sht:Failure`,

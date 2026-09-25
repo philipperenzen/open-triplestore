@@ -48,7 +48,7 @@
 | 9 | **Blazegraph** | Legacy Wikidata workloads | Abandoned 2019; Wikimedia migration complete |
 
 **Bottom line for this project:** Open Triplestore ranks **1st among open-source single-binary
-deployments** on standards breadth — **27 of 29** rows in section 4, recounted, against 14 for
+deployments** on standards breadth — **23 of 29** rows in section 4, recounted, against 14 for
 the next open-source store — and its **~430,000 t/s** bulk load (section 5.1, re-measured) beats
 every Java competitor by 1.1–2.9×. GeoSPARQL 1.1, SHACL-AF, DCAT 2, VoID and RML are standout
 features rare in open-source stores. The primary gap vs. QLever and Virtuoso is scale: those
@@ -96,17 +96,18 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
 
 ### 2.3 Caveats
 
-- **Verified conformance status (read this first).** The **Open Triplestore**
-  columns in the standards matrices below mark *feature presence*. A golden-standard
-  conformance pass (see [`docs/standards.md`](standards.md) and the `tests/*_conformance.rs`
-  suites) found that several are **Partial**, not Full: **SHACL Core** silently ignores
-  blank-node property shapes (the standard idiom) — use named shapes (HIGH-severity, fix
-  pending); **GeoSPARQL 1.1** lacks KML/DGGS literals, the Query Rewrite Extension and
-  several 1.1 functions (it has `relate`, `transform`, the geodesic `metric*` family, the
-  `aggUnion` aggregate and WKT/GML/GeoJSON literals); **OWL 2 DL** runs RL+extension rules in
-  process with full tableau only via the optional Konclude bridge; **SPARQL 1.2 / RDF-star**
-  is the CG `<< >>` model, not the RDF 1.2 triple-term draft. The ✅ marks in §4/§10/§11
-  predate that pass and should be read with `docs/standards.md` as the source of truth.
+- **Verified conformance status (read this first).** The grades in
+  [`docs/standards.md`](standards.md) are the source of truth for Open Triplestore; they are
+  the project's own grades, not W3C or OGC conformance claims, and nothing is OGC-certified.
+  The **Open Triplestore** columns in the matrices below follow those grades for GeoSPARQL,
+  SHACL and the W3C SPARQL tests; elsewhere a ✅ marks *feature presence*, and
+  `docs/standards.md` grades several of those rows **Partial**: SPARQL 1.1 federation (off by
+  default, per-endpoint allowlist), OWL 2 EL, RL and DL (DL runs RL+extension rules in
+  process, with a full tableau only via the optional Konclude bridge), SHACL Advanced and
+  SHACL-C, ShEx, SWRL, RML and DCAT. GeoSPARQL 1.1 lacks KML/DGGS literals and the Query
+  Rewrite Extension (it has the geodesic `metric*` family, `aggUnion` and WKT/GML/GeoJSON
+  literals). SPARQL 1.2 /
+  RDF 1.2 follows the RDF 1.2 triple-term model in object position only.
 - **Reference system.** Open Triplestore performance figures in this document were measured on an
   **Apple M3 Pro**. Reproducible numbers for the documented reference system (AMD Ryzen 9
   7900X3D, Docker/WSL2) and the exact `cargo bench` command live in
@@ -213,7 +214,7 @@ number.
 
 ## 4. Standards Compliance Matrix
 
-Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 🔒 Commercial only
+Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 🔒 Commercial only · — Not claimed (see footnote)
 
 ### 4.1 Core RDF & SPARQL Standards
 
@@ -230,12 +231,12 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 | **RDF 1.2 / RDF-star** | 🟡³ | 🟡³ | 🟡 | ❌ | ❌ | 🟡 | 🟡 | 🟡 | ❌ | ❌ |
 | **JSON-LD 1.1** | ✅ | ✅ | ✅ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ |
 | **N-Quads / TriG** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **W3C SPARQL 1.1 Tests** | ✅⁴ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **W3C SPARQL 1.1 Tests** | —⁴ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 > ¹ Neptune added full SPARQL Update support in v1.4 (2024).
 > ² `rdf-12` feature flag; open-triplestore and Oxigraph track the SPARQL-star draft.
 > ³ `rdf-12` / `rdf-star` feature flag in oxrdf; triple terms parseable but not fully evaluated.
-> ⁴ A spec-derived SPARQL 1.1 suite (125 tests, `tests/w3c_sparql11_conformance.rs`) runs in CI. The official W3C manifest corpus is *not* vendored or executed; see the generated conformance table in `docs/standards.md` for what is.
+> ⁴ Not claimed. Open Triplestore runs a hand-written, spec-derived SPARQL 1.1 suite (`tests/w3c_sparql11_conformance.rs`) and, for development and bug tracking, the query and update sections of the W3C SPARQL 1.1 test suite from w3c/rdf-tests, vendored unmodified (`tests/w3c_sparql11_manifests.rs`). Those sections are a subset of a W3C test suite, on which W3C's test-suite licence policy (https://www.w3.org/copyright/test-suites-licenses/) allows no performance claims, so no result is given here; the known evaluator gaps are tracked in `docs/conformance/sparql11.md`. The other systems' cells are as they were compiled for this comparison.
 
 ### 4.2 Reasoning, Validation & Inference
 
@@ -246,7 +247,7 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 | **OWL 2 QL** | ✅⁶ | ❌ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ | ❌ |
 | **OWL 2 RL** | ✅⁶ | ❌ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ | ❌ |
 | **OWL 2 DL** | ✅⁷ | ❌ | ❌ | ❌ | ❌ | 🔒 | ✅ | ❌ | ❌ | ❌ |
-| **SHACL Validation** | ✅ | ❌ | 🟡 | ❌ | 🟡 | ✅ | ✅ | ✅ | ❌ | ❌ |
+| **SHACL Validation** | 🟡¹⁰ | ❌ | 🟡 | ❌ | 🟡 | ✅ | ✅ | ✅ | ❌ | ❌ |
 | **SHACL-AF Inference** | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
 | **ShEx** | ✅⁸ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
 | **SWRL** | ✅⁹ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
@@ -266,17 +267,26 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >   validator with cardinality checking, CLOSED/EXTRA, inverse constraints, and value sets.
 > ⁹ SWRL rule engine via `swrl` feature flag. Supports OWL/XML and text-based rule formats.
 >   Rules are translated to SPARQL INSERT WHERE and executed in a fixed-point loop.
+> ¹⁰ SHACL Core is graded Partial in [`docs/standards.md`](standards.md): one known failure in
+>   the core section of the W3C SHACL test suite, and results compared on `sh:conforms` and
+>   focus nodes rather than full result-set equality; see
+>   [`docs/conformance/shacl.md`](conformance/shacl.md).
 
 ### 4.3 Geospatial & Text Standards
 
 | Standard | Open Triplestore | Oxigraph | Jena 5 | Blazegraph | Virtuoso | GraphDB | Stardog | RDF4J 5 | Neptune | QLever |
 |----------|-------|----------|--------|------------|----------|---------|---------|---------|---------|--------|
-| **GeoSPARQL 1.0** | ✅ | ❌ | 🟡 | ❌ | 🟡 | ✅ | ✅ | 🟡 | ✅ | 🟡 |
-| **GeoSPARQL 1.1** | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | 🟡 | ❌ | 🟡 | ❌ |
+| **GeoSPARQL 1.0** | 🟡¹¹ | ❌ | 🟡 | ❌ | 🟡 | ✅ | ✅ | 🟡 | ✅ | 🟡 |
+| **GeoSPARQL 1.1** | 🟡¹¹ | ❌ | ❌ | ❌ | ❌ | ✅ | 🟡 | ❌ | 🟡 | ❌ |
 | **SPARQL+Text Search** | ✅⁷ | ❌ | 🟡 | ❌ | ✅ | ✅ | ✅ | 🟡 | ❌ | ✅ |
 
 > ⁷ Tantivy full-text search via `text-search` feature flag with automatic index
 >   sync on every SPARQL UPDATE / Graph Store write (lazy dirty-flag pattern).
+> ¹¹ Partial, not OGC-certified (only the OGC authorises compliance marks for its standards):
+>   the topology families, `geof:relate`, the constructive functions, WKT and GML literals and
+>   CRS transforms are implemented; the geodesic metric family, `geof:aggUnion`,
+>   GeoJSON/KML/DGGS literals and the Query Rewrite Extension are not. See
+>   [`docs/standards.md`](standards.md).
 
 ### 4.4 Protocols, Catalogs & Mapping
 
@@ -301,11 +311,14 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > score being redone: Blazegraph 11 → 10, Neptune 10 → 9, QLever 8 → 7. The other seven
 > were already right.
 >
-> Two items remain 🟡 for Open Triplestore: SPARQL 1.2 and RDF 1.2/RDF-star (upstream oxrdf
-> blocker — triple-term evaluation not yet complete). Completing those would raise it to 29/29.
+> Open Triplestore recounted again on 2026-09-23, 27 → 23: GeoSPARQL 1.0 and 1.1 and SHACL
+> validation now follow the Partial grades in `docs/standards.md`, and the W3C SPARQL 1.1 Tests
+> row is not claimed (footnote ⁴). The other 🟡 rows are SPARQL 1.2 and RDF 1.2/RDF-star
+> (upstream oxrdf blocker — triple-term evaluation not yet complete). The count is of ✅ cells,
+> which elsewhere in the Open Triplestore column mark feature presence (see §2.3).
 
 ```
-Open Triplestore  ███████████████████████████░░   27 / 29  (#1 open-source; only SPARQL 1.2 + RDF-star still 🟡, upstream blocker)
+Open Triplestore  ███████████████████████░░░░░░   23 / 29  (#1 open-source; GeoSPARQL, SHACL, SPARQL 1.2, RDF-star 🟡; W3C tests not claimed)
 Stardog           ██████████████████████░░░░░░░   22 / 29  (commercial; full OWL DL + ShEx + SWRL; GeoSPARQL 1.1 partial)
 GraphDB           █████████████████████░░░░░░░░   21 / 29  (commercial; OWL DL commercial-only; no ShEx/SWRL/LDP/RML)
 Virtuoso          ██████████████░░░░░░░░░░░░░░░   14 / 29
@@ -667,12 +680,15 @@ From BSBM and published benchmarks at concurrency factor 16, 32 GB RAM:
 | `geof:envelope` | ✅ | ❌ | ✅ | ✅ | ❌ | 🟡 | ❌ |
 | `geof:convexHull` | ✅ | ❌ | ✅ | ✅ | ❌ | 🟡 | ❌ |
 | Spatial R-tree index | ✅¹ | ❌ | ✅ | ✅ | ✅ | ✅ | N/A |
-| GeoSPARQL 1.1 rules | ✅ | ❌ | ✅ | 🟡 | ❌ | 🟡 | ❌ |
-| Conformance tests | ✅² | ❌ | ✅ | 🟡 | ❌ | 🟡 | N/A |
+| GeoSPARQL 1.1 rules | ❌³ | ❌ | ✅ | 🟡 | ❌ | 🟡 | ❌ |
+| Conformance tests | 🟡² | ❌ | ✅ | 🟡 | ❌ | 🟡 | N/A |
 
 > ¹ Spatial R-tree index (`rstar` crate) over `geo:asWKT` bounding boxes. Lazily rebuilt
 > on writes. Used for GeoSPARQL pre-filtering (~100× speedup at scale).
-> ² Open Triplestore runs `tests/geosparql_conformance.rs` in CI.
+> ² Open Triplestore runs a hand-written, spec-derived suite (`tests/geosparql_conformance.rs`)
+> and the OGC GeoSPARQL 1.1 validator shapes (`tests/ogc_geosparql_shacl_roundtrip.rs`) in CI;
+> these are development results, not an OGC compliance test or certification.
+> ³ The GeoSPARQL Query Rewrite Extension (the RIF rules) is not implemented.
 
 ### 10.2 GeoSPARQL Performance (measured — see section 2.4 for the system)
 
@@ -717,7 +733,7 @@ reduces GEOS calls by ~90%.
 | GraphDB | ✅ | ✅ | ✅ | ✅ | 🔒 | ✅ | ✅ | ❌ |
 | Stardog | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Virtuoso | ✅ | 🟡 | ✅ | ✅ | ❌ | 🟡 | ❌ | ❌ |
-| **Open Triplestore** | 🟡 | 🟡 | 🟡 | 🟡 | ❌ | ✅ | ✅ | ✅ |
+| **Open Triplestore** | 🟡 | 🟡 | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ✅ |
 | Jena 5 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | 🟡 | ❌ | ❌ |
 | RDF4J 5 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ✅ | ❌ | ❌ |
 | Blazegraph | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ❌ | ❌ |
@@ -934,7 +950,7 @@ security patches not applied. Any existing deployment should migrate to QLever o
 
 ```
 1. GraphDB 11         — full GeoSPARQL 1.1, spatial index, OGC member
-2. Open Triplestore  — GeoSPARQL 1.1 + GEOS; all DE-9IM relations + constructive funcs
+2. Open Triplestore  — GeoSPARQL 1.1 (partial) + GEOS; all DE-9IM relations + constructive funcs
 3. Stardog 10         — good GeoSPARQL; commercial
 4. Neptune            — spatial support but proprietary; AWS lock-in
 ```
@@ -985,9 +1001,9 @@ security patches not applied. Any existing deployment should migrate to QLever o
    competitor by 1.1–2.9×. Only QLever and
    Neptune (Graviton4 cloud bulk loader) match this.
 
-2. **GeoSPARQL 1.1:** One of only three open-source triplestores with full GeoSPARQL 1.1 support
-   (GraphDB, open-triplestore, partial Stardog). All DE-9IM relations and constructive functions
-   implemented via GEOS C++ library.
+2. **GeoSPARQL 1.1:** Broad GeoSPARQL 1.1 coverage via the GEOS C++ library: all DE-9IM
+   relations and the constructive functions. Partial overall (no geodesic metrics, `aggUnion`
+   or GeoJSON literals; see [`docs/standards.md`](standards.md)), and not OGC-certified.
 
 3. **SHACL + SHACL-AF:** Combined validation and inference in a single lightweight binary is rare.
    Only GraphDB and Stardog match this in a server-grade product.

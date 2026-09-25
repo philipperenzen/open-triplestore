@@ -9,7 +9,7 @@
 //! `PUT /api/datasets/:id/shapes`, dataset-validation self-healing and the
 //! boot backfill in [`super::migrate`].
 
-use crate::auth::models::{Dataset, GraphKind};
+use crate::auth::models::{Dataset, GraphKind, Visibility};
 use crate::server::AppState;
 
 use super::bindings;
@@ -23,6 +23,38 @@ fn iri_tail(iri: &str) -> &str {
         .rsplit(['/', '#', ':'])
         .find(|s| !s.is_empty())
         .unwrap_or(iri)
+}
+
+/// Graphs never adopted into the Library on a dataset's behalf: a graph the
+/// Studio mints for an entry of its own (`urn:shapes:`; without an entry, the
+/// entry went and took its content with it), a system graph, and a
+/// model-registry graph (bind a model's shapes instead). An adopted entry is
+/// owned by the dataset's owner, whose managers the Studio then lets edit a
+/// `urn:shapes:` graph outright.
+pub(crate) fn never_adopted(
+    store: &crate::store::TripleStore,
+    base_url: &str,
+    graph_iri: &str,
+) -> bool {
+    graph_iri.starts_with("urn:shapes:")
+        || graph_iri.starts_with("urn:system:")
+        || crate::auth::dataset_graph::graph_held_by_model_registry(store, base_url, graph_iri)
+}
+
+/// Whether `dataset` may have `graph_iri` adopted into the Library on its
+/// behalf (see [`auto_register_dataset_shapes_graph`]).
+fn dataset_may_adopt(state: &AppState, dataset: &Dataset, graph_iri: &str) -> bool {
+    use crate::auth::dataset_graph;
+    if never_adopted(&state.store, &state.base_url, graph_iri) {
+        return false;
+    }
+    dataset.shapes_graph_iri.as_deref() == Some(graph_iri)
+        || dataset_graph::dataset_holds_graph(
+            &state.auth_db,
+            &state.base_url,
+            &dataset.id,
+            graph_iri,
+        )
 }
 
 /// Idempotently adopt `graph_iri` (a graph holding SHACL shapes that belongs to
@@ -47,6 +79,22 @@ pub fn auto_register_dataset_shapes_graph(
         return Ok(Some(existing));
     }
 
+    // A new entry is owned by the dataset's owner, and its managers may edit
+    // it through the Studio as far as `handlers::may_write_shape_graph_content`
+    // lets them. Only a graph the dataset actually uses as its shapes is
+    // adopted: one it holds (namespace, registered) or links as its shapes
+    // graph. Never a graph the Studio mints for an entry of its own
+    // (`urn:shapes:`, whose entry went with it), a system graph or a
+    // model-registry graph (bind a model's shapes instead).
+    if !dataset_may_adopt(state, dataset, graph_iri) {
+        tracing::info!(
+            dataset = %dataset.id,
+            graph = %graph_iri,
+            "shacl_studio: not adopting a graph the dataset does not hold into the Library"
+        );
+        return Ok(None);
+    }
+
     let (targets, count) = super::run::analyze_shapes_graph(&state.store, graph_iri);
     if count == 0 {
         return Ok(None);
@@ -67,6 +115,16 @@ pub fn auto_register_dataset_shapes_graph(
         format!("{} shapes", dataset.name)
     };
 
+    // The entry takes the dataset's visibility, but a graph a dataset holds
+    // as private is its writers' to read, not its viewers': its entry is
+    // private (the owner and their organisation), and whoever may not read
+    // the graph gets no entry of it whatever its visibility says, then or
+    // after it is widened (`crate::auth::acl::withheld_private_graphs`).
+    let visibility = if state.auth_db.is_private_dataset_graph(graph_iri)? {
+        Visibility::Private
+    } else {
+        dataset.visibility
+    };
     let set = studio.create_shape_graph(
         &name,
         Some(&format!(
@@ -75,7 +133,7 @@ pub fn auto_register_dataset_shapes_graph(
         )),
         dataset.owner_type,
         &dataset.owner_id,
-        dataset.visibility,
+        visibility,
         graph_iri,
         &["imported".to_string(), format!("dataset:{}", dataset.id)],
         ShapeSource::Imported,

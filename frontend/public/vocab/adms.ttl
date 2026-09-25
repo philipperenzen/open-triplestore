@@ -1,10 +1,30 @@
-# Asset Description Metadata Schema — ADMS is a profile of DCAT, used to
-# describe semantic assets (or just 'Assets'), defined as highly reusable
-# metadata (e.g.
-# Full vocabulary as published in the Linked Open Vocabularies (LOV) corpus
-# snapshot of 2025-12-18 (https://lov.linkeddata.es/ — dataset CC BY 4.0),
-# version v2015-07-22 (2015-07-22).
-# Source: http://www.w3.org/ns/adms  (ns http://www.w3.org/ns/adms#)
+# Asset Description Metadata Schema (ADMS) — a profile of DCAT for describing
+# semantic assets (namespace revision 2015-07-22).
+# Source: http://www.w3.org/ns/adms as published until 2023 — this copy's
+# triples are identical to https://www.w3.org/ns/legacy_adms.ttl (checked
+# 2026-09-23). http://www.w3.org/ns/adms now redirects to a different, 2023 SEMIC
+# revision, which is not this file.
+# Obtained via the Linked Open Vocabularies (LOV) corpus snapshot of 2025-12-18
+# (https://lov.linkeddata.es/), which re-serialized it as Turtle. LOV's own
+# CC BY 4.0 licence covers LOV's catalogue; it does not relicense this vocabulary.
+# Status: described by Asset Description Metadata Schema (ADMS), W3C Working
+# Group Note 01 August 2013 (Retired August 2023),
+# https://www.w3.org/TR/2013/NOTE-vocab-adms-20130801/ — the vocabulary is now
+# maintained by SEMIC.
+# Copyright © 2015 World Wide Web Consortium. https://www.w3.org/copyright/document-license-2023/
+# Copyright © 2023 W3C®. This software or document includes material copied from
+# or derived from Asset Description Metadata Schema (ADMS),
+# https://www.w3.org/ns/legacy_adms.
+# Licence: W3C Document License (2023), https://www.w3.org/copyright/document-license-2023/
+# Its definitions derive from ADMS v1.00 of the European Commission's ISA
+# Programme: Copyright © 2012 European Union. This vocabulary is published under
+# the ISA Open Metadata Licence v1.1,
+# https://interoperable-europe.ec.europa.eu/licence/isa-open-metadata-licence-v11
+# (its "No Warranty" disclaimer is reproduced in NOTICE.md in this directory).
+# Changes: re-serialized as Turtle by LOV (triples unchanged); this comment
+# header was written by Open Triplestore (2026-07-24, revised 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The vocabulary, as re-serialized by LOV, starts below this line. ----
 @prefix adms: <http://www.w3.org/ns/adms#> .
 @prefix dcat: <http://www.w3.org/ns/dcat#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .

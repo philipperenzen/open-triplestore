@@ -9,7 +9,10 @@
 //! Environment variables:
 //! - `SMTP_HOST` — SMTP relay host. Unset → log-only backend.
 //! - `SMTP_PORT` — relay port (default 587).
-//! - `SMTP_USERNAME` / `SMTP_PASSWORD` — optional credentials.
+//! - `SMTP_USERNAME` / `SMTP_PASSWORD` — optional credentials. The password is
+//!   read as a secret reference (`env:`, `file:`, `vault:`) and resolved at
+//!   startup; a raw value is accepted outside the production posture with a
+//!   deprecation warning.
 //! - `SMTP_TLS` — transport security: `none` (plaintext — only for a relay on a
 //!   trusted private network, e.g. the bundled compose `mail` service),
 //!   `starttls`, or `implicit` (TLS-wrapped/SMTPS). Default: implicit TLS on
@@ -22,6 +25,8 @@
 //!
 //! Note: the ops alerting module (`alerting` feature) has its own independent
 //! `ALERT_SMTP_*` configuration; this mailer is for user-facing account email.
+
+use crate::secrets::env_secret_opt;
 
 use std::sync::Arc;
 
@@ -128,7 +133,7 @@ impl Mailer {
                     host,
                     port,
                     username: env_opt("SMTP_USERNAME"),
-                    password: env_opt("SMTP_PASSWORD"),
+                    password: env_secret_opt("SMTP_PASSWORD"),
                     tls,
                 }
             }

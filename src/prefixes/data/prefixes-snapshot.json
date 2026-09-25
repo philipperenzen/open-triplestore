@@ -2,15 +2,29 @@
  "format_version": 1,
  "sources": {
   "prefix.cc": {
+   "name": "prefix.cc",
+   "homepage": "https://prefix.cc/",
    "url": "https://prefix.cc/popular/all.file.json",
    "snapshot_date": "2026-06-29",
-   "note": "Community prefix registry; repository released under The Unlicense."
+   "entries": 3537,
+   "maintainer": "Richard Cyganiak; developed at the Digital Enterprise Research Institute (DERI), National University of Ireland, Galway",
+   "license": null,
+   "rights": "No licence is published for the prefix.cc data. Prefix-to-namespace pairs are facts. The operator's own issue https://github.com/cygri/prefix.cc/issues/13 (opened 2014) says all data is considered public domain (CC0); that has not been published as a licence or dedication.",
+   "code_license": "The Unlicense (https://github.com/cygri/prefix.cc/blob/master/LICENSE.txt), covering the prefix.cc site's source code, not its data.",
+   "modifications": "Entries with an invalid label or namespace dropped (1 in this snapshot); prefix.cc's popularity order kept as rank; a source field added.",
+   "credit": "prefix.cc (https://prefix.cc/), maintained by Richard Cyganiak, developed at DERI, NUI Galway; snapshot of 2026-06-29. No licence is published for this data; its operator has stated it is considered public domain (CC0): https://github.com/cygri/prefix.cc/issues/13"
   },
   "lov": {
+   "name": "Linked Open Vocabularies (LOV)",
+   "homepage": "https://lov.linkeddata.es/",
    "url": "https://web.archive.org/web/20251218081818id_/https://lov.linkeddata.es/lov.nq.gz",
    "snapshot_date": "2025-12-18",
+   "entries": 157,
    "license": "CC BY 4.0",
-   "attribution": "Linked Open Vocabularies (LOV), https://lov.linkeddata.es/"
+   "license_url": "https://creativecommons.org/licenses/by/4.0/",
+   "attribution": "Linked Open Vocabularies (LOV), https://lov.linkeddata.es/, created by Pierre-Yves Vandenbussche and Bernard Vatant, hosted by the Ontology Engineering Group, Universidad Politécnica de Madrid",
+   "modifications": "Extracted and filtered: the prefix and namespace LOV records for each vocabulary in its dump of 2025-12-18; of 898 vocabularies, 740 whose label prefix.cc already binds and 1 with an invalid label or namespace were left out, leaving 157; ranked after the prefix.cc entries and re-encoded as JSON.",
+   "credit": "Linked Open Vocabularies (LOV), https://lov.linkeddata.es/, created by Pierre-Yves Vandenbussche and Bernard Vatant, hosted by the Ontology Engineering Group, Universidad Politécnica de Madrid; CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Modified: 157 prefix/namespace pairs extracted from the LOV dump of 2025-12-18, keeping only valid pairs whose label prefix.cc does not already bind."
   }
  },
  "prefixes": [
@@ -18102,12 +18116,6 @@
    "prefix": "lpwcc",
    "namespace": "https://linkedpaperswithcode.com/class/",
    "rank": 3015,
-   "source": "prefix.cc"
-  },
-  {
-   "prefix": "ontologia",
-   "namespace": "http://ub.edu/dades/ontologia/Cinema#Cinemes#",
-   "rank": 3016,
    "source": "prefix.cc"
   },
   {

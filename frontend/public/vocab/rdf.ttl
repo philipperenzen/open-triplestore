@@ -1,3 +1,17 @@
+# The RDF Concepts Vocabulary (RDF) — the RDF Schema for the terms in the RDF
+# namespace http://www.w3.org/1999/02/22-rdf-syntax-ns# (dc:date 2019-12-16).
+# Source: https://www.w3.org/1999/02/22-rdf-syntax-ns.ttl
+# Defined in RDF 1.1 Concepts and Abstract Syntax, W3C Recommendation
+# 25 February 2014, https://www.w3.org/TR/2014/REC-rdf11-concepts-20140225/
+# Copyright © 2019 World Wide Web Consortium. https://www.w3.org/copyright/document-license-2023/
+# Copyright © 2023 W3C®. This software or document includes material copied from
+# or derived from The RDF Concepts Vocabulary (RDF),
+# https://www.w3.org/1999/02/22-rdf-syntax-ns.ttl.
+# Licence: W3C Document License (2023), https://www.w3.org/copyright/document-license-2023/
+# Changes by Open Triplestore: this comment header was added; the rest of the
+# file is byte-identical to the source (checked 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The upstream file starts below this line. ----
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .

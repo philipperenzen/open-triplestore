@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { detectGraphRolesFromContent, normalizeGraphRole, graphRoleLabel, contentKindToRole, graphResultsToElements, shortenIRI, expandPrefix, parseNTriplesToBindings, detectRdfFormat } from '../rdf-utils.js';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { toTurtle, toTrig, detectGraphRolesFromContent, normalizeGraphRole, graphRoleLabel, contentKindToRole, graphResultsToElements, shortenIRI, expandPrefix, parseNTriplesToBindings, detectRdfFormat, wellKnownCurie, loadPrefixCcPrefixes } from '../rdf-utils.js';
 
 describe('normalizeGraphRole', () => {
   it('folds legacy/singular spellings onto canonical tokens', () => {
@@ -194,6 +194,53 @@ describe('shortenIRI', () => {
     expect(shortenIRI(null as unknown as string)).toBe('');
     expect(typeof shortenIRI({ subject: {} } as unknown as string)).toBe('string');
   });
+
+  it('keeps a urn: IRI whole instead of inventing a prefix from its NID', () => {
+    // 'urn:uuid:…' has no '#'/'/' to split on. Shortening it to 'uuid:…' would
+    // drop the scheme and read as a CURIE nothing can resolve.
+    expect(shortenIRI('urn:uuid:8f14e45f-ceea-467a-9c2b-1f6f2b0e1a11'))
+      .toBe('urn:uuid:8f14e45f-ceea-467a-9c2b-1f6f2b0e1a11');
+    expect(shortenIRI('urn:example:shapes')).toBe('urn:example:shapes');
+    expect(shortenIRI('mailto:ops@example.org')).toBe('mailto:ops@example.org');
+  });
+
+  it('labels a urn: IRI that does have a namespace boundary', () => {
+    expect(shortenIRI('urn:example:shapes/PersonShape')).toBe('shapes:PersonShape');
+  });
+
+  it('shortens the store’s own graph target IRIs to a readable CURIE', () => {
+    expect(shortenIRI('http://localhost:7878/dataset/bridges/graphs/shapes')).toBe('graphs:shapes');
+    expect(shortenIRI('http://www.w3.org/ns/shacl#NodeShape')).toBe('sh:NodeShape');
+  });
+
+  it('leaves the IRI whole when the derived label would not be a plain name', () => {
+    // '2024,v1' as a prefix label is not a name — a pseudo-CURIE is worse than
+    // the full IRI, which at least says what the term is.
+    expect(shortenIRI('http://example.org/2024,v1/Thing')).toBe('http://example.org/2024,v1/Thing');
+    expect(shortenIRI('http://example.org/ns/')).toBe('http://example.org/ns/');
+  });
+});
+
+describe('wellKnownCurie', () => {
+  it('resolves a COMMON_PREFIXES namespace and reports it for declaration', () => {
+    expect(wellKnownCurie('http://www.w3.org/ns/shacl#NodeShape')).toEqual({
+      prefix: 'sh',
+      namespace: 'http://www.w3.org/ns/shacl#',
+      local: 'NodeShape',
+    });
+    expect(wellKnownCurie('http://xmlns.com/foaf/0.1/Person')).toEqual({
+      prefix: 'foaf',
+      namespace: 'http://xmlns.com/foaf/0.1/',
+      local: 'Person',
+    });
+  });
+
+  it('returns null for unknown, unsplittable or empty IRIs', () => {
+    expect(wellKnownCurie('http://example.org/private/Thing')).toBeNull();
+    expect(wellKnownCurie('urn:uuid:8f14e45f')).toBeNull();
+    expect(wellKnownCurie('')).toBeNull();
+    expect(wellKnownCurie(undefined as unknown as string)).toBeNull();
+  });
 });
 
 describe('expandPrefix', () => {
@@ -263,5 +310,104 @@ describe('parseNTriplesToBindings', () => {
     const o = parseNTriplesToBindings(nt).results.bindings[0].o;
     expect(o.value).toBe('plain');
     expect(o.datatype).toBeUndefined();
+  });
+});
+
+// Kept last in the file: warming the prefix store is module-global state, and
+// the assertions above are written against the cold store.
+describe('loadPrefixCcPrefixes', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const QUDT = 'http://qudt.org/schema/qudt/';
+
+  it('survives a failing endpoint, coalesces concurrent callers, and never re-fetches once warm', async () => {
+    expect(wellKnownCurie(QUDT + 'Unit')).toBeNull();
+
+    // A page mounts while the service is down: no throw, no poisoned state.
+    const failing = vi.fn().mockRejectedValue(new Error('offline'));
+    vi.stubGlobal('fetch', failing);
+    await expect(loadPrefixCcPrefixes()).resolves.toBeUndefined();
+    expect(failing).toHaveBeenCalledTimes(1);
+    expect(wellKnownCurie(QUDT + 'Unit')).toBeNull();
+
+    // An HTTP error, and a 200 carrying something that isn't a prefix map, are
+    // equally survivable — a failed attempt is retryable, not remembered.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 503, json: async () => ({}) }));
+    await expect(loadPrefixCcPrefixes()).resolves.toBeUndefined();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => 'nonsense' }));
+    await expect(loadPrefixCcPrefixes()).resolves.toBeUndefined();
+    expect(wellKnownCurie(QUDT + 'Unit')).toBeNull();
+
+    // Two Studio pages mount together: one request serves both, and awaiting it
+    // means the store really is warm.
+    let release: (v: unknown) => void = () => {};
+    const gate = new Promise((r) => { release = r; });
+    const ok = vi.fn().mockImplementation(async () => {
+      await gate;
+      return { ok: true, json: async () => ({ qudt: QUDT }) };
+    });
+    vi.stubGlobal('fetch', ok);
+    const a = loadPrefixCcPrefixes();
+    const b = loadPrefixCcPrefixes();
+    expect(a).toBe(b);
+    release(null);
+    await Promise.all([a, b]);
+    expect(ok).toHaveBeenCalledTimes(1);
+    expect(wellKnownCurie(QUDT + 'Unit')).toEqual({ prefix: 'qudt', namespace: QUDT, local: 'Unit' });
+    expect(shortenIRI(QUDT + 'Unit')).toBe('qudt:Unit');
+    // A CURIE the UI is willing to show must expand back, or committing an
+    // editable field would store the CURIE text as the IRI.
+    expect(expandPrefix('qudt:Unit')).toBe(QUDT + 'Unit');
+    expect(expandPrefix('qudt:Unit', { qudt: 'http://example.org/mine/' })).toBe('http://example.org/mine/Unit');
+
+    // A third page mounts later: the warm store is not re-fetched.
+    await loadPrefixCcPrefixes();
+    expect(ok).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe('Turtle serialisation only writes CURIEs it declares', () => {
+  const iri = (value: string) => ({ type: 'uri' as const, value });
+
+  it('emits a full IRI when the namespace is not in the declared prefix block', () => {
+    // shortenIRI invents a label from the last namespace segment so a table can
+    // show something readable. Writing that into a document produces a CURIE
+    // with no matching @prefix line — a download that will not parse.
+    const ttl = toTurtle([
+      {
+        subject: iri('urn:example:shapes/PersonShape'),
+        predicate: iri('http://www.w3.org/1999/02/22-rdf-syntax-ns#type'),
+        object: iri('http://www.w3.org/ns/shacl#NodeShape'),
+      },
+    ]);
+    expect(ttl).toContain('<urn:example:shapes/PersonShape>');
+    expect(ttl).not.toMatch(/(^|\s)shapes:/m);
+    // The declared ones are still abbreviated.
+    expect(ttl).toContain('sh:NodeShape');
+    expect(ttl).toContain('@prefix sh:');
+
+    // Every CURIE written must have a declaration.
+    const declared = new Set(
+      [...ttl.matchAll(/@prefix ([A-Za-z0-9_.-]+):/g)].map((m) => m[1]),
+    );
+    for (const m of ttl.matchAll(/(?:^|\s)([A-Za-z][A-Za-z0-9_.-]*):[A-Za-z0-9_.-]+/g)) {
+      expect(declared).toContain(m[1]);
+    }
+  });
+
+  it('applies the same rule inside a named graph', () => {
+    const trig = toTrig([
+      {
+        subject: iri('urn:example:shapes/PersonShape'),
+        predicate: iri('http://www.w3.org/1999/02/22-rdf-syntax-ns#type'),
+        object: iri('http://www.w3.org/ns/shacl#NodeShape'),
+        graph: iri('urn:example:g'),
+      },
+    ]);
+    expect(trig).toContain('<urn:example:shapes/PersonShape>');
+    expect(trig).not.toMatch(/(^|\s)shapes:/m);
   });
 });

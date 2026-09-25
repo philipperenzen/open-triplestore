@@ -157,16 +157,49 @@
     return pickByLang(entry.titles, (x) => x.lang, lang)?.value || entry.prefix;
   }
 
+  // Shown whole and clamped by CSS: under licences that allow no modification
+  // the catalogue keeps a description only when it is the vocabulary's own
+  // text, character for character, so the text itself is never cut.
   function description(entry, lang) {
-    const d = pickByLang(entry.descriptions, (x) => x.lang, lang)?.value || '';
-    return d.length > 220 ? d.slice(0, 220) + '…' : d;
+    return pickByLang(entry.descriptions, (x) => x.lang, lang)?.value || '';
+  }
+
+  // Tooltip of the licence line: each licence's URI, the graph's own
+  // statements, where the licence comes from when the publisher states it
+  // outside the graph, whether it allows only unaltered copies, the notice the
+  // licence requires on copies (which also says when LOV's copy has
+  // mis-decoded text), and why an openly licensed vocabulary is still not
+  // redistributed.
+  // `tr` is $t, passed in so the tooltip follows a language switch.
+  function licenseTooltip(entry, tr) {
+    const lines = (entry.license || [])
+      .map((license, i) => ({ license, uri: (entry.license_uris || [])[i] }))
+      .filter((l) => l.uri)
+      .map((values) => tr('pages.vocabularySearch.licenseUri', { values }));
+    lines.push(...(entry.license_declared || []));
+    if (entry.no_derivatives) lines.push(tr('pages.vocabularySearch.licenseNoDerivativesHint'));
+    if (entry.license_source === 'publisher-terms') {
+      lines.push(tr('pages.vocabularySearch.licensePublisherTerms', { values: { url: entry.license_source_url || '' } }));
+    }
+    if (entry.license_notice) {
+      lines.push(tr('pages.vocabularySearch.licenseNotice', { values: { notice: entry.license_notice } }));
+    }
+    if (entry.redistribution_withheld) {
+      lines.push(tr('pages.vocabularySearch.licenseWithheld', { values: { reason: entry.redistribution_withheld } }));
+    }
+    return lines.join('\n');
   }
 
   async function install(entry) {
     installing.add(entry.prefix); installing = installing;
     try {
       const out = await installVocabulary(entry.prefix);
-      toastSuccess($t('pages.vocabularySearch.installed', { values: { id: out.model_id, version: out.version } }));
+      // A vocabulary whose licence does not allow redistribution is
+      // installed private (see docs/vocabulary-search.md).
+      const values = { id: out.model_id, version: out.version };
+      toastSuccess(out.is_public === false
+        ? $t('pages.vocabularySearch.installedPrivate', { values })
+        : $t('pages.vocabularySearch.installed', { values }));
       await runVocabSearch();
       try { status = await vocabStatus(); } catch {}
     } catch (e) {
@@ -414,6 +447,37 @@
               <h4>{title(entry, $locale)}</h4>
               {#if description(entry, $locale)}
                 <p class="vs-card-desc">{description(entry, $locale)}</p>
+              {:else if entry.source === 'lov' && entry.license_status && !entry.redistributable}
+                <p class="vs-card-desc vs-card-withheld">{$t('pages.vocabularySearch.descriptionWithheld')}</p>
+              {/if}
+              <!-- A LOV vocabulary's licence: the one its graph declares or
+                   its publisher's published terms; platform entries have
+                   none here (their registry entry carries their terms). -->
+              {#if entry.license_status}
+                <p class="vs-card-license" class:restricted={!entry.redistributable}
+                   title={licenseTooltip(entry, $t)}>
+                  {#if entry.license_status === 'open' && entry.redistribution_withheld}
+                    {$t('pages.vocabularySearch.licenseOpenWithheld', { values: { license: (entry.license || []).join(', ') } })}
+                  {:else if entry.license_status === 'open'}
+                    {$t('pages.vocabularySearch.licenseOpen', { values: { license: (entry.license || []).join(', ') } })}
+                  {:else if entry.license_status === 'restricted'}
+                    {$t('pages.vocabularySearch.licenseRestricted', { values: { license: (entry.license || []).join(', ') } })}
+                  {:else if entry.license_status === 'unrecognised'}
+                    {$t('pages.vocabularySearch.licenseUnrecognised')}
+                  {:else if entry.license_status === 'copyright-only'}
+                    {$t('pages.vocabularySearch.licenseCopyrightOnly')}
+                  {:else}
+                    {$t('pages.vocabularySearch.licenseNone')}
+                  {/if}
+                  {#if entry.no_derivatives}
+                    · {$t('pages.vocabularySearch.licenseNoDerivatives')}
+                  {/if}
+                  {#if entry.source === 'lov'}
+                    · <a class="vs-card-license-page" href={`/api/vocab/notice?vocab=${encodeURIComponent(entry.prefix)}`}
+                         target="_blank" rel="noopener" title={$t('pages.vocabularySearch.licensePageTitle')}
+                      >{$t('pages.vocabularySearch.licensePage')}</a>
+                  {/if}
+                </p>
               {/if}
               <div class="vs-card-tags">
                 {#each (entry.tags || []).slice(0, 4) as tg}
@@ -532,10 +596,15 @@
     </section>
   {/if}
 
+  <!-- LOV's CC BY 4.0 covers its catalogue metadata, which this platform
+       extracted and filtered; the vocabularies keep their own licences. -->
   <footer class="vs-attribution">
-    {$t('pages.vocabularySearch.attribution')}
+    {$t('pages.vocabularySearch.attributionLov')}
     <a href="https://lov.linkeddata.es/" target="_blank" rel="noopener noreferrer">Linked Open Vocabularies</a>
-    (CC BY 4.0) · prefix.cc
+    (<a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer">CC BY 4.0</a>;
+    {$t('pages.vocabularySearch.attributionModified')}) · prefix.cc
+    <br />
+    {$t('pages.vocabularySearch.attributionVocabLicences')}
   </footer>
 </div>
 
@@ -609,7 +678,11 @@
   .vs-card { border: 1px solid var(--border, #e2e8f0); border-radius: 10px; padding: 0.75rem 0.9rem; background: var(--bg-card, #fff); display: flex; flex-direction: column; gap: 0.35rem; }
   .vs-card-head { display: flex; justify-content: space-between; align-items: center; }
   .vs-card h4 { margin: 0; font-size: 0.92rem; }
-  .vs-card-desc { font-size: 0.78rem; color: var(--text-muted, #64748b); margin: 0; }
+  .vs-card-desc { font-size: 0.78rem; color: var(--text-muted, #64748b); margin: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; }
+  .vs-card-withheld { font-style: italic; }
+  .vs-card-license { font-size: 0.7rem; color: var(--text-muted, #64748b); margin: 0; }
+  .vs-card-license.restricted { color: var(--warning-700, #b45309); }
+  .vs-card-license-page { color: inherit; text-decoration: underline; }
   .vs-card-tags { display: flex; gap: 0.3rem; flex-wrap: wrap; }
   .vs-tag { font-size: 0.68rem; background: var(--bg-muted, #f1f5f9); border-radius: 999px; padding: 0.08rem 0.5rem; color: var(--text-muted, #475569); }
   .vs-card-metrics { display: flex; gap: 0.75rem; font-size: 0.72rem; color: var(--text-muted, #94a3b8); }
