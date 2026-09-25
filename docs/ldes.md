@@ -50,7 +50,7 @@ GET /api/datasets/<id>/ldes/nodes/<n>       # fragment n (1-based), page_size me
 <…/api/datasets/assets/ldes/members/17>
     dct:isVersionOf <https://example.org/layered/asset/b1> ;
     dct:created "2026-09-02T09:58:12Z"^^xsd:dateTime ;
-    a ex:Bridge ; ex:name "Waalbrug" ; ex:status exd:in-service .
+    a ex:Bridge ; ex:name "Riverside Bridge" ; ex:status exd:in-service .
 ```
 
 Members are version objects: the member IRI carries the entity's properties

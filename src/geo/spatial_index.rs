@@ -3,8 +3,9 @@
 //! Provides ~100x improvement for spatial queries over 10K+ features by
 //! pruning candidates to O(log n + k) before expensive GEOS evaluation.
 //!
-//! The index stores bounding boxes (envelopes) of all `geo:asWKT` geometries
-//! and supports efficient range queries via an R-tree data structure.
+//! The index stores bounding boxes (envelopes) of every serialised geometry —
+//! `geo:asWKT`, `geo:asGML` and `geo:asGeoJSON` — and supports efficient range
+//! queries via an R-tree data structure.
 
 use geos::Geom;
 use oxigraph::model::*;
@@ -14,14 +15,17 @@ use std::sync::{Arc, RwLock};
 use tracing::{info, warn};
 
 use super::datatypes::parse_wkt_literal;
+use super::vocabulary::{AS_GEOJSON_PROPERTY, AS_GML_PROPERTY, AS_WKT_PROPERTY};
 
-const GEO_AS_WKT: &str = "http://www.opengis.net/ont/geosparql#asWKT";
 const GEO_HAS_GEOMETRY: &str = "http://www.opengis.net/ont/geosparql#hasGeometry";
+
+/// The geometry serialisation properties the index scans.
+const SERIALISATIONS: [&str; 3] = [AS_WKT_PROPERTY, AS_GML_PROPERTY, AS_GEOJSON_PROPERTY];
 
 /// An entry in the spatial R-tree index: a subject IRI with its bounding box.
 #[derive(Clone, Debug)]
 pub struct SpatialEntry {
-    /// The subject IRI of the geometry (the node with `geo:asWKT`).
+    /// The subject IRI of the geometry (the node with the serialisation).
     pub subject_iri: String,
     /// The feature IRI that owns this geometry (via `geo:hasGeometry`), if known.
     pub feature_iri: Option<String>,
@@ -65,11 +69,10 @@ impl SpatialIndex {
 
     /// Rebuild the entire spatial index from the store.
     ///
-    /// Scans all triples with predicate `geo:asWKT`, parses each WKT literal,
-    /// computes its bounding box via GEOS `envelope()`, and bulk-loads into
-    /// the R-tree.
+    /// Scans all triples with a geometry serialisation predicate (`geo:asWKT`,
+    /// `geo:asGML`, `geo:asGeoJSON`), parses each literal, computes its
+    /// bounding box via GEOS `envelope()`, and bulk-loads into the R-tree.
     pub fn rebuild(&self, store: &Store) {
-        let wkt_pred = NamedNodeRef::new_unchecked(GEO_AS_WKT);
         let has_geom_pred = NamedNodeRef::new_unchecked(GEO_HAS_GEOMETRY);
 
         let mut entries = Vec::new();
@@ -92,7 +95,10 @@ impl SpatialIndex {
             geom_to_feature.insert(geom, feature);
         }
 
-        for quad in store.quads_for_pattern(None, Some(wkt_pred), None, None) {
+        let quads = SERIALISATIONS.into_iter().flat_map(move |p| {
+            store.quads_for_pattern(None, Some(NamedNodeRef::new_unchecked(p)), None, None)
+        });
+        for quad in quads {
             let quad = match quad {
                 Ok(q) => q,
                 Err(_) => continue,
@@ -275,6 +281,42 @@ mod tests {
         let env = entry.envelope();
         assert_eq!(env.lower(), [0.0, 0.0]);
         assert_eq!(env.upper(), [10.0, 10.0]);
+    }
+
+    #[test]
+    fn every_serialisation_is_indexed() {
+        let store = Store::new().unwrap();
+        store
+            .load_from_slice(
+                oxigraph::io::RdfFormat::Turtle,
+                r#"@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+                <http://example.org/w> geo:asWKT "POINT(1 1)"^^geo:wktLiteral .
+                <http://example.org/g> geo:asGML "<gml:Point><gml:pos>2 2</gml:pos></gml:Point>"^^geo:gmlLiteral .
+                <http://example.org/j> geo:asGeoJSON '{"type":"Point","coordinates":[3,3]}'^^geo:geoJSONLiteral .
+                <http://example.org/bad> geo:asGeoJSON '{"type":"Point"}'^^geo:geoJSONLiteral .
+                "#,
+            )
+            .unwrap();
+        let idx = SpatialIndex::new();
+        idx.rebuild(&store);
+        let mut found: Vec<String> = idx
+            .query_intersecting(0.0, 0.0, 10.0, 10.0)
+            .into_iter()
+            .map(|e| e.subject_iri)
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                "http://example.org/g",
+                "http://example.org/j",
+                "http://example.org/w"
+            ]
+        );
+        // The GeoJSON point is where its coordinates say.
+        let near_j = idx.query_intersecting(2.9, 2.9, 3.1, 3.1);
+        assert_eq!(near_j.len(), 1);
+        assert_eq!(near_j[0].subject_iri, "http://example.org/j");
     }
 
     #[test]

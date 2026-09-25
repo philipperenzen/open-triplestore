@@ -28,7 +28,7 @@ describe('RdfTerm viz chips', () => {
 
   it('shows a 3D chip for a glb URL term', () => {
     const { container } = render(RdfTerm, {
-      term: { type: 'uri', value: 'https://files.example/boog-noord.glb' },
+      term: { type: 'uri', value: 'https://files.example/arch-north.glb' },
     });
     expect(container.querySelector('.viz-chip.model')).toBeTruthy();
   });

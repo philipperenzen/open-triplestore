@@ -601,7 +601,7 @@ static DATASETS: &[DatasetSpec] = &[
 /// Seed copies of the viewer-demo fixtures. Canonical sources live under
 /// tests/fixtures/ (the conformance oracle's home); these copies exist because
 /// the Docker image build only ships src/, and a drift-guard test in
-/// tests/waalbrug_viewer_e2e.rs keeps them byte-identical below their header.
+/// tests/example_bridge_viewer_e2e.rs keeps them byte-identical below their header.
 const LANDMARKS_TTL: &str = include_str!("data/landmarks.ttl");
 /// Mixed GeoSPARQL geometry types (POINT/LINESTRING/POLYGON) for the 2D map.
 const GEO_FEATURES_TTL: &str = include_str!("data/geo-features.ttl");

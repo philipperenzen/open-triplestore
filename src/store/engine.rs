@@ -1,7 +1,7 @@
 use dashmap::DashMap;
 use opengraph::spargebra::algebra::{AggregateExpression, Expression, GraphPattern};
 use opengraph::spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
-use opengraph::spargebra::{Query as SpargebraQuery, SparqlParser, Update as SpargebraUpdate};
+use opengraph::spargebra::{Query as SpargebraQuery, Update as SpargebraUpdate};
 use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
 use oxigraph::model::*;
 use oxigraph::sparql::{QueryResults, QuerySolution, QuerySolutionIter, SparqlEvaluator};
@@ -339,6 +339,8 @@ static NEXT_CACHE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 impl TripleStore {
     /// Open or create a persistent store at the given path.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
+        // Before any query is parsed: the accelerators' planners parse too.
+        crate::geo::aggregates::register_with_parser();
         let store = Store::open(path)?;
         info!("Opened store at {}", path.display());
         let graph_index = GraphIndex::new();
@@ -399,6 +401,7 @@ impl TripleStore {
 
     /// Create an in-memory store (useful for testing).
     pub fn in_memory() -> Result<Self, StoreError> {
+        crate::geo::aggregates::register_with_parser();
         let store = Store::new()?;
         let graph_index = GraphIndex::new();
         let spatial_index = SpatialIndex::new();
@@ -679,6 +682,13 @@ impl TripleStore {
             opts = opts.with_custom_function(iri, move |args| handler(args));
         }
 
+        // …and the GeoSPARQL aggregates (`geof:aggUnion`). This declares them to
+        // this evaluator's own parser as well; every other parse of a query goes
+        // through `crate::sparql::parser`, which knows them too.
+        for (iri, factory) in crate::geo::aggregates::all_aggregates() {
+            opts = opts.with_custom_aggregate_function(iri, move || factory());
+        }
+
         // Register the additive ots-geof: 3D functions (spec §3.4). Separate
         // namespace, so GeoSPARQL 1.1 results are unchanged.
         #[cfg(feature = "geometry3d")]
@@ -839,7 +849,7 @@ impl TripleStore {
         {
             return None;
         }
-        let parsed = SparqlParser::new().parse_query(sparql).ok()?;
+        let parsed = crate::sparql::parser().parse_query(sparql).ok()?;
         let (pattern, dataset) = match &parsed {
             SpargebraQuery::Select {
                 pattern, dataset, ..
@@ -1165,7 +1175,7 @@ impl TripleStore {
         use opengraph::spargebra::term::{GraphName, GraphNamePattern};
         use opengraph::spargebra::GraphUpdateOperation;
 
-        let parsed = SparqlParser::new().parse_update(sparql).ok()?;
+        let parsed = crate::sparql::parser().parse_update(sparql).ok()?;
         // Ground `GraphName` (DATA blocks): NamedNode or DefaultGraph, never a var.
         let ground = |g: &GraphName| match g {
             GraphName::NamedNode(nn) => Some(nn.as_str().to_string()),
@@ -1227,7 +1237,7 @@ impl TripleStore {
     /// conforms to) instead of the whole store.
     pub fn update_scoped(&self, sparql: &str, scope: &[String]) -> Result<(), StoreError> {
         let _w = self.begin_write()?;
-        let mut parsed = spargebra::SparqlParser::new()
+        let mut parsed = crate::sparql::parser()
             .parse_update(sparql)
             .map_err(|e| StoreError::Parse(format!("scoped update: {e}")))?;
         let default = Self::scope_graphs(scope)?;
@@ -1261,7 +1271,7 @@ impl TripleStore {
         sparql: &str,
         scope: &[String],
     ) -> Result<QueryResults<'static>, StoreError> {
-        let mut parsed = spargebra::SparqlParser::new()
+        let mut parsed = crate::sparql::parser()
             .parse_query(sparql)
             .map_err(|e| StoreError::Parse(format!("scoped query: {e}")))?;
         let ds = spargebra::algebra::QueryDataset {
@@ -1426,7 +1436,7 @@ impl TripleStore {
             Some(sim.len() - 1)
         }
 
-        let parsed = spargebra::SparqlParser::new().parse_update(sparql).ok()?;
+        let parsed = crate::sparql::parser().parse_update(sparql).ok()?;
         // The operations are simulated in order against the store's current
         // state and the delta is the NET difference: `DELETE DATA {q}; INSERT
         // DATA {q}` with `q` stored changes nothing, and `INSERT DATA {q};
@@ -1528,7 +1538,7 @@ impl TripleStore {
         // Parse everything first: a syntax error anywhere means nothing runs.
         let mut parsed: Vec<SpargebraUpdate> = Vec::with_capacity(statements.len());
         for (i, s) in statements.iter().enumerate() {
-            match SparqlParser::new().parse_update(s) {
+            match crate::sparql::parser().parse_update(s) {
                 Ok(u) => parsed.push(u),
                 Err(e) => return Ok(rolled_back(i, e.to_string())),
             }
@@ -1805,6 +1815,46 @@ impl TripleStore {
         self.load_reader(reader, format, to_graph)
     }
 
+    /// Error if any quad names a graph other than the default graph.
+    ///
+    /// Used on write paths where the caller was authorized for exactly one graph
+    /// — an LDP resource, or a default-graph Graph Store write — so a body that
+    /// smuggles triples into another named graph (TriG/N-Quads named graphs, a
+    /// JSON-LD `@graph` with an `@id`) must be refused rather than written there,
+    /// bypassing the per-graph ACL. Callers check this *before* inserting.
+    fn reject_named_graphs(quads: &[Quad]) -> Result<(), StoreError> {
+        if let Some(q) = quads
+            .iter()
+            .find(|q| !matches!(q.graph_name, GraphName::DefaultGraph))
+        {
+            let named = match &q.graph_name {
+                GraphName::NamedNode(n) => n.as_str().to_string(),
+                _ => "_:blank".to_string(),
+            };
+            return Err(StoreError::Parse(format!(
+                "named graphs are not allowed here: the body writes into graph <{named}>. \
+                 Load multi-graph data through the dataset import API."
+            )));
+        }
+        Ok(())
+    }
+
+    /// Load `data` into the **default graph only**, rejecting a body that names a
+    /// graph of its own (see [`Self::reject_named_graphs`]). Relative IRIs resolve
+    /// against `base_iri` when given. Parses the whole body before inserting, so a
+    /// rejected body writes nothing.
+    pub fn load_str_triples_only(
+        &self,
+        data: &str,
+        format: RdfFormat,
+        base_iri: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let quads = self.parse_quads(BufReader::new(data.as_bytes()), format, base_iri, None)?;
+        Self::reject_named_graphs(&quads)?;
+        self.insert_quads_and_reindex(quads, None)?;
+        Ok(())
+    }
+
     /// Load RDF data from a string, resolving relative IRIs against `base_iri`.
     pub fn load_str_with_base(
         &self,
@@ -1922,6 +1972,15 @@ impl TripleStore {
         // nothing extra and makes the replace all-or-nothing.
         let quads = self.parse_quads(BufReader::new(data.as_bytes()), format, None, graph_iri)?;
 
+        // A default-graph PUT (`graph_iri` is None) does not force a target graph,
+        // so a quad body (TriG/N-Quads/JSON-LD `@graph`) would keep its own graph
+        // names and write into another tenant's graph, bypassing the per-graph
+        // ACL. Refuse it. A named-graph PUT is safe: `parse_quads` forced every
+        // quad into `graph_iri` above.
+        if graph_iri.is_none() {
+            Self::reject_named_graphs(&quads)?;
+        }
+
         // An empty target (a first PUT, the boot-time seed) has nothing a
         // reader could observe half-replaced and nothing a crash could lose,
         // so it keeps the bulk loader — 2.4x faster per quad than
@@ -2029,7 +2088,12 @@ impl TripleStore {
     ) -> Result<Vec<Quad>, StoreError> {
         match graph_iri {
             Some(g) => self.load_str_delta(data, format, g),
-            None => self.load_str(data, format, None).map(|_| Vec::new()),
+            // Default-graph POST: like the default-graph PUT above, refuse a body
+            // that names its own graph so it cannot be routed past the per-graph
+            // ACL into another graph.
+            None => self
+                .load_str_triples_only(data, format, None)
+                .map(|_| Vec::new()),
         }
     }
 

@@ -253,6 +253,19 @@ async fn chat_turn_as_model(state: AppState, token: &str, model: &str, question:
     common::body_json(resp.into_body()).await
 }
 
+/// `GET /api/llm/health` as the admin.
+async fn llm_health(state: AppState, token: &str) -> Value {
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/api/llm/health")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = common::test_app(state).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200, "health must answer");
+    common::body_json(resp.into_body()).await
+}
+
 // ─── Tests ─────────────────────────────────────────────────────────────────────
 
 /// The system prompt must orient the model on what the question names: the
@@ -950,4 +963,62 @@ async fn identical_failed_query_is_not_rerun() {
         third.contains("was not run") && third.contains("SAME query"),
         "the model is told the repeat was not run: {third}"
     );
+}
+
+/// `/api/llm/health` judges each AI feature's model against the gateway's
+/// `/v1/models` list — the payload its probe already fetched. The configured
+/// model names are read back from the response rather than set through
+/// `LLM_*_MODEL`, so this test changes no process environment; and the mock
+/// list advertises no context window, so the health call's own window probe
+/// caches the same "nothing detectable" a chat turn would.
+#[tokio::test]
+async fn health_reports_whether_each_features_model_is_listed() {
+    let _serial = test_lock().await;
+    let gw = gateway();
+    script(gw, &[]);
+    let (state, token) = common::admin_state();
+
+    // A list that names none of the configured models: reachable, not listed.
+    *gw.models_payload.lock().unwrap() = Some(json!({"data": [{"id": "health-unlisted"}]}));
+    let v = llm_health(state.clone(), &token).await;
+    assert_eq!(v["reachable"], true, "{v}");
+    assert_eq!(
+        v["configured"], true,
+        "the mock gateway is set explicitly: {v}"
+    );
+    let services = v["services"].as_array().expect("services array");
+    let ids: Vec<&str> = services.iter().filter_map(|s| s["id"].as_str()).collect();
+    assert_eq!(ids, ["chat", "sparql", "shacl"], "{v}");
+    assert!(
+        services
+            .iter()
+            .all(|s| s["listed"].as_bool() == Some(false)),
+        "a parsed list without the model is `false`, not unknown: {v}"
+    );
+    let chat = services[0]["model"]
+        .as_str()
+        .expect("chat model")
+        .to_string();
+    assert_eq!(v["chat_model"], chat.as_str(), "{v}");
+
+    // List the chat model — under Ollama's implicit `:latest` tag when it has
+    // no tag — and the chat entry flips to listed; so does any feature that
+    // shares its model.
+    let listed_as = if chat.contains(':') {
+        chat.clone()
+    } else {
+        format!("{chat}:latest")
+    };
+    *gw.models_payload.lock().unwrap() =
+        Some(json!({"data": [{"id": "health-unlisted"}, {"id": listed_as}]}));
+    let v = llm_health(state, &token).await;
+    let services = v["services"].as_array().expect("services array");
+    assert_eq!(services[0]["listed"], true, "{v}");
+    for s in &services[1..] {
+        if s["model"] == chat.as_str() {
+            assert_eq!(s["listed"], true, "same model as chat: {v}");
+        } else {
+            assert!(s["listed"].is_boolean(), "a list was parsed: {v}");
+        }
+    }
 }

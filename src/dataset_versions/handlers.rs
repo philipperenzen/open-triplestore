@@ -42,6 +42,72 @@ fn require_read(state: &AppState, ds: &Dataset, uid: Option<&str>) -> Result<(),
     }
 }
 
+/// The dataset's private *live source*-graph IRIs, as they bear on what `uid`
+/// may see of a version snapshot.
+///
+/// A version snapshot copies every graph the dataset held at the time — private
+/// ones included — into version-scoped IRIs that are absent from
+/// `list_dataset_graph_entries`, so the plain private filter that guards `/sparql`
+/// is a no-op on a version read. This maps a snapshot's *source* graph back to
+/// the live `private` flag instead.
+///
+/// Returns `None` when the caller may write the dataset (writers and admins see
+/// every graph). Otherwise `Some(set)` of the live graphs flagged private, which
+/// the callers below use to drop the matching snapshot graphs. Fails closed: a
+/// lookup error propagates as `500`, so nothing is served, rather than defaulting
+/// to "nothing private".
+fn private_source_filter(
+    state: &AppState,
+    ds: &Dataset,
+    uid: Option<&str>,
+) -> Result<Option<std::collections::HashSet<String>>, AppError> {
+    let can_write = match uid {
+        Some(u) => state
+            .auth_db
+            .can_write_dataset(u, ds)
+            .map_err(|e| AppError::Internal(e.to_string()))?,
+        None => false,
+    };
+    if can_write {
+        return Ok(None);
+    }
+    let entries = state
+        .auth_db
+        .list_dataset_graph_entries(&ds.id)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(Some(
+        entries
+            .into_iter()
+            .filter(|e| e.private)
+            .map(|e| e.graph_iri)
+            .collect(),
+    ))
+}
+
+/// The snapshot graphs of `record` that `uid` may read. Writers get them all;
+/// non-writers lose every snapshot whose live source graph is private. When the
+/// dataset has no private graph the full list is returned unchanged, so the
+/// common case (and legacy versions with an empty `source_map`) is untouched;
+/// once anything is private, a non-writer sees only snapshots with a non-private
+/// source in the map (an unmapped snapshot is dropped, fail-closed).
+fn readable_snapshot_graphs(
+    state: &AppState,
+    ds: &Dataset,
+    uid: Option<&str>,
+    record: &DatasetVersion,
+) -> Result<Vec<String>, AppError> {
+    match private_source_filter(state, ds, uid)? {
+        None => Ok(record.snapshot_graphs.clone()),
+        Some(private) if private.is_empty() => Ok(record.snapshot_graphs.clone()),
+        Some(private) => Ok(record
+            .source_map
+            .iter()
+            .filter(|m| !private.contains(&m.source_graph))
+            .map(|m| m.snapshot_graph.clone())
+            .collect()),
+    }
+}
+
 fn require_write(state: &AppState, ds: &Dataset, uid: &str) -> Result<(), AppError> {
     if state
         .auth_db
@@ -104,13 +170,16 @@ pub async fn get_version_data(
     let record = registry::get_version(&state.store, &state.base_url, &id, &ver)
         .ok_or_else(|| AppError::NotFound(format!("Version '{ver}' not found")))?;
 
+    // A version snapshot copies private graphs too, into IRIs the plain private
+    // filter never sees. Restrict a non-writer to the snapshots whose live source
+    // is not private, so a viewer (or anonymous caller on a public dataset) cannot
+    // dump a private graph through a pinned version.
+    let readable = readable_snapshot_graphs(&state, &ds, uid, &record)?;
     let graphs: Vec<String> = match params.graph.as_deref() {
-        Some("all") | None => record.snapshot_graphs.clone(),
-        Some(suffix) => record
-            .snapshot_graphs
-            .iter()
+        Some("all") | None => readable,
+        Some(suffix) => readable
+            .into_iter()
             .filter(|g| g.ends_with(suffix))
-            .cloned()
             .collect(),
     };
 
@@ -696,10 +765,17 @@ pub async fn diff_versions(
     require_read(&state, &ds, uid)?;
     let from = registry::get_version(&state.store, &state.base_url, &id, &ver)
         .ok_or_else(|| AppError::NotFound(format!("Version '{ver}' not found")))?;
+    // A version snapshot copies private graphs too, and the `live` side reads the
+    // live source graphs directly. Hide every graph whose live source is private
+    // from a non-writer (viewer, or anonymous on a public dataset), so the diff —
+    // rdf-patch triples or the JSON add/remove counts — cannot expose one.
+    let hidden = private_source_filter(&state, &ds, uid)?;
+    let visible = |src: &str| hidden.as_ref().is_none_or(|p| !p.contains(src));
     // (source graph, graph holding the "to" side)
     let to_side: Vec<(String, String)> = if other == "live" {
         from.source_map
             .iter()
+            .filter(|m| visible(&m.source_graph))
             .map(|m| (m.source_graph.clone(), m.source_graph.clone()))
             .collect()
     } else {
@@ -707,6 +783,7 @@ pub async fn diff_versions(
             .ok_or_else(|| AppError::NotFound(format!("Version '{other}' not found")))?;
         to.source_map
             .iter()
+            .filter(|m| visible(&m.source_graph))
             .map(|m| (m.source_graph.clone(), m.snapshot_graph.clone()))
             .collect()
     };
@@ -715,6 +792,7 @@ pub async fn diff_versions(
         let mut mappings: Vec<(String, Option<String>, Option<String>)> = from
             .source_map
             .iter()
+            .filter(|m| visible(&m.source_graph))
             .map(|m| {
                 let to_graph = to_side
                     .iter()
@@ -757,6 +835,9 @@ pub async fn diff_versions(
     let (mut added, mut removed) = (0usize, 0usize);
     let mut graphs = Vec::new();
     for m in &from.source_map {
+        if !visible(&m.source_graph) {
+            continue;
+        }
         let to_graph = to_side
             .iter()
             .find(|(src, _)| *src == m.source_graph)

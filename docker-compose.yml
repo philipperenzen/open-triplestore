@@ -75,7 +75,7 @@ services:
       # "*" reflects any origin with credentials (mirror mode) — lets a browser client
       # on an arbitrary host connect. Prefer an explicit list in prod.
       - CORS_ORIGINS=${CORS_ORIGINS:-}
-      # External validation platform base URL, used by /api/datasets/validate-and-commit.
+      # External validation service base URL, used by /api/datasets/validate-and-commit.
       - VALIDATION_API_URL=${VALIDATION_API_URL:-}
       # Cross-app service discovery (opt-in, off by default). Set LD_DISCOVERY=true to self-register
       # as "triplestore" so siblings/the browser resolve this store instead of hardcoding :7878.

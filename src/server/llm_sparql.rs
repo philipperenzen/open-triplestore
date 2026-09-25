@@ -58,10 +58,11 @@ the parts that are still correct, instead of starting from scratch.\n\
 /// a truncated query is invalid and would only force the repair round-trip.
 const SPARQL_MAX_TOKENS: u32 = 1024;
 
-/// Base URL of the OpenAI-compatible LLM endpoint (`LLM_GATEWAY_URL`). Defaults to a
-/// local server on :8000; if nothing runs there, the AI features show as unavailable.
+/// Base URL of the OpenAI-compatible LLM endpoint (`LLM_GATEWAY_URL`, trimmed).
+/// Unset or blank, it defaults to a local server on :8000; if nothing runs there,
+/// the AI features show as unavailable.
 pub(crate) fn gateway_base() -> String {
-    std::env::var("LLM_GATEWAY_URL").unwrap_or_else(|_| "http://127.0.0.1:8000".to_string())
+    env_nonempty("LLM_GATEWAY_URL").unwrap_or_else(|| "http://127.0.0.1:8000".to_string())
 }
 
 /// Model name sent on every completion. Configure with `LLM_MODEL` (an OpenAI model
@@ -629,6 +630,9 @@ async fn shacl_assist(
 pub struct LlmHealth {
     /// The LLM endpoint this instance is configured to use (`LLM_GATEWAY_URL`).
     gateway: String,
+    /// Whether `LLM_GATEWAY_URL` holds a non-empty value. `false` = no endpoint
+    /// was configured (unset or blank): `gateway` is the built-in local default.
+    configured: bool,
     /// Whether that endpoint answered within the timeout.
     reachable: bool,
     /// The endpoint's payload when reachable (e.g. the `/v1/models` list, or a
@@ -647,31 +651,84 @@ pub struct LlmHealth {
     /// `max_model_len`, Ollama Modelfile `num_ctx`). `null` = no budgeting —
     /// fine for large-context hosted APIs, risky on local runtimes.
     context_tokens: Option<usize>,
+    /// One entry per AI feature, always `chat`, `sparql`, `shacl` in that
+    /// order: the model each one sends and whether the gateway serves it.
+    services: Vec<LlmServiceHealth>,
 }
 
-/// GET /api/llm/health — is an LLM endpoint reachable from this server?
-/// Lets the UI show AI availability alongside its other service health. Probes the
-/// OpenAI-standard `/v1/models` first (works for OpenAI, Ollama, LM Studio, vLLM, …),
-/// then falls back to a gateway `/health` for servers that expose one.
-async fn llm_health(
-    user: Option<Extension<AuthenticatedUser>>,
-    State(_state): State<AppState>,
-) -> Json<LlmHealth> {
-    let gateway = gateway_base();
-    let base = gateway.trim_end_matches('/');
-    let cfg = llm_guard::config();
-    let chat_model = chat_model();
-    let context_tokens = resolve_context_tokens(&chat_model).await;
-    let limits = |reachable: bool, detail: Option<Value>| LlmHealth {
-        gateway: gateway.clone(),
-        reachable,
-        detail,
-        rate_limit_per_min: cfg.rate_per_min,
-        rate_limit_anon_per_min: cfg.rate_per_min_anon,
-        caller: if user.is_some() { "user" } else { "guest" },
-        chat_model: chat_model.clone(),
-        context_tokens,
-    };
+/// One AI feature's model, as `/api/llm/health` reports it.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+pub struct LlmServiceHealth {
+    /// The feature: `chat` (the Spark assistant), `sparql` (NL→SPARQL
+    /// generation and saved-query repair) or `shacl` (the SHACL Studio
+    /// assistant).
+    id: &'static str,
+    /// The model that feature sends: its per-task override (`LLM_CHAT_MODEL`,
+    /// `LLM_SPARQL_MODEL`, `LLM_SHACL_MODEL`), else `LLM_MODEL`.
+    model: String,
+    /// Whether the gateway's model list includes that model (exact id, or
+    /// Ollama's implicit `:latest` tag). `null` when there is no list to judge
+    /// by: the gateway is unreachable, or answered without one (a `/health`
+    /// fallback).
+    listed: Option<bool>,
+}
+
+/// Whether `LLM_GATEWAY_URL` holds a non-empty value (after trimming). When it
+/// is unset or blank, [`gateway_base`] falls back to its built-in local default.
+fn gateway_configured() -> bool {
+    env_nonempty("LLM_GATEWAY_URL").is_some()
+}
+
+/// The model ids in an OpenAI-style model list: a top-level `data` array of
+/// `{"id": …}` objects, as `/v1/models` answers. Entries without a string `id`
+/// are skipped; an empty `data` array is a real (empty) list. `None` when the
+/// payload carries no such list — no payload at all, a gateway's own `/health`
+/// body, or a non-empty `data` array none of whose entries is a model.
+fn listed_model_ids(detail: Option<&Value>) -> Option<Vec<&str>> {
+    let data = detail?.get("data")?.as_array()?;
+    let ids: Vec<&str> = data
+        .iter()
+        .filter_map(|entry| entry.get("id").and_then(Value::as_str))
+        .collect();
+    (data.is_empty() || !ids.is_empty()).then_some(ids)
+}
+
+/// Does the gateway-listed id `listed` name the configured model `configured`?
+/// Exact equality, plus Ollama's implicit tag: an untagged name and the same
+/// name tagged `:latest` are one model, in either direction. Nothing looser —
+/// no case folding, no prefix matching, no stripping of `provider/` prefixes —
+/// because a model the gateway would reject must never show as listed.
+fn model_matches(configured: &str, listed: &str) -> bool {
+    configured == listed
+        || is_implicit_latest(configured, listed)
+        || is_implicit_latest(listed, configured)
+}
+
+/// Is `tagged` the untagged Ollama name `bare` with its implicit `:latest` tag?
+fn is_implicit_latest(bare: &str, tagged: &str) -> bool {
+    !bare.is_empty() && !bare.contains(':') && tagged.strip_suffix(":latest") == Some(bare)
+}
+
+/// The `services` entries of `/api/llm/health`: each `(id, model)` pair, with
+/// whether `listed` (the gateway's model ids, `None` when unknown) serves it.
+fn service_health(
+    models: [(&'static str, String); 3],
+    listed: Option<&[&str]>,
+) -> Vec<LlmServiceHealth> {
+    models
+        .into_iter()
+        .map(|(id, model)| {
+            let listed = listed.map(|ids| ids.iter().any(|l| model_matches(&model, l)));
+            LlmServiceHealth { id, model, listed }
+        })
+        .collect()
+}
+
+/// Probe the gateway at `base`: the OpenAI-standard `/v1/models` first (works
+/// for OpenAI, Ollama, LM Studio, vLLM, …), then a gateway `/health` for servers
+/// that expose one. Returns whether either answered 2xx within the timeout, and
+/// that answer's JSON payload.
+async fn probe_gateway(base: &str) -> (bool, Option<Value>) {
     let client = http();
     for path in ["/v1/models", "/health"] {
         let mut rb = client
@@ -682,12 +739,46 @@ async fn llm_health(
         }
         if let Ok(resp) = rb.send().await {
             if resp.status().is_success() {
-                let detail = resp.json::<Value>().await.ok();
-                return Json(limits(true, detail));
+                return (true, resp.json::<Value>().await.ok());
             }
         }
     }
-    Json(limits(false, None))
+    (false, None)
+}
+
+/// GET /api/llm/health — is an LLM endpoint reachable from this server, and
+/// does it serve the model each AI feature is configured with? Lets the UI show
+/// AI availability alongside its other service health (see [`probe_gateway`]).
+async fn llm_health(
+    user: Option<Extension<AuthenticatedUser>>,
+    State(_state): State<AppState>,
+) -> Json<LlmHealth> {
+    let gateway = gateway_base();
+    let cfg = llm_guard::config();
+    let chat_model = chat_model();
+    let context_tokens = resolve_context_tokens(&chat_model).await;
+    let (reachable, detail) = probe_gateway(gateway.trim_end_matches('/')).await;
+    // Judged from the payload the probe already fetched — no request per model.
+    let services = service_health(
+        [
+            ("chat", chat_model.clone()),
+            ("sparql", sparql_model()),
+            ("shacl", shacl_model()),
+        ],
+        listed_model_ids(detail.as_ref()).as_deref(),
+    );
+    Json(LlmHealth {
+        gateway,
+        configured: gateway_configured(),
+        reachable,
+        detail,
+        rate_limit_per_min: cfg.rate_per_min,
+        rate_limit_anon_per_min: cfg.rate_per_min_anon,
+        caller: if user.is_some() { "user" } else { "guest" },
+        chat_model,
+        context_tokens,
+        services,
+    })
 }
 
 #[derive(Deserialize)]
@@ -1028,7 +1119,7 @@ fn trim_at_parse_error(sparql: &str) -> Option<String> {
 /// parser's message on failure. Undeclared prefixes fail here — which is exactly why
 /// [`finalize_sparql`] runs first.
 pub(crate) fn validate_sparql(sparql: &str) -> Result<(), String> {
-    spargebra::SparqlParser::new()
+    crate::sparql::parser()
         .parse_query(sparql)
         .map(|_| ())
         .map_err(|e| e.to_string())
@@ -1146,10 +1237,10 @@ numbered line per data need (at most 6, each a short phrase), then immediately y
 line. The platform repeats your plan back to you each round so you can work through it; questions \
 answerable with one query need no plan.\n\
 Search by name with the full-text index, not by scanning. The platform indexes every literal and \
-exposes it as a magic property: `(?s ?score) text:search (\"waalbrug\" 20) .` binds ?s to the 20 \
+exposes it as a magic property: `(?s ?score) text:search (\"bridge\" 20) .` binds ?s to the 20 \
 best-matching subjects and ?score to their relevance, already restricted to the graphs you may read. \
 Narrow it to one predicate with a second argument: \
-`(?s ?score) text:search (\"waalbrug\" <http://www.w3.org/2000/01/rdf-schema#label> 20) .` \
+`(?s ?score) text:search (\"bridge\" <http://www.w3.org/2000/01/rdf-schema#label> 20) .` \
 Reach for it whenever the user is LOOKING FOR something by name or keyword and you do not know the \
 IRI — it is ranked and indexed, where `FILTER(CONTAINS(…))` reads every literal in scope. Keep \
 `FILTER(CONTAINS(…))` for narrowing a set you are already matching on. Always pair a text:search with \
@@ -1195,7 +1286,7 @@ name, or an IRI's distinguishing tail segments (e.g. `viewer-3d-demo/building`),
 platform builds the features from your rows. The source:\"query\" forms (chart and map) are ONLY \
 valid after a successful `SPARQL:` round THIS turn — with no query they render an error card. \
 Inline form for hand-stated features: \
-{\"features\":[{\"label\":\"Waalbrug\",\"wkt\":\"POINT(5.8645 51.8519)\",\"iri\":\"http://…\"}]}. \
+{\"features\":[{\"label\":\"Example Bridge\",\"wkt\":\"POINT(4.9 52.37)\",\"iri\":\"http://…\"}]}. \
 WKT must be WGS84 with longitude before latitude. Prefer points or centroids; skip geometries whose WKT \
 was truncated. When elements have 3D model files, add \"models\":[{\"label\":\"…\",\"url\":\"…\",\
 \"wkt\":\"POINT(lon lat)\"}] to place those models on the map at their anchor — the map then renders \
@@ -3509,7 +3600,7 @@ const ANCHOR_STOPWORDS: &[&str] = &[
 ];
 
 /// Ordinary content words from the question worth anchoring in the full-text
-/// index — the complement of [`evidence_terms`]: "beheerobject" or "waalbrug"
+/// index — the complement of [`evidence_terms`]: "beheerobject" or "draaibrug"
 /// rather than identifier-shaped tokens. `exclude` (the identifier terms) and
 /// the stopword list keep the few slots for words that name DOMAIN things.
 fn salient_terms(text: &str, exclude: &[String], cap: usize) -> Vec<String> {
@@ -4776,8 +4867,9 @@ mod tests {
     use super::{
         all_retrievals_empty, caps_for_window, contains_ask_fence, context_from_models_payload,
         context_from_ollama_show, extract_plan, extract_tool_calls, graph_vocab_summary,
-        iri_occurs_blocking, is_ollama_show_payload, locate_iris_blocking, mentioned_iris,
-        render_models_section, salient_terms, strip_plan_block,
+        iri_occurs_blocking, is_ollama_show_payload, listed_model_ids, locate_iris_blocking,
+        mentioned_iris, model_matches, render_models_section, salient_terms, service_health,
+        strip_plan_block, LlmServiceHealth,
     };
     use super::{
         estimate_tokens, evidence_terms, extract_query_request, extract_sparql_directive,
@@ -5018,7 +5110,7 @@ mod tests {
             "<http://www.opengis.net/def/crs/EPSG/0/4326> POLYGON((0 0, 1 0, 1 1, 0 0))"
         ));
         assert!(looks_like_wkt("  MULTIPOLYGON(((0 0,1 0,1 1,0 0)))"));
-        assert!(!looks_like_wkt("Waalbrug"));
+        assert!(!looks_like_wkt("Voorbeeldbrug"));
         assert!(!looks_like_wkt("http://example.org/bridge/1"));
         // Multi-byte content must not panic the prefix check.
         assert!(!looks_like_wkt("héllo wörld"));
@@ -5052,13 +5144,13 @@ mod tests {
                 ok: true,
                 error: None,
                 columns: Some(vec!["name".into(), "count".into()]),
-                rows: Some(vec![vec!["Waalbrug".into(), "3".into()]]),
+                rows: Some(vec![vec!["Voorbeeldbrug".into(), "3".into()]]),
                 truncated: false,
             },
         ];
         let s = fallback_answer(&runs);
         assert!(s.contains("| name | count |"), "markdown header: {s}");
-        assert!(s.contains("| Waalbrug | 3 |"), "row: {s}");
+        assert!(s.contains("| Voorbeeldbrug | 3 |"), "row: {s}");
         assert!(
             !s.to_uppercase().contains("SPARQL:"),
             "no directive leaks: {s}"
@@ -5519,21 +5611,21 @@ The pattern above checks whether any triple exists.";
         let iris: Vec<String> = Vec::new();
         let terms = salient_terms(
             "ik zoek alle beheerobject types uit de dataset met hun labels en relaties \
-             rond de waalbrug",
+             rond de voorbeeldbrug",
             &iris,
             4,
         );
         assert_eq!(
             terms,
-            vec!["beheerobject".to_string(), "waalbrug".to_string()],
+            vec!["beheerobject".to_string(), "voorbeeldbrug".to_string()],
             "function words, and meta words like types/labels/relaties/dataset, never \
              take an anchor slot"
         );
         // Fragments of an identifier evidence_terms already anchors are not
         // re-anchored as words.
-        let exclude = vec!["waalbrug-01".to_string()];
+        let exclude = vec!["voorbeeldbrug-01".to_string()];
         assert_eq!(
-            salient_terms("zoek waalbrug-01 documenten", &exclude, 4),
+            salient_terms("zoek voorbeeldbrug-01 documenten", &exclude, 4),
             vec!["documenten".to_string()]
         );
     }
@@ -5542,8 +5634,8 @@ The pattern above checks whether any triple exists.";
         let store = crate::store::TripleStore::in_memory().unwrap();
         store
             .load_str(
-                r#"<http://ex.org/id/waalbrug> <http://ex.org/def/naam> "Waalbrug" .
-                   <http://ex.org/id/waalbrug> a <http://ex.org/def/Brug> ."#,
+                r#"<http://ex.org/id/voorbeeldbrug> <http://ex.org/def/naam> "Voorbeeldbrug" .
+                   <http://ex.org/id/voorbeeldbrug> a <http://ex.org/def/Brug> ."#,
                 oxigraph::io::RdfFormat::Turtle,
                 Some("urn:test:bridges"),
             )
@@ -5555,10 +5647,10 @@ The pattern above checks whether any triple exists.";
     fn iri_occurrence_probes_cover_every_position_and_graphs() {
         let store = orientation_store();
         for real in [
-            "http://ex.org/id/waalbrug", // subject
-            "http://ex.org/def/naam",    // predicate
-            "http://ex.org/def/Brug",    // object
-            "urn:test:bridges",          // named graph
+            "http://ex.org/id/voorbeeldbrug", // subject
+            "http://ex.org/def/naam",         // predicate
+            "http://ex.org/def/Brug",         // object
+            "urn:test:bridges",               // named graph
         ] {
             assert!(iri_occurs_blocking(&store, real), "{real} must be found");
         }
@@ -5569,7 +5661,7 @@ The pattern above checks whether any triple exists.";
     fn locating_a_pasted_iri_names_only_readable_graphs() {
         let store = orientation_store();
         let iris = vec![
-            "http://ex.org/id/waalbrug".to_string(),
+            "http://ex.org/id/voorbeeldbrug".to_string(),
             "http://ex.org/def/Brug".to_string(),
             "http://ex.org/def/Verzonnen".to_string(),
         ];
@@ -5676,6 +5768,105 @@ The pattern above checks whether any triple exists.";
         );
         assert!(!is_ollama_show_payload(&json!({"whatever": 1})));
         assert_eq!(context_from_ollama_show(&json!({"whatever": 1})), None);
+    }
+
+    // ─── /api/llm/health: is each feature's model served? ─────────────────────
+
+    #[test]
+    fn listed_model_match_is_exact_plus_ollamas_implicit_latest_tag() {
+        assert!(model_matches("gpt-4o", "gpt-4o"));
+        assert!(model_matches("llama3.2:1b", "llama3.2:1b"));
+        // Ollama's implicit tag, in both directions.
+        assert!(model_matches("llama3.2", "llama3.2:latest"));
+        assert!(model_matches("llama3.2:latest", "llama3.2"));
+        assert!(model_matches("library/qwen2.5", "library/qwen2.5:latest"));
+        // A different tag is a different model.
+        assert!(!model_matches("llama3.2", "llama3.2:1b"));
+        assert!(!model_matches("llama3.2:1b", "llama3.2"));
+        assert!(!model_matches("llama3.2:1b", "llama3.2:latest"));
+        assert!(!model_matches("llama3.2:latest", "llama3.2:1b"));
+        // No case folding, no prefix or suffix matching.
+        assert!(!model_matches("GPT-4o", "gpt-4o"));
+        assert!(!model_matches("Llama3.2", "llama3.2:latest"));
+        assert!(!model_matches("gpt-4", "gpt-4o"));
+        assert!(!model_matches("gpt-4o", "gpt-4o-mini"));
+        // provider/model ids match exactly, never with the provider stripped.
+        assert!(model_matches("openai/gpt-4o", "openai/gpt-4o"));
+        assert!(!model_matches("gpt-4o", "openai/gpt-4o"));
+        assert!(!model_matches("openai/gpt-4o", "gpt-4o"));
+        // The implicit tag needs a name in front of it.
+        assert!(!model_matches("", ":latest"));
+    }
+
+    #[test]
+    fn listed_model_ids_come_only_from_openai_style_lists() {
+        let openai = json!({"object": "list", "data": [
+            {"id": "gpt-4o", "object": "model", "owned_by": "openai"},
+            {"id": "llama3.2:latest", "object": "model"},
+        ]});
+        assert_eq!(
+            listed_model_ids(Some(&openai)),
+            Some(vec!["gpt-4o", "llama3.2:latest"])
+        );
+        // An empty list is still a list — every model is then "not listed".
+        assert_eq!(listed_model_ids(Some(&json!({"data": []}))), Some(vec![]));
+        // A gateway's own /health payload carries no model list at all.
+        let health = json!({"status": "ok", "upstream": "vllm"});
+        assert_eq!(listed_model_ids(Some(&health)), None);
+        assert_eq!(listed_model_ids(None), None);
+        // Entries without a string id are skipped, not fatal…
+        let mixed = json!({"data": [{"id": "a"}, {"name": "b"}, {"id": 7}, "c", {"id": "d"}]});
+        assert_eq!(listed_model_ids(Some(&mixed)), Some(vec!["a", "d"]));
+        // …but a `data` field holding no model entries at all is not a list.
+        assert_eq!(listed_model_ids(Some(&json!({"data": [1, 2]}))), None);
+        assert_eq!(listed_model_ids(Some(&json!({"data": {"id": "x"}}))), None);
+    }
+
+    #[test]
+    fn service_entries_judge_each_features_model_against_the_list() {
+        let models = || {
+            [
+                ("chat", "qwen2.5:14b".to_string()),
+                ("sparql", "qwen2.5".to_string()),
+                ("shacl", "gpt-4o".to_string()),
+            ]
+        };
+        let entry = |id: &'static str, model: &str, listed: Option<bool>| LlmServiceHealth {
+            id,
+            model: model.to_string(),
+            listed,
+        };
+
+        // Reachable, with a model list: judged model by model.
+        let payload = json!({"data": [{"id": "qwen2.5:14b"}, {"id": "qwen2.5:latest"}]});
+        let ids = listed_model_ids(Some(&payload));
+        assert_eq!(
+            service_health(models(), ids.as_deref()),
+            vec![
+                entry("chat", "qwen2.5:14b", Some(true)),
+                entry("sparql", "qwen2.5", Some(true)),
+                entry("shacl", "gpt-4o", Some(false)),
+            ]
+        );
+        // Reachable with an empty list: nothing is served.
+        let empty = json!({"data": []});
+        let ids = listed_model_ids(Some(&empty));
+        let services = service_health(models(), ids.as_deref());
+        assert!(
+            services.iter().all(|s| s.listed == Some(false)),
+            "{services:?}"
+        );
+        // Reachable without a list (the /health fallback), or unreachable:
+        // unknown — still all three entries, in order.
+        let health = json!({"status": "ok"});
+        for ids in [listed_model_ids(Some(&health)), listed_model_ids(None)] {
+            let services = service_health(models(), ids.as_deref());
+            assert_eq!(
+                services.iter().map(|s| s.id).collect::<Vec<_>>(),
+                ["chat", "sparql", "shacl"]
+            );
+            assert!(services.iter().all(|s| s.listed.is_none()), "{services:?}");
+        }
     }
 
     #[test]
@@ -5824,11 +6015,11 @@ The pattern above checks whether any triple exists.";
         assert_eq!(calls[0].arguments["query"], "ASK { ?s ?p ?o }");
         // Lenient shape: a gateway that inlines the arguments object.
         let inline = json!({"tool_calls": [
-            {"id": "c2", "function": {"name": "text_search", "arguments": {"query": "waalbrug"}}}
+            {"id": "c2", "function": {"name": "text_search", "arguments": {"query": "voorbeeldbrug"}}}
         ]});
         assert_eq!(
             extract_tool_calls(&inline)[0].arguments["query"],
-            "waalbrug"
+            "voorbeeldbrug"
         );
         // No calls, malformed entries: empty, never a panic.
         assert!(extract_tool_calls(&json!({"content": "hi"})).is_empty());

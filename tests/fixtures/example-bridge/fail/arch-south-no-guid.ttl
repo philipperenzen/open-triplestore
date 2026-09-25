@@ -1,0 +1,10 @@
+# ❌ A component with IFC geometry but no def:ifcGuid (ex:IfcRefShape, SPARQL/ASK).
+@prefix def: <https://example.org/def/> .
+@prefix eb:  <https://example.org/id/example-bridge/> .
+@prefix omg: <https://w3id.org/omg#> .
+@prefix fog: <https://w3id.org/fog#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+eb:Arch-South a def:BridgeComponent ;
+    omg:hasGeometry [ a omg:Geometry ;
+        fog:asIfc_v4.0 "https://example.org/files/south.ifc#7zZ"^^xsd:anyURI ] .
+    # no def:ifcGuid -> ASK constraint fires

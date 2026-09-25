@@ -500,8 +500,8 @@ mod tests {
         );
         assert_eq!(value_term("REI60", None, None).unwrap(), "\"REI60\"");
         assert_eq!(
-            value_term("Waalbrug", None, Some("nl")).unwrap(),
-            "\"Waalbrug\"@nl"
+            value_term("Voorbeeldbrug", None, Some("nl")).unwrap(),
+            "\"Voorbeeldbrug\"@nl"
         );
         assert_eq!(
             value_term("12", Some("xsd:integer"), None).unwrap(),

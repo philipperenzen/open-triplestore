@@ -570,12 +570,19 @@ pub async fn export_container(
     })?;
     let base = state.base_url.trim_end_matches('/').to_string();
 
-    // Documents: every asset of the dataset.
+    // Documents: the dataset's assets the caller may read. `Asset.public` gates
+    // anonymity, not membership — a logged-out caller (only reachable here on a
+    // public dataset) gets the public files; any authenticated dataset-reader
+    // gets them all. This mirrors `list_assets` / `serve_asset`; without it a
+    // hidden (non-public) asset's bytes would be zipped into an anonymous export.
+    let anonymous = uid.is_none();
     let mut documents = Vec::new();
     for a in state
         .auth_db
         .list_dataset_assets(&dataset_id)
         .map_err(e500)?
+        .into_iter()
+        .filter(|a| !anonymous || a.public)
     {
         match state.object_store.download(&a.s3_key).await {
             Ok((bytes, ct)) => documents.push(DocumentEntry {

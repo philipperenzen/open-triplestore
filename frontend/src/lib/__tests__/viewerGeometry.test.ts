@@ -2,17 +2,17 @@ import { describe, it, expect } from 'vitest';
 import { toMapFeature, featureBounds, modelRefs } from '../viewer/geometry';
 import type { ViewerElement } from '../viewer/geometry';
 
-const boog: ViewerElement = {
-  id: 'https://data.example.nl/id/waalbrug/Boog-Noord',
-  label: 'Noordelijke boog',
+const arch: ViewerElement = {
+  id: 'https://example.org/id/example-bridge/Arch-North',
+  label: 'North arch',
   wkt4326: 'POINT(5.860 51.851)',
-  gltf_url: 'https://files.example/boog-noord.glb',
-  files: [['Gltf_v2.0-glb', 'https://files.example/boog-noord.glb']],
+  gltf_url: 'https://files.example/arch-north.glb',
+  files: [['Gltf_v2.0-glb', 'https://files.example/arch-north.glb']],
 };
 
 const trace: ViewerElement = {
-  id: 'https://data.example.nl/id/waalbrug/Waalbrug',
-  label: 'Waalbrug',
+  id: 'https://example.org/id/example-bridge/ExampleBridge',
+  label: 'Example Bridge',
   wkt4326: 'LINESTRING(5.858 51.850, 5.862 51.853)',
 };
 
@@ -25,15 +25,15 @@ const landmark: ViewerElement = {
 
 describe('viewer geometry helpers', () => {
   it('converts a WKT point to a Leaflet [lat, lng] feature', () => {
-    const f = toMapFeature(boog)!;
+    const f = toMapFeature(arch)!;
     expect(f.kind).toBe('point');
     // WKT is (lon lat); Leaflet wants [lat, lng].
     expect(f.latlngs[0]).toEqual([51.851, 5.86]);
-    expect(f.label).toBe('Noordelijke boog');
+    expect(f.label).toBe('North arch');
   });
 
   it('converts a linestring and computes bounds over all features', () => {
-    const fs = [boog, trace].map(toMapFeature).map((f) => f!);
+    const fs = [arch, trace].map(toMapFeature).map((f) => f!);
     expect(fs[1].kind).toBe('line');
     const b = featureBounds(fs)!;
     expect(b[0][0]).toBeCloseTo(51.85); // min lat
@@ -69,14 +69,14 @@ describe('viewer geometry helpers', () => {
     // not produce bounds that would make the map's fitBounds throw.
     const bad = { id: 'bad', label: 'bad', kind: 'point' as const, latlngs: [[5338000, 167000]] as [number, number][] };
     expect(featureBounds([bad])).toBeNull();
-    const good = toMapFeature(boog)!;
+    const good = toMapFeature(arch)!;
     const b = featureBounds([bad, good])!;
     expect(b[0]).toEqual([51.851, 5.86]);
     expect(b[1]).toEqual([51.851, 5.86]);
   });
 
   it('collects model refs preferring glTF, falling back to STL, on a grid', () => {
-    const refs = modelRefs([boog, trace, landmark]);
+    const refs = modelRefs([arch, trace, landmark]);
     expect(refs).toHaveLength(2); // trace has no model
     expect(refs[0].format).toBe('gltf');
     expect(refs[1].format).toBe('stl');
