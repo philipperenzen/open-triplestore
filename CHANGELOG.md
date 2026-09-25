@@ -1492,6 +1492,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as an operand.
 
 ### Security
+- **A group's membership could be read and rewritten from any organisation's
+  path.** The three group-member endpoints — `GET` / `POST
+  /api/organisations/:org_id/groups/:group_id/members` and `DELETE
+  …/members/:user_id` — checked only the caller's role in the `org_id` taken from
+  the path (the segment the caller controls), never that `group_id` actually
+  belonged to that organisation. An admin of *any* organisation could therefore
+  list another org's group membership, add members to it — **including
+  themselves, escalating into a tenant they had no authority over** — or remove
+  members from it, simply by naming the foreign group under their own org's path.
+  The sibling `get_group` / `update_group` / `delete_group` handlers already
+  guarded this; the three member handlers now apply the same check, confirming
+  the group belongs to the path's organisation before any read or write and
+  answering `404` on a mismatch — for platform admins too, so the endpoints
+  cannot be used to probe which group ids exist either.
+- **A non-publisher could make a dataset public by editing it.** `PUT
+  /api/datasets/:id` gated a visibility change on *manage* rights alone, while
+  `create_dataset` gates public *creation* on the publish capability. A user who
+  could manage a dataset but held no publish capability could therefore create it
+  private and then `PUT` it public, bypassing the publisher gate that creation
+  enforces. `update_dataset` now requires publisher rights for the transition
+  into public, matching creation (`is_publisher()` still covers platform admins).
+  Only that transition is gated: an unchanged or narrowing visibility — including
+  editing an already-public dataset's metadata, which the frontend resends with
+  the current visibility on every save — is unaffected.
 - **Several read endpoints leaked private-graph content — and one leaked
   non-public asset bytes — to anyone who could read the dataset.** A private
   dataset graph is meant to be visible only to a writer (owner / maintainer /
