@@ -4284,6 +4284,17 @@ impl AuthDb {
         Ok(())
     }
 
+    /// Whether `graph_iri` is registered to `dataset_id`.
+    pub fn dataset_has_graph(&self, dataset_id: &str, graph_iri: &str) -> anyhow::Result<bool> {
+        let conn = self.pool.get()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM dataset_graphs WHERE dataset_id=?1 AND graph_iri=?2",
+            params![dataset_id, graph_iri],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     pub fn remove_dataset_graph(&self, dataset_id: &str, graph_iri: &str) -> anyhow::Result<()> {
         let conn = self.pool.get()?;
         conn.execute(
