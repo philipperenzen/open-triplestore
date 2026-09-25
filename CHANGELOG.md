@@ -2028,6 +2028,35 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   scopes no reads, and every path that could write or delete it refuses
   registry graphs. The boot adoption of legacy shapes graph settings into the
   Library no longer adopts registry, system or `urn:shapes:` graphs.
+- **A SHACL-AF rule was a SPARQL UPDATE with the store's own authority.** The
+  `sh:construct` body of a `sh:SPARQLRule` was rewritten textually and handed
+  to `TripleStore::update`, which authorizes nothing and confines nothing — so
+  a shapes graph, which any writer of a dataset may upload
+  (`PUT /api/datasets/{id}/shapes`) and then run
+  (`POST /api/datasets/{id}/infer`, or a SHACL Studio pipeline), could read and
+  write every graph in the store: another tenant's private data, `urn:system:*`,
+  the model registry. `DROP ALL` was a rule; with one data graph the `WITH <g>`
+  prefix the engine added confined nothing, since
+  `WITH <g> INSERT { GRAPH <any> { … } } WHERE { GRAPH <any> { … } }` is valid
+  SPARQL. A `sh:TripleRule` was reachable the same way, because the focus node
+  was pasted into the generated update as `<{focus}>` and a focus node may be a
+  literal (`sh:targetNode "…"`) whose lexical form the shapes author writes.
+  Now: `sh:construct` must parse as the CONSTRUCT query SHACL-AF says it is
+  (the `INSERT { … } WHERE { … }` convenience form still parses as one;
+  anything else is refused by name, at load time), it is evaluated **read-only**
+  over the run's data graphs with its own `FROM`/`FROM NAMED` clauses replaced,
+  `$this` is bound as a term instead of being pasted in, and the engine — not
+  the rule — inserts the derived triples, into one graph the dataset holds.
+  `POST /api/datasets/{id}/infer` names that graph: the single data graph as
+  before, or, over several, the dataset's own `urn:dataset:{id}:inferred`
+  (registered with the `entailment` role) instead of the store's global default
+  graph, where derived triples were both unowned and unreadable.
+- **A `sh:sparql` constraint or `sh:SPARQLTarget` could read graphs the run may
+  not.** Their queries were scoped by prepending `FROM` clauses, which a
+  `FROM NAMED <someone-elses-graph>` written into the shape simply added to.
+  The dataset of a shape's query is now replaced outright with the run's data
+  graphs, and no named graph is available, so a `GRAPH` block inside one
+  matches nothing.
 - **The SHACL Studio shapes catalogue listed shapes from graphs the caller
   could not read.** `GET /api/shacl/shapes` hid only Library entries the
   caller could not see. Any other graph holding shapes (a private dataset's

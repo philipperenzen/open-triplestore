@@ -40,6 +40,14 @@ pub fn dataset_owns_graph(base_url: &str, dataset_id: &str, graph_iri: &str) -> 
     graph_iri.starts_with(&http_ns) || graph_iri.starts_with(&urn_ns)
 }
 
+/// Named graph IRI where a dataset's SHACL-AF inference materialises when the
+/// run spans several data graphs and no single one of them is "the" graph.
+/// Inside the dataset's own reserved namespace, so it can never be another
+/// tenant's graph and [`dataset_holds_graph`] admits it.
+pub fn dataset_inference_graph_iri(dataset_id: &str) -> String {
+    format!("urn:dataset:{dataset_id}:inferred")
+}
+
 /// True iff `graph_iri` lies in the model registry's own graph namespace,
 /// `{base}/data-model/`: every version graph (`{base}/data-model/{id}/version/{v}`),
 /// its sub-graphs and the copies the seeder keeps aside (`…/version/{v}-kept-{n}`)
