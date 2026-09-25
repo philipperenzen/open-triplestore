@@ -1492,6 +1492,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as an operand.
 
 ### Security
+- **Several read endpoints leaked private-graph content — and one leaked
+  non-public asset bytes — to anyone who could read the dataset.** A private
+  dataset graph is meant to be visible only to a writer (owner / maintainer /
+  admin); the rule `GET /api/datasets/:id/graphs` already enforces. But the
+  viewer feed, geo-stats (single and batched), 3D-Tiles, the OGC API – Features
+  collection/items, the triple-browser suggestions and the dataset commit log
+  each scoped on the *raw* registered-graph list after only checking dataset
+  access, so a plain viewer — or an anonymous caller on a public dataset — saw
+  private graphs' geometry, labels, feature IRIs, autocomplete values and commit
+  history (message, affected graph IRIs, add/remove counts, actor). Separately,
+  the ICDD **container export** zipped *every* asset regardless of its `public`
+  flag, so an anonymous export of a public dataset downloaded its non-public
+  files. Each read path now scopes to the graphs the caller may actually read
+  (a new fail-closed `AuthDb::list_readable_dataset_graphs`: all graphs for a
+  writer, non-private ones for everyone else — a lookup error propagates as
+  `500` rather than degrading to an empty or full list), and the container
+  export drops non-public assets from an anonymous export, matching
+  `list_assets` / the asset download route. A writer/owner still sees everything.
 - **A write-scoped user could write into any named graph, bypassing the graph
   ACL.** The SPARQL UPDATE path resolves and ACL-checks every named-graph write,
   but two data-loading paths did not, because they loaded the request body while

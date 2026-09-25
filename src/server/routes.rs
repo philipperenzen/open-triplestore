@@ -4989,10 +4989,13 @@ pub async fn browse_suggest(
                     .can_access_dataset(user_id, &ds)
                     .unwrap_or(false) =>
             {
+                // Scope to the graphs this caller may READ: a viewer (or an
+                // anonymous caller on a public dataset) must not get private
+                // graphs' values suggested. Writers still see everything.
                 Some(
                     state
                         .auth_db
-                        .list_dataset_graphs(ds_id)
+                        .list_readable_dataset_graphs(user_id, &ds)
                         .map_err(|e| AppError::Internal(e.to_string()))?,
                 )
             }
@@ -9832,7 +9835,7 @@ pub async fn viewer_feed(
     // lifted footprints here would double them up and swamp the element list.
     let data_graphs: Vec<String> = state
         .auth_db
-        .list_dataset_graphs(&dataset_id)
+        .list_readable_dataset_graphs(user_id, &dataset)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .into_iter()
         .filter(|g| !g.ends_with("/ifcowl") && !is_tiles3d_graph(g))
@@ -9897,7 +9900,7 @@ pub async fn geo_stats(
     // geometry the map view does not render (see viewer_feed).
     let data_graphs: Vec<String> = state
         .auth_db
-        .list_dataset_graphs(&dataset_id)
+        .list_readable_dataset_graphs(user_id, &dataset)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .into_iter()
         .filter(|g| !g.ends_with("/ifcowl") && !is_tiles3d_graph(g))
@@ -9965,7 +9968,7 @@ pub async fn geo_stats_batch(
         }
         for g in state
             .auth_db
-            .list_dataset_graphs(id)
+            .list_readable_dataset_graphs(user_id, &dataset)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
             .into_iter()
             .filter(|g| !g.ends_with("/ifcowl") && !is_tiles3d_graph(g))
