@@ -2108,6 +2108,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - A run that could not read every graph of the dataset is not official: it
     answers as a test run (`test: true`, `partial: true`), records nothing and
     leaves the dataset's validation status as it was.
+  - Recording an official run requires write access to the dataset. A reader
+    whose run *was* complete (nothing hidden) would otherwise overwrite the
+    dataset's status and history or forge a verdict, so a non-writer's non-test
+    request is now refused (`403` — retry with `?test=true`) rather than
+    recorded. The self-heal that adopts and binds a dataset's shapes graph into
+    the Studio Library likewise runs only for a writer, never under a reader's
+    authority.
   - The report graph is private in the dataset whenever the run validated a
     private graph, or a model graph not everyone may read, and it is never
     made public again.

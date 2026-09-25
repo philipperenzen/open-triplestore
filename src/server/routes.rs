@@ -7895,6 +7895,17 @@ pub async fn validate_dataset(
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
     }
 
+    // Recording an official run writes the dataset's stored status and
+    // history, and the shapes self-heal below adopts/binds Library entries —
+    // both are writes. A reader may run validation (as a test) but may do
+    // neither. `can_write_dataset` only knows dataset/org roles, so admins
+    // (writers everywhere) are added explicitly.
+    let can_write = current_user.is_admin()
+        || state
+            .auth_db
+            .can_write_dataset(&current_user.user_id, &dataset)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
     // What the caller may read; admins read every graph.
     let readable = if current_user.is_admin() {
         None
@@ -7984,15 +7995,21 @@ pub async fn validate_dataset(
             ));
         }
         // Self-heal: shapes graphs that never made it into the Studio Library
-        // get adopted + bound now (idempotent, best-effort).
-        for iri in &resolved {
-            if let Err(e) = crate::shacl_studio::registration::auto_register_dataset_shapes_graph(
-                &state,
-                &dataset,
-                iri,
-                Some(&current_user.user_id),
-            ) {
-                debug!("auto-register of shapes graph <{iri}> skipped: {e}");
+        // get adopted + bound now (idempotent, best-effort). Only a writer may
+        // trigger it — adopting a Library entry and binding it is a write, and
+        // it must not run under a mere reader's authority.
+        if can_write {
+            for iri in &resolved {
+                if let Err(e) =
+                    crate::shacl_studio::registration::auto_register_dataset_shapes_graph(
+                        &state,
+                        &dataset,
+                        iri,
+                        Some(&current_user.user_id),
+                    )
+                {
+                    debug!("auto-register of shapes graph <{iri}> skipped: {e}");
+                }
             }
         }
         resolved
@@ -8054,6 +8071,19 @@ pub async fn validate_dataset(
     // one: a caller who may not read the whole dataset must not overwrite its
     // official status with a partial result.
     let partial = !hidden.is_empty() || shapes_withheld;
+    // Recording an official run sets the dataset's stored status and history:
+    // a write. A reader whose run was COMPLETE (nothing hidden) would otherwise
+    // record it — evicting the owner's history, forging a verdict, or setting
+    // the official status against an explicit shapes graph. Refuse it, and say
+    // to ask for a test run instead. A partial run is answered as a test run
+    // just below and never recorded, so it needs no write and stays a `200`.
+    if !q.test.unwrap_or(false) && !partial && !can_write {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Recording a validation run requires write access to the dataset; retry with ?test=true."
+                .to_string(),
+        ));
+    }
     if q.test.unwrap_or(false) || partial {
         return Ok(Json(serde_json::json!({
             "report": report,
