@@ -679,7 +679,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   served at `/api-docs/openapi.json` and the interactive UI is the frontend's
   own page — which also removes the duplicate `axum` 0.8 and `zip` 3 from the
   tree. TypeScript 7 remains held: typescript-eslint has no release that
-  supports it.
+  supports it. A fourth batch, in September, brings `argon2` 0.6 (on
+  `password-hash` 0.6 the hasher draws its own 16-byte salt; password hashes
+  stored under 0.5 still verify — pinned by a regression test on real
+  0.5-minted PHC strings — and new hashes keep the same
+  `$argon2id$v=19$m=19456,t=2,p=1$` form, so a rollback reads them too),
+  `vitest` 5 (no config or test changes needed), `oxigraph` 0.5.11 with its
+  `oxrdf` / `spargebra` / `spareval` / `sparopt` / `sparesults` / `oxttl`
+  siblings in lockstep, `aes-gcm` 0.11.1 (stored OAuth client-secret blobs
+  still decrypt, pinned by a known-answer test), `tower-http` 0.7.1, `flate2`
+  1.1.10, `lru` 0.18.4, `aws-sdk-s3` 1.142, `svelte` 5.57, `vite` 8.2.2, `n3`
+  2.6, `marked`, `devalue` past GHSA-9rgm-9g3h-6x36, `uuid`,
+  `aws-smithy-http-client`, `proj4`, `dompurify`, `@codemirror/search`,
+  `@codemirror/state`, `@typescript-eslint/parser`, and the SHA-pinned
+  `softprops/action-gh-release` 3.0.3. `oxiri` 0.3 is held: its `Iri` type
+  crosses the federation service-handler API, so it has to stay on the 0.2
+  line Oxigraph still uses.
 - **Lint.** eslint 10's new `no-useless-assignment` now runs at its recommended
   `error` severity for `.js`/`.ts`, and the nine genuine dead stores it found —
   five in `.js`/`.ts`, four in plain helper functions inside components — are
@@ -726,6 +741,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **Deactivating a SPARQL service did not stop it answering.** `PUT
+  /api/datasets/:dataset_id/services/:service_id` with `"is_active": false`
+  stored the flag, and the dataset page greyed the service out and stopped
+  showing its endpoint URL, but the query route
+  (`/api/datasets/:dataset_id/services/:service_slug/sparql`) never looked at
+  it. A public dataset's service switched off by its owner kept answering
+  anyone who had the URL. An inactive service now answers `404 Service not
+  found`, the same body as a service that does not exist, on `GET` and both
+  `POST` forms, with or without `?version=`. The same answer goes to every
+  caller: the dataset's owner, its writers and a super admin get it too,
+  because "inactive" is a property of the endpoint, not of who is asking. They
+  can reactivate the service or query the dataset through `/sparql`. This did
+  not widen what anyone could read: the route still required dataset access
+  and still filtered private graphs, so the flag was a switch that did not
+  work, not a read boundary that leaked. The SPARQL editor no longer offers
+  inactive services as endpoints, or routes a version-pinned query through
+  one.
 - **A Raft member's vote survives a restart.** The vote was kept in memory with
   the log, so a member that restarted could vote a second time in the same
   term. The consequences were bounded and documented — the election timeout
@@ -1477,6 +1509,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before this release, or one whose creator has since lost that write access
   or been deactivated, no longer gates. The server logs a warning at each
   write such a pipeline would have gated.
+- **A dataset's SPARQL service could read any graph in the store.** Adding
+  a graph to a service (`POST /api/datasets/{id}/services/{service_id}/graphs`)
+  checked only that the caller could write the dataset in the path. It
+  checked neither the graph nor that the service belonged to that dataset.
+  So any user who could create a dataset could scope a service to another
+  tenant's private graph or a `urn:system:` graph and read it through the
+  service, and so could everyone who could read that dataset, anonymous
+  callers on a public one included. A writer of one dataset could also read,
+  rename, delete or re-scope another dataset's service by putting its id
+  under their own dataset's path. Every `/services/{service_id}` route now
+  answers 404 for a service of another dataset. Adding a graph needs the
+  dataset to hold it (its namespace, its well-known graphs, or registered
+  to it), except for admins. A service query serves only the service graphs
+  the dataset holds when it runs, so rows made before this fix, and rows
+  whose graph was detached since, serve nothing. A service left with no
+  such graph returns nothing; it does not fall back to the whole dataset.
+  Every released version was affected.
 - **`POST /api/shaclc/serialize` read any named graph, for anyone.** It took
   a graph IRI from the request body and handed it straight to the serialiser
   — no authentication, no authorisation — so any caller could name any named
