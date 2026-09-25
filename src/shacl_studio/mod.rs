@@ -3,6 +3,8 @@
 //! * [`models`] — `ShapeGraph`, `ValidationPipeline`, `PipelineRun` entities.
 //! * [`store`] — SQLite persistence (reuses the auth DB pool).
 //! * [`access`] — visibility / manage checks shared by handlers.
+//! * [`read_scope`] — what a principal may read (the `/sparql` rule plus the
+//!   Library's): the catalogue's and every pipeline's read check.
 //! * [`bindings`] — the RDF *validation layer*: shape↔target bindings +
 //!   the dynamic `effective_shape_graphs_for_dataset` inheritance resolver.
 //! * [`run`] — multi-shape-graph validation + report merging + facet analysis.
@@ -31,6 +33,7 @@ pub mod introspect;
 pub mod manifest;
 pub mod migrate;
 pub mod models;
+pub mod read_scope;
 pub mod registration;
 pub mod report_rdf;
 pub mod routes;

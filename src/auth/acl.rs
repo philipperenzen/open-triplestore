@@ -170,6 +170,28 @@ pub fn check_endpoint_acl(
 
 // ─── Graph ACL ────────────────────────────────────────────────────────────────
 
+/// The named graphs `principal` — `(user_id, role)`, or `None` for an
+/// anonymous caller — may read: graphs of the datasets they can access (a
+/// private graph only for those who may write its dataset) merged with their
+/// `graph_acl` read grants. This is the set a `/sparql` query is scoped to
+/// (`server::routes::accessible_read_graphs` wraps it), and the one every
+/// other read path should agree with.
+///
+/// It lists only registered or granted graphs: an admin reads every graph,
+/// so callers check for an admin first.
+pub fn readable_graph_iris(
+    auth_db: &AuthDb,
+    principal: Option<(&str, &str)>,
+) -> anyhow::Result<std::collections::HashSet<String>> {
+    let cached = auth_db.get_accessible_graph_iris_cached(principal.map(|(id, _)| id))?;
+    let mut readable = cached.0.clone();
+    let (user_id, role) = principal.unwrap_or(("", "public"));
+    if let Ok(granted) = auth_db.get_graph_acl_readable_iris(user_id, role) {
+        readable.extend(granted);
+    }
+    Ok(readable)
+}
+
 /// Returns `true` if the caller may perform `required_permission` ("read" |
 /// "write" | "admin") on `graph_iri`.
 ///
