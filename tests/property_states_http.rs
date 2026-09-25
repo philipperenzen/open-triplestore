@@ -203,7 +203,7 @@ async fn states_keep_history_and_the_data_graph_keeps_the_current_value() {
 
     // Typed and IRI values; an unknown reliability is refused.
     let (st, _, txt) = req(&app, Method::POST, "/api/datasets/ps/properties/state", Some(&token), Some(json!({
-        "entity": E, "property": "https://example.org/ps/inspectedBy", "value": "https://example.org/ps/org/rws", "datatype": "iri"
+        "entity": E, "property": "https://example.org/ps/inspectedBy", "value": "https://example.org/ps/org/inspector", "datatype": "iri"
     }))).await;
     assert_eq!(st, StatusCode::CREATED, "{txt}");
     let (st, _, txt) = req(
@@ -289,14 +289,14 @@ async fn language_tags_are_validated_before_they_reach_sparql() {
     let graphs_before = state.store.store().named_graphs().count();
 
     let payload = format!(
-        "en }} }} WHERE {{ }} ; INSERT DATA {{ GRAPH <urn:probe> {{ <urn:s> <urn:p> <urn:o> }} }} ; INSERT {{ GRAPH <{G}> {{ <{E}> <{P}> \"Waalbrug\"@en"
+        "en }} }} WHERE {{ }} ; INSERT DATA {{ GRAPH <urn:probe> {{ <urn:s> <urn:p> <urn:o> }} }} ; INSERT {{ GRAPH <{G}> {{ <{E}> <{P}> \"Viaduct\"@en"
     );
     let (st, _, txt) = req(
         &app,
         Method::POST,
         "/api/datasets/ps/properties/state",
         Some(&token),
-        Some(json!({ "entity": E, "property": P, "value": "Waalbrug", "language": payload })),
+        Some(json!({ "entity": E, "property": P, "value": "Viaduct", "language": payload })),
     )
     .await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
@@ -343,12 +343,12 @@ async fn language_tags_are_validated_before_they_reach_sparql() {
         Method::POST,
         "/api/datasets/ps/properties/state",
         Some(&token),
-        Some(json!({ "entity": E, "property": P, "value": "Waal bridge", "language": "en-GB" })),
+        Some(json!({ "entity": E, "property": P, "value": "River bridge", "language": "en-GB" })),
     )
     .await;
     assert_eq!(st, StatusCode::CREATED, "{txt}");
     assert!(ask(&format!(
-        "ASK {{ GRAPH <{G}> {{ <{E}> <{P}> \"Waal bridge\"@en-GB }} }}"
+        "ASK {{ GRAPH <{G}> {{ <{E}> <{P}> \"River bridge\"@en-GB }} }}"
     )));
     let (st, h, txt) = req(
         &app,

@@ -166,7 +166,7 @@ async fn dcat_ap_nl_catalogue_validates_negotiates_and_survives_hostile_metadata
     state
         .store
         .load_str(
-            "<urn:b1> a <urn:Bridge> ; <urn:name> \"Waalbrug\" . <urn:b2> a <urn:Bridge> .",
+            "<urn:b1> a <urn:Bridge> ; <urn:name> \"Example Bridge\" . <urn:b2> a <urn:Bridge> .",
             RdfFormat::Turtle,
             Some("https://example.org/assets/instances"),
         )

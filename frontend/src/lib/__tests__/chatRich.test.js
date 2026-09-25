@@ -63,10 +63,10 @@ describe('parseChatBlocks', () => {
         '{"type":"bar","title":"T","data":[{"label":"A","value":1},{"label":"B","value":2}]}',
         '```',
         '```map',
-        '{"features":[{"label":"Waalbrug","wkt":"POINT(5.86 51.85)"}]}',
+        '{"features":[{"label":"Example Bridge","wkt":"POINT(5.86 51.85)"}]}',
         '```',
         '```card',
-        '{"title":"Waalbrug","facts":[{"label":"Type","value":"Bridge"}]}',
+        '{"title":"Example Bridge","facts":[{"label":"Type","value":"Bridge"}]}',
         '```',
         '```csv',
         'name,count',
@@ -76,8 +76,8 @@ describe('parseChatBlocks', () => {
     );
     expect(segs.map((s) => s.kind)).toEqual(['chart', 'map', 'card', 'csv']);
     expect(segs[0].spec.series[0].data).toHaveLength(2);
-    expect(segs[1].features[0].label).toBe('Waalbrug');
-    expect(segs[2].card.title).toBe('Waalbrug');
+    expect(segs[1].features[0].label).toBe('Example Bridge');
+    expect(segs[2].card.title).toBe('Example Bridge');
     expect(segs[3].rows).toEqual([['a', '1']]);
   });
 
@@ -341,10 +341,10 @@ describe('parseFileSpec / file blocks', () => {
 describe('lenientJsonParse', () => {
   it('tolerates // and /* */ comments and trailing commas, preserving URLs', () => {
     const card = lenientJsonParse(
-      '{\n  "title": "Waalbrug",\n  "image": "https://example.com/x.jpg", // replace if available\n  /* facts below */\n  "facts": [{"label":"Type","value":"Bridge"},],\n}'
+      '{\n  "title": "Example Bridge",\n  "image": "https://example.com/x.jpg", // replace if available\n  /* facts below */\n  "facts": [{"label":"Type","value":"Bridge"},],\n}'
     );
     expect(card).toEqual({
-      title: 'Waalbrug',
+      title: 'Example Bridge',
       image: 'https://example.com/x.jpg',
       facts: [{ label: 'Type', value: 'Bridge' }],
     });
@@ -364,10 +364,10 @@ describe('lenientJsonParse', () => {
 describe('parseInfoCard', () => {
   it('keeps only well-formed facts and requires a title', () => {
     const { card } = parseInfoCard(
-      '{"title":"Waalbrug","subtitle":"Arch bridge","iri":"http://x/waalbrug","facts":[{"label":"Length","value":"604 m"},{"label":"","value":"x"}]}'
+      '{"title":"Example Bridge","subtitle":"Arch bridge","iri":"http://x/example-bridge","facts":[{"label":"Length","value":"480 m"},{"label":"","value":"x"}]}'
     );
-    expect(card.title).toBe('Waalbrug');
-    expect(card.facts).toEqual([{ label: 'Length', value: '604 m', iri: '' }]);
+    expect(card.title).toBe('Example Bridge');
+    expect(card.facts).toEqual([{ label: 'Length', value: '480 m', iri: '' }]);
     expect(parseInfoCard('{"subtitle":"no title"}').error).toBeTruthy();
   });
 });

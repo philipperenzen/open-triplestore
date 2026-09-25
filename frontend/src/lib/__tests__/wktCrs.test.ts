@@ -1,5 +1,5 @@
 // CRS-aware WKT parsing for client-side map plotting: projected-CRS literals
-// (the Waalbrug demo publishes EPSG:28992 RD New) must land at their true
+// (Dutch data is commonly published in EPSG:28992 RD New) must land at their true
 // WGS84 position, not be plotted raw. Regression for the map-chip/GeoPreview
 // path — found by review: the flagship demo plotted at a nonsense location.
 import { describe, it, expect } from 'vitest';

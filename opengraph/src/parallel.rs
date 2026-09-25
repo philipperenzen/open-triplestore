@@ -53,7 +53,7 @@ use oxrdf::{BlankNode, GraphName, NamedNode, Quad, Term, Variable};
 use rayon::prelude::*;
 use spargebra::algebra::{AggregateExpression, AggregateFunction, Expression, GraphPattern};
 use spargebra::term::{TermPattern, TriplePattern};
-use spargebra::{Query, SparqlParser};
+use spargebra::Query;
 
 /// How a query's per-shard partial results combine into the global answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -179,7 +179,7 @@ impl ParallelStore {
         sparql: &str,
         options: SparqlEvaluator,
     ) -> Result<Option<ParAnswer>, String> {
-        let query = match SparqlParser::new().parse_query(sparql) {
+        let query = match crate::sparql_parser().parse_query(sparql) {
             Ok(q) => q,
             Err(_) => return Ok(None),
         };
@@ -272,7 +272,7 @@ impl ParallelStore {
 /// with no store access. The live query path uses this to skip building (or
 /// consulting) the subject-sharded mirror for queries it cannot accelerate.
 pub fn is_decomposable(sparql: &str) -> bool {
-    SparqlParser::new()
+    crate::sparql_parser()
         .parse_query(sparql)
         .ok()
         .map(|q| {
@@ -300,7 +300,7 @@ pub enum ParClass {
 
 /// Classify a query's parallel shape, or `None` if it is not decomposable.
 pub fn classify(sparql: &str) -> Option<ParClass> {
-    let query = SparqlParser::new().parse_query(sparql).ok()?;
+    let query = crate::sparql_parser().parse_query(sparql).ok()?;
     // A mergeable grouped/global non-COUNT aggregate or a COUNT(DISTINCT) is an
     // order-insensitive scalar/set result.
     if plan_group_aggregate(&query).is_some() || plan_count_distinct(&query).is_some() {
@@ -326,7 +326,7 @@ pub fn classify(sparql: &str) -> Option<ParClass> {
 /// full copy is consulted, so this only defers the `SUM`/`AVG` shapes the shards do
 /// not decompose (global, computed-expression, or otherwise complex ones).
 pub fn has_sum_or_avg(sparql: &str) -> bool {
-    let Ok(query) = SparqlParser::new().parse_query(sparql) else {
+    let Ok(query) = crate::sparql_parser().parse_query(sparql) else {
         return false;
     };
     has_sum_or_avg_query(&query)
@@ -1567,6 +1567,40 @@ mod tests {
     fn count_star_sums_across_shards() {
         let q = persons(500);
         assert_matches(&q, "SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }");
+    }
+
+    /// A custom aggregate is declined by every planner — once the parser knows it
+    /// is one. Undeclared, the sub-select below reads as a row-local BIND over
+    /// one triple pattern, so the COUNT around it plans as a shard-summed count:
+    /// with the aggregate evaluated per shard, one row per shard would be counted.
+    #[test]
+    fn a_registered_custom_aggregate_is_never_decomposed() {
+        // An IRI of this test's own: the registry is process-wide.
+        let agg = "http://example.org/test/parallel/agg";
+        let trap = format!(
+            "SELECT (COUNT(*) AS ?n) WHERE {{ {{ SELECT (<{agg}>(?a) AS ?u) WHERE {{ ?s <http://example.org/age> ?a }} }} }}"
+        );
+        let grouped = format!(
+            "SELECT ?t (<{agg}>(?a) AS ?u) WHERE {{ ?s <http://example.org/type> ?t ; <http://example.org/age> ?a }} GROUP BY ?t"
+        );
+        let global =
+            format!("SELECT (<{agg}>(?a) AS ?u) WHERE {{ ?s <http://example.org/age> ?a }}");
+        assert_eq!(
+            classify(&trap),
+            Some(ParClass::Aggregate),
+            "undeclared, the trap looks decomposable"
+        );
+        crate::register_custom_aggregate(iri(agg));
+        for q in [&trap, &grouped, &global] {
+            assert_eq!(classify(q), None, "{q}");
+            assert!(!is_decomposable(q), "{q}");
+        }
+        let ps = ParallelStore::new(4);
+        ps.load_quads(persons(50)).unwrap();
+        assert!(
+            ps.query(&trap).unwrap().is_none(),
+            "declined, not merged across shards"
+        );
     }
 
     #[test]

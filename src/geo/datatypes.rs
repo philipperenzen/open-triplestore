@@ -1,7 +1,12 @@
-//! GeoSPARQL datatype handling: parsing and serialization of WKT/GML geometry literals.
+//! GeoSPARQL datatype handling: parsing and serialization of geometry literals.
 //!
-//! Supports the `geo:wktLiteral` datatype as defined in GeoSPARQL 1.1,
-//! including optional CRS URI prefix: `<http://...crs...> POINT(0 0)`
+//! Three serialisations are geometries here: `geo:wktLiteral` (with its
+//! optional CRS URI prefix, `<http://...crs...> POINT(0 0)`), `geo:gmlLiteral`
+//! and `geo:geoJSONLiteral` (RFC 7946 — always CRS84). A plain string is read as
+//! WKT for convenience. GML and GeoJSON are translated to WKT, so every one of
+//! them reaches GEOS by the same path ([`literal_wkt`]).
+
+use std::borrow::Cow;
 
 use dashmap::DashMap;
 use geos::{Geom, Geometry as GeosGeometry};
@@ -46,43 +51,53 @@ fn parse_wkt_cached(wkt_str: &str) -> Option<GeosGeometry> {
     Some(g)
 }
 
-/// Parse a `geo:wktLiteral` from an oxrdf Term into a GEOS Geometry.
-///
-/// The WKT literal may optionally have a CRS URI prefix:
-///   `<http://www.opengis.net/def/crs/EPSG/0/4326> POINT(1.0 2.0)`
-/// or just plain WKT:
-///   `POINT(1.0 2.0)`
+const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+
+/// Parse a geometry literal — `geo:wktLiteral` (optionally CRS-prefixed,
+/// `<http://www.opengis.net/def/crs/EPSG/0/4326> POINT(1.0 2.0)`),
+/// `geo:gmlLiteral`, `geo:geoJSONLiteral`, or a plain string read as WKT —
+/// into a GEOS Geometry. `None` for anything else, or a malformed literal.
 pub fn parse_wkt_literal(term: &Term) -> Option<GeosGeometry> {
-    let literal = match term {
-        Term::Literal(lit) => lit,
-        _ => return None,
-    };
+    let wkt = literal_wkt(term)?;
+    trace!("Parsing WKT: {}", wkt);
+    parse_wkt_cached(&wkt)
+}
 
-    // Check the datatype
-    let datatype = literal.datatype();
-    let is_wkt = datatype.as_str() == vocabulary::WKT_LITERAL;
-    let is_gml = datatype.as_str() == vocabulary::GML_LITERAL;
-    let is_string = datatype.as_str() == "http://www.w3.org/2001/XMLSchema#string";
-
-    // Accept geo:wktLiteral, geo:gmlLiteral, or a plain string (for convenience).
-    if !is_wkt && !is_gml && !is_string {
+/// The WKT of a geometry literal, whatever its serialisation: a WKT literal
+/// (or plain string) without its CRS prefix, a GML literal translated by
+/// [`super::gml`], a GeoJSON literal translated by [`super::geojson`]. `None`
+/// for a term that is not a geometry literal or does not translate.
+pub fn literal_wkt(term: &Term) -> Option<Cow<'_, str>> {
+    let Term::Literal(literal) = term else {
         return None;
-    }
-
+    };
     let value = literal.value();
-
-    // GML literals are translated to WKT first, then parsed by the same GEOS path.
-    if is_gml {
-        let wkt = super::gml::gml_to_wkt(value)?;
-        trace!("Parsing GML→WKT: {}", wkt);
-        return parse_wkt_cached(&wkt);
+    match literal.datatype().as_str() {
+        vocabulary::WKT_LITERAL | XSD_STRING => Some(Cow::Borrowed(extract_wkt(value))),
+        vocabulary::GML_LITERAL => super::gml::gml_to_wkt(value).map(Cow::Owned),
+        vocabulary::GEOJSON_LITERAL => super::geojson::geojson_to_wkt(value).map(Cow::Owned),
+        _ => None,
     }
+}
 
-    let wkt_str = extract_wkt(value);
-
-    trace!("Parsing WKT: {}", wkt_str);
-
-    parse_wkt_cached(wkt_str)
+/// The CRS URI a geometry literal carries as its `<crs>` prefix, if any —
+/// `None` meaning GeoSPARQL's default, CRS84.
+///
+/// Only `geo:wktLiteral` (and the plain strings accepted for convenience) use
+/// the prefix form. A `geo:gmlLiteral` value also starts with `<` — its opening
+/// tag — so it is excluded, or the tag would be mistaken for a CRS URI; GML
+/// carries its CRS in `srsName`, which this build does not yet read, so it is
+/// treated as unspecified. A `geo:geoJSONLiteral` is CRS84 by definition
+/// (RFC 7946 has no CRS member).
+pub fn literal_crs_uri(term: &Term) -> Option<&str> {
+    match term {
+        Term::Literal(l)
+            if matches!(l.datatype().as_str(), vocabulary::WKT_LITERAL | XSD_STRING) =>
+        {
+            extract_crs(l.value())
+        }
+        _ => None,
+    }
 }
 
 /// Extract the WKT portion from a geo:wktLiteral value,
@@ -152,21 +167,33 @@ pub fn double_literal(value: f64) -> Term {
     ))
 }
 
-/// Parse a units-of-measure IRI from a Term, returning a scale factor
-/// relative to the geometry's native units.
-pub fn parse_uom(term: &Term) -> Option<f64> {
-    match term {
-        Term::NamedNode(nn) => {
-            match nn.as_str() {
-                s if s == vocabulary::METRE => Some(1.0),
-                s if s == vocabulary::DEGREE => Some(1.0), // assume CRS84 in degrees
-                s if s == vocabulary::RADIAN => Some(std::f64::consts::PI / 180.0),
-                s if s == vocabulary::UNITY => Some(1.0),
-                _ => Some(1.0), // default: pass through
-            }
-        }
-        _ => None,
-    }
+/// A units-of-measure IRI (`uom:`) as `geof:distance` and `geof:buffer` use it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Uom {
+    /// A length, as metres per unit (metre 1, kilometre 1000, …).
+    Linear(f64),
+    /// An angle, as degrees per unit (degree 1, radian 180/π).
+    Angular(f64),
+}
+
+/// Parse a units-of-measure IRI. `None` for a term that is not one of the
+/// linear or angular OGC units this build converts (`uom:unity` included): the
+/// functions then keep the geometry's native units, as they always have.
+pub fn parse_uom(term: &Term) -> Option<Uom> {
+    let Term::NamedNode(nn) = term else {
+        return None;
+    };
+    Some(match nn.as_str() {
+        vocabulary::METRE => Uom::Linear(1.0),
+        vocabulary::KILOMETRE => Uom::Linear(1000.0),
+        vocabulary::CENTIMETRE => Uom::Linear(0.01),
+        vocabulary::MILLIMETRE => Uom::Linear(0.001),
+        vocabulary::DEGREE => Uom::Angular(1.0),
+        vocabulary::RADIAN => Uom::Angular(180.0 / std::f64::consts::PI),
+        // Dimensionless: nothing to convert, the native units stand.
+        vocabulary::UNITY => return None,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -206,6 +233,51 @@ mod tests {
         ));
         let geom = parse_wkt_literal(&term).expect("Should parse POINT");
         assert!(!geom.is_empty().unwrap());
+    }
+
+    fn typed(value: &str, datatype: &str) -> Term {
+        Term::Literal(Literal::new_typed_literal(
+            value,
+            NamedNode::new_unchecked(datatype),
+        ))
+    }
+
+    #[test]
+    fn geojson_literal_parses_like_its_wkt() {
+        let json = typed(
+            r#"{"type":"Polygon","coordinates":[[[0,0],[2,0],[2,2],[0,2],[0,0]]]}"#,
+            vocabulary::GEOJSON_LITERAL,
+        );
+        let from_json = parse_wkt_literal(&json).expect("GeoJSON polygon parses");
+        let from_wkt = parse_wkt_literal(&typed(
+            "POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))",
+            vocabulary::WKT_LITERAL,
+        ))
+        .unwrap();
+        assert!(from_json.equals(&from_wkt).unwrap());
+        // Malformed GeoJSON is not a geometry.
+        assert!(parse_wkt_literal(&typed("{\"type\":", vocabulary::GEOJSON_LITERAL)).is_none());
+    }
+
+    #[test]
+    fn only_a_wkt_literal_carries_a_crs_prefix() {
+        let rd = "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(1 2)";
+        assert_eq!(
+            literal_crs_uri(&typed(rd, vocabulary::WKT_LITERAL)),
+            Some("http://www.opengis.net/def/crs/EPSG/0/28992")
+        );
+        // A GML literal's opening tag is not a CRS, and GeoJSON has none.
+        let gml = "<gml:Point srsName='EPSG:28992'><gml:pos>1 2</gml:pos></gml:Point>";
+        assert_eq!(literal_crs_uri(&typed(gml, vocabulary::GML_LITERAL)), None);
+        let json = r#"{"type":"Point","coordinates":[1,2]}"#;
+        assert_eq!(
+            literal_crs_uri(&typed(json, vocabulary::GEOJSON_LITERAL)),
+            None
+        );
+        assert_eq!(
+            literal_wkt(&typed(json, vocabulary::GEOJSON_LITERAL)).as_deref(),
+            Some("POINT(1 2)")
+        );
     }
 
     #[test]

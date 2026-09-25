@@ -22,9 +22,9 @@ fn state_with_client() -> open_triplestore::server::AppState {
     state
         .auth_db
         .upsert_oauth_client(
-            "otl-viewer",
-            "OTL Viewer",
-            &["http://localhost:5190/auth/callback".to_string()],
+            "example-viewer",
+            "Example Viewer",
+            &["http://localhost:5173/auth/callback".to_string()],
             true,
             None,
         )
@@ -68,7 +68,7 @@ async fn logout_clears_cookies_and_returns_to_registered_client_with_state() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/oauth/logout?client_id=otl-viewer&post_logout_redirect_uri=http%3A%2F%2Flocalhost%3A5190%2F&state=abc%20123")
+                .uri("/oauth/logout?client_id=example-viewer&post_logout_redirect_uri=http%3A%2F%2Flocalhost%3A5173%2F&state=abc%20123")
                 .header(header::COOKIE, "access_token=whatever; refresh_token=whatever")
                 .body(Body::empty())
                 .unwrap(),
@@ -78,7 +78,7 @@ async fn logout_clears_cookies_and_returns_to_registered_client_with_state() {
     assert_eq!(resp.status(), StatusCode::FOUND);
     assert_eq!(
         resp.headers()[header::LOCATION].to_str().unwrap(),
-        "http://localhost:5190/?state=abc%20123"
+        "http://localhost:5173/?state=abc%20123"
     );
     let cookies = set_cookie_values(&resp);
     assert!(
@@ -102,7 +102,7 @@ async fn logout_refuses_unregistered_destination_and_lands_on_login() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/oauth/logout?client_id=otl-viewer&post_logout_redirect_uri=https%3A%2F%2Fevil.example%2Fphish")
+                .uri("/oauth/logout?client_id=example-viewer&post_logout_redirect_uri=https%3A%2F%2Fevil.example%2Fphish")
                 .body(Body::empty())
                 .unwrap(),
         )

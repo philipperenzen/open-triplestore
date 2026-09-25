@@ -25,7 +25,7 @@
 # is the one whose coordinate range starts at exactly 0 (the model rests on the
 # ground plane). The Dragon Bridge is Y-up — it was wrongly declared "Z", which
 # rotated it a quarter-turn about its own long axis and laid it on its side.
-# Modelled with the same standards layering as the Waalbrug example:
+# Modelled with the same standards layering as the reference bridge example:
 # GeoSPARQL geometry (CRS84 lon/lat, exactly as Wikidata returns P625),
 # OMG/FOG file references, BOT containment from a demo collection root,
 # PROV-O derivation back to the Wikidata entity.

@@ -504,6 +504,8 @@ pub struct CreateServiceRequest {
 pub struct UpdateServiceRequest {
     pub name: String,
     pub description: Option<String>,
+    /// `false` switches the service's SPARQL endpoint off (404 to every caller
+    /// until reactivated); omitted leaves it unchanged.
     pub is_active: Option<bool>,
 }
 
@@ -3564,6 +3566,28 @@ pub async fn delete_group(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Confirm `group_id` names a group that belongs to `org_id`, returning it.
+///
+/// The membership/admin checks in the group-member handlers only prove authority
+/// over `org_id` (the path segment the caller controls); they say nothing about
+/// which org the group actually lives in. Without this guard an admin of *any*
+/// org could list, add or remove members of another org's group simply by
+/// naming that group under their own org's path — a cross-tenant IDOR (and, via
+/// add, a self-service privilege escalation). Called unconditionally, so a
+/// platform admin also gets a `404` on a mismatch, mirroring the org-scope guard
+/// already inlined in `get_group` / `update_group` / `delete_group`.
+fn group_in_org(db: &AuthDb, org_id: &str, group_id: &str) -> Result<Group, (StatusCode, String)> {
+    db.get_group(group_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .filter(|g| g.org_id == org_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                "Group not found in this organisation".to_string(),
+            )
+        })
+}
+
 /// GET /api/organisations/:org_id/groups/:group_id/members
 pub async fn list_group_members(
     Extension(current_user): Extension<AuthenticatedUser>,
@@ -3575,6 +3599,10 @@ pub async fn list_group_members(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
             .ok_or_else(|| (StatusCode::FORBIDDEN, "Not a member".to_string()))?;
     }
+
+    // The group must belong to the org in the path, or a member of any org could
+    // read another org's group membership through their own org's path.
+    group_in_org(&db, &org_id, &group_id)?;
 
     let members = db
         .list_group_members(&group_id)
@@ -3614,6 +3642,11 @@ pub async fn add_group_member(
         }
     }
 
+    // The group must belong to the org in the path. Otherwise an admin of any org
+    // could add members to another org's group — including themselves, escalating
+    // into a tenant they have no authority over.
+    group_in_org(&db, &org_id, &group_id)?;
+
     let role = Role::from_str(&req.role)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid role".to_string()))?;
 
@@ -3647,6 +3680,10 @@ pub async fn remove_group_member(
             _ => return Err((StatusCode::FORBIDDEN, "Admin access required".to_string())),
         }
     }
+
+    // The group must belong to the org in the path, or an admin of any org could
+    // remove members from another org's group through their own org's path.
+    group_in_org(&db, &org_id, &group_id)?;
 
     // Super admins cannot be removed from any group.
     let target = db
@@ -3699,7 +3736,9 @@ pub async fn create_dataset(
     // by an organisation/group they belong to — otherwise `owner_id` could be
     // forged to impersonate another principal or attribute data to a foreign
     // catalogue. Publishing (visibility=public) additionally requires publisher
-    // rights, mirroring the visibility gate in `update_dataset`.
+    // rights, so the public flag cannot be forged at creation; `update_dataset`
+    // enforces the same publisher gate on a later widening to public, so the two
+    // paths into a public dataset are gated identically.
     if !current_user.is_admin() {
         if !db
             .can_act_as_owner(&current_user.user_id, owner_type, &req.owner_id)
@@ -3835,7 +3874,7 @@ pub async fn list_datasets(
 /// ownership, org/group membership × visibility, grants, public readability).
 ///
 /// For services that must answer "may this user write this dataset?"
-/// server-side — e.g. the validation platform's owner-gated runs — without
+/// server-side — e.g. an external validation service's owner-gated runs — without
 /// re-deriving ACL logic. Anonymous callers get the public-visibility answer;
 /// an existing-but-invisible dataset answers 404 (not 403) so the endpoint
 /// cannot be used to probe private dataset ids.
@@ -3990,6 +4029,24 @@ pub async fn update_dataset(
         return Err((
             StatusCode::FORBIDDEN,
             "Manage access required to change visibility".to_string(),
+        ));
+    }
+
+    // Publishing (widening to public) additionally requires publisher rights —
+    // the same gate `create_dataset` applies to public creation. Manage access
+    // alone is not enough: an owner/manager without the publish capability could
+    // otherwise create a dataset private and then PUT it public, sidestepping the
+    // creation-time gate entirely. Only the transition *into* public is gated, so
+    // an unchanged or narrowing visibility (and editing an already-public
+    // dataset's metadata, which the frontend resends with the current visibility)
+    // is unaffected. `is_publisher()` already covers platform admins.
+    if visibility == Visibility::Public
+        && dataset.visibility != Visibility::Public
+        && !current_user.is_publisher()
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Publisher access is required to make a dataset public".to_string(),
         ));
     }
 
@@ -4204,8 +4261,12 @@ pub async fn list_dataset_commits(
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
     }
 
+    // Scope the commit log to the graphs this caller may READ: a viewer (or an
+    // anonymous caller on a public dataset) must not see private graphs' commit
+    // history (graph IRI, message, add/remove counts, actor). Writers still see
+    // every registered graph's provenance.
     let graphs = db
-        .list_dataset_graphs(&dataset_id)
+        .list_readable_dataset_graphs(user_id, &dataset)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let scope = crate::commit_log::CommitScope::Graphs(graphs);
     let mut commits = crate::commit_log::list_commits(&state.store, &scope, &params.to_query());
@@ -4370,6 +4431,24 @@ pub async fn patch_dataset_graph_role(
 
 // ─── SPARQL Service handlers ──────────────────────────────────────────────────
 
+/// The SPARQL service `service_id`, provided it belongs to `dataset_id`.
+///
+/// Every `/api/datasets/:dataset_id/services/:service_id` handler authorizes
+/// the caller against the dataset in the path, so a service of any other
+/// dataset must be as absent as one that does not exist (404). Otherwise a
+/// writer of one dataset could read, rename, delete or re-scope another
+/// dataset's service through their own.
+fn dataset_service(
+    db: &AuthDb,
+    dataset_id: &str,
+    service_id: &str,
+) -> Result<SparqlService, (StatusCode, String)> {
+    db.get_sparql_service(service_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .filter(|s| s.dataset_id == dataset_id)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Service not found".to_string()))
+}
+
 /// POST /api/datasets/:dataset_id/services
 pub async fn create_service(
     user_opt: Option<Extension<AuthenticatedUser>>,
@@ -4456,10 +4535,7 @@ pub async fn get_service(
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
     }
 
-    let service = db
-        .get_sparql_service(&service_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "Service not found".to_string()))?;
+    let service = dataset_service(&db, &dataset_id, &service_id)?;
 
     Ok(Json(service))
 }
@@ -4483,6 +4559,7 @@ pub async fn update_service(
     {
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
     }
+    dataset_service(&db, &dataset_id, &service_id)?;
 
     db.update_sparql_service(
         &service_id,
@@ -4492,10 +4569,7 @@ pub async fn update_service(
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let service = db
-        .get_sparql_service(&service_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "Service not found".to_string()))?;
+    let service = dataset_service(&db, &dataset_id, &service_id)?;
 
     Ok(Json(service))
 }
@@ -4518,6 +4592,7 @@ pub async fn delete_service(
     {
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
     }
+    dataset_service(&db, &dataset_id, &service_id)?;
 
     db.delete_sparql_service(&service_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -4526,9 +4601,19 @@ pub async fn delete_service(
 }
 
 /// POST /api/datasets/:dataset_id/services/:service_id/graphs
+///
+/// A service serves its graphs to everyone who may read the dataset, so a
+/// writer may add only a graph the dataset holds
+/// ([`dataset_graph::dataset_holds_graph`]): otherwise any writer could scope
+/// a service of their own dataset to another tenant's private graph or a
+/// `urn:system:` graph and read it through the service. An admin may name
+/// any graph, but the service serves it only while the dataset holds it
+/// (the query path drops the rest), so exposing a foreign graph still takes
+/// registering it to the dataset.
 pub async fn add_service_graph(
     user_opt: Option<Extension<AuthenticatedUser>>,
     State(db): State<Arc<AuthDb>>,
+    State(state): State<AppState>,
     Path((dataset_id, service_id)): Path<(String, String)>,
     Json(req): Json<GraphIriRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -4543,6 +4628,29 @@ pub async fn add_service_graph(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     {
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
+    }
+    dataset_service(&db, &dataset_id, &service_id)?;
+
+    if !current_user.is_admin()
+        && !dataset_graph::dataset_holds_graph(&db, &state.base_url, &dataset_id, &req.graph_iri)
+    {
+        state.audit.log_denied(
+            Some(current_user.user_id.clone()),
+            None,
+            "sparql_service",
+            &service_id,
+            "add_service_graph",
+            None,
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "Graph <{}> is not a graph of dataset '{dataset_id}'. A service may serve only \
+                 the dataset's own graphs: inside its namespace, its metadata, report and asset \
+                 graphs, and the graphs registered to it.",
+                req.graph_iri
+            ),
+        ));
     }
 
     db.add_service_graph(&service_id, &req.graph_iri)
@@ -4570,6 +4678,9 @@ pub async fn remove_service_graph(
     {
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
     }
+    // Removing narrows the service, so any graph may go, including one the
+    // dataset no longer holds; only the service must be this dataset's.
+    dataset_service(&db, &dataset_id, &service_id)?;
 
     db.remove_service_graph(&service_id, &req.graph_iri)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -4595,6 +4706,7 @@ pub async fn list_service_graphs(
     {
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
     }
+    dataset_service(&db, &dataset_id, &service_id)?;
 
     let graphs = db
         .list_service_graphs(&service_id)
