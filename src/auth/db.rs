@@ -1428,6 +1428,39 @@ impl AuthDb {
             )?;
         }
 
+        // One-time cleanup: saved_queries (API services) whose owning dataset,
+        // organisation or group no longer exists. Dataset/org/group ids are
+        // reusable slugs, so an orphaned row — including a `visibility='public'`
+        // one — would otherwise attach to a *future*, unrelated resource that
+        // reused the id and expose its data. Deletes cascade to revisions/tests.
+        let _ = conn.execute_batch(
+            "DELETE FROM saved_queries
+                 WHERE owner_type='dataset'
+                   AND owner_id NOT IN (SELECT id FROM datasets);
+             DELETE FROM saved_queries
+                 WHERE owner_type='organisation'
+                   AND owner_id NOT IN (SELECT id FROM organisations);
+             DELETE FROM saved_queries
+                 WHERE owner_type='group'
+                   AND owner_id NOT IN (SELECT id FROM groups);",
+        );
+
+        Ok(())
+    }
+
+    /// Delete every saved query (API service) owned by `(owner_type, owner_id)`.
+    /// Called from the dataset/organisation/group delete paths so a service never
+    /// outlives its owner and re-attaches to a future resource that reuses the id.
+    /// Revisions and tests cascade (`ON DELETE CASCADE`, foreign_keys=ON).
+    fn delete_saved_queries_for_owner(
+        conn: &rusqlite::Connection,
+        owner_type: &str,
+        owner_id: &str,
+    ) -> rusqlite::Result<()> {
+        conn.execute(
+            "DELETE FROM saved_queries WHERE owner_type=?1 AND owner_id=?2",
+            params![owner_type, owner_id],
+        )?;
         Ok(())
     }
 
@@ -3087,8 +3120,12 @@ impl AuthDb {
     }
 
     pub fn delete_organisation(&self, id: &str) -> anyhow::Result<()> {
-        let conn = self.pool.get()?;
-        conn.execute("DELETE FROM organisations WHERE id = ?1", params![id])?;
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
+        // Org-scoped API services must not outlive the organisation (id reuse).
+        Self::delete_saved_queries_for_owner(&tx, "organisation", id)?;
+        tx.execute("DELETE FROM organisations WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -3362,8 +3399,12 @@ impl AuthDb {
     }
 
     pub fn delete_group(&self, id: &str) -> anyhow::Result<()> {
-        let conn = self.pool.get()?;
-        conn.execute("DELETE FROM groups WHERE id = ?1", params![id])?;
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
+        // Group-scoped API services must not outlive the group (id reuse).
+        Self::delete_saved_queries_for_owner(&tx, "group", id)?;
+        tx.execute("DELETE FROM groups WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -3868,8 +3909,14 @@ impl AuthDb {
     }
 
     pub fn delete_dataset(&self, id: &str) -> anyhow::Result<()> {
-        let conn = self.pool.get()?;
-        conn.execute("DELETE FROM datasets WHERE id = ?1", params![id])?;
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
+        // Drop the dataset's API services in the same transaction: dataset ids are
+        // reusable slugs, so a leftover `visibility='public'` service would attach
+        // to a future dataset that reused this id and expose its data.
+        Self::delete_saved_queries_for_owner(&tx, "dataset", id)?;
+        tx.execute("DELETE FROM datasets WHERE id = ?1", params![id])?;
+        tx.commit()?;
         self.invalidate_accessible_graphs_cache();
         Ok(())
     }
@@ -4235,6 +4282,17 @@ impl AuthDb {
         )?;
         self.invalidate_accessible_graphs_cache();
         Ok(())
+    }
+
+    /// Whether `graph_iri` is registered to `dataset_id`.
+    pub fn dataset_has_graph(&self, dataset_id: &str, graph_iri: &str) -> anyhow::Result<bool> {
+        let conn = self.pool.get()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM dataset_graphs WHERE dataset_id=?1 AND graph_iri=?2",
+            params![dataset_id, graph_iri],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     pub fn remove_dataset_graph(&self, dataset_id: &str, graph_iri: &str) -> anyhow::Result<()> {
