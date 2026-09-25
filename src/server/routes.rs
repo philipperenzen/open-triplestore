@@ -5386,7 +5386,23 @@ async fn execute_dataset_query(
                 .list_dataset_graphs(dataset_id)
                 .map_err(|e| AppError::Internal(e.to_string()))?
         } else {
+            // Serve only graphs the dataset holds. Adding a graph checks this,
+            // but a row made before it did, one an admin added ahead of
+            // registering its graph, or one whose graph was detached since
+            // would otherwise read a graph outside the dataset — another
+            // tenant's, or a `urn:system:` graph. A service left with none
+            // serves nothing; it does not widen to the whole dataset.
             service_graphs
+                .into_iter()
+                .filter(|g| {
+                    crate::auth::dataset_graph::dataset_holds_graph(
+                        &state.auth_db,
+                        &state.base_url,
+                        dataset_id,
+                        g,
+                    )
+                })
+                .collect()
         }
     };
 
