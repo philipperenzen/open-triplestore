@@ -5202,11 +5202,15 @@ async fn execute_dataset_query(
         return Err(AppError::NotFound("Dataset not found".to_string()));
     }
 
-    // Find the service and its graphs
+    // Find the service and its graphs. A deactivated service answers exactly like
+    // a missing one, for every caller — the dataset's writers included: switching
+    // a service off is how an owner stops its endpoint answering (the dataset page
+    // stops showing its URL), and a writer can reactivate it or use /sparql.
     let service = state
         .auth_db
         .get_sparql_service_by_slug(dataset_id, service_slug)
         .map_err(|e| AppError::Internal(e.to_string()))?
+        .filter(|s| s.is_active)
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
 
     // When a version is pinned, scope to that version's snapshot graphs instead of
@@ -5226,7 +5230,23 @@ async fn execute_dataset_query(
                 .list_dataset_graphs(dataset_id)
                 .map_err(|e| AppError::Internal(e.to_string()))?
         } else {
+            // Serve only graphs the dataset holds. Adding a graph checks this,
+            // but a row made before it did, one an admin added ahead of
+            // registering its graph, or one whose graph was detached since
+            // would otherwise read a graph outside the dataset — another
+            // tenant's, or a `urn:system:` graph. A service left with none
+            // serves nothing; it does not widen to the whole dataset.
             service_graphs
+                .into_iter()
+                .filter(|g| {
+                    crate::auth::dataset_graph::dataset_holds_graph(
+                        &state.auth_db,
+                        &state.base_url,
+                        dataset_id,
+                        g,
+                    )
+                })
+                .collect()
         }
     };
 

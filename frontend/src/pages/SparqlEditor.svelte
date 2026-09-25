@@ -602,7 +602,10 @@ LIMIT 25`;
           listServices(ds.id).catch(() => []),
           listDatasetGraphs(ds.id).catch(() => []),
         ]);
-        if (svcs?.length) datasetServices[ds.id] = svcs;
+        // An inactive service answers 404, so it is neither offered as an
+        // endpoint nor used to route a version-pinned query.
+        const active = (svcs ?? []).filter(s => s.is_active);
+        if (active.length) datasetServices[ds.id] = active;
         const iris = (graphs ?? []).map(g => g.graph_iri).filter(Boolean);
         if (iris.length) datasetGraphsById[ds.id] = iris;
       }));
