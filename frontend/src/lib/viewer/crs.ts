@@ -126,7 +126,7 @@ function mapGeometryCoords(g: WktGeometry, fn: (xy: [number, number]) => [number
 
 /**
  * Parse a GeoSPARQL WKT literal into a WGS84 geometry, honouring its optional
- * `<crs-uri>` prefix: projected-CRS coordinates (e.g. the Waalbrug demo's
+ * `<crs-uri>` prefix: projected-CRS coordinates (e.g. RD New,
  * EPSG:28992) are reprojected client-side, so map previews that receive raw
  * literals (RdfTerm chips, resource pages, chat maps) plot correctly. Unknown
  * CRS fall back to plotting as-is (the old behaviour).

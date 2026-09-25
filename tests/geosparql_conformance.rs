@@ -1886,8 +1886,8 @@ fn geos_cx_geosparql11_function_gaps() {
     }
 }
 
-// geof:transform reprojects between EPSG:28992 / CRS84 / 4326 / 3857. The Waalbrug
-// tracé point in RD New transforms to a plausible WGS84 lon/lat near Nijmegen
+// geof:transform reprojects between EPSG:28992 / CRS84 / 4326 / 3857. An RD New
+// point in Nijmegen transforms to a plausible WGS84 lon/lat
 // (~5.86, ~51.85). CRS84 is the lon/lat form; see the EPSG:4326 test below for
 // the authority's lat/lon order.
 #[test]

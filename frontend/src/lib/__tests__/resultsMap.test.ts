@@ -71,12 +71,12 @@ describe('detectGeoBindings', () => {
 describe('resultsToViewerElements', () => {
   it('builds an element per WKT row, keyed on the row IRI and labelled', () => {
     const r = sel(['s', 'label', 'geom'], [
-      { s: uri('http://ex/id/Bridge'), label: lit('Waalbrug'), geom: wkt('POINT(5.86 51.85)') },
+      { s: uri('http://ex/id/Bridge'), label: lit('Example Bridge'), geom: wkt('POINT(5.86 51.85)') },
     ]);
     const els = resultsToViewerElements(r);
     expect(els).toHaveLength(1);
     expect(els[0].id).toBe('http://ex/id/Bridge');
-    expect(els[0].label).toBe('Waalbrug');
+    expect(els[0].label).toBe('Example Bridge');
     expect(els[0].wkt4326).toBe('POINT(5.86 51.85)');
   });
 
@@ -123,7 +123,7 @@ describe('triplesToResults (Triple Browser adapter)', () => {
   it('adapts a triple list to the SELECT-results shape and gates correctly', () => {
     const triples = [
       { subject: uri('http://ex/id/Bridge'), predicate: uri('http://www.opengis.net/ont/geosparql#asWKT'), object: wkt('POINT(5.86 51.85)') },
-      { subject: uri('http://ex/id/Bridge'), predicate: uri('http://ex/name'), object: lit('Waalbrug') },
+      { subject: uri('http://ex/id/Bridge'), predicate: uri('http://ex/name'), object: lit('Example Bridge') },
     ];
     const r = triplesToResults(triples);
     expect(r.head?.vars).toEqual(['subject', 'predicate', 'object']);

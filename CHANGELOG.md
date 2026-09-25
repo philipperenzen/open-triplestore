@@ -527,6 +527,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   term IRIs and labels before the model can coin one.
 
 ### Changed
+- **The reference example is a fictional bridge.** The SHACL/GeoSPARQL
+  conformance oracle, the viewer-feed end-to-end test and the OGC GeoSPARQL
+  round-trip run on `tests/fixtures/example-bridge/`: a made-up arch bridge with
+  an English vocabulary (`https://example.org/def/`) and illustrative
+  coordinates, in place of a real structure. Every case keeps its assertion;
+  the test binaries are now `example_bridge_conformance` and
+  `example_bridge_viewer_e2e`. The layered-reference seed bundle, Spark's prompt
+  examples, the docs and the unit-test fixtures use fictional names as well.
 - **The Triple Browser sends its whole scope, remembers it, and offers the
   query behind the view.** A selection mixing datasets with an organisation
   sent only part of itself — and one dataset plus one organisation matched no
@@ -2282,7 +2290,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`src/ifc/`). Graph Store reads gain `?format=` (turtle/jsonld/rdfxml/ntriples/
   trig/nquads) with download disposition, and assets gain an anonymous-capable
   `…/download` route gated by dataset visibility.
-- **Schependomlaan demo** replaces the Waalbrug example: the canonical open Dutch
+- **Schependomlaan demo** replaces the bridge example: the canonical open Dutch
   BIM dataset (Nijmegen, CC BY 4.0) is fetched on first boot (`SEED_IFC_URL`),
   with the real 3DBAG LoD2.2 city block (CC BY 4.0) bundled for the map.
 - **Viewer**: in-browser IFC rendering (web-ifc) with per-element picking —
@@ -2369,8 +2377,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   names (`da:`, `geo:`, `geof:` …) parse instead of being silently skipped.
 - Per-constraint `sh:severity` on a `sh:SPARQLConstraint` node (e.g. `sh:Warning`) now
   overrides the shape-level severity for that constraint's results.
-- Waalbrug reference-example conformance fixtures (`tests/fixtures/waalbrug/`) and an
-  oracle (`tests/waalbrug_conformance.rs`) encoding the IMBOR/NEN 2660-2 GeoSPARQL +
+- Reference-example conformance fixtures (a bridge; now `tests/fixtures/example-bridge/`) and an
+  oracle (now `tests/example_bridge_conformance.rs`) encoding a GeoSPARQL +
   SHACL (Core/SPARQL/AF) pass/fail matrix.
 - SHACL **complex property paths** are now parsed from RDF: sequence paths `( p1 p2 … )`,
   `sh:inversePath`, `sh:alternativePath`, `sh:zeroOrMorePath`, `sh:oneOrMorePath` and
@@ -2389,7 +2397,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (e.g. `sh:minExclusive`), reported with the expression's `sh:message`.
 - SHACL-AF **`sh:SPARQLFunction`**: user-defined functions (`sh:parameter`/`sh:order`/
   `sh:select` + `sh:prefixes`) are registered as callable SPARQL functions, usable from
-  queries, SHACL-SPARQL constraints and rules (e.g. `ex:afstandMeter`). Bodies are
+  queries, SHACL-SPARQL constraints and rules (e.g. `ex:distanceMetres`). Bodies are
   evaluated against a fresh in-memory store, fully supporting expression-style functions.
 - **Viewer feed** endpoint `GET /api/datasets/:id/viewer-feed`: per-element geometry +
   3D-file references resolved from the BOT/OMG/FOG/GeoSPARQL layering — labels, types,
@@ -2399,7 +2407,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `sh:ValidationReport` as RDF into `urn:system:reports:dataset:{id}` (replaced per run),
   so dashboards can query failures via SPARQL; severity rollup stays on the run rows.
 - **3D & Map Viewer demo dataset** (`viewer-3d-demo`) in the standards demo seed: the
-  Waalbrug bridge (EPSG:28992, IFC/glTF refs) plus real Wikidata landmarks (CC0 —
+  reference bridge (EPSG:28992, IFC/glTF refs) plus real Wikidata landmarks (CC0 —
   Dragon Bridge Da Nang, Big Ben, White House, Empire State Building, Sannō Shrine)
   whose open 3D models live on Wikimedia Commons, and a synthetic CityJSON LoD2
   demo block (EPSG:7415, semantic roof/wall/ground surfaces) bundled with the
@@ -2425,7 +2433,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   overlay. Resource detail pages show a 3D model (BIM) card with IFC GlobalId and
   file links (following named `hasGeometry` nodes one hop), and the geometry map
   gains a *to scale* toggle driven by the model's measured real-world size.
-  **Projected-CRS WKT (e.g. the Waalbrug demo's EPSG:28992) is now reprojected
+  **Projected-CRS WKT (e.g. EPSG:28992 RD New) is now reprojected
   client-side before plotting** — previously raw map previews plotted projected
   coordinates as lon/lat. Dark mode is supported across all maps and 3D scenes.
 - **Official conformance suites in CI**: the W3C SHACL core test suite and the OGC
@@ -2433,7 +2441,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tests/fixtures/{w3c-shacl,ogc-geosparql}/` and run with a two-way ratchet (unlisted
   tests must pass, listed known-failures must still fail). Scorecards:
   W3C core 46 pass / 52 known-fail / 15 aux skips; OGC examples 44/48 matching, and the
-  Waalbrug dataset round-trips through the official GeoSPARQL validator. See
+  reference bridge dataset round-trips through the official GeoSPARQL validator. See
   `docs/conformance/`.
 
 - **Spark chat is now an interactive linked-data canvas.** Assistant answers render

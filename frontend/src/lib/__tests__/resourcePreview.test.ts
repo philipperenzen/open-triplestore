@@ -35,16 +35,16 @@ describe('summarizeTriples', () => {
       hasMore: true,
       triples: [
         triple(`${RDF}type`, uri('http://ex.org/def#Bridge')),
-        triple(`${RDFS}label`, lit('Waalbrug', 'nl')),
-        triple(`${RDFS}label`, lit('Waal Bridge', 'en')),
-        triple(`${RDFS}comment`, lit('An arch bridge across the Waal.', 'en')),
+        triple(`${RDFS}label`, lit('Voorbeeldbrug', 'nl')),
+        triple(`${RDFS}label`, lit('Example Bridge', 'en')),
+        triple(`${RDFS}comment`, lit('An arch bridge across a river.', 'en')),
         triple('http://ex.org/def#span', lit('244')),
       ],
     };
     const p = summarizeTriples(res);
     expect(p.known).toBe(true);
     // Locale is 'en': the English label wins over the first-seen Dutch one.
-    expect(p.label).toBe('Waal Bridge');
+    expect(p.label).toBe('Example Bridge');
     expect(p.types).toEqual(['http://ex.org/def#Bridge'].map(() => expect.any(String)));
     expect(p.description).toContain('arch bridge');
     expect(p.facts).toBe(5);
