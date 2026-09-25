@@ -679,7 +679,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   served at `/api-docs/openapi.json` and the interactive UI is the frontend's
   own page — which also removes the duplicate `axum` 0.8 and `zip` 3 from the
   tree. TypeScript 7 remains held: typescript-eslint has no release that
-  supports it.
+  supports it. A fourth batch, in September, brings `argon2` 0.6 (on
+  `password-hash` 0.6 the hasher draws its own 16-byte salt; password hashes
+  stored under 0.5 still verify — pinned by a regression test on real
+  0.5-minted PHC strings — and new hashes keep the same
+  `$argon2id$v=19$m=19456,t=2,p=1$` form, so a rollback reads them too),
+  `vitest` 5 (no config or test changes needed), `oxigraph` 0.5.11 with its
+  `oxrdf` / `spargebra` / `spareval` / `sparopt` / `sparesults` / `oxttl`
+  siblings in lockstep, `aes-gcm` 0.11.1 (stored OAuth client-secret blobs
+  still decrypt, pinned by a known-answer test), `tower-http` 0.7.1, `flate2`
+  1.1.10, `lru` 0.18.4, `aws-sdk-s3` 1.142, `svelte` 5.57, `vite` 8.2.2, `n3`
+  2.6, `marked`, `devalue` past GHSA-9rgm-9g3h-6x36, `uuid`,
+  `aws-smithy-http-client`, `proj4`, `dompurify`, `@codemirror/search`,
+  `@codemirror/state`, `@typescript-eslint/parser`, and the SHA-pinned
+  `softprops/action-gh-release` 3.0.3. `oxiri` 0.3 is held: its `Iri` type
+  crosses the federation service-handler API, so it has to stay on the 0.2
+  line Oxigraph still uses.
 - **Lint.** eslint 10's new `no-useless-assignment` now runs at its recommended
   `error` severity for `.js`/`.ts`, and the nine genuine dead stores it found —
   five in `.js`/`.ts`, four in plain helper functions inside components — are
