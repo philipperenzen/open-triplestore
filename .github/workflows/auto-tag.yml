@@ -113,7 +113,10 @@ jobs:
 
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "v$next" -F tag_message.txt
+          # --cleanup=whitespace: git's default (strip) deletes every line that
+          # starts with '#', i.e. all of the section's "### Added" … "### Security"
+          # headers.
+          git tag -a "v$next" --cleanup=whitespace -F tag_message.txt
           git push origin "v$next"
           echo "Pushed tag v$next"
 
