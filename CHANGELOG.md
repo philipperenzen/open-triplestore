@@ -1492,6 +1492,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as an operand.
 
 ### Security
+- **The `/sparql` read boundary could be tricked into reading any graph in the
+  store, unauthenticated.** A non-admin query is scoped by rewriting its text:
+  `scope_query_to_authorized` strips the caller's `FROM` / `FROM NAMED` clauses
+  and injects a prologue naming only the graphs the caller may read. Text
+  rewriting cannot be made perfect, and two inputs slipped through. A ` WHERE `
+  (or `{`) inside a string literal mis-anchored the injection, so the prologue
+  landed **inside** the literal and the query reached the engine with no dataset
+  clause at all — reading every named graph, including other tenants' private
+  datasets and graphs flagged private, with no graph IRI needing to be known
+  (`SELECT ?g ?o ("""x WHERE x""" AS ?z) WHERE { GRAPH ?g { ?s ?p ?o } }`). And a
+  `FROM NAMED` the scanner did not recognise — a prefixed-name source,
+  `FROM NAMED<iri>` with no space, or a comment between the keyword and the IRI —
+  survived unstripped, letting the caller name a private graph directly. The same
+  rewriter also backs the dataset-service SPARQL endpoint and the saved-query
+  `…/run` API, so the bypass reached those too. An anonymous request to a public
+  dataset was enough. Every non-admin query is now checked one more time, after
+  rewriting and immediately before it reaches the engine: the exact text is
+  parsed and refused with `403` unless its dataset names only graphs the caller
+  may read (a query left with no dataset clause, or a `FROM` without a matching
+  `FROM NAMED`, is refused as tampering). The check is fail-closed and does not
+  depend on the scanner being perfect. Admins are unchanged — they are scoped
+  additively over every registered graph and may read all of it. Every released
+  version was affected.
 - **Any signed-in user could block writes to a graph with a gating
   pipeline.** A SHACL Studio pipeline with `gate_writes` refuses (422) every
   write its shapes reject to the graphs it covers, for everyone, the graphs'

@@ -566,6 +566,20 @@ async fn execute_query(
         Some(scope_query_to_authorized(query, &accessible))
     };
 
+    // Fail-closed read boundary (non-admins only). Capture the graphs the caller
+    // may read now, before the text-search block consumes `accessible`; the
+    // server-owned entailment graph (added additively below) is folded in once it
+    // is known. The final query is checked against this set just before execution,
+    // so a literal-spliced or unstripped `FROM` clause cannot widen the read past
+    // it. Admins are scoped additively over every registered graph, so they are
+    // exempt. See [`ensure_query_within_scope`].
+    let mut guard_scope: Option<std::collections::HashSet<String>> =
+        if user.map(|u| u.is_admin()).unwrap_or(false) {
+            None
+        } else {
+            Some(accessible.clone())
+        };
+
     // Full-text preprocessing: `text:search` expansion + CONTAINS/STRSTARTS
     // push-down (text-search feature). Runs on the already-scoped query, and
     // is handed the same graph set so index hits obey the same read boundary.
@@ -641,6 +655,11 @@ async fn execute_query(
     };
     let entailment_query: String;
     let query = if let Some(iri) = entailment_graph {
+        // The regime graph is server-owned and added additively, so it is part of
+        // the readable scope for the guard below.
+        if let Some(scope) = guard_scope.as_mut() {
+            scope.insert(iri.clone());
+        }
         entailment_query =
             inject_from_clauses(query, &format!("FROM <{iri}>\nFROM NAMED <{iri}>\n"));
         &entailment_query as &str
@@ -650,6 +669,13 @@ async fn execute_query(
 
     let effective_query = resolve_prefixes(state, query).await;
     let effective_query_str = effective_query.as_deref().unwrap_or(query).to_string();
+
+    // Fail-closed: the rewritten non-admin query must name only graphs the caller
+    // may read (see [`ensure_query_within_scope`]). Runs before the query reaches
+    // the store, so an out-of-scope graph is a 403, never a read.
+    if let Some(allowed) = &guard_scope {
+        ensure_query_within_scope(&effective_query_str, allowed)?;
+    }
 
     // M-1: Enforce a configurable SPARQL query timeout to prevent runaway queries.
     let timeout = std::time::Duration::from_secs(state.query_timeout_secs);
@@ -5330,6 +5356,12 @@ pub(crate) async fn run_scoped_sparql(
     let resolved = resolve_prefixes(state, &effective_query).await;
     let final_query_str = resolved.as_deref().unwrap_or(&effective_query).to_string();
 
+    // Fail-closed read boundary: confirm the rewritten query names only `graph_set`
+    // (the service/saved-query scope), so a literal-spliced or unstripped `FROM`
+    // clause cannot widen it to graphs outside the service. See
+    // [`ensure_query_within_scope`].
+    ensure_query_within_scope(&final_query_str, graph_set)?;
+
     // Stream serialisation through a channel so large CONSTRUCT/DESCRIBE
     // results are not fully buffered before the first byte is sent.
     let store = state.store.clone();
@@ -5640,13 +5672,143 @@ pub(crate) fn scope_query_to_authorized(
     format!("{head_clean}{sep}{from_clauses}{tail}")
 }
 
+/// The IRI a scoped-but-empty caller is pinned to (see `scope_query_to_authorized`).
+/// Always allowed by [`ensure_query_within_scope`]: it is server-injected and holds
+/// no data, so a query pinned to it returns nothing.
+const EMPTY_SCOPE_GRAPH: &str = "urn:empty:graph";
+
+/// Fail-closed post-condition for the read boundary: after
+/// [`scope_query_to_authorized`] (and any server-owned `FROM` injection) has
+/// rewritten a non-admin query, parse the exact text about to reach the engine
+/// and confirm its effective dataset names only graphs in `allowed`.
+///
+/// This backstops the *textual* rewriter, which cannot be made perfect: if an
+/// injected `FROM` prologue landed inside a string literal (so the query ends up
+/// with no dataset clause and reads every named graph), or a caller's
+/// `FROM`/`FROM NAMED` clause slipped past the scanner (a prefixed-name source, no
+/// space before `<`, a comment between the keyword and the IRI), the parsed query
+/// would read graphs outside `allowed`. Rather than trusting the scanner, we
+/// re-derive the dataset from the final query and refuse anything wider than the
+/// caller may read. `allowed` is `EMPTY_SCOPE_GRAPH` plus the graphs the caller
+/// may read (for the entailment path, the server-owned regime graph too).
+///
+/// A correctly-scoped non-admin query always carries the injected
+/// `FROM <g>\nFROM NAMED <g>` prologue, so `dataset` and `dataset.named` are both
+/// `Some`; either being absent means the prologue was neutralised, which we treat
+/// as a scope violation. Admins never reach here — they are scoped additively over
+/// every registered graph and read everything.
+fn ensure_query_within_scope(
+    final_query: &str,
+    allowed: &std::collections::HashSet<String>,
+) -> Result<(), AppError> {
+    use spargebra::Query;
+
+    let scope_error = || {
+        AppError::Forbidden(
+            "Query scope could not be enforced; name the graphs to read in FROM / FROM NAMED"
+                .to_string(),
+        )
+    };
+
+    // Parse with the same grammar the store analyses queries with (`try_fast_count`,
+    // `validate_sparql`). A query the engine would also reject surfaces as a 400.
+    let parsed = spargebra::SparqlParser::new()
+        .parse_query(final_query)
+        .map_err(|e| AppError::BadRequest(format!("query parse: {e}")))?;
+    let dataset = match &parsed {
+        Query::Select { dataset, .. }
+        | Query::Construct { dataset, .. }
+        | Query::Describe { dataset, .. }
+        | Query::Ask { dataset, .. } => dataset.as_ref(),
+    };
+    // No dataset clause → the query reads the whole store's named graphs.
+    let dataset = dataset.ok_or_else(scope_error)?;
+    // `FROM` without `FROM NAMED` (`named: None`) leaves every named graph readable
+    // through `GRAPH ?g { … }`; the prologue always pairs the two, so treat the
+    // asymmetry as tampering.
+    let named = dataset.named.as_ref().ok_or_else(scope_error)?;
+    for iri in dataset.default.iter().chain(named.iter()) {
+        let g = iri.as_str();
+        if g != EMPTY_SCOPE_GRAPH && !allowed.contains(g) {
+            return Err(AppError::Forbidden(format!(
+                "Query names graph <{g}>, which is outside the graphs you may read"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod query_scoping_tests {
-    use super::{extract_and_strip_dataset, first_top_level_where, scope_query_to_authorized};
+    use super::{
+        ensure_query_within_scope, extract_and_strip_dataset, first_top_level_where,
+        scope_query_to_authorized,
+    };
     use std::collections::HashSet;
 
     fn authz(iris: &[&str]) -> HashSet<String> {
         iris.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `scope_query_to_authorized` followed by the fail-closed guard: whatever the
+    /// textual rewriter produces, the guard must reject any query that would read a
+    /// graph outside the authorized set. The tuple is (verdict, the scoped query).
+    fn scope_then_guard(query: &str, iris: &[&str]) -> (bool, String) {
+        let set = authz(iris);
+        let scoped = scope_query_to_authorized(query, &set);
+        (ensure_query_within_scope(&scoped, &set).is_ok(), scoped)
+    }
+
+    #[test]
+    fn guard_admits_a_normally_scoped_query() {
+        let iris = ["http://ex.org/g/a", "http://ex.org/g/b"];
+        let (ok, scoped) = scope_then_guard("SELECT * WHERE { ?s ?p ?o }", &iris);
+        assert!(ok, "a plainly scoped query must pass: {scoped}");
+        // A caller naming one of their own graphs is fine.
+        let (ok, scoped) = scope_then_guard(
+            "SELECT * FROM NAMED <http://ex.org/g/a> WHERE { GRAPH ?g { ?s ?p ?o } }",
+            &iris,
+        );
+        assert!(ok, "naming an authorized graph must pass: {scoped}");
+    }
+
+    #[test]
+    fn guard_admits_the_empty_scope_sentinel() {
+        // A caller with nothing readable is pinned to `urn:empty:graph`; that
+        // server-injected graph must not itself trip the guard.
+        let (ok, scoped) = scope_then_guard("SELECT * WHERE { ?s ?p ?o }", &[]);
+        assert!(scoped.contains("urn:empty:graph"), "{scoped}");
+        assert!(ok, "the empty-scope sentinel must pass: {scoped}");
+    }
+
+    #[test]
+    fn guard_rejects_a_from_named_that_the_scanner_left_in_place() {
+        // No space before `<`, so `extract_and_strip_dataset` never strips it and
+        // the caller's own graph survives beside the injected prologue.
+        let iris = ["http://ex.org/g/a"];
+        let (ok, scoped) = scope_then_guard(
+            "SELECT * FROM NAMED<http://secret/private> WHERE { GRAPH ?g { ?s ?p ?o } }",
+            &iris,
+        );
+        assert!(
+            !ok,
+            "an unstripped FROM NAMED of an unauthorized graph must be refused: {scoped}"
+        );
+    }
+
+    #[test]
+    fn guard_rejects_a_prologue_spliced_into_a_string_literal() {
+        // A ` WHERE ` inside a triple-quoted literal mis-anchors the rewriter, so
+        // the injected prologue lands inside the literal and the query is left with
+        // no dataset clause — which would read every named graph in the store.
+        let iris = ["http://ex.org/g/a"];
+        let attack = "SELECT ?g ?o (\"\"\"x WHERE x\"\"\" AS ?z) \
+             WHERE { GRAPH ?g { ?s ?p ?o } }";
+        let (ok, scoped) = scope_then_guard(attack, &iris);
+        assert!(
+            !ok,
+            "a query whose scope prologue was neutralised must be refused: {scoped}"
+        );
     }
 
     /// The scoped prologue must be byte-identical for the same SET of graphs,
