@@ -99,19 +99,31 @@ fn load_accessible_dataset(
 /// CityJSON lifted to WKT-Z purely for the 3D-Tiles pipeline, so surfacing them
 /// here would make the Features API disagree with the 2D map. Centralised so the
 /// exclusion can't drift between the OGC handlers.
-fn feed_data_graphs(state: &AppState, dataset_id: &str) -> Result<Vec<String>, ApiError> {
+/// Scoped to the graphs `user_id` may READ (private graphs only for a writer),
+/// so a viewer or an anonymous caller on a public dataset never sees a private
+/// graph's features through the OGC API.
+fn feed_data_graphs(
+    state: &AppState,
+    user_id: Option<&str>,
+    dataset: &Dataset,
+) -> Result<Vec<String>, ApiError> {
     Ok(state
         .auth_db
-        .list_dataset_graphs(dataset_id)
+        .list_readable_dataset_graphs(user_id, dataset)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .into_iter()
         .filter(|g| !g.ends_with("/ifcowl") && !crate::geo::viewer_feed::is_tiles3d_graph(g))
         .collect())
 }
 
-/// The geometry-bearing viewer-feed elements of a dataset (whole dataset scope).
-fn dataset_features(state: &AppState, dataset_id: &str) -> Result<Vec<ViewerElement>, ApiError> {
-    let data_graphs = feed_data_graphs(state, dataset_id)?;
+/// The geometry-bearing viewer-feed elements of a dataset (whole dataset scope),
+/// restricted to the graphs `user_id` may read (see [`feed_data_graphs`]).
+fn dataset_features(
+    state: &AppState,
+    user_id: Option<&str>,
+    dataset: &Dataset,
+) -> Result<Vec<ViewerElement>, ApiError> {
+    let data_graphs = feed_data_graphs(state, user_id, dataset)?;
     Ok(build_viewer_feed(&state.store, &data_graphs, None))
 }
 
@@ -276,7 +288,7 @@ async fn collections(
         // dataset list — is decided by a single ASK instead of building a whole
         // viewer feed per dataset (the old N+1). Datasets with geometry still get
         // their extent, so the response shape is unchanged.
-        let graphs = feed_data_graphs(&state, &d.id).unwrap_or_default();
+        let graphs = feed_data_graphs(&state, user_id, d).unwrap_or_default();
         let extent = if dataset_geo_stats(&state.store, &graphs).has_coordinates {
             features_extent(&build_viewer_feed(&state.store, &graphs, None))
         } else {
@@ -301,9 +313,10 @@ async fn collection(
     Path(collection_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let dataset = load_accessible_dataset(&state, &user, &collection_id)?;
+    let user_id = user.as_ref().map(|u| u.user_id.as_str());
     let base = state.base_url.as_str();
     // Cheap geo-stats ASK gate before the full feed build (see `collections`).
-    let graphs = feed_data_graphs(&state, &dataset.id).unwrap_or_default();
+    let graphs = feed_data_graphs(&state, user_id, &dataset).unwrap_or_default();
     let extent = if dataset_geo_stats(&state.store, &graphs).has_coordinates {
         features_extent(&build_viewer_feed(&state.store, &graphs, None))
     } else {
@@ -358,6 +371,7 @@ async fn collection_items(
     Query(q): Query<ItemsQuery>,
 ) -> Result<Response, ApiError> {
     let dataset = load_accessible_dataset(&state, &user, &collection_id)?;
+    let user_id = user.as_ref().map(|u| u.user_id.as_str());
     let base = state.base_url.as_str();
 
     let bbox = match q.bbox.as_deref() {
@@ -367,7 +381,7 @@ async fn collection_items(
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let offset = q.offset.unwrap_or(0);
 
-    let elements = dataset_features(&state, &dataset.id)?;
+    let elements = dataset_features(&state, user_id, &dataset)?;
 
     // Match = every element with a parsable geometry passing the bbox filter.
     let matched: Vec<&ViewerElement> = elements
@@ -443,7 +457,8 @@ async fn collection_item(
     Path((collection_id, feature_id)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
     let dataset = load_accessible_dataset(&state, &user, &collection_id)?;
-    let elements = dataset_features(&state, &dataset.id)?;
+    let user_id = user.as_ref().map(|u| u.user_id.as_str());
+    let elements = dataset_features(&state, user_id, &dataset)?;
 
     let el = elements
         .iter()

@@ -93,4 +93,21 @@ async fn chat_without_a_gateway_is_a_503_that_names_the_knob() {
     let v = body_json(resp.into_body()).await;
     assert_eq!(v["reachable"], false, "{v}");
     assert_eq!(v["gateway"], DEAD_GATEWAY, "{v}");
+    assert_eq!(
+        v["configured"], true,
+        "set explicitly, just not reachable: {v}"
+    );
+    // Every AI feature is still reported, in order, with its model — but
+    // `listed` is unknown (null), not "not served": there is no list to judge by.
+    let services = v["services"].as_array().expect("services array");
+    let ids: Vec<&str> = services.iter().filter_map(|s| s["id"].as_str()).collect();
+    assert_eq!(ids, ["chat", "sparql", "shacl"], "{v}");
+    for s in services {
+        assert!(
+            s.get("listed").is_some_and(serde_json::Value::is_null),
+            "unreachable gateway → listed: null: {v}"
+        );
+        assert!(s["model"].as_str().is_some_and(|m| !m.is_empty()), "{v}");
+    }
+    assert_eq!(services[0]["model"], v["chat_model"], "{v}");
 }

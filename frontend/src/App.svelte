@@ -3,7 +3,8 @@
   import { onMount, tick } from 'svelte';
   import { t, locale, isLoading } from 'svelte-i18n';
   import { isAuthenticated, user, isAdmin, refreshUser, backendHealth, checkBackend } from './lib/stores.js';
-  import { logout as apiLogout } from './lib/api.js';
+  import { logout as apiLogout, llmHealth } from './lib/api.js';
+  import { llmServiceHealthView } from './lib/llmServiceHealth.js';
   import { location } from './lib/locationStore.js';
   import Toasts from './components/Toasts.svelte';
   import SearchBar from './components/SearchBar.svelte';
@@ -148,11 +149,43 @@
   let healthPopoverEl;
   let healthPopoverStyle = '';
 
+  // LLM status for the popover's "LLM services" section. Fetched only when the
+  // popover opens or its refresh button is pressed — never on the 30 s poll —
+  // and never part of the badge colour or the degraded banner: a missing or
+  // unreachable LLM is not the server being unhealthy. `null` until the first
+  // answer; a refresh keeps the previous result on screen until the new one lands.
+  let llmStatus = null;
+  let llmRequestSeq = 0;
+  $: llmView = llmServiceHealthView(llmStatus);
+
+  async function refreshLlmHealth() {
+    const seq = ++llmRequestSeq;
+    const status = await llmHealth(); // never throws
+    // A slower, older response must not overwrite a newer one.
+    if (seq === llmRequestSeq) llmStatus = status;
+  }
+
   async function refreshHealth() {
     if (healthRefreshing) return;
     healthRefreshing = true;
-    await checkBackend();
-    healthRefreshing = false;
+    try {
+      await Promise.all([checkBackend(), refreshLlmHealth()]);
+    } finally {
+      healthRefreshing = false;
+    }
+  }
+
+  // Both ways in (the sidebar badge and the degraded banner's "Details") open
+  // the popover the same way: refreshed, LLM section included, and anchored
+  // above the badge. Its height is capped to the room above the badge, so on a
+  // short viewport it scrolls instead of losing its top off-screen.
+  function openHealthPopover() {
+    healthPopoverOpen = true;
+    refreshHealth();
+    const r = healthBtnRef.getBoundingClientRect();
+    const popW = 290;
+    const left = Math.min(r.left, window.innerWidth - popW - 8);
+    healthPopoverStyle = `position:fixed;z-index:9999;bottom:${window.innerHeight - r.top + 8}px;left:${Math.max(8, left)}px;max-height:${Math.max(120, r.top - 16)}px`;
   }
 
   isAuthenticated.subscribe((value) => (authed = value));
@@ -511,14 +544,8 @@
               class:degraded={$backendHealth?.status === 'degraded'}
               class:offline={$backendHealth?.status === null && $backendHealth !== null}
               on:click={() => {
-                healthPopoverOpen = !healthPopoverOpen;
-                if (healthPopoverOpen) {
-                  refreshHealth();
-                  const r = healthBtnRef.getBoundingClientRect();
-                  const popW = 290;
-                  const left = Math.min(r.left, window.innerWidth - popW - 8);
-                  healthPopoverStyle = `position:fixed;z-index:9999;bottom:${window.innerHeight - r.top + 8}px;left:${Math.max(8, left)}px`;
-                }
+                if (healthPopoverOpen) healthPopoverOpen = false;
+                else openHealthPopover();
               }}
               title={backendStatusLabel}
               aria-label={backendStatusLabel}
@@ -583,7 +610,7 @@
         <div class="backend-banner backend-banner-warn" role="alert">
           <AlertTriangle size={16} />
           <span><strong>{$t('system.backendDegraded')}</strong> <span class="banner-desc">{$t('nav.degradedDesc')}</span></span>
-          <button class="btn btn-sm btn-ghost" on:click={() => { healthPopoverOpen = true; checkBackend(); }}>
+          <button class="btn btn-sm btn-ghost" on:click={openHealthPopover}>
             <RefreshCw size={13} />
             {$t('nav.details')}
           </button>
@@ -791,6 +818,42 @@
             <span class="health-dot-sm" class:h-ok={s?.backup?.enabled} class:h-warn={!s?.backup?.enabled}></span>
             <span class="health-label">{$t('nav.backup')}</span>
             <span class="health-detail">{s?.backup?.enabled ? 'enabled' : 'disabled'}</span>
+          </div>
+        </div>
+        <!-- LLM services: informational only, never part of the badge colour. -->
+        <div class="health-section">
+          <div class="health-section-title">{$t('nav.llmServices')}</div>
+          <div class="health-rows">
+            <div class="health-row">
+              <span
+                class="health-dot-sm"
+                class:h-ok={llmView.gateway.state === 'ok'}
+                class:h-warn={llmView.gateway.state === 'warn'}
+                class:h-pending={llmView.gateway.state === 'pending'}
+              ></span>
+              <span class="health-label">{$t('nav.llmGateway')}</span>
+              <span class="health-detail" title={llmView.gateway.address ?? undefined}>{$t(llmView.gateway.detailKey)}</span>
+            </div>
+            {#each llmView.services as svc (svc.id)}
+              <div class="health-row">
+                <span
+                  class="health-dot-sm"
+                  class:h-ok={svc.state === 'ok'}
+                  class:h-warn={svc.state === 'warn'}
+                  class:h-pending={svc.state === 'pending'}
+                ></span>
+                <span class="health-label">{$t(svc.labelKey)}</span>
+                <span
+                  class="health-detail"
+                  title={svc.noteKey ? `${svc.model} — ${$t(svc.noteKey)}` : svc.model || undefined}
+                >{svc.model || '—'}</span>
+              </div>
+              {#if svc.noteKey}
+                <!-- The state in words, not only as the dot colour: readable on
+                     touch screens (no tooltips) and by screen readers. -->
+                <div class="health-note">{$t(svc.noteKey)}</div>
+              {/if}
+            {/each}
           </div>
         </div>
         {#if $backendHealth.version}
@@ -1039,7 +1102,8 @@
     border-radius: 12px;
     box-shadow: 0 8px 32px rgba(0,0,0,0.45);
     z-index: 9999;
-    overflow: hidden;
+    overflow-x: hidden;
+    overflow-y: auto;
     color: #e2e8f0;
     font-size: 0.8rem;
   }
@@ -1096,10 +1160,28 @@
   .health-dot-sm.h-ok { background: #94d38d; box-shadow: 0 0 4px rgba(148,211,141,0.5); }
   .health-dot-sm.h-err { background: #ef9e8a; box-shadow: 0 0 4px rgba(239,158,138,0.5); }
   .health-dot-sm.h-warn { background: #f5c842; box-shadow: 0 0 4px rgba(245,200,66,0.5); }
+  .health-dot-sm.h-pending { background: #94a3b8; box-shadow: none; opacity: 0.55; }
+
+  .health-section { border-top: 1px solid rgba(255,255,255,0.06); }
+  .health-section-title {
+    padding: 0.45rem 0.75rem 0;
+    font-size: 0.65rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: #64748b;
+  }
 
   .health-label { font-size: 0.8rem; color: #cbd5e1; flex: 1; white-space: nowrap; }
   .health-detail { font-size: 0.73rem; color: #64748b; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
   .health-err-text { color: #ef9e8a; }
+  /* Indented to line up with the row label (padding + dot + gap). */
+  .health-note {
+    padding: 0 0.75rem 0.3rem calc(0.75rem + 7px + 0.5rem);
+    margin-top: -0.2rem;
+    font-size: 0.68rem;
+    color: #f5c842;
+  }
 
   .health-version {
     padding: 0.3rem 0.75rem 0.45rem;
