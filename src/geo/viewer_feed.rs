@@ -3,9 +3,10 @@
 //! Resolves the standard linked-building-data layering — **BOT** topology
 //! (`bot:containsElement` / `bot:hasSubElement`), **OMG/FOG** file references
 //! (`omg:hasGeometry` → `fog:as…` URLs), and **GeoSPARQL** geometry
-//! (`geo:hasGeometry` → `geo:asWKT` / `geo:asGML`) — into a flat list of
-//! elements. Geometries are reprojected to EPSG:4326 (for `[lng, lat]` map
-//! layers) via [`super::crs`], so the frontend never needs CRS math.
+//! (`geo:hasGeometry` → `geo:asWKT` / `geo:asGML` / `geo:asGeoJSON`) — into a
+//! flat list of elements. Geometries are reprojected to EPSG:4326 (for
+//! `[lng, lat]` map layers) via [`super::crs`], so the frontend never needs CRS
+//! math; GeoJSON is CRS84 already.
 //! Vocabulary-specific detail (condition scores, inspection data, …) is
 //! deliberately *not* flattened here: the client fetches an element's full RDF
 //! on selection.
@@ -17,6 +18,7 @@ use utoipa::ToSchema;
 
 use super::crs::{reproject_wkt, transform_xy, Crs};
 use super::datatypes::{extract_crs, extract_wkt};
+use super::geojson::geojson_to_wkt;
 use super::gml::{gml_srs_name, gml_to_wkt};
 
 /// One element (or root object) in the viewer feed.
@@ -103,7 +105,8 @@ pub(crate) fn is_tiles3d_graph(graph: &str) -> bool {
 /// the full feed, so it is safe to call per-dataset on list pages.
 #[derive(Debug, Clone, Serialize, ToSchema, Default)]
 pub struct GeoStats {
-    /// Any feature carries a `geo:asWKT` / `geo:asGML` geometry (mappable in 2D).
+    /// Any feature carries a `geo:asWKT` / `geo:asGML` / `geo:asGeoJSON`
+    /// geometry (mappable in 2D).
     pub has_coordinates: bool,
     /// Any feature links a loadable 3D model file (glTF/STL/CityJSON/CityGML/IFC).
     pub has_models: bool,
@@ -144,8 +147,8 @@ pub fn dataset_geo_stats(store: &TripleStore, data_graphs: &[String]) -> GeoStat
         return GeoStats::default();
     }
 
-    let has_coordinates =
-        ask("?s geo:hasGeometry ?g . { ?g geo:asWKT ?w } UNION { ?g geo:asGML ?w }");
+    let has_coordinates = ask("?s geo:hasGeometry ?g . \
+         { ?g geo:asWKT ?w } UNION { ?g geo:asGML ?w } UNION { ?g geo:asGeoJSON ?w }");
     let has_models = ask("?el omg:hasGeometry ?g . ?g ?p ?f . \
          FILTER(STRSTARTS(STR(?p), \"https://w3id.org/fog#as\")) \
          FILTER(REGEX(STR(?p), \"Gltf|Stl|Cityjson|Citygml|Ifc|Obj\", \"i\"))");
@@ -221,7 +224,7 @@ fn lang_rank(lang: Option<&str>, want: Option<&str>) -> u8 {
 }
 
 /// As [`build_viewer_feed`], but with `located_only` to fetch just the elements
-/// that carry actual coordinates (`geo:asWKT`/`geo:asGML`) plus their model
+/// that carry actual coordinates (`geo:asWKT`/`geo:asGML`/`geo:asGeoJSON`) plus their model
 /// references — the subset the 2D map renders. On a big BIM dataset the IFC
 /// sub-elements (walls/beams/…) inherit their location and number in the
 /// thousands; they matter only to the structure tree, not the map. Skipping the
@@ -256,7 +259,9 @@ pub fn build_viewer_feed_opts(
     let selection = if located_only {
         // Only coordinate-bearing features; ?parent stays unbound (the map's
         // located elements are roots/anchors — the tree resolves parents).
-        "?el geo:hasGeometry ?gg . { ?gg geo:asWKT ?w0 } UNION { ?gg geo:asGML ?g0 }".to_string()
+        "?el geo:hasGeometry ?gg . \
+         { ?gg geo:asWKT ?w0 } UNION { ?gg geo:asGML ?g0 } UNION { ?gg geo:asGeoJSON ?j0 }"
+            .to_string()
     } else {
         let root_filter = match root {
             Some(r) => format!("FILTER(?el = <{r}> || ?parent = <{r}>)"),
@@ -281,7 +286,7 @@ pub fn build_viewer_feed_opts(
         PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
         PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
         PREFIX omg:  <https://w3id.org/omg#>
-        SELECT ?el ?parent ?label ?type ?wkt ?gml ?fp ?file ?guid ?up ?msize ?mhead
+        SELECT ?el ?parent ?label ?type ?wkt ?gml ?geojson ?fp ?file ?guid ?up ?msize ?mhead
         {from}
         WHERE {{
             {selection}
@@ -289,7 +294,8 @@ pub fn build_viewer_feed_opts(
             OPTIONAL {{ ?el a ?type }}
             OPTIONAL {{ ?el geo:hasGeometry ?g .
                         OPTIONAL {{ ?g geo:asWKT ?wkt }}
-                        OPTIONAL {{ ?g geo:asGML ?gml }} }}
+                        OPTIONAL {{ ?g geo:asGML ?gml }}
+                        OPTIONAL {{ ?g geo:asGeoJSON ?geojson }} }}
             OPTIONAL {{ ?el omg:hasGeometry ?og . ?og ?fp ?file .
                         FILTER(STRSTARTS(STR(?fp), "{FOG_AS}"))
                         OPTIONAL {{ ?og <https://opentriplestore.org/ns#modelUpAxis> ?up }}
@@ -382,6 +388,11 @@ pub fn build_viewer_feed_opts(
         } else if entry.wkt4326.is_none() {
             if let Some(gml_lit) = sol.get("gml").map(term_value) {
                 apply_gml(entry, &gml_lit);
+            }
+            if entry.wkt4326.is_none() {
+                if let Some(json) = sol.get("geojson").map(term_value) {
+                    apply_geojson(entry, &json);
+                }
             }
         }
     }
@@ -524,6 +535,17 @@ fn apply_gml(el: &mut ViewerElement, gml_value: &str) {
     };
     el.source_crs = Some(source_uri.unwrap_or_else(|| Crs::Wgs84.to_uri().to_string()));
     el.wkt4326 = reproject_wkt(&wkt_body, source, Crs::Wgs84);
+}
+
+/// Fill the geometry fields from a GeoJSON literal value — CRS84 by definition,
+/// so there is nothing to reproject (the round trip through the WKT writer only
+/// normalises the text the map layers parse).
+fn apply_geojson(el: &mut ViewerElement, json: &str) {
+    let Some(wkt_body) = geojson_to_wkt(json) else {
+        return;
+    };
+    el.source_crs = Some(Crs::Wgs84.to_uri().to_string());
+    el.wkt4326 = reproject_wkt(&wkt_body, Crs::Wgs84, Crs::Wgs84);
 }
 
 /// Fill in each element's administrative place path (country → region → city)
@@ -865,6 +887,31 @@ mod tests {
             "UTM metres must not be emitted as lng/lat: {:?}",
             feed[0].wkt4326
         );
+    }
+
+    #[test]
+    fn geojson_geometry_feeds_the_map() {
+        let data = r#"
+            @prefix geo: <http://www.opengis.net/ont/geosparql#> .
+            @prefix ex:  <http://example.org/> .
+            ex:thing geo:hasGeometry [ geo:asGeoJSON '{"type":"LineString","coordinates":[[4.9,52.37],[4.91,52.38]]}'^^geo:geoJSONLiteral ] .
+        "#;
+        let store = TripleStore::in_memory().unwrap();
+        store.load_str(data, RdfFormat::Turtle, None).unwrap();
+        assert!(dataset_geo_stats(&store, &[]).has_coordinates);
+        for located in [false, true] {
+            let feed = build_viewer_feed_opts(&store, &[], None, located, None);
+            assert_eq!(feed.len(), 1, "{feed:?}");
+            assert_eq!(
+                feed[0].wkt4326.as_deref(),
+                Some("LINESTRING(4.9 52.37,4.91 52.38)"),
+                "GeoJSON is CRS84 already"
+            );
+            assert_eq!(
+                feed[0].source_crs.as_deref(),
+                Some("http://www.opengis.net/def/crs/OGC/1.3/CRS84")
+            );
+        }
     }
 
     #[test]

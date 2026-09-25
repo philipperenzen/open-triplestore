@@ -108,6 +108,14 @@ pub fn generate(
         "distance",
         "area",
         "getSRID",
+        "relate",
+        "transform",
+        "asGeoJSON",
+        "metricDistance",
+        "metricArea",
+        "metricLength",
+        "metricPerimeter",
+        "metricBuffer",
     ];
 
     for (i, func) in geo_functions.iter().enumerate() {
@@ -118,6 +126,8 @@ pub fn generate(
         };
         desc.push_str(&format!("        geof:{}{}\n", func, sep));
     }
+    // GeoSPARQL aggregates (SPARQL 1.1 Service Description `sd:extensionAggregate`).
+    desc.push_str("    sd:extensionAggregate geof:aggUnion ;\n");
 
     // Dataset description
     desc.push_str(&format!(
@@ -198,6 +208,55 @@ mod tests {
         assert!(desc.contains("void:triples 42"));
         assert!(desc.contains("geof:sfContains"));
         assert!(desc.contains("geof:distance"));
+        assert!(desc.contains("geof:asGeoJSON"));
+        assert!(desc.contains("sd:extensionAggregate geof:aggUnion"));
+    }
+
+    /// The advertised aggregate is one the engine registers, and the whole
+    /// description is Turtle that parses.
+    #[test]
+    fn advertised_aggregate_is_registered_and_the_description_parses() {
+        let aggregates: Vec<String> = crate::geo::aggregates::all_aggregates()
+            .into_iter()
+            .map(|(iri, _)| iri.as_str().to_string())
+            .collect();
+        assert!(aggregates
+            .contains(&"http://www.opengis.net/def/function/geosparql/aggUnion".to_string()));
+        let desc = generate(3, &[("http://example.org/g", 1)], &[], true);
+        let store = oxigraph::store::Store::new().unwrap();
+        store
+            .load_from_slice(
+                oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::Turtle)
+                    .with_base_iri("http://localhost/sparql")
+                    .unwrap(),
+                &desc,
+            )
+            .unwrap_or_else(|e| panic!("service description must be Turtle: {e}\n{desc}"));
+    }
+
+    /// Every advertised `geof:` function is one the engine registers.
+    #[test]
+    fn advertised_functions_are_registered() {
+        let registered: Vec<String> = crate::geo::functions::all_functions()
+            .into_iter()
+            .map(|(iri, _)| iri.as_str().to_string())
+            .collect();
+        let desc = generate(0, &[], &[], false);
+        let listed = desc
+            .lines()
+            .map(str::trim)
+            .filter_map(|l| l.strip_prefix("geof:"))
+            .map(|l| l.trim_end_matches([',', ';', ' ']));
+        let mut n = 0;
+        for name in listed {
+            n += 1;
+            let iri = format!("http://www.opengis.net/def/function/geosparql/{name}");
+            assert!(
+                registered.contains(&iri),
+                "advertised but not registered: {name}"
+            );
+        }
+        assert!(n > 30, "the list was read: {n}");
     }
 
     #[test]

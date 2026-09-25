@@ -239,7 +239,10 @@ fn fail_clearance_expression() {
 }
 
 /// The user-defined sh:SPARQLFunction ex:distanceMetres is callable from SPARQL and
-/// returns the same value as the raw geof:distance it wraps.
+/// returns the same value as the raw geof:distance it wraps. The points are in RD New
+/// (the reference example's CRS), where `uom:metre` is the plane's own metres: 3-4-5
+/// is 5 m. (The unprefixed CRS84 points POINT(0 0) and POINT(3 4) would be a geodesic
+/// distance in metres, ~554 km.)
 #[test]
 fn sparql_function_distance_metres_callable() {
     let store = TripleStore::in_memory().unwrap();
@@ -255,8 +258,11 @@ fn sparql_function_distance_metres_callable() {
         PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
         PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
         PREFIX uom:  <http://www.opengis.net/def/uom/OGC/1.0/>
-        SELECT (ex:distanceMetres("POINT(0 0)"^^geo:wktLiteral, "POINT(3 4)"^^geo:wktLiteral) AS ?d)
-               (geof:distance("POINT(0 0)"^^geo:wktLiteral, "POINT(3 4)"^^geo:wktLiteral, uom:metre) AS ?ref)
+        SELECT (ex:distanceMetres("<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(186000 427000)"^^geo:wktLiteral,
+                                  "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(186003 427004)"^^geo:wktLiteral) AS ?d)
+               (geof:distance("<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(186000 427000)"^^geo:wktLiteral,
+                              "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(186003 427004)"^^geo:wktLiteral,
+                              uom:metre) AS ?ref)
         WHERE {}
     "#;
     let (mut d, mut r) = (None, None);

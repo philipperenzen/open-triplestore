@@ -14,6 +14,50 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`geof:aggUnion`, the GeoSPARQL 1.1 spatial aggregate.** A real SPARQL
+  aggregate: `SELECT ?k (geof:aggUnion(?geom) AS ?u) … GROUP BY ?k` folds each
+  group's geometries into their union (GEOS unary union), one
+  `geo:wktLiteral` — with or without `GROUP BY`, in `HAVING`, in sub-selects
+  and in the `WHERE` of an update, over WKT, GML and GeoJSON alike. A group in
+  one CRS keeps it; a group mixing CRSs is unioned in CRS84. It follows
+  SPARQL's aggregate error rules (a value that is not a geometry makes the
+  group's union unbound, as a non-number does to `SUM`), the union of no
+  geometries is `GEOMETRYCOLLECTION EMPTY`, and the result does not depend on
+  the order the solutions arrive in. `geof:aggUnion(DISTINCT ?g)` does not
+  parse — spargebra takes no `DISTINCT` in a custom aggregate's call — and
+  would change nothing: a union absorbs duplicates. Every parse of a query
+  now goes through one parser that knows the aggregate (`opengraph::sparql_parser`, fed by a
+  registry the store fills when it opens): undeclared, `geof:aggUnion(?g)` read
+  as a plain function call — a syntax error under `GROUP BY`, and on the
+  accelerator's planners a different query, a row-local `BIND` that a
+  surrounding `COUNT` could have summed across the subject shards. The shards
+  and the columnar copy decline the aggregate; the full in-memory copy and the
+  engine evaluate it. The service description advertises it as
+  `sd:extensionAggregate`. It was a tracked gap.
+- **The GeoSPARQL 1.1 metric functions** — `geof:metricDistance`,
+  `metricLength`, `metricPerimeter`, `metricArea` and `metricBuffer` — measure in
+  metres (square metres) on the WGS84 ellipsoid whatever CRS the operand is
+  written in: it is reprojected to CRS84 first, and a CRS this build cannot
+  reproject gives an unbound result, not a number in unknown units. Distances,
+  lengths and areas are Karney's geodesic algorithms (through the `geo` crate
+  already in the tree — no new dependency), exact to nanometres and convergent
+  for nearly antipodal points; the nearest points of two geometries and a
+  buffer are found in an ellipsoidal azimuthal equidistant plane around them,
+  and a buffer is returned in its operand's CRS. The suite checks them against
+  published values: GeographicLib's JFK–LHR (5 551 759.400 m) and
+  Wellington–Salamanca (19 959 679.267 m), the equatorial degree and the
+  meridian arc. They were tracked gaps.
+- **`geo:geoJSONLiteral` geometries (GeoSPARQL 1.1).** A GeoJSON literal — an
+  RFC 7946 geometry object, `Point` through `GeometryCollection`, always CRS84
+  longitude/latitude — is a geometry wherever a WKT or GML literal is: every
+  `geof:` function takes it, binary functions harmonise it with a projected
+  operand, `geof:transform` reprojects it, and the spatial index and the map
+  viewer feed read `geo:asGeoJSON` next to `geo:asWKT`/`geo:asGML`. It is
+  translated to WKT on the way in, so it takes the same GEOS path; a malformed
+  one (bad JSON, a `Feature`, a short position, an unclosed ring) is not a
+  geometry, and functions over it are unbound rather than a panic. New
+  **`geof:asGeoJSON`** serialises any geometry as a `geo:geoJSONLiteral`,
+  reprojecting it to CRS84 first. Both were tracked gaps.
 - **LLM services in Service health.** The sidebar's Service health popover now
   lists the LLM gateway and each AI feature — Spark chat, NL→SPARQL and the
   SHACL assistant — with the model it sends and a note when the gateway's
@@ -535,6 +579,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the test binaries are now `example_bridge_conformance` and
   `example_bridge_viewer_e2e`. The layered-reference seed bundle, Spark's prompt
   examples, the docs and the unit-test fixtures use fictional names as well.
+- **`geof:distance` and `geof:buffer` honour a metre unit on a geographic
+  CRS.** With `uom:metre` (or `kilometre`, `centimetre`, `millimetre`) on a CRS84
+  or EPSG:4326 operand, `geof:distance` returned the planar distance in
+  *degrees* and `geof:buffer` buffered by that many degrees — the unit was
+  ignored. Both are geodesic on the WGS84 ellipsoid now, the same as
+  `geof:metricDistance` / `geof:metricBuffer`: London–Paris with `uom:metre` is
+  343 923.120, not 3.63, and a `uom:metre` radius of 1000 is a kilometre, not a
+  thousand degrees. On a projected CRS (RD New, Web Mercator) both stay planar in
+  the CRS's own metres, as before, but `geof:buffer` now converts a kilometre
+  (centimetre, millimetre) radius, which it used to take as metres. An angular
+  unit on a geographic CRS keeps the planar degree distance, now converted for
+  `uom:radian` (it was returned in degrees); without a unit nothing changes.
+  **This changes results** for every query, shape or saved query that passes
+  `uom:metre` with CRS84 or EPSG:4326 geometry — `FILTER(geof:distance(?a, ?b,
+  uom:metre) < 25)` over lon/lat data used to compare degrees with 25 and so
+  held for almost everything, and now compares metres. The bundled "Distance
+  from a city" saved query, labelled metres, now returns metres.
 - **The Triple Browser sends its whole scope, remembers it, and offers the
   query behind the view.** A selection mixing datasets with an organisation
   sent only part of itself — and one dataset plus one organisation matched no
@@ -760,6 +821,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **`geof:getSRID` of a GML literal returned its opening tag as a CRS IRI**
+  (`<gml:Point srsName=…>` read as a `<crs>` prefix — an invalid IRI in the
+  results). It returns CRS84 now, the CRS the other functions already treat a
+  GML literal as being in (`srsName` is not read yet); a GeoJSON literal is
+  CRS84 by definition.
 - **A blank `LLM_GATEWAY_URL` falls back to the built-in default.** It was used
   as given, so `LLM_GATEWAY_URL=` (as an `--env-file` line with no value
   produces) sent every probe and completion to a relative URL that could never

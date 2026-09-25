@@ -1,6 +1,9 @@
+pub mod aggregates;
 pub mod crs;
 pub mod datatypes;
 pub mod functions;
+pub mod geodesic;
+pub mod geojson;
 pub mod gml;
 pub mod places;
 pub mod spatial_index;
