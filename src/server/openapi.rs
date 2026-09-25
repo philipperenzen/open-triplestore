@@ -1509,7 +1509,10 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Validate dataset (SHACL)",
-                "Run SHACL validation against the dataset's shapes graph.",
+                "Run SHACL validation against the dataset's shapes graph. The run reads only the \
+                 dataset graphs the caller may read (a private graph only for the dataset's \
+                 writers); a run that could not read all of them is answered as a test run \
+                 (`test: true`, `partial: true`) and not recorded.",
                 vec![],
                 vec![
                     ("200", "Validation report"),
@@ -1655,7 +1658,9 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Latest validation",
-                "The most recent validation run for the dataset.",
+                "The most recent validation run for the dataset. Its full report goes to the \
+                 dataset's writers and to callers who may read every graph the run validated; \
+                 others get the summary with `report: null` and `report_withheld: true`.",
                 vec![],
                 vec![("200", "Latest run"), ("404", "No runs yet")],
                 false,
@@ -1670,7 +1675,9 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Get validation run",
-                "Details of one validation run.",
+                "Details of one validation run. Its full report goes to the dataset's writers \
+                 and to callers who may read every graph the run validated; others get the \
+                 summary with `report: null` and `report_withheld: true`.",
                 vec![],
                 vec![("200", "Run details"), ("404", "Not found")],
                 false,

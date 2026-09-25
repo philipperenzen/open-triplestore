@@ -916,7 +916,8 @@ impl AuthDb {
                 duration_ms INTEGER,
                 quads INTEGER,
                 source_kind TEXT,
-                run_index INTEGER
+                run_index INTEGER,
+                data_graphs TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_shacl_runs_dataset ON shacl_validation_runs(dataset_id);
             CREATE INDEX IF NOT EXISTS idx_shacl_runs_ts ON shacl_validation_runs(dataset_id, run_timestamp DESC);
@@ -1275,6 +1276,9 @@ impl AuthDb {
             "ALTER TABLE shacl_validation_runs ADD COLUMN quads INTEGER",
             "ALTER TABLE shacl_validation_runs ADD COLUMN source_kind TEXT",
             "ALTER TABLE shacl_validation_runs ADD COLUMN run_index INTEGER",
+            // The graphs a validation run validated (a JSON array), so its
+            // report goes only to who may read them all. NULL on older runs.
+            "ALTER TABLE shacl_validation_runs ADD COLUMN data_graphs TEXT",
             "ALTER TABLE datasets ADD COLUMN conforms_to_model TEXT",
             "ALTER TABLE datasets ADD COLUMN conforms_to_version TEXT",
             "ALTER TABLE datasets ADD COLUMN graph_role TEXT",
@@ -3622,6 +3626,36 @@ impl AuthDb {
             params![run_id, duration_ms, quads, source_kind, run_index as i32],
         )?;
         Ok(())
+    }
+
+    /// Record the graphs validation run `run_id` validated (see
+    /// [`Self::get_validation_run_graphs`]).
+    pub fn set_validation_run_graphs(&self, run_id: &str, graphs: &[String]) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "UPDATE shacl_validation_runs SET data_graphs = ?2 WHERE id = ?1",
+            params![run_id, serde_json::to_string(graphs)?],
+        )?;
+        Ok(())
+    }
+
+    /// The graphs validation run `run_id` validated, and so the graphs whose
+    /// focus nodes and values its report may carry. `None` for a run stored
+    /// before runs recorded them (or an unknown run).
+    pub fn get_validation_run_graphs(&self, run_id: &str) -> anyhow::Result<Option<Vec<String>>> {
+        let conn = self.pool.get()?;
+        let stored: Option<Option<String>> = conn
+            .query_row(
+                "SELECT data_graphs FROM shacl_validation_runs WHERE id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        stored
+            .flatten()
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(Into::into)
     }
 
     /// Persist a validation run and prune to the most recent 50 runs per dataset.

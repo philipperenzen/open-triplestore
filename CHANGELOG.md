@@ -2092,6 +2092,33 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so before a run over other data it is detached, and it is newly attached
   only while empty. A graph the pipeline's owner named as the target keeps
   its registrations; it is attached only when nothing in the scope is private.
+- **Validating a dataset showed its private graphs to anyone who could view
+  it.** `POST /api/datasets/{id}/validate` checked only that the caller could
+  see the dataset, then validated every graph in it, private ones included,
+  and returned the report (focus nodes and values). An official run was also
+  recorded, overwriting the dataset's validation status, and its report was
+  written as RDF to `urn:system:reports:dataset:{id}`, attached to the dataset
+  non-private. So a public dataset's viewers read its private graphs' values
+  in the response, over `/sparql`, and from `…/validation/latest` and
+  `…/validation/runs/{run_id}`. Now:
+  - A run validates only the dataset graphs the caller may read by the rule
+    `/sparql` applies (a private graph only for the dataset's writers, plus
+    graph-ACL read grants; admins read every graph). A private shapes-role
+    graph shapes no run of a caller who may not read it.
+  - A run that could not read every graph of the dataset is not official: it
+    answers as a test run (`test: true`, `partial: true`), records nothing and
+    leaves the dataset's validation status as it was.
+  - The report graph is private in the dataset whenever the run validated a
+    private graph, or a model graph not everyone may read, and it is never
+    made public again.
+  - A stored run records the graphs it validated. Its full report goes to the
+    dataset's writers and to callers who may read each of those graphs when
+    they ask; anyone else gets the run's summary with `report: null` and
+    `report_withheld: true`. A run stored before this release goes in full to
+    the dataset's writers only.
+  - An explicit `shapes_graph` must be readable by the same rule. It used to
+    need a graph-ACL grant, so a graph of a dataset the caller may read now
+    works too.
 - **Detaching or deleting a dataset could wipe graphs it never owned.**
   `DELETE /api/datasets/{id}/graphs` deleted any graph no other dataset
   claimed, so any user who could create a dataset could wipe the model
