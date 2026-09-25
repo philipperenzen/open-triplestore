@@ -9324,8 +9324,30 @@ async fn reasoning_materialize(
         if !visible {
             return Err(AppError::NotFound(format!("Dataset '{ds_id}' not found")));
         }
-        let (mut layer, effective) = crate::entailment::reasoning_sources(&state, &ds);
+        let (layer, effective) = crate::entailment::reasoning_sources(&state, &ds);
         identity = effective.policy;
+        // `reasoning_sources` (via `conformance::resolve`) hands back the
+        // dataset's whole reasoning layer, its private graphs included: it does
+        // not filter on who is asking. But materialisation writes the derived
+        // consequences into a caller-chosen target the caller can read, so a
+        // viewer could launder a private graph's triples out through it. Keep
+        // only the layer graphs the caller may read — the model registry's own
+        // visibility rule still admits model graphs — exactly as the explicit
+        // `source_graphs` below are read-checked. Admins read every graph.
+        let mut layer: Vec<String> = if user.is_admin() {
+            layer
+        } else {
+            let mut kept = Vec::with_capacity(layer.len());
+            for g in layer {
+                if check_graph_read_access(&state, Some(&user), &g)
+                    .map_err(|e| AppError::Internal(e.to_string()))?
+                    || crate::conformance::model_graph_readable(&state, Some(&user.user_id), &g)
+                {
+                    kept.push(g);
+                }
+            }
+            kept
+        };
         for g in body.source_graphs.clone().unwrap_or_default() {
             if !check_graph_read_access(&state, Some(&user), &g)
                 .map_err(|e| AppError::Internal(e.to_string()))?
@@ -9641,6 +9663,24 @@ pub async fn detect_shapes(
     Query(params): Query<DetectShapesParams>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let graph_iri = &params.graph;
+
+    // The graph IRI comes from the caller, so its shape count is only theirs to
+    // learn if the same visibility rules that gate /store and /sparql say they
+    // may read it — otherwise any signed-in principal could probe the shape
+    // count of another tenant's private shapes graph or a `urn:system:*` graph.
+    // Same gate and answer as `shaclc_serialize`. Admins bypass, because
+    // `check_graph_read_access` denies `urn:system:*` and unregistered graphs
+    // even to them, and an admin's own imports land in unregistered graphs
+    // (which is exactly what `DataImport.svelte` probes right after writing).
+    if !current_user.is_admin()
+        && !check_graph_read_access(&state, Some(&current_user), graph_iri)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "No read access to that graph".to_string(),
+        ));
+    }
 
     // Count SHACL shapes in the graph. Direct index scans, not SPARQL: this
     // probe runs right after an import (per uploaded graph), exactly when the
