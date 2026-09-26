@@ -31,7 +31,7 @@
 
 ---
 
-> **Status:** current release **`0.6.0`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
+> **Status:** current release **`0.7.0`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
 
 **Open Triplestore** is a modern, high-performance RDF triple store with **SPARQL 1.1** and **LDP 1.0** support, plus partial support for **SPARQL 1.2 (RDF-star)**, **GeoSPARQL 1.1** (not OGC-certified) and **OWL 2** reasoning (RL natively + DL extension rules; an optional, experimental bridge to an external tableau reasoner such as Konclude) — grades and known gaps per standard in [docs/standards.md](docs/standards.md) — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
 
@@ -231,7 +231,7 @@ Options:
 
 ```bash
 curl http://localhost:7878/health
-# {"status":"ok","version":"0.6.0"}
+# {"status":"ok","version":"0.7.0"}
 ```
 
 > On **Windows PowerShell**, run `curl.exe http://localhost:7878/health` — the bare
