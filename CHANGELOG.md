@@ -13,7 +13,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.7.0] — 2026-09-26
+## [0.7.0] — 2026-09-27
 
 SQL datasources end to end: relational data is profiled, mapped, dry-run,
 gated, materialised, validated, reviewed and watched for drift inside the store,
