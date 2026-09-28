@@ -1,0 +1,150 @@
+# The IFC lift ontology — what the IFC importer emits that BOT, props:,
+# ifcOWL, QUDT, SKOS and NEN 2660-2 do not declare. `{base_url}` is expanded
+# by the seed loader to the deployment's base URL. This is NOT ifcOWL and
+# NOT a schema translation: IFC entities keep their ifcOWL IRIs (IFC2x3 /
+# IFC4); only the entities new in IFC 4.3, for which no ifcOWL exists, are
+# typed here, and only the facility spine among them is declared.
+@prefix ifcl:    <{base_url}/ns/ifc-lift#> .
+@prefix owl:     <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+@prefix dct:     <http://purl.org/dc/terms/> .
+@prefix skos:    <http://www.w3.org/2004/02/skos/core#> .
+@prefix bot:     <https://w3id.org/bot#> .
+@prefix props:   <https://w3id.org/props#> .
+@prefix qudt:    <http://qudt.org/schema/qudt/> .
+@prefix geo:     <http://www.opengis.net/ont/geosparql#> .
+@prefix nen2660: <https://w3id.org/nen2660/def#> .
+@prefix ots:     <https://opentriplestore.org/ns#> .
+
+<{base_url}/ns/ifc-lift> a owl:Ontology ;
+    rdfs:label "IFC lift ontology"@en ;
+    rdfs:comment "The terms the IFC → linked-data lift emits beside the vocabularies it borrows. Not ifcOWL, not a schema translation: an IFC4 entity keeps its ifcOWL IRI, an IFC 4.3-only entity is typed under this namespace, and the values, units, classifications, materials and georeferencing the lift adds are declared here."@en ;
+    owl:versionInfo "1.0.0" ;
+    dct:conformsTo <https://w3id.org/bot#> ;
+    rdfs:seeAlso <https://standards.buildingsmart.org/IFC/DEV/IFC4/ADD2_TC1/OWL> ,
+                 <http://qudt.org/vocab/unit/> .
+
+# ── Facility spine (IFC 4.3) ────────────────────────────────────────────────
+# BOT stops at Site/Building/Storey/Space. A bridge, a road or a railway is
+# a bot:Zone too — "a part of the physical world that has a 3D spatial
+# extent" — and these classes say which kind.
+ifcl:Facility a owl:Class ;
+    rdfs:subClassOf bot:Zone ;
+    rdfs:label "Facility"@en ;
+    rdfs:comment "IfcFacility (IFC 4.3): a built facility such as a bridge, road, railway or marine facility, aggregated under the site."@en .
+ifcl:FacilityPart a owl:Class ;
+    rdfs:subClassOf bot:Zone ;
+    rdfs:label "Facility part"@en ;
+    rdfs:comment "IfcFacilityPart (IFC 4.3): a functional or spatial subdivision of a facility, such as a bridge deck or a road segment."@en .
+ifcl:Bridge a owl:Class ; rdfs:subClassOf ifcl:Facility ; rdfs:label "Bridge"@en ; rdfs:comment "IfcBridge."@en .
+ifcl:BridgePart a owl:Class ; rdfs:subClassOf ifcl:FacilityPart ; rdfs:label "Bridge part"@en ; rdfs:comment "IfcBridgePart."@en .
+ifcl:Road a owl:Class ; rdfs:subClassOf ifcl:Facility ; rdfs:label "Road"@en ; rdfs:comment "IfcRoad."@en .
+ifcl:RoadPart a owl:Class ; rdfs:subClassOf ifcl:FacilityPart ; rdfs:label "Road part"@en ; rdfs:comment "IfcRoadPart."@en .
+ifcl:Railway a owl:Class ; rdfs:subClassOf ifcl:Facility ; rdfs:label "Railway"@en ; rdfs:comment "IfcRailway."@en .
+ifcl:RailwayPart a owl:Class ; rdfs:subClassOf ifcl:FacilityPart ; rdfs:label "Railway part"@en ; rdfs:comment "IfcRailwayPart."@en .
+ifcl:MarineFacility a owl:Class ; rdfs:subClassOf ifcl:Facility ; rdfs:label "Marine facility"@en ; rdfs:comment "IfcMarineFacility."@en .
+ifcl:MarinePart a owl:Class ; rdfs:subClassOf ifcl:FacilityPart ; rdfs:label "Marine part"@en ; rdfs:comment "IfcMarinePart."@en .
+
+# ── Values ──────────────────────────────────────────────────────────────────
+ifcl:Quantity a owl:Class ;
+    rdfs:label "Physical quantity"@en ;
+    rdfs:comment "One quantity of an IfcElementQuantity (a Qto_ set), as a node: qudt:numericValue carries the number, qudt:hasUnit the QUDT unit it is in — the quantity's own unit, else the project default for its kind. The same value is also on the element as the flat props:{Qto}_{Name} literal."@en .
+ifcl:Property a owl:Class ;
+    rdfs:label "Property value"@en ;
+    rdfs:comment "One property of an IfcPropertySet (a Pset_ set), as a node beside the flat props:{Pset}_{Prop} literal: the value(s), the IFC measure type, the unit (own, else the project default for the measure), or the bounds of a bounded value."@en .
+ifcl:Material a owl:Class ;
+    rdfs:label "Material"@en ;
+    rdfs:comment "An IfcMaterial, resolved through layer sets, profile sets, constituent sets and material lists to the materials themselves."@en .
+ifcl:MapConversion a owl:Class ;
+    rdfs:label "Map conversion"@en ;
+    rdfs:comment "The IfcMapConversion of the model context (IFC4 / IFC 4.3 georeferencing): the model origin in the projected CRS, the height, the rotation and scale, read as annotations and never applied to a geometry. When the projected CRS is one this store knows, the node is also a geo:Geometry whose geo:asWKT is the origin as a CRS-qualified point."@en .
+
+ifcl:hasQuantity a owl:ObjectProperty ;
+    rdfs:label "has quantity"@en ; rdfs:range ifcl:Quantity ;
+    rdfs:comment "Links an element or zone to one of its lifted quantities."@en .
+ifcl:hasProperty a owl:ObjectProperty ;
+    rdfs:label "has property"@en ; rdfs:range ifcl:Property ;
+    rdfs:comment "Links an element or zone to one of its lifted property values."@en .
+ifcl:hasClassification a owl:ObjectProperty ;
+    rdfs:label "has classification"@en ; rdfs:range skos:Concept ;
+    rdfs:comment "The skos:Concept an IfcClassificationReference became; the flat props:ifcClassification literal carries its notation."@en .
+ifcl:hasMaterial a owl:ObjectProperty ;
+    rdfs:label "has material"@en ; rdfs:range ifcl:Material ;
+    rdfs:subPropertyOf nen2660:consistsOf ;
+    rdfs:comment "The material an element is made of (IfcRelAssociatesMaterial): constitution, not parthood — hence a sub-property of NEN 2660-2's consistsOf, which the lift also asserts directly."@en .
+ifcl:mapConversion a owl:ObjectProperty ;
+    rdfs:label "map conversion"@en ; rdfs:range ifcl:MapConversion ;
+    rdfs:comment "Links the root spatial element (the site, else the building) to the model's map conversion."@en .
+ifcl:conversionUnit a owl:ObjectProperty ;
+    rdfs:label "conversion unit"@en ; rdfs:range qudt:Unit ;
+    rdfs:comment "For a value in a unit QUDT does not name: the QUDT unit its conversionFactor converts to."@en .
+
+ifcl:quantitySet a owl:DatatypeProperty ; rdfs:label "quantity set"@en ; rdfs:domain ifcl:Quantity ; rdfs:range xsd:string ;
+    rdfs:comment "The IfcElementQuantity name, e.g. Qto_WallBaseQuantities."@en .
+ifcl:quantityKind a owl:DatatypeProperty ; rdfs:label "quantity kind"@en ; rdfs:domain ifcl:Quantity ; rdfs:range xsd:string ;
+    rdfs:comment "Length, Area, Volume, Count, Weight, Time or Number — the IfcPhysicalSimpleQuantity subtype."@en .
+ifcl:inComplexQuantity a owl:DatatypeProperty ; rdfs:label "in complex quantity"@en ; rdfs:domain ifcl:Quantity ; rdfs:range xsd:string ;
+    rdfs:comment "The name of the IfcPhysicalComplexQuantity this quantity is nested in."@en .
+ifcl:propertySet a owl:DatatypeProperty ; rdfs:label "property set"@en ; rdfs:domain ifcl:Property ; rdfs:range xsd:string ;
+    rdfs:comment "The IfcPropertySet name, e.g. Pset_WallCommon."@en .
+ifcl:inComplexProperty a owl:DatatypeProperty ; rdfs:label "in complex property"@en ; rdfs:domain ifcl:Property ; rdfs:range xsd:string ;
+    rdfs:comment "The name of the IfcComplexProperty this property is nested in."@en .
+ifcl:value a owl:DatatypeProperty ; rdfs:label "value"@en ; rdfs:domain ifcl:Property ;
+    rdfs:comment "The typed value of a single, enumerated or list property; repeated for each value of an enumerated or list property."@en .
+ifcl:ifcType a owl:DatatypeProperty ; rdfs:label "IFC measure type"@en ; rdfs:range xsd:string ;
+    rdfs:comment "The IFC defined type the value was written as, e.g. IfcPositiveLengthMeasure — what tells a length from a plain number."@en .
+ifcl:enumeration a owl:DatatypeProperty ; rdfs:label "enumeration"@en ; rdfs:domain ifcl:Property ; rdfs:range xsd:string ;
+    rdfs:comment "The IfcPropertyEnumeration the values of an enumerated property come from."@en .
+ifcl:upperBound a owl:DatatypeProperty ; rdfs:label "upper bound"@en ; rdfs:domain ifcl:Property ;
+    rdfs:comment "IfcPropertyBoundedValue.UpperBoundValue."@en .
+ifcl:lowerBound a owl:DatatypeProperty ; rdfs:label "lower bound"@en ; rdfs:domain ifcl:Property ;
+    rdfs:comment "IfcPropertyBoundedValue.LowerBoundValue."@en .
+ifcl:setPoint a owl:DatatypeProperty ; rdfs:label "set point"@en ; rdfs:domain ifcl:Property ;
+    rdfs:comment "IfcPropertyBoundedValue.SetPointValue."@en .
+ifcl:unitLabel a owl:DatatypeProperty ; rdfs:label "unit label"@en ; rdfs:range xsd:string ;
+    rdfs:comment "The IFC unit as written (KILO GRAM, FURLONG) when QUDT names no IRI for it. The lift never guesses a QUDT unit: a wrong one silently corrupts every conversion, a missing one is honest."@en .
+ifcl:conversionFactor a owl:DatatypeProperty ; rdfs:label "conversion factor"@en ; rdfs:range xsd:double ;
+    rdfs:comment "For an unmapped IfcConversionBasedUnit: the value in this unit times the factor is the value in conversionUnit."@en .
+
+# ── Map conversion ──────────────────────────────────────────────────────────
+ifcl:eastings a owl:DatatypeProperty ; rdfs:label "eastings"@en ; rdfs:domain ifcl:MapConversion ; rdfs:range xsd:double ;
+    rdfs:comment "IfcMapConversion.Eastings: the model origin's easting in the projected CRS."@en .
+ifcl:northings a owl:DatatypeProperty ; rdfs:label "northings"@en ; rdfs:domain ifcl:MapConversion ; rdfs:range xsd:double ;
+    rdfs:comment "IfcMapConversion.Northings."@en .
+ifcl:orthogonalHeight a owl:DatatypeProperty ; rdfs:label "orthogonal height"@en ; rdfs:domain ifcl:MapConversion ; rdfs:range xsd:double ;
+    rdfs:comment "IfcMapConversion.OrthogonalHeight: the origin's height above the vertical datum."@en .
+ifcl:mapRotation a owl:DatatypeProperty ; rdfs:label "map rotation"@en ; rdfs:domain ifcl:MapConversion ; rdfs:range xsd:double ;
+    rdfs:comment "Degrees anticlockwise from the map's easting axis to the model's X axis: atan2(XAxisOrdinate, XAxisAbscissa). An annotation, never applied — the geometry a viewer receives is already placed, and ots:modelHeading is the authored heading."@en .
+ifcl:mapScale a owl:DatatypeProperty ; rdfs:label "map scale"@en ; rdfs:domain ifcl:MapConversion ; rdfs:range xsd:double ;
+    rdfs:comment "IfcMapConversion.Scale."@en .
+ifcl:projectedCrs a owl:DatatypeProperty ; rdfs:label "projected CRS"@en ; rdfs:domain ifcl:MapConversion ; rdfs:range xsd:string ;
+    rdfs:comment "IfcProjectedCRS.Name, conventionally EPSG:<code>. Only a code this store's CRS registry knows becomes a CRS-qualified geo:asWKT; any other stays a label."@en .
+ifcl:verticalDatum a owl:DatatypeProperty ; rdfs:label "vertical datum"@en ; rdfs:domain ifcl:MapConversion ; rdfs:range xsd:string ;
+    rdfs:comment "IfcProjectedCRS.VerticalDatum."@en .
+ifcl:mapProjection a owl:DatatypeProperty ; rdfs:label "map projection"@en ; rdfs:domain ifcl:MapConversion ; rdfs:range xsd:string ;
+    rdfs:comment "IfcProjectedCRS.MapProjection."@en .
+ifcl:mapZone a owl:DatatypeProperty ; rdfs:label "map zone"@en ; rdfs:domain ifcl:MapConversion ; rdfs:range xsd:string ;
+    rdfs:comment "IfcProjectedCRS.MapZone."@en .
+
+# ── Borrowed terms the lift emits, for the record ───────────────────────────
+# Declared elsewhere, listed so the vocabulary the lift produces is in one
+# place. These are not defined here (no rdfs:isDefinedBy).
+# - bot:Site/Building/Storey/Space/Element/Zone, bot:hasBuilding/hasStorey/
+#   hasSpace/containsElement/containsZone/hasSubElement — the BOT contract
+#   the viewer feed and the IDS importer read.
+# - props:ifcGuid, props:uuid, props:ifcName, props:ifcClassification,
+#   props:ifcMaterial and the flat props:{Pset}_{Prop} / props:{Qto}_{Name}
+#   literals — the flat contract.
+# - qudt:hasUnit, qudt:numericValue — on Quantity and Property nodes.
+# - skos:Concept/ConceptScheme/notation/prefLabel/definition/inScheme/
+#   broader/topConceptOf — classifications.
+# - nen2660:hasPart, hasTechnicalPart, contains, connectsObject, consistsOf —
+#   the NEN 2660-2 relation family, beside the BOT edges.
+# - geo:hasGeometry, geo:Geometry, geo:asWKT — the WGS84 anchor (CRS84) and
+#   the CRS-qualified map-conversion point.
+# - omg:hasGeometry, omg:Geometry, fog:asIfc_v4/asIfc_v2x3 — the file link.
+# - ots:modelHeading — the authored survey rotation, on the file-link node.
+# - dct:source/license/rightsHolder on the root; dct:title/publisher/
+#   hasVersion/issued/source on a concept scheme.

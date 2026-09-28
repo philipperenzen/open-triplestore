@@ -72,9 +72,13 @@
   let inspectorAutoExpanded = new Set(); // blank-node ids we've asked the host to load
   let spinnerPos = null; // { x, y } rendered px — drives HTML spinner overlay
   let pinnedNodes = new Set();
-  // Tracks the last node tap so we can detect double-taps ourselves: Cytoscape
-  // core emits no 'dbltap' event, so a `cy.on('dbltap', …)` listener never fires.
+  // Tracks the node under the last tap, and when. Cytoscape core emits no 'dbltap'
+  // event, so a `cy.on('dbltap', …)` listener never fires; this record is what both
+  // double-click paths resolve against — the container's native 'dblclick' for mice
+  // (see onContainerDblClick) and the hand-rolled double-tap window for touch.
   let lastNodeTap = { id: null, t: 0 };
+  // Guards against the two paths resolving the same gesture into two expansions.
+  let lastExpandRequest = { id: null, t: 0 };
   let settingsOpen = false;
   let internalLayout = layout;
   let internalSearch = '';
@@ -518,6 +522,39 @@
     minimapDimTimer = setTimeout(() => { minimapDimmed = true; }, 3000);
   }
 
+  // ─── Expand gesture ─────────────────────────────────────────────────────────
+
+  // Cytoscape hands us the DOM event that produced a tap; a touch tap arrives as a
+  // TouchEvent (or a pointer event whose pointerType says so), a mouse click does not.
+  function isTouchEvent(oe) {
+    if (!oe) return false;
+    if (typeof oe.pointerType === 'string') return oe.pointerType === 'touch';
+    return typeof TouchEvent !== 'undefined' && oe instanceof TouchEvent;
+  }
+
+  // Single funnel for every expand gesture — double-click, double-tap, and the
+  // inspector's automatic blank-node load — so the host sees one request per
+  // gesture even when touch and mouse handling both resolve the same one, and so
+  // every path gets the same feedback from the host.
+  function requestNodeExpand(data) {
+    if (!data || !(data.fullIri || data.nodeType === 'bnode')) return;
+    const now = Date.now();
+    if (lastExpandRequest.id === data.id && now - lastExpandRequest.t < 600) return;
+    lastExpandRequest = { id: data.id, t: now };
+    dispatch('nodeExpand', data);
+  }
+
+  function onContainerDblClick() {
+    if (!cy) return;
+    // The second click of the double-click already fired cytoscape's own 'tap',
+    // which recorded the node under it; edge and background taps clear that record,
+    // so a stale node can't be expanded by a double-click somewhere else.
+    if (!lastNodeTap.id || Date.now() - lastNodeTap.t > 800) return;
+    const node = cy.getElementById(lastNodeTap.id);
+    if (!node || node.length === 0) return;
+    requestNodeExpand(node.data());
+  }
+
   // ─── Mount ───────────────────────────────────────────────────────────────────
 
   onMount(() => {
@@ -536,11 +573,14 @@
     cy.on('tap', 'node', (evt) => {
       const data = evt.target.data();
       const now = Date.now();
-      // Manual double-tap detection (Cytoscape has no native 'dbltap'): two taps
-      // on the same node within 300ms expand it; otherwise it's a single select.
-      if (lastNodeTap.id === data.id && now - lastNodeTap.t < 300) {
+      // Touch has no platform double-click, so keep detecting double-taps by hand
+      // there — but only there. A mouse double-click comes in through the
+      // container's own 'dblclick' event instead: this 300ms window is well under
+      // the ~500ms double-click speed Windows and macOS default to, so an ordinary
+      // mouse double-click fell straight through it and never expanded anything.
+      if (isTouchEvent(evt.originalEvent) && lastNodeTap.id === data.id && now - lastNodeTap.t < 300) {
         lastNodeTap = { id: null, t: 0 };
-        if (data.fullIri || data.nodeType === 'bnode') dispatch('nodeExpand', data);
+        requestNodeExpand(data);
         return;
       }
       lastNodeTap = { id: data.id, t: now };
@@ -549,13 +589,27 @@
     });
 
     cy.on('tap', 'edge', (evt) => {
+      // Clear the node record: the next 'dblclick' landed on an edge, not on the
+      // node that happened to be tapped before it.
+      lastNodeTap = { id: null, t: 0 };
       dispatch('edgeClick', evt.target.data());
       if (inspector) openEdgeInspector(evt.target);
     });
 
     // Tap on empty canvas closes whichever panel is open (node taps set
     // evt.target to the node, edge taps to the edge).
-    cy.on('tap', (evt) => { if (evt.target === cy) { closeInspectorOnCanvasTap(); closeEdgeInspector(); } });
+    cy.on('tap', (evt) => {
+      if (evt.target === cy) {
+        lastNodeTap = { id: null, t: 0 };
+        closeInspectorOnCanvasTap();
+        closeEdgeInspector();
+      }
+    });
+
+    // Double-click to expand, on the platform's own terms: the browser applies the
+    // user's double-click speed and accessibility settings, which a hand-rolled
+    // timer cannot. Cytoscape emits no 'dbltap', so bind the DOM event.
+    container.addEventListener('dblclick', onContainerDblClick);
 
     // Context menu (right-click)
     cy.on('cxttap', 'node', (evt) => {
@@ -673,6 +727,7 @@
     clearTimeout(minimapDimTimer);
     clearTimeout(layoutDebounce);
     wrapperEl?.removeEventListener('keydown', handleKeydown);
+    container?.removeEventListener('dblclick', onContainerDblClick);
   });
 
   // ─── Style builder ───────────────────────────────────────────────────────────
@@ -959,6 +1014,14 @@
     return out;
   }
 
+  // Provenance edges whose object names a geometry's source (see GeoPreview's
+  // `sources`: a licensed source's credit travels with the preview).
+  const PROVENANCE_PREDICATES = [
+    'http://www.w3.org/ns/prov#wasDerivedFrom',
+    'http://purl.org/dc/terms/source',
+    'http://purl.org/dc/elements/1.1/source',
+  ];
+
   function buildInspector(node) {
     if (!node || node.length === 0) return null;
     const nodeType = node.data('nodeType') || 'uri';
@@ -1030,7 +1093,7 @@
       const id = n.id();
       if (inspectorAutoExpanded.has(id)) return;
       inspectorAutoExpanded.add(id);
-      dispatch('nodeExpand', n.data());
+      requestNodeExpand(n.data());
     };
     requestExpand(node); // the tapped node itself, if it's an unexpanded blank node
     node.outgoers('edge').forEach((e) => requestExpand(e.target())); // blank nodes it points at
@@ -1546,6 +1609,11 @@
     </div>
   {/if}
 
+  <!-- The inline 24×24 icons here, in the zoom controls and on the settings close
+       button are copied Lucide icon geometry (ISC, © Lucide Contributors):
+       pin and rotate-ccw are Lucide's own; search, maximize-2, zoom-in,
+       zoom-out, download, settings and x are Feather's shapes (MIT, © Cole
+       Bemis). Licence texts: LICENSES/Lucide-ISC.txt, LICENSES/Feather-MIT.txt. -->
   <!-- Built-in node search (top-left) — minimised to an icon, expands on hover/click.
        Autocomplete is sourced only from nodes currently in the graph. -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -1627,7 +1695,7 @@
     </div>
   {/if}
 
-  <!-- Zoom controls (top-right) -->
+  <!-- Zoom controls (top-right); icon provenance is noted above the node search -->
   <div class="graph-controls">
     <button class="ctrl-btn" title={$t('pages.graphViz.fitAllTitle')} on:click={fitAll} aria-label={$t('pages.graphViz.fitAll')}>
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
@@ -1812,7 +1880,11 @@
           {#if p.model.geometries.length > 0}
             <div class="insp-section">
               <div class="insp-section-head"><MapPin size={12} /> {$t('pages.graphViz.inspectorConnectedData')}</div>
-              <GeoPreview wkts={p.model.geometries} height="150px" />
+              <GeoPreview
+                wkts={p.model.geometries}
+                sources={[p.model.iri, ...p.model.props.filter((pp) => PROVENANCE_PREDICATES.includes(pp.predicate)).map((pp) => pp.o?.value)].filter(Boolean)}
+                height="150px"
+              />
             </div>
           {/if}
 

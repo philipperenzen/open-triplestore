@@ -1,4 +1,4 @@
-# Mixed GeoSPARQL features around the Schependomlaan / Waalbrug site in Nijmegen.
+# Mixed GeoSPARQL features around the Schependomlaan site in Nijmegen.
 #
 # A small "all the 2D geometry types" sample for the map viewer: a POINT, a
 # LINESTRING and a POLYGON, each a real geo:Feature with a geo:hasGeometry /

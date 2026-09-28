@@ -24,9 +24,9 @@ what is partially implemented, and what is planned.
 Enable via the `rdf-12` feature flag:
 
 ```toml
-# Cargo.toml
+# Cargo.toml — the crate is not published (publish = false), so depend on the path
 [dependencies]
-open-triplestore = { version = "0.1", features = ["rdf-12"] }
+open-triplestore = { path = "../open-triplestore", features = ["rdf-12"] }
 ```
 
 Or at the binary level (already on if you build with `--features full`).
@@ -122,15 +122,10 @@ SELECT ?person ?latestEvent WHERE {
 
 ## Configuration
 
-```rust
-// Enable RDF-star / SPARQL 1.2 triple terms in the store
-let store = TripleStore::open("./data")
-    .with_feature(Feature::RdfStar)
-    .build()?;
-```
-
-When running the HTTP server, RDF-star support is automatically enabled if the
-`rdf-12` cargo feature is compiled in. No runtime configuration is needed.
+There is no runtime switch and no builder API for it: `rdf-12` is a compile-time
+feature (part of `full`, hence of the default build and the published image).
+When it is compiled in, `TripleStore::open(path)` and `TripleStore::in_memory()`
+parse and evaluate triple terms; when it is not, the parser rejects them.
 
 ## SPARQL Results Format Extensions
 
@@ -161,7 +156,7 @@ This matches the SPARQL 1.2 Working Draft results format extension.
 The implementation is based on:
 - [SPARQL 1.2 Query Language Working Draft](https://www.w3.org/TR/sparql12-query/)
 - [RDF 1.2 Concepts](https://www.w3.org/TR/rdf12-concepts/)
-- Oxigraph 0.4 native RDF-star support (via `spargebra` and `spareval`)
+- Oxigraph 0.5 native RDF 1.2 / triple-term support (via `spargebra` and `spareval`)
 
 Known gaps vs the full SPARQL 1.2 WD:
 - `LATERAL` not yet implemented (parser will reject)

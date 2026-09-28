@@ -436,15 +436,23 @@ kbd {
   color: var(--brand-700);
 }
 
+/* A field has to look like a field. This said `--bg-strong`, which is also the
+   colour of every card and dialog those fields sit in — measured on the dataset
+   page-settings dialog, an input's background and its dialog's background were
+   the same `rgb(17, 24, 39)`, a contrast ratio of 1.00 — and the border sat at
+   `--line-strong`, 0.18 alpha, which composites to roughly 1.9:1 against that
+   surface. So in dark mode a form read as a column of labels with nothing under
+   them. The field is sunk below whatever surface holds it now, and its edge
+   clears 3:1, the contrast WCAG 1.4.11 asks of a UI component's boundary. */
 :root[data-theme="dark"] input:not([type="checkbox"]):not([type="radio"]),
 :root[data-theme="dark"] select,
 :root[data-theme="dark"] textarea,
 .dark input:not([type="checkbox"]):not([type="radio"]),
 .dark select,
 .dark textarea {
-  background: var(--bg-strong);
+  background: rgba(0, 0, 0, 0.3);
   color: var(--ink-900);
-  border-color: var(--line-strong);
+  border-color: rgba(226, 232, 240, 0.38);
 }
 :root[data-theme="dark"] input:focus,
 :root[data-theme="dark"] select:focus,

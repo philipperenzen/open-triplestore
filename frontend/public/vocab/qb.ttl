@@ -1,3 +1,17 @@
+# The RDF Data Cube Vocabulary (qb), version 0.2 — vocabulary for
+# multi-dimensional (e.g. statistical) data publishing.
+# Source: https://raw.githubusercontent.com/UKGovLD/publishing-statistical-data/master/specs/src/main/vocab/cube.ttl
+# (what the namespace http://purl.org/linked-data/cube returns as Turtle)
+# Defined in The RDF Data Cube Vocabulary, W3C Recommendation 16 January 2014,
+# https://www.w3.org/TR/2014/REC-vocab-data-cube-20140116/
+# Authors and contributors are named in the ontology header below.
+# Licence: Open Data Commons Public Domain Dedication and License (PDDL) 1.0,
+# http://www.opendatacommons.org/licenses/pddl/1.0/ (the file's own
+# dcterms:license); it imposes no conditions, and credit is given as a courtesy.
+# Changes by Open Triplestore: this comment header was added; the rest of the
+# file is byte-identical to the source (checked 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The upstream file starts below this line. ----
 @prefix rdf:            <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix rdfs:           <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix owl:            <http://www.w3.org/2002/07/owl#> .

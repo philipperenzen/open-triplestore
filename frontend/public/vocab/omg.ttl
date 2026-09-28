@@ -1,10 +1,18 @@
-# Ontology for Managing Geometry (OMG) — a community ontology for attaching one
-# or more geometry descriptions to objects and for relating those geometries to
-# each other (e.g. derived, transformed or alternative representations). It is the
-# bridge between domain ontologies such as BOT and file-format ontologies such as
-# FOG.
-# Complete vocabulary, verbatim from the canonical w3id.org release, version 0.3.
-# Source: https://w3id.org/omg  (ns https://w3id.org/omg#)
+# Ontology for Managing Geometry (OMG) 0.3 — by Anna Wagner (TU Darmstadt),
+# Mathias Bonduel (KU Leuven) and Pieter Pauwels (Ghent University); for
+# attaching one or more geometry descriptions to objects and for relating those
+# geometries to each other (e.g. derived, transformed or alternative
+# representations). It is the bridge between domain ontologies such as BOT and
+# file-format ontologies such as FOG.
+# Source: https://w3id.org/omg (https://annawagner.github.io/omg/omg.ttl,
+# repository https://github.com/tudaIIB/omg)
+# Licence: CC BY 4.0, https://creativecommons.org/licenses/by/4.0/, as stated by
+# the authors on https://w3id.org/omg and in the repository's documentation
+# configuration (the Turtle file itself carries no licence statement).
+# Changes by Open Triplestore: this comment header was added; the rest of the
+# file is byte-identical to the source (checked 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The upstream file starts below this line. ----
 # baseURI: https://w3id.org/omg
 # prefix: omg
 

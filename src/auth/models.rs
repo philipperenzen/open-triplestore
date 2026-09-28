@@ -181,6 +181,9 @@ impl From<ApiScope> for AccessLevel {
             ApiScope::Read => AccessLevel::Read,
             ApiScope::Write => AccessLevel::Write,
             ApiScope::Admin => AccessLevel::Manage,
+            // A resource scope is not a rung of the ladder: what it may write
+            // is decided by the routes it names, never by a general grant.
+            ApiScope::SourcesRead | ApiScope::MappingsPropose => AccessLevel::Read,
         }
     }
 }
@@ -188,12 +191,24 @@ impl From<ApiScope> for AccessLevel {
 // ─── API token scopes ────────────────────────────────────────────────────────
 
 /// Scope for an API token.
+///
+/// `read` / `write` / `admin` are the capability ladder. The two
+/// resource-scoped ones exist for the mapping proposer — a service that runs
+/// against the store and nothing else: `sources:read` reads the datasource
+/// registry, profiles, mappings, runs and the mapping gates (never a
+/// datasource's location, credential reference or raw rows), and
+/// `mappings:propose` writes a mapping in the `proposed` state and dry-runs
+/// it. Neither confers any other write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ApiScope {
     Read,
     Write,
     Admin,
+    #[serde(rename = "sources:read")]
+    SourcesRead,
+    #[serde(rename = "mappings:propose")]
+    MappingsPropose,
 }
 
 impl ApiScope {
@@ -202,6 +217,8 @@ impl ApiScope {
             ApiScope::Read => "read",
             ApiScope::Write => "write",
             ApiScope::Admin => "admin",
+            ApiScope::SourcesRead => "sources:read",
+            ApiScope::MappingsPropose => "mappings:propose",
         }
     }
 
@@ -211,6 +228,8 @@ impl ApiScope {
             "read" => Some(ApiScope::Read),
             "write" => Some(ApiScope::Write),
             "admin" => Some(ApiScope::Admin),
+            "sources:read" => Some(ApiScope::SourcesRead),
+            "mappings:propose" => Some(ApiScope::MappingsPropose),
             _ => None,
         }
     }
@@ -591,6 +610,20 @@ impl OwnerType {
 /// * `Shapes`    — SHACL shape graphs used to validate instance data.
 /// * `Entailment` — materialised inference results (written by the reasoner).
 /// * `System`    — internal system graphs (registry metadata, etc.).
+///
+/// and the remaining roles of the layered-graph convention (one graph per
+/// role; NEN 2660-2 / linked-data-BIM practice, but domain-neutral):
+///
+/// * `DomainValues` — enumerations and code lists (SKOS collections of values
+///   an instance property may take), as opposed to the concept vocabulary.
+/// * `Linkset`   — alignments between datasets or vocabularies: `owl:sameAs`,
+///   `skos:exactMatch` and the other SKOS mapping relations.
+/// * `Provenance` — PROV-O activity/entity/agent records about the data.
+/// * `Catalog`   — DCAT / VoID descriptions of datasets and distributions.
+///
+/// `model` is the canonical name for the class layer; `ontology` (the
+/// convention's own word for it) is accepted as an alias everywhere a role is
+/// read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum GraphKind {
@@ -600,6 +633,11 @@ pub enum GraphKind {
     Shapes,
     Entailment,
     System,
+    #[serde(rename = "domain-values")]
+    DomainValues,
+    Linkset,
+    Provenance,
+    Catalog,
 }
 
 impl GraphKind {
@@ -611,18 +649,42 @@ impl GraphKind {
             GraphKind::Shapes => "shapes",
             GraphKind::Entailment => "entailment",
             GraphKind::System => "system",
+            GraphKind::DomainValues => "domain-values",
+            GraphKind::Linkset => "linkset",
+            GraphKind::Provenance => "provenance",
+            GraphKind::Catalog => "catalog",
         }
     }
 
+    /// Every role, in display order. The frontend's role lists are checked
+    /// against this in CI.
+    pub const ALL: [GraphKind; 10] = [
+        GraphKind::Instances,
+        GraphKind::Model,
+        GraphKind::Vocabulary,
+        GraphKind::Shapes,
+        GraphKind::DomainValues,
+        GraphKind::Linkset,
+        GraphKind::Provenance,
+        GraphKind::Catalog,
+        GraphKind::Entailment,
+        GraphKind::System,
+    ];
+
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
-        match s {
+        match s.trim().to_ascii_lowercase().as_str() {
             "instances" | "instance" | "abox" => Some(GraphKind::Instances),
-            "model" | "data-model" | "tbox" => Some(GraphKind::Model),
+            "model" | "data-model" | "ontology" | "tbox" => Some(GraphKind::Model),
             "vocabulary" | "vocab" | "rbox" => Some(GraphKind::Vocabulary),
             "shapes" => Some(GraphKind::Shapes),
             "entailment" => Some(GraphKind::Entailment),
             "system" => Some(GraphKind::System),
+            "domain-values" | "domain_values" | "domainvalues" | "values" | "codelist"
+            | "code-list" => Some(GraphKind::DomainValues),
+            "linkset" | "alignment" | "mappings" => Some(GraphKind::Linkset),
+            "provenance" | "prov" => Some(GraphKind::Provenance),
+            "catalog" | "catalogue" | "dcat" => Some(GraphKind::Catalog),
             _ => None,
         }
     }
@@ -727,6 +789,8 @@ pub struct SparqlService {
     pub slug: String,
     pub sparql_endpoint: String,
     pub description: Option<String>,
+    /// Whether the service's SPARQL endpoint answers. An inactive service
+    /// answers 404 "Service not found" to every caller, writers included.
     pub is_active: bool,
     pub created_at: String,
 }
@@ -943,6 +1007,21 @@ pub struct OauthIdentity {
     pub created_at: String,
 }
 
+/// What a prefix means on this deployment, as set by an administrator.
+///
+/// The label is the primary key of its table, so two overrides can never share
+/// a shorthand. Two labels *may* share a namespace — `dct` and `dcterms` are
+/// both right — so the constraint is on the label alone.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PrefixOverride {
+    pub label: String,
+    pub namespace: String,
+    /// The administrator who set it; null for one restored from elsewhere.
+    pub created_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// An asset (non-RDF file) stored in S3.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Asset {
@@ -1073,5 +1152,40 @@ mod tests {
         // ResourceRole capability checks delegate to AccessLevel.
         assert!(ResourceRole::Editor.can_write() && !ResourceRole::Editor.can_manage());
         assert!(ResourceRole::Admin.can_manage());
+    }
+}
+
+#[cfg(test)]
+mod graph_kind_tests {
+    use super::GraphKind;
+
+    #[test]
+    fn every_role_round_trips_through_its_string() {
+        for k in GraphKind::ALL {
+            assert_eq!(GraphKind::from_str(k.as_str()), Some(k), "{}", k.as_str());
+            // serde uses the same token (`domain-values`, not `domainvalues`)
+            let json = serde_json::to_string(&k).unwrap();
+            assert_eq!(json, format!("\"{}\"", k.as_str()));
+            assert_eq!(serde_json::from_str::<GraphKind>(&json).unwrap(), k);
+        }
+    }
+
+    #[test]
+    fn layered_convention_aliases_fold_onto_canonical_roles() {
+        assert_eq!(GraphKind::from_str("ontology"), Some(GraphKind::Model));
+        assert_eq!(GraphKind::from_str("Ontology"), Some(GraphKind::Model));
+        assert_eq!(GraphKind::from_str("tbox"), Some(GraphKind::Model));
+        assert_eq!(
+            GraphKind::from_str("domain_values"),
+            Some(GraphKind::DomainValues)
+        );
+        assert_eq!(
+            GraphKind::from_str("codelist"),
+            Some(GraphKind::DomainValues)
+        );
+        assert_eq!(GraphKind::from_str("alignment"), Some(GraphKind::Linkset));
+        assert_eq!(GraphKind::from_str("prov"), Some(GraphKind::Provenance));
+        assert_eq!(GraphKind::from_str("catalogue"), Some(GraphKind::Catalog));
+        assert_eq!(GraphKind::from_str("bogus"), None);
     }
 }

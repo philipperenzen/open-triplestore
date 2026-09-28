@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { Parser } from 'n3';
 import {
   parseShapesGraph,
@@ -7,6 +7,20 @@ import {
   makeCurie,
   SEVERITY_WARNING,
 } from '../shaclModel.ts';
+import { loadPrefixCcPrefixes } from '../rdf-utils.js';
+
+// makeCurie must not depend on the resolver offering each label for at most one
+// namespace — that invariant lives in another module. `wkStub.override` injects
+// a resolver that breaks it; left null, every test below sees the real one.
+type WellKnown = { prefix: string; namespace: string; local: string } | null;
+const wkStub = vi.hoisted(() => ({ override: null as ((iri: string) => WellKnown) | null }));
+vi.mock('../rdf-utils.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../rdf-utils.js')>();
+  return {
+    ...actual,
+    wellKnownCurie: (iri: string) => (wkStub.override ? wkStub.override(iri) : actual.wellKnownCurie(iri)),
+  };
+});
 
 const PFX = `@prefix sh: <http://www.w3.org/ns/shacl#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
@@ -560,5 +574,157 @@ describe('kitchen sink + W3C person example', () => {
     expect(g.canRoundTrip).toBe(true);
     expect(g.hasUnsupported).toBeFalsy();
     expectRoundTrip(src);
+  });
+});
+
+// ─── CURIE fallback (the builder used to render bare <http://…> IRIs) ─────────
+
+describe('CURIE resolution', () => {
+  const FOAF = 'http://xmlns.com/foaf/0.1/';
+  // A shapes graph that declares only sh: — everything else must be shortened
+  // by the well-known fallback or not at all.
+  const SPARSE = `@prefix sh: <http://www.w3.org/ns/shacl#> .
+<http://example.org/PersonShape> a sh:NodeShape ;
+  sh:targetClass <${FOAF}Person> ;
+  sh:property [ sh:path <${FOAF}name> ; sh:minCount 1 ] .
+`;
+
+  it('shortens a well-known IRI the document never declared', () => {
+    // This is exactly ShapeBuilder's disp(): a curie built from the document's
+    // own prefix map, which for foaf: holds nothing.
+    expect(makeCurie({})(FOAF + 'Person')).toBe('foaf:Person');
+    expect(makeCurie({})('http://www.w3.org/ns/shacl#NodeShape')).toBe('sh:NodeShape');
+    expect(makeCurie({})('http://purl.org/dc/terms/title')).toBe('dct:title');
+  });
+
+  it('still refuses IRIs nothing knows, rather than inventing a prefix', () => {
+    expect(makeCurie({})('http://example.org/private/Thing')).toBe('<http://example.org/private/Thing>');
+    expect(makeCurie({})('urn:example:shapes')).toBe('<urn:example:shapes>');
+  });
+
+  it('lets a document-declared prefix win over the well-known one', () => {
+    expect(makeCurie({ f: FOAF })(FOAF + 'Person')).toBe('f:Person');
+    const out = serializeShapesGraph(parseShapesGraph(`@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix f: <${FOAF}> .
+<http://example.org/S> a sh:NodeShape ; sh:targetClass f:Person .
+`));
+    expect(out).toContain('sh:targetClass f:Person');
+    expect(out).not.toContain('foaf:Person');
+  });
+
+  it('never reuses a label the document bound to a different namespace', () => {
+    // 'foaf:Person' here would denote http://example.org/foaf/Person — a
+    // different term. The full IRI is the only correct rendering.
+    const prefixes = { foaf: 'http://example.org/foaf/' };
+    expect(makeCurie(prefixes)(FOAF + 'Person')).toBe(`<${FOAF}Person>`);
+  });
+
+  it('declares every fallback prefix it uses, so the Turtle still parses', () => {
+    const out = expectRoundTrip(SPARSE); // parses the output → undeclared prefix would throw
+    expect(out).toContain(`@prefix foaf: <${FOAF}> .`);
+    expect(out).toContain('sh:targetClass foaf:Person');
+    expect(out).toContain('sh:path foaf:name');
+    // and the shortened form is a fixpoint under re-parse
+    expect(reser(out)).toBe(out);
+  });
+
+  it('refuses a local name that would terminate the Turtle statement', () => {
+    // `foaf:Person.` re-parses as `foaf:Person` followed by the '.' that ends
+    // the statement, so the emitted document stops parsing at that point.
+    expect(makeCurie({})(FOAF + 'Person.')).toBe(`<${FOAF}Person.>`);
+    const src = `@prefix sh: <http://www.w3.org/ns/shacl#> .
+<http://example.org/S> a sh:NodeShape ;
+  sh:targetClass <${FOAF}Person.> ;
+  sh:property [ sh:path <${FOAF}name> ; sh:minCount 1 ] .
+`;
+    const out = expectRoundTrip(src); // re-parses the output → an early '.' would throw
+    expect(out).toContain(`sh:targetClass <${FOAF}Person.>`);
+    expect(out).toContain('sh:path foaf:name');
+    // A trailing '-' is PN_CHARS and parses; it must keep shortening.
+    expect(makeCurie({})(FOAF + 'knows-')).toBe('foaf:knows-');
+  });
+
+  it('keeps the round trip lossless when a label is shadowed', () => {
+    const src = `@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix foaf: <http://example.org/foaf/> .
+<http://example.org/S> a sh:NodeShape ;
+  sh:targetClass <${FOAF}Person> ;
+  sh:property [ sh:path foaf:name ; sh:minCount 1 ] .
+`;
+    const out = expectRoundTrip(src);
+    expect(out).toContain(`sh:targetClass <${FOAF}Person>`);
+    expect(out).toContain('sh:path foaf:name');
+  });
+});
+
+// Kept last: warming the prefix store is module-global state.
+describe('CURIE resolution via the prefix service', () => {
+  const QUDT = 'http://qudt.org/schema/qudt/';
+
+  it('falls back to a service-loaded prefix and declares it', async () => {
+    const src = `@prefix sh: <http://www.w3.org/ns/shacl#> .
+<http://example.org/S> a sh:NodeShape ; sh:targetClass <${QUDT}Unit> .
+`;
+    // Cold store: the service namespace is unknown, so the IRI stays whole.
+    expect(serializeShapesGraph(parseShapesGraph(src))).toContain(`<${QUDT}Unit>`);
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ qudt: QUDT }) }));
+    await loadPrefixCcPrefixes();
+    vi.unstubAllGlobals();
+
+    const out = expectRoundTrip(src);
+    expect(out).toContain('sh:targetClass qudt:Unit');
+    expect(out).toContain(`@prefix qudt: <${QUDT}> .`);
+  });
+});
+
+// ─── One label, two namespaces ───────────────────────────────────────────────
+// `void` is the real-world collision: COMMON_PREFIXES binds it to
+// http://www.w3.org/ns/void#, the shipped prefix snapshot to
+// http://rdfs.org/ns/void#. Only the last fallback reaches the @prefix header,
+// so emitting both as `void:…` rewrites one IRI into the other's namespace —
+// and the output is still valid Turtle, so nothing downstream notices.
+
+describe('colliding well-known labels', () => {
+  const VOID_W3 = 'http://www.w3.org/ns/void#';
+  const VOID_RDFS = 'http://rdfs.org/ns/void#';
+
+  const SRC = `@prefix sh: <http://www.w3.org/ns/shacl#> .
+<http://example.org/S> a sh:NodeShape ;
+  sh:targetClass <${VOID_W3}Dataset> ;
+  sh:property [ sh:path <http://example.org/p> ; sh:class <${VOID_RDFS}Linkset> ] .
+`;
+
+  it('keeps both namespaces intact through a serialise', () => {
+    const out = expectRoundTrip(SRC); // quad-identical: neither IRI may move
+    expect(out.match(/^@prefix void: /gm) || []).toHaveLength(1);
+  });
+
+  it('hands a label to one namespace only, whatever the resolver offers', () => {
+    // Injected rather than taken from the prefix store: makeCurie is the last
+    // place that can keep the emitted @prefix header honest, so it must hold
+    // even when the resolver does offer one label for two namespaces.
+    wkStub.override = (iri) => {
+      for (const ns of [VOID_W3, VOID_RDFS])
+        if (iri.startsWith(ns)) return { prefix: 'void', namespace: ns, local: iri.slice(ns.length) };
+      return null;
+    };
+    try {
+      const seen: [string, string][] = [];
+      const curie = makeCurie({}, (label, ns) => seen.push([label, ns]));
+      expect(curie(VOID_W3 + 'Dataset')).toBe('void:Dataset');
+      // Same label, second namespace: `void:Linkset` would denote the first.
+      expect(curie(VOID_RDFS + 'Linkset')).toBe(`<${VOID_RDFS}Linkset>`);
+      // One report per label, so a caller collecting them into a flat
+      // label → namespace map cannot lose the winner to the loser.
+      expect(seen).toEqual([['void', VOID_W3]]);
+
+      // End to end: the saved document must still mean what it meant.
+      const out = expectRoundTrip(SRC);
+      expect(out).toContain(`@prefix void: <${VOID_W3}> .`);
+      expect(out).toContain(`<${VOID_RDFS}Linkset>`);
+    } finally {
+      wkStub.override = null;
+    }
   });
 });

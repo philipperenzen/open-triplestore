@@ -1,0 +1,54 @@
+# Reference example: a fictional arch bridge — SHACL Advanced Features
+# (SPARQL function, rule, custom target, node expression).
+# Note: the rule/target/function bodies use the ex:prefixes declaration from shapes-sparql.ttl,
+# so load both shapes files together (or include the declaration alongside this one).
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix geo:  <http://www.opengis.net/ont/geosparql#> .
+@prefix qudt: <http://qudt.org/schema/qudt/> .
+@prefix def:  <https://example.org/def/> .
+@prefix ex:   <https://example.org/shape/def#> .
+
+### SPARQL-based function — ex:distanceMetres(geomA, geomB)
+ex:distanceMetres a sh:SPARQLFunction ;
+    rdfs:comment "Distance in metres between two WKT geometries."@en ;
+    sh:parameter [ sh:path ex:geomA ; sh:datatype geo:wktLiteral ; sh:order 1 ] ;
+    sh:parameter [ sh:path ex:geomB ; sh:datatype geo:wktLiteral ; sh:order 2 ] ;
+    sh:returnType xsd:decimal ;
+    sh:prefixes ex:prefixes ;
+    sh:select """
+        SELECT ( geof:distance($geomA, $geomB, uom:metre) AS ?result )
+        WHERE { }
+    """ .
+
+### SPARQL rule + custom target — derive an inspection priority for poor condition
+ex:BridgesOverWater a sh:SPARQLTarget ;
+    sh:prefixes ex:prefixes ;
+    sh:select """
+        SELECT ?this
+        WHERE { ?this a def:Bridge ; def:crossesWaterway ?w . }
+    """ .
+
+ex:InspectionPriorityRule a sh:NodeShape ;
+    sh:target ex:BridgesOverWater ;
+    sh:rule [ a sh:SPARQLRule ;
+        rdfs:label "High inspection priority at condition 5 or 6"@en ;
+        sh:prefixes ex:prefixes ;
+        sh:construct """
+            CONSTRUCT { $this def:inspectionPriority "high" . }
+            WHERE {
+                $this <https://w3id.org/bot#containsElement>/def:conditionScore ?cs .
+                ?cs <http://www.w3.org/2004/02/skos/core#notation> ?n .
+                FILTER ( ?n IN ("5","6") )
+            }
+        """ ] .
+
+### Expression constraint (node expression) — clearance height must be ≥ 9.10 m
+ex:ClearanceRequirementShape a sh:NodeShape ;
+    sh:targetClass def:NavigableBridge ;
+    sh:expression [
+        sh:message "Clearance height must be at least 9.10 m."@en ;
+        sh:minExclusive 9.09 ;
+        sh:path ( def:clearanceHeight qudt:numericValue ) ] .

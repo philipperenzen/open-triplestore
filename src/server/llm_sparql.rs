@@ -58,10 +58,11 @@ the parts that are still correct, instead of starting from scratch.\n\
 /// a truncated query is invalid and would only force the repair round-trip.
 const SPARQL_MAX_TOKENS: u32 = 1024;
 
-/// Base URL of the OpenAI-compatible LLM endpoint (`LLM_GATEWAY_URL`). Defaults to a
-/// local server on :8000; if nothing runs there, the AI features show as unavailable.
+/// Base URL of the OpenAI-compatible LLM endpoint (`LLM_GATEWAY_URL`, trimmed).
+/// Unset or blank, it defaults to a local server on :8000; if nothing runs there,
+/// the AI features show as unavailable.
 pub(crate) fn gateway_base() -> String {
-    std::env::var("LLM_GATEWAY_URL").unwrap_or_else(|_| "http://127.0.0.1:8000".to_string())
+    env_nonempty("LLM_GATEWAY_URL").unwrap_or_else(|| "http://127.0.0.1:8000".to_string())
 }
 
 /// Model name sent on every completion. Configure with `LLM_MODEL` (an OpenAI model
@@ -93,8 +94,14 @@ pub(crate) fn chat_model() -> String {
 
 /// Optional bearer token for the endpoint (`LLM_API_KEY`). Required by hosted APIs
 /// (OpenAI, OpenRouter, …); leave unset for local servers (Ollama, LM Studio).
+///
+/// Read as a secret reference (`env:`, `file:`, `vault:`) and resolved per
+/// call, so a rotated gateway key takes effect without a restart. A raw value
+/// is still accepted outside the production posture, with a deprecation
+/// warning; an unresolvable reference disables the key rather than sending a
+/// literal `vault:…` string as a bearer token.
 fn api_key() -> Option<String> {
-    env_nonempty("LLM_API_KEY")
+    crate::secrets::env_secret_opt("LLM_API_KEY")
 }
 
 fn env_nonempty(key: &str) -> Option<String> {
@@ -108,6 +115,15 @@ fn env_nonempty(key: &str) -> Option<String> {
 /// would open a new connection (TCP + TLS handshake) for every completion —
 /// with up to four completions per chat turn that handshake tax is pure added
 /// latency. One pooled client keeps the connection to the gateway alive.
+// Gateway failures — unreachable, or answering with a non-2xx — are 503
+// `ServiceUnavailable`, never 500: the LLM tier is an optional, operator-
+// configured dependency, and `/api/llm/health` already reports it as
+// `reachable: false`. The chat endpoints used to answer a bare "Internal server
+// error" for the same condition, which read as a crash rather than "no gateway".
+/// What to do about an unreachable gateway; appended to every 503.
+const GATEWAY_HINT: &str =
+    "set LLM_GATEWAY_URL to a reachable OpenAI-compatible endpoint (see docs/spark.md)";
+
 fn http() -> &'static reqwest::Client {
     static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
     HTTP.get_or_init(|| {
@@ -145,13 +161,14 @@ pub(crate) async fn chat_completion(
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
-    let resp = rb
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("LLM endpoint unreachable at {url}: {e}")))?;
+    let resp = rb.send().await.map_err(|e| {
+        AppError::ServiceUnavailable(format!(
+            "LLM gateway unreachable at {url}: {e} — {GATEWAY_HINT}"
+        ))
+    })?;
     if !resp.status().is_success() {
-        return Err(AppError::Internal(format!(
-            "LLM endpoint returned {}",
+        return Err(AppError::ServiceUnavailable(format!(
+            "LLM gateway returned {}",
             resp.status()
         )));
     }
@@ -210,13 +227,14 @@ pub(crate) async fn chat_completion_messages(
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
-    let resp = rb
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("LLM endpoint unreachable at {url}: {e}")))?;
+    let resp = rb.send().await.map_err(|e| {
+        AppError::ServiceUnavailable(format!(
+            "LLM gateway unreachable at {url}: {e} — {GATEWAY_HINT}"
+        ))
+    })?;
     if !resp.status().is_success() {
-        return Err(AppError::Internal(format!(
-            "LLM endpoint returned {}",
+        return Err(AppError::ServiceUnavailable(format!(
+            "LLM gateway returned {}",
             resp.status()
         )));
     }
@@ -385,13 +403,14 @@ async fn chat_completion_messages_stream(
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
-    let resp = rb
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("LLM endpoint unreachable at {url}: {e}")))?;
+    let resp = rb.send().await.map_err(|e| {
+        AppError::ServiceUnavailable(format!(
+            "LLM gateway unreachable at {url}: {e} — {GATEWAY_HINT}"
+        ))
+    })?;
     if !resp.status().is_success() {
-        return Err(AppError::Internal(format!(
-            "LLM endpoint returned {}",
+        return Err(AppError::ServiceUnavailable(format!(
+            "LLM gateway returned {}",
             resp.status()
         )));
     }
@@ -509,7 +528,7 @@ async fn shacl_assist(
         "shacl",
         user.as_ref(),
         ip.as_deref(),
-        [description.as_str()],
+        [("user", description.as_str())],
         &description,
     )?;
     let start = Instant::now();
@@ -542,7 +561,10 @@ async fn shacl_assist(
             })?;
             (
                 SHACL_EXPLAIN_SYSTEM,
-                format!("Explain these SHACL shapes:\n\n```turtle\n{ttl}\n```"),
+                format!(
+                    "Explain these SHACL shapes:\n\n```turtle\n{ttl}
+```"
+                ),
                 false,
             )
         }
@@ -551,8 +573,20 @@ async fn shacl_assist(
                 AppError::BadRequest("turtle is required for task=improve".into())
             })?;
             let desc = req.description.as_deref().unwrap_or("");
-            (SHACL_IMPROVE_SYSTEM, format!("Review these SHACL shapes and suggest improvements.{}\n\n```turtle\n{ttl}\n```{context_block}",
-                if desc.is_empty() { String::new() } else { format!(" Focus on: {desc}") }), false)
+            (
+                SHACL_IMPROVE_SYSTEM,
+                format!(
+                    "Review these SHACL shapes and suggest improvements.{}
+\n```turtle\n{ttl}
+```{context_block}",
+                    if desc.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" Focus on: {desc}")
+                    }
+                ),
+                false,
+            )
         }
         _ => {
             return Err(AppError::BadRequest(
@@ -602,6 +636,9 @@ async fn shacl_assist(
 pub struct LlmHealth {
     /// The LLM endpoint this instance is configured to use (`LLM_GATEWAY_URL`).
     gateway: String,
+    /// Whether `LLM_GATEWAY_URL` holds a non-empty value. `false` = no endpoint
+    /// was configured (unset or blank): `gateway` is the built-in local default.
+    configured: bool,
     /// Whether that endpoint answered within the timeout.
     reachable: bool,
     /// The endpoint's payload when reachable (e.g. the `/v1/models` list, or a
@@ -613,27 +650,91 @@ pub struct LlmHealth {
     rate_limit_anon_per_min: u32,
     /// The budget that applies to THIS caller: "user" or "guest".
     caller: &'static str,
+    /// The model Spark chat completions use (`LLM_CHAT_MODEL` → `LLM_MODEL`).
+    chat_model: String,
+    /// The context window the chat budgets its prompt against: the declared
+    /// `LLM_CONTEXT_TOKENS`, else a best-effort probe of the gateway (vLLM
+    /// `max_model_len`, Ollama Modelfile `num_ctx`). `null` = no budgeting —
+    /// fine for large-context hosted APIs, risky on local runtimes.
+    context_tokens: Option<usize>,
+    /// One entry per AI feature, always `chat`, `sparql`, `shacl` in that
+    /// order: the model each one sends and whether the gateway serves it.
+    services: Vec<LlmServiceHealth>,
 }
 
-/// GET /api/llm/health — is an LLM endpoint reachable from this server?
-/// Lets the UI show AI availability alongside its other service health. Probes the
-/// OpenAI-standard `/v1/models` first (works for OpenAI, Ollama, LM Studio, vLLM, …),
-/// then falls back to a gateway `/health` for servers that expose one.
-async fn llm_health(
-    user: Option<Extension<AuthenticatedUser>>,
-    State(_state): State<AppState>,
-) -> Json<LlmHealth> {
-    let gateway = gateway_base();
-    let base = gateway.trim_end_matches('/');
-    let cfg = llm_guard::config();
-    let limits = |reachable: bool, detail: Option<Value>| LlmHealth {
-        gateway: gateway.clone(),
-        reachable,
-        detail,
-        rate_limit_per_min: cfg.rate_per_min,
-        rate_limit_anon_per_min: cfg.rate_per_min_anon,
-        caller: if user.is_some() { "user" } else { "guest" },
-    };
+/// One AI feature's model, as `/api/llm/health` reports it.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+pub struct LlmServiceHealth {
+    /// The feature: `chat` (the Spark assistant), `sparql` (NL→SPARQL
+    /// generation and saved-query repair) or `shacl` (the SHACL Studio
+    /// assistant).
+    id: &'static str,
+    /// The model that feature sends: its per-task override (`LLM_CHAT_MODEL`,
+    /// `LLM_SPARQL_MODEL`, `LLM_SHACL_MODEL`), else `LLM_MODEL`.
+    model: String,
+    /// Whether the gateway's model list includes that model (exact id, or
+    /// Ollama's implicit `:latest` tag). `null` when there is no list to judge
+    /// by: the gateway is unreachable, or answered without one (a `/health`
+    /// fallback).
+    listed: Option<bool>,
+}
+
+/// Whether `LLM_GATEWAY_URL` holds a non-empty value (after trimming). When it
+/// is unset or blank, [`gateway_base`] falls back to its built-in local default.
+fn gateway_configured() -> bool {
+    env_nonempty("LLM_GATEWAY_URL").is_some()
+}
+
+/// The model ids in an OpenAI-style model list: a top-level `data` array of
+/// `{"id": …}` objects, as `/v1/models` answers. Entries without a string `id`
+/// are skipped; an empty `data` array is a real (empty) list. `None` when the
+/// payload carries no such list — no payload at all, a gateway's own `/health`
+/// body, or a non-empty `data` array none of whose entries is a model.
+fn listed_model_ids(detail: Option<&Value>) -> Option<Vec<&str>> {
+    let data = detail?.get("data")?.as_array()?;
+    let ids: Vec<&str> = data
+        .iter()
+        .filter_map(|entry| entry.get("id").and_then(Value::as_str))
+        .collect();
+    (data.is_empty() || !ids.is_empty()).then_some(ids)
+}
+
+/// Does the gateway-listed id `listed` name the configured model `configured`?
+/// Exact equality, plus Ollama's implicit tag: an untagged name and the same
+/// name tagged `:latest` are one model, in either direction. Nothing looser —
+/// no case folding, no prefix matching, no stripping of `provider/` prefixes —
+/// because a model the gateway would reject must never show as listed.
+fn model_matches(configured: &str, listed: &str) -> bool {
+    configured == listed
+        || is_implicit_latest(configured, listed)
+        || is_implicit_latest(listed, configured)
+}
+
+/// Is `tagged` the untagged Ollama name `bare` with its implicit `:latest` tag?
+fn is_implicit_latest(bare: &str, tagged: &str) -> bool {
+    !bare.is_empty() && !bare.contains(':') && tagged.strip_suffix(":latest") == Some(bare)
+}
+
+/// The `services` entries of `/api/llm/health`: each `(id, model)` pair, with
+/// whether `listed` (the gateway's model ids, `None` when unknown) serves it.
+fn service_health(
+    models: [(&'static str, String); 3],
+    listed: Option<&[&str]>,
+) -> Vec<LlmServiceHealth> {
+    models
+        .into_iter()
+        .map(|(id, model)| {
+            let listed = listed.map(|ids| ids.iter().any(|l| model_matches(&model, l)));
+            LlmServiceHealth { id, model, listed }
+        })
+        .collect()
+}
+
+/// Probe the gateway at `base`: the OpenAI-standard `/v1/models` first (works
+/// for OpenAI, Ollama, LM Studio, vLLM, …), then a gateway `/health` for servers
+/// that expose one. Returns whether either answered 2xx within the timeout, and
+/// that answer's JSON payload.
+async fn probe_gateway(base: &str) -> (bool, Option<Value>) {
     let client = http();
     for path in ["/v1/models", "/health"] {
         let mut rb = client
@@ -644,12 +745,46 @@ async fn llm_health(
         }
         if let Ok(resp) = rb.send().await {
             if resp.status().is_success() {
-                let detail = resp.json::<Value>().await.ok();
-                return Json(limits(true, detail));
+                return (true, resp.json::<Value>().await.ok());
             }
         }
     }
-    Json(limits(false, None))
+    (false, None)
+}
+
+/// GET /api/llm/health — is an LLM endpoint reachable from this server, and
+/// does it serve the model each AI feature is configured with? Lets the UI show
+/// AI availability alongside its other service health (see [`probe_gateway`]).
+async fn llm_health(
+    user: Option<Extension<AuthenticatedUser>>,
+    State(_state): State<AppState>,
+) -> Json<LlmHealth> {
+    let gateway = gateway_base();
+    let cfg = llm_guard::config();
+    let chat_model = chat_model();
+    let context_tokens = resolve_context_tokens(&chat_model).await;
+    let (reachable, detail) = probe_gateway(gateway.trim_end_matches('/')).await;
+    // Judged from the payload the probe already fetched — no request per model.
+    let services = service_health(
+        [
+            ("chat", chat_model.clone()),
+            ("sparql", sparql_model()),
+            ("shacl", shacl_model()),
+        ],
+        listed_model_ids(detail.as_ref()).as_deref(),
+    );
+    Json(LlmHealth {
+        gateway,
+        configured: gateway_configured(),
+        reachable,
+        detail,
+        rate_limit_per_min: cfg.rate_per_min,
+        rate_limit_anon_per_min: cfg.rate_per_min_anon,
+        caller: if user.is_some() { "user" } else { "guest" },
+        chat_model,
+        context_tokens,
+        services,
+    })
 }
 
 #[derive(Deserialize)]
@@ -690,7 +825,7 @@ async fn nl_to_sparql(
         "sparql",
         user.as_ref(),
         ip.as_deref(),
-        [req.question.as_str()],
+        [("user", req.question.as_str())],
         &req.question,
     )?;
     let start = Instant::now();
@@ -707,7 +842,8 @@ async fn nl_to_sparql(
 
         if let Err(err) = validate_sparql(&sparql) {
             let repair = format!(
-                "This SPARQL query is not valid ({err}):\n\n{sparql}\n\n\
+                "This SPARQL query is not valid ({err}):\n\n{sparql}
+\n\
                  Return a corrected, complete query. Declare every PREFIX you use. Reply with ONLY the SPARQL.",
             );
             if let Ok(fixed) =
@@ -816,7 +952,12 @@ fn hoist_misplaced_modifiers(sparql: &str) -> Option<String> {
     if !MODIFIER_KEYWORDS.iter().any(|k| upper.starts_with(k)) {
         return None;
     }
-    Some(format!("{}}}\n{}", head.trim_end(), modifiers))
+    Some(format!(
+        "{}}}
+{}",
+        head.trim_end(),
+        modifiers
+    ))
 }
 
 /// Every IRI the vocabulary sampler has described, indexed by its lowercased
@@ -983,8 +1124,8 @@ fn trim_at_parse_error(sparql: &str) -> Option<String> {
 /// Parse-check a query string with the same grammar the engine uses, returning the
 /// parser's message on failure. Undeclared prefixes fail here — which is exactly why
 /// [`finalize_sparql`] runs first.
-fn validate_sparql(sparql: &str) -> Result<(), String> {
-    spargebra::SparqlParser::new()
+pub(crate) fn validate_sparql(sparql: &str) -> Result<(), String> {
+    crate::sparql::parser()
         .parse_query(sparql)
         .map(|_| ())
         .map_err(|e| e.to_string())
@@ -997,23 +1138,57 @@ fn validate_sparql(sparql: &str) -> Result<(), String> {
 /// without that route simply reject it and the UI ignores the result — the core AI
 /// features work regardless. Proxied so the browser only talks to its own origin.
 async fn forward_feedback(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+    headers: HeaderMap,
     Json(signal): Json<Value>,
 ) -> Result<Json<Value>, AppError> {
+    // Same gate as every other endpoint that reaches the gateway. This one had
+    // none: it forwarded an arbitrary caller-supplied JSON body to the gateway
+    // with the server's API key attached, unauthenticated, unlimited and
+    // unlogged — an open relay to `/v1/signals`. The signal's free-text fields
+    // are screened, since they are what a training pipeline ingests.
+    let user = user.map(|Extension(u)| u);
+    let ip = client_ip(&headers, None);
+    let texts: Vec<(&str, &str)> = signal
+        .as_object()
+        .into_iter()
+        .flat_map(|m| m.values())
+        .filter_map(Value::as_str)
+        .map(|s| ("user", s))
+        .collect();
+    let preview = texts.first().map(|(_, s)| *s).unwrap_or("");
+    guard_gate(
+        &state,
+        "feedback",
+        user.as_ref(),
+        ip.as_deref(),
+        texts.clone(),
+        preview,
+    )?;
+
     let url = format!("{}/v1/signals", gateway_base().trim_end_matches('/'));
     let mut rb = http().post(&url).json(&signal);
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
-    let resp = rb
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("LLM endpoint unreachable at {url}: {e}")))?;
-    let ok = resp.status().is_success();
-    let body: Value = resp
-        .json()
-        .await
-        .unwrap_or_else(|_| json!({"accepted": ok}));
+    let resp = rb.send().await.map_err(|e| {
+        AppError::ServiceUnavailable(format!(
+            "LLM gateway unreachable at {url}: {e} — {GATEWAY_HINT}"
+        ))
+    })?;
+    let status = resp.status();
+    let ok = status.is_success();
+    // A gateway without `/v1/signals` answers 404; that used to be reported as
+    // a delivered signal because the body was parsed without checking the
+    // status. Say what happened instead.
+    let body: Value = if ok {
+        resp.json()
+            .await
+            .unwrap_or_else(|_| json!({"accepted": true}))
+    } else {
+        json!({ "accepted": false, "status": status.as_u16() })
+    };
     Ok(Json(body))
 }
 
@@ -1051,6 +1226,10 @@ by querying), and the API services. Query the graphs for their CONTENTS; read th
 exists on the platform. The system runs it read-only under the user's permissions and gives you the \
 result rows; you may then reply with another `SPARQL:` line if you still need different data, otherwise \
 write the final answer. Result cells may be truncated (they then end with …).\n\
+When function tools are offered to you (run_sparql, text_search, vocab_term_search), CALL them \
+instead of writing a `SPARQL:` line — arguments arrive intact, and you can mix a name lookup with \
+queries in one turn. Both protocols are otherwise identical: same read scope, same result tables, \
+same round budget.\n\
 Target graphs with `GRAPH <iri> { … }` inside WHERE — do not use FROM / FROM NAMED. Any data values you \
 present (names, counts, coordinates) MUST come from query results or the platform context, never from \
 memory: if you have not retrieved them this turn, query first.\n\
@@ -1058,17 +1237,28 @@ Query efficiently: fetch everything you need in as FEW rounds as possible (selec
 together instead of querying twice), and ALWAYS add a LIMIT (at most 50 rows come back; use LIMIT 50 \
 for listings — aggregates like COUNT need no LIMIT). When a \"Graph vocabulary\" section is provided, \
 build patterns from EXACTLY those class and property IRIs — never invent vocabulary.\n\
+Plan multi-part questions: when the question asks for several distinct things (labels AND relations \
+AND counts, or spans several models), begin your FIRST reply with a line `PLAN:` followed by one \
+numbered line per data need (at most 6, each a short phrase), then immediately your first `SPARQL:` \
+line. The platform repeats your plan back to you each round so you can work through it; questions \
+answerable with one query need no plan.\n\
 Search by name with the full-text index, not by scanning. The platform indexes every literal and \
-exposes it as a magic property: `(?s ?score) text:search (\"waalbrug\" 20) .` binds ?s to the 20 \
+exposes it as a magic property: `(?s ?score) text:search (\"bridge\" 20) .` binds ?s to the 20 \
 best-matching subjects and ?score to their relevance, already restricted to the graphs you may read. \
 Narrow it to one predicate with a second argument: \
-`(?s ?score) text:search (\"waalbrug\" <http://www.w3.org/2000/01/rdf-schema#label> 20) .` \
+`(?s ?score) text:search (\"bridge\" <http://www.w3.org/2000/01/rdf-schema#label> 20) .` \
 Reach for it whenever the user is LOOKING FOR something by name or keyword and you do not know the \
 IRI — it is ranked and indexed, where `FILTER(CONTAINS(…))` reads every literal in scope. Keep \
 `FILTER(CONTAINS(…))` for narrowing a set you are already matching on. Always pair a text:search with \
 the triple patterns whose values you need (`GRAPH <g> { ?s ?p ?o }`) and `ORDER BY DESC(?score)`; on \
 its own it returns bare IRIs. It matches whole words, so search the distinctive word, not a fragment \
 of one, and if it returns nothing, say so rather than inventing a result.\n\
+Orient before you guess: the context lists Registered models & vocabularies WITH the named graph \
+holding each one's current published definitions — questions about a model's classes, properties or \
+concepts (their labels, definitions, comments, broader/narrower or subclass relations) are answered \
+by querying THAT graph, not an instance-data graph. A WHERE THIS CONVERSATION'S NAMES OCCUR section \
+is verified live against the store: prefer the graphs it names and copy its IRIs exactly. Use any \
+IRI the user pastes VERBATIM in your patterns — never retype, shorten or \"correct\" it.\n\
 Aggregate correctly: `COUNT(*)` counts rows; `COUNT(?v)` counts only rows where ?v is BOUND, so \
 counting a variable that never appears in the pattern silently yields 0 for every group. The \
 canonical per-graph triple count is: \
@@ -1076,10 +1266,10 @@ canonical per-graph triple count is: \
 Sanity-check aggregates before presenting them: an all-zero result almost always means a wrong \
 variable, not empty graphs — re-query, don't chart it.\n\
 Worked patterns — adapt the IRIs from the Graph vocabulary section, never invent them:\n\
-count + extreme value: `SELECT (COUNT(DISTINCT ?b) AS ?count) (MIN(?year) AS ?oldest) WHERE {{ \
-GRAPH <g> {{ ?b a <Class> ; <yearPredicate> ?year }} }}`\n\
-mappable rows: `SELECT ?el ?label ?wkt WHERE {{ GRAPH <g> {{ ?el rdfs:label ?label ; \
-geo:hasGeometry/geo:asWKT ?wkt }} }} LIMIT 50` — then present with a source:\"query\" map.\n\n\
+count + extreme value: `SELECT (COUNT(DISTINCT ?b) AS ?count) (MIN(?year) AS ?oldest) WHERE { \
+GRAPH <g> { ?b a <Class> ; <yearPredicate> ?year } }`\n\
+mappable rows: `SELECT ?el ?label ?wkt WHERE { GRAPH <g> { ?el rdfs:label ?label ; \
+geo:hasGeometry/geo:asWKT ?wkt } } LIMIT 50` — then present with a source:\"query\" map.\n\n\
 # PRESENTING DATA\n\
 Final answers are markdown, and these fenced blocks render as live interactive widgets — use them whenever \
 they make the answer clearer:\n\
@@ -1102,7 +1292,7 @@ name, or an IRI's distinguishing tail segments (e.g. `viewer-3d-demo/building`),
 platform builds the features from your rows. The source:\"query\" forms (chart and map) are ONLY \
 valid after a successful `SPARQL:` round THIS turn — with no query they render an error card. \
 Inline form for hand-stated features: \
-{\"features\":[{\"label\":\"Waalbrug\",\"wkt\":\"POINT(5.8645 51.8519)\",\"iri\":\"http://…\"}]}. \
+{\"features\":[{\"label\":\"Example Bridge\",\"wkt\":\"POINT(4.9 52.37)\",\"iri\":\"http://…\"}]}. \
 WKT must be WGS84 with longitude before latitude. Prefer points or centroids; skip geometries whose WKT \
 was truncated. When elements have 3D model files, add \"models\":[{\"label\":\"…\",\"url\":\"…\",\
 \"wkt\":\"POINT(lon lat)\"}] to place those models on the map at their anchor — the map then renders \
@@ -1118,6 +1308,13 @@ glTF, STL, IFC, CityJSON) or asset download paths from the platform context — 
 - ```file — a file/asset card with inline preview for images, audio, video and PDF: \
 {\"label\":\"…\",\"url\":\"…\",\"filename\":\"report.pdf\"}. Use it when the answer points at a \
 downloadable file (dataset assets, model files, attachments) whose URL you retrieved.\n\
+- ```ask — a choice card that ASKS THE USER when a decision is genuinely theirs: \
+{\"question\":\"…\",\"options\":[\"…\",\"…\"]} with 2–5 short options; the user's click arrives as \
+their next message. Use it INSTEAD OF GUESSING whenever the conversation leaves a real choice open — \
+published vs unpublished-draft definitions, several entities matching an ambiguous name, which of \
+multiple datasets or graphs is meant — or when you need input you cannot retrieve. Ask one question, \
+keep the options concrete, end your reply right after the fence, and never invent a preference on \
+the user's behalf.\n\
 - ```turtle / ```json / ```xml — syntax-highlighted data snippets (not runnable). Small markdown tables \
 also render well.\n\
 - Entity links: link the key entities you name to their detail page as \
@@ -1144,6 +1341,23 @@ updates, or act outside this platform.";
 const MAX_DATASETS_IN_CONTEXT: usize = 60;
 const MAX_SERVICES_IN_CONTEXT: usize = 40;
 const MAX_GRAPHS_IN_CONTEXT: usize = 40;
+/// Cap for the registered models & vocabularies section of the platform context.
+const MAX_MODELS_IN_CONTEXT: usize = 20;
+/// How many user-pasted IRIs get located in the store per turn.
+const MENTIONED_IRI_LIMIT: usize = 8;
+/// How many in-scope graphs to name per located IRI.
+const MENTIONED_IRI_GRAPH_LIMIT: usize = 2;
+/// Quads scanned per triple position when locating an IRI's graphs — bounds the
+/// walk when a term occurs huge numbers of times in graphs the caller cannot read.
+const IRI_PROBE_QUAD_SCAN: usize = 256;
+/// Salient question words looked up in the full-text index per turn.
+const ANCHOR_TERM_LIMIT: usize = 4;
+/// Ranked full-text hits kept per anchored term.
+const ANCHOR_HITS_PER_TERM: usize = 3;
+/// Total term-anchor lines rendered into the prompt.
+const ANCHOR_LINE_LIMIT: usize = 8;
+/// Cap on orientation-derived graphs pushed to the front of vocabulary sampling.
+const ORIENTATION_GRAPH_LIMIT: usize = 6;
 /// Cap rows returned from a chat-issued SPARQL query (both to the model and the UI).
 const MAX_CHAT_QUERY_ROWS: usize = 50;
 /// How many `SPARQL:` rounds the model may use within one user turn. Feeding rows
@@ -1181,6 +1395,165 @@ fn llm_context_tokens() -> Option<usize> {
         .filter(|&n| n > 0)
 }
 
+/// How many `SPARQL:` rounds one turn may use (`LLM_CHAT_MAX_ROUNDS`, default
+/// [`MAX_CHAT_QUERY_ROUNDS`], clamped 1..=8). Three is right for a small local
+/// model — more rounds mostly buy more failed repairs — but a capable model
+/// answering multi-part questions (labels + relations + counts across two
+/// vocabularies) makes good use of four or five.
+fn chat_max_rounds() -> usize {
+    env_nonempty("LLM_CHAT_MAX_ROUNDS")
+        .and_then(|v| v.parse::<usize>().ok())
+        .map(|n| n.clamp(1, 8))
+        .unwrap_or(MAX_CHAT_QUERY_ROUNDS)
+}
+
+/// Per-round query cap in seconds (`LLM_CHAT_QUERY_MAX_SECS`, default
+/// [`CHAT_QUERY_MAX_SECS`], clamped 5..=600). The effective bound is the
+/// smaller of this and the endpoint's own query timeout — see
+/// [`run_chat_query_timed`] for why chat rounds get a tighter cap than the
+/// SPARQL endpoint. Raise it on instances where legitimate analytical
+/// questions (property paths over a large ontology) need more than 30s.
+fn chat_query_max_secs() -> u64 {
+    env_nonempty("LLM_CHAT_QUERY_MAX_SECS")
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|n| n.clamp(5, 600))
+        .unwrap_or(CHAT_QUERY_MAX_SECS)
+}
+
+// ─── Context-window discovery ──────────────────────────────────────────────────
+//
+// `LLM_CONTEXT_TOKENS` is the single most consequential knob on a local
+// runtime, and the one operators forget: without it the runtime truncates an
+// over-long prompt from the top — deleting the execution protocol — and the
+// failure reads as "the assistant fabricates". When it is unset, ask the
+// gateway itself, best-effort: vLLM publishes `max_model_len` on `/v1/models`,
+// and Ollama's native `/api/show` reveals a Modelfile `num_ctx`. Detection can
+// only ever *enable* budgeting that would otherwise be off, and a declared
+// `LLM_CONTEXT_TOKENS` always wins.
+
+/// The window advertised for `model` in an OpenAI-style `/v1/models` payload.
+/// vLLM ships `max_model_len`; some gateways use `context_window` /
+/// `context_length`. Falls back to the sole entry when the id doesn't match
+/// (single-model servers often serve under an alias).
+fn context_from_models_payload(v: &Value, model: &str) -> Option<usize> {
+    let data = v.get("data")?.as_array()?;
+    let entry = data
+        .iter()
+        .find(|e| e["id"].as_str() == Some(model))
+        .or_else(|| if data.len() == 1 { data.first() } else { None })?;
+    ["max_model_len", "context_window", "context_length"]
+        .iter()
+        .find_map(|k| entry.get(*k).and_then(Value::as_u64))
+        .map(|n| n as usize)
+}
+
+/// The serving context of an Ollama `/api/show` response: a Modelfile
+/// `num_ctx` when one is declared, `None` otherwise. Deliberately no guess
+/// for the undeclared case — Ollama's real serving context is whatever
+/// `OLLAMA_CONTEXT_LENGTH` says, which is invisible over the API, and both
+/// wrong guesses hurt (a low floor needlessly trims a raised deployment, a
+/// high one reinstates silent truncation). The caller warns instead; see
+/// [`detect_context_tokens`].
+fn context_from_ollama_show(v: &Value) -> Option<usize> {
+    let params = v["parameters"].as_str()?;
+    for line in params.lines() {
+        let mut it = line.split_whitespace();
+        if it.next() == Some("num_ctx") {
+            if let Some(n) = it.next().and_then(|s| s.parse::<usize>().ok()) {
+                return Some(n);
+            }
+        }
+    }
+    None
+}
+
+/// Does this payload look like an Ollama `/api/show` response at all?
+fn is_ollama_show_payload(v: &Value) -> bool {
+    ["model_info", "modelfile", "details", "parameters"]
+        .iter()
+        .any(|k| v.get(*k).is_some())
+}
+
+/// Detected windows per `gateway|model`, probed once and remembered (including
+/// "nothing detectable", so hosted APIs are not probed on every turn).
+fn detected_ctx_cache() -> &'static Mutex<HashMap<String, Option<usize>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<usize>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+async fn detect_context_tokens(base: &str, model: &str) -> Option<usize> {
+    let mut rb = http()
+        .get(format!("{base}/v1/models"))
+        .timeout(Duration::from_secs(3));
+    if let Some(key) = api_key() {
+        rb = rb.bearer_auth(key);
+    }
+    if let Ok(resp) = rb.send().await {
+        if resp.status().is_success() {
+            if let Ok(v) = resp.json::<Value>().await {
+                if let Some(n) = context_from_models_payload(&v, model) {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    // Ollama's native API lives on the same origin as its OpenAI compat layer.
+    // Both body keys on purpose: newer Ollama reads `model`, older `name`.
+    let mut rb = http()
+        .post(format!("{base}/api/show"))
+        .json(&json!({"model": model, "name": model}))
+        .timeout(Duration::from_secs(3));
+    if let Some(key) = api_key() {
+        rb = rb.bearer_auth(key);
+    }
+    if let Ok(resp) = rb.send().await {
+        if resp.status().is_success() {
+            if let Ok(v) = resp.json::<Value>().await {
+                let n = context_from_ollama_show(&v);
+                if n.is_none() && is_ollama_show_payload(&v) {
+                    // This IS Ollama, and its serving context (the
+                    // OLLAMA_CONTEXT_LENGTH default is 4096) cannot be read
+                    // over the API. Detection results are cached, so this
+                    // warns once per gateway+model, not per turn.
+                    tracing::warn!(
+                        model,
+                        "Ollama serves this model without a Modelfile num_ctx — its context \
+                         window (often 4096) is invisible over the API and the prompt may be \
+                         truncated silently; set LLM_CONTEXT_TOKENS to the real \
+                         OLLAMA_CONTEXT_LENGTH"
+                    );
+                }
+                return n;
+            }
+        }
+    }
+    None
+}
+
+/// The context window to budget this turn against: the declared
+/// `LLM_CONTEXT_TOKENS` when set, else a cached best-effort probe of the
+/// gateway. `None` disables budgeting, exactly as before.
+async fn resolve_context_tokens(model: &str) -> Option<usize> {
+    if let Some(n) = llm_context_tokens() {
+        return Some(n);
+    }
+    let base = gateway_base().trim_end_matches('/').to_string();
+    let key = format!("{base}|{model}");
+    if let Some(cached) = detected_ctx_cache().lock().unwrap().get(&key) {
+        return *cached;
+    }
+    let detected = detect_context_tokens(&base, model).await;
+    if let Some(n) = detected {
+        tracing::info!(
+            model,
+            window = n,
+            "detected the LLM context window from the gateway"
+        );
+    }
+    detected_ctx_cache().lock().unwrap().insert(key, detected);
+    detected
+}
+
 /// Estimated token count for `s`. Deliberately conservative (≈3 chars/token):
 /// prompts here are dense with IRIs and tables, which tokenize far worse than
 /// prose, and over-estimating merely trims history a little sooner while
@@ -1204,6 +1577,190 @@ fn history_within_budget(history: &[ChatMessage], budget: usize) -> &[ChatMessag
         start = i;
     }
     &history[start..]
+}
+
+// ─── Native tool calling ───────────────────────────────────────────────────────
+//
+// The `SPARQL:` directive protocol exists because small local models follow a
+// single-line convention more reliably than anything else. Tool-capable models
+// (and hosted APIs) do better with the OpenAI `tools` interface: arguments
+// arrive as structured JSON instead of being fished out of prose, and the
+// model can interleave retrieval kinds (a text search, then a query). The two
+// protocols run as a HYBRID in one loop: completions are offered the tools,
+// a reply that calls them takes the native path, and a reply that writes a
+// `SPARQL:` line (or a ```sparql fence) still works exactly as before — so a
+// model that ignores the tools loses nothing. A gateway that rejects the
+// `tools` parameter outright is remembered and never offered them again.
+
+/// `LLM_CHAT_TOOLS`: "auto" (default — offer native tools, fall back
+/// transparently) or "off" (directive protocol only).
+fn chat_tools_enabled() -> bool {
+    !matches!(
+        env_nonempty("LLM_CHAT_TOOLS")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "off" | "0" | "false" | "none"
+    )
+}
+
+/// Cap on tool calls executed from one assistant turn — parallel calls beyond
+/// this are answered with an error result instead of running.
+const MAX_TOOL_CALLS_PER_ROUND: usize = 4;
+/// Row cap for the text_search tool's result table.
+const TEXT_SEARCH_TOOL_MAX_HITS: usize = 20;
+
+/// The function tools offered to the model. Kept minimal on purpose: retrieval
+/// tools only — presentation stays in the answer markdown, and asking the user
+/// is the ```ask widget (a final answer, not a callable).
+fn chat_tool_definitions() -> Value {
+    json!([
+        {
+            "type": "function",
+            "function": {
+                "name": "run_sparql",
+                "description": "Run one read-only SPARQL query against the named graphs in scope. \
+                    Target graphs with GRAPH <iri> { … } inside WHERE. Returns up to 50 result rows.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "A complete SPARQL SELECT/ASK/CONSTRUCT/DESCRIBE query."}
+                    },
+                    "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "text_search",
+                "description": "Ranked full-text search over every literal in the readable graphs. \
+                    Use it to find entities by name or keyword when you do not know their IRI.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The word(s) to search; whole-word matching."},
+                        "limit": {"type": "integer", "description": "Max hits (default 10, max 20)."}
+                    },
+                    "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "vocab_term_search",
+                "description": "Search the platform's installed vocabularies and registered models \
+                    for the standard class/property matching a word — returns candidate term IRIs \
+                    with labels. Use it before inventing any vocabulary IRI.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "term": {"type": "string", "description": "One word or short phrase, e.g. \"beheerobject\"."}
+                    },
+                    "required": ["term"]
+                }
+            }
+        }
+    ])
+}
+
+/// One parsed tool call from an assistant message.
+struct ToolCall {
+    id: String,
+    name: String,
+    arguments: Value,
+}
+
+/// The tool calls of an OpenAI-shaped assistant message ("arguments" is a JSON
+/// string per the spec; a gateway that inlines an object is accepted too).
+fn extract_tool_calls(message: &Value) -> Vec<ToolCall> {
+    let Some(arr) = message["tool_calls"].as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|c| {
+            let f = &c["function"];
+            let name = f["name"].as_str()?.to_string();
+            let arguments = f["arguments"]
+                .as_str()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                .unwrap_or_else(|| f["arguments"].clone());
+            Some(ToolCall {
+                id: c["id"].as_str().unwrap_or("call_0").to_string(),
+                name,
+                arguments,
+            })
+        })
+        .collect()
+}
+
+/// gateway|model → whether the completions endpoint accepted a `tools` array.
+/// Only negatives are learned (from a rejected request); they stick for the
+/// process lifetime so a turn never pays the failed attempt twice.
+fn tools_support_cache() -> &'static Mutex<HashMap<String, bool>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn tools_cache_key(model: &str) -> String {
+    format!("{}|{model}", gateway_base().trim_end_matches('/'))
+}
+
+/// A completion attempt's failure, split so tool fallback can tell "the
+/// gateway answered and said no" from "the gateway is unreachable".
+enum CompletionFailure {
+    /// HTTP status from the gateway — a `tools` rejection lands here.
+    Status(reqwest::StatusCode),
+    /// Transport / decode error; retrying without tools would not help.
+    Fatal(AppError),
+}
+
+/// Non-streaming completion returning the assistant MESSAGE object (content
+/// and/or tool_calls), optionally offering `tools`.
+async fn chat_completion_full(
+    model: &str,
+    messages: &[Value],
+    max_tokens: u32,
+    tools: Option<&Value>,
+) -> Result<Value, CompletionFailure> {
+    let mut payload = json!({
+        "model": model,
+        "temperature": 0.0,
+        "max_tokens": max_tokens,
+        "messages": messages,
+    });
+    if let Some(t) = tools {
+        payload["tools"] = t.clone();
+        payload["tool_choice"] = json!("auto");
+    }
+    let url = format!(
+        "{}/v1/chat/completions",
+        gateway_base().trim_end_matches('/')
+    );
+    let mut rb = http()
+        .post(&url)
+        .json(&payload)
+        .timeout(chat_completion_timeout());
+    if let Some(key) = api_key() {
+        rb = rb.bearer_auth(key);
+    }
+    let resp = rb.send().await.map_err(|e| {
+        CompletionFailure::Fatal(AppError::ServiceUnavailable(format!(
+            "LLM gateway unreachable at {url}: {e} — {GATEWAY_HINT}"
+        )))
+    })?;
+    if !resp.status().is_success() {
+        return Err(CompletionFailure::Status(resp.status()));
+    }
+    let body: Value = resp.json().await.map_err(|e| {
+        CompletionFailure::Fatal(AppError::Internal(format!("invalid LLM response: {e}")))
+    })?;
+    let message = body["choices"][0]["message"].clone();
+    if message.is_null() {
+        return Ok(json!({"role": "assistant", "content": ""}));
+    }
+    Ok(message)
 }
 
 #[derive(Deserialize)]
@@ -1358,12 +1915,15 @@ fn validate_chat_request(req: &ChatRequest) -> Result<(), AppError> {
 /// Blocked requests land in the request log right here, so the admin log shows
 /// them even though no LLM call ever happened. Returns the guard flag to carry
 /// into the final log row (set when something was flagged but allowed).
-fn guard_gate<'a>(
+pub(crate) fn guard_gate<'a>(
     state: &AppState,
     endpoint: &'static str,
     user: Option<&AuthenticatedUser>,
     ip: Option<&str>,
-    texts: impl IntoIterator<Item = &'a str>,
+    // `(role, content)` for EVERY message — the guard decides which checks
+    // apply to which roles. Passing a pre-filtered subset is what let a
+    // client-labelled "assistant" message escape the size caps and blocklist.
+    texts: impl IntoIterator<Item = (&'a str, &'a str)>,
     preview_src: &str,
 ) -> Result<Option<String>, AppError> {
     let blocked = |flag: String, err: AppError| {
@@ -1411,14 +1971,17 @@ fn guard_gate<'a>(
     Ok(verdict.flag)
 }
 
-/// The user-typed content of a chat request: every user-role message. The
-/// assistant's own replies are echoed back by the client each turn and must
-/// not trip the phrase checks.
-fn user_texts(req: &ChatRequest) -> impl Iterator<Item = &str> {
+/// Every message in a chat request, as `(role, content)`.
+///
+/// This used to drop `assistant` messages before the guard saw them. The client
+/// submits the whole transcript on each turn, so that let a caller exempt
+/// unlimited content from the size caps and the blocklist just by labelling it
+/// `"assistant"`. The guard now receives everything and decides per check which
+/// roles a given rule applies to.
+fn guarded_texts(req: &ChatRequest) -> impl Iterator<Item = (&str, &str)> {
     req.messages
         .iter()
-        .filter(|m| m.role != "assistant")
-        .map(|m| m.content.as_str())
+        .map(|m| (m.role.as_str(), m.content.as_str()))
 }
 
 fn last_user_text(req: &ChatRequest) -> &str {
@@ -1484,7 +2047,7 @@ async fn llm_chat(
         "chat",
         user.as_ref(),
         ip.as_deref(),
-        user_texts(&req),
+        guarded_texts(&req),
         last_user_text(&req),
     )?;
     let preview = llm_guard::question_preview(last_user_text(&req));
@@ -1538,7 +2101,7 @@ async fn llm_chat_stream(
         "chat_stream",
         user.as_ref(),
         ip.as_deref(),
-        user_texts(&req),
+        guarded_texts(&req),
         last_user_text(&req),
     )?;
     let preview = llm_guard::question_preview(last_user_text(&req));
@@ -1600,31 +2163,80 @@ fn sse_event(ev: &ChatStreamEvent) -> Result<Event, Infallible> {
     }))
 }
 
-/// One completion round: streamed (with tokens forwarded through a
-/// [`DeltaGate`]) when someone is listening AND the round may be shown live,
-/// plain otherwise. Returns the full reply text plus whether any of it was
-/// forwarded to the client live.
+/// The visible text of an assistant message value.
+fn assistant_text(message: &Value) -> String {
+    message["content"].as_str().unwrap_or("").trim().to_string()
+}
+
+/// One completion round, returned as the full assistant MESSAGE (content
+/// and/or tool_calls) plus whether any text was forwarded to the client live.
 ///
-/// `live` is false for pre-retrieval rounds. Whatever prose the model writes
-/// before its first query cannot be grounded in data — streaming it paints a
-/// confident answer the next event has to wipe, which reads as the assistant
-/// making things up and then retracting them. Buffered rounds cost nothing to
-/// correct: the user sees "thinking", then the retrieval trail, then only text
-/// that survived grounding.
-async fn next_reply(
+/// Protocol per call: with `tools` offered (and the gateway not known to
+/// reject them) the request is non-streaming — tool calls are internal rounds,
+/// and a rejection gets ONE immediate retry without tools, after which the
+/// gateway is remembered as tools-incapable so the failed attempt is never
+/// paid again. Without tools, the old behaviour holds exactly: pre-retrieval
+/// rounds are buffered (`live: false` — prose written before the data would
+/// only set up a retraction), post-retrieval rounds stream through the
+/// [`DeltaGate`].
+async fn next_assistant(
     model: &str,
     msgs: &[Value],
     sink: &EventSink,
     live: bool,
-) -> Result<(String, bool), AppError> {
+    tools: Option<&Value>,
+) -> Result<(Value, bool), AppError> {
+    let offer = tools.filter(|_| {
+        tools_support_cache()
+            .lock()
+            .unwrap()
+            .get(&tools_cache_key(model))
+            .copied()
+            .unwrap_or(true)
+    });
+    if let Some(t) = offer {
+        match chat_completion_full(model, msgs, CHAT_MAX_TOKENS, Some(t)).await {
+            Ok(m) => return Ok((m, false)),
+            Err(CompletionFailure::Fatal(e)) => return Err(e),
+            Err(CompletionFailure::Status(status)) => {
+                // The gateway answered and refused — most likely the `tools`
+                // parameter (Ollama 400s for tool-incapable models). Retry
+                // without; only when THAT succeeds is the blame pinned on
+                // tools and remembered.
+                match chat_completion_full(model, msgs, CHAT_MAX_TOKENS, None).await {
+                    Ok(m) => {
+                        tracing::info!(
+                            model,
+                            %status,
+                            "gateway rejected native tools — staying on the directive protocol"
+                        );
+                        tools_support_cache()
+                            .lock()
+                            .unwrap()
+                            .insert(tools_cache_key(model), false);
+                        return Ok((m, false));
+                    }
+                    Err(CompletionFailure::Fatal(e)) => return Err(e),
+                    Err(CompletionFailure::Status(s2)) => {
+                        return Err(AppError::ServiceUnavailable(format!(
+                            "LLM gateway returned {s2}"
+                        )))
+                    }
+                }
+            }
+        }
+    }
     if live && sink.is_live() {
         let mut gate = DeltaGate::new();
         let text =
             chat_completion_messages_stream(model, msgs, CHAT_MAX_TOKENS, sink, &mut gate).await?;
-        Ok((text, gate.forwarded))
+        Ok((
+            json!({"role": "assistant", "content": text}),
+            gate.forwarded,
+        ))
     } else {
         let text = chat_completion_messages(model, msgs.to_vec(), CHAT_MAX_TOKENS).await?;
-        Ok((text, false))
+        Ok((json!({"role": "assistant", "content": text}), false))
     }
 }
 
@@ -1653,8 +2265,13 @@ async fn run_chat_turn(
     // graph list both truncate by position (see prioritise_graphs_for_conversation).
     let graph_list = prioritise_graphs_for_conversation(&state, user_id, &req.messages, graph_list);
     let (context, service_lines) = build_platform_context(&state, user_id, &graph_list);
-    let evidence = evidence_graphs(&state, &req.messages, &graph_list).await;
-    let vocab = graph_vocab_context(&state, &graph_list, &evidence).await;
+    let orientation = question_orientation(&state, &req.messages, &graph_list).await;
+    // The effective context window steers both prompt budgeting and how wide
+    // the vocabulary sample may be — resolved once per turn (declared knob, or
+    // a cached gateway probe).
+    let window = resolve_context_tokens(&model).await;
+    let caps = caps_for_window(window);
+    let vocab_blocks = graph_vocab_context(&state, &graph_list, &orientation.graphs, caps).await;
     // Question-matched API services again, at the tail this time — the full
     // list is mid-prompt where small models lose it (see relevant_services_hint).
     let services_hint = relevant_services_hint(last_user_text(&req), &service_lines);
@@ -1672,29 +2289,45 @@ async fn run_chat_turn(
         })
         .unwrap_or_default();
 
-    let mut system_content = format!(
-        "{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}{vocab}{services_hint}{memory}"
-    );
+    // The system prompt with the first `n` vocabulary blocks; everything else
+    // in it is fixed for the turn.
+    let compose = |vocab_kept: usize| {
+        format!(
+            "{CHAT_SYSTEM_PROMPT}
+\n# PLATFORM CONTEXT\n{context}{vocab}{orient}{services_hint}{memory}",
+            vocab = vocab_section(&vocab_blocks[..vocab_kept]),
+            orient = orientation.section
+        )
+    };
+    let mut kept = vocab_blocks.len();
+    let mut system_content = compose(kept);
 
     // Fit the prompt inside the declared context window, oldest history first.
     // A runtime that truncates silently cuts the START of the prompt — i.e. the
     // execution protocol — so an over-budget turn doesn't degrade, it flips into
     // confident fabrication. Better to forget last week's turns than the rules.
     let mut history: &[ChatMessage] = &req.messages;
-    if let Some(window) = llm_context_tokens() {
+    if let Some(window) = window {
         let budget = window.saturating_sub(CHAT_MAX_TOKENS as usize + CHAT_PROMPT_MARGIN);
-        if estimate_tokens(&system_content) > budget && !vocab.is_empty() {
-            // The vocabulary blocks are the largest elastic part of the system
-            // prompt. Dropping them costs answer quality; overflowing the
-            // window costs the protocol itself.
+        // The vocabulary blocks are the largest elastic part of the system
+        // prompt, and they are in priority order (the conversation's graphs
+        // first), so trim from the END one graph at a time until the prompt
+        // fits. This used to be all-or-nothing: one block over budget dropped
+        // EVERY block, and the model — left with graph IRIs but no vocabulary
+        // — invented predicates and reported data as absent, or fabricated an
+        // answer outright (observed live at an 8k window on a demo-seeded
+        // instance). The orientation section and services hint always
+        // survive: both are tiny and answer the question the turn is about.
+        while estimate_tokens(&system_content) > budget && kept > 0 {
+            kept -= 1;
+            system_content = compose(kept);
+        }
+        if kept < vocab_blocks.len() {
             tracing::warn!(
                 window,
-                "chat system prompt exceeds LLM_CONTEXT_TOKENS budget — dropping graph vocabulary"
-            );
-            // The services hint survives the vocab drop: it is tiny and answers
-            // the question the turn is actually about.
-            system_content = format!(
-                "{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}{services_hint}{memory}"
+                kept,
+                dropped = vocab_blocks.len() - kept,
+                "chat system prompt exceeds the context-window budget — trimmed graph vocabulary, lowest-priority graphs first"
             );
         }
         let remaining = budget.saturating_sub(estimate_tokens(&system_content));
@@ -1707,6 +2340,15 @@ async fn run_chat_turn(
                 "chat history trimmed to fit the context window"
             );
         }
+    } else if estimate_tokens(&system_content) > 8_000 {
+        // No declared window and nothing detectable at the gateway, with a
+        // prompt big enough that a local runtime's silent top-truncation would
+        // delete the execution protocol. Say so where the operator can see it.
+        tracing::warn!(
+            prompt_tokens = estimate_tokens(&system_content),
+            "no LLM context window declared or detectable — a local runtime may \
+             truncate this prompt silently; set LLM_CONTEXT_TOKENS"
+        );
     }
 
     let mut msgs: Vec<Value> = Vec::with_capacity(history.len() + 1);
@@ -1723,10 +2365,13 @@ async fn run_chat_turn(
         msgs.push(json!({"role": role, "content": m.content}));
     }
 
-    // Retrieval loop: the model either answers in prose or replies `SPARQL: <query>`.
-    // Each query runs under the caller's read scope; its rows — or its error, so the
-    // model can self-repair — go back into the conversation for the next round.
+    // Retrieval loop, hybrid across two protocols: a reply may CALL the native
+    // tools (run_sparql / text_search / vocab_term_search), write a `SPARQL:`
+    // directive, or answer in prose. Each retrieval runs under the caller's
+    // read scope; its rows — or its error, so the model can self-repair — go
+    // back into the conversation for the next round.
     let mut runs: Vec<ChatQueryRun> = Vec::new();
+    let tool_defs = chat_tools_enabled().then(chat_tool_definitions);
     sink.send(ChatStreamEvent::Status {
         round: 0,
         state: "thinking",
@@ -1734,48 +2379,144 @@ async fn run_chat_turn(
     .await;
     // Pre-retrieval rounds are never streamed live (`live: false`): any prose
     // here predates the data, so showing it would only set up a retraction.
-    let (mut reply, mut forwarded) = next_reply(&model, &msgs, &sink, false).await?;
+    let (mut assistant, mut forwarded) =
+        next_assistant(&model, &msgs, &sink, false, tool_defs.as_ref()).await?;
 
-    // Retrieval nudge. The `SPARQL:` protocol sits inside a long system prompt,
+    // Retrieval nudge. The retrieval protocol sits inside a long system prompt,
     // and a model that does not follow it silently answers from the platform
     // summary or its own memory — the failure mode looks like "the assistant
-    // ignores the data". So when the opening reply asks for no query at all, ask
-    // once, in a short and explicit message. The model may decline (a conceptual
-    // question needs no data), and if it does we keep its original answer, so the
-    // nudge can only add retrieval, never take an answer away. Costs at most one
-    // extra completion per turn.
-    if extract_query_request(&reply, true).is_none() {
-        let original = (reply.clone(), forwarded);
-        msgs.push(json!({"role": "assistant", "content": reply}));
+    // ignores the data". So when the opening reply neither calls a tool nor
+    // asks for a query — and is not a legitimate ```ask question to the user —
+    // ask once, in a short and explicit message. The model may decline (a
+    // conceptual question needs no data), and if it does we keep its original
+    // answer, so the nudge can only add retrieval, never take an answer away.
+    let needs_nudge = extract_tool_calls(&assistant).is_empty() && {
+        let reply = assistant_text(&assistant);
+        extract_query_request(&reply, true).is_none() && !contains_ask_fence(&reply)
+    };
+    if needs_nudge {
+        let original = (assistant.clone(), forwarded);
+        msgs.push(json!({"role": "assistant", "content": assistant_text(&assistant)}));
         msgs.push(json!({"role": "user", "content":
             "You answered without querying the graphs. If answering my question needs data from \
-             them (any name, number, date, value or geometry), reply with EXACTLY one line: \
-             `SPARQL:` followed by a single query and nothing else. If it genuinely needs no data \
-             from the graphs, repeat your previous answer unchanged."}));
+             them (any name, number, date, value or geometry), retrieve it now: call a tool, or \
+             reply with EXACTLY one line: `SPARQL:` followed by a single query and nothing else. \
+             If it genuinely needs no data from the graphs, repeat your previous answer \
+             unchanged."}));
         sink.send(ChatStreamEvent::Status {
             round: 0,
             state: "thinking",
         })
         .await;
-        (reply, forwarded) = match next_reply(&model, &msgs, &sink, false).await {
-            Ok(v) if extract_query_request(&v.0, true).is_some() => v,
-            // No query the second time either (or the gateway failed): the first
-            // answer was the model's real one — keep it.
-            _ => {
-                msgs.truncate(msgs.len() - 2);
-                original
-            }
-        };
+        (assistant, forwarded) =
+            match next_assistant(&model, &msgs, &sink, false, tool_defs.as_ref()).await {
+                Ok(v)
+                    if !extract_tool_calls(&v.0).is_empty()
+                        || extract_query_request(&assistant_text(&v.0), true).is_some() =>
+                {
+                    v
+                }
+                // No retrieval the second time either (or the gateway failed):
+                // the first answer was the model's real one — keep it.
+                _ => {
+                    msgs.truncate(msgs.len() - 2);
+                    original
+                }
+            };
     }
 
-    for round in 1..=MAX_CHAT_QUERY_ROUNDS {
-        // Before anything has been retrieved a fenced ```sparql block counts as a
-        // request to run it; afterwards it is a query card the user is meant to see.
-        let Some(query) = extract_query_request(&reply, runs.is_empty()) else {
+    // A declared plan (the decomposition step for multi-part questions) is
+    // repeated back with every round's results so the model works through it.
+    let plan_note = extract_plan(&assistant_text(&assistant))
+        .map(|p| {
+            format!(
+                "\nYour plan:\n{p}
+Continue with the next unmet item, or write the final \
+                 answer once every item is met."
+            )
+        })
+        .unwrap_or_default();
+
+    let max_rounds = chat_max_rounds();
+    for round in 1..=max_rounds {
+        let remaining = max_rounds - round;
+        // On the last allowed round the follow-up completion gets no tools —
+        // withholding them forces prose the same way the directive follow-up
+        // says "do not output another SPARQL: line".
+        let next_tools = if remaining > 0 {
+            tool_defs.as_ref()
+        } else {
+            None
+        };
+
+        let calls = extract_tool_calls(&assistant);
+        if !calls.is_empty() {
+            // The streaming client hung up — stop burning completions on a
+            // turn nobody will read. (Never true for the JSON endpoint.)
+            if sink.is_closed() {
+                return Err(AppError::Internal("client disconnected".to_string()));
+            }
+            // Native round: the assistant message goes into the transcript
+            // verbatim (the tool_calls array is part of the protocol), then
+            // every call is answered with a `tool` message.
+            msgs.push(assistant.clone());
+            let total = calls.len();
+            for (i, call) in calls.into_iter().enumerate() {
+                let mut result = if i >= MAX_TOOL_CALLS_PER_ROUND {
+                    format!("Skipped: at most {MAX_TOOL_CALLS_PER_ROUND} tool calls run per round.")
+                } else {
+                    dispatch_tool_call(
+                        &state,
+                        &call,
+                        &graphs,
+                        &orientation.mentioned,
+                        caps,
+                        &sink,
+                        round,
+                        &mut runs,
+                    )
+                    .await
+                };
+                // Round budget and plan ride on the last result of the batch.
+                if i + 1 == total {
+                    result.push_str(&format!(
+                        "\n({remaining} more retrieval rounds allowed this turn.){plan_note}"
+                    ));
+                }
+                msgs.push(json!({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": result,
+                }));
+            }
+            sink.send(ChatStreamEvent::Status {
+                round,
+                state: "thinking",
+            })
+            .await;
+            (assistant, forwarded) =
+                match next_assistant(&model, &msgs, &sink, false, next_tools).await {
+                    Ok(v) => v,
+                    Err(_) => (
+                        json!({"role": "assistant", "content": fallback_answer(&runs)}),
+                        false,
+                    ),
+                };
+            continue;
+        }
+
+        // Until a round has SUCCEEDED a fenced ```sparql block counts as a request
+        // to run it; once rows are in it is a query card the user is meant to see.
+        // The gate used to be `runs.is_empty()`, which also barred the corrected
+        // fence that the repair prompt itself invites after a FAILED round —
+        // models that took that path (a 1.5B and a 7.6B one, live) got a card
+        // instead of results and answered from memory. The per-turn round cap
+        // still bounds how many attempts this can cost.
+        let reply = assistant_text(&assistant);
+        let nothing_retrieved_yet = !runs.iter().any(|r| r.ok);
+        let Some(query) = extract_query_request(&reply, nothing_retrieved_yet) else {
             break;
         };
-        // The streaming client hung up — stop burning completions on a turn
-        // nobody will read. (Never true for the JSON endpoint.)
         if sink.is_closed() {
             return Err(AppError::Internal("client disconnected".to_string()));
         }
@@ -1784,140 +2525,56 @@ async fn run_chat_turn(
         if forwarded {
             sink.send(ChatStreamEvent::RoundReset).await;
         }
-        // Inject any undeclared-but-known prefixes, then parse-check the model's
-        // own text BEFORE scoping: a syntax error reported against the scoped
-        // rewrite has line numbers that mean nothing to the model, which makes
-        // self-repair hopeless.
-        // Repair BEFORE the query is streamed to the client and recorded in the
-        // conversation, so the query the user sees in the retrieval trail is the
-        // query that actually runs.
-        let query = repair_sparql(finalize_sparql(&state, query).await);
         msgs.push(json!({"role": "assistant", "content": format!("SPARQL:\n{query}")}));
-        sink.send(ChatStreamEvent::Query {
+        let (ok, body) = execute_chat_query(
+            &state,
+            query,
+            &graphs,
+            &orientation.mentioned,
+            caps,
+            &sink,
             round,
-            sparql: query.clone(),
-        })
+            &mut runs,
+        )
         .await;
-        let remaining = MAX_CHAT_QUERY_ROUNDS - round;
-        // Reject invented vocabulary BEFORE running it. Such a query is valid
-        // SPARQL and returns zero rows, which the model reports as absent data —
-        // a false negative the user cannot tell from a true one. Failing it with
-        // the offending IRIs named gives the next round something to act on.
-        let run_result = match validate_sparql(&query) {
-            Err(parse_err) => Err(AppError::BadRequest(format!("invalid SPARQL: {parse_err}"))),
-            Ok(()) => match unknown_vocab_iris(&query, &known_vocab_iris()) {
-                bad if !bad.is_empty() => Err(AppError::BadRequest(format!(
-                    "these IRIs do not exist in the graphs you queried: {}. Use ONLY the IRIs \
-                     listed under \"Graph vocabulary\" — copy them character for character, \
-                     including capitalisation.",
-                    bad.iter()
-                        .map(|b| format!("<{b}>"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ))),
-                _ => run_chat_query_timed(&state, &query, &graphs).await,
-            },
-        };
-        let follow_up = match run_result {
-            Ok(qr) => {
-                sink.send(ChatStreamEvent::QueryResult {
-                    round,
-                    ok: true,
-                    rows: Some(qr.rows.len()),
-                    truncated: qr.truncated,
-                    error: None,
-                })
-                .await;
-                let table = render_rows_for_llm(&qr);
-                // Read these BEFORE qr.rows moves into the trail below.
-                let rows_empty = qr.rows.is_empty();
-                let all_zero = all_numeric_cells_zero(&qr.rows);
-                runs.push(ChatQueryRun {
-                    sparql: query,
-                    ok: true,
-                    error: None,
-                    columns: Some(qr.columns),
-                    rows: Some(qr.rows),
-                    truncated: qr.truncated,
-                });
-                if remaining > 0 {
-                    // Steer self-repair on the two degenerate shapes a small
-                    // model reliably falls into: an empty result from guessed
-                    // vocabulary, and an aggregate of an unbound variable
-                    // (every group counts 0).
-                    let hint = if rows_empty {
-                        "\nHINT: 0 rows usually means the pattern's vocabulary does not match \
-                         the graph. Re-read the Graph vocabulary section and build the pattern \
-                         ONLY from those exact class/property IRIs (and use COUNT(*), never \
-                         COUNT of a variable that is not bound in the pattern)."
-                    } else if all_zero {
-                        "\nHINT: every numeric value is 0 — that almost always means the \
-                         aggregate counts an UNBOUND variable. Use COUNT(*) and GROUP BY a \
-                         variable that is bound in the pattern, then retry."
-                    } else {
-                        ""
-                    };
-                    format!(
-                        "Query results:\n{table}{hint}\nIf you still need different data, reply with \
-                         `SPARQL:` and one query ({remaining} more allowed this turn). Otherwise \
-                         write the final answer to my previous question in clear natural language, \
-                         using the presentation widgets (chart/map/card/api/csv/markdown table) \
-                         where they help; chart/map query results with the source:\"query\" form."
-                    )
-                } else {
-                    format!(
-                        "Query results:\n{table}\nWrite the final answer to my previous question \
-                         in clear natural language, using the presentation widgets where they \
-                         help. Do not output another SPARQL: line. If the results above are \
-                         empty, say you could not FIND the data — never state that something \
-                         does not exist based on an empty result — and check the PLATFORM \
-                         CONTEXT sections (Datasets, API Services, Files) first: if one of \
-                         those already answers the question, use it."
-                    )
-                }
-            }
-            Err(e) => {
-                let emsg = e.message();
-                sink.send(ChatStreamEvent::QueryResult {
-                    round,
-                    ok: false,
-                    rows: None,
-                    truncated: false,
-                    error: Some(emsg.clone()),
-                })
-                .await;
-                runs.push(ChatQueryRun {
-                    sparql: query,
-                    ok: false,
-                    error: Some(emsg.clone()),
-                    columns: None,
-                    rows: None,
-                    truncated: false,
-                });
-                if remaining > 0 {
-                    format!(
-                        "That query failed to run: {emsg}\n\
-                         HINT: aggregates belong in SELECT — `SELECT (MIN(?x) AS ?alias)` — never \
-                         inside GROUP BY; every projected variable must be bound in the pattern; \
-                         build patterns ONLY from the Graph vocabulary section's IRIs; and the \
-                         `SPARQL:` line must contain the query alone, no prose before or after. \
-                         Do NOT resend the same query unchanged.\n\
-                         Reply with `SPARQL:` and a corrected \
-                         query ({remaining} more allowed this turn), or answer without querying — \
-                         you may include the corrected query as a ```sparql block for the user to \
-                         run themselves."
-                    )
-                } else {
-                    format!(
-                        "That query failed to run: {emsg}\nAnswer my previous question as well as \
-                         you can without another query; include a corrected query as a ```sparql \
-                         block if useful. Do not output another SPARQL: line. Never state that \
-                         something does not exist because a query failed or returned nothing — \
-                         and check the PLATFORM CONTEXT sections (Datasets, API Services, \
-                         Files) first: if one of those already answers the question, use it."
-                    )
-                }
-            }
+        let follow_up = match (ok, remaining > 0) {
+            (true, true) => format!(
+                "{body}
+If you still need different data, reply with \
+                 `SPARQL:` and one query ({remaining} more allowed this turn). Otherwise \
+                 write the final answer to my previous question in clear natural language, \
+                 using the presentation widgets (chart/map/card/api/csv/markdown table) \
+                 where they help; chart/map query results with the source:\"query\" \
+                 form.{plan_note}"
+            ),
+            (true, false) => format!(
+                "{body}
+Write the final answer to my previous question \
+                 in clear natural language, using the presentation widgets where they \
+                 help. Do not output another SPARQL: line. If the results above are \
+                 empty, say you could not FIND the data — never state that something \
+                 does not exist based on an empty result — and check the PLATFORM \
+                 CONTEXT sections (Datasets, API Services, Files, Registered models) \
+                 first: if one of those already answers the question, use it."
+            ),
+            (false, true) => format!(
+                "{body}
+The `SPARQL:` line must contain the query alone, no prose before or \
+                 after. Reply with `SPARQL:` and a corrected \
+                 query ({remaining} more allowed this turn), or answer without querying — \
+                 you may include the corrected query as a ```sparql block for the user to \
+                 run themselves.{plan_note}"
+            ),
+            (false, false) => format!(
+                "{body}
+Answer my previous question as well as \
+                 you can without another query; include a corrected query as a ```sparql \
+                 block if useful. Do not output another SPARQL: line. Never state that \
+                 something does not exist because a query failed or returned nothing — \
+                 and check the PLATFORM CONTEXT sections (Datasets, API Services, \
+                 Files, Registered models) first: if one of those already answers \
+                 the question, use it."
+            ),
         };
         msgs.push(json!({"role": "user", "content": follow_up}));
         sink.send(ChatStreamEvent::Status {
@@ -1925,19 +2582,29 @@ async fn run_chat_turn(
             state: "thinking",
         })
         .await;
-        // Post-retrieval rounds stream live: the model now writes against real
-        // results, and a directive-shaped reply (another query request) is
-        // caught at the first token by the DeltaGate, so nothing that would be
-        // superseded reaches the client.
-        (reply, forwarded) = match next_reply(&model, &msgs, &sink, true).await {
+        // Post-retrieval rounds stream live (when no tools are in play): the
+        // model now writes against real results, and a directive-shaped reply
+        // is caught at the first token by the DeltaGate, so nothing that would
+        // be superseded reaches the client.
+        (assistant, forwarded) = match next_assistant(&model, &msgs, &sink, true, next_tools).await
+        {
             Ok(v) => v,
-            Err(_) => (fallback_answer(&runs), false),
+            Err(_) => (
+                json!({"role": "assistant", "content": fallback_answer(&runs)}),
+                false,
+            ),
         };
     }
-    // A stubborn model may still emit a *bare* directive after its last allowed
-    // round — never show that to the user; fall back to the data we did
-    // retrieve. A real answer that merely embeds a corrected query (which the
-    // failure follow-ups explicitly invite) is kept as-is.
+    let mut reply = assistant_text(&assistant);
+    // A stubborn model may still demand more retrieval after its last allowed
+    // round — a dangling tool call or a *bare* directive must never reach the
+    // user; fall back to the data we did retrieve. A real answer that merely
+    // embeds a corrected query (which the failure follow-ups explicitly
+    // invite) is kept as-is.
+    if !extract_tool_calls(&assistant).is_empty() {
+        reply = fallback_answer(&runs);
+    }
+    reply = strip_plan_block(&reply);
     if is_bare_sparql_directive(&reply) {
         reply = fallback_answer(&runs);
     }
@@ -1948,6 +2615,18 @@ async fn run_chat_turn(
         reply.push_str(
             "\n\n*These values were not retrieved from the knowledge graph this turn — \
              run a query to verify them.*",
+        );
+    }
+    // Every retrieval came back empty: whatever the model wrote, the honest
+    // reading is "not found", and a small model reliably upgrades that to
+    // "does not exist" no matter what the instructions say. State the
+    // epistemic status mechanically, in the same voice as the widget caveat.
+    // (A COUNT of zero or an ASK returning false produces a ROW, not an empty
+    // result, so real "the answer is zero/no" turns never get this.)
+    if all_retrievals_empty(&runs) {
+        reply.push_str(
+            "\n\n*No rows matched this turn's queries — the data was not found, \
+             which is not proof it does not exist.*",
         );
     }
 
@@ -1971,10 +2650,304 @@ async fn run_chat_turn(
     })
 }
 
+/// Run one model-authored query through the whole pipeline — prefix repair,
+/// parse check, the store-verified invented-IRI check (pasted IRIs exempt),
+/// scoped execution — recording the round in the trail and reporting it on the
+/// sink. Returns `(ok, body)` where `body` is the text the model gets back:
+/// the result table with the empty/all-zero repair hints, or the failure with
+/// its hint. Both retrieval protocols share this path, so the trail the user
+/// sees is identical whichever one the model spoke.
+#[allow(clippy::too_many_arguments)]
+async fn execute_chat_query(
+    state: &AppState,
+    raw: String,
+    graphs: &Arc<HashSet<String>>,
+    mentioned: &[String],
+    caps: VocabCaps,
+    sink: &EventSink,
+    round: usize,
+    runs: &mut Vec<ChatQueryRun>,
+) -> (bool, String) {
+    // Inject any undeclared-but-known prefixes, then parse-check the model's
+    // own text BEFORE scoping: a syntax error reported against the scoped
+    // rewrite has line numbers that mean nothing to the model. Repair BEFORE
+    // the query is streamed and recorded, so the query the user sees in the
+    // trail is the query that actually runs.
+    let query = repair_sparql(finalize_sparql(state, raw).await);
+    sink.send(ChatStreamEvent::Query {
+        round,
+        sparql: query.clone(),
+    })
+    .await;
+    // A query identical to one that already failed this turn fails identically.
+    // Running it again burns a retrieval round for nothing — a 7.6B model
+    // resubmitted the same broken query three times live, despite the follow-up
+    // saying not to — so record it, skip the store, and make the repeat itself
+    // the error the model has to react to.
+    if let Some(prev) = runs.iter().find(|r| !r.ok && r.sparql == query) {
+        let emsg = format!(
+            "this is the SAME query that already failed this turn, and it fails the same \
+             way: {}. Change the query, or answer without it.",
+            prev.error.clone().unwrap_or_default()
+        );
+        sink.send(ChatStreamEvent::QueryResult {
+            round,
+            ok: false,
+            rows: None,
+            truncated: false,
+            error: Some(emsg.clone()),
+        })
+        .await;
+        runs.push(ChatQueryRun {
+            sparql: query,
+            ok: false,
+            error: Some(emsg.clone()),
+            columns: None,
+            rows: None,
+            truncated: false,
+        });
+        return (false, format!("That query was not run: {emsg}"));
+    }
+    // Reject invented vocabulary BEFORE running it (see [`absent_iris`] for
+    // why candidates are verified against the store and pasted IRIs are
+    // exempt).
+    let run_result = match validate_sparql(&query) {
+        Err(parse_err) => Err(AppError::BadRequest(parse_error_message(&parse_err))),
+        Ok(()) => {
+            let candidates: Vec<String> = unknown_vocab_iris(&query, &known_vocab_iris())
+                .into_iter()
+                .filter(|iri| !mentioned.iter().any(|m| m == iri))
+                .collect();
+            match absent_iris(state, candidates).await {
+                bad if !bad.is_empty() => Err(AppError::BadRequest(format!(
+                    "these IRIs occur nowhere on this platform: {}. Do not invent IRIs — \
+                     copy them character for character from the Graph vocabulary or WHERE \
+                     THIS CONVERSATION'S NAMES OCCUR sections, or find real entities by \
+                     name with text_search.",
+                    bad.iter()
+                        .map(|b| format!("<{b}>"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))),
+                _ => run_chat_query_timed(state, &query, graphs).await,
+            }
+        }
+    };
+    match run_result {
+        Ok(qr) => {
+            sink.send(ChatStreamEvent::QueryResult {
+                round,
+                ok: true,
+                rows: Some(qr.rows.len()),
+                truncated: qr.truncated,
+                error: None,
+            })
+            .await;
+            let table = render_rows_for_llm(&qr);
+            let rows_empty = qr.rows.is_empty();
+            let all_zero = all_numeric_cells_zero(&qr.rows);
+            runs.push(ChatQueryRun {
+                sparql: query,
+                ok: true,
+                error: None,
+                columns: Some(qr.columns),
+                rows: Some(qr.rows),
+                truncated: qr.truncated,
+            });
+            // Steer self-repair on the two degenerate shapes a small model
+            // reliably falls into: an empty result from guessed vocabulary,
+            // and an aggregate of an unbound variable.
+            let hint: String = if rows_empty {
+                // Ground the repair in the queried graphs' REAL vocabulary
+                // instead of exhortation: the prompt's sampled section may not
+                // even include the graph this query targeted.
+                let queried = queried_graph_vocab(
+                    state,
+                    &runs.last().map(|r| r.sparql.clone()).unwrap_or_default(),
+                    graphs,
+                    caps,
+                )
+                .await;
+                format!(
+                    "\nHINT: 0 rows usually means the pattern's vocabulary does not match \
+                     the graph — or the graph is the wrong one. Re-check the WHERE THIS \
+                     CONVERSATION'S NAMES OCCUR and Registered models sections for the \
+                     right graph, find entities by name with the text search, and use \
+                     COUNT(*), never COUNT of a variable that is not bound in the \
+                     pattern.{queried}"
+                )
+            } else if all_zero {
+                "\nHINT: every numeric value is 0 — that almost always means the \
+                 aggregate counts an UNBOUND variable. Use COUNT(*) and GROUP BY a \
+                 variable that is bound in the pattern, then retry."
+                    .to_string()
+            } else {
+                String::new()
+            };
+            (true, format!("Query results:\n{table}{hint}"))
+        }
+        Err(e) => {
+            let emsg = e.message();
+            sink.send(ChatStreamEvent::QueryResult {
+                round,
+                ok: false,
+                rows: None,
+                truncated: false,
+                error: Some(emsg.clone()),
+            })
+            .await;
+            runs.push(ChatQueryRun {
+                sparql: query,
+                ok: false,
+                error: Some(emsg.clone()),
+                columns: None,
+                rows: None,
+                truncated: false,
+            });
+            (
+                false,
+                format!(
+                    "That query failed to run: {emsg}
+\
+                     HINT: aggregates belong in SELECT — `SELECT (MIN(?x) AS ?alias)` — never \
+                     inside GROUP BY; every projected variable must be bound in the pattern; \
+                     build patterns ONLY from IRIs in the Graph vocabulary and WHERE THIS \
+                     CONVERSATION'S NAMES OCCUR sections. Do NOT resend the same query \
+                     unchanged."
+                ),
+            )
+        }
+    }
+}
+
+/// Execute one native tool call and return the result text the model sees.
+/// `run_sparql` shares the exact pipeline (and user-visible trail) of the
+/// directive protocol; the search tools answer directly from their indexes.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_tool_call(
+    state: &AppState,
+    call: &ToolCall,
+    graphs: &Arc<HashSet<String>>,
+    mentioned: &[String],
+    caps: VocabCaps,
+    sink: &EventSink,
+    round: usize,
+    runs: &mut Vec<ChatQueryRun>,
+) -> String {
+    match call.name.as_str() {
+        "run_sparql" => {
+            let raw = call.arguments["query"].as_str().unwrap_or("").trim();
+            if raw.is_empty() {
+                return "run_sparql needs a non-empty \"query\" string argument.".to_string();
+            }
+            execute_chat_query(
+                state,
+                raw.to_string(),
+                graphs,
+                mentioned,
+                caps,
+                sink,
+                round,
+                runs,
+            )
+            .await
+            .1
+        }
+        "text_search" => text_search_tool(state, &call.arguments, graphs).await,
+        "vocab_term_search" => {
+            let term = call.arguments["term"].as_str().unwrap_or("").trim();
+            if term.is_empty() {
+                return "vocab_term_search needs a non-empty \"term\" string argument.".to_string();
+            }
+            let lines = vocab_term_lines(state, &[term.to_string()], &[]).await;
+            if lines.is_empty() {
+                format!("No installed vocabulary defines a term matching \"{term}\".")
+            } else {
+                lines.join("\n")
+            }
+        }
+        other => format!(
+            "Unknown tool {other:?} — available: run_sparql, text_search, vocab_term_search."
+        ),
+    }
+}
+
+/// The `text_search` tool: ranked whole-word search over every literal in the
+/// caller's readable graphs, straight from the full-text index.
+#[cfg(feature = "text-search")]
+async fn text_search_tool(
+    state: &AppState,
+    arguments: &Value,
+    graphs: &Arc<HashSet<String>>,
+) -> String {
+    let q = arguments["query"].as_str().unwrap_or("").trim().to_string();
+    if q.is_empty() {
+        return "text_search needs a non-empty \"query\" string argument.".to_string();
+    }
+    let limit = arguments["limit"]
+        .as_u64()
+        .map(|n| n as usize)
+        .unwrap_or(10)
+        .clamp(1, TEXT_SEARCH_TOOL_MAX_HITS);
+    let Some(index) = state.text_index.clone() else {
+        return "Full-text search is not available on this platform — use run_sparql with a \
+                FILTER(CONTAINS(…)) pattern instead."
+            .to_string();
+    };
+    let scope = crate::text_search::index::GraphScopeOwned::Only(Arc::clone(graphs));
+    let sync_state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        sync_state.sync_text_index_if_dirty();
+        match index.search(&q, None, scope.as_scope(), limit) {
+            Err(e) => format!("text search failed: {e}"),
+            Ok(hits) if hits.is_empty() => {
+                format!("No literal matches \"{q}\" in the graphs you can read.")
+            }
+            Ok(hits) => {
+                let mut s = String::from("subject | predicate | graph\n");
+                for h in hits {
+                    s.push_str(&format!(
+                        "{} | {} | {}
+",
+                        h.subject, h.predicate, h.graph
+                    ));
+                }
+                s
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| "text search failed".to_string())
+}
+
+#[cfg(not(feature = "text-search"))]
+async fn text_search_tool(
+    _state: &AppState,
+    _arguments: &Value,
+    _graphs: &Arc<HashSet<String>>,
+) -> String {
+    "Full-text search is not enabled on this platform — use run_sparql with a \
+     FILTER(CONTAINS(…)) pattern instead."
+        .to_string()
+}
+
 /// True when the answer embeds data widgets but no query succeeded this turn —
 /// i.e. the widget values cannot have come from the graphs.
 fn widgets_without_retrieval(answer: &str, runs: &[ChatQueryRun]) -> bool {
     answer.lines().any(opens_data_widget_fence) && !runs.iter().any(|r| r.ok)
+}
+
+/// True when at least one query ran this turn and EVERY successful one
+/// returned zero rows — the turn retrieved nothing at all.
+fn all_retrievals_empty(runs: &[ChatQueryRun]) -> bool {
+    let mut any = false;
+    for r in runs.iter().filter(|r| r.ok) {
+        any = true;
+        if r.rows.as_ref().is_none_or(|rows| !rows.is_empty()) {
+            return false;
+        }
+    }
+    any
 }
 
 /// Does this line open a data-widget fence? Mirrors the frontend fence grammar
@@ -2026,7 +2999,8 @@ fn fallback_answer(runs: &[ChatQueryRun]) -> String {
     } else if let Some(last) = runs.last() {
         format!(
             "I tried to answer by querying the knowledge graph, but the query did not run ({}). \
-             You can refine it here:\n\n```sparql\n{}\n```",
+             You can refine it here:\n\n```sparql\n{}
+```",
             last.error.as_deref().unwrap_or("unknown error"),
             last.sparql
         )
@@ -2285,6 +3259,32 @@ fn build_platform_context(
         }
     }
 
+    // Registered data models & vocabularies. The DEFINITIONS questions are about
+    // (classes, properties, concepts — their labels, comments, broader/subclass
+    // relations) live in these registry version graphs, not in the instance
+    // graphs — and the vocabulary sampler rarely reaches them, because they are
+    // usually the LARGEST graphs in scope and the sampler prefers small ones.
+    // Asked about a registered model, Spark therefore guessed an instance graph
+    // and reported real definitions as absent. Naming each entry WITH the graph
+    // holding its current published content lets the first query hit the right
+    // graph. Visibility mirrors `/api/models` (`can_access_ontology`).
+    let visible_models: Vec<crate::data_models::registry::ModelContextEntry> =
+        crate::data_models::registry::list_models_for_context(&state.store)
+            .into_iter()
+            .filter(|e| {
+                state
+                    .auth_db
+                    .can_access_ontology(
+                        user_id,
+                        e.is_public,
+                        e.owner_type.as_deref(),
+                        e.owner_id.as_deref(),
+                    )
+                    .unwrap_or(false)
+            })
+            .collect();
+    ctx.push_str(&render_models_section(&visible_models, graphs));
+
     if !graphs.is_empty() {
         ctx.push_str(
             "\n## Named graphs in scope (wrap patterns in `GRAPH <iri> { … }`; \
@@ -2306,6 +3306,63 @@ fn build_platform_context(
     }
 
     (ctx, services)
+}
+
+/// Render the registered models & vocabularies section from already
+/// visibility-filtered entries. A model's published graph is only *named as
+/// queryable* when it is in the caller's read scope — inviting a query against
+/// an unreadable graph would just manufacture a silent-empty round.
+fn render_models_section(
+    entries: &[crate::data_models::registry::ModelContextEntry],
+    in_scope: &[String],
+) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let scope: HashSet<&str> = in_scope.iter().map(String::as_str).collect();
+    let mut out = String::from(
+        "\n## Registered models & vocabularies (a model's class/property/concept \
+         definitions, labels and relations live in the graph named here — query \
+         THAT graph for them)\n",
+    );
+    for e in entries.iter().take(MAX_MODELS_IN_CONTEXT) {
+        out.push_str(&format!(
+            "- \"{}\" ({}, namespace {})",
+            e.title,
+            e.kind.as_str(),
+            e.namespace
+        ));
+        match e.graph_iri.as_deref() {
+            Some(g) if scope.contains(g) => {
+                out.push_str(&format!(" — definitions in graph <{g}>"));
+                if let Some(v) = e.version.as_deref() {
+                    out.push_str(&format!(" (version {v})"));
+                }
+            }
+            _ => out.push_str(" — no published version readable to you"),
+        }
+        // A draft is real, readable content the owner has not published yet.
+        // Naming it as explicitly UNPUBLISHED (rather than hiding it or mixing
+        // it in) is what lets the assistant offer the draft/published choice
+        // to the user instead of silently picking one.
+        if let Some(d) = e.draft_graph_iri.as_deref() {
+            if scope.contains(d) && e.graph_iri.as_deref() != Some(d) {
+                out.push_str(&format!("; unpublished draft in graph <{d}>"));
+                if let Some(v) = e.draft_version.as_deref() {
+                    out.push_str(&format!(" (draft {v})"));
+                }
+                out.push_str(" — when both could answer, ask the user which to use");
+            }
+        }
+        out.push('\n');
+    }
+    if entries.len() > MAX_MODELS_IN_CONTEXT {
+        out.push_str(&format!(
+            "- …and {} more.\n",
+            entries.len() - MAX_MODELS_IN_CONTEXT
+        ));
+    }
+    out
 }
 
 /// API services whose name or description shares a content word with the
@@ -2374,6 +3431,41 @@ fn relevant_services_hint(question: &str, services: &[String]) -> String {
 const VOCAB_GRAPH_LIMIT: usize = 12;
 const VOCAB_CLASS_LIMIT: usize = 8;
 const VOCAB_PRED_LIMIT: usize = 20;
+
+/// Vocabulary sampling caps for one turn. The defaults are sized for a small
+/// local window; a declared large window affords a wider keyhole.
+#[derive(Clone, Copy)]
+struct VocabCaps {
+    graphs: usize,
+    classes: usize,
+    predicates: usize,
+}
+
+/// Caps as a function of the effective context window. The sample is the
+/// biggest accuracy lever there is, and 8 classes + 20 predicates is a keyhole
+/// — but only a window that can actually HOLD a bigger sample should pay for
+/// one: over-filling a small window makes the budgeter drop the vocabulary
+/// section entirely, which is strictly worse than a small sample. The 32k
+/// threshold leaves a large-caps worst case (~16k estimated tokens of IRIs)
+/// comfortably inside the window next to the protocol, context and output
+/// budget. Deliberately NOT graduated further — the cache below stores
+/// rendered summaries per graph, so caps must be stable per process for
+/// prompts to stay deterministic.
+fn caps_for_window(window: Option<usize>) -> VocabCaps {
+    match window {
+        Some(w) if w >= 32_768 => VocabCaps {
+            graphs: 20,
+            classes: 16,
+            predicates: 32,
+        },
+        _ => VocabCaps {
+            graphs: VOCAB_GRAPH_LIMIT,
+            classes: VOCAB_CLASS_LIMIT,
+            predicates: VOCAB_PRED_LIMIT,
+        },
+    }
+}
+
 /// How long a sampled summary stays fresh. Vocabulary changes rarely; five
 /// minutes keeps chat turns from re-scanning while still tracking imports.
 const VOCAB_TTL: Duration = Duration::from_secs(300);
@@ -2386,12 +3478,6 @@ fn vocab_cache() -> &'static Mutex<HashMap<String, (Instant, String)>> {
     static CACHE: OnceLock<Mutex<HashMap<String, (Instant, String)>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
-
-/// How many graphs the text index may pull to the front of the grounding list.
-const VOCAB_EVIDENCE_GRAPHS: usize = 4;
-/// How many text hits to resolve to graphs. Small: we want the graphs a few
-/// strong matches live in, not a survey.
-const VOCAB_EVIDENCE_HITS: usize = 12;
 
 /// Terms from the question worth looking up in the text index.
 ///
@@ -2424,19 +3510,349 @@ fn evidence_terms(text: &str) -> Vec<String> {
     out
 }
 
-/// Graphs that demonstrably contain something the question named.
+/// Function words and linked-data meta-vocabulary that must never spend one of
+/// the few full-text anchor slots. The meta words ("label", "broader", …)
+/// describe the SHAPE of the requested answer, not a domain entity, and would
+/// anchor to every vocabulary graph at once. Only words of ≥5 characters reach
+/// the check, so shorter function words need no entry.
+const ANCHOR_STOPWORDS: &[&str] = &[
+    // Dutch function words
+    "andere",
+    "binnen",
+    "buiten",
+    "eerste",
+    "graag",
+    "hierin",
+    "hoeveel",
+    "kunnen",
+    "moeten",
+    "tussen",
+    "tweede",
+    "waarom",
+    "waarvan",
+    "wanneer",
+    "welke",
+    "willen",
+    "zoals",
+    "zonder",
+    "zullen",
+    // English function words
+    "about",
+    "after",
+    "again",
+    "before",
+    "between",
+    "could",
+    "every",
+    "first",
+    "other",
+    "please",
+    "second",
+    "should",
+    "their",
+    "there",
+    "these",
+    "those",
+    "using",
+    "where",
+    "which",
+    "while",
+    "within",
+    "would",
+    // Linked-data meta words
+    "broader",
+    "class",
+    "classes",
+    "comment",
+    "comments",
+    "concept",
+    "concepts",
+    "conforms",
+    "dataset",
+    "datasets",
+    "graaf",
+    "grafen",
+    "graph",
+    "graphs",
+    "instance",
+    "instances",
+    "label",
+    "labels",
+    "links",
+    "model",
+    "modellen",
+    "models",
+    "named",
+    "narrower",
+    "properties",
+    "property",
+    "queries",
+    "query",
+    "relatie",
+    "relaties",
+    "relations",
+    "sparql",
+    "transitive",
+    "triple",
+    "triples",
+    "types",
+    "value",
+    "values",
+    "vocabulaire",
+    "vocabularies",
+    "vocabulary",
+    "waarde",
+    "waarden",
+];
+
+/// Ordinary content words from the question worth anchoring in the full-text
+/// index — the complement of [`evidence_terms`]: "beheerobject" or "draaibrug"
+/// rather than identifier-shaped tokens. `exclude` (the identifier terms) and
+/// the stopword list keep the few slots for words that name DOMAIN things.
+fn salient_terms(text: &str, exclude: &[String], cap: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in text.split(|c: char| !c.is_alphanumeric()) {
+        if raw.chars().count() < 5 {
+            continue;
+        }
+        let t = raw.to_lowercase();
+        if !t.chars().any(|c| c.is_alphabetic())
+            || ANCHOR_STOPWORDS.contains(&t.as_str())
+            || exclude.iter().any(|e| e.to_lowercase().contains(&t))
+            || out.contains(&t)
+        {
+            continue;
+        }
+        out.push(t);
+        if out.len() >= cap {
+            break;
+        }
+    }
+    out
+}
+
+/// Absolute IRIs pasted into recent user messages, newest message first,
+/// verbatim. A pasted IRI is the strongest possible signal of what a question
+/// is about — and the one signal the literal-oriented evidence pass ignores
+/// entirely (an IRI is not a literal, so the text index never sees it).
+/// Deliberately conservative: http(s) only, no query strings (those are UI
+/// links, not RDF IRIs), punctuation and `<…>` wrapping trimmed.
+fn mentioned_iris(messages: &[ChatMessage]) -> Vec<String> {
+    const TRAILERS: &[char] = &['>', ')', ']', '"', '\'', ',', '.', ';', ':', '!', '?'];
+    let mut out: Vec<String> = Vec::new();
+    'msgs: for m in messages
+        .iter()
+        .rev()
+        .filter(|m| m.role != "assistant")
+        .take(6)
+    {
+        let mut rest = m.content.as_str();
+        while let Some(i) = rest.find("http") {
+            rest = &rest[i..];
+            if !(rest.starts_with("http://") || rest.starts_with("https://")) {
+                rest = &rest["http".len()..];
+                continue;
+            }
+            let end = rest
+                .find(|c: char| {
+                    c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | ')' | ']')
+                })
+                .unwrap_or(rest.len());
+            let iri = rest[..end].trim_end_matches(TRAILERS);
+            if iri.len() >= 12
+                && iri.len() <= 300
+                && !iri.contains('?')
+                && !out.iter().any(|o| o == iri)
+            {
+                out.push(iri.to_string());
+                if out.len() >= MENTIONED_IRI_LIMIT {
+                    break 'msgs;
+                }
+            }
+            rest = &rest[end..];
+        }
+    }
+    out
+}
+
+/// Where one pasted IRI demonstrably occurs, checked against the store itself.
+struct IriLocation {
+    iri: String,
+    /// Triple position of the sighting: "subject" | "predicate" | "object".
+    role: &'static str,
+    /// Up to [`MENTIONED_IRI_GRAPH_LIMIT`] in-scope graphs containing it.
+    graphs: Vec<String>,
+    /// The IRI is itself a named graph in the caller's read scope.
+    is_named_graph: bool,
+}
+
+/// Distinct in-scope graphs among the first [`IRI_PROBE_QUAD_SCAN`] quads of a
+/// pattern probe.
+fn in_scope_graphs_of<E>(
+    quads: impl Iterator<Item = Result<oxigraph::model::Quad, E>>,
+    in_scope: &HashSet<String>,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for quad in quads.take(IRI_PROBE_QUAD_SCAN).flatten() {
+        if let oxigraph::model::GraphName::NamedNode(g) = quad.graph_name {
+            let g = g.as_str();
+            if in_scope.contains(g) && !out.iter().any(|o| o == g) {
+                out.push(g.to_string());
+                if out.len() >= MENTIONED_IRI_GRAPH_LIMIT {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Locate each pasted IRI with indexed quad probes: which readable graphs hold
+/// it, and in which triple position. Everything here is bounded — three probes
+/// per IRI, each scanning at most [`IRI_PROBE_QUAD_SCAN`] quads — so a turn
+/// pays microseconds for ground truth the model otherwise guesses at.
 ///
-/// Size and list position are both proxies for "is this graph relevant", and
-/// both are wrong often enough to matter: a 74-triple asset-management graph is
-/// the whole answer to a question about an asset code, yet it competes for slots
-/// with every other small graph in the store. The text index knows which graph
-/// actually holds the literal, so ask it. Best-effort throughout — no index, no
-/// identifier-shaped terms, or no hits simply leaves the ordering as it was.
-async fn evidence_graphs(
+/// Privacy note: the rendered line for an IRI that exists only in graphs the
+/// caller cannot read is identical to the line for one that exists nowhere in
+/// scope ("occurs in no graph you can read") — this must not become an
+/// existence oracle for unreadable data.
+fn locate_iris_blocking(
+    store: &TripleStore,
+    iris: &[String],
+    in_scope: &HashSet<String>,
+) -> Vec<IriLocation> {
+    use oxigraph::model::{NamedNodeRef, NamedOrBlankNodeRef, TermRef};
+    iris.iter()
+        .map(|iri| {
+            let mut loc = IriLocation {
+                iri: iri.clone(),
+                role: "",
+                graphs: Vec::new(),
+                is_named_graph: false,
+            };
+            let Ok(node) = NamedNodeRef::new(iri.as_str()) else {
+                return loc;
+            };
+            let s = store.store();
+            loc.is_named_graph =
+                in_scope.contains(iri.as_str()) && s.contains_named_graph(node).unwrap_or(false);
+            let subj = in_scope_graphs_of(
+                s.quads_for_pattern(Some(NamedOrBlankNodeRef::NamedNode(node)), None, None, None),
+                in_scope,
+            );
+            if !subj.is_empty() {
+                loc.role = "subject";
+                loc.graphs = subj;
+                return loc;
+            }
+            let pred =
+                in_scope_graphs_of(s.quads_for_pattern(None, Some(node), None, None), in_scope);
+            if !pred.is_empty() {
+                loc.role = "predicate";
+                loc.graphs = pred;
+                return loc;
+            }
+            let obj = in_scope_graphs_of(
+                s.quads_for_pattern(None, None, Some(TermRef::NamedNode(node)), None),
+                in_scope,
+            );
+            if !obj.is_empty() {
+                loc.role = "object";
+                loc.graphs = obj;
+            }
+            loc
+        })
+        .collect()
+}
+
+/// Does this IRI occur anywhere in the store — as subject, predicate, object,
+/// or as a named graph? Four `.next()`-bounded indexed probes; no scans.
+fn iri_occurs_blocking(store: &TripleStore, iri: &str) -> bool {
+    use oxigraph::model::{NamedNodeRef, NamedOrBlankNodeRef, TermRef};
+    let Ok(node) = NamedNodeRef::new(iri) else {
+        return false;
+    };
+    let s = store.store();
+    s.quads_for_pattern(Some(NamedOrBlankNodeRef::NamedNode(node)), None, None, None)
+        .next()
+        .is_some()
+        || s.quads_for_pattern(None, Some(node), None, None)
+            .next()
+            .is_some()
+        || s.quads_for_pattern(None, None, Some(TermRef::NamedNode(node)), None)
+            .next()
+            .is_some()
+        || s.contains_named_graph(node).unwrap_or(false)
+}
+
+/// The subset of `candidates` that occurs nowhere in the store at all.
+///
+/// This is what makes the invented-IRI check safe to enforce: the sampled
+/// vocabulary is a tiny window (8 classes + 20 predicates per graph), so
+/// "absent from the sample" routinely condemned REAL terms — `rdfs:label`
+/// where only `rdfs:comment` made a sample, a class outside a big ontology's
+/// top 8, even a legitimate named graph whose siblings were sampled. Each
+/// rejection burned a retrieval round with a false "does not exist" error and
+/// steered the model away from IRIs the user had pasted verbatim. Verifying
+/// candidates against the store itself keeps the real protection — an IRI that
+/// occurs nowhere IS invented — at the cost of a few indexed probes.
+///
+/// Fail-open on runtime errors: this check exists to help retrieval, and a
+/// wrongly-run query only returns rows the caller may see anyway.
+async fn absent_iris(state: &AppState, candidates: Vec<String>) -> Vec<String> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let store = state.store.clone();
+    tokio::task::spawn_blocking(move || {
+        candidates
+            .into_iter()
+            .filter(|iri| !iri_occurs_blocking(&store, iri))
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Everything a turn can learn about what the question NAMES, before the model
+/// writes its first query.
+struct QuestionOrientation {
+    /// IRIs pasted into recent user messages, verbatim — exempt from the
+    /// invented-IRI check (the user asked about them by name; if one is truly
+    /// absent, the honest outcome is a query that finds nothing, not an error
+    /// claiming the user invented it).
+    mentioned: Vec<String>,
+    /// Graphs that demonstrably contain something the question named, best
+    /// evidence first — they take vocabulary slots ahead of size heuristics.
+    graphs: Vec<String>,
+    /// Rendered `# WHERE THIS CONVERSATION'S NAMES OCCUR` prompt section
+    /// (empty when there is nothing to say).
+    section: String,
+}
+
+/// Ground the turn in what the question names, from three sources: IRIs the
+/// user pasted (located with indexed quad probes), identifier-shaped tokens
+/// and salient content words (both resolved through the full-text index to the
+/// subjects and graphs that actually carry them). This is the orientation the
+/// model was told to do with `text:search` and reliably skipped — done
+/// mechanically, it costs milliseconds and turns "guess a graph, get 0 rows,
+/// report the data as absent" into a first query against the right graph.
+/// Best-effort throughout: no index, no matches, or probe errors just shrink
+/// the section.
+/// A text-index hit reduced to the fields the orientation section renders.
+/// Local (rather than `text_search::index::SearchHit`) so the code compiles
+/// with the `text-search` feature off.
+struct AnchorHit {
+    subject: String,
+    predicate: String,
+    graph: String,
+}
+
+async fn question_orientation(
     state: &AppState,
     messages: &[ChatMessage],
     in_scope: &[String],
-) -> Vec<String> {
+) -> QuestionOrientation {
     let text: String = messages
         .iter()
         .rev()
@@ -2445,106 +3861,349 @@ async fn evidence_graphs(
         .map(|m| m.content.as_str())
         .collect::<Vec<_>>()
         .join(" ");
-    let terms = evidence_terms(&text);
-    if terms.is_empty() {
-        return Vec::new();
+    let mentioned = mentioned_iris(messages);
+    // Cut pasted IRIs out of the text before tokenising — a URL shreds into
+    // meaningless tokens (the scheme, the domain) that would hijack term slots.
+    let mut prose = text.clone();
+    for iri in &mentioned {
+        prose = prose.replace(iri.as_str(), " ");
     }
-    // Preferred path: the text index. It is rebuilt lazily and only on demand, so
-    // sync first — searching without that sees whatever was last committed, which
-    // after a fresh import is nothing.
-    #[cfg(feature = "text-search")]
-    state.sync_text_index_if_dirty();
-    let index = state.text_index.clone();
-    let search_terms = terms.clone();
-    // The same read boundary the graph filter below applies, pushed into the
-    // index instead: hits from graphs the caller cannot read are dropped by the
-    // search itself, so they never consume one of the few VOCAB_EVIDENCE_HITS
-    // slots and crowd out a subject that is actually visible.
-    let scope = crate::text_search::index::GraphScopeOwned::Only(Arc::new(
-        in_scope.iter().cloned().collect::<HashSet<String>>(),
-    ));
-    let subjects: Vec<String> = match index {
-        None => Vec::new(),
-        Some(index) => tokio::task::spawn_blocking(move || {
-            let mut subs: Vec<String> = Vec::new();
-            for term in search_terms {
-                // Quoted: an identifier with hyphens is several tokens to the
-                // query parser, and the unquoted form would match any of them.
-                let q = format!("\"{}\"", term.replace('"', ""));
-                let Ok(hits) = index.search(&q, None, scope.as_scope(), VOCAB_EVIDENCE_HITS) else {
-                    continue;
-                };
-                for h in hits {
-                    if !subs.contains(&h.subject) {
-                        subs.push(h.subject);
-                    }
-                }
-            }
-            subs
-        })
-        .await
-        .unwrap_or_default(),
+    let id_terms = evidence_terms(&prose);
+    let name_terms = salient_terms(&prose, &id_terms, ANCHOR_TERM_LIMIT);
+
+    let scope_set: Arc<HashSet<String>> = Arc::new(in_scope.iter().cloned().collect());
+
+    // Pasted IRIs → authoritative store probes.
+    let locations: Vec<IriLocation> = if mentioned.is_empty() {
+        Vec::new()
+    } else {
+        let store = state.store.clone();
+        let iris = mentioned.clone();
+        let scope = Arc::clone(&scope_set);
+        tokio::task::spawn_blocking(move || locate_iris_blocking(&store, &iris, &scope))
+            .await
+            .unwrap_or_default()
     };
 
-    // Fall back to matching the literal directly when the index yields nothing —
-    // it may be unavailable, not yet built, or (observed on a store whose index
-    // held 540k documents) simply not answering. A scan is the expensive way to
-    // ask this question, so it is strictly a fallback: bounded by LIMIT, by the
-    // deadline below, and by only running for identifier-shaped terms, whose
+    // Identifier + name terms → the full-text index (whole-word, ranked, and
+    // scope-filtered by the search itself). Synced first: the index is rebuilt
+    // lazily, and searching an unsynced index right after an import sees
+    // nothing.
+    let terms: Vec<String> = id_terms.iter().chain(name_terms.iter()).cloned().collect();
+    let mut anchors: Vec<(String, AnchorHit)> = Vec::new();
+    #[cfg(feature = "text-search")]
+    if !terms.is_empty() {
+        if let Some(index) = state.text_index.clone() {
+            let scope = crate::text_search::index::GraphScopeOwned::Only(Arc::clone(&scope_set));
+            let search_terms = terms.clone();
+            let sync_state = state.clone();
+            anchors = tokio::task::spawn_blocking(move || {
+                // Sync INSIDE the blocking task: a dirty index means a
+                // whole-store reindex, and running that on the async runtime
+                // (the old call site) stalled every in-flight request for its
+                // duration.
+                sync_state.sync_text_index_if_dirty();
+                let mut out: Vec<(String, AnchorHit)> = Vec::new();
+                for term in search_terms {
+                    // Quoted: an identifier with hyphens is several tokens to
+                    // the query parser, and the unquoted form matches any of them.
+                    let q = format!("\"{}\"", term.replace('"', ""));
+                    let Ok(hits) = index.search(&q, None, scope.as_scope(), ANCHOR_HITS_PER_TERM)
+                    else {
+                        continue;
+                    };
+                    for h in hits {
+                        if !out.iter().any(|(_, e)| e.subject == h.subject) {
+                            out.push((
+                                term.clone(),
+                                AnchorHit {
+                                    subject: h.subject,
+                                    predicate: h.predicate,
+                                    graph: h.graph,
+                                },
+                            ));
+                        }
+                    }
+                }
+                out
+            })
+            .await
+            .unwrap_or_default();
+        }
+    }
+    #[cfg(not(feature = "text-search"))]
+    let _ = &terms;
+
+    // Fall back to matching identifier literals directly when the index gave
+    // nothing — it may be unavailable, not yet built, or (observed on a store
+    // whose index held 540k documents) simply not answering. Strictly bounded:
+    // LIMIT, the vocab time budget, and identifier-shaped terms only, whose
     // whole point is that they match almost nothing.
-    let store = state.store.clone();
-    let sparql = if subjects.is_empty() {
-        let filters = terms
+    let mut fallback_graphs: Vec<String> = Vec::new();
+    if anchors.is_empty() && !id_terms.is_empty() {
+        let filters = id_terms
             .iter()
             .map(|t| format!("CONTAINS(STR(?o), \"{}\")", t.replace('"', "")))
             .collect::<Vec<_>>()
             .join(" || ");
-        format!(
+        let sparql = format!(
             "SELECT DISTINCT ?g WHERE {{ GRAPH ?g {{ ?s ?p ?o . \
-             FILTER(isLiteral(?o) && ({filters})) }} }} LIMIT {VOCAB_EVIDENCE_GRAPHS}"
-        )
-    } else {
-        // One lookup for every hit at once; subject-position patterns are indexed,
-        // so this stays cheap even on a large store.
-        let values = subjects
-            .iter()
-            .take(VOCAB_EVIDENCE_HITS)
-            .map(|s| format!("<{s}>"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        format!("SELECT DISTINCT ?g WHERE {{ VALUES ?s {{ {values} }} GRAPH ?g {{ ?s ?p ?o }} }}")
-    };
-    let found: Vec<String> = tokio::time::timeout(
-        VOCAB_TIME_BUDGET,
-        tokio::task::spawn_blocking(move || {
-            let mut gs = Vec::new();
-            if let Ok(QueryResults::Solutions(sols)) = store.query(&sparql) {
-                for sol in sols.flatten() {
-                    if let Some(Term::NamedNode(n)) = sol.get("g") {
-                        gs.push(n.as_str().to_string());
+             FILTER(isLiteral(?o) && ({filters})) }} }} LIMIT {ORIENTATION_GRAPH_LIMIT}"
+        );
+        let store = state.store.clone();
+        fallback_graphs = tokio::time::timeout(
+            VOCAB_TIME_BUDGET,
+            tokio::task::spawn_blocking(move || {
+                let mut gs = Vec::new();
+                if let Ok(QueryResults::Solutions(sols)) = store.query(&sparql) {
+                    for sol in sols.flatten() {
+                        if let Some(Term::NamedNode(n)) = sol.get("g") {
+                            gs.push(n.as_str().to_string());
+                        }
                     }
                 }
+                gs
+            }),
+        )
+        .await
+        .map(|r| r.unwrap_or_default())
+        .unwrap_or_default();
+    }
+
+    // Graph priority: located-IRI graphs are the strongest evidence, then the
+    // graphs the text hits live in, then the literal-scan fallback.
+    let mut graphs: Vec<String> = Vec::new();
+    let push = |g: &str, graphs: &mut Vec<String>| {
+        if graphs.len() < ORIENTATION_GRAPH_LIMIT
+            && scope_set.contains(g)
+            && !graphs.iter().any(|o| o == g)
+        {
+            graphs.push(g.to_string());
+        }
+    };
+    for loc in &locations {
+        for g in &loc.graphs {
+            push(g, &mut graphs);
+        }
+    }
+    for (_, h) in &anchors {
+        push(&h.graph, &mut graphs);
+    }
+    for g in &fallback_graphs {
+        push(g, &mut graphs);
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    for loc in &locations {
+        if !loc.graphs.is_empty() {
+            let gs = loc
+                .graphs
+                .iter()
+                .map(|g| format!("<{g}>"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("- <{}> occurs as {} in {}", loc.iri, loc.role, gs));
+        } else if loc.is_named_graph {
+            lines.push(format!("- <{}> is itself a named graph", loc.iri));
+        } else {
+            lines.push(format!(
+                "- <{}> occurs in no graph you can read — if a query for it finds nothing, \
+                 say you could not find it",
+                loc.iri
+            ));
+        }
+    }
+    for (term, h) in anchors.iter().take(ANCHOR_LINE_LIMIT) {
+        lines.push(format!(
+            "- \"{}\" matches <{}> (via <{}>) in graph <{}>",
+            term, h.subject, h.predicate, h.graph
+        ));
+    }
+    // The installed-vocabulary term index knows the STANDARD term for a plain
+    // word ("beheerobject" → the class that models it) even when no graph in
+    // scope carries it as a literal — candidate IRIs with their labels, so the
+    // model reaches for a real term instead of coining one.
+    lines.extend(vocab_term_lines(state, &name_terms, &id_terms).await);
+    let section = if lines.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n# WHERE THIS CONVERSATION'S NAMES OCCUR (verified in the store just now — \
+             prefer these graphs, copy these IRIs exactly)\n{}
+",
+            lines.join("\n")
+        )
+    };
+
+    QuestionOrientation {
+        mentioned,
+        graphs,
+        section,
+    }
+}
+
+/// How many question words to look up in the vocabulary term index, and how
+/// many candidate terms each may contribute to the orientation section.
+const VOCAB_TERM_LOOKUPS: usize = 2;
+const VOCAB_TERM_HITS: usize = 3;
+
+/// Candidate standard-vocabulary terms for the question's words, from the
+/// platform's installed-vocabulary search index (the same engine behind
+/// `/api/vocab/terms/search`). Best-effort: no engine, no feature, or no hits
+/// renders nothing.
+#[cfg(feature = "vocab-search")]
+async fn vocab_term_lines(
+    state: &AppState,
+    name_terms: &[String],
+    id_terms: &[String],
+) -> Vec<String> {
+    let Some(engine) = state.vocab_engine.clone() else {
+        return Vec::new();
+    };
+    let terms: Vec<String> = name_terms
+        .iter()
+        .chain(id_terms.iter())
+        .take(VOCAB_TERM_LOOKUPS)
+        .cloned()
+        .collect();
+    if terms.is_empty() {
+        return Vec::new();
+    }
+    crate::vocab_search::routes::ensure_fresh(state).await;
+    tokio::task::spawn_blocking(move || {
+        use crate::vocab_search::corpus::TermType;
+        let mut lines: Vec<String> = Vec::new();
+        for term in terms {
+            let outcome = engine.search_terms(
+                &term,
+                &[TermType::Class, TermType::Property],
+                None,
+                &[],
+                None,
+                1,
+                VOCAB_TERM_HITS,
+            );
+            for c in outcome.results.into_iter().take(VOCAB_TERM_HITS) {
+                lines.push(format!(
+                    "- \"{}\" could be the vocabulary term {} <{}> ({} in {})",
+                    term, c.prefixed, c.iri, c.ttype, c.vocab
+                ));
             }
-            gs
+        }
+        lines
+    })
+    .await
+    .unwrap_or_default()
+}
+
+#[cfg(not(feature = "vocab-search"))]
+async fn vocab_term_lines(
+    _state: &AppState,
+    _name_terms: &[String],
+    _id_terms: &[String],
+) -> Vec<String> {
+    Vec::new()
+}
+
+/// One graph's cached vocabulary block, sampling on a cold cache — bounded by
+/// `deadline`, the summary cached for [`VOCAB_TTL`] either way. `None` when the
+/// deadline passed before the sample landed (the cost of an in-flight sample is
+/// already paid, so it is awaited and cached, mirroring the batch sampler).
+async fn graph_summary_cached(
+    state: &AppState,
+    graph: &str,
+    caps: VocabCaps,
+    deadline: Instant,
+) -> Option<String> {
+    if let Some((at, summary)) = vocab_cache().lock().unwrap().get(graph) {
+        if at.elapsed() < VOCAB_TTL {
+            return Some(summary.clone());
+        }
+    }
+    if Instant::now() >= deadline {
+        return None;
+    }
+    let store = state.store.clone();
+    let g2 = graph.to_string();
+    let summary = tokio::time::timeout(
+        deadline.saturating_duration_since(Instant::now()),
+        tokio::task::spawn_blocking(move || {
+            graph_vocab_summary(&store, &g2, caps).unwrap_or_default()
         }),
     )
     .await
-    .map(|r| r.unwrap_or_default())
-    .unwrap_or_default();
+    .ok()?
+    .ok()?;
+    vocab_cache()
+        .lock()
+        .unwrap()
+        .insert(graph.to_string(), (Instant::now(), summary.clone()));
+    Some(summary)
+}
 
-    // Only graphs the caller may actually read.
-    found
-        .into_iter()
-        .filter(|g| in_scope.contains(g))
-        .take(VOCAB_EVIDENCE_GRAPHS)
-        .collect()
+/// Time budget for enriching one zero-row repair hint with the queried graphs'
+/// real vocabulary — a human is mid-turn, so this stays well under the batch
+/// sampler's budget (and is usually a pure cache hit anyway).
+const QUERIED_VOCAB_BUDGET: Duration = Duration::from_millis(1500);
+
+/// Vocabulary blocks for the graphs a zero-row query actually targeted, for
+/// the repair hint. The prompt's sampled section covers only `caps.graphs`
+/// graphs — the query may well have targeted one outside that window, and
+/// "re-read the vocabulary section" is then advice about a section that says
+/// nothing relevant. Sampling the queried graph on demand turns the hint into
+/// ground truth. Every `<iri>` in the query that is one of the caller's
+/// readable graphs is, in practice, a `GRAPH` target.
+async fn queried_graph_vocab(
+    state: &AppState,
+    query: &str,
+    in_scope: &HashSet<String>,
+    caps: VocabCaps,
+) -> String {
+    let mut targets: Vec<String> = Vec::new();
+    let mut rest = query;
+    while let Some(start) = rest.find('<') {
+        let Some(len) = rest[start + 1..].find('>') else {
+            break;
+        };
+        let iri = &rest[start + 1..start + 1 + len];
+        rest = &rest[start + 1 + len + 1..];
+        if in_scope.contains(iri) && !targets.iter().any(|t| t == iri) {
+            targets.push(iri.to_string());
+            if targets.len() >= 2 {
+                break;
+            }
+        }
+    }
+    let deadline = Instant::now() + QUERIED_VOCAB_BUDGET;
+    let mut blocks: Vec<String> = Vec::new();
+    for g in &targets {
+        if let Some(s) = graph_summary_cached(state, g, caps, deadline).await {
+            if !s.is_empty() {
+                blocks.push(s);
+            }
+        }
+    }
+    if blocks.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\nThe queried graph(s) actually contain:\n{}
+Build the pattern ONLY from these \
+         IRIs, copied exactly.",
+        blocks.join("\n")
+    )
 }
 
 /// A prompt section listing sampled classes + predicates per in-scope graph
-/// (up to [`VOCAB_GRAPH_LIMIT`] graphs). Served from a TTL cache; cold graphs are
+/// (up to `caps.graphs`). Served from a TTL cache; cold graphs are
 /// sampled inside a strict time budget — on timeout the turn proceeds with
 /// whatever was sampled or already cached.
-async fn graph_vocab_context(state: &AppState, graphs: &[String], evidence: &[String]) -> String {
+async fn graph_vocab_context(
+    state: &AppState,
+    graphs: &[String],
+    evidence: &[String],
+    caps: VocabCaps,
+) -> Vec<String> {
     // WHICH graphs get a slot matters as much as sampling them reliably. Taking
     // the first N in list order let a handful of huge derived layers (an IFC
     // import's ifcOWL lift is ~700k triples and dozens of graphs) consume every
@@ -2562,7 +4221,7 @@ async fn graph_vocab_context(state: &AppState, graphs: &[String], evidence: &[St
     // Graphs the text index proved contain something the question named go
     // FIRST — that is direct evidence of relevance, where size and list position
     // are only proxies.
-    let mentioned = graphs.len().min(VOCAB_GRAPH_LIMIT / 2);
+    let mentioned = graphs.len().min(caps.graphs / 2);
     let mut rest: Vec<&String> = graphs
         .iter()
         .skip(mentioned)
@@ -2587,10 +4246,10 @@ async fn graph_vocab_context(state: &AppState, graphs: &[String], evidence: &[St
                 .filter(|g| !evidence.contains(g)),
         )
         .chain(rest)
-        .take(VOCAB_GRAPH_LIMIT)
+        .take(caps.graphs)
         .collect();
     if wanted.is_empty() {
-        return String::new();
+        return Vec::new();
     }
     let mut summaries: HashMap<String, String> = HashMap::new();
     let mut missing: Vec<String> = Vec::new();
@@ -2623,34 +4282,24 @@ async fn graph_vocab_context(state: &AppState, graphs: &[String], evidence: &[St
         let deadline = Instant::now() + VOCAB_TIME_BUDGET;
         missing.sort_by_key(|g| state.store.graph_count_cached(Some(g)));
         for g in missing {
-            if Instant::now() >= deadline {
-                break;
-            }
-            let store = state.store.clone();
-            let g2 = g.clone();
-            let Ok(Ok(summary)) = tokio::time::timeout(
-                deadline.saturating_duration_since(Instant::now()),
-                tokio::task::spawn_blocking(move || {
-                    graph_vocab_summary(&store, &g2).unwrap_or_default()
-                }),
-            )
-            .await
-            else {
+            let Some(summary) = graph_summary_cached(state, &g, caps, deadline).await else {
                 break;
             };
-            vocab_cache()
-                .lock()
-                .unwrap()
-                .insert(g.clone(), (Instant::now(), summary.clone()));
             summaries.insert(g, summary);
         }
     }
-    let blocks: Vec<&str> = wanted
+    // In priority order: the prompt budgeter trims from the END of this list.
+    wanted
         .iter()
         .filter_map(|g| summaries.get(*g))
-        .map(String::as_str)
-        .filter(|s| !s.is_empty())
-        .collect();
+        .filter(|summary| !summary.is_empty())
+        .cloned()
+        .collect()
+}
+
+/// The system prompt's vocabulary section for `blocks` (in priority order);
+/// empty when there are none.
+fn vocab_section(blocks: &[String]) -> String {
     if blocks.is_empty() {
         return String::new();
     }
@@ -2660,9 +4309,23 @@ async fn graph_vocab_context(state: &AppState, graphs: &[String], evidence: &[St
     )
 }
 
+/// rdf:type OBJECTS that mark a graph as *defining* terms rather than holding
+/// instance data: a T-Box graph's `?s a ?x` sample yields these meta-classes,
+/// never the domain classes it defines (those sit in subject position). The
+/// distinction is exactly what the model needs when choosing between a
+/// definitions graph and an instance graph for a "what does X mean" question.
+const DEFINING_META_CLASSES: [&str; 6] = [
+    "http://www.w3.org/2002/07/owl#Class",
+    "http://www.w3.org/2000/01/rdf-schema#Class",
+    "http://www.w3.org/2002/07/owl#ObjectProperty",
+    "http://www.w3.org/2002/07/owl#DatatypeProperty",
+    "http://www.w3.org/2004/02/skos/core#Concept",
+    "http://www.w3.org/2004/02/skos/core#ConceptScheme",
+];
+
 /// Sample one graph's vocabulary into a summary block, or `None` when the graph
 /// yields nothing usable (empty, or unreadable).
-fn graph_vocab_summary(store: &TripleStore, graph: &str) -> Option<String> {
+fn graph_vocab_summary(store: &TripleStore, graph: &str, caps: VocabCaps) -> Option<String> {
     // Frequency-ordered on purpose. The first cut took the first-N DISTINCT
     // IRIs in storage order — arbitrary — and on a graph with more predicates
     // than the cap it dropped exactly the ones questions hinge on (the BAG
@@ -2673,19 +4336,20 @@ fn graph_vocab_summary(store: &TripleStore, graph: &str) -> Option<String> {
     // (dct:license on a root node) to the tail, which the cap then trims. The
     // GROUP BY runs against the in-memory mirror and is guarded by the
     // sampling time budget; results cache for VOCAB_TTL as before.
+    let (class_cap, pred_cap) = (caps.classes, caps.predicates);
     let classes = sample_distinct_iris(
         store,
         &format!(
-            "SELECT ?x WHERE {{ {{ SELECT ?x (COUNT(*) AS ?n) WHERE {{ GRAPH <{graph}> {{ ?s a ?x }} }} GROUP BY ?x }} }} ORDER BY DESC(?n) LIMIT {VOCAB_CLASS_LIMIT}"
+            "SELECT ?x WHERE {{ {{ SELECT ?x (COUNT(*) AS ?n) WHERE {{ GRAPH <{graph}> {{ ?s a ?x }} }} GROUP BY ?x }} }} ORDER BY DESC(?n) LIMIT {class_cap}"
         ),
-        VOCAB_CLASS_LIMIT,
+        class_cap,
     );
     let predicates = sample_distinct_iris(
         store,
         &format!(
-            "SELECT ?x WHERE {{ {{ SELECT ?x (COUNT(*) AS ?n) WHERE {{ GRAPH <{graph}> {{ ?s ?x ?o }} }} GROUP BY ?x }} }} ORDER BY DESC(?n) LIMIT {VOCAB_PRED_LIMIT}"
+            "SELECT ?x WHERE {{ {{ SELECT ?x (COUNT(*) AS ?n) WHERE {{ GRAPH <{graph}> {{ ?s ?x ?o }} }} GROUP BY ?x }} }} ORDER BY DESC(?n) LIMIT {pred_cap}"
         ),
-        VOCAB_PRED_LIMIT,
+        pred_cap,
     );
     if classes.is_empty() && predicates.is_empty() {
         return None;
@@ -2696,6 +4360,17 @@ fn graph_vocab_summary(store: &TripleStore, graph: &str) -> Option<String> {
     }
     if !predicates.is_empty() {
         s.push_str(&format!("\n  predicates: {}", predicates.join(" ")));
+    }
+    // The marker line carries no angle brackets on purpose: everything wrapped
+    // in <…> inside a cached summary is treated as a known IRI by
+    // [`known_vocab_iris`].
+    if classes
+        .iter()
+        .any(|c| DEFINING_META_CLASSES.iter().any(|m| c == &format!("<{m}>")))
+    {
+        s.push_str(
+            "\n  (this graph DEFINES terms — query it for definitions, labels and term relations)",
+        );
     }
     Some(s)
 }
@@ -2748,7 +4423,7 @@ async fn run_chat_query_timed(
     query: &str,
     graphs: &Arc<HashSet<String>>,
 ) -> Result<ChatQueryResult, AppError> {
-    let secs = state.query_timeout_secs.min(CHAT_QUERY_MAX_SECS);
+    let secs = state.query_timeout_secs.min(chat_query_max_secs());
     match tokio::time::timeout(
         Duration::from_secs(secs),
         run_chat_query(state, query, graphs),
@@ -2966,8 +4641,9 @@ fn extract_query_request(reply: &str, allow_fence: bool) -> Option<String> {
 /// the `SPARQL:` execution marker. Read strictly, that reply retrieves nothing:
 /// the turn ends, the fence renders as a query card, and the model then answers
 /// from memory. Treating the fence as a directive is only safe while nothing has
-/// been retrieved yet this turn (see [`chat_query_request`]) — once rows are in,
-/// a fenced query is a *presented* query card and must stay one.
+/// been retrieved yet this turn — i.e. no round has succeeded; a failed round
+/// retrieved nothing — because once rows are in, a fenced query is a
+/// *presented* query card and must stay one.
 fn first_sparql_fence(reply: &str) -> Option<String> {
     let mut rest = reply;
     while let Some(open) = rest.find("```") {
@@ -2982,6 +4658,23 @@ fn first_sparql_fence(reply: &str) -> Option<String> {
         rest = &body[end + 3..];
     }
     None
+}
+
+/// The parser's message, plus an actionable hint for the failure both a 1.5B
+/// and a 7.6B model produced live: an aggregate projected next to a plain
+/// variable with no GROUP BY. Oxigraph reports that as "The SELECT contains a
+/// variable that is unbound", which the models could not act on — they resent
+/// the query unchanged.
+fn parse_error_message(parse_err: &str) -> String {
+    let mut msg = format!("invalid SPARQL: {parse_err}");
+    if parse_err.contains("variable that is unbound") {
+        msg.push_str(
+            " — a SELECT that contains an aggregate (COUNT/MIN/MAX/SUM/AVG) may project \
+             ONLY aggregates and GROUP BY variables: add `GROUP BY ?var` for each plain \
+             variable you project, or drop the aggregate.",
+        );
+    }
+    msg
 }
 
 /// Does this text contain a SPARQL *read* query form? Updates are never run
@@ -3007,6 +4700,96 @@ fn directive_pos(reply: &str) -> Option<usize> {
         offset += line.len() + 1;
     }
     None
+}
+
+/// True when a reply opens an ```ask fence. Asking the user IS a complete,
+/// legitimate reply — it must not be nudged into querying, and it carries no
+/// data to caveat.
+fn contains_ask_fence(reply: &str) -> bool {
+    reply.lines().any(|line| {
+        let t = line.trim_start();
+        let fence = match t.bytes().next() {
+            Some(c @ (b'`' | b'~')) => c,
+            _ => return false,
+        };
+        let run = t.bytes().take_while(|&b| b == fence).count();
+        run >= 3 && t[run..].trim().eq_ignore_ascii_case("ask")
+    })
+}
+
+/// Cap on declared plan items / their length — the plan is a working note the
+/// platform repeats back each round, not a place to store an essay.
+const PLAN_MAX_ITEMS: usize = 6;
+const PLAN_ITEM_MAX_CHARS: usize = 160;
+
+/// The numbered plan a reply declared under a line-anchored `PLAN:` — the
+/// query-decomposition step for multi-part questions. Returns the normalised
+/// item lines, or `None` when the reply declared none.
+fn extract_plan(reply: &str) -> Option<String> {
+    let mut found = false;
+    let mut items: Vec<String> = Vec::new();
+    for line in reply.lines() {
+        let t = line.trim();
+        if !found {
+            if let Some(rest) = t
+                .get(..5)
+                .filter(|head| head.eq_ignore_ascii_case("PLAN:"))
+                .map(|_| t[5..].trim())
+            {
+                found = true;
+                if !rest.is_empty() {
+                    items.push(truncate(rest, PLAN_ITEM_MAX_CHARS));
+                }
+            }
+            continue;
+        }
+        let is_item = t
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit() || c == '-' || c == '*')
+            .unwrap_or(false);
+        if !is_item {
+            break;
+        }
+        items.push(truncate(t, PLAN_ITEM_MAX_CHARS));
+        if items.len() >= PLAN_MAX_ITEMS {
+            break;
+        }
+    }
+    (found && !items.is_empty()).then(|| items.join("\n"))
+}
+
+/// Remove a `PLAN:` block from a final answer — the plan is retrieval-loop
+/// working state, already mirrored in the follow-up prompts, and showing it to
+/// the user reads as unfinished scratch work.
+fn strip_plan_block(reply: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let mut in_plan = false;
+    for line in reply.lines() {
+        let t = line.trim();
+        if !in_plan {
+            if t.get(..5)
+                .map(|head| head.eq_ignore_ascii_case("PLAN:"))
+                .unwrap_or(false)
+            {
+                in_plan = true;
+                continue;
+            }
+            out.push(line);
+            continue;
+        }
+        let is_item = t
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit() || c == '-' || c == '*')
+            .unwrap_or(false);
+        if is_item {
+            continue;
+        }
+        in_plan = false;
+        out.push(line);
+    }
+    out.join("\n").trim().to_string()
 }
 
 /// How much prose may surround a post-loop directive before the reply counts as
@@ -3088,6 +4871,13 @@ fn strip_code_fence(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
+        all_retrievals_empty, caps_for_window, contains_ask_fence, context_from_models_payload,
+        context_from_ollama_show, extract_plan, extract_tool_calls, graph_vocab_summary,
+        iri_occurs_blocking, is_ollama_show_payload, listed_model_ids, locate_iris_blocking,
+        mentioned_iris, model_matches, render_models_section, salient_terms, service_health,
+        strip_plan_block, LlmServiceHealth,
+    };
+    use super::{
         estimate_tokens, evidence_terms, extract_query_request, extract_sparql_directive,
         fallback_answer, find_ci, first_sparql_fence, history_within_budget,
         hoist_misplaced_modifiers, is_bare_sparql_directive, looks_like_wkt,
@@ -3098,7 +4888,7 @@ mod tests {
         CHAT_TABLE_MAX_CHARS, CHAT_WKT_CELL_MAX_CHARS,
     };
     use serde_json::json;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     fn msg(role: &str, content: &str) -> ChatMessage {
         ChatMessage {
@@ -3216,12 +5006,16 @@ mod tests {
     #[test]
     fn fence_scan_skips_non_sparql_and_non_query_blocks() {
         // A chart widget must never be mistaken for a query request.
-        let widgets = "```chart\n{\"type\":\"bar\",\"data\":[]}\n```\n\n```json\n{\"a\":1}\n```";
+        let widgets = "```chart\n{\"type\":\"bar\",\"data\":[]}
+```\n\n```json\n{\"a\":1}
+```";
         assert!(first_sparql_fence(widgets).is_none());
         // A sparql fence holding an update is not a read query.
         assert!(first_sparql_fence("```sparql\nDROP GRAPH <urn:g>\n```").is_none());
         // The first *query* fence wins, even behind another language's block.
-        let mixed = "```json\n{}\n```\n```sparql\nASK { ?s ?p ?o }\n```";
+        let mixed = "```json\n{}
+```\n```sparql\nASK { ?s ?p ?o }
+```";
         assert_eq!(
             first_sparql_fence(mixed).as_deref(),
             Some("ASK { ?s ?p ?o }")
@@ -3232,7 +5026,9 @@ mod tests {
 
     #[test]
     fn directive_still_wins_over_a_fence() {
-        let reply = "SPARQL:\nSELECT ?a WHERE { ?a ?b ?c }\n\n```sparql\nASK { ?s ?p ?o }\n```";
+        let reply = "SPARQL:\nSELECT ?a WHERE { ?a ?b ?c }
+\n```sparql\nASK { ?s ?p ?o }
+```";
         assert_eq!(
             extract_query_request(reply, true).as_deref(),
             Some("SELECT ?a WHERE { ?a ?b ?c }")
@@ -3252,24 +5048,60 @@ mod tests {
 
     #[test]
     fn ungrounded_widgets_get_flagged_but_grounded_or_plain_answers_do_not() {
-        assert!(widgets_without_retrieval("```map\n{}\n```", &[]));
-        assert!(widgets_without_retrieval("```chart\n{}\n```", &[]));
+        assert!(widgets_without_retrieval(
+            "```map\n{}
+```",
+            &[]
+        ));
+        assert!(widgets_without_retrieval(
+            "```chart\n{}
+```",
+            &[]
+        ));
         // A successful run this turn grounds the widget.
-        assert!(!widgets_without_retrieval("```map\n{}\n```", &[ok_run()]));
+        assert!(!widgets_without_retrieval(
+            "```map\n{}
+```",
+            &[ok_run()]
+        ));
         // Prose and non-data fences never get the caveat.
         assert!(!widgets_without_retrieval("plain prose", &[]));
-        assert!(!widgets_without_retrieval("```sparql\nASK {}\n```", &[]));
+        assert!(!widgets_without_retrieval(
+            "```sparql\nASK {}
+```",
+            &[]
+        ));
     }
 
     #[test]
     fn widget_fence_variants_the_frontend_renders_are_detected() {
         // The frontend (chatRich.js) also renders ~~~ fences, leading
         // whitespace, a space before the tag, and the geo/infocard aliases.
-        assert!(widgets_without_retrieval("```geo\n{}\n```", &[]));
-        assert!(widgets_without_retrieval("~~~chart\n{}\n~~~", &[]));
-        assert!(widgets_without_retrieval("  ``` map\n{}\n```", &[]));
-        assert!(widgets_without_retrieval("````infocard\n{}\n````", &[]));
-        assert!(widgets_without_retrieval("```info-card\n{}\n```", &[]));
+        assert!(widgets_without_retrieval(
+            "```geo\n{}
+```",
+            &[]
+        ));
+        assert!(widgets_without_retrieval(
+            "~~~chart\n{}
+~~~",
+            &[]
+        ));
+        assert!(widgets_without_retrieval(
+            "  ``` map\n{}
+```",
+            &[]
+        ));
+        assert!(widgets_without_retrieval(
+            "````infocard\n{}
+````",
+            &[]
+        ));
+        assert!(widgets_without_retrieval(
+            "```info-card\n{}
+```",
+            &[]
+        ));
         // A tag that merely starts with a widget name is not a widget fence.
         assert!(!widgets_without_retrieval("```chartreuse\ncode\n```", &[]));
         // Two characters are not a fence.
@@ -3284,7 +5116,7 @@ mod tests {
             "<http://www.opengis.net/def/crs/EPSG/0/4326> POLYGON((0 0, 1 0, 1 1, 0 0))"
         ));
         assert!(looks_like_wkt("  MULTIPOLYGON(((0 0,1 0,1 1,0 0)))"));
-        assert!(!looks_like_wkt("Waalbrug"));
+        assert!(!looks_like_wkt("Voorbeeldbrug"));
         assert!(!looks_like_wkt("http://example.org/bridge/1"));
         // Multi-byte content must not panic the prefix check.
         assert!(!looks_like_wkt("héllo wörld"));
@@ -3318,13 +5150,13 @@ mod tests {
                 ok: true,
                 error: None,
                 columns: Some(vec!["name".into(), "count".into()]),
-                rows: Some(vec![vec!["Waalbrug".into(), "3".into()]]),
+                rows: Some(vec![vec!["Voorbeeldbrug".into(), "3".into()]]),
                 truncated: false,
             },
         ];
         let s = fallback_answer(&runs);
         assert!(s.contains("| name | count |"), "markdown header: {s}");
-        assert!(s.contains("| Waalbrug | 3 |"), "row: {s}");
+        assert!(s.contains("| Voorbeeldbrug | 3 |"), "row: {s}");
         assert!(
             !s.to_uppercase().contains("SPARQL:"),
             "no directive leaks: {s}"
@@ -3363,7 +5195,8 @@ mod tests {
     fn repairs_limit_written_inside_the_where_block() {
         // The exact shape a small model produces when told to always add a LIMIT.
         let broken = "SELECT ?g ?s ?p ?o\nWHERE {\n  GRAPH ?g {\n    ?s ?p ?o\n    \
-                      FILTER (STR(?s) = \"AB-12-345-C\" )\n  }\nLIMIT 50\n}";
+                      FILTER (STR(?s) = \"AB-12-345-C\" )\n  }
+LIMIT 50\n}";
         assert!(validate_sparql(broken).is_err());
         let fixed = repair_sparql(broken.to_string());
         assert!(validate_sparql(&fixed).is_ok(), "repaired query must parse");
@@ -3471,7 +5304,8 @@ mod tests {
         // the first prose word — every counting question burned all its rounds
         // this way.
         let with_prose = "SELECT (COUNT(?s) AS ?triplesCount) WHERE { \
-                          GRAPH <https://x.org/g> { ?s ?p ?o } }\n\n\
+                          GRAPH <https://x.org/g> { ?s ?p ?o } }
+\n\
                           This query counts the number of triples in the dataset.";
         let repaired = repair_sparql(with_prose.to_string());
         assert!(
@@ -3483,7 +5317,8 @@ mod tests {
 
         // Prose directly attached (no blank line) is cut just the same — the
         // parser's error position, not paragraph structure, decides the cut.
-        let attached = "ASK { ?s ?p ?o }\nThe pattern above checks whether any triple exists.";
+        let attached = "ASK { ?s ?p ?o }
+The pattern above checks whether any triple exists.";
         let repaired = repair_sparql(attached.to_string());
         assert_eq!(repaired, "ASK { ?s ?p ?o }");
 
@@ -3494,8 +5329,11 @@ mod tests {
 
     #[test]
     fn extracts_sparql_directive_with_fence() {
-        let q = extract_sparql_directive("SPARQL:\n```sparql\nSELECT * WHERE { ?s ?p ?o }\n```")
-            .expect("should detect a query");
+        let q = extract_sparql_directive(
+            "SPARQL:\n```sparql\nSELECT * WHERE { ?s ?p ?o }
+```",
+        )
+        .expect("should detect a query");
         assert_eq!(q, "SELECT * WHERE { ?s ?p ?o }");
     }
 
@@ -3531,7 +5369,8 @@ mod tests {
     #[test]
     fn bare_directive_is_demoted_post_loop() {
         assert!(is_bare_sparql_directive(
-            "SPARQL:\n```sparql\nSELECT * WHERE { ?s ?p ?o }\n```"
+            "SPARQL:\n```sparql\nSELECT * WHERE { ?s ?p ?o }
+```"
         ));
         assert!(is_bare_sparql_directive(
             "SPARQL: SELECT * WHERE { ?s ?p ?o }"
@@ -3544,7 +5383,8 @@ mod tests {
         // a final answer with substantial prose around it must not be demoted.
         let reply = "I could not run the query because the graph IRI was wrong. \
                      Here is a corrected version you can run yourself:\n\
-                     SPARQL:\n```sparql\nSELECT * WHERE { GRAPH <urn:g> { ?s ?p ?o } }\n```\n\
+                     SPARQL:\n```sparql\nSELECT * WHERE { GRAPH <urn:g> { ?s ?p ?o } }
+```\n\
                      It selects every triple in the graph you asked about.";
         assert!(!is_bare_sparql_directive(reply));
         // Plain prose (no directive at all) is never demoted either.
@@ -3572,7 +5412,10 @@ mod tests {
     #[test]
     fn strips_sparql_fence() {
         assert_eq!(
-            strip_code_fence("```sparql\nSELECT * WHERE { ?s ?p ?o }\n```"),
+            strip_code_fence(
+                "```sparql\nSELECT * WHERE { ?s ?p ?o }
+```"
+            ),
             "SELECT * WHERE { ?s ?p ?o }"
         );
     }
@@ -3584,7 +5427,13 @@ mod tests {
 
     #[test]
     fn strips_bare_fence_without_lang() {
-        assert_eq!(strip_code_fence("```\nASK {}\n```"), "ASK {}");
+        assert_eq!(
+            strip_code_fence(
+                "```\nASK {}
+```"
+            ),
+            "ASK {}"
+        );
     }
 
     #[test]
@@ -3593,12 +5442,16 @@ mod tests {
         // directive payload unfenced with a stray closing ``` after it — seen
         // live with qwen2.5:7b. The fence and trailing prose are not query text.
         assert_eq!(
-            strip_code_fence("SELECT ?x WHERE {}\n```\nYou can run this yourself."),
+            strip_code_fence(
+                "SELECT ?x WHERE {}
+```\nYou can run this yourself."
+            ),
             "SELECT ?x WHERE {}"
         );
         // Same for the extraction entry point.
         let q = extract_sparql_directive(
-            "SPARQL:\nSELECT ?x WHERE {}\n```\nYou can run this yourself.",
+            "SPARQL:\nSELECT ?x WHERE {}
+```\nYou can run this yourself.",
         )
         .expect("query before the fence is extracted");
         assert_eq!(q, "SELECT ?x WHERE {}");
@@ -3609,14 +5462,18 @@ mod tests {
         // rfind would span into a SECOND fenced block; the query ends at the
         // first closing fence.
         assert_eq!(
-            strip_code_fence("```sparql\nASK {}\n```\nand also:\n```python\nx = 1\n```"),
+            strip_code_fence(
+                "```sparql\nASK {}
+```\nand also:\n```python\nx = 1\n```"
+            ),
             "ASK {}"
         );
     }
 
     #[test]
     fn unfenced_directive_with_trailing_prose_after_fence_is_not_bare() {
-        let reply = "SPARQL:\nSELECT * WHERE { ?s ?p ?o }\n```\nThis long trailing \
+        let reply = "SPARQL:\nSELECT * WHERE { ?s ?p ?o }
+```\nThis long trailing \
                      explanation describes the query in detail and is clearly a real \
                      answer for the user rather than a bare execution directive.";
         assert!(!is_bare_sparql_directive(reply));
@@ -3714,5 +5571,464 @@ mod tests {
         let (out, forwarded) = gate_run(&["Let me check.\n", "SPARQL: SELECT ?s WHERE {}"]).await;
         assert!(out.join("").starts_with("Let me check."));
         assert!(forwarded);
+    }
+
+    // ─── Orientation: pasted IRIs, salient terms, store probes ─────────────────
+
+    #[test]
+    fn mentioned_iris_finds_pasted_iris_verbatim() {
+        // The transcript that motivated this: IRIs pasted mid-sentence with
+        // trailing punctuation, and one wrapped in angle brackets.
+        let msgs = vec![
+            msg(
+                "user",
+                "ik zoek types uit https://data.example.nl/def/beheer/Beheerobject_BD, en \
+                 <https://data.example.nl/def/beheer/OpenTunnelbak> graag.",
+            ),
+            msg("assistant", "see http://echoed.example/from/assistant"),
+        ];
+        let iris = mentioned_iris(&msgs);
+        assert_eq!(
+            iris,
+            vec![
+                "https://data.example.nl/def/beheer/Beheerobject_BD".to_string(),
+                "https://data.example.nl/def/beheer/OpenTunnelbak".to_string(),
+            ],
+            "verbatim, punctuation trimmed, assistant text ignored"
+        );
+    }
+
+    #[test]
+    fn mentioned_iris_skips_ui_links_and_dedups() {
+        let msgs = vec![msg(
+            "user",
+            "compare https://host/resource?iri=x with https://ex.org/id/a and \
+             https://ex.org/id/a again",
+        )];
+        assert_eq!(
+            mentioned_iris(&msgs),
+            vec!["https://ex.org/id/a".to_string()],
+            "query-string URLs are UI links, not RDF IRIs; duplicates collapse"
+        );
+    }
+
+    #[test]
+    fn salient_terms_keep_domain_words_and_drop_meta_words() {
+        let iris: Vec<String> = Vec::new();
+        let terms = salient_terms(
+            "ik zoek alle beheerobject types uit de dataset met hun labels en relaties \
+             rond de voorbeeldbrug",
+            &iris,
+            4,
+        );
+        assert_eq!(
+            terms,
+            vec!["beheerobject".to_string(), "voorbeeldbrug".to_string()],
+            "function words, and meta words like types/labels/relaties/dataset, never \
+             take an anchor slot"
+        );
+        // Fragments of an identifier evidence_terms already anchors are not
+        // re-anchored as words.
+        let exclude = vec!["voorbeeldbrug-01".to_string()];
+        assert_eq!(
+            salient_terms("zoek voorbeeldbrug-01 documenten", &exclude, 4),
+            vec!["documenten".to_string()]
+        );
+    }
+
+    fn orientation_store() -> crate::store::TripleStore {
+        let store = crate::store::TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                r#"<http://ex.org/id/voorbeeldbrug> <http://ex.org/def/naam> "Voorbeeldbrug" .
+                   <http://ex.org/id/voorbeeldbrug> a <http://ex.org/def/Brug> ."#,
+                oxigraph::io::RdfFormat::Turtle,
+                Some("urn:test:bridges"),
+            )
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn iri_occurrence_probes_cover_every_position_and_graphs() {
+        let store = orientation_store();
+        for real in [
+            "http://ex.org/id/voorbeeldbrug", // subject
+            "http://ex.org/def/naam",         // predicate
+            "http://ex.org/def/Brug",         // object
+            "urn:test:bridges",               // named graph
+        ] {
+            assert!(iri_occurs_blocking(&store, real), "{real} must be found");
+        }
+        assert!(!iri_occurs_blocking(&store, "http://ex.org/def/Verzonnen"));
+    }
+
+    #[test]
+    fn locating_a_pasted_iri_names_only_readable_graphs() {
+        let store = orientation_store();
+        let iris = vec![
+            "http://ex.org/id/voorbeeldbrug".to_string(),
+            "http://ex.org/def/Brug".to_string(),
+            "http://ex.org/def/Verzonnen".to_string(),
+        ];
+        let scope: HashSet<String> = ["urn:test:bridges".to_string()].into_iter().collect();
+        let locs = locate_iris_blocking(&store, &iris, &scope);
+        assert_eq!(locs[0].role, "subject");
+        assert_eq!(locs[0].graphs, vec!["urn:test:bridges".to_string()]);
+        assert_eq!(locs[1].role, "object");
+        assert!(locs[2].graphs.is_empty(), "an invented IRI locates nowhere");
+
+        // Privacy: with the graph out of scope, a real IRI looks exactly like
+        // an absent one — location must not become an existence oracle.
+        let no_scope: HashSet<String> = HashSet::new();
+        let hidden = locate_iris_blocking(&store, &iris, &no_scope);
+        assert!(hidden[0].graphs.is_empty() && !hidden[0].is_named_graph);
+    }
+
+    #[test]
+    fn models_section_names_only_readable_graphs_as_queryable() {
+        use crate::data_models::registry::ModelContextEntry;
+        use crate::kind_detector::RegistryKind;
+        let entries = vec![
+            ModelContextEntry {
+                title: "Beheerstandaard".into(),
+                namespace: "https://data.example.nl/def/beheer#".into(),
+                kind: RegistryKind::Vocabulary,
+                is_public: true,
+                owner_type: None,
+                owner_id: None,
+                graph_iri: Some("urn:model:beheer".into()),
+                version: Some("1.0.0".into()),
+                draft_graph_iri: Some("urn:model:beheer-draft".into()),
+                draft_version: Some("1.1.0".into()),
+            },
+            ModelContextEntry {
+                title: "Private".into(),
+                namespace: "https://ex.org/def#".into(),
+                kind: RegistryKind::DataModel,
+                is_public: false,
+                owner_type: None,
+                owner_id: None,
+                graph_iri: Some("urn:model:private".into()),
+                version: None,
+                draft_graph_iri: None,
+                draft_version: None,
+            },
+        ];
+        let in_scope = vec![
+            "urn:model:beheer".to_string(),
+            "urn:model:beheer-draft".to_string(),
+        ];
+        let section = render_models_section(&entries, &in_scope);
+        assert!(
+            section.contains("\"Beheerstandaard\" (vocabulary, namespace https://data.example.nl/def/beheer#) — definitions in graph <urn:model:beheer> (version 1.0.0)"),
+            "readable model must name its graph: {section}"
+        );
+        assert!(
+            section.contains(
+                "; unpublished draft in graph <urn:model:beheer-draft> (draft 1.1.0) — when \
+                 both could answer, ask the user which to use"
+            ),
+            "an in-scope draft is offered as an explicit choice: {section}"
+        );
+        // Out-of-scope drafts stay invisible.
+        let published_only = render_models_section(&entries, &["urn:model:beheer".to_string()]);
+        assert!(!published_only.contains("unpublished draft"));
+        assert!(
+            section.contains("\"Private\" (data-model, namespace https://ex.org/def#) — no published version readable to you"),
+            "unreadable graph must not be offered for querying: {section}"
+        );
+        assert!(render_models_section(&[], &in_scope).is_empty());
+    }
+
+    // ─── Shortcoming follow-ups: windows, caps, honesty footer, T-Box marker ──
+
+    #[test]
+    fn context_window_is_read_from_known_gateway_payloads() {
+        // vLLM advertises max_model_len per served model.
+        let vllm = json!({"data": [
+            {"id": "meta/llama", "max_model_len": 32768},
+            {"id": "other", "max_model_len": 4096},
+        ]});
+        assert_eq!(
+            context_from_models_payload(&vllm, "meta/llama"),
+            Some(32768)
+        );
+        // No id match and more than one entry: nothing to conclude.
+        assert_eq!(context_from_models_payload(&vllm, "unknown"), None);
+        // A single-model server answers for any alias.
+        let single = json!({"data": [{"id": "served", "context_window": 8192}]});
+        assert_eq!(context_from_models_payload(&single, "alias"), Some(8192));
+        assert_eq!(context_from_models_payload(&json!({"data": []}), "m"), None);
+
+        // Ollama: only an explicit Modelfile num_ctx counts — the serving
+        // context of an untuned model is invisible over the API, and both
+        // possible guesses hurt, so the detector warns instead of guessing.
+        let tuned = json!({"details": {}, "parameters": "stop \"<|eot|>\"\nnum_ctx 16384"});
+        assert_eq!(context_from_ollama_show(&tuned), Some(16384));
+        let untuned = json!({"model_info": {"llama.context_length": 131072}});
+        assert_eq!(context_from_ollama_show(&untuned), None);
+        assert!(
+            is_ollama_show_payload(&untuned),
+            "still recognised as Ollama"
+        );
+        assert!(!is_ollama_show_payload(&json!({"whatever": 1})));
+        assert_eq!(context_from_ollama_show(&json!({"whatever": 1})), None);
+    }
+
+    // ─── /api/llm/health: is each feature's model served? ─────────────────────
+
+    #[test]
+    fn listed_model_match_is_exact_plus_ollamas_implicit_latest_tag() {
+        assert!(model_matches("gpt-4o", "gpt-4o"));
+        assert!(model_matches("llama3.2:1b", "llama3.2:1b"));
+        // Ollama's implicit tag, in both directions.
+        assert!(model_matches("llama3.2", "llama3.2:latest"));
+        assert!(model_matches("llama3.2:latest", "llama3.2"));
+        assert!(model_matches("library/qwen2.5", "library/qwen2.5:latest"));
+        // A different tag is a different model.
+        assert!(!model_matches("llama3.2", "llama3.2:1b"));
+        assert!(!model_matches("llama3.2:1b", "llama3.2"));
+        assert!(!model_matches("llama3.2:1b", "llama3.2:latest"));
+        assert!(!model_matches("llama3.2:latest", "llama3.2:1b"));
+        // No case folding, no prefix or suffix matching.
+        assert!(!model_matches("GPT-4o", "gpt-4o"));
+        assert!(!model_matches("Llama3.2", "llama3.2:latest"));
+        assert!(!model_matches("gpt-4", "gpt-4o"));
+        assert!(!model_matches("gpt-4o", "gpt-4o-mini"));
+        // provider/model ids match exactly, never with the provider stripped.
+        assert!(model_matches("openai/gpt-4o", "openai/gpt-4o"));
+        assert!(!model_matches("gpt-4o", "openai/gpt-4o"));
+        assert!(!model_matches("openai/gpt-4o", "gpt-4o"));
+        // The implicit tag needs a name in front of it.
+        assert!(!model_matches("", ":latest"));
+    }
+
+    #[test]
+    fn listed_model_ids_come_only_from_openai_style_lists() {
+        let openai = json!({"object": "list", "data": [
+            {"id": "gpt-4o", "object": "model", "owned_by": "openai"},
+            {"id": "llama3.2:latest", "object": "model"},
+        ]});
+        assert_eq!(
+            listed_model_ids(Some(&openai)),
+            Some(vec!["gpt-4o", "llama3.2:latest"])
+        );
+        // An empty list is still a list — every model is then "not listed".
+        assert_eq!(listed_model_ids(Some(&json!({"data": []}))), Some(vec![]));
+        // A gateway's own /health payload carries no model list at all.
+        let health = json!({"status": "ok", "upstream": "vllm"});
+        assert_eq!(listed_model_ids(Some(&health)), None);
+        assert_eq!(listed_model_ids(None), None);
+        // Entries without a string id are skipped, not fatal…
+        let mixed = json!({"data": [{"id": "a"}, {"name": "b"}, {"id": 7}, "c", {"id": "d"}]});
+        assert_eq!(listed_model_ids(Some(&mixed)), Some(vec!["a", "d"]));
+        // …but a `data` field holding no model entries at all is not a list.
+        assert_eq!(listed_model_ids(Some(&json!({"data": [1, 2]}))), None);
+        assert_eq!(listed_model_ids(Some(&json!({"data": {"id": "x"}}))), None);
+    }
+
+    #[test]
+    fn service_entries_judge_each_features_model_against_the_list() {
+        let models = || {
+            [
+                ("chat", "qwen2.5:14b".to_string()),
+                ("sparql", "qwen2.5".to_string()),
+                ("shacl", "gpt-4o".to_string()),
+            ]
+        };
+        let entry = |id: &'static str, model: &str, listed: Option<bool>| LlmServiceHealth {
+            id,
+            model: model.to_string(),
+            listed,
+        };
+
+        // Reachable, with a model list: judged model by model.
+        let payload = json!({"data": [{"id": "qwen2.5:14b"}, {"id": "qwen2.5:latest"}]});
+        let ids = listed_model_ids(Some(&payload));
+        assert_eq!(
+            service_health(models(), ids.as_deref()),
+            vec![
+                entry("chat", "qwen2.5:14b", Some(true)),
+                entry("sparql", "qwen2.5", Some(true)),
+                entry("shacl", "gpt-4o", Some(false)),
+            ]
+        );
+        // Reachable with an empty list: nothing is served.
+        let empty = json!({"data": []});
+        let ids = listed_model_ids(Some(&empty));
+        let services = service_health(models(), ids.as_deref());
+        assert!(
+            services.iter().all(|s| s.listed == Some(false)),
+            "{services:?}"
+        );
+        // Reachable without a list (the /health fallback), or unreachable:
+        // unknown — still all three entries, in order.
+        let health = json!({"status": "ok"});
+        for ids in [listed_model_ids(Some(&health)), listed_model_ids(None)] {
+            let services = service_health(models(), ids.as_deref());
+            assert_eq!(
+                services.iter().map(|s| s.id).collect::<Vec<_>>(),
+                ["chat", "sparql", "shacl"]
+            );
+            assert!(services.iter().all(|s| s.listed.is_none()), "{services:?}");
+        }
+    }
+
+    #[test]
+    fn vocab_caps_widen_only_for_windows_that_can_hold_them() {
+        assert_eq!(caps_for_window(None).graphs, 12);
+        assert_eq!(caps_for_window(Some(16_384)).classes, 8);
+        let large = caps_for_window(Some(32_768));
+        assert_eq!(
+            (large.graphs, large.classes, large.predicates),
+            (20, 16, 32)
+        );
+    }
+
+    fn run_with_rows(rows: Option<Vec<Vec<String>>>, ok: bool) -> ChatQueryRun {
+        ChatQueryRun {
+            sparql: String::new(),
+            ok,
+            error: None,
+            columns: None,
+            rows,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn all_empty_footer_fires_only_when_every_retrieval_found_nothing() {
+        assert!(
+            !all_retrievals_empty(&[]),
+            "no queries → no claim to caveat"
+        );
+        assert!(all_retrievals_empty(&[run_with_rows(Some(vec![]), true)]));
+        // A COUNT of zero is a ROW — a real answer, not an empty retrieval.
+        assert!(!all_retrievals_empty(&[run_with_rows(
+            Some(vec![vec!["0".into()]]),
+            true
+        )]));
+        // Failed rounds alone carry no retrieval either way.
+        assert!(!all_retrievals_empty(&[run_with_rows(None, false)]));
+        // One failed + one empty success: still an all-empty turn.
+        assert!(all_retrievals_empty(&[
+            run_with_rows(None, false),
+            run_with_rows(Some(vec![]), true),
+        ]));
+    }
+
+    #[test]
+    fn tbox_graphs_get_the_defines_marker_and_instance_graphs_do_not() {
+        let store = crate::store::TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                r#"<http://ex.org/def#Brug> a <http://www.w3.org/2002/07/owl#Class> ;
+                     <http://www.w3.org/2000/01/rdf-schema#label> "Brug" ."#,
+                oxigraph::io::RdfFormat::Turtle,
+                Some("urn:test:defs"),
+            )
+            .unwrap();
+        store
+            .load_str(
+                r#"<http://ex.org/id/b1> a <http://ex.org/def#Brug> ."#,
+                oxigraph::io::RdfFormat::Turtle,
+                Some("urn:test:abox"),
+            )
+            .unwrap();
+        let caps = caps_for_window(None);
+        let defs = graph_vocab_summary(&store, "urn:test:defs", caps).unwrap();
+        assert!(
+            defs.contains("DEFINES terms"),
+            "a graph whose members are owl:Class instances defines terms: {defs}"
+        );
+        let abox = graph_vocab_summary(&store, "urn:test:abox", caps).unwrap();
+        assert!(
+            !abox.contains("DEFINES terms"),
+            "instance data must not claim to define terms: {abox}"
+        );
+    }
+
+    // ─── Agent tools: plan, ask, native tool calls ─────────────────────────────
+
+    #[test]
+    fn plans_are_extracted_tracked_and_stripped() {
+        let reply = "PLAN:\n1. tel de bruggen\n2. vind het zeldzame object\nSPARQL:\nSELECT ?s WHERE { ?s ?p ?o }";
+        assert_eq!(
+            extract_plan(reply).as_deref(),
+            Some("1. tel de bruggen\n2. vind het zeldzame object")
+        );
+        // Same-line first item, dash items, and the cap.
+        let inline = "PLAN: count things\n- deel twee\nrest of prose";
+        assert_eq!(
+            extract_plan(inline).as_deref(),
+            Some("count things\n- deel twee")
+        );
+        assert_eq!(extract_plan("no plan here"), None);
+        assert_eq!(extract_plan("PLAN:\nprose, not a list"), None);
+        let many = format!(
+            "PLAN:\n{}",
+            (1..=9)
+                .map(|i| format!("{i}. x"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert_eq!(
+            extract_plan(&many).unwrap().lines().count(),
+            6,
+            "capped at six items"
+        );
+
+        let stripped = strip_plan_block("Answer intro.\nPLAN:\n1. a\n2. b\nThe real answer.");
+        assert_eq!(stripped, "Answer intro.\nThe real answer.");
+        assert_eq!(strip_plan_block("plain answer"), "plain answer");
+    }
+
+    #[test]
+    fn ask_fences_are_recognised_as_complete_replies() {
+        assert!(contains_ask_fence(
+            "Which one?\n```ask\n{\"question\":\"?\",\"options\":[\"a\"]}
+```"
+        ));
+        assert!(
+            contains_ask_fence(
+                "~~~ASK\n{}
+~~~"
+            ),
+            "tildes and case are fine"
+        );
+        assert!(
+            !contains_ask_fence(
+                "```sparql\nASK { ?s ?p ?o }
+```"
+            ),
+            "a SPARQL ASK is not an ask card"
+        );
+        assert!(!contains_ask_fence("plain prose about asking"));
+    }
+
+    #[test]
+    fn tool_calls_parse_from_openai_and_lenient_shapes() {
+        // Spec shape: arguments is a JSON *string*.
+        let m = json!({"role": "assistant", "content": null, "tool_calls": [
+            {"id": "call_1", "type": "function",
+             "function": {"name": "run_sparql", "arguments": "{\"query\":\"ASK { ?s ?p ?o }\"}"}}
+        ]});
+        let calls = extract_tool_calls(&m);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "run_sparql");
+        assert_eq!(calls[0].arguments["query"], "ASK { ?s ?p ?o }");
+        // Lenient shape: a gateway that inlines the arguments object.
+        let inline = json!({"tool_calls": [
+            {"id": "c2", "function": {"name": "text_search", "arguments": {"query": "voorbeeldbrug"}}}
+        ]});
+        assert_eq!(
+            extract_tool_calls(&inline)[0].arguments["query"],
+            "voorbeeldbrug"
+        );
+        // No calls, malformed entries: empty, never a panic.
+        assert!(extract_tool_calls(&json!({"content": "hi"})).is_empty());
+        assert!(extract_tool_calls(&json!({"tool_calls": [{"id": "x"}]})).is_empty());
     }
 }

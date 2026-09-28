@@ -35,6 +35,9 @@ tracing   = "0.1"
 anyhow    = "1"
 # Data-parallel execution for the partitioned (sharded) query layer.
 rayon     = "1"
+# The columnar evaluator: the xsd value semantics oxigraph itself uses, so
+# numeric promotion and dateTime comparison agree with the engine.
+oxsdatatypes = "0.2"
 
 [dev-dependencies]
 criterion  = { version = "0.5", features = ["html_reports"] }

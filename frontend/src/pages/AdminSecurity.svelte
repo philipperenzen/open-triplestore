@@ -264,7 +264,10 @@
   let tripleLabels = [];
   let tripleLoading = false;
   let showTripleForm = false;
-  let tripleForm = { subject_iri: '', predicate_iri: '', object_value: '', label_graph_iri: '' };
+  // `graph_iri` — the graph the labelled triple LIVES in — is required by the API.
+  // It was missing from this form entirely, so every submission failed to
+  // deserialize before it reached the handler.
+  let tripleForm = { subject_iri: '', predicate_iri: '', object_value: '', graph_iri: '', label_graph_iri: '' };
   let tripleError = '';
   let tripleSaving = false;
 
@@ -280,7 +283,7 @@
     try {
       await createTripleSecurityLabel(tripleForm);
       showTripleForm = false;
-      tripleForm = { subject_iri: '', predicate_iri: '', object_value: '', label_graph_iri: '' };
+      tripleForm = { subject_iri: '', predicate_iri: '', object_value: '', graph_iri: '', label_graph_iri: '' };
       await loadTripleLabels();
     } catch (e) {
       tripleError = e.message;
@@ -385,7 +388,7 @@
         <p class="hint">{$t('pages.adminSecurity.clientsHint')}</p>
       </div>
       {#if oidcClients === null}
-        <p class="hint"><Loader2 size={14} class="spin" /> {$t('common.loading')}</p>
+        <p class="hint"><Loader2 size={14} class="spin" /> {$t('system.loading')}</p>
       {:else}
         {#if oidcClients.length === 0}
           <p class="hint">{$t('pages.adminSecurity.clientsEmpty')}</p>
@@ -395,7 +398,7 @@
             <div class="panel-header">
               <h3>{c.name} <code>{c.client_id}</code></h3>
               <button class="btn btn-sm btn-danger" on:click={() => removeOidcClient(c.client_id)}>
-                <Trash2 size={14} /> {$t('common.delete')}
+                <Trash2 size={14} /> {$t('system.delete')}
               </button>
             </div>
             <p class="hint">
@@ -450,7 +453,7 @@
         <p class="hint">{$t('pages.adminSecurity.guestRegHint')}</p>
       </div>
       {#if guestReg === null}
-        <p class="hint"><Loader2 size={14} class="spin" /> {$t('common.loading')}</p>
+        <p class="hint"><Loader2 size={14} class="spin" /> {$t('system.loading')}</p>
       {:else}
         <div class="form-card">
           <h3>{$t('pages.adminSecurity.guestRegTitle')}</h3>
@@ -823,6 +826,12 @@
             <div class="form-group full">
               <label for="tl-object">{$t('pages.adminSecurity.objectValue')} <span class="hint-sm">{$t('pages.adminSecurity.objectValueHint')}</span></label>
               <input id="tl-object" bind:value={tripleForm.object_value} placeholder="&quot;confidential&quot; or https://…" />
+            </div>
+            <div class="form-group full">
+              <label for="tl-graph">{$t('pages.adminSecurity.dataGraphIri')} <span class="hint-sm">{$t('pages.adminSecurity.dataGraphIriHint')}</span></label>
+              <Combobox id="tl-graph" bind:value={tripleForm.graph_iri}
+                suggestions={availableGraphIris}
+                placeholder="https://example.org/graph/hr" />
             </div>
             <div class="form-group full">
               <label for="tl-label-graph">{$t('pages.adminSecurity.labelGraphIri')} <span class="hint-sm">{$t('pages.adminSecurity.labelGraphIriHint')}</span></label>

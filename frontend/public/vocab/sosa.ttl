@@ -2,10 +2,25 @@
 # W3C/OGC Semantic Sensor Network ontology, describing sensors, the observations
 # they make, the features and properties they observe, the procedures used,
 # sampling, and actuation.
-# Complete vocabulary, verbatim from the W3C Spatial Data on the Web working
-# group source (w3c/sdw, ssn/integrated/sosa.ttl), as published in the SSN
-# Recommendation (https://www.w3.org/TR/vocab-ssn/).
-# Source: https://github.com/w3c/sdw/blob/gh-pages/ssn/integrated/sosa.ttl  (ns http://www.w3.org/ns/sosa/)
+# Source: https://github.com/w3c/sdw/blob/gh-pages/ssn/integrated/sosa.ttl (the
+# same file is served at http://www.w3.org/ns/sosa/).
+# Defined in Semantic Sensor Network Ontology, W3C Recommendation 19 October
+# 2017, by the joint W3C/OGC Spatial Data on the Web Working Group,
+# https://www.w3.org/TR/2017/REC-vocab-ssn-20171019/
+# Copyright 2017 W3C/OGC. (the file's own dcterms:rights, kept below)
+# Licences declared by the file (Open Triplestore meets the conditions of both):
+#   W3C Software and Document License (2015),
+#   https://www.w3.org/copyright/software-license-2015/ ;
+#   OGC Software License 1.0, http://www.opengeospatial.org/ogc/Software (now
+#   https://www.ogc.org/about/policies/software-licenses/ogc-software-license-1-0/).
+#   Full texts of both: NOTICE.md in this directory.
+# This software or document includes material copied from or derived from
+# Sensor, Observation, Sample, and Actuator (SOSA) Ontology,
+# http://www.w3.org/ns/sosa/. Copyright © 2017 W3C® (MIT, ERCIM, Keio, Beihang).
+# Changes by Open Triplestore: this comment header was added on 2026-08-12 and
+# revised on 2026-09-23; the rest of the file is byte-identical to the source.
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The upstream file starts below this line. ----
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .

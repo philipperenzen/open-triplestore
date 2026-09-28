@@ -36,6 +36,10 @@ pub fn data_model_public_routes() -> Router<AppState> {
             get(handlers::merge_preview),
         )
         .route("/api/models/:id/term", get(super::deref::describe_term))
+        // Attribution and licence texts of the bundled vocabularies, linked from
+        // every seeded entry's licence record; served here so the link works on
+        // an API-only server too (the web UI ships the same file).
+        .route(super::vocab_files::NOTICE_PATH, get(handlers::vocab_notice))
 }
 
 /// Write routes — require authentication; fine-grained role checks are done inside handlers.

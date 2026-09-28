@@ -28,7 +28,7 @@ const PRIVATE_GRAPH: &str = "http://example.org/graphs/private";
 const LABEL: &str = "http://www.w3.org/2000/01/rdf-schema#label";
 
 /// A state whose store holds one public and one private graph, each with a
-/// resource whose label mentions "waalbrug", plus a live Tantivy index.
+/// resource whose label mentions "viaduct", plus a live Tantivy index.
 fn state_with_index() -> (AppState, tempfile::TempDir) {
     let mut state = test_state();
 
@@ -90,10 +90,10 @@ fn state_with_index() -> (AppState, tempfile::TempDir) {
         .update(&format!(
             "INSERT DATA {{ \
                GRAPH <{PUBLIC_GRAPH}> {{ \
-                 <http://example.org/bridge> <{LABEL}> \"Waalbrug Nijmegen\" \
+                 <http://example.org/bridge> <{LABEL}> \"Viaduct Riverside\" \
                }} \
                GRAPH <{PRIVATE_GRAPH}> {{ \
-                 <http://example.org/secret> <{LABEL}> \"Waalbrug classified\" \
+                 <http://example.org/secret> <{LABEL}> \"Viaduct classified\" \
                }} \
              }}"
         ))
@@ -130,7 +130,7 @@ async fn text_search_returns_matches_without_a_manual_reindex() {
     let (status, body) = sparql(
         &state,
         "PREFIX ft: <tag:open-triplestore,2024:ft:>\n\
-         SELECT ?s ?score WHERE {\n  (?s ?score) ft:search(\"waalbrug\" 10) .\n}",
+         SELECT ?s ?score WHERE {\n  (?s ?score) ft:search(\"viaduct\" 10) .\n}",
         Some(&token),
     )
     .await;
@@ -149,7 +149,7 @@ async fn text_search_hits_are_limited_to_readable_graphs() {
     // read boundary itself or private subjects leak.
     let (state, _dir) = state_with_index();
 
-    let query = "SELECT ?s ?score WHERE {\n  (?s ?score) text:search (\"waalbrug\" 10) .\n}";
+    let query = "SELECT ?s ?score WHERE {\n  (?s ?score) text:search (\"viaduct\" 10) .\n}";
 
     let owner = mint_token("u1", "alice", "user");
     let (status, body) = sparql(&state, query, Some(&owner)).await;
@@ -199,7 +199,7 @@ async fn a_write_is_visible_to_the_next_search() {
 async fn contains_still_matches_inside_longer_words() {
     // The push-down prunes candidates with the index; if it prunes a row the
     // FILTER would have kept, the query silently returns the wrong answer.
-    // "bridge" is a substring of "Waalbrug"'s sibling label below, but not a
+    // "bridge" is a substring of the sibling label "Drawbridge" below, but not a
     // token of it — exactly the case the old tokenized push-down dropped.
     let (state, _dir) = state_with_index();
     let token = mint_token("u1", "alice", "user");
@@ -265,7 +265,7 @@ fn seed_literals(state: &AppState, n: usize) {
     let mut insert = format!("INSERT DATA {{ GRAPH <{PUBLIC_GRAPH}> {{ ");
     for i in 0..n {
         insert.push_str(&format!(
-            "<http://example.org/n{i}> <{LABEL}> \"filler label number {i} waalbrug\" . "
+            "<http://example.org/n{i}> <{LABEL}> \"filler label number {i} viaduct\" . "
         ));
     }
     insert.push_str("} }");
@@ -302,7 +302,7 @@ async fn a_reindex_does_not_stall_the_runtime() {
     let started = Instant::now();
     let out = state
         .apply_text_search(
-            "SELECT ?s ?score WHERE { (?s ?score) text:search (\"waalbrug\" 5) . }",
+            "SELECT ?s ?score WHERE { (?s ?score) text:search (\"viaduct\" 5) . }",
             scope,
         )
         .await
@@ -337,7 +337,7 @@ async fn a_reindex_does_not_stall_the_runtime() {
 /// parallel. `text_sync_lock` is what keeps that safe.
 #[tokio::test]
 async fn concurrent_searches_share_one_rebuild() {
-    const QUERY: &str = "SELECT ?s ?score WHERE { (?s ?score) text:search (\"waalbrug\" 5) . }";
+    const QUERY: &str = "SELECT ?s ?score WHERE { (?s ?score) text:search (\"viaduct\" 5) . }";
 
     let (state, _dir) = state_with_index();
     seed_literals(&state, 20_000);

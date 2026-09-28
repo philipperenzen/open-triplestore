@@ -41,7 +41,7 @@
   function firstLit(s: any, preds: string[]): string {
     if (!store || !s) return '';
     for (const p of preds) {
-      let objs: any[] = [];
+      let objs: any[];
       try {
         objs = store.getObjects(s, namedNode(p), null);
       } catch {

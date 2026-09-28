@@ -14,21 +14,21 @@ use serde_json::json;
 use crate::store::TripleStore;
 
 /// `VALUES ?g { <a> <b> }` clause restricting queries to the scope's graphs.
-/// Empty scope yields an empty string (queries then run over the union graph).
+///
+/// An empty scope emits `VALUES ?g { }`, which matches nothing. It must NOT
+/// collapse to an empty string: that removed the GRAPH wrapper entirely and ran
+/// the query over the union graph, so a caller with no readable graphs — or one
+/// who simply passed no scope — read the whole store, every tenant included.
+/// Callers resolve "no scope given" to the caller's accessible graphs before
+/// getting here; reaching this with an empty list means "nothing readable", and
+/// the honest answer to that is no rows.
 fn values_clause(data_graphs: &[String]) -> String {
-    if data_graphs.is_empty() {
-        return String::new();
-    }
     let iris: String = data_graphs.iter().map(|g| format!("<{g}> ")).collect();
     format!("VALUES ?g {{ {iris}}}")
 }
 
 fn wrap_graph(values: &str, body: &str) -> String {
-    if values.is_empty() {
-        body.to_string()
-    } else {
-        format!("{values} GRAPH ?g {{ {body} }}")
-    }
+    format!("{values} GRAPH ?g {{ {body} }}")
 }
 
 fn lit_i64(sol: &oxigraph::sparql::QuerySolution, var: &str) -> i64 {

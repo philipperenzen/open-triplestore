@@ -1,8 +1,9 @@
 # OWL 2 RL Profile
 
 OWL 2 RL (Rule Language) is a tractable sub-language of OWL 2 that maps cleanly to rule-based
-forward chaining.  It covers roughly 80 rules from the W3C OWL 2 RL specification (Table 4 and
-Table 5 in the W3C document) and is complete for OWL 2 RL ontologies.
+forward chaining.  It runs 63 of the 78 OWL 2 RL/RDF rules of the W3C specification (OWL 2
+Profiles §4.3, Tables 4–9); the 15 it does not run are listed below with their reason, and
+`tests/owl2_rl_conformance.rs` pins both lists against the specification's inventory.
 
 > **Open Triplestore role names:** class definitions and class axioms = graph role **Model** (the T-Box); ABox content = graph role **Instances**.  Property definitions and relations (the R-Box) belong to the **Vocabulary** role, even though OWL groups them with the TBox for reasoning.  The RL reasoner reasons over the TBox+RBox schema together — the role split concerns where terms are stored and registered, not the reasoning semantics.
 
@@ -29,17 +30,14 @@ OWL 2 RL is suitable for:
 | prp-trp | Transitive property: chain through three hops |
 | prp-spo1 | SubPropertyOf: propagate triples through superproperty |
 | prp-spo2 | Property chain axiom: `r ∘ s ⊑ t` |
-| prp-eqp1/2 | EquivalentProperty: treat equivalent properties symmetrically |
-| prp-pdw | PropertyDisjointWith: detect co-occurring disjoint properties |
+| prp-eqp1/2 | EquivalentProperty — subsumed: `scm-eqp1/2` turn it into mutual `rdfs:subPropertyOf` and `prp-spo1` propagates |
 | prp-npa1/2 | NegativePropertyAssertion: inconsistency when assertion violated |
-| prp-key | hasKey: merge individuals sharing all key property values |
+| prp-key | hasKey: merge individuals sharing the values of **every** key property — composite keys `owl:hasKey ( ex:first ex:last )` included (single-property keys were the only ones that fired before) |
 
 ### Class Rules (cls-*)
 
 | Rule | Description |
 |------|-------------|
-| cls-thing | Every individual is of type `owl:Thing` |
-| cls-nothing1 | Detect explicit `owl:Nothing` membership |
 | cls-nothing2 | Detect instances of classes asserted disjoint with their supers |
 | cls-int1 | Intersection membership: `x type C1 ∧ C2` if `x type C1` and `x type C2` |
 | cls-int2 | Intersection decomposition: members of `C1 ∩ C2` are members of each |
@@ -60,6 +58,17 @@ OWL 2 RL is suitable for:
 | cax-dw | DisjointWith: inconsistency detection |
 | cax-adc | AllDisjointClasses: expand to pairwise disjointWith, then detect inconsistency |
 
+### Datatype Rules (dt-*, Table 8)
+
+| Rule | Description |
+|------|-------------|
+| dt-type1 | Every datatype of the OWL 2 RL datatype map (`xsd:integer`, `xsd:string`, `xsd:dateTime`, … — OWL 2 Profiles §4.2) is an `rdfs:Datatype` |
+| dt-not-type | A literal whose lexical form is not in the lexical space of its datatype (`"abc"^^xsd:integer`) is an **inconsistency**; every XSD-typed literal in scope is checked with the lexical rules SHACL's `sh:datatype` uses |
+
+`dt-type2`, `dt-eq` and `dt-diff` are not run: they type, equate or
+distinguish literals *as subjects*, which an RDF graph cannot hold; literal
+values are compared by SPARQL value semantics in every other rule.
+
 ### Schema Rules (scm-*)
 
 | Rule | Description |
@@ -67,7 +76,6 @@ OWL 2 RL is suitable for:
 | scm-cls | Every class is subClassOf `owl:Thing` |
 | scm-sco | SubClassOf transitivity |
 | scm-eqc1/2 | EquivalentClass ↔ mutual subClassOf |
-| scm-op/dp/ap | Axiomatic property typing |
 | scm-spo | SubPropertyOf transitivity |
 | scm-eqp1/2 | EquivalentProperty ↔ mutual subPropertyOf |
 | scm-dom1/2 | Domain inheritance through property and class hierarchies |
@@ -77,6 +85,32 @@ OWL 2 RL is suitable for:
 | scm-avf | AllValuesFrom schema entailment |
 | scm-int | Intersection schema entailment |
 | scm-uni | Union schema entailment |
+
+### Rules not run
+
+The engine reports the two lists as `IMPLEMENTED_RULES` and
+`UNIMPLEMENTED_RULES` (`src/reasoning/owl2_rl.rs`); together they are the
+specification's 78 rules, and `tests/owl2_rl_conformance.rs` fails when they
+are not.
+
+| Rule | Why not |
+|------|---------|
+| eq-ref | reflexive `owl:sameAs` for every term of every triple: triples the graph, no other rule needs it |
+| eq-diff2, eq-diff3 | `owl:AllDifferent` inconsistency: not implemented |
+| prp-ap | the fixed list of annotation-property axiomatic triples: not implemented |
+| prp-eqp1, prp-eqp2 | subsumed by `scm-eqp1/2` + `prp-spo1` |
+| prp-pdw, prp-adp | `owl:propertyDisjointWith` / `owl:AllDisjointProperties` inconsistency: not implemented |
+| cls-thing | every individual typed `owl:Thing`: one triple per term, no other rule needs it |
+| cls-nothing1 | explicit `owl:Nothing` membership inconsistency: not implemented |
+| dt-type2, dt-eq, dt-diff | need literal subjects (see above) |
+| scm-op, scm-dp | reflexive `rdfs:subPropertyOf` / `owl:equivalentProperty` per property: no other rule needs it |
+
+### Identity policy
+
+Whether the Table 4 equality rules run at all for a dataset — and whether its
+`linkset` graphs are premises — is the dataset's [identity policy](reasoning.md#identity-policy--what-happens-with-owlsameas)
+(`sameas-off` / `sameas-narrow` / `sameas-full`). The raw engine
+(`Owl2RLReasoner::new`) defaults to `sameas-full`; `with_identity_policy` selects.
 
 ## Configuration
 

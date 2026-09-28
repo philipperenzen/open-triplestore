@@ -1,3 +1,14 @@
+# VANN: A vocabulary for annotating vocabulary descriptions — release of
+# 2010-06-07, by Ian Davis.
+# Source: https://vocab.org/vann/vann-vocab-20100607.rdf
+# Copyright © 2005 Ian Davis. (the file's own dcterms:rights, kept below)
+# Licence: Creative Commons Attribution 1.0 (CC BY 1.0),
+# http://creativecommons.org/licenses/by/1.0/ (the file's own cc:license)
+# Changes by Open Triplestore: converted from RDF/XML to Turtle (triples
+# unchanged, except that the cc:Work statement's subject, relative to the
+# document in the source, is written out as the source's URL) and this comment
+# header added.
+# Full attribution and licence texts: NOTICE.md in this directory.
 @prefix cc: <http://web.resource.org/cc/> .
 @prefix dcmitype: <http://purl.org/dc/dcmitype/> .
 @prefix dcterms: <http://purl.org/dc/terms/> .

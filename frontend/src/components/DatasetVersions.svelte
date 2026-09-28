@@ -154,7 +154,13 @@
       else if (action === 'deprecate') await deprecateDatasetVersion(id, ver);
       else if (action === 'restore') {
         if (!confirm($t('components.datasetVersions.restoreConfirm', { values: { version: ver } }))) { actionKey = ''; return; }
-        await restoreDatasetVersion(id, ver);
+        const res = await restoreDatasetVersion(id, ver);
+        // Graphs that have left the dataset since the snapshot are not restored.
+        if (res?.skipped?.length) {
+          alert($t('components.datasetVersions.restoreSkipped', {
+            values: { count: res.skipped.length, graphs: res.skipped.map((s) => s.graph).join(', ') },
+          }));
+        }
       }
       await load();
     } catch (e) {

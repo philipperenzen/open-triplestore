@@ -1,6 +1,72 @@
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import tailwindcss from '@tailwindcss/vite';
+import fs from 'node:fs';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import { otherBundledMaterial, thirdPartyLicenses } from './scripts/third-party-licenses.mjs';
+
+// ── Cesium runtime assets, served from this origin ────────────────────────────
+//
+// Cesium loads its web workers, shaders, widget CSS and 3D-Tiles/terrain helper
+// assets at runtime relative to `window.CESIUM_BASE_URL`, outside the module
+// graph, so a bundler never sees them. The viewer used to point that at a CDN
+// pinned to a literal version — which had drifted 21 minor releases behind the
+// `cesium` package npm actually installed, and which made the globe depend on
+// internet access. This plugin serves the installed package's own Build/Cesium
+// runtime directories under /cesium/ in dev, and copies them into dist/cesium
+// at build time, so the assets always match the engine and work air-gapped.
+const CESIUM_RUNTIME_DIRS = ['Workers', 'Assets', 'ThirdParty', 'Widgets'];
+const CESIUM_MIME = {
+  '.js': 'text/javascript',
+  '.mjs': 'text/javascript',
+  '.wasm': 'application/wasm',
+  '.json': 'application/json',
+  '.css': 'text/css',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+  '.xml': 'application/xml',
+  '.glsl': 'text/plain',
+  '.txt': 'text/plain',
+};
+
+function cesiumBuildDir() {
+  const require = createRequire(import.meta.url);
+  return path.join(path.dirname(require.resolve('cesium/package.json')), 'Build', 'Cesium');
+}
+
+function cesiumAssets() {
+  const buildDir = cesiumBuildDir();
+  return {
+    name: 'ots-cesium-assets',
+    configureServer(server) {
+      server.middlewares.use('/cesium', (req, res, next) => {
+        const rel = decodeURIComponent((req.url || '/').split('?')[0]);
+        const file = path.normalize(path.join(buildDir, rel));
+        // Containment + only the runtime directories, never the whole package.
+        if (!file.startsWith(buildDir + path.sep)) return next();
+        if (!CESIUM_RUNTIME_DIRS.some((d) => file.startsWith(path.join(buildDir, d) + path.sep))) {
+          return next();
+        }
+        fs.stat(file, (err, st) => {
+          if (err || !st.isFile()) return next();
+          res.setHeader('Content-Type', CESIUM_MIME[path.extname(file)] || 'application/octet-stream');
+          res.setHeader('Cache-Control', 'public, max-age=3600');
+          fs.createReadStream(file).pipe(res);
+        });
+      });
+    },
+    closeBundle() {
+      const outDir = path.resolve('dist', 'cesium');
+      for (const d of CESIUM_RUNTIME_DIRS) {
+        fs.cpSync(path.join(buildDir, d), path.join(outDir, d), { recursive: true });
+      }
+    },
+  };
+}
 
 // One-shot resolve of the service registry at dev-server startup so the backend proxy
 // targets can follow discovery. Falls back to {} (→ the localhost default) when it's down.
@@ -29,6 +95,28 @@ async function resolveRegistry() {
   }
 }
 
+// ── Third-party licence notices ────────────────────────────────────────────────
+//
+// The minifier strips the @license comments of the npm packages it bundles, so
+// the build writes their licence and notice files to dist/THIRD-PARTY-LICENSES.txt
+// instead (see scripts/third-party-licenses.mjs). The plugin records what the
+// bundler actually put into the main bundle and each web worker; the packages
+// below reach dist/ outside the module graph and are added explicitly, and so is
+// the third-party material no npm package covers (web-ifc.wasm's statically
+// linked libraries, inline icon shapes, EPSG parameters), whose licence texts
+// come from the repository's LICENSES/ directory: the build fails without it.
+const licenses = thirdPartyLicenses({
+  extraPackages: [
+    // cesiumAssets() copies Build/Cesium's runtime into dist/cesium; that build
+    // contains CesiumJS and the packages it depends on.
+    { name: 'cesium', withDependencies: true, reason: 'runtime assets copied to dist/cesium' },
+    // @tailwindcss/vite compiles Tailwind's base styles into the stylesheet.
+    { name: 'tailwindcss', reason: 'base styles compiled into dist/assets/*.css' },
+  ],
+  cesiumRuntimeDir: cesiumBuildDir(),
+  otherMaterial: otherBundledMaterial(fileURLToPath(new URL('../LICENSES', import.meta.url))),
+});
+
 export default defineConfig(async () => {
   // Only probe the registry when discovery is enabled — otherwise skip the startup round-trip.
   const reg = DISCOVERY ? await resolveRegistry() : {};
@@ -43,7 +131,9 @@ export default defineConfig(async () => {
     // Expose the opt-in flag to the browser bundle so serviceRegistry.ts only contacts the
     // registry when discovery is on (otherwise no /registry/events SSE reconnect loop, no noise).
     define: { __LD_DISCOVERY__: JSON.stringify(DISCOVERY) },
-    plugins: [tailwindcss(), svelte()],
+    plugins: [tailwindcss(), svelte(), cesiumAssets(), licenses.plugin()],
+    // Web workers are separate bundles: record their third-party modules too.
+    worker: { plugins: () => [licenses.workerPlugin()] },
     server: {
       // --no-reload (LD_NO_HMR=1) turns off hot module reload while keeping the dev server + proxy.
       hmr: process.env.LD_NO_HMR === '1' ? false : undefined,
@@ -136,7 +226,8 @@ export default defineConfig(async () => {
       // Vitest owns unit tests under src/; Playwright (npm run e2e) owns e2e/.
       // Without this, vitest's default glob picks up e2e/*.spec.ts and crashes
       // because Playwright's test() can't run under vitest.
-      include: ['src/**/*.{test,spec}.{js,ts}'],
+      // scripts/*.test.mjs cover the build scripts (e.g. the licence notices).
+      include: ['src/**/*.{test,spec}.{js,ts}', 'scripts/**/*.test.mjs'],
     },
   };
 });

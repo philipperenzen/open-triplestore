@@ -5,6 +5,7 @@
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
   import { listShapeGraphs, listPipelines, listDatasets } from '../lib/api.js';
+  import { loadPrefixCcPrefixes } from '../lib/rdf-utils.js';
   import { FileCode, Workflow, Database, ShieldCheck, Plus, ArrowRight, AlertTriangle } from 'lucide-svelte';
   import { Link, navigate } from '../lib/router/index.js';
   import ShaclStudioNav from '../components/ShaclStudioNav.svelte';
@@ -22,6 +23,10 @@
   }
 
   onMount(async () => {
+    // Warm the full namespace→prefix store for the whole Studio; without it
+    // CURIEs elsewhere fall back to the 19 hard-coded common prefixes. Self-
+    // guarded and self-catching, so it neither blocks nor can fail loudly.
+    loadPrefixCcPrefixes();
     try {
       [sets, pipelines, datasets] = await Promise.all([
         listShapeGraphs().catch(() => []),
@@ -163,7 +168,9 @@
   .recent { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
   :global(.studio-page .recent-link) { display: flex; align-items: center; gap: 0.5rem; padding: 0.45rem 0.6rem; border-radius: 8px; text-decoration: none; color: #334155; }
   :global(.studio-page .recent-link:hover) { background: #f8fafc; }
-  .recent-name { flex: 1; font-weight: 600; }
+  /* A pipeline name is human-readable text and wraps; it never widens the
+     panel past the viewport, and it is never cut. */
+  .recent-name { flex: 1 1 8rem; min-width: 0; font-weight: 600; overflow-wrap: break-word; }
   .recent-time { font-size: 0.74rem; color: #94a3b8; }
   .pill { display: inline-flex; align-items: center; gap: 3px; font-size: 0.68rem; padding: 2px 7px; border-radius: 999px; font-weight: 600; }
   .pill-ok { background: #dcfce7; color: #15803d; }
@@ -176,6 +183,14 @@
 
   @media (max-width: 760px) {
     .row { grid-template-columns: 1fr; }
+  }
+
+  /* Phone: a run's name, its verdict and its age no longer share one line —
+     the name takes the line it needs and the rest follows underneath. */
+  @media (max-width: 720px) {
+    :global(.studio-page .recent-link) { flex-wrap: wrap; row-gap: 0.2rem; min-height: 2.5rem; }
+    .recent-time { margin-left: auto; }
+    .panel-head { flex-wrap: wrap; gap: 0.4rem; }
   }
 
   :global(:is([data-theme="dark"], .dark) .studio-page .kpi) { background: var(--bg-strong); }

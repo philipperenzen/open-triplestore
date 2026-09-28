@@ -1,0 +1,4 @@
+# ❌ ifcGuid fails sh:pattern (too short / invalid chars).
+@prefix def: <https://example.org/def/> .
+@prefix eb:  <https://example.org/id/example-bridge/> .
+eb:Arch-Bad a def:BridgeComponent ; def:ifcGuid "too-short" .

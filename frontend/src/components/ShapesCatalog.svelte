@@ -9,6 +9,7 @@
   //   • picker mode (`picker` + `targetGraphId`) — add picks to one shape graph
   //     (used from the editor's "Add existing shapes"); emits `imported`.
   import { onMount, createEventDispatcher } from 'svelte';
+  import { t } from 'svelte-i18n';
   import {
     listShapesCatalog, listShapeGraphs, createShapeGraph, importShapesIntoGraph, registerShapeGraph,
     getShapeGraphTurtle,
@@ -16,6 +17,7 @@
   import { Search, X, Plus, Check, Database, FileCode, Layers, FolderInput, BookmarkPlus, Loader2, ChevronRight, ChevronDown, ExternalLink } from 'lucide-svelte';
   import { navigate } from '../lib/router/index.js';
   import { filterByQuery } from '../lib/searchMatch.js';
+  import { shortenIRI } from '../lib/rdf-utils.js';
   import { openPendingViewerTab, showShapesInViewer, viewerConfigured } from '../lib/graphViewer.ts';
   import Select from './Select.svelte';
   import { toastError, toastSuccess } from '../lib/toast.ts';
@@ -96,7 +98,10 @@
     });
   }
 
-  function shortIRI(iri) { const m = String(iri).match(/[^#/]+$/); return m ? m[0] : iri; }
+  // IRIs are displayed as CURIEs via shortenIRI. A local-name-only truncator used
+  // to live here and threw the namespace away, so sh:NodeShape and ex:NodeShape
+  // both rendered as "NodeShape" — every display site below pairs the CURIE with
+  // a title= carrying the full IRI so nothing is lost.
 
   // Hide graphs that hold none of the selected shape kind, so "Node shapes" /
   // "Property shapes" only surfaces graphs that actually have them. NB: the
@@ -132,7 +137,7 @@
     openingViewer.add(g.graph); openingViewer = new Set(openingViewer);
     try {
       const ttl = await getShapeGraphTurtle(g.shape_graph_id);
-      if (!ttl || !ttl.trim()) { toastError('No shapes to open in this graph.'); win?.close(); return; }
+      if (!ttl || !ttl.trim()) { toastError($t('components.shapesCatalog.noShapesToOpen')); win?.close(); return; }
       showShapesInViewer(win, ttl);
     } catch (e) {
       toastError(e.message); win?.close();
@@ -152,7 +157,7 @@
     busy = true;
     try {
       const res = await importShapesIntoGraph(targetGraphId, selectedRefs());
-      toastSuccess(`Added ${res.imported} shape${res.imported === 1 ? '' : 's'} (v${res.version})`);
+      toastSuccess($t('components.shapesCatalog.addedWithVersion', { values: { count: res.imported, version: res.version } }));
       selected = new Set();
       dispatch('imported', res);
     } catch (e) { toastError(e.message); } finally { busy = false; }
@@ -160,35 +165,35 @@
 
   async function createFromSelection() {
     if (!selected.size) return;
-    const name = (prompt('Name for the new shape graph:', 'New shape graph') || '').trim();
+    const name = (prompt($t('components.shapesCatalog.newGraphPrompt'), $t('components.shapesCatalog.newGraphDefault')) || '').trim();
     if (!name) return;
     busy = true;
     try {
       const sg = await createShapeGraph({ name, visibility: 'private' });
       const res = await importShapesIntoGraph(sg.id, selectedRefs());
-      toastSuccess(`Created "${sg.name}" with ${res.imported} shape${res.imported === 1 ? '' : 's'}`);
+      toastSuccess($t('components.shapesCatalog.created', { values: { name: sg.name, count: res.imported } }));
       dispatch('created', sg);
       navigate(`/shacl/shapes/${sg.id}`);
     } catch (e) { toastError(e.message); } finally { busy = false; }
   }
 
   async function addToExisting() {
-    if (!selected.size || !addTargetId) { toastError('Pick a shape graph to add into'); return; }
+    if (!selected.size || !addTargetId) { toastError($t('components.shapesCatalog.pickTarget')); return; }
     busy = true;
     try {
       const res = await importShapesIntoGraph(addTargetId, selectedRefs());
-      toastSuccess(`Added ${res.imported} shape${res.imported === 1 ? '' : 's'}`);
+      toastSuccess($t('components.shapesCatalog.added', { values: { count: res.imported } }));
       navigate(`/shacl/shapes/${addTargetId}`);
     } catch (e) { toastError(e.message); } finally { busy = false; }
   }
 
   async function registerGraph(g) {
-    const name = (prompt('Name for this shape graph:', shortIRI(g.graph)) || '').trim();
+    const name = (prompt($t('components.shapesCatalog.registerPrompt'), shortenIRI(g.graph)) || '').trim();
     if (!name) return;
     busy = true;
     try {
       const sg = await registerShapeGraph({ graph_iri: g.graph, name, visibility: 'private' });
-      toastSuccess(`Registered "${sg.name}"`);
+      toastSuccess($t('components.shapesCatalog.registered', { values: { name: sg.name } }));
       await reload();
     } catch (e) { toastError(e.message); } finally { busy = false; }
   }
@@ -250,7 +255,7 @@
             {#if expanded.has(g.graph)}<ChevronDown size={14} />{:else}<ChevronRight size={14} />{/if}
           </button>
           <Layers size={13} class="grp-icon" />
-          <code class="grp-iri" title={g.graph} on:click={() => toggleExpand(g)} role="presentation">{shortIRI(g.graph)}</code>
+          <code class="grp-iri" title={g.graph} on:click={() => toggleExpand(g)} role="presentation">{shortenIRI(g.graph)}</code>
           {#if kindFilter === 'node'}
             <span class="grp-counts">{(g.node_count || 0).toLocaleString()} <span class="dim">node shape{g.node_count === 1 ? '' : 's'}</span></span>
           {:else if kindFilter === 'property'}
@@ -290,9 +295,9 @@
                   <li class="shape-row" class:sel={selected.has(key(g.graph, s.shape))} on:click={() => toggle(g.graph, s.shape)} role="presentation">
                     <span class="box" class:on={selected.has(key(g.graph, s.shape))}>{#if selected.has(key(g.graph, s.shape))}<Check size={11} />{/if}</span>
                     <span class="kind kind-{s.kind}">{s.kind === 'property' ? 'P' : 'N'}</span>
-                    <span class="shape-name" title={s.shape}>{s.label || shortIRI(s.shape)}</span>
-                    {#each (s.target_classes || []).slice(0, 3) as tc}<span class="chip chip-target"><Database size={9} /> {shortIRI(tc)}</span>{/each}
-                    {#if s.path}<span class="chip chip-path">{shortIRI(s.path)}</span>{/if}
+                    <span class="shape-name" title={s.shape}>{s.label || shortenIRI(s.shape)}</span>
+                    {#each (s.target_classes || []).slice(0, 3) as tc}<span class="chip chip-target" title={tc}><Database size={9} /> {shortenIRI(tc)}</span>{/each}
+                    {#if s.path}<span class="chip chip-path" title={s.path}>{shortenIRI(s.path)}</span>{/if}
                   </li>
                 {/each}
               </ul>

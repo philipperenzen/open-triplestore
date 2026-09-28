@@ -1,10 +1,25 @@
-# The Bibliographic Ontology — The Bibliographic Ontology Specification
-# provides main concepts and properties for describing citations and
-# bibliographic references (i.e.
-# Full vocabulary as published in the Linked Open Vocabularies (LOV) corpus
-# snapshot of 2025-12-18 (https://lov.linkeddata.es/ — dataset CC BY 4.0),
-# version v1.3 (2009-11-04).
-# Source: http://purl.org/ontology/bibo/  (ns http://purl.org/ontology/bibo/)
+# The Bibliographic Ontology (BIBO) 1.3 (2009-11-04) — concepts and properties
+# for describing citations and bibliographic references; by Bruce D'Arcus and
+# Frédérick Giasson.
+# Source: http://purl.org/ontology/bibo/ as captured by LOV. This is an older
+# revision: it differs slightly from DCMI's current file,
+# https://www.dublincore.org/specifications/bibo/bibo/bibo.ttl (for example it
+# lacks bibo:Specification and keeps some older labels).
+# Obtained via the Linked Open Vocabularies (LOV) corpus snapshot of 2025-12-18
+# (https://lov.linkeddata.es/), which re-serialized it as Turtle. LOV's own
+# CC BY 4.0 licence covers LOV's catalogue; it does not relicense this vocabulary.
+# Copyright © 2008-2013 by Structured Dynamics LLC.
+# BIBO is now maintained by DCMI: DCMI Community Specification, latest update
+# 2016-05-11. The canonical version is on DCMI's site:
+# https://www.dublincore.org/specifications/bibo/bibo/
+# Licence: CC BY 4.0, https://creativecommons.org/licenses/by/4.0/, under DCMI's
+# Document Notice (https://www.dublincore.org/about/copyright/). The original
+# Structured Dynamics specification was licensed CC BY 1.0 and stated that its
+# copyright does not apply to the ontology terms.
+# Changes: re-serialized as Turtle by LOV; this comment header was written by
+# Open Triplestore (2026-07-24, revised 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The vocabulary, as re-serialized by LOV, starts below this line. ----
 @prefix bibo: <http://purl.org/ontology/bibo/> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix foaf: <http://xmlns.com/foaf/0.1/> .

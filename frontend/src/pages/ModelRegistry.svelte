@@ -4,7 +4,7 @@
   import { navigate, Link } from '../lib/router/index.js';
   import { BookOpen, Plus, Trash2, Search, Loader2, Tag, ChevronRight, Info, ChevronDown, Globe, Lock, CheckSquare, X, User, Building2, Library } from 'lucide-svelte';
   import { listDataModels, createDataModel, deleteDataModel, listPublicUsers, listOrganisations } from '../lib/api.js';
-  import { isAdmin } from '../lib/stores.js';
+  import { isAdmin, isAuthenticated } from '../lib/stores.js';
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import BulkActionBar from '../components/BulkActionBar.svelte';
   import Avatar from '../components/Avatar.svelte';
@@ -160,6 +160,10 @@
           <CheckSquare size={14} />
           {selectMode ? $t('pages.modelRegistry.cancelSelect') : $t('pages.modelRegistry.select')}
         </button>
+      {/if}
+      <!-- Any signed-in user may register a model they own (the server enforces
+           ownership + the publisher gate for public entries). -->
+      {#if $isAuthenticated}
         <button class="btn btn-primary btn-sm" on:click={() => showCreate = true}>
           <Plus size={16} />
           {$t('pages.modelRegistry.newModel')}
@@ -279,6 +283,15 @@
               </div>
               <code class="text-xs text-[var(--ink-400)] break-all">{model.id}</code>
             </div>
+            {#if $isAdmin}
+              <button
+                class="p-1.5 -mt-1 rounded-lg text-red-400 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-50 shrink-0"
+                on:click|stopPropagation={() => deleteTarget = model}
+                aria-label={$t('pages.modelRegistry.deleteModel')}
+              >
+                <Trash2 size={14} />
+              </button>
+            {/if}
             <ChevronRight size={18} class="text-[var(--ink-300)] mt-0.5 shrink-0 group-hover:text-[var(--brand-500)] transition-colors" />
           </div>
 
@@ -314,15 +327,6 @@
             </div>
           </div>
 
-          {#if $isAdmin}
-            <button
-              class="absolute top-3 right-3 p-1.5 rounded-lg text-red-400 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-50"
-              on:click|stopPropagation={() => deleteTarget = model}
-              aria-label={$t('pages.modelRegistry.deleteModel')}
-            >
-              <Trash2 size={14} />
-            </button>
-          {/if}
         </div>
       {/each}
     </div>

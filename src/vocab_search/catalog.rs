@@ -15,11 +15,24 @@
 //! strictly public-only so private entries never leak into anonymous
 //! rankings.
 //!
+//! Licences: LOV's CC BY 4.0 covers LOV's own metadata only.  Each LOV
+//! record also carries the vocabulary's own licence — the one its graph
+//! declares or, where the graph names none, the terms its publisher states
+//! elsewhere (`license_source`) — the notice that licence requires on copies
+//! (`license_notice`), each licence's URI (`license_uris`), whether every
+//! licence offered allows only unaltered copies (`no_derivatives`), whether
+//! LOV's copy holds mis-decoded text (`lov_misdecoded`; the notice then says
+//! so) and whether this project may redistribute it (`redistributable`,
+//! false when `redistribution_withheld` says why); the build script keeps a
+//! vocabulary's description only when it may.  Term
+//! search indexes only redistributable LOV vocabularies (see
+//! [`super::corpus`]).
+//!
 //! The catalog itself is independent of the `vocab-search` Cargo feature —
 //! vocabulary-level search works on every build; only term-level search
 //! needs the Tantivy engine.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::RwLock;
 
@@ -67,6 +80,37 @@ pub struct VocabVersionInfo {
     pub instance_count: u64,
 }
 
+/// How a vocabulary's licence was classified: the one its own graph
+/// declares or, where the graph names none, the terms its publisher states
+/// elsewhere (`LicenseSource`; see `scripts/build_lov_catalog.py`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LicenseStatus {
+    /// A licence that allows sharing a verbatim copy with attribution.
+    Open,
+    /// NonCommercial, all rights reserved, copyleft and similar terms.
+    Restricted,
+    /// A licence reference the build script could not identify.
+    Unrecognised,
+    /// Only a copyright line, no licence.
+    CopyrightOnly,
+    /// No licence or rights statement at all.
+    #[serde(rename = "none")]
+    Undeclared,
+}
+
+/// Where a LOV vocabulary's licence fields come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LicenseSource {
+    /// The licence (or its absence) is what the vocabulary's own graph states.
+    Graph,
+    /// The graph names no licence; the licence is what the publisher states
+    /// elsewhere — a licence page, a specification or a site-wide notice —
+    /// from the build script's reviewed table (`license_source_url` cites it).
+    PublisherTerms,
+}
+
 /// One LOV vocabulary record, as embedded.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LovVocab {
@@ -99,19 +143,103 @@ pub struct LovVocab {
     pub metrics: VocabMetrics,
     #[serde(default)]
     pub versions: Vec<VocabVersionInfo>,
-    /// Quads of this vocabulary's graph in the LOV corpus (0 = not present,
-    /// i.e. not installable from the bundled corpus).
+    /// Quads of this vocabulary's graph in the LOV dump the catalog was built
+    /// from (0 = not present).  Whether the corpus on this instance holds the
+    /// graph is tracked separately — the image ships a filtered corpus.
     #[serde(default)]
     pub graph_quads: u64,
+    /// Recognised licences (`CC BY 4.0`, `Apache-2.0`, …): those the
+    /// vocabulary declares in its own graph or, for `publisher-terms`, those
+    /// its publisher states elsewhere.
+    #[serde(default)]
+    pub license: Vec<String>,
+    /// The URI of each licence in `license`, in the same order; `None` for
+    /// a label that names no licence document (a public-domain statement)
+    /// or one the build script could not resolve.
+    #[serde(default)]
+    pub license_uris: Vec<Option<String>>,
+    /// The licence and rights statements exactly as the graph declares them.
+    #[serde(default)]
+    pub license_declared: Vec<String>,
+    /// `None` for catalogs built before licences were recorded.
+    #[serde(default)]
+    pub license_status: Option<LicenseStatus>,
+    /// Whether this project may redistribute the vocabulary: its licence
+    /// allows sharing an unmodified copy and LOV's copy can be shipped under
+    /// it.  False when unknown.
+    #[serde(default)]
+    pub redistributable: bool,
+    /// Every licence offered allows only unaltered copies (CC BY-ND, the OGC
+    /// Document Notice): an installed copy must not be edited or copied into
+    /// a draft.
+    #[serde(default)]
+    pub no_derivatives: bool,
+    /// Where the licence fields come from; `None` for catalogs built before
+    /// this was recorded.
+    #[serde(default)]
+    pub license_source: Option<LicenseSource>,
+    /// The publisher's statement of its terms, for `publisher-terms`.
+    #[serde(default)]
+    pub license_source_url: Option<String>,
+    /// The statement the licence requires on copies, whatever the licence's
+    /// source: the W3C and OGC document notices (filled in per vocabulary
+    /// with its year, title, IRI and status), the copyright line MIT and BSD
+    /// require, DCMI's or ESCO's statement.  `None` when the licence asks
+    /// only for the usual attribution.
+    #[serde(default)]
+    pub license_notice: Option<String>,
+    /// Why a vocabulary whose licence would allow redistribution is not
+    /// redistributed (LOV's copy is not a faithful copy of a work that allows
+    /// no modification, or nobody states the copyright notice its licence
+    /// requires); `None` otherwise.
+    #[serde(default)]
+    pub redistribution_withheld: Option<String>,
+    /// How many literals of LOV's copy hold characters mis-decoded (UTF-8
+    /// read as Latin-1 or Windows-1252) in a graph that is redistributed
+    /// anyway, because its licence allows modification; `license_notice`
+    /// then says so.  0 otherwise.
+    #[serde(default)]
+    pub lov_misdecoded: u32,
 }
 
+impl LovVocab {
+    /// The vocabulary's licences with their URIs, for the registry's licence
+    /// record; labels without a URI are left out.
+    pub fn license_refs(&self) -> Vec<(String, String)> {
+        self.license
+            .iter()
+            .zip(self.license_uris.iter())
+            .filter_map(|(name, uri)| uri.as_ref().map(|u| (name.clone(), u.clone())))
+            .collect()
+    }
+}
+
+/// Where the catalog came from.  `license` is LOV's licence for its own
+/// metadata; it does not extend to the vocabularies (see `license_scope`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatalogSource {
     pub url: String,
     pub snapshot_date: String,
     pub sha256: String,
     pub license: String,
+    #[serde(default = "lov_license_url")]
+    pub license_url: String,
+    #[serde(default = "lov_license_scope")]
+    pub license_scope: String,
     pub attribution: String,
+    /// What this project changed relative to the LOV dump.
+    #[serde(default)]
+    pub modifications: Option<String>,
+}
+
+fn lov_license_url() -> String {
+    "https://creativecommons.org/licenses/by/4.0/".to_string()
+}
+
+fn lov_license_scope() -> String {
+    "LOV's own catalogue metadata. Each vocabulary, and any text quoted from it, stays \
+     under its publisher's licence, given per entry."
+        .to_string()
 }
 
 #[derive(Deserialize)]
@@ -206,9 +334,32 @@ pub struct CatalogEntry {
     pub source: &'static str,
     /// Set when the vocabulary is registered on this instance.
     pub model_id: Option<String>,
-    /// True when the bundled corpus contains this vocabulary's triples, so
-    /// an admin can install it without any network access.
+    /// True when the corpus on this instance contains this vocabulary's
+    /// triples, so an admin can install it without any network access.
     pub installable: bool,
+    /// The vocabulary's licences, from its own graph or its publisher's
+    /// terms (LOV entries only; a platform entry's terms are those of its
+    /// registry entry).
+    pub license: Vec<String>,
+    /// The URI of each licence in `license`, in the same order (`null` where
+    /// the label names no licence document).
+    pub license_uris: Vec<Option<String>>,
+    pub license_declared: Vec<String>,
+    pub license_status: Option<LicenseStatus>,
+    /// Whether this project may redistribute the vocabulary.
+    pub redistributable: bool,
+    /// Every licence offered allows only unaltered copies.
+    pub no_derivatives: bool,
+    /// `graph` or `publisher-terms` (LOV entries only).
+    pub license_source: Option<LicenseSource>,
+    pub license_source_url: Option<String>,
+    /// The statement the licence requires on copies.
+    pub license_notice: Option<String>,
+    /// Why an openly licensed vocabulary is still not redistributed.
+    pub redistribution_withheld: Option<String>,
+    /// Literals of LOV's copy with mis-decoded characters (see
+    /// [`LovVocab::lov_misdecoded`]).
+    pub lov_misdecoded: u32,
 }
 
 pub struct VocabCatalog {
@@ -220,6 +371,9 @@ pub struct VocabCatalog {
     by_nsp_canon: HashMap<String, usize>,
     term_metrics: HashMap<String, [u64; 2]>,
     platform: RwLock<PlatformOverlay>,
+    /// Vocabulary graphs present in the corpus this instance found (`None`
+    /// until scanned, or without a corpus).
+    corpus_graphs: RwLock<Option<HashSet<String>>>,
 }
 
 impl VocabCatalog {
@@ -253,7 +407,35 @@ impl VocabCatalog {
             by_nsp_canon,
             term_metrics: file.term_metrics,
             platform: RwLock::new(PlatformOverlay::default()),
+            corpus_graphs: RwLock::new(None),
         }
+    }
+
+    /// Record which vocabulary graphs the corpus holds (`None`: no corpus).
+    pub fn set_corpus_graphs(&self, graphs: Option<HashSet<String>>) {
+        let mut guard = self
+            .corpus_graphs
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = graphs;
+    }
+
+    /// Whether the corpus holds the graph of the vocabulary `uri`.
+    pub fn corpus_has(&self, uri: &str) -> bool {
+        self.corpus_graphs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|g| g.contains(uri))
+    }
+
+    /// Catalogued vocabularies present in the corpus.
+    pub fn corpus_vocab_count(&self) -> usize {
+        let guard = self.corpus_graphs.read().unwrap_or_else(|e| e.into_inner());
+        guard
+            .as_ref()
+            .map(|g| self.lov.iter().filter(|v| g.contains(&v.uri)).count())
+            .unwrap_or(0)
     }
 
     pub fn source(&self) -> &CatalogSource {
@@ -274,9 +456,130 @@ impl VocabCatalog {
         self.by_prefix.get(prefix).map(|&i| &self.lov[i])
     }
 
+    /// Raw LOV record installed under registry id `id`: the installer uses
+    /// the LOV prefix, lowercased.
+    pub fn lov_by_model_id(&self, id: &str) -> Option<&LovVocab> {
+        self.lov_by_prefix(id)
+            .filter(|v| v.prefix.to_lowercase() == id)
+            .or_else(|| self.lov.iter().find(|v| v.prefix.to_lowercase() == id))
+    }
+
+    /// Raw LOV record whose namespace is exactly `nsp`.
+    pub fn lov_by_namespace(&self, nsp: &str) -> Option<&LovVocab> {
+        self.by_nsp_exact.get(nsp).map(|&i| &self.lov[i])
+    }
+
+    /// Plain-text licence page of one LOV vocabulary, as `GET
+    /// /api/vocab/notice` serves it and the licence record of an installed
+    /// copy links to it: its licences with their URIs, where they are stated,
+    /// the notice copies must carry, where the copy comes from and LOV's own
+    /// attribution.
+    pub fn notice_text(&self, v: &LovVocab) -> String {
+        let src = &self.source;
+        let title = v
+            .titles
+            .iter()
+            .find(|t| t.lang.as_deref().is_none_or(|l| l.starts_with("en")))
+            .or(v.titles.first())
+            .map(|t| t.value.as_str())
+            .unwrap_or(v.prefix.as_str());
+        let mut out = format!(
+            "{title} ({})\nPrefix: {}\nNamespace: {}\n\n",
+            v.uri, v.prefix, v.nsp
+        );
+        if v.license.is_empty() {
+            out.push_str("Licence: none known.\n");
+        }
+        for (i, label) in v.license.iter().enumerate() {
+            match v.license_uris.get(i).cloned().flatten() {
+                Some(uri) => out.push_str(&format!("Licence: {label}, {uri}\n")),
+                None => out.push_str(&format!("Licence: {label}\n")),
+            }
+        }
+        match (v.license_source, v.license_source_url.as_deref()) {
+            (Some(LicenseSource::PublisherTerms), Some(url)) => out.push_str(&format!(
+                "The vocabulary's graph names no licence; its publisher states these terms at \
+                 {url}.\n"
+            )),
+            _ if !v.license_declared.is_empty() => out.push_str(&format!(
+                "As the vocabulary's graph states it: {}\n",
+                v.license_declared.join(" | ")
+            )),
+            _ => {}
+        }
+        if v.no_derivatives {
+            out.push_str(
+                "Its licence allows only unaltered copies: this server redistributes it \
+                 unmodified and refuses drafts and other edits of it.\n",
+            );
+        }
+        if let Some(n) = v.license_notice.as_deref() {
+            out.push_str(&format!("\nRequired notice:\n{n}\n"));
+        }
+        if v.redistributable && v.graph_quads > 0 {
+            out.push_str(&format!(
+                "\nThis project may redistribute it: the Docker image ships LOV's copy of its \
+                 graph, as found in LOV's dump, unchanged{}.\n",
+                if v.lov_misdecoded > 0 {
+                    " (with the mis-decoded characters the notice describes)"
+                } else {
+                    ""
+                }
+            ));
+        } else if v.redistributable {
+            out.push_str(
+                "\nIts licence would let this project redistribute it, but LOV's dump holds no \
+                 copy of its graph.\n",
+            );
+        } else {
+            out.push_str(&format!(
+                "\nThis project does not redistribute it{}; installed from a full LOV dump, it \
+                 stays private to its owner and the admins.\n",
+                v.redistribution_withheld
+                    .as_deref()
+                    .map(|w| format!(": {}", w.trim_end_matches('.')))
+                    .unwrap_or_default()
+            ));
+        }
+        out.push_str(&format!(
+            "\nSource: the Linked Open Vocabularies (LOV) dump {} (snapshot {}, sha256 {}), \
+             graph <{}>: LOV's N-Quads serialization of the publisher's document.\n\
+             LOV: {}, under {} ({}), which covers LOV's own catalogue metadata only; the \
+             vocabulary stays under the licence above.\n\
+             Licence texts: the licence URIs above; Open Triplestore's NOTICE file and \
+             LICENSES/ directory (/app/NOTICE and /app/LICENSES/ in the Docker image) \
+             reproduce those that must travel with copies.\n",
+            src.url,
+            src.snapshot_date,
+            src.sha256,
+            v.uri,
+            src.attribution,
+            src.license,
+            src.license_url,
+        ));
+        out
+    }
+
     /// Raw LOV record whose graph in the corpus is `graph_uri`.
     pub fn lov_by_uri(&self, uri: &str) -> Option<&LovVocab> {
         self.by_uri.get(uri).map(|&i| &self.lov[i])
+    }
+
+    /// A short digest of which LOV vocabularies may be redistributed, and so
+    /// term-indexed.  Part of the persisted index's directory name, so a
+    /// catalog that changes the set rebuilds the index instead of reopening
+    /// one that holds vocabularies it no longer may serve.
+    pub fn redistributable_digest(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut uris: Vec<&str> = self
+            .lov
+            .iter()
+            .filter(|v| v.redistributable)
+            .map(|v| v.uri.as_str())
+            .collect();
+        uris.sort_unstable();
+        let digest = Sha256::digest(uris.join("\n").as_bytes());
+        hex::encode(&digest[..4])
     }
 
     /// Replace the platform overlay with the registry entries (all
@@ -331,9 +634,18 @@ impl VocabCatalog {
             .collect()
     }
 
-    fn entry_from_lov(&self, v: &LovVocab, overlay: &PlatformOverlay) -> CatalogEntry {
+    /// `model_id` is set only when the caller can see the registry entry: a
+    /// private install (a vocabulary whose licence does not allow
+    /// redistribution) must not show up as installed to anyone else.
+    fn entry_from_lov(
+        &self,
+        v: &LovVocab,
+        overlay: &PlatformOverlay,
+        can_see: ViewerPredicate,
+    ) -> CatalogEntry {
         let model_id = overlay
             .lookup_nsp(&v.nsp)
+            .filter(|&i| can_see(&overlay.vocabs[i]))
             .map(|i| overlay.vocabs[i].id.clone());
         CatalogEntry {
             prefix: v.prefix.clone(),
@@ -350,7 +662,18 @@ impl VocabCatalog {
             versions: v.versions.clone(),
             source: "lov",
             model_id,
-            installable: v.graph_quads > 0,
+            installable: v.graph_quads > 0 && self.corpus_has(&v.uri),
+            license: v.license.clone(),
+            license_uris: v.license_uris.clone(),
+            license_declared: v.license_declared.clone(),
+            license_status: v.license_status,
+            redistributable: v.redistributable,
+            no_derivatives: v.no_derivatives,
+            license_source: v.license_source,
+            license_source_url: v.license_source_url.clone(),
+            license_notice: v.license_notice.clone(),
+            redistribution_withheld: v.redistribution_withheld.clone(),
+            lov_misdecoded: v.lov_misdecoded,
         }
     }
 
@@ -391,6 +714,17 @@ impl VocabCatalog {
             source: "platform",
             model_id: Some(v.id.clone()),
             installable: false,
+            license: Vec::new(),
+            license_uris: Vec::new(),
+            license_declared: Vec::new(),
+            license_status: None,
+            redistributable: false,
+            no_derivatives: false,
+            license_source: None,
+            license_source_url: None,
+            license_notice: None,
+            redistribution_withheld: None,
+            lov_misdecoded: 0,
         }
     }
 
@@ -409,7 +743,7 @@ impl VocabCatalog {
                 .lookup_nsp(&v.nsp)
                 .is_some_and(|i| can_see(&overlay.vocabs[i]));
             if !registered {
-                out.push(self.entry_from_lov(v, &overlay));
+                out.push(self.entry_from_lov(v, &overlay, can_see));
             }
         }
         out
@@ -435,7 +769,7 @@ impl VocabCatalog {
             .or_else(|| self.by_uri.get(key))
             .or_else(|| self.by_nsp_exact.get(key))
             .or_else(|| self.by_nsp_canon.get(&canon_nsp(key)));
-        idx.map(|&i| self.entry_from_lov(&self.lov[i], &overlay))
+        idx.map(|&i| self.entry_from_lov(&self.lov[i], &overlay, can_see))
     }
 
     /// All tags with usage counts, descending.
@@ -602,7 +936,441 @@ mod tests {
             "expected >800 vocabs, got {}",
             cat.lov_len()
         );
+        // LOV's licence, scoped to LOV's own metadata.
         assert_eq!(cat.source().license, "CC BY 4.0");
+        assert_eq!(
+            cat.source().license_url,
+            "https://creativecommons.org/licenses/by/4.0/"
+        );
+        assert!(cat.source().license_scope.contains("per entry"));
+        assert!(cat.source().modifications.is_some());
+    }
+
+    #[test]
+    fn records_carry_the_vocabulary_licence() {
+        let cat = VocabCatalog::bundled();
+        let gr = cat.info("gr", &public_only).expect("gr");
+        assert_eq!(gr.license, vec!["CC BY 3.0".to_string()]);
+        assert_eq!(gr.license_status, Some(LicenseStatus::Open));
+        assert!(gr.redistributable);
+        assert!(!gr.descriptions.is_empty());
+
+        let react = cat.info("react", &public_only).expect("react");
+        assert_eq!(react.license, vec!["CC BY-NC 4.0".to_string()]);
+        assert_eq!(react.license_status, Some(LicenseStatus::Restricted));
+        assert!(!react.redistributable);
+
+        assert_eq!(gr.license_source, Some(LicenseSource::Graph));
+        assert!(gr.license_source_url.is_none());
+
+        let doap = cat.info("doap", &public_only).expect("doap");
+        assert_eq!(doap.license_status, Some(LicenseStatus::CopyrightOnly));
+        assert_eq!(doap.license_source, Some(LicenseSource::Graph));
+
+        let void = cat.info("void", &public_only).expect("void");
+        assert_eq!(void.license_status, Some(LicenseStatus::Undeclared));
+        assert!(void.license_declared.is_empty());
+        assert!(!void.redistributable);
+    }
+
+    #[test]
+    fn publisher_terms_fill_in_where_the_graph_is_silent() {
+        let cat = VocabCatalog::bundled();
+        // FOAF's graph states no licence; its specification does.
+        let foaf = cat.info("foaf", &public_only).expect("foaf");
+        assert_eq!(foaf.license, vec!["CC BY 1.0".to_string()]);
+        assert_eq!(foaf.license_status, Some(LicenseStatus::Open));
+        assert_eq!(foaf.license_source, Some(LicenseSource::PublisherTerms));
+        assert_eq!(
+            foaf.license_source_url.as_deref(),
+            Some("http://xmlns.com/foaf/spec/")
+        );
+        assert!(foaf.license_declared.is_empty());
+        assert!(foaf.redistributable);
+
+        // W3C's site-wide Document License, for a namespace W3C serves.
+        let rdfs = cat.info("rdfs", &public_only).expect("rdfs");
+        assert_eq!(
+            rdfs.license,
+            vec!["W3C Document License (2023)".to_string()]
+        );
+        assert_eq!(rdfs.license_source, Some(LicenseSource::PublisherTerms));
+        assert!(rdfs.redistributable);
+
+        // Terms that require a statement carry it verbatim.
+        let dcterms = cat.info("dcterms", &public_only).expect("dcterms");
+        assert_eq!(dcterms.license, vec!["CC BY 4.0".to_string()]);
+        assert!(dcterms
+            .license_notice
+            .as_deref()
+            .is_some_and(|n| n.contains("Dublin Core")));
+        let esco = cat.info("esco", &public_only).expect("esco");
+        assert_eq!(
+            esco.license_notice.as_deref(),
+            Some("This service uses the ESCO classification of the European Commission.")
+        );
+        assert!(esco.redistributable);
+
+        // Publisher terms can restrict too: FAO's reservation is
+        // non-commercial, so the geopolitical ontology stays out.
+        let geop = cat.info("geop", &public_only).expect("geop");
+        assert_eq!(geop.license_status, Some(LicenseStatus::Restricted));
+        assert_eq!(geop.license_source, Some(LicenseSource::PublisherTerms));
+        assert!(!geop.redistributable);
+        assert!(geop.descriptions.is_empty());
+
+        // A licence the graph states always wins: GoodRelations keeps its own.
+        let gr = cat.info("gr", &public_only).expect("gr");
+        assert_eq!(gr.license_source, Some(LicenseSource::Graph));
+    }
+
+    #[test]
+    fn required_notices_are_filled_in() {
+        let cat = VocabCatalog::bundled();
+        let notice = |p: &str| {
+            cat.lov_by_prefix(p)
+                .unwrap_or_else(|| panic!("{p}"))
+                .license_notice
+                .clone()
+                .unwrap_or_else(|| panic!("{p} has no notice"))
+        };
+        // A W3C namespace document without its own notice: the licence's
+        // copy notice with the document's year, and the notice for material
+        // copied from or derived from it, naming it.
+        assert_eq!(
+            notice("rdfs"),
+            "Copyright © 2014 World Wide Web Consortium. \
+             https://www.w3.org/copyright/document-license-2023/ Copyright © 2023 W3C®. This \
+             software or document includes material copied from or derived from The RDF Schema \
+             vocabulary (RDFS), http://www.w3.org/2000/01/rdf-schema#."
+        );
+        // The year and status the graph states itself.
+        assert!(notice("owl").starts_with("Copyright © 2009 "));
+        assert!(notice("cnt").contains("Status: Working Draft 29 April 2011."));
+        // ADMS: the original is W3C's legacy copy, and the ISA notice of
+        // the release it derives from comes along.
+        let adms = notice("adms");
+        assert!(adms.contains("https://www.w3.org/ns/legacy_adms"), "{adms}");
+        assert!(adms.contains("Copyright © 2012 European Union"), "{adms}");
+        // OGC: the notice of the original file, which LOV's copy drops.
+        let sf = notice("sf");
+        assert!(
+            sf.contains("Copyright (c) 2012 Open Geospatial Consortium."),
+            "{sf}"
+        );
+        assert!(sf.contains("GeoSPARQL 1.0 is an OGC Standard."), "{sf}");
+        // MIT and BSD: the rights holder's copyright line.
+        assert!(notice("poso").starts_with("Copyright (c) 2021-2025 Maxim Van de Wynckel"));
+        assert!(notice("s4agri").starts_with("Copyright 2020 ETSI."));
+        assert!(notice("modp").contains("Indian Statistical Institute"));
+
+        for v in &cat.lov {
+            if let Some(n) = &v.license_notice {
+                assert!(
+                    !n.contains("[$"),
+                    "{}: unfilled placeholder in {n}",
+                    v.prefix
+                );
+                assert!(!n.contains('\t') && !n.contains('\n'), "{}", v.prefix);
+            }
+            // Every shipped W3C document carries its notice.
+            if v.redistributable
+                && v.license
+                    .iter()
+                    .any(|l| l.starts_with("W3C Document License"))
+            {
+                let n = v.license_notice.as_deref().unwrap_or_default();
+                assert!(
+                    n.contains("This software or document includes material"),
+                    "{}",
+                    v.prefix
+                );
+            }
+            // A licence that requires the copyright notice ships with one.
+            let needs_line = !v.license.is_empty()
+                && v.license
+                    .iter()
+                    .all(|l| ["MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC"].contains(&l.as_str()));
+            if v.redistributable && needs_line {
+                let n = v.license_notice.as_deref().unwrap_or_default();
+                assert!(
+                    n.contains("Copyright"),
+                    "{} ships without its copyright line",
+                    v.prefix
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn licences_are_labelled_as_their_holders_grant_them() {
+        let cat = VocabCatalog::bundled();
+        let v = |p: &str| cat.lov_by_prefix(p).unwrap_or_else(|| panic!("{p}"));
+        // ODRL: the Recommendation's licence; the graph's pointer to W3C's
+        // 2002 IPR notice is kept as declared.
+        let odrl = v("odrl");
+        assert_eq!(
+            odrl.license,
+            vec!["W3C Software and Document License (2015)"]
+        );
+        assert_eq!(odrl.license_source, Some(LicenseSource::PublisherTerms));
+        assert!(odrl
+            .license_declared
+            .iter()
+            .any(|d| d.contains("ipr-notice-20021231")));
+        // The SWAP files' own licence file wins over W3C's site default.
+        let doc = v("doc");
+        assert_eq!(doc.license, vec!["W3C Software Notice (1998)"]);
+        assert_eq!(doc.license_source, Some(LicenseSource::Graph));
+        // A ported CC licence keeps its jurisdiction.
+        assert_eq!(v("oecc").license, vec!["CC BY-SA 3.0 US"]);
+        // OMG's authors state CC BY 4.0 on its documentation.
+        let omg = v("omg");
+        assert_eq!(omg.license, vec!["CC BY 4.0"]);
+        assert_eq!(omg.license_source, Some(LicenseSource::PublisherTerms));
+        assert!(omg.redistributable);
+    }
+
+    #[test]
+    fn unfaithful_or_unattributable_copies_are_withheld() {
+        let cat = VocabCatalog::bundled();
+        // drammar (CC BY-ND) and prof (W3C Document License): LOV
+        // mis-decoded text in them; authn_provider (MIT): no copyright line;
+        // tmo: "Creative Commons - By Attribution" names no version, so the
+        // licence copies must carry is unknown.
+        for p in ["drama", "prof", "authn_provider", "tmo"] {
+            let v = cat.lov_by_prefix(p).unwrap_or_else(|| panic!("{p}"));
+            assert_eq!(v.license_status, Some(LicenseStatus::Open), "{p}");
+            assert!(!v.redistributable, "{p}");
+            assert!(v.redistribution_withheld.is_some(), "{p}");
+            assert!(v.descriptions.is_empty(), "{p}");
+        }
+        let gr = cat.info("gr", &public_only).expect("gr");
+        assert!(gr.redistribution_withheld.is_none());
+    }
+
+    #[test]
+    fn every_shipped_licence_has_its_uri() {
+        let cat = VocabCatalog::bundled();
+        for v in &cat.lov {
+            assert_eq!(
+                v.license.len(),
+                v.license_uris.len(),
+                "{}: license_uris out of step",
+                v.prefix
+            );
+            if !v.redistributable {
+                continue;
+            }
+            for (label, uri) in v.license.iter().zip(&v.license_uris) {
+                match uri {
+                    Some(u) => assert!(
+                        oxigraph::model::NamedNode::new(u.as_str()).is_ok(),
+                        "{}: {label} has a URI that is not an IRI: {u}",
+                        v.prefix
+                    ),
+                    // A public-domain statement names no licence document.
+                    None => assert_eq!(label, "Public domain", "{}", v.prefix),
+                }
+            }
+        }
+        let v = |p: &str| cat.lov_by_prefix(p).unwrap_or_else(|| panic!("{p}"));
+        assert_eq!(
+            v("gr").license_refs(),
+            vec![(
+                "CC BY 3.0".to_string(),
+                "https://creativecommons.org/licenses/by/3.0/".to_string()
+            )]
+        );
+        // CC0 has only a 1.0: prose naming "CC-Zero" is that licence.
+        assert_eq!(v("ontolex").license, vec!["CC0 1.0"]);
+        assert_eq!(v("ebg").license, vec!["ODC-By 1.0"]);
+    }
+
+    #[test]
+    fn no_derivatives_marks_verbatim_only_licences() {
+        let cat = VocabCatalog::bundled();
+        let v = |p: &str| cat.lov_by_prefix(p).unwrap_or_else(|| panic!("{p}"));
+        // CC BY-ND and the OGC Document Notice allow unaltered copies only.
+        for p in ["pna", "mso-em", "sf", "gml", "drama"] {
+            assert!(v(p).no_derivatives, "{p}");
+        }
+        // The W3C Document License allows derivative works in software with
+        // its notice; CC BY and dual licences that allow changes do not bind.
+        for p in ["rdfs", "gr", "foaf", "plink"] {
+            assert!(!v(p).no_derivatives, "{p}");
+        }
+    }
+
+    #[test]
+    fn open_government_and_isa_graphs_carry_their_notices() {
+        let cat = VocabCatalog::bundled();
+        let notice = |p: &str| {
+            cat.lov_by_prefix(p)
+                .unwrap_or_else(|| panic!("{p}"))
+                .license_notice
+                .clone()
+                .unwrap_or_else(|| panic!("{p} has no notice"))
+        };
+        assert!(notice("reegle").starts_with(
+            "Contains public sector information licensed under the Open Government Licence v3.0."
+        ));
+        assert!(notice("bperson").contains("Data Vlaanderen"));
+        // The ISA licence's copyright notice and No Warranty disclaimer, on
+        // its own graphs and on the W3C ones that derive from ISA work.
+        for p in ["locn", "person", "radion", "oslo", "adms", "rov"] {
+            let n = notice(p);
+            assert!(n.contains("ISA Open Metadata Licence v1.1"), "{p}: {n}");
+            assert!(
+                n.contains("No Warranty: EACH WORK IS PROVIDED \"AS IS\"")
+                    && n.contains("AS FAR SUCH LAWS APPLY TO THE WORK."),
+                "{p}: {n}"
+            );
+        }
+        assert!(notice("oslo").starts_with("Copyright (c) 2013-2014 V-ICT-OR."));
+    }
+
+    #[test]
+    fn mis_decoded_copies_say_so() {
+        let cat = VocabCatalog::bundled();
+        let v = |p: &str| cat.lov_by_prefix(p).unwrap_or_else(|| panic!("{p}"));
+        // Checked against the publisher's file: LOV's error.
+        let mil = v("mil");
+        assert!(mil.redistributable);
+        assert!(mil.lov_misdecoded > 700);
+        assert!(mil
+            .license_notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("LOV mis-decoded characters in")));
+        // tp's only copyright line is among them; the notice restores it.
+        assert!(v("tp")
+            .license_notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("Copyright © 2015 Tourpedia.")));
+        // Not checked: the notice says only that the copy holds such text.
+        assert!(v("qudt")
+            .license_notice
+            .as_deref()
+            .is_some_and(|n| n.contains("hold mis-decoded characters")));
+        // The publisher's own (SSN's DetectionLimit comment) and real text
+        // ("× " in EMMO) are not flagged.
+        for p in ["ssno", "w3c-ssn", "emmo", "gr"] {
+            assert_eq!(v(p).lov_misdecoded, 0, "{p}");
+        }
+        for x in &cat.lov {
+            if x.lov_misdecoded > 0 {
+                assert!(x.redistributable && !x.no_derivatives, "{}", x.prefix);
+                assert!(
+                    x.license_notice
+                        .as_deref()
+                        .is_some_and(|n| n.contains("mis-decoded characters")),
+                    "{}",
+                    x.prefix
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn redistributable_digest_is_stable() {
+        let cat = VocabCatalog::bundled();
+        let d = cat.redistributable_digest();
+        assert_eq!(d.len(), 8);
+        assert_eq!(d, VocabCatalog::bundled().redistributable_digest());
+    }
+
+    #[test]
+    fn private_install_is_not_shown_as_installed_to_others() {
+        let cat = VocabCatalog::bundled();
+        let void_nsp = cat.lov_by_prefix("void").expect("void").nsp.clone();
+        cat.set_platform_records(&[DataModelRecord {
+            id: "void".into(),
+            title: "VoID".into(),
+            namespace: void_nsp,
+            description: None,
+            is_public: false,
+            owner_type: Some("user".into()),
+            owner_id: Some("admin-1".into()),
+            latest_published: Some("2011".into()),
+            latest_draft: None,
+            version_count: 1,
+            created_at: String::new(),
+            created_by: None,
+            kind: RegistryKind::Vocabulary,
+        }]);
+        // Anonymous: the LOV record, with no trace of the private entry.
+        let anon = cat.info("void", &public_only).expect("void");
+        assert_eq!(anon.source, "lov");
+        assert!(anon.model_id.is_none());
+        let listed = cat.list(&public_only);
+        let entry = listed.iter().find(|e| e.prefix == "void").expect("listed");
+        assert!(entry.model_id.is_none());
+        // The owner sees the registry entry.
+        let owner_view = |_v: &PlatformVocab| true;
+        let own = cat.info("void", &owner_view).expect("own");
+        assert_eq!(own.source, "platform");
+        assert_eq!(own.model_id.as_deref(), Some("void"));
+    }
+
+    #[test]
+    fn descriptions_only_for_redistributable_vocabularies() {
+        let cat = VocabCatalog::bundled();
+        let mut kept = 0;
+        for v in &cat.lov {
+            assert!(
+                v.license_status.is_some(),
+                "{} has no licence status",
+                v.prefix
+            );
+            if v.redistributable {
+                kept += usize::from(!v.descriptions.is_empty());
+            } else {
+                assert!(
+                    v.descriptions.is_empty(),
+                    "{} is not redistributable but keeps its description",
+                    v.prefix
+                );
+            }
+        }
+        assert!(kept > 300, "expected >300 kept descriptions, got {kept}");
+    }
+
+    #[test]
+    fn catalog_without_licence_fields_still_parses() {
+        // Catalogs built before licences were recorded lack the new fields.
+        let json = r#"{"format_version":1,
+            "source":{"url":"u","snapshot_date":"d","sha256":"s","license":"CC BY 4.0",
+                      "attribution":"LOV"},
+            "vocabularies":[{"prefix":"ex","uri":"http://example.org/","nsp":"http://example.org/",
+                             "graph_quads":3}]}"#;
+        let file: CatalogFile = serde_json::from_str(json).expect("parses");
+        assert_eq!(
+            file.source.license_url,
+            "https://creativecommons.org/licenses/by/4.0/"
+        );
+        assert!(file.source.modifications.is_none());
+        let v = &file.vocabularies[0];
+        assert!(v.license.is_empty());
+        assert_eq!(v.license_status, None);
+        assert!(!v.redistributable);
+        assert_eq!(v.license_source, None);
+        assert!(v.license_source_url.is_none() && v.license_notice.is_none());
+        assert!(v.redistribution_withheld.is_none());
+    }
+
+    #[test]
+    fn installable_follows_the_corpus_in_use() {
+        let cat = VocabCatalog::bundled();
+        // No corpus scanned yet: nothing is installable.
+        assert!(!cat.info("gr", &public_only).expect("gr").installable);
+        assert_eq!(cat.corpus_vocab_count(), 0);
+
+        // A filtered corpus holding GoodRelations only.
+        let gr_uri = cat.lov_by_prefix("gr").expect("gr").uri.clone();
+        cat.set_corpus_graphs(Some(HashSet::from([gr_uri])));
+        assert!(cat.info("gr", &public_only).expect("gr").installable);
+        assert!(!cat.info("foaf", &public_only).expect("foaf").installable);
+        assert_eq!(cat.corpus_vocab_count(), 1);
     }
 
     #[test]

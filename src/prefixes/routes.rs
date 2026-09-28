@@ -8,6 +8,15 @@
 //!
 //! Mounted with the anonymous SPARQL rate-limit tier — everything here is
 //! in-memory and cheap, but unauthenticated.
+//!
+//! `/api/prefixes/all` and `/api/prefixes/context.jsonld` re-serve the whole
+//! bundled snapshot, so every deployment passes on third-party data: prefix.cc
+//! mappings (no licence published; the operator has stated they are considered
+//! CC0) and LOV-derived ones (CC BY 4.0, which asks for credit, the licence URI
+//! and a note of modification). The Turtle and SPARQL exports open with the
+//! snapshot's credit lines as comments, and the CSV export names each row's
+//! source; JSON, JSON-LD and plain text have nowhere to put a credit without
+//! changing what clients parse, so the docs and NOTICE carry it for those.
 
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
@@ -18,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::server::error::AppError;
 use crate::server::AppState;
 
-use super::{is_valid_label, ResolvedPrefix};
+use super::{is_valid_label, PrefixRegistry, PrefixSource, ResolvedPrefix};
 
 pub fn prefix_routes() -> Router<AppState> {
     Router::new()
@@ -212,9 +221,38 @@ async fn export_all(
     Query(params): Query<ExportParams>,
 ) -> Result<Response, AppError> {
     crate::vocab_search::routes::ensure_fresh(&state).await;
-    let entries = state.prefix_registry.all_prefixes();
     let format = params.format.as_deref().unwrap_or("json");
-    let (body, content_type) = match format {
+    let (body, content_type) = render_export(&state.prefix_registry, format)?;
+    Ok(([(axum::http::header::CONTENT_TYPE, content_type)], body).into_response())
+}
+
+/// `#` comment lines crediting the bundled third-party sources that `entries`
+/// draw on, empty when none do. Turtle and SPARQL both allow comments, so the
+/// credit travels with a saved export.
+fn credit_comment(registry: &PrefixRegistry, entries: &[ResolvedPrefix]) -> String {
+    let mut out = String::new();
+    for source in [PrefixSource::PrefixCc, PrefixSource::Lov] {
+        if !entries.iter().any(|e| e.source == source) {
+            continue;
+        }
+        if let Some(credit) = registry.source_credit(source) {
+            if out.is_empty() {
+                out.push_str("# Includes prefix mappings from:\n");
+            }
+            // A line break would end the comment and leave the rest as syntax.
+            out.push_str(&format!("# - {}\n", credit.replace(['\r', '\n'], " ")));
+        }
+    }
+    out
+}
+
+/// Body and content type of one bulk-export format.
+fn render_export(
+    registry: &PrefixRegistry,
+    format: &str,
+) -> Result<(String, &'static str), AppError> {
+    let entries = registry.all_prefixes();
+    Ok(match format {
         "json" => {
             let map: serde_json::Map<String, serde_json::Value> = entries
                 .iter()
@@ -231,20 +269,20 @@ async fn export_all(
             )
         }
         "jsonld" => (jsonld_context_body(&entries), "application/ld+json"),
-        "ttl" => (
-            entries
-                .iter()
-                .map(|e| format!("@prefix {}: <{}> .\n", e.prefix, e.namespace))
-                .collect(),
-            "text/turtle",
-        ),
-        "sparql" => (
-            entries
-                .iter()
-                .map(|e| format!("PREFIX {}: <{}>\n", e.prefix, e.namespace))
-                .collect(),
-            "text/plain; charset=utf-8",
-        ),
+        "ttl" => {
+            let mut s = credit_comment(registry, &entries);
+            for e in &entries {
+                s.push_str(&format!("@prefix {}: <{}> .\n", e.prefix, e.namespace));
+            }
+            (s, "text/turtle")
+        }
+        "sparql" => {
+            let mut s = credit_comment(registry, &entries);
+            for e in &entries {
+                s.push_str(&format!("PREFIX {}: <{}>\n", e.prefix, e.namespace));
+            }
+            (s, "text/plain; charset=utf-8")
+        }
         "csv" => {
             // RFC 4180: quote fields containing delimiters (commas are legal,
             // un-encoded characters in namespace IRIs).
@@ -282,8 +320,7 @@ async fn export_all(
                 "Unsupported format {other:?} (expected json, jsonld, ttl, sparql, csv or txt)"
             )))
         }
-    };
-    Ok(([(axum::http::header::CONTENT_TYPE, content_type)], body).into_response())
+    })
 }
 
 fn jsonld_context_body(entries: &[ResolvedPrefix]) -> String {
@@ -306,4 +343,240 @@ async fn jsonld_context(State(state): State<AppState>) -> Response {
         jsonld_context_body(&entries),
     )
         .into_response()
+}
+
+// ─── Administration ──────────────────────────────────────────────────────────
+//
+// What a prefix means *here*. The read side above is the community snapshot
+// plus what this instance derives from its own datasets; this is a deployment
+// stating, for example, that `geo` is its geo namespace and not the one
+// prefix.cc lists. Overrides are stored in the identity database, so they
+// survive a restart and reach a follower with the rest of it, and the label is
+// that table's primary key — two prefixes cannot share a shorthand.
+//
+// Mounted admin-only. Repointing a prefix changes what every stored CURIE
+// expands to, which is not a thing an ordinary user should be able to do to
+// everyone else.
+
+/// Reload the in-memory overlay from storage. Called after every write so the
+/// process never disagrees with what is stored.
+fn refresh_admin_overlay(state: &AppState) -> Result<(), AppError> {
+    let stored = state
+        .auth_db
+        .list_prefix_overrides()
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    state
+        .prefix_registry
+        .set_admin_prefixes(stored.into_iter().map(|o| (o.label, o.namespace)));
+    Ok(())
+}
+
+/// Reject a label or namespace the registry would refuse anyway, with a reason
+/// rather than a silent no-op.
+fn validate(label: &str, namespace: &str) -> Result<(), AppError> {
+    if !is_valid_label(label) {
+        return Err(AppError::BadRequest(format!(
+            "{label:?} is not a prefix label: start with a letter, then letters, \
+             digits, '_' or '-'"
+        )));
+    }
+    if !super::is_valid_iri(namespace) {
+        return Err(AppError::BadRequest(format!(
+            "{namespace:?} is not a usable namespace: an http or https IRI"
+        )));
+    }
+    Ok(())
+}
+
+pub fn prefix_admin_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/admin/prefixes",
+            get(list_overrides).post(create_override),
+        )
+        .route(
+            "/api/admin/prefixes/:label",
+            axum::routing::put(put_override).delete(delete_override),
+        )
+}
+
+#[derive(Deserialize)]
+pub struct CreateOverride {
+    label: String,
+    namespace: String,
+}
+
+#[derive(Deserialize)]
+pub struct PutOverride {
+    namespace: String,
+}
+
+/// GET /api/admin/prefixes — the overrides this deployment has set.
+async fn list_overrides(State(state): State<AppState>) -> Result<Response, AppError> {
+    let rows = state
+        .auth_db
+        .list_prefix_overrides()
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(Json(rows).into_response())
+}
+
+/// POST /api/admin/prefixes — claim a label.
+///
+/// Refuses a label that already has an override, and says what it currently
+/// means: two prefixes with the same shorthand cannot both be right, and
+/// repointing an established one silently would change what stored CURIEs
+/// expand to. `PUT` is the way to repoint, which says so by being a different
+/// request.
+async fn create_override(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<crate::auth::middleware::AuthenticatedUser>,
+    Json(body): Json<CreateOverride>,
+) -> Result<Response, AppError> {
+    validate(&body.label, &body.namespace)?;
+    if let Some(existing) = state
+        .auth_db
+        .get_prefix_override(&body.label)
+        .map_err(|e| AppError::Internal(e.to_string()))?
+    {
+        return Err(AppError::Conflict(serde_json::json!({
+            "error": format!(
+                "the prefix {:?} already resolves to {} here; PUT to repoint it",
+                existing.label, existing.namespace
+            ),
+            "label": existing.label,
+            "namespace": existing.namespace,
+        })));
+    }
+    let row = state
+        .auth_db
+        .create_prefix_override(&body.label, &body.namespace, Some(&user.user_id))
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    refresh_admin_overlay(&state)?;
+    Ok((axum::http::StatusCode::CREATED, Json(row)).into_response())
+}
+
+/// PUT /api/admin/prefixes/:label — set or repoint a label.
+async fn put_override(
+    State(state): State<AppState>,
+    Path(label): Path<String>,
+    axum::Extension(user): axum::Extension<crate::auth::middleware::AuthenticatedUser>,
+    Json(body): Json<PutOverride>,
+) -> Result<Response, AppError> {
+    validate(&label, &body.namespace)?;
+    let (row, created) = state
+        .auth_db
+        .put_prefix_override(&label, &body.namespace, Some(&user.user_id))
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    refresh_admin_overlay(&state)?;
+    let status = if created {
+        axum::http::StatusCode::CREATED
+    } else {
+        axum::http::StatusCode::OK
+    };
+    Ok((status, Json(row)).into_response())
+}
+
+/// DELETE /api/admin/prefixes/:label — drop the override.
+///
+/// The label is not deleted, only this deployment's opinion of it: it falls
+/// back to the platform overlay, an installed bundle's seeds, or the community
+/// snapshot, whichever answers first.
+async fn delete_override(
+    State(state): State<AppState>,
+    Path(label): Path<String>,
+) -> Result<Response, AppError> {
+    let removed = state
+        .auth_db
+        .delete_prefix_override(&label)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    if !removed {
+        return Err(AppError::NotFound(format!(
+            "no override for the prefix {label:?}"
+        )));
+    }
+    refresh_admin_overlay(&state)?;
+    Ok(axum::http::StatusCode::NO_CONTENT.into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turtle_and_sparql_exports_open_with_the_source_credits() {
+        let registry = PrefixRegistry::bundled_only();
+        for (format, directive) in [("ttl", "@prefix "), ("sparql", "PREFIX ")] {
+            let (body, _) = render_export(&registry, format).unwrap();
+            assert!(body.starts_with("# Includes prefix mappings from:\n"));
+            assert!(body.contains("prefix.cc (https://prefix.cc/)"));
+            assert!(body.contains("https://github.com/cygri/prefix.cc/issues/13"));
+            assert!(body.contains("CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)"));
+            assert!(body.contains(&format!("{directive}foaf: <http://xmlns.com/foaf/0.1/>")));
+        }
+    }
+
+    #[test]
+    fn credit_header_parses_as_turtle_and_sparql() {
+        // Comments only: a client reading the export as Turtle or as a SPARQL
+        // prologue must not notice it.
+        let registry = PrefixRegistry::bundled_only();
+        let header = credit_comment(&registry, &registry.all_prefixes());
+        assert!(header.lines().count() >= 3, "{header}");
+        let ttl = format!("{header}@prefix foaf: <http://xmlns.com/foaf/0.1/> .\n");
+        let parsed: Result<Vec<_>, _> =
+            oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::Turtle)
+                .for_reader(ttl.as_bytes())
+                .collect();
+        assert!(parsed.is_ok(), "{parsed:?}");
+        spargebra::SparqlParser::new()
+            .parse_query(&format!(
+                "{header}PREFIX foaf: <http://xmlns.com/foaf/0.1/>\n\
+                 SELECT * WHERE {{ ?s foaf:name ?o }}"
+            ))
+            .expect("header works in a SPARQL prologue");
+    }
+
+    #[test]
+    fn the_whole_turtle_export_parses() {
+        // Every bundled namespace is an IRI (the loader leaves out the one
+        // prefix.cc entry that is not), so a strict parser reads it all.
+        let registry = PrefixRegistry::bundled_only();
+        let (body, _) = render_export(&registry, "ttl").unwrap();
+        let parsed: Result<Vec<_>, _> =
+            oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::Turtle)
+                .for_reader(body.as_bytes())
+                .collect();
+        assert!(parsed.is_ok(), "{:?}", parsed.err());
+    }
+
+    #[test]
+    fn json_export_stays_a_plain_prefix_map() {
+        // The frontend reads this as prefix → namespace; a credit key would
+        // turn into a bogus prefix there.
+        let registry = PrefixRegistry::bundled_only();
+        let (body, content_type) = render_export(&registry, "json").unwrap();
+        assert_eq!(content_type, "application/json");
+        let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&body).unwrap();
+        assert!(map
+            .values()
+            .all(|v| v.as_str().is_some_and(|ns| ns.starts_with("http"))));
+        assert_eq!(map["foaf"], "http://xmlns.com/foaf/0.1/");
+    }
+
+    #[test]
+    fn no_credit_header_without_bundled_entries() {
+        let registry = PrefixRegistry::empty();
+        registry.set_admin_prefixes([("ex".to_string(), "https://example.org/".to_string())]);
+        let (body, _) = render_export(&registry, "ttl").unwrap();
+        assert_eq!(body, "@prefix ex: <https://example.org/> .\n");
+    }
+
+    #[test]
+    fn unknown_export_format_is_refused() {
+        let registry = PrefixRegistry::empty();
+        assert!(matches!(
+            render_export(&registry, "xml"),
+            Err(AppError::BadRequest(_))
+        ));
+    }
 }

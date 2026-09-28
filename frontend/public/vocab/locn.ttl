@@ -1,10 +1,36 @@
-# ISA Programme Location Core Vocabulary — The ISA Programme Location Core
-# Vocabulary provides a minimum set of classes and properties for describing
-# any place in terms of its name, address or geometry.
-# Full vocabulary as published in the Linked Open Vocabularies (LOV) corpus
-# snapshot of 2025-12-18 (https://lov.linkeddata.es/ — dataset CC BY 4.0),
-# version v2015-0323 (2015-03-23).
-# Source: http://www.w3.org/ns/locn  (ns http://www.w3.org/ns/locn#)
+# ISA Programme Location Core Vocabulary (LOCN) — classes and properties for
+# describing any place by its name, address or geometry (version 2015-03-23).
+# Source: http://www.w3.org/ns/locn — triples identical to
+# https://www.w3.org/ns/locn.ttl except one relative IRI (locn.svg), which LOV
+# resolved to http://njh.me/locn.svg (checked 2026-09-23).
+# Obtained via the Linked Open Vocabularies (LOV) corpus snapshot of 2025-12-18
+# (https://lov.linkeddata.es/), which re-serialized it as Turtle. LOV's own
+# CC BY 4.0 licence covers LOV's catalogue; it does not relicense this vocabulary.
+# Copyright © European Union, 2012-2015. (the file's own dcterms:rights)
+# Licence: ISA Open Metadata Licence v1.1,
+# https://interoperable-europe.ec.europa.eu/licence/isa-open-metadata-licence-v11
+# (the file's own dcterms:license gives the former Joinup address, which no
+# longer resolves). Joinup, now Interoperable Europe, page of this vocabulary:
+# https://interoperable-europe.ec.europa.eu/collection/semic-support-centre/solution/core-location-vocabulary/release/100
+# The licence's "No Warranty" disclaimer:
+# EACH WORK IS PROVIDED "AS IS" WITHOUT REPRESENTATIONS, WARRANTIES, OBLIGATIONS
+# AND LIABILITIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, TO THE FULL EXTENT
+# PERMITTED BY LAW INCLUDING, BUT NOT LIMITED TO, ANY IMPLIED WARRANTY OF
+# MERCHANTABILITY, INTEGRATION, SATISFACTORY QUALITY AND FITNESS FOR A PARTICULAR
+# PURPOSE.
+# EXCEPT IN THE CASES OF WILFUL MISCONDUCT OR DAMAGES DIRECTLY CAUSED TO NATURAL
+# PERSONS, NEITHER EUROPEAN UNION NOR ITS CONTRIBUTOR(S) WILL BE LIABLE FOR ANY
+# INCIDENTAL, CONSEQUENTIAL, DIRECT OR INDIRECT DAMAGES INCLUDING BUT NOT LIMITED
+# TO THE LOSS OF DATA, LOST PROFITS, OR ANY OTHER FINANCIAL LOSS ARISING FROM THE
+# USE OF, OR INABILITY TO USE, EVEN IF THE EUROPEAN UNION HAS BEEN NOTIFIED OF
+# THE POSSIBILITY OF SUCH LOSS, DAMAGES, CLAIMS OR COSTS OR FOR ANY CLAIM BY ANY
+# THIRD PARTY. HOWEVER, THE LICENSOR WILL BE LIABLE UNDER STATUTORY PRODUCT
+# LIABILITY LAWS AS FAR SUCH LAWS APPLY TO THE WORK.
+# Changes: re-serialized as Turtle by LOV (triples unchanged apart from the
+# locn.svg IRI above); this comment header was written by Open Triplestore
+# (2026-07-24, revised 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The vocabulary, as re-serialized by LOV, starts below this line. ----
 @prefix dcat: <http://www.w3.org/ns/dcat#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix foaf: <http://xmlns.com/foaf/0.1/> .

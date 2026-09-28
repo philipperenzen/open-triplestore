@@ -15,64 +15,614 @@ distributed under their own licenses, including but not limited to:
   - Axum, Tokio, Tower and the wider Rust async ecosystem — MIT
   - GEOS (via the geos crate) — LGPL-2.1
   - Tantivy (full-text search) — MIT
-  - and other crates / npm packages listed in Cargo.toml, Cargo.lock,
-    and frontend/package.json.
+  - and the other crates and npm packages the build compiles in, listed in
+    Cargo.lock and frontend/package-lock.json.
+
+The copyright notices, licence texts and NOTICE files of every third-party Rust
+crate linked into the server binary, and of every npm package the web UI bundles
+or copies into its build, are reproduced verbatim in two files that are
+generated at build time and not checked in:
+
+  - THIRD-PARTY-LICENSES-server.txt: the Rust crates, written by
+    scripts/gen_rust_third_party_licenses.py in the Docker builder stage; in
+    the Docker image at /app/THIRD-PARTY-LICENSES-server.txt.
+  - frontend/dist/THIRD-PARTY-LICENSES.txt: the web UI's npm packages, written
+    by frontend/scripts/third-party-licenses.mjs during `npm run build`. Its
+    section 3 covers the third-party material the web UI serves without an npm
+    package: web-ifc.wasm with the libraries statically linked into it (texts
+    from LICENSES/web-ifc/), the Lucide and Feather icon shapes drawn inline in
+    GraphCanvas.svelte (LICENSES/Lucide-ISC.txt, LICENSES/Feather-MIT.txt), and
+    the EPSG attribution for the coordinate reference system parameters in the
+    3D viewer. The build reads those texts from LICENSES/ and fails without
+    them. In the Docker image at /app/frontend/dist/THIRD-PARTY-LICENSES.txt,
+    and served by the web UI at /THIRD-PARTY-LICENSES.txt.
+
+Every third-party item below keeps its own licence; the AGPL-3.0 and the Commons
+Clause do not apply to it. The licence texts referred to below are in LICENSES/
+(shipped in the Docker image at /app/LICENSES/). Creative Commons and Open Data
+Commons licences are referred to by URI; the W3C Document License is referred to
+by URI and its text is in LICENSES/ as well.
 
 Bundled binaries and frontend libraries:
 
-  - web-ifc (frontend/public/wasm/web-ifc.wasm and the web-ifc npm package) —
-    Mozilla Public License 2.0, © the ThatOpen Company / web-ifc contributors.
-    Source Code Form: https://github.com/ThatOpen/engine_web-ifc (the exact
-    version is pinned in frontend/package-lock.json). Per MPL-2.0 §3.2 this
-    notice tells recipients where to obtain the Source Code Form.
-  - CesiumJS — Apache-2.0, © Cesium GS, Inc. (https://github.com/CesiumGS/cesium)
-  - swagger-ui-dist — Apache-2.0, © SmartBear Software
+  - web-ifc 0.0.77 (frontend/public/wasm/web-ifc.wasm, byte-identical to
+    web-ifc.wasm in the npm package web-ifc@0.0.77; the package's JavaScript
+    API is bundled into the frontend build) — Mozilla Public License 2.0
+    (LICENSES/web-ifc/web-ifc.txt), by the web-ifc contributors (ThatOpen).
+    Unmodified. Source Code Form: https://github.com/ThatOpen/engine_web-ifc at
+    commit f26c4beef0a668ebdb180d2b95a94097a1e21cef (the npm package's
+    gitHead), built with Emscripten 4.0.23. Per MPL-2.0 §3.2 this notice tells
+    recipients where to obtain the Source Code Form. The wasm has the following
+    compiled in statically (commits as pinned in src/cpp/CMakeLists.txt at that
+    web-ifc commit); each licence text is in LICENSES/web-ifc/:
+      * glm (https://github.com/g-truc/glm @ 8d1fd52e5ab5590e2c81768ace50c72bae28f2ed)
+        — Copyright (c) 2005 - G-Truc Creation; offered under The Happy Bunny
+        License or the MIT License, used under MIT — glm.txt
+      * stduuid (https://github.com/mariusbancila/stduuid @ 3afe7193facd5d674de709fccc44d5055e144d7a)
+        — MIT License; its LICENSE reads "Copyright (c) 2017" and names no
+        holder (the repository is Marius Bancila's) — stduuid.txt
+      * spdlog 1.15.1 (https://github.com/gabime/spdlog @ f355b3d58f7067eee1706ff3c801c2361011f3d5)
+        — MIT, Copyright (c) 2016 Gabi Melman — spdlog.txt; and the {fmt}
+        11.1.3 copy spdlog bundles — MIT with an optional exception for object
+        code, Copyright (c) 2012 - present, Victor Zverovich — fmt.txt
+      * earcut.hpp (https://github.com/mapbox/earcut.hpp @ 4811a2b69b91f6127a75e780de6e2113609ddabb)
+        — ISC, Copyright (c) 2015, Mapbox — earcut.hpp.txt
+      * tinynurbs (https://github.com/QuimMoya/tinynurbs @ 47115cd9b6e922b27bbc4ab01fdeac2e9ea597a4,
+        a fork of pradeep-pyro/tinynurbs) — BSD-3-Clause, Copyright (c) 2017,
+        Pradeep Kumar Jayaraman — tinynurbs.txt
+      * CDT (https://github.com/artem-ogre/CDT @ 4d0c9026b8ec846fe544897e7111f8f9080d5f8a)
+        — Mozilla Public License 2.0; Source Code Form at that commit — CDT.txt.
+        Its CDT/include/predicates.h — BSD-3-Clause, Copyright (c) 2019,
+        William C. Lenthe — CDT-predicates.txt
+      * fast_float (https://github.com/fastfloat/fast_float @ 2b2395f9ac836ffca6404424bcc252bff7aa80e4)
+        — Copyright (c) 2021 The fast_float authors; Apache-2.0 OR MIT OR
+        BSL-1.0, used under MIT — fast_float.txt
+      * the Emscripten 4.0.23 runtime and system libraries: Emscripten (embind
+        and runtime) — MIT / University of Illinois/NCSA, Copyright (c)
+        2010-2014 Emscripten authors — emscripten.txt; musl libc — MIT,
+        Copyright © 2005-2020 Rich Felker, et al. — musl.txt; LLVM libc++,
+        libc++abi and compiler-rt — Apache-2.0 WITH LLVM-exception (legacy code
+        University of Illinois/NCSA or MIT) — libcxx.txt, libcxxabi.txt,
+        compiler-rt.txt; dlmalloc — Doug Lea, public domain (CC0).
+  - Inline SVG icons in frontend/src/components/GraphCanvas.svelte (search,
+    maximize-2, rotate-ccw, zoom-in, zoom-out, pin, download, settings, x) —
+    icon geometry copied by hand from Lucide (https://github.com/lucide-icons/lucide,
+    v0.100.0-era geometry). Lucide: ISC License, "Copyright (c) for portions of
+    Lucide are held by Cole Bemis 2013-2022 as part of Feather (MIT). All other
+    copyright (c) for Lucide are held by Lucide Contributors 2022." —
+    LICENSES/Lucide-ISC.txt. pin and rotate-ccw are Lucide's own drawings; the
+    other seven shapes are Feather's (https://github.com/feathericons/feather):
+    MIT License, Copyright (c) 2013-2023 Cole Bemis — LICENSES/Feather-MIT.txt.
+    Paths are in compact, geometrically equivalent form; the SVG attributes are
+    the project's.
+  - CesiumJS — Apache-2.0, © CesiumJS Contributors
+    (https://github.com/CesiumGS/cesium). The build copies its runtime files
+    unmodified into dist/cesium/, including the WebAssembly modules in
+    dist/cesium/ThirdParty/ (the Draco and Basis Universal decoders, zip.js
+    and Cesium's gaussian-splat module). CesiumJS's LICENSE.md, reproduced in
+    frontend/dist/THIRD-PARTY-LICENSES.txt, gives the notices of the
+    third-party code CesiumJS bundles.
+  - swagger-ui-dist — Apache-2.0. Its NOTICE file reads:
+        swagger-ui
+        Copyright 2020-2021 SmartBear Software Inc.
+    The licence notices of the libraries inside its pre-built bundle
+    (swagger-ui-bundle.js.LICENSE.txt) are reproduced in
+    frontend/dist/THIRD-PARTY-LICENSES.txt.
   - MapLibre GL JS — BSD-3-Clause, © MapLibre contributors
-  - three.js — MIT; Leaflet — BSD-2-Clause; and the other packages named in
-    frontend/package.json, each under its own license.
+  - three.js — MIT, © three.js authors; Leaflet — BSD-2-Clause, © Volodymyr
+    Agafonkin and CloudMade; and the other npm packages the web UI bundles,
+    each under its own licence. frontend/dist/THIRD-PARTY-LICENSES.txt lists
+    them all, with each package's licence and the verbatim text of every
+    LICENSE, COPYING and NOTICE file it ships.
 
 Bundled datasets and vocabularies:
 
-  - Linked Open Vocabularies (LOV) — vocabulary catalog metadata
-    (assets/vocab/lov-catalog.json.gz) and the optional lov.nq.gz corpus baked
-    into the Docker image. © the LOV team (Pierre-Yves Vandenbussche et al.),
-    https://lov.linkeddata.es/ — CC BY 4.0. The corpus aggregates ~900
-    third-party vocabularies; EACH VOCABULARY REMAINS UNDER ITS OWN UPSTREAM
-    TERMS — LOV's CC BY 4.0 covers the aggregation and its metadata.
-  - Standard vocabularies bundled in frontend/public/vocab/ (17 of them
-    extracted via LOV, the rest fetched or authored directly). Each remains
-    under its publisher's terms, notably:
-      * W3C vocabularies (RDF, RDFS, OWL, SHACL, SKOS, DCAT, PROV, SOSA/SSN,
-        Org, Time, ODRL, qb, …) — W3C Software and Document License,
-        https://www.w3.org/copyright/software-license/
-      * schema.org (schema.ttl, a subset with definitions reproduced
-        verbatim) — CC BY-SA 3.0, © schema.org,
-        https://schema.org/docs/terms.html
-      * Dublin Core (dcterms, dctype) — CC BY 4.0, © DCMI,
-        https://www.dublincore.org/about/copyright/
-      * FOAF — CC BY 1.0 (http://xmlns.com/foaf/spec/); GoodRelations —
-        CC BY 3.0 (© Martin Hepp); VOAF/VANN/SIOC/BIBO — Creative Commons
-        Attribution; PAV and DOAP — Apache-2.0
-      * GeoSPARQL — © Open Geospatial Consortium, OGC Document License
-      * SAREF — © ETSI, BSD-3-Clause (https://forge.etsi.org/etsi-software-license)
-      * BOT, FOG, OMG, props — © W3C Linked Building Data Community Group,
-        Creative Commons Attribution
-      * LOCN — ISA Open Metadata Licence v1.1, © European Union
-  - IMBOR 2025 Vocabulaire — © Stichting CROW, bundled verbatim
-    (frontend/public/vocab/imbor.ttl) from the official IMBOR 2025 Linked Data
-    release, https://github.com/Stichting-CROW/imbor. Licensed CC BY 4.0
-    (IMBOR gegevens) and ODC-BY (IMBOR producten) per CROW's licence table,
-    https://docs.crow.nl/imbor/techdoc/ — this database is made available
-    under the Open Data Commons Attribution License,
-    https://opendatacommons.org/licenses/by/1-0/.
-  - prefix.cc — community prefix→namespace mappings, merged into
-    src/prefixes/data/prefixes-snapshot.json. Community-contributed data from
-    https://prefix.cc/ (site code released under The Unlicense; the mapping
-    data itself carries no stated license).
+  - Vocabularies bundled in frontend/public/vocab/. The web UI serves them at
+    /vocab/, and the server compiles them in and seeds them as public reference
+    models. The per-file title, version, source, copyright holder, licence URI
+    and changes are in frontend/public/vocab/NOTICE.md (served at
+    /vocab/NOTICE.md), which also reproduces the licence texts that must travel
+    with the files. The server records each seeded copy's licence and
+    attribution as registry metadata, returned by /api/models (attribution),
+    and a download of a seeded copy starts with the file's header as comments,
+    then a line saying whether the content is that file's triples, unchanged,
+    or a copy that may have been modified in the registry (imbor.ttl: Link
+    headers only). The seeded graphs hold each file's triples, which the
+    seeder checks against the file. The store writes typed literals in its
+    canonical form, with the same values: some xsd:nonNegativeInteger
+    literals in dcat.ttl, dcat/2.0.0.ttl, prov.ttl, time.ttl, vcard.ttl,
+    ssn.ttl, bibo.ttl, saref.ttl and locn.ttl read as xsd:integer, and two
+    +00:00 time zones in pav.ttl read as Z. imbor.ttl has no typed literals and
+    is held exactly. The registry publishes no content in the IMBOR entry other
+    than that file; a stored copy that no longer matches it is kept as a
+    private version served only to those who may write the entry, and the
+    file's triples are restored. 17 files came through the Linked Open Vocabularies (LOV)
+    corpus snapshot of 2025-12-18 (https://lov.linkeddata.es/), which
+    re-serialized them as Turtle; LOV's CC BY 4.0 covers LOV's catalogue and
+    does not relicense them. Open Triplestore added a comment header to every
+    file except imbor.ttl. By licence:
+      * W3C Document License (2023), https://www.w3.org/copyright/document-license-2023/
+        — World Wide Web Consortium: rdf.ttl (RDF 1.1 namespace document,
+        2019), rdfs.ttl (2014), owl.ttl (OWL 2, 2009; line endings converted to
+        LF), shacl.ttl (SHACL 2017), prov.ttl (PROV-O 2013), skos.ttl (SKOS
+        2009, converted from RDF/XML), oa.ttl (Web Annotation 2016), dqv.ttl
+        (2016), vcard.ttl (2014), vs.ttl (2011), wgs84.ttl (2009), csvw.ttl
+        (2015 revision), adms.ttl (2015 revision; its definitions derive from
+        ADMS v1.00, Copyright © 2012 European Union, ISA Open Metadata Licence
+        v1.1), and the W3C-derived descriptions in the Open Triplestore-written
+        xsd.ttl (XML Schema Part 2, Copyright © 2004 W3C® (MIT, ERCIM, Keio);
+        XSD 1.1 Part 2, Copyright © 2012 W3C® (MIT, ERCIM, Keio)). Each file
+        carries its W3C copyright notice (xsd.ttl those of the two XSD
+        specifications; the others "Copyright © [year] World Wide Web
+        Consortium. https://www.w3.org/copyright/document-license-2023/" with
+        the document's own year), its status, and "Copyright © 2023 W3C®. This
+        software or document includes material copied from or derived from
+        [title and URI of the W3C document]."
+      * W3C Software and Document License (2015),
+        https://www.w3.org/copyright/software-license-2015/
+        (LICENSES/W3C-Software-and-Document-License-2015.txt): ODRL Version 2.2
+        (odrl.ttl), Copyright © 2018 W3C® (MIT, ERCIM, Keio, Beihang); SOSA and
+        SSN (sosa.ttl, ssn.ttl), Copyright 2017 W3C/OGC, which are also licensed
+        under the OGC Software License 1.0,
+        https://www.ogc.org/about/policies/software-licenses/ogc-software-license-1-0/
+        (full text in frontend/public/vocab/NOTICE.md). Changes: comment headers
+        added; odrl.ttl re-serialized by LOV.
+      * CC BY 4.0, https://creativecommons.org/licenses/by/4.0/ — DCAT 3
+        (dcat.ttl, Copyright © 2024 World Wide Web Consortium) and DCAT 2
+        (dcat/2.0.0.ttl, Copyright © 2020 W3C® (MIT, ERCIM, Keio, Beihang));
+        OWL-Time (time.ttl, Copyright © 2006-2017 W3C, OGC); DCMI Metadata Terms
+        and DCMI Type Vocabulary (dcterms.ttl, dcterms/2012.06.14.ttl,
+        dctype.ttl; also the DCMI Element Set definitions inside
+        geosparql/1.0.0.ttl) — "Portions of this software may use RDF schemas
+        Copyright © 2011 DCMI, the Dublin Core™ Metadata Initiative. These are
+        licensed under the Creative Commons 4.0 Attribution license."
+        http://dublincore.org/; The Bibliographic Ontology 1.3 (bibo.ttl, by
+        Bruce D'Arcus and Frédérick Giasson, Copyright © 2008-2013 by
+        Structured Dynamics LLC, now maintained by DCMI,
+        https://www.dublincore.org/specifications/bibo/bibo/); the Creative
+        Commons Rights Expression Language schema (cc.ttl, Creative Commons);
+        FOG 0.0.4 and OMG 0.3 (fog.ttl, omg.ttl, by Anna Wagner, Mathias Bonduel
+        and Pieter Pauwels). Changes: comment headers added; the LOV files were
+        re-serialized.
+      * CC BY 3.0, http://creativecommons.org/licenses/by/3.0/ — GoodRelations
+        V1 (gr.ttl, Martin Hepp): "This work is based on the GoodRelations
+        ontology, developed by Martin Hepp", http://purl.org/goodrelations/;
+        Vocabulary of a Friend 2.3 (voaf.ttl, Bernard Vatant, with
+        Pierre-Yves Vandenbussche and Lise Rozat; publisher Open Knowledge
+        Foundation). Changes: re-serialized by LOV; comment headers added.
+      * CC BY 1.0, http://creativecommons.org/licenses/by/1.0/ — FOAF 0.99
+        (foaf.ttl, Copyright © 2000-2014 Dan Brickley and Libby Miller;
+        converted from RDF/XML); VANN (vann.ttl, Copyright © 2005 Ian Davis;
+        converted from RDF/XML, with the one relative subject IRI of its
+        cc:Work statement written out as the source URL); SIOC Core Ontology rev. 1.35 (sioc.ttl,
+        Copyright © 2004-2010 by DERI, NUI Galway, the notice at that
+        revision — the current specification names the holder Data Science
+        Institute (formerly DERI), NUI Galway; editors Uldis Bojārs and John G.
+        Breslin); Building Topology Ontology 0.3.2 (bot.ttl, Copyright
+        2017-2020 W3C Linked Building Data Community Group). Changes: comment
+        headers added; sioc.ttl re-serialized by LOV.
+      * CC BY-SA 3.0, http://creativecommons.org/licenses/by-sa/3.0/ —
+        schema.ttl is a 27-term subset adapted by Open Triplestore from
+        Schema.org release 30.0 of 2026-03-19 (release files:
+        https://github.com/schemaorg/schemaorg/tree/main/data/releases/30.0;
+        release notes: https://schema.org/docs/releases.html). Copyright:
+        Google, Inc., Yahoo, Inc., Microsoft Corporation and Yandex (the
+        Schema.org Sponsors), per https://schema.org/docs/terms.html. Each term
+        keeps its release-30.0 triples unchanged and is restated under its
+        http://schema.org/ IRI. Open Triplestore releases the adaptation under
+        CC BY-SA 3.0. No endorsement by Schema.org or its Sponsors is implied.
+      * Open Data Commons PDDL 1.0, http://www.opendatacommons.org/licenses/pddl/1.0/
+        — the W3C Organization Ontology 0.8 (org.ttl) and the RDF Data Cube
+        Vocabulary 0.2 (qb.ttl). Both are dedicated to the public domain;
+        credit is a courtesy.
+      * Apache License 2.0, https://www.apache.org/licenses/LICENSE-2.0
+        (LICENSES/Apache-2.0.txt) — PAV 2.3.1 (pav.ttl, Copyright 2008-2014
+        Massachusetts General Hospital; Harvard Medical School; Balboa Systems;
+        University of Manchester); OGC GeoSPARQL 1.1 (geosparql.ttl, (c) 2021
+        Open Geospatial Consortium) and GeoSPARQL 1.0 (geosparql/1.0.0.ttl,
+        Copyright (c) 2012 Open Geospatial Consortium), both from
+        https://github.com/opengeospatial/geosemantics-semantic-resources. Each
+        file carries a notice that Open Triplestore changed it by adding a
+        comment header; pav.ttl was also re-serialized by LOV.
+      * BSD-3-Clause (LICENSES/BSD-3-Clause-ETSI-SAREF.txt, also reproduced in
+        frontend/public/vocab/NOTICE.md) — ETSI SAREF Core v3.1.1 (saref.ttl),
+        Copyright 2019 ETSI, from https://saref.etsi.org/core/v3.1.1/saref.ttl.
+        Comment header added.
+      * ISA Open Metadata Licence v1.1,
+        https://interoperable-europe.ec.europa.eu/licence/isa-open-metadata-licence-v11
+        (LICENSES/ISA-Open-Metadata-Licence-1.1.txt) — ISA Programme Location
+        Core Vocabulary (locn.ttl), Copyright © European Union, 2012-2015. Its
+        No Warranty disclaimer is kept in the file header and in
+        frontend/public/vocab/NOTICE.md. Changes: re-serialized by LOV, which
+        also resolved the relative IRI locn.svg to http://njh.me/locn.svg;
+        comment header added.
+      * DOAP vocabulary (doap.ttl) — Copyright © 2004-2009 Edd Dumbill. LOV's
+        re-serialization of the DOAP namespace document served at
+        http://usefulinc.com/ns/doap (2009-2015). The upstream repository
+        https://github.com/ewilderj/doap has been Apache-2.0 since 2018-03-31
+        ("Copyright © 2004-2016 Edd Dumbill, 2016-2017 Edd Wilder-James, 2018-
+        The DOAP Authors"). The file also contains 97 Japanese-language labels
+        and comments and a few other strings that were never in that repository
+        and have no published licence; see frontend/public/vocab/NOTICE.md.
+      * IMBOR 2025 Vocabulaire (imbor.ttl) — © Stichting CROW. Byte-identical
+        copy of imbor2025-vocabulaire.ttl (sha256
+        16d9ca3cf13862ddce6ca9a813ccf5174cea1876ed44611806be766d2224ce84) from
+        the IMBOR 2025 Linked Data release,
+        https://github.com/Stichting-CROW/imbor/releases/download/2025/IMBOR-2025.LinkedData.zipfile.zip
+        (ZIP sha256 910dbcfcd628258f3e383d419b70c8e5ef91a9718382d1420cb4d5fa09d651dc).
+        CROW's licence table (https://docs.crow.nl/imbor/techdoc/#licenties)
+        gives CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/) for IMBOR
+        data and ODC-BY 1.0 (https://opendatacommons.org/licenses/by/1-0/) for
+        the Linked Data release. CROW's Beheerplan IMBOR v1.0 (2 July 2025,
+        https://docs.crow.nl/imbor/beheerplan/) names CC BY-ND 4.0
+        (https://creativecommons.org/licenses/by-nd/4.0/). The file is therefore
+        redistributed only unmodified, with no header added.
+  - Linked Open Vocabularies (LOV): vocabulary catalogue and vocabulary corpus.
+    Paths: assets/vocab/lov-catalog.json.gz (compiled into the server binary)
+    and assets/vocab/lov-redistributable.txt; in the Docker image
+    /app/assets/vocab/lov.nq.gz and /app/assets/vocab/lov-redistributable.txt.
+    Source: the LOV dump lov.nq.gz, snapshot of 2025-12-18, as archived at
+    https://web.archive.org/web/20251218081818id_/https://lov.linkeddata.es/lov.nq.gz
+    (sha256 7b5522b4f86d642d7e48df289f3d3330898e9aa021cc4d4ef0ad38f0f039c233).
+    Credit: Linked Open Vocabularies (LOV), https://lov.linkeddata.es/, created
+    by Pierre-Yves Vandenbussche and Bernard Vatant and hosted by the Ontology
+    Engineering Group, Universidad Politecnica de Madrid.
+    Licence: Creative Commons Attribution 4.0 International (CC BY 4.0),
+    https://creativecommons.org/licenses/by/4.0/ . It covers LOV's own
+    catalogue data only, not the vocabularies LOV collects (see below).
+    Modified:
+      * lov-catalog.json.gz is an extract of LOV's metadata graph, converted to
+        JSON by scripts/build_lov_catalog.py. Open Triplestore added the fields
+        license, license_declared, license_status, redistributable,
+        redistribution_withheld, license_source, license_source_url,
+        license_notice, incoming_links, graph_quads and term_metrics. It
+        removed the description of every vocabulary it does not redistribute.
+        Where a licence forbids modification, it kept a description only if
+        the text is character for character a literal of the vocabulary's own
+        graph.
+      * The image's lov.nq.gz is an extract of the same dump: the named graphs
+        of the vocabularies listed in lov-redistributable.txt, each copied
+        unchanged from LOV's dump. All other graphs, LOV's metadata graph
+        included, are removed. Four vocabularies whose licence would allow
+        redistribution are left out: drammar (http://www.purl.org/drammar,
+        CC BY-ND 4.0) and W3C's Profiles Vocabulary
+        (http://www.w3.org/ns/dx/prof, W3C Document License), because LOV
+        mis-decoded characters in its copies, which are therefore not
+        faithful copies of works that allow no modification; and Inrupt's
+        Authentication Provider vocabulary, whose MIT licence requires a
+        copyright notice its rights holder does not publish; and the
+        Translational Medicine Ontology
+        (http://www.w3.org/2001/sw/hcls/ns/transmed/), whose graph names
+        "Creative Commons - By Attribution" without a version, while every
+        version of that licence requires copies to carry the URI or text of
+        the licence that applies.
+    Third-party vocabularies: each vocabulary graph in the corpus, and each
+    catalogue description quoted from a vocabulary, is its publisher's work
+    under the licence recorded per catalogue entry (license, license_declared,
+    license_source) and per graph in lov-redistributable.txt (graph IRI, LOV
+    prefix, licence, licence source, required notice). That licence is the one the vocabulary
+    declares in its own graph or, where the graph declares none, the terms its
+    publisher states elsewhere (license_source "publisher-terms", with the URL
+    of those terms in license_source_url; the table is in
+    scripts/build_lov_catalog.py). Each graph is LOV's copy as LOV's dump
+    holds it, shipped unchanged: LOV's N-Quads serialization of the
+    publisher's document, with the copyright and licence statements among
+    them. In 14 of those graphs, all under licences that allow modification,
+    LOV's copy has characters that were mis-decoded (UTF-8 read as Latin-1 or
+    Windows-1252), so it differs from the publisher's document in those
+    literals, and each graph's notice (the notice column, and license_notice)
+    says so: http://rdf.muninn-project.org/ontologies/military,
+    http://data.ign.fr/def/topo, https://w3id.org/HHT,
+    http://purl.org/oslo/ns/localgov, https://w3id.org/vpa and
+    http://tour-pedia.org/download/tp.owl (checked against the publishers' own
+    files), and http://qudt.org/schema/qudt, http://sparql.cwrc.ca/ontologies/cwrc,
+    http://qudt.org/2.1/vocab/sou, http://dati.isprambiente.it/ontology/core#,
+    http://purl.obolibrary.org/obo/obi.owl, http://purl.oclc.org/NET/ldr/ns#,
+    http://purl.org/spar/c4o and https://w3id.org/seas/ (not checked). A graph
+    under a licence that allows no modification ships only when no such text
+    is found. Comments in the publisher's
+    source file are not part of it; where a licence needs a notice the graph
+    does not carry, it is in the notice column of lov-redistributable.txt and
+    summarised below. Creative Commons licences named there as "CC <elements>
+    <version>" are at https://creativecommons.org/licenses/<elements>/<version>/
+    (a ported licence adds its jurisdiction, e.g. .../by/3.0/au/); CC0 1.0 is
+    at https://creativecommons.org/publicdomain/zero/1.0/ and the older CC
+    Public Domain dedication at http://creativecommons.org/licenses/publicdomain/.
+    The Open Data Commons licences are at https://opendatacommons.org/licenses/odbl/1-0/
+    (ODbL 1.0), https://opendatacommons.org/licenses/by/1-0/ (ODC-By 1.0) and
+    https://opendatacommons.org/licenses/pddl/1-0/ (PDDL 1.0); Etalab's
+    Licence Ouverte / Open Licence at
+    https://www.data.gouv.fr/Licence-Ouverte-Open-Licence; The Unlicense at
+    https://unlicense.org/. The other licence names in lov-redistributable.txt
+    (each catalogue entry's license_uris gives the same URIs): Public Domain
+    Mark 1.0 https://creativecommons.org/publicdomain/mark/1.0/; Apache-2.0
+    https://www.apache.org/licenses/LICENSE-2.0; MIT
+    https://opensource.org/licenses/MIT; BSD-3-Clause
+    https://opensource.org/licenses/BSD-3-Clause; W3C Document License (2023)
+    https://www.w3.org/copyright/document-license-2023/ and (2015)
+    https://www.w3.org/Consortium/Legal/2015/doc-license; W3C Software and
+    Document License (2015)
+    https://www.w3.org/Consortium/Legal/2015/copyright-software-and-document;
+    W3C Software License (2002)
+    https://www.w3.org/Consortium/Legal/2002/copyright-software-20021231; W3C
+    Software Notice (1998) http://www.w3.org/Consortium/Legal/copyright-software-19980720;
+    OGC Document Notice https://www.ogc.org/about-ogc/policies/document-notice/;
+    OGC Document License https://www.ogc.org/license; OGC Software License
+    http://www.opengeospatial.org/ogc/Software; ISA Open Metadata Licence 1.1
+    https://interoperable-europe.ec.europa.eu/licence/isa-open-metadata-licence-v11;
+    UK Open Government Licence
+    https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/;
+    Modellicentie Gratis Hergebruik 1.0
+    https://overheid.vlaanderen.be/sites/default/files/documenten/ict-egov/licenties/hergebruik/modellicentie_gratis_hergebruik_v1_0.html;
+    the Commission's reuse policy (Decision 2011/833/EU)
+    https://eur-lex.europa.eu/eli/dec/2011/833/oj. "Public domain" names no
+    licence document: for http://id.loc.gov/vocabulary/relators it is the
+    Library of Congress's statement at https://id.loc.gov/about/. The texts of the other licences used
+    (Apache-2.0, MIT, BSD-3-Clause, the W3C Software Notice (1998 and 2002),
+    Software and Document, and Document licences, the OGC Document License Agreement, Document
+    Notice and Software License, the ISA Open Metadata Licence v1.1, the
+    Shared Desktop Ontologies (OSCAF) licence) are in LICENSES/.
+    Notices those licences require: each shipped graph's notice is quoted in
+    full in the last column of lov-redistributable.txt (and in the catalogue
+    entry's license_notice). In summary:
+      * W3C Document License (2023), the 48 graphs whose licence source in
+        lov-redistributable.txt is https://www.w3.org/copyright/intellectual-rights/
+        (W3C's statement that "Unless otherwise stated, documents on the W3C
+        site are published under the W3C document license"; namespaces that
+        W3C serves from www.w3.org, over http and https), and the DPV graph
+        https://w3id.org/dpv, which names the licence itself (its 2015 version
+        for https://w3id.org/dpv/pd). Each graph's notice gives: the copyright
+        notice in the form the licence prescribes, "Copyright © <year> World
+        Wide Web Consortium. https://www.w3.org/copyright/document-license-2023/",
+        with the year of that document (from the graph's own dates, else LOV's
+        date for the version it holds), or the author's own notice where there
+        is one (DPV); the document's status where the graph states one (for
+        example "Working Draft 29 April 2011"); and, because LOV re-serialized
+        the documents, the notice the licence prescribes for material copied
+        from or derived from them, "Copyright © 2023 W3C®. This software or
+        document includes material copied from or derived from <title>,
+        <IRI>." The IRI is the link to the original document (for
+        http://www.w3.org/ns/adms, which now redirects to SEMIC's ADMS 2.00,
+        https://www.w3.org/ns/legacy_adms). Full texts in
+        LICENSES/W3C-Document-License-2023.txt and
+        LICENSES/W3C-Document-License-2015.txt.
+      * W3C Software and Document License (2015), ODRL,
+        http://www.w3.org/ns/odrl/2/ (the licence of the ODRL 2.2
+        Recommendation, https://www.w3.org/TR/2018/REC-odrl-vocab-20180215/;
+        the graph's own dcterms:license, kept, points to W3C's 2002 IPR
+        notice): This software or document includes material copied from or
+        derived from ODRL Version 2.2, http://www.w3.org/ns/odrl/2/. Copyright ©
+        2018 W3C® (MIT, ERCIM, Keio, Beihang). The same licence, with the OGC
+        Software License, covers SOSA and SSN (http://www.w3.org/ns/sosa/,
+        http://www.w3.org/ns/ssn/), which keep their own "Copyright 2017
+        W3C/OGC." Full texts in LICENSES/W3C-Software-and-Document-License-2015.txt
+        and LICENSES/OGC-Software-License-1.0.txt.
+      * W3C Software Notice (1998), the SWAP graphs
+        http://www.w3.org/2000/10/swap/pim/doc and http://www.w3.org/2006/gen/ont,
+        which name http://www.w3.org/2000/10/swap/LICENSE.n3: Share and Enjoy.
+        Open Source license: Copyright (c) 2000,1,2 W3C (MIT, INRIA, Keio)
+        Copyright other contributers mentioned in individual files.
+        http://www.w3.org/Consortium/Legal/copyright-software-19980720 .
+        Changes: none by Open Triplestore; LOV serialized the files as N-Quads.
+        Full text in LICENSES/W3C-Software-Notice-1998.txt.
+      * W3C Software License (2002), http://spitfire-project.eu/ontology/ns
+        and http://www.w3.org/ns/ssn/, which keep their own copyright lines
+        ("Copyright 2010 - 2012 SPITFIRE."; "Copyright 2009 - 2011 W3C.").
+        Changes: none by Open Triplestore; LOV serialized the files as
+        N-Quads. Full text in LICENSES/W3C-Software-Notice-2002.txt.
+      * OGC Document Notice, the graphs sf and gml, which are, triple for
+        triple, the OGC's http://schemas.opengis.net/sf/1.0/simple_features_geometries.rdf
+        and http://schemas.opengis.net/gml/3.2.1/gml_32_geometries.rdf; the
+        notice at the top of both files, which LOV's copies drop: GeoSPARQL
+        1.0 is an OGC Standard. Copyright (c) 2012 Open Geospatial Consortium.
+        To obtain additional rights of use, visit
+        http://www.opengeospatial.org/legal/ . Version: 1.0.1.
+        https://www.ogc.org/about-ogc/policies/document-notice/ — text in
+        LICENSES/OGC-Document-Notice.txt. The OGC Document License Agreement
+        graph http://www.opengis.net/ont/geosparql keeps its own "(c) 2023
+        Open Geospatial Consortium" (text in LICENSES/OGC-Document-License.txt).
+      * DCMI, the graphs under http://purl.org/dc/: "Portions of this software
+        may use RDF schemas Copyright © 2011 DCMI, the Dublin Core™ Metadata
+        Initiative. These are licensed under the Creative Commons 4.0
+        Attribution license." http://dublincore.org/ ,
+        https://creativecommons.org/licenses/by/4.0/
+      * ESCO, the graphs under http://data.europa.eu/esco/: This service uses
+        the ESCO classification of the European Commission.
+      * BSD-3-Clause, the NEPOMUK graphs under
+        http://www.semanticdesktop.org/ontologies/ (nie, nco, nfo, ncal, nao,
+        nrl): Copyright (c) 2006-2008, NEPOMUK consortium and contributors. All
+        rights reserved. Copyright © 2009-2014 OSCAF and contributors.
+        Conditions and disclaimer in LICENSES/BSD-3-Clause-NEPOMUK.txt (the
+        NEPOMUK software licence) and, for the OSCAF contributions, the Shared
+        Desktop Ontologies licence (CC-BY or BSD, used under BSD) in
+        LICENSES/OSCAF-Shared-Desktop-Ontologies-License.txt.
+      * BSD-3-Clause, the 11 SAREF graphs under https://saref.etsi.org/, each
+        with the copyright line of the LICENSE in its repository at
+        https://labs.etsi.org/rep/saref/ (on the branch of the version LOV
+        holds): Copyright 2019 ETSI (core, saref4ehaw, saref4ener,
+        saref4inma, saref4syst, saref4watr, saref4wear); Copyright 2020 ETSI
+        (saref4agri, saref4bldg, saref4city, saref4envi). Conditions and
+        disclaimer in LICENSES/BSD-3-Clause-ETSI-SAREF.txt.
+      * MIT (full text in LICENSES/MIT.txt, which these lines complete):
+        - POSO, http://purl.org/poso/ and http://purl.org/poso/common/:
+          Copyright (c) 2021-2025 Maxim Van de Wynckel, Beat Signer & Vrije
+          Universiteit Brussel (https://github.com/OpenHPS/POSO/blob/master/LICENSE).
+        - EUTaxO, https://w3id.org/EUTaxO: Copyright (c) 2021 jfaldanam
+          (https://gitlab.com/jfaldanam/EUTaxO/-/blob/master/LICENSE).
+        - OPTiMAR, https://w3id.org/optimar: Copyright (c) 2025 USAL
+          (https://github.com/BISITE/OPTIMAR-Ontology/blob/main/LICENSE).
+        - the 5 Materials Design Ontology graphs under https://w3id.org/mdo/:
+          Copyright (C) 2019 Huanyu Li
+          (https://github.com/huanyu-li/Materials-Design-Ontology/blob/master/LICENSE).
+      * CC BY 4.0, the RDA Registry graphs under http://rdaregistry.info/:
+        Copyright © 2020 American Library Association, Canadian Federation of
+        Library Associations, and CILIP: Chartered Institute of Library and
+        Information Professionals.
+      * CC BY 4.0, MOD (http://www.isibang.ac.in/ns/mod and
+        https://w3id.org/mod): MOD: Metadata for Ontology Description and
+        publication. Creators: Biswanath Dutta, Clement Jonquet. Rights
+        holder: Indian Statistical Institute and University of Montpellier.
+      * CC BY 4.0, OMG (https://w3id.org/omg): OMG: Ontology for Managing
+        Geometry, by Anna Wagner (TU Darmstadt), Mathias Bonduel (KU Leuven)
+        and Pieter Pauwels (Ghent University).
+      * CC BY 1.0, FOAF: Copyright © 2000-2014 Dan Brickley and Libby Miller;
+        SIOC (http://rdfs.org/sioc/ns#, the revision 1.35 graph LOV holds, the
+        same content as frontend/public/vocab/sioc.ttl): Copyright © 2004-2010
+        by DERI, NUI Galway, the specification's notice at that revision; the
+        current specification, http://rdfs.org/sioc/spec/, gives Copyright ©
+        2004-2018 by Data Science Institute (formerly DERI), NUI Galway.
+      * CC BY-SA 3.0 US (https://creativecommons.org/licenses/by-sa/3.0/us/),
+        VAEM: Attribution should be made to TopQuadrant, Inc.; the oeGOV
+        graphs http://www.oegov.org/core/owl/cc and
+        http://www.oegov.org/core/owl/gc: Attribution: TopQuadrant, Inc. (the
+        graph's cc:attributionName).
+      * ODbL 1.0, http://w3id.org/charta77/jup, and ODC-By 1.0,
+        http://data.businessgraph.io/ontology# (and the IGN and PersonLink
+        graphs geofla, geom, ignf and plink, which also offer CC BY 2.0 and
+        the Licence Ouverte): each graph is unchanged, keeps its own licence
+        statement and is conveyed under that licence (URIs above).
+      * UK Open Government Licence, http://reegle.info/schema (the licence's
+        default attribution statement, as the provider gives none): Contains
+        public sector information licensed under the Open Government Licence
+        v3.0. https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/
+      * Modellicentie Gratis Hergebruik Vlaanderen v1.0,
+        http://data.vlaanderen.be/ns/persoon (article 4: the licensor's name
+        and the year, as the graph specifies no attribution): Bron: Data
+        Vlaanderen, 2017.
+      * CC BY 1.0, http://tour-pedia.org/download/tp.owl: Copyright © 2015
+        Tourpedia (its only copyright line, mis-decoded in LOV's copy).
+      * ISA Open Metadata Licence v1.1 (Joinup, https://joinup.ec.europa.eu/),
+        the graphs http://www.w3.org/ns/locn ("Copyright © European Union,
+        2012-2015."), http://www.w3.org/ns/person and http://www.w3.org/ns/radion#
+        ("Copyright © 2012 European Commission.") and
+        http://purl.org/oslo/ns/localgov ("Copyright (c) 2013-2014 V-ICT-OR."),
+        and the ISA-derived material in two W3C
+        graphs that carry no notice of their own: http://www.w3.org/ns/adms,
+        whose definitions derive from ADMS v1.00, and
+        http://www.w3.org/ns/regorg, the Core Business Vocabulary 1.00 as W3C
+        revised it; for both: Copyright © 2012 European Union. This vocabulary
+        is published under the ISA Open Metadata Licence v1.1. The licence's
+        No Warranty disclaimer:
+        EACH WORK IS PROVIDED "AS IS" WITHOUT REPRESENTATIONS, WARRANTIES,
+        OBLIGATIONS AND LIABILITIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, TO
+        THE FULL EXTENT PERMITTED BY LAW INCLUDING, BUT NOT LIMITED TO, ANY
+        IMPLIED WARRANTY OF MERCHANTABILITY, INTEGRATION, SATISFACTORY QUALITY
+        AND FITNESS FOR A PARTICULAR PURPOSE. EXCEPT IN THE CASES OF WILFUL
+        MISCONDUCT OR DAMAGES DIRECTLY CAUSED TO NATURAL PERSONS, NEITHER
+        EUROPEAN UNION NOR ITS CONTRIBUTOR(S) WILL BE LIABLE FOR ANY
+        INCIDENTAL, CONSEQUENTIAL, DIRECT OR INDIRECT DAMAGES INCLUDING BUT NOT
+        LIMITED TO THE LOSS OF DATA, LOST PROFITS, OR ANY OTHER FINANCIAL LOSS
+        ARISING FROM THE USE OF, OR INABILITY TO USE, EVEN IF THE EUROPEAN UNION
+        HAS BEEN NOTIFIED OF THE POSSIBILITY OF SUCH LOSS, DAMAGES, CLAIMS OR
+        COSTS OR FOR ANY CLAIM BY ANY THIRD PARTY. HOWEVER, THE LICENSOR WILL BE
+        LIABLE UNDER STATUTORY PRODUCT LIABILITY LAWS AS FAR SUCH LAWS APPLY TO
+        THE WORK.
+  - prefix.cc prefix mappings: the 3,537 entries with "source": "prefix.cc" in
+    src/prefixes/data/prefixes-snapshot.json. They are compiled into the server
+    binary, and every deployment re-serves them at /api/prefixes/all and
+    /api/prefixes/context.jsonld. Taken from https://prefix.cc/popular/all.file.json
+    on 2026-06-29 by scripts/build_prefix_dataset.py. The pairs are unchanged,
+    except that the one entry whose namespace is not an IRI (ontologia,
+    http://ub.edu/dades/ontologia/Cinema#Cinemes#, which has two '#') is left
+    out; prefix.cc's popularity order is kept as the rank field and a source
+    field is added.
+    prefix.cc (https://prefix.cc/) is maintained by Richard Cyganiak and was
+    developed at DERI, NUI Galway. No licence is published for the data. The
+    pairs are facts, and the operator has stated that all data is considered
+    public domain (CC0) in https://github.com/cygri/prefix.cc/issues/13, though
+    no licence or dedication has been published. The prefix.cc site code
+    (https://github.com/cygri/prefix.cc) is under The Unlicense, which covers
+    the code, not the data.
+  - Linked Open Vocabularies (LOV) prefix mappings: the 157 entries with
+    "source": "lov" in src/prefixes/data/prefixes-snapshot.json, compiled into
+    the server binary and re-served at /api/prefixes/all and
+    /api/prefixes/context.jsonld. Modified: extracted from the LOV dump of
+    2025-12-18 (via assets/vocab/lov-catalog.json.gz) and filtered to the valid
+    prefix/namespace pairs whose label prefix.cc does not already bind (157 of
+    898 vocabularies), then ranked after the prefix.cc entries and re-encoded as
+    JSON by scripts/build_prefix_dataset.py. Credit and licence as in the LOV
+    entry above: CC BY 4.0, https://creativecommons.org/licenses/by/4.0/.
+  - IFC schema names — entity names and EXPRESS-ordered attribute names
+    (src/ifc/names.rs) and the IfcSIUnitName, IfcSIPrefix and IfcUnitEnum
+    enumeration values (src/ifc/units.rs), from the IFC2X3, IFC4 and IFC4.3
+    schemas. Copyright © 1996-2020 buildingSMART International Limited. All
+    rights reserved. Used in software development under buildingSMART's
+    copyright notice, which permits that use without prior written consent
+    provided full attribution is given (the notice in LICENSE.md on the
+    master branch of https://github.com/buildingSMART/IFC4.x-development); the
+    repository's current branch (ifc4.3-main, LICENSE.md) licenses the work
+    under CC BY-ND 4.0, http://creativecommons.org/licenses/by-nd/4.0/ —
+    © buildingSMART International Ltd. Reproduced unchanged,
+    reformatted as Rust string tables; buildingSMART provides the material as
+    is, without warranty. Industry Foundation Class™, IFC™ and ifcXML™ are
+    trademarks of buildingSMART International Limited.
+  - EPSG parameters in frontend/src/lib/viewer/crs.ts (proj4 definitions for
+    EPSG:28992, 2154, 27700, 31370 and 2056, and the ETRS89, WGS 84 and NAD83
+    UTM zone families) — derived from the EPSG Geodetic Parameter Dataset,
+    owned by the International Association of Oil and Gas Producers (IOGP),
+    https://epsg.org. Used under the EPSG Dataset Terms of Use (revised 8 April
+    2016), https://epsg.org/terms-of-use.html; anyone who receives these
+    parameters from this product receives them under those terms. The values
+    were recast as PROJ (proj4) strings via epsg.io and are not verbatim EPSG
+    records. IOGP publishes the EPSG Dataset at no charge and without warranty,
+    and this product charges nothing for it.
   - The vocabulary recommender algorithm is an independent reimplementation of
     the ideas in CLARIAH's vocabulary-recommender (Triply B.V.),
     https://github.com/CLARIAH/vocabulary-recommender — whose repository
     states no license; no upstream code is included.
+
+Bundled test data:
+
+  The files below are test fixtures, used only by the test suite. They are not
+  compiled into the Open Triplestore binary or copied into the Docker image.
+
+  - W3C SPARQL 1.1 test suite, query and update sections —
+    tests/fixtures/w3c-sparql11/ (917 test files: the 26 directories that
+    manifest-sparql11-query.ttl and manifest-sparql11-update.ttl include, plus
+    those two manifests). Copyright © 2010 W3C® (MIT, ERCIM, Keio), All Rights
+    Reserved; Copyright © 2015 W3C® (MIT, ERCIM, Keio, Beihang). From
+    https://github.com/w3c/rdf-tests (sparql/sparql11), commit
+    369a90d1a60c021b746df2e411da0ff36258a758. An unmodified subset: every file
+    is byte-identical to upstream, and the protocol, graph-store, federation,
+    result-format and entailment sections are not included. Redistributed
+    under the W3C 3-clause BSD License,
+    https://www.w3.org/copyright/3-clause-bsd-license-2008/ (the W3C Test Suite
+    License does not permit subsets). The original notice, disclaimer and
+    licence text are in tests/fixtures/w3c-sparql11/LICENSE.md; plain-text
+    licence in LICENSES/W3C-BSD-3-Clause-2008.txt. Used for development and
+    bug tracking only: no results are published for these tests, because a
+    subset of a W3C test suite does not allow claims of performance or the use
+    of the name W3C (https://www.w3.org/copyright/test-suites-licenses/).
+  - W3C SHACL test suite, core and sparql sections —
+    tests/fixtures/w3c-shacl/core/ (121 files) and tests/fixtures/w3c-shacl/sparql/
+    (28 files), from the W3C RDF Data Shapes Working Group; authors per
+    upstream history: Holger Knublauch, Peter F. Patel-Schneider, Ashley
+    Sommer. Copyright © 2017–2019 World Wide Web Consortium. From
+    https://github.com/w3c/data-shapes: data-shapes-test-suite/tests/core at
+    commit b6e73695d6196f33d7ce3ba47094a10fbc298e65 and
+    data-shapes-test-suite/tests/sparql at commit
+    9c863967bceaef1a87c24e4dd761eda763823120. W3C Software and Document
+    License, https://www.w3.org/copyright/software-license-2023/. Full text in
+    tests/fixtures/w3c-shacl/LICENSE-W3C-Software-and-Document-2023.txt and
+    LICENSES/W3C-Software-and-Document-License-2023.txt; upstream LICENSE.md
+    kept unchanged. Modified: carriage returns removed (LF line endings) in 72
+    core and 10 sparql files; the suite's root tests/manifest.ttl is not
+    included; otherwise unmodified. The notice of changes is in
+    tests/fixtures/w3c-shacl/PROVENANCE.md.
+  - OGC GeoSPARQL 1.1 SHACL validator and example corpus —
+    tests/fixtures/ogc-geosparql/validator.ttl and
+    tests/fixtures/ogc-geosparql/examples/*.ttl (48 files). © Open Geospatial
+    Consortium; validator.ttl carries "(c) 2022 Open Geospatial Consortium" and
+    names the OGC GeoSPARQL Standards Working Group as creator. From
+    https://github.com/opengeospatial/ogc-geosparql (vocabularies/validator.ttl
+    and examples/shacl/*.ttl), commit 523098e714bb077a800f048be2940942b66310c8.
+    Unmodified. Apache-2.0 per the upstream README's License section. Full
+    text in tests/fixtures/ogc-geosparql/LICENSE-Apache-2.0.txt and
+    LICENSES/Apache-2.0.txt; details in tests/fixtures/ogc-geosparql/LICENSE.md.
+    validator.ttl also declares dcterms:license https://www.ogc.org/license,
+    the OGC Document License Agreement
+    (https://www.ogc.org/about/policies/document-license-agreement/). Test
+    results are not an OGC compliance certification.
 
 Demo content (seeded datasets):
 
@@ -86,16 +636,62 @@ Demo content (seeded datasets):
     Informatics (IAI) / Karlsruhe Institute of Technology (KIT), provided
     "for unrestricted use" with a requested citation,
     https://www.ifcwiki.org/index.php?title=KIT_IFC_Examples
-  - 3DBAG excerpt (frontend/public/samples/schependomlaan-3dbag.city.json,
-    modified: a small excerpt of the full dataset) — © 3DBAG by tudelft3d
-    and 3DGI, CC BY 4.0, https://docs.3dbag.nl/en/copyright/
+  - 3DBAG excerpt (frontend/public/samples/schependomlaan-3dbag.city.json; the
+    same bytes are compiled into the server binary by src/saved_queries/seed.rs
+    and served as RDF and as 3D Tiles) — © 3DBAG by tudelft3d and 3DGI (3D
+    geoinformation research group, TU Delft, and 3DGI), licensed CC BY 4.0,
+    https://creativecommons.org/licenses/by/4.0/ — credit and terms:
+    https://docs.3dbag.nl/en/copyright/. Source: 3DBAG release 2025.09.03,
+    fetched from the 3DBAG API (https://api.3dbag.nl/collections/pand/items,
+    bbox 185610,428010,185760,428160 in EPSG:7415; 77 buildings), committed
+    2026-07-24. MODIFIED by scripts/build_3dbag_excerpt.py: LoD1.2/LoD1.3
+    geometry dropped (LoD0 footprints and LoD2.2 solids kept), building
+    attributes cut to an allow-list and rounded to 3 decimals, LoD0 footprint
+    heights raised from z=0 to ground level (b3_h_maaiveld), and the features
+    re-indexed and merged into one CityJSON 2.0 document. The seeded RDF and
+    the 3D Tiles endpoint adapt it further (triangulated, reprojected,
+    grounded). The credit is shown on the maps, the globe and the 3D and geometry
+    previews whenever what they display is recognisably 3DBAG's (its
+    provenance, IRIs or file names say so), and the 3D Tiles carry it as glTF
+    asset.copyright.
   - World-landmark 3D models (STL, Wikimedia Commons): Big Ben, White House,
     Empire State Building (simplified) and Nagasaki torii shrine © Microsoft,
     CC BY 4.0; Dragon Bridge in Da Nang by -karlos-, CC0. Licence and creator
     are also recorded per model in the seeded RDF.
-  - Demo street/park geometries traced from OpenStreetMap —
+  - Demo street/park geometries and model headings traced from OpenStreetMap —
     © OpenStreetMap contributors, ODbL, https://www.openstreetmap.org/copyright
   - Wikidata-derived landmark facts — CC0.
+  - LOINC codes in the clinical-reference seed bundle
+    (examples/seed-bundles/clinical-reference/vocabulary.ttl): 29463-7 Body
+    weight, 8302-2 Body height, 8867-4 Heart rate — LOINC codes with their
+    LOINC long common names, LOINC version 2.81, unchanged. The same notice is
+    carried as dcterms:rights on the code scheme.
+    This material contains content from LOINC (http://loinc.org). LOINC is
+    copyright © Regenstrief Institute, Inc. and the Logical Observation
+    Identifiers Names and Codes (LOINC) Committee and is available at no cost
+    under the license at http://loinc.org/license. LOINC® is a registered
+    United States trademark of Regenstrief Institute, Inc.
+
+Fetched at run time, not redistributed:
+
+  - NEN 2660-2:2022 — © Stichting Koninklijk Nederlands Normalisatie Instituut
+    (NEN); no licence is granted. Its RDF files are downloaded from NEN's
+    repository by the nen2660-imbor and nen2660-relations bundles' fetch.sh and
+    are not redistributed; those bundles register the models holding them as
+    private registry entries (public = false), so an instance that runs them
+    does not re-serve NEN's content publicly. examples/seed-bundles/nen2660-relations/relations-profile.ttl
+    reuses only NEN 2660-2's relation IRIs and their short English labels; its
+    characteristics and scope notes are this project's own. NEN has not
+    published or endorsed the profile.
+  - IMBOR 2025 Kern and its addenda (examples/seed-bundles/nen2660-imbor) —
+    © Stichting CROW, licensed as the IMBOR entry above; downloaded by the
+    bundle's fetch.sh together with NEN 2660-2, which it needs. The bundle
+    records that licence on its imbor-otl model, whose content the registry
+    likewise refuses to alter.
+  - GWSW (examples/seed-bundles/gwsw) — © Stichting RIONED. The ontology states
+    no licence (RIONED's CC0 covers the data on the GWSW Server) and quotes
+    definitions from NEN and EN standards, so it is downloaded by fetch.sh and
+    not redistributed.
 
 The licenses of bundled and dependency components are unaffected by the Commons
 Clause condition above, which applies only to Open Triplestore itself.

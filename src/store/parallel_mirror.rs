@@ -44,8 +44,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
+use opengraph::columnar::Columnar;
 use opengraph::parallel::{self, ParAnswer, ParClass, ParallelStore};
-use oxigraph::sparql::{QueryResults, QuerySolution, QuerySolutionIter, SparqlEvaluator, Variable};
+use oxigraph::sparql::{
+    QueryResults, QuerySolution, QuerySolutionIter, QueryTripleIter, SparqlEvaluator, Variable,
+};
 use oxigraph::store::Store;
 use tracing::{debug, warn};
 
@@ -81,6 +84,15 @@ const MAX_SHARDS: usize = 16;
 /// (correct, just unaccelerated). `0` disables the debounce (rebuild eagerly).
 /// Tunable via `OTS_PARALLEL_QUERY_REBUILD_QUIET_MS`.
 const DEFAULT_REBUILD_QUIET_MS: u64 = 500;
+/// Store size (triples) up to which a due rebuild runs inline on the query that
+/// notices it. Small stores rebuild in well under a second, so the query keeps
+/// the old read-your-write behaviour. Above this the rebuild moves to a
+/// background thread and the noticing query (plus everything behind it) falls
+/// back to the persistent store — measured on a laptop, an inline rebuild of a
+/// 1.7M-triple store held the first post-import aggregate for ~29s, past the
+/// 30s SPARQL timeout, which surfaced to users as "queries time out after an
+/// upload".
+const DEFAULT_INLINE_REBUILD_MAX_TRIPLES: usize = 50_000;
 
 /// Subject-sharded in-memory accelerator, shared (`Arc`) inside `TripleStore`.
 #[derive(Clone)]
@@ -98,6 +110,12 @@ struct Inner {
     /// per row — ~40× slower than the same join in RAM — so serving these reads from
     /// this copy is the single biggest win for non-aggregate queries.
     full: RwLock<Option<Arc<Store>>>,
+    /// The columnar, dictionary-encoded copy with its own evaluator
+    /// (`opengraph::columnar`): consulted first for the queries it accepts.
+    /// `None` before the first build, over the cap, or when switched off.
+    columnar: RwLock<Option<Arc<Columnar>>>,
+    /// `OTS_COLUMNAR_QUERY` (default on): build and consult the columnar copy.
+    columnar_enabled: bool,
     /// Set on every write; the next query rebuilds before using either copy.
     dirty: AtomicBool,
     /// Serializes (re)builds so concurrent queries don't each rebuild.
@@ -118,6 +136,18 @@ struct Inner {
     last_write_ms: AtomicU64,
     /// Quiet period (ms) writes must clear before a (re)build; `0` rebuilds eagerly.
     rebuild_quiet_ms: AtomicU64,
+    /// Store size (triples) up to which a due rebuild runs inline on the query
+    /// path; larger rebuilds are handed to a background thread. See
+    /// [`DEFAULT_INLINE_REBUILD_MAX_TRIPLES`].
+    inline_rebuild_max: AtomicUsize,
+    /// True while a background rebuild thread is running — deduplicates spawns
+    /// so a burst of queries after a big write starts one thread, not one each.
+    background_building: AtomicBool,
+    /// Writes that have started and not yet finished (see
+    /// [`ParallelMirror::write_started`]). A build that starts or ends while
+    /// this is non-zero cannot be published clean: the store may already hold
+    /// quads whose `mark_dirty` has not been recorded yet.
+    writes_in_flight: AtomicUsize,
     /// Count of full (re)builds performed — diagnostics + regression guard.
     build_count: AtomicUsize,
     /// Count of `Store::len()` probes. That call is a full-store key scan in
@@ -182,6 +212,15 @@ impl ParallelMirror {
             inner: Arc::new(Inner {
                 shards: RwLock::new(None),
                 full: RwLock::new(None),
+                columnar: RwLock::new(None),
+                columnar_enabled: std::env::var("OTS_COLUMNAR_QUERY")
+                    .map(|v| {
+                        !matches!(
+                            v.trim().to_ascii_lowercase().as_str(),
+                            "0" | "false" | "off" | "no"
+                        )
+                    })
+                    .unwrap_or(true),
                 dirty: AtomicBool::new(true),
                 build_lock: Mutex::new(()),
                 built_len: AtomicUsize::new(0),
@@ -192,10 +231,50 @@ impl ParallelMirror {
                 base: Instant::now(),
                 last_write_ms: AtomicU64::new(0),
                 rebuild_quiet_ms: AtomicU64::new(env_rebuild_quiet_ms()),
+                inline_rebuild_max: AtomicUsize::new(DEFAULT_INLINE_REBUILD_MAX_TRIPLES),
+                background_building: AtomicBool::new(false),
+                writes_in_flight: AtomicUsize::new(0),
                 build_count: AtomicUsize::new(0),
                 len_probes: AtomicUsize::new(0),
             }),
         }
+    }
+
+    /// A write is starting. Marks the mirror stale *before* the store mutates,
+    /// so a rebuild that overlaps the write can never publish clean: the write's
+    /// timestamp already differs from the mark the build took, and the in-flight
+    /// count keeps `build_and_publish` from publishing at all until the write has
+    /// finished. Pair with [`Self::write_finished`] (the store does this through
+    /// an RAII guard, so every return path balances the counter).
+    pub fn write_started(&self) {
+        self.inner.writes_in_flight.fetch_add(1, Ordering::AcqRel);
+        self.mark_dirty();
+    }
+
+    /// The write that called [`Self::write_started`] has finished (committed or
+    /// failed). Marks dirty first, then decrements: a publisher that observes zero
+    /// in flight is then guaranteed to also observe this write's timestamp.
+    pub fn write_finished(&self) {
+        self.mark_dirty();
+        self.inner.writes_in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    /// Writes currently between `write_started` and `write_finished`.
+    pub fn writes_in_flight(&self) -> usize {
+        self.inner.writes_in_flight.load(Ordering::Acquire)
+    }
+
+    /// The clean, unsharded in-memory copy of the whole store, if one is
+    /// published and no write has landed since. A *peek*: it never rebuilds,
+    /// never probes `store.len()` and never spawns a thread, so a caller that
+    /// wants a consistent RAM snapshot for a long read (the SHACL engine) can
+    /// ask on every run at no cost. `None` while dirty, while a rebuild is in
+    /// progress, over the cap, or when the accelerator is disabled.
+    pub fn full_copy(&self) -> Option<Arc<Store>> {
+        if !self.inner.enabled || self.inner.dirty.load(Ordering::Acquire) {
+            return None;
+        }
+        self.inner.full.read().ok()?.clone()
     }
 
     /// Mark the mirror stale after any write to the persistent store.
@@ -212,7 +291,6 @@ impl ParallelMirror {
 
     /// Number of full (re)builds performed since construction. Diagnostics, and the
     /// hook the regression test uses to prove a write burst does not thrash rebuilds.
-    #[cfg(test)]
     pub fn build_count(&self) -> usize {
         self.inner.build_count.load(Ordering::Relaxed)
     }
@@ -226,9 +304,15 @@ impl ParallelMirror {
 
     /// Override the rebuild quiet period (ms) — used by tests to drive the debounce
     /// deterministically without touching the process-wide environment variable.
-    #[cfg(test)]
-    fn set_rebuild_quiet_ms(&self, ms: u64) {
+    pub fn set_rebuild_quiet_ms(&self, ms: u64) {
         self.inner.rebuild_quiet_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Override the inline-rebuild size bound — used by tests to force the
+    /// background path with a small store.
+    #[cfg(test)]
+    fn set_inline_rebuild_max(&self, n: usize) {
+        self.inner.inline_rebuild_max.store(n, Ordering::Relaxed);
     }
 
     /// Try to answer `sparql` in parallel across the shards, returning `None` to
@@ -238,10 +322,13 @@ impl ParallelMirror {
     ///
     /// `options` is a factory (called at most once) so the relatively expensive
     /// `QueryOptions` build is skipped entirely for non-accelerable queries.
+    /// `class` is the parallel classifier's verdict, supplied by the caller,
+    /// which already computed it for the query telemetry.
     pub fn try_query<F>(
         &self,
         store: &Store,
         sparql: &str,
+        class: Option<ParClass>,
         options: F,
     ) -> Option<QueryResults<'static>>
     where
@@ -251,7 +338,7 @@ impl ParallelMirror {
             return None;
         }
         // Only order-insensitive aggregates/ASK are accelerated on the live path.
-        if parallel::classify(sparql) != Some(ParClass::Aggregate) {
+        if class != Some(ParClass::Aggregate) {
             return None;
         }
         let shards = self.get_or_build(store)?;
@@ -264,6 +351,17 @@ impl ParallelMirror {
 
     /// Get warm shards, (re)building from `store` if dirty, or `None` if the store
     /// is empty or larger than the cap.
+    /// Keep the mirror fresh without waiting for a query: if writes have gone
+    /// quiet and the copies are stale, start (or perform) the rebuild now. Called
+    /// from a periodic server task, so the first query after a write burst does
+    /// not pay for — or wait out — the rebuild.
+    pub fn ensure_fresh(&self, store: &Store) {
+        if !self.inner.enabled || !self.inner.dirty.load(Ordering::Acquire) {
+            return;
+        }
+        let _ = self.get_or_build(store);
+    }
+
     fn get_or_build(&self, store: &Store) -> Option<Arc<ParallelStore>> {
         // Fast path: a CLEAN state is authoritative in both directions — `Some` is
         // the warm mirror, and `None` means "deliberately off for this state" (empty
@@ -286,9 +384,23 @@ impl ParallelMirror {
             return None;
         }
         // (Re)build under the build lock so concurrent queries build at most once.
-        let _guard = self.inner.build_lock.lock().ok()?;
-        // Same authoritative re-check: a thread that queued behind a builder which
-        // then decided "over cap" must not run `store.len()` itself.
+        // `try_lock`, not `lock`: a query that finds a rebuild already running —
+        // inline on another request or on the background thread — must fall back
+        // to the persistent store, not queue up behind a multi-second build.
+        // A background rebuild is pending or running: decline without touching
+        // the lock. The rebuild thread takes `build_lock` with a blocking `lock()`;
+        // while it waited, every query that won `try_lock` here first ran a full
+        // `store.len()` scan (below) before declining anyway — profiled at 9% of a
+        // SHACL run's worker CPU across seven threads, starving the rebuild for
+        // the whole window. Now the pending thread is the only candidate builder.
+        if self.inner.background_building.load(Ordering::Acquire) {
+            return None;
+        }
+        let Ok(_guard) = self.inner.build_lock.try_lock() else {
+            return None;
+        };
+        // Same authoritative re-check: a thread that raced a builder which then
+        // decided "over cap" must not run `store.len()` itself.
         if !self.inner.dirty.load(Ordering::Acquire) {
             return self.inner.shards.read().ok()?.clone();
         }
@@ -301,51 +413,177 @@ impl ParallelMirror {
         self.inner.len_probes.fetch_add(1, Ordering::Relaxed);
         let total = store.len().unwrap_or(usize::MAX);
         if total == 0 || total > self.inner.max_triples {
-            // Over the cap (or empty): keep the accelerator off for this state.
-            *self.inner.shards.write().ok()? = None;
-            *self.inner.full.write().ok()? = None;
-            self.inner.built_len.store(0, Ordering::Release);
-            self.inner.dirty.store(false, Ordering::Release);
-            // An over-cap store silently disabling the accelerator was the cause of
-            // a hard-to-spot perf regression (large joins fell back to RocksDB,
-            // ~40× slower per row). Surface it ONCE at warn! so it is never silent,
-            // naming the knob to raise it. Empty stores are not a regression — keep
-            // those at debug!.
-            if total > self.inner.max_triples
-                && !self.inner.over_cap_warned.swap(true, Ordering::AcqRel)
-            {
-                warn!(
-                    "in-memory query accelerator OFF: store has {total} triples, over the \
-                     {} cap — large joins/SELECTs fall back to RocksDB (slower). Raise \
-                     OTS_PARALLEL_QUERY_MAX_TRIPLES (and the container memory budget) to \
-                     re-enable it; each held triple costs ~2× in RAM.",
-                    self.inner.max_triples
-                );
-            } else {
-                debug!(
-                    "parallel mirror inactive: {total} triples (cap {})",
-                    self.inner.max_triples
-                );
-            }
+            self.publish_off(total);
             return None;
         }
-        // Build both copies before publishing either, so a build error leaves the
-        // previous (or empty) state untouched.
-        let ps = Arc::new(build_from_store(store, self.inner.shard_count)?);
-        let full = Arc::new(build_full_store(store)?);
-        *self.inner.shards.write().ok()? = Some(ps.clone());
-        *self.inner.full.write().ok()? = Some(full);
-        self.inner.built_len.store(total, Ordering::Release);
+        if total <= self.inner.inline_rebuild_max.load(Ordering::Relaxed) {
+            // Small store: the rebuild is sub-second, so run it on this query and
+            // keep read-your-write behaviour for dev/test-sized instances.
+            return self.build_and_publish(store, total);
+        }
+        // Large store: the rebuild costs seconds to tens of seconds (measured
+        // ~29s at 1.7M triples), which used to land on whichever query noticed
+        // the store went quiet — the first aggregate after an import blew the
+        // SPARQL timeout. Hand the rebuild to a detached thread instead; this
+        // query (and everything until the publish) falls back to the
+        // persistent store. The flag deduplicates spawns across queries.
+        if self
+            .inner
+            .background_building
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let mirror = self.clone();
+            let store = store.clone();
+            let spawned = std::thread::Builder::new()
+                .name("mirror-rebuild".to_string())
+                .spawn(move || {
+                    let _guard = mirror
+                        .inner
+                        .build_lock
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if mirror.inner.dirty.load(Ordering::Acquire) {
+                        // Re-derive the verdict: the store may have grown past the
+                        // cap (or shrunk under the inline bound) since the spawn.
+                        mirror.rebuild_locked(&store);
+                    }
+                    mirror
+                        .inner
+                        .background_building
+                        .store(false, Ordering::Release);
+                });
+            if spawned.is_err() {
+                self.inner
+                    .background_building
+                    .store(false, Ordering::Release);
+            }
+        }
+        None
+    }
+
+    /// Probe the store and rebuild (or switch off) the mirror. Caller must hold
+    /// `build_lock`; this is the background thread's whole job.
+    fn rebuild_locked(&self, store: &Store) {
+        self.inner.len_probes.fetch_add(1, Ordering::Relaxed);
+        let total = store.len().unwrap_or(usize::MAX);
+        if total == 0 || total > self.inner.max_triples {
+            self.publish_off(total);
+        } else {
+            let _ = self.build_and_publish(store, total);
+        }
+    }
+
+    /// Publish the "accelerator off" state (empty or over-cap store) and log it.
+    /// Caller must hold `build_lock`.
+    fn publish_off(&self, total: usize) {
+        if let Ok(mut shards) = self.inner.shards.write() {
+            *shards = None;
+        }
+        if let Ok(mut full) = self.inner.full.write() {
+            *full = None;
+        }
+        if let Ok(mut c) = self.inner.columnar.write() {
+            *c = None;
+        }
+        self.inner.built_len.store(0, Ordering::Release);
         self.inner.dirty.store(false, Ordering::Release);
-        self.inner.build_count.fetch_add(1, Ordering::Relaxed);
-        // Built successfully (under cap): re-arm the over-cap warning so a later
-        // growth back over the cap is surfaced again.
-        self.inner.over_cap_warned.store(false, Ordering::Release);
+        // An over-cap store silently disabling the accelerator was the cause of
+        // a hard-to-spot perf regression (large joins fell back to RocksDB,
+        // ~40× slower per row). Surface it ONCE at warn! so it is never silent,
+        // naming the knob to raise it. Empty stores are not a regression — keep
+        // those at debug!.
+        if total > self.inner.max_triples
+            && !self.inner.over_cap_warned.swap(true, Ordering::AcqRel)
+        {
+            warn!(
+                "in-memory query accelerator OFF: store has {total} triples, over the \
+                 {} cap — large joins/SELECTs fall back to RocksDB (slower). Raise \
+                 OTS_PARALLEL_QUERY_MAX_TRIPLES (and the container memory budget) to \
+                 re-enable it; each held triple costs ~2× in RAM.",
+                self.inner.max_triples
+            );
+        } else {
+            debug!(
+                "parallel mirror inactive: {total} triples (cap {})",
+                self.inner.max_triples
+            );
+        }
+    }
+
+    /// Build both RAM copies from `store` and publish them. Caller must hold
+    /// `build_lock`.
+    ///
+    /// `dirty` is cleared BEFORE the build, not after: a write landing while the
+    /// copies are being built re-marks the mirror and the next quiet query
+    /// rebuilds again. Clearing after the publish (the old order) erased that
+    /// mark and served a silently stale mirror until the write after it.
+    fn build_and_publish(&self, store: &Store, total: usize) -> Option<Arc<ParallelStore>> {
+        // The mirror stays *dirty* for the whole build, so `get_or_build` answers
+        // None (the persistent store serves the query) instead of the previous
+        // snapshot. Clearing the flag up front, as this used to, handed every
+        // reader the pre-write copy for the seconds a rebuild takes — a SHACL run
+        // right after an import mixed stale and fresh answers and reported
+        // violations that did not exist, or none at all.
+        // A write in flight may have committed quads whose mark is not recorded
+        // yet; the copies built now could miss them and still look clean. Stay
+        // dirty and let the next quiet tick retry once the write has finished.
+        if self.writes_in_flight() > 0 {
+            return None;
+        }
+        let write_mark = self.inner.last_write_ms.load(Ordering::Acquire);
+        let built = build_from_store(store, self.inner.shard_count)
+            .map(Arc::new)
+            .zip(build_full_store(store).map(Arc::new));
+        let Some((ps, full)) = built else {
+            // Build error: leave the previous state untouched and stay dirty.
+            return None;
+        };
+        // The columnar copy, from the full copy just built (one pass over
+        // RAM, not a second pass over RocksDB).
+        let columnar = if self.inner.columnar_enabled {
+            Some(Arc::new(Columnar::from_quads(
+                full.iter().filter_map(Result::ok),
+            )))
+        } else {
+            None
+        };
+        self.publish(ps.clone(), full, columnar, total, write_mark);
         debug!(
             "parallel mirror built: {total} triples ({} shards + 1 full copy)",
             self.inner.shard_count
         );
         Some(ps)
+    }
+
+    /// Install freshly built copies. The mirror is marked clean only if no
+    /// write landed since `write_mark` was taken at the start of the build;
+    /// otherwise it stays dirty and the next quiet window rebuilds again.
+    fn publish(
+        &self,
+        ps: Arc<ParallelStore>,
+        full: Arc<Store>,
+        columnar: Option<Arc<Columnar>>,
+        total: usize,
+        write_mark: u64,
+    ) {
+        if let Ok(mut shards) = self.inner.shards.write() {
+            *shards = Some(ps);
+        }
+        if let Ok(mut f) = self.inner.full.write() {
+            *f = Some(full);
+        }
+        if let Ok(mut c) = self.inner.columnar.write() {
+            *c = columnar;
+        }
+        self.inner.built_len.store(total, Ordering::Release);
+        self.inner.build_count.fetch_add(1, Ordering::Relaxed);
+        // Built successfully (under cap): re-arm the over-cap warning so a later
+        // growth back over the cap is surfaced again.
+        self.inner.over_cap_warned.store(false, Ordering::Release);
+        let unchanged = self.inner.last_write_ms.load(Ordering::Acquire) == write_mark
+            && self.writes_in_flight() == 0;
+        self.inner.dirty.store(!unchanged, Ordering::Release);
     }
 
     /// Try to answer `sparql` from the **unsharded** in-memory copy — the path for
@@ -354,6 +592,35 @@ impl ParallelMirror {
     /// store evaluated by the same engine, so results are identical; it is just in
     /// RAM, avoiding RocksDB's per-row join lookups. Returns `None` (→ persistent
     /// store) for a disabled mirror, an over-cap store, or any evaluation error.
+    /// Try to answer `sparql` from the columnar copy with its own evaluator —
+    /// consulted before the shards and the full copy for every query it
+    /// accepts (see `opengraph::columnar`). Declines, like the full copy,
+    /// `SUM`/`AVG` (IEEE-754 order dependence) so the engine keeps its
+    /// last-ULP answer; declines anything the evaluator does not implement,
+    /// a dirty or over-cap mirror, and any evaluation error.
+    pub fn try_columnar_query(&self, store: &Store, sparql: &str) -> Option<QueryResults<'static>> {
+        if !self.inner.enabled || !self.inner.columnar_enabled {
+            return None;
+        }
+        // One parse, three questions. Asking `has_sum_or_avg`, `accepts_text`
+        // and `Columnar::query` each with the query *text* parsed it three
+        // times; on a short query that dominated, and the perf gate measured
+        // it as `concurrent_reads/threads/1` 237 us -> 610 us.
+        if opengraph::columnar::uses_reserved_names(sparql) {
+            return None;
+        }
+        let query = crate::sparql::parser().parse_query(sparql).ok()?;
+        if parallel::has_sum_or_avg_query(&query) || opengraph::columnar::accepts(&query).is_err() {
+            return None;
+        }
+        self.get_or_build(store)?;
+        let columnar = self.inner.columnar.read().ok()?.clone()?;
+        match opengraph::columnar::evaluate(&columnar, &query) {
+            Ok(Some(answer)) => Some(par_answer_to_results(answer)),
+            _ => None,
+        }
+    }
+
     pub fn try_full_query<F>(
         &self,
         store: &Store,
@@ -407,7 +674,7 @@ fn env_rebuild_quiet_ms() -> u64 {
 /// matters for the flap), else total system RAM. Returns `None` when neither can
 /// be read (e.g. on non-Linux hosts), where the caller falls back to the fixed
 /// floor.
-fn detect_memory_limit_bytes() -> Option<u64> {
+pub(crate) fn detect_memory_limit_bytes() -> Option<u64> {
     // cgroup v2 (Docker default on modern hosts): a numeric byte limit, or the
     // literal "max" when unconstrained.
     if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory.max") {
@@ -426,6 +693,29 @@ fn detect_memory_limit_bytes() -> Option<u64> {
             if n > 0 && n < (1u64 << 62) {
                 return Some(n);
             }
+        }
+    }
+    // macOS has no /proc: ask sysctl for the physical memory size, so the
+    // RAM-aware cap applies on developer machines too (it used to fall back to
+    // the 2M floor there, keeping the accelerator off above it).
+    #[cfg(target_os = "macos")]
+    {
+        let mut size: u64 = 0;
+        let mut len = std::mem::size_of::<u64>();
+        let name = std::ffi::CString::new("hw.memsize").expect("static name");
+        // SAFETY: sysctlbyname writes at most `len` bytes into `size`, whose
+        // address and size we pass; no other pointers are involved.
+        let rc = unsafe {
+            libc::sysctlbyname(
+                name.as_ptr(),
+                &mut size as *mut u64 as *mut libc::c_void,
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc == 0 && size > 0 {
+            return Some(size);
         }
     }
     // No cgroup limit (or unconstrained) → total system RAM.
@@ -494,6 +784,9 @@ fn par_answer_to_results(ans: ParAnswer) -> QueryResults<'static> {
                 .into_iter()
                 .map(move |row| Ok(QuerySolution::from((row_vars.clone(), row))));
             QueryResults::Solutions(QuerySolutionIter::new(vars, iter))
+        }
+        ParAnswer::Graph(triples) => {
+            QueryResults::Graph(QueryTripleIter::new(triples.into_iter().map(Ok)))
         }
     }
 }
@@ -650,6 +943,43 @@ mod tests {
         assert_eq!(mirror.build_count(), 1);
     }
 
+    /// Stores past the inline bound rebuild on a background thread: the query
+    /// that notices the store went quiet falls back to the persistent store
+    /// instead of paying the multi-second rebuild inline (which blew the SPARQL
+    /// timeout on the first post-import aggregate), and the warm mirror shows
+    /// up shortly after.
+    #[test]
+    fn large_store_rebuild_runs_in_background() {
+        let mirror = ParallelMirror::new(true, 2, 10_000_000);
+        mirror.set_rebuild_quiet_ms(0);
+        mirror.set_inline_rebuild_max(0); // force every rebuild onto the background path
+        let store = store_with_quads(50);
+        let q = "SELECT * WHERE { ?s ?p ?o } LIMIT 1";
+
+        mirror.mark_dirty();
+        assert!(
+            mirror
+                .try_full_query(&store, q, SparqlEvaluator::new)
+                .is_none(),
+            "the noticing query must fall back, not rebuild inline",
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while mirror.build_count() == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            mirror.build_count(),
+            1,
+            "the background thread performs the rebuild"
+        );
+        assert!(
+            mirror
+                .try_full_query(&store, q, SparqlEvaluator::new)
+                .is_some(),
+            "queries after the background publish use the warm mirror",
+        );
+    }
+
     /// With no write since construction the initial build is never debounced, so a
     /// cold first query (e.g. the first viewer-feed after boot settles) builds at
     /// once rather than waiting out a quiet period.
@@ -664,5 +994,120 @@ mod tests {
             .try_full_query(&store, q, SparqlEvaluator::new)
             .is_some());
         assert_eq!(mirror.build_count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod stale_read_tests {
+    use super::*;
+    use oxigraph::model::{NamedNode, Quad};
+
+    fn store_with(n: usize) -> Store {
+        let store = Store::new().unwrap();
+        for i in 0..n {
+            store
+                .insert(&Quad::new(
+                    NamedNode::new_unchecked(format!("urn:s{i}")),
+                    NamedNode::new_unchecked("urn:p"),
+                    NamedNode::new_unchecked("urn:o"),
+                    oxigraph::model::GraphName::DefaultGraph,
+                ))
+                .unwrap();
+        }
+        store
+    }
+
+    /// While a rebuild holds the build lock and the mirror is dirty, a query
+    /// must fall back to the persistent store — never read the old snapshot.
+    #[test]
+    fn a_build_in_progress_hands_out_no_snapshot() {
+        let store = store_with(10);
+        let mirror = ParallelMirror::new(true, 2, 1_000_000);
+        mirror.set_rebuild_quiet_ms(0);
+        assert!(
+            mirror.get_or_build(&store).is_some(),
+            "first build (inline) publishes"
+        );
+        mirror.mark_dirty();
+        let _building = mirror.inner.build_lock.lock().unwrap();
+        assert!(
+            mirror.get_or_build(&store).is_none(),
+            "dirty + build lock held = a rebuild is running: no stale shards"
+        );
+    }
+
+    /// A stale mirror with writes gone quiet is rebuilt by `ensure_fresh`
+    /// without any query asking for it.
+    #[test]
+    fn ensure_fresh_rebuilds_a_quiet_dirty_mirror() {
+        let store = store_with(10);
+        let mirror = ParallelMirror::new(true, 2, 1_000_000);
+        mirror.set_rebuild_quiet_ms(0);
+        assert!(mirror.get_or_build(&store).is_some());
+        let builds = mirror.inner.build_count.load(Ordering::Relaxed);
+        mirror.mark_dirty();
+        mirror.ensure_fresh(&store);
+        assert_eq!(mirror.inner.build_count.load(Ordering::Relaxed), builds + 1);
+        assert!(!mirror.inner.dirty.load(Ordering::Acquire));
+        mirror.ensure_fresh(&store);
+        assert_eq!(
+            mirror.inner.build_count.load(Ordering::Relaxed),
+            builds + 1,
+            "clean: no rebuild"
+        );
+    }
+
+    /// A write that has started but not finished keeps a build from publishing
+    /// at all, and `full_copy()` (the SHACL engine's snapshot peek) hands out a
+    /// copy only in the clean state — never during or right after a write.
+    #[test]
+    fn a_write_in_flight_blocks_publication_and_the_peek() {
+        let store = store_with(10);
+        let mirror = ParallelMirror::new(true, 2, 1_000_000);
+        mirror.set_rebuild_quiet_ms(0);
+        assert!(mirror.full_copy().is_none(), "nothing built yet");
+        assert!(mirror.get_or_build(&store).is_some());
+        assert!(mirror.full_copy().is_some(), "clean and built");
+        mirror.write_started();
+        assert!(
+            mirror.full_copy().is_none(),
+            "dirty as soon as a write starts"
+        );
+        assert!(
+            mirror.build_and_publish(&store, 10).is_none(),
+            "no publish while a write is in flight"
+        );
+        assert!(mirror.inner.dirty.load(Ordering::Acquire));
+        mirror.write_finished();
+        assert_eq!(mirror.writes_in_flight(), 0);
+        assert!(mirror.build_and_publish(&store, 10).is_some());
+        assert!(!mirror.inner.dirty.load(Ordering::Acquire));
+        assert!(mirror.full_copy().is_some());
+    }
+
+    /// Publishing clears the dirty flag only when nothing was written during
+    /// the build; a write that landed meanwhile keeps the mirror dirty.
+    #[test]
+    fn publish_stays_dirty_when_a_write_landed_during_the_build() {
+        let store = store_with(5);
+        let mirror = ParallelMirror::new(true, 2, 1_000_000);
+        mirror.set_rebuild_quiet_ms(0);
+        let ps = Arc::new(build_from_store(&store, 2).unwrap());
+        let full = Arc::new(build_full_store(&store).unwrap());
+        let mark = mirror.inner.last_write_ms.load(Ordering::Acquire);
+        mirror.publish(ps.clone(), full.clone(), None, 5, mark);
+        assert!(
+            !mirror.inner.dirty.load(Ordering::Acquire),
+            "no write during the build: clean"
+        );
+        // A write during the build bumps the write mark past `mark`.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        mirror.mark_dirty();
+        let mark_before_second_build = mark;
+        mirror.publish(ps, full, None, 5, mark_before_second_build);
+        assert!(
+            mirror.inner.dirty.load(Ordering::Acquire),
+            "a write landed during the build: still dirty"
+        );
     }
 }

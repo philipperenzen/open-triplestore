@@ -9,6 +9,7 @@
   import Select from '../components/Select.svelte';
   import { isAuthenticated, authInitialized, user } from '../lib/stores.js';
   import { toastError, toastSuccess } from '../lib/toast.ts';
+  import { shortenIRI, loadPrefixCcPrefixes, prefixesVersion } from '../lib/rdf-utils.js';
   import { t } from 'svelte-i18n';
 
   let sets = [];
@@ -40,7 +41,14 @@
     if (!$isAuthenticated) navigate('/login');
   }
 
+  // `shortenIRI` reads a module-level prefix map, which creates no Svelte
+  // dependency. Naming the version store here is what makes these labels
+  // recompute once the ~3700-entry prefix snapshot lands, instead of keeping
+  // the weaker form they were first rendered with.
+  $: curie = ($prefixesVersion, (iri) => shortenIRI(iri));
+
   onMount(async () => {
+    loadPrefixCcPrefixes();
     loading = true;
     try {
       sets = await listShapeGraphs();
@@ -113,12 +121,6 @@
   }
 
   function toggle(set, value) { if (set.has(value)) set.delete(value); else set.add(value); return new Set(set); }
-
-  function shortIRI(iri) {
-    if (!iri) return '';
-    const m = String(iri).match(/[^#/]+$/);
-    return m ? m[0] : iri;
-  }
 
   function relativeTime(iso) {
     if (!iso) return '';
@@ -291,7 +293,7 @@
                 </div>
                 {#if (set.target_classes || []).length}
                   <div class="targets">
-                    {#each set.target_classes.slice(0, 6) as tc}<span class="chip chip-target"><Database size={10} /> {shortIRI(tc)}</span>{/each}
+                    {#each set.target_classes.slice(0, 6) as tc}<span class="chip chip-target" title={tc}><Database size={10} /> {curie(tc)}</span>{/each}
                     {#if set.target_classes.length > 6}<span class="chip chip-more">+{set.target_classes.length - 6}</span>{/if}
                   </div>
                 {/if}
@@ -380,7 +382,9 @@
   .facet { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; width: 100%; padding: 0.3rem 0.5rem; border: 1px solid transparent; border-radius: 8px; background: transparent; font-size: 0.8rem; color: #334155; cursor: pointer; text-transform: capitalize; }
   .facet:hover { background: #f8fafc; }
   .facet.active { background: #ecfeff; color: #0e7490; border-color: #7ED6D0; }
-  .facet-label { display: inline-flex; align-items: center; gap: 0.3rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* A facet names a source, a visibility or an owner — all of them labels, so
+     they wrap rather than lose their tail to an ellipsis. */
+  .facet-label { display: inline-flex; align-items: center; gap: 0.3rem; min-width: 0; text-align: left; overflow-wrap: break-word; }
   .facet-count { font-size: 0.72rem; color: #94a3b8; font-weight: 600; flex-shrink: 0; }
   .facet-empty { font-size: 0.8rem; color: #94a3b8; }
 
@@ -392,21 +396,27 @@
   .group-label { display: flex; align-items: baseline; gap: 0.4rem; margin: 0 0 0.55rem; font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; }
   .group-label + .set-grid { margin-bottom: 1.1rem; }
   .group-count { font-size: 0.7rem; font-weight: 600; color: #94a3b8; }
-  .set-grid { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 0.85rem; }
+  /* min(320px, 100%): below a 320px-wide column the track would keep its floor
+     and push the page sideways instead of narrowing. */
+  .set-grid { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 0.85rem; }
   .set-card { border: 1px solid var(--line-soft); border-radius: 12px; background: #fff; display: flex; flex-direction: column; transition: border-color 0.12s, box-shadow 0.12s; }
   .set-card:hover { border-color: #7ED6D0; box-shadow: var(--shadow-sm); }
   :global(.set-card-main) { display: block; padding: 0.85rem 1rem; color: inherit; text-decoration: none; }
   .set-head { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
   :global(.set-icon) { color: #2F7A8C; flex-shrink: 0; }
-  .set-name { font-weight: 600; font-size: 0.95rem; color: #1e293b; }
-  .set-desc { margin: 0.4rem 0 0; font-size: 0.82rem; color: #64748b; line-height: 1.4; max-height: 2.6em; overflow: hidden; }
+  .set-name { font-weight: 600; font-size: 0.95rem; color: #1e293b; min-width: 0; overflow-wrap: break-word; }
+  /* A description is prose, so it may stop after two lines — but at a line
+     boundary with an ellipsis, not halfway through a clipped third line. */
+  .set-desc { margin: 0.4rem 0 0; font-size: 0.82rem; color: #64748b; line-height: 1.4; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: break-word; }
   .set-meta { display: flex; gap: 0.7rem; margin-top: 0.6rem; align-items: center; flex-wrap: wrap; font-size: 0.78rem; color: #475569; }
   .set-stat strong { color: #1e293b; font-weight: 700; }
   .set-stat.dim { color: #94a3b8; margin-left: auto; }
   .targets { display: flex; gap: 0.25rem; flex-wrap: wrap; margin-top: 0.55rem; }
   .chip { display: inline-flex; align-items: center; gap: 0.2rem; font-size: 0.68rem; padding: 2px 7px; border-radius: 999px; font-weight: 600; }
   .chip-vis { background: #f1f5f9; color: #475569; text-transform: capitalize; }
-  .chip-target { background: #ecfeff; color: #0e7490; font-family: 'IBM Plex Mono', monospace; font-weight: 500; }
+  /* A target class is an identifier with no spaces to break at, so it breaks
+     anywhere rather than pushing the card wider than its column. */
+  .chip-target { background: #ecfeff; color: #0e7490; font-family: 'IBM Plex Mono', monospace; font-weight: 500; max-width: 100%; overflow-wrap: anywhere; }
   .chip-source { background: #ede9fe; color: #5b21b6; text-transform: capitalize; }
   .chip-source-derived { background: #fef3c7; color: #92400e; }
   .chip-source-ai { background: #fce7f3; color: #9d174d; }
@@ -432,6 +442,23 @@
   @media (max-width: 760px) {
     .layout { grid-template-columns: 1fr; }
     .facets { max-height: none; }
+  }
+
+  /* Phone. The toolbar stops being one line: the search field owns a line of
+     its own and the actions share the next, side by side rather than as a
+     stack of full-width bars (the app makes every `.btn` full width here).
+     Everything that is tapped grows to a finger's width. */
+  @media (max-width: 720px) {
+    .toolbar { flex-wrap: wrap; gap: 0.5rem; }
+    .search-wrap { flex: 1 1 100%; }
+    .toolbar-actions { width: 100%; flex-wrap: wrap; }
+    .toolbar-actions .btn { width: auto; flex: 1 1 8rem; min-height: 2.5rem; }
+    .vt { min-height: 2.5rem; }
+    .facet { min-height: 2.5rem; }
+    .icon-btn { width: 2.5rem; height: 2.5rem; }
+    .set-actions { padding: 0 0.6rem 0.6rem; gap: 0.35rem; }
+    .modal-actions { flex-wrap: wrap; }
+    .modal-actions .btn { width: auto; flex: 1 1 8rem; min-height: 2.5rem; }
   }
 
   /* ---- Dark mode overrides (scoped rules out-specify global theme.css) ---- */

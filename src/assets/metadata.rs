@@ -440,21 +440,19 @@ fn kml_bbox(bytes: &[u8]) -> Option<(f64, f64, f64, f64)> {
     loop {
         match reader.read_event() {
             Ok(quick_xml::events::Event::Start(e)) => {
-                if e.local_name().as_ref() == b"coordinates" {
+                if e.local_name().as_ref() == "coordinates" {
                     in_coords = true;
                 }
             }
             Ok(quick_xml::events::Event::End(e)) => {
-                if e.local_name().as_ref() == b"coordinates" {
+                if e.local_name().as_ref() == "coordinates" {
                     in_coords = false;
                 }
             }
             Ok(quick_xml::events::Event::Text(e)) if in_coords => {
-                if let Ok(txt) = e.decode().map_err(|_| ()).and_then(|s| {
-                    quick_xml::escape::unescape(&s)
-                        .map(|u| u.into_owned())
-                        .map_err(|_| ())
-                }) {
+                if let Ok(txt) =
+                    quick_xml::escape::unescape(&e.into_inner()).map(|u| u.into_owned())
+                {
                     for tuple in txt.split_whitespace() {
                         let mut parts = tuple.split(',');
                         if let (Some(lon), Some(lat)) = (parts.next(), parts.next()) {

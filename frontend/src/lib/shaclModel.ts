@@ -3,7 +3,9 @@
 // `parseShapesGraph` turns a Turtle shapes graph into an editable model of node
 // shapes → property shapes → typed constraints, and `serializeShapesGraph`
 // writes that model back to clean, readable Turtle. Together they give the
-// builder two-way sync with the Turtle source.
+// builder two-way sync with the Turtle source. Serialising may add an @prefix
+// line the source lacked: `makeCurie` shortens well-known namespaces the
+// document never declared, and a CURIE it emits has to be declared.
 //
 // Lossless guarantee: every quad of the source document is accounted for.
 // A quad is either
@@ -18,6 +20,7 @@
 // when the Turtle itself fails to parse.
 
 import { Parser } from 'n3';
+import { wellKnownCurie } from './rdf-utils';
 
 export const SH = 'http://www.w3.org/ns/shacl#';
 const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
@@ -763,7 +766,12 @@ const DEFAULT_PREFIXES: Record<string, string> = {
 
 export function serializeShapesGraph(g: ShapesGraph): string {
   const prefixes: Record<string, string> = { ...DEFAULT_PREFIXES, ...g.prefixes };
-  const curie = makeCurie(prefixes);
+  // Turtle that uses a prefix it never declares does not parse, so whatever the
+  // curie fallback reaches for is collected here and declared in the header.
+  const fallbackPrefixes: Record<string, string> = {};
+  const curie = makeCurie(prefixes, (label, ns) => {
+    fallbackPrefixes[label] = ns;
+  });
 
   // Stable blank-node labels for retained quads (deterministic per serialise).
   const blanks = new Map<string, string>();
@@ -949,7 +957,8 @@ export function serializeShapesGraph(g: ShapesGraph): string {
     for (const { s, rows } of bySubj.values()) tail.push(`${xTerm(s)} ${rows.join(' ;\n  ')} .`);
   }
 
-  const usedPrefixes = Object.entries(prefixes)
+  // Declared after the body is built: only then is the fallback set complete.
+  const usedPrefixes = Object.entries({ ...fallbackPrefixes, ...prefixes })
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([p, ns]) => `@prefix ${p}: <${ns}> .`)
     .join('\n');
@@ -957,14 +966,55 @@ export function serializeShapesGraph(g: ShapesGraph): string {
   return `${usedPrefixes}\n\n${body}\n`;
 }
 
-function makeCurie(prefixes: Record<string, string>): (iri: string) => string {
+// Conservative Turtle name shapes. A CURIE we emit must survive a re-parse, so
+// anything outside these stays a full <IRI> rather than risking invalid Turtle.
+// The trailing '.' was the hole: PN_LOCAL may not end in one, so `foaf:Person.`
+// terminated the statement early and the output stopped parsing. A trailing '-'
+// is PN_CHARS and stays allowed — refusing it would only lose valid CURIEs.
+const PN_LOCAL_SAFE = /^[A-Za-z_](?:[A-Za-z0-9_.-]*[A-Za-z0-9_-])?$/;
+const PN_PREFIX_SAFE = /^[A-Za-z][A-Za-z0-9_-]*$/;
+
+/**
+ * IRI → CURIE. Resolution order: prefixes the document declares (the author's
+ * own choices win), then the well-known / prefix-service namespaces known to
+ * rdf-utils — without that fallback the builder rendered bare
+ * `<http://…>` for everything the document happened not to declare.
+ *
+ * `onFallback` reports every prefix taken from that fallback. A CURIE the
+ * document never declared must be declared by whoever emits it, so display-time
+ * shortening and serialise-time `@prefix` lines cannot drift apart. Each label
+ * is reported for at most one namespace, so the caller can collect the reports
+ * into a flat map without one overwriting another.
+ */
+function makeCurie(
+  prefixes: Record<string, string>,
+  onFallback?: (label: string, namespace: string) => void,
+): (iri: string) => string {
   const entries = Object.entries(prefixes).sort((a, b) => b[1].length - a[1].length);
+  // Labels this curie has already handed out, label → namespace. The guard
+  // consulted only the document's prefixes, so two namespaces resolving to the
+  // same well-known label (void: was both w3.org and rdfs.org) each emitted
+  // `void:…` while only the last reached the @prefix header — silently
+  // rewriting the other IRI on save. Uniqueness has to hold where the CURIE is
+  // emitted, not only wherever the labels happen to come from.
+  const taken = new Map<string, string>();
   return (iri: string) => {
     for (const [p, ns] of entries) {
       if (ns && iri.startsWith(ns)) {
         const local = iri.slice(ns.length);
-        if (/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(local)) return `${p}:${local}`;
+        if (PN_LOCAL_SAFE.test(local)) return `${p}:${local}`;
       }
+    }
+    const wk = wellKnownCurie(iri);
+    if (!wk) return `<${iri}>`;
+    // A label already bound to a different namespace must not be reused:
+    // `foaf:Person` would then denote the wrong IRI entirely.
+    const bound = prefixes[wk.prefix] !== undefined ? prefixes[wk.prefix] : taken.get(wk.prefix);
+    const shadowed = bound !== undefined && bound !== wk.namespace;
+    if (!shadowed && PN_PREFIX_SAFE.test(wk.prefix) && PN_LOCAL_SAFE.test(wk.local)) {
+      taken.set(wk.prefix, wk.namespace);
+      onFallback?.(wk.prefix, wk.namespace);
+      return `${wk.prefix}:${wk.local}`;
     }
     return `<${iri}>`;
   };

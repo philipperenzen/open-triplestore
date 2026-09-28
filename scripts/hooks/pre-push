@@ -98,7 +98,8 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 if [ "${OTS_PERF_FULL:-}" = "1" ]; then
-  # Stricter path: run a representative Criterion subset, then compare against
+  # Stricter path: run the gated Criterion set (the same seven-group filter the
+  # CI gate and perf-baseline.yml use), then compare against
   # the committed baseline. A real regression blocks the push.
   echo "OTS_PERF_FULL=1 — running Criterion subset + regression check…"
   PY="$(detect_python || true)"
@@ -107,7 +108,7 @@ if [ "${OTS_PERF_FULL:-}" = "1" ]; then
     echo "Skipping (CI is authoritative); unset OTS_PERF_FULL or install Python to gate locally."
     exit 0
   fi
-  if ! cargo bench --bench performance --features full -- 'query|path|geosparql'; then
+  if ! OTS_QUERY_CACHE=off cargo bench --bench performance --features full -- 'query|path|geosparql|insert|update|shacl|concurrent'; then
     echo "✗ Benchmark subset failed to build/run — blocking push." >&2
     exit 1
   fi

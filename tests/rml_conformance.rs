@@ -446,19 +446,25 @@ fn rml_blank_node_subject_shared_across_poms() {
     );
 }
 
-// Tracked gap: referencing object maps (rr:parentTriplesMap joins) are not modelled.
+// Referencing object maps (`rr:parentTriplesMap` + `rr:joinCondition`) are
+// modelled and executed for RELATIONAL logical sources, where the parent can be
+// streamed and indexed (see the `rml::sql` unit tests). For a FILE source there
+// is nothing to join against a second time, so the mapping parses and the
+// referencing triple is simply not produced.
 #[test]
-fn rml_referencing_object_map_join_is_gap() {
+fn rml_referencing_object_map_parses_but_file_sources_do_not_join() {
     let mapping = r#"
       ex:Child a rr:TriplesMap ;
         rml:logicalSource ex:CSrc ; rr:subjectMap ex:CSubj ;
-        rr:predicateObjectMap ex:ParentPOM .
+        rr:predicateObjectMap ex:ParentPOM, ex:OwnPOM .
       ex:CSrc rml:source "c.csv" ; rml:referenceFormulation ql:CSV .
       ex:CSubj rr:template "http://example.org/c/{id}" .
       ex:ParentPOM rr:predicate ex:parent ; rr:objectMap ex:ParentObj .
       ex:ParentObj rr:parentTriplesMap ex:Parent ;
         rr:joinCondition ex:Join .
       ex:Join rr:child "pid" ; rr:parent "id" .
+      ex:OwnPOM rr:predicate ex:own ; rr:objectMap ex:OwnObj .
+      ex:OwnObj rml:reference "pid" .
       ex:Parent a rr:TriplesMap ;
         rml:logicalSource ex:PSrc ; rr:subjectMap ex:PSubj ;
         rr:predicateObjectMap ex:NamePOM .
@@ -466,23 +472,145 @@ fn rml_referencing_object_map_join_is_gap() {
       ex:PSubj rr:template "http://example.org/p/{id}" .
       ex:NamePOM rr:predicate foaf:name ; rr:objectMap ex:NameObj .
       ex:NameObj rml:reference "name" ."#;
-    // The referencing object map has no template/reference/constant, so the engine
-    // either fails to parse the mapping OR produces no joined triple — both confirm
-    // the gap. (Neither outcome is a join.)
-    let m = parse_rml(&format!("{PFX}{mapping}"));
-    match m {
-        Err(_) => { /* gap: referencing object map not parseable */ }
-        Ok(m) => {
-            let mut src = HashMap::new();
-            src.insert("c.csv".to_string(), "id,pid\n1,10\n".to_string());
-            src.insert("p.csv".to_string(), "id,name\n10,Pat\n".to_string());
-            let store = TripleStore::in_memory().unwrap();
-            let _ = execute(&m, &src, &store, None);
-            assert_eq!(
-                count(&store, "SELECT ?o WHERE { <http://example.org/c/1> ex:parent <http://example.org/p/10> }"),
-                0,
-                "tracked gap: rr:parentTriplesMap joins are not implemented"
-            );
-        }
-    }
+
+    let m = parse_rml(&format!("{PFX}{mapping}"))
+        .expect("a referencing object map is part of the model, so the mapping parses");
+    let mut src = HashMap::new();
+    src.insert("c.csv".to_string(), "id,pid\n1,10\n".to_string());
+    src.insert("p.csv".to_string(), "id,name\n10,Pat\n".to_string());
+    let store = TripleStore::in_memory().unwrap();
+    execute(&m, &src, &store, None).expect("the rest of the mapping still runs");
+
+    assert_eq!(
+        count(
+            &store,
+            "SELECT ?o WHERE { <http://example.org/c/1> ex:parent <http://example.org/p/10> }"
+        ),
+        0,
+        "a file logical source has no queryable parent to join to"
+    );
+    // The surrounding mapping is unaffected: the child's own properties and the
+    // parent triples map both produce their triples.
+    assert_eq!(
+        count(
+            &store,
+            "SELECT ?o WHERE { <http://example.org/c/1> ex:own \"10\" }"
+        ),
+        1,
+        "the child's own predicate-object map still fires"
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT ?o WHERE { <http://example.org/p/10> foaf:name \"Pat\" }"
+        ),
+        1,
+        "the parent triples map still produces its own triples"
+    );
+}
+
+// A relational logical source is executed through a connection, so the
+// file-based entry point refuses it rather than silently producing nothing.
+#[test]
+fn rml_relational_source_is_refused_by_the_file_executor() {
+    let m = parse_rml(&format!(
+        "{PFX}
+         ex:M a rr:TriplesMap ;
+           rml:logicalSource [ rml:source <urn:source:legacy> ; rr:tableName \"products\" ] ;
+           rr:subjectMap [ rr:template \"http://example.org/p/{{id}}\" ] ;
+           rr:predicateObjectMap [ rr:predicate ex:name ; rr:objectMap [ rr:column \"name\" ] ] ."
+    ))
+    .expect("a relational mapping parses");
+    let store = TripleStore::in_memory().unwrap();
+    let err = execute(&m, &HashMap::new(), &store, None).unwrap_err();
+    assert!(
+        err.contains("/api/sources/"),
+        "the error names the path that can run it: {err}"
+    );
+    assert_eq!(store.len().unwrap(), 0, "nothing was written");
+}
+
+// A quoted CSV field containing a newline must produce a correctly escaped
+// literal, not break the whole mapping.
+//
+// Literals were serialised by hand-escaping only `\` and `"`, leaving raw
+// newlines, carriage returns and tabs in the generated Turtle. Turtle's
+// STRING_LITERAL_QUOTE forbids those, so ONE multi-line source value made the
+// entire document unparseable and `execute` failed with "Failed to load
+// generated triples" — not a skipped row, the whole batch.
+#[test]
+fn rml_literal_with_newline_does_not_break_the_mapping() {
+    let mapping = r#"
+      ex:M a rr:TriplesMap ;
+        rml:logicalSource ex:Src ; rr:subjectMap ex:Subj ;
+        rr:predicateObjectMap ex:POM .
+      ex:Src rml:source "notes.csv" ; rml:referenceFormulation ql:CSV .
+      ex:Subj rr:template "http://example.org/note/{id}" .
+      ex:POM rr:predicate ex:body ; rr:objectMap ex:Obj .
+      ex:Obj rml:reference "body" ."#;
+    // Row 2's body spans two lines inside quotes, and row 3 carries a tab.
+    let csv = "id,body\n1,plain\n2,\"first line\nsecond line\"\n3,\"has\ttab\"\n";
+    let (store, n) = run_rml(mapping, &[("notes.csv", csv)]);
+
+    assert_eq!(
+        n, 3,
+        "every row must be mapped, not just the ones without control characters"
+    );
+    assert_eq!(
+        first(
+            &store,
+            "SELECT ?b WHERE { <http://example.org/note/2> ex:body ?b }"
+        )
+        .as_deref(),
+        Some("\"first line\\nsecond line\""),
+        "the newline must be escaped, and the value preserved"
+    );
+    assert_eq!(
+        first(
+            &store,
+            "SELECT ?b WHERE { <http://example.org/note/1> ex:body ?b }"
+        )
+        .as_deref(),
+        Some("\"plain\""),
+        "neighbouring rows must be unaffected"
+    );
+}
+
+// A reference-derived IRI whose value is not a valid IRI must skip that term,
+// not emit invalid Turtle that fails the whole batch.
+//
+// `rr:termType rr:IRI` on an `rml:reference` interpolated the raw cell value
+// between angle brackets with no validation or encoding, so a value with a
+// space produced an unparseable document and a value containing `>` could
+// close the IRI and inject further triples.
+#[test]
+fn rml_invalid_iri_reference_skips_the_term_not_the_batch() {
+    let mapping = r#"
+      ex:M a rr:TriplesMap ;
+        rml:logicalSource ex:Src ; rr:subjectMap ex:Subj ;
+        rr:predicateObjectMap ex:POM .
+      ex:Src rml:source "links.csv" ; rml:referenceFormulation ql:CSV .
+      ex:Subj rr:template "http://example.org/link/{id}" .
+      ex:POM rr:predicate ex:target ; rr:objectMap ex:Obj .
+      ex:Obj rml:reference "target" ; rr:termType rr:IRI ."#;
+    let csv = "id,target\n1,http://example.org/ok\n2,not a valid iri\n";
+    let (store, _n) = run_rml(mapping, &[("links.csv", csv)]);
+
+    assert_eq!(
+        first(
+            &store,
+            "SELECT ?t WHERE { <http://example.org/link/1> ex:target ?t }"
+        )
+        .as_deref(),
+        Some("<http://example.org/ok>"),
+        "the valid row must still be mapped"
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT ?t WHERE { <http://example.org/link/2> ex:target ?t }"
+        ),
+        0,
+        "the unrepresentable IRI must be skipped"
+    );
 }

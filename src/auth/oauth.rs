@@ -36,7 +36,7 @@ use uuid::Uuid;
 use super::db::AuthDb;
 use super::jwt::{issue_access_token, issue_refresh_token};
 use super::models::{map_claims_to_role, OauthProvider, SystemRole};
-use super::secret::decrypt_secret;
+use super::secret::read_stored_secret;
 
 // ─── In-memory PKCE session store ─────────────────────────────────────────────
 
@@ -127,8 +127,10 @@ pub async fn begin_oidc_flow(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("Provider '{}' has no client_id", provider.slug))?;
 
+    // Resolved here, at the moment of use: a `vault:` reference picks up a
+    // rotation without a restart, and nothing holds the value between logins.
     let client_secret = match &provider.client_secret_enc {
-        Some(enc) => Some(decrypt_secret(enc, jwt_secret)?),
+        Some(stored) => Some(read_stored_secret(stored, jwt_secret)?),
         None => None,
     };
 
@@ -220,7 +222,7 @@ pub async fn complete_oidc_flow(
         .ok_or_else(|| anyhow::anyhow!("OAuth provider not found"))?;
 
     let client_secret = match &provider.client_secret_enc {
-        Some(enc) => Some(decrypt_secret(enc, &jwt_config.secret)?),
+        Some(stored) => Some(read_stored_secret(stored, &jwt_config.secret)?),
         None => None,
     };
 

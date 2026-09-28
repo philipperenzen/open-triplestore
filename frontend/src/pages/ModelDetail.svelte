@@ -23,6 +23,7 @@
   import OntologyBrowserPanel from '../components/OntologyBrowserPanel.svelte';
   import BranchPanel from '../components/BranchPanel.svelte';
   import CommitHistory from '../components/CommitHistory.svelte';
+  import ModelAttributionCard from '../components/ModelAttributionCard.svelte';
 
   // Inline browser — which version is expanded
   let browserVersion = null;
@@ -58,6 +59,12 @@
   let currentUser = null;
   user.subscribe(v => currentUser = v);
   $: isPublisher = currentUser?.can_publish || currentUser?.role === 'admin' || currentUser?.role === 'super_admin';
+  // Content whose licence allows no altered copies (IMBOR): the server refuses
+  // every upload, edit, draft, branch, merge, rebase and publish in the entry,
+  // so those actions are not offered.
+  $: noDerivatives = !!model?.attribution?.no_derivatives
+    || (versions || []).some((v) => v.attribution?.no_derivatives);
+  $: canAlter = isPublisher && !noDerivatives;
 
   // ── Edit model metadata ────────────────────────────────────────────────────
   let showEdit = false;
@@ -284,9 +291,11 @@
           <button class="btn btn-ghost btn-sm" on:click={openEdit} title={$t('pages.modelDetail.editMetadata')}>
             <Pencil size={15} /> {$t('system.edit')}
           </button>
-          <button class="btn btn-primary btn-sm" on:click={() => showUpload = true}>
-            <Upload size={15} /> {$t('pages.modelDetail.uploadVersion')}
-          </button>
+          {#if canAlter}
+            <button class="btn btn-primary btn-sm" on:click={() => showUpload = true}>
+              <Upload size={15} /> {$t('pages.modelDetail.uploadVersion')}
+            </button>
+          {/if}
         {/if}
       </div>
     </div>
@@ -359,6 +368,11 @@
       {/if}
     </div>
 
+    <!-- Licence and attribution of a bundled vocabulary's content -->
+    {#if model.attribution}
+      <ModelAttributionCard attribution={model.attribution} />
+    {/if}
+
     <!-- Ownership -->
     {#if model.owner_id}
       <div class="ownership-card">
@@ -419,7 +433,7 @@
 
     <!-- Branches -->
     {#if model}
-      <BranchPanel {id} {versions} canWrite={isPublisher} on:created={load} />
+      <BranchPanel {id} {versions} canWrite={canAlter} on:created={load} />
     {/if}
 
     <!-- Commit history -->
@@ -524,8 +538,8 @@
                     </a>
                   {/if}
 
-                  <!-- Create draft -->
-                  {#if isPublisher && ver.status === 'published'}
+                  <!-- Create draft (not for content that allows no altered copies) -->
+                  {#if canAlter && ver.status === 'published'}
                     <span class="ver-sep"></span>
                     <button
                       class="ver-btn"
@@ -559,7 +573,7 @@
                   {/if}
 
                   <!-- Publish -->
-                  {#if isPublisher && (ver.status === 'draft' || ver.status === 'staged')}
+                  {#if canAlter && (ver.status === 'draft' || ver.status === 'staged')}
                     <button class="ver-btn ver-btn-publish" on:click={() => openPublish(ver.version)}>
                       <CheckCircle size={13} /> {$t('pages.modelDetail.publish')}
                     </button>
@@ -612,6 +626,9 @@
                   · {ver.sub_graphs.length === 1 ? $t('pages.modelDetail.subGraphCount', { values: { count: ver.sub_graphs.length } }) : $t('pages.modelDetail.subGraphCountPlural', { values: { count: ver.sub_graphs.length } })}
                 {/if}
               </div>
+              {#if ver.attribution}
+                <ModelAttributionCard attribution={ver.attribution} variant="compact" />
+              {/if}
 
               <!-- Per-subgraph publishing (Phase 6) -->
               {#if ver.sub_graphs?.length}

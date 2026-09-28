@@ -1,0 +1,4 @@
+# ✅ A 22-char IFC GUID conforms to ex:GuidShape (targetClass def:BridgeComponent).
+@prefix def: <https://example.org/def/> .
+@prefix eb:  <https://example.org/id/example-bridge/> .
+eb:Arch-North a def:BridgeComponent ; def:ifcGuid "1aB2cD3eF4gH5iJ6kL7mNo" .

@@ -136,6 +136,10 @@ pub struct TextIndex {
     /// term (`MAX_TOKEN_LEN`), which makes `text_raw` an incomplete view of the
     /// store and disables substring push-down.
     raw_complete: AtomicBool,
+    /// Documents added or deleted since the last commit (incremental writes
+    /// defer their commit to the next search or refresh — one Tantivy commit
+    /// per request cost ~75 ms and serialised concurrent writers).
+    pending_commit: std::sync::atomic::AtomicBool,
 }
 
 /// The schema every index built by this module uses.
@@ -212,6 +216,7 @@ impl TextIndex {
             reader,
             writer: Arc::new(Mutex::new(writer)),
             raw_complete: AtomicBool::new(true),
+            pending_commit: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -296,6 +301,7 @@ impl TextIndex {
         scope: GraphScope<'_>,
         limit: usize,
     ) -> Result<Vec<SearchHit>, TextSearchError> {
+        self.commit_pending()?;
         use tantivy::collector::TopDocs;
         use tantivy::query::QueryParser;
 
@@ -346,6 +352,7 @@ impl TextIndex {
         case: MatchCase,
         scope: GraphScope<'_>,
     ) -> Result<SubstringCandidates, TextSearchError> {
+        self.commit_pending()?;
         use tantivy::collector::TopDocs;
 
         let incomplete = SubstringCandidates {
@@ -457,7 +464,147 @@ impl TextIndex {
             .to_string()
     }
 
+    /// Refresh the documents of exactly `graphs`: drop everything indexed under
+    /// those graph IRIs, re-read their current literal triples from the store,
+    /// and commit once. `O(size of the named graphs)` — never a full-store scan.
+    ///
+    /// This is the write-path companion to [`Self::reindex_from_store`]: a bulk
+    /// import (or Graph Store write) knows which graphs it touched, so it can
+    /// keep the index warm for the cost of the data it just wrote instead of
+    /// marking the whole index dirty and making some later query pay for a
+    /// whole-store rebuild (measured at ~10s for 670k documents — inline on the
+    /// first `CONTAINS` query after an upload).
+    ///
+    /// A graph that no longer exists (replace-then-drop, DELETE) simply
+    /// contributes zero documents — its old ones are still removed.
+    pub fn refresh_graphs(
+        &self,
+        store: &TripleStore,
+        graphs: &[String],
+    ) -> Result<usize, TextSearchError> {
+        use oxigraph::model::{GraphNameRef, NamedNodeRef, Term};
+
+        if graphs.is_empty() {
+            return Ok(0);
+        }
+
+        {
+            // `graph` is a STRING field: one un-tokenized term per doc, so a
+            // term-set delete removes exactly these graphs' documents.
+            let writer = self.writer.lock().expect("index writer lock poisoned");
+            let query = TermSetQuery::new(
+                graphs
+                    .iter()
+                    .map(|g| tantivy::Term::from_field_text(self.graph_field, g)),
+            );
+            writer.delete_query(Box::new(query))?;
+        }
+
+        let mut count = 0usize;
+        for graph in graphs {
+            let Ok(g) = NamedNodeRef::new(graph) else {
+                continue;
+            };
+            let quads = store
+                .quads_for_graph(GraphNameRef::NamedNode(g))
+                .map_err(|e| TextSearchError::Store(e.to_string()))?;
+            for q in quads {
+                let oxigraph::model::NamedOrBlankNode::NamedNode(s) = &q.subject else {
+                    continue;
+                };
+                let Term::Literal(lit) = &q.object else {
+                    continue;
+                };
+                self.index_triple(s.as_str(), q.predicate.as_str(), graph, lit.value())?;
+                count += 1;
+            }
+        }
+
+        self.commit()?;
+        debug!(
+            "text index refreshed: {} graphs, {} documents",
+            graphs.len(),
+            count
+        );
+        Ok(count)
+    }
+
     /// Rebuild the index from all literal triples in the store.
+    /// Index the literal-object triples among `quads` (IRI subjects in named
+    /// graphs) — the incremental counterpart of [`Self::refresh_graphs`] for a
+    /// write whose new quads are known exactly.
+    pub fn index_quads(&self, quads: &[oxigraph::model::Quad]) -> Result<usize, TextSearchError> {
+        use oxigraph::model::{GraphName, NamedOrBlankNode, Term};
+        let mut count = 0usize;
+        for q in quads {
+            let (NamedOrBlankNode::NamedNode(s), Term::Literal(lit), GraphName::NamedNode(g)) =
+                (&q.subject, &q.object, &q.graph_name)
+            else {
+                continue;
+            };
+            self.index_triple(s.as_str(), q.predicate.as_str(), g.as_str(), lit.value())?;
+            count += 1;
+        }
+        if count > 0 {
+            self.pending_commit.store(true, Ordering::Release);
+        }
+        Ok(count)
+    }
+
+    /// Remove the documents of `quads` (exact subject + predicate + graph +
+    /// literal match), for a write whose deleted quads are known exactly.
+    pub fn remove_quads(&self, quads: &[oxigraph::model::Quad]) -> Result<usize, TextSearchError> {
+        use oxigraph::model::{GraphName, NamedOrBlankNode, Term};
+        use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
+        use tantivy::schema::IndexRecordOption;
+        let mut count = 0usize;
+        {
+            let writer = self.writer.lock().expect("index writer lock poisoned");
+            for q in quads {
+                let (NamedOrBlankNode::NamedNode(s), Term::Literal(lit), GraphName::NamedNode(g)) =
+                    (&q.subject, &q.object, &q.graph_name)
+                else {
+                    continue;
+                };
+                let must = |field, text: &str| -> (Occur, Box<dyn Query>) {
+                    (
+                        Occur::Must,
+                        Box::new(TermQuery::new(
+                            tantivy::Term::from_field_text(field, text),
+                            IndexRecordOption::Basic,
+                        )),
+                    )
+                };
+                let query = BooleanQuery::new(vec![
+                    must(self.uri_field, s.as_str()),
+                    must(self.predicate_field, q.predicate.as_str()),
+                    must(self.graph_field, g.as_str()),
+                    must(self.text_raw_field, lit.value()),
+                ]);
+                writer.delete_query(Box::new(query))?;
+                count += 1;
+            }
+        }
+        if count > 0 {
+            self.pending_commit.store(true, Ordering::Release);
+        }
+        Ok(count)
+    }
+
+    /// Commit documents deferred by [`Self::index_quads`] / [`Self::remove_quads`],
+    /// if any. Called before every search, so a search always sees the writes
+    /// that preceded it; the cost lands on one reader instead of every writer.
+    pub fn commit_pending(&self) -> Result<bool, TextSearchError> {
+        if !self.pending_commit.swap(false, Ordering::AcqRel) {
+            return Ok(false);
+        }
+        if let Err(e) = self.commit() {
+            self.pending_commit.store(true, Ordering::Release);
+            return Err(e);
+        }
+        Ok(true)
+    }
+
     pub fn reindex_from_store(&self, store: &TripleStore) -> Result<usize, TextSearchError> {
         info!("Rebuilding text index from store");
 
@@ -630,7 +777,7 @@ mod tests {
         // and a candidate set that misses it is not safe to restrict a query.
         let (_d, idx) = indexed(&[
             ("http://ex.org/a", LABEL, "urn:g", "Drawbridge"),
-            ("http://ex.org/b", LABEL, "urn:g", "Waalbrug"),
+            ("http://ex.org/b", LABEL, "urn:g", "Voorbeeldbrug"),
         ]);
 
         let got = idx
@@ -655,18 +802,18 @@ mod tests {
     #[test]
     fn substring_search_honours_case_and_anchor() {
         let (_d, idx) = indexed(&[
-            ("http://ex.org/a", LABEL, "urn:g", "Waalbrug"),
+            ("http://ex.org/a", LABEL, "urn:g", "Voorbeeldbrug"),
             (
                 "http://ex.org/b",
                 LABEL,
                 "urn:g",
-                "de waalbrug bij Nijmegen",
+                "de voorbeeldbrug over de rivier",
             ),
         ]);
 
         let sensitive = idx
             .search_substring(
-                "Waalbrug",
+                "Voorbeeldbrug",
                 MatchAnchor::Anywhere,
                 MatchCase::Sensitive,
                 GraphScope::All,
@@ -676,7 +823,7 @@ mod tests {
 
         let insensitive = idx
             .search_substring(
-                "waalbrug",
+                "voorbeeldbrug",
                 MatchAnchor::Anywhere,
                 MatchCase::Insensitive,
                 GraphScope::All,
@@ -686,7 +833,7 @@ mod tests {
 
         let prefix = idx
             .search_substring(
-                "Waalbrug",
+                "Voorbeeldbrug",
                 MatchAnchor::Prefix,
                 MatchCase::Sensitive,
                 GraphScope::All,
@@ -757,6 +904,53 @@ mod tests {
         let hits = idx.search("bridge", None, GraphScope::All, 10).unwrap();
         assert_eq!(hits.len(), 1, "only the named predicate should be removed");
         assert_eq!(hits[0].predicate, "http://ex.org/comment");
+    }
+
+    #[test]
+    fn refresh_graphs_replaces_only_the_named_graphs_documents() {
+        use oxigraph::model::{Literal, NamedNode, Quad};
+
+        let dir = tempfile::tempdir().unwrap();
+        let idx = TextIndex::open(dir.path()).unwrap();
+        // Stale documents for two graphs.
+        idx.index_triple("http://ex.org/a", LABEL, "urn:g1", "old bridge")
+            .unwrap();
+        idx.index_triple("http://ex.org/b", LABEL, "urn:g2", "kept tunnel")
+            .unwrap();
+        idx.commit().unwrap();
+
+        // The store's current contents for g1 differ from what is indexed.
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .store_quad(Quad::new(
+                NamedNode::new("http://ex.org/a2").unwrap(),
+                NamedNode::new(LABEL).unwrap(),
+                Literal::new_simple_literal("new viaduct"),
+                NamedNode::new("urn:g1").unwrap(),
+            ))
+            .unwrap();
+
+        let n = idx.refresh_graphs(&store, &["urn:g1".to_string()]).unwrap();
+        assert_eq!(n, 1);
+
+        // g1's stale document is gone and its live one is searchable; g2's
+        // document was not touched.
+        assert!(idx
+            .search("bridge", None, GraphScope::All, 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            idx.search("viaduct", None, GraphScope::All, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            idx.search("tunnel", None, GraphScope::All, 10)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

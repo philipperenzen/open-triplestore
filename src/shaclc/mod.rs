@@ -6,5 +6,5 @@
 pub mod parser;
 pub mod serializer;
 
-pub use parser::parse;
+pub use parser::{parse, parse_lenient};
 pub use serializer::serialize;

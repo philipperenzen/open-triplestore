@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════════
-# W3C SPARQL / RDF Conformance Test Runner
+# Endpoint conformance smoke runner
 #
-# Downloads the official W3C test manifests and runs them against a
-# locally-running instance of the open-triplestore.
-#
-# Sources:
-#   - W3C SPARQL 1.1 test suite: https://github.com/w3c/sparql-12/tree/main/tests
-#   - W3C RDF tests:             https://github.com/w3c/rdf-tests
-#   - ad-freiburg sparql-conformance:
-#                                https://github.com/ad-freiburg/sparql-conformance
+# Runs hand-written SPARQL 1.1, RDF 1.1, GeoSPARQL, Graph Store and Service
+# Description checks against a RUNNING open-triplestore endpoint and writes a
+# tab-separated report. The checks are derived from the specifications; this
+# script does NOT download or execute the official W3C test manifests (an
+# earlier header claimed it did — the download code was never called). The
+# vendored corpora that ARE executed (W3C SHACL Core, OGC GeoSPARQL validator
+# shapes) run under `cargo test`; see docs/standards.md.
 #
 # Usage:
 #   ./scripts/run_w3c_conformance.sh [--endpoint URL] [--suite SUITE]
@@ -17,13 +16,11 @@
 # Options:
 #   --endpoint URL   SPARQL endpoint to test (default: http://localhost:7878/sparql)
 #   --suite SUITE    Which suite to run: sparql11 | rdf11 | sparql12 | all (default: all)
-#   --download-only  Only download test files, don't run tests
 #   --report FILE    Write conformance report to FILE (default: conformance_report.txt)
 #
 # Prerequisites:
 #   - curl or wget
 #   - jq (for JSON processing)
-#   - python3 or node (for manifest parsing, optional)
 #   - A running instance of open-triplestore on --endpoint
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -32,9 +29,7 @@ set -euo pipefail
 # ─── Configuration ────────────────────────────────────────────────────────────
 ENDPOINT="${SPARQL_ENDPOINT:-http://localhost:7878/sparql}"
 SUITE="all"
-DOWNLOAD_ONLY=false
 REPORT_FILE="conformance_report.txt"
-TEST_DIR="$(pwd)/.w3c_tests"
 BINARY="$(pwd)/target/release/open-triplestore"
 
 # W3C test suite URLs (GitHub raw content)
@@ -59,7 +54,6 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --endpoint)  ENDPOINT="$2"; shift 2 ;;
         --suite)     SUITE="$2"; shift 2 ;;
-        --download-only) DOWNLOAD_ONLY=true; shift ;;
         --report)    REPORT_FILE="$2"; shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
@@ -120,23 +114,6 @@ sparql_update() {
         -X POST \
         -H "Content-Type: application/x-www-form-urlencoded" \
         2>/dev/null
-}
-
-download_file() {
-    local url="$1"
-    local dest="$2"
-    if [ ! -f "$dest" ]; then
-        mkdir -p "$(dirname "$dest")"
-        if command -v curl &> /dev/null; then
-            curl -sfL "$url" -o "$dest" 2>/dev/null || return 1
-        elif command -v wget &> /dev/null; then
-            wget -q "$url" -O "$dest" 2>/dev/null || return 1
-        else
-            warn "Neither curl nor wget found"
-            return 1
-        fi
-    fi
-    return 0
 }
 
 # ─── Start Server If Not Running ──────────────────────────────────────────────
@@ -542,10 +519,6 @@ main() {
     echo "# Format: result\ttest_name" >> "$REPORT_FILE"
     echo "" >> "$REPORT_FILE"
 
-    if [ "$DOWNLOAD_ONLY" = true ]; then
-        log "Download-only mode; skipping test execution"
-        exit 0
-    fi
 
     # Start server if needed
     start_server_if_needed

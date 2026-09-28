@@ -457,7 +457,9 @@ export function parseCityGML(xmlText: string, opts: { only?: Set<string> } = {})
     if (!ringHolder) return [];
     const posList = ringHolder.getElementsByTagNameNS('*', 'posList')[0];
     let nums: number[];
-    let dim = 3;
+    // Set on both branches below; no initialiser, so TS flags any future path
+    // that forgets to.
+    let dim: number;
     if (posList) {
       dim = Number(posList.getAttribute('srsDimension') || srsEl?.getAttribute('srsDimension')) || 3;
       nums = (posList.textContent ?? '').trim().split(/\s+/).map(Number);

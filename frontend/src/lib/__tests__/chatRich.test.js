@@ -14,6 +14,7 @@ import {
   decorateApiLinks,
   decorateIriLinks,
   lenientJsonParse,
+  parseAskSpec,
 } from '../chatRich.js';
 
 describe('parseChatBlocks', () => {
@@ -62,10 +63,10 @@ describe('parseChatBlocks', () => {
         '{"type":"bar","title":"T","data":[{"label":"A","value":1},{"label":"B","value":2}]}',
         '```',
         '```map',
-        '{"features":[{"label":"Waalbrug","wkt":"POINT(5.86 51.85)"}]}',
+        '{"features":[{"label":"Example Bridge","wkt":"POINT(5.86 51.85)"}]}',
         '```',
         '```card',
-        '{"title":"Waalbrug","facts":[{"label":"Type","value":"Bridge"}]}',
+        '{"title":"Example Bridge","facts":[{"label":"Type","value":"Bridge"}]}',
         '```',
         '```csv',
         'name,count',
@@ -75,8 +76,8 @@ describe('parseChatBlocks', () => {
     );
     expect(segs.map((s) => s.kind)).toEqual(['chart', 'map', 'card', 'csv']);
     expect(segs[0].spec.series[0].data).toHaveLength(2);
-    expect(segs[1].features[0].label).toBe('Waalbrug');
-    expect(segs[2].card.title).toBe('Waalbrug');
+    expect(segs[1].features[0].label).toBe('Example Bridge');
+    expect(segs[2].card.title).toBe('Example Bridge');
     expect(segs[3].rows).toEqual([['a', '1']]);
   });
 
@@ -340,10 +341,10 @@ describe('parseFileSpec / file blocks', () => {
 describe('lenientJsonParse', () => {
   it('tolerates // and /* */ comments and trailing commas, preserving URLs', () => {
     const card = lenientJsonParse(
-      '{\n  "title": "Waalbrug",\n  "image": "https://example.com/x.jpg", // replace if available\n  /* facts below */\n  "facts": [{"label":"Type","value":"Bridge"},],\n}'
+      '{\n  "title": "Example Bridge",\n  "image": "https://example.com/x.jpg", // replace if available\n  /* facts below */\n  "facts": [{"label":"Type","value":"Bridge"},],\n}'
     );
     expect(card).toEqual({
-      title: 'Waalbrug',
+      title: 'Example Bridge',
       image: 'https://example.com/x.jpg',
       facts: [{ label: 'Type', value: 'Bridge' }],
     });
@@ -363,10 +364,10 @@ describe('lenientJsonParse', () => {
 describe('parseInfoCard', () => {
   it('keeps only well-formed facts and requires a title', () => {
     const { card } = parseInfoCard(
-      '{"title":"Waalbrug","subtitle":"Arch bridge","iri":"http://x/waalbrug","facts":[{"label":"Length","value":"604 m"},{"label":"","value":"x"}]}'
+      '{"title":"Example Bridge","subtitle":"Arch bridge","iri":"http://x/example-bridge","facts":[{"label":"Length","value":"480 m"},{"label":"","value":"x"}]}'
     );
-    expect(card.title).toBe('Waalbrug');
-    expect(card.facts).toEqual([{ label: 'Length', value: '604 m', iri: '' }]);
+    expect(card.title).toBe('Example Bridge');
+    expect(card.facts).toEqual([{ label: 'Length', value: '480 m', iri: '' }]);
     expect(parseInfoCard('{"subtitle":"no title"}').error).toBeTruthy();
   });
 });
@@ -386,7 +387,9 @@ describe('normalizeSparqlResult', () => {
   it('classifies graph, boolean and bindings responses', () => {
     expect(normalizeSparqlResult({ _graphResult: true, ntriples: '<a> <b> <c> .' }).kind).toBe('graph');
     expect(normalizeSparqlResult({ boolean: true })).toEqual({ kind: 'boolean', value: true });
-    const b = normalizeSparqlResult({ head: { vars: ['s'] }, results: { bindings: [{ s: { type: 'uri', value: 'x' } }] } });
+    const b = /** @type {any} */ (
+      normalizeSparqlResult({ head: { vars: ['s'] }, results: { bindings: [{ s: { type: 'uri', value: 'x' } }] } })
+    );
     expect(b.kind).toBe('bindings');
     expect(b.vars).toEqual(['s']);
     expect(b.bindings).toHaveLength(1);
@@ -507,5 +510,34 @@ describe('decorateIriLinks', () => {
     expect(decorateIriLinks('<pre><code>https://ex.org/x</code></pre>')).not.toContain('chat-iri-link');
     expect(decorateIriLinks('<code>SELECT ?s</code>')).not.toContain('chat-iri-link');
     expect(decorateIriLinks('<p>https://ex.org/x</p>')).not.toContain('chat-iri-link');
+  });
+});
+
+describe('parseAskSpec / ask blocks', () => {
+  it('parses a question with options and renders as an ask segment', () => {
+    const src =
+      'Which version?\n```ask\n{"question":"Welke versie wil je gebruiken?","options":["Gepubliceerd 1.0.0","Concept 1.1.0"]}\n```';
+    const segs = parseChatBlocks(src);
+    const ask = segs.find((s) => s.kind === 'ask');
+    expect(ask).toBeTruthy();
+    expect(ask.ask.question).toBe('Welke versie wil je gebruiken?');
+    expect(ask.ask.options).toEqual(['Gepubliceerd 1.0.0', 'Concept 1.1.0']);
+  });
+
+  it('caps and cleans options, and rejects broken specs', () => {
+    const many = { question: 'q', options: ['a', '', 'b', 3, 'c', 'd', 'e', 'f'] };
+    expect(/** @type {any} */ (parseAskSpec(JSON.stringify(many))).ask.options).toEqual(['a', 'b', 'c', 'd', 'e']);
+    expect(/** @type {any} */ (parseAskSpec('not json')).error).toBeTruthy();
+    expect(/** @type {any} */ (parseAskSpec('{"options":["a"]}')).error).toBeTruthy();
+    expect(/** @type {any} */ (parseAskSpec('{"question":"q","options":[]}')).error).toBeTruthy();
+    // A broken fence degrades to the broken block, never a crash.
+    const segs = parseChatBlocks('```ask\n{"question":""}\n```');
+    expect(segs[0].kind).toBe('broken');
+    expect(segs[0].label).toBe('ask');
+  });
+
+  it('never fires on untagged JSON', () => {
+    const segs = parseChatBlocks('```\n{"question":"q","options":["a"]}\n```');
+    expect(segs.some((s) => s.kind === 'ask')).toBe(false);
   });
 });

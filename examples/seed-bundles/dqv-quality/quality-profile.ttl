@@ -1,0 +1,87 @@
+# A DQV quality profile: the categories, dimensions and metrics DQV leaves to
+# the deployment. DQV ships one dimension (dqv:precision), no category and no
+# metric, and defines "no specific cardinality constraints" for inCategory or
+# inDimension (its own usage notes) — so this profile is where the grouping
+# lives, and shapes.ttl is where it is enforced.
+#
+# The metrics are the signals this platform can actually measure about a
+# dataset: whether the latest SHACL run conformed, how many violations it
+# reported, how many triples the dataset holds, whether its endpoint answered.
+# A future emitter of dqv:QualityMeasurement from validation runs would use
+# exactly these IRIs, and the sample in instances.ttl shows what it would
+# write.
+@prefix dqv:  <http://www.w3.org/ns/dqv#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix dct:  <http://purl.org/dc/terms/> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix q:    <https://example.org/dqv-quality/def#> .
+
+<https://example.org/dqv-quality/def> a owl:Ontology ;
+    rdfs:label "DQV quality profile"@en ;
+    rdfs:comment "Quality categories, dimensions and metrics as DQV instances; the categories follow the intrinsic / contextual / accessibility grouping of ISO/IEC 25012 and the W3C Data on the Web Best Practices."@en ;
+    owl:imports <http://www.w3.org/ns/dqv> ;
+    dct:conformsTo <https://www.w3.org/TR/vocab-dqv/> ;
+    owl:versionInfo "1.0.0" .
+
+# ── Categories ──────────────────────────────────────────────────────────────
+q:intrinsic a dqv:Category ;
+    skos:prefLabel "Intrinsic"@en ;
+    skos:definition "Quality that can be judged from the data alone, independently of how it is used: consistency, precision, syntactic validity."@en .
+
+q:contextual a dqv:Category ;
+    skos:prefLabel "Contextual"@en ;
+    skos:definition "Quality relative to the task the data is used for: completeness, relevance, timeliness."@en .
+
+q:accessibility a dqv:Category ;
+    skos:prefLabel "Accessibility"@en ;
+    skos:definition "Quality of the access to the data: availability, licensing, interlinking."@en .
+
+# ── Dimensions ──────────────────────────────────────────────────────────────
+q:consistency a dqv:Dimension ;
+    dqv:inCategory q:intrinsic ;
+    skos:prefLabel "Consistency"@en ;
+    skos:definition "The degree to which the data satisfies the constraints declared for it."@en .
+
+q:completeness a dqv:Dimension ;
+    dqv:inCategory q:contextual ;
+    skos:prefLabel "Completeness"@en ;
+    skos:definition "The degree to which the expected entities and properties are present."@en .
+
+q:availability a dqv:Dimension ;
+    dqv:inCategory q:accessibility ;
+    skos:prefLabel "Availability"@en ;
+    skos:definition "The degree to which the data can be retrieved when it is wanted."@en .
+
+# DQV's own dimension, re-categorised by this profile: the namespace document
+# declares it and nothing else about it. Its type is restated so the profile
+# validates on its own, without the dqv vocabulary graph in scope.
+dqv:precision a dqv:Dimension ;
+    dqv:inCategory q:intrinsic ;
+    skos:prefLabel "Precision"@en .
+
+# ── Metrics ─────────────────────────────────────────────────────────────────
+q:shaclConformanceMetric a dqv:Metric ;
+    dqv:inDimension q:consistency ;
+    dqv:expectedDataType xsd:boolean ;
+    skos:prefLabel "SHACL conformance"@en ;
+    skos:definition "Whether the most recent SHACL validation run over the dataset reported sh:conforms true."@en .
+
+q:shaclViolationCountMetric a dqv:Metric ;
+    dqv:inDimension q:consistency ;
+    dqv:expectedDataType xsd:integer ;
+    skos:prefLabel "SHACL violation count"@en ;
+    skos:definition "The number of sh:Violation results in the most recent SHACL validation run over the dataset."@en .
+
+q:tripleCountMetric a dqv:Metric ;
+    dqv:inDimension q:completeness ;
+    dqv:expectedDataType xsd:integer ;
+    skos:prefLabel "Triple count"@en ;
+    skos:definition "void:triples for the dataset at the time of measurement."@en .
+
+q:endpointAvailabilityMetric a dqv:Metric ;
+    dqv:inDimension q:availability ;
+    dqv:expectedDataType xsd:boolean ;
+    skos:prefLabel "Endpoint availability"@en ;
+    skos:definition "Whether the distribution's dcat:accessURL answered at the time of measurement."@en .

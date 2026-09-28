@@ -58,6 +58,7 @@
 
 // Durable blank-node identity (headline feature).
 pub mod canonical;
+pub mod columnar;
 pub mod skolem;
 
 // Query & storage optimisation.
@@ -66,6 +67,11 @@ pub mod mvcc;
 pub mod optimizer;
 pub mod parallel;
 pub mod rocksdb_config;
+
+// The one SPARQL parser configuration every query path shares (custom
+// aggregates declared once by the embedding application).
+pub mod parser;
+pub use parser::{custom_aggregates, register_custom_aggregate, sparql_parser};
 
 // Convenience re-exports for the durable blank-node API.
 pub use canonical::{

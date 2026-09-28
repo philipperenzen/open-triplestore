@@ -16,7 +16,7 @@ use crate::server::AppState;
 
 use super::models::{
     CreateDatasetBranchRequest, CreateDatasetVersionRequest, DatasetBranchInfo, DatasetVersion,
-    UpdateDatasetVersionRequest, VersionDataParams, VersionStatus,
+    GcDatasetVersionsRequest, UpdateDatasetVersionRequest, VersionDataParams, VersionStatus,
 };
 use super::{registry, snapshot};
 
@@ -42,6 +42,72 @@ fn require_read(state: &AppState, ds: &Dataset, uid: Option<&str>) -> Result<(),
     }
 }
 
+/// The dataset's private *live source*-graph IRIs, as they bear on what `uid`
+/// may see of a version snapshot.
+///
+/// A version snapshot copies every graph the dataset held at the time — private
+/// ones included — into version-scoped IRIs that are absent from
+/// `list_dataset_graph_entries`, so the plain private filter that guards `/sparql`
+/// is a no-op on a version read. This maps a snapshot's *source* graph back to
+/// the live `private` flag instead.
+///
+/// Returns `None` when the caller may write the dataset (writers and admins see
+/// every graph). Otherwise `Some(set)` of the live graphs flagged private, which
+/// the callers below use to drop the matching snapshot graphs. Fails closed: a
+/// lookup error propagates as `500`, so nothing is served, rather than defaulting
+/// to "nothing private".
+fn private_source_filter(
+    state: &AppState,
+    ds: &Dataset,
+    uid: Option<&str>,
+) -> Result<Option<std::collections::HashSet<String>>, AppError> {
+    let can_write = match uid {
+        Some(u) => state
+            .auth_db
+            .can_write_dataset(u, ds)
+            .map_err(|e| AppError::Internal(e.to_string()))?,
+        None => false,
+    };
+    if can_write {
+        return Ok(None);
+    }
+    let entries = state
+        .auth_db
+        .list_dataset_graph_entries(&ds.id)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(Some(
+        entries
+            .into_iter()
+            .filter(|e| e.private)
+            .map(|e| e.graph_iri)
+            .collect(),
+    ))
+}
+
+/// The snapshot graphs of `record` that `uid` may read. Writers get them all;
+/// non-writers lose every snapshot whose live source graph is private. When the
+/// dataset has no private graph the full list is returned unchanged, so the
+/// common case (and legacy versions with an empty `source_map`) is untouched;
+/// once anything is private, a non-writer sees only snapshots with a non-private
+/// source in the map (an unmapped snapshot is dropped, fail-closed).
+fn readable_snapshot_graphs(
+    state: &AppState,
+    ds: &Dataset,
+    uid: Option<&str>,
+    record: &DatasetVersion,
+) -> Result<Vec<String>, AppError> {
+    match private_source_filter(state, ds, uid)? {
+        None => Ok(record.snapshot_graphs.clone()),
+        Some(private) if private.is_empty() => Ok(record.snapshot_graphs.clone()),
+        Some(private) => Ok(record
+            .source_map
+            .iter()
+            .filter(|m| !private.contains(&m.source_graph))
+            .map(|m| m.snapshot_graph.clone())
+            .collect()),
+    }
+}
+
 fn require_write(state: &AppState, ds: &Dataset, uid: &str) -> Result<(), AppError> {
     if state
         .auth_db
@@ -50,7 +116,9 @@ fn require_write(state: &AppState, ds: &Dataset, uid: &str) -> Result<(), AppErr
     {
         Ok(())
     } else {
-        Err(AppError::Unauthorized(
+        // 403, not 401: the caller IS authenticated, they just lack the right.
+        // A 401 here made clients treat "no write grant" as a session expiry.
+        Err(AppError::Forbidden(
             "Write access to this dataset required".to_string(),
         ))
     }
@@ -102,13 +170,16 @@ pub async fn get_version_data(
     let record = registry::get_version(&state.store, &state.base_url, &id, &ver)
         .ok_or_else(|| AppError::NotFound(format!("Version '{ver}' not found")))?;
 
+    // A version snapshot copies private graphs too, into IRIs the plain private
+    // filter never sees. Restrict a non-writer to the snapshots whose live source
+    // is not private, so a viewer (or anonymous caller on a public dataset) cannot
+    // dump a private graph through a pinned version.
+    let readable = readable_snapshot_graphs(&state, &ds, uid, &record)?;
     let graphs: Vec<String> = match params.graph.as_deref() {
-        Some("all") | None => record.snapshot_graphs.clone(),
-        Some(suffix) => record
-            .snapshot_graphs
-            .iter()
+        Some("all") | None => readable,
+        Some(suffix) => readable
+            .into_iter()
             .filter(|g| g.ends_with(suffix))
-            .cloned()
             .collect(),
     };
 
@@ -237,6 +308,13 @@ pub async fn create_version(
     }
     // Re-test this dataset's saved queries against the new version (background).
     crate::saved_queries::testing::spawn_version_tests(&state, &id, &body.version);
+    version_commit(
+        &state,
+        &user.user_id,
+        &id,
+        Some(&record.version),
+        format!("Cut version {}", record.version),
+    );
     Ok((StatusCode::CREATED, Json(record)))
 }
 
@@ -330,6 +408,13 @@ pub async fn publish_version(
     .map_err(AppError::from)?;
     registry::update_latest_published(&state.store, &state.base_url, &id, &ver)
         .map_err(AppError::from)?;
+    version_commit(
+        &state,
+        &user.user_id,
+        &id,
+        Some(&ver),
+        format!("Published version {ver}"),
+    );
     Ok(Json(json!({ "status": "published", "version": ver })))
 }
 
@@ -356,6 +441,13 @@ pub async fn deprecate_version(
         VersionStatus::Deprecated,
     )
     .map_err(AppError::from)?;
+    version_commit(
+        &state,
+        &user.user_id,
+        &id,
+        Some(&ver),
+        format!("Deprecated version {ver}"),
+    );
     Ok(Json(json!({ "status": "deprecated", "version": ver })))
 }
 
@@ -375,10 +467,63 @@ pub async fn restore_version(
             "Version has no graph mapping to restore".to_string(),
         ));
     }
-    let restored = snapshot::restore(&state.store, &record.source_map).map_err(AppError::from)?;
+    // A restore overwrites (or, from an empty snapshot, deletes) each source
+    // graph and registers it to the dataset again, so every one goes through
+    // the gate a new target graph does. Since the snapshot, a graph may have
+    // left the dataset: detached and taken up by someone else, a source run
+    // graph a later promotion replaced, or a graph that became part of the
+    // model registry. Such a graph is skipped — it is no longer one of the
+    // dataset's live graphs — and reported; the rest is restored.
+    let mut mappings = Vec::with_capacity(record.source_map.len());
+    let mut claims = Vec::with_capacity(record.source_map.len());
+    let mut skipped = Vec::new();
+    for m in &record.source_map {
+        let g = &m.source_graph;
+        let registered = state
+            .auth_db
+            .dataset_has_graph(&id, g)
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let claim = if registered {
+            crate::auth::dataset_graph::refuse_model_registry_graph(
+                &state.store,
+                &state.base_url,
+                &id,
+                g,
+            )
+            .map(|_| crate::auth::dataset_graph::GraphClaim::Registered)
+        } else {
+            crate::auth::dataset_graph::gate_dataset_graph_target(
+                &state.store,
+                &state.auth_db,
+                &state.base_url,
+                &id,
+                g,
+                &user,
+            )
+        };
+        match claim {
+            Ok(claim) => {
+                mappings.push(m.clone());
+                claims.push((g.clone(), claim));
+            }
+            Err(reason) => skipped.push(json!({ "graph": g, "reason": reason })),
+        }
+    }
+    let restored_graphs: Vec<String> = mappings.iter().map(|m| m.source_graph.clone()).collect();
+    let ldes_before = crate::ldes::capture::before(&state, &restored_graphs);
+    let restored = snapshot::restore(&state.store, &mappings).map_err(AppError::from)?;
+    crate::ldes::capture::after(&state, ldes_before);
+    crate::entailment::after_write(&state, &restored_graphs);
+    // The full-text index followed writes but never a restore, so searches kept
+    // answering from the pre-restore content.
+    #[cfg(feature = "text-search")]
+    state.refresh_text_index_graphs(&restored);
     // Ensure restored graphs are registered to the dataset.
-    for g in &restored {
-        let _ = state.auth_db.add_dataset_graph(&id, g);
+    for (g, claim) in &claims {
+        if restored.contains(g) {
+            let _ =
+                crate::auth::dataset_graph::register_claimed_graph(&state.auth_db, &id, g, *claim);
+        }
     }
     // Re-apply the version's validation-layer bindings (best-effort, tolerant of
     // shape graphs deleted since the snapshot).
@@ -394,7 +539,16 @@ pub async fn restore_version(
         Ok(_) => {}
         Err(e) => tracing::warn!("failed to restore validation bindings for {id} v{ver}: {e}"),
     }
-    Ok(Json(json!({ "restored": restored, "version": ver })))
+    version_commit(
+        &state,
+        &user.user_id,
+        &id,
+        Some(&ver),
+        format!("Restored version {ver}"),
+    );
+    Ok(Json(
+        json!({ "restored": restored, "skipped": skipped, "version": ver }),
+    ))
 }
 
 // ─── branches ─────────────────────────────────────────────────────────────
@@ -504,5 +658,308 @@ pub async fn create_branch(
         branch: Some(branch),
     };
     registry::insert_version(&state.store, &state.base_url, &record).map_err(AppError::from)?;
+    version_commit(
+        &state,
+        &user.user_id,
+        &id,
+        Some(&record.version),
+        format!("Branched {} from {}", record.version, body.from_version),
+    );
     Ok((StatusCode::CREATED, Json(record)))
+}
+
+/// Commit-trail entry for a version operation, scoped to the dataset's
+/// registered graphs (so `GET …/commits` lists it) plus the version's snapshot
+/// graphs when it has any. Best-effort.
+fn version_commit(
+    state: &AppState,
+    user_id: &str,
+    dataset_id: &str,
+    version: Option<&str>,
+    message: String,
+) {
+    let mut affected = state
+        .auth_db
+        .list_dataset_graphs(dataset_id)
+        .unwrap_or_default();
+    if let Some(v) = version {
+        if let Some(rec) = registry::get_version(&state.store, &state.base_url, dataset_id, v) {
+            affected.extend(rec.snapshot_graphs.iter().cloned());
+        }
+    }
+    affected.sort();
+    affected.dedup();
+    crate::commit_log::record(
+        &state.store,
+        &state.base_url,
+        crate::commit_log::CommitKind::Dataset,
+        message,
+        Some(user_id),
+        Some(format!(
+            "{}/dataset/{}",
+            state.base_url.trim_end_matches('/'),
+            dataset_id
+        )),
+        affected,
+        0,
+        0,
+        version.map(str::to_string),
+    );
+}
+
+// ─── Retention: delete / diff / gc ────────────────────────────────────────────
+
+/// Drop a version's snapshot graphs and its version-scoped validation graph,
+/// then its registry triples. Returns the graphs dropped.
+fn purge_version(
+    state: &AppState,
+    dataset_id: &str,
+    record: &DatasetVersion,
+) -> Result<Vec<String>, AppError> {
+    let mut dropped: Vec<String> = record.snapshot_graphs.clone();
+    dropped.push(crate::shacl_studio::bindings::version_validation_graph(
+        &state.base_url,
+        dataset_id,
+        &record.version,
+    ));
+    let refs: Vec<&str> = dropped.iter().map(String::as_str).collect();
+    state
+        .store
+        .bulk_delete_graphs(&refs)
+        .map_err(AppError::from)?;
+    registry::delete_version(&state.store, &state.base_url, dataset_id, &record.version)
+        .map_err(AppError::from)?;
+    Ok(dropped)
+}
+
+fn dataset_or_404(state: &AppState, id: &str) -> Result<Dataset, AppError> {
+    state
+        .auth_db
+        .get_dataset(id)
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| AppError::NotFound(format!("Dataset '{id}' not found")))
+}
+
+/// `DELETE /api/datasets/:id/versions/:ver[?force=true]` — remove a version
+/// and reclaim its snapshot graphs. Every replace-import used to leave a full
+/// copy of each changed graph behind with no way to delete it, so N re-imports
+/// retained N copies. A published version is refused (409) unless forced:
+/// deprecate it first.
+pub async fn delete_version(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path((id, ver)): Path<(String, String)>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Result<impl IntoResponse, AppError> {
+    let ds = dataset_or_404(&state, &id)?;
+    require_write(&state, &ds, &user.user_id)?;
+    let record = registry::get_version(&state.store, &state.base_url, &id, &ver)
+        .ok_or_else(|| AppError::NotFound(format!("Version '{ver}' not found")))?;
+    let force = q
+        .get("force")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    if record.status == VersionStatus::Published && !force {
+        return Err(AppError::Conflict(json!({
+            "error": "version is published; deprecate it first, or pass ?force=true",
+            "version": ver,
+        })));
+    }
+    let dropped = purge_version(&state, &id, &record)?;
+    version_commit(
+        &state,
+        &user.user_id,
+        &id,
+        None,
+        format!("Deleted version {ver}"),
+    );
+    Ok(Json(json!({ "deleted": ver, "graphs_dropped": dropped })))
+}
+
+/// `GET /api/datasets/:id/versions/:ver/diff/:other` — the per-graph triple
+/// delta from `ver` to `other`, where `other` is another version or `live`
+/// (the dataset's current graphs). `added`/`removed` are counted from `ver`'s
+/// point of view. There was no way to see what changed between two versions
+/// short of exporting both.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct DiffParams {
+    /// `rdf-patch` for the diff as an RDF Patch document (also via
+    /// `Accept: application/rdf-patch`).
+    pub format: Option<String>,
+}
+
+pub async fn diff_versions(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+    Path((id, ver, other)): Path<(String, String, String)>,
+    axum::extract::Query(params): axum::extract::Query<DiffParams>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, AppError> {
+    let want_patch = params
+        .format
+        .as_deref()
+        .is_some_and(|f| f.eq_ignore_ascii_case("rdf-patch"))
+        || headers
+            .get(axum::http::header::ACCEPT)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|a| a.contains("rdf-patch"));
+    let ds = dataset_or_404(&state, &id)?;
+    let uid = user.as_ref().map(|Extension(u)| u.user_id.as_str());
+    require_read(&state, &ds, uid)?;
+    let from = registry::get_version(&state.store, &state.base_url, &id, &ver)
+        .ok_or_else(|| AppError::NotFound(format!("Version '{ver}' not found")))?;
+    // A version snapshot copies private graphs too, and the `live` side reads the
+    // live source graphs directly. Hide every graph whose live source is private
+    // from a non-writer (viewer, or anonymous on a public dataset), so the diff —
+    // rdf-patch triples or the JSON add/remove counts — cannot expose one.
+    let hidden = private_source_filter(&state, &ds, uid)?;
+    let visible = |src: &str| hidden.as_ref().is_none_or(|p| !p.contains(src));
+    // (source graph, graph holding the "to" side)
+    let to_side: Vec<(String, String)> = if other == "live" {
+        from.source_map
+            .iter()
+            .filter(|m| visible(&m.source_graph))
+            .map(|m| (m.source_graph.clone(), m.source_graph.clone()))
+            .collect()
+    } else {
+        let to = registry::get_version(&state.store, &state.base_url, &id, &other)
+            .ok_or_else(|| AppError::NotFound(format!("Version '{other}' not found")))?;
+        to.source_map
+            .iter()
+            .filter(|m| visible(&m.source_graph))
+            .map(|m| (m.source_graph.clone(), m.snapshot_graph.clone()))
+            .collect()
+    };
+    if want_patch {
+        // (target = the live source graph, from = the version's snapshot, to = the other side)
+        let mut mappings: Vec<(String, Option<String>, Option<String>)> = from
+            .source_map
+            .iter()
+            .filter(|m| visible(&m.source_graph))
+            .map(|m| {
+                let to_graph = to_side
+                    .iter()
+                    .find(|(src, _)| *src == m.source_graph)
+                    .map(|(_, g)| g.clone());
+                (
+                    m.source_graph.clone(),
+                    Some(m.snapshot_graph.clone()),
+                    to_graph,
+                )
+            })
+            .collect();
+        for (src, g) in &to_side {
+            if !from.source_map.iter().any(|m| m.source_graph == *src) {
+                mappings.push((src.clone(), None, Some(g.clone())));
+            }
+        }
+        let dataset_iri = format!("{}/dataset/{}", state.base_url.trim_end_matches('/'), id);
+        let text = crate::rdf_patch::generate(
+            &state.store,
+            &[
+                ("dataset", dataset_iri.as_str()),
+                ("from", ver.as_str()),
+                ("to", other.as_str()),
+            ],
+            &mappings,
+        );
+        return Ok((
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                crate::rdf_patch::MEDIA_TYPE,
+            )],
+            text,
+        )
+            .into_response());
+    }
+    let delta =
+        |a: &[String], b: &[String]| crate::data_models::diff::triple_delta(&state.store, a, b);
+    let (mut added, mut removed) = (0usize, 0usize);
+    let mut graphs = Vec::new();
+    for m in &from.source_map {
+        if !visible(&m.source_graph) {
+            continue;
+        }
+        let to_graph = to_side
+            .iter()
+            .find(|(src, _)| *src == m.source_graph)
+            .map(|(_, g)| g.clone());
+        let (a, r) = match &to_graph {
+            Some(g) => delta(
+                std::slice::from_ref(&m.snapshot_graph),
+                std::slice::from_ref(g),
+            ),
+            None => delta(std::slice::from_ref(&m.snapshot_graph), &[]),
+        };
+        added += a;
+        removed += r;
+        graphs.push(json!({
+            "source_graph": m.source_graph,
+            "added": a,
+            "removed": r,
+            "missing_on_other_side": to_graph.is_none(),
+        }));
+    }
+    for (src, g) in &to_side {
+        if !from.source_map.iter().any(|m| m.source_graph == *src) {
+            let (a, r) = delta(&[], std::slice::from_ref(g));
+            added += a;
+            removed += r;
+            graphs.push(json!({ "source_graph": src, "added": a, "removed": r, "missing_on_other_side": false, "only_on_other_side": true }));
+        }
+    }
+    Ok(Json(json!({
+        "dataset_id": id,
+        "from": ver,
+        "to": other,
+        "added": added,
+        "removed": removed,
+        "graphs": graphs,
+    }))
+    .into_response())
+}
+
+/// `POST /api/datasets/:id/versions/gc` — retention. Keeps the newest `keep`
+/// non-published versions and deletes the rest (snapshots included).
+/// Published versions are never collected; deprecate and delete them
+/// explicitly.
+pub async fn gc_versions(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(id): Path<String>,
+    Json(body): Json<GcDatasetVersionsRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let ds = dataset_or_404(&state, &id)?;
+    require_write(&state, &ds, &user.user_id)?;
+    let mut candidates: Vec<DatasetVersion> =
+        registry::list_versions(&state.store, &state.base_url, &id)
+            .into_iter()
+            .filter(|v| v.status != VersionStatus::Published)
+            .collect();
+    // Newest first; the version label breaks ties within one timestamp.
+    candidates.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| b.version.cmp(&a.version))
+    });
+    let mut deleted = Vec::new();
+    for v in candidates.into_iter().skip(body.keep) {
+        purge_version(&state, &id, &v)?;
+        deleted.push(v.version);
+    }
+    if !deleted.is_empty() {
+        version_commit(
+            &state,
+            &user.user_id,
+            &id,
+            None,
+            format!(
+                "Garbage-collected {} version(s): {}",
+                deleted.len(),
+                deleted.join(", ")
+            ),
+        );
+    }
+    Ok(Json(json!({ "kept": body.keep, "deleted": deleted })))
 }

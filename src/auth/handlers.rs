@@ -424,7 +424,7 @@ pub struct CreateDatasetRequest {
     #[serde(alias = "conforms_to_ontology")]
     pub conforms_to_model: Option<String>,
     pub conforms_to_version: Option<String>,
-    /// Optional role classification: "instances" | "model" | "vocabulary" | "shapes" | "entailment" | "system"
+    /// Optional role classification: "instances" | "model" | "vocabulary" | "shapes" | "domain-values" | "linkset" | "provenance" | "catalog" | "entailment" | "system"
     pub graph_role: Option<String>,
 }
 
@@ -461,6 +461,28 @@ pub struct GraphIriRequest {
     pub graph_iri: String,
 }
 
+/// Parse an optional graph-role string. An unknown value is a 400: it used to
+/// fold to `None`, so a typo (or a role the server did not know yet) silently
+/// CLEARED the graph's role with a 200.
+fn parse_graph_role(raw: Option<&str>) -> Result<Option<GraphKind>, (StatusCode, String)> {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(None),
+        Some(r) => GraphKind::from_str(r).map(Some).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "unknown graph role '{r}'; expected one of {}",
+                    GraphKind::ALL
+                        .iter()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )
+        }),
+    }
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct PatchDatasetGraphRoleRequest {
     pub graph_iri: String,
@@ -482,6 +504,8 @@ pub struct CreateServiceRequest {
 pub struct UpdateServiceRequest {
     pub name: String,
     pub description: Option<String>,
+    /// `false` switches the service's SPARQL endpoint off (404 to every caller
+    /// until reactivated); omitted leaves it unchanged.
     pub is_active: Option<bool>,
 }
 
@@ -517,7 +541,7 @@ pub(crate) fn auth_cookie_headers(
 }
 
 /// Build `Set-Cookie` headers that clear access and refresh tokens on logout.
-fn clear_auth_cookie_headers(secure: bool) -> HeaderMap {
+pub(crate) fn clear_auth_cookie_headers(secure: bool) -> HeaderMap {
     let mut headers = HeaderMap::new();
     let secure_attr = if secure { "; Secure" } else { "" };
     for (name, path) in &[("access_token", "/"), ("refresh_token", "/api/auth")] {
@@ -3178,24 +3202,40 @@ pub async fn delete_organisation(
             .auth_db
             .get_dataset(dataset_id)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let graph_iris = state
+        let mut graph_iris = state
             .auth_db
             .list_dataset_graphs(dataset_id)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        for iri in &graph_iris {
-            let shared = state
-                .auth_db
-                .graph_has_other_dataset_refs(iri.as_str(), dataset_id)
-                .unwrap_or(false);
-            if !shared {
-                let _ = state.store.graph_store_delete(Some(iri.as_str()));
-            }
+        // The shapes graph lives only in the datasets table; one the dataset
+        // owns goes through the same filter as the registered graphs (any
+        // other one is only linked; see `shapes_graph_goes_with_dataset`).
+        if let Some(shapes_iri) = dataset
+            .as_ref()
+            .and_then(|d| d.shapes_graph_iri.clone())
+            .filter(|g| {
+                dataset_graph::shapes_graph_goes_with_dataset(
+                    &state.auth_db,
+                    &state.base_url,
+                    dataset_id,
+                    g,
+                )
+            })
+        {
+            graph_iris.push(shapes_iri);
         }
-        // Also delete shapes graph when present.
-        if let Some(ref d) = dataset {
-            if let Some(ref shapes_iri) = d.shapes_graph_iri {
-                let _ = state.store.graph_store_delete(Some(shapes_iri.as_str()));
-            }
+        // Drop only the dataset's own graphs (or those the caller may delete
+        // directly) that no other dataset uses and that are neither system,
+        // SHACL Studio nor model-registry graphs (see
+        // `graphs_deletable_with_dataset`).
+        for iri in dataset_graph::graphs_deletable_with_dataset(
+            &state.store,
+            &state.auth_db,
+            &state.base_url,
+            dataset_id,
+            &graph_iris,
+            &current_user,
+        ) {
+            let _ = state.store.graph_store_delete(Some(iri.as_str()));
         }
         state
             .auth_db
@@ -3542,6 +3582,28 @@ pub async fn delete_group(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Confirm `group_id` names a group that belongs to `org_id`, returning it.
+///
+/// The membership/admin checks in the group-member handlers only prove authority
+/// over `org_id` (the path segment the caller controls); they say nothing about
+/// which org the group actually lives in. Without this guard an admin of *any*
+/// org could list, add or remove members of another org's group simply by
+/// naming that group under their own org's path — a cross-tenant IDOR (and, via
+/// add, a self-service privilege escalation). Called unconditionally, so a
+/// platform admin also gets a `404` on a mismatch, mirroring the org-scope guard
+/// already inlined in `get_group` / `update_group` / `delete_group`.
+fn group_in_org(db: &AuthDb, org_id: &str, group_id: &str) -> Result<Group, (StatusCode, String)> {
+    db.get_group(group_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .filter(|g| g.org_id == org_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                "Group not found in this organisation".to_string(),
+            )
+        })
+}
+
 /// GET /api/organisations/:org_id/groups/:group_id/members
 pub async fn list_group_members(
     Extension(current_user): Extension<AuthenticatedUser>,
@@ -3553,6 +3615,10 @@ pub async fn list_group_members(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
             .ok_or_else(|| (StatusCode::FORBIDDEN, "Not a member".to_string()))?;
     }
+
+    // The group must belong to the org in the path, or a member of any org could
+    // read another org's group membership through their own org's path.
+    group_in_org(&db, &org_id, &group_id)?;
 
     let members = db
         .list_group_members(&group_id)
@@ -3592,6 +3658,11 @@ pub async fn add_group_member(
         }
     }
 
+    // The group must belong to the org in the path. Otherwise an admin of any org
+    // could add members to another org's group — including themselves, escalating
+    // into a tenant they have no authority over.
+    group_in_org(&db, &org_id, &group_id)?;
+
     let role = Role::from_str(&req.role)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid role".to_string()))?;
 
@@ -3625,6 +3696,10 @@ pub async fn remove_group_member(
             _ => return Err((StatusCode::FORBIDDEN, "Admin access required".to_string())),
         }
     }
+
+    // The group must belong to the org in the path, or an admin of any org could
+    // remove members from another org's group through their own org's path.
+    group_in_org(&db, &org_id, &group_id)?;
 
     // Super admins cannot be removed from any group.
     let target = db
@@ -3677,7 +3752,9 @@ pub async fn create_dataset(
     // by an organisation/group they belong to — otherwise `owner_id` could be
     // forged to impersonate another principal or attribute data to a foreign
     // catalogue. Publishing (visibility=public) additionally requires publisher
-    // rights, mirroring the visibility gate in `update_dataset`.
+    // rights, so the public flag cannot be forged at creation; `update_dataset`
+    // enforces the same publisher gate on a later widening to public, so the two
+    // paths into a public dataset are gated identically.
     if !current_user.is_admin() {
         if !db
             .can_act_as_owner(&current_user.user_id, owner_type, &req.owner_id)
@@ -3700,7 +3777,7 @@ pub async fn create_dataset(
     // Human-readable, unique slug id → IRI `{base}/dataset/{id}` reads semantically
     // (e.g. `…/dataset/bridge-inventory`) instead of exposing a raw UUID.
     let id = unique_dataset_slug(&db, &req.name);
-    let graph_role = req.graph_role.as_deref().and_then(GraphKind::from_str);
+    let graph_role = parse_graph_role(req.graph_role.as_deref())?;
     let dataset = db
         .create_dataset(
             &id,
@@ -3813,7 +3890,7 @@ pub async fn list_datasets(
 /// ownership, org/group membership × visibility, grants, public readability).
 ///
 /// For services that must answer "may this user write this dataset?"
-/// server-side — e.g. the validation platform's owner-gated runs — without
+/// server-side — e.g. an external validation service's owner-gated runs — without
 /// re-deriving ACL logic. Anonymous callers get the public-visibility answer;
 /// an existing-but-invisible dataset answers 404 (not 403) so the endpoint
 /// cannot be used to probe private dataset ids.
@@ -3971,6 +4048,24 @@ pub async fn update_dataset(
         ));
     }
 
+    // Publishing (widening to public) additionally requires publisher rights —
+    // the same gate `create_dataset` applies to public creation. Manage access
+    // alone is not enough: an owner/manager without the publish capability could
+    // otherwise create a dataset private and then PUT it public, sidestepping the
+    // creation-time gate entirely. Only the transition *into* public is gated, so
+    // an unchanged or narrowing visibility (and editing an already-public
+    // dataset's metadata, which the frontend resends with the current visibility)
+    // is unaffected. `is_publisher()` already covers platform admins.
+    if visibility == Visibility::Public
+        && dataset.visibility != Visibility::Public
+        && !current_user.is_publisher()
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Publisher access is required to make a dataset public".to_string(),
+        ));
+    }
+
     // Reject unsafe URL schemes before they reach storage (these surface as
     // <a href> on the dataset's public DCAT metadata page).
     validate_metadata_url("license", req.license.as_deref())?;
@@ -4054,37 +4149,54 @@ pub async fn delete_dataset(
         return Err((StatusCode::FORBIDDEN, "Manage access required".to_string()));
     }
 
-    // Delete all named graphs associated with this dataset from Oxigraph, but only
-    // when no other dataset still references the same graph IRI. Run the whole
-    // sequence off the async runtime under the write timeout: this can touch many
-    // (potentially large) graphs, and a stalled store must not pin a Tokio worker or
-    // block reads/liveness. Individual deletes stay best-effort (a graph may already
-    // be absent); a timeout aborts the batch with 503.
-    let graph_iris = state
+    // Delete the named graphs associated with this dataset from Oxigraph, but only
+    // those that are the dataset's own (or the caller may delete directly), that
+    // no other dataset still uses and that are neither system, SHACL Studio nor
+    // model-registry graphs (`graphs_deletable_with_dataset`; a lookup error keeps
+    // the graph). Run the whole sequence off the async runtime under the write
+    // timeout: this can touch many (potentially large) graphs, and a stalled store
+    // must not pin a Tokio worker or block reads/liveness. Individual deletes stay
+    // best-effort (a graph may already be absent); a timeout aborts the batch with
+    // 503.
+    let mut graph_iris = state
         .auth_db
         .list_dataset_graphs(&dataset_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // The shapes graph is stored only in the datasets table (not listed in
+    // dataset_graphs), so it is added explicitly or it is orphaned in Oxigraph;
+    // it goes through the same filter. Only a shapes graph the dataset owns
+    // is a candidate (`shapes_graph_goes_with_dataset`): any other one is
+    // merely linked (a shapes graph the dataset wrote outside its namespace
+    // is registered to it, and listed above).
+    if let Some(shapes_iri) = dataset.shapes_graph_iri.clone().filter(|g| {
+        dataset_graph::shapes_graph_goes_with_dataset(
+            &state.auth_db,
+            &state.base_url,
+            &dataset_id,
+            g,
+        )
+    }) {
+        graph_iris.push(shapes_iri);
+    }
     let store = state.store.clone();
     let auth_db = state.auth_db.clone();
+    let base_url = state.base_url.clone();
     let del_dataset_id = dataset_id.clone();
-    let shapes_iri = dataset.shapes_graph_iri.clone();
+    let actor = current_user.clone();
     let meta_graph = dataset_graph::dataset_metadata_graph_iri(&dataset_id);
     let write_timeout = std::time::Duration::from_secs(state.write_timeout_secs);
     tokio::time::timeout(
         write_timeout,
         tokio::task::spawn_blocking(move || {
-            for iri in &graph_iris {
-                let shared = auth_db
-                    .graph_has_other_dataset_refs(iri.as_str(), &del_dataset_id)
-                    .unwrap_or(false);
-                if !shared {
-                    let _ = store.graph_store_delete(Some(iri.as_str()));
-                }
-            }
-            // The shapes graph is stored only in the datasets table (not listed in
-            // dataset_graphs), so delete it explicitly or it is orphaned in Oxigraph.
-            if let Some(ref shapes_iri) = shapes_iri {
-                let _ = store.graph_store_delete(Some(shapes_iri.as_str()));
+            for iri in dataset_graph::graphs_deletable_with_dataset(
+                &store,
+                &auth_db,
+                &base_url,
+                &del_dataset_id,
+                &graph_iris,
+                &actor,
+            ) {
+                let _ = store.graph_store_delete(Some(iri.as_str()));
             }
             // The DCAT metadata named graph for this dataset.
             let _ = store.graph_store_delete(Some(&meta_graph));
@@ -4182,8 +4294,12 @@ pub async fn list_dataset_commits(
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
     }
 
+    // Scope the commit log to the graphs this caller may READ: a viewer (or an
+    // anonymous caller on a public dataset) must not see private graphs' commit
+    // history (graph IRI, message, add/remove counts, actor). Writers still see
+    // every registered graph's provenance.
     let graphs = db
-        .list_dataset_graphs(&dataset_id)
+        .list_readable_dataset_graphs(user_id, &dataset)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let scope = crate::commit_log::CommitScope::Graphs(graphs);
     let mut commits = crate::commit_log::list_commits(&state.store, &scope, &params.to_query());
@@ -4218,14 +4334,22 @@ pub async fn add_dataset_graph(
     // private graph IRI to their own dataset and then read it, since
     // `get_accessible_graph_iris` makes any graph registered to an accessible
     // dataset readable (cross-tenant read — the IDOR the bulk-import path already
-    // defends against). Admins are unrestricted.
-    if !current_user.is_admin() {
-        if let Err(msg) = crate::auth::dataset_graph::authorize_dataset_graph_target(
-            &db,
-            &state.base_url,
-            &dataset_id,
-            &req.graph_iri,
-        ) {
+    // defends against), and write or delete it, since a dataset's editors
+    // import into and detach its graphs: a graph that already holds data is
+    // attached only by a caller who may write it directly. A model-registry
+    // graph is refused for everyone, admins included: registered, it could be
+    // bulk-imported over past the registry's licence checks and wiped by a
+    // detach. Admins are otherwise unrestricted.
+    let claim = match crate::auth::dataset_graph::gate_dataset_graph_target(
+        &state.store,
+        &db,
+        &state.base_url,
+        &dataset_id,
+        &req.graph_iri,
+        &current_user,
+    ) {
+        Ok(claim) => claim,
+        Err(msg) => {
             state.audit.log_denied(
                 Some(current_user.user_id.clone()),
                 None,
@@ -4236,9 +4360,9 @@ pub async fn add_dataset_graph(
             );
             return Err((StatusCode::FORBIDDEN, msg));
         }
-    }
+    };
 
-    db.add_dataset_graph(&dataset_id, &req.graph_iri)
+    crate::auth::dataset_graph::register_claimed_graph(&db, &dataset_id, &req.graph_iri, claim)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Rewrite DCAT metadata graph to include the new void:subset entry.
@@ -4269,18 +4393,43 @@ pub async fn remove_dataset_graph(
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
     }
 
-    state
+    // Whether the stored graph goes too, decided while the registration (and
+    // the origin it records) still exists: only a graph that is the dataset's
+    // own — in its namespace, created by it, or one the caller may delete
+    // directly — that no other dataset uses, that is not this dataset's own
+    // shapes graph, and that is neither a system, SHACL Studio nor
+    // model-registry graph (a registration made before registry graphs were
+    // refused only loses its row). Any lookup error keeps the graph.
+    let own_shapes_graph = dataset.shapes_graph_iri.as_deref() == Some(req.graph_iri.as_str());
+    let deletable = !own_shapes_graph
+        && !dataset_graph::graphs_deletable_with_dataset(
+            &state.store,
+            &state.auth_db,
+            &state.base_url,
+            &dataset_id,
+            std::slice::from_ref(&req.graph_iri),
+            &current_user,
+        )
+        .is_empty();
+
+    // Only a registration this dataset actually had is removed, and only then may
+    // the stored graph go: detaching a graph the dataset never registered must not
+    // delete whatever graph of that name exists (the model registry, a kept
+    // no-derivatives copy, another user's model).
+    let removed = state
         .auth_db
         .remove_dataset_graph(&dataset_id, &req.graph_iri)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // If no other dataset references this graph IRI, remove the Oxigraph graph too.
-    // The DB row is already gone, so exclude_dataset_id="" — any hit means another dataset.
-    let shared = state
-        .auth_db
-        .graph_has_other_dataset_refs(&req.graph_iri, "")
-        .unwrap_or(true); // default to keeping the graph on error
-    if !shared {
+    if !removed {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!(
+                "Graph <{}> is not registered to dataset '{dataset_id}'",
+                req.graph_iri
+            ),
+        ));
+    }
+    if deletable {
         let _ = state.store.graph_store_delete(Some(req.graph_iri.as_str()));
     }
 
@@ -4312,13 +4461,43 @@ pub async fn patch_dataset_graph_role(
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
     }
 
+    // Only a graph registered to this dataset has a role or a privacy flag
+    // here. The role update below adopts a shapes graph into the SHACL Studio
+    // Library, owned by the dataset's owner, so naming any other graph would
+    // hand the dataset's members the Studio's hold on someone else's graph.
+    if !db
+        .dataset_has_graph(&dataset_id, &req.graph_iri)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!(
+                "Graph <{}> is not registered to dataset '{dataset_id}'",
+                req.graph_iri
+            ),
+        ));
+    }
+
     // A request carrying `private` is a privacy toggle and leaves the role
     // untouched; otherwise it is a role update (where a null role clears it).
     if let Some(private) = req.private {
         db.set_dataset_graph_private(&dataset_id, &req.graph_iri, private)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        // A validation report on the graph goes with it.
+        if private {
+            crate::server::routes::report_graphs_follow_private_graph(&state, &req.graph_iri)
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!(
+                            "The graph is private now, but the validation reports on it could \
+                             not all follow: {e}"
+                        ),
+                    )
+                })?;
+        }
     } else {
-        let graph_role = req.graph_role.as_deref().and_then(GraphKind::from_str);
+        let graph_role = parse_graph_role(req.graph_role.as_deref())?;
         db.set_dataset_graph_role(&dataset_id, &req.graph_iri, graph_role)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -4347,6 +4526,24 @@ pub async fn patch_dataset_graph_role(
 }
 
 // ─── SPARQL Service handlers ──────────────────────────────────────────────────
+
+/// The SPARQL service `service_id`, provided it belongs to `dataset_id`.
+///
+/// Every `/api/datasets/:dataset_id/services/:service_id` handler authorizes
+/// the caller against the dataset in the path, so a service of any other
+/// dataset must be as absent as one that does not exist (404). Otherwise a
+/// writer of one dataset could read, rename, delete or re-scope another
+/// dataset's service through their own.
+fn dataset_service(
+    db: &AuthDb,
+    dataset_id: &str,
+    service_id: &str,
+) -> Result<SparqlService, (StatusCode, String)> {
+    db.get_sparql_service(service_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .filter(|s| s.dataset_id == dataset_id)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Service not found".to_string()))
+}
 
 /// POST /api/datasets/:dataset_id/services
 pub async fn create_service(
@@ -4434,10 +4631,7 @@ pub async fn get_service(
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
     }
 
-    let service = db
-        .get_sparql_service(&service_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "Service not found".to_string()))?;
+    let service = dataset_service(&db, &dataset_id, &service_id)?;
 
     Ok(Json(service))
 }
@@ -4461,6 +4655,7 @@ pub async fn update_service(
     {
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
     }
+    dataset_service(&db, &dataset_id, &service_id)?;
 
     db.update_sparql_service(
         &service_id,
@@ -4470,10 +4665,7 @@ pub async fn update_service(
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let service = db
-        .get_sparql_service(&service_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "Service not found".to_string()))?;
+    let service = dataset_service(&db, &dataset_id, &service_id)?;
 
     Ok(Json(service))
 }
@@ -4496,6 +4688,7 @@ pub async fn delete_service(
     {
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
     }
+    dataset_service(&db, &dataset_id, &service_id)?;
 
     db.delete_sparql_service(&service_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -4504,9 +4697,19 @@ pub async fn delete_service(
 }
 
 /// POST /api/datasets/:dataset_id/services/:service_id/graphs
+///
+/// A service serves its graphs to everyone who may read the dataset, so a
+/// writer may add only a graph the dataset holds
+/// ([`dataset_graph::dataset_holds_graph`]): otherwise any writer could scope
+/// a service of their own dataset to another tenant's private graph or a
+/// `urn:system:` graph and read it through the service. An admin may name
+/// any graph, but the service serves it only while the dataset holds it
+/// (the query path drops the rest), so exposing a foreign graph still takes
+/// registering it to the dataset.
 pub async fn add_service_graph(
     user_opt: Option<Extension<AuthenticatedUser>>,
     State(db): State<Arc<AuthDb>>,
+    State(state): State<AppState>,
     Path((dataset_id, service_id)): Path<(String, String)>,
     Json(req): Json<GraphIriRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -4521,6 +4724,29 @@ pub async fn add_service_graph(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     {
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
+    }
+    dataset_service(&db, &dataset_id, &service_id)?;
+
+    if !current_user.is_admin()
+        && !dataset_graph::dataset_holds_graph(&db, &state.base_url, &dataset_id, &req.graph_iri)
+    {
+        state.audit.log_denied(
+            Some(current_user.user_id.clone()),
+            None,
+            "sparql_service",
+            &service_id,
+            "add_service_graph",
+            None,
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "Graph <{}> is not a graph of dataset '{dataset_id}'. A service may serve only \
+                 the dataset's own graphs: inside its namespace, its metadata, report and asset \
+                 graphs, and the graphs registered to it.",
+                req.graph_iri
+            ),
+        ));
     }
 
     db.add_service_graph(&service_id, &req.graph_iri)
@@ -4548,6 +4774,9 @@ pub async fn remove_service_graph(
     {
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
     }
+    // Removing narrows the service, so any graph may go, including one the
+    // dataset no longer holds; only the service must be this dataset's.
+    dataset_service(&db, &dataset_id, &service_id)?;
 
     db.remove_service_graph(&service_id, &req.graph_iri)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -4573,6 +4802,7 @@ pub async fn list_service_graphs(
     {
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
     }
+    dataset_service(&db, &dataset_id, &service_id)?;
 
     let graphs = db
         .list_service_graphs(&service_id)
@@ -4585,9 +4815,75 @@ pub async fn list_service_graphs(
 
 /// GET /api/users/public — returns minimal public info (id, username, avatar_key).
 /// No authentication required.
+///
+/// The endpoint exists so the UI can put a name and an avatar on the owner chip
+/// of something the caller is already looking at. It used to answer with every
+/// active account on the instance, to anybody, which turned that label lookup
+/// into an account-enumeration surface: a stranger could read off the whole
+/// roster of a private deployment. The list is therefore scoped to the users the
+/// caller could already infer — the owners of the datasets it may read (for an
+/// anonymous caller, the public ones), the members of the organisations it
+/// belongs to (which it may already read through
+/// `/api/organisations/:org_id/members`), and itself. Only an admin still sees
+/// everyone, matching the admin directory at `GET /api/users`. The JSON shape
+/// and the status codes are unchanged; only the membership of the list is.
 pub async fn list_public_users(
+    user: Option<Extension<AuthenticatedUser>>,
     State(db): State<Arc<AuthDb>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let caller = user.as_ref().map(|Extension(u)| u);
+
+    // `None` means "no scoping": an admin has an effective role on every
+    // resource, so computing the visible set would only ever return everybody.
+    //
+    // For every other caller the set is assembled from prefetched bulk reads and
+    // then intersected in memory. `list_accessible_datasets` resolves the whole
+    // dataset table in one pass plus a fixed number of per-caller authorization
+    // queries, and each organisation the caller belongs to costs one more query
+    // — a handful, not one per user. The endpoint stays O(users + datasets),
+    // never O(users × datasets).
+    let visible_ids: Option<std::collections::HashSet<String>> =
+        if caller.is_some_and(|u| u.is_admin()) {
+            None
+        } else {
+            let caller_id = caller.map(|u| u.user_id.as_str());
+            let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+            // A signed-in caller can already read its own account back from
+            // `GET /api/users/:user_id`, so it never disappears from its own list.
+            if let Some(id) = caller_id {
+                ids.insert(id.to_string());
+            }
+
+            for dataset in db
+                .list_accessible_datasets(caller_id)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            {
+                // An organisation-owned dataset names an organisation, not a
+                // person, so it discloses no account on its own. Its members are
+                // added below, and only to a caller that belongs to it.
+                if matches!(dataset.owner_type, OwnerType::User) {
+                    ids.insert(dataset.owner_id);
+                }
+            }
+
+            if let Some(id) = caller_id {
+                for org in db
+                    .list_user_organisations(id)
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                {
+                    for (member, _role) in db
+                        .list_org_members(&org.id)
+                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                    {
+                        ids.insert(member.id);
+                    }
+                }
+            }
+
+            Some(ids)
+        };
+
     let users = db
         .list_users()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -4602,6 +4898,11 @@ pub async fn list_public_users(
     let response: Vec<PublicUser> = users
         .into_iter()
         .filter(|u| u.is_active)
+        .filter(|u| {
+            visible_ids
+                .as_ref()
+                .is_none_or(|ids| ids.contains(u.id.as_str()))
+        })
         .map(|u| PublicUser {
             id: u.id,
             username: u.username,
@@ -4702,6 +5003,165 @@ pub async fn delete_user(
 
 // ─── Dataset SHACL config handler ─────────────────────────────────────────────
 
+/// The gate for linking `graph_iri` as `dataset_id`'s shapes graph
+/// (`PUT /api/datasets/:id/shacl`). A link is a read: validation reads the
+/// shapes, and `GET /api/datasets/:id/shapes` serves them to the dataset's
+/// readers. So the graph must be one the caller may read, and the link never
+/// makes it the dataset's to write or delete (`PUT /shapes` and a dataset
+/// delete check that separately).
+///
+/// * Everyone, admins included: a valid IRI that is not a model-registry
+///   graph (bind a model's shapes through the SHACL Studio instead).
+/// * Non-admins, in addition:
+///   - the dataset's own namespace is always fine;
+///   - a SHACL Studio Library graph (`urn:shapes:`) only when the caller may
+///     see its Library entry;
+///   - never a graph in another reserved namespace, or one registered to
+///     another dataset;
+///   - a graph that already holds data only when the caller may read it: a
+///     graph-ACL read grant, a Library entry they may see, or the shapes
+///     graph of a dataset they may read (sharing one dataset's shapes with
+///     another);
+///   - never a graph some dataset holds as private that they may not read
+///     by the `/sparql` rule, however else they may see it.
+fn gate_shapes_graph_link(
+    state: &AppState,
+    dataset_id: &str,
+    graph_iri: &str,
+    user: &AuthenticatedUser,
+) -> Result<(), String> {
+    if oxigraph::model::NamedNode::new(graph_iri).is_err() {
+        return Err(format!(
+            "Shapes graph <{graph_iri}> is not a valid IRI, so it cannot be linked to dataset \
+             '{dataset_id}'."
+        ));
+    }
+    dataset_graph::refuse_model_registry_graph(
+        &state.store,
+        &state.base_url,
+        dataset_id,
+        graph_iri,
+    )?;
+    if user.is_admin() {
+        return Ok(());
+    }
+    let db = &state.auth_db;
+    let refused = || {
+        format!(
+            "Graph <{graph_iri}> cannot be linked as the shapes graph of dataset '{dataset_id}': \
+             you may not read it, or it belongs to another dataset, the system or a server \
+             feature."
+        )
+    };
+    // A private graph is read by its dataset's writers (and graph-ACL
+    // readers) only. Seeing that dataset, or a Library entry of the graph,
+    // does not make it the caller's to read. A lookup error refuses.
+    if crate::auth::acl::private_graph_withheld(db, Some(user), graph_iri).unwrap_or(true) {
+        return Err(refused());
+    }
+    if dataset_graph::dataset_owns_graph(&state.base_url, dataset_id, graph_iri) {
+        return Ok(());
+    }
+    let orgs = db.get_user_org_ids(&user.user_id).unwrap_or_default();
+    let library_entry_visible = || {
+        crate::shacl_studio::store::ShaclStudioStore::new(db.pool())
+            .get_shape_graph_by_iri(graph_iri)
+            .ok()
+            .flatten()
+            .is_some_and(|set| {
+                crate::shacl_studio::access::can_access_set(&set, Some(&user.user_id), &orgs)
+            })
+    };
+    if graph_iri.starts_with("urn:shapes:") {
+        return if library_entry_visible() {
+            Ok(())
+        } else {
+            Err(refused())
+        };
+    }
+    // Whether `d` uses the graph as its shapes (its shapes graph setting, or
+    // registered with the shapes role) and the caller may read `d`: sharing
+    // one dataset's shapes with another.
+    let readable_shapes_of = |d: &crate::auth::models::Dataset| {
+        let as_shapes = d.shapes_graph_iri.as_deref() == Some(graph_iri)
+            || db
+                .list_dataset_graph_entries(&d.id)
+                .unwrap_or_default()
+                .iter()
+                .any(|e| e.graph_iri == graph_iri && e.graph_role == Some(GraphKind::Shapes));
+        as_shapes
+            && db
+                .can_access_dataset(Some(&user.user_id), d)
+                .unwrap_or(false)
+    };
+    // Another dataset's own shapes graph (its default `urn:dataset:{id}:shapes`,
+    // say) is shared the same way; any other graph in a reserved namespace is
+    // refused.
+    if dataset_graph::graph_in_foreign_reserved_namespace(&state.base_url, dataset_id, graph_iri) {
+        let shared = dataset_graph::namespace_dataset_id(&state.base_url, graph_iri)
+            .filter(|owner| *owner != dataset_id)
+            .is_some_and(
+                |owner| matches!(db.get_dataset(owner), Ok(Some(ref d)) if readable_shapes_of(d)),
+            );
+        return if shared { Ok(()) } else { Err(refused()) };
+    }
+    // A graph other datasets hold is linked only as their shapes, and only
+    // when the caller may read every one of them.
+    let Ok(holders) = db.datasets_with_graph(graph_iri) else {
+        return Err(refused());
+    };
+    let others: Vec<String> = holders.into_iter().filter(|id| id != dataset_id).collect();
+    if !others.is_empty() {
+        let all_readable_shapes = others
+            .iter()
+            .all(|id| matches!(db.get_dataset(id), Ok(Some(ref d)) if readable_shapes_of(d)));
+        return if all_readable_shapes {
+            Ok(())
+        } else {
+            Err(refused())
+        };
+    }
+    let shapes_of_readable_dataset = || {
+        db.list_datasets()
+            .unwrap_or_default()
+            .iter()
+            .any(|d| d.id != dataset_id && readable_shapes_of(d))
+    };
+    let registered_here = db.dataset_has_graph(dataset_id, graph_iri).unwrap_or(false);
+    let empty = !dataset_graph::graph_holds_data(&state.store, graph_iri);
+    // An empty graph another dataset links is that dataset's pending shapes
+    // graph: a second link now would stop it from writing them (a graph
+    // another dataset uses is not claimed for a write). Link it once the
+    // shapes exist.
+    let linked_elsewhere = || {
+        db.list_datasets().map_or(true, |all| {
+            all.iter()
+                .any(|d| d.id != dataset_id && d.shapes_graph_iri.as_deref() == Some(graph_iri))
+        })
+    };
+    if empty && !registered_here && linked_elsewhere() {
+        return Err(format!(
+            "Graph <{graph_iri}> is the shapes graph another dataset links, and it holds no shapes \
+             yet. Link it once they have been written."
+        ));
+    }
+    // A graph with no data yet is fine to link, unless the graph ACL already
+    // hands it to someone: then, as for a graph that holds data, the caller
+    // must be able to read it.
+    let unclaimed_and_empty = empty && !dataset_graph::graph_named_in_acl(db, graph_iri);
+    if registered_here
+        || unclaimed_and_empty
+        || db
+            .check_graph_permission(&user.user_id, user.role.as_str(), graph_iri, "read")
+            .unwrap_or(false)
+        || library_entry_visible()
+        || shapes_of_readable_dataset()
+    {
+        return Ok(());
+    }
+    Err(refused())
+}
+
 /// PUT /api/datasets/:dataset_id/shacl
 pub async fn update_dataset_shacl(
     Extension(current_user): Extension<AuthenticatedUser>,
@@ -4726,27 +5186,31 @@ pub async fn update_dataset_shacl(
     // GET /shapes, so it is a read target on this dataset just like a registered
     // graph. `can_write_dataset` only proves the caller may write *into this
     // dataset*; without this gate a writer could point shapes_graph_iri at another
-    // tenant's private graph and exfiltrate it via get_shapes. Constrain non-admins
-    // to the dataset's own namespace or an unclaimed external graph, reusing the
-    // same boundary as add_dataset_graph. Admins are unrestricted.
-    if !current_user.is_admin() {
-        if let Some(shapes_iri) = req.shapes_graph_iri.as_deref() {
-            if let Err(msg) = crate::auth::dataset_graph::authorize_dataset_graph_target(
-                &db,
-                &state.base_url,
+    // tenant's private graph and exfiltrate it via get_shapes (see
+    // `gate_shapes_graph_link`). A model-registry graph is refused for everyone,
+    // admins included: as the shapes graph it would be dumped by GET /shapes,
+    // adopted in place into the SHACL Studio Library and dropped by a dataset
+    // delete. Linking is read-only: `PUT /shapes` writes the graph only if the
+    // dataset holds it or the caller may write it. A blank IRI clears the
+    // setting and names no graph.
+    // Resending the link the dataset already has (toggling `shacl_on_write`)
+    // changes no one's access, so it is not gated again.
+    if let Some(shapes_iri) = req
+        .shapes_graph_iri
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .filter(|s| dataset.shapes_graph_iri.as_deref() != Some(*s))
+    {
+        if let Err(msg) = gate_shapes_graph_link(&state, &dataset_id, shapes_iri, &current_user) {
+            state.audit.log_denied(
+                Some(current_user.user_id.clone()),
+                None,
+                "dataset_shacl",
                 &dataset_id,
-                shapes_iri,
-            ) {
-                state.audit.log_denied(
-                    Some(current_user.user_id.clone()),
-                    None,
-                    "dataset_shacl",
-                    &dataset_id,
-                    "set_shapes_graph",
-                    None,
-                );
-                return Err((StatusCode::FORBIDDEN, msg));
-            }
+                "set_shapes_graph",
+                None,
+            );
+            return Err((StatusCode::FORBIDDEN, msg));
         }
     }
 
@@ -4808,7 +5272,7 @@ pub async fn update_dataset_role(
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
     }
 
-    let graph_role = req["graph_role"].as_str().and_then(GraphKind::from_str);
+    let graph_role = parse_graph_role(req["graph_role"].as_str())?;
 
     db.update_dataset_role(&dataset_id, graph_role)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -4919,6 +5383,18 @@ fn promote_dataset_to_registry(
                 anyhow::bail!(
                     "registry entry '{registry_id}' already exists and is owned by \
                      another account; refusing to promote dataset {dataset_id} into it"
+                );
+            }
+            // An entry whose licence allows no altered copies (IMBOR) holds only
+            // the checked bundled file: a promoted dataset would be a new,
+            // different version of it.
+            if let Some(a) =
+                registry::no_derivatives_attribution(&state.store, &state.base_url, registry_id)
+            {
+                anyhow::bail!(
+                    "registry entry '{registry_id}' holds {}, whose licence allows no altered \
+                     copies; refusing to promote dataset {dataset_id} into it",
+                    a.file
                 );
             }
         }

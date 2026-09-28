@@ -1,0 +1,152 @@
+# Reference example: a fictional arch bridge — instance data (ABox), full canonical dataset.
+# Deliberately exercises many datatypes: xsd:decimal/integer/gYear/date/dateTime/
+# boolean, rdf:langString, geo:wktLiteral, geo:gmlLiteral, xsd:anyURI, SKOS concepts,
+# QUDT quantities. This is the conformant dataset behind the viewer feed and the
+# validation-report tests; the intended SHACL failures live in fail/*.ttl, one per case.
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+@prefix skos:    <http://www.w3.org/2004/02/skos/core#> .
+@prefix dcat:    <http://www.w3.org/ns/dcat#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix geo:     <http://www.opengis.net/ont/geosparql#> .
+@prefix bot:     <https://w3id.org/bot#> .
+@prefix omg:     <https://w3id.org/omg#> .
+@prefix fog:     <https://w3id.org/fog#> .
+@prefix gom:     <https://w3id.org/gom#> .
+@prefix opm:     <https://w3id.org/opm#> .
+@prefix qudt:    <http://qudt.org/schema/qudt/> .
+@prefix unit:    <http://qudt.org/vocab/unit/> .
+@prefix quantitykind: <http://qudt.org/vocab/quantitykind/> .
+@prefix def:     <https://example.org/def/> .
+@prefix eb:      <https://example.org/id/example-bridge/> .
+
+#################################################################
+## The structure: typing, topology (BOT), geometry (GeoSPARQL)
+#################################################################
+eb:ExampleBridge
+    a def:NavigableBridge ;
+    rdfs:label "Example Bridge"@en , "Voorbeeldbrug"@nl ;
+    def:constructionYear "1962"^^xsd:gYear ;
+    def:movable false ;
+    def:spanCount 3 ;
+    def:crossesWaterway eb:ExampleRiver ;             # for the custom SHACL target
+    bot:containsElement eb:Deck , eb:Arch-North , eb:Arch-South ,
+                        eb:Abutment-North , eb:Abutment-South ;
+    def:clearanceHeight eb:clearance ;
+    def:clearanceHeightState eb:clearance-state ;
+    geo:hasGeometry eb:geom-alignment .
+
+# Alignment as WKT in RD New (EPSG:28992) — coordinates illustrative.
+eb:geom-alignment a geo:Geometry ;
+    geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> LINESTRING(185820 427330, 186110 427690)"^^geo:wktLiteral .
+
+# Free clearance height as a QUDT quantity (datatype-rich).
+eb:clearance a qudt:QuantityValue ;
+    qudt:hasQuantityKind quantitykind:Height ;
+    qudt:numericValue "9.40"^^xsd:decimal ;
+    qudt:unit unit:M .
+
+eb:ExampleRiver a def:Waterway ; rdfs:label "Example River"@en .
+
+#################################################################
+## Components with sub-decomposition + GeoSPARQL + GUID + material
+#################################################################
+eb:Arch-North
+    a def:Arch ;
+    rdfs:label "North arch"@en ;
+    def:material def:steel ;
+    def:conditionScore def:cs2 ;
+    bot:hasSubElement eb:Hanger-N03 ;
+    geo:hasGeometry eb:geom-arch-n ;
+    def:ifcGuid "1aB2cD3eF4gH5iJ6kL7mNo" ;              # IFC GlobalId (22 chars)
+    omg:hasGeometry eb:geomdesc-arch-n ;
+    def:lastInspection eb:insp-arch-n .
+
+eb:geom-arch-n a geo:Geometry ;
+    geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(185920 427470)"^^geo:wktLiteral .
+
+# Arch-South: conformant in the canonical dataset (has WKT geom, IFC geom AND ifcGuid).
+# The fail/arch-south-no-guid.ttl case strips the GUID to trigger ex:IfcRefShape.
+eb:Arch-South
+    a def:Arch ;
+    rdfs:label "South arch"@en ;
+    def:material def:steel ;
+    def:conditionScore def:cs3 ;
+    geo:hasGeometry eb:geom-arch-s ;
+    def:ifcGuid "7zZ8yY9xX0wW1vV2uU3tTs" ;
+    omg:hasGeometry eb:geomdesc-arch-s .
+
+eb:geom-arch-s a geo:Geometry ;
+    geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(186010 427560)"^^geo:wktLiteral .
+
+eb:Deck a def:Deck ; rdfs:label "Deck"@en ; def:conditionScore def:cs2 .
+
+# GML-literal geometry (alternative datatype) on another component.
+eb:Abutment-North a def:Abutment ;
+    rdfs:label "North abutment"@en ;
+    def:material def:concrete ;
+    def:conditionScore def:cs3 ;
+    geo:hasGeometry eb:geom-abut-n .
+eb:geom-abut-n a geo:Geometry ;
+    geo:asGML "<gml:Point srsName=\"http://www.opengis.net/def/crs/EPSG/0/28992\"><gml:pos>185830 427345</gml:pos></gml:Point>"^^geo:gmlLiteral .
+
+eb:Abutment-South a def:Abutment ;
+    rdfs:label "South abutment"@en ;
+    def:material def:concrete ;
+    def:conditionScore def:cs3 ;
+    geo:hasGeometry eb:geom-abut-s .
+eb:geom-abut-s a geo:Geometry ;
+    geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(186100 427675)"^^geo:wktLiteral .
+
+#################################################################
+## OMG/FOG/GOM: one geometry description, several formats
+## (IFC + glTF + point cloud), CRS via GOM
+#################################################################
+eb:geomdesc-arch-n a omg:Geometry ;
+    gom:hasCoordinateSystem eb:rdnew-cs ;
+    fog:asIfc_v4.0 "https://example.org/files/example-bridge.ifc#1aB2cD3eF4gH5iJ6kL7mNo"^^xsd:anyURI ;
+    fog:asGltf_v2.0-glb "https://example.org/files/arch-north.glb"^^xsd:anyURI ;
+    fog:asLaz_v1.4 "https://example.org/files/arch-north.laz"^^xsd:anyURI .
+
+eb:geomdesc-arch-s a omg:Geometry ;
+    gom:hasCoordinateSystem eb:rdnew-cs ;
+    fog:asIfc_v4.0 "https://example.org/files/example-bridge.ifc#7zZ8yY9xX0wW1vV2uU3tTs"^^xsd:anyURI ;
+    fog:asGltf_v2.0-glb "https://example.org/files/arch-south.glb"^^xsd:anyURI .
+
+eb:rdnew-cs a gom:CoordinateSystem ;
+    rdfs:label "Amersfoort / RD New + NAP"@en ;
+    gom:hasEPSG "28992"^^xsd:string .
+
+#################################################################
+## DCAT 2: the geometry files as dataset / distributions
+#################################################################
+eb:ExampleBridge-bim a dcat:Dataset ;
+    dcterms:title "BIM deliveries, Example Bridge"@en ;
+    dcterms:conformsTo <https://standards.buildingsmart.org/IFC/RELEASE/IFC4/> ;
+    dcat:distribution
+      [ a dcat:Distribution ; dcat:mediaType "application/x-step" ;
+        dcat:accessURL <https://example.org/files/example-bridge.ifc> ] ,
+      [ a dcat:Distribution ; dcat:mediaType "model/gltf-binary" ;
+        dcat:accessURL <https://example.org/files/arch-north.glb> ] .
+
+#################################################################
+## PROV-O + OPM: provenance on a measured property
+#################################################################
+eb:clearance-state a opm:CurrentPropertyState , prov:Entity ;
+    opm:value "9.40"^^xsd:decimal ;
+    prov:wasGeneratedBy eb:survey-2025 ;
+    prov:generatedAtTime "2025-04-12T10:30:00+02:00"^^xsd:dateTime .
+
+eb:survey-2025 a prov:Activity ;
+    rdfs:label "Hydrographic survey 2025"@en ;
+    prov:startedAtTime "2025-04-12T08:00:00+02:00"^^xsd:dateTime ;
+    prov:wasAssociatedWith [ a prov:Agent ; rdfs:label "Survey team"@en ] .
+
+#################################################################
+## Inspection with time (OWL-Time / xsd:date)
+#################################################################
+eb:insp-arch-n a def:Inspection ;
+    def:inspectionDate "2025-09-30"^^xsd:date ;
+    def:observedConditionScore def:cs2 .

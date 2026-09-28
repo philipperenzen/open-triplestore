@@ -43,16 +43,19 @@ export async function createPasskey(publicKey) {
       id: b64urlToBuf(c.id),
     })),
   };
-  const cred = await navigator.credentials.create({ publicKey: options });
+  const cred = /** @type {PublicKeyCredential} */ (
+    await navigator.credentials.create({ publicKey: options })
+  );
+  const response = /** @type {AuthenticatorAttestationResponse} */ (cred.response);
   return {
     id: cred.id,
     rawId: bufToB64url(cred.rawId),
     type: cred.type,
     extensions: cred.getClientExtensionResults?.() ?? {},
     response: {
-      attestationObject: bufToB64url(cred.response.attestationObject),
-      clientDataJSON: bufToB64url(cred.response.clientDataJSON),
-      transports: cred.response.getTransports?.() ?? undefined,
+      attestationObject: bufToB64url(response.attestationObject),
+      clientDataJSON: bufToB64url(response.clientDataJSON),
+      transports: response.getTransports?.() ?? undefined,
     },
   };
 }
@@ -71,17 +74,20 @@ export async function getPasskeyAssertion(publicKey) {
       id: b64urlToBuf(c.id),
     })),
   };
-  const cred = await navigator.credentials.get({ publicKey: options });
+  const cred = /** @type {PublicKeyCredential} */ (
+    await navigator.credentials.get({ publicKey: options })
+  );
+  const response = /** @type {AuthenticatorAssertionResponse} */ (cred.response);
   return {
     id: cred.id,
     rawId: bufToB64url(cred.rawId),
     type: cred.type,
     extensions: cred.getClientExtensionResults?.() ?? {},
     response: {
-      authenticatorData: bufToB64url(cred.response.authenticatorData),
-      clientDataJSON: bufToB64url(cred.response.clientDataJSON),
-      signature: bufToB64url(cred.response.signature),
-      userHandle: cred.response.userHandle ? bufToB64url(cred.response.userHandle) : null,
+      authenticatorData: bufToB64url(response.authenticatorData),
+      clientDataJSON: bufToB64url(response.clientDataJSON),
+      signature: bufToB64url(response.signature),
+      userHandle: response.userHandle ? bufToB64url(response.userHandle) : null,
     },
   };
 }

@@ -1,10 +1,16 @@
-# Building Topology Ontology (BOT) — a minimal core ontology by the W3C Linked
-# Building Data Community Group for describing the topology of buildings: zones
-# (sites, buildings, storeys, spaces), the building elements they contain, and
-# the interfaces between them.
-# Complete vocabulary, verbatim from the community group source (w3c-lbd-cg/bot),
-# version 0.3.2.
-# Source: https://w3c-lbd-cg.github.io/bot/  (ns https://w3id.org/bot#)
+# Building Topology Ontology (BOT) 0.3.2 — a minimal core ontology by the W3C
+# Linked Building Data Community Group for describing the topology of buildings:
+# zones (sites, buildings, storeys, spaces), the building elements they contain,
+# and the interfaces between them.
+# Source: https://raw.githubusercontent.com/w3c-lbd-cg/bot/master/bot.ttl
+# (identical to bot-0.3.2.ttl and to https://w3id.org/bot)
+# Licence: Creative Commons Attribution 1.0 (CC BY 1.0),
+# https://creativecommons.org/licenses/by/1.0/ (the file's own dcterms:license);
+# the upstream copyright notice follows below.
+# Changes by Open Triplestore: this comment header was added; the rest of the
+# file is byte-identical to the source (checked 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The upstream file starts below this line. ----
 # Copyright 2017-2020 W3C Linked Building Data Community Group.
 # 
 # This work is licensed under a Creative Commons Attribution License. 

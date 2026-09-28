@@ -1,9 +1,10 @@
 //! data-model versioning system.
 
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// Status of a data model version.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum VersionStatus {
     Published,
@@ -35,7 +36,7 @@ impl VersionStatus {
 }
 
 /// Summary of a data model (for list views).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DataModelRecord {
     pub id: String,
     pub title: String,
@@ -55,11 +56,12 @@ pub struct DataModelRecord {
     /// Drives the type badge/filter in the UI and the publish-time version
     /// stamping (OWL `owl:versionIRI` vs DCAT/PAV/SKOS metadata).
     #[serde(default)]
+    #[schema(value_type = String, example = "vocabulary")]
     pub kind: crate::kind_detector::RegistryKind,
 }
 
 /// Metadata for a single data model version.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DataModelVersion {
     pub data_model_id: String,
     pub version: String,
@@ -87,10 +89,97 @@ pub struct DataModelVersion {
 /// Lifecycle status of a single subgraph within a version (Phase 6 —
 /// per-subgraph publishing). Lets e.g. the `shapes` subgraph be published
 /// while `concepts` stays draft.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SubGraphStatus {
     pub graph_iri: String,
     pub status: VersionStatus,
+}
+
+// ─── Licence and attribution ──────────────────────────────────────────────────
+
+/// A licence, by name and canonical URI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LicenseRef {
+    /// Short name, e.g. "CC BY 4.0" or "W3C Document License (2023)".
+    pub name: String,
+    /// The licence's canonical URI.
+    pub uri: String,
+}
+
+/// Licence and attribution of third-party content held by a registry entry or
+/// version: the bundled standard vocabularies the server seeds as public
+/// reference models (`src/data_models/seed_vocab.rs`), vocabularies installed
+/// from the LOV corpus, and seed-bundle models that declare a licence
+/// (`[data_models.license]`).
+///
+/// It is registry metadata, stored next to the record in the registry graph and
+/// never written into the content's own graph, so the stored triples stay
+/// exactly those of the source. For a bundled vocabulary every field is taken
+/// from the file's comment header or from `frontend/public/vocab/NOTICE.md`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ContentAttribution {
+    /// Where the content was loaded from: a bundled vocabulary file, relative
+    /// to `/vocab/` (for example `dcat/2.0.0.ttl`); a graph of the LOV corpus;
+    /// or, as `seed bundle <id>: <files>`, a seed bundle's payload files.
+    pub file: String,
+    /// The licence(s) the content is under. Empty when no licence is known.
+    pub licenses: Vec<LicenseRef>,
+    /// The rights holders' copyright notices, verbatim.
+    pub copyright: Vec<String>,
+    /// The statement the licence asks every copy to carry (for example the W3C
+    /// derivative notice or DCMI's schema notice), verbatim.
+    pub notice: Option<String>,
+    /// The status of the source document, which the W3C Document License asks
+    /// every copy to state.
+    pub status: Option<String>,
+    /// Where the content comes from.
+    pub source_url: String,
+    /// The specification this version belongs to.
+    pub specification_url: Option<String>,
+    /// How the bundled file differs from its source, as its header states.
+    pub changes: Option<String>,
+    /// How the stored copy relates to the bundled file.
+    pub stored_copy: String,
+    /// The stored triples were checked against the bundled file and are
+    /// exactly its triples. `false` for a copy made in this registry (a draft,
+    /// branch, merge or rebase) and for a seeded version whose content differs
+    /// from the file or may since have been edited: downloads of those say
+    /// they may have been modified. A record stored before this field existed
+    /// reads as `false`.
+    #[serde(default)]
+    pub unchanged: bool,
+    /// Further licence remarks (for example IMBOR's no-derivatives reading).
+    pub remarks: Option<String>,
+    /// The rights holder allows no altered copies: the content is redistributed
+    /// only unmodified, and no notice is written into downloads of it. The
+    /// registry refuses every way of making or publishing other content in an
+    /// entry that holds such a record, and serves only the unchanged copy.
+    pub no_derivatives: bool,
+    /// The bundled file's own comment header, verbatim without the `# `
+    /// prefixes. The store drops comments, so this is where the header lives
+    /// on for the stored copy.
+    pub header: Option<String>,
+    /// Full attribution and licence texts for every bundled vocabulary,
+    /// served by this server.
+    pub notice_url: String,
+}
+
+/// A registry entry as the API returns it: the record plus the licence and
+/// attribution of the content it holds (`null` for user models).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct DataModelResponse {
+    #[serde(flatten)]
+    pub record: DataModelRecord,
+    pub attribution: Option<ContentAttribution>,
+}
+
+/// A version as the API returns it: the version record plus the licence and
+/// attribution of its content (`null` unless the server seeded it).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct DataModelVersionResponse {
+    #[serde(flatten)]
+    pub version: DataModelVersion,
+    pub attribution: Option<ContentAttribution>,
 }
 
 /// Version response with RDF kind detection metadata.

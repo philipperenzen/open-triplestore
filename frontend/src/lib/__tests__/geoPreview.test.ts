@@ -35,7 +35,7 @@ const originalHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'c
 const originalRO = globalThis.ResizeObserver;
 
 beforeAll(() => {
-  addMessages('en', en as Record<string, unknown>);
+  addMessages('en', en as unknown as Parameters<typeof addMessages>[1]);
   init({ fallbackLocale: 'en', initialLocale: 'en' });
   Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
     configurable: true,

@@ -1032,10 +1032,6 @@ fn test_multiple_rdf_formats() {
 // ═══════════════════════════════════════════════════════════
 
 #[test]
-#[cfg_attr(
-    all(target_os = "macos", target_arch = "aarch64"),
-    ignore = "Oxigraph RocksDB TryFromIntError on macOS arm64 — runs on Linux/CI"
-)]
 fn test_persistence_across_reopens() {
     let tmp = tempfile::TempDir::new().unwrap();
 

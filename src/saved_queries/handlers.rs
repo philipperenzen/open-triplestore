@@ -53,38 +53,47 @@ fn check_read(
     if user.map(|u| u.is_admin()).unwrap_or(false) {
         return Ok(());
     }
-    if sq_visibility == Some("public") {
-        return Ok(());
-    }
     let uid = user.map(|u| u.user_id.as_str());
     let ok = match scope {
         QueryScope::Dataset => {
+            // Load the dataset FIRST, even for a public service: a dataset-scoped
+            // row left behind by a deleted dataset must not serve a *future*
+            // dataset that reused the id (defence in depth behind the delete
+            // cleanup + orphan sweep). A missing dataset is 404, not a public
+            // short-circuit.
             let ds = state
                 .auth_db
                 .get_dataset(owner_id)
                 .map_err(internal)?
                 .ok_or_else(|| AppError::NotFound("dataset not found".to_string()))?;
-            state
-                .auth_db
-                .can_access_dataset(uid, &ds)
-                .map_err(internal)?
+            sq_visibility == Some("public")
+                || state
+                    .auth_db
+                    .can_access_dataset(uid, &ds)
+                    .map_err(internal)?
         }
-        QueryScope::Organisation => match uid {
-            Some(id) => state
-                .auth_db
-                .get_org_membership(id, owner_id)
-                .map_err(internal)?
-                .is_some(),
-            None => false,
-        },
-        QueryScope::Group => match uid {
-            Some(id) => state
-                .auth_db
-                .get_group_membership(id, owner_id)
-                .map_err(internal)?
-                .is_some(),
-            None => false,
-        },
+        QueryScope::Organisation => {
+            sq_visibility == Some("public")
+                || match uid {
+                    Some(id) => state
+                        .auth_db
+                        .get_org_membership(id, owner_id)
+                        .map_err(internal)?
+                        .is_some(),
+                    None => false,
+                }
+        }
+        QueryScope::Group => {
+            sq_visibility == Some("public")
+                || match uid {
+                    Some(id) => state
+                        .auth_db
+                        .get_group_membership(id, owner_id)
+                        .map_err(internal)?
+                        .is_some(),
+                    None => false,
+                }
+        }
     };
     if ok {
         Ok(())
@@ -170,6 +179,75 @@ fn check_write<'a>(
     } else {
         Err(AppError::Forbidden(
             "editor or owner rights required for this scope".to_string(),
+        ))
+    }
+}
+
+/// Validate a requested API-service `visibility` and gate the transition to
+/// `public`.
+///
+/// `check_write` lets a dataset **Editor** create and edit services, but making a
+/// service `public` exposes the scope's (non-private) data to anonymous callers —
+/// `check_read` short-circuits to allow on `visibility == "public"`. That is a
+/// publishing decision, not an editing one, so a plain editor must not reach it.
+/// Making a service public needs manage rights on the scope (dataset:
+/// `can_manage_dataset`; org/group: Admin) and, for a dataset, the publish
+/// capability — mirroring `create_dataset`. `current` is the service's existing
+/// visibility, so re-saving an already-public service is not re-gated. Any other
+/// visibility value an editor may set. A system admin bypasses.
+fn authorize_visibility(
+    state: &AppState,
+    u: &AuthenticatedUser,
+    scope: QueryScope,
+    owner_id: &str,
+    requested: Option<&str>,
+    current: Option<&str>,
+) -> Result<(), AppError> {
+    let Some(vis) = requested else { return Ok(()) };
+    if !matches!(vis, "public" | "private" | "members") {
+        return Err(AppError::BadRequest(
+            "visibility must be one of: public, private, members".to_string(),
+        ));
+    }
+    // Only the transition INTO public is gated.
+    if vis != "public" || current == Some("public") || u.is_admin() {
+        return Ok(());
+    }
+    let allowed = match scope {
+        QueryScope::Dataset => {
+            let ds = state
+                .auth_db
+                .get_dataset(owner_id)
+                .map_err(internal)?
+                .ok_or_else(|| AppError::NotFound("dataset not found".to_string()))?;
+            state
+                .auth_db
+                .can_manage_dataset(&u.user_id, &ds)
+                .map_err(internal)?
+                && u.is_publisher()
+        }
+        QueryScope::Organisation => matches!(
+            state
+                .auth_db
+                .get_org_membership(&u.user_id, owner_id)
+                .map_err(internal)?,
+            Some(Role::Admin)
+        ),
+        QueryScope::Group => matches!(
+            state
+                .auth_db
+                .get_group_membership(&u.user_id, owner_id)
+                .map_err(internal)?,
+            Some(Role::Admin)
+        ),
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden(
+            "publishing an API service (visibility=public) requires manage rights on this scope, \
+             and publisher rights for a dataset"
+                .to_string(),
         ))
     }
 }
@@ -356,6 +434,7 @@ async fn create_core(
     req: CreateSavedQueryRequest,
 ) -> Result<Json<SavedQuery>, AppError> {
     let u = check_write(state, user, scope, owner_id)?;
+    authorize_visibility(state, u, scope, owner_id, req.visibility.as_deref(), None)?;
     if req.name.trim().is_empty() || req.sparql.trim().is_empty() {
         return Err(AppError::BadRequest(
             "name and sparql are required".to_string(),
@@ -412,6 +491,14 @@ async fn update_core(
         .get_by_slug(scope, owner_id, slug)
         .map_err(internal)?
         .ok_or_else(|| AppError::NotFound("saved query not found".to_string()))?;
+    authorize_visibility(
+        state,
+        u,
+        scope,
+        owner_id,
+        req.visibility.as_deref(),
+        sq.visibility.as_deref(),
+    )?;
     if let Some(ref s) = req.sparql {
         let specs = req
             .parameters
@@ -550,6 +637,23 @@ async fn repair_core(
     body: RepairBody,
 ) -> Result<Json<Value>, AppError> {
     let u = check_write(state, user, scope, owner_id)?;
+    // The same gate every other LLM-spending endpoint passes: the per-principal
+    // rate limit, screening of the caller-supplied text, and a request-log row.
+    // This route had none, so it spent completions outside the budget the admin
+    // telemetry reports. `error` and `schema_hint` are the free text the caller
+    // controls; the SPARQL itself is data.
+    let error_text = body.error.clone().unwrap_or_default();
+    let hint_text = body.schema_hint.clone().unwrap_or_default();
+    let guard_flag = crate::server::llm_sparql::guard_gate(
+        state,
+        "repair",
+        Some(u),
+        None,
+        [("user", error_text.as_str()), ("user", hint_text.as_str())],
+        &error_text,
+    )?;
+    let start = std::time::Instant::now();
+
     let store = store_of(state);
     let sq = store
         .get_by_slug(scope, owner_id, slug)
@@ -575,7 +679,44 @@ async fn repair_core(
         body.schema_hint.as_deref(),
         body.model.as_deref(),
     )
-    .await?;
+    .await;
+
+    {
+        use crate::server::llm_guard::{question_preview, record, LlmLogEntry};
+        let mut entry = LlmLogEntry::new("repair");
+        entry.user_id = Some(u.user_id.clone());
+        entry.guard_flag = guard_flag;
+        entry.duration_ms = Some(start.elapsed().as_millis() as i64);
+        entry.prompt_chars = Some((broken.chars().count() + error.chars().count()) as i64);
+        entry.question_preview = question_preview(&error);
+        match &res {
+            Ok(r) => {
+                entry.model = Some(r.model.clone());
+                entry.answer_chars = Some(r.sparql.chars().count() as i64);
+            }
+            Err(e) => {
+                entry.status = "error";
+                entry.error = Some(e.message().chars().take(300).collect());
+            }
+        }
+        record(&state.auth_db.pool(), entry);
+    }
+    let res = res?;
+
+    // Never persist a revision that does not parse. The model's output went
+    // straight into `add_revision`, which performs no SPARQL check, and then
+    // became the query's live head — so a bad repair replaced a broken query
+    // with a broken query that was now also the saved one. The chat path
+    // validates model-written SPARQL before running it; the saved path must be
+    // at least as careful before WRITING it.
+    let parse_error = crate::server::llm_sparql::validate_sparql(&res.sparql).err();
+    if body.save {
+        if let Some(e) = &parse_error {
+            return Err(AppError::BadRequest(format!(
+                "the repaired query does not parse and was not saved: {e}"
+            )));
+        }
+    }
     let mut saved_revision = None;
     if body.save {
         let rev = store
@@ -605,6 +746,8 @@ async fn repair_core(
     Ok(Json(json!({
         "sparql": res.sparql,
         "model": res.model,
+        "valid": parse_error.is_none(),
+        "parseError": parse_error,
         "savedRevision": saved_revision,
     })))
 }
@@ -936,6 +1079,7 @@ mod tests {
             can_publish: false,
             write_access: write,
             can_mint_api_tokens: true,
+            scopes: Vec::new(),
         }
     }
 

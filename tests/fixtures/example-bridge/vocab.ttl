@@ -1,0 +1,41 @@
+# Reference example: a fictional arch bridge — vocabulary layer (TBox).
+# Object types are modelled as rdfs:Class (and, in the shapes files, sh:NodeShape);
+# value lists are SKOS concept schemes. Every def:/eb:/ex: IRI is illustrative.
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:     <http://www.w3.org/2002/07/owl#> .
+@prefix sh:      <http://www.w3.org/ns/shacl#> .
+@prefix skos:    <http://www.w3.org/2004/02/skos/core#> .
+@prefix bot:     <https://w3id.org/bot#> .
+@prefix def:     <https://example.org/def/> .
+
+#################################################################
+## Class hierarchy (object types). BOT is building-oriented, so
+## civil structures get their own branch that reuses BOT.
+#################################################################
+def:Structure a owl:Class, sh:NodeShape ;
+    rdfs:label "Structure"@en .
+
+def:Bridge          rdfs:subClassOf def:Structure, bot:Zone ; rdfs:label "Bridge"@en .
+def:NavigableBridge rdfs:subClassOf def:Bridge ;                rdfs:label "Bridge over a navigable waterway"@en .
+
+def:BridgeComponent rdfs:subClassOf bot:Element ; rdfs:label "Bridge component"@en .
+def:Deck     rdfs:subClassOf def:BridgeComponent ; rdfs:label "Deck"@en .
+def:Arch     rdfs:subClassOf def:BridgeComponent ; rdfs:label "Arch"@en .
+def:Hanger   rdfs:subClassOf def:BridgeComponent ; rdfs:label "Hanger"@en .
+def:Abutment rdfs:subClassOf def:BridgeComponent ; rdfs:label "Abutment"@en .
+
+#################################################################
+## Value lists as SKOS (a 1–6 condition scale and materials)
+#################################################################
+def:ConditionScores a skos:ConceptScheme ; rdfs:label "Condition score (1 = excellent … 6 = very poor)"@en .
+def:cs1 a skos:Concept ; skos:inScheme def:ConditionScores ; skos:notation "1" ; skos:prefLabel "Excellent"@en .
+def:cs2 a skos:Concept ; skos:inScheme def:ConditionScores ; skos:notation "2" ; skos:prefLabel "Good"@en .
+def:cs3 a skos:Concept ; skos:inScheme def:ConditionScores ; skos:notation "3" ; skos:prefLabel "Fair"@en .
+def:cs4 a skos:Concept ; skos:inScheme def:ConditionScores ; skos:notation "4" ; skos:prefLabel "Mediocre"@en .
+def:cs5 a skos:Concept ; skos:inScheme def:ConditionScores ; skos:notation "5" ; skos:prefLabel "Poor"@en .
+def:cs6 a skos:Concept ; skos:inScheme def:ConditionScores ; skos:notation "6" ; skos:prefLabel "Very poor"@en .
+
+def:Materials a skos:ConceptScheme ; rdfs:label "Material"@en .
+def:steel    a skos:Concept ; skos:inScheme def:Materials ; skos:prefLabel "Steel"@en .
+def:concrete a skos:Concept ; skos:inScheme def:Materials ; skos:prefLabel "Concrete"@en .

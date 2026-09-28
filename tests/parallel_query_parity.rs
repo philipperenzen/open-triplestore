@@ -61,9 +61,14 @@ fn persons_measure(n: usize, graph: &str, datatype: &str, lit: impl Fn(usize) ->
 }
 
 fn store(enabled: bool, shards: usize, cap: usize, data: &str) -> TripleStore {
+    // Quiet period 0: rebuild on the first query after the load. With the
+    // default 500 ms debounce the mirror declined to build (the load is a write
+    // microseconds earlier), so both sides of every parity assertion were the
+    // persistent store and the whole suite compared the engine against itself.
     let store = TripleStore::in_memory()
         .unwrap()
-        .with_parallel_query(enabled, shards, cap);
+        .with_parallel_query(enabled, shards, cap)
+        .with_parallel_rebuild_quiet_ms(0);
     store.load_str(data, RdfFormat::NQuads, None).unwrap();
     store
 }
@@ -467,6 +472,11 @@ fn mirror_is_consulted_not_silently_bypassed() {
     let store = store(true, 4, 100_000_000, &persons(100, G));
     let q = format!("SELECT (COUNT(*) AS ?c) FROM <{G}> WHERE {{ ?s <{EX}name> ?nm }}");
     assert_eq!(count_c(&store, &q), 100, "warms the mirror");
+    assert!(
+        store.parallel_build_count() > 0,
+        "the mirror must actually have been built by now — if it was not, every \
+         parity test in this file is comparing the persistent store with itself"
+    );
 
     let quad = Quad::new(
         NamedNode::new(format!("{EX}pNEW")).unwrap(),
@@ -519,4 +529,26 @@ fn parity_holds_across_shard_counts() {
         );
         assert_eq!(got, expected, "diverged at {shards} shards");
     }
+}
+
+/// A grouped aggregate inside `GRAPH <g> { … }` — how every HTTP query
+/// arrives after ACL scoping — is decomposed across the shards and merges to
+/// exactly the single-store answer (the planner used to refuse any GRAPH
+/// pattern, so the sharded path never saw the aggregates it exists for).
+#[test]
+fn parity_group_by_avg_inside_graph() {
+    let data = persons_measure(4_000, G, XSD_DEC, |i| format!("{}.25", i % 97));
+    let query = format!(
+        "SELECT ?t (COUNT(?p) AS ?c) (AVG(?m) AS ?a) WHERE {{ GRAPH <{G}> {{ ?p <{EX}type> ?t ; <{EX}m> ?m }} }} GROUP BY ?t"
+    );
+    assert!(
+        opengraph::parallel::is_decomposable(&query),
+        "a constant-graph GRAPH pattern must be shardable"
+    );
+    assert_parity(&data, &query);
+    // …and a variable graph name stays with the engine (it may join across shards).
+    let var_graph = format!(
+        "SELECT ?t (COUNT(?p) AS ?c) WHERE {{ GRAPH ?g {{ ?p <{EX}type> ?t }} }} GROUP BY ?t"
+    );
+    assert!(!opengraph::parallel::is_decomposable(&var_graph));
 }

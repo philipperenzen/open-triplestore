@@ -80,7 +80,7 @@ export function renderMarkdown(md, opts = {}) {
   const source = String(md || '');
   if (!source.trim()) return { html: '', headings: [] };
 
-  const dirty = marked.parse(source, { breaks: !!opts.breaks });
+  const dirty = /** @type {string} */ (marked.parse(source, { breaks: !!opts.breaks, async: false }));
   const clean = DOMPurify.sanitize(dirty, { USE_PROFILES: { html: true }, ADD_ATTR: ['target'] });
 
   // Outside a DOM (SSR / non-jsdom): return sanitized HTML without a TOC.

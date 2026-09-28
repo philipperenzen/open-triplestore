@@ -3,12 +3,12 @@
 # copying `plugins/hello`) makes it a workspace member automatically — no edit
 # needed here. It still needs an optional dependency entry + feature flag
 # below, and a registration in `src/plugins.rs`, to actually be built in.
-members = [".", "opengraph", "plugins/*"]
+members = [".", "opengraph", "plugins/*", "tools/*"]
 resolver = "2"
 
 [package]
 name = "open-triplestore"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 # Floor set by the AWS SDK stack: aws-credential-types 1.3.0 / aws-smithy-runtime
 # 1.12 and friends declare `rust-version = "1.94.1"`. Bump the `rust:<ver>` images
@@ -70,7 +70,13 @@ geometry3d      = ["dep:parry3d-f64"]
 ## `--all-features` job compiles it (on a trixie-based rust image — see
 ## .gitlab-ci.yml).
 sfcgal3d        = ["geometry3d", "dep:sfcgal"]
-## SAML 2.0 SSO support (requires libxml2 + openssl via samael's xmlsec feature)
+## SAML 2.0 SSO support (requires libxml2 + openssl via samael's xmlsec feature).
+## EXPERIMENTAL and deliberately NOT in `full`: the ACS handler has never been
+## verified against a real IdP and has a known request-ID validation defect
+## (`parse_base64_response` is handed a confirmation-method URN where samael
+## expects request IDs, with IdP-initiated responses disallowed), so no login
+## can currently succeed. Kept compiling — CI enables it explicitly — for
+## whoever picks it up; see docs/auth.md.
 saml            = ["dep:samael", "samael/xmlsec"]
 ## Test helpers (AppState::test_default_with_store etc.)
 test-utils      = []
@@ -79,6 +85,11 @@ test-utils      = []
 plugin-hello    = ["dep:ots-plugin-hello"]
 ## Accounts dashboard: users/orgs/entitlements + merged LLM usage at /ext/accounts-dashboard
 plugin-accounts-dashboard = ["dep:ots-plugin-accounts-dashboard"]
+## Datasource connectors (docs/sources.md "Dialects"): PostgreSQL (`postgresql`),
+## MySQL / MariaDB (`mysql`) and SQL Server (`mssql`). Off by default.
+plugin-postgres = ["dep:ots-plugin-postgres"]
+plugin-mysql    = ["dep:ots-plugin-mysql"]
+plugin-mssql    = ["dep:ots-plugin-mssql"]
 ## Optional `age` X25519 backup encryption
 backup-encrypt  = ["dep:age"]
 ## Optional SMTP alerting (lettre itself is a core dependency — the auth
@@ -93,8 +104,30 @@ asset-archive     = ["dep:zip"]              # ZIP entry count + uncompressed si
 asset-spreadsheet = ["dep:calamine"]         # XLSX/ODS sheet + row counts
 asset-thumbnail   = ["dep:image"]            # derived thumbnail generation (routes.rs)
 asset-clamav      = []                        # ClamAV INSTREAM virus scan on upload (std net only)
-## All extensions enabled
-full            = ["rdf-12", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl", "text-search", "vocab-search", "ldp", "shex", "swrl", "saml", "geometry3d", "asset-pdf", "asset-exif", "asset-media", "asset-archive", "asset-spreadsheet", "asset-thumbnail", "asset-clamav"]
+## The feature set a plain `cargo build` produces.
+##
+## `full`, so the README's native build path yields the binary its Highlights
+## table describes. With no `default` key at all — the previous state — a plain
+## `cargo build --release` compiled none of RDF 1.2, the OWL 2 profiles, LDP,
+## ShEx, SWRL, text/vocab search, SAML or 3D geometry, while the README told
+## users to build exactly that way and then start the server. Docker and CI pass
+## explicit feature lists, so only the documented native path was affected.
+##
+## `--no-default-features` gets the minimal core (SPARQL 1.1 + GeoSPARQL 2D over
+## the Oxigraph engine); CI compiles that configuration so its `#[cfg(not(...))]`
+## fallbacks keep building.
+default         = ["full"]
+
+## All extensions enabled.
+##
+## `backup-encrypt` and `alerting` are included: docs/administration.md
+## documents BACKUP_ENCRYPT and ALERT_WEBHOOK_URL / ALERT_SMTP_* as ordinary
+## operational knobs, but the Dockerfile and the release workflow both build
+## `--features full`, so leaving them out meant every published image silently
+## ignored those variables. Neither pulls a native dependency (`age` is pure
+## Rust; lettre is already a core dependency — the `alerting` flag only gates
+## the module), so there is no build-portability cost.
+full            = ["rdf-12", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl", "text-search", "vocab-search", "ldp", "shex", "swrl", "geometry3d", "backup-encrypt", "alerting", "asset-pdf", "asset-exif", "asset-media", "asset-archive", "asset-spreadsheet", "asset-thumbnail", "asset-clamav"]
 
 [dependencies]
 libc = "0.2"
@@ -103,6 +136,11 @@ libc = "0.2"
 # (a mismatch splits e.g. oxrdf and breaks rdf-star feature unification).
 oxigraph = "0.5"
 oxrdf = "0.3"
+# Needed only to name `Iri` in the federation service-handler trait; already in the tree.
+# Must stay on the oxiri line Oxigraph itself uses (0.2 as of oxigraph 0.5.11): the
+# `DefaultServiceHandler::handle` signature and `spargebra::Query::Select { base_iri }`
+# take Oxigraph's `Iri`, so a newer oxiri here is a distinct type and does not compile.
+oxiri = "0.2.11"
 spargebra = "0.4"
 
 # OpenGraph — our maintained engine layer over Oxigraph. Provides durable
@@ -146,7 +184,7 @@ regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 # Authentication & Identity
-rusqlite = { version = "0.31", features = ["bundled", "backup"] }
+rusqlite = { version = "0.31", features = ["bundled", "backup", "hooks", "column_decltype"] }
 r2d2 = "0.8"
 r2d2_sqlite = { version = "0.24", features = ["bundled"] }
 
@@ -154,11 +192,15 @@ r2d2_sqlite = { version = "0.24", features = ["bundled"] }
 ipnet = "2"
 
 # LRU cache for property path memoisation (W4-22)
-lru = "0.16"
-jsonwebtoken = "9"
-# ES256 keypair generation for the OIDC provider (already jsonwebtoken's verifier backend).
+lru = "0.18"
+# v11 ships no crypto backend by default — `rust_crypto` selects the pure-Rust
+# one (hmac/sha2/p256/…, all already in the tree via webauthn/openidconnect);
+# the alternative `aws_lc_rs` would add a C/cmake build dependency.
+jsonwebtoken = { version = "11", features = ["rust_crypto"] }
+# ES256 keypair generation for the OIDC provider (also rustls's crypto backend
+# in this tree; no longer jsonwebtoken's, which moved off ring in v10).
 ring = "0.17"
-argon2 = "0.5"
+argon2 = "0.6"
 uuid = { version = "1", features = ["v4", "v5"] }
 chrono = { version = "0.4", features = ["serde"] }
 # Kept in lockstep with `hkdf` (below): both ride the RustCrypto `digest` 0.11
@@ -240,10 +282,15 @@ sfcgal = { version = "0.8", optional = true }
 
 # RML mapping sources
 csv = "1"
-quick-xml = "0.41"
+quick-xml = "0.42"
 
 # Seed bundle manifests (src/seed_bundles/manifest.rs)
 toml = "1"
+
+# YARRRML and the legacy sql2rdf mapping format are YAML (src/sources/yarrrml).
+# A parser, not a serde data format: those documents have variable shape, so
+# they are walked as a tree rather than deserialised into fixed structs.
+yaml-rust2 = "0.13"
 
 # Compile-time plugin architecture (src/plugins.rs). The API crate is always
 # present (the registry/mount code needs its types); individual plugin crates
@@ -251,6 +298,12 @@ toml = "1"
 ots-plugin-api = { path = "plugins/api" }
 ots-plugin-hello = { path = "plugins/hello", optional = true }
 ots-plugin-accounts-dashboard = { path = "plugins/accounts-dashboard", optional = true }
+# Datasource connectors for the networked SQL dialects (src/sources). SQLite
+# is in core; each of these is a driver decision an operator makes per
+# deployment rather than a dependency every build carries.
+ots-plugin-postgres = { path = "plugins/postgres", optional = true }
+ots-plugin-mysql = { path = "plugins/mysql", optional = true }
+ots-plugin-mssql = { path = "plugins/mssql", optional = true }
 
 # Asset metadata extraction (classify uploads by kind + per-kind detail).
 # imagesize/infer are pure-Rust and tiny; the heavier probers are feature-gated.
@@ -281,6 +334,7 @@ hkdf = "0.13"
 
 # In-memory concurrent cache (OAuth PKCE sessions)
 dashmap = "6"
+openraft = { version = "0.9", features = ["serde", "storage-v2"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

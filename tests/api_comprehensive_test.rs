@@ -69,6 +69,8 @@ mod helpers {
             text_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(feature = "text-search")]
             text_sync_lock: Arc::new(std::sync::Mutex::new(())),
+            #[cfg(feature = "text-search")]
+            text_bg_syncing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             vocab_catalog: Arc::new(
                 open_triplestore::vocab_search::catalog::VocabCatalog::bundled(),
             ),
@@ -1135,7 +1137,16 @@ mod graph_store {
     }
 
     #[tokio::test]
-    async fn get_default_graph_empty() {
+    /// Reading the default graph is admin-only.
+    ///
+    /// This used to assert that an ANONYMOUS `GET /store?default` returned 200:
+    /// the handler only ran its ACL check when a `?graph=` was named, so the
+    /// default graph — which no per-graph ACL covers, and which holds LDP
+    /// resources and anything loaded without a target graph — was dumped to any
+    /// caller. The SPARQL path never exposed it (queries are scoped with
+    /// FROM/FROM NAMED over accessible named graphs), so this was the only way
+    /// to read it.
+    async fn get_default_graph_requires_admin() {
         let resp = test_app(test_state())
             .oneshot(
                 Request::builder()
@@ -1146,7 +1157,29 @@ mod graph_store {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "an anonymous default-graph dump must be refused"
+        );
+
+        let (state, token) = admin_state();
+        let resp = test_app(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/store?default")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "an admin may still read the default graph"
+        );
     }
 
     #[tokio::test]
@@ -1375,9 +1408,15 @@ mod graph_store {
     #[tokio::test]
     async fn payload_too_large_returns_413() {
         let (state, token) = admin_state();
-        // Generate ~52 MB of data — exceeds the 50 MB body limit
-        let big_body = vec![b'a'; 52 * 1024 * 1024];
-        let resp = test_app(state)
+        // The Graph Store body limit is `OTS_MAX_UPLOAD_MB` (default 512 MB),
+        // read when the router is built. Pin it to 1 MB for this app only —
+        // the variable is set just around the build so no other router in
+        // this binary picks it up — and send a body over that.
+        std::env::set_var("OTS_MAX_UPLOAD_MB", "1");
+        let app = test_app(state);
+        std::env::remove_var("OTS_MAX_UPLOAD_MB");
+        let big_body = vec![b'a'; 2 * 1024 * 1024];
+        let resp = app
             .oneshot(
                 Request::builder()
                     .method(Method::PUT)
@@ -1392,7 +1431,7 @@ mod graph_store {
         assert_eq!(
             resp.status(),
             StatusCode::PAYLOAD_TOO_LARGE,
-            "52 MB body must return 413"
+            "a body over the configured limit must return 413"
         );
     }
 }
@@ -1908,12 +1947,17 @@ shape <PersonShape> -> <Person> {
     <name> minCount 1 ;
 }
 "#;
-        let resp = test_app(test_state())
+        // The parser is authenticated compute now, so an anonymous request would
+        // only ever prove that 401 is a 4xx. The token keeps the endpoint itself
+        // under test (see tests/api_auth_exposure.rs for the auth contract).
+        let (state, token) = admin_state();
+        let resp = test_app(state)
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
                     .uri("/api/shaclc/parse")
                     .header(header::CONTENT_TYPE, "text/shaclc")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::from(shaclc))
                     .unwrap(),
             )
@@ -2088,28 +2132,52 @@ mod rml {
 
     #[tokio::test]
     async fn rml_preview() {
-        let preview_body = serde_json::json!({
-            "mapping": SIMPLE_RML,
-            "sources": {
-                "data.csv": "id,name\n1,Alice\n2,Bob"
-            }
-        });
-        let resp = test_app(test_state())
+        // The handler takes MULTIPART: a `mapping` part plus one part per named
+        // source. This test used to post JSON and assert "2xx or 4xx" — which the
+        // resulting 415 satisfied — so the endpoint had no effective coverage and
+        // a total regression would have gone unnoticed.
+        let boundary = "ots-rml-preview-boundary";
+        let csv = "id,name\n1,Alice\n2,Bob\n";
+        let body = format!(
+            "--{b}\r\nContent-Disposition: form-data; name=\"mapping\"\r\n\r\n{m}\r\n\
+             --{b}\r\nContent-Disposition: form-data; name=\"data.csv\"; filename=\"data.csv\"\r\n\
+             Content-Type: text/csv\r\n\r\n{c}\r\n--{b}--\r\n",
+            b = boundary,
+            m = SIMPLE_RML,
+            c = csv
+        );
+        // The preview is authenticated compute now; the token keeps this test on
+        // the mapping run itself rather than on the 401 (see
+        // tests/api_auth_exposure.rs for the auth contract).
+        let (state, token) = admin_state();
+        let resp = test_app(state)
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
                     .uri("/api/rml/preview")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(serde_json::to_string(&preview_body).unwrap()))
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(body))
                     .unwrap(),
             )
             .await
             .unwrap();
-        // Preview is unauthenticated; expect 200 with triples or 400 on format mismatch
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::OK,
+            "a well-formed preview request succeeds"
+        );
+        let json = body_json(resp.into_body()).await;
         assert!(
-            resp.status().is_success() || resp.status().is_client_error(),
-            "RML preview must return 2xx or 4xx, got {}",
-            resp.status()
+            json["triples_count"].as_u64().unwrap_or(0) >= 2,
+            "two rows must yield triples: {json}"
+        );
+        assert!(
+            json["turtle"].as_str().unwrap_or("").contains("Alice"),
+            "the dry-run Turtle carries the mapped values: {json}"
         );
     }
 }
@@ -2382,13 +2450,22 @@ mod performance {
 
     use super::helpers::*;
 
-    async fn bulk_insert_ntriples(n: usize, max_secs: u64) {
+    /// Bulk-load `n` triples through the Graph Store route and check every one
+    /// of them arrived.
+    ///
+    /// This used to assert a wall-clock bound instead, which is why the 100k
+    /// case was `#[ignore]`d as "timing-sensitive": a duration assertion on a
+    /// shared runner measures the runner. Ingest speed has its own gate —
+    /// `benches/performance.rs`'s `insert/*` groups, compared against the merge
+    /// base by `scripts/perf_regression.py` — so this asserts what a
+    /// correctness suite can actually hold: the right number of triples, in the
+    /// right graph, queryable afterwards.
+    async fn bulk_insert_ntriples(n: usize) {
         let (state, token) = admin_state();
         let data = ntriples(n);
         let graph = url_encode("http://perf.ex.org/graph");
 
-        let start = Instant::now();
-        let resp = test_app(state)
+        let resp = test_app(state.clone())
             .oneshot(
                 Request::builder()
                     .method(Method::PUT)
@@ -2400,33 +2477,45 @@ mod performance {
             )
             .await
             .unwrap();
-        let elapsed = start.elapsed();
         assert!(
             resp.status().is_success(),
-            "Bulk insert of {n} triples must succeed: {}",
+            "bulk insert of {n} triples must succeed: {}",
             resp.status()
         );
+
+        let count = state
+            .store
+            .query(
+                "SELECT (COUNT(*) AS ?c) WHERE {                    GRAPH <http://perf.ex.org/graph> { ?s ?p ?o }                  }",
+            )
+            .expect("the count query must run");
+        let got = match count {
+            oxigraph::sparql::QueryResults::Solutions(mut solutions) => solutions
+                .next()
+                .and_then(|row| row.ok())
+                .and_then(|row| row.get("c").map(|t| t.to_string()))
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
         assert!(
-            elapsed < Duration::from_secs(max_secs),
-            "Bulk insert of {n} triples took {:?}, expected < {max_secs}s",
-            elapsed
+            got.starts_with(&format!("\"{n}\"")),
+            "all {n} triples must be queryable afterwards, got {got}"
         );
     }
 
     #[tokio::test]
     async fn bulk_insert_1k() {
-        bulk_insert_ntriples(1_000, 5).await;
+        bulk_insert_ntriples(1_000).await;
     }
 
     #[tokio::test]
     async fn bulk_insert_10k() {
-        bulk_insert_ntriples(10_000, 15).await;
+        bulk_insert_ntriples(10_000).await;
     }
 
     #[tokio::test]
-    #[ignore = "perf stress test: 100k-triple bulk insert; slow + timing-sensitive, run explicitly with `cargo test -- --ignored`"]
     async fn bulk_insert_100k() {
-        bulk_insert_ntriples(100_000, 60).await;
+        bulk_insert_ntriples(100_000).await;
     }
 
     #[tokio::test]

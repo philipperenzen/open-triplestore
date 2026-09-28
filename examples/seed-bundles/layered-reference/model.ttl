@@ -1,0 +1,16 @@
+@prefix ex:   <https://example.org/layered/def#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+<https://example.org/layered/def> a owl:Ontology ; rdfs:label "Asset model" .
+
+ex:Asset  a owl:Class ; rdfs:label "Asset" .
+ex:Bridge a owl:Class ; rdfs:label "Bridge" ; rdfs:subClassOf ex:Asset .
+ex:Road   a owl:Class ; rdfs:label "Road"   ; rdfs:subClassOf ex:Asset .
+
+ex:name       a owl:DatatypeProperty ; rdfs:label "name"        ; rdfs:domain ex:Asset  ; rdfs:range xsd:string .
+ex:spanMetres a owl:DatatypeProperty ; rdfs:label "span (m)"    ; rdfs:domain ex:Bridge ; rdfs:range xsd:decimal .
+ex:status     a owl:ObjectProperty   ; rdfs:label "status"      ; rdfs:domain ex:Asset  ; rdfs:range skos:Concept .
+ex:kind       a owl:ObjectProperty   ; rdfs:label "kind"        ; rdfs:domain ex:Asset  ; rdfs:range skos:Concept .

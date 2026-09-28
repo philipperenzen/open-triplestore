@@ -6,6 +6,7 @@ import App from './App.svelte';
 import './theme.css';
 import './app.css';
 import { initTheme } from './lib/theme.js';
+import { initIriDisplay } from './lib/iriDisplay';
 import { initServiceRegistry } from './lib/serviceRegistry.js';
 import { loadRuntimeConfig } from './lib/runtimeConfig.js';
 import { logBanner } from './lib/banner.js';
@@ -16,6 +17,10 @@ logBanner();
 // Apply the persisted/OS-derived dark-mode signal before the app mounts so
 // the first paint is already in the correct theme (avoids a light-mode flash).
 initTheme();
+
+// Likewise for whether terms are labelled with prefixed names or whole IRIs,
+// so the first table painted is already in the form the reader asked for.
+initIriDisplay();
 
 // Discover sibling-service addresses from the registry and re-broadcast changes as
 // 'ldapps-service-change'. Opt-in: a no-op unless LD_DISCOVERY is set (see vite.config.js). This

@@ -34,7 +34,7 @@ fn parse_xml(source_data: &str, iterator: &str) -> Result<Vec<Row>, String> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
-                let name = String::from_utf8_lossy(e.name().0).to_string();
+                let name = e.name().0.to_string();
                 element_stack.push(name.clone());
 
                 // Check if this element matches the iterator path
@@ -49,10 +49,9 @@ fn parse_xml(source_data: &str, iterator: &str) -> Result<Vec<Row>, String> {
                 if let (Some(ref mut row), Some(ref field)) =
                     (current_row.as_mut(), current_field.as_ref())
                 {
-                    let text = e
-                        .decode()
+                    let text = quick_xml::escape::unescape(&e.into_inner())
                         .ok()
-                        .and_then(|s| quick_xml::escape::unescape(&s).ok().map(|u| u.into_owned()))
+                        .map(|u| u.into_owned())
                         .unwrap_or_default();
                     if !text.is_empty() {
                         row.insert(field.to_string(), text);
@@ -60,7 +59,7 @@ fn parse_xml(source_data: &str, iterator: &str) -> Result<Vec<Row>, String> {
                 }
             }
             Ok(Event::End(e)) => {
-                let name = String::from_utf8_lossy(e.name().0).to_string();
+                let name = e.name().0.to_string();
 
                 if path_matches(&element_stack, &segments) {
                     // Closing the iterator element — emit the row

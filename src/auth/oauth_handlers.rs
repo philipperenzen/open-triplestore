@@ -13,7 +13,7 @@ use super::middleware::AuthenticatedUser;
 use super::models::OauthProviderCreate;
 use super::oauth::{begin_oidc_flow, complete_oidc_flow, OAuthSessions};
 use super::saml::{complete_saml_flow, generate_sp_metadata};
-use super::secret::encrypt_secret;
+use super::secret::store_configured_secret;
 use crate::server::AppState;
 
 // ─── Public provider listing (for login UI) ────────────────────────────────────
@@ -76,23 +76,30 @@ pub async fn admin_list_providers(
     }
 }
 
+/// Map a secret-storage failure to a response. A refused raw value or a bad
+/// reference is the caller's problem; a cipher failure is ours. The message
+/// is the error's own text, which never contains the secret.
+fn secret_error(e: &anyhow::Error) -> axum::response::Response {
+    use crate::secrets::SecretError;
+    let status = match e.downcast_ref::<SecretError>() {
+        Some(_) => StatusCode::BAD_REQUEST,
+        None => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+}
+
 /// POST /api/admin/oauth/providers
 pub async fn admin_create_provider(
     State(state): State<AppState>,
     Extension(_user): Extension<AuthenticatedUser>,
     Json(mut body): Json<OauthProviderCreate>,
 ) -> impl IntoResponse {
-    // Encrypt client secret before storage
-    if let Some(plaintext) = body.client_secret.take() {
-        match encrypt_secret(&plaintext, &state.jwt_config.secret) {
-            Ok(enc) => body.client_secret_enc = Some(enc),
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("{{\"error\":\"{e}\"}}"),
-                )
-                    .into_response()
-            }
+    // A secret reference is stored as itself; a raw value is refused in the
+    // production posture and encrypted (deprecated) elsewhere.
+    if let Some(supplied) = body.client_secret.take() {
+        match store_configured_secret("client_secret", &supplied, &state.jwt_config.secret) {
+            Ok(stored) => body.client_secret_enc = Some(stored),
+            Err(e) => return secret_error(&e),
         }
     }
     match state.auth_db.create_oauth_provider(&body) {
@@ -136,17 +143,11 @@ pub async fn admin_update_provider(
     Path(id): Path<String>,
     Json(mut body): Json<OauthProviderCreate>,
 ) -> impl IntoResponse {
-    // Only re-encrypt if a new plaintext secret was supplied
-    if let Some(plaintext) = body.client_secret.take() {
-        match encrypt_secret(&plaintext, &state.jwt_config.secret) {
-            Ok(enc) => body.client_secret_enc = Some(enc),
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("{{\"error\":\"{e}\"}}"),
-                )
-                    .into_response()
-            }
+    // Only re-store when a new secret was supplied.
+    if let Some(supplied) = body.client_secret.take() {
+        match store_configured_secret("client_secret", &supplied, &state.jwt_config.secret) {
+            Ok(stored) => body.client_secret_enc = Some(stored),
+            Err(e) => return secret_error(&e),
         }
     } else if body.client_secret_enc.is_none() {
         // Preserve existing encrypted secret

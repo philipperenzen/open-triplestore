@@ -134,6 +134,29 @@ pub fn compute_etag(content: &[u8]) -> String {
     format!("\"{}\"", hex::encode(&hash[..8]))
 }
 
+/// The resource's ETag: a hash over its outgoing triples — its full state,
+/// containment included — independent of the negotiated representation.
+///
+/// GET used to hash the RE-SERIALISED, Prefer-filtered body while PUT and PATCH
+/// compared `If-Match` against the raw DESCRIBE hash, so an ETag read from a
+/// response could never satisfy a conditional write: every documented
+/// read→modify→write round-trip ended in 412. One function, used by every verb.
+pub fn resource_etag(store: &TripleStore, iri: &str) -> String {
+    compute_etag(&describe_resource(store, iri).unwrap_or_default())
+}
+
+/// The IRI object of `<subject> <predicate> ?o`, if there is one.
+pub fn object_iri(store: &TripleStore, subject: &str, predicate: &str) -> Option<String> {
+    let q = format!("SELECT ?o WHERE {{ <{subject}> <{predicate}> ?o }} LIMIT 1");
+    match store.query(&q).ok()? {
+        oxigraph::sparql::QueryResults::Solutions(mut s) => match s.next()?.ok()?.get("o") {
+            Some(oxigraph::model::Term::NamedNode(n)) => Some(n.as_str().to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 // ─── Container creation ────────────────────────────────────────────────────────
 
 /// Ensure the container IRI is typed as an LDP Basic Container.
@@ -425,8 +448,10 @@ pub fn describe_resource(store: &TripleStore, iri: &str) -> Result<Vec<u8>, Stri
 /// Relative IRIs resolve against `iri` so an idiomatic `<>` subject (LDP's way of
 /// referring to the resource being written) attaches to the resource itself.
 pub fn load_resource_turtle(store: &TripleStore, iri: &str, turtle: &str) -> Result<(), String> {
+    // Triples-only: an LDP resource is one graph, so the body may not name a graph
+    // of its own and write outside the resource, bypassing the graph ACL.
     store
-        .load_str_with_base(turtle, oxigraph::io::RdfFormat::Turtle, iri, None)
+        .load_str_triples_only(turtle, oxigraph::io::RdfFormat::Turtle, Some(iri))
         .map_err(|e| e.to_string())
 }
 
@@ -435,13 +460,12 @@ pub fn load_resource_turtle(store: &TripleStore, iri: &str, turtle: &str) -> Res
 /// Relative IRIs resolve against `iri` (see [`load_resource_turtle`]).
 pub fn load_resource_jsonld(store: &TripleStore, iri: &str, jsonld: &str) -> Result<(), String> {
     store
-        .load_str_with_base(
+        .load_str_triples_only(
             jsonld,
             oxigraph::io::RdfFormat::JsonLd {
                 profile: Default::default(),
             },
-            iri,
-            None,
+            Some(iri),
         )
         .map_err(|e| e.to_string())
 }

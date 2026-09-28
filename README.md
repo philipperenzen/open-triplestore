@@ -31,9 +31,9 @@
 
 ---
 
-> **Status:** current release **`0.6.0`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
+> **Status:** current release **`0.7.0`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
 
-**Open Triplestore** is a modern, high-performance RDF triple store with full **SPARQL 1.1**, **SPARQL 1.2 (RDF-star)**, **GeoSPARQL 1.1**, **OWL 2** reasoning (RL natively + DL rules, with an external-reasoner bridge for full tableau classification/consistency), and **LDP 1.0** support — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
+**Open Triplestore** is a modern, high-performance RDF triple store with **SPARQL 1.1** and **LDP 1.0** support, plus partial support for **SPARQL 1.2 (RDF-star)**, **GeoSPARQL 1.1** (not OGC-certified) and **OWL 2** reasoning (RL natively + DL extension rules; an optional, experimental bridge to an external tableau reasoner such as Konclude) — grades and known gaps per standard in [docs/standards.md](docs/standards.md) — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
 
 ## Demo
 
@@ -67,9 +67,15 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | Feature | Detail |
 |---|---|
 | **SPARQL 1.1** | SELECT, CONSTRUCT, ASK, DESCRIBE, UPDATE (INSERT/DELETE) |
-| **SPARQL 1.2** | RDF-star embedded triples |
-| **GeoSPARQL 1.1** | All 30 OGC requirements — Simple Features, Egenhofer, RCC8, constructive & metric functions |
-| **OWL 2 DL** | Native hasSelf, disjointUnionOf, NegativePropertyAssertion, hasKey + all ~80 RL rules; external reasoner bridge for full tableau ([docs](docs/owl2-dl.md)) |
+| **SPARQL 1.2** | Triple terms `<<( )>>` / `rdf:reifies` and the accessor functions (RDF 1.2 model); `LATERAL` and `CALL` are not implemented |
+| **SPARQL federation** | `SERVICE` is off by default (SSRF mitigation) and enabled per endpoint with `OTS_REMOTE_ALLOWLIST`; calls are timed out and row-capped, and the service description advertises federation only when an allowlist exists |
+| **GeoSPARQL 1.1** | Simple Features, Egenhofer and RCC8 relations, DE-9IM `relate`, distance/area/buffer and the constructive functions, the geodesic metric family (metres on the WGS84 ellipsoid), the `aggUnion` aggregate, WKT, GML and GeoJSON literals (`asGeoJSON`), CRS transform for the built-in CRS set. Not implemented: KML/DGGS literals, the Query Rewrite Extension, the other aggregates ([grades & gaps](docs/standards.md#known-limitations--conformance-findings)) |
+| **OWL 2 DL** | Native hasSelf, disjointUnionOf, NegativePropertyAssertion, hasKey on top of the RL rules; optional external-reasoner bridge (experimental, `OTS_EXTERNAL_REASONER=konclude`) ([docs](docs/owl2-dl.md)) |
+| **Federated access control** | Signed identity assertions between instances (`SERVICE`, LDES sync); verified against the peer's JWKS, authorised locally ([docs](docs/federation.md)) |
+| **Linked-document containers** | Import and export packaged containers of documents, RDF payloads and link graphs — ISO 21597-1 ICDD as the first profile ([docs](docs/containers.md)) |
+| **Time-evolving properties** | OPM-style property states with validity, reliability and attribution; current value stays a plain triple, history and as-of queries read the chain ([docs](docs/datasets.md#time-evolving-properties-opm-profile)) |
+| **Spec → SHACL importers** | Generic constraint-specification importer interface; buildingSMART IDS 1.0 → SHACL Core shapes in SHACL Studio ([docs](docs/shacl.md#importing-constraint-specifications-ids)) |
+| **LDES** | Publish any dataset as a Linked Data Event Stream (TREE-fragmented version objects, tombstones) and sync a remote stream into a dataset incrementally ([docs](docs/ldes.md)) |
 | **LDP 1.0** | Basic, Direct, Indirect Containers; NonRDFSource; PATCH with SPARQL Update; Prefer header ([docs](docs/ldp.md)) |
 | **RBAC auth** | `super_admin` › `admin` › `user` role hierarchy; JWT access + refresh tokens; long-lived API keys |
 | **Dataset privacy** | Datasets default to `private`; public datasets are queryable without auth |
@@ -80,10 +86,14 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | **RML mapping** | [RDF Mapping Language](https://rml.io/specs/rml/) — CSV, JSON (JSONPath), XML (XPath) → RDF with template expansion |
 | **OpenAPI docs** | Interactive Swagger UI at `/api-docs/` with JWT Bearer auth; machine-readable spec at `/api-docs/openapi.json` |
 | **AI assistant** *(optional)* | Natural-language → SPARQL, a grounded knowledge-graph chat, and a SHACL drafting assistant — run the **bundled local model** (`docker compose --profile llm up`, GPU-accelerated on NVIDIA) or **bring your own** OpenAI-compatible API (OpenAI, vLLM, Azure, …) via `LLM_GATEWAY_URL`; off by default, hidden until reachable ([docs](docs/api-services.md), [chat](docs/spark.md)) |
-| **Vocabulary search** | Internal [LOV](https://lov.linkeddata.es/) mirror: search 900+ vocabularies and their terms, CLARIAH-style vocabulary recommender, one-click offline install into the registry ([docs](docs/vocabulary-search.md)) |
+| **Vocabulary search** | Internal [LOV](https://lov.linkeddata.es/) mirror: a catalogue of ~900 vocabularies, each with its licence status (the licence the vocabulary declares or, where it names none, its publisher's published terms); term search and one-click offline install into the registry for those whose licence lets the image ship them (install also works for the others from a dump you supply, privately); CLARIAH-style vocabulary recommender ([docs](docs/vocabulary-search.md)) |
 | **Prefix service** | Internal prefix.cc replacement: ~3,700 bundled prefix↔namespace mappings + platform vocabularies, powering SPARQL auto-prefixing and a public lookup API — no third-party calls |
 | **Multiple RDF formats** | Turtle, N-Triples, N-Quads, TriG, RDF/XML |
 | **Storage backends** | In-memory (fast) and persistent RocksDB |
+| **In-memory query accelerator** | Over a persistent store, an in-RAM mirror answers most reads: subject shards for aggregates, an O(1) count index, and a columnar copy with its own evaluator for joins and lookups. Every query is routed to the cheapest exit that gives the engine's exact answer, and anything else goes to the engine ([docs](docs/performance.md#4-the-columnar-copy-opengraphcolumnar)) |
+| **Change log** | Every write recorded per graph in commit order, with sequence numbers a consumer can tail and bookmark. Off by default — a `WHERE` update pays ×2.5–4 for its before/after diff — and on whenever there is a consumer ([docs](docs/versioning.md#change-log)) |
+| **Replication & failover** | A leader ships its change log to cold, warm or hot followers: read-only replicas that catch up hourly, every minute, or within a round trip. Synchronous acknowledgement and Raft consensus are opt-in; failover is by epoch. Two-container example in [`docker-compose.replication.yml`](docker-compose.replication.yml) ([docs](docs/operations.md#replication)) |
+| **Workload telemetry** | Which exit answered each query (exact counts), sampled latencies for analytical and other queries, validation and write-gap histograms — `GET /api/admin/telemetry`, and the **Node status** page in the web UI ([docs](docs/performance.md#telemetry)) |
 | **HTTP protocols** | SPARQL Protocol + Graph Store HTTP Protocol (RFC 7230) + LDP 1.0 |
 | **Docker-ready** | Multi-stage image; non-root runtime; health-check built-in |
 
@@ -168,14 +178,26 @@ docker compose --profile mail up -d   # or COMPOSE_PROFILES=mail in .env, plus:
 
 Delivering straight to recipient MXes needs a host with outbound port 25 and proper DNS (rDNS + SPF); from anywhere else set `MAIL_RELAYHOST` to a smarthost you already have (workspace or transactional provider). Any external SMTP service also works directly, without the profile — see [.env.example](.env.example) and [docs/auth.md](docs/auth.md).
 
+**Optional — a read replica.** [`docker-compose.replication.yml`](docker-compose.replication.yml) is a separate two-container stack: a leader and a hot follower that tails the leader's change log and answers reads a round trip behind. It comes up in two steps because the follower authenticates with an API token minted on the leader:
+
+```bash
+docker compose -f docker-compose.replication.yml up -d leader     # then mint a token, add it to .env, and
+docker compose -f docker-compose.replication.yml up -d follower   # → curl localhost:7879/api/replication/status
+```
+
+The walkthrough — including a write on the leader showing up on the follower — is in [docs/operations.md](docs/operations.md#try-it-a-leader-and-a-hot-follower-with-docker-compose).
+
 ### Native (requires Rust 1.94.1+)
 
 System libraries are needed on every OS: **GEOS** (GeoSPARQL) always, plus
-**libxmlsec1** for the `saml` feature in `--features full`. On Debian/Ubuntu:
+**libxmlsec1** only for the experimental `saml` feature (not in `full`; see docs/auth.md). On Debian/Ubuntu:
 `apt-get install libgeos-dev libxmlsec1-dev`; on macOS: `brew install geos libxmlsec1`.
 
 ```bash
 # macOS · Linux · WSL
+# The default feature set is `full` — every capability in the Highlights table
+# above. `cargo build --release --no-default-features` gives the minimal core
+# (SPARQL 1.1 + GeoSPARQL 2D) if you want a smaller binary.
 cargo build --release
 ./target/release/open-triplestore --port 7878 --data-dir ./data
 ```
@@ -209,7 +231,7 @@ Options:
 
 ```bash
 curl http://localhost:7878/health
-# {"status":"ok","version":"0.6.0"}
+# {"status":"ok","version":"0.7.0"}
 ```
 
 > On **Windows PowerShell**, run `curl.exe http://localhost:7878/health` — the bare
@@ -280,6 +302,7 @@ A full-featured browser interface is bundled with the server at `http://localhos
 | `/organisations` | Organisation management (requires auth) |
 | `/settings` | Profile, password change, API token management (requires auth) |
 | `/admin/users` | User management — create, edit role/status, reset password, deactivate (requires admin+) |
+| `/admin/operations` | Node status — replication role, lag and last catch-up; which exit answered each query and how fast; SHACL validations; write gaps; the change log with its cursors (requires admin+) |
 
 ### Development
 
@@ -454,7 +477,7 @@ curl -X DELETE http://localhost:7878/api/admin/users/<user_id> \
 ## Automatic Prefix Resolution
 
 Write SPARQL without declaring prefixes — they resolve against the built-in
-prefix service (a bundled snapshot of the full prefix.cc registry + the LOV
+prefix service (a bundled snapshot of the prefix.cc registry + the LOV
 catalog, ~3,700 mappings, plus every vocabulary registered on the instance):
 
 ```sparql
@@ -470,11 +493,36 @@ the live prefix.cc for labels the local tiers don't know (cached in
 `/api/prefixes/{label}`, `/api/prefixes/reverse?uri=…` — see
 [docs/vocabulary-search.md](docs/vocabulary-search.md).
 
+Provenance of the bundled mappings: prefix.cc publishes no licence for its
+data. The pairs are facts, and its operator has said the data is considered
+public domain (CC0) in [cygri/prefix.cc#13](https://github.com/cygri/prefix.cc/issues/13),
+without publishing a licence or dedication; the snapshot records exactly that
+and credits prefix.cc. The LOV mappings are CC BY 4.0 and credited as such.
+Both statements are in the snapshot's `sources` block
+(`src/prefixes/data/prefixes-snapshot.json`) and in [`NOTICE`](NOTICE); the
+Turtle and SPARQL bulk exports open with its credit lines, and the CSV export
+names each row's source.
+
 ---
 
 ## GeoSPARQL 1.1
 
-All 30 OGC requirements via GEOS bindings.
+Topological relations (Simple Features, Egenhofer, RCC8) and `geof:relate` with
+DE-9IM patterns; distance, area, buffer and the other constructive functions;
+WKT, GML and GeoJSON geometry literals, and `geof:asGeoJSON` — all via GEOS.
+The metric family (`geof:metricDistance`, `metricLength`, `metricPerimeter`,
+`metricArea`, `metricBuffer`) measures in metres on the WGS84 ellipsoid whatever
+the CRS, and `geof:distance`/`geof:buffer` with a metre unit on a geographic CRS
+are geodesic too. `geof:transform` converts between the built-in CRSs (RD New,
+CRS84, EPSG:4326 in authority axis order, Web Mercator), and binary predicates
+harmonise their operands' CRSs. `geof:aggUnion` is a real SPARQL aggregate —
+the union of a group's geometries, with or without `GROUP BY`.
+
+**Not implemented:** KML/DGGS literals, the Query Rewrite Extension, the other
+GeoSPARQL 1.1 aggregates and several of its non-metric functions. (Earlier versions of this
+README claimed "all 30 OGC requirements" — that number was the test file's own
+numbering, not the OGC conformance classes. The honest grade is *Partial*; see
+[docs/standards.md](docs/standards.md).)
 
 ```sparql
 PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
@@ -745,7 +793,7 @@ See [docs/rml.md](docs/rml.md) for the full RML guide including JSON and XML sou
 
 ## OWL 2 DL Reasoning
 
-Native OWL 2 DL support runs all ~80 OWL 2 RL forward-chaining rules plus DL-specific SPARQL rules for `owl:hasSelf`, `owl:disjointUnionOf`, `owl:NegativePropertyAssertion`, `owl:hasKey`, and cardinality annotations.  An `ExternalReasonerBridge` allows plugging in a full tableau reasoner (HermiT, Pellet, ELK) for ABox completion.
+Native OWL 2 DL support runs the OWL 2 RL forward-chaining rules (the equality, property, class and schema families — the Table 8 datatype rules `dt-*` are not implemented) plus DL-specific SPARQL rules for `owl:hasSelf`, `owl:disjointUnionOf`, `owl:NegativePropertyAssertion`, `owl:hasKey`, and cardinality annotations.  An `ExternalReasonerBridge` can hand the ontology to an external tableau reasoner for classification — Konclude is wired (`OTS_EXTERNAL_REASONER=konclude`) and experimental; it is off unless configured.
 
 ```bash
 # Query with OWL 2 DL entailment
@@ -804,21 +852,57 @@ open-triplestore
 ├── docs/               Feature guides (SHACL, DCAT 2, RML, performance, administration)
 ├── tests/              Conformance & benchmark test suites
 ├── benches/            Criterion performance benchmarks
-└── scripts/            Test runners, W3C conformance tester
+└── scripts/            Test runners, conformance-table generator, benchmark tooling
 ```
 
 ---
 
 ## Conformance
 
-| Test suite | Tests | Pass |
-|---|---|---|
-| W3C SPARQL 1.1 | 112 | **112** |
-| W3C RDF 1.1 Formats | 63 | **63** |
-| OGC GeoSPARQL 1.1 | 84 | **84** |
-| SP2B / BSBM Benchmarks | 28 | **28** |
-| sparqloscope | 67 | **67** |
-| Unit / Integration | ~39 | **~36** (3 ignored: RocksDB arm64) |
+The table below is generated from the test suites (`scripts/conformance_table.py`,
+checked in CI), so the counts are what `cargo test` runs. Grades per standard,
+and the known gaps behind them, are in [docs/standards.md](docs/standards.md).
+None of this is a W3C or OGC conformance claim; for the vendored SPARQL 1.1
+sections of the W3C test suite no score is published, as W3C's test-suite
+licence policy allows no performance claims on a subset.
+
+<!-- conformance-table:start -->
+| Standard | Suite | Basis | Tests | Notes |
+|---|---|---|---:|---|
+| SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 17 |  |
+| DCAT 2 / VoID | `tests/dcat_conformance.rs` | spec-derived | 4 |  |
+| GeoSPARQL 1.1 | `tests/geosparql_conformance.rs` | spec-derived | 130 |  |
+| LDP 1.0 (store level) | `tests/ldp_conformance.rs` | spec-derived | 43 |  |
+| LDP 1.0 (HTTP) | `tests/ldp_http_conformance.rs` | spec-derived | 13 |  |
+| OGC GeoSPARQL 1.1 validator shapes | `tests/ogc_geosparql_shacl_roundtrip.rs` | **vendored OGC corpus** (unmodified) | 2 |  |
+| OWL 2 DL extension rules | `tests/owl2_dl_conformance.rs` | spec-derived | 34 |  |
+| OWL 2 EL | `tests/owl2_el_conformance.rs` | spec-derived | 14 |  |
+| OWL 2 QL | `tests/owl2_ql_conformance.rs` | spec-derived | 21 |  |
+| OWL 2 RL | `tests/owl2_rl_conformance.rs` | spec-derived | 30 |  |
+| RDF 1.1 formats | `tests/rdf11_conformance.rs` | spec-derived | 63 |  |
+| RDFS entailment | `tests/rdfs_conformance.rs` | spec-derived | 23 |  |
+| RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 19 |  |
+| SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 23 |  |
+| SHACL-AF rules | `tests/shacl_rules_conformance.rs` | spec-derived | 20 |  |
+| SHACL Compact Syntax | `tests/shaclc_conformance.rs` | spec-derived | 11 |  |
+| ShEx | `tests/shex_conformance.rs` | spec-derived | 10 |  |
+| SPARQL 1.2 / RDF-star | `tests/sparql12_conformance.rs` | spec-derived | 14 |  |
+| SP2B / BSBM query shapes | `tests/sparql_benchmarks.rs` | benchmark-derived | 28 |  |
+| SPARQL 1.1 functions | `tests/sparql_functions_conformance.rs` | spec-derived | 9 |  |
+| SPARQL engine coverage (sparqloscope) | `tests/sparqloscope_conformance.rs` | sparqloscope-derived | 67 |  |
+| Cross-standard HTTP smoke | `tests/standards_conformance.rs` | spec-derived | 26 |  |
+| SWRL | `tests/swrl_conformance.rs` | spec-derived | 4 |  |
+| SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (core + sparql sections, manifest-driven) | 1 | 136 corpus cases: 119 pass, 2 known failures, 15 runner-side skips (floor ≥90 asserted) |
+| SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 125 |  |
+| SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
+
+752 conformance tests across 26 suites; a further 688 tests in 99 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 3 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. The SHACL and GeoSPARQL corpus results are development and regression results on the vendored sections (`docs/conformance/`), not W3C or OGC conformance claims. The SPARQL 1.1 sections are a subset of a W3C test suite, so under W3C's test-suite licence policy they are used for development and bug tracking only, and no score is published for them.
+
+_Generated by `scripts/conformance_table.py` — edit the suites, not the table._
+<!-- conformance-table:end -->
+
+Optional build features — which are in the default `full` set and the published
+image, and which CI compiles — are listed in [docs/build-features.md](docs/build-features.md).
 
 ---
 
@@ -892,6 +976,8 @@ In short:
 - ✅ **Free to use, self-host, study, and modify** — for anyone, including companies, at no cost.
 - ✅ **Contribute back** — if you run a modified version as a network service, the AGPL (§ 13) requires you to make your changes available to its users.
 - ❌ **No selling** — the Commons Clause forbids selling the software, offering it as a paid or hosted service, or charging for support whose value derives substantially from it.
+
+Third-party material in this repository keeps its own licence and is not under AGPL-3.0 or the Commons Clause: the bundled vocabularies (per file in [`frontend/public/vocab/NOTICE.md`](frontend/public/vocab/NOTICE.md)), the vendored test suites under `tests/fixtures/`, the demo datasets and the bundled libraries — see [`NOTICE`](NOTICE), with licence texts in [`LICENSES/`](LICENSES).
 
 If you need terms beyond these, contact the author.
 

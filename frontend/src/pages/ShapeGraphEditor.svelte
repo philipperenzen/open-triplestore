@@ -4,7 +4,8 @@
   import { sanitizeHtml } from '../lib/ontology/sanitizeHtml.js';
   import { getShapeGraph, updateShapeGraph, listShapeGraphRevisions, getShapeGraphRevision, restoreShapeGraphRevision,
     validateShapeGraph, stageShapeGraph, publishShapeGraph, deprecateShapeGraph, listBindingsForShapeGraph,
-    getShapeGraphTurtle } from '../lib/api.js';
+    getShapeGraphTurtle, listDatasets } from '../lib/api.js';
+  import { shortenIRI, loadPrefixCcPrefixes, prefixesVersion } from '../lib/rdf-utils.js';
   import { ArrowLeft, History, Lock, Users, Globe, Save, Edit3, X, RotateCcw, Loader2, Sparkles, Database, ShieldCheck, Send, Archive, Check, Plus, Link2, ExternalLink } from 'lucide-svelte';
   import { Link, navigate } from '../lib/router/index.js';
   import { openPendingViewerTab, showShapesInViewer, viewerConfigured } from '../lib/graphViewer.ts';
@@ -47,13 +48,24 @@
   // SHACL sandbox. Only shown when VITE_GRAPH_VIEWER_URL is configured.
   let openingViewer = false;
 
+  // Datasets, only to put a name on a binding target: GET /api/shacl/bindings
+  // answers with bare target IRIs, so the dataset id parsed out of the IRI is
+  // all we have to join on.
+  let allDatasets = [];
+
   let _guardChecked = false;
   $: if ($authInitialized && !_guardChecked) {
     _guardChecked = true;
     if (!$isAuthenticated) navigate('/login');
   }
 
-  onMount(load);
+  onMount(() => {
+    loadPrefixCcPrefixes();
+    load();
+    // Names are decoration on the impact chips — never let this lookup delay
+    // or break the editor itself.
+    listDatasets().then((d) => (allDatasets = d || [])).catch(() => {});
+  });
 
   $: if (id) { load(); }
 
@@ -192,24 +204,36 @@
     return $i18nT('pages.shapeGraphEditor.monthsAgo', { values: { count: Math.round(day / 30) } });
   }
 
-  function shortIRI(iri) {
-    const m = String(iri).match(/[^#/]+$/);
-    return m ? m[0] : iri;
+  function datasetName(datasetId, datasets) {
+    return datasets.find((d) => String(d.id) === datasetId)?.name || datasetId;
   }
 
   /**
    * Classify a binding target IRI for display. Dataset targets are the
    * canonical `{base}/dataset/{id}` IRIs; graph targets nest under
    * `…/dataset/{id}/graphs/{tail}` — both link to the dataset page.
+   *
+   * The label used to be the raw dataset id (a slug/UUID); resolve it against
+   * the dataset list, falling back to the id when the lookup misses or the
+   * list has not landed yet.
    */
-  function parseTarget(iri) {
+  function parseTarget(iri, datasets) {
     const s = String(iri);
     const g = s.match(/\/dataset\/([^/]+)\/graphs\/(.+)$/);
-    if (g) return { datasetId: g[1], label: `${g[1]} / ${g[2]}` };
+    if (g) return { iri: s, datasetId: g[1], label: `${datasetName(g[1], datasets)} / ${g[2]}` };
     const d = s.match(/\/dataset\/([^/]+)$/);
-    if (d) return { datasetId: d[1], label: d[1] };
-    return { datasetId: null, label: shortIRI(s) };
+    if (d) return { iri: s, datasetId: d[1], label: datasetName(d[1], datasets) };
+    return { iri: s, datasetId: null, label: shortenIRI(s) };
   }
+
+  // Derived (not called inline in the markup) so the chips re-label themselves
+  // when the dataset list arrives after the bindings.
+  // `shortenIRI` reads a module-level prefix map, which creates no Svelte
+  // dependency. Naming the version store here is what makes these labels
+  // recompute once the ~3700-entry prefix snapshot lands, instead of keeping
+  // the weaker form they were first rendered with.
+  $: curie = ($prefixesVersion, (iri) => shortenIRI(iri));
+  $: impactChips = ($prefixesVersion, impact.map((iri) => parseTarget(iri, allDatasets)));
 </script>
 
 <div class="editor-page">
@@ -257,20 +281,19 @@
             </div>
             {#if (set.target_classes || []).length}
               <div class="targets">
-                {#each set.target_classes as tc}<span class="chip chip-target"><Database size={10} /> {shortIRI(tc)}</span>{/each}
+                {#each set.target_classes as tc}<span class="chip chip-target" title={tc}><Database size={10} /> {curie(tc)}</span>{/each}
               </div>
             {/if}
             {#if impact.length}
               <div class="impact">
                 <span class="impact-label"><Link2 size={11} /> {impact.length === 1 ? $i18nT('pages.shapeGraphEditor.appliedToTarget', { values: { count: impact.length } }) : $i18nT('pages.shapeGraphEditor.appliedToTargets', { values: { count: impact.length } })}</span>
                 <ul class="impact-list">
-                  {#each impact.slice(0, 12) as t}
-                    {@const tt = parseTarget(t)}
+                  {#each impactChips.slice(0, 12) as tt}
                     <li>
                       {#if tt.datasetId}
-                        <Link to={`/datasets/${tt.datasetId}`} class="impact-link" title={t}><Database size={10} /> {tt.label}</Link>
+                        <Link to={`/datasets/${tt.datasetId}`} class="impact-link" title={tt.iri}><Database size={10} /> {tt.label}</Link>
                       {:else}
-                        <span class="chip chip-applied" title={t}>{tt.label}</span>
+                        <span class="chip chip-applied" title={tt.iri}>{tt.label}</span>
                       {/if}
                     </li>
                   {/each}
@@ -307,7 +330,7 @@
 
     <div class="card editor-host">
       {#key editorReloadToken}
-        <ShapesEditor shapeGraphId={id} usageTargets={impact} height="calc(100vh - 360px)" />
+        <ShapesEditor shapeGraphId={id} usageTargets={impactChips} height="calc(100vh - 360px)" />
       {/key}
     </div>
 
@@ -345,19 +368,21 @@
               {#if metaReport.conforms}<Check size={15} /> {$i18nT('pages.shapeGraphEditor.shapesWellFormed')}{:else}<X size={15} /> {metaReport.results_count === 1 ? $i18nT('pages.shapeGraphEditor.issuesFound', { values: { count: metaReport.results_count } }) : $i18nT('pages.shapeGraphEditor.issuesFoundPlural', { values: { count: metaReport.results_count } })}{/if}
             </p>
             {#if (metaReport.results || []).length}
+              <div class="table-scroll">
               <table class="meta-table">
                 <thead><tr><th>{$i18nT('pages.shapeGraphEditor.colSeverity')}</th><th>{$i18nT('pages.shapeGraphEditor.colFocus')}</th><th>{$i18nT('pages.shapeGraphEditor.colPath')}</th><th>{$i18nT('pages.shapeGraphEditor.colMessage')}</th></tr></thead>
                 <tbody>
                   {#each metaReport.results as r}
                     <tr>
                       <td><span class="sev sev-{r.severity}">{r.severity}</span></td>
-                      <td><code>{shortIRI(r.focus_node)}</code></td>
-                      <td>{r.path ? shortIRI(r.path) : '—'}</td>
+                      <td><code title={r.focus_node}>{curie(r.focus_node)}</code></td>
+                      <td title={r.path}>{r.path ? curie(r.path) : '—'}</td>
                       <td>{r.message}</td>
                     </tr>
                   {/each}
                 </tbody>
               </table>
+              </div>
             {/if}
           {/if}
         </div>
@@ -429,7 +454,9 @@
      names) must render verbatim; only taxonomy chips get capitalised. */
   .chip { display: inline-flex; align-items: center; gap: 0.2rem; font-size: 0.7rem; padding: 2px 7px; border-radius: 999px; background: #f1f5f9; color: #475569; font-weight: 600; }
   .chip-cap { text-transform: capitalize; }
-  .chip-target { background: #ecfeff; color: #0e7490; font-family: 'IBM Plex Mono', monospace; font-weight: 500; text-transform: none; }
+  /* Identifiers have no spaces to break at, so they break anywhere rather
+     than push the card past the viewport. */
+  .chip-target { background: #ecfeff; color: #0e7490; font-family: 'IBM Plex Mono', monospace; font-weight: 500; text-transform: none; max-width: 100%; overflow-wrap: anywhere; }
   .chip-source-derived { background: #fef3c7; color: #92400e; }
   .chip-source-ai { background: #fce7f3; color: #9d174d; }
   .chip-source-imported { background: #dbeafe; color: #1d4ed8; }
@@ -441,6 +468,9 @@
 
   .meta-verdict { display: inline-flex; align-items: center; gap: 0.4rem; font-weight: 600; font-size: 0.9rem; color: #991b1b; margin: 0 0 0.6rem; }
   .meta-verdict.ok { color: #166534; }
+  /* Four columns of report detail need more room than a phone has; the table
+     carries its own sideways scroll so the page keeps none. */
+  .table-scroll { overflow-x: auto; }
   .meta-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
   .meta-table th, .meta-table td { text-align: left; padding: 0.3rem 0.45rem; border-bottom: 1px solid var(--line-soft, #e5e7eb); vertical-align: top; }
   .sev { padding: 0.05rem 0.35rem; border-radius: 4px; font-size: 0.7rem; text-transform: capitalize; }
@@ -470,6 +500,23 @@
   .rev-time { font-size: 0.75rem; color: #94a3b8; }
   .btn-xs { font-size: 0.72rem; padding: 0.2rem 0.5rem; }
   .dim { color: #94a3b8; }
+
+  /* Phone. Every `.btn` is full width below this breakpoint, which turned the
+     header's seven small actions into seven stacked bars and left the edit
+     form's Cancel/Save and each revision's Preview/Restore fighting a select
+     or a note for the same line. They pair up two to a row instead, each row
+     tall enough to be tapped. */
+  @media (max-width: 720px) {
+    .meta-actions .btn { width: auto; flex: 1 1 9rem; min-height: 2.5rem; }
+    .meta-quiet { white-space: normal; margin-left: 0; }
+    .meta-edit-row { flex-wrap: wrap; }
+    .meta-edit-row :global(.sel-trigger) { flex: 1 1 100%; min-height: 2.5rem; }
+    .meta-edit-row .btn { width: auto; flex: 1 1 8rem; min-height: 2.5rem; }
+    .rev-row { flex-wrap: wrap; row-gap: 0.35rem; }
+    .rev-note { flex: 1 1 8rem; overflow-wrap: break-word; }
+    .rev-row .btn { width: auto; flex: 1 1 6rem; min-height: 2.5rem; }
+    .icon-btn { width: 2.5rem; height: 2.5rem; }
+  }
 
   :global(:is([data-theme="dark"], .dark)) .error { color: #fca5a5; background: rgba(220,38,38,0.12); border-color: rgba(220,38,38,0.35); }
   :global(:is([data-theme="dark"], .dark) .editor-page .back) { color: var(--brand-700); }

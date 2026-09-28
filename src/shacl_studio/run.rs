@@ -37,15 +37,51 @@ pub fn run_validation(
     threshold: SeverityThreshold,
     run_inference: bool,
 ) -> Result<RunOutcome, String> {
+    run_validation_scoped(
+        store,
+        shape_graph_graphs,
+        data_graphs,
+        data_graphs,
+        threshold,
+        run_inference,
+    )
+}
+
+/// [`run_validation`] with the validation READ scope separated from the
+/// inference scope.
+///
+/// They are not the same set. Validation should see everything the data
+/// depends on, including the model version the dataset conforms to, so that
+/// `sh:class` and `sh:targetClass` resolve. Inference must NOT: `shacl::infer`
+/// materialises into a named graph only when it is handed exactly one data
+/// graph, so adding a model graph to that slice would silently relocate a
+/// single-graph pipeline's in-place inference into the store's default graph.
+/// `infer_graphs` is also what the caller diffs to recover the derived triples,
+/// so it has to stay the set the caller owns and may write.
+pub fn run_validation_scoped(
+    store: &TripleStore,
+    shape_graph_graphs: &[String],
+    read_graphs: &[String],
+    infer_graphs: &[String],
+    threshold: SeverityThreshold,
+    run_inference: bool,
+) -> Result<RunOutcome, String> {
     let mut results = Vec::new();
+    let mut metrics: Option<crate::shacl::report::RunMetrics> = None;
     for shapes_graph in shape_graph_graphs {
         if run_inference {
-            let _ = crate::shacl::infer(store, shapes_graph, data_graphs)?;
+            let _ = crate::shacl::infer(store, shapes_graph, infer_graphs)?;
         }
-        let report = crate::shacl::validate(store, shapes_graph, data_graphs)?;
+        let report = crate::shacl::validate(store, shapes_graph, read_graphs)?;
         results.extend(report.results);
+        metrics = match (metrics.take(), report.metrics) {
+            (Some(a), Some(b)) => Some(a.merge(b)),
+            (a, b) => a.or(b),
+        };
     }
-    Ok(summarise(results, threshold))
+    let mut outcome = summarise(results, threshold);
+    outcome.report.metrics = metrics;
+    Ok(outcome)
 }
 
 /// Snapshot the union of all quads currently in `data_graphs` (used to diff the
@@ -72,24 +108,26 @@ fn collect_graph_quads(store: &TripleStore, data_graphs: &[String]) -> HashSet<Q
 pub fn run_validation_capturing(
     store: &TripleStore,
     shape_graph_graphs: &[String],
-    data_graphs: &[String],
+    read_graphs: &[String],
+    infer_graphs: &[String],
     threshold: SeverityThreshold,
     run_inference: bool,
 ) -> Result<(RunOutcome, Vec<Quad>), String> {
     let before = if run_inference {
-        collect_graph_quads(store, data_graphs)
+        collect_graph_quads(store, infer_graphs)
     } else {
         HashSet::new()
     };
-    let outcome = run_validation(
+    let outcome = run_validation_scoped(
         store,
         shape_graph_graphs,
-        data_graphs,
+        read_graphs,
+        infer_graphs,
         threshold,
         run_inference,
     )?;
     let inferred = if run_inference {
-        collect_graph_quads(store, data_graphs)
+        collect_graph_quads(store, infer_graphs)
             .into_iter()
             .filter(|q| !before.contains(q))
             .collect()
@@ -133,6 +171,7 @@ fn summarise(
             conforms: results.is_empty(),
             results,
             results_count,
+            metrics: None,
         },
         passes,
         violation_count,

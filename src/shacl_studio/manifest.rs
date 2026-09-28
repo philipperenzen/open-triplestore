@@ -3,9 +3,11 @@
 //! dataset and its attached SHACL shapes on its own: dataset metadata,
 //! prefixes, the shapes (Turtle + SHACLC) with their target classes, the data
 //! graph IRIs, and the SPARQL / Graph-Store endpoints. Access is gated by the
-//! dataset's existing ACL at the handler; this module just assembles the body.
+//! dataset's existing ACL at the handler; this module just assembles the body,
+//! less the private graphs the caller may not read (their Turtle is theirs to
+//! withhold, and their IRIs are not listed).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use serde_json::json;
 
@@ -69,19 +71,32 @@ fn attached_shape_graphs(
     out
 }
 
-/// Assemble the form-manifest JSON for `dataset`.
+/// Assemble the form-manifest JSON for `dataset`, for a caller who may not
+/// read the private dataset graphs in `withheld`
+/// ([`crate::auth::acl::withheld_private_graphs`]): a private shapes graph
+/// attached to the dataset (its own, or another dataset's linked or bound
+/// here) and a private data graph are left out.
 pub fn build_manifest(
     store: &TripleStore,
     auth_db: &AuthDb,
     base_url: &str,
     studio: &ShaclStudioStore,
     dataset: &Dataset,
+    withheld: &HashSet<String>,
 ) -> serde_json::Value {
-    let data_graphs = auth_db.list_dataset_graphs(&dataset.id).unwrap_or_default();
+    let data_graphs: Vec<String> = auth_db
+        .list_dataset_graphs(&dataset.id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|g| !withheld.contains(g))
+        .collect();
 
     let mut shapes = Vec::new();
     let mut all_targets: BTreeSet<String> = BTreeSet::new();
-    for (graph_iri, targets) in attached_shape_graphs(store, auth_db, base_url, studio, dataset) {
+    for (graph_iri, targets) in attached_shape_graphs(store, auth_db, base_url, studio, dataset)
+        .into_iter()
+        .filter(|(g, _)| !withheld.contains(g))
+    {
         let turtle = store
             .graph_store_get(Some(&graph_iri), oxigraph::io::RdfFormat::Turtle)
             .ok()

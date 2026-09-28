@@ -1,0 +1,8 @@
+# Rule POSITIVE — a bridge over water with a cs5 part MUST infer def:inspectionPriority "high".
+@prefix def: <https://example.org/def/> .
+@prefix eb:  <https://example.org/id/example-bridge/> .
+@prefix bot: <https://w3id.org/bot#> .
+@prefix skos:<http://www.w3.org/2004/02/skos/core#> .
+eb:PoorBridge a def:Bridge ; def:crossesWaterway eb:ExampleRiver ; bot:containsElement eb:PoorPart .
+eb:PoorPart a def:BridgeComponent ; def:conditionScore eb:cs5 .
+eb:cs5 a skos:Concept ; skos:notation "5" .

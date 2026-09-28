@@ -6,7 +6,14 @@
 //!   (viewer feed, browse, SPARQL demos) consumes: `bot:Site/Building/Storey/
 //!   Space/Element` with `bot:containsElement`/`bot:hasSubElement` containment,
 //!   `rdfs:label`s, IFC GlobalIds, property-set values as `props:` data
-//!   properties, and FOG file references back to the original IFC.
+//!   properties, and FOG file references back to the original IFC. On top of
+//!   that flat contract, and never instead of it: the NEN 2660-2 relation
+//!   family beside the BOT edges, property and quantity values as typed nodes
+//!   with QUDT units, classifications as SKOS concepts, materials, the IFC 4.3
+//!   facility spine under `bot:Zone`, and the map conversion as a
+//!   CRS-qualified geometry — all under the lift's own namespace,
+//!   `{base_url}/ns/ifc-lift#`, whose ontology ships as the `ifc-lift` seed
+//!   bundle.
 //! * **ifcOWL layer** (optional) — a complete instance-level lift of the STEP
 //!   file: every instance typed in the schema's ifcOWL namespace with all its
 //!   attributes. Encoding is the pragmatic "direct" style (literals attached
@@ -20,12 +27,14 @@
 pub mod names;
 pub mod rdf;
 pub mod step;
+pub mod units;
 
 /// Options for one conversion run.
 #[derive(Default)]
 pub struct ConvertOptions {
     /// Base IRI for minted instances; rooted entities get `{base}{GlobalId}`,
-    /// unrooted ones `{base}i{stepId}`. Must end with `/` or `#`.
+    /// unrooted ones `{base}i{stepId}`. Must end with `/` or `#`. The lift's
+    /// own namespace is derived from it — see [`rdf::lift_namespace`].
     pub inst_base: String,
     /// Public URL of the stored IFC file — emitted as `fog:asIfc…` references
     /// (per element with a `#GlobalId` fragment) so viewers and downloads can
@@ -65,6 +74,31 @@ pub struct IfcStats {
     pub spaces: usize,
     pub bot_triples: usize,
     pub ifcowl_triples: usize,
+    /// IFC 4.3 facilities and facility parts (bridges, roads, …) in the
+    /// spatial spine.
+    #[serde(default)]
+    pub facilities: usize,
+    /// Physical quantities lifted from element quantity sets.
+    #[serde(default)]
+    pub quantities: usize,
+    /// Property values lifted as typed nodes (every kind, not only single).
+    #[serde(default)]
+    pub properties: usize,
+    /// Units a quantity or property declared that have no QUDT IRI in the
+    /// table — emitted as a label (and a conversion factor when there is
+    /// one), never as a guessed IRI.
+    #[serde(default)]
+    pub unmapped_units: usize,
+    /// Classification references lifted to SKOS concepts.
+    #[serde(default)]
+    pub classifications: usize,
+    /// Element–material associations.
+    #[serde(default)]
+    pub materials: usize,
+    /// Whether the model context carries an `IfcMapConversion` that was
+    /// lifted (its CRS may still be unrecognised).
+    #[serde(default)]
+    pub map_conversion: bool,
 }
 
 /// Parse `input` and emit RDF. `bot_sink` / `ifcowl_sink` receive N-Triples

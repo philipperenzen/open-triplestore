@@ -1,9 +1,21 @@
-# Creative Commons Rights Expression Language — The Creative Commons Rights
-# Expression Language (CC REL) lets you describe copyright licenses in RDF.
-# Full vocabulary as published in the Linked Open Vocabularies (LOV) corpus
-# snapshot of 2025-12-18 (https://lov.linkeddata.es/ — dataset CC BY 4.0),
-# version v2008-03-03 (2008-03-03).
-# Source: http://creativecommons.org/schema.rdf  (ns http://creativecommons.org/ns#)
+# Creative Commons Rights Expression Language (ccREL) schema — lets you describe
+# copyright licences in RDF (2008-03-03 text).
+# Source: http://creativecommons.org/schema.rdf — triples identical to
+# https://github.com/creativecommons/cc.licenserdf/blob/master/cc/licenserdf/rdf/schema.rdf
+# with language tags written in lower case; https://creativecommons.org/schema.rdf
+# now serves the same terms with whitespace differences in some literals.
+# Obtained via the Linked Open Vocabularies (LOV) corpus snapshot of 2025-12-18
+# (https://lov.linkeddata.es/), which re-serialized it as Turtle. LOV's own
+# CC BY 4.0 licence covers LOV's catalogue; it does not relicense this vocabulary.
+# Creator: Creative Commons. Licence: CC BY 4.0,
+# https://creativecommons.org/licenses/by/4.0/, per
+# https://creativecommons.org/policies/ (the deprecated cc.licenserdf repository
+# also offers the schema under the MIT licence). No endorsement by Creative
+# Commons is implied.
+# Changes: re-serialized as Turtle by LOV (triples unchanged); this comment
+# header was written by Open Triplestore (2026-07-24, revised 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The vocabulary, as re-serialized by LOV, starts below this line. ----
 @prefix cc: <http://creativecommons.org/ns#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .

@@ -8,7 +8,9 @@ import type { ModelFormat } from './models';
 
 export type PreviewRequest =
   | { kind: 'model'; url: string; format: ModelFormat; title: string }
-  | { kind: 'geo'; wkts: string[]; title: string };
+  // `sources`: where the geometry came from (graph or resource IRIs), so the
+  // preview can show the credit a licensed source requires.
+  | { kind: 'geo'; wkts: string[]; title: string; sources?: string[] };
 
 export const preview = writable<PreviewRequest | null>(null);
 

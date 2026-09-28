@@ -3,8 +3,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
 
-// Only `AlertManager::send_direct` is used by the server binary; the rest of the
-// alerting API is exercised by the library surface/tests.
+// `send_direct` (targeted saved-query notifications) and `dispatch` (the ops
+// webhook/SMTP fan-out, raised on scheduled-backup failure) are both used by the
+// server binary. The allow covers the remaining constructors, which the library
+// surface and tests exercise.
 #[allow(dead_code)]
 mod alerting;
 mod assets;
@@ -12,24 +14,34 @@ mod auth;
 mod backup;
 mod catalog;
 mod commit_log;
+mod conformance;
+mod containers;
 mod data_models;
 mod dataset_versions;
 mod dcat;
 mod docs;
 mod email;
+mod entailment;
+mod federation;
 mod geo;
 mod ifc;
 mod imports;
 mod kind_detector;
+mod ldes;
 #[cfg(feature = "ldp")]
 mod ldp;
 mod netutil;
 mod ogcapi;
 mod plugins;
 mod prefixes;
+mod property_states;
+mod provenance;
+mod rdf_patch;
 mod reasoning;
+mod remote;
 mod rml;
 mod saved_queries;
+mod secrets;
 mod seed_bundles;
 mod server;
 mod shacl;
@@ -37,7 +49,9 @@ mod shacl_studio;
 mod shaclc;
 #[cfg(feature = "shex")]
 mod shex;
+mod sources;
 mod sparql;
+mod spec_import;
 mod storage;
 mod store;
 mod svc_registry;
@@ -115,8 +129,9 @@ struct Cli {
     promote_super_admin: Option<String>,
 
     /// Restore the store + identity DB from a backup id (in BACKUP_DIR, default
-    /// {data-dir}/backups), REPLACING current data, then exit. Encrypted backups
-    /// must be decrypted manually first.
+    /// {data-dir}/backups), REPLACING current data, then exit. For an encrypted
+    /// backup, set BACKUP_DECRYPT_IDENTITY_PATH to your `age-keygen` identity
+    /// file — the server stores only the recipient, never the identity.
     #[arg(long, value_name = "BACKUP_ID")]
     restore: Option<String>,
 
@@ -317,9 +332,16 @@ async fn main() -> anyhow::Result<()> {
             .db_path
             .clone()
             .unwrap_or_else(|| cli.data_dir.join("auth.db"));
+        // Only needed for an age-encrypted backup; the server never holds this
+        // identity, so restoring one is an explicit operator action.
+        let identity = std::env::var("BACKUP_DECRYPT_IDENTITY_PATH")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from);
         info!("Restoring backup {id} from {}…", backup_dir.display());
         let store = store::TripleStore::open(&cli.data_dir)?;
-        let manifest = backup::restore_backup(&backup_dir, id, &store, &target_sqlite)?;
+        let manifest =
+            backup::restore_backup(&backup_dir, id, &store, &target_sqlite, identity.as_deref())?;
         info!(
             "Restored backup {} ({} quads). Restart without --restore to run the server.",
             manifest.id, manifest.rdf_quad_count
@@ -452,7 +474,20 @@ async fn main() -> anyhow::Result<()> {
     // Initialize asset storage — S3/MinIO if configured, local filesystem otherwise
     let object_store = if let Some(endpoint) = cli.s3_endpoint {
         let access_key = cli.s3_access_key.unwrap_or_default();
-        let secret_key = cli.s3_secret_key.unwrap_or_default();
+        // A secret reference (env:/file:/vault:) is resolved here; a raw value
+        // is refused in the production posture and warned about elsewhere.
+        let secret_key = match cli
+            .s3_secret_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            Some(v) => secrets::resolve_configured("S3_SECRET_KEY", v)
+                .map_err(|e| anyhow::anyhow!("S3_SECRET_KEY: {e}"))?
+                .expose()
+                .to_string(),
+            None => String::new(),
+        };
         let obj_store = storage::ObjectStore::new(
             &endpoint,
             &cli.s3_bucket,
@@ -544,6 +579,7 @@ async fn main() -> anyhow::Result<()> {
         cli.registry_url,
         cli.registry_token,
         cli.data_dir.clone(),
+        db_path.clone(),
         #[cfg(feature = "text-search")]
         text_index,
         #[cfg(feature = "vocab-search")]

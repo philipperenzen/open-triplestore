@@ -1,10 +1,25 @@
-# CSV on the Web Vocabulary — This document describes the RDFS vocabulary
-# description used in the Metadata Vocabulary for Tabular Data along with the
-# default JSON-LD Context.
-# Full vocabulary as published in the Linked Open Vocabularies (LOV) corpus
-# snapshot of 2025-12-18 (https://lov.linkeddata.es/ — dataset CC BY 4.0),
-# version v2015-12-17 (2015-12-17).
-# Source: http://www.w3.org/ns/csvw#  (ns http://www.w3.org/ns/csvw#)
+# CSVW Namespace Vocabulary Terms — the RDFS vocabulary used in the Metadata
+# Vocabulary for Tabular Data, along with the default JSON-LD context.
+# Source: http://www.w3.org/ns/csvw — this copy's triples are identical to
+# https://github.com/w3c/csvw/blob/63ee7a7/ns/csvw.ttl (2015-07-02; its
+# owl:versionInfo names commit 6e6daf9), the revision published at that URI in
+# 2015-2016. It is superseded by the 2017-06-06 revision at
+# https://www.w3.org/ns/csvw.ttl.
+# Obtained via the Linked Open Vocabularies (LOV) corpus snapshot of 2025-12-18
+# (https://lov.linkeddata.es/), which re-serialized it as Turtle. LOV's own
+# CC BY 4.0 licence covers LOV's catalogue; it does not relicense this vocabulary.
+# Status: namespace document of Metadata Vocabulary for Tabular Data, W3C
+# Recommendation 17 December 2015,
+# https://www.w3.org/TR/2015/REC-tabular-metadata-20151217/
+# Copyright © 2015 World Wide Web Consortium. https://www.w3.org/copyright/document-license-2023/
+# Copyright © 2023 W3C®. This software or document includes material copied from
+# or derived from CSVW Namespace Vocabulary Terms,
+# http://www.w3.org/ns/csvw.
+# Licence: W3C Document License (2023), https://www.w3.org/copyright/document-license-2023/
+# Changes: re-serialized as Turtle by LOV (triples unchanged); this comment
+# header was written by Open Triplestore (2026-07-24, revised 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The vocabulary, as re-serialized by LOV, starts below this line. ----
 @prefix csvw: <http://www.w3.org/ns/csvw#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .

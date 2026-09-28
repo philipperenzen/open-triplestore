@@ -1112,8 +1112,13 @@ pub async fn import_cityjson_bytes(
     let _ = state.auth_db.add_dataset_graph(dataset_id, &graph);
     let _ = super::handlers::detect_and_store_graph_role(state, dataset_id, &graph);
     state.auth_db.invalidate_accessible_graphs_cache();
+    // Writer-pays text-index maintenance for exactly the produced graph.
     #[cfg(feature = "text-search")]
-    state.mark_text_dirty();
+    {
+        let st = state.clone();
+        let g = graph.clone();
+        let _ = tokio::task::spawn_blocking(move || st.refresh_text_index_graphs(&[g])).await;
+    }
 
     Ok(CityJsonImportOutcome {
         asset_id,
@@ -1211,29 +1216,18 @@ pub async fn ingest_cityjson(
 
     // Per-graph write boundary: a non-admin may only target a graph already
     // registered to this dataset or under its canonical IRI namespace (mirrors
-    // the bulk-import / Graph Store Protocol gate).
-    if !user.is_admin() {
-        if let Some(t) = target_graph.as_deref() {
-            let namespace = format!(
-                "{}/dataset/{}",
-                state.base_url.trim_end_matches('/'),
-                dataset_id
-            );
-            let registered = state
-                .auth_db
-                .list_dataset_graphs(&dataset_id)
-                .unwrap_or_default();
-            let owned_by_other = state
-                .auth_db
-                .graph_has_other_dataset_refs(t, &dataset_id)
-                .unwrap_or(true);
-            let in_scope = registered.iter().any(|g| g == t) || t.starts_with(&namespace);
-            if owned_by_other || !in_scope {
-                return Err(AppError::Forbidden(format!(
-                    "Target graph <{t}> is outside dataset '{dataset_id}'"
-                )));
-            }
-        }
+    // the bulk-import / Graph Store Protocol gate), and nobody a model-registry
+    // graph.
+    if let Some(t) = target_graph.as_deref() {
+        crate::auth::dataset_graph::authorize_dataset_write_target(
+            &state.store,
+            &state.auth_db,
+            &state.base_url,
+            &dataset_id,
+            t,
+            user.is_admin(),
+        )
+        .map_err(AppError::Forbidden)?;
     }
 
     if q.preview {

@@ -54,13 +54,54 @@ const MAX_ITERATIONS: usize = 500;
 pub struct El2Classifier<'a> {
     store: &'a TripleStore,
     target_graph: String,
+    /// When set, the rules read ONLY these graphs (plus the target graph).
+    /// Without it they read the unnamed default graph, as they always did.
+    sources: Option<Vec<String>>,
 }
 
 impl<'a> El2Classifier<'a> {
+    /// Restrict the rules to `sources` (plus the target graph). Without a
+    /// scope the rules read the unnamed default graph only, so a dataset's
+    /// named graphs — and the model version it conforms to — were invisible to
+    /// materialisation; this is what `POST /api/reasoning/materialize` sets
+    /// from `source_graphs` or the dataset's conformance layer.
+    pub fn with_sources(mut self, sources: Vec<String>) -> Self {
+        self.sources = Some(sources);
+        self
+    }
+
+    fn scope(&self) -> Option<Vec<String>> {
+        self.sources.as_ref().map(|s| {
+            let mut g = s.clone();
+            if !g.contains(&self.target_graph) {
+                g.push(self.target_graph.clone());
+            }
+            g
+        })
+    }
+
+    fn run_update(&self, sparql: &str) -> Result<(), crate::store::engine::StoreError> {
+        match self.scope() {
+            Some(scope) => self.store.update_scoped(sparql, &scope),
+            None => self.store.update(sparql),
+        }
+    }
+
+    fn run_query(
+        &self,
+        sparql: &str,
+    ) -> Result<oxigraph::sparql::QueryResults<'static>, crate::store::engine::StoreError> {
+        match self.scope() {
+            Some(scope) => self.store.query_scoped(sparql, &scope),
+            None => self.store.query(sparql),
+        }
+    }
+
     pub fn new(store: &'a TripleStore) -> Self {
         Self {
             store,
             target_graph: OWL2_EL_ENTAILMENT_GRAPH.to_string(),
+            sources: None,
         }
     }
 
@@ -73,6 +114,8 @@ impl<'a> El2Classifier<'a> {
     pub fn classify(&self) -> Result<ReasoningReport, ReasoningError> {
         let start = Instant::now();
         let mut iterations = 0usize;
+        // Report the delta this run produced, not the graph's final size.
+        let initial = count_graph(self.store, &self.target_graph)?;
 
         info!("OWL 2 EL classification → <{}>", self.target_graph);
 
@@ -116,7 +159,7 @@ impl<'a> El2Classifier<'a> {
 
         Ok(ReasoningReport {
             regime: "owl2-el".to_string(),
-            triples_added: final_count,
+            triples_added: final_count.saturating_sub(initial),
             iterations,
             elapsed_ms: start.elapsed().as_millis() as u64,
             target_graph: self.target_graph.clone(),
@@ -129,7 +172,7 @@ impl<'a> El2Classifier<'a> {
         let q = format!(
             "ASK {{ ?c <{RDFS_SUB_CLASS_OF}> <{OWL_NOTHING}> . FILTER(?c != <{OWL_NOTHING}>) }}"
         );
-        match self.store.query(&q)? {
+        match self.run_query(&q)? {
             oxigraph::sparql::QueryResults::Boolean(b) => Ok(!b),
             _ => Ok(true),
         }
@@ -145,7 +188,7 @@ impl<'a> El2Classifier<'a> {
                          FILTER(?c1 != ?c3) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -164,7 +207,7 @@ impl<'a> El2Classifier<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q1)?;
+        self.run_update(&q1)?;
 
         // Join: if A ⊑ B1 and A ⊑ B2 and (B1 ∩ B2 exists as a class) → A ⊑ (B1 ∩ B2)
         let q2 = format!(
@@ -181,7 +224,7 @@ impl<'a> El2Classifier<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q2)?;
+        self.run_update(&q2)?;
         Ok(())
     }
 
@@ -202,7 +245,7 @@ impl<'a> El2Classifier<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -221,7 +264,7 @@ impl<'a> El2Classifier<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -243,7 +286,7 @@ impl<'a> El2Classifier<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -260,7 +303,7 @@ impl<'a> El2Classifier<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -274,7 +317,7 @@ impl<'a> El2Classifier<'a> {
                WHERE {{ ?p <{RDFS_DOMAIN}> ?a . ?x ?p ?y }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -288,7 +331,7 @@ impl<'a> El2Classifier<'a> {
                         FILTER(isIRI(?y) || isBlank(?y)) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -303,7 +346,7 @@ impl<'a> El2Classifier<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -327,7 +370,7 @@ impl<'a> El2Classifier<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -352,7 +395,7 @@ impl<'a> El2Classifier<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -374,7 +417,7 @@ impl<'a> El2Classifier<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -394,7 +437,7 @@ impl<'a> El2Classifier<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -416,7 +459,7 @@ impl<'a> El2Classifier<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 }

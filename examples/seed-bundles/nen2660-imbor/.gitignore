@@ -1,0 +1,5 @@
+# fetched payloads (run ./fetch.sh)
+*.ttl
+!instances.ttl
+imbor.zip
+imbor-release/

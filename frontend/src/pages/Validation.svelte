@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import {
     listDatasets, validateDataset, updateDatasetShacl, getDataset, getOrganisation,
-    listAccessibleShapeGraphs, listOrganisations,
+    listAccessibleShapeGraphs, listShapeGraphs, listOrganisations,
     getLatestValidationRun, getValidationHistory, getValidationRun, listLatestValidationRuns,
     listPublicUsers, getGeoStats,
   } from '../lib/api.js';
@@ -13,6 +13,7 @@
   import Select from '../components/Select.svelte';
   import { isAuthenticated, user } from '../lib/stores.js';
   import PageHeader from '../components/PageHeader.svelte';
+  import ShaclStudioNav from '../components/ShaclStudioNav.svelte';
   import ShapesEditor from '../components/ShapesEditor.svelte';
   import IssueResults from '../components/IssueResults.svelte';
   import { toastError } from '../lib/toast.ts';
@@ -20,6 +21,9 @@
 
   let organisations = [];
   let accessibleShapeGraphs = [];
+  // The SHACL Library, i.e. the same shape graphs the Shapes view lists. Fetched
+  // once for the page because every dataset row offers the same set.
+  let shapeLibrary = [];
   let userMap = {}; // user id -> display name, for resolving dataset owners
 
   let backDatasetId = null;
@@ -85,6 +89,7 @@
       // Always resolve the current user's own datasets, even if not public.
       if ($user?.id) userMap[String($user.id)] = $user.display_name || $user.username;
       try { const r = await listAccessibleShapeGraphs(); accessibleShapeGraphs = r?.shape_graphs || []; } catch {}
+      try { shapeLibrary = (await listShapeGraphs()) || []; } catch {}
       datasets = await listDatasets();
       if (backDatasetId) {
         datasets = datasets.filter(d => d.id === backDatasetId);
@@ -216,6 +221,41 @@
   $: shapeSourceDatasetIds = new Set((accessibleShapeGraphs || []).map(sg => String(sg.dataset_id)).filter(s => s && s !== 'undefined'));
   $: noShapesIds = new Set(datasets.filter(d => !d.shapes_graph_iri && !shapeSourceDatasetIds.has(String(d.id))).map(d => d.id));
 
+  // What the inline "link shapes" picker offers. The Library comes first: those
+  // are the shape graphs the Shapes view shows and the ones a user has just
+  // authored, and each carries the `graph_iri` that `updateDatasetShacl` stores
+  // as `shapes_graph_iri`. Shape graphs older than the Library have no entry
+  // there, so the IRIs other datasets already point at are folded in behind
+  // them under their dataset's name — nothing that used to be linkable stops
+  // being linkable. The shape count disambiguates similarly named graphs.
+  $: shapeLinkOptions = (() => {
+    const opts = [];
+    const seen = new Set();
+    for (const sg of shapeLibrary || []) {
+      if (!sg.graph_iri || seen.has(sg.graph_iri)) continue;
+      seen.add(sg.graph_iri);
+      const count = sg.shape_count ?? 0;
+      const noun = count === 1 ? $t('pages.shapeLibrary.shapeSingular') : $t('pages.shapeLibrary.shapePlural');
+      opts.push({ value: sg.graph_iri, label: `${sg.name || sg.graph_iri} · ${count} ${noun}` });
+    }
+    // One dataset can expose several shapes-role graphs, and then its name alone
+    // names none of them; the IRI's last segment is what tells them apart.
+    const nameUses = {};
+    for (const sg of accessibleShapeGraphs || []) {
+      if (sg.shapes_graph_iri) nameUses[sg.dataset_name] = (nameUses[sg.dataset_name] || 0) + 1;
+    }
+    for (const sg of accessibleShapeGraphs || []) {
+      if (!sg.shapes_graph_iri || seen.has(sg.shapes_graph_iri)) continue;
+      seen.add(sg.shapes_graph_iri);
+      const tail = sg.shapes_graph_iri.split(/[/#]/).filter(Boolean).pop();
+      const label = sg.dataset_name
+        ? (nameUses[sg.dataset_name] > 1 ? `${sg.dataset_name} · ${tail}` : sg.dataset_name)
+        : sg.shapes_graph_iri;
+      opts.push({ value: sg.shapes_graph_iri, label });
+    }
+    return opts;
+  })();
+
   // Global summary across datasets (uses persisted summaries + freshly run reports).
   $: summary = (() => {
     const s = { conforms: 0, violations: 0, warnings: 0, infos: 0, validated: 0, total: datasets.length, noShapes: 0 };
@@ -243,6 +283,11 @@
       <button class="btn" on:click={() => navigate('/login')}>{$t('pages.validation.signIn')}</button>
     </div>
   {:else}
+
+  <!-- This page is the Studio's dataset overview, so it carries the Studio's
+       own bar: it was reachable from the Overview card but had no way back
+       except the browser's own. -->
+  <ShaclStudioNav />
 
   <PageHeader
     title={$t('pages.validation.title')}
@@ -330,13 +375,13 @@
                   <span class="pill pill-error"><AlertTriangle size={11} /> {$t('system.error')}</span>
                 {:else if noShapesIds.has(ds.id)}
                   <span class="pill pill-muted">{$t('pages.validation.noShapes')}</span>
-                  {#if accessibleShapeGraphs.some((sg) => sg.shapes_graph_iri)}
+                  {#if shapeLinkOptions.length}
                     <div class="inline-shapes-picker" on:click|stopPropagation role="presentation">
                       <Select
                         size="sm"
                         value=""
                         placeholder={$t('pages.validation.linkShapesPlaceholder')}
-                        options={accessibleShapeGraphs.filter((sg) => sg.shapes_graph_iri).map((sg) => ({ value: sg.shapes_graph_iri, label: sg.dataset_name || sg.shapes_graph_iri }))}
+                        options={shapeLinkOptions}
                         on:change={(e) => { if (e.detail) linkShapes(ds, e.detail); }}
                       />
                     </div>
@@ -354,6 +399,7 @@
                 disabled={status.loading || noShapesIds.has(ds.id)}
                 title={noShapesIds.has(ds.id) ? $t('pages.validation.configureShapesFirst') : $t('pages.validation.runValidation')}>
                 {#if status.loading}<Loader2 size={12} class="spin" />{:else}<Play size={12} />{/if}
+                <span class="run-label">{$t('pages.validation.runValidation')}</span>
               </button>
               <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
               <label class="toggle" on:click|stopPropagation on:keydown|stopPropagation>
@@ -470,8 +516,19 @@
   .auth-gate h2 { font-size: 1.3rem; font-weight: 600; margin: 0; }
   .auth-gate p { color: var(--ink-600); max-width: 30rem; margin: 0; }
   :global(.auth-gate-icon) { color: var(--ink-400); }
-  .owner-chip { display: inline-flex; align-items: center; gap: 0.3rem; margin-left: 0.4rem; font-size: 0.72rem; color: var(--ink-500); background: #f1f5f9; padding: 1px 6px 1px 2px; border-radius: 10px; }
-  .owner-chip-name { max-width: 8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* A chip naming an owner shows the owner's name, all of it. It used to stop
+     at 7rem with an ellipsis, which turns two organisations with a shared
+     prefix into the same chip.
+     No `min-width: 0` here, which is what let the flex algorithm take the chip
+     below the width of its own content — the name then spilled over the end of
+     the pill background. Its automatic minimum is its longest word, and the
+     name wraps inside it; `.ds-name` cannot be starved by that because it has
+     its own 4.5rem floor and the row wraps. */
+  .owner-chip { display: inline-flex; align-items: flex-start; gap: 0.3rem; margin-left: 0.4rem; font-size: 0.72rem; color: var(--ink-500); background: #f1f5f9; padding: 1px 6px 1px 2px; border-radius: 10px; flex: 0 1 auto; }
+  /* `break-word`, not `anywhere`: an owner is a human name, so it wraps
+     between words and only splits one if a single word cannot fit. At 375px
+     `anywhere` broke "Open Triplestore" into three lines with a stray "e". */
+  .owner-chip-name { overflow-wrap: break-word; }
 
   .error { color: #dc2626; background: #fef2f2; border: 1px solid #fecaca; padding: 0.6rem 0.8rem; border-radius: 10px; font-size: 0.85rem; }
 
@@ -499,9 +556,19 @@
   .dataset-row:hover { border-color: #7ED6D0; background: #f0fdfa; }
   .dataset-row.selected { border-color: #2F7A8C; background: linear-gradient(135deg, rgba(126,214,208,0.15), rgba(255,255,255,0.6)); box-shadow: inset 0 0 0 1px rgba(47,122,140,0.25); }
 
-  .row-main { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.35rem; }
-  .row-title { display: flex; align-items: center; gap: 0.35rem; min-width: 0; color: #475569; }
-  .ds-name { font-weight: 600; font-size: 0.88rem; color: #1e293b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row-main { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.35rem; flex-wrap: wrap; }
+  /* The title takes the row and the status wraps under it when the panel is
+     narrow — it carries a pill plus a shapes picker and would otherwise
+     leave the name nothing. */
+  .row-title { display: flex; align-items: center; gap: 0.35rem; min-width: 0; flex: 1 1 11rem; color: #475569; }
+  /* `overflow: hidden` zeroes a flex item's automatic minimum size, so the
+     name would otherwise shrink to 0 while the owner chip (overflow visible,
+     minimum = its content) keeps everything. The floor is the name's; the
+     chip is what yields. */
+  /* The floor stays: a flex item that may shrink to nothing did, and that was
+     the bug that made this list nameless. What goes is the clipping — a
+     dataset whose name does not fit on one line takes two. */
+  .ds-name { flex: 1 1 auto; min-width: 4.5rem; font-weight: 600; font-size: 0.88rem; color: #1e293b; overflow-wrap: break-word; }
   .row-status { display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; }
   .ran-at { display: inline-flex; align-items: center; gap: 0.2rem; font-size: 0.68rem; color: #94a3b8; }
 
@@ -514,6 +581,9 @@
 
   .row-actions { display: flex; align-items: center; gap: 0.35rem; }
   .ds-error { color: #b91c1c; font-size: 0.75rem; margin: 0.3rem 0 0; }
+  /* The run button names itself only where there is room for a word; on a wide
+     panel the row is a dense list and the icon plus its title carry it. */
+  .run-label { display: none; }
 
   .toggle { position: relative; display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; user-select: none; }
   .toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
@@ -568,6 +638,33 @@
     .summary-actions .btn { width: 100%; }
     .split { grid-template-columns: 1fr; }
     .ds-list { max-height: none; }
+  }
+
+  /* Phone. Below 720px the app's own `.btn { width: 100% }` turned the
+     icon-only run button into a wide empty bar, which left the toggle beside
+     it so little room that "On write" broke over two lines. The button takes
+     its own width back and says what it does; the toggle keeps the far end of
+     the line and drops to a line of its own when the two no longer fit. */
+  @media (max-width: 720px) {
+    .row-actions { flex-wrap: wrap; justify-content: space-between; gap: 0.5rem; margin-top: 0.15rem; }
+    .row-actions .btn { width: auto; min-height: 2.5rem; padding: 0.45rem 0.9rem; }
+    .run-label { display: inline; }
+    .toggle { min-height: 2.5rem; }
+
+    /* The shapes picker is a control, not a chip: it takes the width of the
+       status line rather than the sliver left over beside the pill — which
+       means the status line has to take the row's width first. */
+    .row-status { flex: 1 1 100%; }
+    .inline-shapes-picker { flex: 1 1 100%; margin-left: 0; }
+    .inline-shapes-picker :global(.sel-trigger) { min-height: 2.5rem; }
+
+    .pane-tabs { flex-wrap: wrap; }
+    .tab-row { flex: 1 1 100%; flex-wrap: wrap; }
+    .tab { min-height: 2.5rem; }
+    .pane-tabs > .btn { width: 100%; min-height: 2.5rem; }
+
+    .history-main { flex-wrap: wrap; }
+    .history-time { margin-left: auto; }
   }
 
   /* ---- Dark mode overrides (scoped rules out-specify global theme.css) ---- */

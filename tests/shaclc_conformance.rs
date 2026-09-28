@@ -13,7 +13,9 @@
 //! These tests exercise the supported productions and verify a Turtle ->
 //! SHACL-C -> Turtle round-trip preserves the core constraints.
 
-use open_triplestore::shaclc::{parse, serialize};
+mod common;
+
+use open_triplestore::shaclc::{parse, parse_lenient, serialize};
 use open_triplestore::store::TripleStore;
 use oxigraph::io::RdfFormat;
 
@@ -157,15 +159,149 @@ shape ex:PersonShape -> ex:Person {
     );
 }
 
-// Documented behavior: the parser is LENIENT — non-shape input does not hard-error;
-// it yields a document with no shapes (input not matching the grammar is ignored).
-// (A stricter parser would reject trailing garbage; noted as a minor robustness gap.)
+// The parser is STRICT by default: input the grammar does not know is an
+// error naming its position. It used to be lenient — unrecognised input was
+// silently dropped — so a spec-conformant SHACL-C document using forms this
+// mini-grammar does not implement parsed to an EMPTY document, and uploading
+// it replaced the dataset's shapes graph with nothing while answering 200.
 #[test]
-fn shaclc_lenient_on_non_shape_input() {
+fn shaclc_rejects_unrecognised_input_by_default() {
     let r = parse("this is not valid shaclc @@@ {{{");
-    assert!(r.is_ok(), "parser is lenient and does not hard-error");
+    let err = r.expect_err("garbage must be a parse error, not an empty document");
+    assert!(
+        err.contains("line 1") && err.contains("unrecognised input"),
+        "the error names the position: {err}"
+    );
+    assert!(
+        err.contains("lenient=true"),
+        "the error names the opt-out: {err}"
+    );
+}
+
+// An unknown constraint inside an otherwise valid shape is an error too —
+// the whole shape (not just the token) would have been dropped before.
+#[test]
+fn shaclc_rejects_an_unknown_constraint_inside_a_shape() {
+    let input = r#"
+PREFIX ex: <http://example.org/>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+
+shape ex:S -> ex:T {
+    ex:name xsd:string [1..1] ;
+    ex:age frobnicate ;
+}
+"#;
+    let err = parse(input).expect_err("an unknown constraint keyword is an error");
+    assert!(
+        err.contains("line 5") || err.contains("line 4"),
+        "position named: {err}"
+    );
+}
+
+// `parse_lenient` keeps the old drop-what-you-cannot-parse behaviour for
+// callers that opt in (`?lenient=true` over HTTP).
+#[test]
+fn shaclc_lenient_mode_ignores_unrecognised_input() {
+    let r = parse_lenient("this is not valid shaclc @@@ {{{");
+    assert!(r.is_ok(), "lenient mode does not hard-error");
     assert!(
         !r.unwrap().contains("sh:NodeShape"),
         "no shapes are produced from non-shape input"
+    );
+}
+
+// Over HTTP: `POST /api/shaclc/parse` is strict (400 with the position) and
+// `?lenient=true` restores the old behaviour.
+mod http {
+    use super::common::*;
+    use axum::body::Body;
+    use axum::http::{header, Method, Request, StatusCode};
+    use tower::ServiceExt as _;
+
+    async fn post(uri: &str, body: &str) -> (StatusCode, String) {
+        // The endpoint is authenticated compute now, so these strictness cases
+        // carry a token; the auth contract itself lives in
+        // tests/api_auth_exposure.rs.
+        let (state, token) = admin_state();
+        let app = test_app(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "text/shaclc")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let st = resp.status();
+        (st, body_text(resp.into_body()).await)
+    }
+
+    #[tokio::test]
+    async fn shaclc_parse_endpoint_is_strict_unless_lenient_is_requested() {
+        let garbage = "PREFIX ex: <http://example.org/>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\nshape ex:S -> ex:T { ex:p xsd:string [1..1] ; }\nnonsense here";
+        let (st, txt) = post("/api/shaclc/parse", garbage).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
+        assert!(txt.contains("unrecognised input"), "{txt}");
+        let (st, txt) = post("/api/shaclc/parse?lenient=true", garbage).await;
+        assert_eq!(st, StatusCode::OK, "{txt}");
+        assert!(
+            txt.contains("sh:NodeShape"),
+            "the parsable shape is kept: {txt}"
+        );
+    }
+}
+
+// Serializing a shape with SEVERAL blank-node property shapes — the standard
+// `sh:property [ … ]` idiom — must give each property its own path and datatype.
+//
+// The serializer resolved a blank-node property shape by interpolating `_:bN`
+// into a SPARQL query. In SPARQL a blank node is an existential VARIABLE, not a
+// reference to the stored node, so the pattern matched every subject in the
+// graph and each property drew an arbitrary path/datatype from whichever
+// property shape matched first. The existing round-trip test uses a shape with
+// ONE property, where "arbitrary" and "correct" coincide, so it never fired.
+#[test]
+fn shaclc_serializes_each_blank_node_property_shape_distinctly() {
+    let turtle = r#"
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix ex: <http://example.org/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+ex:PersonShape a sh:NodeShape ;
+    sh:targetClass ex:Person ;
+    sh:property [ sh:path ex:name ; sh:datatype xsd:string ] ;
+    sh:property [ sh:path ex:age  ; sh:datatype xsd:integer ] .
+"#;
+    let store = load_turtle(turtle);
+    let out = serialize(&store, "urn:shapes").expect("serialize");
+
+    assert!(
+        out.contains("name") && out.contains("age"),
+        "both property paths must appear, got:\n{out}"
+    );
+
+    // Each path must be paired with ITS OWN datatype. Under the old lookup both
+    // lines got whichever datatype the wildcard match returned first.
+    let name_line = out
+        .lines()
+        .find(|l| l.contains("name"))
+        .unwrap_or_default()
+        .to_string();
+    let age_line = out
+        .lines()
+        .find(|l| l.contains("age"))
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        name_line.contains("string") && !name_line.contains("integer"),
+        "ex:name must keep xsd:string, got: {name_line:?}\nfull output:\n{out}"
+    );
+    assert!(
+        age_line.contains("integer") && !age_line.contains("string"),
+        "ex:age must keep xsd:integer, got: {age_line:?}\nfull output:\n{out}"
     );
 }

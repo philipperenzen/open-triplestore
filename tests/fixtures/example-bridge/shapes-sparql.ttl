@@ -1,0 +1,96 @@
+# Reference example: a fictional arch bridge — SHACL-SPARQL constraints + the
+# ex:prefixes declaration they (and shapes-af.ttl) share.
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix def:  <https://example.org/def/> .
+@prefix ex:   <https://example.org/shape/def#> .
+
+### Prefix declaration for SHACL-SPARQL
+ex:prefixes
+    sh:declare [ sh:prefix "rdf"  ; sh:namespace "http://www.w3.org/1999/02/22-rdf-syntax-ns#"^^xsd:anyURI ] ,
+    [ sh:prefix "def"  ; sh:namespace "https://example.org/def/"^^xsd:anyURI ] ,
+    [ sh:prefix "geo"  ; sh:namespace "http://www.opengis.net/ont/geosparql#"^^xsd:anyURI ] ,
+    [ sh:prefix "geof" ; sh:namespace "http://www.opengis.net/def/function/geosparql/"^^xsd:anyURI ] ,
+    [ sh:prefix "uom"  ; sh:namespace "http://www.opengis.net/def/uom/OGC/1.0/"^^xsd:anyURI ] ,
+    [ sh:prefix "qudt" ; sh:namespace "http://qudt.org/schema/qudt/"^^xsd:anyURI ] ,
+    [ sh:prefix "ex"   ; sh:namespace "https://example.org/shape/def#"^^xsd:anyURI ] .
+
+### Aggregate — sum of span lengths vs total length (HAVING). Severity = Warning.
+ex:SpanSumShape a sh:NodeShape ;
+    sh:targetClass def:Bridge ;
+    sh:sparql [ a sh:SPARQLConstraint ;
+        sh:severity sh:Warning ;
+        sh:message "Sum of span lengths differs from the total length by more than 0.5 m."@en ;
+        sh:prefixes ex:prefixes ;
+        sh:select """
+            SELECT $this (SUM(?l) AS ?value)
+            WHERE {
+                $this def:totalLength ?total .
+                $this def:hasSpan/def:length ?l .
+            }
+            GROUP BY $this ?total
+            HAVING ( ABS(SUM(?l) - ?total) > 0.5 )
+        """ ] .
+
+### Cross-property — a movable bridge requires an operating mechanism
+ex:MovableShape a sh:NodeShape ;
+    sh:targetClass def:Bridge ;
+    sh:sparql [ a sh:SPARQLConstraint ;
+        sh:message "Movable bridge without an operating mechanism."@en ;
+        sh:prefixes ex:prefixes ;
+        sh:select """
+            SELECT $this
+            WHERE {
+                $this def:movable true .
+                FILTER NOT EXISTS { $this def:hasOperatingMechanism ?m }
+            }
+        """ ] .
+
+### GeoSPARQL — component geometry must lie within 25 m of the bridge alignment
+ex:ComponentOnAlignmentShape a sh:NodeShape ;
+    sh:targetClass def:Bridge ;
+    sh:sparql [ a sh:SPARQLConstraint ;
+        sh:message "Component geometry lies more than 25 m off the bridge alignment."@en ;
+        sh:prefixes ex:prefixes ;
+        sh:select """
+            SELECT $this ?component
+            WHERE {
+                $this geo:hasGeometry/geo:asWKT ?bridgeWkt .
+                $this <https://w3id.org/bot#containsElement> ?component .
+                ?component geo:hasGeometry/geo:asWKT ?cWkt .
+                FILTER ( geof:distance(?bridgeWkt, ?cWkt, uom:metre) > 25 )
+            }
+        """ ] .
+
+### GeoSPARQL — two arches must not coincide (minimum distance)
+ex:ArchSpacingShape a sh:NodeShape ;
+    sh:targetClass def:Bridge ;
+    sh:sparql [ a sh:SPARQLConstraint ;
+        sh:message "Two arches lie less than 10 m apart (possible duplicate registration)."@en ;
+        sh:prefixes ex:prefixes ;
+        sh:select """
+            SELECT $this (?a AS ?value)
+            WHERE {
+                $this <https://w3id.org/bot#containsElement> ?a , ?b .
+                ?a a def:Arch . ?b a def:Arch .
+                FILTER ( STR(?a) < STR(?b) )
+                ?a geo:hasGeometry/geo:asWKT ?aw .
+                ?b geo:hasGeometry/geo:asWKT ?bw .
+                FILTER ( geof:distance(?aw, ?bw, uom:metre) < 10 )
+            }
+        """ ] .
+
+### sh:ask-style validator — a GUID is required as soon as an IFC file is attached
+ex:IfcRefShape a sh:NodeShape ;
+    sh:targetClass def:BridgeComponent ;
+    sh:sparql [ a sh:SPARQLConstraint ;
+        sh:message "Component with IFC geometry lacks def:ifcGuid."@en ;
+        sh:prefixes ex:prefixes ;
+        sh:select """
+            SELECT $this
+            WHERE {
+                $this <https://w3id.org/omg#hasGeometry>/<https://w3id.org/fog#asIfc_v4.0> ?ifc .
+                FILTER NOT EXISTS { $this def:ifcGuid ?g }
+            }
+        """ ] .

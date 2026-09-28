@@ -1,10 +1,18 @@
-# DCMI Type Vocabulary — The DCMI Type Vocabulary provides a general, cross-
-# domain list of approved terms that may be used as values for the Resource
-# Type element to identify the genre of a resource.
-# Full vocabulary as published in the Linked Open Vocabularies (LOV) corpus
-# snapshot of 2025-12-18 (https://lov.linkeddata.es/ — dataset CC BY 4.0),
-# version v2012-06-14 (2012-06-14).
-# Source: http://purl.org/dc/dcmitype/  (ns http://purl.org/dc/dcmitype/)
+# DCMI Type Vocabulary — a general, cross-domain list of approved terms for the
+# Resource Type element (release 2012-06-14).
+# Source: http://purl.org/dc/dcmitype/ — triples identical to
+# http://dublincore.org/2012/06/14/dctype.ttl (checked 2026-09-23).
+# Obtained via the Linked Open Vocabularies (LOV) corpus snapshot of 2025-12-18
+# (https://lov.linkeddata.es/), which re-serialized it as Turtle. LOV's own
+# CC BY 4.0 licence covers LOV's catalogue; it does not relicense this vocabulary.
+# Portions of this software may use RDF schemas Copyright © 2011 DCMI, the Dublin
+# Core™ Metadata Initiative. These are licensed under the Creative Commons 4.0
+# Attribution license.
+# DCMI: http://dublincore.org/ — licence: https://creativecommons.org/licenses/by/4.0/
+# Changes: re-serialized as Turtle by LOV (triples unchanged); this comment
+# header was written by Open Triplestore (2026-07-24, revised 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The vocabulary, as re-serialized by LOV, starts below this line. ----
 @prefix dcam: <http://purl.org/dc/dcam/> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix dctype: <http://purl.org/dc/dcmitype/> .

@@ -4,7 +4,7 @@
   // and the gate-writes confirmation flow.
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
-  import { listPipelines, runPipeline, listLatestPipelineRuns } from '../lib/api.js';
+  import { listPipelines, runPipeline, listLatestPipelineRuns, listDatasets, listShapeGraphs } from '../lib/api.js';
   import { Workflow, Play, Loader2, Clock, ShieldCheck, Zap, GitMerge, AlertTriangle, Check, X, Calendar } from 'lucide-svelte';
   import { Link, navigate } from '../lib/router/index.js';
   import { shortenIRI } from '../lib/rdf-utils.js';
@@ -17,6 +17,11 @@
   let loading = true;
   let running = new Set();
 
+  // A pipeline stores only ids for its targets, so the scope tooltip needs
+  // these lists to name them.
+  let allDatasets = [];
+  let allShapeGraphs = [];
+
   let _guardChecked = false;
   $: if ($authInitialized && !_guardChecked) {
     _guardChecked = true;
@@ -24,6 +29,10 @@
   }
 
   onMount(async () => {
+    // Names only decorate the scope tooltip — fetched alongside, never awaited,
+    // so a slow or failing lookup can't hold up the pipeline list.
+    listDatasets().then((d) => (allDatasets = d || [])).catch(() => {});
+    listShapeGraphs().then((s) => (allShapeGraphs = s || [])).catch(() => {});
     try {
       pipelines = await listPipelines();
       if (pipelines.length) {
@@ -51,22 +60,33 @@
     }
   }
 
+  /** Name for a record id, falling back to the id itself — a missing lookup
+   *  must never render as an empty entry or `undefined`. */
+  function nameOf(list, recordId) {
+    return list.find((x) => String(x.id) === String(recordId))?.name || recordId;
+  }
+
   // Compact scope rollup: n datasets / n graphs / n meta shape graphs, with the
   // first few names in a title tooltip. Reads both the new `targets` array and
   // the legacy dataset_ids/graph_iris (Sets dedupe the mirrored values).
-  function scopeOf(p) {
+  // The tooltip used to print raw dataset / shape-graph ids, which name nothing.
+  function scopeOf(p, datasets, shapeGraphs) {
     const tg = p.targets || [];
     const ds = [...new Set([...(p.dataset_ids || []), ...tg.filter((t) => t.kind === 'dataset').map((t) => t.id)])];
     const gr = [...new Set([...(p.graph_iris || []), ...tg.filter((t) => t.kind === 'graph').map((t) => t.id)])];
     const meta = [...new Set(tg.filter((t) => t.kind === 'shapegraph').map((t) => t.id))];
     const few = (arr, fmt) => arr.slice(0, 4).map(fmt).join(', ') + (arr.length > 4 ? ` (+${arr.length - 4})` : '');
     const tooltip = [
-      ds.length ? `${$t('pages.pipelinesList.scopeTipDatasets')}: ${few(ds, (x) => x)}` : '',
+      ds.length ? `${$t('pages.pipelinesList.scopeTipDatasets')}: ${few(ds, (x) => nameOf(datasets, x))}` : '',
       gr.length ? `${$t('pages.pipelinesList.scopeTipGraphs')}: ${few(gr, shortenIRI)}` : '',
-      meta.length ? `${$t('pages.pipelinesList.scopeTipMeta')}: ${few(meta, (x) => x)}` : '',
+      meta.length ? `${$t('pages.pipelinesList.scopeTipMeta')}: ${few(meta, (x) => nameOf(shapeGraphs, x))}` : '',
     ].filter(Boolean).join('\n');
     return { ds: ds.length, gr: gr.length, meta: meta.length, tooltip };
   }
+
+  // Derived (not called inline in the markup) so the tooltips pick up the names
+  // when the dataset / shape-graph lists land after the pipelines.
+  $: scopes = new Map(pipelines.map((p) => [p.id, scopeOf(p, allDatasets, allShapeGraphs)]));
 
   function relativeTime(iso) {
     if (!iso) return '';
@@ -104,7 +124,7 @@
     <ul class="pipe-list">
       {#each pipelines as p (p.id)}
         {@const last = latest[p.id]}
-        {@const scope = scopeOf(p)}
+        {@const scope = scopes.get(p.id)}
         <li class="pipe-card">
           <div class="pipe-main">
             <div class="pipe-head">
@@ -181,7 +201,7 @@
   .pipe-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.35rem; }
   .pipe-head { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
   :global(.pipe-icon) { color: #6d28d9; }
-  :global(.pipe-name-link) { font-weight: 600; color: #1e293b; text-decoration: none; }
+  :global(.pipe-name-link) { font-weight: 600; color: #1e293b; text-decoration: none; overflow-wrap: break-word; min-width: 0; }
   :global(.pipe-name-link:hover) { color: #2F7A8C; text-decoration: underline; }
   .pipe-desc { margin: 0; color: #64748b; font-size: 0.85rem; }
   .pipe-meta { font-size: 0.78rem; color: #64748b; display: flex; gap: 0.4rem; flex-wrap: wrap; }
@@ -205,6 +225,18 @@
   .pill-ok { background: #dcfce7; color: #15803d; }
   .pill-fail { background: #fee2e2; color: #b91c1c; }
   .dim { color: #94a3b8; }
+
+  /* Phone. The two header links are pinned to the card's top-right corner,
+     which on a narrow card means they sit on top of the heading and the
+     intro; below the breakpoint they rejoin the flow underneath. The card
+     itself stops being a row, so "Run now" spans the card instead of being
+     squeezed against its right edge. */
+  @media (max-width: 720px) {
+    .toolbar-cta { position: static; margin-top: 0.6rem; flex-wrap: wrap; }
+    .toolbar-cta :global(.btn) { width: auto; flex: 1 1 8rem; min-height: 2.5rem; }
+    .pipe-card { flex-direction: column; align-items: stretch; gap: 0.6rem; }
+    .pipe-actions .btn { width: 100%; min-height: 2.5rem; }
+  }
 
   :global(:is([data-theme="dark"], .dark)) .pipe-card { background: var(--bg-strong); }
   :global(:is([data-theme="dark"], .dark)) .pipe-card:hover { border-color: var(--line-strong); }

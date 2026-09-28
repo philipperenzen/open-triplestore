@@ -87,6 +87,8 @@ fn test_state() -> AppState {
         text_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         #[cfg(feature = "text-search")]
         text_sync_lock: Arc::new(std::sync::Mutex::new(())),
+        #[cfg(feature = "text-search")]
+        text_bg_syncing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         vocab_catalog: Arc::new(open_triplestore::vocab_search::catalog::VocabCatalog::bundled()),
         vocab_registry_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
@@ -656,6 +658,12 @@ async fn service_description_advertises_capabilities() {
         txt.contains("sd:Service"),
         "must advertise an sd:Service: {txt}"
     );
+    // `SERVICE` is disabled by design (SSRF), so advertising basic federated
+    // query made federating clients plan calls that always failed.
+    assert!(
+        !txt.contains("BasicFederatedQuery"),
+        "must not advertise federation the endpoint refuses: {txt}"
+    );
     assert!(
         txt.contains("SPARQL11Query"),
         "must advertise SPARQL 1.1 Query"
@@ -714,6 +722,77 @@ ASK {
         body_json(resp.into_body()).await["boolean"],
         true,
         "geof:sfContains(polygon, interior point) must be true"
+    );
+}
+
+// GeoSPARQL 1.1 aggregate over HTTP: `geof:aggUnion` under GROUP BY on /sparql, and
+// in the WHERE of a SPARQL UPDATE — whose graph ACL check parses the update before
+// the store does, and used to reject the aggregate as a syntax error.
+#[tokio::test]
+async fn geosparql_agg_union_over_http() {
+    let (state, token) = admin_state();
+    let g = "http://ex.org/std/parcels";
+    state
+        .store
+        .update(&format!(
+            "PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+             INSERT DATA {{ GRAPH <{g}> {{
+               <http://ex.org/std/a> <http://ex.org/std/region> <http://ex.org/std/north> ;
+                   geo:hasGeometry <http://ex.org/std/ga> .
+               <http://ex.org/std/ga> geo:asWKT \"POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))\"^^geo:wktLiteral .
+               <http://ex.org/std/b> <http://ex.org/std/region> <http://ex.org/std/north> ;
+                   geo:hasGeometry <http://ex.org/std/gb> .
+               <http://ex.org/std/gb> geo:asWKT \"POLYGON((1 0, 3 0, 3 2, 1 2, 1 0))\"^^geo:wktLiteral .
+             }} }}"
+        ))
+        .unwrap();
+    let prefixes = "PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
+";
+    let query = format!(
+        "{prefixes}SELECT ?region (geof:area(geof:aggUnion(?w)) AS ?area) WHERE {{
+           GRAPH <{g}> {{ ?f <http://ex.org/std/region> ?region ; geo:hasGeometry/geo:asWKT ?w }}
+         }} GROUP BY ?region"
+    );
+    let resp = sparql_get(&state, &token, &query, "application/sparql-results+json").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp.into_body()).await;
+    let rows = json["results"]["bindings"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(rows.len(), 1, "one region: {json}");
+    let area: f64 = rows[0]["area"]["value"]
+        .as_str()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(f64::NAN);
+    assert!(
+        (area - 6.0).abs() < 1e-9,
+        "the overlap counted once: {json}"
+    );
+
+    let update = format!(
+        "{prefixes}INSERT {{ GRAPH <{g}> {{ ?region <http://ex.org/std/footprint> ?u }} }} WHERE {{
+           SELECT ?region (geof:aggUnion(?w) AS ?u) WHERE {{
+             GRAPH <{g}> {{ ?f <http://ex.org/std/region> ?region ; geo:hasGeometry/geo:asWKT ?w }}
+           }} GROUP BY ?region
+         }}"
+    );
+    let resp = sparql_update(&state, &token, &update).await;
+    assert!(
+        resp.status().is_success(),
+        "an UPDATE aggregating in its WHERE: {}",
+        resp.status()
+    );
+    let stored = state
+        .store
+        .query(&format!(
+            "ASK {{ GRAPH <{g}> {{ <http://ex.org/std/north> <http://ex.org/std/footprint> ?u }} }}"
+        ))
+        .unwrap();
+    assert!(
+        matches!(stored, QueryResults::Boolean(true)),
+        "the union was written"
     );
 }
 
@@ -1190,10 +1269,18 @@ async fn shex_validation_endpoint() {
         )
         .await
         .unwrap();
-    assert!(
-        resp.status() == StatusCode::OK || resp.status() == StatusCode::BAD_REQUEST,
-        "ShEx validate endpoint must respond, got {}",
-        resp.status()
+    // The schema parses and the focus node has no ex:name, so the report is a
+    // real non-conformance — not merely "the route answered". Full semantics
+    // live in tests/shex_conformance.rs; this pins the wiring end to end.
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a parseable schema validates"
+    );
+    let body = body_json(resp.into_body()).await;
+    assert_eq!(
+        body["conforms"], false,
+        "a focus node with no ex:name must not conform: {body}"
     );
 }
 
@@ -1217,14 +1304,12 @@ async fn swrl_execute_endpoint_wired() {
         )
         .await
         .unwrap();
-    assert_ne!(
+    // `{}` lacks the required `rules` field, so the exact answer is the JSON
+    // extractor's 422 — not just "anything but 404/500". Rule semantics live in
+    // tests/swrl_conformance.rs.
+    assert_eq!(
         resp.status(),
-        StatusCode::NOT_FOUND,
-        "SWRL route must be mounted"
-    );
-    assert!(
-        resp.status() != StatusCode::INTERNAL_SERVER_ERROR,
-        "SWRL endpoint must handle the request gracefully, got {}",
-        resp.status()
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a body without `rules` is rejected by the extractor"
     );
 }

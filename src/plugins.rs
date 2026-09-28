@@ -191,6 +191,12 @@ pub fn registered_plugins() -> Vec<Arc<dyn Plugin>> {
     plugins.push(Arc::new(
         ots_plugin_accounts_dashboard::AccountsDashboardPlugin,
     ));
+    #[cfg(feature = "plugin-postgres")]
+    plugins.push(Arc::new(ots_plugin_postgres::PostgresPlugin));
+    #[cfg(feature = "plugin-mysql")]
+    plugins.push(Arc::new(ots_plugin_mysql::MysqlPlugin));
+    #[cfg(feature = "plugin-mssql")]
+    plugins.push(Arc::new(ots_plugin_mssql::MssqlPlugin));
     plugins
 }
 

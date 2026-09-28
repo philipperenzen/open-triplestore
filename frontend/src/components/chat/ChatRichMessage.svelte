@@ -89,6 +89,19 @@
     <ChatFileCard file={seg.file} />
   {:else if seg.kind === 'csv'}
     <CsvPreview columns={seg.columns} rows={seg.rows} raw={seg.raw} />
+  {:else if seg.kind === 'ask'}
+    <!-- The assistant handed the decision back: clicking an option sends it
+         as the user's next message (wired by the chat page). -->
+    <div class="ask-card">
+      <p class="ask-question">{seg.ask.question}</p>
+      <div class="ask-options">
+        {#each seg.ask.options as option}
+          <button type="button" class="ask-option" on:click={() => dispatch('askChoice', option)}>
+            {option}
+          </button>
+        {/each}
+      </div>
+    </div>
   {:else if seg.kind === 'broken'}
     <div class="broken">
       <p class="broken-note">{$t('components.chat.brokenBlock', { values: { label: seg.label } })}</p>
@@ -131,6 +144,39 @@
     background: var(--brand-100, #dbeafe);
     border-color: var(--brand-300, #93c5fd);
     outline: none;
+  }
+  .ask-card {
+    margin: 0.35rem 0 0.55rem;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--brand-200, #bfdbfe);
+    background: var(--brand-50, #eff6ff);
+    border-radius: 10px;
+  }
+  .ask-question { margin: 0 0 0.5rem; font-weight: 600; font-size: 0.85rem; }
+  .ask-options { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .ask-option {
+    cursor: pointer;
+    font-size: 0.8rem;
+    padding: 0.3rem 0.7rem;
+    border-radius: 999px;
+    border: 1px solid var(--brand-300, #93c5fd);
+    background: #fff;
+    color: var(--brand-700, #1d4ed8);
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .ask-option:hover, .ask-option:focus-visible {
+    background: var(--brand-100, #dbeafe);
+    border-color: var(--brand-400, #60a5fa);
+    outline: none;
+  }
+  :global(:is([data-theme="dark"], .dark)) .ask-card {
+    background: rgba(59, 130, 246, 0.12);
+    border-color: rgba(59, 130, 246, 0.3);
+  }
+  :global(:is([data-theme="dark"], .dark)) .ask-option {
+    background: rgba(30, 41, 59, 0.8);
+    color: #93c5fd;
+    border-color: rgba(59, 130, 246, 0.4);
   }
   .broken { margin: 0 0 0.55rem; }
   .broken-note { margin: 0 0 0.25rem; font-size: 0.72rem; color: var(--ink-400); font-style: italic; }

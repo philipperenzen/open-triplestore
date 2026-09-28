@@ -379,6 +379,56 @@ fn triple_rule_binds_focus_node_in_object_position() {
     );
 }
 
+/// A `sh:SPARQLRule` carrying `sh:prefixes` run against **one** data graph. With a
+/// single data graph the engine materialises into that graph via `WITH <g>`; the
+/// prologue the rule's `sh:prefixes` expands to must stay *before* `WITH`
+/// (SPARQL 1.1 Update grammar: `Prologue ( Update1 … )`, `WITH` being part of
+/// `Modify`), otherwise the update fails to parse and `infer` errors out. This
+/// is the `ex:InspectionPriorityRule` shape of `tests/fixtures/example-bridge/shapes-af.ttl`.
+#[test]
+fn sparql_rule_with_prefixes_infers_into_single_named_graph() {
+    let shapes = r#"
+        ex:prefixes sh:declare [ sh:prefix "ex" ; sh:namespace "http://example.org/"^^xsd:anyURI ] .
+        ex:AdultShape a sh:NodeShape ;
+            sh:targetClass ex:Person ;
+            sh:rule [ a sh:SPARQLRule ;
+                sh:prefixes ex:prefixes ;
+                sh:construct "CONSTRUCT { $this ex:category ex:Adult } WHERE { $this ex:age ?a . FILTER(?a >= 18) }" ] ."#;
+    let data = r#"
+        ex:alice a ex:Person ; ex:age 30 .
+        ex:bob   a ex:Person ; ex:age 12 ."#;
+    let store = TripleStore::in_memory().unwrap();
+    store
+        .load_str(
+            &format!("{PFX}{shapes}"),
+            RdfFormat::Turtle,
+            Some("urn:shapes"),
+        )
+        .unwrap();
+    store
+        .load_str(&format!("{PFX}{data}"), RdfFormat::Turtle, Some("urn:data"))
+        .unwrap();
+
+    let n = infer(&store, "urn:shapes", &["urn:data".to_string()])
+        .expect("a prefixed rule must parse when the engine targets one graph");
+    assert_eq!(n, 1, "exactly alice is classified");
+    assert!(
+        ask(
+            &store,
+            "ASK { GRAPH <urn:data> { ex:alice ex:category ex:Adult } }"
+        ),
+        "the derived triple lands in the data graph the rule inferred over",
+    );
+    assert!(
+        !ask(&store, "ASK { ex:alice ex:category ex:Adult }"),
+        "nothing leaks into the store's default graph",
+    );
+    assert!(!ask(
+        &store,
+        "ASK { GRAPH <urn:data> { ex:bob ex:category ex:Adult } }"
+    ));
+}
+
 // ─────────────────────────── HTTP endpoint ───────────────────────────
 
 /// `POST /api/datasets/:id/infer` — exercises the real Axum router (auth, write
@@ -452,14 +502,30 @@ mod http {
             "endpoint must report inferred triples: {j}",
         );
 
-        // The triple rule writes to the default graph — verify via the store.
-        let materialised = matches!(
+        // The rule materialises INTO the dataset's data graph. It used to land
+        // in the default graph — outside every registered, ACL'd graph, and
+        // invisible to the data graph it was inferring over.
+        let in_data_graph = matches!(
+            state.store.query(
+                "ASK { GRAPH <urn:data> { <http://example.org/Registry> <http://example.org/status> <http://example.org/Active> } }"
+            ),
+            Ok(QueryResults::Boolean(true))
+        );
+        assert!(
+            in_data_graph,
+            "derived triple must land in the data graph it was inferred over"
+        );
+
+        let leaked_to_default = matches!(
             state.store.query(
                 "ASK { <http://example.org/Registry> <http://example.org/status> <http://example.org/Active> }"
             ),
             Ok(QueryResults::Boolean(true))
         );
-        assert!(materialised, "derived triple must be queryable after infer");
+        assert!(
+            !leaked_to_default,
+            "inferred triples must not be written to the default graph"
+        );
     }
 
     #[tokio::test]
@@ -527,4 +593,79 @@ mod http {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
+}
+
+// ─── sh:order, sh:condition, sh:deactivated (SHACL-AF §4.1–4.2) ───────────────
+
+/// Rules run in ascending `sh:order`: the second rule consumes what the first
+/// produced within one iteration, so a rule chain converges in one round when
+/// ordered and would need the fixed-point loop otherwise. Observable here: a
+/// rule with a higher order that deletes-nothing-but-marks sees the earlier
+/// rule's triple in the same pass.
+#[test]
+fn rules_run_in_sh_order() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:Thing ;
+  sh:rule [ a sh:TripleRule ; sh:order 2 ;
+            sh:subject sh:this ; sh:predicate ex:second ; sh:object true ;
+            sh:condition ex:HasFirst ] ;
+  sh:rule [ a sh:TripleRule ; sh:order 1 ;
+            sh:subject sh:this ; sh:predicate ex:first ; sh:object true ] .
+ex:HasFirst a sh:NodeShape ; sh:property [ sh:path ex:first ; sh:minCount 1 ] .
+"#;
+    let store = store_with(shapes, "ex:t a ex:Thing .");
+    let n = infer(&store, "urn:shapes", &[]).unwrap();
+    assert!(ask(&store, "ASK { ex:t ex:first true }"), "order 1 fired");
+    assert!(
+        ask(&store, "ASK { ex:t ex:second true }"),
+        "order 2 fired after order 1 (its condition needs ex:first)"
+    );
+    assert_eq!(n, 2);
+}
+
+/// `sh:condition`: a rule fires only for focus nodes that conform to the
+/// condition shape.
+#[test]
+fn rule_condition_filters_focus_nodes() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:Person ;
+  sh:rule [ a sh:TripleRule ; sh:condition ex:Adult ;
+            sh:subject sh:this ; sh:predicate ex:mayVote ; sh:object true ] .
+ex:Adult a sh:NodeShape ; sh:property [ sh:path ex:age ; sh:minInclusive 18 ] .
+"#;
+    let data = "ex:ann a ex:Person ; ex:age 34 . ex:bob a ex:Person ; ex:age 12 .";
+    let store = store_with(shapes, data);
+    let n = infer(&store, "urn:shapes", &[]).unwrap();
+    assert!(
+        ask(&store, "ASK { ex:ann ex:mayVote true }"),
+        "ann conforms to ex:Adult"
+    );
+    assert!(
+        !ask(&store, "ASK { ex:bob ex:mayVote true }"),
+        "bob does not"
+    );
+    assert_eq!(n, 1);
+}
+
+/// A deactivated rule, or a rule on a deactivated shape, does not fire.
+#[test]
+fn deactivated_rules_do_not_fire() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:Thing ;
+  sh:rule [ a sh:TripleRule ; sh:deactivated true ;
+            sh:subject sh:this ; sh:predicate ex:fromRule ; sh:object true ] .
+ex:Off a sh:NodeShape ; sh:targetClass ex:Thing ; sh:deactivated true ;
+  sh:rule [ a sh:TripleRule ; sh:subject sh:this ; sh:predicate ex:fromShape ; sh:object true ] .
+"#;
+    let store = store_with(shapes, "ex:t a ex:Thing .");
+    let n = infer(&store, "urn:shapes", &[]).unwrap();
+    assert!(
+        !ask(&store, "ASK { ex:t ex:fromRule ?x }"),
+        "deactivated rule"
+    );
+    assert!(
+        !ask(&store, "ASK { ex:t ex:fromShape ?x }"),
+        "rule of a deactivated shape"
+    );
+    assert_eq!(n, 0);
 }

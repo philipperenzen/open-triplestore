@@ -12,6 +12,30 @@
 // contexts and older browsers. It never throws; it resolves to whether the copy
 // succeeded so callers can show accurate feedback.
 
+import { get } from 'svelte/store';
+import { _ as i18n } from 'svelte-i18n';
+import { toastWarn } from './toast';
+
+/**
+ * Copy `text`, and when that fails, say so.
+ *
+ * The same boolean as [`copyToClipboard`], plus a toast on failure telling
+ * the user to select and press Ctrl/Cmd + C. Use it for anything a person
+ * clicks; a silent `false` reads as a dead button.
+ */
+export async function copyOrWarn(text: string): Promise<boolean> {
+  const ok = await copyToClipboard(text);
+  if (!ok) {
+    try {
+      toastWarn(get(i18n)('system.copyFailed'));
+    } catch {
+      // i18n not initialised (a unit test, an early paint): the copy still
+      // reported its failure through the return value.
+    }
+  }
+  return ok;
+}
+
 /** Copy `text` to the clipboard. Resolves `true` on success, `false` otherwise. */
 export async function copyToClipboard(text: string): Promise<boolean> {
   const value = String(text ?? '');

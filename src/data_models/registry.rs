@@ -3,7 +3,9 @@
 //! All metadata is stored as RDF triples in the named graph
 //! `<urn:system:data-model-registry>` inside Oxigraph.
 
-use super::models::{DataModelRecord, DataModelVersion, SubGraphStatus, VersionStatus};
+use super::models::{
+    ContentAttribution, DataModelRecord, DataModelVersion, SubGraphStatus, VersionStatus,
+};
 use crate::kind_detector::RegistryKind;
 use crate::store::TripleStore;
 use oxigraph::model::*;
@@ -125,6 +127,96 @@ pub fn list_data_models(store: &TripleStore) -> Vec<DataModelRecord> {
         }
     }
     records
+}
+
+/// One registry entry prepared for the Spark chat's platform context: the
+/// model's human identity plus the named graph holding its current *published*
+/// content, resolved in the same query. Distinct from [`DataModelRecord`] on
+/// purpose — the prompt needs the graph IRI (which `list_data_models` discards)
+/// and none of the per-model version counting that listing pays for.
+pub struct ModelContextEntry {
+    pub title: String,
+    pub namespace: String,
+    pub kind: RegistryKind,
+    pub is_public: bool,
+    pub owner_type: Option<String>,
+    pub owner_id: Option<String>,
+    /// Named graph holding the latest published version's content, when one exists.
+    pub graph_iri: Option<String>,
+    /// That version's semver label ("2.1.0"), for prose.
+    pub version: Option<String>,
+    /// Named graph of the latest DRAFT version, when one exists — unreviewed
+    /// content, surfaced so an assistant can offer it as an explicit choice
+    /// rather than silently mixing it with published definitions.
+    pub draft_graph_iri: Option<String>,
+    /// The draft's semver label.
+    pub draft_version: Option<String>,
+}
+
+/// List every registered model/vocabulary with the graph of its latest
+/// published version, sorted by title so a prompt built from it is stable
+/// across turns. Visibility is NOT applied here — callers filter with
+/// `can_access_ontology`, exactly like the `/api/models` handler.
+pub fn list_models_for_context(store: &TripleStore) -> Vec<ModelContextEntry> {
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        PREFIX dct: <{DCT}>
+        PREFIX owl: <{OWL}>
+        SELECT ?m ?title ?ns ?kind ?isPublic ?ownerType ?ownerId ?graphIri ?semver ?draftIri ?draftVer WHERE {{
+          GRAPH <{REGISTRY_GRAPH}> {{
+            ?m a ver:DataModel ;
+               dct:title ?title ;
+               ver:namespace ?ns .
+            OPTIONAL {{ ?m ver:kind ?kind }}
+            OPTIONAL {{ ?m ver:isPublic ?isPublic }}
+            OPTIONAL {{ ?m ver:ownerType ?ownerType }}
+            OPTIONAL {{ ?m ver:ownerId ?ownerId }}
+            OPTIONAL {{
+              ?m ver:latestPublished ?v .
+              ?v ver:graphIri ?graphIri .
+              OPTIONAL {{ ?v owl:versionInfo ?semver }}
+            }}
+            OPTIONAL {{
+              ?m ver:latestDraft ?d .
+              ?d ver:graphIri ?draftIri .
+              OPTIONAL {{ ?d owl:versionInfo ?draftVer }}
+            }}
+          }}
+        }}
+        "#
+    );
+    let mut out: Vec<ModelContextEntry> = Vec::new();
+    // Same fanout guard as `list_data_models`: any doubled OPTIONAL value would
+    // otherwise list the model once per combination.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(&q) {
+        for row in solutions.flatten() {
+            let vals: Vec<Option<Term>> = row.values().to_vec();
+            let Some(m) = var_str(&vals, 0) else { continue };
+            if !seen.insert(m) {
+                continue;
+            }
+            out.push(ModelContextEntry {
+                title: var_str(&vals, 1).unwrap_or_default(),
+                namespace: var_str(&vals, 2).unwrap_or_default(),
+                kind: var_str(&vals, 3)
+                    .map(|s| RegistryKind::from_persisted(&s))
+                    .unwrap_or_default(),
+                is_public: var_str(&vals, 4)
+                    .map(|v| v == "true" || v == "1")
+                    .unwrap_or(false),
+                owner_type: var_str(&vals, 5),
+                owner_id: var_str(&vals, 6),
+                graph_iri: var_str(&vals, 7),
+                version: var_str(&vals, 8),
+                draft_graph_iri: var_str(&vals, 9),
+                draft_version: var_str(&vals, 10),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.title.cmp(&b.title).then(a.namespace.cmp(&b.namespace)));
+    out
 }
 
 fn count_versions(store: &TripleStore, data_model_iri_str: &str) -> usize {
@@ -988,6 +1080,748 @@ pub fn data_model_exists(store: &TripleStore, base_url: &str, data_model_id: &st
     get_data_model(store, base_url, data_model_id).is_some()
 }
 
+// ─── Licence and attribution (registry metadata) ─────────────────────────────
+//
+// The licence and attribution of the content an entry or version holds (today:
+// the bundled vocabularies the server seeds) live here, in the registry graph,
+// as the JSON record (`ver:attribution`) plus one `dct:license` per licence.
+// Nothing is written into the content's own graph.
+
+/// Registry IRI of a data model entry.
+pub fn data_model_iri(base_url: &str, data_model_id: &str) -> String {
+    format!("{base_url}/data-model/{data_model_id}")
+}
+
+/// Registry IRI of a version record.
+pub fn version_record_iri(base_url: &str, data_model_id: &str, version: &str) -> String {
+    format!("{base_url}/data-model/{data_model_id}/version/{version}")
+}
+
+/// Record, replace or (with `None`) clear the attribution of a registry entry
+/// or version record, in one update.
+pub fn set_attribution(
+    store: &TripleStore,
+    subject_iri: &str,
+    attribution: Option<&ContentAttribution>,
+) -> Result<(), crate::store::engine::StoreError> {
+    use crate::store::engine::StoreError;
+    NamedNode::new(subject_iri)
+        .map_err(|e| StoreError::Parse(format!("invalid registry IRI {subject_iri}: {e}")))?;
+    let mut insert = String::new();
+    if let Some(a) = attribution {
+        let json = serde_json::to_string(a)
+            .map_err(|e| StoreError::Parse(format!("attribution JSON: {e}")))?;
+        insert.push_str(&format!(
+            "<{subject_iri}> ver:attribution \"{}\" .\n",
+            crate::store::escape_sparql_literal(&json)
+        ));
+        for l in &a.licenses {
+            NamedNode::new(l.uri.as_str())
+                .map_err(|e| StoreError::Parse(format!("invalid licence URI {}: {e}", l.uri)))?;
+            insert.push_str(&format!("<{subject_iri}> dct:license <{}> .\n", l.uri));
+        }
+    }
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        PREFIX dct: <{DCT}>
+        DELETE {{ GRAPH <{REGISTRY_GRAPH}> {{
+          <{subject_iri}> ver:attribution ?a .
+          <{subject_iri}> dct:license ?l .
+        }} }}
+        INSERT {{ GRAPH <{REGISTRY_GRAPH}> {{
+          {insert}
+        }} }}
+        WHERE {{
+          OPTIONAL {{ GRAPH <{REGISTRY_GRAPH}> {{ <{subject_iri}> ver:attribution ?a }} }}
+          OPTIONAL {{ GRAPH <{REGISTRY_GRAPH}> {{ <{subject_iri}> dct:license ?l }} }}
+        }}
+        "#
+    );
+    store.update(&q)
+}
+
+fn parse_attribution(json: &str) -> Option<ContentAttribution> {
+    match serde_json::from_str(json) {
+        Ok(a) => Some(a),
+        Err(e) => {
+            tracing::warn!("registry: unreadable attribution record: {e}");
+            None
+        }
+    }
+}
+
+/// The attribution recorded for a registry entry or version record.
+pub fn get_attribution(store: &TripleStore, subject_iri: &str) -> Option<ContentAttribution> {
+    NamedNode::new(subject_iri).ok()?;
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        SELECT ?a WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{ <{subject_iri}> ver:attribution ?a }} }}
+        LIMIT 1
+        "#
+    );
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(&q) {
+        if let Some(row) = solutions.flatten().next() {
+            let vals: Vec<Option<Term>> = row.values().to_vec();
+            return var_str(&vals, 0).and_then(|j| parse_attribution(&j));
+        }
+    }
+    None
+}
+
+/// The attribution of every registry entry that has one, keyed by model id —
+/// one query for the whole list view.
+pub fn model_attributions(
+    store: &TripleStore,
+) -> std::collections::HashMap<String, ContentAttribution> {
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        SELECT ?m ?a WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{
+          ?m a ver:DataModel ; ver:attribution ?a .
+        }} }}
+        "#
+    );
+    let mut out = std::collections::HashMap::new();
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(&q) {
+        for row in solutions.flatten() {
+            let vals: Vec<Option<Term>> = row.values().to_vec();
+            let (Some(m), Some(json)) = (var_str(&vals, 0), var_str(&vals, 1)) else {
+                continue;
+            };
+            // Same id rule as `list_data_models`: the IRI's last path segment.
+            let id = m.rsplit('/').next().unwrap_or(&m).to_string();
+            if out.contains_key(&id) {
+                continue;
+            }
+            if let Some(a) = parse_attribution(&json) {
+                out.insert(id, a);
+            }
+        }
+    }
+    out
+}
+
+/// The attribution of each of a model's versions that has one, keyed by
+/// version label.
+pub fn version_attributions(
+    store: &TripleStore,
+    base_url: &str,
+    data_model_id: &str,
+) -> std::collections::HashMap<String, ContentAttribution> {
+    let ont_iri = data_model_iri(base_url, data_model_id);
+    let mut out = std::collections::HashMap::new();
+    if NamedNode::new(ont_iri.as_str()).is_err() {
+        return out;
+    }
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        PREFIX owl: <{OWL}>
+        SELECT ?semver ?a WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{
+          ?v ver:dataModel <{ont_iri}> ; owl:versionInfo ?semver ; ver:attribution ?a .
+        }} }}
+        "#
+    );
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(&q) {
+        for row in solutions.flatten() {
+            let vals: Vec<Option<Term>> = row.values().to_vec();
+            let (Some(ver), Some(json)) = (var_str(&vals, 0), var_str(&vals, 1)) else {
+                continue;
+            };
+            if out.contains_key(&ver) {
+                continue;
+            }
+            if let Some(a) = parse_attribution(&json) {
+                out.insert(ver, a);
+            }
+        }
+    }
+    out
+}
+
+/// What the vocabulary seeder needs to know about one registry record before
+/// it updates it: who created it, its notes, its raw attribution JSON, the
+/// marker the seeder writes on its own records ([`set_seeded_by`]) and, for a
+/// version, its status, graphs, creation date and the seed check it last
+/// recorded ([`set_seed_check`]).
+#[derive(Debug, Clone, Default)]
+pub struct RecordProvenance {
+    pub created_by: Option<String>,
+    pub notes: Option<String>,
+    pub attribution_json: Option<String>,
+    /// The version's status (versions only).
+    pub status: Option<VersionStatus>,
+    /// SHA-256 of the bundled file the stored copy was last loaded from or
+    /// checked against (versions only).
+    pub seed_source_sha256: Option<String>,
+    /// Digest of the triples the seeder last loaded or found to be exactly
+    /// the bundled file's, as stored (versions only).
+    pub seed_content_digest: Option<String>,
+    /// The `ver:seededBy` marker: which seeder created the record, if one did.
+    pub seeded_by: Option<String>,
+    /// The version's base graph (versions only).
+    pub graph_iri: Option<String>,
+    /// The version's sub-graphs (versions only).
+    pub sub_graphs: Vec<String>,
+    /// The version's `dct:created`, lexical form (versions only).
+    pub created_at: Option<String>,
+}
+
+/// Provenance of a model entry (`None` when absent) and of each of its
+/// versions, keyed by version label. Three queries, whatever the version
+/// count.
+pub fn record_provenance(
+    store: &TripleStore,
+    base_url: &str,
+    data_model_id: &str,
+) -> (
+    Option<RecordProvenance>,
+    std::collections::HashMap<String, RecordProvenance>,
+) {
+    let ont_iri = data_model_iri(base_url, data_model_id);
+    let mut versions = std::collections::HashMap::new();
+    if NamedNode::new(ont_iri.as_str()).is_err() {
+        return (None, versions);
+    }
+    let q_model = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        PREFIX dct: <{DCT}>
+        SELECT ?creator ?a ?seeded WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{
+          <{ont_iri}> a ver:DataModel .
+          OPTIONAL {{ <{ont_iri}> dct:creator ?creator }}
+          OPTIONAL {{ <{ont_iri}> ver:attribution ?a }}
+          OPTIONAL {{ <{ont_iri}> ver:seededBy ?seeded }}
+        }} }}
+        "#
+    );
+    let mut model = None;
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(&q_model) {
+        if let Some(row) = solutions.flatten().next() {
+            let vals: Vec<Option<Term>> = row.values().to_vec();
+            model = Some(RecordProvenance {
+                created_by: var_str(&vals, 0),
+                attribution_json: var_str(&vals, 1),
+                seeded_by: var_str(&vals, 2),
+                ..RecordProvenance::default()
+            });
+        }
+    }
+    let q_versions = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        PREFIX dct: <{DCT}>
+        PREFIX owl: <{OWL}>
+        PREFIX adms: <{ADMS}>
+        SELECT ?semver ?creator ?notes ?a ?status ?sha ?digest ?seeded ?graph ?created
+        WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{
+          ?v ver:dataModel <{ont_iri}> ; owl:versionInfo ?semver .
+          OPTIONAL {{ ?v dct:creator ?creator }}
+          OPTIONAL {{ ?v adms:versionNotes ?notes }}
+          OPTIONAL {{ ?v ver:attribution ?a }}
+          OPTIONAL {{ ?v ver:status ?status }}
+          OPTIONAL {{ ?v ver:seedSourceSha256 ?sha }}
+          OPTIONAL {{ ?v ver:seedContentDigest ?digest }}
+          OPTIONAL {{ ?v ver:seededBy ?seeded }}
+          OPTIONAL {{ ?v ver:graphIri ?graph }}
+          OPTIONAL {{ ?v dct:created ?created }}
+        }} }}
+        "#
+    );
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(&q_versions) {
+        for row in solutions.flatten() {
+            let vals: Vec<Option<Term>> = row.values().to_vec();
+            let Some(ver) = var_str(&vals, 0) else {
+                continue;
+            };
+            versions.entry(ver).or_insert_with(|| RecordProvenance {
+                created_by: var_str(&vals, 1),
+                notes: var_str(&vals, 2),
+                attribution_json: var_str(&vals, 3),
+                status: var_str(&vals, 4).and_then(|s| VersionStatus::from_str(&s)),
+                seed_source_sha256: var_str(&vals, 5),
+                seed_content_digest: var_str(&vals, 6),
+                seeded_by: var_str(&vals, 7),
+                graph_iri: var_str(&vals, 8),
+                created_at: var_str(&vals, 9),
+                sub_graphs: Vec::new(),
+            });
+        }
+    }
+    let q_sub_graphs = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        PREFIX owl: <{OWL}>
+        SELECT ?semver ?g WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{
+          ?v ver:dataModel <{ont_iri}> ; owl:versionInfo ?semver ; ver:subGraph ?g .
+        }} }}
+        "#
+    );
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(&q_sub_graphs) {
+        for row in solutions.flatten() {
+            let vals: Vec<Option<Term>> = row.values().to_vec();
+            let (Some(ver), Some(g)) = (var_str(&vals, 0), var_str(&vals, 1)) else {
+                continue;
+            };
+            if let Some(p) = versions.get_mut(&ver) {
+                if !p.sub_graphs.contains(&g) {
+                    p.sub_graphs.push(g);
+                }
+            }
+        }
+    }
+    (model, versions)
+}
+
+/// Record which seeder created a registry entry or version record (the
+/// `ver:seededBy` marker), replacing any earlier marker. Only the vocabulary
+/// seeder writes it, on records it creates or has proven to be its own; the
+/// seeder touches no record without it.
+pub fn set_seeded_by(
+    store: &TripleStore,
+    subject_iri: &str,
+    marker: &str,
+) -> Result<(), crate::store::engine::StoreError> {
+    use crate::store::engine::StoreError;
+    NamedNode::new(subject_iri)
+        .map_err(|e| StoreError::Parse(format!("invalid registry IRI {subject_iri}: {e}")))?;
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        DELETE {{ GRAPH <{REGISTRY_GRAPH}> {{ <{subject_iri}> ver:seededBy ?m }} }}
+        INSERT {{ GRAPH <{REGISTRY_GRAPH}> {{ <{subject_iri}> ver:seededBy "{marker}" }} }}
+        WHERE {{ OPTIONAL {{ GRAPH <{REGISTRY_GRAPH}> {{ <{subject_iri}> ver:seededBy ?m }} }} }}
+        "#,
+        marker = crate::store::escape_sparql_literal(marker),
+    );
+    store.update(&q)
+}
+
+/// The raw JSON of the attribution recorded for a registry entry or version
+/// record.
+pub fn attribution_json(store: &TripleStore, subject_iri: &str) -> Option<String> {
+    NamedNode::new(subject_iri).ok()?;
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        SELECT ?a WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{ <{subject_iri}> ver:attribution ?a }} }}
+        LIMIT 1
+        "#
+    );
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(&q) {
+        if let Some(row) = solutions.flatten().next() {
+            let vals: Vec<Option<Term>> = row.values().to_vec();
+            return var_str(&vals, 0);
+        }
+    }
+    None
+}
+
+/// Replace the attribution of a registry entry or version record, but only if
+/// it still is `expected` (its raw JSON, `None` for no record): a compare and
+/// set in one update, so a concurrent writer (a PATCH or a direct write that
+/// just marked the record as possibly modified) is never overwritten with an
+/// older view. Returns whether the record now holds `attribution`.
+pub fn replace_attribution_if(
+    store: &TripleStore,
+    subject_iri: &str,
+    expected: Option<&str>,
+    attribution: Option<&ContentAttribution>,
+) -> Result<bool, crate::store::engine::StoreError> {
+    use crate::store::engine::StoreError;
+    NamedNode::new(subject_iri)
+        .map_err(|e| StoreError::Parse(format!("invalid registry IRI {subject_iri}: {e}")))?;
+    let lit = crate::store::escape_sparql_literal;
+    let new_json = match attribution {
+        Some(a) => Some(
+            serde_json::to_string(a)
+                .map_err(|e| StoreError::Parse(format!("attribution JSON: {e}")))?,
+        ),
+        None => None,
+    };
+    let mut insert = String::new();
+    if let (Some(a), Some(json)) = (attribution, new_json.as_deref()) {
+        insert.push_str(&format!(
+            "<{subject_iri}> ver:attribution \"{}\" .\n",
+            lit(json)
+        ));
+        for l in &a.licenses {
+            NamedNode::new(l.uri.as_str())
+                .map_err(|e| StoreError::Parse(format!("invalid licence URI {}: {e}", l.uri)))?;
+            insert.push_str(&format!("<{subject_iri}> dct:license <{}> .\n", l.uri));
+        }
+    }
+    let condition = match expected {
+        Some(old) => format!(
+            "GRAPH <{REGISTRY_GRAPH}> {{ <{subject_iri}> ver:attribution ?a }} \
+             FILTER(sameTerm(?a, \"{}\"))",
+            lit(old)
+        ),
+        None => format!(
+            "FILTER NOT EXISTS {{ GRAPH <{REGISTRY_GRAPH}> {{ <{subject_iri}> ver:attribution ?any }} }}"
+        ),
+    };
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        PREFIX dct: <{DCT}>
+        DELETE {{ GRAPH <{REGISTRY_GRAPH}> {{
+          <{subject_iri}> ver:attribution ?a .
+          <{subject_iri}> dct:license ?l .
+        }} }}
+        INSERT {{ GRAPH <{REGISTRY_GRAPH}> {{
+          {insert}
+        }} }}
+        WHERE {{
+          {condition}
+          OPTIONAL {{ GRAPH <{REGISTRY_GRAPH}> {{ <{subject_iri}> dct:license ?l }} }}
+        }}
+        "#
+    );
+    store.update(&q)?;
+    Ok(attribution_json(store, subject_iri) == new_json)
+}
+
+/// Mark a version record whose content has just been, or is about to be,
+/// changed in place as possibly modified: a record that called its content
+/// unchanged now says it is not, with `stored_copy` saying why. Retries its
+/// compare and set so a concurrent update of the record is neither lost nor
+/// overwritten. A record that already says possibly modified is left alone.
+pub fn mark_possibly_modified(
+    store: &TripleStore,
+    record_iri: &str,
+    stored_copy: impl Fn(&ContentAttribution) -> String,
+) -> Result<(), crate::store::engine::StoreError> {
+    for _ in 0..5 {
+        let Some(json) = attribution_json(store, record_iri) else {
+            return Ok(());
+        };
+        let Some(mut a) = parse_attribution(&json) else {
+            return Ok(());
+        };
+        if !a.unchanged {
+            return Ok(());
+        }
+        a.unchanged = false;
+        a.stored_copy = stored_copy(&a);
+        if replace_attribution_if(store, record_iri, Some(&json), Some(&a))? {
+            return Ok(());
+        }
+    }
+    Err(crate::store::engine::StoreError::Parse(format!(
+        "the licence record of {record_iri} kept changing; it could not be marked as possibly \
+         modified"
+    )))
+}
+
+/// A registered model version whose content a graph is part of, and the
+/// licence record of that version.
+#[derive(Debug, Clone)]
+pub struct AttributedVersion {
+    pub data_model_id: String,
+    pub version: String,
+    /// The version record's IRI.
+    pub record_iri: String,
+    pub attribution: ContentAttribution,
+}
+
+/// The registered version whose content `graph_iri` is, when that version has
+/// a licence record: one registry query. A graph named like a version
+/// (`{base}/data-model/{id}/version/{ver}`, or a graph under it) is looked up
+/// by that version's record; any other graph by the version records that list
+/// it as their base graph or a sub-graph (a seed bundle's graphs). `None` for
+/// a graph no attributed version holds.
+pub fn attributed_version_of_graph(
+    store: &TripleStore,
+    base_url: &str,
+    graph_iri: &str,
+) -> Option<AttributedVersion> {
+    NamedNode::new(graph_iri).ok()?;
+    let conventional = graph_iri
+        .strip_prefix(&format!("{base_url}/data-model/"))
+        .and_then(|rest| rest.split_once("/version/"))
+        .and_then(|(id, tail)| {
+            let version = tail.split('/').next().unwrap_or_default();
+            let ok = !id.is_empty()
+                && !id.contains('/')
+                && crate::data_models::version_iri::validate_version(version).is_ok();
+            ok.then(|| (id.to_string(), version.to_string()))
+        });
+    if let Some((id, version)) = conventional {
+        let record_iri = version_record_iri(base_url, &id, &version);
+        NamedNode::new(record_iri.as_str()).ok()?;
+        let q = format!(
+            r#"
+            PREFIX ver: <{VER}>
+            SELECT ?a WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{
+              <{record_iri}> ver:dataModel ?m ; ver:attribution ?a .
+            }} }} LIMIT 1
+            "#
+        );
+        if let Ok(QueryResults::Solutions(solutions)) = store.query(&q) {
+            if let Some(row) = solutions.flatten().next() {
+                let vals: Vec<Option<Term>> = row.values().to_vec();
+                let attribution = var_str(&vals, 0).and_then(|j| parse_attribution(&j))?;
+                return Some(AttributedVersion {
+                    data_model_id: id,
+                    version,
+                    record_iri,
+                    attribution,
+                });
+            }
+        }
+        return None;
+    }
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        PREFIX owl: <{OWL}>
+        SELECT ?v ?m ?semver ?a WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{
+          {{ ?v ver:graphIri <{graph_iri}> }} UNION {{ ?v ver:subGraph <{graph_iri}> }}
+          ?v ver:attribution ?a ; ver:dataModel ?m ; owl:versionInfo ?semver .
+        }} }} LIMIT 1
+        "#
+    );
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(&q) {
+        if let Some(row) = solutions.flatten().next() {
+            let vals: Vec<Option<Term>> = row.values().to_vec();
+            let record_iri = var_str(&vals, 0)?;
+            let model = var_str(&vals, 1)?;
+            let version = var_str(&vals, 2)?;
+            let attribution = var_str(&vals, 3).and_then(|j| parse_attribution(&j))?;
+            return Some(AttributedVersion {
+                data_model_id: model.rsplit('/').next().unwrap_or(&model).to_string(),
+                version,
+                record_iri,
+                attribution,
+            });
+        }
+    }
+    None
+}
+
+/// A version record whose licence record calls its content unchanged and
+/// which recorded a digest of that content when it was checked
+/// ([`set_seed_check`]).
+#[derive(Debug, Clone)]
+pub struct CheckedCopy {
+    pub record_iri: String,
+    pub graph_iri: String,
+    pub sub_graphs: Vec<String>,
+    pub content_digest: String,
+}
+
+/// Every version record that calls its content unchanged and has a recorded
+/// content digest: the copies whose stored graphs a check vouched for.
+pub fn checked_copies(store: &TripleStore) -> Vec<CheckedCopy> {
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        SELECT ?v ?g ?d ?a WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{
+          ?v ver:seedContentDigest ?d ; ver:attribution ?a ; ver:graphIri ?g .
+        }} }}
+        "#
+    );
+    let mut out: Vec<CheckedCopy> = Vec::new();
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(&q) {
+        for row in solutions.flatten() {
+            let vals: Vec<Option<Term>> = row.values().to_vec();
+            let (Some(v), Some(g), Some(d), Some(json)) = (
+                var_str(&vals, 0),
+                var_str(&vals, 1),
+                var_str(&vals, 2),
+                var_str(&vals, 3),
+            ) else {
+                continue;
+            };
+            if out.iter().any(|c| c.record_iri == v) {
+                continue;
+            }
+            if !parse_attribution(&json).is_some_and(|a| a.unchanged) {
+                continue;
+            }
+            let sub_graphs = get_sub_graphs(store, &v);
+            out.push(CheckedCopy {
+                record_iri: v,
+                graph_iri: g,
+                sub_graphs,
+                content_digest: d,
+            });
+        }
+    }
+    out
+}
+
+/// Record the seeder's check of a seeded version's stored copy: the SHA-256 of
+/// the bundled file it was checked against and, when the copy was found to be
+/// (or was just loaded as) exactly that file's triples, the digest of those
+/// triples as stored. With `content_digest` `None` an earlier digest stays:
+/// it still describes the seeder's own last content, which is what a later
+/// boot needs to tell that content from an edit.
+pub fn set_seed_check(
+    store: &TripleStore,
+    version_iri: &str,
+    source_sha256: &str,
+    content_digest: Option<&str>,
+) -> Result<(), crate::store::engine::StoreError> {
+    use crate::store::engine::StoreError;
+    NamedNode::new(version_iri)
+        .map_err(|e| StoreError::Parse(format!("invalid registry IRI {version_iri}: {e}")))?;
+    let lit = crate::store::escape_sparql_literal;
+    let (del_digest, ins_digest, where_digest) = match content_digest {
+        Some(d) => (
+            format!("<{version_iri}> ver:seedContentDigest ?d ."),
+            format!("<{version_iri}> ver:seedContentDigest \"{}\" .", lit(d)),
+            format!(
+                "OPTIONAL {{ GRAPH <{REGISTRY_GRAPH}> {{ <{version_iri}> ver:seedContentDigest ?d }} }}"
+            ),
+        ),
+        None => (String::new(), String::new(), String::new()),
+    };
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        DELETE {{ GRAPH <{REGISTRY_GRAPH}> {{
+          <{version_iri}> ver:seedSourceSha256 ?s .
+          {del_digest}
+        }} }}
+        INSERT {{ GRAPH <{REGISTRY_GRAPH}> {{
+          <{version_iri}> ver:seedSourceSha256 "{sha}" .
+          {ins_digest}
+        }} }}
+        WHERE {{
+          OPTIONAL {{ GRAPH <{REGISTRY_GRAPH}> {{ <{version_iri}> ver:seedSourceSha256 ?s }} }}
+          {where_digest}
+        }}
+        "#,
+        sha = lit(source_sha256),
+    );
+    store.update(&q)
+}
+
+/// The licence record that makes entry `data_model_id` hold content whose
+/// licence allows no altered copies (IMBOR): the entry's own record, or any of
+/// its versions'. Every path that would create, change or publish content in
+/// such an entry must refuse (see `handlers`).
+pub fn no_derivatives_attribution(
+    store: &TripleStore,
+    base_url: &str,
+    data_model_id: &str,
+) -> Option<ContentAttribution> {
+    get_attribution(store, &data_model_iri(base_url, data_model_id))
+        .filter(|a| a.no_derivatives)
+        .or_else(|| {
+            version_attributions(store, base_url, data_model_id)
+                .into_values()
+                .find(|a| a.no_derivatives)
+        })
+}
+
+/// The attribution of each entry's latest published version, keyed by model
+/// id: the record of the content an entry serves as its latest. One query.
+pub fn latest_published_attributions(
+    store: &TripleStore,
+) -> std::collections::HashMap<String, ContentAttribution> {
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        SELECT ?m ?a WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{
+          ?m a ver:DataModel ; ver:latestPublished ?v .
+          ?v ver:attribution ?a .
+        }} }}
+        "#
+    );
+    let mut out = std::collections::HashMap::new();
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(&q) {
+        for row in solutions.flatten() {
+            let vals: Vec<Option<Term>> = row.values().to_vec();
+            let (Some(m), Some(json)) = (var_str(&vals, 0), var_str(&vals, 1)) else {
+                continue;
+            };
+            let id = m.rsplit('/').next().unwrap_or(&m).to_string();
+            if out.contains_key(&id) {
+                continue;
+            }
+            if let Some(a) = parse_attribution(&json) {
+                out.insert(id, a);
+            }
+        }
+    }
+    out
+}
+
+/// Whether a version record in the registry names `graph_iri` as its base
+/// graph (`ver:graphIri`) or as one of its sub-graphs (`ver:subGraph`), with
+/// or without a licence record: one registry query. Operations that are not
+/// the registry's own (a dataset attaching, detaching or deleting graphs) must
+/// leave such a graph alone.
+///
+/// Fails closed: a graph name that is not a valid IRI, or a registry query
+/// that errors, counts as held, so a caller never deletes or claims a graph
+/// it could not rule out.
+pub fn graph_held_by_version(store: &TripleStore, graph_iri: &str) -> bool {
+    graph_held_by_version_checked(store, graph_iri).unwrap_or(true)
+}
+
+/// [`graph_held_by_version`] without the fail-closed default: `None` when the
+/// name is not a valid IRI or the registry query fails. For a caller that
+/// removes something when a graph IS held (a cleanup), where a lookup that
+/// could not answer must change nothing.
+pub fn graph_held_by_version_checked(store: &TripleStore, graph_iri: &str) -> Option<bool> {
+    NamedNode::new(graph_iri).ok()?;
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        ASK {{ GRAPH <{REGISTRY_GRAPH}> {{
+          {{ ?v ver:graphIri <{graph_iri}> }} UNION {{ ?v ver:subGraph <{graph_iri}> }}
+        }} }}
+        "#
+    );
+    match store.query(&q) {
+        Ok(QueryResults::Boolean(held)) => Some(held),
+        _ => None,
+    }
+}
+
+/// The id of a registry entry holding `graph_iri`: the entry a version graph
+/// `{base}/data-model/{id}/version/{ver}` (or a graph under it) is named
+/// after, else the entry of a version record naming it as its base graph or
+/// a sub-graph. `None` when no entry holds it or the lookup fails.
+pub fn data_model_holding_graph(
+    store: &TripleStore,
+    base_url: &str,
+    graph_iri: &str,
+) -> Option<String> {
+    NamedNode::new(graph_iri).ok()?;
+    let conventional = graph_iri
+        .strip_prefix(&format!("{}/data-model/", base_url.trim_end_matches('/')))
+        .and_then(|rest| rest.split_once("/version/"))
+        .map(|(id, _)| id)
+        .filter(|id| !id.is_empty() && !id.contains('/'));
+    if let Some(id) = conventional {
+        return Some(id.to_string());
+    }
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        SELECT ?m WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{
+          {{ ?v ver:graphIri <{graph_iri}> }} UNION {{ ?v ver:subGraph <{graph_iri}> }}
+          ?v ver:dataModel ?m .
+        }} }} LIMIT 1
+        "#
+    );
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(&q) {
+        if let Some(row) = solutions.flatten().next() {
+            let vals: Vec<Option<Term>> = row.values().to_vec();
+            let model = var_str(&vals, 0)?;
+            return Some(model.rsplit('/').next().unwrap_or(&model).to_string());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1040,6 +1874,76 @@ mod tests {
             records.iter().map(|r| &r.id).collect::<Vec<_>>()
         );
         assert_eq!(records[0].id, "gr");
+    }
+
+    /// The context listing resolves each model's latest PUBLISHED graph in one
+    /// pass — that graph IRI is what lets the chat target the right graph for
+    /// "what classes does model X define" instead of guessing an instance graph.
+    #[test]
+    fn context_listing_carries_the_published_graph() {
+        let store = TripleStore::in_memory().unwrap();
+        seed_one(&store, "gr", "2026-07-24T13:06:28Z");
+        set_data_model_kind(&store, BASE, "gr", RegistryKind::Vocabulary).unwrap();
+
+        // No published version yet: the entry lists with no graph.
+        let entries = list_models_for_context(&store);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].title, "Good Relations");
+        assert!(entries[0].graph_iri.is_none());
+        assert!(entries[0].is_public);
+
+        let ver = DataModelVersion {
+            data_model_id: "gr".into(),
+            version: "1.2.0".into(),
+            status: VersionStatus::Published,
+            graph_iri: "http://purl.org/goodrelations/v1".into(),
+            sub_graphs: Vec::new(),
+            created_at: "2026-07-24T13:06:28Z".into(),
+            created_by: None,
+            derived_from: None,
+            notes: None,
+            branch: None,
+            sub_graph_status: Vec::new(),
+        };
+        insert_version(&store, BASE, &ver).unwrap();
+        update_latest_published(&store, BASE, "gr", "1.2.0").unwrap();
+
+        let entries = list_models_for_context(&store);
+        assert_eq!(entries.len(), 1, "still one entry per model");
+        let e = &entries[0];
+        assert_eq!(
+            e.graph_iri.as_deref(),
+            Some("http://purl.org/goodrelations/v1")
+        );
+        assert_eq!(e.version.as_deref(), Some("1.2.0"));
+        assert_eq!(e.kind, RegistryKind::Vocabulary);
+        assert_eq!(e.namespace, "http://purl.org/goodrelations/v1#");
+        assert!(e.draft_graph_iri.is_none(), "no draft yet");
+
+        // A newer draft rides along without displacing the published graph.
+        let draft = DataModelVersion {
+            data_model_id: "gr".into(),
+            version: "1.3.0".into(),
+            status: VersionStatus::Draft,
+            graph_iri: "urn:draft:gr-1.3.0".into(),
+            sub_graphs: Vec::new(),
+            created_at: "2026-07-25T09:00:00Z".into(),
+            created_by: None,
+            derived_from: None,
+            notes: None,
+            branch: None,
+            sub_graph_status: Vec::new(),
+        };
+        insert_version(&store, BASE, &draft).unwrap();
+        update_latest_draft(&store, BASE, "gr", "1.3.0").unwrap();
+        let e = &list_models_for_context(&store)[0];
+        assert_eq!(
+            e.graph_iri.as_deref(),
+            Some("http://purl.org/goodrelations/v1"),
+            "published stays"
+        );
+        assert_eq!(e.draft_graph_iri.as_deref(), Some("urn:draft:gr-1.3.0"));
+        assert_eq!(e.draft_version.as_deref(), Some("1.3.0"));
     }
 
     /// The ordinary case keeps listing every distinct model.

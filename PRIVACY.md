@@ -139,7 +139,7 @@ you configure**. None of them send data to the project maintainers.
 | **OAuth login** | Your configured OAuth provider(s) (`src/auth/oauth.rs`). | Only when configured/used. | Leave unconfigured. |
 | **Operational alerts** | An **HTTP webhook** (`ALERT_WEBHOOK_URL`) and/or an **SMTP server** (`ALERT_SMTP_*`, requires the `alerting` build feature) that you configure. (`src/alerting/`) | Only on operational events when configured. Sends alert text you can scope. | Leave `ALERT_WEBHOOK_URL` and `ALERT_SMTP_*` unset. |
 | **Service registry (companion-app discovery)** | A service registry you run (`LD_REGISTRY_URL`, default `http://localhost:8500`). Advertises this instance's own URL so sibling services can discover it. (`src/svc_registry.rs`) | Best-effort heartbeat at startup and periodically. Fail-soft: the registry being down never affects the store. | Do not run a registry at that address (calls simply fail and are ignored), or point `LD_REGISTRY_URL` at an unused address. No data beyond the instance's own name/URL is sent. |
-| **Validation platform** | An external SHACL validation service you configure (`VALIDATION_API_URL`). (`src/dataset_versions/commit.rs`) | Only when the validate-and-commit endpoint is used. Forwards the data to be validated and the caller's bearer token. | Leave `VALIDATION_API_URL` unset; the endpoint then returns a configuration error instead of calling out. |
+| **Validation service** | An external SHACL validation service you configure (`VALIDATION_API_URL`). (`src/dataset_versions/commit.rs`) | Only when the validate-and-commit endpoint is used. Forwards the data to be validated and the caller's bearer token. | Leave `VALIDATION_API_URL` unset; the endpoint then returns a configuration error instead of calling out. |
 
 ### 5.1 Third-party requests made by the web frontend (the user's browser)
 
@@ -190,7 +190,7 @@ above are essential; document any others your customised deployment introduces.
 - **Categories of data subjects:** _[e.g. staff, customers, data described in RDF]_
 - **Categories of personal data actually held:** _[derive from §4 for your case]_
 - **Recipients / processors:** _[hosting provider, configured LLM provider, IdP,
-  alert/SMTP provider, validation platform — list each you enabled in §5]_
+  alert/SMTP provider, validation service — list each you enabled in §5]_
 - **International transfers:** _[where your servers and any processors are located;
   safeguards used]_
 - **Retention periods:** _[per category — RDF data, accounts, audit logs (incl.

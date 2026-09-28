@@ -1,3 +1,22 @@
+# OGC GeoSPARQL 1.0 ontology (2012) — the OGC GeoSPARQL Standards Working
+# Group's Turtle serialization.
+# Source: https://github.com/opengeospatial/geosemantics-semantic-resources/blob/main/resources/geosparql-swg/geosparql-1.0/ontologies/geo.ttl
+# (identical to vocabularies/geo.ttl at commit 9de28a4f, branch geosparql-1.0,
+# of https://github.com/opengeospatial/ogc-geosparql).
+# Copyright (c) 2012 Open Geospatial Consortium. (the notice of the original
+# RDF/XML release, https://schemas.opengis.net/geosparql/1.0/geosparql_vocab_all.rdf)
+# Licence: Apache License 2.0 (the source repository's LICENSE and README); full
+# text: LICENSES/Apache-2.0.txt in the Open Triplestore source,
+# https://www.apache.org/licenses/LICENSE-2.0
+# Includes the DCMI Metadata Element Set definitions (dc:contributor … dc:type):
+# Portions of this software may use RDF schemas Copyright © 2011 DCMI, the Dublin
+# Core™ Metadata Initiative. These are licensed under the Creative Commons 4.0
+# Attribution license.
+# DCMI: http://dublincore.org/ — licence: https://creativecommons.org/licenses/by/4.0/
+# Changes (Apache-2.0 §4(b) notice): Open Triplestore changed this file by adding
+# this comment header (2026-09-23); the rest is byte-identical to the source.
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The upstream file starts below this line. ----
 PREFIX geo: <http://www.opengis.net/ont/geosparql#>
 PREFIX dc: <http://purl.org/dc/elements/1.1/>
 PREFIX dcterms: <http://purl.org/dc/terms/>

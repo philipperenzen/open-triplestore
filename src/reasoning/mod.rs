@@ -21,6 +21,9 @@
 
 pub mod common;
 
+/// Identity policy: what materialisation does with `owl:sameAs`.
+pub mod identity;
+
 #[cfg(feature = "rdfs-entailment")]
 pub mod rdfs;
 

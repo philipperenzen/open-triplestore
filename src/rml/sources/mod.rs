@@ -23,6 +23,13 @@ pub fn load_rows(
         ReferenceFormulation::Csv => csv_source::load(source_data),
         ReferenceFormulation::JsonPath => json_source::load(source_data, iterator),
         ReferenceFormulation::XPath => xml_source::load(source_data, iterator),
+        // A relational source does not read a file: its rows come from a
+        // connection, through `crate::rml::sql`.
+        ReferenceFormulation::Sql => Err(
+            "a relational logical source is executed through POST /api/sources/{id}/runs, not \
+             from an uploaded file"
+                .to_string(),
+        ),
         ReferenceFormulation::Other(iri) => {
             Err(format!("Unsupported reference formulation: {iri}"))
         }

@@ -1,7 +1,7 @@
 use dashmap::DashMap;
 use opengraph::spargebra::algebra::{AggregateExpression, Expression, GraphPattern};
 use opengraph::spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
-use opengraph::spargebra::{Query as SpargebraQuery, SparqlParser, Update as SpargebraUpdate};
+use opengraph::spargebra::{Query as SpargebraQuery, Update as SpargebraUpdate};
 use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
 use oxigraph::model::*;
 use oxigraph::sparql::{QueryResults, QuerySolution, QuerySolutionIter, SparqlEvaluator};
@@ -16,8 +16,59 @@ use crate::geo::functions as geo_fns;
 #[cfg(feature = "geometry3d")]
 use crate::geo::index3d::SpatialIndex3D;
 use crate::geo::spatial_index::SpatialIndex;
+use crate::store::changes::{self, ChangeLog, GraphDelta};
 use crate::store::parallel_mirror::ParallelMirror;
 use crate::store::query_cache::QueryCache;
+use crate::store::replication::{self, Replication, ReplicationConfig};
+use crate::store::telemetry::{QueryShape, Served, Telemetry};
+use opengraph::parallel::{self, ParClass};
+
+/// Force a prepared query's dataset to read `scope` and nothing else.
+///
+/// The default graph becomes the union of `scope` — the unnamed default graph
+/// when `scope` is empty — and the set of available named graphs becomes
+/// *empty*, so a `GRAPH <g>` (or `GRAPH ?g`) block inside the query matches
+/// nothing whatever `g` is. Whatever dataset the query declared is replaced,
+/// which is the point: a `FROM NAMED <someone-elses-graph>` written into a
+/// shape, a rule or any other stored query text must not widen what that query
+/// can read.
+///
+/// This is the read boundary for SPARQL that arrives as data. Queries a *user*
+/// sends to `/sparql` are scoped the other way round, by intersecting the
+/// dataset they ask for with the graphs they may read
+/// (`routes::scope_query_to_authorized`).
+pub(crate) fn confine_dataset(
+    dataset: &mut oxigraph::sparql::QueryDataset,
+    scope: &[String],
+) -> Result<(), StoreError> {
+    let default: Vec<GraphName> = if scope.is_empty() {
+        vec![GraphName::DefaultGraph]
+    } else {
+        scope
+            .iter()
+            .map(|g| {
+                NamedNode::new(g)
+                    .map(GraphName::NamedNode)
+                    .map_err(|e| StoreError::Parse(format!("scope graph <{g}>: {e}")))
+            })
+            .collect::<Result<_, _>>()?
+    };
+    dataset.set_default_graph(default);
+    dataset.set_available_named_graphs(Vec::new());
+    Ok(())
+}
+
+/// Outcome of one statement of a [`TripleStore::batch_update`] batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BatchStatement {
+    /// The batch committed; this statement is applied.
+    Applied,
+    /// This statement failed (parse or execution) and the batch was rolled
+    /// back — nothing in it is applied.
+    Failed(String),
+    /// Another statement failed; this one was rolled back (or never ran).
+    RolledBack,
+}
 
 #[derive(Error, Debug)]
 pub enum StoreError {
@@ -41,6 +92,10 @@ pub enum StoreError {
     UnsupportedFormat(String),
     #[error("Graph not found: {0}")]
     GraphNotFound(String),
+    #[error("{0}")]
+    Other(String),
+    #[error("read-only replica: writes go to the leader {0}")]
+    ReadOnly(String),
 }
 
 /// How blank nodes are treated when data is imported.
@@ -173,6 +228,21 @@ impl GraphIndex {
     /// index (a full rebuild only enumerates graphs in `named_graphs()`, so an
     /// emptied implicit graph drops out). Otherwise the per-graph counts and
     /// `cached_named_graph_count` would drift after a `DELETE` empties a graph.
+    /// Add `delta` new quads to `graph`'s count (a graph-targeted load whose
+    /// new-quad count is known exactly), instead of rescanning the graph.
+    fn add(&self, graph_iri: Option<&str>, delta: usize) {
+        let key = graph_iri.map(str::to_string);
+        *self.counts.entry(key).or_insert(0) += delta;
+    }
+
+    /// Adjust `graph`'s count by a signed delta (a ground update whose effect
+    /// on the graph is known exactly). Never goes below zero.
+    fn adjust(&self, graph_iri: Option<&str>, delta: i64) {
+        let key = graph_iri.map(str::to_string);
+        let mut e = self.counts.entry(key).or_insert(0);
+        *e = (*e as i64 + delta).max(0) as usize;
+    }
+
     fn recount_specific_graphs(&self, store: &Store, graph_iris: &[Option<String>]) {
         for graph_iri in graph_iris {
             match graph_iri {
@@ -204,6 +274,24 @@ impl GraphIndex {
     }
 }
 
+/// The exact effect of a ground write: `(inserted, deleted)` quads.
+pub type QuadDelta = (Vec<Quad>, Vec<Quad>);
+
+/// Whole-store VoID statistics (see [`TripleStore::void_stats`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VoidStats {
+    pub triples: usize,
+    pub distinct_subjects: usize,
+    pub distinct_predicates: usize,
+    pub distinct_objects: usize,
+    pub named_graphs: usize,
+}
+
+fn next_instance_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The core triple store engine wrapping Oxigraph with GeoSPARQL extensions.
 #[derive(Clone)]
 pub struct TripleStore {
@@ -223,14 +311,61 @@ pub struct TripleStore {
     /// Memoises small query results (invalidated on every write); a repeated query
     /// is answered without re-evaluation. See [`QueryCache`].
     query_cache: QueryCache,
+    /// Workload telemetry: which exit answered each query and how fast,
+    /// validation runs, write spacing. Shared by clones. See [`Telemetry`].
+    telemetry: Arc<Telemetry>,
+    /// Per-quad change capture with a durable cursor. Shared by clones.
+    /// See [`ChangeLog`].
+    changes: Arc<ChangeLog>,
+    /// Replication role, temperature, scope and — on a follower — its
+    /// position. See [`Replication`].
+    replication: Arc<Replication>,
+    /// Process-unique id of this store instance, shared by its clones.
+    /// Caches keyed on a store must not survive the store: a new store
+    /// can reuse the old one's address and start at the same write
+    /// generation (every test store does).
+    instance_id: u64,
+    /// VoID statistics for the whole store, keyed by the write generation
+    /// they were computed at (see [`TripleStore::void_stats`]).
+    void_stats_cache: std::sync::Arc<std::sync::Mutex<Option<(u64, VoidStats)>>>,
     /// Blank-node durability policy applied on import. Defaults to
     /// [`BlankNodeMode::Preserve`] (opt into durability via
     /// [`TripleStore::with_blank_node_mode`]).
     blank_node_mode: BlankNodeMode,
     /// Process-unique identity for cache keying (shared by clones, distinct per
-    /// underlying store). Prevents the per-thread SHACL path cache from serving
-    /// one store's results to another (same focus IRI + path, different data).
+    /// underlying store): one store's derived state is never served for another
+    /// (same focus IRI + path, different data).
     cache_id: u64,
+    /// `true` for a RocksDB-backed store, `false` for the in-memory backend. The
+    /// SHACL engine takes one readable transaction (a RocksDB snapshot, no locks)
+    /// per validation run on a persistent store; the memory backend's transaction
+    /// holds its exclusive write lock, so there the engine reads live instead.
+    persistent: bool,
+    /// `sh:SPARQLFunction` handlers discovered in the store, keyed by the write
+    /// generation they were discovered at. Every `query_options()` used to walk
+    /// the whole store's `rdf:type` index for them — a RocksDB snapshot plus a
+    /// prefix scan per SPARQL query, 12% of a large SHACL run's CPU.
+    shacl_functions: std::sync::Arc<std::sync::Mutex<Option<(u64, ShaclFunctions)>>>,
+}
+
+/// The `sh:SPARQLFunction` handlers discovered at one write generation.
+type ShaclFunctions = Arc<Vec<(NamedNode, crate::shacl::sparql_functions::FnHandler)>>;
+
+/// Brackets one write to the store (see [`TripleStore::begin_write`]). Dropping
+/// it records the write's end on every return path, including errors.
+pub(crate) struct WriteGuard<'a>(&'a TripleStore, i64);
+
+impl Drop for WriteGuard<'_> {
+    fn drop(&mut self) {
+        self.0.parallel_mirror.write_finished();
+        self.0.query_cache.invalidate();
+        changes::leave_write();
+        // The outermost guard of a synchronous leader waits for its
+        // followers' acknowledgement of what this write recorded.
+        if self.0.parallel_mirror.writes_in_flight() == 0 {
+            self.0.replication.after_write(&self.0.changes, self.1);
+        }
+    }
 }
 
 /// Monotonic source for [`TripleStore::cache_id`].
@@ -239,12 +374,33 @@ static NEXT_CACHE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 impl TripleStore {
     /// Open or create a persistent store at the given path.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
+        // Before any query is parsed: the accelerators' planners parse too.
+        crate::geo::aggregates::register_with_parser();
         let store = Store::open(path)?;
         info!("Opened store at {}", path.display());
         let graph_index = GraphIndex::new();
         graph_index.rebuild(&store);
         let spatial_index = SpatialIndex::new();
         spatial_index.rebuild(&store);
+        // The change log beside the store: settle whatever a crash left
+        // pending, then check every graph's count against the last one the
+        // log recorded, so a write the log never saw closes its chains.
+        let changes = ChangeLog::open(Some(path))?;
+        let contains = |q: &Quad| store.contains(q.as_ref()).unwrap_or(false);
+        match changes.resolve_pending(&contains) {
+            Ok((c, a, u)) if c + a + u > 0 => {
+                info!("change log: {c} pending row(s) committed, {a} aborted, {u} unknown")
+            }
+            Err(e) => tracing::warn!("change log: pending rows not resolved: {e}"),
+            _ => {}
+        }
+        let disagreed = changes.reconcile_counts(&graph_index.all_entries());
+        if !disagreed.is_empty() {
+            tracing::warn!(
+                "change log: {} graph(s) changed outside the log; their chains are closed",
+                disagreed.len()
+            );
+        }
         #[cfg(feature = "geometry3d")]
         let spatial_index_3d = {
             // Defer the (potentially large) WKT-Z scan: a persistent store may
@@ -265,13 +421,22 @@ impl TripleStore {
             spatial_index_3d,
             parallel_mirror: ParallelMirror::from_env(),
             query_cache: QueryCache::from_env(),
+            telemetry: Arc::new(Telemetry::new()),
+            instance_id: next_instance_id(),
+            void_stats_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             blank_node_mode: BlankNodeMode::default(),
             cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            changes: Arc::new(changes),
+            replication: Arc::new(Replication::from_env(Some(path))),
+            persistent: true,
+            shacl_functions: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
+        .inspect(replication::spawn_follower_if_configured)
     }
 
     /// Create an in-memory store (useful for testing).
     pub fn in_memory() -> Result<Self, StoreError> {
+        crate::geo::aggregates::register_with_parser();
         let store = Store::new()?;
         let graph_index = GraphIndex::new();
         let spatial_index = SpatialIndex::new();
@@ -285,9 +450,17 @@ impl TripleStore {
             spatial_index_3d,
             parallel_mirror: ParallelMirror::from_env(),
             query_cache: QueryCache::from_env(),
+            telemetry: Arc::new(Telemetry::new()),
+            instance_id: next_instance_id(),
+            void_stats_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             blank_node_mode: BlankNodeMode::default(),
             cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            changes: Arc::new(ChangeLog::open(None)?),
+            replication: Arc::new(Replication::from_env(None)),
+            persistent: false,
+            shacl_functions: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
+        .inspect(replication::spawn_follower_if_configured)
     }
 
     /// Set the blank-node durability policy applied on import (builder style).
@@ -311,12 +484,129 @@ impl TripleStore {
         self
     }
 
-    /// Record a write: invalidate the in-memory mirror (mark for rebuild) and the
-    /// result cache (bump its generation). Called by every mutating path so reads
-    /// never see stale derived state.
-    fn note_write(&self) {
-        self.parallel_mirror.mark_dirty();
+    /// Change capture on, with these caps (builder style; tests): the
+    /// before-image scan cap and the payload cap, in quads. The log becomes
+    /// an in-memory one, on regardless of `OTS_CHANGE_CAPTURE`.
+    pub fn with_change_capture(mut self, max_scan: usize, max_payload: usize) -> Self {
+        self.changes = Arc::new(
+            ChangeLog::in_memory()
+                .map(|l| l.with_caps(max_scan, max_payload))
+                .unwrap_or_else(|_| ChangeLog::disabled()),
+        );
+        self
+    }
+
+    /// Switch change capture off (builder style; tests).
+    pub fn with_change_capture_disabled(mut self) -> Self {
+        self.changes = Arc::new(ChangeLog::disabled());
+        self
+    }
+
+    /// Replication role, temperature and scope (builder style; tests). The
+    /// follower's bookmark stays in memory and no follower thread starts:
+    /// tests drive [`Self::replicate_once`] themselves.
+    pub fn with_replication(mut self, config: ReplicationConfig) -> Self {
+        self.replication = Arc::new(Replication::with_config(config, None));
+        self
+    }
+
+    /// Override the parallel mirror's rebuild quiet period (builder style;
+    /// tests). `0` rebuilds eagerly on the first query after a write.
+    ///
+    /// The parity suite needs this: every test loads data and queries within
+    /// microseconds, well inside the default 500 ms quiet window, so the mirror
+    /// declined to build and BOTH sides of every "parity" assertion were the
+    /// persistent store — the suite compared the engine against itself.
+    pub fn with_parallel_rebuild_quiet_ms(self, ms: u64) -> Self {
+        self.parallel_mirror.set_rebuild_quiet_ms(ms);
+        self
+    }
+
+    /// Rebuild the in-memory query accelerator if writes have gone quiet and it
+    /// is stale (see `ParallelMirror::ensure_fresh`); cheap when nothing changed.
+    pub fn accelerator_tick(&self) {
+        self.parallel_mirror.ensure_fresh(&self.store);
+    }
+
+    /// How many times the parallel mirror has been (re)built. Tests use it to
+    /// prove the mirror was consulted rather than silently bypassed.
+    pub fn parallel_build_count(&self) -> usize {
+        self.parallel_mirror.build_count()
+    }
+
+    /// Bracket a write. Called at the top of every mutating path: the in-memory
+    /// mirror is marked stale and the write generation bumped *before* the store
+    /// mutates, and again when the returned guard drops (after the commit and
+    /// the graph-index / text-index work that follows it). The window between
+    /// a commit and its notification used to be invisible: a mirror rebuilt in
+    /// it published clean while missing the committed quads, and generation
+    /// checks could not tell a write was in progress at all.
+    pub(crate) fn begin_write(&self) -> Result<WriteGuard<'_>, StoreError> {
+        // A follower writes only what it replicates.
+        if self.replication.read_only() && !replication::applying() {
+            return Err(StoreError::ReadOnly(
+                self.replication.leader_url().unwrap_or_default(),
+            ));
+        }
+        // The outermost guard only: a nested primitive is the same write.
+        if self.parallel_mirror.writes_in_flight() == 0 {
+            self.telemetry.record_write();
+        }
+        self.parallel_mirror.write_started();
         self.query_cache.invalidate();
+        changes::enter_write();
+        Ok(WriteGuard(self, self.changes.last_seq()))
+    }
+
+    /// Writes currently in progress (between `begin_write` and its guard's drop).
+    pub fn writes_in_flight(&self) -> usize {
+        self.parallel_mirror.writes_in_flight()
+    }
+
+    /// The workload telemetry rings (see [`Telemetry`]).
+    pub fn telemetry(&self) -> &Telemetry {
+        &self.telemetry
+    }
+
+    /// The change log: one row per graph per write, sequenced in commit
+    /// order (see [`ChangeLog`]).
+    pub fn changes(&self) -> &ChangeLog {
+        &self.changes
+    }
+
+    /// This node's replication role and, on a follower, where it stands
+    /// (see [`Replication`]).
+    pub fn replication(&self) -> &Replication {
+        &self.replication
+    }
+
+    /// Whether the store is RocksDB-backed (see the `persistent` field).
+    pub fn is_persistent(&self) -> bool {
+        self.persistent
+    }
+
+    /// The accelerator's clean in-memory copy of the whole store, if one is
+    /// published and no write has landed since (a peek — never builds).
+    pub fn mirror_full_copy(&self) -> Option<Arc<Store>> {
+        self.parallel_mirror.full_copy()
+    }
+
+    /// The `sh:SPARQLFunction` handlers defined in the store, discovered once per
+    /// write generation.
+    fn shacl_functions(&self) -> ShaclFunctions {
+        let gen = self.write_generation();
+        if let Ok(guard) = self.shacl_functions.lock() {
+            if let Some((g, fns)) = guard.as_ref() {
+                if *g == gen {
+                    return fns.clone();
+                }
+            }
+        }
+        let fns = Arc::new(crate::shacl::sparql_functions::all_functions(self));
+        if let Ok(mut guard) = self.shacl_functions.lock() {
+            *guard = Some((gen, fns.clone()));
+        }
+        fns
     }
 
     /// The blank-node durability policy currently in effect.
@@ -349,6 +639,64 @@ impl TripleStore {
     }
 
     /// Build query options with all registered custom functions (GeoSPARQL, RDF 1.2, etc.).
+    /// The store's write generation: bumped on every mutation. Lets read-side
+    /// caches key on "has anything changed" instead of rescanning per request.
+    pub fn write_generation(&self) -> u64 {
+        self.query_cache.generation()
+    }
+
+    /// Process-unique id of this store instance (shared by clones). With
+    /// [`write_generation`](Self::write_generation) it identifies a store
+    /// state for caches that outlive a single call.
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
+    }
+
+    /// Whole-store VoID statistics over default *and* named graphs, cached
+    /// until the next write. The DCAT catalogue used to run three DISTINCT
+    /// scans over the default graph only on every anonymous request — and
+    /// report 0 distinct subjects for a store whose data sits in named graphs.
+    pub fn void_stats(&self) -> VoidStats {
+        let generation = self.write_generation();
+        if let Ok(guard) = self.void_stats_cache.lock() {
+            if let Some((g, stats)) = guard.as_ref() {
+                if *g == generation {
+                    return *stats;
+                }
+            }
+        }
+        let count = |q: &str| -> usize {
+            match self.query(q) {
+                Ok(oxigraph::sparql::QueryResults::Solutions(mut sols)) => sols
+                    .next()
+                    .and_then(|r| r.ok())
+                    .and_then(|r| match r.get(0) {
+                        Some(oxigraph::model::Term::Literal(l)) => l.value().parse().ok(),
+                        _ => None,
+                    })
+                    .unwrap_or(0),
+                _ => 0,
+            }
+        };
+        let stats = VoidStats {
+            triples: self.len().unwrap_or(0),
+            distinct_subjects: count(
+                "SELECT (COUNT(DISTINCT ?s) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }",
+            ),
+            distinct_predicates: count(
+                "SELECT (COUNT(DISTINCT ?p) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }",
+            ),
+            distinct_objects: count(
+                "SELECT (COUNT(DISTINCT ?o) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }",
+            ),
+            named_graphs: self.named_graphs().map(|g| g.len()).unwrap_or(0),
+        };
+        if let Ok(mut guard) = self.void_stats_cache.lock() {
+            *guard = Some((generation, stats));
+        }
+        stats
+    }
+
     pub(crate) fn query_options(&self) -> SparqlEvaluator {
         // SPARQL federation (`SERVICE`) stays disabled: oxigraph is built without the
         // `http-client` feature, so there is no HTTP service handler and `SERVICE`/`LOAD`
@@ -356,10 +704,24 @@ impl TripleStore {
         // (oxigraph 0.5 moved the explicit `without_service_handler` toggle behind the
         // `http-client` feature, so there is nothing to call when it is disabled.)
         let mut opts = SparqlEvaluator::new();
+        // SPARQL federation: every `SERVICE` goes through the allowlisted
+        // handler (crate::sparql::federation) — no allowlist, no network.
+        opts = opts.with_default_service_handler(
+            crate::sparql::federation::AllowlistedServiceHandler {
+                identity: crate::federation::current_identity(),
+            },
+        );
 
         // Register all GeoSPARQL functions
         for (iri, handler) in geo_fns::all_functions() {
             opts = opts.with_custom_function(iri, move |args| handler(args));
+        }
+
+        // …and the GeoSPARQL aggregates (`geof:aggUnion`). This declares them to
+        // this evaluator's own parser as well; every other parse of a query goes
+        // through `crate::sparql::parser`, which knows them too.
+        for (iri, factory) in crate::geo::aggregates::all_aggregates() {
+            opts = opts.with_custom_aggregate_function(iri, move || factory());
         }
 
         // Register the additive ots-geof: 3D functions (spec §3.4). Separate
@@ -384,8 +746,9 @@ impl TripleStore {
         // Register SHACL-AF user-defined functions (sh:SPARQLFunction) discovered in the
         // store. Discovery uses the raw quad index (never store.query), so this does not
         // re-enter query_options; each function evaluates against a fresh in-memory store.
-        for (iri, handler) in crate::shacl::sparql_functions::all_functions(self) {
-            opts = opts.with_custom_function(iri, move |args| handler(args));
+        for (iri, handler) in self.shacl_functions().iter() {
+            let handler = handler.clone();
+            opts = opts.with_custom_function(iri.clone(), move |args| handler(args));
         }
 
         opts
@@ -396,15 +759,59 @@ impl TripleStore {
         // Result cache: a repeated, *deterministic* query is answered from a small
         // LRU keyed by the (already ACL-scoped) query string and invalidated on
         // every write — so a hit is the exact result the engine would compute.
-        if let Some(cached) = self.query_cache.get(sparql) {
+        // A federated (SERVICE) query is never *stored* (`is_cacheable`, on the
+        // put path), so it can never be a hit: nothing about the query text is
+        // inspected before the lookup — that scan on every call, hits included,
+        // tripled the cost of a cached point query.
+        // Ask before reading the clock: `Instant::now()` and the ring's lock
+        // were 40 % of a cache hit, and only a sampled query needs either.
+        // The exit counters are exact regardless.
+        let t0 = self.telemetry.should_time().then(std::time::Instant::now);
+        if let Some((cached, shape)) = self.query_cache.get(sparql) {
+            self.telemetry
+                .record_query(Served::CacheHit, t0.map(|t| t.elapsed()), shape);
             return Ok(cached);
         }
-        let results = self.query_uncached(sparql)?;
-        Ok(self.query_cache.put(sparql, results))
+        // Snapshot the generation BEFORE evaluating: a write that commits while
+        // this query runs must invalidate the result, not be stamped onto it.
+        let gen = self.query_cache.generation();
+        // A global `COUNT(*)` is answered from the maintained count index in a
+        // few microseconds and needs no syntax tree, so it is asked before the
+        // classifier — whose verdict costs a parse. Asking first cost such a
+        // query 3.0 us -> 6.8 us, which the perf gate caught.
+        if let Some(fast) = self.try_fast_count(sparql) {
+            let shape = QueryShape {
+                analytical: true,
+                aggregate_text: true,
+            };
+            let results = self.query_cache.put(sparql, gen, fast, shape);
+            self.telemetry
+                .record_query(Served::FastCount, t0.map(|t| t.elapsed()), shape);
+            return Ok(results);
+        }
+        // The shape bits, once per uncached evaluation: the classifier parses
+        // (the mirror reuses its verdict rather than parsing again), and the
+        // bits are stamped on the cache entry so a hit inherits them.
+        let class = parallel::classify(sparql);
+        let shape = QueryShape {
+            analytical: class == Some(ParClass::Aggregate),
+            aggregate_text: QueryShape::mentions_aggregate(sparql),
+        };
+        let (results, served) = self.query_uncached(sparql, class)?;
+        let results = self.query_cache.put(sparql, gen, results, shape);
+        self.telemetry
+            .record_query(served, t0.map(|t| t.elapsed()), shape);
+        Ok(results)
     }
 
-    /// The evaluation pipeline behind [`Self::query`], without the result cache.
-    fn query_uncached(&self, sparql: &str) -> Result<QueryResults<'static>, StoreError> {
+    /// The evaluation pipeline behind [`Self::query`], without the result cache,
+    /// naming the exit that answered. `class` is the parallel classifier's
+    /// verdict, computed by the caller.
+    fn query_uncached(
+        &self,
+        sparql: &str,
+        class: Option<ParClass>,
+    ) -> Result<(QueryResults<'static>, Served), StoreError> {
         // Use char-boundary-safe slicing to avoid panics on multi-byte UTF-8 input.
         let prefix_end = (0..=sparql.len().min(200))
             .rfind(|&i| sparql.is_char_boundary(i))
@@ -414,9 +821,11 @@ impl TripleStore {
         // the maintained per-graph count index instead of materialising and then
         // discarding every solution tuple. Callgrind shows ~30% of COUNT(*) cost is
         // tuple build/copy (`InternalTuple::set`, `EncodedTerm::clone`, memcpy) —
-        // pure waste when the projection is only a count.
+        // pure waste when the projection is only a count. `query` asks this before
+        // the classifier and returns; the check stays here for the paths that come
+        // straight to `query_uncached`.
         if let Some(fast) = self.try_fast_count(sparql) {
-            return Ok(fast);
+            return Ok((fast, Served::FastCount));
         }
         // Multi-core path: a decomposable aggregate / `ASK` is evaluated across
         // subject-hash shards (the in-memory mirror) and merged, using every core
@@ -425,9 +834,18 @@ impl TripleStore {
         // shard error, so results are identical to single-store evaluation.
         if let Some(parallel) = self
             .parallel_mirror
-            .try_query(&self.store, sparql, || self.query_options())
+            .try_query(&self.store, sparql, class, || self.query_options())
         {
-            return Ok(parallel);
+            return Ok((parallel, Served::Shards));
+        }
+        // The columnar copy's own evaluator (P5): dictionary ids, sorted
+        // permutations of the quads, a binary search per triple pattern. It
+        // takes the work the *full copy* would otherwise do — it is consulted
+        // after the shards, not before, because a decomposable aggregate is
+        // 8–11x faster across the shards' cores than in one evaluator. Every
+        // shape it does not implement exactly is declined and falls through.
+        if let Some(columnar) = self.parallel_mirror.try_columnar_query(&self.store, sparql) {
+            return Ok((columnar, Served::Columnar));
         }
         // In-memory full mirror: everything the shards can't decompose (joins,
         // grouped non-COUNT aggregates, large SELECTs) is served from an unsharded
@@ -439,14 +857,14 @@ impl TripleStore {
             .parallel_mirror
             .try_full_query(&self.store, sparql, || self.query_options())
         {
-            return Ok(full);
+            return Ok((full, Served::FullCopy));
         }
         let results = self
             .query_options()
             .parse_query(sparql)?
             .on_store(&self.store)
             .execute()?;
-        Ok(results)
+        Ok((results, Served::Engine))
     }
 
     /// Recognise `SELECT (COUNT(*) AS ?v) WHERE { ?s ?p ?o }` (optionally with a
@@ -466,28 +884,53 @@ impl TripleStore {
         {
             return None;
         }
-        let parsed = SparqlParser::new().parse_query(sparql).ok()?;
+        let parsed = crate::sparql::parser().parse_query(sparql).ok()?;
         let (pattern, dataset) = match &parsed {
             SpargebraQuery::Select {
                 pattern, dataset, ..
             } => (pattern, dataset),
             _ => return None,
         };
-        let var_name = count_star_var(pattern)?;
-        // The single graph the count applies to (the query's default graph).
-        let graph: Option<String> = match dataset {
-            None => None,
-            Some(ds) => match ds.default.as_slice() {
-                // `FROM NAMED` with no `FROM` empties the default graph → not us.
-                [] if ds.named.is_some() => return None,
-                [] => None,
-                [g] => Some(g.as_str().to_string()),
-                _ => return None, // multiple FROM → RDF-merge dedup, can't sum counts
-            },
+        let (var_name, scope) = count_star_var(pattern)?;
+        let named_in_dataset = |g: &str| -> bool {
+            match dataset.as_ref().and_then(|ds| ds.named.as_ref()) {
+                Some(named) => named.iter().any(|n| n.as_str() == g),
+                None => true,
+            }
         };
-        let count = self
-            .graph_count_cached(graph.as_deref())
-            .or_else(|| self.count_graph(graph.as_deref()).ok())?;
+        let count = match scope {
+            // `{ ?s ?p ?o }` — the query's default graph.
+            CountScope::Default => {
+                let graph: Option<String> = match dataset {
+                    None => None,
+                    Some(ds) => match ds.default.as_slice() {
+                        [] if ds.named.is_some() => return None,
+                        [] => None,
+                        [g] => Some(g.as_str().to_string()),
+                        _ => return None, // multiple FROM → RDF-merge dedup, can't sum counts
+                    },
+                };
+                self.graph_count_cached(graph.as_deref())
+                    .or_else(|| self.count_graph(graph.as_deref()).ok())?
+            }
+            // `GRAPH <g> { ?s ?p ?o }` — one named graph, if it is in the dataset.
+            CountScope::Named(g) => {
+                if named_in_dataset(&g) {
+                    self.graph_count_cached(Some(&g))
+                        .or_else(|| self.count_graph(Some(&g)).ok())?
+                } else {
+                    0
+                }
+            }
+            // `GRAPH ?g { ?s ?p ?o }` — every named graph in the dataset.
+            CountScope::AnyNamed => self
+                .graph_index
+                .all_entries()
+                .into_iter()
+                .filter(|(k, _)| k.as_deref().is_some_and(&named_in_dataset))
+                .map(|(_, c)| c)
+                .sum(),
+        };
         let var = oxigraph::sparql::Variable::new(var_name).ok()?;
         let lit = Literal::new_typed_literal(
             count.to_string(),
@@ -501,6 +944,7 @@ impl TripleStore {
 
     /// Execute a SPARQL UPDATE operation.
     pub fn update(&self, sparql: &str) -> Result<(), StoreError> {
+        let _w = self.begin_write()?;
         // Use char-boundary-safe slicing to avoid panics on multi-byte UTF-8 input.
         let prefix_end = (0..=sparql.len().min(200))
             .rfind(|&i| sparql.is_char_boundary(i))
@@ -515,18 +959,236 @@ impl TripleStore {
         // scans. `None` ⇒ targets can't be bounded (variable graph, CLEAR/DROP/
         // CREATE/LOAD, or a parse miss) ⇒ conservative full rebuild.
         let targets = Self::static_update_targets(sparql);
-        self.query_options()
-            .parse_update(sparql)?
-            .on_store(&self.store)
-            .execute()?;
+        // A ground update is simulated first (probes, not a scan), so its
+        // row is the exact net delta; anything else is scanned or unknown.
+        let exact = if self.changes.enabled() && targets.is_some() {
+            self.ground_update_delta(sparql)
+        } else {
+            None
+        };
+        let prepared = self.query_options().parse_update(sparql)?;
+        self.execute_update_captured(
+            "update",
+            prepared,
+            targets.as_deref(),
+            exact
+                .as_ref()
+                .map(|(_, ins, del)| (ins.as_slice(), del.as_slice())),
+        )?;
         match targets {
             Some(targets) => self
                 .graph_index
                 .recount_specific_graphs(&self.store, &targets),
             None => self.graph_index.rebuild(&self.store),
         }
-        self.note_write();
         Ok(())
+    }
+
+    // ─── Change capture ───────────────────────────────────────────────────────
+
+    /// Run a prepared update inside one transaction, recording its rows:
+    /// exact when the caller simulated a ground update, a before/after scan
+    /// of the static targets when they are known and small enough, unknown
+    /// otherwise. The commit is the repo's own call, inside the log's
+    /// sequence section, so `seq` order is commit order (delta note §4.3).
+    fn execute_update_captured(
+        &self,
+        origin: &'static str,
+        prepared: oxigraph::sparql::PreparedSparqlUpdate,
+        targets: Option<&[Option<String>]>,
+        exact: Option<(&[Quad], &[Quad])>,
+    ) -> Result<(), StoreError> {
+        let pre_count = self.pre_count();
+        let intent = self.changes.begin(origin, targets, &pre_count);
+        let scan = self.scan_targets(intent.is_some(), targets, exact.is_some());
+        let before: Vec<(Option<String>, Vec<Quad>)> = scan
+            .iter()
+            .flatten()
+            .map(|g| (g.clone(), self.graph_quads(g.as_deref())))
+            .collect();
+        let mut tx = self.store.start_transaction()?;
+        if let Err(e) = prepared.on_transaction(&mut tx).execute() {
+            drop(tx);
+            if let Some(intent) = intent {
+                self.changes.abort(intent);
+            }
+            return Err(e.into());
+        }
+        let deltas = if intent.is_some() {
+            self.deltas_for(&tx, exact, scan.as_deref(), before, targets)
+        } else {
+            Vec::new()
+        };
+        self.changes
+            .commit_with(intent, deltas, || tx.commit().map_err(StoreError::from))
+    }
+
+    /// The graphs to scan for a before-image: only when a row will be
+    /// written, the targets are known, no exact delta is in hand, and their
+    /// summed counts fit the scan cap.
+    fn scan_targets(
+        &self,
+        recording: bool,
+        targets: Option<&[Option<String>]>,
+        exact: bool,
+    ) -> Option<Vec<Option<String>>> {
+        if !recording || exact {
+            return None;
+        }
+        let t = targets?;
+        let total: usize = t
+            .iter()
+            .map(|g| self.graph_index.get_count(g.as_deref()).unwrap_or(0))
+            .sum();
+        (total <= self.changes.max_scan()).then(|| t.to_vec())
+    }
+
+    /// The rows of a write, from what is known after it ran and before it
+    /// committed: the exact delta, the before/after diff, or unknown.
+    fn deltas_for(
+        &self,
+        tx: &oxigraph::store::Transaction<'_>,
+        exact: Option<(&[Quad], &[Quad])>,
+        scan: Option<&[Option<String>]>,
+        before: Vec<(Option<String>, Vec<Quad>)>,
+        targets: Option<&[Option<String>]>,
+    ) -> Vec<GraphDelta> {
+        if let Some((added, removed)) = exact {
+            return Self::deltas_by_graph(added, removed, self.changes.max_payload());
+        }
+        if scan.is_some() {
+            return before
+                .into_iter()
+                .map(|(g, pre)| {
+                    let post = Self::tx_graph_quads(tx, g.as_deref());
+                    let (added, removed) = changes::diff_quads(&pre, &post);
+                    let n = post.len();
+                    GraphDelta::full(g, added, removed).with_post_count(n)
+                })
+                .collect();
+        }
+        targets
+            .map(|t| t.iter().map(|g| GraphDelta::unknown(g.clone())).collect())
+            .unwrap_or_default()
+    }
+
+    /// Group an exact delta by graph: full rows when the whole payload fits
+    /// the cap, exact counts per graph otherwise.
+    fn deltas_by_graph(added: &[Quad], removed: &[Quad], max_payload: usize) -> Vec<GraphDelta> {
+        let mut by_graph: std::collections::BTreeMap<Option<String>, (Vec<Quad>, Vec<Quad>)> =
+            std::collections::BTreeMap::new();
+        let full = added.len() + removed.len() <= max_payload;
+        for q in added {
+            let e = by_graph.entry(Self::graph_key_of(q)).or_default();
+            if full {
+                e.0.push(q.clone());
+            }
+        }
+        for q in removed {
+            let e = by_graph.entry(Self::graph_key_of(q)).or_default();
+            if full {
+                e.1.push(q.clone());
+            }
+        }
+        if full {
+            by_graph
+                .into_iter()
+                .map(|(g, (a, r))| GraphDelta::full(g, a, r))
+                .collect()
+        } else {
+            let count = |quads: &[Quad], g: &Option<String>| {
+                quads.iter().filter(|q| Self::graph_key_of(q) == *g).count()
+            };
+            by_graph
+                .into_keys()
+                .map(|g| {
+                    let (a, r) = (count(added, &g), count(removed, &g));
+                    GraphDelta::counts(g, a, r, None)
+                })
+                .collect()
+        }
+    }
+
+    /// The quads that would be new in each graph of `quads` (duplicates
+    /// within the batch and quads already stored do not count). A
+    /// version-snapshot graph is reported unknown rather than have its copy
+    /// stored a second time (delta note §2.2).
+    fn fresh_by_graph(
+        &self,
+        quads: &[Quad],
+        graphs: &[Option<String>],
+    ) -> Result<Vec<GraphDelta>, StoreError> {
+        let mut seen: std::collections::HashSet<&Quad> =
+            std::collections::HashSet::with_capacity(quads.len());
+        let mut fresh: std::collections::BTreeMap<Option<String>, Vec<Quad>> =
+            std::collections::BTreeMap::new();
+        let snapshot = |g: &Option<String>| g.as_deref().is_some_and(|g| g.contains("/version/"));
+        for q in quads {
+            let g = Self::graph_key_of(q);
+            if snapshot(&g) || !seen.insert(q) {
+                continue;
+            }
+            if !self.store.contains(q.as_ref())? {
+                fresh.entry(g).or_default().push(q.clone());
+            }
+        }
+        Ok(graphs
+            .iter()
+            .map(|g| {
+                if snapshot(g) {
+                    return GraphDelta::unknown(g.clone());
+                }
+                let quads = fresh.remove(g).unwrap_or_default();
+                if quads.len() <= self.changes.max_payload() {
+                    GraphDelta::full(g.clone(), quads, Vec::new())
+                } else {
+                    GraphDelta::counts(g.clone(), quads.len(), 0, None)
+                }
+            })
+            .collect())
+    }
+
+    /// The count index as the log's pre-write count: complete after the
+    /// open-time rebuild, so a graph it does not list has no quads.
+    fn pre_count(&self) -> impl Fn(Option<&str>) -> Option<usize> + '_ {
+        move |g| Some(self.graph_index.get_count(g).unwrap_or(0))
+    }
+
+    fn graph_key_of(q: &Quad) -> Option<String> {
+        match &q.graph_name {
+            GraphName::NamedNode(n) => Some(n.as_str().to_string()),
+            _ => None,
+        }
+    }
+
+    fn graph_name_ref(graph: Option<&str>) -> Option<GraphNameRef<'_>> {
+        match graph {
+            None => Some(GraphNameRef::DefaultGraph),
+            Some(iri) => NamedNodeRef::new(iri).ok().map(GraphNameRef::NamedNode),
+        }
+    }
+
+    /// Every quad of a graph, from the store.
+    fn graph_quads(&self, graph: Option<&str>) -> Vec<Quad> {
+        match Self::graph_name_ref(graph) {
+            Some(name) => self
+                .store
+                .quads_for_pattern(None, None, None, Some(name))
+                .flatten()
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Every quad of a graph, as an uncommitted transaction sees it.
+    fn tx_graph_quads(tx: &oxigraph::store::Transaction<'_>, graph: Option<&str>) -> Vec<Quad> {
+        match Self::graph_name_ref(graph) {
+            Some(name) => tx
+                .quads_for_pattern(None, None, None, Some(name))
+                .flatten()
+                .collect(),
+            None => Vec::new(),
+        }
     }
 
     /// Statically determine the set of graphs a SPARQL UPDATE writes to, so the
@@ -548,7 +1210,7 @@ impl TripleStore {
         use opengraph::spargebra::term::{GraphName, GraphNamePattern};
         use opengraph::spargebra::GraphUpdateOperation;
 
-        let parsed = SparqlParser::new().parse_update(sparql).ok()?;
+        let parsed = crate::sparql::parser().parse_update(sparql).ok()?;
         // Ground `GraphName` (DATA blocks): NamedNode or DefaultGraph, never a var.
         let ground = |g: &GraphName| match g {
             GraphName::NamedNode(nn) => Some(nn.as_str().to_string()),
@@ -600,69 +1262,435 @@ impl TripleStore {
     /// only the graphs listed in `affected_iris` are re-counted.  When
     /// `full_rebuild` is true (e.g. CLEAR ALL / DROP ALL) a full rebuild is
     /// still performed.
+    /// Run an update whose `WHERE` clauses read ONLY the union of `scope`: a
+    /// SPARQL `USING` dataset is set on every DELETE/INSERT operation that does
+    /// not declare one (`GRAPH <g>` patterns are unaffected). Without a scope
+    /// the rules of the reasoners read the *unnamed default graph* only, which
+    /// made every named graph — every dataset — invisible to
+    /// `POST /api/reasoning/materialize`; this is how a reasoner materialises
+    /// over a selected layer (a dataset's own graphs plus the model version it
+    /// conforms to) instead of the whole store.
+    pub fn update_scoped(&self, sparql: &str, scope: &[String]) -> Result<(), StoreError> {
+        let _w = self.begin_write()?;
+        let mut parsed = crate::sparql::parser()
+            .parse_update(sparql)
+            .map_err(|e| StoreError::Parse(format!("scoped update: {e}")))?;
+        let default = Self::scope_graphs(scope)?;
+        for op in &mut parsed.operations {
+            if let spargebra::GraphUpdateOperation::DeleteInsert { using, .. } = op {
+                if using.is_none() {
+                    *using = Some(spargebra::algebra::QueryDataset {
+                        default: default.clone(),
+                        named: None,
+                    });
+                }
+            }
+        }
+        let targets = Self::static_update_targets(sparql);
+        let prepared = self.query_options().for_update(parsed);
+        self.execute_update_captured("update_scoped", prepared, targets.as_deref(), None)?;
+        match targets {
+            Some(targets) => self
+                .graph_index
+                .recount_specific_graphs(&self.store, &targets),
+            None => self.graph_index.rebuild(&self.store),
+        }
+        Ok(())
+    }
+
+    /// The read-only counterpart of [`update_scoped`](Self::update_scoped): a
+    /// query without its own `FROM` clauses evaluated against the union of
+    /// `scope` as its default graph. Uncached.
+    pub fn query_scoped(
+        &self,
+        sparql: &str,
+        scope: &[String],
+    ) -> Result<QueryResults<'static>, StoreError> {
+        let mut parsed = crate::sparql::parser()
+            .parse_query(sparql)
+            .map_err(|e| StoreError::Parse(format!("scoped query: {e}")))?;
+        let ds = spargebra::algebra::QueryDataset {
+            default: Self::scope_graphs(scope)?,
+            named: None,
+        };
+        match &mut parsed {
+            spargebra::Query::Select { dataset, .. }
+            | spargebra::Query::Construct { dataset, .. }
+            | spargebra::Query::Describe { dataset, .. }
+            | spargebra::Query::Ask { dataset, .. } => {
+                if dataset.is_none() {
+                    *dataset = Some(ds);
+                }
+            }
+        }
+        Ok(self
+            .query_options()
+            .for_query(parsed)
+            .on_store(&self.store)
+            .execute()?)
+    }
+
+    /// Evaluate a caller-supplied CONSTRUCT query read-only, confined to `scope`.
+    ///
+    /// This is the safe way to run SPARQL that came from *data* — a SHACL-AF
+    /// rule body, say, which any writer of a dataset can upload. Three things
+    /// make it safe, and all three matter:
+    ///
+    /// * it is a **query**, so the grammar itself rules out writing, dropping
+    ///   or naming a destination graph — a CONSTRUCT template cannot carry a
+    ///   `GRAPH` clause. The caller decides where the resulting triples go;
+    /// * the dataset is [confined](confine_dataset) to `scope`, *replacing*
+    ///   whatever `FROM` / `FROM NAMED` the query declared — unlike
+    ///   [`query_scoped`](Self::query_scoped), which only fills in a dataset
+    ///   the query left unset and leaves every named graph reachable;
+    /// * variables are bound as **terms** through `bindings`, never pasted
+    ///   into the text, so a focus node whose lexical form is hostile (a
+    ///   literal `sh:targetNode`) cannot close a clause and open another.
+    pub fn construct_confined(
+        &self,
+        query: &SpargebraQuery,
+        scope: &[String],
+        bindings: &[(&str, Term)],
+    ) -> Result<Vec<Triple>, StoreError> {
+        if !matches!(query, SpargebraQuery::Construct { .. }) {
+            return Err(StoreError::Parse(
+                "only a CONSTRUCT query can be evaluated confined".to_string(),
+            ));
+        }
+        let mut prepared = self.query_options().for_query(query.clone());
+        confine_dataset(prepared.dataset_mut(), scope)?;
+        let mut bound = prepared.on_store(&self.store);
+        for (name, term) in bindings {
+            let var = oxigraph::sparql::Variable::new(*name)
+                .map_err(|e| StoreError::Parse(e.to_string()))?;
+            bound = bound.substitute_variable(var, term.clone());
+        }
+        match bound.execute()? {
+            QueryResults::Graph(triples) => Ok(triples.collect::<Result<Vec<_>, _>>()?),
+            // A CONSTRUCT always evaluates to a graph; the other arms cannot
+            // happen, and an empty result is the honest answer if they did.
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// As [`Self::bulk_insert_quads`], with the graphs to re-count taken from
+    /// the quads themselves — including the unnamed default graph, which a
+    /// caller cannot name in `affected_graphs`.
+    pub fn insert_quads(&self, quads: Vec<Quad>) -> Result<(), StoreError> {
+        let mut graphs: Vec<Option<String>> = quads.iter().map(Self::graph_key_of).collect();
+        graphs.sort();
+        graphs.dedup();
+        let named: Vec<String> = graphs.iter().flatten().cloned().collect();
+        self.bulk_insert_quads(quads, &named)?;
+        if graphs.iter().any(Option::is_none) {
+            self.graph_index
+                .recount_specific_graphs(&self.store, &[None]);
+        }
+        Ok(())
+    }
+
+    fn scope_graphs(scope: &[String]) -> Result<Vec<oxigraph::model::NamedNode>, StoreError> {
+        scope
+            .iter()
+            .map(|g| {
+                oxigraph::model::NamedNode::new(g.as_str())
+                    .map_err(|e| StoreError::Parse(format!("scope graph <{g}>: {e}")))
+            })
+            .collect()
+    }
+
     pub fn update_targeted(
         &self,
         sparql: &str,
         affected_iris: &[String],
         full_rebuild: bool,
     ) -> Result<(), StoreError> {
+        self.update_targeted_delta(sparql, affected_iris, full_rebuild)
+            .map(|_| ())
+    }
+
+    /// As [`Self::update_targeted`], returning the exact `(inserted, deleted)`
+    /// quads when the update is ground (`INSERT DATA` / `DELETE DATA` only),
+    /// so derived indexes can be maintained incrementally; `None` otherwise.
+    pub fn update_targeted_delta(
+        &self,
+        sparql: &str,
+        affected_iris: &[String],
+        full_rebuild: bool,
+    ) -> Result<Option<QuadDelta>, StoreError> {
+        let _w = self.begin_write()?;
         let prefix_end = (0..=sparql.len().min(200))
             .rfind(|&i| sparql.is_char_boundary(i))
             .unwrap_or(0);
         debug!("Executing targeted update: {}", &sparql[..prefix_end]);
-        self.query_options()
-            .parse_update(sparql)?
-            .on_store(&self.store)
-            .execute()?;
-        if full_rebuild || affected_iris.is_empty() {
-            self.graph_index.rebuild(&self.store);
+        // A ground update (INSERT DATA / DELETE DATA only) has an exactly
+        // knowable effect per graph: count it before executing and adjust the
+        // index afterwards, instead of rescanning every affected graph — that
+        // recount made a 500-quad insert into a 900k-quad graph cost a
+        // 900k-quad scan (the HTTP write stall the scale benchmark measured).
+        let exact = if full_rebuild {
+            None
         } else {
-            let graphs: Vec<Option<String>> =
-                affected_iris.iter().map(|s| Some(s.clone())).collect();
-            self.graph_index
-                .recount_specific_graphs(&self.store, &graphs);
+            self.ground_update_delta(sparql)
+        };
+        // The log's targets: the graphs of the exact delta when there is one
+        // (no second parse of the text), the statically known targets
+        // otherwise, nothing when nothing records.
+        let targets: Option<Vec<Option<String>>> = if !self.changes.enabled() {
+            None
+        } else if let Some((deltas, _, _)) = &exact {
+            Some(deltas.iter().map(|(g, _)| g.clone()).collect())
+        } else {
+            Self::static_update_targets(sparql)
+        };
+        let prepared = self.query_options().parse_update(sparql)?;
+        self.execute_update_captured(
+            "update_targeted",
+            prepared,
+            targets.as_deref(),
+            exact
+                .as_ref()
+                .map(|(_, ins, del)| (ins.as_slice(), del.as_slice())),
+        )?;
+        let mut result = None;
+        match exact {
+            Some((deltas, inserted, deleted)) if !affected_iris.is_empty() => {
+                result = Some((inserted, deleted));
+                for (graph, delta) in deltas {
+                    let known = self.graph_index.get_count(graph.as_deref()).is_some();
+                    if known {
+                        self.graph_index.adjust(graph.as_deref(), delta);
+                    } else {
+                        self.graph_index
+                            .recount_specific_graphs(&self.store, std::slice::from_ref(&graph));
+                    }
+                }
+            }
+            _ => {
+                if full_rebuild || affected_iris.is_empty() {
+                    self.graph_index.rebuild(&self.store);
+                } else {
+                    let graphs: Vec<Option<String>> =
+                        affected_iris.iter().map(|s| Some(s.clone())).collect();
+                    self.graph_index
+                        .recount_specific_graphs(&self.store, &graphs);
+                }
+            }
         }
-        self.note_write();
-        Ok(())
+        Ok(result)
     }
 
-    /// Execute multiple SPARQL UPDATE statements in a single batch.
-    ///
-    /// All updates are parsed upfront (fail-fast on syntax errors), then
-    /// executed sequentially. The graph index is rebuilt once at the end,
-    /// amortising overhead across the entire batch (3-7x faster than
-    /// individual `update()` calls).
-    pub fn batch_update(
+    /// For an update made only of `INSERT DATA` / `DELETE DATA`, the exact
+    /// per-graph change it will make (duplicates and no-ops excluded, ground
+    /// quads checked against the store). `None` for anything else.
+    /// spargebra's graph name → oxrdf's (None for a blank-node graph name,
+    /// which a ground update cannot name deterministically).
+    fn oxrdf_graph_name(g: &spargebra::term::GraphName) -> Option<GraphName> {
+        match g {
+            spargebra::term::GraphName::NamedNode(n) => {
+                Some(GraphName::NamedNode(NamedNode::new_unchecked(n.as_str())))
+            }
+            spargebra::term::GraphName::DefaultGraph => Some(GraphName::DefaultGraph),
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn ground_update_delta(
         &self,
-        statements: &[String],
-    ) -> Result<Vec<Result<(), String>>, StoreError> {
-        // Parse all upfront
-        let parsed: Vec<Result<SpargebraUpdate, String>> = statements
-            .iter()
-            .map(|s| {
-                SparqlParser::new()
-                    .parse_update(s)
-                    .map_err(|e| e.to_string())
-            })
-            .collect();
+        sparql: &str,
+    ) -> Option<(Vec<(Option<String>, i64)>, Vec<Quad>, Vec<Quad>)> {
+        use spargebra::GraphUpdateOperation;
+        use std::collections::{HashMap, HashSet};
 
-        let opts = self.query_options();
-        let mut results = Vec::with_capacity(statements.len());
-
-        for update in parsed {
-            match update {
-                Ok(u) => match opts.clone().for_update(u).on_store(&self.store).execute() {
-                    Ok(()) => results.push(Ok(())),
-                    Err(e) => results.push(Err(e.to_string())),
-                },
-                Err(e) => results.push(Err(e)),
+        fn graph_key(quad: &Quad) -> Option<Option<String>> {
+            match &quad.graph_name {
+                GraphName::NamedNode(n) => Some(Some(n.as_str().to_string())),
+                GraphName::DefaultGraph => Some(None),
+                GraphName::BlankNode(_) => None,
             }
         }
 
+        /// The simulated state of one ground quad: `(quad, stored now, stored
+        /// after the operations so far)`, in first-seen order.
+        type Sim = Vec<(Quad, bool, bool)>;
+
+        /// The slot for `quad`, seeded from the store the first time it is seen.
+        fn slot(
+            store: &Store,
+            sim: &mut Sim,
+            slots: &mut HashMap<Quad, usize>,
+            quad: Quad,
+        ) -> Option<usize> {
+            if let Some(&i) = slots.get(&quad) {
+                return Some(i);
+            }
+            let present = store.contains(quad.as_ref()).ok()?;
+            sim.push((quad.clone(), present, present));
+            slots.insert(quad, sim.len() - 1);
+            Some(sim.len() - 1)
+        }
+
+        let parsed = crate::sparql::parser().parse_update(sparql).ok()?;
+        // The operations are simulated in order against the store's current
+        // state and the delta is the NET difference: `DELETE DATA {q}; INSERT
+        // DATA {q}` with `q` stored changes nothing, and `INSERT DATA {q};
+        // DELETE DATA {q}` with `q` absent changes nothing. Checking each
+        // operation against the pre-update store instead reported -1 / +1 for
+        // those, so the count index drifted and the text index dropped a
+        // document for a quad still stored (or kept one for a quad never
+        // stored).
+        let mut sim: Sim = Vec::new();
+        let mut slots: HashMap<Quad, usize> = HashMap::new();
+        let mut deltas: HashMap<Option<String>, i64> = HashMap::new();
+        let mut inserted: Vec<Quad> = Vec::new();
+        for op in &parsed.operations {
+            match op {
+                GraphUpdateOperation::InsertData { data } => {
+                    // A blank node in INSERT DATA is a fresh node, so its quad
+                    // is always new; the same label twice in one operation is
+                    // one node, hence one quad.
+                    let mut op_bnodes: HashSet<Quad> = HashSet::new();
+                    for q in data {
+                        let quad = Quad::new(
+                            q.subject.clone(),
+                            q.predicate.clone(),
+                            q.object.clone(),
+                            Self::oxrdf_graph_name(&q.graph_name)?,
+                        );
+                        let key = graph_key(&quad)?;
+                        let fresh_bnode = matches!(quad.subject, NamedOrBlankNode::BlankNode(_))
+                            || matches!(quad.object, Term::BlankNode(_));
+                        if fresh_bnode {
+                            if op_bnodes.insert(quad.clone()) {
+                                *deltas.entry(key).or_insert(0) += 1;
+                                inserted.push(quad);
+                            }
+                            continue;
+                        }
+                        let i = slot(&self.store, &mut sim, &mut slots, quad)?;
+                        sim[i].2 = true;
+                    }
+                }
+                GraphUpdateOperation::DeleteData { data } => {
+                    for q in data {
+                        let quad = Quad::new(
+                            NamedOrBlankNode::NamedNode(q.subject.clone()),
+                            q.predicate.clone(),
+                            Term::from(q.object.clone()),
+                            Self::oxrdf_graph_name(&q.graph_name)?,
+                        );
+                        graph_key(&quad)?;
+                        let i = slot(&self.store, &mut sim, &mut slots, quad)?;
+                        sim[i].2 = false;
+                    }
+                }
+                _ => return None,
+            }
+        }
+        let mut deleted: Vec<Quad> = Vec::new();
+        for (quad, before, after) in sim {
+            if before == after {
+                continue;
+            }
+            let key = graph_key(&quad)?;
+            if after {
+                *deltas.entry(key).or_insert(0) += 1;
+                inserted.push(quad);
+            } else {
+                *deltas.entry(key).or_insert(0) -= 1;
+                deleted.push(quad);
+            }
+        }
+        Some((deltas.into_iter().collect(), inserted, deleted))
+    }
+
+    /// Execute multiple SPARQL UPDATE statements as ONE transaction.
+    ///
+    /// Every statement is parsed up front; the parsed updates then run in
+    /// order inside a single oxigraph transaction, so a later statement sees
+    /// the effect of an earlier one and the first failure — at parse time or
+    /// at execution — aborts the whole batch with nothing applied. The graph
+    /// index is rebuilt once at the end, amortising overhead across the batch
+    /// (3-7x faster than individual `update()` calls).
+    ///
+    /// Each statement used to run as its own transaction while the endpoint
+    /// documented the batch as atomic: a mid-batch failure left the earlier
+    /// statements applied.
+    pub fn batch_update(&self, statements: &[String]) -> Result<Vec<BatchStatement>, StoreError> {
+        let _w = self.begin_write()?;
+        let rolled_back = |failed_at: usize, err: String| -> Vec<BatchStatement> {
+            (0..statements.len())
+                .map(|i| {
+                    if i == failed_at {
+                        BatchStatement::Failed(err.clone())
+                    } else {
+                        BatchStatement::RolledBack
+                    }
+                })
+                .collect()
+        };
+        // Parse everything first: a syntax error anywhere means nothing runs.
+        let mut parsed: Vec<SpargebraUpdate> = Vec::with_capacity(statements.len());
+        for (i, s) in statements.iter().enumerate() {
+            match crate::sparql::parser().parse_update(s) {
+                Ok(u) => parsed.push(u),
+                Err(e) => return Ok(rolled_back(i, e.to_string())),
+            }
+        }
+
+        // The batch's rows: exact when every statement is ground (one
+        // simulation over the joined text), a before/after scan of the
+        // static targets when known and small enough, unknown otherwise.
+        let (targets, ground) = if self.changes.enabled() {
+            let joined = statements.join(" ;\n");
+            let targets = Self::static_update_targets(&joined);
+            let ground = if targets.is_some() {
+                self.ground_update_delta(&joined)
+            } else {
+                None
+            };
+            (targets, ground)
+        } else {
+            (None, None)
+        };
+        let exact = ground
+            .as_ref()
+            .map(|(_, ins, del)| (ins.as_slice(), del.as_slice()));
+        let pre_count = self.pre_count();
+        let intent = self
+            .changes
+            .begin("batch_update", targets.as_deref(), &pre_count);
+        let scan = self.scan_targets(intent.is_some(), targets.as_deref(), exact.is_some());
+        let before: Vec<(Option<String>, Vec<Quad>)> = scan
+            .iter()
+            .flatten()
+            .map(|g| (g.clone(), self.graph_quads(g.as_deref())))
+            .collect();
+
+        let opts = self.query_options();
+        let mut tx = self.store.start_transaction()?;
+        for (i, u) in parsed.into_iter().enumerate() {
+            if let Err(e) = opts.clone().for_update(u).on_transaction(&mut tx).execute() {
+                // Dropping the transaction without `commit` discards every
+                // statement that ran before this one.
+                drop(tx);
+                if let Some(intent) = intent {
+                    self.changes.abort(intent);
+                }
+                return Ok(rolled_back(i, e.to_string()));
+            }
+        }
+        let deltas = if intent.is_some() {
+            self.deltas_for(&tx, exact, scan.as_deref(), before, targets.as_deref())
+        } else {
+            Vec::new()
+        };
+        self.changes
+            .commit_with(intent, deltas, || tx.commit().map_err(StoreError::from))?;
+
         // Rebuild graph index once for the entire batch
         self.graph_index.rebuild(&self.store);
-        self.note_write();
-        Ok(results)
+        Ok(vec![BatchStatement::Applied; statements.len()])
     }
 
     /// Load RDF data from a reader with the given format.
@@ -690,24 +1718,64 @@ impl TripleStore {
         base_iri: Option<&str>,
         to_graph: Option<&str>,
     ) -> Result<(), StoreError> {
+        let _w = self.begin_write()?;
         // Fast path: nothing to rewrite and no forced graph → stream directly.
         if self.blank_node_mode == BlankNodeMode::Preserve && to_graph.is_none() {
             // oxigraph 0.5: the bulk loader stages batches and only persists them on
             // an explicit `commit()` — dropping it without committing loses the data.
+            // Streamed straight into the store: the delta is never
+            // materialised, so the row is an honest store-scoped unknown.
+            let parser = Self::parser_for(format, base_iri)?;
+            let intent = self.changes.begin("load_reader", None, &|_| None);
             let mut loader = self.store.bulk_loader();
-            loader.load_from_reader(Self::parser_for(format, base_iri)?, reader)?;
-            loader.commit()?;
+            if let Err(e) = loader.load_from_reader(parser, reader) {
+                if let Some(intent) = intent {
+                    self.changes.abort(intent);
+                }
+                return Err(e.into());
+            }
+            self.changes
+                .commit_unknown(intent, None, || loader.commit().map_err(StoreError::from))?;
             info!("Data loaded successfully (streamed)");
             self.graph_index.rebuild(&self.store);
             self.spatial_index.mark_dirty();
             #[cfg(feature = "geometry3d")]
             self.spatial_index_3d.mark_dirty();
-            self.note_write();
             return Ok(());
         }
 
-        // Materialise quads (embedded graph names from NQuads/TriG are preserved;
-        // triple formats land in the default graph). Parse errors are propagated.
+        let quads = self.parse_quads(reader, format, base_iri, to_graph)?;
+        self.insert_quads_and_reindex(quads, to_graph).map(|_| ())
+    }
+
+    /// As [`Self::load_str`] into a named graph, returning the quads that were
+    /// actually new (so callers can update derived indexes incrementally).
+    pub fn load_str_delta(
+        &self,
+        data: &str,
+        format: RdfFormat,
+        to_graph: &str,
+    ) -> Result<Vec<Quad>, StoreError> {
+        let reader = BufReader::new(data.as_bytes());
+        let quads = self.parse_quads(reader, format, None, Some(to_graph))?;
+        self.insert_quads_and_reindex(quads, Some(to_graph))
+    }
+
+    /// Parse `reader` into quads, retargeting them into `to_graph` when one is
+    /// given and applying the durable blank-node policy.
+    ///
+    /// Split out of [`Self::load_reader_with_base`] so a caller that must not
+    /// mutate the store until the input is known-good — Graph Store PUT, which
+    /// replaces a graph — can parse first and only then clear.
+    fn parse_quads(
+        &self,
+        reader: impl BufRead,
+        format: RdfFormat,
+        base_iri: Option<&str>,
+        to_graph: Option<&str>,
+    ) -> Result<Vec<Quad>, StoreError> {
+        // Embedded graph names from NQuads/TriG are preserved; triple formats
+        // land in the default graph. Parse errors are propagated.
         let mut quads: Vec<Quad> = Self::parser_for(format, base_iri)?
             .for_reader(reader)
             .map(|r| r.map_err(|e| StoreError::Parse(e.to_string())))
@@ -725,32 +1793,101 @@ impl TripleStore {
                 .collect();
         }
 
-        // Apply the durable blank-node policy, then bulk-load.
-        let quads = self.apply_blank_node_mode(quads);
+        Ok(self.apply_blank_node_mode(quads))
+    }
+
+    /// Bulk-insert already-parsed quads and run the post-write index bookkeeping.
+    fn insert_quads_and_reindex(
+        &self,
+        quads: Vec<Quad>,
+        to_graph: Option<&str>,
+    ) -> Result<Vec<Quad>, StoreError> {
+        self.insert_quads_and_reindex_into(quads, to_graph, false)
+    }
+
+    /// [`Self::insert_quads_and_reindex`] for a caller that knows the target
+    /// graph holds nothing (it just emptied it): every distinct quad is new,
+    /// so the per-quad `contains` probe is skipped.
+    fn insert_quads_and_reindex_into(
+        &self,
+        quads: Vec<Quad>,
+        to_graph: Option<&str>,
+        target_is_empty: bool,
+    ) -> Result<Vec<Quad>, StoreError> {
+        let _w = self.begin_write()?;
+        // A graph-targeted load knows exactly how many quads are new (duplicates
+        // within the batch and quads already stored do not count), so the graph
+        // index is bumped by that number. Recounting the graph after every load
+        // made each write O(graph): under the scale benchmark a 500-quad insert
+        // into a 900k-quad graph took seconds, and concurrent writers stalled.
+        let new_quads: Option<Vec<Quad>> = if to_graph.is_some() {
+            let mut seen: std::collections::HashSet<&Quad> =
+                std::collections::HashSet::with_capacity(quads.len());
+            let mut fresh = Vec::new();
+            for q in &quads {
+                if seen.insert(q) && (target_is_empty || !self.store.contains(q.as_ref())?) {
+                    fresh.push(q.clone());
+                }
+            }
+            Some(fresh)
+        } else {
+            None
+        };
+        // The rows: the fresh quads of a named target; per graph unknown for
+        // a default-graph load, whose duplicates were never probed.
+        let (targets, deltas): (Vec<Option<String>>, Vec<GraphDelta>) = match (to_graph, &new_quads)
+        {
+            (Some(g), Some(fresh)) => {
+                let g = Some(g.to_string());
+                let delta = if fresh.len() <= self.changes.max_payload() {
+                    GraphDelta::full(g.clone(), fresh.clone(), Vec::new())
+                } else {
+                    GraphDelta::counts(g.clone(), fresh.len(), 0, None)
+                };
+                (vec![g], vec![delta])
+            }
+            _ => {
+                let mut graphs: Vec<Option<String>> =
+                    quads.iter().map(Self::graph_key_of).collect();
+                graphs.sort();
+                graphs.dedup();
+                let deltas = graphs.iter().cloned().map(GraphDelta::unknown).collect();
+                (graphs, deltas)
+            }
+        };
+        let pre_count = self.pre_count();
+        let intent = self.changes.begin("load", Some(&targets), &pre_count);
         let mut loader = self.store.bulk_loader();
-        loader.load_quads(quads)?;
-        loader.commit()?; // oxigraph 0.5: stage-then-commit (see load_reader_with_base).
+        if let Err(e) = loader.load_quads(quads) {
+            if let Some(intent) = intent {
+                self.changes.abort(intent);
+            }
+            return Err(e.into());
+        }
+        // oxigraph 0.5: stage-then-commit (see load_reader_with_base).
+        self.changes
+            .commit_with(intent, deltas, || loader.commit().map_err(StoreError::from))?;
 
         info!("Data loaded successfully");
-        // When all data was forced into a single target graph (the Graph Store
-        // PUT/POST path, and every per-graph seed/audit/shape re-PUT at boot),
-        // ONLY that graph changed — recount just it instead of rebuilding the
-        // whole index. A full rebuild walks and counts every named graph,
-        // including a dataset's multi-million-triple `…/ifcowl` lift, so doing it
-        // per re-PUT turned each idempotent boot PUT into a full-store scan. With
-        // no target graph the input may name several graphs (NQuads/TriG), so the
-        // full rebuild stays.
-        match to_graph {
-            Some(g) => self
-                .graph_index
-                .recount_specific_graphs(&self.store, &[Some(g.to_string())]),
-            None => self.graph_index.rebuild(&self.store),
-        }
+        let delta = match (to_graph, new_quads) {
+            (Some(g), Some(fresh)) => {
+                if self.graph_index.get_count(Some(g)).is_some() {
+                    self.graph_index.add(Some(g), fresh.len());
+                } else {
+                    self.graph_index
+                        .recount_specific_graphs(&self.store, &[Some(g.to_string())]);
+                }
+                fresh
+            }
+            _ => {
+                self.graph_index.rebuild(&self.store);
+                Vec::new()
+            }
+        };
         self.spatial_index.mark_dirty();
         #[cfg(feature = "geometry3d")]
         self.spatial_index_3d.mark_dirty();
-        self.note_write();
-        Ok(())
+        Ok(delta)
     }
 
     /// Load RDF data from a file, auto-detecting format from extension.
@@ -770,6 +1907,46 @@ impl TripleStore {
     ) -> Result<(), StoreError> {
         let reader = BufReader::new(data.as_bytes());
         self.load_reader(reader, format, to_graph)
+    }
+
+    /// Error if any quad names a graph other than the default graph.
+    ///
+    /// Used on write paths where the caller was authorized for exactly one graph
+    /// — an LDP resource, or a default-graph Graph Store write — so a body that
+    /// smuggles triples into another named graph (TriG/N-Quads named graphs, a
+    /// JSON-LD `@graph` with an `@id`) must be refused rather than written there,
+    /// bypassing the per-graph ACL. Callers check this *before* inserting.
+    fn reject_named_graphs(quads: &[Quad]) -> Result<(), StoreError> {
+        if let Some(q) = quads
+            .iter()
+            .find(|q| !matches!(q.graph_name, GraphName::DefaultGraph))
+        {
+            let named = match &q.graph_name {
+                GraphName::NamedNode(n) => n.as_str().to_string(),
+                _ => "_:blank".to_string(),
+            };
+            return Err(StoreError::Parse(format!(
+                "named graphs are not allowed here: the body writes into graph <{named}>. \
+                 Load multi-graph data through the dataset import API."
+            )));
+        }
+        Ok(())
+    }
+
+    /// Load `data` into the **default graph only**, rejecting a body that names a
+    /// graph of its own (see [`Self::reject_named_graphs`]). Relative IRIs resolve
+    /// against `base_iri` when given. Parses the whole body before inserting, so a
+    /// rejected body writes nothing.
+    pub fn load_str_triples_only(
+        &self,
+        data: &str,
+        format: RdfFormat,
+        base_iri: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let quads = self.parse_quads(BufReader::new(data.as_bytes()), format, base_iri, None)?;
+        Self::reject_named_graphs(&quads)?;
+        self.insert_quads_and_reindex(quads, None)?;
+        Ok(())
     }
 
     /// Load RDF data from a string, resolving relative IRIs against `base_iri`.
@@ -796,24 +1973,32 @@ impl TripleStore {
         }
     }
 
+    /// Resolve `from_graph` to the graph the dump/scan helpers read from.
+    fn graph_ref(from_graph: Option<&str>) -> Result<GraphNameRef<'_>, StoreError> {
+        match from_graph {
+            Some(g) => Ok(GraphNameRef::NamedNode(
+                NamedNodeRef::new(g)
+                    .map_err(|e| StoreError::Parse(format!("Invalid IRI: {}", e)))?,
+            )),
+            None => Ok(GraphNameRef::DefaultGraph),
+        }
+    }
+
     /// Stream all triples from a graph in the specified format into `writer`.
     ///
     /// This is the primitive used by both the buffered [`Self::dump`] helper and
     /// the streaming HTTP response path — callers that want to avoid buffering
     /// multi-MB results in memory can pass an `axum`-backed writer directly.
+    ///
+    /// Emits no `@prefix` header: every IRI is written in full. Callers serving
+    /// Turtle to a human want [`Self::dump_prefixed`] instead.
     pub fn dump_to_writer<W: Write>(
         &self,
         mut writer: W,
         format: RdfFormat,
         from_graph: Option<&str>,
     ) -> Result<(), StoreError> {
-        let graph = match from_graph {
-            Some(g) => GraphNameRef::NamedNode(
-                NamedNodeRef::new(g)
-                    .map_err(|e| StoreError::Parse(format!("Invalid IRI: {}", e)))?,
-            ),
-            None => GraphNameRef::DefaultGraph,
-        };
+        let graph = Self::graph_ref(from_graph)?;
 
         let serializer = RdfSerializer::from_format(format);
         let mut ser = serializer.for_writer(&mut writer);
@@ -854,6 +2039,144 @@ impl TripleStore {
         Ok(buffer)
     }
 
+    /// The distinct namespaces the terms of `from_graph` are drawn from.
+    ///
+    /// Each entry is a namespace some term in the graph can actually be written
+    /// against, so a prefix header built from these has no dead lines in it.
+    /// The datatypes Turtle writes implicitly — plain strings, language strings,
+    /// and the numeric/boolean shorthands (`1`, `1.5`, `true`) — are skipped:
+    /// their IRI never reaches the document, so declaring `xsd:` for a graph
+    /// whose only typed literal is `sh:minCount 1` would be exactly such a dead
+    /// line. A datatype outside that set (`xsd:date`, say) is written out, and
+    /// does put its namespace in the header.
+    pub fn graph_namespaces(
+        &self,
+        from_graph: Option<&str>,
+    ) -> Result<std::collections::BTreeSet<String>, StoreError> {
+        const IMPLICIT_DATATYPES: [&str; 6] = [
+            "http://www.w3.org/2001/XMLSchema#string",
+            "http://www.w3.org/2001/XMLSchema#integer",
+            "http://www.w3.org/2001/XMLSchema#decimal",
+            "http://www.w3.org/2001/XMLSchema#double",
+            "http://www.w3.org/2001/XMLSchema#boolean",
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString",
+        ];
+        let graph = Self::graph_ref(from_graph)?;
+        let mut out = std::collections::BTreeSet::new();
+        for quad in self.store.quads_for_pattern(None, None, None, Some(graph)) {
+            let quad = quad?;
+            if let NamedOrBlankNode::NamedNode(n) = &quad.subject {
+                collect_namespace(n.as_str(), &mut out);
+            }
+            collect_namespace(quad.predicate.as_str(), &mut out);
+            match &quad.object {
+                Term::NamedNode(n) => collect_namespace(n.as_str(), &mut out),
+                Term::Literal(l) => {
+                    let dt = l.datatype();
+                    if !IMPLICIT_DATATYPES.contains(&dt.as_str()) {
+                        collect_namespace(dt.as_str(), &mut out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+
+    /// Like [`Self::dump_to_writer`], but prepends an `@prefix` header so the
+    /// document reads as CURIEs (`sh:NodeShape`) instead of full IRIs.
+    ///
+    /// `resolve_ns` maps a namespace IRI to the `(label, namespace)` pair to
+    /// declare for it — typically a lookup in the instance's `PrefixRegistry`.
+    /// It is called once per *distinct* namespace in the graph, never per
+    /// triple, because this runs per request. Namespaces it declines keep their
+    /// full IRI form.
+    ///
+    /// The returned namespace need not be the one passed in: a registry knows
+    /// `ex: <http://example.org/>`, while the namespace a Turtle writer splits
+    /// `http://example.org/shapes/PersonShape` at is `.../shapes/`. Declaring
+    /// the shorter, registered namespace still shortens that IRI, because the
+    /// serializer matches declarations by string prefix, longest first. What it
+    /// must never do is declare the *derived* namespace under the registry's
+    /// label — that would re-point every other `ex:` CURIE in the document.
+    ///
+    /// Formats with no prefix header (N-Triples, N-Quads, RDF/XML) fall straight
+    /// through to [`Self::dump_to_writer`]; they would pay for the namespace scan
+    /// and get nothing for it.
+    pub fn dump_prefixed_to_writer<W, F>(
+        &self,
+        mut writer: W,
+        format: RdfFormat,
+        from_graph: Option<&str>,
+        resolve_ns: F,
+    ) -> Result<(), StoreError>
+    where
+        W: Write,
+        F: Fn(&str) -> Option<(String, String)>,
+    {
+        if !matches!(format, RdfFormat::Turtle | RdfFormat::TriG) {
+            return self.dump_to_writer(writer, format, from_graph);
+        }
+
+        // The resolver may answer with a namespace SHORTER than the one derived
+        // from the IRI, so a label can be claimed either by the namespace it was
+        // registered for or by some longer namespace falling back to it. Those
+        // are not equal claims: resolving in namespace-string order would let a
+        // derived namespace take `foaf` and leave the real FOAF namespace
+        // undeclared. Exact self-declarations are therefore claimed first, and
+        // fallbacks only fill what is left.
+        let resolved: Vec<(String, String, String)> = self
+            .graph_namespaces(from_graph)?
+            .into_iter()
+            .filter_map(|ns| resolve_ns(&ns).map(|(label, declared)| (ns, label, declared)))
+            .filter(|(_, label, _)| crate::prefixes::is_valid_label(label))
+            .collect();
+
+        let mut serializer = RdfSerializer::from_format(format);
+        let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for exact_first in [true, false] {
+            for (ns, label, declared) in &resolved {
+                if (declared == ns) != exact_first {
+                    continue;
+                }
+                // A label names one namespace only: re-declaring it would
+                // silently re-point every CURIE written against the first.
+                if !taken.insert(label.clone()) {
+                    continue;
+                }
+                serializer = serializer.with_prefix(label, declared).map_err(|e| {
+                    StoreError::Parse(format!("Invalid namespace '{declared}': {e}"))
+                })?;
+            }
+        }
+
+        let graph = Self::graph_ref(from_graph)?;
+        let mut ser = serializer.for_writer(&mut writer);
+        for quad in self.store.quads_for_pattern(None, None, None, Some(graph)) {
+            let quad = quad?;
+            ser.serialize_triple(quad.as_ref())?;
+        }
+        ser.finish()?;
+        Ok(())
+    }
+
+    /// Buffered [`Self::dump_prefixed_to_writer`], for callers that need bytes.
+    pub fn dump_prefixed<F>(
+        &self,
+        format: RdfFormat,
+        from_graph: Option<&str>,
+        resolve_ns: F,
+    ) -> Result<Vec<u8>, StoreError>
+    where
+        F: Fn(&str) -> Option<(String, String)>,
+    {
+        let approx = self.graph_index.get_count(from_graph).unwrap_or(0);
+        let mut buffer: Vec<u8> =
+            Vec::with_capacity(approx.saturating_mul(80).min(8 * 1024 * 1024));
+        self.dump_prefixed_to_writer(&mut buffer, format, from_graph, resolve_ns)?;
+        Ok(buffer)
+    }
+
     /// Graph Store Protocol: GET a named graph.
     pub fn graph_store_get(
         &self,
@@ -870,7 +2193,10 @@ impl TripleStore {
         data: &str,
         format: RdfFormat,
     ) -> Result<(), StoreError> {
-        // Clear existing graph first
+        // Bracket the whole replace, clear included: the guard nests with the
+        // one the load takes, and the mirror must be stale before the graph is
+        // emptied, not only before it is refilled.
+        let _w = self.begin_write()?;
         let graph_name = match graph_iri {
             Some(iri) => GraphNameRef::NamedNode(
                 NamedNodeRef::new(iri)
@@ -878,10 +2204,108 @@ impl TripleStore {
             ),
             None => GraphNameRef::DefaultGraph,
         };
-        self.store.clear_graph(graph_name)?;
 
-        // Load new data (load_reader rebuilds graph index)
-        self.load_str(data, format, graph_iri)
+        // Parse BEFORE clearing. Clearing first meant a malformed body destroyed
+        // the graph and then failed to replace it: the caller got a 4xx while the
+        // graph was left empty, with no way to recover it. PUT is a replace, so
+        // the body is already fully in memory — materialising the quads costs
+        // nothing extra and makes the replace all-or-nothing.
+        let quads = self.parse_quads(BufReader::new(data.as_bytes()), format, None, graph_iri)?;
+
+        // A default-graph PUT (`graph_iri` is None) does not force a target graph,
+        // so a quad body (TriG/N-Quads/JSON-LD `@graph`) would keep its own graph
+        // names and write into another tenant's graph, bypassing the per-graph
+        // ACL. Refuse it. A named-graph PUT is safe: `parse_quads` forced every
+        // quad into `graph_iri` above.
+        if graph_iri.is_none() {
+            Self::reject_named_graphs(&quads)?;
+        }
+
+        // An empty target (a first PUT, the boot-time seed) has nothing a
+        // reader could observe half-replaced and nothing a crash could lose,
+        // so it keeps the bulk loader — 2.4x faster per quad than
+        // `Transaction::insert` (5.3 s vs 12.5 s for 900k quads).
+        let target_is_empty = self
+            .store
+            .quads_for_pattern(None, None, None, Some(graph_name))
+            .next()
+            .is_none();
+        if target_is_empty {
+            if graph_iri.is_some() {
+                self.graph_index.remove(graph_iri);
+                self.graph_index.add(graph_iri, 0);
+            }
+            return self
+                .insert_quads_and_reindex_into(quads, graph_iri, true)
+                .map(|_| ());
+        }
+
+        // Replace in ONE transaction. Clearing in one transaction and loading
+        // in another let a concurrent reader see the graph empty between the
+        // two, and a crash between the two left it empty for good. Inside the
+        // transaction the target is empty, so every distinct quad is new —
+        // that is the count the graph index gets once the commit is visible.
+        // The cost is one write batch the size of old + new (see
+        // docs/performance.md, "Graph Store PUT replace").
+        let distinct = {
+            let mut seen: std::collections::HashSet<&Quad> =
+                std::collections::HashSet::with_capacity(quads.len());
+            quads.iter().filter(|q| seen.insert(q)).count()
+        };
+        // The row is the net diff against the pre-image, which the clear
+        // walks anyway; above the scan cap the row says so.
+        let target = graph_iri.map(str::to_string);
+        let pre_count = self.pre_count();
+        let intent = self.changes.begin(
+            "graph_store_put",
+            Some(std::slice::from_ref(&target)),
+            &pre_count,
+        );
+        let scan = intent.is_some()
+            && self.graph_index.get_count(graph_iri).unwrap_or(usize::MAX)
+                <= self.changes.max_scan();
+        let pre: Vec<Quad> = if scan {
+            self.store
+                .quads_for_pattern(None, None, None, Some(graph_name))
+                .flatten()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut tx = self.store.start_transaction()?;
+        if let Err(e) = tx.clear_graph(graph_name) {
+            drop(tx);
+            if let Some(intent) = intent {
+                self.changes.abort(intent);
+            }
+            return Err(e.into());
+        }
+        for q in &quads {
+            tx.insert(q.as_ref());
+        }
+        let delta = if scan {
+            let (added, removed) = changes::diff_quads(&pre, &quads);
+            GraphDelta::full(target.clone(), added, removed).with_post_count(distinct)
+        } else {
+            GraphDelta::unknown(target.clone()).with_post_count(distinct)
+        };
+        self.changes.commit_with(intent, vec![delta], || {
+            tx.commit().map_err(StoreError::from)
+        })?;
+        info!("Graph replaced ({distinct} quads)");
+        if graph_iri.is_some() {
+            // The graph now holds exactly the payload's distinct quads.
+            // Leaving the pre-replace count in place made every replace report
+            // old + new (and boot-time re-PUTs compounded it per restart).
+            self.graph_index.remove(graph_iri);
+            self.graph_index.add(graph_iri, distinct);
+        } else {
+            self.graph_index.rebuild(&self.store);
+        }
+        self.spatial_index.mark_dirty();
+        #[cfg(feature = "geometry3d")]
+        self.spatial_index_3d.mark_dirty();
+        Ok(())
     }
 
     /// Graph Store Protocol: POST (merge into) a named graph.
@@ -894,8 +2318,44 @@ impl TripleStore {
         self.load_str(data, format, graph_iri)
     }
 
+    /// As [`Self::graph_store_post`], returning the quads that were new when
+    /// the target is a named graph (empty for the default graph).
+    pub fn graph_store_post_delta(
+        &self,
+        graph_iri: Option<&str>,
+        data: &str,
+        format: RdfFormat,
+    ) -> Result<Vec<Quad>, StoreError> {
+        match graph_iri {
+            Some(g) => self.load_str_delta(data, format, g),
+            // Default-graph POST: like the default-graph PUT above, refuse a body
+            // that names its own graph so it cannot be routed past the per-graph
+            // ACL into another graph.
+            None => self
+                .load_str_triples_only(data, format, None)
+                .map(|_| Vec::new()),
+        }
+    }
+
     /// Graph Store Protocol: DELETE a named graph.
+    /// Empty a graph in chunks of transactions. `Store::clear_graph` walks the
+    /// graph and deletes quad by quad inside one transaction; on a 900k-quad
+    /// graph that took ~33 s, and collecting the quads first then deleting
+    /// them in 50k-quad transactions takes ~22 s — the same work in RocksDB,
+    /// but without one write batch the size of the graph.
+    fn clear_graph_chunked(&self, quads: &[Quad]) -> Result<(), StoreError> {
+        for chunk in quads.chunks(50_000) {
+            let mut tx = self.store.start_transaction()?;
+            for q in chunk {
+                tx.remove(q.as_ref());
+            }
+            tx.commit()?;
+        }
+        Ok(())
+    }
+
     pub fn graph_store_delete(&self, graph_iri: Option<&str>) -> Result<(), StoreError> {
+        let _w = self.begin_write()?;
         let graph_name = match graph_iri {
             Some(iri) => GraphNameRef::NamedNode(
                 NamedNodeRef::new(iri)
@@ -903,14 +2363,43 @@ impl TripleStore {
             ),
             None => GraphNameRef::DefaultGraph,
         };
-        self.store.clear_graph(graph_name)?;
+        let quads: Vec<Quad> = self
+            .store
+            .quads_for_pattern(None, None, None, Some(graph_name))
+            .collect::<Result<_, _>>()?;
+        let target = graph_iri.map(str::to_string);
+        let pre_count = self.pre_count();
+        let intent = self.changes.begin(
+            "graph_store_delete",
+            Some(std::slice::from_ref(&target)),
+            &pre_count,
+        );
+        if quads.len() < 100_000 {
+            // One transaction: the removed quads are the row.
+            let delta = GraphDelta::full(target.clone(), Vec::new(), quads).with_post_count(0);
+            self.changes.commit_with(intent, vec![delta], || {
+                self.store.clear_graph(graph_name).map_err(StoreError::from)
+            })?;
+        } else {
+            // Chunked in 50k-quad transactions — the one non-atomic primitive
+            // (delta note §2.4): exact counts once it is through, unknown if
+            // it fails part way.
+            let n = quads.len();
+            if let Err(e) = self.clear_graph_chunked(&quads) {
+                self.changes
+                    .commit_unknown(intent, Some(vec![target]), || Ok::<(), StoreError>(()))?;
+                return Err(e);
+            }
+            let delta = GraphDelta::counts(target.clone(), 0, n, Some(0));
+            self.changes
+                .commit_with(intent, vec![delta], || Ok::<(), StoreError>(()))?;
+        }
         if let Some(iri) = graph_iri {
             let nn = NamedNode::new(iri)
                 .map_err(|e| StoreError::Parse(format!("Invalid IRI: {}", e)))?;
             self.store.remove_named_graph(&nn)?;
         }
         self.graph_index.remove(graph_iri);
-        self.note_write();
         Ok(())
     }
 
@@ -920,6 +2409,7 @@ impl TripleStore {
     /// `update_opt()` call, avoiding N separate Oxigraph write transactions.
     /// Graph index entries are removed in one pass after the update.
     pub fn bulk_delete_graphs(&self, graph_iris: &[&str]) -> Result<(), StoreError> {
+        let _w = self.begin_write()?;
         if graph_iris.is_empty() {
             return Ok(());
         }
@@ -937,16 +2427,47 @@ impl TripleStore {
             .collect::<Vec<_>>()
             .join(" ; ");
 
-        self.query_options()
-            .parse_update(&sparql)?
-            .on_store(&self.store)
-            .execute()?;
+        // The rows: every dropped graph's quads when they fit the scan cap
+        // together, exact counts from the index otherwise.
+        let targets: Vec<Option<String>> = graph_iris.iter().map(|g| Some(g.to_string())).collect();
+        let pre_count = self.pre_count();
+        let intent = self
+            .changes
+            .begin("bulk_delete_graphs", Some(&targets), &pre_count);
+        let total: usize = targets
+            .iter()
+            .map(|g| self.graph_index.get_count(g.as_deref()).unwrap_or(0))
+            .sum();
+        let deltas: Vec<GraphDelta> = targets
+            .iter()
+            .map(|g| {
+                if intent.is_some() && total <= self.changes.max_scan() {
+                    GraphDelta::full(g.clone(), Vec::new(), self.graph_quads(g.as_deref()))
+                        .with_post_count(0)
+                } else {
+                    match self.graph_index.get_count(g.as_deref()) {
+                        Some(n) => GraphDelta::counts(g.clone(), 0, n, Some(0)),
+                        None => GraphDelta::unknown(g.clone()).with_post_count(0),
+                    }
+                }
+            })
+            .collect();
+        let prepared = self.query_options().parse_update(&sparql)?;
+        let mut tx = self.store.start_transaction()?;
+        if let Err(e) = prepared.on_transaction(&mut tx).execute() {
+            drop(tx);
+            if let Some(intent) = intent {
+                self.changes.abort(intent);
+            }
+            return Err(e.into());
+        }
+        self.changes
+            .commit_with(intent, deltas, || tx.commit().map_err(StoreError::from))?;
 
         // Remove from in-memory graph index.
         for iri in graph_iris {
             self.graph_index.remove(Some(iri));
         }
-        self.note_write();
         Ok(())
     }
 
@@ -960,10 +2481,32 @@ impl TripleStore {
         quads: Vec<Quad>,
         affected_graphs: &[String],
     ) -> Result<(), StoreError> {
+        let _w = self.begin_write()?;
         if !quads.is_empty() {
+            // The rows: per graph, the quads that were new (probed); unknown
+            // for a version-snapshot graph (see `fresh_by_graph`).
+            let mut graphs: Vec<Option<String>> = quads.iter().map(Self::graph_key_of).collect();
+            graphs.sort();
+            graphs.dedup();
+            let pre_count = self.pre_count();
+            let intent = self
+                .changes
+                .begin("bulk_insert_quads", Some(&graphs), &pre_count);
+            let deltas = if intent.is_some() {
+                self.fresh_by_graph(&quads, &graphs)?
+            } else {
+                Vec::new()
+            };
             let mut loader = self.store.bulk_loader();
-            loader.load_quads(quads)?;
-            loader.commit()?; // oxigraph 0.5: stage-then-commit.
+            if let Err(e) = loader.load_quads(quads) {
+                if let Some(intent) = intent {
+                    self.changes.abort(intent);
+                }
+                return Err(e.into());
+            }
+            // oxigraph 0.5: stage-then-commit.
+            self.changes
+                .commit_with(intent, deltas, || loader.commit().map_err(StoreError::from))?;
             self.spatial_index.mark_dirty();
             #[cfg(feature = "geometry3d")]
             self.spatial_index_3d.mark_dirty();
@@ -972,7 +2515,6 @@ impl TripleStore {
         // Register (or recount) only the affected graphs in the index.
         let iris: Vec<Option<String>> = affected_graphs.iter().map(|s| Some(s.clone())).collect();
         self.graph_index.recount_specific_graphs(&self.store, &iris);
-        self.note_write();
         Ok(())
     }
 
@@ -1022,9 +2564,79 @@ impl TripleStore {
     }
 
     /// Insert a single quad into the store.
+    /// Apply a replicated delta to one graph — the quads a leader's row says
+    /// were added and removed — in one transaction, the count index adjusted
+    /// by what actually changed. Passes the follower's read-only check. Does
+    /// not record to this node's change log: a follower's log is not a source
+    /// (docs/operations.md (Replication)).
+    pub(crate) fn apply_delta_replicated(
+        &self,
+        graph: Option<&str>,
+        added: &[Quad],
+        removed: &[Quad],
+    ) -> Result<(), StoreError> {
+        let _apply = replication::ApplyGuard::enter();
+        let _w = self.begin_write()?;
+        let mut tx = self.store.start_transaction()?;
+        let (mut fresh, mut gone) = (0i64, 0i64);
+        for q in added {
+            if !tx.contains(q.as_ref())? {
+                tx.insert(q.as_ref());
+                fresh += 1;
+            }
+        }
+        for q in removed {
+            if tx.contains(q.as_ref())? {
+                tx.remove(q.as_ref());
+                gone += 1;
+            }
+        }
+        tx.commit()?;
+        if self.graph_index.get_count(graph).is_some() {
+            self.graph_index.adjust(graph, fresh - gone);
+        } else {
+            self.graph_index
+                .recount_specific_graphs(&self.store, &[graph.map(str::to_string)]);
+        }
+        self.spatial_index.mark_dirty();
+        #[cfg(feature = "geometry3d")]
+        self.spatial_index_3d.mark_dirty();
+        Ok(())
+    }
+
     pub fn store_quad(&self, quad: Quad) -> Result<(), StoreError> {
-        self.store.insert(&quad)?;
-        self.note_write();
+        let _w = self.begin_write()?;
+        let graph = Self::graph_key_of(&quad);
+        let pre_count = self.pre_count();
+        let intent =
+            self.changes
+                .begin("store_quad", Some(std::slice::from_ref(&graph)), &pre_count);
+        let fresh = !self.store.contains(quad.as_ref())?;
+        let delta = GraphDelta::full(
+            graph.clone(),
+            if fresh {
+                vec![quad.clone()]
+            } else {
+                Vec::new()
+            },
+            Vec::new(),
+        );
+        self.changes.commit_with(intent, vec![delta], || {
+            self.store
+                .insert(&quad)
+                .map(|_| ())
+                .map_err(StoreError::from)
+        })?;
+        // Keep the count index exact for the one-quad path too (it used
+        // to lag this write, which /health tolerated and a chain cannot).
+        if fresh {
+            if self.graph_index.get_count(graph.as_deref()).is_some() {
+                self.graph_index.adjust(graph.as_deref(), 1);
+            } else {
+                self.graph_index
+                    .recount_specific_graphs(&self.store, std::slice::from_ref(&graph));
+            }
+        }
         Ok(())
     }
 
@@ -1033,6 +2645,52 @@ impl TripleStore {
         let quads = self
             .store
             .quads_for_pattern(None, None, None, Some(graph))
+            .collect::<Result<Vec<Quad>, _>>()?;
+        Ok(quads)
+    }
+
+    /// Count quads `(?s <predicate> <object>)` inside a named graph via a direct
+    /// index scan — no SPARQL parse, no query-accelerator involvement. Used by
+    /// hot probes (shape detection after an import) that must stay cheap even
+    /// while the in-memory mirror is stale and rebuilding.
+    pub fn count_pattern_in_graph(
+        &self,
+        graph_iri: &str,
+        predicate: &str,
+        object: &str,
+    ) -> Result<usize, StoreError> {
+        use oxigraph::model::TermRef;
+        let g = NamedNodeRef::new(graph_iri)
+            .map_err(|e| StoreError::Parse(format!("Invalid IRI: {}", e)))?;
+        let p = NamedNodeRef::new(predicate)
+            .map_err(|e| StoreError::Parse(format!("Invalid IRI: {}", e)))?;
+        let o = NamedNodeRef::new(object)
+            .map_err(|e| StoreError::Parse(format!("Invalid IRI: {}", e)))?;
+        Ok(self
+            .store
+            .quads_for_pattern(
+                None,
+                Some(p),
+                Some(TermRef::NamedNode(o)),
+                Some(GraphNameRef::NamedNode(g)),
+            )
+            .count())
+    }
+
+    /// Return at most `limit` quads from a named graph.
+    ///
+    /// For prevalence-based work (content-kind classification) a bounded sample
+    /// is as good as the whole graph, and materialising a multi-million-quad
+    /// graph just to count type signals held the import request for seconds.
+    pub fn quads_for_graph_sample(
+        &self,
+        graph: GraphNameRef<'_>,
+        limit: usize,
+    ) -> Result<Vec<Quad>, StoreError> {
+        let quads = self
+            .store
+            .quads_for_pattern(None, None, None, Some(graph))
+            .take(limit)
             .collect::<Result<Vec<Quad>, _>>()?;
         Ok(quads)
     }
@@ -1071,10 +2729,19 @@ impl TripleStore {
         self.graph_index.get_count(graph_iri)
     }
 
+    /// Entries held by the query-result cache (a test probe, see
+    /// [`QueryCache::len`]).
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn query_cache_len(&self) -> usize {
+        self.query_cache.len()
+    }
+
     /// Rebuild the graph index (e.g. after external writes).
     pub fn rebuild_graph_index(&self) {
+        // Not a data write: a follower rebuilds its index like any node.
+        let _apply = replication::ApplyGuard::enter();
+        let Ok(_w) = self.begin_write() else { return };
         self.graph_index.rebuild(&self.store);
-        self.note_write();
     }
 
     /// Access the spatial R-tree index for GeoSPARQL pre-filtering.
@@ -1198,6 +2865,33 @@ impl TripleStore {
     }
 }
 
+// ── Namespace extraction (see TripleStore::graph_namespaces) ─────────────────
+
+/// The namespace part of `iri`: everything up to and including the last `#`,
+/// `/` or `:` that is followed by a local name.
+///
+/// This is the same split a Turtle writer makes when it shortens an IRI, so a
+/// namespace returned here is one the serializer can actually use.
+fn namespace_of(iri: &str) -> Option<&str> {
+    let cut = iri
+        .rfind('#')
+        .or_else(|| iri.rfind('/'))
+        .or_else(|| iri.rfind(':'))?;
+    // A delimiter with nothing after it is the IRI's own end, not a namespace.
+    (cut + 1 < iri.len()).then(|| &iri[..=cut])
+}
+
+/// Record `iri`'s namespace in `out`, if it has one.
+fn collect_namespace(iri: &str, out: &mut std::collections::BTreeSet<String>) {
+    if let Some(ns) = namespace_of(iri) {
+        // Checked before inserting: `insert` alone would allocate a `String` for
+        // every term in the graph, not just the first of each namespace.
+        if !out.contains(ns) {
+            out.insert(ns.to_string());
+        }
+    }
+}
+
 /// Detect RDF format from file extension.
 pub fn detect_format_from_path(path: &Path) -> Result<RdfFormat, StoreError> {
     match path.extension().and_then(|e| e.to_str()) {
@@ -1215,41 +2909,77 @@ pub fn detect_format_from_path(path: &Path) -> Result<RdfFormat, StoreError> {
 
 /// If `pattern` is `SELECT (COUNT(*) AS ?v)` over a single full-scan triple
 /// pattern, return the projected variable name `v`; otherwise `None`.
-fn count_star_var(pattern: &GraphPattern) -> Option<String> {
+/// What a `COUNT(*)` full scan ranges over.
+enum CountScope {
+    Default,
+    Named(String),
+    AnyNamed,
+}
+
+fn count_star_var(pattern: &GraphPattern) -> Option<(String, CountScope)> {
     if let GraphPattern::Project { inner, variables } = pattern {
-        if variables.len() == 1 && is_count_star_full_scan(inner) {
-            return Some(variables[0].as_str().to_string());
+        if variables.len() == 1 {
+            if let Some(scope) = count_star_scope(inner) {
+                return Some((variables[0].as_str().to_string(), scope));
+            }
         }
     }
     None
 }
 
-/// `Extend(Group([], [COUNT(*)]), full-scan BGP)` — the algebra a global
-/// `(COUNT(*) AS ?v)` parses to (the Extend aliases the aggregate result).
-fn is_count_star_full_scan(p: &GraphPattern) -> bool {
+fn count_star_scope(p: &GraphPattern) -> Option<CountScope> {
     match p {
         GraphPattern::Extend {
-            inner, expression, ..
-        } => matches!(expression, Expression::Variable(_)) && is_count_star_full_scan(inner),
+            inner,
+            expression: Expression::Variable(_),
+            ..
+        } => count_star_scope(inner),
         GraphPattern::Group {
             inner,
             variables,
             aggregates,
         } => {
-            variables.is_empty()
-                && aggregates.len() == 1
-                && matches!(
+            if !variables.is_empty()
+                || aggregates.len() != 1
+                || !matches!(
                     &aggregates[0].1,
                     AggregateExpression::CountSolutions { distinct: false }
                 )
-                && is_full_scan_bgp(inner)
+            {
+                return None;
+            }
+            full_scan_scope(inner)
         }
-        _ => false,
+        _ => None,
     }
 }
 
-/// A single triple pattern whose subject, predicate and object are three
-/// *distinct* variables (`{ ?s ?p ?o }`) — a true full scan.
+/// `{ ?s ?p ?o }`, `GRAPH <g> { ?s ?p ?o }` or `GRAPH ?g { ?s ?p ?o }` — and
+/// nothing else in the pattern.
+fn full_scan_scope(p: &GraphPattern) -> Option<CountScope> {
+    match p {
+        GraphPattern::Bgp { .. } if is_full_scan_bgp(p) => Some(CountScope::Default),
+        GraphPattern::Graph { name, inner } if is_full_scan_bgp(inner) => match name {
+            NamedNodePattern::NamedNode(n) => Some(CountScope::Named(n.as_str().to_string())),
+            NamedNodePattern::Variable(v) => {
+                // Only when ?g is not one of the triple's own variables.
+                if let GraphPattern::Bgp { patterns } = inner.as_ref() {
+                    let tp = &patterns[0];
+                    let used = |t: &TermPattern| matches!(t, TermPattern::Variable(x) if x == v);
+                    if used(&tp.subject)
+                        || used(&tp.object)
+                        || matches!(&tp.predicate, NamedNodePattern::Variable(x) if x == v)
+                    {
+                        return None;
+                    }
+                }
+                Some(CountScope::AnyNamed)
+            }
+        },
+        _ => None,
+    }
+}
+
 fn is_full_scan_bgp(p: &GraphPattern) -> bool {
     matches!(p, GraphPattern::Bgp { patterns } if patterns.len() == 1 && all_distinct_vars(&patterns[0]))
 }
@@ -1452,10 +3182,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        all(target_os = "macos", target_arch = "aarch64"),
-        ignore = "Oxigraph RocksDB TryFromIntError on macOS arm64 in test context — runs on Linux/CI"
-    )]
     fn test_persistent_store() {
         // Use a unique subdirectory to avoid RocksDB lock conflicts
         let tmp = TempDir::new().unwrap();
@@ -1690,5 +3416,632 @@ mod tests {
             None,
             "parse miss → rebuild"
         );
+    }
+
+    // ── Prefixed serialization ───────────────────────────────────────────────
+
+    const SH: &str = "http://www.w3.org/ns/shacl#";
+    const EX: &str = "http://example.org/";
+
+    fn shapes_store() -> TripleStore {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                "@prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+                 @prefix ex: <http://example.org/> .\n\
+                 ex:PersonShape a sh:NodeShape ; sh:targetClass ex:Person ; \
+                 sh:name \"people\" ; sh:minCount 1 .",
+                RdfFormat::Turtle,
+                Some("urn:g"),
+            )
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn namespace_of_splits_on_the_last_delimiter() {
+        assert_eq!(
+            namespace_of("http://www.w3.org/ns/shacl#NodeShape"),
+            Some(SH)
+        );
+        assert_eq!(namespace_of("http://example.org/Person"), Some(EX));
+        assert_eq!(namespace_of("urn:example:thing"), Some("urn:example:"));
+        // Nothing follows the delimiter, so there is no local name to shorten.
+        assert_eq!(namespace_of("http://example.org/"), None);
+        assert_eq!(namespace_of("bare"), None);
+    }
+
+    #[test]
+    fn graph_namespaces_lists_only_what_the_graph_uses() {
+        let store = shapes_store();
+        let ns = store.graph_namespaces(Some("urn:g")).unwrap();
+        assert!(ns.contains(SH), "{ns:?}");
+        assert!(ns.contains(EX), "{ns:?}");
+        assert!(
+            ns.contains("http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
+            "rdf:type is a term of the graph: {ns:?}"
+        );
+        // Neither the plain string's xsd:string nor the integer's xsd:integer is
+        // ever written out, so xsd has no CURIE to shorten here.
+        assert!(!ns.contains("http://www.w3.org/2001/XMLSchema#"), "{ns:?}");
+
+        // A datatype Turtle *does* write out puts its namespace back in.
+        let dated = TripleStore::in_memory().unwrap();
+        dated
+            .load_str(
+                "<http://e/s> <http://e/p> \
+                 \"2024-01-01\"^^<http://www.w3.org/2001/XMLSchema#date> .",
+                RdfFormat::Turtle,
+                Some("urn:g"),
+            )
+            .unwrap();
+        assert!(dated
+            .graph_namespaces(Some("urn:g"))
+            .unwrap()
+            .contains("http://www.w3.org/2001/XMLSchema#"));
+    }
+
+    #[test]
+    fn a_registered_namespace_keeps_its_own_label_against_a_fallback() {
+        // Both namespaces resolve to the label `foaf`: one because it IS the
+        // registered namespace, the other by falling back to it. Claiming in
+        // namespace-string order would hand the label to whichever sorts first
+        // and leave the real one written out in full.
+        let store = TripleStore::in_memory().unwrap();
+        let g = "urn:g";
+        store
+            .load_str(
+                "<http://a.example/x/Thing> <http://xmlns.com/foaf/0.1/knows> \
+                 <http://xmlns.com/foaf/0.1/Person> .",
+                RdfFormat::NTriples,
+                Some(g),
+            )
+            .unwrap();
+
+        let foaf = "http://xmlns.com/foaf/0.1/";
+        let out = String::from_utf8(
+            store
+                .dump_prefixed(RdfFormat::Turtle, Some(g), |ns| {
+                    if ns == foaf {
+                        Some(("foaf".to_string(), foaf.to_string()))
+                    } else if ns.starts_with("http://a.example/") {
+                        // A fallback: a shorter, registered namespace under the
+                        // same label.
+                        Some(("foaf".to_string(), "http://a.example/".to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            out.contains(&format!("@prefix foaf: <{foaf}>")),
+            "the namespace that owns the label keeps it:\n{out}"
+        );
+        assert!(out.contains("foaf:knows"), "{out}");
+        assert_eq!(
+            out.matches("@prefix foaf:").count(),
+            1,
+            "one label, one namespace:\n{out}"
+        );
+    }
+
+    #[test]
+    fn dump_prefixed_writes_curies_for_resolved_namespaces_only() {
+        let store = shapes_store();
+        let ttl = String::from_utf8(
+            store
+                .dump_prefixed(RdfFormat::Turtle, Some("urn:g"), |ns| {
+                    (ns == SH).then(|| ("sh".to_string(), SH.to_string()))
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(ttl.contains(&format!("@prefix sh: <{SH}>")), "{ttl}");
+        assert!(ttl.contains("sh:NodeShape"), "{ttl}");
+        // Declined by the resolver, so it must still be written in full.
+        assert!(!ttl.contains("@prefix ex:"), "{ttl}");
+        assert!(ttl.contains("<http://example.org/PersonShape>"), "{ttl}");
+        // The plain dump is unchanged: the prefixed path is opt-in.
+        let plain =
+            String::from_utf8(store.dump(RdfFormat::Turtle, Some("urn:g")).unwrap()).unwrap();
+        assert!(!plain.contains("@prefix"), "{plain}");
+    }
+
+    #[test]
+    fn dump_prefixed_declares_a_label_once() {
+        let store = shapes_store();
+        // A resolver that hands every namespace the same label: the second one
+        // must be dropped, not re-point the first namespace's CURIEs.
+        let ttl = String::from_utf8(
+            store
+                .dump_prefixed(RdfFormat::Turtle, Some("urn:g"), |ns| {
+                    Some(("v".to_string(), ns.to_string()))
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ttl.matches("@prefix v:").count(), 1, "{ttl}");
+        // Invalid Turtle labels are refused outright.
+        let bad = String::from_utf8(
+            store
+                .dump_prefixed(RdfFormat::Turtle, Some("urn:g"), |ns| {
+                    Some(("1 bad".to_string(), ns.to_string()))
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(!bad.contains("@prefix"), "{bad}");
+    }
+
+    #[test]
+    fn dump_prefixed_declares_the_namespace_the_resolver_returns() {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                "<http://example.org/shapes/PersonShape> \
+                 <http://www.w3.org/ns/shacl#targetClass> \
+                 <http://example.org/shapes/Person> .",
+                RdfFormat::Turtle,
+                Some("urn:g"),
+            )
+            .unwrap();
+        // Both IRIs split at `.../shapes/`, but the resolver only knows the
+        // shorter `http://example.org/`; declaring the split namespace under
+        // `ex` would misname it.
+        let ttl = String::from_utf8(
+            store
+                .dump_prefixed(RdfFormat::Turtle, Some("urn:g"), |ns| {
+                    ns.starts_with("http://example.org/")
+                        .then(|| ("ex".to_string(), "http://example.org/".to_string()))
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(ttl.contains("@prefix ex: <http://example.org/>"), "{ttl}");
+        assert!(!ttl.contains("<http://example.org/shapes/"), "{ttl}");
+        // The `/` left in the local name is escaped, not dropped.
+        assert!(ttl.contains(r"ex:shapes\/PersonShape"), "{ttl}");
+    }
+
+    #[test]
+    fn dump_prefixed_round_trips_and_leaves_n_triples_alone() {
+        let store = shapes_store();
+        let ttl = store
+            .dump_prefixed(RdfFormat::Turtle, Some("urn:g"), |ns| {
+                (ns == SH).then(|| ("sh".to_string(), SH.to_string()))
+            })
+            .unwrap();
+        let reloaded = TripleStore::in_memory().unwrap();
+        reloaded
+            .load_str(
+                &String::from_utf8(ttl).unwrap(),
+                RdfFormat::Turtle,
+                Some("urn:g"),
+            )
+            .unwrap();
+        let lines = |s: &TripleStore| {
+            let nt =
+                String::from_utf8(s.dump(RdfFormat::NTriples, Some("urn:g")).unwrap()).unwrap();
+            let mut l: Vec<String> = nt.lines().map(str::to_string).collect();
+            l.sort();
+            l
+        };
+        assert_eq!(lines(&reloaded), lines(&store));
+        // A format with no prefix header falls through unchanged.
+        let nt = store
+            .dump_prefixed(RdfFormat::NTriples, Some("urn:g"), |ns| {
+                Some(("sh".to_string(), ns.to_string()))
+            })
+            .unwrap();
+        assert_eq!(nt, store.dump(RdfFormat::NTriples, Some("urn:g")).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod fast_count_scope_tests {
+    use super::*;
+    use oxigraph::sparql::QueryResults;
+
+    fn count(store: &TripleStore, q: &str) -> Option<i64> {
+        match store.query(q).ok()? {
+            QueryResults::Solutions(mut s) => s.next()?.ok()?.get(0).and_then(|t| match t {
+                Term::Literal(l) => l.value().parse().ok(),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    /// `COUNT(*)` over `GRAPH <g>` / `GRAPH ?g` is answered from the count
+    /// index — exact, and without a scan — and respects `FROM NAMED`.
+    #[test]
+    fn graph_scoped_counts_come_from_the_index() {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .update("INSERT DATA { GRAPH <urn:a> { <urn:s> <urn:p> 1, 2, 3 } GRAPH <urn:b> { <urn:s> <urn:p> 4 } <urn:d> <urn:p> 5 }")
+            .unwrap();
+        let scans = store.graph_index.scan_count();
+        assert_eq!(
+            count(
+                &store,
+                "SELECT (COUNT(*) AS ?c) WHERE { GRAPH <urn:a> { ?s ?p ?o } }"
+            ),
+            Some(3)
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT (COUNT(*) AS ?c) WHERE { GRAPH <urn:b> { ?s ?p ?o } }"
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }"
+            ),
+            Some(4)
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT (COUNT(*) AS ?c) FROM NAMED <urn:b> WHERE { GRAPH ?g { ?s ?p ?o } }"
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT (COUNT(*) AS ?c) FROM NAMED <urn:b> WHERE { GRAPH <urn:a> { ?s ?p ?o } }"
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT (COUNT(*) AS ?c) WHERE { GRAPH <urn:none> { ?s ?p ?o } }"
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            store.graph_index.scan_count(),
+            scans,
+            "no graph scan for any of them"
+        );
+        // A count that binds the graph variable inside the triple is not a full scan.
+        assert_eq!(
+            count(
+                &store,
+                "SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?g ?p ?o } }"
+            ),
+            Some(0)
+        );
+    }
+}
+
+#[cfg(test)]
+mod graph_index_increment_tests {
+    use super::*;
+
+    /// Two loads into one graph — with duplicates inside a batch and quads
+    /// already stored — leave the index equal to a real recount, without a
+    /// graph scan per load.
+    #[test]
+    fn graph_targeted_loads_bump_the_index_exactly() {
+        let store = TripleStore::in_memory().unwrap();
+        let g = "urn:inc";
+        store
+            .load_str(
+                "<urn:a> <urn:p> 1 . <urn:b> <urn:p> 2 . <urn:a> <urn:p> 1 .",
+                RdfFormat::Turtle,
+                Some(g),
+            )
+            .unwrap();
+        assert_eq!(store.graph_count_cached(Some(g)), Some(2));
+        let scans_before = store.graph_index.scan_count();
+        store
+            .load_str(
+                "<urn:b> <urn:p> 2 . <urn:c> <urn:p> 3 .",
+                RdfFormat::Turtle,
+                Some(g),
+            )
+            .unwrap();
+        assert_eq!(
+            store.graph_count_cached(Some(g)),
+            Some(3),
+            "one new quad, one duplicate"
+        );
+        assert_eq!(
+            store.graph_index.scan_count(),
+            scans_before,
+            "no graph scan for a known graph"
+        );
+        assert_eq!(
+            store.count_graph(Some(g)).unwrap(),
+            3,
+            "the index agrees with a real count"
+        );
+    }
+}
+
+#[cfg(test)]
+mod graph_store_put_index_tests {
+    use super::*;
+    use oxigraph::sparql::QueryResults;
+
+    fn sparql_count(store: &TripleStore, q: &str) -> i64 {
+        match store.query(q).unwrap() {
+            QueryResults::Solutions(mut s) => match s.next().unwrap().unwrap().get(0) {
+                Some(Term::Literal(l)) => l.value().parse().unwrap(),
+                other => panic!("expected a count literal, got {other:?}"),
+            },
+            _ => panic!("expected solutions"),
+        }
+    }
+
+    /// A Graph Store PUT replaces the graph, so the cached count must be the
+    /// size of the new body — not old + new. The clear never touched the
+    /// index, and the load then added its (all fresh) quads on top of the
+    /// stale count, so every PUT-replace drifted the cached count upwards and
+    /// `SELECT (COUNT(*)) WHERE { GRAPH <g> { … } }` answered from it.
+    #[test]
+    fn graph_store_put_replace_keeps_the_cached_count_exact() {
+        let store = TripleStore::in_memory().unwrap();
+        let g = "urn:put";
+        store
+            .graph_store_put(
+                Some(g),
+                "<urn:a> <urn:p> 1 . <urn:b> <urn:p> 2 . <urn:c> <urn:p> 3 .",
+                RdfFormat::Turtle,
+            )
+            .unwrap();
+        assert_eq!(store.graph_count_cached(Some(g)), Some(3));
+        assert_eq!(store.writes_in_flight(), 0);
+
+        store
+            .graph_store_put(
+                Some(g),
+                "<urn:x> <urn:p> 1 . <urn:y> <urn:p> 2 .",
+                RdfFormat::Turtle,
+            )
+            .unwrap();
+        assert_eq!(
+            store.graph_count_cached(Some(g)),
+            Some(2),
+            "a replace leaves the index at the new body's size"
+        );
+        assert_eq!(store.count_graph(Some(g)).unwrap(), 2);
+        assert_eq!(
+            sparql_count(
+                &store,
+                "SELECT (COUNT(*) AS ?c) WHERE { GRAPH <urn:put> { ?s ?p ?o } }"
+            ),
+            2,
+            "the fast COUNT(*) path answers from the exact index"
+        );
+        assert_eq!(
+            store.writes_in_flight(),
+            0,
+            "the write bracket was released"
+        );
+
+        // A third replace does not compound either.
+        store
+            .graph_store_put(Some(g), "<urn:z> <urn:p> 1 .", RdfFormat::Turtle)
+            .unwrap();
+        assert_eq!(store.graph_count_cached(Some(g)), Some(1));
+        assert_eq!(store.count_graph(Some(g)).unwrap(), 1);
+    }
+}
+
+#[cfg(test)]
+mod ground_update_delta_tests {
+    use super::*;
+
+    const G: &str = "urn:net";
+
+    fn q(store: &TripleStore, n: u32) -> Quad {
+        let _ = store;
+        Quad::new(
+            NamedNode::new_unchecked("urn:s"),
+            NamedNode::new_unchecked("urn:p"),
+            Literal::from(n),
+            NamedNode::new_unchecked(G),
+        )
+    }
+
+    fn delta(store: &TripleStore, sparql: &str) -> QuadDelta {
+        store
+            .update_targeted_delta(sparql, &[G.to_string()], false)
+            .unwrap()
+            .expect("a ground update has an exact delta")
+    }
+
+    /// `DELETE DATA {q}; INSERT DATA {q}` with `q` present leaves the store as
+    /// it was: the delta must net to nothing, or the count index drifts down
+    /// by one and the text index drops a document for a quad that is still
+    /// stored.
+    #[test]
+    fn delete_then_insert_of_a_present_quad_nets_to_nothing() {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .update(&format!(
+                "INSERT DATA {{ GRAPH <{G}> {{ <urn:s> <urn:p> 1 }} }}"
+            ))
+            .unwrap();
+        assert_eq!(store.graph_count_cached(Some(G)), Some(1));
+
+        let (inserted, deleted) = delta(
+            &store,
+            &format!(
+                "DELETE DATA {{ GRAPH <{G}> {{ <urn:s> <urn:p> 1 }} }} ; \
+                 INSERT DATA {{ GRAPH <{G}> {{ <urn:s> <urn:p> 1 }} }}"
+            ),
+        );
+        assert!(inserted.is_empty(), "net insert: {inserted:?}");
+        assert!(deleted.is_empty(), "net delete: {deleted:?}");
+        assert_eq!(store.graph_count_cached(Some(G)), Some(1));
+        assert_eq!(store.count_graph(Some(G)).unwrap(), 1);
+        assert!(store.store.contains(q(&store, 1).as_ref()).unwrap());
+    }
+
+    /// The mirror image: `INSERT DATA {q}; DELETE DATA {q}` with `q` absent
+    /// ends with `q` absent — no +1, no ghost document.
+    #[test]
+    fn insert_then_delete_of_an_absent_quad_nets_to_nothing() {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .update(&format!(
+                "INSERT DATA {{ GRAPH <{G}> {{ <urn:s> <urn:p> 0 }} }}"
+            ))
+            .unwrap();
+        assert_eq!(store.graph_count_cached(Some(G)), Some(1));
+
+        let (inserted, deleted) = delta(
+            &store,
+            &format!(
+                "INSERT DATA {{ GRAPH <{G}> {{ <urn:s> <urn:p> 1 }} }} ; \
+                 DELETE DATA {{ GRAPH <{G}> {{ <urn:s> <urn:p> 1 }} }}"
+            ),
+        );
+        assert!(inserted.is_empty(), "net insert: {inserted:?}");
+        assert!(deleted.is_empty(), "net delete: {deleted:?}");
+        assert_eq!(store.graph_count_cached(Some(G)), Some(1));
+        assert_eq!(store.count_graph(Some(G)).unwrap(), 1);
+        assert!(!store.store.contains(q(&store, 1).as_ref()).unwrap());
+    }
+
+    /// Distinct quads still produce the exact (-1, +1) effect.
+    #[test]
+    fn delete_one_insert_another_is_still_exact() {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .update(&format!(
+                "INSERT DATA {{ GRAPH <{G}> {{ <urn:s> <urn:p> 1 }} }}"
+            ))
+            .unwrap();
+
+        let (inserted, deleted) = delta(
+            &store,
+            &format!(
+                "DELETE DATA {{ GRAPH <{G}> {{ <urn:s> <urn:p> 1 }} }} ; \
+                 INSERT DATA {{ GRAPH <{G}> {{ <urn:s> <urn:p> 2 }} }}"
+            ),
+        );
+        assert_eq!(deleted, vec![q(&store, 1)]);
+        assert_eq!(inserted, vec![q(&store, 2)]);
+        assert_eq!(store.graph_count_cached(Some(G)), Some(1));
+        assert_eq!(store.count_graph(Some(G)).unwrap(), 1);
+    }
+
+    /// A blank-node quad is always fresh, but the same bnode quad written twice
+    /// in one operation is one quad.
+    #[test]
+    fn blank_node_quads_are_fresh_but_not_double_counted_within_an_operation() {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .update(&format!(
+                "INSERT DATA {{ GRAPH <{G}> {{ <urn:s> <urn:p> 1 }} }}"
+            ))
+            .unwrap();
+        let (inserted, deleted) = delta(
+            &store,
+            &format!("INSERT DATA {{ GRAPH <{G}> {{ _:b <urn:p> 1 . _:b <urn:p> 1 }} }}"),
+        );
+        assert_eq!(inserted.len(), 1, "{inserted:?}");
+        assert!(deleted.is_empty());
+        assert_eq!(store.graph_count_cached(Some(G)), Some(2));
+        assert_eq!(store.count_graph(Some(G)).unwrap(), 2);
+    }
+}
+
+#[cfg(test)]
+mod scoped_tests {
+    use super::TripleStore;
+    use oxigraph::io::RdfFormat;
+    use oxigraph::sparql::QueryResults;
+
+    fn ask(store: &TripleStore, q: &str) -> bool {
+        matches!(store.query(q), Ok(QueryResults::Boolean(true)))
+    }
+
+    /// The rules of the reasoners are `INSERT … WHERE` updates whose WHERE
+    /// reads the default graph; scoped, that default graph is the union of the
+    /// given graphs and nothing else.
+    #[test]
+    fn scoped_update_reads_only_the_scope() {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                "<urn:a> <urn:p> <urn:b> .",
+                RdfFormat::Turtle,
+                Some("urn:g1"),
+            )
+            .unwrap();
+        store
+            .load_str(
+                "<urn:c> <urn:p> <urn:d> .",
+                RdfFormat::Turtle,
+                Some("urn:g2"),
+            )
+            .unwrap();
+        store
+            .load_str("<urn:e> <urn:p> <urn:f> .", RdfFormat::Turtle, None)
+            .unwrap();
+        let rule = "INSERT { GRAPH <urn:t> { ?s <urn:q> ?o } } WHERE { ?s <urn:p> ?o }";
+        store.update_scoped(rule, &["urn:g1".to_string()]).unwrap();
+        assert!(ask(
+            &store,
+            "ASK { GRAPH <urn:t> { <urn:a> <urn:q> <urn:b> } }"
+        ));
+        assert!(
+            !ask(&store, "ASK { GRAPH <urn:t> { <urn:c> <urn:q> <urn:d> } }"),
+            "a graph outside the scope must not be read"
+        );
+        assert!(
+            !ask(&store, "ASK { GRAPH <urn:t> { <urn:e> <urn:q> <urn:f> } }"),
+            "the unnamed default graph is outside an explicit scope"
+        );
+        // Unscoped: the historical behaviour — the default graph only.
+        store.update(rule).unwrap();
+        assert!(ask(
+            &store,
+            "ASK { GRAPH <urn:t> { <urn:e> <urn:q> <urn:f> } }"
+        ));
+        assert!(!ask(
+            &store,
+            "ASK { GRAPH <urn:t> { <urn:c> <urn:q> <urn:d> } }"
+        ));
+    }
+
+    #[test]
+    fn scoped_query_sees_the_scope_as_its_default_graph() {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                "<urn:a> <urn:p> <urn:b> .",
+                RdfFormat::Turtle,
+                Some("urn:g1"),
+            )
+            .unwrap();
+        store
+            .load_str(
+                "<urn:c> <urn:p> <urn:d> .",
+                RdfFormat::Turtle,
+                Some("urn:g2"),
+            )
+            .unwrap();
+        let q = "ASK { <urn:c> <urn:p> <urn:d> }";
+        assert!(matches!(
+            store.query_scoped(q, &["urn:g2".to_string()]),
+            Ok(QueryResults::Boolean(true))
+        ));
+        assert!(matches!(
+            store.query_scoped(q, &["urn:g1".to_string()]),
+            Ok(QueryResults::Boolean(false))
+        ));
     }
 }

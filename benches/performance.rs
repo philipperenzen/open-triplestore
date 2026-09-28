@@ -28,6 +28,16 @@
 //! pattern so that results are reproducible across machines. The default graph
 //! is used throughout unless stated otherwise; GeoSPARQL benchmarks store WKT
 //! geometries.
+//!
+//! # What is measured
+//!
+//! Every read benchmark repeats one query on a store nothing writes to, so with
+//! `TripleStore`'s result cache on every iteration after the first would be a
+//! cache hit and the number would measure the cache, not the engine (63 of the
+//! 68 read benchmarks did exactly that until 2026-09). `fresh_store()` therefore
+//! disables the result cache; build stores through it, never through
+//! `TripleStore::in_memory()` directly. The cached path has its own benchmark,
+//! `query/cache_hit`, which enables the cache on purpose.
 
 use std::sync::{Arc, Mutex};
 
@@ -41,7 +51,20 @@ use oxigraph::sparql::QueryResults;
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 fn fresh_store() -> TripleStore {
-    TripleStore::in_memory().unwrap()
+    // Result cache OFF: a benchmark that repeats one query on an unchanged store
+    // must measure evaluation, not a cache hit (see the module docs). The
+    // runners also export OTS_QUERY_CACHE=off, but the bench must not depend on
+    // the environment.
+    TripleStore::in_memory()
+        .unwrap()
+        .with_query_cache(false, 0, 0)
+}
+
+/// The one store with the result cache ON, for `query/cache_hit` only.
+fn cached_store() -> TripleStore {
+    TripleStore::in_memory()
+        .unwrap()
+        .with_query_cache(true, 256, 10_000)
 }
 
 /// Generate N generic person triples in Turtle.
@@ -175,6 +198,33 @@ fn gen_shacl_persons_ttl(n: usize, violation_rate: f64) -> String {
     s
 }
 
+/// `gen_persons_ttl` plus `rdf:type ex:Person` on every person, so all five
+/// properties (name, age, type, score, email) sit under one SHACL target class.
+fn gen_shacl_wide_persons_ttl(n: usize) -> String {
+    let mut s = gen_persons_ttl(n);
+    for i in 0..n {
+        s.push_str(&format!("ex:p{i} a ex:Person .\n"));
+    }
+    s
+}
+
+/// A shapes graph with five property shapes over `ex:Person` — one per
+/// property `gen_persons_ttl` emits — so a run makes five probes per focus node.
+fn gen_wide_shapes_ttl() -> String {
+    String::from(
+        "@prefix sh:  <http://www.w3.org/ns/shacl#> .\n\
+         @prefix ex:  <http://example.org/> .\n\
+         @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+         ex:PersonShape a sh:NodeShape ;\n\
+             sh:targetClass ex:Person ;\n\
+             sh:property [ sh:path ex:name  ; sh:minCount 1 ; sh:datatype xsd:string ] ;\n\
+             sh:property [ sh:path ex:age   ; sh:minCount 1 ; sh:minInclusive 0 ] ;\n\
+             sh:property [ sh:path ex:type  ; sh:minCount 1 ; sh:nodeKind sh:IRI ] ;\n\
+             sh:property [ sh:path ex:score ; sh:minCount 1 ; sh:maxCount 1 ] ;\n\
+             sh:property [ sh:path ex:email ; sh:minCount 1 ; sh:pattern \"@\" ] .\n",
+    )
+}
+
 /// Fully consume a `QueryResults` iterator so timing is fair.
 fn consume_solutions(results: QueryResults) -> usize {
     match results {
@@ -213,14 +263,26 @@ fn bench_insert_update(c: &mut Criterion) {
     group.bench_function("single_triple", |b| {
         let store = fresh_store();
         let mut i: usize = 0;
-        b.iter(|| {
-            store
-                .update(&format!(
-                    "INSERT DATA {{ <http://ex/s{i}> <http://ex/p> \"v{i}\" }}"
-                ))
-                .unwrap();
-            i += 1;
-        });
+        // `update` recounts the target graph after the write; the previous
+        // iteration's triple is removed in the (untimed) setup so that graph
+        // stays one triple large instead of growing with every sample, which
+        // made this a drifting measurement rather than a per-write cost.
+        b.iter_batched(
+            || {
+                let cur = i;
+                i += 1;
+                if let Some(prev) = cur.checked_sub(1) {
+                    store
+                        .update(&format!(
+                            "DELETE DATA {{ <http://ex/s{prev}> <http://ex/p> \"v{prev}\" }}"
+                        ))
+                        .unwrap();
+                }
+                format!("INSERT DATA {{ <http://ex/s{cur}> <http://ex/p> \"v{cur}\" }}")
+            },
+            |sparql| store.update(&sparql).unwrap(),
+            criterion::BatchSize::SmallInput,
+        );
     });
     group.finish();
 }
@@ -234,16 +296,28 @@ fn bench_insert_update_batch(c: &mut Criterion) {
     group.bench_function("10_triples", |b| {
         let store = fresh_store();
         let mut base: usize = 0;
-        b.iter(|| {
-            let triples: String = (base..base + 10)
+        let triples = |from: usize| -> String {
+            (from..from + 10)
                 .map(|i| format!("<http://ex/s{i}> <http://ex/p> \"v{i}\" ."))
                 .collect::<Vec<_>>()
-                .join(" ");
-            store
-                .update(&format!("INSERT DATA {{ {triples} }}"))
-                .unwrap();
-            base += 10;
-        });
+                .join(" ")
+        };
+        // Steady-state like `single_triple`: the previous batch is removed in
+        // the untimed setup so the recounted graph does not grow.
+        b.iter_batched(
+            || {
+                let cur = base;
+                base += 10;
+                if let Some(prev) = cur.checked_sub(10) {
+                    store
+                        .update(&format!("DELETE DATA {{ {} }}", triples(prev)))
+                        .unwrap();
+                }
+                format!("INSERT DATA {{ {} }}", triples(cur))
+            },
+            |sparql| store.update(&sparql).unwrap(),
+            criterion::BatchSize::SmallInput,
+        );
     });
     group.finish();
 }
@@ -461,6 +535,27 @@ fn bench_query_optional(c: &mut Criterion) {
             });
         });
     }
+    group.finish();
+}
+
+/// Measure a result-cache hit: the same small query repeated on an unchanged
+/// store with the cache ON. This is the only benchmark that exercises the cached
+/// path, and it exists because that path regresses on its own — a text scan
+/// placed in front of the lookup once cost every query ~250 ns.
+fn bench_query_cache_hit(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query/cache_hit");
+
+    let store = cached_store();
+    store
+        .load_str(&gen_persons_ttl(1_000), RdfFormat::Turtle, None)
+        .unwrap();
+    let query = "SELECT ?name WHERE { <http://example.org/p0> <http://example.org/name> ?name }";
+    // Populate the cache once so every timed iteration is a hit.
+    consume_solutions(store.query(query).unwrap());
+
+    group.bench_function("point_lookup", |b| {
+        b.iter(|| consume_solutions(store.query(query).unwrap()));
+    });
     group.finish();
 }
 
@@ -1011,6 +1106,60 @@ fn bench_update_delete_where(c: &mut Criterion) {
     group.finish();
 }
 
+/// Measure a ground `INSERT DATA` into an already-populated named graph
+/// through the HTTP write path.
+///
+/// `POST …/update` runs `update_targeted_delta`, which for a ground update
+/// (`INSERT DATA` / `DELETE DATA` only) computes the exact per-graph count
+/// delta up front and adjusts the count index by it — instead of recounting
+/// the whole target graph after every write, the O(graph)-per-write cost that
+/// made a 500-quad insert into a 900k-quad graph a 900k-quad scan. The graph
+/// holds ~100k quads so a recount would show; the quads an iteration inserts
+/// are removed again in the (untimed) setup, so the graph is the same size for
+/// every sample. `insert/sparql_update` measures the plain `update` path on a
+/// one-triple graph by contrast.
+fn bench_update_ground_delta(c: &mut Criterion) {
+    let mut group = c.benchmark_group("update/ground_delta");
+    group.sample_size(20);
+    group.sampling_mode(SamplingMode::Flat);
+
+    let graph = "http://example.org/g0";
+    let store = fresh_store();
+    // Three quads per person into one graph: ~102k quads in <g0>.
+    store
+        .load_str(&gen_named_graph_nq(34_000, 1), RdfFormat::NQuads, None)
+        .unwrap();
+    let affected = vec![graph.to_string()];
+    let quads = |n: usize| -> String {
+        (0..n)
+            .map(|i| format!("<http://example.org/fresh{i}> <http://example.org/p> \"v{i}\" ."))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+
+    for &n in &[1_usize, 100] {
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::new("insert_data", n), &n, |b, &n| {
+            let insert = format!("INSERT DATA {{ GRAPH <{graph}> {{ {} }} }}", quads(n));
+            let delete = format!("DELETE DATA {{ GRAPH <{graph}> {{ {} }} }}", quads(n));
+            b.iter_batched(
+                || {
+                    store
+                        .update_targeted_delta(&delete, &affected, false)
+                        .unwrap();
+                },
+                |()| {
+                    store
+                        .update_targeted_delta(&insert, &affected, false)
+                        .unwrap()
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
+    group.finish();
+}
+
 // ─── GeoSPARQL benchmarks ─────────────────────────────────────────────────────
 
 /// Measure GeoSPARQL sfContains over point features.
@@ -1047,7 +1196,9 @@ fn bench_geosparql_contains(c: &mut Criterion) {
     group.finish();
 }
 
-/// Measure geof:distance (Euclidean) for spatial proximity queries.
+/// Measure geof:distance for spatial proximity queries. The operands are CRS84
+/// and the unit is `uom:metre`, so this is the geodesic (WGS84 ellipsoid)
+/// distance — it was planar degrees, which made the 300 km filter keep every row.
 fn bench_geosparql_distance(c: &mut Criterion) {
     let mut group = c.benchmark_group("geosparql/distance");
 
@@ -1207,6 +1358,117 @@ fn bench_geosparql_buffer(c: &mut Criterion) {
 /// All N persons have the required ex:name and ex:age properties. Measures the
 /// baseline overhead of shapes loading + focus-node resolution + constraint
 /// evaluation when no violations are found.
+/// Multi-graph SHACL validation: the one shape of run this suite never had.
+///
+/// Every other SHACL benchmark passes a one-element `data_graphs`, and with a
+/// single graph `GraphSel::All` and `GraphSel::One(0)` are the same code path —
+/// so nothing here measured graph reach, the cross-graph `rdfs:subClassOf*`
+/// closure, or the per-graph fan-out of a composite path. A change that made
+/// five-graph validation several times slower would have read as 0 %.
+///
+/// The fixture separates the pieces deliberately: the subclass axiom lives in a
+/// model graph while every `rdf:type` lives in an instance graph, so
+/// `DataView::prepare`'s closure and `resolve_targets`' per-graph instance scan
+/// are both load-bearing. The shapes use a sequence path and a
+/// `zeroOrMorePath`, because a single hop cannot diverge between the two
+/// readings and would measure nothing.
+///
+/// Three ids: `within/1` is the single-graph control, `within/4` spreads the
+/// same data over four graphs with every path resolvable inside one of them,
+/// and `crossing/4` moves the `ex:name` triples into a fifth graph so the
+/// sequence path has to cross a boundary. `crossing/4` is the one that moves if
+/// the reach semantics change.
+///
+/// Each id asserts its own violation count inside `b.iter`, so a scoping
+/// regression that silently drops focus nodes panics the benchmark instead of
+/// being reported as an improvement — the gate only fails on slowdowns.
+fn bench_shacl_validate_multigraph(c: &mut Criterion) {
+    const N: usize = 1_000;
+    let mut group = c.benchmark_group("shacl/validate_multigraph");
+    group.sample_size(20);
+
+    let model_graph = "http://example.org/mg/model";
+    let name_graph = "http://example.org/mg/names";
+    let shapes_graph = "http://example.org/mg/shapes";
+    let instance_graph = |i: usize| format!("http://example.org/mg/instances/{i}");
+
+    // `ex:absent` is on no asset anywhere, so every focus node yields exactly
+    // one violation and the count is a target-resolution assertion.
+    let shapes = r#"
+        @prefix sh: <http://www.w3.org/ns/shacl#> .
+        @prefix ex: <http://example.org/mg#> .
+        ex:AssetShape a sh:NodeShape ;
+            sh:targetClass ex:Asset ;
+            sh:property [ sh:path ex:absent ; sh:minCount 1 ] ;
+            sh:property [ sh:path ( ex:partOf ex:name ) ] ;
+            sh:property [ sh:path [ sh:zeroOrMorePath ex:partOf ] ; sh:class ex:Asset ] .
+    "#;
+
+    // (id, number of instance graphs, names in their own graph)
+    for &(label, graphs, names_apart) in &[
+        ("within", 1_usize, false),
+        ("within", 4, false),
+        ("crossing", 4, true),
+    ] {
+        let store = fresh_store();
+        store
+            .load_str(shapes, RdfFormat::Turtle, Some(shapes_graph))
+            .unwrap();
+        // The subclass axiom, alone, in the model graph.
+        store
+            .load_str(
+                "<http://example.org/mg#Bridge> \
+                 <http://www.w3.org/2000/01/rdf-schema#subClassOf> \
+                 <http://example.org/mg#Asset> .",
+                RdfFormat::Turtle,
+                Some(model_graph),
+            )
+            .unwrap();
+
+        let mut names = String::from("@prefix ex: <http://example.org/mg#> .\n");
+        for i in 0..graphs {
+            let mut ttl = String::from("@prefix ex: <http://example.org/mg#> .\n");
+            for k in (i..N).step_by(graphs) {
+                // Typed as the SUBCLASS, so the target only resolves when the
+                // model graph's axiom is reachable.
+                ttl.push_str(&format!("ex:a{k} a ex:Bridge ; ex:partOf ex:a{}.\n", k / 2));
+                if names_apart {
+                    names.push_str(&format!("ex:a{k} ex:name \"n{k}\" .\n"));
+                } else {
+                    ttl.push_str(&format!("ex:a{k} ex:name \"n{k}\" .\n"));
+                }
+            }
+            store
+                .load_str(&ttl, RdfFormat::Turtle, Some(&instance_graph(i)))
+                .unwrap();
+        }
+        if names_apart {
+            store
+                .load_str(&names, RdfFormat::Turtle, Some(name_graph))
+                .unwrap();
+        }
+
+        let mut data_graphs: Vec<String> = (0..graphs).map(instance_graph).collect();
+        data_graphs.push(model_graph.to_string());
+        if names_apart {
+            data_graphs.push(name_graph.to_string());
+        }
+
+        let id = BenchmarkId::new(label, graphs);
+        group.throughput(Throughput::Elements(N as u64));
+        group.bench_with_input(id, &(store, data_graphs), |b, (s, dg)| {
+            b.iter(|| {
+                let report = open_triplestore::shacl::validate(s, shapes_graph, dg).unwrap();
+                // Every asset violates `ex:absent`, and nothing else may change
+                // the count: fewer means target resolution lost focus nodes.
+                assert_eq!(report.results_count, N, "focus nodes lost");
+                report
+            });
+        });
+    }
+    group.finish();
+}
+
 fn bench_shacl_validate_clean(c: &mut Criterion) {
     let mut group = c.benchmark_group("shacl/validate_clean");
     group.sample_size(20);
@@ -1269,6 +1531,61 @@ fn bench_shacl_validate_violations(c: &mut Criterion) {
         });
     }
     group.finish();
+}
+
+/// Measure SHACL validation on a persistent (RocksDB) store — the snapshot
+/// source plus the per-run adjacency index.
+///
+/// `shacl/validate_clean` runs on the memory backend, so `DataView` takes the
+/// live source and, at 2 000 probes (1 000 nodes × 2 paths, under the
+/// 20 000-probe threshold), never builds the run index. This variant opens a
+/// RocksDB store in a temporary directory with the accelerator off, so the run
+/// reads one RocksDB snapshot, and validates 5 000 focus nodes against five
+/// property shapes: 25 000 probes, enough for `build_index` to scan the five
+/// predicates once and answer every probe from the adjacency maps — the path a
+/// production dataset takes.
+fn bench_shacl_validate_snapshot(c: &mut Criterion) {
+    let mut group = c.benchmark_group("shacl/validate_snapshot");
+    group.sample_size(10);
+    group.sampling_mode(SamplingMode::Flat);
+
+    let data_graph = "http://example.org/data";
+    let shapes_graph = "http://example.org/shapes";
+    let dir = tempfile::tempdir().unwrap();
+    // The accelerator would publish a RAM mirror after the first queries and
+    // move the run onto the mirror source; it reads its switch at open time,
+    // so turn it off for this store only and put the environment back.
+    let prev = std::env::var_os("OTS_PARALLEL_QUERY");
+    std::env::set_var("OTS_PARALLEL_QUERY", "off");
+    let store = TripleStore::open(dir.path()).unwrap();
+    match prev {
+        Some(v) => std::env::set_var("OTS_PARALLEL_QUERY", v),
+        None => std::env::remove_var("OTS_PARALLEL_QUERY"),
+    }
+    let n = 5_000_usize;
+    store
+        .load_str(
+            &gen_shacl_wide_persons_ttl(n),
+            RdfFormat::Turtle,
+            Some(data_graph),
+        )
+        .unwrap();
+    store
+        .load_str(
+            &gen_wide_shapes_ttl(),
+            RdfFormat::Turtle,
+            Some(shapes_graph),
+        )
+        .unwrap();
+
+    group.throughput(Throughput::Elements(n as u64));
+    group.bench_with_input(BenchmarkId::from_parameter(n), &store, |b, s| {
+        let dg = vec![data_graph.to_string()];
+        b.iter(|| open_triplestore::shacl::validate(s, shapes_graph, &dg).unwrap());
+    });
+    group.finish();
+    drop(store);
+    drop(dir);
 }
 
 // ─── Concurrent read benchmarks ───────────────────────────────────────────────
@@ -1493,6 +1810,7 @@ criterion_group!(
     config = Criterion::default().sample_size(50);
     targets =
         bench_query_lookup,
+        bench_query_cache_hit,
         bench_query_lookup_limit,
         bench_query_join_2way,
         bench_query_join_3way,
@@ -1528,7 +1846,8 @@ criterion_group!(
     config = Criterion::default().sample_size(20);
     targets =
         bench_update_insert_where,
-        bench_update_delete_where
+        bench_update_delete_where,
+        bench_update_ground_delta
 );
 
 criterion_group!(
@@ -1547,7 +1866,9 @@ criterion_group!(
     config = Criterion::default().sample_size(20);
     targets =
         bench_shacl_validate_clean,
-        bench_shacl_validate_violations
+        bench_shacl_validate_violations,
+        bench_shacl_validate_snapshot,
+        bench_shacl_validate_multigraph
 );
 
 criterion_group!(

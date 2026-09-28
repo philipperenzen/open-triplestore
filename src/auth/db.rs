@@ -15,6 +15,41 @@ type AccessibleGraphs = (HashSet<String>, HashSet<String>);
 
 use super::models::*;
 
+/// Which position a triple-security-label term occupies, since an object may be
+/// a literal while a subject or predicate may not.
+#[derive(Clone, Copy)]
+enum TermPosition {
+    Iri,
+    Object,
+}
+
+/// Render a caller-supplied term in N-Triples syntax.
+///
+/// Triple security labels are matched against keys built by splitting an
+/// N-Triples serialisation, so the stored values must be in that same form.
+/// Callers send bare IRIs (`http://ex/s`) or bare literal text; an already
+/// canonical value (`<…>`, `"…"`, `_:b0`) is passed through unchanged so
+/// re-canonicalising is idempotent.
+fn canonical_term(value: &str, position: TermPosition) -> String {
+    let v = value.trim();
+    if v.is_empty() {
+        return v.to_string();
+    }
+    // Already an N-Triples term.
+    if (v.starts_with('<') && v.ends_with('>')) || v.starts_with('"') || v.starts_with("_:") {
+        return v.to_string();
+    }
+    match position {
+        TermPosition::Iri => format!("<{v}>"),
+        TermPosition::Object => match oxigraph::model::NamedNode::new(v) {
+            // A well-formed absolute IRI is an IRI object.
+            Ok(n) => n.to_string(),
+            // Otherwise it is literal text.
+            Err(_) => oxigraph::model::Literal::new_simple_literal(v).to_string(),
+        },
+    }
+}
+
 /// Helper to read a User from a row (columns per USER_COLS: id, username, email, password_hash, role, is_active, created_at, updated_at, is_public, avatar_key, can_publish, display_name, bio, website, phone, organization, email_verified, totp_enabled).
 /// Escape SQLite `LIKE` wildcards (`%`, `_`) in a literal prefix so folder paths
 /// containing them cannot widen a `LIKE prefix || '/%'` match. Pair with `ESCAPE '\'`.
@@ -287,6 +322,12 @@ pub struct AuthDb {
     /// uncached path does two SELECTs + a HashSet join each call.
     #[allow(clippy::type_complexity)] // a cache tuple; a type alias would obscure it
     accessible_graphs_cache: Mutex<HashMap<Option<String>, (Instant, Arc<AccessibleGraphs>)>>,
+    /// The file, for a persistent database; the replication watch
+    /// connection opens it read-only.
+    path: Option<std::path::PathBuf>,
+    /// A connection that only ever asks `PRAGMA data_version` (see
+    /// [`Self::data_version`]).
+    watch: Mutex<Option<Connection>>,
 }
 
 impl AuthDb {
@@ -303,16 +344,25 @@ impl AuthDb {
                 "PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;",
             )
         });
+        // Open one connection eagerly, the rest on demand: `build` used to open
+        // all eight at once, each running `journal_mode=WAL`, and the boot log
+        // carried a spurious "r2d2: database is locked" ERROR from the losers.
         let pool = r2d2::Pool::builder()
             .max_size(8)
+            .min_idle(Some(1))
             .build(manager)
             .map_err(|e| anyhow::anyhow!("Pool build failed: {}", e))?;
         let db = Self {
             pool,
             accessible_graphs_cache: Mutex::new(HashMap::new()),
+            path: Some(path.to_path_buf()),
+            watch: Mutex::new(None),
         };
         db.migrate()?;
         info!("Auth database ready at {}", path.display());
+        // A replication follower keeps this database current from its
+        // leader (does nothing unless the environment configures one).
+        crate::store::replication::spawn_identity_follower_if_configured(db.thread_handle());
         Ok(db)
     }
 
@@ -328,9 +378,81 @@ impl AuthDb {
         let db = Self {
             pool,
             accessible_graphs_cache: Mutex::new(HashMap::new()),
+            path: None,
+            watch: Mutex::new(None),
         };
         db.migrate()?;
         Ok(db)
+    }
+
+    // ─── Replication: the database shipped whole ───────────────────────────
+
+    /// A handle for a background thread: the same pool, its own caches.
+    fn thread_handle(&self) -> Self {
+        Self {
+            pool: self.pool.clone(),
+            accessible_graphs_cache: Mutex::new(HashMap::new()),
+            path: self.path.clone(),
+            watch: Mutex::new(None),
+        }
+    }
+
+    /// A consistent snapshot of the whole database as SQLite file bytes,
+    /// taken with the online backup API (safe under WAL, no lock on the
+    /// writers). What a replication follower fetches.
+    pub fn snapshot_bytes(&self) -> anyhow::Result<Vec<u8>> {
+        let src = self.pool.get()?;
+        let tmp = std::env::temp_dir().join(format!("ots-identity-{}.db", uuid::Uuid::new_v4()));
+        let result = (|| {
+            let mut dst = Connection::open(&tmp)?;
+            let backup = rusqlite::backup::Backup::new(&src, &mut dst)?;
+            backup.run_to_completion(100, Duration::from_millis(5), None)?;
+            Ok::<Vec<u8>, anyhow::Error>(std::fs::read(&tmp)?)
+        })();
+        let _ = std::fs::remove_file(&tmp);
+        result
+    }
+
+    /// Replace this database's contents with a snapshot, in place, under the
+    /// open connections — the backup API's destination side, so no file is
+    /// swapped and no pool reopened; every connection sees the new state on
+    /// its next statement. What a replication follower does with the
+    /// leader's identity database.
+    pub fn apply_snapshot(&self, bytes: &[u8]) -> anyhow::Result<()> {
+        if !bytes.starts_with(b"SQLite format 3\0") {
+            anyhow::bail!("not a SQLite database ({} bytes)", bytes.len());
+        }
+        let tmp = std::env::temp_dir().join(format!("ots-identity-{}.db", uuid::Uuid::new_v4()));
+        std::fs::write(&tmp, bytes)?;
+        let result = (|| {
+            let src =
+                Connection::open_with_flags(&tmp, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let mut dst = self.pool.get()?;
+            let backup = rusqlite::backup::Backup::new(&src, &mut dst)?;
+            backup.run_to_completion(100, Duration::from_millis(5), None)?;
+            Ok::<(), anyhow::Error>(())
+        })();
+        let _ = std::fs::remove_file(&tmp);
+        result?;
+        self.invalidate_accessible_graphs_cache();
+        Ok(())
+    }
+
+    /// SQLite's own change counter for this database: `PRAGMA data_version`
+    /// on a connection kept only for watching, which moves whenever any
+    /// other connection commits. The replication manifest reports it, so a
+    /// follower fetches a snapshot only after a change. `None` for an
+    /// in-memory database, whose single connection sees no "other" commits.
+    pub fn data_version(&self) -> Option<i64> {
+        let path = self.path.as_ref()?;
+        let mut watch = self.watch.lock().unwrap_or_else(|p| p.into_inner());
+        if watch.is_none() {
+            *watch =
+                Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
+        }
+        let conn = watch.as_ref()?;
+        conn.query_row("PRAGMA data_version", [], |r| r.get::<_, i64>(0))
+            .ok()
     }
 
     /// Shared pool accessor — used by the audit logger so it can reuse the
@@ -535,6 +657,7 @@ impl AuthDb {
                 graph_iri TEXT NOT NULL,
                 graph_role TEXT,
                 private INTEGER NOT NULL DEFAULT 0,
+                origin TEXT,
                 PRIMARY KEY (dataset_id, graph_iri)
             );
 
@@ -609,6 +732,68 @@ impl AuthDb {
             CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 
             -- ── Endpoint ACL ────────────────────────────────────────────────
+            -- LDES (Linked Data Event Streams): per-dataset stream config,
+            -- the append-only member log, and the client's sync bookmarks.
+            CREATE TABLE IF NOT EXISTS ldes_streams (
+                dataset_id TEXT PRIMARY KEY REFERENCES datasets(id) ON DELETE CASCADE,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                page_size INTEGER NOT NULL DEFAULT 100,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS ldes_members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dataset_id TEXT NOT NULL,
+                entity_iri TEXT NOT NULL,
+                graph_iri TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                deleted INTEGER NOT NULL DEFAULT 0,
+                ntriples TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_ldes_members_ds ON ldes_members(dataset_id, id);
+            CREATE TABLE IF NOT EXISTS ldes_sync_state (
+                dataset_id TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                last_timestamp TEXT,
+                members_applied INTEGER NOT NULL DEFAULT 0,
+                synced_at TEXT,
+                PRIMARY KEY (dataset_id, source_url)
+            );
+            -- Frozen fragment bounds: once a page is full, its member→node
+            -- assignment is sealed here so retention can delete rows without
+            -- renumbering pages already served as immutable. next_created_at
+            -- is the tree:value of the relation out of the node, recorded at
+            -- sealing time so it survives whatever is pruned later.
+            CREATE TABLE IF NOT EXISTS ldes_nodes (
+                dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+                node INTEGER NOT NULL,
+                first_id INTEGER NOT NULL,
+                last_id INTEGER NOT NULL,
+                next_created_at TEXT NOT NULL,
+                sealed_at TEXT NOT NULL,
+                PRIMARY KEY (dataset_id, node)
+            );
+            -- The stream's declared retention policy (LDES 1.0 §4.4); no row
+            -- means every member is kept.
+            CREATE TABLE IF NOT EXISTS ldes_retention (
+                dataset_id TEXT PRIMARY KEY REFERENCES datasets(id) ON DELETE CASCADE,
+                full_log_duration TEXT,
+                version_amount INTEGER,
+                version_duration TEXT,
+                version_delete_duration TEXT,
+                starting_from TEXT,
+                updated_at TEXT NOT NULL
+            );
+
+            -- Per-dataset entailment: selected regime, materialisation mode, last run.
+            CREATE TABLE IF NOT EXISTS dataset_entailment (
+                dataset_id TEXT PRIMARY KEY REFERENCES datasets(id) ON DELETE CASCADE,
+                regime TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'materialize',
+                updated_at TEXT NOT NULL,
+                last_run_at TEXT,
+                last_triples INTEGER
+            );
+
             CREATE TABLE IF NOT EXISTS endpoint_acl (
                 id TEXT PRIMARY KEY,
                 principal_type TEXT NOT NULL CHECK(principal_type IN ('user','organisation','group','role')),
@@ -727,7 +912,13 @@ impl AuthDb {
                 info_count INTEGER NOT NULL DEFAULT 0,
                 report_json TEXT NOT NULL,
                 triggered_by TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                duration_ms INTEGER,
+                quads INTEGER,
+                source_kind TEXT,
+                run_index INTEGER,
+                data_graphs TEXT,
+                shapes_graphs TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_shacl_runs_dataset ON shacl_validation_runs(dataset_id);
             CREATE INDEX IF NOT EXISTS idx_shacl_runs_ts ON shacl_validation_runs(dataset_id, run_timestamp DESC);
@@ -992,6 +1183,20 @@ impl AuthDb {
                 updated_at TEXT NOT NULL
             );
 
+            -- ── Prefix overrides ────────────────────────────────────────────
+            -- What a prefix means *here*, set by an administrator. The label is
+            -- the primary key, which makes no-two-prefixes-with-the-same-
+            -- shorthand a property of the storage rather than a check someone
+            -- has to remember to run. Lives in the identity database so
+            -- it survives a restart and reaches a follower with the rest of it.
+            CREATE TABLE IF NOT EXISTS prefix_overrides (
+                label TEXT PRIMARY KEY,
+                namespace TEXT NOT NULL,
+                created_by TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             -- ── OIDC provider (this store as the identity provider for client apps) ──
             -- Registered relying-party clients (SPAs and services signing users
             -- in AGAINST this store; distinct from oauth_providers = upstream
@@ -1067,6 +1272,17 @@ impl AuthDb {
             "ALTER TABLE users ADD COLUMN can_publish INTEGER NOT NULL DEFAULT 0",
             // Migrate legacy 'publisher' role rows: grant can_publish and reset to 'user'
             "UPDATE users SET can_publish=1, role='user' WHERE role='publisher'",
+            // What a validation run read and how long it took (workload telemetry).
+            "ALTER TABLE shacl_validation_runs ADD COLUMN duration_ms INTEGER",
+            "ALTER TABLE shacl_validation_runs ADD COLUMN quads INTEGER",
+            "ALTER TABLE shacl_validation_runs ADD COLUMN source_kind TEXT",
+            "ALTER TABLE shacl_validation_runs ADD COLUMN run_index INTEGER",
+            // The graphs a validation run validated (a JSON array), so its
+            // report goes only to who may read them all. NULL on older runs.
+            "ALTER TABLE shacl_validation_runs ADD COLUMN data_graphs TEXT",
+            // The shapes graphs it validated against (a JSON array): its report
+            // names their shapes, paths and messages. NULL on older runs.
+            "ALTER TABLE shacl_validation_runs ADD COLUMN shapes_graphs TEXT",
             "ALTER TABLE datasets ADD COLUMN conforms_to_model TEXT",
             "ALTER TABLE datasets ADD COLUMN conforms_to_version TEXT",
             "ALTER TABLE datasets ADD COLUMN graph_role TEXT",
@@ -1086,6 +1302,21 @@ impl AuthDb {
             "ALTER TABLE datasets ADD COLUMN version_notes TEXT",
             "ALTER TABLE datasets ADD COLUMN spatial TEXT",
             "ALTER TABLE datasets ADD COLUMN landing_page TEXT",
+            // Triple security labels were stored as callers sent them (bare
+            // `http://ex/s`) while the filter matches N-Triples terms
+            // (`<http://ex/s>`), so no label ever matched. Canonicalise the
+            // existing rows; new ones are canonicalised on write. Guarded on
+            // NOT LIKE so it is idempotent.
+            "UPDATE triple_security_labels SET subject_iri = '<' || subject_iri || '>' \
+             WHERE subject_iri NOT LIKE '<%' AND subject_iri NOT LIKE '_:%'",
+            "UPDATE triple_security_labels SET predicate_iri = '<' || predicate_iri || '>' \
+             WHERE predicate_iri NOT LIKE '<%'",
+            // Objects that look like absolute IRIs become IRI terms; anything
+            // else is left for the operator, since guessing a literal's
+            // datatype/language from bare text would be worse than a no-match.
+            "UPDATE triple_security_labels SET object_value = '<' || object_value || '>' \
+             WHERE object_value NOT LIKE '<%' AND object_value NOT LIKE '\"%' \
+               AND object_value NOT LIKE '_:%' AND object_value LIKE '%://%'",
             // Organisation Linked Data / FOAF / vCard metadata fields
             "ALTER TABLE organisations ADD COLUMN homepage TEXT",
             "ALTER TABLE organisations ADD COLUMN identifier TEXT",
@@ -1105,6 +1336,13 @@ impl AuthDb {
             // Per-graph privacy: a private graph is hidden from dataset viewers and
             // the public — only principals who can write the owning dataset see it.
             "ALTER TABLE dataset_graphs ADD COLUMN private INTEGER NOT NULL DEFAULT 0",
+            // How a dataset came to hold a graph outside its own namespace:
+            // 'created' (the graph was empty and the dataset made it) or
+            // 'adopted' (it held data, and whoever attached it could write it).
+            // NULL on rows made before this column existed, and on rows the
+            // server itself registers: such a graph is deleted with the
+            // dataset only by a caller who could delete it directly.
+            "ALTER TABLE dataset_graphs ADD COLUMN origin TEXT",
             // Rename old role strings to the new canonical names.
             "UPDATE datasets SET graph_role = 'model' WHERE graph_role = 'tbox'",
             "UPDATE datasets SET graph_role = 'instances' WHERE graph_role = 'abox'",
@@ -1206,6 +1444,39 @@ impl AuthDb {
             )?;
         }
 
+        // One-time cleanup: saved_queries (API services) whose owning dataset,
+        // organisation or group no longer exists. Dataset/org/group ids are
+        // reusable slugs, so an orphaned row — including a `visibility='public'`
+        // one — would otherwise attach to a *future*, unrelated resource that
+        // reused the id and expose its data. Deletes cascade to revisions/tests.
+        let _ = conn.execute_batch(
+            "DELETE FROM saved_queries
+                 WHERE owner_type='dataset'
+                   AND owner_id NOT IN (SELECT id FROM datasets);
+             DELETE FROM saved_queries
+                 WHERE owner_type='organisation'
+                   AND owner_id NOT IN (SELECT id FROM organisations);
+             DELETE FROM saved_queries
+                 WHERE owner_type='group'
+                   AND owner_id NOT IN (SELECT id FROM groups);",
+        );
+
+        Ok(())
+    }
+
+    /// Delete every saved query (API service) owned by `(owner_type, owner_id)`.
+    /// Called from the dataset/organisation/group delete paths so a service never
+    /// outlives its owner and re-attaches to a future resource that reuses the id.
+    /// Revisions and tests cascade (`ON DELETE CASCADE`, foreign_keys=ON).
+    fn delete_saved_queries_for_owner(
+        conn: &rusqlite::Connection,
+        owner_type: &str,
+        owner_id: &str,
+    ) -> rusqlite::Result<()> {
+        conn.execute(
+            "DELETE FROM saved_queries WHERE owner_type=?1 AND owner_id=?2",
+            params![owner_type, owner_id],
+        )?;
         Ok(())
     }
 
@@ -2104,6 +2375,95 @@ impl AuthDb {
         Ok(())
     }
 
+    // ─── Prefix overrides (what a prefix means on this deployment) ───────────
+
+    /// Every override, ordered by label.
+    pub fn list_prefix_overrides(&self) -> anyhow::Result<Vec<PrefixOverride>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT label, namespace, created_by, created_at, updated_at
+             FROM prefix_overrides ORDER BY label",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(PrefixOverride {
+                    label: r.get(0)?,
+                    namespace: r.get(1)?,
+                    created_by: r.get(2)?,
+                    created_at: r.get(3)?,
+                    updated_at: r.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// One override by label; None when the label has none.
+    pub fn get_prefix_override(&self, label: &str) -> anyhow::Result<Option<PrefixOverride>> {
+        let conn = self.pool.get()?;
+        read_prefix_override(&conn, label)
+    }
+
+    /// Create an override, refusing a label that already has one.
+    ///
+    /// The refusal is the point: two prefixes with the same shorthand cannot
+    /// both be right, and silently repointing an established prefix changes
+    /// what every stored CURIE means. Repointing is [`Self::put_prefix_override`],
+    /// which says so.
+    pub fn create_prefix_override(
+        &self,
+        label: &str,
+        namespace: &str,
+        created_by: Option<&str>,
+    ) -> anyhow::Result<PrefixOverride> {
+        // One connection for the whole call: the pool is small, and holding one
+        // while asking for another is how you deadlock it.
+        let conn = self.pool.get()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let changed = conn.execute(
+            "INSERT OR IGNORE INTO prefix_overrides
+                 (label, namespace, created_by, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            rusqlite::params![label, namespace, created_by, now],
+        )?;
+        if changed == 0 {
+            anyhow::bail!("prefix {label} already has an override");
+        }
+        read_prefix_override(&conn, label)?
+            .ok_or_else(|| anyhow::anyhow!("override vanished after insert"))
+    }
+
+    /// Create or repoint an override.
+    pub fn put_prefix_override(
+        &self,
+        label: &str,
+        namespace: &str,
+        created_by: Option<&str>,
+    ) -> anyhow::Result<(PrefixOverride, bool)> {
+        let conn = self.pool.get()?;
+        let existed = read_prefix_override(&conn, label)?.is_some();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO prefix_overrides
+                 (label, namespace, created_by, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(label) DO UPDATE SET
+                 namespace = excluded.namespace,
+                 updated_at = excluded.updated_at",
+            rusqlite::params![label, namespace, created_by, now],
+        )?;
+        let row = read_prefix_override(&conn, label)?
+            .ok_or_else(|| anyhow::anyhow!("override vanished after upsert"))?;
+        Ok((row, !existed))
+    }
+
+    /// Remove an override, so the label falls back to whatever the lower tiers
+    /// say. Returns whether there was one.
+    pub fn delete_prefix_override(&self, label: &str) -> anyhow::Result<bool> {
+        let conn = self.pool.get()?;
+        Ok(conn.execute("DELETE FROM prefix_overrides WHERE label = ?1", [label])? > 0)
+    }
+
     // ─── App settings (runtime-changeable admin toggles) ──────────────────────
 
     /// Read one instance setting; None when never set.
@@ -2635,12 +2995,20 @@ impl AuthDb {
         Ok(())
     }
 
+    /// Stamp `last_used_at`, at most once a minute per token. The stamp is
+    /// bookkeeping; a client that authenticates several times a second — a
+    /// replication follower polling its leader — must not turn every request
+    /// into a write: each is an fsync, and on a replication leader each moves
+    /// the identity database's version, which made the follower fetch the
+    /// whole database again at its next check, every check.
     pub fn update_api_token_last_used(&self, id: &str) -> anyhow::Result<()> {
         let conn = self.pool.get()?;
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = chrono::Utc::now();
+        let stale = (now - chrono::Duration::seconds(60)).to_rfc3339();
         conn.execute(
-            "UPDATE api_tokens SET last_used_at = ?1 WHERE id = ?2",
-            params![now, id],
+            "UPDATE api_tokens SET last_used_at = ?1
+             WHERE id = ?2 AND (last_used_at IS NULL OR last_used_at < ?3)",
+            params![now.to_rfc3339(), id, stale],
         )?;
         Ok(())
     }
@@ -2768,8 +3136,12 @@ impl AuthDb {
     }
 
     pub fn delete_organisation(&self, id: &str) -> anyhow::Result<()> {
-        let conn = self.pool.get()?;
-        conn.execute("DELETE FROM organisations WHERE id = ?1", params![id])?;
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
+        // Org-scoped API services must not outlive the organisation (id reuse).
+        Self::delete_saved_queries_for_owner(&tx, "organisation", id)?;
+        tx.execute("DELETE FROM organisations WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -3043,8 +3415,12 @@ impl AuthDb {
     }
 
     pub fn delete_group(&self, id: &str) -> anyhow::Result<()> {
-        let conn = self.pool.get()?;
-        conn.execute("DELETE FROM groups WHERE id = ?1", params![id])?;
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
+        // Group-scoped API services must not outlive the group (id reuse).
+        Self::delete_saved_queries_for_owner(&tx, "group", id)?;
+        tx.execute("DELETE FROM groups WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -3279,6 +3655,85 @@ impl AuthDb {
     }
 
     // ─── SHACL validation run history ──────────────────────────────────────────
+
+    /// Attach what a validation run read and how long it took.
+    pub fn set_validation_run_metrics(
+        &self,
+        run_id: &str,
+        duration_ms: i64,
+        quads: i64,
+        source_kind: &str,
+        run_index: bool,
+    ) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "UPDATE shacl_validation_runs SET duration_ms = ?2, quads = ?3, source_kind = ?4, run_index = ?5 WHERE id = ?1",
+            params![run_id, duration_ms, quads, source_kind, run_index as i32],
+        )?;
+        Ok(())
+    }
+
+    /// Record the graphs validation run `run_id` validated, and the shapes
+    /// graphs it validated them against (see [`Self::get_validation_run_graphs`]
+    /// and [`Self::get_validation_run_shapes_graphs`]).
+    pub fn set_validation_run_graphs(
+        &self,
+        run_id: &str,
+        graphs: &[String],
+        shapes_graphs: &[String],
+    ) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "UPDATE shacl_validation_runs SET data_graphs = ?2, shapes_graphs = ?3 WHERE id = ?1",
+            params![
+                run_id,
+                serde_json::to_string(graphs)?,
+                serde_json::to_string(shapes_graphs)?
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The shapes graphs validation run `run_id` validated against, and so the
+    /// graphs whose shapes, paths and messages its report may carry. `None`
+    /// for a run stored before runs recorded them (or an unknown run).
+    pub fn get_validation_run_shapes_graphs(
+        &self,
+        run_id: &str,
+    ) -> anyhow::Result<Option<Vec<String>>> {
+        let conn = self.pool.get()?;
+        let stored: Option<Option<String>> = conn
+            .query_row(
+                "SELECT shapes_graphs FROM shacl_validation_runs WHERE id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        stored
+            .flatten()
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    /// The graphs validation run `run_id` validated, and so the graphs whose
+    /// focus nodes and values its report may carry. `None` for a run stored
+    /// before runs recorded them (or an unknown run).
+    pub fn get_validation_run_graphs(&self, run_id: &str) -> anyhow::Result<Option<Vec<String>>> {
+        let conn = self.pool.get()?;
+        let stored: Option<Option<String>> = conn
+            .query_row(
+                "SELECT data_graphs FROM shacl_validation_runs WHERE id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        stored
+            .flatten()
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(Into::into)
+    }
 
     /// Persist a validation run and prune to the most recent 50 runs per dataset.
     #[allow(clippy::too_many_arguments)]
@@ -3532,8 +3987,14 @@ impl AuthDb {
     }
 
     pub fn delete_dataset(&self, id: &str) -> anyhow::Result<()> {
-        let conn = self.pool.get()?;
-        conn.execute("DELETE FROM datasets WHERE id = ?1", params![id])?;
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
+        // Drop the dataset's API services in the same transaction: dataset ids are
+        // reusable slugs, so a leftover `visibility='public'` service would attach
+        // to a future dataset that reused this id and expose its data.
+        Self::delete_saved_queries_for_owner(&tx, "dataset", id)?;
+        tx.execute("DELETE FROM datasets WHERE id = ?1", params![id])?;
+        tx.commit()?;
         self.invalidate_accessible_graphs_cache();
         Ok(())
     }
@@ -3901,14 +4362,103 @@ impl AuthDb {
         Ok(())
     }
 
-    pub fn remove_dataset_graph(&self, dataset_id: &str, graph_iri: &str) -> anyhow::Result<()> {
+    /// Register `graph_iri` to `dataset_id` and record how the dataset came to
+    /// hold it (`origin`: `'created'` or `'adopted'`, see the
+    /// `dataset_graphs.origin` column). A registration that already records
+    /// an origin keeps it; one that records none (the write path registered
+    /// the graph before its caller could) takes this one.
+    pub fn add_dataset_graph_with_origin(
+        &self,
+        dataset_id: &str,
+        graph_iri: &str,
+        origin: &str,
+    ) -> anyhow::Result<()> {
         let conn = self.pool.get()?;
         conn.execute(
+            "INSERT INTO dataset_graphs (dataset_id, graph_iri, origin) VALUES (?1,?2,?3) \
+             ON CONFLICT(dataset_id, graph_iri) DO UPDATE SET \
+             origin = COALESCE(dataset_graphs.origin, excluded.origin)",
+            params![dataset_id, graph_iri, origin],
+        )?;
+        self.invalidate_accessible_graphs_cache();
+        Ok(())
+    }
+
+    /// Whether `graph_iri` is registered to `dataset_id`.
+    pub fn dataset_has_graph(&self, dataset_id: &str, graph_iri: &str) -> anyhow::Result<bool> {
+        let conn = self.pool.get()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM dataset_graphs WHERE dataset_id=?1 AND graph_iri=?2",
+            params![dataset_id, graph_iri],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// The origin recorded for `graph_iri`'s registration to `dataset_id`:
+    /// `None` when the graph is not registered to it, `Some(None)` when the
+    /// row records none (it predates the column, or the server made it).
+    pub fn dataset_graph_origin(
+        &self,
+        dataset_id: &str,
+        graph_iri: &str,
+    ) -> anyhow::Result<Option<Option<String>>> {
+        let conn = self.pool.get()?;
+        conn.query_row(
+            "SELECT origin FROM dataset_graphs WHERE dataset_id=?1 AND graph_iri=?2",
+            params![dataset_id, graph_iri],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Ids of the datasets `graph_iri` is registered to.
+    pub fn datasets_with_graph(&self, graph_iri: &str) -> anyhow::Result<Vec<String>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT dataset_id FROM dataset_graphs WHERE graph_iri=?1 ORDER BY dataset_id",
+        )?;
+        let ids = stmt
+            .query_map(params![graph_iri], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(ids)
+    }
+
+    /// Every `(dataset_id, graph_iri, graph_role)` registration.
+    pub fn list_all_dataset_graph_rows(
+        &self,
+    ) -> anyhow::Result<Vec<(String, String, Option<GraphKind>)>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT dataset_id, graph_iri, graph_role FROM dataset_graphs \
+             ORDER BY dataset_id, graph_iri",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                let role: Option<String> = row.get(2)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    role.as_deref().and_then(GraphKind::from_str),
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Remove `graph_iri`'s registration from `dataset_id`. Returns `true` when
+    /// a row was removed, `false` when the graph was not registered to that
+    /// dataset: a caller that goes on to delete the stored graph must do so
+    /// only for a registration it actually removed.
+    pub fn remove_dataset_graph(&self, dataset_id: &str, graph_iri: &str) -> anyhow::Result<bool> {
+        let conn = self.pool.get()?;
+        let removed = conn.execute(
             "DELETE FROM dataset_graphs WHERE dataset_id=?1 AND graph_iri=?2",
             params![dataset_id, graph_iri],
         )?;
         self.invalidate_accessible_graphs_cache();
-        Ok(())
+        Ok(removed > 0)
     }
 
     pub fn list_dataset_graphs(&self, dataset_id: &str) -> anyhow::Result<Vec<String>> {
@@ -3944,6 +4494,33 @@ impl AuthDb {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(entries)
+    }
+
+    /// Graphs of `dataset` the caller may read: all of them for a writer
+    /// (owner / maintainer / admin), non-private ones for everyone else
+    /// (a viewer, or an anonymous caller on a public dataset).
+    ///
+    /// This is the read-scope companion to [`list_dataset_graphs`], which
+    /// returns the *raw* registration list and therefore leaks private-graph
+    /// content when a read handler scopes on it after only checking dataset
+    /// access. It applies the exact rule the `GET /api/datasets/:id/graphs`
+    /// handler uses. Errors propagate (a lookup failure is surfaced, never
+    /// swallowed into an empty or full list).
+    pub fn list_readable_dataset_graphs(
+        &self,
+        user_id: Option<&str>,
+        dataset: &Dataset,
+    ) -> anyhow::Result<Vec<String>> {
+        let can_see_private = self
+            .effective_dataset_role(user_id, dataset)?
+            .map(|r| r.can_write())
+            .unwrap_or(false);
+        Ok(self
+            .list_dataset_graph_entries(&dataset.id)?
+            .into_iter()
+            .filter(|e| can_see_private || !e.private)
+            .map(|e| e.graph_iri)
+            .collect())
     }
 
     /// Return the distinct, non-null `graph_role` values for every dataset that
@@ -4009,6 +4586,49 @@ impl AuthDb {
         )?;
         self.invalidate_accessible_graphs_cache();
         Ok(())
+    }
+
+    /// The graphs some dataset holds as private
+    /// ([`Self::set_dataset_graph_private`]).
+    pub fn list_private_dataset_graph_iris(
+        &self,
+    ) -> anyhow::Result<std::collections::HashSet<String>> {
+        let conn = self.pool.get()?;
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT graph_iri FROM dataset_graphs WHERE private != 0")?;
+        let iris = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(iris)
+    }
+
+    /// The datasets that have their validation report graph
+    /// (`urn:system:reports:dataset:{id}`) registered, with the latest
+    /// validation run of each, if any.
+    pub fn list_datasets_with_report_graph(&self) -> anyhow::Result<Vec<(String, Option<String>)>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT g.dataset_id,
+                    (SELECT r.id FROM shacl_validation_runs r WHERE r.dataset_id = g.dataset_id
+                     ORDER BY r.run_timestamp DESC LIMIT 1)
+             FROM dataset_graphs g
+             WHERE g.graph_iri = 'urn:system:reports:dataset:' || g.dataset_id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Whether some dataset holds `graph_iri` as private.
+    pub fn is_private_dataset_graph(&self, graph_iri: &str) -> anyhow::Result<bool> {
+        let conn = self.pool.get()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM dataset_graphs WHERE graph_iri=?1 AND private != 0",
+            params![graph_iri],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     /// Returns `true` when `graph_iri` is still registered to at least one dataset
@@ -5015,6 +5635,40 @@ impl AuthDb {
     }
 
     /// Fetch all endpoint ACL rules relevant to a given user (by user id, role, org memberships, group memberships).
+    /// Endpoint ACL rules that apply to an ANONYMOUS caller.
+    ///
+    /// Anonymous rules use the reserved principal `('role', 'public')`. The
+    /// table's CHECK constraint allows only user/organisation/group/role, and
+    /// `public` is not a `SystemRole`, so the pair is unambiguous and needs no
+    /// table rebuild to introduce.
+    ///
+    /// Without this, `check_endpoint_acl` had no rules to evaluate for an
+    /// unauthenticated request and simply allowed it — so a rule aimed at
+    /// anonymous access did nothing, on exactly the `optional_auth` routes where
+    /// anonymous access is what an operator wants to restrict.
+    pub fn get_endpoint_acl_rules_for_public(&self) -> anyhow::Result<Vec<EndpointAclRule>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, principal_type, principal_id, path_pattern, http_methods, effect, priority, created_at, created_by
+             FROM endpoint_acl WHERE principal_type='role' AND principal_id='public'
+             ORDER BY priority DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(EndpointAclRule {
+                id: row.get(0)?,
+                principal_type: row.get(1)?,
+                principal_id: row.get(2)?,
+                path_pattern: row.get(3)?,
+                http_methods: row.get(4)?,
+                effect: row.get(5)?,
+                priority: row.get(6)?,
+                created_at: row.get(7)?,
+                created_by: row.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn get_endpoint_acl_rules_for_user(
         &self,
         user_id: &str,
@@ -5377,6 +6031,16 @@ impl AuthDb {
         graph_iri: &str,
         label_graph_iri: &str,
     ) -> anyhow::Result<TripleSecurityLabel> {
+        // Canonicalise to N-Triples term syntax before storing. The filter that
+        // reads these rows builds its lookup keys by splitting an N-Triples
+        // line, so its subject is `<http://ex/s>` — while callers naturally
+        // send a bare `http://ex/s` (the repo's own API test does). Exact SQL
+        // equality between the two never matched, which made the whole
+        // cell-level security feature a silent no-op.
+        let subject_iri = &canonical_term(subject_iri, TermPosition::Iri);
+        let predicate_iri = &canonical_term(predicate_iri, TermPosition::Iri);
+        let object_value = &canonical_term(object_value, TermPosition::Object);
+
         let conn = self.pool.get()?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
@@ -5725,6 +6389,57 @@ impl AuthDb {
 mod tests {
     use super::*;
 
+    /// The last-used stamp is written at most once a minute per token: a
+    /// client that authenticates twice a second — a replication follower —
+    /// must not turn every request into a write, nor move the identity
+    /// database's version (which the follower watches) more than once a
+    /// minute with its own polling.
+    /// A file-backed database, so there is a `data_version` to watch.
+    #[test]
+    fn the_last_used_stamp_is_written_at_most_once_a_minute() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = AuthDb::open(&dir.path().join("auth.db")).unwrap();
+        db.create_user("u1", "alice", "alice@example.com", "hash", SystemRole::User)
+            .unwrap();
+        db.create_api_token("t1", "u1", "tok", "h1", "ots_h1", &[ApiScope::Read], None)
+            .unwrap();
+        let stamp = || {
+            db.get_api_token_by_hash("h1")
+                .unwrap()
+                .unwrap()
+                .last_used_at
+        };
+
+        db.update_api_token_last_used("t1").unwrap();
+        let first = stamp().expect("stamped on first use");
+        let version = db.data_version();
+        assert!(version.is_some());
+        db.update_api_token_last_used("t1").unwrap();
+        db.update_api_token_last_used("t1").unwrap();
+        assert_eq!(
+            stamp().as_deref(),
+            Some(first.as_str()),
+            "within the minute: kept"
+        );
+        assert_eq!(db.data_version(), version, "and the database did not move");
+
+        // Two minutes old: stamped again, and the version moves.
+        let old = (chrono::Utc::now() - chrono::Duration::minutes(2)).to_rfc3339();
+        db.pool()
+            .get()
+            .unwrap()
+            .execute(
+                "UPDATE api_tokens SET last_used_at = ?1 WHERE id = 't1'",
+                params![old],
+            )
+            .unwrap();
+        let moved = db.data_version();
+        db.update_api_token_last_used("t1").unwrap();
+        let again = stamp().unwrap();
+        assert!(again > old, "{again} is newer than {old}");
+        assert_ne!(db.data_version(), moved);
+    }
+
     #[test]
     fn test_create_and_get_user() {
         let db = AuthDb::in_memory().unwrap();
@@ -5808,6 +6523,7 @@ mod tests {
             conforms,
             results_count: results.len(),
             results,
+            metrics: None,
         }
     }
 
@@ -6588,4 +7304,25 @@ mod refresh_rotation_tests {
         // An unknown hash is simply absent, not an error.
         assert!(db.take_client_refresh_token("nope").unwrap().is_none());
     }
+}
+
+/// Read one override on a connection the caller already holds.
+fn read_prefix_override(conn: &Connection, label: &str) -> anyhow::Result<Option<PrefixOverride>> {
+    let row = conn
+        .query_row(
+            "SELECT label, namespace, created_by, created_at, updated_at
+             FROM prefix_overrides WHERE label = ?1",
+            [label],
+            |r| {
+                Ok(PrefixOverride {
+                    label: r.get(0)?,
+                    namespace: r.get(1)?,
+                    created_by: r.get(2)?,
+                    created_at: r.get(3)?,
+                    updated_at: r.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(row)
 }

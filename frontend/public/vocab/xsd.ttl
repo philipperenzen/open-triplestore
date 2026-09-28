@@ -1,7 +1,24 @@
 # XML Schema Datatypes (http://www.w3.org/2001/XMLSchema#) used as RDF literal
 # datatypes. There is no normative Turtle vocabulary for XSD, so this compact
-# file declares the datatypes commonly seen in RDF data as rdfs:Datatype with a
-# short description, so they render in the term-definition card.
+# file, written by Open Triplestore, declares the datatypes commonly seen in RDF
+# data as rdfs:Datatype with a short description, so they render in the
+# term-definition card.
+# Several descriptions are copied from or derived from XML Schema Part 2:
+# Datatypes Second Edition, W3C Recommendation 28 October 2004,
+# https://www.w3.org/TR/2004/REC-xmlschema-2-20041028/ (Copyright © 2004 W3C®
+# (MIT, ERCIM, Keio), All Rights Reserved) and W3C XML Schema Definition
+# Language (XSD) 1.1 Part 2: Datatypes, W3C Recommendation 5 April 2012,
+# https://www.w3.org/TR/2012/REC-xmlschema11-2-20120405/ (Copyright © 2012 W3C®
+# (MIT, ERCIM, Keio), All Rights Reserved).
+# Copyright © 2023 W3C®. This software or document includes material copied from
+# or derived from XML Schema Part 2: Datatypes Second Edition,
+# https://www.w3.org/TR/2004/REC-xmlschema-2-20041028/, and W3C XML Schema
+# Definition Language (XSD) 1.1 Part 2: Datatypes,
+# https://www.w3.org/TR/2012/REC-xmlschema11-2-20120405/.
+# Those W3C-derived descriptions remain under the W3C Document License (2023),
+# https://www.w3.org/copyright/document-license-2023/; the rest of this file is
+# Open Triplestore's own work under the project's licence (see LICENSE).
+# Full attribution and licence texts: NOTICE.md in this directory.
 @prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 
@@ -46,7 +63,7 @@ xsd:anyURI a rdfs:Datatype ; rdfs:label "anyURI"@en ;
 xsd:base64Binary a rdfs:Datatype ; rdfs:label "base64Binary"@en ;
   rdfs:comment "Base64-encoded arbitrary binary data."@en .
 xsd:hexBinary a rdfs:Datatype ; rdfs:label "hexBinary"@en ;
-  rdfs:comment "Hex-encoded arbitrary binary data."@en .
+  rdfs:comment "Arbitrary hex-encoded binary data."@en .
 xsd:language a rdfs:Datatype ; rdfs:label "language"@en ;
   rdfs:comment "A language identifier as defined by BCP 47."@en .
 xsd:normalizedString a rdfs:Datatype ; rdfs:subClassOf xsd:string ; rdfs:label "normalizedString"@en ;

@@ -94,7 +94,10 @@ expect_exit 0 "compare: fastest-of-two ignores a polluted pass on each side" -- 
                           --after "$cmp_root/head-1" --after "$cmp_root/head-2" \
                           --baseline "$cmp_base"
 
-# Same base, change genuinely 30% slower in BOTH passes -> regression.
+# A quiet base, change genuinely 30% slower in BOTH passes -> regression. (With the
+# base's polluted 1400 pass left in, 1300 would sit inside the base's own spread —
+# that is test 12's subject, not this one's.)
+write_median base-2 1000.0
 write_median head-1 1300.0; write_median head-2 1300.0
 expect_exit 1 "compare: real regression on both passes fails" -- \
   "$PY" "$script" compare --before "$cmp_root/base-1" --before "$cmp_root/base-2" \
@@ -259,6 +262,56 @@ if re.search(sys.argv[1], 'query/alternative_path/10000'):
 else:
     print('FAIL: filter does not match query/alternative_path/10000'); sys.exit(1)
 " "$filt" || fails=$((fails + 1))
+
+# 12. The merge base's own spread bounds what counts as a regression. Fastest-wins
+#     assumes every side gets a quiet pass; on this runner the 5–10 ms benchmarks
+#     land in a fast or a slow mode instead, and one side drawing a fast sample the
+#     other never got read as +30 % on a change with no engine code. The numbers
+#     are that run's `query_minus/10000`: base 6.85 / 5.30 / 4.76 ms, change
+#     6.66 / 7.06 / 6.22 ms — faster in the first pair, then the base got lucky.
+write_median base-1 6850000.0; write_median base-2 5300000.0; write_median base-3 4760000.0
+write_median head-1 6660000.0; write_median head-2 7060000.0; write_median head-3 6220000.0
+expect_exit 0 "spread: +30% whose fastest change pass is inside the base's own spread passes" -- \
+  "$PY" "$script" compare --before "$cmp_root/base-1" --before "$cmp_root/base-2" --before "$cmp_root/base-3" \
+                          --after "$cmp_root/head-1" --after "$cmp_root/head-2" --after "$cmp_root/head-3" \
+                          --baseline "$cmp_base"
+case "$LAST_OUT" in
+  *"inside the merge base's own spread"*) echo "PASS: the row says why it is not a regression";;
+  *) echo "FAIL: no spread explanation in the row status"; fails=$((fails + 1));;
+esac
+case "$LAST_OUT" in
+  *"**1** over tolerance but inside"*) echo "PASS: the summary counts it separately";;
+  *) echo "FAIL: the summary does not count the within-spread row"; fails=$((fails + 1));;
+esac
+
+# Overlap cannot be undone by more passes (the change's fastest only ever drops, the
+# base's slowest only ever rises), so the screen must not hand it to confirmation.
+expect_exit 0 "spread: screening does not flag a within-spread benchmark" -- \
+  "$PY" "$script" compare --before "$cmp_root/base-1" --before "$cmp_root/base-2" \
+                          --after "$cmp_root/head-1" --after "$cmp_root/head-2" \
+                          --baseline "$cmp_base" --soft --flagged-out "$flag_out"
+if [ -s "$flag_out" ]; then
+  echo "FAIL: within-spread benchmark was flagged for confirmation: '$(cat "$flag_out")'"; fails=$((fails + 1))
+else
+  echo "PASS: within-spread benchmark not flagged"
+fi
+
+# The same base, but a change slower in EVERY pass than the base's slowest: that is
+# separation, and the ratio (7.06 / 4.76 = 1.48) is over the bar -> still a regression.
+write_median head-1 7200000.0; write_median head-2 7500000.0; write_median head-3 7060000.0
+expect_exit 1 "spread: a change slower than the base's slowest pass still fails" -- \
+  "$PY" "$script" compare --before "$cmp_root/base-1" --before "$cmp_root/base-2" --before "$cmp_root/base-3" \
+                          --after "$cmp_root/head-1" --after "$cmp_root/head-2" --after "$cmp_root/head-3" \
+                          --baseline "$cmp_base"
+
+# A stable base gives the spread rule nothing to hide behind: +12% on 1000/1000/1000
+# is separated by definition, and the 1.10 default catches it as before.
+write_median base-1 1000.0; write_median base-2 1000.0; write_median base-3 1000.0
+write_median head-1 1120.0; write_median head-2 1150.0; write_median head-3 1130.0
+expect_exit 1 "spread: a stable base keeps the plain tolerance bar" -- \
+  "$PY" "$script" compare --before "$cmp_root/base-1" --before "$cmp_root/base-2" --before "$cmp_root/base-3" \
+                          --after "$cmp_root/head-1" --after "$cmp_root/head-2" --after "$cmp_root/head-3" \
+                          --baseline "$cmp_base"
 
 echo "===================================="
 if [ "$fails" -eq 0 ]; then echo "ALL PERF SELF-TESTS PASSED"; else echo "$fails PERF SELF-TEST(S) FAILED"; exit 1; fi

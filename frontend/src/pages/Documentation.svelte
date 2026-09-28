@@ -272,6 +272,8 @@
     gap: 1.75rem;
     padding-bottom: 3rem;
   }
+  /* The rail is a panel like every other surface in the app, so the index reads
+     as a deliberate piece of furniture rather than a stray list of links. */
   .docs-side {
     width: 14rem;
     flex-shrink: 0;
@@ -279,6 +281,11 @@
     top: 1.25rem;
     max-height: calc(100vh - 2.5rem);
     overflow-y: auto;
+    background: var(--bg-float, #fff);
+    border: 1px solid var(--line-soft);
+    border-radius: 12px;
+    box-shadow: var(--shadow-xs);
+    padding: 0.85rem 0.45rem;
   }
   .docs-side-inner {
     display: flex;
@@ -312,6 +319,7 @@
     color: var(--ink-400);
     margin: 0 0 0.3rem;
     padding: 0 0.65rem;
+    overflow-wrap: break-word;
   }
   :global(.side-link) {
     display: flex;
@@ -326,10 +334,11 @@
     border-left: 2px solid transparent;
     line-height: 1.35;
   }
+  /* Doc titles wrap onto a second line rather than being cut — in a 14rem rail
+     an ellipsis hides exactly the words that tell two docs apart. */
   .side-link-t {
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    overflow-wrap: break-word;
   }
   :global(.side-link:hover) {
     background: var(--bg-soft);
@@ -343,6 +352,7 @@
   }
   .side-tag {
     margin-left: auto;
+    flex-shrink: 0;
     font-size: 0.62rem;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -390,6 +400,8 @@
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--brand-600);
+    min-width: 0;
+    overflow-wrap: break-word;
   }
   :global(.doc-edit) {
     margin-left: auto;
@@ -433,6 +445,12 @@
   .doc-empty p {
     font-size: 0.88rem;
     margin: 0;
+    max-width: 30rem;
+    overflow-wrap: break-word;
+  }
+  /* The missing slug is an unbroken identifier and can be longer than a phone. */
+  .doc-empty code {
+    overflow-wrap: anywhere;
   }
   :global(.doc-empty-link) {
     margin-top: 0.75rem;
@@ -481,6 +499,21 @@
   /* ── Rendered markdown content ──────────────────────────────────────────── */
   .docs-article {
     max-width: 48rem;
+  }
+  /* Doc bodies are full of IRIs and long identifiers. Prose breaks on words,
+     code breaks anywhere, so neither can push the page sideways on a phone.
+     Code inside <pre> keeps its horizontal scroll: white-space: pre wins. */
+  .docs-article :global(h1),
+  .docs-article :global(h2),
+  .docs-article :global(h3),
+  .docs-article :global(h4),
+  .docs-article :global(p),
+  .docs-article :global(li),
+  .docs-article :global(a) {
+    overflow-wrap: break-word;
+  }
+  .docs-article :global(code) {
+    overflow-wrap: anywhere;
   }
   .docs-article :global(h1) {
     font-size: 1.6rem;
@@ -639,6 +672,11 @@
       display: none;
     }
   }
+  /* Once the rail moves above the article the index is the first thing on the
+     page, so each category becomes a card. Categories are wildly uneven —
+     Introduction holds one doc, API & Operations ten — so the cards flow down
+     balanced columns rather than sitting in grid rows: a grid would either
+     stretch the one-doc card into a hollow box or leave a gap under it. */
   @media (max-width: 1024px) {
     .docs-layout {
       flex-direction: column;
@@ -648,13 +686,82 @@
       position: static;
       width: 100%;
       max-height: none;
+      overflow-y: visible;
+      background: none;
+      border: 0;
+      box-shadow: none;
+      padding: 0;
+    }
+    /* Stacked, the column still inherits align-items: flex-start, so without an
+       explicit width the article shrink-wraps to its widest code block or table
+       and takes the whole page sideways with it. */
+    .docs-main {
+      width: 100%;
     }
     .docs-side-inner {
-      flex-flow: row wrap;
-      gap: 0.75rem 1.25rem;
+      display: block;
+      columns: 15rem auto;
+      column-gap: 0.75rem;
     }
-    .docs-article {
-      max-width: none;
+    .side-group {
+      break-inside: avoid;
+      margin: 0 0 0.75rem;
+      background: var(--bg-float, #fff);
+      border: 1px solid var(--line-soft);
+      border-radius: 12px;
+      box-shadow: var(--shadow-xs);
+      padding: 0.7rem 0.5rem 0.55rem;
+      gap: 0.15rem;
+    }
+    .side-group-h {
+      margin: 0 0 0.4rem;
+      padding: 0 0.5rem 0.4rem;
+      border-bottom: 1px solid var(--line-soft);
+    }
+    /* Touch-sized rows, which double as the spacing between entries in a card. */
+    :global(.side-link) {
+      min-height: 40px;
+      padding: 0.45rem 0.5rem;
+      font-size: 0.86rem;
+    }
+    /* Loading and error states are one item, not one category — full width. */
+    .side-skeleton,
+    .side-error {
+      column-span: all;
+    }
+  }
+  @media (max-width: 720px) {
+    .doc-head {
+      flex-wrap: wrap;
+      gap: 0.5rem 0.75rem;
+    }
+    :global(.doc-edit) {
+      min-height: 40px;
+      padding: 0.3rem 0.75rem;
+    }
+    :global(.doc-empty-link) {
+      display: inline-flex;
+      align-items: center;
+      min-height: 40px;
+    }
+    .doc-empty {
+      padding: 3rem 0.25rem;
+    }
+    .docs-article :global(h1) {
+      font-size: 1.35rem;
+    }
+    .docs-article :global(h2) {
+      font-size: 1.08rem;
+      margin-top: 1.6rem;
+    }
+    .docs-article :global(h3) {
+      font-size: 0.97rem;
+    }
+    .docs-article :global(pre) {
+      padding: 0.8rem 0.9rem;
+    }
+    .docs-article :global(pre code) {
+      font-size: 0.78rem;
     }
   }
 </style>

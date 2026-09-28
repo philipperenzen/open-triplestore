@@ -262,3 +262,125 @@ async fn viewer_cannot_drill_into_private_snapshot_graph() {
         "public snapshot drill-down must still return its triple, body: {body}"
     );
 }
+
+// ─── Version data-dump and diff endpoints (CB5, part 2) ──────────────────────
+//
+// The dataset-service and browse `?version=` paths above (CB5) filter private
+// snapshot graphs. The version *data-dump* (`GET …/versions/:ver/data`) and
+// *diff* (`GET …/versions/:ver/diff/:other`) handlers in
+// `src/dataset_versions/handlers.rs` did not: they served every snapshot graph of
+// the version to anyone who could read the dataset, so a viewer — anonymous, on a
+// public dataset — could dump or diff a graph the owner flagged private through a
+// pinned version. Both now map each snapshot back to its live source graph and
+// drop the ones flagged private for a non-writer.
+
+async fn get_auth(app: &Router, uri: &str, token: Option<&str>) -> (StatusCode, String) {
+    let mut b = Request::builder().method(Method::GET).uri(uri);
+    if let Some(t) = token {
+        b = b.header(axum::http::header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+    let resp = app
+        .clone()
+        .oneshot(b.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, body_text(resp.into_body()).await)
+}
+
+/// CB5 — version data dump: an anonymous viewer of a public dataset gets the
+/// public snapshot's triples but never the private snapshot's.
+#[tokio::test]
+async fn viewer_cannot_dump_private_snapshot_via_version_data() {
+    let (app, _record) = setup();
+    let (status, body) = get_auth(
+        &app,
+        &format!("/api/datasets/ds1/versions/{VERSION}/data?graph=all"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "version data dump should succeed: {body}"
+    );
+    assert!(
+        body.contains(PUBLIC_MARKER),
+        "public snapshot triple must be in the dump, body: {body}"
+    );
+    assert!(
+        !body.contains(PRIVATE_MARKER),
+        "private snapshot triple must NOT leak through the data dump, body: {body}"
+    );
+}
+
+/// The writer who owns the dataset still dumps every snapshot graph, private
+/// included — the filter narrows only non-writers.
+#[tokio::test]
+async fn owner_still_dumps_private_snapshot_via_version_data() {
+    let (app, _record) = setup();
+    let token = mint_token("owner", "owner", "user");
+    let (status, body) = get_auth(
+        &app,
+        &format!("/api/datasets/ds1/versions/{VERSION}/data?graph=all"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "owner dump should succeed: {body}");
+    assert!(
+        body.contains(PUBLIC_MARKER) && body.contains(PRIVATE_MARKER),
+        "the owner must still see both snapshot graphs, body: {body}"
+    );
+}
+
+/// CB5 — version diff: neither the rdf-patch triples nor the JSON graph list may
+/// expose a private graph to an anonymous viewer.
+#[tokio::test]
+async fn viewer_diff_hides_private_snapshot_graphs() {
+    let (app, _record) = setup();
+
+    // rdf-patch carries the actual triples: the private marker must be absent.
+    let (status, patch) = get_auth(
+        &app,
+        &format!("/api/datasets/ds1/versions/{VERSION}/diff/live?format=rdf-patch"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "diff (patch) should succeed: {patch}"
+    );
+    assert!(
+        !patch.contains(PRIVATE_MARKER),
+        "private triples must NOT appear in the rdf-patch diff, body: {patch}"
+    );
+
+    // The JSON diff lists a per-graph breakdown keyed by the live source graph;
+    // the private source IRI must not appear there either.
+    let (status, json) = get_auth(
+        &app,
+        &format!("/api/datasets/ds1/versions/{VERSION}/diff/live"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "diff (json) should succeed: {json}");
+    assert!(
+        !json.contains(PRIV_GRAPH),
+        "the private source graph must NOT appear in the JSON diff, body: {json}"
+    );
+
+    // The owner sees the private graph in the breakdown (control).
+    let token = mint_token("owner", "owner", "user");
+    let (status, json) = get_auth(
+        &app,
+        &format!("/api/datasets/ds1/versions/{VERSION}/diff/live"),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "owner diff should succeed: {json}");
+    assert!(
+        json.contains(PRIV_GRAPH),
+        "the owner must still see the private source graph in the diff, body: {json}"
+    );
+}

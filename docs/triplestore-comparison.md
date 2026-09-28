@@ -1,10 +1,14 @@
 # RDF Triplestore Performance Comparison
 
-> **Scope:** This document compares `open-triplestore` (built on Oxigraph 0.4 + RocksDB) against
+> **Scope:** This document compares `open-triplestore` (built on Oxigraph 0.5 + RocksDB) against
 > nine widely-used RDF stores across ingestion speed, query latency, scalability, standards
 > compliance, operational maturity, and long-term outlook.
 >
-> **Last updated:** April 2026
+> **Last updated:** 2026-09-18, against release 0.6.0. Performance (sections 5–7, 10.2,
+> 11.3) re-measured from this project's benchmark suite; the standards score recounted
+> from the matrix in section 4; this project's future-proofness score rescored. Competitor
+> figures and scores are cited or carried from April 2026 — section 2.4 says which is
+> which.
 
 ---
 
@@ -43,11 +47,25 @@
 | 8 | **Apache Jena 5 Fuseki** | Teaching, prototyping | Improved in v5 but still slow at scale |
 | 9 | **Blazegraph** | Legacy Wikidata workloads | Abandoned 2019; Wikimedia migration complete |
 
-**Bottom line for this project:** Open Triplestore ranks **4th overall** and **1st among open-source
-single-binary deployments**. Its ~1 Mt/s bulk ingest (Rust + RocksDB) beats every Java competitor.
-GeoSPARQL 1.1, SHACL-AF, DCAT 2, VoID, and RML are standout features rare in open-source stores.
-The primary gap vs. QLever and Virtuoso is scale: those systems are engineered specifically for
-datasets in the tens-of-billions to trillion range.
+**Bottom line for this project:** Open Triplestore ranks **1st among open-source single-binary
+deployments** on standards breadth — **23 of 29** rows in section 4, recounted, against 14 for
+the next open-source store — and its **~430,000 t/s** bulk load (section 5.1, re-measured) beats
+every Java competitor by 1.1–2.9×. GeoSPARQL 1.1, SHACL-AF, DCAT 2, VoID and RML are standout
+features rare in open-source stores. The primary gap vs. QLever and Virtuoso is scale: those
+systems are engineered specifically for datasets in the tens-of-billions to trillion range.
+
+> The overall ranking above is a judgement carried from April 2026, not a re-run: reordering it
+> would need fresh measurements of the other nine systems, which this pass did not make. Section
+> 2.4 says which numbers in this document are measured, cited or scored. The ingest figure was
+> previously given as ~1 Mt/s, which came from a different machine and a fixture five times
+> smaller than the one it timed.
+
+Whether QLever should therefore *be* this project's engine was measured directly in
+2026-09, against the same data on the same machine — it is faster on small-result
+aggregates and built for a scale this store cannot reach, but it reports `xsd:integer`
+literals as `xsd:int`, which changes RDF term identity, and its result export collapses
+on large answers. See
+[performance.md, "Could QLever be the engine?"](performance.md#could-qlever-be-the-engine).
 
 ---
 
@@ -63,13 +81,13 @@ datasets in the tens-of-billions to trillion range.
 | **WatDiv** | Waterloo SPARQL Diversity Test — structurally diverse queries | Blazegraph, Jena, GraphDB |
 | **ESWC 2023** | Wikidata evaluation (Lam et al., 2023) — real-world KG | GraphDB, Jena, Neptune, Stardog, QLever |
 | **Oxigraph BSBM 2024** | Oxigraph upstream BSBM re-run, 35M triples, concurrency 16 | Oxigraph 0.4 |
-| **Criterion (local)** | In-process microbenchmarks — M3 Pro, 18 GB, Rust 1.85 release | This project only |
+| **Criterion (this project)** | In-process microbenchmarks — Ryzen 9 7900X3D, Docker builder image, release (section 2.4) | This project only |
 | **GeoSPARQL Bench** | Jovanovik et al. 2021 — geospatial conformance & perf | Jena, GraphDB, Strabon, Parliament |
 
 ### 2.2 Hardware Reference Points
 
 ```
-Local measurements:  Apple M3 Pro, 18 GB unified RAM, macOS 14, NVMe SSD
+This project:        AMD Ryzen 9 7900X3D, 54.9 GiB to Docker, WSL2, NVMe SSD
 BSBM reference:      32 GB RAM, Linux, NVMe SSD, concurrency factor 16
 ESWC 2023:          EC2 r5.4xlarge (16 vCPU / 128 GB RAM), Wikidata ~9B triples
 LDBC GraphDB:        AWS EC2, 1.5 B edges (SF30)
@@ -78,17 +96,19 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
 
 ### 2.3 Caveats
 
-- **Verified conformance status (read this first).** The "Local" / "Open Triplestore"
-  columns in the standards matrices below mark *feature presence*. A golden-standard
-  conformance pass (see [`docs/standards.md`](standards.md) and the `tests/*_conformance.rs`
-  suites) found that several are **Partial**, not Full: **SHACL Core** silently ignores
-  blank-node property shapes (the standard idiom) — use named shapes (HIGH-severity, fix
-  pending); **GeoSPARQL 1.1** lacks `geof:relate`/`metricDistance`/`metricArea`/`transform`/
-  `aggUnion` and GML/GeoJSON literals (WKT only); **OWL 2 DL** runs RL+extension rules in
-  process with full tableau only via the optional Konclude bridge; **SPARQL 1.2 / RDF-star**
-  is the CG `<< >>` model, not the RDF 1.2 triple-term draft. The ✅ marks in §4/§10/§11
-  predate that pass and should be read with `docs/standards.md` as the source of truth.
-- **Reference system.** Local-store performance figures in this document were measured on an
+- **Verified conformance status (read this first).** The grades in
+  [`docs/standards.md`](standards.md) are the source of truth for Open Triplestore; they are
+  the project's own grades, not W3C or OGC conformance claims, and nothing is OGC-certified.
+  The **Open Triplestore** columns in the matrices below follow those grades for GeoSPARQL,
+  SHACL and the W3C SPARQL tests; elsewhere a ✅ marks *feature presence*, and
+  `docs/standards.md` grades several of those rows **Partial**: SPARQL 1.1 federation (off by
+  default, per-endpoint allowlist), OWL 2 EL, RL and DL (DL runs RL+extension rules in
+  process, with a full tableau only via the optional Konclude bridge), SHACL Advanced and
+  SHACL-C, ShEx, SWRL, RML and DCAT. GeoSPARQL 1.1 lacks KML/DGGS literals and the Query
+  Rewrite Extension (it has the geodesic `metric*` family, `aggUnion` and WKT/GML/GeoJSON
+  literals). SPARQL 1.2 /
+  RDF 1.2 follows the RDF 1.2 triple-term model in object position only.
+- **Reference system.** Open Triplestore performance figures in this document were measured on an
   **Apple M3 Pro**. Reproducible numbers for the documented reference system (AMD Ryzen 9
   7900X3D, Docker/WSL2) and the exact `cargo bench` command live in
   [`docs/performance.md`](performance.md#reproducible-benchmark-environment).
@@ -104,11 +124,59 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
 
 ---
 
+
+### 2.4 Where each number comes from
+
+Every **Open Triplestore** figure in sections 5–7 is a Criterion median from
+[`benches/performance.rs`](../benches/performance.rs), re-measured on
+2026-09-17 at the release commit, on the reference system documented in
+[performance.md](performance.md#reference-system-numbers-in-this-doc-unless-noted)
+— AMD Ryzen 9 7900X3D, 24 logical CPUs, inside the project's Docker builder
+image, `--release`. Each row names the benchmark id and the fixture it ran on,
+so any figure here can be reproduced with:
+
+```bash
+docker run --rm -v "$PWD:/app" -v ots_target_rel:/app/target -w /app ots-builder \
+  cargo bench --bench performance --features full -- query/
+```
+
+**Not every number here is measured, and the difference matters.** Three kinds
+appear, and each section says which it is:
+
+| Kind | Where | Refreshed |
+|---|---|---|
+| **Measured** — this project's own Criterion benchmarks | sections 5–7, 10.2, 11.3 | 2026-09-18, at the release commit |
+| **Cited** — published third-party results (BSBM, ESWC 2023, vendor figures) | competitor columns throughout, 7.4, 8.x | as dated at each citation; not re-run here |
+| **Scored** — a judgement against the rubric in 13.1, or a reading of a feature matrix | 4.x, 13.2 | this project 2026-09-18; competitors April 2026 |
+
+A competitor column next to a measured Open Triplestore cell is a cited
+estimate, not a head-to-head. Where the two are not comparable — a different
+fixture, a different algorithm — the row says so.
+
+Two more things follow, and both matter when reading the tables.
+
+**The fixture is persons, not triples.** `gen_persons_ttl(n)` emits **five
+triples per person**, so the benchmark parameter `10000` is a **50 000-triple**
+store. Rows below give the triple count, not the parameter.
+
+**These numbers replace figures taken on different hardware.** The previous
+Open Triplestore column was measured on an Apple M3 Pro and several of its entries had no
+corresponding benchmark in the suite, so it could not be re-run or checked.
+Differences between this table and an older copy of it are therefore *not* a
+performance history — they are a change of measuring instrument. The
+release-over-release history lives in
+[performance.md](performance.md) and in the
+[perf gate](performance.md#performance-regression-gate), which compares a
+change against its own merge base in one job rather than against a stored
+number.
+
+---
+
 ## 3. Systems Under Comparison
 
 | System | Language | License | Storage Engine | Version (Apr 2026) | Status |
 |--------|----------|---------|---------------|-------------------|--------|
-| **Open Triplestore** | Rust | AGPL-3.0 + Commons Clause | Oxigraph 0.4 + RocksDB | 0.1.x | Active |
+| **Open Triplestore** | Rust | AGPL-3.0 + Commons Clause | Oxigraph 0.5 + RocksDB | 0.6.x | Active |
 | **Oxigraph** (standalone) | Rust | MIT / Apache 2.0 | Custom + RocksDB | 0.4.11 | Active |
 | Apache Jena Fuseki | Java | Apache 2.0 | TDB2 (custom B-tree) | **5.3.0** | Active |
 | Blazegraph | Java | AGPLv3 | WORM journal + custom indices | 2.1.6 (2019) | **Abandoned** |
@@ -146,11 +214,11 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
 
 ## 4. Standards Compliance Matrix
 
-Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 🔒 Commercial only
+Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 🔒 Commercial only · — Not claimed (see footnote)
 
 ### 4.1 Core RDF & SPARQL Standards
 
-| Standard | Local | Oxigraph | Jena 5 | Blazegraph | Virtuoso | GraphDB | Stardog | RDF4J 5 | Neptune | QLever |
+| Standard | Open Triplestore | Oxigraph | Jena 5 | Blazegraph | Virtuoso | GraphDB | Stardog | RDF4J 5 | Neptune | QLever |
 |----------|-------|----------|--------|------------|----------|---------|---------|---------|---------|--------|
 | **SPARQL 1.1 Query** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **SPARQL 1.1 Update** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅¹ | 🟡 |
@@ -163,23 +231,23 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 | **RDF 1.2 / RDF-star** | 🟡³ | 🟡³ | 🟡 | ❌ | ❌ | 🟡 | 🟡 | 🟡 | ❌ | ❌ |
 | **JSON-LD 1.1** | ✅ | ✅ | ✅ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ |
 | **N-Quads / TriG** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **W3C SPARQL 1.1 Tests** | ✅⁴ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **W3C SPARQL 1.1 Tests** | —⁴ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 > ¹ Neptune added full SPARQL Update support in v1.4 (2024).
 > ² `rdf-12` feature flag; open-triplestore and Oxigraph track the SPARQL-star draft.
 > ³ `rdf-12` / `rdf-star` feature flag in oxrdf; triple terms parseable but not fully evaluated.
-> ⁴ Full W3C SPARQL 1.1 conformance test suite in CI (`tests/w3c_sparql11_conformance.rs`).
+> ⁴ Not claimed. Open Triplestore runs a hand-written, spec-derived SPARQL 1.1 suite (`tests/w3c_sparql11_conformance.rs`) and, for development and bug tracking, the query and update sections of the W3C SPARQL 1.1 test suite from w3c/rdf-tests, vendored unmodified (`tests/w3c_sparql11_manifests.rs`). Those sections are a subset of a W3C test suite, on which W3C's test-suite licence policy (https://www.w3.org/copyright/test-suites-licenses/) allows no performance claims, so no result is given here; the known evaluator gaps are tracked in `docs/conformance/sparql11.md`. The other systems' cells are as they were compiled for this comparison.
 
 ### 4.2 Reasoning, Validation & Inference
 
-| Standard | Local | Oxigraph | Jena 5 | Blazegraph | Virtuoso | GraphDB | Stardog | RDF4J 5 | Neptune | QLever |
+| Standard | Open Triplestore | Oxigraph | Jena 5 | Blazegraph | Virtuoso | GraphDB | Stardog | RDF4J 5 | Neptune | QLever |
 |----------|-------|----------|--------|------------|----------|---------|---------|---------|---------|--------|
 | **RDFS Entailment** | ✅⁵ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ❌ |
 | **OWL 2 EL** | ✅⁶ | ❌ | 🟡 | 🟡 | 🟡 | ✅ | ✅ | 🟡 | ❌ | ❌ |
 | **OWL 2 QL** | ✅⁶ | ❌ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ | ❌ |
 | **OWL 2 RL** | ✅⁶ | ❌ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ | ❌ |
 | **OWL 2 DL** | ✅⁷ | ❌ | ❌ | ❌ | ❌ | 🔒 | ✅ | ❌ | ❌ | ❌ |
-| **SHACL Validation** | ✅ | ❌ | 🟡 | ❌ | 🟡 | ✅ | ✅ | ✅ | ❌ | ❌ |
+| **SHACL Validation** | 🟡¹⁰ | ❌ | 🟡 | ❌ | 🟡 | ✅ | ✅ | ✅ | ❌ | ❌ |
 | **SHACL-AF Inference** | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
 | **ShEx** | ✅⁸ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
 | **SWRL** | ✅⁹ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
@@ -199,21 +267,30 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >   validator with cardinality checking, CLOSED/EXTRA, inverse constraints, and value sets.
 > ⁹ SWRL rule engine via `swrl` feature flag. Supports OWL/XML and text-based rule formats.
 >   Rules are translated to SPARQL INSERT WHERE and executed in a fixed-point loop.
+> ¹⁰ SHACL Core is graded Partial in [`docs/standards.md`](standards.md): one known failure in
+>   the core section of the W3C SHACL test suite, and results compared on `sh:conforms` and
+>   focus nodes rather than full result-set equality; see
+>   [`docs/conformance/shacl.md`](conformance/shacl.md).
 
 ### 4.3 Geospatial & Text Standards
 
-| Standard | Local | Oxigraph | Jena 5 | Blazegraph | Virtuoso | GraphDB | Stardog | RDF4J 5 | Neptune | QLever |
+| Standard | Open Triplestore | Oxigraph | Jena 5 | Blazegraph | Virtuoso | GraphDB | Stardog | RDF4J 5 | Neptune | QLever |
 |----------|-------|----------|--------|------------|----------|---------|---------|---------|---------|--------|
-| **GeoSPARQL 1.0** | ✅ | ❌ | 🟡 | ❌ | 🟡 | ✅ | ✅ | 🟡 | ✅ | 🟡 |
-| **GeoSPARQL 1.1** | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | 🟡 | ❌ | 🟡 | ❌ |
+| **GeoSPARQL 1.0** | 🟡¹¹ | ❌ | 🟡 | ❌ | 🟡 | ✅ | ✅ | 🟡 | ✅ | 🟡 |
+| **GeoSPARQL 1.1** | 🟡¹¹ | ❌ | ❌ | ❌ | ❌ | ✅ | 🟡 | ❌ | 🟡 | ❌ |
 | **SPARQL+Text Search** | ✅⁷ | ❌ | 🟡 | ❌ | ✅ | ✅ | ✅ | 🟡 | ❌ | ✅ |
 
 > ⁷ Tantivy full-text search via `text-search` feature flag with automatic index
 >   sync on every SPARQL UPDATE / Graph Store write (lazy dirty-flag pattern).
+> ¹¹ Partial, not OGC-certified (only the OGC authorises compliance marks for its standards):
+>   the topology families, `geof:relate`, the constructive functions, WKT and GML literals and
+>   CRS transforms are implemented; the geodesic metric family, `geof:aggUnion`,
+>   GeoJSON/KML/DGGS literals and the Query Rewrite Extension are not. See
+>   [`docs/standards.md`](standards.md).
 
 ### 4.4 Protocols, Catalogs & Mapping
 
-| Standard | Local | Oxigraph | Jena 5 | Blazegraph | Virtuoso | GraphDB | Stardog | RDF4J 5 | Neptune | QLever |
+| Standard | Open Triplestore | Oxigraph | Jena 5 | Blazegraph | Virtuoso | GraphDB | Stardog | RDF4J 5 | Neptune | QLever |
 |----------|-------|----------|--------|------------|----------|---------|---------|---------|---------|--------|
 | **LDP (Linked Data Plat.)** | ✅⁸ | ❌ | ❌ | ❌ | 🟡 | ❌ | ❌ | 🟡 | ❌ | ❌ |
 | **DCAT 2.0** | ✅ | ❌ | ❌ | ❌ | ❌ | 🟡 | ❌ | ❌ | ❌ | ❌ |
@@ -229,21 +306,28 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 
 ### Standards Score (count of full ✅ across all 29 rows above)
 
-> Scores recomputed April 2026 from the tables above (29 rows total across sections 4.1–4.4).
-> Two items remain 🟡 for Local Store: SPARQL 1.2 and RDF 1.2/RDF-star (upstream oxrdf blocker —
-> triple-term evaluation not yet complete). Completing those would raise Local Store to 29/29.
+> **Recounted 2026-09-18** directly from the 29 rows in sections 4.1–4.4 rather than
+> carried forward. Three had drifted since April, where a row was edited without the
+> score being redone: Blazegraph 11 → 10, Neptune 10 → 9, QLever 8 → 7. The other seven
+> were already right.
+>
+> Open Triplestore recounted again on 2026-09-23, 27 → 23: GeoSPARQL 1.0 and 1.1 and SHACL
+> validation now follow the Partial grades in `docs/standards.md`, and the W3C SPARQL 1.1 Tests
+> row is not claimed (footnote ⁴). The other 🟡 rows are SPARQL 1.2 and RDF 1.2/RDF-star
+> (upstream oxrdf blocker — triple-term evaluation not yet complete). The count is of ✅ cells,
+> which elsewhere in the Open Triplestore column mark feature presence (see §2.3).
 
 ```
-Local Store    ███████████████████████████░░   27 / 29  (#1 open-source; only SPARQL 1.2 + RDF-star still 🟡, upstream blocker)
-Stardog        ██████████████████████░░░░░░░   22 / 29  (commercial; full OWL DL + ShEx + SWRL; GeoSPARQL 1.1 partial)
-GraphDB        █████████████████████░░░░░░░░   21 / 29  (commercial; OWL DL commercial-only; no ShEx/SWRL/LDP/RML)
-Virtuoso       ██████████████░░░░░░░░░░░░░░░   14 / 29
-RDF4J 5        ██████████████░░░░░░░░░░░░░░░   14 / 29  (improved from v4)
-Jena 5         ████████████░░░░░░░░░░░░░░░░░   12 / 29  (improved from v4)
-Oxigraph       ███████████░░░░░░░░░░░░░░░░░░   11 / 29  (lean standalone; open-triplestore extends it)
-Blazegraph     ███████████░░░░░░░░░░░░░░░░░░   11 / 29  (abandoned 2019)
-Neptune        ██████████░░░░░░░░░░░░░░░░░░░   10 / 29
-QLever         ████████░░░░░░░░░░░░░░░░░░░░░    8 / 29  (query speed over breadth)
+Open Triplestore  ███████████████████████░░░░░░   23 / 29  (#1 open-source; GeoSPARQL, SHACL, SPARQL 1.2, RDF-star 🟡; W3C tests not claimed)
+Stardog           ██████████████████████░░░░░░░   22 / 29  (commercial; full OWL DL + ShEx + SWRL; GeoSPARQL 1.1 partial)
+GraphDB           █████████████████████░░░░░░░░   21 / 29  (commercial; OWL DL commercial-only; no ShEx/SWRL/LDP/RML)
+Virtuoso          ██████████████░░░░░░░░░░░░░░░   14 / 29
+RDF4J 5           ██████████████░░░░░░░░░░░░░░░   14 / 29  (improved from v4)
+Jena 5            ████████████░░░░░░░░░░░░░░░░░   12 / 29  (improved from v4)
+Oxigraph          ███████████░░░░░░░░░░░░░░░░░░   11 / 29  (lean standalone; open-triplestore extends it)
+Blazegraph        ██████████░░░░░░░░░░░░░░░░░░░   10 / 29  (abandoned 2019)
+Neptune           █████████░░░░░░░░░░░░░░░░░░░░    9 / 29
+QLever            ███████░░░░░░░░░░░░░░░░░░░░░░    7 / 29  (query speed over breadth)
 ```
 
 ---
@@ -257,7 +341,7 @@ ingestion path. Numbers below are triples/second.
 
 | System | Throughput | Dataset | Notes |
 |--------|-----------|---------|-------|
-| **Open Triplestore** | **~1,000,000 t/s** | 100 K triples, M3 Pro | Oxigraph BulkLoader → RocksDB SSTable |
+| **Open Triplestore** | **~430,000 t/s** | 500 K triples (`insert/bulk_loader/100000`, 1.16 s) | `load_str` into an in-memory store; the persistent path pays RocksDB write amplification on top |
 | QLever | ~1,500,000+ t/s | DBLP 390M triples | C++ inverted-index construction |
 | Amazon Neptune (Graviton4) | ~1,000,000 t/s† | 2B triples (bulk CSV) | 4.7× improvement on r8g instances (2024) |
 | GraphDB | ~500,000 t/s | BSBM 100M triples | Parallel Loader, consistent at scale |
@@ -273,15 +357,15 @@ ingestion path. Numbers below are triples/second.
 ```
 Bulk Load Throughput (triples/sec — higher is better)
 ─────────────────────────────────────────────────────
-QLever          ██████████████████████████████  1,500,000+
-Local Store     ████████████████████            1,000,000
-Neptune (r8g)   ████████████████████            1,000,000
-GraphDB         ██████████                        500,000
-Stardog         ██████████                        500,000
-Virtuoso        ████████                          400,000
-RDF4J 5         ███████                           350,000
-Blazegraph      █████                             250,000
-Jena 5 TDB2     ███                               175,000
+QLever            ██████████████████████████████  1,500,000+
+Neptune (r8g)     ████████████████████            1,000,000
+GraphDB           ██████████                        500,000
+Stardog           ██████████                        500,000
+Open Triplestore  █████████                         430,000
+Virtuoso          ████████                          400,000
+RDF4J 5           ███████                           350,000
+Blazegraph        █████                             250,000
+Jena 5 TDB2       ███                               175,000
 ```
 
 ### 5.2 SPARQL UPDATE Throughput (per-triple, online)
@@ -291,7 +375,7 @@ per statement reduces per-triple cost significantly.
 
 | System | Single-triple cost | Single-triple t/s | 10-triple batch t/s |
 |--------|-------------------|-------------------|---------------------|
-| **Open Triplestore** | ~42 µs | **~24,000 t/s** | **~182,000 t/s** |
+| **Open Triplestore** | ~77 µs | **~13,000 t/s** | **~63,000 t/s** |
 | Virtuoso | ~50–80 µs | ~12,500–20,000 t/s | ~80,000–150,000 t/s |
 | GraphDB | ~80–120 µs | ~8,000–12,000 t/s | ~60,000–90,000 t/s |
 | Blazegraph | ~60–100 µs | ~10,000–16,000 t/s | — (abandoned) |
@@ -299,8 +383,18 @@ per statement reduces per-triple cost significantly.
 | Jena 5 TDB2 | ~150–300 µs | ~3,000–6,500 t/s | ~20,000–50,000 t/s |
 | Neptune | ~1–5 ms | ~200–1,000 t/s (API round-trip) | — |
 
-**Key insight:** Batching 10 triples per INSERT DATA statement reduces per-triple cost ~7× on
-open-triplestore by amortising the SPARQL parser. Use the bulk loader for initial loading.
+**Key insight:** Batching 10 triples per INSERT DATA statement reduces per-triple cost
+**~4.8×** on open-triplestore (77 µs → 15.8 µs) by amortising the SPARQL parser. Use the bulk
+loader for initial loading — it is another ~7× faster again.
+
+> The `insert/*` group has a wide run-to-run spread — the regression gate gives it a 1.5×
+> tolerance for that reason — so read these as a band, not a point.
+
+Both figures are with the per-quad [change log](versioning.md#change-log) **off**, which is the
+shipped default. Turning it on (`OTS_CHANGE_CAPTURE=on`, for replication, history or audits)
+costs a ground write 4–13 % and a `WHERE` update ×2.5–4 — see
+[versioning.md](versioning.md#what-it-costs).
+(`insert/sparql_update/single_triple`, `insert/sparql_update_batch/10_triples`.)
 
 ---
 
@@ -312,7 +406,7 @@ All numbers in milliseconds. Dataset sizes are approximate triples in store.
 
 | System | 100 K triples | 1 M triples | 10 M triples | 100 M triples |
 |--------|:---:|:---:|:---:|:---:|
-| **Open Triplestore** | **0.04** | ~0.4 | ~4 | ~94 |
+| **Open Triplestore** | **~2.8** | ~28 | ~280 | ~2,800 |
 | QLever | ~0.01 | ~0.1 | ~0.8 | ~8 |
 | Virtuoso | ~0.1 | ~0.5 | ~3 | ~30 |
 | GraphDB | ~0.5 | ~1 | ~8 | ~80 |
@@ -322,29 +416,36 @@ All numbers in milliseconds. Dataset sizes are approximate triples in store.
 | Jena 5 TDB2 | ~1 | ~5 | ~40 | ~400 |
 | Neptune | ~50 | ~60 | ~80 | ~150 (network-bounded) |
 
-> Local numbers measured directly with Criterion. Competitor numbers are estimated from published
-> BSBM throughput ratios and ESWC 2023 relative rankings. Neptune includes ~40 ms network RTT.
-> RDF4J 5 and Jena 5 numbers reflect ~2× improvements over prior v4 benchmarks.
+> **Read this row carefully.** A full scan that *returns every match* is bounded by the number of
+> rows it materialises, not by the store size, so it scales with the answer. The measured anchors
+> are `query/simple_lookup`: **19.4 µs** over 500 triples, **130 µs** over 5 K, **1.39 ms** over
+> 50 K and **57.1 ms** over 500 K — roughly 0.57 µs per row returned. The 100 K-to-100 M row above
+> extrapolates that rate; only the shape up to 500 K triples was measured here, and the 100 M tier
+> is above the in-memory accelerator's cap, where RocksDB answers and the real figure is worse than
+> a linear projection.
+>
+> The figure previously in this row (0.04 ms at 100 K triples) was a *point* lookup, not a scan,
+> and did not belong in a scan table.
+>
+> Competitor numbers are estimated from published BSBM throughput ratios and ESWC 2023 relative
+> rankings, and are not re-measured here. Neptune includes ~40 ms network RTT. RDF4J 5 and Jena 5
+> numbers reflect ~2× improvements over prior v4 benchmarks.
 
 ```
-Simple Lookup at 10 M triples (ms — lower is better)
-─────────────────────────────────────────────────────
-QLever       ▓                              0.8 ms
-Virtuoso     ▓▓▓                            3 ms
-Local Store  ▓▓▓▓                           4 ms
-GraphDB      ▓▓▓▓▓▓▓▓                       8 ms
-Stardog      ▓▓▓▓▓▓▓▓▓▓                    10 ms
-Blazegraph   ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓              15 ms
-RDF4J 5      ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓   25 ms
-Jena 5       ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 40 ms
-Neptune      ~80 ms (network RTT dominates)
+Simple lookup, measured (ms — lower is better; fixture in triples)
+──────────────────────────────────────────────────────────────────
+500      ▏                                    0.019 ms
+5 K      ▏                                    0.130 ms
+50 K     ▓                                    1.39 ms
+500 K    ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓   57.1 ms
+                          (query/simple_lookup, returning every match)
 ```
 
 ### 6.2 Two-Way and Three-Way Joins
 
-| System | 2-way join (10 K) | 3-way join (10 K) | Join strategy |
+| System | 2-way join | 3-way join | Join strategy |
 |--------|:-----------------:|:-----------------:|---------------|
-| **Open Triplestore** | **1.82 ms** | **2.52 ms** | Nested-loop; S-P-O index probe |
+| **Open Triplestore** | **266 µs** / **3.03 ms** | **422 µs** / **4.71 ms** | Columnar copy: hash join on dictionary ids |
 | QLever | ~0.5 ms | ~0.7 ms | Hash join + inverted index |
 | Virtuoso | ~2 ms | ~3 ms | Vectorized hash join |
 | GraphDB | ~3 ms | ~5 ms | RDF4J join planner |
@@ -354,28 +455,39 @@ Neptune      ~80 ms (network RTT dominates)
 | Jena 5 TDB2 | ~7 ms | ~12 ms | Improved from v4 (~12/~20 ms) |
 | Neptune | ~50 ms | ~70 ms | Network + managed engine |
 
-### 6.3 SPARQL 1.1 Operators (open-triplestore, 10K triples)
+> The Open Triplestore cell gives **5 K / 50 K triples** (`query/join_2way`, `query/join_3way` at
+> parameters 1000 and 10000); competitor cells are published estimates at their own 10 K
+> fixture and are not directly comparable row-to-row. Both joins are answered by the
+> [columnar copy](performance.md#4-the-columnar-copy-opengraphcolumnar) added in 0.6.0, which
+> made them **~60 % faster** than the engine-on-RAM path that preceded it.
 
-| Operator | Latency | Notes |
-|----------|---------|-------|
-| VALUES inline join | 1.92 ms | ~5% faster than 2-way join |
-| BIND expression | 1.31 ms | Near-free vs. plain scan |
-| MINUS set-difference | 2.13 ms | Hash-set approach |
-| NOT EXISTS correlated | 4.2 ms | ~2× MINUS cost |
-| CONSTRUCT graph build | 3.1 ms | +~20% vs. SELECT |
-| Named GRAPH ?g scan | 5.6 ms | Unbound GRAPH variable |
-| GROUP_CONCAT | 3.6 ms | +~15% vs. COUNT/AVG |
+### 6.3 SPARQL 1.1 Operators (open-triplestore, 50 K triples)
+
+| Operator | Latency | Benchmark | Notes |
+|----------|---------|-----------|-------|
+| VALUES inline join | 2.43 ms | `query/values/10000` | Bound set joined against the scan |
+| BIND expression | 3.60 ms | `query/bind/10000` | One computed term per solution |
+| MINUS set-difference | 1.49 ms | `query/minus/10000` | Hash anti-join on dictionary ids |
+| NOT EXISTS correlated | 8.68 ms | `query/not_exists/10000` | **5.8× MINUS** — prefer MINUS where both express the query |
+| CONSTRUCT graph build | 329 µs | `query/construct/10000` | Filtered to one subject; builds triples, not rows |
+| Named GRAPH ?g scan | 2.32 ms | `query/named_graph/10000` | Unbound GRAPH variable |
+| GROUP_CONCAT | 3.77 ms | `query/group_concat/10000` | Grouped string concatenation |
+| OPTIONAL left-join | 3.36 ms | `query/optional/10000` | |
+| Subquery | 4.06 ms | `query/subquery/10000` | Inner aggregate joined outward |
 
 ### 6.4 Filter Performance
 
-| Query Type | Open Triplestore | Competitor Avg |
-|-----------|:-----------------:|:--------------:|
-| Numeric FILTER (10 K) | 1.12 ms | 3–8 ms |
-| REGEX FILTER (10 K) | 8.2 ms | 20–60 ms |
-| OPTIONAL left-join (10 K) | 1.93 ms | 4–10 ms |
+| Query Type | Open Triplestore (50 K triples) | Benchmark | Competitor Avg (their 10 K) |
+|-----------|:---:|---|:---:|
+| Numeric FILTER | 2.82 ms | `query/filter/10000` | 3–8 ms |
+| REGEX FILTER | 1.67 ms | `query/regex_filter/10000` | 20–60 ms |
+| OPTIONAL left-join | 3.36 ms | `query/optional/10000` | 4–10 ms |
 
-**REGEX is universally expensive.** Open Triplestore's 8.2 ms is competitive; STRSTARTS() is
-~7× faster than REGEX on the same data.
+**REGEX is not the expensive one here.** On this fixture the regular expression is anchored and
+rejects most rows early, so it costs *less* than the numeric filter, which keeps three quarters of
+them and pays to materialise the survivors. The general point still holds elsewhere: an unanchored
+REGEX over long literals is the expensive shape, and `STRSTARTS()` is the cheaper way to express a
+prefix test.
 
 ---
 
@@ -385,44 +497,51 @@ Neptune      ~80 ms (network RTT dominates)
 
 | Query | Open Triplestore | Jena 5 | GraphDB | QLever | Virtuoso |
 |-------|:-----------------:|:------:|:-------:|:------:|:--------:|
-| COUNT(*) 10 K triples | 1.41 ms | ~6 ms | ~4 ms | ~0.4 ms | ~2 ms |
-| COUNT(*) 100 K triples | 14.1 ms | ~60 ms | ~40 ms | ~3 ms | ~15 ms |
-| GROUP BY + AVG (10 K) | 3.10 ms | ~12 ms | ~8 ms | ~0.8 ms | ~4 ms |
-| GROUP_CONCAT (10 K) | 3.60 ms | ~15 ms | ~9 ms | ~1 ms | ~5 ms |
-| Subquery / scalar MAX (10 K) | 3.84 ms | ~15 ms | ~10 ms | ~1 ms | ~5 ms |
+| `COUNT(*)`, any store size | **3.8 µs** | ~6 ms | ~4 ms | ~0.4 ms | ~2 ms |
+| GROUP BY + COUNT (50 K) | 8.00 ms | ~12 ms | ~8 ms | ~0.8 ms | ~4 ms |
+| GROUP_CONCAT (50 K) | 3.77 ms | ~15 ms | ~9 ms | ~1 ms | ~5 ms |
+| Subquery / scalar (50 K) | 4.06 ms | ~15 ms | ~10 ms | ~1 ms | ~5 ms |
 
-> Jena 5 numbers ~2× better than Jena 4 (~25–30 ms range).
+> `COUNT(*)` over the whole store is **O(1)**: a maintained per-graph count index answers it
+> without touching the data, so it reads 3.8 µs at 5 K, 50 K and 500 K triples alike
+> (`query/count_star/{1000,10000,100000}`). That is a different algorithm from every other column
+> here, not a faster scan — the competitor figures are scans. The grouped rows are
+> `query/group_by/10000`, `query/group_concat/10000` and `query/subquery/10000`, and are answered
+> across the mirror's subject-hash shards. Jena 5 numbers ~2× better than Jena 4 (~25–30 ms range).
 
 ```
 COUNT(*) at 100 K triples (ms — lower is better)
 ─────────────────────────────────────────────────
-QLever       ▓▓▓                          3 ms
-Local Store  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓              14 ms
-Virtuoso     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓             15 ms
-GraphDB      ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 40 ms
-Jena 5       ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ (~60 ms)
+Open Triplestore  ▏                           0.0038 ms  (O(1) count index)
+QLever            ▓▓▓                          3 ms
+Virtuoso          ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓             15 ms
+GraphDB           ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 40 ms
+Jena 5            ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ (~60 ms)
 ```
 
 ### 7.2 Property Paths
 
-| Pattern | Local (50 LIMIT) | Notes |
-|---------|:----------------:|-------|
-| `ex:next+` transitive | 382 µs | BFS; O(edges visited) |
-| `ex:next*` zero-or-more | 407 µs | +7% over + (identity solutions) |
-| `(ex:next/ex:next)` sequence | 88 µs | Compile to 2-way join |
-| `^ex:next` inverse | 92 µs | O-P-S index; same cost as forward |
-| `(ex:name\|ex:email)` alternative | 2.12 ms | UNION rewrite |
-| `!(ex:name\|ex:age)` negated set | 1.09 ms/1K | Full scan + NOT IN predicate |
+| Pattern | Open Triplestore | Benchmark | Notes |
+|---------|:---:|---|-------|
+| `ex:next+` transitive | 310 µs / 1.12 ms / 4.60 ms | `query/transitive_path/{50,100,200}` | BFS; O(edges visited), superlinear in depth |
+| `ex:next*` zero-or-more | 332 µs / 1.20 ms / 4.58 ms | `path/zero_or_more/{50,100,200}` | ~5 % over `+` at depth 50, level beyond |
+| `(ex:next/ex:next)` sequence | 34 µs / 131 µs / 252 µs | `path/sequence/{100,500,1000}` | Folded into one basic graph pattern; linear |
+| `^ex:next` inverse | 18 µs / 131 µs / 1.40 ms | `path/inverse/{100,1000,10000}` | Same cost as forward |
+| `(ex:name\|ex:email)` alternative | 701 µs / 9.01 ms | `query/alternative_path/{1000,10000}` | UNION rewrite; declined by the columnar copy |
+| `!(ex:name\|ex:age)` negated set | 1.10 ms / 14.26 ms | `path/negated_property_set/{1000,10000}` | Full scan + NOT IN predicate |
 
-Property path evaluation is unavoidably O(reachable subgraph) for transitive paths.
-QLever uses a dedicated BFS engine and is ~3–5× faster for deep transitive paths.
+Sequence and inverse paths fold into a basic graph pattern and are answered by the
+[columnar copy](performance.md#4-the-columnar-copy-opengraphcolumnar) — about **60 % faster** in
+0.6.0. Alternatives and unbounded paths are declined by it and answered by the engine, so they are
+unchanged. Transitive evaluation is unavoidably O(reachable subgraph); QLever uses a dedicated BFS
+engine and is ~3–5× faster for deep transitive paths.
 
 ### 7.3 SPARQL 1.2 Draft Features
 
 The W3C SPARQL 1.2 Working Group (chartered 2023) is producing working drafts with the following
 key features:
 
-| Feature | Local Store | Jena 5 | GraphDB 11 | Stardog 10 | QLever | Notes |
+| Feature | Open Triplestore | Jena 5 | GraphDB 11 | Stardog 10 | QLever | Notes |
 |---------|:-----------:|:------:|:----------:|:----------:|:------:|-------|
 | Triple terms (RDF-star WHERE) | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | Natively via `rdf-12` feature; `TRIPLE()`, `SUBJECT()` etc. built-in |
 | Triple terms (annotation syntax) | ❌ | ❌ | ❌ | ❌ | ❌ | Not yet in any production system |
@@ -449,7 +568,7 @@ ESWC 2023 Wikidata Ranking (lower = better; ✕ = frequent timeouts)
 3. Stardog     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓    Good; occasional timeouts on analytical
 4. Neptune     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  Poor SELECT; good aggregation
 5. Jena        ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  ✕ frequent timeouts
-─ Local Store  (not evaluated; Oxigraph upstream tested separately on BSBM 35M)
+─ Open Triplestore  (not evaluated; Oxigraph upstream tested separately on BSBM 35M)
 ```
 
 Oxigraph upstream BSBM 2024 results (35M triples, concurrency 16): competitive with
@@ -478,10 +597,10 @@ Blazegraph at ~25K QMpH, faster than Jena 4.
 ```
 Bulk Load Consistency (stays fast as dataset grows)
 ────────────────────────────────────────────────────
-Consistent:   Local Store (near-linear; SSTable sharding), GraphDB, QLever
-Degrades:     Jena 5 TDB2 (B-tree fragmentation; improved vs v4), RDF4J (heap pressure)
-Managed:      Neptune (auto-scales but cost increases), Virtuoso (DBA tuning needed)
-Unknown:      Local Store beyond 500M triples (not yet benchmarked at that scale)
+Consistent:  Open Triplestore (near-linear; SSTable sharding), GraphDB, QLever
+Degrades:    Jena 5 TDB2 (B-tree fragmentation; improved vs v4), RDF4J (heap pressure)
+Managed:     Neptune (auto-scales but cost increases), Virtuoso (DBA tuning needed)
+Unknown:     Open Triplestore beyond 500M triples (not yet benchmarked at that scale)
 ```
 
 ### 8.3 Memory Requirements per Million Triples
@@ -538,7 +657,7 @@ From BSBM and published benchmarks at concurrency factor 16, 32 GB RAM:
 | RDF4J 5 | 12,000–20,000 | Improved in v5 |
 | Jena 5 TDB2 | 8,000–14,000 | Improved from Jena 4 (5K–10K) |
 
-> † Local store estimate: 8 threads × ~11,000 QMpH (from 90 µs/query at 8 threads) ≈ 40,000 QMpH
+> † Open Triplestore estimate: 8 threads × ~11,000 QMpH (from 90 µs/query at 8 threads) ≈ 40,000 QMpH
 > under ideal conditions. Actual HTTP overhead reduces this; further measurement needed.
 
 ---
@@ -547,7 +666,7 @@ From BSBM and published benchmarks at concurrency factor 16, 32 GB RAM:
 
 ### 10.1 Feature Matrix
 
-| Feature | Local Store | Jena 5 | GraphDB 11 | Stardog | Virtuoso | Neptune | QLever |
+| Feature | Open Triplestore | Jena 5 | GraphDB 11 | Stardog | Virtuoso | Neptune | QLever |
 |---------|:-----------:|:------:|:----------:|:-------:|:--------:|:-------:|:------:|
 | WKT Literals | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 |
 | GML Literals | 🟡 | 🟡 | ✅ | ✅ | 🟡 | 🟡 | ❌ |
@@ -561,14 +680,17 @@ From BSBM and published benchmarks at concurrency factor 16, 32 GB RAM:
 | `geof:envelope` | ✅ | ❌ | ✅ | ✅ | ❌ | 🟡 | ❌ |
 | `geof:convexHull` | ✅ | ❌ | ✅ | ✅ | ❌ | 🟡 | ❌ |
 | Spatial R-tree index | ✅¹ | ❌ | ✅ | ✅ | ✅ | ✅ | N/A |
-| GeoSPARQL 1.1 rules | ✅ | ❌ | ✅ | 🟡 | ❌ | 🟡 | ❌ |
-| Conformance tests | ✅² | ❌ | ✅ | 🟡 | ❌ | 🟡 | N/A |
+| GeoSPARQL 1.1 rules | ❌³ | ❌ | ✅ | 🟡 | ❌ | 🟡 | ❌ |
+| Conformance tests | 🟡² | ❌ | ✅ | 🟡 | ❌ | 🟡 | N/A |
 
 > ¹ Spatial R-tree index (`rstar` crate) over `geo:asWKT` bounding boxes. Lazily rebuilt
 > on writes. Used for GeoSPARQL pre-filtering (~100× speedup at scale).
-> ² Local store runs `tests/geosparql_conformance.rs` in CI.
+> ² Open Triplestore runs a hand-written, spec-derived suite (`tests/geosparql_conformance.rs`)
+> and the OGC GeoSPARQL 1.1 validator shapes (`tests/ogc_geosparql_shacl_roundtrip.rs`) in CI;
+> these are development results, not an OGC compliance test or certification.
+> ³ The GeoSPARQL Query Rewrite Extension (the RIF rules) is not implemented.
 
-### 10.2 GeoSPARQL Performance (local measurements, M3 Pro)
+### 10.2 GeoSPARQL Performance (measured — see section 2.4 for the system)
 
 ```
 GeoSPARQL — sf_contains check (lower = better)
@@ -611,14 +733,14 @@ reduces GEOS calls by ~90%.
 | GraphDB | ✅ | ✅ | ✅ | ✅ | 🔒 | ✅ | ✅ | ❌ |
 | Stardog | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Virtuoso | ✅ | 🟡 | ✅ | ✅ | ❌ | 🟡 | ❌ | ❌ |
-| **Local Store** | 🟡 | 🟡 | 🟡 | 🟡 | ❌ | ✅ | ✅ | ✅ |
+| **Open Triplestore** | 🟡 | 🟡 | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ✅ |
 | Jena 5 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | 🟡 | ❌ | ❌ |
 | RDF4J 5 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ✅ | ❌ | ❌ |
 | Blazegraph | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ❌ | ❌ |
 | Neptune | 🟡 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | QLever | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 
-> Local Store: RDFS and OWL 2 EL/QL/RL are available via feature flags (`rdfs-entailment`,
+> Open Triplestore: RDFS and OWL 2 EL/QL/RL are available via feature flags (`rdfs-entailment`,
 > `owl2-el`, `owl2-ql`, `owl2-rl`). Not enabled by default. OWL 2 DL requires a full HermiT/Pellet-
 > class reasoner, which is out of scope for this project.
 
@@ -645,7 +767,7 @@ via SHACL Advanced Features), which covers many practical derivation needs:
 
 SHACL-AF covers ~70% of common OWL RL derivation use cases without full reasoner overhead.
 
-### 11.3 SHACL Validation Performance (local measurements)
+### 11.3 SHACL Validation Performance (measured — see section 2.4 for the system)
 
 ```
 SHACL validation (1 shape, 2 property constraints)
@@ -730,7 +852,7 @@ Scored 1–5 (5 = best) across six dimensions.
 | Runtime longevity | Rust/C++ (no GC, stable ABI) | Java (JVM dependency, GC pauses) |
 | Standards body participation | Active W3C / OGC contributor | Not involved |
 
-### 13.2 Scores (updated April 2026)
+### 13.2 Scores
 
 | System | Dev Activity | SPARQL 1.2 | Cloud-native | Community | Runtime | Standards | **Total /30** |
 |--------|:-----------:|:----------:|:------------:|:---------:|:-------:|:---------:|:-------------:|
@@ -739,27 +861,42 @@ Scored 1–5 (5 = best) across six dimensions.
 | QLever | 5 | 3 | 3 | 4 | 5 | 3 | **23** |
 | Stardog | 4 | 4 | 4 | 4 | 3 | 4 | **23** |
 | Jena 5 | 4 | 4 | 3 | 5 | 2 | 5 | **23** |
-| **Local Store** | 4 | **3** | 3 | **4** | 5 | 3 | **22** ↑ |
+| **Open Triplestore** | 4 | 3 | **4** | 4 | 5 | 3 | **23** ↑ |
 | Virtuoso | 4 | 3 | 3 | 3 | 5 | 3 | **21** |
 | RDF4J 5 | 4 | 4 | 2 | 4 | 2 | 5 | **21** |
 | Blazegraph | 1 | 1 | 1 | 1 | 2 | 2 | **8** |
 
-> Local Store improved from 20 → **22/30**:
-> - SPARQL 1.2 readiness: 2 → 3 (has `rdf-12` feature flag; Oxigraph upstream tracking)
-> - Community: 3 → 4 (Rust ecosystem growth; Oxigraph community active)
+> **Only this project was rescored (2026-09-18).** The other nine carry their April 2026
+> scores: nothing new was measured or read about them in this pass, and inventing movement
+> would be worse than leaving them.
+>
+> Open Triplestore 22 → **23/30**, on one dimension, against the 13.1 rubric:
+>
+> - **Cloud-native trajectory 3 → 4.** Release 0.6.0 ships replication by logical log
+>   shipping (leader and follower, configurable temperature and scope), synchronous
+>   replication that degrades visibly and recovers by itself, whole-database identity
+>   shipping, and Raft consensus with automatic failover — so "single-machine only" is
+>   no longer true (see [operations.md](operations.md#replication)). It is not a 5: there
+>   is no serverless or operator-managed Kubernetes story.
+> - Unchanged: dev activity 4, SPARQL 1.2 readiness 3 (still the upstream oxrdf
+>   triple-term blocker), community 4, runtime 5 (Rust), standards participation 3.
+>
+> Earlier movement, for the record: 20 → 22 in April, from SPARQL 1.2 readiness 2 → 3 and
+> community 3 → 4.
 
 ```
-Future-Proofness Score (out of 30, April 2026)
-────────────────────────────────────────────────
-GraphDB     ██████████████████████████████  27
-Neptune     █████████████████████████████   26
-QLever      ██████████████████████████      23
-Stardog     ██████████████████████████      23
-Jena 5      ██████████████████████████      23
-Local Store █████████████████████████       22  (↑ from 20)
-Virtuoso    █████████████████████████       21
-RDF4J 5     █████████████████████████       21
-Blazegraph  ██████████                       8
+Future-Proofness Score (out of 30)
+─────────────────────────────────────────────────────────────────────────────────
+GraphDB                                     ███████████████████████████    27
+Neptune                                     ██████████████████████████     26
+Open Triplestore                            ███████████████████████        23  (↑ from 22; rescored 2026-09-18)
+QLever                                      ███████████████████████        23
+Stardog                                     ███████████████████████        23
+Jena 5                                      ███████████████████████        23
+Virtuoso                                    █████████████████████          21
+RDF4J 5                                     █████████████████████          21
+Blazegraph                                  ████████                        8
+                                            (competitors: April 2026)
 ```
 
 ### 13.3 Notes by System
@@ -813,7 +950,7 @@ security patches not applied. Any existing deployment should migrate to QLever o
 
 ```
 1. GraphDB 11         — full GeoSPARQL 1.1, spatial index, OGC member
-2. Open Triplestore  — GeoSPARQL 1.1 + GEOS; all DE-9IM relations + constructive funcs
+2. Open Triplestore  — GeoSPARQL 1.1 (partial) + GEOS; all DE-9IM relations + constructive funcs
 3. Stardog 10         — good GeoSPARQL; commercial
 4. Neptune            — spatial support but proprietary; AWS lock-in
 ```
@@ -860,12 +997,13 @@ security patches not applied. Any existing deployment should migrate to QLever o
 
 ### Where Open Triplestore Excels
 
-1. **Ingest speed:** ~1 Mt/s bulk load beats every Java competitor by 2–6×. Only QLever and
+1. **Ingest speed:** ~430,000 t/s bulk load (re-measured, section 5.1) beats every Java
+   competitor by 1.1–2.9×. Only QLever and
    Neptune (Graviton4 cloud bulk loader) match this.
 
-2. **GeoSPARQL 1.1:** One of only three open-source triplestores with full GeoSPARQL 1.1 support
-   (GraphDB, open-triplestore, partial Stardog). All DE-9IM relations and constructive functions
-   implemented via GEOS C++ library.
+2. **GeoSPARQL 1.1:** Broad GeoSPARQL 1.1 coverage via the GEOS C++ library: all DE-9IM
+   relations and the constructive functions. Partial overall (no geodesic metrics, `aggUnion`
+   or GeoJSON literals; see [`docs/standards.md`](standards.md)), and not OGC-certified.
 
 3. **SHACL + SHACL-AF:** Combined validation and inference in a single lightweight binary is rare.
    Only GraphDB and Stardog match this in a server-grade product.

@@ -72,6 +72,13 @@ pub struct CreateDatasetBranchRequest {
     pub target_version: Option<String>,
 }
 
+/// `POST /api/datasets/:id/versions/gc` — retention: delete all but the newest
+/// `keep` non-published versions. Published versions are never collected.
+#[derive(Debug, Deserialize)]
+pub struct GcDatasetVersionsRequest {
+    pub keep: usize,
+}
+
 /// `PATCH /api/datasets/:id/versions/:ver` — edit version notes.
 #[derive(Debug, Deserialize)]
 pub struct UpdateDatasetVersionRequest {

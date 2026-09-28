@@ -1,7 +1,7 @@
 //! Validate-and-commit orchestration (Unified Accounts plan, Phase 4).
 //!
 //! `POST /api/datasets/validate-and-commit` runs SHACL validation on an external
-//! validation platform (forwarding the caller's bearer token, on-behalf-of) and,
+//! validation service (forwarding the caller's bearer token, on-behalf-of) and,
 //! **only if the data conforms**, imports it and snapshots a new dataset version
 //! with a commit message — into a brand-new private dataset (default) or a
 //! caller-specified existing dataset (ACL-checked). Commit is gated on `conforms`
@@ -27,7 +27,7 @@ use super::models::{DatasetVersion, VersionStatus};
 use super::{registry, reports, snapshot};
 
 /// A graph supplied inline (`ttl`) or by OTS reference — forwarded verbatim to
-/// the Validation Platform, whose contract uses these exact (snake_case) fields.
+/// the external validation service, whose contract uses these exact (snake_case) fields.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct GraphSourceIn {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,7 +83,7 @@ struct ValidatorResponse {
     report: String,
 }
 
-/// Call the Validation Platform `/validate`, forwarding the caller's token.
+/// Call the external validation service's `/validate`, forwarding the caller's token.
 async fn run_validation(
     bearer: &str,
     body: &ValidateAndCommitRequest,
@@ -93,7 +93,7 @@ async fn run_validation(
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| {
             AppError::BadRequest(
-                "Validation Platform not configured (set VALIDATION_API_URL)".to_string(),
+                "External validation service not configured (set VALIDATION_API_URL)".to_string(),
             )
         })?;
     let req = ValidatorRequest {
@@ -119,6 +119,31 @@ async fn run_validation(
     resp.json::<ValidatorResponse>()
         .await
         .map_err(|e| AppError::Internal(format!("bad validator response: {e}")))
+}
+
+/// Refuse a commit target graph that belongs to another dataset, to the
+/// system or to the model registry. Both commit branches register the
+/// caller-supplied graph and then `graph_store_put` (replace) it, so an
+/// unchecked graph name is a whole-graph overwrite of whoever owns it. A
+/// model-registry graph is refused for everyone, admins included (this path
+/// runs none of the registry's licence checks); admins are otherwise
+/// unrestricted, matching the same gate on the mapping-execution path in
+/// `server::routes`.
+fn authorize_target_graph(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    dataset_id: &str,
+    graph_iri: &str,
+) -> Result<crate::auth::dataset_graph::GraphClaim, AppError> {
+    crate::auth::dataset_graph::gate_dataset_graph_target(
+        &state.store,
+        &state.auth_db,
+        &state.base_url,
+        dataset_id,
+        graph_iri,
+        user,
+    )
+    .map_err(AppError::Forbidden)
 }
 
 /// POST /api/datasets/validate-and-commit
@@ -196,10 +221,18 @@ pub async fn validate_and_commit(
                 .clone()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| format!("{}/dataset/{}/graph/imported", state.base_url, ds_id));
-            state
-                .auth_db
-                .add_dataset_graph(&ds_id, &graph_iri)
-                .map_err(|e| AppError::Internal(e.to_string()))?;
+            // A brand-new dataset may not claim a graph another dataset already
+            // owns: the graph is REPLACED by the graph_store_put below, so
+            // without this the "create a dataset, name someone else's graph"
+            // path is a whole-graph overwrite.
+            let claim = authorize_target_graph(&state, &user, &ds_id, &graph_iri)?;
+            crate::auth::dataset_graph::register_claimed_graph(
+                &state.auth_db,
+                &ds_id,
+                &graph_iri,
+                claim,
+            )
+            .map_err(|e| AppError::Internal(e.to_string()))?;
             (ds, graph_iri)
         }
         "dataset" => {
@@ -231,10 +264,29 @@ pub async fn validate_and_commit(
                 }),
             };
             if !registered.contains(&graph_iri) {
-                state
-                    .auth_db
-                    .add_dataset_graph(&ds_id, &graph_iri)
-                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                // The caller-supplied graph was accepted verbatim, registered to
+                // this dataset, and then REPLACED by the graph_store_put below —
+                // the register-then-overwrite bypass that every other write path
+                // gates. `can_write_dataset` above only proves the caller owns
+                // *this* dataset, not that the graph is theirs to claim.
+                let claim = authorize_target_graph(&state, &user, &ds_id, &graph_iri)?;
+                crate::auth::dataset_graph::register_claimed_graph(
+                    &state.auth_db,
+                    &ds_id,
+                    &graph_iri,
+                    claim,
+                )
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            } else {
+                // Already registered: still never replace a model-registry graph
+                // (a registration made before such graphs were refused).
+                crate::auth::dataset_graph::refuse_model_registry_graph(
+                    &state.store,
+                    &state.base_url,
+                    &ds_id,
+                    &graph_iri,
+                )
+                .map_err(AppError::Forbidden)?;
             }
             (ds, graph_iri)
         }
@@ -248,11 +300,15 @@ pub async fn validate_and_commit(
     // 3. Enforce the dataset's effective shapes (Studio write-gates + bindings
     // + legacy shacl_on_write) so a commit cannot bypass graph-attached shapes,
     // even if it passed the request-supplied shapes above.
+    // The commit below is a graph_store_put, i.e. a replace — so the payload is
+    // the graph's whole future state.
     crate::server::routes::validate_on_write(
         &state,
+        Some(&user),
         Some(&graph_iri),
         &data_ttl,
         RdfFormat::Turtle,
+        crate::shacl_studio::gate::WriteMode::Replace,
     )?;
 
     // 4. Import (replace) the validated data into the target graph.
@@ -389,6 +445,7 @@ mod tests {
             can_publish: false,
             write_access: true,
             can_mint_api_tokens: true,
+            scopes: Vec::new(),
         }
     }
 

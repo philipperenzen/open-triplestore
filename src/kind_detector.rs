@@ -399,6 +399,15 @@ pub fn classify_quad_role(q: &Quad) -> GraphKind {
             if matches!(obj_str, SKOS_CONCEPT_SCHEME | SKOS_CONCEPT) {
                 return GraphKind::Vocabulary;
             }
+            if matches!(obj_str, SKOS_COLLECTION | SKOS_ORDERED_COLLECTION) {
+                return GraphKind::DomainValues;
+            }
+            if PROV_TYPES.contains(&obj_str) {
+                return GraphKind::Provenance;
+            }
+            if CATALOG_TYPES.contains(&obj_str) {
+                return GraphKind::Catalog;
+            }
             if !SCHEMA_TYPE_OBJECTS.contains(&obj_str) {
                 return GraphKind::Instances;
             }
@@ -407,8 +416,14 @@ pub fn classify_quad_role(q: &Quad) -> GraphKind {
         return GraphKind::Shapes;
     } else if p == SPIN_RULE || p.starts_with(SP_NS) {
         return GraphKind::Entailment;
+    } else if LINK_PREDICATES.contains(&p) {
+        return GraphKind::Linkset;
+    } else if p == SKOS_MEMBER || p == SKOS_MEMBER_LIST {
+        return GraphKind::DomainValues;
     } else if p.starts_with(SKOS_NS) {
         return GraphKind::Vocabulary;
+    } else if p.starts_with(PROV_NS) {
+        return GraphKind::Provenance;
     }
 
     // Predicate-level axiom routing (single-quad approximation): property axioms
@@ -434,6 +449,44 @@ pub fn classify_quad_role(q: &Quad) -> GraphKind {
 
 const OWL_NAMED_INDIVIDUAL: &str = "http://www.w3.org/2002/07/owl#NamedIndividual";
 
+// ─── Layered-convention roles beyond the three DL boxes ───────────────────────
+const PROV_NS: &str = "http://www.w3.org/ns/prov#";
+const SKOS_COLLECTION: &str = "http://www.w3.org/2004/02/skos/core#Collection";
+const SKOS_ORDERED_COLLECTION: &str = "http://www.w3.org/2004/02/skos/core#OrderedCollection";
+const SKOS_MEMBER: &str = "http://www.w3.org/2004/02/skos/core#member";
+const SKOS_MEMBER_LIST: &str = "http://www.w3.org/2004/02/skos/core#memberList";
+/// Types whose subject trees are PROV-O records.
+const PROV_TYPES: &[&str] = &[
+    "http://www.w3.org/ns/prov#Activity",
+    "http://www.w3.org/ns/prov#Entity",
+    "http://www.w3.org/ns/prov#Agent",
+    "http://www.w3.org/ns/prov#Person",
+    "http://www.w3.org/ns/prov#Organization",
+    "http://www.w3.org/ns/prov#SoftwareAgent",
+    "http://www.w3.org/ns/prov#Bundle",
+    "http://www.w3.org/ns/prov#Collection",
+];
+/// Types whose subject trees are DCAT / VoID catalog metadata.
+const CATALOG_TYPES: &[&str] = &[
+    "http://www.w3.org/ns/dcat#Catalog",
+    "http://www.w3.org/ns/dcat#Dataset",
+    "http://www.w3.org/ns/dcat#Distribution",
+    "http://www.w3.org/ns/dcat#DataService",
+    "http://www.w3.org/ns/dcat#CatalogRecord",
+    "http://rdfs.org/ns/void#Dataset",
+    "http://rdfs.org/ns/void#Linkset",
+];
+/// Alignment predicates: a tree (or a whole graph) made of these is a linkset.
+const LINK_PREDICATES: &[&str] = &[
+    "http://www.w3.org/2002/07/owl#sameAs",
+    "http://www.w3.org/2004/02/skos/core#exactMatch",
+    "http://www.w3.org/2004/02/skos/core#closeMatch",
+    "http://www.w3.org/2004/02/skos/core#broadMatch",
+    "http://www.w3.org/2004/02/skos/core#narrowMatch",
+    "http://www.w3.org/2004/02/skos/core#relatedMatch",
+    "http://www.w3.org/2004/02/skos/core#mappingRelation",
+];
+
 /// Per-quad signal for the subject-tree classifier. Type-derived signals
 /// (`*Type`) outrank predicate-namespace fallbacks (`*Pred`): an instance with
 /// an `rdfs:label` stays an instance, a SKOS concept with OWL annotations stays
@@ -446,6 +499,16 @@ enum TreeSignal {
     InstanceType,
     ModelPred,
     VocabPred,
+    /// An alignment predicate (`owl:sameAs`, SKOS mapping relations).
+    LinkPred,
+    /// A PROV-O type / predicate.
+    ProvType,
+    ProvPred,
+    /// A DCAT / VoID type.
+    CatalogType,
+    /// A SKOS collection type / membership predicate (domain values).
+    ValuesType,
+    ValuesPred,
     Neutral,
 }
 
@@ -459,6 +522,9 @@ fn tree_signal(q: &Quad) -> TreeSignal {
                     SH_NODE_SHAPE | SH_PROPERTY_SHAPE => TreeSignal::Shapes,
                     SWRL_IMP => TreeSignal::Entailment,
                     SKOS_CONCEPT_SCHEME | SKOS_CONCEPT => TreeSignal::VocabType,
+                    SKOS_COLLECTION | SKOS_ORDERED_COLLECTION => TreeSignal::ValuesType,
+                    _ if PROV_TYPES.contains(&o) => TreeSignal::ProvType,
+                    _ if CATALOG_TYPES.contains(&o) => TreeSignal::CatalogType,
                     OWL_NAMED_INDIVIDUAL => TreeSignal::InstanceType,
                     // Remaining schema-namespace types (owl:Class, properties,
                     // owl:Restriction, …) are model constructs.
@@ -473,8 +539,14 @@ fn tree_signal(q: &Quad) -> TreeSignal {
         TreeSignal::Shapes
     } else if p == SPIN_RULE || p.starts_with(SP_NS) {
         TreeSignal::Entailment
+    } else if LINK_PREDICATES.contains(&p) {
+        TreeSignal::LinkPred
+    } else if p == SKOS_MEMBER || p == SKOS_MEMBER_LIST {
+        TreeSignal::ValuesPred
     } else if p.starts_with(SKOS_NS) {
         TreeSignal::VocabPred
+    } else if p.starts_with(PROV_NS) {
+        TreeSignal::ProvPred
     } else if p.starts_with("http://www.w3.org/2002/07/owl#")
         || p.starts_with("http://www.w3.org/2000/01/rdf-schema#")
     {
@@ -493,6 +565,12 @@ struct TreeTally {
     instance_type: usize,
     model_pred: usize,
     vocab_pred: usize,
+    link_pred: usize,
+    prov_type: usize,
+    prov_pred: usize,
+    catalog_type: usize,
+    values_type: usize,
+    values_pred: usize,
 }
 
 impl TreeTally {
@@ -505,6 +583,12 @@ impl TreeTally {
             TreeSignal::InstanceType => self.instance_type += 1,
             TreeSignal::ModelPred => self.model_pred += 1,
             TreeSignal::VocabPred => self.vocab_pred += 1,
+            TreeSignal::LinkPred => self.link_pred += 1,
+            TreeSignal::ProvType => self.prov_type += 1,
+            TreeSignal::ProvPred => self.prov_pred += 1,
+            TreeSignal::CatalogType => self.catalog_type += 1,
+            TreeSignal::ValuesType => self.values_type += 1,
+            TreeSignal::ValuesPred => self.values_pred += 1,
             TreeSignal::Neutral => {}
         }
     }
@@ -522,11 +606,36 @@ impl TreeTally {
         if self.model_type > 0 {
             return GraphKind::Model;
         }
+        // Typed layered-convention records: a DCAT/VoID description, a PROV-O
+        // record, a bare SKOS collection (values without a concept scheme).
+        if self.catalog_type > 0 {
+            return GraphKind::Catalog;
+        }
+        if self.prov_type > 0 {
+            return GraphKind::Provenance;
+        }
+        if self.values_type > 0 && self.vocab_type == 0 {
+            return GraphKind::DomainValues;
+        }
         if self.vocab_type > 0 {
             return GraphKind::Vocabulary;
         }
         if self.instance_type > 0 {
             return GraphKind::Instances;
+        }
+        // Untyped trees: alignment-only trees are a linkset (`<a> owl:sameAs
+        // <b>` carries no rdf:type), PROV-predicate-only trees are provenance,
+        // membership-only trees are domain values.
+        if self.link_pred > 0
+            && self.link_pred >= self.model_pred + self.vocab_pred + self.prov_pred
+        {
+            return GraphKind::Linkset;
+        }
+        if self.prov_pred > 0 && self.prov_pred >= self.model_pred + self.vocab_pred {
+            return GraphKind::Provenance;
+        }
+        if self.values_pred > 0 && self.vocab_pred == 0 {
+            return GraphKind::DomainValues;
         }
         if self.vocab_pred > self.model_pred {
             return GraphKind::Vocabulary;
@@ -1059,5 +1168,88 @@ mod tests {
         assert_eq!(role1("ex:Red a skos:Concept ."), GraphKind::Vocabulary);
         // Instance data → Instances.
         assert_eq!(role1("ex:alice a ex:Person ."), GraphKind::Instances);
+    }
+
+    // ── Layered-convention roles ───────────────────────────────────────────
+
+    fn all_roles(ttl: &str) -> Vec<GraphKind> {
+        classify_quad_roles(&parse(ttl))
+    }
+
+    #[test]
+    fn alignment_only_graph_is_a_linkset() {
+        let roles = all_roles(
+            "@prefix owl: <http://www.w3.org/2002/07/owl#> .
+             @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+             <http://a/1> owl:sameAs <http://b/1> .
+             <http://a/2> skos:exactMatch <http://b/2> .
+             <http://a/3> skos:closeMatch <http://b/3> .",
+        );
+        assert!(!roles.is_empty());
+        assert!(
+            roles.iter().all(|r| *r == GraphKind::Linkset),
+            "sameAs / SKOS-mapping-only triples are a linkset: {roles:?}"
+        );
+    }
+
+    #[test]
+    fn prov_records_are_provenance() {
+        let roles = all_roles(
+            "@prefix prov: <http://www.w3.org/ns/prov#> .
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+             <http://ex/act1> a prov:Activity ;
+               prov:wasAssociatedWith <http://ex/agent1> ;
+               prov:startedAtTime \"2026-01-01T00:00:00Z\"^^xsd:dateTime .
+             <http://ex/agent1> a prov:Agent .",
+        );
+        assert!(
+            roles.iter().all(|r| *r == GraphKind::Provenance),
+            "{roles:?}"
+        );
+    }
+
+    #[test]
+    fn dcat_records_are_catalog() {
+        let roles = all_roles(
+            "@prefix dcat: <http://www.w3.org/ns/dcat#> .
+             @prefix dct: <http://purl.org/dc/terms/> .
+             <http://ex/ds> a dcat:Dataset ; dct:title \"Bridges\" ; dcat:distribution <http://ex/dist> .
+             <http://ex/dist> a dcat:Distribution ; dcat:mediaType \"text/turtle\" .",
+        );
+        assert!(roles.iter().all(|r| *r == GraphKind::Catalog), "{roles:?}");
+    }
+
+    #[test]
+    fn bare_skos_collection_is_domain_values_but_a_scheme_stays_vocabulary() {
+        let values = all_roles(
+            "@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+             <http://ex/status-values> a skos:Collection ;
+               skos:member <http://ex/status/open>, <http://ex/status/closed> .",
+        );
+        assert!(
+            values.iter().all(|r| *r == GraphKind::DomainValues),
+            "a collection tree is a value list: {values:?}"
+        );
+        let vocab = all_roles(
+            "@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+             <http://ex/scheme> a skos:ConceptScheme .
+             <http://ex/c1> a skos:Concept ; skos:inScheme <http://ex/scheme> ; skos:prefLabel \"one\" .",
+        );
+        assert!(
+            vocab.iter().all(|r| *r == GraphKind::Vocabulary),
+            "concepts in a scheme remain vocabulary: {vocab:?}"
+        );
+    }
+
+    #[test]
+    fn typed_instances_with_a_stray_sameas_stay_instances() {
+        let roles = all_roles(
+            "@prefix owl: <http://www.w3.org/2002/07/owl#> .
+             <http://ex/b1> a <http://ex/Bridge> ; <http://ex/length> 42 ; owl:sameAs <http://other/b1> .",
+        );
+        assert!(
+            roles.iter().all(|r| *r == GraphKind::Instances),
+            "an rdf:type on the tree wins over one alignment triple: {roles:?}"
+        );
     }
 }

@@ -214,16 +214,24 @@ fn is_quad_format(format: RdfFormat) -> bool {
     matches!(format, RdfFormat::NQuads | RdfFormat::TriG)
 }
 
-/// Stable string key for a triple (graph name ignored) used to compare two
-/// triple sets for equality. Blank-node identity is not normalised, so two
+/// 64-bit key for a triple (graph name ignored) used to compare two triple
+/// sets for equality. Blank-node identity is not normalised, so two
 /// isomorphic-but-relabelled graphs may compare as different — acceptable for
-/// the "did this upload change anything" check.
-fn triple_key(q: &Quad) -> String {
-    format!("{}\t{}\t{}", q.subject, q.predicate, q.object)
+/// the "did this upload change anything" check, as is the negligible
+/// (~n²/2⁶⁵) collision chance. Hashes replace the old `format!`ed string keys,
+/// which allocated ~100 bytes per stored triple and made the comparison a
+/// visible chunk of a large replace import.
+fn triple_key(q: &Quad) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    q.subject.hash(&mut h);
+    q.predicate.hash(&mut h);
+    q.object.hash(&mut h);
+    h.finish()
 }
 
 /// Triple keys for the subset of `quads` whose final graph is `graph`.
-fn incoming_triple_keys(quads: &[Quad], graph: &str) -> std::collections::HashSet<String> {
+fn incoming_triple_keys(quads: &[Quad], graph: &str) -> std::collections::HashSet<u64> {
     quads
         .iter()
         .filter(|q| matches!(&q.graph_name, GraphName::NamedNode(nn) if nn.as_str() == graph))
@@ -235,7 +243,7 @@ fn incoming_triple_keys(quads: &[Quad], graph: &str) -> std::collections::HashSe
 fn live_triple_keys(
     store: &TripleStore,
     graph: &str,
-) -> Result<std::collections::HashSet<String>, String> {
+) -> Result<std::collections::HashSet<u64>, String> {
     use oxigraph::model::{GraphNameRef, NamedNodeRef};
     let g = NamedNodeRef::new(graph).map_err(|e| format!("Invalid graph IRI '{graph}': {e}"))?;
     let quads = store
@@ -407,10 +415,19 @@ pub fn parse_and_load_bulk_gated(
             .iter()
             .map(|g| {
                 let incoming = incoming_triple_keys(&all_quads, g);
-                let live = live_triple_keys(store, g)?;
+                // Distinct-count first: when the sizes differ the sets can't be
+                // equal, and the (much larger) cost of materialising every
+                // stored triple is skipped — the common case for a replace
+                // that actually changes data.
+                let live_count = store.count_graph(Some(g)).map_err(|e| e.to_string())?;
+                let changed = if live_count != incoming.len() {
+                    true
+                } else {
+                    incoming != live_triple_keys(store, g)?
+                };
                 Ok(GraphChange {
                     graph: g.clone(),
-                    changed: incoming != live,
+                    changed,
                 })
             })
             .collect::<Result<_, String>>()
@@ -1031,7 +1048,16 @@ mod tests {
         // Replace target untouched (old triple intact), sibling not committed.
         let keys = live_triple_keys(&store, G).unwrap();
         assert_eq!(keys.len(), 1);
-        assert!(keys.iter().any(|k| k.contains("http://example.org/old")));
+        let old = Quad::new(
+            NamedNode::new("http://example.org/old").unwrap(),
+            NamedNode::new("http://example.org/p").unwrap(),
+            NamedNode::new("http://example.org/o").unwrap(),
+            NamedNode::new(G).unwrap(),
+        );
+        assert!(
+            keys.contains(&triple_key(&old)),
+            "the seeded triple must still be stored"
+        );
         assert_eq!(store.count_graph(Some(g_other)).unwrap(), 0);
     }
 

@@ -238,15 +238,21 @@
     box-shadow: 0 4px 14px rgba(15, 23, 42, 0.07);
   }
   .files-ds-meta { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; flex: 1; }
+  /* The name is how you tell one card from another, so it is never cut: it
+     wraps. The line under it is a visibility word followed by the dataset's
+     description, which is prose and runs to a thousand characters on the
+     seeded demo — it gets two lines here rather than one clipped line, and
+     the dataset's own page carries the whole of it. */
   .files-ds-name {
     font-weight: 700; font-size: 0.88rem; color: var(--ink-900, #0f172a);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    overflow-wrap: break-word;
   }
   .files-ds-sub {
-    display: flex; align-items: center; gap: 0.3rem;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+    overflow: hidden;
     font-size: 0.72rem; color: var(--ink-400, #94a3b8);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     text-transform: capitalize;
+    overflow-wrap: break-word;
   }
   .files-page :global(.files-ds-open) { color: var(--ink-300, #cbd5e1); flex-shrink: 0; }
   :global(.files-ds-card:hover .files-ds-open) { color: var(--brand-500, #3b82f6); }

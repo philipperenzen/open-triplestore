@@ -9,6 +9,14 @@
 //!   * **foreign-graph write** via `POST /api/datasets/:id/mappings/execute` — RML
 //!     `?graph=` / `rml:graphMap` targeting another tenant's graph;
 //!   * **owner forgery** on dataset creation.
+//!
+//! Also locks in two later authorization fixes:
+//!   * **cross-org group-member IDOR** — the group-member routes only checked the
+//!     caller's role in the path's `org_id`, not that the group belonged to it, so
+//!     an admin of any org could list/add/remove members of another org's group;
+//!   * **publish-gate bypass** — `update_dataset` gated a visibility change on
+//!     manage rights but not publisher rights, so a non-publisher could create a
+//!     dataset private and then `PUT` it public.
 
 mod common;
 
@@ -17,7 +25,7 @@ use axum::http::{Request, StatusCode};
 use common::{admin_state, mint_token, test_app};
 use open_triplestore::auth::dataset_graph::authorize_dataset_graph_target;
 use open_triplestore::auth::db::AuthDb;
-use open_triplestore::auth::models::{OwnerType, SystemRole, Visibility};
+use open_triplestore::auth::models::{OwnerType, Role, SystemRole, Visibility};
 use open_triplestore::data_models::registry;
 use open_triplestore::server::AppState;
 use tower::ServiceExt as _;
@@ -387,5 +395,290 @@ async fn owner_can_still_promote_into_own_registry_entry_security() {
     assert!(
         registry::version_exists(&state.store, &state.base_url, "my-model", "1.0.0"),
         "owner's own promotion should have created the 1.0.0 version"
+    );
+}
+
+// ─────────────── HIGH: cross-org group-member IDOR (org/group scope) ───────────────
+//
+// GET/POST `/api/organisations/:org_id/groups/:group_id/members` and
+// DELETE `…/members/:user_id` only checked the caller's role in the path's
+// `org_id` — the segment the caller controls — never that `group_id` actually
+// belongs to `org_id`. So an admin of ANY org could list, add (including
+// themselves → privilege escalation) or remove members of another org's group by
+// naming that group under their own org's path. Each verb must `404` on the
+// mismatch (matching `get_group`/`update_group`/`delete_group`), and the target
+// group's membership must be untouched.
+
+fn get_auth(uri: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn del_auth(uri: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// Two orgs owned by different admins: `alice_x` admins org A, `bob_x` admins
+/// org B, and org B owns `groupB` whose sole member is `victim_x`. Returns
+/// alice's token (a *full org-A admin*, so only the org/group-scope guard — not
+/// the per-org admin check — can keep her out of org B's group).
+fn two_orgs_one_group(state: &AppState) -> String {
+    let alice = make_user(state, "alice_x");
+    make_user(state, "bob_x");
+    make_user(state, "victim_x");
+    state
+        .auth_db
+        .create_organisation("orgA", "Org A", "org-a", None, None)
+        .unwrap();
+    state
+        .auth_db
+        .create_organisation("orgB", "Org B", "org-b", None, None)
+        .unwrap();
+    state
+        .auth_db
+        .add_org_member("alice_x", "orgA", Role::Admin)
+        .unwrap();
+    state
+        .auth_db
+        .add_org_member("bob_x", "orgB", Role::Admin)
+        .unwrap();
+    state
+        .auth_db
+        .create_group("groupB", "orgB", "Group B", None)
+        .unwrap();
+    state
+        .auth_db
+        .add_group_member("victim_x", "groupB", Role::Member)
+        .unwrap();
+    alice
+}
+
+#[tokio::test]
+async fn group_member_ops_scoped_to_path_org_security() {
+    let (state, _admin) = admin_state();
+    let alice = two_orgs_one_group(&state);
+
+    // LIST org B's group through org A's path → 404.
+    let resp = test_app(state.clone())
+        .oneshot(get_auth(
+            "/api/organisations/orgA/groups/groupB/members",
+            &alice,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "listing another org's group members must 404"
+    );
+
+    // ADD herself into org B's group (privilege escalation) → 404.
+    let resp = test_app(state.clone())
+        .oneshot(post_json(
+            "/api/organisations/orgA/groups/groupB/members",
+            &alice,
+            serde_json::json!({ "user_id": "alice_x", "role": "admin" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "adding a member to another org's group must 404"
+    );
+
+    // REMOVE org B's group member → 404.
+    let resp = test_app(state.clone())
+        .oneshot(del_auth(
+            "/api/organisations/orgA/groups/groupB/members/victim_x",
+            &alice,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "removing a member from another org's group must 404"
+    );
+
+    // The group's membership is exactly as seeded: victim only, and no alice.
+    let ids: Vec<String> = state
+        .auth_db
+        .list_group_members("groupB")
+        .unwrap()
+        .into_iter()
+        .map(|(u, _)| u.id)
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["victim_x".to_string()],
+        "org B's group membership must be unchanged: {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn group_member_ops_work_for_legitimate_org_admin_security() {
+    // Positive control: the scope guard must not break the owning org's admin
+    // operating on that org's own group.
+    let (state, _admin) = admin_state();
+    let _alice = two_orgs_one_group(&state);
+    let bob = mint_token("bob_x", "bob_x", "user");
+
+    // LIST through the correct org path → 200.
+    let resp = test_app(state.clone())
+        .oneshot(get_auth(
+            "/api/organisations/orgB/groups/groupB/members",
+            &bob,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the owning org's admin must still list its group members"
+    );
+
+    // ADD through the correct org path → 201.
+    make_user(&state, "newbie_x");
+    let resp = test_app(state.clone())
+        .oneshot(post_json(
+            "/api/organisations/orgB/groups/groupB/members",
+            &bob,
+            serde_json::json!({ "user_id": "newbie_x", "role": "member" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "the owning org's admin must still add members"
+    );
+    assert!(
+        state
+            .auth_db
+            .list_group_members("groupB")
+            .unwrap()
+            .iter()
+            .any(|(u, _)| u.id == "newbie_x"),
+        "a legitimate add must take effect"
+    );
+}
+
+// ─────────────── MEDIUM: publish-gate bypass via update_dataset ───────────────
+//
+// `create_dataset` gates public creation on `is_publisher()`, but `update_dataset`
+// gated a visibility change on `can_manage()` alone. A user with manage but not
+// publish rights could therefore create a dataset private and then `PUT` it
+// public, sidestepping the publisher gate. Only the transition *into* public is
+// gated: an unchanged or narrowing visibility must still succeed.
+
+#[tokio::test]
+async fn non_publisher_cannot_publish_via_update_dataset_security() {
+    let (state, _admin) = admin_state();
+    // `np` owns (hence manages) the dataset but has no publish capability.
+    let np = make_user(&state, "np");
+    make_dataset(&state, "npds", "np"); // private
+
+    let resp = test_app(state.clone())
+        .oneshot(put_json(
+            "/api/datasets/npds",
+            &np,
+            serde_json::json!({ "name": "npds", "visibility": "public" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a non-publisher must not be able to make a dataset public"
+    );
+
+    // The visibility must be untouched by the rejected request.
+    let ds = state.auth_db.get_dataset("npds").unwrap().unwrap();
+    assert_eq!(
+        ds.visibility,
+        Visibility::Private,
+        "the dataset must remain private"
+    );
+}
+
+#[tokio::test]
+async fn publisher_can_publish_via_update_dataset_security() {
+    // Positive control: a genuine publisher (not a platform admin) may widen to
+    // public.
+    let (state, _admin) = admin_state();
+    let pubu = make_user(&state, "pubu");
+    state.auth_db.update_user_can_publish("pubu", true).unwrap();
+    make_dataset(&state, "pubds", "pubu"); // private
+
+    let resp = test_app(state.clone())
+        .oneshot(put_json(
+            "/api/datasets/pubds",
+            &pubu,
+            serde_json::json!({ "name": "pubds", "visibility": "public" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a publisher must be able to make their dataset public"
+    );
+    let ds = state.auth_db.get_dataset("pubds").unwrap().unwrap();
+    assert_eq!(
+        ds.visibility,
+        Visibility::Public,
+        "the dataset must now be public"
+    );
+}
+
+#[tokio::test]
+async fn non_publisher_can_edit_already_public_dataset_security() {
+    // Regression guard: the gate only blocks the transition INTO public. The
+    // metadata dialog resends the dataset's current visibility on every save, so a
+    // non-publisher owner editing an already-public dataset must still succeed.
+    let (state, _admin) = admin_state();
+    let np = make_user(&state, "np2");
+    state
+        .auth_db
+        .create_dataset(
+            "pubalready",
+            "Public Already",
+            None,
+            OwnerType::User,
+            "np2",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+
+    let resp = test_app(state.clone())
+        .oneshot(put_json(
+            "/api/datasets/pubalready",
+            &np,
+            serde_json::json!({ "name": "Renamed", "visibility": "public" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "editing an already-public dataset must not require publisher rights"
+    );
+    let ds = state.auth_db.get_dataset("pubalready").unwrap().unwrap();
+    assert_eq!(ds.name, "Renamed", "the metadata edit must have applied");
+    assert_eq!(
+        ds.visibility,
+        Visibility::Public,
+        "visibility must remain public"
     );
 }

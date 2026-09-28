@@ -1,0 +1,424 @@
+//! End-to-end test of the viewer and validation product surface: load the
+//! reference example (a fictional arch bridge), fetch the **viewer feed**
+//! (per-element geometry, reprojected, + glTF/IFC references), run
+//! **validation**, and read the persisted `sh:ValidationReport` back **as RDF**
+//! plus the severity rollup.
+
+mod common;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use common::{admin_state, body_json, test_app};
+use open_triplestore::auth::models::{OwnerType, Visibility};
+use oxigraph::io::RdfFormat;
+use oxigraph::sparql::QueryResults;
+use tower::ServiceExt as _;
+
+const VOCAB: &str = include_str!("fixtures/example-bridge/vocab.ttl");
+const ABOX: &str = include_str!("fixtures/example-bridge/example-bridge.ttl");
+const SHAPES_CORE: &str = include_str!("fixtures/example-bridge/shapes-core.ttl");
+const SHAPES_SPARQL: &str = include_str!("fixtures/example-bridge/shapes-sparql.ttl");
+const SHAPES_AF: &str = include_str!("fixtures/example-bridge/shapes-af.ttl");
+
+fn req(method: &str, uri: &str, token: Option<&str>) -> Request<Body> {
+    let mut b = Request::builder().method(method).uri(uri);
+    if let Some(t) = token {
+        b = b.header("Authorization", format!("Bearer {t}"));
+    }
+    b.body(Body::empty()).unwrap()
+}
+
+/// Build a dataset `eb` holding the reference example's ABox (urn:eb:data) + shapes
+/// (urn:eb:shapes).
+fn example_bridge_state() -> (open_triplestore::server::AppState, String) {
+    let (state, token) = admin_state();
+    state
+        .auth_db
+        .create_dataset(
+            "eb",
+            "Example Bridge",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    state
+        .auth_db
+        .update_dataset_shacl("eb", false, Some("urn:eb:shapes"))
+        .unwrap();
+    state
+        .auth_db
+        .add_dataset_graph("eb", "urn:eb:data")
+        .unwrap();
+
+    state
+        .store
+        .load_str(VOCAB, RdfFormat::Turtle, Some("urn:eb:data"))
+        .unwrap();
+    state
+        .store
+        .load_str(ABOX, RdfFormat::Turtle, Some("urn:eb:data"))
+        .unwrap();
+    for shapes in [VOCAB, SHAPES_CORE, SHAPES_SPARQL, SHAPES_AF] {
+        state
+            .store
+            .load_str(shapes, RdfFormat::Turtle, Some("urn:eb:shapes"))
+            .unwrap();
+    }
+    (state, token)
+}
+
+#[tokio::test]
+async fn viewer_feed_returns_elements_with_gltf_and_reprojected_geometry() {
+    let (state, token) = example_bridge_state();
+    let resp = test_app(state)
+        .oneshot(req("GET", "/api/datasets/eb/viewer-feed", Some(&token)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let j = body_json(resp.into_body()).await;
+    let elements = j["elements"].as_array().expect("elements array");
+    assert!(
+        elements.len() >= 6,
+        "root + 5 contained elements (+ sub-elements), got {}: {j}",
+        elements.len()
+    );
+
+    let arch = elements
+        .iter()
+        .find(|e| e["id"].as_str().unwrap_or("").ends_with("Arch-North"))
+        .expect("Arch-North in feed");
+    assert_eq!(
+        arch["gltf_url"].as_str(),
+        Some("https://example.org/files/arch-north.glb"),
+        "arch glTF URL: {arch}"
+    );
+    assert_eq!(arch["ifc_guid"].as_str(), Some("1aB2cD3eF4gH5iJ6kL7mNo"));
+    // RD New point reprojected to WGS84 in Nijmegen (~5.84, ~51.84).
+    let wkt = arch["wkt4326"].as_str().expect("wkt4326 present");
+    let nums: Vec<f64> = wkt
+        .trim_start_matches("POINT(")
+        .trim_end_matches(')')
+        .split_whitespace()
+        .filter_map(|t| t.parse().ok())
+        .collect();
+    assert_eq!(nums.len(), 2, "POINT coords: {wkt}");
+    assert!((nums[0] - 5.84).abs() < 0.05, "lon near Nijmegen: {wkt}");
+    assert!((nums[1] - 51.84).abs() < 0.05, "lat near Nijmegen: {wkt}");
+
+    // The GML-only Abutment-North also gets a reprojected geometry (srsName-aware).
+    let abutment = elements
+        .iter()
+        .find(|e| e["id"].as_str().unwrap_or("").ends_with("Abutment-North"))
+        .expect("Abutment-North in feed");
+    assert!(
+        abutment["wkt4326"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("POINT"),
+        "GML geometry reprojected: {abutment}"
+    );
+
+    // The root has no parent; children point at it.
+    let root = elements
+        .iter()
+        .find(|e| e["id"].as_str().unwrap_or("").ends_with("/ExampleBridge"))
+        .expect("root in feed");
+    assert!(root["parent"].is_null(), "root has no parent: {root}");
+    assert!(
+        arch["parent"]
+            .as_str()
+            .unwrap_or("")
+            .ends_with("/ExampleBridge"),
+        "arch parented to root: {arch}"
+    );
+}
+
+#[tokio::test]
+async fn validate_persists_report_as_queryable_rdf_with_rollup() {
+    let (state, token) = example_bridge_state();
+    let app = test_app(state.clone());
+
+    // Official validation run (canonical dataset → conforms).
+    let resp = app
+        .clone()
+        .oneshot(req("POST", "/api/datasets/eb/validate", Some(&token)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let j = body_json(resp.into_body()).await;
+    assert_eq!(
+        j["report"]["conforms"].as_bool(),
+        Some(true),
+        "the canonical reference example conforms: {j}"
+    );
+
+    // The report is queryable as RDF from the per-dataset report graph.
+    let conforms_as_rdf = matches!(
+        state.store.query(
+            "PREFIX sh: <http://www.w3.org/ns/shacl#> \
+             ASK { GRAPH <urn:system:reports:dataset:eb> { ?r a sh:ValidationReport ; sh:conforms true } }"
+        ),
+        Ok(QueryResults::Boolean(true))
+    );
+    assert!(conforms_as_rdf, "sh:ValidationReport persisted as RDF");
+
+    // Severity rollup: the latest stored run carries counts by severity.
+    let resp = app
+        .oneshot(req(
+            "GET",
+            "/api/datasets/eb/validation/latest",
+            Some(&token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let j = body_json(resp.into_body()).await;
+    for key in ["violation_count", "warning_count", "info_count"] {
+        assert!(
+            j[key].is_number() || j["run"][key].is_number(),
+            "rollup field {key} present: {j}"
+        );
+    }
+}
+
+/// Real-world demo: Wikidata-derived landmarks (CC0; coordinates from P625, 3D
+/// models from P4896 on Wikimedia Commons) flow through the same viewer feed —
+/// CRS84 geometry passes through, STL file references are exposed via FOG.
+#[tokio::test]
+async fn viewer_feed_serves_wikidata_landmarks_demo() {
+    let (state, token) = admin_state();
+    state
+        .auth_db
+        .create_dataset(
+            "lm",
+            "Landmarks",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    state
+        .auth_db
+        .add_dataset_graph("lm", "urn:lm:data")
+        .unwrap();
+    state
+        .store
+        .load_str(
+            include_str!("fixtures/landmarks/landmarks.ttl"),
+            RdfFormat::Turtle,
+            Some("urn:lm:data"),
+        )
+        .unwrap();
+
+    let resp = test_app(state)
+        .oneshot(req("GET", "/api/datasets/lm/viewer-feed", Some(&token)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let j = body_json(resp.into_body()).await;
+    let elements = j["elements"].as_array().expect("elements");
+    assert_eq!(elements.len(), 6, "collection root + 5 landmarks: {j}");
+    // Orientation annotations flow through, and they are MEASURED from the STL
+    // binaries (the up axis is the one whose coordinate range starts at 0 — the
+    // ground plane): the three tower models are Z-up; the Dragon Bridge and the
+    // torii are Y-up and therefore carry no annotation — the bridge's previous
+    // `"Z"` was wrong and laid it on its side (a quarter-turn about its own
+    // long axis).
+    let el = |name: &str| {
+        elements
+            .iter()
+            .find(|e| e["id"].as_str().unwrap_or("").ends_with(name))
+            .unwrap_or_else(|| panic!("{name} in feed"))
+    };
+    let up = |name: &str| el(name)["up_axis"].as_str().map(str::to_string);
+    assert_eq!(up("BigBen").as_deref(), Some("Z"));
+    assert_eq!(up("EmpireStateBuilding").as_deref(), Some("Z"));
+    assert_eq!(up("WhiteHouse").as_deref(), Some("Z"));
+    assert_eq!(up("DragonBridge"), None);
+    assert_eq!(up("SannoShrine"), None);
+    // Real-world bearings (ots:modelHeading, measured from OSM footprints) reach
+    // the feed as numbers; the torii has no OSM way, so it stays unannotated
+    // rather than getting an invented bearing.
+    let heading = |name: &str| el(name)["heading"].as_f64();
+    assert_eq!(heading("DragonBridge"), Some(88.1));
+    assert_eq!(heading("EmpireStateBuilding"), Some(119.1));
+    assert_eq!(heading("SannoShrine"), None);
+
+    let bridge = elements
+        .iter()
+        .find(|e| e["id"].as_str().unwrap_or("").ends_with("DragonBridge"))
+        .expect("Dragon Bridge in feed");
+    // CRS84 lon/lat passes through reprojection unchanged.
+    let wkt = bridge["wkt4326"].as_str().expect("wkt4326");
+    assert!(
+        wkt.contains("108.226") && wkt.contains("16.061"),
+        "Da Nang coordinates preserved: {wkt}"
+    );
+    // The STL model reference is exposed through the FOG file list.
+    let files = bridge["files"].as_array().expect("files");
+    assert!(
+        files.iter().any(|f| f[0].as_str() == Some("Stl")
+            && f[1].as_str().unwrap_or("").contains("Dragon_Bridge")),
+        "Commons STL reference present: {files:?}"
+    );
+}
+
+/// The per-building 3DBAG layer (the graph `seed_bag_buildings` generates from
+/// the bundled excerpt) serves every REAL BAG pand through the feed: the zone
+/// renders the shared CityJSON once, each building carries a `#objectId`
+/// fragment reference for picking plus a reprojected footprint polygon, and the
+/// registry attributes and owl:sameAs links ride along on the element's RDF.
+#[tokio::test]
+async fn viewer_feed_serves_per_building_3dbag_layer() {
+    use open_triplestore::imports::cityjson::{
+        convert_cityjson_viewer_buildings, CityJsonViewerOptions,
+    };
+    let (state, token) = admin_state();
+    state
+        .auth_db
+        .create_dataset(
+            "ctx",
+            "Context",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    state
+        .auth_db
+        .add_dataset_graph("ctx", "urn:ctx:data")
+        .unwrap();
+    let doc: serde_json::Value = serde_json::from_str(include_str!(
+        "../frontend/public/samples/schependomlaan-3dbag.city.json"
+    ))
+    .expect("bundled excerpt parses");
+    let (nt, stats) = convert_cityjson_viewer_buildings(
+        &doc,
+        &CityJsonViewerOptions {
+            inst_base: "https://opentriplestore.org/demo/viewer-3d-demo/".to_string(),
+            file_url: "/samples/schependomlaan-3dbag.city.json".to_string(),
+            zone_label: "Schependomlaan block".to_string(),
+            zone_comment: "test".to_string(),
+            license: Some("https://creativecommons.org/licenses/by/4.0/".to_string()),
+            attribution: Some("© 3DBAG by tudelft3d and 3DGI".to_string()),
+            source: Some("https://docs.3dbag.nl/en/copyright/".to_string()),
+        },
+    )
+    .expect("viewer conversion succeeds");
+    assert!(stats.objects > 50, "a real block of buildings: {stats:?}");
+    state
+        .store
+        .load_str(&nt, RdfFormat::NTriples, Some("urn:ctx:data"))
+        .unwrap();
+
+    let resp = test_app(state)
+        .oneshot(req("GET", "/api/datasets/ctx/viewer-feed", Some(&token)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let j = body_json(resp.into_body()).await;
+    let elements = j["elements"].as_array().expect("elements");
+
+    // The zone holds the ONE whole-file render reference.
+    let zone = elements
+        .iter()
+        .find(|e| e["id"].as_str().unwrap_or("").ends_with("/bag/zone"))
+        .expect("zone element in feed");
+    let files = zone["files"].as_array().expect("zone files");
+    assert!(
+        files.iter().any(|f| f[0].as_str() == Some("Cityjson")
+            && f[1].as_str() == Some("/samples/schependomlaan-3dbag.city.json")),
+        "whole-file CityJSON reference on the zone: {files:?}"
+    );
+
+    // Every building is an individually addressable element under the zone,
+    // with a fragment ref into the shared file and a real footprint polygon.
+    let buildings: Vec<_> = elements
+        .iter()
+        .filter(|e| {
+            e["id"]
+                .as_str()
+                .unwrap_or("")
+                .contains("/bag/NL.IMBAG.Pand.")
+        })
+        .collect();
+    assert!(
+        buildings.len() > 50,
+        "per-building elements in feed: {}",
+        buildings.len()
+    );
+    let b = buildings
+        .iter()
+        .find(|e| e["wkt4326"].as_str().is_some())
+        .expect("a building with a footprint");
+    assert_eq!(
+        b["parent"].as_str().map(|p| p.ends_with("/bag/zone")),
+        Some(true),
+        "buildings hang off the zone: {:?}",
+        b["parent"]
+    );
+    let wkt = b["wkt4326"].as_str().unwrap();
+    assert!(
+        wkt.starts_with("POLYGON((5.83"),
+        "CRS84 footprint near Nijmegen: {wkt}"
+    );
+    let bfiles = b["files"].as_array().expect("building files");
+    assert!(
+        bfiles.iter().any(|f| f[0].as_str() == Some("Cityjson")
+            && f[1]
+                .as_str()
+                .unwrap_or("")
+                .contains(".city.json#NL.IMBAG.Pand.")),
+        "per-building #objectId fragment ref: {bfiles:?}"
+    );
+    // Labels carry the registry number + year built.
+    assert!(
+        buildings.iter().any(|e| {
+            e["label"]
+                .as_str()
+                .map(|l| l.starts_with("Pand ") && l.contains('('))
+                .unwrap_or(false)
+        }),
+        "labels like 'Pand 0268… (1920)'"
+    );
+}
+
+/// Drift guard: the seed copies under src/saved_queries/data/ must stay
+/// byte-identical to the canonical fixtures (below their 2-line SEED COPY header).
+#[test]
+fn seed_copies_match_canonical_fixtures() {
+    {
+        let (seed, fixture) = (
+            include_str!("../src/saved_queries/data/landmarks.ttl"),
+            include_str!("fixtures/landmarks/landmarks.ttl"),
+        );
+        let body: String = seed.lines().skip(2).collect::<Vec<_>>().join("\n");
+        let canon: String = fixture.lines().collect::<Vec<_>>().join("\n");
+        assert_eq!(
+            body.trim_end(),
+            canon.trim_end(),
+            "seed copy drifted from its canonical fixture — re-copy it"
+        );
+    }
+}
+
+#[tokio::test]
+async fn viewer_feed_requires_access_on_private_dataset() {
+    let (state, _token) = example_bridge_state();
+    let resp = test_app(state)
+        .oneshot(req("GET", "/api/datasets/eb/viewer-feed", None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "anonymous access to a private dataset's feed is denied"
+    );
+}

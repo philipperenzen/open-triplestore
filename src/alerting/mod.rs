@@ -8,6 +8,8 @@
 //! Failures are logged at WARN but never propagated; alerting must never
 //! break the calling code path.
 
+use crate::secrets::env_secret_opt;
+
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -48,7 +50,7 @@ impl AlertConfig {
                 .ok()
                 .and_then(|s| s.parse().ok()),
             smtp_user: std::env::var("ALERT_SMTP_USER").ok(),
-            smtp_pass: std::env::var("ALERT_SMTP_PASS").ok(),
+            smtp_pass: env_secret_opt("ALERT_SMTP_PASS"),
             smtp_from: std::env::var("ALERT_SMTP_FROM").ok(),
             smtp_to: std::env::var("ALERT_SMTP_TO")
                 .ok()
@@ -241,5 +243,80 @@ impl AlertManager {
             mailer.send(email).await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::db::AuthDb;
+
+    fn manager(cfg: AlertConfig) -> (AlertManager, Arc<AuditLogger>) {
+        let db = AuthDb::in_memory().unwrap();
+        let audit = Arc::new(AuditLogger::new(db.pool()));
+        (AlertManager::new(cfg, audit.clone()), audit)
+    }
+
+    /// Alerting is off unless a channel is configured — the whole module must be
+    /// a no-op for the default deployment.
+    #[test]
+    fn is_enabled_requires_a_usable_channel() {
+        assert!(!AlertConfig::default().is_enabled());
+
+        let webhook = AlertConfig {
+            webhook_url: Some("http://example.invalid/hook".into()),
+            ..Default::default()
+        };
+        assert!(webhook.is_enabled(), "a webhook alone is enough");
+
+        // An SMTP host with no recipients cannot deliver anything.
+        let no_recipients = AlertConfig {
+            smtp_host: Some("smtp.example.invalid".into()),
+            ..Default::default()
+        };
+        assert!(
+            !no_recipients.is_enabled(),
+            "an SMTP host with no ALERT_SMTP_TO cannot deliver"
+        );
+
+        let smtp = AlertConfig {
+            smtp_host: Some("smtp.example.invalid".into()),
+            smtp_to: vec!["ops@example.invalid".into()],
+            ..Default::default()
+        };
+        assert!(smtp.is_enabled());
+    }
+
+    /// Dispatch must never panic or block the caller, whatever the channel does.
+    /// Here the webhook host does not resolve, which is the common failure.
+    #[tokio::test]
+    async fn dispatch_is_best_effort_and_records_nothing_on_failure() {
+        let (mgr, _audit) = manager(AlertConfig {
+            // .invalid is reserved by RFC 2606 and never resolves.
+            webhook_url: Some("http://alert.invalid/hook".into()),
+            ..Default::default()
+        });
+        mgr.dispatch(Alert {
+            severity: AlertSeverity::Critical,
+            kind: "backup_failed".into(),
+            message: "scheduled backup did not complete".into(),
+            context: serde_json::json!({ "error": "disk full" }),
+        })
+        .await;
+        // Reaching here without a panic is the property under test: alerting
+        // must never break the code path that raised the alert.
+    }
+
+    /// With no channel configured, dispatch returns immediately.
+    #[tokio::test]
+    async fn dispatch_is_a_no_op_when_disabled() {
+        let (mgr, _audit) = manager(AlertConfig::default());
+        mgr.dispatch(Alert {
+            severity: AlertSeverity::Info,
+            kind: "noop".into(),
+            message: "nothing configured".into(),
+            context: serde_json::Value::Null,
+        })
+        .await;
     }
 }

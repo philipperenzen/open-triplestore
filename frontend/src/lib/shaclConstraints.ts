@@ -1,6 +1,7 @@
 // Catalog of SHACL constraint "cards" for the shapes editor palette.
 // Each card carries a short description, a worked example, and an insertable
-// Turtle template. Adapted from a SHACL sandbox.
+// Turtle template; the Turtle editor's completer offers the same templates
+// as snippets.
 
 export interface ShaclConstraintCard {
   id: string;

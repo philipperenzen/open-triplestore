@@ -20,4 +20,6 @@ data/
 *.md
 test-data/
 scripts/
+# …except the generator the builder stage runs for the crates' licence notices.
+!scripts/gen_rust_third_party_licenses.py
 .dockerignore

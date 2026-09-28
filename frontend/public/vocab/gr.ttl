@@ -1,11 +1,20 @@
-# The GoodRelations Ontology for Semantic Web-based E-Commerce — The
-# GoodRelations ontology provides the vocabulary for annotating e-commerce
-# offerings (1) to sell, lease, repair, dispose, or maintain commodity
-# products and (2) to provide commodity services.
-# Full vocabulary as published in the Linked Open Vocabularies (LOV) corpus
-# snapshot of 2025-12-18 (https://lov.linkeddata.es/ — dataset CC BY 4.0),
-# version v2011-10-01 (2011-10-01).
-# Source: http://purl.org/goodrelations/v1  (ns http://purl.org/goodrelations/v1#)
+# The GoodRelations Ontology for Semantic Web-based E-Commerce — V1, release
+# 2011-10-01, by Martin Hepp: a vocabulary for annotating e-commerce offerings.
+# Source: http://purl.org/goodrelations/v1 (served from
+# http://www.heppnetz.de/ontologies/goodrelations/v1.owl) — triples identical
+# (checked 2026-09-23).
+# Obtained via the Linked Open Vocabularies (LOV) corpus snapshot of 2025-12-18
+# (https://lov.linkeddata.es/), which re-serialized it as Turtle. LOV's own
+# CC BY 4.0 licence covers LOV's catalogue; it does not relicense this vocabulary.
+# This work is based on the GoodRelations ontology, developed by Martin Hepp.
+# http://purl.org/goodrelations/
+# Licence: Creative Commons Attribution 3.0 Unported (CC BY 3.0),
+# http://creativecommons.org/licenses/by/3.0/ (the file's own dc:rights and
+# dcterms:license, kept below).
+# Changes: re-serialized as Turtle by LOV (triples unchanged); this comment
+# header was written by Open Triplestore (2026-07-24, revised 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The vocabulary, as re-serialized by LOV, starts below this line. ----
 @prefix dc: <http://purl.org/dc/elements/1.1/> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix foaf: <http://xmlns.com/foaf/0.1/> .

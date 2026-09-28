@@ -14,6 +14,13 @@ let _refreshToken: string | null = null;
 
 class ApiError extends Error {
   status?: number;
+  /**
+   * The server's error body, parsed, when it sent JSON. Some refusals carry
+   * facts the caller has to act on and not just a sentence to display — a 409
+   * from the prefix admin endpoints names the namespace the label resolves to
+   * today, which is what makes repointing it an informed choice.
+   */
+  body?: unknown;
 }
 
 function getAccessToken(): string | null {
@@ -45,19 +52,29 @@ function authHeaders() {
   return headers;
 }
 
-async function extractErrorMessage(res) {
+// Reads a failed response once, for both the sentence to show and the body it
+// came from: the response stream can only be consumed once, so a caller that
+// needs the structured body cannot read it after asking for the message.
+async function extractError(res): Promise<{ message: string; body: unknown }> {
   try {
     const text = await res.text();
+    let json: any = null;
     try {
-      const json = JSON.parse(text);
-      const msg = json.message || json.error || json.detail;
-      if (msg) return msg;
+      json = JSON.parse(text);
     } catch {}
+    if (json) {
+      const msg = json.message || json.error || json.detail;
+      if (msg) return { message: msg, body: json };
+    }
     const stripped = text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-    return stripped || res.statusText;
+    return { message: stripped || res.statusText, body: json };
   } catch {
-    return res.statusText;
+    return { message: res.statusText, body: null };
   }
+}
+
+async function extractErrorMessage(res) {
+  return (await extractError(res)).message;
 }
 
 let isRefreshing = false;
@@ -165,9 +182,10 @@ async function request(method, path, body = null, init: { signal?: AbortSignal }
   }
 
   if (!res.ok) {
-    const msg = await extractErrorMessage(res);
-    const err = new ApiError(msg);
+    const { message, body: errorBody } = await extractError(res);
+    const err = new ApiError(message);
     err.status = res.status;
+    err.body = errorBody;
     throw err;
   }
   const ct = res.headers.get('content-type') || '';
@@ -581,7 +599,8 @@ export const browseTriples = (params, init: RequestInit = {}) => {
   return request('GET', `/api/browse/triples?${qs}`, null, init);
 };
 // `opts` may be a bare graph IRI (back-compat) or an object carrying the same
-// scope params as browseTriples: { graph, dataset_id, dataset_ids, org_id, versions }.
+// scope params as browseTriples: { graph, dataset_id, dataset_ids, org_id,
+// org_ids, versions }.
 // Scope lets the graph view expand a resource within the active browse scope
 // (dataset/org + version pins) instead of the broad accessible set.
 // `init.signal` cancels an in-flight lookup — the viewer's inspector windows
@@ -589,7 +608,7 @@ export const browseTriples = (params, init: RequestInit = {}) => {
 export const browseResource = (iri, opts = {}, init: { signal?: AbortSignal } = {}) => {
   const qs = new URLSearchParams({ iri });
   const o = typeof opts === 'string' ? { graph: opts } : (opts || {});
-  for (const k of ['graph', 'dataset_id', 'dataset_ids', 'org_id', 'versions']) {
+  for (const k of ['graph', 'dataset_id', 'dataset_ids', 'org_id', 'org_ids', 'versions']) {
     if (o[k]) qs.set(k, o[k]);
   }
   return request('GET', `/api/browse/resource?${qs.toString()}`, null, init);
@@ -636,7 +655,9 @@ export const getGeoStatsBatch = (datasetIds: string[]): Promise<GeoStats> => {
 };
 // Classes / properties / graphs present in the current scope, with counts.
 // Accepts the same scope params as browseTriples (dataset_id, dataset_ids,
-// org_id, versions, graph). The chip `filters` JSON may also be passed through.
+// org_id, org_ids, versions, graph) — the rail describes the same scope the
+// results do only because both are sent the whole selection. The chip `filters`
+// JSON may also be passed through.
 export const browseFacets = (params, init: { signal?: AbortSignal } = {}) => {
   const qs = new URLSearchParams(params).toString();
   return request('GET', `/api/browse/facets?${qs}`, null, init);
@@ -721,16 +742,58 @@ export async function nlToSparql(question, schemaHint, currentQuery = null) {
   return res.json(); // { sparql, model }
 }
 
-// Is the NL→SPARQL LLM service reachable? Used to show LLM availability in service health.
-export async function llmHealth() {
+/** The LLM features the server reports on, one entry each, in this order. */
+export type LlmServiceId = 'chat' | 'sparql' | 'shacl';
+
+/** One LLM feature in `GET /api/llm/health`'s `services` array. */
+export interface LlmServiceStatus {
+  /** `chat` = Spark, `sparql` = natural language → SPARQL (and saved-query
+   *  repair), `shacl` = the SHACL Studio assistant. A newer server may add ids. */
+  id: LlmServiceId | string;
+  /** The model this feature sends to the gateway. */
+  model: string;
+  /** Whether the gateway's model list names that model: `null` when the
+   *  gateway is unreachable or answered without an OpenAI-style model list. */
+  listed: boolean | null;
+}
+
+/**
+ * `GET /api/llm/health`. Everything but `reachable` is optional: `llmHealth()`
+ * returns `{ reachable: false, error: true }` when the endpoint itself could
+ * not be read, and servers older than the `configured` / `services` fields
+ * leave them out.
+ */
+export interface LlmHealth {
+  reachable: boolean;
+  /** Set only by `llmHealth()`'s own fallback: the request failed, so nothing
+   *  is known about the gateway (never sent by the server). */
+  error?: true;
+  /** Gateway base URL the server talks to. */
+  gateway?: string;
+  /** Body of the gateway's `/v1/models` (or `/health`) response. */
+  detail?: unknown;
+  rate_limit_per_min?: number;
+  rate_limit_anon_per_min?: number;
+  caller?: 'user' | 'guest';
+  chat_model?: string;
+  context_tokens?: number | null;
+  /** `LLM_GATEWAY_URL` is set and not blank; `false` = the server falls back to its built-in default. */
+  configured?: boolean;
+  services?: LlmServiceStatus[];
+}
+
+// Is the LLM gateway reachable, and which model does each LLM feature use?
+// Used to show LLM availability in service health; never throws.
+export async function llmHealth(): Promise<LlmHealth> {
   try {
     const token = getAccessToken();
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
     const res = await fetchRetry429(`${API_BASE}/api/llm/health`, { headers });
-    if (!res.ok) return { reachable: false };
-    return res.json(); // { gateway, reachable, detail }
+    if (!res.ok) return { reachable: false, error: true };
+    // Awaited here so a body that is not JSON lands in the catch below.
+    return await res.json(); // LlmHealth
   } catch {
-    return { reachable: false };
+    return { reachable: false, error: true };
   }
 }
 
@@ -782,7 +845,14 @@ export async function llmChat(messages, model = null) {
 // stream (older server, buffering proxy) — callers fall back to llmChat then.
 // Abort via `signal` to stop generation (closing the stream stops the server-side
 // turn as well).
-export async function llmChatStream(messages, { model = null, signal, onEvent } = {}) {
+export async function llmChatStream(
+  messages,
+  {
+    model = null,
+    signal,
+    onEvent,
+  }: { model?: string | null; signal?: AbortSignal; onEvent?: (event: unknown) => void } = {}
+) {
   const token = getAccessToken();
   const headers = { 'Content-Type': 'application/json', Accept: 'text/event-stream' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -842,6 +912,22 @@ export const adminLlmRequests = (opts: { limit?: number; offset?: number; status
 };
 export const adminLlmStats = () =>
   request('GET', '/api/admin/llm/stats'); // { last_24h: {...}, top_users_7d: [...] }
+
+// ─── Operations: replication, workload telemetry, the change log ─────────────
+// Public, beside /livez: { role, configured_role, mode, scope, leader_url,
+// node_id, read_only, epoch, applied_seq, leader_newest_seq, lag_rows,
+// last_sync_at, last_error, applied_rows, refetched_graphs, resyncs,
+// interval_secs, healthy, sync?, identity?, cluster? }
+export const replicationStatus = () =>
+  request('GET', '/api/replication/status');
+// Admin: { uptime_secs, queries: { total, window, by_served, analytical, other },
+// validations: {...}, writes: { total, gaps } } — see docs/performance.md "Telemetry".
+export const adminTelemetry = () =>
+  request('GET', '/api/admin/telemetry');
+// Admin: { enabled, epoch, next_seq, rows, committed, pending, unknown,
+// oldest_seq, newest_seq, cursors, max_scan, max_payload, retention_days, size_bytes }
+export const adminChangesStatus = () =>
+  request('GET', '/api/admin/changes/status');
 
 // ─── OIDC provider (this store as the identity provider for client apps) ─────
 // decision: 'check' → { client_name, scope, requires_consent };
@@ -959,9 +1045,22 @@ export async function getShapeGraphTurtle(id: string, format: 'turtle' | 'shaclc
   return res.text();
 }
 
-/** Save the shape graph's Turtle (or SHACLC via `contentType="text/shaclc"`). */
-export async function putShapeGraphTurtle(id: string, body: string, contentType = 'text/turtle'): Promise<{ version: number }> {
-  const res = await fetch(`/api/shacl/shape-graphs/${id}/turtle`, {
+export interface PutShapeGraphTurtleOptions {
+  /** Commit note for the revision. Omitted/blank lets the server name it. */
+  message?: string;
+  /** Body media type — `text/shaclc` to save SHACL Compact syntax. */
+  contentType?: string;
+}
+
+/** Save the shape graph's Turtle (or SHACLC via `contentType: "text/shaclc"`). */
+export async function putShapeGraphTurtle(
+  id: string,
+  body: string,
+  options: PutShapeGraphTurtleOptions = {},
+): Promise<{ version: number }> {
+  const { message = '', contentType = 'text/turtle' } = options;
+  const query = message.trim() ? `?message=${encodeURIComponent(message.trim())}` : '';
+  const res = await fetch(`/api/shacl/shape-graphs/${id}/turtle${query}`, {
     method: 'PUT',
     credentials: 'include',
     headers: { 'Content-Type': contentType },
@@ -970,6 +1069,84 @@ export async function putShapeGraphTurtle(id: string, body: string, contentType 
   if (!res.ok) throw new Error(`Failed to save shape graph turtle: ${res.status} ${await res.text()}`);
   return res.json();
 }
+
+// ─── SQL datasources, RML mappings and materialisation runs ─────────────────
+// Admin-only (src/sources). A datasource response carries the credential
+// REFERENCE (env:/file:/vault:), never a value — there is no password field
+// anywhere in this surface.
+export const listSources = () => request('GET', '/api/sources');
+export const getSource = (id) => request('GET', `/api/sources/${encodeURIComponent(id)}`);
+export const createSource = (body) => request('POST', '/api/sources', body);
+export const updateSource = (id, body) => request('PUT', `/api/sources/${encodeURIComponent(id)}`, body);
+export const deleteSource = (id) => request('DELETE', `/api/sources/${encodeURIComponent(id)}`);
+/// Open a connection and throw it away. Never persists anything.
+export const testSource = (body) => request('POST', '/api/sources/test', body);
+export const introspectSource = (id) => request('GET', `/api/sources/${encodeURIComponent(id)}/introspect`);
+export const previewSourceTable = (id, table, limit = 20) =>
+  request('GET', `/api/sources/${encodeURIComponent(id)}/preview?table=${encodeURIComponent(table)}&limit=${limit}`);
+export const sourceMetrics = () => request('GET', '/api/sources/metrics');
+
+export const listSourceMappings = (sourceId) =>
+  request('GET', sourceId ? `/api/mappings?source=${encodeURIComponent(`urn:source:${sourceId}`)}` : '/api/mappings');
+export const getMapping = (id) => request('GET', `/api/mappings/${encodeURIComponent(id)}`);
+export const createMapping = (body) => request('POST', '/api/mappings', body);
+export const updateMapping = (id, body) => request('PUT', `/api/mappings/${encodeURIComponent(id)}`, body);
+export const deleteMapping = (id) => request('DELETE', `/api/mappings/${encodeURIComponent(id)}`);
+// `request` returns text when the response is not JSON, which the RML
+// endpoint (text/turtle) relies on.
+export const getMappingRml = (id, version?: number) =>
+  request('GET', `/api/mappings/${encodeURIComponent(id)}/rml${version ? `?version=${version}` : ''}`);
+
+// Profiling: counts and shapes per table, never rows. The profile is Turtle.
+export const profileSource = (sourceId, tables?: string[]) =>
+  request('POST', `/api/sources/${encodeURIComponent(sourceId)}/profile`, tables?.length ? { tables } : {});
+export const getSourceProfile = (sourceId, version?: number) =>
+  request('GET', `/api/sources/${encodeURIComponent(sourceId)}/profile${version ? `?version=${version}` : ''}`);
+// Drift between two profile versions, and the re-map tickets it opens.
+export const driftSource = (sourceId, body = {}) =>
+  request('POST', `/api/sources/${encodeURIComponent(sourceId)}/drift`, body);
+export const listSourceTickets = (sourceId) =>
+  request('GET', `/api/sources/${encodeURIComponent(sourceId)}/tickets`);
+export const closeTicket = (ticketId) => request('POST', `/api/tickets/${encodeURIComponent(ticketId)}/close`, {});
+// A sample of a mapping, validated and classified; registers nothing.
+export const dryRunSource = (sourceId, body) =>
+  request('POST', `/api/sources/${encodeURIComponent(sourceId)}/dry-run`, body);
+// The mapping gates config graph.
+export const getMappingGates = () => request('GET', '/api/sources/gates');
+export const updateMappingGates = (patch) => request('PUT', '/api/sources/gates', patch);
+// A legacy `mapping.sql2rdf.yaml` bundle as RML, registered nowhere.
+export const convertLegacyMapping = (body) => request('POST', '/api/mappings/convert', body);
+
+// Review decisions on a mapping — approve, edit, reject — as PROV, and the
+// calibration curve those decisions support.
+export const decideMapping = (mappingId, body) =>
+  request('POST', `/api/mappings/${encodeURIComponent(mappingId)}/decisions`, body);
+export const listMappingDecisions = (mappingId) =>
+  request('GET', `/api/mappings/${encodeURIComponent(mappingId)}/reviews`);
+export const calibrateConfidence = (body = {}) => request('POST', '/api/sources/calibration', body);
+
+export const listSourceRuns = (sourceId) => request('GET', `/api/sources/${encodeURIComponent(sourceId)}/runs`);
+export const startSourceRun = (sourceId, body) => request('POST', `/api/sources/${encodeURIComponent(sourceId)}/runs`, body);
+export const getRun = (runId) => request('GET', `/api/runs/${encodeURIComponent(runId)}`);
+export const rollbackRun = (runId) => request('POST', `/api/runs/${encodeURIComponent(runId)}/rollback`, {});
+export const deleteRun = (runId) => request('DELETE', `/api/runs/${encodeURIComponent(runId)}`);
+// A refused run's kept candidate, re-gated and swapped in after correction.
+export const promoteRun = (runId) => request('POST', `/api/runs/${encodeURIComponent(runId)}/promote`, {});
+
+// The review queue a refused run opens: one item per subject, with the
+// deterministic fixer (preview as an RDF Patch, or apply) and a human's
+// explicit status.
+export const listSourceReviews = (sourceId, status?: string) =>
+  request(
+    'GET',
+    `/api/sources/${encodeURIComponent(sourceId)}/reviews${status ? `?status=${encodeURIComponent(status)}` : ''}`,
+  );
+export const getReviewItem = (itemId) => request('GET', `/api/reviews/${encodeURIComponent(itemId)}`);
+export const setReviewStatus = (itemId, body) =>
+  request('POST', `/api/reviews/${encodeURIComponent(itemId)}/status`, body);
+export const autofixReviewItem = (itemId, apply: boolean) =>
+  request('POST', `/api/reviews/${encodeURIComponent(itemId)}/autofix`, { apply });
+export const suggestReviewFix = (itemId) => request('POST', `/api/reviews/${encodeURIComponent(itemId)}/suggest`, {});
 
 // ─── SHACL Studio: validation pipelines ─────────────────────────────────────
 export const listPipelines = () => request('GET', '/api/shacl/pipelines');
@@ -1306,8 +1483,12 @@ export const deleteAssetFolder = (datasetId, path, recursive = false) =>
   );
 
 // Move (folder) and/or rename (filename) an asset; absent keys keep their value.
-export const moveAsset = (datasetId, assetId, { folder, filename } = {}) => {
-  const body = {};
+export const moveAsset = (
+  datasetId,
+  assetId,
+  { folder, filename }: { folder?: string; filename?: string } = {}
+) => {
+  const body: Record<string, string> = {};
   if (folder !== undefined) body.folder = folder;
   if (filename !== undefined) body.filename = filename;
   return request('PATCH', `/api/datasets/${datasetId}/assets/${assetId}`, body);
@@ -1343,6 +1524,50 @@ export function isLoggedIn() {
 
 // ── Model Registry (OWL/RDFS ontologies and SKOS vocabularies) ─────────────────
 // Each entry carries a `kind` ("data-model" | "vocabulary"), auto-detected on upload.
+
+/** A licence by name and canonical URI. */
+export interface ModelLicenseRef {
+  name: string;
+  uri: string;
+}
+
+/**
+ * Licence and attribution of the content a registry entry or version holds:
+ * set for the bundled standard vocabularies the server seeds (and drafts
+ * copied from them), `null` otherwise. Registry metadata, not part of the
+ * stored graph. Mirrors `ContentAttribution` in src/data_models/models.rs.
+ */
+export interface ModelAttribution {
+  /** The bundled file, relative to /vocab/ (e.g. "dcat/2.0.0.ttl"). */
+  file: string;
+  /** Empty when no licence is known (DOAP). */
+  licenses: ModelLicenseRef[];
+  /** Copyright notices or, where a source states none, its creator credit. */
+  copyright: string[];
+  /** The statement the licence asks every copy to carry, verbatim. */
+  notice: string | null;
+  /** The source document's status (the W3C Document License asks for it). */
+  status: string | null;
+  source_url: string;
+  specification_url: string | null;
+  /** How the bundled file differs from its source. */
+  changes: string | null;
+  /** How the stored copy relates to the bundled file. */
+  stored_copy: string;
+  /**
+   * The server checked that the stored triples are the bundled file's.
+   * False for drafts, branches, merges, rebases and edited copies, which may
+   * have been modified. Absent from older servers' records.
+   */
+  unchanged?: boolean;
+  remarks: string | null;
+  /** The rights holder allows no altered copies (IMBOR). */
+  no_derivatives: boolean;
+  /** The bundled file's own comment header, verbatim. */
+  header: string | null;
+  /** Full attribution and licence texts (/vocab/NOTICE.md on this server). */
+  notice_url: string;
+}
 
 export const listDataModels = () => request('GET', '/api/models');
 
@@ -1531,6 +1756,41 @@ export const createTripleSecurityLabel = (data) =>
 export const deleteTripleSecurityLabel = (id) =>
   request('DELETE', `/api/admin/acl/triples/${id}`);
 
+// ─── Admin: Prefix overrides ─────────────────────────────────────────────────
+// What a prefix label means *on this deployment*, outranking the bundled
+// community snapshot and the labels derived from the store's own datasets.
+
+export interface PrefixOverride {
+  label: string;
+  namespace: string;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** The overrides this deployment has set, ordered by label. */
+export const adminListPrefixOverrides = (): Promise<PrefixOverride[]> =>
+  request('GET', '/api/admin/prefixes');
+
+/**
+ * Claim a label. Refused with 409 when the label already has an override —
+ * the thrown ApiError's `body` then carries `{ error, label, namespace }`,
+ * where `namespace` is what the label resolves to today.
+ */
+export const adminCreatePrefixOverride = (label: string, namespace: string): Promise<PrefixOverride> =>
+  request('POST', '/api/admin/prefixes', { label, namespace });
+
+/** Repoint a label, or create it if this deployment had no opinion of it yet. */
+export const adminPutPrefixOverride = (label: string, namespace: string): Promise<PrefixOverride> =>
+  request('PUT', `/api/admin/prefixes/${encodeURIComponent(label)}`, { namespace });
+
+/**
+ * Drop this deployment's opinion of a label. The prefix itself survives: it
+ * falls back to whichever lower tier answers first.
+ */
+export const adminDeletePrefixOverride = (label: string) =>
+  request('DELETE', `/api/admin/prefixes/${encodeURIComponent(label)}`);
+
 
 // ─── Vocabulary search service (internal LOV) ────────────────────────────────
 // Backed by the platform's own vocabulary catalog (bundled LOV snapshot +
@@ -1563,7 +1823,28 @@ export interface VocabCatalogEntry {
   }[];
   source: 'platform' | 'lov';
   model_id?: string | null;
+  /** Its graph is in this instance's corpus (the image ships only
+   *  vocabularies this platform may redistribute). */
   installable: boolean;
+  /** The vocabulary's licence: the one its own graph declares or, where it
+   *  names none, its publisher's published terms (`license_source`). LOV
+   *  entries only; null status on platform entries. LOV's CC BY 4.0 covers
+   *  only LOV's metadata, not the vocabularies. */
+  license: string[];
+  license_declared: string[];
+  license_status: 'open' | 'restricted' | 'unrecognised' | 'copyright-only' | 'none' | null;
+  /** This platform may redistribute it (and term-indexes it). */
+  redistributable: boolean;
+  /** `graph`: the licence fields are what the vocabulary's own graph states;
+   *  `publisher-terms`: the graph names none and the publisher states its
+   *  terms elsewhere (`license_source_url`). */
+  license_source?: 'graph' | 'publisher-terms' | null;
+  license_source_url?: string | null;
+  /** The statement the licence requires on copies (a copyright line, the
+   *  W3C or OGC document notice, …), whatever the licence's source. */
+  license_notice?: string | null;
+  /** Why an openly licensed vocabulary is still not redistributed. */
+  redistribution_withheld?: string | null;
 }
 
 export interface VocabTermHit {
@@ -1652,3 +1933,21 @@ export const expandCurie = (curie: string) =>
 
 export const shrinkIri = (iri: string) =>
   request('GET', `/api/prefixes/shrink?iri=${encodeURIComponent(iri)}`);
+
+/**
+ * What a label resolves to right now, and from which tier — `admin` (an
+ * override set here), `platform`, `seeded`, `dataset` or `cache`. Resolves
+ * through the tiers in order, so it answers "what would this prefix mean if I
+ * used it today?" rather than "is there an override for it?".
+ *
+ * A label nothing knows gets a 404, which callers read as "undefined so far"
+ * rather than as a failure.
+ */
+export const lookupPrefixLabel = (label: string): Promise<ResolvedPrefixLookup> =>
+  request('GET', `/api/prefixes/${encodeURIComponent(label)}`);
+
+export interface ResolvedPrefixLookup {
+  prefix: string;
+  namespace: string;
+  source: string;
+}

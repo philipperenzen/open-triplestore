@@ -62,6 +62,8 @@ pub async fn describe_term(
 
     let record = registry::get_version(&state.store, &state.base_url, &id, &version)
         .ok_or_else(|| AppError::NotFound(format!("Version '{version}' not found")))?;
+    // Content that allows no altered copies is described from its checked copy only.
+    super::handlers::ensure_servable(&state, &id, &data_model, &record.version, user.as_deref())?;
 
     let graphs: Vec<String> = if record.sub_graphs.is_empty() {
         vec![record.graph_iri.clone()]
@@ -106,5 +108,17 @@ pub async fn describe_term(
         header::CONTENT_TYPE,
         HeaderValue::from_static(format.content_type()),
     );
+    // A term's description is a portion of the version's content: name its
+    // licence(s), source and full notice, as the download does.
+    if let Some(a) = registry::get_attribution(
+        &state.store,
+        &registry::version_record_iri(&state.base_url, &id, &record.version),
+    ) {
+        for link in super::vocab_files::link_header_values(&a, &state.base_url) {
+            if let Ok(v) = HeaderValue::from_str(&link) {
+                resp.headers_mut().append(header::LINK, v);
+            }
+        }
+    }
     Ok(resp)
 }

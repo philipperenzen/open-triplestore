@@ -23,17 +23,26 @@
   const model3d = () => import('../components/viewer/Model3D.svelte');
 
   // GeoSPARQL/OMG geometry often hangs off a *named* node
-  // (wb:Boog geo:hasGeometry wb:geom-boog; wb:geom-boog geo:asWKT "...").
+  // (eb:Arch geo:hasGeometry eb:geom-arch; eb:geom-arch geo:asWKT "...").
   // browseResource only inlines blank nodes, so follow hasGeometry objects one
   // hop and harvest their WKT + model-file values too.
   let hopWkts = [];
   let hopModels = [];
+  // Where the geometry came from (the geometry nodes and their provenance), so
+  // the map can carry the credit a licensed source requires (3DBAG's CC BY).
+  let hopSources = [];
+  const PROVENANCE_PREDICATES = [
+    'http://www.w3.org/ns/prov#wasDerivedFrom',
+    'http://purl.org/dc/terms/source',
+    'http://purl.org/dc/elements/1.1/source',
+  ];
   async function followGeometryHops(rows) {
     // Snapshot the IRI: the router reuses this component across navigations,
     // so a slow response for the previous resource must not overwrite state.
     const forIri = iri;
     hopWkts = [];
     hopModels = [];
+    hopSources = [];
     const targets = rows
       .filter((r) => isGeometryPredicate(r.p?.value))
       .map((r) => r.o)
@@ -47,9 +56,11 @@
     if (forIri !== iri) return; // navigated away while loading
     const wkts = [];
     const models = [];
+    const sources = [...targets];
     const scanRow = (r) => {
       if (isWktLiteral(r.o)) wkts.push(r.o.value);
       const v = r.o?.value;
+      if (typeof v === 'string' && PROVENANCE_PREDICATES.includes(r.p?.value)) sources.push(v);
       if (typeof v === 'string') {
         const format = modelFormatFromUrl(v);
         if (format) models.push({ id: v, label: shortenIRI(r.p?.value || ''), url: v, format });
@@ -62,6 +73,7 @@
     }
     hopWkts = wkts;
     hopModels = models;
+    hopSources = sources;
   }
   $: followGeometryHops(outgoing);
 
@@ -69,6 +81,14 @@
   $: allModels = [
     ...featuredModels,
     ...hopModels.filter((m) => !featuredModels.some((f) => f.url === m.url)),
+  ];
+  $: geoSources = [
+    iri,
+    ...outgoing
+      .filter((r) => PROVENANCE_PREDICATES.includes(r.p?.value) && typeof r.o?.value === 'string')
+      .map((r) => r.o.value),
+    ...hopSources,
+    ...allModels.map((m) => m.url),
   ];
 
   // Real-world footprint for the map's "to scale" toggle, measured from the
@@ -100,7 +120,7 @@
   import { tick } from 'svelte';
   import { detectValueKind, datatypeLabel } from '../lib/ontology/valueType.js';
   import { prefixForNamespace, lookupNamespacePrefix } from '../lib/ontology/prefixService.js';
-  import { copyToClipboard } from '../lib/clipboard.js';
+  import { copyOrWarn } from '../lib/clipboard.js';
 
   const isIri = (term) => term && (term.type === 'uri' || term.type === 'iri');
   const langOf = (term) => term && (term['xml:lang'] || term.language || term.lang || '');
@@ -331,8 +351,13 @@
     navigate(`/browse?${qs.toString()}`);
   }
 
+  // A copy fails more often than the old silent `if (ok) …` assumed: the async
+  // Clipboard API rejects while the document is not focused, and does not exist
+  // at all outside a secure context — a store reached over plain HTTP on a LAN,
+  // which is a normal deployment here. `copyOrWarn` says so instead of leaving
+  // the user clicking a button that does nothing.
   async function copyIri() {
-    if (await copyToClipboard(iri)) {
+    if (await copyOrWarn(iri)) {
       copied = true;
       setTimeout(() => (copied = false), 1500);
     }
@@ -637,6 +662,27 @@
 </script>
 
 <div class="resource-page">
+  <!-- The full IRI plus its copy control, shared by the two headers below (the
+       file resource's and the normal one), which used to carry a copy of it
+       each. The copy control is a named button rather than the bare 12px glyph
+       it was: an unlabelled icon at the far end of a long line is neither
+       findable nor announceable, and its tooltip never appears on a touch
+       device. Click-to-copy on the IRI text itself was the alternative, but it
+       fights the very thing the next line protects — selecting the text by
+       hand. The IRI wraps instead of being clipped with an ellipsis, because a
+       user who copies it by selecting should get all of it, not a middle. -->
+  {#snippet iriLine()}
+    <div class="iri-full">
+      <code class="iri-text">{iri}</code>
+      <button class="copy-iri" on:click={copyIri}>
+        {#if copied}<Check size={13} />{:else}<Copy size={13} />{/if}
+        <!-- One span across both states, so the swap is announced by the live
+             region rather than replacing it. -->
+        <span aria-live="polite">{copied ? $i18nT('system.copied') : $i18nT('pages.resource.copyIri')}</span>
+      </button>
+    </div>
+  {/snippet}
+
   <!-- Breadcrumb / back -->
   <div class="crumbs">
     <button class="crumb-btn" on:click={goBack} title={$i18nT('pages.resource.goBack')}>
@@ -659,12 +705,7 @@
         <FileText size={16} />
         <h2>{shortenIRI(iri)}</h2>
       </div>
-      <div class="iri-full">
-        <span class="truncate">{iri}</span>
-        <button class="icon-btn" on:click={copyIri} title={$i18nT('pages.resource.copyIri')}>
-          {#if copied}<Check size={12} />{:else}<Copy size={12} />{/if}
-        </button>
-      </div>
+      {@render iriLine()}
     </div>
     <div class="card">
       <FileViewer url={iri} height="360px" />
@@ -681,12 +722,7 @@
         {:else}
           <h2>{shortenIRI(iri)}</h2>
         {/if}
-        <div class="iri-full">
-          <span class="truncate">{iri}</span>
-          <button class="icon-btn" on:click={copyIri} title={$i18nT('pages.resource.copyIri')}>
-            {#if copied}<Check size={12} />{:else}<Copy size={12} />{/if}
-          </button>
-        </div>
+        {@render iriLine()}
       </div>
       <div class="header-actions">
         <div class="tb-menu-wrap" use:clickOutside={() => (showTbMenu = false)}>
@@ -832,7 +868,7 @@
           <h3><MapPin size={14} /> {$i18nT('pages.resource.geometry')}</h3>
           {#await geoPreviewMod then GP}
             {#if GP}
-              <svelte:component this={GP.default} wkts={allWkts} scaleMeters={modelMeters} />
+              <svelte:component this={GP.default} wkts={allWkts} scaleMeters={modelMeters} sources={geoSources} />
             {/if}
           {/await}
         </div>
@@ -1260,9 +1296,13 @@
   .header-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
   .min-w-0 { min-width: 0; }
   .short-iri { font-size: 0.8rem; color: #6a5acd; margin-bottom: 0.25rem; font-weight: 500; }
-  .iri-full { display: inline-flex; align-items: center; gap: 0.4rem; font-family: monospace; font-size: 0.75rem; color: #4a90d9; word-break: break-all; max-width: 100%; }
-  .icon-btn { border: none; background: transparent; color: inherit; cursor: pointer; padding: 2px; border-radius: 6px; }
-  .icon-btn:hover { background: rgba(0,0,0,0.06); }
+  .iri-full { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 0.35rem 0.5rem; font-size: 0.75rem; color: #4a90d9; max-width: 100%; }
+  /* Wraps over as many lines as the IRI needs; see the markup for why it is no
+     longer clipped to one line with an ellipsis. */
+  .iri-text { flex: 1 1 20rem; min-width: 0; font-family: monospace; word-break: break-all; user-select: text; }
+  .copy-iri { display: inline-flex; align-items: center; gap: 0.3rem; flex: none; padding: 1px 0.5rem; border: 1px solid currentColor; border-radius: 999px; background: transparent; color: inherit; font-size: 0.7rem; line-height: 1.7; cursor: pointer; }
+  .copy-iri:hover { background: rgba(74,144,217,0.12); }
+  .copy-iri:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 
   .header-actions { display: flex; gap: 0.4rem; flex-shrink: 0; flex-wrap: wrap; }
 
@@ -1360,8 +1400,6 @@
   .ld-dropdown a { display: block; padding: 6px 14px; font-size: 0.82rem; color: #333; text-decoration: none; }
   .ld-dropdown a:hover { background: #f0f4ff; }
 
-  .truncate { overflow: hidden; text-overflow: ellipsis; max-width: 600px; }
-
   .empty-state { display: flex; gap: 0.75rem; align-items: flex-start; padding: 1rem; background: #fffbe6; border: 1px solid #ffe58f; color: #614700; }
   .empty-state strong { display: block; margin-bottom: 0.25rem; }
   .empty-state .muted { margin: 0 0 0.5rem; }
@@ -1441,7 +1479,7 @@
 
   :global(:is([data-theme="dark"], .dark)) .crumb-btn { background: rgba(255,255,255,0.06); }
   :global(:is([data-theme="dark"], .dark)) .crumb-btn:hover { background: rgba(255,255,255,0.1); }
-  :global(:is([data-theme="dark"], .dark)) .icon-btn:hover { background: rgba(255,255,255,0.08); }
+  :global(:is([data-theme="dark"], .dark)) .copy-iri:hover { background: rgba(96,165,250,0.16); }
   :global(:is([data-theme="dark"], .dark)) .crumb-scope,
   :global(:is([data-theme="dark"], .dark)) .type-badge,
   :global(:is([data-theme="dark"], .dark)) .toggle-on,

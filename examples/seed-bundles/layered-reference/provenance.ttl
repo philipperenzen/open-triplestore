@@ -1,0 +1,11 @@
+@prefix exp:  <https://example.org/layered/prov/> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+exp:import-2026-09 a prov:Activity ;
+    prov:startedAtTime "2026-09-01T09:00:00Z"^^xsd:dateTime ;
+    prov:endedAtTime   "2026-09-01T09:05:00Z"^^xsd:dateTime ;
+    prov:wasAssociatedWith exp:asset-office ;
+    prov:used <https://registry.example.org/export/2026-09> .
+exp:asset-office a prov:Organization .
+<https://example.org/layered/instances> a prov:Entity ; prov:wasGeneratedBy exp:import-2026-09 .

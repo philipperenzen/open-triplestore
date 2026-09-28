@@ -106,6 +106,17 @@ your use of those services is governed by **their** terms and privacy policies.
 The bundled web UI may load assets from public CDNs in the user's browser (see
 [PRIVACY.md](PRIVACY.md) §5.1).
 
+The Software also bundles third-party data — vocabularies, test suites and demo
+datasets — each under its publisher's own licence, listed in
+[`NOTICE`](NOTICE) and, per vocabulary, in `frontend/public/vocab/NOTICE.md`
+(served at `/vocab/NOTICE.md`). If you seed the clinical-reference bundle, your
+terms must carry LOINC's notice, which its licence requires of any online
+resource that serves LOINC content: *This material contains content from LOINC
+(http://loinc.org). LOINC is copyright © Regenstrief Institute, Inc. and the
+Logical Observation Identifiers Names and Codes (LOINC) Committee and is
+available at no cost under the license at http://loinc.org/license. LOINC® is a
+registered United States trademark of Regenstrief Institute, Inc.*
+
 ## 8. Operators must set their own end-user terms
 
 These terms govern your use of the **Software**. They are **not** a contract

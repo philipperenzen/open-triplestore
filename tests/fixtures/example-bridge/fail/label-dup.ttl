@@ -1,0 +1,5 @@
+# ❌ Two nl labels violate sh:uniqueLang on ex:LabelShape (targetClass def:Structure).
+@prefix def: <https://example.org/def/> .
+@prefix eb:  <https://example.org/id/example-bridge/> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+eb:ExampleBridge a def:Structure ; rdfs:label "Voorbeeldbrug"@nl , "Brug"@nl .

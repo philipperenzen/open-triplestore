@@ -78,6 +78,19 @@ pub fn management_routes() -> Router<AppState> {
     Router::new()
         .route("/", get(service_description_handler))
         .route("/health", get(health_check))
+        .route("/api/admin/telemetry", get(admin_telemetry))
+        .route("/api/admin/changes", get(admin_changes))
+        .route("/api/admin/changes/status", get(admin_changes_status))
+        .route(
+            "/api/admin/changes/cursors/:name",
+            put(admin_changes_set_cursor).delete(admin_changes_delete_cursor),
+        )
+        .route("/api/replication/status", get(replication_status))
+        .route("/api/replication/manifest", get(replication_manifest))
+        .route("/api/replication/identity", get(replication_identity))
+        .route("/api/replication/raft/vote", post(raft_vote))
+        .route("/api/replication/raft/append", post(raft_append))
+        .route("/api/replication/raft/snapshot", post(raft_snapshot))
         .route("/livez", get(liveness_check))
 }
 
@@ -88,6 +101,9 @@ pub struct SparqlQueryParams {
     pub query: Option<String>,
     /// Entailment regime: "rdfs", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl"
     pub entailment: Option<String>,
+    /// A dataset whose own entailment graph (`urn:entailment:<regime>:<id>`)
+    /// joins the query; the regime defaults to the dataset's configured one.
+    pub entailment_dataset: Option<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -148,6 +164,7 @@ async fn sparql_query_get(
         &query,
         accept,
         params.entailment.as_deref(),
+        params.entailment_dataset.as_deref(),
     )
     .await
 }
@@ -160,6 +177,7 @@ async fn sparql_query_get(
 async fn sparql_post(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
+    Query(url_params): Query<SparqlQueryParams>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
@@ -185,7 +203,15 @@ async fn sparql_post(
 
     if content_type.starts_with("application/sparql-query") {
         // Direct query in body
-        execute_query(&state, user.as_deref(), &body_str, accept, None).await
+        execute_query(
+            &state,
+            user.as_deref(),
+            &body_str,
+            accept,
+            url_params.entailment.as_deref(),
+            url_params.entailment_dataset.as_deref(),
+        )
+        .await
     } else if content_type.starts_with("application/sparql-update") {
         // Updates require authentication
         if user.is_none() {
@@ -209,8 +235,17 @@ async fn sparql_post(
             .find(|(k, _)| k == "update")
             .map(|(_, v)| v.as_str());
 
+        // Entailment selection: form fields first, then the URL's query parameters.
+        let field = |name: &str| {
+            params
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        };
+        let ent = field("entailment").or(url_params.entailment.as_deref());
+        let ent_ds = field("entailment_dataset").or(url_params.entailment_dataset.as_deref());
         if let Some(q) = query {
-            execute_query(&state, user.as_deref(), q, accept, None).await
+            execute_query(&state, user.as_deref(), q, accept, ent, ent_ds).await
         } else if let Some(u) = update {
             if user.is_none() {
                 return Err(AppError::Unauthorized(
@@ -469,6 +504,7 @@ async fn execute_query(
     query: &str,
     accept: &str,
     entailment: Option<&str>,
+    entailment_dataset: Option<&str>,
 ) -> Result<Response, AppError> {
     debug!("Executing query, Accept: {}", accept);
 
@@ -530,6 +566,20 @@ async fn execute_query(
         Some(scope_query_to_authorized(query, &accessible))
     };
 
+    // Fail-closed read boundary (non-admins only). Capture the graphs the caller
+    // may read now, before the text-search block consumes `accessible`; the
+    // server-owned entailment graph (added additively below) is folded in once it
+    // is known. The final query is checked against this set just before execution,
+    // so a literal-spliced or unstripped `FROM` clause cannot widen the read past
+    // it. Admins are scoped additively over every registered graph, so they are
+    // exempt. See [`ensure_query_within_scope`].
+    let mut guard_scope: Option<std::collections::HashSet<String>> =
+        if user.map(|u| u.is_admin()).unwrap_or(false) {
+            None
+        } else {
+            Some(accessible.clone())
+        };
+
     // Full-text preprocessing: `text:search` expansion + CONTAINS/STRSTARTS
     // push-down (text-search feature). Runs on the already-scoped query, and
     // is handed the same graph set so index hits obey the same read boundary.
@@ -553,29 +603,79 @@ async fn execute_query(
     #[cfg(not(feature = "text-search"))]
     let query = scoped_query.as_deref().unwrap_or(query);
 
-    // Entailment regime: inject FROM <urn:entailment:...> if requested
-    let entailment_query: String;
-    let query = if let Some(regime) = entailment {
-        let graph_iri = match regime {
-            "rdfs" => Some(crate::reasoning::common::RDFS_ENTAILMENT_GRAPH),
-            "owl2-rl" => Some(crate::reasoning::common::OWL2_RL_ENTAILMENT_GRAPH),
-            "owl2-el" => Some(crate::reasoning::common::OWL2_EL_ENTAILMENT_GRAPH),
-            "owl2-ql" => Some(crate::reasoning::common::OWL2_QL_ENTAILMENT_GRAPH),
-            _ => None,
-        };
-        if let Some(iri) = graph_iri {
-            entailment_query =
-                inject_from_clauses(query, &format!("FROM <{iri}>\nFROM NAMED <{iri}>\n"));
-            &entailment_query as &str
-        } else {
-            query
+    // Entailment: a dataset's own entailment graph (`entailment_dataset`, regime
+    // from the parameter or the dataset's configuration), else the shared
+    // `urn:entailment:<regime>` graph, joins the default graph via FROM.
+    let entailment_graph: Option<String> = if let Some(ds_id) = entailment_dataset {
+        let ds = state
+            .auth_db
+            .get_dataset(ds_id)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::NotFound(format!("Dataset '{ds_id}' not found")))?;
+        if !state
+            .auth_db
+            .can_access_dataset(user_id, &ds)
+            .unwrap_or(false)
+        {
+            return Err(AppError::NotFound(format!("Dataset '{ds_id}' not found")));
         }
+        // The regime: the parameter, else the dataset's configuration. A dataset
+        // with no regime configured makes the parameter a no-op, so a client can
+        // always send it.
+        let regime = match entailment {
+            Some(r) => Some(r.to_string()),
+            None => crate::entailment::config(&state.auth_db, ds_id)
+                .ok()
+                .flatten()
+                .map(|c| c.regime),
+        };
+        match regime {
+            Some(r) if !crate::entailment::REGIMES.contains(&r.as_str()) => {
+                return Err(AppError::BadRequest(format!(
+                    "unknown entailment regime `{r}`"
+                )));
+            }
+            Some(r) => Some(crate::entailment::dataset_entailment_graph(&r, ds_id)),
+            None => None,
+        }
+    } else if let Some(regime) = entailment {
+        match regime {
+            "rdfs" => Some(crate::reasoning::common::RDFS_ENTAILMENT_GRAPH.to_string()),
+            "owl2-rl" => Some(crate::reasoning::common::OWL2_RL_ENTAILMENT_GRAPH.to_string()),
+            "owl2-el" => Some(crate::reasoning::common::OWL2_EL_ENTAILMENT_GRAPH.to_string()),
+            "owl2-ql" => Some(crate::reasoning::common::OWL2_QL_ENTAILMENT_GRAPH.to_string()),
+            // Advertised in the OpenAPI spec and in docs/owl2-dl.md, but this
+            // arm was missing: `?entailment=owl2-dl` fell through to `_ => None`
+            // and the query silently ran with no entailment graph at all.
+            "owl2-dl" => Some(crate::reasoning::common::OWL2_DL_ENTAILMENT_GRAPH.to_string()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let entailment_query: String;
+    let query = if let Some(iri) = entailment_graph {
+        // The regime graph is server-owned and added additively, so it is part of
+        // the readable scope for the guard below.
+        if let Some(scope) = guard_scope.as_mut() {
+            scope.insert(iri.clone());
+        }
+        entailment_query =
+            inject_from_clauses(query, &format!("FROM <{iri}>\nFROM NAMED <{iri}>\n"));
+        &entailment_query as &str
     } else {
         query
     };
 
     let effective_query = resolve_prefixes(state, query).await;
     let effective_query_str = effective_query.as_deref().unwrap_or(query).to_string();
+
+    // Fail-closed: the rewritten non-admin query must name only graphs the caller
+    // may read (see [`ensure_query_within_scope`]). Runs before the query reaches
+    // the store, so an out-of-scope graph is a 403, never a read.
+    if let Some(allowed) = &guard_scope {
+        ensure_query_within_scope(&effective_query_str, allowed)?;
+    }
 
     // M-1: Enforce a configurable SPARQL query timeout to prevent runaway queries.
     let timeout = std::time::Duration::from_secs(state.query_timeout_secs);
@@ -592,7 +692,10 @@ async fn execute_query(
     let (ct_tx, ct_rx) = oneshot::channel::<Result<&'static str, AppError>>();
     let (chunk_tx, chunk_rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(8);
 
+    let federated_identity = user.and_then(|u| crate::federation::identity_for(state, &u.user_id));
     tokio::task::spawn_blocking(move || {
+        // SERVICE clauses evaluated inside this query act for the caller.
+        let _identity = crate::federation::IdentityGuard::set(federated_identity);
         let results = match store.query(&effective_query_str) {
             Ok(r) => r,
             Err(e) => {
@@ -662,7 +765,7 @@ async fn execute_query(
 /// graph IRIs. `require_graph_write` is called for each one so that the
 /// graph-level ACL is enforced for SPARQL UPDATE the same way it is for
 /// the Graph Store Protocol PUT/POST/DELETE endpoints.
-async fn execute_update(
+pub(crate) async fn execute_update(
     state: &AppState,
     user: Option<&AuthenticatedUser>,
     update: &str,
@@ -674,7 +777,7 @@ async fn execute_update(
     let effective_str = effective_update.as_deref().unwrap_or(update);
 
     // Parse with spargebra to extract target graph IRIs for ACL checking.
-    let parsed = spargebra::SparqlParser::new()
+    let parsed = crate::sparql::parser()
         .parse_update(effective_str)
         .map_err(|e| AppError::BadRequest(format!("Invalid SPARQL UPDATE: {}", e)))?;
 
@@ -689,27 +792,101 @@ async fn execute_update(
 
     // H-1: enforce the per-graph ACL on BOTH the write targets and the WHERE/USING
     // read side, and admin-gate variable-graph / SERVICE / all-graph operations.
-    let (graph_iris, requires_admin) = authorize_update(state, user, &parsed)?;
+    let authorized = authorize_update(state, user, &parsed)?;
+    let (graph_iris, requires_admin) = (authorized.write_iris, authorized.requires_admin);
+    // A write into a model version's graph: its licence record stops calling
+    // the content unchanged before the write runs.
+    mark_model_versions_written(state, &authorized.model_versions)?;
 
     // M-5: Use targeted graph index update (only re-count affected graphs).
     // W4-21: Wrap in a configurable timeout to abort runaway UPDATE operations.
     let effective = effective_str.to_string();
     let store = state.store.clone();
     let affected = graph_iris.clone();
+    let ldes_before = {
+        let st = state.clone();
+        let gs = graph_iris.clone();
+        tokio::task::spawn_blocking(move || crate::ldes::capture::before(&st, &gs))
+            .await
+            .unwrap_or_default()
+    };
     let timeout = std::time::Duration::from_secs(state.query_timeout_secs);
-    tokio::time::timeout(
-        timeout,
-        tokio::task::spawn_blocking(move || {
-            store.update_targeted(&effective, &affected, requires_admin)
-        }),
-    )
-    .await
-    .map_err(|_| AppError::BadRequest("Update execution timed out".to_string()))?
-    .map_err(|e| AppError::Internal(e.to_string()))?
-    .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let ctx = write_context(state, user, crate::commit_log::CommitKind::Sparql);
+    // A write whose graphs could not be named before it ran: the model copies
+    // a check vouched for are re-checked after it. The re-check runs in the
+    // write's own blocking task, right after the write: that task cannot be
+    // cancelled and commits even when this request stops waiting (the timeout
+    // below, a client that goes away), so the re-check runs whenever the write
+    // did. The result is handed over before the re-check, which therefore does
+    // not count toward the timeout.
+    let reverify = authorized.writes_unnamed_graphs;
+    let st = state.clone();
+    let (result_tx, result_rx) = oneshot::channel();
+    let write = tokio::task::spawn_blocking(move || {
+        let result = {
+            let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
+            store.update_targeted_delta(&effective, &affected, requires_admin)
+        };
+        // A replica refuses every write before anything is written.
+        let may_have_written =
+            !matches!(result, Err(crate::store::engine::StoreError::ReadOnly(_)));
+        let _ = result_tx.send(result);
+        if reverify && may_have_written {
+            reverify_model_copies_after_write(&st);
+        }
+    });
+    let delta = tokio::time::timeout(timeout, result_rx)
+        .await
+        .map_err(|_| {
+            // Only the wait ends here: the write cannot be cancelled.
+            AppError::BadRequest(
+                "Update execution timed out: the server stopped waiting for it, but an update \
+                 cannot be cancelled once it runs and may still complete; check the data before \
+                 running it again"
+                    .to_string(),
+            )
+        })?
+        .map_err(|_| AppError::Internal("the update task ended without a result".to_string()))?
+        .map_err(|e| match e {
+            // A replica refuses every write: 503, not a client error.
+            crate::store::engine::StoreError::ReadOnly(_) => AppError::from(e),
+            other => AppError::BadRequest(other.to_string()),
+        })?;
+    if reverify {
+        // Answer once the re-check is done, so a read right after this
+        // response sees the records it marked.
+        let _ = write.await;
+    }
+    // Writer-pays text-index maintenance: a ground update (INSERT DATA /
+    // DELETE DATA) knows its exact quads, so just those documents change;
+    // any other update with known target graphs refreshes exactly those; a
+    // variable-graph / default-graph / admin wildcard update falls back to
+    // the whole-index dirty flag (repaired by the background sync) because its
+    // touched set can't be enumerated here.
     #[cfg(feature = "text-search")]
-    state.mark_text_dirty();
+    if requires_admin || graph_iris.is_empty() {
+        state.mark_text_dirty();
+    } else {
+        let st = state.clone();
+        let graphs = graph_iris.clone();
+        let _ = tokio::task::spawn_blocking(move || match delta {
+            Some((inserted, deleted)) => st.text_index_apply_delta(&inserted, &deleted, &graphs),
+            None => st.refresh_text_index_graphs(&graphs),
+        })
+        .await;
+    }
+    #[cfg(not(feature = "text-search"))]
+    let _ = delta;
 
+    {
+        let st = state.clone();
+        let ent_graphs: Vec<String> = graph_iris.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::ldes::capture::after(&st, ldes_before);
+            crate::entailment::after_write(&st, &ent_graphs);
+        })
+        .await;
+    }
     {
         use crate::auth::audit::{AuditEventBuilder, AuditEventType, AuditOutcome};
         let mut b = AuditEventBuilder::new(AuditEventType::SparqlUpdate, AuditOutcome::Success)
@@ -739,7 +916,7 @@ async fn execute_update(
         }
     }
 
-    Ok(StatusCode::NO_CONTENT.into_response())
+    Ok(with_ack(state, StatusCode::NO_CONTENT.into_response()))
 }
 
 /// Graph access a SPARQL UPDATE performs, resolved for per-graph ACL enforcement.
@@ -764,6 +941,10 @@ struct UpdateGraphAccess {
     /// of affected graphs cannot be bounded statically, so the operation is
     /// restricted to admins (non-admins must name explicit graphs).
     unscoped: bool,
+    /// A variable graph in a DELETE/INSERT template: the graphs the update
+    /// WRITES cannot be named before it runs (a variable graph read only in
+    /// the WHERE clause leaves every write target named).
+    unnamed_write: bool,
 }
 
 /// Recursively collect the named graphs a `WHERE` pattern reads, flagging a
@@ -860,7 +1041,10 @@ fn analyze_update_graph_access(update: &spargebra::Update) -> UpdateGraphAccess 
                         GraphNamePattern::NamedNode(nn) => {
                             acc.write_iris.insert(nn.as_str().to_string());
                         }
-                        GraphNamePattern::Variable(_) => acc.unscoped = true,
+                        GraphNamePattern::Variable(_) => {
+                            acc.unscoped = true;
+                            acc.unnamed_write = true;
+                        }
                         GraphNamePattern::DefaultGraph => {
                             // Resolves to the WITH/USING default graph(s); with no
                             // USING it is the unnamed default graph (allowed, like a
@@ -902,37 +1086,41 @@ fn analyze_update_graph_access(update: &spargebra::Update) -> UpdateGraphAccess 
 /// path scopes to (see [`execute_query`]). Used to authorize the read
 /// (`WHERE`/`USING`) side of SPARQL UPDATEs so a writer cannot copy data out of
 /// graphs they cannot read.
-fn accessible_read_graphs(
+pub(crate) fn accessible_read_graphs(
     state: &AppState,
     user: Option<&AuthenticatedUser>,
 ) -> Result<std::collections::HashSet<String>, AppError> {
-    let user_id = user.map(|u| u.user_id.as_str());
-    let cached = state
-        .auth_db
-        .get_accessible_graph_iris_cached(user_id)
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-    let mut accessible = cached.0.clone();
-    if let Some(u) = user {
-        if let Ok(acl_iris) = state
-            .auth_db
-            .get_graph_acl_readable_iris(&u.user_id, u.role.as_str())
-        {
-            accessible.extend(acl_iris);
-        }
-    } else if let Ok(acl_iris) = state.auth_db.get_graph_acl_readable_iris("", "public") {
-        accessible.extend(acl_iris);
-    }
-    Ok(accessible)
+    crate::auth::acl::readable_graph_iris(
+        &state.auth_db,
+        user.map(|u| (u.user_id.as_str(), u.role.as_str())),
+    )
+    .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// What [`authorize_update`] found a SPARQL UPDATE may do.
+struct AuthorizedUpdate {
+    /// Ground write-target IRIs (for index recount, audit, and provenance).
+    write_iris: Vec<String>,
+    /// An all-graph operation (CLEAR/DROP ALL or NAMED).
+    requires_admin: bool,
+    /// The update writes graphs that cannot be named before it runs (a
+    /// variable graph in a DELETE/INSERT template, CLEAR/DROP ALL or NAMED):
+    /// admin only, and followed by a re-check of the model copies a check
+    /// vouched for, since no guard could look at those graphs beforehand.
+    writes_unnamed_graphs: bool,
+    /// Model versions with a licence record among the write targets, to mark
+    /// as possibly modified before the write runs.
+    model_versions: Vec<crate::data_models::registry::AttributedVersion>,
 }
 
 /// Enforce the per-graph ACL for both the write and read side of a parsed
-/// SPARQL UPDATE (H-1). Returns the ground write-target IRIs (for index recount,
-/// audit, and provenance) and whether the update is an all-graph operation.
+/// SPARQL UPDATE (H-1), and the model registry's guard on each ground write
+/// target (a version whose licence allows no altered copies is refused).
 fn authorize_update(
     state: &AppState,
     user: Option<&AuthenticatedUser>,
     parsed: &spargebra::Update,
-) -> Result<(Vec<String>, bool), AppError> {
+) -> Result<AuthorizedUpdate, AppError> {
     let access = analyze_update_graph_access(parsed);
     let is_admin = user.map(|u| u.is_admin()).unwrap_or(false);
 
@@ -955,8 +1143,11 @@ fn authorize_update(
     }
 
     // Write permission for every ground target graph.
+    let mut model_versions = Vec::new();
     for iri in &access.write_iris {
-        require_graph_write(state, user, Some(iri.as_str()))?;
+        if let Some(v) = require_graph_write_for(state, user, Some(iri.as_str()))? {
+            model_versions.push(v);
+        }
     }
 
     // H-1: read permission for every ground graph the WHERE/USING reads. Prevents
@@ -972,10 +1163,56 @@ fn authorize_update(
         }
     }
 
-    Ok((
-        access.write_iris.into_iter().collect(),
-        access.requires_admin,
-    ))
+    Ok(AuthorizedUpdate {
+        write_iris: access.write_iris.into_iter().collect(),
+        requires_admin: access.requires_admin,
+        writes_unnamed_graphs: access.requires_admin || access.unnamed_write,
+        model_versions,
+    })
+}
+
+#[cfg(test)]
+mod update_graph_access_tests {
+    use super::analyze_update_graph_access;
+
+    fn access(update: &str) -> super::UpdateGraphAccess {
+        analyze_update_graph_access(&spargebra::SparqlParser::new().parse_update(update).unwrap())
+    }
+
+    /// Only a write whose graphs cannot be named before it runs is followed by
+    /// the re-check of the checked model copies: a variable graph in a
+    /// DELETE/INSERT template (`DELETE WHERE` included), or CLEAR/DROP ALL or
+    /// NAMED. A variable graph read only in the WHERE clause leaves every
+    /// write target named, and each of those went through the write guard.
+    #[test]
+    fn only_writes_into_unnamed_graphs_need_the_recheck() {
+        let a = access("INSERT { GRAPH <urn:mine> { ?s ?p ?o } } WHERE { GRAPH ?g { ?s ?p ?o } }");
+        assert!(a.unscoped, "admin only: the read side is unbounded");
+        assert!(!a.unnamed_write && !a.requires_admin);
+        assert!(a.write_iris.contains("urn:mine"));
+
+        for update in [
+            "INSERT { GRAPH ?g { ?s <urn:p> 1 } } WHERE { GRAPH ?g { ?s ?p ?o } }",
+            "DELETE { GRAPH ?g { ?s ?p ?o } } WHERE { GRAPH ?g { ?s ?p ?o } }",
+            "DELETE WHERE { GRAPH ?g { ?s <urn:p> ?o } }",
+        ] {
+            let a = access(update);
+            assert!(a.unnamed_write && a.unscoped, "{update}");
+        }
+        for update in ["CLEAR ALL", "DROP NAMED", "CLEAR SILENT ALL"] {
+            let a = access(update);
+            assert!(a.requires_admin && !a.unnamed_write, "{update}");
+        }
+        for update in [
+            "INSERT DATA { GRAPH <urn:g> { <urn:s> <urn:p> 1 } }",
+            "WITH <urn:g> DELETE { ?s ?p ?o } WHERE { ?s ?p ?o }",
+            "CLEAR GRAPH <urn:g>",
+            "COPY <urn:a> TO <urn:b>",
+        ] {
+            let a = access(update);
+            assert!(!a.unnamed_write && !a.requires_admin, "{update}");
+        }
+    }
 }
 
 // ─── Batch SPARQL UPDATE ──────────────────────────────────────────────────────
@@ -987,7 +1224,8 @@ struct BatchUpdateRequest {
 
 /// POST /sparql/batch — execute multiple SPARQL UPDATE statements in one batch.
 ///
-/// Amortises write-lock acquisition and SPARQL parse overhead across all
+/// The batch is one transaction: either every statement is applied or none
+/// is. Amortises write-lock acquisition and SPARQL parse overhead across all
 /// statements (3-7x faster than individual updates). Max 1000 statements.
 async fn sparql_batch_update(
     State(state): State<AppState>,
@@ -1014,43 +1252,81 @@ async fn sparql_batch_update(
             "This API token does not have write scope".to_string(),
         ));
     }
+    let mut model_versions = Vec::new();
+    let mut writes_unnamed_graphs = false;
     for stmt in &resolved {
-        let parsed = spargebra::SparqlParser::new()
+        let parsed = crate::sparql::parser()
             .parse_update(stmt.as_str())
             .map_err(|e| AppError::BadRequest(format!("Invalid SPARQL UPDATE: {}", e)))?;
         // H-1: per-graph read+write ACL, admin-gate variable-graph/SERVICE/all-graph ops.
-        authorize_update(&state, Some(&user), &parsed)?;
+        let authorized = authorize_update(&state, Some(&user), &parsed)?;
+        writes_unnamed_graphs |= authorized.writes_unnamed_graphs;
+        model_versions.extend(authorized.model_versions);
     }
+    // Every statement is authorized: the model versions the batch writes stop
+    // being called unchanged before it runs.
+    mark_model_versions_written(&state, &model_versions)?;
 
     let results = state.store.batch_update(&resolved)?;
+    if writes_unnamed_graphs {
+        // In a blocking task of its own, which runs to the end even when the
+        // client goes away while this request waits for it.
+        let st = state.clone();
+        let _ = tokio::task::spawn_blocking(move || reverify_model_copies_after_write(&st)).await;
+    }
 
     // Build per-statement status
+    use crate::store::engine::BatchStatement;
     let statuses: Vec<serde_json::Value> = results
         .iter()
         .enumerate()
         .map(|(i, r)| match r {
-            Ok(()) => serde_json::json!({ "index": i, "status": "ok" }),
-            Err(e) => serde_json::json!({ "index": i, "status": "error", "error": e }),
+            BatchStatement::Applied => serde_json::json!({ "index": i, "status": "ok" }),
+            BatchStatement::Failed(e) => {
+                serde_json::json!({ "index": i, "status": "error", "error": e })
+            }
+            BatchStatement::RolledBack => {
+                serde_json::json!({ "index": i, "status": "rolled_back" })
+            }
         })
         .collect();
 
-    let all_ok = results.iter().all(|r| r.is_ok());
+    let all_ok = results.iter().all(|r| *r == BatchStatement::Applied);
 
     if all_ok {
-        Ok((
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "ok",
-                "count": results.len(),
-            })),
-        )
-            .into_response())
+        Ok(with_ack(
+            &state,
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "count": results.len(),
+                })),
+            )
+                .into_response(),
+        ))
     } else {
+        // One transaction: a failing statement rolls every other statement
+        // back, so `results` names the failure and marks the rest
+        // `rolled_back`. 422: the request was understood, nothing was
+        // applied, and `error` says which statement failed and why. (The
+        // earlier 200-with-a-body was retired by the maintainer.)
+        let error = results
+            .iter()
+            .enumerate()
+            .find_map(|(i, r)| match r {
+                BatchStatement::Failed(e) => {
+                    Some(format!("statement {i} failed: {e}; nothing was applied"))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| "a statement failed; nothing was applied".to_string());
         Ok((
-            StatusCode::OK,
+            StatusCode::UNPROCESSABLE_ENTITY,
             Json(serde_json::json!({
-                "status": "partial",
+                "status": "rolled_back",
                 "count": results.len(),
+                "error": error,
                 "results": statuses,
             })),
         )
@@ -1126,15 +1402,31 @@ async fn graph_store_get(
     });
 
     // Graph-level access control: check visibility before serving graph data.
-    if let Some(iri) = params.graph_iri() {
-        let is_admin = user.as_deref().map(|u| u.is_admin()).unwrap_or(false);
-        if !is_admin {
-            let user_id = user.as_deref().map(|u| u.user_id.as_str());
-            let allowed = check_graph_read_access(&state, user_id, iri)
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-            if !allowed {
+    let is_admin = user.as_deref().map(|u| u.is_admin()).unwrap_or(false);
+    match params.graph_iri() {
+        Some(iri) => {
+            if !is_admin {
+                let allowed = check_graph_read_access(&state, user.as_deref(), iri)
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                if !allowed {
+                    return Err(AppError::Unauthorized(
+                        "Access denied to this graph".to_string(),
+                    ));
+                }
+            }
+        }
+        // The default graph. This branch used to skip the check entirely, so
+        // `GET /store` dumped it to any caller. No per-graph ACL covers the
+        // default graph, and the SPARQL path never exposes it either (queries
+        // are scoped with FROM/FROM NAMED over the caller's accessible named
+        // graphs), so a bare dump was the one way to read it. It holds LDP
+        // resources and anything loaded without a target graph — admin-only.
+        None => {
+            if !is_admin {
                 return Err(AppError::Unauthorized(
-                    "Access denied to this graph".to_string(),
+                    "Reading the default graph requires admin privileges; name a graph with \
+                     ?graph=<iri> instead"
+                        .to_string(),
                 ));
             }
         }
@@ -1143,11 +1435,20 @@ async fn graph_store_get(
     // Triple-level security label filtering: when the target graph has labels,
     // we have to load+filter+re-serialize, which fundamentally needs the bytes
     // in memory. Otherwise we can stream the dump directly through axum.
+    // Fail closed: if the label table cannot be read, the graph may carry
+    // labels this read cannot apply, so the read is refused rather than served
+    // unfiltered — the rule the endpoint ACL already follows on a DB error.
+    // (`unwrap_or(false)` used to turn that error into an unfiltered 200.)
     let needs_label_filter = match params.graph_iri() {
         Some(iri) => state
             .auth_db
             .has_triple_security_labels(&[iri][..])
-            .unwrap_or(false),
+            .map_err(|e| {
+                tracing::error!(error = %e, graph = iri, "triple-label check failed; refusing the read");
+                AppError::ServiceUnavailable(
+                    "triple security labels could not be checked; the read is refused".to_string(),
+                )
+            })?,
         None => false,
     };
 
@@ -1175,6 +1476,7 @@ async fn graph_store_get(
     // Stream the dump straight through the response body so multi-MB graphs
     // don't get buffered in a `Vec<u8>` before the first byte is sent.
     let store = state.store.clone();
+    let registry = state.prefix_registry.clone();
     let graph_iri = params.graph_iri().map(|s| s.to_string());
     let rdf_format = format.to_rdf_format();
     let (chunk_tx, chunk_rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(8);
@@ -1185,8 +1487,14 @@ async fn graph_store_get(
         // Signal "ok to send headers" before producing data so the caller
         // can surface an error as a real 5xx if the dump cannot be initiated.
         let _ = start_tx.send(Ok(()));
+        // Turtle and TriG get an `@prefix` header for the namespaces the graph
+        // uses — the document a person opens reads as CURIEs, not as a wall of
+        // full IRIs. The line-based formats fall straight through to the plain
+        // dump; they have no header to fill.
         let result = store
-            .dump_to_writer(&mut writer, rdf_format, graph_iri.as_deref())
+            .dump_prefixed_to_writer(&mut writer, rdf_format, graph_iri.as_deref(), |ns| {
+                registry.declaration_for(ns)
+            })
             .map_err(|e| e.to_string())
             // Emit the tail of the buffered stream, else the dump is truncated.
             .and_then(|_| writer.finish().map_err(|e| e.to_string()));
@@ -1281,7 +1589,11 @@ fn apply_triple_label_filter(
             Some(graph_iri),
         )?;
     }
-    let result = out_store.dump(rdf_fmt, Some(graph_iri))?;
+    // The same prefix header the unfiltered stream gets: a reader with fewer
+    // rights still gets a readable document.
+    let result = out_store.dump_prefixed(rdf_fmt, Some(graph_iri), |ns| {
+        state.prefix_registry.declaration_for(ns)
+    })?;
     Ok(result)
 }
 
@@ -1290,12 +1602,16 @@ fn apply_triple_label_filter(
 /// the dataset's shapes graph. Returns `Err(AppError::ValidationFailed)` if
 /// validation fails. Also enforces SHACL Studio write-gates (pipelines +
 /// validation-layer bindings). Shared with the validate-and-commit path so a
-/// commit cannot bypass the dataset's effective shapes.
+/// commit cannot bypass the dataset's effective shapes. A refusal's report
+/// goes to `writer` (`None`: anonymous) less the shapes they may not read
+/// ([`crate::shacl_studio::gate::report_for_writer`]).
 pub(crate) fn validate_on_write(
     state: &AppState,
+    writer: Option<&AuthenticatedUser>,
     graph_iri: Option<&str>,
     data: &str,
     format: oxigraph::io::RdfFormat,
+    mode: crate::shacl_studio::gate::WriteMode,
 ) -> Result<(), AppError> {
     let iri = match graph_iri {
         Some(iri) => iri,
@@ -1309,22 +1625,31 @@ pub(crate) fn validate_on_write(
     // during the transition.
     {
         let studio = crate::shacl_studio::store::ShaclStudioStore::new(state.auth_db.pool());
-        if let Err(report) = crate::shacl_studio::gate::check_write_gates(
-            &state.store,
-            &state.auth_db,
-            &studio,
-            &state.base_url,
-            iri,
-            data,
-            format,
-        ) {
+        let ctx = crate::shacl_studio::gate::GateContext {
+            main_store: &state.store,
+            auth_db: &state.auth_db,
+            studio: &studio,
+            base_url: &state.base_url,
+            writer,
+        };
+        if let Err(report) =
+            crate::shacl_studio::gate::check_write_gates(ctx, iri, data, format, mode)
+        {
             return Err(AppError::ValidationFailed(report));
         }
     }
 
     let dataset = match state.auth_db.find_dataset_by_graph_iri(iri) {
         Ok(Some(ds)) => ds,
-        _ => return Ok(()), // no owning dataset found — skip validation
+        Ok(None) => return Ok(()), // no owning dataset — no dataset gate
+        // A failed lookup is not "no dataset": it would skip the gate.
+        Err(e) => {
+            return Err(AppError::ValidationFailed(
+                crate::shacl_studio::gate::gate_error(format!(
+                    "looking up the dataset holding <{iri}>: {e}"
+                )),
+            ))
+        }
     };
 
     if !dataset.shacl_on_write {
@@ -1339,9 +1664,22 @@ pub(crate) fn validate_on_write(
         }
     };
 
-    // Load incoming data into a temporary in-memory store for validation
+    // Stage the graph's FUTURE contents in a temporary store. For a merge that
+    // is the existing graph plus the payload: validating the payload alone let
+    // a POST adding a second `ex:name` pass `sh:maxCount 1`, and rejected a POST
+    // that supplied one property with `sh:minCount 1` on all the others.
     let temp = crate::store::TripleStore::in_memory()
         .map_err(|e| AppError::Internal(format!("Failed to create temp store: {e}")))?;
+    if mode == crate::shacl_studio::gate::WriteMode::Merge {
+        let existing = state
+            .store
+            .dump(oxigraph::io::RdfFormat::Turtle, Some(iri))
+            .map_err(|e| AppError::Internal(format!("Failed to read existing graph: {e}")))?;
+        let existing = String::from_utf8(existing)
+            .map_err(|_| AppError::Internal("Existing graph is not valid UTF-8".to_string()))?;
+        temp.load_str(&existing, oxigraph::io::RdfFormat::Turtle, graph_iri)
+            .map_err(|e| AppError::Internal(format!("Failed to stage existing graph: {e}")))?;
+    }
     temp.load_str(data, format, graph_iri)
         .map_err(|e| AppError::BadRequest(format!("Failed to parse incoming data: {e}")))?;
 
@@ -1360,8 +1698,14 @@ pub(crate) fn validate_on_write(
     .map_err(|e| AppError::Internal(format!("Failed to load shapes into temp store: {e}")))?;
 
     let data_graphs = vec![iri.to_string()];
-    let report = crate::shacl::validate(&temp, &shapes_graph_iri, &data_graphs)
-        .map_err(|e| AppError::Internal(format!("SHACL validation error: {e}")))?;
+    // Fail closed: a shapes graph the engine cannot evaluate (an ill-formed
+    // shape, a `sh:sparql` that does not parse) refuses the write with the
+    // same 422 report the Studio gates use, not a 500 and never a 204.
+    let report = crate::shacl::validate(&temp, &shapes_graph_iri, &data_graphs).map_err(|e| {
+        AppError::ValidationFailed(crate::shacl_studio::gate::gate_error(format!(
+            "dataset shapes graph <{shapes_graph_iri}>: {e}"
+        )))
+    })?;
 
     // Continuous mode (Phase 5): record a report for this validate-on-write so it
     // shares the on-demand report history. Best-effort — a storage hiccup (or a
@@ -1384,21 +1728,47 @@ pub(crate) fn validate_on_write(
     );
 
     if !report.conforms {
-        return Err(AppError::ValidationFailed(report));
+        return Err(AppError::ValidationFailed(
+            crate::shacl_studio::gate::report_for_writer(
+                &state.auth_db,
+                writer,
+                report,
+                &[shapes_graph_iri],
+            ),
+        ));
     }
 
     Ok(())
 }
 
-/// Check graph-level write permission for a caller.
-/// Admins always pass; non-admins must have an explicit write/admin grant
-/// in `graph_acl` (dataset-visibility grants read-only access to SPARQL
-/// queries — explicit write grants are required for Graph Store writes).
+/// Check graph-level write permission for a caller, for a write that runs
+/// right after the check: [`require_graph_write_for`], then the model-registry
+/// mark of [`mark_model_versions_written`].
 fn require_graph_write(
     state: &AppState,
     user: Option<&AuthenticatedUser>,
     graph_iri: Option<&str>,
 ) -> Result<(), AppError> {
+    let model_version = require_graph_write_for(state, user, graph_iri)?;
+    mark_model_versions_written(state, model_version.as_slice())
+}
+
+/// Check graph-level write permission for a caller.
+/// Admins pass the graph ACL; non-admins must have an explicit write/admin
+/// grant in `graph_acl` (dataset-visibility grants read-only access to SPARQL
+/// queries — explicit write grants are required for Graph Store writes).
+///
+/// Then the model registry's guard, for admins too: a graph holding a
+/// registered version whose licence allows no altered copies (IMBOR) is never
+/// written directly (403). A graph holding any other version with a licence
+/// record is returned, so the caller can mark that record as possibly
+/// modified ([`mark_model_versions_written`]) once the whole request is
+/// authorized and before its write runs. One registry query per graph.
+fn require_graph_write_for(
+    state: &AppState,
+    user: Option<&AuthenticatedUser>,
+    graph_iri: Option<&str>,
+) -> Result<Option<crate::data_models::registry::AttributedVersion>, AppError> {
     // M-8: a read-only API token may never write, even to the default graph or a
     // graph it holds a stale grant on. SPARQL UPDATE enforces this separately too,
     // but centralising it here also covers the Graph Store Protocol PUT/POST/DELETE
@@ -1413,20 +1783,45 @@ fn require_graph_write(
 
     let iri = match graph_iri {
         Some(i) => i,
-        None => return Ok(()), // default graph — handled by require_auth layer
+        None => return Ok(None), // default graph — handled by require_auth layer
     };
 
     // Admins bypass graph ACL
-    if user.map(|u| u.is_admin()).unwrap_or(false) {
-        return Ok(());
+    let is_admin = user.map(|u| u.is_admin()).unwrap_or(false);
+    if !is_admin && !check_graph_permission(user, iri, "write", &state.auth_db) {
+        return Err(AppError::Unauthorized(format!(
+            "Write access denied for graph <{iri}>"
+        )));
     }
 
-    if check_graph_permission(user, iri, "write", &state.auth_db) {
-        Ok(())
-    } else {
-        Err(AppError::Unauthorized(format!(
-            "Write access denied for graph <{iri}>"
-        )))
+    crate::data_models::write_guard::check(&state.store, &state.base_url, iri)
+        .map_err(AppError::Forbidden)
+}
+
+/// Mark the licence records of the model versions an authorized direct write
+/// is about to change as possibly modified (see
+/// `crate::data_models::write_guard`).
+fn mark_model_versions_written(
+    state: &AppState,
+    versions: &[crate::data_models::registry::AttributedVersion],
+) -> Result<(), AppError> {
+    if versions.is_empty() {
+        return Ok(());
+    }
+    crate::data_models::write_guard::mark(&state.store, versions).map_err(AppError::from)?;
+    state.mark_vocab_registry_dirty();
+    Ok(())
+}
+
+/// After an admin's write whose graphs could not be named in advance (a
+/// variable graph in a DELETE/INSERT template, `CLEAR ALL`): re-check every
+/// model copy a check vouched for, and mark each one that changed; the
+/// registry-derived vocab state is then rebuilt. Blocking: the callers run it
+/// in the write's own blocking task, or one of its own, so it is never skipped
+/// because the request stopped waiting.
+fn reverify_model_copies_after_write(state: &AppState) {
+    if crate::data_models::write_guard::reverify_checked_copies(&state.store) > 0 {
+        state.mark_vocab_registry_dirty();
     }
 }
 
@@ -1461,7 +1856,21 @@ async fn graph_store_put(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    require_graph_write(&state, user.as_deref(), params.graph_iri())?;
+    let model_version = require_graph_write_for(&state, user.as_deref(), params.graph_iri())?;
+    let commit_graph = params.graph_iri().map(str::to_string);
+    let before = commit_graph
+        .as_deref()
+        .and_then(|g| state.store.graph_count_cached(Some(g)))
+        .unwrap_or(0);
+    // LDES change capture: the entity index before the write (empty unless
+    // the graph belongs to a dataset that publishes a stream).
+    let ldes_before = {
+        let st = state.clone();
+        let gs: Vec<String> = commit_graph.iter().cloned().collect();
+        tokio::task::spawn_blocking(move || crate::ldes::capture::before(&st, &gs))
+            .await
+            .unwrap_or_default()
+    };
 
     let content_type = headers
         .get(CONTENT_TYPE)
@@ -1474,17 +1883,61 @@ async fn graph_store_put(
     let data = String::from_utf8(body.to_vec())
         .map_err(|_| AppError::BadRequest("Invalid UTF-8".to_string()))?;
 
-    validate_on_write(&state, params.graph_iri(), &data, format)?;
+    validate_on_write(
+        &state,
+        user.as_deref(),
+        params.graph_iri(),
+        &data,
+        format,
+        crate::shacl_studio::gate::WriteMode::Replace,
+    )?;
+    mark_model_versions_written(&state, model_version.as_slice())?;
 
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
+    let touched = graph.clone();
+    let ctx = write_context(
+        &state,
+        user.as_deref(),
+        crate::commit_log::CommitKind::GraphStore,
+    );
     run_store_write(&state, "graph store PUT", move || {
+        let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
         store.graph_store_put(graph.as_deref(), &data, format)
     })
     .await?;
-    #[cfg(feature = "text-search")]
-    state.mark_text_dirty();
-    Ok(StatusCode::NO_CONTENT.into_response())
+    sync_text_index_after_graph_write(&state, touched).await;
+    {
+        let st = state.clone();
+        let ent_graphs: Vec<String> = commit_graph.iter().cloned().collect();
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::ldes::capture::after(&st, ldes_before);
+            crate::entailment::after_write(&st, &ent_graphs);
+        })
+        .await;
+    }
+    // Commit trail: Graph Store writes left no trace, while the dataset's
+    // history endpoint presented the commit log as complete.
+    let after = commit_graph
+        .as_deref()
+        .and_then(|g| state.store.graph_count_cached(Some(g)))
+        .unwrap_or(0);
+    crate::commit_log::record(
+        &state.store,
+        &state.base_url,
+        crate::commit_log::CommitKind::GraphStore,
+        format!(
+            "Graph Store PUT {}",
+            commit_graph.as_deref().unwrap_or("default graph")
+        ),
+        user.as_deref().map(|u| u.user_id.as_str()),
+        None,
+        commit_graph.iter().cloned().collect(),
+        after,
+        before,
+        None,
+    );
+    Ok(with_ack(&state, StatusCode::NO_CONTENT.into_response()))
 }
 
 /// POST /store?graph=... — Merge into graph
@@ -1495,7 +1948,21 @@ async fn graph_store_post(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    require_graph_write(&state, user.as_deref(), params.graph_iri())?;
+    let model_version = require_graph_write_for(&state, user.as_deref(), params.graph_iri())?;
+    let commit_graph = params.graph_iri().map(str::to_string);
+    let before = commit_graph
+        .as_deref()
+        .and_then(|g| state.store.graph_count_cached(Some(g)))
+        .unwrap_or(0);
+    // LDES change capture: the entity index before the write (empty unless
+    // the graph belongs to a dataset that publishes a stream).
+    let ldes_before = {
+        let st = state.clone();
+        let gs: Vec<String> = commit_graph.iter().cloned().collect();
+        tokio::task::spawn_blocking(move || crate::ldes::capture::before(&st, &gs))
+            .await
+            .unwrap_or_default()
+    };
 
     let content_type = headers
         .get(CONTENT_TYPE)
@@ -1508,17 +1975,73 @@ async fn graph_store_post(
     let data = String::from_utf8(body.to_vec())
         .map_err(|_| AppError::BadRequest("Invalid UTF-8".to_string()))?;
 
-    validate_on_write(&state, params.graph_iri(), &data, format)?;
+    validate_on_write(
+        &state,
+        user.as_deref(),
+        params.graph_iri(),
+        &data,
+        format,
+        crate::shacl_studio::gate::WriteMode::Merge,
+    )?;
+    mark_model_versions_written(&state, model_version.as_slice())?;
 
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
-    run_store_write(&state, "graph store POST", move || {
-        store.graph_store_post(graph.as_deref(), &data, format)
+    let touched = graph.clone();
+    let ctx = write_context(
+        &state,
+        user.as_deref(),
+        crate::commit_log::CommitKind::GraphStore,
+    );
+    let inserted = run_store_write(&state, "graph store POST", move || {
+        let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
+        store.graph_store_post_delta(graph.as_deref(), &data, format)
     })
     .await?;
-    #[cfg(feature = "text-search")]
-    state.mark_text_dirty();
-    Ok(StatusCode::NO_CONTENT.into_response())
+    // The appended quads are known exactly: index just those documents
+    // instead of re-indexing every literal of the graph.
+    match touched {
+        Some(g) => {
+            let st = state.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                st.text_index_apply_delta(&inserted, &[], std::slice::from_ref(&g))
+            })
+            .await;
+        }
+        None => sync_text_index_after_graph_write(&state, None).await,
+    }
+    {
+        let st = state.clone();
+        let ent_graphs: Vec<String> = commit_graph.iter().cloned().collect();
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::ldes::capture::after(&st, ldes_before);
+            // A merge only adds quads: the entailment graph is extended, not rebuilt.
+            crate::entailment::after_additive_write(&st, &ent_graphs);
+        })
+        .await;
+    }
+    // Commit trail: Graph Store writes left no trace, while the dataset's
+    // history endpoint presented the commit log as complete.
+    let after = commit_graph
+        .as_deref()
+        .and_then(|g| state.store.graph_count_cached(Some(g)))
+        .unwrap_or(0);
+    crate::commit_log::record(
+        &state.store,
+        &state.base_url,
+        crate::commit_log::CommitKind::GraphStore,
+        format!(
+            "Graph Store POST {}",
+            commit_graph.as_deref().unwrap_or("default graph")
+        ),
+        user.as_deref().map(|u| u.user_id.as_str()),
+        None,
+        commit_graph.iter().cloned().collect(),
+        after.saturating_sub(before),
+        0,
+        None,
+    );
+    Ok(with_ack(&state, StatusCode::NO_CONTENT.into_response()))
 }
 
 /// DELETE /store?graph=... — Remove a graph
@@ -1527,14 +2050,90 @@ async fn graph_store_delete(
     user: Option<Extension<AuthenticatedUser>>,
     Query(params): Query<GraphStoreParams>,
 ) -> Result<Response, AppError> {
-    require_graph_write(&state, user.as_deref(), params.graph_iri())?;
+    let model_version = require_graph_write_for(&state, user.as_deref(), params.graph_iri())?;
+    mark_model_versions_written(&state, model_version.as_slice())?;
+    let commit_graph = params.graph_iri().map(str::to_string);
+    let before = commit_graph
+        .as_deref()
+        .and_then(|g| state.store.graph_count_cached(Some(g)))
+        .unwrap_or(0);
+    // LDES change capture: the entity index before the write (empty unless
+    // the graph belongs to a dataset that publishes a stream).
+    let ldes_before = {
+        let st = state.clone();
+        let gs: Vec<String> = commit_graph.iter().cloned().collect();
+        tokio::task::spawn_blocking(move || crate::ldes::capture::before(&st, &gs))
+            .await
+            .unwrap_or_default()
+    };
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
+    let touched = graph.clone();
+    let ctx = write_context(
+        &state,
+        user.as_deref(),
+        crate::commit_log::CommitKind::GraphStore,
+    );
     run_store_write(&state, "graph store DELETE", move || {
+        let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
         store.graph_store_delete(graph.as_deref())
     })
     .await?;
-    Ok(StatusCode::NO_CONTENT.into_response())
+    // Previously nothing invalidated the text index here, so a deleted graph's
+    // literals kept turning up in search results until an unrelated write
+    // forced a rebuild.
+    sync_text_index_after_graph_write(&state, touched).await;
+    {
+        let st = state.clone();
+        let ent_graphs: Vec<String> = commit_graph.iter().cloned().collect();
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::ldes::capture::after(&st, ldes_before);
+            crate::entailment::after_write(&st, &ent_graphs);
+        })
+        .await;
+    }
+    // Commit trail: Graph Store writes left no trace, while the dataset's
+    // history endpoint presented the commit log as complete.
+    let after = commit_graph
+        .as_deref()
+        .and_then(|g| state.store.graph_count_cached(Some(g)))
+        .unwrap_or(0);
+    crate::commit_log::record(
+        &state.store,
+        &state.base_url,
+        crate::commit_log::CommitKind::GraphStore,
+        format!(
+            "Graph Store DELETE {}",
+            commit_graph.as_deref().unwrap_or("default graph")
+        ),
+        user.as_deref().map(|u| u.user_id.as_str()),
+        None,
+        commit_graph.iter().cloned().collect(),
+        0,
+        before.saturating_sub(after),
+        None,
+    );
+    Ok(with_ack(&state, StatusCode::NO_CONTENT.into_response()))
+}
+
+/// Keep the text index in step with a Graph Store write, writer-pays: refresh
+/// exactly the touched graph (off the async runtime) so readers never inherit a
+/// whole-store rebuild. A default-graph write has no graph key to refresh, so
+/// that case falls back to the whole-index dirty flag (repaired by the
+/// background sync).
+pub(crate) async fn sync_text_index_after_graph_write(state: &AppState, graph: Option<String>) {
+    #[cfg(feature = "text-search")]
+    match graph {
+        Some(g) => {
+            let st = state.clone();
+            let _ = tokio::task::spawn_blocking(move || st.refresh_text_index_graphs(&[g])).await;
+        }
+        None => state.mark_text_dirty(),
+    }
+    #[cfg(not(feature = "text-search"))]
+    {
+        let _ = (state, graph);
+    }
 }
 
 // ─── Management endpoints ─────────────────────────────────────────────────────
@@ -1624,17 +2223,25 @@ async fn service_description_handler(
 
     // Default-graph triple count. Hidden (0) for anonymous/non-admin callers so the
     // unauthenticated service description never reveals default-graph size.
+    // Read the O(1) maintained count index, not count_graph() — the latter scans
+    // the whole graph, and a public IFC dataset's `…/ifcowl` graph (millions of
+    // triples) made the Turtle service description take tens of seconds per
+    // request. Value-identical: the index tracks the exact per-graph quad count.
     let default_graph_count = if is_admin {
-        state.store.count_graph(None).unwrap_or(0)
+        state.store.graph_count_cached(None).unwrap_or(0)
     } else {
         0
     };
 
-    // Pair each accessible named graph with its own triple count (void:triples).
+    // Pair each accessible named graph with its own triple count (void:triples) —
+    // O(1) cached lookups rather than a per-graph scan (see above).
     let named_graph_counts: Vec<(&str, usize)> = accessible_graph_iris
         .iter()
         .map(|iri| {
-            let count = state.store.count_graph(Some(iri.as_str())).unwrap_or(0);
+            let count = state
+                .store
+                .graph_count_cached(Some(iri.as_str()))
+                .unwrap_or(0);
             (iri.as_str(), count)
         })
         .collect();
@@ -1667,8 +2274,12 @@ async fn service_description_handler(
         })
         .collect();
 
-    let desc =
-        service_description::generate(default_graph_count, &named_graph_counts, &dataset_descs);
+    let desc = service_description::generate(
+        default_graph_count,
+        &named_graph_counts,
+        &dataset_descs,
+        crate::remote::enabled(),
+    );
 
     Ok((StatusCode::OK, [(CONTENT_TYPE, "text/turtle")], desc).into_response())
 }
@@ -1683,6 +2294,287 @@ async fn liveness_check() -> impl IntoResponse {
 }
 
 /// GET /health — detailed subsystem probe
+/// GET /api/admin/telemetry — the workload telemetry summary: which exit of
+/// the query path answers and how fast, split by the analytical bit; SHACL
+/// runs by path, source and duration; the inter-write gap histogram. Admins
+/// only: latency distributions and validation scopes describe tenants.
+async fn admin_telemetry(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    match user.as_deref() {
+        None => Err((
+            StatusCode::UNAUTHORIZED,
+            "Authentication required".to_string(),
+        )),
+        Some(u) if !u.is_admin() => Err((StatusCode::FORBIDDEN, "Admin role required".to_string())),
+        Some(_) => Ok(Json(state.store.telemetry().summary())),
+    }
+}
+
+/// The context the change log stamps on a write's rows: the actor IRI as the
+/// commit trail mints it, and the commit kind. The guard is set inside the
+/// blocking closure that runs the primitive, never across an await.
+fn write_context(
+    state: &AppState,
+    user: Option<&AuthenticatedUser>,
+    kind: crate::commit_log::CommitKind,
+) -> crate::store::changes::WriteContext {
+    crate::store::changes::WriteContext {
+        actor_iri: user.map(|u| format!("{}/users/{}", state.base_url, u.user_id)),
+        commit_iri: None,
+        kind: Some(kind.as_str().to_string()),
+    }
+}
+
+fn require_admin(
+    user: Option<&AuthenticatedUser>,
+) -> Result<&AuthenticatedUser, (StatusCode, String)> {
+    match user {
+        None => Err((
+            StatusCode::UNAUTHORIZED,
+            "Authentication required".to_string(),
+        )),
+        Some(u) if !u.is_admin() => Err((StatusCode::FORBIDDEN, "Admin role required".to_string())),
+        Some(u) => Ok(u),
+    }
+}
+
+#[derive(Deserialize)]
+struct ChangesQuery {
+    after: Option<i64>,
+    limit: Option<usize>,
+    graph: Option<String>,
+    /// Long-poll: when no row is above `after`, hold the request up to
+    /// this long for one to land (at most 30 s).
+    wait_ms: Option<u64>,
+}
+
+/// GET /api/admin/changes?after=&limit=&graph= — rows of the change log with
+/// a sequence number above `after`, in commit order; `graph` narrows to one
+/// graph's rows plus the store-scoped rows every reader must see. Admins
+/// only: rows carry quads from every tenant.
+async fn admin_changes(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+    Query(q): Query<ChangesQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_admin(user.as_deref())?;
+    let after = q.after.unwrap_or(0).max(0);
+    let limit = q.limit.unwrap_or(500).clamp(1, 5000);
+    let log = state.store.changes();
+    // Register for the wake-up before looking, so a row finalised between
+    // the look and the wait is not missed.
+    let mut notified = Box::pin(log.rows_notified());
+    notified.as_mut().enable();
+    let mut rows = log.rows_after_in(after, limit, q.graph.as_deref());
+    let wait = q.wait_ms.unwrap_or(0).min(30_000);
+    if rows.is_empty() && wait > 0 {
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(wait), notified).await;
+        rows = log.rows_after_in(after, limit, q.graph.as_deref());
+    }
+    let next_after = rows.last().and_then(|r| r.seq).unwrap_or(after);
+    Ok(Json(serde_json::json!({
+        "epoch": log.epoch(),
+        "rows": rows,
+        "next_after": next_after,
+    })))
+}
+
+/// GET /api/admin/changes/status — the log's epoch, sequence, row states,
+/// cursors and caps.
+async fn admin_changes_status(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_admin(user.as_deref())?;
+    Ok(Json(state.store.changes().status()))
+}
+
+#[derive(Deserialize)]
+struct CursorBody {
+    seq: i64,
+}
+
+/// PUT /api/admin/changes/cursors/:name — bookmark a consumer's position.
+/// Rows at or below the lowest live cursor are what retention keeps.
+async fn admin_changes_set_cursor(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+    Path(name): Path<String>,
+    Json(body): Json<CursorBody>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let u = require_admin(user.as_deref())?;
+    let valid_name = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if !valid_name {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "cursor names are 1-64 characters of [A-Za-z0-9._-]".to_string(),
+        ));
+    }
+    let log = state.store.changes();
+    let last = log.last_seq();
+    if body.seq < 0 || body.seq > last {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("seq must be between 0 and {last}"),
+        ));
+    }
+    log.set_cursor(&name, body.seq, Some(&u.user_id))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    log.cursor(&name).map(Json).ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "cursor not stored".to_string(),
+    ))
+}
+
+/// DELETE /api/admin/changes/cursors/:name — 204, or 404 for a name the log
+/// does not hold.
+async fn admin_changes_delete_cursor(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_admin(user.as_deref())?;
+    if state.store.changes().delete_cursor(&name) {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((StatusCode::NOT_FOUND, "no such cursor".to_string()))
+    }
+}
+
+/// Stamp a write's response with what the synchronous followers said:
+/// `X-Replication-Ack: sync` while the required ones keep up, `degraded`
+/// while a success means "durable on the leader only". Absent when no
+/// synchronous follower is configured.
+fn with_ack(state: &AppState, mut resp: Response) -> Response {
+    if let Some(ack) = state.store.replication().ack_state() {
+        if let Ok(v) = axum::http::HeaderValue::from_str(ack) {
+            resp.headers_mut().insert("x-replication-ack", v);
+        }
+    }
+    resp
+}
+
+/// GET /api/replication/status — this node's role, temperature, scope and,
+/// on a follower, its position and lag. Public, beside `/livez`: a load
+/// balancer or an operator asks a replica how far behind it is without a
+/// token; nothing in it names data.
+async fn replication_status(State(state): State<AppState>) -> impl IntoResponse {
+    Json(state.store.replication().status())
+}
+
+/// GET /api/replication/manifest — what a follower needs to start or to
+/// resynchronise: the leader's epoch and position, every graph it holds, and
+/// each dataset's graphs (so a follower can select datasets). Admins only.
+async fn replication_manifest(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_admin(user.as_deref())?;
+    let datasets = state
+        .auth_db
+        .list_datasets()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|d| crate::store::replication::DatasetGraphs {
+            graphs: state.auth_db.list_dataset_graphs(&d.id).unwrap_or_default(),
+            id: d.id,
+        })
+        .collect();
+    Ok(Json(crate::store::replication::manifest_of(
+        &state.store,
+        datasets,
+        state.auth_db.data_version(),
+    )))
+}
+
+/// GET /api/replication/identity — the identity database, whole, as a
+/// consistent SQLite snapshot (the online backup API). What a follower
+/// applies in place when the manifest's `identity_version` moves. Admins
+/// only: it holds every user, token and rule.
+async fn replication_identity(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_admin(user.as_deref())?;
+    let auth = state.auth_db.clone();
+    let bytes = tokio::task::spawn_blocking(move || auth.snapshot_bytes())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(([(CONTENT_TYPE, "application/vnd.sqlite3")], bytes))
+}
+
+/// The Raft RPCs of a cluster member, over the server's own port. Not user
+/// routes: the members share `OTS_REPLICATION_CLUSTER_SECRET`, sent as
+/// `X-Cluster-Secret`, compared in constant time. 404 on a node that is not
+/// a cluster member, 503 while the member is starting.
+fn cluster_member(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<&'static crate::store::consensus::Member, (StatusCode, String)> {
+    let Some(cluster) = state.store.replication().config().cluster.as_ref() else {
+        return Err((StatusCode::NOT_FOUND, "not a cluster member".to_string()));
+    };
+    let given = headers
+        .get("x-cluster-secret")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let (a, b) = (given.as_bytes(), cluster.secret.as_bytes());
+    let equal = a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0;
+    if !equal {
+        return Err((StatusCode::UNAUTHORIZED, "cluster secret".to_string()));
+    }
+    crate::store::consensus::member().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "cluster member starting".to_string(),
+    ))
+}
+
+async fn raft_vote(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(rpc): Json<openraft::raft::VoteRequest<u64>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let m = cluster_member(&state, &headers)?;
+    m.raft
+        .vote(rpc)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn raft_append(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(rpc): Json<openraft::raft::AppendEntriesRequest<crate::store::consensus::TypeConfig>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let m = cluster_member(&state, &headers)?;
+    m.raft
+        .append_entries(rpc)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn raft_snapshot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(rpc): Json<openraft::raft::InstallSnapshotRequest<crate::store::consensus::TypeConfig>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let m = cluster_member(&state, &headers)?;
+    m.raft
+        .install_snapshot(rpc)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
 async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
     // Triplestore — read the maintained O(1) count index, NOT store.len() /
     // named_graphs(), which scan RocksDB (O(total quads)) and can block past the
@@ -1749,7 +2641,7 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
 /// - All other graphs are checked against dataset-graph access control.
 fn check_graph_read_access(
     state: &AppState,
-    user_id: Option<&str>,
+    user: Option<&AuthenticatedUser>,
     iri: &str,
 ) -> anyhow::Result<bool> {
     // Block all system graphs for non-admins.
@@ -1757,9 +2649,13 @@ fn check_graph_read_access(
         return Ok(false);
     }
 
-    // Dataset graphs: check against accessible graph IRIs.
-    let cached_graphs = state.auth_db.get_accessible_graph_iris_cached(user_id)?;
-    Ok(cached_graphs.0.contains(iri))
+    // Use the same set the SPARQL path scopes to: dataset-derived visibility
+    // MERGED with explicit `graph_acl` read grants. Consulting only the former
+    // meant one grant behaved differently depending on the protocol — rows over
+    // /sparql, 401 over /store — though docs/security.md promises both.
+    let accessible =
+        accessible_read_graphs(state, user).map_err(|e| anyhow::anyhow!(e.message()))?;
+    Ok(accessible.contains(iri))
 }
 
 // ─── Triple Browsing API ──────────────────────────────────────────────────────
@@ -2710,25 +3606,13 @@ fn resolve_scope_graphs(
         return Ok(ScopeGraphs::Set(vec![graph.clone()]));
     }
 
-    if params.dataset_ids.is_some() || params.org_id.is_some() || params.dataset_id.is_some() {
-        let ds_ids: Vec<String> = if let Some(ref ids_csv) = params.dataset_ids {
-            ids_csv
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect()
-        } else if let Some(ref org_id) = params.org_id {
-            state
-                .auth_db
-                .list_datasets_by_org(org_id)
-                .map_err(|e| AppError::Internal(e.to_string()))?
-                .into_iter()
-                .map(|ds| ds.id.to_string())
-                .collect()
-        } else {
-            vec![params.dataset_id.clone().unwrap()]
-        };
+    if let Some(ds_ids) = scope_dataset_ids(
+        state,
+        params.dataset_id.as_deref(),
+        params.dataset_ids.as_deref(),
+        params.org_id.as_deref(),
+        params.org_ids.as_deref(),
+    )? {
         let scoped = scope_dataset_graphs(state, &ds_ids, &versions_map, user_id, is_admin)?;
         return Ok(if scoped.is_empty() {
             ScopeGraphs::Empty
@@ -2778,14 +3662,17 @@ pub struct BrowseTripleParams {
     /// can access.
     pub dataset_id: Option<String>,
     /// Comma-separated list of dataset IDs. Scopes results to the union of all
-    /// named graphs registered under those datasets. When present, takes
-    /// precedence over `dataset_id`. Non-admin users are additionally restricted
-    /// to graphs they can access.
+    /// named graphs registered under those datasets. Unioned with `dataset_id`
+    /// and with the organisation scopes below. Non-admin users are additionally
+    /// restricted to graphs they can access.
     pub dataset_ids: Option<String>,
     /// Scope browse results to all named graphs of all datasets owned by this
-    /// organisation ID. Non-admin users are additionally restricted to graphs
-    /// they can access.
+    /// organisation ID. Unioned with any dataset scope rather than overridden by
+    /// it. Non-admin users are additionally restricted to graphs they can access.
     pub org_id: Option<String>,
+    /// Comma-separated list of organisation IDs, for a scope spanning several
+    /// organisations. Unioned with `org_id` and with the dataset scopes.
+    pub org_ids: Option<String>,
     /// Optional per-dataset version map: comma-separated `datasetId:version`
     /// pairs. For a dataset with a pinned version, results come from that
     /// version's snapshot graphs instead of its live graphs. Datasets absent
@@ -2807,11 +3694,14 @@ pub struct BrowseResourceParams {
     /// `BrowseTripleParams` so the graph view can expand a resource within the
     /// same scope as the initial browse load. `graph` takes precedence.
     pub dataset_id: Option<String>,
-    /// Comma-separated dataset IDs; union of their named graphs. Takes
-    /// precedence over `dataset_id`.
+    /// Comma-separated dataset IDs; union of their named graphs, unioned in turn
+    /// with `dataset_id` and the organisation scopes.
     pub dataset_ids: Option<String>,
     /// Scope to all datasets owned by this organisation ID.
     pub org_id: Option<String>,
+    /// Comma-separated organisation IDs, for a scope spanning several
+    /// organisations.
+    pub org_ids: Option<String>,
     /// Per-dataset version pins (comma-separated `datasetId:version`). A pinned
     /// dataset is read from its version snapshot graphs instead of live graphs.
     pub versions: Option<String>,
@@ -2968,6 +3858,77 @@ fn private_snapshot_graphs(
             .collect(),
         None => std::collections::HashSet::new(),
     }
+}
+
+/// Split a comma-separated id list, dropping surrounding whitespace and empty
+/// entries — `a, ,b` names two ids, and a lone `,` names none.
+fn split_id_csv(csv: &str) -> Vec<String> {
+    csv.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The dataset ids a browse request is scoped to: everything named by
+/// `dataset_id` and `dataset_ids`, plus every dataset of every organisation
+/// named by `org_id` and `org_ids`, deduplicated.
+///
+/// These four used to be resolved by an if/else chain, so a request that named
+/// both datasets and an organisation — what the triple browser sends as soon as
+/// a user picks some datasets *and* an organisation — silently lost the
+/// organisation, and both the rows and the facets came back covering the
+/// datasets alone. They name one scope together.
+///
+/// `None` means the request carried no dataset/organisation scope at all, which
+/// is not the same as an empty union: an organisation with no datasets, or an
+/// empty `dataset_ids`, has always narrowed the request to nothing rather than
+/// widening it to everything, and still does.
+///
+/// Authorisation is deliberately left to `scope_dataset_graphs`, which every
+/// caller applies to the whole list: a dataset reached through an organisation
+/// is filtered exactly like one named directly, so a wider scope can never mean
+/// a wider view.
+fn scope_dataset_ids(
+    state: &AppState,
+    dataset_id: Option<&str>,
+    dataset_ids: Option<&str>,
+    org_id: Option<&str>,
+    org_ids: Option<&str>,
+) -> Result<Option<Vec<String>>, AppError> {
+    if dataset_id.is_none() && dataset_ids.is_none() && org_id.is_none() && org_ids.is_none() {
+        return Ok(None);
+    }
+
+    let mut ids: Vec<String> = Vec::new();
+    if let Some(id) = dataset_id {
+        ids.push(id.to_string());
+    }
+    if let Some(csv) = dataset_ids {
+        ids.extend(split_id_csv(csv));
+    }
+    for org in org_id
+        .map(str::to_string)
+        .into_iter()
+        .chain(org_ids.map(split_id_csv).unwrap_or_default())
+    {
+        ids.extend(
+            state
+                .auth_db
+                .list_datasets_by_org(&org)
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .into_iter()
+                .map(|ds| ds.id),
+        );
+    }
+
+    // A dataset named directly and again through its organisation is still one
+    // dataset. `scope_dataset_graphs` deduplicates the graphs it returns, so this
+    // is not what keeps rows from appearing twice; it spares the repeated
+    // per-dataset resolution and authorisation behind each duplicate id.
+    ids.sort();
+    ids.dedup();
+    Ok(Some(ids))
 }
 
 /// Resolve the scoped named-graph set for a set of datasets, honouring an
@@ -3528,30 +4489,16 @@ pub async fn browse_triples(
                 g = graph, bgp = bgp, fc = fc,
             )),
         )
-    } else if params.dataset_ids.is_some() || params.org_id.is_some() || params.dataset_id.is_some()
-    {
-        // Resolve the set of dataset IDs in scope, then collect their graphs —
-        // each dataset's graphs come from its pinned version snapshot (if any) or
-        // its live graphs. Shared across the dataset_ids / org_id / dataset_id cases.
-        let ds_ids: Vec<String> = if let Some(ref ids_csv) = params.dataset_ids {
-            ids_csv
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect()
-        } else if let Some(ref org_id) = params.org_id {
-            state
-                .auth_db
-                .list_datasets_by_org(org_id)
-                .map_err(|e| AppError::Internal(e.to_string()))?
-                .into_iter()
-                .map(|ds| ds.id.to_string())
-                .collect()
-        } else {
-            vec![params.dataset_id.clone().unwrap()]
-        };
-
+    } else if let Some(ds_ids) = scope_dataset_ids(
+        &state,
+        params.dataset_id.as_deref(),
+        params.dataset_ids.as_deref(),
+        params.org_id.as_deref(),
+        params.org_ids.as_deref(),
+    )? {
+        // The datasets in scope are the union of the dataset and organisation
+        // parameters; their graphs come from each dataset's pinned version
+        // snapshot (if any) or its live graphs.
         let scoped = scope_dataset_graphs(&state, &ds_ids, &versions_map, user_id, is_admin)?;
 
         if scoped.is_empty() {
@@ -3848,8 +4795,13 @@ pub async fn browse_resource(
             }
         }
         vec![graph.clone()]
-    } else if params.dataset_ids.is_some() || params.org_id.is_some() || params.dataset_id.is_some()
-    {
+    } else if let Some(ds_ids) = scope_dataset_ids(
+        &state,
+        params.dataset_id.as_deref(),
+        params.dataset_ids.as_deref(),
+        params.org_id.as_deref(),
+        params.org_ids.as_deref(),
+    )? {
         // Honour the browse scope (dataset/org + version pins), mirroring
         // browse_triples → resolve_scope_graphs, so expanding a resource in the
         // graph view reads the same (possibly version-snapshot) graphs as the
@@ -3860,24 +4812,6 @@ pub async fn browse_resource(
             .as_deref()
             .map(parse_versions_map)
             .unwrap_or_default();
-        let ds_ids: Vec<String> = if let Some(ref ids_csv) = params.dataset_ids {
-            ids_csv
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect()
-        } else if let Some(ref org_id) = params.org_id {
-            state
-                .auth_db
-                .list_datasets_by_org(org_id)
-                .map_err(|e| AppError::Internal(e.to_string()))?
-                .into_iter()
-                .map(|ds| ds.id.to_string())
-                .collect()
-        } else {
-            vec![params.dataset_id.clone().unwrap()]
-        };
         let scoped = scope_dataset_graphs(&state, &ds_ids, &versions_map, user_id, is_admin)?;
         if scoped.is_empty() {
             return Ok(Json(serde_json::json!({
@@ -4241,10 +5175,13 @@ pub async fn browse_suggest(
                     .can_access_dataset(user_id, &ds)
                     .unwrap_or(false) =>
             {
+                // Scope to the graphs this caller may READ: a viewer (or an
+                // anonymous caller on a public dataset) must not get private
+                // graphs' values suggested. Writers still see everything.
                 Some(
                     state
                         .auth_db
-                        .list_dataset_graphs(ds_id)
+                        .list_readable_dataset_graphs(user_id, &ds)
                         .map_err(|e| AppError::Internal(e.to_string()))?,
                 )
             }
@@ -4454,11 +5391,15 @@ async fn execute_dataset_query(
         return Err(AppError::NotFound("Dataset not found".to_string()));
     }
 
-    // Find the service and its graphs
+    // Find the service and its graphs. A deactivated service answers exactly like
+    // a missing one, for every caller — the dataset's writers included: switching
+    // a service off is how an owner stops its endpoint answering (the dataset page
+    // stops showing its URL), and a writer can reactivate it or use /sparql.
     let service = state
         .auth_db
         .get_sparql_service_by_slug(dataset_id, service_slug)
         .map_err(|e| AppError::Internal(e.to_string()))?
+        .filter(|s| s.is_active)
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
 
     // When a version is pinned, scope to that version's snapshot graphs instead of
@@ -4478,7 +5419,23 @@ async fn execute_dataset_query(
                 .list_dataset_graphs(dataset_id)
                 .map_err(|e| AppError::Internal(e.to_string()))?
         } else {
+            // Serve only graphs the dataset holds. Adding a graph checks this,
+            // but a row made before it did, one an admin added ahead of
+            // registering its graph, or one whose graph was detached since
+            // would otherwise read a graph outside the dataset — another
+            // tenant's, or a `urn:system:` graph. A service left with none
+            // serves nothing; it does not widen to the whole dataset.
             service_graphs
+                .into_iter()
+                .filter(|g| {
+                    crate::auth::dataset_graph::dataset_holds_graph(
+                        &state.auth_db,
+                        &state.base_url,
+                        dataset_id,
+                        g,
+                    )
+                })
+                .collect()
         }
     };
 
@@ -4587,6 +5544,12 @@ pub(crate) async fn run_scoped_sparql(
     // Auto-resolve prefixes
     let resolved = resolve_prefixes(state, &effective_query).await;
     let final_query_str = resolved.as_deref().unwrap_or(&effective_query).to_string();
+
+    // Fail-closed read boundary: confirm the rewritten query names only `graph_set`
+    // (the service/saved-query scope), so a literal-spliced or unstripped `FROM`
+    // clause cannot widen it to graphs outside the service. See
+    // [`ensure_query_within_scope`].
+    ensure_query_within_scope(&final_query_str, graph_set)?;
 
     // Stream serialisation through a channel so large CONSTRUCT/DESCRIBE
     // results are not fully buffered before the first byte is sent.
@@ -4898,13 +5861,143 @@ pub(crate) fn scope_query_to_authorized(
     format!("{head_clean}{sep}{from_clauses}{tail}")
 }
 
+/// The IRI a scoped-but-empty caller is pinned to (see `scope_query_to_authorized`).
+/// Always allowed by [`ensure_query_within_scope`]: it is server-injected and holds
+/// no data, so a query pinned to it returns nothing.
+const EMPTY_SCOPE_GRAPH: &str = "urn:empty:graph";
+
+/// Fail-closed post-condition for the read boundary: after
+/// [`scope_query_to_authorized`] (and any server-owned `FROM` injection) has
+/// rewritten a non-admin query, parse the exact text about to reach the engine
+/// and confirm its effective dataset names only graphs in `allowed`.
+///
+/// This backstops the *textual* rewriter, which cannot be made perfect: if an
+/// injected `FROM` prologue landed inside a string literal (so the query ends up
+/// with no dataset clause and reads every named graph), or a caller's
+/// `FROM`/`FROM NAMED` clause slipped past the scanner (a prefixed-name source, no
+/// space before `<`, a comment between the keyword and the IRI), the parsed query
+/// would read graphs outside `allowed`. Rather than trusting the scanner, we
+/// re-derive the dataset from the final query and refuse anything wider than the
+/// caller may read. `allowed` is `EMPTY_SCOPE_GRAPH` plus the graphs the caller
+/// may read (for the entailment path, the server-owned regime graph too).
+///
+/// A correctly-scoped non-admin query always carries the injected
+/// `FROM <g>\nFROM NAMED <g>` prologue, so `dataset` and `dataset.named` are both
+/// `Some`; either being absent means the prologue was neutralised, which we treat
+/// as a scope violation. Admins never reach here — they are scoped additively over
+/// every registered graph and read everything.
+fn ensure_query_within_scope(
+    final_query: &str,
+    allowed: &std::collections::HashSet<String>,
+) -> Result<(), AppError> {
+    use spargebra::Query;
+
+    let scope_error = || {
+        AppError::Forbidden(
+            "Query scope could not be enforced; name the graphs to read in FROM / FROM NAMED"
+                .to_string(),
+        )
+    };
+
+    // Parse with the same grammar the store analyses queries with (`try_fast_count`,
+    // `validate_sparql`). A query the engine would also reject surfaces as a 400.
+    let parsed = spargebra::SparqlParser::new()
+        .parse_query(final_query)
+        .map_err(|e| AppError::BadRequest(format!("query parse: {e}")))?;
+    let dataset = match &parsed {
+        Query::Select { dataset, .. }
+        | Query::Construct { dataset, .. }
+        | Query::Describe { dataset, .. }
+        | Query::Ask { dataset, .. } => dataset.as_ref(),
+    };
+    // No dataset clause → the query reads the whole store's named graphs.
+    let dataset = dataset.ok_or_else(scope_error)?;
+    // `FROM` without `FROM NAMED` (`named: None`) leaves every named graph readable
+    // through `GRAPH ?g { … }`; the prologue always pairs the two, so treat the
+    // asymmetry as tampering.
+    let named = dataset.named.as_ref().ok_or_else(scope_error)?;
+    for iri in dataset.default.iter().chain(named.iter()) {
+        let g = iri.as_str();
+        if g != EMPTY_SCOPE_GRAPH && !allowed.contains(g) {
+            return Err(AppError::Forbidden(format!(
+                "Query names graph <{g}>, which is outside the graphs you may read"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod query_scoping_tests {
-    use super::{extract_and_strip_dataset, first_top_level_where, scope_query_to_authorized};
+    use super::{
+        ensure_query_within_scope, extract_and_strip_dataset, first_top_level_where,
+        scope_query_to_authorized,
+    };
     use std::collections::HashSet;
 
     fn authz(iris: &[&str]) -> HashSet<String> {
         iris.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `scope_query_to_authorized` followed by the fail-closed guard: whatever the
+    /// textual rewriter produces, the guard must reject any query that would read a
+    /// graph outside the authorized set. The tuple is (verdict, the scoped query).
+    fn scope_then_guard(query: &str, iris: &[&str]) -> (bool, String) {
+        let set = authz(iris);
+        let scoped = scope_query_to_authorized(query, &set);
+        (ensure_query_within_scope(&scoped, &set).is_ok(), scoped)
+    }
+
+    #[test]
+    fn guard_admits_a_normally_scoped_query() {
+        let iris = ["http://ex.org/g/a", "http://ex.org/g/b"];
+        let (ok, scoped) = scope_then_guard("SELECT * WHERE { ?s ?p ?o }", &iris);
+        assert!(ok, "a plainly scoped query must pass: {scoped}");
+        // A caller naming one of their own graphs is fine.
+        let (ok, scoped) = scope_then_guard(
+            "SELECT * FROM NAMED <http://ex.org/g/a> WHERE { GRAPH ?g { ?s ?p ?o } }",
+            &iris,
+        );
+        assert!(ok, "naming an authorized graph must pass: {scoped}");
+    }
+
+    #[test]
+    fn guard_admits_the_empty_scope_sentinel() {
+        // A caller with nothing readable is pinned to `urn:empty:graph`; that
+        // server-injected graph must not itself trip the guard.
+        let (ok, scoped) = scope_then_guard("SELECT * WHERE { ?s ?p ?o }", &[]);
+        assert!(scoped.contains("urn:empty:graph"), "{scoped}");
+        assert!(ok, "the empty-scope sentinel must pass: {scoped}");
+    }
+
+    #[test]
+    fn guard_rejects_a_from_named_that_the_scanner_left_in_place() {
+        // No space before `<`, so `extract_and_strip_dataset` never strips it and
+        // the caller's own graph survives beside the injected prologue.
+        let iris = ["http://ex.org/g/a"];
+        let (ok, scoped) = scope_then_guard(
+            "SELECT * FROM NAMED<http://secret/private> WHERE { GRAPH ?g { ?s ?p ?o } }",
+            &iris,
+        );
+        assert!(
+            !ok,
+            "an unstripped FROM NAMED of an unauthorized graph must be refused: {scoped}"
+        );
+    }
+
+    #[test]
+    fn guard_rejects_a_prologue_spliced_into_a_string_literal() {
+        // A ` WHERE ` inside a triple-quoted literal mis-anchors the rewriter, so
+        // the injected prologue lands inside the literal and the query is left with
+        // no dataset clause — which would read every named graph in the store.
+        let iris = ["http://ex.org/g/a"];
+        let attack = "SELECT ?g ?o (\"\"\"x WHERE x\"\"\" AS ?z) \
+             WHERE { GRAPH ?g { ?s ?p ?o } }";
+        let (ok, scoped) = scope_then_guard(attack, &iris);
+        assert!(
+            !ok,
+            "a query whose scope prologue was neutralised must be refused: {scoped}"
+        );
     }
 
     /// The scoped prologue must be byte-identical for the same SET of graphs,
@@ -5840,6 +6933,34 @@ fn asset_etag(asset: &crate::auth::models::Asset) -> String {
     format!("\"{:x}-{:x}\"", h, asset.size_bytes)
 }
 
+/// Why an asset's bytes could not be served.
+///
+/// Bytes this node simply does not hold are a `404`, not a `500`: a follower
+/// replicates the store and the identity database but not the object store, so
+/// it lists the leader's files — their metadata travels with the identity
+/// database — without holding any of them. Saying "internal server error" there
+/// blames the node for working as designed, and tells the caller nothing about
+/// where the file actually is, so a follower names its leader.
+///
+/// Anything else is a real fault and keeps its `500`.
+fn asset_download_error(
+    state: &AppState,
+    filename: &str,
+    err: &anyhow::Error,
+) -> (StatusCode, String) {
+    if err.downcast_ref::<crate::storage::AssetMissing>().is_none() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+    }
+    let replication = state.store.replication();
+    let message = match (replication.role(), replication.leader_url()) {
+        (crate::store::replication::Role::Follower, Some(leader)) => format!(
+            "This node replicates data, not files: {filename} is stored on the leader at {leader}"
+        ),
+        _ => format!("No stored bytes for {filename}"),
+    };
+    (StatusCode::NOT_FOUND, message)
+}
+
 async fn serve_asset(
     state: &AppState,
     user_id: Option<&str>,
@@ -5912,7 +7033,7 @@ async fn serve_asset(
         .object_store
         .download(&asset.s3_key)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| asset_download_error(state, &asset.filename, &e))?;
 
     // Active content types (SVG / HTML / XML) can execute script when a browser
     // renders them inline in the app's origin — stored XSS. Serve those as a
@@ -6895,6 +8016,8 @@ fn resolve_shapes_graphs(sources: DatasetShapesSources) -> Vec<String> {
 const NO_SHAPES_GRAPH_MSG: &str = "No shapes graph found for this dataset. Upload a SHACL \
      shapes file, set a graph's role to 'shapes', or bind a shape graph in SHACL Studio.";
 
+const NO_READABLE_SHAPES_GRAPH_MSG: &str = "No shapes graph of this dataset is one you may read.";
+
 /// Merge per-shapes-graph validation reports into one: conforms = all conform,
 /// results concatenated, results_count = sum.
 fn merge_validation_reports(
@@ -6902,15 +8025,21 @@ fn merge_validation_reports(
 ) -> crate::shacl::report::ValidationReport {
     let mut conforms = true;
     let mut results = Vec::new();
+    let mut metrics: Option<crate::shacl::report::RunMetrics> = None;
     for r in reports {
         conforms &= r.conforms;
         results.extend(r.results);
+        metrics = match (metrics.take(), r.metrics) {
+            (Some(a), Some(b)) => Some(a.merge(b)),
+            (a, b) => a.or(b),
+        };
     }
     let results_count = results.len();
     crate::shacl::report::ValidationReport {
         conforms,
         results,
         results_count,
+        metrics,
     }
 }
 
@@ -6920,6 +8049,17 @@ fn merge_validation_reports(
 /// dataset's configured `shapes_graph_iri`, SHACL Studio bindings, then dataset
 /// graphs with the `shapes` role (auto-registered into the Studio on use).
 /// Multiple shapes graphs are each validated and merged into one report.
+///
+/// A SHACL report carries the focus nodes and values of the graphs it
+/// validated, so a run reads only the dataset graphs its caller may read, by
+/// the rule a `/sparql` query is scoped to
+/// ([`crate::auth::acl::readable_graph_iris`]: a private graph only for the
+/// dataset's writers, plus graph-ACL read grants); admins read them all. The
+/// same goes for its shapes: a private graph of any dataset shapes only the
+/// runs of who may read it. A run that could not see every graph or shapes
+/// graph of the dataset is not official: it is answered as a test run
+/// (`test: true`, `partial: true`), records nothing and leaves the dataset's
+/// official status as it was.
 pub async fn validate_dataset(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -6948,6 +8088,53 @@ pub async fn validate_dataset(
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
     }
 
+    // Recording an official run writes the dataset's stored status and
+    // history, and the shapes self-heal below adopts/binds Library entries —
+    // both are writes. A reader may run validation (as a test) but may do
+    // neither. `can_write_dataset` only knows dataset/org roles, so admins
+    // (writers everywhere) are added explicitly.
+    let can_write = current_user.is_admin()
+        || state
+            .auth_db
+            .can_write_dataset(&current_user.user_id, &dataset)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // What the caller may read; admins read every graph.
+    let readable = if current_user.is_admin() {
+        None
+    } else {
+        Some(
+            accessible_read_graphs(&state, Some(&current_user))
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.message()))?,
+        )
+    };
+    let may_read = |g: &str| readable.as_ref().is_none_or(|r| r.contains(g));
+
+    // The dataset's graphs, less the persisted-report graph (a run must not
+    // read its own report back as data), and those of them the caller may
+    // not read: they are no part of this caller's run.
+    let entries: Vec<crate::auth::models::DatasetGraphEntry> = state
+        .auth_db
+        .list_dataset_graph_entries(&dataset_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .filter(|e| !e.graph_iri.starts_with("urn:system:reports:"))
+        .collect();
+    let hidden: std::collections::HashSet<&str> = entries
+        .iter()
+        .map(|e| e.graph_iri.as_str())
+        .filter(|g| !may_read(g))
+        .collect();
+    // Graphs some dataset holds as private: a shapes graph may be another
+    // dataset's, linked or bound here.
+    let private_graphs = state
+        .auth_db
+        .list_private_dataset_graph_iris()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Whether the run leaves out a shapes graph of the dataset the caller may
+    // not read: then it is not the dataset's run either.
+    let mut shapes_withheld = false;
+
     // Resolve the shapes graph(s): explicit body override, else configured /
     // bound / shapes-role sources.
     let explicit = body
@@ -6962,12 +8149,14 @@ pub async fn validate_dataset(
                     .to_string(),
             )
         })?;
-        if !crate::auth::acl::check_graph_permission(
-            Some(&current_user),
-            &iri,
-            "read",
-            &state.auth_db,
-        ) {
+        if !may_read(&iri)
+            && !crate::auth::acl::check_graph_permission(
+                Some(&current_user),
+                &iri,
+                "read",
+                &state.auth_db,
+            )
+        {
             return Err((
                 StatusCode::FORBIDDEN,
                 format!("Read access denied for shapes graph <{iri}>"),
@@ -6979,51 +8168,122 @@ pub async fn validate_dataset(
         if sources.is_empty() {
             return Err((StatusCode::BAD_REQUEST, NO_SHAPES_GRAPH_MSG.to_string()));
         }
-        let resolved = resolve_shapes_graphs(sources);
+        // A graph of the dataset the caller may not read (a private
+        // shapes-role graph), or another dataset's private graph linked or
+        // bound here, shapes no run of theirs, whichever source names it: its
+        // messages and paths would reach them in the report.
+        let all = resolve_shapes_graphs(sources);
+        let resolved: Vec<String> = all
+            .iter()
+            .filter(|g| {
+                !hidden.contains(g.as_str()) && (may_read(g) || !private_graphs.contains(*g))
+            })
+            .cloned()
+            .collect();
+        shapes_withheld = resolved.len() < all.len();
+        if resolved.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                NO_READABLE_SHAPES_GRAPH_MSG.to_string(),
+            ));
+        }
         // Self-heal: shapes graphs that never made it into the Studio Library
-        // get adopted + bound now (idempotent, best-effort).
-        for iri in &resolved {
-            if let Err(e) = crate::shacl_studio::registration::auto_register_dataset_shapes_graph(
-                &state,
-                &dataset,
-                iri,
-                Some(&current_user.user_id),
-            ) {
-                debug!("auto-register of shapes graph <{iri}> skipped: {e}");
+        // get adopted + bound now (idempotent, best-effort). Only a writer may
+        // trigger it — adopting a Library entry and binding it is a write, and
+        // it must not run under a mere reader's authority.
+        if can_write {
+            for iri in &resolved {
+                if let Err(e) =
+                    crate::shacl_studio::registration::auto_register_dataset_shapes_graph(
+                        &state,
+                        &dataset,
+                        iri,
+                        Some(&current_user.user_id),
+                    )
+                {
+                    debug!("auto-register of shapes graph <{iri}> skipped: {e}");
+                }
             }
         }
         resolved
     };
 
-    // Data graphs for this dataset, excluding the persisted-report graph.
-    // Shapes graphs stay IN the data set: SHACL allows the shapes graph and
-    // data graph to coincide (merged uploads), and excluding them would make
-    // a merged shapes+instances graph validate vacuously to "conforms".
-    let data_graphs: Vec<String> = state
-        .auth_db
-        .list_dataset_graphs(&dataset_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .into_iter()
-        .filter(|g| !g.starts_with("urn:system:reports:"))
+    // Data graphs: the dataset's graphs the caller may read. Shapes graphs
+    // stay IN the data set: SHACL allows the shapes graph and data graph to
+    // coincide (merged uploads), and excluding them would make a merged
+    // shapes+instances graph validate vacuously to "conforms".
+    let mut data_graphs: Vec<String> = entries
+        .iter()
+        .map(|e| e.graph_iri.clone())
+        .filter(|g| !hidden.contains(g.as_str()))
         .collect();
 
+    // The declared model version's graphs join the data graphs. SHACL reads
+    // the class hierarchy out of the data graph it is given — "all the
+    // rdfs:subClassOf declarations needed to walk the class hierarchy need to
+    // exist in the data graph" (§2.1.3.2), "the data graph is expected to
+    // include all the ontology axioms related to the data" (§3.2) — but model
+    // graphs live in the model registry, not in `dataset_graphs`, so a dataset
+    // that declares `dct:conformsTo` was validated without the model it
+    // conforms to: `sh:targetClass` on a superclass targeted nothing and
+    // `sh:class` on one failed, silently. Reasoning already reads them
+    // (`conformance::reasoning_sources`); validation now does too. Only graphs
+    // the caller may read are added, on the registry's own visibility rule.
+    {
+        let existing: std::collections::HashSet<String> = data_graphs.iter().cloned().collect();
+        data_graphs.extend(
+            crate::conformance::model_graphs_for_dataset(
+                &state.store,
+                &state.auth_db,
+                &state.base_url,
+                &dataset,
+                Some(current_user.user_id.as_str()),
+            )
+            .into_iter()
+            .filter(|g| !existing.contains(g)),
+        );
+    }
+
     // Run SHACL validation once per shapes graph and merge into one report.
+    // The path label is a thread-local and must not outlive this loop: the
+    // awaits below would let it leak onto whatever task runs here next.
     let mut reports = Vec::with_capacity(shapes_graphs.len());
-    for shapes_graph_iri in &shapes_graphs {
-        let report = crate::shacl::validate(&state.store, shapes_graph_iri, &data_graphs)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        reports.push(report);
+    {
+        let _path = crate::store::telemetry::ValidationPathGuard::set("dataset");
+        for shapes_graph_iri in &shapes_graphs {
+            let report = crate::shacl::validate(&state.store, shapes_graph_iri, &data_graphs)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            reports.push(report);
+        }
     }
     let report = merge_validation_reports(reports);
 
     // A test run validates but records nothing — no run row, so it doesn't
-    // count officially and the dataset's stored status is left unchanged.
-    if q.test.unwrap_or(false) {
+    // count officially and the dataset's stored status is left unchanged. A
+    // run that could not see every graph or shapes graph of the dataset is
+    // one: a caller who may not read the whole dataset must not overwrite its
+    // official status with a partial result.
+    let partial = !hidden.is_empty() || shapes_withheld;
+    // Recording an official run sets the dataset's stored status and history:
+    // a write. A reader whose run was COMPLETE (nothing hidden) would otherwise
+    // record it — evicting the owner's history, forging a verdict, or setting
+    // the official status against an explicit shapes graph. Refuse it, and say
+    // to ask for a test run instead. A partial run is answered as a test run
+    // just below and never recorded, so it needs no write and stays a `200`.
+    if !q.test.unwrap_or(false) && !partial && !can_write {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Recording a validation run requires write access to the dataset; retry with ?test=true."
+                .to_string(),
+        ));
+    }
+    if q.test.unwrap_or(false) || partial {
         return Ok(Json(serde_json::json!({
             "report": report,
             "run_id": null,
             "ran_at": null,
             "test": true,
+            "partial": partial,
         })));
     }
 
@@ -7039,6 +8299,8 @@ pub async fn validate_dataset(
         &dataset_id,
         &report,
         Some(current_user.user_id.as_str()),
+        &data_graphs,
+        &shapes_graphs,
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -7048,22 +8310,48 @@ pub async fn validate_dataset(
     // Best-effort: an RDF-persistence failure must not fail the validation call.
     {
         let report_graph = format!("urn:system:reports:dataset:{dataset_id}");
-        let report_iri = format!("{report_graph}#run-{}", summary.id);
-        let ttl = crate::shacl_studio::report_rdf::report_to_turtle(&report, &report_iri);
-        match state.store.graph_store_put(
-            Some(&report_graph),
-            &ttl,
-            oxigraph::io::RdfFormat::Turtle,
-        ) {
-            Ok(_) => {
-                let _ = state.auth_db.add_dataset_graph(&dataset_id, &report_graph);
-                let _ = state.auth_db.set_dataset_graph_role(
-                    &dataset_id,
-                    &report_graph,
-                    Some(crate::auth::models::GraphKind::System),
+        // Registered to the dataset, the report is read by the dataset's
+        // readers, so it is private there when a graph it reports on is: one
+        // of the dataset's private graphs, or a model graph not everyone may
+        // read (the dataset's graphs are all in: the run is official).
+        let private = entries.iter().any(|e| e.private)
+            || data_graphs.iter().any(|g| {
+                !entries.iter().any(|e| &e.graph_iri == g)
+                    && !crate::conformance::model_graph_readable(&state, None, g)
+            });
+        // A shapes graph another dataset holds as private is read by that
+        // dataset's writers, not by this one's, and a graph registered here
+        // is read by this one's at least: no report of such a run is written,
+        // and the last one is cleared rather than left to stand for it.
+        let foreign_private_shapes = shapes_graphs
+            .iter()
+            .any(|g| private_graphs.contains(g) && !entries.iter().any(|e| &e.graph_iri == g));
+        if foreign_private_shapes {
+            if let Err(e) = clear_dataset_report_graph(&state, &dataset_id) {
+                tracing::warn!(
+                    "dataset {dataset_id}: the last report in <{report_graph}> could not be \
+                     cleared: {e}"
                 );
             }
-            Err(e) => debug!("report-RDF persistence skipped: {e}"),
+        } else {
+            match place_dataset_report_graph(&state.auth_db, &dataset_id, &report_graph, private) {
+                Ok(()) => {
+                    let report_iri = format!("{report_graph}#run-{}", summary.id);
+                    let ttl =
+                        crate::shacl_studio::report_rdf::report_to_turtle(&report, &report_iri);
+                    if let Err(e) = state.store.graph_store_put(
+                        Some(&report_graph),
+                        &ttl,
+                        oxigraph::io::RdfFormat::Turtle,
+                    ) {
+                        debug!("report-RDF persistence skipped: {e}");
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    "dataset {dataset_id}: skipped report write to <{report_graph}>: who may read \
+                 it could not be settled: {e}"
+                ),
+            }
         }
     }
 
@@ -7088,12 +8376,105 @@ pub struct ValidateBody {
     pub shapes_graph: Option<String>,
 }
 
-/// Count severities, serialize the report, and store a validation run.
+/// Settle who may read a dataset's report graph before an official run
+/// writes into it: registered to the dataset (role System), and private there
+/// when `private`. A report graph once private stays private: making it
+/// public again is a decision for whoever may change the dataset's graphs.
+/// On `Err` the report is not written.
+fn place_dataset_report_graph(
+    auth_db: &crate::auth::db::AuthDb,
+    dataset_id: &str,
+    report_graph: &str,
+    private: bool,
+) -> anyhow::Result<()> {
+    let registered = auth_db
+        .list_dataset_graph_entries(dataset_id)?
+        .into_iter()
+        .find(|e| e.graph_iri == report_graph);
+    if registered.is_none() {
+        auth_db.add_dataset_graph(dataset_id, report_graph)?;
+    }
+    if private && !registered.is_some_and(|e| e.private) {
+        auth_db.set_dataset_graph_private(dataset_id, report_graph, true)?;
+    }
+    auth_db.set_dataset_graph_role(
+        dataset_id,
+        report_graph,
+        Some(crate::auth::models::GraphKind::System),
+    )?;
+    Ok(())
+}
+
+/// Empty `dataset_id`'s report graph: its last report may not stand where the
+/// dataset's readers read it.
+fn clear_dataset_report_graph(state: &AppState, dataset_id: &str) -> anyhow::Result<()> {
+    let report_graph = format!("urn:system:reports:dataset:{dataset_id}");
+    state
+        .store
+        .update(&format!("CLEAR SILENT GRAPH <{report_graph}>"))
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// `graph_iri` has just been made private in a dataset: every dataset's report
+/// graph holding a report on it follows. A report graph holds its dataset's
+/// latest official run; when that run validated the graph, or was shaped by
+/// it, the report graph is made private where the dataset holds the graph
+/// privately (its writers read it), and cleared where the dataset does not
+/// hold it (a shapes graph linked from another dataset: see
+/// `validate_dataset`). Where the dataset holds it non-private, its readers
+/// read the graph through it anyway. A run stored before runs recorded their
+/// graphs counts as reading every graph of its dataset. Stored runs need
+/// nothing: `stored_run_view` checks at every read.
+pub(crate) fn report_graphs_follow_private_graph(
+    state: &AppState,
+    graph_iri: &str,
+) -> anyhow::Result<()> {
+    let db = &state.auth_db;
+    for (dataset_id, latest_run) in db.list_datasets_with_report_graph()? {
+        let entry = db
+            .list_dataset_graph_entries(&dataset_id)?
+            .into_iter()
+            .find(|e| e.graph_iri == graph_iri);
+        if entry.as_ref().is_some_and(|e| !e.private) {
+            continue;
+        }
+        let holds = entry.is_some();
+        let read = match &latest_run {
+            None => false,
+            Some(run) => match (
+                db.get_validation_run_graphs(run)?,
+                db.get_validation_run_shapes_graphs(run)?,
+            ) {
+                (None, _) => holds,
+                (Some(data), shapes) => {
+                    data.iter().any(|g| g == graph_iri)
+                        || shapes.is_some_and(|s| s.iter().any(|g| g == graph_iri))
+                }
+            },
+        };
+        if !read {
+            continue;
+        }
+        let report_graph = format!("urn:system:reports:dataset:{dataset_id}");
+        if holds {
+            db.set_dataset_graph_private(&dataset_id, &report_graph, true)?;
+        } else {
+            clear_dataset_report_graph(state, &dataset_id)?;
+        }
+    }
+    Ok(())
+}
+
+/// Count severities, serialize the report, and store a validation run with
+/// the graphs it validated (`data_graphs`) and the shapes graphs it validated
+/// them against (`shapes_graphs`).
 fn persist_validation_run(
     state: &AppState,
     dataset_id: &str,
     report: &crate::shacl::report::ValidationReport,
     triggered_by: Option<&str>,
+    data_graphs: &[String],
+    shapes_graphs: &[String],
 ) -> anyhow::Result<crate::auth::models::ShaclRunSummary> {
     use crate::shacl::report::Severity;
     let mut violation_count = 0i64;
@@ -7107,7 +8488,7 @@ fn persist_validation_run(
         }
     }
     let report_json = serde_json::to_string(report)?;
-    state.auth_db.insert_validation_run(
+    let summary = state.auth_db.insert_validation_run(
         dataset_id,
         report.conforms,
         report.results_count as i64,
@@ -7116,10 +8497,92 @@ fn persist_validation_run(
         info_count,
         &report_json,
         triggered_by,
-    )
+    )?;
+    // What the run read and how long it took, so the history survives a
+    // restart (the telemetry rings do not).
+    if let Some(m) = &report.metrics {
+        if let Err(e) = state.auth_db.set_validation_run_metrics(
+            &summary.id,
+            m.duration_ms as i64,
+            m.quads as i64,
+            &m.source,
+            m.run_index,
+        ) {
+            tracing::warn!("validation run {}: metrics not stored: {e}", summary.id);
+        }
+    }
+    // What the run validated, and against what: its report goes in full only
+    // to who may read all of it (`stored_run_view`). Unrecorded, it goes to
+    // writers only.
+    if let Err(e) = state
+        .auth_db
+        .set_validation_run_graphs(&summary.id, data_graphs, shapes_graphs)
+    {
+        tracing::warn!(
+            "validation run {}: validated graphs not stored, so its report goes to the \
+             dataset's writers only: {e}",
+            summary.id
+        );
+    }
+    Ok(summary)
 }
 
-/// GET /api/datasets/:dataset_id/validation/latest — latest stored run (full report) or null
+/// A stored validation run as `user` sees it. Its report carries the focus
+/// nodes and values of every graph the run validated, so it goes in full to
+/// admins, the dataset's writers, and callers who may read each of those
+/// graphs now (by the `/sparql` rule, or the model registry's for a model
+/// graph); a graph made private since the run counts as private. It also
+/// names its shapes, their paths and messages, so it is withheld from anyone
+/// but an admin who may not read a shapes graph it used that some dataset
+/// holds as private now, the dataset's writers included: one linked from
+/// another dataset need not be theirs to read. Anyone else gets the run's
+/// summary: `report` is null and `report_withheld` true. A run stored before
+/// runs recorded their graphs goes in full to writers only.
+fn stored_run_view(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    dataset: &crate::auth::models::Dataset,
+    run: crate::auth::models::ShaclValidationRun,
+) -> anyhow::Result<serde_json::Value> {
+    let shapes_withheld = !user.is_admin()
+        && match state.auth_db.get_validation_run_shapes_graphs(&run.id)? {
+            None => false,
+            Some(shapes) => {
+                let withheld =
+                    crate::auth::acl::withheld_private_graphs(&state.auth_db, Some(user))?;
+                shapes.iter().any(|g| withheld.contains(g))
+            }
+        };
+    let full = user.is_admin()
+        || (!shapes_withheld
+            && (state.auth_db.can_write_dataset(&user.user_id, dataset)?
+                || match state.auth_db.get_validation_run_graphs(&run.id)? {
+                    None => false,
+                    Some(graphs) => {
+                        let readable = crate::auth::acl::readable_graph_iris(
+                            &state.auth_db,
+                            Some((user.user_id.as_str(), user.role.as_str())),
+                        )?;
+                        graphs.iter().all(|g| {
+                            readable.contains(g)
+                                || crate::conformance::model_graph_readable(
+                                    state,
+                                    Some(&user.user_id),
+                                    g,
+                                )
+                        })
+                    }
+                }));
+    let mut view = serde_json::to_value(run)?;
+    if !full {
+        view["report"] = serde_json::Value::Null;
+    }
+    view["report_withheld"] = serde_json::Value::Bool(!full);
+    Ok(view)
+}
+
+/// GET /api/datasets/:dataset_id/validation/latest — latest stored run or null
+/// (its full report only as `stored_run_view` allows)
 pub async fn get_latest_validation_run(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -7140,6 +8603,9 @@ pub async fn get_latest_validation_run(
     let run = state
         .auth_db
         .get_latest_validation_run(&dataset_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map(|run| stored_run_view(&state, &current_user, &dataset, run))
+        .transpose()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(run))
 }
@@ -7175,7 +8641,8 @@ pub async fn get_validation_history(
     Ok(Json(runs))
 }
 
-/// GET /api/datasets/:dataset_id/validation/runs/:run_id — one stored run (full report)
+/// GET /api/datasets/:dataset_id/validation/runs/:run_id — one stored run
+/// (its full report only as `stored_run_view` allows)
 pub async fn get_validation_run(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -7199,6 +8666,8 @@ pub async fn get_validation_run(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .filter(|r| r.dataset_id == dataset_id)
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Run not found".to_string()))?;
+    let run = stored_run_view(&state, &current_user, &dataset, run)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(run))
 }
 
@@ -7240,7 +8709,9 @@ pub async fn list_latest_validation_runs(
 /// GET /api/datasets/:dataset_id/shapes — get shapes graph
 ///
 /// Supports `Accept: text/shaclc` or `?format=shaclc` to return SHACLC compact syntax.
-/// Default is Turtle.
+/// Default is Turtle. A shapes graph some dataset holds as private is served
+/// only to who may read it, by the rule a `/sparql` query is scoped to; 404
+/// when that leaves none.
 pub async fn get_shapes(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -7264,9 +8735,25 @@ pub async fn get_shapes(
 
     // Same resolution order as validate_dataset: configured shapes_graph_iri,
     // Studio bindings, then shapes-role dataset graphs.
-    let shapes_graphs = resolve_shapes_graphs(dataset_shapes_sources(&state, &dataset));
-    if shapes_graphs.is_empty() {
+    let resolved = resolve_shapes_graphs(dataset_shapes_sources(&state, &dataset));
+    if resolved.is_empty() {
         return Err((StatusCode::NOT_FOUND, NO_SHAPES_GRAPH_MSG.to_string()));
+    }
+    // A graph some dataset holds as private goes only to who may read it, by
+    // the rule a `/sparql` query is scoped to (admins read every graph): this
+    // dataset's private shapes-role graph to its writers, not its viewers,
+    // and another dataset's, linked or bound here, to that one's.
+    let withheld = crate::auth::acl::withheld_private_graphs(&state.auth_db, Some(&current_user))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let shapes_graphs: Vec<String> = resolved
+        .into_iter()
+        .filter(|g| !withheld.contains(g))
+        .collect();
+    if shapes_graphs.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            NO_READABLE_SHAPES_GRAPH_MSG.to_string(),
+        ));
     }
 
     // Detect SHACLC format request via query param or Accept header
@@ -7297,12 +8784,15 @@ pub async fn get_shapes(
     }
 
     // Merge the Turtle of every resolved shapes graph (Turtle allows repeated
-    // @prefix directives, so concatenation stays valid).
+    // @prefix directives, so concatenation stays valid — each graph's header
+    // binds its labels for the statements that follow it).
     let mut data: Vec<u8> = Vec::new();
     for iri in &shapes_graphs {
         let ttl = state
             .store
-            .graph_store_get(Some(iri), oxigraph::io::RdfFormat::Turtle)
+            .dump_prefixed(oxigraph::io::RdfFormat::Turtle, Some(iri), |ns| {
+                state.prefix_registry.declaration_for(ns)
+            })
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         if !data.is_empty() {
             data.extend_from_slice(b"\n");
@@ -7313,11 +8803,75 @@ pub async fn get_shapes(
     Ok((StatusCode::OK, [(CONTENT_TYPE, "text/turtle")], data).into_response())
 }
 
+/// Whether `user` may replace `dataset_id`'s shapes graph `shapes_iri` through
+/// `PUT /api/datasets/:id/shapes` (see there). `Ok(None)` when the dataset
+/// already holds the graph (or it is a Library graph the caller may edit),
+/// `Ok(Some(claim))` when the write claims it for the dataset (register it
+/// with that claim if `claim_registers_with_dataset` agrees: an admin's
+/// write of a new graph leaves it to the dataset's editors, of anyone
+/// else's graph does not), 403 otherwise.
+fn authorize_shapes_graph_write(
+    state: &AppState,
+    dataset_id: &str,
+    shapes_iri: &str,
+    user: &AuthenticatedUser,
+) -> Result<Option<crate::auth::dataset_graph::GraphClaim>, (StatusCode, String)> {
+    use crate::auth::dataset_graph;
+    let forbidden = |m: String| (StatusCode::FORBIDDEN, m);
+    dataset_graph::refuse_model_registry_graph(
+        &state.store,
+        &state.base_url,
+        dataset_id,
+        shapes_iri,
+    )
+    .map_err(forbidden)?;
+    if dataset_graph::dataset_holds_graph(&state.auth_db, &state.base_url, dataset_id, shapes_iri) {
+        return Ok(None);
+    }
+    if shapes_iri.starts_with("urn:shapes:") {
+        let orgs = state
+            .auth_db
+            .get_user_org_ids(&user.user_id)
+            .unwrap_or_default();
+        let manageable = user.is_admin()
+            || crate::shacl_studio::store::ShaclStudioStore::new(state.auth_db.pool())
+                .get_shape_graph_by_iri(shapes_iri)
+                .ok()
+                .flatten()
+                .is_some_and(|set| {
+                    crate::shacl_studio::access::can_manage_set(
+                        &set,
+                        Some(&user.user_id),
+                        &orgs,
+                        false,
+                    )
+                });
+        return if manageable {
+            Ok(None)
+        } else {
+            Err(forbidden(format!(
+                "Shapes graph <{shapes_iri}> is a SHACL Studio Library graph you may not edit."
+            )))
+        };
+    }
+    dataset_graph::gate_dataset_graph_target(
+        &state.store,
+        &state.auth_db,
+        &state.base_url,
+        dataset_id,
+        shapes_iri,
+        user,
+    )
+    .map(Some)
+    .map_err(forbidden)
+}
+
 /// PUT /api/datasets/:dataset_id/shapes — upload shapes graph
 pub async fn put_shapes(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
     Path(dataset_id): Path<String>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
     _headers: HeaderMap,
     body: Bytes,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -7341,6 +8895,18 @@ pub async fn put_shapes(
         .clone()
         .unwrap_or_else(|| format!("urn:dataset:{}:shapes", dataset_id));
 
+    // The shapes graph is replaced below, on the dataset's authority. That
+    // covers a graph the dataset holds (its namespace, or registered to it) and
+    // a SHACL Studio Library graph the caller may edit there. A shapes graph
+    // that is only linked (`PUT /shacl`) is someone else's to write: it is
+    // claimed through the dataset graph gate like any other target, so it
+    // holds no data yet or the caller may write it directly, and it is then
+    // registered to the dataset (after an admin's write, only a new graph a
+    // non-admin could have claimed). A model-registry graph is refused for
+    // everyone — an old setting may still name one.
+    let shapes_claim =
+        authorize_shapes_graph_write(&state, &dataset_id, &shapes_iri, &current_user)?;
+
     let raw = String::from_utf8(body.to_vec())
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid UTF-8".to_string()))?;
 
@@ -7350,8 +8916,18 @@ pub async fn put_shapes(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("text/turtle");
     let data = if content_type.contains("shaclc") {
-        crate::shaclc::parse(&raw)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("SHACLC parse error: {e}")))?
+        // Strict by default: unrecognised SHACLC is a 400, never an emptied
+        // shapes graph. `?lenient=true` restores the drop-what-you-cannot-parse
+        // behaviour for callers that want it.
+        let lenient = query
+            .get("lenient")
+            .is_some_and(|v| v == "true" || v == "1");
+        let parsed = if lenient {
+            crate::shaclc::parse_lenient(&raw)
+        } else {
+            crate::shaclc::parse(&raw)
+        };
+        parsed.map_err(|e| (StatusCode::BAD_REQUEST, e))?
     } else {
         raw
     };
@@ -7366,6 +8942,29 @@ pub async fn put_shapes(
         .auth_db
         .update_dataset_shacl(&dataset_id, dataset.shacl_on_write, Some(&shapes_iri))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(claim) = shapes_claim.filter(|claim| {
+        crate::auth::dataset_graph::claim_registers_with_dataset(
+            &state.auth_db,
+            &state.base_url,
+            &dataset_id,
+            &shapes_iri,
+            *claim,
+            current_user.is_admin(),
+        )
+    }) {
+        crate::auth::dataset_graph::register_claimed_graph(
+            &state.auth_db,
+            &dataset_id,
+            &shapes_iri,
+            claim,
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let _ = state.auth_db.set_dataset_graph_role(
+            &dataset_id,
+            &shapes_iri,
+            Some(crate::auth::models::GraphKind::Shapes),
+        );
+    }
 
     // Adopt the uploaded shapes into the SHACL Studio Library + validation
     // layer so they are visible and effective (idempotent, best-effort).
@@ -7386,6 +8985,11 @@ pub async fn put_shapes(
 }
 
 /// POST /api/datasets/:dataset_id/infer — run SHACL rules to materialize inferred triples
+///
+/// Runs the rules of the dataset's shapes graphs (resolved as for
+/// `validate_dataset`) that the caller may read: the rules of a graph some
+/// dataset holds as private run only for who may read it. `partial: true`
+/// says a shapes graph was left out; 400 when none is left.
 pub async fn infer_dataset(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -7414,10 +9018,28 @@ pub async fn infer_dataset(
 
     // Same shapes resolution as validate_dataset: configured field, Studio
     // bindings, and shapes-role graphs (union, deduped).
-    let shapes_graphs = resolve_shapes_graphs(dataset_shapes_sources(&state, &dataset));
-    if shapes_graphs.is_empty() {
+    let all = resolve_shapes_graphs(dataset_shapes_sources(&state, &dataset));
+    if all.is_empty() {
         return Err((StatusCode::BAD_REQUEST, NO_SHAPES_GRAPH_MSG.to_string()));
     }
+    // What the rules derive is written into the dataset, where its writers
+    // and readers read their constants and structure back. So a graph some
+    // dataset holds as private, linked or bound here by one of its writers,
+    // is no rule of a run by who may not read it (admins read every graph).
+    let withheld = crate::auth::acl::withheld_private_graphs(&state.auth_db, Some(&current_user))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let shapes_graphs: Vec<String> = all
+        .iter()
+        .filter(|g| !withheld.contains(*g))
+        .cloned()
+        .collect();
+    if shapes_graphs.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            NO_READABLE_SHAPES_GRAPH_MSG.to_string(),
+        ));
+    }
+    let partial = shapes_graphs.len() < all.len();
 
     let data_graphs: Vec<String> = state
         .auth_db
@@ -7427,14 +9049,75 @@ pub async fn infer_dataset(
         .filter(|g| !g.starts_with("urn:system:reports:"))
         .collect();
 
+    // A dataset with no graphs has nothing to infer over. Running anyway would
+    // hand the rules the store's *default* graph as their scope — every
+    // tenant's data is outside it, but so is anything this dataset owns, so
+    // there is nothing to gain and a boundary to lose.
+    if data_graphs.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "inferred_triples": 0,
+            "partial": partial,
+        })));
+    }
+
+    // Where the derived triples go. One data graph: into it, in place, as
+    // always. Several: into the dataset's own inference graph — never the
+    // store's global default graph, which no dataset holds and which
+    // `scope_query_to_authorized` puts out of reach of every reader, so
+    // triples materialised there were both unowned and invisible.
+    let target_graph = match data_graphs.as_slice() {
+        [one] => one.clone(),
+        _ => {
+            let iri = crate::auth::dataset_graph::dataset_inference_graph_iri(&dataset_id);
+            // Registered so it is a graph of the dataset like any other:
+            // ACL'd, listed, versioned, and removed with the dataset. It is
+            // inside the dataset's own namespace, so the dataset makes it —
+            // `origin = created`, which is what lets a detach delete it.
+            crate::auth::dataset_graph::register_claimed_graph(
+                &state.auth_db,
+                &dataset_id,
+                &iri,
+                crate::auth::dataset_graph::GraphClaim::Created,
+            )
+            .and_then(|()| {
+                state.auth_db.set_dataset_graph_role(
+                    &dataset_id,
+                    &iri,
+                    Some(crate::auth::models::GraphKind::Entailment),
+                )
+            })
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            iri
+        }
+    };
+    // The engine writes only here, so this is the one graph to authorize. The
+    // rules come from a shapes graph the caller may have uploaded themselves.
+    if !crate::auth::dataset_graph::dataset_holds_graph(
+        &state.auth_db,
+        &state.base_url,
+        &dataset_id,
+        &target_graph,
+    ) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!("Graph <{target_graph}> is not a graph of dataset '{dataset_id}'"),
+        ));
+    }
+
     let mut count = 0usize;
     for shapes_graph_iri in &shapes_graphs {
-        count += crate::shacl::infer(&state.store, shapes_graph_iri, &data_graphs)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        count += crate::shacl::infer_into(
+            &state.store,
+            shapes_graph_iri,
+            &data_graphs,
+            Some(&target_graph),
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
 
     Ok(Json(serde_json::json!({
         "inferred_triples": count,
+        "partial": partial,
     })))
 }
 
@@ -7444,17 +9127,32 @@ pub async fn infer_dataset(
 ///
 /// Body: SHACLC text (Content-Type: text/shaclc or text/plain)
 /// Response: Turtle (Content-Type: text/turtle)
-pub async fn shaclc_parse(body: Bytes) -> Result<Response, (StatusCode, String)> {
+pub async fn shaclc_parse(
+    Query(query): Query<std::collections::HashMap<String, String>>,
+    body: Bytes,
+) -> Result<Response, (StatusCode, String)> {
     let input = String::from_utf8(body.to_vec())
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid UTF-8".to_string()))?;
-    let turtle = crate::shaclc::parse(&input).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let lenient = query
+        .get("lenient")
+        .is_some_and(|v| v == "true" || v == "1");
+    let turtle = if lenient {
+        crate::shaclc::parse_lenient(&input)
+    } else {
+        crate::shaclc::parse(&input)
+    }
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     Ok((StatusCode::OK, [(CONTENT_TYPE, "text/turtle")], turtle).into_response())
 }
 
 /// POST /api/shaclc/serialize — convert a shapes graph (by IRI) from the store → SHACLC
 ///
-/// Body: JSON `{"shapesGraphIri": "urn:..."}` or the IRI directly as plain text
+/// Body: JSON `{"shapesGraphIri": "urn:..."}` or the IRI directly as plain text.
+/// Requires a token, and the caller must be allowed to read the graph they
+/// name: the handler reads whatever IRI it is given straight out of the
+/// store, so without that check any caller could read any graph.
 pub async fn shaclc_serialize(
+    Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
     body: Bytes,
 ) -> Result<Response, (StatusCode, String)> {
@@ -7477,6 +9175,19 @@ pub async fn shaclc_serialize(
     } else {
         body_str.trim().to_string()
     };
+
+    // The IRI comes from the caller, so it is only theirs to read if the
+    // same visibility rules that gate /store and /sparql say so. A graph the
+    // caller may not read is refused with the same answer whether or not it
+    // exists, so this cannot be used to discover graph IRIs.
+    if !check_graph_read_access(&state, Some(&current_user), &shapes_iri)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "No read access to that graph".to_string(),
+        ));
+    }
 
     let shaclc = crate::shaclc::serialize(&state.store, &shapes_iri)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -7551,9 +9262,14 @@ pub async fn get_rml_mapping(
     }
 
     let mapping_graph = format!("urn:dataset:{}:rml-mappings", dataset_id);
+    // A mapping is read and edited by people: `rr:` and `rml:` beat their IRIs.
     let data = state
         .store
-        .graph_store_get(Some(&mapping_graph), oxigraph::io::RdfFormat::Turtle)
+        .dump_prefixed(
+            oxigraph::io::RdfFormat::Turtle,
+            Some(&mapping_graph),
+            |ns| state.prefix_registry.declaration_for(ns),
+        )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if data.is_empty() {
@@ -7615,14 +9331,18 @@ pub async fn execute_rml_mapping(
     // targets. A non-admin may therefore only write the dataset's own namespaced
     // graphs: gate the `?graph=` target here, and every `rml:graphMap` override at
     // execution. Without this a writer of any dataset could inject triples into
-    // another tenant's graph. Admins are unrestricted.
-    if !current_user.is_admin() {
-        if let Err(msg) = crate::auth::dataset_graph::authorize_dataset_graph_target(
-            &state.auth_db,
-            &state.base_url,
-            &dataset_id,
-            &target_graph,
-        ) {
+    // another tenant's graph. A model-registry graph is refused for everyone,
+    // admins included: this path runs none of the registry's licence checks.
+    let target_claim = match crate::auth::dataset_graph::gate_dataset_graph_target(
+        &state.store,
+        &state.auth_db,
+        &state.base_url,
+        &dataset_id,
+        &target_graph,
+        &current_user,
+    ) {
+        Ok(claim) => claim,
+        Err(msg) => {
             state.audit.log_denied(
                 Some(current_user.user_id.clone()),
                 None,
@@ -7633,7 +9353,7 @@ pub async fn execute_rml_mapping(
             );
             return Err((StatusCode::FORBIDDEN, msg));
         }
-    }
+    };
 
     // Parse multipart: collect mapping override and source files
     let mut mapping_turtle_override: Option<String> = None;
@@ -7696,7 +9416,9 @@ pub async fn execute_rml_mapping(
         let count = crate::rml::execute(&mapping, &source_data, &temp, Some(&target_graph))
             .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
         let turtle_bytes = temp
-            .dump(oxigraph::io::RdfFormat::Turtle, Some(&target_graph))
+            .dump_prefixed(oxigraph::io::RdfFormat::Turtle, Some(&target_graph), |ns| {
+                state.prefix_registry.declaration_for(ns)
+            })
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let turtle = String::from_utf8(turtle_bytes).unwrap_or_default();
         return Ok(Json(serde_json::json!({
@@ -7710,32 +9432,73 @@ pub async fn execute_rml_mapping(
     // Execute into the real store, enforcing the same boundary on every effective
     // (graphMap-overridden) destination graph — a mapping's `rml:graphMap` can name
     // a target other than `?graph=`, so the gate must cover the resolved set too.
-    let is_admin = current_user.is_admin();
+    // Each destination the gate lets through is recorded with its claim, so
+    // the run registers every graph it writes and the next run finds them
+    // held by the dataset (an unregistered graph that now holds data would
+    // refuse it).
+    let authz_user = current_user.clone();
     let authz_base = state.base_url.clone();
     let authz_db = state.auth_db.clone();
+    let authz_store = state.store.clone();
     let authz_ds = dataset_id.clone();
+    let claims = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let authz_claims = claims.clone();
     let count = crate::rml::execute_authorized(
         &mapping,
         &source_data,
         &state.store,
         Some(&target_graph),
         move |g: &str| {
-            if is_admin {
-                Ok(())
-            } else {
-                crate::auth::dataset_graph::authorize_dataset_graph_target(
-                    &authz_db,
-                    &authz_base,
-                    &authz_ds,
-                    g,
-                )
-            }
+            let claim = crate::auth::dataset_graph::gate_dataset_graph_target(
+                &authz_store,
+                &authz_db,
+                &authz_base,
+                &authz_ds,
+                g,
+                &authz_user,
+            )?;
+            authz_claims
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push((g.to_string(), claim));
+            Ok(())
         },
     )
     .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
-    // Register target graph in dataset
-    let _ = state.auth_db.add_dataset_graph(&dataset_id, &target_graph);
+    // Register the target graph in the dataset, and every graphMap
+    // destination the dataset may hold, with how the gate found each (created
+    // by this run, or taken over by a caller who may write it). The stored
+    // mapping is the dataset's editors' to write, so an admin's run registers
+    // only destinations a non-admin could have claimed (see
+    // `claim_registers_with_dataset`).
+    let _ = crate::auth::dataset_graph::register_claimed_graph(
+        &state.auth_db,
+        &dataset_id,
+        &target_graph,
+        target_claim,
+    );
+    let written = claims.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    for (g, claim) in written {
+        if g == target_graph
+            || !crate::auth::dataset_graph::claim_registers_with_dataset(
+                &state.auth_db,
+                &state.base_url,
+                &dataset_id,
+                &g,
+                claim,
+                current_user.is_admin(),
+            )
+        {
+            continue;
+        }
+        let _ = crate::auth::dataset_graph::register_claimed_graph(
+            &state.auth_db,
+            &dataset_id,
+            &g,
+            claim,
+        );
+    }
 
     Ok(Json(serde_json::json!({
         "triples_inserted": count,
@@ -7747,7 +9510,10 @@ pub async fn execute_rml_mapping(
 /// POST /api/rml/preview — dry-run RML mapping without persisting
 ///
 /// Multipart: `mapping` (Turtle) + named source file parts.
-pub async fn rml_preview(mut multipart: Multipart) -> Result<Response, (StatusCode, String)> {
+pub async fn rml_preview(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Response, (StatusCode, String)> {
     let mut mapping_turtle: Option<String> = None;
     let mut source_data: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
@@ -7789,7 +9555,9 @@ pub async fn rml_preview(mut multipart: Multipart) -> Result<Response, (StatusCo
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let turtle_bytes = temp
-        .dump(oxigraph::io::RdfFormat::Turtle, None)
+        .dump_prefixed(oxigraph::io::RdfFormat::Turtle, None, |ns| {
+            state.prefix_registry.declaration_for(ns)
+        })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(serde_json::json!({
@@ -8097,13 +9865,141 @@ pub fn reasoning_routes() -> Router<AppState> {
         .route("/api/reasoning/status", get(reasoning_status))
         .route("/api/reasoning/rewrite", post(reasoning_rewrite))
         .route("/api/text-search/reindex", post(text_search_reindex))
+        // Identity policy (owl:sameAs) — per dataset and per organisation.
+        .route(
+            "/api/datasets/:dataset_id/identity",
+            get(crate::entailment::get_dataset_identity)
+                .put(crate::entailment::put_dataset_identity)
+                .delete(crate::entailment::delete_dataset_identity),
+        )
+        .route(
+            "/api/organisations/:org_id/identity",
+            get(crate::entailment::get_org_identity)
+                .put(crate::entailment::put_org_identity)
+                .delete(crate::entailment::delete_org_identity),
+        )
 }
 
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 struct MaterializeRequest {
     regime: String,
+    /// Graphs the rules may read. Omitted (and no `dataset`): the unnamed
+    /// default graph only — the historical behaviour.
     source_graphs: Option<Vec<String>>,
     target_graph: Option<String>,
+    /// Reason over this dataset's conformance layer: its data-bearing graphs
+    /// plus the model version it conforms to (`GET …/conformance`). Any
+    /// `source_graphs` are added on top.
+    dataset: Option<String>,
+}
+
+/// Run `regime` over `sources` (None = the whole store) into `target`.
+/// Shared by `POST /api/reasoning/materialize` and the per-dataset
+/// materialisation (`crate::entailment`).
+pub(crate) fn run_regime(
+    state: &AppState,
+    regime: &str,
+    sources: Option<Vec<String>>,
+    target: &str,
+    identity: crate::reasoning::identity::IdentityPolicy,
+) -> Result<Option<crate::reasoning::ReasoningReport>, AppError> {
+    let _sources: Vec<String> = sources.clone().unwrap_or_default();
+    // Apply the scope to whichever reasoner the regime selects.
+    // Unused when every regime feature is off (`--no-default-features`).
+    #[allow(unused_macros)]
+    macro_rules! scoped {
+        ($m:expr) => {{
+            let m = $m;
+            match &sources {
+                Some(s) => m.with_sources(s.clone()),
+                None => m,
+            }
+        }};
+    }
+    // Silence unused-variable warnings for the case where no reasoning feature is
+    // compiled in (only the `_ => Err(...)` arm fires, leaving state/target unused).
+    let _ = (&state, target, identity);
+
+    // Match returns Some(report) for a recognised regime or None for an unknown one.
+    // Both branches are always present in the match so no unreachable-code warning fires.
+    let report: Option<crate::reasoning::ReasoningReport> = match regime {
+        #[cfg(feature = "rdfs-entailment")]
+        "rdfs" => {
+            let m = scoped!(crate::reasoning::rdfs::RdfsMaterializer::with_target(
+                &state.store,
+                target
+            ));
+            Some(
+                m.materialize()
+                    .map_err(|e| AppError::Internal(e.to_string()))?,
+            )
+        }
+        #[cfg(feature = "owl2-rl")]
+        "owl2-rl" => {
+            let m = scoped!(crate::reasoning::owl2_rl::Owl2RLReasoner::new(&state.store)
+                .with_target(target)
+                .with_identity_policy(identity));
+            Some(
+                m.materialize()
+                    .map_err(|e| AppError::Internal(e.to_string()))?,
+            )
+        }
+        #[cfg(feature = "owl2-el")]
+        "owl2-el" => {
+            let m = scoped!(
+                crate::reasoning::owl2_el::El2Classifier::new(&state.store).with_target(target)
+            );
+            Some(
+                m.classify()
+                    .map_err(|e| AppError::Internal(e.to_string()))?,
+            )
+        }
+        #[cfg(feature = "owl2-ql")]
+        "owl2-ql" => {
+            let rw = scoped!(crate::reasoning::owl2_ql::QLQueryRewriter::new(
+                &state.store
+            ));
+            Some(
+                rw.materialize_tbox()
+                    .map_err(|e| AppError::Internal(e.to_string()))?,
+            )
+        }
+        #[cfg(feature = "owl2-dl")]
+        "owl2-dl" => {
+            use crate::reasoning::owl2_dl::{
+                ExternalReasoner, ExternalReasonerBridge, NativeTableauStub,
+            };
+            // The external bridge is reachable only through configuration:
+            // `OTS_EXTERNAL_REASONER=konclude` (binary from
+            // `OTS_EXTERNAL_REASONER_BIN`, else `Konclude` on PATH). Unset means
+            // the native stub — RL plus the DL extension rules. This used to
+            // hard-code the stub, so the documented bridge could not be used over
+            // HTTP no matter how the server was configured.
+            let reasoner: Box<dyn ExternalReasoner> = match std::env::var("OTS_EXTERNAL_REASONER")
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "konclude" => {
+                    let k = crate::reasoning::konclude_bridge::KoncludeReasoner::new();
+                    Box::new(match std::env::var("OTS_EXTERNAL_REASONER_BIN") {
+                        Ok(bin) if !bin.trim().is_empty() => k.with_binary(bin.trim()),
+                        _ => k,
+                    })
+                }
+                _ => Box::new(NativeTableauStub),
+            };
+            let bridge = ExternalReasonerBridge::new(reasoner).with_identity_policy(identity);
+            Some(
+                bridge
+                    .materialize(&state.store, &_sources, target)
+                    .map_err(|e| AppError::Internal(e.to_string()))?,
+            )
+        }
+        _ => None,
+    };
+    Ok(report)
 }
 
 /// POST /api/reasoning/materialize — run an entailment regime.
@@ -8130,6 +10026,20 @@ async fn reasoning_materialize(
     // an explicit grant or admin).
     require_graph_write(&state, Some(&user), Some(target.as_str()))?;
 
+    // Entailment graphs are derived data and must be rebuilt from scratch each
+    // run. Materialisation only ever INSERTed, so after a source triple was
+    // deleted or edited its stale consequences stayed in `urn:entailment:*`
+    // forever — and were still folded into every `?entailment=` query. Only the
+    // server-owned entailment namespace is cleared: a caller may legitimately
+    // target one of their own graphs, and clearing that would destroy data.
+    if target.starts_with("urn:entailment:") {
+        let clear = format!("CLEAR SILENT GRAPH <{target}>");
+        state
+            .store
+            .update(&clear)
+            .map_err(|e| AppError::Internal(format!("clearing <{target}>: {e}")))?;
+    }
+
     // Bound concurrent expensive operations so a burst of reasoning calls can't
     // occupy every Tokio worker and starve the runtime (held until handler return).
     let _permit = state
@@ -8138,60 +10048,78 @@ async fn reasoning_materialize(
         .await
         .map_err(|_| AppError::Internal("Server overloaded".to_string()))?;
     // Extract source_graphs unconditionally so the struct field is always read.
-    let _sources = body.source_graphs.unwrap_or_default();
-    // Silence unused-variable warnings for the case where no reasoning feature is
-    // compiled in (only the `_ => Err(...)` arm fires, leaving state/target unused).
-    let _ = (&state, &target);
-
-    // Match returns Some(report) for a recognised regime or None for an unknown one.
-    // Both branches are always present in the match so no unreachable-code warning fires.
-    let report: Option<crate::reasoning::ReasoningReport> = match body.regime.as_str() {
-        #[cfg(feature = "rdfs-entailment")]
-        "rdfs" => {
-            let m = crate::reasoning::rdfs::RdfsMaterializer::with_target(&state.store, &target);
-            Some(
-                m.materialize()
-                    .map_err(|e| AppError::Internal(e.to_string()))?,
-            )
+    // The graphs the rules may read. `source_graphs` used to be parsed and then
+    // ignored — every regime materialised over the unnamed default graph, so a
+    // dataset's named graphs were invisible to this endpoint however it was
+    // called. Scoped now: a dataset's conformance layer, explicit graphs the
+    // caller may read, or (neither given) the default graph as before.
+    // A dataset run applies the dataset's identity policy (what owl:sameAs
+    // may do, whether linksets are premises); an unscoped run reads whatever
+    // it is given and keeps the full behaviour.
+    let mut identity = crate::reasoning::identity::IdentityPolicy::Full;
+    let sources: Option<Vec<String>> = if let Some(ds_id) = body.dataset.as_deref() {
+        let ds = state
+            .auth_db
+            .get_dataset(ds_id)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::NotFound(format!("Dataset '{ds_id}' not found")))?;
+        let visible = state
+            .auth_db
+            .can_access_dataset(Some(&user.user_id), &ds)
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        if !visible {
+            return Err(AppError::NotFound(format!("Dataset '{ds_id}' not found")));
         }
-        #[cfg(feature = "owl2-rl")]
-        "owl2-rl" => {
-            let m =
-                crate::reasoning::owl2_rl::Owl2RLReasoner::new(&state.store).with_target(&target);
-            Some(
-                m.materialize()
-                    .map_err(|e| AppError::Internal(e.to_string()))?,
-            )
+        let (layer, effective) = crate::entailment::reasoning_sources(&state, &ds);
+        identity = effective.policy;
+        // `reasoning_sources` (via `conformance::resolve`) hands back the
+        // dataset's whole reasoning layer, its private graphs included: it does
+        // not filter on who is asking. But materialisation writes the derived
+        // consequences into a caller-chosen target the caller can read, so a
+        // viewer could launder a private graph's triples out through it. Keep
+        // only the layer graphs the caller may read — the model registry's own
+        // visibility rule still admits model graphs — exactly as the explicit
+        // `source_graphs` below are read-checked. Admins read every graph.
+        let mut layer: Vec<String> = if user.is_admin() {
+            layer
+        } else {
+            let mut kept = Vec::with_capacity(layer.len());
+            for g in layer {
+                if check_graph_read_access(&state, Some(&user), &g)
+                    .map_err(|e| AppError::Internal(e.to_string()))?
+                    || crate::conformance::model_graph_readable(&state, Some(&user.user_id), &g)
+                {
+                    kept.push(g);
+                }
+            }
+            kept
+        };
+        for g in body.source_graphs.clone().unwrap_or_default() {
+            if !check_graph_read_access(&state, Some(&user), &g)
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                && !crate::conformance::model_graph_readable(&state, Some(&user.user_id), &g)
+            {
+                return Err(AppError::Forbidden(format!("no read access to <{g}>")));
+            }
+            if !layer.contains(&g) {
+                layer.push(g);
+            }
         }
-        #[cfg(feature = "owl2-el")]
-        "owl2-el" => {
-            let m =
-                crate::reasoning::owl2_el::El2Classifier::new(&state.store).with_target(&target);
-            Some(
-                m.classify()
-                    .map_err(|e| AppError::Internal(e.to_string()))?,
-            )
+        Some(layer)
+    } else if let Some(explicit) = body.source_graphs.clone() {
+        for g in &explicit {
+            if !check_graph_read_access(&state, Some(&user), g)
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                && !crate::conformance::model_graph_readable(&state, Some(&user.user_id), g)
+            {
+                return Err(AppError::Forbidden(format!("no read access to <{g}>")));
+            }
         }
-        #[cfg(feature = "owl2-ql")]
-        "owl2-ql" => {
-            let rw = crate::reasoning::owl2_ql::QLQueryRewriter::new(&state.store);
-            Some(
-                rw.materialize_tbox()
-                    .map_err(|e| AppError::Internal(e.to_string()))?,
-            )
-        }
-        #[cfg(feature = "owl2-dl")]
-        "owl2-dl" => {
-            use crate::reasoning::owl2_dl::{ExternalReasonerBridge, NativeTableauStub};
-            let bridge = ExternalReasonerBridge::new(Box::new(NativeTableauStub));
-            Some(
-                bridge
-                    .materialize(&state.store, &_sources, &target)
-                    .map_err(|e| AppError::Internal(e.to_string()))?,
-            )
-        }
-        _ => None,
+        Some(explicit)
+    } else {
+        None
     };
+    let report = run_regime(&state, &body.regime, sources.clone(), &target, identity)?;
 
     match report {
         Some(r) => Ok((
@@ -8202,6 +10130,8 @@ async fn reasoning_materialize(
                 "iterations": r.iterations,
                 "elapsed_ms": r.elapsed_ms,
                 "target_graph": r.target_graph,
+                // The graphs the rules read (null: the unnamed default graph).
+                "sources": sources,
             })),
         )
             .into_response()),
@@ -8277,10 +10207,35 @@ async fn text_search_reindex(
     let _ = &state;
     #[cfg(feature = "text-search")]
     {
-        if let Some(ref idx) = state.text_index {
-            let count = idx
-                .reindex_from_store(&state.store)
-                .map_err(|e| AppError::Internal(e.to_string()))?;
+        if state.text_index.is_some() {
+            // A whole-store rebuild takes seconds to minutes, and the text_search
+            // module's own contract says it must never be called straight from an
+            // async task — this handler did exactly that, pinning a Tokio worker
+            // for the duration. It also skipped `text_sync_lock`, so a manual
+            // reindex could run concurrently with the background auto-sync and the
+            // two would delete each other's documents.
+            let st = state.clone();
+            let count = tokio::task::spawn_blocking(move || {
+                let idx = st.text_index.as_ref().expect("checked above");
+                let _guard = st
+                    .text_sync_lock
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                // Clear the dirty mark before the rebuild, so a write landing
+                // mid-rebuild leaves the index dirty afterwards rather than
+                // having its mark erased (mirrors sync_text_index_if_dirty).
+                st.text_dirty
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                let res = idx.reindex_from_store(&st.store);
+                if res.is_err() {
+                    st.text_dirty
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                res
+            })
+            .await
+            .map_err(|e| AppError::Internal(format!("reindex task panicked: {e}")))?
+            .map_err(|e| AppError::Internal(e.to_string()))?;
             return Ok((
                 StatusCode::OK,
                 Json(serde_json::json!({ "indexed": count })),
@@ -8399,8 +10354,23 @@ fn default_max_iterations() -> usize {
 #[cfg(feature = "swrl")]
 async fn swrl_execute(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
     Json(body): Json<SwrlExecuteRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // Rule execution INSERTs derived triples into `target_graph` — previously
+    // with no authorization at all (the handler took no `AuthenticatedUser`), so
+    // any caller could materialise arbitrary triples into any graph, including
+    // the shared `urn:entailment:*` graphs and other tenants'. Mirrors
+    // `/api/reasoning/materialize` above; as there, a `None` target means the
+    // default graph, which carries the write-scope check but no per-graph ACL.
+    require_graph_write(&state, Some(&user), body.target_graph.as_deref()).map_err(|e| {
+        let status = match &e {
+            AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            _ => StatusCode::FORBIDDEN,
+        };
+        (status, e.message())
+    })?;
+
     let rules = match body.format.as_str() {
         "xml" => crate::swrl::parser::parse_swrl(&body.rules)
             .map_err(|e| (StatusCode::BAD_REQUEST, e))?,
@@ -8440,29 +10410,41 @@ pub async fn detect_shapes(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let graph_iri = &params.graph;
 
-    // Count SHACL shapes in the graph
-    let count_query = format!(
-        "SELECT (COUNT(*) AS ?n) WHERE {{ GRAPH <{graph_iri}> {{ \
-         {{ ?s a <http://www.w3.org/ns/shacl#NodeShape> }} \
-         UNION {{ ?s a <http://www.w3.org/ns/shacl#PropertyShape> }} }} }}"
-    );
-    let shape_count: usize = if let Ok(oxigraph::sparql::QueryResults::Solutions(mut sols)) =
-        state.store.query(count_query.as_str())
+    // The graph IRI comes from the caller, so its shape count is only theirs to
+    // learn if the same visibility rules that gate /store and /sparql say they
+    // may read it — otherwise any signed-in principal could probe the shape
+    // count of another tenant's private shapes graph or a `urn:system:*` graph.
+    // Same gate and answer as `shaclc_serialize`. Admins bypass, because
+    // `check_graph_read_access` denies `urn:system:*` and unregistered graphs
+    // even to them, and an admin's own imports land in unregistered graphs
+    // (which is exactly what `DataImport.svelte` probes right after writing).
+    if !current_user.is_admin()
+        && !check_graph_read_access(&state, Some(&current_user), graph_iri)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     {
-        sols.next()
-            .and_then(|r| r.ok())
-            .and_then(|s| s.get("n").map(|v| v.to_string()))
-            .and_then(|s| {
-                // Oxigraph returns typed literals like `"5"^^<...integer>`
-                s.trim_matches('"')
-                    .split('"')
-                    .next()
-                    .and_then(|n| n.parse::<usize>().ok())
-            })
-            .unwrap_or(0)
-    } else {
-        0
-    };
+        return Err((
+            StatusCode::FORBIDDEN,
+            "No read access to that graph".to_string(),
+        ));
+    }
+
+    // Count SHACL shapes in the graph. Direct index scans, not SPARQL: this
+    // probe runs right after an import (per uploaded graph), exactly when the
+    // in-memory query accelerator is stale — a SPARQL aggregate here used to
+    // queue behind its full rebuild.
+    const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+    let shape_count: usize = state
+        .store
+        .count_pattern_in_graph(graph_iri, RDF_TYPE, "http://www.w3.org/ns/shacl#NodeShape")
+        .unwrap_or(0)
+        + state
+            .store
+            .count_pattern_in_graph(
+                graph_iri,
+                RDF_TYPE,
+                "http://www.w3.org/ns/shacl#PropertyShape",
+            )
+            .unwrap_or(0);
 
     let shapes_detected = shape_count > 0;
 
@@ -8596,7 +10578,7 @@ pub async fn viewer_feed(
     // lifted footprints here would double them up and swamp the element list.
     let data_graphs: Vec<String> = state
         .auth_db
-        .list_dataset_graphs(&dataset_id)
+        .list_readable_dataset_graphs(user_id, &dataset)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .into_iter()
         .filter(|g| !g.ends_with("/ifcowl") && !is_tiles3d_graph(g))
@@ -8661,7 +10643,7 @@ pub async fn geo_stats(
     // geometry the map view does not render (see viewer_feed).
     let data_graphs: Vec<String> = state
         .auth_db
-        .list_dataset_graphs(&dataset_id)
+        .list_readable_dataset_graphs(user_id, &dataset)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .into_iter()
         .filter(|g| !g.ends_with("/ifcowl") && !is_tiles3d_graph(g))
@@ -8729,7 +10711,7 @@ pub async fn geo_stats_batch(
         }
         for g in state
             .auth_db
-            .list_dataset_graphs(id)
+            .list_readable_dataset_graphs(user_id, &dataset)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
             .into_iter()
             .filter(|g| !g.ends_with("/ifcowl") && !is_tiles3d_graph(g))

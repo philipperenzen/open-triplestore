@@ -17,7 +17,7 @@
 | **Controller** | **You — the self-hoster/operator.** | You determine the purposes and means of processing the personal data you load and the accounts you create. |
 | **Processor** | Often **also you**; or a hosting provider / managed-service vendor acting on your instructions. | Assess your own setup. |
 | **Neither controller nor processor** | **The Open Triplestore maintainers.** | They publish software; they do not operate your instance and receive no data from it (the Software ships **no telemetry** to them — see [PRIVACY.md](../PRIVACY.md) §2). |
-| **Independent controller / your processor** | **Third-party services you connect** (configured LLM endpoint, OIDC/SAML/OAuth provider, alert/SMTP provider, validation platform). | Each requires its own assessment and, where it acts as your processor, an Art. 28 data-processing agreement. |
+| **Independent controller / your processor** | **Third-party services you connect** (configured LLM endpoint, OIDC/SAML/OAuth provider, alert/SMTP provider, validation service). | Each requires its own assessment and, where it acts as your processor, an Art. 28 data-processing agreement. |
 
 Because the deployment is self-hosted, **the location of processing and any
 transfers are under your control** (see §7).
@@ -165,7 +165,7 @@ process around them. (For reporting a *vulnerability in the Software itself*, se
 Because Open Triplestore is **self-hosted, the location of processing is under
 your control** — choose where your servers and backups reside. Transfers arise
 mainly from **optional integrations you enable** (a hosted LLM endpoint, an
-external IdP, alert/SMTP provider, validation platform) and from the **frontend's
+external IdP, alert/SMTP provider, validation service) and from the **frontend's
 CDN/font/map requests made in the user's browser** (see
 [PRIVACY.md](../PRIVACY.md) §5.1). For each, identify the destination and ensure
 an appropriate transfer mechanism (e.g. adequacy, SCCs) — or self-host the asset

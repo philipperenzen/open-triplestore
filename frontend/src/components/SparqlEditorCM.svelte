@@ -4,11 +4,11 @@
   import { EditorState, Compartment } from '@codemirror/state';
   import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
   import { closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
-  import { indentOnInput, bracketMatching, foldKeymap } from '@codemirror/language';
+  import { indentOnInput, bracketMatching, foldKeymap, foldGutter } from '@codemirror/language';
   import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
-  import { lintKeymap } from '@codemirror/lint';
+  import { lintKeymap, lintGutter } from '@codemirror/lint';
   import { sparqlLanguage, sparqlAutocomplete } from '../lib/sparql-mode.js';
-  import { turtleLanguage } from '../lib/turtle-mode.js';
+  import { turtleLanguage, turtleAutocomplete, turtleDiagnostics, turtleFolding } from '../lib/turtle-mode.js';
   import { ontologyAwareAutocomplete } from '../lib/ontology/sparqlCompletion.js';
   import { sparqlLinter } from '../lib/ontology/sparqlLint.js';
   import { shortenIRI } from '../lib/rdf-utils.js';
@@ -30,6 +30,11 @@
   export let ontologyTerms = null;
   /** Enable sparqljs-based linting. */
   export let lint = false;
+  /**
+   * Turtle mode only: a parse-error message to surface in the editor as a
+   * gutter marker and a squiggle on the offending line.
+   */
+  export let parseError = null;
   /** Optional async fetcher: (sparqlQueryString) => Promise<{head,results}>. Enables live IRI hover info. */
   export let sparqlFetcher = null;
   /** Optional graph IRI(s) to scope hover lookup queries to. */
@@ -47,6 +52,18 @@
   const completionCompartment = new Compartment();
   const lintCompartment = new Compartment();
   const themeCompartment = new Compartment();
+  const wrapCompartment = new Compartment();
+
+  // A phone screen has no room to scroll a long triple pattern sideways, so the
+  // editor soft-wraps at the width where the app switches to its narrow layout.
+  // Wider screens keep horizontal scrolling, where unwrapped lines read better.
+  const NARROW_QUERY = '(max-width: 720px)';
+  let narrow = typeof window !== 'undefined' && window.matchMedia
+    ? window.matchMedia(NARROW_QUERY).matches
+    : false;
+  let unsubNarrow = null;
+  $: wrapExt = narrow ? EditorView.lineWrapping : [];
+  $: if (view) view.dispatch({ effects: wrapCompartment.reconfigure(wrapExt) });
 
   let isDark = resolveDark(theme);
   let unsubTheme = null;
@@ -59,19 +76,36 @@
   $: { theme; recomputeDark(); }
   $: if (view) view.dispatch({ effects: themeCompartment.reconfigure(buildEditorTheme(isDark, height)) });
 
+  // Turtle used to be served by the SPARQL completer, which offers SELECT /
+  // WHERE / FILTER and `PREFIX x: <…>` — none of them valid in a shapes file.
+  const turtleCompletionExt = mode === 'turtle' ? turtleAutocomplete() : null;
+
   $: completionExt = mode === 'sparql'
     ? ontologyAwareAutocomplete({
         prefixes: ontologyPrefixes || {},
         terms: ontologyTerms || [],
       })
-    : sparqlAutocomplete;
+    : turtleCompletionExt || sparqlAutocomplete;
 
-  $: lintExt = (mode === 'sparql' && lint)
-    ? sparqlLinter({
-        knownIris: new Set((ontologyTerms || []).map(t => t.iri)),
-        resolvePrefix: (p) => (ontologyPrefixes && ontologyPrefixes[p]) || NAMESPACES[p] || lookupPrefixSync(p) || null,
-      })
-    : [];
+  // The shapes editor re-parses on every keystroke, so `parseError` is
+  // reassigned constantly even when the message is unchanged. Rebuild the
+  // linter only on a real change — otherwise every keystroke reconfigures the
+  // compartment, which costs a transaction of its own.
+  let turtleLintExt = [];
+  let lastParseError;
+  $: if (mode === 'turtle' && parseError !== lastParseError) {
+    lastParseError = parseError;
+    turtleLintExt = turtleDiagnostics(parseError);
+  }
+
+  $: lintExt = mode === 'turtle'
+    ? turtleLintExt
+    : (mode === 'sparql' && lint)
+      ? sparqlLinter({
+          knownIris: new Set((ontologyTerms || []).map(t => t.iri)),
+          resolvePrefix: (p) => (ontologyPrefixes && ontologyPrefixes[p]) || NAMESPACES[p] || lookupPrefixSync(p) || null,
+        })
+      : [];
 
   // Reconfigure compartments when the ontology changes
   $: if (view) {
@@ -214,10 +248,18 @@ WHERE {
 
     const executeKeymap = keymap.of([
       { key: 'Ctrl-Enter', mac: 'Cmd-Enter', run() { dispatch('execute', view.state.doc.toString()); return true; } },
+      // Turtle only: the SPARQL workspace has no save of its own, and binding
+      // Mod-s there would swallow the browser's own shortcut for nothing.
+      ...(mode === 'turtle'
+        ? [{ key: 'Mod-s', preventDefault: true, run() { dispatch('save', view.state.doc.toString()); return true; } }]
+        : []),
     ]);
 
     const extensions = [
       lineNumbers(),
+      // A Turtle IRI is one unbreakable token, so a shapes file legitimately has
+      // lines wider than the pane; without wrapping they scroll out of sight.
+      ...(mode === 'turtle' ? [EditorView.lineWrapping, lintGutter(), turtleFolding, foldGutter()] : []),
       highlightActiveLine(),
       history(),
       drawSelection(),
@@ -250,6 +292,7 @@ WHERE {
         }
       }),
       themeCompartment.of(buildEditorTheme(isDark, height)),
+      wrapCompartment.of(wrapExt),
     ];
 
     if (readonly) extensions.push(EditorState.readOnly.of(true));
@@ -259,9 +302,20 @@ WHERE {
       parent: container,
     });
     unsubTheme = onThemeChange(recomputeDark);
+
+    if (typeof window !== 'undefined' && window.matchMedia) {
+      const mq = window.matchMedia(NARROW_QUERY);
+      const onNarrowChange = () => { narrow = mq.matches; };
+      mq.addEventListener?.('change', onNarrowChange);
+      unsubNarrow = () => mq.removeEventListener?.('change', onNarrowChange);
+    }
   });
 
-  onDestroy(() => { if (unsubTheme) unsubTheme(); if (view) view.destroy(); });
+  onDestroy(() => {
+    if (unsubTheme) unsubTheme();
+    if (unsubNarrow) unsubNarrow();
+    if (view) view.destroy();
+  });
 
   $: if (view && query !== view.state.doc.toString()) {
     view.dispatch({
@@ -329,4 +383,22 @@ WHERE {
     backdrop-filter: blur(4px);
   }
   .cm-format-btn:hover { opacity: 1; }
+
+  /* Phone. Floating the button over the top-right corner only works while
+     there is empty gutter to float in, and the app's `.btn { width: 100% }`
+     below 720px stretched it across the whole corner, so it sat on top of the
+     PREFIX lines. Here it stops floating and becomes a toolbar row above the
+     editor instead, at its own width and with a thumb-sized hit area. */
+  @media (max-width: 720px) {
+    .cm-host { display: flex; flex-direction: column; }
+    .cm-format-btn {
+      position: static;
+      align-self: flex-end;
+      width: auto;
+      min-height: 2.5rem;
+      margin-bottom: 0.35rem;
+      opacity: 1;
+      backdrop-filter: none;
+    }
+  }
 </style>

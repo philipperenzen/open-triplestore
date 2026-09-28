@@ -1,3 +1,16 @@
+# Data Catalog Vocabulary (DCAT) — Version 2.
+# Source: https://www.w3.org/ns/dcat2.ttl
+# Defined in Data Catalog Vocabulary (DCAT) - Version 2, W3C Recommendation
+# 04 February 2020, https://www.w3.org/TR/2020/REC-vocab-dcat-2-20200204/
+# Copyright © 2020 W3C® (MIT, ERCIM, Keio, Beihang).
+# Created by the W3C Dataset Exchange Working Group; creators and contributors
+# are named in the ontology header below.
+# Licence: CC BY 4.0, https://creativecommons.org/licenses/by/4.0/ (the file's
+# own dct:license).
+# Changes by Open Triplestore: this comment header was added; the rest of the
+# file is byte-identical to the source (checked 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The upstream file starts below this line. ----
 # baseURI: http://www.w3.org/ns/dcat
 # imports: http://purl.org/dc/terms/
 # imports: http://www.w3.org/2004/02/skos/core

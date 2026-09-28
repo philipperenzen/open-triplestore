@@ -1,0 +1,6 @@
+# ❌ A movable bridge without an operating mechanism (cross-property SPARQL).
+@prefix def: <https://example.org/def/> .
+@prefix eb:  <https://example.org/id/example-bridge/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+eb:SwingBridge a def:Bridge ; def:movable true .
+    # no def:hasOperatingMechanism

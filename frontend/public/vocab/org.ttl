@@ -1,3 +1,15 @@
+# Core organization ontology (the W3C Organization Ontology), version 0.8.
+# Source: https://www.w3.org/ns/org.ttl
+# Defined in The Organization Ontology, W3C Recommendation 16 January 2014,
+# https://www.w3.org/TR/2014/REC-vocab-org-20140116/
+# Authors and contributors are named in the ontology header below.
+# Licence: Open Data Commons Public Domain Dedication and License (PDDL) 1.0,
+# http://www.opendatacommons.org/licenses/pddl/1.0/ (the file's own
+# dct:license); it imposes no conditions, and credit is given as a courtesy.
+# Changes by Open Triplestore: this comment header was added; the rest of the
+# file is byte-identical to the source (checked 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The upstream file starts below this line. ----
 @prefix rdf:        <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix rdfs:       <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix owl:        <http://www.w3.org/2002/07/owl#> .

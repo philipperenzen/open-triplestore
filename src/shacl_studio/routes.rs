@@ -16,6 +16,22 @@ pub fn studio_auth_routes() -> Router<AppState> {
     Router::new()
         // Shape graphs
         .route(
+            "/api/shacl/importers",
+            get(crate::spec_import::list_importers),
+        )
+        .route(
+            "/api/shacl/import/:format",
+            post(crate::spec_import::import_spec),
+        )
+        .route(
+            "/api/shacl/exporters",
+            get(crate::spec_import::list_exporters),
+        )
+        .route(
+            "/api/shacl/export/:format",
+            post(crate::spec_import::export_spec),
+        )
+        .route(
             "/api/shacl/shape-graphs",
             get(handlers::list_shape_graphs).post(handlers::create_shape_graph),
         )

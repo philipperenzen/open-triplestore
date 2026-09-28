@@ -24,6 +24,7 @@
   import { isDark } from './lib/theme.js';
   import { modelRefs } from './lib/viewer/geometry';
   import { modelFormatFromUrl } from './lib/viewer/detect';
+  import { mapAttributionFor } from './lib/viewer/attribution';
   import ViewerMap from './components/viewer/ViewerMap.svelte';
   import Model3D from './components/viewer/Model3D.svelte';
   import CesiumViewer from './components/viewer/CesiumViewer.svelte';
@@ -98,6 +99,9 @@
 
   $: hasGeo = shown.some((e) => e.wkt4326);
   $: refs = modelRefs(shown);
+  // Embeds sit on third-party pages, so the data credit travels with the map
+  // (the 3D views credit their own content: Model3D and CesiumViewer).
+  $: mapAttribution = mapAttributionFor(shown);
 
   // /embed/model — a single file by URL, no dataset feed involved.
   const srcParam = params.get('src') || '';
@@ -209,6 +213,7 @@
         {selected}
         initialFocus={elementParam}
         basemap={basemapParam}
+        extraAttribution={mapAttribution}
         height="100%"
         on:select={onSelect}
       />

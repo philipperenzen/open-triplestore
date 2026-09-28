@@ -1,0 +1,8 @@
+# ❌ Two arches < 10 m apart (SPARQL + geof:distance; possible duplicate registration).
+@prefix def: <https://example.org/def/> .
+@prefix eb:  <https://example.org/id/example-bridge/> .
+@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+@prefix bot: <https://w3id.org/bot#> .
+eb:DoubleBridge a def:Bridge ; bot:containsElement eb:ArchA , eb:ArchB .
+eb:ArchA a def:Arch ; geo:hasGeometry [ geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(185920 427470)"^^geo:wktLiteral ] .
+eb:ArchB a def:Arch ; geo:hasGeometry [ geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(185923 427472)"^^geo:wktLiteral ] .  # ~3.6 m from ArchA

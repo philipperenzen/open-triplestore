@@ -1,6 +1,7 @@
-//! W3C SPARQL 1.1 Conformance Tests
-//!
-//! Tests derived from the official W3C SPARQL 1.1 test suite:
+//! SPARQL 1.1 Query/Update tests — hand-written and derived from the SPARQL 1.1
+//! specifications. This is not the W3C test suite (the vendored query and
+//! update sections of it run in `w3c_sparql11_manifests.rs`); cases here are
+//! modelled on the categories of the W3C SPARQL 1.1 test suite:
 //! https://www.w3.org/2009/sparql/docs/tests/summary.html
 //! https://w3c.github.io/rdf-tests/sparql/sparql11/
 //!

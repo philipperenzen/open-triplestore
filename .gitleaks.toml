@@ -10,4 +10,9 @@ regexes = [
   # Fixed JWT signing secret used only by the Playwright e2e job in
   # .github/workflows/e2e.yml — a throwaway value, never a real credential.
   '''e2e_jwt_secret_must_be_32_chars_xx''',
+  # Passwords of the throwaway database containers the live-sources job
+  # (.github/workflows/ci.yml, .gitlab-ci.yml) starts for the connector tests.
+  '''ots-live-pw''',
+  '''OtsLive-Passw0rd''',
+  '''OtsLive-R3ader''',
 ]

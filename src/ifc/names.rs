@@ -5,6 +5,17 @@
 //!
 //! Attribute lists follow the IFC2X3 schema (which IFC4 keeps for these
 //! entities, with rare additions that then simply spill into `argNN`).
+//!
+//! The entity and attribute names are taken unchanged from the IFC2X3, IFC4
+//! and IFC4.3 schemas: "Copyright © 1996-2020 buildingSMART International
+//! Limited. All rights reserved." — a notice that lets the technical
+//! documentation be used in software development provided full attribution
+//! is given; the IFC4.x development repository
+//! (https://github.com/buildingSMART/IFC4.x-development, LICENSE.md) licenses
+//! it under CC BY-ND 4.0, http://creativecommons.org/licenses/by-nd/4.0/.
+//! Industry Foundation Class™, IFC™ and ifcXML™ are trademarks of
+//! buildingSMART International Limited. The BOT and lift mappings below are
+//! this project's own.
 
 /// Canonical CamelCase for entity names seen in the wild.
 pub const CAMEL: &[&str] = &[
@@ -162,6 +173,202 @@ pub const CAMEL: &[&str] = &[
     "IfcWorkSchedule",
     "IfcScheduleTimeControl",
     "IfcVirtualElement",
+    // Georeferencing (IFC4 / IFC 4.3).
+    "IfcMapConversion",
+    "IfcMapConversionScaled",
+    "IfcProjectedCRS",
+    "IfcGeographicCRS",
+    "IfcRigidOperation",
+    // Quantities and property kinds.
+    "IfcQuantityNumber",
+    "IfcPhysicalComplexQuantity",
+    "IfcPropertyEnumeration",
+    "IfcPropertyEnumeratedValue",
+    "IfcPropertyListValue",
+    "IfcPropertyBoundedValue",
+    "IfcComplexProperty",
+    "IfcPropertySetDefinitionSet",
+    // Materials (IFC4).
+    "IfcMaterialProfileSet",
+    "IfcMaterialProfileSetUsage",
+    "IfcMaterialProfile",
+    "IfcMaterialConstituentSet",
+    "IfcMaterialConstituent",
+    "IfcRelConnectsElements",
+    // IFC 4.3: facilities, alignment and infrastructure elements. These have
+    // no ifcOWL IRI (buildingSMART published ifcOWL up to IFC4 ADD2 only) and
+    // are typed under the lift's own namespace.
+    "IfcFacility",
+    "IfcFacilityPart",
+    "IfcFacilityPartCommon",
+    "IfcBridge",
+    "IfcBridgePart",
+    "IfcRoad",
+    "IfcRoadPart",
+    "IfcRailway",
+    "IfcRailwayPart",
+    "IfcMarineFacility",
+    "IfcMarinePart",
+    "IfcAlignment",
+    "IfcAlignmentHorizontal",
+    "IfcAlignmentVertical",
+    "IfcAlignmentCant",
+    "IfcAlignmentSegment",
+    "IfcLinearPositioningElement",
+    "IfcPositioningElement",
+    "IfcReferent",
+    "IfcLinearElement",
+    "IfcCourse",
+    "IfcKerb",
+    "IfcPavement",
+    "IfcRail",
+    "IfcTrackElement",
+    "IfcSign",
+    "IfcSignal",
+    "IfcBearing",
+    "IfcDeepFoundation",
+    "IfcCaissonFoundation",
+    "IfcEarthworksCut",
+    "IfcEarthworksFill",
+    "IfcEarthworksElement",
+    "IfcReinforcedSoil",
+    "IfcGeotechnicalStratum",
+    "IfcGeotechnicalAssembly",
+    "IfcGeomodel",
+    "IfcGeoslice",
+    "IfcBorehole",
+    "IfcConveyorSegment",
+    "IfcMooringDevice",
+    "IfcNavigationElement",
+    "IfcVehicle",
+    "IfcImpactProtectionDevice",
+    "IfcDistributionBoard",
+    "IfcElectricFlowTreatmentDevice",
+    "IfcLiquidTerminal",
+    // Defined types, as they appear inline in property and quantity values
+    // (`IFCPOSITIVELENGTHMEASURE(2800.)`) — named on the value node.
+    "IfcLabel",
+    "IfcText",
+    "IfcIdentifier",
+    "IfcBoolean",
+    "IfcLogical",
+    "IfcInteger",
+    "IfcReal",
+    "IfcDate",
+    "IfcDateTime",
+    "IfcTime",
+    "IfcDuration",
+    "IfcTimeStamp",
+    "IfcDescriptiveMeasure",
+    "IfcNumericMeasure",
+    "IfcParameterValue",
+    "IfcCountMeasure",
+    "IfcRatioMeasure",
+    "IfcPositiveRatioMeasure",
+    "IfcNormalisedRatioMeasure",
+    "IfcLengthMeasure",
+    "IfcPositiveLengthMeasure",
+    "IfcNonNegativeLengthMeasure",
+    "IfcAreaMeasure",
+    "IfcVolumeMeasure",
+    "IfcMassMeasure",
+    "IfcMassDensityMeasure",
+    "IfcTimeMeasure",
+    "IfcPlaneAngleMeasure",
+    "IfcPositivePlaneAngleMeasure",
+    "IfcThermodynamicTemperatureMeasure",
+    "IfcThermalTransmittanceMeasure",
+    "IfcThermalConductivityMeasure",
+    "IfcForceMeasure",
+    "IfcPressureMeasure",
+    "IfcPowerMeasure",
+    "IfcEnergyMeasure",
+    "IfcFrequencyMeasure",
+    "IfcElectricCurrentMeasure",
+    "IfcElectricVoltageMeasure",
+    "IfcVolumetricFlowRateMeasure",
+    "IfcLinearVelocityMeasure",
+    "IfcIlluminanceMeasure",
+    "IfcLuminousFluxMeasure",
+    "IfcLuminousIntensityMeasure",
+    "IfcSoundPowerMeasure",
+    "IfcSoundPressureMeasure",
+    "IfcMonetaryMeasure",
+];
+
+/// Entities introduced in IFC 4.3 (no ifcOWL IRI exists for them). In an
+/// `IFC4X3*` file these are typed under the lift's own namespace; every
+/// entity IFC4 already had keeps its IFC4 ifcOWL IRI, so shapes written for
+/// IFC4 keep matching 4.3 models.
+pub const IFC4X3_ONLY: &[&str] = &[
+    "IFCFACILITY",
+    "IFCFACILITYPART",
+    "IFCFACILITYPARTCOMMON",
+    "IFCBRIDGE",
+    "IFCBRIDGEPART",
+    "IFCROAD",
+    "IFCROADPART",
+    "IFCRAILWAY",
+    "IFCRAILWAYPART",
+    "IFCMARINEFACILITY",
+    "IFCMARINEPART",
+    "IFCALIGNMENT",
+    "IFCALIGNMENTHORIZONTAL",
+    "IFCALIGNMENTVERTICAL",
+    "IFCALIGNMENTCANT",
+    "IFCALIGNMENTSEGMENT",
+    "IFCLINEARPOSITIONINGELEMENT",
+    "IFCPOSITIONINGELEMENT",
+    "IFCREFERENT",
+    "IFCLINEARELEMENT",
+    "IFCCOURSE",
+    "IFCKERB",
+    "IFCPAVEMENT",
+    "IFCRAIL",
+    "IFCTRACKELEMENT",
+    "IFCSIGN",
+    "IFCSIGNAL",
+    "IFCBEARING",
+    "IFCDEEPFOUNDATION",
+    "IFCCAISSONFOUNDATION",
+    "IFCEARTHWORKSCUT",
+    "IFCEARTHWORKSFILL",
+    "IFCEARTHWORKSELEMENT",
+    "IFCREINFORCEDSOIL",
+    "IFCGEOTECHNICALSTRATUM",
+    "IFCGEOTECHNICALASSEMBLY",
+    "IFCGEOMODEL",
+    "IFCGEOSLICE",
+    "IFCBOREHOLE",
+    "IFCCONVEYORSEGMENT",
+    "IFCMOORINGDEVICE",
+    "IFCNAVIGATIONELEMENT",
+    "IFCVEHICLE",
+    "IFCIMPACTPROTECTIONDEVICE",
+    "IFCDISTRIBUTIONBOARD",
+    "IFCELECTRICFLOWTREATMENTDEVICE",
+    "IFCLIQUIDTERMINAL",
+    "IFCQUANTITYNUMBER",
+    "IFCMAPCONVERSIONSCALED",
+    "IFCRIGIDOPERATION",
+    "IFCGEOGRAPHICCRS",
+];
+
+/// IFC 4.3 facility entities → the lift's own class local name. BOT has no
+/// class for a bridge, a road or a railway; these become `bot:Zone` plus the
+/// lift class, so an infrastructure model gets a spatial spine at all.
+pub const FACILITY_ZONE: &[(&str, &str)] = &[
+    ("IFCFACILITY", "Facility"),
+    ("IFCFACILITYPART", "FacilityPart"),
+    ("IFCFACILITYPARTCOMMON", "FacilityPart"),
+    ("IFCBRIDGE", "Bridge"),
+    ("IFCBRIDGEPART", "BridgePart"),
+    ("IFCROAD", "Road"),
+    ("IFCROADPART", "RoadPart"),
+    ("IFCRAILWAY", "Railway"),
+    ("IFCRAILWAYPART", "RailwayPart"),
+    ("IFCMARINEFACILITY", "MarineFacility"),
+    ("IFCMARINEPART", "MarinePart"),
 ];
 
 /// `(ENTITY, ordered attribute names)` for the entities whose attributes we
@@ -739,6 +946,118 @@ pub const ATTRS: &[(&str, &[&str])] = &[
     (
         "IFCQUANTITYWEIGHT",
         &["Name", "Description", "Unit", "WeightValue"],
+    ),
+    (
+        "IFCQUANTITYTIME",
+        &["Name", "Description", "Unit", "TimeValue", "Formula"],
+    ),
+    (
+        "IFCQUANTITYNUMBER",
+        &["Name", "Description", "Unit", "NumberValue", "Formula"],
+    ),
+    (
+        "IFCPHYSICALCOMPLEXQUANTITY",
+        &[
+            "Name",
+            "Description",
+            "HasQuantities",
+            "Discrimination",
+            "Quality",
+            "Usage",
+        ],
+    ),
+    (
+        "IFCPROPERTYENUMERATION",
+        &["Name", "EnumerationValues", "Unit"],
+    ),
+    // Georeferencing.
+    (
+        "IFCMAPCONVERSION",
+        &[
+            "SourceCRS",
+            "TargetCRS",
+            "Eastings",
+            "Northings",
+            "OrthogonalHeight",
+            "XAxisAbscissa",
+            "XAxisOrdinate",
+            "Scale",
+        ],
+    ),
+    (
+        "IFCMAPCONVERSIONSCALED",
+        &[
+            "SourceCRS",
+            "TargetCRS",
+            "Eastings",
+            "Northings",
+            "OrthogonalHeight",
+            "XAxisAbscissa",
+            "XAxisOrdinate",
+            "Scale",
+            "FactorX",
+            "FactorY",
+            "FactorZ",
+        ],
+    ),
+    (
+        "IFCPROJECTEDCRS",
+        &[
+            "Name",
+            "Description",
+            "GeodeticDatum",
+            "VerticalDatum",
+            "MapProjection",
+            "MapZone",
+            "MapUnit",
+        ],
+    ),
+    (
+        "IFCGEOGRAPHICCRS",
+        &[
+            "Name",
+            "Description",
+            "GeodeticDatum",
+            "PrimeMeridian",
+            "AngleUnit",
+            "HeightUnit",
+        ],
+    ),
+    // Classification.
+    (
+        "IFCCLASSIFICATION",
+        &[
+            "Source",
+            "Edition",
+            "EditionDate",
+            "Name",
+            "Description",
+            "Specification",
+            "ReferenceTokens",
+        ],
+    ),
+    (
+        "IFCCLASSIFICATIONREFERENCE",
+        &[
+            "Location",
+            "Identification",
+            "Name",
+            "ReferencedSource",
+            "Description",
+            "Sort",
+        ],
+    ),
+    (
+        "IFCRELCONNECTSELEMENTS",
+        &[
+            "GlobalId",
+            "OwnerHistory",
+            "Name",
+            "Description",
+            "ConnectionGeometry",
+            "RelatingElement",
+            "RelatedElement",
+        ],
     ),
     // Actors, units, materials.
     (

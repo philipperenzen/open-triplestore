@@ -280,9 +280,44 @@ See [rml.md](rml.md) for the full RML guide.
 | `SERVE_FRONTEND` | `true` | Serve the bundled web UI (frontend SPA) at `/`. Set `false` for a headless, API-only server — SPARQL, Graph Store and REST endpoints are unaffected. Also the `--serve-frontend` CLI flag. |
 | `CORS_ORIGINS` | *(empty — same-origin only)* | Comma-separated allowed origins, e.g. `https://app.example.com,https://www.example.com` |
 | `TRUSTED_PROXY_CIDRS` | *(empty — direct TCP IP)* | Comma-separated CIDRs of reverse proxies whose `X-Forwarded-For` is honoured for rate limiting, e.g. `10.0.0.0/8,172.16.0.0/12`. Leave empty when not behind a proxy. |
+| `OTS_EXTERNAL_REASONER` | *(unset)* | `konclude` routes `owl2-dl` materialisation through an external tableau reasoner after the native rules (experimental; see [owl2-dl.md](owl2-dl.md)). Unset: native rules only. |
+| `OTS_EXTERNAL_REASONER_BIN` | `Konclude` | Path to the reasoner binary when `OTS_EXTERNAL_REASONER` is set. |
+| `DCAT_PROFILE` | `dcat` | Catalogue application profile: `dcat`, `dcat-ap` or `dcat-ap-nl` (see [dcat.md](dcat.md)). |
+| `CATALOG_TITLE` / `CATALOG_DESCRIPTION` | instance defaults | The `dcat:Catalog` metadata. |
+| `CATALOG_PUBLISHER_URI` / `CATALOG_PUBLISHER_NAME` / `CATALOG_PUBLISHER_IDENTIFIER` | `<base>/publisher` | The catalogue's publishing agent. |
+| `CATALOG_LANGUAGE` | `ENG` (`NLD` under dcat-ap-nl) | ISO 639-3 code for the catalogue language. |
+| `CATALOG_LICENSE` | unset | Licence IRI for the catalogue and for distributions of datasets without one. |
+| `OTS_REMOTE_AUTH` | unset | `assert` mints a signed identity assertion for allowlisted peers when acting for a user (see [federation.md](federation.md)). |
+| `OTS_TRUSTED_ISSUERS` | unset | Comma-separated peer base URLs whose identity assertions are accepted (needs `BASE_URL`). |
+| `OTS_MAX_UPLOAD_MB` | 512 (Graph Store), 1024 (bulk import) | Request-body limit for RDF uploads; bodies are buffered and parsed before they replace anything, so this also bounds memory per request. Larger datasets: append in chunks or use the bulk import. |
+| `OTS_REMOTE_ALLOWLIST` | *(unset)* | Comma-separated URLs the server may contact on a user's behalf: SPARQL federation (`SERVICE <endpoint>`) and LDES client sync. Unset or empty: no outbound requests at all (a `SERVICE` clause errors). An entry is matched on its parsed origin, not as a string prefix: the scheme, host (case-insensitive) and port must be equal, the URL may carry no credentials, and the entry's path must be a prefix of the URL's path on segment boundaries. So `https://sparql.example.org` (with or without a trailing slash) admits every path on that origin and nothing else — not `https://sparql.example.org.evil.net/`, not `https://sparql.example.org@evil.net/`, not port 8443 — and `https://h/sparql` admits `/sparql` and `/sparql/…` but not `/sparqlx`. Entries that are not absolute http(s) URLs are ignored with a warning. |
+| `OTS_REMOTE_TIMEOUT_SECS` | `10` | Timeout per outbound request. |
+| `OTS_SERVICE_MAX_ROWS` | `10000` | Row cap per `SERVICE` call; a larger remote result is truncated. |
+| `ENDPOINT_ACL_ENFORCE` | `true` | Enforce endpoint ACL rules. Set to `false` to disable enforcement entirely — an escape hatch for a misfiring rule (see [security.md](security.md#endpoint-acl)), not a normal setting. |
 | `RATE_LIMIT_DISABLED` | `false` | Set to `true`/`1` to switch off per-IP rate limiting (auth, SPARQL and import quotas). For trusted/internal deployments and the test/CI harness only — **never enable on a public server**. Secure by default. |
 | `BASE_URL` | `http://localhost:7878` | Base URL used to mint linked-data IRIs (no trailing slash) |
 | `SPARQL_QUERY_TIMEOUT_SECS` | `30` | Per-query/update execution timeout in seconds |
+| `OTS_CHANGE_CAPTURE` | `off` | `on` records every write in the per-quad change log (`<data-dir>/changes/changes.db`): one row per graph per write with the net delta, exact counts or an honest `unknown`, a sequence number in commit order, and a cursor per consumer. It is what a replication follower tails and what the dataset history and audits read — **turn it on when something reads it**. It is off by default because it is not free and the cost is uneven: a ground `INSERT DATA`/`DELETE DATA` pays 4–13 %, but an `INSERT … WHERE` pays **×2.5** and a `DELETE … WHERE` **×3–4**. A `WHERE` update names its target by pattern, so the only way to know what it changed is to read the target graph before the update, read it again through the transaction, and subtract — a cost proportional to the *graph*, not to the size of the change, so a small `DELETE WHERE` against a large graph is the worst case. A replication leader or cluster member records regardless (its followers tail this log); a follower does not unless set to `on`, since its own log would be partial. Measured table and row format: [versioning.md](versioning.md#what-it-costs). |
+| `OTS_CHANGE_CAPTURE_MAX_SCAN` | `250000` | Quads: a `WHERE` update's target graphs are scanned for a before-image only when their summed counts fit; above it the row says `unknown`. Lower it to bound what capture can cost a single write, at the price of less precise rows. |
+| `OTS_CHANGE_CAPTURE_MAX_PAYLOAD` | `250000` | Quads a `full` row may carry; above it the row keeps exact counts only. |
+| `OTS_CHANGE_RETENTION_DAYS` | `90` | Change-log rows older than this are swept — never above the lowest live cursor. |
+| `OTS_CURSOR_TTL_DAYS` | `30` | A change-log cursor not updated for this long stops pinning retention and is dropped. |
+| `OTS_REPLICATION_ROLE` | `none` | `leader` records every write in the change log and serves followers; `follower` keeps this store read-only and tails a leader. See [operations.md](operations.md#replication). |
+| `OTS_REPLICATION_MODE` | `warm` | A follower's temperature — how often it catches up: `cold` (hourly), `warm` (every minute; `medium` is accepted), `hot` (long-polls the leader: the request for rows is held up to 25 s and answered the moment a row lands). |
+| `OTS_REPLICATION_LEADER_URL`, `OTS_REPLICATION_TOKEN` | *(unset)* | The leader's base URL and an admin API token minted there. A follower without a leader URL reports the omission in its status and applies nothing. |
+| `OTS_REPLICATION_GRAPHS` | `all` | The graphs a follower applies: `all`, or a comma-separated list of graph IRIs (`default` for the default graph). |
+| `OTS_REPLICATION_DATASETS` | *(unset)* | Instead of graphs: the leader's dataset ids, resolved to graphs through the leader's manifest at every catch-up. |
+| `OTS_REPLICATION_NODE_ID` | `$HOSTNAME` | This follower's name — the cursor it keeps on the leader, which pins the leader's retention. |
+| `OTS_REPLICATION_POLL_MS` | `500` | Paces a hot follower's retry after a failed catch-up (50–60000); the long-poll hold itself is 25 s. |
+| `OTS_REPLICATION_INTERVAL_SECS` | *(temperature)* | A catch-up interval that replaces the temperature's. |
+| `OTS_REPLICATION_SYNC_FOLLOWERS` | *(unset: asynchronous)* | On a leader: the follower node ids whose acknowledgement every write waits for. Set it and the leader is synchronous; see [operations.md](operations.md#synchronous-replication). |
+| `OTS_REPLICATION_SYNC_REQUIRED` | `1` | How many of the named followers must have applied a write before it returns; `all` for every one. |
+| `OTS_REPLICATION_IDENTITY_INTERVAL_SECS` | *(temperature, ≥ 5)* | On a follower: how often it checks the leader's manifest for a changed identity database and, when it changed, fetches and applies the snapshot in place. See [operations.md](operations.md#identity-database). |
+| `OTS_REPLICATION_CLUSTER`, `OTS_REPLICATION_CLUSTER_ID`, `OTS_REPLICATION_CLUSTER_SECRET` | *(unset)* | With `OTS_REPLICATION_ROLE=cluster`: every member as `id=url,…`, this node's id, and the secret the members' Raft messages carry. Raft elects the leader; the rest follow hot and acknowledge a majority. See [operations.md](operations.md#consensus). |
+| `OTS_REPLICATION_ELECTION_MS`, `OTS_REPLICATION_HEARTBEAT_MS` | `1500`, a fifth of it | The election timeout's lower bound (the upper is twice it) and the leader's heartbeat. |
+| `OTS_REPLICATION_SYNC_TIMEOUT_MS` | `2000` | How long a write waits for them (50–60000). After it, the write returns degraded — `X-Replication-Ack: degraded` — and the leader recovers by itself when a follower catches up. |
+| `OTS_TELEMETRY_TIMING_STRIDE` | `8` | One query in this many is timed and lands in the latency ring that `GET /api/admin/telemetry` reports percentiles from. The exit counts and the total are exact regardless. Raising it makes the query path cheaper and the percentiles coarser; `1` times every query. The default exists because reading the clock and locking the ring costs about 40 ns, which is 40 % of a cache-hit query. |
+| `OTS_COLUMNAR_QUERY` | `on` | The in-memory mirror's third copy: a term dictionary and sorted permutations of the quads with an evaluator of its own, consulted after the shards and before the full copy for the query shapes it implements exactly, declining the rest. `off` leaves the two engine copies. See [performance.md](performance.md#4-the-columnar-copy-opengraphcolumnar). |
 | `S3_ENDPOINT` | *(unset — local filesystem)* | S3/MinIO endpoint URL. If unset, assets are stored in `<data-dir>/assets/` |
 | `S3_BUCKET` | `triplestore-assets` | S3 bucket name |
 | `S3_ACCESS_KEY` | | S3 access key |
@@ -292,7 +327,8 @@ See [rml.md](rml.md) for the full RML guide.
 | `BACKUP_RETENTION_COUNT` | `7` | Number of backups to retain |
 | `BACKUP_SCHEDULE_HOURS` | `24` | Hours between scheduled backups |
 | `BACKUP_ENCRYPT` | `false` | Encrypt backups with `age` X25519 (requires the `backup-encrypt` build feature) |
-| `BACKUP_ENCRYPT_KEY_PATH` | `data/backup_key.age` | Path to the backup encryption key (auto-generated if absent) |
+| `BACKUP_ENCRYPT_KEY_PATH` | `<data-dir>/backup_key.age` | File holding the `age` X25519 **recipient** (public `age1…` line). Operator-supplied — the server refuses to start if `BACKUP_ENCRYPT=true` and this is absent. |
+| `BACKUP_DECRYPT_IDENTITY_PATH` | *(unset)* | `age-keygen` identity file, used only by `--restore` to decrypt an encrypted backup. Never needed by the running server. |
 | `AUDIT_PSEUDONYMISE_AFTER_DAYS` | `365` | GDPR/AVG: pseudonymise audit rows older than this |
 | `TEXT_SEARCH_DIR` | `<data-dir>/tantivy` | Tantivy full-text index directory (requires the `text-search` build feature) |
 | `SMTP_HOST` / `SMTP_*` | *(unset — account email is written to the server log)* | Outbound account email (verification, password reset, reminders) — see [auth.md](auth.md#email-delivery-configuration); the compose stack bundles an optional Postfix relay (`--profile mail`) |
@@ -385,7 +421,8 @@ The backup subsystem produces a snapshot every `BACKUP_SCHEDULE_HOURS` hours
 | `BACKUP_RETENTION_COUNT` | `7` | Number of snapshots to keep |
 | `BACKUP_SCHEDULE_HOURS` | `24` | Cron interval |
 | `BACKUP_ENCRYPT` | `false` | Enable `age` X25519 encryption (requires `--features backup-encrypt`) |
-| `BACKUP_ENCRYPT_KEY_PATH` | — | Path to a file containing one X25519 recipient |
+| `BACKUP_ENCRYPT_KEY_PATH` | `<data-dir>/backup_key.age` | File containing one X25519 recipient. Required when `BACKUP_ENCRYPT=true` — never auto-generated |
+| `BACKUP_DECRYPT_IDENTITY_PATH` | — | Identity file for `--restore` of an encrypted backup |
 | `BACKUP_S3_ENABLED` | `false` | Mirror each snapshot to the configured ObjectStore |
 
 **Admin endpoints** (`super_admin` only):
@@ -393,10 +430,38 @@ The backup subsystem produces a snapshot every `BACKUP_SCHEDULE_HOURS` hours
 - `GET /api/admin/backup` — list manifests
 - `POST /api/admin/backup/{id}/verify` — recompute and compare checksums
 
-Restore is **out of scope for the API** — it is a destructive operation that
-should be performed manually: stop the server, replace `auth.sqlite` with the
-backup file (decrypting with `age` first if applicable), then re-import the
-N-Quads dump into a freshly-initialised RocksDB store.
+Restore is **out of scope for the API** — it is destructive and replaces the
+identity DB file, so it runs offline through the CLI with the server stopped:
+
+```bash
+open-triplestore --restore <backup-id> --data-dir ./data
+```
+
+Checksums are verified before anything is touched, so a corrupt backup aborts
+without destroying the live store.
+
+#### Encrypted backups
+
+`BACKUP_ENCRYPT=true` requires an **operator-supplied** recipient — the server
+will not start without one, and deliberately does not generate one:
+
+```bash
+age-keygen -o backup-identity.txt        # keep this file OFF the server
+grep 'public key' backup-identity.txt    # → age1…
+printf 'age1…\n' > /secure/backup_key.age
+```
+
+Point `BACKUP_ENCRYPT_KEY_PATH` at the recipient file. To restore, give the
+CLI the identity you kept:
+
+```bash
+BACKUP_DECRYPT_IDENTITY_PATH=/secure/backup-identity.txt \
+  open-triplestore --restore <backup-id> --data-dir ./data
+```
+
+The server stores only the recipient, never the identity — so automatic
+crash-recovery (`STORE_AUTO_RECOVER`) cannot restore an encrypted backup and
+says so loudly rather than starting empty.
 
 ### Alerting
 

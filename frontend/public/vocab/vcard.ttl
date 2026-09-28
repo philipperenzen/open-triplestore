@@ -1,9 +1,21 @@
-# An Ontology for vCards — This ontology models and represents vCards in RDF
-# using current best practices.
-# Full vocabulary as published in the Linked Open Vocabularies (LOV) corpus
-# snapshot of 2025-12-18 (https://lov.linkeddata.es/ — dataset CC BY 4.0),
-# version v2014-05-22 (2014-05-22).
-# Source: http://www.w3.org/2006/vcard/ns  (ns http://www.w3.org/2006/vcard/ns#)
+# Ontology for vCard — models and represents vCards in RDF (revision 2014-05-22).
+# Source: http://www.w3.org/2006/vcard/ns — triples identical to the current
+# https://www.w3.org/2006/vcard/ns.ttl except 12 triples added there later (a
+# Solid contacts extension), which this older revision lacks.
+# Obtained via the Linked Open Vocabularies (LOV) corpus snapshot of 2025-12-18
+# (https://lov.linkeddata.es/), which re-serialized it as Turtle. LOV's own
+# CC BY 4.0 licence covers LOV's catalogue; it does not relicense this vocabulary.
+# Defined in vCard Ontology - for describing People and Organizations, W3C
+# Interest Group Note 22 May 2014, https://www.w3.org/TR/2014/NOTE-vcard-rdf-20140522/
+# Copyright © 2014 World Wide Web Consortium. https://www.w3.org/copyright/document-license-2023/
+# Copyright © 2023 W3C®. This software or document includes material copied from
+# or derived from Ontology for vCard,
+# https://www.w3.org/2006/vcard/ns.
+# Licence: W3C Document License (2023), https://www.w3.org/copyright/document-license-2023/
+# Changes: re-serialized as Turtle by LOV (triples unchanged); this comment
+# header was written by Open Triplestore (2026-07-24, revised 2026-09-23).
+# Full attribution and licence texts: NOTICE.md in this directory.
+# ---- The vocabulary, as re-serialized by LOV, starts below this line. ----
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .

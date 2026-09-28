@@ -15,6 +15,8 @@
 
 use std::sync::Arc;
 
+pub mod sources;
+
 /// SPARQL capability a plugin gets against the host's shared store, without
 /// depending on the host crate's store types directly.
 pub trait PluginStore: Send + Sync {
@@ -114,6 +116,14 @@ pub trait Plugin: Send + Sync + 'static {
     /// periodic sync). Called once at boot, after `on_boot`. The plugin owns
     /// whatever task it spawns (typically via `tokio::spawn`).
     fn spawn_background(&self, _ctx: PluginContext) {}
+
+    /// Datasource drivers this plugin contributes (see [`sources`]). The host
+    /// registers each under its dialect next to the built-in SQLite driver;
+    /// a dialect already provided by core or an earlier plugin is refused
+    /// at boot with a log line, not silently overridden. Default: none.
+    fn connectors(&self) -> Vec<Arc<dyn sources::SourceConnector>> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]

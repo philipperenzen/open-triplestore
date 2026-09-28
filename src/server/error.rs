@@ -129,6 +129,13 @@ impl From<crate::store::engine::StoreError> for AppError {
             crate::store::engine::StoreError::SparqlSyntax(e) => {
                 AppError::BadRequest(format!("SPARQL syntax error: {}", e))
             }
+            crate::store::engine::StoreError::ReadOnly(leader) => {
+                AppError::ServiceUnavailable(if leader.is_empty() {
+                    "read-only replica: writes go to the leader".to_string()
+                } else {
+                    format!("read-only replica: writes go to the leader at {leader}")
+                })
+            }
             other => AppError::Internal(other.to_string()),
         }
     }
