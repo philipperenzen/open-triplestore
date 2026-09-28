@@ -221,9 +221,13 @@ Bundled datasets and vocabularies:
         University of Manchester); OGC GeoSPARQL 1.1 (geosparql.ttl, (c) 2021
         Open Geospatial Consortium) and GeoSPARQL 1.0 (geosparql/1.0.0.ttl,
         Copyright (c) 2012 Open Geospatial Consortium), both from
-        https://github.com/opengeospatial/geosemantics-semantic-resources. Each
-        file carries a notice that Open Triplestore changed it by adding a
-        comment header; pav.ttl was also re-serialized by LOV.
+        https://github.com/opengeospatial/geosemantics-semantic-resources; the
+        DOAP vocabulary (doap.ttl, Copyright © 2004-2016 Edd Dumbill, 2016-2017
+        Edd Wilder-James, 2018- The DOAP Authors), from
+        https://github.com/ewilderj/doap at commit d164b82d (schema/doap.rdf).
+        Each file carries a notice that Open Triplestore changed it by adding a
+        comment header; pav.ttl was also re-serialized by LOV, and doap.ttl was
+        converted from RDF/XML to Turtle by Open Triplestore.
       * BSD-3-Clause (LICENSES/BSD-3-Clause-ETSI-SAREF.txt, also reproduced in
         frontend/public/vocab/NOTICE.md) — ETSI SAREF Core v3.1.1 (saref.ttl),
         Copyright 2019 ETSI, from https://saref.etsi.org/core/v3.1.1/saref.ttl.
@@ -236,14 +240,6 @@ Bundled datasets and vocabularies:
         frontend/public/vocab/NOTICE.md. Changes: re-serialized by LOV, which
         also resolved the relative IRI locn.svg to http://njh.me/locn.svg;
         comment header added.
-      * DOAP vocabulary (doap.ttl) — Copyright © 2004-2009 Edd Dumbill. LOV's
-        re-serialization of the DOAP namespace document served at
-        http://usefulinc.com/ns/doap (2009-2015). The upstream repository
-        https://github.com/ewilderj/doap has been Apache-2.0 since 2018-03-31
-        ("Copyright © 2004-2016 Edd Dumbill, 2016-2017 Edd Wilder-James, 2018-
-        The DOAP Authors"). The file also contains 97 Japanese-language labels
-        and comments and a few other strings that were never in that repository
-        and have no published licence; see frontend/public/vocab/NOTICE.md.
       * IMBOR 2025 Vocabulaire (imbor.ttl) — © Stichting CROW. Byte-identical
         copy of imbor2025-vocabulaire.ttl (sha256
         16d9ca3cf13862ddce6ca9a813ccf5174cea1876ed44611806be766d2224ce84) from

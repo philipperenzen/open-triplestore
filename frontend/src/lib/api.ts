@@ -1540,7 +1540,7 @@ export interface ModelLicenseRef {
 export interface ModelAttribution {
   /** The bundled file, relative to /vocab/ (e.g. "dcat/2.0.0.ttl"). */
   file: string;
-  /** Empty when no licence is known (DOAP). */
+  /** Empty when no licence is known (a DOAP copy seeded by 0.7.0 or earlier). */
   licenses: ModelLicenseRef[];
   /** Copyright notices or, where a source states none, its creator credit. */
   copyright: string[];

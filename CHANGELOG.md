@@ -13,6 +13,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
+  LOV's re-serialization of the old DOAP namespace document (2009-2015). That
+  file stated no licence, and its 97 Japanese-language labels and comments were
+  never in the Apache-2.0 upstream repository. It is now
+  https://github.com/ewilderj/doap's own `schema/doap.rdf` at commit `d164b82d`
+  (2022-03-13, its latest revision), converted to Turtle with its triples
+  unchanged: 741 triples with labels in six languages, "Copyright © 2004-2016
+  Edd Dumbill, 2016-2017 Edd Wilder-James, 2018- The DOAP Authors", under the
+  Apache License 2.0. The registry seeds it as DOAP `2022-03-13` and points the
+  entry at it. On an install that seeded the old copy, version `2012-01-04` is
+  kept, deprecated. Its licence record no longer calls it the bundled file: it
+  says what the copy is and that part of it has no published licence. `NOTICE`
+  and `vocab/NOTICE.md` list DOAP under Apache-2.0.
+
 ## [0.7.0] — 2026-09-28
 
 SQL datasources end to end: relational data is profiled, mapped, dry-run,

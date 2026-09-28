@@ -386,11 +386,11 @@ disclaimer that distributions must keep is in appendix E).
 ## DOAP
 
 ### `doap.ttl` — Description of a Project (DOAP) vocabulary
-- **What it is:** the DOAP vocabulary (namespace `http://usefulinc.com/ns/doap#`) by Edd Dumbill, now Edd Wilder-James. The file is LOV's Turtle re-serialization of the DOAP namespace document; LOV labels the version "2012-01-04". Its 696 triples are identical to the document served at `http://usefulinc.com/ns/doap` from at least 2009 to 2015, for example the Internet Archive capture https://web.archive.org/web/20090626130747/http://usefulinc.com/ns/doap.
-- **Copyright:** "Copyright © 2004-2009 Edd Dumbill" (the file's own dc:rights). The file states no licence.
-- **Licence:** the upstream repository https://github.com/ewilderj/doap (formerly edumbill/doap) has been under the Apache License 2.0 since 2018-03-31. Its current `schema/doap.rdf` gives "Copyright © 2004-2016 Edd Dumbill, 2016-2017 Edd Wilder-James, 2018- The DOAP Authors". That grant covers the material in that repository, which is most of this file.
-  - This file also contains 97 Japanese-language labels and comments (96 tagged `@ja`, one `@jp`) and a few other strings that have never been in that repository's `schema/doap.rdf`. The Apache-2.0 grant is not shown to cover them, and no licence has been published for them.
-- **Changes:** re-serialized as Turtle by LOV; Open Triplestore added a comment header in 2026-07. That header's "Source" line names https://github.com/edumbill/doap/blob/master/schema/doap.rdf, which is where LOV's catalogue points. The content matches the usefulinc.com namespace document instead.
+- **What it is:** the DOAP vocabulary (namespace `http://usefulinc.com/ns/doap#`) by Edd Dumbill, now Edd Wilder-James, and the DOAP authors. The file is the upstream repository's `schema/doap.rdf` at commit `d164b82d38f7636fe78ff1ef025ef7502fb8538e` (2022-03-13), the file's latest revision: https://github.com/ewilderj/doap/blob/d164b82d38f7636fe78ff1ef025ef7502fb8538e/schema/doap.rdf — 741 triples, with labels and comments in English, Czech, German, Spanish, French and Portuguese.
+- **Copyright:** "Copyright © 2004-2016 Edd Dumbill, 2016-2017 Edd Wilder-James, 2018- The DOAP Authors" (the file's own notice; the authors are listed in the repository's `AUTHORS` file).
+- **Licence:** Apache License 2.0, http://www.apache.org/licenses/LICENSE-2.0 (full text in `LICENSES/Apache-2.0.txt`). The source file carries the licence notice itself, and the repository has no `NOTICE` file.
+- **Changes:** converted from RDF/XML to Turtle by Open Triplestore in 2026-09; the triples are the source file's, unchanged. A comment header was added, carrying the copyright and licence notice.
+- **Earlier copies:** releases up to 0.7.0 shipped LOV's Turtle re-serialization of the older namespace document served at `http://usefulinc.com/ns/doap` (2009-2015, "Copyright © 2004-2009 Edd Dumbill"), version label `2012-01-04`. That file stated no licence, and 97 of its Japanese-language labels and comments were never in the Apache-2.0 repository. It is no longer shipped. An install that seeded it keeps it, deprecated, next to the new version.
 
 ## Open Triplestore's own vocabulary
 
