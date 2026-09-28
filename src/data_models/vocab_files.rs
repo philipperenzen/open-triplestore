@@ -570,6 +570,20 @@ pub const PAV: BundledFile = bundled!("pav.ttl", {
     store_form: Some("2 xsd:dateTime literals read with the time zone Z instead of +00:00"),
 });
 
+/// The upstream repository's own file, converted from RDF/XML (it replaced
+/// LOV's re-serialization of the older namespace document, whose Japanese
+/// labels had no published licence).
+pub const DOAP: BundledFile = bundled!("doap.ttl", {
+    licenses: &[Licence {
+        name: "Apache License 2.0",
+        uri: "http://www.apache.org/licenses/LICENSE-2.0",
+    }],
+    copyright: &["Copyright © 2004-2016 Edd Dumbill, 2016-2017 Edd Wilder-James, 2018- The DOAP \
+                  Authors"],
+    source: "https://github.com/ewilderj/doap/blob/d164b82d38f7636fe78ff1ef025ef7502fb8538e/\
+             schema/doap.rdf",
+});
+
 pub const GEOSPARQL: BundledFile = bundled!("geosparql.ttl", {
     licenses: &[Licence {
         name: "Apache License 2.0",
@@ -657,20 +671,6 @@ pub const IMBOR: BundledFile = bundled!("imbor.ttl", {
                    Open Triplestore follows the stricter reading: attribution to Stichting CROW, \
                    the licence URIs, and no altered copies."),
     no_derivatives: true,
-});
-
-// ─── DOAP (licence unresolved) ─────────────────────────────────────────────────
-
-pub const DOAP: BundledFile = bundled!("doap.ttl", {
-    copyright: &["Copyright © 2004-2009 Edd Dumbill"],
-    source: "http://usefulinc.com/ns/doap",
-    changes: Some("Re-serialized as Turtle by LOV; Open Triplestore added a comment header in \
-                   2026-07."),
-    remarks: Some("The file states no licence. The upstream repository \
-                   https://github.com/ewilderj/doap has been under the Apache License 2.0 since \
-                   2018-03-31, which covers most of this file; its 97 Japanese-language labels \
-                   and comments and a few other strings have never been in that repository, and \
-                   no licence has been published for them."),
 });
 
 // ─── Open Triplestore's own vocabulary ─────────────────────────────────────────
@@ -1044,8 +1044,8 @@ mod tests {
         }
     }
 
-    /// Each third-party file yields a complete record: a licence (except DOAP,
-    /// whose file states none), a source, the changes and a notice link.
+    /// Each third-party file yields a complete record: a licence, a source,
+    /// the changes and a notice link.
     #[test]
     fn every_third_party_file_has_a_complete_record() {
         for f in ALL {
@@ -1053,9 +1053,7 @@ mod tests {
                 assert!(!f.third_party, "{} lost its record", f.path);
                 continue;
             };
-            if f.path != "doap.ttl" {
-                assert!(!a.licenses.is_empty(), "{}: no licence", f.path);
-            }
+            assert!(!a.licenses.is_empty(), "{}: no licence", f.path);
             assert!(!a.source_url.is_empty(), "{}: no source", f.path);
             assert!(a.changes.is_some(), "{}: no changes statement", f.path);
             assert!(

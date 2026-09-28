@@ -1,9 +1,20 @@
-# Description of a Project vocabulary — The Description of a Project (DOAP)
-# vocabulary, described using W3C RDF Schema and the Web Ontology Language.
-# Full vocabulary as published in the Linked Open Vocabularies (LOV) corpus
-# snapshot of 2025-12-18 (https://lov.linkeddata.es/ — dataset CC BY 4.0),
-# version v2012-01-04 (2012-01-04).
-# Source: https://github.com/edumbill/doap/blob/master/schema/doap.rdf  (ns http://usefulinc.com/ns/doap#)
+# Description of a Project (DOAP) vocabulary — the DOAP vocabulary, described
+# using W3C RDF Schema and the Web Ontology Language.
+# Source: https://github.com/ewilderj/doap/blob/d164b82d38f7636fe78ff1ef025ef7502fb8538e/schema/doap.rdf
+# (namespace http://usefulinc.com/ns/doap#), the file's latest revision, of
+# 2022-03-13.
+# Copyright © 2004-2016 Edd Dumbill, 2016-2017 Edd Wilder-James, 2018- The DOAP
+# Authors (see https://github.com/ewilderj/doap/blob/d164b82d38f7636fe78ff1ef025ef7502fb8538e/AUTHORS)
+# Licensed under the Apache License, Version 2.0 (the "License"); you may not
+# use this file except in compliance with the License. You may obtain a copy of
+# the License at http://www.apache.org/licenses/LICENSE-2.0 (also in
+# LICENSES/Apache-2.0.txt). Unless required by applicable law or agreed to in
+# writing, software distributed under the License is distributed on an "AS IS"
+# BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied. See the License for the specific language governing permissions and
+# limitations under the License.
+# Changes: converted from RDF/XML to Turtle by Open Triplestore in 2026-09; the
+# triples are the source file's, unchanged. This comment header was added.
 @prefix dc: <http://purl.org/dc/elements/1.1/> .
 @prefix doap: <http://usefulinc.com/ns/doap#> .
 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
@@ -18,13 +29,13 @@ doap:ArchRepository a rdfs:Class,
         "GNU Arch repository"@en,
         "Repositorio GNU Arch"@es,
         "Dépôt GNU Arch"@fr,
-        "GNU Archのリポジトリ"@ja ;
+        "Repositório GNU Arch"@pt ;
     rdfs:comment "Úložiště zdrojových kódů GNU Arch."@cs,
         "GNU Arch Quellcode-Versionierungssystem."@de,
         "GNU Arch source code repository."@en,
         "Repositorio GNU Arch del código fuente."@es,
         "Dépôt GNU Arch du code source."@fr,
-        "ソースコードのGNU Archのリポジトリ"@ja ;
+        "Repositório GNU Arch do código fonte."@pt ;
     rdfs:isDefinedBy doap: ;
     rdfs:subClassOf doap:Repository .
 
@@ -35,21 +46,21 @@ doap:BKRepository a rdfs:Class,
         "BitKeeper Repository"@en,
         "Repositorio BitKeeper"@es,
         "Dépôt BitKeeper"@fr,
-        "BitKeeperのリポジトリ"@ja ;
+        "Repositório Bitkeeper"@pt ;
     rdfs:comment "Úložiště zdrojových kódů BitKeeper."@cs,
         "BitKeeper Quellcode-Versionierungssystem."@de,
         "BitKeeper source code repository."@en,
         "Repositorio BitKeeper del código fuente."@es,
         "Dépôt BitKeeper du code source."@fr,
-        "ソースコードのBitKeeperのリポジトリ"@ja ;
+        "Repositório BitKeeper do código fonte."@pt ;
     rdfs:isDefinedBy doap: ;
     rdfs:subClassOf doap:Repository .
 
 doap:BazaarBranch a rdfs:Class ;
     rdfs:label "Bazaar Branch"@en,
-        "Bazzarのリポジトリ"@ja ;
+        "Ramificação Bazaar"@pt ;
     rdfs:comment "Bazaar source code branch."@en,
-        "ソースコードのBazzarのリポジトリ"@ja ;
+        "Código fonte da ramificação Bazaar."@pt ;
     rdfs:isDefinedBy doap: ;
     rdfs:subClassOf doap:Repository .
 
@@ -60,13 +71,13 @@ doap:CVSRepository a rdfs:Class,
         "CVS Repository"@en,
         "Repositorio CVS"@es,
         "Dépôt CVS"@fr,
-        "CVSのリポジトリ"@ja ;
+        "Repositório CVS"@pt ;
     rdfs:comment "Úložiště zdrojových kódů CVS."@cs,
         "CVS Quellcode-Versionierungssystem."@de,
         "CVS source code repository."@en,
         "Repositorio CVS del código fuente."@es,
         "Dépôt CVS du code source."@fr,
-        "ソースコードのCVSのリポジトリ"@ja ;
+        "Repositório CVS do código fonte."@pt ;
     rdfs:isDefinedBy doap: ;
     rdfs:subClassOf doap:Repository .
 
@@ -74,51 +85,59 @@ doap:DarcsRepository a rdfs:Class ;
     rdfs:label "darcs Repository"@en,
         "Repositorio darcs"@es,
         "Dépôt darcs"@fr,
-        "darcsのリポジトリ"@ja ;
+        "Repositório darcs"@pt ;
     rdfs:comment "darcs source code repository."@en,
         "Repositorio darcs del código fuente."@es,
         "Dépôt darcs du code source."@fr,
-        "ソースコードのdarcsのリポジトリ"@ja ;
+        "Repositório darcs do código fonte."@pt ;
+    rdfs:isDefinedBy doap: ;
+    rdfs:subClassOf doap:Repository .
+
+doap:GitBranch a rdfs:Class ;
+    rdfs:label "Git Branch"@en,
+        "Ramificação Git"@pt ;
+    rdfs:comment "Git source code branch."@en,
+        "Código fonte da ramificação Git."@pt ;
     rdfs:isDefinedBy doap: ;
     rdfs:subClassOf doap:Repository .
 
 doap:GitRepository a rdfs:Class ;
     rdfs:label "Úložiště Git"@cs,
-        "Git repository"@de,
+        "Git Repository"@de,
         "Git Repository"@en,
         "Repositorio Git"@es,
         "Dépôt Git"@fr,
-        "Gitのリポジトリ"@ja ;
+        "Repositório Git"@pt ;
     rdfs:comment "Úložiště zdrojových kódů Git."@cs,
         "Git Quellcode-Versionierungssystem."@de,
         "Git source code repository."@en,
         "Repositorio Git del código fuente."@es,
         "Dépôt Git du code source."@fr,
-        "ソースコードのGitのリポジトリ"@ja ;
+        "Repositório Git do código fonte."@pt ;
     rdfs:isDefinedBy doap: ;
     rdfs:subClassOf doap:Repository .
 
 doap:HgRepository a rdfs:Class ;
     rdfs:label "Mercurial Repository"@en,
-        "Mercurialのリポジトリ"@ja ;
+        "Repositório Mercurial"@pt ;
     rdfs:comment "Mercurial source code repository."@en,
-        "ソースコードのMercurialのリポジトリ"@ja ;
+        "Repositório Mercurial do código fonte."@pt ;
     rdfs:isDefinedBy doap: ;
     rdfs:subClassOf doap:Repository .
 
 doap:Project a rdfs:Class ;
     rdfs:label "Projekt"@cs,
-        "Prijekt"@de,
+        "Projekt"@de,
         "Project"@en,
         "Proyecto"@es,
         "Projet"@fr,
-        "プロジェクト"@ja ;
+        "Projeto"@pt ;
     rdfs:comment "Projekt."@cs,
         "Ein Projekt."@de,
         "A project."@en,
         "Un proyecto."@es,
         "Un projet."@fr,
-        "プログラミングのプロジェクト"@ja ;
+        "Projeto."@pt ;
     rdfs:isDefinedBy doap: ;
     rdfs:subClassOf foaf:Project,
         <http://xmlns.com/wordnet/1.6/Project> .
@@ -129,13 +148,13 @@ doap:Repository a rdfs:Class ;
         "Repository"@en,
         "Repositorio"@es,
         "Dépôt"@fr,
-        "リポジトリ"@ja ;
+        "Repositório"@pt ;
     rdfs:comment "Úložiště zdrojových kódů."@cs,
         "Quellcode-Versionierungssystem."@de,
         "Source code repository."@en,
         "Repositorio del código fuente."@es,
         "Dépôt du code source."@fr,
-        "ソースコードのリポジトリ"@ja ;
+        "Repositório do código fonte."@pt ;
     rdfs:isDefinedBy doap: .
 
 doap:SVNRepository a rdfs:Class ;
@@ -144,21 +163,21 @@ doap:SVNRepository a rdfs:Class ;
         "Subversion Repository"@en,
         "Repositorio Subversion"@es,
         "Dépôt Subversion"@fr,
-        "Subversionのリポジトリ"@ja ;
+        "Repositório Subversion"@pt ;
     rdfs:comment "Úložiště zdrojových kódů Subversion."@cs,
         "Subversion Quellcode-Versionierungssystem."@de,
         "Subversion source code repository."@en,
         "Repositorio Subversion del código fuente."@es,
         "Dépôt Subversion du code source."@fr,
-        "ソースコードのSubversionのリポジトリ"@ja ;
+        "Repositório Subversion do código fonte."@pt ;
     rdfs:isDefinedBy doap: ;
     rdfs:subClassOf doap:Repository .
 
 doap:Specification a rdfs:Class ;
     rdfs:label "Specification"@en,
-        "明細書じ"@ja ;
+        "Especificação"@pt ;
     rdfs:comment "A specification of a system's aspects, technical or otherwise."@en,
-        "あるシステムの詳しく書いた明細書。多分技術的なもの。"@ja ;
+        "A especificação de aspetos, técnicas ou outros do sistema."@pt ;
     rdfs:isDefinedBy doap: ;
     rdfs:subClassOf rdfs:Resource .
 
@@ -168,13 +187,13 @@ doap:Version a rdfs:Class ;
         "Version"@en,
         "Versión"@es,
         "Version"@fr,
-        "バーション"@ja ;
+        "Versão"@pt ;
     rdfs:comment "Informace o uvolněné verzi projektu."@cs,
         "Versionsinformation eines Projekt Releases."@de,
         "Version information of a project release."@en,
         "Información sobre la versión de un release del proyecto."@es,
-        "Détails sur une version d'une realease d'un projet."@fr,
-        "リリースのバーション情報"@jp ;
+        "Détails sur une version d'une release d'un projet."@fr,
+        "Informação sobre a versão do projeto lançado."@pt ;
     rdfs:isDefinedBy doap: .
 
 doap:anon-root a rdf:Property ;
@@ -183,34 +202,35 @@ doap:anon-root a rdf:Property ;
         "anonymous root"@en,
         "raíz anónima"@es,
         "racine anonyme"@fr,
-        "匿名ルート"@ja ;
+        "raíz anónima"@pt ;
     rdfs:comment "Úložiště pro anonymní přístup."@cs,
         "Repository für anonymen Zugriff"@de,
         "Repository for anonymous access."@en,
         "Repositorio para acceso anónimo."@es,
         "Dépôt pour accès anonyme."@fr,
-        "匿名でアクセスできるパス"@ja ;
+        "Repositório para acesso anónimo."@pt ;
     rdfs:domain doap:Repository ;
     rdfs:isDefinedBy doap: ;
     rdfs:range rdfs:Literal .
 
 doap:audience a rdf:Property ;
     rdfs:label "audience"@en,
-        "目指したユーザ"@ja ;
+        "audiência"@pt ;
     rdfs:comment "Description of target user base"@en,
-        "目指したユーザたちの説明"@ja ;
+        "Descrição do utilizador base alvo"@pt ;
     rdfs:domain doap:Project ;
     rdfs:isDefinedBy doap: ;
     rdfs:range rdfs:Literal .
 
 doap:blog a rdf:Property ;
     rdfs:label "blog"@en,
-        "ブログ"@ja ;
+        "blog"@pt ;
     rdfs:comment "URI of a blog related to a project"@en,
-        "このプロジェクトに関するブログのURI"@ja ;
+        "URI de um blog relacionado com um projeto"@pt ;
     rdfs:domain doap:Project ;
     rdfs:isDefinedBy doap: ;
-    rdfs:range rdfs:Resource .
+    rdfs:range <http://rdfs.org/sioc/types#Weblog>,
+        rdfs:Resource .
 
 doap:browse a rdf:Property ;
     rdfs:label "prohlížeč"@cs,
@@ -218,13 +238,13 @@ doap:browse a rdf:Property ;
         "browse"@en,
         "navegar"@es,
         "visualiser"@fr,
-        "ウェブのユーザインタフェース"@ja ;
+        "navegar"@pt ;
     rdfs:comment "Webové rozhraní pro prohlížení úložiště."@cs,
         "Web-Browser Interface für das Repository."@de,
         "Web browser interface to repository."@en,
         "Interface web del repositorio."@es,
         "Interface web au dépôt."@fr,
-        "このリポジトリのウェブのウェブのユーザインタフェース"@ja ;
+        "Interface web do repositório."@pt ;
     rdfs:domain doap:Repository ;
     rdfs:isDefinedBy doap: .
 
@@ -234,13 +254,13 @@ doap:bug-database a rdf:Property ;
         "bug database"@en,
         "base de datos de bugs"@es,
         "suivi des bugs"@fr,
-        "バグページ"@ja ;
+        "base de dados de bugs"@pt ;
     rdfs:comment "Správa chyb projektu."@cs,
         "Fehlerdatenbank eines Projektes."@de,
         "Bug tracker for a project."@en,
         "Bug tracker para un proyecto."@es,
         "Suivi des bugs pour un projet."@fr,
-        "このプロジェクのバグ管理ページ"@ja ;
+        "Bug tracker para um projeto."@pt ;
     rdfs:domain doap:Project ;
     rdfs:isDefinedBy doap: .
 
@@ -250,13 +270,13 @@ doap:category a rdf:Property ;
         "category"@en,
         "categoría"@es,
         "catégorie"@fr,
-        "分類"@ja ;
+        "categoria"@pt ;
     rdfs:comment "Kategorie projektu."@cs,
         "Eine Kategorie eines Projektes."@de,
         "A category of project."@en,
         "Una categoría de proyecto."@es,
         "Une catégorie de projet."@fr,
-        "このプロジェクトの分類。"@ja ;
+        "Uma categoría de projeto."@pt ;
     rdfs:domain doap:Project ;
     rdfs:isDefinedBy doap: .
 
@@ -266,13 +286,13 @@ doap:created a rdf:Property ;
         "created"@en,
         "creado"@es,
         "créé"@fr,
-        "作成日付"@ja ;
+        "criado"@pt ;
     rdfs:comment "Datum, kdy bylo něco vytvořeno ve formátu RRRR-MM-DD, např. 2004-04-05"@cs,
         "Erstellungsdatum von Irgendwas, angegeben im YYYY-MM-DD Format, z.B. 2004-04-05."@de,
         "Date when something was created, in YYYY-MM-DD form. e.g. 2004-04-05"@en,
         "Fecha en la que algo fue creado, en formato AAAA-MM-DD. e.g. 2004-04-05"@es,
         "Date à laquelle a été créé quelque chose, au format AAAA-MM-JJ (par ex. 2004-04-05)"@fr,
-        "何かが作成された日付、AAAA-MM-JJの型、例えば2004-04-05。"@ja ;
+        "Data em que algo foi criado, no formato AAAA-MM-DD. e.g. 2004-04-05"@pt ;
     rdfs:isDefinedBy doap: ;
     rdfs:range rdfs:Literal .
 
@@ -282,13 +302,13 @@ doap:description a rdf:Property ;
         "description"@en,
         "descripción"@es,
         "description"@fr,
-        "説明"@ja ;
+        "descrição"@pt ;
     rdfs:comment "Čistě textový, 2 až 4 věty dlouhý popis projektu."@cs,
         "Beschreibung eines Projekts als einfacher Text mit der Länge von 2 bis 4 Sätzen."@de,
         "Plain text description of a project, of 2-4 sentences in length."@en,
         "Descripción en texto plano de un proyecto, de 2 a 4 enunciados de longitud."@es,
         "Texte descriptif d'un projet, long de 2 à 4 phrases."@fr,
-        "プロジェクトの文の説明、2から4までの行数。"@ja ;
+        "Descrição de um projeto em texto apenas, com 2 a 4 frases de comprimento."@pt ;
     rdfs:isDefinedBy doap: ;
     rdfs:range rdfs:Literal .
 
@@ -298,16 +318,31 @@ doap:developer a rdf:Property ;
         "developer"@en,
         "desarrollador"@es,
         "développeur"@fr,
-        "開発者"@ja ;
+        "programador"@pt ;
     rdfs:comment "Vývojář softwaru projektu."@cs,
-        "Software-Entwickler für eine Projekt."@de,
+        "Software-Entwickler für das Projekt."@de,
         "Developer of software for the project."@en,
         "Desarrollador de software para el proyecto."@es,
         "Développeur pour le projet."@fr,
-        "プロジェクトのソフトウェアの開発者"@ja ;
+        "Programador de software para o projeto."@pt ;
     rdfs:domain doap:Project ;
     rdfs:isDefinedBy doap: ;
     rdfs:range foaf:Person .
+
+doap:developer-forum a rdf:Property ;
+    rdfs:label "developer forum"@en ;
+    rdfs:comment "A forum or community for developers of this project."@en ;
+    rdfs:domain doap:Project ;
+    rdfs:isDefinedBy doap: ;
+    rdfs:range <http://rdfs.org/sioc/ns#Container> .
+
+doap:documentation a rdf:Property ;
+    rdfs:label "documentation"@en,
+        "aide"@fr ;
+    rdfs:comment "Documentation of the project."@en,
+        "Aide pour l’utilisation de ce projet."@fr ;
+    rdfs:domain doap:Project ;
+    rdfs:isDefinedBy doap: .
 
 doap:documenter a rdf:Property ;
     rdfs:label "dokumentarista"@cs,
@@ -315,13 +350,13 @@ doap:documenter a rdf:Property ;
         "documenter"@en,
         "escritor de ayuda"@es,
         "rédacteur de l'aide"@fr,
-        "文章制作者"@ja ;
+        "documentador"@pt ;
     rdfs:comment "Spoluautor dokumentace projektu."@cs,
-        "Mitarbeiter an der Dokumentation eines Projektes."@de,
+        "Mitarbeiter an der Dokumentation des Projektes."@de,
         "Contributor of documentation to the project."@en,
         "Proveedor de documentación para el proyecto."@es,
         "Collaborateur à la documentation du projet."@fr,
-        "このプロジェクトのドキュメントの貢献者"@ja ;
+        "Contribuidor para a documentação do projeto."@pt ;
     rdfs:domain doap:Project ;
     rdfs:isDefinedBy doap: ;
     rdfs:range foaf:Person .
@@ -332,13 +367,13 @@ doap:download-mirror a rdf:Property ;
         "download mirror"@en,
         "mirror de descarga"@es,
         "miroir pour le téléchargement"@fr,
-        "ダウンロードミラー"@ja ;
+        "mirror para download"@pt ;
     rdfs:comment "Zrcadlo stránky pro stažení softwaru."@cs,
         "Spiegel der Seite von die Projekt-Software heruntergeladen werden kann."@de,
         "Mirror of software download web page."@en,
         "Mirror de la página web de descarga."@es,
         "Miroir de la page de téléchargement du programme."@fr,
-        "このプロジェクトのダウンロードミラー"@ja ;
+        "Mirror da página web para fazer download."@pt ;
     rdfs:domain doap:Project ;
     rdfs:isDefinedBy doap: .
 
@@ -348,23 +383,23 @@ doap:download-page a rdf:Property ;
         "download page"@en,
         "página de descarga"@es,
         "page de téléchargement"@fr,
-        "ダウンロードページ"@ja ;
+        "página para download"@pt ;
     rdfs:comment "Webová stránka, na které lze stáhnout projektový software."@cs,
         "Web-Seite von der die Projekt-Software heruntergeladen werden kann."@de,
         "Web page from which the project software can be downloaded."@en,
         "Página web de la cuál se puede bajar el software."@es,
         "Page web à partir de laquelle on peut télécharger le programme."@fr,
-        "このプロジェクトのダウンロードできるウェブページ"@ja ;
+        "Página web da qual o projeto de software pode ser descarregado."@pt ;
     rdfs:domain doap:Project ;
     rdfs:isDefinedBy doap: .
 
 doap:file-release a rdf:Property ;
     rdfs:label "soubor revize"@cs,
         "file-release"@en,
-        "このリリースのダウンロードできるファイルのURI"@ja,
-        "ファイル"@ja ;
+        "publicação do ficheiro"@pt ;
     rdfs:comment "URI adresa stažení asociované s revizí."@cs,
-        "URI of download associated with this release."@en ;
+        "URI of download associated with this release."@en,
+        "URI para download associado com a publicação."@pt ;
     rdfs:domain doap:Version ;
     rdfs:isDefinedBy doap: .
 
@@ -374,13 +409,13 @@ doap:helper a rdf:Property ;
         "helper"@en,
         "colaborador"@es,
         "collaborateur"@fr,
-        "貢献者"@ja ;
+        "colaborador"@pt ;
     rdfs:comment "Spoluautor projektu."@cs,
         "Projekt-Mitarbeiter."@de,
         "Project contributor."@en,
         "Colaborador del proyecto."@es,
         "Collaborateur au projet."@fr,
-        "このプロジェクトの貢献者"@ja ;
+        "Ajudante ou colaborador do projeto."@pt ;
     rdfs:domain doap:Project ;
     rdfs:isDefinedBy doap: ;
     rdfs:range foaf:Person .
@@ -392,7 +427,7 @@ doap:homepage a rdf:Property,
         "homepage"@en,
         "página web"@es,
         "page web"@fr,
-        "ホームページ"@ja ;
+        "página web"@pt ;
     rdfs:comment "URL adresa domovské stránky projektu asociované s právě jedním projektem."@cs,
         """URL der Projekt-Homepage,
 		verbunden mit genau einem Projekt."""@de,
@@ -402,25 +437,26 @@ doap:homepage a rdf:Property,
 		asociada con exactamente un proyecto."""@es,
         """L'URL de la page web d'un projet,
 		associée avec un unique projet."""@fr,
-        "このプロジェクトのホームページのURL。このホームページは他のプロジェクトのホームページじゃないこと。"@ja ;
+        """O URL da página de um projeto,
+		asociada com exactamente um projeto."""@pt ;
     rdfs:domain doap:Project ;
     rdfs:isDefinedBy doap: ;
     rdfs:subPropertyOf foaf:homepage .
 
 doap:implements a rdf:Property ;
     rdfs:label "Implements specification"@en,
-        "実装した明細書"@ja ;
+        "Especificações para implementação"@pt ;
     rdfs:comment "A specification that a project implements. Could be a standard, API or legally defined level of conformance."@en,
-        "このプロジェクトが実装したシステムの明細書。標準やAPIや明細書のようなもの。"@ja ;
+        "Uma especificação que um projeto implementa. Pode ser uma padrão, API ou um nível de conformidade definida legalmente."@pt ;
     rdfs:domain doap:Project ;
     rdfs:isDefinedBy doap: ;
     rdfs:range doap:Specification .
 
 doap:language a rdf:Property ;
     rdfs:label "language"@en,
-        "言語"@ja ;
-    rdfs:comment "ISO language code a project has been translated into"@en,
-        "このプロジェクトの翻訳された言語のISO言語コート"@en ;
+        "idioma"@pt ;
+    rdfs:comment "BCP47 language code a project has been translated into"@en,
+        "Código de idioma BCP47 do projeto para o qual foi traduzido"@pt ;
     rdfs:domain doap:Project ;
     rdfs:isDefinedBy doap: ;
     rdfs:range rdfs:Literal .
@@ -431,13 +467,13 @@ doap:license a rdf:Property ;
         "license"@en,
         "licencia"@es,
         "licence"@fr,
-        "ライセンス"@ja ;
+        "licença"@pt ;
     rdfs:comment "URI adresa RDF popisu licence, pod kterou je software distribuován."@cs,
-        "Die URI einer RDF-Beschreibung einer Lizenz unter der die Software herausgegeben wird."@de,
-        "The URI of an RDF description of the license the software is distributed under."@en,
+        "Die URI einer RDF-Beschreibung einer Lizenz unter der die Software herausgegeben wird. z.B. eine SPDX Referenz"@de,
+        "The URI of an RDF description of the license the software is distributed under. E.g. a SPDX reference"@en,
         "El URI de una descripción RDF de la licencia bajo la cuál se distribuye el software."@es,
         "L'URI d'une description RDF de la licence sous laquelle le programme est distribué."@fr,
-        "このプロジェクトの散布ライセンスのRDF説明のURI"@ja ;
+        "O URI de uma descrição RDF da licença do software sob a qual é distribuída. Ex.: referência SPDX"@pt ;
     rdfs:isDefinedBy doap: .
 
 doap:location a rdf:Property ;
@@ -446,13 +482,13 @@ doap:location a rdf:Property ;
         "repository location"@en,
         "lugar del respositorio"@es,
         "emplacement du dépôt"@fr,
-        "このリポジトリのURL"@ja ;
+        "localização do respositório"@pt ;
     rdfs:comment "Umístění úložiště."@cs,
         "Lokation eines Repositorys."@de,
         "Location of a repository."@en,
         "lugar de un repositorio."@es,
         "Emplacement d'un dépôt."@fr,
-        "このリポジトリの場所。"@ja ;
+        "Localização de um repositório."@pt ;
     rdfs:domain doap:Repository ;
     rdfs:isDefinedBy doap: .
 
@@ -462,15 +498,16 @@ doap:mailing-list a rdf:Property ;
         "mailing list"@en,
         "lista de correo"@es,
         "liste de diffusion"@fr,
-        "メーリングリスト"@ja ;
+        "lista de distribuição de e-mail"@pt ;
     rdfs:comment "Domovská stránka nebo e–mailová adresa e–mailové diskuse."@cs,
         "Homepage der Mailing Liste oder E-Mail Adresse."@de,
         "Mailing list home page or email address."@en,
         "Página web de la lista de correo o dirección de correo."@es,
         "Page web de la liste de diffusion, ou adresse de courriel."@fr,
-        "メーリングリストのホームページやメールアドレス"@ja ;
+        "Página web da lista de distribuição de e-mail ou dos endereços."@pt ;
     rdfs:domain doap:Project ;
-    rdfs:isDefinedBy doap: .
+    rdfs:isDefinedBy doap: ;
+    rdfs:range <http://rdfs.org/sioc/types#MailingList> .
 
 doap:maintainer a rdf:Property ;
     rdfs:label "správce"@cs,
@@ -478,13 +515,13 @@ doap:maintainer a rdf:Property ;
         "maintainer"@en,
         "desarrollador principal"@es,
         "développeur principal"@fr,
-        "メンテナー"@ja ;
+        "programador principal"@pt ;
     rdfs:comment "Správce projektu, vedoucí projektu."@cs,
         "Hauptentwickler eines Projektes, der Projektleiter"@de,
         "Maintainer of a project, a project leader."@en,
         "Desarrollador principal de un proyecto, un líder de proyecto."@es,
         "Développeur principal d'un projet, un meneur du projet."@fr,
-        "このプロジェクトのメンテなー及びリーダ。"@ja ;
+        "Programador principal de um projeto, um líder de projeto."@pt ;
     rdfs:domain doap:Project ;
     rdfs:isDefinedBy doap: ;
     rdfs:range foaf:Person .
@@ -495,13 +532,13 @@ doap:module a rdf:Property ;
         "module"@en,
         "módulo"@es,
         "module"@fr,
-        "モジュール名前"@ja ;
-    rdfs:comment "Jméno modulu v úložišti."@cs,
-        "Modul-Name eines Subversion."@de,
-        "Module name of a repository."@en,
-        "Nombre del módulo de un repositorio."@es,
-        "Nom du module d'un dépôt."@fr,
-        "このリポジトリのモジュール名前"@ja ;
+        "módulo"@pt ;
+    rdfs:comment "Jméno modulu v CVS, BitKeeper nebo Arch úložišti."@cs,
+        "Modul-Name eines Subversion, CVS, BitKeeper oder Arch Repositorys."@de,
+        "Module name of a Subversion, CVS, BitKeeper or Arch repository."@en,
+        "Nombre del módulo de un repositorio Subversion, CVS, BitKeeper o Arch."@es,
+        "Nom du module d'un dépôt Subversion, CVS, BitKeeper ou Arch."@fr,
+        "Nome do módulo de um repositório Subversion, CVS, BitKeeper ou Arch."@pt ;
     rdfs:domain [ a owl:Class ;
             owl:unionOf ( doap:CVSRepository doap:ArchRepository doap:BKRepository ) ] ;
     rdfs:isDefinedBy doap: .
@@ -512,13 +549,13 @@ doap:name a rdf:Property ;
         "name"@en,
         "nombre"@es,
         "nom"@fr,
-        "名前"@ja ;
+        "nome"@pt ;
     rdfs:comment "Jméno něčeho."@cs,
         "Der Name von Irgendwas"@de,
         "A name of something."@en,
         "El nombre de algo."@es,
         "Le nom de quelque chose."@fr,
-        "何かの名前"@ja ;
+        "O nome de alguma coisa."@pt ;
     rdfs:isDefinedBy doap: ;
     rdfs:range rdfs:Literal ;
     rdfs:subPropertyOf rdfs:label .
@@ -530,7 +567,7 @@ doap:old-homepage a rdf:Property,
         "old homepage"@en,
         "página web antigua"@es,
         "ancienne page web"@fr,
-        "前のホームページ"@ja ;
+        "página web antiga"@pt ;
     rdfs:comment "URL adresa předešlé domovské stránky projektu asociované s právě jedním projektem."@cs,
         """URL der letzten Projekt-Homepage,
 		verbunden mit genau einem Projekt."""@de,
@@ -540,7 +577,8 @@ doap:old-homepage a rdf:Property,
 		asociada con exactamente un proyecto."""@es,
         """L'URL d'une ancienne page web d'un
 		projet, associée avec un unique projet."""@fr,
-        "このプロジェクトの前のホームページ。他のプロジェクトの前のホームページじゃないこと。"@ja ;
+        """O URL antigo da página de um projeto,
+		associada com exactamente um projeto."""@pt ;
     rdfs:domain doap:Project ;
     rdfs:isDefinedBy doap: ;
     rdfs:subPropertyOf foaf:homepage .
@@ -551,15 +589,15 @@ doap:os a rdf:Property ;
         "operating system"@en,
         "sistema operativo"@es,
         "système d'exploitation"@fr,
-        "オペレーティングシステム"@ja ;
+        "sistema operativo"@pt ;
     rdfs:comment "Operační systém, na jehož použití je projekt limitován. Vynechejte tuto vlastnost, pokud je projekt nezávislý na operačním systému."@cs,
         "Betriebssystem auf dem das Projekt eingesetzt werden kann. Diese Eigenschaft kann ausgelassen werden, wenn das Projekt nicht BS-spezifisch ist."@de,
         "Operating system that a project is limited to.  Omit this property if the project is not OS-specific."@en,
+        "Sistema operativo a que o projeto está limitado. Omita esta propriedade se o projeto não é condicionado pelo SO usado."@en,
         """Sistema opertivo al cuál está limitado el proyecto.  Omita esta propiedad si el proyecto no es específico
 		de un sistema opertaivo en particular."""@es,
         """Système d'exploitation auquel est limité le projet. Omettez cette propriété si le
-		projet n'est pas limité à un système d'exploitation."""@fr,
-        "このプロジェクトの限られたオペレーティングシステム。もし、プロジェクトはどのOSも大丈夫なら、このプロパティを書き落としていい。"@ja ;
+		projet n'est pas limité à un système d'exploitation."""@fr ;
     rdfs:domain doap:Project,
         doap:Version ;
     rdfs:isDefinedBy doap: ;
@@ -567,9 +605,9 @@ doap:os a rdf:Property ;
 
 doap:platform a rdf:Property ;
     rdfs:label "platform"@en,
-        "プラットフォーム"@ja ;
+        "plataforma"@pt ;
     rdfs:comment "Indicator of software platform (non-OS specific), e.g. Java, Firefox, ECMA CLR"@en,
-        "このプロジェクトの必要なプラットフォーム（OSに関係ない）。例えば：Java、Firefox、ECMA CLRとか。"@ja ;
+        "Indicador da plataforma do software (não específico a nenhum SO), ex.: Java, Firefox, ECMA CLR"@pt ;
     rdfs:domain doap:Project,
         doap:Version ;
     rdfs:isDefinedBy doap: ;
@@ -581,14 +619,14 @@ doap:programming-language a rdf:Property ;
         "programming language"@en,
         "lenguaje de programación"@es,
         "langage de programmation"@fr,
-        "プログラミング言語"@ja ;
+        "linguagem de programação"@pt ;
     rdfs:comment "Programovací jazyk, ve kterém je projekt implementován nebo pro který je zamýšlen k použití."@cs,
         "Programmiersprache in der ein Projekt implementiert ist oder intendiert wird zu benutzen."@de,
         "Programming language a project is implemented in or intended for use with."@en,
         "Lenguaje de programación en el que un proyecto es implementado o con el cuál pretende usarse."@es,
         """Langage de programmation avec lequel un projet est implémenté,
 		ou avec lequel il est prévu de l'utiliser."""@fr,
-        "このプログラミングの実装のプログラミング言語、または目指した言語。"@ja ;
+        "Linguagem de programação que o projeto usa ou é para ser utilizada."@pt ;
     rdfs:domain doap:Project ;
     rdfs:isDefinedBy doap: ;
     rdfs:range rdfs:Literal .
@@ -599,33 +637,16 @@ doap:release a rdf:Property ;
         "release"@en,
         "release"@es,
         "release"@fr,
-        "リリース"@ja ;
+        "publicação"@pt ;
     rdfs:comment "Relase (verze) projektu."@cs,
         "Ein Release (Version) eines Projekts."@de,
         "A project release."@en,
         "Un release (versión) de un proyecto."@es,
         "Une release (révision) d'un projet."@fr,
-        "このプロジェクトのリリース"@ja ;
+        "A publicação de um projeto."@pt ;
     rdfs:domain doap:Project ;
     rdfs:isDefinedBy doap: ;
     rdfs:range doap:Version .
-
-doap:repository a rdf:Property ;
-    rdfs:label "úložiště"@cs,
-        "Repository"@de,
-        "repository"@en,
-        "repositorio"@es,
-        "dépôt"@fr,
-        "リポジトリ"@ja ;
-    rdfs:comment "Úložiště zdrojových kódů."@cs,
-        "Quellcode-Versionierungssystem."@de,
-        "Source code repository."@en,
-        "Repositorio del código fuente."@es,
-        "Dépôt du code source."@fr,
-        "このプロジェクトのソースコードのリポジトリ"@ja ;
-    rdfs:domain doap:Project ;
-    rdfs:isDefinedBy doap: ;
-    rdfs:range doap:Repository .
 
 doap:revision a rdf:Property ;
     rdfs:label "verze"@cs,
@@ -633,13 +654,13 @@ doap:revision a rdf:Property ;
         "revision"@en,
         "versión"@es,
         "révision"@fr,
-        "リビジョンコート"@ja ;
+        "revisão"@pt ;
     rdfs:comment "Identifikátor zpřístupněné revize softwaru."@cs,
         "Versionsidentifikator eines Software-Releases."@de,
         "Revision identifier of a software release."@en,
         "Indentificador de la versión de un release de software."@es,
         "Identifiant de révision d'une release du programme."@fr,
-        "このリリースのリビジョン識別子"@ja ;
+        "Identificador do lançamento da revisão do software."@pt ;
     rdfs:domain doap:Version ;
     rdfs:isDefinedBy doap: ;
     rdfs:range rdfs:Literal .
@@ -650,21 +671,34 @@ doap:screenshots a rdf:Property ;
         "screenshots"@en,
         "capturas de pantalla"@es,
         "captures d'écran"@fr,
-        "スクリーンショット"@ja ;
+        "capturas de ecrãs"@pt ;
     rdfs:comment "Webová stránka projektu se snímky obrazovky."@cs,
         "Web-Seite mit Screenshots eines Projektes."@de,
         "Web page with screenshots of project."@en,
         "Página web con capturas de pantalla del proyecto."@es,
         "Page web avec des captures d'écran du projet."@fr,
-        "スクリーンショットのあるウェブページ"@ja ;
+        "Página web com as capturas de ecrãn do projeto."@pt ;
     rdfs:domain doap:Project ;
     rdfs:isDefinedBy doap: .
 
+doap:security-contact a rdf:Property ;
+    rdfs:label "security contact"@en ;
+    rdfs:comment """The Agent that should be contacted
+	if security issues are found with the project."""@en ;
+    rdfs:domain doap:Project ;
+    rdfs:isDefinedBy doap: ;
+    rdfs:range foaf:Agent .
+
+doap:security-policy a rdf:Property ;
+    rdfs:label "security policy"@en ;
+    rdfs:comment "URL of the security policy of a project."@en ;
+    rdfs:domain doap:Project ;
+    rdfs:isDefinedBy doap: ;
+    rdfs:subPropertyOf foaf:page .
+
 doap:service-endpoint a rdf:Property ;
-    rdfs:label "service endpoint"@en,
-        "サービスサイト"@ja ;
-    rdfs:comment "The URI of a web service endpoint where software as a service may be accessed"@en,
-        "ことプロジェクトが提供したサーブスを載せるサイト。"@ja ;
+    rdfs:label "service endpoint"@en ;
+    rdfs:comment "The URI of a web service endpoint where software as a service may be accessed"@en ;
     rdfs:domain doap:Project ;
     rdfs:isDefinedBy doap: ;
     rdfs:range rdfs:Resource .
@@ -675,15 +709,22 @@ doap:shortdesc a rdf:Property ;
         "short description"@en,
         "descripción corta"@es,
         "description courte"@fr,
-        "簡単な説明"@ja ;
+        "descrição curta"@pt ;
     rdfs:comment "Krátký (8 nebo 9 slov) čistě textový popis projektu."@cs,
-        "Kurzbeschreibung (8 oder 9 Wörter) eines Projects als einfacher Text."@de,
+        "Kurzbeschreibung (8 oder 9 Wörter) eines Projekts als einfacher Text."@de,
         "Short (8 or 9 words) plain text description of a project."@en,
         "Descripción corta (8 o 9 palabras) en texto plano de un proyecto."@es,
         "Texte descriptif concis (8 ou 9 mots) d'un projet."@fr,
-        "日本語の二十文字ぐらいの説明"@ja ;
+        "Descrição curta (com 8 ou 9 palavras) de um projeto em texto apenas."@pt ;
     rdfs:isDefinedBy doap: ;
     rdfs:range rdfs:Literal .
+
+doap:support-forum a rdf:Property ;
+    rdfs:label "supporting forum"@en ;
+    rdfs:comment "A forum or community that supports this project."@en ;
+    rdfs:domain doap:Project ;
+    rdfs:isDefinedBy doap: ;
+    rdfs:range <http://rdfs.org/sioc/ns#Container> .
 
 doap:tester a rdf:Property ;
     rdfs:label "tester"@cs,
@@ -691,13 +732,13 @@ doap:tester a rdf:Property ;
         "tester"@en,
         "tester"@es,
         "testeur"@fr,
-        "試験者"@ja ;
+        "controlador"@pt ;
     rdfs:comment "Tester nebo jiný spoluautor kontrolující kvalitu."@cs,
         "Ein Tester oder anderer Mitarbeiter der Qualitätskontrolle."@de,
         "A tester or other quality control contributor."@en,
-        "このプロジェクトのため、試験をする人や品質メンテナー。"@en,
         "Un tester u otro proveedor de control de calidad."@es,
-        "Un testeur ou un collaborateur au contrôle qualité."@fr ;
+        "Un testeur ou un collaborateur au contrôle qualité."@fr,
+        "Um controlador ou outro contribuidor para o controlo de qualidade."@pt ;
     rdfs:domain doap:Project ;
     rdfs:isDefinedBy doap: ;
     rdfs:range foaf:Person .
@@ -708,22 +749,20 @@ doap:translator a rdf:Property ;
         "translator"@en,
         "traductor"@es,
         "traducteur"@fr,
-        "翻訳者"@ja ;
+        "tradutor"@pt ;
     rdfs:comment "Spoluautor překladu projektu."@cs,
-        "Mitarbeiter an den Übersetzungen eines Projektes."@de,
+        "Mitarbeiter an den Übersetzungen des Projektes."@de,
         "Contributor of translations to the project."@en,
         "Proveedor de traducciones al proyecto."@es,
         "Collaborateur à la traduction du projet."@fr,
-        "このプロジェクトを翻訳する貢献者"@ja ;
+        "Contribuidor das traduções para o projeto."@pt ;
     rdfs:domain doap:Project ;
     rdfs:isDefinedBy doap: ;
     rdfs:range foaf:Person .
 
 doap:vendor a rdf:Property ;
-    rdfs:label "vendor"@en,
-        "提供組織"@ja ;
-    rdfs:comment "Vendor organization: commercial, free or otherwise"@en,
-        "提供組織、商業の組織や自由の組織。"@ja ;
+    rdfs:label "vendor"@en ;
+    rdfs:comment "Vendor organization: commercial, free or otherwise"@en ;
     rdfs:domain doap:Project ;
     rdfs:isDefinedBy doap: ;
     rdfs:range foaf:Organization .
@@ -734,18 +773,45 @@ doap:wiki a rdf:Property ;
         "wiki"@en,
         "wiki"@es,
         "wiki"@fr,
-        "ウィキ"@ja ;
+        "wiki"@pt ;
     rdfs:comment "URL adresa wiki projektu pro společné diskuse."@cs,
         "Wiki-URL für die kollaborative Dikussion eines Projektes."@de,
         "URL of Wiki for collaborative discussion of project."@en,
         "URL del Wiki para discusión colaborativa del proyecto."@es,
         "L'URL du Wiki pour la discussion collaborative sur le projet."@fr,
-        "このプロジェクトの討論用ウィキ"@ja ;
+        "URL da Wiki para discussão em grupo do projeto."@pt ;
     rdfs:domain doap:Project ;
-    rdfs:isDefinedBy doap: .
+    rdfs:isDefinedBy doap: ;
+    rdfs:range <http://rdfs.org/sioc/types#Wiki> .
+
+doap:repository a rdf:Property ;
+    rdfs:label "úložiště"@cs,
+        "Repository"@de,
+        "repository"@en,
+        "repositorio"@es,
+        "dépôt"@fr,
+        "repositório"@pt ;
+    rdfs:comment "Úložiště zdrojových kódů."@cs,
+        "Quellcode-Versionierungssystem."@de,
+        "Source code repository."@en,
+        "Repositorio del código fuente."@es,
+        "Dépôt du code source."@fr,
+        "Repositório do código fonte."@pt ;
+    rdfs:domain doap:Project ;
+    rdfs:isDefinedBy doap: ;
+    rdfs:range doap:Repository ;
+    owl:inverseOf doap:repositoryOf .
+
+doap:repositoryOf a rdf:Property ;
+    rdfs:label "repository of"@en ;
+    rdfs:comment "The project that uses a repository."@en ;
+    rdfs:domain doap:Repository ;
+    rdfs:isDefinedBy doap: ;
+    rdfs:range doap:Project ;
+    owl:inverseOf doap:repository .
 
 doap: a owl:Ontology ;
-    dc:creator "Edd Dumbill" ;
+    dc:creator "Edd Wilder-James" ;
     dc:description "The Description of a Project (DOAP) vocabulary, described using W3C RDF Schema and the Web Ontology Language.",
         "Slovník Description of a Project (DOAP, Popis projektu), popsaný použitím W3C RDF Schema a Web Ontology Language."@cs,
         "Das Vokabular \"Description of a Project (DOAP)\", beschrieben durch W3C RDF Schema and the Web Ontology Language."@de,
@@ -753,12 +819,12 @@ doap: a owl:Ontology ;
 		y Web Ontology Language."""@es,
         """Le vocabulaire Description Of A Project (DOAP, Description D'Un Projet),
 		décrit en utilisant RDF Schema du W3C et OWL."""@fr,
-        "プロジェクトの説明の語彙(DOAP)。W3C RDF SchemaとWeb Ontology Languageで作られた。"@ja ;
+        "Vocabulário de descrição de um Projeto (DOAP - Description of a Project), descrito no esquema (schema) W3C RDF e na Web Ontology Language."@pt ;
     dc:format "application/rdf+xml" ;
-    dc:rights "Copyright © 2004-2009 Edd Dumbill" ;
+    dc:rights "Copyright © The DOAP Authors" ;
     dc:title "Description of a Project (DOAP) vocabulary" ;
     owl:imports foaf:index.rdf ;
     foaf:maker [ a foaf:Person ;
             foaf:mbox <mailto:edd@usefulinc.com> ;
-            foaf:name "Edd Dumbill" ] .
+            foaf:name "Edd Wilder-James" ] .
 

@@ -845,9 +845,9 @@ const VOCABS: &[StdVocab] = &[
         title: "Description of a Project (DOAP)",
         namespace: "http://usefulinc.com/ns/doap#",
         versions: &[StdVersion {
-            version: "2012-01-04",
-            official_name: "Description of a Project vocabulary (2012)",
-            date: "2012-01-04",
+            version: "2022-03-13",
+            official_name: "Description of a Project vocabulary (2022)",
+            date: "2022-03-13",
             spec_url: "https://github.com/ewilderj/doap",
             status: VersionStatus::Published,
             latest: true,
@@ -956,6 +956,42 @@ struct RetiredVersion {
     notes: &'static str,
     /// The creation date that seeder gave it.
     date: &'static str,
+    /// The licence record the kept copy gets in place of the one an earlier
+    /// seeder wrote, which described the bundled file of the same name that
+    /// this build replaced. `None` for a version whose licence allows no
+    /// altered copies: with no record of the file it stays withheld.
+    record: Option<RetiredRecord>,
+}
+
+/// What a retired version's kept copy is, for its licence record.
+struct RetiredRecord {
+    /// The source it was loaded from, in words (it is no longer a bundled file).
+    file: &'static str,
+    copyright: &'static [&'static str],
+    source: &'static str,
+    stored_copy: &'static str,
+    remarks: &'static str,
+}
+
+impl RetiredRecord {
+    fn attribution(&self, specification_url: &str) -> ContentAttribution {
+        ContentAttribution {
+            file: self.file.to_string(),
+            licenses: Vec::new(),
+            copyright: self.copyright.iter().map(|c| c.to_string()).collect(),
+            notice: None,
+            status: None,
+            source_url: self.source.to_string(),
+            specification_url: Some(specification_url.to_string()),
+            changes: None,
+            stored_copy: self.stored_copy.to_string(),
+            unchanged: false,
+            remarks: Some(self.remarks.to_string()),
+            no_derivatives: false,
+            header: None,
+            notice_url: vf::NOTICE_PATH.to_string(),
+        }
+    }
 }
 
 /// Releases 0.4.0 to 0.6.0 seeded IMBOR's hand-authored "excerpt", which
@@ -963,12 +999,43 @@ struct RetiredVersion {
 /// deprecated and withheld ([`enforce_no_derivatives`]). The `bag` and `otl`
 /// entries those releases also seeded are entries of their own that this
 /// build does not seed; they are left as they are.
-const RETIRED_SEEDED_VERSIONS: &[RetiredVersion] = &[RetiredVersion {
-    id: "imbor",
-    version: "excerpt",
-    notes: "CROW IMBOR (excerpt)",
-    date: "2024-01-01",
-}];
+///
+/// Releases up to 0.7.0 seeded DOAP `2012-01-04` from LOV's re-serialization
+/// of the old DOAP namespace document, whose Japanese labels have no published
+/// licence; this build ships the upstream repository's Apache-2.0 file as
+/// `2022-03-13` instead. The old copy is kept, deprecated, with a record that
+/// says what it is ([`retire_versions`]).
+const RETIRED_SEEDED_VERSIONS: &[RetiredVersion] = &[
+    RetiredVersion {
+        id: "imbor",
+        version: "excerpt",
+        notes: "CROW IMBOR (excerpt)",
+        date: "2024-01-01",
+        record: None,
+    },
+    RetiredVersion {
+        id: "doap",
+        version: "2012-01-04",
+        notes: "Description of a Project vocabulary (2012)",
+        date: "2012-01-04",
+        record: Some(RetiredRecord {
+            file: "the vocab/doap.ttl that releases up to 0.7.0 bundled (LOV's re-serialization \
+                   of the DOAP namespace document)",
+            copyright: &["Copyright © 2004-2009 Edd Dumbill"],
+            source: "http://usefulinc.com/ns/doap",
+            stored_copy: "Seeded by a release up to 0.7.0 from its bundled vocab/doap.ttl: LOV's \
+                          Turtle re-serialization of the DOAP namespace document served at \
+                          http://usefulinc.com/ns/doap from 2009 to 2015. Later releases ship the \
+                          upstream repository's own file instead, as version 2022-03-13, so this \
+                          copy is kept, deprecated, and is not the current bundled file.",
+            remarks: "That file stated no licence. The upstream repository \
+                      https://github.com/ewilderj/doap has been under the Apache License 2.0 since \
+                      2018-03-31, which covers most of this copy; its 97 Japanese-language labels \
+                      and comments and a few other strings were never in that repository, and no \
+                      licence has been published for them.",
+        }),
+    },
+];
 
 /// Whether `id` is the registry id of a vocabulary this build seeds. Other
 /// seeders (seed bundles) leave these ids to it, whatever the boot order.
@@ -1348,8 +1415,86 @@ fn sync_seeded_records(state: &AppState, v: &StdVocab, mode: Mode) -> anyhow::Re
     }
     if has_no_derivatives(v) {
         updated += enforce_no_derivatives(state, v, &snap)?;
+    } else if mode == Mode::Seed {
+        updated += retire_versions(state, v, &snap)?;
     }
     Ok(updated)
+}
+
+/// For a vocabulary whose licence allows other copies: a version an earlier
+/// seeder made and this build no longer ships ([`RETIRED_SEEDED_VERSIONS`]) is
+/// kept, deprecated, and its licence record — written for a bundled file this
+/// build replaced — is replaced by one that says what the copy is. Only the
+/// seeder's own version is touched, and a record someone changed since this
+/// pass began is left as they set it. Returns the number of records changed.
+fn retire_versions(state: &AppState, v: &StdVocab, snap: &Snapshot) -> anyhow::Result<usize> {
+    let mut changed = 0usize;
+    for r in RETIRED_SEEDED_VERSIONS.iter().filter(|r| r.id == v.id) {
+        let Some(p) = snap.versions.get(r.version) else {
+            continue;
+        };
+        let iri = registry::version_record_iri(&state.base_url, v.id, r.version);
+        match version_owned(state, v, r.version, p) {
+            None => {
+                tracing::warn!(
+                    "vocabulary '{}': version '{}' is not the one an earlier seeder made; left \
+                     as it is",
+                    v.id,
+                    r.version
+                );
+                continue;
+            }
+            Some(Owned::Legacy) => {
+                registry::set_seeded_by(&state.store, &iri, SEEDED_BY)?;
+                changed += 1;
+            }
+            Some(Owned::Marked) => {}
+        }
+        if p.status == Some(VersionStatus::Published) {
+            registry::update_version_status(
+                &state.store,
+                &state.base_url,
+                v.id,
+                r.version,
+                VersionStatus::Deprecated,
+            )?;
+            state.mark_vocab_registry_dirty();
+            tracing::info!(
+                "vocabulary '{}': version '{}', which an earlier build seeded and this one no \
+                 longer ships, is kept and deprecated",
+                v.id,
+                r.version
+            );
+            changed += 1;
+        }
+        if let Some(rec) = &r.record {
+            let spec = v
+                .versions
+                .iter()
+                .find(|ver| ver.latest)
+                .map_or("", |ver| ver.spec_url);
+            let expected = rec.attribution(spec);
+            let current = p.attribution_json.clone();
+            if record_json(Some(&expected)) != current {
+                if registry::replace_attribution_if(
+                    &state.store,
+                    &iri,
+                    current.as_deref(),
+                    Some(&expected),
+                )? {
+                    changed += 1;
+                } else {
+                    tracing::warn!(
+                        "vocabulary '{}' version '{}': its licence record changed while it was \
+                         checked; left as the other writer set it",
+                        v.id,
+                        r.version
+                    );
+                }
+            }
+        }
+    }
+    Ok(changed)
 }
 
 /// The bundled file's triples as the store holds them, and the parse they
@@ -3064,6 +3209,88 @@ mod tests {
                 "{step}: the staging graph is empty"
             );
         }
+    }
+
+    /// An install upgraded from 0.7.0 holds DOAP `2012-01-04`, seeded from
+    /// LOV's copy of the old namespace document. The new build seeds the
+    /// upstream file as `2022-03-13` and points the entry at it; the old copy
+    /// is kept (graph and record), deprecated, and its licence record now says
+    /// what it is instead of calling it the bundled file. The next start
+    /// writes nothing.
+    #[test]
+    fn the_old_doap_copy_is_kept_deprecated_with_a_truthful_record() {
+        let state = fresh();
+        let entry = registry::data_model_iri(&state.base_url, "doap");
+        registry::insert_data_model(
+            &state.store,
+            &state.base_url,
+            "doap",
+            "Description of a Project (DOAP)",
+            "http://usefulinc.com/ns/doap#",
+            Some(DESC),
+            true,
+            None,
+            None,
+            None,
+            "2012-01-04T00:00:00Z",
+        )
+        .unwrap();
+        registry::set_seeded_by(&state.store, &entry, SEEDED_BY).unwrap();
+        let old = version_iri(&state, "doap", "2012-01-04");
+        registry::insert_version(
+            &state.store,
+            &state.base_url,
+            &DataModelVersion {
+                data_model_id: "doap".into(),
+                version: "2012-01-04".into(),
+                status: VersionStatus::Published,
+                graph_iri: old.clone(),
+                sub_graphs: vec![old.clone()],
+                created_at: "2012-01-04T00:00:00Z".into(),
+                created_by: None,
+                derived_from: None,
+                notes: Some("Description of a Project vocabulary (2012)".into()),
+                branch: None,
+                sub_graph_status: Vec::new(),
+            },
+        )
+        .unwrap();
+        update(
+            &state,
+            &format!(
+                "INSERT DATA {{ GRAPH <{old}> {{ <http://usefulinc.com/ns/doap#Project> \
+                 <http://www.w3.org/2000/01/rdf-schema#label> \"Projekt\"@ja }} }}"
+            ),
+        );
+        // The record the 0.7.0 seeder wrote: the bundled file, unchanged.
+        let stale = vf::DOAP.attribution(Some("https://github.com/ewilderj/doap"), true);
+        registry::replace_attribution_if(&state.store, &old, None, stale.as_ref()).unwrap();
+        registry::update_latest_published(&state.store, &state.base_url, "doap", "2012-01-04")
+            .unwrap();
+
+        seed_standard_vocabularies(&state);
+
+        let entry_rec = registry::get_data_model(&state.store, &state.base_url, "doap").unwrap();
+        assert_eq!(entry_rec.latest_published.as_deref(), Some("2022-03-13"));
+        assert!(record(&state, "doap", "2022-03-13").unchanged);
+        let kept = registry::get_version(&state.store, &state.base_url, "doap", "2012-01-04")
+            .expect("the old copy is kept");
+        assert_eq!(kept.status, VersionStatus::Deprecated);
+        assert!(ask(
+            &state,
+            &format!("ASK {{ GRAPH <{old}> {{ ?s ?p ?o }} }}")
+        ));
+        let a = registry::get_attribution(&state.store, &old).unwrap();
+        assert!(!a.unchanged);
+        assert!(a.licenses.is_empty(), "it states no licence");
+        assert!(a.file.contains("releases up to 0.7.0"), "{}", a.file);
+        assert!(a.stored_copy.contains("2022-03-13"), "{}", a.stored_copy);
+        assert_eq!(seeded_by(&state, &old).as_deref(), Some(SEEDED_BY));
+        assert_eq!(
+            sync_seeded_records(&state, vocab("doap"), Mode::Seed).unwrap(),
+            0,
+            "steady state"
+        );
     }
 
     /// Releases 0.4.0 to 0.6.0 seeded a hand-authored IMBOR "excerpt". It is
