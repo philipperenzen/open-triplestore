@@ -67,6 +67,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sweep that releases such registrations runs on every boot — one registry
   query — so a row that slips in by any path does not survive the next start.
 
+### Security
+- **Every configured secret goes through the secrets module.** `JWT_SECRET`,
+  `LD_REGISTRY_TOKEN`, a replication follower's `OTS_REPLICATION_TOKEN` and the
+  accounts-dashboard plugin's `ACCOUNTS_DASHBOARD_GATEWAY_KEY` were read as raw
+  environment values, though the module's own documentation listed the JWT
+  signing secret among the settings it covers. Each now takes a secret
+  reference (`env:NAME`, `file:/path`, `vault:…`) that resolves at startup or
+  at use, and a raw value is refused under `OTS_ENV=production` (warned about
+  once in development), as `S3_SECRET_KEY` already was: a raw `JWT_SECRET` or
+  `LD_REGISTRY_TOKEN` stops the server at startup with the module's
+  `RawSecretRefused` message, a raw replication token or gateway key is dropped
+  with an error in the log. Plugins get the same rule through a new
+  `PluginSecrets` capability on `PluginContext` (`ots-plugin-api`), so a
+  plugin never reads a credential variable itself. `.env.example`,
+  `docs/administration.md` and `docs/sources.md` say so.
+
 ### Changed
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That

@@ -358,8 +358,8 @@ pub trait Plugin: Send + Sync + 'static {
 }
 ```
 
-`PluginContext` gives a plugin the instance's `base_url` and two capability
-objects, both in the same plain-strings idiom so the plugin crate needs no
+`PluginContext` gives a plugin the instance's `base_url` and three capability
+objects, all in the same plain-strings idiom so the plugin crate needs no
 dependency on this project's internal types:
 
 - `store: Arc<dyn PluginStore>` — `query_json` / `update`, SPARQL against the
@@ -376,6 +376,15 @@ dependency on this project's internal types:
   `plugins/accounts-dashboard` (feature `plugin-accounts-dashboard`) a full
   consumer: a deployment-wide accounts/entitlements/LLM-usage dashboard at
   `/ext/accounts-dashboard/ui`.
+- `secrets: Arc<dyn PluginSecrets>` — the host's secrets module
+  ([docs/sources.md](sources.md#credentials-are-references-never-values)):
+  `env_secret("MY_PLUGIN_KEY")` reads the variable as the server reads its own
+  credentials — a reference (`env:NAME`, `file:/path`, `vault:…`) is resolved,
+  a raw value is accepted in development with a one-time warning and
+  **refused under `OTS_ENV=production`** (`Err`, with a message that never
+  carries the value). A plugin never reads a credential variable itself;
+  `plugins/accounts-dashboard` resolves `ACCOUNTS_DASHBOARD_GATEWAY_KEY` this
+  way. `ots_plugin_api::NoSecrets` is the stand-in for unit tests.
 - `Plugin::connectors` *(ots-plugin-api 0.3)* — datasource drivers for the
   SQL sources feature ([docs/sources.md](sources.md)): a plugin hands the host
   a `SourceConnector` per dialect, registered next to the built-in SQLite
