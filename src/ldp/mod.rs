@@ -37,5 +37,6 @@
 pub mod container;
 pub mod handler;
 pub mod routes;
+pub mod wac;
 
 pub use routes::ldp_routes;
