@@ -9,6 +9,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use super::container::{self, ContainerType};
+use super::wac;
 use crate::auth::middleware::AuthenticatedUser;
 use crate::server::AppState;
 
@@ -50,11 +51,22 @@ fn type_links(ct: &ContainerType) -> Vec<String> {
     links
 }
 
-/// Build a joined Link header value (type links + constrained-by).
-fn build_link_header(ct: &ContainerType, base_url: &str) -> String {
+/// Build a joined Link header value: type links, constrained-by, and the
+/// resource's ACL (`rel="acl"`, WAC discovery).
+fn build_link_header(ct: &ContainerType, base_url: &str, resource_iri: &str) -> String {
     let mut parts = type_links(ct);
     parts.push(constrained_by_link(base_url));
+    parts.push(acl_link(resource_iri));
     parts.join(", ")
+}
+
+fn acl_link(resource_iri: &str) -> String {
+    // An ACL resource's ACL is itself.
+    let acl = match wac::governed_resource(resource_iri) {
+        Some(_) => resource_iri.to_string(),
+        None => wac::acl_iri(resource_iri),
+    };
+    format!("<{acl}>; rel=\"acl\"")
 }
 
 // ─── Security helpers ───────────────────────────────────────────────────────────
@@ -106,6 +118,17 @@ fn safe_binary_content_type(ct: &str) -> String {
     } else {
         "application/octet-stream".to_string()
     }
+}
+
+/// Record `user` as the owner of a resource this request created.
+fn own_created(state: &AppState, iri: &str, user: &AuthenticatedUser) -> Result<(), Response> {
+    wac::write_owner_acl(&state.store, iri, &user.user_id).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("recording the owner of <{iri}>: {e}"),
+        )
+            .into_response()
+    })
 }
 
 // ─── Query parameters ─────────────────────────────────────────────────────────
@@ -350,7 +373,7 @@ pub async fn ldp_get(
                     HeaderName::from_static("x-content-type-options"),
                     HeaderValue::from_static("nosniff"),
                 );
-                let link_val = build_link_header(&ct, base);
+                let link_val = build_link_header(&ct, base, &iri);
                 resp_headers.insert(
                     HeaderName::from_static("link"),
                     HeaderValue::from_str(&link_val)
@@ -430,7 +453,7 @@ pub async fn ldp_get(
     // One ETag per resource STATE, shared with HEAD/PUT/PATCH — never a hash of
     // this particular negotiated, Prefer-filtered representation.
     let etag = container::resource_etag(&state.store, &iri);
-    let link_val = build_link_header(&ct, base);
+    let link_val = build_link_header(&ct, base, &iri);
 
     let mut resp_headers = HeaderMap::new();
     resp_headers.insert(
@@ -541,6 +564,7 @@ header on every `/ldp/` response (LDP 1.0 §4.2.1.6).\n\
 /// Indirect Container membership triple creation.
 pub async fn ldp_post(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
     path: Option<Path<String>>,
     headers: HeaderMap,
     body: Bytes,
@@ -555,10 +579,14 @@ pub async fn ldp_post(
     // Determine container type before creating member
     let container_ct = container::get_container_type(&state.store, &container_iri);
 
-    // Ensure container exists (creates as Basic if unknown)
+    // Ensure container exists (creates as Basic if unknown). Whoever caused a
+    // container to come into being owns it, like any other created resource.
     if container_ct == ContainerType::Unknown {
         if let Err(e) = container::ensure_container(&state.store, &container_iri) {
             return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+        }
+        if let Err(e) = own_created(&state, &container_iri, &user) {
+            return e;
         }
     }
 
@@ -628,12 +656,15 @@ pub async fn ldp_post(
             if let Err(e) = container::add_member(&state.store, &container_iri, &member_iri) {
                 return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
             }
+            if let Err(e) = own_created(&state, &member_iri, &user) {
+                return e;
+            }
             let mut resp_headers = HeaderMap::new();
             resp_headers.insert(
                 axum::http::header::LOCATION,
                 HeaderValue::from_str(&member_iri).unwrap_or_else(|_| HeaderValue::from_static("")),
             );
-            let link_val = build_link_header(&ContainerType::NonRdfSource, base);
+            let link_val = build_link_header(&ContainerType::NonRdfSource, base, &member_iri);
             resp_headers.insert(
                 HeaderName::from_static("link"),
                 HeaderValue::from_str(&link_val).unwrap_or_else(|_| HeaderValue::from_static("")),
@@ -710,8 +741,14 @@ pub async fn ldp_post(
         }
     }
 
+    // The creator owns the new resource (Read, Write, Control), whatever the
+    // container's policy says about everyone else.
+    if let Err(e) = own_created(&state, &member_iri, &user) {
+        return e;
+    }
+
     let member_ct = container::get_container_type(&state.store, &member_iri);
-    let link_val = build_link_header(&member_ct, base);
+    let link_val = build_link_header(&member_ct, base, &member_iri);
     let mut resp_headers = HeaderMap::new();
     resp_headers.insert(
         axum::http::header::LOCATION,
@@ -814,6 +851,7 @@ fn apply_requested_container_type(
 /// Supports `If-Match` ETag for optimistic concurrency.
 pub async fn ldp_put(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
     path: Option<Path<String>>,
     headers: HeaderMap,
     body: Bytes,
@@ -824,6 +862,10 @@ pub async fn ldp_put(
     if !valid_iri(&iri) {
         return (StatusCode::BAD_REQUEST, "Invalid resource path").into_response();
     }
+    let container = container_iri_for(base, &path);
+    let existed = container::resource_exists(&state.store, &iri);
+    let container_existed = container == iri
+        || container::get_container_type(&state.store, &container) != ContainerType::Unknown;
 
     // If-Match check
     if let Some(if_match) = headers.get("if-match") {
@@ -893,10 +935,22 @@ pub async fn ldp_put(
 
     // Ensure container relationship. A PUT to the root `/ldp/` has the resource and
     // its parent container as the same IRI, so skip the self-membership triple.
-    let container = container_iri_for(base, &path);
     let _ = container::ensure_container(&state.store, &container);
     if container != iri {
         let _ = container::add_member(&state.store, &container, &iri);
+    }
+
+    // A PUT that created something makes the caller its owner; a replace
+    // leaves ownership where it was.
+    if !existed {
+        if let Err(e) = own_created(&state, &iri, &user) {
+            return e;
+        }
+    }
+    if !container_existed {
+        if let Err(e) = own_created(&state, &container, &user) {
+            return e;
+        }
     }
 
     let etag = container::resource_etag(&state.store, &iri);
@@ -1026,6 +1080,11 @@ pub async fn ldp_delete(State(state): State<AppState>, path: Option<Path<String>
         return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }
 
+    // The ACL goes with the resource: whoever recreates the path owns it.
+    if let Err(e) = wac::delete_acl(&state.store, &iri) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+    }
+
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -1036,7 +1095,7 @@ pub async fn ldp_options(State(state): State<AppState>, Path(path): Path<String>
     let base = state.base_url.as_ref();
     let iri = resource_iri(base, &path);
     let ct = container::get_container_type(&state.store, &iri);
-    let link_val = build_link_header(&ct, base);
+    let link_val = build_link_header(&ct, base, &iri);
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -1062,7 +1121,7 @@ pub async fn ldp_options(State(state): State<AppState>, Path(path): Path<String>
 /// OPTIONS /ldp/ — root container options (no path param).
 pub async fn ldp_options_root(State(state): State<AppState>) -> Response {
     let base = state.base_url.as_ref();
-    let link_val = build_link_header(&ContainerType::Basic, base);
+    let link_val = build_link_header(&ContainerType::Basic, base, &wac::root_iri(base));
 
     let mut headers = HeaderMap::new();
     headers.insert(

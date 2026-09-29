@@ -721,6 +721,30 @@ async fn mark_vocab_dirty_after_success(
 }
 
 pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNet>) -> Router {
+    // The LDP root ACL is seeded once, here, so it exists before the first
+    // request reaches `/ldp/`. The default `open` policy is today's behaviour
+    // written where an admin can change it (`docs/ldp.md`, "Access control").
+    #[cfg(feature = "ldp")]
+    if !state.store.replication().read_only() {
+        use crate::ldp::wac;
+        let policy = wac::RootAclPolicy::from_env();
+        match wac::ensure_root_acl(&state.store, &state.base_url, policy) {
+            Ok(true) => tracing::info!(
+                policy = policy.label(),
+                "ldp: seeded the root ACL at {}/ldp/.acl",
+                state.base_url
+            ),
+            Ok(false) => {}
+            Err(e) => tracing::warn!("ldp: seeding the root ACL failed: {e}"),
+        }
+        if wac::root_acl_is_open(&state.store, &state.base_url).unwrap_or(false) {
+            tracing::info!(
+                "ldp: the root ACL is open: every signed-in user may read, write and append \
+                 under /ldp/; tighten it with PUT {}/ldp/.acl (see docs/ldp.md)",
+                state.base_url
+            );
+        }
+    }
     // What a prefix means on this deployment is configuration, held in the
     // identity database and answered from an in-memory overlay. Load it here,
     // where the routes that answer with it are assembled: a router over an

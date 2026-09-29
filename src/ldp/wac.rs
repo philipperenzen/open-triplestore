@@ -752,6 +752,17 @@ pub fn root_acl_seeded(store: &TripleStore, base_url: &str) -> Result<bool, Stri
     }
 }
 
+/// Whether the root ACL, as it stands, lets every signed-in user (or everyone)
+/// write under `/ldp/`: what the `open` seed grants, until an admin tightens it.
+pub fn root_acl_is_open(store: &TripleStore, base_url: &str) -> Result<bool, String> {
+    let root = root_iri(base_url);
+    let auths = load_authorizations(store, ACL_DEFAULT, &root)?;
+    Ok(auths.iter().any(|a| {
+        (a.agent_classes.contains(ACL_AUTHENTICATED_AGENT) || a.agent_classes.contains(FOAF_AGENT))
+            && a.modes.contains(&Mode::Write)
+    }))
+}
+
 /// Seed the root ACL once. Returns whether anything was written.
 ///
 /// The seed is recorded with a `dcterms:created` on `{root}.acl`, so an admin
