@@ -82,6 +82,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `PluginSecrets` capability on `PluginContext` (`ots-plugin-api`), so a
   plugin never reads a credential variable itself. `.env.example`,
   `docs/administration.md` and `docs/sources.md` say so.
+- **The LLM feedback relay screens every string in the signal.**
+  `POST /api/llm/feedback` forwards a training signal to the gateway's
+  `/v1/signals` with the server's key attached, and screened only the signal's
+  top-level string fields for size and injection — while the free text a
+  pipeline ingests sits nested (`input.nl_question`, `label.comment`,
+  `output.*`) and reached the gateway unscreened. The relay now walks the JSON
+  recursively, to a bounded depth of 16 levels, applies the same per-field,
+  count and whole-conversation caps and the injection heuristics to every
+  string leaf, and refuses a signal larger as a whole than a conversation may
+  be, so bulk cannot hide in numbers or nesting. A nested oversized or
+  injection-flagged field, or a signal nested past the bound, answers `400`
+  before anything reaches the gateway; the signals the UI sends relay as
+  before.
 
 ### Changed
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
