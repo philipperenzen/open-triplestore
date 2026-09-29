@@ -108,6 +108,12 @@ mod tests {
     /// authenticated principals. Returns a router; data lives behind the shared
     /// Arc-backed store so it's visible to every cloned `oneshot`.
     fn fixture() -> axum::Router {
+        fixture_with_state().0
+    }
+
+    /// As [`fixture`], also handing back the state, for the whole-store
+    /// expectations an admin's numbers come from.
+    fn fixture_with_state() -> (axum::Router, crate::server::AppState) {
         let state = test_state();
         let db = &state.auth_db;
 
@@ -169,7 +175,28 @@ mod tests {
         db.add_org_member("pviewer", "priv-org", Role::Viewer)
             .unwrap();
 
-        build_router(state, "", vec![])
+        let app = build_router(state.clone(), "", vec![]);
+        (app, state)
+    }
+
+    /// What building the router adds to the store on top of the fixture's
+    /// data, which an admin's whole-store numbers include: with the `ldp`
+    /// feature the seeded LDP root ACL graph, `(triples, graphs)`.
+    fn seeded_system_graphs(state: &crate::server::AppState) -> (u64, u64) {
+        #[cfg(feature = "ldp")]
+        let extra = {
+            let n = state
+                .store
+                .count_graph(Some(crate::ldp::wac::ACL_GRAPH))
+                .unwrap_or(0) as u64;
+            (n, u64::from(n > 0))
+        };
+        #[cfg(not(feature = "ldp"))]
+        let extra = {
+            let _ = state;
+            (0, 0)
+        };
+        extra
     }
 
     async fn get(app: &axum::Router, uri: &str, bearer: Option<&str>) -> (StatusCode, String) {
@@ -245,19 +272,22 @@ mod tests {
 
     #[tokio::test]
     async fn browse_stats_scopes_to_each_role() {
-        let app = fixture();
+        let (app, state) = fixture_with_state();
+        // An admin's numbers are the whole store's, system graphs included.
+        let (system_triples, system_graphs) = seeded_system_graphs(&state);
         for (label, tok) in principals() {
             let (status, body) = get(&app, "/api/browse/stats", tok.as_deref()).await;
             assert_eq!(status, StatusCode::OK, "{label}: {body}");
             let j = json(&body);
+            let admin = label == "super_admin";
             assert_eq!(
                 j["total_triples"],
-                expected_triples(label),
+                expected_triples(label) + if admin { system_triples } else { 0 },
                 "{label}: wrong total_triples\n{body}"
             );
             assert_eq!(
                 j["named_graphs"],
-                expected_graphs(label),
+                expected_graphs(label) + if admin { system_graphs } else { 0 },
                 "{label}: wrong named_graphs\n{body}"
             );
         }
