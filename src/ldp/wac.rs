@@ -820,6 +820,24 @@ pub fn root_acl_seeded(store: &TripleStore, base_url: &str) -> Result<bool, Stri
     }
 }
 
+/// Seed the root ACL under the `LDP_ROOT_ACL` policy unless it is there
+/// already or the store is a read-only replica (the leader's arrives through
+/// replication). Returns the policy applied when something was written.
+///
+/// Called from the boot seed and from every LDP request, so the ACL exists
+/// before the first evaluation whichever comes first, and the router build
+/// itself writes nothing.
+pub fn seed_root_acl_if_missing(
+    store: &TripleStore,
+    base_url: &str,
+) -> Result<Option<RootAclPolicy>, String> {
+    if store.replication().read_only() {
+        return Ok(None);
+    }
+    let policy = RootAclPolicy::from_env();
+    Ok(ensure_root_acl(store, base_url, policy)?.then_some(policy))
+}
+
 /// Whether the root ACL, as it stands, lets every signed-in user (or everyone)
 /// write under `/ldp/`: what the `open` seed grants, until an admin tightens it.
 pub fn root_acl_is_open(store: &TripleStore, base_url: &str) -> Result<bool, String> {
@@ -840,6 +858,10 @@ pub fn ensure_root_acl(
     base_url: &str,
     policy: RootAclPolicy,
 ) -> Result<bool, String> {
+    // Two first requests must not both seed: the check and the write are one
+    // step. (The lock is process-wide; the seed is rare and small.)
+    static SEED: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = SEED.lock().unwrap_or_else(|e| e.into_inner());
     if root_acl_seeded(store, base_url)? {
         return Ok(false);
     }

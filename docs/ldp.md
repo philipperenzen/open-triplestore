@@ -291,7 +291,7 @@ Admins pass every check. An API token without write scope still cannot write, an
 
 Every node must be named under the ACL resource (`<#name>`), be typed `acl:Authorization`, have `acl:accessTo` (and/or, for a container, `acl:default`) equal to the resource the ACL governs, at least one agent of the shapes above, at least one of the four modes, and nothing else. `DELETE R.acl` removes the resource's own authorizations (not the owner grant); `POST` and `PATCH` on a `.acl` are `405`. Names ending in `.acl` are reserved.
 
-**The root ACL.** At first start the server seeds `/ldp/.acl` (recorded with a `dcterms:created`, so it is seeded once) with:
+**The root ACL.** At first start (or at the first LDP request, whichever comes first) the server seeds `/ldp/.acl`, recorded with a `dcterms:created` so it is seeded once, with:
 
 - `LDP_ROOT_ACL=open` (default): `acl:AuthenticatedAgent` gets `acl:Read`, `acl:Write` and `acl:Append` on `/ldp/` and, through `acl:default`, on everything under it; the `admin` and `super_admin` roles get every mode. This is the behaviour of releases before WAC, written where an admin can change it; the server logs one line at start while the root is open this way.
 - `LDP_ROOT_ACL=owners`: only the two admin roles. Users reach only what they create or are granted.

@@ -975,14 +975,19 @@ async fn security_upgrade_seeds_the_open_root_acl_and_keeps_existing_requests_wo
     let e = env_over(store);
     let app = &e.app;
     assert!(
-        acl_graph_has_subject_prefix(&e.state, &format!("{BASE}/ldp/.acl#authenticated")),
-        "the open root ACL is seeded when the router is built"
+        !wac::root_acl_seeded(&e.state.store, BASE).unwrap(),
+        "building the router writes nothing to the store"
     );
-    assert!(wac::root_acl_seeded(&e.state.store, BASE).unwrap());
 
-    // A plain user does today's things to yesterday's data.
+    // A plain user does today's things to yesterday's data; the first LDP
+    // request seeds the open root ACL (at startup, the boot seed does).
     let (st, _, body) = get(app, Some(&e.bob), "/ldp/old/item").await;
     assert_eq!(st, StatusCode::OK, "{body}");
+    assert!(
+        acl_graph_has_subject_prefix(&e.state, &format!("{BASE}/ldp/.acl#authenticated")),
+        "the open root ACL is seeded by the first LDP request"
+    );
+    assert!(wac::root_acl_seeded(&e.state.store, BASE).unwrap());
     assert!(body.contains("pre-upgrade"));
     let (st, _, body) = get(app, Some(&e.bob), "/ldp/old/").await;
     assert_eq!(st, StatusCode::OK, "{body}");
@@ -1113,7 +1118,7 @@ async fn security_owners_root_policy_starts_closed() {
     let app = &e.app;
     assert!(
         !acl_graph_has_subject_prefix(&e.state, &format!("{BASE}/ldp/.acl#authenticated")),
-        "the router build must not re-seed an already seeded root"
+        "neither the router build nor a request re-seeds an already seeded root"
     );
     assert!(!wac::root_acl_is_open(&e.state.store, BASE).unwrap());
 

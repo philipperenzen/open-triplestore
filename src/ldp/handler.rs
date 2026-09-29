@@ -145,6 +145,13 @@ fn caller_agent(
     state: &AppState,
     user: Option<&AuthenticatedUser>,
 ) -> Result<wac::Agent, Response> {
+    // The root ACL must exist before anything is evaluated against it. The
+    // boot seed writes it at startup; a request that arrives first (or a
+    // router built without the boot seed, as in tests) writes it here. A
+    // failure is logged and evaluation goes on over what is there: nothing.
+    if let Err(e) = wac::seed_root_acl_if_missing(&state.store, &state.base_url) {
+        tracing::warn!("ldp: seeding the root ACL failed: {e}");
+    }
     wac::Agent::resolve(&state.auth_db, user).map_err(|e| {
         tracing::error!("ldp: WAC membership lookup failed, refusing the request: {e}");
         forbidden("access control lookup failed (memberships); the request is refused".to_string())

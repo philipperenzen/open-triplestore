@@ -231,9 +231,14 @@ it (delete the authenticated grant, keep owners).
 Environment knob `LDP_ROOT_ACL=open|owners` (default `open`) chooses the
 seed: `owners` seeds only admins, so a fresh install starts closed.
 
-**Changed during implementation.** The seed runs in `build_router`, so it is
-done before the first request (the boot seed task runs concurrently with
-serving, and the test harness never runs it). It also writes
+**Changed during implementation.** The seed runs in the boot seed
+(`run_boot_seed`, with the other system graphs, as planned) *and* on every
+LDP request (`seed_root_acl_if_missing`, idempotent, mutex-guarded), so the
+ACL exists before the first evaluation whichever comes first: the boot seed
+task runs concurrently with serving, and the test harness never runs it. A
+first draft seeded in `build_router`; that wrote a system graph and a
+change-log row into every test that builds a router, and broke suites that
+count store state after the build. Building the router writes nothing. It also writes
 `<{base}/ldp/.acl#admins>` and `#super-admins` (`acl:agentClass
 urn:ots:role:admin` / `super_admin`, every mode), so the grant admins hold
 implicitly is visible in the ACL. The seed is recorded with a
@@ -257,7 +262,7 @@ The "root ACL is open" line is logged at every start while
 | WAC evaluation, agent IRIs, ACL parse/validate | new `src/ldp/wac.rs` |
 | Route `.acl` paths, Link/WAC-Allow headers, checks per verb, owner ACL on create, ACL delete | `src/ldp/handler.rs`, `src/ldp/routes.rs` |
 | PATCH confinement, body confinement | new `src/ldp/patch.rs`; `src/ldp/handler.rs` (`ldp_patch`, `body_confined_to`) |
-| Root ACL seed, `LDP_ROOT_ACL` | `src/server/mod.rs` (`build_router`, before any request); the acl Link on a CORS-answered `OPTIONS` in `ldp_options_capabilities` |
+| Root ACL seed, `LDP_ROOT_ACL` | `src/ldp/wac.rs` (`seed_root_acl_if_missing`), called from `run_boot_seed` in `src/server/mod.rs` and from every LDP request; the acl Link on a CORS-answered `OPTIONS` in `ldp_options_capabilities` |
 | `acl:` / `foaf:` prefixes | `src/ldp/mod.rs` constants |
 | Anonymous read when the ACL allows it | `src/auth/middleware.rs` (`require_auth` for `/ldp/` GET/HEAD only) |
 | Agent IRI for the caller | `/api/auth/me` response, field `agent_iri` |

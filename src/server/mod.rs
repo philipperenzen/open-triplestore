@@ -736,30 +736,6 @@ async fn mark_vocab_dirty_after_success(
 }
 
 pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNet>) -> Router {
-    // The LDP root ACL is seeded once, here, so it exists before the first
-    // request reaches `/ldp/`. The default `open` policy is today's behaviour
-    // written where an admin can change it (`docs/ldp.md`, "Access control").
-    #[cfg(feature = "ldp")]
-    if !state.store.replication().read_only() {
-        use crate::ldp::wac;
-        let policy = wac::RootAclPolicy::from_env();
-        match wac::ensure_root_acl(&state.store, &state.base_url, policy) {
-            Ok(true) => tracing::info!(
-                policy = policy.label(),
-                "ldp: seeded the root ACL at {}/ldp/.acl",
-                state.base_url
-            ),
-            Ok(false) => {}
-            Err(e) => tracing::warn!("ldp: seeding the root ACL failed: {e}"),
-        }
-        if wac::root_acl_is_open(&state.store, &state.base_url).unwrap_or(false) {
-            tracing::info!(
-                "ldp: the root ACL is open: every signed-in user may read, write and append \
-                 under /ldp/; tighten it with PUT {}/ldp/.acl (see docs/ldp.md)",
-                state.base_url
-            );
-        }
-    }
     // What a prefix means on this deployment is configuration, held in the
     // identity database and answered from an in-memory overlay. Load it here,
     // where the routes that answer with it are assembled: a router over an
@@ -2914,6 +2890,27 @@ pub fn run_boot_seed(
     }
     let store = &seed_state.store;
     let auth = &seed_state.auth_db;
+    // 0. The LDP root ACL, once (`LDP_ROOT_ACL`): today's behaviour written
+    // where an admin can change it (`docs/ldp.md`, "Access control"). The
+    // first LDP request seeds it too, should it arrive before this runs.
+    #[cfg(feature = "ldp")]
+    {
+        use crate::ldp::wac;
+        match wac::seed_root_acl_if_missing(store, base) {
+            Ok(Some(policy)) => tracing::info!(
+                policy = policy.label(),
+                "ldp: seeded the root ACL at {base}/ldp/.acl"
+            ),
+            Ok(None) => {}
+            Err(e) => tracing::warn!("ldp: seeding the root ACL failed: {e}"),
+        }
+        if wac::root_acl_is_open(store, base).unwrap_or(false) {
+            tracing::info!(
+                "ldp: the root ACL is open: every signed-in user may read, write and append \
+                 under /ldp/; tighten it with PUT {base}/ldp/.acl (see docs/ldp.md)"
+            );
+        }
+    }
     // 1. SHACL Studio meta-shapes, legacy shape import, per-standard shapes.
     if let Err(e) = crate::shacl_studio::seed::seed_shacl_shacl(store, auth) {
         tracing::warn!("shacl_studio: SHACL-SHACL seed failed: {e}");
