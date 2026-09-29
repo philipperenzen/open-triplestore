@@ -441,7 +441,7 @@ mod tests {
             format!("DELETE {{ <{R}> <http://example.org/p> ?o }} WHERE {{ GRAPH <http://victim/> {{ ?s ?p ?o }} }}"),
             format!("INSERT {{ <{R}> <http://example.org/p> ?o }} WHERE {{ GRAPH ?g {{ ?s ?p ?o }} }}"),
             format!("INSERT {{ <{R}> <http://example.org/p> ?o }} WHERE {{ SERVICE <http://x/sparql> {{ ?s ?p ?o }} }}"),
-            format!("WITH <http://victim/> DELETE {{ ?s ?p ?o }} WHERE {{ ?s ?p ?o }}"),
+            "WITH <http://victim/> DELETE { ?s ?p ?o } WHERE { ?s ?p ?o }".to_string(),
             format!("DELETE {{ <{R}> ?p ?o }} USING <http://victim/> WHERE {{ ?s ?p ?o }}"),
             "CLEAR ALL".to_string(),
             "DROP ALL".to_string(),

@@ -121,6 +121,7 @@ fn safe_binary_content_type(ct: &str) -> String {
 }
 
 /// Record `user` as the owner of a resource this request created.
+#[allow(clippy::result_large_err)] // Err is an axum Response, returned on the cold deny path
 fn own_created(state: &AppState, iri: &str, user: &AuthenticatedUser) -> Result<(), Response> {
     wac::write_owner_acl(&state.store, iri, &user.user_id, is_container(state, iri)).map_err(|e| {
         (
@@ -139,6 +140,7 @@ fn forbidden(msg: String) -> Response {
 
 /// The caller as WAC sees them. A failed membership lookup refuses the
 /// request: access control that cannot be evaluated grants nothing.
+#[allow(clippy::result_large_err)] // Err is an axum Response, returned on the cold deny path
 fn caller_agent(
     state: &AppState,
     user: Option<&AuthenticatedUser>,
@@ -150,6 +152,7 @@ fn caller_agent(
 }
 
 /// Refuse unless `agent` holds `mode` on `iri` under its effective ACL.
+#[allow(clippy::result_large_err)] // Err is an axum Response, returned on the cold deny path
 fn require_mode(
     state: &AppState,
     agent: &wac::Agent,
@@ -200,6 +203,7 @@ const WAC_ALLOW: &str = "wac-allow";
 /// is authorized for `target` only; a triple whose subject is another IRI
 /// under `/ldp/` would land in that resource past its ACL. Subjects outside
 /// `/ldp/` stay allowed: an LDP-RS may describe related things.
+#[allow(clippy::result_large_err)] // Err is an axum Response, returned on the cold deny path
 fn body_confined_to(
     state: &AppState,
     text: &str,
