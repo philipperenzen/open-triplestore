@@ -36,6 +36,7 @@
 
 pub mod container;
 pub mod handler;
+pub mod patch;
 pub mod routes;
 pub mod wac;
 

@@ -1,7 +1,9 @@
 # Plan: per-resource access control for LDP with Web Access Control (WAC)
 
-Status: plan, 2026-09-29. Branch `feat/ldp-wac`. Implementation and review
-happen on this branch; the plan is updated as decisions change.
+Status: implemented on branch `feat/ldp-wac`, 2026-09-29. Paragraphs marked
+**Changed during implementation** record where the code differs from the first
+draft of this plan, and why; the reviewer checks the result against this
+document, test by test.
 
 ## Why
 
@@ -89,6 +91,14 @@ IRI as a hash-namespace: `<{acl}#owner>`, `<{acl}#public>`). Reasons:
   (see the system-graph scoping rule in `src/server/routes.rs`);
 - one graph keeps lookup a single `GRAPH <urn:system:ldp-acl> { … }` query.
 
+**Changed during implementation.** The LDP layer names a container `{c}` when
+`POST` creates it and `{c}/` when it is the parent of a `PUT` path, and clients
+address it either way. The ACL graph is therefore keyed by one canonical
+spelling (trailing slash dropped; the root `{base}/ldp/` keeps its slash), the
+ACL of a container is `{c}.acl`, and `{c}/.acl` names the same ACL. An ACL body
+may use either spelling in `acl:accessTo`/`acl:default`; the canonical one is
+stored (`src/ldp/wac.rs`, `canonical`).
+
 Reads and writes of a `.acl` go through the LDP handlers (they are LDP RDF
 sources), but the handler routes them to the ACL graph, requires
 `acl:Control` on the resource the ACL governs, and validates the body: only
@@ -107,20 +117,41 @@ pub async fn allowed(state, agent: &Agent, resource_iri: &str, mode: Mode) -> Re
 
 1. Admins (`user.is_admin()`) pass, as everywhere else in the store.
 2. Find the effective ACL: the resource's own `.acl` if it has any
-   `acl:Authorization` with `acl:accessTo <resource>`; else walk up the
-   container chain and use the first ancestor whose ACL has an
-   `acl:Authorization` with `acl:default <container>`.
+   client-written `acl:Authorization` with `acl:accessTo <resource>`; else
+   walk up the container chain and use the first ancestor whose ACL has a
+   client-written `acl:Authorization` with `acl:default <container>`. The
+   server-managed owner grant (`R.acl#owner`, below) of the resource always
+   applies on top, and the owner grants of the containers passed on the walk
+   apply through their `acl:default`.
+
+   **Changed during implementation.** The first draft treated the owner grant
+   as an ordinary own ACL. Under strict WAC an `acl:accessTo` authorization
+   shadows every inherited one, so writing an owner ACL on every create made
+   each new resource private to its creator, made items 3 and 5 dead letters
+   (nothing created after the upgrade inherited anything, and tightening the
+   root ACL reached nothing created since), and contradicted tests 1-3, which
+   assume a created resource still follows its container's policy until
+   someone writes its `.acl`. The owner grant is therefore additive and never
+   counts as "the resource has an ACL of its own": creating a resource does
+   not change who else may reach it; only writing its `.acl` does. A resource's
+   own ACL still overrides a container owner's default, as item 6 says.
 3. Allowed when any matching authorization grants the mode. `acl:Write`
    implies nothing else; `acl:Control` implies nothing else (per WAC).
    Append is satisfied by Append or Write.
 4. A lookup error refuses the request (fail closed), like the SHACL gate
-   discovery rule.
+   discovery rule. Implemented as 403 with a body naming the failed lookup;
+   admins pass before any lookup.
 5. The existing checks stay in front: `require_auth`, `endpoint_acl_guard`,
    and `enforce_write_scope_for_mutation` (an API token without write scope
-   still can't write, whatever the ACL says). `foaf:Agent` grants can make a
-   resource readable anonymously only if `require_auth` is relaxed for
-   `/ldp/` GET/HEAD when the root ACL grants `foaf:Agent` Read; do that in
-   the same middleware, not by removing the layer.
+   still can't write, whatever the ACL says). `foaf:Agent` grants make a
+   resource readable anonymously: `require_auth` lets a token-less `GET`/`HEAD`
+   under `/ldp/` through, with no principal in the extensions, only when the
+   ACL of *that* resource grants `foaf:Agent` Read (Control for a `.acl`); the
+   handler evaluates the ACL again.
+
+   **Changed during implementation.** The first draft gated this on the root
+   ACL granting `foaf:Agent` Read. Test 4 grants it on one resource, so the
+   middleware evaluates the requested resource, in the same layer.
 
 ### PATCH
 
@@ -129,13 +160,31 @@ Today `ldp_patch` hands the SPARQL Update to `execute_update`. Change it to:
 1. require `acl:Write` on the resource;
 2. parse the update and refuse anything that is not `INSERT DATA`,
    `DELETE DATA` or `DELETE/INSERT WHERE` on the default graph (no `GRAPH`,
-   `LOAD`, `CLEAR`, `DROP`, `SERVICE`, `WITH`, `USING`);
+   `LOAD`, `CLEAR`, `CREATE`, `DROP`, `SERVICE`, `WITH`, `USING`);
 3. run it against a scratch store holding only the resource's triples
    (the same "describe the resource" query GET uses), then write the
    difference back as the resource's new state with the container and
    membership triples untouched.
 
 That makes PATCH unable to touch other resources, whatever the body says.
+
+**Changed during implementation** (`src/ldp/patch.rs`). The confinement rule
+is "no triple about another resource under `/ldp/`", not "only triples whose
+subject is the resource": a `PUT`/`POST` body has always been allowed to
+describe things outside `/ldp/` (an LDP-RS may describe related things; the
+conformance suites do it, and `tests/ldp_conformance.rs` PATCHes such a triple
+into the root container and must keep passing), so a `PATCH` may too. Triples
+about another IRI under `/ldp/` are refused, statically in the update's data
+and templates and again in the result; server-managed triples (`ldp:*`
+predicates, `rdf:type ldp:*`, the Non-RDF Source storage triples) are refused
+the same way; triples whose object is a blank node are not moved through the
+scratch store (a blank node has no identity across the round trip; a `PATCH`
+can add such structure, removing it takes a `PUT`). A disallowed shape or a
+result that reaches beyond the resource is a 403 (the existing test for
+`DROP ALL` expects 403), a syntax error a 400. `PUT` and `POST` bodies are
+held to the same line: a body describing another resource under `/ldp/` is a
+403, because the WAC check covers the target only. The old route through
+`execute_update` also audited the update; the confined path does not.
 
 ### Ownership on create
 
@@ -151,6 +200,17 @@ That makes PATCH unable to touch other resources, whatever the body says.
 and for a new container also `acl:default <{container}>`, so its members
 inherit the owner unless they get their own ACL. `DELETE` of a resource
 deletes its ACL.
+
+**Changed during implementation.** `<{acl}#owner>` is server-managed: `GET`
+shows it, a `PUT` body that names `<#owner>` is refused (400), and it is
+removed only with the resource. The root container never gets an owner: the
+first user whose `PUT` or `POST` brought it into being would otherwise own
+everything under it through `acl:default`. A container auto-created by a
+`POST` or a `PUT` path is owned by the caller who caused it, like any other
+created resource. A `.acl` `PUT` replaces the client-written nodes (201 when
+there were none, 204 otherwise); `DELETE` of a `.acl` removes them, and the
+resource inherits again; `POST` and `PATCH` on a `.acl` are 405. Names ending
+in `.acl` are reserved (a `Slug` producing one is a 400).
 
 ### Root ACL
 
@@ -171,6 +231,18 @@ it (delete the authenticated grant, keep owners).
 Environment knob `LDP_ROOT_ACL=open|owners` (default `open`) chooses the
 seed: `owners` seeds only admins, so a fresh install starts closed.
 
+**Changed during implementation.** The seed runs in `build_router`, so it is
+done before the first request (the boot seed task runs concurrently with
+serving, and the test harness never runs it). It also writes
+`<{base}/ldp/.acl#admins>` and `#super-admins` (`acl:agentClass
+urn:ots:role:admin` / `super_admin`, every mode), so the grant admins hold
+implicitly is visible in the ACL. The seed is recorded with a
+`dcterms:created` on `<{base}/ldp/.acl>` rather than detected by "no
+authorization for the root": with the draft rule an admin who emptied the
+root ACL to close the space would have been overridden at the next start.
+The "root ACL is open" line is logged at every start while
+`acl:AuthenticatedAgent` or `foaf:Agent` holds Write on the root.
+
 ### Headers and discovery
 
 - Every LDP response: `Link: <{resource}.acl>; rel="acl"`.
@@ -184,14 +256,14 @@ seed: `owners` seeds only admins, so a fresh install starts closed.
 |---|---|
 | WAC evaluation, agent IRIs, ACL parse/validate | new `src/ldp/wac.rs` |
 | Route `.acl` paths, Link/WAC-Allow headers, checks per verb, owner ACL on create, ACL delete | `src/ldp/handler.rs`, `src/ldp/routes.rs` |
-| PATCH confinement | `src/ldp/handler.rs` (`ldp_patch`), helper in `src/ldp/container.rs` |
-| Root ACL seed, `LDP_ROOT_ACL` | where system graphs are seeded at startup (`src/server/mod.rs` startup path) |
+| PATCH confinement, body confinement | new `src/ldp/patch.rs`; `src/ldp/handler.rs` (`ldp_patch`, `body_confined_to`) |
+| Root ACL seed, `LDP_ROOT_ACL` | `src/server/mod.rs` (`build_router`, before any request); the acl Link on a CORS-answered `OPTIONS` in `ldp_options_capabilities` |
 | `acl:` / `foaf:` prefixes | `src/ldp/mod.rs` constants |
 | Anonymous read when the ACL allows it | `src/auth/middleware.rs` (`require_auth` for `/ldp/` GET/HEAD only) |
-| Agent IRI for the caller | `/api/auth/me` response or `GET /ldp/.well-known/agent` |
+| Agent IRI for the caller | `/api/auth/me` response, field `agent_iri` |
 | Docs | `docs/ldp.md` (replace the "Access control" limitation with a section), `docs/standards.md` (LDP row: note WAC), `SECURITY.md` (one line), `docs/security.md` if it lists per-graph rules |
 | Changelog | `CHANGELOG.md` `[Unreleased]` `### Added` and `### Security` |
-| Tests | new `tests/ldp_wac_security_http.rs` (keep `security` in the name so the CI security gate counts it), and `tests/ldp_http_conformance.rs` for the headers |
+| Tests | new `tests/ldp_wac_security_http.rs` (keep `security` in the name so the CI security gate counts it), all eleven, headers included; the conformance suites unchanged |
 
 ## Tests to write (HTTP, two users plus an admin)
 

@@ -196,6 +196,35 @@ fn wac_allow_value(state: &AppState, agent: &wac::Agent, iri: &str) -> Option<He
 
 const WAC_ALLOW: &str = "wac-allow";
 
+/// Refuse a `PUT`/`POST` body that describes another LDP resource. The body
+/// is authorized for `target` only; a triple whose subject is another IRI
+/// under `/ldp/` would land in that resource past its ACL. Subjects outside
+/// `/ldp/` stay allowed: an LDP-RS may describe related things.
+fn body_confined_to(
+    state: &AppState,
+    text: &str,
+    format: oxigraph::io::RdfFormat,
+    target: &str,
+) -> Result<(), Response> {
+    let root = wac::root_iri(&state.base_url);
+    let parser = oxigraph::io::RdfParser::from_format(format)
+        .with_base_iri(target)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()).into_response())?;
+    for quad in parser.for_reader(text.as_bytes()) {
+        let quad = quad.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()).into_response())?;
+        if let oxigraph::model::NamedOrBlankNode::NamedNode(s) = &quad.subject {
+            if super::patch::other_ldp_subject(s.as_str(), target, &root) {
+                return Err(forbidden(format!(
+                    "the body describes another resource, <{}>; a write to <{target}> may only \
+                     describe <{target}> and things outside /ldp/",
+                    s.as_str()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn acl_method_not_allowed() -> Response {
     (
         StatusCode::METHOD_NOT_ALLOWED,
@@ -807,9 +836,14 @@ header on every `/ldp/` response (LDP 1.0 §4.2.1.6).\n\
   (or `DirectContainer` / `IndirectContainer`). A Direct container's body must\n\
   carry `ldp:membershipResource` and `ldp:hasMemberRelation`; an Indirect\n\
   container additionally `ldp:insertedContentRelation`. Missing ones are a 400.\n\
-- `PATCH` takes `application/sparql-update`, evaluated under the same per-graph\n\
-  authorisation as `POST /sparql`: all-graph and variable-graph operations need\n\
-  admin rights.\n\
+- `PATCH` takes `application/sparql-update` and is confined to the target\n\
+  resource: `INSERT DATA`, `DELETE DATA` and `DELETE/INSERT … WHERE` on the\n\
+  default graph only (no `GRAPH`, `LOAD`, `CLEAR`, `CREATE`, `DROP`, `SERVICE`,\n\
+  `WITH`, `USING`). The `WHERE` clause sees only the resource's own triples. A\n\
+  result describing another resource under `/ldp/`, or touching a\n\
+  server-managed triple (`ldp:*`, `rdf:type ldp:*`), is refused with 403 and\n\
+  nothing changes. Likewise a `PUT`/`POST` body may describe the target and\n\
+  things outside `/ldp/`, not another resource.\n\
 - `If-Match` is honoured on `PUT` and `PATCH`; the ETag identifies the resource\n\
   state and is the same for `GET` and `HEAD` regardless of the negotiated format.\n\
 - The path `/ldp/constraints` is reserved for this document.\n";
@@ -920,6 +954,10 @@ pub async fn ldp_post(
             } else {
                 oxigraph::io::RdfFormat::Turtle
             };
+
+            if let Err(r) = body_confined_to(&state, text, fmt, &member_iri) {
+                return r;
+            }
 
             // Parse with the new member's IRI as base so an idiomatic relative
             // `<>` subject resolves to it instead of being rejected as schemeless.
@@ -1201,6 +1239,12 @@ pub async fn ldp_put(
                     return (StatusCode::BAD_REQUEST, "Body must be valid UTF-8").into_response()
                 }
             };
+            let fmt = oxigraph::io::RdfFormat::JsonLd {
+                profile: Default::default(),
+            };
+            if let Err(r) = body_confined_to(&state, text, fmt, &iri) {
+                return r;
+            }
             if let Err(e) = container::load_resource_jsonld(&state.store, &iri, text) {
                 return (StatusCode::BAD_REQUEST, e).into_response();
             }
@@ -1211,6 +1255,10 @@ pub async fn ldp_put(
                     return (StatusCode::BAD_REQUEST, "Body must be valid UTF-8").into_response()
                 }
             };
+            if let Err(r) = body_confined_to(&state, turtle, oxigraph::io::RdfFormat::Turtle, &iri)
+            {
+                return r;
+            }
             if let Err(e) = container::load_resource_turtle(&state.store, &iri, turtle) {
                 return (StatusCode::BAD_REQUEST, e).into_response();
             }
@@ -1333,17 +1381,24 @@ pub async fn ldp_patch(
         Err(_) => return (StatusCode::BAD_REQUEST, "Body must be valid UTF-8").into_response(),
     };
 
-    // Route through the same gate as POST /sparql instead of running the body
-    // verbatim. The body is arbitrary attacker-controlled SPARQL UPDATE: run
-    // unguarded it let any authenticated caller `DROP ALL` or delete another
-    // tenant's named graph, bypassing every per-graph ACL. `execute_update`
-    // enforces the API-token write scope, admin-gates variable-graph/SERVICE and
-    // all-graph operations, and checks read+write permission on every ground
-    // graph the update touches — and it audits and records provenance.
-    if let Err(e) =
-        crate::server::routes::execute_update(&state, Some(&user), sparql, Some("LDP PATCH")).await
-    {
-        return e.into_response();
+    // The body is arbitrary SPARQL Update from a caller who holds acl:Write on
+    // this one resource. It is not run against the store: `patch::apply`
+    // restricts its shape, evaluates it on a scratch store holding only the
+    // resource's own triples and writes back the difference, so whatever the
+    // body says it can change the target resource and nothing else. (It used
+    // to go through the `/sparql` gate, which could still clear the whole
+    // default graph, where every LDP resource lives.)
+    match super::patch::apply(&state.store, &iri, &wac::root_iri(base), sparql) {
+        Ok(_) => {}
+        Err(super::patch::PatchError::BadRequest(m)) => {
+            return (StatusCode::BAD_REQUEST, m).into_response()
+        }
+        Err(super::patch::PatchError::NotAllowed(m)) => {
+            return (StatusCode::FORBIDDEN, m).into_response()
+        }
+        Err(super::patch::PatchError::Internal(m)) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, m).into_response()
+        }
     }
 
     // Return 204 with new ETag

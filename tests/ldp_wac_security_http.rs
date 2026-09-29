@@ -471,6 +471,187 @@ async fn security_public_read_needs_a_foaf_agent_grant() {
     );
 }
 
+// ─── 6 ─────────────────────────────────────────────────────────────────────────
+
+/// Plan test 6. A `PATCH` that names another resource's subject, or uses
+/// `GRAPH`, `CLEAR`, `DROP`, `LOAD`, `SERVICE`, `WITH` or `USING`, is refused
+/// and changes nothing; one confined to the resource works.
+#[tokio::test]
+async fn security_patch_is_confined_to_the_target_resource() {
+    let e = env();
+    let app = &e.app;
+    assert_eq!(
+        put_doc(app, &e.alice, "/ldp/q/one").await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        put_doc(app, &e.alice, "/ldp/q/two").await.0,
+        StatusCode::NO_CONTENT
+    );
+    let one = format!("{BASE}/ldp/q/one");
+    let two = format!("{BASE}/ldp/q/two");
+    let victim = "http://victim.example/private";
+    e.state
+        .store
+        .update(&format!(
+            "INSERT DATA {{ GRAPH <{victim}> {{ <http://s/seed> <http://p/> \"SEED\" }} . \
+             <http://other.example/subject> <http://p/> \"DEFAULT_GRAPH_SEED\" }}"
+        ))
+        .unwrap();
+    let intact = |state: &AppState| {
+        ask(
+            state,
+            &format!("ASK {{ <{two}> <http://example.org/p> \"v\" }}"),
+        ) && ask(
+            state,
+            &format!("ASK {{ GRAPH <{victim}> {{ <http://s/seed> <http://p/> \"SEED\" }} }}"),
+        ) && ask(
+            state,
+            "ASK { <http://other.example/subject> <http://p/> \"DEFAULT_GRAPH_SEED\" }",
+        ) && ask(
+            state,
+            &format!("ASK {{ <{one}> a <http://www.w3.org/ns/ldp#RDFSource> }}"),
+        ) && ask(
+            state,
+            &format!("ASK {{ <{BASE}/ldp/q/> <http://www.w3.org/ns/ldp#contains> <{one}> }}"),
+        )
+    };
+    assert!(intact(&e.state));
+
+    // Bob holds acl:Write on `one` through the open root, and nothing more.
+    for evil in [
+        format!("INSERT DATA {{ <{two}> <http://example.org/p> \"smuggled\" }}"),
+        format!("DELETE WHERE {{ <{two}> ?p ?o }}"),
+        format!("INSERT DATA {{ GRAPH <{victim}> {{ <{one}> <http://p/> \"x\" }} }}"),
+        format!("INSERT {{ <{one}> <http://p/> ?o }} WHERE {{ GRAPH <{victim}> {{ ?s ?p ?o }} }}"),
+        format!("INSERT {{ <{one}> <http://p/> ?o }} WHERE {{ GRAPH ?g {{ ?s ?p ?o }} }}"),
+        format!("INSERT {{ <{one}> <http://p/> ?o }} WHERE {{ SERVICE <http://x.example/sparql> {{ ?s ?p ?o }} }}"),
+        format!("WITH <{victim}> DELETE {{ ?s ?p ?o }} WHERE {{ ?s ?p ?o }}"),
+        format!("DELETE {{ <{one}> ?p ?o }} USING <{victim}> WHERE {{ ?s ?p ?o }}"),
+        "CLEAR ALL".to_string(),
+        "CLEAR DEFAULT".to_string(),
+        "DROP ALL".to_string(),
+        format!("DROP GRAPH <{victim}>"),
+        "LOAD <http://example.org/data.ttl>".to_string(),
+        "CREATE GRAPH <http://new.example/>".to_string(),
+        format!("DELETE DATA {{ <{one}> a <http://www.w3.org/ns/ldp#RDFSource> }}"),
+        format!("INSERT DATA {{ <{one}> <http://www.w3.org/ns/ldp#contains> <{two}> }}"),
+        format!("INSERT {{ ?other <http://example.org/p> \"x\" }} WHERE {{ VALUES ?other {{ <{two}> }} }}"),
+    ] {
+        let (st, _, body) = send(
+            app,
+            Method::PATCH,
+            "/ldp/q/one",
+            Some(&e.bob),
+            &[("Content-Type", SPARQL_UPDATE)],
+            &evil,
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "`{evil}` must be refused: {body}");
+        assert!(intact(&e.state), "`{evil}` changed something it must not");
+        assert!(
+            ask(&e.state, &format!("ASK {{ <{one}> <http://example.org/p> \"v\" }}")),
+            "`{evil}` changed the resource although refused"
+        );
+    }
+    let (st, _, _) = send(
+        app,
+        Method::PATCH,
+        "/ldp/q/one",
+        Some(&e.bob),
+        &[("Content-Type", SPARQL_UPDATE)],
+        "not sparql at all",
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    // A subject outside /ldp/ is the resource's to describe (as in a PUT body),
+    // and a WHERE clause about one sees nothing: a no-op, not a breach.
+    let (st, _, body) = send(
+        app,
+        Method::PATCH,
+        "/ldp/q/one",
+        Some(&e.bob),
+        &[("Content-Type", SPARQL_UPDATE)],
+        "DELETE WHERE { <http://other.example/subject> ?p ?o }",
+    )
+    .await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{body}");
+    assert!(intact(&e.state));
+
+    // PUT and POST bodies are held to the same line: no triples about another
+    // resource under /ldp/, whatever the target.
+    for (method, path) in [(Method::PUT, "/ldp/q/mine"), (Method::POST, "/ldp/q/")] {
+        let (st, _, body) = send(
+            app,
+            method.clone(),
+            path,
+            Some(&e.bob),
+            &[("Content-Type", TURTLE), ("Slug", "mine")],
+            &format!(
+                "<> <http://example.org/p> \"ok\" . <{two}> <http://example.org/p> \"smuggled\" ."
+            ),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::FORBIDDEN,
+            "{method} body about `two`: {body}"
+        );
+        assert!(intact(&e.state));
+        assert!(!ask(
+            &e.state,
+            &format!("ASK {{ <{two}> <http://example.org/p> \"smuggled\" }}")
+        ));
+        let (st, _, body) = send(
+            app,
+            method.clone(),
+            path,
+            Some(&e.bob),
+            &[("Content-Type", TURTLE), ("Slug", "mine")],
+            "<> <http://example.org/p> \"ok\" . <http://example.org/related> <http://example.org/p> \"fine\" .",
+        )
+        .await;
+        assert!(
+            st.is_success(),
+            "{method} body about the target and an outside subject: {st} {body}"
+        );
+    }
+
+    // Confined to the resource: allowed, and visible on GET.
+    let (st, _, body) = send(
+        app,
+        Method::PATCH,
+        "/ldp/q/one",
+        Some(&e.bob),
+        &[("Content-Type", SPARQL_UPDATE)],
+        "DELETE { <> <http://example.org/p> ?o } INSERT { <> <http://example.org/p> \"new\" } \
+         WHERE { <> <http://example.org/p> ?o }",
+    )
+    .await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{body}");
+    let (st, _, body) = get(app, Some(&e.bob), "/ldp/q/one").await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(
+        body.contains("\"new\"") && !body.contains("\"v\""),
+        "{body}"
+    );
+    assert!(intact(&e.state));
+    // A wildcard delete empties the resource and nothing else; it stays an LDP resource.
+    let (st, _, _) = send(
+        app,
+        Method::PATCH,
+        "/ldp/q/one",
+        Some(&e.bob),
+        &[("Content-Type", SPARQL_UPDATE)],
+        "DELETE { ?s ?p ?o } WHERE { ?s ?p ?o }",
+    )
+    .await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    assert!(intact(&e.state));
+    assert_eq!(get(app, Some(&e.bob), "/ldp/q/one").await.0, StatusCode::OK);
+}
+
 // ─── 7 ─────────────────────────────────────────────────────────────────────────
 
 /// Plan test 7. Writing a `.acl` needs `acl:Control`: the owner can, a
