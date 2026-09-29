@@ -371,6 +371,8 @@ impl AppState {
     #[inline]
     pub fn mark_vocab_registry_dirty(&self) {
         self.vocab_registry_dirty.store(true, Ordering::Relaxed);
+        // The registry's published versions feed the readable-graph set too.
+        self.auth_db.invalidate_accessible_graphs_cache();
     }
 
     /// Rebuild the Tantivy index if it has been marked dirty since the last sync.
@@ -721,6 +723,19 @@ async fn mark_vocab_dirty_after_success(
 }
 
 pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNet>) -> Router {
+    // The graphs a principal may read include those of the model registry's
+    // published versions (a public entry's to everyone). The registry lives
+    // in the store, which the identity database cannot see, so it is handed
+    // the lookup here, where both are at hand: every read path that scopes
+    // by `get_accessible_graph_iris` (`/sparql`, the Graph Store, the SHACL
+    // Studio, dereferencing) then agrees with the data-model API.
+    {
+        let store = state.store.clone();
+        state.auth_db.set_registry_graph_source(Arc::new(move || {
+            crate::data_models::registry::published_version_graphs(&store)
+        }));
+    }
+
     // What a prefix means on this deployment is configuration, held in the
     // identity database and answered from an in-memory overlay. Load it here,
     // where the routes that answer with it are assembled: a router over an

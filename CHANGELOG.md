@@ -13,6 +13,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A published model's graphs read the same everywhere.** The graphs of a
+  published model-registry version were served by
+  `GET /api/models/{id}/versions/{ver}/data` to whoever may see the entry (a
+  public entry: everyone), but were invisible to non-admins over `/sparql`
+  (`GRAPH <iri>` matched nothing, a `FROM` naming it was dropped) and refused
+  with `401` by `GET /store?graph=<iri>` — the seeded SKOS graph included.
+  The readable-graph set that every read path scopes by (`/sparql`, the Graph
+  Store, the SHACL Studio's read scope, dereferencing, the LLM context) now
+  adds the base graph and sub-graphs of every published version of an entry
+  the caller may see: a public entry to everyone, anonymous callers included; a
+  private entry to its owner, the owner organisation's members and admins.
+  Those graphs count as managed, so a private entry's graph is no longer an
+  "unmanaged" graph to anyone. Writes are unchanged: a `SPARQL UPDATE` or
+  Graph Store write into a registry graph still needs write authority on it,
+  and a no-derivatives version still refuses every write.
+  `GET /api/models/{id}/versions/{ver}/profile` moved from the admin-gated
+  sources router to the data-model routes: it is read by exactly who may read
+  `/data` (it answered `401` anonymously for a public model whose `/data`
+  answered `200`). The API reference's auth table gains the model rows, and
+  `tests/api_reference_auth.rs` probes them with a seeded vocabulary.
+
 ### Changed
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That

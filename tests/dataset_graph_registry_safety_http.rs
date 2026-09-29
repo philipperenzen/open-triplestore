@@ -547,8 +547,23 @@ async fn the_boot_cleanup_releases_old_registrations_of_registry_graphs() {
         &open_triplestore::shacl_studio::bindings::dataset_target_iri(&base, "mine"),
     );
     assert!(bound.contains(&BUNDLE_SUB_GRAPH.to_string()), "{bound:?}");
-    let (_, all_registered) = db.get_accessible_graph_iris(None).unwrap();
-    assert!(!all_registered.contains(BUNDLE_GRAPH));
+    // The graphs are no longer dataset-scoped: the dataset's owner reads them
+    // by the registry's rule alone — the public bundle model, not the victim's
+    // private one — and the registry, not a dataset, is what holds them.
+    let (accessible, all_registered) = db.get_accessible_graph_iris(Some("attacker")).unwrap();
+    assert!(
+        accessible.contains(BUNDLE_GRAPH),
+        "a public published model"
+    );
+    assert!(
+        !accessible.contains(&f.protected[3].0),
+        "the victim's private model stays unreadable once the row is gone"
+    );
+    assert!(
+        all_registered.contains(BUNDLE_GRAPH),
+        "held by the registry"
+    );
+    assert!(!db.dataset_has_graph("mine", BUNDLE_GRAPH).unwrap());
     f.assert_untouched("after the cleanup");
 
     // Once: a row made afterwards (by a path that bypasses the gate) stays for
