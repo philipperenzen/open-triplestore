@@ -471,6 +471,121 @@ async fn security_public_read_needs_a_foaf_agent_grant() {
     );
 }
 
+// ─── 5 ─────────────────────────────────────────────────────────────────────────
+
+/// Plan test 5. A resource body that contains ACL triples changes no ACL: with
+/// the resource as subject they land in the default graph as ordinary triples;
+/// naming the ACL resource itself is refused as any other resource under
+/// `/ldp/` is; a body that names the ACL graph is refused outright.
+#[tokio::test]
+async fn security_acl_triples_in_a_resource_body_change_no_acl() {
+    let e = env();
+    let app = &e.app;
+    assert_eq!(
+        put_doc(app, &e.alice, "/ldp/e/doc").await.0,
+        StatusCode::NO_CONTENT
+    );
+    let (st, _) = put_acl(
+        app,
+        &e.alice,
+        "/ldp/e/.acl",
+        &grant_all("me", &format!("{BASE}/ldp/e"), true, "alice"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(
+        get(app, Some(&e.bob), "/ldp/e/doc").await.0,
+        StatusCode::FORBIDDEN
+    );
+    let doc = format!("{BASE}/ldp/e/doc");
+    let bob_all = "acl:agent <urn:ots:user:bob> ; acl:mode acl:Read, acl:Write, acl:Control";
+    let acl_graph_before = {
+        let (_, _, acl) = get(app, Some(&e.alice), "/ldp/e/doc.acl").await;
+        acl
+    };
+
+    // The resource as subject: accepted as plain triples in the default graph.
+    let (st, _, body) = send(
+        app,
+        Method::PUT,
+        "/ldp/e/doc",
+        Some(&e.alice),
+        &[("Content-Type", TURTLE)],
+        &format!("@prefix acl: <{ACL}> .\n<> a acl:Authorization ; acl:accessTo <> ; {bob_all} ."),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{body}");
+    assert!(
+        ask(
+            &e.state,
+            &format!("ASK {{ <{doc}> <{ACL}agent> <urn:ots:user:bob> }}")
+        ),
+        "an ordinary default-graph triple"
+    );
+    assert!(
+        !ask(
+            &e.state,
+            &format!(
+                "ASK {{ GRAPH <{}> {{ ?s <{ACL}agent> <urn:ots:user:bob> }} }}",
+                wac::ACL_GRAPH
+            )
+        ),
+        "nothing reached the ACL graph"
+    );
+    assert_eq!(
+        get(app, Some(&e.bob), "/ldp/e/doc").await.0,
+        StatusCode::FORBIDDEN
+    );
+
+    // The ACL resource as subject: refused, like any other resource under /ldp/.
+    for (ct, body) in [
+        (
+            TURTLE,
+            format!("@prefix acl: <{ACL}> .\n<{doc}.acl#grant> a acl:Authorization ; acl:accessTo <{doc}> ; {bob_all} ."),
+        ),
+        (
+            "application/ld+json",
+            format!(
+                r#"{{"@id":"{doc}.acl#grant","@type":"{ACL}Authorization","{ACL}accessTo":{{"@id":"{doc}"}},"{ACL}agent":{{"@id":"urn:ots:user:bob"}},"{ACL}mode":{{"@id":"{ACL}Control"}}}}"#
+            ),
+        ),
+        // The ACL graph named outright (a JSON-LD named graph): refused before anything is written.
+        (
+            "application/ld+json",
+            format!(
+                r#"{{"@id":"{}","@graph":[{{"@id":"{doc}.acl#grant","@type":"{ACL}Authorization","{ACL}accessTo":{{"@id":"{doc}"}},"{ACL}agent":{{"@id":"urn:ots:user:bob"}},"{ACL}mode":{{"@id":"{ACL}Control"}}}}]}}"#,
+                wac::ACL_GRAPH
+            ),
+        ),
+    ] {
+        for (method, path) in [(Method::PUT, "/ldp/e/doc"), (Method::POST, "/ldp/e/")] {
+            let (st, _, resp) = send(
+                app,
+                method.clone(),
+                path,
+                Some(&e.alice),
+                &[("Content-Type", ct), ("Slug", "planted")],
+                &body,
+            )
+            .await;
+            assert!(
+                st == StatusCode::FORBIDDEN || st == StatusCode::BAD_REQUEST,
+                "{method} {ct} body naming the ACL must be refused, got {st}: {resp}"
+            );
+        }
+    }
+    let (_, _, acl_graph_after) = get(app, Some(&e.alice), "/ldp/e/doc.acl").await;
+    assert_eq!(acl_graph_after, acl_graph_before, "the ACL is untouched");
+    assert!(!acl_graph_has_subject_prefix(
+        &e.state,
+        &format!("{doc}.acl#grant")
+    ));
+    assert_eq!(
+        get(app, Some(&e.bob), "/ldp/e/doc").await.0,
+        StatusCode::FORBIDDEN
+    );
+}
+
 // ─── 6 ─────────────────────────────────────────────────────────────────────────
 
 /// Plan test 6. A `PATCH` that names another resource's subject, or uses
@@ -910,6 +1025,158 @@ async fn security_upgrade_seeds_the_open_root_acl_and_keeps_existing_requests_wo
     let (st, _, body) = get(app, Some(&e.admin), "/ldp/.acl").await;
     assert_eq!(st, StatusCode::OK, "{body}");
     assert!(body.contains("AuthenticatedAgent"), "{body}");
+}
+
+// ─── 10 ────────────────────────────────────────────────────────────────────────
+
+/// Plan test 10. A lookup failure fails closed: when the membership lookup
+/// cannot run, a non-admin gets 403 on every verb and nothing is written;
+/// admins, who pass before any lookup, are unaffected.
+#[tokio::test]
+async fn security_acl_lookup_failure_fails_closed() {
+    let e = env();
+    let app = &e.app;
+    assert_eq!(
+        put_doc(app, &e.alice, "/ldp/f/doc").await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(get(app, Some(&e.bob), "/ldp/f/doc").await.0, StatusCode::OK);
+
+    // Every group lookup now fails, as a database error would: the in-memory
+    // pool holds one connection. (Only WAC reads `groups`; the endpoint ACL
+    // reads the membership tables, which stay.)
+    e.state
+        .auth_db
+        .pool()
+        .get()
+        .unwrap()
+        .execute_batch("DROP TABLE groups")
+        .unwrap();
+
+    let (st, _, body) = get(app, Some(&e.bob), "/ldp/f/doc").await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body.contains("lookup failed"),
+        "the refusal names the failed lookup: {body}"
+    );
+    assert_eq!(
+        put_doc(app, &e.bob, "/ldp/f/new").await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert!(!ask(
+        &e.state,
+        &format!("ASK {{ <{BASE}/ldp/f/new> ?p ?o }}")
+    ));
+    assert_eq!(
+        patch_self(app, &e.bob, "/ldp/f/doc").await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        delete(app, &e.bob, "/ldp/f/doc").await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (st, _, _) = send(
+        app,
+        Method::POST,
+        "/ldp/f/",
+        Some(&e.bob),
+        &[("Content-Type", TURTLE), ("Slug", "posted")],
+        "<> <http://example.org/p> \"posted\" .",
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert_eq!(
+        get(app, Some(&e.bob), "/ldp/f/doc.acl").await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert!(ask(
+        &e.state,
+        &format!("ASK {{ <{BASE}/ldp/f/doc> <http://example.org/p> \"v\" }}")
+    ));
+    assert_eq!(
+        get(app, Some(&e.admin), "/ldp/f/doc").await.0,
+        StatusCode::OK
+    );
+}
+
+// ─── LDP_ROOT_ACL=owners ───────────────────────────────────────────────────────
+
+/// The `owners` seed (`LDP_ROOT_ACL=owners`) starts a fresh install closed:
+/// users reach only what they create or are granted; admins everything. The
+/// policy is applied through the seed function rather than the environment
+/// variable, which is process-wide and would race other tests.
+#[tokio::test]
+async fn security_owners_root_policy_starts_closed() {
+    let store = TripleStore::in_memory().unwrap();
+    assert!(wac::ensure_root_acl(&store, BASE, wac::RootAclPolicy::Owners).unwrap());
+    let e = env_over(store);
+    let app = &e.app;
+    assert!(
+        !acl_graph_has_subject_prefix(&e.state, &format!("{BASE}/ldp/.acl#authenticated")),
+        "the router build must not re-seed an already seeded root"
+    );
+    assert!(!wac::root_acl_is_open(&e.state.store, BASE).unwrap());
+
+    assert_eq!(
+        get(app, Some(&e.alice), "/ldp/").await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        put_doc(app, &e.alice, "/ldp/mine").await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (st, _, _) = send(
+        app,
+        Method::POST,
+        "/ldp/",
+        Some(&e.alice),
+        &[("Content-Type", TURTLE), ("Slug", "x")],
+        "<> <http://example.org/p> \"x\" .",
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // The admin opens one container to Alice; she owns what she creates there.
+    assert_eq!(
+        put_doc(app, &e.admin, "/ldp/team/readme").await.0,
+        StatusCode::NO_CONTENT
+    );
+    let team = format!("{BASE}/ldp/team");
+    let (st, body) = put_acl(
+        app,
+        &e.admin,
+        "/ldp/team/.acl",
+        &format!(
+            "<#alice> a acl:Authorization ; acl:accessTo <{team}> ; acl:default <{team}> ;\n\
+               acl:agent <urn:ots:user:alice> ; acl:mode acl:Read, acl:Append .\n"
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        get(app, Some(&e.alice), "/ldp/team/readme").await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        put_doc(app, &e.alice, "/ldp/team/readme").await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        put_doc(app, &e.alice, "/ldp/team/notes").await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        put_doc(app, &e.alice, "/ldp/team/notes").await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        get(app, Some(&e.bob), "/ldp/team/notes").await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        get(app, Some(&e.alice), "/ldp/").await.0,
+        StatusCode::FORBIDDEN
+    );
 }
 
 // ─── 11 ────────────────────────────────────────────────────────────────────────
