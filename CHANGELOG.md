@@ -13,6 +13,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
+  purely additive (a manifest without them behaves exactly as before).
+  `[account]` (`username`, `email`, `display_name`, `password_env`) names the
+  account the bundle's content is attributed to: created when missing, with
+  the system role `user` (never higher) and as an admin of the bundle's
+  organisation, its password the value of the environment variable
+  `password_env` names or, without one, a password nobody knows; an existing
+  account is used as it is. It owns the bundle's saved-query services, which no
+  longer wait for an instance admin to exist, and is the creator
+  (`dct:creator`) of every version the bundle's `[[data_models]]` publish.
+  `[[groups]]` (`name`, `role` = admin | member | viewer, `members`) are
+  matched by name inside the organisation and created when missing; members
+  are resolved by username, an existing membership keeps its role, and a
+  username that does not resolve yet is deferred to the next reseed. Because a
+  version with a creator is no longer "creator-less with the bundle's notes",
+  the bundle now marks every version it registers (`ver:seededBy
+  seed-bundle:<id>`) and recognises its versions by that marker first — a
+  version an earlier build registered is marked at the next reseed — so
+  attribution cannot break the manifest's `public = false` or a licence record.
+
 ### Fixed
 - **A published model's graphs read the same everywhere.** The graphs of a
   published model-registry version were served by

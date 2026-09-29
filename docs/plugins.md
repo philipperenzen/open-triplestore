@@ -80,6 +80,42 @@ description = "…"
 sparql = "SELECT ?p WHERE { ?p a <https://acme.example/catalog#Product> }"
 ```
 
+#### Identity and attribution keys (`[account]`, `[[groups]]`)
+
+Both are optional and purely additive: a manifest without them behaves
+exactly as before.
+
+```toml
+[account]                            # the account the bundle's content is attributed to
+username = "acme-steward"
+email = "steward@acme.example"
+display_name = "Acme data steward"   # optional
+password_env = "ACME_STEWARD_PASSWORD"   # optional: the environment variable holding
+                                         # the initial password (never the password itself)
+
+[[groups]]                           # teams inside the bundle's organisation
+name = "Data stewards"
+role = "member"                      # admin | member | viewer; default member
+members = ["acme-steward", "alice"]  # usernames
+```
+
+- **`[account]`** is created when no account with that username exists, with
+  the system role `user` (never higher: the manifest cannot mint an admin),
+  and is made an **admin of the bundle's organisation**. Its password is the
+  value of `password_env` when that variable is set at seed time; otherwise
+  the account gets a password nobody knows, so it signs in only once an admin
+  sets one (or through single sign-on). An account that already exists is
+  used as it is: its role, password and profile are never changed. The
+  account is the **owner of the bundle's saved-query services**, so they are
+  created on the first boot instead of waiting for an instance admin to
+  exist, and every version the bundle's `[[data_models]]` publishes carries
+  it as its creator (`dct:creator`).
+- **`[[groups]]`** are matched by `name` inside the organisation and created
+  when missing. Each `members` entry is resolved by username and added with
+  the group's `role`; an existing membership is left as it is. A username
+  that does not resolve yet (an account that registers later) is logged and
+  **deferred to the next reseed**, which runs at every boot.
+
 #### Layered-convention keys (reference models, conformance, shapes)
 
 A bundle can ship the *model layer* as well as datasets, so a dataset can
