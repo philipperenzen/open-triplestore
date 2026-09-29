@@ -1821,6 +1821,33 @@ pub fn graph_held_by_version(store: &TripleStore, graph_iri: &str) -> bool {
     graph_held_by_version_checked(store, graph_iri).unwrap_or(true)
 }
 
+/// Every graph some version record names as its base graph (`ver:graphIri`)
+/// or a sub-graph (`ver:subGraph`), whatever the version's status: one
+/// registry query, for a sweep over many graphs where
+/// [`graph_held_by_version_checked`] would cost one query each. `None` when
+/// the registry query fails, so the caller changes nothing.
+pub fn version_held_graphs(store: &TripleStore) -> Option<std::collections::HashSet<String>> {
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        SELECT DISTINCT ?g WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{
+          {{ ?v ver:graphIri ?g }} UNION {{ ?v ver:subGraph ?g }}
+        }} }}
+        "#
+    );
+    let QueryResults::Solutions(solutions) = store.query(&q).ok()? else {
+        return None;
+    };
+    let mut out = std::collections::HashSet::new();
+    for row in solutions {
+        let vals: Vec<Option<Term>> = row.ok()?.values().to_vec();
+        if let Some(g) = var_str(&vals, 0) {
+            out.insert(g);
+        }
+    }
+    Some(out)
+}
+
 /// [`graph_held_by_version`] without the fail-closed default: `None` when the
 /// name is not a valid IRI or the registry query fails. For a caller that
 /// removes something when a graph IS held (a cleanup), where a lookup that

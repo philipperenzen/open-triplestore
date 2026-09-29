@@ -34,6 +34,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `/data` (it answered `401` anonymously for a public model whose `/data`
   answered `200`). The API reference's auth table gains the model rows, and
   `tests/api_reference_auth.rs` probes them with a seeded vocabulary.
+- **A seed bundle can no longer attach a model-registry graph to a dataset.**
+  `apply_bundle` registered every `[[datasets.graphs]]` IRI through the internal
+  path, past the refusal `POST /api/datasets/:id/graphs` applies to graphs the
+  model registry holds. Seen in the field: the boot sweep released a legacy
+  registration of a registry graph, and the bundle re-added the same graph in
+  the same boot, making the model dataset-scoped again. A bundle dataset graph
+  the registry holds (a version's base graph or sub-graph, or a graph under
+  `{base}/data-model/`) is now skipped with a warning that names the rule, is
+  not counted as registered (`SeedReport::graphs_refused` counts it), and the
+  sweep that releases such registrations runs on every boot — one registry
+  query — so a row that slips in by any path does not survive the next start.
 
 ### Changed
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was

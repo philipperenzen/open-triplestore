@@ -213,6 +213,11 @@ pub struct SeedReport {
     pub datasets_created: Vec<String>,
     /// Graphs registered to datasets (created or verified).
     pub graphs_registered: usize,
+    /// `[[datasets.graphs]]` entries the bundle did not register because the
+    /// graph belongs to the model registry (a version's base graph or
+    /// sub-graph, or a graph under `{base}/data-model/`): the rule
+    /// `POST /api/datasets/:id/graphs` applies, warned about per graph.
+    pub graphs_refused: usize,
     /// Graphs whose data was loaded into a pre-existing dataset (an earlier
     /// interrupted seed left them registered but empty).
     pub graphs_backfilled: usize,
@@ -462,6 +467,26 @@ pub fn apply_bundle(state: &AppState, bundle: &Bundle) -> anyhow::Result<SeedRep
 
         for g in &ds.graphs {
             let iri = expand_base(&g.iri, base_url);
+            // The rule `POST /api/datasets/:id/graphs` applies, admins
+            // included (`dataset_graph::gate_dataset_graph_target`): a graph
+            // the model registry holds is never a dataset's. Registering it
+            // here would re-attach what the boot sweep just released, make the
+            // dataset's readers see a private model and its editors overwrite
+            // and delete it. Models are managed through the data-model API
+            // (`[[data_models]]` for a bundle). Fails closed: a registry that
+            // cannot be read counts as holding the graph.
+            if dataset_graph::graph_held_by_model_registry(&state.store, base_url, &iri) {
+                tracing::warn!(
+                    bundle = %bundle.id,
+                    dataset = %ds.slug,
+                    graph = %iri,
+                    "graph belongs to the model registry, so it is not registered to the dataset \
+                     (the rule POST /api/datasets/:id/graphs applies: a dataset may not claim a \
+                     model-registry graph); declare it under [[data_models]] instead"
+                );
+                report.graphs_refused += 1;
+                continue;
+            }
             // (Re)load the bundled data only while the target graph is empty:
             // a fresh seed, or a previous seed that registered the graph but
             // never populated it. A graph that already holds triples is left
@@ -1244,6 +1269,132 @@ mod tests {
                 .unwrap_or(0)
                 > 0,
             "instances graph loaded from TriG payload"
+        );
+    }
+
+    /// The `WARN`-and-up lines a closure logs, for asserting what a bundle
+    /// warned about. `tracing_subscriber`'s writer is cloned per line, so the
+    /// buffer sits behind an `Arc`.
+    #[derive(Clone, Default)]
+    struct LogSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+        type Writer = LogSink;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn with_captured_warnings<T>(f: impl FnOnce() -> T) -> (T, String) {
+        let sink = LogSink::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(sink.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let out = tracing::subscriber::with_default(subscriber, f);
+        let logs = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+        (out, logs)
+    }
+
+    /// A `[[datasets.graphs]]` entry naming a graph the bundle's own
+    /// `[[data_models]]` version holds is not registered to the dataset — the
+    /// rule `POST /api/datasets/:id/graphs` applies — and says so; the
+    /// dataset ends up holding only its other graph. The boot sweep that
+    /// releases such rows runs on every start, so nothing re-attaches what it
+    /// released.
+    #[test]
+    fn a_dataset_graph_the_model_registry_holds_is_not_registered() {
+        let state = test_state();
+        let mut b = model_bundle("held", "held-model", None);
+        let model_graph = "https://example.org/otl/def/".to_string();
+        let own_graph = "https://example.org/held/instances".to_string();
+        b.datasets = vec![BundleDataset {
+            slug: "held-ds".into(),
+            name: "Held".into(),
+            description: None,
+            visibility: Visibility::Public,
+            graphs: vec![
+                BundleGraph {
+                    iri: model_graph.clone(),
+                    role: Some(GraphKind::Model),
+                    data: None,
+                },
+                BundleGraph {
+                    iri: own_graph.clone(),
+                    role: None,
+                    data: Some((
+                        Cow::Borrowed("<https://example.org/held/a> a <https://example.org/T> ."),
+                        Fmt::Turtle,
+                    )),
+                },
+            ],
+            quads: vec![],
+            saved_queries: vec![],
+            conforms_to: None,
+            shape_graphs: Vec::new(),
+        }];
+
+        let (report, logs) = with_captured_warnings(|| apply_bundle(&state, &b).unwrap());
+        assert_eq!(report.models_registered, 1);
+        assert_eq!(report.graphs_registered, 1, "only the dataset's own graph");
+        assert_eq!(report.graphs_refused, 1);
+        assert!(
+            logs.contains("belongs to the model registry")
+                && logs.contains("POST /api/datasets/:id/graphs")
+                && logs.contains(&model_graph),
+            "the refusal names the rule and the graph: {logs}"
+        );
+        assert_eq!(
+            state.auth_db.list_dataset_graphs("held-ds").unwrap(),
+            vec![own_graph.clone()]
+        );
+        // The model's graph is intact, and still the version's.
+        assert!(state.store.graph_count_cached(Some(&model_graph)).unwrap() > 0);
+        assert!(crate::data_models::registry::graph_held_by_version(
+            &state.store,
+            &model_graph
+        ));
+
+        // What the field report saw: a legacy row released by the boot sweep,
+        // then the bundle applied in the same boot. The sweep releases the
+        // row, the bundle does not put it back, and a second sweep (the next
+        // boot) still finds nothing to do.
+        state
+            .auth_db
+            .add_dataset_graph("held-ds", &model_graph)
+            .unwrap();
+        let released = dataset_graph::release_model_registry_claims(
+            &state.store,
+            &state.auth_db,
+            &state.base_url,
+        )
+        .unwrap();
+        assert_eq!(released, 1);
+        let (report, _) = with_captured_warnings(|| apply_bundle(&state, &b).unwrap());
+        assert_eq!(report.graphs_refused, 1);
+        assert_eq!(
+            state.auth_db.list_dataset_graphs("held-ds").unwrap(),
+            vec![own_graph]
+        );
+        assert_eq!(
+            dataset_graph::release_model_registry_claims(
+                &state.store,
+                &state.auth_db,
+                &state.base_url
+            )
+            .unwrap(),
+            0
         );
     }
 

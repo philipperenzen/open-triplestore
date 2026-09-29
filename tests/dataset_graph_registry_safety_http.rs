@@ -10,8 +10,8 @@
 //! * a registration made before that refusal existed only loses its row on a
 //!   detach, a dataset delete or an organisation delete: the stored graph
 //!   stays;
-//! * a one-time boot cleanup releases those old registrations, keeping a
-//!   shapes-role graph bound for validation;
+//! * a boot cleanup, run on every start, releases those old registrations,
+//!   keeping a shapes-role graph bound for validation;
 //! * a dataset still deletes its own graphs, and keeps a graph another dataset
 //!   still uses.
 
@@ -512,11 +512,11 @@ async fn a_dataset_still_deletes_its_own_graphs() {
     assert_eq!(triple_count(&state, external), 0, "the last holder took it");
 }
 
-/// The one-time boot cleanup: registrations of registry graphs made before
-/// they were refused are released. The graphs stop being dataset-scoped for
+/// The boot cleanup: registrations of registry graphs made before they were
+/// refused are released. The graphs stop being dataset-scoped for
 /// reads, a shapes-role row stays bound for validation, the dataset's shapes
 /// graph setting (which scopes no reads) is kept for its validation, other
-/// registrations are untouched, and the sweep runs once.
+/// registrations are untouched, and the sweep runs on every boot.
 #[tokio::test]
 async fn the_boot_cleanup_releases_old_registrations_of_registry_graphs() {
     let f = fixture().await;
@@ -566,17 +566,16 @@ async fn the_boot_cleanup_releases_old_registrations_of_registry_graphs() {
     assert!(!db.dataset_has_graph("mine", BUNDLE_GRAPH).unwrap());
     f.assert_untouched("after the cleanup");
 
-    // Once: a row made afterwards (by a path that bypasses the gate) stays for
-    // the gate and the delete filter to deal with.
+    // Every boot: a row made afterwards (by a path that bypasses the gate)
+    // does not survive the next sweep.
     db.add_dataset_graph("mine", BUNDLE_GRAPH).unwrap();
+    assert!(dataset_graph::model_registry_claims_released(db));
     assert_eq!(
         dataset_graph::release_model_registry_claims(&f.state.store, db, &base).unwrap(),
-        0
+        1
     );
-    assert!(db
-        .list_dataset_graphs("mine")
-        .unwrap()
-        .contains(&BUNDLE_GRAPH.to_string()));
+    assert_eq!(db.list_dataset_graphs("mine").unwrap(), vec![own]);
+    f.assert_untouched("after the second sweep");
 }
 
 /// The registry lookup names a version's base graph and sub-graphs, and fails
