@@ -13,6 +13,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **SHACL result paths no longer render with a stray `>`.** The backend
+  serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
+  `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if
+  it were a bare IRI, showing `ex.org:label>`. The dataset validation dialog,
+  `/validation`, `/shacl/results`, the shape-graph meta report and the source
+  dry-run findings now shorten every `<…>` term and keep the operators, so a
+  sequence path reads `ex.org:a/ex.org:b`; the tooltip keeps the raw path.
+
 ### Changed
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That

@@ -7,6 +7,8 @@
 // must never treat the envelope itself as the report — these helpers normalize
 // both shapes into one.
 
+import { shortenIRI } from './rdf-utils.js';
+
 export interface ValidationResultRow {
   severity?: string;
   focus_node?: string;
@@ -82,4 +84,25 @@ export function validationErrorMessage(err: unknown, fallback = 'Validation fail
     if (typeof msg === 'string' && msg.trim()) return msg.trim();
   }
   return fallback;
+}
+
+/**
+ * Display form of a result's `path`. The backend serialises a SHACL property
+ * path in SPARQL path syntax, so a plain predicate arrives as `<http://…>` and
+ * the composite forms as `^<a>` (inverse), `<a>/<b>` (sequence), `<a>|<b>`
+ * (alternative) and `<a>*` / `<a>+` / `<a>?`. Every `<…>` term is shortened
+ * with `shorten` (default `shortenIRI`) and the operators are kept, so
+ * `<http://ex.org/a>/<http://ex.org/b>` renders as `ex.org:a/ex.org:b`. An
+ * unbracketed full IRI is shortened as a whole; a prefixed name such as
+ * `ex:label` passes through unchanged. Callers keep the raw path for the
+ * tooltip.
+ */
+export function formatShaclPath(path: string, shorten: (iri: string) => string = shortenIRI): string {
+  if (typeof path !== 'string') return path == null ? '' : String(path);
+  if (!path) return '';
+  if (!path.includes('<')) {
+    // A bare term: a full IRI has a namespace boundary, a prefixed name does not.
+    return /[/#]/.test(path) ? shorten(path) : path;
+  }
+  return path.replace(/<([^<>]*)>/g, (_m, iri: string) => shorten(iri));
 }
