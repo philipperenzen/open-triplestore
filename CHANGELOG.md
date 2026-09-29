@@ -66,6 +66,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not counted as registered (`SeedReport::graphs_refused` counts it), and the
   sweep that releases such registrations runs on every boot — one registry
   query — so a row that slips in by any path does not survive the next start.
+- **`cargo check --all-targets --features full` builds without `test-utils`.**
+  `tests/replication.rs`, `tests/ldp_conformance.rs` and `tests/query_cache.rs`
+  use probes the library only exports with the `test-utils` feature
+  (`InProcessLeader`, `AppState::test_default_with_store`, `query_cache_len`),
+  so checking every target without it failed. Those three test targets are now
+  declared in `Cargo.toml` with `required-features = ["test-utils"]`; the CI
+  test job enables the feature, so they still run there, and auto-discovery of
+  every other `tests/*.rs` is unaffected. The conformance table's totals are
+  regenerated for the three suites this change set adds.
 
 ### Security
 - **Every configured secret goes through the secrets module.** `JWT_SECRET`,
