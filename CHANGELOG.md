@@ -28,6 +28,41 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   says what the copy is and that part of it has no published licence. `NOTICE`
   and `vocab/NOTICE.md` list DOAP under Apache-2.0.
 
+### Added
+- **Per-resource access control for LDP, with Web Access Control.** Every
+  resource under `/ldp/` now has an ACL at `R.acl` (`C.acl` or `C/.acl` for a
+  container), in the Solid WAC model (`acl:Authorization`, `acl:accessTo`,
+  `acl:default`, `acl:agent` / `acl:agentGroup` / `acl:agentClass`,
+  `acl:mode`), advertised with `Link: <R.acl>; rel="acl"` and `WAC-Allow` on
+  `GET`/`HEAD`. Agents are this store's principals by stable IRI
+  (`urn:ots:user:…`, `urn:ots:org:…`, `urn:ots:group:…`, `urn:ots:role:…`),
+  plus `acl:AuthenticatedAgent` and `foaf:Agent`; `GET /api/auth/me` returns
+  the caller's `agent_iri`. A resource without an ACL inherits the nearest
+  container's `acl:default`; whoever creates a resource owns it
+  (`R.acl#owner`: Read, Write, Control). The root ACL is seeded once, open by
+  default (`LDP_ROOT_ACL=open`: every signed-in user may read, write and
+  append, as before) or closed (`LDP_ROOT_ACL=owners`: admins only), and is
+  edited like any other. A `foaf:Agent` Read grant makes a resource readable
+  without a token. Not in scope: WebID-TLS, Solid-OIDC, `acl:origin`. See
+  `docs/ldp.md`, "Access control".
+
+### Security
+- **LDP resources were readable and writable by every signed-in user, and
+  `PATCH` could rewrite the whole default graph.** Every `/ldp/` verb now
+  checks the resource's WAC ACL: `acl:Read` for `GET`/`HEAD`, `acl:Write` for
+  `PUT`/`PATCH`/`DELETE`, `acl:Append` on the container for `POST` and a
+  creating `PUT`, `acl:Control` to read or change an ACL. Admins pass; a
+  failed membership or ACL lookup refuses the request. `PATCH` no longer runs
+  its SPARQL Update against the store: it is restricted to `INSERT DATA`,
+  `DELETE DATA` and `DELETE/INSERT WHERE` on the default graph, evaluated on
+  the resource's own triples only, and its result may not describe another
+  resource under `/ldp/` or a server-managed triple; `PUT` and `POST` bodies
+  are held to the same rule, so a write authorized for one resource cannot
+  reach another through its body. On upgrade the open root ACL keeps every
+  request that worked before working; operators who want a closed space set
+  `LDP_ROOT_ACL=owners` before first start or tighten `/ldp/.acl` afterwards.
+  Tests: `tests/ldp_wac_security_http.rs`.
+
 ## [0.7.0] — 2026-09-28
 
 SQL datasources end to end: relational data is profiled, mapped, dry-run,
