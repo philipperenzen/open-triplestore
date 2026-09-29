@@ -676,14 +676,29 @@ impl axum::extract::FromRef<AppState> for OidcProviderState {
 /// response and fills the headers in when they are missing. A plain (non-preflight)
 /// `OPTIONS` still reaches the handler, which sets them — `accept-post` is then
 /// already present and this is a no-op. The values match `ldp::handler::ldp_options`.
+/// The `Link: rel="acl"` every LDP response carries is filled in the same way.
 async fn ldp_options_capabilities(
+    axum::extract::State(state): axum::extract::State<AppState>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let is_ldp_options = req.method() == Method::OPTIONS && req.uri().path().starts_with("/ldp/");
+    let path = req.uri().path().to_string();
     let mut resp = next.run(req).await;
     if is_ldp_options && !resp.headers().contains_key("accept-post") {
         let headers = resp.headers_mut();
+        #[cfg(feature = "ldp")]
+        if let Some(iri) = crate::ldp::wac::iri_for_request_path(&state.base_url, &path) {
+            let acl = match crate::ldp::wac::governed_resource(&iri) {
+                Some(_) => iri.clone(),
+                None => crate::ldp::wac::acl_iri(&iri),
+            };
+            if let Ok(v) = HeaderValue::from_str(&format!("<{acl}>; rel=\"acl\"")) {
+                headers.insert(HeaderName::from_static("link"), v);
+            }
+        }
+        #[cfg(not(feature = "ldp"))]
+        let _ = (&state, &path);
         headers.insert(
             axum::http::header::ALLOW,
             HeaderValue::from_static("GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"),
@@ -2081,7 +2096,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         // Re-attach the LDP capability headers that the CORS preflight short-circuit
         // would otherwise drop. Must sit just outside the CORS layer so it runs on the
         // preflight response CORS produced (see `ldp_options_capabilities`).
-        .layer(middleware::from_fn(ldp_options_capabilities))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            ldp_options_capabilities,
+        ))
         .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("content-security-policy"),
             csp_value,

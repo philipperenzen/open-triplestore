@@ -122,13 +122,240 @@ fn safe_binary_content_type(ct: &str) -> String {
 
 /// Record `user` as the owner of a resource this request created.
 fn own_created(state: &AppState, iri: &str, user: &AuthenticatedUser) -> Result<(), Response> {
-    wac::write_owner_acl(&state.store, iri, &user.user_id).map_err(|e| {
+    wac::write_owner_acl(&state.store, iri, &user.user_id, is_container(state, iri)).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("recording the owner of <{iri}>: {e}"),
         )
             .into_response()
     })
+}
+
+// ─── WAC ───────────────────────────────────────────────────────────────────────
+
+fn forbidden(msg: String) -> Response {
+    (StatusCode::FORBIDDEN, msg).into_response()
+}
+
+/// The caller as WAC sees them. A failed membership lookup refuses the
+/// request: access control that cannot be evaluated grants nothing.
+fn caller_agent(
+    state: &AppState,
+    user: Option<&AuthenticatedUser>,
+) -> Result<wac::Agent, Response> {
+    wac::Agent::resolve(&state.auth_db, user).map_err(|e| {
+        tracing::error!("ldp: WAC membership lookup failed, refusing the request: {e}");
+        forbidden("access control lookup failed (memberships); the request is refused".to_string())
+    })
+}
+
+/// Refuse unless `agent` holds `mode` on `iri` under its effective ACL.
+fn require_mode(
+    state: &AppState,
+    agent: &wac::Agent,
+    iri: &str,
+    mode: wac::Mode,
+) -> Result<(), Response> {
+    match wac::allowed(
+        &state.store,
+        agent,
+        iri,
+        &wac::root_iri(&state.base_url),
+        mode,
+    ) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(forbidden(format!(
+            "acl:{} on <{iri}> is not granted by its access control list (Link rel=\"acl\")",
+            capitalize(mode.label())
+        ))),
+        Err(e) => {
+            tracing::error!("ldp: WAC lookup for <{iri}> failed, refusing the request: {e}");
+            Err(forbidden(
+                "access control lookup failed; the request is refused".to_string(),
+            ))
+        }
+    }
+}
+
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+/// The `WAC-Allow` header for `iri`: the caller's modes and the public ones.
+fn wac_allow_value(state: &AppState, agent: &wac::Agent, iri: &str) -> Option<HeaderValue> {
+    let root = wac::root_iri(&state.base_url);
+    let user_modes = wac::granted_modes(&state.store, agent, iri, &root).ok()?;
+    let public_modes =
+        wac::granted_modes(&state.store, &wac::Agent::anonymous(), iri, &root).ok()?;
+    HeaderValue::from_str(&wac::wac_allow_header(&user_modes, &public_modes)).ok()
+}
+
+const WAC_ALLOW: &str = "wac-allow";
+
+fn acl_method_not_allowed() -> Response {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        [(axum::http::header::ALLOW, "GET, HEAD, PUT, DELETE, OPTIONS")],
+        "an ACL resource is read with GET and replaced with PUT; POST and PATCH are not supported",
+    )
+        .into_response()
+}
+
+/// Whether the resource an ACL governs is there to be governed. The root
+/// container always is.
+fn governed_exists(state: &AppState, governed: &str) -> bool {
+    let canonical = wac::canonical(governed);
+    canonical == wac::root_iri(&state.base_url)
+        || container::resource_exists(&state.store, canonical)
+        || container::resource_exists(&state.store, &format!("{canonical}/"))
+}
+
+/// Whether `iri` is an LDP container, under either spelling.
+fn is_container(state: &AppState, iri: &str) -> bool {
+    let canonical = wac::canonical(iri);
+    let is = |i: &str| {
+        matches!(
+            container::get_container_type(&state.store, i),
+            ContainerType::Basic | ContainerType::Direct | ContainerType::Indirect
+        )
+    };
+    canonical == wac::root_iri(&state.base_url) || is(canonical) || is(&format!("{canonical}/"))
+}
+
+/// GET `R.acl`: the authorizations of `R`, for a caller with `acl:Control` on `R`.
+fn acl_get(state: &AppState, agent: &wac::Agent, governed: &str, headers: &HeaderMap) -> Response {
+    if let Err(r) = require_mode(state, agent, governed, wac::Mode::Control) {
+        return r;
+    }
+    if !governed_exists(state, governed) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let nt = match wac::acl_ntriples(&state.store, governed) {
+        Ok(nt) => nt,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    if nt.is_empty() {
+        // No ACL of its own: the resource inherits (Solid clients read a 404 so).
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let (out_format, out_content_type) = negotiate_ldp_format(headers);
+    let etag = container::compute_etag(&nt);
+    let body = reserialize_ntriples(&nt, out_format);
+    let acl = wac::acl_iri(governed);
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_str(out_content_type)
+            .unwrap_or_else(|_| HeaderValue::from_static("text/turtle")),
+    );
+    resp_headers.insert(axum::http::header::VARY, HeaderValue::from_static("Accept"));
+    resp_headers.insert(
+        HeaderName::from_static("etag"),
+        HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("\"x\"")),
+    );
+    resp_headers.insert(
+        HeaderName::from_static("link"),
+        HeaderValue::from_str(&build_link_header(
+            &ContainerType::RdfSource,
+            &state.base_url,
+            &acl,
+        ))
+        .unwrap_or_else(|_| HeaderValue::from_static("")),
+    );
+    (StatusCode::OK, resp_headers, body).into_response()
+}
+
+/// PUT `R.acl`: replace the client-written authorizations of `R`. Needs
+/// `acl:Control` on `R`; the body is validated whole before anything is written.
+fn acl_put(
+    state: &AppState,
+    agent: &wac::Agent,
+    governed: &str,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Response {
+    if let Err(r) = require_mode(state, agent, governed, wac::Mode::Control) {
+        return r;
+    }
+    if !governed_exists(state, governed) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("text/turtle");
+    let format = if content_type.contains("application/ld+json") {
+        oxigraph::io::RdfFormat::JsonLd {
+            profile: Default::default(),
+        }
+    } else if content_type.contains("application/rdf+xml") {
+        oxigraph::io::RdfFormat::RdfXml
+    } else if content_type.contains("text/turtle") || content_type.contains("application/n-triples")
+    {
+        oxigraph::io::RdfFormat::Turtle
+    } else {
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "an ACL is written as text/turtle, application/ld+json or application/rdf+xml",
+        )
+            .into_response();
+    };
+    let text = match std::str::from_utf8(body) {
+        Ok(s) => s,
+        Err(_) => return (StatusCode::BAD_REQUEST, "Body must be valid UTF-8").into_response(),
+    };
+    let triples =
+        match wac::validate_acl_body(text, format, governed, is_container(state, governed)) {
+            Ok(t) => t,
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, format!("invalid ACL: {e}")).into_response()
+            }
+        };
+    let had_own = match wac::has_client_acl(&state.store, governed) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    if let Err(e) = wac::replace_client_acl(&state.store, governed, &triples) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+    }
+    let acl = wac::acl_iri(governed);
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert(
+        HeaderName::from_static("link"),
+        HeaderValue::from_str(&build_link_header(
+            &ContainerType::RdfSource,
+            &state.base_url,
+            &acl,
+        ))
+        .unwrap_or_else(|_| HeaderValue::from_static("")),
+    );
+    let status = if had_own {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::CREATED
+    };
+    (status, resp_headers).into_response()
+}
+
+/// DELETE `R.acl`: drop the client-written authorizations of `R`, which then
+/// inherits again. The owner grant stays; it goes with the resource.
+fn acl_delete(state: &AppState, agent: &wac::Agent, governed: &str) -> Response {
+    if let Err(r) = require_mode(state, agent, governed, wac::Mode::Control) {
+        return r;
+    }
+    match wac::has_client_acl(&state.store, governed) {
+        Ok(true) => {}
+        Ok(false) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+    match wac::delete_client_acl(&state.store, governed) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
 }
 
 // ─── Query parameters ─────────────────────────────────────────────────────────
@@ -338,16 +565,33 @@ fn container_iri_for(base_url: &str, path: &str) -> String {
 /// it resolves to the empty path (the container IRI `{base}/ldp/`).
 pub async fn ldp_get(
     State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
     path: Option<Path<String>>,
     headers: HeaderMap,
     Query(params): Query<LdpPageParams>,
 ) -> Response {
+    let user = user.map(|Extension(u)| u);
     let path = path.map(|p| p.0).unwrap_or_default();
     let base = state.base_url.as_ref();
     let iri = resource_iri(base, &path);
     if !valid_iri(&iri) {
         return (StatusCode::BAD_REQUEST, "Invalid resource path").into_response();
     }
+
+    // WAC: `acl:Read` on the resource, `acl:Control` to read its ACL. An
+    // anonymous caller only gets here when `require_auth` found a
+    // `foaf:Agent` grant; the check is repeated so the two cannot disagree.
+    let agent = match caller_agent(&state, user.as_ref()) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    if let Some(governed) = wac::governed_resource(&iri) {
+        return acl_get(&state, &agent, governed, &headers);
+    }
+    if let Err(r) = require_mode(&state, &agent, &iri, wac::Mode::Read) {
+        return r;
+    }
+    let wac_allow = wac_allow_value(&state, &agent, &iri);
 
     let page_size = params.page_size.unwrap_or(100).min(1000);
     let page = params.page.unwrap_or(0);
@@ -379,6 +623,9 @@ pub async fn ldp_get(
                     HeaderValue::from_str(&link_val)
                         .unwrap_or_else(|_| HeaderValue::from_static("")),
                 );
+                if let Some(v) = wac_allow {
+                    resp_headers.insert(HeaderName::from_static(WAC_ALLOW), v);
+                }
                 (StatusCode::OK, resp_headers, data).into_response()
             }
             Ok(None) => StatusCode::NOT_FOUND.into_response(),
@@ -478,6 +725,9 @@ pub async fn ldp_get(
         HeaderName::from_static("preference-applied"),
         HeaderValue::from_static(prefer.applied_header()),
     );
+    if let Some(v) = wac_allow {
+        resp_headers.insert(HeaderName::from_static(WAC_ALLOW), v);
+    }
     resp_headers.insert(
         HeaderName::from_static("link"),
         HeaderValue::from_str(&link_val).unwrap_or_else(|_| HeaderValue::from_static("")),
@@ -508,6 +758,7 @@ pub async fn ldp_get(
 /// container `/ldp/` (no `*path` segment) resolves to the empty path.
 pub async fn ldp_head(
     State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
     path: Option<Path<String>>,
     headers: HeaderMap,
 ) -> Response {
@@ -516,7 +767,14 @@ pub async fn ldp_head(
     // the unfiltered DESCRIBE, omitted Vary, and knew nothing about binary
     // resources — so HEAD and GET disagreed on Content-Type and ETag for the
     // same resource. Delegating makes divergence impossible.
-    let mut resp = ldp_get(State(state), path, headers, Query(LdpPageParams::default())).await;
+    let mut resp = ldp_get(
+        State(state),
+        user,
+        path,
+        headers,
+        Query(LdpPageParams::default()),
+    )
+    .await;
     *resp.body_mut() = axum::body::Body::empty();
     resp
 }
@@ -530,7 +788,17 @@ pub async fn ldp_constraints() -> Response {
 This document is the target of the `Link: rel=\"http://www.w3.org/ns/ldp#constrainedBy\"`\n\
 header on every `/ldp/` response (LDP 1.0 §4.2.1.6).\n\
 \n\
-- Authentication is required for every `/ldp/` request.\n\
+- Authentication is required for every `/ldp/` request, except `GET`/`HEAD` of\n\
+  a resource whose access control list grants `foaf:Agent` `acl:Read`.\n\
+- Access control is Web Access Control (WAC): every resource `R` has an ACL at\n\
+  `R.acl` (`C/.acl` for a container), linked with `Link: rel=\"acl\"`. `GET`/`HEAD`\n\
+  need `acl:Read`, `PUT`/`PATCH`/`DELETE` `acl:Write`, `POST` `acl:Append` on the\n\
+  container, and reading or writing an ACL `acl:Control` on the resource it\n\
+  governs. A resource without an ACL of its own inherits the nearest container's\n\
+  `acl:default`. The creator of a resource holds Read, Write and Control on it\n\
+  (`R.acl#owner`, server-managed). Names ending in `.acl` are reserved.\n\
+- `WAC-Allow: user=\"…\", public=\"…\"` on `GET`/`HEAD` lists the caller's and the\n\
+  public modes.\n\
 - `POST` creates a member of the target container. `Slug` is sanitised to a\n\
   URL-safe path segment; a missing or empty Slug yields a UUID.\n\
 - `POST` and `PUT` accept `text/turtle`, `application/ld+json` and\n\
@@ -575,6 +843,18 @@ pub async fn ldp_post(
     if !valid_iri(&container_iri) {
         return (StatusCode::BAD_REQUEST, "Invalid container path").into_response();
     }
+    if wac::governed_resource(&container_iri).is_some() {
+        return acl_method_not_allowed();
+    }
+
+    // WAC: creating a member needs `acl:Append` (or Write) on the container.
+    let agent = match caller_agent(&state, Some(&user)) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    if let Err(r) = require_mode(&state, &agent, &container_iri, wac::Mode::Append) {
+        return r;
+    }
 
     // Determine container type before creating member
     let container_ct = container::get_container_type(&state.store, &container_iri);
@@ -602,6 +882,13 @@ pub async fn ldp_post(
     let member_iri = format!("{container_base}/{slug}");
     if !valid_iri(&member_iri) {
         return (StatusCode::BAD_REQUEST, "Invalid member IRI").into_response();
+    }
+    if wac::governed_resource(&member_iri).is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "names ending in .acl are reserved for access control lists",
+        )
+            .into_response();
     }
 
     // Determine content type from request header
@@ -862,10 +1149,28 @@ pub async fn ldp_put(
     if !valid_iri(&iri) {
         return (StatusCode::BAD_REQUEST, "Invalid resource path").into_response();
     }
+    let agent = match caller_agent(&state, Some(&user)) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    if let Some(governed) = wac::governed_resource(&iri) {
+        return acl_put(&state, &agent, governed, &headers, &body);
+    }
     let container = container_iri_for(base, &path);
     let existed = container::resource_exists(&state.store, &iri);
     let container_existed = container == iri
         || container::get_container_type(&state.store, &container) != ContainerType::Unknown;
+
+    // WAC: replacing needs `acl:Write` on the resource; creating needs
+    // `acl:Append` (or Write) on the container it lands in.
+    let gate = if existed || container == iri {
+        require_mode(&state, &agent, &iri, wac::Mode::Write)
+    } else {
+        require_mode(&state, &agent, &container, wac::Mode::Append)
+    };
+    if let Err(r) = gate {
+        return r;
+    }
 
     // If-Match check
     if let Some(if_match) = headers.get("if-match") {
@@ -995,6 +1300,18 @@ pub async fn ldp_patch(
         )
             .into_response();
     }
+    if wac::governed_resource(&iri).is_some() {
+        return acl_method_not_allowed();
+    }
+
+    // WAC: `acl:Write` on the resource.
+    let agent = match caller_agent(&state, Some(&user)) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    if let Err(r) = require_mode(&state, &agent, &iri, wac::Mode::Write) {
+        return r;
+    }
 
     // 404 if resource doesn't exist
     if !container::resource_exists(&state.store, &iri) {
@@ -1046,12 +1363,27 @@ pub async fn ldp_patch(
 /// DELETE /ldp/*path — Remove an LDP resource and its containment triple.
 ///
 /// Also removes Direct / Indirect Container membership triples.
-pub async fn ldp_delete(State(state): State<AppState>, path: Option<Path<String>>) -> Response {
+pub async fn ldp_delete(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    path: Option<Path<String>>,
+) -> Response {
     let path = path.map(|p| p.0).unwrap_or_default();
     let base = state.base_url.as_ref();
     let iri = resource_iri(base, &path);
     if !valid_iri(&iri) {
         return (StatusCode::BAD_REQUEST, "Invalid resource path").into_response();
+    }
+    let agent = match caller_agent(&state, Some(&user)) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    if let Some(governed) = wac::governed_resource(&iri) {
+        return acl_delete(&state, &agent, governed);
+    }
+    // WAC: `acl:Write` on the resource.
+    if let Err(r) = require_mode(&state, &agent, &iri, wac::Mode::Write) {
+        return r;
     }
     let container = container_iri_for(base, &path);
 

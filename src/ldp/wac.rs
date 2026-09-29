@@ -54,7 +54,8 @@ use crate::store::TripleStore;
 
 /// The system graph every LDP authorization lives in.
 pub const ACL_GRAPH: &str = "urn:system:ldp-acl";
-pub const ACL_NS: &str = "http://www.w3.org/ns/auth/acl#";
+#[cfg(test)]
+const ACL_NS: &str = "http://www.w3.org/ns/auth/acl#";
 pub const FOAF_AGENT: &str = "http://xmlns.com/foaf/0.1/Agent";
 pub const ACL_AUTHENTICATED_AGENT: &str = "http://www.w3.org/ns/auth/acl#AuthenticatedAgent";
 const ACL_AUTHORIZATION: &str = "http://www.w3.org/ns/auth/acl#Authorization";
@@ -204,10 +205,25 @@ pub fn root_iri(base_url: &str) -> String {
     format!("{base_url}/ldp/")
 }
 
-/// The ACL resource governing `resource_iri`: `R.acl`, which for a container
-/// `{c}/` is `{c}/.acl`.
+/// The one spelling of a resource IRI the ACL graph is keyed by.
+///
+/// The LDP layer names a container `{c}` when it is created by `POST` and
+/// `{c}/` when it is the parent of a `PUT` path, and clients address it either
+/// way. Both must resolve to one ACL, so a trailing slash is dropped; the root
+/// `{base}/ldp/` keeps its slash (there is no other spelling of it).
+pub fn canonical(resource_iri: &str) -> &str {
+    if resource_iri.ends_with("/ldp/") {
+        resource_iri
+    } else {
+        resource_iri.trim_end_matches('/')
+    }
+}
+
+/// The ACL resource governing `resource_iri`: `R.acl`; `{base}/ldp/.acl` for
+/// the root. A container `{c}` is governed by `{c}.acl`, and `{c}/.acl` names
+/// the same ACL (see [`canonical`]).
 pub fn acl_iri(resource_iri: &str) -> String {
-    format!("{resource_iri}.acl")
+    format!("{}.acl", canonical(resource_iri))
 }
 
 /// The resource an ACL IRI or request path governs, if it is one (`…/x.acl`
@@ -216,31 +232,28 @@ pub fn governed_resource(acl_iri_or_path: &str) -> Option<&str> {
     acl_iri_or_path.strip_suffix(".acl")
 }
 
-pub fn is_container_iri(iri: &str) -> bool {
-    iri.ends_with('/')
-}
-
 /// The IRI a request path under `/ldp/` names, or `None` outside it.
 pub fn iri_for_request_path(base_url: &str, request_path: &str) -> Option<String> {
     let rest = request_path.strip_prefix("/ldp/")?;
     Some(format!("{base_url}/ldp/{rest}"))
 }
 
-/// The containers above `resource_iri`, nearest first, ending with `root`.
-/// Empty for the root itself or for an IRI outside the root.
+/// The containers above `resource_iri` in canonical spelling, nearest first,
+/// ending with `root`. Empty for the root itself or for an IRI outside it.
 pub fn ancestors(resource_iri: &str, root: &str) -> Vec<String> {
     let mut out = Vec::new();
+    let resource_iri = canonical(resource_iri);
     if resource_iri == root || !resource_iri.starts_with(root) {
         return out;
     }
-    let mut cur = resource_iri.trim_end_matches('/');
-    while cur.len() >= root.len() {
+    let mut cur = resource_iri;
+    while cur.len() > root.len() {
         let Some(slash) = cur.rfind('/') else { break };
         let parent = &resource_iri[..slash + 1];
         if parent.len() < root.len() {
             break;
         }
-        out.push(parent.to_string());
+        out.push(canonical(parent).to_string());
         if parent == root {
             break;
         }
@@ -364,6 +377,7 @@ pub fn effective_authorizations(
     resource_iri: &str,
     root: &str,
 ) -> Result<Vec<Authorization>, String> {
+    let resource_iri = canonical(resource_iri);
     let (owner, client) = split_owner(load_authorizations(store, ACL_ACCESS_TO, resource_iri)?);
     let mut effective = owner;
     if !client.is_empty() {
@@ -423,6 +437,35 @@ pub fn allowed(
     Ok(granted_modes(store, agent, resource_iri, root)?.contains(&mode))
 }
 
+/// Whether an anonymous `GET`/`HEAD` of `request_path` is allowed: the resource's
+/// ACL grants `foaf:Agent` `acl:Read` (or `acl:Control`, for an ACL resource).
+/// Anything that is not a read under `/ldp/`, and any lookup failure, is `false`.
+pub fn anonymous_request_allowed(
+    store: &TripleStore,
+    base_url: &str,
+    method: &axum::http::Method,
+    request_path: &str,
+) -> bool {
+    if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
+        return false;
+    }
+    let Some(iri) = iri_for_request_path(base_url, request_path) else {
+        return false;
+    };
+    let (resource, mode) = match governed_resource(&iri) {
+        Some(governed) => (governed.to_string(), Mode::Control),
+        None => (iri.clone(), Mode::Read),
+    };
+    allowed(
+        store,
+        &Agent::anonymous(),
+        &resource,
+        &root_iri(base_url),
+        mode,
+    )
+    .unwrap_or(false)
+}
+
 /// The `WAC-Allow` header value: `user="read write", public="read"`.
 pub fn wac_allow_header(user_modes: &BTreeSet<Mode>, public_modes: &BTreeSet<Mode>) -> String {
     let join = |modes: &BTreeSet<Mode>| {
@@ -468,7 +511,14 @@ pub fn write_owner_acl(
     store: &TripleStore,
     resource_iri: &str,
     user_id: &str,
+    is_container: bool,
 ) -> Result<(), String> {
+    let resource_iri = canonical(resource_iri);
+    // The root has no owner: the first user to touch it would otherwise own
+    // everything under it through acl:default. Its policy is the seeded ACL.
+    if resource_iri.ends_with("/ldp/") {
+        return Ok(());
+    }
     delete_owner_acl(store, resource_iri)?;
     let subject = nn(&format!("{}#{OWNER_FRAGMENT}", acl_iri(resource_iri)))?;
     let resource = nn(resource_iri)?;
@@ -481,7 +531,7 @@ pub fn write_owner_acl(
             nn(&user_agent_iri(user_id))?,
         ),
     ];
-    if is_container_iri(resource_iri) {
+    if is_container {
         triples.push(Triple::new(subject.clone(), nn(ACL_DEFAULT)?, resource));
     }
     for mode in [Mode::Read, Mode::Write, Mode::Control] {
@@ -508,6 +558,7 @@ fn delete_owner_acl(store: &TripleStore, resource_iri: &str) -> Result<(), Strin
 /// Remove the client-written authorizations of `resource_iri` (every node under
 /// `R.acl#` except the owner grant). The resource falls back to inheritance.
 pub fn delete_client_acl(store: &TripleStore, resource_iri: &str) -> Result<(), String> {
+    let resource_iri = canonical(resource_iri);
     let prefix = sparql_str(&format!("{}#", acl_iri(resource_iri)));
     let owner = sparql_str(&format!("{}#{OWNER_FRAGMENT}", acl_iri(resource_iri)));
     store
@@ -527,6 +578,7 @@ pub fn delete_acl(store: &TripleStore, resource_iri: &str) -> Result<(), String>
 
 /// Every triple of the ACL resource of `resource_iri`, as N-Triples.
 pub fn acl_ntriples(store: &TripleStore, resource_iri: &str) -> Result<Vec<u8>, String> {
+    let resource_iri = canonical(resource_iri);
     let prefix = sparql_str(&format!("{}#", acl_iri(resource_iri)));
     let q = format!(
         "SELECT ?s ?p ?o WHERE {{ GRAPH <{ACL_GRAPH}> {{ ?s ?p ?o }} \
@@ -546,6 +598,7 @@ pub fn acl_ntriples(store: &TripleStore, resource_iri: &str) -> Result<Vec<u8>, 
 
 /// Whether `resource_iri` has client-written authorizations of its own.
 pub fn has_client_acl(store: &TripleStore, resource_iri: &str) -> Result<bool, String> {
+    let resource_iri = canonical(resource_iri);
     let (_, client) = split_owner(load_authorizations(store, ACL_ACCESS_TO, resource_iri)?);
     if !client.is_empty() {
         return Ok(true);
@@ -574,8 +627,11 @@ pub fn validate_acl_body(
     body: &str,
     format: RdfFormat,
     resource_iri: &str,
+    is_container: bool,
 ) -> Result<Vec<Triple>, String> {
+    let resource_iri = canonical(resource_iri);
     let acl = acl_iri(resource_iri);
+    let resource_nn = nn(resource_iri)?;
     let parser = RdfParser::from_format(format)
         .with_base_iri(acl.as_str())
         .map_err(|e| e.to_string())?;
@@ -585,7 +641,19 @@ pub fn validate_acl_body(
         if !matches!(quad.graph_name, GraphName::DefaultGraph) {
             return Err("an ACL body may not name a graph".to_string());
         }
-        triples.push(Triple::new(quad.subject, quad.predicate, quad.object));
+        // Either spelling of the governed resource is accepted; the canonical
+        // one is stored, so lookups find it.
+        let predicate = quad.predicate.as_str();
+        let object = match &quad.object {
+            Term::NamedNode(o)
+                if (predicate == ACL_ACCESS_TO || predicate == ACL_DEFAULT)
+                    && canonical(o.as_str()) == resource_iri =>
+            {
+                Term::NamedNode(resource_nn.clone())
+            }
+            other => other.clone(),
+        };
+        triples.push(Triple::new(quad.subject, quad.predicate, object));
     }
 
     let prefix = format!("{acl}#");
@@ -635,7 +703,7 @@ pub fn validate_acl_body(
                     "acl:accessTo must be <{resource_iri}>, the resource this ACL governs"
                 ))
             }
-            ACL_DEFAULT if o == resource_iri && is_container_iri(resource_iri) => {
+            ACL_DEFAULT if o == resource_iri && is_container => {
                 node.default.insert(o.to_string());
             }
             ACL_DEFAULT => {
@@ -845,26 +913,38 @@ mod tests {
     }
 
     fn put_acl(store: &TripleStore, resource: &str, turtle: &str) {
-        let triples = validate_acl_body(turtle, RdfFormat::Turtle, resource).unwrap();
+        let is_container = resource.ends_with('/');
+        let triples = validate_acl_body(turtle, RdfFormat::Turtle, resource, is_container).unwrap();
         replace_client_acl(store, resource, &triples).unwrap();
     }
 
     #[test]
     fn iri_helpers() {
         assert_eq!(acl_iri("http://h/ldp/a"), "http://h/ldp/a.acl");
-        assert_eq!(acl_iri("http://h/ldp/c/"), "http://h/ldp/c/.acl");
+        assert_eq!(acl_iri("http://h/ldp/c/"), "http://h/ldp/c.acl");
+        assert_eq!(acl_iri("http://h/ldp/"), "http://h/ldp/.acl");
+        assert_eq!(canonical("http://h/ldp/c/"), "http://h/ldp/c");
+        assert_eq!(canonical("http://h/ldp/"), "http://h/ldp/");
         assert_eq!(
             governed_resource("http://h/ldp/c/.acl"),
             Some("http://h/ldp/c/")
         );
+        assert_eq!(
+            governed_resource("http://h/ldp/.acl"),
+            Some("http://h/ldp/")
+        );
         assert_eq!(governed_resource("http://h/ldp/a"), None);
         assert_eq!(
             ancestors("http://h/ldp/a/b/c", "http://h/ldp/"),
-            vec!["http://h/ldp/a/b/", "http://h/ldp/a/", "http://h/ldp/"]
+            vec!["http://h/ldp/a/b", "http://h/ldp/a", "http://h/ldp/"]
         );
         assert_eq!(
             ancestors("http://h/ldp/a/b/", "http://h/ldp/"),
-            vec!["http://h/ldp/a/", "http://h/ldp/"]
+            vec!["http://h/ldp/a", "http://h/ldp/"]
+        );
+        assert_eq!(
+            ancestors("http://h/ldp/a", "http://h/ldp/"),
+            vec!["http://h/ldp/"]
         );
         assert!(ancestors("http://h/ldp/", "http://h/ldp/").is_empty());
         assert_eq!(
@@ -908,8 +988,8 @@ mod tests {
         let bob = user("bob", SystemRole::User);
         let dir = format!("{root}a/");
         let doc = format!("{dir}doc");
-        write_owner_acl(&store, &dir, "alice").unwrap();
-        write_owner_acl(&store, &doc, "alice").unwrap();
+        write_owner_acl(&store, &dir, "alice", true).unwrap();
+        write_owner_acl(&store, &doc, "alice", false).unwrap();
 
         // Creating did not shadow the root: Bob still writes inside.
         assert!(allowed(&store, &bob, &doc, &root, Mode::Write).unwrap());
@@ -995,7 +1075,7 @@ mod tests {
     #[test]
     fn acl_body_validation_refuses_the_wrong_shapes() {
         let doc = format!("{BASE}/ldp/d");
-        let ok = |ttl: &str| validate_acl_body(ttl, RdfFormat::Turtle, &doc);
+        let ok = |ttl: &str| validate_acl_body(ttl, RdfFormat::Turtle, &doc, false);
         let acl = format!("@prefix acl: <{ACL_NS}> .\n");
         assert!(ok(&format!(
             "{acl}<#a> a acl:Authorization ; acl:accessTo <{doc}> ; acl:agent <urn:ots:user:x> ; acl:mode acl:Read ."
@@ -1031,7 +1111,7 @@ mod tests {
     fn acl_representation_lists_owner_and_client_nodes() {
         let (store, root) = fresh_open();
         let doc = format!("{root}r");
-        write_owner_acl(&store, &doc, "alice").unwrap();
+        write_owner_acl(&store, &doc, "alice", false).unwrap();
         put_acl(
             &store,
             &doc,
