@@ -1651,6 +1651,10 @@ export const createDataModelDraft = (id, fromVer, targetVer) =>
 export const getDataModelDiff = (id, from, to) =>
   request('GET', `/api/models/${id}/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
 export const getDataModelCollaborators = (id) => request('GET', `/api/models/${id}/collaborators`);
+/** Datasets that declare conformance to this model, with their pinned version and whether a newer one is published. */
+export const getDataModelDependents = (id) => request('GET', `/api/models/${id}/dependents`);
+/** The dataset's resolved conformance layer (model version, latest published, update_available, shapes). */
+export const getDatasetConformance = (id) => request('GET', `/api/datasets/${id}/conformance`);
 export const getDataModelBranches = (id) => request('GET', `/api/models/${id}/branches`);
 export const getDataModelCommits = (id, branch) =>
   request('GET', `/api/models/${id}/commits${branch ? `?branch=${encodeURIComponent(branch)}` : ''}`);

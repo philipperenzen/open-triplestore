@@ -2416,10 +2416,108 @@ pub async fn publish_version(
     // Stamping added triples: a seeded copy is no longer the bundled file.
     mark_possibly_modified(&state, &id, &ver)?;
 
+    // Publishing is the event dependants watch for (datasets pinned to an older
+    // version become out of date), so it is on the model's commit log like every
+    // other change to the registry.
+    let mut affected = vec![record.graph_iri.clone()];
+    affected.extend(record.sub_graphs.iter().cloned());
+    affected.sort();
+    affected.dedup();
+    crate::commit_log::record(
+        &state.store,
+        &state.base_url,
+        match data_model.kind {
+            crate::kind_detector::RegistryKind::Vocabulary => {
+                crate::commit_log::CommitKind::Vocabulary
+            }
+            _ => crate::commit_log::CommitKind::DataModel,
+        },
+        format!("Published version {ver}"),
+        Some(&user.user_id),
+        Some(format!(
+            "{}/data-model/{}",
+            state.base_url.trim_end_matches('/'),
+            id
+        )),
+        affected,
+        0,
+        0,
+        Some(ver.clone()),
+    );
+
     Ok(Json(json!({
         "status": "published",
         "version": ver,
         "versionIRI": version_iri,
+    })))
+}
+
+/// GET /api/models/:id/dependents — the datasets that declare conformance to this
+/// model (`conforms_to_model`), each with the version it is pinned to and whether a
+/// newer version has been published since. Visibility-scoped: only datasets the
+/// caller may read are listed, so a private dataset never leaks through its model.
+pub async fn list_dependents(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let model = registry::get_data_model(&state.store, &state.base_url, &id)
+        .ok_or_else(|| AppError::NotFound(format!("Data model '{id}' not found")))?;
+    let uid = user.as_deref().map(|u| u.user_id.as_str());
+    if !state
+        .auth_db
+        .can_access_ontology(
+            uid,
+            model.is_public,
+            model.owner_type.as_deref(),
+            model.owner_id.as_deref(),
+        )
+        .map_err(|e| AppError::Internal(e.to_string()))?
+    {
+        return Err(AppError::NotFound(format!("Data model '{id}' not found")));
+    }
+    let mut datasets = Vec::new();
+    for ds in state
+        .auth_db
+        .list_datasets()
+        .map_err(|e| AppError::Internal(e.to_string()))?
+    {
+        if ds.conforms_to_model.as_deref() != Some(id.as_str()) {
+            continue;
+        }
+        if !state.auth_db.can_access_dataset(uid, &ds).unwrap_or(false) {
+            continue;
+        }
+        let pinned = ds.conforms_to_version.clone().filter(|v| !v.is_empty());
+        let effective = pinned.clone().or_else(|| model.latest_published.clone());
+        let update_available = matches!(
+            (&pinned, &model.latest_published),
+            (Some(p), Some(l)) if p != l
+        );
+        let published =
+            crate::dataset_versions::registry::list_versions(&state.store, &state.base_url, &ds.id)
+                .into_iter()
+                .find(|v| {
+                    matches!(
+                        v.status,
+                        crate::dataset_versions::models::VersionStatus::Published
+                    )
+                });
+        datasets.push(json!({
+            "dataset_id": ds.id,
+            "name": ds.name,
+            "visibility": ds.visibility,
+            "pinned_version": pinned,
+            "effective_version": effective,
+            "update_available": update_available,
+            "published_version": published.as_ref().map(|v| &v.version),
+            "published_conforms_to_version": published.as_ref().and_then(|v| v.conforms_to_version.clone()),
+        }));
+    }
+    Ok(Json(json!({
+        "model_id": id,
+        "latest_published": model.latest_published,
+        "datasets": datasets,
     })))
 }
 

@@ -36,6 +36,21 @@ fn version_iri(base_url: &str, dataset_id: &str, version: &str) -> String {
 // ─── Version listing ──────────────────────────────────────────────────────
 
 /// List all versions for a dataset, newest first.
+/// The dataset's current model pin (`conforms_to_model`, `conforms_to_version`), for
+/// stamping onto a version that is being cut. Empty strings read as "not pinned".
+pub fn dataset_pin(
+    auth_db: &crate::auth::db::AuthDb,
+    dataset_id: &str,
+) -> (Option<String>, Option<String>) {
+    match auth_db.get_dataset(dataset_id) {
+        Ok(Some(ds)) => (
+            ds.conforms_to_model.filter(|m| !m.is_empty()),
+            ds.conforms_to_version.filter(|v| !v.is_empty()),
+        ),
+        _ => (None, None),
+    }
+}
+
 pub fn list_versions(store: &TripleStore, base_url: &str, dataset_id: &str) -> Vec<DatasetVersion> {
     let ds_iri = dataset_iri(base_url, dataset_id);
     let q = format!(
@@ -45,7 +60,7 @@ pub fn list_versions(store: &TripleStore, base_url: &str, dataset_id: &str) -> V
         PREFIX owl: <{OWL}>
         PREFIX adms: <{ADMS}>
         PREFIX prov: <{PROV}>
-        SELECT ?v ?semver ?status ?graphIri ?createdAt ?createdBy ?derivedFrom ?notes ?branch WHERE {{
+        SELECT ?v ?semver ?status ?graphIri ?createdAt ?createdBy ?derivedFrom ?notes ?branch ?cModel ?cVersion WHERE {{
           GRAPH <{REGISTRY_GRAPH}> {{
             ?v ver:dataset <{ds_iri}> ;
                owl:versionInfo ?semver ;
@@ -56,6 +71,8 @@ pub fn list_versions(store: &TripleStore, base_url: &str, dataset_id: &str) -> V
             OPTIONAL {{ ?v prov:wasDerivedFrom ?derivedFrom }}
             OPTIONAL {{ ?v adms:versionNotes ?notes }}
             OPTIONAL {{ ?v ver:branch ?branch }}
+            OPTIONAL {{ ?v ver:conformsToModel ?cModel }}
+            OPTIONAL {{ ?v ver:conformsToVersion ?cVersion }}
           }}
         }}
         ORDER BY DESC(?createdAt)
@@ -95,6 +112,8 @@ pub fn list_versions(store: &TripleStore, base_url: &str, dataset_id: &str) -> V
                 derived_from,
                 notes: var_str(&vals, 7),
                 branch: var_str(&vals, 8),
+                conforms_to_model: var_str(&vals, 9),
+                conforms_to_version: var_str(&vals, 10),
             });
         }
     }
@@ -119,7 +138,7 @@ pub fn get_version(
         PREFIX owl: <{OWL}>
         PREFIX adms: <{ADMS}>
         PREFIX prov: <{PROV}>
-        SELECT ?semver ?status ?graphIri ?createdAt ?createdBy ?derivedFrom ?notes ?branch WHERE {{
+        SELECT ?semver ?status ?graphIri ?createdAt ?createdBy ?derivedFrom ?notes ?branch ?cModel ?cVersion WHERE {{
           GRAPH <{REGISTRY_GRAPH}> {{
             <{ver_iri}> owl:versionInfo ?semver ;
                ver:status ?status ;
@@ -129,6 +148,8 @@ pub fn get_version(
             OPTIONAL {{ <{ver_iri}> prov:wasDerivedFrom ?derivedFrom }}
             OPTIONAL {{ <{ver_iri}> adms:versionNotes ?notes }}
             OPTIONAL {{ <{ver_iri}> ver:branch ?branch }}
+            OPTIONAL {{ <{ver_iri}> ver:conformsToModel ?cModel }}
+            OPTIONAL {{ <{ver_iri}> ver:conformsToVersion ?cVersion }}
           }}
         }}
         "#
@@ -156,6 +177,8 @@ pub fn get_version(
                 derived_from,
                 notes: var_str(&vals, 6),
                 branch: var_str(&vals, 7),
+                conforms_to_model: var_str(&vals, 8),
+                conforms_to_version: var_str(&vals, 9),
             });
         }
     }
@@ -259,6 +282,36 @@ pub fn insert_version(
         .iter()
         .map(|g| format!("    ver:subGraph <{g}> ;\n"))
         .collect();
+    // The model version the instances conformed to when this version was cut: kept as
+    // literals for the API and, when both halves are known, as `dct:conformsTo` on the
+    // registry's own model-version IRI so the DCAT catalogue can follow it.
+    let conforms = match (
+        record
+            .conforms_to_model
+            .as_deref()
+            .filter(|m| !m.is_empty()),
+        record
+            .conforms_to_version
+            .as_deref()
+            .filter(|v| !v.is_empty()),
+    ) {
+        (Some(m), Some(v)) => {
+            let em = m.replace('\\', "\\\\").replace('"', "\\\"");
+            let ev = v.replace('\\', "\\\\").replace('"', "\\\"");
+            let mv = format!(
+                "{}/data-model/{m}/version/{v}",
+                base_url.trim_end_matches('/')
+            );
+            format!(
+                "    ver:conformsToModel \"{em}\" ;\n    ver:conformsToVersion \"{ev}\" ;\n    dct:conformsTo <{mv}> ;\n"
+            )
+        }
+        (Some(m), None) => {
+            let em = m.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("    ver:conformsToModel \"{em}\" ;\n")
+        }
+        _ => String::new(),
+    };
 
     let q = format!(
         r#"
@@ -274,7 +327,7 @@ pub fn insert_version(
               ver:dataset <{ds_iri}> ;
               ver:status "{status}" ;
               ver:graphIri <{ver_iri}> ;
-              {sub_graphs}{creator}{derived}{notes}{branch}
+              {sub_graphs}{creator}{derived}{notes}{branch}{conforms}
               dct:created "{created_at}"^^<{XSD}dateTime> .
             <{ds_iri}> ver:hasVersion <{ver_iri}> .
           }}

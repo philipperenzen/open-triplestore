@@ -13,6 +13,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Model versions and the datasets that depend on them are linked.** A dataset
+  version now records the model version its instances were pinned to when it was
+  cut (`conforms_to_model` / `conforms_to_version` on `DatasetVersion`, stored as
+  `ver:conformsToModel` / `ver:conformsToVersion` plus `dct:conformsTo` on the
+  model-version IRI), so a published dataset version keeps saying which model
+  version it conformed to after the dataset moves on. `GET /api/datasets/:id/conformance`
+  reports the model's `latest_published`, whether the dataset is `pinned`, and
+  `update_available` when a newer model version has been published than the pinned
+  one. New `GET /api/models/:id/dependents` lists the (visible) datasets that declare
+  conformance to a model, each with its pinned/effective version, whether it is
+  behind, and its latest published dataset version. Publishing a model version is
+  recorded on the model's commit log. Studio shows an "update available" badge on
+  the dataset page and a "used by N datasets" card on the model page — the
+  store-side half of a model-update procedure: an external validation service
+  re-validates a dataset against the new version, collects or corrects what it
+  asks for, and re-pins; the store now tells everyone which datasets that applies to.
+
 ### Fixed
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
