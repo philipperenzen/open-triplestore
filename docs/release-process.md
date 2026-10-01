@@ -48,94 +48,115 @@ convention, for example `fix/refresh-token-collision`, `security/oidc-https-pin`
 
 ## Release flow
 
-A normal release promotes the current `develop` to `main` and tags it. All commits
-are DCO-signed (`git commit -s`), including the version bump.
+A normal release promotes the current `develop` to `main` and tags it. You choose
+the bump level; the workflows do the rest. It takes three clicks and two PR reviews.
 
-1. **Bump the version.** Edit the `[package] version` in
-   [`Cargo.toml`](../Cargo.toml) to the new `X.Y.Z`. Update the version mentioned in
-   [`README.md`](../README.md) ("current release") if you keep that in sync.
+1. **Prepare.** In the Actions tab, run **Prepare release**
+   ([`release-prepare.yml`](../.github/workflows/release-prepare.yml)). Choose the
+   bump, `patch`, `minor` or `major`, and leave the branch at `develop`. The workflow
+   runs [`.github/scripts/release_prepare.py`](../.github/scripts/release_prepare.py),
+   which:
+   - takes the latest `vX.Y.Z` tag and applies the bump, so `minor` after `v0.7.0`
+     gives `0.8.0`;
+   - sets the version in `Cargo.toml`, `Cargo.lock` and `README.md`;
+   - turns `[Unreleased]` in [`CHANGELOG.md`](../CHANGELOG.md) into a dated
+     `## [X.Y.Z] — YYYY-MM-DD` section. It adds `None.` for a missing
+     `### Deprecated` or `### Security` group, opens a fresh `[Unreleased]` and
+     updates the compare links;
+   - on a minor or major release, rewrites the supported-versions tables in
+     [`SECURITY.md`](../SECURITY.md) and [`SUPPORT.md`](../SUPPORT.md) by the
+     [support policy](#deprecation--support-policy).
 
-2. **Update the changelog.** In [`CHANGELOG.md`](../CHANGELOG.md), turn the
-   `[Unreleased]` work into a dated `## [X.Y.Z] — YYYY-MM-DD` section, keeping the
-   group order `Added, Changed, Deprecated, Removed, Fixed, Security` (write
-   `None.` for any empty group — see [the changelog convention](#changelog-deprecated--security-convention)).
-   Update the compare links at the bottom so `[Unreleased]` compares
-   `vX.Y.Z...HEAD` and a new `[X.Y.Z]` link is added.
+   It commits that on `chore/release-X.Y.Z` and opens a PR into `develop`. It
+   refuses when `[Unreleased]` is empty or the tag already exists.
 
-3. **Open the release PR `develop` → `main`.** Let CI (build, clippy, test,
-   conformance, security, and the perf gate) go green, then merge.
+2. **Review the bump PR and merge it.** Read the new changelog section. Push any edits
+   to the PR branch: an intro paragraph under the heading, or entries an earlier
+   release already carries. Then merge.
 
-   ```bash
-   # from an up-to-date develop, with the bump + changelog committed:
-   git switch develop
-   git commit -s -am "release: 0.2.1"
-   gh pr create --base main --head develop --title "Release 0.2.1"
-   # review, then merge the PR (no force-push to main)
-   ```
+3. **Review the release PR and merge it.** Merging the bump PR opens the
+   `develop → main` PR, titled `Release X.Y.Z`. Merge it with a **merge commit**, not
+   a squash, so `main` keeps `develop`'s history.
 
-4. **Tag the release on `main`.** Create an **annotated** SemVer tag whose message is
-   the changelog section for this version (including any `### Deprecated` /
-   `### Security` content), then push the tag.
+4. **CI takes over.** [`auto-tag.yml`](../.github/workflows/auto-tag.yml) sees that
+   `main`'s `Cargo.toml` version has no tag yet. It checks that the version is the
+   next major, minor or patch after the latest tag. It then creates the annotated tag
+   `vX.Y.Z` on the merge commit, with the changelog section as its message, and runs
+   [`release.yml`](../.github/workflows/release.yml) for it. That workflow publishes
+   the GitHub Release and the GHCR image (see
+   [How CI reacts to tags](#how-ci-reacts-to-tags)).
 
-   ```bash
-   git switch main
-   git pull --ff-only
-   git tag -a v0.2.1 --cleanup=whitespace \
-     -m "$(awk '/^## \[0.2.1\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md)"
-   git push origin v0.2.1
-   ```
+No personal access token is involved. GitHub starts no workflow runs for anything done
+with the workflow token (`GITHUB_TOKEN`), so the automation works around that twice:
+- `auto-tag.yml` calls `release.yml` directly instead of relying on the tag push;
+- the prepare workflow dispatches CI on each PR it opens, and those runs show as the
+  PR's checks. A push to the PR branch runs CI as usual.
 
-   `--cleanup=whitespace` matters: git's default cleanup mode for a tag message
-   strips every line that starts with `#`, which silently deletes the section's
-   `### Added` … `### Security` headers from the tag.
+A merge into `main` that does not change the `Cargo.toml` version is not a release,
+and auto-tag does nothing.
 
-5. **CI takes over.** Pushing the `vX.Y.Z` tag triggers the release automation (see
-   [How CI reacts to tags](#how-ci-reacts-to-tags)): a GitHub Release is published
-   from the changelog section, and a GHCR image is built and pushed.
+### By hand
 
-### Automated tagging (optional)
+The same steps work without the prepare workflow, for example from a GitLab mirror
+(its [`.gitlab-ci.yml`](../.gitlab-ci.yml) release job fires on a pushed tag). Every
+commit is DCO-signed (`git commit -s`):
 
-Step 4 can be automated. [`auto-tag.yml`](../.github/workflows/auto-tag.yml) tags a
-release **automatically when the `develop → main` PR is merged**, deriving the
-version from the bump level named in the **PR title** (`major`, `minor`, or
-`patch`, case-insensitive) applied to the latest `vX.Y.Z` tag. It refuses to tag
-unless the computed version matches the `Cargo.toml` version the release PR
-committed (steps 1–2 above are still required), and the tag message is the
-`CHANGELOG.md` section as usual. A merge whose title carries no bump keyword is
-ignored, so non-release merges into `main` are safe.
+```bash
+git switch -c chore/release-0.8.0 origin/develop
+python3 .github/scripts/release_prepare.py minor   # prints 0.8.0
+git commit -s -am "release: 0.8.0"
+gh pr create --base develop --title "release: 0.8.0"
+# after merging it:
+gh pr create --base main --head develop --title "Release 0.8.0"
+```
 
-> **Setup:** the tag is pushed with a `RELEASE_PAT` secret, **not** the default
-> `GITHUB_TOKEN` — a tag pushed by `GITHUB_TOKEN` does not trigger other workflows,
-> so `release.yml` would never fire. Create a fine-grained PAT with `contents:
-> write` on this repo and store it as the `RELEASE_PAT` secret. Without it the tag
-> is still created, but you must run the Release workflow (or re-push the tag with
-> a PAT) to publish.
+Merging the release PR on GitHub still runs auto-tag. Where it can't run, tag the
+merge on `main` yourself and push the tag, which fires `release.yml`:
+
+```bash
+git switch main && git pull --ff-only
+git tag -a v0.8.0 --cleanup=whitespace \
+  -m "$(awk '/^## \[0.8.0\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md)"
+git push origin v0.8.0
+```
+
+`--cleanup=whitespace` matters: git's default cleanup for a tag message strips every
+line that starts with `#`, which silently deletes the section's `### Added` …
+`### Security` headers.
+
+If publishing fails after the tag exists (a registry outage, say), run **Release**
+from the Actions tab with that tag. It builds the Release and the image again for the
+existing tag.
 
 ## Security hotfix flow
 
-Security and other critical fixes do **not** wait for the next feature release; they
+Security and other critical fixes do **not** wait for the next feature release. They
 ship as a patch off the affected stable line.
 
-1. **Branch from the affected line.** Branch from `main` for the current release, or
-   from the relevant `release/X.Y` to fix an older supported line. Use a
-   `security/<topic>` branch name.
+1. **Branch from the affected line.** A patch goes on the line's `release/X.Y`
+   branch, so it carries no unreleased work from `develop`. If the branch does not
+   exist yet, cut it from the line's latest tag, for example
+   `git push origin v0.7.0^{commit}:refs/heads/release/0.7`. Name the fix branch
+   `security/<topic>`. (When `develop` holds nothing but fixes since the last
+   release, you can instead fix it there and cut a normal `patch` release.)
 
-2. **Fix and add a regression test.** Every security fix lands with a test that
-   stays discoverable by the CI **`security`** test filter. CI runs
-   `cargo test --all-features security` as a named gate and **fails if fewer than ~40
-   security tests run**, so a renamed/moved test can't silently drop coverage — keep
-   the word `security` in the test (or module) name.
+2. **Fix and add a regression test.** Every security fix lands with a test that the CI
+   **`security`** test filter finds. CI runs `cargo test --all-features security` as a
+   named gate and **fails if fewer than ~40 security tests run**, so a renamed or moved
+   test can't silently drop coverage. Keep the word `security` in the test or module
+   name. Add a `### Security` entry to `[Unreleased]`, with a CVE reference where one
+   is assigned.
 
-3. **Bump the patch + changelog.** Bump `PATCH` in `Cargo.toml` and add a
-   `## [X.Y.Z]` section with a `### Security` group describing the fix (and a CVE
-   reference where one is assigned).
+3. **PR and merge** the fix into the branch you started from.
 
-4. **PR, merge, tag.** Open the PR against the line you branched from, merge, then
-   tag `vX.Y.Z` (annotated, message = the changelog section) and push it. CI publishes
-   the release + image as usual.
+4. **Release the patch.** Run **Prepare release** with `patch` and the branch
+   `release/X.Y`. The bump PR goes into `release/X.Y`, and merging it is the release:
+   auto-tag tags `vX.Y.(Z+1)` on the merge and publishes it. A patch on an older line
+   becomes neither the repository's *latest* GitHub Release nor the image's `latest`
+   tag.
 
-5. **Forward-merge.** Merge the fix forward into `develop` (and any newer
-   `release/X.Y` lines that are still supported) so it isn't lost in the next release.
+5. **Forward-merge.** Merge the fix into `develop`, and into any newer supported
+   `release/X.Y` lines, so the next release keeps it.
 
 ## Tagging conventions
 
@@ -146,19 +167,24 @@ ship as a patch off the affected stable line.
   from the changelog when publishing the GitHub Release.
 - Pre-release tags use a hyphen, e.g. `v0.3.0-rc.1`; CI marks any tag containing a
   hyphen as a GitHub *pre-release* and does **not** move the Docker `latest` tag to it.
-- Only the maintainer creates release tags, and the `v*` tags are protected (see
+- Release tags are created by `auto-tag.yml` when a release PR merges, or by the
+  maintainer. A ruleset protects the `v*` tags from being moved or deleted (see
   [Repository settings](#repository-settings-the-maintainer-applies-uiadmin)).
 
 ## How CI reacts to tags
 
 The workflows live in [`.github/workflows/`](../.github/workflows) (GitHub Actions)
-and are mirrored in [`.gitlab-ci.yml`](../.gitlab-ci.yml). Pushing a `v*` tag fires:
+and are mirrored in [`.gitlab-ci.yml`](../.gitlab-ci.yml). For each release tag, whether
+`auto-tag.yml` created it or the maintainer pushed it, these run:
 
 - **`release.yml`** — extracts the `## [X.Y.Z]` section from `CHANGELOG.md`,
   publishes a **GitHub Release** with those notes, then builds the 3-stage Dockerfile
   (already `--features full`) and pushes a **GHCR image** tagged
   `ghcr.io/philipperenzen/open-triplestore:{X.Y.Z, X.Y, latest}`. A tag with a hyphen
-  is published as a pre-release and does not get the `latest` tag. The job also emits a
+  is published as a pre-release. Only the newest version becomes the latest GitHub
+  Release and gets the image's `latest` tag, so a patch on an older line leaves both
+  alone. The workflow can also be run from the Actions tab for an existing tag, to
+  publish again after a failure. The job also emits a
   non-fatal warning if the release notes lack a `### Security` or `### Deprecated`
   section. A GitHub Release body holds at most 125,000 characters; a longer section
   is published as a digest ([`.github/scripts/release_notes_digest.py`](../.github/scripts/release_notes_digest.py)):
@@ -167,7 +193,8 @@ and are mirrored in [`.gitlab-ci.yml`](../.gitlab-ci.yml). Pushing a `v*` tag fi
   section whole.
 - **`perf-baseline.yml`** — re-anchors the authoritative performance baseline
   ([`benches/perf_baseline.json`](../benches/perf_baseline.json)) by running the full
-  Criterion suite and opening a `chore/perf-baseline-refresh` PR back to `develop`. The
+  Criterion suite and opening a `chore/perf-baseline-refresh` PR back to `develop`
+  (`auto-tag.yml` dispatches it on the new tag). The
   baseline is refreshed **only** here (and on manual dispatch), never from PR runs, so
   in-flight changes can't drift the reference the gate checks against.
 
@@ -249,6 +276,9 @@ GitHub repository UI, not in code:
   path-aware allowance so docs-only PRs aren't blocked by a path-skipped run.)
 - **Protect `v*` tags** with a tag protection rule so only the maintainer can create or
   move release tags.
+- **Let GitHub Actions open pull requests** (Settings → Actions → General → Workflow
+  permissions → *Allow GitHub Actions to create and approve pull requests*). The
+  prepare workflow opens the bump PR and the release PR with the workflow token.
 - **GHCR package visibility = public.** The very first image push creates the GHCR
   package as *private*; set it to **public** once (Packages → package settings) so
   anonymous `docker pull` works.
