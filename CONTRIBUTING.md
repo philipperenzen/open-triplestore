@@ -50,9 +50,11 @@ Name your branch `<area>/<topic>`, for example:
 - `security/oidc-https-pin` — a security fix
 - `frontend/dataset-filters` — a web-UI change
 
-**Releases are tag-driven and maintainer-only.** A release bumps `Cargo.toml` and
-`CHANGELOG.md`, merges `develop` → `main` via PR, and is tagged `vX.Y.Z`; pushing the
-tag publishes a GitHub Release and a GHCR Docker image. Contributors don't cut
+**Releases are tag-driven and maintainer-only.** The maintainer runs the *Prepare
+release* workflow with a `patch`, `minor` or `major` bump. It opens a PR that bumps
+`Cargo.toml` and turns `[Unreleased]` in `CHANGELOG.md` into the new version's section.
+Merging that PR opens the `develop` → `main` PR. Merging that one tags `vX.Y.Z` and
+publishes a GitHub Release and a GHCR Docker image. Contributors don't cut
 releases — the full process is in
 [`docs/release-process.md`](docs/release-process.md).
 

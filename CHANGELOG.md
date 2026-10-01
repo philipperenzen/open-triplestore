@@ -13,6 +13,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **SHACL result paths no longer render with a stray `>`.** The backend
+  serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
+  `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if
+  it were a bare IRI, showing `ex.org:label>`. The dataset validation dialog,
+  `/validation`, `/shacl/results`, the shape-graph meta report and the source
+  dry-run findings now shorten every `<…>` term and keep the operators, so a
+  sequence path reads `ex.org:a/ex.org:b`; the tooltip keeps the raw path.
+
 ### Changed
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
@@ -27,6 +36,39 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   kept, deprecated. Its licence record no longer calls it the bundled file: it
   says what the copy is and that part of it has no published licence. `NOTICE`
   and `vocab/NOTICE.md` list DOAP under Apache-2.0.
+- **Releases are prepared by a workflow.** *Prepare release* in the Actions
+  tab takes a `patch`, `minor` or `major` bump and opens a PR that writes the
+  next version into `Cargo.toml`, `Cargo.lock`, `README.md` and `CHANGELOG.md`
+  (and, for a minor or major, the supported-versions tables). Merging it opens
+  the `develop → main` PR. Merging that tags the release and publishes the
+  GitHub Release and the image. No personal access token is needed:
+  `auto-tag.yml` calls `release.yml` itself instead of relying on its tag
+  push, and takes the version from `Cargo.toml` instead of a keyword in the PR
+  title. A `patch` on a `release/X.Y` branch releases that line and leaves the
+  `latest` GitHub Release and image tag alone. `release.yml` can be re-run for
+  an existing tag. See `docs/release-process.md`.
+
+### Fixed
+- **The supported-versions tables were five releases old.** `SECURITY.md` and
+  `SUPPORT.md` still named `0.2.x` as the current line. They now list `0.7.x`
+  as Active and `0.6.x` as Security-only until 0.8.0, and the prepare workflow
+  keeps them current.
+
+### Fixed
+- **The UI says when a validation or inference run left graphs out.** A run
+  that could not read every graph or shapes graph of a dataset answers
+  `partial: true`: a validation run is then a test run, not recorded, and an
+  inference run skips the rules it may not read. The dataset page, the
+  Validation page, the SHACL results page, the import wizard's pre-validation
+  and the shapes editor's Infer now show a note when that happens. Asking for
+  an official run on the SHACL results page used to reload the unchanged
+  latest run, so the click seemed to do nothing; the page now shows the test
+  run it got. In the same pass:
+  - The import wizard's pre-validation read the verdict off the response
+    envelope instead of its report, so it always showed "undefined issue(s)
+    found", even for conforming data.
+  - The dataset page's validation dialog showed the escape `\u2014` as text
+    where its summary line has a dash.
 
 ### Added
 - **Per-resource access control for LDP, with Web Access Control.** Every

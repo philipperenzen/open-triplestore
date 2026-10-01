@@ -10,6 +10,7 @@
   import { parseShapesGraph } from '../lib/shaclModel.ts';
   import { emptyShapesTemplate } from '../lib/turtle-mode.ts';
   import AiAssistPanel from './AiAssistPanel.svelte';
+  import PartialRunNote from './PartialRunNote.svelte';
   import ShapeBuilder from './ShapeBuilder.svelte';
 
   /**
@@ -297,6 +298,7 @@
   </div>
 
   {#if error}<p class="error">{error}</p>{/if}
+  {#if inferResult?.partial}<PartialRunNote kind="infer" />{/if}
 
   <div class="editor-grid" class:has-ai={aiOpen}>
   <!-- svelte-ignore a11y_click_events_have_key_events -->

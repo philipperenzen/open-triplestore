@@ -1,0 +1,171 @@
+# Release preparation: the first two steps of docs/release-process.md.
+#
+# 1. prepare — run by hand (Actions → Prepare release → Run workflow), with the
+#    bump level `patch`, `minor` or `major` and the branch to release from:
+#    `develop` for a normal release, or a `release/X.Y` maintenance branch for a
+#    patch on an older line. It runs .github/scripts/release_prepare.py, which
+#    writes the next version into Cargo.toml, Cargo.lock, README.md and
+#    CHANGELOG.md, commits that on `chore/release-X.Y.Z` and opens a PR into the
+#    chosen branch. Before merging, edit the section in that PR if you want an
+#    intro paragraph or to trim entries.
+# 2. promote — when that PR is merged into `develop`, opens the `develop → main`
+#    release PR. Merging it lets auto-tag.yml tag and publish the release. A
+#    `release/X.Y` PR needs no promote step: auto-tag.yml tags it on merge.
+#
+# PRs opened with GITHUB_TOKEN start no workflow runs (GitHub's recursion
+# guard), so each job dispatches CI on the PR's head itself; the runs appear as
+# the PR's checks. A push to the PR branch runs CI as usual.
+name: Prepare release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump
+        type: choice
+        options: [patch, minor, major]
+        required: true
+      branch:
+        description: Branch to release from (develop, or release/X.Y for a patch on an older line)
+        type: string
+        default: develop
+        required: true
+  pull_request:
+    types: [closed]
+    branches: [develop]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: release-prepare
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Open the version-bump PR
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the inputs
+        env:
+          BRANCH: ${{ inputs.branch }}
+          BUMP: ${{ inputs.bump }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$BRANCH" = develop ]; then
+            echo "LINE=" >> "$GITHUB_ENV"
+          elif [[ "$BRANCH" =~ ^release/([0-9]+\.[0-9]+)$ ]]; then
+            if [ "$BUMP" != patch ]; then
+              echo "::error::$BRANCH takes patch releases only."
+              exit 1
+            fi
+            echo "LINE=${BASH_REMATCH[1]}" >> "$GITHUB_ENV"
+          else
+            echo "::error::Release from develop or a release/X.Y branch, not '$BRANCH'."
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.branch }}
+          # The next version comes from the tags, so fetch them all.
+          fetch-depth: 0
+
+      - name: Write the next version into the tree
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/release_prepare.py "$BUMP" ${LINE:+--line "$LINE"}
+
+      - name: Commit, push and open the PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ inputs.branch }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PREVIOUS: ${{ steps.version.outputs.previous }}
+          BUMP: ${{ steps.version.outputs.bump }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          head="chore/release-$VERSION"
+          if git ls-remote --exit-code --heads origin "$head" >/dev/null; then
+            echo "::error::Branch $head already exists. Merge or delete it first."
+            exit 1
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$head"
+          git commit -a -s -F - <<EOF
+          release: $VERSION
+
+          A $BUMP release after $PREVIOUS. Cargo.toml, Cargo.lock and the
+          changelog move to $VERSION, and [Unreleased] becomes the dated
+          [$VERSION] section with its compare link.
+          EOF
+          git push origin "$head"
+
+          if [ "$BASE" = develop ]; then
+            next="Merging this opens the \`develop → main\` release PR; merging that one tags \`v$VERSION\` and publishes the GitHub Release and the image."
+          else
+            next="Merging this tags \`v$VERSION\` on \`$BASE\` and publishes the GitHub Release and the image."
+          fi
+          gh pr create --base "$BASE" --head "$head" \
+            --title "release: $VERSION" \
+            --body "$(cat <<EOF
+          A **$BUMP** release: \`$PREVIOUS\` → \`$VERSION\`, prepared by the *Prepare release* workflow.
+
+          Before merging, read the \`## [$VERSION]\` section of \`CHANGELOG.md\`. Add an intro paragraph under its heading if the release needs one, and trim entries that an earlier release already carries. Push those edits to this branch.
+
+          $next
+          EOF
+          )"
+          gh workflow run ci.yml --ref "$head"
+          echo "### Opened the $BUMP release PR for \`v$VERSION\` into \`$BASE\`" >> "$GITHUB_STEP_SUMMARY"
+
+  promote:
+    name: Open the develop → main release PR
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.event.pull_request.head.ref, 'chore/release-')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Open the release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n '/^\[package\]/,/^\[/ s/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "::notice::v$version is already tagged; nothing to promote."
+            exit 0
+          fi
+          existing="$(gh pr list --base main --head develop --state open --json number --jq '.[0].number')"
+          if [ -n "$existing" ]; then
+            echo "::notice::A develop → main PR is already open (#$existing); CI is dispatched on develop again."
+          else
+            gh pr create --base main --head develop \
+              --title "Release $version" \
+              --body "$(cat <<EOF
+          Promotes \`develop\` to \`main\` for **v$version**. Merge with a merge commit, not a squash, so \`main\` keeps \`develop\`'s history.
+
+          On merge, the *Auto-tag release* workflow creates the annotated tag \`v$version\` from the changelog section and publishes the GitHub Release and the container image.
+          EOF
+          )"
+          fi
+          gh workflow run ci.yml --ref develop
+          gh workflow run e2e.yml --ref develop

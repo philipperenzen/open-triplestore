@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Open Triplestore is at an early (`0.2.x`) stage. The latest two minor versions are
+Open Triplestore is at an early (`0.7.x`) stage. The latest two minor versions are
 supported; older lines are not separately patched. Releases are cut from the
 development trunk and tagged on the stable line — see
 [`docs/release-process.md`](docs/release-process.md) for the full branch/release
@@ -18,8 +18,8 @@ below.
 
 | Line | Status | Supported until | Notes |
 |---|---|---|---|
-| `0.2.x` | Active | current | Latest stable release. |
-| `0.1.x` | Security-only | 0.3.0 | Superseded by 0.2.x. |
+| `0.7.x` | Active | current | Latest stable release. |
+| `0.6.x` | Security-only | 0.8.0 | Superseded by 0.7.x. |
 | `develop` | Dev trunk | rolling | Active development branch; not a release line. (`main` is the latest stable release.) |
 | older | EOL | — | Unsupported; please upgrade. |
 

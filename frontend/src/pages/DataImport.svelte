@@ -16,6 +16,8 @@
   import SparqlEditorCM from '../components/SparqlEditorCM.svelte';
   import StepIndicator from '../components/StepIndicator.svelte';
   import Select from '../components/Select.svelte';
+  import PartialRunNote from '../components/PartialRunNote.svelte';
+  import { unwrapValidationRun } from '../lib/validationReport.js';
   import {
     Upload, FileText, X, Link as LinkIcon, Terminal, Plus, ChevronRight, ChevronLeft,
     User, Building2, Database, Eye, Users, Lock, Check, AlertTriangle,
@@ -1013,7 +1015,14 @@ INTO GRAPH <http://example.org/import/loaded>`,
     if (!validationDatasetId) return;
     validating = true;
     preValidationResult = null;
-    try { preValidationResult = await validateDataset(validationDatasetId, {}); }
+    try {
+      // The endpoint answers an envelope ({ report, run_id, … }): the verdict
+      // is in its report, and `partial` says the run left graphs out.
+      const run = unwrapValidationRun(await validateDataset(validationDatasetId, {}));
+      preValidationResult = run.report
+        ? { ...run.report, partial: run.partial }
+        : { error: $i18nT('pages.validation.validationError') };
+    }
     catch (e) { preValidationResult = { error: e.message }; }
     finally { validating = false; }
   }
@@ -2270,6 +2279,7 @@ INTO GRAPH <http://example.org/import/loaded>`,
                         <AlertTriangle size={18} /> {$i18nT('pages.import.issuesFound', { values: { count: preValidationResult.results_count } })}
                       {/if}
                     </div>
+                    {#if preValidationResult.partial}<PartialRunNote />{/if}
                   {/if}
                 {/if}
               </div>
