@@ -6,6 +6,7 @@
     validateShapeGraph, stageShapeGraph, publishShapeGraph, deprecateShapeGraph, listBindingsForShapeGraph,
     getShapeGraphTurtle, listDatasets } from '../lib/api.js';
   import { shortenIRI, loadPrefixCcPrefixes, prefixesVersion } from '../lib/rdf-utils.js';
+  import { formatShaclPath } from '../lib/validationReport.js';
   import { ArrowLeft, History, Lock, Users, Globe, Save, Edit3, X, RotateCcw, Loader2, Sparkles, Database, ShieldCheck, Send, Archive, Check, Plus, Link2, ExternalLink } from 'lucide-svelte';
   import { Link, navigate } from '../lib/router/index.js';
   import { openPendingViewerTab, showShapesInViewer, viewerConfigured } from '../lib/graphViewer.ts';
@@ -376,7 +377,7 @@
                     <tr>
                       <td><span class="sev sev-{r.severity}">{r.severity}</span></td>
                       <td><code title={r.focus_node}>{curie(r.focus_node)}</code></td>
-                      <td title={r.path}>{r.path ? curie(r.path) : '—'}</td>
+                      <td title={r.path}>{r.path ? formatShaclPath(r.path, curie) : '—'}</td>
                       <td>{r.message}</td>
                     </tr>
                   {/each}

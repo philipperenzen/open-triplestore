@@ -43,7 +43,7 @@
     getValidationHistory,
     getGeoStats,
   } from '../lib/api.js';
-  import { unwrapValidationRun, validationErrorMessage } from '../lib/validationReport.js';
+  import { unwrapValidationRun, validationErrorMessage, formatShaclPath } from '../lib/validationReport.js';
   import { toastSuccess } from '../lib/toast.ts';
   import { compactNumber } from '../lib/format.ts';
   import { RESOURCE_ROLES, RESOURCE_ROLE_RANK } from '../lib/permissions.js';
@@ -1898,7 +1898,7 @@
               <tr>
                 <td><span class="sev sev-{r.severity}">{r.severity}</span></td>
                 <td><code title={r.focus_node}>{shortenIRI(r.focus_node)}</code></td>
-                <td title={r.path}>{r.path ? shortenIRI(r.path) : '—'}</td>
+                <td title={r.path}>{r.path ? formatShaclPath(r.path) : '—'}</td>
                 <td>{r.message}</td>
               </tr>
             {/each}
@@ -2190,7 +2190,7 @@
                     <tr>
                       <td><span class="sev sev-{r.severity}">{r.severity}</span></td>
                       <td><code title={r.focus_node}>{shortenIRI(r.focus_node)}</code></td>
-                      <td title={r.path}>{r.path ? shortenIRI(r.path) : '\u2014'}</td>
+                      <td title={r.path}>{r.path ? formatShaclPath(r.path) : '\u2014'}</td>
                       <td>{r.message}</td>
                     </tr>
                   {/each}
