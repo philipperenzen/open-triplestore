@@ -276,9 +276,11 @@ curl -X PUT 'http://localhost:7878/store?graph=http://example.org/people' \
 
 ### Limitations
 
-- Validation is applied to `PUT` and `POST` on the Graph Store Protocol (`/store`).
-- SPARQL `UPDATE` statements are not validated automatically (target graphs cannot be reliably determined without executing the update).
-- Only named graphs registered to the dataset trigger validation; writes to unregistered graphs pass through unchecked.
+These apply to every write gate: this per-dataset `shacl_on_write` gate, and the SHACL Studio gates below (validation-layer bindings and pipelines with `gate_writes`).
+
+- Writes are validated on Graph Store `PUT` and `POST` (`/store`), bulk import (`/api/import/bulk`) and `POST /api/datasets/validate-and-commit`.
+- SPARQL Update (`/sparql`, `/sparql/batch`) is still not validated, Studio gates included: an update can write data that a gate would refuse on `/store`. To keep a gated graph valid, write it through one of the paths above, or run the pipeline (or `POST /api/datasets/{id}/validate`) after the update.
+- Only graphs a gate covers are validated: graphs registered to the dataset, graphs that carry a binding, and graphs in a gating pipeline's scope. Writes to other graphs pass through unchecked.
 
 ---
 
@@ -362,7 +364,7 @@ A pipeline is a saved, runnable validation. Its scope is a set of **targets** �
 
 A run's report carries the data it validated (focus nodes and values), so a pipeline's whole scope — every dataset, every data graph it resolves to and every shape graph it composes — must be readable by whoever creates or updates it, runs or test-runs it, or opens a stored run's report (`GET /api/shacl/pipelines/{id}/runs/{run_id}`); anything else answers 403. Reading follows the `/sparql` rule above, and a Library shape graph is readable by whoever the Library shows it to. The shapes bound to a dataset or graph in scope come with it, except a graph some dataset holds as private that the caller may not read: a pipeline with one in scope answers 403. The check is made each time, so a revoked grant takes effect at the next run. A scheduled run is checked against the pipeline's creator and skipped when they may no longer read its scope. Run summaries (`…/runs`, counts only) are listed to everyone who can see the pipeline. A report persisted as RDF (`results_target`) or inferred triples written to a new graph are attached to a dataset only when that dataset holds every graph the run validated, and are private there when any of them is private. The pipeline's own report graph collects every run, so a run over other data first detaches it, and it is attached again only while empty.
 
-A pipeline with `gate_writes` refuses (422) every write its shapes reject to the graphs it covers, whoever makes it, the graphs' owners and editors included. So setting a gate (creating or updating a pipeline with `gate_writes`) needs what a validation-layer binding needs: write access to every dataset it covers (dataset targets, and `dataset_ids` while no `graph_iris` narrow the scope) and a graph-ACL write grant on every graph it names (graph targets, `graph_iris`). Admins pass. Anything else answers 403, and a dataset that does not exist 404. Read access is enough only for a pipeline that validates without gating. The gate acts with its creator's authority, checked at every write: once the creator may no longer write what it covers (a revoked grant, a deactivated account), the pipeline stops gating, and the server logs a warning at each write it would have gated.
+A pipeline with `gate_writes` refuses (422) every write its shapes reject to the graphs it covers, whoever makes it, the graphs' owners and editors included. So setting a gate (creating or updating a pipeline with `gate_writes`) needs what a validation-layer binding needs: write access to every dataset it covers (dataset targets, and `dataset_ids` while no `graph_iris` narrow the scope) and a graph-ACL write grant on every graph it names (graph targets, `graph_iris`). Admins pass. Anything else answers 403, and a dataset that does not exist 404. Read access is enough only for a pipeline that validates without gating. The gate acts with its creator's authority, checked at every write: once the creator may no longer write what it covers (a revoked grant, a deactivated account), the pipeline stops gating, and the server logs a warning at each write it would have gated. The gate covers the write paths listed under [Limitations](#limitations); SPARQL Update is not gated.
 
 ### Meta-validation (SHACL-SHACL)
 

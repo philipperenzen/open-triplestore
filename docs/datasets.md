@@ -317,11 +317,23 @@ See [rml.md](rml.md) for full RML documentation.
 
 Datasets support three visibility levels:
 
-| Visibility | Public Access | Registered Users | Owner | Admin |
-|---|---|---|---|---|
-| `public` | Read-only | Read-only | Read + Write | Read + Write |
-| `members` | ✗ | Read-only | Read + Write | Read + Write |
-| `private` | ✗ | ✗ | Read + Write | Read + Write |
+| Visibility | Anonymous | Other signed-in users | Members of the owning org/group | Owner | Admin |
+|---|---|---|---|---|---|
+| `public` | Read-only | Read-only | By membership role | Manage | Manage |
+| `members` | ✗ | ✗ | By membership role | Manage | Manage |
+| `private` | ✗ | ✗ | Org/group admins only | Manage | Manage |
+
+"Other signed-in users" means anyone who is not the owner and not a member of
+the owning organisation or group. A `members` dataset is not readable just
+because you are signed in. Only members of the owning organisation or group,
+and users given an explicit grant (below), can read it. A user-owned `members`
+dataset is therefore readable only by its owner and by grantees.
+
+"By membership role" means the membership's own level: an org/group `viewer`
+reads, a `member` reads and writes, and an `admin` manages. For a
+group-owned dataset, members of the group's parent organisation count too.
+On a `private` dataset, plain members and viewers of the owning org/group get
+nothing unless they are granted access explicitly.
 
 ### Explicit access grants
 
@@ -335,9 +347,11 @@ of three levels:
 | `editor` | Read + write data |
 | `admin` | Manage the dataset, its metadata, and its access grants |
 
-A grant to a group or organisation applies to all of its members. Grants combine
-with membership-derived access, taking the strongest — except that an org/group
-admin can never be demoted below `admin` on resources their org/group owns.
+A grant to a group or organisation applies to all of its members. An explicit
+grant replaces the access a user would get from membership. It can raise that
+access (an org `member` granted `admin` on one dataset) or lower it (a `member`
+limited to `viewer`). The one exception: an org/group admin is never demoted
+below `admin` on resources their org/group owns.
 
 ---
 

@@ -21,6 +21,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `/validation`, `/shacl/results`, the shape-graph meta report and the source
   dry-run findings now shorten every `<…>` term and keep the operators, so a
   sequence path reads `ex.org:a/ex.org:b`; the tooltip keeps the raw path.
+- **Docs and UI help text match the server again.**
+  - `docs/datasets.md` said any signed-in user can read a `members`
+    dataset. Only members of the owning organisation or group, and users with
+    an explicit grant, can. It also said a grant combines with membership by
+    taking the strongest role; in fact the grant replaces the membership role,
+    except that an org/group admin is never demoted.
+  - `docs/named-graphs.md` and the Graphs page placed the Graph Store Protocol
+    at `/sparql?graph=`; it lives at `/store?graph=`.
+  - The Datasets page's help (English and Dutch) advertised a per-dataset
+    endpoint at `/api/datasets/{id}/sparql`, which does not exist. Each SPARQL
+    service on a dataset answers at
+    `/api/datasets/{id}/services/{slug}/sparql`.
+  - The Datasets and organisation pages' help (English and Dutch) said a
+    `private` dataset is visible to its owner only, and that every member of
+    an organisation can see the datasets it owns. Organisation admins and
+    users granted access can also see a `private` dataset, and plain members
+    of the organisation cannot.
+  - `docs/shacl.md` now says which writes are validated (Graph Store
+    `PUT`/`POST`, bulk import, validate-and-commit). It also says that SPARQL
+    Update skips every write gate, SHACL Studio pipelines and bindings
+    included, not only `shacl_on_write`.
 
 ### Changed
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
