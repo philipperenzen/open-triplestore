@@ -150,6 +150,21 @@ fn env_opt(name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// `OTS_REPLICATION_TOKEN` through the secrets module: a reference
+/// (`env:`/`file:`/`vault:`) resolves; a raw value is accepted in the
+/// development posture with a one-time warning and refused under
+/// `OTS_ENV=production`, in which case the follower runs without a token and
+/// the log says so (the leader then refuses it, which is the point).
+fn replication_token() -> Option<String> {
+    match crate::secrets::env_secret("OTS_REPLICATION_TOKEN") {
+        Ok(secret) => secret.map(|s| s.expose().to_string()),
+        Err(e) => {
+            tracing::error!("OTS_REPLICATION_TOKEN: {e}; the follower runs without a token");
+            None
+        }
+    }
+}
+
 /// True when `OTS_REPLICATION_ROLE=leader`: the change log stays on.
 pub fn leader_role_configured() -> bool {
     env_opt("OTS_REPLICATION_ROLE")
@@ -209,7 +224,7 @@ impl ReplicationConfig {
             env_opt("OTS_REPLICATION_GRAPHS").as_deref(),
             env_opt("OTS_REPLICATION_DATASETS").as_deref(),
             env_opt("OTS_REPLICATION_LEADER_URL").as_deref(),
-            env_opt("OTS_REPLICATION_TOKEN").as_deref(),
+            replication_token().as_deref(),
             env_opt("OTS_REPLICATION_NODE_ID").as_deref(),
             env_opt("OTS_REPLICATION_POLL_MS").as_deref(),
             env_opt("OTS_REPLICATION_INTERVAL_SECS").as_deref(),

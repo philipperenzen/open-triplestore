@@ -214,6 +214,53 @@ async fn every_documented_endpoint_enforces_the_level_it_documents() {
     );
 }
 
+/// The model-registry rows carry `{id}` and `{ver}`, which the sweep above
+/// skips. They are filled here with a bundled vocabulary the server seeds as a
+/// public entry, so the **none** level of a published model's data and profile
+/// is probed for real: the profile answered `401` anonymously while `/data`
+/// answered `200`, because it sat behind the admin-gated sources router.
+#[tokio::test]
+async fn public_model_rows_answer_anonymously_for_a_seeded_vocabulary() {
+    std::env::set_var("RATE_LIMIT_DISABLED", "1");
+
+    let (state, _reader_token) = documented_state();
+    open_triplestore::data_models::seed_vocab::seed_standard_vocabularies(&state);
+    let app = test_app(state);
+
+    let rows = documented_rows();
+    let mut checked = 0usize;
+    for row in rows
+        .iter()
+        .filter(|r| r.method == Method::GET && r.path.starts_with("/api/models/{id}/"))
+    {
+        assert_eq!(
+            row.level,
+            Level::None,
+            "{} is documented as something other than **none**",
+            row.path
+        );
+        let path = row
+            .path
+            .replace("{id}", "skos")
+            .replace("{ver}", "2009-08-18");
+        let status = probe(&app, &row.method, &path, None).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{} {} is documented **none** but answers an anonymous caller {status} for a \
+             seeded public vocabulary",
+            row.method,
+            path,
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 2,
+        "only {checked} model rows were exercised — the `/api/models/{{id}}/…` rows are no \
+         longer in the auth table"
+    );
+}
+
 #[tokio::test]
 async fn admin_rows_refuse_an_ordinary_token() {
     std::env::set_var("RATE_LIMIT_DISABLED", "1");

@@ -36,6 +36,11 @@ pub fn data_model_public_routes() -> Router<AppState> {
             get(handlers::merge_preview),
         )
         .route("/api/models/:id/term", get(super::deref::describe_term))
+        // The version profile reads what `/data` serves, so it is read by
+        // whoever may read the entry — anonymously for a public model. It
+        // used to sit under the admin-gated sources router, answering 401
+        // for a public model whose `/data` answered 200.
+        .merge(super::profile::routes())
         // Attribution and licence texts of the bundled vocabularies, linked from
         // every seeded entry's licence record; served here so the link works on
         // an API-only server too (the web UI ships the same file).

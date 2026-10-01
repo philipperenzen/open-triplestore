@@ -167,6 +167,8 @@ fn build_bundle() -> Bundle {
         },
         datasets,
         data_models: Vec::new(),
+        account: None,
+        groups: Vec::new(),
     }
 }
 
