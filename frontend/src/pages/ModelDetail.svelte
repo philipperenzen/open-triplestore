@@ -13,6 +13,7 @@
     updateDataModel, updateDataModelVersionNotes, uploadDataModelVersion,
     getOrganisation, listOrgMembers, listPublicUsers, getDataModelCollaborators,
     subgraphActionDataModel,
+    getDataModelDependents,
   } from '../lib/api.js';
   import { isAdmin, user } from '../lib/stores.js';
   import { copyToClipboard } from '../lib/clipboard.js';
@@ -36,6 +37,8 @@
   let model = null;
   let versions = [];
   let collaborators = [];
+  // Datasets pinned to this model (and whether they are behind the latest published version).
+  let dependents = null;
   let loading = false;
   let error = '';
 
@@ -142,6 +145,7 @@
       ]);
       loadOwnership(model);
       getDataModelCollaborators(id).then(c => { collaborators = c || []; }).catch(() => {});
+      getDataModelDependents(id).then(d => { dependents = d; }).catch(() => { dependents = null; });
     } catch (e) {
       error = e.message;
     }
@@ -408,6 +412,26 @@
           {:else}
             <span class="ownership-name">{ownerUser || model.owner_id}</span>
           {/if}
+        </div>
+      </div>
+    {/if}
+
+    <!-- Datasets that conform to this model -->
+    {#if dependents && dependents.datasets.length > 0}
+      <div class="ownership-card" data-testid="model-dependents">
+        <div class="ownership-header">
+          <span class="ownership-label">{$t('pages.modelDetail.dependents', { values: { count: dependents.datasets.length } })}</span>
+        </div>
+        <div class="ownership-body">
+          <div class="members-list">
+            {#each dependents.datasets as d}
+              <a class="member-chip" href="/datasets/{d.dataset_id}"
+                 title={d.update_available ? $t('pages.modelDetail.dependentBehind', { values: { latest: dependents.latest_published } }) : $t('pages.modelDetail.dependentCurrent')}>
+                {d.name} · v{d.effective_version || '—'}
+                {#if d.update_available}<span class="dep-behind">⬆ {dependents.latest_published}</span>{:else}<span class="dep-ok">✓</span>{/if}
+              </a>
+            {/each}
+          </div>
         </div>
       </div>
     {/if}
@@ -814,4 +838,6 @@
   :global(:is([data-theme="dark"], .dark)) .sg-btn-publish { color: #6ee7b7; border-color: rgba(16,185,129,0.4); }
   :global(:is([data-theme="dark"], .dark)) .sg-btn-danger { color: #fca5a5; border-color: rgba(239,68,68,0.4); }
   :global(:is([data-theme="dark"], .dark)) .member-chip { background: var(--brand-100); border-color: var(--brand-200); }
+  .dep-behind { margin-left: .35rem; color: var(--warning-800, #7a4b00); font-weight: 600; }
+  .dep-ok { margin-left: .35rem; color: var(--success-700, #137a3a); }
 </style>
