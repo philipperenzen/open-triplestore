@@ -25,6 +25,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `GET`/`PATCH`/`DELETE /api/admin/feedback[/{id}]`. Submissions need a
   write-capable principal, are rate-limited per client address and are capped
   at 20 per user per day.
+- **A real FAQ.** `/docs/faq` grew from five technical answers to about sixty
+  questions for people using the platform: accounts, datasets and access,
+  importing, querying, validation, models, Spark, the API, troubleshooting and
+  how to get help.
 
 ### Fixed
 - **SHACL result paths no longer render with a stray `>`.** The backend
