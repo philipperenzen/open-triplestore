@@ -14,7 +14,10 @@ use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
 use common::*;
 use open_triplestore::auth::models::SystemRole;
+use open_triplestore::dataset_versions::models::{DatasetVersion, GraphMapping, VersionStatus};
+use open_triplestore::dataset_versions::registry;
 use open_triplestore::server::AppState;
+use open_triplestore::shacl_studio::bindings;
 use oxigraph::io::RdfFormat;
 use oxigraph::sparql::QueryResults;
 use serde_json::{json, Value};
@@ -487,4 +490,110 @@ async fn gc_keeps_the_newest_drafts_and_never_a_published_version() {
         vec!["1.0.0", "1.0.3"],
         "the published version and the newest draft stay"
     );
+}
+
+// ─── A graph named `validation` ───────────────────────────────────────────────
+
+/// Its last segment is the name of the version's validation-layer graph.
+const VG: &str = "http://example.org/vds/validation";
+
+/// A graph whose last segment is `validation` used to snapshot into the IRI of
+/// the version's validation-layer graph, `…/version/{v}/validation`. Cutting the
+/// version copied the graph's triples there, then cleared that graph to write
+/// the bindings snapshot, so the version kept none of them.
+#[tokio::test]
+async fn a_graph_named_validation_keeps_its_snapshot() {
+    let (state, token) = admin_state();
+    let app = test_app(state.clone());
+    let ds = dataset_with_graph(&state, &app, &token).await;
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/{ds}/graphs"),
+        &token,
+        json!({ "graph_iri": VG }),
+    )
+    .await;
+    assert!(st.is_success(), "register graph: {st} {txt}");
+    state
+        .store
+        .load_str(
+            "<urn:vds:c> <urn:vds:p> \"three\" . <urn:vds:d> <urn:vds:p> \"four\" . \
+             <urn:vds:e> <urn:vds:p> \"five\" .",
+            RdfFormat::Turtle,
+            Some(VG),
+        )
+        .unwrap();
+    // A dataset binding, so the bindings step has something to write.
+    let base = state.base_url.as_str();
+    bindings::add_binding(
+        &state.store,
+        &bindings::dataset_target_iri(base, &ds),
+        "urn:vds:shapes",
+    )
+    .unwrap();
+
+    let v = cut(&app, &token, &ds, "1.0.0").await;
+    let snapshot = v["source_map"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["source_graph"] == VG)
+        .and_then(|m| m["snapshot_graph"].as_str())
+        .unwrap_or_else(|| panic!("no snapshot of {VG}: {v}"))
+        .to_string();
+    let validation = bindings::version_validation_graph(base, &ds, "1.0.0");
+    assert_ne!(
+        snapshot, validation,
+        "the data snapshot has a graph of its own"
+    );
+    assert_eq!(
+        count(&state, &snapshot),
+        3,
+        "the snapshot still holds the graph's triples after the bindings step"
+    );
+    assert_eq!(
+        count(&state, &validation),
+        2,
+        "the binding is snapshotted beside it (validatedBy + conformsTo)"
+    );
+}
+
+/// A version cut before the name was reserved lists the validation graph among
+/// its snapshots; deleting the version drops that graph once, not twice.
+#[tokio::test]
+async fn deleting_a_version_drops_a_shared_validation_graph_once() {
+    let (state, token) = admin_state();
+    let app = test_app(state.clone());
+    let ds = dataset_with_graph(&state, &app, &token).await;
+    let base = state.base_url.as_str();
+    let validation = bindings::version_validation_graph(base, &ds, "0.9.0");
+    let legacy = DatasetVersion {
+        dataset_id: ds.clone(),
+        version: "0.9.0".into(),
+        status: VersionStatus::Draft,
+        graph_iri: format!("{base}/dataset/{ds}/version/0.9.0"),
+        snapshot_graphs: vec![validation.clone()],
+        source_map: vec![GraphMapping {
+            snapshot_graph: validation.clone(),
+            source_graph: VG.into(),
+        }],
+        created_at: "2026-01-01T00:00:00Z".into(),
+        created_by: None,
+        derived_from: None,
+        notes: None,
+        branch: None,
+    };
+    registry::insert_version(&state.store, base, &legacy).unwrap();
+
+    let (st, v, txt) = req(
+        &app,
+        Method::DELETE,
+        &format!("/api/datasets/{ds}/versions/0.9.0"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(v["graphs_dropped"], json!([validation]), "{txt}");
 }

@@ -77,6 +77,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an existing tag. See `docs/release-process.md`.
 
 ### Fixed
+- **A graph named `…/validation` keeps its version snapshot.** A snapshot
+  graph is named after its source graph's last path segment, under the version
+  IRI, which is also where the version's validation-layer graph lives
+  (`{base}/dataset/{id}/version/{v}/validation`). A source graph whose last
+  segment slugified to `validation` was copied there, then cleared when the
+  bindings snapshot was written, so the version kept none of its triples (only
+  the bindings, if any), and deleting the version dropped that graph twice.
+  Snapshots, branches included, no longer take the name `validation`: such a
+  graph becomes `validation-1`. An index suffix can no longer collide with
+  another graph's name either (`a`, `a-1`, `a` now give `a`, `a-1`, `a-2`
+  rather than two `a-1`s). Versions cut earlier keep their IRIs, and their lost
+  snapshot cannot be recovered: restoring one of them replaces that live graph
+  with what the snapshot holds. Tests: `tests/dataset_versions_http.rs`.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if
