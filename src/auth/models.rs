@@ -943,14 +943,16 @@ impl OauthProvider {
     /// Whether a browser sign-in can start from this provider, i.e. whether the
     /// login page should offer it. An OIDC entry needs a client ID: the
     /// `env-oidc` entry that `OIDC_ISSUER` creates has none (it only anchors
-    /// resource-server accounts), nor does an OIDC entry saved without one.
+    /// resource-server accounts), nor does an OIDC entry saved without one. A
+    /// SAML entry needs an SSO URL to send the AuthnRequest to, and a build with
+    /// the `saml` feature.
     pub fn offers_login(&self) -> bool {
+        let filled = |v: &Option<String>| v.as_deref().is_some_and(|v| !v.trim().is_empty());
         self.is_active
-            && (self.provider_type == "saml"
-                || self
-                    .client_id
-                    .as_deref()
-                    .is_some_and(|id| !id.trim().is_empty()))
+            && match self.provider_type.as_str() {
+                "saml" => cfg!(feature = "saml") && filled(&self.sso_url),
+                _ => filled(&self.client_id),
+            }
     }
 }
 

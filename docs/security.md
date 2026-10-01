@@ -10,7 +10,7 @@ Register external identity providers so users can sign in with corporate credent
 - **Azure AD / Entra ID** — Microsoft Entra tenants, configured like OIDC with tenant-specific endpoints.
 - **SAML 2.0** — Enterprise SAML identity providers for browser-based SSO.
 
-A provider can **auto-provision** accounts on first login and map an incoming claim to a system role: `role_claim` names the claim (e.g. a group attribute), `role_claim_map` maps each claim value to `user`, `admin`, or `super_admin`, and `default_role` applies when nothing matches. Providers can be disabled without deleting them; enabled ones appear automatically on the login page. Configured providers are listed at `GET /api/auth/oauth/providers`; admin CRUD is under `/api/admin/oauth/providers`.
+A provider can **auto-provision** accounts on first login and map an incoming claim to a system role: `role_claim` names the claim (e.g. a group attribute), `role_claim_map` maps each claim value to `user`, `admin`, or `super_admin`, and `default_role` applies when nothing matches. Providers can be disabled without deleting them; enabled ones appear automatically on the login page once a sign-in can start from them (an OIDC provider needs a client ID, a SAML provider an SSO URL and a build with the `saml` feature). Configured providers are listed at `GET /api/auth/oauth/providers`; admin CRUD is under `/api/admin/oauth/providers`.
 
 ## Endpoint ACL
 

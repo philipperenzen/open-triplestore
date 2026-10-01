@@ -4536,6 +4536,25 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
     );
     mount(
         paths,
+        "/api/auth/saml/:slug/login",
+        vec![(
+            M::Get,
+            o(
+                "Auth",
+                "Start SAML sign-in",
+                "SP-initiated SAML sign-in: redirects to the IdP's SSO URL with an \
+                 AuthnRequest and binds the attempt to the browser (`saml_state` cookie).",
+                vec![],
+                vec![
+                    ("307", "Redirect to the IdP"),
+                    ("404", "No SAML provider a sign-in can start from"),
+                ],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
         "/api/auth/saml/:slug/metadata",
         vec![(
             M::Get,
@@ -4557,11 +4576,13 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Auth",
                 "SAML assertion consumer",
-                "SAML ACS endpoint; consumes the IdP assertion and establishes a session.",
+                "SAML ACS endpoint; accepts a signed response answering the AuthnRequest \
+                 this browser started, once, and redirects to the app with a session.",
                 vec![],
                 vec![
-                    ("302", "Redirect to app with session"),
-                    ("400", "Invalid assertion"),
+                    ("303", "Redirect to /oauth/callback with the session tokens"),
+                    ("400", "Bad or missing state binding"),
+                    ("401", "Response rejected"),
                 ],
                 false,
             ),

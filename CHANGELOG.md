@@ -14,6 +14,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **SP-initiated SAML sign-in (experimental `saml` feature).** A SAML button on
+  the login page now goes to `GET /api/auth/saml/{slug}/login`, which redirects
+  to the IdP's SSO URL with an AuthnRequest (HTTP-Redirect binding) and binds
+  the attempt to the browser with a short-lived `saml_state` cookie
+  (`SameSite=None; Secure` with `SECURE_COOKIES`). The ACS now accepts only a
+  signed response that answers that request (`InResponseTo`), from that
+  browser, once and within 10 minutes. It then redirects to the SPA's
+  `/oauth/callback` page instead of returning the tokens as JSON.
+  IdP-initiated responses are refused. Before this, the ACS passed a
+  confirmation-method URN where request IDs belong, so no SAML sign-in could
+  succeed, and the login button led to a `404`. The store now identifies itself
+  to the IdP with its own entity ID, the SP metadata URL
+  `…/api/auth/saml/{slug}/metadata`, rather than reusing the IdP's entity ID.
+  Re-register the SP at the IdP with that entity ID. SAML stays out of `full`
+  until it has been verified against a real IdP. See `docs/auth.md`.
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -98,10 +113,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (slug `env-oidc`, no client ID) to hold the accounts of IdP bearer tokens,
   and the login page listed it as a sign-in option that failed with "has no
   client_id". `GET /api/auth/oauth/providers` now lists only active entries a
-  browser sign-in can start from: SAML entries, and OIDC entries with a client
-  ID. `GET /api/auth/oauth/{slug}/authorize` answers `404` for the others
-  instead of `500`. IdP bearer tokens are unaffected, whatever an admin later
+  browser sign-in can start from: OIDC entries with a client ID, and SAML
+  entries with an SSO URL in a build with the `saml` feature.
+  `GET /api/auth/oauth/{slug}/authorize` answers `404` for the others instead
+  of `500`. IdP bearer tokens are unaffected, whatever an admin later
   edits on the entry; turning it off is no longer needed to hide it.
+- **OIDC browser sign-in lands signed in.** After the code exchange the
+  callback redirected to `/#access_token=…`, a page that never reads the
+  fragment, so the tokens were dropped and the user arrived signed out. It now
+  redirects to `/oauth/callback#…`, which stores them and removes them from the
+  URL bar.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if
