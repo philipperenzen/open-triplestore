@@ -1184,7 +1184,10 @@
       "openValidationStudio": "Open Validation studio",
       "moreActions": "More actions",
       "filesExpand": "Expand",
-      "filesOpenPage": "Open Files page"
+      "filesOpenPage": "Open Files page",
+      "modelUpdateAvailable": "model {version} published — update available",
+      "modelUpdateAvailableHint": "A newer version of the model was published than the one this dataset is pinned to. Re-validate against it, correct or collect what it asks for, then pin the new version.",
+      "modelCurrent": "current"
     },
     "validation": {
       "title": "SHACL Validation",
@@ -2296,7 +2299,10 @@
         "possiblyModifiedHint": "This copy is not known to be the bundled file, unchanged: it was made or edited in this registry, or it differs from the file. Its downloads say so.",
         "header": "Notice in the bundled file {file}",
         "fullNotice": "Full attribution and licence texts"
-      }
+      },
+      "dependents": "Used by {count} dataset(s)",
+      "dependentBehind": "Pinned to an older version — latest published is {latest}",
+      "dependentCurrent": "Pinned to the latest published version"
     },
     "modelDiff": {
       "heading": "Diff:",
