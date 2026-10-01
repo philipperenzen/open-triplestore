@@ -13,6 +13,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Feedback dialog and admin inbox.** Signed-in users send a bug report,
+  feature request, question or other note from the new **Feedback** button in
+  the sidebar footer, or from the help card that now ends every documentation
+  page. A report can carry the in-app page and the browser it was sent from;
+  both are opt-out. It goes to this instance's admins, who triage it at
+  **Admin → Feedback**: set its status, correct its type, reply to the reporter (who follows
+  status and replies under **My reports**) and keep an internal note. New
+  routes: `POST /api/feedback`, `GET /api/feedback/mine`, and
+  `GET`/`PATCH`/`DELETE /api/admin/feedback[/{id}]`. Submissions need a
+  write-capable principal, are rate-limited per client address and are capped
+  at 20 per user per day.
+
 ### Fixed
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,

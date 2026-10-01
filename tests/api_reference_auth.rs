@@ -232,6 +232,7 @@ async fn admin_rows_refuse_an_ordinary_token() {
         "/api/admin/telemetry",
         "/api/admin/changes",
         "/api/replication/manifest",
+        "/api/admin/feedback",
     ];
 
     let rows = documented_rows();

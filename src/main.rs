@@ -23,6 +23,7 @@ mod docs;
 mod email;
 mod entailment;
 mod federation;
+mod feedback;
 mod geo;
 mod ifc;
 mod imports;

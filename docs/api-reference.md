@@ -109,6 +109,11 @@ Three facts worth knowing before an instance is exposed:
 | `GET` | `/.well-known/void` | **none** | Catalog of the public datasets. |
 | `GET` | `/api-docs/openapi.json` | **none** | The spec is tailored to the caller: operations it may not reach are left out. |
 | `GET` | `/api/docs` | **none** | Documentation pages; admin-only pages are filtered out. |
+| `POST` | `/api/feedback` | **token** | Send a bug report, feature request or question to this instance's admins. Needs a write-capable token; rate-limited and capped at 20 a day per user. |
+| `GET` | `/api/feedback/mine` | **token** | Your own reports, with their status and the admins' reply. |
+| `GET` | `/api/admin/feedback` | **admin** | The feedback inbox; `?status=` and `?kind=` narrow it. |
+| `PATCH` | `/api/admin/feedback/{id}` | **admin** | Set a report's status, reply to the reporter, or keep an internal note. |
+| `DELETE` | `/api/admin/feedback/{id}` | **admin** | Delete a report. |
 
 `tests/api_reference_auth.rs` reads this table out of the shipped Markdown and
 fires an anonymous request at every row it can address, so a level stated here

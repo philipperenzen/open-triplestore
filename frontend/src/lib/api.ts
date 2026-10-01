@@ -1160,6 +1160,24 @@ export const listDocs = () => request('GET', '/api/docs');
 export const getDoc = (slug) => request('GET', `/api/docs/${slug}`);
 export const saveDoc = (slug, body) => request('PUT', `/api/docs/${slug}`, body);
 export const deleteDoc = (slug) => request('DELETE', `/api/docs/${slug}`);
+
+// Feedback: bug reports, feature requests and questions for this instance's admins.
+export const submitFeedback = (body: {
+  kind: string; title: string; body: string; page?: string | null; include_browser?: boolean;
+}) => request('POST', '/api/feedback', body);
+export const listMyFeedback = () => request('GET', '/api/feedback/mine');
+export const adminListFeedback = (filter: { status?: string; kind?: string } = {}) => {
+  const q = new URLSearchParams();
+  if (filter.status) q.set('status', filter.status);
+  if (filter.kind) q.set('kind', filter.kind);
+  const qs = q.toString();
+  return request('GET', `/api/admin/feedback${qs ? `?${qs}` : ''}`);
+};
+export const adminUpdateFeedback = (id: string, body: {
+  status?: string; admin_response?: string; admin_note?: string;
+}) => request('PATCH', `/api/admin/feedback/${encodeURIComponent(id)}`, body);
+export const adminDeleteFeedback = (id: string) =>
+  request('DELETE', `/api/admin/feedback/${encodeURIComponent(id)}`);
 // Pass { test: true } for a dry run that validates but is NOT recorded.
 export const runPipeline = (id, opts: { test?: boolean } = {}) =>
   request('POST', `/api/shacl/pipelines/${id}/run${opts.test ? '?test=true' : ''}`, {});

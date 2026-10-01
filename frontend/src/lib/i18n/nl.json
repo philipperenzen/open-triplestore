@@ -72,7 +72,10 @@
     "adminPrefixes": "Prefixen",
     "vocabularySearch": "Vocabulaire zoeken",
     "files": "Bestanden",
-    "sqlSources": "SQL-bronnen"
+    "sqlSources": "SQL-bronnen",
+    "feedback": "Feedback",
+    "feedbackHint": "Feedback sturen: een fout melden, een functie aanvragen of een vraag stellen",
+    "adminFeedback": "Feedback"
   },
   "system": {
     "checkingBackend": "Backend controleren",
@@ -2217,7 +2220,13 @@
       "createFirst": "Maak de eerste documentatiepagina aan",
       "onThisPage": "Op deze pagina",
       "title": "Documentatie",
-      "detail": "Ondersteunde standaarden, mogelijkheden en gebruiksgids voor het Open Triplestore-platform."
+      "detail": "Ondersteunde standaarden, mogelijkheden en gebruiksgids voor het Open Triplestore-platform.",
+      "helpTitle": "Niet gevonden wat je zocht?",
+      "helpBody": "Stel de beheerders van dit platform een vraag, meld iets dat niet werkt of stel een verbetering voor.",
+      "helpFaq": "Of bekijk eerst de veelgestelde vragen.",
+      "helpAsk": "Stel een vraag",
+      "helpBug": "Meld een fout",
+      "helpFeature": "Stel een functie voor"
     },
     "modelDetail": {
       "createDraftPrompt": "Maak een nieuw concept aan vanaf v{version}.\n\nVoer de nieuwe versiereeks in:",
@@ -3384,6 +3393,39 @@
       "entities": "Entiteiten",
       "violations": "{count} overtredingen",
       "rounds": "Rondes"
+    },
+    "adminFeedback": {
+      "title": "Feedback",
+      "detail": "Foutmeldingen, functieverzoeken en vragen die gebruikers van dit platform via het feedbackvenster hebben gestuurd.",
+      "refresh": "Vernieuwen",
+      "statusFilter": "Filteren op status",
+      "all": "Alle",
+      "kindFilter": "Soort",
+      "allKinds": "Alle soorten",
+      "loading": "Meldingen laden…",
+      "emptyTitle": "Nog geen feedback",
+      "emptyBody": "Wanneer gebruikers via de knop Feedback in de zijbalk een fout, functieverzoek of vraag sturen, verschijnt die hier.",
+      "noMatchTitle": "Niets voldoet aan deze filters",
+      "noMatchBody": "Kies een andere status of soort om meer meldingen te zien.",
+      "unknownUser": "Verwijderde gebruiker",
+      "from": "Van",
+      "page": "Pagina",
+      "browser": "Browser",
+      "version": "Versie",
+      "updated": "Laatst bijgewerkt",
+      "status": "Status",
+      "response": "Reactie aan de melder",
+      "responsePlaceholder": "Zichtbaar voor de melder onder Mijn meldingen",
+      "responseHint": "De melder ziet deze tekst bij de melding.",
+      "note": "Interne notitie",
+      "notePlaceholder": "Alleen zichtbaar voor beheerders",
+      "noteHint": "Voor andere beheerders, bijv. een link naar een issuetracker. Nooit zichtbaar voor de melder.",
+      "save": "Opslaan",
+      "saved": "Melding bijgewerkt",
+      "delete": "Verwijderen",
+      "deleteTitle": "Deze melding verwijderen?",
+      "deleteMessage": "“{title}” wordt definitief verwijderd, ook voor de melder.",
+      "kind": "Soort"
     }
   },
   "toast": {
@@ -4463,6 +4505,64 @@
       "facts": "{count}{more} feiten in de store",
       "clickToOpen": "klik om te openen",
       "notInStore": "Geen data over deze IRI in de store — externe link"
+    },
+    "feedback": {
+      "title": "Feedback sturen",
+      "subtitle": "Je melding gaat naar de beheerders van dit platform. Zij kunnen reageren, en je volgt de melding onder Mijn meldingen.",
+      "close": "Sluiten",
+      "tabNew": "Nieuwe melding",
+      "tabMine": "Mijn meldingen",
+      "kindLegend": "Waar gaat het over?",
+      "kinds": {
+        "bug": "Foutmelding",
+        "feature": "Functieverzoek",
+        "question": "Vraag",
+        "other": "Overig"
+      },
+      "kindHints": {
+        "bug": "Iets werkt niet of gedraagt zich onverwacht",
+        "feature": "Een idee of verbetering",
+        "question": "Hulp bij het gebruik van het platform",
+        "other": "Al het andere"
+      },
+      "titleLabel": "Samenvatting",
+      "titlePlaceholders": {
+        "bug": "bijv. Import mislukt voor Turtle-bestanden met blank nodes",
+        "feature": "bijv. Queryresultaten exporteren naar Excel",
+        "question": "bijv. Hoe deel ik een dataset met mijn team?",
+        "other": "Een korte samenvatting"
+      },
+      "bodyLabel": "Details",
+      "bodyPlaceholders": {
+        "bug": "Wat deed je (stap voor stap)?\nWat verwachtte je dat er zou gebeuren?\nWat gebeurde er in plaats daarvan? Vermeld foutmeldingen, de dataset of de query.",
+        "feature": "Wat wil je kunnen doen, en waarom? Beschrijf welk probleem het voor je oplost.",
+        "question": "Wat probeer je te doen, en wat heb je al geprobeerd?",
+        "other": "Vertel ons meer."
+      },
+      "contextHeading": "Meesturen met de melding",
+      "includePage": "De pagina waarop je bent:",
+      "includeBrowser": "Je browser en besturingssysteem",
+      "securityNote": "Een beveiligingslek gevonden? Meld het niet hier, maar neem vertrouwelijk contact op met de beheerders van dit platform.",
+      "cancel": "Annuleren",
+      "send": "Melding versturen",
+      "rateLimited": "Je hebt in korte tijd meerdere meldingen gestuurd. Wacht een minuut en probeer het opnieuw.",
+      "sentTitle": "Bedankt, je melding is verstuurd",
+      "sentBody": "De beheerders bekijken je melding. Reacties en statuswijzigingen zie je onder Mijn meldingen.",
+      "viewMine": "Mijn meldingen bekijken",
+      "sendAnother": "Nog een sturen",
+      "done": "Klaar",
+      "loading": "Je meldingen laden…",
+      "mineEmpty": "Je hebt nog geen meldingen gestuurd.",
+      "replyHeading": "Reactie van de beheerders",
+      "statuses": {
+        "open": "Open",
+        "in_progress": "In behandeling",
+        "resolved": "Opgelost",
+        "closed": "Gesloten"
+      },
+      "signInTitle": "Log in om feedback te sturen",
+      "signInBody": "Meldingen worden aan je account gekoppeld, zodat de beheerders contact met je kunnen opnemen.",
+      "readFaq": "Lees de veelgestelde vragen"
     }
   },
   "viewer": {
