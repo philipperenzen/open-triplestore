@@ -14,7 +14,7 @@ Each version is stored in a dedicated named graph following the pattern `{base-u
 
 ## Does the triplestore support RDF-star?
 
-Yes. Both the storage engine and SPARQL processor support RDF-star (quoted triples). Use the `<< s p o >>` syntax in Turtle 1.2 or SPARQL 1.2 queries. Standard RDF 1.1 is always supported alongside it.
+It supports RDF 1.2, which replaces the RDF-star Community Group model. The store and the SPARQL engine hold *triple terms*, written `<<( s p o )>>`, which may appear only as an object. To annotate a statement, use `<< s p o >>` in Turtle 1.2 or SPARQL 1.2: it is shorthand for a reifier (a blank node that `rdf:reifies` the triple term) and does not assert the statement. `s p o {| … |}` asserts it and annotates it in one go. RDF-star data that uses a quoted triple as a subject needs converting. Standard RDF 1.1 is always supported alongside it. See [SPARQL 1.2](/docs/sparql-12).
 
 ## How does content negotiation work?
 

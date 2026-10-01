@@ -7,27 +7,27 @@ the TBox (schema) axioms at query time.
 
 > **Open Triplestore role names:** In the OTS UI and API, class definitions and class axioms are stored with graph role **Model** (the T-Box) and ABox content with graph role **Instances**.  Property definitions and relations (`rdfs:subPropertyOf`, `owl:inverseOf`, `rdfs:domain`/`range`) are the **R-Box** and belong to the **Vocabulary** role, even though OWL groups them with the TBox for reasoning purposes.  The standard OWL 2 terms TBox and ABox are used throughout this document as they are defined in the W3C OWL 2 specification, and the reasoner classifies over the TBox+RBox schema together.
 
-This makes it ideal for:
-- Read-heavy workloads where the TBox is small and relatively static.
-- Scenarios where storage of entailed triples is prohibitive.
-- Integration with existing relational databases via SPARQL-to-SQL rewriting.
+The rewriter here covers part of the profile; the [Standards](standards.md) page
+grades OWL 2 QL **Partial**, and the limits are listed [below](#limitations).
+Query rewriting suits read-heavy workloads with a small, fairly static TBox,
+where storing entailed triples is not wanted.
 
-## Algorithm: PerfectRef
+## Algorithm
 
-The implementation uses the **PerfectRef** algorithm (Calvanese et al., 2007) at the SPARQL AST
-level (not string-based rewriting):
+The rewriter expands each triple pattern on its own, over hierarchies closed in
+Rust. It is **not** PerfectRef (Calvanese et al., 2007): there is no reduction
+step that unifies atoms, and existential restrictions are not rewritten across
+atoms.
 
 1. Load the TBox from the store (subClassOf, equivalentClass, subPropertyOf, equivalentProperty,
-   inverseOf, rdfs:domain).
-2. Compute full transitive closure in pure Rust.
+   inverseOf, rdfs:domain, and `someValuesFrom` restrictions on the right of subClassOf).
+2. Compute the transitive closure of the class and property hierarchies.
 3. Parse the incoming SPARQL query to an AST via the `spargebra` crate.
 4. Walk the AST and rewrite each Basic Graph Pattern (BGP) triple:
-   - `?x rdf:type <C>` → `UNION` branches for all subclasses of `C` (because any individual of
-     a subclass of `C` satisfies the query).
-   - `?x <P> ?y` → `UNION` branches for all subproperties of `P`, plus inverse alternatives
-     where `owl:inverseOf` applies.
-   - `rdf:domain` axioms generate existential alternatives: if `P rdfs:domain C` then
-     `?x rdf:type C` can be satisfied by `?x <P> ?_`.
+   - `?x rdf:type <C>` → `UNION` branches for all subclasses of `C`.
+   - `?x <P> ?y` → `UNION` branches for all subproperties of `P`, plus the
+     reversed pattern for each property declared `owl:inverseOf` `P`.
+   - If `P rdfs:domain C`, then `?x rdf:type C` also matches `?x <P> ?_ql_any`.
 5. Serialize the rewritten AST back to SPARQL and execute.
 
 ## Supported TBox Axioms
@@ -122,8 +122,26 @@ ASK {
 
 ## Limitations
 
-- Variable predicates (`?x ?p ?y`) cannot be statically rewritten.
-- `owl:someValuesFrom` restrictions in the TBox require an existential witness that QL rewriting
-  cannot generate; use OWL 2 EL or RL for those axioms.
+- **Unsound existential mapping.** An axiom `C rdfs:subClassOf [ owl:someValuesFrom D ; owl:onProperty P ]`
+  is treated like `P rdfs:domain C`. With `ex:Parent ⊑ ∃ex:hasChild.ex:Person`
+  and `ex:x ex:hasChild ex:y`, `ASK { ex:x a ex:Parent }` wrongly returns true.
+  A fix is planned.
+- **One shared fresh variable.** Every domain expansion uses the same variable
+  `?_ql_any`, so two expansions in one query are joined on it, and it appears in
+  `SELECT *` results.
+- **Partial hierarchy handling.** `rdfs:range` is not used. Domain expansion
+  applies only to the class named in the query, not to its subclasses, and not
+  through sub-properties. Inverses are not combined with sub-properties, and an
+  anonymous inverse (`[ owl:inverseOf ex:p ]`) is ignored.
+- **Not covered:** negative inclusions and consistency checking,
+  symmetric/reflexive properties, data properties, `?x a ?c` with a variable
+  class, and variable predicates (`?x ?p ?y`), which cannot be statically
+  rewritten.
+- **HTTP exposure.** The `owl2-ql` regime of `POST /api/reasoning/materialize`
+  and of datasets writes only the TBox closure (see
+  [TBox Materialisation](#tbox-materialisation-optional)); `?entailment=owl2-ql`
+  on `/sparql` adds that graph to the query, so no query is rewritten and no
+  ABox inference is returned. `POST /api/reasoning/rewrite` returns the
+  rewritten query; its TBox comes from the unnamed default graph only.
 - The rewriter loads the full TBox on each call.  For high-throughput scenarios, cache the
   `QLQueryRewriter` instance across requests.

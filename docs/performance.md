@@ -458,7 +458,7 @@ the only variable is the host hardware.
 | RAM visible to Docker | 54.9 GiB (`MemTotal`, pinned via `.wslconfig`) |
 | Storage | NVMe SSD |
 | GPU | Not used — the triplestore has no GPU code path |
-| Engine | Oxigraph 0.4.11 (oxrdf 0.2.4) · GEOS 11.0.1 · Axum 0.7.9 |
+| Engine | Oxigraph 0.4.11 (oxrdf 0.2.4) · GEOS 11.0.1 · Axum 0.7.9 — as of the 2026-06 run; the project now pins Oxigraph 0.5 |
 | Rust / image | rustc 1.91.1 · `ots-builder` (rust:1.91-bookworm) · `--release` |
 
 > GPUs are listed for completeness only; RDF/SPARQL/GeoSPARQL/SHACL workloads
@@ -511,11 +511,19 @@ per-benchmark `estimates.json` files that can be diffed across runs or machines.
 
 A **full** `cargo bench --bench performance --features full` run on the reference
 system above (Docker/WSL2, release, 24 vCPU), captured 2026-06 — **97 benchmarks**,
-Criterion median shown. Reproduce with the [run command](#reproducible-run-command);
+Criterion median shown.
+
+> **Dated figures.** Every table and chart in this section, down to and including
+> "Extra-large scaling", comes from that **June 2026** run on Oxigraph 0.4.11
+> unless a row says otherwise. It has not been re-run since the Oxigraph 0.5
+> upgrade, the query mirror and the columnar copy, so read the numbers as that
+> build's, not today's. Later measurements are dated where they appear (the 2026-09
+> asset-shaped benchmark and 9M SHACL sections, the CI baseline in
+> `benches/perf_baseline.json`). Reproduce with the [run command](#reproducible-run-command);
 per-benchmark `estimates.json` is written under `target/criterion/`. Charts are
 in [`docs/benchmarks/`](benchmarks/).
 
-#### SPARQL query latency
+#### SPARQL query latency (2026-06 run)
 
 ![SPARQL query latency at 10k persons / 50k triples](benchmarks/query-latency-10k.svg)
 
@@ -548,7 +556,7 @@ count index instead of a scan, so it costs the same at every size. The figure is
 GitHub runner); this run, made while it still scanned, measured 620 µs, 7.09 ms
 and 66.2 ms. The chart above leaves it out.
 
-#### SPARQL operators — pick the cheaper equivalent
+#### SPARQL operators — pick the cheaper equivalent (2026-06 run)
 
 ![operator cost at 10k](benchmarks/operators.svg)
 
@@ -556,7 +564,7 @@ and 66.2 ms. The chart above leaves it out.
 MINUS hashes the exclusion set once; NOT EXISTS re-evaluates its inner pattern
 per row. `VALUES` (2.03 ms) beats the equivalent 2-pattern join (7.62 ms).
 
-#### Property paths
+#### Property paths (2026-06 run)
 
 | Path | small | mid | large |
 |---|--:|--:|--:|
@@ -570,7 +578,7 @@ per row. `VALUES` (2.03 ms) beats the equivalent 2-pattern join (7.62 ms).
 Inverse paths match forward-scan speed (they use the O-P-S index); `*` adds ~2 %
 over `+` for the identity solutions.
 
-#### Bulk loading & writes
+#### Bulk loading & writes (2026-06 run)
 
 ![bulk-loader throughput vs size](benchmarks/bulk-load-throughput.svg)
 
@@ -586,7 +594,7 @@ Single `INSERT DATA` is 72 µs/triple (~14 K/s); batching 10 triples per stateme
 drops that to 27 µs/triple (~37 K/s, **2.6×**). Use the bulk loader for ingestion
 (~0.5–0.9 M triples/s).
 
-#### GeoSPARQL (GEOS, per candidate binding) — with the WKT→WKB parse cache
+#### GeoSPARQL (GEOS, per candidate binding) — with the WKT→WKB parse cache (2026-06 run)
 
 ![GeoSPARQL points vs polygons](benchmarks/geosparql.svg)
 
@@ -607,7 +615,7 @@ Relation queries drop 35–57% — polygons (more coordinates → more `strtod`)
 benefit most. `buffer` is constructive (builds a new geometry per row), so it is
 compute-bound and the parse cache doesn't help it.
 
-#### SHACL validation
+#### SHACL validation (2026-06 run)
 
 ![SHACL throughput vs focus-node count](benchmarks/shacl-scaling.svg)
 
@@ -622,7 +630,7 @@ nodes is shapes-loading + target resolution, so throughput rises from 85 K to
 286 K nodes/s as that fixed cost amortizes. Violations add negligible overhead
 for this shape.
 
-#### Concurrency
+#### Concurrency (2026-06 run)
 
 ![concurrent read latency vs threads](benchmarks/concurrent-reads.svg)
 
@@ -639,7 +647,7 @@ Writes serialize on the store's write lock. Mixed 4-reader + 1-writer: 5.47 ms.
 > The 7900X3D's 3D V-Cache notably helps the index-scan-heavy paths. GPUs are
 > irrelevant — every path here is CPU/memory-bound.
 
-#### Extra-large scaling — 1M to 100M triples (persistent store)
+#### Extra-large scaling — 1M to 100M triples (persistent store, 2026-06 run)
 
 The criterion figures above are in-memory (tiny→large, ≤500k triples). At 1M–100M
 an in-memory store would exhaust RAM, so this tier uses the **persistent (RocksDB)

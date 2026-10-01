@@ -33,7 +33,7 @@
 
 > **Status:** current release **`0.7.0`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
 
-**Open Triplestore** is a modern, high-performance RDF triple store with **SPARQL 1.1** and **LDP 1.0** support, plus partial support for **SPARQL 1.2 (RDF-star)**, **GeoSPARQL 1.1** (not OGC-certified) and **OWL 2** reasoning (RL natively + DL extension rules; an optional, experimental bridge to an external tableau reasoner such as Konclude) — grades and known gaps per standard in [docs/standards.md](docs/standards.md) — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
+**Open Triplestore** is a modern, high-performance RDF triple store with **SPARQL 1.1** and **LDP 1.0** support, plus partial support for **SPARQL 1.2 (RDF-star)**, **GeoSPARQL 1.1** (not OGC-certified) and **OWL 2** reasoning (RL natively + DL extension rules; no complete DL reasoner ships) — grades and known gaps per standard in [docs/standards.md](docs/standards.md) — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
 
 ## Demo
 
@@ -67,10 +67,10 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | Feature | Detail |
 |---|---|
 | **SPARQL 1.1** | SELECT, CONSTRUCT, ASK, DESCRIBE, UPDATE (INSERT/DELETE) |
-| **SPARQL 1.2** | Triple terms `<<( )>>` / `rdf:reifies` and the accessor functions (RDF 1.2 model); `LATERAL` and `CALL` are not implemented |
+| **SPARQL 1.2** | Triple terms `<<( )>>`, reifiers and `{\| \|}` annotations (RDF 1.2 model), the triple-term and base-direction functions, `VERSION`; plus Oxigraph's `LATERAL` and `ADJUST` extensions, which are not part of SPARQL 1.2 ([docs](docs/sparql-12.md)) |
 | **SPARQL federation** | `SERVICE` is off by default (SSRF mitigation) and enabled per endpoint with `OTS_REMOTE_ALLOWLIST`; calls are timed out and row-capped, and the service description advertises federation only when an allowlist exists |
 | **GeoSPARQL 1.1** | Simple Features, Egenhofer and RCC8 relations, DE-9IM `relate`, distance/area/buffer and the constructive functions, the geodesic metric family (metres on the WGS84 ellipsoid), the `aggUnion` aggregate, WKT, GML and GeoJSON literals (`asGeoJSON`), CRS transform for the built-in CRS set. Not implemented: KML/DGGS literals, the Query Rewrite Extension, the other aggregates ([grades & gaps](docs/standards.md#known-limitations--conformance-findings)) |
-| **OWL 2 DL** | Native hasSelf, disjointUnionOf, NegativePropertyAssertion, hasKey on top of the RL rules; optional external-reasoner bridge (experimental, `OTS_EXTERNAL_REASONER=konclude`) ([docs](docs/owl2-dl.md)) |
+| **OWL 2 DL** | Native hasSelf, disjointUnionOf, NegativePropertyAssertion, hasKey on top of the RL rules; not a complete DL reasoner — the experimental Konclude bridge does not work yet ([docs](docs/owl2-dl.md)) |
 | **Federated access control** | Signed identity assertions between instances (`SERVICE`, LDES sync); verified against the peer's JWKS, authorised locally ([docs](docs/federation.md)) |
 | **Linked-document containers** | Import and export packaged containers of documents, RDF payloads and link graphs — ISO 21597-1 ICDD as the first profile ([docs](docs/containers.md)) |
 | **Time-evolving properties** | OPM-style property states with validity, reliability and attribution; current value stays a plain triple, history and as-of queries read the chain ([docs](docs/datasets.md#time-evolving-properties-opm-profile)) |
@@ -81,7 +81,7 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | **Dataset privacy** | Datasets default to `private`; public datasets are queryable without auth |
 | **SHACL validation** | Validate data on read or write; SHACL-AF rule inference; shapes stored per dataset |
 | **SHACL on write** | Automatic SHACL validation on every Graph Store PUT/POST — returns 422 with full report on violation |
-| **SHACL Compact Syntax** | Parse and serialize shapes in [SHACLC](https://w3c.github.io/shacl/shacl-compact-syntax/) via `Accept: text/shaclc` |
+| **SHACL Compact Syntax** | Parse and serialize shapes in a subset of [SHACLC](https://w3c.github.io/shacl/shacl-compact-syntax/) via `Accept: text/shaclc`; the export drops what it cannot write ([docs](docs/shacl.md#what-the-serializer-leaves-out)) |
 | **DCAT 2 catalog** | Full W3C DCAT 2 catalog at `/.well-known/void` — per-dataset distributions, VoID statistics, PROV-O provenance |
 | **RML mapping** | [RDF Mapping Language](https://rml.io/specs/rml/) — CSV, JSON (JSONPath), XML (XPath) → RDF with template expansion |
 | **OpenAPI docs** | Interactive Swagger UI at `/api-docs/` with JWT Bearer auth; machine-readable spec at `/api-docs/openapi.json` |
@@ -539,8 +539,14 @@ SELECT ?feature WHERE {
 | Simple Features | `sfContains` `sfCrosses` `sfDisjoint` `sfEquals` `sfIntersects` `sfOverlaps` `sfTouches` `sfWithin` |
 | Egenhofer | `ehContains` `ehCoveredBy` `ehCovers` `ehDisjoint` `ehEquals` `ehInside` `ehMeet` `ehOverlap` |
 | RCC8 | `rcc8dc` `rcc8ec` `rcc8po` `rcc8tppi` `rcc8tpp` `rcc8ntpp` `rcc8ntppi` `rcc8eq` |
+| DE-9IM | `relate` |
 | Constructive | `boundary` `buffer` `convexHull` `difference` `envelope` `intersection` `symDifference` `union` |
-| Metric | `distance` `area` `getSRID` |
+| Measurement | `distance` `area` |
+| Metric (metres, WGS84 ellipsoid) | `metricDistance` `metricLength` `metricPerimeter` `metricArea` `metricBuffer` |
+| CRS and serialisation | `getSRID` `transform` `asGeoJSON` |
+| Aggregate | `aggUnion` |
+
+The full list with its caveats is in [docs/geosparql.md](docs/geosparql.md#supported-functions).
 
 ---
 
@@ -793,7 +799,7 @@ See [docs/rml.md](docs/rml.md) for the full RML guide including JSON and XML sou
 
 ## OWL 2 DL Reasoning
 
-Native OWL 2 DL support runs the OWL 2 RL forward-chaining rules (the equality, property, class and schema families — the Table 8 datatype rules `dt-*` are not implemented) plus DL-specific SPARQL rules for `owl:hasSelf`, `owl:disjointUnionOf`, `owl:NegativePropertyAssertion`, `owl:hasKey`, and cardinality annotations.  An `ExternalReasonerBridge` can hand the ontology to an external tableau reasoner for classification — Konclude is wired (`OTS_EXTERNAL_REASONER=konclude`) and experimental; it is off unless configured.
+Native OWL 2 DL support runs the OWL 2 RL forward-chaining rules (63 of the 78 RL/RDF rules; of the Table 8 datatype rules only `dt-type1` and `dt-not-type`) plus DL-specific SPARQL rules for `owl:hasSelf`, `owl:disjointUnionOf`, `owl:NegativePropertyAssertion`, `owl:hasKey`, and cardinality annotations.  An `ExternalReasonerBridge` trait lets an external tableau reasoner take over classification, but none that works ships today: the Konclude bridge (`OTS_EXTERNAL_REASONER=konclude`) is experimental and cannot work as written ([details](docs/owl2-dl.md#konclude-experimental-not-working)); leave it unset.
 
 ```bash
 # Query with OWL 2 DL entailment

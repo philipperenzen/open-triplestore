@@ -14,7 +14,36 @@ Three serialisations are geometries, and every `geof:` function accepts any of t
 
 ## Supported functions
 
-`sf:intersects`, `sf:contains`, `sf:within`, `sf:overlaps`, `sf:touches`, `sf:crosses`, `sf:disjoint`, `sf:equals`, `geof:distance`, `geof:buffer`, `geof:convexHull`, `geof:envelope`, `geof:union`, `geof:intersection`, `geof:asGeoJSON`, and the aggregate `geof:aggUnion`.
+All functions are in the `geof:` namespace (`http://www.opengis.net/def/function/geosparql/`)
+and are called as filter functions; the `geo:sfIntersects`-style *properties* of the Query
+Rewrite Extension are not supported.
+
+| Family | Functions |
+|---|---|
+| Simple Features relations | `sfContains` `sfCrosses` `sfDisjoint` `sfEquals` `sfIntersects` `sfOverlaps` `sfTouches` `sfWithin` |
+| Egenhofer relations | `ehContains` `ehCoveredBy` `ehCovers` `ehDisjoint` `ehEquals` `ehInside` `ehMeet` `ehOverlap` |
+| RCC8 relations | `rcc8dc` `rcc8ec` `rcc8eq` `rcc8ntpp` `rcc8ntppi` `rcc8po` `rcc8tpp` `rcc8tppi` |
+| DE-9IM | `relate(g1, g2, pattern)` — its operands are not reprojected to a common CRS first |
+| Constructive | `boundary` `buffer` `convexHull` `difference` `envelope` `intersection` `symDifference` `union` |
+| Measurement | `distance` (with an optional unit, below); `area` (planar, in the CRS's units; no unit argument) |
+| Metric (metres on the WGS84 ellipsoid) | `metricDistance` `metricLength` `metricPerimeter` `metricArea` `metricBuffer` ([below](#metres-on-the-ellipsoid)) |
+| CRS | `getSRID` (the CRS IRI, CRS84 by default); `transform(g, crsIRI)` for the built-in CRS set |
+| Serialisation | `asGeoJSON` |
+| Aggregate | `aggUnion` ([below](#the-union-aggregate)) |
+
+The relation functions harmonise the CRS of their operands: the second is reprojected into the
+first's CRS, and a pair this build cannot reproject gives an unbound result. The CRS is read from
+a WKT literal's `<crs>` prefix; a GML literal's `srsName` is not read yet, so a GML geometry is
+taken to be CRS84. The built-in CRS
+set is CRS84, EPSG:4326, EPSG:28992 (RD New) and EPSG:3857 (Web Mercator).
+
+Not implemented from GeoSPARQL 1.1: the other non-topological functions (`asWKT`, `asGML`,
+`asKML`, `asDGGS`, `dimension`, `coordinateDimension`, `spatialDimension`, `geometryType`,
+`isEmpty`, `isSimple`, `hasSerialization`, `numGeometries`, `geometryN`, `minX` … `maxZ`,
+`concaveHull`, `centroid`, `boundingCircle` and the rest), the aggregates other than
+`aggUnion`, KML and DGGS literals, and the Query Rewrite and RDFS entailment extensions.
+[Supported Standards](/docs/standards) has the grade. Non-standard 3D functions live in their
+own namespace; see the [3D geometry platform](/docs/geo-3d-platform).
 
 ## Metres on the ellipsoid
 

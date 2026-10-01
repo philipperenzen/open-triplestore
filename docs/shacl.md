@@ -168,25 +168,49 @@ curl -X POST http://localhost:7878/api/datasets/<dataset_id>/validate \
      -H 'Authorization: Bearer <token>'
 ```
 
-Response:
+Response (keys are snake_case):
 
 ```json
 {
-  "conforms": false,
-  "results_count": 2,
-  "results": [
-    {
-      "severity": "Violation",
-      "focusNode": "http://example.org/alice",
-      "path": "http://schema.org/name",
-      "value": null,
-      "message": "Less than 1 values on schema:name",
-      "sourceShape": "urn:dataset:my-dataset:shapes#PersonShape",
-      "sourceConstraint": "http://www.w3.org/ns/shacl#MinCountConstraintComponent"
+  "report": {
+    "conforms": false,
+    "results_count": 1,
+    "results": [
+      {
+        "severity": "violation",
+        "focus_node": "http://example.org/alice",
+        "path": "<http://schema.org/name>",
+        "value": null,
+        "source_shape": "http://schema.org/PersonShape",
+        "source_constraint": "sh:minCount 1",
+        "message": "Expected at least 1 values, found 0"
+      }
+    ],
+    "metrics": {
+      "path": "dataset",
+      "duration_ms": 4,
+      "quads": 1250,
+      "graphs": 3,
+      "source": "live",
+      "run_index": false
     }
-  ]
+  },
+  "run_id": "3f6c2a9e-8d41-4c0b-9a57-2b1e6f0d7c18",
+  "ran_at": "2026-10-01T12:00:00.000000+00:00"
 }
 ```
+
+- `path` is the property path in SPARQL syntax; `value` is the offending value
+  node as a string, without its datatype or language tag (or `null`).
+- `source_constraint` is a readable label for the constraint (`sh:minCount 1`,
+  `sh:datatype …`, `sh:SPARQLConstraint`), not the constraint-component IRI.
+- `message` is the shape's `sh:message` when it has one, else a default text.
+- A test or partial run (see below) answers `"run_id": null, "ran_at": null`
+  and adds `"test": true, "partial": …`.
+
+The 422 body of a write gate is a different shape: camelCase keys
+(`focusNode`, `sourceShape`, `sourceConstraint`), `"severity": "Violation"`,
+and an `"error"` field instead of `results_count` and `metrics`.
 
 ### What a run reads, and who sees its report
 
@@ -587,9 +611,23 @@ curl -X POST http://localhost:7878/api/shaclc/serialize \
      -d 'urn:dataset:my-dataset:shapes'
 ```
 
-### Graceful degradation
+### What the serializer leaves out
 
-Shapes using SPARQL-based constraints or complex property paths that cannot be expressed in SHACLC are serialized as Turtle comments in the SHACLC output.
+`/api/shaclc/serialize` (and `Accept: text/shaclc`) writes only part of a shapes graph, and
+**drops the rest without a warning or a comment** in the output:
+
+- Only subjects typed `sh:NodeShape` are written, each with its first `sh:targetClass` and
+  `sh:closed`; other targets are dropped.
+- Per property shape it writes the path, `sh:datatype`, `sh:nodeKind`, `sh:node`,
+  `sh:minCount`/`sh:maxCount`, `sh:pattern` and `sh:message`. Node-level constraints and
+  `sh:class`, `sh:in`, `sh:hasValue`, value ranges, string lengths, the logical constraints and
+  SPARQL-based constraints are dropped. A property shape without `sh:path` is skipped.
+- A complex property path (sequence, inverse, alternative) comes out as a blank-node label,
+  which the parser cannot read back.
+- `sh:pattern` is written without escaping.
+
+So a SHACL-C export is not a faithful copy of a shapes graph; keep Turtle as the source of
+truth.
 
 ---
 

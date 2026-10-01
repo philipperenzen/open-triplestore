@@ -2,7 +2,7 @@ I now have every source I need. Verification summary before writing: all 16 "wro
 
 # Delta versioning: per-quad change capture with a durable cursor, versions as checkpoint plus patch chain, RDF-star statement provenance
 
-> **Status: design note only.** Nothing here is implemented and nothing in this phase will be. Every code-level claim is cited as `path:line` against the `feat/improvements` worktree (crates against the cargo registry); where a figure does not exist the note says "unmeasured" and names the experiment. Constraints honoured: RocksDB layout and on-disk format unchanged; existing routes, status codes and JSON fields kept; `src/auth/`, the frontend, CI and `Cargo.toml` dependencies untouched.
+> **Status (updated 2026-10-01): partly implemented.** Phase 1 — per-quad change capture with a durable cursor (§2) — and the admin change feed with named cursors shipped in 0.7.0; see [Versioning](../versioning.md), "Change log", for what was built. Versions as checkpoint plus patch chain (§3), before-image capture and RDF-star statement provenance (§6) are not implemented. The rest of this note is the design as written before any of it was built: every code-level claim is cited as `path:line` against the `feat/improvements` worktree (crates against the cargo registry); where a figure does not exist the note says "unmeasured" and names the experiment. Constraints honoured: RocksDB layout and on-disk format unchanged; existing routes, status codes and JSON fields kept; `src/auth/`, the frontend, CI and `Cargo.toml` dependencies untouched.
 >
 > **Maintainer's steer.** The reliable changelog is built first; SHACL→SQL is *deferred pending measurement*, not rejected; bulk revalidation after a shape or model update is a real, recurring workload. §8.3 specifies the 9M-quad gating experiment.
 >
@@ -318,7 +318,7 @@ Conventions, from the read-boundary follow-up: read routes join `dataset_version
 | SHACL, 0.9M, 6 shapes | 10.8 s pre-rebuild; 0.64–0.93 s HTTP / 0.72 s in-process after | `docs/performance.md:624`, `:657` |
 | SHACL, 9M, 6 shapes | 118 s pre-rebuild; **post-rebuild unmeasured** (no SHACL row at `:687-697`) | `:624` |
 | mirror rebuild, 1.7M | ~29 s inline, on a laptop | `src/store/parallel_mirror.rs:88-90` |
-| write-path budget | no benchmark may slow by more than 20 % | `p2-brief.md` |
+| write-path budget | no benchmark may slow by more than 20 % | the programme brief (not in the repository) |
 
 Savings are structural, not measured: nine scan sites removed, two O(graph) LDES scans per write removed, O(delta) diffs, no synchronous copy on draft, pipeline and validate-and-commit versions. Added costs inside the write path, all unmeasured: two SQLite statements and the critical section per write (measurement 3); the PUT-replace pre-image on an already-regressed benchmark (measurement 4); N-Quads serialisation and gzip of payloads up to the payload cap (measurement 9); and, outside the write path but hitting every reader, the store-wide mirror and cache invalidation of a read-triggered materialisation (measurement 10).
 

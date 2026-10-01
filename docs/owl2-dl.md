@@ -2,7 +2,7 @@
 
 > **Open Triplestore role names:** class definitions and class axioms = graph role **Model** (the T-Box); ABox content = graph role **Instances**.  Property definitions and relations (the R-Box) belong to the **Vocabulary** role, even though OWL groups them with the TBox for reasoning.  The DL reasoner reasons over the TBox+RBox schema together — the role split concerns where terms are stored and registered, not the reasoning semantics.
 
-OWL 2 DL (Description Logics, based on SROIQ(D)) is the most expressive OWL 2 profile and the basis for fully formal ontology engineering.  It is N2EXPTIME-complete, which means full reasoning requires a tableau algorithm with blocked-node merging.  This triplestore provides **native support** for all OWL 2 RL rules plus the DL-specific axioms that are expressible as SPARQL INSERT operations, and an **external reasoner bridge** for full tableau completion.
+OWL 2 DL (Description Logics, based on SROIQ(D)) is the most expressive OWL 2 profile and the basis for fully formal ontology engineering.  It is N2EXPTIME-complete, which means full reasoning requires a tableau algorithm with blocked-node merging.  This triplestore provides **native support** for the OWL 2 RL rules plus the DL-specific axioms that are expressible as SPARQL INSERT operations. That is incomplete, so the [Standards](standards.md) page grades OWL 2 DL **Partial**. An experimental bridge to an external reasoner exists, but it does not work yet (see [below](#konclude-experimental-not-working)).
 
 ---
 
@@ -10,9 +10,9 @@ OWL 2 DL (Description Logics, based on SROIQ(D)) is the most expressive OWL 2 pr
 
 The native `Owl2DLReasoner` runs in two phases:
 
-### Phase 1 — All OWL 2 RL rules (~80 rules)
+### Phase 1 — OWL 2 RL rules
 
-All OWL 2 RL forward-chaining rules from W3C OWL 2 Profiles Tables 4–9 are applied first.  These cover the large majority of practical ontology inferences, including:
+The OWL 2 RL forward-chaining rules from W3C OWL 2 Profiles Tables 4–9 that the engine runs (63 of 78, see [OWL 2 RL](owl2-rl.md)) are applied first.  These cover the large majority of practical ontology inferences, including:
 
 | Rule group | Examples |
 |---|---|
@@ -51,22 +51,22 @@ The following features require a tableau algorithm with blocked-node merging and
 - **Full ABox completion** — propagating universal quantifiers (`owl:allValuesFrom`) across cyclic role paths requires cycle detection via blocking.
 - **Nominals** (`owl:oneOf`) combined with complex role hierarchies.
 
-To get full OWL 2 DL reasoning, plug in an external reasoner (see below).
+Full OWL 2 DL reasoning needs an external reasoner; none ships with the project today.
 
 > **Without Konclude:** When no external reasoner is configured, the `NativeTableauStub`
 > in `src/reasoning/owl2_dl.rs` is used as a fallback.  It satisfies the `ExternalReasoner`
 > trait interface and runs the RL+DL-extension rules described above, returning partial results.
 > This provides OWL 2 RL-level coverage without a full tableau.  All Phase 1 + Phase 2 rules
-> above will fire; only the four tableau-only features listed here will be absent.
+> above will fire; the tableau-only features listed here will be absent.
 >
 > **Important — what the stub does *not* do:** the stub only supports *rule
 > materialization* (`materialize()` / `?entailment=owl2-dl`). The dedicated
 > description-logic services — **classification**, **consistency checking**, and
 > **explicit inference extraction** (`classify()`, `check_consistency()`,
 > `get_inferences()`) — return a `NotSupported` error unless a real external
-> reasoner (HermiT, Pellet, ELK, Konclude, …) is plugged in. If your workflow
-> needs sound-and-complete DL classification or consistency, you **must** configure
-> an external reasoner; the bundled engine alone is not a complete OWL 2 DL reasoner.
+> reasoner is plugged in through the `ExternalReasoner` trait. No working one ships
+> with the project (the Konclude bridge below does not work yet), so the bundled
+> engine alone is not a complete OWL 2 DL reasoner.
 
 ---
 
@@ -132,57 +132,36 @@ WHERE {
 
 ## Connecting an external reasoner
 
-### Konclude (built-in bridge)
+### Konclude (experimental, not working)
 
-[Konclude](https://www.derivo.de/en/products/konclude/) is a high-performance OWL 2 DL reasoner
-written in C++ and available under the Apache 2.0 licence.  A ready-to-use bridge is included:
+[Konclude](https://github.com/konclude/Konclude) is a tableau-based OWL 2 DL reasoner written
+in C++ and released under the **GNU LGPL v3**. The repository contains a bridge to it
+(`src/reasoning/konclude_bridge.rs`), but the bridge **cannot work as written** and nothing in
+CI runs it against a real Konclude binary:
 
-```rust
-use open_triplestore::reasoning::konclude_bridge::KoncludeReasoner;
-use open_triplestore::reasoning::owl2_dl::ExternalReasonerBridge;
+- It sends the store as Turtle on standard input (`-i -`). Konclude reads its input from a
+  file given with `-i FILEPATH`, and natively only in OWL/XML or OWL functional syntax; RDF
+  input needs an optional Redland build whose mapping Konclude itself calls experimental.
+- It passes `-f Turtle`, which is not a documented Konclude option, and uses the command name
+  `realization` where Konclude's documentation spells it `realisation`.
+- It reads only subclass edges back from the response, so realisation results (individual
+  types) would be lost.
+- It has no timeout.
 
-// Finds "Konclude" in PATH
-let konclude = KoncludeReasoner::new();
+No install recipe is given here: Konclude publishes binary archives per platform on its
+[releases page](https://github.com/konclude/Konclude/releases), but until the bridge is
+rewritten there is nothing for it to connect to.
 
-// Or specify the binary path explicitly
-let konclude = KoncludeReasoner::new().with_binary("/opt/konclude/Konclude");
-
-let bridge = ExternalReasonerBridge::new(Box::new(konclude));
-let report  = bridge.materialize(&store, &[], "urn:entailment:owl2-dl")?;
-println!("OWL 2 DL: {} triples", report.triples_added);
-```
-
-**Installing Konclude:**
-
-```bash
-# macOS (Homebrew tap or direct download)
-curl -L https://github.com/konclude/Konclude/releases/latest/download/Konclude-linux-x86_64 \
-  -o /usr/local/bin/Konclude && chmod +x /usr/local/bin/Konclude
-
-# Verify
-Konclude --version
-```
-
-The bridge:
-1. Runs all native OWL 2 DL rules in-process.
-2. Serialises the store to Turtle.
-3. Passes it to Konclude via stdin (`Konclude realization -i - -o -`).
-4. Parses the class hierarchy from the response and loads it into the target graph.
-
-The bridge is selected by configuration — it is **not** on by default:
+The configuration that selects it:
 
 | Variable | Effect |
 |---|---|
-| `OTS_EXTERNAL_REASONER=konclude` | Route `regime: "owl2-dl"` through Konclude after the native rules. Unset: native rules only (the `NativeTableauStub`). |
+| `OTS_EXTERNAL_REASONER=konclude` | Route `regime: "owl2-dl"` through the Konclude bridge after the native rules. Unset: native rules only (the `NativeTableauStub`). |
 | `OTS_EXTERNAL_REASONER_BIN=/path/to/Konclude` | Binary to run; default `Konclude` on `PATH`. |
 
-With Konclude *configured but not found*, materialisation fails with an error
-rather than silently returning only native results — a misconfigured reasoner
-should be visible, not papered over. Without the variable there is no external
-step at all, and `triples_added` reports what the native rules derived.
-
-The bridge is **experimental**: its Turtle→OWL/XML hand-off and the response
-parser have not been exercised against a real Konclude build in CI.
+With Konclude configured but not found, materialisation fails with an error rather than
+silently returning only native results. Without the variable there is no external step, and
+`triples_added` reports what the native rules derived. Leave it unset.
 
 ### Custom external reasoner
 
@@ -232,9 +211,9 @@ All inferred triples — from both RL rules and DL extension rules — are writt
 
 | Profile | Basis | Extra features vs RL |
 |---|---|---|
-| OWL 2 RL | ~80 forward-chaining rules | — |
+| OWL 2 RL | 63 of the 78 RL/RDF rules | — |
 | **OWL 2 DL** (this) | All RL rules + 10 DL extension rules | hasSelf, disjointUnionOf, NPA checks, hasKey re-checks, cardinality annotations |
-| OWL 2 DL (full tableau) | External reasoner required | Full existential completion, nominals+roles |
+| OWL 2 DL (full tableau) | External reasoner required (none ships today) | Full existential completion, nominals+roles |
 
 ---
 

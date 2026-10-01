@@ -5,10 +5,10 @@ Reasoning can be applied to materialise inferred triples across all named graphs
 | Profile | Best for | Notes |
 |---|---|---|
 | RDFS | Simple schema inference | Lowest overhead. Infers subclass hierarchies, property domains and ranges. |
-| OWL 2 QL | Large read-heavy datasets | No existentials. Uses query rewriting — minimal extra storage. |
-| OWL 2 EL | Life sciences (SNOMED-CT, Gene Ontology) | Supports existential restrictions. Polynomial time. |
-| OWL 2 RL | Rule-based integration with RDF | Materialises triples. Most complete; may significantly grow graph size. |
-| OWL 2 DL | Full OWL expressivity | Native support for `hasSelf`, `disjointUnionOf`, `NegativePropertyAssertion`, `hasKey`, and cardinality annotations on top of all OWL 2 RL rules. Full existential completion (tableau) requires an external reasoner (HermiT, Pellet). |
+| OWL 2 QL | Large read-heavy datasets | Query rewriting over the class and property hierarchies via `POST /api/reasoning/rewrite`; the materialise regime writes only the TBox closure. Partial — see [OWL 2 QL](owl2-ql.md) for the limits. |
+| OWL 2 EL | Taxonomies with existential restrictions | A subset of the EL completion rules. Partial — see [OWL 2 EL](owl2-el.md) for what it reads and its limits. |
+| OWL 2 RL | Rule-based integration with RDF | Materialises triples with 63 of the 78 RL/RDF rules; the broadest of the native regimes. May significantly grow graph size. |
+| OWL 2 DL | Full OWL expressivity | Native support for `hasSelf`, `disjointUnionOf`, `NegativePropertyAssertion`, `hasKey`, and cardinality annotations on top of all OWL 2 RL rules. Full existential completion (tableau) requires an external reasoner; none ships today, and the experimental Konclude bridge does not work yet ([details](owl2-dl.md#konclude-experimental-not-working)). |
 
 Reasoning is triggered via `POST /api/reasoning/materialize` with a JSON body:
 

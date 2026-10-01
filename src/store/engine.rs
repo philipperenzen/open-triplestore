@@ -737,7 +737,8 @@ impl TripleStore {
             opts = opts.with_custom_function(iri, move |args| handler(args));
         }
 
-        // Register SPARQL 1.2 ADJUST function (always available)
+        // Register the non-standard sparql:adjust function (always available; the
+        // ADJUST keyword is the native SEP-0002 built-in, not this)
         {
             let (iri, handler) = crate::sparql::rdf12_functions::adjust_function();
             opts = opts.with_custom_function(iri, move |args| handler(args));

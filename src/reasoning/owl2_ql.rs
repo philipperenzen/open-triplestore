@@ -1,4 +1,4 @@
-//! OWL 2 QL profile — query rewriting via the PerfectRef algorithm.
+//! OWL 2 QL profile — query rewriting over the class and property hierarchies.
 //!
 //! OWL 2 QL is based on DL-Lite and enables LOGSPACE query answering through
 //! *query rewriting* rather than materialisation.  Instead of storing entailed
@@ -9,6 +9,9 @@
 //! - `rdfs:subPropertyOf` / `owl:equivalentProperty`
 //! - `owl:inverseOf`
 //! - `owl:someValuesFrom` existential restrictions
+//!
+//! Each triple pattern is expanded on its own; this is not PerfectRef (no
+//! reduction step), and `docs/owl2-ql.md` lists the known limits.
 //!
 //! The implementation uses the `spargebra` crate for AST-level query parsing
 //! and manipulation, avoiding the fragile string-level approach.

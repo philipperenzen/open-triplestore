@@ -1,14 +1,20 @@
 //! Konclude OWL 2 DL reasoner bridge.
 //!
-//! Konclude is a high-performance OWL 2 DL reasoner written in C++ and
-//! available under the Apache 2.0 licence.  This module implements the
-//! [`ExternalReasoner`] trait by spawning Konclude as a subprocess, piping
-//! OWL/XML in on stdin, and parsing OWL/XML back from stdout.
+//! Konclude is a tableau-based OWL 2 DL reasoner written in C++ and released
+//! under the GNU LGPL v3.  This module implements the [`ExternalReasoner`]
+//! trait by spawning Konclude as a subprocess and piping the ontology in on
+//! stdin.
+//!
+//! **Experimental and not working** (see `docs/owl2-dl.md`): Konclude reads
+//! its input from a file (`-i FILEPATH`), natively only in OWL/XML or OWL
+//! functional syntax, but this bridge pipes Turtle on stdin; `-f Turtle` is not
+//! a documented Konclude option; Konclude's README spells the command
+//! `realisation`; only subclass edges are read back; and there is no timeout.
+//! It has never been run against a real Konclude binary.
 //!
 //! # Requirements
 //! - Konclude binary must be reachable via `$PATH` **or** the path must be
 //!   configured explicitly via [`KoncludeReasoner::with_binary`].
-//! - Tested with Konclude v0.6.2 (the current Apache-licensed release).
 //!
 //! # Usage
 //! ```no_run
@@ -26,13 +32,12 @@
 //! ```
 //!
 //! # Format notes
-//! - Input format: OWL/XML (serialized from the store's Turtle dump via a
-//!   lightweight internal converter).  Konclude also accepts OWL/XML on its
-//!   `-i` flag when run in classification / realisation modes.
-//! - Output format: OWL/XML (`ClassHierarchy` response) which is parsed back
-//!   to `rdfs:subClassOf` Turtle for loading into the store.
+//! - Input format: the store's Turtle dump, unchanged (`turtle_to_owl_xml`
+//!   returns it as is), which Konclude does not read natively.
+//! - Output format: an OWL/XML `ClassHierarchy` response is parsed back to
+//!   `rdfs:subClassOf` Turtle for loading into the store.
 //!
-//! # Konclude sub-commands used
+//! # Konclude sub-commands used (as written; see above)
 //! | Operation             | Command |
 //! |-----------------------|---------|
 //! | Classification        | `Konclude classification -i - -o -` |
