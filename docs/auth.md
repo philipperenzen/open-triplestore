@@ -286,9 +286,8 @@ auto-provisioning off, so that only accounts that already exist (linked by
 verified email) can use IdP tokens. The entry's own role claim map and its
 enabled switch do not affect this path; the environment variables above do.
 
-The entry also appears among the sign-in options on the login page, but it has
-no client ID, so a browser sign-in through it fails. Turning its *enabled*
-switch off removes it from the login page without affecting IdP tokens.
+The entry does not appear on the login page: it has no client ID, and the
+login page lists only providers a browser sign-in can start from.
 
 ## Guest self-registration (admin toggle)
 
