@@ -41,7 +41,27 @@
 //! slug = "all-statements"
 //! description = "…"
 //! sparql = "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 100"
+//!
+//! # Optional, purely additive: a manifest without them behaves as before.
+//! [account]                        # the account the bundle's content is attributed to
+//! username = "my-steward"
+//! email = "steward@example.org"
+//! display_name = "My steward"      # optional
+//! password_env = "MY_STEWARD_PASSWORD"   # optional: the variable holding the initial
+//!                                        # password; unset → a password nobody knows
+//!
+//! [[groups]]                       # teams inside the organisation, matched by name
+//! name = "Data stewards"
+//! role = "member"                  # admin | member | viewer (default member)
+//! members = ["my-steward", "alice"]   # usernames; unknown ones wait for the next reseed
 //! ```
+//!
+//! `[account]` is created when missing, with the system role `user` (never
+//! higher) and as an admin of the bundle's organisation; an existing account
+//! is used as it is. It owns the bundle's saved-query services — so they
+//! need not wait for an instance admin — and is the creator of the versions
+//! `[[data_models]]` publishes. `[[groups]]` members that do not resolve yet
+//! are deferred to the next reseed; an existing membership keeps its role.
 
 use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
@@ -50,11 +70,12 @@ use anyhow::{bail, Context};
 use oxigraph::io::RdfFormat;
 use serde::Deserialize;
 
-use crate::auth::models::{GraphKind, Visibility};
+use crate::auth::models::{GraphKind, Role, Visibility};
 use crate::saved_queries::models::CreateSavedQueryRequest;
 
 use super::{
-    Bundle, BundleDataModel, BundleDataset, BundleGraph, BundleLicense, Fmt, OrgSpec, QuadsPayload,
+    Bundle, BundleAccount, BundleDataModel, BundleDataset, BundleGraph, BundleGroup, BundleLicense,
+    Fmt, OrgSpec, QuadsPayload,
 };
 
 #[derive(Deserialize)]
@@ -64,6 +85,12 @@ struct ManifestDoc {
     #[serde(default)]
     opt_out_env: Option<String>,
     organisation: OrgDoc,
+    /// `[account]`: the account the bundle's content is attributed to.
+    #[serde(default)]
+    account: Option<AccountDoc>,
+    /// `[[groups]]`: teams inside the organisation.
+    #[serde(default)]
+    groups: Vec<GroupDoc>,
     #[serde(default)]
     datasets: Vec<DatasetDoc>,
     /// Reference models (RDFS/OWL classes, SKOS vocabularies, value lists)
@@ -84,6 +111,32 @@ struct OrgDoc {
     name: String,
     #[serde(default)]
     description: Option<String>,
+}
+
+/// `[account]`; see the module docs.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountDoc {
+    username: String,
+    email: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    /// The environment variable holding the initial password — never the
+    /// password itself.
+    #[serde(default)]
+    password_env: Option<String>,
+}
+
+/// One `[[groups]]` entry; see the module docs.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroupDoc {
+    name: String,
+    /// `admin` | `member` | `viewer`; default `member`.
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    members: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -243,6 +296,53 @@ pub fn parse_bundle(dir: &Path) -> anyhow::Result<Bundle> {
         bail!("manifest `id` must not be empty");
     }
 
+    let account = match doc.account {
+        None => None,
+        Some(a) => {
+            if a.username.trim().is_empty() || a.email.trim().is_empty() {
+                bail!("[account] needs a username and an email");
+            }
+            if a.password_env
+                .as_deref()
+                .is_some_and(|v| v.trim().is_empty())
+            {
+                bail!("[account] password_env names an environment variable; it must not be empty");
+            }
+            Some(BundleAccount {
+                username: a.username.trim().to_string(),
+                email: a.email.trim().to_string(),
+                display_name: a.display_name.filter(|d| !d.trim().is_empty()),
+                password_env: a.password_env.map(|v| v.trim().to_string()),
+            })
+        }
+    };
+
+    let mut groups = Vec::with_capacity(doc.groups.len());
+    for g in doc.groups {
+        if g.name.trim().is_empty() {
+            bail!("a [[groups]] entry needs a name");
+        }
+        let role = match g.role.as_deref().map(str::trim) {
+            None => Role::Member,
+            Some(r) => Role::from_str(&r.to_ascii_lowercase()).with_context(|| {
+                format!(
+                    "group '{}': unknown role '{r}' (admin | member | viewer)",
+                    g.name
+                )
+            })?,
+        };
+        groups.push(BundleGroup {
+            name: g.name.trim().to_string(),
+            role,
+            members: g
+                .members
+                .into_iter()
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty())
+                .collect(),
+        });
+    }
+
     let mut datasets = Vec::with_capacity(doc.datasets.len());
     for ds in doc.datasets {
         if ds.slug.trim().is_empty() {
@@ -394,6 +494,8 @@ pub fn parse_bundle(dir: &Path) -> anyhow::Result<Bundle> {
         datasets,
         prefixes: doc.prefixes,
         data_models,
+        account,
+        groups,
     })
 }
 
@@ -560,6 +662,74 @@ licenses = [{ name = "CC BY 4.0", uri = "https://creativecommons.org/licenses/by
         assert!(parse_bundle(tmp.path()).unwrap().data_models[0]
             .license
             .is_none());
+    }
+
+    /// `[account]` and `[[groups]]` parse into the bundle; a manifest without
+    /// them has neither; a role outside admin | member | viewer, or an
+    /// account without a username, is refused.
+    #[test]
+    fn account_and_groups_are_optional_and_checked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let write = |extra: &str| {
+            std::fs::write(
+                tmp.path().join("manifest.toml"),
+                format!(
+                    r#"
+id = "ident"
+
+[organisation]
+slug = "ident-org"
+name = "Ident"
+{extra}
+"#
+                ),
+            )
+            .unwrap();
+        };
+
+        write("");
+        let plain = parse_bundle(tmp.path()).unwrap();
+        assert!(plain.account.is_none());
+        assert!(plain.groups.is_empty());
+
+        write(
+            r#"
+[account]
+username = " steward "
+email = "steward@example.org"
+password_env = "STEWARD_PASSWORD"
+
+[[groups]]
+name = "Stewards"
+role = "Viewer"
+members = ["steward", "", "alice"]
+
+[[groups]]
+name = "Everyone"
+"#,
+        );
+        let b = parse_bundle(tmp.path()).unwrap();
+        let a = b.account.as_ref().expect("[account] parsed");
+        assert_eq!(a.username, "steward");
+        assert_eq!(a.email, "steward@example.org");
+        assert_eq!(a.display_name, None);
+        assert_eq!(a.password_env.as_deref(), Some("STEWARD_PASSWORD"));
+        assert_eq!(b.groups.len(), 2);
+        assert_eq!(b.groups[0].name, "Stewards");
+        assert_eq!(b.groups[0].role, Role::Viewer);
+        assert_eq!(b.groups[0].members, vec!["steward", "alice"]);
+        assert_eq!(b.groups[1].role, Role::Member, "the default role");
+        assert!(b.groups[1].members.is_empty());
+
+        write("[[groups]]\nname = \"Stewards\"\nrole = \"owner\"\n");
+        let err = match parse_bundle(tmp.path()) {
+            Ok(_) => panic!("an unknown group role must be refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("unknown role 'owner'"), "{err}");
+
+        write("[account]\nusername = \"\"\nemail = \"x@example.org\"\n");
+        assert!(parse_bundle(tmp.path()).is_err());
     }
 
     /// The shipped nen2660-imbor bundle declares IMBOR Kern's licence: CROW's,

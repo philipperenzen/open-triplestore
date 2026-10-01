@@ -13,6 +13,69 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
+  purely additive (a manifest without them behaves exactly as before).
+  `[account]` (`username`, `email`, `display_name`, `password_env`) names the
+  account the bundle's content is attributed to: created when missing, with
+  the system role `user` (never higher) and as an admin of the bundle's
+  organisation, its password the value of the environment variable
+  `password_env` names or, without one, a password nobody knows; an existing
+  account is used as it is. It owns the bundle's saved-query services, which no
+  longer wait for an instance admin to exist, and is the creator
+  (`dct:creator`) of every version the bundle's `[[data_models]]` publish.
+  `[[groups]]` (`name`, `role` = admin | member | viewer, `members`) are
+  matched by name inside the organisation and created when missing; members
+  are resolved by username, an existing membership keeps its role, and a
+  username that does not resolve yet is deferred to the next reseed. Because a
+  version with a creator is no longer "creator-less with the bundle's notes",
+  the bundle now marks every version it registers (`ver:seededBy
+  seed-bundle:<id>`) and recognises its versions by that marker first — a
+  version an earlier build registered is marked at the next reseed — so
+  attribution cannot break the manifest's `public = false` or a licence record.
+- **Per-resource access control for LDP, with Web Access Control.** Every
+  resource under `/ldp/` now has an ACL at `R.acl` (`C.acl` or `C/.acl` for a
+  container), in the Solid WAC model (`acl:Authorization`, `acl:accessTo`,
+  `acl:default`, `acl:agent` / `acl:agentGroup` / `acl:agentClass`,
+  `acl:mode`), advertised with `Link: <R.acl>; rel="acl"` and `WAC-Allow` on
+  `GET`/`HEAD`. Agents are this store's principals by stable IRI
+  (`urn:ots:user:…`, `urn:ots:org:…`, `urn:ots:group:…`, `urn:ots:role:…`),
+  plus `acl:AuthenticatedAgent` and `foaf:Agent`; `GET /api/auth/me` returns
+  the caller's `agent_iri`. A resource without an ACL inherits the nearest
+  container's `acl:default`; whoever creates a resource owns it
+  (`R.acl#owner`: Read, Write, Control). The root ACL is seeded once, open by
+  default (`LDP_ROOT_ACL=open`: every signed-in user may read, write and
+  append, as before) or closed (`LDP_ROOT_ACL=owners`: admins only), and is
+  edited like any other. A `foaf:Agent` Read grant makes a resource readable
+  without a token. Not in scope: WebID-TLS, Solid-OIDC, `acl:origin`. See
+  `docs/ldp.md`, "Access control".
+
+### Changed
+- **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
+  LOV's re-serialization of the old DOAP namespace document (2009-2015). That
+  file stated no licence, and its 97 Japanese-language labels and comments were
+  never in the Apache-2.0 upstream repository. It is now
+  https://github.com/ewilderj/doap's own `schema/doap.rdf` at commit `d164b82d`
+  (2022-03-13, its latest revision), converted to Turtle with its triples
+  unchanged: 741 triples with labels in six languages, "Copyright © 2004-2016
+  Edd Dumbill, 2016-2017 Edd Wilder-James, 2018- The DOAP Authors", under the
+  Apache License 2.0. The registry seeds it as DOAP `2022-03-13` and points the
+  entry at it. On an install that seeded the old copy, version `2012-01-04` is
+  kept, deprecated. Its licence record no longer calls it the bundled file: it
+  says what the copy is and that part of it has no published licence. `NOTICE`
+  and `vocab/NOTICE.md` list DOAP under Apache-2.0.
+- **Releases are prepared by a workflow.** *Prepare release* in the Actions
+  tab takes a `patch`, `minor` or `major` bump and opens a PR that writes the
+  next version into `Cargo.toml`, `Cargo.lock`, `README.md` and `CHANGELOG.md`
+  (and, for a minor or major, the supported-versions tables). Merging it opens
+  the `develop → main` PR. Merging that tags the release and publishes the
+  GitHub Release and the image. No personal access token is needed:
+  `auto-tag.yml` calls `release.yml` itself instead of relying on its tag
+  push, and takes the version from `Cargo.toml` instead of a keyword in the PR
+  title. A `patch` on a `release/X.Y` branch releases that line and leaves the
+  `latest` GitHub Release and image tag alone. `release.yml` can be re-run for
+  an existing tag. See `docs/release-process.md`.
+
 ### Fixed
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
@@ -42,40 +105,50 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `PUT`/`POST`, bulk import, validate-and-commit). It also says that SPARQL
     Update skips every write gate, SHACL Studio pipelines and bindings
     included, not only `shacl_on_write`.
-
-### Changed
-- **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
-  LOV's re-serialization of the old DOAP namespace document (2009-2015). That
-  file stated no licence, and its 97 Japanese-language labels and comments were
-  never in the Apache-2.0 upstream repository. It is now
-  https://github.com/ewilderj/doap's own `schema/doap.rdf` at commit `d164b82d`
-  (2022-03-13, its latest revision), converted to Turtle with its triples
-  unchanged: 741 triples with labels in six languages, "Copyright © 2004-2016
-  Edd Dumbill, 2016-2017 Edd Wilder-James, 2018- The DOAP Authors", under the
-  Apache License 2.0. The registry seeds it as DOAP `2022-03-13` and points the
-  entry at it. On an install that seeded the old copy, version `2012-01-04` is
-  kept, deprecated. Its licence record no longer calls it the bundled file: it
-  says what the copy is and that part of it has no published licence. `NOTICE`
-  and `vocab/NOTICE.md` list DOAP under Apache-2.0.
-- **Releases are prepared by a workflow.** *Prepare release* in the Actions
-  tab takes a `patch`, `minor` or `major` bump and opens a PR that writes the
-  next version into `Cargo.toml`, `Cargo.lock`, `README.md` and `CHANGELOG.md`
-  (and, for a minor or major, the supported-versions tables). Merging it opens
-  the `develop → main` PR. Merging that tags the release and publishes the
-  GitHub Release and the image. No personal access token is needed:
-  `auto-tag.yml` calls `release.yml` itself instead of relying on its tag
-  push, and takes the version from `Cargo.toml` instead of a keyword in the PR
-  title. A `patch` on a `release/X.Y` branch releases that line and leaves the
-  `latest` GitHub Release and image tag alone. `release.yml` can be re-run for
-  an existing tag. See `docs/release-process.md`.
-
-### Fixed
+- **A published model's graphs read the same everywhere.** The graphs of a
+  published model-registry version were served by
+  `GET /api/models/{id}/versions/{ver}/data` to whoever may see the entry (a
+  public entry: everyone), but were invisible to non-admins over `/sparql`
+  (`GRAPH <iri>` matched nothing, a `FROM` naming it was dropped) and refused
+  with `401` by `GET /store?graph=<iri>` — the seeded SKOS graph included.
+  The readable-graph set that every read path scopes by (`/sparql`, the Graph
+  Store, the SHACL Studio's read scope, dereferencing, the LLM context) now
+  adds the base graph and sub-graphs of every published version of an entry
+  the caller may see: a public entry to everyone, anonymous callers included; a
+  private entry to its owner, the owner organisation's members and admins.
+  Those graphs count as managed, so a private entry's graph is no longer an
+  "unmanaged" graph to anyone. Writes are unchanged: a `SPARQL UPDATE` or
+  Graph Store write into a registry graph still needs write authority on it,
+  and a no-derivatives version still refuses every write.
+  `GET /api/models/{id}/versions/{ver}/profile` moved from the admin-gated
+  sources router to the data-model routes: it is read by exactly who may read
+  `/data` (it answered `401` anonymously for a public model whose `/data`
+  answered `200`). The API reference's auth table gains the model rows, and
+  `tests/api_reference_auth.rs` probes them with a seeded vocabulary.
+- **A seed bundle can no longer attach a model-registry graph to a dataset.**
+  `apply_bundle` registered every `[[datasets.graphs]]` IRI through the internal
+  path, past the refusal `POST /api/datasets/:id/graphs` applies to graphs the
+  model registry holds. Seen in the field: the boot sweep released a legacy
+  registration of a registry graph, and the bundle re-added the same graph in
+  the same boot, making the model dataset-scoped again. A bundle dataset graph
+  the registry holds (a version's base graph or sub-graph, or a graph under
+  `{base}/data-model/`) is now skipped with a warning that names the rule, is
+  not counted as registered (`SeedReport::graphs_refused` counts it), and the
+  sweep that releases such registrations runs on every boot — one registry
+  query — so a row that slips in by any path does not survive the next start.
+- **`cargo check --all-targets --features full` builds without `test-utils`.**
+  `tests/replication.rs`, `tests/ldp_conformance.rs` and `tests/query_cache.rs`
+  use probes the library only exports with the `test-utils` feature
+  (`InProcessLeader`, `AppState::test_default_with_store`, `query_cache_len`),
+  so checking every target without it failed. Those three test targets are now
+  declared in `Cargo.toml` with `required-features = ["test-utils"]`; the CI
+  test job enables the feature, so they still run there, and auto-discovery of
+  every other `tests/*.rs` is unaffected. The conformance table's totals are
+  regenerated for the three suites this change set adds.
 - **The supported-versions tables were five releases old.** `SECURITY.md` and
   `SUPPORT.md` still named `0.2.x` as the current line. They now list `0.7.x`
   as Active and `0.6.x` as Security-only until 0.8.0, and the prepare workflow
   keeps them current.
-
-### Fixed
 - **The UI says when a validation or inference run left graphs out.** A run
   that could not read every graph or shapes graph of a dataset answers
   `partial: true`: a validation run is then a test run, not recorded, and an
@@ -91,25 +164,34 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - The dataset page's validation dialog showed the escape `\u2014` as text
     where its summary line has a dash.
 
-### Added
-- **Per-resource access control for LDP, with Web Access Control.** Every
-  resource under `/ldp/` now has an ACL at `R.acl` (`C.acl` or `C/.acl` for a
-  container), in the Solid WAC model (`acl:Authorization`, `acl:accessTo`,
-  `acl:default`, `acl:agent` / `acl:agentGroup` / `acl:agentClass`,
-  `acl:mode`), advertised with `Link: <R.acl>; rel="acl"` and `WAC-Allow` on
-  `GET`/`HEAD`. Agents are this store's principals by stable IRI
-  (`urn:ots:user:…`, `urn:ots:org:…`, `urn:ots:group:…`, `urn:ots:role:…`),
-  plus `acl:AuthenticatedAgent` and `foaf:Agent`; `GET /api/auth/me` returns
-  the caller's `agent_iri`. A resource without an ACL inherits the nearest
-  container's `acl:default`; whoever creates a resource owns it
-  (`R.acl#owner`: Read, Write, Control). The root ACL is seeded once, open by
-  default (`LDP_ROOT_ACL=open`: every signed-in user may read, write and
-  append, as before) or closed (`LDP_ROOT_ACL=owners`: admins only), and is
-  edited like any other. A `foaf:Agent` Read grant makes a resource readable
-  without a token. Not in scope: WebID-TLS, Solid-OIDC, `acl:origin`. See
-  `docs/ldp.md`, "Access control".
-
 ### Security
+- **Every configured secret goes through the secrets module.** `JWT_SECRET`,
+  `LD_REGISTRY_TOKEN`, a replication follower's `OTS_REPLICATION_TOKEN` and the
+  accounts-dashboard plugin's `ACCOUNTS_DASHBOARD_GATEWAY_KEY` were read as raw
+  environment values, though the module's own documentation listed the JWT
+  signing secret among the settings it covers. Each now takes a secret
+  reference (`env:NAME`, `file:/path`, `vault:…`) that resolves at startup or
+  at use, and a raw value is refused under `OTS_ENV=production` (warned about
+  once in development), as `S3_SECRET_KEY` already was: a raw `JWT_SECRET` or
+  `LD_REGISTRY_TOKEN` stops the server at startup with the module's
+  `RawSecretRefused` message, a raw replication token or gateway key is dropped
+  with an error in the log. Plugins get the same rule through a new
+  `PluginSecrets` capability on `PluginContext` (`ots-plugin-api`), so a
+  plugin never reads a credential variable itself. `.env.example`,
+  `docs/administration.md` and `docs/sources.md` say so.
+- **The LLM feedback relay screens every string in the signal.**
+  `POST /api/llm/feedback` forwards a training signal to the gateway's
+  `/v1/signals` with the server's key attached, and screened only the signal's
+  top-level string fields for size and injection — while the free text a
+  pipeline ingests sits nested (`input.nl_question`, `label.comment`,
+  `output.*`) and reached the gateway unscreened. The relay now walks the JSON
+  recursively, to a bounded depth of 16 levels, applies the same per-field,
+  count and whole-conversation caps and the injection heuristics to every
+  string leaf, and refuses a signal larger as a whole than a conversation may
+  be, so bulk cannot hide in numbers or nesting. A nested oversized or
+  injection-flagged field, or a signal nested past the bound, answers `400`
+  before anything reaches the gateway; the signals the UI sends relay as
+  before.
 - **LDP resources were readable and writable by every signed-in user, and
   `PATCH` could rewrite the whole default graph.** Every `/ldp/` verb now
   checks the resource's WAC ACL: `acl:Read` for `GET`/`HEAD`, `acl:Write` for

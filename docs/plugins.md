@@ -80,6 +80,42 @@ description = "…"
 sparql = "SELECT ?p WHERE { ?p a <https://acme.example/catalog#Product> }"
 ```
 
+#### Identity and attribution keys (`[account]`, `[[groups]]`)
+
+Both are optional and purely additive: a manifest without them behaves
+exactly as before.
+
+```toml
+[account]                            # the account the bundle's content is attributed to
+username = "acme-steward"
+email = "steward@acme.example"
+display_name = "Acme data steward"   # optional
+password_env = "ACME_STEWARD_PASSWORD"   # optional: the environment variable holding
+                                         # the initial password (never the password itself)
+
+[[groups]]                           # teams inside the bundle's organisation
+name = "Data stewards"
+role = "member"                      # admin | member | viewer; default member
+members = ["acme-steward", "alice"]  # usernames
+```
+
+- **`[account]`** is created when no account with that username exists, with
+  the system role `user` (never higher: the manifest cannot mint an admin),
+  and is made an **admin of the bundle's organisation**. Its password is the
+  value of `password_env` when that variable is set at seed time; otherwise
+  the account gets a password nobody knows, so it signs in only once an admin
+  sets one (or through single sign-on). An account that already exists is
+  used as it is: its role, password and profile are never changed. The
+  account is the **owner of the bundle's saved-query services**, so they are
+  created on the first boot instead of waiting for an instance admin to
+  exist, and every version the bundle's `[[data_models]]` publishes carries
+  it as its creator (`dct:creator`).
+- **`[[groups]]`** are matched by `name` inside the organisation and created
+  when missing. Each `members` entry is resolved by username and added with
+  the group's `role`; an existing membership is left as it is. A username
+  that does not resolve yet (an account that registers later) is logged and
+  **deferred to the next reseed**, which runs at every boot.
+
 #### Layered-convention keys (reference models, conformance, shapes)
 
 A bundle can ship the *model layer* as well as datasets, so a dataset can
@@ -322,8 +358,8 @@ pub trait Plugin: Send + Sync + 'static {
 }
 ```
 
-`PluginContext` gives a plugin the instance's `base_url` and two capability
-objects, both in the same plain-strings idiom so the plugin crate needs no
+`PluginContext` gives a plugin the instance's `base_url` and three capability
+objects, all in the same plain-strings idiom so the plugin crate needs no
 dependency on this project's internal types:
 
 - `store: Arc<dyn PluginStore>` — `query_json` / `update`, SPARQL against the
@@ -340,6 +376,15 @@ dependency on this project's internal types:
   `plugins/accounts-dashboard` (feature `plugin-accounts-dashboard`) a full
   consumer: a deployment-wide accounts/entitlements/LLM-usage dashboard at
   `/ext/accounts-dashboard/ui`.
+- `secrets: Arc<dyn PluginSecrets>` — the host's secrets module
+  ([docs/sources.md](sources.md#credentials-are-references-never-values)):
+  `env_secret("MY_PLUGIN_KEY")` reads the variable as the server reads its own
+  credentials — a reference (`env:NAME`, `file:/path`, `vault:…`) is resolved,
+  a raw value is accepted in development with a one-time warning and
+  **refused under `OTS_ENV=production`** (`Err`, with a message that never
+  carries the value). A plugin never reads a credential variable itself;
+  `plugins/accounts-dashboard` resolves `ACCOUNTS_DASHBOARD_GATEWAY_KEY` this
+  way. `ots_plugin_api::NoSecrets` is the stand-in for unit tests.
 - `Plugin::connectors` *(ots-plugin-api 0.3)* — datasource drivers for the
   SQL sources feature ([docs/sources.md](sources.md)): a plugin hands the host
   a `SourceConnector` per dialect, registered next to the built-in SQLite
