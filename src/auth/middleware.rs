@@ -520,11 +520,29 @@ pub async fn require_auth(
     State(provider): State<crate::server::OidcProviderState>,
     State(base_url): State<crate::server::BaseUrl>,
     State(audit): State<Arc<AuditLogger>>,
+    #[cfg(feature = "ldp")] State(app_state): State<crate::server::AppState>,
     mut req: Request,
     next: Next,
 ) -> Result<Response, Response> {
-    let token = extract_token(&req)
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing authorization token").into_response())?;
+    let Some(token) = extract_token(&req) else {
+        // WAC: an LDP resource whose access control list grants `foaf:Agent`
+        // `acl:Read` is readable without a token. The layer stays; only a
+        // `GET`/`HEAD` under `/ldp/` that the ACL opens to everyone passes, with
+        // no principal in the extensions. The handler evaluates the ACL again.
+        #[cfg(feature = "ldp")]
+        if crate::ldp::wac::anonymous_request_allowed(
+            &app_state.store,
+            &app_state.base_url,
+            req.method(),
+            req.uri().path(),
+        ) {
+            let ctx = DenialContext::capture(&req);
+            let resp = next.run(req).await;
+            audit_forbidden(&audit, &ctx, &resp);
+            return Ok(resp);
+        }
+        return Err((StatusCode::UNAUTHORIZED, "Missing authorization token").into_response());
+    };
 
     let user = authenticate(
         &jwt_config,

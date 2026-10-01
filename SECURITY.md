@@ -30,6 +30,8 @@ the [`CHANGELOG.md`](CHANGELOG.md) `### Deprecated` group and in the release not
 ahead of removal. The **Notes** column records the reason a line is downgraded — for
 example "deprecated due to CVE-…" or "superseded by x.y".
 
+**LDP.** Access to `/ldp/*` is per resource, with Web Access Control (`.acl` resources; see [`docs/ldp.md`](docs/ldp.md#access-control)); a way past an `.acl`, or a `PATCH`/`PUT`/`POST` body that reaches another resource, is a vulnerability and is reported as below.
+
 ## Reporting a vulnerability
 
 **Please do not open a public GitHub issue for security vulnerabilities.**

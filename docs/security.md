@@ -30,6 +30,10 @@ The default is a rule away from closed: matching rules are taken in priority ord
 
 Grant a principal access to a specific named graph at one of three levels: `read`, `write` (includes read), or `admin` (includes write). The special **public** principal grants unauthenticated read access to a single graph. Grants are additive and apply to both SPARQL queries and the Graph Store Protocol — an explicit write grant is required for `PUT` / `POST` / `DELETE` on `/store` and for any SPARQL Update that targets the graph. Managed at `/api/admin/acl/graphs`.
 
+## LDP Web Access Control
+
+Resources under `/ldp/` have a per-resource access control list in the Solid **Web Access Control** model: `R.acl` holds `acl:Authorization` nodes granting `acl:Read` / `acl:Write` / `acl:Append` / `acl:Control` to a user (`urn:ots:user:…`), an organisation or group (`acl:agentGroup`), a role, any signed-in user (`acl:AuthenticatedAgent`) or everyone (`foaf:Agent`); resources without an ACL inherit through `acl:default` from their containers, up to `/ldp/`. Creators own what they create; admins pass. The root ACL is seeded once (`LDP_ROOT_ACL=open|owners`). `PATCH`, `PUT` and `POST` bodies are confined to the target resource. Authorizations live in `urn:system:ldp-acl`, unreachable over `/sparql` and `/store`. Details, the agent IRIs and how to tighten the root ACL: [ldp.md](ldp.md#access-control).
+
 ## Triple Security Labels
 
 For cell-level security, individual triples (matched by subject, predicate, and object) can be assigned to a **label graph**. The triple is then visible only to principals who can read that label graph via the Named-Graph ACL; admins bypass filtering. Managed at `/api/admin/acl/triples`.
