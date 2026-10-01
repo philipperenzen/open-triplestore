@@ -13,8 +13,8 @@
 //! NAMED term-map resources (the form in the engine's own working test), which
 //! parse correctly, to exercise the mapping features.
 //!
-//! Referencing object maps (joins / `rr:parentTriplesMap`) are not modelled —
-//! documented as a gap.
+//! Referencing object maps (joins / `rr:parentTriplesMap`) run on relational
+//! sources only; the file executor refuses them (see the test below).
 
 use open_triplestore::rml::{execute, parse_rml};
 use open_triplestore::store::TripleStore;
@@ -448,11 +448,11 @@ fn rml_blank_node_subject_shared_across_poms() {
 
 // Referencing object maps (`rr:parentTriplesMap` + `rr:joinCondition`) are
 // modelled and executed for RELATIONAL logical sources, where the parent can be
-// streamed and indexed (see the `rml::sql` unit tests). For a FILE source there
-// is nothing to join against a second time, so the mapping parses and the
-// referencing triple is simply not produced.
+// streamed and indexed (see the `rml::sql` unit tests). A FILE source has no
+// parent to join against, so the file executor refuses the mapping by name
+// instead of dropping the link and reporting success.
 #[test]
-fn rml_referencing_object_map_parses_but_file_sources_do_not_join() {
+fn rml_referencing_object_map_parses_but_the_file_executor_refuses_it() {
     let mapping = r#"
       ex:Child a rr:TriplesMap ;
         rml:logicalSource ex:CSrc ; rr:subjectMap ex:CSubj ;
@@ -479,33 +479,20 @@ fn rml_referencing_object_map_parses_but_file_sources_do_not_join() {
     src.insert("c.csv".to_string(), "id,pid\n1,10\n".to_string());
     src.insert("p.csv".to_string(), "id,name\n10,Pat\n".to_string());
     let store = TripleStore::in_memory().unwrap();
-    execute(&m, &src, &store, None).expect("the rest of the mapping still runs");
-
+    let err = execute(&m, &src, &store, None)
+        .expect_err("a file source cannot resolve rr:parentTriplesMap");
+    assert!(
+        err.contains("<http://example.org/Child>"),
+        "names the triples map: {err}"
+    );
+    assert!(
+        err.contains("rr:parentTriplesMap"),
+        "names the construct: {err}"
+    );
     assert_eq!(
-        count(
-            &store,
-            "SELECT ?o WHERE { <http://example.org/c/1> ex:parent <http://example.org/p/10> }"
-        ),
+        count(&store, "SELECT * WHERE { ?s ?p ?o }"),
         0,
-        "a file logical source has no queryable parent to join to"
-    );
-    // The surrounding mapping is unaffected: the child's own properties and the
-    // parent triples map both produce their triples.
-    assert_eq!(
-        count(
-            &store,
-            "SELECT ?o WHERE { <http://example.org/c/1> ex:own \"10\" }"
-        ),
-        1,
-        "the child's own predicate-object map still fires"
-    );
-    assert_eq!(
-        count(
-            &store,
-            "SELECT ?o WHERE { <http://example.org/p/10> foaf:name \"Pat\" }"
-        ),
-        1,
-        "the parent triples map still produces its own triples"
+        "a refused mapping writes nothing, not the triples it could make"
     );
 }
 

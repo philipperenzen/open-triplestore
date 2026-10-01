@@ -35,7 +35,7 @@ claims, and nothing here is OGC-certified:
 | LDES / TREE | Event streams of version objects; hypermedia fragmentation | Partial — time-ordered fixed-size fragments with `GreaterThanOrEqualToRelation`, frozen once full; entity-level version objects, tombstones; retention policies (`fullLogDuration`, `versionAmount`, `versionDuration`, `versionDeleteDuration`, `startingFrom`) enforced inside frozen pages with `410 Gone` for a compacted node; an incremental client that treats 410 as an empty page. No `tree:shape`, `ldes:versionKey` or spatial/substring fragmentations. Spec-derived rules in `tests/ldes_conformance.rs` (no external corpus exists). See [ldes.md](ldes.md). |
 | LDP (Linked Data Platform) 1.0 | Basic/Direct/Indirect Containers; NonRDFSource; per-resource access control with Web Access Control (`.acl` resources, `acl:` vocabulary, `Link rel="acl"`, `WAC-Allow`) | Full — WAC agents are this store's principals; no WebID-TLS / Solid-OIDC, no `acl:origin`. See [ldp.md](ldp.md#access-control). |
 | DCAT 3 / DCAT-AP 3 / DCAT-AP-NL 3 | Dataset catalogue description; EU / NL application profiles | Partial — DCAT 3 catalogue with VoID statistics; `DCAT_PROFILE` adds the AP/AP-NL mandatory properties (typed agents, identifiers, language, file types, data services, EU-authority statuses); no `dcat:CatalogRecord`, no temporal coverage, and the official DCAT-AP SHACL suite is not run in CI. See [dcat.md](dcat.md). |
-| RML / R2RML | CSV/JSON/XML → RDF mapping | Partial⁹ |
+| RML / R2RML | CSV/JSON/XML files and SQL / SPARQL datasources → RDF | Partial⁹ |
 | JWT / OAuth 2.0 / OIDC | Authentication | Full |
 | SAML 2.0 | Authentication | Experimental — not in the `full` feature or the published image; the ACS handler has a known request-ID validation defect, so no login can currently succeed. See [auth.md](auth.md). |
 | ShEx | Shape Expressions (ShExC) | Partial — node kinds, datatypes with lexical checks, string/numeric facets, value sets, cardinalities, EachOf/OneOf, inverse constraints, CLOSED/EXTRA, shape references; no semantic actions, imports or annotations. Semantics pinned by `tests/shex_conformance.rs`. |
@@ -156,21 +156,26 @@ behavior and will flip green when the limitation is resolved.
    IRIs, `sh:resultPath`, `sh:value`).
 7. **SHACL Advanced** — SPARQL-based targets (`sh:target` with `sh:select`),
    SPARQL constraints (`sh:sparql` with `sh:select`; `$this` is pre-bound via
-   `VALUES` + `FROM <data-graph>`), rules, and `sh:qualifiedValueShape` counting
-   work. **Not implemented:** custom constraint components
-   (`sh:ConstraintComponent` / `sh:parameter` validators), `sh:ask`-based
-   constraints, and rule `sh:condition` / `sh:order`. The W3C corpus score
-   compares `sh:conforms` and the focus-node multiset, not result component
-   IRIs, paths or values.
+   `VALUES` + `FROM <data-graph>`), custom constraint components
+   (`sh:ConstraintComponent` / `sh:parameter` with `sh:ask` or `sh:select`
+   validators), rules with `sh:condition` and `sh:order`, and
+   `sh:qualifiedValueShape` counting work ([shacl.md](shacl.md)). **Not
+   implemented:** the `$shapesGraph` and `$currentShape` pre-bindings — a
+   constraint that uses them fails the shapes graph at load. The W3C corpus
+   score compares `sh:conforms` and the focus-node multiset, not result
+   component IRIs, paths or values.
 8. **SHACL-C** is a pragmatic subset: `[min..max]` counts, `closed`, and `// "msg"`
    messages. The parser rejects unrecognized trailing input (it used to discard it
    silently, which could empty a shape graph on upload with a 200).
 9. **RML / R2RML** — CSV/JSON/XML *file* sources with template/reference/constant
    term maps, datatype and language tags, `rr:class`, and inline blank-node term
-   maps. **Not implemented:** SQL logical tables (`rr:logicalTable`,
-   `rr:sqlQuery`) and referencing object maps (`rr:parentTriplesMap` joins); a
-   predicate-object map honours its first predicate map and first object map
-   only.
+   maps ([rml.md](rml.md)); relational logical sources (`rr:tableName`,
+   `rml:query`, R2RML's `rr:logicalTable` / `rr:sqlQuery`) over registered
+   PostgreSQL, MySQL / MariaDB and SQL Server datasources and virtual SPARQL
+   sources, with referencing object maps (`rr:parentTriplesMap` joins) resolved
+   there ([sources.md](sources.md)). **Not implemented:** joins on file sources
+   (the mapping is refused), and more than one predicate map or object map per
+   predicate-object map (the first of each is used).
 10. **Zero-length property paths:** `:x :p* ?y` includes start nodes present in the
     data; the pure ALP edge of a *constant* start node absent from the graph is an
     oxigraph-evaluator divergence.

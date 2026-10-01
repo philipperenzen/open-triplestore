@@ -1,8 +1,7 @@
 # Improvement log
 
-Running record of the improvement programme in
-[open-triplestore-painpoints.md](open-triplestore-painpoints.md): one entry per
-item, verify-first. An item is either implemented (failing test, then passing,
+Running record of the improvement programme (its brief, the "painpoints"
+document, was never committed): one entry per item, verify-first. An item is either implemented (failing test, then passing,
 plus docs), "already fixed at `<commit>`" (the probe passed before any change),
 or "blocked" with the diagnosis. Branch `feat/improvements` off `develop`;
 build and test environment: the Dockerfile's `chef` stage
@@ -384,9 +383,6 @@ Notes and follow-ups (none blocking):
   `scripts/` is outside this phase's edit scope — a two-constant change
   (`CORPUS` label, `CORPUS_RUNNERS` floor) for the maintainer.
 - Identity policy Settings UI (`frontend/`, out of scope) — see item 1.
-- `docs/notes/open-triplestore-painpoints.md`, which this log links to, is not
-  in the repository (the programme text lives in the session brief); either
-  commit it or drop the link.
 - The reasoning-source filter for linksets lives in `entailment.rs`
   (`reasoning_sources`) because `conformance::resolve` is used by
   non-reasoning callers; a caller that reaches `conformance::resolve(...)

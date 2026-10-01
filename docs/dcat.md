@@ -14,7 +14,7 @@ The triplestore automatically generates a full [W3C DCAT 2](https://www.w3.org/T
 | Aggregate `void:Dataset` | Total triple count, distinct subjects/objects/predicates, named graph count |
 | Per-dataset `dcat:Dataset` | Title, description, issued/modified dates, access rights, creator/publisher |
 | `dcat:Distribution` | SPARQL endpoint distribution + Graph Store HTTP Protocol distribution |
-| VoID statistics | Per-dataset `void:triples` from actual SPARQL COUNT queries |
+| VoID statistics | Per-dataset `void:triples` from the store's per-graph triple counts; whole-store counts cached until the next write |
 | `dct:conformsTo` | Links to the dataset's SHACL shapes graph when configured |
 | `dct:conformsTo` | Links to the model version the dataset's instance data conforms to |
 | Organization metadata | `foaf:Organization` + `org:FormalOrganization` for organisation-owned datasets |
@@ -162,9 +162,9 @@ Dataset visibility maps to EU Publications Office access rights URIs:
 
 ## VoID Statistics
 
-VoID statistics (`void:triples`, `void:distinctSubjects`, `void:distinctObjects`, `void:properties`) are computed live via SPARQL COUNT queries when the catalog is requested. For large stores this may add a few hundred milliseconds; the results are not cached between requests.
+The root dataset's statistics (`void:triples`, `void:distinctSubjects`, `void:distinctObjects`, `void:properties`) cover the whole store, default and named graphs alike. They are computed with `COUNT` queries the first time the catalogue is requested after a write and cached until the next write, so repeated requests cost nothing.
 
-The aggregate `void:triples` at the root dataset level reflects `SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }` across all graphs. Per-dataset counts scope the query to `GRAPH <iri> { ?s ?p ?o }` for each registered graph.
+A dataset's `void:triples` is the sum of its registered graphs' triple counts, which the store keeps current on every write — no query runs for it. Each registered graph (system graphs excluded) is also listed as a `void:subset`.
 
 ---
 

@@ -2,6 +2,8 @@
 
 The triplestore supports the [RDF Mapping Language (RML)](https://rml.io/specs/rml/) for converting tabular and semi-structured data (CSV, JSON, XML) into RDF triples.
 
+This page covers mappings over uploaded **files**. Relational databases (PostgreSQL, MySQL / MariaDB, SQL Server) and SPARQL endpoints are mapped as registered datasources instead — see [Sources](sources.md) — and that path also resolves joins between triples maps.
+
 ---
 
 ## Overview
@@ -33,6 +35,7 @@ RML extends W3C R2RML to non-relational data sources. A mapping document is a Tu
 | `rr:subjectMap` shortcut (`rr:subject`) | Supported |
 | `rr:predicateMap` shortcut (`rr:predicate`) | Supported |
 | `rr:objectMap` shortcut (`rr:object`) | Supported |
+| `rr:parentTriplesMap` (referencing object maps, joins) | Not on file sources: a mapping that uses one is refused with `400` and names the triples map. Registered datasources resolve them ([Sources](sources.md)). |
 
 ---
 
@@ -292,7 +295,8 @@ Both graphs appear in the dataset graph list and participate in dataset-scoped S
 
 ## Limitations
 
-- **Joins between TriplesMap entries**: RML join conditions (`rr:joinCondition`) are not yet supported. Denormalize source data before mapping or use separate SPARQL UPDATE statements to add cross-reference links.
-- **SQL / SPARQL sources**: Only file-based sources (CSV, JSON, XML) are supported. R2RML SQL source and SPARQL-based sources are not implemented.
+- **Joins between TriplesMap entries**: a file row stands alone, so `rr:parentTriplesMap` (with or without `rr:joinCondition`) cannot be resolved here and the whole mapping is refused rather than run without its links. Put the parent's key in the child's rows and build the object with `rr:template`, or load the data as a registered datasource, where joins run ([Sources](sources.md)).
+- **SQL / SPARQL sources**: this upload path reads files only. SQL logical tables (`rr:tableName`, `rml:query`) and SPARQL endpoints are mapped through registered datasources ([Sources](sources.md)); a mapping that names one is refused here with a pointer to that path.
+- **One predicate and one object per map**: a predicate-object map uses its first `rr:predicateMap` / `rr:predicate` and its first `rr:objectMap` / `rr:object`; write one predicate-object map per pair.
 - **Large files**: Source files are read entirely into memory. For very large files (> 100 MB), consider splitting them before upload.
 - **Nested JSON/XML**: Deep nesting (e.g. accessing `$.orders[].items[].price`) requires the iterator to point to the innermost array. Nested sibling references are flattened at a single object level.

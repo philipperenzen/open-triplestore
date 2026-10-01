@@ -75,6 +75,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   title. A `patch` on a `release/X.Y` branch releases that line and leaves the
   `latest` GitHub Release and image tag alone. `release.yml` can be re-run for
   an existing tag. See `docs/release-process.md`.
+- **An RML file mapping with `rr:parentTriplesMap` is refused.** The upload
+  path (CSV, JSON, XML) has no join resolver, so a referencing object map
+  resolved to nothing: the run wrote the rest of the mapping, dropped every link
+  it asked for, and reported success. It now answers `400` naming the triples
+  map, as it already did for a mapping that reads a registered datasource.
+  Joins run on registered datasources (`docs/sources.md`). Tests:
+  `src/rml/executor.rs`, `tests/rml_conformance.rs`.
+- **`docker-compose.override.yml` no longer ships.** It was one machine's
+  workaround for an unstable build host (thin LTO, two build jobs), and Compose
+  merges the file automatically, so every `docker compose build` got the slow,
+  less optimised image while `docs/development.md` called the file git-ignored.
+  It is now ignored; keep a local copy if you use one.
 
 ### Fixed
 - **SHACL result paths no longer render with a stray `>`.** The backend
@@ -142,6 +154,60 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     found", even for conforming data.
   - The dataset page's validation dialog showed the escape `\u2014` as text
     where its summary line has a dash.
+- **The bundled Open Triplestore ontology names all ten graph roles.** The
+  catalogue writes `ots:graphRole` values for `DomainValues`, `Linkset`,
+  `Provenance` and `Catalog`, but the `ots-ontology` demo dataset defined only
+  the first six roles, as `GraphRole` individuals and as SKOS concepts. New
+  installs get all ten; existing ones keep their seeded copy.
+- **GitLab CI runs the gates GitHub runs.** The frontend job type-checks
+  (`npm run typecheck`); e2e uses Node 24; `cargo-deny` covers every feature;
+  new `minimal-build` (`--no-default-features`) and `plugins` (each plugin crate
+  on its own) jobs; and the perf job self-tests the gate, screens softly and
+  re-benches flagged benchmarks before failing, and clears each pass's
+  directory first — the cached `target/` could nest one pass inside the last
+  and switch off every tolerance key.
+- **Docs that contradicted the code.**
+  - Graph roles: the styleguide said six (there are ten) and gave them an
+    `…/ns/role#` namespace (they are `https://opentriplestore.org/ns#`);
+    `docs/datasets.md` had its `catalog` row stranded below the table.
+  - `docs/rml.md` and `docs/standards.md` said SQL and SPARQL sources and joins
+    were not implemented; `standards.md` also listed SHACL-AF custom constraint
+    components, `sh:ask` validators and rule `sh:condition` / `sh:order` as
+    missing.
+  - `docs/sparql-12.md` called `LATERAL` planned and rejected by the parser (it
+    works) and let triple terms be subjects (RDF 1.2 allows objects only).
+  - `docs/owl2-el.md` named `Owl2ELReasoner` (the type is `El2Classifier`), and
+    the reasoner examples passed a string to `TripleStore::open`, which takes a
+    `Path`. The OWL 2 DL docs said keys of more than two properties produce no
+    `owl:sameAs`; the RL phase merges keys of any length.
+  - `docs/datatypes.md` said XSD literals keep their lexical form; numbers,
+    booleans and dates come back canonical (`"01"^^xsd:integer` → `"1"`).
+  - `docs/dcat.md` said VoID statistics are computed per request and never
+    cached; they are cached until the next write.
+  - `docs/data-modeling.md` said SHACL-on-write covers LDP writes; it covers
+    Graph Store writes to dataset graphs only.
+  - `docs/administration.md` said interactive OIDC sign-in ignores group
+    claims; it maps `groups` and `roles`. `docs/auth.md` left the `guest` role
+    and `OTS_GUEST_CAPABILITIES` out.
+  - `docs/development.md` and `docs/windows.md` put `saml` in `full` (it is not);
+    the native Windows build drops its hand-written feature list for the
+    default `full`.
+  - `docs/triplestore-comparison.md` marked federation, OWL 2 EL, RL and DL,
+    ShEx, SWRL and RML full where `docs/standards.md` grades them Partial; the
+    standards score is recounted, 23 → 16 of 29. Its GeoSPARQL note still
+    called the geodesic metric functions, `aggUnion` and GeoJSON missing.
+  - `docs/performance.md` showed a whole-store `COUNT(*)` scanning (7.09 ms at
+    10k); the count index answers it in ~0.14 µs at every size.
+  - `PRIVACY.md` listed Leaflet from unpkg and OpenStreetMap tiles; the UI
+    bundles its map libraries and fetches OpenFreeMap and, with an operator's
+    key, Esri imagery. `frontend/index.html` no longer pre-resolves an Esri
+    host the code stopped using.
+  - `CONTRIBUTING.md` told contributors to use `--all-features`, which needs
+    native SFCGAL; it now gives CI's feature set and the typecheck step.
+    `.github/RELEASE_TEMPLATE.md` used H2 groups where release notes and the
+    `### Security` / `### Deprecated` check use H3.
+  - `frontend/public/vocab/NOTICE.md` counted 17 files from LOV; DOAP's
+    replacement left 16.
 
 ### Security
 - **Every configured secret goes through the secrets module.** `JWT_SECRET`,

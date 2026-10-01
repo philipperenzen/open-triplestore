@@ -50,11 +50,12 @@ open-triplestore = { features = ["full"] }
 ## API Usage
 
 ```rust
-use open_triplestore::reasoning::owl2_el::Owl2ELReasoner;
+use open_triplestore::reasoning::owl2_el::El2Classifier;
 use open_triplestore::store::TripleStore;
+use std::path::Path;
 
-let store = TripleStore::open("./data")?;
-let reasoner = Owl2ELReasoner::new(&store);
+let store = TripleStore::open(Path::new("./data"))?;
+let reasoner = El2Classifier::new(&store);
 let report = reasoner.classify()?;
 
 println!(

@@ -652,12 +652,16 @@ otso:visibility a owl:DatatypeProperty ;
     rdfs:comment "Access level of a dataset (public, members, private)." ;
     rdfs:range xsd:string .
 
-otso:Instances  a otso:GraphRole ; rdfs:label "Instances"  ; rdfs:comment "Instance data (A-Box)." .
-otso:Model      a otso:GraphRole ; rdfs:label "Model"      ; rdfs:comment "OWL/RDFS terminology (T-Box)." .
-otso:Vocabulary a otso:GraphRole ; rdfs:label "Vocabulary" ; rdfs:comment "SKOS concept schemes." .
-otso:Shapes     a otso:GraphRole ; rdfs:label "Shapes"     ; rdfs:comment "SHACL shape graphs." .
-otso:Entailment a otso:GraphRole ; rdfs:label "Entailment" ; rdfs:comment "Materialised inferred triples." .
-otso:System     a otso:GraphRole ; rdfs:label "System"     ; rdfs:comment "Internal system metadata." .
+otso:Instances    a otso:GraphRole ; rdfs:label "Instances"     ; rdfs:comment "Instance data (A-Box)." .
+otso:Model        a otso:GraphRole ; rdfs:label "Model"         ; rdfs:comment "OWL/RDFS class definitions and class axioms (T-Box)." .
+otso:Vocabulary   a otso:GraphRole ; rdfs:label "Vocabulary"    ; rdfs:comment "Property definitions and SKOS concept schemes (R-Box)." .
+otso:Shapes       a otso:GraphRole ; rdfs:label "Shapes"        ; rdfs:comment "SHACL shape graphs." .
+otso:Entailment   a otso:GraphRole ; rdfs:label "Entailment"    ; rdfs:comment "Materialised inferred triples." .
+otso:DomainValues a otso:GraphRole ; rdfs:label "Domain values" ; rdfs:comment "Code lists and enumerations an instance property may take." .
+otso:Linkset      a otso:GraphRole ; rdfs:label "Linkset"       ; rdfs:comment "Alignments between sources (owl:sameAs, skos:*Match)." .
+otso:Provenance   a otso:GraphRole ; rdfs:label "Provenance"    ; rdfs:comment "PROV-O records of who produced what, when and from what." .
+otso:Catalog      a otso:GraphRole ; rdfs:label "Catalog"       ; rdfs:comment "DCAT / VoID descriptions of datasets and distributions." .
+otso:System       a otso:GraphRole ; rdfs:label "System"        ; rdfs:comment "Internal system metadata." .
 "#;
 
 /// SKOS controlled vocabulary for the codebase's value sets (graph roles,
@@ -674,8 +678,12 @@ otsv:role-instances  a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel
 otsv:role-model      a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Model"@en .
 otsv:role-vocabulary a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Vocabulary"@en .
 otsv:role-shapes     a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Shapes"@en .
-otsv:role-entailment a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Entailment"@en .
-otsv:role-system     a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "System"@en .
+otsv:role-entailment    a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Entailment"@en .
+otsv:role-domain-values a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Domain values"@en .
+otsv:role-linkset       a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Linkset"@en .
+otsv:role-provenance    a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Provenance"@en .
+otsv:role-catalog       a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Catalog"@en .
+otsv:role-system        a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "System"@en .
 
 otsv:conf-full    a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Full"@en .
 otsv:conf-partial a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Partial"@en .

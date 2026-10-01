@@ -149,10 +149,23 @@ expose the user's IP address to them:
 
 - **Google Fonts** (`fonts.googleapis.com`, `fonts.gstatic.com`) — web fonts,
   loaded on every page (`frontend/index.html`).
-- **Leaflet map library** (`unpkg.com`) — loaded **only** when a geographic/WKT
-  value is previewed (`frontend/src/components/GeoPreview.svelte`).
-- **OpenStreetMap tiles** (`tile.openstreetmap.org`) — map tiles, fetched **only**
-  when a map is rendered.
+- **OpenFreeMap** (`tiles.openfreemap.org`) — the street basemap's style, vector
+  tiles and label fonts, fetched when a map is rendered (the 2D and 3D viewers
+  and the geometry preview). Every page also opens a connection to this host in
+  advance (`<link rel="preconnect">` in `frontend/index.html`) so maps paint
+  sooner; no request is sent over it until a map renders, but the host sees the
+  connection.
+- **Esri World Imagery** (`ibasemaps-api.arcgis.com`) — satellite tiles, only
+  when the operator has configured an Esri API key (runtime config
+  `basemaps.esriApiKey`, see [docs/plugins.md](docs/plugins.md)) **and** the user
+  switches a map to satellite.
+- **Files linked from the data** — previewing a 3D model or similar file whose
+  IRI points at another host (the 3D chip on a value) makes the browser fetch it
+  from that host, on the user's click.
+
+The map libraries themselves (Leaflet, MapLibre, Cesium and its assets) are
+bundled and served from this instance; 3D tiles of a dataset come from this
+instance's own `/api/datasets/{id}/3dtiles/` endpoint.
 
 Prefix lookups from the browser (SPARQL editor autocomplete, prefix search)
 go to this instance's own `/api/prefixes` service — the UI no longer contacts

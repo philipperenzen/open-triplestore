@@ -20,8 +20,9 @@
 //!    by returning native DL results rather than `NotSupported`.
 //!
 //! # Known limitations
-//! - `owl:hasKey` only handles key lists of 1 or 2 properties.  Longer lists
-//!   require an external tableau reasoner.
+//! - `owl:hasKey`: the RL phase's `prp-key` merges keys of any length; the
+//!   DL loop re-checks only 1- and 2-property keys, so a longer key is not
+//!   applied to an individual whose type only a DL extension rule derived.
 //! - `owl:minCardinality` / `owl:cardinality` insert annotation triples
 //!   (`urn:dl:minCardinality`, `urn:dl:exactCardinality`) to record the
 //!   constraint obligation; existential witnesses cannot be generated from

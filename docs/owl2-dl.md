@@ -39,6 +39,8 @@ The following DL-specific axioms are added on top of the RL rules:
 | `owl:minQualifiedCardinality` | annotation | Records `urn:dl:minQualifiedCardinality` |
 | `owl:qualifiedCardinality` | annotation | Records `urn:dl:exactQualifiedCardinality` |
 
+Keys of any length are merged before these rules run: the OWL 2 RL phase's `prp-key` rule handles composite keys (`owl:hasKey ( ex:first ex:last ex:born )`). The two `dl-has-key` rules re-check 1- and 2-property keys inside the DL fixed-point loop, so they also catch individuals that only the DL rules above gave the keyed type.
+
 ---
 
 ## What requires an external tableau reasoner
@@ -48,7 +50,6 @@ The following features require a tableau algorithm with blocked-node merging and
 - **Existential witness generation** — when `owl:minCardinality n ≥ 1` applies but no n filler nodes exist, a tableau creates fresh anonymous individuals (Skolem witnesses).  SPARQL cannot create new nodes in an INSERT.
 - **Full ABox completion** — propagating universal quantifiers (`owl:allValuesFrom`) across cyclic role paths requires cycle detection via blocking.
 - **Nominals** (`owl:oneOf`) combined with complex role hierarchies.
-- **`owl:hasKey` with more than 2 properties** — the native rules only handle 1- and 2-property key lists.
 
 To get full OWL 2 DL reasoning, plug in an external reasoner (see below).
 
@@ -73,7 +74,7 @@ To get full OWL 2 DL reasoning, plug in an external reasoner (see below).
 
 | Feature | Limitation |
 |---|---|
-| `owl:hasKey` | Only key lists of **1 or 2 properties** are handled natively.  Longer lists silently produce no `sameAs` for those combinations. |
+| `owl:hasKey` | Keys of any length are merged in the RL phase. Inside the DL loop only 1- and 2-property keys are re-checked, so a key of three or more properties is not applied to an individual whose type only a DL extension rule derived. |
 | `owl:minCardinality` | Only an annotation triple (`urn:dl:minCardinality`) is inserted to record the obligation.  Existential fillers are NOT generated. |
 | `owl:cardinality` | The min side is annotated only; the max side (cls-maxc1/cls-maxc2) is handled by RL. |
 | Qualified cardinalities | Same annotation-only behaviour as unqualified cardinalities. |
@@ -232,8 +233,8 @@ All inferred triples — from both RL rules and DL extension rules — are writt
 | Profile | Basis | Extra features vs RL |
 |---|---|---|
 | OWL 2 RL | ~80 forward-chaining rules | — |
-| **OWL 2 DL** (this) | All RL rules + 10 DL extension rules | hasSelf, disjointUnionOf, NPA checks, hasKey (1-2 keys), cardinality annotations |
-| OWL 2 DL (full tableau) | External reasoner required | Full existential completion, nominals+roles, hasKey n>2 |
+| **OWL 2 DL** (this) | All RL rules + 10 DL extension rules | hasSelf, disjointUnionOf, NPA checks, hasKey re-checks, cardinality annotations |
+| OWL 2 DL (full tableau) | External reasoner required | Full existential completion, nominals+roles |
 
 ---
 
