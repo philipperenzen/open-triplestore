@@ -45,6 +45,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as Active and `0.6.x` as Security-only until 0.8.0, and the prepare workflow
   keeps them current.
 
+### Fixed
+- **The UI says when a validation or inference run left graphs out.** A run
+  that could not read every graph or shapes graph of a dataset answers
+  `partial: true`: a validation run is then a test run, not recorded, and an
+  inference run skips the rules it may not read. The dataset page, the
+  Validation page, the SHACL results page, the import wizard's pre-validation
+  and the shapes editor's Infer now show a note when that happens. Asking for
+  an official run on the SHACL results page used to reload the unchanged
+  latest run, so the click seemed to do nothing; the page now shows the test
+  run it got. In the same pass:
+  - The import wizard's pre-validation read the verdict off the response
+    envelope instead of its report, so it always showed "undefined issue(s)
+    found", even for conforming data.
+  - The dataset page's validation dialog showed the escape `\u2014` as text
+    where its summary line has a dash.
+
 ## [0.7.0] — 2026-09-28
 
 SQL datasources end to end: relational data is profiled, mapped, dry-run,

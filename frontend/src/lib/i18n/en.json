@@ -3470,6 +3470,10 @@
       "roleClass": "Class",
       "rolePredicate": "Predicate"
     },
+    "partialRunNote": {
+      "validate": "Partial run: some graphs or shapes graphs of this dataset are not yours to read, so this run left them out. It was not recorded, and the dataset's validation status is unchanged.",
+      "infer": "Partial run: some shapes graphs of this dataset are not yours to read, so their rules did not run."
+    },
     "prefixSearch": {
       "placeholder": "Search prefixes & vocabularies…",
       "ariaSearch": "Search prefixes and vocabularies",

@@ -1,7 +1,9 @@
 // Pure helpers for the SHACL validation UI.
 //
 // POST /api/datasets/:id/validate returns an envelope `{ report, run_id,
-// ran_at }` (plus `test: true` for dry runs); stored runs from
+// ran_at }` (plus `test: true` for dry runs, and `partial: true` when the run
+// left out graphs the caller may not read, which makes it a test run too);
+// stored runs from
 // /validation/latest and /validation/runs/:id carry the report under the same
 // `report` key but use `{ id, run_timestamp }` for identity/time. Components
 // must never treat the envelope itself as the report — these helpers normalize
@@ -26,6 +28,7 @@ export interface NormalizedValidationRun {
   runId: string | null;
   ranAt: string | null;
   test: boolean;
+  partial: boolean;
 }
 
 function looksLikeReport(o: unknown): o is Record<string, unknown> {
@@ -43,13 +46,13 @@ function normalizeReport(r: Record<string, unknown>): ValidationReport {
 
 /**
  * Unwrap a validate response or stored-run record into `{ report, runId,
- * ranAt, test }`. Accepts the envelope (`report`/`run_id`/`ran_at`), a stored
+ * ranAt, test, partial }`. Accepts the envelope (`report`/`run_id`/`ran_at`), a stored
  * run (`report`/`id`/`run_timestamp`) and — defensively — a bare report.
  * Returns a null report when none is present.
  */
 export function unwrapValidationRun(res: unknown): NormalizedValidationRun {
   if (!res || typeof res !== 'object') {
-    return { report: null, runId: null, ranAt: null, test: false };
+    return { report: null, runId: null, ranAt: null, test: false, partial: false };
   }
   const r = res as Record<string, unknown>;
   const report = looksLikeReport(r.report)
@@ -68,6 +71,7 @@ export function unwrapValidationRun(res: unknown): NormalizedValidationRun {
       (typeof r.run_timestamp === 'string' && r.run_timestamp) ||
       null,
     test: r.test === true,
+    partial: r.partial === true,
   };
 }
 
