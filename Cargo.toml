@@ -261,7 +261,7 @@ futures = "0.3"
 # the UI needs utoipa-swagger-ui's axum integration, and every release of that
 # crate since 8.x targets axum 0.8, whose `Router` cannot be merged into our
 # axum 0.7 one. Adding it back only makes sense as part of an axum 0.8 migration.
-utoipa = { version = "5", features = ["axum_extras"] }
+utoipa = { version = "6", features = ["axum_extras"] }
 
 # SHACL Compact Syntax parser
 nom = "7"
