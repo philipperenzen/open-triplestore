@@ -16,6 +16,11 @@ services:
       - triplestore_data:/data
     environment:
       - RUST_LOG=info
+      # Deployment posture (empty = development). `production` refuses a raw
+      # secret value at startup, and this file passes JWT_SECRET and
+      # S3_SECRET_KEY raw: give each a reference that resolves inside the
+      # container (e.g. file: on a mounted secret, via an override file) first.
+      - OTS_ENV=${OTS_ENV:-}
       # Serve the bundled web UI at /. Set SERVE_FRONTEND=false in .env for an
       # API-only container (SPARQL / Graph Store / REST are unaffected).
       - SERVE_FRONTEND=${SERVE_FRONTEND:-true}
@@ -101,6 +106,23 @@ services:
       - LLM_GATEWAY_URL=${LLM_GATEWAY_URL:-http://ollama:11434}
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:7b}
       - LLM_API_KEY=${LLM_API_KEY:-}
+      # Per-task model overrides; empty falls back to LLM_MODEL.
+      - LLM_SPARQL_MODEL=${LLM_SPARQL_MODEL:-}
+      - LLM_SHACL_MODEL=${LLM_SHACL_MODEL:-}
+      - LLM_CHAT_MODEL=${LLM_CHAT_MODEL:-}
+      # LLM guard, rate limits and request log; empty keeps each default
+      # (see .env.example).
+      - LLM_RATE_LIMIT_PER_MIN=${LLM_RATE_LIMIT_PER_MIN:-}
+      - LLM_RATE_LIMIT_ANON_PER_MIN=${LLM_RATE_LIMIT_ANON_PER_MIN:-}
+      - LLM_GUARD_INJECTION_ACTION=${LLM_GUARD_INJECTION_ACTION:-}
+      - LLM_GUARD_BLOCKLIST=${LLM_GUARD_BLOCKLIST:-}
+      - LLM_GUARD_MAX_MESSAGE_CHARS=${LLM_GUARD_MAX_MESSAGE_CHARS:-}
+      - LLM_GUARD_MAX_MESSAGES=${LLM_GUARD_MAX_MESSAGES:-}
+      - LLM_GUARD_MAX_TOTAL_CHARS=${LLM_GUARD_MAX_TOTAL_CHARS:-}
+      - LLM_LOG_PREVIEW_DISABLED=${LLM_LOG_PREVIEW_DISABLED:-}
+      - LLM_LOG_RETENTION_DAYS=${LLM_LOG_RETENTION_DAYS:-}
+      # ClamAV daemon (host:port) for upload scanning; empty disables it.
+      - CLAMAV_ADDR=${CLAMAV_ADDR:-}
       # In-memory query accelerator cap. Above this triple count the store keeps
       # TWO full RAM copies OFF and answers from RocksDB (correct, just slower for
       # large joins). By default the cap auto-sizes to mem_limit below; set this
