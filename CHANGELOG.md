@@ -87,6 +87,32 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   merges the file automatically, so every `docker compose build` got the slow,
   less optimised image while `docs/development.md` called the file git-ignored.
   It is now ignored; keep a local copy if you use one.
+- **Standards grades follow the code.** `docs/standards.md` regrades
+  **SPARQL 1.1 Query** and **OWL 2 QL** from Full to Partial, and every footnote
+  now lists the real gaps. SPARQL 1.1 Query: the W3C entries the oxigraph 0.5
+  evaluator fails and why, duplicate matches across several `FROM` graphs
+  (oxigraph#1919), the `/sparql` dataset rewrite, and shards that evaluate
+  `EXISTS` per shard. OWL 2 QL: two unsound rewrites, no `rdfs:range`, and a
+  regime that materialises only the TBox closure. OWL 2 EL: an unsound CR3 rule.
+  OWL 2 RL: `dt-type1` and `dt-not-type` are implemented (the docs and README
+  said they were not), and unscoped runs miss joins over two derived premises.
+  SHACL Core: literal canonicalisation, including derived integer datatypes
+  stored as `xsd:integer`. SHACL Advanced: the gaps that remain. GeoSPARQL: the
+  functions that answer wrongly today. The RDF Patch and LDES rows are reworded:
+  RDF Patch lacks multiple transaction blocks (there are no nested ones), and
+  `ldes:versionKey` is not part of LDES 1.0. The in-app capabilities graph (the
+  `capabilities` demo dataset) gave every standard "Full"; it now lists every
+  row of `docs/standards.md` with its grade, a unit test keeps the two in step,
+  and existing installs get the new graph on their next start (demo content
+  version 14). The conformance table counts `tests/ldes_conformance.rs` as the
+  "LDES 1.0 / TREE" suite and relabels the DCAT and OWL 2 DL rows.
+- **The comparison matrix follows the grades on every row.**
+  `docs/triplestore-comparison.md` shows 🟡 for every standard
+  `docs/standards.md` grades Partial, including SPARQL 1.1 Query, OWL 2 QL,
+  SHACL-AF inference, DCAT and VoID, so the standards score is recounted,
+  16 → 11 of 29. The OWL DL and SWRL text no longer contradicts the matrix. The
+  unused spatial R-tree, the unbuilt property-path memoisation and
+  "single-node only" are corrected, and its footnote numbers no longer collide.
 
 ### Fixed
 - **SHACL result paths no longer render with a stray `>`.** The backend

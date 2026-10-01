@@ -13,12 +13,14 @@ runners record, and writes the result between `<!-- conformance-table:start -->`
     scripts/conformance_table.py --write    # update README.md and docs/standards.md
     scripts/conformance_table.py --check    # exit 1 if either file is stale (CI)
 
-The *basis* column is the honest part: only the W3C SPARQL 1.1 query/update
-sections, the W3C SHACL core/sparql sections and the OGC GeoSPARQL validator
-shapes are vendored test corpora; every other suite is hand-written and
-*derived from* the spec text.
+The *basis* column is the honest part: only the rows marked **vendored** run
+a published test corpus (today the W3C SPARQL 1.1 query/update sections, the W3C
+SHACL core/sparql sections and the OGC GeoSPARQL validator shapes); every other
+suite is hand-written and *derived from* the spec text.
 
-Which corpus results are published is a licence question, not a style one:
+Which corpus results are published is a licence question, not a style one, and
+is decided per corpus when it is vendored (`CORPUS_RUNNERS`, `PUBLISH_SCORE`,
+`UNSCORED_NOTES`). The current ones:
 
 - The SPARQL 1.1 sections come from a W3C test suite, which W3C licenses under
   its 3-clause BSD licence for "software development, bug tracking, and other
@@ -62,7 +64,7 @@ SUITES: dict[str, tuple[str, str]] = {
     "owl2_rl_conformance": ("OWL 2 RL", "spec-derived"),
     "owl2_el_conformance": ("OWL 2 EL", "spec-derived"),
     "owl2_ql_conformance": ("OWL 2 QL", "spec-derived"),
-    "owl2_dl_conformance": ("OWL 2 DL extension rules", "spec-derived"),
+    "owl2_dl_conformance": ("OWL 2 DL", "spec-derived"),
     "shacl_conformance": ("SHACL Core", "spec-derived"),
     "w3c_shacl_conformance": ("SHACL Core", "**vendored W3C corpus** (core + sparql sections, manifest-driven)"),
     "w3c_sparql11_manifests": ("SPARQL 1.1 Query/Update", "**vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven)"),
@@ -72,7 +74,8 @@ SUITES: dict[str, tuple[str, str]] = {
     "swrl_conformance": ("SWRL", "spec-derived"),
     "ldp_conformance": ("LDP 1.0 (store level)", "spec-derived"),
     "ldp_http_conformance": ("LDP 1.0 (HTTP)", "spec-derived"),
-    "dcat_conformance": ("DCAT 2 / VoID", "spec-derived"),
+    "dcat_conformance": ("DCAT 3 / DCAT-AP 3 / VoID", "spec-derived"),
+    "ldes_conformance": ("LDES 1.0 / TREE", "spec-derived"),
     "rml_conformance": ("RML / R2RML", "spec-derived"),
     "standards_conformance": ("Cross-standard HTTP smoke", "spec-derived"),
 }
@@ -100,11 +103,15 @@ CORPUS_RUNNERS = {
 # policy allows no public performance claims.
 PUBLISH_SCORE = {"w3c_shacl_conformance"}
 
-# The note for a corpus runner whose score is not published.
-UNSCORED_NOTE = (
-    "runs in CI as a development and regression ratchet; no score is published "
-    "(W3C test-suite policy); known gaps in `docs/conformance/sparql11.md`"
-)
+# The note for each corpus runner whose score is not published. Every
+# CORPUS_RUNNERS entry outside PUBLISH_SCORE needs one: it says why no score is
+# given and where the known gaps are tracked.
+UNSCORED_NOTES = {
+    "w3c_sparql11_manifests": (
+        "runs in CI as a development and regression ratchet; no score is published "
+        "(W3C test-suite policy); known gaps in `docs/conformance/sparql11.md`"
+    ),
+}
 
 
 def corpus(stem: str) -> tuple[int, int, int, int]:
@@ -139,8 +146,10 @@ def render() -> str:
                     cases, passed, failed, skipped = corpus(stem)
                     plural = "" if failed == 1 else "s"
                     note = f"{cases} corpus cases: {passed} pass, {failed} known failure{plural}, {skipped} runner-side skips (floor ≥{CORPUS_RUNNERS[stem]} asserted)"
+                elif stem in UNSCORED_NOTES:
+                    note = UNSCORED_NOTES[stem]
                 else:
-                    note = UNSCORED_NOTE
+                    raise SystemExit(f"{stem}.rs: unscored corpus runner without an UNSCORED_NOTES entry")
             elif ign:
                 note = f"{ign} ignored"
             rows.append((std, f"`tests/{stem}.rs`", basis, n, note))
@@ -163,10 +172,11 @@ def render() -> str:
         "regression suites under `tests/`, plus the crate's unit tests. Only the "
         f"{len([r for r in rows if 'vendored' in r[2]])} **vendored** rows run a published "
         "corpus; every other suite is hand-written and derived from the specification text. "
-        "The SHACL and GeoSPARQL corpus results are development and regression results on the "
-        "vendored sections (`docs/conformance/`), not W3C or OGC conformance claims. The SPARQL "
-        "1.1 sections are a subset of a W3C test suite, so under W3C's test-suite licence policy "
-        "they are used for development and bug tracking only, and no score is published for them."
+        "A vendored row gives results only where its corpus licence allows performance claims; "
+        "those are development and regression results on the vendored sections "
+        "(`docs/conformance/`), not W3C, OGC or other conformance claims. The W3C SPARQL 1.1 "
+        "sections are a subset of a W3C test suite, so they carry no results and are used for "
+        "development and bug tracking only."
     )
     lines.append("")
     lines.append("_Generated by `scripts/conformance_table.py` — edit the suites, not the table._")
