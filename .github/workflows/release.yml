@@ -1,4 +1,8 @@
-# Release automation: fires on each annotated `v*` tag pushed to `main`.
+# Release automation for one annotated `vX.Y.Z` tag. It runs when:
+#   - auto-tag.yml calls it after tagging a merged release PR (the usual path),
+#   - a maintainer pushes a `v*` tag by hand, or
+#   - a maintainer runs it from the Actions tab for an existing tag, to publish
+#     again after a failure.
 #
 # 1. release-notes — extracts the matching `## [X.Y.Z]` section from CHANGELOG.md
 #    and publishes a GitHub Release with those notes.
@@ -10,6 +14,18 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_call:
+    inputs:
+      tag:
+        description: The release tag, for example v0.8.0
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The existing release tag to publish, for example v0.8.0
+        type: string
+        required: true
 
 permissions:
   contents: write
@@ -17,22 +33,44 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # The tag being released: the input when called or dispatched, else the
+  # pushed tag.
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   release-notes:
     name: Create GitHub Release
     runs-on: ubuntu-latest
+    outputs:
+      latest: ${{ steps.latest.outputs.latest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          # Every tag, to tell whether this one is the newest release.
+          fetch-depth: 0
 
-      # Extract the CHANGELOG section for this tag. GITHUB_REF_NAME is e.g.
+      # A patch on an older line (v0.6.1 after v0.7.0) must not become the
+      # latest GitHub Release or move the image's `latest` tag.
+      - name: Is this the newest release?
+        id: latest
+        shell: bash
+        run: |
+          set -euo pipefail
+          newest="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname \
+                    | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)"
+          if [ "$TAG" = "$newest" ]; then latest=true; else latest=false; fi
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "$TAG is the newest release: $latest (newest tag: ${newest:-none})"
+
+      # Extract the CHANGELOG section for this tag. TAG is e.g.
       # "v0.2.1"; strip the leading "v" to get the bare version used in the
       # "## [X.Y.Z]" headers, then awk out everything up to the next "## [".
       - name: Extract release notes from CHANGELOG
         shell: bash
         run: |
           set -euo pipefail
-          ver="${GITHUB_REF_NAME#v}"
+          ver="${TAG#v}"
           echo "Extracting notes for version: $ver"
           hdr="## [$ver]"
           # Fixed-string match (index, not regex): a dynamic-regex "\\[" is dropped
@@ -53,7 +91,7 @@ jobs:
           # tag. The annotated tag message keeps the section whole.
           if [ "$(wc -m < release_notes.md)" -gt 120000 ]; then
             python3 .github/scripts/release_notes_digest.py \
-              "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY" release_notes.md
+              "$TAG" "$GITHUB_REPOSITORY" release_notes.md
           fi
           echo "----- release_notes.md ($(wc -m < release_notes.md) characters) -----"
           cat release_notes.md
@@ -73,10 +111,14 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
+          tag_name: ${{ env.TAG }}
           body_path: release_notes.md
-          name: "Open Triplestore ${{ github.ref_name }}"
+          name: "Open Triplestore ${{ env.TAG }}"
           # A tag like v0.2.1-rc.1 contains a hyphen → mark it a pre-release.
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(env.TAG, '-') }}
+          # The newest version is the repository's latest release; a patch on
+          # an older line is not.
+          make_latest: ${{ steps.latest.outputs.latest }}
 
   publish-image:
     name: Build & push container image
@@ -86,6 +128,8 @@ jobs:
     if: github.repository == 'philipperenzen/open-triplestore'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
 
       # NOTE: the very first push creates the GHCR package as *private*. A
       # maintainer must set its visibility to public once (Packages → settings)
@@ -102,10 +146,12 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/philipperenzen/open-triplestore
+          # The version comes from TAG, not the triggering ref, which is the
+          # merged PR's branch when auto-tag.yml calls this workflow.
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+            type=semver,pattern={{version}},value=${{ env.TAG }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.TAG }}
+            type=raw,value=latest,enable=${{ needs.release-notes.outputs.latest == 'true' }}
 
       # The 3-stage Dockerfile already builds the server with `--features full`,
       # so no build-args are needed here.
