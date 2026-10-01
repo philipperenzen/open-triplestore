@@ -11,27 +11,39 @@
 //!  * S13 — the returning-user branch of `provision_or_link_user` must keep
 //!    returning the existing linked user (and refresh its identity record)
 //!    instead of swallowing/aborting on the housekeeping upsert.
+//!  * The login page only offers providers a sign-in can start from: the
+//!    synthetic `env-oidc` row that `OIDC_ISSUER` creates (no client_id) stays
+//!    off it, through admin edits, while bearer tokens from that IdP keep
+//!    verifying and JIT-provisioning against the row.
 
 mod common;
 use common::*;
 
 use std::sync::Arc;
 
+use axum::{
+    body::Body,
+    http::{header, Method, Request, StatusCode},
+};
 use open_triplestore::auth::{
     audit::{AuditEventBuilder, AuditEventType, AuditLogger, AuditOutcome},
     db::AuthDb,
     jwt::{issue_access_token, verify_token, JwtConfig},
     models::{OauthProviderCreate, SystemRole},
     oauth::provision_or_link_user,
+    oidc_provider::ProviderKeys,
+    oidc_rs::{ensure_env_provider, AuthExt, OidcVerifier, ENV_OIDC_PROVIDER_SLUG},
 };
+use tower::ServiceExt as _;
 
-/// Build a minimal OIDC provider row and return its id.
-fn make_oidc_provider(db: &Arc<AuthDb>, slug: &str, auto_provision: bool) -> String {
-    let create = OauthProviderCreate {
+/// A provider row of the given type; `client_id` is what an admin typed (or
+/// left out).
+fn provider_row(slug: &str, provider_type: &str, client_id: Option<&str>) -> OauthProviderCreate {
+    OauthProviderCreate {
         name: format!("Provider {slug}"),
         slug: slug.to_string(),
-        provider_type: "oidc".to_string(),
-        client_id: Some("client-123".to_string()),
+        provider_type: provider_type.to_string(),
+        client_id: client_id.map(str::to_string),
         client_secret: None,
         client_secret_enc: None,
         discovery_url: Some("https://idp.example.com/.well-known/openid-configuration".to_string()),
@@ -41,9 +53,17 @@ fn make_oidc_provider(db: &Arc<AuthDb>, slug: &str, auto_provision: bool) -> Str
         idp_certificate: None,
         scopes: None,
         role_claim_map: None,
-        auto_provision,
+        auto_provision: true,
         default_role: Some("user".to_string()),
         is_active: true,
+    }
+}
+
+/// Build a minimal OIDC provider row and return its id.
+fn make_oidc_provider(db: &Arc<AuthDb>, slug: &str, auto_provision: bool) -> String {
+    let create = OauthProviderCreate {
+        auto_provision,
+        ..provider_row(slug, "oidc", Some("client-123"))
     };
     db.create_oauth_provider(&create).unwrap().id
 }
@@ -174,4 +194,181 @@ fn sso_login_failure_audit_event_is_recorded() {
     let details = ev.details.as_ref().expect("details present");
     assert_eq!(details["provider_type"], "saml");
     assert_eq!(details["reason"], "assertion_rejected");
+}
+
+// ─── Login page vs. the resource-server provider row ──────────────────────────
+
+/// The slugs the public login page renders as SSO buttons, sorted.
+async fn login_page_slugs(app: &axum::Router) -> Vec<String> {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/oauth/providers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut slugs: Vec<String> = body_json(resp.into_body())
+        .await
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["slug"].as_str().unwrap().to_string())
+        .collect();
+    slugs.sort();
+    slugs
+}
+
+async fn authorize_status(app: &axum::Router, slug: &str) -> StatusCode {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/auth/oauth/{slug}/authorize"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+/// An OIDC row without a client_id cannot start a browser login (the flow bails
+/// on the missing client_id), so the login page must not render it as a button:
+/// that covers the synthetic `env-oidc` row `OIDC_ISSUER` creates and an OIDC
+/// row an admin saved without one. SAML rows carry no client_id by design and
+/// stay listed.
+#[tokio::test]
+async fn providers_without_a_client_id_are_not_offered_on_the_login_page() {
+    let state = test_state();
+    let db = &state.auth_db;
+    make_oidc_provider(db, "acme", true);
+    db.create_oauth_provider(&provider_row("corp-saml", "saml", None))
+        .unwrap();
+    db.create_oauth_provider(&provider_row("no-client", "oidc", None))
+        .unwrap();
+    db.create_oauth_provider(&provider_row("blank-client", "oidc", Some("  ")))
+        .unwrap();
+    ensure_env_provider(db, "https://idp.example.org", "user").unwrap();
+    let app = test_app(state);
+
+    assert_eq!(login_page_slugs(&app).await, ["acme", "corp-saml"]);
+    // Hitting the authorize URL directly finds no login to start either.
+    for slug in [ENV_OIDC_PROVIDER_SLUG, "no-client", "blank-client"] {
+        assert_eq!(
+            authorize_status(&app, slug).await,
+            StatusCode::NOT_FOUND,
+            "{slug}"
+        );
+    }
+}
+
+/// End to end in resource-server mode: an admin edits the `env-oidc` row
+/// through the identity-provider API (renames it, saves an empty client_id,
+/// later switches it off). It never shows up on the login page, and bearer
+/// tokens from the configured issuer keep verifying and JIT-provisioning one
+/// local user against that row.
+#[tokio::test]
+async fn edited_env_oidc_row_stays_off_the_login_page_and_keeps_serving_bearer_tokens() {
+    // The IdP: another instance whose built-in OIDC provider signs the tokens.
+    let mut idp = test_state();
+    idp.oidc_provider = Some(Arc::new(
+        ProviderKeys::load_or_generate(&idp.auth_db, "test-secret").unwrap(),
+    ));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let issuer = format!("http://{}", listener.local_addr().unwrap());
+    idp.base_url = Arc::new(issuer.clone());
+    let keys = idp.oidc_provider.clone().unwrap();
+    let idp_app = test_app(idp);
+    std::thread::spawn(move || {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move {
+                let l = tokio::net::TcpListener::from_std(listener).unwrap();
+                axum::serve(l, idp_app).await.unwrap();
+            });
+    });
+
+    // The resource server, configured as OIDC_ISSUER=<idp> OIDC_AUDIENCE=ots-api.
+    let (mut rs, admin_token) = admin_state();
+    let mut ext = AuthExt::disabled();
+    ext.oidc = Some(OidcVerifier::new(issuer.clone(), Some("ots-api".into())));
+    rs.auth_ext = Arc::new(ext);
+    let env = ensure_env_provider(&rs.auth_db, &issuer, "user").unwrap();
+    let app = test_app(rs.clone());
+
+    let edit = |name: &str, is_active: bool| {
+        let body = serde_json::json!({
+            "name": name,
+            "slug": ENV_OIDC_PROVIDER_SLUG,
+            "provider_type": "oidc",
+            "client_id": "",
+            "discovery_url": env.discovery_url,
+            "scopes": "openid email profile",
+            "auto_provision": true,
+            "default_role": "user",
+            "is_active": is_active,
+        });
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/api/admin/oauth/providers/{}", env.id))
+            .header(header::AUTHORIZATION, format!("Bearer {admin_token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let me = |sub: &str| {
+        let now = chrono::Utc::now().timestamp();
+        let token = keys
+            .sign_claims(&serde_json::json!({
+                "iss": issuer,
+                "sub": sub,
+                "aud": "ots-api",
+                "iat": now,
+                "nbf": now - 5,
+                "exp": now + 60,
+                "preferred_username": "rs-user",
+                "email": "rs-user@example.org",
+            }))
+            .unwrap();
+        Request::builder()
+            .uri("/api/auth/me")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let resp = app
+        .clone()
+        .oneshot(edit("Company IdP", true))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(login_page_slugs(&app).await.is_empty());
+
+    let resp = app.clone().oneshot(me("ext-sub-1")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let first = body_json(resp.into_body()).await;
+    assert_eq!(first["username"], "rs-user");
+
+    // Switched off: still not on the login page, and the same subject still
+    // resolves to the same JIT-provisioned user through the row.
+    let resp = app
+        .clone()
+        .oneshot(edit("Company IdP", false))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(login_page_slugs(&app).await.is_empty());
+    let resp = app.clone().oneshot(me("ext-sub-1")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp.into_body()).await["id"], first["id"]);
+
+    // The edits kept the one row the resource-server path looks up by slug.
+    let row = ensure_env_provider(&rs.auth_db, &issuer, "user").unwrap();
+    assert_eq!(row.id, env.id);
+    assert_eq!(row.name, "Company IdP");
 }

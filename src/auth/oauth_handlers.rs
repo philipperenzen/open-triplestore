@@ -26,12 +26,15 @@ pub struct PublicProvider {
 }
 
 /// GET /api/auth/oauth/providers
-/// Returns active SSO providers (no secrets) for the login UI.
+/// Returns the SSO providers a sign-in can start from (no secrets) for the
+/// login UI. Active entries without a client ID, such as `env-oidc`, are left
+/// out: they still serve IdP bearer tokens, which never consult this list.
 pub async fn list_active_providers(State(state): State<AppState>) -> impl IntoResponse {
     match state.auth_db.list_oauth_providers(true) {
         Ok(providers) => {
             let public: Vec<PublicProvider> = providers
                 .into_iter()
+                .filter(|p| p.offers_login())
                 .map(|p| PublicProvider {
                     slug: p.slug,
                     name: p.name,
@@ -252,7 +255,7 @@ pub async fn oidc_authorize(
     axum::extract::Extension(sessions): axum::extract::Extension<OAuthSessions>,
 ) -> Response {
     let provider = match state.auth_db.get_oauth_provider_by_slug(&slug) {
-        Ok(Some(p)) if p.is_active && p.provider_type == "oidc" => p,
+        Ok(Some(p)) if p.provider_type == "oidc" && p.offers_login() => p,
         Ok(_) => {
             return (StatusCode::NOT_FOUND, "{\"error\":\"Provider not found\"}").into_response()
         }

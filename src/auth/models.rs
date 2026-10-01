@@ -939,6 +939,21 @@ pub struct OauthProviderCreate {
     pub is_active: bool,
 }
 
+impl OauthProvider {
+    /// Whether a browser sign-in can start from this provider, i.e. whether the
+    /// login page should offer it. An OIDC entry needs a client ID: the
+    /// `env-oidc` entry that `OIDC_ISSUER` creates has none (it only anchors
+    /// resource-server accounts), nor does an OIDC entry saved without one.
+    pub fn offers_login(&self) -> bool {
+        self.is_active
+            && (self.provider_type == "saml"
+                || self
+                    .client_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty()))
+    }
+}
+
 impl OauthProviderCreate {
     pub fn scopes_or_default(&self) -> String {
         self.scopes

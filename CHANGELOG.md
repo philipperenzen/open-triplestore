@@ -77,6 +77,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an existing tag. See `docs/release-process.md`.
 
 ### Fixed
+- **The login page no longer offers SSO buttons that cannot sign in.** With
+  `OIDC_ISSUER` set, the store creates an *Environment OIDC* provider entry
+  (slug `env-oidc`, no client ID) to hold the accounts of IdP bearer tokens,
+  and the login page listed it as a sign-in option that failed with "has no
+  client_id". `GET /api/auth/oauth/providers` now lists only active entries a
+  browser sign-in can start from: SAML entries, and OIDC entries with a client
+  ID. `GET /api/auth/oauth/{slug}/authorize` answers `404` for the others
+  instead of `500`. IdP bearer tokens are unaffected, whatever an admin later
+  edits on the entry; turning it off is no longer needed to hide it.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if
