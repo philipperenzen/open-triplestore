@@ -10,18 +10,32 @@
 //! Supported lines: `H` (headers), `TX` / `TC` / `TA` (one transaction;
 //! `TA` aborts, nothing is applied), `PA` / `PD` (prefixes), `A` / `D`
 //! (add / delete a quad — the graph term is required here, since a dataset
-//! patch may only touch the dataset's registered graphs). Deleting a triple
-//! whose subject or object is a blank node is refused: the patch is applied
-//! as SPARQL `DELETE DATA`, which cannot name blank nodes.
+//! patch may only touch the dataset's registered graphs). Terms are IRIs,
+//! prefixed names, literals, blank nodes and RDF 1.2 triple terms
+//! (`<<( s p o )>>`, as an object).
+//!
+//! A patch is applied through the store's `apply_delta` primitive, not as
+//! SPARQL: one transaction, the net effect of its lines (the last line on a
+//! quad wins), recorded in the change log. That is what lets a `D` line name
+//! a blank node — `DELETE DATA` cannot — with one caveat: `_:label` addresses
+//! a stored blank node only when it is the store's own label, as a patch this
+//! store exported carries it; a hand-written label matches nothing.
+//!
+//! Headers the store writes and reads (delta note §5.1): `H id`, `H prev`
+//! (the patch this one inverts), `H seq` / `H epoch` (a change's place in the
+//! change log), `H dataset`, `H commit`, and `H base-digest` — on apply, the
+//! set hash (`store::set_hash`) the graphs the patch names must have before
+//! it applies, else 412.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::{Extension, Json};
-use oxigraph::model::{BlankNode, GraphNameRef, Literal, NamedNode, NamedNodeRef};
+use oxigraph::io::{RdfFormat, RdfParser};
+use oxigraph::model::{BlankNode, GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, Quad};
 
 use crate::auth::middleware::AuthenticatedUser;
 use crate::server::AppState;
@@ -82,6 +96,206 @@ impl Patch {
             })
             .collect()
     }
+
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// `H base-digest`: the set hash the patch's graphs must have before it
+    /// applies.
+    pub fn base_digest(&self) -> Option<&str> {
+        self.header("base-digest")
+    }
+
+    /// The lines as quads, reduced to their net effect: the last line on a
+    /// quad decides whether it ends up present (`A`) or absent (`D`), as
+    /// applying the lines one by one would. Returns `(to_add, to_remove)`,
+    /// which never share a quad.
+    pub fn net_quads(&self) -> Result<(Vec<Quad>, Vec<Quad>), String> {
+        let mut last: Vec<(Quad, bool)> = Vec::new();
+        let mut index: HashMap<Quad, usize> = HashMap::new();
+        for op in &self.ops {
+            let (add, q) = match op {
+                Op::Add(q) => (true, q),
+                Op::Delete(q) => (false, q),
+            };
+            let quad = q.to_quad()?;
+            match index.get(&quad) {
+                Some(&i) => last[i].1 = add,
+                None => {
+                    index.insert(quad.clone(), last.len());
+                    last.push((quad, add));
+                }
+            }
+        }
+        let (add, remove): (Vec<(Quad, bool)>, Vec<(Quad, bool)>) =
+            last.into_iter().partition(|(_, add)| *add);
+        Ok((
+            add.into_iter().map(|(q, _)| q).collect(),
+            remove.into_iter().map(|(q, _)| q).collect(),
+        ))
+    }
+
+    /// The patch that undoes this one: `A` and `D` swapped, lines in reverse
+    /// order, a fresh `H id`, and `H prev` naming this patch.
+    pub fn inverse(&self) -> Patch {
+        let mut headers: Vec<(String, String)> = vec![(
+            "id".to_string(),
+            format!("urn:uuid:{}", uuid::Uuid::new_v4()),
+        )];
+        if let Some(id) = self.id() {
+            headers.push(("prev".to_string(), id.to_string()));
+        }
+        headers.extend(
+            self.headers
+                .iter()
+                .filter(|(k, _)| k != "id" && k != "prev" && k != "base-digest")
+                .cloned(),
+        );
+        Patch {
+            headers,
+            prefixes: Vec::new(),
+            ops: self
+                .ops
+                .iter()
+                .rev()
+                .map(|op| match op {
+                    Op::Add(q) => Op::Delete(q.clone()),
+                    Op::Delete(q) => Op::Add(q.clone()),
+                })
+                .collect(),
+            aborted: self.aborted,
+        }
+    }
+
+    /// The patch as text: its headers and one transaction, every term in
+    /// canonical form (no prefix lines needed).
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        for (k, v) in &self.headers {
+            out.push_str(&format!("H {k} {} .\n", header_value(v)));
+        }
+        out.push_str("TX .\n");
+        for op in &self.ops {
+            let (code, q) = match op {
+                Op::Add(q) => ("A", q),
+                Op::Delete(q) => ("D", q),
+            };
+            match &q.g {
+                Some(g) => out.push_str(&format!("{code} {} {} {} {g} .\n", q.s, q.p, q.o)),
+                None => out.push_str(&format!("{code} {} {} {} .\n", q.s, q.p, q.o)),
+            }
+        }
+        out.push_str(if self.aborted { "TA .\n" } else { "TC .\n" });
+        out
+    }
+}
+
+/// A header value as a patch term: IRIs (and `urn:` names) in angle
+/// brackets, anything else as a quoted literal.
+fn header_value(v: &str) -> String {
+    if v.starts_with('<') || v.starts_with('"') {
+        v.to_string()
+    } else if v.contains("://") || v.starts_with("urn:") {
+        format!("<{v}>")
+    } else {
+        format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
+impl QuadText {
+    /// The quad these canonical terms spell.
+    pub fn to_quad(&self) -> Result<Quad, String> {
+        let line = match &self.g {
+            Some(g) => format!("{} {} {} {g} .\n", self.s, self.p, self.o),
+            None => format!("{} {} {} .\n", self.s, self.p, self.o),
+        };
+        RdfParser::from_format(RdfFormat::NQuads)
+            .for_reader(line.as_bytes())
+            .next()
+            .ok_or_else(|| format!("not a quad: {}", line.trim_end()))?
+            .map_err(|e| format!("{}: {e}", line.trim_end()))
+    }
+
+    pub fn from_quad(q: &Quad) -> QuadText {
+        QuadText {
+            s: q.subject.to_string(),
+            p: q.predicate.to_string(),
+            o: q.object.to_string(),
+            g: match &q.graph_name {
+                GraphName::NamedNode(n) => Some(n.to_string()),
+                _ => None,
+            },
+        }
+    }
+}
+
+/// One change of the change log as a patch: its removed quads as `D` lines,
+/// then its added quads as `A` lines, with its place in the log — `H seq`,
+/// `H epoch` — and `H dataset` / `H commit` when known. The id is the
+/// change's own (`urn:ots:change:{epoch}:{seq}`), so fetching it twice gives
+/// the same patch. `None` for a row that carries no quads (`counts` or
+/// `unknown`).
+pub fn change_patch(
+    row: &crate::store::changes::ChangeRow,
+    dataset_iri: Option<&str>,
+) -> Option<Patch> {
+    use crate::store::changes::{decode_text, Extent};
+    if row.extent != Extent::Full {
+        return None;
+    }
+    let seq = row.seq?;
+    let mut headers = vec![
+        (
+            "id".to_string(),
+            format!("urn:ots:change:{}:{seq}", row.epoch),
+        ),
+        ("seq".to_string(), seq.to_string()),
+        ("epoch".to_string(), row.epoch.clone()),
+    ];
+    if let Some(d) = dataset_iri {
+        headers.push(("dataset".to_string(), d.to_string()));
+    }
+    if let Some(c) = &row.commit_iri {
+        headers.push(("commit".to_string(), c.clone()));
+    }
+    let mut ops: Vec<Op> = Vec::new();
+    let mut removed: Vec<QuadText> = decode_text(row.removed.as_deref())
+        .iter()
+        .map(QuadText::from_quad)
+        .collect();
+    let mut added: Vec<QuadText> = decode_text(row.added.as_deref())
+        .iter()
+        .map(QuadText::from_quad)
+        .collect();
+    let key = |q: &QuadText| format!("{} {} {}", q.s, q.p, q.o);
+    removed.sort_by_key(key);
+    added.sort_by_key(key);
+    ops.extend(removed.into_iter().map(Op::Delete));
+    ops.extend(added.into_iter().map(Op::Add));
+    Some(Patch {
+        headers,
+        prefixes: Vec::new(),
+        ops,
+        aborted: false,
+    })
+}
+
+/// The patch that undoes one change: [`change_patch`] inverted, with the
+/// deterministic id `urn:ots:change:{epoch}:{seq}:inverse`.
+pub fn change_inverse_patch(
+    row: &crate::store::changes::ChangeRow,
+    dataset_iri: Option<&str>,
+) -> Option<Patch> {
+    let forward = change_patch(row, dataset_iri)?;
+    let mut inverse = forward.inverse();
+    if let Some(id) = forward.id() {
+        inverse.headers[0].1 = format!("{id}:inverse");
+    }
+    Some(inverse)
 }
 
 // ── tokenizer ───────────────────────────────────────────────────────────────
@@ -100,6 +314,47 @@ fn tokenize(line: &str) -> Result<Vec<String>, String> {
         }
         let start = i;
         match c {
+            // A triple term `<<( s p o )>>`, possibly nested; IRIs and
+            // literals inside are skipped whole so a `>>` in them does not
+            // end it.
+            '<' if chars.get(i + 1) == Some(&'<') => {
+                let mut depth = 0usize;
+                loop {
+                    if i >= chars.len() {
+                        return Err("unterminated triple term".into());
+                    }
+                    match chars[i] {
+                        '<' if chars.get(i + 1) == Some(&'<') => {
+                            depth += 1;
+                            i += 2;
+                        }
+                        '>' if chars.get(i + 1) == Some(&'>') => {
+                            depth -= 1;
+                            i += 2;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        '<' => {
+                            while i < chars.len() && chars[i] != '>' {
+                                i += 1;
+                            }
+                            i += 1;
+                        }
+                        '"' => {
+                            i += 1;
+                            while i < chars.len() && chars[i] != '"' {
+                                if chars[i] == '\\' {
+                                    i += 1;
+                                }
+                                i += 1;
+                            }
+                            i += 1;
+                        }
+                        _ => i += 1,
+                    }
+                }
+            }
             '<' => {
                 while i < chars.len() && chars[i] != '>' {
                     i += 1;
@@ -241,6 +496,12 @@ fn canonical_term(
     ln: usize,
 ) -> Result<String, String> {
     let err = |e: String| format!("line {ln}: {what}: {e}");
+    if t.starts_with("<<") {
+        if !allow_literal {
+            return Err(err(format!("a triple term may only be an object ({t})")));
+        }
+        return triple_term(t, prefixes, ln);
+    }
     if is_iri(t) {
         return NamedNode::new(&t[1..t.len() - 1])
             .map(|n| n.to_string())
@@ -273,6 +534,37 @@ fn canonical_term(
     expand_prefixed(t, prefixes)
         .map(|n| n.to_string())
         .map_err(err)
+}
+
+/// An RDF 1.2 triple term `<<( s p o )>>` in canonical form, its inner terms
+/// checked like any other (a literal or triple term is only an object).
+fn triple_term(t: &str, prefixes: &[(String, String)], ln: usize) -> Result<String, String> {
+    if !cfg!(feature = "rdf-12") {
+        return Err(format!(
+            "line {ln}: triple terms need a build with RDF 1.2 support ({t})"
+        ));
+    }
+    let inner = t
+        .strip_prefix("<<(")
+        .and_then(|r| r.strip_suffix(")>>"))
+        .ok_or_else(|| format!("line {ln}: a triple term is written <<( s p o )>> ({t})"))?;
+    let toks = tokenize(inner).map_err(|e| format!("line {ln}: {e}"))?;
+    if toks.len() != 3 {
+        return Err(format!(
+            "line {ln}: a triple term holds a subject, a predicate and an object ({t})"
+        ));
+    }
+    let s = canonical_term(&toks[0], prefixes, true, false, "triple-term subject", ln)?;
+    let p = canonical_term(
+        &toks[1],
+        prefixes,
+        false,
+        false,
+        "triple-term predicate",
+        ln,
+    )?;
+    let o = canonical_term(&toks[2], prefixes, true, true, "triple-term object", ln)?;
+    Ok(format!("<<( {s} {p} {o} )>>"))
 }
 
 /// Parse a patch document.
@@ -353,9 +645,11 @@ pub fn parse(text: &str) -> Result<Patch, String> {
                 }
                 let delete = code == "D";
                 let px = &patch.prefixes;
-                let s = canonical_term(&args[0], px, !delete, false, "subject", ln)?;
+                // Blank nodes in a `D` line too: the apply removes quads
+                // through a transaction, which can name them.
+                let s = canonical_term(&args[0], px, true, false, "subject", ln)?;
                 let p = canonical_term(&args[1], px, false, false, "predicate", ln)?;
-                let o = canonical_term(&args[2], px, !delete, true, "object", ln)?;
+                let o = canonical_term(&args[2], px, true, true, "object", ln)?;
                 let g = if args.len() == 4 {
                     Some(canonical_term(&args[3], px, false, false, "graph", ln)?)
                 } else {
@@ -504,6 +798,10 @@ pub fn generate(
 type ApiErr = (StatusCode, String);
 
 /// POST /api/datasets/:id/patch — apply an RDF Patch to the dataset's graphs.
+///
+/// One transaction through the store's `apply_delta`: the net effect of the
+/// lines, recorded in the change log under one commit. `H base-digest`, when
+/// present, must equal the set hash of the graphs the patch names, else 412.
 pub async fn apply_patch_handler(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -588,32 +886,73 @@ pub async fn apply_patch_handler(
             graphs.push(iri);
         }
     }
-    let update = to_sparql_update(&patch);
+    let (to_add, to_remove) = patch
+        .net_quads()
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid RDF Patch: {e}")))?;
+    let expected = match patch.base_digest() {
+        Some(d) => Some(crate::store::set_hash::SetHash::from_hex(d).ok_or((
+            StatusCode::BAD_REQUEST,
+            "H base-digest must be a 64-digit hex set hash".to_string(),
+        ))?),
+        None => None,
+    };
     let (added, removed) = (patch.adds(), patch.deletes());
+    let stamp = crate::commit_log::CommitStamp::new(&state.base_url);
+    let ctx = crate::server::write_effects::context(
+        &state,
+        Some(&user),
+        crate::commit_log::CommitKind::Sparql,
+        &stamp,
+    );
     let st = state.clone();
     let gs = graphs.clone();
-    let update_text = update.clone();
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let before = crate::ldes::capture::before(&st, &gs);
-        st.store.update(&update_text).map_err(|e| e.to_string())?;
-        crate::ldes::capture::after(&st, before);
-        crate::entailment::after_write(&st, &gs);
-        Ok(())
-    })
+    let stamped = stamp.clone();
+    let (effective, written) = tokio::task::spawn_blocking(
+        move || -> Result<(crate::store::engine::QuadDelta, crate::server::write_effects::Written), ApiErr> {
+            if let Some(expected) = expected {
+                let actual = crate::store::set_hash::SetHash::of_graphs(&st.store, &gs);
+                if actual != expected {
+                    return Err((
+                        StatusCode::PRECONDITION_FAILED,
+                        format!(
+                            "H base-digest does not match: the graphs are now {}",
+                            actual.to_hex()
+                        ),
+                    ));
+                }
+            }
+            let ldes = crate::ldes::capture::Capture::begin(&st, &gs);
+            let applied = {
+                let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
+                st.store.apply_delta(&to_add, &to_remove, true)
+            };
+            let effective = applied.map_err(|e| match e {
+                crate::store::engine::StoreError::ReadOnly(_) => {
+                    (StatusCode::SERVICE_UNAVAILABLE, e.to_string())
+                }
+                other => (
+                    StatusCode::BAD_REQUEST,
+                    format!("applying the patch failed: {other}"),
+                ),
+            })?;
+            let written = crate::server::write_effects::Written::read(&st, &stamped);
+            ldes.finish(&st, &written.rows);
+            written.entailment(&st, &gs);
+            // The exact quads when the change log has them; else what was
+            // applied, which the apply itself returned.
+            if !written.sync_text_index(&st, &gs) {
+                #[cfg(feature = "text-search")]
+                st.text_index_apply_delta(&effective.0, &effective.1, &gs);
+            }
+            Ok((effective, written))
+        },
+    )
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("applying the patch failed: {e}"),
-        )
-    })?;
-    for g in &graphs {
-        crate::server::routes::sync_text_index_after_graph_write(&state, Some(g.clone())).await;
-    }
-    crate::commit_log::record(
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    crate::commit_log::record_stamped(
         &state.store,
         &state.base_url,
+        &stamp,
         crate::commit_log::CommitKind::Sparql,
         format!("RDF Patch {id}: +{added} −{removed}"),
         Some(&user.user_id),
@@ -627,12 +966,15 @@ pub async fn apply_patch_handler(
         removed,
         None,
     );
+    let seq_to = written.rows.iter().filter_map(|r| r.seq).max();
     Ok(Json(serde_json::json!({
         "applied": true,
         "id": id,
         "aborted": false,
         "added": added,
         "removed": removed,
+        "effective": { "added": effective.0.len(), "removed": effective.1.len() },
+        "seq": seq_to,
         "graphs": graphs,
     })))
 }
@@ -673,8 +1015,134 @@ mod tests {
     }
 
     #[test]
-    fn rejects_blank_node_deletes_unknown_codes_and_open_transactions() {
-        assert!(parse("TX .\nD _:b <urn:p> <urn:o> <urn:g> .\nTC .\n")
+    #[cfg(feature = "rdf-12")]
+    fn triple_terms_tokenize_and_round_trip() {
+        let p = parse(
+            "TX .\nA <urn:r> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( <urn:s> <urn:p> \"a >> b\" )>> <urn:g> .\nTC .\n",
+        )
+        .unwrap();
+        let Op::Add(q) = &p.ops[0] else { panic!() };
+        assert_eq!(q.o, "<<( <urn:s> <urn:p> \"a >> b\" )>>");
+        let quad = q.to_quad().unwrap();
+        assert!(matches!(quad.object, oxigraph::model::Term::Triple(_)));
+        // Back through the renderer and the parser: the same quad.
+        let again = parse(&p.render()).unwrap();
+        let Op::Add(q2) = &again.ops[0] else { panic!() };
+        assert_eq!(q2.to_quad().unwrap(), quad);
+        // A triple term is only ever an object.
+        assert!(
+            parse("TX .\nA <<( <urn:s> <urn:p> <urn:o> )>> <urn:p> <urn:o> <urn:g> .\nTC .\n")
+                .unwrap_err()
+                .contains("only be an object")
+        );
+        assert!(parse("TX .\nA <urn:s> <urn:p> <<( <urn:s> <urn:p> .\nTC .\n").is_err());
+    }
+
+    #[test]
+    fn the_last_line_on_a_quad_decides_its_net_effect() {
+        let p = parse(
+            "TX .\n\
+             A <urn:a> <urn:p> <urn:o> <urn:g> .\n\
+             D <urn:a> <urn:p> <urn:o> <urn:g> .\n\
+             D <urn:b> <urn:p> <urn:o> <urn:g> .\n\
+             A <urn:b> <urn:p> <urn:o> <urn:g> .\n\
+             D <urn:c> <urn:p> <urn:o> <urn:g> .\n\
+             TC .\n",
+        )
+        .unwrap();
+        let (add, remove) = p.net_quads().unwrap();
+        let s = |qs: &[Quad]| -> Vec<String> { qs.iter().map(|q| q.subject.to_string()).collect() };
+        assert_eq!(s(&add), vec!["<urn:b>"]);
+        assert_eq!(s(&remove), vec!["<urn:a>", "<urn:c>"]);
+    }
+
+    #[test]
+    fn an_inverse_swaps_and_reverses_and_names_its_forward_patch() {
+        let p = parse(
+            "H id <urn:uuid:1> .\nH base-digest \"00\" .\nTX .\nD <urn:a> <urn:p> <urn:o> <urn:g> .\nA <urn:b> <urn:p> <urn:o> <urn:g> .\nTC .\n",
+        )
+        .unwrap();
+        let inv = p.inverse();
+        assert_ne!(inv.id(), Some("urn:uuid:1"));
+        assert_eq!(inv.header("prev"), Some("urn:uuid:1"));
+        assert_eq!(
+            inv.base_digest(),
+            None,
+            "the forward base is not the inverse's"
+        );
+        match (&inv.ops[0], &inv.ops[1]) {
+            (Op::Delete(d), Op::Add(a)) => {
+                assert_eq!(d.s, "<urn:b>");
+                assert_eq!(a.s, "<urn:a>");
+            }
+            other => panic!("{other:?}"),
+        }
+        let text = inv.render();
+        assert!(text.contains("H prev <urn:uuid:1> .\n"), "{text}");
+        assert_eq!(parse(&text).unwrap().ops, inv.ops);
+    }
+
+    #[test]
+    fn a_change_row_is_a_patch_with_its_place_in_the_log() {
+        use crate::store::changes::{ChangeRow, Extent, State};
+        let row = ChangeRow {
+            row: 1,
+            seq: Some(42),
+            epoch: "ep".into(),
+            txn: "t".into(),
+            scope: "graph".into(),
+            graph_iri: Some("urn:g".into()),
+            origin: "update".into(),
+            kind: Some("sparql".into()),
+            commit_iri: Some("http://x/commit/c1".into()),
+            actor_iri: None,
+            extent: Extent::Full,
+            added: Some("<urn:b> <urn:p> _:x1 <urn:g> .\n".into()),
+            removed: Some("<urn:a> <urn:p> <urn:o> <urn:g> .\n".into()),
+            added_n: 1,
+            removed_n: 1,
+            post_count: Some(1),
+            has_bnode: true,
+            state: State::Committed,
+            created_at: "now".into(),
+        };
+        let p = change_patch(&row, Some("http://x/dataset/d")).unwrap();
+        assert_eq!(p.id(), Some("urn:ots:change:ep:42"));
+        let text = p.render();
+        for h in [
+            "H seq \"42\" .",
+            "H epoch \"ep\" .",
+            "H dataset <http://x/dataset/d> .",
+            "H commit <http://x/commit/c1> .",
+        ] {
+            assert!(text.contains(h), "{h} in {text}");
+        }
+        assert!(
+            text.contains(
+                "D <urn:a> <urn:p> <urn:o> <urn:g> .\nA <urn:b> <urn:p> _:x1 <urn:g> .\n"
+            ),
+            "{text}"
+        );
+        let inv = change_inverse_patch(&row, None).unwrap();
+        assert_eq!(inv.id(), Some("urn:ots:change:ep:42:inverse"));
+        let back = parse(&inv.render()).unwrap();
+        let (add, remove) = back.net_quads().unwrap();
+        assert_eq!(add[0].subject.to_string(), "<urn:a>");
+        assert_eq!(remove[0].subject.to_string(), "<urn:b>");
+        // No quads, no patch.
+        let mut counts = row.clone();
+        counts.extent = Extent::Counts;
+        assert!(change_patch(&counts, None).is_none());
+    }
+
+    #[test]
+    fn accepts_blank_node_deletes_and_rejects_unknown_codes_and_open_transactions() {
+        // A `D` line may name a blank node: the apply removes quads through
+        // a transaction, which can (a SPARQL `DELETE DATA` could not).
+        let p = parse("TX .\nD _:b <urn:p> <urn:o> <urn:g> .\nTC .\n").unwrap();
+        assert_eq!(p.deletes(), 1);
+        // A blank node still cannot be a predicate or a graph.
+        assert!(parse("TX .\nD <urn:s> _:p <urn:o> <urn:g> .\nTC .\n")
             .unwrap_err()
             .contains("blank node"));
         assert!(parse("X .\n").unwrap_err().contains("unknown code"));

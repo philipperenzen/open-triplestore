@@ -611,6 +611,11 @@ fn pipeline_covers_graph(
     graph_iri: &str,
     dataset_id: Option<&str>,
 ) -> bool {
+    // A statement-provenance graph holds annotations about the data, written
+    // by the server behind each write: never gated (delta note §6.3).
+    if crate::provenance::is_any_statement_provenance_graph(graph_iri) {
+        return false;
+    }
     let scope = gated_scope(p);
     scope.graphs.contains(graph_iri) || dataset_id.is_some_and(|ds| scope.datasets.contains(ds))
 }

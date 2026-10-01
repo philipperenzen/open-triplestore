@@ -40,6 +40,25 @@ pub fn owner_iri(base_url: &str, ds: &Dataset) -> String {
     }
 }
 
+/// The graph a dataset's statement-level provenance goes to, when it opts in
+/// (delta note §6.3): one per dataset, registered with the Provenance role.
+pub fn statement_provenance_graph(dataset_id: &str) -> String {
+    format!("urn:ots:statement-provenance:{dataset_id}")
+}
+
+/// Whether `graph` is `dataset_id`'s statement-provenance graph.
+pub fn is_statement_provenance_graph(dataset_id: &str, graph: &str) -> bool {
+    graph == statement_provenance_graph(dataset_id)
+}
+
+/// Whether `graph` is any dataset's statement-provenance graph: annotations
+/// about data, never data themselves — no reasoner premise, no gate, no LDES
+/// member, no version content, and left out of browsing unless asked for
+/// (delta note §6.3).
+pub fn is_any_statement_provenance_graph(graph: &str) -> bool {
+    graph.starts_with("urn:ots:statement-provenance:")
+}
+
 /// The dataset's PROV-O trail as Turtle.
 pub fn dataset_provenance_turtle(state: &AppState, ds: &Dataset) -> String {
     let base = state.base_url.trim_end_matches('/');

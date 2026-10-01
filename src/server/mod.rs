@@ -22,6 +22,7 @@ pub mod routes;
 mod security_regression_tests;
 #[cfg(test)]
 mod security_tests;
+pub(crate) mod write_effects;
 
 #[cfg(feature = "text-search")]
 use crate::text_search::TextIndex;
@@ -1223,10 +1224,6 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(crate::property_states::as_of),
         )
         .route(
-            "/api/datasets/:dataset_id/patch",
-            post(crate::rdf_patch::apply_patch_handler),
-        )
-        .route(
             "/api/datasets/:dataset_id/entailment",
             get(crate::entailment::get_entailment).put(crate::entailment::put_entailment),
         )
@@ -1267,6 +1264,13 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
 
     // Dataset routes that have no conflicting public variant (auth required for all methods)
     let dataset_protected_routes = Router::new()
+        // RDF Patch apply. It declares an authenticated user, so it lives here:
+        // under optional_auth an anonymous POST reached the handler and failed
+        // its extractor with a 500 instead of a 401.
+        .route(
+            "/api/datasets/:dataset_id/patch",
+            post(crate::rdf_patch::apply_patch_handler),
+        )
         .route(
             "/api/datasets/:dataset_id/shacl",
             put(handlers::update_dataset_shacl),
@@ -2474,6 +2478,33 @@ pub async fn run(
             }
         });
     }
+    // Delta versions: drop builds unused for their time-to-live (all expired
+    // ones in one store write), and now and then release the change-log pins
+    // of versions the registry no longer holds (delta note §3.3, §2.5).
+    {
+        let st = state.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(std::time::Duration::from_secs(30));
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut ticks: u64 = 0;
+            loop {
+                every.tick().await;
+                ticks += 1;
+                if !st.store.changes().readable() || st.store.replication().read_only() {
+                    continue;
+                }
+                let s = st.clone();
+                let reconcile = ticks % 20 == 0;
+                let _ = tokio::task::spawn_blocking(move || {
+                    crate::dataset_versions::materialise::sweep(&s.store);
+                    if reconcile {
+                        crate::dataset_versions::materialise::reconcile_pins(&s.store);
+                    }
+                })
+                .await;
+            }
+        });
+    }
 
     // Compile-time plugins (src/plugins.rs): on_boot + any background task,
     // once per process. A no-op with zero `plugin-*` features enabled.
@@ -2571,6 +2602,26 @@ pub async fn run(
             state.auth_db.clone(),
             state.base_url.to_string(),
         );
+        // Change-log consumers, every few seconds (no-ops while change
+        // capture is off): write-triggered pipelines and statement provenance.
+        {
+            let st = state.clone();
+            tokio::spawn(async move {
+                let mut every = tokio::time::interval(std::time::Duration::from_secs(5));
+                every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    every.tick().await;
+                    if !st.store.changes().enabled() || st.store.replication().read_only() {
+                        continue;
+                    }
+                    let s = st.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        crate::shacl_studio::trigger::tick(&s.store, &s.auth_db, &s.base_url);
+                    })
+                    .await;
+                }
+            });
+        }
         // A Raft cluster member boots as a follower and skips the boot seed,
         // so the one-time release of dataset claims on model-registry graphs
         // runs here instead, once this member leads (the marker it sets on the

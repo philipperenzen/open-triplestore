@@ -789,6 +789,20 @@ async fn run_core(
     let req = VersionRequest::parse(version.as_deref());
     let uid = user.map(|u| u.user_id.as_str());
     let prep = exec::prepare_run(state, &sq_store, &sq, uid, &provided, &req)?;
+    // The resolved version may be a delta whose graphs are built on demand.
+    if let (Some(label), crate::saved_queries::models::QueryScope::Dataset) =
+        (prep.version_label.as_deref(), &sq.scope)
+    {
+        if let Some(record) = crate::dataset_versions::registry::get_version(
+            &state.store,
+            &state.base_url,
+            &sq.owner_id,
+            label,
+        ) {
+            crate::dataset_versions::materialise::ensure_built(state, &record, uid.is_none())
+                .await?;
+        }
+    }
     let mut result = routes::run_scoped_sparql(state, &prep.query, &prep.graphs, accept).await;
 
     // Tell the caller which dataset version actually served the response.

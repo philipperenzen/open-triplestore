@@ -188,6 +188,213 @@ pub fn after(state: &AppState, before: Before) -> usize {
     written
 }
 
+/// How a write handler captures LDES members: from the change log's rows
+/// when the log records the write — no graph is scanned (delta note §2.6) —
+/// else by indexing the tracked graphs before and after ([`before`] /
+/// [`after`]).
+pub enum Capture {
+    /// The log records this write; `graphs` are the tracked ones among the
+    /// write's targets, with their dataset.
+    Rows(Vec<(String, String)>),
+    Scan(Before),
+}
+
+impl Capture {
+    /// Start capturing a write to `graphs`. Off the async runtime: the scan
+    /// fallback reads every tracked graph.
+    pub fn begin(state: &AppState, graphs: &[String]) -> Capture {
+        if state.store.changes().enabled() {
+            match crate::ldes::store::tracked(&state.auth_db, graphs) {
+                Ok(t) => Capture::Rows(t),
+                Err(e) => {
+                    tracing::warn!("ldes: tracked-graph lookup failed: {e}");
+                    Capture::Rows(Vec::new())
+                }
+            }
+        } else {
+            Capture::Scan(before(state, graphs))
+        }
+    }
+
+    /// Publish what the write changed. `rows` are the write's own rows
+    /// (`ChangeLog::rows_for_commit`); empty when the log did not record it
+    /// after all, in which case every tracked graph is republished whole —
+    /// correct, if not cheap. Returns the members written.
+    pub fn finish(self, state: &AppState, rows: &[crate::store::changes::ChangeRow]) -> usize {
+        match self {
+            Capture::Scan(b) => after(state, b),
+            Capture::Rows(tracked) => after_rows(state, &tracked, rows),
+        }
+    }
+}
+
+/// `OTS_LDES_BNODE_DEPTH` (default 8): how far up a blank-node tree the
+/// owner of a changed blank-node subject is looked for.
+fn bnode_depth() -> usize {
+    std::env::var("OTS_LDES_BNODE_DEPTH")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(8)
+}
+
+/// `OTS_LDES_BNODE_SUBJECTS_MAX` (default 10 000): above this many
+/// blank-node subjects in one graph's rows the graph is republished whole
+/// instead of walking each one up to its owner.
+fn bnode_subjects_max() -> usize {
+    std::env::var("OTS_LDES_BNODE_SUBJECTS_MAX")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(10_000)
+}
+
+/// The IRI entity a blank node hangs from in `graph`: up the tree through
+/// the store as it is now, and through the quads the write removed (a link
+/// the write cut is still the owner it changed). `None` for an orphan.
+fn bnode_owner(
+    store: &TripleStore,
+    graph: NamedNodeRef<'_>,
+    bnode: &oxigraph::model::BlankNode,
+    removed: &[Quad],
+    depth: usize,
+) -> Option<String> {
+    let mut current = bnode.clone();
+    for _ in 0..depth {
+        let parent: Option<NamedOrBlankNode> = store
+            .store()
+            .quads_for_pattern(
+                None,
+                None,
+                Some(oxigraph::model::TermRef::BlankNode(current.as_ref())),
+                Some(GraphNameRef::NamedNode(graph)),
+            )
+            .flatten()
+            .map(|q| q.subject)
+            .next()
+            .or_else(|| {
+                removed
+                    .iter()
+                    .find(|q| matches!(&q.object, Term::BlankNode(b) if *b == current))
+                    .map(|q| q.subject.clone())
+            });
+        match parent? {
+            NamedOrBlankNode::NamedNode(n) => return Some(n.as_str().to_string()),
+            NamedOrBlankNode::BlankNode(b) => current = b,
+        }
+    }
+    None
+}
+
+/// Members from a write's rows: every IRI subject a row added or removed a
+/// quad of, plus the owner of every changed blank-node subtree, becomes a
+/// member carrying its current description — or a tombstone when nothing of
+/// it is left in the graph. A graph whose rows do not carry their quads (a
+/// change over the payload cap, or one the log could not bound) is
+/// republished whole, as is one with more blank-node subjects than
+/// `OTS_LDES_BNODE_SUBJECTS_MAX`.
+pub fn after_rows(
+    state: &AppState,
+    tracked: &[(String, String)],
+    rows: &[crate::store::changes::ChangeRow],
+) -> usize {
+    use crate::store::changes::{decode_text, Extent};
+    if tracked.is_empty() {
+        return 0;
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut written = 0;
+    let mut touched: HashSet<String> = HashSet::new();
+    let store_scoped = rows.iter().any(|r| r.scope == "store");
+    for (graph, dataset) in tracked {
+        let mine: Vec<&crate::store::changes::ChangeRow> = rows
+            .iter()
+            .filter(|r| r.graph_iri.as_deref() == Some(graph.as_str()))
+            .collect();
+        let whole =
+            store_scoped || mine.is_empty() || mine.iter().any(|r| r.extent != Extent::Full);
+        let Ok(g) = NamedNodeRef::new(graph) else {
+            continue;
+        };
+        let mut entities: HashSet<String> = HashSet::new();
+        let mut blank_subjects = 0usize;
+        let mut republish = whole;
+        if !republish {
+            let removed: Vec<Quad> = mine
+                .iter()
+                .flat_map(|r| decode_text(r.removed.as_deref()))
+                .collect();
+            let added: Vec<Quad> = mine
+                .iter()
+                .flat_map(|r| decode_text(r.added.as_deref()))
+                .collect();
+            let max = bnode_subjects_max();
+            let depth = bnode_depth();
+            for q in added.iter().chain(removed.iter()) {
+                match &q.subject {
+                    NamedOrBlankNode::NamedNode(s) => {
+                        entities.insert(s.as_str().to_string());
+                    }
+                    NamedOrBlankNode::BlankNode(b) => {
+                        blank_subjects += 1;
+                        if blank_subjects > max {
+                            republish = true;
+                            break;
+                        }
+                        if let Some(owner) = bnode_owner(&state.store, g, b, &removed, depth) {
+                            entities.insert(owner);
+                        }
+                    }
+                }
+            }
+        }
+        if republish {
+            written += publish_all(state, dataset, std::slice::from_ref(graph));
+            continue;
+        }
+        let mut entities: Vec<String> = entities.into_iter().collect();
+        entities.sort();
+        for entity in entities {
+            let Ok(e) = NamedNodeRef::new(&entity) else {
+                continue;
+            };
+            let present = state
+                .store
+                .store()
+                .quads_for_pattern(
+                    Some(oxigraph::model::NamedOrBlankNodeRef::NamedNode(e)),
+                    None,
+                    None,
+                    Some(GraphNameRef::NamedNode(g)),
+                )
+                .next()
+                .is_some();
+            let (deleted, nt) = if present {
+                (false, describe_entity(&state.store, graph, &entity))
+            } else {
+                (true, String::new())
+            };
+            match crate::ldes::store::insert_member(
+                &state.auth_db,
+                dataset,
+                &entity,
+                graph,
+                &now,
+                deleted,
+                &nt,
+            ) {
+                Ok(_) => {
+                    written += 1;
+                    touched.insert(dataset.clone());
+                }
+                Err(e) => tracing::warn!("ldes: member insert failed for <{entity}>: {e}"),
+            }
+        }
+    }
+    for dataset in &touched {
+        settle(state, dataset, false);
+    }
+    written
+}
+
 /// Publish every entity of `graphs` as a member (initial publish when a
 /// stream is enabled, and after a bulk import). Only applies when the dataset
 /// has an enabled stream; graphs the dataset marks private are skipped.
@@ -209,7 +416,11 @@ pub fn publish_all(state: &AppState, dataset_id: &str, graphs: &[String]) -> usi
     };
     let now = chrono::Utc::now().to_rfc3339();
     let mut written = 0;
-    for graph in graphs.iter().filter(|g| !private.contains(*g)) {
+    for graph in graphs
+        .iter()
+        .filter(|g| !private.contains(*g))
+        .filter(|g| !crate::provenance::is_any_statement_provenance_graph(g))
+    {
         let idx = subject_index(&state.store, graph);
         let mut entities: Vec<&String> = idx.keys().collect();
         entities.sort();

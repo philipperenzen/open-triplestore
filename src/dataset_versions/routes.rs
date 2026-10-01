@@ -89,4 +89,14 @@ pub fn dataset_version_auth_routes() -> Router<AppState> {
             "/api/datasets/:dataset_id/branches",
             post(handlers::create_branch),
         )
+        // A consumer's named position in the dataset's change feed.
+        .route(
+            "/api/datasets/:dataset_id/changes/cursors/:name",
+            axum::routing::put(crate::dataset_changes::put_cursor)
+                .delete(crate::dataset_changes::delete_cursor),
+        )
+        .route(
+            "/api/admin/versions/sweep",
+            post(handlers::admin_sweep_orphans),
+        )
 }

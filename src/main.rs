@@ -17,6 +17,7 @@ mod commit_log;
 mod conformance;
 mod containers;
 mod data_models;
+mod dataset_changes;
 mod dataset_versions;
 mod dcat;
 mod docs;

@@ -87,6 +87,83 @@ pub fn record(
     }
 }
 
+/// A commit whose identity exists before its write runs. The handler puts
+/// [`CommitStamp::commit_iri`] into the write's change-log context, so every
+/// row the write produces carries it; recording the commit afterwards with
+/// [`record_stamped`] then points the commit at exactly those rows —
+/// `ver:seqFrom` / `ver:seqTo` and the net counts (delta note §7). It is also
+/// how the handler reads back what its own write changed
+/// (`ChangeLog::rows_for_commit`).
+#[derive(Debug, Clone)]
+pub struct CommitStamp {
+    pub commit_id: String,
+    pub commit_iri: String,
+}
+
+impl CommitStamp {
+    pub fn new(base_url: &str) -> Self {
+        let commit_id = uuid::Uuid::new_v4().to_string();
+        let commit_iri = format!("{}/commit/{commit_id}", base_url.trim_end_matches('/'));
+        Self {
+            commit_id,
+            commit_iri,
+        }
+    }
+}
+
+/// As [`record`], for a write that ran under `stamp`: the commit takes the
+/// stamp's id and, when the change log recorded the write, the sequence
+/// range of its rows and their net counts. `added` / `removed` keep their
+/// per-path meaning (delta note §8.5 Q4).
+#[allow(clippy::too_many_arguments)]
+pub fn record_stamped(
+    store: &TripleStore,
+    base_url: &str,
+    stamp: &CommitStamp,
+    kind: CommitKind,
+    message: impl Into<String>,
+    actor_user_id: Option<&str>,
+    subject_iri: Option<String>,
+    affected_graphs: Vec<String>,
+    added: usize,
+    removed: usize,
+    version: Option<String>,
+) {
+    let mut rec = CommitRecord::new(kind, message);
+    rec.commit_id = stamp.commit_id.clone();
+    rec.actor_iri = actor_user_id.map(|u| format!("{}/users/{u}", base_url.trim_end_matches('/')));
+    rec.subject_iri = subject_iri;
+    rec.affected_graphs = affected_graphs;
+    rec.added = added;
+    rec.removed = removed;
+    rec.version = version;
+    stamp_sequence(store, &stamp.commit_iri, &mut rec);
+    if let Err(e) = insert_commit(store, base_url, &rec) {
+        tracing::warn!("failed to record {} commit: {e}", rec.kind.as_str());
+    }
+}
+
+/// Fill a commit's sequence range and net counts from the rows its write
+/// stamped; nothing when the log did not record the write. Net counts only
+/// when every row knows its delta.
+pub fn stamp_sequence(store: &TripleStore, commit_iri: &str, rec: &mut CommitRecord) {
+    let rows = store.changes().rows_for_commit(commit_iri);
+    let seqs: Vec<i64> = rows.iter().filter_map(|r| r.seq).collect();
+    let (Some(from), Some(to)) = (seqs.iter().min(), seqs.iter().max()) else {
+        return;
+    };
+    rec.seq_from = Some(*from);
+    rec.seq_to = Some(*to);
+    if rows
+        .iter()
+        .all(|r| r.extent != crate::store::changes::Extent::Unknown)
+    {
+        rec.net_added = Some(rows.iter().map(|r| r.added_n).sum());
+        rec.net_removed = Some(rows.iter().map(|r| r.removed_n).sum());
+    }
+    store.changes().note_first_seq_commit(commit_iri);
+}
+
 /// A single commit in the trail.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitRecord {
@@ -120,6 +197,21 @@ pub struct CommitRecord {
     pub parent_revision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
+    /// First and last change-log sequence number of the commit's write
+    /// (`ver:seqFrom` / `ver:seqTo`). Absent for a write the log did not
+    /// record, and on every commit made before the log existed — those are
+    /// ordered by `created_at`, later ones by `seq_to`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq_from: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq_to: Option<i64>,
+    /// Quads the write actually added / removed, net, from its rows. Unlike
+    /// `added` / `removed`, whose meaning differs per path, these always
+    /// mean the same thing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net_added: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net_removed: Option<i64>,
 }
 
 impl CommitRecord {
@@ -142,6 +234,10 @@ impl CommitRecord {
             removed: 0,
             parent_revision: None,
             revision: None,
+            seq_from: None,
+            seq_to: None,
+            net_added: None,
+            net_removed: None,
         }
     }
 }
@@ -210,6 +306,20 @@ pub fn insert_commit(
     }
     if let Some(m) = &rec.metadata {
         lines.push(format!("    ver:metadata \"{}\" ;", esc(&m.to_string())));
+    }
+    // The pointer into the change log's sequence (delta note §2.3: one
+    // literal per end, never the delta itself).
+    if let Some(n) = rec.seq_from {
+        lines.push(format!("    ver:seqFrom \"{n}\"^^xsd:integer ;"));
+    }
+    if let Some(n) = rec.seq_to {
+        lines.push(format!("    ver:seqTo \"{n}\"^^xsd:integer ;"));
+    }
+    if let Some(n) = rec.net_added {
+        lines.push(format!("    ver:netAdded \"{n}\"^^xsd:integer ;"));
+    }
+    if let Some(n) = rec.net_removed {
+        lines.push(format!("    ver:netRemoved \"{n}\"^^xsd:integer ;"));
     }
     for g in &rec.affected_graphs {
         lines.push(format!(
@@ -374,6 +484,10 @@ pub fn list_commits(
         OPTIONAL { ?c ver:kind ?kind }
         OPTIONAL { ?c ver:metadata ?meta }
         OPTIONAL { ?c ver:affectedGraph ?ag }
+        OPTIONAL { ?c ver:seqFrom ?seqFrom }
+        OPTIONAL { ?c ver:seqTo ?seqTo }
+        OPTIONAL { ?c ver:netAdded ?netAdded }
+        OPTIONAL { ?c ver:netRemoved ?netRemoved }
     "#;
 
     let where_block = where_lines.join("\n            ");
@@ -386,6 +500,7 @@ pub fn list_commits(
         PREFIX prov: <{PROV}>
         PREFIX rdfs: <{RDFS}>
         SELECT DISTINCT ?c ?created ?actor ?msg ?subject ?version ?branch ?added ?removed ?parent ?rev ?kind ?meta
+               ?seqFrom ?seqTo ?netAdded ?netRemoved
                (GROUP_CONCAT(DISTINCT STR(?ag); separator=" ") AS ?graphs)
         WHERE {{
           GRAPH <{COMMIT_GRAPH}> {{
@@ -394,6 +509,7 @@ pub fn list_commits(
           }}
         }}
         GROUP BY ?c ?created ?actor ?msg ?subject ?version ?branch ?added ?removed ?parent ?rev ?kind ?meta
+                 ?seqFrom ?seqTo ?netAdded ?netRemoved
         ORDER BY DESC(?created)
         {limit_clause}
         "#
@@ -423,6 +539,7 @@ pub fn list_commits(
                 Some("graph-store") => CommitKind::GraphStore,
                 Some("import") => CommitKind::Import,
                 Some("backup") => CommitKind::Backup,
+                Some("source") => CommitKind::Source,
                 _ => CommitKind::DataModel,
             };
             let metadata =
@@ -455,6 +572,10 @@ pub fn list_commits(
                 removed: g("removed").and_then(|s| s.parse().ok()).unwrap_or(0),
                 parent_revision: g("parent"),
                 revision: g("rev"),
+                seq_from: g("seqFrom").and_then(|s| s.parse().ok()),
+                seq_to: g("seqTo").and_then(|s| s.parse().ok()),
+                net_added: g("netAdded").and_then(|s| s.parse().ok()),
+                net_removed: g("netRemoved").and_then(|s| s.parse().ok()),
             });
         }
     }

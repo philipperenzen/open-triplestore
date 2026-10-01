@@ -36,6 +36,20 @@ fn version_iri(base_url: &str, dataset_id: &str, version: &str) -> String {
     format!("{base_url}/dataset/{dataset_id}/version/{version}")
 }
 
+/// Suffixes a version's own graphs use beside its snapshots: a source graph
+/// slugifying to one of these is disambiguated, or its snapshot would be the
+/// version's validation graph (`shacl_studio::bindings::version_validation_graph`)
+/// and the bindings snapshot would wipe it.
+const RESERVED_SUFFIXES: &[&str] = &["validation"];
+
+/// A fresh suffix tracker with the reserved suffixes already taken.
+fn suffix_tracker() -> HashMap<String, usize> {
+    RESERVED_SUFFIXES
+        .iter()
+        .map(|s| (s.to_string(), 1))
+        .collect()
+}
+
 /// Ensure snapshot suffixes are unique even when two source graphs slugify to
 /// the same value (disambiguate with an index suffix).
 fn unique_suffix(used: &mut HashMap<String, usize>, base: &str) -> String {
@@ -84,6 +98,27 @@ fn copy_graph(store: &TripleStore, from: &str, to: &str) -> Result<usize, StoreE
     Ok(copied)
 }
 
+/// The snapshot graph each source graph of a version maps to:
+/// `{base}/dataset/{id}/version/{ver}/{slug}`. Deterministic — the same for a
+/// checkpoint that copies into them now and a delta that builds them later
+/// (delta note §3.1).
+pub fn mapping(
+    base_url: &str,
+    dataset_id: &str,
+    version: &str,
+    source_graphs: &[String],
+) -> Vec<GraphMapping> {
+    let ver_iri = version_iri(base_url, dataset_id, version);
+    let mut used = suffix_tracker();
+    source_graphs
+        .iter()
+        .map(|src| {
+            let suffix = unique_suffix(&mut used, &slugify_last_segment(src));
+            GraphMapping::new(format!("{ver_iri}/{suffix}"), src.clone())
+        })
+        .collect()
+}
+
 pub fn snapshot_graphs(
     store: &TripleStore,
     base_url: &str,
@@ -91,29 +126,62 @@ pub fn snapshot_graphs(
     version: &str,
     source_graphs: &[String],
 ) -> Result<Vec<GraphMapping>, StoreError> {
-    let ver_iri = version_iri(base_url, dataset_id, version);
-    let mut used: HashMap<String, usize> = HashMap::new();
+    let mut mappings = mapping(base_url, dataset_id, version, source_graphs);
+    copy_into(store, &mut mappings)?;
+    Ok(mappings)
+}
 
-    let mut mappings: Vec<GraphMapping> = Vec::new();
-    for src in source_graphs {
-        let suffix = unique_suffix(&mut used, &slugify_last_segment(src));
-        let snap = format!("{ver_iri}/{suffix}");
-        mappings.push(GraphMapping {
-            snapshot_graph: snap,
-            source_graph: src.clone(),
-        });
-    }
-
-    // Clear snapshot targets first (idempotent on retry).
+/// Copy each mapping's source graph into its snapshot graph (cleared first,
+/// idempotent on retry), recording per graph the set hash of the content —
+/// under the source graph — and its quad count.
+pub fn copy_into(store: &TripleStore, mappings: &mut [GraphMapping]) -> Result<(), StoreError> {
     let snap_iris: Vec<String> = mappings.iter().map(|m| m.snapshot_graph.clone()).collect();
     let snap_refs: Vec<&str> = snap_iris.iter().map(|s| s.as_str()).collect();
     store.bulk_delete_graphs(&snap_refs)?;
-
-    // Copy each source graph into its snapshot graph, streaming.
-    for m in &mappings {
-        copy_graph(store, &m.source_graph, &m.snapshot_graph)?;
+    for m in mappings.iter_mut() {
+        let (n, hash) =
+            copy_graph_hashed(store, &m.source_graph, &m.snapshot_graph, &m.source_graph)?;
+        m.quad_count = Some(n as i64);
+        m.content_hash = Some(hash.to_hex());
     }
-    Ok(mappings)
+    Ok(())
+}
+
+/// As [`copy_graph`], hashing every copied quad under `hash_as` on the way.
+pub fn copy_graph_hashed(
+    store: &TripleStore,
+    from: &str,
+    to: &str,
+    hash_as: &str,
+) -> Result<(usize, crate::store::set_hash::SetHash), StoreError> {
+    const BATCH: usize = 50_000;
+    let target = GraphName::NamedNode(
+        NamedNode::new(to).map_err(|e| StoreError::Parse(format!("Invalid IRI: {e}")))?,
+    );
+    let src =
+        NamedNodeRef::new(from).map_err(|e| StoreError::Parse(format!("Invalid IRI: {e}")))?;
+    let affected = vec![to.to_string()];
+    let mut hash = crate::store::set_hash::SetHash::new();
+    let mut batch: Vec<Quad> = Vec::with_capacity(BATCH);
+    let mut copied = 0usize;
+    for q in store
+        .store()
+        .quads_for_pattern(None, None, None, Some(GraphNameRef::NamedNode(src)))
+    {
+        let q = q?;
+        hash.add_quad(&q, Some(hash_as));
+        batch.push(Quad::new(q.subject, q.predicate, q.object, target.clone()));
+        if batch.len() >= BATCH {
+            copied += batch.len();
+            store.bulk_insert_quads(std::mem::take(&mut batch), &affected)?;
+            batch.reserve(BATCH);
+        }
+    }
+    if !batch.is_empty() {
+        copied += batch.len();
+        store.bulk_insert_quads(batch, &affected)?;
+    }
+    Ok((copied, hash))
 }
 
 /// Clone an existing version's snapshot graphs into a new version (used for
@@ -127,16 +195,17 @@ pub fn clone_version(
     target_version: &str,
 ) -> Result<Vec<GraphMapping>, StoreError> {
     let ver_iri = version_iri(base_url, dataset_id, target_version);
-    let mut used: HashMap<String, usize> = HashMap::new();
+    let mut used = suffix_tracker();
 
     let mut new_map: Vec<GraphMapping> = Vec::new();
     for m in source_map {
         let suffix = unique_suffix(&mut used, &slugify_last_segment(&m.snapshot_graph));
         let snap = format!("{ver_iri}/{suffix}");
-        new_map.push(GraphMapping {
-            snapshot_graph: snap,
-            source_graph: m.source_graph.clone(),
-        });
+        // The same content as the version it clones: its hash and count too.
+        let mut cloned = GraphMapping::new(snap, m.source_graph.clone());
+        cloned.content_hash = m.content_hash.clone();
+        cloned.quad_count = m.quad_count;
+        new_map.push(cloned);
     }
 
     let new_iris: Vec<String> = new_map.iter().map(|m| m.snapshot_graph.clone()).collect();

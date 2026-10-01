@@ -1,6 +1,9 @@
 //! RDF Patch (7.5): a version diff is served as a patch, and a patch applies
 //! to another dataset atomically as one commit — with the guards a dataset
-//! patch needs (registered graphs only, no blank-node deletes, TA aborts).
+//! patch needs (registered graphs only, TA aborts). A `D` line may name a
+//! blank node: the apply removes quads through a transaction, and a label the
+//! store exported addresses the stored node (a hand-written one matches
+//! nothing).
 
 mod common;
 
@@ -267,8 +270,10 @@ async fn version_diff_as_patch_applies_to_another_dataset() {
         &format!("TX .\nD _:b <urn:p> \"y\" <{G2}> .\nTC .\n"),
     )
     .await;
-    assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
-    assert!(txt.contains("blank node"), "{txt}");
+    // Accepted, and a no-op: a hand-written label names no stored node.
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let r: Value = serde_json::from_str(&txt).unwrap();
+    assert_eq!(r["effective"]["removed"], 0, "{txt}");
     let (st, _, txt) = req(
         &app,
         Method::POST,
@@ -403,4 +408,163 @@ async fn patch_rejects_undeclared_and_malformed_prefixed_names() {
     assert!(ask(&format!(
         "ASK {{ GRAPH <{G2}> {{ <http://example.org/s> <http://example.org/p> <http://example.org/o-1.v2> }} }}"
     )));
+}
+
+// ─── Through the change log ────────────────────────────────────────────────
+
+async fn recording_dataset() -> (open_triplestore::server::AppState, String, Router, String) {
+    let store = open_triplestore::store::TripleStore::in_memory()
+        .unwrap()
+        .with_change_capture(
+            open_triplestore::store::changes::DEFAULT_MAX_SCAN,
+            open_triplestore::store::changes::DEFAULT_MAX_PAYLOAD,
+        );
+    let (state, token) = admin_state_with_store(store);
+    let app = test_app(state.clone());
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/datasets",
+        Some(&token),
+        Some("application/json"),
+        None,
+        &json!({ "name": "pc", "owner_type": "user", "owner_id": "adm", "visibility": "private" })
+            .to_string(),
+    )
+    .await;
+    assert!(st.is_success(), "{txt}");
+    let id = serde_json::from_str::<Value>(&txt).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/{id}/graphs"),
+        Some(&token),
+        Some("application/json"),
+        None,
+        &json!({ "graph_iri": G }).to_string(),
+    )
+    .await;
+    assert!(st.is_success(), "{txt}");
+    (state, token, app, id)
+}
+
+/// A change exported by the store carries the store's own blank-node labels,
+/// so its inverse, applied through the patch route, removes exactly those
+/// nodes — which `DELETE DATA` never could.
+#[tokio::test]
+async fn an_exported_change_removes_its_blank_nodes_through_the_patch_route() {
+    let (state, token, app, id) = recording_dataset().await;
+    state
+        .store
+        .load_str(
+            "<urn:feature:1> <urn:geom> _:g . _:g <urn:wkt> \"POINT(1 2)\" .",
+            RdfFormat::Turtle,
+            Some(G),
+        )
+        .unwrap();
+    let seq = state.store.changes().last_seq();
+    let (st, ct, patch) = req(
+        &app,
+        Method::GET,
+        &format!("/api/datasets/{id}/changes/{seq}/inverse"),
+        Some(&token),
+        None,
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{patch}");
+    assert!(ct.starts_with("application/rdf-patch"));
+    assert!(
+        patch.contains("D _:"),
+        "the inverse deletes the blank node: {patch}"
+    );
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/{id}/patch"),
+        Some(&token),
+        Some("application/rdf-patch"),
+        None,
+        &patch,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let r: Value = serde_json::from_str(&txt).unwrap();
+    assert_eq!(r["effective"]["removed"], 2, "{txt}");
+    assert!(r["seq"].is_i64(), "{txt}");
+    assert_eq!(state.store.count_graph(Some(G)).unwrap(), 0);
+}
+
+/// `H base-digest` makes the apply conditional on the graphs being what the
+/// patch was made against.
+#[tokio::test]
+async fn a_patch_whose_base_digest_no_longer_matches_is_refused() {
+    let (state, token, app, id) = recording_dataset().await;
+    state
+        .store
+        .load_str("<urn:s> <urn:p> \"1\" .", RdfFormat::Turtle, Some(G))
+        .unwrap();
+    let digest =
+        open_triplestore::store::set_hash::SetHash::of_graphs(&state.store, &[G.to_string()])
+            .to_hex();
+    let patch = |d: &str| {
+        format!("H base-digest \"{d}\" .\nTX .\nA <urn:s2> <urn:p> \"2\" <{G}> .\nTC .\n")
+    };
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/{id}/patch"),
+        Some(&token),
+        Some("application/rdf-patch"),
+        None,
+        &patch(&digest),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    // The same digest again: the graph moved on.
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/{id}/patch"),
+        Some(&token),
+        Some("application/rdf-patch"),
+        None,
+        &patch(&digest),
+    )
+    .await;
+    assert_eq!(st, StatusCode::PRECONDITION_FAILED, "{txt}");
+    assert_eq!(state.store.count_graph(Some(G)).unwrap(), 2);
+    let (st, _, _) = req(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/{id}/patch"),
+        Some(&token),
+        Some("application/rdf-patch"),
+        None,
+        &patch("not-hex"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+}
+
+/// The route needs an account: anonymous used to reach the handler and fail
+/// its extractor with a 500.
+#[tokio::test]
+async fn an_anonymous_patch_is_unauthorized_not_an_error() {
+    let (_state, _token, app, id) = recording_dataset().await;
+    let (st, _, _) = req(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/{id}/patch"),
+        None,
+        Some("application/rdf-patch"),
+        None,
+        &format!("TX .\nA <urn:s> <urn:p> \"1\" <{G}> .\nTC .\n"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
 }

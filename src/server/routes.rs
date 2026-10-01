@@ -85,6 +85,24 @@ pub fn management_routes() -> Router<AppState> {
             "/api/admin/changes/cursors/:name",
             put(admin_changes_set_cursor).delete(admin_changes_delete_cursor),
         )
+        .route(
+            "/api/admin/changes/stats",
+            get(crate::dataset_changes::admin_stats),
+        )
+        // A dataset's change feed: reads, on the SPARQL group's rate tier
+        // (delta note §7).
+        .route(
+            "/api/datasets/:dataset_id/changes",
+            get(crate::dataset_changes::feed),
+        )
+        .route(
+            "/api/datasets/:dataset_id/changes/:seq",
+            get(crate::dataset_changes::change),
+        )
+        .route(
+            "/api/datasets/:dataset_id/changes/:seq/inverse",
+            get(crate::dataset_changes::change_inverse),
+        )
         .route("/api/replication/status", get(replication_status))
         .route("/api/replication/manifest", get(replication_manifest))
         .route("/api/replication/identity", get(replication_identity))
@@ -803,15 +821,21 @@ pub(crate) async fn execute_update(
     let effective = effective_str.to_string();
     let store = state.store.clone();
     let affected = graph_iris.clone();
-    let ldes_before = {
+    let ldes = {
         let st = state.clone();
         let gs = graph_iris.clone();
-        tokio::task::spawn_blocking(move || crate::ldes::capture::before(&st, &gs))
+        tokio::task::spawn_blocking(move || crate::ldes::capture::Capture::begin(&st, &gs))
             .await
-            .unwrap_or_default()
+            .unwrap_or(crate::ldes::capture::Capture::Rows(Vec::new()))
     };
     let timeout = std::time::Duration::from_secs(state.query_timeout_secs);
-    let ctx = write_context(state, user, crate::commit_log::CommitKind::Sparql);
+    let stamp = crate::commit_log::CommitStamp::new(&state.base_url);
+    let ctx = crate::server::write_effects::context(
+        state,
+        user,
+        crate::commit_log::CommitKind::Sparql,
+        &stamp,
+    );
     // A write whose graphs could not be named before it ran: the model copies
     // a check vouched for are re-checked after it. The re-check runs in the
     // write's own blocking task, right after the write: that task cannot be
@@ -857,21 +881,32 @@ pub(crate) async fn execute_update(
         // response sees the records it marked.
         let _ = write.await;
     }
+    // What the change log recorded of this write (nothing when it is off).
+    let written = crate::server::write_effects::Written::read(state, &stamp);
     // Writer-pays text-index maintenance: a ground update (INSERT DATA /
-    // DELETE DATA) knows its exact quads, so just those documents change;
-    // any other update with known target graphs refreshes exactly those; a
-    // variable-graph / default-graph / admin wildcard update falls back to
-    // the whole-index dirty flag (repaired by the background sync) because its
-    // touched set can't be enumerated here.
+    // DELETE DATA) knows its exact quads, so just those documents change; so
+    // does any update the change log recorded in full; any other update with
+    // known target graphs refreshes exactly those; a variable-graph /
+    // default-graph / admin wildcard update falls back to the whole-index
+    // dirty flag (repaired by the background sync) because its touched set
+    // can't be enumerated here.
     #[cfg(feature = "text-search")]
-    if requires_admin || graph_iris.is_empty() {
-        state.mark_text_dirty();
-    } else {
+    {
         let st = state.clone();
         let graphs = graph_iris.clone();
-        let _ = tokio::task::spawn_blocking(move || match delta {
-            Some((inserted, deleted)) => st.text_index_apply_delta(&inserted, &deleted, &graphs),
-            None => st.refresh_text_index_graphs(&graphs),
+        let w = written.clone();
+        let wildcard = requires_admin || graph_iris.is_empty();
+        let _ = tokio::task::spawn_blocking(move || {
+            if w.sync_text_index(&st, &graphs) {
+                return;
+            }
+            match delta {
+                _ if wildcard => st.mark_text_dirty(),
+                Some((inserted, deleted)) => {
+                    st.text_index_apply_delta(&inserted, &deleted, &graphs)
+                }
+                None => st.refresh_text_index_graphs(&graphs),
+            }
         })
         .await;
     }
@@ -881,9 +916,10 @@ pub(crate) async fn execute_update(
     {
         let st = state.clone();
         let ent_graphs: Vec<String> = graph_iris.clone();
+        let w = written.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            crate::ldes::capture::after(&st, ldes_before);
-            crate::entailment::after_write(&st, &ent_graphs);
+            ldes.finish(&st, &w.rows);
+            w.entailment(&st, &ent_graphs);
         })
         .await;
     }
@@ -903,17 +939,22 @@ pub(crate) async fn execute_update(
     }
 
     // Record the update in the linked-data provenance trail, keyed by the graphs
-    // it touched (so it surfaces on dataset pages). Best-effort.
+    // it touched (so it surfaces on dataset pages), pointing at its rows in the
+    // change log. Best-effort.
     if !graph_iris.is_empty() {
-        let mut rec = crate::commit_log::CommitRecord::new(
+        crate::commit_log::record_stamped(
+            &state.store,
+            &state.base_url,
+            &stamp,
             crate::commit_log::CommitKind::Sparql,
             message.unwrap_or("SPARQL update"),
+            user.map(|u| u.user_id.as_str()),
+            None,
+            graph_iris.clone(),
+            0,
+            0,
+            None,
         );
-        rec.actor_iri = user.map(|u| format!("{}/users/{}", state.base_url, u.user_id));
-        rec.affected_graphs = graph_iris.clone();
-        if let Err(e) = crate::commit_log::insert_commit(&state.store, &state.base_url, &rec) {
-            tracing::warn!("failed to record SPARQL update commit: {e}");
-        }
     }
 
     Ok(with_ack(state, StatusCode::NO_CONTENT.into_response()))
@@ -1862,14 +1903,15 @@ async fn graph_store_put(
         .as_deref()
         .and_then(|g| state.store.graph_count_cached(Some(g)))
         .unwrap_or(0);
-    // LDES change capture: the entity index before the write (empty unless
-    // the graph belongs to a dataset that publishes a stream).
-    let ldes_before = {
+    // LDES change capture: from the write's rows when the change log records
+    // it, else the entity index before the write (empty unless the graph
+    // belongs to a dataset that publishes a stream).
+    let ldes = {
         let st = state.clone();
         let gs: Vec<String> = commit_graph.iter().cloned().collect();
-        tokio::task::spawn_blocking(move || crate::ldes::capture::before(&st, &gs))
+        tokio::task::spawn_blocking(move || crate::ldes::capture::Capture::begin(&st, &gs))
             .await
-            .unwrap_or_default()
+            .unwrap_or(crate::ldes::capture::Capture::Rows(Vec::new()))
     };
 
     let content_type = headers
@@ -1896,23 +1938,27 @@ async fn graph_store_put(
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
     let touched = graph.clone();
-    let ctx = write_context(
+    let stamp = crate::commit_log::CommitStamp::new(&state.base_url);
+    let ctx = crate::server::write_effects::context(
         &state,
         user.as_deref(),
         crate::commit_log::CommitKind::GraphStore,
+        &stamp,
     );
     run_store_write(&state, "graph store PUT", move || {
         let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
         store.graph_store_put(graph.as_deref(), &data, format)
     })
     .await?;
-    sync_text_index_after_graph_write(&state, touched).await;
+    let written = crate::server::write_effects::Written::read(&state, &stamp);
+    sync_text_index_after_write(&state, &written, touched).await;
     {
         let st = state.clone();
         let ent_graphs: Vec<String> = commit_graph.iter().cloned().collect();
+        let w = written.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            crate::ldes::capture::after(&st, ldes_before);
-            crate::entailment::after_write(&st, &ent_graphs);
+            ldes.finish(&st, &w.rows);
+            w.entailment(&st, &ent_graphs);
         })
         .await;
     }
@@ -1922,9 +1968,10 @@ async fn graph_store_put(
         .as_deref()
         .and_then(|g| state.store.graph_count_cached(Some(g)))
         .unwrap_or(0);
-    crate::commit_log::record(
+    crate::commit_log::record_stamped(
         &state.store,
         &state.base_url,
+        &stamp,
         crate::commit_log::CommitKind::GraphStore,
         format!(
             "Graph Store PUT {}",
@@ -1954,14 +2001,15 @@ async fn graph_store_post(
         .as_deref()
         .and_then(|g| state.store.graph_count_cached(Some(g)))
         .unwrap_or(0);
-    // LDES change capture: the entity index before the write (empty unless
-    // the graph belongs to a dataset that publishes a stream).
-    let ldes_before = {
+    // LDES change capture: from the write's rows when the change log records
+    // it, else the entity index before the write (empty unless the graph
+    // belongs to a dataset that publishes a stream).
+    let ldes = {
         let st = state.clone();
         let gs: Vec<String> = commit_graph.iter().cloned().collect();
-        tokio::task::spawn_blocking(move || crate::ldes::capture::before(&st, &gs))
+        tokio::task::spawn_blocking(move || crate::ldes::capture::Capture::begin(&st, &gs))
             .await
-            .unwrap_or_default()
+            .unwrap_or(crate::ldes::capture::Capture::Rows(Vec::new()))
     };
 
     let content_type = headers
@@ -1988,18 +2036,22 @@ async fn graph_store_post(
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
     let touched = graph.clone();
-    let ctx = write_context(
+    let stamp = crate::commit_log::CommitStamp::new(&state.base_url);
+    let ctx = crate::server::write_effects::context(
         &state,
         user.as_deref(),
         crate::commit_log::CommitKind::GraphStore,
+        &stamp,
     );
     let inserted = run_store_write(&state, "graph store POST", move || {
         let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
         store.graph_store_post_delta(graph.as_deref(), &data, format)
     })
     .await?;
+    let written = crate::server::write_effects::Written::read(&state, &stamp);
     // The appended quads are known exactly: index just those documents
-    // instead of re-indexing every literal of the graph.
+    // instead of re-indexing every literal of the graph. A default-graph
+    // merge is exact too when the change log recorded it.
     match touched {
         Some(g) => {
             let st = state.clone();
@@ -2008,13 +2060,14 @@ async fn graph_store_post(
             })
             .await;
         }
-        None => sync_text_index_after_graph_write(&state, None).await,
+        None => sync_text_index_after_write(&state, &written, None).await,
     }
     {
         let st = state.clone();
         let ent_graphs: Vec<String> = commit_graph.iter().cloned().collect();
+        let w = written.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            crate::ldes::capture::after(&st, ldes_before);
+            ldes.finish(&st, &w.rows);
             // A merge only adds quads: the entailment graph is extended, not rebuilt.
             crate::entailment::after_additive_write(&st, &ent_graphs);
         })
@@ -2026,9 +2079,10 @@ async fn graph_store_post(
         .as_deref()
         .and_then(|g| state.store.graph_count_cached(Some(g)))
         .unwrap_or(0);
-    crate::commit_log::record(
+    crate::commit_log::record_stamped(
         &state.store,
         &state.base_url,
+        &stamp,
         crate::commit_log::CommitKind::GraphStore,
         format!(
             "Graph Store POST {}",
@@ -2057,38 +2111,43 @@ async fn graph_store_delete(
         .as_deref()
         .and_then(|g| state.store.graph_count_cached(Some(g)))
         .unwrap_or(0);
-    // LDES change capture: the entity index before the write (empty unless
-    // the graph belongs to a dataset that publishes a stream).
-    let ldes_before = {
+    // LDES change capture: from the write's rows when the change log records
+    // it, else the entity index before the write (empty unless the graph
+    // belongs to a dataset that publishes a stream).
+    let ldes = {
         let st = state.clone();
         let gs: Vec<String> = commit_graph.iter().cloned().collect();
-        tokio::task::spawn_blocking(move || crate::ldes::capture::before(&st, &gs))
+        tokio::task::spawn_blocking(move || crate::ldes::capture::Capture::begin(&st, &gs))
             .await
-            .unwrap_or_default()
+            .unwrap_or(crate::ldes::capture::Capture::Rows(Vec::new()))
     };
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
     let touched = graph.clone();
-    let ctx = write_context(
+    let stamp = crate::commit_log::CommitStamp::new(&state.base_url);
+    let ctx = crate::server::write_effects::context(
         &state,
         user.as_deref(),
         crate::commit_log::CommitKind::GraphStore,
+        &stamp,
     );
     run_store_write(&state, "graph store DELETE", move || {
         let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
         store.graph_store_delete(graph.as_deref())
     })
     .await?;
+    let written = crate::server::write_effects::Written::read(&state, &stamp);
     // Previously nothing invalidated the text index here, so a deleted graph's
     // literals kept turning up in search results until an unrelated write
     // forced a rebuild.
-    sync_text_index_after_graph_write(&state, touched).await;
+    sync_text_index_after_write(&state, &written, touched).await;
     {
         let st = state.clone();
         let ent_graphs: Vec<String> = commit_graph.iter().cloned().collect();
+        let w = written.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            crate::ldes::capture::after(&st, ldes_before);
-            crate::entailment::after_write(&st, &ent_graphs);
+            ldes.finish(&st, &w.rows);
+            w.entailment(&st, &ent_graphs);
         })
         .await;
     }
@@ -2098,9 +2157,10 @@ async fn graph_store_delete(
         .as_deref()
         .and_then(|g| state.store.graph_count_cached(Some(g)))
         .unwrap_or(0);
-    crate::commit_log::record(
+    crate::commit_log::record_stamped(
         &state.store,
         &state.base_url,
+        &stamp,
         crate::commit_log::CommitKind::GraphStore,
         format!(
             "Graph Store DELETE {}",
@@ -2114,6 +2174,23 @@ async fn graph_store_delete(
         None,
     );
     Ok(with_ack(&state, StatusCode::NO_CONTENT.into_response()))
+}
+
+/// As [`sync_text_index_after_graph_write`], first trying the exact quads the
+/// change log recorded for the write.
+pub(crate) async fn sync_text_index_after_write(
+    state: &AppState,
+    written: &crate::server::write_effects::Written,
+    graph: Option<String>,
+) {
+    if written.is_exact() {
+        let st = state.clone();
+        let w = written.clone();
+        let graphs: Vec<String> = graph.iter().cloned().collect();
+        let _ = tokio::task::spawn_blocking(move || w.sync_text_index(&st, &graphs)).await;
+        return;
+    }
+    sync_text_index_after_graph_write(state, graph).await;
 }
 
 /// Keep the text index in step with a Graph Store write, writer-pays: refresh
@@ -2309,21 +2386,6 @@ async fn admin_telemetry(
         )),
         Some(u) if !u.is_admin() => Err((StatusCode::FORBIDDEN, "Admin role required".to_string())),
         Some(_) => Ok(Json(state.store.telemetry().summary())),
-    }
-}
-
-/// The context the change log stamps on a write's rows: the actor IRI as the
-/// commit trail mints it, and the commit kind. The guard is set inside the
-/// blocking closure that runs the primitive, never across an await.
-fn write_context(
-    state: &AppState,
-    user: Option<&AuthenticatedUser>,
-    kind: crate::commit_log::CommitKind,
-) -> crate::store::changes::WriteContext {
-    crate::store::changes::WriteContext {
-        actor_iri: user.map(|u| format!("{}/users/{}", state.base_url, u.user_id)),
-        commit_iri: None,
-        kind: Some(kind.as_str().to_string()),
     }
 }
 
@@ -3808,6 +3870,43 @@ fn is_pinned_version(version: &str) -> bool {
     !matches!(version.trim(), "" | "live" | "latest" | "current")
 }
 
+/// Build the delta versions a `versions=` pin names before the pin is
+/// resolved to graphs (delta note §3.3): their graphs are empty until built.
+/// Only datasets the caller can see are considered — the resolution after
+/// this answers 404 for the rest — and an anonymous caller never builds
+/// (503 with `Retry-After`).
+async fn ensure_pinned_versions_built(
+    state: &AppState,
+    versions: Option<&str>,
+    user: Option<&AuthenticatedUser>,
+) -> Result<(), AppError> {
+    let Some(versions) = versions else {
+        return Ok(());
+    };
+    let uid = user.map(|u| u.user_id.as_str());
+    for (ds_id, v) in parse_versions_map(versions) {
+        if !is_pinned_version(&v) {
+            continue;
+        }
+        let Ok(Some(ds)) = state.auth_db.get_dataset(&ds_id) else {
+            continue;
+        };
+        if !state.auth_db.can_access_dataset(uid, &ds).unwrap_or(false) {
+            continue;
+        }
+        if let Some(record) = crate::dataset_versions::registry::get_version(
+            &state.store,
+            &state.base_url,
+            &ds_id,
+            v.trim(),
+        ) {
+            crate::dataset_versions::materialise::ensure_built(state, &record, uid.is_none())
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 /// The set of SNAPSHOT graph IRIs in `version` of `dataset_id` whose SOURCE
 /// (live) graph is flagged `private`.
 ///
@@ -4064,6 +4163,7 @@ pub async fn browse_triples(
     user: Option<Extension<AuthenticatedUser>>,
     Query(params): Query<BrowseTripleParams>,
 ) -> Result<impl IntoResponse, AppError> {
+    ensure_pinned_versions_built(&state, params.versions.as_deref(), user.as_deref()).await?;
     // Cap at 1 000 000 rows to guard against accidental memory exhaustion.
     // The previous 10 000 limit was unnecessarily restrictive for bulk data exports.
     let limit = params.limit.unwrap_or(100).min(1_000_000);
@@ -4634,6 +4734,7 @@ pub async fn browse_facets(
     user: Option<Extension<AuthenticatedUser>>,
     Query(params): Query<BrowseTripleParams>,
 ) -> Result<impl IntoResponse, AppError> {
+    ensure_pinned_versions_built(&state, params.versions.as_deref(), user.as_deref()).await?;
     let user_id = user.as_deref().map(|u| u.user_id.as_str());
     let is_admin = user.as_deref().map(|u| u.is_admin()).unwrap_or(false);
 
@@ -4765,6 +4866,7 @@ pub async fn browse_resource(
     user: Option<Extension<AuthenticatedUser>>,
     Query(params): Query<BrowseResourceParams>,
 ) -> Result<impl IntoResponse, AppError> {
+    ensure_pinned_versions_built(&state, params.versions.as_deref(), user.as_deref()).await?;
     let iri = &params.iri;
 
     // Validate IRI parameters
@@ -5406,6 +5508,17 @@ async fn execute_dataset_query(
     // the service's live graphs (dataset access was already checked above, and the
     // version belongs to this dataset). Otherwise use the service graphs, falling
     // back to all dataset graphs so the service works without manual registration.
+    if let Some(v) = version.map(str::trim).filter(|v| is_pinned_version(v)) {
+        if let Some(record) = crate::dataset_versions::registry::get_version(
+            &state.store,
+            &state.base_url,
+            dataset_id,
+            v,
+        ) {
+            crate::dataset_versions::materialise::ensure_built(state, &record, user.is_none())
+                .await?;
+        }
+    }
     let graphs = if let Some(snapshot) = version_snapshot_graphs(state, dataset_id, version)? {
         snapshot
     } else {

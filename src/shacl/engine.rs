@@ -53,6 +53,28 @@ pub fn validate(
     shapes_graph: &str,
     data_graphs: &[String],
 ) -> Result<ValidationReport, String> {
+    validate_inner(store, shapes_graph, data_graphs, None)
+}
+
+/// As [`validate`], for the focus nodes in `focus` only: every shape's
+/// targets are resolved as usual and then narrowed to the set. The report is
+/// what a full run would say about those nodes — an incremental revalidation
+/// after a write that touched only them (delta note §8.3).
+pub fn validate_focused(
+    store: &TripleStore,
+    shapes_graph: &str,
+    data_graphs: &[String],
+    focus: &std::collections::HashSet<Term>,
+) -> Result<ValidationReport, String> {
+    validate_inner(store, shapes_graph, data_graphs, Some(focus))
+}
+
+fn validate_inner(
+    store: &TripleStore,
+    shapes_graph: &str,
+    data_graphs: &[String],
+    focus: Option<&std::collections::HashSet<Term>>,
+) -> Result<ValidationReport, String> {
     info!(
         "SHACL validation: shapes_graph=<{}>, data_graphs={:?}",
         shapes_graph, data_graphs
@@ -81,7 +103,10 @@ pub fn validate(
             .par_iter()
             .filter(|shape| !shape.deactivated)
             .map(|shape| {
-                let focus_nodes = resolve_targets(view, shape);
+                let mut focus_nodes = resolve_targets(view, shape);
+                if let Some(focus) = focus {
+                    focus_nodes.retain(|n| focus.contains(n));
+                }
                 debug!(
                     "Shape <{}> has {} target nodes",
                     shape.iri,

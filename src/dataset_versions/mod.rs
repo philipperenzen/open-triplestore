@@ -2,7 +2,10 @@
 //! with a draft→staged→published→deprecated lifecycle, named branches, and
 //! restore-onto-live-graphs.
 pub mod commit;
+pub mod cut;
 pub mod handlers;
+pub mod lock;
+pub mod materialise;
 pub mod models;
 pub mod registry;
 pub mod reports;
@@ -16,6 +19,11 @@ use models::{DatasetVersion, VersionStatus};
 /// Snapshot `source_graphs` into a new version with the given lifecycle status
 /// and record it in the registry. `update_latest_draft` is only meaningful for
 /// draft versions, so it is driven off the status.
+///
+/// Always a physical checkpoint: this is the entry point the replace-import
+/// archive uses (a Published version, physical by rule) and that callers
+/// rely on to find the copied graphs in place right after it returns. A cut
+/// that may be a delta goes through [`cut::cut`].
 #[allow(clippy::too_many_arguments)] // cohesive snapshot inputs; a struct adds churn
 pub fn snapshot_as_version(
     store: &TripleStore,
@@ -27,42 +35,56 @@ pub fn snapshot_as_version(
     created_by: Option<&str>,
     notes: Option<&str>,
 ) -> Result<DatasetVersion, String> {
-    let source_map = snapshot::snapshot_graphs(store, base_url, dataset_id, version, source_graphs)
-        .map_err(|e| e.to_string())?;
-    let snapshot_graphs: Vec<String> = source_map
-        .iter()
-        .map(|m| m.snapshot_graph.clone())
-        .collect();
-
-    let record = DatasetVersion {
+    let req = cut::CutRequest {
         dataset_id: dataset_id.to_string(),
         version: version.to_string(),
+        source_graphs: source_graphs.to_vec(),
         status,
-        graph_iri: format!("{base_url}/dataset/{dataset_id}/version/{version}"),
-        snapshot_graphs,
-        source_map,
-        created_at: chrono::Utc::now().to_rfc3339(),
-        created_by: created_by.map(|u| u.to_string()),
-        derived_from: None,
-        notes: notes.map(|n| n.to_string()),
+        created_by: created_by.map(str::to_string),
+        notes: notes.map(str::to_string),
         branch: None,
+        derived_from: None,
+        force_checkpoint: true,
+        shared: Default::default(),
     };
-    registry::insert_version(store, base_url, &record).map_err(|e| e.to_string())?;
-    if status == VersionStatus::Draft {
-        registry::update_latest_draft(store, base_url, dataset_id, version)
-            .map_err(|e| e.to_string())?;
+    let record = cut::cut(store, base_url, &req)?.record;
+    after_cut(store, base_url, &record, source_graphs);
+    Ok(record)
+}
+
+/// What every cut is followed by: the latest-draft pointer for a draft on the
+/// main line, and the validation layer's bindings snapshotted beside the data
+/// (best-effort: the version already persisted).
+pub fn after_cut(
+    store: &TripleStore,
+    base_url: &str,
+    record: &DatasetVersion,
+    source_graphs: &[String],
+) {
+    if record.status == VersionStatus::Draft && record.branch.is_none() {
+        if let Err(e) =
+            registry::update_latest_draft(store, base_url, &record.dataset_id, &record.version)
+        {
+            tracing::warn!(
+                "failed to move latest draft of {} to {}: {e}",
+                record.dataset_id,
+                record.version
+            );
+        }
     }
-    // Snapshot the validation layer alongside the data (best-effort).
     if let Err(e) = crate::shacl_studio::bindings::snapshot_dataset_bindings(
         store,
         base_url,
-        dataset_id,
-        version,
+        &record.dataset_id,
+        &record.version,
         source_graphs,
     ) {
-        tracing::warn!("failed to snapshot validation bindings for {dataset_id} v{version}: {e}");
+        tracing::warn!(
+            "failed to snapshot validation bindings for {} v{}: {e}",
+            record.dataset_id,
+            record.version
+        );
     }
-    Ok(record)
 }
 
 /// Compute the next semantic version for a dataset from its existing versions.
@@ -106,19 +128,16 @@ mod semver_tests {
     use super::*;
 
     fn ver(v: &str) -> DatasetVersion {
-        DatasetVersion {
-            dataset_id: "ds".into(),
-            version: v.into(),
-            status: VersionStatus::Published,
-            graph_iri: String::new(),
-            snapshot_graphs: vec![],
-            source_map: vec![],
-            created_at: String::new(),
-            created_by: None,
-            derived_from: None,
-            notes: None,
-            branch: None,
-        }
+        DatasetVersion::checkpoint(
+            "ds",
+            v,
+            VersionStatus::Published,
+            String::new(),
+            vec![],
+            None,
+            None,
+            None,
+        )
     }
 
     #[test]
