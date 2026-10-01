@@ -5,6 +5,7 @@
 - **Session Token (JWT)** — Issued automatically on login. Used by this browser interface. Valid for the configured session duration. No setup needed.
 - **Bearer API Token** — Created in [Settings → API Tokens](/settings). Use in the `Authorization: Bearer <token>` HTTP header. Suitable for scripts, CI/CD, and integrations. Shown once on creation — store it securely.
 - **OAuth 2.0 / OIDC** — Configured providers appear on the login page. After SSO, the user receives a normal session token. API tokens can then be issued for programmatic access.
+- **IdP access token** — Off by default. With [resource-server mode](#oidc-resource-server-mode-idp-access-tokens) configured, a client that already holds an access token from your identity provider sends it as `Authorization: Bearer <token>`, and the store verifies it against the provider's keys.
 
 ## API token scopes
 
@@ -162,6 +163,132 @@ Sign in with Apple is **not yet supported** by the generic OIDC integration: App
 ### Other IdPs (Keycloak, Auth0, Okta, …)
 
 Any IdP exposing a `.well-known/openid-configuration` works with the generic OIDC type; enterprise IdPs can also connect via SAML 2.0 (upload the IdP certificate, set the SSO URL, and exchange SP metadata from `/api/auth/saml/<slug>/metadata`).
+
+## OIDC resource-server mode (IdP access tokens)
+
+The providers above sign people in through the browser. Resource-server mode
+is a separate path, for a client that already holds an access token from your
+identity provider: for example, a single-page app that signs its users in at
+Keycloak or Entra ID and then calls this store's API directly. The client
+sends the IdP's token as `Authorization: Bearer <token>`. The store checks the
+signature against the IdP's published keys, then links the token's subject to
+a local account, creating one if needed. The mode is configured only through
+environment variables and stays off unless `OIDC_ISSUER` is set.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OIDC_ISSUER` | *(unset: mode off)* | The IdP's issuer URL, e.g. `https://idp.example.org/realms/example`. Must be `https`; plain `http` is accepted only for `localhost` and loopback addresses. If you give a cleartext issuer, startup logs an error and leaves the mode off, because a man in the middle could otherwise serve forged keys. A trailing `/` is removed. |
+| `OIDC_AUDIENCE` | *(unset)* | The `aud` value a token must carry for this store. **Required.** If `OIDC_ISSUER` is set without it, startup logs a warning and every IdP token is refused. |
+| `OIDC_DEFAULT_ROLE` | `user` | The system role an account created from a token gets when no claim maps to a role. One of `user`, `guest`, `admin`, `super_admin`; an unknown value means `user`. Unlike mapped roles, this value is **not capped**: `admin` would make every IdP account an administrator. It is read only once (see [changing settings later](#changing-settings-later)). |
+| `OIDC_ROLE_CLAIMS` | `roles,realm_access.roles,groups` | Comma-separated claim names to check for role mapping. A dotted name reaches into a nested object (`realm_access.roles` is Keycloak's shape). String and string-array values are read. |
+| `OIDC_ROLE_CLAIM_MAP` | *(unset: no mapping)* | A JSON object from claim value to role, e.g. `{"idp-admins": "admin", "idp-editors": "publisher", "staff": "user"}`. Invalid JSON is ignored without a warning, which disables mapping. |
+| `OIDC_GROUPS_CLAIM` | `groups` | The claim holding group names. Its values are matched against the role map and used for organisation membership. |
+| `OIDC_ORG_GROUP_PREFIX` | `org:` | The prefix that marks a group as an organisation membership: `org:example-gis` makes the account a member of the organisation whose slug is `example-gis`. |
+| `ACCEPT_LEGACY_TOKENS` | `true` | Keep accepting this store's own session tokens and `ots_` API tokens. `false` or `0` refuses them; see [below](#turning-off-the-stores-own-tokens). |
+
+The Docker Compose file passes all eight through from `.env`.
+
+### What a token must look like
+
+- It is signed with an asymmetric algorithm (RS…, PS…, ES…, EdDSA). HMAC
+  (`HS256` and the other HS variants) is refused.
+- Its header has a `kid` that names a key in the IdP's key set. The store reads
+  `jwks_uri` from `<OIDC_ISSUER>/.well-known/openid-configuration`
+  (`jwks_uri` must be `https` too) and caches the keys for an hour. An unknown
+  `kid` triggers an immediate re-fetch, so key rotation needs no restart.
+- `iss` equals `OIDC_ISSUER` character for character, with no trailing
+  slash. An IdP whose `iss` ends in `/` is not matched today.
+- `aud` contains `OIDC_AUDIENCE`, `exp` is in the future, and `nbf` (if
+  present) is in the past.
+- `sub` is present. `email`, `email_verified`, `name` and
+  `preferred_username` are read when present.
+
+A bearer token is tried in this order: the store's own session or API token
+(while legacy tokens are accepted), an access token from the store's own
+[OIDC provider](oidc-provider.md), a [federation](federation.md) assertion
+from a trusted peer, and only then the IdP. A token starting with `ots_` never
+reaches the IdP check. A token that fails verification gets
+`401 Invalid or expired token`.
+
+### Accounts
+
+The store keys each IdP account on its subject (`sub`), stored under a
+provider entry named *Environment OIDC* (slug `env-oidc`) that is created at
+startup. The first request with a new subject resolves it as follows:
+
+1. If the token's `email` belongs to an existing local account **and** the
+   token says `email_verified: true`, the subject is linked to that account.
+2. If the email exists but is not asserted as verified, the request is
+   refused (`401`). This prevents account takeover through an IdP that lets
+   anyone claim any address.
+3. Otherwise a new account is created. Its username comes from `name`,
+   `preferred_username`, `email` or `sub` (made unique). It gets the token's
+   email, or a placeholder `…@oauth.local` address when the token has none,
+   and no usable password, so its owner signs in only through the IdP.
+
+Every later request with the same subject reaches the same account. A
+deactivated account is refused.
+
+### Roles, publish permission and organisations
+
+On **every** request, the values of the `OIDC_ROLE_CLAIMS` claims and of the
+`OIDC_GROUPS_CLAIM` claim are looked up in `OIDC_ROLE_CLAIM_MAP`:
+
+- The highest mapped role wins. `super_admin` is capped at `admin`, so a token
+  can never make an account a super admin through the map.
+- When a value maps to a role, that role is written to the account, even if
+  it is lower than the account's current role. The IdP is authoritative: a
+  role an admin set in the UI is overwritten on the next request. When nothing
+  maps, an existing account keeps its role, and a new account gets
+  `OIDC_DEFAULT_ROLE`.
+- The special value `"publisher"` grants the
+  [publish permission](administration.md#the-can_publish-capability). It is
+  never taken away just because the claim is absent.
+
+Each group value that starts with `OIDC_ORG_GROUP_PREFIX` names an
+organisation slug. If that organisation exists, the account is added to it as
+a `member`. Organisations are never created this way, and memberships are only
+added: one stays after the group disappears from the token.
+
+### What an IdP token may do
+
+An IdP token carries the authority of an interactive session for its account:
+it may read, write wherever the account's dataset and graph permissions allow,
+and create long-lived API tokens at `POST /api/auth/tokens`.
+`OTS_OIDC_SESSION_POLICY` does **not** apply here; it governs only the tokens
+this store issues as an [OIDC provider](oidc-provider.md#what-a-provider-token-may-do).
+So any client that holds a user's IdP access token for this audience can turn
+it into a permanent `ots_` token for that account. If that is not acceptable,
+keep this store's audience out of the tokens issued to clients you do not
+fully trust.
+
+Accounts with the `guest` role stay limited by `OTS_GUEST_CAPABILITIES`,
+whichever way they authenticate.
+
+### Turning off the store's own tokens
+
+`ACCEPT_LEGACY_TOKENS=false` refuses every session token this store issues,
+including the one the bundled web UI receives after a password, passkey or SSO
+sign-in. Every `ots_` API token is refused too, with
+`401 Legacy tokens are disabled`. What still works: IdP tokens, access tokens
+from the store's own OIDC provider, and federation assertions. Use it only for
+an API-only deployment whose clients all hold IdP tokens. The bundled web UI's
+sign-in stops working.
+
+### Changing settings later
+
+The *Environment OIDC* entry is created once, the first time the server starts
+with `OIDC_ISSUER` set. It records `OIDC_DEFAULT_ROLE` and has
+auto-provisioning on. Changing `OIDC_DEFAULT_ROLE` afterwards does not update
+the entry. Edit it under **Security & Access Control → Identity providers**
+(or `PUT /api/admin/oauth/providers/:id`) instead. There you can also turn
+auto-provisioning off, so that only accounts that already exist (linked by
+verified email) can use IdP tokens. The entry's own role claim map and its
+enabled switch do not affect this path; the environment variables above do.
+
+The entry also appears among the sign-in options on the login page, but it has
+no client ID, so a browser sign-in through it fails. Turning its *enabled*
+switch off removes it from the login page without affecting IdP tokens.
 
 ## Guest self-registration (admin toggle)
 
