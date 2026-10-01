@@ -346,6 +346,23 @@ percent-encoding = "2"
 webauthn-authenticator-rs = { version = "0.5", features = ["softpasskey"] }
 webauthn-rs-proto = "0.5"
 
+# Test targets that use probes the library only exports with `test-utils`
+# (`InProcessLeader`, `AppState::test_default_with_store`, `query_cache_len`).
+# Declared so `cargo check --all-targets --features full` builds without that
+# feature; auto-discovery of every other `tests/*.rs` is unaffected. The CI
+# test job enables `test-utils`, so all three still run there.
+[[test]]
+name = "replication"
+required-features = ["test-utils"]
+
+[[test]]
+name = "ldp_conformance"
+required-features = ["test-utils"]
+
+[[test]]
+name = "query_cache"
+required-features = ["test-utils"]
+
 [[bench]]
 name = "performance"
 harness = false

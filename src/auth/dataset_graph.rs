@@ -650,23 +650,25 @@ pub fn graphs_deletable_with_dataset(
     out
 }
 
-/// The `app_settings` key [`release_model_registry_claims`] sets once it has
-/// swept every registration.
+/// The `app_settings` key [`release_model_registry_claims`] sets each time it
+/// has swept every registration with the registry answering.
 const REGISTRY_CLAIMS_MARKER: &str = "cleanup.dataset_registry_claims.v1";
 
-/// Whether [`release_model_registry_claims`] has completed on this identity
-/// database (a lookup error counts as not yet).
+/// Whether [`release_model_registry_claims`] has completed at least once on
+/// this identity database (a lookup error counts as not yet). The Raft
+/// cluster loop uses it to stop retrying once a sweep has gone through.
 pub fn model_registry_claims_released(db: &crate::auth::db::AuthDb) -> bool {
     matches!(db.get_app_setting(REGISTRY_CLAIMS_MARKER), Ok(Some(_)))
 }
 
-/// One-time boot cleanup: `dataset_graphs` rows naming a model-registry graph,
-/// made before the registration gate refused them. They still made the
-/// graph dataset-scoped for reads (`get_accessible_graph_iris`), hid it from
-/// everyone else, and made it one the dataset holds. Each such row goes; a
-/// shapes-role row stays in effect for validation as a SHACL Studio binding,
-/// which only reads the graph. Datasets that lost a row get their metadata
-/// graph rewritten.
+/// Boot cleanup: `dataset_graphs` rows naming a model-registry graph. Made
+/// before the registration gate refused them, or by a path that does not
+/// gate registration (a seed bundle used to register whatever its manifest
+/// named). They still made the graph dataset-scoped for reads
+/// (`get_accessible_graph_iris`), hid it from everyone else, and made it one
+/// the dataset holds. Each such row goes; a shapes-role row stays in effect
+/// for validation as a SHACL Studio binding, which only reads the graph.
+/// Datasets that lost a row get their metadata graph rewritten.
 ///
 /// A dataset's `shapes_graph_iri` naming a registry graph is left as it is:
 /// it does not scope reads, the paths that could write or delete it refuse
@@ -674,32 +676,24 @@ pub fn model_registry_claims_released(db: &crate::auth::db::AuthDb) -> bool {
 /// (the `shacl_on_write` gate refuses any result, keeps an on-write report
 /// and checks source runs; a binding does not).
 ///
-/// Runs once: a marker in `app_settings` records a sweep in which every
-/// registry lookup answered. A lookup that fails removes nothing (unlike the
-/// fail-closed [`graph_held_by_model_registry`]) and leaves the marker unset,
-/// so the next boot tries again. Returns the number of rows removed.
+/// Runs on every boot, so a registration that slipped in after an earlier
+/// sweep does not survive the next start: one registry query lists every
+/// graph a version holds, and each row is checked against it. A registry
+/// that cannot be read removes nothing (unlike the fail-closed
+/// [`graph_held_by_model_registry`]). A marker in `app_settings` records
+/// that a sweep went through with the registry answering
+/// ([`model_registry_claims_released`]). Returns the number of rows removed.
 pub fn release_model_registry_claims(
     store: &TripleStore,
     db: &crate::auth::db::AuthDb,
     base_url: &str,
 ) -> anyhow::Result<usize> {
-    if db.get_app_setting(REGISTRY_CLAIMS_MARKER)?.is_some() {
-        return Ok(0);
-    }
-    let mut undecided = false;
-    let mut held = |g: &str| -> bool {
-        if g == crate::data_models::registry::REGISTRY_GRAPH
+    let version_held = crate::data_models::registry::version_held_graphs(store);
+    let undecided = version_held.is_none();
+    let held = |g: &str| -> bool {
+        g == crate::data_models::registry::REGISTRY_GRAPH
             || in_model_registry_namespace(base_url, g)
-        {
-            return true;
-        }
-        match crate::data_models::registry::graph_held_by_version_checked(store, g) {
-            Some(h) => h,
-            None => {
-                undecided |= oxigraph::model::NamedNode::new(g).is_ok();
-                false
-            }
-        }
+            || version_held.as_ref().is_some_and(|set| set.contains(g))
     };
     let bind = |dataset_id: &str, g: &str| {
         let target = crate::shacl_studio::bindings::dataset_target_iri(base_url, dataset_id);
@@ -735,7 +729,8 @@ pub fn release_model_registry_claims(
     }
     if undecided {
         tracing::warn!(
-            "registry-claim cleanup: a model-registry lookup failed; it runs again next boot"
+            "registry-claim cleanup: the model registry could not be read; dataset registrations \
+             of its graphs, if any, are kept until the next boot"
         );
     } else {
         db.set_app_setting(REGISTRY_CLAIMS_MARKER, &chrono::Utc::now().to_rfc3339())?;

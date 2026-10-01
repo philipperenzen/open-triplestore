@@ -13,6 +13,13 @@ const ACCESSIBLE_GRAPHS_TTL: Duration = Duration::from_secs(30);
 
 type AccessibleGraphs = (HashSet<String>, HashSet<String>);
 
+/// Where [`AuthDb::get_accessible_graph_iris`] learns the graphs of the model
+/// registry's published versions (`None`: the registry could not be read).
+/// The registry lives in the RDF store, which this identity database does not
+/// hold; the server installs it with [`AuthDb::set_registry_graph_source`].
+pub type RegistryGraphSource =
+    dyn Fn() -> Option<Vec<crate::data_models::registry::PublishedVersionGraph>> + Send + Sync;
+
 use super::models::*;
 
 /// Which position a triple-security-label term occupies, since an object may be
@@ -322,6 +329,10 @@ pub struct AuthDb {
     /// uncached path does two SELECTs + a HashSet join each call.
     #[allow(clippy::type_complexity)] // a cache tuple; a type alias would obscure it
     accessible_graphs_cache: Mutex<HashMap<Option<String>, (Instant, Arc<AccessibleGraphs>)>>,
+    /// The model registry's published-version graphs, for the accessible-graph
+    /// set ([`Self::set_registry_graph_source`]); `None` until the server
+    /// installs it, and on a handle that never needs it.
+    registry_graphs: std::sync::RwLock<Option<Arc<RegistryGraphSource>>>,
     /// The file, for a persistent database; the replication watch
     /// connection opens it read-only.
     path: Option<std::path::PathBuf>,
@@ -355,6 +366,7 @@ impl AuthDb {
         let db = Self {
             pool,
             accessible_graphs_cache: Mutex::new(HashMap::new()),
+            registry_graphs: std::sync::RwLock::new(None),
             path: Some(path.to_path_buf()),
             watch: Mutex::new(None),
         };
@@ -378,6 +390,7 @@ impl AuthDb {
         let db = Self {
             pool,
             accessible_graphs_cache: Mutex::new(HashMap::new()),
+            registry_graphs: std::sync::RwLock::new(None),
             path: None,
             watch: Mutex::new(None),
         };
@@ -392,6 +405,7 @@ impl AuthDb {
         Self {
             pool: self.pool.clone(),
             accessible_graphs_cache: Mutex::new(HashMap::new()),
+            registry_graphs: std::sync::RwLock::new(None),
             path: self.path.clone(),
             watch: Mutex::new(None),
         }
@@ -4648,9 +4662,25 @@ impl AuthDb {
         Ok(count > 0)
     }
 
+    /// Install where [`Self::get_accessible_graph_iris`] learns the model
+    /// registry's published-version graphs. The server does this once the
+    /// store and this database are both at hand (the router build); a
+    /// database without a source behaves as if the registry were empty.
+    pub fn set_registry_graph_source(&self, source: Arc<RegistryGraphSource>) {
+        if let Ok(mut slot) = self.registry_graphs.write() {
+            *slot = Some(source);
+        }
+        self.invalidate_accessible_graphs_cache();
+    }
+
     /// Returns (accessible_graph_iris, all_registered_graph_iris).
-    /// A graph is accessible if it belongs to a dataset the user can access.
-    /// Graphs not registered to any dataset are treated as unmanaged/public.
+    /// A graph is accessible if it belongs to a dataset the user can access,
+    /// or holds a published version of a model-registry entry the user may see
+    /// (a public entry: everyone, anonymous callers included; a private one:
+    /// its owner, the owner organisation's members and admins — the rule of
+    /// [`Self::can_access_ontology`], which the data-model API serves by).
+    /// Graphs not registered to any dataset and held by no published version
+    /// are treated as unmanaged/public.
     /// Callers should show a graph if it is in `accessible` OR not in `all_registered`.
     pub fn get_accessible_graph_iris(
         &self,
@@ -4678,7 +4708,8 @@ impl AuthDb {
             rows
         };
 
-        let all_registered: HashSet<String> = all_pairs.iter().map(|(_, g, _)| g.clone()).collect();
+        let mut all_registered: HashSet<String> =
+            all_pairs.iter().map(|(_, g, _)| g.clone()).collect();
 
         // 2. Find which datasets this user can access, and of those, which they
         //    can write — private graphs are only visible to writers (owner /
@@ -4711,7 +4742,7 @@ impl AuthDb {
 
         // 3. Keep graph IRIs whose owning dataset is accessible, dropping private
         //    graphs in datasets the user cannot write.
-        let accessible: HashSet<String> = all_pairs
+        let mut accessible: HashSet<String> = all_pairs
             .into_iter()
             .filter(|(ds_id, _, private)| {
                 accessible_ids.contains(ds_id.as_str())
@@ -4719,6 +4750,49 @@ impl AuthDb {
             })
             .map(|(_, g, _)| g)
             .collect();
+
+        // 4. The graphs of the model registry's published versions: every one
+        //    is managed (a private entry's graph is not an unmanaged/public
+        //    graph to anyone), and readable by whoever may see its entry. A
+        //    registry that could not be read adds nothing.
+        let source = self
+            .registry_graphs
+            .read()
+            .ok()
+            .and_then(|slot| slot.clone());
+        if let Some(source) = source {
+            match source() {
+                Some(graphs) => {
+                    // One visibility decision per distinct (public, owner).
+                    let mut decided: HashMap<(bool, Option<String>, Option<String>), bool> =
+                        HashMap::new();
+                    for g in graphs {
+                        all_registered.insert(g.graph_iri.clone());
+                        let key = (g.is_public, g.owner_type.clone(), g.owner_id.clone());
+                        let visible = match decided.get(&key) {
+                            Some(v) => *v,
+                            None => {
+                                let v = self.can_access_ontology(
+                                    user_id,
+                                    g.is_public,
+                                    g.owner_type.as_deref(),
+                                    g.owner_id.as_deref(),
+                                )?;
+                                decided.insert(key, v);
+                                v
+                            }
+                        };
+                        if visible {
+                            accessible.insert(g.graph_iri);
+                        }
+                    }
+                }
+                None => tracing::warn!(
+                    "the model registry could not be read; its published versions' graphs are \
+                     left out of the readable set until it can"
+                ),
+            }
+        }
 
         Ok((accessible, all_registered))
     }

@@ -488,6 +488,7 @@ pub async fn delete_data_model(
         registry::delete_data_model(&store, &base, &model_id)
     })
     .await?;
+    state.auth_db.invalidate_accessible_graphs_cache();
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -548,6 +549,8 @@ pub async fn update_data_model(
         )
     })
     .await?;
+    // Visibility and ownership decide who reads the entry's graphs.
+    state.auth_db.invalidate_accessible_graphs_cache();
     let record = registry::get_data_model(&state.store, &state.base_url, &id)
         .ok_or_else(|| AppError::Internal("Failed to retrieve updated ontology".to_string()))?;
     Ok(Json(model_response(&state, record)))
@@ -2389,6 +2392,10 @@ pub async fn publish_version(
     .map_err(AppError::from)?;
     registry::update_latest_published(&state.store, &state.base_url, &id, &ver)
         .map_err(AppError::from)?;
+    // A published version's graphs join the readable set of whoever may see
+    // the entry (`/sparql`, the Graph Store): make that so now, not at the
+    // cache's next expiry.
+    state.auth_db.invalidate_accessible_graphs_cache();
     // Publishing a version that was the main-line draft retires the draft pointer.
     // Staging already clears it, but a Draft can be published directly (see the
     // status guard above), so without this `latest_draft` would keep pointing at a
@@ -2552,6 +2559,8 @@ pub async fn deprecate_version(
         VersionStatus::Deprecated,
     )
     .map_err(AppError::from)?;
+    // Its graphs leave the readable set the published version put them in.
+    state.auth_db.invalidate_accessible_graphs_cache();
 
     Ok(Json(json!({ "status": "deprecated", "version": ver })))
 }

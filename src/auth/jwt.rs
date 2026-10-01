@@ -159,6 +159,19 @@ pub fn hash_token(token: &str) -> String {
 /// True for well-known default/placeholder JWT secrets (and the empty string) that must never
 /// sign tokens in a real deployment — a public secret makes every session token forgeable.
 /// `main` warns on these and refuses to start when production cookies are enabled.
+/// The configured JWT signing secret (`JWT_SECRET` / `--jwt-secret`), routed
+/// through the secrets module like every other credential: a reference
+/// (`env:NAME`, `file:/path`, `vault:…`) resolves to its value; a raw value is
+/// accepted in the development posture with a one-time warning and refused
+/// under `OTS_ENV=production`, so the server does not start with a signing
+/// secret pasted into its environment. The error names the setting, never
+/// the value.
+pub fn configured_jwt_secret(value: &str) -> anyhow::Result<String> {
+    let secret = crate::secrets::resolve_configured("JWT_SECRET", value.trim())
+        .map_err(|e| anyhow::anyhow!("JWT_SECRET: {e}"))?;
+    Ok(secret.expose().to_string())
+}
+
 pub fn is_weak_jwt_secret(secret: &str) -> bool {
     const WEAK: &[&str] = &[
         "",

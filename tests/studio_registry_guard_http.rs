@@ -129,6 +129,8 @@ fn bundle() -> Bundle {
             model("nd-otl", ND_GRAPH, ND_TTL, licence(true, "otl.ttl")),
             model("open-otl", BY_GRAPH, BY_TTL, licence(false, "open.ttl")),
         ],
+        account: None,
+        groups: Vec::new(),
     }
 }
 

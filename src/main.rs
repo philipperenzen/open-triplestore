@@ -406,8 +406,11 @@ async fn main() -> anyhow::Result<()> {
     // Track where the secret came from so a weak-secret failure can name the exact input to fix.
     // An auto-generated secret is 64 random chars and can never be weak, so reaching the weak
     // check below always means the value was explicitly configured (env/CLI or the on-disk file).
+    // A configured secret goes through the secrets module: a reference
+    // (env:/file:/vault:) resolves, a raw value is refused in the production
+    // posture and warned about once in development — as S3_SECRET_KEY is.
     let (jwt_secret, jwt_secret_from_file) = if let Some(s) = cli.jwt_secret {
-        (s, false)
+        (auth::jwt::configured_jwt_secret(&s)?, false)
     } else {
         match std::fs::read_to_string(&jwt_secret_path) {
             Ok(s) if !s.trim().is_empty() => {
@@ -470,6 +473,16 @@ async fn main() -> anyhow::Result<()> {
         cli.access_token_expiry_minutes,
         cli.refresh_token_expiry_days,
     ));
+
+    // The service-registry bearer, likewise: a reference resolves here, a raw
+    // value is refused under OTS_ENV=production.
+    let registry_token = match cli.registry_token.trim() {
+        "" => String::new(),
+        v => secrets::resolve_configured("LD_REGISTRY_TOKEN", v)
+            .map_err(|e| anyhow::anyhow!("LD_REGISTRY_TOKEN: {e}"))?
+            .expose()
+            .to_string(),
+    };
 
     // Initialize asset storage — S3/MinIO if configured, local filesystem otherwise
     let object_store = if let Some(endpoint) = cli.s3_endpoint {
@@ -577,7 +590,7 @@ async fn main() -> anyhow::Result<()> {
         cli.port_fallback,
         cli.discovery,
         cli.registry_url,
-        cli.registry_token,
+        registry_token,
         cli.data_dir.clone(),
         db_path.clone(),
         #[cfg(feature = "text-search")]

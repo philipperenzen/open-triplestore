@@ -1131,6 +1131,36 @@ pub(crate) fn validate_sparql(sparql: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Nesting past which a relayed feedback signal is refused. The signals the UI
+/// sends are three levels deep; a walk that never ends is not a signal.
+const FEEDBACK_MAX_DEPTH: usize = 16;
+
+/// Every string leaf of `value`, wherever it sits in objects and arrays, in
+/// document order — what the relay's size and injection screening runs over
+/// ([`guard_gate`] applies the per-message, count and total caps and the
+/// blocklist to each). `Err` when the value nests deeper than
+/// [`FEEDBACK_MAX_DEPTH`].
+fn string_leaves<'a>(value: &'a Value, depth: usize, out: &mut Vec<&'a str>) -> Result<(), ()> {
+    if depth > FEEDBACK_MAX_DEPTH {
+        return Err(());
+    }
+    match value {
+        Value::String(s) => out.push(s.as_str()),
+        Value::Array(items) => {
+            for item in items {
+                string_leaves(item, depth + 1, out)?;
+            }
+        }
+        Value::Object(fields) => {
+            for item in fields.values() {
+                string_leaves(item, depth + 1, out)?;
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+    Ok(())
+}
+
 /// POST /api/llm/feedback  <TrainingExample> -> endpoint `/v1/signals`
 ///
 /// Optional training-signal feedback loop: forwards accept/edit/reject signals to an
@@ -1150,13 +1180,26 @@ async fn forward_feedback(
     // are screened, since they are what a training pipeline ingests.
     let user = user.map(|Extension(u)| u);
     let ip = client_ip(&headers, None);
-    let texts: Vec<(&str, &str)> = signal
-        .as_object()
-        .into_iter()
-        .flat_map(|m| m.values())
-        .filter_map(Value::as_str)
-        .map(|s| ("user", s))
-        .collect();
+    // The whole signal, not its top level: the free text a pipeline ingests
+    // sits nested (`input.nl_question`, `label.comment`, `output.*`), and a
+    // string in an object or an array used to reach the gateway unscreened.
+    // The serialized signal is capped like a whole conversation first, so
+    // bulk cannot hide in numbers, keys or nesting either.
+    let cfg = llm_guard::config();
+    let serialized_len = signal.to_string().chars().count();
+    if serialized_len > cfg.max_total_chars {
+        return Err(AppError::BadRequest(format!(
+            "the feedback signal exceeds {} characters",
+            cfg.max_total_chars
+        )));
+    }
+    let mut leaves: Vec<&str> = Vec::new();
+    if string_leaves(&signal, 0, &mut leaves).is_err() {
+        return Err(AppError::BadRequest(format!(
+            "the feedback signal is nested deeper than {FEEDBACK_MAX_DEPTH} levels"
+        )));
+    }
+    let texts: Vec<(&str, &str)> = leaves.into_iter().map(|s| ("user", s)).collect();
     let preview = texts.first().map(|(_, s)| *s).unwrap_or("");
     guard_gate(
         &state,

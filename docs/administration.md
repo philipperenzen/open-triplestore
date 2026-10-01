@@ -272,7 +272,7 @@ See [rml.md](rml.md) for the full RML guide.
 
 | Variable | Default | Description |
 |---|---|---|
-| `JWT_SECRET` | *(random, saved to `data/jwt_secret`)* | JWT signing secret. Set explicitly in production so tokens survive restarts. The on-disk file is written `0600`. The server **refuses to start** if this is a well-known default/placeholder (e.g. `change-me-in-production`), naming the fix — leave it unset to auto-generate a strong one. |
+| `JWT_SECRET` | *(random, saved to `data/jwt_secret`)* | JWT signing secret, as a raw value or a secret reference (`env:NAME`, `file:/path`, `vault:…`; see [sources.md](sources.md#secret-references)). Under `OTS_ENV=production` a raw value is **refused at startup**; in development it is accepted with a one-time warning. Set explicitly in production so tokens survive restarts. The on-disk file is written `0600`. The server **refuses to start** if this is a well-known default/placeholder (e.g. `change-me-in-production`), naming the fix — leave it unset to auto-generate a strong one. |
 | `AUTH_DB_PATH` | `<data-dir>/auth.db` | Path to the SQLite identity database |
 | `ACCESS_TOKEN_EXPIRY_MINUTES` | `30` | Access token lifetime |
 | `REFRESH_TOKEN_EXPIRY_DAYS` | `30` | Refresh token lifetime |
@@ -304,7 +304,7 @@ See [rml.md](rml.md) for the full RML guide.
 | `OTS_CURSOR_TTL_DAYS` | `30` | A change-log cursor not updated for this long stops pinning retention and is dropped. |
 | `OTS_REPLICATION_ROLE` | `none` | `leader` records every write in the change log and serves followers; `follower` keeps this store read-only and tails a leader. See [operations.md](operations.md#replication). |
 | `OTS_REPLICATION_MODE` | `warm` | A follower's temperature — how often it catches up: `cold` (hourly), `warm` (every minute; `medium` is accepted), `hot` (long-polls the leader: the request for rows is held up to 25 s and answered the moment a row lands). |
-| `OTS_REPLICATION_LEADER_URL`, `OTS_REPLICATION_TOKEN` | *(unset)* | The leader's base URL and an admin API token minted there. A follower without a leader URL reports the omission in its status and applies nothing. |
+| `OTS_REPLICATION_LEADER_URL`, `OTS_REPLICATION_TOKEN` | *(unset)* | The leader's base URL and an admin API token minted there — the token raw or as a secret reference (`env:`/`file:`/`vault:`); under `OTS_ENV=production` a raw token is refused and the follower runs without one. A follower without a leader URL reports the omission in its status and applies nothing. |
 | `OTS_REPLICATION_GRAPHS` | `all` | The graphs a follower applies: `all`, or a comma-separated list of graph IRIs (`default` for the default graph). |
 | `OTS_REPLICATION_DATASETS` | *(unset)* | Instead of graphs: the leader's dataset ids, resolved to graphs through the leader's manifest at every catch-up. |
 | `OTS_REPLICATION_NODE_ID` | `$HOSTNAME` | This follower's name — the cursor it keeps on the leader, which pins the leader's retention. |
@@ -321,7 +321,8 @@ See [rml.md](rml.md) for the full RML guide.
 | `S3_ENDPOINT` | *(unset — local filesystem)* | S3/MinIO endpoint URL. If unset, assets are stored in `<data-dir>/assets/` |
 | `S3_BUCKET` | `triplestore-assets` | S3 bucket name |
 | `S3_ACCESS_KEY` | | S3 access key |
-| `S3_SECRET_KEY` | | S3 secret key |
+| `S3_SECRET_KEY` | | S3 secret key (raw or a secret reference; raw is refused under `OTS_ENV=production`) |
+| `LD_REGISTRY_TOKEN` | *(unset)* | Bearer token for the cross-app service registry (`LD_DISCOVERY`), raw or as a secret reference; raw is refused under `OTS_ENV=production`. |
 | `S3_REGION` | `us-east-1` | S3 region |
 | `BACKUP_DIR` | `data/backups` | Directory for scheduled backups |
 | `BACKUP_RETENTION_COUNT` | `7` | Number of backups to retain |

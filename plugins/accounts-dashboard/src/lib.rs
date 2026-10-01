@@ -13,7 +13,9 @@
 //!   external LLM gateway's usage ledger when
 //!   `ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL` is set (the Linked Data LLMs
 //!   gateway's `GET /v1/usage`; `ACCOUNTS_DASHBOARD_GATEWAY_KEY` rides along
-//!   as its bearer when set).
+//!   as its bearer when set — resolved through the host's secrets module, so
+//!   it is a reference like `env:NAME` or `file:/path`, and a raw value is
+//!   refused under `OTS_ENV=production`).
 //!
 //! Everything is gated on an ADMIN bearer via [`ots_plugin_api::PluginAuth`] —
 //! the host enforces the check, the plugin never sees credentials beyond
@@ -118,9 +120,18 @@ async fn overview(State(ctx): State<PluginContext>, headers: HeaderMap) -> Respo
         .unwrap_or(serde_json::Value::Null);
 
     // External gateway ledger — fail-soft: unreachable = marked unavailable.
+    // The bearer comes through the host's secrets module: a raw key in the
+    // production posture, or a reference that does not resolve, is refused
+    // and the gateway is reported unavailable with the reason, never called.
     let gateway_llm = match gateway_usage_url() {
         None => serde_json::json!({ "configured": false }),
-        Some(base) => fetch_gateway_usage(&base).await,
+        Some(base) => match ctx.secrets.env_secret("ACCOUNTS_DASHBOARD_GATEWAY_KEY") {
+            Ok(key) => fetch_gateway_usage(&base, key.as_deref()).await,
+            Err(e) => {
+                tracing::warn!("accounts-dashboard: ACCOUNTS_DASHBOARD_GATEWAY_KEY: {e}");
+                unavailable(&format!("ACCOUNTS_DASHBOARD_GATEWAY_KEY: {e}"))
+            }
+        },
     };
 
     let users: serde_json::Value = serde_json::from_str(&users).unwrap_or_default();
@@ -136,14 +147,12 @@ async fn overview(State(ctx): State<PluginContext>, headers: HeaderMap) -> Respo
     .into_response()
 }
 
-async fn fetch_gateway_usage(base: &str) -> serde_json::Value {
+async fn fetch_gateway_usage(base: &str, key: Option<&str>) -> serde_json::Value {
     let url = format!("{base}/v1/usage?group_by=user");
     let client = reqwest::Client::new();
     let mut req = client.get(&url).timeout(std::time::Duration::from_secs(5));
-    if let Ok(key) = std::env::var("ACCOUNTS_DASHBOARD_GATEWAY_KEY") {
-        if !key.trim().is_empty() {
-            req = req.bearer_auth(key.trim());
-        }
+    if let Some(key) = key.map(str::trim).filter(|k| !k.is_empty()) {
+        req = req.bearer_auth(key);
     }
     match req.send().await {
         Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
@@ -167,7 +176,7 @@ fn unavailable(reason: &str) -> serde_json::Value {
 mod tests {
     use super::*;
     use http_body_util::BodyExt as _;
-    use ots_plugin_api::{NoAuth, PluginStore};
+    use ots_plugin_api::{NoAuth, NoSecrets, PluginStore};
     use std::sync::Arc;
     use tower::ServiceExt as _;
 
@@ -186,6 +195,7 @@ mod tests {
             base_url: Arc::new("http://localhost:7878".to_string()),
             store: Arc::new(NullStore),
             auth: Arc::new(NoAuth),
+            secrets: Arc::new(NoSecrets),
         }
     }
 
