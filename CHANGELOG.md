@@ -77,6 +77,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an existing tag. See `docs/release-process.md`.
 
 ### Fixed
+- **OIDC resource-server mode, provider-token policy and several settings
+  are documented.** The resource-server mode, which accepts an external IdP's
+  access tokens (`OIDC_ISSUER`, `OIDC_AUDIENCE`, `OIDC_DEFAULT_ROLE`, the
+  claim-mapping variables and `ACCEPT_LEGACY_TOKENS`), was configured only
+  through `docker-compose.yml` and `.env.example`. It now has a section in
+  `docs/auth.md`: token requirements, account linking, role and organisation
+  mapping, what an IdP token may do (including minting API tokens), and that
+  `ACCEPT_LEGACY_TOKENS=false` also refuses the web UI's own sign-in.
+  `docs/oidc-provider.md` said provider tokens work "like any session token".
+  It now describes `OTS_OIDC_SESSION_POLICY` and `OTS_OIDC_WRITE_SCOPES`:
+  under the default `session` policy every registered client's token can
+  write, admin tokens always write, and because the provider issues only
+  `openid profile email`, `scoped` makes provider tokens read-only.
+  `.env.example` had claimed a client could widen its scopes; that claim is
+  corrected. The administration env table gains `WRITE_TIMEOUT_SECS` (a
+  timed-out write answers `503` but may still complete), `VALIDATION_API_URL`
+  (forwards the caller's bearer token), `SEED_STANDARDS_DEMO`,
+  `EMBED_FRAME_ANCESTORS` and the query-cache, mirror, SHACL run-index and
+  telemetry tuning knobs. `docs/plugins.md` lists the accounts-dashboard
+  settings. `docker-compose.yml` now passes `OTS_OIDC_SESSION_POLICY`,
+  `OTS_OIDC_WRITE_SCOPES`, `OTS_GUEST_CAPABILITIES` and
+  `EMBED_FRAME_ANCESTORS` through to the server; before, setting them in
+  `.env` had no effect.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if
