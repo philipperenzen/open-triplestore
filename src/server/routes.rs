@@ -3808,8 +3808,9 @@ fn is_pinned_version(version: &str) -> bool {
     !matches!(version.trim(), "" | "live" | "latest" | "current")
 }
 
-/// The set of SNAPSHOT graph IRIs in `version` of `dataset_id` whose SOURCE
-/// (live) graph is flagged `private`.
+/// The set of SNAPSHOT graph IRIs in `version` of `dataset_id` that a caller who
+/// cannot write the dataset must not read: those whose SOURCE (live) graph is
+/// flagged `private`.
 ///
 /// A version snapshot copies *all* of a dataset's selected graphs — including
 /// private ones — into version-scoped IRIs (`{base}/dataset/{id}/version/{v}/…`).
@@ -3817,46 +3818,182 @@ fn is_pinned_version(version: &str) -> bool {
 /// records the LIVE graphs), so a naive `private.contains(snapshot_iri)` check
 /// never matches and would leak private data to viewers through a pinned-version
 /// read. To filter correctly we map each snapshot graph back to its source via
-/// the version's `source_map` and drop snapshots whose source is private.
+/// the version's `source_map` and drop snapshots whose source is private. A
+/// snapshot the map does not tie to a source is dropped as well, as the version
+/// data and saved-query paths do.
 ///
-/// Returns an empty set for live/unknown versions or when the version has no
-/// recorded source mapping (older snapshots), which is the safe default for the
-/// *writer* fast-path — callers MUST only apply this filter to non-writers.
+/// The label is trimmed exactly as [`version_snapshot_graphs`] trims it, so both
+/// resolve the same version. Returns an empty set for live data and for a dataset
+/// with no private graph. Fails closed: a pinned version that cannot be read, or
+/// private flags that cannot be listed, are an error — an empty set would hide
+/// nothing. Callers MUST only apply this filter to non-writers.
 fn private_snapshot_graphs(
     state: &AppState,
     dataset_id: &str,
     version: &str,
-) -> std::collections::HashSet<String> {
+) -> Result<std::collections::HashSet<String>, AppError> {
+    let version = version.trim();
     if !is_pinned_version(version) {
-        return std::collections::HashSet::new();
+        return Ok(std::collections::HashSet::new());
     }
     // Live graph IRIs the owner marked private for this dataset.
     let private_sources: std::collections::HashSet<String> = state
         .auth_db
         .list_dataset_graph_entries(dataset_id)
-        .unwrap_or_default()
+        .map_err(|e| AppError::Internal(e.to_string()))?
         .into_iter()
         .filter(|e| e.private)
         .map(|e| e.graph_iri)
         .collect();
     if private_sources.is_empty() {
-        return std::collections::HashSet::new();
+        return Ok(std::collections::HashSet::new());
     }
-    // Map snapshot → source via the version's recorded graph map, keeping the
-    // snapshot IRIs whose source is private.
-    match crate::dataset_versions::registry::get_version(
+    let ver = crate::dataset_versions::registry::get_version(
         &state.store,
         state.base_url.as_str(),
         dataset_id,
         version,
-    ) {
-        Some(ver) => ver
+    )
+    .ok_or_else(|| AppError::NotFound(format!("dataset version '{version}' not found")))?;
+    // Map snapshot → source via the version's recorded graph map, keeping the
+    // snapshot IRIs whose source is private, plus any snapshot it leaves unmapped.
+    let mapped: std::collections::HashSet<&str> = ver
+        .source_map
+        .iter()
+        .map(|m| m.snapshot_graph.as_str())
+        .collect();
+    let unmapped: Vec<String> = ver
+        .snapshot_graphs
+        .iter()
+        .filter(|g| !mapped.contains(g.as_str()))
+        .cloned()
+        .collect();
+    Ok(ver
+        .source_map
+        .into_iter()
+        .filter(|m| private_sources.contains(&m.source_graph))
+        .map(|m| m.snapshot_graph)
+        .chain(unmapped)
+        .collect())
+}
+
+#[cfg(test)]
+mod private_snapshot_tests {
+    use super::private_snapshot_graphs;
+    use crate::auth::models::{OwnerType, SystemRole, Visibility};
+    use crate::dataset_versions::models::{DatasetVersion, VersionStatus};
+    use crate::dataset_versions::{registry, snapshot_as_version};
+    use crate::server::error::AppError;
+    use crate::server::AppState;
+    use crate::store::TripleStore;
+
+    const PUB: &str = "http://example.org/g/public";
+    const PRIV: &str = "http://example.org/g/private";
+
+    /// A dataset with a public and a private graph, both snapshotted into
+    /// version `1.0.0`. Returns the state and the private graph's snapshot IRI.
+    fn state_with_version() -> (AppState, String) {
+        let state = AppState::test_default_with_store(TripleStore::in_memory().unwrap());
+        let db = &state.auth_db;
+        db.create_user("owner", "owner", "owner@test.com", "hash", SystemRole::User)
+            .unwrap();
+        db.create_dataset(
+            "ds1",
+            "DS1",
+            None,
+            OwnerType::User,
+            "owner",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+        for g in [PUB, PRIV] {
+            db.add_dataset_graph("ds1", g).unwrap();
+            state
+                .store
+                .update(&format!(
+                    "INSERT DATA {{ GRAPH <{g}> {{ <urn:s> <urn:p> <urn:o> }} }}"
+                ))
+                .unwrap();
+        }
+        db.set_dataset_graph_private("ds1", PRIV, true).unwrap();
+        let ver = snapshot_as_version(
+            &state.store,
+            state.base_url.as_str(),
+            "ds1",
+            "1.0.0",
+            &[PUB.to_string(), PRIV.to_string()],
+            VersionStatus::Published,
+            None,
+            None,
+        )
+        .unwrap();
+        let snap = ver
             .source_map
-            .into_iter()
-            .filter(|m| private_sources.contains(&m.source_graph))
-            .map(|m| m.snapshot_graph)
-            .collect(),
-        None => std::collections::HashSet::new(),
+            .iter()
+            .find(|m| m.source_graph == PRIV)
+            .map(|m| m.snapshot_graph.clone())
+            .unwrap();
+        (state, snap)
+    }
+
+    /// The label is trimmed as `version_snapshot_graphs` trims it, so a padded
+    /// label withholds the same snapshot as the plain one.
+    #[test]
+    fn a_padded_label_withholds_the_same_snapshot() {
+        let (state, priv_snap) = state_with_version();
+        for label in ["1.0.0", " 1.0.0", "1.0.0 ", "\t1.0.0\n"] {
+            let private = private_snapshot_graphs(&state, "ds1", label).unwrap();
+            assert_eq!(
+                private,
+                std::collections::HashSet::from([priv_snap.clone()]),
+                "{label:?}"
+            );
+        }
+        for live in ["", " ", "live", " latest ", "current"] {
+            let private = private_snapshot_graphs(&state, "ds1", live).unwrap();
+            assert!(private.is_empty(), "{live:?}");
+        }
+    }
+
+    /// A pinned label that names no readable version is refused rather than read
+    /// as "nothing private", which would serve every snapshot graph.
+    #[test]
+    fn an_unreadable_pinned_version_fails_closed() {
+        let (state, _) = state_with_version();
+        for label in ["9.9.9", "1.0.0 x", "1.0.0%20"] {
+            assert!(
+                matches!(
+                    private_snapshot_graphs(&state, "ds1", label),
+                    Err(AppError::NotFound(_))
+                ),
+                "{label:?}"
+            );
+        }
+    }
+
+    /// A snapshot graph the version's map does not tie to a source is withheld.
+    #[test]
+    fn an_unmapped_snapshot_is_withheld() {
+        let (state, _) = state_with_version();
+        let base = state.base_url.as_str();
+        let stray = format!("{base}/dataset/ds1/version/2.0.0/stray");
+        let record = DatasetVersion {
+            dataset_id: "ds1".into(),
+            version: "2.0.0".into(),
+            status: VersionStatus::Draft,
+            graph_iri: format!("{base}/dataset/ds1/version/2.0.0"),
+            snapshot_graphs: vec![stray.clone()],
+            source_map: Vec::new(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            created_by: None,
+            derived_from: None,
+            notes: None,
+            branch: None,
+        };
+        registry::insert_version(&state.store, base, &record).unwrap();
+        let private = private_snapshot_graphs(&state, "ds1", "2.0.0").unwrap();
+        assert!(private.contains(&stray), "{private:?}");
     }
 }
 
@@ -3988,7 +4125,7 @@ fn scope_dataset_graphs(
                     if can_write {
                         out.extend(snap);
                     } else {
-                        let private = private_snapshot_graphs(state, id, v.as_str());
+                        let private = private_snapshot_graphs(state, id, v.as_str())?;
                         out.extend(snap.into_iter().filter(|g| !private.contains(g)));
                     }
                 }
@@ -4038,7 +4175,7 @@ fn is_authorized_version_graph(
                         // A snapshot of a PRIVATE source graph may only be read by a
                         // caller who can write the dataset — otherwise a viewer could
                         // read private data by drilling straight into the snapshot IRI.
-                        if private_snapshot_graphs(state, ds_id, v.as_str()).contains(graph) {
+                        if private_snapshot_graphs(state, ds_id, v.as_str())?.contains(graph) {
                             let can_write = match user_id {
                                 Some(uid) => {
                                     state.auth_db.can_write_dataset(uid, &d).unwrap_or(false)
@@ -5402,6 +5539,12 @@ async fn execute_dataset_query(
         .filter(|s| s.is_active)
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
 
+    // One normalised label for both version lookups below: the snapshot graphs
+    // and the private filter must resolve the same version. The filter used to
+    // get the raw label, so `?version=1.0.0%20` found the snapshot but no version
+    // to filter by, and served every snapshot graph, private ones included.
+    let version = version.map(str::trim);
+
     // When a version is pinned, scope to that version's snapshot graphs instead of
     // the service's live graphs (dataset access was already checked above, and the
     // version belongs to this dataset). Otherwise use the service graphs, falling
@@ -5452,10 +5595,11 @@ async fn execute_dataset_query(
     let graphs: Vec<String> = if can_write {
         graphs
     } else {
+        // A failed lookup refuses the read rather than counting as "nothing private".
         let mut private: std::collections::HashSet<String> = state
             .auth_db
             .list_dataset_graph_entries(dataset_id)
-            .unwrap_or_default()
+            .map_err(|e| AppError::Internal(e.to_string()))?
             .into_iter()
             .filter(|e| e.private)
             .map(|e| e.graph_iri)
@@ -5466,7 +5610,7 @@ async fn execute_dataset_query(
         // Add the snapshot IRIs whose SOURCE (live) graph is private (no-op for
         // live reads, where `private_snapshot_graphs` returns empty).
         if let Some(v) = version {
-            private.extend(private_snapshot_graphs(state, dataset_id, v));
+            private.extend(private_snapshot_graphs(state, dataset_id, v)?);
         }
         graphs
             .into_iter()

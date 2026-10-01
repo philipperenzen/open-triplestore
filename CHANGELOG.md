@@ -144,6 +144,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     where its summary line has a dash.
 
 ### Security
+- **A padded version label no longer reads a dataset's private snapshots.**
+  The dataset service (`GET`/`POST /api/datasets/{id}/services/{slug}/sparql`)
+  trimmed `version` before resolving the pinned version's snapshot graphs, but
+  handed the private-graph filter the raw label, which the version registry
+  refuses. With whitespace around the label (`?version=1.0.0%20`, a `+`, a tab,
+  or the same in a form body) the filter found no version and withheld nothing,
+  so a viewer, or an anonymous caller on a public dataset, read the snapshots
+  of graphs flagged private. Both lookups now use the one trimmed label, and
+  the filter fails closed: a pinned version it cannot read, or private flags it
+  cannot list, refuse the read, and a snapshot graph the version's map ties to
+  no source is withheld from non-writers, as the version-data and saved-query
+  paths already did. Every release since 0.4.0 is affected. Tests:
+  `tests/security_routes.rs`.
 - **Every configured secret goes through the secrets module.** `JWT_SECRET`,
   `LD_REGISTRY_TOKEN`, a replication follower's `OTS_REPLICATION_TOKEN` and the
   accounts-dashboard plugin's `ACCOUNTS_DASHBOARD_GATEWAY_KEY` were read as raw
