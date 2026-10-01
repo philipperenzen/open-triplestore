@@ -33,8 +33,57 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   seed-bundle:<id>`) and recognises its versions by that marker first — a
   version an earlier build registered is marked at the next reseed — so
   attribution cannot break the manifest's `public = false` or a licence record.
+- **Per-resource access control for LDP, with Web Access Control.** Every
+  resource under `/ldp/` now has an ACL at `R.acl` (`C.acl` or `C/.acl` for a
+  container), in the Solid WAC model (`acl:Authorization`, `acl:accessTo`,
+  `acl:default`, `acl:agent` / `acl:agentGroup` / `acl:agentClass`,
+  `acl:mode`), advertised with `Link: <R.acl>; rel="acl"` and `WAC-Allow` on
+  `GET`/`HEAD`. Agents are this store's principals by stable IRI
+  (`urn:ots:user:…`, `urn:ots:org:…`, `urn:ots:group:…`, `urn:ots:role:…`),
+  plus `acl:AuthenticatedAgent` and `foaf:Agent`; `GET /api/auth/me` returns
+  the caller's `agent_iri`. A resource without an ACL inherits the nearest
+  container's `acl:default`; whoever creates a resource owns it
+  (`R.acl#owner`: Read, Write, Control). The root ACL is seeded once, open by
+  default (`LDP_ROOT_ACL=open`: every signed-in user may read, write and
+  append, as before) or closed (`LDP_ROOT_ACL=owners`: admins only), and is
+  edited like any other. A `foaf:Agent` Read grant makes a resource readable
+  without a token. Not in scope: WebID-TLS, Solid-OIDC, `acl:origin`. See
+  `docs/ldp.md`, "Access control".
+
+### Changed
+- **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
+  LOV's re-serialization of the old DOAP namespace document (2009-2015). That
+  file stated no licence, and its 97 Japanese-language labels and comments were
+  never in the Apache-2.0 upstream repository. It is now
+  https://github.com/ewilderj/doap's own `schema/doap.rdf` at commit `d164b82d`
+  (2022-03-13, its latest revision), converted to Turtle with its triples
+  unchanged: 741 triples with labels in six languages, "Copyright © 2004-2016
+  Edd Dumbill, 2016-2017 Edd Wilder-James, 2018- The DOAP Authors", under the
+  Apache License 2.0. The registry seeds it as DOAP `2022-03-13` and points the
+  entry at it. On an install that seeded the old copy, version `2012-01-04` is
+  kept, deprecated. Its licence record no longer calls it the bundled file: it
+  says what the copy is and that part of it has no published licence. `NOTICE`
+  and `vocab/NOTICE.md` list DOAP under Apache-2.0.
+- **Releases are prepared by a workflow.** *Prepare release* in the Actions
+  tab takes a `patch`, `minor` or `major` bump and opens a PR that writes the
+  next version into `Cargo.toml`, `Cargo.lock`, `README.md` and `CHANGELOG.md`
+  (and, for a minor or major, the supported-versions tables). Merging it opens
+  the `develop → main` PR. Merging that tags the release and publishes the
+  GitHub Release and the image. No personal access token is needed:
+  `auto-tag.yml` calls `release.yml` itself instead of relying on its tag
+  push, and takes the version from `Cargo.toml` instead of a keyword in the PR
+  title. A `patch` on a `release/X.Y` branch releases that line and leaves the
+  `latest` GitHub Release and image tag alone. `release.yml` can be re-run for
+  an existing tag. See `docs/release-process.md`.
 
 ### Fixed
+- **SHACL result paths no longer render with a stray `>`.** The backend
+  serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
+  `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if
+  it were a bare IRI, showing `ex.org:label>`. The dataset validation dialog,
+  `/validation`, `/shacl/results`, the shape-graph meta report and the source
+  dry-run findings now shorten every `<…>` term and keep the operators, so a
+  sequence path reads `ex.org:a/ex.org:b`; the tooltip keeps the raw path.
 - **A published model's graphs read the same everywhere.** The graphs of a
   published model-registry version were served by
   `GET /api/models/{id}/versions/{ver}/data` to whoever may see the entry (a
@@ -75,6 +124,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   test job enables the feature, so they still run there, and auto-discovery of
   every other `tests/*.rs` is unaffected. The conformance table's totals are
   regenerated for the three suites this change set adds.
+- **The supported-versions tables were five releases old.** `SECURITY.md` and
+  `SUPPORT.md` still named `0.2.x` as the current line. They now list `0.7.x`
+  as Active and `0.6.x` as Security-only until 0.8.0, and the prepare workflow
+  keeps them current.
+- **The UI says when a validation or inference run left graphs out.** A run
+  that could not read every graph or shapes graph of a dataset answers
+  `partial: true`: a validation run is then a test run, not recorded, and an
+  inference run skips the rules it may not read. The dataset page, the
+  Validation page, the SHACL results page, the import wizard's pre-validation
+  and the shapes editor's Infer now show a note when that happens. Asking for
+  an official run on the SHACL results page used to reload the unchanged
+  latest run, so the click seemed to do nothing; the page now shows the test
+  run it got. In the same pass:
+  - The import wizard's pre-validation read the verdict off the response
+    envelope instead of its report, so it always showed "undefined issue(s)
+    found", even for conforming data.
+  - The dataset page's validation dialog showed the escape `\u2014` as text
+    where its summary line has a dash.
 
 ### Security
 - **Every configured secret goes through the secrets module.** `JWT_SECRET`,
@@ -104,21 +171,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   injection-flagged field, or a signal nested past the bound, answers `400`
   before anything reaches the gateway; the signals the UI sends relay as
   before.
-
-### Changed
-- **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
-  LOV's re-serialization of the old DOAP namespace document (2009-2015). That
-  file stated no licence, and its 97 Japanese-language labels and comments were
-  never in the Apache-2.0 upstream repository. It is now
-  https://github.com/ewilderj/doap's own `schema/doap.rdf` at commit `d164b82d`
-  (2022-03-13, its latest revision), converted to Turtle with its triples
-  unchanged: 741 triples with labels in six languages, "Copyright © 2004-2016
-  Edd Dumbill, 2016-2017 Edd Wilder-James, 2018- The DOAP Authors", under the
-  Apache License 2.0. The registry seeds it as DOAP `2022-03-13` and points the
-  entry at it. On an install that seeded the old copy, version `2012-01-04` is
-  kept, deprecated. Its licence record no longer calls it the bundled file: it
-  says what the copy is and that part of it has no published licence. `NOTICE`
-  and `vocab/NOTICE.md` list DOAP under Apache-2.0.
+- **LDP resources were readable and writable by every signed-in user, and
+  `PATCH` could rewrite the whole default graph.** Every `/ldp/` verb now
+  checks the resource's WAC ACL: `acl:Read` for `GET`/`HEAD`, `acl:Write` for
+  `PUT`/`PATCH`/`DELETE`, `acl:Append` on the container for `POST` and a
+  creating `PUT`, `acl:Control` to read or change an ACL. Admins pass; a
+  failed membership or ACL lookup refuses the request. `PATCH` no longer runs
+  its SPARQL Update against the store: it is restricted to `INSERT DATA`,
+  `DELETE DATA` and `DELETE/INSERT WHERE` on the default graph, evaluated on
+  the resource's own triples only, and its result may not describe another
+  resource under `/ldp/` or a server-managed triple; `PUT` and `POST` bodies
+  are held to the same rule, so a write authorized for one resource cannot
+  reach another through its body. On upgrade the open root ACL keeps every
+  request that worked before working; operators who want a closed space set
+  `LDP_ROOT_ACL=owners` before first start or tighten `/ldp/.acl` afterwards.
+  Tests: `tests/ldp_wac_security_http.rs`.
 
 ## [0.7.0] — 2026-09-28
 

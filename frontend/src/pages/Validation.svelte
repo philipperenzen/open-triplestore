@@ -16,6 +16,7 @@
   import ShaclStudioNav from '../components/ShaclStudioNav.svelte';
   import ShapesEditor from '../components/ShapesEditor.svelte';
   import IssueResults from '../components/IssueResults.svelte';
+  import PartialRunNote from '../components/PartialRunNote.svelte';
   import { toastError } from '../lib/toast.ts';
   import { unwrapValidationRun } from '../lib/validationReport.js';
 
@@ -119,7 +120,7 @@
       const run = unwrapValidationRun(res);
       if (!run.report) throw new Error($t('pages.validation.validationError'));
       const report = run.report;
-      datasetStatus[dsId] = { loading: false, result: report, summary: summarize(report), error: null, ranAt: run.ranAt };
+      datasetStatus[dsId] = { loading: false, result: report, summary: summarize(report), error: null, ranAt: run.ranAt, partial: run.partial };
       selectedDataset = dsId;
       viewingRunId = null;
       if (activeTab === 'history') loadHistory(dsId);
@@ -152,7 +153,7 @@
     try {
       const run = await getLatestValidationRun(dsId);
       if (run) {
-        datasetStatus[dsId] = { ...datasetStatus[dsId], result: run.report, summary: summaryFromRun(run), ranAt: run.run_timestamp, error: null };
+        datasetStatus[dsId] = { ...datasetStatus[dsId], result: run.report, summary: summaryFromRun(run), ranAt: run.run_timestamp, error: null, partial: false };
         datasetStatus = datasetStatus;
       }
     } catch {}
@@ -172,7 +173,7 @@
   async function viewRun(dsId, runId) {
     try {
       const run = await getValidationRun(dsId, runId);
-      datasetStatus[dsId] = { ...datasetStatus[dsId], result: run.report, summary: summaryFromRun(run), ranAt: run.run_timestamp };
+      datasetStatus[dsId] = { ...datasetStatus[dsId], result: run.report, summary: summaryFromRun(run), ranAt: run.run_timestamp, partial: false };
       datasetStatus = datasetStatus;
       viewingRunId = runId;
       activeTab = 'results';
@@ -454,6 +455,7 @@
                 </div>
               {/if}
             </div>
+            {#if activeStatus?.partial}<PartialRunNote />{/if}
             {#if !activeResult.conforms}
               <IssueResults results={activeResult.results} datasetName={selectedDs.name} datasetId={selectedDataset} {viewerEnabled} />
             {/if}

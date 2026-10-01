@@ -8,6 +8,9 @@ on:
   push:
     branches: [main, master, 'release/**']
   pull_request:
+  # release-prepare.yml opens its PRs with GITHUB_TOKEN, which starts no
+  # pull_request runs, so it dispatches this workflow on the PR's head instead.
+  workflow_dispatch:
 
 # Collapse superseded runs: a new push/PR-update on the same ref cancels the
 # in-flight one. push (refs/heads/*) and PR (refs/pull/*/merge) have distinct refs,

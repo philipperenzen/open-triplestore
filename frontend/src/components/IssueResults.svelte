@@ -5,6 +5,7 @@
   import { t } from 'svelte-i18n';
   import Select from './Select.svelte';
   import { copyToClipboard } from '../lib/clipboard.js';
+  import { formatShaclPath } from '../lib/validationReport.js';
 
   export let results = [];
   export let datasetName = '';
@@ -197,7 +198,7 @@
                 <div class="issue-top">
                   <span class="sev-badge sev-{s}">{r.severity}</span>
                   <a class="focus-link" href={`/resource?iri=${encodeURIComponent(r.focus_node)}`} title={r.focus_node}>{shortenIRI(r.focus_node)}</a>
-                  {#if r.path}<span class="issue-sep">·</span><span class="issue-path" title={r.path}>{shortenIRI(r.path)}</span>{/if}
+                  {#if r.path}<span class="issue-sep">·</span><span class="issue-path" title={r.path}>{formatShaclPath(r.path)}</span>{/if}
                   {#if viewerEnabled && datasetId && r.focus_node}
                     <a class="show3d-link" href={`/datasets/${datasetId}/viewer?focus=${encodeURIComponent(r.focus_node)}`} target="_blank" rel="noopener" title={$t('components.issueResults.showIn3dTitle')}>
                       <Boxes size={12} /> {$t('components.issueResults.showIn3d')}

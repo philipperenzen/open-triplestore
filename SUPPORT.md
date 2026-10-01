@@ -7,8 +7,8 @@ cut and branched, see [`docs/release-process.md`](docs/release-process.md).
 
 | Line | Status | Supported until | Notes |
 |---|---|---|---|
-| `0.2.x` | Active | current | Latest stable release. |
-| `0.1.x` | Security-only | 0.3.0 | Superseded by 0.2.x. |
+| `0.7.x` | Active | current | Latest stable release. |
+| `0.6.x` | Security-only | 0.8.0 | Superseded by 0.7.x. |
 | `develop` | Dev trunk | rolling | Active development branch; not a release line. |
 | older | EOL | — | Unsupported; please upgrade. |
 

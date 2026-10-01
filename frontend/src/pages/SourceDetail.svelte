@@ -29,6 +29,7 @@
   } from '../lib/api.js';
   import { Link, navigate } from '../lib/router/index.js';
   import { shortenIRI } from '../lib/rdf-utils.js';
+  import { formatShaclPath } from '../lib/validationReport.js';
   import { parseSourceProfile } from '../lib/sourceProfile.ts';
   import { parseRmlMatrix } from '../lib/rmlMatrix.ts';
   import { isAdmin, authInitialized } from '../lib/stores.js';
@@ -969,7 +970,7 @@
             {#if !drResult.classification.mappingDefects.length}<p class="dim small">{$t('pages.sourceDetail.noneFound')}</p>{/if}
             {#each drResult.classification.mappingDefects as f}
               <div class="finding defect">
-                <div><code>{shortenIRI(String(f.path ?? f.shape).replace(/^<|>$/g, ''))}</code> <span class="chip chip-tiny">{f.constraint}</span></div>
+                <div><code>{formatShaclPath(String(f.path ?? f.shape))}</code> <span class="chip chip-tiny">{f.constraint}</span></div>
                 <div class="small">{f.message}</div>
                 <div class="small dim">{$t('pages.sourceDetail.share', { values: { affected: f.affected, population: f.population, share: Math.round(f.share * 100) } })}</div>
               </div>
@@ -980,7 +981,7 @@
             {#if !drResult.classification.dataIssues.length}<p class="dim small">{$t('pages.sourceDetail.noneFound')}</p>{/if}
             {#each drResult.classification.dataIssues as f}
               <div class="finding issue">
-                <div><code>{shortenIRI(String(f.path ?? f.shape).replace(/^<|>$/g, ''))}</code> <span class="chip chip-tiny">{f.constraint}</span></div>
+                <div><code>{formatShaclPath(String(f.path ?? f.shape))}</code> <span class="chip chip-tiny">{f.constraint}</span></div>
                 <div class="small">{f.message}</div>
                 <div class="small dim">{$t('pages.sourceDetail.share', { values: { affected: f.affected, population: f.population, share: Math.round(f.share * 100) } })} · {f.focusNodes.map(shortenIRI).join(', ')}</div>
               </div>
@@ -1002,7 +1003,7 @@
                 {#if openEntity === e.subject}
                   <pre class="rml">{e.turtle}</pre>
                   {#each e.violations as v}
-                    <div class="small bad"><code>{v.path ? shortenIRI(v.path.replace(/^<|>$/g, '')) : ''}</code> {v.message}</div>
+                    <div class="small bad"><code>{v.path ? formatShaclPath(v.path) : ''}</code> {v.message}</div>
                   {/each}
                 {/if}
               </li>
@@ -1147,7 +1148,7 @@
                 </button>
                 {#if openItem === it.id}
                   {#each it.violations as v}
-                    <div class="small bad"><code>{v.path ? shortenIRI(v.path) : ''}</code> <span class="chip chip-tiny">{v.constraint}</span> {v.message}</div>
+                    <div class="small bad"><code>{v.path ? formatShaclPath(v.path) : ''}</code> <span class="chip chip-tiny">{v.constraint}</span> {v.message}</div>
                   {/each}
                   <pre class="rml">{it.snapshot}</pre>
                   {#if it.decision}

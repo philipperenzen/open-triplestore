@@ -1389,6 +1389,12 @@ pub async fn me(
             serde_json::Value::Array(organisations),
         );
         obj.insert("groups".into(), serde_json::Value::Array(groups));
+        // The IRI this user has in LDP `.acl` resources (Web Access Control).
+        #[cfg(feature = "ldp")]
+        obj.insert(
+            "agent_iri".into(),
+            serde_json::Value::String(crate::ldp::wac::user_agent_iri(&current_user.user_id)),
+        );
     }
     Ok(Json(body))
 }
