@@ -1300,6 +1300,18 @@ fn value_outside_a_datatype_range_is_inconsistent() {
     assert_eq!(inconsistent_rule(&s).as_deref(), Some("dt-not-type"));
 }
 
+/// D4, the storage limit: oxigraph keeps `"300"^^xsd:byte` as the integer
+/// 300, so the literal itself is not ill-typed after storage; a range of
+/// `xsd:byte` still rejects the value. (Storage that keeps lexical forms
+/// and datatypes would turn the first case into `dt-not-type`.)
+#[test]
+fn out_of_range_byte_is_caught_by_value_not_by_its_stored_datatype() {
+    let s = store_with("ex:x ex:n \"300\"^^xsd:byte .");
+    assert_eq!(inconsistent_rule(&s), None, "stored as the integer 300");
+    let s = store_with("ex:n rdfs:range xsd:byte . ex:x ex:n 300 .");
+    assert_eq!(inconsistent_rule(&s).as_deref(), Some("dt-not-type"));
+}
+
 /// dt-type2 feeding cls-svf1: a data value types the subject of a
 /// someValuesFrom restriction on a datatype that holds the value.
 #[test]

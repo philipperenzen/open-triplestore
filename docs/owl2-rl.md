@@ -1,10 +1,11 @@
 # OWL 2 RL Profile
 
 OWL 2 RL (Rule Language) is a tractable sub-language of OWL 2 that maps cleanly to rule-based
-forward chaining.  It runs 75 of the 78 OWL 2 RL/RDF rules of the W3C specification (OWL 2
-Profiles §4.3, Tables 4–9); the 3 it does not run (the literal-subject datatype rules) are
-listed below with their reason, and `tests/owl2_rl_conformance.rs` pins both lists against the
-specification's inventory. `eq-ref` runs only when asked for (see [eq-ref](#eq-ref-is-opt-in)).
+forward chaining.  It runs all 78 OWL 2 RL/RDF rules of the W3C specification (OWL 2
+Profiles §4.3, Tables 4–9), and `tests/owl2_rl_conformance.rs` pins the list against the
+specification's inventory. The three Table 8 rules whose conclusions have a literal subject
+are applied to the literals' data values (see [Datatype rules](#datatype-rules-dt--table-8)).
+`eq-ref` runs only when asked for (see [eq-ref](#eq-ref-is-opt-in)).
 
 > **Open Triplestore role names:** class definitions and class axioms = graph role **Model** (the T-Box); ABox content = graph role **Instances**.  Property definitions and relations (the R-Box) belong to the **Vocabulary** role, even though OWL groups them with the TBox for reasoning.  The RL reasoner reasons over the TBox+RBox schema together — the role split concerns where terms are stored and registered, not the reasoning semantics.
 
@@ -87,8 +88,40 @@ blank-node class expressions included.
 | dt-type1 | Every datatype of the OWL 2 RL datatype map (`xsd:integer`, `xsd:string`, `xsd:dateTime`, … — OWL 2 Profiles §4.2) is an `rdfs:Datatype` |
 | dt-not-type | A literal whose lexical form is not in the lexical space of its datatype (`"abc"^^xsd:integer`) is an **inconsistency**; every XSD-typed literal in scope is checked with the lexical rules SHACL's `sh:datatype` uses |
 
-`dt-type2`, `dt-eq` and `dt-diff` are not run: they type, equate or
-distinguish literals *as subjects*, which an RDF graph cannot hold.
+| dt-type2 | Every literal is of each datatype of the map whose value space holds its value: `"3"^^xsd:integer` is also an `xsd:decimal`, `xsd:byte`, … (never an `xsd:double`: the float and double value spaces are disjoint from the decimal one) |
+| dt-eq | Literals with equal values (`"1"^^xsd:integer`, `"1.0"^^xsd:decimal`) are the same |
+| dt-diff | Literals with different values are different |
+
+The three rules conclude triples with a literal subject, which an RDF graph cannot hold, so
+the engine draws their RDF-representable consequences itself, from the data values of the
+literals in scope (the OWL 2 RL datatype map of `src/reasoning/datatypes.rs`):
+
+- **Equal values.** A literal written two ways gets the other's triples (`dt-eq` with
+  `eq-rep-o`): the *variants* are written to the target graph. `owl:hasValue` (`cls-hv1/2`),
+  `owl:hasKey` (`prp-key`) and negative data assertions (`prp-npa2`) therefore match by value.
+- **Typing.** A literal has its `dt-type2` datatypes plus the classes `rdfs:range` (`prp-rng`)
+  and `owl:allValuesFrom` (`cls-avf`) give it, closed under `rdfs:subClassOf`,
+  `owl:equivalentClass` and `owl:intersectionOf`. A `owl:someValuesFrom` restriction on a data
+  property types its subject from that (`cls-svf1`).
+- **Inconsistencies.** A literal outside a datatype it is typed with (`:age rdfs:range
+  xsd:integer . :x :age "forty"`) is `dt-not-type`; two different values of a functional data
+  property, or of a `owl:maxCardinality 1` / `owl:maxQualifiedCardinality 1` restriction, are
+  `dt-diff` (with `eq-diff1`); a literal in `owl:Nothing`, two disjoint or complementary
+  classes, or counted by a maximum qualified cardinality of 0 is reported by the class rule.
+
+Equal-valued variants are written whatever the [identity policy](#identity-policy): the
+policy concerns `owl:sameAs` between individuals, not the values of literals.
+
+Not simulated: conclusions reached *through* a triple with a literal subject. They arise only
+when a data property is used as an object property (declared symmetric, transitive or the
+inverse of another), which OWL 2's typing rules out, and from `owl:sameAs` between a literal
+and an IRI.
+
+Storage limit: Oxigraph stores the integer-derived types (`xsd:byte` …
+`xsd:nonNegativeInteger`) as `xsd:integer` and `xsd:dateTimeStamp` as `xsd:dateTime`, so
+`"300"^^xsd:byte` reaches the reasoner as the integer 300 and is not flagged as ill-typed
+(decision D4: a documented limit, no ingest-time check). A range or restriction naming
+`xsd:byte` still rejects the value 300.
 
 ### Schema Rules (scm-*)
 
@@ -133,18 +166,28 @@ on with `Owl2RLReasoner::with_eq_ref(true)` or `"eq_ref": true` in the body of
 `POST /api/reasoning/materialize`. `sameas-off` skips it with the other equality rules. The
 inconsistencies that follow from it — `x owl:differentFrom x`, an individual listed twice in an
 `owl:AllDifferent` — are reported whether or not it runs. Without it, the only triples missing
-from the closure are the reflexive `owl:sameAs` ones.
+from the closure are the reflexive `owl:sameAs` ones. The grade (Full, docs/standards.md) is
+given with `eq-ref` off by default (decision D2).
 
-### Rules not run
+### The rule inventory
 
-The engine reports the two lists as `IMPLEMENTED_RULES` and
-`UNIMPLEMENTED_RULES` (`src/reasoning/owl2_rl.rs`); together they are the
-specification's 78 rules, and `tests/owl2_rl_conformance.rs` fails when they
-are not.
+The engine lists the rules it runs as `IMPLEMENTED_RULES` (`src/reasoning/owl2_rl.rs`), all 78
+of the specification; `UNIMPLEMENTED_RULES` is empty, and `tests/owl2_rl_conformance.rs` fails
+when the two lists are not exactly the specification's rules.
 
-| Rule | Why not |
-|------|---------|
-| dt-type2, dt-eq, dt-diff | need literal subjects (see above) |
+### How the closure is checked
+
+- `tests/owl2_rl_conformance.rs` has a test per rule group, and a differential test: a
+  test-only evaluator (`tests/support/rl_reference.rs`) applies the 78 rules naively over
+  *generalized* triples (literal subjects included, so `dt-type2` / `dt-eq` / `dt-diff` run as
+  written), and for seeded random graphs the engine must agree with it on consistency and,
+  when consistent, produce exactly the RDF-representable part of its closure (reflexive
+  `owl:sameAs` aside: those are `eq-ref`'s).
+- `tests/w3c_owl2_rl_manifests.rs` runs the approved W3C OWL 2 test cases of the RL profile;
+  `tests/w3c_sparql11_entailment_manifests.rs` runs the SPARQL 1.1 entailment-regime cases
+  for the OWL 2 RDF-Based Semantics. Known gaps are in
+  [conformance/owl2-rl.md](conformance/owl2-rl.md); no score is published (W3C test-suite
+  policy).
 
 ### Identity policy
 
