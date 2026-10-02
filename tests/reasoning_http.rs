@@ -850,6 +850,57 @@ mod consistency {
         assert!(body["consistent"].is_null(), "{body}");
     }
 
+    /// `eq_ref` in the body turns eq-ref on for that run; it is off without it.
+    /// A new inconsistency rule (prp-pdw) is a 422 that names it.
+    #[tokio::test]
+    async fn eq_ref_is_a_request_option_and_new_rules_name_themselves() {
+        let (state, token) = admin_state();
+        state
+            .store
+            .load_str(
+                "@prefix ex: <http://example.org/> . ex:x ex:p ex:y .",
+                RdfFormat::Turtle,
+                None,
+            )
+            .unwrap();
+        let reflexive = |state: &AppState| {
+            matches!(
+                state.store.query(&format!(
+                    "ASK {{ GRAPH <{RL_TG}> {{ <{EX}x> <http://www.w3.org/2002/07/owl#sameAs> <{EX}x> }} }}"
+                )),
+                Ok(QueryResults::Boolean(true))
+            )
+        };
+        let (st, body) = materialize(&state, &token, "owl2-rl").await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert!(!reflexive(&state), "eq-ref is off by default");
+        let app = test_app(state.clone());
+        let (st, _, txt) = req(
+            &app,
+            Method::POST,
+            "/api/reasoning/materialize",
+            &token,
+            Some(json!({ "regime": "owl2-rl", "eq_ref": true })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{txt}");
+        assert!(reflexive(&state), "eq_ref: true writes x owl:sameAs x");
+
+        state
+            .store
+            .load_str(
+                "@prefix owl: <http://www.w3.org/2002/07/owl#> . \
+                 @prefix ex: <http://example.org/> . \
+                 ex:p owl:propertyDisjointWith ex:q . ex:x ex:q ex:y .",
+                RdfFormat::Turtle,
+                None,
+            )
+            .unwrap();
+        let (st, body) = materialize(&state, &token, "owl2-rl").await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body["rule"], "prp-pdw", "{body}");
+    }
+
     #[tokio::test]
     async fn dataset_run_answers_422_and_records_the_outcome() {
         let (state, token) = admin_state();
