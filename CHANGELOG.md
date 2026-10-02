@@ -117,6 +117,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an existing tag. See `docs/release-process.md`.
 
 ### Fixed
+- **More `.env` settings reach the server under Docker Compose.**
+  `docker-compose.yml` passes the server an explicit environment list, so a
+  setting `.env.example` documents had no effect until it was on that list.
+  The list now includes the per-task model overrides (`LLM_SPARQL_MODEL`,
+  `LLM_SHACL_MODEL`, `LLM_CHAT_MODEL`), the LLM rate limits
+  (`LLM_RATE_LIMIT_PER_MIN`, `LLM_RATE_LIMIT_ANON_PER_MIN`), the prompt guard
+  (`LLM_GUARD_INJECTION_ACTION`, `LLM_GUARD_BLOCKLIST`,
+  `LLM_GUARD_MAX_MESSAGE_CHARS`, `LLM_GUARD_MAX_MESSAGES`,
+  `LLM_GUARD_MAX_TOTAL_CHARS`), the LLM request log
+  (`LLM_LOG_PREVIEW_DISABLED`, `LLM_LOG_RETENTION_DAYS`), `CLAMAV_ADDR` and
+  `OTS_ENV`. Each is passed empty when unset, which the server treats as
+  unset. `.env.example` now lists `OTS_ENV` and `LLM_CHAT_MODEL`. It also notes
+  that the production posture refuses the raw `JWT_SECRET` and
+  `S3_SECRET_KEY` this compose file passes, so those must be references first.
 - **OIDC resource-server mode, provider-token policy and several settings
   are documented.** The resource-server mode, which accepts an external IdP's
   access tokens (`OIDC_ISSUER`, `OIDC_AUDIENCE`, `OIDC_DEFAULT_ROLE`, the
