@@ -922,7 +922,8 @@ pub struct OauthProviderCreate {
     pub slug: String,
     pub provider_type: String,
     pub client_id: Option<String>,
-    /// Plaintext secret — will be encrypted before storage
+    /// Plaintext secret — will be encrypted before storage. Absent on an
+    /// update keeps the stored secret.
     pub client_secret: Option<String>,
     /// Pre-encrypted secret — used internally when updating without changing the secret
     #[serde(skip)]
@@ -931,8 +932,12 @@ pub struct OauthProviderCreate {
     pub tenant_id: Option<String>,
     pub entity_id: Option<String>,
     pub sso_url: Option<String>,
+    /// SAML IdP signing certificate (PEM). Never returned by a read; absent on
+    /// an update keeps the stored certificate.
     pub idp_certificate: Option<String>,
+    /// Space-separated, e.g. `openid email profile`.
     pub scopes: Option<String>,
+    /// JSON object as a string, claim value → grant (see [`OauthProvider`]).
     pub role_claim_map: Option<String>,
     pub auto_provision: bool,
     pub default_role: Option<String>,

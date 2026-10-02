@@ -155,6 +155,13 @@ pub async fn admin_update_provider(
             body.client_secret_enc = existing.client_secret_enc;
         }
     }
+    // The IdP certificate is redacted from every read, so a client editing the
+    // provider cannot send it back. Absent means "keep the stored one".
+    if body.idp_certificate.is_none() {
+        if let Ok(Some(existing)) = state.auth_db.get_oauth_provider_by_id(&id) {
+            body.idp_certificate = existing.idp_certificate;
+        }
+    }
     match state.auth_db.update_oauth_provider(&id, &body) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (
