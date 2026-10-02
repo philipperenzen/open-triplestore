@@ -257,7 +257,9 @@ pub struct MfaRequiredResponse {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct LogoutRequest {
-    pub refresh_token: String,
+    /// The refresh token to revoke; without it, the `refresh_token` cookie's.
+    #[serde(default)]
+    pub refresh_token: Option<String>,
 }
 
 // ─── API Token request/response types ────────────────────────────────────────
@@ -1295,33 +1297,44 @@ pub async fn refresh(
 }
 
 /// POST /api/auth/logout
+///
+/// Revokes the refresh token (from the JSON body's `refresh_token`, else the
+/// HttpOnly cookie) and clears the auth cookies: `204`. For a session that a
+/// SAML sign-in started, the whole refresh-token family is revoked, and when
+/// the IdP has a Single Logout endpoint the answer is `200` with
+/// `{"saml_logout_url": …}`, where the browser goes next to end the IdP
+/// session. Access tokens already issued stay valid until they expire.
 pub async fn logout(
     State(db): State<Arc<AuthDb>>,
     State(jwt_config): State<Arc<JwtConfig>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(cookie_config): State<CookieConfig>,
+    State(base_url): State<crate::server::BaseUrl>,
     headers: HeaderMap,
     body: axum::body::Bytes,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+) -> Result<axum::response::Response, (StatusCode, String)> {
     let mut logged_actor: Option<String> = None;
-    // Accept refresh token from JSON body OR from HttpOnly cookie (M-2)
-    let refresh_token_str: Option<String> = {
-        if !body.is_empty() {
-            serde_json::from_slice::<LogoutRequest>(&body)
-                .ok()
-                .map(|r| r.refresh_token)
-        } else {
-            headers
-                .get("cookie")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|c| {
-                    c.split(';')
-                        .find_map(|p| p.trim().strip_prefix("refresh_token=").map(str::to_string))
-                })
-        }
-    };
+    // Accept refresh token from JSON body OR from HttpOnly cookie (M-2). A
+    // body without one (the SPA sends `{}` when it holds no token) falls back
+    // to the cookie.
+    let from_body = (!body.is_empty())
+        .then(|| serde_json::from_slice::<LogoutRequest>(&body).ok())
+        .flatten()
+        .and_then(|r| r.refresh_token)
+        .filter(|t| !t.is_empty());
+    let refresh_token_str: Option<String> = from_body.or_else(|| {
+        headers
+            .get("cookie")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|c| {
+                c.split(';')
+                    .find_map(|p| p.trim().strip_prefix("refresh_token=").map(str::to_string))
+            })
+    });
 
     // Best effort: revoke the refresh token if valid
+    let mut saml_logout_url = None;
+    let mut saml_session = false;
     if let Some(ref tok) = refresh_token_str {
         if let Ok(claims) = jwt::verify_token(&jwt_config, tok) {
             if claims.token_type == "refresh" {
@@ -1329,6 +1342,18 @@ pub async fn logout(
                 let token_hash = hash_token(tok);
                 if let Ok(Some(stored)) = db.get_refresh_token_by_hash(&token_hash) {
                     let _ = db.revoke_refresh_token(&stored.id);
+                    if let Some(family) = stored.family_id.as_deref() {
+                        saml_session = matches!(db.get_saml_session(family), Ok(Some(_)));
+                        match crate::auth::saml::begin_saml_logout(
+                            &db,
+                            family,
+                            &base_url.0,
+                            &jwt_config.secret,
+                        ) {
+                            Ok(url) => saml_logout_url = url,
+                            Err(e) => tracing::warn!("SAML logout could not reach the IdP: {e:#}"),
+                        }
+                    }
                 }
             }
         }
@@ -1337,16 +1362,29 @@ pub async fn logout(
     {
         let mut b = AuditEventBuilder::new(AuditEventType::Logout, AuditOutcome::Success);
         b.actor_id = logged_actor;
+        if saml_session {
+            b = b.details(serde_json::json!({
+                "auth_method": "saml_slo",
+                "initiated_by": "sp",
+                "idp_logout": saml_logout_url.is_some(),
+            }));
+        }
         b.ip_address = audit::client_ip(&headers, None);
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
     }
 
-    Ok((
-        StatusCode::NO_CONTENT,
-        clear_auth_cookie_headers(cookie_config.secure),
-    ))
+    let cleared = clear_auth_cookie_headers(cookie_config.secure);
+    Ok(match saml_logout_url {
+        Some(url) => (
+            StatusCode::OK,
+            cleared,
+            Json(serde_json::json!({ "saml_logout_url": url })),
+        )
+            .into_response(),
+        None => (StatusCode::NO_CONTENT, cleared).into_response(),
+    })
 }
 
 /// GET /api/auth/me

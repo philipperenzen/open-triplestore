@@ -463,6 +463,7 @@ pub fn ensure_env_provider(
         auto_provision: true,
         default_role: Some(default_role.to_string()),
         is_active: true,
+        saml_config: None,
     };
     auth_db.create_oauth_provider(&create)
 }

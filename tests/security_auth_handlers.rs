@@ -347,6 +347,11 @@ async fn admin_json(
     (status, body_text(resp.into_body()).await)
 }
 
+/// Two throwaway self-signed certificates (public parts only). A build with
+/// the `saml` feature refuses an IdP certificate that does not parse.
+const CERT_A: &str = "-----BEGIN CERTIFICATE-----\nMIIBjzCCATWgAwIBAgIUIjqfh5zqhmH1xnwGUq/QcTy7rPswCgYIKoZIzj0EAwIw\nHDEaMBgGA1UEAwwRaWRwLWEuZXhhbXBsZS5vcmcwIBcNMjYxMDAzMDAyNzA4WhgP\nMjEyNjA5MDkwMDI3MDhaMBwxGjAYBgNVBAMMEWlkcC1hLmV4YW1wbGUub3JnMFkw\nEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE3gQC74t8Dyc98b51OQlvEftoy+4HlVSE\nvoHKz+fzNiY2rWZK969Yb+Bsf7q2dWw7KVVWn3bl7H1W6bMA0wkxn6NTMFEwHQYD\nVR0OBBYEFIPTHvOwMbf1YMxyLehMubBLTMD4MB8GA1UdIwQYMBaAFIPTHvOwMbf1\nYMxyLehMubBLTMD4MA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDSAAwRQIh\nAKtoJKTjRYIJvlqraaOnA4u4Dm81rkPAy9WKQyTgEat6AiB0zWiQdhhGsYLv8y+N\nqgJVeVw09c139bMic0vS5a5/3A==\n-----END CERTIFICATE-----";
+const CERT_B: &str = "-----BEGIN CERTIFICATE-----\nMIIBjjCCATWgAwIBAgIUF3enFtZkx9UNk5vj2pOriUKBaGAwCgYIKoZIzj0EAwIw\nHDEaMBgGA1UEAwwRaWRwLWIuZXhhbXBsZS5vcmcwIBcNMjYxMDAzMDAyNzA4WhgP\nMjEyNjA5MDkwMDI3MDhaMBwxGjAYBgNVBAMMEWlkcC1iLmV4YW1wbGUub3JnMFkw\nEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEl9Vo8reNxWbXZC5hsJumwizXE1aS/5g/\nZt5D0bx6mMUamhppRsjtpOcVCsn5Lo527hgJUMp32HZEr0x0ZFP+x6NTMFEwHQYD\nVR0OBBYEFIlKIFm6M3FiAUYsgd7SMPtf/o2BMB8GA1UdIwQYMBaAFIlKIFm6M3Fi\nAUYsgd7SMPtf/o2BMA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDRwAwRAIg\nGxZNifKtz8jgwWUkn9r+uasILugXZPdwhhGNzAccE2oCIEIXfFsoZRQrAB9d1u8H\nvB03ylhxZHXiMGF0eqGRGy2E\n-----END CERTIFICATE-----";
+
 /// The admin form cannot send back the client secret or the SAML IdP
 /// certificate (no read returns them), so an edit that omits them must keep
 /// the stored values. The bodies are the shape the form sends: `scopes` and
@@ -365,7 +370,7 @@ async fn provider_edit_keeps_redacted_secret_and_certificate() {
         "auto_provision": true, "default_role": "user", "is_active": true,
     });
     let mut create = base.clone();
-    create["idp_certificate"] = "CERT-A".into();
+    create["idp_certificate"] = CERT_A.into();
     create["client_secret"] = "secret-a".into();
     let (st, txt) = admin_json(
         &app,
@@ -392,19 +397,19 @@ async fn provider_edit_keeps_redacted_secret_and_certificate() {
     assert_eq!(st, StatusCode::NO_CONTENT, "{txt}");
     let p = db.get_oauth_provider_by_id(&id).unwrap().unwrap();
     assert!(!p.is_active);
-    assert_eq!(p.idp_certificate.as_deref(), Some("CERT-A"));
+    assert_eq!(p.idp_certificate.as_deref(), Some(CERT_A));
     assert_eq!(p.client_secret_enc, secret_a);
     assert_eq!(p.tenant_id.as_deref(), Some("tenant-1"));
     assert_eq!(p.role_claim_map.as_deref(), Some("{\"staff\":\"user\"}"));
 
     // A supplied certificate replaces the stored one.
     let mut edit = base.clone();
-    edit["idp_certificate"] = "CERT-B".into();
+    edit["idp_certificate"] = CERT_B.into();
     let (st, txt) = admin_json(&app, Method::PUT, &uri, &token, Some(edit)).await;
     assert_eq!(st, StatusCode::NO_CONTENT, "{txt}");
     let p = db.get_oauth_provider_by_id(&id).unwrap().unwrap();
     assert!(p.is_active);
-    assert_eq!(p.idp_certificate.as_deref(), Some("CERT-B"));
+    assert_eq!(p.idp_certificate.as_deref(), Some(CERT_B));
 
     // The list the form reads carries `is_active` and string `scopes`, and
     // never the certificate.
@@ -420,5 +425,5 @@ async fn provider_edit_keeps_redacted_secret_and_certificate() {
     let list: serde_json::Value = serde_json::from_str(&txt).unwrap();
     assert_eq!(list[0]["is_active"], true);
     assert_eq!(list[0]["scopes"], "openid email profile");
-    assert!(!txt.contains("CERT-B"), "{txt}");
+    assert!(!txt.contains("BEGIN CERTIFICATE"), "{txt}");
 }

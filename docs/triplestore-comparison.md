@@ -807,7 +807,7 @@ yield 4–8× improvement (see Optimisation Roadmap).
 
 | System | Built-in Auth | JWT | RBAC | TLS | OAuth / OIDC | SAML |
 |--------|:------------:|:---:|:----:|:---:|:------------:|:----:|
-| **Open Triplestore** | ✅ | ✅ | ✅ | 🟡¹ | ✅² | 🟡² |
+| **Open Triplestore** | ✅ | ✅ | ✅ | 🟡¹ | ✅² | ✅² |
 | Jena 5 Fuseki | ✅ (Shiro) | ❌ | 🟡 | ✅ | ❌ | ❌ |
 | GraphDB | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Stardog | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -819,7 +819,13 @@ yield 4–8× improvement (see Optimisation Roadmap).
 
 > ¹ TLS termination handled by a reverse proxy (nginx/Caddy); open-triplestore does not
 > terminate TLS natively (intentional, standard for 12-factor apps).
-> ² OAuth 2.0 / OIDC via `openidconnect` crate; SAML 2.0 via `samael` crate (optional).
+> ² OAuth 2.0 / OIDC via `openidconnect` crate. SAML 2.0 (service provider: SP- and
+> IdP-initiated sign-in, encrypted assertions, signed requests, Single Logout) via the
+> `samael` crate plus the store's own decryption and logout handling; the `saml` feature
+> is in the published image but not in `full`. Graded Full in
+> [`docs/standards.md`](standards.md) on 2026-10-03 (was 🟡: experimental, SP-initiated
+> only). SAML is not one of the 29 rows the Standards Score counts, so the score is
+> unchanged.
 
 ### 12.3 Ecosystem & Language Bindings
 
@@ -1011,7 +1017,7 @@ security patches not applied. Any existing deployment should migrate to QLever o
 4. **Rust runtime:** No JVM, no GC pauses, predictable latency tail, small binary. Embeds into
    any environment without a container.
 
-5. **Built-in auth:** JWT + SQLite auth with role hierarchy + OAuth/OIDC + optional SAML — unique
+5. **Built-in auth:** JWT + SQLite auth with role hierarchy + OAuth/OIDC + SAML 2.0 (in the image) — unique
    among the open-source options (Jena/RDF4J/QLever require separate auth infrastructure).
 
 6. **DCAT 2 + VoID + RML:** Data catalog vocabulary, linked-data statistics, and RDF mapping

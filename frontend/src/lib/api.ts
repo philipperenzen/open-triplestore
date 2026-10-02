@@ -235,17 +235,30 @@ export const refreshAccessToken = () => {
   return request('POST', '/api/auth/refresh', { refresh_token: refreshToken });
 };
 
-export const logout = async () => {
+/**
+ * Sign out: the server revokes the refresh token (this one, else the cookie's)
+ * and clears the HttpOnly cookies. For a SAML session it also answers with the
+ * IdP's Single Logout URL, which this returns so the caller can send the
+ * browser there; otherwise `null`.
+ */
+export const logout = async (): Promise<string | null> => {
+  let samlLogoutUrl: string | null = null;
   try {
     // M-2: send credentials so the HttpOnly cookies are cleared server-side
-    await fetch(`${API_BASE}/api/auth/logout`, {
+    const refreshToken = getRefreshToken();
+    const res = await fetch(`${API_BASE}/api/auth/logout`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: '{}',
+      body: JSON.stringify(refreshToken ? { refresh_token: refreshToken } : {}),
     });
+    if (res.status === 200) {
+      const body = await res.json().catch(() => null);
+      if (body && typeof body.saml_logout_url === 'string') samlLogoutUrl = body.saml_logout_url;
+    }
   } catch {}
   clearTokens();
+  return samlLogoutUrl;
 };
 
 export const getMe = () => request('GET', '/api/auth/me');
@@ -1719,6 +1732,24 @@ export const adminUpdateOauthProvider = (id, data) =>
 
 export const adminDeleteOauthProvider = (id) =>
   request('DELETE', `/api/admin/oauth/providers/${id}`);
+
+/** Read IdP metadata from `{ url }` (https) or `{ xml }` into provider fields. */
+export const adminReadSamlMetadata = (data: { url?: string; xml?: string }) =>
+  request('POST', '/api/admin/oauth/saml-metadata', data);
+
+/** Our entity ID, endpoints and SP keys, and the IdP certificates. */
+export const adminSamlOverview = (id) =>
+  request('GET', `/api/admin/oauth/providers/${id}/saml`);
+
+/** Add an SP key: generated, or `{ private_key, certificate }`. */
+export const adminCreateSamlKey = (id, data = {}) =>
+  request('POST', `/api/admin/oauth/providers/${id}/saml/keys`, data);
+
+export const adminActivateSamlKey = (id, kid) =>
+  request('POST', `/api/admin/oauth/providers/${id}/saml/keys/${encodeURIComponent(kid)}/activate`, {});
+
+export const adminDeleteSamlKey = (id, kid) =>
+  request('DELETE', `/api/admin/oauth/providers/${id}/saml/keys/${encodeURIComponent(kid)}`);
 
 // ─── Admin: Endpoint ACL ──────────────────────────────────────────────────────
 

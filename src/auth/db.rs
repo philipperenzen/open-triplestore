@@ -883,6 +883,37 @@ impl AuthDb {
             );
             CREATE INDEX IF NOT EXISTS idx_oauth_identities_user ON oauth_identities(user_id);
 
+            -- ── SAML: the store's own key pairs per provider (SP side) ─────────
+            -- The private key is stored like an OAuth client secret (auth::secret):
+            -- a secret reference, or AES-GCM encrypted with the HKDF-derived key.
+            -- `is_current` marks the key that signs; every key is published in the
+            -- SP metadata and tried for decryption, which is how a rollover works.
+            CREATE TABLE IF NOT EXISTS saml_sp_keys (
+                kid TEXT PRIMARY KEY,
+                provider_id TEXT NOT NULL REFERENCES oauth_providers(id) ON DELETE CASCADE,
+                private_key_enc TEXT NOT NULL,
+                certificate TEXT NOT NULL,
+                is_current INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_saml_sp_keys_provider ON saml_sp_keys(provider_id);
+
+            -- ── SAML: the IdP session behind each refresh-token family ─────────
+            -- Single Logout finds the families to revoke by (provider, NameID,
+            -- SessionIndex), and the LogoutRequest we send names them back.
+            CREATE TABLE IF NOT EXISTS saml_sessions (
+                family_id TEXT PRIMARY KEY,
+                provider_id TEXT NOT NULL REFERENCES oauth_providers(id) ON DELETE CASCADE,
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                name_id TEXT NOT NULL,
+                name_id_format TEXT,
+                name_qualifier TEXT,
+                sp_name_qualifier TEXT,
+                session_index TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_saml_sessions_subject ON saml_sessions(provider_id, name_id);
+
             -- ── Audit log (append-only) ──────────────────────────────────────
             CREATE TABLE IF NOT EXISTS audit_events (
                 id TEXT PRIMARY KEY,
@@ -1269,6 +1300,8 @@ impl AuthDb {
         // (supported in SQLite ≥ 3.37). For older SQLite, we try and ignore errors.
         let upgrades = [
             "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'",
+            // SAML settings beyond entity ID / SSO URL / certificates (JSON).
+            "ALTER TABLE oauth_providers ADD COLUMN saml_config TEXT",
             "ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1",
             // Why an account was deactivated ('guest_disabled' = the admin turned
             // guest self-registration off; such accounts auto-reactivate when it
@@ -6247,8 +6280,8 @@ impl AuthDb {
             "INSERT INTO oauth_providers
              (id, name, slug, provider_type, client_id, client_secret_enc, discovery_url, tenant_id,
               entity_id, sso_url, idp_certificate, scopes, role_claim_map, auto_provision,
-              default_role, is_active, created_at, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?17)",
+              default_role, is_active, created_at, updated_at, saml_config)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?17,?18)",
             params![
                 id,
                 p.name,
@@ -6268,7 +6301,8 @@ impl AuthDb {
                 p.auto_provision as i32,
                 p.default_role,
                 p.is_active as i32,
-                now
+                now,
+                saml_config_json(p)?
             ],
         )?;
         self.get_oauth_provider_by_id_conn(&conn, &id)?
@@ -6283,7 +6317,7 @@ impl AuthDb {
         conn.query_row(
             "SELECT id, name, slug, provider_type, client_id, client_secret_enc, discovery_url, tenant_id,
                     entity_id, sso_url, idp_certificate, scopes, role_claim_map, auto_provision,
-                    default_role, is_active, created_at, updated_at
+                    default_role, is_active, created_at, updated_at, saml_config
              FROM oauth_providers WHERE id=?1",
             params![id],
             Self::row_to_oauth_provider,
@@ -6312,6 +6346,12 @@ impl AuthDb {
                 .get::<_, Option<String>>(14)?
                 .unwrap_or_else(|| "user".to_string()),
             is_active: row.get::<_, i32>(15)? != 0,
+            // Lenient: a row written by a newer build (more fields) or by hand
+            // (bad JSON) reads as the defaults rather than failing the lookup.
+            saml_config: row
+                .get::<_, Option<String>>(18)?
+                .and_then(|j| serde_json::from_str(&j).ok())
+                .unwrap_or_default(),
             created_at: row.get(16)?,
             updated_at: row.get(17)?,
         })
@@ -6327,7 +6367,7 @@ impl AuthDb {
         conn.query_row(
             "SELECT id, name, slug, provider_type, client_id, client_secret_enc, discovery_url, tenant_id,
                     entity_id, sso_url, idp_certificate, scopes, role_claim_map, auto_provision,
-                    default_role, is_active, created_at, updated_at
+                    default_role, is_active, created_at, updated_at, saml_config
              FROM oauth_providers WHERE slug=?1",
             params![slug],
             Self::row_to_oauth_provider,
@@ -6339,12 +6379,12 @@ impl AuthDb {
         let sql = if active_only {
             "SELECT id, name, slug, provider_type, client_id, client_secret_enc, discovery_url, tenant_id,
                     entity_id, sso_url, idp_certificate, scopes, role_claim_map, auto_provision,
-                    default_role, is_active, created_at, updated_at
+                    default_role, is_active, created_at, updated_at, saml_config
              FROM oauth_providers WHERE is_active=1 ORDER BY name ASC"
         } else {
             "SELECT id, name, slug, provider_type, client_id, client_secret_enc, discovery_url, tenant_id,
                     entity_id, sso_url, idp_certificate, scopes, role_claim_map, auto_provision,
-                    default_role, is_active, created_at, updated_at
+                    default_role, is_active, created_at, updated_at, saml_config
              FROM oauth_providers ORDER BY name ASC"
         };
         let mut stmt = conn.prepare(sql)?;
@@ -6359,7 +6399,8 @@ impl AuthDb {
             "UPDATE oauth_providers SET name=?1, slug=?2, provider_type=?3, client_id=?4,
              client_secret_enc=?5, discovery_url=?6, tenant_id=?7, entity_id=?8, sso_url=?9,
              idp_certificate=?10, scopes=?11, role_claim_map=?12, auto_provision=?13,
-             default_role=?14, is_active=?15, updated_at=?16 WHERE id=?17",
+             default_role=?14, is_active=?15, updated_at=?16,
+             saml_config=COALESCE(?18, saml_config) WHERE id=?17",
             params![
                 p.name,
                 p.slug,
@@ -6379,7 +6420,8 @@ impl AuthDb {
                 p.default_role,
                 p.is_active as i32,
                 now,
-                id
+                id,
+                saml_config_json(p)?
             ],
         )?;
         Ok(())
@@ -6388,6 +6430,178 @@ impl AuthDb {
     pub fn delete_oauth_provider(&self, id: &str) -> anyhow::Result<()> {
         let conn = self.pool.get()?;
         conn.execute("DELETE FROM oauth_providers WHERE id=?1", params![id])?;
+        Ok(())
+    }
+
+    // ─── SAML SP keys and sessions ────────────────────────────────────────────
+
+    /// Store a new SP key for a provider. The first key of a provider becomes
+    /// its current (signing) key; later ones wait for [`Self::activate_saml_sp_key`].
+    pub fn create_saml_sp_key(
+        &self,
+        provider_id: &str,
+        kid: &str,
+        private_key_enc: &str,
+        certificate_b64: &str,
+    ) -> anyhow::Result<SamlSpKey> {
+        {
+            // Released before the read below: an in-memory store has a single
+            // pooled connection.
+            let conn = self.pool.get()?;
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO saml_sp_keys (kid, provider_id, private_key_enc, certificate, is_current, created_at)
+                 VALUES (?1, ?2, ?3, ?4,
+                         NOT EXISTS (SELECT 1 FROM saml_sp_keys WHERE provider_id = ?2 AND is_current = 1),
+                         ?5)",
+                params![kid, provider_id, private_key_enc, certificate_b64, now],
+            )?;
+        }
+        self.list_saml_sp_keys(provider_id)?
+            .into_iter()
+            .find(|k| k.kid == kid)
+            .ok_or_else(|| anyhow::anyhow!("SAML SP key not found after insert"))
+    }
+
+    /// A provider's SP keys, the current one first.
+    pub fn list_saml_sp_keys(&self, provider_id: &str) -> anyhow::Result<Vec<SamlSpKey>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT kid, provider_id, private_key_enc, certificate, is_current, created_at
+             FROM saml_sp_keys WHERE provider_id = ?1 ORDER BY is_current DESC, created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![provider_id], |row| {
+            Ok(SamlSpKey {
+                kid: row.get(0)?,
+                provider_id: row.get(1)?,
+                private_key_enc: row.get(2)?,
+                certificate: row.get(3)?,
+                is_current: row.get::<_, i32>(4)? != 0,
+                created_at: row.get(5)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Make `kid` the provider's signing key. Returns false when the provider
+    /// has no such key.
+    pub fn activate_saml_sp_key(&self, provider_id: &str, kid: &str) -> anyhow::Result<bool> {
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM saml_sp_keys WHERE provider_id = ?1 AND kid = ?2)",
+            params![provider_id, kid],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE saml_sp_keys SET is_current = (kid = ?2) WHERE provider_id = ?1",
+            params![provider_id, kid],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Delete a provider's SP key; the current key cannot be deleted. Returns
+    /// `Ok(None)` when there is no such key, `Ok(Some(false))` for the current key.
+    pub fn delete_saml_sp_key(&self, provider_id: &str, kid: &str) -> anyhow::Result<Option<bool>> {
+        let conn = self.pool.get()?;
+        let current: Option<bool> = conn
+            .query_row(
+                "SELECT is_current FROM saml_sp_keys WHERE provider_id = ?1 AND kid = ?2",
+                params![provider_id, kid],
+                |r| Ok(r.get::<_, i32>(0)? != 0),
+            )
+            .optional()?;
+        match current {
+            None => Ok(None),
+            Some(true) => Ok(Some(false)),
+            Some(false) => {
+                conn.execute(
+                    "DELETE FROM saml_sp_keys WHERE provider_id = ?1 AND kid = ?2",
+                    params![provider_id, kid],
+                )?;
+                Ok(Some(true))
+            }
+        }
+    }
+
+    /// Remember the IdP session a SAML sign-in started, under the refresh-token
+    /// family it was issued.
+    pub fn create_saml_session(&self, s: &SamlSession) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO saml_sessions
+             (family_id, provider_id, user_id, name_id, name_id_format, name_qualifier,
+              sp_name_qualifier, session_index, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                s.family_id,
+                s.provider_id,
+                s.user_id,
+                s.name_id,
+                s.name_id_format,
+                s.name_qualifier,
+                s.sp_name_qualifier,
+                s.session_index,
+                s.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn map_saml_session_row(row: &rusqlite::Row) -> rusqlite::Result<SamlSession> {
+        Ok(SamlSession {
+            family_id: row.get(0)?,
+            provider_id: row.get(1)?,
+            user_id: row.get(2)?,
+            name_id: row.get(3)?,
+            name_id_format: row.get(4)?,
+            name_qualifier: row.get(5)?,
+            sp_name_qualifier: row.get(6)?,
+            session_index: row.get(7)?,
+            created_at: row.get(8)?,
+        })
+    }
+
+    /// The SAML session behind a refresh-token family, if it came from SAML.
+    pub fn get_saml_session(&self, family_id: &str) -> anyhow::Result<Option<SamlSession>> {
+        let conn = self.pool.get()?;
+        conn.query_row(
+            "SELECT family_id, provider_id, user_id, name_id, name_id_format, name_qualifier,
+                    sp_name_qualifier, session_index, created_at
+             FROM saml_sessions WHERE family_id = ?1",
+            params![family_id],
+            Self::map_saml_session_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// The SAML sessions of one IdP subject at a provider.
+    pub fn saml_sessions_for_subject(
+        &self,
+        provider_id: &str,
+        name_id: &str,
+    ) -> anyhow::Result<Vec<SamlSession>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT family_id, provider_id, user_id, name_id, name_id_format, name_qualifier,
+                    sp_name_qualifier, session_index, created_at
+             FROM saml_sessions WHERE provider_id = ?1 AND name_id = ?2",
+        )?;
+        let rows = stmt.query_map(params![provider_id, name_id], Self::map_saml_session_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn delete_saml_session(&self, family_id: &str) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "DELETE FROM saml_sessions WHERE family_id = ?1",
+            params![family_id],
+        )?;
         Ok(())
     }
 
@@ -6457,6 +6671,16 @@ impl AuthDb {
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
+}
+
+/// The `saml_config` column value for a create/update body: its JSON, or
+/// `None` (an update then keeps the stored settings; a create stores none).
+fn saml_config_json(p: &OauthProviderCreate) -> anyhow::Result<Option<String>> {
+    p.saml_config
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(Into::into)
 }
 
 #[cfg(test)]

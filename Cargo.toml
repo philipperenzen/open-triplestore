@@ -70,12 +70,12 @@ geometry3d      = ["dep:parry3d-f64"]
 ## `--all-features` job compiles it (on a trixie-based rust image — see
 ## .gitlab-ci.yml).
 sfcgal3d        = ["geometry3d", "dep:sfcgal"]
-## SAML 2.0 SSO support (requires libxml2 + openssl via samael's xmlsec feature).
-## EXPERIMENTAL and deliberately NOT in `full`: the SP-initiated flow (login
-## route → AuthnRequest → ACS bound to that request) is covered by tests against
-## a simulated IdP (tests/security_federated.rs) but has not been verified
-## against a real one. CI enables it explicitly; see docs/auth.md.
-saml            = ["dep:samael", "samael/xmlsec"]
+## SAML 2.0 SSO, our side as the service provider (web-browser sign-in,
+## encrypted assertions, signed requests, single logout; docs/auth.md). Needs
+## libxml2, libxmlsec1, pkg-config and libclang at build time, so it is NOT in
+## `full`: a plain native build never needs them. The Docker image enables it
+## through the Dockerfile's CARGO_FEATURES, and CI builds it explicitly.
+saml            = ["dep:samael", "samael/xmlsec", "dep:openssl"]
 ## Test helpers (AppState::test_default_with_store etc.)
 test-utils      = []
 ## Template/example compile-time plugin (plugins/hello), mounted at /ext/hello.
@@ -320,8 +320,11 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # Full-text search (text-search feature)
 tantivy = { version = "0.26", optional = true }
 
-# SAML 2.0 SSO (saml feature)
+# SAML 2.0 SSO (saml feature). openssl is already linked through samael and
+# webauthn-rs; the SP uses it directly for XML decryption, redirect-binding
+# signatures and its own key pairs.
 samael = { version = "0.0.22", optional = true }
+openssl = { version = "0.10", optional = true }
 
 # OAuth 2.0 / OIDC
 openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }

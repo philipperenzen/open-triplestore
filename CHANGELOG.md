@@ -14,11 +14,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- **SP-initiated SAML sign-in (experimental `saml` feature).** A SAML button on
+- **SP-initiated SAML sign-in (`saml` feature).** A SAML button on
   the login page now goes to `GET /api/auth/saml/{slug}/login`, which redirects
   to the IdP's SSO URL with an AuthnRequest (HTTP-Redirect binding) and binds
   the attempt to the browser with a short-lived `saml_state` cookie
-  (`SameSite=None; Secure` with `SECURE_COOKIES`). The ACS now accepts only a
+  (`SameSite=None; Secure` whenever `BASE_URL` is https). The ACS now accepts only a
   signed response that answers that request (`InResponseTo`), from that
   browser, once and within 10 minutes. It then redirects to the SPA's
   `/oauth/callback` page instead of returning the tokens as JSON.
@@ -27,8 +27,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   succeed, and the login button led to a `404`. The store now identifies itself
   to the IdP with its own entity ID, the SP metadata URL
   `…/api/auth/saml/{slug}/metadata`, rather than reusing the IdP's entity ID.
-  Re-register the SP at the IdP with that entity ID. SAML stays out of `full`
-  until it has been verified against a real IdP. See `docs/auth.md`.
+  Re-register the SP at the IdP with that entity ID. See `docs/auth.md`.
+- **SAML 2.0 completed: IdP metadata import, encrypted assertions, signed
+  requests, Single Logout.** Per provider, a new `saml_config` holds our entity
+  ID override, the IdP's logout URL, the NameID format (persistent by default;
+  a transient NameID needs a subject attribute), attribute names (defaults now
+  include the `urn:oid:` names and the Microsoft role claim), the IdP-initiated
+  policy (off by default; when on, each assertion is accepted once), clock
+  skew, request signing, an encrypted-assertion requirement and a contact.
+  `POST /api/admin/oauth/saml-metadata` reads IdP metadata from an https URL
+  (no redirects) or pasted XML into the entity ID, SSO/SLO URLs and every
+  signing certificate; `idp_certificate` now holds several certificates, so an
+  IdP key rollover trusts old and new at once. Each provider gets its own SP
+  key pair, stored like an OAuth client secret, published in our metadata with
+  `use="signing"` and `use="encryption"` (samael's metadata labels both
+  `signing`; ours is written by the store) and managed under
+  `/api/admin/oauth/providers/{id}/saml/keys` (add, activate, delete: key
+  rollover). Assertions encrypted with AES-GCM or AES-CBC and RSA-OAEP decrypt;
+  AuthnRequests can be signed. `GET|POST /api/auth/saml/{slug}/slo` handles
+  Single Logout from the IdP (signed LogoutRequest → the named sessions'
+  refresh-token families are revoked → signed LogoutResponse), and signing out
+  of a SAML session revokes its family and returns `{"saml_logout_url"}` from
+  `POST /api/auth/logout`, which the web UI follows. Access tokens issued
+  before a logout stay valid until they expire. The admin form's SAML section
+  covers all of it. Tests: a fake IdP in `tests/security_federated.rs`.
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -82,6 +104,33 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asks for, and re-pins; the store now tells everyone which datasets that applies to.
 
 ### Changed
+- **SAML 2.0 is graded Full and ships in the Docker image.** The Dockerfile's
+  `CARGO_FEATURES` now defaults to `full,saml,plugin-postgres,plugin-mysql,plugin-mssql`;
+  the image already carried libxml2 and libxmlsec1, so it gains no package.
+  `saml` stays out of `full`, so a native `cargo build` still needs no
+  libxmlsec1, pkg-config or libclang. A custom `CARGO_FEATURES` must now list
+  `saml` to keep SAML. The admin UI no longer labels SAML experimental.
+  `docs/standards.md` grades it Full for the web-browser SSO and Single Logout
+  profiles with this store as the service provider (Artifact binding, ECP,
+  attribute queries, NameID management and metadata aggregates/MDQ out of
+  scope).
+- **SAML needs an https `BASE_URL` outside localhost.** The login route refuses
+  to start on a plain-http `BASE_URL` other than loopback, and the `saml_state`
+  cookie follows `BASE_URL` (https → `SameSite=None; Secure`) instead of
+  `SECURE_COOKIES`, which compose did not even forward. The public SP metadata
+  route now answers only for an active provider; admins fetch it before
+  activation from `/api/admin/oauth/providers/{id}/saml/metadata`.
+- **Docker Compose passes every `.env` setting to the server.** The
+  `triplestore` service listed its environment by name and had no `env_file`,
+  so documented settings such as `SECURE_COOKIES`, `TRUSTED_PROXY_CIDRS`,
+  `OTS_REMOTE_ALLOWLIST`, `OTS_DISABLE_REGISTRATION`, `LDP_ROOT_ACL`,
+  `RATE_LIMIT_DISABLED` and the `LLM_*` tuning never reached it, and
+  `BACKUP_RETENTION_COUNT`, `BACKUP_SCHEDULE_HOURS`, `S3_BUCKET`, `S3_REGION`
+  and `RUST_LOG` were hard-coded over `.env`. It now loads `.env` through
+  `env_file` (`required: false`, Compose 2.24+), and those five take their value
+  from `.env` with the old default. `scripts/check_compose_env.py`, in both CI
+  pipelines, fails when a documented variable is not forwarded or is
+  hard-coded.
 - **The Docker image ships the SQL connectors.** 0.7.0 announced PostgreSQL,
   MySQL / MariaDB and SQL Server datasources, but the image built only
   `--features full`, which leaves `plugin-postgres`, `plugin-mysql` and
@@ -123,6 +172,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an existing tag. See `docs/release-process.md`.
 
 ### Fixed
+- **Signing out revokes the session's refresh token.** The web UI sent `{}` as
+  the logout body, and the server read a body without `refresh_token` as "no
+  token" instead of falling back to the cookie, so the refresh token of an SSO
+  or password session stayed valid after sign-out. The UI now sends the token
+  it holds, and the server falls back to the cookie.
 - **The login page no longer offers SSO buttons that cannot sign in.** With
   `OIDC_ISSUER` set, the store creates an *Environment OIDC* provider entry
   (slug `env-oidc`, no client ID) to hold the accounts of IdP bearer tokens,
@@ -238,6 +292,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     where its summary line has a dash.
 
 ### Security
+- **SAML responses are checked more strictly.** Signatures must use RSA or
+  ECDSA with SHA-256, -384 or -512 (samael accepted any algorithm, SHA-1
+  included, when none was configured); a message with a DOCTYPE or larger than
+  1 MiB is refused before libxml parses it; a provider without an IdP signing
+  certificate never starts a sign-in (samael skips verification without one);
+  a refused response gets a generic error, with the reason in the audit log
+  only; request IDs carry 128 random bits. RSA PKCS#1 v1.5 key transport in
+  encrypted assertions is refused.
 - **Known advisories now in the image, through the SQL Server driver.** With
   `plugin-mssql` in the image (see *Changed*), tiberius 0.12.3, the latest
   release, brings rustls 0.21 and rustls-webpki 0.101 with it. Their

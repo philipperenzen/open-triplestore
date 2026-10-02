@@ -7,7 +7,7 @@
 # 1. release-notes — extracts the matching `## [X.Y.Z]` section from CHANGELOG.md
 #    and publishes a GitHub Release with those notes.
 # 2. publish-image — builds the 3-stage Dockerfile (its default CARGO_FEATURES:
-#    `full` plus the SQL connectors) and pushes it to GHCR (ghcr.io/philipperenzen/open-triplestore).
+#    `full`, `saml` and the SQL connectors) and pushes it to GHCR (ghcr.io/philipperenzen/open-triplestore).
 name: Release
 
 on:
@@ -153,8 +153,8 @@ jobs:
             type=semver,pattern={{major}}.{{minor}},value=${{ env.TAG }}
             type=raw,value=latest,enable=${{ needs.release-notes.outputs.latest == 'true' }}
 
-      # The 3-stage Dockerfile's default CARGO_FEATURES (`full` plus the SQL
-      # connectors) is the release feature set, so no build-args are needed here.
+      # The 3-stage Dockerfile's default CARGO_FEATURES (`full`, `saml` and the
+      # SQL connectors) is the release feature set, so no build-args are needed here.
       - name: Build and push image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
