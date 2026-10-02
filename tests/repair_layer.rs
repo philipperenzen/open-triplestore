@@ -1134,3 +1134,155 @@ async fn a_rewrite_merge_rematerialises_entailment_under_narrow_and_off() {
         );
     }
 }
+
+// ── The assistant (§9) ──────────────────────────────────────────────────────
+
+/// A scripted OpenAI-compatible gateway: each completion pops the next reply
+/// and keeps the request. One per test binary, on its own runtime thread,
+/// with `LLM_GATEWAY_URL` pointing at it.
+mod gateway {
+    use std::collections::VecDeque;
+    use std::sync::{Mutex, OnceLock};
+
+    use axum::extract::State;
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use serde_json::{json, Value};
+
+    pub struct Gateway {
+        pub replies: Mutex<VecDeque<String>>,
+        pub prompts: Mutex<Vec<Value>>,
+    }
+
+    async fn completions(
+        State(gw): State<&'static Gateway>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        gw.prompts.lock().unwrap().push(body);
+        let reply = gw.replies.lock().unwrap().pop_front().unwrap_or_default();
+        Json(json!({ "choices": [{ "message": { "role": "assistant", "content": reply } }] }))
+    }
+
+    pub fn get() -> &'static Gateway {
+        static GW: OnceLock<&'static Gateway> = OnceLock::new();
+        GW.get_or_init(|| {
+            let gw: &'static Gateway = Box::leak(Box::new(Gateway {
+                replies: Mutex::new(VecDeque::new()),
+                prompts: Mutex::new(Vec::new()),
+            }));
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async move {
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    tx.send(listener.local_addr().unwrap()).unwrap();
+                    let app = Router::new()
+                        .route("/v1/chat/completions", post(completions))
+                        .with_state(gw);
+                    axum::serve(listener, app).await.unwrap();
+                });
+            });
+            std::env::set_var("LLM_GATEWAY_URL", format!("http://{}", rx.recv().unwrap()));
+            gw
+        })
+    }
+
+    pub fn script(gw: &Gateway, replies: &[&str]) {
+        *gw.replies.lock().unwrap() = replies.iter().map(|r| r.to_string()).collect();
+        gw.prompts.lock().unwrap().clear();
+    }
+}
+
+/// The residual of a deterministic run goes to the model; its answer runs
+/// as heuristic rules through the chase and comes back as a kept proposal
+/// that applies through the gated apply. A rule set the heuristic guard
+/// refuses comes back as `rejected`, with no proposal.
+#[tokio::test]
+async fn the_assistant_answers_the_residual_with_heuristic_rules() {
+    let gw = gateway::get();
+    let (state, token) = bridge_state();
+    let app = test_app(state.clone());
+    gateway::script(
+        gw,
+        &[
+            "```turtle\n@prefix ots: <https://opentriplestore.org/ns#> .\n<urn:rule:name> a ots:Rule ;\n  ots:construct \"PREFIX ex: <http://example.org/> CONSTRUCT { ?this ex:name \\\"Unnamed\\\" } WHERE { ?this a ex:Bridge FILTER NOT EXISTS { ?this ex:name ?n } }\" ;\n  ots:message \"{?this} gets a placeholder name\" .\n```",
+            "@prefix ots: <https://opentriplestore.org/ns#> .\n<urn:rule:rename> a ots:Rule ;\n  ots:construct \"PREFIX ex: <http://example.org/> CONSTRUCT { ?this ex:name \\\"X\\\" } WHERE { ?this ex:name ?n }\" ;\n  ots:retract \"?this <http://example.org/name> ?n\" .",
+        ],
+    );
+    let (s, text) = send(
+        &app,
+        Method::POST,
+        "/api/llm/shacl",
+        Some(&token),
+        Some(json!({ "task": "repair", "dataset_id": "ds" })),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{text}");
+    let r: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(r["task"], "repair");
+    assert!(r["rejected"].is_null(), "{r:#}");
+    // The model was shown the residual: b3's missing name.
+    let prompt = gw.prompts.lock().unwrap()[0].to_string();
+    assert!(
+        prompt.contains("http://example.org/b3") && prompt.contains("MinCountConstraintComponent"),
+        "{prompt}"
+    );
+    let p = &r["proposal"];
+    assert_eq!(p["rules"]["heuristic"], 1, "{p:#}");
+    assert_eq!(p["persisted"], true);
+    // The model's rules run on their own: the proposal is theirs alone, one
+    // name for the one bridge without one.
+    let actions = p["actions"].as_array().unwrap();
+    assert_eq!(actions.len(), 1, "{p:#}");
+    assert_eq!(actions[0]["rule"], "urn:rule:name");
+    assert_eq!(actions[0]["confidence"], "heuristic");
+    assert_eq!(p["validation"]["before"]["violation"], 6, "{p:#}");
+    assert_eq!(p["validation"]["after"]["violation"], 5, "{p:#}");
+    let (s, a) = apply(&app, &token, p["proposal_id"].as_str().unwrap()).await;
+    assert_eq!(s, StatusCode::OK, "{a}");
+    assert!(ask(&state, &format!("ASK {{ GRAPH <{DATA}> {{ <http://example.org/b3> <http://example.org/name> \"Unnamed\" }} }}")));
+
+    let (s, text) = send(
+        &app,
+        Method::POST,
+        "/api/llm/shacl",
+        Some(&token),
+        Some(json!({ "task": "repair", "dataset_id": "ds", "residual": { "residual": [] } })),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{text}");
+    let r: Value = serde_json::from_str(&text).unwrap();
+    assert!(r["proposal"].is_null(), "{r:#}");
+    assert!(
+        r["rejected"]
+            .as_str()
+            .unwrap()
+            .contains("may not be destructive"),
+        "{r:#}"
+    );
+    // A viewer may not ask.
+    let viewer = user(&state, "viewer");
+    state
+        .auth_db
+        .set_resource_grant(
+            "dataset",
+            "ds",
+            "user",
+            "viewer",
+            ResourceRole::Viewer,
+            "adm",
+        )
+        .unwrap();
+    let (s, _) = send(
+        &app,
+        Method::POST,
+        "/api/llm/shacl",
+        Some(&viewer),
+        Some(json!({ "task": "repair", "dataset_id": "ds" })),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+}

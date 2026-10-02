@@ -271,6 +271,29 @@ epoch. A proposal's `H base-commit`, `H base-sequence` and `H base-epoch`
 headers are the values to pass. Without an option the route applies a patch
 exactly as it always has.
 
+### The assistant
+
+SHACL Studio's assistant (`POST /api/llm/shacl`) takes
+`"task": "repair"` with a `dataset_id`. It sends the model the *residual*
+of a deterministic run: the results no rule repaired (at most 50), the
+report-only constraints with their reasons, and the conflicts. Pass
+`residual` yourself to skip that run. The model may only answer with
+`ots:Rule`s. They run through the same chase, on their own (the
+deterministic rules are not part of their proposal, so it can be reviewed
+apart), as heuristic rules:
+
+- with a smaller budget (10 rounds, 1 000 nulls, 5 000 lines). A heuristic
+  rule that exhausts it is dropped and named in `rules.dropped`;
+- never destructive: no `ots:retract`, no `ots:destructive`, no
+  `ots:mergeMode ots:Rewrite`;
+- only over predicates the premises already use.
+
+Their proposal is kept with confidence `heuristic` for review and applied
+like any other. A rule set that does not load or is refused by those checks
+comes back as `rejected`, with no proposal: the message is the next thing
+to answer. Nothing is written to the store and no rule is saved into a
+shapes graph. `heuristic_rules` in a `POST …/repair` body runs rules of
+your own under the same restrictions.
 
 ---
 
