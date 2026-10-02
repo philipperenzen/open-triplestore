@@ -193,6 +193,9 @@ jobs:
   # sets OTS_TEST_LIVE_REQUIRED: a missing or renamed variable fails here
   # instead of skipping. The MySQL plugin serves MariaDB too, so its test runs
   # against both. The passwords are throwaway values for these containers.
+  # Every server also gets a certificate from a throwaway CA, so each driver
+  # runs once more with tls: true against that CA (OTS_TEST_<DIALECT>_TLS_CA
+  # names where it lies on the server; the test reads it back).
   live-sources:
     name: Database connectors against live servers
     runs-on: ubuntu-latest
@@ -240,8 +243,19 @@ jobs:
       OTS_TEST_MSSQL_HOST: 127.0.0.1
       OTS_TEST_MSSQL_PASSWORD: OtsLive-Passw0rd
       OTS_TEST_MSSQL_READER_PASSWORD: OtsLive-R3ader
+      OTS_TEST_POSTGRES_TLS_CA: /var/lib/postgresql/ots-tls/ca.pem
+      OTS_TEST_MYSQL_TLS_CA: /var/lib/mysql-files/ots-tls/ca.pem
+      OTS_TEST_MSSQL_TLS_CA: /var/opt/mssql/ots-tls/ca.pem
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # First, so the MariaDB and SQL Server restarts it needs overlap with
+      # the build; the tests wait for a server that is still coming back.
+      - name: Turn on TLS in the servers
+        run: >-
+          scripts/live-sources-tls.sh
+          ${{ job.services.postgres.id }} ${{ job.services.mysql.id }}
+          ${{ job.services.mariadb.id }} ${{ job.services.mssql.id }}
 
       # The HTTP pipeline test builds the main crate (see the backend job).
       - name: Free up disk space

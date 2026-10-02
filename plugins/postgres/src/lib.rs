@@ -160,13 +160,21 @@ fn tls_connector(root_bundle: Option<&str>) -> Result<MakeRustlsConnect, SourceE
 }
 
 /// A driver error as a message. The server's own message when there is one
-/// — it never carries the password — else the driver's summary. The host
-/// scrubs host, database and account on top.
+/// — it never carries the password — else the driver's summary with its
+/// causes, so a refused certificate says why ("error performing TLS
+/// handshake: invalid peer certificate: UnknownIssuer"). The host scrubs
+/// host, database and account on top.
 fn describe(e: &postgres::Error) -> String {
-    match e.as_db_error() {
-        Some(db) => db.message().to_string(),
-        None => e.to_string(),
+    if let Some(db) = e.as_db_error() {
+        return db.message().to_string();
     }
+    let mut message = e.to_string();
+    let mut cause = std::error::Error::source(e);
+    while let Some(c) = cause {
+        message.push_str(&format!(": {c}"));
+        cause = c.source();
+    }
+    message
 }
 
 struct PostgresConnection {

@@ -509,6 +509,10 @@ pub enum SourceError {
     Unsupported(String),
     /// The statement timeout elapsed.
     Timeout,
+    /// The driver failed without reporting an error: the host caught a panic
+    /// inside it. The message names the dialect, never the panic's text, which
+    /// goes to the server log only.
+    Driver(String),
 }
 
 impl fmt::Display for SourceError {
@@ -519,6 +523,7 @@ impl fmt::Display for SourceError {
             SourceError::Query(m) => write!(f, "query failed: {m}"),
             SourceError::Unsupported(m) => write!(f, "unsupported: {m}"),
             SourceError::Timeout => f.write_str("statement timeout elapsed"),
+            SourceError::Driver(m) => write!(f, "driver failure: {m}"),
         }
     }
 }

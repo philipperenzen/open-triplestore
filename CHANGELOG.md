@@ -1047,6 +1047,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   client remembers the members at the bookmark's own timestamp (LDES 1.0
   §3.2). A stream without `ldes:versionOfPath` or a timestamp path used to
   yield no members at all; each member is now its own entity.
+- **MySQL / MariaDB datasources connect over TLS.** The `plugin-mysql` driver
+  was built without a TLS backend, so `tls: true` against a server that offers
+  TLS (MySQL 8 does by default) panicked inside the driver and every probe,
+  introspection and run answered an opaque 500 — leaving cleartext as the only
+  setting that worked. The driver now carries rustls over ring, as the
+  PostgreSQL plugin does, with the bundled Mozilla roots plus a private CA from
+  `options.sslrootcert`. Beyond MySQL: the host now contains a panic in any
+  source driver as a named `driver failure` error (the detail goes to the
+  server log, and that connection is retired), and a PostgreSQL TLS refusal
+  says why (`invalid peer certificate: UnknownIssuer`) instead of only "error
+  performing TLS handshake". CI's `live-sources` job gives PostgreSQL, MySQL,
+  MariaDB and SQL Server a certificate from a throwaway CA and runs every
+  driver once more with `tls: true`
+  ([`scripts/live-sources-tls.sh`](scripts/live-sources-tls.sh)).
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if

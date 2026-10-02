@@ -81,19 +81,85 @@ rust:
 # missing variable into a failure. GitLab waits only for a service's port, so
 # each test retries its administrator connection while the server starts. The
 # passwords are throwaway values for these containers.
+# Every server also makes itself a certificate from a throwaway CA as it
+# starts (OTS_LIVE_TLS_GEN, the GitLab twin of scripts/live-sources-tls.sh:
+# services cannot see the repository), so each driver runs once more with
+# tls: true against that CA; OTS_TEST_<DIALECT>_TLS_CA names where it lies on
+# the server and the test reads it back.
 live-sources:
   stage: test
   image: rust:1.94-trixie
   services:
     - name: postgres:16
       alias: postgres
+      variables:
+        OTS_TLS_DIR: /var/lib/postgresql/ots-tls
+        OTS_TLS_OWNER: postgres
+      entrypoint:
+        - sh
+        - -c
+        - >-
+          eval "$(printenv OTS_LIVE_TLS_GEN)" &&
+          exec docker-entrypoint.sh postgres -c ssl=on
+          -c ssl_cert_file=/var/lib/postgresql/ots-tls/server.pem
+          -c ssl_key_file=/var/lib/postgresql/ots-tls/server.key
     - name: mysql:8.4
       alias: mysql
+      variables:
+        OTS_TLS_DIR: /var/lib/mysql-files/ots-tls
+        OTS_TLS_OWNER: mysql
+      entrypoint:
+        - sh
+        - -c
+        - >-
+          eval "$(printenv OTS_LIVE_TLS_GEN)" &&
+          exec docker-entrypoint.sh mysqld
+          --ssl-ca=/var/lib/mysql-files/ots-tls/ca.pem
+          --ssl-cert=/var/lib/mysql-files/ots-tls/server.pem
+          --ssl-key=/var/lib/mysql-files/ots-tls/server.key
     - name: mariadb:11.4
       alias: mariadb
+      variables:
+        OTS_TLS_DIR: /var/lib/mysql-files/ots-tls
+        OTS_TLS_OWNER: mysql
+      entrypoint:
+        - sh
+        - -c
+        - >-
+          eval "$(printenv OTS_LIVE_TLS_GEN)" &&
+          exec docker-entrypoint.sh mariadbd
+          --ssl-ca=/var/lib/mysql-files/ots-tls/ca.pem
+          --ssl-cert=/var/lib/mysql-files/ots-tls/server.pem
+          --ssl-key=/var/lib/mysql-files/ots-tls/server.key
     - name: mcr.microsoft.com/mssql/server:2022-latest
       alias: mssql
+      variables:
+        OTS_TLS_DIR: /var/opt/mssql/ots-tls
+        OTS_TLS_OWNER: mssql
+      entrypoint:
+        - sh
+        - -c
+        - >-
+          eval "$(printenv OTS_LIVE_TLS_GEN)" &&
+          exec /opt/mssql/bin/launch_sqlservr.sh /opt/mssql/bin/sqlservr
   variables:
+    # A CA and a server certificate for every service name, made inside the
+    # service before the server starts; SQL Server reads its certificate
+    # from mssql.conf. Not expanded, so the services see the script as is.
+    OTS_LIVE_TLS_GEN:
+      expand: false
+      value: |
+        set -e
+        d=$OTS_TLS_DIR
+        mkdir -p "$d"
+        openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=ots-live-test-ca -keyout "$d/ca.key" -out "$d/ca.pem" 2>/dev/null
+        openssl req -newkey rsa:2048 -nodes -subj /CN=ots-live-test-server -keyout "$d/server.key" -out "$d/server.csr" 2>/dev/null
+        printf '%s\n' 'subjectAltName=DNS:localhost,IP:127.0.0.1,DNS:postgres,DNS:mysql,DNS:mariadb,DNS:mssql' 'basicConstraints=critical,CA:FALSE' 'keyUsage=critical,digitalSignature,keyEncipherment' 'extendedKeyUsage=serverAuth' > "$d/server.ext"
+        openssl x509 -req -in "$d/server.csr" -CA "$d/ca.pem" -CAkey "$d/ca.key" -CAcreateserial -days 2 -extfile "$d/server.ext" -out "$d/server.pem" 2>/dev/null
+        chmod 600 "$d/server.key"
+        if [ "$(id -u)" = 0 ]; then chown -R "$OTS_TLS_OWNER" "$d"; fi
+        case $d in /var/opt/mssql/*) printf '%s\n' '[network]' "tlscert = $d/server.pem" "tlskey = $d/server.key" 'forceencryption = 0' > /var/opt/mssql/mssql.conf;; esac
+        set +e
     POSTGRES_PASSWORD: ots-live-pw
     MYSQL_ROOT_PASSWORD: ots-live-pw
     MARIADB_ROOT_PASSWORD: ots-live-pw
@@ -107,6 +173,9 @@ live-sources:
     OTS_TEST_MSSQL_HOST: mssql
     OTS_TEST_MSSQL_PASSWORD: OtsLive-Passw0rd
     OTS_TEST_MSSQL_READER_PASSWORD: OtsLive-R3ader
+    OTS_TEST_POSTGRES_TLS_CA: /var/lib/postgresql/ots-tls/ca.pem
+    OTS_TEST_MYSQL_TLS_CA: /var/lib/mysql-files/ots-tls/ca.pem
+    OTS_TEST_MSSQL_TLS_CA: /var/opt/mssql/ots-tls/ca.pem
   cache:
     key: "rust-trixie-live-$CI_COMMIT_REF_SLUG"
     paths:
