@@ -631,6 +631,8 @@ fn snapshot_affected_versions(
                 pipeline.name
             )),
             branch: None,
+            conforms_to_model: None,
+            conforms_to_version: None,
         };
         if let Err(e) = crate::dataset_versions::registry::insert_version(store, base_url, &record)
         {
