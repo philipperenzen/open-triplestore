@@ -5,8 +5,8 @@ suite** are vendored under
 [`tests/fixtures/w3c-shacl/`](../../tests/fixtures/w3c-shacl/PROVENANCE.md) and run in CI
 via [`tests/w3c_shacl_conformance.rs`](../../tests/w3c_shacl_conformance.rs).
 
-The counts below are development and regression results on those sections, at the
-two comparison levels described below. They are not a claim of conformance to the
+The counts below are development and regression results on those sections, at full
+report equality (described below). They are not a claim of conformance to the
 W3C SHACL Recommendation, and W3C has not reviewed or endorsed them. The tests are
 redistributed under the W3C Software and Document License — see
 [`PROVENANCE.md`](../../tests/fixtures/w3c-shacl/PROVENANCE.md) there.
@@ -15,14 +15,15 @@ redistributed under the W3C Software and Document License — see
 
 | | core | sparql | total |
 |---|---|---|---|
-| **Pass** (focus nodes) | **97** | **22** | **119** |
 | **Pass** (full report equality) | **97** | **22** | **119** |
 | Known-fail (ratcheted) | 1 | 0 | 1 |
 | Optional feature, unsupported (failure reported as the spec requires) | 0 | 1 | 1 |
 | Skipped (auxiliary `-data`/`-shapes` files, no test entry) | 15 | 0 | 15 |
 | Total files | 113 | 23 | 136 |
 
-*(Previous baselines: 2026-09-10: 119 pass / 2 known-fail, focus nodes only, with
+*(Until 2026-10-02 the runner compared `sh:conforms` and the focus-node multiset
+only; full report equality, added as a second level, matched it on every case and
+replaced it. Previous baselines: 2026-09-10: 119 pass / 2 known-fail, focus nodes only, with
 `shapesGraph-001` counted as a failure; 2026-06-11, core only: 97 pass / 1
 known-fail; 2026-06-10: 46 pass / 52 known-fail — see "Typed-term engine refactor"
 below for what closed that gap.)*
@@ -35,15 +36,12 @@ and `pre-binding-006` — expect the validator to *reject* the shapes graph
 (`mf:result sht:Failure`); the runner passes those when validation returns an
 error, and fails them when a report comes back.
 
-**Comparison levels.** Two tests in the runner, each with its own ratchet:
-
-- `w3c_shacl_core_suite`: `sh:conforms` plus the multiset of violation **focus
-  nodes** (IRIs/literals by lexical form, blank nodes by count).
-- `w3c_shacl_full_report_equality`: `sh:conforms` plus the multiset of **results**,
-  each compared on `sh:focusNode`, `sh:resultPath` (as a path structure),
-  `sh:value`, `sh:sourceShape`, `sh:sourceConstraintComponent`, `sh:resultSeverity`
-  and `sh:sourceConstraint` — everything except `sh:resultMessage`, whose wording
-  the spec leaves to the processor. Our side is the RDF report the engine writes
+**Comparison.** The runner's test, `w3c_shacl_full_report_equality`, compares
+`sh:conforms` and the multiset of **results**, each on `sh:focusNode`,
+`sh:resultPath` (as a path structure), `sh:value`, `sh:sourceShape`,
+`sh:sourceConstraintComponent`, `sh:resultSeverity` and `sh:sourceConstraint` —
+everything except `sh:resultMessage`, whose wording the spec leaves to the
+processor. Our side is the RDF report the engine writes
   (`src/shacl_studio/report_rdf.rs`), loaded back into the store, so the RDF
   serialisation is tested as well. Blank nodes of the data graph (focus nodes,
   values) match any blank node; a blank-node shape or `sh:sparql` node must be the
@@ -54,11 +52,9 @@ error, and fails them when a report comes back.
   `core/property/datatype-ill-formed` passes because its ill-formed literals are
   stored as written.
 
-**Gap policy:** a two-way ratchet. Every test not listed in `KNOWN_FAILURES` (or, for
-the second level, `KNOWN_REPORT_MISMATCHES`) must pass, and every listed test must
-still fail — silent regressions *and* silent fixes both turn CI red, so the lists
-cannot go stale. A tier-1 known failure counts as a known mismatch at the second
-level too.
+**Gap policy:** a two-way ratchet. Every test not listed in `KNOWN_FAILURES` must
+pass, and every listed test must still fail — silent regressions *and* silent fixes
+both turn CI red, so the list cannot go stale.
 
 **Optional features.** `OPTIONAL_UNSUPPORTED` lists tests of a feature the
 specification makes optional and requires a processor without it to report as a

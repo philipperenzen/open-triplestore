@@ -64,7 +64,7 @@ SUITES: dict[str, tuple[str, str]] = {
     "owl2_ql_conformance": ("OWL 2 QL", "spec-derived"),
     "owl2_dl_conformance": ("OWL 2 DL extension rules", "spec-derived"),
     "shacl_conformance": ("SHACL Core", "spec-derived"),
-    "w3c_shacl_conformance": ("SHACL Core", "**vendored W3C corpus** (core + sparql sections, manifest-driven)"),
+    "w3c_shacl_conformance": ("SHACL Core", "**vendored W3C corpus** (core + sparql sections, manifest-driven, full report equality)"),
     "w3c_sparql11_manifests": ("SPARQL 1.1 Query/Update", "**vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven)"),
     "shacl_rules_conformance": ("SHACL-AF rules", "spec-derived"),
     "shaclc_conformance": ("SHACL Compact Syntax", "spec-derived"),
@@ -107,14 +107,12 @@ UNSCORED_NOTE = (
 )
 
 
-def corpus(stem: str) -> tuple[int, int, int, int, int, tuple[int, int] | None]:
-    """(cases, pass, known failures, runner-side skips, optional-unsupported,
-    report-equality (pass, mismatches) or None) from the runner's own recorded
-    baselines (`Empirical baseline: N pass / N known-fail / N aux skips
-    [/ N optional unsupported]`, and optionally `Report-equality baseline:
-    N pass / N mismatch`, in tests/<stem>.rs) and its KNOWN_FAILURES,
-    OPTIONAL_UNSUPPORTED and KNOWN_REPORT_MISMATCHES lists. File counts are
-    not used: the corpus directories hold shared/aux files beyond the cases.
+def corpus(stem: str) -> tuple[int, int, int, int, int]:
+    """(cases, pass, known failures, runner-side skips, optional-unsupported)
+    from the runner's own recorded baseline (`Empirical baseline: N pass /
+    N known-fail / N aux skips [/ N optional unsupported]` in tests/<stem>.rs)
+    and its KNOWN_FAILURES and OPTIONAL_UNSUPPORTED lists. File counts are not
+    used: the corpus directories hold shared/aux files beyond the cases.
 
     Optional-unsupported cases test a feature the specification makes optional
     and requires a processor without it to report as a failure; the runner
@@ -144,20 +142,7 @@ def corpus(stem: str) -> tuple[int, int, int, int, int, tuple[int, int] | None]:
         raise SystemExit(
             f"{stem}.rs: OPTIONAL_UNSUPPORTED has {entries('OPTIONAL_UNSUPPORTED')} entries but the baseline says {optional}"
         )
-    equality = None
-    e = re.search(r"Report-equality baseline: (\d+) pass / (\d+) mismatch", src)
-    if e:
-        eq_pass, eq_mismatch = int(e.group(1)), int(e.group(2))
-        if entries("KNOWN_REPORT_MISMATCHES") != eq_mismatch:
-            raise SystemExit(
-                f"{stem}.rs: KNOWN_REPORT_MISMATCHES has {entries('KNOWN_REPORT_MISMATCHES')} entries but the baseline says {eq_mismatch}"
-            )
-        if eq_pass + eq_mismatch != passed:
-            raise SystemExit(
-                f"{stem}.rs: report-equality baseline ({eq_pass} + {eq_mismatch}) does not add up to the {passed} tier-1 passes"
-            )
-        equality = (eq_pass, eq_mismatch)
-    return passed + failed + skipped + optional, passed, failed, skipped, optional, equality
+    return passed + failed + skipped + optional, passed, failed, skipped, optional
 
 
 def render() -> str:
@@ -172,16 +157,12 @@ def render() -> str:
             if stem in CORPUS_RUNNERS:
                 if stem in PUBLISH_SCORE:
                     # Parsed on every run, so a stale baseline fails --check.
-                    cases, passed, failed, skipped, optional, equality = corpus(stem)
+                    cases, passed, failed, skipped, optional = corpus(stem)
                     plural = "" if failed == 1 else "s"
                     note = f"{cases} corpus cases: {passed} pass, {failed} known failure{plural}"
                     if optional:
                         note += f", {optional} optional feature unsupported (reported as the failure the spec requires)"
                     note += f", {skipped} runner-side skips (floor ≥{CORPUS_RUNNERS[stem]} asserted)"
-                    if equality:
-                        eq_pass, eq_mismatch = equality
-                        eq_plural = "" if eq_mismatch == 1 else "es"
-                        note += f"; at full report equality {eq_pass} pass, {eq_mismatch} known mismatch{eq_plural}"
                 else:
                     note = UNSCORED_NOTE
             elif ign:

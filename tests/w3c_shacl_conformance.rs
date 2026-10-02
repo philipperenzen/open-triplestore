@@ -9,23 +9,20 @@
 //! validator must reject. The runner loads the file as both shapes graph and
 //! data graph (the suite is designed for this — `sht:dataGraph <>` /
 //! `sht:shapesGraph <>` reference the file itself), runs our validator and
-//! compares at two levels, one `#[test]` each:
-//!
-//!   * `w3c_shacl_core_suite`: `sh:conforms` and, when non-conforming, the
-//!     **multiset of violation focus nodes** (IRIs/literals by lexical form;
-//!     blank nodes matched by count).
-//!   * `w3c_shacl_full_report_equality`: `sh:conforms` and the **multiset of
-//!     results**, each compared on focus node, `sh:resultPath` (as a path
-//!     structure), `sh:value`, `sh:sourceShape`, `sh:sourceConstraintComponent`,
-//!     `sh:resultSeverity` and `sh:sourceConstraint` — everything but
-//!     `sh:resultMessage`. Our side is the RDF report `report_rdf` writes,
-//!     loaded back, so the RDF serialisation is under test too. Blank nodes of
-//!     the data graph (focus nodes, values) are wildcards; shape and
-//!     constraint blank nodes must be the very node of the shapes graph.
+//! compares `sh:conforms` and the **multiset of results**, each on focus
+//! node, `sh:resultPath` (as a path structure), `sh:value`, `sh:sourceShape`,
+//! `sh:sourceConstraintComponent`, `sh:resultSeverity` and
+//! `sh:sourceConstraint` — everything but `sh:resultMessage`, whose wording the
+//! spec leaves to the processor. Our side is the RDF report `report_rdf`
+//! writes, loaded back, so the RDF serialisation is under test too. Blank nodes
+//! of the data graph (focus nodes, values) are wildcards; shape and constraint
+//! blank nodes must be the very node of the shapes graph. (Until 2026-10-02 the
+//! runner compared only `sh:conforms` and the focus-node multiset; full report
+//! equality replaced that once both agreed on every case.)
 //!
 //! For `sht:Failure` both check that validation returned an error.
 //!
-//! Gap policy (two-way ratchet): every test NOT in a tier's known list must
+//! Gap policy (two-way ratchet): every test NOT in `KNOWN_FAILURES` must
 //! pass, and every listed test must still fail — so silent regressions *and*
 //! silent fixes both turn the suite red, keeping the lists honest.
 //!
@@ -64,8 +61,8 @@ const KNOWN_FAILURES: &[(&str, &str)] = &[
 
 /// Tests of an optional feature this processor does not implement, where the
 /// specification requires the processor to report a failure — which it does.
-/// Each entry names the error text the failure must carry. These pass in both
-/// tiers when validation fails with that error, and fail on a report.
+/// Each entry names the error text the failure must carry. These pass when
+/// validation fails with that error, and fail on a report.
 const OPTIONAL_UNSUPPORTED: &[(&str, &str, &str)] = &[(
     "sparql/pre-binding/shapesGraph-001.ttl",
     "$shapesGraph",
@@ -74,13 +71,6 @@ const OPTIONAL_UNSUPPORTED: &[(&str, &str, &str)] = &[(
      expected report assumes support, which w3c/data-shapes#426 contests, and SHACL 1.2 \
      SPARQL Extensions drops both variables",
 )];
-
-/// Full-report-equality mismatches (`w3c_shacl_full_report_equality`), with
-/// the reason. Same two-way ratchet as `KNOWN_FAILURES`; a test in either list
-/// is not repeated here unless it also passes tier 1.
-///
-/// Report-equality baseline: 119 pass / 0 mismatch
-const KNOWN_REPORT_MISMATCHES: &[(&str, &str)] = &[];
 
 #[derive(Debug, PartialEq)]
 enum Outcome {
@@ -104,20 +94,9 @@ fn suite_files(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// `term` → comparable lexical key. Blank nodes all map to `_:` so they are
-/// compared by count, not label (labels are not stable across parsers).
-fn focus_key(term: &oxigraph::model::Term) -> String {
-    match term {
-        oxigraph::model::Term::NamedNode(nn) => nn.as_str().to_string(),
-        oxigraph::model::Term::Literal(l) => l.value().to_string(),
-        oxigraph::model::Term::BlankNode(_) => "_:".to_string(),
-        other => other.to_string(),
-    }
-}
-
 enum Expected {
-    /// `sh:conforms` and the multiset of expected focus nodes.
-    Report(bool, BTreeMap<String, usize>),
+    /// The expected `sh:conforms`; the results are read from the store.
+    Report(bool),
     /// `mf:result sht:Failure`: the validator must reject the shapes graph.
     Failure,
 }
@@ -148,35 +127,7 @@ fn expected(store: &TripleStore) -> Option<Expected> {
         _ => return None,
     };
 
-    let mut focus: BTreeMap<String, usize> = BTreeMap::new();
-    if let Ok(QueryResults::Solutions(sols)) = store.query(
-        "PREFIX sht: <http://www.w3.org/ns/shacl-test#> \
-         PREFIX mf: <http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#> \
-         PREFIX sh: <http://www.w3.org/ns/shacl#> \
-         SELECT ?f WHERE { GRAPH <urn:t:shapes> { \
-            ?t a sht:Validate ; mf:result ?r . ?r sh:result ?res . ?res sh:focusNode ?f } }",
-    ) {
-        for sol in sols.flatten() {
-            if let Some(f) = sol.get("f") {
-                *focus.entry(focus_key(f)).or_insert(0) += 1;
-            }
-        }
-    }
-    Some(Expected::Report(conforms, focus))
-}
-
-/// Actual focus-node multiset from our report, normalised like `focus_key`.
-fn actual_focus(report: &ValidationReport) -> BTreeMap<String, usize> {
-    let mut out: BTreeMap<String, usize> = BTreeMap::new();
-    for r in &report.results {
-        let key = if r.focus_node.starts_with("_:") {
-            "_:".to_string()
-        } else {
-            r.focus_node.clone()
-        };
-        *out.entry(key).or_insert(0) += 1;
-    }
-    out
+    Some(Expected::Report(conforms))
 }
 
 /// A loaded test case: the store with the file in `urn:t:shapes` and
@@ -282,9 +233,9 @@ fn check_optional(case: &Case, needle: &str) -> Outcome {
     }
 }
 
-/// Validate, settling `sht:Failure` cases; `Ok` carries the report and the
-/// expected `sh:conforms` for a report case.
-fn validated(case: &Case) -> Result<(ValidationReport, bool), Outcome> {
+/// Validate, settling `sht:Failure` cases and a wrong `sh:conforms`; `Ok`
+/// carries the report of a report case.
+fn validated(case: &Case) -> Result<ValidationReport, Outcome> {
     let report = match run_validate(case) {
         Ok(r) => r,
         Err(e) => {
@@ -299,34 +250,16 @@ fn validated(case: &Case) -> Result<(ValidationReport, bool), Outcome> {
             "expected the validator to reject the shapes graph (sht:Failure), got a report with conforms={}",
             report.conforms
         ))),
-        Expected::Report(want_conforms, _) => {
+        Expected::Report(want_conforms) => {
             if report.conforms != *want_conforms {
                 return Err(Outcome::Fail(format!(
                     "conforms: want {want_conforms}, got {} ({} results)",
                     report.conforms, report.results_count
                 )));
             }
-            Ok((report, *want_conforms))
+            Ok(report)
         }
     }
-}
-
-/// Tier 1: `sh:conforms` and the focus-node multiset.
-fn run_focus_tier(case: &Case) -> Outcome {
-    let (report, want_conforms) = match validated(case) {
-        Ok(v) => v,
-        Err(outcome) => return outcome,
-    };
-    let Expected::Report(_, want_focus) = &case.expected else {
-        unreachable!("validated() settles sht:Failure cases");
-    };
-    if !want_conforms && !want_focus.is_empty() {
-        let got = actual_focus(&report);
-        if &got != want_focus {
-            return Outcome::Fail(format!("focus nodes: want {want_focus:?}, got {got:?}"));
-        }
-    }
-    Outcome::Pass
 }
 
 const SH: &str = "http://www.w3.org/ns/shacl#";
@@ -471,10 +404,10 @@ fn result_keys(store: &TripleStore, graph: &str, report_pattern: &str) -> BTreeM
     out
 }
 
-/// Tier 2: `sh:conforms` and the full result multiset, compared through the
-/// RDF report our writer produces.
-fn run_full_tier(case: &Case) -> Outcome {
-    let (report, _) = match validated(case) {
+/// `sh:conforms` and the full result multiset, compared through the RDF report
+/// our writer produces.
+fn run_case(case: &Case) -> Outcome {
+    let report = match validated(case) {
         Ok(v) => v,
         Err(outcome) => return outcome,
     };
@@ -517,7 +450,7 @@ fn run_full_tier(case: &Case) -> Outcome {
     ))
 }
 
-/// What one tier's pass over every suite file found.
+/// What a pass over every suite file found.
 #[derive(Default)]
 struct Tally {
     total_files: usize,
@@ -531,8 +464,8 @@ struct Tally {
     seen_optional: usize,
 }
 
-/// Run `check` on every suite file under the two-way ratchet of `known`.
-fn run_tier(tier: &str, known: &[(&str, &str)], check: fn(&Case) -> Outcome) -> Tally {
+/// Run every suite file under the two-way ratchet of `KNOWN_FAILURES`.
+fn run_suite() -> Tally {
     let mut t = Tally::default();
     for suite in SUITES {
         let root = Path::new(FIXTURES).join(suite);
@@ -574,11 +507,11 @@ fn run_tier(tier: &str, known: &[(&str, &str)], check: fn(&Case) -> Outcome) -> 
                 }
                 continue;
             }
-            let known_entry = known.iter().find(|(k, _)| *k == rel);
+            let known_entry = KNOWN_FAILURES.iter().find(|(k, _)| *k == rel);
             if known_entry.is_some() {
                 t.seen_known += 1;
             }
-            match check(&case) {
+            match run_case(&case) {
                 Outcome::Pass => {
                     t.pass += 1;
                     suite_pass += 1;
@@ -597,13 +530,13 @@ fn run_tier(tier: &str, known: &[(&str, &str)], check: fn(&Case) -> Outcome) -> 
             }
         }
         println!(
-            "W3C SHACL {tier} {suite}: {suite_pass} passed, {suite_known} known-fail, \
+            "W3C SHACL {suite}: {suite_pass} passed, {suite_known} known-fail, \
              {suite_optional} optional unsupported, {suite_skip} skipped, {} files",
             files.len()
         );
     }
     println!(
-        "W3C SHACL {tier} total: {} passed, {} known-fail, {} optional unsupported, {} skipped, {} files",
+        "W3C SHACL total: {} passed, {} known-fail, {} optional unsupported, {} skipped, {} files",
         t.pass,
         t.known_fail,
         t.optional,
@@ -616,13 +549,13 @@ fn run_tier(tier: &str, known: &[(&str, &str)], check: fn(&Case) -> Outcome) -> 
     t
 }
 
-/// The asserts both tiers share: the ratchet in both directions, every list
-/// entry names a vendored file, and the skip ceiling.
-fn assert_tally(t: &Tally, known: &[(&str, &str)], list: &str) {
+#[test]
+fn w3c_shacl_full_report_equality() {
+    let t = run_suite();
     assert_eq!(
         t.seen_known,
-        known.len(),
-        "every {list} key must name a vendored, loadable file (stale entries?)"
+        KNOWN_FAILURES.len(),
+        "every KNOWN_FAILURES key must name a vendored, loadable file (stale entries?)"
     );
     assert_eq!(
         t.seen_optional,
@@ -631,12 +564,12 @@ fn assert_tally(t: &Tally, known: &[(&str, &str)], list: &str) {
     );
     assert!(
         t.unexpected_failures.is_empty(),
-        "tests failing that are not in {list}:\n  {}",
+        "tests failing that are not in KNOWN_FAILURES:\n  {}",
         t.unexpected_failures.join("\n  ")
     );
     assert!(
         t.unexpected_passes.is_empty(),
-        "{list} entries now pass — remove them to ratchet forward:\n  {}",
+        "KNOWN_FAILURES entries now pass — remove them to ratchet forward:\n  {}",
         t.unexpected_passes.join("\n  ")
     );
     assert!(
@@ -645,12 +578,6 @@ fn assert_tally(t: &Tally, known: &[(&str, &str)], list: &str) {
         t.skip.len(),
         t.skip.join("\n  ")
     );
-}
-
-#[test]
-fn w3c_shacl_core_suite() {
-    let t = run_tier("focus", KNOWN_FAILURES, run_focus_tier);
-    assert_tally(&t, KNOWN_FAILURES, "KNOWN_FAILURES");
     // A floor as well as a ratchet. The runner turns an unreadable or
     // unparseable file into a silent skip, so a Turtle-parser regression
     // would have turned every file into a skip and still passed the
@@ -659,24 +586,6 @@ fn w3c_shacl_core_suite() {
     assert!(
         t.pass >= 110,
         "only {} W3C SHACL cases passed (floor 110); skips: {}",
-        t.pass,
-        t.skip.len()
-    );
-}
-
-#[test]
-fn w3c_shacl_full_report_equality() {
-    // A tier-1 failure is a report mismatch too: those entries carry over.
-    let known: Vec<(&str, &str)> = KNOWN_FAILURES
-        .iter()
-        .chain(KNOWN_REPORT_MISMATCHES)
-        .copied()
-        .collect();
-    let t = run_tier("full-report", &known, run_full_tier);
-    assert_tally(&t, &known, "KNOWN_FAILURES / KNOWN_REPORT_MISMATCHES");
-    assert!(
-        t.pass >= 110,
-        "only {} W3C SHACL cases passed at full report equality (floor 110); skips: {}",
         t.pass,
         t.skip.len()
     );

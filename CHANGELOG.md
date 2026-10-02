@@ -95,11 +95,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `sh:sparql` constraint or `sh:select` validator on a node shape whose row
   leaves `?value` unbound now reports the focus node as the value, as SHACL
   §5.3.2 says (it reported none).
-- **The W3C SHACL corpus runs at two comparison levels.** A second test,
-  `w3c_shacl_full_report_equality`, compares every result on focus node,
+- **The W3C SHACL corpus is compared at full report equality.** The runner,
+  now `w3c_shacl_full_report_equality`, compares every result on focus node,
   path, value, source shape, component, severity and `sh:sourceConstraint`
   (everything but the message), through the RDF report the engine writes. It
-  carries its own ratchet list (`KNOWN_REPORT_MISMATCHES`).
+  used to compare `sh:conforms` and the focus-node multiset only; both levels
+  agreed on every case (119 pass) before the old one was retired.
   `sparql/pre-binding/shapesGraph-001` moved from the known failures to a new
   category, optional and unsupported: `$shapesGraph` / `$currentShape` are
   optional in SHACL §5.3.1, which requires a processor without them to report
