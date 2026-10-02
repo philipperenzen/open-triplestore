@@ -172,6 +172,7 @@ minted at `POST /api/auth/tokens`. Send it as `Authorization: Bearer <token>`.",
             crate::shacl::report::ValidationReport,
             crate::shacl::report::RunMetrics,
             crate::shacl::report::ValidationResult,
+            crate::shacl::report::ResultAnnotationValue,
             crate::shacl::report::Severity,
             // Route-level types
             super::routes::SparqlQueryParams,

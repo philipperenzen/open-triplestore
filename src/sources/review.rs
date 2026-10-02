@@ -1089,6 +1089,7 @@ mod tests {
             source_shape: "http://example.org/products/ontology#ProductShape".into(),
             source_constraint: constraint.to_string(),
             source_constraint_component: String::new(),
+            annotations: Vec::new(),
             terms: Default::default(),
             message: format!("{constraint} failed"),
         }

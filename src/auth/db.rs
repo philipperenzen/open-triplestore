@@ -6591,6 +6591,7 @@ mod tests {
                 source_shape: "urn:shape".into(),
                 source_constraint: "sh:minCount 1".into(),
                 source_constraint_component: String::new(),
+                annotations: Vec::new(),
                 terms: Default::default(),
                 message: "missing".into(),
             })

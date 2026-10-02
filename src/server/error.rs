@@ -59,7 +59,7 @@ impl IntoResponse for AppError {
                     "error": "SHACL validation failed",
                     "conforms": report.conforms,
                     "results": report.results.iter().map(|r| {
-                        serde_json::json!({
+                        let mut result = serde_json::json!({
                             "severity": format!("{:?}", r.severity),
                             "focusNode": r.focus_node,
                             "path": r.path,
@@ -68,7 +68,12 @@ impl IntoResponse for AppError {
                             "sourceShape": r.source_shape,
                             "sourceConstraint": r.source_constraint,
                             "sourceConstraintComponent": r.source_constraint_component,
-                        })
+                        });
+                        // SHACL-AF result annotations, only where declared.
+                        if !r.annotations.is_empty() {
+                            result["annotations"] = serde_json::json!(r.annotations);
+                        }
+                        result
                     }).collect::<Vec<_>>(),
                 });
                 (StatusCode::UNPROCESSABLE_ENTITY, axum::Json(body)).into_response()
