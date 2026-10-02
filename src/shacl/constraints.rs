@@ -190,6 +190,15 @@ pub(crate) fn evaluate_constraint(
 
 /// Evaluate a constraint against a focus node whose value nodes along `path`
 /// (`values`, distinct) have already been resolved.
+///
+/// The constraints that recurse into other shapes (`sh:not`, `sh:and`,
+/// `sh:or`, `sh:xone`, `sh:node`, nested `sh:property`,
+/// `sh:qualifiedValueShape`, `sh:expression`) are evaluated here; every other
+/// constraint in [`evaluate_leaf_constraint`]. The split keeps this frame — the
+/// one repeated at every level of a nested or cyclic shapes graph, up to
+/// `MAX_SHACL_SHAPE_DEPTH` levels — small: an unoptimised build gives every
+/// result built in a function its own stack slot, and with all ~40 arms in one
+/// function 50 levels no longer fit a 2 MiB thread stack.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_constraint_with_values(
     view: &DataView<'_>,
@@ -202,44 +211,333 @@ pub(crate) fn evaluate_constraint_with_values(
     severity: &Severity,
 ) -> Vec<ValidationResult> {
     let mut results = Vec::new();
-    // Report strings are built only when a result is actually produced: the
-    // overwhelmingly common outcome of a constraint is "no result".
-    let focus_str: std::cell::OnceCell<String> = std::cell::OnceCell::new();
+    let ctx = ResultCtx::new(severity, shape_iri, focus_node);
     let component = component_iri(constraint);
-    // One result of `component`: the display strings plus the typed terms the
-    // RDF report is written from. `value` is sh:value for value-node-oriented
-    // results (SHACL sets it to the offending value node — the focus itself in
-    // a node-shape context).
-    let mk_of = |component: &str,
-                 value: Option<&Term>,
-                 path: Option<&PropertyPath>,
-                 source_constraint: String,
-                 message: String|
-     -> ValidationResult {
+    match constraint {
+        // ---- SHACL-AF node expression (path + comparison subset) ----
+        Constraint::Expression {
+            path: expr_path,
+            checks,
+            message,
+        } => {
+            // Evaluate the inner comparison constraints against the values reached
+            // along the expression path; any inner violation fails the expression.
+            let mut inner = Vec::new();
+            let expr_values = value_nodes(view, focus_node, Some(expr_path));
+            for check in checks {
+                inner.extend(evaluate_constraint_with_values(
+                    view,
+                    shapes,
+                    shape_iri,
+                    focus_node,
+                    check,
+                    Some(expr_path),
+                    &expr_values,
+                    severity,
+                ));
+            }
+            if !inner.is_empty() {
+                ctx.push(
+                    &mut results,
+                    component,
+                    inner
+                        .into_iter()
+                        .next()
+                        .and_then(|r| r.terms.value)
+                        .as_ref(),
+                    Some(expr_path),
+                    "sh:expression".to_string(),
+                    message
+                        .clone()
+                        .unwrap_or_else(|| "sh:expression constraint not satisfied".to_string()),
+                );
+            }
+        }
+
+        // ---- Logical constraints ----
+        // In a property-shape context these apply to EACH VALUE NODE along the
+        // path (SHACL §4.6); only in a node-shape context (no path) do they apply
+        // to the focus node itself. Results keep the original focus node and
+        // carry the offending value in sh:value.
+        Constraint::Not(inner_shape) => {
+            for value in values.iter() {
+                // The value must NOT conform; zero inner violations → violation.
+                let inner_violations =
+                    validate_inline_shape(view, shapes, value, inner_shape, severity);
+                if inner_violations.is_empty() {
+                    ctx.push(
+                        &mut results,
+                        component,
+                        Some(value),
+                        path,
+                        "sh:not".to_string(),
+                        "Value conforms to sh:not shape (must not conform)".to_string(),
+                    );
+                }
+            }
+        }
+
+        Constraint::And(inner_shapes) => {
+            // Every value must conform to ALL inner shapes; one violation per
+            // value that fails any of them.
+            for value in values.iter() {
+                let fails = inner_shapes.iter().any(|inner| {
+                    !validate_inline_shape(view, shapes, value, inner, severity).is_empty()
+                });
+                if fails {
+                    ctx.push(
+                        &mut results,
+                        component,
+                        Some(value),
+                        path,
+                        "sh:and".to_string(),
+                        "Value does not conform to all sh:and shapes".to_string(),
+                    );
+                }
+            }
+        }
+
+        Constraint::Or(inner_shapes) => {
+            // Every value must conform to at least one inner shape.
+            for value in values.iter() {
+                let any_conforms = inner_shapes.iter().any(|inner| {
+                    validate_inline_shape(view, shapes, value, inner, severity).is_empty()
+                });
+                if !any_conforms {
+                    ctx.push(
+                        &mut results,
+                        component,
+                        Some(value),
+                        path,
+                        "sh:or".to_string(),
+                        "Value does not conform to any sh:or shape".to_string(),
+                    );
+                }
+            }
+        }
+
+        Constraint::Xone(inner_shapes) => {
+            // Every value must conform to exactly one inner shape.
+            for value in values.iter() {
+                let conforming_count = inner_shapes
+                    .iter()
+                    .filter(|inner| {
+                        validate_inline_shape(view, shapes, value, inner, severity).is_empty()
+                    })
+                    .count();
+                if conforming_count != 1 {
+                    ctx.push(
+                        &mut results,
+                        component,
+                        Some(value),
+                        path,
+                        "sh:xone".to_string(),
+                        format!(
+                            "Value conforms to {} sh:xone shapes, expected exactly 1",
+                            conforming_count
+                        ),
+                    );
+                }
+            }
+        }
+
+        // ---- Shape reference constraint ----
+        Constraint::Node(ref_shape) => {
+            // Each value node must conform to the referenced shape; one
+            // violation per non-conforming value (sh:node, SHACL §4.6.3).
+            for value in values.iter() {
+                let inner = validate_inline_shape(view, shapes, value, ref_shape, severity);
+                if !inner.is_empty() {
+                    ctx.push(
+                        &mut results,
+                        component,
+                        Some(value),
+                        path,
+                        format!("sh:node <{}>", ref_shape.iri),
+                        format!("Value does not conform to shape <{}>", ref_shape.iri),
+                    );
+                }
+            }
+        }
+
+        // ---- Nested property shape (sh:property on a property shape) ----
+        Constraint::Property(inner_ps) if inner_ps.deactivated => {}
+        Constraint::Property(inner_ps) => {
+            // Each value node along the outer path becomes the focus node of the
+            // nested property shape (SHACL §2.1.3).
+            let inner_iri = inner_ps.iri.as_deref().unwrap_or(shape_iri);
+            for value in values.iter() {
+                // One fetch per (outer value node, nested property shape).
+                let inner_values = value_nodes(view, value, Some(&inner_ps.path));
+                for c in &inner_ps.constraints {
+                    results.extend(evaluate_constraint_with_values(
+                        view,
+                        shapes,
+                        inner_iri,
+                        value,
+                        c,
+                        Some(&inner_ps.path),
+                        &inner_values,
+                        severity,
+                    ));
+                }
+            }
+        }
+
+        // ---- Qualified value shape ----
+        Constraint::QualifiedValueShape {
+            shape: qvs,
+            min_count,
+            max_count,
+            disjoint,
+            sibling_shapes,
+        } => {
+            // Count the values along the path that conform to the qualified value
+            // shape; with sh:qualifiedValueShapesDisjoint, values conforming to a
+            // sibling property shape's qualified value shape are excluded.
+            let conforming_count = values
+                .iter()
+                .filter(|v| {
+                    validate_inline_shape(view, shapes, v, qvs, severity).is_empty()
+                        && !(*disjoint
+                            && sibling_shapes.iter().any(|sib| {
+                                validate_inline_shape(view, shapes, v, sib, severity).is_empty()
+                            }))
+                })
+                .count();
+
+            if let Some(min) = min_count {
+                if conforming_count < *min {
+                    ctx.push(
+                        &mut results,
+                        component,
+                        None,
+                        path,
+                        format!("sh:qualifiedMinCount {}", min),
+                        format!(
+                            "Only {} values conform to qualified shape, expected at least {}",
+                            conforming_count, min
+                        ),
+                    );
+                }
+            }
+            if let Some(max) = max_count {
+                if conforming_count > *max {
+                    ctx.push(
+                        &mut results,
+                        SH_QUALIFIED_MAX_COUNT_COMPONENT,
+                        None,
+                        path,
+                        format!("sh:qualifiedMaxCount {}", max),
+                        format!(
+                            "{} values conform to qualified shape, expected at most {}",
+                            conforming_count, max
+                        ),
+                    );
+                }
+            }
+        }
+        _ => {
+            return evaluate_leaf_constraint(
+                view, shape_iri, focus_node, constraint, path, values, severity,
+            )
+        }
+    }
+
+    results
+}
+
+/// What the results of one (shape, focus node) share, and how one is built:
+/// the display strings plus the typed terms the RDF report is written from.
+/// The focus node's display string is built only when a result is produced —
+/// the overwhelmingly common outcome of a constraint is "no result".
+struct ResultCtx<'a> {
+    severity: &'a Severity,
+    shape_iri: &'a str,
+    focus_node: &'a Term,
+    focus_str: std::cell::OnceCell<String>,
+}
+
+impl<'a> ResultCtx<'a> {
+    fn new(severity: &'a Severity, shape_iri: &'a str, focus_node: &'a Term) -> Self {
+        ResultCtx {
+            severity,
+            shape_iri,
+            focus_node,
+            focus_str: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// One result of `component`. `value` is sh:value for value-node-oriented
+    /// results (SHACL sets it to the offending value node — the focus itself
+    /// in a node-shape context).
+    fn result(
+        &self,
+        component: &str,
+        value: Option<&Term>,
+        path: Option<&PropertyPath>,
+        source_constraint: String,
+        message: String,
+    ) -> ValidationResult {
         ValidationResult {
-            severity: severity.clone(),
-            focus_node: focus_str.get_or_init(|| display_term(focus_node)).clone(),
+            severity: self.severity.clone(),
+            focus_node: self
+                .focus_str
+                .get_or_init(|| display_term(self.focus_node))
+                .clone(),
             path: path.map(|p| p.to_sparql()),
             value: value.map(display_term),
-            source_shape: shape_iri.to_string(),
+            source_shape: self.shape_iri.to_string(),
             source_constraint,
             source_constraint_component: component.to_string(),
             message,
             terms: ResultTerms {
-                focus_node: Some(focus_node.clone()),
+                focus_node: Some(self.focus_node.clone()),
                 value: value.cloned(),
                 path: path.cloned(),
-                source_shape: Some(lexical_term(shape_iri)),
+                source_shape: Some(lexical_term(self.shape_iri)),
                 source_constraint: None,
                 severity: None,
             },
         }
-    };
+    }
+
+    /// [`ResultCtx::result`], pushed onto `results`.
+    fn push(
+        &self,
+        results: &mut Vec<ValidationResult>,
+        component: &str,
+        value: Option<&Term>,
+        path: Option<&PropertyPath>,
+        source_constraint: String,
+        message: String,
+    ) {
+        results.push(self.result(component, value, path, source_constraint, message));
+    }
+}
+
+/// Every constraint that does not recurse into other shapes (see
+/// [`evaluate_constraint_with_values`], the only caller).
+#[inline(never)]
+fn evaluate_leaf_constraint(
+    view: &DataView<'_>,
+    shape_iri: &str,
+    focus_node: &Term,
+    constraint: &Constraint,
+    path: Option<&PropertyPath>,
+    values: &[Term],
+    severity: &Severity,
+) -> Vec<ValidationResult> {
+    let mut results = Vec::new();
+    let ctx = ResultCtx::new(severity, shape_iri, focus_node);
+    let component = component_iri(constraint);
     let mk = |value: Option<&Term>,
               path: Option<&PropertyPath>,
               source_constraint: String,
               message: String|
-     -> ValidationResult { mk_of(component, value, path, source_constraint, message) };
+     -> ValidationResult {
+        ctx.result(component, value, path, source_constraint, message)
+    };
 
     match constraint {
         Constraint::Class(class_iri) => {
@@ -707,44 +1005,6 @@ pub(crate) fn evaluate_constraint_with_values(
             }
         }
 
-        // ---- SHACL-AF node expression (path + comparison subset) ----
-        Constraint::Expression {
-            path: expr_path,
-            checks,
-            message,
-        } => {
-            // Evaluate the inner comparison constraints against the values reached
-            // along the expression path; any inner violation fails the expression.
-            let mut inner = Vec::new();
-            let expr_values = value_nodes(view, focus_node, Some(expr_path));
-            for check in checks {
-                inner.extend(evaluate_constraint_with_values(
-                    view,
-                    shapes,
-                    shape_iri,
-                    focus_node,
-                    check,
-                    Some(expr_path),
-                    &expr_values,
-                    severity,
-                ));
-            }
-            if !inner.is_empty() {
-                results.push(mk(
-                    inner
-                        .into_iter()
-                        .next()
-                        .and_then(|r| r.terms.value)
-                        .as_ref(),
-                    Some(expr_path),
-                    "sh:expression".to_string(),
-                    message
-                        .clone()
-                        .unwrap_or_else(|| "sh:expression constraint not satisfied".to_string()),
-                ));
-            }
-        }
-
         // ---- Value range constraints ----
         // Violation unless the comparison is *definitively* satisfied: literals of
         // incomparable types, IRIs and blank nodes all violate (SHACL §4.3).
@@ -912,175 +1172,15 @@ pub(crate) fn evaluate_constraint_with_values(
             }
         }
 
-        // ---- Logical constraints ----
-        // In a property-shape context these apply to EACH VALUE NODE along the
-        // path (SHACL §4.6); only in a node-shape context (no path) do they apply
-        // to the focus node itself. Results keep the original focus node and
-        // carry the offending value in sh:value.
-        Constraint::Not(inner_shape) => {
-            for value in values.iter() {
-                // The value must NOT conform; zero inner violations → violation.
-                let inner_violations =
-                    validate_inline_shape(view, shapes, value, inner_shape, severity);
-                if inner_violations.is_empty() {
-                    results.push(mk(
-                        Some(value),
-                        path,
-                        "sh:not".to_string(),
-                        "Value conforms to sh:not shape (must not conform)".to_string(),
-                    ));
-                }
-            }
-        }
-
-        Constraint::And(inner_shapes) => {
-            // Every value must conform to ALL inner shapes; one violation per
-            // value that fails any of them.
-            for value in values.iter() {
-                let fails = inner_shapes.iter().any(|inner| {
-                    !validate_inline_shape(view, shapes, value, inner, severity).is_empty()
-                });
-                if fails {
-                    results.push(mk(
-                        Some(value),
-                        path,
-                        "sh:and".to_string(),
-                        "Value does not conform to all sh:and shapes".to_string(),
-                    ));
-                }
-            }
-        }
-
-        Constraint::Or(inner_shapes) => {
-            // Every value must conform to at least one inner shape.
-            for value in values.iter() {
-                let any_conforms = inner_shapes.iter().any(|inner| {
-                    validate_inline_shape(view, shapes, value, inner, severity).is_empty()
-                });
-                if !any_conforms {
-                    results.push(mk(
-                        Some(value),
-                        path,
-                        "sh:or".to_string(),
-                        "Value does not conform to any sh:or shape".to_string(),
-                    ));
-                }
-            }
-        }
-
-        Constraint::Xone(inner_shapes) => {
-            // Every value must conform to exactly one inner shape.
-            for value in values.iter() {
-                let conforming_count = inner_shapes
-                    .iter()
-                    .filter(|inner| {
-                        validate_inline_shape(view, shapes, value, inner, severity).is_empty()
-                    })
-                    .count();
-                if conforming_count != 1 {
-                    results.push(mk(
-                        Some(value),
-                        path,
-                        "sh:xone".to_string(),
-                        format!(
-                            "Value conforms to {} sh:xone shapes, expected exactly 1",
-                            conforming_count
-                        ),
-                    ));
-                }
-            }
-        }
-
-        // ---- Shape reference constraint ----
-        Constraint::Node(ref_shape) => {
-            // Each value node must conform to the referenced shape; one
-            // violation per non-conforming value (sh:node, SHACL §4.6.3).
-            for value in values.iter() {
-                let inner = validate_inline_shape(view, shapes, value, ref_shape, severity);
-                if !inner.is_empty() {
-                    results.push(mk(
-                        Some(value),
-                        path,
-                        format!("sh:node <{}>", ref_shape.iri),
-                        format!("Value does not conform to shape <{}>", ref_shape.iri),
-                    ));
-                }
-            }
-        }
-
-        // ---- Nested property shape (sh:property on a property shape) ----
-        Constraint::Property(inner_ps) if inner_ps.deactivated => {}
-        Constraint::Property(inner_ps) => {
-            // Each value node along the outer path becomes the focus node of the
-            // nested property shape (SHACL §2.1.3).
-            let inner_iri = inner_ps.iri.as_deref().unwrap_or(shape_iri);
-            for value in values.iter() {
-                // One fetch per (outer value node, nested property shape).
-                let inner_values = value_nodes(view, value, Some(&inner_ps.path));
-                for c in &inner_ps.constraints {
-                    results.extend(evaluate_constraint_with_values(
-                        view,
-                        shapes,
-                        inner_iri,
-                        value,
-                        c,
-                        Some(&inner_ps.path),
-                        &inner_values,
-                        severity,
-                    ));
-                }
-            }
-        }
-
-        // ---- Qualified value shape ----
-        Constraint::QualifiedValueShape {
-            shape: qvs,
-            min_count,
-            max_count,
-            disjoint,
-            sibling_shapes,
-        } => {
-            // Count the values along the path that conform to the qualified value
-            // shape; with sh:qualifiedValueShapesDisjoint, values conforming to a
-            // sibling property shape's qualified value shape are excluded.
-            let conforming_count = values
-                .iter()
-                .filter(|v| {
-                    validate_inline_shape(view, shapes, v, qvs, severity).is_empty()
-                        && !(*disjoint
-                            && sibling_shapes.iter().any(|sib| {
-                                validate_inline_shape(view, shapes, v, sib, severity).is_empty()
-                            }))
-                })
-                .count();
-
-            if let Some(min) = min_count {
-                if conforming_count < *min {
-                    results.push(mk(
-                        None,
-                        path,
-                        format!("sh:qualifiedMinCount {}", min),
-                        format!(
-                            "Only {} values conform to qualified shape, expected at least {}",
-                            conforming_count, min
-                        ),
-                    ));
-                }
-            }
-            if let Some(max) = max_count {
-                if conforming_count > *max {
-                    results.push(mk_of(
-                        SH_QUALIFIED_MAX_COUNT_COMPONENT,
-                        None,
-                        path,
-                        format!("sh:qualifiedMaxCount {}", max),
-                        format!(
-                            "{} values conform to qualified shape, expected at most {}",
-                            conforming_count, max
-                        ),
-                    ));
-                }
-            }
+        Constraint::Not(_)
+        | Constraint::And(_)
+        | Constraint::Or(_)
+        | Constraint::Xone(_)
+        | Constraint::Node(_)
+        | Constraint::Property(_)
+        | Constraint::QualifiedValueShape { .. }
+        | Constraint::Expression { .. } => {
+            unreachable!("evaluate_constraint_with_values evaluates the recursive constraints")
         }
     }
 
