@@ -126,9 +126,9 @@ fn patch(r: &Run) -> String {
 
 /// Apply a proposal's patch to `s` (as the patch route would).
 fn apply(s: &TripleStore, patch: &str) {
-    let p = crate::rdf_patch::parse(patch).unwrap();
-    if !p.ops.is_empty() {
-        s.update(&crate::rdf_patch::to_sparql_update(&p)).unwrap();
+    let rows = super::apply::proposal_rows(patch).unwrap();
+    if !rows.is_empty() {
+        s.update(&super::apply::ground_update(&rows)).unwrap();
     }
 }
 

@@ -40,7 +40,12 @@ ex:b3 a ex:Bridge .
 /// An admin state with dataset `ds` (owned by `adm`): an instances graph
 /// and a shapes-role graph.
 fn bridge_state() -> (AppState, String) {
-    let (state, token) = admin_state();
+    bridge_state_over(open_triplestore::store::TripleStore::in_memory().unwrap())
+}
+
+/// As [`bridge_state`], around a store the test built.
+fn bridge_state_over(store: open_triplestore::store::TripleStore) -> (AppState, String) {
+    let (state, token) = admin_state_with_store(store);
     state
         .auth_db
         .create_dataset(
@@ -706,4 +711,426 @@ async fn kept_proposals_are_files_beside_the_store() {
         quads_before,
         "a proposal is never written to the store"
     );
+}
+
+// ── Applying (§8.3) ─────────────────────────────────────────────────────────
+
+async fn post_patch(
+    app: &Router,
+    token: &str,
+    query: &str,
+    if_match: Option<&str>,
+    patch: String,
+) -> (StatusCode, Value) {
+    let mut b = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/datasets/ds/patch{query}"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/rdf-patch");
+    if let Some(m) = if_match {
+        b = b.header(header::IF_MATCH, m);
+    }
+    let resp = app
+        .clone()
+        .oneshot(b.body(Body::from(patch)).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let text = body_text(resp.into_body()).await;
+    (
+        status,
+        serde_json::from_str(&text).unwrap_or(Value::String(text)),
+    )
+}
+
+/// A patch adding `ex:b{n} ex:name "N{n}"` to the instances graph.
+fn name_patch(n: u32) -> String {
+    format!(
+        "TX .\nA <http://example.org/b{n}> <http://example.org/name> \"N{n}\" <{DATA}> .\nTC .\n"
+    )
+}
+
+fn has_name(state: &AppState, n: u32) -> bool {
+    ask(state, &format!("ASK {{ GRAPH <{DATA}> {{ <http://example.org/b{n}> <http://example.org/name> \"N{n}\" }} }}"))
+}
+
+fn newest_commit(state: &AppState) -> Option<open_triplestore::commit_log::CommitRecord> {
+    use open_triplestore::commit_log::{list_commits, CommitQuery, CommitScope};
+    list_commits(
+        &state.store,
+        &CommitScope::Graphs(vec![DATA.to_string()]),
+        &CommitQuery {
+            limit: Some(1),
+            ..Default::default()
+        },
+    )
+    .into_iter()
+    .next()
+}
+
+fn commit_iri(state: &AppState, c: &open_triplestore::commit_log::CommitRecord) -> String {
+    format!(
+        "{}/commit/{}",
+        state.base_url.trim_end_matches('/'),
+        c.commit_id
+    )
+}
+
+async fn apply(app: &Router, token: &str, pid: &str) -> (StatusCode, Value) {
+    let (s, text) = send(
+        app,
+        Method::POST,
+        &format!("/api/datasets/ds/repair/proposals/{pid}/apply"),
+        Some(token),
+        None,
+        None,
+    )
+    .await;
+    (
+        s,
+        serde_json::from_str(&text).unwrap_or(Value::String(text)),
+    )
+}
+
+async fn kept(app: &Router, token: &str, body: Value) -> String {
+    let mut body = body;
+    body["persist"] = json!(true);
+    let (s, r) = repair(app, token, body).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    r["proposal_id"].as_str().unwrap().to_string()
+}
+
+/// §8.2, §8.3 and the test plan's idempotence: a kept proposal applies
+/// once, the commit names it, the proposal records the commit, a second
+/// apply is refused and nothing is left to propose.
+#[tokio::test]
+async fn a_kept_proposal_applies_once_and_the_commit_names_it() {
+    let (state, token) = bridge_state();
+    let app = test_app(state.clone());
+    let (_, r) = repair(&app, &token, json!({ "persist": true })).await;
+    let pid = r["proposal_id"].as_str().unwrap().to_string();
+    let (s, a) = apply(&app, &token, &pid).await;
+    assert_eq!(s, StatusCode::OK, "{a}");
+    assert_eq!(a["applied"], true);
+    assert_eq!(a["status"], "applied");
+    assert_eq!(a["added"], r["summary"]["adds"]);
+    assert_eq!(a["removed"], 0);
+    assert_eq!(a["graphs"], json!([DATA]));
+    assert!(ask(&state, &format!("ASK {{ GRAPH <{DATA}> {{ <http://example.org/b1> <http://example.org/status> <http://example.org/Active> }} }}")));
+
+    let c = newest_commit(&state).unwrap();
+    assert_eq!(a["commit"], commit_iri(&state, &c));
+    assert!(
+        c.message.starts_with(&format!("Repair {pid}: +")),
+        "{}",
+        c.message
+    );
+    let meta = c.metadata.unwrap();
+    assert_eq!(meta["repair"]["proposal"], pid.as_str());
+    assert_eq!(meta["repair"]["engine"], "ots-chase/0.1");
+    assert_eq!(meta["repair"]["rules"], r["rules"]["digest"]);
+
+    let (_, got) = get_json(
+        &app,
+        &token,
+        &format!("/api/datasets/ds/repair/proposals/{pid}"),
+    )
+    .await;
+    assert_eq!(got["status"], "applied");
+    assert_eq!(got["applied_commit"], a["commit"]);
+
+    let (s, again) = apply(&app, &token, &pid).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{again}");
+    assert_eq!(again["error"], "not_proposed");
+    let (_, next) = repair(&app, &token, json!({})).await;
+    assert_eq!(next["summary"]["adds"], 0, "{next:#}");
+}
+
+/// §9: the base moved before the apply → 409, and the proposal is
+/// superseded; nothing is written.
+#[tokio::test]
+async fn a_proposal_whose_base_moved_is_409_and_superseded() {
+    let (state, token) = bridge_state();
+    let app = test_app(state.clone());
+    let pid = kept(&app, &token, json!({})).await;
+    assert_eq!(
+        post_patch(&app, &token, "", None, name_patch(9)).await.0,
+        StatusCode::OK
+    );
+    let (s, body) = apply(&app, &token, &pid).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "stale_base");
+    assert_eq!(body["precondition"], "if-base-commit");
+    let (_, got) = get_json(
+        &app,
+        &token,
+        &format!("/api/datasets/ds/repair/proposals/{pid}"),
+    )
+    .await;
+    assert_eq!(got["status"], "superseded");
+    assert!(!ask(&state, &format!("ASK {{ GRAPH <{DATA}> {{ <http://example.org/b1> <http://example.org/status> <http://example.org/Active> }} }}")));
+}
+
+/// The apply runs the dataset's write gates (always: a Graph Store write to
+/// the same graph would). A refusal is the gate's 422 and leaves the
+/// proposal `proposed`; once the residual is gone the next proposal applies.
+#[tokio::test]
+async fn the_apply_runs_the_write_gates_and_a_refusal_keeps_the_proposal() {
+    let (state, token) = bridge_state();
+    state
+        .auth_db
+        .update_dataset_shacl("ds", true, Some(SHAPES))
+        .unwrap();
+    let app = test_app(state.clone());
+    // b3 has no name, which no rule supplies: the repaired graph still
+    // violates the shapes the gate runs.
+    let pid = kept(&app, &token, json!({})).await;
+    let (s, body) = apply(&app, &token, &pid).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(!body["results"].as_array().unwrap().is_empty(), "{body}");
+    let (_, got) = get_json(
+        &app,
+        &token,
+        &format!("/api/datasets/ds/repair/proposals/{pid}"),
+    )
+    .await;
+    assert_eq!(got["status"], "proposed");
+
+    state
+        .store
+        .load_str(
+            "<http://example.org/b3> <http://example.org/name> \"Three\" .",
+            RdfFormat::NTriples,
+            Some(DATA),
+        )
+        .unwrap();
+    let pid = kept(&app, &token, json!({})).await;
+    let (s, body) = apply(&app, &token, &pid).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+}
+
+/// The patch route's opt-in base-commit precondition, by query or
+/// `If-Match`. Without it the route is unchanged.
+#[tokio::test]
+async fn the_patch_route_checks_a_base_commit_when_asked() {
+    let (state, token) = bridge_state();
+    let app = test_app(state.clone());
+    // No commit has touched the graph: an empty base matches.
+    let (s, body) = post_patch(&app, &token, "?if-base-commit=", None, name_patch(10)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    // Now one has.
+    let newest = commit_iri(&state, &newest_commit(&state).unwrap());
+    let (s, body) = post_patch(&app, &token, "?if-base-commit=", None, name_patch(11)).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "stale_base");
+    assert_eq!(body["current"], newest.as_str());
+    assert!(!has_name(&state, 11), "a refused patch writes nothing");
+    let (s, body) = post_patch(
+        &app,
+        &token,
+        &format!("?if-base-commit={newest}"),
+        None,
+        name_patch(12),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let newest = commit_iri(&state, &newest_commit(&state).unwrap());
+    let (s, _) = post_patch(
+        &app,
+        &token,
+        "",
+        Some(&format!("\"{newest}\"")),
+        name_patch(13),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = post_patch(
+        &app,
+        &token,
+        "",
+        Some(&format!("\"{newest}\"")),
+        name_patch(14),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    let (s, body) = post_patch(&app, &token, "", None, name_patch(15)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["applied"], true);
+    assert!(
+        has_name(&state, 10)
+            && has_name(&state, 12)
+            && has_name(&state, 13)
+            && has_name(&state, 15)
+    );
+    // A caller who cannot see the dataset learns nothing from the option.
+    let outsider = user(&state, "outsider");
+    let (s, _) = post_patch(&app, &outsider, "?if-base-commit=", None, name_patch(16)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+/// The durable precondition: change-log sequence (and epoch). It sees a
+/// write that records no commit, and ignores writes to other graphs.
+#[tokio::test]
+async fn the_patch_route_checks_a_base_sequence_against_the_change_log() {
+    use open_triplestore::store::changes::{DEFAULT_MAX_PAYLOAD, DEFAULT_MAX_SCAN};
+    let (state, token) = bridge_state();
+    let app = test_app(state);
+    let (s, body) = post_patch(&app, &token, "?if-base-sequence=0", None, name_patch(20)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(
+        body.as_str().unwrap().contains("OTS_CHANGE_CAPTURE"),
+        "{body}"
+    );
+
+    let store = open_triplestore::store::TripleStore::in_memory()
+        .unwrap()
+        .with_change_capture(DEFAULT_MAX_SCAN, DEFAULT_MAX_PAYLOAD);
+    let (state, token) = bridge_state_over(store);
+    let app = test_app(state.clone());
+    let changes = state.store.changes();
+    let (seq, epoch) = (changes.last_seq(), changes.epoch().to_string());
+    let q = |seq: i64, epoch: &str| format!("?if-base-sequence={seq}&if-base-epoch={epoch}");
+    let (s, body) = post_patch(&app, &token, &q(seq, &epoch), None, name_patch(21)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let (s, body) = post_patch(&app, &token, &q(seq, &epoch), None, name_patch(22)).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["precondition"], "if-base-sequence");
+    assert!(!has_name(&state, 22));
+
+    let seq = changes.last_seq();
+    let (s, _) = post_patch(&app, &token, &q(seq, "another-epoch"), None, name_patch(23)).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    let (s, _) = post_patch(&app, &token, &q(seq + 100, &epoch), None, name_patch(24)).await;
+    assert_eq!(
+        s,
+        StatusCode::CONFLICT,
+        "a base ahead of the log is not this log's"
+    );
+    // A write to another graph does not move the base of this one.
+    state
+        .store
+        .load_str(
+            "<http://example.org/x> <http://example.org/p> \"1\" .",
+            RdfFormat::NTriples,
+            Some("http://example.org/graph/other"),
+        )
+        .unwrap();
+    let (s, body) = post_patch(&app, &token, &q(seq, &epoch), None, name_patch(25)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    // A write that records no commit does.
+    let seq = changes.last_seq();
+    state
+        .store
+        .load_str(
+            "<http://example.org/x> <http://example.org/p> \"2\" .",
+            RdfFormat::NTriples,
+            Some(DATA),
+        )
+        .unwrap();
+    let (s, _) = post_patch(&app, &token, &q(seq, &epoch), None, name_patch(26)).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+}
+
+/// `?validate=true` runs the write gates of the graphs the patch touches
+/// over what they would hold. The option is what turns the gate on for this
+/// route (PR #434 proposes gating every patch).
+#[tokio::test]
+async fn validate_true_runs_the_write_gates_on_the_patch_route() {
+    let (state, token) = bridge_state();
+    state
+        .auth_db
+        .update_dataset_shacl("ds", true, Some(SHAPES))
+        .unwrap();
+    let app = test_app(state.clone());
+    let bridge = format!("TX .\nA <http://example.org/b30> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.org/Bridge> <{DATA}> .\nTC .\n");
+    let (s, body) = post_patch(&app, &token, "?validate=true", None, bridge.clone()).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        body["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["focusNode"] == "http://example.org/b30"),
+        "{body}"
+    );
+    assert!(!ask(
+        &state,
+        &format!("ASK {{ GRAPH <{DATA}> {{ <http://example.org/b30> ?p ?o }} }}")
+    ));
+    let (s, body) = post_patch(&app, &token, "", None, bridge).await;
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "without the option the route applies as before: {body}"
+    );
+}
+
+/// The test plan's last item: a `Rewrite` merge applied through the
+/// proposal re-materialises the dataset's entailment, under the
+/// `sameas-narrow` and the `sameas-off` identity policy alike — the merge
+/// writes no `owl:sameAs`, so neither policy has a link to follow.
+#[tokio::test]
+async fn a_rewrite_merge_rematerialises_entailment_under_narrow_and_off() {
+    for identity in ["sameas-narrow", "sameas-off"] {
+        let (state, token) = bridge_state();
+        state
+            .store
+            .load_str(
+                r#"@prefix ex: <http://example.org/> . @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+                   ex:Bridge rdfs:subClassOf ex:Structure .
+                   ex:k1 ex:code "K1" .
+                   ex:k2 ex:code "K1" ; a ex:Bridge ."#,
+                RdfFormat::Turtle,
+                Some(DATA),
+            )
+            .unwrap();
+        rules_graph(
+            &state,
+            r#"<urn:rule:code-key> a ots:Rule ;
+  ots:construct "PREFIX ex: <http://example.org/> CONSTRUCT {} WHERE { ?x ex:code ?k . ?y ex:code ?k }" ;
+  ots:equate ( "x" "y" ) ;
+  ots:mergeMode ots:Rewrite ."#,
+        )
+        .await;
+        let app = test_app(state.clone());
+        let (s, body) = send(
+            &app,
+            Method::PUT,
+            "/api/datasets/ds/entailment",
+            Some(&token),
+            Some(json!({ "regime": "rdfs", "mode": "materialize", "identity": identity })),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{body}");
+        let entailed = |s: &str| {
+            ask(&state, &format!("ASK {{ GRAPH <urn:entailment:rdfs:ds> {{ <http://example.org/{s}> a <http://example.org/Structure> }} }}"))
+        };
+        assert!(entailed("k2") && !entailed("k1"), "{identity}");
+
+        let pid = kept(
+            &app,
+            &token,
+            json!({ "rules": [RULES], "derive": { "from_shapes": false, "from_owl": false } }),
+        )
+        .await;
+        let (s, a) = apply(&app, &token, &pid).await;
+        assert_eq!(s, StatusCode::OK, "{identity}: {a}");
+        assert!(ask(&state, &format!("ASK {{ GRAPH <{DATA}> {{ <http://example.org/k1> a <http://example.org/Bridge> }} }}")));
+        assert!(
+            !ask(
+                &state,
+                &format!("ASK {{ GRAPH <{DATA}> {{ <http://example.org/k2> ?p ?o }} }}")
+            ),
+            "{identity}: the loser is gone"
+        );
+        assert!(!ask(
+            &state,
+            "ASK { ?a <http://www.w3.org/2002/07/owl#sameAs> ?b }"
+        ));
+        assert!(
+            entailed("k1") && !entailed("k2"),
+            "{identity}: re-materialised after the apply"
+        );
+    }
 }

@@ -18,8 +18,10 @@
 //! * [`proposal`] — the patch and the report;
 //! * [`persist`] — proposals kept for review, as files;
 //! * [`run`] — one run, end to end (blocking);
+//! * [`apply`] — the gated apply, and the patch route's opt-in checks;
 //! * [`handlers`] — the HTTP routes.
 
+pub mod apply;
 pub mod chase;
 pub mod compile;
 pub mod handlers;

@@ -1224,7 +1224,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         )
         .route(
             "/api/datasets/:dataset_id/patch",
-            post(crate::rdf_patch::apply_patch_handler),
+            post(crate::rdf_patch::apply_patch_handler).layer(middleware::from_fn_with_state(
+                state.clone(),
+                crate::repair::apply::patch_route_layer,
+            )),
         )
         .route(
             "/api/datasets/:dataset_id/entailment",

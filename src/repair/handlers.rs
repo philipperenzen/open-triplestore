@@ -54,6 +54,10 @@ pub fn routes() -> Router<AppState> {
             get(get_proposal),
         )
         .route(
+            "/api/datasets/:dataset_id/repair/proposals/:proposal_id/apply",
+            post(super::apply::apply_proposal),
+        )
+        .route(
             "/api/datasets/:dataset_id/repair/proposals/:proposal_id/reject",
             post(reject_proposal),
         )

@@ -1758,6 +1758,33 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 ),
             )],
         );
+        mount(
+            paths,
+            "/api/datasets/:dataset_id/repair/proposals/:proposal_id/apply",
+            vec![(
+                M::Post,
+                o(
+                    "Validation",
+                    "Apply a repair proposal",
+                    "Apply a kept proposal under the dataset's patch lock. Its own base marker is the precondition (the change-log sequence when it carries one, else its base commit): a dataset that moved since answers 409 and the proposal becomes `superseded`. The write gates of every graph it touches run over the patched graphs, as for a Graph Store write (422 with the report; the proposal stays `proposed`). The patch is one ground update, recorded as a commit whose `metadata.repair` names the proposal; the proposal becomes `applied`. The optional `if-base-commit` / `if-base-sequence` / `if-base-epoch` add preconditions. Write access required.",
+                    vec![
+                        qp("if-base-commit", false, "Also require this commit IRI (or id) to be the newest touching the proposal's graphs."),
+                        qp("if-base-sequence", false, "Also require no change-log row after this sequence to touch them (change capture on)."),
+                        qp("if-base-epoch", false, "The change log's epoch the sequence belongs to."),
+                    ],
+                    vec![
+                        ("200", "`{applied, proposal_id, status, commit, added, removed, graphs}`"),
+                        ("400", "if-base-sequence without change capture"),
+                        ("401", "Authentication required"),
+                        ("403", "Write access to the dataset required"),
+                        ("404", "No such dataset or proposal"),
+                        ("409", "The dataset changed since the proposal was computed, or the proposal is not `proposed`"),
+                        ("422", "A write gate refused the patched graphs"),
+                    ],
+                    true,
+                ),
+            )],
+        );
     }
     mount(
         paths,

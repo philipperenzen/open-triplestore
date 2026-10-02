@@ -205,6 +205,7 @@ With `persist: true` the proposal is kept for review:
 |---|---|---|
 | `GET` | `/api/datasets/{id}/repair/proposals` | The kept proposals, newest first, with `status` and `stale`. |
 | `GET` | `/api/datasets/{id}/repair/proposals/{pid}` | Report, patch, a page of actions (`?offset=&limit=`), `stale`. `Accept: application/rdf-patch` for the patch. |
+| `POST` | `/api/datasets/{id}/repair/proposals/{pid}/apply` | Apply it (below). |
 | `POST` | `/api/datasets/{id}/repair/proposals/{pid}/reject` | Reject it. |
 
 States: `proposed` → `applied` | `rejected` | `superseded` | `expired`. A
@@ -216,6 +217,59 @@ ones and anything past `OTS_REPAIR_PROPOSAL_TTL` days (default 30) expire.
 They are not in backups — a proposal can always be computed again.
 
 **Nothing is ever applied automatically.**
+
+### Applying a proposal
+
+```bash
+curl -X POST http://localhost:7878/api/datasets/<id>/repair/proposals/<pid>/apply \
+     -H 'Authorization: Bearer <token>'
+```
+
+Needs write access to the dataset. The apply, in order:
+
+1. takes the dataset's patch lock — `POST /api/datasets/{id}/patch` takes
+   the same one, so two applies never interleave between check and write;
+2. checks the proposal's base: its change-log sequence when it has one and
+   the log is still in the same epoch, else its base commit. If a graph of
+   the proposal changed since, the answer is `409`
+   (`"error": "stale_base"`) and the proposal becomes `superseded`:
+   compute it again;
+3. runs the write gates of every graph it touches over what the graph would
+   hold after it — the gates a Graph Store write to that graph passes
+   (`shacl_on_write` shapes, Studio pipelines that gate writes,
+   validation-layer bindings). A refusal is `422` with the validation
+   report, and the proposal stays `proposed`;
+4. writes the patch as one ground update: the count and text indexes take
+   the exact change, a materialised entailment is refreshed and an LDES
+   stream records the change, as for any other write;
+5. records a commit (`GET /api/datasets/{id}/commits`) whose
+   `metadata.repair` names the proposal, the engine, the base and the rules
+   digest, and marks the proposal `applied` with that commit. With change
+   capture on, the change-log rows of the write carry the same commit. The
+   apply is audited as a SPARQL update.
+
+The answer is `{applied, proposal_id, status, commit, added, removed,
+graphs}`. A proposal that is not `proposed` is `409`
+(`"error": "not_proposed"`), so applying twice changes nothing. The patch is
+read on the server, so a proposal larger than the 8 MiB request limit is
+applied here.
+
+### The same checks on the patch route
+
+`POST /api/datasets/{id}/patch` takes three opt-in options for a patch you
+apply yourself — a downloaded proposal, or any other:
+
+| Option | |
+|---|---|
+| `?if-base-commit=<iri>` or `If-Match: "<iri>"` | `409` unless `<iri>` (or the bare commit id) is still the newest commit touching a graph the patch names. An empty value means no commit has touched them yet. |
+| `?if-base-sequence=<n>&if-base-epoch=<e>` | `409` if a change-log row after `n` touches those graphs. This also sees writes that record no commit. Needs `OTS_CHANGE_CAPTURE=on` (`400` without). |
+| `?validate=true` | Run the write gates of the graphs the patch touches first; `422` with the report on a refusal. |
+
+A `409` body is `{"error": "stale_base", "message", "precondition",
+"current"}`, where `current` is the newest commit or the log's sequence and
+epoch. A proposal's `H base-commit`, `H base-sequence` and `H base-epoch`
+headers are the values to pass. Without an option the route applies a patch
+exactly as it always has.
 
 
 ---
