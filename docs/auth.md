@@ -196,8 +196,9 @@ The Docker Compose file passes all eight through from `.env`.
   `jwks_uri` from `<OIDC_ISSUER>/.well-known/openid-configuration`
   (`jwks_uri` must be `https` too) and caches the keys for an hour. An unknown
   `kid` triggers an immediate re-fetch, so key rotation needs no restart.
-- `iss` equals `OIDC_ISSUER` character for character, with no trailing
-  slash. An IdP whose `iss` ends in `/` is not matched today.
+- `iss` equals `OIDC_ISSUER`, with or without one trailing slash:
+  `https://tenant.example` and `https://tenant.example/` both match, and
+  nothing else does.
 - `aud` contains `OIDC_AUDIENCE`, `exp` is in the future, and `nbf` (if
   present) is in the past.
 - `sub` is present. `email`, `email_verified`, `name` and
