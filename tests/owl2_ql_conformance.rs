@@ -542,3 +542,525 @@ fn test_ql_unqualified_existential_on_the_left() {
     assert!(ask_ql(&s, "ASK { ex:cs101 rdf:type ex:Course }"));
     assert!(!ask_ql(&s, "ASK { ex:cs101 rdf:type ex:Teacher }"));
 }
+
+// ─── DL-Lite_R closure: materialisation, consistency, existentials ─────────────
+//
+// These run the reasoner the way the server does: the data sits in a named
+// graph, `materialize()` writes the ground closure into the QL entailment
+// graph, and a query reads both through `FROM`, its blank nodes rewritten by
+// `rewrite_existentials` over the TBox of the graphs it reads.
+
+use open_triplestore::reasoning::common::{ReasoningError, ReasoningReport};
+use open_triplestore::reasoning::owl2_ql::rewrite_existentials;
+
+const DATA: &str = "urn:test:ql:data";
+const ENT: &str = "urn:entailment:owl2-ql";
+
+fn data_store(ttl: &str) -> TripleStore {
+    let store = TripleStore::in_memory().unwrap();
+    store
+        .load_str(&format!("{PREAMBLE}{ttl}"), RdfFormat::Turtle, Some(DATA))
+        .unwrap();
+    store
+}
+
+fn materialise(store: &TripleStore) -> Result<ReasoningReport, ReasoningError> {
+    QLQueryRewriter::new(store)
+        .with_sources(vec![DATA.to_string()])
+        .materialize()
+}
+
+/// A store with `ttl` in the data graph, materialised (and consistent).
+fn closed(ttl: &str) -> TripleStore {
+    let store = data_store(ttl);
+    materialise(&store).expect("consistent");
+    store
+}
+
+/// Run `form WHERE { pattern }` over the data and the entailment graph, the
+/// blank nodes rewritten as `/sparql?entailment=owl2-ql` does.
+fn entailed(
+    store: &TripleStore,
+    form: &str,
+    pattern: &str,
+) -> oxigraph::sparql::QueryResults<'static> {
+    let q = format!("{SPARQL_PREFIXES}{form} FROM <{DATA}> FROM <{ENT}> WHERE {{ {pattern} }}");
+    let q = rewrite_existentials(store, &q).unwrap().unwrap_or(q);
+    store.query(&q).unwrap_or_else(|e| panic!("{e}\n{q}"))
+}
+
+fn ask_entailed(store: &TripleStore, pattern: &str) -> bool {
+    match entailed(store, "ASK", pattern) {
+        oxigraph::sparql::QueryResults::Boolean(b) => b,
+        _ => panic!("expected ASK result"),
+    }
+}
+
+/// The rows of `SELECT vars`, each as the values' strings, sorted.
+fn select_entailed(store: &TripleStore, vars: &str, pattern: &str) -> Vec<Vec<String>> {
+    let mut rows: Vec<Vec<String>> = match entailed(store, &format!("SELECT {vars}"), pattern) {
+        oxigraph::sparql::QueryResults::Solutions(sols) => {
+            let names: Vec<String> = sols
+                .variables()
+                .iter()
+                .map(|v| v.as_str().to_string())
+                .collect();
+            sols.flatten()
+                .map(|s| {
+                    names
+                        .iter()
+                        .map(|n| s.get(n.as_str()).map(|t| t.to_string()).unwrap_or_default())
+                        .collect()
+                })
+                .collect()
+        }
+        _ => panic!("expected SELECT result"),
+    };
+    rows.sort();
+    rows
+}
+
+fn in_entailment_graph(store: &TripleStore, pattern: &str) -> bool {
+    matches!(
+        store.query(&format!(
+            "{SPARQL_PREFIXES}ASK {{ GRAPH <{ENT}> {{ {pattern} }} }}"
+        )),
+        Ok(oxigraph::sparql::QueryResults::Boolean(true))
+    )
+}
+
+fn inconsistency(ttl: &str) -> String {
+    match materialise(&data_store(ttl)) {
+        Err(ReasoningError::Inconsistency { rule, detail }) => format!("{rule}: {detail}"),
+        other => panic!("expected an inconsistency, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_ql_materialises_ground_atoms() {
+    // Every entailed membership and assertion over named individuals is
+    // written; nothing already asserted is written again.
+    let s = closed(
+        "ex:worksFor rdfs:domain ex:Employee . \
+         ex:Employee rdfs:subClassOf ex:Person . \
+         ex:headOf rdfs:subPropertyOf ex:worksFor . \
+         ex:employs owl:inverseOf ex:worksFor . \
+         ex:alice ex:headOf ex:acme . \
+         ex:bob a ex:Employee .",
+    );
+    assert!(in_entailment_graph(&s, "ex:alice a ex:Employee"));
+    assert!(in_entailment_graph(&s, "ex:alice a ex:Person"));
+    assert!(in_entailment_graph(&s, "ex:alice ex:worksFor ex:acme"));
+    assert!(in_entailment_graph(&s, "ex:acme ex:employs ex:alice"));
+    assert!(in_entailment_graph(&s, "ex:bob a ex:Person"));
+    assert!(
+        !in_entailment_graph(&s, "ex:bob a ex:Employee"),
+        "asserted, not re-written"
+    );
+    assert!(!in_entailment_graph(&s, "ex:acme a ex:Person"));
+    // The TBox closure is there too.
+    assert!(in_entailment_graph(
+        &s,
+        "ex:headOf rdfs:subPropertyOf ex:worksFor"
+    ));
+    // Variables bind to names: answered from the materialised graph alone.
+    assert_eq!(
+        select_entailed(&s, "?x", "?x a ex:Person"),
+        [["<http://example.org/alice>"], ["<http://example.org/bob>"]]
+    );
+}
+
+#[test]
+fn test_ql_qualified_existential_is_existential() {
+    // Parent ⊑ ∃hasChild.Person: x has *some* child who is a person. No
+    // child is named, so no ground atom; a blank node finds the anonymous one.
+    let s = closed(
+        "ex:Parent rdfs:subClassOf [ owl:onProperty ex:hasChild ; owl:someValuesFrom ex:Person ] . \
+         ex:Person rdfs:subClassOf ex:Agent . \
+         ex:x a ex:Parent .",
+    );
+    assert!(!ask_entailed(&s, "ex:x ex:hasChild ?y"), "no named child");
+    assert!(ask_entailed(&s, "ex:x ex:hasChild []"));
+    assert!(ask_entailed(&s, "ex:x ex:hasChild [ a ex:Person ]"));
+    assert!(ask_entailed(&s, "ex:x ex:hasChild [ a ex:Agent ]"));
+    assert!(!ask_entailed(&s, "ex:x ex:hasChild [ a ex:Parent ]"));
+    assert!(!ask_entailed(&s, "ex:x ex:hasParent []"));
+    // Still sound: a child does not make a parent.
+    let s = closed(
+        "ex:Parent rdfs:subClassOf [ owl:onProperty ex:hasChild ; owl:someValuesFrom ex:Person ] . \
+         ex:y ex:hasChild ex:z .",
+    );
+    assert!(!ask_entailed(&s, "ex:y a ex:Parent"));
+}
+
+#[test]
+fn test_ql_existential_chain() {
+    // Two levels of anonymous elements.
+    let s = closed(
+        "ex:A rdfs:subClassOf [ owl:onProperty ex:r ; owl:someValuesFrom ex:B ] . \
+         ex:B rdfs:subClassOf [ owl:onProperty ex:s ; owl:someValuesFrom ex:C ] . \
+         ex:a a ex:A .",
+    );
+    assert!(ask_entailed(&s, "ex:a ex:r [ ex:s [ a ex:C ] ]"));
+    assert!(ask_entailed(
+        &s,
+        "ex:a ex:r _:b . _:b a ex:B . _:b ex:s _:c"
+    ));
+    assert!(!ask_entailed(&s, "ex:a ex:r [ ex:r [] ]"));
+    assert!(!ask_entailed(&s, "ex:a ex:s []"));
+    // Anywhere: some element has an s-successor.
+    assert!(ask_entailed(&s, "[] ex:s [ a ex:C ]"));
+    assert!(!ask_entailed(&s, "[] ex:s [ a ex:A ]"));
+}
+
+#[test]
+fn test_ql_existential_through_roles_inverses_and_ranges() {
+    let s = closed(
+        "ex:Mother rdfs:subClassOf [ owl:onProperty ex:hasSon ; owl:someValuesFrom owl:Thing ] . \
+         ex:hasSon rdfs:subPropertyOf ex:hasChild . \
+         ex:hasChild rdfs:range ex:Child . \
+         ex:hasParent owl:inverseOf ex:hasChild . \
+         ex:Orphanage rdfs:subClassOf \
+             [ owl:onProperty [ owl:inverseOf ex:livesIn ] ; owl:someValuesFrom owl:Thing ] . \
+         ex:m a ex:Mother . \
+         ex:home a ex:Orphanage .",
+    );
+    assert!(ask_entailed(&s, "ex:m ex:hasChild [ a ex:Child ]"));
+    assert!(ask_entailed(&s, "[] ex:hasParent ex:m"));
+    assert!(ask_entailed(&s, "[] ex:livesIn ex:home"));
+    assert!(!ask_entailed(&s, "ex:home ex:livesIn []"));
+    assert_eq!(
+        select_entailed(&s, "?x", "?x ex:hasChild []"),
+        [["<http://example.org/m>"]]
+    );
+    // A query blank node used twice must be the same element: the child's
+    // parent is the mother herself.
+    assert_eq!(
+        select_entailed(&s, "?x ?y", "?x ex:hasChild _:c . _:c ex:hasParent ?y"),
+        [["<http://example.org/m>", "<http://example.org/m>"]]
+    );
+}
+
+#[test]
+fn test_ql_existential_matches_named_and_anonymous_once() {
+    // x has a named child and an anonymous one: one row, not two or three.
+    let s = closed(
+        "ex:Parent rdfs:subClassOf [ owl:onProperty ex:hasChild ; owl:someValuesFrom owl:Thing ] . \
+         ex:x a ex:Parent . ex:x ex:hasChild ex:c1 . ex:x ex:hasChild ex:c2 . \
+         ex:y ex:hasChild ex:c3 .",
+    );
+    assert_eq!(
+        select_entailed(&s, "?x", "?x ex:hasChild []"),
+        [["<http://example.org/x>"], ["<http://example.org/y>"]]
+    );
+    // A blank node still matches named individuals.
+    assert!(!ask_entailed(&s, "ex:y ex:hasChild [ ex:hasChild ex:c3 ]"));
+    assert!(ask_entailed(&s, "[ ex:hasChild ex:c3 ]"));
+    // No TBox, no change: the plain answer.
+    let plain = closed("ex:p ex:knows ex:q . ex:q ex:knows ex:r .");
+    assert_eq!(
+        select_entailed(&plain, "?x", "?x ex:knows [ ex:knows [] ]"),
+        [["<http://example.org/p>"]]
+    );
+}
+
+#[test]
+fn test_ql_unqualified_tbox_closure_through_existentials() {
+    // A ⊑ ∃r.B and ∃r ⊑ C (a domain): every A is a C, a named-class
+    // subsumption only the closure through the existential shows.
+    let s = closed(
+        "ex:A rdfs:subClassOf [ owl:onProperty ex:r ; owl:someValuesFrom ex:B ] . \
+         ex:r rdfs:domain ex:C . \
+         ex:a a ex:A .",
+    );
+    assert!(in_entailment_graph(&s, "ex:A rdfs:subClassOf ex:C"));
+    assert!(in_entailment_graph(&s, "ex:a a ex:C"));
+}
+
+#[test]
+fn test_ql_rewrite_query_answers_existentials_without_materialisation() {
+    // The standalone rewriting (`POST /api/reasoning/rewrite`) expands ground
+    // atoms itself and rewrites blank nodes too.
+    let s = store_with(
+        "ex:Parent rdfs:subClassOf [ owl:onProperty ex:hasChild ; owl:someValuesFrom ex:Person ] . \
+         ex:Mother rdfs:subClassOf ex:Parent . \
+         ex:m a ex:Mother .",
+    );
+    assert!(ask_ql(&s, "ASK { ex:m ex:hasChild [ a ex:Person ] }"));
+    assert!(ask_ql(&s, "ASK { ex:m a ex:Parent }"));
+    assert!(!ask_ql(&s, "ASK { ex:m ex:hasChild ?c }"));
+}
+
+#[test]
+fn test_ql_disjoint_classes_inconsistent() {
+    let m = inconsistency(
+        "ex:Cat owl:disjointWith ex:Dog . \
+         ex:Kitten rdfs:subClassOf ex:Cat . \
+         ex:barks rdfs:domain ex:Dog . \
+         ex:tom a ex:Kitten . ex:tom ex:barks ex:loudly .",
+    );
+    assert!(m.contains("ql-cls-disjoint"), "{m}");
+    // owl:AllDisjointClasses and owl:complementOf say the same.
+    let m = inconsistency(
+        "[] a owl:AllDisjointClasses ; owl:members ( ex:A ex:B ex:C ) . \
+         ex:x a ex:A , ex:C .",
+    );
+    assert!(m.contains("ql-cls-disjoint"), "{m}");
+    let m = inconsistency("ex:A rdfs:subClassOf [ owl:complementOf ex:B ] . ex:x a ex:A , ex:B .");
+    assert!(m.contains("ql-cls-disjoint"), "{m}");
+    // Consistent data stays consistent.
+    assert!(materialise(&data_store(
+        "ex:Cat owl:disjointWith ex:Dog . ex:tom a ex:Cat . ex:rex a ex:Dog ."
+    ))
+    .is_ok());
+}
+
+#[test]
+fn test_ql_unsatisfiability_propagates_through_existentials() {
+    // A ⊑ ∃r.B, the range of r is C, and B ⊥ C: no A can exist. The closure
+    // says so (A ⊑ owl:Nothing), and an A in the data is inconsistent; the
+    // derived atoms stay in the graph.
+    let ttl = "ex:A rdfs:subClassOf [ owl:onProperty ex:r ; owl:someValuesFrom ex:B ] . \
+               ex:r rdfs:range ex:C . \
+               ex:B owl:disjointWith ex:C . \
+               ex:Sub rdfs:subClassOf ex:A . \
+               ex:a a ex:Sub .";
+    let s = data_store(ttl);
+    match materialise(&s) {
+        Err(ReasoningError::Inconsistency { rule, detail }) => {
+            assert_eq!(rule, "ql-cls-nothing", "{detail}")
+        }
+        other => panic!("expected an inconsistency, got {other:?}"),
+    }
+    assert!(in_entailment_graph(&s, "ex:A rdfs:subClassOf owl:Nothing"));
+    assert!(in_entailment_graph(
+        &s,
+        "ex:Sub rdfs:subClassOf owl:Nothing"
+    ));
+    assert!(in_entailment_graph(&s, "ex:a a ex:A"));
+    // Without an A, the TBox alone is consistent.
+    let s = closed(
+        "ex:A rdfs:subClassOf [ owl:onProperty ex:r ; owl:someValuesFrom ex:B ] . \
+         ex:r rdfs:range ex:C . ex:B owl:disjointWith ex:C .",
+    );
+    assert!(in_entailment_graph(&s, "ex:A rdfs:subClassOf owl:Nothing"));
+}
+
+#[test]
+fn test_ql_property_characteristics() {
+    // Symmetric: the converse is materialised.
+    let s = closed("ex:knows a owl:SymmetricProperty . ex:a ex:knows ex:b .");
+    assert!(in_entailment_graph(&s, "ex:b ex:knows ex:a"));
+    // Asymmetric, through a sub-property.
+    let m = inconsistency(
+        "ex:parentOf a owl:AsymmetricProperty . ex:motherOf rdfs:subPropertyOf ex:parentOf . \
+         ex:a ex:motherOf ex:b . ex:b ex:parentOf ex:a .",
+    );
+    assert!(m.contains("ql-prp-disjoint"), "{m}");
+    // Irreflexive, through an inverse.
+    let m = inconsistency(
+        "ex:marriedTo a owl:IrreflexiveProperty . ex:spouseOf owl:inverseOf ex:marriedTo . \
+         ex:a ex:spouseOf ex:a .",
+    );
+    assert!(m.contains("ql-prp-irp"), "{m}");
+    // Disjoint properties, through the hierarchy.
+    let m = inconsistency(
+        "ex:likes owl:propertyDisjointWith ex:hates . ex:adores rdfs:subPropertyOf ex:likes . \
+         ex:a ex:adores ex:b . ex:a ex:hates ex:b .",
+    );
+    assert!(m.contains("ql-prp-disjoint"), "{m}");
+    // `a owl:differentFrom a`.
+    let m = inconsistency("ex:a owl:differentFrom ex:a .");
+    assert!(m.contains("ql-different-from"), "{m}");
+}
+
+#[test]
+fn test_ql_reflexive_property() {
+    // Every individual has the loop, and so is in the property's domain.
+    let s = closed(
+        "ex:knows a owl:ReflexiveProperty . ex:knows rdfs:domain ex:Agent . \
+         ex:a ex:likes ex:b . ex:c a ex:Thingy .",
+    );
+    assert!(in_entailment_graph(&s, "ex:a ex:knows ex:a"));
+    assert!(in_entailment_graph(&s, "ex:b ex:knows ex:b"));
+    assert!(in_entailment_graph(&s, "ex:c a ex:Agent"));
+    assert!(ask_entailed(&s, "ex:c ex:knows []"));
+    assert!(ask_entailed(&s, "_:x ex:knows _:x"));
+    // Reflexive and irreflexive together: no model, whatever the data.
+    let m = inconsistency(
+        "ex:p a owl:ReflexiveProperty . ex:q a owl:IrreflexiveProperty . \
+         ex:p rdfs:subPropertyOf ex:q .",
+    );
+    assert!(m.contains("ql-prp-irp"), "{m}");
+}
+
+#[test]
+fn test_ql_data_properties() {
+    let s = closed(
+        "ex:age a owl:DatatypeProperty ; rdfs:domain ex:Person ; rdfs:range xsd:integer . \
+         ex:ageInYears rdfs:subPropertyOf ex:age . \
+         ex:Adult rdfs:subClassOf [ owl:onProperty ex:age ; owl:someValuesFrom xsd:integer ] . \
+         ex:a ex:ageInYears 42 . \
+         ex:b a ex:Adult .",
+    );
+    assert!(in_entailment_graph(&s, "ex:a ex:age 42"));
+    assert!(in_entailment_graph(&s, "ex:a a ex:Person"));
+    assert!(in_entailment_graph(&s, "ex:b a ex:Person"));
+    assert!(ask_entailed(&s, "ex:b ex:age []"));
+    assert!(!ask_entailed(&s, "ex:b ex:age ?v"));
+    // A literal is never typed by a class range or domain.
+    assert!(!in_entailment_graph(
+        &s,
+        "?l a ex:Person FILTER(isLiteral(?l))"
+    ));
+    // A value outside the declared datatype is an inconsistency...
+    let m = inconsistency(
+        "ex:age a owl:DatatypeProperty ; rdfs:range xsd:integer . ex:a ex:age \"old\" .",
+    );
+    assert!(m.contains("ql-dt-range"), "{m}");
+    // ...but one that needs a value check is not judged until the OWL 2
+    // datatype map lands (stored integers all read back as xsd:integer).
+    assert!(materialise(&data_store(
+        "ex:age a owl:DatatypeProperty ; rdfs:range xsd:nonNegativeInteger . ex:a ex:age 5 ."
+    ))
+    .is_ok());
+}
+
+#[test]
+fn test_ql_reports_ignored_axioms() {
+    // D9: axioms outside OWL 2 QL are not used, and the report says which.
+    let s = data_store(
+        "ex:ancestorOf a owl:TransitiveProperty . \
+         ex:hasMother a owl:FunctionalProperty . \
+         ex:a owl:sameAs ex:b . \
+         ex:Pet rdfs:subClassOf [ owl:unionOf ( ex:Cat ex:Dog ) ] . \
+         ex:Prof rdfs:subClassOf ex:Staff .",
+    );
+    let report = materialise(&s).unwrap();
+    assert_eq!(report.ignored_axioms, 4, "{:?}", report.ignored_sample);
+    let axioms: Vec<&str> = report
+        .ignored_sample
+        .iter()
+        .map(|a| a.axiom.as_str())
+        .collect();
+    for a in [
+        "owl:TransitiveProperty",
+        "owl:FunctionalProperty",
+        "owl:sameAs",
+        "rdfs:subClassOf",
+    ] {
+        assert!(axioms.contains(&a), "{axioms:?}");
+    }
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(json["ignored_axioms"], 4);
+    // A QL-only TBox reports nothing (and the fields are omitted).
+    let report = materialise(&data_store("ex:Prof rdfs:subClassOf ex:Staff .")).unwrap();
+    let json = serde_json::to_value(&report).unwrap();
+    assert!(json.get("ignored_axioms").is_none(), "{json}");
+}
+
+/// A small deterministic generator (xorshift) for the differential test.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+}
+
+/// A random ontology in the intersection of OWL 2 QL and OWL 2 RL.
+fn random_ql_rl(rng: &mut Rng) -> String {
+    let c = |rng: &mut Rng| format!("ex:C{}", rng.below(5));
+    let p = |rng: &mut Rng| format!("ex:p{}", rng.below(4));
+    let i = |rng: &mut Rng| format!("ex:i{}", rng.below(6));
+    let mut ttl = String::new();
+    for _ in 0..(4 + rng.below(6)) {
+        let axiom = match rng.below(10) {
+            0 | 1 => format!("{} rdfs:subClassOf {} .", c(rng), c(rng)),
+            2 => format!("{} rdfs:subPropertyOf {} .", p(rng), p(rng)),
+            3 => format!("{} owl:inverseOf {} .", p(rng), p(rng)),
+            4 => format!("{} rdfs:domain {} .", p(rng), c(rng)),
+            5 => format!("{} rdfs:range {} .", p(rng), c(rng)),
+            6 => format!("{} a owl:SymmetricProperty .", p(rng)),
+            7 => format!(
+                "[ owl:onProperty {} ; owl:someValuesFrom owl:Thing ] rdfs:subClassOf {} .",
+                p(rng),
+                c(rng)
+            ),
+            8 => format!("{} owl:equivalentClass {} .", c(rng), c(rng)),
+            _ => format!(
+                "{} rdfs:subClassOf [ owl:intersectionOf ( {} {} ) ] .",
+                c(rng),
+                c(rng),
+                c(rng)
+            ),
+        };
+        ttl.push_str(&axiom);
+        ttl.push('\n');
+    }
+    for _ in 0..(4 + rng.below(8)) {
+        let fact = if rng.below(2) == 0 {
+            format!("{} a {} .", i(rng), c(rng))
+        } else {
+            format!("{} {} {} .", i(rng), p(rng), i(rng))
+        };
+        ttl.push_str(&fact);
+        ttl.push('\n');
+    }
+    ttl
+}
+
+/// The ground atoms over the individuals `ex:i*` in a graph (asserted or
+/// derived), as N-Triples-ish strings.
+fn individual_atoms(store: &TripleStore, graphs: &[&str]) -> std::collections::BTreeSet<String> {
+    let from: String = graphs.iter().map(|g| format!("FROM <{g}> ")).collect();
+    let q = format!(
+        "SELECT DISTINCT ?s ?p ?o {from} WHERE {{ ?s ?p ?o . \
+           FILTER(STRSTARTS(STR(?s), \"http://example.org/i\")) \
+           FILTER(STRSTARTS(STR(?o), \"http://example.org/i\") \
+               || STRSTARTS(STR(?o), \"http://example.org/C\")) }}"
+    );
+    match store.query(&q).unwrap() {
+        oxigraph::sparql::QueryResults::Solutions(sols) => sols
+            .flatten()
+            .map(|s| format!("{} {} {}", s["s"], s["p"], s["o"]))
+            .collect(),
+        _ => panic!("expected SELECT result"),
+    }
+}
+
+#[cfg(feature = "owl2-rl")]
+#[test]
+fn test_ql_differential_against_rl() {
+    // On ontologies in both profiles, OWL 2 QL and OWL 2 RL entail the same
+    // ground atoms over named individuals.
+    use open_triplestore::reasoning::owl2_rl::Owl2RLReasoner;
+    const RL: &str = "urn:test:ql:rl";
+    let mut rng = Rng(0x005e_ed0f_0e11_2026);
+    for case in 0..60 {
+        let ttl = random_ql_rl(&mut rng);
+        let store = data_store(&ttl);
+        materialise(&store).unwrap_or_else(|e| panic!("case {case}: {e}\n{ttl}"));
+        Owl2RLReasoner::new(&store)
+            .with_target(RL)
+            .with_sources(vec![DATA.to_string()])
+            .materialize()
+            .unwrap_or_else(|e| panic!("case {case}: {e}\n{ttl}"));
+        let ql = individual_atoms(&store, &[DATA, ENT]);
+        let rl = individual_atoms(&store, &[DATA, RL]);
+        assert_eq!(
+            ql,
+            rl,
+            "case {case}: QL and RL disagree\n{ttl}\nQL only: {:?}\nRL only: {:?}",
+            ql.difference(&rl).collect::<Vec<_>>(),
+            rl.difference(&ql).collect::<Vec<_>>()
+        );
+    }
+}
