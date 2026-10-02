@@ -46,6 +46,8 @@ pub fn snapshot_as_version(
         derived_from: None,
         notes: notes.map(|n| n.to_string()),
         branch: None,
+        conforms_to_model: None,
+        conforms_to_version: None,
     };
     registry::insert_version(store, base_url, &record).map_err(|e| e.to_string())?;
     if status == VersionStatus::Draft {
@@ -118,6 +120,8 @@ mod semver_tests {
             derived_from: None,
             notes: None,
             branch: None,
+            conforms_to_model: None,
+            conforms_to_version: None,
         }
     }
 
