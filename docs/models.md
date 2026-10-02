@@ -43,6 +43,50 @@ The Schema.org entry keeps the version label `29.0` it first shipped with, becau
 4. **Stage** — Promote a draft to *staged* for review before it goes live. Staging is optional but lets reviewers see a candidate without it becoming the canonical latest.
 5. **Publish** — Mark a version *published*. The published version becomes the canonical latest version and is served at `/api/models/{id}/latest/data`. On publish, version metadata is stamped into the graph by content: OWL `owl:versionIRI`/`owl:priorVersion` for class/property models and DCAT/PAV/SKOS metadata for vocabularies (both for mixed packages). A version still in **Draft** status is never served as "latest". Published versions are immutable.
 6. **Deprecate** — Older published versions can be deprecated to signal that consumers should upgrade.
+7. **Delete** — Remove a version that should not exist, see below.
+
+## Deleting a version
+
+`DELETE /api/models/{id}/versions/{ver}` removes one version: the named graphs that hold
+it (its base graph and sub-graphs) and its registry record (status, notes, licence record,
+seed checks, per-subgraph states, and the entry's `hasVersion`, `latestPublished` and
+`latestDraft` links to it), all in one transaction. A graph that another version record also
+names is left in place and reported under `graphs_kept`. Other versions that were derived
+from it, and the entry's commit log, keep naming it: they are history.
+
+- **Who.** Admins, and users with the publish permission who may write the entry (its owner,
+  or an admin of the owning organisation). Others get `403`; an entry the caller may not see
+  answers `404`.
+- **Published versions.** A version that is published (or has a published subgraph) answers
+  `409` unless the request says `?force=true`. Deleting the latest published version
+  leaves the entry with no latest published version until another one is published.
+- **Dependent datasets.** While datasets depend on the version, the answer is `409`, with or
+  without `force`. A dataset depends on it when its `conforms_to_version` names it, when it
+  has no pin and the version is the latest published one, or when one of its dataset versions
+  that is not deprecated records it as the model version it conformed to. The body lists the
+  datasets the caller may read and only counts the others (`hidden_datasets`), as
+  `GET /api/models/{id}/dependents` does. Re-pin them first.
+
+A refusal changes nothing. Its body says why, and whether `force` would help:
+
+```json
+{ "error": "Version '1.0.0' is published; …", "version": "1.0.0", "published": true,
+  "force_allowed": false,
+  "reasons": [ { "code": "published", "message": "…" },
+               { "code": "dependents", "message": "…", "hidden_datasets": 0,
+                 "datasets": [ { "dataset_id": "…", "name": "bridges-2026",
+                                 "reason": "pinned", "dataset_version": null } ] } ] }
+```
+
+`reason` is `pinned`, `floating` or `dataset_version` (with that dataset version's label). A
+successful delete answers `200` with `graphs_dropped`, `graphs_kept`, `triples_removed` and
+`forced`, and lands on the entry's commit log ("Deleted version 2.0.0", or "Deleted
+published version 1.0.0 (forced)") and in the audit log (`graph_deleted`, action
+`delete_model_version`). The model page's delete button shows the same reasons, and offers
+*Delete anyway* only when `force` would succeed.
+
+A version of a bundled vocabulary that the seeder owns is seeded again at the next start
+while `SEED_STANDARD_VOCABS` is on.
 
 ## Storage
 

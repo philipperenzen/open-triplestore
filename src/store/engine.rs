@@ -2937,6 +2937,119 @@ impl TripleStore {
         Ok(())
     }
 
+    /// Drop `graph_iris` and run `update` in **one** transaction: either the
+    /// graphs are gone and the update applied, or neither happened. For a
+    /// delete whose bookkeeping lives in another graph (a registry record),
+    /// so a failure cannot leave the record without its data or the data
+    /// without its record.
+    ///
+    /// `update` may write only the graphs in `writes` (checked statically
+    /// before anything runs; an update whose targets cannot be bounded is
+    /// refused). Unlike a `DROP` sent through [`Self::update`], which forces a
+    /// full rebuild of the graph count index, the index is maintained
+    /// surgically: the dropped graphs are removed and `writes` recounted.
+    pub fn drop_graphs_with_update(
+        &self,
+        graph_iris: &[&str],
+        update: &str,
+        writes: &[&str],
+    ) -> Result<(), StoreError> {
+        let _w = self.begin_write()?;
+        for iri in graph_iris.iter().chain(writes) {
+            NamedNodeRef::new(iri)
+                .map_err(|e| StoreError::Parse(format!("Invalid IRI '{}': {}", iri, e)))?;
+        }
+        let dropped: Vec<Option<String>> = graph_iris.iter().map(|g| Some(g.to_string())).collect();
+        let written: Vec<Option<String>> = writes
+            .iter()
+            .filter(|w| !graph_iris.contains(w))
+            .map(|g| Some(g.to_string()))
+            .collect();
+        // The update must stay inside the graphs it declared: the index and the
+        // change log are only maintained for those.
+        match Self::static_update_targets(update) {
+            Some(t) if t.iter().all(|g| dropped.contains(g) || written.contains(g)) => {}
+            _ => {
+                return Err(StoreError::Parse(
+                    "drop_graphs_with_update: the update writes graphs it did not declare"
+                        .to_string(),
+                ))
+            }
+        }
+        let mut sparql: String = graph_iris
+            .iter()
+            .map(|iri| format!("DROP SILENT GRAPH <{iri}> ;\n"))
+            .collect();
+        sparql.push_str(update);
+
+        let mut targets = dropped.clone();
+        targets.extend(written.iter().cloned());
+        let pre_count = self.pre_count();
+        let intent = self
+            .changes
+            .begin("drop_graphs_with_update", Some(&targets), &pre_count);
+        // Dropped graphs: their quads when everything fits the scan cap, exact
+        // counts otherwise (as `bulk_delete_graphs`). Written graphs: a
+        // before/after diff when they fit, unknown otherwise.
+        let total: usize = targets
+            .iter()
+            .map(|g| self.graph_index.get_count(g.as_deref()).unwrap_or(0))
+            .sum();
+        let full = intent.is_some() && total <= self.changes.max_scan();
+        let mut deltas: Vec<GraphDelta> = dropped
+            .iter()
+            .map(|g| {
+                if full {
+                    GraphDelta::full(g.clone(), Vec::new(), self.graph_quads(g.as_deref()))
+                        .with_post_count(0)
+                } else {
+                    match self.graph_index.get_count(g.as_deref()) {
+                        Some(n) => GraphDelta::counts(g.clone(), 0, n, Some(0)),
+                        None => GraphDelta::unknown(g.clone()).with_post_count(0),
+                    }
+                }
+            })
+            .collect();
+        let before: Vec<(Option<String>, Vec<Quad>)> = if full {
+            written
+                .iter()
+                .map(|g| (g.clone(), self.graph_quads(g.as_deref())))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let prepared = self.query_options().parse_update(&sparql)?;
+        let mut tx = self.store.start_transaction()?;
+        if let Err(e) = prepared.on_transaction(&mut tx).execute() {
+            drop(tx);
+            if let Some(intent) = intent {
+                self.changes.abort(intent);
+            }
+            return Err(e.into());
+        }
+        if intent.is_some() {
+            if full {
+                deltas.extend(before.into_iter().map(|(g, pre)| {
+                    let post = Self::tx_graph_quads(&tx, g.as_deref());
+                    let (added, removed) = changes::diff_quads(&pre, &post);
+                    let n = post.len();
+                    GraphDelta::full(g, added, removed).with_post_count(n)
+                }));
+            } else {
+                deltas.extend(written.iter().map(|g| GraphDelta::unknown(g.clone())));
+            }
+        }
+        self.changes
+            .commit_with(intent, deltas, || tx.commit().map_err(StoreError::from))?;
+
+        for iri in graph_iris {
+            self.graph_index.remove(Some(iri));
+        }
+        self.graph_index
+            .recount_specific_graphs(&self.store, &written);
+        Ok(())
+    }
+
     /// Insert multiple quads using Oxigraph's bulk loader.
     ///
     /// Significantly faster than individual `store_quad()` calls for large
@@ -4188,6 +4301,54 @@ mod tests {
             })
             .unwrap();
         assert_eq!(nt, store.dump(RdfFormat::NTriples, Some("urn:g")).unwrap());
+    }
+
+    /// `drop_graphs_with_update`: the drops and the update land together, the
+    /// index forgets the dropped graphs and recounts the written one, and an
+    /// update that writes an undeclared graph is refused before anything runs.
+    #[test]
+    fn drop_graphs_with_update_is_one_bounded_write() {
+        let store = TripleStore::in_memory().unwrap();
+        for (g, n) in [("urn:v1", 3), ("urn:keep", 1), ("urn:reg", 2)] {
+            for i in 0..n {
+                store
+                    .update(&format!(
+                        "INSERT DATA {{ GRAPH <{g}> {{ <urn:s{i}> <urn:p> <urn:o> }} }}"
+                    ))
+                    .unwrap();
+            }
+        }
+        // An update that writes a graph it did not declare: refused, nothing changed.
+        let err = store.drop_graphs_with_update(
+            &["urn:v1"],
+            "DELETE WHERE { GRAPH <urn:keep> { ?s ?p ?o } }",
+            &["urn:reg"],
+        );
+        assert!(err.is_err());
+        assert_eq!(store.graph_count_cached(Some("urn:v1")), Some(3));
+        assert_eq!(store.graph_count_cached(Some("urn:keep")), Some(1));
+
+        store
+            .drop_graphs_with_update(
+                &["urn:v1"],
+                "DELETE WHERE { GRAPH <urn:reg> { <urn:s0> ?p ?o } }",
+                &["urn:reg"],
+            )
+            .unwrap();
+        assert_eq!(store.graph_count_cached(Some("urn:v1")), None);
+        assert_eq!(store.graph_count_cached(Some("urn:reg")), Some(1));
+        assert_eq!(store.graph_count_cached(Some("urn:keep")), Some(1));
+        let names: Vec<String> = store
+            .named_graphs()
+            .unwrap()
+            .into_iter()
+            .map(|n| n.as_str().to_string())
+            .collect();
+        assert!(!names.contains(&"urn:v1".to_string()), "{names:?}");
+        assert!(matches!(
+            store.query("ASK { GRAPH <urn:reg> { <urn:s1> <urn:p> <urn:o> } }"),
+            Ok(QueryResults::Boolean(true))
+        ));
     }
 }
 

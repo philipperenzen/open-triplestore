@@ -1151,6 +1151,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `/api/datasets/{id}/services/{service}/sparql` (docs/embedding.md), and an
   IFC file is uploaded through `POST /api/import/bulk`
   (docs/geo-3d-platform.md).
+- **"Delete version" on a model page works.** The button has called
+  `DELETE /api/models/:id/versions/:ver` since 0.1.0, a route that did not
+  exist, so it always failed with `405`. The route now exists: admins, and
+  publishers who may write the entry, delete one version, its graphs and its
+  registry record in one transaction (a graph another version record also
+  names is kept), recorded on the entry's commit log and in the audit log. A
+  published version answers `409` unless `?force=true`; while datasets depend
+  on the version (pinned to it, floating on it as the latest published one, or
+  holding a dataset version that is not deprecated and conformed to it) it
+  answers `409` whatever `force` says, listing the datasets the caller may read
+  and counting the others. The model page shows those reasons and offers
+  "Delete anyway" only when force would succeed.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if

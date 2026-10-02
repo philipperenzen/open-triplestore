@@ -2565,6 +2565,251 @@ pub async fn deprecate_version(
     Ok(Json(json!({ "status": "deprecated", "version": ver })))
 }
 
+// ─── Delete a version ─────────────────────────────────────────────────────────
+
+/// Why a dataset depends on model version `ver`: its current pin names it, it
+/// floats on the latest published version and that is `ver`, or one of its
+/// dataset versions that is not deprecated records it as the model version it
+/// conformed to (`dataset_version`).
+fn version_dependents(
+    state: &AppState,
+    model: &DataModelRecord,
+    ver: &str,
+) -> Result<Vec<(crate::auth::models::Dataset, &'static str, Option<String>)>, AppError> {
+    let mut out = Vec::new();
+    for ds in state
+        .auth_db
+        .list_datasets()
+        .map_err(|e| AppError::Internal(e.to_string()))?
+    {
+        let mut why: Option<(&'static str, Option<String>)> = None;
+        if ds.conforms_to_model.as_deref() == Some(model.id.as_str()) {
+            match ds.conforms_to_version.as_deref().filter(|v| !v.is_empty()) {
+                Some(p) if p == ver => why = Some(("pinned", None)),
+                None if model.latest_published.as_deref() == Some(ver) => {
+                    why = Some(("floating", None))
+                }
+                _ => {}
+            }
+        }
+        if why.is_none() {
+            why = crate::dataset_versions::registry::list_versions(
+                &state.store,
+                &state.base_url,
+                &ds.id,
+            )
+            .into_iter()
+            .find(|v| {
+                v.status != VersionStatus::Deprecated
+                    && v.conforms_to_model.as_deref() == Some(model.id.as_str())
+                    && v.conforms_to_version.as_deref() == Some(ver)
+            })
+            .map(|v| ("dataset_version", Some(v.version)));
+        }
+        if let Some((reason, dataset_version)) = why {
+            out.push((ds, reason, dataset_version));
+        }
+    }
+    Ok(out)
+}
+
+/// DELETE /api/models/:id/versions/:ver[?force=true]
+///
+/// Removes one version: its graphs and its registry rows, in one transaction.
+/// Admins, and publishers who may write the entry, may do so. A published
+/// version (or one with a published subgraph) answers `409` unless `force`;
+/// a version datasets depend on answers `409` listing them, `force` or not.
+pub async fn delete_version(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path((id, ver)): Path<(String, String)>,
+    Query(params): Query<super::models::DeleteVersionParams>,
+) -> Result<impl IntoResponse, AppError> {
+    let model = registry::get_data_model(&state.store, &state.base_url, &id)
+        .ok_or_else(|| AppError::NotFound(format!("Data model '{id}' not found")))?;
+    // An entry the caller may not see is not there for them.
+    if !state
+        .auth_db
+        .can_access_ontology(
+            Some(user.user_id.as_str()),
+            model.is_public,
+            model.owner_type.as_deref(),
+            model.owner_id.as_deref(),
+        )
+        .map_err(|e| AppError::Internal(e.to_string()))?
+    {
+        return Err(AppError::NotFound(format!("Data model '{id}' not found")));
+    }
+    let may_delete = user.is_admin()
+        || (user.is_publisher()
+            && state
+                .auth_db
+                .can_write_ontology(
+                    &user.user_id,
+                    model.owner_type.as_deref(),
+                    model.owner_id.as_deref(),
+                )
+                .map_err(|e| AppError::Internal(e.to_string()))?);
+    if !may_delete {
+        return Err(AppError::Forbidden(
+            "Deleting a version needs an admin, or a publisher who may write this entry"
+                .to_string(),
+        ));
+    }
+    let record = registry::get_version(&state.store, &state.base_url, &id, &ver)
+        .ok_or_else(|| AppError::NotFound(format!("Version '{ver}' not found")))?;
+
+    let published = record.status == VersionStatus::Published
+        || model.latest_published.as_deref() == Some(ver.as_str())
+        || record
+            .sub_graph_status
+            .iter()
+            .any(|s| s.status == VersionStatus::Published);
+    let dependents = version_dependents(&state, &model, &ver)?;
+
+    let mut reasons = Vec::new();
+    if published && !params.force {
+        reasons.push(json!({
+            "code": "published",
+            "message": format!(
+                "Version '{ver}' is published; consumers may rely on it. Repeat with ?force=true to delete it anyway."
+            ),
+        }));
+    }
+    if !dependents.is_empty() {
+        // Name only the datasets the caller may read; count the rest, so a
+        // private dataset is not disclosed through the model it conforms to.
+        let mut listed = Vec::new();
+        let mut hidden = 0usize;
+        for (ds, why, dataset_version) in &dependents {
+            if state
+                .auth_db
+                .can_access_dataset(Some(user.user_id.as_str()), ds)
+                .unwrap_or(false)
+            {
+                listed.push(json!({
+                    "dataset_id": ds.id,
+                    "name": ds.name,
+                    "reason": why,
+                    "dataset_version": dataset_version,
+                }));
+            } else {
+                hidden += 1;
+            }
+        }
+        reasons.push(json!({
+            "code": "dependents",
+            "message": format!(
+                "{} dataset(s) depend on version '{ver}'. Re-pin them to another version first; force does not override this.",
+                dependents.len()
+            ),
+            "datasets": listed,
+            "hidden_datasets": hidden,
+        }));
+    }
+    if !reasons.is_empty() {
+        let message = reasons
+            .iter()
+            .filter_map(|r| r["message"].as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        return Err(AppError::Conflict(json!({
+            "error": message,
+            "model_id": id,
+            "version": ver,
+            "status": record.status.as_str(),
+            "published": published,
+            // Whether repeating with ?force=true would succeed.
+            "force_allowed": dependents.is_empty(),
+            "reasons": reasons,
+        })));
+    }
+
+    // The version's content: its base graph and sub-graphs, minus any graph
+    // another version record also names (left for that version) and any
+    // system graph (never a version's to drop).
+    let mut graphs = vec![record.graph_iri.clone()];
+    graphs.extend(record.sub_graphs.iter().cloned());
+    graphs.sort();
+    graphs.dedup();
+    graphs.retain(|g| !g.starts_with("urn:system:"));
+    let ver_iri = registry::version_record_iri(&state.base_url, &id, &ver);
+    let shared = registry::graphs_held_by_other_versions(&state.store, &ver_iri, &graphs)
+        .ok_or_else(|| {
+            AppError::Internal("could not check which graphs other versions hold".to_string())
+        })?;
+    let (kept, dropped): (Vec<String>, Vec<String>) =
+        graphs.into_iter().partition(|g| shared.contains(g));
+    let removed: usize = dropped
+        .iter()
+        .map(|g| state.store.graph_count_cached(Some(g)).unwrap_or(0))
+        .sum();
+
+    let store = state.store.clone();
+    let base = state.base_url.to_string();
+    let (model_id, version, drop_list) = (id.clone(), ver.clone(), dropped.clone());
+    run_store_write(&state, "data model version delete", move || {
+        registry::delete_version(&store, &base, &model_id, &version, &drop_list)
+    })
+    .await?;
+    // Its graphs leave every readable set they were in.
+    state.auth_db.invalidate_accessible_graphs_cache();
+
+    let forced = published && params.force;
+    crate::commit_log::record(
+        &state.store,
+        &state.base_url,
+        match model.kind {
+            crate::kind_detector::RegistryKind::Vocabulary => {
+                crate::commit_log::CommitKind::Vocabulary
+            }
+            _ => crate::commit_log::CommitKind::DataModel,
+        },
+        if forced {
+            format!("Deleted published version {ver} (forced)")
+        } else {
+            format!("Deleted version {ver}")
+        },
+        Some(&user.user_id),
+        Some(registry::data_model_iri(
+            state.base_url.trim_end_matches('/'),
+            &id,
+        )),
+        dropped.clone(),
+        0,
+        removed,
+        Some(ver.clone()),
+    );
+    {
+        use crate::auth::audit::{AuditEventBuilder, AuditEventType, AuditOutcome};
+        state.audit.log(
+            AuditEventBuilder::new(AuditEventType::GraphDeleted, AuditOutcome::Success)
+                .actor_id(user.user_id.clone())
+                .resource("data_model_version", format!("{id}/{ver}"))
+                .action("delete_model_version")
+                .details(json!({
+                    "model_id": id,
+                    "version": ver,
+                    "status": record.status.as_str(),
+                    "forced": forced,
+                    "graphs": dropped,
+                    "graphs_kept": kept,
+                    "triples_removed": removed,
+                })),
+        );
+    }
+
+    Ok(Json(json!({
+        "deleted": true,
+        "model_id": id,
+        "version": ver,
+        "forced": forced,
+        "graphs_dropped": dropped,
+        "graphs_kept": kept,
+        "triples_removed": removed,
+    })))
+}
+
 // ─── Per-subgraph lifecycle (Phase 6) ──────────────────────────────────────────
 
 /// Resolve the body's `graph` (full IRI or trailing suffix) to one of the
