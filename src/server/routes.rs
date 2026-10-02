@@ -1670,6 +1670,9 @@ pub(crate) fn validate_on_write(
     // that supplied one property with `sh:minCount 1` on all the others.
     let temp = crate::store::TripleStore::in_memory()
         .map_err(|e| AppError::Internal(format!("Failed to create temp store: {e}")))?;
+    // The functions every query of the live store sees, so the gate computes
+    // what the same run computes outside it.
+    temp.inherit_registered_functions(&state.store);
     if mode == crate::shacl_studio::gate::WriteMode::Merge {
         let existing = state
             .store
@@ -10278,6 +10281,11 @@ struct ShExValidateRequest {
 }
 
 /// POST /api/datasets/:dataset_id/shex/validate — validate dataset using ShEx
+///
+/// Reads the dataset's own graphs that the caller may read (the `/sparql`
+/// rule, [`accessible_read_graphs`]; admins read them all) and nothing else:
+/// a report names its focus nodes, and a verdict answers a question about the
+/// data. Stored SHACL report graphs are no part of the data.
 #[cfg(feature = "shex")]
 async fn shex_validate(
     Extension(current_user): Extension<AuthenticatedUser>,
@@ -10302,20 +10310,50 @@ async fn shex_validate(
     let schema =
         crate::shex::parse_shexc(&body.schema).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
-    let report = crate::shex::validate(&state.store, &schema, &body.shape_map);
+    let readable = if current_user.is_admin() {
+        None
+    } else {
+        Some(
+            accessible_read_graphs(&state, Some(&current_user))
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.message()))?,
+        )
+    };
+    let graphs: Vec<String> = state
+        .auth_db
+        .list_dataset_graphs(&dataset_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .filter(|g| !g.starts_with("urn:system:reports:"))
+        .filter(|g| readable.as_ref().is_none_or(|r| r.contains(g)))
+        .collect();
+    let scope = crate::shex::GraphScope::named(graphs);
+
+    let report = crate::shex::validate_in(&state.store, &scope, &schema, &body.shape_map);
     Ok(Json(report))
 }
 
 /// POST /api/shex/validate — validate inline (no dataset context)
+///
+/// Reads what `/sparql` would let the caller read ([`accessible_read_graphs`]);
+/// an admin reads the whole store.
 #[cfg(feature = "shex")]
 async fn shex_validate_inline(
+    Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
     Json(body): Json<ShExValidateRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let schema =
         crate::shex::parse_shexc(&body.schema).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
-    let report = crate::shex::validate(&state.store, &schema, &body.shape_map);
+    let scope = if current_user.is_admin() {
+        crate::shex::GraphScope::All
+    } else {
+        crate::shex::GraphScope::named(
+            accessible_read_graphs(&state, Some(&current_user))
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.message()))?,
+        )
+    };
+    let report = crate::shex::validate_in(&state.store, &scope, &schema, &body.shape_map);
     Ok(Json(report))
 }
 

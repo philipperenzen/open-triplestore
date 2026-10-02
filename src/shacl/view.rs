@@ -22,7 +22,8 @@
 //! Value nodes are then resolved natively from the quad index for every path
 //! form SHACL has, targets and `sh:class` checks come from per-run class sets,
 //! and no SPARQL is evaluated on the per-focus-node path at all. SPARQL-based
-//! constraints (`sh:sparql`) and SPARQL targets keep reading the live store.
+//! constraints (`sh:sparql`), SPARQL targets and the bodies of the
+//! `sh:SPARQLFunction`s they call read the same source ([`DataView::query`]).
 
 use super::shapes::{Constraint, PropertyPath, Shape, Target};
 use crate::store::TripleStore;
@@ -102,12 +103,13 @@ pub(crate) struct DataView<'a> {
     /// can hold no quads), so the other graphs are still validated.
     graphs: Vec<GraphName>,
     classes: HashMap<(String, GraphSel), ClassInfo>,
-    /// The run's SPARQL evaluator, built once from the store's own options so
-    /// the GeoSPARQL, 3D, RDF 1.2 and `sh:SPARQLFunction` registrations are
-    /// present. Building it scans the store for user-defined functions, which
-    /// is exactly the per-probe cost this module exists to remove, so it is
-    /// built once here and cloned per query (`SparqlEvaluator` is `Clone`;
-    /// `parse_query` consumes it).
+    /// The run's SPARQL evaluator, built by the caller from
+    /// `TripleStore::query_options_for_shapes` so the GeoSPARQL, 3D, RDF 1.2
+    /// and the run's own `sh:SPARQLFunction` registrations are present.
+    /// Building it scans for user-defined functions, which is exactly the
+    /// per-probe cost this module exists to remove, so it is built once per
+    /// run and cloned per query (`SparqlEvaluator` is `Clone`; `parse_query`
+    /// consumes it).
     evaluator: oxigraph::sparql::SparqlEvaluator,
     /// Per-run adjacency for the shape predicates, built for the snapshot and
     /// live sources when the run is large enough to pay for it (see
@@ -193,7 +195,12 @@ const _: () = {
 
 impl<'a> DataView<'a> {
     /// Open the run's data source (see the module docs for the choice).
-    pub(crate) fn new(store: &'a TripleStore, data_graphs: &'a [String]) -> Self {
+    /// `evaluator` evaluates the shapes graph's SPARQL (see the field).
+    pub(crate) fn new(
+        store: &'a TripleStore,
+        data_graphs: &'a [String],
+        evaluator: oxigraph::sparql::SparqlEvaluator,
+    ) -> Self {
         let raw = if let Some(full) = store.mirror_full_copy() {
             RawSource::Mirror(full)
         } else if store.is_persistent() {
@@ -218,7 +225,7 @@ impl<'a> DataView<'a> {
             raw,
             graphs,
             classes: HashMap::new(),
-            evaluator: store.query_options(),
+            evaluator,
             index: None,
         }
     }
@@ -440,12 +447,44 @@ impl<'a> DataView<'a> {
             crate::store::engine::confine_dataset(prepared.dataset_mut(), self.data_graphs)
                 .map_err(|e| e.to_string())?;
         }
-        match &self.raw {
-            RawSource::Snapshot(tx) => prepared.on_transaction(tx).execute(),
-            RawSource::Mirror(store) => prepared.on_store(store).execute(),
-            RawSource::Live(store) => prepared.on_store(store).execute(),
+        self.scope().execute(prepared).map_err(|e| e.to_string())
+    }
+
+    /// Evaluate a parsed query against the run's data source with `bindings`
+    /// bound as terms, its dataset confined to the run's data graphs (the
+    /// default graph when the run names none). Every variable in `bindings`
+    /// must be a top-level variable of `query` (spareval refuses the rest).
+    pub(crate) fn query_bound(
+        &self,
+        query: &opengraph::spargebra::Query,
+        bindings: &[(oxigraph::sparql::Variable, Term)],
+    ) -> Result<oxigraph::sparql::QueryResults<'_>, String> {
+        // Without the optimizer, which would treat the bound variables as
+        // unbound (see `sparql_functions::without_optimizer`).
+        let evaluator = crate::shacl::sparql_functions::without_optimizer(self.evaluator.clone());
+        let mut prepared = evaluator.for_query(query.clone());
+        crate::store::engine::confine_dataset(prepared.dataset_mut(), self.data_graphs)
+            .map_err(|e| e.to_string())?;
+        for (var, term) in bindings {
+            prepared = prepared.substitute_variable(var.clone(), term.clone());
         }
-        .map_err(|e| e.to_string())
+        self.scope().execute(prepared).map_err(|e| e.to_string())
+    }
+
+    /// The run's data as a function body called from one of its queries sees
+    /// it: the same source, data graphs and evaluator (see
+    /// [`crate::shacl::sparql_functions::DataScope`]).
+    pub(crate) fn scope(&self) -> crate::shacl::sparql_functions::DataScope<'_> {
+        use crate::shacl::sparql_functions::{DataScope, ScopeSource};
+        DataScope {
+            source: match &self.raw {
+                RawSource::Snapshot(tx) => ScopeSource::Transaction(tx),
+                RawSource::Mirror(store) => ScopeSource::Store(store),
+                RawSource::Live(store) => ScopeSource::Store(store),
+            },
+            data_graphs: self.data_graphs,
+            evaluator: &self.evaluator,
+        }
     }
 
     /// A bare-evaluator SELECT for the view's own internal scans (instance
@@ -869,10 +908,8 @@ fn collect_constraint_classes(
                 collect_constraint_classes(c, graph_count, out);
             }
         }
-        Constraint::Expression { checks, .. } => {
-            for c in checks {
-                collect_constraint_classes(c, graph_count, out);
-            }
+        Constraint::Expression { expr, .. } => {
+            expr.visit(&mut |s| collect_classes(s, graph_count, out), &mut |_| {});
         }
         _ => {}
     }
@@ -923,10 +960,17 @@ fn collect_constraint_predicates(constraint: &Constraint, out: &mut HashSet<(Str
                 collect_constraint_predicates(c, out);
             }
         }
-        Constraint::Expression { path, checks, .. } => {
-            collect_path_predicates(path, false, out);
-            for c in checks {
-                collect_constraint_predicates(c, out);
+        Constraint::Expression { expr, .. } => {
+            let mut paths = Vec::new();
+            let mut shapes = Vec::new();
+            expr.visit(&mut |s| shapes.push(s.clone()), &mut |p| {
+                paths.push(p.clone())
+            });
+            for p in &paths {
+                collect_path_predicates(p, false, out);
+            }
+            for s in &shapes {
+                collect_shape_predicates(s, out);
             }
         }
         _ => {}

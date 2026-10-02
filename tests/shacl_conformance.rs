@@ -1268,6 +1268,143 @@ fn closure_and_sequence_paths_cross_data_graphs() {
     );
 }
 
+// ─── sh:SPARQLFunction scope ───────────────────────────────────────────────
+//
+// A `sh:SPARQLFunction` belongs to the runs of the shapes graph that declares
+// it. It never reaches another shapes graph's run, and it can never redefine
+// an `xsd:` cast or a function the server registers itself (GeoSPARQL, 3D,
+// RDF 1.2, ADJUST): a writer of any graph could otherwise change what every
+// other tenant's constraints, gates and pipelines compute.
+
+/// A function definition with one parameter `$x`.
+fn sparql_function(iri: &str, select: &str) -> String {
+    format!(
+        "<{iri}> a sh:SPARQLFunction ;\n\
+           sh:parameter [ sh:path ex:x ; sh:order 0 ] ;\n\
+           sh:select \"\"\"{select}\"\"\" .\n"
+    )
+}
+
+const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+
+/// `ex:big` violates when its value, cast with the built-in `xsd:integer`, is
+/// over 5 — and it is 10.
+fn cast_shapes() -> String {
+    format!(
+        "ex:CastShape a sh:NodeShape ; sh:targetNode ex:big ;\n\
+           sh:sparql [ sh:select \"\"\"SELECT $this ?value WHERE {{ $this <http://example.org/v> ?value . FILTER(<{XSD_INTEGER}>(?value) > 5) }}\"\"\" ] .\n"
+    )
+}
+
+fn load(store: &TripleStore, graph: &str, ttl: &str) {
+    store
+        .load_str(&format!("{PFX}{ttl}"), RdfFormat::Turtle, Some(graph))
+        .unwrap();
+}
+
+/// Another graph in the store — any dataset's — defines `xsd:integer` to
+/// always return 0. The shapes graph's own constraint still casts with the
+/// built-in and still catches the violation.
+#[test]
+fn sparql_function_in_another_graph_cannot_redefine_a_cast() {
+    let store = TripleStore::in_memory().unwrap();
+    load(&store, "urn:shapes", &cast_shapes());
+    load(&store, "urn:data", "ex:big ex:v \"10\" .");
+    load(
+        &store,
+        "urn:attacker",
+        &sparql_function(XSD_INTEGER, "SELECT (0 AS ?r) WHERE {}"),
+    );
+    let r = validate(&store, "urn:shapes", &["urn:data".to_string()]).unwrap();
+    assert!(
+        violates(&r, "/big"),
+        "a graph outside the run redefined xsd:integer: {:?}",
+        r.results
+    );
+}
+
+/// A shapes graph that declares a function at a reserved IRI (an `xsd:`
+/// cast, a registered GeoSPARQL function) fails its own run: the definition
+/// would silently be ignored otherwise, and the author would never learn it.
+#[test]
+fn sparql_function_redefining_a_builtin_fails_the_run() {
+    for reserved in [
+        XSD_INTEGER,
+        "http://www.opengis.net/def/function/geosparql/sfWithin",
+        "http://www.w3.org/ns/sparql#adjust",
+    ] {
+        let store = TripleStore::in_memory().unwrap();
+        load(
+            &store,
+            "urn:shapes",
+            &format!(
+                "{}{}",
+                cast_shapes(),
+                sparql_function(reserved, "SELECT (0 AS ?r) WHERE {}")
+            ),
+        );
+        load(&store, "urn:data", "ex:big ex:v \"10\" .");
+        match validate(&store, "urn:shapes", &["urn:data".to_string()]) {
+            Err(e) => assert!(e.contains(reserved), "{reserved}: {e}"),
+            Ok(r) => panic!(
+                "{reserved} was redefined or ignored silently: {:?}",
+                r.results
+            ),
+        }
+    }
+}
+
+/// A result value is the N-Triples term: `"20"^^xsd:integer`.
+fn is_twenty(value: &Option<String>) -> bool {
+    value.as_deref().is_some_and(|v| v.starts_with("\"20\""))
+}
+
+/// Two shapes graphs: A declares `ex:double` and uses it; B uses it without
+/// declaring it. A's run computes with it; B's run does not see it.
+#[test]
+fn sparql_function_is_scoped_to_its_shapes_graph() {
+    let store = TripleStore::in_memory().unwrap();
+    let uses_double = "SELECT $this ?value WHERE { $this <http://example.org/v> ?v . BIND(<http://example.org/double>(?v) AS ?value) FILTER(?value > 15) }";
+    load(
+        &store,
+        "urn:shapes-a",
+        &format!(
+            "{}ex:A a sh:NodeShape ; sh:targetNode ex:big ; sh:sparql [ sh:select \"\"\"{uses_double}\"\"\" ] .\n",
+            sparql_function("http://example.org/double", "SELECT ($x * 2 AS ?r) WHERE {}")
+        ),
+    );
+    load(
+        &store,
+        "urn:shapes-b",
+        &format!("ex:B a sh:NodeShape ; sh:targetNode ex:big ; sh:sparql [ sh:select \"\"\"{uses_double}\"\"\" ] .\n"),
+    );
+    load(&store, "urn:data", "ex:big ex:v 10 .");
+    let data = ["urn:data".to_string()];
+
+    let a = validate(&store, "urn:shapes-a", &data).unwrap();
+    assert!(
+        a.results
+            .iter()
+            .any(|x| x.focus_node.ends_with("/big") && is_twenty(&x.value)),
+        "the declaring graph's run computes with its function: {:?}",
+        a.results
+    );
+
+    let b = validate(&store, "urn:shapes-b", &data).unwrap();
+    assert!(
+        !b.results.iter().any(|x| is_twenty(&x.value)),
+        "another shapes graph's function reached this run: {:?}",
+        b.results
+    );
+    assert!(
+        b.results
+            .iter()
+            .any(|x| x.focus_node.ends_with("/big") && x.message.contains("double")),
+        "an undeclared function makes the constraint unevaluable, not a pass: {:?}",
+        b.results
+    );
+}
+
 // ─── Fail open: every value of a multi-valued parameter is a constraint ──────
 //
 // SHACL §4: when a component has a single parameter, "each value of such a
@@ -1778,4 +1915,167 @@ fn rdf_report_keeps_typed_terms() {
         ),
         "{ttl}"
     );
+}
+
+// ─── SHACL-AF: expression constraints (§7) ──────────────────────────────────
+//
+// `sh:expression` holds a node expression evaluated with each value node as
+// the focus node; there is a result for every value node whose expression
+// does not produce exactly `{ true }`.
+
+/// After TopQuadrant's `expression/booleans-001`: `sh:expression sh:this`
+/// passes `true` and flags `false`.
+#[test]
+fn expression_constraint_requires_exactly_true() {
+    let r = run(
+        "ex:S a sh:NodeShape ; sh:expression sh:this ; sh:targetNode true, false .",
+        "",
+    );
+    assert!(!r.conforms);
+    assert_eq!(r.results.len(), 1, "{:?}", r.results);
+    assert_eq!(r.results[0].focus_node, "false");
+    assert_eq!(
+        r.results[0].value.as_deref(),
+        Some("false"),
+        "{:?}",
+        r.results
+    );
+}
+
+/// A function expression over a path: the clearance must be at least 9.10.
+/// No value at all is an empty result, which is not `{ true }` either.
+#[test]
+fn expression_constraint_with_a_function_expression() {
+    let shapes = r#"
+ex:atLeast a sh:SPARQLFunction ;
+  sh:parameter [ sh:path ex:value ; sh:order 1 ] ; sh:parameter [ sh:path ex:minimum ; sh:order 2 ] ;
+  sh:returnType xsd:boolean ; sh:ask "ASK { FILTER ($value >= $minimum) }" .
+ex:S a sh:NodeShape ; sh:targetClass ex:Bridge ;
+  sh:expression [ sh:message "Clearance below 9.10 m" ; ex:atLeast ( [ sh:path ex:clearance ] 9.10 ) ] ."#;
+    let data = r#"
+ex:ok a ex:Bridge ; ex:clearance 9.50 .
+ex:low a ex:Bridge ; ex:clearance 8.50 .
+ex:none a ex:Bridge ."#;
+    let r = run(shapes, data);
+    assert!(!violates(&r, "/ok"), "{:?}", r.results);
+    assert!(violates(&r, "/low"), "{:?}", r.results);
+    assert!(violates(&r, "/none"), "{:?}", r.results);
+    assert!(
+        r.results
+            .iter()
+            .all(|x| x.message.contains("Clearance below")),
+        "the expression's sh:message is the result message: {:?}",
+        r.results
+    );
+}
+
+/// The proprietary form this engine used to read — `sh:expression [ sh:path
+/// P ; sh:minExclusive … ]`, a path with comparison constraints on the
+/// expression node — is a standard path expression now (decision D6): its
+/// outputs are the path's values, which are not `true`.
+#[test]
+fn the_former_path_comparison_expression_form_has_standard_semantics() {
+    let r = run(
+        "ex:S a sh:NodeShape ; sh:targetNode ex:b ; sh:expression [ sh:path ex:h ; sh:minExclusive 9 ] .",
+        "ex:b ex:h 10 .",
+    );
+    assert!(violates(&r, "/b"), "{:?}", r.results);
+}
+
+/// On a property shape the expression is evaluated with every value node as
+/// the focus node.
+#[test]
+fn expression_on_a_property_shape_checks_each_value_node() {
+    let r = run(
+        "ex:S a sh:NodeShape ; sh:targetNode ex:t ; sh:property [ sh:path ex:flag ; sh:expression sh:this ] .",
+        "ex:t ex:flag true, false .",
+    );
+    assert_eq!(r.results.len(), 1, "{:?}", r.results);
+    assert_eq!(
+        r.results[0].value.as_deref(),
+        Some("false"),
+        "{:?}",
+        r.results
+    );
+}
+
+// ─── SHACL-AF: custom targets (§3) ──────────────────────────────────────────
+
+const BORN_IN: &str = r#"
+ex:BornIn a sh:SPARQLTargetType ; rdfs:subClassOf sh:Target ;
+  sh:parameter [ sh:path ex:country ] ;
+  sh:select "SELECT ?this WHERE { ?this <http://example.org/bornIn> $country . }" .
+"#;
+
+/// A SPARQL-based target type (§3.2): the target's parameter values are
+/// pre-bound in the type's query.
+#[test]
+fn sparql_target_type_prebinds_its_parameters() {
+    let shapes = format!(
+        "{BORN_IN}ex:S a sh:NodeShape ; sh:target [ a ex:BornIn ; ex:country ex:NL ] ;\n\
+           sh:property [ sh:path ex:name ; sh:minCount 1 ] ."
+    );
+    let r = run(&shapes, "ex:a ex:bornIn ex:NL . ex:b ex:bornIn ex:US .");
+    assert!(violates(&r, "/a"), "{:?}", r.results);
+    assert!(!violates(&r, "/b"), "{:?}", r.results);
+}
+
+/// A target that lacks a value for a non-optional parameter produces no
+/// target nodes (§3.2); a literal value is a term, not query text.
+#[test]
+fn sparql_target_type_without_its_parameter_targets_nothing() {
+    for target in [
+        "[ a ex:BornIn ]",
+        r#"[ a ex:BornIn ; ex:country "x\" . } UNION { ?this ?p ?o" ]"#,
+    ] {
+        let shapes = format!(
+            "{BORN_IN}ex:S a sh:NodeShape ; sh:target {target} ;\n\
+               sh:property [ sh:path ex:name ; sh:minCount 1 ] ."
+        );
+        let r = run(&shapes, "ex:a ex:bornIn ex:NL .");
+        assert!(r.conforms, "{target}: {:?}", r.results);
+    }
+}
+
+/// `sh:target` makes its subject a shape (§3) even with no `rdf:type
+/// sh:NodeShape` and no other target or property.
+#[test]
+fn a_shape_whose_only_target_is_sh_target_is_discovered() {
+    let shapes = r#"
+ex:S sh:target [ a sh:SPARQLTarget ; sh:select "SELECT ?this WHERE { ?this a <http://example.org/Thing> }" ] ;
+  sh:class ex:Named ."#;
+    let r = run(shapes, "ex:t a ex:Thing .");
+    assert!(violates(&r, "/t"), "{:?}", r.results);
+}
+
+// ─── SHACL-AF: function bodies read the run's data graphs ───────────────────
+
+/// A constraint calls a function whose body counts labels: it sees the run's
+/// data graph (two labels), not another graph in the store (five more), and a
+/// `GRAPH` block in the body reaches nothing.
+#[test]
+fn sparql_function_body_in_a_constraint_reads_the_run_data_graphs() {
+    let store = TripleStore::in_memory().unwrap();
+    load(
+        &store,
+        "urn:shapes",
+        r#"
+ex:countLabels a sh:SPARQLFunction ;
+  sh:select "SELECT (COUNT(?l) AS ?r) WHERE { ?s <http://www.w3.org/2000/01/rdf-schema#label> ?l }" .
+ex:anyGraph a sh:SPARQLFunction ;
+  sh:select "SELECT (COUNT(?l) AS ?r) WHERE { GRAPH ?g { ?s <http://www.w3.org/2000/01/rdf-schema#label> ?l } }" .
+ex:S a sh:NodeShape ; sh:targetNode ex:t ;
+  sh:sparql [ sh:select "SELECT $this ?value WHERE { BIND (<http://example.org/countLabels>() AS ?value) }" ] ;
+  sh:sparql [ sh:select "SELECT $this ?value WHERE { BIND (<http://example.org/anyGraph>() AS ?value) FILTER (?value > 0) }" ] ."#,
+    );
+    load(&store, "urn:data", r#"ex:t rdfs:label "a", "b" ."#);
+    load(
+        &store,
+        "urn:other",
+        r#"ex:u rdfs:label "c", "d", "e", "f", "g" ."#,
+    );
+    let r = validate(&store, "urn:shapes", &["urn:data".to_string()]).unwrap();
+    let values: Vec<_> = r.results.iter().filter_map(|x| x.value.clone()).collect();
+    assert_eq!(values.len(), 1, "{:?}", r.results);
+    assert!(values[0].starts_with("\"2\""), "{:?}", r.results);
 }

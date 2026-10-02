@@ -341,15 +341,14 @@ pub struct TripleStore {
     /// per validation run on a persistent store; the memory backend's transaction
     /// holds its exclusive write lock, so there the engine reads live instead.
     persistent: bool,
-    /// `sh:SPARQLFunction` handlers discovered in the store, keyed by the write
-    /// generation they were discovered at. Every `query_options()` used to walk
-    /// the whole store's `rdf:type` index for them — a RocksDB snapshot plus a
-    /// prefix scan per SPARQL query, 12% of a large SHACL run's CPU.
-    shacl_functions: std::sync::Arc<std::sync::Mutex<Option<(u64, ShaclFunctions)>>>,
+    /// The `sh:SPARQLFunction`s every query sees: those of the admin-designated
+    /// function graphs, discovered once per write generation (every
+    /// `query_options()` used to walk the whole store's `rdf:type` index for
+    /// them — a RocksDB snapshot plus a prefix scan per SPARQL query, 12% of a
+    /// large SHACL run's CPU). Shared by clones. See
+    /// [`crate::shacl::sparql_functions`] for why nothing else is registered.
+    user_functions: std::sync::Arc<std::sync::Mutex<crate::shacl::sparql_functions::Registry>>,
 }
-
-/// The `sh:SPARQLFunction` handlers discovered at one write generation.
-type ShaclFunctions = Arc<Vec<(NamedNode, crate::shacl::sparql_functions::FnHandler)>>;
 
 /// Brackets one write to the store (see [`TripleStore::begin_write`]). Dropping
 /// it records the write's end on every return path, including errors.
@@ -366,6 +365,79 @@ impl Drop for WriteGuard<'_> {
             self.0.replication.after_write(&self.0.changes, self.1);
         }
     }
+}
+
+/// The server's own SPARQL extension functions — GeoSPARQL, the `ots-geof:`
+/// 3D functions, RDF 1.2 and ADJUST — as `(IRI, handler)` pairs.
+fn builtin_functions() -> Vec<(NamedNode, crate::shacl::sparql_functions::FnHandler)> {
+    let mut fns = geo_fns::all_functions();
+    // The additive ots-geof: 3D functions (spec §3.4). Separate namespace, so
+    // GeoSPARQL 1.1 results are unchanged.
+    #[cfg(feature = "geometry3d")]
+    fns.extend(crate::geo::functions3d::all_functions_3d());
+    // RDF 1.2 SPARQL built-in functions (rdf-12 feature).
+    #[cfg(feature = "rdf-12")]
+    fns.extend(crate::sparql::rdf12_functions::all_functions());
+    // SPARQL 1.2 ADJUST (always available).
+    fns.push(crate::sparql::rdf12_functions::adjust_function());
+    fns
+}
+
+/// The IRIs of [`builtin_functions`] and the GeoSPARQL aggregates: no
+/// `sh:SPARQLFunction` may take one.
+pub(crate) fn builtin_function_iris() -> &'static std::collections::HashSet<String> {
+    static IRIS: std::sync::OnceLock<std::collections::HashSet<String>> =
+        std::sync::OnceLock::new();
+    IRIS.get_or_init(|| {
+        builtin_functions()
+            .into_iter()
+            .map(|(iri, _)| iri.into_string())
+            .chain(
+                crate::geo::aggregates::all_aggregates()
+                    .into_iter()
+                    .map(|(iri, _)| iri.into_string()),
+            )
+            .collect()
+    })
+}
+
+/// An evaluator with the server's own functions and aggregates and the
+/// allowlisted federation handler, and no user-defined function.
+fn builtin_options() -> SparqlEvaluator {
+    // SPARQL federation (`SERVICE`) stays disabled: oxigraph is built without the
+    // `http-client` feature, so there is no HTTP service handler and `SERVICE`/`LOAD`
+    // error rather than fetch — SERVICE-based SSRF/exfiltration stays off. (SSRF-1)
+    // (oxigraph 0.5 moved the explicit `without_service_handler` toggle behind the
+    // `http-client` feature, so there is nothing to call when it is disabled.)
+    let mut opts = SparqlEvaluator::new();
+    // SPARQL federation: every `SERVICE` goes through the allowlisted
+    // handler (crate::sparql::federation) — no allowlist, no network.
+    opts =
+        opts.with_default_service_handler(crate::sparql::federation::AllowlistedServiceHandler {
+            identity: crate::federation::current_identity(),
+        });
+    opts = with_functions(opts, &builtin_functions());
+    // …and the GeoSPARQL aggregates (`geof:aggUnion`). This declares them to
+    // this evaluator's own parser as well; every other parse of a query goes
+    // through `crate::sparql::parser`, which knows them too.
+    for (iri, factory) in crate::geo::aggregates::all_aggregates() {
+        opts = opts.with_custom_aggregate_function(iri, move || factory());
+    }
+    opts
+}
+
+/// `opts` with `functions` registered. A registration replaces an earlier
+/// one with the same IRI, which is why user-defined sets are checked against
+/// [`builtin_function_iris`] before they get here.
+fn with_functions(
+    mut opts: SparqlEvaluator,
+    functions: &[(NamedNode, crate::shacl::sparql_functions::FnHandler)],
+) -> SparqlEvaluator {
+    for (iri, handler) in functions {
+        let handler = handler.clone();
+        opts = opts.with_custom_function(iri.clone(), move |args| handler(args));
+    }
+    opts
 }
 
 /// Monotonic source for [`TripleStore::cache_id`].
@@ -429,7 +501,9 @@ impl TripleStore {
             changes: Arc::new(changes),
             replication: Arc::new(Replication::from_env(Some(path))),
             persistent: true,
-            shacl_functions: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            user_functions: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::shacl::sparql_functions::Registry::from_env(),
+            )),
         })
         .inspect(replication::spawn_follower_if_configured)
     }
@@ -458,7 +532,9 @@ impl TripleStore {
             changes: Arc::new(ChangeLog::open(None)?),
             replication: Arc::new(Replication::from_env(None)),
             persistent: false,
-            shacl_functions: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            user_functions: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::shacl::sparql_functions::Registry::from_env(),
+            )),
         })
         .inspect(replication::spawn_follower_if_configured)
     }
@@ -591,22 +667,62 @@ impl TripleStore {
         self.parallel_mirror.full_copy()
     }
 
-    /// The `sh:SPARQLFunction` handlers defined in the store, discovered once per
-    /// write generation.
-    fn shacl_functions(&self) -> ShaclFunctions {
+    /// The `sh:SPARQLFunction`s every query of this store sees (see the
+    /// `user_functions` field), discovered once per write generation.
+    fn registered_functions(&self) -> crate::shacl::sparql_functions::Functions {
+        use crate::shacl::sparql_functions as sf;
         let gen = self.write_generation();
-        if let Ok(guard) = self.shacl_functions.lock() {
-            if let Some((g, fns)) = guard.as_ref() {
-                if *g == gen {
-                    return fns.clone();
-                }
-            }
-        }
-        let fns = Arc::new(crate::shacl::sparql_functions::all_functions(self));
-        if let Ok(mut guard) = self.shacl_functions.lock() {
-            *guard = Some((gen, fns.clone()));
+        let graphs = match self.user_functions.lock() {
+            Ok(registry) => match registry.lookup(gen) {
+                Ok(fns) => return fns,
+                Err(graphs) => graphs,
+            },
+            Err(_) => return Arc::default(),
+        };
+        // Discovered without holding the lock: it reads the store.
+        let fns: sf::Functions = Arc::new(if graphs.is_empty() {
+            Vec::new()
+        } else {
+            sf::designated_functions(self, &graphs, builtin_function_iris())
+        });
+        if let Ok(mut registry) = self.user_functions.lock() {
+            registry.store_discovered(gen, fns.clone());
         }
         fns
+    }
+
+    /// Designate the graphs whose `sh:SPARQLFunction`s every query sees, in
+    /// place of `OTS_SPARQL_FUNCTION_GRAPHS`. Each must be
+    /// `urn:system:functions` or lie under `urn:system:functions:` — graphs
+    /// only an admin can write; `Err` names the first that does not.
+    pub fn set_function_graphs(&self, graphs: &[String]) -> Result<(), String> {
+        use crate::shacl::sparql_functions as sf;
+        if let Some(bad) = graphs.iter().find(|g| !sf::is_designatable_graph(g)) {
+            return Err(format!(
+                "<{bad}> cannot be a function graph: it must be <{}> or start with {}:",
+                sf::DESIGNATED_GRAPH,
+                sf::DESIGNATED_GRAPH
+            ));
+        }
+        self.user_functions
+            .lock()
+            .map_err(|_| "function registry lock poisoned".to_string())?
+            .set_graphs(graphs.to_vec());
+        // A cached result may have been computed with the old set.
+        self.query_cache.invalidate();
+        Ok(())
+    }
+
+    /// Make every query of this store — a scratch store a write gate
+    /// validates in — see exactly the `sh:SPARQLFunction`s every query of
+    /// `main` sees, whatever this store holds. A shapes run in the scratch
+    /// store then computes what the same run would compute in `main`.
+    pub fn inherit_registered_functions(&self, main: &TripleStore) {
+        let fns = main.registered_functions();
+        if let Ok(mut registry) = self.user_functions.lock() {
+            registry.inherit(fns);
+        }
+        self.query_cache.invalidate();
     }
 
     /// The blank-node durability policy currently in effect.
@@ -697,61 +813,45 @@ impl TripleStore {
         stats
     }
 
+    /// Query options for every query of this store: the server's own
+    /// functions plus the `sh:SPARQLFunction`s of the admin-designated function
+    /// graphs. A function a shapes graph declares is not here; it belongs to
+    /// that graph's runs ([`Self::query_options_for_shapes`]).
     pub(crate) fn query_options(&self) -> SparqlEvaluator {
-        // SPARQL federation (`SERVICE`) stays disabled: oxigraph is built without the
-        // `http-client` feature, so there is no HTTP service handler and `SERVICE`/`LOAD`
-        // error rather than fetch — SERVICE-based SSRF/exfiltration stays off. (SSRF-1)
-        // (oxigraph 0.5 moved the explicit `without_service_handler` toggle behind the
-        // `http-client` feature, so there is nothing to call when it is disabled.)
-        let mut opts = SparqlEvaluator::new();
-        // SPARQL federation: every `SERVICE` goes through the allowlisted
-        // handler (crate::sparql::federation) — no allowlist, no network.
-        opts = opts.with_default_service_handler(
-            crate::sparql::federation::AllowlistedServiceHandler {
-                identity: crate::federation::current_identity(),
-            },
-        );
+        with_functions(builtin_options(), &self.registered_functions())
+    }
 
-        // Register all GeoSPARQL functions
-        for (iri, handler) in geo_fns::all_functions() {
-            opts = opts.with_custom_function(iri, move |args| handler(args));
-        }
-
-        // …and the GeoSPARQL aggregates (`geof:aggUnion`). This declares them to
-        // this evaluator's own parser as well; every other parse of a query goes
-        // through `crate::sparql::parser`, which knows them too.
-        for (iri, factory) in crate::geo::aggregates::all_aggregates() {
-            opts = opts.with_custom_aggregate_function(iri, move || factory());
-        }
-
-        // Register the additive ots-geof: 3D functions (spec §3.4). Separate
-        // namespace, so GeoSPARQL 1.1 results are unchanged.
-        #[cfg(feature = "geometry3d")]
-        for (iri, handler) in crate::geo::functions3d::all_functions_3d() {
-            opts = opts.with_custom_function(iri, move |args| handler(args));
-        }
-
-        // Register RDF 1.2 SPARQL built-in functions (rdf-12 feature)
-        #[cfg(feature = "rdf-12")]
-        for (iri, handler) in crate::sparql::rdf12_functions::all_functions() {
-            opts = opts.with_custom_function(iri, move |args| handler(args));
-        }
-
-        // Register SPARQL 1.2 ADJUST function (always available)
-        {
-            let (iri, handler) = crate::sparql::rdf12_functions::adjust_function();
-            opts = opts.with_custom_function(iri, move |args| handler(args));
-        }
-
-        // Register SHACL-AF user-defined functions (sh:SPARQLFunction) discovered in the
-        // store. Discovery uses the raw quad index (never store.query), so this does not
-        // re-enter query_options; each function evaluates against a fresh in-memory store.
-        for (iri, handler) in self.shacl_functions().iter() {
-            let handler = handler.clone();
-            opts = opts.with_custom_function(iri.clone(), move |args| handler(args));
-        }
-
-        opts
+    /// Query options for a run of `shapes_graph` (SHACL validation and
+    /// rules): [`Self::query_options`] plus the `sh:SPARQLFunction`s the
+    /// shapes graph declares. `Err` when one of them would redefine an `xsd:`
+    /// cast, a function the server registers or a designated graph's
+    /// function: the run must fail rather than compute with something else.
+    pub(crate) fn query_options_for_shapes(
+        &self,
+        shapes_graph: &str,
+    ) -> Result<SparqlEvaluator, String> {
+        let registered = self.registered_functions();
+        // A designated function graph used as a shapes graph: its functions
+        // are registered already.
+        let designated = self
+            .user_functions
+            .lock()
+            .map(|r| r.designates(shapes_graph))
+            .unwrap_or(false);
+        let declared = if designated {
+            Vec::new()
+        } else {
+            crate::shacl::sparql_functions::shapes_graph_functions(
+                self,
+                shapes_graph,
+                &registered,
+                builtin_function_iris(),
+            )?
+        };
+        Ok(with_functions(
+            with_functions(builtin_options(), &registered),
+            &declared,
+        ))
     }
 
     /// Execute a SPARQL query (SELECT, CONSTRUCT, ASK, DESCRIBE).
@@ -1348,8 +1448,12 @@ impl TripleStore {
     ///   literal `sh:targetNode`) cannot close a clause and open another; they
     ///   reach every scope of the query, as SHACL pre-binding defines it
     ///   ([`crate::sparql::prebind`]).
+    ///
+    /// `evaluator` supplies the functions the query may call: for a rule, the
+    /// run's own ([`Self::query_options_for_shapes`]).
     pub fn construct_confined(
         &self,
+        evaluator: SparqlEvaluator,
         query: &SpargebraQuery,
         scope: &[String],
         bindings: &[(&str, Term)],
@@ -1369,10 +1473,16 @@ impl TripleStore {
         let names: Vec<&str> = bindings.iter().map(|(n, _)| *n).collect();
         crate::sparql::prebind::rewrite(&mut query, &names).map_err(StoreError::Parse)?;
         let terms: Vec<(&str, &Term)> = bindings.iter().map(|(n, t)| (*n, t)).collect();
-        let mut prepared = crate::sparql::prebind::prepare(self.query_options(), query, &terms)
+        let mut prepared = crate::sparql::prebind::prepare(evaluator.clone(), query, &terms)
             .map_err(StoreError::Parse)?;
         confine_dataset(prepared.dataset_mut(), scope)?;
-        match prepared.on_store(&self.store).execute()? {
+        // A `sh:SPARQLFunction` the rule calls reads what the rule reads.
+        let data = crate::shacl::sparql_functions::DataScope {
+            source: crate::shacl::sparql_functions::ScopeSource::Store(&self.store),
+            data_graphs: scope,
+            evaluator: &evaluator,
+        };
+        match data.execute(prepared)? {
             QueryResults::Graph(triples) => Ok(triples.collect::<Result<Vec<_>, _>>()?),
             // A CONSTRUCT always evaluates to a graph; the other arms cannot
             // happen, and an empty result is the honest answer if they did.
