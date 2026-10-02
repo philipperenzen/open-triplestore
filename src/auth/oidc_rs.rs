@@ -374,6 +374,18 @@ impl OidcVerifier {
         &self.issuer
     }
 
+    /// A verifier whose JWKS is already cached, so `verify` runs without
+    /// discovery or network I/O.
+    #[cfg(test)]
+    fn with_jwks(issuer: &str, audience: &str, jwks: JwkSet) -> Self {
+        let v = Self::new(issuer.to_string(), Some(audience.to_string()));
+        *v.cache.try_write().expect("fresh verifier cache") = Some(CachedJwks {
+            jwks,
+            fetched_at: Instant::now(),
+        });
+        v
+    }
+
     /// Fetch (and cache) the issuer's JWKS via OIDC discovery.
     async fn jwks(&self, force: bool) -> anyhow::Result<JwkSet> {
         if !force {
@@ -458,7 +470,13 @@ impl OidcVerifier {
 
         let key = DecodingKey::from_jwk(&jwk)?;
         let mut validation = Validation::new(header.alg);
-        validation.set_issuer(&[self.issuer.as_str()]);
+        // The issuer is configured without a trailing `/` (`from_env` and
+        // `OTS_TRUSTED_ISSUERS` trim it), but some IdPs put one in `iss`
+        // (Auth0: `https://tenant.auth0.com/`). Accept exactly these two
+        // spellings of the configured issuer and nothing else.
+        let iss_bare = self.issuer.trim_end_matches('/');
+        let iss_slash = format!("{iss_bare}/");
+        validation.set_issuer(&[iss_bare, iss_slash.as_str()]);
         // Audience validation is MANDATORY. With no configured `aud` we would
         // accept any token the IdP minted for *any* client of the same issuer
         // (audience-confusion / token-redirection). Fail closed instead of
@@ -829,5 +847,79 @@ mod tests {
             msg.contains("https") || msg.contains("insecure"),
             "the error must explain the https requirement, got: {msg}"
         );
+    }
+
+    // ─── `iss` with or without a trailing slash ───────────────────────────────
+    // Auth0 (and others) issue `iss: "https://tenant.example/"`, while the
+    // configured issuer is stored trimmed. Both spellings must verify; any
+    // other issuer, a wrong audience or an expired token must still fail.
+
+    fn signed_token(
+        keys: &crate::auth::oidc_provider::ProviderKeys,
+        iss: &str,
+        aud: &str,
+        exp_offset: i64,
+    ) -> String {
+        let now = chrono::Utc::now().timestamp();
+        keys.sign_claims(&serde_json::json!({
+            "iss": iss, "aud": aud, "sub": "subject-1",
+            "iat": now, "exp": now + exp_offset,
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn verify_accepts_issuer_with_or_without_trailing_slash() {
+        let db = AuthDb::in_memory().unwrap();
+        let keys =
+            crate::auth::oidc_provider::ProviderKeys::load_or_generate(&db, "test-secret").unwrap();
+        let jwks: JwkSet =
+            serde_json::from_value(serde_json::json!({ "keys": [keys.public_jwk] })).unwrap();
+
+        // As configured from the environment (trimmed), and as constructed
+        // directly with the slash kept.
+        for configured in ["https://idp.example", "https://idp.example/"] {
+            let verifier = OidcVerifier::with_jwks(configured, "my-api", jwks.clone());
+            for iss in ["https://idp.example", "https://idp.example/"] {
+                let claims = verifier
+                    .verify(&signed_token(&keys, iss, "my-api", 300))
+                    .await
+                    .unwrap_or_else(|e| panic!("configured {configured}, iss {iss}: {e}"));
+                assert_eq!(claims.sub, "subject-1");
+            }
+            for iss in [
+                "https://idp.example//",
+                "https://idp.example/other",
+                "https://idp.example.evil",
+                "http://idp.example",
+            ] {
+                assert!(
+                    verifier
+                        .verify(&signed_token(&keys, iss, "my-api", 300))
+                        .await
+                        .is_err(),
+                    "configured {configured}: iss {iss} must be refused"
+                );
+            }
+            assert!(
+                verifier
+                    .verify(&signed_token(
+                        &keys,
+                        "https://idp.example/",
+                        "other-api",
+                        300
+                    ))
+                    .await
+                    .is_err(),
+                "a wrong audience must still be refused"
+            );
+            assert!(
+                verifier
+                    .verify(&signed_token(&keys, "https://idp.example/", "my-api", -600))
+                    .await
+                    .is_err(),
+                "an expired token must still be refused"
+            );
+        }
     }
 }
