@@ -37,6 +37,10 @@ pub struct AllowlistedServiceHandler {
     /// The identity the query acts for (captured on the request thread), for
     /// federation assertions towards the remote.
     pub identity: Option<std::sync::Arc<crate::federation::Identity>>,
+    /// Whom the query acts for, captured the same way: decides whether
+    /// `SERVICE <urn:source:id>` may use the source's account. `None`
+    /// resolves no source.
+    pub source_caller: Option<std::sync::Arc<crate::sources::virtual_source::SourceCaller>>,
 }
 
 impl DefaultServiceHandler for AllowlistedServiceHandler {
@@ -50,8 +54,13 @@ impl DefaultServiceHandler for AllowlistedServiceHandler {
     ) -> Result<QuerySolutionIter<'static>, Self::Error> {
         // `SERVICE <urn:source:id>` names a registered virtual datasource:
         // its endpoint and its account stand in, and the allowlist applies
-        // to the endpoint exactly as to a URL written out.
-        let resolved = match crate::sources::virtual_source::resolve(service_name.as_str()) {
+        // to the endpoint exactly as to a URL written out. A source the
+        // caller may not use resolves to nothing, and its IRI then fails the
+        // allowlist like any IRI that names no source.
+        let resolved = match crate::sources::virtual_source::resolve(
+            service_name.as_str(),
+            self.source_caller.as_deref(),
+        ) {
             Some(Ok(r)) => Some(r),
             Some(Err(reason)) => {
                 return Err(FederationError::Parse {

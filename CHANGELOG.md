@@ -186,6 +186,41 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   request that worked before working; operators who want a closed space set
   `LDP_ROOT_ACL=owners` before first start or tighten `/ldp/.acl` afterwards.
   Tests: `tests/ldp_wac_security_http.rs`.
+- **`SERVICE <urn:source:id>` used a datasource's stored account for any
+  caller.** A local query naming a registered virtual source was sent to its
+  endpoint with the account the source was registered with, whoever asked —
+  including an anonymous caller of `/sparql`. The account is now the source's
+  to share: it resolves for an administrator, for the source's owner, and for
+  a signed-in user who holds a role on the dataset the source is bound to (as
+  its owner, a member of the owning organisation or group, or through a
+  grant). A public dataset's visibility alone does not count, and an
+  anonymous caller never qualifies. For anyone else the source does not
+  exist: the `SERVICE` fails exactly as one naming an unregistered source
+  does, and the endpoint never sees the account. Live queries over a source
+  are served by `/sparql` and SPARQL Update; a query evaluated anywhere else
+  — a path that does not say whom it acts for — resolves no source. Tests:
+  `tests/sources_virtual_http.rs`.
+- **A SPARQL Update could probe a graph its writer cannot read through
+  `EXISTS`.** The update's read-side ACL walked the `WHERE` clause's patterns
+  but not its expressions, so `INSERT { GRAPH <mine> { … } } WHERE { FILTER
+  EXISTS { GRAPH <other> { … } } }` told a writer of `<mine>` whether
+  `<other>` held a triple. Every `EXISTS` / `NOT EXISTS` — in a `FILTER`, a
+  `BIND`, an `OPTIONAL`'s condition, an `ORDER BY` key or an aggregate — is
+  now checked like the rest of the clause: a named graph needs read access,
+  and a variable graph or a `SERVICE` inside one makes the update admin-only.
+  LDP `PATCH` applies its no-`GRAPH`, no-`SERVICE` rule inside `EXISTS` too.
+  Tests: `tests/security_graph_acl_protocol_parity.rs`.
+- **The catalogue's aggregate VoID statistics counted private graphs.** The
+  whole-store dataset in `/.well-known/void` (`void:triples`,
+  `void:distinctSubjects`, `void:distinctObjects`, `void:properties`,
+  `void:documents`) counted every graph, private and system ones included,
+  for anonymous callers too, and each dataset's entry listed its private
+  graphs as `void:subset`s and counted them in its `void:triples` for anyone
+  who could see the dataset. Both now stay inside the graphs the caller may
+  read over `/sparql` (an anonymous caller: the public ones), as the service
+  description at `/` already did: a private graph is listed and counted for
+  its dataset's writers only. An administrator still sees the whole store.
+  Tests: `tests/dcat_ap_http.rs`.
 
 ## [0.7.0] — 2026-09-28
 

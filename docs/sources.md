@@ -233,6 +233,25 @@ URL and no secret — so a virtual source is also queryable without
 materialising anything. Federation's own rules apply unchanged: the endpoint
 must be allowlisted, the remote timeout and row cap hold.
 
+Because such a query is sent with the source's account, using it is the
+source's to share. The source resolves for:
+
+- an administrator;
+- the source's owner;
+- a signed-in user who holds a role on the dataset the source is bound to
+  (`dataset` on its record): the dataset's owner, a member of the owning
+  organisation or group, or a grantee — any role, viewer included.
+
+A public dataset's visibility alone does not count: reading the graphs a
+mapping produced is not reading everything the account can reach. An
+anonymous caller never qualifies, and a source bound to no dataset is for
+administrators and its owner only. For anyone else the source does not exist:
+the `SERVICE` fails exactly as one naming an unregistered source does (with
+`SILENT`, it contributes no rows), and the endpoint never sees the account on
+their behalf. Live queries are served by `/sparql` and by SPARQL Update (where
+`SERVICE` is admin-only anyway); a query the store evaluates for any other
+purpose resolves no source.
+
 ---
 
 ## Registering a datasource

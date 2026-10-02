@@ -47,10 +47,14 @@ The catalogue's own metadata comes from the environment:
 | `CATALOG_LANGUAGE` | ISO 639-3 code (`ENG`, `NLD`, …) mapped onto the EU language authority; default `ENG`, or `NLD` under `dcat-ap-nl`. |
 | `CATALOG_LICENSE` | Licence IRI for the catalogue and, when a dataset declares none, its distributions. |
 
-Statistics (`void:triples`, distinct subjects/predicates/objects) are computed
-over the whole store — default and named graphs alike — and cached until the
-next write, so an anonymous `/.well-known/void` no longer costs three full
-scans per request.
+The aggregate dataset's statistics (`void:triples`, distinct
+subjects/predicates/objects, `void:documents`) count what the caller may read:
+an administrator's cover the whole store, default and named graphs alike;
+anyone else's — an anonymous caller's included — only the graphs they may
+read over `/sparql` (for an anonymous caller, the public ones). Private and
+system graphs therefore never show in a total they could not query. Each
+caller's statistics are cached until the next write, so an anonymous
+`/.well-known/void` does not cost three scans per request.
 
 ## Accessing the Catalog
 
@@ -162,9 +166,7 @@ Dataset visibility maps to EU Publications Office access rights URIs:
 
 ## VoID Statistics
 
-VoID statistics (`void:triples`, `void:distinctSubjects`, `void:distinctObjects`, `void:properties`) are computed live via SPARQL COUNT queries when the catalog is requested. For large stores this may add a few hundred milliseconds; the results are not cached between requests.
-
-The aggregate `void:triples` at the root dataset level reflects `SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }` across all graphs. Per-dataset counts scope the query to `GRAPH <iri> { ?s ?p ?o }` for each registered graph.
+The root dataset's statistics (`void:triples`, `void:distinctSubjects`, `void:distinctObjects`, `void:properties`, `void:documents`) cover the graphs the caller may read — the whole store, default and named graphs alike, for an administrator; the readable named graphs for anyone else, so an anonymous caller counts only public graphs. They are computed with `COUNT` queries the first time a caller with that set of graphs requests the catalogue after a write, and cached until the next write.
 
 ---
 

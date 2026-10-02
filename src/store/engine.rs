@@ -287,6 +287,13 @@ pub struct VoidStats {
     pub named_graphs: usize,
 }
 
+/// [`TripleStore::void_stats_over`]'s cache: sorted graph set → (write
+/// generation, statistics).
+type VoidScopedCache = std::collections::HashMap<Vec<String>, (u64, VoidStats)>;
+
+/// Graph sets whose statistics are kept at once; one more clears them all.
+const VOID_SCOPED_CACHE_CAP: usize = 64;
+
 fn next_instance_id() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -328,6 +335,10 @@ pub struct TripleStore {
     /// VoID statistics for the whole store, keyed by the write generation
     /// they were computed at (see [`TripleStore::void_stats`]).
     void_stats_cache: std::sync::Arc<std::sync::Mutex<Option<(u64, VoidStats)>>>,
+    /// VoID statistics over a set of graphs (a caller's readable graphs),
+    /// keyed by the sorted set and stamped with the write generation (see
+    /// [`TripleStore::void_stats_over`]).
+    void_scoped_cache: std::sync::Arc<std::sync::Mutex<VoidScopedCache>>,
     /// Blank-node durability policy applied on import. Defaults to
     /// [`BlankNodeMode::Preserve`] (opt into durability via
     /// [`TripleStore::with_blank_node_mode`]).
@@ -424,6 +435,9 @@ impl TripleStore {
             telemetry: Arc::new(Telemetry::new()),
             instance_id: next_instance_id(),
             void_stats_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            void_scoped_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             blank_node_mode: BlankNodeMode::default(),
             cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             changes: Arc::new(changes),
@@ -453,6 +467,9 @@ impl TripleStore {
             telemetry: Arc::new(Telemetry::new()),
             instance_id: next_instance_id(),
             void_stats_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            void_scoped_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             blank_node_mode: BlankNodeMode::default(),
             cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             changes: Arc::new(ChangeLog::open(None)?),
@@ -697,6 +714,75 @@ impl TripleStore {
         stats
     }
 
+    /// VoID statistics over the named graphs in `graphs` only — what a caller
+    /// who reads exactly those graphs may learn about the store, where
+    /// [`Self::void_stats`] counts every graph, private and system ones too.
+    /// `triples` sums the graphs' sizes; the distinct counts are over their
+    /// union; `named_graphs` counts the ones that exist. Cached per graph set
+    /// until the next write.
+    pub fn void_stats_over(&self, graphs: &std::collections::HashSet<String>) -> VoidStats {
+        let mut key: Vec<String> = graphs.iter().cloned().collect();
+        key.sort_unstable();
+        let generation = self.write_generation();
+        if let Ok(guard) = self.void_scoped_cache.lock() {
+            if let Some((g, stats)) = guard.get(&key) {
+                if *g == generation {
+                    return *stats;
+                }
+            }
+        }
+        let present: Vec<&String> = match self.named_graphs() {
+            Ok(all) => {
+                let all: std::collections::HashSet<String> =
+                    all.into_iter().map(|g| g.into_string()).collect();
+                key.iter().filter(|g| all.contains(*g)).collect()
+            }
+            Err(_) => Vec::new(),
+        };
+        let stats = if present.is_empty() {
+            VoidStats::default()
+        } else {
+            let values: String = present
+                .iter()
+                .map(|g| format!("<{}>", crate::store::escape_sparql_iri(g)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let count = |var: &str| -> usize {
+                let q = format!(
+                    "SELECT (COUNT(DISTINCT ?{var}) AS ?c) WHERE {{ VALUES ?g {{ {values} }} GRAPH ?g {{ ?s ?p ?o }} }}"
+                );
+                match self.query(&q) {
+                    Ok(oxigraph::sparql::QueryResults::Solutions(mut sols)) => sols
+                        .next()
+                        .and_then(|r| r.ok())
+                        .and_then(|r| match r.get(0) {
+                            Some(oxigraph::model::Term::Literal(l)) => l.value().parse().ok(),
+                            _ => None,
+                        })
+                        .unwrap_or(0),
+                    _ => 0,
+                }
+            };
+            VoidStats {
+                triples: present
+                    .iter()
+                    .map(|g| self.count_graph(Some(g.as_str())).unwrap_or(0))
+                    .sum(),
+                distinct_subjects: count("s"),
+                distinct_predicates: count("p"),
+                distinct_objects: count("o"),
+                named_graphs: present.len(),
+            }
+        };
+        if let Ok(mut guard) = self.void_scoped_cache.lock() {
+            if guard.len() >= VOID_SCOPED_CACHE_CAP && !guard.contains_key(&key) {
+                guard.clear();
+            }
+            guard.insert(key, (generation, stats));
+        }
+        stats
+    }
+
     pub(crate) fn query_options(&self) -> SparqlEvaluator {
         // SPARQL federation (`SERVICE`) stays disabled: oxigraph is built without the
         // `http-client` feature, so there is no HTTP service handler and `SERVICE`/`LOAD`
@@ -709,6 +795,7 @@ impl TripleStore {
         opts = opts.with_default_service_handler(
             crate::sparql::federation::AllowlistedServiceHandler {
                 identity: crate::federation::current_identity(),
+                source_caller: crate::sources::virtual_source::current_caller(),
             },
         );
 

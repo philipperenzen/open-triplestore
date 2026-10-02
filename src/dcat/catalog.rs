@@ -256,6 +256,7 @@ pub fn build_catalog(
     .into_iter()
     .filter(|ds| auth_db.can_access_dataset(user_id, ds).unwrap_or(false))
     .collect();
+    let readable = readable_graphs(auth_db, user_id);
 
     // ── the catalogue ──
     let catalog = nn(&match scope {
@@ -344,12 +345,12 @@ pub fn build_catalog(
 
     // ── the aggregate dataset (whole store) ──
     if scope.is_none() {
-        aggregate_dataset(&mut g, opts, store, &publisher);
+        aggregate_dataset(&mut g, opts, store, readable.as_ref(), &publisher);
     }
 
     // ── per-dataset entries ──
     for ds in &datasets {
-        dataset_entry(&mut g, opts, store, auth_db, ds);
+        dataset_entry(&mut g, opts, store, auth_db, readable.as_ref(), ds);
     }
 
     // ── the SPARQL service ──
@@ -594,10 +595,34 @@ fn contact_point(
 
 // ── the aggregate dataset ───────────────────────────────────────────────────
 
-fn aggregate_dataset(g: &mut G, opts: &CatalogOptions, store: &TripleStore, publisher: &NamedNode) {
+/// The graphs the caller may read, by the `/sparql` rule
+/// ([`crate::auth::acl::readable_graph_iris`]): `None` for an administrator,
+/// who reads every graph. The catalogue's statistics and graph listings stay
+/// inside this set, so private and system graphs never show in a total or a
+/// listing the caller could not query (as the service description at `/`
+/// already does). A failed lookup reads nothing.
+fn readable_graphs(auth_db: &Arc<AuthDb>, user_id: Option<&str>) -> Option<HashSet<String>> {
+    let user = user_id.and_then(|id| auth_db.get_user_by_id(id).ok().flatten());
+    if user.as_ref().is_some_and(|u| u.role.is_admin()) {
+        return None;
+    }
+    let principal = user.as_ref().map(|u| (u.id.as_str(), u.role.as_str()));
+    Some(crate::auth::acl::readable_graph_iris(auth_db, principal).unwrap_or_default())
+}
+
+fn aggregate_dataset(
+    g: &mut G,
+    opts: &CatalogOptions,
+    store: &TripleStore,
+    readable: Option<&HashSet<String>>,
+    publisher: &NamedNode,
+) {
     let base = opts.base_url.as_str();
     let root = nn(&format!("{base}/dataset"));
-    let stats = store.void_stats();
+    let stats = match readable {
+        None => store.void_stats(),
+        Some(graphs) => store.void_stats_over(graphs),
+    };
     g.typ(root.clone(), &p(VOID, "Dataset"));
     g.typ(root.clone(), &p(DCAT, "Dataset"));
     g.lang(root.clone(), &p(DCT, "title"), &opts.title, opts.lang_tag());
@@ -764,6 +789,7 @@ fn dataset_entry(
     opts: &CatalogOptions,
     store: &TripleStore,
     auth_db: &Arc<AuthDb>,
+    readable: Option<&HashSet<String>>,
     ds: &Dataset,
 ) {
     let base = opts.base_url.as_str();
@@ -844,10 +870,12 @@ fn dataset_entry(
     }
     g.add(s.clone(), &p(PROV, "wasAttributedTo"), agent.clone());
 
-    // Graphs, roles, counts, provenance.
-    let entries = auth_db
+    // Graphs, roles, counts, provenance — of the graphs the caller may read:
+    // a private graph is its dataset's writers' only.
+    let mut entries = auth_db
         .list_dataset_graph_entries(&ds.id)
         .unwrap_or_default();
+    entries.retain(|e| !e.private || readable.is_none_or(|r| r.contains(&e.graph_iri)));
     let graphs: Vec<String> = entries.iter().map(|e| e.graph_iri.clone()).collect();
     let latest = crate::commit_log::list_commits(
         store,
