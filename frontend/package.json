@@ -63,7 +63,7 @@
     "leaflet": "^1.9.4",
     "lucide-svelte": "npm:@lucide/svelte@^1.17.0",
     "maplibre-gl": "^6.0.0",
-    "marked": "^18.0.11",
+    "marked": "^18.0.14",
     "n3": "^2.6.4",
     "pbf": "^5.1.2",
     "proj4": "^2.22.0",
