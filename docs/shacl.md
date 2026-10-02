@@ -120,53 +120,41 @@ Without them, `sh:targetClass` on a superclass would target nothing and
 `sh:class` against a model term would fail, silently. Only model graphs the
 caller may read are added.
 
-### Multi-graph reach — a known inconsistency
+### Several data graphs: one merged graph
 
-When a run spans more than one data graph, the SHACL constructs do not all read
-the same set of graphs, and **the same logical rule can give opposite answers
-depending on how it is written**:
+SHACL validates against **one** data graph (§3.4). A run over several data
+graphs validates their **merge**: every construct reads all of them at once.
 
 | Construct | Reads |
 |---|---|
-| `sh:path` (property paths), for an IRI focus node | each data graph separately, results unioned — a path that must cross graphs finds nothing |
-| `sh:path`, for a blank-node or literal focus node | all data graphs merged |
-| `sh:sparql`, `sh:class` | all data graphs merged |
-| `sh:closed`, `sh:targetSubjectsOf`, `sh:targetObjectsOf` | all data graphs at once — but these are single-hop lookups, so this is the same answer as reading each graph in turn |
-| `sh:targetClass` | type triples per graph; the `rdfs:subClassOf*` chain across all graphs |
+| `sh:path` (property paths), for any focus node | all data graphs merged: each hop of a sequence, alternative or closure may continue in any of them |
+| `sh:sparql`, custom-component validators, SPARQL targets | all data graphs merged (the default graph of the query; no named graphs) |
+| `sh:class`, `sh:targetClass` | all data graphs merged, the `rdfs:subClassOf*` chain included |
+| `sh:closed`, `sh:targetSubjectsOf`, `sh:targetObjectsOf` | all data graphs merged |
 
-Only paths with an **intermediate node** can diverge — a sequence, a
-`zeroOrMorePath` or a `oneOrMorePath`. A single hop matches quads that each
-live in exactly one graph, so reading the graphs one at a time and reading them
-merged give the same answer; `sh:closed` and the `subjectsOf`/`objectsOf`
-targets are therefore never affected.
+So `sh:path ( ex:hasDeck ex:width )` finds a deck's width when `ex:hasDeck`
+lives in the instances graph and `ex:width` in a details graph, and it answers
+exactly as the same rule written as a `sh:sparql` constraint does. SHACL-AF
+inference reads its rules' conditions the same way.
 
-So a rule expressed as `sh:path ( ex:hasDeck ex:width )` can report a violation
-that the identical rule written as a `sh:sparql` constraint does not, and the
-same path answers differently for an IRI focus node and a blank-node one. The
-specification defines validation against **one** data graph (§3.4), so the
-merged reading is the faithful one and the per-graph path evaluation is the
-deviation.
+**Changed 2026-10-02.** Until then a path from an **IRI** focus node was
+evaluated inside each data graph in turn, results unioned, so a path whose hops
+lived in different graphs found nothing, while the same path from a blank-node
+focus node, or the same rule as a `sh:sparql` constraint, found the value.
+Paths with an intermediate node (a sequence, `sh:zeroOrMorePath`,
+`sh:oneOrMorePath`) can therefore now find values they used to miss, on
+datasets with more than one graph: a `sh:minCount` that used to fail can pass,
+and a `sh:maxCount`, `sh:uniqueLang` or `sh:qualifiedMaxCount` that used to pass
+can fail. SHACL-AF rules whose `sh:condition` reads such a path can fire where
+they did not, and scheduled inference materialises what they derive. A
+single-hop path reads the same either way, and so does every single-graph run,
+which includes every write gate. The `OTS_SHACL_REACH_PROBE` setting that
+measured the difference is gone.
 
-**This has not been changed**, because flipping it would alter which SHACL-AF
-rules fire, and inference materialises into your data on an unattended
-schedule. Single-graph runs — which includes every write gate — are unaffected
-either way, since the two readings coincide when there is one graph.
-
-To find out whether it affects your data, set `OTS_SHACL_REACH_PROBE=1`. Each
-run then logs, at warning level, how many value-node lookups found nothing per
-graph but would have found values over the merge:
-
-```
-graph-reach probe: 14 value-node lookups found nothing per data graph but would
-have found 21 value nodes over the merge of them
-```
-
-The probe changes no answer — it measures and discards. It costs one extra path
-evaluation per lookup that found nothing, so leave it off outside an
-investigation. If it reports nothing on your datasets, the inconsistency does
-not reach your data.
-
----
+A write gate checks the one graph being written, so for a path that crosses
+graphs it no longer predicts the dataset run: a write can pass its gate and the
+dataset still report the path, or the other way round. Run the dataset's
+validation after writes that a cross-graph path depends on.
 
 ### How a shapes graph is read
 
@@ -546,15 +534,30 @@ A `sh:SPARQLConstraint` (`sh:select`) is evaluated once per focus node with
 `$this` **pre-bound** as SHACL §5.3 defines it: the focus node reaches every
 scope of the query — a `FILTER` in a nested group or a `UNION` branch, a
 sub-select that projects `$this`, the projection and `GROUP BY` of an aggregate
-— and `bound($this)` is true. On a property shape, `$PATH` is replaced by the
-shape's path. Every solution is a violation; `?value` and `?path` in a solution
-become `sh:value` and `sh:resultPath`.
+— and `bound($this)` is true. The focus node is bound as an RDF term, never
+pasted into the query text, so blank-node focus nodes are checked like any
+other (they used to be skipped, so their constraints never ran) and a literal
+cannot change the query. On a property shape, `$PATH` is replaced by the
+shape's path. A constraint with `sh:deactivated true` produces no results.
 
-The features the specification forbids under pre-binding (§5.3.2) — `MINUS`,
-`VALUES`, `SERVICE`, a nested `SELECT` that does not project `$this`
-explicitly (`SELECT *` included), and assigning to a pre-bound variable
-(`… AS $this`) — make the shapes graph **fail to load**, so a constraint that
-uses them fails loudly instead of silently never firing. `$shapesGraph` and
+Every solution is a violation (§5.3.2):
+
+* `?value` becomes `sh:value`, and `?path` becomes `sh:resultPath` when it is
+  an IRI (otherwise the shape's path is used).
+* The message is the solution's `?message` binding if there is one, else the
+  constraint's `sh:message` with every `{?var}` / `{$var}` replaced by that
+  variable's binding in the solution. A block naming an unbound variable is
+  left as written.
+* A solution that binds `?failure` to `true` is a **failure**, not a result.
+  The run reports it as a violation that the constraint could not be
+  evaluated, so the focus node does not conform and a write gate refuses the
+  write.
+
+The features the specification forbids under pre-binding (Appendix A) —
+`MINUS`, `VALUES`, `SERVICE`, a nested `SELECT` that does not project every
+pre-bound variable explicitly (`SELECT *` included), and assigning to a
+pre-bound variable (`… AS $this`) — make the shapes graph **fail to load**, so
+a constraint that uses them fails loudly instead of silently never firing. `$shapesGraph` and
 `$currentShape` are not supported and fail the shapes graph the same way. The
 `sh:prefixes` prologue includes the `sh:declare` declarations of the named
 ontology and of everything it `owl:imports` within the shapes graph.
@@ -579,15 +582,24 @@ ex:TitleShape a sh:NodeShape ; sh:targetClass ex:Doc ;
   shape uses, and the path's local name is the SPARQL variable the validator
   sees (`ex:maxWords` → `$maxWords`). `sh:optional true` makes a parameter
   optional; a component only applies when every mandatory parameter is present.
+  When the component has a **single** parameter, each value the shape gives it
+  is a constraint of its own (`ex:forbidden "red", "blue"` checks both). When
+  it has several, a shape that gives any of them more than one value is
+  ill-formed and fails the shapes graph (SHACL §4).
 * **Validators** — `sh:nodeValidator` (node shapes), `sh:propertyValidator`
   (property shapes) or `sh:validator` (either). An `sh:ask` validator runs once
   per value node with `$this`, `$value` and the parameters pre-bound; `false`
   is a violation. An `sh:select` validator runs once per focus node; every row
-  is a violation (`?value`, `?path` as for `sh:sparql`). `$PATH` is available
-  in property validators.
-* **`sh:message`** on the validator is the result message, with `{$param}`,
-  `{?param}`, `{$this}` and `{$value}` rendered; `sourceConstraint` names the
-  component.
+  is a violation, with `?value`, `?path`, `?message` and `?failure` read as
+  for `sh:sparql`. `$PATH` is available in property validators. Blank-node
+  focus and value nodes are pre-bound like any other term. A sub-select inside
+  a validator must project every pre-bound variable, the parameters included.
+* **`sh:message`** on the validator is the result message, falling back to the
+  component's own `sh:message`, with `{$param}`, `{?param}`, `{$this}` and
+  `{$value}` — and, for a SELECT validator, any variable of the solution —
+  rendered; `sourceConstraint` names the component.
+* **`sh:deactivated true`** on a validator takes it out: the shape falls back
+  to `sh:validator`, and if no validator is left the component checks nothing.
 
 A component a shape uses without a validator for the shape's kind, or a
 validator that does not parse, fails the shapes graph.

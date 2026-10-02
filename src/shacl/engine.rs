@@ -178,25 +178,6 @@ pub fn validate(
 
     debug!("SHACL validation complete: {} violations", results_count);
 
-    // Graph-reach measurement (off unless OTS_SHACL_REACH_PROBE is set): how
-    // often a `sh:path` found nothing per data graph where the merge of them
-    // would have found values. Reported here and nowhere else — never as a
-    // result, because `conforms` is `results.is_empty()`.
-    let (diverged, extra_values, examined) = view.reach_probe.totals();
-    if examined > 0 {
-        warn!(
-            shapes_graph = %shapes_graph,
-            data_graphs = data_graphs.len(),
-            diverged,
-            extra_values,
-            examined,
-            "graph-reach probe: of {examined} cross-graph-capable value-node lookups, \
-             {diverged} would yield more values over the merge of the data graphs \
-             ({extra_values} extra value nodes in total); sh:path is evaluated per graph \
-             while sh:sparql and the class machinery read them merged"
-        );
-    }
-
     // The run's own account of itself: for the report, the run row and the
     // workload telemetry (docs/notes/analytical-mirror-design.md §1.4).
     let metrics = RunMetrics {
@@ -838,6 +819,11 @@ fn load_constraints(
         .iter()
         .map(term_to_lexical)
     {
+        // SHACL §5.3: a SPARQL-based constraint with `sh:deactivated true`
+        // produces no validation results.
+        if is_deactivated(store, shapes_graph, &sparql_node) {
+            continue;
+        }
         if let Some(select) =
             single_value(store, shapes_graph, &sparql_node, &format!("{SH}select"))
         {
@@ -872,32 +858,59 @@ fn load_constraints(
     let is_property_shape =
         single_value(store, shapes_graph, shape_iri, &format!("{SH}path")).is_some();
     for comp in constraint_components(store, shapes_graph)?.iter() {
-        let mut params: Vec<(String, Term)> = Vec::new();
+        // Every value the shape gives each parameter. A component with a
+        // single parameter declares one constraint per value (SHACL §4, "each
+        // value of such a parameter declares an individual constraint"); with
+        // several parameters, more than one value for any of them makes the
+        // shape ill-formed. Only the first value used to be read, so the rest
+        // were never checked — and which one counted as first was store order.
+        let mut supplied: Vec<(&str, Vec<Term>)> = Vec::new();
         let mut complete = true;
         for p in &comp.parameters {
-            match store
-                .objects_for_subject_in_graph(shape_iri, &p.path, Some(shapes_graph))
-                .into_iter()
-                .next()
-            {
-                Some(v) => params.push((p.name.clone(), v)),
-                None if p.optional => {}
-                None => complete = false,
+            let values = store.objects_for_subject_in_graph(shape_iri, &p.path, Some(shapes_graph));
+            if values.is_empty() {
+                complete &= p.optional;
+            } else {
+                supplied.push((p.name.as_str(), values));
             }
         }
-        if params.is_empty() || !complete {
+        if supplied.is_empty() || !complete {
             continue;
         }
-        let validator = if is_property_shape {
-            comp.property_validator
-                .clone()
-                .or_else(|| comp.validator.clone())
+        let instances: Vec<Vec<(String, Term)>> = if comp.parameters.len() == 1 {
+            let (name, values) = &supplied[0];
+            values
+                .iter()
+                .map(|v| vec![(name.to_string(), v.clone())])
+                .collect()
         } else {
-            comp.node_validator
-                .clone()
-                .or_else(|| comp.validator.clone())
+            if let Some((name, _)) = supplied.iter().find(|(_, vs)| vs.len() > 1) {
+                return Err(format!(
+                    "shape <{shape_iri}>: constraint component <{}> declares several \
+                     parameters, and the shape gives its parameter ${name} more than one value",
+                    comp.iri
+                ));
+            }
+            vec![supplied
+                .iter()
+                .map(|(n, vs)| (n.to_string(), vs[0].clone()))
+                .collect()]
         };
-        let Some(validator) = validator else {
+        let (validator, deactivated) = if is_property_shape {
+            (
+                &comp.property_validator,
+                comp.property_validator_deactivated,
+            )
+        } else {
+            (&comp.node_validator, comp.node_validator_deactivated)
+        };
+        let Some(validator) = validator.clone().or_else(|| comp.validator.clone()) else {
+            // Every validator that would apply carries `sh:deactivated true`:
+            // the author switched the component off, and its constraints
+            // produce nothing.
+            if deactivated || comp.validator_deactivated {
+                continue;
+            }
             // A component the shape uses but that has no validator for the
             // shape's kind is an ill-formed shapes graph (§6.2.2), not a
             // constraint that quietly never fires.
@@ -911,12 +924,15 @@ fn load_constraints(
                 }
             ));
         };
-        constraints.push(Constraint::Custom(Box::new(CustomConstraint {
-            component: comp.iri.clone(),
-            params,
-            validator: validator.query,
-            message: validator.message,
-        })));
+        for params in instances {
+            constraints.push(Constraint::Custom(Box::new(CustomConstraint {
+                component: comp.iri.clone(),
+                params,
+                validator: validator.query.clone(),
+                // SHACL §5.3.2: the validator's sh:message, else the component's.
+                message: validator.message.clone().or_else(|| comp.message.clone()),
+            })));
+        }
     }
 
     // SHACL-AF: sh:expression node expressions (path + comparison subset). The
@@ -971,9 +987,17 @@ struct ComponentValidator {
 struct ConstraintComponentDecl {
     iri: String,
     parameters: Vec<ComponentParameter>,
+    /// The component's own `sh:message`, used when the validator has none.
+    message: Option<String>,
+    /// A validator carrying `sh:deactivated true` is not loaded (`None`
+    /// above) and its flag is set here, so a shape that finds no validator
+    /// can tell "switched off" from "never declared".
     validator: Option<ComponentValidator>,
+    validator_deactivated: bool,
     node_validator: Option<ComponentValidator>,
+    node_validator_deactivated: bool,
     property_validator: Option<ComponentValidator>,
+    property_validator_deactivated: bool,
 }
 
 /// (shapes graph, store instance, store write generation, declarations).
@@ -1049,41 +1073,55 @@ fn constraint_components(
                 optional,
             });
         }
-        let load_validator = |pred: &str| -> Result<Option<ComponentValidator>, String> {
+        let param_names: Vec<&str> = parameters.iter().map(|p| p.name.as_str()).collect();
+        let check = |q: &str, ask: bool, pred: &str, form: &str| {
+            super::constraints::check_validator_query(q, ask, &param_names).map_err(|e| {
+                format!("constraint component <{iri}>: sh:{pred} sh:{form} does not parse: {e}")
+            })
+        };
+        // `Ok((validator, deactivated))`.
+        let load_validator = |pred: &str| -> Result<(Option<ComponentValidator>, bool), String> {
             let Some(vnode) = single_value(store, shapes_graph, iri, &format!("{SH}{pred}")) else {
-                return Ok(None);
+                return Ok((None, false));
             };
+            if is_deactivated(store, shapes_graph, &vnode) {
+                return Ok((None, true));
+            }
             let prefixes = sparql_prefixes(store, shapes_graph, &vnode);
             let message = single_value(store, shapes_graph, &vnode, &format!("{SH}message"));
-            let query = if let Some(ask) =
-                single_value(store, shapes_graph, &vnode, &format!("{SH}ask"))
-            {
-                let q = format!("{prefixes}{ask}");
-                super::constraints::check_validator_query(&q, true).map_err(|e| {
-                    format!("constraint component <{iri}>: sh:{pred} sh:ask does not parse: {e}")
-                })?;
-                CustomValidator::Ask(q)
-            } else if let Some(select) =
-                single_value(store, shapes_graph, &vnode, &format!("{SH}select"))
-            {
-                let q = format!("{prefixes}{select}");
-                super::constraints::check_validator_query(&q, false).map_err(|e| {
-                    format!("constraint component <{iri}>: sh:{pred} sh:select does not parse: {e}")
-                })?;
-                CustomValidator::Select(q)
-            } else {
-                return Err(format!(
+            let query =
+                if let Some(ask) = single_value(store, shapes_graph, &vnode, &format!("{SH}ask")) {
+                    let q = format!("{prefixes}{ask}");
+                    check(&q, true, pred, "ask")?;
+                    CustomValidator::Ask(q)
+                } else if let Some(select) =
+                    single_value(store, shapes_graph, &vnode, &format!("{SH}select"))
+                {
+                    let q = format!("{prefixes}{select}");
+                    check(&q, false, pred, "select")?;
+                    CustomValidator::Select(q)
+                } else {
+                    return Err(format!(
                     "constraint component <{iri}>: sh:{pred} carries neither sh:ask nor sh:select"
                 ));
-            };
-            Ok(Some(ComponentValidator { query, message }))
+                };
+            Ok((Some(ComponentValidator { query, message }), false))
         };
+        let (validator, validator_deactivated) = load_validator("validator")?;
+        let (node_validator, node_validator_deactivated) = load_validator("nodeValidator")?;
+        let (property_validator, property_validator_deactivated) =
+            load_validator("propertyValidator")?;
+        let message = single_value(store, shapes_graph, iri, &format!("{SH}message"));
         out.push(ConstraintComponentDecl {
             iri: iri.clone(),
             parameters,
-            validator: load_validator("validator")?,
-            node_validator: load_validator("nodeValidator")?,
-            property_validator: load_validator("propertyValidator")?,
+            message,
+            validator,
+            validator_deactivated,
+            node_validator,
+            node_validator_deactivated,
+            property_validator,
+            property_validator_deactivated,
         });
     }
     let out = std::sync::Arc::new(out);
@@ -1339,16 +1377,14 @@ fn resolve_targets(view: &DataView<'_>, shape: &Shape) -> Result<Vec<Term>, Stri
                 // in any shapes graph the caller could write selected focus
                 // nodes from EVERY graph in the store, other tenants' included,
                 // and `sh:value` carried their terms back in the report. The
-                // same `FROM <g>` prologue a `sh:sparql` constraint gets
-                // confines it to the graphs this run may read; with no
-                // `FROM NAMED`, a `GRAPH` block inside the target matches
-                // nothing, exactly as for constraints.
+                // run's view confines it, as it does a `sh:sparql` constraint,
+                // to the graphs this run may read; with no named graphs, a
+                // `GRAPH` block inside the target matches nothing.
                 //
                 // A target that fails to evaluate fails the run: it used to
                 // yield no focus nodes, so the shape validated nothing and a
                 // write gate let the write through.
-                let scoped = super::constraints::prebind(sparql, &[], None, view.data_graphs);
-                let nodes = execute_select_terms(view, &scoped, "this").map_err(|e| {
+                let nodes = execute_select_terms(view, sparql, "this").map_err(|e| {
                     format!(
                         "shape <{}>: sh:target could not be evaluated: {e}",
                         shape.iri

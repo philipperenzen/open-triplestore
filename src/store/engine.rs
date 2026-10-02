@@ -1678,7 +1678,9 @@ impl TripleStore {
     ///   the query left unset and leaves every named graph reachable;
     /// * variables are bound as **terms** through `bindings`, never pasted
     ///   into the text, so a focus node whose lexical form is hostile (a
-    ///   literal `sh:targetNode`) cannot close a clause and open another.
+    ///   literal `sh:targetNode`) cannot close a clause and open another; they
+    ///   reach every scope of the query, as SHACL pre-binding defines it
+    ///   ([`crate::sparql::prebind`]).
     ///
     /// `evaluator` supplies the functions the query may call: for a rule, the
     /// run's own ([`Self::query_options_for_shapes`]).
@@ -1694,15 +1696,20 @@ impl TripleStore {
                 "only a CONSTRUCT query can be evaluated confined".to_string(),
             ));
         }
-        let mut prepared = evaluator.for_query(query.clone());
+        // The bindings reach every scope of the query, as SHACL pre-binding
+        // defines it, and seed the evaluation so that triple patterns are
+        // looked up by them (crate::sparql::prebind). Seeding alone let the
+        // optimizer drop a `FILTER` whose `$this` no triple pattern binds, and
+        // the rule never fired; the rewrite alone scanned every pattern in
+        // full for each focus node.
+        let mut query = query.clone();
+        let names: Vec<&str> = bindings.iter().map(|(n, _)| *n).collect();
+        crate::sparql::prebind::rewrite(&mut query, &names).map_err(StoreError::Parse)?;
+        let terms: Vec<(&str, &Term)> = bindings.iter().map(|(n, t)| (*n, t)).collect();
+        let mut prepared =
+            crate::sparql::prebind::prepare(evaluator, query, &terms).map_err(StoreError::Parse)?;
         confine_dataset(prepared.dataset_mut(), scope)?;
-        let mut bound = prepared.on_store(&self.store);
-        for (name, term) in bindings {
-            let var = oxigraph::sparql::Variable::new(*name)
-                .map_err(|e| StoreError::Parse(e.to_string()))?;
-            bound = bound.substitute_variable(var, term.clone());
-        }
-        match bound.execute()? {
+        match prepared.on_store(&self.store).execute()? {
             QueryResults::Graph(triples) => Ok(triples.collect::<Result<Vec<_>, _>>()?),
             // A CONSTRUCT always evaluates to a graph; the other arms cannot
             // happen, and an empty result is the honest answer if they did.
