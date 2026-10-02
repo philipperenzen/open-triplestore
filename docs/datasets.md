@@ -28,6 +28,7 @@ Within each dataset, graphs are organized by **role**, indicating their purpose 
 | `domain-values` | Code lists | SKOS collections / enumerations | ✅ | ✅ | The values an instance property may take (enumerations, code lists, units) — the *domain values* layer of NEN 2660-2, kept apart from the concept vocabulary so it can be versioned and validated separately |
 | `linkset` | Alignments | `owl:sameAs`, `skos:*Match` | ✅ | ✅ | Mappings between this dataset's resources and another dataset or vocabulary; one graph per alignment keeps the mapping's provenance and lifecycle independent of both ends |
 | `provenance` | PROV-O records | `prov:Activity`, `prov:Entity`, `prov:Agent` | ✅ | ✅ | Who produced what, when and from which sources; the commit log (`urn:system:commit-log`) is the platform's own provenance graph |
+| `catalog` | Catalogue records | `dcat:Catalog`, `dcat:Dataset`, `dcat:Distribution`, `void:Dataset` | ✅ | ✅ | DCAT / VoID descriptions of datasets, distributions and data services that travel with the data (declared, or inferred by the import auto-split from DCAT/VoID-typed records) |
 
 ### Time-evolving properties (OPM profile)
 
@@ -85,7 +86,6 @@ SPARQL Update (`sparql`), bulk imports (`import`), every version operation —
 cut, publish, deprecate, restore, delete, garbage-collect, branch (`dataset`,
 with the version) — and model/shape editor saves. A backup restore is recorded
 under the subject `urn:ots:store`.
-| `catalog` | DCAT / VoID | `dcat:Dataset`, `dcat:Distribution`, `void:Dataset` | ✅ | ✅ | Metadata describing datasets and distributions, as served at `/.well-known/void` |
 
 ### The conformance layer (TBox / ABox)
 

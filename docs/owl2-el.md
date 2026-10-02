@@ -184,8 +184,9 @@ open-triplestore = { features = ["full"] }
 ```rust
 use open_triplestore::reasoning::owl2_el::El2Classifier;
 use open_triplestore::store::TripleStore;
+use std::path::Path;
 
-let store = TripleStore::open("./data")?;
+let store = TripleStore::open(Path::new("./data"))?;
 let report = El2Classifier::new(&store)
     .with_sources(vec!["urn:example:ontology".to_string()])
     .classify()?;

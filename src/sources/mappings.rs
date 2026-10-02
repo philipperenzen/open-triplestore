@@ -7,8 +7,8 @@
 
 use oxigraph::io::RdfFormat;
 
-use crate::rml::model::{ObjectMap, RmlMapping, SourceRef};
-use crate::rml::parse_from_store;
+use crate::rml::model::{ObjectMap, RmlMapping, Semantics, SourceRef};
+use crate::rml::parse_from_store_as;
 use crate::store::TripleStore;
 
 use super::model::*;
@@ -40,6 +40,8 @@ pub enum MappingError {
     GraphMap,
     #[error("supply either 'rml' or 'yarrrml', not both — they would disagree")]
     BothForms,
+    #[error("unknown semantics '{0}'; expected 'r2rml' (the default) or 'legacy'")]
+    Semantics(String),
     #[error("the YARRRML could not be translated: {0}")]
     Yarrrml(String),
     #[error("{0}")]
@@ -48,7 +50,20 @@ pub enum MappingError {
 
 /// Parse and check a mapping submitted for `source_id`.
 pub fn validate_rml(rml: &str, source_id: &str) -> Result<RmlMapping, MappingError> {
-    let mapping = crate::rml::parse_rml(rml).map_err(MappingError::Invalid)?;
+    validate_rml_as(rml, source_id, Semantics::default())
+}
+
+/// [`validate_rml`], parsed under the rules it would be frozen with.
+pub fn validate_rml_as(
+    rml: &str,
+    source_id: &str,
+    semantics: Semantics,
+) -> Result<RmlMapping, MappingError> {
+    let store = TripleStore::in_memory().map_err(|e| MappingError::Storage(e.to_string()))?;
+    store
+        .load_str(rml, RdfFormat::Turtle, None)
+        .map_err(|e| MappingError::Invalid(format!("Failed to parse RML Turtle: {e}")))?;
+    let mapping = parse_from_store_as(&store, None, semantics).map_err(MappingError::Invalid)?;
     check(&mapping, source_id)?;
     Ok(mapping)
 }
@@ -74,15 +89,10 @@ pub fn check(mapping: &RmlMapping, source_id: &str) -> Result<(), MappingError> 
         _ => return Err(MappingError::MultipleSources(sources.join(", "))),
     }
 
+    if mapping.has_graph_maps() {
+        return Err(MappingError::GraphMap);
+    }
     for tm in &mapping.triples_maps {
-        if tm.graph_map.is_some() {
-            return Err(MappingError::GraphMap);
-        }
-        for pom in &tm.predicate_object_maps {
-            if pom.graph_map.is_some() {
-                return Err(MappingError::GraphMap);
-            }
-        }
         if !matches!(tm.logical_source.source, SourceRef::Datasource(_)) {
             return Err(MappingError::Invalid(format!(
                 "TriplesMap <{}> reads a file, not the datasource; a mapping run against a \
@@ -94,24 +104,40 @@ pub fn check(mapping: &RmlMapping, source_id: &str) -> Result<(), MappingError> 
     Ok(())
 }
 
-/// Write a version's RML into its own graph. A version is frozen: it is
-/// written once, and a change creates the next one.
+/// The term-generation rules a request asks a new version to be frozen
+/// under: R2RML's unless it pins the legacy ones, which keeps the IRIs and
+/// blank nodes an older version produced (see [`Semantics`]).
+pub fn requested_semantics(requested: Option<&str>) -> Result<Semantics, MappingError> {
+    match requested.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(Semantics::default()),
+        Some(s) => Semantics::parse(s).ok_or_else(|| MappingError::Semantics(s.to_string())),
+    }
+}
+
+/// Write a version's RML into its own graph, stamped with the rules it runs
+/// under. A version is frozen: it is written once, and a change creates the
+/// next one.
 pub fn store_version(
     store: &TripleStore,
     id: &str,
     version: u32,
     rml: &str,
+    semantics: Semantics,
 ) -> Result<(), MappingError> {
     let graph = mapping_version_iri(id, version);
     store
         .graph_store_put(Some(&graph), rml, RdfFormat::Turtle)
-        .map_err(|e| MappingError::Storage(e.to_string()))
+        .map_err(|e| MappingError::Storage(e.to_string()))?;
+    super::registry::put_version_semantics(store, id, version, semantics)
+        .map_err(MappingError::Storage)
 }
 
-/// Parse a stored version back into an executable mapping.
+/// Parse a stored version back into an executable mapping, under the rules
+/// it was frozen with — a version from before the stamp runs as it always did.
 pub fn load(store: &TripleStore, id: &str, version: u32) -> Result<RmlMapping, MappingError> {
     let graph = mapping_version_iri(id, version);
-    parse_from_store(store, Some(&graph)).map_err(MappingError::Invalid)
+    let semantics = super::registry::version_semantics(store, id, version);
+    parse_from_store_as(store, Some(&graph), semantics).map_err(MappingError::Invalid)
 }
 
 /// A stored version as Turtle, for the API and the Studio editor.
@@ -230,8 +256,9 @@ mod tests {
     fn a_version_round_trips_through_its_own_graph() {
         let store = TripleStore::in_memory().unwrap();
         let rml = mapping_for("urn:source:legacy");
-        store_version(&store, "m", 1, &rml).unwrap();
+        store_version(&store, "m", 1, &rml, Semantics::R2rml).unwrap();
         let loaded = load(&store, "m", 1).expect("loads");
+        assert_eq!(loaded.semantics, Semantics::R2rml);
         assert_eq!(loaded.triples_maps.len(), 1);
         assert_eq!(loaded.datasources(), vec!["urn:source:legacy"]);
         let ttl = turtle(&store, "m", 1, |_| None).expect("serialises");
@@ -246,9 +273,16 @@ mod tests {
     #[test]
     fn versions_are_independent_graphs() {
         let store = TripleStore::in_memory().unwrap();
-        store_version(&store, "m", 1, &mapping_for("urn:source:legacy")).unwrap();
+        store_version(
+            &store,
+            "m",
+            1,
+            &mapping_for("urn:source:legacy"),
+            Semantics::R2rml,
+        )
+        .unwrap();
         let v2 = mapping_for("urn:source:legacy").replace("ex:p", "ex:renamed");
-        store_version(&store, "m", 2, &v2).unwrap();
+        store_version(&store, "m", 2, &v2, Semantics::R2rml).unwrap();
         assert!(turtle(&store, "m", 1, |_| None)
             .unwrap()
             .contains("example.org/p"));
@@ -258,6 +292,81 @@ mod tests {
         assert!(!turtle(&store, "m", 2, |_| None)
             .unwrap()
             .contains("example.org/p>"));
+    }
+
+    #[test]
+    fn a_version_keeps_the_rules_it_was_frozen_with() {
+        // A template object map with no rr:termType: a literal under the
+        // legacy rules, an IRI under R2RML's (§7.4).
+        let rml = format!(
+            "{PFX}
+             ex:M a rr:TriplesMap ;
+               rml:logicalSource [ rml:source <urn:source:legacy> ; rr:tableName \"t\" ] ;
+               rr:subjectMap [ rr:template \"http://x/{{id}}\" ] ;
+               rr:predicateObjectMap [ rr:predicate ex:p ;
+                 rr:objectMap [ rr:template \"http://x/c/{{c}}\" ] ] ."
+        );
+        let store = TripleStore::in_memory().unwrap();
+        store_version(&store, "m", 1, &rml, Semantics::Legacy).unwrap();
+        store_version(&store, "m", 2, &rml, Semantics::R2rml).unwrap();
+        // Version 3 is written the way a version frozen before the stamp
+        // existed was: RML graph only.
+        store
+            .graph_store_put(Some(&mapping_version_iri("m", 3)), &rml, RdfFormat::Turtle)
+            .unwrap();
+
+        let term_type = |v: u32| {
+            let m = load(&store, "m", v).unwrap();
+            let ObjectMap::Term(t) = &m.triples_maps[0].predicate_object_maps[0].object else {
+                panic!("a term object map")
+            };
+            (m.semantics, t.term_type.clone())
+        };
+        use crate::rml::model::TermType;
+        assert_eq!(term_type(1), (Semantics::Legacy, TermType::Literal));
+        assert_eq!(term_type(2), (Semantics::R2rml, TermType::IRI));
+        assert_eq!(
+            term_type(3),
+            (Semantics::Legacy, TermType::Literal),
+            "an unstamped version is a legacy one"
+        );
+    }
+
+    #[test]
+    fn a_request_may_pin_the_legacy_rules_and_nothing_else() {
+        assert_eq!(requested_semantics(None).unwrap(), Semantics::R2rml);
+        assert_eq!(requested_semantics(Some(" ")).unwrap(), Semantics::R2rml);
+        assert_eq!(
+            requested_semantics(Some("legacy")).unwrap(),
+            Semantics::Legacy
+        );
+        assert_eq!(
+            requested_semantics(Some("r2rml")).unwrap(),
+            Semantics::R2rml
+        );
+        let err = requested_semantics(Some("newest")).unwrap_err();
+        assert!(err.to_string().contains("'newest'"), "{err}");
+    }
+
+    #[test]
+    fn a_graph_map_on_the_subject_map_or_via_rr_graph_is_refused_too() {
+        for placement in [
+            "rr:subjectMap [ rr:template \"http://x/{id}\" ; rr:graph <http://x/g> ] ;",
+            "rr:subjectMap [ rr:template \"http://x/{id}\" ; rr:graphMap [ rr:template \"http://x/{c}\" ] ] ;",
+        ] {
+            let err = validate_rml(
+                &format!(
+                    "{PFX}
+                     ex:M a rr:TriplesMap ;
+                       rml:logicalSource [ rml:source <urn:source:legacy> ; rr:tableName \"t\" ] ;
+                       {placement}
+                       rr:predicateObjectMap [ rr:predicate ex:p ; rr:objectMap [ rr:column \"c\" ] ] ."
+                ),
+                "legacy",
+            )
+            .unwrap_err();
+            assert_eq!(err, MappingError::GraphMap, "{placement}");
+        }
     }
 
     #[test]

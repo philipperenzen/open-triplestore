@@ -144,6 +144,10 @@ pub struct DryRunRequest {
     /// proposal, and what the Studio editor sends between saves.
     pub rml: Option<String>,
     pub yarrrml: Option<String>,
+    /// The term-generation rules an unregistered mapping is previewed under:
+    /// `r2rml` (the default) or `legacy` — what it would be frozen with. A
+    /// registered version always runs under its own.
+    pub semantics: Option<String>,
     /// The shapes to validate against. Explicit, else the registered
     /// mapping's, else the model version's. Only a graph the caller may read
     /// applies (the rule `/sparql` applies, a Library entry they are shown, a
@@ -488,7 +492,10 @@ fn choose(
             .map_err(|e| bad(mappings::MappingError::Yarrrml(e.to_string()).to_string()))?,
         _ => unreachable!("counted above"),
     };
-    let rml = mappings::validate_rml(&turtle, &source.id).map_err(|e| bad(e.to_string()))?;
+    let semantics =
+        mappings::requested_semantics(body.semantics.as_deref()).map_err(|e| bad(e.to_string()))?;
+    let rml = mappings::validate_rml_as(&turtle, &source.id, semantics)
+        .map_err(|e| bad(e.to_string()))?;
     Ok(Chosen {
         rml,
         record: None,

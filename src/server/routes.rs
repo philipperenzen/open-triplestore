@@ -9534,6 +9534,8 @@ pub async fn get_rml_mapping(
 /// Query params:
 /// - `?preview=true` — return generated triples without persisting
 /// - `?graph=<iri>` — override target named graph (default: dataset default graph)
+/// - `?base=<iri>` — the base IRI relative IRIs resolve against (R2RML §11.2);
+///   a triples map's own `rml:baseIRI` wins
 pub async fn execute_rml_mapping(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -9644,8 +9646,17 @@ pub async fn execute_rml_mapping(
         })?
     };
 
-    let mapping = crate::rml::parse_rml(&mapping_turtle)
+    let mut mapping = crate::rml::parse_rml(&mapping_turtle)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid RML mapping: {e}")))?;
+    if let Some(base) = params.get("base").filter(|b| !b.trim().is_empty()) {
+        oxigraph::model::NamedNode::new(base.trim()).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("base '{base}' is not an absolute IRI: {e}"),
+            )
+        })?;
+        mapping.base_iri = Some(base.trim().to_string());
+    }
 
     if preview {
         // Execute into a temporary in-memory store and return the triples

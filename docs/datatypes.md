@@ -39,13 +39,15 @@ Turtle also has literal **shorthands** so common values need no `^^`:
 | `4.2` | `xsd:decimal` |
 | `4.2e1` | `xsd:double` |
 
-> **Value space vs. stored form.** The store keeps your lexical form **exactly as
-> written**, but the engine (Oxigraph) implements the XSD *value spaces*, so
-> numbers, booleans, dates and durations are compared, ordered and computed
-> **by value**. That means `"01"^^xsd:integer` equals `"1"^^xsd:integer`, and
-> `"1.0E2"^^xsd:double` equals `100.0` in a `FILTER`. Datatypes outside the XSD
-> value space (see [Other & custom datatypes](#other-custom-datatypes)) are kept
-> verbatim and compared by exact match.
+> **Value space vs. stored form.** The engine (Oxigraph) implements the XSD
+> *value spaces*: numbers, booleans, dates and durations are compared, ordered
+> and computed **by value**, so `"01"^^xsd:integer` equals `"1"^^xsd:integer`, and
+> `"1.0E2"^^xsd:double` equals `100.0` in a `FILTER`. It also **stores** them as
+> values, so a literal comes back in canonical form: `"01"^^xsd:integer` reads
+> back as `"1"`, `"1"^^xsd:boolean` as `"true"`. Strings, language-tagged
+> strings and datatypes outside the XSD value space (see
+> [Other & custom datatypes](#other-custom-datatypes)) keep their lexical form
+> exactly as written and are compared by exact match.
 
 <details>
 <summary>▸ View example — what datatypes are in my data?</summary>

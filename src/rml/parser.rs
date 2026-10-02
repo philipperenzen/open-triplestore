@@ -5,11 +5,15 @@
 
 use std::collections::BTreeMap;
 
+use oxigraph::model::Term;
+
 use super::model::*;
 use crate::store::engine::TripleStore;
 
 const RR: &str = "http://www.w3.org/ns/r2rml#";
 const RML: &str = "http://semweb.mmlab.be/ns/rml#";
+/// The RML-Core / RML-IO namespace. Only `rml:baseIRI` is read from it so far.
+const RML_CORE: &str = "http://w3id.org/rml/";
 const FNML: &str = "http://semweb.mmlab.be/ns/fnml#";
 /// FnO moved host; both spellings of `fno:executes` are accepted.
 const FNO_EXECUTES: [&str; 2] = [
@@ -17,9 +21,33 @@ const FNO_EXECUTES: [&str; 2] = [
     "http://w3id.org/function/ontology#executes",
 ];
 
+/// The IRI a graph map generates to name the default graph (R2RML §9).
+pub const DEFAULT_GRAPH: &str = "http://www.w3.org/ns/r2rml#defaultGraph";
+
 /// The IRI prefix a `rml:source` carries when it names a registered
 /// datasource rather than a file.
 pub const DATASOURCE_PREFIX: &str = "urn:source:";
+
+/// Where a term map sits, which decides the term types it may produce and its
+/// default (R2RML §7.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Position {
+    Subject,
+    Predicate,
+    Object,
+    Graph,
+}
+
+impl Position {
+    fn name(self) -> &'static str {
+        match self {
+            Position::Subject => "subject map",
+            Position::Predicate => "predicate map",
+            Position::Object => "object map",
+            Position::Graph => "graph map",
+        }
+    }
+}
 
 /// Parse RML mappings from Turtle text into an `RmlMapping`.
 pub fn parse_rml(turtle: &str) -> Result<RmlMapping, String> {
@@ -31,8 +59,20 @@ pub fn parse_rml(turtle: &str) -> Result<RmlMapping, String> {
     parse_from_store(&store, None)
 }
 
-/// Parse RML mappings from a named graph in an existing store.
+/// Parse RML mappings from a named graph in an existing store, under the
+/// current term-generation rules.
 pub fn parse_from_store(store: &TripleStore, graph: Option<&str>) -> Result<RmlMapping, String> {
+    parse_from_store_as(store, graph, Semantics::default())
+}
+
+/// [`parse_from_store`] under the rules a frozen mapping version was written
+/// against. The rules decide a default here — what an object map's template
+/// generates when it names no `rr:termType` — so they are applied at parse.
+pub fn parse_from_store_as(
+    store: &TripleStore,
+    graph: Option<&str>,
+    semantics: Semantics,
+) -> Result<RmlMapping, String> {
     let graph_clause = match graph {
         Some(g) => format!("GRAPH <{}> {{", crate::store::escape_sparql_iri(g)),
         None => String::new(),
@@ -48,9 +88,14 @@ pub fn parse_from_store(store: &TripleStore, graph: Option<&str>) -> Result<RmlM
     tm_iris.sort();
     tm_iris.dedup();
 
+    let ctx = Ctx {
+        store,
+        graph,
+        semantics,
+    };
     let mut triples_maps = Vec::new();
     for tm_iri in &tm_iris {
-        match parse_triples_map(store, tm_iri, graph) {
+        match ctx.triples_map(tm_iri) {
             Ok(tm) => triples_maps.push(tm),
             Err(e) => return Err(format!("Error in TriplesMap <{tm_iri}>: {e}")),
         }
@@ -59,7 +104,11 @@ pub fn parse_from_store(store: &TripleStore, graph: Option<&str>) -> Result<RmlM
         return Err("the mapping declares no rr:TriplesMap".to_string());
     }
 
-    let mapping = RmlMapping { triples_maps };
+    let mapping = RmlMapping {
+        triples_maps,
+        semantics,
+        base_iri: None,
+    };
     validate_references(&mapping)?;
     Ok(mapping)
 }
@@ -98,38 +147,499 @@ fn same_logical_source(a: &LogicalSource, b: &LogicalSource) -> bool {
     a.source == b.source && a.query == b.query && a.table_name == b.table_name
 }
 
-fn parse_triples_map(
-    store: &TripleStore,
-    tm_iri: &str,
-    graph: Option<&str>,
-) -> Result<TriplesMap, String> {
-    let g = |pred: &str| -> Vec<String> { get_objects(store, tm_iri, pred, graph) };
+/// The store, graph and rules a document is parsed under.
+struct Ctx<'a> {
+    store: &'a TripleStore,
+    graph: Option<&'a str>,
+    semantics: Semantics,
+}
 
-    // Logical source (rml:logicalSource, or R2RML's rr:logicalTable)
-    let ls_iri = g(&format!("{RML}logicalSource"))
-        .into_iter()
-        .next()
-        .or_else(|| g(&format!("{RR}logicalTable")).into_iter().next())
-        .ok_or("Missing rml:logicalSource")?;
-    let logical_source = parse_logical_source(store, &ls_iri, graph)?;
-
-    let subject_map = parse_subject_map(store, tm_iri, graph)?;
-
-    let pom_nodes = g(&format!("{RR}predicateObjectMap"));
-    let mut predicate_object_maps = Vec::new();
-    for pom_node in &pom_nodes {
-        predicate_object_maps.push(parse_pom(store, pom_node, graph)?);
+impl Ctx<'_> {
+    fn objects(&self, subject: &str, predicate: &str) -> Vec<String> {
+        get_objects(self.store, subject, predicate, self.graph)
     }
 
-    let graph_map = parse_optional_term_map(store, tm_iri, &format!("{RR}graphMap"), graph);
+    fn terms(&self, subject: &str, predicate: &str) -> Vec<Term> {
+        get_terms(self.store, subject, predicate, self.graph)
+    }
 
-    Ok(TriplesMap {
-        iri: tm_iri.to_string(),
-        logical_source,
-        subject_map,
-        predicate_object_maps,
-        graph_map,
+    fn triples_map(&self, tm_iri: &str) -> Result<TriplesMap, String> {
+        // Logical source (rml:logicalSource, or R2RML's rr:logicalTable)
+        let ls_iri = self
+            .objects(tm_iri, &format!("{RML}logicalSource"))
+            .into_iter()
+            .next()
+            .or_else(|| {
+                self.objects(tm_iri, &format!("{RR}logicalTable"))
+                    .into_iter()
+                    .next()
+            })
+            .ok_or("Missing rml:logicalSource")?;
+        let logical_source = parse_logical_source(self.store, &ls_iri, self.graph)?;
+
+        let mut subject_map = self.subject_map(tm_iri)?;
+        // R2RML puts graph maps on the subject map. One on the triples map
+        // itself is how this engine used to read them; it still means "every
+        // triple of this map", which is what a subject graph map means.
+        subject_map
+            .graph_maps
+            .extend(self.graph_maps(tm_iri, "triples map")?);
+
+        let mut predicate_object_maps = Vec::new();
+        for pom_node in &self.objects(tm_iri, &format!("{RR}predicateObjectMap")) {
+            predicate_object_maps.push(self.pom(pom_node)?);
+        }
+
+        let base_iri = [format!("{RML_CORE}baseIRI"), format!("{RML}baseIRI")]
+            .iter()
+            .find_map(|p| match self.terms(tm_iri, p).into_iter().next() {
+                Some(Term::NamedNode(n)) => Some(Ok(n.into_string())),
+                Some(_) => Some(Err("rml:baseIRI must be an IRI".to_string())),
+                None => None,
+            })
+            .transpose()?;
+
+        let mut tm = TriplesMap {
+            iri: tm_iri.to_string(),
+            logical_source,
+            subject_map,
+            predicate_object_maps,
+            base_iri,
+        };
+        if tm.logical_source.reference_formulation == ReferenceFormulation::Sql {
+            normalise_sql_columns(&mut tm);
+        }
+        Ok(tm)
+    }
+
+    fn subject_map(&self, tm_iri: &str) -> Result<SubjectMap, String> {
+        let sm_node = self
+            .objects(tm_iri, &format!("{RR}subjectMap"))
+            .into_iter()
+            .next();
+        // A function-valued subject (`fnml:functionValue` on the subject map):
+        // the term map is an empty placeholder and the function does the work.
+        let function = match &sm_node {
+            Some(sm) => self
+                .objects(sm, &format!("{FNML}functionValue"))
+                .into_iter()
+                .next()
+                .map(|fv| self.function(sm, &fv))
+                .transpose()?,
+            None => None,
+        };
+        let term_map = if function.is_some() {
+            TermMap {
+                kind: TermMapKind::Constant(Term::Literal(
+                    oxigraph::model::Literal::new_simple_literal(""),
+                )),
+                term_type: TermType::IRI,
+                datatype: None,
+                language: None,
+            }
+        } else if let Some(ref sm) = sm_node {
+            self.term_map(sm, Position::Subject)?
+        } else {
+            let val = self
+                .terms(tm_iri, &format!("{RR}subject"))
+                .into_iter()
+                .next()
+                .ok_or("Missing rr:subjectMap or rr:subject")?;
+            constant(val, Position::Subject)?
+        };
+
+        // rr:class assertions. R2RML places rr:class on the subjectMap; also accept it on
+        // the TriplesMap as a convenience.
+        let mut classes = Vec::new();
+        if let Some(ref sm) = sm_node {
+            classes.extend(self.objects(sm, &format!("{RR}class")));
+        }
+        classes.extend(self.objects(tm_iri, &format!("{RR}class")));
+        classes.sort();
+        classes.dedup();
+
+        let graph_maps = match &sm_node {
+            Some(sm) => self.graph_maps(sm, "subject map")?,
+            None => Vec::new(),
+        };
+
+        Ok(SubjectMap {
+            term_map,
+            classes,
+            function,
+            graph_maps,
+        })
+    }
+
+    fn pom(&self, pom_node: &str) -> Result<PredicateObjectMap, String> {
+        // Predicate map
+        let pm_nodes = self.objects(pom_node, &format!("{RR}predicateMap"));
+        let predicate_map = if let Some(pm) = pm_nodes.into_iter().next() {
+            self.term_map(&pm, Position::Predicate)?
+        } else {
+            let pred = self
+                .terms(pom_node, &format!("{RR}predicate"))
+                .into_iter()
+                .next()
+                .ok_or("Missing rr:predicateMap or rr:predicate")?;
+            constant(pred, Position::Predicate)?
+        };
+
+        // Object map: a referencing map, a function, or a plain term.
+        let om_nodes = self.objects(pom_node, &format!("{RR}objectMap"));
+        let object = if let Some(om) = om_nodes.into_iter().next() {
+            self.object_map(&om)?
+        } else {
+            // `rr:object` is a constant: an IRI stays an IRI, and a literal
+            // keeps its datatype and language tag.
+            let obj = self
+                .terms(pom_node, &format!("{RR}object"))
+                .into_iter()
+                .next()
+                .ok_or("Missing rr:objectMap or rr:object")?;
+            ObjectMap::Term(constant(obj, Position::Object)?)
+        };
+
+        let graph_maps = self.graph_maps(pom_node, "predicate-object map")?;
+
+        Ok(PredicateObjectMap {
+            predicate_map,
+            object,
+            graph_maps,
+        })
+    }
+
+    /// Every `rr:graphMap` and `rr:graph` on `node`. A malformed graph map is
+    /// a mapping error: dropping it would write the triples somewhere else.
+    fn graph_maps(&self, node: &str, owner: &str) -> Result<Vec<TermMap>, String> {
+        let mut out = Vec::new();
+        for gm in self.objects(node, &format!("{RR}graphMap")) {
+            out.push(
+                self.term_map(&gm, Position::Graph)
+                    .map_err(|e| format!("rr:graphMap of the {owner}: {e}"))?,
+            );
+        }
+        for g in self.terms(node, &format!("{RR}graph")) {
+            out.push(constant(g, Position::Graph).map_err(|e| format!("rr:graph: {e}"))?);
+        }
+        Ok(out)
+    }
+
+    fn object_map(&self, om: &str) -> Result<ObjectMap, String> {
+        if let Some(parent) = self
+            .objects(om, &format!("{RR}parentTriplesMap"))
+            .into_iter()
+            .next()
+        {
+            let mut joins = Vec::new();
+            for jc in self.objects(om, &format!("{RR}joinCondition")) {
+                let child = self
+                    .objects(&jc, &format!("{RR}child"))
+                    .into_iter()
+                    .next()
+                    .ok_or("rr:joinCondition is missing rr:child")?;
+                let parent_col = self
+                    .objects(&jc, &format!("{RR}parent"))
+                    .into_iter()
+                    .next()
+                    .ok_or("rr:joinCondition is missing rr:parent")?;
+                joins.push(JoinCondition {
+                    child,
+                    parent: parent_col,
+                });
+            }
+            joins.sort_by(|a, b| (&a.child, &a.parent).cmp(&(&b.child, &b.parent)));
+            return Ok(ObjectMap::Ref(RefObjectMap {
+                parent_triples_map: parent,
+                joins,
+            }));
+        }
+
+        if let Some(fv) = self
+            .objects(om, &format!("{FNML}functionValue"))
+            .into_iter()
+            .next()
+        {
+            return self.function(om, &fv).map(ObjectMap::Function);
+        }
+
+        self.term_map(om, Position::Object).map(ObjectMap::Term)
+    }
+
+    /// The function call under `fnml:functionValue` node `fv`, hung off the term
+    /// map `om` (an object map or a subject map).
+    fn function(&self, om: &str, fv: &str) -> Result<FunctionMap, String> {
+        let mut params: BTreeMap<String, Vec<FunctionArg>> = BTreeMap::new();
+        let mut function: Option<String> = None;
+
+        for pom in self.objects(fv, &format!("{RR}predicateObjectMap")) {
+            let predicate = self
+                .objects(&pom, &format!("{RR}predicate"))
+                .into_iter()
+                .next()
+                .or_else(|| {
+                    self.objects(&pom, &format!("{RR}predicateMap"))
+                        .into_iter()
+                        .next()
+                        .and_then(|pm| {
+                            self.objects(&pm, &format!("{RR}constant"))
+                                .into_iter()
+                                .next()
+                        })
+                })
+                .ok_or("a function parameter is missing rr:predicate")?;
+
+            // `rr:object` is a constant; `rr:objectMap [ rr:column … ]` reads the row.
+            let mut args: Vec<FunctionArg> = self
+                .objects(&pom, &format!("{RR}object"))
+                .into_iter()
+                .map(FunctionArg::Constant)
+                .collect();
+            for om_node in self.objects(&pom, &format!("{RR}objectMap")) {
+                let tm = self.term_map(&om_node, Position::Object)?;
+                args.push(match tm.kind {
+                    TermMapKind::Reference(c) => FunctionArg::Reference(c),
+                    TermMapKind::Constant(c) => FunctionArg::Constant(term_value(&c)),
+                    TermMapKind::Template(t) => FunctionArg::Constant(t),
+                });
+            }
+            if FNO_EXECUTES.contains(&predicate.as_str()) {
+                function = args
+                    .iter()
+                    .find_map(|a| match a {
+                        FunctionArg::Constant(c) => Some(c.clone()),
+                        FunctionArg::Reference(_) => None,
+                    })
+                    .or(function);
+                continue;
+            }
+            params.entry(predicate).or_default().extend(args);
+        }
+
+        let function = function.ok_or("fnml:functionValue is missing fno:executes")?;
+        let datatype = self
+            .objects(om, &format!("{RR}datatype"))
+            .into_iter()
+            .next();
+
+        Ok(FunctionMap {
+            function,
+            params,
+            datatype,
+        })
+    }
+
+    fn term_map(&self, node: &str, position: Position) -> Result<TermMap, String> {
+        // Determine TermMapKind
+        let kind = if let Some(c) = self
+            .terms(node, &format!("{RR}constant"))
+            .into_iter()
+            .next()
+        {
+            return constant(c, position);
+        } else if let Some(t) = self
+            .objects(node, &format!("{RR}template"))
+            .into_iter()
+            .next()
+        {
+            TermMapKind::Template(t)
+        } else if let Some(r) = self
+            .objects(node, &format!("{RML}reference"))
+            .into_iter()
+            .next()
+        {
+            TermMapKind::Reference(r)
+        } else if let Some(c) = self
+            .objects(node, &format!("{RR}column"))
+            .into_iter()
+            .next()
+        {
+            TermMapKind::Reference(c)
+        } else {
+            return Err(format!(
+                "TermMap <{node}> has no constant, template, or reference"
+            ));
+        };
+
+        let datatype = self
+            .objects(node, &format!("{RR}datatype"))
+            .into_iter()
+            .next();
+        let language = self
+            .objects(node, &format!("{RR}language"))
+            .into_iter()
+            .next();
+
+        // R2RML §7.4: an explicit rr:termType wins; otherwise an object map
+        // is a literal when it reads a column or declares a language or a
+        // datatype, and everything else is an IRI. Before the fix this engine
+        // made every object map a literal by default, which a legacy version
+        // keeps.
+        let default_type = match position {
+            Position::Object => {
+                let literal = match self.semantics {
+                    Semantics::Legacy => true,
+                    Semantics::R2rml => {
+                        matches!(kind, TermMapKind::Reference(_))
+                            || language.is_some()
+                            || datatype.is_some()
+                    }
+                };
+                if literal {
+                    TermType::Literal
+                } else {
+                    TermType::IRI
+                }
+            }
+            _ => TermType::IRI,
+        };
+        let term_type = self
+            .objects(node, &format!("{RR}termType"))
+            .into_iter()
+            .next()
+            .map(|iri| term_type_from_iri(&iri, default_type.clone()))
+            .unwrap_or(default_type);
+
+        Ok(TermMap {
+            kind,
+            term_type,
+            datatype,
+            language,
+        })
+    }
+}
+
+/// A constant-valued term map. Its term type is the constant's own kind
+/// (R2RML §7.4), so a literal keeps its datatype and language tag and an IRI
+/// is an IRI wherever it appears — `rr:termType` has no effect on it. Only an
+/// object may be a literal, and a blank node is never a constant.
+fn constant(value: Term, position: Position) -> Result<TermMap, String> {
+    let term_type = match &value {
+        Term::NamedNode(_) => TermType::IRI,
+        Term::Literal(_) if position == Position::Object => TermType::Literal,
+        Term::Literal(l) => {
+            return Err(format!(
+                "the constant of a {} must be an IRI, not the literal \"{}\"",
+                position.name(),
+                l.value()
+            ))
+        }
+        _ => {
+            return Err(format!(
+                "the constant of a {} must be an IRI{}",
+                position.name(),
+                if position == Position::Object {
+                    " or a literal"
+                } else {
+                    ""
+                }
+            ))
+        }
+    };
+    Ok(TermMap {
+        kind: TermMapKind::Constant(value),
+        term_type,
+        datatype: None,
+        language: None,
     })
+}
+
+/// A constant's lexical value: the IRI itself, or a literal's text.
+fn term_value(t: &Term) -> String {
+    match t {
+        Term::NamedNode(n) => n.as_str().to_string(),
+        Term::Literal(l) => l.value().to_string(),
+        Term::BlankNode(b) => format!("_:{}", b.as_str()),
+        #[cfg(feature = "rdf-12")]
+        Term::Triple(_) => String::new(),
+    }
+}
+
+/// Column names in a relational triples map as the result set reports them:
+/// `rr:column "\"ID\""` and a template's `{"ID"}` read column `ID`. R2RML
+/// takes column names from SQL, where the quotes are spelling, not name.
+fn normalise_sql_columns(tm: &mut TriplesMap) {
+    use super::sqlident::column_name;
+    let fix = |m: &mut TermMap| match &mut m.kind {
+        TermMapKind::Reference(c) => *c = column_name(c),
+        TermMapKind::Template(t) => *t = map_template_columns(t, &column_name),
+        TermMapKind::Constant(_) => {}
+    };
+    let fix_function = |f: &mut FunctionMap| {
+        for args in f.params.values_mut() {
+            for a in args {
+                if let FunctionArg::Reference(c) = a {
+                    *c = column_name(c);
+                }
+            }
+        }
+    };
+    fix(&mut tm.subject_map.term_map);
+    tm.subject_map.graph_maps.iter_mut().for_each(fix);
+    if let Some(f) = &mut tm.subject_map.function {
+        fix_function(f);
+    }
+    for pom in &mut tm.predicate_object_maps {
+        fix(&mut pom.predicate_map);
+        pom.graph_maps.iter_mut().for_each(fix);
+        match &mut pom.object {
+            ObjectMap::Term(t) => fix(t),
+            ObjectMap::Function(f) => fix_function(f),
+            ObjectMap::Ref(r) => {
+                for j in &mut r.joins {
+                    j.child = column_name(&j.child);
+                    j.parent = column_name(&j.parent);
+                }
+            }
+        }
+    }
+}
+
+/// Rewrite each `{column}` placeholder of a template through `f`, keeping
+/// escapes intact.
+fn map_template_columns(template: &str, f: &dyn Fn(&str) -> String) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut chars = template.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                out.push('\\');
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+            }
+            '{' => {
+                let mut name = String::new();
+                let mut closed = false;
+                while let Some(inner) = chars.next() {
+                    match inner {
+                        '\\' => {
+                            if let Some(next) = chars.next() {
+                                name.push(next);
+                            }
+                        }
+                        '}' => {
+                            closed = true;
+                            break;
+                        }
+                        other => name.push(other),
+                    }
+                }
+                out.push('{');
+                for ch in f(&name).chars() {
+                    if matches!(ch, '{' | '}' | '\\') {
+                        out.push('\\');
+                    }
+                    out.push(ch);
+                }
+                if closed {
+                    out.push('}');
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 fn parse_logical_source(
@@ -184,227 +694,6 @@ fn parse_logical_source(
     })
 }
 
-fn parse_subject_map(
-    store: &TripleStore,
-    tm_iri: &str,
-    graph: Option<&str>,
-) -> Result<SubjectMap, String> {
-    let sm_node = get_objects(store, tm_iri, &format!("{RR}subjectMap"), graph)
-        .into_iter()
-        .next();
-    // A function-valued subject (`fnml:functionValue` on the subject map):
-    // the term map is an empty placeholder and the function does the work.
-    let function = match &sm_node {
-        Some(sm) => get_objects(store, sm, &format!("{FNML}functionValue"), graph)
-            .into_iter()
-            .next()
-            .map(|fv| parse_function(store, sm, &fv, graph))
-            .transpose()?,
-        None => None,
-    };
-    let term_map = if function.is_some() {
-        TermMap {
-            kind: TermMapKind::Constant(String::new()),
-            term_type: TermType::IRI,
-            datatype: None,
-            language: None,
-        }
-    } else if let Some(ref sm) = sm_node {
-        parse_term_map(store, sm, graph, TermType::IRI)?
-    } else {
-        let subjects = get_objects(store, tm_iri, &format!("{RR}subject"), graph);
-        let val = subjects
-            .into_iter()
-            .next()
-            .ok_or("Missing rr:subjectMap or rr:subject")?;
-        TermMap {
-            kind: TermMapKind::Constant(val),
-            term_type: TermType::IRI,
-            datatype: None,
-            language: None,
-        }
-    };
-
-    // rr:class assertions. R2RML places rr:class on the subjectMap; also accept it on
-    // the TriplesMap as a convenience.
-    let mut classes = Vec::new();
-    if let Some(ref sm) = sm_node {
-        classes.extend(get_objects(store, sm, &format!("{RR}class"), graph));
-    }
-    classes.extend(get_objects(store, tm_iri, &format!("{RR}class"), graph));
-    classes.sort();
-    classes.dedup();
-
-    Ok(SubjectMap {
-        term_map,
-        classes,
-        function,
-    })
-}
-
-fn parse_pom(
-    store: &TripleStore,
-    pom_node: &str,
-    graph: Option<&str>,
-) -> Result<PredicateObjectMap, String> {
-    // Predicate map
-    let pm_nodes = get_objects(store, pom_node, &format!("{RR}predicateMap"), graph);
-    let predicate_map = if let Some(pm) = pm_nodes.into_iter().next() {
-        parse_term_map(store, &pm, graph, TermType::IRI)?
-    } else {
-        let pred = get_objects(store, pom_node, &format!("{RR}predicate"), graph)
-            .into_iter()
-            .next()
-            .ok_or("Missing rr:predicateMap or rr:predicate")?;
-        TermMap {
-            kind: TermMapKind::Constant(pred),
-            term_type: TermType::IRI,
-            datatype: None,
-            language: None,
-        }
-    };
-
-    // Object map: a referencing map, a function, or a plain term.
-    let om_nodes = get_objects(store, pom_node, &format!("{RR}objectMap"), graph);
-    let object = if let Some(om) = om_nodes.into_iter().next() {
-        parse_object_map(store, &om, graph)?
-    } else {
-        let obj = get_objects(store, pom_node, &format!("{RR}object"), graph)
-            .into_iter()
-            .next()
-            .ok_or("Missing rr:objectMap or rr:object")?;
-        ObjectMap::Term(TermMap {
-            kind: TermMapKind::Constant(obj),
-            term_type: TermType::Literal,
-            datatype: None,
-            language: None,
-        })
-    };
-
-    let graph_map = parse_optional_term_map(store, pom_node, &format!("{RR}graphMap"), graph);
-
-    Ok(PredicateObjectMap {
-        predicate_map,
-        object,
-        graph_map,
-    })
-}
-
-fn parse_object_map(
-    store: &TripleStore,
-    om: &str,
-    graph: Option<&str>,
-) -> Result<ObjectMap, String> {
-    if let Some(parent) = get_objects(store, om, &format!("{RR}parentTriplesMap"), graph)
-        .into_iter()
-        .next()
-    {
-        let mut joins = Vec::new();
-        for jc in get_objects(store, om, &format!("{RR}joinCondition"), graph) {
-            let child = get_objects(store, &jc, &format!("{RR}child"), graph)
-                .into_iter()
-                .next()
-                .ok_or("rr:joinCondition is missing rr:child")?;
-            let parent_col = get_objects(store, &jc, &format!("{RR}parent"), graph)
-                .into_iter()
-                .next()
-                .ok_or("rr:joinCondition is missing rr:parent")?;
-            joins.push(JoinCondition {
-                child,
-                parent: parent_col,
-            });
-        }
-        joins.sort_by(|a, b| (&a.child, &a.parent).cmp(&(&b.child, &b.parent)));
-        return Ok(ObjectMap::Ref(RefObjectMap {
-            parent_triples_map: parent,
-            joins,
-        }));
-    }
-
-    if let Some(fv) = get_objects(store, om, &format!("{FNML}functionValue"), graph)
-        .into_iter()
-        .next()
-    {
-        return parse_function_map(store, om, &fv, graph);
-    }
-
-    parse_term_map(store, om, graph, TermType::Literal).map(ObjectMap::Term)
-}
-
-fn parse_function_map(
-    store: &TripleStore,
-    om: &str,
-    fv: &str,
-    graph: Option<&str>,
-) -> Result<ObjectMap, String> {
-    parse_function(store, om, fv, graph).map(ObjectMap::Function)
-}
-
-/// The function call under `fnml:functionValue` node `fv`, hung off the term
-/// map `om` (an object map or a subject map).
-fn parse_function(
-    store: &TripleStore,
-    om: &str,
-    fv: &str,
-    graph: Option<&str>,
-) -> Result<FunctionMap, String> {
-    let mut params: BTreeMap<String, Vec<FunctionArg>> = BTreeMap::new();
-    let mut function: Option<String> = None;
-
-    for pom in get_objects(store, fv, &format!("{RR}predicateObjectMap"), graph) {
-        let predicate = get_objects(store, &pom, &format!("{RR}predicate"), graph)
-            .into_iter()
-            .next()
-            .or_else(|| {
-                get_objects(store, &pom, &format!("{RR}predicateMap"), graph)
-                    .into_iter()
-                    .next()
-                    .and_then(|pm| {
-                        get_objects(store, &pm, &format!("{RR}constant"), graph)
-                            .into_iter()
-                            .next()
-                    })
-            })
-            .ok_or("a function parameter is missing rr:predicate")?;
-
-        // `rr:object` is a constant; `rr:objectMap [ rr:column … ]` reads the row.
-        let mut args: Vec<FunctionArg> = get_objects(store, &pom, &format!("{RR}object"), graph)
-            .into_iter()
-            .map(FunctionArg::Constant)
-            .collect();
-        for om_node in get_objects(store, &pom, &format!("{RR}objectMap"), graph) {
-            let tm = parse_term_map(store, &om_node, graph, TermType::Literal)?;
-            args.push(match tm.kind {
-                TermMapKind::Reference(c) => FunctionArg::Reference(c),
-                TermMapKind::Constant(c) => FunctionArg::Constant(c),
-                TermMapKind::Template(t) => FunctionArg::Constant(t),
-            });
-        }
-        if FNO_EXECUTES.contains(&predicate.as_str()) {
-            function = args
-                .iter()
-                .find_map(|a| match a {
-                    FunctionArg::Constant(c) => Some(c.clone()),
-                    FunctionArg::Reference(_) => None,
-                })
-                .or(function);
-            continue;
-        }
-        params.entry(predicate).or_default().extend(args);
-    }
-
-    let function = function.ok_or("fnml:functionValue is missing fno:executes")?;
-    let datatype = get_objects(store, om, &format!("{RR}datatype"), graph)
-        .into_iter()
-        .next();
-
-    Ok(FunctionMap {
-        function,
-        params,
-        datatype,
-    })
-}
-
 fn term_type_from_iri(iri: &str, default: TermType) -> TermType {
     match iri {
         i if i.ends_with("IRI") || i.ends_with("URI") => TermType::IRI,
@@ -412,71 +701,6 @@ fn term_type_from_iri(iri: &str, default: TermType) -> TermType {
         i if i.ends_with("Literal") => TermType::Literal,
         _ => default,
     }
-}
-
-fn parse_term_map(
-    store: &TripleStore,
-    node: &str,
-    graph: Option<&str>,
-    default_type: TermType,
-) -> Result<TermMap, String> {
-    let get = |pred: &str| get_objects(store, node, pred, graph);
-
-    // Determine TermMapKind
-    let kind = if let Some(c) = get(&format!("{RR}constant")).into_iter().next() {
-        TermMapKind::Constant(c)
-    } else if let Some(t) = get(&format!("{RR}template")).into_iter().next() {
-        TermMapKind::Template(t)
-    } else if let Some(r) = get(&format!("{RML}reference")).into_iter().next() {
-        TermMapKind::Reference(r)
-    } else if let Some(c) = get(&format!("{RR}column")).into_iter().next() {
-        TermMapKind::Reference(c)
-    } else {
-        return Err(format!(
-            "TermMap <{node}> has no constant, template, or reference"
-        ));
-    };
-
-    // Determine TermType (default depends on context)
-    let term_type_iris = get(&format!("{RR}termType"));
-    let explicit_term_type = !term_type_iris.is_empty();
-    let mut term_type = term_type_iris
-        .into_iter()
-        .next()
-        .map(|iri| term_type_from_iri(&iri, default_type.clone()))
-        .unwrap_or_else(|| default_type.clone());
-    // R2RML: a constant's term type follows the constant's RDF term — an absolute-IRI
-    // constant is an IRI even in object position (where the default is Literal).
-    if !explicit_term_type {
-        if let TermMapKind::Constant(ref v) = kind {
-            if v.contains("://") || v.starts_with("urn:") {
-                term_type = TermType::IRI;
-            }
-        }
-    }
-
-    let datatype = get(&format!("{RR}datatype")).into_iter().next();
-    let language = get(&format!("{RR}language")).into_iter().next();
-
-    Ok(TermMap {
-        kind,
-        term_type,
-        datatype,
-        language,
-    })
-}
-
-fn parse_optional_term_map(
-    store: &TripleStore,
-    subject: &str,
-    pred: &str,
-    graph: Option<&str>,
-) -> Option<TermMap> {
-    let nodes = get_objects(store, subject, pred, graph);
-    nodes
-        .into_iter()
-        .next()
-        .and_then(|n| parse_term_map(store, &n, graph, TermType::IRI).ok())
 }
 
 /// Get all object values for (subject, predicate) in the given graph context.
@@ -501,6 +725,17 @@ fn get_objects(
         .collect()
 }
 
+/// The objects of (subject, predicate) as RDF terms, for the places where the
+/// kind of term is the meaning: `rr:constant` and its shortcuts.
+fn get_terms(
+    store: &TripleStore,
+    subject: &str,
+    predicate: &str,
+    graph: Option<&str>,
+) -> Vec<Term> {
+    store.objects_for_subject_in_graph(subject, predicate, graph)
+}
+
 /// Like [`get_objects`], but keeps whether each object was an IRI (`true`) or a
 /// literal — the difference between `rml:source <urn:source:x>` (a registered
 /// datasource) and `rml:source "x.csv"` (a file part name).
@@ -510,7 +745,6 @@ fn get_objects_typed(
     predicate: &str,
     graph: Option<&str>,
 ) -> Vec<(String, bool)> {
-    use oxigraph::model::Term;
     store
         .objects_for_subject_in_graph(subject, predicate, graph)
         .into_iter()
@@ -526,7 +760,6 @@ fn get_objects_typed(
 
 /// Run a SELECT query and return a named column's values as strings.
 fn query_col(store: &TripleStore, sparql: &str, col: &str) -> Vec<String> {
-    use oxigraph::model::Term;
     use oxigraph::sparql::QueryResults;
 
     match store.query(sparql) {
@@ -723,6 +956,149 @@ mod tests {
         ))
         .unwrap_err();
         assert!(err.contains("fno:executes"), "{err}");
+    }
+
+    #[test]
+    fn a_literal_constant_is_refused_where_only_an_iri_may_stand() {
+        for (placement, construct) in [
+            ("rr:subject \"s\" ;", "subject map"),
+            (
+                "rr:subjectMap [ rr:template \"http://x/{id}\" ] ;
+                 rr:predicateObjectMap [ rr:predicate \"p\" ; rr:object \"o\" ] ;",
+                "predicate map",
+            ),
+            (
+                "rr:subjectMap [ rr:template \"http://x/{id}\" ; rr:graph \"g\" ] ;",
+                "graph map",
+            ),
+        ] {
+            let err = parse_rml(&format!(
+                "{PFX}
+                 ex:M a rr:TriplesMap ;
+                   rml:logicalSource [ rml:source \"d.csv\" ; rml:referenceFormulation ql:CSV ] ;
+                   {placement} ."
+            ))
+            .unwrap_err();
+            assert!(err.contains(construct), "{construct}: {err}");
+        }
+    }
+
+    #[test]
+    fn graph_maps_are_read_from_every_placement() {
+        let m = parse_rml(&format!(
+            "{PFX}
+             ex:M a rr:TriplesMap ;
+               rml:logicalSource [ rml:source \"d.csv\" ; rml:referenceFormulation ql:CSV ] ;
+               rr:graphMap [ rr:constant ex:OnTheMap ] ;
+               rr:subjectMap [ rr:template \"http://x/{{id}}\" ; rr:graph ex:G1 ;
+                               rr:graphMap [ rr:template \"http://x/g/{{t}}\" ] ] ;
+               rr:predicateObjectMap [ rr:predicate ex:p ; rr:object ex:o ;
+                                       rr:graph ex:G2, ex:G3 ] ."
+        ))
+        .unwrap();
+        let tm = &m.triples_maps[0];
+        assert_eq!(
+            tm.subject_map.graph_maps.len(),
+            3,
+            "rr:graphMap, rr:graph, and the triples map's own"
+        );
+        assert_eq!(tm.predicate_object_maps[0].graph_maps.len(), 2);
+        assert!(m.has_graph_maps());
+    }
+
+    #[test]
+    fn sql_column_names_lose_their_delimiters() {
+        let m = parse_rml(&format!(
+            "{PFX}
+             ex:C a rr:TriplesMap ;
+               rml:logicalSource [ rml:source <urn:source:s> ; rr:tableName \"\\\"Child\\\"\" ] ;
+               rr:subjectMap [ rr:template \"http://x/{{\\\"ID\\\"}}/{{plain}}\" ] ;
+               rr:predicateObjectMap [ rr:predicate ex:n ; rr:objectMap [ rr:column \"`Name`\" ] ] ;
+               rr:predicateObjectMap [ rr:predicate ex:p ; rr:objectMap [
+                  rr:parentTriplesMap ex:P ;
+                  rr:joinCondition [ rr:child \"[PID]\" ; rr:parent \"\\\"ID\\\"\" ] ] ] .
+             ex:P a rr:TriplesMap ;
+               rml:logicalSource [ rml:source <urn:source:s> ; rr:tableName \"parent\" ] ;
+               rr:subjectMap [ rr:template \"http://x/p{{ID}}\" ] ."
+        ))
+        .unwrap();
+        let c = m.find("http://example.org/C").unwrap();
+        assert!(
+            matches!(&c.subject_map.term_map.kind, TermMapKind::Template(t) if t == "http://x/{ID}/{plain}")
+        );
+        assert_eq!(
+            c.logical_source.table_name.as_deref(),
+            Some("\"Child\""),
+            "the table keeps its spelling; the dialect re-quotes it"
+        );
+        let n = c
+            .predicate_object_maps
+            .iter()
+            .find_map(|p| match &p.object {
+                ObjectMap::Term(t) => Some(t),
+                _ => None,
+            })
+            .unwrap();
+        assert!(matches!(&n.kind, TermMapKind::Reference(r) if r == "Name"));
+        let r = c
+            .predicate_object_maps
+            .iter()
+            .find_map(|p| match &p.object {
+                ObjectMap::Ref(r) => Some(r),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            r.joins,
+            vec![JoinCondition {
+                child: "PID".into(),
+                parent: "ID".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn template_object_defaults_follow_the_semantics() {
+        let doc = format!(
+            "{PFX}
+             ex:M a rr:TriplesMap ;
+               rml:logicalSource [ rml:source \"d.csv\" ; rml:referenceFormulation ql:CSV ] ;
+               rr:subjectMap [ rr:template \"http://x/{{id}}\" ] ;
+               rr:predicateObjectMap [ rr:predicate ex:t ; rr:objectMap [ rr:template \"http://x/{{a}}\" ] ] ;
+               rr:predicateObjectMap [ rr:predicate ex:d ; rr:objectMap [ rr:template \"{{a}}\" ; rr:datatype ex:dt ] ] ;
+               rr:predicateObjectMap [ rr:predicate ex:c ; rr:objectMap [ rml:reference \"a\" ] ] ;
+               rr:predicateObjectMap [ rr:predicate ex:i ; rr:objectMap [ rml:reference \"a\" ; rr:termType rr:IRI ] ] ."
+        );
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(&doc, oxigraph::io::RdfFormat::Turtle, None)
+            .unwrap();
+        // Predicate-object maps come back in store order; sort by predicate.
+        let types = |s: Semantics| -> Vec<TermType> {
+            let m = parse_from_store_as(&store, None, s).unwrap();
+            let mut by_predicate: Vec<(String, TermType)> = m.triples_maps[0]
+                .predicate_object_maps
+                .iter()
+                .map(|p| match (&p.predicate_map.kind, &p.object) {
+                    (TermMapKind::Constant(pred), ObjectMap::Term(t)) => {
+                        (pred.to_string(), t.term_type.clone())
+                    }
+                    _ => panic!(),
+                })
+                .collect();
+            by_predicate.sort_by(|a, b| a.0.cmp(&b.0));
+            by_predicate.into_iter().map(|(_, t)| t).collect()
+        };
+        use TermType::*;
+        // R2RML §7.4: a template object is an IRI unless it declares a
+        // datatype or language; a column is a literal; explicit wins.
+        // In predicate order: ex:c (column), ex:d (datatype), ex:i (explicit
+        // IRI), ex:t (template).
+        assert_eq!(types(Semantics::R2rml), vec![Literal, Literal, IRI, IRI]);
+        assert_eq!(
+            types(Semantics::Legacy),
+            vec![Literal, Literal, IRI, Literal]
+        );
     }
 
     #[test]

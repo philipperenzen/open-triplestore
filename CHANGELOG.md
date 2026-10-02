@@ -465,6 +465,43 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   transactional quad path (`TripleStore::apply_quad_ops`) that records the
   exact net change in the change log, and the response's `added`/`removed`
   are that net change. Spec-derived tests in `tests/rdf_patch_conformance.rs`.
+- **RML / R2RML terms follow R2RML.** A file mapping, a dataset's stored
+  mapping and every newly frozen datasource mapping version now generate terms
+  by R2RML's rules, so their output changes:
+  - a template object map with no `rr:termType` is an **IRI** (§7.4), not a
+    literal — write `rr:termType rr:Literal` for text;
+  - a template value is encoded only when the term is an IRI, and only outside
+    RFC 3987 `iunreserved` (§7.3): `a-b.c_d~e` and non-ASCII letters stay as
+    they are where they used to become `a%2Db%2Ec%5Fd%7Ee`, and a literal
+    template is no longer percent-encoded;
+  - a blank node is one per value and graph (§11.2, §9.1), not one per row;
+  - graph maps sit on the subject map (`rr:graphMap` or `rr:graph`) and
+    predicate-object maps, and a triple goes to the **union** of both graphs
+    instead of the predicate-object map's overriding the subject's; `rr:class`
+    triples go to the subject's graphs, `rr:defaultGraph` names the default
+    graph, every graph map is used rather than the first, and a malformed one
+    is an error instead of being dropped. A graph map on the triples map is
+    still read, as a subject graph map;
+  - a relative IRI resolves against a base IRI: a triples map's `rml:baseIRI`,
+    or `?base=` on `POST /api/datasets/:id/mappings/execute`.
+  **Existing datasource mapping versions keep their output.** Each version is
+  now stamped with the rules it runs under (`semantics`: `r2rml` or `legacy`,
+  on the version entity and in the API); a version frozen before carries no
+  stamp and runs as `legacy`. `POST`/`PUT /api/mappings` and an inline dry-run
+  accept `"semantics": "legacy"` to freeze a new version under the old rules,
+  so a fix does not rename every entity. Whatever the rules:
+  - `rr:object <IRI>` is an IRI — it used to be written as a string literal,
+    which YARRRML's `[ex:p, ex:Term]` produced — and a constant literal keeps
+    its datatype and language tag (a constant is no longer typed by whether it
+    contains `://`);
+  - a literal constant in a subject, predicate or graph position is a mapping
+    error;
+  - `rr:tableName` may be schema-qualified and its parts delimited
+    (`"Student"`, `` `x` ``, `[x]`), each re-quoted by the dialect; a delimited
+    column name (`rr:column "\"ID\""`, `{"ID"}`, join columns) reads column
+    `ID`.
+  The YARRRML and legacy-format converters now write an explicit `rr:termType`
+  on every template and column term map.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were
@@ -489,6 +526,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   title. A `patch` on a `release/X.Y` branch releases that line and leaves the
   `latest` GitHub Release and image tag alone. `release.yml` can be re-run for
   an existing tag. See `docs/release-process.md`.
+- **An RML file mapping with `rr:parentTriplesMap` is refused.** The upload
+  path (CSV, JSON, XML) has no join resolver, so a referencing object map
+  resolved to nothing: the run wrote the rest of the mapping, dropped every link
+  it asked for, and reported success. It now answers `400` naming the triples
+  map, as it already did for a mapping that reads a registered datasource.
+  Joins run on registered datasources (`docs/sources.md`). Tests:
+  `src/rml/executor.rs`, `tests/rml_conformance.rs`.
+- **`docker-compose.override.yml` no longer ships.** It was one machine's
+  workaround for an unstable build host (thin LTO, two build jobs), and Compose
+  merges the file automatically, so every `docker compose build` got the slow,
+  less optimised image while `docs/development.md` called the file git-ignored.
+  It is now ignored; keep a local copy if you use one.
 
 - **`owl2-dl` needs a configured backend (breaking).** There is no default
   any more: without `OTS_DL_BACKEND` every `owl2-dl` request answers 503.
@@ -889,6 +938,60 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     found", even for conforming data.
   - The dataset page's validation dialog showed the escape `\u2014` as text
     where its summary line has a dash.
+- **The bundled Open Triplestore ontology names all ten graph roles.** The
+  catalogue writes `ots:graphRole` values for `DomainValues`, `Linkset`,
+  `Provenance` and `Catalog`, but the `ots-ontology` demo dataset defined only
+  the first six roles, as `GraphRole` individuals and as SKOS concepts. New
+  installs get all ten; existing ones keep their seeded copy.
+- **GitLab CI runs the gates GitHub runs.** The frontend job type-checks
+  (`npm run typecheck`); e2e uses Node 24; `cargo-deny` covers every feature;
+  new `minimal-build` (`--no-default-features`) and `plugins` (each plugin crate
+  on its own) jobs; and the perf job self-tests the gate, screens softly and
+  re-benches flagged benchmarks before failing, and clears each pass's
+  directory first — the cached `target/` could nest one pass inside the last
+  and switch off every tolerance key.
+- **Docs that contradicted the code.**
+  - Graph roles: the styleguide said six (there are ten) and gave them an
+    `…/ns/role#` namespace (they are `https://opentriplestore.org/ns#`);
+    `docs/datasets.md` had its `catalog` row stranded below the table.
+  - `docs/rml.md` and `docs/standards.md` said SQL and SPARQL sources and joins
+    were not implemented; `standards.md` also listed SHACL-AF custom constraint
+    components, `sh:ask` validators and rule `sh:condition` / `sh:order` as
+    missing.
+  - `docs/sparql-12.md` called `LATERAL` planned and rejected by the parser (it
+    works) and let triple terms be subjects (RDF 1.2 allows objects only).
+  - `docs/owl2-el.md` named `Owl2ELReasoner` (the type is `El2Classifier`), and
+    the reasoner examples passed a string to `TripleStore::open`, which takes a
+    `Path`. The OWL 2 DL docs said keys of more than two properties produce no
+    `owl:sameAs`; the RL phase merges keys of any length.
+  - `docs/datatypes.md` said XSD literals keep their lexical form; numbers,
+    booleans and dates come back canonical (`"01"^^xsd:integer` → `"1"`).
+  - `docs/dcat.md` said VoID statistics are computed per request and never
+    cached; they are cached until the next write.
+  - `docs/data-modeling.md` said SHACL-on-write covers LDP writes; it covers
+    Graph Store writes to dataset graphs only.
+  - `docs/administration.md` said interactive OIDC sign-in ignores group
+    claims; it maps `groups` and `roles`. `docs/auth.md` left the `guest` role
+    and `OTS_GUEST_CAPABILITIES` out.
+  - `docs/development.md` and `docs/windows.md` put `saml` in `full` (it is not);
+    the native Windows build drops its hand-written feature list for the
+    default `full`.
+  - `docs/triplestore-comparison.md` marked federation, OWL 2 EL, RL and DL,
+    ShEx, SWRL and RML full where `docs/standards.md` grades them Partial; the
+    standards score is recounted, 23 → 16 of 29. Its GeoSPARQL note still
+    called the geodesic metric functions, `aggUnion` and GeoJSON missing.
+  - `docs/performance.md` showed a whole-store `COUNT(*)` scanning (7.09 ms at
+    10k); the count index answers it in ~0.14 µs at every size.
+  - `PRIVACY.md` listed Leaflet from unpkg and OpenStreetMap tiles; the UI
+    bundles its map libraries and fetches OpenFreeMap and, with an operator's
+    key, Esri imagery. `frontend/index.html` no longer pre-resolves an Esri
+    host the code stopped using.
+  - `CONTRIBUTING.md` told contributors to use `--all-features`, which needs
+    native SFCGAL; it now gives CI's feature set and the typecheck step.
+    `.github/RELEASE_TEMPLATE.md` used H2 groups where release notes and the
+    `### Security` / `### Deprecated` check use H3.
+  - `frontend/public/vocab/NOTICE.md` counted 17 files from LOV; DOAP's
+    replacement left 16.
 
 - **The Konclude bridge works.** It piped Turtle on stdin, but Konclude reads
   only OWL/XML or functional-style syntax, from files. It also passed an

@@ -40,7 +40,7 @@ applies.
 | LDES / TREE | Event streams of version objects; hypermedia fragmentation | Partial — time-ordered fixed-size fragments with `GreaterThanOrEqualToRelation`, frozen once full; entity-level version objects, tombstones; retention policies (`fullLogDuration`, `versionAmount`, `versionDuration`, `versionDeleteDuration`, `startingFrom`) enforced inside frozen pages with `410 Gone` for a compacted node; an incremental client that treats 410 as an empty page. No `tree:shape`, `ldes:versionKey` or spatial/substring fragmentations. Spec-derived rules in `tests/ldes_conformance.rs` (no external corpus exists). See [ldes.md](ldes.md). |
 | LDP (Linked Data Platform) 1.0 | Basic/Direct/Indirect Containers; NonRDFSource; per-resource access control with Web Access Control (`.acl` resources, `acl:` vocabulary, `Link rel="acl"`, `WAC-Allow`) | Full — WAC agents are this store's principals; no WebID-TLS / Solid-OIDC, no `acl:origin`. See [ldp.md](ldp.md#access-control). |
 | DCAT 3 / DCAT-AP 3 / DCAT-AP-NL 3 | Dataset catalogue description; EU / NL application profiles | Partial — DCAT 3 catalogue with VoID statistics; `DCAT_PROFILE` adds the AP/AP-NL mandatory properties (typed agents, identifiers, language, file types, data services, EU-authority statuses); no `dcat:CatalogRecord`, no temporal coverage, and the official DCAT-AP SHACL suite is not run in CI. See [dcat.md](dcat.md). |
-| RML / R2RML | CSV/JSON/XML → RDF mapping | Partial⁹ |
+| RML / R2RML | CSV/JSON/XML files and SQL / SPARQL datasources → RDF | Partial⁹ |
 | JWT / OAuth 2.0 / OIDC | Authentication | Full |
 | SAML 2.0 | Authentication | Experimental — not in the `full` feature or the published image. SP-initiated Web Browser SSO (HTTP-Redirect AuthnRequest, HTTP-POST response bound to the request, signed by the configured IdP certificate); no IdP-initiated SSO, signed AuthnRequests, encrypted assertions or Single Logout. Tested against a simulated IdP only. See [auth.md](auth.md#saml-20). |
 | ShEx | Shape Expressions (ShExC) | Partial — node kinds, datatypes with lexical checks, string/numeric facets, value sets, cardinalities, EachOf/OneOf, inverse constraints, CLOSED/EXTRA, shape references; no semantic actions, imports or annotations. Semantics pinned by `tests/shex_conformance.rs`. |
@@ -80,7 +80,7 @@ allows no performance claims on a subset.
 | RDF 1.1 formats | `tests/rdf11_conformance.rs` | spec-derived | 63 |  |
 | RDF Patch (RDF Delta) | `tests/rdf_patch_conformance.rs` | spec-derived | 24 |  |
 | RDFS entailment | `tests/rdfs_conformance.rs` | spec-derived | 23 |  |
-| RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 19 |  |
+| RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 30 |  |
 | SHACL Advanced Features | `tests/shacl_af_corpus.rs` | **vendored TopQuadrant corpus** (expression, function, rule and target tests of TopQuadrant/shacl, unmodified; dash-driven) | 1 | 10 corpus cases: 9 pass, 1 known failure, 0 runner-side skips (floor ≥9 asserted) |
 | SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 58 |  |
 | SHACL-AF rules | `tests/shacl_rules_conformance.rs` | spec-derived | 43 |  |
@@ -98,7 +98,7 @@ allows no performance claims on a subset.
 | SPARQL 1.1 Federated Query | `tests/w3c_sparql11_federation.rs` | **vendored W3C test-suite subset** (`service/` + `syntax-fed/` sections of w3c/rdf-tests, unmodified; manifest-driven, local endpoints) | 1 | runs in CI as a development and regression ratchet against local endpoints; no score is published (W3C test-suite policy); see `docs/conformance/sparql11.md` §Federation |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 
-987 conformance tests across 30 suites; a further 795 tests in 106 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 6 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. The SHACL, SHACL-AF and GeoSPARQL corpus results are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant or OGC conformance claims. The SPARQL 1.1 sections (query, update and federation) and the OWL 2 DL test cases are partial runs of W3C test suites, so under W3C's licence terms they are used for development and bug tracking only, and no score is published for them.
+998 conformance tests across 30 suites; a further 796 tests in 106 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 6 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. The SHACL, SHACL-AF and GeoSPARQL corpus results are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant or OGC conformance claims. The SPARQL 1.1 sections (query, update and federation) and the OWL 2 DL test cases are partial runs of W3C test suites, so under W3C's licence terms they are used for development and bug tracking only, and no score is published for them.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->
@@ -233,10 +233,20 @@ behavior and will flip green when the limitation is resolved.
    silently, which could empty a shape graph on upload with a 200).
 9. **RML / R2RML** — CSV/JSON/XML *file* sources with template/reference/constant
    term maps, datatype and language tags, `rr:class`, and inline blank-node term
-   maps. **Not implemented:** SQL logical tables (`rr:logicalTable`,
-   `rr:sqlQuery`) and referencing object maps (`rr:parentTriplesMap` joins); a
-   predicate-object map honours its first predicate map and first object map
-   only.
+   maps ([rml.md](rml.md)); relational logical sources (`rr:tableName`,
+   `rml:query`, R2RML's `rr:logicalTable` / `rr:sqlQuery`) over registered
+   PostgreSQL, MySQL / MariaDB and SQL Server datasources and virtual SPARQL
+   sources, with referencing object maps (`rr:parentTriplesMap` joins) resolved
+   there ([sources.md](sources.md)). Terms follow R2RML: §7.4 term types
+   (constants keep their kind, datatype and language; template objects are
+   IRIs), §7.3 IRI-safe encoding of IRI templates only, blank nodes per value
+   and graph, union graph-map semantics with `rr:defaultGraph`, a base IRI
+   (`rml:baseIRI` or the run's), and delimited / schema-qualified SQL
+   identifiers. A datasource mapping version frozen before that keeps the old
+   term rules. **Not implemented:** joins on file sources (the mapping is
+   refused), more than one predicate map or object map per predicate-object
+   map (the first of each is used), `rml:null` (an empty value generates no
+   term), and mapping-validation / data-error reporting.
 10. **Zero-length property paths:** `:x :p* ?y` includes start nodes present in the
     data; the pure ALP edge of a *constant* start node absent from the graph is an
     oxigraph-evaluator divergence.

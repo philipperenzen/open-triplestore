@@ -3,7 +3,8 @@
 # Mirrors the GitHub Actions workflows (.github/workflows/ci.yml, perf.yml,
 # perf-baseline.yml, release.yml + e2e.yml) so a fork hosted on any GitLab
 # instance (gitlab.com or self-managed) gets the same gates: rustfmt + clippy +
-# build + test (incl. conformance & security suites), the database connectors
+# build + test (incl. conformance & security suites), a --no-default-features
+# build, the plugin crates on their own, the database connectors
 # against live PostgreSQL / MySQL / MariaDB / SQL Server services, the frontend
 # lint/test/build, the cargo-deny supply-chain audit (advisories, bans, sources,
 # licenses), an npm production-dependency audit, a gitleaks secret scan, the
@@ -122,6 +123,47 @@ live-sources:
     - cargo test -p ots-plugin-mssql --test live --locked
     - cargo test --features test-utils,plugin-postgres --test sources_postgres_http --locked
 
+# ── Minimal build (mirrors ci.yml minimal-build) ──────────────────────────────
+# `--no-default-features` must keep compiling: a feature gate that only the full
+# build exercises breaks here first.
+minimal-build:
+  stage: test
+  image: rust:1.94-trixie
+  cache:
+    key: "rust-trixie-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cargo/registry/
+      - .cargo/git/
+      - target/
+    policy: pull
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq libgeos-dev cmake pkg-config libclang-dev libssl-dev lld
+  script:
+    - cargo build --no-default-features --locked
+
+# ── Plugin crates on their own (mirrors ci.yml plugins) ───────────────────────
+# The plugin crates do not depend on the main crate, so each one must build,
+# lint and test at its own default features, without the main crate's system
+# libraries; the rust job covers plugin-hello wired INTO the main crate.
+plugins:
+  stage: test
+  image: rust:1.94-trixie
+  cache:
+    key: "rust-trixie-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cargo/registry/
+      - .cargo/git/
+      - target/
+    policy: pull
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq pkg-config libssl-dev
+    - rustup component add clippy
+  script:
+    - cargo clippy -p ots-plugin-api -p ots-plugin-hello -p ots-plugin-accounts-dashboard -p ots-plugin-postgres -p ots-plugin-mysql -p ots-plugin-mssql --all-targets -- -D warnings
+    - cargo test -p ots-plugin-api -p ots-plugin-hello -p ots-plugin-accounts-dashboard -p ots-plugin-postgres -p ots-plugin-mysql -p ots-plugin-mssql --locked
+
 # ── Seed bundles on real data (mirrors the last steps of ci.yml conformance) ─
 # NEN 2660-2, IMBOR and GWSW are not vendored (NEN 2660-2 carries no licence
 # that allows redistributing it), so each bundle's fetch.sh downloads them from
@@ -157,10 +199,11 @@ docs-parity:
     - python3 scripts/conformance_table.py --check
 
 # ── Performance-regression GATE (mirrors .github/workflows/perf.yml) ──────────
-# Subset Criterion bench + a comparison against the committed baseline. Runs on
-# merge requests and on pushes to main/develop/release/*. Sample sizes are
-# hard-coded in benches/performance.rs, so the name filter (not --sample-size)
-# controls runtime.
+# Subset Criterion bench of the merge base and this change on the same runner,
+# a soft screening comparison, then a re-bench of only the flagged benchmarks
+# before anything fails. Runs on merge requests and on pushes to
+# main/develop/release/*. Sample sizes are hard-coded in benches/performance.rs,
+# so the name filter (not --sample-size) controls runtime.
 perf:
   stage: perf
   # Same trixie image as the rust job (shared cache key — see the note there).
@@ -188,6 +231,9 @@ perf:
     # Both revisions get benched, so the base commit has to be in the clone.
     GIT_DEPTH: "0"
   script:
+    # The only coverage the gate's own comparison logic has: seconds, and it
+    # runs before the hour of benching so a broken gate fails fast.
+    - bash scripts/perf_selftest.sh
     # Bench the merge base and this change back-to-back on the same runner, two
     # passes each (fastest median per benchmark wins), then compare the two. The
     # committed baseline is measured on a different runner instance, so comparing
@@ -200,20 +246,46 @@ perf:
         echo "No usable base commit ('$BASE') — nothing to compare against, skipping."; exit 0
       fi
     # base, change, base, change — alternating, not two-and-two: a runner drifts
-    # over the hour this takes, so consecutive halves are not comparable.
-    - git checkout --detach "$BASE"
-    - OTS_QUERY_CACHE=off cargo bench --bench performance --features full -- 'query|path|geosparql|insert|update|shacl|concurrent'
-    - mv target/criterion target/criterion-base-1
-    - git checkout --detach "$HEAD"
-    - OTS_QUERY_CACHE=off cargo bench --bench performance --features full -- 'query|path|geosparql|insert|update|shacl|concurrent'
-    - mv target/criterion target/criterion-head-1
-    - git checkout --detach "$BASE"
-    - OTS_QUERY_CACHE=off cargo bench --bench performance --features full -- 'query|path|geosparql|insert|update|shacl|concurrent'
-    - mv target/criterion target/criterion-base-2
-    - git checkout --detach "$HEAD"
-    - OTS_QUERY_CACHE=off cargo bench --bench performance --features full -- 'query|path|geosparql|insert|update|shacl|concurrent'
-    - mv target/criterion target/criterion-head-2
-    - python3 scripts/perf_regression.py compare --before target/criterion-base-1 --before target/criterion-base-2 --after target/criterion-head-1 --after target/criterion-head-2 --baseline benches/perf_baseline.json --github-summary
+    # over the hour this takes, so consecutive halves are not comparable. Each
+    # pass moves into a directory cleared first: `mv A B` nests A INSIDE B when B
+    # exists, and the cached target/ can still hold the last pipeline's passes —
+    # nesting prefixes every bench id with "criterion/" and disables every
+    # tolerance key in the baseline.
+    #
+    # The first comparison only SCREENS (`--soft`): applied to every benchmark at
+    # once, two samples a side still let some benchmark trip the bar by luck. The
+    # flagged ids get a third pass on each side — interference only ever slows a
+    # benchmark, so a real regression reproduces and a fluke does not — and the
+    # gate then compares all three. Nothing flagged: the screen is the result.
+    - |
+      bench() {
+        git checkout --detach "$1"
+        OTS_QUERY_CACHE=off cargo bench --bench performance --features full -- "$3"
+        rm -rf "target/criterion-$2"
+        mv target/criterion "target/criterion-$2"
+      }
+      GATED='query|path|geosparql|insert|update|shacl|concurrent'
+      bench "$BASE" base-1 "$GATED"
+      bench "$HEAD" head-1 "$GATED"
+      bench "$BASE" base-2 "$GATED"
+      bench "$HEAD" head-2 "$GATED"
+      python3 scripts/perf_regression.py compare \
+        --before target/criterion-base-1 --before target/criterion-base-2 \
+        --after  target/criterion-head-1 --after  target/criterion-head-2 \
+        --baseline benches/perf_baseline.json \
+        --summary-title 'Performance vs merge base (screening)' \
+        --soft --flagged-out target/perf-flagged.txt
+      FLAGGED="$(cat target/perf-flagged.txt 2>/dev/null || true)"
+      if [ -n "$FLAGGED" ]; then
+        echo "Confirming: $FLAGGED"
+        bench "$BASE" base-3 "$FLAGGED"
+        bench "$HEAD" head-3 "$FLAGGED"
+        python3 scripts/perf_regression.py compare \
+          --before target/criterion-base-1 --before target/criterion-base-2 --before target/criterion-base-3 \
+          --after  target/criterion-head-1 --after  target/criterion-head-2 --after  target/criterion-head-3 \
+          --baseline benches/perf_baseline.json \
+          --summary-title 'Performance vs merge base (confirmed)'
+      fi
 
 # ── Performance baseline refresh (mirrors .github/workflows/perf-baseline.yml) ─
 # Full Criterion suite → regenerated baseline as a CI artifact. Runs on `v*`
@@ -265,6 +337,9 @@ frontend:
     - npm ci
   script:
     - npm run lint
+    # `tsc --noEmit` (see ci.yml): eslint's no-undef is off for .ts, so without
+    # it a typo'd identifier reaches the build as a runtime `undefined`.
+    - npm run typecheck
     - npm run test
     - npm run build
 
@@ -283,7 +358,10 @@ cargo-deny:
     - apt-get install -y -qq pkg-config libssl-dev
     - cargo install cargo-deny --locked --version ^0.16
   script:
-    - cargo deny check advisories bans sources licenses
+    # Every feature, as cargo-deny-action does on GitHub by default: without
+    # it optional dependencies drop out of the graph and their advisories are
+    # never seen. cargo-deny compiles nothing, so `sfcgal3d` costs nothing here.
+    - cargo deny --all-features check advisories bans sources licenses
 
 # ── npm audit (production dependencies, high severity) ────────────────────────
 npm-audit:
@@ -320,7 +398,7 @@ e2e:
   before_script:
     - apt-get update -qq
     - apt-get install -y -qq libgeos-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld curl
-    - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    - curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
     - apt-get install -y -qq nodejs
   script:
     - cargo build --features "rdf-12,owl2-rl,owl2-el,owl2-ql,owl2-dl,text-search,ldp,shex,swrl"

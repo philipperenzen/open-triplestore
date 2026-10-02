@@ -606,7 +606,10 @@ mod tests {
         &tm(m, map)
             .predicate_object_maps
             .iter()
-            .find(|p| matches!(&p.predicate_map.kind, TermMapKind::Constant(c) if c == predicate))
+            .find(|p| {
+                matches!(&p.predicate_map.kind,
+                    TermMapKind::Constant(oxigraph::model::Term::NamedNode(c)) if c.as_str() == predicate)
+            })
             .unwrap_or_else(|| panic!("no predicate <{predicate}> on '{map}'"))
             .object
     }
@@ -829,7 +832,9 @@ mappings:
         let ObjectMap::Term(note) = object(&m, "product", "http://example.org/note") else {
             panic!()
         };
-        assert!(matches!(&note.kind, TermMapKind::Constant(c) if c == "just text"));
+        assert!(matches!(&note.kind,
+            TermMapKind::Constant(oxigraph::model::Term::Literal(c)) if c.value() == "just text"));
+        assert_eq!(note.term_type, crate::rml::model::TermType::Literal);
     }
 
     #[test]

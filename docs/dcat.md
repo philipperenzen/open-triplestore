@@ -14,7 +14,7 @@ The triplestore automatically generates a full [W3C DCAT 2](https://www.w3.org/T
 | Aggregate `void:Dataset` | Total triple count, distinct subjects/objects/predicates, named graph count |
 | Per-dataset `dcat:Dataset` | Title, description, issued/modified dates, access rights, creator/publisher |
 | `dcat:Distribution` | SPARQL endpoint distribution + Graph Store HTTP Protocol distribution |
-| VoID statistics | Per-dataset `void:triples` from actual SPARQL COUNT queries |
+| VoID statistics | Per-dataset `void:triples` from the store's per-graph triple counts; whole-store counts cached until the next write |
 | `dct:conformsTo` | Links to the dataset's SHACL shapes graph when configured |
 | `dct:conformsTo` | Links to the model version the dataset's instance data conforms to |
 | Organization metadata | `foaf:Organization` + `org:FormalOrganization` for organisation-owned datasets |
@@ -167,6 +167,8 @@ Dataset visibility maps to EU Publications Office access rights URIs:
 ## VoID Statistics
 
 The root dataset's statistics (`void:triples`, `void:distinctSubjects`, `void:distinctObjects`, `void:properties`, `void:documents`) cover the graphs the caller may read — the whole store, default and named graphs alike, for an administrator; the readable named graphs for anyone else, so an anonymous caller counts only public graphs. They are computed with `COUNT` queries the first time a caller with that set of graphs requests the catalogue after a write, and cached until the next write.
+
+A dataset's `void:triples` is the sum of its registered graphs' triple counts, which the store keeps current on every write — no query runs for it. Each registered graph (system graphs excluded) is also listed as a `void:subset`.
 
 ---
 

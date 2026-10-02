@@ -323,6 +323,12 @@ pub struct MappingRequest {
     pub model: Option<String>,
     pub model_version: Option<String>,
     pub state: Option<String>,
+    /// The term-generation rules the new version is frozen under: `r2rml`
+    /// (the default) or `legacy`, which keeps the IRIs and blank nodes a
+    /// version frozen before this engine followed R2RML's term rules produced
+    /// (template object maps default to literals, every non-alphanumeric
+    /// template character is percent-encoded, blank nodes are per row).
+    pub semantics: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -345,6 +351,10 @@ pub struct MappingResponse {
     /// the baseline for `POST /api/sources/{id}/drift`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_version: Option<u32>,
+    /// The term-generation rules the newest version runs under: `r2rml`, or
+    /// `legacy` for a version frozen before this engine followed R2RML's term
+    /// rules (or pinned to them on purpose).
+    pub semantics: String,
     /// Triples maps in the newest version, for a list view.
     pub triples_maps: usize,
     /// `rr:parentTriplesMap` edges in the newest version: which triples map

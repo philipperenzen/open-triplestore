@@ -38,6 +38,8 @@ SELECT ?individual ?n
 WHERE { GRAPH <urn:entailment:owl2-dl:diagnostics> { ?individual <urn:dl:minCardinality> ?n } }
 ```
 
+Keys of any length are merged before these rules run: the OWL 2 RL phase's `prp-key` rule handles composite keys (`owl:hasKey ( ex:first ex:last ex:born )`). The two `dl-has-key` rules re-check 1- and 2-property keys inside the DL fixed-point loop, so they also catch individuals that only the DL rules above gave the keyed type.
+
 ---
 
 ## What every backend run checks first

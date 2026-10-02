@@ -318,6 +318,32 @@ urn:mapping:products-map:version:2    version 2 — a separate graph
 never rewritten, because runs reference it. A metadata-only edit (title,
 state, shapes graph) keeps the current version.
 
+### Term-generation rules
+
+Each version is stamped with the term rules it runs under (`ds:rmlSemantics`
+on the version entity, and `semantics` in the API response):
+
+- **`r2rml`** — R2RML's own: a template object map with no `rr:termType` is an
+  IRI (§7.4), a template value is IRI-safe encoded only when it builds an IRI
+  (§7.3), and a blank node is one per value and graph (§11.2). Every new
+  version gets these.
+- **`legacy`** — what the engine did before: template object maps default to
+  literals, every template value has all but its letters and digits
+  percent-encoded (`a-b` becomes `a%2Db`), and blank nodes are minted per row.
+  A version frozen before the stamp existed carries none and runs as `legacy`,
+  so its runs keep producing the IRIs they always did.
+
+An IRI is an identity, so changing a version's rules would rename its
+entities. To fix a mapping without renaming everything it produces, send
+`"semantics": "legacy"` with the new RML; to move to R2RML's rules, send the
+RML without it and expect new IRIs wherever a value held a character such as
+`-`, `.`, `_` or `~`. `semantics` is refused on a metadata-only edit, which
+freezes no version. A dry-run of an unregistered mapping accepts it too.
+
+Under both rules a constant is the term written (`rr:object <IRI>` is an IRI, a
+typed or language-tagged literal keeps its datatype or tag), and SQL
+identifiers are read as SQL (see below).
+
 ```bash
 curl -X POST http://localhost:7878/api/mappings \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{
@@ -398,8 +424,9 @@ Three rules a mapping must satisfy:
   and one write gate;
 - every triples map reads that datasource (a file source belongs to the
   [RML upload path](rml.md), not here);
-- it declares no `rr:graphMap` — the run graph is the unit the write gate
-  validates and the role swap promotes, so every triple has to land in it.
+- it declares no `rr:graphMap` or `rr:graph`, on any subject map or
+  predicate-object map — the run graph is the unit the write gate validates
+  and the role swap promotes, so every triple has to land in it.
 
 ### Relational logical sources
 
@@ -433,9 +460,9 @@ ex:SuppliersMap a rr:TriplesMap ;
 
 | Construct | Behaviour |
 |---|---|
-| `rr:tableName` | The whole table or view. The identifier is quoted by the dialect, never interpolated |
+| `rr:tableName` | The whole table or view, optionally schema-qualified (`sales.products`). Delimited parts (`"Product Lines"`, `` `x` ``, `[x]`) lose their delimiters and every part is re-quoted by the dialect, never interpolated. A schema-qualified parent is not looked up for a unique key, so its joins are indexed |
 | `rml:query` / `rr:sqlQuery` | Used verbatim; the connection is read-only, so it cannot write |
-| `rr:template`, `rr:column`, `rr:constant` | As in R2RML. A template percent-encodes; `\{` and `\}` are literal braces |
+| `rr:template`, `rr:column`, `rr:constant` | As in R2RML. A delimited column name (`rr:column "\"ID\""`, `{"ID"}` in a template, a join column) reads the column `ID`. An IRI template value is IRI-safe encoded; `\{` and `\}` are literal braces |
 | `rr:parentTriplesMap` + `rr:joinCondition` | The object is the subject the parent map generates for the joined row |
 | `fnml:functionValue` | An enumeration or code-list lookup — see below |
 | A second triples map on the same source | Just another `rr:TriplesMap`; this is how a nested structure is expressed |
@@ -527,8 +554,8 @@ rr:objectMap [ fnml:functionValue [
                           rr:object "http://example.org/categories/{category_slug}" ] ] ]
 ```
 
-The template's placeholders are `{column}` — the value, percent-encoded as in
-an `rr:template` — or `{column_slug}`: the value as an ASCII slug (lower-case
+The template's placeholders are `{column}` — the value, encoded as in an IRI
+`rr:template` under the version's rules — or `{column_slug}`: the value as an ASCII slug (lower-case
 letters and digits, runs of anything else folded to one hyphen, none at either
 end). A placeholder the row cannot supply, or a value that slugs to nothing,
 yields no term. The template must be absolute, for the same reason as above.

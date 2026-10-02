@@ -3,20 +3,23 @@
 //! Grounded in the RML spec (https://rml.io/specs/rml/) and R2RML
 //! (https://www.w3.org/TR/r2rml/), adversarially fact-checked. The engine
 //! implements R2RML vocabulary (`rr:`) + RML source extensions (`rml:`) for
-//! CSV / JSONPath / XPath logical sources, with template / reference / constant
-//! term maps, term types, datatypes, languages, `rr:class`, and graph maps.
+//! CSV / JSONPath / XPath logical sources and registered relational sources,
+//! with template / reference / constant term maps, R2RML's term types and
+//! defaults (§7.4), IRI-safe template values (§7.3), blank nodes per value and
+//! graph (§9.1, §11.2), datatypes, languages, `rr:class`, graph maps with
+//! R2RML's union semantics (§9, §11.1), a base IRI, and SQL identifiers.
 //!
-//! KNOWN ENGINE LIMITATION (see `rml_inline_blank_node_mapping_gap`): like the
-//! SHACL loader, `parse_rml` is store-based and mis-dereferences INLINE BLANK
-//! NODES, so mappings authored with `rr:subjectMap [ ... ]` / multiple
-//! `rr:predicateObjectMap [ ... ]` cross-contaminate. These tests therefore use
-//! NAMED term-map resources (the form in the engine's own working test), which
-//! parse correctly, to exercise the mapping features.
+//! Most tests name their term maps (`ex:Subj rr:template …`); inline blank
+//! nodes parse the same way (`rml_inline_blank_node_mapping`).
 //!
-//! Referencing object maps (joins / `rr:parentTriplesMap`) are not modelled —
-//! documented as a gap.
+//! Referencing object maps (joins / `rr:parentTriplesMap`) run on relational
+//! sources only; the file executor refuses them (see the test below).
+//!
+//! A mapping version frozen before the engine followed R2RML's term rules
+//! keeps the old ones (`Semantics::Legacy`); `rml_legacy_semantics_*` pin them.
 
-use open_triplestore::rml::{execute, parse_rml};
+use open_triplestore::rml::model::Semantics;
+use open_triplestore::rml::{execute, parse_from_store_as, parse_rml};
 use open_triplestore::store::TripleStore;
 use oxigraph::sparql::QueryResults;
 use std::collections::HashMap;
@@ -334,38 +337,72 @@ fn rml_object_term_type_iri() {
     );
 }
 
-// rr:template on an object map builds a (literal) object from a column.
+// R2RML §7.4: an object map with no rr:termType is a literal only when it reads
+// a column or declares a language or datatype — a template object is an IRI.
 #[test]
-fn rml_object_template_literal() {
+fn rml_object_template_defaults_to_an_iri() {
     let mapping = r#"
       ex:M a rr:TriplesMap ;
         rml:logicalSource ex:Src ; rr:subjectMap ex:Subj ;
         rr:predicateObjectMap ex:POM .
       ex:Src rml:source "d.csv" ; rml:referenceFormulation ql:CSV .
       ex:Subj rr:template "http://example.org/r/{id}" .
+      ex:POM rr:predicate ex:dept ; rr:objectMap ex:Obj .
+      ex:Obj rr:template "http://example.org/dept/{dept}" ."#;
+    let (store, _) = run_rml(mapping, &[("d.csv", "id,dept\n1,Sales\n")]);
+    assert_eq!(
+        first(
+            &store,
+            "SELECT ?d WHERE { <http://example.org/r/1> ex:dept ?d }"
+        )
+        .as_deref(),
+        Some("<http://example.org/dept/Sales>")
+    );
+}
+
+// …and a template object becomes a literal by saying so, or by declaring a
+// language or a datatype; its value is not percent-encoded (§7.3).
+#[test]
+fn rml_object_template_literal() {
+    let mapping = r#"
+      ex:M a rr:TriplesMap ;
+        rml:logicalSource ex:Src ; rr:subjectMap ex:Subj ;
+        rr:predicateObjectMap ex:POM, ex:LangPOM .
+      ex:Src rml:source "d.csv" ; rml:referenceFormulation ql:CSV .
+      ex:Subj rr:template "http://example.org/r/{id}" .
       ex:POM rr:predicate ex:greeting ; rr:objectMap ex:Obj .
-      ex:Obj rr:template "Hello {name}" ."#;
-    let (store, _) = run_rml(mapping, &[("d.csv", "id,name\n1,Sam\n")]);
+      ex:Obj rr:template "Hello {name}!" ; rr:termType rr:Literal .
+      ex:LangPOM rr:predicate ex:groet ; rr:objectMap ex:LangObj .
+      ex:LangObj rr:template "Hallo {name}" ; rr:language "nl" ."#;
+    let (store, _) = run_rml(mapping, &[("d.csv", "id,name\n1,Sam Lee\n")]);
     assert_eq!(
         first(
             &store,
             "SELECT ?g WHERE { <http://example.org/r/1> ex:greeting ?g }"
         )
         .as_deref(),
-        Some("\"Hello Sam\"")
+        Some("\"Hello Sam Lee!\"")
+    );
+    assert_eq!(
+        first(
+            &store,
+            "SELECT ?g WHERE { <http://example.org/r/1> ex:groet ?g }"
+        )
+        .as_deref(),
+        Some("\"Hallo Sam Lee\"@nl")
     );
 }
 
-// rr:graphMap routes the generated triples into a named graph.
+// rr:graphMap on the subject map (R2RML §9) routes every triple of the subject
+// — rr:class included — into a named graph.
 #[test]
 fn rml_graph_map_routes_to_named_graph() {
     let mapping = r#"
       ex:M a rr:TriplesMap ;
         rml:logicalSource ex:Src ; rr:subjectMap ex:Subj ;
-        rr:predicateObjectMap ex:POM ;
-        rr:graphMap ex:GM .
+        rr:predicateObjectMap ex:POM .
       ex:Src rml:source "d.csv" ; rml:referenceFormulation ql:CSV .
-      ex:Subj rr:template "http://example.org/r/{id}" .
+      ex:Subj rr:template "http://example.org/r/{id}" ; rr:graphMap ex:GM .
       ex:POM rr:predicate foaf:name ; rr:objectMap ex:Obj .
       ex:Obj rml:reference "name" .
       ex:GM rr:constant ex:G1 ."#;
@@ -448,11 +485,11 @@ fn rml_blank_node_subject_shared_across_poms() {
 
 // Referencing object maps (`rr:parentTriplesMap` + `rr:joinCondition`) are
 // modelled and executed for RELATIONAL logical sources, where the parent can be
-// streamed and indexed (see the `rml::sql` unit tests). For a FILE source there
-// is nothing to join against a second time, so the mapping parses and the
-// referencing triple is simply not produced.
+// streamed and indexed (see the `rml::sql` unit tests). A FILE source has no
+// parent to join against, so the file executor refuses the mapping by name
+// instead of dropping the link and reporting success.
 #[test]
-fn rml_referencing_object_map_parses_but_file_sources_do_not_join() {
+fn rml_referencing_object_map_parses_but_the_file_executor_refuses_it() {
     let mapping = r#"
       ex:Child a rr:TriplesMap ;
         rml:logicalSource ex:CSrc ; rr:subjectMap ex:CSubj ;
@@ -479,33 +516,20 @@ fn rml_referencing_object_map_parses_but_file_sources_do_not_join() {
     src.insert("c.csv".to_string(), "id,pid\n1,10\n".to_string());
     src.insert("p.csv".to_string(), "id,name\n10,Pat\n".to_string());
     let store = TripleStore::in_memory().unwrap();
-    execute(&m, &src, &store, None).expect("the rest of the mapping still runs");
-
+    let err = execute(&m, &src, &store, None)
+        .expect_err("a file source cannot resolve rr:parentTriplesMap");
+    assert!(
+        err.contains("<http://example.org/Child>"),
+        "names the triples map: {err}"
+    );
+    assert!(
+        err.contains("rr:parentTriplesMap"),
+        "names the construct: {err}"
+    );
     assert_eq!(
-        count(
-            &store,
-            "SELECT ?o WHERE { <http://example.org/c/1> ex:parent <http://example.org/p/10> }"
-        ),
+        count(&store, "SELECT * WHERE { ?s ?p ?o }"),
         0,
-        "a file logical source has no queryable parent to join to"
-    );
-    // The surrounding mapping is unaffected: the child's own properties and the
-    // parent triples map both produce their triples.
-    assert_eq!(
-        count(
-            &store,
-            "SELECT ?o WHERE { <http://example.org/c/1> ex:own \"10\" }"
-        ),
-        1,
-        "the child's own predicate-object map still fires"
-    );
-    assert_eq!(
-        count(
-            &store,
-            "SELECT ?o WHERE { <http://example.org/p/10> foaf:name \"Pat\" }"
-        ),
-        1,
-        "the parent triples map still produces its own triples"
+        "a refused mapping writes nothing, not the triples it could make"
     );
 }
 
@@ -612,5 +636,440 @@ fn rml_invalid_iri_reference_skips_the_term_not_the_batch() {
         ),
         0,
         "the unrepresentable IRI must be skipped"
+    );
+}
+
+// ── Relational runs (the path a registered mapping version takes) ──
+
+/// Run `rml` against a fresh SQLite database built from `ddl`, into
+/// `urn:run:test`.
+fn run_relational(ddl: &str, rml: &str) -> TripleStore {
+    use ots_plugin_api::sources::{ConnectParams, SourceConnector};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.db");
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(ddl)
+        .unwrap();
+    let connector = open_triplestore::sources::sqlite::SqliteConnector;
+    let mut conn = connector
+        .connect(&ConnectParams {
+            dialect: "sqlite".into(),
+            host: None,
+            port: None,
+            database: path.to_string_lossy().into_owned(),
+            username: None,
+            password: None,
+            read_only: true,
+            statement_timeout_ms: 5_000,
+            tls: false,
+            options: Default::default(),
+        })
+        .unwrap();
+    let mapping = parse_rml(rml).unwrap_or_else(|e| panic!("{e}\n---\n{rml}"));
+    let store = TripleStore::in_memory().unwrap();
+    let quote = |i: &str| connector.quote_identifier(i);
+    open_triplestore::rml::execute_relational(
+        &mapping,
+        conn.as_mut(),
+        &quote,
+        &store,
+        "urn:run:test",
+        100,
+        "run-1",
+    )
+    .expect("run succeeds");
+    store
+}
+
+// YARRRML `[ex:category, ex:Hardware]` names a term, and the translator emits
+// it as `rr:object <…Hardware>`. R2RML §7.4: the type of a constant's term is
+// the type of the constant itself, so the object is an IRI — not the string
+// "http://example.org/Hardware".
+#[test]
+fn yarrrml_constant_iri_object_is_an_iri_when_run() {
+    let rml = open_triplestore::sources::yarrrml::to_rml(
+        r#"
+prefixes: {ex: "http://example.org/"}
+mappings:
+  product:
+    table: product
+    s: ex:p$(pid)
+    po:
+      - [ex:category, ex:Hardware]
+      - [ex:note, "just text"]
+"#,
+        Some("s"),
+    )
+    .expect("translates");
+    let store = run_relational(
+        "CREATE TABLE product (pid INTEGER PRIMARY KEY); INSERT INTO product VALUES (1);",
+        &rml,
+    );
+    assert_eq!(
+        first(
+            &store,
+            "SELECT ?o WHERE { GRAPH <urn:run:test> { <http://example.org/p1> ex:category ?o } }"
+        )
+        .as_deref(),
+        Some("<http://example.org/Hardware>"),
+        "a constant IRI object is an IRI\n---\n{rml}"
+    );
+    assert_eq!(
+        first(
+            &store,
+            "SELECT ?o WHERE { GRAPH <urn:run:test> { <http://example.org/p1> ex:note ?o } }"
+        )
+        .as_deref(),
+        Some("\"just text\""),
+        "a constant literal stays a literal"
+    );
+}
+
+// `rr:object <IRI>` is a constant: the IRI stays an IRI (R2RML §7.4, "if it is
+// an IRI, then an IRI will be generated").
+#[test]
+fn rml_object_shortcut_iri_constant_is_an_iri() {
+    let mapping = r#"
+      ex:M a rr:TriplesMap ;
+        rml:logicalSource ex:Src ; rr:subjectMap ex:Subj ;
+        rr:predicateObjectMap ex:POM .
+      ex:Src rml:source "d.csv" ; rml:referenceFormulation ql:CSV .
+      ex:Subj rr:template "http://example.org/r/{id}" .
+      ex:POM rr:predicate ex:status ; rr:object ex:Active ."#;
+    let (store, _) = run_rml(mapping, &[("d.csv", "id\n1\n")]);
+    assert_eq!(
+        first(
+            &store,
+            "SELECT ?o WHERE { <http://example.org/r/1> ex:status ?o }"
+        )
+        .as_deref(),
+        Some("<http://example.org/Active>")
+    );
+}
+
+// A constant literal keeps its datatype and its language tag, in rr:constant
+// and in the rr:object shortcut alike.
+#[test]
+fn rml_constant_literal_keeps_datatype_and_language() {
+    let mapping = r#"
+      ex:M a rr:TriplesMap ;
+        rml:logicalSource ex:Src ; rr:subjectMap ex:Subj ;
+        rr:predicateObjectMap ex:P1, ex:P2, ex:P3 .
+      ex:Src rml:source "d.csv" ; rml:referenceFormulation ql:CSV .
+      ex:Subj rr:template "http://example.org/r/{id}" .
+      ex:P1 rr:predicate ex:rank ; rr:object "5"^^xsd:integer .
+      ex:P2 rr:predicate ex:label ; rr:objectMap [ rr:constant "hallo"@nl ] .
+      ex:P3 rr:predicate ex:note ; rr:objectMap [ rr:constant "http://not/an/iri" ] ."#;
+    let (store, _) = run_rml(mapping, &[("d.csv", "id\n1\n")]);
+    let get = |p: &str| {
+        first(
+            &store,
+            &format!("SELECT ?o WHERE {{ <http://example.org/r/1> ex:{p} ?o }}"),
+        )
+    };
+    assert_eq!(
+        get("rank").as_deref(),
+        Some("\"5\"^^<http://www.w3.org/2001/XMLSchema#integer>")
+    );
+    assert_eq!(get("label").as_deref(), Some("\"hallo\"@nl"));
+    assert_eq!(
+        get("note").as_deref(),
+        Some("\"http://not/an/iri\""),
+        "a literal that looks like an IRI is still a literal"
+    );
+}
+
+// R2RML §7.3: a template value is encoded only outside RFC 3987 iunreserved —
+// the specification's own examples — and only when the term is an IRI.
+#[test]
+fn rml_template_values_are_iri_safe() {
+    let mapping = r#"
+      ex:M a rr:TriplesMap ;
+        rml:logicalSource ex:Src ; rr:subjectMap ex:Subj ;
+        rr:predicateObjectMap ex:POM .
+      ex:Src rml:source "d.csv" ; rml:referenceFormulation ql:CSV .
+      ex:Subj rr:template "http://example.org/v/{v}" .
+      ex:POM rr:predicate ex:raw ; rr:objectMap [ rml:reference "v" ] ."#;
+    let csv = "v\n42\nHello World!\n2011-08-23T22:17:00Z\n~A_17.1-2\n葉篤正\n";
+    let (store, _) = run_rml(mapping, &[("d.csv", csv)]);
+    for (value, encoded) in [
+        ("42", "42"),
+        ("Hello World!", "Hello%20World%21"),
+        ("2011-08-23T22:17:00Z", "2011-08-23T22%3A17%3A00Z"),
+        ("~A_17.1-2", "~A_17.1-2"),
+        ("葉篤正", "葉篤正"),
+    ] {
+        assert_eq!(
+            count(
+                &store,
+                &format!(
+                    "SELECT * WHERE {{ <http://example.org/v/{encoded}> ex:raw \"{value}\" }}"
+                )
+            ),
+            1,
+            "{value:?} must become {encoded:?}"
+        );
+    }
+}
+
+// R2RML §11.2 and §9.1: a blank node is unique to its value, so two rows with
+// the same value share it; in another graph the same value is another node.
+#[test]
+fn rml_blank_nodes_are_one_per_value_and_graph() {
+    let mapping = r#"
+      ex:M a rr:TriplesMap ;
+        rml:logicalSource ex:Src ; rr:subjectMap ex:Subj ;
+        rr:predicateObjectMap ex:POM, ex:GPOM .
+      ex:Src rml:source "d.csv" ; rml:referenceFormulation ql:CSV .
+      ex:Subj rr:template "dept{dept}" ; rr:termType rr:BlankNode .
+      ex:POM rr:predicate ex:member ; rr:objectMap [ rml:reference "name" ] .
+      ex:GPOM rr:predicate ex:tagged ; rr:objectMap [ rml:reference "name" ] ;
+        rr:graph ex:Tags ."#;
+    let (store, _) = run_rml(mapping, &[("d.csv", "dept,name\nA,Ann\nA,Bob\nB,Cy\n")]);
+    assert_eq!(
+        count(
+            &store,
+            "SELECT ?d WHERE { ?d ex:member \"Ann\" , \"Bob\" . FILTER(isBlank(?d)) }"
+        ),
+        1,
+        "rows with the same value share one node"
+    );
+    assert_eq!(
+        count(&store, "SELECT DISTINCT ?d WHERE { ?d ex:member ?n }"),
+        2,
+        "two departments, two nodes"
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT ?d WHERE { ?d ex:member \"Ann\" . GRAPH ex:Tags { ?d ex:tagged \"Ann\" } }"
+        ),
+        0,
+        "the node in another graph is another node"
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT ?d WHERE { GRAPH ex:Tags { ?d ex:tagged \"Ann\" , \"Bob\" } }"
+        ),
+        1,
+        "…which the same value shares within that graph"
+    );
+}
+
+// R2RML §11.1: a triple goes to the union of its subject map's and its
+// predicate-object map's graphs; rr:class triples to the subject's graphs; a
+// graph map generating rr:defaultGraph names the default graph; with no graph
+// map at all, the default graph.
+#[test]
+fn rml_graph_maps_take_the_union_of_subject_and_predicate_object_graphs() {
+    let mapping = r#"
+      ex:M a rr:TriplesMap ;
+        rml:logicalSource ex:Src ; rr:subjectMap ex:Subj ;
+        rr:predicateObjectMap ex:Both, ex:Plain .
+      ex:Src rml:source "d.csv" ; rml:referenceFormulation ql:CSV .
+      ex:Subj rr:template "http://example.org/r/{id}" ; rr:class foaf:Person ;
+        rr:graph ex:People ; rr:graphMap [ rr:template "http://example.org/g/{team}" ] .
+      ex:Both rr:predicate foaf:name ; rr:objectMap [ rml:reference "name" ] ;
+        rr:graph ex:Names, rr:defaultGraph .
+      ex:Plain rr:predicate foaf:nick ; rr:objectMap [ rml:reference "nick" ] .
+      ex:N a rr:TriplesMap ;
+        rml:logicalSource ex:Src ;
+        rr:subjectMap [ rr:template "http://example.org/n/{id}" ] ;
+        rr:predicateObjectMap [ rr:predicate ex:plain ; rr:objectMap [ rml:reference "nick" ] ] ."#;
+    let (store, _) = run_rml(mapping, &[("d.csv", "id,name,nick,team\n1,Al,A,red\n")]);
+    let graphs_of = |pattern: &str| -> Vec<String> {
+        let QueryResults::Solutions(sols) = store
+            .query(&format!(
+                "{SPARQL_PFX} SELECT ?g WHERE {{ {{ GRAPH ?g {{ {pattern} }} }} UNION \
+                 {{ {pattern} BIND(\"default\" AS ?g) }} }} ORDER BY STR(?g)"
+            ))
+            .unwrap()
+        else {
+            panic!()
+        };
+        sols.map(|s| s.unwrap().get("g").unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(
+        graphs_of("<http://example.org/r/1> foaf:name \"Al\""),
+        vec![
+            "\"default\"",
+            "<http://example.org/Names>",
+            "<http://example.org/People>",
+            "<http://example.org/g/red>"
+        ],
+        "subject graphs ∪ predicate-object graphs, rr:defaultGraph included"
+    );
+    assert_eq!(
+        graphs_of("<http://example.org/r/1> foaf:nick \"A\""),
+        vec!["<http://example.org/People>", "<http://example.org/g/red>"],
+        "a predicate-object map with no graph map takes the subject's"
+    );
+    assert_eq!(
+        graphs_of("<http://example.org/r/1> a foaf:Person"),
+        vec!["<http://example.org/People>", "<http://example.org/g/red>"],
+        "rr:class goes to the subject's graphs"
+    );
+    assert_eq!(
+        graphs_of("<http://example.org/n/1> ex:plain \"A\""),
+        vec!["\"default\""],
+        "no graph map anywhere: the default graph"
+    );
+}
+
+// A graph map that cannot be parsed is a mapping error, not a silent re-route
+// into the default graph.
+#[test]
+fn rml_a_malformed_graph_map_is_an_error() {
+    let err = parse_rml(&format!(
+        "{PFX}
+         ex:M a rr:TriplesMap ;
+           rml:logicalSource [ rml:source \"d.csv\" ; rml:referenceFormulation ql:CSV ] ;
+           rr:subjectMap [ rr:template \"http://example.org/r/{{id}}\" ; rr:graphMap [ rr:termType rr:IRI ] ] ."
+    ))
+    .unwrap_err();
+    assert!(err.contains("rr:graphMap"), "{err}");
+}
+
+// R2RML §11.2 / RML-Core rml:baseIRI: a generated value that is not an
+// absolute IRI is appended to the base IRI.
+#[test]
+fn rml_relative_iris_resolve_against_the_base_iri() {
+    let mapping = r#"
+      ex:M a rr:TriplesMap ;
+        rml:logicalSource ex:Src ; rr:subjectMap ex:Subj ;
+        rr:predicateObjectMap ex:POM ;
+        rml:baseIRI <http://example.com/base/> .
+      ex:Src rml:source "d.csv" ; rml:referenceFormulation ql:CSV .
+      ex:Subj rr:template "Student/{id}" .
+      ex:POM rr:predicate foaf:name ; rr:objectMap [ rml:reference "name" ] .
+      ex:Other a rr:TriplesMap ;
+        rml:logicalSource ex:Src ;
+        rr:subjectMap [ rr:template "Person/{id}" ] ;
+        rr:predicateObjectMap [ rr:predicate foaf:nick ; rr:objectMap [ rml:reference "name" ] ] ."#;
+    let m = parse_rml(&format!("{PFX}{mapping}")).expect("parse_rml");
+    let src = HashMap::from([("d.csv".to_string(), "id,name\n10,Venus\n".to_string())]);
+
+    let store = TripleStore::in_memory().unwrap();
+    execute(&m, &src, &store, None).unwrap();
+    assert_eq!(
+        count(
+            &store,
+            "SELECT * WHERE { <http://example.com/base/Student/10> foaf:name \"Venus\" }"
+        ),
+        1,
+        "the triples map's own rml:baseIRI"
+    );
+    assert_eq!(
+        count(&store, "SELECT * WHERE { ?s foaf:nick ?n }"),
+        0,
+        "no base IRI, no IRI: the relative subject generates nothing"
+    );
+
+    // The run's base IRI applies where a triples map names none.
+    let mut with_base = m.clone();
+    with_base.base_iri = Some("http://example.org/run/".to_string());
+    let store = TripleStore::in_memory().unwrap();
+    execute(&with_base, &src, &store, None).unwrap();
+    assert_eq!(
+        count(
+            &store,
+            "SELECT * WHERE { <http://example.org/run/Person/10> foaf:nick \"Venus\" }"
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT * WHERE { <http://example.com/base/Student/10> foaf:name \"Venus\" }"
+        ),
+        1,
+        "rml:baseIRI wins over the run's"
+    );
+}
+
+// SQL identifiers (R2RML §5): delimiters are spelling, not name. A delimited
+// table, a schema-qualified table, a delimited column and a delimited column
+// in a template all name what the database holds.
+#[test]
+fn r2rml_delimited_and_qualified_sql_identifiers() {
+    let store = run_relational(
+        r#"CREATE TABLE "Student" ("ID" INTEGER PRIMARY KEY, "Name" TEXT);
+           INSERT INTO "Student" VALUES (10, 'Venus');
+           CREATE TABLE dept (id INTEGER PRIMARY KEY, name TEXT);
+           INSERT INTO dept VALUES (1, 'Physics');"#,
+        &format!(
+            "{PFX}
+             ex:S a rr:TriplesMap ;
+               rr:logicalTable [ rml:source <urn:source:s> ; rr:tableName \"\\\"Student\\\"\" ] ;
+               rr:subjectMap [ rr:template \"http://example.org/s/{{\\\"ID\\\"}}\" ] ;
+               rr:predicateObjectMap [ rr:predicate foaf:name ; rr:objectMap [ rr:column \"\\\"Name\\\"\" ] ] .
+             ex:D a rr:TriplesMap ;
+               rml:logicalSource [ rml:source <urn:source:s> ; rr:tableName \"main.dept\" ] ;
+               rr:subjectMap [ rr:template \"http://example.org/d/{{id}}\" ] ;
+               rr:predicateObjectMap [ rr:predicate ex:name ; rr:objectMap [ rr:column \"name\" ] ] ."
+        ),
+    );
+    let ask = |pattern: &str| {
+        count(
+            &store,
+            &format!("SELECT * WHERE {{ GRAPH <urn:run:test> {{ {pattern} }} }}"),
+        )
+    };
+    assert_eq!(ask("<http://example.org/s/10> foaf:name \"Venus\""), 1);
+    assert_eq!(ask("<http://example.org/d/1> ex:name \"Physics\""), 1);
+}
+
+// A version frozen before the R2RML term rules keeps the old ones: a template
+// object map defaults to a literal, every non-alphanumeric template character
+// is percent-encoded, and blank nodes are minted per row.
+#[test]
+fn rml_legacy_semantics_keep_the_old_terms() {
+    let mapping = format!(
+        "{PFX}
+         ex:M a rr:TriplesMap ;
+           rml:logicalSource [ rml:source \"d.csv\" ; rml:referenceFormulation ql:CSV ] ;
+           rr:subjectMap [ rr:template \"http://example.org/r/{{id}}\" ] ;
+           rr:predicateObjectMap [ rr:predicate ex:code ; rr:objectMap [ rr:template \"http://example.org/c/{{code}}\" ] ] ;
+           rr:predicateObjectMap [ rr:predicate ex:status ; rr:object ex:Active ] .
+         ex:B a rr:TriplesMap ;
+           rml:logicalSource [ rml:source \"d.csv\" ; rml:referenceFormulation ql:CSV ] ;
+           rr:subjectMap [ rr:template \"g{{grp}}\" ; rr:termType rr:BlankNode ] ;
+           rr:predicateObjectMap [ rr:predicate ex:has ; rr:objectMap [ rml:reference \"id\" ] ] ."
+    );
+    let doc = TripleStore::in_memory().unwrap();
+    doc.load_str(&mapping, oxigraph::io::RdfFormat::Turtle, None)
+        .unwrap();
+    let m = parse_from_store_as(&doc, None, Semantics::Legacy).unwrap();
+    let src = HashMap::from([(
+        "d.csv".to_string(),
+        "id,code,grp\nA-1,x.y,1\nA-2,z,1\n".to_string(),
+    )]);
+    let store = TripleStore::in_memory().unwrap();
+    execute(&m, &src, &store, None).unwrap();
+    assert_eq!(
+        first(
+            &store,
+            "SELECT ?c WHERE { <http://example.org/r/A%2D1> ex:code ?c }"
+        )
+        .as_deref(),
+        Some("\"http://example.org/c/x%2Ey\""),
+        "legacy: a literal, and the old encoding — of the subject too"
+    );
+    assert_eq!(
+        first(
+            &store,
+            "SELECT ?s WHERE { <http://example.org/r/A%2D1> ex:status ?s }"
+        )
+        .as_deref(),
+        Some("<http://example.org/Active>"),
+        "a constant IRI is an IRI under every version's rules"
+    );
+    assert_eq!(
+        count(&store, "SELECT DISTINCT ?g WHERE { ?g ex:has ?id }"),
+        2,
+        "legacy: one blank node per row, even for the same value"
     );
 }
