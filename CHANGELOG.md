@@ -66,6 +66,34 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   re-validates a dataset against the new version, collects or corrects what it
   asks for, and re-pins; the store now tells everyone which datasets that applies to.
 
+- **OWL 2 DL backends, checks and background runs.** The `owl2-dl` regime
+  now runs on the backend `OTS_DL_BACKEND` names:
+  - `konclude`: a Konclude binary (`OTS_KONCLUDE_BIN`), driven through OWLlink
+    and SPARQL files with a time limit;
+  - `sidecar`: an HTTP reasoner service (`OTS_REASONER_URL`,
+    `OTS_REASONER_TOKEN`) speaking the version-1 protocol in `docs/owl2-dl.md`;
+  - `native`: the in-process rules.
+
+  `OTS_REASONER_TIMEOUT_SECS` (default 300) and `OTS_REASONER_MAX_TRIPLES`
+  (default 1,000,000) bound every external call. The input is mapped from RDF
+  to OWL 2 (the reverse OWL 2 RDF mapping) and checked against the OWL 2 DL
+  typing constraints and global restrictions before any backend sees it.
+  - Input outside OWL 2 DL is a 422 `{in_profile: false, violations}`.
+  - No backend, or an unreachable one, is a 503.
+  - A run past the time limit is a 504 with `"result": "unknown"`.
+  - Too much input is a 413; a backend failure is a 502.
+  - A failing external backend never falls back to the native rules.
+  - Only triples about named entities reach the target graph.
+  - Reports add `backend`, `backend_version`, `complete` and `warnings`.
+
+  New `POST /api/reasoning/check` answers consistency, entailment,
+  satisfiability and profile questions with `true`, `false` or `unknown`
+  (OWL 2 Conformance §2.2), as a 200; an inconsistent premise carries the
+  materialisation 422's `consistent`, `rule` and `detail`.
+  `?async=true` on materialise and check queues a job (202) that
+  `GET /api/reasoning/jobs/{job_id}` reports, with the status and body the
+  synchronous call would have answered.
+
 ### Changed
 - **`ReasoningError::Inconsistency` names its rule.** The library variant is now
   `Inconsistency { rule, detail }` (it was `Inconsistency(String)`), and
@@ -95,6 +123,43 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   title. A `patch` on a `release/X.Y` branch releases that line and leaves the
   `latest` GitHub Release and image tag alone. `release.yml` can be re-run for
   an existing tag. See `docs/release-process.md`.
+
+- **`owl2-dl` needs a configured backend (breaking).** There is no default
+  any more: without `OTS_DL_BACKEND` every `owl2-dl` request answers 503.
+  Set `OTS_DL_BACKEND=native` to keep the previous in-process rules, which are
+  sound but not complete (`complete: false` and a warning in every report).
+  `OTS_EXTERNAL_REASONER` and `OTS_EXTERNAL_REASONER_BIN` are removed; a server
+  that still sets them logs a warning. Input that is not OWL 2 DL is refused
+  with the violations listed, where it was reasoned over before. In the library,
+  `owl2_dl::{ExternalReasoner, ExternalReasonerBridge, NativeTableauStub}` and
+  `konclude_bridge::KoncludeReasoner` are replaced by `dl_backend::DlBackend`,
+  `dl_backend::{materialize, check}` and `konclude_bridge::KoncludeBackend`.
+- **The native OWL 2 DL rules reach one joint fixed point with OWL 2 RL.** The
+  RL rules used to run once, before the DL rules, so a DL consequence such as
+  `x p x` from `owl:hasSelf` never reached `rdfs:domain`, `rdfs:subPropertyOf`
+  or any other RL rule. They now alternate until neither adds anything. New:
+  - `owl:hasSelf` also works backwards (`x p x` ⇒ `x : ∃p.Self`);
+  - `owl:ReflexiveProperty` relates every individual in scope to itself, so a
+    property that is also irreflexive is reported inconsistent (`prp-irp`).
+
+  The DL layer's own 1- and 2-property `owl:hasKey` rules and its
+  negative-assertion checks duplicated RL `prp-key` and `prp-npa1/2` and are
+  gone. An inconsistent negative assertion now names `prp-npa1` or `prp-npa2`
+  instead of `dl-negative-object-assertion` / `dl-negative-data-assertion`.
+- **Cardinality obligations moved to a diagnostics graph (breaking).** The
+  `urn:dl:minCardinality` / `exactCardinality` / `minQualifiedCardinality` /
+  `exactQualifiedCardinality` triples are not inferences. They are now written
+  to `<target>:diagnostics` (for example
+  `urn:entailment:owl2-dl:diagnostics`), which `?entailment=` never folds into
+  a query, instead of the entailment graph itself.
+- **`owl2-dl` datasets re-materialise in the background.** After a write, a
+  dataset in `materialize` mode with the `owl2-dl` regime no longer reasons
+  inside the write. A background run starts once no write has arrived for
+  `OTS_DL_DEBOUNCE_MS` (default 2000), and writes during a run queue one more.
+  `GET /api/datasets/{id}/entailment` adds `status` (`queued`, `running`, `ok`,
+  `inconsistent`, `not_in_profile`, `unavailable`, `timeout`, `too_large`,
+  `failed`, …), `error`, `backend`, `complete` and `dl_backend`. A `PUT` of the
+  setting still runs at once.
 
 ### Fixed
 - **Reasoners see their own consequences on an unscoped run.** Without
@@ -199,6 +264,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     found", even for conforming data.
   - The dataset page's validation dialog showed the escape `\u2014` as text
     where its summary line has a dash.
+
+- **The Konclude bridge works.** It piped Turtle on stdin, but Konclude reads
+  only OWL/XML or functional-style syntax, from files. It also passed an
+  undocumented `-f` flag, guessed consistency from the log text, had no time
+  limit and kept only subclass edges. It now:
+  - writes functional-style syntax mapped from the RDF;
+  - asks for consistency (`IsKBSatisfiable`), classification and realisation
+    (types and `owl:sameAs`) over OWLlink, and for object property assertions
+    over SPARQL;
+  - kills the process at the time limit.
+
+  Checked against Konclude v0.7.0-1138. Data values entailed through
+  `owl:hasValue` are not reported by Konclude and not materialised.
 
 ### Security
 - **Every configured secret goes through the secrets module.** `JWT_SECRET`,

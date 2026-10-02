@@ -8,7 +8,7 @@ Reasoning can be applied to materialise inferred triples across all named graphs
 | OWL 2 QL | Large read-heavy datasets | No existentials. Uses query rewriting — minimal extra storage. |
 | OWL 2 EL | Life sciences (SNOMED-CT, Gene Ontology) | Supports existential restrictions. Polynomial time. |
 | OWL 2 RL | Rule-based integration with RDF | Materialises triples. Most complete; may significantly grow graph size. |
-| OWL 2 DL | Full OWL expressivity | Native support for `hasSelf`, `disjointUnionOf`, `NegativePropertyAssertion`, `hasKey` (1–2 keys), and cardinality annotations on top of all OWL 2 RL rules. Full existential completion (tableau) requires an external reasoner (HermiT, Pellet). |
+| OWL 2 DL | Full OWL expressivity | Needs a backend (`OTS_DL_BACKEND`; 503 without one): Konclude or a reasoner sidecar for complete DL reasoning, or the native OWL 2 RL + DL-syntax rules (`hasSelf`, `ReflexiveProperty`, `disjointUnionOf`), which are sound but not complete. Input must be in OWL 2 DL (422 lists the violations). See [owl2-dl.md](owl2-dl.md). |
 
 Reasoning is triggered via `POST /api/reasoning/materialize` with a JSON body:
 
@@ -62,6 +62,31 @@ A run that does not reach its fixed point within 500 iterations is also a
 part of the closure, so it is reported, never returned as a success. The rules
 run on a blocking worker, off the server's async threads.
 
+An `owl2-dl` run can also fail because of its backend:
+- **503**: no DL backend is configured (`OTS_DL_BACKEND`), or it cannot be reached;
+- **504** with `"result": "unknown"`: the backend did not answer in time;
+- **413**: more triples than the backend accepts;
+- **422** with `{in_profile: false, violations}`: the input is not in OWL 2 DL;
+- **502**: the backend failed.
+
+A successful `owl2-dl` report adds `backend`, `backend_version`, `complete` and `warnings`. See [owl2-dl.md](owl2-dl.md).
+
+**Background runs.** `POST /api/reasoning/materialize?async=true` (and
+`POST /api/reasoning/check?async=true`) answers `202` with
+`{job_id, status: "queued", location}` and runs in the background.
+`GET /api/reasoning/jobs/{job_id}` returns `status` (`queued`, `running`,
+`succeeded`, `failed`), and once the job has finished, the `http_status` and
+`result` body the synchronous call would have sent. A job is visible to the
+user who started it and to admins, and is kept for an hour after it finishes.
+A restart forgets jobs.
+
+**Checks.** `POST /api/reasoning/check` answers OWL 2 DL consistency,
+entailment, satisfiability and profile questions with
+`result: "true" | "false" | "unknown"` (OWL 2 Conformance §2.2). An inconsistent
+premise is a `200` carrying the fields above (`consistent: false`, `rule`,
+`detail`), because the check ran and that is its answer. See
+[owl2-dl.md](owl2-dl.md#check--post-apireasoningcheck).
+
 For OWL 2 QL you can rewrite a query against the schema instead of materialising — `POST /api/reasoning/rewrite` returns the expanded SPARQL. You can also fold an entailment graph into a single query by adding `?entailment=rdfs|owl2-rl|owl2-el|owl2-ql|owl2-dl` to a SPARQL request.
 
 ## Per-dataset entailment: selectable regime, materialisation toggle
@@ -103,7 +128,18 @@ for a regime that checks consistency, `null` for one that does not or after a
 run that failed for another reason — with `inconsistency: {rule, detail}` when
 the last run found the dataset inconsistent. A `PUT` whose run finds an
 inconsistency (or does not converge) answers the same `422` as
-`POST /api/reasoning/materialize`; the setting is saved and the run recorded. The global `?entailment=<regime>` (the shared
+`POST /api/reasoning/materialize`; the setting is saved and the run recorded.
+The record also carries `status` (`ok`, `inconsistent`, `not_converged`,
+`not_in_profile`, `unavailable`, `timeout`, `too_large`, `failed`, or
+`queued` / `running` for a pending background run), `error`, `backend` and
+`complete`.
+
+**`owl2-dl` datasets run in the background.** A DL backend can take minutes,
+so after a write an `owl2-dl` dataset is not re-materialised inside the write.
+A background run starts once no write has arrived for `OTS_DL_DEBOUNCE_MS`
+(default 2000), and writes during a run queue one more. The entailment graph
+is therefore eventually consistent: `status` shows `queued` or `running` until
+the run catches up. A `PUT` of the setting still runs at once. The global `?entailment=<regime>` (the shared
 `urn:entailment:<regime>` graphs filled by `POST /api/reasoning/materialize`)
 keeps working unchanged.
 

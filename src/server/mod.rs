@@ -15,6 +15,8 @@ mod oidc_provider_tests;
 pub mod openapi;
 #[cfg(test)]
 mod passkey_tests;
+/// Background reasoning jobs (`?async=true`).
+pub mod reasoning_jobs;
 #[cfg(test)]
 mod role_visibility_tests;
 pub mod routes;
@@ -301,6 +303,8 @@ pub struct AppState {
     /// Vocabulary term search engine (vocab-search feature).
     #[cfg(feature = "vocab-search")]
     pub vocab_engine: Option<Arc<crate::vocab_search::index::VocabSearchEngine>>,
+    /// The OWL 2 DL backend configuration (`OTS_DL_BACKEND`, …).
+    pub dl: Arc<crate::reasoning::dl_config::DlConfig>,
 }
 
 /// Construct a minimal `AppState` for tests (unit and integration).
@@ -349,6 +353,7 @@ impl AppState {
             vocab_catalog: Arc::new(crate::vocab_search::catalog::VocabCatalog::bundled()),
             vocab_registry_dirty: Arc::new(AtomicBool::new(false)),
             vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
+            dl: Default::default(),
             #[cfg(feature = "vocab-search")]
             vocab_engine: None,
         }
@@ -2403,6 +2408,14 @@ pub async fn run(
     // Declarative OIDC-client seed for infra-as-code deployments (idempotent).
     crate::auth::oidc_provider::seed_clients_from_env(&auth_db, &jwt_config.secret);
 
+    let dl_config = crate::reasoning::dl_config::DlConfig::from_env();
+    match dl_config.backend {
+        Some(kind) => tracing::info!("OWL 2 DL: backend `{}`", kind.as_str()),
+        None => tracing::info!(
+            "OWL 2 DL: no backend configured (OTS_DL_BACKEND) — the owl2-dl regime answers 503"
+        ),
+    }
+
     // Hold a flush handle for graceful shutdown — `store` is moved into AppState below.
     let shutdown_store = store.clone();
     let state = AppState {
@@ -2453,6 +2466,7 @@ pub async fn run(
         // finishes its own refresh.
         vocab_registry_dirty: Arc::new(AtomicBool::new(true)),
         vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
+        dl: Arc::new(dl_config),
         #[cfg(feature = "vocab-search")]
         vocab_engine,
     };

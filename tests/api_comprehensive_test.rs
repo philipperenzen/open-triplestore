@@ -76,6 +76,7 @@ mod helpers {
             ),
             vocab_registry_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
+            dl: Default::default(),
             #[cfg(feature = "vocab-search")]
             vocab_engine: None,
         }

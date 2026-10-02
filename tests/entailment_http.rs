@@ -299,3 +299,125 @@ async fn dataset_regime_materialises_on_write_and_joins_queries_on_request() {
         "{st}"
     );
 }
+
+/// An `owl2-dl` dataset is not re-materialised inside the write: the write
+/// answers at once and a debounced background run follows (D9). `GET
+/// …/entailment` says `queued` meanwhile and then what the run found, with
+/// the backend that ran and whether it is complete.
+#[cfg(feature = "owl2-dl")]
+#[tokio::test]
+async fn dl_dataset_reruns_in_the_background_after_a_write() {
+    use open_triplestore::reasoning::dl_config::{DlBackendKind, DlConfig};
+    let (mut state, token) = admin_state();
+    let mut cfg = DlConfig::default().with_backend(DlBackendKind::Native);
+    cfg.debounce = std::time::Duration::from_millis(1500);
+    state.dl = std::sync::Arc::new(cfg);
+    state
+        .auth_db
+        .create_dataset(
+            "dlbg",
+            "DL",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    for (g, role) in [(MODEL, GraphKind::Model), (DATA, GraphKind::Instances)] {
+        state.auth_db.add_dataset_graph("dlbg", g).unwrap();
+        state
+            .auth_db
+            .set_dataset_graph_role("dlbg", g, Some(role))
+            .unwrap();
+    }
+    state
+        .store
+        .load_str(
+            &format!(
+                "<{EX}Bridge> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <{EX}Asset> ."
+            ),
+            RdfFormat::Turtle,
+            Some(MODEL),
+        )
+        .unwrap();
+    state
+        .store
+        .load_str(
+            &format!("<{EX}b1> a <{EX}Bridge> ."),
+            RdfFormat::Turtle,
+            Some(DATA),
+        )
+        .unwrap();
+    let app = test_app(state.clone());
+    let enc = url_encode(&format!("SELECT ?b WHERE {{ ?b a <{EX}Asset> }}"));
+
+    // Selecting the regime runs at once, as for every regime.
+    let (st, v, txt) = req(
+        &app,
+        Method::PUT,
+        "/api/datasets/dlbg/entailment",
+        Some(&token),
+        Some("application/json"),
+        &json!({ "regime": "owl2-dl", "mode": "materialize" }).to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(v["backend"], "native", "{txt}");
+    assert_eq!(v["complete"], json!(false), "{txt}");
+
+    // The write answers without waiting for the DL run.
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/store?graph={}", url_encode(DATA)),
+        Some(&token),
+        Some("text/turtle"),
+        &format!("<{EX}b2> a <{EX}Bridge> ."),
+    )
+    .await;
+    assert!(st.is_success(), "{st} {txt}");
+    let (_, v, txt) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/dlbg/entailment",
+        Some(&token),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(v["status"], "queued", "{txt}");
+    assert_eq!(v["dl_backend"], "native", "{txt}");
+
+    // …and the background run catches up.
+    let mut caught_up = false;
+    for _ in 0..300 {
+        let (_, v, _) = req(
+            &app,
+            Method::GET,
+            "/api/datasets/dlbg/entailment",
+            Some(&token),
+            None,
+            "",
+        )
+        .await;
+        let (_, rows_v, _) = req(
+            &app,
+            Method::GET,
+            &format!("/sparql?query={enc}&entailment_dataset=dlbg"),
+            Some(&token),
+            None,
+            "",
+        )
+        .await;
+        if v["status"] == "ok" && rows(&rows_v) == 2 {
+            assert_eq!(v["backend"], "native", "{v}");
+            assert_eq!(v["complete"], json!(false), "{v}");
+            assert_eq!(v["consistent"], json!(true), "{v}");
+            caught_up = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(caught_up, "the background owl2-dl run did not finish");
+}

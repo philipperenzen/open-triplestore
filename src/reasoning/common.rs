@@ -36,8 +36,48 @@ pub enum ReasoningError {
     /// target graph holds only part of the closure.
     #[error("{regime} materialisation did not reach a fixed point within {iterations} iterations")]
     NotConverged { regime: String, iterations: usize },
+    /// The request cannot be served as asked (e.g. `sameas-off` with an
+    /// external DL backend, which cannot switch equality off).
     #[error("Not supported: {0}")]
     NotSupported(String),
+    /// No OWL 2 DL backend is configured, or the configured one cannot be
+    /// reached. Never answered by falling back to another backend.
+    #[error("OWL 2 DL backend unavailable: {0}")]
+    Unavailable(String),
+    /// The backend did not answer in time: the result is unknown.
+    #[error("{backend} did not answer within {seconds} s")]
+    Timeout { backend: String, seconds: u64 },
+    /// The input exceeds the backend's size cap (`OTS_REASONER_MAX_TRIPLES`).
+    #[error("the input has {triples} triples; the {backend} backend accepts at most {limit}")]
+    TooLarge {
+        backend: String,
+        triples: usize,
+        limit: usize,
+    },
+    /// The input is not an OWL 2 DL ontology.
+    #[error("the input is not in OWL 2 DL ({} violation(s))", violations.len())]
+    NotInProfile { violations: Vec<ProfileViolation> },
+    /// The backend ran and failed (crash, unreadable answer).
+    #[error("{backend} failed: {detail}")]
+    Backend { backend: String, detail: String },
+}
+
+/// One reason an input is not in OWL 2 DL: a typing constraint, a global
+/// restriction of the Structural Specification (§11), or a triple with no
+/// OWL 2 reading (`unmapped-triple`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProfileViolation {
+    pub rule: String,
+    pub detail: String,
+}
+
+impl ProfileViolation {
+    pub fn new(rule: &str, detail: impl Into<String>) -> Self {
+        ProfileViolation {
+            rule: rule.to_string(),
+            detail: detail.into(),
+        }
+    }
 }
 
 /// Whether `regime` checks consistency, i.e. can fail with

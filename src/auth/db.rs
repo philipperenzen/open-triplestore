@@ -809,7 +809,16 @@ impl AuthDb {
                 -- 1 consistent, 0 inconsistent, NULL not checked / unknown
                 last_consistent INTEGER,
                 -- JSON {rule, detail} of the last inconsistent run
-                last_inconsistency TEXT
+                last_inconsistency TEXT,
+                -- queued | running | ok | inconsistent | not_converged | not_in_profile
+                -- | unavailable | timeout | too_large | failed
+                last_status TEXT,
+                -- what went wrong, when last_status is not ok
+                last_error TEXT,
+                -- the reasoner that ran (owl2-dl: native | konclude | sidecar)
+                last_backend TEXT,
+                -- 1 complete reasoner, 0 sound but incomplete, NULL not applicable
+                last_complete INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS endpoint_acl (
@@ -1388,6 +1397,11 @@ impl AuthDb {
             // What the last entailment run found about consistency.
             "ALTER TABLE dataset_entailment ADD COLUMN last_consistent INTEGER",
             "ALTER TABLE dataset_entailment ADD COLUMN last_inconsistency TEXT",
+            // Status of the last (or pending background) run and its backend.
+            "ALTER TABLE dataset_entailment ADD COLUMN last_status TEXT",
+            "ALTER TABLE dataset_entailment ADD COLUMN last_error TEXT",
+            "ALTER TABLE dataset_entailment ADD COLUMN last_backend TEXT",
+            "ALTER TABLE dataset_entailment ADD COLUMN last_complete INTEGER",
         ];
         for sql in &upgrades {
             let _ = conn.execute_batch(sql); // ignore "duplicate column" / already-run errors

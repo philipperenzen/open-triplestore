@@ -62,6 +62,7 @@ mod tests {
             vocab_catalog: Arc::new(crate::vocab_search::catalog::VocabCatalog::bundled()),
             vocab_registry_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
+            dl: Default::default(),
             #[cfg(feature = "vocab-search")]
             vocab_engine: None,
         }

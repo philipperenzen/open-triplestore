@@ -33,7 +33,7 @@
 
 > **Status:** current release **`0.7.0`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
 
-**Open Triplestore** is a modern, high-performance RDF triple store with **SPARQL 1.1** and **LDP 1.0** support, plus partial support for **SPARQL 1.2 (RDF-star)**, **GeoSPARQL 1.1** (not OGC-certified) and **OWL 2** reasoning (RL natively + DL extension rules; an optional, experimental bridge to an external tableau reasoner such as Konclude) — grades and known gaps per standard in [docs/standards.md](docs/standards.md) — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
+**Open Triplestore** is a modern, high-performance RDF triple store with **SPARQL 1.1** and **LDP 1.0** support, plus partial support for **SPARQL 1.2 (RDF-star)**, **GeoSPARQL 1.1** (not OGC-certified) and **OWL 2** reasoning (RL natively; OWL 2 DL through a configured backend — Konclude, a reasoner sidecar, or the incomplete native RL + DL-syntax rules) — grades and known gaps per standard in [docs/standards.md](docs/standards.md) — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
 
 ## Demo
 
@@ -70,7 +70,7 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | **SPARQL 1.2** | Triple terms `<<( )>>` / `rdf:reifies` and the accessor functions (RDF 1.2 model); `LATERAL` and `CALL` are not implemented |
 | **SPARQL federation** | `SERVICE` is off by default (SSRF mitigation) and enabled per endpoint with `OTS_REMOTE_ALLOWLIST`; calls are timed out and row-capped, and the service description advertises federation only when an allowlist exists |
 | **GeoSPARQL 1.1** | Simple Features, Egenhofer and RCC8 relations, DE-9IM `relate`, distance/area/buffer and the constructive functions, the geodesic metric family (metres on the WGS84 ellipsoid), the `aggUnion` aggregate, WKT, GML and GeoJSON literals (`asGeoJSON`), CRS transform for the built-in CRS set. Not implemented: KML/DGGS literals, the Query Rewrite Extension, the other aggregates ([grades & gaps](docs/standards.md#known-limitations--conformance-findings)) |
-| **OWL 2 DL** | Native hasSelf, disjointUnionOf, NegativePropertyAssertion, hasKey on top of the RL rules; optional external-reasoner bridge (experimental, `OTS_EXTERNAL_REASONER=konclude`) ([docs](docs/owl2-dl.md)) |
+| **OWL 2 DL** | Backend chosen with `OTS_DL_BACKEND` (`konclude`, `sidecar`, or `native` RL + DL-syntax rules, sound but incomplete); OWL 2 DL profile check; `POST /api/reasoning/check` for consistency, entailment, satisfiability; background runs ([docs](docs/owl2-dl.md)) |
 | **Federated access control** | Signed identity assertions between instances (`SERVICE`, LDES sync); verified against the peer's JWKS, authorised locally ([docs](docs/federation.md)) |
 | **Linked-document containers** | Import and export packaged containers of documents, RDF payloads and link graphs — ISO 21597-1 ICDD as the first profile ([docs](docs/containers.md)) |
 | **Time-evolving properties** | OPM-style property states with validity, reliability and attribution; current value stays a plain triple, history and as-of queries read the chain ([docs](docs/datasets.md#time-evolving-properties-opm-profile)) |
@@ -793,7 +793,12 @@ See [docs/rml.md](docs/rml.md) for the full RML guide including JSON and XML sou
 
 ## OWL 2 DL Reasoning
 
-Native OWL 2 DL support runs the OWL 2 RL forward-chaining rules (the equality, property, class and schema families — the Table 8 datatype rules `dt-*` are not implemented) plus DL-specific SPARQL rules for `owl:hasSelf`, `owl:disjointUnionOf`, `owl:NegativePropertyAssertion`, `owl:hasKey`, and cardinality annotations.  An `ExternalReasonerBridge` can hand the ontology to an external tableau reasoner for classification — Konclude is wired (`OTS_EXTERNAL_REASONER=konclude`) and experimental; it is off unless configured.
+The `owl2-dl` regime runs on the backend `OTS_DL_BACKEND` names, and answers 503 when none is configured. The choices are:
+- `konclude`: a Konclude binary you install, driven through OWLlink;
+- `sidecar`: an HTTP reasoner service;
+- `native`: the OWL 2 RL rules plus DL-syntax rules (`owl:hasSelf`, `owl:ReflexiveProperty`, `owl:disjointUnionOf`) run to one joint fixed point. They are sound but not complete, and reports say `complete: false`.
+
+Input is checked against the OWL 2 DL profile first (422 lists the violations). `POST /api/reasoning/check` answers consistency, entailment, satisfiability and profile questions with true, false or unknown, and `?async=true` runs materialisations and checks as background jobs.
 
 ```bash
 # Query with OWL 2 DL entailment
@@ -875,7 +880,7 @@ licence policy allows no performance claims on a subset.
 | LDP 1.0 (store level) | `tests/ldp_conformance.rs` | spec-derived | 43 |  |
 | LDP 1.0 (HTTP) | `tests/ldp_http_conformance.rs` | spec-derived | 13 |  |
 | OGC GeoSPARQL 1.1 validator shapes | `tests/ogc_geosparql_shacl_roundtrip.rs` | **vendored OGC corpus** (unmodified) | 2 |  |
-| OWL 2 DL extension rules | `tests/owl2_dl_conformance.rs` | spec-derived | 34 |  |
+| OWL 2 DL extension rules | `tests/owl2_dl_conformance.rs` | spec-derived | 65 |  |
 | OWL 2 EL | `tests/owl2_el_conformance.rs` | spec-derived | 14 |  |
 | OWL 2 QL | `tests/owl2_ql_conformance.rs` | spec-derived | 21 |  |
 | OWL 2 RL | `tests/owl2_rl_conformance.rs` | spec-derived | 37 |  |
@@ -896,7 +901,7 @@ licence policy allows no performance claims on a subset.
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 125 |  |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 
-759 conformance tests across 26 suites; a further 715 tests in 104 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 3 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. The SHACL and GeoSPARQL corpus results are development and regression results on the vendored sections (`docs/conformance/`), not W3C or OGC conformance claims. The SPARQL 1.1 sections are a subset of a W3C test suite, so under W3C's test-suite licence policy they are used for development and bug tracking only, and no score is published for them.
+790 conformance tests across 26 suites; a further 729 tests in 104 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 3 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. The SHACL and GeoSPARQL corpus results are development and regression results on the vendored sections (`docs/conformance/`), not W3C or OGC conformance claims. The SPARQL 1.1 sections are a subset of a W3C test suite, so under W3C's test-suite licence policy they are used for development and bug tracking only, and no score is published for them.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->

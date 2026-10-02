@@ -1,45 +1,28 @@
-//! OWL 2 DL profile — native DL extension layer + external reasoner bridge.
+//! OWL 2 DL — the native backend: OWL 2 RL plus the DL-syntax rules, run to
+//! one joint fixed point.
 //!
-//! OWL 2 DL (SROIQ(D)) is N2EXPTIME-complete and requires a tableau algorithm
-//! with blocked-node merging that cannot be fully expressed as SPARQL INSERT
-//! rules.  This module provides two complementary approaches:
+//! OWL 2 DL (SROIQ(D)) needs a tableau (or hypertableau) reasoner; this
+//! module is not one. [`Owl2DLReasoner`] is sound but incomplete: it applies
+//! every OWL 2 RL/RDF rule ([`super::owl2_rl`]) together with rules for DL
+//! syntax that forward chaining can still honour —
 //!
-//! 1. **[`Owl2DLReasoner`]** — a native in-process reasoner that:
-//!    - First runs all ~80 OWL 2 RL forward-chaining rules.
-//!    - Then applies additional DL-specific SPARQL INSERT rules for axioms
-//!      expressible without a tableau: `owl:hasSelf`, `owl:disjointUnionOf`,
-//!      `owl:NegativePropertyAssertion`, `owl:hasKey`, and cardinality
-//!      annotations.
-//!    - Detects inconsistencies raised by both RL rules and DL-specific checks.
+//! - `owl:hasSelf` in both directions (`x : ∃p.Self` ⇒ `x p x`, and back);
+//! - `owl:ReflexiveProperty` (`x p x` for every individual in scope, so
+//!   `prp-irp` catches a property that is also irreflexive);
+//! - `owl:disjointUnionOf` (members are subclasses and pairwise disjoint);
 //!
-//! 2. **[`ExternalReasonerBridge`]** — delegates to any `ExternalReasoner`
-//!    (HermiT, Pellet, ELK, Konclude, …) after running the native DL rules.
+//! — interleaved until neither adds anything, so a DL consequence feeds the RL
+//! rules and the other way round. Keys of any length and negative property
+//! assertions are RL rules (`prp-key`, `prp-npa1/2`).
 //!
-//! 3. **[`NativeTableauStub`]** — placeholder that satisfies the
-//!    `ExternalReasoner` trait without a real tableau; the bridge now succeeds
-//!    by returning native DL results rather than `NotSupported`.
+//! Minimum and exact cardinalities cannot be satisfied by forward chaining
+//! (that needs existential witnesses). Their obligations are recorded as
+//! `urn:dl:*` triples in a diagnostics graph beside the target
+//! ([`super::dl_backend::diagnostics_graph`]), which `?entailment=` never
+//! folds into a query.
 //!
-//! # Known limitations
-//! - `owl:hasKey` only handles key lists of 1 or 2 properties.  Longer lists
-//!   require an external tableau reasoner.
-//! - `owl:minCardinality` / `owl:cardinality` insert annotation triples
-//!   (`urn:dl:minCardinality`, `urn:dl:exactCardinality`) to record the
-//!   constraint obligation; existential witnesses cannot be generated from
-//!   SPARQL INSERT alone.
-//!
-//! # Connecting a real reasoner
-//!
-//! Implement [`ExternalReasoner`] for your reasoner process and hand it to the
-//! bridge (sketch — see [`konclude_bridge`](crate::reasoning::konclude_bridge) for a
-//! complete, compiling implementation):
-//!
-//! ```text
-//! struct HermitBridge { process: std::process::Child }
-//! impl ExternalReasoner for HermitBridge { ... }
-//!
-//! let bridge = ExternalReasonerBridge::new(Box::new(HermitBridge::start()?));
-//! let report = bridge.materialize(&store, &[], "urn:entailment:owl2-dl")?;
-//! ```
+//! Complete OWL 2 DL reasoning goes through a [`super::dl_backend::DlBackend`]
+//! (Konclude or the reasoner sidecar), selected with `OTS_DL_BACKEND`.
 
 use std::time::Instant;
 use tracing::{debug, info};
@@ -54,51 +37,47 @@ const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
 const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
 const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
 const RDFS_SUB_CLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
-const OWL_SAME_AS: &str = "http://www.w3.org/2002/07/owl#sameAs";
 const OWL_DISJOINT_WITH: &str = "http://www.w3.org/2002/07/owl#disjointWith";
 const OWL_ON_PROPERTY: &str = "http://www.w3.org/2002/07/owl#onProperty";
 const OWL_HAS_SELF: &str = "http://www.w3.org/2002/07/owl#hasSelf";
 const OWL_DISJOINT_UNION_OF: &str = "http://www.w3.org/2002/07/owl#disjointUnionOf";
-const OWL_NEGATIVE_PROP_ASSERTION: &str = "http://www.w3.org/2002/07/owl#NegativePropertyAssertion";
-const OWL_SOURCE_INDIVIDUAL: &str = "http://www.w3.org/2002/07/owl#sourceIndividual";
-const OWL_ASSERTION_PROPERTY: &str = "http://www.w3.org/2002/07/owl#assertionProperty";
-const OWL_TARGET_INDIVIDUAL: &str = "http://www.w3.org/2002/07/owl#targetIndividual";
-const OWL_TARGET_VALUE: &str = "http://www.w3.org/2002/07/owl#targetValue";
-const OWL_HAS_KEY: &str = "http://www.w3.org/2002/07/owl#hasKey";
+const OWL_REFLEXIVE_PROPERTY: &str = "http://www.w3.org/2002/07/owl#ReflexiveProperty";
+const OWL_THING: &str = "http://www.w3.org/2002/07/owl#Thing";
+const OWL_NAMED_INDIVIDUAL: &str = "http://www.w3.org/2002/07/owl#NamedIndividual";
 const OWL_MIN_CARDINALITY: &str = "http://www.w3.org/2002/07/owl#minCardinality";
 const OWL_CARDINALITY: &str = "http://www.w3.org/2002/07/owl#cardinality";
 const OWL_MIN_QUAL_CARD: &str = "http://www.w3.org/2002/07/owl#minQualifiedCardinality";
 const OWL_QUAL_CARD: &str = "http://www.w3.org/2002/07/owl#qualifiedCardinality";
 const OWL_ON_CLASS: &str = "http://www.w3.org/2002/07/owl#onClass";
-const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
 
-/// Annotation IRI written to the entailment graph to record a minCardinality obligation.
+/// Diagnostics IRI recording a minCardinality obligation.
 pub const DL_MIN_CARDINALITY: &str = "urn:dl:minCardinality";
-/// Annotation IRI for an exactCardinality obligation.
+/// Diagnostics IRI for an exactCardinality obligation.
 pub const DL_EXACT_CARDINALITY: &str = "urn:dl:exactCardinality";
-/// Annotation IRI for a minQualifiedCardinality obligation.
+/// Diagnostics IRI for a minQualifiedCardinality obligation.
 pub const DL_MIN_QUAL_CARDINALITY: &str = "urn:dl:minQualifiedCardinality";
-/// Annotation IRI for an exactQualifiedCardinality obligation.
+/// Diagnostics IRI for an exactQualifiedCardinality obligation.
 pub const DL_EXACT_QUAL_CARDINALITY: &str = "urn:dl:exactQualifiedCardinality";
 
+/// Outer rounds (one RL fixed point + one DL pass each) before the run fails
+/// with [`ReasoningError::NotConverged`].
 const MAX_ITERATIONS: usize = 500;
 
 // ─── Native DL Reasoner ───────────────────────────────────────────────────────
 
-/// OWL 2 DL native reasoner.
-///
-/// Runs all OWL 2 RL rules first, then applies the additional DL-specific
-/// axiom rules that can be expressed as SPARQL INSERT operations.
+/// OWL 2 DL native reasoner: RL and DL-syntax rules to a joint fixed point.
 pub struct Owl2DLReasoner<'a> {
     store: &'a TripleStore,
     target_graph: String,
+    /// Where cardinality obligations go; default `<target>:diagnostics`.
+    diagnostics_graph: Option<String>,
     /// When set, the rules read ONLY these graphs (plus the target graph).
     /// Without it they read the unnamed default graph plus the target graph
     /// (`TripleStore::update_over`), so rules see their own consequences.
     sources: Option<Vec<String>>,
     /// If `true`, inconsistency rules raise `ReasoningError::Inconsistency`.
     pub detect_inconsistency: bool,
-    /// Identity policy handed to the RL phase (see `Owl2RLReasoner`).
+    /// Identity policy handed to the RL rules (see `Owl2RLReasoner`).
     identity: super::identity::IdentityPolicy,
 }
 
@@ -132,22 +111,11 @@ impl<'a> Owl2DLReasoner<'a> {
         }
     }
 
-    fn run_query(
-        &self,
-        sparql: &str,
-    ) -> Result<oxigraph::sparql::QueryResults<'static>, crate::store::engine::StoreError> {
-        match self.scope() {
-            Some(scope) => self.store.query_scoped(sparql, &scope),
-            None => self
-                .store
-                .query_over(sparql, std::slice::from_ref(&self.target_graph)),
-        }
-    }
-
     pub fn new(store: &'a TripleStore) -> Self {
         Self {
             store,
             target_graph: OWL2_DL_ENTAILMENT_GRAPH.to_string(),
+            diagnostics_graph: None,
             sources: None,
             detect_inconsistency: true,
             identity: super::identity::IdentityPolicy::Full,
@@ -159,143 +127,130 @@ impl<'a> Owl2DLReasoner<'a> {
         self
     }
 
-    /// Identity policy for the RL phase (`sameas-off` skips the equality rules).
+    /// Where the `urn:dl:*` cardinality obligations go (default
+    /// `<target>:diagnostics`).
+    pub fn with_diagnostics(mut self, graph: impl Into<String>) -> Self {
+        self.diagnostics_graph = Some(graph.into());
+        self
+    }
+
+    fn diagnostics(&self) -> String {
+        self.diagnostics_graph
+            .clone()
+            .unwrap_or_else(|| super::dl_backend::diagnostics_graph(&self.target_graph))
+    }
+
+    /// Identity policy for the RL rules (`sameas-off` skips the equality rules).
     pub fn with_identity_policy(mut self, policy: super::identity::IdentityPolicy) -> Self {
         self.identity = policy;
         self
     }
 
-    /// Materialize all OWL 2 DL inferences into the target graph.
+    fn rl(&self) -> super::owl2_rl::Owl2RLReasoner<'a> {
+        let mut rl = super::owl2_rl::Owl2RLReasoner::new(self.store)
+            .with_target(self.target_graph.clone())
+            .with_identity_policy(self.identity);
+        rl.detect_inconsistency = self.detect_inconsistency;
+        match &self.sources {
+            Some(s) => rl.with_sources(s.clone()),
+            None => rl,
+        }
+    }
+
+    /// Materialize the joint RL + DL closure into the target graph.
     ///
-    /// Step 1: Run all OWL 2 RL rules (via [`super::owl2_rl::Owl2RLReasoner`]).
-    /// Step 2: Fixed-point loop over DL-specific extension rules.
-    /// Step 3: Consistency check.
+    /// Each round runs the RL rules to their own fixed point (with their
+    /// consistency checks), then one pass of the DL rules; the run ends when a
+    /// DL pass adds nothing the RL rules have not already seen.
     pub fn materialize(&self) -> Result<ReasoningReport, ReasoningError> {
         let start = Instant::now();
         info!("OWL 2 DL materialization → <{}>", self.target_graph);
         // Report the delta this run produced, not the graph's final size.
         let initial = count_graph(self.store, &self.target_graph)?;
-
-        // ── Step 1: RL rules ──────────────────────────────────────────────────
-        let rl = super::owl2_rl::Owl2RLReasoner::new(self.store)
-            .with_target(self.target_graph.clone())
-            .with_identity_policy(self.identity);
-        // The RL phase reads the same scope as the DL rules. It used to run
-        // unscoped — default graph only — whatever the caller had asked for.
-        let rl = match &self.sources {
-            Some(s) => rl.with_sources(s.clone()),
-            None => rl,
-        };
-        let rl_report = rl.materialize()?;
-
-        debug!(
-            "OWL 2 DL: RL phase added {} triples in {} iterations",
-            rl_report.triples_added, rl_report.iterations
-        );
-
-        // ── Step 2: DL extension rules ────────────────────────────────────────
-        let mut dl_iterations = 0usize;
-
+        let rl = self.rl();
+        let mut iterations = 0usize;
+        let mut rounds = 0usize;
         loop {
-            dl_iterations += 1;
-            let before = count_graph(self.store, &self.target_graph)?;
-
+            rounds += 1;
+            iterations += rl.materialize()?.iterations;
+            let mid = count_graph(self.store, &self.target_graph)?;
             self.rule_dl_has_self()?;
+            self.rule_dl_has_self_converse()?;
+            self.rule_dl_reflexive()?;
             self.rule_dl_disjoint_union_subclass()?;
             self.rule_dl_disjoint_union_pairwise()?;
-            self.rule_dl_has_key_one()?;
-            self.rule_dl_has_key_two()?;
-            self.rule_dl_min_cardinality()?;
-            self.rule_dl_cardinality()?;
-            self.rule_dl_min_qualified_cardinality()?;
-            self.rule_dl_qualified_cardinality()?;
-            // TG-aware cax-sco: propagates types using schema triples that RL
-            // deposited in TG (e.g. transitively-closed subClassOf chains).
-            self.rule_dl_cax_sco_tg()?;
-
+            iterations += 1;
             let after = count_graph(self.store, &self.target_graph)?;
-            if after == before {
+            debug!("OWL 2 DL round {rounds}: DL rules added {}", after - mid);
+            if after == mid {
                 break;
             }
-            if dl_iterations >= MAX_ITERATIONS {
+            if rounds >= MAX_ITERATIONS {
                 return Err(ReasoningError::NotConverged {
                     regime: "owl2-dl".to_string(),
-                    iterations: rl_report.iterations + dl_iterations,
+                    iterations,
                 });
             }
         }
-
-        // ── Step 3: Consistency check ─────────────────────────────────────────
-        if self.detect_inconsistency {
-            self.check_consistency()?;
-        }
+        self.record_cardinality_obligations()?;
 
         let total_triples = count_graph(self.store, &self.target_graph)?;
         Ok(ReasoningReport {
             regime: "owl2-dl".to_string(),
             triples_added: total_triples.saturating_sub(initial),
-            iterations: rl_report.iterations + dl_iterations,
+            iterations,
             elapsed_ms: start.elapsed().as_millis() as u64,
             target_graph: self.target_graph.clone(),
         })
     }
 
-    /// Check for inconsistencies not covered by RL rules.
-    ///
-    /// Detects violated `owl:NegativePropertyAssertion` axioms (both object and
-    /// data property variants).
-    pub fn check_consistency(&self) -> Result<(), ReasoningError> {
-        self.rule_dl_negative_object_assertion()?;
-        self.rule_dl_negative_data_assertion()?;
-        Ok(())
-    }
-
     // ── DL-specific rules ──────────────────────────────────────────────────────
 
-    /// `dl-has-self`: For each class C with `owl:hasSelf true` on property p,
-    /// every individual x of type C satisfies `x p x`.
-    ///
-    /// Because SPARQL INSERT requires a concrete predicate IRI, this rule first
-    /// SELECTs the (class, property) pairs, then issues one UPDATE per pair.
+    /// `dl-has-self`: `?c owl:hasSelf true ; owl:onProperty ?p . ?x a ?c` ⇒
+    /// `?x ?p ?x`.
     fn rule_dl_has_self(&self) -> Result<(), ReasoningError> {
         let tg = &self.target_graph;
-
-        // Find all (class, property) pairs with owl:hasSelf true
-        let select_q = format!(
-            "SELECT DISTINCT ?c ?p WHERE {{ \
-               ?c <{OWL_ON_PROPERTY}> ?p . \
-               ?c <{OWL_HAS_SELF}> \"true\"^^<{XSD_BOOLEAN}> . \
-             }}"
+        let q = format!(
+            "INSERT {{ GRAPH <{tg}> {{ ?x ?p ?x }} }} \
+             WHERE {{ ?c <{OWL_HAS_SELF}> ?self ; <{OWL_ON_PROPERTY}> ?p . \
+                      FILTER(?self = true) \
+                      ?x <{RDF_TYPE}> ?c . FILTER(isIRI(?x)) FILTER(isIRI(?p)) }}"
         );
+        self.run_update(&q).map_err(Into::into)
+    }
 
-        let pairs = match self.run_query(&select_q)? {
-            oxigraph::sparql::QueryResults::Solutions(sols) => sols
-                .flatten()
-                .filter_map(|s| {
-                    let c = match s.get("c")? {
-                        oxigraph::model::Term::NamedNode(n) => n.as_str().to_string(),
-                        _ => return None,
-                    };
-                    let p = match s.get("p")? {
-                        oxigraph::model::Term::NamedNode(n) => n.as_str().to_string(),
-                        _ => return None,
-                    };
-                    Some((c, p))
-                })
-                .collect::<Vec<_>>(),
-            _ => vec![],
-        };
+    /// `dl-has-self-converse`: `?c owl:hasSelf true ; owl:onProperty ?p .
+    /// ?x ?p ?x` ⇒ `?x a ?c`.
+    fn rule_dl_has_self_converse(&self) -> Result<(), ReasoningError> {
+        let tg = &self.target_graph;
+        let q = format!(
+            "INSERT {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?c }} }} \
+             WHERE {{ ?c <{OWL_HAS_SELF}> ?self ; <{OWL_ON_PROPERTY}> ?p . \
+                      FILTER(?self = true) \
+                      ?x ?p ?x . FILTER(isIRI(?x)) }}"
+        );
+        self.run_update(&q).map_err(Into::into)
+    }
 
-        for (c, p) in pairs {
-            // Check both the default graph and TG so that RL-derived types are visible.
-            let q = format!(
-                "INSERT {{ GRAPH <{tg}> {{ ?x <{p}> ?x }} }} \
-                 WHERE {{ {{ ?x <{RDF_TYPE}> <{c}> }} UNION {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> <{c}> }} }} \
-                          FILTER(isIRI(?x)) }}"
-            );
-            self.run_update(&q)?;
-        }
-        Ok(())
+    /// `dl-reflexive`: `?p a owl:ReflexiveProperty` ⇒ `?x ?p ?x` for every
+    /// individual in scope — anything typed with a class outside the reserved
+    /// vocabulary (or `owl:Thing` / `owl:NamedIndividual`), and both ends of
+    /// a `?p` assertion. `prp-irp` then catches reflexive + irreflexive.
+    fn rule_dl_reflexive(&self) -> Result<(), ReasoningError> {
+        let tg = &self.target_graph;
+        let q = format!(
+            "INSERT {{ GRAPH <{tg}> {{ ?x ?p ?x }} }} \
+             WHERE {{ ?p <{RDF_TYPE}> <{OWL_REFLEXIVE_PROPERTY}> . FILTER(isIRI(?p)) \
+               {{ ?x <{RDF_TYPE}> ?c . \
+                  FILTER(?c IN (<{OWL_THING}>, <{OWL_NAMED_INDIVIDUAL}>) || \
+                         !(STRSTARTS(STR(?c), \"http://www.w3.org/2002/07/owl#\") || \
+                           STRSTARTS(STR(?c), \"http://www.w3.org/2000/01/rdf-schema#\") || \
+                           STRSTARTS(STR(?c), \"http://www.w3.org/1999/02/22-rdf-syntax-ns#\") || \
+                           STRSTARTS(STR(?c), \"http://www.w3.org/2001/XMLSchema#\"))) }} \
+               UNION {{ ?x ?p ?y }} UNION {{ ?y ?p ?x }} \
+               FILTER(isIRI(?x)) }}"
+        );
+        self.run_update(&q).map_err(Into::into)
     }
 
     /// `dl-disjoint-union-subclass`: Each member of a `owl:disjointUnionOf`
@@ -334,354 +289,31 @@ impl<'a> Owl2DLReasoner<'a> {
         self.run_update(&q).map_err(Into::into)
     }
 
-    /// `dl-negative-object-assertion` (consistency check): Raises
-    /// `ReasoningError::Inconsistency` when a `owl:NegativePropertyAssertion`
-    /// is violated by an asserted object-property triple.
-    fn rule_dl_negative_object_assertion(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            "ASK {{ \
-               ?npa <{RDF_TYPE}> <{OWL_NEGATIVE_PROP_ASSERTION}> . \
-               ?npa <{OWL_SOURCE_INDIVIDUAL}> ?s . \
-               ?npa <{OWL_ASSERTION_PROPERTY}> ?p . \
-               ?npa <{OWL_TARGET_INDIVIDUAL}> ?o . \
-               ?s ?p ?o . \
-             }}"
-        );
-        match self.run_query(&q)? {
-            oxigraph::sparql::QueryResults::Boolean(true) => Err(ReasoningError::inconsistency(
-                "dl-negative-object-assertion",
-                "NegativeObjectPropertyAssertion violated: an asserted triple contradicts a \
-                 declared owl:NegativePropertyAssertion"
-                    .to_string(),
-            )),
-            _ => Ok(()),
-        }
-    }
-
-    /// `dl-negative-data-assertion` (consistency check): Same as
-    /// `rule_dl_negative_object_assertion` but for data property assertions.
-    fn rule_dl_negative_data_assertion(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            "ASK {{ \
-               ?npa <{RDF_TYPE}> <{OWL_NEGATIVE_PROP_ASSERTION}> . \
-               ?npa <{OWL_SOURCE_INDIVIDUAL}> ?s . \
-               ?npa <{OWL_ASSERTION_PROPERTY}> ?p . \
-               ?npa <{OWL_TARGET_VALUE}> ?v . \
-               ?s ?p ?v . \
-             }}"
-        );
-        match self.run_query(&q)? {
-            oxigraph::sparql::QueryResults::Boolean(true) => Err(ReasoningError::inconsistency(
-                "dl-negative-data-assertion",
-                "NegativeDataPropertyAssertion violated: an asserted triple contradicts a \
-                 declared owl:NegativePropertyAssertion"
-                    .to_string(),
-            )),
-            _ => Ok(()),
-        }
-    }
-
-    /// `dl-has-key` (1-key): If class C has a key list of exactly one property
-    /// p, two individuals of type C with the same p-value are `owl:sameAs`.
-    fn rule_dl_has_key_one(&self) -> Result<(), ReasoningError> {
-        let tg = &self.target_graph;
-        let q = format!(
-            "INSERT {{ GRAPH <{tg}> {{ ?x <{OWL_SAME_AS}> ?y }} }} \
-             WHERE {{ \
-               ?c <{OWL_HAS_KEY}> ?keylist . \
-               ?keylist <{RDF_FIRST}> ?p . \
-               ?keylist <{RDF_REST}> <{RDF_NIL}> . \
-               ?x <{RDF_TYPE}> ?c . \
-               ?y <{RDF_TYPE}> ?c . \
-               ?x ?p ?v . \
-               ?y ?p ?v . \
-               FILTER(?x != ?y) \
-               FILTER(isIRI(?x)) \
-               FILTER(isIRI(?y)) \
-             }}"
-        );
-        self.run_update(&q).map_err(Into::into)
-    }
-
-    /// `dl-has-key` (2-key): Same as `dl-has-key-one` but for key lists of
-    /// exactly two properties.  Lists longer than 2 require a tableau reasoner.
-    fn rule_dl_has_key_two(&self) -> Result<(), ReasoningError> {
-        let tg = &self.target_graph;
-        let q = format!(
-            "INSERT {{ GRAPH <{tg}> {{ ?x <{OWL_SAME_AS}> ?y }} }} \
-             WHERE {{ \
-               ?c <{OWL_HAS_KEY}> ?keylist . \
-               ?keylist <{RDF_FIRST}> ?p1 . \
-               ?keylist <{RDF_REST}> ?rest . \
-               ?rest <{RDF_FIRST}> ?p2 . \
-               ?rest <{RDF_REST}> <{RDF_NIL}> . \
-               ?x <{RDF_TYPE}> ?c . \
-               ?y <{RDF_TYPE}> ?c . \
-               ?x ?p1 ?v1 . \
-               ?y ?p1 ?v1 . \
-               ?x ?p2 ?v2 . \
-               ?y ?p2 ?v2 . \
-               FILTER(?x != ?y) \
-               FILTER(isIRI(?x)) \
-               FILTER(isIRI(?y)) \
-             }}"
-        );
-        self.run_update(&q).map_err(Into::into)
-    }
-
-    /// `dl-min-cardinality`: Records a minCardinality obligation in the
-    /// entailment graph.  Existential witnesses cannot be generated from SPARQL
-    /// alone; connect an external tableau reasoner for full ABox completion.
-    fn rule_dl_min_cardinality(&self) -> Result<(), ReasoningError> {
-        let tg = &self.target_graph;
-        let q = format!(
-            "INSERT {{ GRAPH <{tg}> {{ ?x <{DL_MIN_CARDINALITY}> ?n }} }} \
-             WHERE {{ \
-               ?c <{OWL_MIN_CARDINALITY}> ?n . \
-               ?c <{OWL_ON_PROPERTY}> ?p . \
-               ?x <{RDF_TYPE}> ?c . \
-               FILTER(isIRI(?x)) \
-             }}"
-        );
-        self.run_update(&q).map_err(Into::into)
-    }
-
-    /// `dl-cardinality`: Records an exactCardinality obligation.  The
-    /// `owl:maxCardinality` side is already handled by RL rules `cls-maxc1`/
-    /// `cls-maxc2`.
-    fn rule_dl_cardinality(&self) -> Result<(), ReasoningError> {
-        let tg = &self.target_graph;
-        let q = format!(
-            "INSERT {{ GRAPH <{tg}> {{ ?x <{DL_EXACT_CARDINALITY}> ?n }} }} \
-             WHERE {{ \
-               ?c <{OWL_CARDINALITY}> ?n . \
-               ?c <{OWL_ON_PROPERTY}> ?p . \
-               ?x <{RDF_TYPE}> ?c . \
-               FILTER(isIRI(?x)) \
-             }}"
-        );
-        self.run_update(&q).map_err(Into::into)
-    }
-
-    /// `dl-min-qualified-cardinality`: Records a minQualifiedCardinality
-    /// obligation (with `owl:onClass` filler).
-    fn rule_dl_min_qualified_cardinality(&self) -> Result<(), ReasoningError> {
-        let tg = &self.target_graph;
-        let q = format!(
-            "INSERT {{ GRAPH <{tg}> {{ ?x <{DL_MIN_QUAL_CARDINALITY}> ?n }} }} \
-             WHERE {{ \
-               ?c <{OWL_MIN_QUAL_CARD}> ?n . \
-               ?c <{OWL_ON_PROPERTY}> ?p . \
-               ?c <{OWL_ON_CLASS}> ?filler . \
-               ?x <{RDF_TYPE}> ?c . \
-               FILTER(isIRI(?x)) \
-             }}"
-        );
-        self.run_update(&q).map_err(Into::into)
-    }
-
-    /// `dl-qualified-cardinality`: Records an exactQualifiedCardinality
-    /// obligation.
-    fn rule_dl_qualified_cardinality(&self) -> Result<(), ReasoningError> {
-        let tg = &self.target_graph;
-        let q = format!(
-            "INSERT {{ GRAPH <{tg}> {{ ?x <{DL_EXACT_QUAL_CARDINALITY}> ?n }} }} \
-             WHERE {{ \
-               ?c <{OWL_QUAL_CARD}> ?n . \
-               ?c <{OWL_ON_PROPERTY}> ?p . \
-               ?c <{OWL_ON_CLASS}> ?filler . \
-               ?x <{RDF_TYPE}> ?c . \
-               FILTER(isIRI(?x)) \
-             }}"
-        );
-        self.run_update(&q).map_err(Into::into)
-    }
-
-    /// TG-aware `cax-sco`: Like the RL rule, but also reads `rdfs:subClassOf` and
-    /// `rdf:type` triples from TG so that RL-derived schema/type facts are visible.
-    ///
-    /// This handles cases where:
-    /// - `scm-sco` deposited a transitive subClassOf chain into TG, which `cax-sco`
-    ///   (reading only the default graph) cannot see.
-    /// - DL `disjointUnionOf` derived a subClassOf into TG that RL cannot chain from.
-    fn rule_dl_cax_sco_tg(&self) -> Result<(), ReasoningError> {
-        let tg = &self.target_graph;
-        let q = format!(
-            "INSERT {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?c2 }} }} \
-             WHERE {{ \
-               {{ ?c1 <{RDFS_SUB_CLASS_OF}> ?c2 }} UNION {{ GRAPH <{tg}> {{ ?c1 <{RDFS_SUB_CLASS_OF}> ?c2 }} }} \
-               {{ ?x <{RDF_TYPE}> ?c1 }} UNION {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?c1 }} }} \
-               FILTER(?c1 != ?c2) \
-             }}"
-        );
-        self.run_update(&q).map_err(Into::into)
-    }
-}
-
-// ─── ExternalReasoner trait ───────────────────────────────────────────────────
-
-/// Contract for an OWL 2 DL reasoner.
-pub trait ExternalReasoner: Send + Sync {
-    /// Human-readable name (e.g. `"hermit"`, `"pellet"`).
-    fn name(&self) -> &'static str;
-
-    /// Load the ontology serialized as Turtle and classify it.
-    /// Returns the derived subsumption hierarchy as Turtle.
-    fn classify(&self, ontology_turtle: &str) -> Result<String, ReasoningError>;
-
-    /// Check whether the ontology is consistent.
-    fn check_consistency(&self, ontology_turtle: &str) -> Result<bool, ReasoningError>;
-
-    /// Compute all inferences and return them as Turtle.
-    fn get_inferences(&self, ontology_turtle: &str) -> Result<String, ReasoningError>;
-}
-
-// ─── NativeTableauStub ────────────────────────────────────────────────────────
-
-/// Placeholder that satisfies `ExternalReasoner` without a real tableau.
-///
-/// When used with [`ExternalReasonerBridge`], the bridge now runs the native
-/// DL rules before calling the stub, so `materialize()` **succeeds** (with
-/// partial native results) rather than returning `NotSupported`.
-///
-/// Replace with a real implementation of `ExternalReasoner` to activate full
-/// OWL 2 DL tableau reasoning (HermiT, Pellet, ELK, Konclude, …).
-pub struct NativeTableauStub;
-
-impl ExternalReasoner for NativeTableauStub {
-    fn name(&self) -> &'static str {
-        "native-dl-stub"
-    }
-
-    fn classify(&self, _: &str) -> Result<String, ReasoningError> {
-        Err(ReasoningError::NotSupported(
-            "OWL 2 DL native tableau is not yet implemented. \
-             Plug in an ExternalReasoner (HermiT, Pellet, ELK, …)."
-                .to_string(),
-        ))
-    }
-
-    fn check_consistency(&self, _: &str) -> Result<bool, ReasoningError> {
-        Err(ReasoningError::NotSupported(
-            "OWL 2 DL consistency check requires an ExternalReasoner.".to_string(),
-        ))
-    }
-
-    fn get_inferences(&self, _: &str) -> Result<String, ReasoningError> {
-        Err(ReasoningError::NotSupported(
-            "OWL 2 DL inference requires an ExternalReasoner.".to_string(),
-        ))
-    }
-}
-
-// ─── ExternalReasonerBridge ───────────────────────────────────────────────────
-
-/// Bridges an [`ExternalReasoner`] with the local [`TripleStore`].
-///
-/// The bridge first runs the native OWL 2 DL rules (via [`Owl2DLReasoner`]),
-/// then — if the inner reasoner is not the `"native-dl-stub"` — additionally
-/// calls the external reasoner to load further inferences.
-pub struct ExternalReasonerBridge {
-    reasoner: Box<dyn ExternalReasoner>,
-    identity: super::identity::IdentityPolicy,
-}
-
-impl ExternalReasonerBridge {
-    pub fn new(reasoner: Box<dyn ExternalReasoner>) -> Self {
-        Self {
-            reasoner,
-            identity: super::identity::IdentityPolicy::Full,
-        }
-    }
-
-    /// Identity policy for the native RL/DL phase.
-    pub fn with_identity_policy(mut self, policy: super::identity::IdentityPolicy) -> Self {
-        self.identity = policy;
-        self
-    }
-
-    /// Run native DL rules first, then optionally delegate to the external
-    /// reasoner and load the resulting inferences into `target_graph`.
-    pub fn materialize(
-        &self,
-        store: &TripleStore,
-        source_graphs: &[String],
-        target_graph: &str,
-    ) -> Result<ReasoningReport, ReasoningError> {
-        let start = Instant::now();
-        // Report the delta this run produced, not the graph's final size.
-        let initial = count_graph(store, target_graph)?;
-
-        // ── Step 1: Run the native DL reasoner ───────────────────────────────
-        let native_report = {
-            let m = Owl2DLReasoner::new(store)
-                .with_target(target_graph)
-                .with_identity_policy(self.identity);
-            // The same scope the native rules read: the caller's layer, not the store.
-            if source_graphs.is_empty() {
-                m
+    /// Minimum and exact cardinality obligations the rules cannot satisfy
+    /// (no existential witnesses), recorded in the diagnostics graph:
+    /// `?x urn:dl:minCardinality ?n` for `?x a [ owl:minCardinality ?n ]`, and
+    /// likewise for exact and qualified cardinalities.
+    fn record_cardinality_obligations(&self) -> Result<(), ReasoningError> {
+        let dg = self.diagnostics();
+        for (card, mark, qualified) in [
+            (OWL_MIN_CARDINALITY, DL_MIN_CARDINALITY, false),
+            (OWL_CARDINALITY, DL_EXACT_CARDINALITY, false),
+            (OWL_MIN_QUAL_CARD, DL_MIN_QUAL_CARDINALITY, true),
+            (OWL_QUAL_CARD, DL_EXACT_QUAL_CARDINALITY, true),
+        ] {
+            let on_class = if qualified {
+                format!("?c <{OWL_ON_CLASS}> ?filler . ")
             } else {
-                m.with_sources(source_graphs.to_vec())
-            }
-        }
-        .materialize()?;
-
-        // ── Step 2: Optionally call the external reasoner ────────────────────
-        if self.reasoner.name() != "native-dl-stub" {
-            let ontology_ttl = if source_graphs.is_empty() {
-                store
-                    .dump(oxigraph::io::RdfFormat::Turtle, None)
-                    .map_err(|e| ReasoningError::Store(e.to_string()))
-                    .and_then(|bytes| {
-                        String::from_utf8(bytes).map_err(|e| ReasoningError::Store(e.to_string()))
-                    })?
-            } else {
-                let mut combined = String::new();
-                for g in source_graphs {
-                    let bytes = store
-                        .dump(oxigraph::io::RdfFormat::Turtle, Some(g))
-                        .map_err(|e| ReasoningError::Store(e.to_string()))?;
-                    combined.push_str(
-                        &String::from_utf8(bytes)
-                            .map_err(|e| ReasoningError::Store(e.to_string()))?,
-                    );
-                    combined.push('\n');
-                }
-                combined
+                String::new()
             };
-
-            // A real external reasoner does full SROIQ(D) reasoning the native rules
-            // cannot. Reject an inconsistent ontology first, then load both the
-            // classified subsumption hierarchy and the complete inference set (loads
-            // are idempotent where they overlap).
-            if !self.reasoner.check_consistency(&ontology_ttl)? {
-                return Err(ReasoningError::inconsistency(
-                    "external-reasoner",
-                    format!(
-                        "external reasoner {} reported the ontology inconsistent",
-                        self.reasoner.name()
-                    ),
-                ));
-            }
-            for ttl in [
-                self.reasoner.classify(&ontology_ttl)?,
-                self.reasoner.get_inferences(&ontology_ttl)?,
-            ] {
-                store
-                    .load_str(&ttl, oxigraph::io::RdfFormat::Turtle, Some(target_graph))
-                    .map_err(|e| ReasoningError::Store(e.to_string()))?;
-            }
+            let q = format!(
+                "INSERT {{ GRAPH <{dg}> {{ ?x <{mark}> ?n }} }} \
+                 WHERE {{ ?c <{card}> ?n ; <{OWL_ON_PROPERTY}> ?p . {on_class}\
+                          ?x <{RDF_TYPE}> ?c . FILTER(isIRI(?x)) }}"
+            );
+            self.run_update(&q)?;
         }
-
-        let count = count_graph(store, target_graph)?;
-
-        Ok(ReasoningReport {
-            regime: format!("owl2-dl({})", self.reasoner.name()),
-            triples_added: count.saturating_sub(initial),
-            iterations: native_report.iterations + 1,
-            elapsed_ms: start.elapsed().as_millis() as u64,
-            target_graph: target_graph.to_string(),
-        })
+        Ok(())
     }
 }
 
@@ -704,34 +336,6 @@ mod tests {
             oxigraph::sparql::QueryResults::Boolean(b) => b,
             _ => panic!("expected ASK result"),
         }
-    }
-
-    #[test]
-    fn test_stub_classify_returns_not_supported() {
-        let stub = NativeTableauStub;
-        assert!(matches!(
-            stub.classify(""),
-            Err(ReasoningError::NotSupported(_))
-        ));
-    }
-
-    #[test]
-    fn test_stub_check_consistency_returns_not_supported() {
-        let stub = NativeTableauStub;
-        assert!(matches!(
-            stub.check_consistency(""),
-            Err(ReasoningError::NotSupported(_))
-        ));
-    }
-
-    #[test]
-    fn test_bridge_with_stub_now_succeeds() {
-        let store = crate::store::TripleStore::in_memory().unwrap();
-        let bridge = ExternalReasonerBridge::new(Box::new(NativeTableauStub));
-        // Bridge should succeed (native DL rules run; stub is skipped)
-        assert!(bridge
-            .materialize(&store, &[], "urn:entailment:owl2-dl")
-            .is_ok());
     }
 
     #[test]
