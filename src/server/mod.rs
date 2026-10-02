@@ -2,6 +2,7 @@
 mod account_lifecycle_tests;
 #[cfg(test)]
 mod accounts_introspection_tests;
+pub mod client_ip;
 pub mod content_negotiation;
 pub mod error;
 #[cfg(test)]
@@ -44,7 +45,7 @@ use crate::prefixes::PrefixRegistry;
 use crate::saved_queries::routes::{saved_query_auth_routes, saved_query_public_routes};
 use crate::storage::ObjectStore;
 use crate::store::TripleStore;
-use axum::extract::{ConnectInfo, DefaultBodyLimit};
+use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::middleware;
 use axum::routing::{delete, get, post, put};
@@ -62,63 +63,22 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
-/// IP key extractor that checks X-Forwarded-For / X-Real-IP headers first (for reverse proxies
-/// and Docker deployments), then falls back to the TCP peer address.
+/// Rate-limiter key: the client IP from [`client_ip::resolve`].
 ///
 /// H-2: XFF/X-Real-IP headers are only trusted when the TCP peer IP falls within one of the
-/// configured `trusted_cidrs`. This prevents attackers from spoofing their IP by injecting
+/// configured trusted proxies. This prevents attackers from spoofing their IP by injecting
 /// an arbitrary X-Forwarded-For header.
 #[derive(Clone)]
 struct SmartIpExtractor {
-    trusted_cidrs: Vec<IpNet>,
+    trusted: client_ip::TrustedProxies,
 }
 
 impl KeyExtractor for SmartIpExtractor {
     type Key = IpAddr;
 
     fn extract<B>(&self, req: &Request<B>) -> Result<IpAddr, GovernorError> {
-        // 3. TCP peer address (available when using into_make_service_with_connect_info)
-        let peer_ip: Option<IpAddr> = req
-            .extensions()
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|ConnectInfo(addr)| addr.ip());
-
-        let peer_is_trusted = peer_ip
-            .map(|ip| self.trusted_cidrs.iter().any(|cidr| cidr.contains(&ip)))
-            .unwrap_or(false);
-
-        if peer_is_trusted {
-            // 1. X-Forwarded-For. Walk the chain RIGHT-to-LEFT, skipping trusted
-            //    proxy hops; the first untrusted address is the real client. The
-            //    left-most entry is fully client-controlled, so trusting it would let
-            //    a client behind the proxy forge `X-Forwarded-For: <victim>` to
-            //    attribute their request load to (and rate-limit-lock-out) another IP,
-            //    or rotate forged IPs to evade their own limit.
-            if let Some(xff) = req.headers().get("x-forwarded-for") {
-                if let Ok(val) = xff.to_str() {
-                    for entry in val.rsplit(',') {
-                        if let Ok(ip) = entry.trim().parse::<IpAddr>() {
-                            let entry_trusted =
-                                self.trusted_cidrs.iter().any(|cidr| cidr.contains(&ip));
-                            if !entry_trusted {
-                                return Ok(ip);
-                            }
-                        }
-                    }
-                }
-            }
-            // 2. X-Real-IP
-            if let Some(xri) = req.headers().get("x-real-ip") {
-                if let Ok(val) = xri.to_str() {
-                    if let Ok(ip) = val.trim().parse::<IpAddr>() {
-                        return Ok(ip);
-                    }
-                }
-            }
-        }
-
-        // Use TCP peer IP directly (not behind a trusted proxy)
-        if let Some(ip) = peer_ip {
+        let peer = client_ip::peer_ip(req.extensions());
+        if let Some(ip) = client_ip::resolve(req.headers(), peer, &self.trusted) {
             return Ok(ip);
         }
         // Fallback: bucket all unidentifiable clients together rather than hard-erroring.
@@ -269,6 +229,10 @@ pub struct AppState {
     /// When true, auth cookies are issued with the `Secure` attribute (HTTPS only).
     /// Disabled by default so plain-HTTP local development still works.
     pub secure_cookies: bool,
+    /// Reverse proxies whose `X-Forwarded-For` is believed (`TRUSTED_PROXY_CIDRS`).
+    /// [`build_router`] sets it from its `trusted_cidrs` argument, so the rate
+    /// limiter, the audit log and the LLM guard all derive the client IP alike.
+    pub trusted_proxies: client_ip::TrustedProxies,
     /// Bounds concurrent browse query execution so a flood of browse requests
     /// cannot monopolise the `spawn_blocking` thread pool and starve other work.
     pub browse_semaphore: Arc<tokio::sync::Semaphore>,
@@ -336,6 +300,7 @@ impl AppState {
             query_timeout_secs: 30,
             write_timeout_secs: 120,
             secure_cookies: false,
+            trusted_proxies: client_ip::TrustedProxies::default(),
             browse_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BROWSE_QUERIES)),
             expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(expensive_op_capacity())),
             #[cfg(feature = "text-search")]
@@ -613,6 +578,12 @@ impl axum::extract::FromRef<AppState> for CookieConfig {
     }
 }
 
+impl axum::extract::FromRef<AppState> for client_ip::TrustedProxies {
+    fn from_ref(state: &AppState) -> Self {
+        state.trusted_proxies.clone()
+    }
+}
+
 impl axum::extract::FromRef<AppState> for Arc<AuthDb> {
     fn from_ref(state: &AppState) -> Self {
         state.auth_db.clone()
@@ -738,6 +709,10 @@ async fn mark_vocab_dirty_after_success(
 }
 
 pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNet>) -> Router {
+    let mut state = state;
+    let trusted_proxies = client_ip::TrustedProxies::new(trusted_cidrs);
+    state.trusted_proxies = trusted_proxies.clone();
+
     // The graphs a principal may read include those of the model registry's
     // published versions (a public entry's to everyone). The registry lives
     // in the store, which the identity database cannot see, so it is handed
@@ -794,7 +769,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         Arc::new(
             GovernorConfigBuilder::default()
                 .key_extractor(SmartIpExtractor {
-                    trusted_cidrs: trusted_cidrs.clone(),
+                    trusted: trusted_proxies.clone(),
                 })
                 .per_second(period_secs)
                 .burst_size(burst)
@@ -2433,6 +2408,7 @@ pub async fn run(
         query_timeout_secs,
         write_timeout_secs,
         secure_cookies,
+        trusted_proxies: client_ip::TrustedProxies::new(trusted_cidrs.clone()),
         browse_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BROWSE_QUERIES)),
         expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(expensive_op_capacity())),
         #[cfg(feature = "text-search")]

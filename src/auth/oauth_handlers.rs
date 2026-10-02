@@ -14,6 +14,7 @@ use super::models::OauthProviderCreate;
 use super::oauth::{begin_oidc_flow, complete_oidc_flow, OAuthSessions};
 use super::saml::{complete_saml_flow, generate_sp_metadata};
 use super::secret::store_configured_secret;
+use crate::server::client_ip::ClientIp;
 use crate::server::AppState;
 
 // ─── Public provider listing (for login UI) ────────────────────────────────────
@@ -192,6 +193,7 @@ pub async fn admin_delete_provider(
 fn audit_sso_login_success(
     state: &AppState,
     headers: &axum::http::HeaderMap,
+    client_ip: ClientIp,
     provider_type: &str,
     slug: &str,
     access_token: &str,
@@ -205,7 +207,7 @@ fn audit_sso_login_success(
     if let Ok(claims) = crate::auth::jwt::verify_token(&state.jwt_config, access_token) {
         b = b.actor(claims.sub, claims.username, claims.role);
     }
-    b.ip_address = audit::client_ip(headers, None);
+    b.ip_address = client_ip.as_string();
     b.user_agent = audit::user_agent(headers);
     b.request_id = audit::request_id_from_headers(headers);
     state.audit.log(b);
@@ -217,6 +219,7 @@ fn audit_sso_login_success(
 fn audit_sso_login_failure(
     state: &AppState,
     headers: &axum::http::HeaderMap,
+    client_ip: ClientIp,
     provider_type: &str,
     slug: &str,
     reason: &str,
@@ -228,7 +231,7 @@ fn audit_sso_login_failure(
             "provider_slug": slug,
             "reason": reason,
         }));
-    b.ip_address = audit::client_ip(headers, None);
+    b.ip_address = client_ip.as_string();
     b.user_agent = audit::user_agent(headers);
     b.request_id = audit::request_id_from_headers(headers);
     state.audit.log(b);
@@ -306,12 +309,20 @@ pub async fn oidc_callback(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     axum::extract::Extension(sessions): axum::extract::Extension<OAuthSessions>,
+    client_ip: ClientIp,
     headers: axum::http::HeaderMap,
     Query(params): Query<OidcCallbackParams>,
 ) -> Response {
     if let Some(err) = params.error {
         let desc = params.error_description.as_deref().unwrap_or("");
-        audit_sso_login_failure(&state, &headers, "oidc", &slug, &format!("idp_error:{err}"));
+        audit_sso_login_failure(
+            &state,
+            &headers,
+            client_ip,
+            "oidc",
+            &slug,
+            &format!("idp_error:{err}"),
+        );
         return (
             StatusCode::BAD_REQUEST,
             format!("{{\"error\":\"{err}\",\"error_description\":\"{desc}\"}}"),
@@ -352,7 +363,14 @@ pub async fn oidc_callback(
                 .find_map(|p| p.trim().strip_prefix("oauth_state=").map(str::to_string))
         });
     if cookie_state.as_deref() != Some(state_key.as_str()) {
-        audit_sso_login_failure(&state, &headers, "oidc", &slug, "invalid_state_binding");
+        audit_sso_login_failure(
+            &state,
+            &headers,
+            client_ip,
+            "oidc",
+            &slug,
+            "invalid_state_binding",
+        );
         return (
             StatusCode::BAD_REQUEST,
             "{\"error\":\"Invalid or missing state binding\"}",
@@ -374,7 +392,7 @@ pub async fn oidc_callback(
     .await
     {
         Ok((access, refresh)) => {
-            audit_sso_login_success(&state, &headers, "oidc", &slug, &access);
+            audit_sso_login_success(&state, &headers, client_ip, "oidc", &slug, &access);
             // M-3: redirect to the SPA with tokens in the URL fragment (never server-logged).
             // The frontend OAuthCallback.svelte reads them from window.location.hash and
             // immediately calls history.replaceState to remove them from the URL bar.
@@ -386,7 +404,14 @@ pub async fn oidc_callback(
         }
         Err(e) => {
             tracing::error!("OIDC callback error for '{}': {e}", slug);
-            audit_sso_login_failure(&state, &headers, "oidc", &slug, "code_exchange_failed");
+            audit_sso_login_failure(
+                &state,
+                &headers,
+                client_ip,
+                "oidc",
+                &slug,
+                "code_exchange_failed",
+            );
             (StatusCode::UNAUTHORIZED, format!("{{\"error\":\"{e}\"}}")).into_response()
         }
     }
@@ -438,6 +463,7 @@ pub async fn saml_metadata(State(state): State<AppState>, Path(slug): Path<Strin
 pub async fn saml_acs(
     State(state): State<AppState>,
     Path(slug): Path<String>,
+    client_ip: ClientIp,
     headers: axum::http::HeaderMap,
     // `axum::Form` consumes the request body and so must be the LAST extractor.
     axum::Form(form): axum::Form<SamlAcsForm>,
@@ -445,7 +471,14 @@ pub async fn saml_acs(
     let provider = match state.auth_db.get_oauth_provider_by_slug(&slug) {
         Ok(Some(p)) if p.is_active && p.provider_type == "saml" => p,
         Ok(_) => {
-            audit_sso_login_failure(&state, &headers, "saml", &slug, "provider_not_found");
+            audit_sso_login_failure(
+                &state,
+                &headers,
+                client_ip,
+                "saml",
+                &slug,
+                "provider_not_found",
+            );
             return (StatusCode::NOT_FOUND, "{\"error\":\"Provider not found\"}").into_response();
         }
         Err(e) => {
@@ -469,7 +502,7 @@ pub async fn saml_acs(
     .await
     {
         Ok((access, refresh)) => {
-            audit_sso_login_success(&state, &headers, "saml", &slug, &access);
+            audit_sso_login_success(&state, &headers, client_ip, "saml", &slug, &access);
             Json(serde_json::json!({
                 "access_token": access,
                 "refresh_token": refresh,
@@ -480,7 +513,14 @@ pub async fn saml_acs(
         }
         Err(e) => {
             tracing::error!("SAML ACS error for '{}': {e}", slug);
-            audit_sso_login_failure(&state, &headers, "saml", &slug, "assertion_rejected");
+            audit_sso_login_failure(
+                &state,
+                &headers,
+                client_ip,
+                "saml",
+                &slug,
+                "assertion_rejected",
+            );
             (StatusCode::UNAUTHORIZED, format!("{{\"error\":\"{e}\"}}")).into_response()
         }
     }

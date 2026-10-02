@@ -12,6 +12,7 @@ use super::db::AuthDb;
 use super::jwt::{hash_token, verify_token, JwtConfig};
 use super::models::{AccessLevel, ApiScope, SystemRole};
 use super::oidc_rs::AuthExt;
+use crate::server::client_ip::ClientIp;
 
 /// Authenticated user extracted from JWT token or API token.
 #[derive(Debug, Clone)]
@@ -465,14 +466,14 @@ struct DenialContext {
 }
 
 impl DenialContext {
-    fn capture(req: &Request) -> Self {
+    fn capture(req: &Request, client_ip: ClientIp) -> Self {
         let user = req.extensions().get::<AuthenticatedUser>();
         Self {
             method: req.method().as_str().to_string(),
             path: req.uri().path().to_string(),
             actor_id: user.map(|u| u.user_id.clone()),
             actor_role: user.map(|u| u.role.as_str().to_string()),
-            ip: super::audit::client_ip(req.headers(), None),
+            ip: client_ip.as_string(),
             request_id: req
                 .extensions()
                 .get::<crate::server::RequestId>()
@@ -521,6 +522,7 @@ pub async fn require_auth(
     State(base_url): State<crate::server::BaseUrl>,
     State(audit): State<Arc<AuditLogger>>,
     #[cfg(feature = "ldp")] State(app_state): State<crate::server::AppState>,
+    client_ip: ClientIp,
     mut req: Request,
     next: Next,
 ) -> Result<Response, Response> {
@@ -536,7 +538,7 @@ pub async fn require_auth(
             req.method(),
             req.uri().path(),
         ) {
-            let ctx = DenialContext::capture(&req);
+            let ctx = DenialContext::capture(&req, client_ip);
             let resp = next.run(req).await;
             audit_forbidden(&audit, &ctx, &resp);
             return Ok(resp);
@@ -559,7 +561,7 @@ pub async fn require_auth(
 
     // Capture identity/endpoint context, then audit if the handler (or an inner
     // guard) denies with 403 (see `audit_forbidden`).
-    let ctx = DenialContext::capture(&req);
+    let ctx = DenialContext::capture(&req, client_ip);
     let resp = next.run(req).await;
     audit_forbidden(&audit, &ctx, &resp);
     Ok(resp)
@@ -575,6 +577,7 @@ pub async fn optional_auth(
     State(provider): State<crate::server::OidcProviderState>,
     State(base_url): State<crate::server::BaseUrl>,
     State(audit): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     mut req: Request,
     next: Next,
 ) -> Response {
@@ -600,7 +603,7 @@ pub async fn optional_auth(
 
     // Audit any downstream 403 — including anonymous cross-tenant read probes on
     // visibility-scoped routes that this middleware lets through unauthenticated.
-    let ctx = DenialContext::capture(&req);
+    let ctx = DenialContext::capture(&req, client_ip);
     let resp = next.run(req).await;
     audit_forbidden(&audit, &ctx, &resp);
     resp

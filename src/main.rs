@@ -160,7 +160,8 @@ struct Cli {
     registry_token: String,
 
     /// Comma-separated list of trusted reverse-proxy CIDRs whose X-Forwarded-For headers
-    /// are honoured for rate limiting (H-2). Empty = no proxy trust; direct TCP IP is used.
+    /// are believed when deriving the client IP for rate limiting, the audit log and the
+    /// guest LLM budget (H-2). Empty = no proxy trust; direct TCP IP is used.
     /// Example: "10.0.0.0/8,172.16.0.0/12"
     #[arg(long, env = "TRUSTED_PROXY_CIDRS", default_value = "")]
     trusted_proxy_cidrs: String,

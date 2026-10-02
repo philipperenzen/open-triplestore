@@ -38,6 +38,7 @@ use super::handlers::{
 use super::jwt::{self, JwtConfig};
 use super::middleware::AuthenticatedUser;
 use super::password;
+use crate::server::client_ip::ClientIp;
 use crate::server::{AppState, CookieConfig};
 
 /// Relying-party display name shown by authenticator UIs.
@@ -302,6 +303,7 @@ pub async fn register_finish(
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(state): State<AppState>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<RegisterFinishRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -393,7 +395,7 @@ pub async fn register_finish(
                 .actor(&user.id, &user.username, user.role.as_str())
                 .resource("passkey", &id)
                 .details(serde_json::json!({ "name": name }));
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -426,6 +428,7 @@ pub async fn delete_passkey(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Path(credential_id): Path<String>,
     Json(req): Json<DeletePasskeyRequest>,
@@ -454,7 +457,7 @@ pub async fn delete_passkey(
         let mut b = AuditEventBuilder::new(AuditEventType::PasskeyRemoved, AuditOutcome::Success)
             .actor(&user.id, &user.username, user.role.as_str())
             .resource("passkey", &credential_id);
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -496,16 +499,18 @@ pub async fn login_start(
 ///
 /// Every failure path returns one generic message (mirroring `login`) so the
 /// endpoint can't be used to probe which credentials or accounts exist.
+#[allow(clippy::too_many_arguments)] // axum extractors, one per capability
 pub async fn login_finish(
     State(db): State<Arc<AuthDb>>,
     State(jwt_config): State<Arc<JwtConfig>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(cookie_config): State<CookieConfig>,
     State(state): State<AppState>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<LoginFinishRequest>,
 ) -> Result<Response, (StatusCode, String)> {
-    let ip = audit::client_ip(&headers, None);
+    let ip = client_ip.as_string();
     let ua = audit::user_agent(&headers);
     let req_id = audit::request_id_from_headers(&headers);
     let unauthorized = || (StatusCode::UNAUTHORIZED, GENERIC_LOGIN_ERROR.to_string());

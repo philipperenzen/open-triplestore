@@ -355,29 +355,6 @@ impl AuditLogger {
     }
 }
 
-/// Best-effort extraction of client IP from typical proxy headers, falling
-/// back to the connect-info socket address. None of these are authoritative;
-/// they reflect what the request claimed at the audit moment.
-pub fn client_ip(
-    headers: &axum::http::HeaderMap,
-    connect_addr: Option<std::net::SocketAddr>,
-) -> Option<String> {
-    if let Some(v) = headers.get("x-forwarded-for").and_then(|h| h.to_str().ok()) {
-        if let Some(first) = v.split(',').next() {
-            let ip = first.trim();
-            if !ip.is_empty() {
-                return Some(ip.to_string());
-            }
-        }
-    }
-    if let Some(v) = headers.get("x-real-ip").and_then(|h| h.to_str().ok()) {
-        if !v.is_empty() {
-            return Some(v.to_string());
-        }
-    }
-    connect_addr.map(|a| a.ip().to_string())
-}
-
 pub fn user_agent(headers: &axum::http::HeaderMap) -> Option<String> {
     headers
         .get(axum::http::header::USER_AGENT)

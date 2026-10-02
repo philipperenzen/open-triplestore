@@ -279,7 +279,7 @@ See [rml.md](rml.md) for the full RML guide.
 | `SECURE_COOKIES` | `false` | Issue auth cookies with the `Secure` attribute (HTTPS only). **Set to `true` in any TLS deployment**; leave `false` for plain-HTTP local development. |
 | `SERVE_FRONTEND` | `true` | Serve the bundled web UI (frontend SPA) at `/`. Set `false` for a headless, API-only server — SPARQL, Graph Store and REST endpoints are unaffected. Also the `--serve-frontend` CLI flag. |
 | `CORS_ORIGINS` | *(empty — same-origin only)* | Comma-separated allowed origins, e.g. `https://app.example.com,https://www.example.com` |
-| `TRUSTED_PROXY_CIDRS` | *(empty — direct TCP IP)* | Comma-separated CIDRs of reverse proxies whose `X-Forwarded-For` is honoured for rate limiting, e.g. `10.0.0.0/8,172.16.0.0/12`. Leave empty when not behind a proxy. |
+| `TRUSTED_PROXY_CIDRS` | *(empty — direct TCP IP)* | Comma-separated CIDRs of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` is believed, e.g. `10.0.0.0/8,172.16.0.0/12`. The client IP derived this way keys the per-IP rate limits and the guest AI budget and is the IP recorded in the audit log. From any other peer the headers are ignored and the TCP peer address is the client. Leave empty when not behind a proxy; behind one, set it, or every client appears as the proxy. |
 | `OTS_EXTERNAL_REASONER` | *(unset)* | `konclude` routes `owl2-dl` materialisation through an external tableau reasoner after the native rules (experimental; see [owl2-dl.md](owl2-dl.md)). Unset: native rules only. |
 | `OTS_EXTERNAL_REASONER_BIN` | `Konclude` | Path to the reasoner binary when `OTS_EXTERNAL_REASONER` is set. |
 | `DCAT_PROFILE` | `dcat` | Catalogue application profile: `dcat`, `dcat-ap` or `dcat-ap-nl` (see [dcat.md](dcat.md)). |
