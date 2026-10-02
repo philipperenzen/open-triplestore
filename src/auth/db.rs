@@ -805,7 +805,11 @@ impl AuthDb {
                 mode TEXT NOT NULL DEFAULT 'materialize',
                 updated_at TEXT NOT NULL,
                 last_run_at TEXT,
-                last_triples INTEGER
+                last_triples INTEGER,
+                -- 1 consistent, 0 inconsistent, NULL not checked / unknown
+                last_consistent INTEGER,
+                -- JSON {rule, detail} of the last inconsistent run
+                last_inconsistency TEXT
             );
 
             CREATE TABLE IF NOT EXISTS endpoint_acl (
@@ -1381,6 +1385,9 @@ impl AuthDb {
             "ALTER TABLE users ADD COLUMN totp_secret_enc TEXT",
             "ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE users ADD COLUMN totp_last_step INTEGER NOT NULL DEFAULT 0",
+            // What the last entailment run found about consistency.
+            "ALTER TABLE dataset_entailment ADD COLUMN last_consistent INTEGER",
+            "ALTER TABLE dataset_entailment ADD COLUMN last_inconsistency TEXT",
         ];
         for sql in &upgrades {
             let _ = conn.execute_batch(sql); // ignore "duplicate column" / already-run errors

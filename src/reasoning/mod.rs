@@ -42,4 +42,4 @@ pub mod owl2_dl;
 #[cfg(feature = "owl2-dl")]
 pub mod konclude_bridge;
 
-pub use common::ReasoningReport;
+pub use common::{ReasoningError, ReasoningReport};

@@ -1,9 +1,10 @@
 # OWL 2 RL Profile
 
 OWL 2 RL (Rule Language) is a tractable sub-language of OWL 2 that maps cleanly to rule-based
-forward chaining.  It runs 63 of the 78 OWL 2 RL/RDF rules of the W3C specification (OWL 2
-Profiles §4.3, Tables 4–9); the 15 it does not run are listed below with their reason, and
-`tests/owl2_rl_conformance.rs` pins both lists against the specification's inventory.
+forward chaining.  It runs 75 of the 78 OWL 2 RL/RDF rules of the W3C specification (OWL 2
+Profiles §4.3, Tables 4–9); the 3 it does not run (the literal-subject datatype rules) are
+listed below with their reason, and `tests/owl2_rl_conformance.rs` pins both lists against the
+specification's inventory. `eq-ref` runs only when asked for (see [eq-ref](#eq-ref-is-opt-in)).
 
 > **Open Triplestore role names:** class definitions and class axioms = graph role **Model** (the T-Box); ABox content = graph role **Instances**.  Property definitions and relations (the R-Box) belong to the **Vocabulary** role, even though OWL groups them with the TBox for reasoning.  The RL reasoner reasons over the TBox+RBox schema together — the role split concerns where terms are stored and registered, not the reasoning semantics.
 
@@ -16,10 +17,25 @@ OWL 2 RL is suitable for:
 
 ## Rules Implemented
 
+Lists — `owl:intersectionOf`, `owl:unionOf`, `owl:oneOf`, `owl:propertyChainAxiom`,
+`owl:hasKey`, `owl:members`, `owl:distinctMembers` — may have any length and any members,
+blank-node class expressions included.
+
+### Equality Rules (eq-*)
+
+| Rule | Description |
+|------|-------------|
+| eq-ref | Every term is `owl:sameAs` itself — **opt-in**, see below |
+| eq-sym, eq-trans | `owl:sameAs` is symmetric and transitive |
+| eq-rep-s/p/o | Replace a term by an `owl:sameAs` term in subject, predicate or object position |
+| eq-diff1 | `x owl:sameAs y` and `x owl:differentFrom y` is an **inconsistency** (so is `x owl:differentFrom x`) |
+| eq-diff2, eq-diff3 | Two members of an `owl:AllDifferent` (`owl:members` / `owl:distinctMembers`) that are `owl:sameAs`, or one individual listed twice, is an **inconsistency** |
+
 ### Property Rules (prp-*)
 
 | Rule | Description |
 |------|-------------|
+| prp-ap | The built-in annotation properties (`rdfs:label`, `rdfs:comment`, `rdfs:seeAlso`, `rdfs:isDefinedBy`, `owl:deprecated`, `owl:versionInfo`, `owl:priorVersion`, `owl:backwardCompatibleWith`, `owl:incompatibleWith`) are `owl:AnnotationProperty` |
 | prp-dom | Property domain: `?p rdfs:domain ?c` → type subjects |
 | prp-rng | Property range: `?p rdfs:range ?c` → type objects |
 | prp-fp | Functional property: merge objects sharing same subject |
@@ -27,27 +43,33 @@ OWL 2 RL is suitable for:
 | prp-irp | Irreflexive property: detect `x P x` as inconsistency |
 | prp-symp | Symmetric property: if `x P y` then `y P x` |
 | prp-asyp | Asymmetric property: detect `x P y` AND `y P x` as inconsistency |
-| prp-trp | Transitive property: chain through three hops |
+| prp-trp | Transitive property: `x P y`, `y P z` → `x P z`; a cycle gives `x P x` |
 | prp-spo1 | SubPropertyOf: propagate triples through superproperty |
-| prp-spo2 | Property chain axiom: `r ∘ s ⊑ t` |
-| prp-eqp1/2 | EquivalentProperty — subsumed: `scm-eqp1/2` turn it into mutual `rdfs:subPropertyOf` and `prp-spo1` propagates |
-| prp-npa1/2 | NegativePropertyAssertion: inconsistency when assertion violated |
-| prp-key | hasKey: merge individuals sharing the values of **every** key property — composite keys `owl:hasKey ( ex:first ex:last )` included (single-property keys were the only ones that fired before) |
+| prp-spo2 | Property chain axiom `P ← P1 ∘ … ∘ Pn`, any length |
+| prp-eqp1/2 | EquivalentProperty: propagate triples both ways |
+| prp-pdw | `owl:propertyDisjointWith`: two disjoint properties linking the same pair is an **inconsistency** |
+| prp-adp | `owl:AllDisjointProperties`: two of its members linking the same pair is an **inconsistency** |
+| prp-inv1/2 | InverseOf: `x P y` ↔ `y Q x` |
+| prp-npa1/2 | NegativePropertyAssertion: inconsistency when assertion violated (the three NPA properties are enough; no `rdf:type` triple needed) |
+| prp-key | hasKey: merge named individuals sharing the values of **every** key property — composite keys and inverse key properties included |
 
 ### Class Rules (cls-*)
 
 | Rule | Description |
 |------|-------------|
-| cls-nothing2 | Detect instances of classes asserted disjoint with their supers |
-| cls-int1 | Intersection membership: `x type C1 ∧ C2` if `x type C1` and `x type C2` |
-| cls-int2 | Intersection decomposition: members of `C1 ∩ C2` are members of each |
-| cls-uni | Union: members of unions are members of `owl:Thing` |
+| cls-thing, cls-nothing1 | `owl:Thing` and `owl:Nothing` are `owl:Class` |
+| cls-nothing2 | An instance of `owl:Nothing` (asserted or derived) is an **inconsistency** |
+| cls-int1 | Intersection membership: `x type C` if `x` is a member of every class in `C owl:intersectionOf (C1 … Cn)` |
+| cls-int2 | Intersection decomposition: members of `C1 ∩ … ∩ Cn` are members of each |
+| cls-uni | Union: a member of any `Ci` is a member of `C owl:unionOf (C1 … Cn)` |
 | cls-com | ComplementOf inconsistency: `x type C` and `x type ¬C` |
-| cls-svf1/2 | SomeValuesFrom: existential witnesses |
+| cls-svf1/2 | SomeValuesFrom: `u P v`, `v type D` → `u type ∃P.D` (`D = owl:Thing`: any `u P v`) |
 | cls-avf | AllValuesFrom: propagate range restrictions |
-| cls-hv1/2 | HasValue: property assertions from value restrictions |
-| cls-maxc1/2 | MaxCardinality(0): detect cardinality violations |
-| cls-maxqc1-4 | QualifiedMaxCardinality: detect qualified cardinality violations |
+| cls-hv1/2 | HasValue: property assertions from value restrictions, and back |
+| cls-maxc1 | MaxCardinality 0: any `u P y` for an instance `u` is an **inconsistency** |
+| cls-maxc2 | MaxCardinality 1: two values of an instance are `owl:sameAs` |
+| cls-maxqc1-4 | Qualified MaxCardinality 0 (**inconsistency**) and 1 (`owl:sameAs`) |
+| cls-oo | OneOf: each listed individual is a member |
 
 ### Class Axiom Rules (cax-*)
 
@@ -66,25 +88,52 @@ OWL 2 RL is suitable for:
 | dt-not-type | A literal whose lexical form is not in the lexical space of its datatype (`"abc"^^xsd:integer`) is an **inconsistency**; every XSD-typed literal in scope is checked with the lexical rules SHACL's `sh:datatype` uses |
 
 `dt-type2`, `dt-eq` and `dt-diff` are not run: they type, equate or
-distinguish literals *as subjects*, which an RDF graph cannot hold; literal
-values are compared by SPARQL value semantics in every other rule.
+distinguish literals *as subjects*, which an RDF graph cannot hold.
 
 ### Schema Rules (scm-*)
 
 | Rule | Description |
 |------|-------------|
-| scm-cls | Every class is subClassOf `owl:Thing` |
+| scm-cls | Every class `C` is `C ⊑ C`, `C ≡ C`, `C ⊑ owl:Thing` and `owl:Nothing ⊑ C` |
 | scm-sco | SubClassOf transitivity |
 | scm-eqc1/2 | EquivalentClass ↔ mutual subClassOf |
+| scm-op, scm-dp | Every object / datatype property `P` is `P ⊑ P` and `P ≡ P` |
 | scm-spo | SubPropertyOf transitivity |
 | scm-eqp1/2 | EquivalentProperty ↔ mutual subPropertyOf |
 | scm-dom1/2 | Domain inheritance through property and class hierarchies |
 | scm-rng1/2 | Range inheritance through property and class hierarchies |
 | scm-hv | HasValue schema entailment |
 | scm-svf1/2 | SomeValuesFrom schema entailment |
-| scm-avf | AllValuesFrom schema entailment |
+| scm-avf1/2 | AllValuesFrom schema entailment |
 | scm-int | Intersection schema entailment |
 | scm-uni | Union schema entailment |
+
+### Inverse property expressions
+
+Wherever a rule reads a property — domain, range, characteristics, sub- and
+equivalent properties, chains, keys, disjoint properties, negative property
+assertions and the `owl:onProperty` of a restriction — it may be an inverse
+property expression `[ owl:inverseOf P ]`:
+
+```turtle
+ex:sibling owl:propertyChainAxiom ( ex:hasParent [ owl:inverseOf ex:hasParent ] ) .
+[ owl:inverseOf ex:hasParent ] rdfs:subPropertyOf ex:hasChild .
+ex:Pet rdfs:subClassOf [ owl:onProperty [ owl:inverseOf ex:owns ] ; owl:allValuesFrom ex:Owner ] .
+```
+
+The expression is a blank node, and no RDF triple can have a blank-node predicate, so a premise
+`u [inverseOf P] v` is read as `v P u` and a consequence `x [inverseOf P] y` is written as
+`y P x`.
+
+### eq-ref is opt-in
+
+`eq-ref` writes `x owl:sameAs x` for every subject, predicate and non-literal object: about one
+triple per term, and no other rule needs those triples to fire. It is off by default; turn it
+on with `Owl2RLReasoner::with_eq_ref(true)` or `"eq_ref": true` in the body of
+`POST /api/reasoning/materialize`. `sameas-off` skips it with the other equality rules. The
+inconsistencies that follow from it — `x owl:differentFrom x`, an individual listed twice in an
+`owl:AllDifferent` — are reported whether or not it runs. Without it, the only triples missing
+from the closure are the reflexive `owl:sameAs` ones.
 
 ### Rules not run
 
@@ -95,15 +144,7 @@ are not.
 
 | Rule | Why not |
 |------|---------|
-| eq-ref | reflexive `owl:sameAs` for every term of every triple: triples the graph, no other rule needs it |
-| eq-diff2, eq-diff3 | `owl:AllDifferent` inconsistency: not implemented |
-| prp-ap | the fixed list of annotation-property axiomatic triples: not implemented |
-| prp-eqp1, prp-eqp2 | subsumed by `scm-eqp1/2` + `prp-spo1` |
-| prp-pdw, prp-adp | `owl:propertyDisjointWith` / `owl:AllDisjointProperties` inconsistency: not implemented |
-| cls-thing | every individual typed `owl:Thing`: one triple per term, no other rule needs it |
-| cls-nothing1 | explicit `owl:Nothing` membership inconsistency: not implemented |
 | dt-type2, dt-eq, dt-diff | need literal subjects (see above) |
-| scm-op, scm-dp | reflexive `rdfs:subPropertyOf` / `owl:equivalentProperty` per property: no other rule needs it |
 
 ### Identity policy
 
@@ -141,7 +182,7 @@ Entailed triples go to `urn:entailment:owl2-rl`.
 ### Consistency Checking
 
 ```rust
-reasoner.check_consistency()?;   // returns Err(ReasoningError::Inconsistency(...)) if violated
+reasoner.check_consistency()?;   // Err(ReasoningError::Inconsistency { rule, detail }) if violated
 ```
 
 ## Example

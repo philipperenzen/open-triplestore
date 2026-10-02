@@ -14,6 +14,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **OWL 2 RL: `eq-ref` on request.** `Owl2RLReasoner::with_eq_ref(true)`, or
+  `"eq_ref": true` in the body of `POST /api/reasoning/materialize`, also writes
+  `x owl:sameAs x` for every subject, predicate and non-literal object. It is
+  off by default (about one triple per term); `sameas-off` skips it.
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -67,6 +71,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asks for, and re-pins; the store now tells everyone which datasets that applies to.
 
 ### Changed
+- **OWL 2 RL runs 75 of the 78 RL/RDF rules (was 63), and lists and inverse
+  properties work everywhere.** New: `eq-diff2`/`eq-diff3`
+  (`owl:AllDifferent`), `prp-pdw` (`owl:propertyDisjointWith`), `prp-adp`
+  (`owl:AllDisjointProperties`) — inconsistencies, reported as a 422 with their
+  rule id — and `prp-ap`, `cls-thing`, `cls-nothing1`, `scm-op`, `scm-dp`,
+  `prp-eqp1/2`, `eq-ref` (opt-in). `scm-cls` now derives all four of its
+  consequences (`C ≡ C` and `owl:Nothing ⊑ C` were missing). `cls-int1`,
+  `prp-spo2` and `prp-key` match lists of any length (intersections and chains
+  of three or more never fired); `scm-int`, `scm-uni` and `cax-adc` no longer
+  skip blank-node members. An inverse property expression `[ owl:inverseOf P ]`
+  works in domains, ranges, characteristics, sub-/equivalent properties, chains,
+  keys and restrictions. Before, those rules matched nothing, and an inverse key
+  property was dropped from the key, so individuals merged on the remaining
+  properties alone. `prp-npa1/2` no longer require an
+  `rdf:type owl:NegativePropertyAssertion` triple. `prp-trp` keeps the reflexive
+  triple a cycle derives. `x owl:differentFrom x` is an inconsistency. The
+  duplicate `prp-hv1/2` copies of `cls-hv1/2` are gone. Every run now adds the
+  13 axiomatic triples (9 annotation properties, `owl:Thing`/`owl:Nothing` as
+  classes) plus their `scm-cls` consequences, so an empty store's
+  materialisation reports 48 triples instead of 32. The only rules not run are
+  `dt-type2`, `dt-eq` and `dt-diff`.
+- **`ReasoningError::Inconsistency` names its rule.** The library variant is now
+  `Inconsistency { rule, detail }` (it was `Inconsistency(String)`), and
+  `ReasoningError::NotConverged { regime, iterations }` is new. Code that
+  matched `Inconsistency(_)` matches `Inconsistency { .. }`.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were
@@ -93,6 +122,36 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an existing tag. See `docs/release-process.md`.
 
 ### Fixed
+- **Reasoners see their own consequences on an unscoped run.** Without
+  `dataset` or `source_graphs`, the OWL 2 RL, EL and DL rules read only the
+  unnamed default graph while every consequence went to the named target
+  graph, so a rule whose premises were both derived never fired: the third hop
+  of a transitive property, a three-link `owl:sameAs` chain,
+  `owl:equivalentProperty` propagation (`prp-eqp1/2` are subsumed only once
+  `prp-spo1` sees what `scm-eqp1/2` derived), a range reached through a
+  sub-property, and every consistency check on derived facts (`eq-diff1` after
+  `prp-fp`, `cls-nothing2` after `cax-sco`, `prp-irp`, `prp-asyp`, `cls-com`,
+  `cls-maxqc1/2`). Unscoped runs now read the default graph together with the
+  target graph (`TripleStore::update_over` / `query_over`). Scoped and
+  per-dataset runs already read their target graph and are unchanged. (OWL 2
+  QL computes its closure in memory and never reads its own output, so its
+  reads are unchanged.) An
+  unscoped run can therefore derive more than before, and a store that used to
+  pass may now be reported inconsistent.
+- **An inconsistent ontology is a 422, not a 500.** `POST
+  /api/reasoning/materialize` and `PUT /api/datasets/{id}/entailment` answer
+  `422` with `{consistent: false, rule, detail, regime, target_graph}`, naming
+  the check that fired; the consequences derived before it stay in the target
+  graph. A successful run reports `consistent` (`true` for `owl2-rl` and
+  `owl2-dl`, `null` for a regime without inconsistency rules), and
+  `GET /api/datasets/{id}/entailment` records what the last run found
+  (`consistent`, `inconsistency`).
+- **A reasoning run that hits the iteration limit fails instead of returning a
+  partial closure.** RDFS, OWL 2 RL, EL and DL stopped silently after 500
+  fixed-point rounds and reported success. They now fail with
+  `ReasoningError::NotConverged`, a `422` with `converged: false` over HTTP.
+- **`POST /api/reasoning/materialize` no longer blocks an async worker.** The
+  rules run on the blocking pool, as the per-dataset run already did.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if

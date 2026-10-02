@@ -9891,18 +9891,100 @@ struct MaterializeRequest {
     /// plus the model version it conforms to (`GET …/conformance`). Any
     /// `source_graphs` are added on top.
     dataset: Option<String>,
+    /// `owl2-rl` only: also run eq-ref, writing `x owl:sameAs x` for every
+    /// term (about one triple per term). Default `false`.
+    #[serde(default)]
+    eq_ref: bool,
+}
+
+/// The HTTP error for a failed reasoning run. An inconsistent ontology and a
+/// run that did not reach its fixed point are facts about the caller's data,
+/// so they are a 422 whose body says what happened (the derived triples stay
+/// in `target`); anything else is a server fault.
+pub(crate) fn reasoning_failure(
+    e: crate::reasoning::ReasoningError,
+    regime: &str,
+    target: &str,
+) -> AppError {
+    use crate::reasoning::ReasoningError;
+    match e {
+        ReasoningError::Inconsistency { rule, detail } => {
+            AppError::Unprocessable(serde_json::json!({
+                "error": format!("the ontology is inconsistent ({rule}): {detail}"),
+                "consistent": false,
+                "rule": rule,
+                "detail": detail,
+                "regime": regime,
+                "target_graph": target,
+            }))
+        }
+        ReasoningError::NotConverged { iterations, .. } => {
+            AppError::Unprocessable(serde_json::json!({
+                "error": format!(
+                    "{regime} did not reach a fixed point within {iterations} iterations; \
+                     the target graph holds only part of the closure"
+                ),
+                "converged": false,
+                "iterations": iterations,
+                "regime": regime,
+                "target_graph": target,
+            }))
+        }
+        other => AppError::Internal(other.to_string()),
+    }
 }
 
 /// Run `regime` over `sources` (None = the whole store) into `target`.
 /// Shared by `POST /api/reasoning/materialize` and the per-dataset
-/// materialisation (`crate::entailment`).
+/// materialisation (`crate::entailment`). `Ok(None)`: unknown regime.
 pub(crate) fn run_regime(
     state: &AppState,
     regime: &str,
     sources: Option<Vec<String>>,
     target: &str,
     identity: crate::reasoning::identity::IdentityPolicy,
+    options: RegimeOptions,
 ) -> Result<Option<crate::reasoning::ReasoningReport>, AppError> {
+    run_reasoner_with(state, regime, sources, target, identity, options)
+        .map_err(|e| reasoning_failure(e, regime, target))
+}
+
+/// Per-run switches a regime may honour; the defaults are what every
+/// per-dataset run uses.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct RegimeOptions {
+    /// `owl2-rl`: run eq-ref (`Owl2RLReasoner::with_eq_ref`).
+    pub eq_ref: bool,
+}
+
+/// [`run_regime`] with the reasoner's own error, for a caller that records
+/// what the run found (`crate::entailment`).
+pub(crate) fn run_reasoner(
+    state: &AppState,
+    regime: &str,
+    sources: Option<Vec<String>>,
+    target: &str,
+    identity: crate::reasoning::identity::IdentityPolicy,
+) -> Result<Option<crate::reasoning::ReasoningReport>, crate::reasoning::ReasoningError> {
+    run_reasoner_with(
+        state,
+        regime,
+        sources,
+        target,
+        identity,
+        RegimeOptions::default(),
+    )
+}
+
+/// [`run_reasoner`] with explicit [`RegimeOptions`].
+pub(crate) fn run_reasoner_with(
+    state: &AppState,
+    regime: &str,
+    sources: Option<Vec<String>>,
+    target: &str,
+    identity: crate::reasoning::identity::IdentityPolicy,
+    options: RegimeOptions,
+) -> Result<Option<crate::reasoning::ReasoningReport>, crate::reasoning::ReasoningError> {
     let _sources: Vec<String> = sources.clone().unwrap_or_default();
     // Apply the scope to whichever reasoner the regime selects.
     // Unused when every regime feature is off (`--no-default-features`).
@@ -9918,7 +10000,7 @@ pub(crate) fn run_regime(
     }
     // Silence unused-variable warnings for the case where no reasoning feature is
     // compiled in (only the `_ => Err(...)` arm fires, leaving state/target unused).
-    let _ = (&state, target, identity);
+    let _ = (&state, target, identity, options);
 
     // Match returns Some(report) for a recognised regime or None for an unknown one.
     // Both branches are always present in the match so no unreachable-code warning fires.
@@ -9929,40 +10011,29 @@ pub(crate) fn run_regime(
                 &state.store,
                 target
             ));
-            Some(
-                m.materialize()
-                    .map_err(|e| AppError::Internal(e.to_string()))?,
-            )
+            Some(m.materialize()?)
         }
         #[cfg(feature = "owl2-rl")]
         "owl2-rl" => {
             let m = scoped!(crate::reasoning::owl2_rl::Owl2RLReasoner::new(&state.store)
                 .with_target(target)
-                .with_identity_policy(identity));
-            Some(
-                m.materialize()
-                    .map_err(|e| AppError::Internal(e.to_string()))?,
-            )
+                .with_identity_policy(identity)
+                .with_eq_ref(options.eq_ref));
+            Some(m.materialize()?)
         }
         #[cfg(feature = "owl2-el")]
         "owl2-el" => {
             let m = scoped!(
                 crate::reasoning::owl2_el::El2Classifier::new(&state.store).with_target(target)
             );
-            Some(
-                m.classify()
-                    .map_err(|e| AppError::Internal(e.to_string()))?,
-            )
+            Some(m.classify()?)
         }
         #[cfg(feature = "owl2-ql")]
         "owl2-ql" => {
             let rw = scoped!(crate::reasoning::owl2_ql::QLQueryRewriter::new(
                 &state.store
             ));
-            Some(
-                rw.materialize_tbox()
-                    .map_err(|e| AppError::Internal(e.to_string()))?,
-            )
+            Some(rw.materialize_tbox()?)
         }
         #[cfg(feature = "owl2-dl")]
         "owl2-dl" => {
@@ -9991,11 +10062,7 @@ pub(crate) fn run_regime(
                 _ => Box::new(NativeTableauStub),
             };
             let bridge = ExternalReasonerBridge::new(reasoner).with_identity_policy(identity);
-            Some(
-                bridge
-                    .materialize(&state.store, &_sources, target)
-                    .map_err(|e| AppError::Internal(e.to_string()))?,
-            )
+            Some(bridge.materialize(&state.store, &_sources, target)?)
         }
         _ => None,
     };
@@ -10025,20 +10092,6 @@ async fn reasoning_materialize(
     // target graph (admins bypass; server-owned entailment graphs therefore need
     // an explicit grant or admin).
     require_graph_write(&state, Some(&user), Some(target.as_str()))?;
-
-    // Entailment graphs are derived data and must be rebuilt from scratch each
-    // run. Materialisation only ever INSERTed, so after a source triple was
-    // deleted or edited its stale consequences stayed in `urn:entailment:*`
-    // forever — and were still folded into every `?entailment=` query. Only the
-    // server-owned entailment namespace is cleared: a caller may legitimately
-    // target one of their own graphs, and clearing that would destroy data.
-    if target.starts_with("urn:entailment:") {
-        let clear = format!("CLEAR SILENT GRAPH <{target}>");
-        state
-            .store
-            .update(&clear)
-            .map_err(|e| AppError::Internal(format!("clearing <{target}>: {e}")))?;
-    }
 
     // Bound concurrent expensive operations so a burst of reasoning calls can't
     // occupy every Tokio worker and starve the runtime (held until handler return).
@@ -10119,7 +10172,35 @@ async fn reasoning_materialize(
     } else {
         None
     };
-    let report = run_regime(&state, &body.regime, sources.clone(), &target, identity)?;
+    // The rules are synchronous store work that can run for minutes: keep it
+    // off the async workers, as the per-dataset run already does.
+    let report = {
+        let state = state.clone();
+        let regime = body.regime.clone();
+        let sources = sources.clone();
+        let target = target.clone();
+        let options = RegimeOptions {
+            eq_ref: body.eq_ref,
+        };
+        tokio::task::spawn_blocking(move || {
+            // Entailment graphs are derived data and must be rebuilt from
+            // scratch each run. Materialisation only ever INSERTed, so after a
+            // source triple was deleted or edited its stale consequences stayed
+            // in `urn:entailment:*` forever — and were still folded into every
+            // `?entailment=` query. Only the server-owned entailment namespace
+            // is cleared: a caller may legitimately target one of their own
+            // graphs, and clearing that would destroy data.
+            if target.starts_with("urn:entailment:") {
+                state
+                    .store
+                    .update(&format!("CLEAR SILENT GRAPH <{target}>"))
+                    .map_err(|e| AppError::Internal(format!("clearing <{target}>: {e}")))?;
+            }
+            run_regime(&state, &regime, sources, &target, identity, options)
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("reasoning task: {e}")))??
+    };
 
     match report {
         Some(r) => Ok((
@@ -10132,6 +10213,10 @@ async fn reasoning_materialize(
                 "target_graph": r.target_graph,
                 // The graphs the rules read (null: the unnamed default graph).
                 "sources": sources,
+                // true: the regime checked consistency and found none violated;
+                // null: the regime has no inconsistency rules (an inconsistent
+                // run is a 422, never a 200).
+                "consistent": crate::reasoning::common::checks_consistency(&r.regime).then_some(true),
             })),
         )
             .into_response()),

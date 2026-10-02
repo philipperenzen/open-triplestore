@@ -68,12 +68,15 @@ fn dl_empty_store_ok() {
         .materialize()
         .expect("an empty store is trivially consistent");
     assert_eq!(report.regime, "owl2-dl");
-    // OWL 2 RL's dt-type1 holds for every ontology, the empty one included: the
-    // 32 datatypes of the RL datatype map are rdfs:Datatypes. Nothing else can
-    // be derived from nothing.
+    // The OWL 2 RL axiomatic rules hold for every ontology, the empty one included:
+    // the 32 datatypes of the RL datatype map are rdfs:Datatypes (dt-type1), the 9
+    // built-in annotation properties are owl:AnnotationProperty (prp-ap), and
+    // owl:Thing and owl:Nothing are classes (cls-thing, cls-nothing1), which scm-cls
+    // makes their own sub- and equivalent classes, with owl:Nothing ⊑ owl:Thing
+    // (5 distinct triples). Nothing else can be derived from nothing.
     assert_eq!(
-        report.triples_added, 32,
-        "only the dt-type1 datatype-map axioms are derived from nothing"
+        report.triples_added, 48,
+        "only the RL axiomatic triples are derived from nothing"
     );
 }
 
@@ -431,7 +434,7 @@ fn dl_negative_object_assertion_violated() {
     "#,
     );
     let result = Owl2DLReasoner::new(&store).materialize();
-    assert!(matches!(result, Err(ReasoningError::Inconsistency(_))));
+    assert!(matches!(result, Err(ReasoningError::Inconsistency { .. })));
 }
 
 #[test]
@@ -448,7 +451,7 @@ fn dl_negative_data_assertion_violated() {
     "#,
     );
     let result = Owl2DLReasoner::new(&store).materialize();
-    assert!(matches!(result, Err(ReasoningError::Inconsistency(_))));
+    assert!(matches!(result, Err(ReasoningError::Inconsistency { .. })));
 }
 
 #[test]
@@ -736,7 +739,7 @@ fn dl_rl_disjoint_inconsistency_fires() {
     "#,
     );
     let result = Owl2DLReasoner::new(&store).materialize();
-    assert!(matches!(result, Err(ReasoningError::Inconsistency(_))));
+    assert!(matches!(result, Err(ReasoningError::Inconsistency { .. })));
 }
 
 #[test]
