@@ -6,6 +6,34 @@ short-lived, signed assertion; every instance keeps deciding for itself what
 that identity may see. This is the pattern of the Dutch DSGO trust framework
 (and of dataspaces generally): federated identity, local authorisation.
 
+## `SERVICE`: what a call returns
+
+`SERVICE <endpoint> { P }` sends `P` to the endpoint as a stand-alone
+`SELECT`, reads the solutions and joins them with the rest of the query
+locally (SPARQL 1.1 Federated Query §3.2). Local bindings are not pushed to
+the remote, and `SERVICE ?var` (a variable endpoint) is not supported.
+
+A call either returns the remote's complete answer or **fails**. It fails
+when:
+
+- the endpoint is not covered by `OTS_REMOTE_ALLOWLIST` (or no allowlist is
+  set);
+- the request errors, the remote answers a non-2xx status, or the response
+  is not a SPARQL results document with solutions;
+- it takes longer than `OTS_REMOTE_TIMEOUT_SECS` (default 10);
+- the response body exceeds `OTS_REMOTE_MAX_BYTES` (default 64 MiB) — the
+  body is read as a stream and the call stops as soon as it passes the limit;
+- the result has more than `OTS_SERVICE_MAX_ROWS` rows (default 10 000).
+
+A failed call makes the query fail with an error naming the cause, the
+variable to raise included. Under `SERVICE SILENT` it instead yields the
+single solution with no bindings (Ω0), so the rest of the query runs as if
+the remote had matched once without binding anything. A result over a cap is
+never cut short: a truncated `SERVICE` result would silently change the
+answer of the query around it (a `COUNT`, a `MINUS`, a missing join
+partner), and nothing would tell the caller. To get past a cap, raise it or
+narrow the pattern inside `SERVICE`.
+
 ## Outbound: acting for a user at a peer
 
 ```

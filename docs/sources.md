@@ -219,7 +219,8 @@ one `CONSTRUCT`, loaded in one pass so blank nodes keep their identity — as a
 run with `mode: snapshot`: gated against the bound dataset's shapes, swapped
 in atomically, listed with the mapped runs, reviewable and promotable, with
 `prov:used <urn:source:…>` on its trail and no `mapping` on its record. The
-body is fetched whole; a very large virtual graph is better mapped than
+body is fetched whole, up to `OTS_REMOTE_MAX_BYTES` (64 MiB by default; a
+larger body fails the run); a very large virtual graph is better mapped than
 snapshotted.
 
 ```bash
@@ -231,7 +232,8 @@ curl -X POST http://localhost:7878/api/sources/assets-vkg/runs -H "Authorization
 resolves to the source's endpoint with its credential — the query names no
 URL and no secret — so a virtual source is also queryable without
 materialising anything. Federation's own rules apply unchanged: the endpoint
-must be allowlisted, the remote timeout and row cap hold.
+must be allowlisted, and the remote timeout, body limit and row cap hold —
+a result over a cap fails the call rather than being truncated.
 
 Because such a query is sent with the source's account, using it is the
 source's to share. The source resolves for:

@@ -106,6 +106,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so an entry created by an earlier version with an admin default, or edited
   to one, creates `user` accounts. `guest` is kept. Grant admin per account
   through `OIDC_ROLE_CLAIM_MAP` or the UI.
+- **A `SERVICE` result over a cap fails instead of being truncated.** A remote
+  result with more than `OTS_SERVICE_MAX_ROWS` rows used to be cut to the cap
+  and joined as if it were the whole answer, which silently changed the result
+  of the query around it. It is now a failed invocation, like a refused
+  endpoint or a timeout: the query errors with a message naming
+  `OTS_SERVICE_MAX_ROWS`, and under `SERVICE SILENT` the clause yields the
+  single empty solution (SPARQL 1.1 Federated Query §3.2). Every outbound
+  response body — `SERVICE` results, virtual-datasource queries and snapshots,
+  LDES pages — is now read as a stream under a new limit,
+  `OTS_REMOTE_MAX_BYTES` (default 64 MiB), and a body over it fails the same
+  way; before, bodies were read whole with no limit. A query or a snapshot
+  that relied on truncation, or on a body above 64 MiB, now fails: raise the
+  variable or narrow the pattern. See docs/federation.md.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were

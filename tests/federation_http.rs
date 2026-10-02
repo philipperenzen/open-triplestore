@@ -1,7 +1,8 @@
 //! SPARQL federation behind an allowlist (6.4). `SERVICE` used to error
 //! unconditionally (oxigraph built without its HTTP client, as an SSRF
 //! mitigation). It now reaches endpoints whose prefix is in
-//! `OTS_REMOTE_ALLOWLIST`, with a timeout and a row cap, and nothing else.
+//! `OTS_REMOTE_ALLOWLIST`, with a timeout, a row cap and a byte cap (both a
+//! failed invocation when exceeded, never a truncation), and nothing else.
 //!
 //! The "remote" is a second instance of this server on a local listener,
 //! holding a public dataset; the local store federates to it.
@@ -121,15 +122,38 @@ async fn service_is_allowlisted_timed_and_capped() {
         "an endpoint outside the allowlist is refused"
     );
 
-    // 4. The row cap truncates.
+    // 4. A result over the row cap is a failed invocation, not a truncated
+    //    answer: an error naming the knob, and Ω0 under SERVICE SILENT.
     std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
     std::env::set_var("OTS_SERVICE_MAX_ROWS", "2");
-    assert_eq!(
-        count(&local, &q).unwrap(),
-        2,
-        "capped at OTS_SERVICE_MAX_ROWS"
+    let err = count(&local, &q).expect_err("three rows exceed a cap of two");
+    assert!(
+        err.contains("OTS_SERVICE_MAX_ROWS"),
+        "the error names the knob: {err}"
     );
+    assert_eq!(
+        count(&local, &silent).unwrap(),
+        1,
+        "SERVICE SILENT over the cap yields the single empty solution"
+    );
+    std::env::set_var("OTS_SERVICE_MAX_ROWS", "3");
+    assert_eq!(count(&local, &q).unwrap(), 3, "a result at the cap passes");
     std::env::remove_var("OTS_SERVICE_MAX_ROWS");
+
+    // 4b. The same for a response body over OTS_REMOTE_MAX_BYTES.
+    std::env::set_var("OTS_REMOTE_MAX_BYTES", "64");
+    let err = count(&local, &q).expect_err("the results document exceeds 64 bytes");
+    assert!(
+        err.contains("OTS_REMOTE_MAX_BYTES"),
+        "the error names the knob: {err}"
+    );
+    assert_eq!(
+        count(&local, &silent).unwrap(),
+        1,
+        "SERVICE SILENT over the byte cap yields the single empty solution"
+    );
+    std::env::remove_var("OTS_REMOTE_MAX_BYTES");
+    assert_eq!(count(&local, &q).unwrap(), 3, "the default limit admits it");
 
     // 5. The service description advertises federation only with an allowlist.
     async fn describe(app: axum::Router, token: &str) -> String {

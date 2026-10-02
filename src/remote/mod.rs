@@ -12,9 +12,11 @@
 //! `https://sparql.example.org` admits neither
 //! `https://sparql.example.org.evil.net/` nor
 //! `https://sparql.example.org@evil.net/`. Every request also gets a
-//! timeout (`OTS_REMOTE_TIMEOUT_SECS`, default 10) and a result cap
-//! (`OTS_SERVICE_MAX_ROWS`, default 10 000) so a slow or huge remote cannot
-//! stall or flood a local query.
+//! timeout (`OTS_REMOTE_TIMEOUT_SECS`, default 10) and a body limit
+//! (`OTS_REMOTE_MAX_BYTES`, default 64 MiB), and a `SERVICE` result a row cap
+//! (`OTS_SERVICE_MAX_ROWS`, default 10 000), so a slow or huge remote cannot
+//! stall or flood a local query. Exceeding a limit fails the request; nothing
+//! is ever cut short and passed on as if it were the whole answer.
 //!
 //! The allowlist is read on every call rather than cached: tests and operators
 //! change it at runtime, and the cost is one environment read.
@@ -26,6 +28,7 @@ use std::time::Duration;
 pub const ALLOWLIST_ENV: &str = "OTS_REMOTE_ALLOWLIST";
 pub const TIMEOUT_ENV: &str = "OTS_REMOTE_TIMEOUT_SECS";
 pub const MAX_ROWS_ENV: &str = "OTS_SERVICE_MAX_ROWS";
+pub const MAX_BYTES_ENV: &str = "OTS_REMOTE_MAX_BYTES";
 
 /// The raw allowlist entries, trimmed, empty entries dropped.
 pub fn allowlist() -> Vec<String> {
@@ -168,6 +171,14 @@ pub fn max_rows() -> usize {
         .unwrap_or(10_000)
 }
 
+pub fn max_bytes() -> usize {
+    std::env::var(MAX_BYTES_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(64 * 1024 * 1024)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RemoteError {
     #[error("remote access to <{0}> is not allowed: it is not in {ALLOWLIST_ENV}")]
@@ -176,6 +187,41 @@ pub enum RemoteError {
     Request { url: String, reason: String },
     #[error("remote <{url}> answered {status}")]
     Status { url: String, status: u16 },
+    #[error(
+        "remote <{url}> answered more than {limit} bytes; raise {MAX_BYTES_ENV} \
+         or narrow the request"
+    )]
+    TooLarge { url: String, limit: usize },
+}
+
+/// Read a response body as UTF-8 text, a chunk at a time, failing as soon as
+/// it exceeds `OTS_REMOTE_MAX_BYTES` — before it is all in memory, and before
+/// anything downstream can mistake a prefix for the whole document. RDF and
+/// SPARQL results formats are UTF-8; invalid sequences are replaced, as
+/// `Response::text` would.
+async fn body_text(url: &str, mut resp: reqwest::Response) -> Result<String, RemoteError> {
+    let limit = max_bytes();
+    let too_large = || RemoteError::TooLarge {
+        url: url.to_string(),
+        limit,
+    };
+    if resp.content_length().is_some_and(|n| n > limit as u64) {
+        return Err(too_large());
+    }
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| RemoteError::Request {
+        url: url.to_string(),
+        reason: e.to_string(),
+    })? {
+        if buf.len() + chunk.len() > limit {
+            return Err(too_large());
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(match String::from_utf8(buf) {
+        Ok(s) => s,
+        Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+    })
 }
 
 fn runtime() -> &'static tokio::runtime::Runtime {
@@ -230,7 +276,8 @@ pub(crate) enum Auth<'a> {
 
 /// `POST` a SPARQL query to `endpoint` and return the body as text in the
 /// format `accept` asks for — results JSON for a SELECT/ASK, N-Triples for
-/// a CONSTRUCT. Behind the allowlist, with the module's timeout.
+/// a CONSTRUCT. Behind the allowlist, with the module's timeout and body
+/// limit.
 pub(crate) fn post_sparql_blocking(
     endpoint: &str,
     query: &str,
@@ -272,10 +319,7 @@ pub(crate) fn post_sparql_blocking(
                 status: status.as_u16(),
             });
         }
-        resp.text().await.map_err(|e| RemoteError::Request {
-            url: endpoint,
-            reason: e.to_string(),
-        })
+        body_text(&endpoint, resp).await
     })
 }
 
@@ -324,10 +368,7 @@ pub fn get_rdf_blocking_with_auth(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("text/turtle")
             .to_string();
-        let body = resp.text().await.map_err(|e| RemoteError::Request {
-            url,
-            reason: e.to_string(),
-        })?;
+        let body = body_text(&url, resp).await?;
         Ok((ct, body))
     })
 }
