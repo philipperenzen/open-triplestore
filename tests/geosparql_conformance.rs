@@ -3350,19 +3350,20 @@ fn is_false(r: Option<String>) -> bool {
 #[test]
 fn ogc_req17_wkt_literal_empty_is_the_empty_geometry() {
     let s = ts();
-    for empty in [
-        "\"\"^^geo:wktLiteral",
-        "\"<http://www.opengis.net/def/crs/EPSG/0/28992>\"^^geo:wktLiteral",
+    // Each beside a point in its own CRS (CRS84 POINT(1 1) has no RD New coordinates).
+    for (empty, point) in [
+        ("\"\"^^geo:wktLiteral".to_string(), wkt("POINT(1 1)")),
+        (
+            "\"<http://www.opengis.net/def/crs/EPSG/0/28992>\"^^geo:wktLiteral".to_string(),
+            rd("POINT(155000 463000)"),
+        ),
     ] {
         assert!(
             geof_opt(&s, &format!("geof:envelope({empty})")).is_some(),
             "{empty} is a geometry"
         );
         assert!(
-            is_true(geof_opt(
-                &s,
-                &format!("geof:sfDisjoint({empty}, {})", wkt("POINT(1 1)"))
-            )),
+            is_true(geof_opt(&s, &format!("geof:sfDisjoint({empty}, {point})"))),
             "{empty} is disjoint from everything"
         );
         assert_eq!(geof_num(&s, &format!("geof:area({empty})")), 0.0);
@@ -3461,7 +3462,10 @@ fn ogc_req43_relate_harmonises_operand_crs() {
         &s,
         &format!("geof:relate({rd_point}, {wgs_box}, \"0FFFFF212\")"),
     );
-    assert!(is_true(inside), "RD point inside the CRS84 box: {inside:?}");
+    assert!(
+        is_true(inside.clone()),
+        "RD point inside the CRS84 box: {inside:?}"
+    );
     let gml = gml_point("EPSG:28992", "121800 487400");
     assert!(is_true(geof_opt(
         &s,
