@@ -99,4 +99,8 @@ pub fn dataset_version_auth_routes() -> Router<AppState> {
             "/api/admin/versions/sweep",
             post(handlers::admin_sweep_orphans),
         )
+        .route(
+            "/api/datasets/:dataset_id/settings",
+            axum::routing::put(crate::dataset_settings::put_settings),
+        )
 }

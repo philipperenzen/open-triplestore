@@ -169,12 +169,17 @@ pub fn build(
             + c.change_count()
     });
     let _w = store.begin_write().map_err(store_err)?;
+    // The cheaper end first; either end that holds will do, so a base whose
+    // snapshot was tampered with does not cost a version the live graphs and
+    // their chain can still rebuild, nor the reverse.
     let built = match (forward.intact, live_cost) {
         (true, Some(live)) if live < base_cost => {
             build_backward(store, record, backward.as_ref(), head)
                 .or_else(|_| build_forward(store, record, &base, &forward))
         }
-        (true, _) => build_forward(store, record, &base, &forward),
+        (true, Some(_)) => build_forward(store, record, &base, &forward)
+            .or_else(|_| build_backward(store, record, backward.as_ref(), head)),
+        (true, None) => build_forward(store, record, &base, &forward),
         (false, Some(_)) => build_backward(store, record, backward.as_ref(), head),
         (false, None) => Err(BuildError::Broken(
             forward

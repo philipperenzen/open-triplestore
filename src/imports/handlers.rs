@@ -484,7 +484,13 @@ pub async fn bulk_import(
 
     let text_state = state.clone();
     let text_outcome = outcome.clone();
+    let skolem = meta
+        .dataset_id
+        .as_deref()
+        .filter(|d| crate::dataset_settings::get(&state.auth_db, d).skolem)
+        .map(|_| state.base_url.to_string());
     let mut result = tokio::task::spawn_blocking(move || {
+        let _skolem = crate::store::engine::SkolemImportGuard::set(skolem);
         let studio = crate::shacl_studio::store::ShaclStudioStore::new(gate_db.pool());
         let gate_ctx = crate::shacl_studio::gate::GateContext {
             main_store: &gate_store,

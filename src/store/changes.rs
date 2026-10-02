@@ -2066,10 +2066,6 @@ impl NetDelta {
         }
     }
 
-    pub fn len(&self) -> usize {
-        self.added.len() + self.removed.len()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.added.is_empty() && self.removed.is_empty()
     }
@@ -2581,7 +2577,7 @@ mod tests {
         assert!(net.removed.is_empty(), "q9 went and came back");
         let inverse = net.clone().inverse();
         assert_eq!(inverse.removed, vec![q(2, Some(a))]);
-        assert_eq!(net.len(), 1);
+        assert_eq!(net.added.len() + net.removed.len(), 1);
     }
 
     #[test]

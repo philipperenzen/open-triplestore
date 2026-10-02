@@ -26,6 +26,16 @@ closure), timestamped. An entity that disappears becomes a *tombstone* member
 (`ots:Tombstone`). Writes to datasets that have not enabled a stream cost
 nothing extra.
 
+How a write is compared depends on the [change log](/docs/versioning). With
+it on, the write's own rows name what changed: their IRI subjects, plus the
+entity a changed blank-node subtree hangs from (walked up at most
+`OTS_LDES_BNODE_DEPTH`, 8, levels) — no graph is scanned. A graph whose rows
+do not carry their quads (a change over the row cap, or one the log could not
+bound), or with more than `OTS_LDES_BNODE_SUBJECTS_MAX` (10 000) blank-node
+subjects in one write, is republished whole. With the log off, every tracked
+graph is indexed before and after the write and the two compared, as
+before.
+
 The stream (`text/turtle`, `application/ld+json` or `application/n-triples`
 by `Accept`; readable by whoever may read the dataset):
 

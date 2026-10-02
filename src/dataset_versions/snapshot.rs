@@ -119,18 +119,6 @@ pub fn mapping(
         .collect()
 }
 
-pub fn snapshot_graphs(
-    store: &TripleStore,
-    base_url: &str,
-    dataset_id: &str,
-    version: &str,
-    source_graphs: &[String],
-) -> Result<Vec<GraphMapping>, StoreError> {
-    let mut mappings = mapping(base_url, dataset_id, version, source_graphs);
-    copy_into(store, &mut mappings)?;
-    Ok(mappings)
-}
-
 /// Copy each mapping's source graph into its snapshot graph (cleared first,
 /// idempotent on retry), recording per graph the set hash of the content —
 /// under the source graph — and its quad count.
@@ -276,7 +264,8 @@ mod tests {
         put(&store, live, "http://x/c", "http://x/p", "http://x/d");
 
         // Snapshot the live graph into version 1.0.0.
-        let map = snapshot_graphs(&store, base, "ds1", "1.0.0", &[live.to_string()]).unwrap();
+        let mut map = mapping(base, "ds1", "1.0.0", &[live.to_string()]);
+        copy_into(&store, &mut map).unwrap();
         assert_eq!(map.len(), 1);
         assert_eq!(map[0].source_graph, live);
         assert!(map[0]
@@ -299,7 +288,8 @@ mod tests {
         let live = "http://x/g/data";
         put(&store, live, "http://x/a", "http://x/p", "http://x/b");
 
-        let v1 = snapshot_graphs(&store, base, "ds1", "1.0.0", &[live.to_string()]).unwrap();
+        let mut v1 = mapping(base, "ds1", "1.0.0", &[live.to_string()]);
+        copy_into(&store, &mut v1).unwrap();
         let branch = clone_version(&store, base, "ds1", &v1, "1.0.0-feature").unwrap();
         assert_eq!(branch.len(), 1);
         // Branch keeps the same source target for restore.

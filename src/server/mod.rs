@@ -2494,7 +2494,7 @@ pub async fn run(
                     continue;
                 }
                 let s = st.clone();
-                let reconcile = ticks % 20 == 0;
+                let reconcile = ticks.is_multiple_of(20);
                 let _ = tokio::task::spawn_blocking(move || {
                     crate::dataset_versions::materialise::sweep(&s.store);
                     if reconcile {
@@ -2617,6 +2617,7 @@ pub async fn run(
                     let s = st.clone();
                     let _ = tokio::task::spawn_blocking(move || {
                         crate::shacl_studio::trigger::tick(&s.store, &s.auth_db, &s.base_url);
+                        crate::statement_provenance::tick(&s);
                     })
                     .await;
                 }

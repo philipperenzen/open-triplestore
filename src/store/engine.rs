@@ -125,6 +125,45 @@ pub enum BlankNodeMode {
     Skolem,
 }
 
+thread_local! {
+    static IMPORT_SKOLEM_BASE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// While alive, RDF parsed for import on this thread gets durable Skolem IRIs
+/// under `{base}/.well-known/genid/` in place of its blank nodes — for a
+/// dataset that opted in (`dataset_settings`, delta note §5.2). Set it inside
+/// the blocking closure that parses and loads, as the change log's
+/// `WriteContextGuard` is: a thread-local does not follow an `.await`.
+pub struct SkolemImportGuard(Option<String>);
+
+impl SkolemImportGuard {
+    pub fn set(base: Option<String>) -> Self {
+        Self(IMPORT_SKOLEM_BASE.with(|c| c.replace(base)))
+    }
+}
+
+impl Drop for SkolemImportGuard {
+    fn drop(&mut self) {
+        let prev = self.0.take();
+        IMPORT_SKOLEM_BASE.with(|c| *c.borrow_mut() = prev);
+    }
+}
+
+/// The base a [`SkolemImportGuard`] set on this thread, if any.
+pub fn import_skolem_base() -> Option<String> {
+    IMPORT_SKOLEM_BASE.with(|c| c.borrow().clone())
+}
+
+/// `quads` with their blank nodes skolemized when this thread imports for a
+/// dataset that asked for it; unchanged otherwise.
+pub fn apply_import_skolem(quads: Vec<Quad>) -> Vec<Quad> {
+    match import_skolem_base() {
+        Some(base) => opengraph::skolem::skolemize(&quads, base.trim_end_matches('/')).0,
+        None => quads,
+    }
+}
+
 /// In-memory index of named-graph IRIs and their triple counts.
 /// Provides O(1) graph enumeration instead of full index scans.
 ///
@@ -707,6 +746,10 @@ impl TripleStore {
     /// Canonicalization/Skolemization are whole-batch operations, so callers
     /// must materialise the quads first (see [`Self::load_reader`]).
     fn apply_blank_node_mode(&self, quads: Vec<Quad>) -> Vec<Quad> {
+        // A dataset's own opt-in, for this import, wins over the store's mode.
+        if import_skolem_base().is_some() {
+            return apply_import_skolem(quads);
+        }
         match self.blank_node_mode {
             BlankNodeMode::Preserve => quads,
             BlankNodeMode::Canonical => opengraph::canonical::stable_relabel(&quads),
@@ -1915,7 +1958,10 @@ impl TripleStore {
     ) -> Result<(), StoreError> {
         let _w = self.begin_write()?;
         // Fast path: nothing to rewrite and no forced graph → stream directly.
-        if self.blank_node_mode == BlankNodeMode::Preserve && to_graph.is_none() {
+        if self.blank_node_mode == BlankNodeMode::Preserve
+            && to_graph.is_none()
+            && import_skolem_base().is_none()
+        {
             // oxigraph 0.5: the bulk loader stages batches and only persists them on
             // an explicit `commit()` — dropping it without committing loses the data.
             let parser = Self::parser_for(format, base_iri)?;

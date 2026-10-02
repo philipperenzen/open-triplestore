@@ -26,22 +26,26 @@ pub fn resolve_data_graphs(
     pipeline: &ValidationPipeline,
 ) -> Vec<String> {
     let mut graphs: Vec<String> = pipeline.graph_iris.clone();
+    // A dataset's graphs, without its statement-provenance graph: the
+    // annotations are not data to validate, and the extra graph would turn a
+    // single-graph dataset's in-place inference into a multi-graph one.
+    let dataset_graphs = |id: &str| {
+        auth_db
+            .list_dataset_graphs(id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|g| !crate::provenance::is_any_statement_provenance_graph(g))
+    };
 
     if pipeline.graph_iris.is_empty() {
         for ds in &pipeline.dataset_ids {
-            if let Ok(g) = auth_db.list_dataset_graphs(ds) {
-                graphs.extend(g);
-            }
+            graphs.extend(dataset_graphs(ds));
         }
     }
 
     for t in &pipeline.targets {
         match t.kind {
-            TargetKind::Dataset => {
-                if let Ok(g) = auth_db.list_dataset_graphs(&t.id) {
-                    graphs.extend(g);
-                }
-            }
+            TargetKind::Dataset => graphs.extend(dataset_graphs(&t.id)),
             TargetKind::Graph => graphs.push(t.id.clone()),
             TargetKind::ShapeGraph => {
                 if let Ok(Some(set)) = studio.get_shape_graph(&t.id) {

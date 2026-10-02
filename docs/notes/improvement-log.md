@@ -3284,3 +3284,79 @@ Four tests: the vote comes back after a restart, the file holds the
 latest of several, no path means no file and no memory, and a corrupt
 file is ignored and then overwritten. Commenting out the one line that
 writes the file turns three of them red.
+
+## Delta versioning, built (2026-10-01)
+
+The design note (`docs/notes/delta-versioning-design.md`) was approved for
+full implementation — all five phases, tests complete — and is built on
+`feat/delta-versions`. The note's new §9 is the reviewer's map: where each
+phase lives, where the code departs from the design and why, how the ten
+open questions were answered, and which measurements were not taken. This
+entry records what building it found.
+
+### What the tests found
+
+**A `CLEAR GRAPH` closed every chain in the store.** The first delta tests
+failed eight at a time, all the same way: the second delta of a dataset was
+always a checkpoint. A version cut snapshots the dataset's SHACL bindings,
+and that snapshot starts with `CLEAR SILENT GRAPH <…/validation>`.
+`static_update_targets` treated every `CLEAR`, `DROP`, `CREATE` and `LOAD` as
+unbounded, so the change log recorded a store-scoped `unknown` row — and a
+store-scoped row bounds every chain, because nothing says which graphs it
+touched. Each cut therefore broke the chain the next cut would have extended.
+Those four operations on one named graph (or the default graph) now name
+their graph; only `ALL` and `NAMED` stay unbounded.
+
+**The provenance graph was data to five paths the design did not list.**
+The note's §6.3 table names the role-blind paths to fix (browse, entailment,
+the gate, LDES, version cuts). A read of every caller of the dataset graph
+lists found five more that took the statement-provenance graph as data:
+dataset validation; the dataset's SHACL rule run, where one data graph plus
+the annotations made two, and two graphs send inferences to a separate graph
+instead of in place — so switching provenance on silently moved where a
+dataset's inferences go; a Studio pipeline scoped to a dataset, which the
+annotation write then re-triggered after every run; and the default graph of
+validate-and-commit and of a property state's current value, where the
+provenance graph can be the first graph a dataset registers, and
+validate-and-commit *replaces* the graph it lands in. Each now leaves it out,
+and each fix has a test that fails without it.
+
+**A tampered base cost a version that was still recoverable.** A delta is
+built from whichever end of its chain is cheaper: forward from its base, or
+backward from the live graphs. A build that went forward and found the base's
+snapshot no longer matching its hash gave up, even with an intact backward
+chain; only the backward-first case fell back. Both directions now fall back
+to the other, and a version is answered 410 (`chain_broken`) only when
+neither end holds — the test tampers the base, reads the version back intact,
+then breaks the other end too.
+
+### Decisions
+
+Recorded in the note's §9.2; the ones a reviewer is most likely to question:
+
+- **Capture stays off by default.** Deltas exist only while it records; with
+  it off, versions are checkpoints exactly as before, and the write path does
+  what it did. That is also why the CI benchmarks say nothing about the cost
+  of capture: they run with it off.
+- **The content hash is an additive set hash**, not the note's sorted-lines
+  digest: a delta's hash must be known at cut time, without building it, and
+  a sum of per-quad hashes is the base's hash plus the chain.
+- **Dataset delete is wired to the version purge**, against the note's
+  "no dataset-delete wiring": a deleted dataset's pins would hold retention
+  back for ever. One call in `src/auth/handlers.rs`, plus an admin sweep for
+  what was left before it.
+
+### Not done
+
+The §8.2 measurements were not taken, and every default is the one the note
+proposed; the note's §9.4 lists them. They are the work to do before
+recommending capture on for a large deployment. The §8.3 experiment's
+remaining parts — the shape-update revalidation and the gate sandbox, plus the
+write-triggered incremental run — are now a second test in
+`tests/scale_shacl_9m.rs`, which asserts that the merged incremental report
+equals a full validation; `docs/performance.md` has its figures.
+
+Open for the owner: whether the statement-provenance graph should be
+system-only (today the dataset's writers can write it, as they can every
+graph the server keeps for a dataset), and the write gate's whole-graph
+sandbox, which the change log could now replace with focus-node validation.

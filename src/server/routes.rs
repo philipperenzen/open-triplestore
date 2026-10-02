@@ -103,6 +103,10 @@ pub fn management_routes() -> Router<AppState> {
             "/api/datasets/:dataset_id/changes/:seq/inverse",
             get(crate::dataset_changes::change_inverse),
         )
+        .route(
+            "/api/datasets/:dataset_id/settings",
+            get(crate::dataset_settings::get_settings),
+        )
         .route("/api/replication/status", get(replication_status))
         .route("/api/replication/manifest", get(replication_manifest))
         .route("/api/replication/identity", get(replication_identity))
@@ -1473,6 +1477,18 @@ async fn graph_store_get(
         }
     }
 
+    // JSON-LD has no syntax for RDF 1.2 triple terms: the serializer fails
+    // mid-stream, after the 200 and the headers went out, leaving a truncated
+    // body. Refuse up front instead (delta note §6.3).
+    if matches!(format, super::content_negotiation::GraphFormat::JsonLd)
+        && holds_triple_terms(&state.store, params.graph_iri())
+    {
+        return Err(AppError::NotAcceptable(
+            "this graph holds RDF 1.2 triple terms, which JSON-LD cannot express; ask for Turtle, N-Triples, N-Quads or TriG"
+                .to_string(),
+        ));
+    }
+
     // Triple-level security label filtering: when the target graph has labels,
     // we have to load+filter+re-serialize, which fundamentally needs the bytes
     // in memory. Otherwise we can stream the dump directly through axum.
@@ -1945,8 +1961,10 @@ async fn graph_store_put(
         crate::commit_log::CommitKind::GraphStore,
         &stamp,
     );
+    let skolem = skolem_base_for(&state, graph.as_deref());
     run_store_write(&state, "graph store PUT", move || {
         let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
+        let _skolem = crate::store::engine::SkolemImportGuard::set(skolem);
         store.graph_store_put(graph.as_deref(), &data, format)
     })
     .await?;
@@ -2043,8 +2061,10 @@ async fn graph_store_post(
         crate::commit_log::CommitKind::GraphStore,
         &stamp,
     );
+    let skolem = skolem_base_for(&state, graph.as_deref());
     let inserted = run_store_write(&state, "graph store POST", move || {
         let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
+        let _skolem = crate::store::engine::SkolemImportGuard::set(skolem);
         store.graph_store_post_delta(graph.as_deref(), &data, format)
     })
     .await?;
@@ -2174,6 +2194,43 @@ async fn graph_store_delete(
         None,
     );
     Ok(with_ack(&state, StatusCode::NO_CONTENT.into_response()))
+}
+
+/// Whether `graph` (the default graph for `None`) holds an RDF 1.2 triple
+/// term. RDF 1.2 reaches one through `rdf:reifies` — a triple term is only
+/// ever an object — so the predicate index answers without a scan.
+pub(crate) fn holds_triple_terms(store: &crate::store::TripleStore, graph: Option<&str>) -> bool {
+    #[cfg(feature = "rdf-12")]
+    {
+        let reifies = oxigraph::model::NamedNodeRef::new_unchecked(
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies",
+        );
+        let name = match graph {
+            Some(g) => match oxigraph::model::NamedNodeRef::new(g) {
+                Ok(n) => oxigraph::model::GraphNameRef::NamedNode(n),
+                Err(_) => return false,
+            },
+            None => oxigraph::model::GraphNameRef::DefaultGraph,
+        };
+        store
+            .store()
+            .quads_for_pattern(None, Some(reifies), None, Some(name))
+            .flatten()
+            .any(|q| matches!(q.object, oxigraph::model::Term::Triple(_)))
+    }
+    #[cfg(not(feature = "rdf-12"))]
+    {
+        let _ = (store, graph);
+        false
+    }
+}
+
+/// The Skolem base for RDF written into `graph`, when a dataset holding it
+/// imports with Skolem IRIs (`dataset_settings`, delta note §5.2).
+pub(crate) fn skolem_base_for(state: &AppState, graph: Option<&str>) -> Option<String> {
+    graph
+        .filter(|g| crate::dataset_settings::skolem_dataset_for_graph(&state.auth_db, g))
+        .map(|_| state.base_url.to_string())
 }
 
 /// As [`sync_text_index_after_graph_write`], first trying the exact quads the
@@ -4094,11 +4151,17 @@ fn scope_dataset_graphs(
                 continue;
             }
         }
-        // Live data: intersect this dataset's live graphs with the accessible set.
-        let live = state
+        // Live data: intersect this dataset's live graphs with the accessible
+        // set. Its statement-provenance graph is annotations about the data,
+        // not data: left out of the dataset's scope, readable by naming it
+        // (`graph=`; delta note §6.3).
+        let live: Vec<String> = state
             .auth_db
             .list_dataset_graphs(id)
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .into_iter()
+            .filter(|g| !crate::provenance::is_any_statement_provenance_graph(g))
+            .collect();
         match &accessible {
             None => out.extend(live),
             Some(acc) => out.extend(live.into_iter().filter(|g| acc.contains(g.as_str()))),
@@ -8232,6 +8295,8 @@ pub async fn validate_dataset(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .into_iter()
         .filter(|e| !e.graph_iri.starts_with("urn:system:reports:"))
+        // Statement-provenance annotations are not data (delta note §6.3).
+        .filter(|e| !crate::provenance::is_any_statement_provenance_graph(&e.graph_iri))
         .collect();
     let hidden: std::collections::HashSet<&str> = entries
         .iter()
@@ -9159,7 +9224,10 @@ pub async fn infer_dataset(
         .list_dataset_graphs(&dataset_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .into_iter()
-        .filter(|g| !g.starts_with("urn:system:reports:"))
+        .filter(|g| {
+            !g.starts_with("urn:system:reports:")
+                && !crate::provenance::is_any_statement_provenance_graph(g)
+        })
         .collect();
 
     // A dataset with no graphs has nothing to infer over. Running anyway would

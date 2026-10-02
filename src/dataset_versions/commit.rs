@@ -259,9 +259,19 @@ pub async fn validate_and_commit(
                 .map_err(|e| AppError::Internal(e.to_string()))?;
             let graph_iri = match c.graph.clone().filter(|s| !s.is_empty()) {
                 Some(g) => g,
-                None => registered.first().cloned().unwrap_or_else(|| {
-                    format!("{}/dataset/{}/graph/imported", state.base_url, ds_id)
-                }),
+                // Never a graph the server keeps for the dataset's history
+                // (statement provenance, property states): the commit
+                // replaces the graph it lands in.
+                None => registered
+                    .iter()
+                    .find(|g| {
+                        !crate::provenance::is_any_statement_provenance_graph(g)
+                            && **g != crate::property_states::states_graph(&ds_id)
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        format!("{}/dataset/{}/graph/imported", state.base_url, ds_id)
+                    }),
             };
             if !registered.contains(&graph_iri) {
                 // The caller-supplied graph was accepted verbatim, registered to

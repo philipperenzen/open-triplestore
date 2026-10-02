@@ -61,13 +61,18 @@ async fn req(
 }
 
 /// A dataset owned by the admin with `G` registered and holding two triples.
+///
+/// Its name, hence its id and its version IRIs, is unique to the test: the
+/// version and build locks are process-wide and keyed by those IRIs, so tests
+/// running side by side on one name would wait on each other's locks.
 async fn dataset(state: &AppState, app: &Router, token: &str, visibility: &str) -> String {
+    let name = format!("dv-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
     let (st, v, txt) = req(
         app,
         Method::POST,
         "/api/datasets",
         Some(token),
-        json!({ "name": "dv", "owner_type": "user", "owner_id": "adm", "visibility": visibility }),
+        json!({ "name": name, "owner_type": "user", "owner_id": "adm", "visibility": visibility }),
     )
     .await;
     assert!(st.is_success(), "create dataset: {st} {txt}");
@@ -612,4 +617,150 @@ async fn deleting_a_dataset_takes_its_versions_with_it() {
     .is_empty());
     assert!(state.store.changes().pins().is_empty());
     assert!(state.store.changes().materialisations(None).is_empty());
+}
+
+/// A delta is rebuilt from whichever end of its chain still holds: from its
+/// base forward, or from the live graphs backward. A base snapshot that no
+/// longer hashes to what it recorded is not a base, so the build goes the
+/// other way; when neither end holds, the version is gone (410) and flagged
+/// `chain_broken`, rather than served wrong.
+#[tokio::test]
+async fn a_delta_rebuilds_from_whichever_end_holds_and_is_gone_when_neither_does() {
+    // Rows above ten quads carry counts, not quads: a chain cannot cross one.
+    let store = TripleStore::in_memory()
+        .unwrap()
+        .with_change_capture(DEFAULT_MAX_SCAN, 10);
+    let (state, token) = admin_state_with_store(store);
+    let app = test_app(state.clone());
+    let ds = dataset(&state, &app, &token, "private").await;
+    let v1 = cut(&app, &token, &ds, "1.0.0").await;
+    edit_after_v1(&state);
+    let v2 = cut(&app, &token, &ds, "1.1.0").await;
+    assert_eq!(v2["kind"], "delta", "{v2}");
+    // Five more statements: going back from the live graph now costs more
+    // than going forward from the base, so the base is tried first.
+    let mut more = String::new();
+    for i in 0..5 {
+        more.push_str(&format!("<urn:dv:m{i}> <urn:dv:p> {i} . "));
+    }
+    state
+        .store
+        .update(&format!("INSERT DATA {{ GRAPH <{G}> {{ {more} }} }}"))
+        .unwrap();
+    // The base's snapshot is changed behind the registry's back.
+    let base_snap = v1["snapshot_graphs"][0].as_str().unwrap().to_string();
+    state
+        .store
+        .update(&format!(
+            "INSERT DATA {{ GRAPH <{base_snap}> {{ <urn:dv:z> <urn:dv:p> \"forged\" }} }}"
+        ))
+        .unwrap();
+    let (st, lines) = data(&app, Some(&token), &ds, "1.1.0").await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        subjects(&lines),
+        vec!["<urn:dv:b>", "<urn:dv:c>"],
+        "rebuilt backward from the live graph"
+    );
+
+    // Forget the build, and cut the backward chain with a change too large
+    // to carry its quads.
+    let record = open_triplestore::dataset_versions::registry::get_version(
+        &state.store,
+        &state.base_url,
+        &ds,
+        "1.1.0",
+    )
+    .unwrap();
+    state
+        .store
+        .bulk_delete_graphs(&[v2["snapshot_graphs"][0].as_str().unwrap()])
+        .unwrap();
+    state
+        .store
+        .changes()
+        .delete_materialisation(&record.graph_iri);
+    let mut bulk = String::new();
+    for i in 0..20 {
+        bulk.push_str(&format!("<urn:dv:n{i}> <urn:dv:p> {i} . "));
+    }
+    state
+        .store
+        .update(&format!("INSERT DATA {{ GRAPH <{G}> {{ {bulk} }} }}"))
+        .unwrap();
+    let (st, _) = data(&app, Some(&token), &ds, "1.1.0").await;
+    assert_eq!(st, StatusCode::GONE);
+    let (st, rec, txt) = req(
+        &app,
+        Method::GET,
+        &format!("/api/datasets/{ds}/versions/1.1.0"),
+        Some(&token),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(rec["chain_broken"], true, "{rec}");
+}
+
+/// The orphan sweep: what a deleted dataset or an interrupted operation left
+/// behind — a version graph no record names, a pin of a version the registry
+/// no longer holds — is removed; what a live version holds is not.
+#[tokio::test]
+async fn the_admin_sweep_removes_only_what_no_version_holds() {
+    let (state, token) = admin_state_with_store(recording());
+    let app = test_app(state.clone());
+    let ds = dataset(&state, &app, &token, "private").await;
+    let v1 = cut(&app, &token, &ds, "1.0.0").await;
+    edit_after_v1(&state);
+    cut(&app, &token, &ds, "1.1.0").await;
+    let live_snap = v1["snapshot_graphs"][0].as_str().unwrap().to_string();
+    // Left behind: a version graph of this dataset no record names, and the
+    // pin of a version that is gone.
+    let orphan = format!("{}/dataset/{ds}/version/9.9.9/g1", state.base_url);
+    state
+        .store
+        .update(&format!(
+            "INSERT DATA {{ GRAPH <{orphan}> {{ <urn:dv:x> <urn:dv:p> 1 }} }}"
+        ))
+        .unwrap();
+    let gone = format!("{}/dataset/{ds}/version/8.8.8", state.base_url);
+    state
+        .store
+        .changes()
+        .set_pin(&format!("version:{gone}"), 1, Some("system"))
+        .unwrap();
+    let pins_before = state.store.changes().pins().len();
+
+    let (st, _, _) = req(
+        &app,
+        Method::POST,
+        "/api/admin/versions/sweep",
+        None,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    let (st, report, txt) = req(
+        &app,
+        Method::POST,
+        "/api/admin/versions/sweep",
+        Some(&token),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(report["orphan_graphs_dropped"], json!([orphan]), "{report}");
+    assert_eq!(report["pins_released"], 1, "{report}");
+    assert_eq!(count(&state, &orphan), 0);
+    assert_eq!(count(&state, &live_snap), 2, "a live version's graph stays");
+    assert_eq!(state.store.changes().pins().len(), pins_before - 1);
+    assert_eq!(
+        open_triplestore::dataset_versions::registry::list_versions(
+            &state.store,
+            &state.base_url,
+            &ds
+        )
+        .len(),
+        2
+    );
 }

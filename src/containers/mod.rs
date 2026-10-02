@@ -415,8 +415,12 @@ pub async fn import_container(
     let st = state.clone();
     let payloads: Vec<(RdfPayload, String)> =
         manifest.payloads.iter().cloned().zip(targets).collect();
+    let skolem = crate::dataset_settings::get(&state.auth_db, &dataset_id)
+        .skolem
+        .then(|| state.base_url.to_string());
     let loaded = tokio::task::spawn_blocking(
         move || -> Vec<Result<(String, PayloadKind, String, usize), String>> {
+            let _skolem = crate::store::engine::SkolemImportGuard::set(skolem);
             payloads
                 .iter()
                 .map(|(p, iri)| {

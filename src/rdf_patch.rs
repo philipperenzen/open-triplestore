@@ -131,8 +131,7 @@ impl Patch {
                 }
             }
         }
-        let (add, remove): (Vec<(Quad, bool)>, Vec<(Quad, bool)>) =
-            last.into_iter().partition(|(_, add)| *add);
+        let (add, remove): (Vec<_>, Vec<_>) = last.into_iter().partition(|(_, add)| *add);
         Ok((
             add.into_iter().map(|(q, _)| q).collect(),
             remove.into_iter().map(|(q, _)| q).collect(),
