@@ -27,7 +27,7 @@ pub use crate::service::{DefaultServiceHandler, ServiceHandler};
 pub use crate::update::{DeleteInsertIter, DeleteInsertQuad};
 use json_event_parser::{JsonEvent, WriterJsonSerializer};
 use oxiri::Iri;
-use oxrdf::{GraphName, Literal, NamedNode, NamedOrBlankNode, Term, Variable};
+use oxrdf::{BlankNode, GraphName, Literal, NamedNode, NamedOrBlankNode, Term, Variable};
 use oxsdatatypes::{DateTime, DayTimeDuration, Float};
 use spargebra::Query;
 use spargebra::algebra::QueryDataset;
@@ -35,6 +35,8 @@ use spargebra::term::{GroundQuadPattern, QuadPattern};
 use sparopt::Optimizer;
 use sparopt::algebra::GraphPattern;
 use std::collections::HashMap;
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::{fmt, io};
@@ -382,6 +384,9 @@ impl QueryEvaluator {
         struct Context<'a> {
             now: Option<DateTime>,
             custom_functions: &'a CustomFunctionRegistry,
+            /// One evaluation of one expression is one solution: `BNODE(label)`
+            /// returns the same node for the same label within it.
+            blank_node_keys: [RandomState; 2],
         }
 
         impl<'a> ExpressionEvaluatorContext<'a> for Context<'a> {
@@ -454,6 +459,17 @@ impl QueryEvaluator {
             fn custom_functions(&mut self) -> &CustomFunctionRegistry {
                 self.custom_functions
             }
+
+            fn build_blank_node_for_label(
+                &mut self,
+            ) -> impl Fn(&HashMap<&'a Variable, Term>, &str) -> BlankNode + 'a {
+                let [a, b] = self.blank_node_keys.clone();
+                move |_, label| {
+                    BlankNode::new_from_unique_id(
+                        (u128::from(a.hash_one(label)) << 64) | u128::from(b.hash_one(label)),
+                    )
+                }
+            }
         }
 
         build_expression_evaluator(
@@ -461,6 +477,7 @@ impl QueryEvaluator {
             &mut Context {
                 now: None,
                 custom_functions: &self.custom_functions,
+                blank_node_keys: [RandomState::new(), RandomState::new()],
             },
         )
         .ok()?(&substitutions.into_iter().collect::<HashMap<_, _>>())

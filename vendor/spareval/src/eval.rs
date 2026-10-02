@@ -30,9 +30,10 @@ use sparopt::algebra::{
     AggregateExpression, Expression, GraphPattern, JoinAlgorithm, LeftJoinAlgorithm,
     MinusAlgorithm, OrderExpression,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::hash_map::RandomState;
 use std::cmp::Ordering;
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::iter::{Peekable, empty, once};
 use std::marker::PhantomData;
 use std::mem::take;
@@ -429,6 +430,52 @@ pub struct SimpleEvaluator<'a, D: QueryableDataset<'a>> {
     custom_functions: Rc<CustomFunctionRegistry>,
     custom_aggregate_functions: Rc<CustomAggregateFunctionRegistry>,
     run_stats: bool,
+    blank_node_labels: Rc<BlankNodeLabels>,
+}
+
+/// Per-evaluation state of `BNODE(label)` (SPARQL 1.1 §17.4.2.9).
+///
+/// The node for a label in a solution is derived from the label and the
+/// solution's bindings with two SipHash keys drawn at random for each
+/// evaluation, so it is the same for every expression evaluated on that
+/// solution, differs between solutions and between evaluations (requests),
+/// and, being a 128-bit random-looking id, does not collide with the dataset's
+/// blank nodes. Variables assigned by an expression (`BIND`, `SELECT (… AS ?v)`)
+/// are left out of the key: they get bound while the solution is extended, so
+/// two expressions evaluated on the same solution see them differently.
+/// Two solutions that bind every other variable identically are not told
+/// apart.
+struct BlankNodeLabels {
+    keys: [RandomState; 2],
+    assigned: RefCell<FxHashSet<usize>>,
+}
+
+impl BlankNodeLabels {
+    fn new() -> Self {
+        Self {
+            keys: [RandomState::new(), RandomState::new()],
+            assigned: RefCell::default(),
+        }
+    }
+
+    fn blank_node<T: Hash>(&self, tuple: &InternalTuple<T>, label: &str) -> BlankNode {
+        let assigned = self.assigned.borrow();
+        let [a, b] = &self.keys;
+        let (mut a, mut b) = (a.build_hasher(), b.build_hasher());
+        for (position, value) in tuple.inner.iter().enumerate() {
+            if let Some(value) = value {
+                if !assigned.contains(&position) {
+                    for hasher in [&mut a, &mut b] {
+                        position.hash(hasher);
+                        value.hash(hasher);
+                    }
+                }
+            }
+        }
+        label.hash(&mut a);
+        label.hash(&mut b);
+        BlankNode::new_from_unique_id((u128::from(a.finish()) << 64) | u128::from(b.finish()))
+    }
 }
 
 impl<'a, D: QueryableDataset<'a>> SimpleEvaluator<'a, D> {
@@ -450,6 +497,7 @@ impl<'a, D: QueryableDataset<'a>> SimpleEvaluator<'a, D> {
             custom_functions,
             custom_aggregate_functions,
             run_stats,
+            blank_node_labels: Rc::new(BlankNodeLabels::new()),
         })
     }
 
@@ -1336,6 +1384,7 @@ impl<'a, D: QueryableDataset<'a>> SimpleEvaluator<'a, D> {
                 let child = child?;
 
                 let position = encode_variable(encoded_variables, variable);
+                self.blank_node_labels.assigned.borrow_mut().insert(position);
                 if let Some(expression) = self.internal_expression_evaluator(
                     expression,
                     encoded_variables,
@@ -1965,6 +2014,7 @@ impl<'a, D: QueryableDataset<'a>> Clone for SimpleEvaluator<'a, D> {
             custom_functions: Rc::clone(&self.custom_functions),
             custom_aggregate_functions: Rc::clone(&self.custom_aggregate_functions),
             run_stats: self.run_stats,
+            blank_node_labels: Rc::clone(&self.blank_node_labels),
         }
     }
 }
@@ -2045,6 +2095,13 @@ impl<'a, D: QueryableDataset<'a>> ExpressionEvaluatorContext<'a>
 
     fn custom_functions(&mut self) -> &CustomFunctionRegistry {
         &self.evaluator.custom_functions
+    }
+
+    fn build_blank_node_for_label(
+        &mut self,
+    ) -> impl Fn(&InternalTuple<D::InternalTerm>, &str) -> BlankNode + 'a {
+        let labels = Rc::clone(&self.evaluator.blank_node_labels);
+        move |tuple, label| labels.blank_node(tuple, label)
     }
 }
 

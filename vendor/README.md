@@ -68,6 +68,14 @@ One commit each, in this order:
    SPARQL 1.2 draft, return a simple literal. Fixes
    `aggregates#agg-groupconcat-04` and `-06`. Draft:
    `spareval/UPSTREAM-PR-group-concat.md`.
+5. **`BNODE(str)` is fresh per solution** (`spareval` expressions). It returned
+   `BlankNode::new(str)`: one node per string for the whole query and every later
+   request, and nothing for a string that is not a blank-node label. SPARQL 1.1
+   §17.4.2.9 asks for the same node within one solution and distinct nodes across
+   solutions. The node is now a keyed 128-bit hash of the string and the
+   solution's bindings (leaving out variables that `BIND` / `SELECT` expressions
+   assign), with keys drawn at random per evaluation. Fixes `functions#bnode01`.
+   Draft: `spareval/UPSTREAM-PR-bnode-label.md`.
 
 ### Verifying the fork
 

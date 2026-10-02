@@ -57,6 +57,13 @@ pub trait ExpressionEvaluatorContext<'a> {
     fn now(&mut self) -> DateTime;
     fn base_iri(&mut self) -> Option<Arc<Iri<String>>>;
     fn custom_functions(&mut self) -> &CustomFunctionRegistry;
+    /// The blank node `BNODE(label)` returns for `label` in the solution `tuple`.
+    ///
+    /// SPARQL 1.1 §17.4.2.9: the node is distinct from every blank node of the
+    /// queried dataset and from the nodes built for other solutions, and calls
+    /// with the same label within expressions for one solution return the same
+    /// node. Any string is a valid label.
+    fn build_blank_node_for_label(&mut self) -> impl Fn(&Self::Tuple, &str) -> BlankNode + 'a;
 }
 
 pub type ExpressionEvaluator<'a, I, O> = Rc<dyn (Fn(&I) -> Option<O>) + 'a>;
@@ -606,11 +613,14 @@ pub fn build_expression_evaluator<'a, C: ExpressionEvaluatorContext<'a>>(
             Function::BNode => match parameters.first() {
                 Some(id) => {
                     let id = build_expression_evaluator(id, context)?;
+                    let blank_node_for_label = context.build_blank_node_for_label();
                     Rc::new(move |tuple| {
                         let ExpressionTerm::StringLiteral(id) = id(tuple)? else {
                             return None;
                         };
-                        Some(ExpressionTerm::BlankNode(BlankNode::new(id).ok()?))
+                        Some(ExpressionTerm::BlankNode(blank_node_for_label(
+                            tuple, &id,
+                        )))
                     })
                 }
                 None => Rc::new(|_| Some(ExpressionTerm::BlankNode(BlankNode::default()))),
