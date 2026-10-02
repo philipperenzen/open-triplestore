@@ -1224,6 +1224,59 @@ impl AuthDb {
                 updated_at TEXT NOT NULL
             );
 
+            -- ── Dataset prefix tables (RDF Patch `PA` / `PD`) ─────────────────
+            -- The prefixes that are part of a dataset's own data: an applied
+            -- RDF Patch's `PA` / `PD` rows change them, the dataset's Turtle and
+            -- TriG exports declare them. The label may be empty (Turtle's `:`).
+            CREATE TABLE IF NOT EXISTS dataset_prefixes (
+                dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+                label TEXT NOT NULL,
+                namespace TEXT NOT NULL,
+                updated_by TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (dataset_id, label)
+            );
+            -- The table as it stood when a version was cut (JSON [[label, ns], …]).
+            -- No row: the version predates prefix tables, its table is unknown.
+            CREATE TABLE IF NOT EXISTS dataset_version_prefixes (
+                dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+                version TEXT NOT NULL,
+                prefixes TEXT NOT NULL,
+                PRIMARY KEY (dataset_id, version)
+            );
+
+            -- ── RDF Patch logs (RDF Delta), one per dataset ───────────────────
+            -- `init` is the log's version 0 (JSON {version, graphs, prefixes}),
+            -- `checkpoint` the state the last version-cut entry reached, which
+            -- the next one is a diff from (JSON {graphs: {source: snapshot},
+            -- prefixes}).
+            CREATE TABLE IF NOT EXISTS dataset_patch_logs (
+                dataset_id TEXT PRIMARY KEY REFERENCES datasets(id) ON DELETE CASCADE,
+                init TEXT NOT NULL,
+                checkpoint TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            -- One appended patch. `kind` is `patch` (POSTed to the log) or
+            -- `version` (a version cut). A version entry renders from `spec`
+            -- (immutable snapshot graphs) until a version it reads is deleted,
+            -- when its `text` is written out; a patch entry always has `text`.
+            CREATE TABLE IF NOT EXISTS dataset_patch_log_entries (
+                dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+                version INTEGER NOT NULL,
+                patch_id TEXT NOT NULL,
+                prev_id TEXT,
+                kind TEXT NOT NULL,
+                author TEXT,
+                dataset_version TEXT,
+                default_graph TEXT,
+                graphs TEXT NOT NULL,
+                spec TEXT,
+                text TEXT,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (dataset_id, version),
+                UNIQUE (dataset_id, patch_id)
+            );
+
             -- ── OIDC provider (this store as the identity provider for client apps) ──
             -- Registered relying-party clients (SPAs and services signing users
             -- in AGAINST this store; distinct from oauth_providers = upstream
@@ -2497,6 +2550,149 @@ impl AuthDb {
     pub fn delete_prefix_override(&self, label: &str) -> anyhow::Result<bool> {
         let conn = self.pool.get()?;
         Ok(conn.execute("DELETE FROM prefix_overrides WHERE label = ?1", [label])? > 0)
+    }
+
+    // ─── Dataset prefix tables (changed by RDF Patch PA / PD) ────────────────
+
+    /// A dataset's prefix table, ordered by label.
+    pub fn list_dataset_prefixes(&self, dataset_id: &str) -> anyhow::Result<Vec<DatasetPrefix>> {
+        let conn = self.pool.get()?;
+        read_dataset_prefixes(&conn, dataset_id)
+    }
+
+    /// The table as `(label, namespace)` pairs, ordered by label.
+    pub fn dataset_prefix_pairs(&self, dataset_id: &str) -> anyhow::Result<Vec<(String, String)>> {
+        Ok(self
+            .list_dataset_prefixes(dataset_id)?
+            .into_iter()
+            .map(|p| (p.label, p.namespace))
+            .collect())
+    }
+
+    /// Set (or repoint) one prefix. Returns whether the label is new.
+    pub fn put_dataset_prefix(
+        &self,
+        dataset_id: &str,
+        label: &str,
+        namespace: &str,
+        by: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
+        let existed = tx
+            .query_row(
+                "SELECT 1 FROM dataset_prefixes WHERE dataset_id = ?1 AND label = ?2",
+                params![dataset_id, label],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        upsert_dataset_prefix(&tx, dataset_id, label, namespace, by)?;
+        tx.commit()?;
+        Ok(!existed)
+    }
+
+    /// Remove one prefix. Returns whether there was one.
+    pub fn delete_dataset_prefix(&self, dataset_id: &str, label: &str) -> anyhow::Result<bool> {
+        let conn = self.pool.get()?;
+        Ok(conn.execute(
+            "DELETE FROM dataset_prefixes WHERE dataset_id = ?1 AND label = ?2",
+            params![dataset_id, label],
+        )? > 0)
+    }
+
+    /// Replace the whole table.
+    pub fn replace_dataset_prefixes(
+        &self,
+        dataset_id: &str,
+        pairs: &[(String, String)],
+        by: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM dataset_prefixes WHERE dataset_id = ?1",
+            params![dataset_id],
+        )?;
+        for (label, namespace) in pairs {
+            upsert_dataset_prefix(&tx, dataset_id, label, namespace, by)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Apply a patch's `PA` (`Some(namespace)`) and `PD` (`None`) rows in
+    /// order, in one transaction. A `PD` of a label the table lacks is a no-op.
+    pub fn apply_dataset_prefix_ops(
+        &self,
+        dataset_id: &str,
+        ops: &[(String, Option<String>)],
+        by: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
+        for (label, namespace) in ops {
+            match namespace {
+                Some(ns) => upsert_dataset_prefix(&tx, dataset_id, label, ns, by)?,
+                None => {
+                    tx.execute(
+                        "DELETE FROM dataset_prefixes WHERE dataset_id = ?1 AND label = ?2",
+                        params![dataset_id, label],
+                    )?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Record the dataset's current prefix table as `version`'s.
+    pub fn snapshot_dataset_version_prefixes(
+        &self,
+        dataset_id: &str,
+        version: &str,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        let pairs = self.dataset_prefix_pairs(dataset_id)?;
+        let conn = self.pool.get()?;
+        conn.execute(
+            "INSERT INTO dataset_version_prefixes (dataset_id, version, prefixes)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(dataset_id, version) DO UPDATE SET prefixes = excluded.prefixes",
+            params![dataset_id, version, serde_json::to_string(&pairs)?],
+        )?;
+        Ok(pairs)
+    }
+
+    /// The prefix table `version` was cut with; `None` for a version cut
+    /// before prefix tables existed.
+    pub fn dataset_version_prefixes(
+        &self,
+        dataset_id: &str,
+        version: &str,
+    ) -> anyhow::Result<Option<Vec<(String, String)>>> {
+        let conn = self.pool.get()?;
+        let json: Option<String> = conn
+            .query_row(
+                "SELECT prefixes FROM dataset_version_prefixes WHERE dataset_id = ?1 AND version = ?2",
+                params![dataset_id, version],
+                |r| r.get(0),
+            )
+            .optional()?;
+        json.map(|j| serde_json::from_str(&j).map_err(Into::into))
+            .transpose()
+    }
+
+    pub fn delete_dataset_version_prefixes(
+        &self,
+        dataset_id: &str,
+        version: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "DELETE FROM dataset_version_prefixes WHERE dataset_id = ?1 AND version = ?2",
+            params![dataset_id, version],
+        )?;
+        Ok(())
     }
 
     // ─── App settings (runtime-changeable admin toggles) ──────────────────────
@@ -7419,6 +7615,52 @@ mod refresh_rotation_tests {
 }
 
 /// Read one override on a connection the caller already holds.
+fn read_dataset_prefixes(
+    conn: &Connection,
+    dataset_id: &str,
+) -> anyhow::Result<Vec<DatasetPrefix>> {
+    let mut stmt = conn.prepare(
+        "SELECT label, namespace, updated_by, updated_at
+         FROM dataset_prefixes WHERE dataset_id = ?1 ORDER BY label",
+    )?;
+    let rows = stmt
+        .query_map([dataset_id], |r| {
+            Ok(DatasetPrefix {
+                label: r.get(0)?,
+                namespace: r.get(1)?,
+                updated_by: r.get(2)?,
+                updated_at: r.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn upsert_dataset_prefix(
+    conn: &Connection,
+    dataset_id: &str,
+    label: &str,
+    namespace: &str,
+    by: Option<&str>,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO dataset_prefixes (dataset_id, label, namespace, updated_by, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(dataset_id, label) DO UPDATE SET
+             namespace = excluded.namespace,
+             updated_by = excluded.updated_by,
+             updated_at = excluded.updated_at",
+        params![
+            dataset_id,
+            label,
+            namespace,
+            by,
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
 fn read_prefix_override(conn: &Connection, label: &str) -> anyhow::Result<Option<PrefixOverride>> {
     let row = conn
         .query_row(

@@ -1480,6 +1480,44 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             ),
         )],
     );
+    mount(paths, "/api/datasets/:dataset_id/versions/:ver/diff/:other", vec![
+        (M::Get, o("Versions", "Diff two versions", "What changed from `ver` to `other` (another version, or `live` for the current graphs): per-graph `added` / `removed` counts as JSON, or with `?format=rdf-patch` (or `Accept: application/rdf-patch`) an RDF Patch that turns `ver` into `other` — `PD` / `PA` rows for the prefix-table changes when both sides recorded a table, then `D` / `A` quads against the live graph names, blank nodes by the store's ids. A diff to a version has a name-based `H id`, and its `H prev` names the diff from the version cut before `ver` to `ver`, so consecutive diffs chain. Graphs a non-writer may not read are left out.",
+            vec![], vec![("200", "JSON counts or `application/rdf-patch`"), ("404", "Dataset or version not found")], false)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/patch", vec![
+        (M::Post, o("Versions", "Apply an RDF Patch", "Apply an RDF Patch (`application/rdf-patch`) to the dataset, atomically, as one commit: `A` / `D` quads must name a registered graph (triples go to the registered graph `?graph=` names, else 400), the SHACL write gates run over each touched graph's future contents (422 with the report), blank nodes name the store's own nodes, and `PA` / `PD` rows change the dataset's prefix table. Not journaled in the dataset's patch log; append to `…/log` for that. Response: `{applied, id, aborted, transactions, added, removed, graphs}`.",
+            vec![], vec![("200", "Applied (or nothing to apply)"), ("400", "Invalid patch, or a graph the dataset does not hold"), ("401", "Authentication required"), ("403", "Write access required"), ("415", "Not an RDF Patch"), ("422", "A SHACL write gate refused it")], true)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/prefixes", vec![
+        (M::Get, o("Datasets", "Dataset prefix table", "The dataset's own prefixes, `[{label, namespace, updated_by, updated_at}]` by label: part of its data, changed by an applied RDF Patch's `PA` / `PD` rows, recorded with each version and restored with it, and declared by the dataset's Turtle and TriG exports ahead of the prefix registry. The label may be empty (the default prefix `:`).",
+            vec![], vec![("200", "The table"), ("404", "Dataset not found")], false)),
+        (M::Put, o("Datasets", "Replace the prefix table", "Body: `{label: namespace}` — the whole table. A label is a Turtle `PN_PREFIX` or empty; a namespace any absolute IRI.",
+            vec![], vec![("200", "The new table"), ("400", "Invalid label or namespace"), ("401", "Authentication required"), ("403", "Write access required")], true)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/prefixes/:label", vec![
+        (M::Put, o("Datasets", "Set a prefix", "Body: `{namespace}`. Sets or repoints one label of the dataset's prefix table.",
+            vec![], vec![("201", "Added"), ("200", "Repointed"), ("400", "Invalid label or namespace"), ("401", "Authentication required"), ("403", "Write access required")], true)),
+        (M::Delete, o("Datasets", "Remove a prefix", "Removes one label from the dataset's prefix table.",
+            vec![], vec![("204", "Removed"), ("404", "No such prefix"), ("401", "Authentication required"), ("403", "Write access required")], true)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/log", vec![
+        (M::Get, o("Versions", "Dataset patch log", "The dataset's RDF Patch log (RDF Delta patch log, named by the dataset id): `{name, init, latest: {version, id}, entries: [{version, id, prev, kind, author, dataset_version, default_graph, graphs, created_at}]}`. `kind` is `patch` (appended here) or `version` (a version cut, the diff from the previous cut). An entry that changes a graph the caller may not read is listed as `{version, id, prev, kind, withheld: true}`. Page with `?after={version}&limit=`.",
+            vec![], vec![("200", "The log"), ("404", "Dataset not found")], false)),
+        (M::Post, o("Versions", "Append to the patch log", "Append an RDF Patch. It needs exactly one `H id` (an IRI the log does not hold) and at most one `H prev`, which must name the log's latest entry — none only when the log is empty; a mismatch is a 409 naming the latest entry, and nothing changes. The patch is then applied exactly as `POST …/patch` applies one (with `?graph=` for triples) and appended only when that succeeds. Writes made any other way are not journaled. Response: the apply result plus `{version, prev}`.",
+            vec![], vec![("200", "Applied and appended"), ("400", "Invalid patch or headers"), ("401", "Authentication required"), ("403", "Write access required"), ("409", "H id taken, or H prev is not the latest entry"), ("422", "A SHACL write gate refused it")], true)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/log/init", vec![
+        (M::Get, o("Versions", "Patch log version 0", "The dataset the log starts from, as TriG (or N-Quads with `?format=nquads`): each graph under its live name, the prefix table declared. Empty for a log a version cut started, or one started on an empty dataset; otherwise the draft version cut when the first patch was appended (410 once that version is deleted).",
+            vec![], vec![("200", "RDF data"), ("404", "Dataset not found, or the log is empty"), ("410", "Version 0's version was deleted")], false)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/log/current", vec![
+        (M::Get, o("Versions", "Latest patch in the log", "The log's latest patch, `application/rdf-patch`, with its log version in `X-Patch-Log-Version` (and `X-Patch-Default-Graph` when its triples went to a `?graph=`).",
+            vec![], vec![("200", "The patch"), ("403", "It changes a graph the caller may not read"), ("404", "Dataset not found, or the log is empty")], false)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/log/patch/:reference", vec![
+        (M::Get, o("Versions", "A patch in the log", "One patch, by log version (all digits) or by id (the full IRI, or the UUID of a `uuid:` / `urn:uuid:` id), exactly as appended.",
+            vec![], vec![("200", "The patch"), ("403", "It changes a graph the caller may not read"), ("404", "No such patch")], false)),
+    ]);
     mount(paths, "/api/datasets/validate-and-commit", vec![
         (M::Post, o("Versions", "Validate and commit", "Validate a proposed dataset change and, if it passes, commit it as a new version atomically.",
             vec![], vec![("200", "Committed"), ("400", "Validation failed"), ("401", "Authentication required")], true)),

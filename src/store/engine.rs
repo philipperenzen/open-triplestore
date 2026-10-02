@@ -2471,9 +2471,28 @@ impl TripleStore {
     /// and get nothing for it.
     pub fn dump_prefixed_to_writer<W, F>(
         &self,
+        writer: W,
+        format: RdfFormat,
+        from_graph: Option<&str>,
+        resolve_ns: F,
+    ) -> Result<(), StoreError>
+    where
+        W: Write,
+        F: Fn(&str) -> Option<(String, String)>,
+    {
+        self.dump_with_prefixes_to_writer(writer, format, from_graph, &[], resolve_ns)
+    }
+
+    /// [`Self::dump_prefixed_to_writer`] that declares `fixed` first, as given
+    /// and whether the graph uses them or not: a dataset's own prefix table,
+    /// which is part of its data (RDF Patch `PA` / `PD`). `resolve_ns` then
+    /// fills in the namespaces they leave, under labels they leave free.
+    pub fn dump_with_prefixes_to_writer<W, F>(
+        &self,
         mut writer: W,
         format: RdfFormat,
         from_graph: Option<&str>,
+        fixed: &[(String, String)],
         resolve_ns: F,
     ) -> Result<(), StoreError>
     where
@@ -2483,6 +2502,95 @@ impl TripleStore {
         if !matches!(format, RdfFormat::Turtle | RdfFormat::TriG) {
             return self.dump_to_writer(writer, format, from_graph);
         }
+        let serializer = Self::prefixed_serializer(
+            format,
+            self.graph_namespaces(from_graph)?,
+            fixed,
+            resolve_ns,
+        )?;
+        let graph = Self::graph_ref(from_graph)?;
+        let mut ser = serializer.for_writer(&mut writer);
+        for quad in self.store.quads_for_pattern(None, None, None, Some(graph)) {
+            let quad = quad?;
+            ser.serialize_triple(quad.as_ref())?;
+        }
+        ser.finish()?;
+        Ok(())
+    }
+
+    /// Several graphs as one document: `graphs` is `(stored graph, name to
+    /// write it under)`. A dataset format (TriG, N-Quads) writes each graph's
+    /// triples in a graph of that name; a graph format writes them all as one
+    /// graph. Turtle and TriG declare `fixed` and then what `resolve_ns`
+    /// answers, as [`Self::dump_with_prefixes_to_writer`] does.
+    pub fn dump_graphs_with_prefixes_to_writer<W, F>(
+        &self,
+        mut writer: W,
+        format: RdfFormat,
+        graphs: &[(String, String)],
+        fixed: &[(String, String)],
+        resolve_ns: F,
+    ) -> Result<(), StoreError>
+    where
+        W: Write,
+        F: Fn(&str) -> Option<(String, String)>,
+    {
+        let serializer = if matches!(format, RdfFormat::Turtle | RdfFormat::TriG) {
+            let mut namespaces = std::collections::BTreeSet::new();
+            for (stored, _) in graphs {
+                namespaces.extend(self.graph_namespaces(Some(stored))?);
+            }
+            Self::prefixed_serializer(format, namespaces, fixed, resolve_ns)?
+        } else {
+            RdfSerializer::from_format(format)
+        };
+        let dataset = format.supports_datasets();
+        let mut ser = serializer.for_writer(&mut writer);
+        for (stored, name) in graphs {
+            let name = NamedNode::new(name.as_str())
+                .map_err(|e| StoreError::Parse(format!("Invalid IRI: {e}")))?;
+            let graph = Self::graph_ref(Some(stored))?;
+            for quad in self.store.quads_for_pattern(None, None, None, Some(graph)) {
+                let quad = quad?;
+                if dataset {
+                    ser.serialize_quad(QuadRef::new(
+                        &quad.subject,
+                        &quad.predicate,
+                        &quad.object,
+                        GraphNameRef::NamedNode(name.as_ref()),
+                    ))?;
+                } else {
+                    ser.serialize_triple(quad.as_ref())?;
+                }
+            }
+        }
+        ser.finish()?;
+        Ok(())
+    }
+
+    /// A Turtle / TriG serializer declaring `fixed`, then a label for each of
+    /// `namespaces` that `resolve_ns` answers for.
+    fn prefixed_serializer<F>(
+        format: RdfFormat,
+        namespaces: std::collections::BTreeSet<String>,
+        fixed: &[(String, String)],
+        resolve_ns: F,
+    ) -> Result<RdfSerializer, StoreError>
+    where
+        F: Fn(&str) -> Option<(String, String)>,
+    {
+        let mut serializer = RdfSerializer::from_format(format);
+        let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut declared_ns: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (label, ns) in fixed {
+            if !taken.insert(label.clone()) {
+                continue;
+            }
+            declared_ns.insert(ns.clone());
+            serializer = serializer
+                .with_prefix(label, ns)
+                .map_err(|e| StoreError::Parse(format!("Invalid namespace '{ns}': {e}")))?;
+        }
 
         // The resolver may answer with a namespace SHORTER than the one derived
         // from the IRI, so a label can be claimed either by the namespace it was
@@ -2491,18 +2599,18 @@ impl TripleStore {
         // derived namespace take `foaf` and leave the real FOAF namespace
         // undeclared. Exact self-declarations are therefore claimed first, and
         // fallbacks only fill what is left.
-        let resolved: Vec<(String, String, String)> = self
-            .graph_namespaces(from_graph)?
+        let resolved: Vec<(String, String, String)> = namespaces
             .into_iter()
             .filter_map(|ns| resolve_ns(&ns).map(|(label, declared)| (ns, label, declared)))
             .filter(|(_, label, _)| crate::prefixes::is_valid_label(label))
             .collect();
-
-        let mut serializer = RdfSerializer::from_format(format);
-        let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
         for exact_first in [true, false] {
             for (ns, label, declared) in &resolved {
                 if (declared == ns) != exact_first {
+                    continue;
+                }
+                // A namespace the fixed table declares keeps its label there.
+                if declared_ns.contains(declared) {
                     continue;
                 }
                 // A label names one namespace only: re-declaring it would
@@ -2515,15 +2623,7 @@ impl TripleStore {
                 })?;
             }
         }
-
-        let graph = Self::graph_ref(from_graph)?;
-        let mut ser = serializer.for_writer(&mut writer);
-        for quad in self.store.quads_for_pattern(None, None, None, Some(graph)) {
-            let quad = quad?;
-            ser.serialize_triple(quad.as_ref())?;
-        }
-        ser.finish()?;
-        Ok(())
+        Ok(serializer)
     }
 
     /// Buffered [`Self::dump_prefixed_to_writer`], for callers that need bytes.

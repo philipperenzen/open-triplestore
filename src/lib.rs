@@ -59,6 +59,7 @@ pub mod prefixes;
 pub mod property_states;
 pub mod provenance;
 pub mod rdf_patch;
+pub mod rdf_patch_log;
 pub mod reasoning;
 pub mod remote;
 pub mod repair;

@@ -37,6 +37,7 @@ mod prefixes;
 mod property_states;
 mod provenance;
 mod rdf_patch;
+mod rdf_patch_log;
 mod reasoning;
 mod remote;
 // The binary serves the repair routes; the rest of the module's public

@@ -112,6 +112,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `6687b48`) are vendored under `tests/fixtures/shacl-af-topquadrant/` and run
   by `tests/shacl_af_corpus.rs` as a two-way ratchet: 9 of 10 cases pass
   (`docs/conformance/shacl.md`).
+- **RDF Patch logs per dataset.** Each dataset has an
+  [RDF Patch log](https://afs.github.io/rdf-delta/rdf-patch-logs.html) at
+  `/api/datasets/{id}/log`: `POST` appends a patch (exactly one `H id`, at
+  most one `H prev`, which must name the latest entry, else `409` and nothing
+  changes), applying it like `POST …/patch` and appending it only when that
+  succeeds; `GET …/log`, `…/log/init` (version 0 as TriG), `…/log/current`
+  and `…/log/patch/{version|id}` read it. Every version cut also appends the
+  diff from the previous cut as a chained patch. SPARQL, Graph Store and
+  import writes are not journaled. Entries that change a graph the caller may
+  not read are withheld. See `docs/versioning.md#patch-logs`.
+- **A prefix table per dataset.** `GET`/`PUT /api/datasets/{id}/prefixes` and
+  `PUT`/`DELETE …/prefixes/{label}`. Each version records the table it was
+  cut with and a restore brings it back. The dataset's Turtle and TriG
+  exports (the Graph Store read of its graphs, a version's `/data`) declare
+  it ahead of the prefix registry.
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -424,6 +439,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   node expression that contains itself or is none of the seven kinds, and a
   target-type parameter given twice or as a blank node fail the shapes graph
   too.
+- **RDF Patch `PA`/`PD` change the dataset's prefix table**, as the format
+  page has it ("Prefixes do not apply to the data of the patch. They are
+  changes to the data the patch is applied to"); they used to change nothing.
+  A version diff served as a patch carries the prefix-table changes as
+  `PD`/`PA` rows, and diffs between versions chain: a diff to a version keeps
+  one name-based `H id`, and its `H prev` names the diff into `from`. `A`/`D`
+  rows may still use the patch's own prefixed names (a documented extension).
+  `POST …/patch` answers `401` instead of `500` without a token. The RDF
+  Patch row of `docs/standards.md` is now Full.
+- **A version's TriG download is one document with named graphs.**
+  `GET /api/datasets/{id}/versions/{ver}/data` wrote every snapshot's triples
+  into the default graph; each graph is now written under the live graph it
+  was cut from, so the download lines up with the version's RDF Patch diffs.
 - **RDF Patch follows the format page.** `PA`/`PD` take the prefix name as a
   keyword or a quoted string and the namespace as an IRI or a string, so
   patches written by Jena or RDF Delta (`PA "rdf" "http://…" .`) apply; the

@@ -67,12 +67,27 @@ pub enum Op {
     Delete(PatchQuad),
 }
 
+/// A `PA` / `PD` row: a change to the prefix table of the data the patch is
+/// applied to ("Prefixes do not apply to the data of the patch. They are
+/// changes to the data the patch is applied to."). The name has no `:`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrefixOp {
+    Add { name: String, namespace: String },
+    Delete { name: String },
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct Patch {
     pub headers: Vec<(String, String)>,
-    /// The prefix table the patch leaves (name without the `:`, namespace):
-    /// its `PA` / `PD` rows in order, an aborted block's rows undone.
+    /// The prefix table the patch's own rows read their prefixed names
+    /// against (name without the `:`, namespace): its `PA` / `PD` rows in
+    /// order, an aborted block's rows undone. The extension that lets `A` /
+    /// `D` rows use prefixed names; see [`Self::prefix_ops`] for what the
+    /// rows change.
     pub prefixes: Vec<(String, String)>,
+    /// The `PA` / `PD` rows of every committed block, and of rows outside any
+    /// block, in patch order: the changes to the target's prefix table.
+    pub prefix_ops: Vec<PrefixOp>,
     /// The `A` / `D` rows of every committed block, and of rows outside any
     /// block, in patch order.
     pub ops: Vec<Op>,
@@ -97,6 +112,13 @@ impl Patch {
             .iter()
             .filter(|o| matches!(o, Op::Delete(_)))
             .count()
+    }
+    /// Every value of the header `name`, in order.
+    pub fn header_values<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        self.headers
+            .iter()
+            .filter(move |(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
     }
     /// The rows as store operations, a row without a graph put in `default`.
     /// `Err` names the first row that has no graph when there is no default.
@@ -449,8 +471,9 @@ type Prefixes = Vec<(String, String)>;
 /// Parse a patch document.
 pub fn parse(text: &str) -> Result<Patch, String> {
     let mut patch = Patch::default();
-    // The open block: its rows, and the prefix table to restore on `TA`.
-    let mut open: Option<(Vec<Op>, Prefixes)> = None;
+    // The open block: its rows, its prefix rows, and the prefix table to
+    // restore on `TA`.
+    let mut open: Option<(Vec<Op>, Vec<PrefixOp>, Prefixes)> = None;
     for (ln, toks) in rows(text)? {
         let at = |e: String| format!("line {ln}: {e}");
         let (code, args) = match toks.split_first() {
@@ -479,17 +502,18 @@ pub fn parse(text: &str) -> Result<Patch, String> {
                             .into(),
                     ));
                 }
-                open = Some((Vec::new(), patch.prefixes.clone()));
+                open = Some((Vec::new(), Vec::new(), patch.prefixes.clone()));
             }
             "TC" => {
-                let Some((ops, _)) = open.take() else {
+                let Some((ops, prefix_ops, _)) = open.take() else {
                     return Err(at("TC without TX".into()));
                 };
                 patch.ops.extend(ops);
+                patch.prefix_ops.extend(prefix_ops);
                 patch.committed += 1;
             }
             "TA" => {
-                let Some((_, prefixes)) = open.take() else {
+                let Some((_, _, prefixes)) = open.take() else {
                     return Err(at("TA without TX".into()));
                 };
                 patch.prefixes = prefixes;
@@ -509,7 +533,15 @@ pub fn parse(text: &str) -> Result<Patch, String> {
                 };
                 NamedNode::new(&ns).map_err(|e| at(format!("PA: <{ns}>: {e}")))?;
                 patch.prefixes.retain(|(p, _)| *p != name);
-                patch.prefixes.push((name, ns));
+                patch.prefixes.push((name.clone(), ns.clone()));
+                let op = PrefixOp::Add {
+                    name,
+                    namespace: ns,
+                };
+                match &mut open {
+                    Some((_, prefix_ops, _)) => prefix_ops.push(op),
+                    None => patch.prefix_ops.push(op),
+                }
             }
             "PD" => {
                 if args.len() != 1 {
@@ -517,6 +549,11 @@ pub fn parse(text: &str) -> Result<Patch, String> {
                 }
                 let name = prefix_name(&args[0]).map_err(at)?;
                 patch.prefixes.retain(|(p, _)| *p != name);
+                let op = PrefixOp::Delete { name };
+                match &mut open {
+                    Some((_, prefix_ops, _)) => prefix_ops.push(op),
+                    None => patch.prefix_ops.push(op),
+                }
             }
             "A" | "D" => {
                 if args.len() != 3 && args.len() != 4 {
@@ -532,7 +569,7 @@ pub fn parse(text: &str) -> Result<Patch, String> {
                     Op::Add(q)
                 };
                 match &mut open {
-                    Some((ops, _)) => ops.push(op),
+                    Some((ops, _, _)) => ops.push(op),
                     None => patch.ops.push(op),
                 }
             }
@@ -565,14 +602,23 @@ fn triples_of(store: &TripleStore, graph: &str) -> HashSet<String> {
 /// A patch that transforms the `from` graphs into the `to` graphs, expressed
 /// against `target` graph IRIs: `(target, from, to)` per graph, where a
 /// missing side is the empty graph. Blank nodes are written with the store's
-/// own ids, so the patch applies faithfully to a store that holds them.
-pub fn generate(
+/// own ids, so the patch applies faithfully to a store that holds them. It
+/// has the given `H id`, an `H prev` (the patch it follows in a chain or
+/// log) and the `PA` / `PD` rows that change the target's prefix table
+/// (`None`: a `PD`), written first in the block.
+pub fn render(
     store: &TripleStore,
+    id: &str,
+    prev: Option<&str>,
     headers: &[(&str, &str)],
+    prefix_changes: &[(String, Option<String>)],
     mappings: &[(String, Option<String>, Option<String>)],
 ) -> String {
     let mut out = String::new();
-    out.push_str(&format!("H id <urn:uuid:{}> .\n", uuid::Uuid::new_v4()));
+    out.push_str(&format!("H id <{}> .\n", escape_sparql_iri(id)));
+    if let Some(prev) = prev {
+        out.push_str(&format!("H prev <{}> .\n", escape_sparql_iri(prev)));
+    }
     for (k, v) in headers {
         if v.starts_with('<') || v.starts_with('"') {
             out.push_str(&format!("H {k} {v} .\n"));
@@ -583,6 +629,12 @@ pub fn generate(
         }
     }
     out.push_str("TX .\n");
+    for (name, ns) in prefix_changes {
+        match ns {
+            Some(ns) => out.push_str(&format!("PA \"{name}\" <{}> .\n", escape_sparql_iri(ns))),
+            None => out.push_str(&format!("PD \"{name}\" .\n")),
+        }
+    }
     for (target, from, to) in mappings {
         let from_set = from
             .as_deref()
@@ -608,6 +660,34 @@ pub fn generate(
     out
 }
 
+/// The `PA` / `PD` rows that turn prefix table `from` into `to` (`None`: a
+/// `PD`): removed labels first, then new and repointed ones, each by label.
+pub fn prefix_changes(
+    from: &[(String, String)],
+    to: &[(String, String)],
+) -> Vec<(String, Option<String>)> {
+    let mut out: Vec<(String, Option<String>)> = from
+        .iter()
+        .filter(|(l, _)| !to.iter().any(|(t, _)| t == l))
+        .map(|(l, _)| (l.clone(), None))
+        .collect();
+    out.sort();
+    let mut added: Vec<(String, Option<String>)> = to
+        .iter()
+        .filter(|(l, ns)| !from.iter().any(|(f, fns)| f == l && fns == ns))
+        .map(|(l, ns)| (l.clone(), Some(ns.clone())))
+        .collect();
+    added.sort();
+    out.extend(added);
+    out
+}
+
+/// Whether `name` may name a prefix in a dataset's table: a Turtle
+/// `PN_PREFIX`, or empty for the default prefix (`:`).
+pub fn is_prefix_name(name: &str) -> bool {
+    is_pn_prefix(name)
+}
+
 // ── HTTP ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -624,6 +704,12 @@ pub struct Refused(Box<Response>);
 impl IntoResponse for Refused {
     fn into_response(self) -> Response {
         *self.0
+    }
+}
+
+impl From<Response> for Refused {
+    fn from(r: Response) -> Self {
+        Refused(Box::new(r))
     }
 }
 
@@ -684,19 +770,28 @@ fn check_gates(
     Ok(())
 }
 
-/// POST /api/datasets/:id/patch — apply an RDF Patch to the dataset's graphs.
-pub async fn apply_patch_handler(
-    State(state): State<AppState>,
-    Extension(user): Extension<AuthenticatedUser>,
-    Path(dataset_id): Path<String>,
-    Query(params): Query<PatchParams>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Json<serde_json::Value>, Refused> {
+/// What applying a patch to a dataset did.
+#[derive(Debug, Default)]
+pub struct Applied {
+    pub added: usize,
+    pub removed: usize,
+    /// The registered graphs its rows touched, in first-touch order.
+    pub graphs: Vec<String>,
+    /// Its `PA` / `PD` rows, applied to the dataset's prefix table.
+    pub prefix_rows: usize,
+}
+
+/// The dataset `dataset_id`, when `user` may write it: 404 when they may not
+/// see it, 403 when they may only read it.
+pub(crate) fn writable_dataset(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    dataset_id: &str,
+) -> Result<crate::auth::models::Dataset, Refused> {
     let e500 = |e: anyhow::Error| refuse(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     let ds = state
         .auth_db
-        .get_dataset(&dataset_id)
+        .get_dataset(dataset_id)
         .map_err(e500)?
         .ok_or_else(|| refuse(StatusCode::NOT_FOUND, "Dataset not found"))?;
     if !state
@@ -713,6 +808,11 @@ pub async fn apply_patch_handler(
     {
         return Err(refuse(StatusCode::FORBIDDEN, "Write access required"));
     }
+    Ok(ds)
+}
+
+/// The body of a patch request as text, refusing another media type.
+pub(crate) fn patch_text(headers: &HeaderMap, body: &Bytes) -> Result<String, Refused> {
     let ct = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -723,33 +823,26 @@ pub async fn apply_patch_handler(
             format!("send the patch as {MEDIA_TYPE} (got {ct})"),
         ));
     }
+    String::from_utf8(body.to_vec()).map_err(|e| refuse(StatusCode::BAD_REQUEST, e.to_string()))
+}
+
+/// Apply `patch` to the dataset's graphs and prefix table, as `user` (who may
+/// write it): every quad in one of its registered graphs (the one it names,
+/// or for a triple the registered graph `default_graph` names), the SHACL
+/// write gates passed, the rows in one store transaction, then the `PA` /
+/// `PD` rows on the prefix table. A refusal changes nothing.
+pub(crate) async fn apply_to_dataset(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    dataset_id: &str,
+    patch: &Patch,
+    default_graph: Option<&str>,
+) -> Result<Applied, Refused> {
+    let e500 = |e: anyhow::Error| refuse(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     let bad = |m: String| refuse(StatusCode::BAD_REQUEST, m);
-    let text = String::from_utf8(body.to_vec()).map_err(|e| bad(e.to_string()))?;
-    let patch = parse(&text).map_err(|e| bad(format!("invalid RDF Patch: {e}")))?;
-    let id = patch.id().unwrap_or("-").to_string();
-    // The rows as written, beside the net `added` / `removed` they make.
-    let transactions = serde_json::json!({
-        "committed": patch.committed,
-        "aborted": patch.aborted,
-        "add_rows": patch.adds(),
-        "delete_rows": patch.deletes(),
-    });
-    if patch.ops.is_empty() {
-        return Ok(Json(serde_json::json!({
-            "applied": false,
-            "id": id,
-            "aborted": patch.aborted > 0,
-            "transactions": transactions,
-            "added": 0,
-            "removed": 0,
-            "reason": if patch.aborted > 0 { "every transaction was aborted (TA)" } else { "no A/D rows" },
-        })));
-    }
-    // Every quad lands in one of the dataset's registered graphs: the one it
-    // names, or for a triple the `?graph=` default.
     let registered: HashSet<String> = state
         .auth_db
-        .list_dataset_graphs(&dataset_id)
+        .list_dataset_graphs(dataset_id)
         .map_err(e500)?
         .into_iter()
         .collect();
@@ -758,7 +851,7 @@ pub async fn apply_patch_handler(
             "graph <{iri}> is not registered to dataset {dataset_id}"
         ))
     };
-    let default = match params.graph.as_deref() {
+    let default = match default_graph {
         Some(iri) => {
             if !registered.contains(iri) {
                 return Err(not_registered(iri));
@@ -781,49 +874,123 @@ pub async fn apply_patch_handler(
             graphs.push(iri.to_string());
         }
     }
-    let st = state.clone();
-    let gs = graphs.clone();
-    let writer = user.clone();
-    let (added, removed) =
-        tokio::task::spawn_blocking(move || -> Result<(usize, usize), Refused> {
-            use crate::server::error::AppError;
-            check_gates(&st, &writer, &ops, &gs).map_err(AppError::ValidationFailed)?;
-            let before = crate::ldes::capture::before(&st, &gs);
-            let counts = st.store.apply_quad_ops(&ops).map_err(AppError::from)?;
-            crate::ldes::capture::after(&st, before);
-            crate::entailment::after_write(&st, &gs);
-            Ok(counts)
-        })
-        .await
-        .map_err(|e| refuse(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
-    for g in &graphs {
-        crate::server::routes::sync_text_index_after_graph_write(&state, Some(g.clone())).await;
+    let mut applied = Applied {
+        graphs: graphs.clone(),
+        prefix_rows: patch.prefix_ops.len(),
+        ..Applied::default()
+    };
+    if !ops.is_empty() {
+        let st = state.clone();
+        let gs = graphs.clone();
+        let writer = user.clone();
+        let (added, removed) =
+            tokio::task::spawn_blocking(move || -> Result<(usize, usize), Refused> {
+                use crate::server::error::AppError;
+                check_gates(&st, &writer, &ops, &gs).map_err(AppError::ValidationFailed)?;
+                let before = crate::ldes::capture::before(&st, &gs);
+                let counts = st.store.apply_quad_ops(&ops).map_err(AppError::from)?;
+                crate::ldes::capture::after(&st, before);
+                crate::entailment::after_write(&st, &gs);
+                Ok(counts)
+            })
+            .await
+            .map_err(|e| refuse(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+        applied.added = added;
+        applied.removed = removed;
+        for g in &graphs {
+            crate::server::routes::sync_text_index_after_graph_write(state, Some(g.clone())).await;
+        }
+        crate::commit_log::record(
+            &state.store,
+            &state.base_url,
+            crate::commit_log::CommitKind::Sparql,
+            format!(
+                "RDF Patch {}: +{added} −{removed}",
+                patch.id().unwrap_or("-")
+            ),
+            Some(&user.user_id),
+            Some(format!(
+                "{}/dataset/{}",
+                state.base_url.trim_end_matches('/'),
+                dataset_id
+            )),
+            graphs,
+            added,
+            removed,
+            None,
+        );
     }
-    crate::commit_log::record(
-        &state.store,
-        &state.base_url,
-        crate::commit_log::CommitKind::Sparql,
-        format!("RDF Patch {id}: +{added} −{removed}"),
-        Some(&user.user_id),
-        Some(format!(
-            "{}/dataset/{}",
-            state.base_url.trim_end_matches('/'),
-            dataset_id
-        )),
-        graphs.clone(),
-        added,
-        removed,
-        None,
-    );
-    Ok(Json(serde_json::json!({
-        "applied": true,
+    // "Prefixes do not apply to the data of the patch. They are changes to
+    // the data the patch is applied to": the dataset's prefix table.
+    if !patch.prefix_ops.is_empty() {
+        let rows: Vec<(String, Option<String>)> = patch
+            .prefix_ops
+            .iter()
+            .map(|op| match op {
+                PrefixOp::Add { name, namespace } => (name.clone(), Some(namespace.clone())),
+                PrefixOp::Delete { name } => (name.clone(), None),
+            })
+            .collect();
+        state
+            .auth_db
+            .apply_dataset_prefix_ops(dataset_id, &rows, Some(&user.user_id))
+            .map_err(e500)?;
+    }
+    Ok(applied)
+}
+
+/// POST /api/datasets/:id/patch — apply an RDF Patch to the dataset's graphs
+/// and prefix table. Not journaled: the dataset's patch log
+/// (`/api/datasets/:id/log`) holds only what is appended to it.
+pub async fn apply_patch_handler(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+    Path(dataset_id): Path<String>,
+    Query(params): Query<PatchParams>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, Refused> {
+    let Some(Extension(user)) = user else {
+        return Err(refuse(StatusCode::UNAUTHORIZED, "Authentication required"));
+    };
+    writable_dataset(&state, &user, &dataset_id)?;
+    let text = patch_text(&headers, &body)?;
+    let patch = parse(&text)
+        .map_err(|e| refuse(StatusCode::BAD_REQUEST, format!("invalid RDF Patch: {e}")))?;
+    let id = patch.id().unwrap_or("-").to_string();
+    let applied =
+        apply_to_dataset(&state, &user, &dataset_id, &patch, params.graph.as_deref()).await?;
+    Ok(Json(applied_json(&patch, &id, &applied)))
+}
+
+/// The response to an applied patch: the rows as written, beside the net
+/// `added` / `removed` they made.
+pub(crate) fn applied_json(patch: &Patch, id: &str, applied: &Applied) -> serde_json::Value {
+    let transactions = serde_json::json!({
+        "committed": patch.committed,
+        "aborted": patch.aborted,
+        "add_rows": patch.adds(),
+        "delete_rows": patch.deletes(),
+        "prefix_rows": applied.prefix_rows,
+    });
+    let changes = !patch.ops.is_empty() || !patch.prefix_ops.is_empty();
+    let mut out = serde_json::json!({
+        "applied": changes,
         "id": id,
         "aborted": patch.aborted > 0,
         "transactions": transactions,
-        "added": added,
-        "removed": removed,
-        "graphs": graphs,
-    })))
+        "added": applied.added,
+        "removed": applied.removed,
+        "graphs": applied.graphs,
+    });
+    if !changes {
+        out["reason"] = serde_json::json!(if patch.aborted > 0 {
+            "every transaction was aborted (TA)"
+        } else {
+            "no A/D/PA/PD rows"
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -939,9 +1106,12 @@ mod tests {
         store
             .update("INSERT DATA { GRAPH <urn:from> { <urn:a> <urn:p> 1 . <urn:b> <urn:p> 2 } GRAPH <urn:to> { <urn:a> <urn:p> 1 . <urn:c> <urn:p> 3 } }")
             .unwrap();
-        let text = generate(
+        let text = render(
             &store,
+            "urn:uuid:1",
+            None,
             &[("from", "v1"), ("to", "live")],
+            &[],
             &[(
                 "urn:target".to_string(),
                 Some("urn:from".to_string()),

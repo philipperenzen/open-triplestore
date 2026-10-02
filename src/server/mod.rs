@@ -1210,6 +1210,31 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             )),
         )
         .route(
+            "/api/datasets/:dataset_id/prefixes",
+            get(crate::prefixes::dataset_table::list).put(crate::prefixes::dataset_table::replace),
+        )
+        .route(
+            "/api/datasets/:dataset_id/prefixes/:label",
+            put(crate::prefixes::dataset_table::put_one)
+                .delete(crate::prefixes::dataset_table::delete_one),
+        )
+        .route(
+            "/api/datasets/:dataset_id/log",
+            get(crate::rdf_patch_log::describe_log).post(crate::rdf_patch_log::append_patch),
+        )
+        .route(
+            "/api/datasets/:dataset_id/log/init",
+            get(crate::rdf_patch_log::get_init),
+        )
+        .route(
+            "/api/datasets/:dataset_id/log/current",
+            get(crate::rdf_patch_log::get_current),
+        )
+        .route(
+            "/api/datasets/:dataset_id/log/patch/:reference",
+            get(crate::rdf_patch_log::get_patch),
+        )
+        .route(
             "/api/datasets/:dataset_id/entailment",
             get(crate::entailment::get_entailment).put(crate::entailment::put_entailment),
         )
