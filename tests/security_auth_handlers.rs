@@ -7,6 +7,8 @@
 //!   belongs to a *different* org (cross-org path) with 404.
 //! * [CB3] PUT /api/datasets/:id/shacl rejects a `shapes_graph_iri` that points
 //!   at another dataset's namespace for a non-admin caller.
+//! * PUT /api/admin/oauth/providers/:id accepts the body the admin form sends
+//!   and keeps the redacted client secret and SAML certificate when absent.
 //!
 //! Driven through the real Axum router via `tower::ServiceExt::oneshot` (no socket).
 
@@ -318,4 +320,105 @@ async fn shapes_graph_in_own_namespace_is_accepted() {
         StatusCode::NO_CONTENT,
         "own-namespace shapes graph must be accepted"
     );
+}
+
+// ─── Identity-provider edits keep what a read redacts ─────────────────────────
+
+async fn admin_json(
+    app: &axum::Router,
+    method: Method,
+    uri: &str,
+    token: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, String) {
+    let mut b = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"));
+    let body = match body {
+        Some(v) => {
+            b = b.header(header::CONTENT_TYPE, "application/json");
+            Body::from(v.to_string())
+        }
+        None => Body::empty(),
+    };
+    let resp = app.clone().oneshot(b.body(body).unwrap()).await.unwrap();
+    let status = resp.status();
+    (status, body_text(resp.into_body()).await)
+}
+
+/// The admin form cannot send back the client secret or the SAML IdP
+/// certificate (no read returns them), so an edit that omits them must keep
+/// the stored values. The bodies are the shape the form sends: `scopes` and
+/// `role_claim_map` as strings, `is_active` rather than `enabled`.
+#[tokio::test]
+async fn provider_edit_keeps_redacted_secret_and_certificate() {
+    let (state, token) = admin_state();
+    let db = state.auth_db.clone();
+    let app = test_app(state);
+    let base = serde_json::json!({
+        "name": "Example SAML", "slug": "example-saml", "provider_type": "saml",
+        "client_id": null, "discovery_url": null, "tenant_id": "tenant-1",
+        "entity_id": "https://idp.example.org/saml", "sso_url": "https://idp.example.org/sso",
+        "scopes": "openid email profile",
+        "role_claim_map": "{\"staff\":\"user\"}",
+        "auto_provision": true, "default_role": "user", "is_active": true,
+    });
+    let mut create = base.clone();
+    create["idp_certificate"] = "CERT-A".into();
+    create["client_secret"] = "secret-a".into();
+    let (st, txt) = admin_json(
+        &app,
+        Method::POST,
+        "/api/admin/oauth/providers",
+        &token,
+        Some(create),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    let id = serde_json::from_str::<serde_json::Value>(&txt).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let stored = db.get_oauth_provider_by_id(&id).unwrap().unwrap();
+    let secret_a = stored.client_secret_enc.clone();
+    assert!(secret_a.is_some());
+
+    // Disable it without resending either secret value.
+    let mut edit = base.clone();
+    edit["is_active"] = false.into();
+    let uri = format!("/api/admin/oauth/providers/{id}");
+    let (st, txt) = admin_json(&app, Method::PUT, &uri, &token, Some(edit)).await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{txt}");
+    let p = db.get_oauth_provider_by_id(&id).unwrap().unwrap();
+    assert!(!p.is_active);
+    assert_eq!(p.idp_certificate.as_deref(), Some("CERT-A"));
+    assert_eq!(p.client_secret_enc, secret_a);
+    assert_eq!(p.tenant_id.as_deref(), Some("tenant-1"));
+    assert_eq!(p.role_claim_map.as_deref(), Some("{\"staff\":\"user\"}"));
+
+    // A supplied certificate replaces the stored one.
+    let mut edit = base.clone();
+    edit["idp_certificate"] = "CERT-B".into();
+    let (st, txt) = admin_json(&app, Method::PUT, &uri, &token, Some(edit)).await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{txt}");
+    let p = db.get_oauth_provider_by_id(&id).unwrap().unwrap();
+    assert!(p.is_active);
+    assert_eq!(p.idp_certificate.as_deref(), Some("CERT-B"));
+
+    // The list the form reads carries `is_active` and string `scopes`, and
+    // never the certificate.
+    let (st, txt) = admin_json(
+        &app,
+        Method::GET,
+        "/api/admin/oauth/providers",
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let list: serde_json::Value = serde_json::from_str(&txt).unwrap();
+    assert_eq!(list[0]["is_active"], true);
+    assert_eq!(list[0]["scopes"], "openid email profile");
+    assert!(!txt.contains("CERT-B"), "{txt}");
 }
