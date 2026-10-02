@@ -56,7 +56,36 @@ CI red, so the list cannot go stale.
   `xsd:boolean` natively and reads the literal back in canonical form (`"1"` →
   `"true"`), so the distinction is unrecoverable after loading. This is a storage
   canonicalisation property, not an engine gap; fixing it would require keeping
-  the original lexical form alongside every stored literal.
+  the original lexical form alongside every stored literal. The same storage
+  property makes `sh:datatype` reject valid values of the derived integer types
+  and `xsd:dateTimeStamp`, which read back as `xsd:integer` / `xsd:dateTime`; no
+  suite case covers that (`datatype-ill-formed` passes because its values are
+  ill-formed anyway). Both are pinned by `pinned_*` tests in
+  `tests/shacl_conformance.rs`, and the dataset and SHACL Studio shapes uploads
+  refuse non-canonical booleans on activation flags (see
+  [shacl.md](../shacl.md#literal-forms-the-engine-cannot-see)).
+
+## Beyond the suite: fail-open gaps (2026-10-01)
+
+The suite has no case for several places where the engine let data through that
+the shapes forbid. They are covered by `tests/shacl_conformance.rs` and
+`tests/shacl_rules_conformance.rs` instead:
+
+- **Multi-valued parameters**: only the first value of `sh:not`, `sh:hasValue`,
+  `sh:pattern` and `sh:qualifiedValueShape`, and the first list of `sh:and`,
+  `sh:or` and `sh:xone`, was read. Each value is now its own constraint
+  (SHACL §4).
+- **`sh:deactivated`** was honoured on top-level shapes only. It now applies to
+  property shapes and inline shapes as well, with the spec's meaning (every
+  term conforms, so `sh:not` of a deactivated shape fails).
+- **Ill-formed paths** (a property shape with no `sh:path`, several, or one that
+  is no well-formed path) skipped the property shape with a warning; they now
+  fail the shapes graph like every other load error.
+- **A SPARQL target that errors when it runs** yielded no focus nodes; it now
+  fails the run.
+- **Triple rules with node-expression terms** (`sh:object [ sh:path ex:p ]`)
+  wrote the shapes graph's blank node into the data; they are refused at load
+  until node expressions are implemented.
 
 ## Typed-term engine refactor (2026-06-11)
 

@@ -60,6 +60,9 @@ pub struct PropertyShape {
     /// `sh:message` on the property shape itself — overrides the engine's
     /// default result message for results produced by this property shape.
     pub message: Option<String>,
+    /// `sh:deactivated true`: every term conforms (SHACL §2.1.6), so the
+    /// shape's constraints are not evaluated.
+    pub deactivated: bool,
 }
 
 /// SHACL property paths.

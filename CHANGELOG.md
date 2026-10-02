@@ -93,6 +93,35 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an existing tag. See `docs/release-process.md`.
 
 ### Fixed
+- **SHACL validation and write gates no longer pass data the shapes forbid.**
+  Gates get stricter: data that used to be accepted may now be refused with
+  422, and a shapes graph that used to load may now fail the run.
+  - Every value of `sh:not`, `sh:hasValue`, `sh:pattern` and
+    `sh:qualifiedValueShape`, and every list of `sh:and`, `sh:or` and
+    `sh:xone`, is its own constraint (SHACL §4). Only the first one was read.
+  - `sh:deactivated true` works on property shapes and inline shapes
+    (`sh:node`, `sh:not`, logical members, qualified value shapes, rule
+    conditions), with the spec's meaning: every term conforms, so `sh:not` of a
+    deactivated shape fails. It worked on top-level shapes only.
+  - A property shape without a `sh:path`, with several, or with one that is not
+    a well-formed path, and a shape typed `sh:PropertyShape` without one, fail
+    the shapes graph. They were skipped with a warning.
+  - A SPARQL target (`sh:target [ sh:select … ]`) that errors when it runs fails
+    the run; it selected no focus nodes. A rule shape whose target cannot be
+    loaded fails inference instead of never firing.
+  - A `sh:TripleRule` whose subject, predicate or object is a node expression
+    (a blank node such as `[ sh:path ex:p ]`) is refused at load. It wrote the
+    shapes graph's own blank node into the data graph.
+  - The dataset `PUT /api/datasets/{id}/shapes` and SHACL Studio create and
+    `PUT …/turtle` refuse (422) an activation flag (`sh:uniqueLang`,
+    `sh:closed`, `sh:deactivated`, `sh:qualifiedValueShapesDisjoint`,
+    `sh:optional`) written as `"1"`/`"0"^^xsd:boolean`: storage reads it back as
+    `true`/`false`, which SHACL does not mean. The derived-datatype deviation
+    (`"5"^^xsd:nonNegativeInteger` reads back as `xsd:integer`, so
+    `sh:datatype xsd:nonNegativeInteger` rejects it) is now documented in
+    `docs/shacl.md` and pinned by tests; it is not fixed.
+  - The IDS export reports a second `sh:pattern` or `sh:hasValue` and
+    deactivated shapes as losses instead of exporting them with another meaning.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if

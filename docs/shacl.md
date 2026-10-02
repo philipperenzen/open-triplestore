@@ -41,6 +41,13 @@ curl -X PUT http://localhost:7878/api/datasets/<dataset_id>/shapes \
      --data-binary @shapes.ttl
 ```
 
+Write the boolean flags `sh:uniqueLang`, `sh:closed`, `sh:deactivated`,
+`sh:qualifiedValueShapesDisjoint` and `sh:optional` as `true` or `false`. An
+upload that writes one as another `xsd:boolean` form (`"1"^^xsd:boolean`,
+`"0"^^xsd:boolean`) is refused with 422 naming the triples, here and in SHACL
+Studio (create and `PUT …/turtle`); see
+[Literal forms the engine cannot see](#literal-forms-the-engine-cannot-see).
+
 ### SHACL Compact Syntax (SHACLC)
 
 Shapes can be uploaded in compact syntax — they are parsed to Turtle before storage. The stored form is always Turtle.
@@ -161,6 +168,58 @@ not reach your data.
 
 ---
 
+### How a shapes graph is read
+
+- **Every value of a parameter is a constraint.** A shape with two values of
+  `sh:not`, `sh:hasValue`, `sh:pattern` (sharing the one `sh:flags`) or
+  `sh:qualifiedValueShape`, or two lists for `sh:and`, `sh:or` or `sh:xone`,
+  must satisfy each of them (SHACL §4). Until 2026-10 only the first value was
+  read, so a gate let through data that a later value forbids.
+- **`sh:deactivated true` works on every shape**: top-level node and property
+  shapes, values of `sh:property` (named or blank), and inline shapes under
+  `sh:node`, `sh:not`, `sh:and`/`sh:or`/`sh:xone`, `sh:qualifiedValueShape` and
+  a rule's `sh:condition`. Every term conforms to a deactivated shape
+  (SHACL §2.1.6), so it reports nothing — and `sh:not` of a deactivated shape
+  fails for every value.
+- **An ill-formed shapes graph fails the run** (a write gate turns that into
+  422) rather than skipping what it cannot use. Besides an unparseable
+  `sh:sparql` or validator, that covers a value of `sh:property`, or a shape
+  typed `sh:PropertyShape`, without a `sh:path`; a shape with more than one
+  `sh:path`; a path that is not a well-formed SHACL property path (a literal, a
+  blank node that is no path, a sequence or alternative with a member that is
+  no path); and a SPARQL target (`sh:target [ sh:select … ]`) that does not
+  parse, does not project `?this`, or errors when it runs.
+
+### Literal forms the engine cannot see
+
+The store keeps `xsd:boolean`, the numeric types and the date/time types as
+values, not as the text that was written. What comes back is the canonical
+form of that value, and validation only ever sees what comes back:
+
+| Written | Read back |
+|---|---|
+| `"5"^^xsd:nonNegativeInteger` (any of the 12 types derived from `xsd:integer`: `xsd:int`, `xsd:byte`, `xsd:positiveInteger`, …) | `"5"^^xsd:integer` |
+| `"2026-10-01T12:00:00Z"^^xsd:dateTimeStamp` | `"2026-10-01T12:00:00Z"^^xsd:dateTime` |
+| `"1"^^xsd:boolean`, `"0"^^xsd:boolean` | `true`, `false` |
+
+Two consequences for SHACL:
+
+- **`sh:datatype` with a derived integer type or `xsd:dateTimeStamp` reports
+  every stored value as a violation**, valid ones included, and a write gate
+  answers 422 on valid data. Until storage keeps the written datatype, use
+  `sh:datatype xsd:integer` with `sh:minInclusive` / `sh:maxInclusive` for
+  the range (or `xsd:dateTime`).
+- **A boolean flag written as `"1"` acts as `true`.** SHACL activates
+  `sh:uniqueLang`, `sh:closed`, `sh:deactivated` and the other flags only for
+  the literal `true` (W3C test `core/property/uniqueLang-002`, the one known
+  core failure), but once stored the two cannot be told apart. The dataset
+  `PUT …/shapes` and SHACL Studio uploads refuse such flags instead of storing
+  a meaning the author may not have intended; the other write paths (Graph
+  Store Protocol, SPARQL Update, imports) store them as given.
+
+Both are pinned by tests (`tests/shacl_conformance.rs`, `pinned_*`), which
+will flip when storage keeps lexical forms.
+
 ## On-Demand Validation
 
 ```bash
@@ -237,7 +296,7 @@ When `shacl_on_write` is `true` on a dataset and a `shapes_graph_iri` is configu
 
 If validation fails, the write is rejected with **422 Unprocessable Entity** and the JSON report is returned. The store is not modified. A report names the gate's shapes, their paths and messages: when the shapes that refused the write include a graph some dataset holds as private that the writer may not read, the 422 says only that the write does not conform, and by how many results. The same holds for every write gate below, and for bulk import.
 
-The gate fails **closed**: a gate that cannot be evaluated refuses the write with the same 422 and a report naming the cause, never a 204. That covers a shapes graph that cannot be read or copied, a validation-engine error, and an ill-formed shapes graph — in particular a `sh:sparql` constraint whose `sh:select` does not parse (or errors at evaluation) is a violation of the focus node, not a constraint that silently never fires. Loading such a shapes graph for on-demand validation fails with an error for the same reason.
+The gate fails **closed**: a gate that cannot be evaluated refuses the write with the same 422 and a report naming the cause, never a 204. That covers a shapes graph that cannot be read or copied, a validation-engine error, and an ill-formed shapes graph — in particular a `sh:sparql` constraint whose `sh:select` does not parse (or errors at evaluation) is a violation of the focus node, not a constraint that silently never fires, and a property shape without a usable `sh:path` or a SPARQL target that fails refuses the write rather than being skipped (see [How a shapes graph is read](#how-a-shapes-graph-is-read)). Loading such a shapes graph for on-demand validation fails with an error for the same reason.
 
 ### Enable via API
 
@@ -430,14 +489,19 @@ graph was left out; with none left the call answers 400.
 Supports `sh:SPARQLRule` (`sh:construct`) and `sh:TripleRule` (`sh:subject` /
 `sh:predicate` / `sh:object`, with `sh:this` standing for the focus node; a
 literal object keeps its datatype). Inferred triples are written back into the
-data graph, and the rules run to a fixed point. The SHACL-AF rule modifiers are
-honoured:
+data graph, and the rules run to a fixed point. A triple rule's terms must be
+constants (IRIs or literals) or `sh:this`: the other SHACL-AF node expressions
+— a blank node such as `sh:object [ sh:path ex:p ]` — are not evaluated yet,
+and a rule using one fails the run with a message naming its shape, instead of
+writing the shapes graph's blank node into the data. Use a `sh:SPARQLRule` for
+those. A rule shape whose target cannot be loaded fails the run too. The
+SHACL-AF rule modifiers are honoured:
 
 | Modifier | Effect |
 |---|---|
 | `sh:order` | Rules run in ascending order (default `0`), so a later rule sees what an earlier one produced within the same pass. |
 | `sh:condition` | A shape the focus node must conform to for the rule to fire — below, only adults get `ex:mayVote`. |
-| `sh:deactivated true` | On the rule or on its shape: the rule does not run. |
+| `sh:deactivated true` | On the rule or on its shape: the rule does not run. On a `sh:condition` shape: every node conforms to it, so it does not hold the rule back. |
 
 ```turtle
 ex:VoterShape a sh:NodeShape ;
@@ -710,7 +774,11 @@ Three further caveats, each reported in `losses` when it applies:
   recovered; synthesising one would emit a document that lies.
 - **`xs:pattern` is implicitly anchored and has no flags**, while `sh:pattern`
   is an XPath/SPARQL regex. A flagless pattern is exported with a warning that
-  the match semantics differ; a flagged one is dropped.
+  the match semantics differ; a flagged one is dropped. So is every pattern
+  after the first: several `sh:pattern` values must all match, while several
+  `xs:pattern` facets are alternatives. Likewise only the first of several
+  `sh:hasValue` values is exported, and a deactivated shape or property shape
+  is not exported at all.
 - **This is not a general SHACL-to-IDS translator.** It exports shapes written
   over *this store's* IFC RDF vocabulary — the `props:` / `bot:` convention the
   IFC lift emits and the IDS importer targets. Shapes produced by other tools

@@ -1044,3 +1044,373 @@ fn sparql_function_is_scoped_to_its_shapes_graph() {
         b.results
     );
 }
+
+
+// ─── Fail open: every value of a multi-valued parameter is a constraint ──────
+//
+// SHACL §4: when a component has a single parameter, "each value of such a
+// parameter declares an individual constraint". The loader used to read only
+// the first value of sh:not, sh:and, sh:or, sh:xone, sh:hasValue, sh:pattern
+// and sh:qualifiedValueShape, so the others were never checked and a write
+// gate let data through that one of them forbids. Which value came "first"
+// depended on store order, so each test has one node per value: whichever
+// value the old loader kept, another node still had to be flagged.
+
+fn try_run(shapes: &str, data: &str) -> Result<ValidationReport, String> {
+    let store = TripleStore::in_memory().unwrap();
+    store
+        .load_str(
+            &format!("{PFX}{shapes}"),
+            RdfFormat::Turtle,
+            Some("urn:shapes"),
+        )
+        .unwrap();
+    store
+        .load_str(&format!("{PFX}{data}"), RdfFormat::Turtle, Some("urn:data"))
+        .unwrap();
+    validate(&store, "urn:shapes", &["urn:data".to_string()])
+}
+
+/// Focus nodes with at least one result, by local name.
+fn flagged(r: &ValidationReport) -> std::collections::BTreeSet<String> {
+    r.results
+        .iter()
+        .map(|v| {
+            v.focus_node
+                .trim_matches(|c| c == '<' || c == '>')
+                .trim_start_matches("http://example.org/")
+                .to_string()
+        })
+        .collect()
+}
+
+fn set(names: &[&str]) -> std::collections::BTreeSet<String> {
+    names.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn every_value_of_sh_not_is_its_own_constraint() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+  sh:not [ sh:class ex:A ], [ sh:class ex:B ] ."#;
+    let data = r#"
+ex:a a ex:T, ex:A .
+ex:b a ex:T, ex:B .
+ex:ok a ex:T ."#;
+    let r = run(shapes, data);
+    assert_eq!(flagged(&r), set(&["a", "b"]), "{:?}", r.results);
+}
+
+#[test]
+fn every_list_of_sh_and_sh_or_sh_xone_is_its_own_constraint() {
+    // sh:and — two lists, each with one member.
+    let r = run(
+        "ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+           sh:and ( [ sh:class ex:A ] ), ( [ sh:class ex:B ] ) .",
+        "ex:a a ex:T, ex:A . ex:b a ex:T, ex:B . ex:ok a ex:T, ex:A, ex:B .",
+    );
+    assert_eq!(flagged(&r), set(&["a", "b"]), "sh:and: {:?}", r.results);
+
+    // sh:or — conforming to one member of the first list says nothing about
+    // the second.
+    let r = run(
+        "ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+           sh:or ( [ sh:class ex:A ] [ sh:class ex:B ] ), ( [ sh:class ex:C ] [ sh:class ex:D ] ) .",
+        "ex:a a ex:T, ex:A . ex:c a ex:T, ex:C . ex:ok a ex:T, ex:B, ex:D .",
+    );
+    assert_eq!(flagged(&r), set(&["a", "c"]), "sh:or: {:?}", r.results);
+
+    // sh:xone — exactly one member of EACH list.
+    let r = run(
+        "ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+           sh:xone ( [ sh:class ex:A ] [ sh:class ex:B ] ), ( [ sh:class ex:C ] [ sh:class ex:D ] ) .",
+        "ex:a a ex:T, ex:A . ex:c a ex:T, ex:C . ex:ok a ex:T, ex:A, ex:D .",
+    );
+    assert_eq!(flagged(&r), set(&["a", "c"]), "sh:xone: {:?}", r.results);
+}
+
+#[test]
+fn every_value_of_sh_has_value_is_its_own_constraint() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+  sh:property [ sh:path ex:p ; sh:hasValue ex:x, "y" ] ."#;
+    let data = r#"
+ex:a a ex:T ; ex:p ex:x .
+ex:b a ex:T ; ex:p "y" .
+ex:ok a ex:T ; ex:p ex:x, "y" ."#;
+    let r = run(shapes, data);
+    assert_eq!(flagged(&r), set(&["a", "b"]), "{:?}", r.results);
+}
+
+#[test]
+fn every_value_of_sh_pattern_is_its_own_constraint() {
+    // Both patterns take the shape's one sh:flags.
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+  sh:property [ sh:path ex:p ; sh:pattern "^a", "z$" ; sh:flags "i" ] ."#;
+    let data = r#"
+ex:a a ex:T ; ex:p "Abc" .
+ex:z a ex:T ; ex:p "xyZ" .
+ex:ok a ex:T ; ex:p "AZ" ."#;
+    let r = run(shapes, data);
+    assert_eq!(flagged(&r), set(&["a", "z"]), "{:?}", r.results);
+}
+
+#[test]
+fn every_value_of_sh_qualified_value_shape_is_its_own_constraint() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+  sh:property [ sh:path ex:p ;
+      sh:qualifiedValueShape [ sh:class ex:A ], [ sh:class ex:B ] ;
+      sh:qualifiedMinCount 1 ] ."#;
+    let data = r#"
+ex:va a ex:A . ex:vb a ex:B .
+ex:a a ex:T ; ex:p ex:va .
+ex:b a ex:T ; ex:p ex:vb .
+ex:ok a ex:T ; ex:p ex:va, ex:vb ."#;
+    let r = run(shapes, data);
+    assert_eq!(flagged(&r), set(&["a", "b"]), "{:?}", r.results);
+}
+
+// ─── Fail open: sh:deactivated below the top level ───────────────────────────
+//
+// SHACL §2.1.6: "All RDF terms conform to a deactivated shape." That held only
+// for top-level shapes. A deactivated property shape still produced results,
+// and an inline shape under sh:node / sh:not / sh:or was evaluated as if
+// active — so sh:not of a deactivated shape passed when it must fail.
+
+#[test]
+fn a_deactivated_property_shape_produces_no_results() {
+    // Named (the spec's own example) and blank.
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:Person ;
+  sh:property ex:S-name ;
+  sh:property [ sh:path ex:age ; sh:minCount 1 ; sh:deactivated true ] .
+ex:S-name a sh:PropertyShape ; sh:path ex:name ; sh:minCount 1 ; sh:deactivated true ."#;
+    let r = run(shapes, "ex:JohnDoe a ex:Person .");
+    assert!(r.conforms, "{:?}", r.results);
+
+    // A top-level property shape, and one nested under a property shape.
+    let shapes = r#"
+ex:P a sh:PropertyShape ; sh:targetClass ex:Person ; sh:path ex:name ;
+  sh:minCount 1 ; sh:deactivated true .
+ex:Q a sh:NodeShape ; sh:targetClass ex:Person ;
+  sh:property [ sh:path ex:knows ;
+      sh:property [ sh:path ex:name ; sh:minCount 1 ; sh:deactivated true ] ] ."#;
+    let r = run(shapes, "ex:JohnDoe a ex:Person ; ex:knows ex:Jane .");
+    assert!(r.conforms, "{:?}", r.results);
+}
+
+#[test]
+fn every_term_conforms_to_a_deactivated_inline_shape() {
+    let data = "ex:a a ex:T .";
+    // sh:node of a deactivated shape: nothing to report.
+    let r = run(
+        "ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+           sh:node [ sh:class ex:Missing ; sh:deactivated true ] .",
+        data,
+    );
+    assert!(r.conforms, "sh:node: {:?}", r.results);
+    // sh:or with a deactivated member: that member always conforms.
+    let r = run(
+        "ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+           sh:or ( [ sh:class ex:Missing ; sh:deactivated true ] [ sh:class ex:Other ] ) .",
+        data,
+    );
+    assert!(r.conforms, "sh:or: {:?}", r.results);
+    // sh:not of a deactivated shape: the node conforms to it, so sh:not fails.
+    let r = run(
+        "ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+           sh:not [ sh:class ex:Missing ; sh:deactivated true ] .",
+        data,
+    );
+    assert_eq!(flagged(&r), set(&["a"]), "sh:not: {:?}", r.results);
+    // sh:deactivated false is the default: the shape stays active.
+    let r = run(
+        "ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+           sh:node [ sh:class ex:Missing ; sh:deactivated false ] .",
+        data,
+    );
+    assert_eq!(
+        flagged(&r),
+        set(&["a"]),
+        "deactivated false: {:?}",
+        r.results
+    );
+}
+
+// ─── Fail closed: a property shape without a usable path ─────────────────────
+//
+// A property shape whose sh:path was missing or did not parse was skipped with
+// a warning, while every other load error fails the run (the write gate turns
+// it into 422). Skipping it made the shapes graph conform by omission.
+
+#[test]
+fn a_property_shape_without_a_usable_path_fails_the_shapes_graph() {
+    for (what, shapes) in [
+        (
+            "no sh:path",
+            "ex:S a sh:NodeShape ; sh:targetClass ex:T ; sh:property [ sh:minCount 1 ] .",
+        ),
+        (
+            "a blank node that is no path",
+            "ex:S a sh:NodeShape ; sh:targetClass ex:T ; sh:property [ sh:path [ ex:foo ex:bar ] ; sh:minCount 1 ] .",
+        ),
+        (
+            "a literal path",
+            "ex:S a sh:NodeShape ; sh:targetClass ex:T ; sh:property [ sh:path \"ex:p\" ; sh:minCount 1 ] .",
+        ),
+        (
+            "two paths",
+            "ex:S a sh:NodeShape ; sh:targetClass ex:T ; sh:property [ sh:path ex:p, ex:q ; sh:minCount 1 ] .",
+        ),
+        (
+            "a sequence with a member that is no path",
+            "ex:S a sh:NodeShape ; sh:targetClass ex:T ; sh:property [ sh:path ( ex:p [ ex:foo ex:bar ] ) ; sh:minCount 1 ] .",
+        ),
+        (
+            "an alternative with a member that is no path",
+            "ex:S a sh:NodeShape ; sh:targetClass ex:T ; sh:property [ sh:path [ sh:alternativePath ( ex:p \"q\" ) ] ; sh:minCount 1 ] .",
+        ),
+        (
+            "a top-level property shape with a path that is no path",
+            "ex:S a sh:PropertyShape ; sh:targetClass ex:T ; sh:path [ ex:foo ex:bar ] ; sh:minCount 1 .",
+        ),
+        (
+            "a top-level sh:PropertyShape with no path",
+            "ex:S a sh:PropertyShape ; sh:targetClass ex:T ; sh:minCount 1 .",
+        ),
+        (
+            "an inline shape with a path that is no path",
+            "ex:S a sh:NodeShape ; sh:targetClass ex:T ; sh:node [ sh:path [ ex:foo ex:bar ] ; sh:minCount 1 ] .",
+        ),
+    ] {
+        let r = try_run(shapes, "ex:a a ex:T .");
+        assert!(r.is_err(), "{what}: must fail the run, got {r:?}");
+    }
+    // Every well-formed path form still loads.
+    let r = try_run(
+        "ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+           sh:property [ sh:path ( ex:p [ sh:inversePath ex:q ] ) ] ;
+           sh:property [ sh:path [ sh:alternativePath ( ex:p [ sh:zeroOrMorePath ex:q ] ) ] ] ;
+           sh:property [ sh:path [ sh:oneOrMorePath ex:p ] ] ;
+           sh:property [ sh:path [ sh:zeroOrOnePath ex:p ] ] ;
+           sh:property [ sh:path ( ex:p ex:q ) ; sh:minCount 1 ] .",
+        "ex:a a ex:T .",
+    )
+    .expect("well-formed paths load");
+    assert_eq!(flagged(&r), set(&["a"]), "{:?}", r.results);
+}
+
+// ─── Fail closed: a SPARQL target that errors at run time ────────────────────
+
+/// A target that parses and projects `?this` but fails when evaluated used to
+/// yield no focus nodes (`if let Ok(..)`, and per-solution errors were dropped
+/// too): the shape validated nothing and the gate let the write through.
+#[test]
+fn a_sparql_target_that_errors_at_run_time_fails_the_run() {
+    let shapes = r#"
+ex:S a sh:NodeShape ;
+  sh:target [ sh:select "SELECT ?this WHERE { SERVICE <http://example.org/nowhere> { ?this ?p ?o } }" ] ;
+  sh:property [ sh:path ex:p ; sh:minCount 1 ] ."#;
+    let r = try_run(shapes, "ex:a a ex:T .");
+    assert!(
+        r.is_err(),
+        "an erroring target must fail the run, got {r:?}"
+    );
+}
+
+// ─── Pinned deviations: literal canonicalisation in storage ──────────────────
+//
+// oxigraph stores xsd:boolean, the numerics and the temporals as native
+// values: every derived integer type reads back as xsd:integer, and
+// "1"^^xsd:boolean reads back as true. The engine only ever sees what the
+// store returns. These tests pin today's behaviour so the change is visible
+// when storage keeps lexical forms (plan card 15); flip them then.
+
+/// PINNED (wrong per SHACL §4.1.2): a valid `"5"^^xsd:nonNegativeInteger`
+/// violates `sh:datatype xsd:nonNegativeInteger`, because the store hands it
+/// back as `"5"^^xsd:integer`. A write gate answers 422 on valid data.
+#[test]
+fn pinned_a_derived_integer_type_violates_its_own_sh_datatype() {
+    for dt in [
+        "nonNegativeInteger",
+        "positiveInteger",
+        "int",
+        "short",
+        "byte",
+        "unsignedLong",
+    ] {
+        let shapes = format!(
+            "ex:S a sh:NodeShape ; sh:targetNode ex:a ; sh:property [ sh:path ex:n ; sh:datatype xsd:{dt} ] ."
+        );
+        let r = run(&shapes, &format!("ex:a ex:n \"5\"^^xsd:{dt} ."));
+        assert!(
+            !r.conforms,
+            "xsd:{dt}: storage now keeps the derived datatype — flip this pin \
+             and the docs (footnote 6, docs/shacl.md): {:?}",
+            r.results
+        );
+        // The cause: the stored term reads back as xsd:integer.
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                &format!("{PFX}ex:a ex:n \"5\"^^xsd:{dt} ."),
+                RdfFormat::Turtle,
+                Some("urn:data"),
+            )
+            .unwrap();
+        let Ok(oxigraph::sparql::QueryResults::Solutions(mut rows)) =
+            store.query("SELECT (DATATYPE(?o) AS ?d) WHERE { GRAPH <urn:data> { ?s ?p ?o } }")
+        else {
+            panic!("datatype query failed");
+        };
+        let d = rows.next().unwrap().unwrap().get("d").unwrap().to_string();
+        assert_eq!(
+            d, "<http://www.w3.org/2001/XMLSchema#integer>",
+            "xsd:{dt} reads back as xsd:integer"
+        );
+    }
+    // xsd:dateTimeStamp reads back as xsd:dateTime the same way.
+    let r = run(
+        "ex:S a sh:NodeShape ; sh:targetNode ex:a ; sh:property [ sh:path ex:t ; sh:datatype xsd:dateTimeStamp ] .",
+        "ex:a ex:t \"2026-10-01T12:00:00Z\"^^xsd:dateTimeStamp .",
+    );
+    assert!(
+        !r.conforms,
+        "xsd:dateTimeStamp: storage now keeps it — flip this pin and the docs"
+    );
+    // xsd:integer itself is unaffected.
+    let r = run(
+        "ex:S a sh:NodeShape ; sh:targetNode ex:a ; sh:property [ sh:path ex:n ; sh:datatype xsd:integer ] .",
+        "ex:a ex:n 5 .",
+    );
+    assert!(r.conforms, "{:?}", r.results);
+}
+
+/// PINNED (wrong per SHACL; W3C core/property/uniqueLang-002): only the
+/// literal `true` activates a flag, but the store turns `"1"^^xsd:boolean`
+/// into `true`, so `"1"` activates `sh:uniqueLang` and `sh:deactivated` too.
+/// `put_shapes` and Studio PUT refuse such uploads (see
+/// `tests/shacl_studio_http.rs`); other write paths still store them.
+#[test]
+fn pinned_a_non_canonical_true_activates_a_flag() {
+    let r = run(
+        "ex:S a sh:PropertyShape ; sh:targetNode ex:i ; sh:path ex:m ; sh:uniqueLang \"1\"^^xsd:boolean .",
+        "ex:i ex:m \"HI\"@en, \"Hi\"@en .",
+    );
+    assert!(
+        !r.conforms,
+        "\"1\" no longer activates sh:uniqueLang — flip this pin and remove \
+         uniqueLang-002 from KNOWN_FAILURES"
+    );
+    let r = run(
+        "ex:S a sh:NodeShape ; sh:targetNode ex:i ; sh:class ex:Missing ; sh:deactivated \"1\"^^xsd:boolean .",
+        "ex:i ex:m 1 .",
+    );
+    assert!(
+        r.conforms,
+        "\"1\" no longer deactivates — flip this pin: {:?}",
+        r.results
+    );
+}
