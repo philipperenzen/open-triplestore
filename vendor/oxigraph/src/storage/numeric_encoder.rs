@@ -5,7 +5,7 @@ use crate::storage::error::{CorruptionError, StorageError};
 use crate::storage::small_string::SmallString;
 use oxsdatatypes::*;
 use siphasher::sip128::{Hasher128, SipHasher24};
-use std::fmt::Debug;
+use std::fmt::{self, Debug, Write as _};
 use std::hash::{Hash, Hasher};
 use std::mem::discriminant;
 use std::str;
@@ -568,6 +568,12 @@ impl From<LiteralRef<'_>> for EncodedTerm {
                         }
                     }
                 }),
+            // A native (value) encoding is used only when the datatype is exactly
+            // the native type and the lexical form is the one the value prints
+            // back to; anything else (derived types such as xsd:int or
+            // xsd:dateTimeStamp, or a non-canonical form such as "1"^^xsd:boolean
+            // or "05"^^xsd:integer) is kept verbatim as a typed literal below, so
+            // the store returns exactly the term it was given.
             "http://www.w3.org/2001/XMLSchema#boolean" => parse_boolean_str(value),
             "http://www.w3.org/2001/XMLSchema#string" => {
                 Some(if let Ok(value) = SmallString::try_from(value) {
@@ -580,22 +586,9 @@ impl From<LiteralRef<'_>> for EncodedTerm {
             }
             "http://www.w3.org/2001/XMLSchema#float" => parse_float_str(value),
             "http://www.w3.org/2001/XMLSchema#double" => parse_double_str(value),
-            "http://www.w3.org/2001/XMLSchema#integer"
-            | "http://www.w3.org/2001/XMLSchema#byte"
-            | "http://www.w3.org/2001/XMLSchema#short"
-            | "http://www.w3.org/2001/XMLSchema#int"
-            | "http://www.w3.org/2001/XMLSchema#long"
-            | "http://www.w3.org/2001/XMLSchema#unsignedByte"
-            | "http://www.w3.org/2001/XMLSchema#unsignedShort"
-            | "http://www.w3.org/2001/XMLSchema#unsignedInt"
-            | "http://www.w3.org/2001/XMLSchema#unsignedLong"
-            | "http://www.w3.org/2001/XMLSchema#positiveInteger"
-            | "http://www.w3.org/2001/XMLSchema#negativeInteger"
-            | "http://www.w3.org/2001/XMLSchema#nonPositiveInteger"
-            | "http://www.w3.org/2001/XMLSchema#nonNegativeInteger" => parse_integer_str(value),
+            "http://www.w3.org/2001/XMLSchema#integer" => parse_integer_str(value),
             "http://www.w3.org/2001/XMLSchema#decimal" => parse_decimal_str(value),
-            "http://www.w3.org/2001/XMLSchema#dateTime"
-            | "http://www.w3.org/2001/XMLSchema#dateTimeStamp" => parse_date_time_str(value),
+            "http://www.w3.org/2001/XMLSchema#dateTime" => parse_date_time_str(value),
             "http://www.w3.org/2001/XMLSchema#time" => parse_time_str(value),
             "http://www.w3.org/2001/XMLSchema#date" => parse_date_str(value),
             "http://www.w3.org/2001/XMLSchema#gYearMonth" => parse_g_year_month_str(value),
@@ -612,7 +605,7 @@ impl From<LiteralRef<'_>> for EncodedTerm {
             }
             _ => None,
         };
-        match native_encoding {
+        match native_encoding.filter(|term| is_canonical_native_encoding(term, value)) {
             Some(term) => term,
             None => {
                 if let Ok(value) = SmallString::try_from(value) {
@@ -627,6 +620,54 @@ impl From<LiteralRef<'_>> for EncodedTerm {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Whether `term`, a native (value) encoding of a literal, decodes back to exactly
+/// `lexical`.
+///
+/// Literals decode by printing their value (`Literal::from(value)` uses its
+/// `Display`), so this compares that output with `lexical` as it is written,
+/// without allocating. Non-native encodings (strings, language-tagged strings)
+/// keep their lexical form anyway and are always "canonical".
+fn is_canonical_native_encoding(term: &EncodedTerm, lexical: &str) -> bool {
+    let mut check = LexicalFormCheck { rest: lexical };
+    let written = match term {
+        EncodedTerm::BooleanLiteral(value) => write!(check, "{value}"),
+        EncodedTerm::FloatLiteral(value) => write!(check, "{value}"),
+        EncodedTerm::DoubleLiteral(value) => write!(check, "{value}"),
+        EncodedTerm::IntegerLiteral(value) => write!(check, "{value}"),
+        EncodedTerm::DecimalLiteral(value) => write!(check, "{value}"),
+        EncodedTerm::DateTimeLiteral(value) => write!(check, "{value}"),
+        EncodedTerm::TimeLiteral(value) => write!(check, "{value}"),
+        EncodedTerm::DateLiteral(value) => write!(check, "{value}"),
+        EncodedTerm::GYearMonthLiteral(value) => write!(check, "{value}"),
+        EncodedTerm::GYearLiteral(value) => write!(check, "{value}"),
+        EncodedTerm::GMonthDayLiteral(value) => write!(check, "{value}"),
+        EncodedTerm::GDayLiteral(value) => write!(check, "{value}"),
+        EncodedTerm::GMonthLiteral(value) => write!(check, "{value}"),
+        EncodedTerm::DurationLiteral(value) => write!(check, "{value}"),
+        EncodedTerm::YearMonthDurationLiteral(value) => write!(check, "{value}"),
+        EncodedTerm::DayTimeDurationLiteral(value) => write!(check, "{value}"),
+        _ => return true,
+    };
+    written.is_ok() && check.rest.is_empty()
+}
+
+/// A `fmt::Write` sink that checks the written text is a prefix of `rest`,
+/// consuming it, and fails as soon as it is not.
+struct LexicalFormCheck<'a> {
+    rest: &'a str,
+}
+
+impl fmt::Write for LexicalFormCheck<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        if let Some(rest) = self.rest.strip_prefix(s) {
+            self.rest = rest;
+            Ok(())
+        } else {
+            Err(fmt::Error)
         }
     }
 }
@@ -1207,6 +1248,79 @@ mod tests {
 
         assert_eq!(StrHash::new("foo").to_be_bytes(), FOO_HASH);
         assert_eq!(StrHash::from_be_bytes(FOO_HASH).to_be_bytes(), FOO_HASH);
+    }
+
+    fn round_trip(lexical: &str, datatype: &str) -> Term {
+        let literal = Literal::new_typed_literal(lexical, NamedNode::new_unchecked(datatype));
+        let encoded = EncodedTerm::from(literal.as_ref());
+        let mut strings = std::collections::HashMap::new();
+        insert_term(literal.as_ref().into(), &encoded, &mut |key, value| {
+            strings.insert(*key, value.to_owned());
+        });
+        MapLookup(strings).decode_term(&encoded).unwrap()
+    }
+
+    struct MapLookup(std::collections::HashMap<StrHash, String>);
+
+    impl StrLookup for MapLookup {
+        fn get_str(&self, key: &StrHash) -> Result<Option<String>, StorageError> {
+            Ok(self.0.get(key).cloned())
+        }
+    }
+
+    const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+
+    #[test]
+    fn canonical_native_literals_use_the_native_encoding() {
+        for (lexical, datatype) in [
+            ("true", "boolean"),
+            ("false", "boolean"),
+            ("5", "integer"),
+            ("-5", "integer"),
+            ("1.5", "decimal"),
+            ("2020-01-01T00:00:00Z", "dateTime"),
+            ("2020-01-01", "date"),
+            ("P1D", "duration"),
+        ] {
+            let datatype = format!("{XSD}{datatype}");
+            let literal = Literal::new_typed_literal(lexical, NamedNode::new_unchecked(&datatype));
+            let encoded = EncodedTerm::from(literal.as_ref());
+            assert!(
+                !matches!(
+                    encoded,
+                    EncodedTerm::SmallTypedLiteral { .. } | EncodedTerm::BigTypedLiteral { .. }
+                ),
+                "{literal} should be stored as a value"
+            );
+            assert_eq!(round_trip(lexical, &datatype), literal.into());
+        }
+    }
+
+    #[test]
+    fn non_canonical_and_derived_literals_keep_their_lexical_form() {
+        for (lexical, datatype) in [
+            ("1", "boolean"),
+            ("0", "boolean"),
+            ("05", "integer"),
+            ("+5", "integer"),
+            ("1.50", "decimal"),
+            ("2020-01-01T00:00:00+00:00", "dateTime"),
+            ("5", "int"),
+            ("5", "nonNegativeInteger"),
+            ("-1", "negativeInteger"),
+            ("300", "byte"),
+            ("2020-01-01T00:00:00Z", "dateTimeStamp"),
+            ("not a number", "integer"),
+        ] {
+            let datatype = format!("{XSD}{datatype}");
+            let literal = Literal::new_typed_literal(lexical, NamedNode::new_unchecked(&datatype));
+            let encoded = EncodedTerm::from(literal.as_ref());
+            assert!(
+                matches!(encoded, EncodedTerm::SmallTypedLiteral { .. }),
+                "{literal} should be stored verbatim, got {encoded:?}"
+            );
+            assert_eq!(round_trip(lexical, &datatype), literal.into());
+        }
     }
 
     #[cfg(target_pointer_width = "64")]
