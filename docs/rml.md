@@ -37,7 +37,11 @@ RML extends W3C R2RML to non-relational data sources. A mapping document is a Tu
 | `rr:subjectMap` shortcut (`rr:subject`) | Supported |
 | `rr:predicateMap` shortcut (`rr:predicate`) | Supported |
 | `rr:objectMap` shortcut (`rr:object`) | Supported |
+| Several predicate and object maps per predicate-object map | Every predicate map × every object map, shortcuts included (R2RML §6.3, §11.1): `rr:predicate ex:a, ex:b ; rr:object ex:X ; rr:objectMap [ … ]` generates four triples per row |
 | `rr:parentTriplesMap` (referencing object maps, joins) | Not on file sources: a mapping that uses one is refused with `400` and names the triples map. Registered datasources resolve them ([Sources](sources.md)). |
+| Empty values and `rml:null` | An empty CSV cell, an empty JSON string and an empty XML element are values — an empty literal, or an IRI built from the empty string (RML-IO: nothing is NULL unless the source says so). A JSON `null` and a missing key or element are no value. `rml:null "…"` on the logical source (RML-IO's `<http://w3id.org/rml/null>`, or `rml:null` in the legacy namespace) lists values that count as NULL — `rml:null ""` restores "an empty cell generates nothing" |
+| Mapping validation | A non-conforming mapping is refused at upload with the construct named — see [Errors](#errors) |
+| Data errors | A value that cannot become its term aborts the run and names the rows, or is skipped and reported with `on_data_error=skip` — see [Errors](#errors) |
 
 ---
 
@@ -82,6 +86,7 @@ curl -X POST http://localhost:7878/api/datasets/<dataset_id>/mappings/execute \
 | `preview=true` | `false` | Return generated triples without persisting |
 | `graph=<iri>` | `urn:dataset:<id>:rml-output` | Override the target named graph |
 | `base=<iri>` | none | Base IRI that relative IRIs resolve against; a triples map's `rml:baseIRI` wins |
+| `on_data_error=skip` | `abort` | Leave out terms whose values cannot become them, and report the rows as `data_errors`, instead of failing the run — see [Errors](#errors). `POST /api/rml/preview` takes it too |
 
 ### Preview without persisting
 
@@ -315,6 +320,48 @@ The term rules above are R2RML's. Before this engine followed them, a template o
 
 ---
 
+## Errors
+
+Three kinds, each refused rather than run into silence:
+
+**A non-conforming mapping** is refused when it is parsed — on upload, and on
+every run of a stored mapping — with `400` and a message that names the
+triples map and the construct. R2RML's rules: a triples map has exactly one
+logical source (`rml:logicalSource` / `rr:logicalTable`) and exactly one
+subject map (`rr:subjectMap` / `rr:subject`); a term map is exactly one of a
+constant, a column (`rr:column` / `rml:reference`) or a template, each given
+once; `rr:termType` is `rr:IRI`, `rr:BlankNode` or `rr:Literal`, and only
+what the position allows (a subject: IRI or blank node; a predicate or a
+graph: IRI); `rr:language` and `rr:datatype` exclude each other, belong to a
+literal only, and a language tag must be valid BCP 47; `rr:class` values are
+IRIs; a logical table names `rr:tableName` or a query, not both; a
+referencing object map has no term map of its own, and each join condition
+one `rr:child` and one `rr:parent`. `rr:sqlVersion` and `rr:inverseExpression`
+are accepted (and not needed).
+
+**A column the source does not have** is refused before the first row: a CSV
+header that lacks a column the mapping names, or — for a registered
+datasource — a column the logical table's query does not return. The message
+names the column, where the mapping uses it, and the columns the source has.
+JSON and XML records carry no fixed column set; a missing key there is a NULL.
+
+**A data error** (R2RML §4.3) is a row whose value cannot become the term the
+mapping asks for: an IRI term map whose value is not a valid IRI (nor one
+relative to the base IRI), or a literal whose `rr:datatype` it does not fit
+(`"forty-two"` as `xsd:integer`; XSD's numeric, boolean, date, time,
+duration, `g*` and `hexBinary` types are checked). By default the run aborts,
+writes nothing, and names the first ten offending rows with their values. With
+`on_data_error=skip` it leaves those terms out — as this engine once did
+silently — and reports every row it skipped from:
+
+```json
+{ "triples_inserted": 418, "target_graph": "urn:dataset:<id>:rml-output",
+  "data_errors": { "rows": 1,
+    "first": ["<http://example.org/LinkMap> row 2: column \"target\" generates \"not a valid iri\", which is not a valid IRI"] } }
+```
+
+---
+
 ## Storage
 
 Mappings are stored in the named graph `urn:dataset:<id>:rml-mappings` and are automatically registered in the dataset's graph list. Generated output goes to `urn:dataset:<id>:rml-output` unless overridden.
@@ -327,7 +374,5 @@ Both graphs appear in the dataset graph list and participate in dataset-scoped S
 
 - **Joins between TriplesMap entries**: a file row stands alone, so `rr:parentTriplesMap` (with or without `rr:joinCondition`) cannot be resolved here and the whole mapping is refused rather than run without its links. Put the parent's key in the child's rows and build the object with `rr:template`, or load the data as a registered datasource, where joins run ([Sources](sources.md)).
 - **SQL / SPARQL sources**: this upload path reads files only. SQL logical tables (`rr:tableName`, `rml:query`) and SPARQL endpoints are mapped through registered datasources ([Sources](sources.md)); a mapping that names one is refused here with a pointer to that path.
-- **Empty values**: an empty CSV cell, JSON string or XML text generates no term, as a NULL does. RML-IO treats only `rml:null` values as NULL; that is not implemented yet.
-- **One predicate and one object per map**: a predicate-object map uses its first `rr:predicateMap` / `rr:predicate` and its first `rr:objectMap` / `rr:object`; write one predicate-object map per pair.
 - **Large files**: Source files are read entirely into memory. For very large files (> 100 MB), consider splitting them before upload.
 - **Nested JSON/XML**: Deep nesting (e.g. accessing `$.orders[].items[].price`) requires the iterator to point to the innermost array. Nested sibling references are flattened at a single object level.

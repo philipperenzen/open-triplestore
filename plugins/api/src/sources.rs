@@ -559,6 +559,21 @@ pub trait SourceConnection: Send {
         sink: BatchSink<'_>,
     ) -> Result<u64, SourceError>;
 
+    /// The names of the columns `query` returns, in order, without reading a
+    /// row — what a prepared statement describes. `None` when the connector
+    /// cannot say.
+    ///
+    /// A row leaves out its NULL columns, so rows alone cannot tell a column
+    /// that is always NULL from one that does not exist. An R2RML mapping
+    /// that names a column its logical table lacks is in error (R2RML §6),
+    /// and this is how the host finds out before it streams anything rather
+    /// than running the mapping into silence. The default answers `None`; a
+    /// connector that can prepare a statement overrides it.
+    fn columns(&mut self, query: &str) -> Result<Option<Vec<String>>, SourceError> {
+        let _ = query;
+        Ok(None)
+    }
+
     /// `MAX(column)` of `table`, as a lexical value, for incremental runs.
     fn max_watermark(&mut self, table: &str, column: &str) -> Result<Option<String>, SourceError>;
 

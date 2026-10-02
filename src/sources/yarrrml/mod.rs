@@ -229,6 +229,8 @@ fn translate_mapping(
         subject_mint: false,
         classes,
         poms,
+        // YARRRML means RML: an empty value is a value.
+        nulls: Vec::new(),
     })
 }
 
@@ -607,11 +609,11 @@ mod tests {
             .predicate_object_maps
             .iter()
             .find(|p| {
-                matches!(&p.predicate_map.kind,
+                matches!(&p.predicate_maps[0].kind,
                     TermMapKind::Constant(oxigraph::model::Term::NamedNode(c)) if c.as_str() == predicate)
             })
             .unwrap_or_else(|| panic!("no predicate <{predicate}> on '{map}'"))
-            .object
+            .object_maps[0]
     }
 
     const BASIC: &str = r#"

@@ -98,7 +98,8 @@ pub fn expand_slug_template(template: &str, row: &Row, semantics: Semantics) -> 
 }
 
 /// `otsfn:mintIri`: an IRI from `otsfn:template` over the current row.
-fn mint_iri(f: &FunctionMap, row: &Row, semantics: Semantics) -> Result<Option<String>, String> {
+fn mint_iri(f: &FunctionMap, row: &Row, gen: &mut TermGen) -> Result<Option<String>, String> {
+    let semantics = gen.semantics;
     let template = arg_value(f.first(&format!("{FN_NS}template")), row).ok_or_else(|| {
         format!("{FN_LABEL}:mintIri needs {FN_LABEL}:template with an absolute IRI template")
     })?;
@@ -111,14 +112,25 @@ fn mint_iri(f: &FunctionMap, row: &Row, semantics: Semantics) -> Result<Option<S
     let Some(filled) = expand_slug_template(&template, row, semantics) else {
         return Ok(None);
     };
-    // An IRI the template cannot make well-formed skips the term, as an
-    // `rr:template` does.
-    Ok(NamedNode::new(&filled).ok().map(|n| n.to_string()))
+    // An IRI the template cannot make well-formed is a data error, as it is
+    // for an `rr:template`.
+    match NamedNode::new(&filled) {
+        Ok(n) => Ok(Some(n.to_string())),
+        Err(_) => {
+            gen.data_error(format!(
+                "{FN_LABEL}:mintIri template \"{template}\" generates {}, which is not a valid IRI",
+                quoted(&filled)
+            ));
+            Ok(None)
+        }
+    }
 }
 
-/// One source row: column name → lexical value. A SQL NULL, an empty CSV cell
-/// and an absent JSON key are all "no key", so a term map over one produces
-/// no term and therefore no triple.
+/// One source row: column name → lexical value. A NULL — a SQL NULL, a JSON
+/// `null` or absent key, a value the logical source lists under `rml:null` —
+/// is "no key", so a term map over one produces no term and therefore no
+/// triple. An empty string is a value (RML-IO), except under
+/// [`Semantics::Legacy`], where an empty value produces no term either.
 pub type Row = HashMap<String, String>;
 /// Per-column generic types, when the source reports them (relational only).
 pub type Kinds = HashMap<String, ValueKind>;
@@ -138,6 +150,8 @@ pub struct TermGen {
     counter: u64,
     /// Legacy only: the nodes minted for the current row, by value.
     row: HashMap<String, String>,
+    /// Data errors (R2RML §4.3) met since the caller last took them.
+    errors: Vec<String>,
 }
 
 impl TermGen {
@@ -147,6 +161,28 @@ impl TermGen {
             prefix: prefix.into(),
             counter: 0,
             row: HashMap::new(),
+            errors: Vec::new(),
+        }
+    }
+
+    /// Record a data error: a value that cannot become the term its map asks
+    /// for. The term is not generated; whether the run goes on is the
+    /// caller's decision ([`OnDataError`]).
+    pub fn data_error(&mut self, message: String) {
+        self.errors.push(message);
+    }
+
+    /// The data errors recorded since the last call.
+    pub fn take_errors(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.errors)
+    }
+
+    /// Drop the cells of `row` that count as NULL in `source`: its
+    /// `rml:null` values. A legacy version ignores `rml:null` and instead
+    /// generates no term from an empty value, as it always did.
+    pub fn apply_nulls(&self, source: &LogicalSource, row: &mut Row) {
+        if self.semantics == Semantics::R2rml && !source.nulls.is_empty() {
+            row.retain(|_, v| !source.nulls.iter().any(|n| n == v));
         }
     }
 
@@ -258,7 +294,9 @@ pub fn eval_term(
         TermMapKind::Reference(col) => row.get(col)?.clone(),
     };
 
-    if raw_value.is_empty() {
+    // An empty value is a value (RML-IO: nothing is NULL unless the source
+    // says so). Before, it produced no term, which a legacy version keeps.
+    if raw_value.is_empty() && gen.semantics == Semantics::Legacy {
         return None;
     }
 
@@ -269,7 +307,22 @@ pub fn eval_term(
         // produced invalid Turtle and failed the WHOLE mapping, and one
         // containing `>` could terminate the IRI and inject further triples.
         // A value that is not absolute is appended to the base IRI (§11.2).
-        TermType::IRI => iri::absolute_iri(&raw_value, at.base)?.to_string(),
+        TermType::IRI => match iri::absolute_iri(&raw_value, at.base) {
+            Some(n) => n.to_string(),
+            None => {
+                gen.data_error(format!(
+                    "{} generates {}, which is not a valid IRI{}",
+                    describe(tm),
+                    quoted(&raw_value),
+                    if at.base.is_some() {
+                        " (relative to the base IRI either)"
+                    } else {
+                        ""
+                    }
+                ));
+                return None;
+            }
+        },
         TermType::BlankNode => gen.blank_node(raw_value, at.graph),
         // Likewise for literals: hand-escaping only `\` and `"` left raw
         // newlines, carriage returns and tabs in the output, which Turtle's
@@ -278,23 +331,49 @@ pub fn eval_term(
         // "Failed to load generated triples" rather than skipping a row.
         TermType::Literal => {
             if let Some(ref lang) = tm.language {
-                match Literal::new_language_tagged_literal(&raw_value, lang) {
-                    Ok(l) => l.to_string(),
-                    // An invalid language tag is a mapping error, not a reason
-                    // to emit a broken document.
-                    Err(_) => return None,
+                // The parser has checked the tag, so this cannot fail on it.
+                Literal::new_language_tagged_literal(&raw_value, lang)
+                    .ok()?
+                    .to_string()
+            } else if let Some(dt) = &tm.datatype {
+                // A datatype-override literal that is ill-typed is a data error
+                // (R2RML §10.3); a natural one is well-typed by construction.
+                if let Some(why) = super::xsd::ill_typed(&raw_value, dt) {
+                    gen.data_error(format!(
+                        "{} generates {} as <{dt}>, which is {why}",
+                        describe(tm),
+                        quoted(&raw_value)
+                    ));
+                    return None;
                 }
-            } else if let Some(dt) = tm
-                .datatype
-                .clone()
-                .or_else(|| natural_datatype_for(tm, kinds).map(|d| format!("{XSD}{d}")))
-            {
                 Literal::new_typed_literal(&raw_value, NamedNode::new(dt).ok()?).to_string()
+            } else if let Some(dt) = natural_datatype_for(tm, kinds) {
+                Literal::new_typed_literal(&raw_value, NamedNode::new(format!("{XSD}{dt}")).ok()?)
+                    .to_string()
             } else {
                 Literal::new_simple_literal(&raw_value).to_string()
             }
         }
     })
+}
+
+/// A term map as an error message names it.
+fn describe(tm: &TermMap) -> String {
+    match &tm.kind {
+        TermMapKind::Template(t) => format!("rr:template \"{t}\""),
+        TermMapKind::Reference(c) => format!("column \"{c}\""),
+        TermMapKind::Constant(c) => format!("rr:constant {c}"),
+    }
+}
+
+/// A source value quoted for an error message, shortened past 120 characters.
+fn quoted(value: &str) -> String {
+    const MAX: usize = 120;
+    // Escaped, so a value with a line break stays on the report's one line.
+    match value.char_indices().nth(MAX) {
+        Some((i, _)) => format!("\"{}…\"", value[..i].escape_debug()),
+        None => format!("\"{}\"", value.escape_debug()),
+    }
 }
 
 /// A constant in N-Triples form. The parser admits only IRIs and literals.
@@ -417,10 +496,11 @@ pub fn eval_function(
     f: &FunctionMap,
     row: &Row,
     kinds: Option<&Kinds>,
-    semantics: Semantics,
+    gen: &mut TermGen,
 ) -> Result<Option<String>, String> {
+    let semantics = gen.semantics;
     if f.function == FN_MINT_IRI {
-        return mint_iri(f, row, semantics);
+        return mint_iri(f, row, gen);
     }
     if f.function != FN_MAP_VALUE {
         return Err(format!(
@@ -432,7 +512,7 @@ pub fn eval_function(
         // No input value (a NULL column) → no triple, like any term map.
         return Ok(None);
     };
-    if raw.is_empty() {
+    if raw.is_empty() && semantics == Semantics::Legacy {
         return Ok(None);
     }
 
@@ -604,15 +684,67 @@ mod tests {
             ),
             None
         );
-        // …and an empty value is treated the same way.
+        // An empty value is a value under R2RML's rules (RML-IO: nothing is
+        // NULL unless `rml:null` says so)…
+        let empty = term(TermMapKind::Reference("e".into()), TermType::Literal);
         assert_eq!(
-            eval(
-                &term(TermMapKind::Reference("e".into()), TermType::Literal),
-                &row(&[("e", "")]),
-                None
+            eval(&empty, &row(&[("e", "")]), None).as_deref(),
+            Some("\"\"")
+        );
+        // …and no term under a legacy version's.
+        assert_eq!(
+            eval_as(Semantics::Legacy, &empty, &row(&[("e", "")]), None),
+            None
+        );
+    }
+
+    #[test]
+    fn rml_null_values_are_dropped_from_the_row_under_r2rml_only() {
+        let source = LogicalSource {
+            source: SourceRef::File("d.csv".into()),
+            reference_formulation: ReferenceFormulation::Csv,
+            iterator: None,
+            query: None,
+            table_name: None,
+            nulls: vec!["".into(), "NULL".into()],
+        };
+        let mut r = row(&[("a", ""), ("b", "NULL"), ("c", "x")]);
+        TermGen::new(Semantics::R2rml, "b").apply_nulls(&source, &mut r);
+        assert_eq!(r, row(&[("c", "x")]));
+        let mut r = row(&[("a", ""), ("b", "NULL")]);
+        TermGen::new(Semantics::Legacy, "b").apply_nulls(&source, &mut r);
+        assert_eq!(r.len(), 2, "a legacy version ignores rml:null");
+    }
+
+    #[test]
+    fn data_errors_are_recorded_not_generated() {
+        let mut g = TermGen::new(Semantics::R2rml, "b");
+        let iri = term(TermMapKind::Reference("t".into()), TermType::IRI);
+        assert_eq!(
+            eval_term(
+                &iri,
+                &row(&[("t", "not an iri")]),
+                None,
+                &mut g,
+                At::default()
             ),
             None
         );
+        let mut typed = term(TermMapKind::Reference("n".into()), TermType::Literal);
+        typed.datatype = Some(format!("{XSD}integer"));
+        assert_eq!(
+            eval_term(&typed, &row(&[("n", "1.5")]), None, &mut g, At::default()),
+            None
+        );
+        assert_eq!(
+            eval_term(&typed, &row(&[("n", "15")]), None, &mut g, At::default()).as_deref(),
+            Some(format!("\"15\"^^<{XSD}integer>").as_str())
+        );
+        let errors = g.take_errors();
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors[0].contains("\"not an iri\"") && errors[0].contains("not a valid IRI"));
+        assert!(errors[1].contains("\"1.5\"") && errors[1].contains("integer"));
+        assert!(g.take_errors().is_empty(), "taking them clears them");
     }
 
     #[test]
@@ -891,17 +1023,27 @@ mod tests {
         ]);
         for raw in ["active", "ACTIVE ", " Active"] {
             assert_eq!(
-                eval_function(&f, &row(&[("status", raw)]), None, Semantics::R2rml)
-                    .unwrap()
-                    .unwrap(),
+                eval_function(
+                    &f,
+                    &row(&[("status", raw)]),
+                    None,
+                    &mut TermGen::new(Semantics::R2rml, "t")
+                )
+                .unwrap()
+                .unwrap(),
                 "<http://x/Active>",
                 "{raw}"
             );
         }
         assert_eq!(
-            eval_function(&f, &row(&[("status", "retired")]), None, Semantics::R2rml)
-                .unwrap()
-                .unwrap(),
+            eval_function(
+                &f,
+                &row(&[("status", "retired")]),
+                None,
+                &mut TermGen::new(Semantics::R2rml, "t")
+            )
+            .unwrap()
+            .unwrap(),
             "<http://x/Retired>",
             "map keys are normalised too"
         );
@@ -915,15 +1057,26 @@ mod tests {
             ("mapping", FunctionArg::Constant("a=http://x/A".into())),
         ]);
         assert_eq!(
-            eval_function(&f, &row(&[("s", "Weird Value")]), None, Semantics::R2rml)
-                .unwrap()
-                .unwrap(),
+            eval_function(
+                &f,
+                &row(&[("s", "Weird Value")]),
+                None,
+                &mut TermGen::new(Semantics::R2rml, "t")
+            )
+            .unwrap()
+            .unwrap(),
             "\"Weird Value\"",
             "the raw value is kept, not the normalised key"
         );
         // NULL in, nothing out.
         assert_eq!(
-            eval_function(&f, &row(&[]), None, Semantics::R2rml).unwrap(),
+            eval_function(
+                &f,
+                &row(&[]),
+                None,
+                &mut TermGen::new(Semantics::R2rml, "t")
+            )
+            .unwrap(),
             None
         );
     }
@@ -936,16 +1089,26 @@ mod tests {
         ]);
         let kinds: Kinds = HashMap::from([("code".to_string(), ValueKind::Integer)]);
         assert_eq!(
-            eval_function(&f, &row(&[("code", "7")]), Some(&kinds), Semantics::R2rml)
-                .unwrap()
-                .unwrap(),
+            eval_function(
+                &f,
+                &row(&[("code", "7")]),
+                Some(&kinds),
+                &mut TermGen::new(Semantics::R2rml, "t")
+            )
+            .unwrap()
+            .unwrap(),
             format!("\"7\"^^<{XSD}integer>")
         );
         // A mapped value is still the IRI, whatever the column type.
         assert_eq!(
-            eval_function(&f, &row(&[("code", "1")]), Some(&kinds), Semantics::R2rml)
-                .unwrap()
-                .unwrap(),
+            eval_function(
+                &f,
+                &row(&[("code", "1")]),
+                Some(&kinds),
+                &mut TermGen::new(Semantics::R2rml, "t")
+            )
+            .unwrap()
+            .unwrap(),
             "<http://x/One>"
         );
     }
@@ -962,7 +1125,13 @@ mod tests {
             vec![FunctionArg::Constant("omit".into())],
         );
         assert_eq!(
-            eval_function(&omit, &row(&[("s", "zzz")]), None, Semantics::R2rml).unwrap(),
+            eval_function(
+                &omit,
+                &row(&[("s", "zzz")]),
+                None,
+                &mut TermGen::new(Semantics::R2rml, "t")
+            )
+            .unwrap(),
             None
         );
 
@@ -976,9 +1145,14 @@ mod tests {
             vec![FunctionArg::Constant("http://x/status/".into())],
         );
         assert_eq!(
-            eval_function(&mint, &row(&[("s", "zz z")]), None, Semantics::R2rml)
-                .unwrap()
-                .unwrap(),
+            eval_function(
+                &mint,
+                &row(&[("s", "zz z")]),
+                None,
+                &mut TermGen::new(Semantics::R2rml, "t")
+            )
+            .unwrap()
+            .unwrap(),
             "<http://x/status/zz%20z>"
         );
     }
@@ -994,7 +1168,13 @@ mod tests {
             format!("{FN_NS}unmappedTemplate"),
             vec![FunctionArg::Constant("status/".into())],
         );
-        let err = eval_function(&f, &row(&[("s", "x")]), None, Semantics::R2rml).unwrap_err();
+        let err = eval_function(
+            &f,
+            &row(&[("s", "x")]),
+            None,
+            &mut TermGen::new(Semantics::R2rml, "t"),
+        )
+        .unwrap_err();
         assert!(err.contains("not absolute"), "{err}");
     }
 
@@ -1002,24 +1182,39 @@ mod tests {
     fn unknown_functions_and_rules_fail_loudly() {
         let mut f = map_fn(&[("value", FunctionArg::Constant("x".into()))]);
         f.function = "http://example.org/nope".into();
-        assert!(eval_function(&f, &row(&[]), None, Semantics::R2rml)
-            .unwrap_err()
-            .contains("unsupported function"));
+        assert!(eval_function(
+            &f,
+            &row(&[]),
+            None,
+            &mut TermGen::new(Semantics::R2rml, "t")
+        )
+        .unwrap_err()
+        .contains("unsupported function"));
 
         let bad = map_fn(&[
             ("value", FunctionArg::Constant("x".into())),
             ("normalize", FunctionArg::Constant("sideways".into())),
         ]);
-        assert!(eval_function(&bad, &row(&[]), None, Semantics::R2rml)
-            .unwrap_err()
-            .contains("fn:normalize"));
+        assert!(eval_function(
+            &bad,
+            &row(&[]),
+            None,
+            &mut TermGen::new(Semantics::R2rml, "t")
+        )
+        .unwrap_err()
+        .contains("fn:normalize"));
 
         let malformed = map_fn(&[
             ("value", FunctionArg::Constant("x".into())),
             ("mapping", FunctionArg::Constant("no-equals-sign".into())),
         ]);
-        assert!(eval_function(&malformed, &row(&[]), None, Semantics::R2rml)
-            .unwrap_err()
-            .contains("fn:mapping"));
+        assert!(eval_function(
+            &malformed,
+            &row(&[]),
+            None,
+            &mut TermGen::new(Semantics::R2rml, "t")
+        )
+        .unwrap_err()
+        .contains("fn:mapping"));
     }
 }

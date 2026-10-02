@@ -104,6 +104,63 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `ID`.
   The YARRRML and legacy-format converters now write an explicit `rr:termType`
   on every template and column term map.
+- **An RML predicate-object map generates every predicate × every object.**
+  A predicate-object map with several `rr:predicateMap` / `rr:predicate` or
+  `rr:objectMap` / `rr:object` values used only the first of each, in store
+  order, and dropped the rest without a word. It now generates one triple per
+  predicate per object (R2RML §6.3, §11.1), referencing object maps included,
+  into each of its graphs, on file and datasource runs and in dry runs. This
+  applies to every mapping version, legacy-stamped ones included: the triples
+  it adds were missing, and no existing term changes.
+- **An RML mapping that does not conform to R2RML is refused, with the
+  construct named.** Parsing used to take the first of two subject maps,
+  logical sources or term-map kinds, drop an invalid language tag at run
+  time and ignore an unknown `rr:termType`. Now a triples map needs exactly
+  one logical source and one subject map; a term map exactly one of
+  `rr:constant`, `rr:template`, `rr:column` / `rml:reference`, each once;
+  `rr:termType` must be `rr:IRI`, `rr:BlankNode` or `rr:Literal` and legal
+  where it stands (a literal subject, predicate or graph, or a blank-node
+  predicate or graph, is an error); `rr:language` and `rr:datatype` exclude
+  each other and apply to literals only; a language tag must be valid BCP 47;
+  `rr:class` values must be IRIs; a logical table cannot have both
+  `rr:tableName` and a query; a referencing object map takes no term map of
+  its own. The error names the triples map and the construct. A mapping
+  version stored before that breaks one of these rules now fails to run with
+  that message, under either term-rules stamp.
+- **A column the source does not have is an error.** A term map, function
+  parameter or join condition naming a column that a CSV header lacks, or
+  that a datasource's query does not return, failed silently — every row
+  generated nothing for it. It is now refused before the first row, naming
+  the column, where the mapping uses it and the columns the source has. A
+  query result with two columns of one name is refused too (R2RML §5.2).
+  Connectors gain `SourceConnection::columns(query)` in `ots-plugin-api`
+  (additive, default `None`); SQLite, PostgreSQL, MySQL and SQL Server
+  describe a query without running it.
+- **A data error aborts an RML run and names the rows.** A value an IRI term
+  map cannot make a valid IRI of — and, new, a value outside its
+  `rr:datatype`'s lexical space (R2RML §10.3: `"forty-two"` as
+  `xsd:integer`) — used to drop that term without a word. Now the run fails
+  and writes nothing, and its error names the first ten offending rows with
+  their values (R2RML §4.3), for every mapping version, legacy-stamped ones
+  included. A run that would rather go on can opt in: `"onDataError": "skip"`
+  on `POST /api/sources/:id/runs`, `?on_data_error=skip` on
+  `POST /api/datasets/:id/mappings/execute` and `POST /api/rml/preview`. It
+  leaves those terms out and reports the rows (`dataErrors` on the run
+  record, `data_errors` in the file endpoints' response). A dry-run never
+  aborts on one and lists them as `dataErrors`. `otsfn:mintIri` reports an
+  IRI it cannot make the same way.
+- **An empty value is a value; RML-IO `rml:null` says what is NULL.** An
+  empty CSV cell, an empty JSON string, an empty XML element and a SQL `''`
+  generated no term. Under R2RML and RML-IO only a NULL does — a SQL NULL, a
+  JSON `null` or missing key — so these now generate an empty literal (or an
+  IRI built from the empty string), and an empty XML element `<a/>` reads as
+  `""` where it read as missing. `rml:null "…"` on the logical source (RML-IO
+  `<http://w3id.org/rml/null>`, also read in the legacy `rml:` namespace)
+  lists further values that count as NULL. A mapping version stamped
+  `legacy` keeps generating no term from an empty value and ignores
+  `rml:null`. The legacy-format converter writes `rml:null ""` on every
+  logical source, so a converted mapping still reproduces the legacy
+  transformer's output.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were

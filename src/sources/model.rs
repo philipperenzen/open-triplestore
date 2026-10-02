@@ -425,6 +425,12 @@ pub struct RunRequest {
     pub mode: Option<String>,
     /// Rows per batch handed to the term-map evaluator.
     pub batch_size: Option<usize>,
+    /// What a data error does — a row value that cannot become the term its
+    /// map asks for (R2RML §4.3): `abort` (the default) fails the run and
+    /// names the offending rows; `skip` leaves those terms out and reports
+    /// the rows on the run.
+    #[serde(default)]
+    pub on_data_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -454,6 +460,9 @@ pub struct RunRecord {
     /// Entities the run published to the dataset's LDES stream, when one is
     /// enabled.
     pub ldes_members: u64,
+    /// Rows a run with `onDataError: "skip"` left terms out of, and the
+    /// first of them.
+    pub data_errors: crate::rml::checks::DataErrors,
 }
 
 impl RunRecord {
@@ -497,6 +506,10 @@ pub struct RunResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub watermark: Option<String>,
     pub ldes_members: u64,
+    /// Rows the run skipped terms from because their values could not become
+    /// those terms (`onDataError: "skip"`). Absent when there were none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_errors: Option<crate::rml::checks::DataErrors>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -560,6 +573,7 @@ impl From<&RunRecord> for RunResponse {
             error: r.error.clone(),
             watermark: r.watermark.clone(),
             ldes_members: r.ldes_members,
+            data_errors: (!r.data_errors.is_empty()).then(|| r.data_errors.clone()),
         }
     }
 }

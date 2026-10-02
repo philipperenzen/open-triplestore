@@ -119,10 +119,7 @@ pub fn parse_from_store_as(
 /// mapping error the author sees at upload.
 fn validate_references(mapping: &RmlMapping) -> Result<(), String> {
     for tm in &mapping.triples_maps {
-        for pom in &tm.predicate_object_maps {
-            let ObjectMap::Ref(r) = &pom.object else {
-                continue;
-            };
+        for r in tm.refs() {
             let parent = mapping.find(&r.parent_triples_map).ok_or_else(|| {
                 format!(
                     "TriplesMap <{}> references parent <{}>, which the mapping does not define",
@@ -164,18 +161,22 @@ impl Ctx<'_> {
     }
 
     fn triples_map(&self, tm_iri: &str) -> Result<TriplesMap, String> {
-        // Logical source (rml:logicalSource, or R2RML's rr:logicalTable)
-        let ls_iri = self
-            .objects(tm_iri, &format!("{RML}logicalSource"))
-            .into_iter()
-            .next()
-            .or_else(|| {
-                self.objects(tm_iri, &format!("{RR}logicalTable"))
-                    .into_iter()
-                    .next()
-            })
-            .ok_or("Missing rml:logicalSource")?;
-        let logical_source = parse_logical_source(self.store, &ls_iri, self.graph)?;
+        // Exactly one logical source: rml:logicalSource, or R2RML's
+        // rr:logicalTable (R2RML §6). Taking the first of two silently mapped
+        // whichever the store happened to list first.
+        let mut sources = self.objects(tm_iri, &format!("{RML}logicalSource"));
+        sources.extend(self.objects(tm_iri, &format!("{RR}logicalTable")));
+        let ls_iri = match sources.len() {
+            0 => return Err("Missing rml:logicalSource or rr:logicalTable".to_string()),
+            1 => sources.remove(0),
+            n => {
+                return Err(format!(
+                    "the triples map has {n} logical sources (rml:logicalSource / \
+                     rr:logicalTable); it reads exactly one"
+                ))
+            }
+        };
+        let logical_source = self.logical_source(&ls_iri)?;
 
         let mut subject_map = self.subject_map(tm_iri)?;
         // R2RML puts graph maps on the subject map. One on the triples map
@@ -190,14 +191,15 @@ impl Ctx<'_> {
             predicate_object_maps.push(self.pom(pom_node)?);
         }
 
-        let base_iri = [format!("{RML_CORE}baseIRI"), format!("{RML}baseIRI")]
-            .iter()
-            .find_map(|p| match self.terms(tm_iri, p).into_iter().next() {
-                Some(Term::NamedNode(n)) => Some(Ok(n.into_string())),
-                Some(_) => Some(Err("rml:baseIRI must be an IRI".to_string())),
-                None => None,
-            })
-            .transpose()?;
+        let base_iri = match self.single(
+            tm_iri,
+            &[format!("{RML_CORE}baseIRI"), format!("{RML}baseIRI")],
+            "triples map",
+        )? {
+            Some(Term::NamedNode(n)) => Some(n.into_string()),
+            Some(_) => return Err("rml:baseIRI must be an IRI".to_string()),
+            None => None,
+        };
 
         let mut tm = TriplesMap {
             iri: tm_iri.to_string(),
@@ -212,11 +214,124 @@ impl Ctx<'_> {
         Ok(tm)
     }
 
+    fn logical_source(&self, ls_iri: &str) -> Result<LogicalSource, String> {
+        const OWNER: &str = "logical source";
+        let text = |t: Term| match t {
+            Term::Literal(l) => l.value().to_string(),
+            Term::NamedNode(n) => n.into_string(),
+            other => other.to_string(),
+        };
+
+        // `rr:tableName` / `rml:query` / `rr:sqlQuery` describe a relational
+        // source: a table or an R2RML view, never both (R2RML §5).
+        let table_name = self
+            .single(ls_iri, &[format!("{RR}tableName")], OWNER)?
+            .map(text);
+        let query = self
+            .single(
+                ls_iri,
+                &[format!("{RML}query"), format!("{RR}sqlQuery")],
+                OWNER,
+            )?
+            .map(text);
+        if table_name.is_some() && query.is_some() {
+            return Err(
+                "the logical source has both rr:tableName and a query (rr:sqlQuery / rml:query); \
+                 it reads a table or an R2RML view, not both (R2RML §5)"
+                    .to_string(),
+            );
+        }
+
+        // rml:source — a datasource IRI, or a file part name / path.
+        let source_term = self.single(ls_iri, &[format!("{RML}source")], OWNER)?;
+        let source = match &source_term {
+            Some(Term::NamedNode(n)) if n.as_str().starts_with(DATASOURCE_PREFIX) => {
+                SourceRef::Datasource(n.as_str().to_string())
+            }
+            Some(Term::NamedNode(n)) => SourceRef::File(n.as_str().to_string()),
+            Some(Term::BlankNode(b)) => SourceRef::File(format!("_:{}", b.as_str())),
+            Some(Term::Literal(l)) => SourceRef::File(l.value().to_string()),
+            #[cfg(feature = "rdf-12")]
+            Some(Term::Triple(_)) => return Err("rml:source cannot be a triple term".to_string()),
+            // R2RML's `rr:logicalTable` names no source: the datasource is the
+            // one the run supplies. Only legal with a table or query.
+            None if table_name.is_some() || query.is_some() => SourceRef::Datasource(String::new()),
+            None => return Err("Missing rml:source".to_string()),
+        };
+
+        let mut formulation = self
+            .single(ls_iri, &[format!("{RML}referenceFormulation")], OWNER)?
+            .map(|t| ReferenceFormulation::from_iri(&text(t)))
+            .unwrap_or(ReferenceFormulation::Csv);
+        // A datasource source IS relational, whatever (if anything) the document
+        // declared: the reference formulation is advisory, the source is not.
+        if matches!(source, SourceRef::Datasource(_)) {
+            formulation = ReferenceFormulation::Sql;
+        }
+        if formulation == ReferenceFormulation::Sql && query.is_none() && table_name.is_none() {
+            return Err(
+                "a relational logical source needs rr:tableName or rml:query / rr:sqlQuery"
+                    .to_string(),
+            );
+        }
+
+        let iterator = self
+            .single(ls_iri, &[format!("{RML}iterator")], OWNER)?
+            .map(text);
+
+        // `rml:null` (RML-IO): source values that count as NULL. Read on the
+        // logical source, where this engine's sources are described, and on
+        // a source node that has properties of its own.
+        let mut nulls: Vec<String> = Vec::new();
+        let mut null_holders = vec![ls_iri.to_string()];
+        match &source_term {
+            Some(Term::NamedNode(n)) => null_holders.push(n.as_str().to_string()),
+            Some(Term::BlankNode(b)) => null_holders.push(format!("_:{}", b.as_str())),
+            _ => {}
+        }
+        for holder in &null_holders {
+            for p in [format!("{RML_CORE}null"), format!("{RML}null")] {
+                for t in self.terms(holder, &p) {
+                    match t {
+                        Term::Literal(l) => {
+                            if !nulls.iter().any(|n| n == l.value()) {
+                                nulls.push(l.value().to_string());
+                            }
+                        }
+                        other => {
+                            return Err(format!(
+                                "rml:null {other} is not a string; it names a value that \
+                                 counts as NULL"
+                            ))
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(LogicalSource {
+            source,
+            reference_formulation: formulation,
+            iterator,
+            query,
+            table_name,
+            nulls,
+        })
+    }
+
     fn subject_map(&self, tm_iri: &str) -> Result<SubjectMap, String> {
-        let sm_node = self
-            .objects(tm_iri, &format!("{RR}subjectMap"))
-            .into_iter()
-            .next();
+        // Exactly one subject map: `rr:subjectMap` or the `rr:subject`
+        // shortcut (R2RML §6).
+        let sm_nodes = self.objects(tm_iri, &format!("{RR}subjectMap"));
+        let shortcuts = self.terms(tm_iri, &format!("{RR}subject"));
+        let n = sm_nodes.len() + shortcuts.len();
+        if n > 1 {
+            return Err(format!(
+                "the triples map has {n} subject maps (rr:subjectMap / rr:subject); it has \
+                 exactly one"
+            ));
+        }
+        let sm_node = sm_nodes.into_iter().next();
         // A function-valued subject (`fnml:functionValue` on the subject map):
         // the term map is an empty placeholder and the function does the work.
         let function = match &sm_node {
@@ -240,8 +355,7 @@ impl Ctx<'_> {
         } else if let Some(ref sm) = sm_node {
             self.term_map(sm, Position::Subject)?
         } else {
-            let val = self
-                .terms(tm_iri, &format!("{RR}subject"))
+            let val = shortcuts
                 .into_iter()
                 .next()
                 .ok_or("Missing rr:subjectMap or rr:subject")?;
@@ -249,12 +363,23 @@ impl Ctx<'_> {
         };
 
         // rr:class assertions. R2RML places rr:class on the subjectMap; also accept it on
-        // the TriplesMap as a convenience.
-        let mut classes = Vec::new();
+        // the TriplesMap as a convenience. Its values must be IRIs (R2RML §6.2).
+        let mut class_terms = Vec::new();
         if let Some(ref sm) = sm_node {
-            classes.extend(self.objects(sm, &format!("{RR}class")));
+            class_terms.extend(self.terms(sm, &format!("{RR}class")));
         }
-        classes.extend(self.objects(tm_iri, &format!("{RR}class")));
+        class_terms.extend(self.terms(tm_iri, &format!("{RR}class")));
+        let mut classes = Vec::new();
+        for c in class_terms {
+            match c {
+                Term::NamedNode(n) => classes.push(n.into_string()),
+                other => {
+                    return Err(format!(
+                        "rr:class {other} is not an IRI; a class must be an IRI (R2RML §6.2)"
+                    ))
+                }
+            }
+        }
         classes.sort();
         classes.dedup();
 
@@ -272,39 +397,38 @@ impl Ctx<'_> {
     }
 
     fn pom(&self, pom_node: &str) -> Result<PredicateObjectMap, String> {
-        // Predicate map
-        let pm_nodes = self.objects(pom_node, &format!("{RR}predicateMap"));
-        let predicate_map = if let Some(pm) = pm_nodes.into_iter().next() {
-            self.term_map(&pm, Position::Predicate)?
-        } else {
-            let pred = self
-                .terms(pom_node, &format!("{RR}predicate"))
-                .into_iter()
-                .next()
-                .ok_or("Missing rr:predicateMap or rr:predicate")?;
-            constant(pred, Position::Predicate)?
-        };
+        // Every predicate map and every `rr:predicate` shortcut: the map
+        // generates each predicate with each object (R2RML §11.1).
+        let mut predicate_maps = Vec::new();
+        for pm in self.objects(pom_node, &format!("{RR}predicateMap")) {
+            predicate_maps.push(self.term_map(&pm, Position::Predicate)?);
+        }
+        for pred in self.terms(pom_node, &format!("{RR}predicate")) {
+            predicate_maps.push(constant(pred, Position::Predicate)?);
+        }
+        if predicate_maps.is_empty() {
+            return Err("Missing rr:predicateMap or rr:predicate".to_string());
+        }
 
-        // Object map: a referencing map, a function, or a plain term.
-        let om_nodes = self.objects(pom_node, &format!("{RR}objectMap"));
-        let object = if let Some(om) = om_nodes.into_iter().next() {
-            self.object_map(&om)?
-        } else {
-            // `rr:object` is a constant: an IRI stays an IRI, and a literal
-            // keeps its datatype and language tag.
-            let obj = self
-                .terms(pom_node, &format!("{RR}object"))
-                .into_iter()
-                .next()
-                .ok_or("Missing rr:objectMap or rr:object")?;
-            ObjectMap::Term(constant(obj, Position::Object)?)
-        };
+        // Every object map — a referencing map, a function, or a plain term —
+        // and every `rr:object` shortcut, a constant: an IRI stays an IRI, and
+        // a literal keeps its datatype and language tag.
+        let mut object_maps = Vec::new();
+        for om in self.objects(pom_node, &format!("{RR}objectMap")) {
+            object_maps.push(self.object_map(&om)?);
+        }
+        for obj in self.terms(pom_node, &format!("{RR}object")) {
+            object_maps.push(ObjectMap::Term(constant(obj, Position::Object)?));
+        }
+        if object_maps.is_empty() {
+            return Err("Missing rr:objectMap or rr:object".to_string());
+        }
 
         let graph_maps = self.graph_maps(pom_node, "predicate-object map")?;
 
         Ok(PredicateObjectMap {
-            predicate_map,
-            object,
+            predicate_maps,
+            object_maps,
             graph_maps,
         })
     }
@@ -326,23 +450,41 @@ impl Ctx<'_> {
     }
 
     fn object_map(&self, om: &str) -> Result<ObjectMap, String> {
-        if let Some(parent) = self
-            .objects(om, &format!("{RR}parentTriplesMap"))
-            .into_iter()
-            .next()
-        {
+        let parents = self.objects(om, &format!("{RR}parentTriplesMap"));
+        let functions = self.objects(om, &format!("{FNML}functionValue"));
+        let kinds = self.term_map_kinds(om);
+        if parents.len() > 1 {
+            return Err(format!(
+                "the object map has {} values of rr:parentTriplesMap; a referencing object map \
+                 names one parent",
+                parents.len()
+            ));
+        }
+        if let Some(parent) = parents.into_iter().next() {
+            // A referencing object map is not a term map (R2RML §8).
+            if let Some(kind) = kinds
+                .first()
+                .or(functions.first().map(|_| &"fnml:functionValue"))
+            {
+                return Err(format!(
+                    "the object map has both rr:parentTriplesMap and {kind}; a referencing \
+                     object map generates its parent's subject and takes no term map of its own"
+                ));
+            }
             let mut joins = Vec::new();
             for jc in self.objects(om, &format!("{RR}joinCondition")) {
-                let child = self
-                    .objects(&jc, &format!("{RR}child"))
-                    .into_iter()
-                    .next()
-                    .ok_or("rr:joinCondition is missing rr:child")?;
-                let parent_col = self
-                    .objects(&jc, &format!("{RR}parent"))
-                    .into_iter()
-                    .next()
-                    .ok_or("rr:joinCondition is missing rr:parent")?;
+                let one = |p: &str| -> Result<String, String> {
+                    let mut v = self.objects(&jc, &format!("{RR}{p}"));
+                    match v.len() {
+                        0 => Err(format!("rr:joinCondition is missing rr:{p}")),
+                        1 => Ok(v.remove(0)),
+                        n => Err(format!(
+                            "rr:joinCondition has {n} values of rr:{p}; it takes exactly one"
+                        )),
+                    }
+                };
+                let child = one("child")?;
+                let parent_col = one("parent")?;
                 joins.push(JoinCondition {
                     child,
                     parent: parent_col,
@@ -355,15 +497,60 @@ impl Ctx<'_> {
             }));
         }
 
-        if let Some(fv) = self
-            .objects(om, &format!("{FNML}functionValue"))
-            .into_iter()
-            .next()
-        {
+        if functions.len() > 1 {
+            return Err(format!(
+                "the object map has {} values of fnml:functionValue; it takes at most one",
+                functions.len()
+            ));
+        }
+        if let Some(fv) = functions.into_iter().next() {
+            if let Some(kind) = kinds.first() {
+                return Err(format!(
+                    "the object map has both fnml:functionValue and {kind}; the function \
+                     computes the term"
+                ));
+            }
             return self.function(om, &fv).map(ObjectMap::Function);
         }
 
         self.term_map(om, Position::Object).map(ObjectMap::Term)
+    }
+
+    /// Which of the four term-map kinds `node` declares, one entry per value.
+    fn term_map_kinds(&self, node: &str) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        for (p, name) in [
+            (format!("{RR}constant"), "rr:constant"),
+            (format!("{RR}template"), "rr:template"),
+            (format!("{RML}reference"), "rml:reference"),
+            (format!("{RR}column"), "rr:column"),
+        ] {
+            out.extend(std::iter::repeat_n(name, self.terms(node, &p).len()));
+        }
+        out
+    }
+
+    /// The value of `predicates` on `node`, refusing more than one in all:
+    /// each is single-valued on the construct it describes.
+    fn single(
+        &self,
+        node: &str,
+        predicates: &[String],
+        owner: &str,
+    ) -> Result<Option<Term>, String> {
+        let mut values: Vec<Term> = Vec::new();
+        for p in predicates {
+            values.extend(self.terms(node, p));
+        }
+        if values.len() > 1 {
+            let names: Vec<String> = predicates.iter().map(|p| curie(p)).collect();
+            return Err(format!(
+                "the {owner} has {} values of {}; it takes at most one",
+                values.len(),
+                names.join(" / ")
+            ));
+        }
+        Ok(values.pop())
     }
 
     /// The function call under `fnml:functionValue` node `fv`, hung off the term
@@ -430,45 +617,78 @@ impl Ctx<'_> {
     }
 
     fn term_map(&self, node: &str, position: Position) -> Result<TermMap, String> {
-        // Determine TermMapKind
-        let kind = if let Some(c) = self
-            .terms(node, &format!("{RR}constant"))
-            .into_iter()
-            .next()
-        {
+        let owner = position.name();
+        // A term map is exactly one of a constant, a column (`rr:column` or
+        // `rml:reference`) or a template (R2RML §7).
+        let kinds = self.term_map_kinds(node);
+        match kinds.as_slice() {
+            [] => {
+                return Err(format!(
+                    "the {owner} has no rr:constant, rr:template, rr:column or rml:reference"
+                ))
+            }
+            [_] => {}
+            [a, b, ..] if a == b => {
+                return Err(format!(
+                    "the {owner} has {} values of {a}; it takes exactly one",
+                    kinds.len()
+                ))
+            }
+            [a, b, ..] => {
+                return Err(format!(
+                    "the {owner} has both {a} and {b}; a term map is exactly one of a constant, \
+                     a column or a template (R2RML §7)"
+                ))
+            }
+        }
+        if kinds[0] == "rr:constant" {
+            let c = self.terms(node, &format!("{RR}constant")).remove(0);
             return constant(c, position);
-        } else if let Some(t) = self
-            .objects(node, &format!("{RR}template"))
-            .into_iter()
-            .next()
-        {
-            TermMapKind::Template(t)
-        } else if let Some(r) = self
-            .objects(node, &format!("{RML}reference"))
-            .into_iter()
-            .next()
-        {
-            TermMapKind::Reference(r)
-        } else if let Some(c) = self
-            .objects(node, &format!("{RR}column"))
-            .into_iter()
-            .next()
-        {
-            TermMapKind::Reference(c)
-        } else {
-            return Err(format!(
-                "TermMap <{node}> has no constant, template, or reference"
-            ));
+        }
+        let kind = match kinds[0] {
+            "rr:template" => {
+                TermMapKind::Template(self.objects(node, &format!("{RR}template")).remove(0))
+            }
+            "rml:reference" => {
+                TermMapKind::Reference(self.objects(node, &format!("{RML}reference")).remove(0))
+            }
+            _ => TermMapKind::Reference(self.objects(node, &format!("{RR}column")).remove(0)),
         };
 
-        let datatype = self
-            .objects(node, &format!("{RR}datatype"))
-            .into_iter()
-            .next();
-        let language = self
-            .objects(node, &format!("{RR}language"))
-            .into_iter()
-            .next();
+        let datatype = match self.single(node, &[format!("{RR}datatype")], owner)? {
+            Some(Term::NamedNode(n)) => Some(n.into_string()),
+            Some(other) => {
+                return Err(format!(
+                    "rr:datatype {other} on the {owner} is not an IRI (R2RML §7.6)"
+                ))
+            }
+            None => None,
+        };
+        let language = match self.single(node, &[format!("{RR}language")], owner)? {
+            Some(Term::Literal(l)) => {
+                let tag = l.value().to_string();
+                // Validated by the BCP 47 parser the store itself uses.
+                if oxigraph::model::Literal::new_language_tagged_literal("", &tag).is_err() {
+                    return Err(format!(
+                        "rr:language \"{tag}\" on the {owner} is not a valid BCP 47 language \
+                         tag (R2RML §7.5)"
+                    ));
+                }
+                Some(tag)
+            }
+            Some(other) => {
+                return Err(format!(
+                    "rr:language {other} on the {owner} must be a string (R2RML §7.5)"
+                ))
+            }
+            None => None,
+        };
+        if datatype.is_some() && language.is_some() {
+            return Err(format!(
+                "the {owner} has both rr:language and rr:datatype; a literal carries a language \
+                 tag or a datatype, not both (R2RML §7.6)"
+            ));
+        }
 
         // R2RML §7.4: an explicit rr:termType wins; otherwise an object map
         // is a literal when it reads a column or declares a language or a
@@ -493,12 +713,46 @@ impl Ctx<'_> {
             }
             _ => TermType::IRI,
         };
-        let term_type = self
-            .objects(node, &format!("{RR}termType"))
-            .into_iter()
-            .next()
-            .map(|iri| term_type_from_iri(&iri, default_type.clone()))
-            .unwrap_or(default_type);
+        let term_type = match self.single(node, &[format!("{RR}termType")], owner)? {
+            Some(Term::NamedNode(n)) => term_type_from_iri(n.as_str()).ok_or_else(|| {
+                format!(
+                    "rr:termType <{}> on the {owner} is not rr:IRI, rr:BlankNode or rr:Literal",
+                    n.as_str()
+                )
+            })?,
+            Some(other) => {
+                return Err(format!(
+                    "rr:termType {other} on the {owner} is not an IRI (R2RML §7.4)"
+                ))
+            }
+            None => default_type,
+        };
+        let allowed: &[TermType] = match position {
+            Position::Subject => &[TermType::IRI, TermType::BlankNode],
+            Position::Predicate | Position::Graph => &[TermType::IRI],
+            Position::Object => &[TermType::IRI, TermType::BlankNode, TermType::Literal],
+        };
+        if !allowed.contains(&term_type) {
+            let names: Vec<&str> = allowed.iter().map(term_type_name).collect();
+            return Err(format!(
+                "the {owner} generates {}, which R2RML §7.4 does not allow there; it may \
+                 generate {}",
+                term_type_name(&term_type),
+                names.join(" or ")
+            ));
+        }
+        if term_type != TermType::Literal && (language.is_some() || datatype.is_some()) {
+            return Err(format!(
+                "the {owner} declares {} but generates {}; only a literal takes a language tag \
+                 or a datatype (R2RML §7.5, §7.6)",
+                if language.is_some() {
+                    "rr:language"
+                } else {
+                    "rr:datatype"
+                },
+                term_type_name(&term_type)
+            ));
+        }
 
         Ok(TermMap {
             kind,
@@ -580,15 +834,17 @@ fn normalise_sql_columns(tm: &mut TriplesMap) {
         fix_function(f);
     }
     for pom in &mut tm.predicate_object_maps {
-        fix(&mut pom.predicate_map);
+        pom.predicate_maps.iter_mut().for_each(fix);
         pom.graph_maps.iter_mut().for_each(fix);
-        match &mut pom.object {
-            ObjectMap::Term(t) => fix(t),
-            ObjectMap::Function(f) => fix_function(f),
-            ObjectMap::Ref(r) => {
-                for j in &mut r.joins {
-                    j.child = column_name(&j.child);
-                    j.parent = column_name(&j.parent);
+        for object in &mut pom.object_maps {
+            match object {
+                ObjectMap::Term(t) => fix(t),
+                ObjectMap::Function(f) => fix_function(f),
+                ObjectMap::Ref(r) => {
+                    for j in &mut r.joins {
+                        j.child = column_name(&j.child);
+                        j.parent = column_name(&j.parent);
+                    }
                 }
             }
         }
@@ -642,65 +898,41 @@ fn map_template_columns(template: &str, f: &dyn Fn(&str) -> String) -> String {
     out
 }
 
-fn parse_logical_source(
-    store: &TripleStore,
-    ls_iri: &str,
-    graph: Option<&str>,
-) -> Result<LogicalSource, String> {
-    let get = |pred: &str| get_objects(store, ls_iri, pred, graph);
-
-    // `rr:tableName` / `rml:query` / `rr:sqlQuery` describe a relational source.
-    let table_name = get(&format!("{RR}tableName")).into_iter().next();
-    let query = get(&format!("{RML}query"))
-        .into_iter()
-        .next()
-        .or_else(|| get(&format!("{RR}sqlQuery")).into_iter().next());
-
-    // rml:source — a datasource IRI, a file path/URL, or inline data.
-    let source_terms = get_objects_typed(store, ls_iri, &format!("{RML}source"), graph);
-    let source = match source_terms.into_iter().next() {
-        Some((value, true)) if value.starts_with(DATASOURCE_PREFIX) => SourceRef::Datasource(value),
-        Some((value, _)) => SourceRef::File(value),
-        // R2RML's `rr:logicalTable` names no source: the datasource is the
-        // one the run supplies. Only legal with a table or query.
-        None if table_name.is_some() || query.is_some() => SourceRef::Datasource(String::new()),
-        None => return Err("Missing rml:source".to_string()),
-    };
-
-    let mut formulation = get(&format!("{RML}referenceFormulation"))
-        .into_iter()
-        .next()
-        .map(|iri| ReferenceFormulation::from_iri(&iri))
-        .unwrap_or(ReferenceFormulation::Csv);
-    // A datasource source IS relational, whatever (if anything) the document
-    // declared: the reference formulation is advisory, the source is not.
-    if matches!(source, SourceRef::Datasource(_)) {
-        formulation = ReferenceFormulation::Sql;
+/// `rr:IRI`, `rr:BlankNode` or `rr:Literal`, in the R2RML or the RML-Core
+/// namespace. Anything else is not a term type.
+fn term_type_from_iri(iri: &str) -> Option<TermType> {
+    let local = iri
+        .strip_prefix(RR)
+        .or_else(|| iri.strip_prefix(RML_CORE))?;
+    match local {
+        "IRI" => Some(TermType::IRI),
+        "BlankNode" => Some(TermType::BlankNode),
+        "Literal" => Some(TermType::Literal),
+        _ => None,
     }
-    if formulation == ReferenceFormulation::Sql && query.is_none() && table_name.is_none() {
-        return Err(
-            "a relational logical source needs rr:tableName or rml:query / rr:sqlQuery".to_string(),
-        );
-    }
-
-    let iterator = get(&format!("{RML}iterator")).into_iter().next();
-
-    Ok(LogicalSource {
-        source,
-        reference_formulation: formulation,
-        iterator,
-        query,
-        table_name,
-    })
 }
 
-fn term_type_from_iri(iri: &str, default: TermType) -> TermType {
-    match iri {
-        i if i.ends_with("IRI") || i.ends_with("URI") => TermType::IRI,
-        i if i.ends_with("BlankNode") => TermType::BlankNode,
-        i if i.ends_with("Literal") => TermType::Literal,
-        _ => default,
+fn term_type_name(t: &TermType) -> &'static str {
+    match t {
+        TermType::IRI => "rr:IRI",
+        TermType::BlankNode => "rr:BlankNode",
+        TermType::Literal => "rr:Literal",
     }
+}
+
+/// A predicate IRI in the prefixed form error messages use.
+fn curie(iri: &str) -> String {
+    for (ns, prefix) in [
+        (RR, "rr:"),
+        (RML, "rml:"),
+        (RML_CORE, "rml:"),
+        (FNML, "fnml:"),
+    ] {
+        if let Some(local) = iri.strip_prefix(ns) {
+            return format!("{prefix}{local}");
+        }
+    }
+    format!("<{iri}>")
 }
 
 /// Get all object values for (subject, predicate) in the given graph context.
@@ -863,7 +1095,7 @@ mod tests {
         ))
         .expect("parses");
         let child = m.find("http://example.org/Child").unwrap();
-        let ObjectMap::Ref(r) = &child.predicate_object_maps[0].object else {
+        let ObjectMap::Ref(r) = &child.predicate_object_maps[0].object_maps[0] else {
             panic!("expected a referencing object map");
         };
         assert_eq!(r.parent_triples_map, "http://example.org/Parent");
@@ -925,7 +1157,8 @@ mod tests {
                    rr:predicateObjectMap [ rr:predicate fn:unmapped ; rr:object \"literal\" ] ] ] ] ."
         ))
         .expect("parses");
-        let ObjectMap::Function(f) = &m.triples_maps[0].predicate_object_maps[0].object else {
+        let ObjectMap::Function(f) = &m.triples_maps[0].predicate_object_maps[0].object_maps[0]
+        else {
             panic!("expected a function object map");
         };
         assert_eq!(f.function, "https://w3id.org/open-triplestore/fn#mapValue");
@@ -1034,7 +1267,7 @@ mod tests {
         let n = c
             .predicate_object_maps
             .iter()
-            .find_map(|p| match &p.object {
+            .find_map(|p| match &p.object_maps[0] {
                 ObjectMap::Term(t) => Some(t),
                 _ => None,
             })
@@ -1043,7 +1276,7 @@ mod tests {
         let r = c
             .predicate_object_maps
             .iter()
-            .find_map(|p| match &p.object {
+            .find_map(|p| match &p.object_maps[0] {
                 ObjectMap::Ref(r) => Some(r),
                 _ => None,
             })
@@ -1079,7 +1312,7 @@ mod tests {
             let mut by_predicate: Vec<(String, TermType)> = m.triples_maps[0]
                 .predicate_object_maps
                 .iter()
-                .map(|p| match (&p.predicate_map.kind, &p.object) {
+                .map(|p| match (&p.predicate_maps[0].kind, &p.object_maps[0]) {
                     (TermMapKind::Constant(pred), ObjectMap::Term(t)) => {
                         (pred.to_string(), t.term_type.clone())
                     }
@@ -1099,6 +1332,23 @@ mod tests {
             types(Semantics::Legacy),
             vec![Literal, Literal, IRI, Literal]
         );
+    }
+
+    #[test]
+    fn a_predicate_object_map_keeps_every_predicate_and_object_map() {
+        let m = parse_rml(&format!(
+            "{PFX}
+             ex:M a rr:TriplesMap ;
+               rml:logicalSource [ rml:source \"d.csv\" ; rml:referenceFormulation ql:CSV ] ;
+               rr:subjectMap [ rr:template \"http://x/{{id}}\" ] ;
+               rr:predicateObjectMap [
+                 rr:predicate ex:a, ex:b ; rr:predicateMap [ rr:template \"http://x/p/{{k}}\" ] ;
+                 rr:object ex:O, \"lit\" ; rr:objectMap [ rml:reference \"v\" ] ] ."
+        ))
+        .unwrap();
+        let pom = &m.triples_maps[0].predicate_object_maps[0];
+        assert_eq!(pom.predicate_maps.len(), 3);
+        assert_eq!(pom.object_maps.len(), 3);
     }
 
     #[test]

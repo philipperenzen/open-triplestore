@@ -315,8 +315,7 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >   All 39 conformance tests pass (`tests/ldp_conformance.rs`).
 > ⁹ SKOS is a vocabulary; all systems store SKOS triples — "support" means SKOS-aware inferencing.
 > ¹⁰ RML, graded Partial in [`docs/standards.md`](standards.md): CSV/JSON/XML files and
->   registered SQL and SPARQL datasources; joins (`rr:parentTriplesMap`) run on datasources only,
->   and a predicate-object map uses its first predicate map and first object map.
+>   registered SQL and SPARQL datasources; joins (`rr:parentTriplesMap`) run on datasources only.
 
 ### Standards Score (count of full ✅ across all 29 rows above)
 

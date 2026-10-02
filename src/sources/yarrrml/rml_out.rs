@@ -97,6 +97,9 @@ pub struct TriplesMapOut {
     pub subject_mint: bool,
     pub classes: Vec<String>,
     pub poms: Vec<PomOut>,
+    /// Source values that count as NULL, written as RML-IO `rml:null` on the
+    /// logical source.
+    pub nulls: Vec<String>,
 }
 
 /// Namespace the generated triples maps are named under. They are internal
@@ -224,6 +227,9 @@ pub fn render(maps: &[TriplesMapOut]) -> Result<String, String> {
         out.push_str(&format!("{} a rr:TriplesMap ;\n", iri(&map_iri(&m.name))?));
         out.push_str("  rml:logicalSource [\n");
         out.push_str(&format!("    rml:source {} ;\n", iri(&m.source)?));
+        for n in &m.nulls {
+            out.push_str(&format!("    <http://w3id.org/rml/null> {} ;\n", lit(n)));
+        }
         if let Some(q) = &m.query {
             out.push_str(&format!("    rml:query {}\n", lit(q)));
         } else if let Some(t) = &m.table {
@@ -518,6 +524,7 @@ mod tests {
                     },
                 },
             ],
+            nulls: Vec::new(),
         }
     }
 
@@ -573,7 +580,7 @@ mod tests {
             let mut out: Vec<(String, TermType)> = m.triples_maps[0]
                 .predicate_object_maps
                 .iter()
-                .filter_map(|p| match (&p.predicate_map.kind, &p.object) {
+                .filter_map(|p| match (&p.predicate_maps[0].kind, &p.object_maps[0]) {
                     (TermMapKind::Constant(pred), ObjectMap::Term(t)) => {
                         Some((pred.to_string(), t.term_type.clone()))
                     }
@@ -630,9 +637,9 @@ mod tests {
         let pom = child
             .predicate_object_maps
             .iter()
-            .find(|p| matches!(p.object, crate::rml::model::ObjectMap::Ref(_)))
+            .find(|p| matches!(p.object_maps[0], crate::rml::model::ObjectMap::Ref(_)))
             .expect("a referencing object map");
-        let crate::rml::model::ObjectMap::Ref(r) = &pom.object else {
+        let crate::rml::model::ObjectMap::Ref(r) = &pom.object_maps[0] else {
             unreachable!()
         };
         assert_eq!(r.parent_triples_map, map_iri("supplier"));
@@ -658,7 +665,7 @@ mod tests {
         let f = tm
             .predicate_object_maps
             .iter()
-            .find_map(|p| match &p.object {
+            .find_map(|p| match &p.object_maps[0] {
                 crate::rml::model::ObjectMap::Function(f) => Some(f),
                 _ => None,
             })

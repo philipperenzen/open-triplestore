@@ -7,7 +7,7 @@
 
 use oxigraph::io::RdfFormat;
 
-use crate::rml::model::{ObjectMap, RmlMapping, Semantics, SourceRef};
+use crate::rml::model::{RmlMapping, Semantics, SourceRef};
 use crate::rml::parse_from_store_as;
 use crate::store::TripleStore;
 
@@ -165,10 +165,8 @@ where
 pub fn join_parents(mapping: &RmlMapping) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for tm in &mapping.triples_maps {
-        for pom in &tm.predicate_object_maps {
-            if let ObjectMap::Ref(r) = &pom.object {
-                out.push((tm.iri.clone(), r.parent_triples_map.clone()));
-            }
+        for r in tm.refs() {
+            out.push((tm.iri.clone(), r.parent_triples_map.clone()));
         }
     }
     out
@@ -177,6 +175,7 @@ pub fn join_parents(mapping: &RmlMapping) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rml::model::ObjectMap;
 
     const PFX: &str = "@prefix rr: <http://www.w3.org/ns/r2rml#> .\n\
 @prefix rml: <http://semweb.mmlab.be/ns/rml#> .\n\
@@ -317,7 +316,8 @@ mod tests {
 
         let term_type = |v: u32| {
             let m = load(&store, "m", v).unwrap();
-            let ObjectMap::Term(t) = &m.triples_maps[0].predicate_object_maps[0].object else {
+            let ObjectMap::Term(t) = &m.triples_maps[0].predicate_object_maps[0].object_maps[0]
+            else {
                 panic!("a term object map")
             };
             (m.semantics, t.term_type.clone())

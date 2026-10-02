@@ -16,39 +16,44 @@
 //! [`super::sql`](super::sql) instead, because they can join across triples
 //! maps; both share the term-map evaluation in [`super::terms`].
 
+use super::checks::{check_columns, DataErrors, OnDataError};
 use super::model::*;
 use super::sources::load_rows;
 use super::terms::{Row, TermGen};
 use crate::store::engine::TripleStore;
 use std::collections::HashMap;
 
-/// Execute an RML mapping, writing generated triples into `target_graph` in `store`.
-///
-/// `source_data` is a map from logical source identifier (file path / name) → content string.
-/// Returns the number of triples inserted.
-pub fn execute(
-    mapping: &RmlMapping,
-    source_data: &HashMap<String, String>,
-    store: &TripleStore,
-    target_graph: Option<&str>,
-) -> Result<usize, String> {
-    execute_authorized(mapping, source_data, store, target_graph, |_| Ok(()))
+/// What a file-mapping run wrote, and the rows it skipped terms from.
+#[derive(Debug, Clone, Default)]
+pub struct FileOutcome {
+    pub triples: usize,
+    /// Empty unless the run skipped data errors ([`OnDataError::Skip`]).
+    pub data_errors: DataErrors,
 }
 
-/// Like [`execute`], but `authorize` gates **every effective target graph** before
+/// Execute an RML mapping, writing generated triples into `target_graph` in `store`.
+///
+/// `source_data` is a map from logical source identifier (file path / name) →
+/// content string. `authorize` gates **every effective target graph** before
 /// any write. A graph map (on a subject map or a predicate-object map) sends
 /// triples to a graph other than `target_graph`, so a caller-supplied mapping
 /// can name an arbitrary destination graph; the dataset-scoped HTTP path passes an `authorize` that
 /// keeps those targets inside the dataset's own graph boundary (preventing a
 /// cross-tenant write). Authorization runs over the full resolved set *before*
 /// the first insert, so a rejected mapping writes nothing.
-pub fn execute_authorized<A>(
+///
+/// A column the mapping names that a CSV header lacks is an error before the
+/// first row. A row value that cannot become its term (R2RML §4.3) aborts
+/// the run with the offending rows named, unless `on_data_error` is
+/// [`OnDataError::Skip`]; either way an aborted run writes nothing.
+pub fn execute_with<A>(
     mapping: &RmlMapping,
     source_data: &HashMap<String, String>,
     store: &TripleStore,
     target_graph: Option<&str>,
+    on_data_error: OnDataError,
     authorize: A,
-) -> Result<usize, String>
+) -> Result<FileOutcome, String>
 where
     A: Fn(&str) -> Result<(), String>,
 {
@@ -65,14 +70,11 @@ where
     // The same goes for a referencing object map: `rr:parentTriplesMap` needs
     // a join resolver, and a file row stands alone. Resolving it to nothing
     // dropped every link the mapping asked for and still reported success.
-    if let Some((tm, r)) = mapping.triples_maps.iter().find_map(|tm| {
-        tm.predicate_object_maps
-            .iter()
-            .find_map(|pom| match &pom.object {
-                ObjectMap::Ref(r) => Some((tm, r)),
-                _ => None,
-            })
-    }) {
+    if let Some((tm, r)) = mapping
+        .triples_maps
+        .iter()
+        .find_map(|tm| tm.refs().next().map(|r| (tm, r)))
+    {
         return Err(format!(
             "TriplesMap <{}> links to <{}> through rr:parentTriplesMap, which file sources \
              (CSV, JSON, XML) cannot resolve; put the parent's subject in the child's own \
@@ -84,6 +86,7 @@ where
     // Triples keyed by their target named graph (None = default/target_graph).
     let mut triples_by_graph: HashMap<Option<String>, Vec<String>> = HashMap::new();
     let mut gen = TermGen::new(mapping.semantics, "b");
+    let mut data_errors = DataErrors::default();
 
     for tm in &mapping.triples_maps {
         let source_key = match &tm.logical_source.source {
@@ -92,17 +95,25 @@ where
         };
 
         execute_triples_map(
+            mapping,
             tm,
             source_data,
             &source_key,
             &mut triples_by_graph,
             &mut gen,
-            mapping.base_for(tm),
+            on_data_error,
+            &mut data_errors,
         )?;
+        if on_data_error == OnDataError::Abort && !data_errors.is_empty() {
+            return Err(data_errors.abort_message());
+        }
     }
 
     if triples_by_graph.is_empty() {
-        return Ok(0);
+        return Ok(FileOutcome {
+            triples: 0,
+            data_errors,
+        });
     }
 
     // Authorize every effective destination graph up front, so a mapping whose
@@ -138,30 +149,50 @@ where
         total += triples.len();
     }
 
-    Ok(total)
+    Ok(FileOutcome {
+        triples: total,
+        data_errors,
+    })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_triples_map(
+    mapping: &RmlMapping,
     tm: &TriplesMap,
     source_data: &HashMap<String, String>,
     source_key: &str,
     out: &mut HashMap<Option<String>, Vec<String>>,
     gen: &mut TermGen,
-    base: Option<&str>,
+    on_data_error: OnDataError,
+    data_errors: &mut DataErrors,
 ) -> Result<(), String> {
     let content = source_data
         .get(source_key)
         .ok_or_else(|| format!("Source data not found for key: {source_key}"))?;
 
-    let rows = load_rows(
+    let (columns, rows) = load_rows(
         content,
         &tm.logical_source.reference_formulation,
         tm.logical_source.iterator.as_deref(),
+        mapping.semantics == Semantics::R2rml,
     )?;
+    // A CSV header is the source's column list: a column the mapping names
+    // that it lacks is a mapping error, not a run of empty rows. JSON and XML
+    // records carry no fixed set, and a missing key there is a NULL.
+    if let Some(columns) = columns {
+        check_columns(mapping, tm, &columns)?;
+    }
 
-    for row_result in rows {
-        let row = row_result?;
+    let base = mapping.base_for(tm);
+    for (i, row_result) in rows.enumerate() {
+        let mut row = row_result?;
+        gen.apply_nulls(&tm.logical_source, &mut row);
         execute_row(tm, &row, out, gen, base)?;
+        data_errors.record(&tm.iri, i as u64 + 1, gen.take_errors());
+        // An aborting run reads on only to name a few more offending rows.
+        if on_data_error == OnDataError::Abort && data_errors.sample_full() {
+            break;
+        }
     }
 
     Ok(())
@@ -192,6 +223,23 @@ mod tests {
     use super::*;
     use crate::rml::parser::parse_rml;
     use oxigraph::sparql::QueryResults;
+
+    fn execute(
+        mapping: &RmlMapping,
+        source_data: &HashMap<String, String>,
+        store: &TripleStore,
+        target_graph: Option<&str>,
+    ) -> Result<usize, String> {
+        execute_with(
+            mapping,
+            source_data,
+            store,
+            target_graph,
+            OnDataError::Abort,
+            |_| Ok(()),
+        )
+        .map(|o| o.triples)
+    }
 
     const MAPPING: &str = r#"
         @prefix rr:   <http://www.w3.org/ns/r2rml#> .

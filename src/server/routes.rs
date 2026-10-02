@@ -9323,6 +9323,7 @@ pub async fn execute_rml_mapping(
     }
 
     let preview = params.get("preview").map(|v| v == "true").unwrap_or(false);
+    let on_data_error = on_data_error_param(&params)?;
     let target_graph = params
         .get("graph")
         .cloned()
@@ -9424,20 +9425,30 @@ pub async fn execute_rml_mapping(
                 format!("Temp store error: {e}"),
             )
         })?;
-        let count = crate::rml::execute(&mapping, &source_data, &temp, Some(&target_graph))
-            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        let outcome = crate::rml::execute_with(
+            &mapping,
+            &source_data,
+            &temp,
+            Some(&target_graph),
+            on_data_error,
+            |_| Ok(()),
+        )
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
         let turtle_bytes = temp
             .dump_prefixed(oxigraph::io::RdfFormat::Turtle, Some(&target_graph), |ns| {
                 state.prefix_registry.declaration_for(ns)
             })
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let turtle = String::from_utf8(turtle_bytes).unwrap_or_default();
-        return Ok(Json(serde_json::json!({
+        let mut body = serde_json::json!({
             "preview": true,
-            "triples_count": count,
+            "triples_count": outcome.triples,
             "turtle": turtle,
-        }))
-        .into_response());
+        });
+        if !outcome.data_errors.is_empty() {
+            body["data_errors"] = serde_json::json!(outcome.data_errors);
+        }
+        return Ok(Json(body).into_response());
     }
 
     // Execute into the real store, enforcing the same boundary on every effective
@@ -9454,11 +9465,12 @@ pub async fn execute_rml_mapping(
     let authz_ds = dataset_id.clone();
     let claims = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let authz_claims = claims.clone();
-    let count = crate::rml::execute_authorized(
+    let outcome = crate::rml::execute_with(
         &mapping,
         &source_data,
         &state.store,
         Some(&target_graph),
+        on_data_error,
         move |g: &str| {
             let claim = crate::auth::dataset_graph::gate_dataset_graph_target(
                 &authz_store,
@@ -9511,11 +9523,29 @@ pub async fn execute_rml_mapping(
         );
     }
 
-    Ok(Json(serde_json::json!({
-        "triples_inserted": count,
+    let mut body = serde_json::json!({
+        "triples_inserted": outcome.triples,
         "target_graph": target_graph,
-    }))
-    .into_response())
+    });
+    if !outcome.data_errors.is_empty() {
+        body["data_errors"] = serde_json::json!(outcome.data_errors);
+    }
+    Ok(Json(body).into_response())
+}
+
+/// `?on_data_error=abort|skip` on the file-mapping endpoints.
+fn on_data_error_param(
+    params: &std::collections::HashMap<String, String>,
+) -> Result<crate::rml::checks::OnDataError, (StatusCode, String)> {
+    match params.get("on_data_error") {
+        None => Ok(crate::rml::checks::OnDataError::Abort),
+        Some(v) => crate::rml::checks::OnDataError::parse(v).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("unknown on_data_error '{v}'; expected abort (the default) or skip"),
+            )
+        }),
+    }
 }
 
 /// POST /api/rml/preview — dry-run RML mapping without persisting
@@ -9523,8 +9553,10 @@ pub async fn execute_rml_mapping(
 /// Multipart: `mapping` (Turtle) + named source file parts.
 pub async fn rml_preview(
     State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
     mut multipart: Multipart,
 ) -> Result<Response, (StatusCode, String)> {
+    let on_data_error = on_data_error_param(&params)?;
     let mut mapping_turtle: Option<String> = None;
     let mut source_data: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
@@ -9562,7 +9594,10 @@ pub async fn rml_preview(
             format!("Temp store error: {e}"),
         )
     })?;
-    let count = crate::rml::execute(&mapping, &source_data, &temp, None)
+    let outcome =
+        crate::rml::execute_with(&mapping, &source_data, &temp, None, on_data_error, |_| {
+            Ok(())
+        })
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let turtle_bytes = temp
@@ -9571,11 +9606,14 @@ pub async fn rml_preview(
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(serde_json::json!({
-        "triples_count": count,
+    let mut body = serde_json::json!({
+        "triples_count": outcome.triples,
         "turtle": String::from_utf8(turtle_bytes).unwrap_or_default(),
-    }))
-    .into_response())
+    });
+    if !outcome.data_errors.is_empty() {
+        body["data_errors"] = serde_json::json!(outcome.data_errors);
+    }
+    Ok(Json(body).into_response())
 }
 
 // ─── Helper functions ────────────────────────────────────────────────────────
