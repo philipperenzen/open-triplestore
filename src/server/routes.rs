@@ -3990,6 +3990,8 @@ mod private_snapshot_tests {
             derived_from: None,
             notes: None,
             branch: None,
+            conforms_to_model: None,
+            conforms_to_version: None,
         };
         registry::insert_version(&state.store, base, &record).unwrap();
         let private = private_snapshot_graphs(&state, "ds1", "2.0.0").unwrap();

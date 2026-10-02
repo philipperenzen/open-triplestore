@@ -583,6 +583,8 @@ async fn deleting_a_version_drops_a_shared_validation_graph_once() {
         derived_from: None,
         notes: None,
         branch: None,
+        conforms_to_model: None,
+        conforms_to_version: None,
     };
     registry::insert_version(&state.store, base, &legacy).unwrap();
 
