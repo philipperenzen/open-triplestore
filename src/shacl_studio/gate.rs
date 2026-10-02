@@ -479,6 +479,10 @@ fn copy_shape_graphs(
     temp: &TripleStore,
     graphs: &BTreeSet<String>,
 ) -> Result<(), ValidationReport> {
+    // The functions every query of the live store sees (its admin-designated
+    // function graphs) are the scratch store's too, so a gate computes what
+    // the same run computes outside it.
+    temp.inherit_registered_functions(main_store);
     for g in graphs {
         let bytes = main_store
             .dump(RdfFormat::Turtle, Some(g))

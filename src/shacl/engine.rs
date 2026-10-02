@@ -66,7 +66,10 @@ pub fn validate(
     // clean RAM copy, else one RocksDB snapshot, else the live memory store.
     // Class closures and target instance sets are computed up front, in
     // parallel, so the fan-out below takes no lock and runs no SPARQL.
-    let mut view = DataView::new(store, data_graphs);
+    // The run's evaluator: the server's functions plus the ones this shapes
+    // graph declares — never another graph's (see `sparql_functions`).
+    let evaluator = store.query_options_for_shapes(shapes_graph)?;
+    let mut view = DataView::new(store, data_graphs, evaluator);
     view.prepare(&shapes);
 
     // `shapes_slice` is a shared immutable reference passed into parallel closures so
@@ -287,6 +290,9 @@ pub fn infer_into(
 
     let rules = load_rules(store, shapes_graph)?;
     debug!("Loaded {} rules", rules.len());
+    // Rule bodies, SPARQL targets and conditions see the server's functions
+    // plus the ones this shapes graph declares (see `sparql_functions`).
+    let evaluator = store.query_options_for_shapes(shapes_graph)?;
 
     let mut total_inferred: usize = 0;
 
@@ -328,7 +334,7 @@ pub fn infer_into(
             let mut prepared: Vec<Shape> = Vec::with_capacity(1 + rule.conditions.len());
             prepared.push(target_shape.clone());
             prepared.extend(rule.conditions.iter().cloned());
-            let mut view = DataView::new(store, data_graphs);
+            let mut view = DataView::new(store, data_graphs, evaluator.clone());
             view.prepare(&prepared);
             let focus_nodes = resolve_targets(&view, &target_shape);
 
@@ -348,7 +354,14 @@ pub fn infer_into(
                 if !conforms {
                     continue;
                 }
-                apply_rule(store, focus_node, &rule.body, data_graphs, target_graph)?;
+                apply_rule(
+                    store,
+                    &evaluator,
+                    focus_node,
+                    &rule.body,
+                    data_graphs,
+                    target_graph,
+                )?;
             }
         }
 
@@ -1595,6 +1608,7 @@ fn load_rules(store: &TripleStore, shapes_graph: &str) -> Result<Vec<Rule>, Stri
 /// handed to `TripleStore::update`, which authorizes nothing.
 fn apply_rule(
     store: &TripleStore,
+    evaluator: &oxigraph::sparql::SparqlEvaluator,
     focus_node: &Term,
     body: &RuleBody,
     data_graphs: &[String],
@@ -1610,7 +1624,7 @@ fn apply_rule(
                 Vec::new()
             };
             store
-                .construct_confined(query, data_graphs, &bindings)
+                .construct_confined(evaluator.clone(), query, data_graphs, &bindings)
                 // An erroring rule used to be logged and swallowed, so `infer`
                 // reported success with 0 inferred triples whether the rules ran
                 // or every one of them failed. Surface it: the caller decides.
@@ -2597,7 +2611,7 @@ mod tests {
             .unwrap();
 
         let graphs = vec![g.to_string()];
-        let view = DataView::new(&store, &graphs);
+        let view = DataView::new(&store, &graphs, store.query_options());
         assert_eq!(
             view.source_kind(),
             "snapshot",

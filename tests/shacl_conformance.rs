@@ -907,3 +907,140 @@ fn a_composite_path_reaches_differently_for_an_iri_and_a_blank_node_focus() {
         r.results
     );
 }
+
+// ─── sh:SPARQLFunction scope ───────────────────────────────────────────────
+//
+// A `sh:SPARQLFunction` belongs to the runs of the shapes graph that declares
+// it. It never reaches another shapes graph's run, and it can never redefine
+// an `xsd:` cast or a function the server registers itself (GeoSPARQL, 3D,
+// RDF 1.2, ADJUST): a writer of any graph could otherwise change what every
+// other tenant's constraints, gates and pipelines compute.
+
+/// A function definition with one parameter `$x`.
+fn sparql_function(iri: &str, select: &str) -> String {
+    format!(
+        "<{iri}> a sh:SPARQLFunction ;\n\
+           sh:parameter [ sh:path ex:x ; sh:order 0 ] ;\n\
+           sh:select \"\"\"{select}\"\"\" .\n"
+    )
+}
+
+const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+
+/// `ex:big` violates when its value, cast with the built-in `xsd:integer`, is
+/// over 5 — and it is 10.
+fn cast_shapes() -> String {
+    format!(
+        "ex:CastShape a sh:NodeShape ; sh:targetNode ex:big ;\n\
+           sh:sparql [ sh:select \"\"\"SELECT $this ?value WHERE {{ $this <http://example.org/v> ?value . FILTER(<{XSD_INTEGER}>(?value) > 5) }}\"\"\" ] .\n"
+    )
+}
+
+fn load(store: &TripleStore, graph: &str, ttl: &str) {
+    store
+        .load_str(&format!("{PFX}{ttl}"), RdfFormat::Turtle, Some(graph))
+        .unwrap();
+}
+
+/// Another graph in the store — any dataset's — defines `xsd:integer` to
+/// always return 0. The shapes graph's own constraint still casts with the
+/// built-in and still catches the violation.
+#[test]
+fn sparql_function_in_another_graph_cannot_redefine_a_cast() {
+    let store = TripleStore::in_memory().unwrap();
+    load(&store, "urn:shapes", &cast_shapes());
+    load(&store, "urn:data", "ex:big ex:v \"10\" .");
+    load(
+        &store,
+        "urn:attacker",
+        &sparql_function(XSD_INTEGER, "SELECT (0 AS ?r) WHERE {}"),
+    );
+    let r = validate(&store, "urn:shapes", &["urn:data".to_string()]).unwrap();
+    assert!(
+        violates(&r, "/big"),
+        "a graph outside the run redefined xsd:integer: {:?}",
+        r.results
+    );
+}
+
+/// A shapes graph that declares a function at a reserved IRI (an `xsd:`
+/// cast, a registered GeoSPARQL function) fails its own run: the definition
+/// would silently be ignored otherwise, and the author would never learn it.
+#[test]
+fn sparql_function_redefining_a_builtin_fails_the_run() {
+    for reserved in [
+        XSD_INTEGER,
+        "http://www.opengis.net/def/function/geosparql/sfWithin",
+        "http://www.w3.org/ns/sparql#adjust",
+    ] {
+        let store = TripleStore::in_memory().unwrap();
+        load(
+            &store,
+            "urn:shapes",
+            &format!(
+                "{}{}",
+                cast_shapes(),
+                sparql_function(reserved, "SELECT (0 AS ?r) WHERE {}")
+            ),
+        );
+        load(&store, "urn:data", "ex:big ex:v \"10\" .");
+        match validate(&store, "urn:shapes", &["urn:data".to_string()]) {
+            Err(e) => assert!(e.contains(reserved), "{reserved}: {e}"),
+            Ok(r) => panic!(
+                "{reserved} was redefined or ignored silently: {:?}",
+                r.results
+            ),
+        }
+    }
+}
+
+/// A result value is the N-Triples term: `"20"^^xsd:integer`.
+fn is_twenty(value: &Option<String>) -> bool {
+    value.as_deref().is_some_and(|v| v.starts_with("\"20\""))
+}
+
+/// Two shapes graphs: A declares `ex:double` and uses it; B uses it without
+/// declaring it. A's run computes with it; B's run does not see it.
+#[test]
+fn sparql_function_is_scoped_to_its_shapes_graph() {
+    let store = TripleStore::in_memory().unwrap();
+    let uses_double = "SELECT $this ?value WHERE { $this <http://example.org/v> ?v . BIND(<http://example.org/double>(?v) AS ?value) FILTER(?value > 15) }";
+    load(
+        &store,
+        "urn:shapes-a",
+        &format!(
+            "{}ex:A a sh:NodeShape ; sh:targetNode ex:big ; sh:sparql [ sh:select \"\"\"{uses_double}\"\"\" ] .\n",
+            sparql_function("http://example.org/double", "SELECT ($x * 2 AS ?r) WHERE {}")
+        ),
+    );
+    load(
+        &store,
+        "urn:shapes-b",
+        &format!("ex:B a sh:NodeShape ; sh:targetNode ex:big ; sh:sparql [ sh:select \"\"\"{uses_double}\"\"\" ] .\n"),
+    );
+    load(&store, "urn:data", "ex:big ex:v 10 .");
+    let data = ["urn:data".to_string()];
+
+    let a = validate(&store, "urn:shapes-a", &data).unwrap();
+    assert!(
+        a.results
+            .iter()
+            .any(|x| x.focus_node.ends_with("/big") && is_twenty(&x.value)),
+        "the declaring graph's run computes with its function: {:?}",
+        a.results
+    );
+
+    let b = validate(&store, "urn:shapes-b", &data).unwrap();
+    assert!(
+        !b.results.iter().any(|x| is_twenty(&x.value)),
+        "another shapes graph's function reached this run: {:?}",
+        b.results
+    );
+    assert!(
+        b.results
+            .iter()
+            .any(|x| x.focus_node.ends_with("/big") && x.message.contains("double")),
+        "an undeclared function makes the constraint unevaluable, not a pass: {:?}",
+        b.results
+    );
+}
