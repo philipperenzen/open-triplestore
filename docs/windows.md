@@ -8,7 +8,7 @@ Open Triplestore runs on Windows three ways. Pick based on what you're doing:
 | **WSL2 (Ubuntu)** | Developing the Rust backend / frontend | ⭐⭐ easy | All (`full`) |
 | **Native MSVC** | Avoiding WSL/Docker entirely | ⭐⭐⭐ advanced / experimental | Partial (no `saml`) |
 
-The native build depends on the **GEOS** C library (for GeoSPARQL) on every OS, and
+The native build depends on the **GEOS** C library, 3.11 or later (for GeoSPARQL), on every OS, and
 on **libxmlsec1** for the optional `saml` feature. Those are trivial to install on
 Debian/Ubuntu/macOS but awkward under MSVC — which is why **Docker or WSL2 are the
 recommended routes on Windows**.
