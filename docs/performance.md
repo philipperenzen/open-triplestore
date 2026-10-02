@@ -683,11 +683,33 @@ Apple M-series laptop, release build.
 | `COUNT(*)` in `GRAPH` | 237 ms | 2.1 s | —² |
 | SHACL, all assets, 6 shapes | 10.8 s (83k quads/s) | 6.3 s on the mirror, 13.5 s on RocksDB in the 4g container⁴ (118 s before the engine rebuild) | — |
 | 4 writers + 4 readers, 20 s | 46k quads/s written, write p95 71 ms; 10.6k reads/s, read p95 1.6 ms | 34k quads/s written, write p95 122 ms; 5.7k reads/s, read p95 3.1 ms | — |
+| RDF Patch, 1 000 lines (500 `D`, 500 `A`)⁵ | 3.9 s as `POST …/patch` writes it; 15 ms as a repair proposal's apply writes it | — | — |
 
 ⁴ Measured 2026-09-16 with [`tests/scale_shacl_9m.rs`](../tests/scale_shacl_9m.rs)
 (ignored; run on purpose) on the reference system below, in Docker, release
 build; the row's other 9M cells are the laptop figures of the first run. The
 full measurement is under "The 9M SHACL measurement" further down.
+
+⁵ Measured 2026-10-02 with `scale_otl 100000 <dir> --patch` on an Apple M1 Pro
+(16 GB), release build. Each figure is the median of 5 applies, each undone
+before the next. The patch route writes a patch as one SPARQL update, then
+recounts every graph it touches: a scan of all 0.9M quads. A repair proposal's
+apply (`docs/repair.md`) writes the same ground update through
+`update_targeted_delta`, which adjusts the count by the exact delta.
+
+In the same session, `develop` with and without the repair layer ran the
+whole harness alternately, three times each. Medians with the layer against
+without:
+
+- SHACL: 1.07 s against 1.04 s.
+- 4 writers: 61.9k against 61.7k quads/s written, write p95 55 against 54 ms.
+- group by: 1.18 s against 1.12 s.
+- 2-way join: 73 against 70 ms.
+
+Every other row moved less. The largest move, +9 % on the
+sub-millisecond property path, is inside the spread between runs. No row got
+slower by anything near the 20 % the project allows. Those runs are faster
+than the cells above, which come from an earlier engine.
 
 ² The Docker Fuseki image is amd64-only and the webapp distribution needs a
 login; the comparison ran Fuseki *main* (the no-UI jar) natively over HTTP —

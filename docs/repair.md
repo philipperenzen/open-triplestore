@@ -230,8 +230,8 @@ Needs write access to the dataset. The apply, in order:
 1. takes the dataset's patch lock — `POST /api/datasets/{id}/patch` takes
    the same one, so two applies never interleave between check and write;
 2. checks the proposal's base: its change-log sequence when it has one and
-   the log is still in the same epoch, else its base commit. If a graph of
-   the proposal changed since, the answer is `409`
+   the log is still in the same epoch, else its base commit. If a graph the
+   run read (`base.graphs`) changed since, the answer is `409`
    (`"error": "stale_base"`) and the proposal becomes `superseded`:
    compute it again;
 3. runs the write gates of every graph it touches over what the graph would
@@ -309,8 +309,8 @@ your own under the same restrictions.
 
 - Nothing SPARQL-based is repaired; no literal is ever invented; no choice
   is made without an opt-in policy.
-- The copy is the whole dataset (`scope.focus` narrows the rules, not the
-  copy), validated whole.
+- The copy holds whole graphs (`scope.focus` narrows the rules, not the
+  copy), and is validated whole.
 - A placeholder never merges into a blank node, and a blank-node triple is
   never deleted.
 - Kept proposals are not backed up and computing a proposal is not
