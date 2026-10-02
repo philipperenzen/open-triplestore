@@ -19,10 +19,10 @@ claims, and nothing here is OGC-certified:
 | SPARQL 1.1 Federated Query (`SERVICE`) | Remote query | Partial³ — off by default; per-endpoint allowlist |
 | SPARQL 1.1 Service Description | Capability advertisement | Full |
 | SPARQL 1.2 (WD) | Triple terms, accessor functions | Partial¹ |
-| RDFS | subClass/subProperty/domain/range inference | Full |
+| RDFS | subClass/subProperty/domain/range inference | Full¹³ |
 | OWL 2 QL | Profile reasoning (materialised) | Full¹² |
 | OWL 2 EL | Profile reasoning (materialised) | Partial¹¹ |
-| OWL 2 RL | Profile reasoning (materialised) | Partial¹¹ |
+| OWL 2 RL | Profile reasoning (materialised) | Full¹⁴ |
 | OWL 2 DL | Description-logic expressivity | Partial⁴ |
 | GeoSPARQL 1.1 | Spatial RDF, relation/metric functions | Partial⁵ |
 | SHACL Core | Structural constraint validation | Partial⁶ |
@@ -174,12 +174,8 @@ behavior and will flip green when the limitation is resolved.
 10. **Zero-length property paths:** `:x :p* ?y` includes start nodes present in the
     data; the pure ALP edge of a *constant* start node absent from the graph is an
     oxigraph-evaluator divergence.
-11. **OWL 2 RL / EL:** RL runs 75 of the 78 RL/RDF rules, lists of any length and
-    inverse property expressions included (`eq-ref` on request); the Table 8 rules
-    `dt-type2`, `dt-eq` and `dt-diff` are not run, so literals are matched as terms,
-    not by value. EL does not apply `owl:hasValue`,
-    `owl:oneOf` or `owl:hasSelf` — use RL where those matter. Both are pinned by
-    `tests/owl2_rl_conformance.rs` / `tests/owl2_el_conformance.rs`.
+11. **OWL 2 EL:** EL does not apply `owl:hasValue`, `owl:oneOf` or `owl:hasSelf` — use RL
+    where those matter. Pinned by `tests/owl2_el_conformance.rs`.
 12. **OWL 2 QL:** the whole profile: the DL-Lite_R closure, ground
     materialisation, consistency (negative inclusions, asymmetric/irreflexive
     properties, ill-typed literals, data ranges) and existential rewriting of
@@ -187,6 +183,26 @@ behavior and will flip green when the limitation is resolved.
     values through the OWL 2 datatype map. Oxigraph stores integer-derived
     types as `xsd:integer`, so a check reads the value, not the datatype it
     was written with.
+
+13. **RDFS:** the RDF 1.1 Semantics patterns `rdfD2` and `rdfs1`–`rdfs13` with the RDF and RDFS
+    axiomatic triples, in one fixed-point loop ([RDFS Entailment](/docs/rdfs-entailment)).
+    Exempt by decision D11, as the closure is infinite: the container-membership axioms are
+    written for `rdf:_1` … `rdf:_n` up to the largest index the data uses, `rdfs1` declares the
+    recognized datatypes that are in use, and `rdfD1` (a blank node per typed literal) is not
+    materialised. Checked by `tests/rdfs_conformance.rs` and the W3C RDF 1.1 Semantics and
+    SPARQL 1.1 entailment-regime cases (no score published).
+14. **OWL 2 RL:** all 78 RL/RDF rules (OWL 2 Profiles §4.3), lists of any length and inverse
+    property expressions included. The Table 8 rules with literal subjects (`dt-type2`,
+    `dt-eq`, `dt-diff`) are applied to data values through the 32-type RL datatype map, so
+    `hasValue`, keys and negative data assertions match by value, data values type
+    `someValuesFrom` subjects, and out-of-range or conflicting values are inconsistencies.
+    `eq-ref` is off by default and on with `eq_ref: true` (decision D2); without it the closure
+    lacks only the reflexive `owl:sameAs` triples. Not simulated: conclusions reached through a
+    literal-subject triple when a data property is used as an object property, which OWL 2's
+    typing rules out. Oxigraph stores integer-derived types as `xsd:integer` (decision D4: a
+    documented limit). Checked by a differential test against a generalized-triple reference
+    evaluator and by the W3C OWL 2 RL-profile and SPARQL entailment-regime cases (no score
+    published); see [OWL 2 RL](/docs/owl2-rl).
 
 Related guides: [OWL Reasoning](/docs/reasoning), [SHACL Validation](/docs/shacl),
 [GeoSPARQL](/docs/geosparql), [Performance](/docs/performance),

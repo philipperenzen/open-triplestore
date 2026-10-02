@@ -493,7 +493,8 @@ mod tests {
         RdfsMaterializer::with_target(&s, RDFS_ENTAILMENT_GRAPH)
             .materialize()
             .unwrap();
-        // The datatype xsd:integer should be inferred as subClassOf rdfs:Literal
+        // rdfs1 declares xsd:integer an rdfs:Datatype; rdfs13 then makes it a
+        // subclass of rdfs:Literal.
         assert!(ask(
             &s,
             "ASK { GRAPH <urn:entailment:rdfs> \

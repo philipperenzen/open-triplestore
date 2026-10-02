@@ -793,7 +793,7 @@ See [docs/rml.md](docs/rml.md) for the full RML guide including JSON and XML sou
 
 ## OWL 2 DL Reasoning
 
-Native OWL 2 DL support runs the OWL 2 RL forward-chaining rules (75 of the 78 RL/RDF rules — the Table 8 datatype rules `dt-type2`, `dt-eq` and `dt-diff` are not run) plus DL-specific SPARQL rules for `owl:hasSelf`, `owl:disjointUnionOf`, `owl:NegativePropertyAssertion`, `owl:hasKey`, and cardinality annotations.  An `ExternalReasonerBridge` can hand the ontology to an external tableau reasoner for classification — Konclude is wired (`OTS_EXTERNAL_REASONER=konclude`) and experimental; it is off unless configured.
+Native OWL 2 DL support runs the OWL 2 RL forward-chaining rules (all 78 RL/RDF rules; the Table 8 rules with literal subjects are applied to data values) plus DL-specific SPARQL rules for `owl:hasSelf`, `owl:disjointUnionOf`, `owl:NegativePropertyAssertion`, `owl:hasKey`, and cardinality annotations.  An `ExternalReasonerBridge` can hand the ontology to an external tableau reasoner for classification — Konclude is wired (`OTS_EXTERNAL_REASONER=konclude`) and experimental; it is off unless configured.
 
 ```bash
 # Query with OWL 2 DL entailment

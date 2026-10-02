@@ -305,8 +305,8 @@ fn test_rdfs13_datatype_subclass_literal() {
 
 #[test]
 fn test_rdfs1_xsd_datatypes() {
-    // After materialization xsd:integer should be subClassOf rdfs:Literal (axiomatic rule rdfs1)
-    // Activated by the presence of any typed literal
+    // rdfs1 declares the datatype in use an rdfs:Datatype; rdfs13 makes it a subclass of rdfs:Literal
+    // (the datatype must be recognized and used by a literal in scope)
     let s = store_with("ex:alice ex:age \"30\"^^xsd:integer .");
     materialize(&s);
     assert!(
