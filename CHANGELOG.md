@@ -14,6 +14,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **OWL 2 QL: DL-Lite_R closure, ground materialisation, consistency and
+  existential query rewriting.** The `owl2-ql` regime of
+  `POST /api/reasoning/materialize` and of a dataset's entailment now writes
+  every entailed class membership and property assertion over the data's
+  individuals (it wrote only the subclass/subproperty closure, so
+  `?entailment=owl2-ql` said nothing about individuals). The TBox is closed
+  over basic concepts and roles with qualified existentials on the right,
+  intersections, complements, disjoint classes and properties,
+  symmetric/asymmetric/reflexive/irreflexive properties and data properties;
+  unsatisfiability propagates through negative inclusions, and an
+  inconsistency fails the run with its rule (`ql-cls-disjoint`,
+  `ql-prp-irp`, …). On `/sparql?entailment=owl2-ql` (and a dataset whose
+  regime is `owl2-ql`) the query's blank nodes are rewritten existentially, so
+  `ASK { ex:ann ex:hasChild [ a ex:Person ] }` is true when the schema says
+  every parent has a child, with one solution per binding of the variables;
+  the TBox is cached until the next write and a query without blank nodes is
+  untouched. Reasoning reports gain `ignored_axioms` and `ignored_sample`,
+  the axioms outside the profile that were not used. See `docs/owl2-ql.md`.
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -67,6 +85,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asks for, and re-pins; the store now tells everyone which datasets that applies to.
 
 ### Changed
+- **OWL 2 QL is graded Partial.** `docs/standards.md` graded it Full while the
+  rewriter was unsound and wrote no individual inferences. With the DL-Lite_R
+  closure in place, what remains is checking data-property values against the
+  OWL 2 datatype map; the comparison matrix follows (Standards Score 23 → 22).
+- **`owl2-ql` materialisation results change** (see Added): the target graph
+  now holds ground atoms, a dataset run writes to the dataset's own
+  `urn:entailment:owl2-ql:<id>` graph (it wrote the TBox closure to the shared
+  graph), and an inconsistent ontology fails the run.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were

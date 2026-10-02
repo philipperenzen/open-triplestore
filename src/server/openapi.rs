@@ -2247,7 +2247,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             vec![pp("org_id")], vec![("200", "Policy after the change"), ("403", "Organisation admin role required")], true)),
     ]);
     mount(paths, "/api/reasoning/materialize", vec![
-        (M::Post, o("Reasoning", "Materialise entailments", "Materialise inferred triples for an entailment regime (rdfs, owl2-rl, owl2-el, owl2-ql, owl2-dl).",
+        (M::Post, o("Reasoning", "Materialise entailments", "Materialise inferred triples for an entailment regime (rdfs, owl2-rl, owl2-el, owl2-ql, owl2-dl). The report counts the triples added; `owl2-ql` also reports `ignored_axioms` and `ignored_sample` (the first 20 axioms outside the profile that were not used), omitted when there are none.",
             vec![], vec![("200", "Reasoning report"), ("401", "Authentication required")], true)),
     ]);
     mount(
