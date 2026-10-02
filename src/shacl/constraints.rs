@@ -61,6 +61,10 @@ pub(crate) fn validate_inline_shape(
     shape: &Shape,
     severity: &Severity,
 ) -> Vec<ValidationResult> {
+    // Every term conforms to a deactivated shape (SHACL §2.1.6).
+    if shape.deactivated {
+        return Vec::new();
+    }
     // Bound recursion so a cyclic shapes graph cannot overflow the stack.
     let (_depth_guard, within_limit) = ShapeDepthGuard::enter();
     if !within_limit {
@@ -82,7 +86,7 @@ pub(crate) fn validate_inline_shape(
         ));
     }
 
-    for prop_shape in &shape.property_shapes {
+    for prop_shape in shape.property_shapes.iter().filter(|ps| !ps.deactivated) {
         let ps_iri = prop_shape.iri.as_deref().unwrap_or(shape_iri);
         // The value nodes are fetched once per (focus node, property shape) and
         // shared by every constraint of the shape.
@@ -941,6 +945,7 @@ pub(crate) fn evaluate_constraint_with_values(
         }
 
         // ---- Nested property shape (sh:property on a property shape) ----
+        Constraint::Property(inner_ps) if inner_ps.deactivated => {}
         Constraint::Property(inner_ps) => {
             // Each value node along the outer path becomes the focus node of the
             // nested property shape (SHACL §2.1.3).

@@ -8931,6 +8931,8 @@ pub async fn put_shapes(
     } else {
         raw
     };
+    crate::shacl::lint::check_activation_flags(&data)
+        .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e))?;
 
     state
         .store
