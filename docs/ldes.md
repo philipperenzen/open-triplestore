@@ -149,7 +149,8 @@ older than the publisher's full-log window, because members created between
 the two may have been compacted before this mirror saw them.
 
 Outbound requests are subject to the remote allowlist: the stream's origin
-must be listed in `OTS_REMOTE_ALLOWLIST`, and each fetch has the usual timeout.
+must be listed in `OTS_REMOTE_ALLOWLIST`, and each fetch has the usual timeout and
+body limit (`OTS_REMOTE_TIMEOUT_SECS`, `OTS_REMOTE_MAX_BYTES`).
 
 ## What is and is not implemented
 
