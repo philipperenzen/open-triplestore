@@ -1074,3 +1074,29 @@ async fn owl2_ql_inconsistency_fails_the_run() {
         "{body}"
     );
 }
+
+/// An OWL 2 EL run reports the axioms outside the profile it left out, and
+/// a report with none leaves the field out.
+#[cfg(feature = "owl2-el")]
+#[tokio::test]
+async fn owl2_el_reports_ignored_axioms() {
+    let (state, token) = admin_state();
+    state
+        .store
+        .load_str(
+            "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> . \
+             @prefix owl: <http://www.w3.org/2002/07/owl#> . \
+             @prefix ex: <http://example.org/> . \
+             ex:A rdfs:subClassOf [ owl:unionOf ( ex:B ex:C ) ] . \
+             ex:A rdfs:subClassOf ex:D . ex:x a ex:A .",
+            oxigraph::io::RdfFormat::Turtle,
+            None,
+        )
+        .unwrap();
+    let (st, body) = materialize(&state, &token, "owl2-el").await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["ignored"][0]["construct"], "ObjectUnionOf", "{body}");
+    assert_eq!(body["ignored"][0]["count"], 1, "{body}");
+    let (_, body) = materialize(&state, &token, "rdfs").await;
+    assert!(body.get("ignored").is_none(), "{body}");
+}

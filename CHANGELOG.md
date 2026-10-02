@@ -186,6 +186,38 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now holds ground atoms, a dataset run writes to the dataset's own
   `urn:entailment:owl2-ql:<id>` graph (it wrote the TBox closure to the shared
   graph), and an inconsistent ontology fails the run.
+- **OWL 2 EL is a native EL++ reasoner covering the whole profile; graded Full.**
+  Results change. The SPARQL `INSERT` loop is replaced by a saturation engine in
+  Rust (`src/reasoning/owl2_el/`): it reads the ontology from the quad index,
+  normalizes it, applies the EL++ completion rules with a worklist and writes
+  the new consequences with one `insert_quads` call.
+  - It now derives what the loop missed: every subsumption that needs an
+    anonymous successor, TBox property chains (`findingSite ∘ partOf ⊑
+    findingSite`), chains of any length, ranges on existential successors,
+    ⊥ through successors, and `owl:Thing ⊑ C`. An unscoped run sees its own
+    consequences. Classification also writes `owl:equivalentClass`, and the
+    property hierarchy writes `owl:equivalentProperty`.
+  - New constructs: `owl:hasValue` (object and data), one-individual
+    `owl:oneOf`, `owl:hasSelf`, `owl:sameAs`, `owl:differentFrom`,
+    `owl:AllDifferent`, negative property assertions, functional data
+    properties, data ranges and the nineteen EL datatypes with value semantics
+    (`"1"^^xsd:integer` equals `"1.0"^^xsd:decimal`). Classification stays
+    complete with nominals: a class whose subsumers depend on them is checked
+    against a hypothetical instance.
+  - Inconsistency also covers equality against `owl:differentFrom`, negative
+    property assertions, ill-typed literals and data-range violations,
+    including two values of a functional data property.
+  - Only triples that are not already in a premise graph are written. A
+    triple that is both asserted and entailed is no longer copied into
+    `urn:entailment:owl2-el`.
+  - **API addition (`ReasoningReport::ignored`):** the axioms outside the EL
+    profile that a run left out, as `[{construct, count, example}]`.
+    `POST /api/reasoning/materialize` returns the list when it is not empty.
+  - `docs/owl2-el.md` is rewritten, with performance measured on the
+    saturation core, and `docs/standards.md` grades OWL 2 EL Full.
+    `tests/owl2_el_conformance.rs` adds 34 tests, two of them randomised
+    differential tests against the RL engine on the EL ∩ RL fragment;
+    `test_biomedical_classification` no longer passes on an asserted triple.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were

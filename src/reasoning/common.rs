@@ -22,6 +22,22 @@ pub struct ReasoningReport {
     /// The first few of those axioms (at most [`IGNORED_SAMPLE`]).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ignored_sample: Vec<IgnoredAxiom>,
+    /// Axioms the regime read but could not use: constructs outside its
+    /// profile, by construct. Empty (and not serialized) for a regime that
+    /// does not report them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored: Vec<IgnoredAxioms>,
+}
+
+/// Axioms of one construct that a reasoning run left out.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IgnoredAxioms {
+    /// The OWL 2 construct, e.g. `ObjectUnionOf` or `FunctionalObjectProperty`.
+    pub construct: String,
+    /// How many axioms or expressions used it.
+    pub count: usize,
+    /// One of them: the subject term of the first one read.
+    pub example: String,
 }
 
 /// How many ignored axioms a [`ReasoningReport`] lists by name.
@@ -138,8 +154,9 @@ pub fn count_graph(
 /// (the default graph when `None`), read from the quad index — the
 /// `rdf:rest*` walk is done here rather than as a SPARQL property path.
 /// Blank-node class expressions are skipped; the order of a key's properties
-/// does not matter. Shared by the RL (`prp-key`) and EL hasKey rules.
-#[cfg(any(feature = "owl2-rl", feature = "owl2-el"))]
+/// does not matter. Used by the RL `prp-key` rule (the EL engine reads keys
+/// with the rest of its ontology).
+#[cfg(feature = "owl2-rl")]
 pub fn has_keys(
     store: &crate::store::TripleStore,
     scope: Option<&[String]>,

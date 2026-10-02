@@ -254,11 +254,12 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 
 > ⁵ Full RDFS entailment (all 13 rules rdfs1–rdfs13) via `rdfs-entailment` feature flag.
 >   See [`docs/rdfs-entailment.md`](rdfs-entailment.md).
-> ⁶ OWL 2 EL (CR1–CR10 + hasKey + reflexivity) and OWL 2 RL (~80 forward-chaining rules
->   including maxCardinality, qualified cardinality, AllDisjointClasses, property chains, and
->   hasKey) via feature flags (`owl2-el`, `owl2-rl`). OWL 2 QL (`owl2-ql`), the whole profile:
->   DL-Lite_R closure, ground materialisation, consistency checks (data ranges decided on values
->   through the OWL 2 datatype map) and existential rewriting of query blank nodes.
+> ⁶ OWL 2 EL (`owl2-el`): a native EL++ saturation engine for the whole profile — nominals,
+>   `hasSelf`, the EL datatypes, keys and equality, with randomised differential tests against RL.
+>   OWL 2 RL (`owl2-rl`): ~80 forward-chaining rules including maxCardinality, qualified
+>   cardinality, AllDisjointClasses, property chains, and hasKey. OWL 2 QL (`owl2-ql`), the whole
+>   profile: DL-Lite_R closure, ground materialisation, consistency checks (data ranges decided on
+>   values through the OWL 2 datatype map) and existential rewriting of query blank nodes.
 >   See [`docs/owl2-el.md`](owl2-el.md), [`docs/owl2-ql.md`](owl2-ql.md), [`docs/owl2-rl.md`](owl2-rl.md).
 > ⁷ OWL 2 DL: native RL+DL-extension rules (hasSelf, disjointUnion, negativePropertyAssertion,
 >   hasKey, cardinality annotations) run in-process; full tableau via optional Konclude subprocess
@@ -311,6 +312,10 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > carried forward. Three had drifted since April, where a row was edited without the
 > score being redone: Blazegraph 11 → 10, Neptune 10 → 9, QLever 8 → 7. The other seven
 > were already right.
+>
+> 2026-10-02: the OWL 2 EL ✅ in section 4.2 is now backed by a Full grade in `docs/standards.md`
+> (native EL++ engine covering the whole profile); the count does not change, since that cell was
+> already counted. Section 11.1 follows.
 >
 > Open Triplestore recounted again on 2026-09-23, 27 → 23: GeoSPARQL 1.0 and 1.1 and SHACL
 > validation now follow the Partial grades in `docs/standards.md`, and the W3C SPARQL 1.1 Tests
@@ -741,7 +746,7 @@ reduces GEOS calls by ~90%.
 | GraphDB | ✅ | ✅ | ✅ | ✅ | 🔒 | ✅ | ✅ | ❌ |
 | Stardog | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Virtuoso | ✅ | 🟡 | ✅ | ✅ | ❌ | 🟡 | ❌ | ❌ |
-| **Open Triplestore** | 🟡 | 🟡 | ✅ | 🟡 | ❌ | 🟡 | ✅ | ✅ |
+| **Open Triplestore** | 🟡 | ✅ | ✅ | 🟡 | ❌ | 🟡 | ✅ | ✅ |
 | Jena 5 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | 🟡 | ❌ | ❌ |
 | RDF4J 5 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ✅ | ❌ | ❌ |
 | Blazegraph | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ❌ | ❌ |
