@@ -46,8 +46,9 @@ open-triplestore = { features = ["owl2-rl"] }
 ```rust
 use open_triplestore::reasoning::rdfs::RdfsMaterializer;
 use open_triplestore::store::TripleStore;
+use std::path::Path;
 
-let store = TripleStore::open("./data")?;
+let store = TripleStore::open(Path::new("./data"))?;
 let materialiser = RdfsMaterializer::new(&store);
 let report = materialiser.materialize()?;
 

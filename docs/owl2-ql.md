@@ -56,8 +56,9 @@ owl2-ql = ["rdfs-entailment"]
 ```rust
 use open_triplestore::reasoning::owl2_ql::QLQueryRewriter;
 use open_triplestore::store::TripleStore;
+use std::path::Path;
 
-let store = TripleStore::open("./data")?;
+let store = TripleStore::open(Path::new("./data"))?;
 let rewriter = QLQueryRewriter::new(&store);
 
 // Rewrite a query before executing

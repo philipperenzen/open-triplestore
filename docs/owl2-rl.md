@@ -125,8 +125,9 @@ owl2-rl = ["rdfs-entailment"]   # already defined in the project
 ```rust
 use open_triplestore::reasoning::owl2_rl::Owl2RLReasoner;
 use open_triplestore::store::TripleStore;
+use std::path::Path;
 
-let store = TripleStore::open("./data")?;
+let store = TripleStore::open(Path::new("./data"))?;
 let reasoner = Owl2RLReasoner::new(&store);
 let report = reasoner.materialize()?;
 

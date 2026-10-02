@@ -58,7 +58,8 @@ The bundled **Open Triplestore** org publishes its own model and vocabulary in
 the *"Open Triplestore Model & Vocabulary"* dataset:
 
 - **Model** (`…/ots-model/ots-model`, role `Model`, the T-Box): OWL/RDFS **class**
-  definitions — `ots:Standard`, `ots:AuthMethod`, and the six `GraphRole` classes.
+  definitions — `ots:Standard`, `ots:AuthMethod`, the `ots:GraphRole` class and
+  its ten role individuals.
 - **Vocabulary** (`…/ots-model/ots-vocabulary`, role `Vocabulary`, the R-Box): the
   **property/relation** terms (`ots:conformance`, the `ots:graphRole` relation,
   `ots:visibility`) and a SKOS concept scheme for graph roles, conformance levels
@@ -66,9 +67,9 @@ the *"Open Triplestore Model & Vocabulary"* dataset:
   Vocabulary layer, even though the `GraphRole` classes it points at are defined
   in the Model.
 
-The role individuals are minted in the role namespace
-`https://opentriplestore.org/ns/role#` (e.g. `…/ns/role#Model`,
-`…/ns/role#Vocabulary`, `…/ns/role#Instances`).
+The role individuals are minted in the project namespace
+`https://opentriplestore.org/ns#` (e.g. `…/ns#Model`, `…/ns#Vocabulary`,
+`…/ns#Instances`, `…/ns#DomainValues`).
 
 ## 5. Derived-data write targets
 

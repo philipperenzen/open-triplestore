@@ -77,6 +77,7 @@ Full access including user management. **Requires an admin or super_admin accoun
 | `user` | Default for new accounts | Create datasets and organisations, upload data with a write token |
 | `admin` | Assigned by super_admin | All user capabilities + manage users and tokens, and publish models and vocabularies |
 | `super_admin` | System owner (configured at setup) | Full access including assigning admin / super_admin roles |
+| `guest` | Self-registered while [guest registration](#guest-self-registration-admin-toggle) is on | Read-only by default: no writing, dataset creation, API tokens or publishing unless `OTS_GUEST_CAPABILITIES` grants them |
 
 **Publish permission** is an add-on that can be granted to any user (the role stays `user`) by an admin or super-admin. It allows uploading model and vocabulary versions and publishing them. Admins and super-admins always have it implicitly.
 
@@ -181,6 +182,13 @@ guest-open forms). The toggle is runtime-changeable (no restart):
 
 `GET /api/auth/features` exposes the toggle so register UIs adapt their
 wording; sweeps are audit-logged with the affected count.
+
+What a guest may do beyond reading is set by the environment variable
+`OTS_GUEST_CAPABILITIES`, a comma- or space-separated list: `write` (data in
+datasets the guest holds a grant on), `create_datasets`, `api_tokens`,
+`publish`, or `all` (everything a `user` may do). Unset, guests are read-only. The clamp applies on
+every path a guest arrives by — session cookie, API token or OIDC token — and
+an unknown word is ignored with a warning rather than granting anything.
 
 ## Introspection for resource servers
 

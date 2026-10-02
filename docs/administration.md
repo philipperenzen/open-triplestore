@@ -20,7 +20,7 @@ It can be granted by an admin via the user management API, or automatically duri
 { "team-admins": "admin", "team-publishers": "publisher", "staff": "user" }
 ```
 
-The `"publisher"` grant only sets `can_publish`; it does not change the account role. SSO grants the capability non-destructively — it is set on matching sign-ins and never revoked just because a claim is absent. (Group/claim mapping applies on the SAML and resource-server OIDC paths; the interactive ID-token OIDC flow does not yet extract groups.)
+The `"publisher"` grant only sets `can_publish`; it does not change the account role. SSO grants the capability non-destructively — it is set on matching sign-ins and never revoked just because a claim is absent. (Group/claim mapping applies on every SSO path: SAML, resource-server OIDC tokens, and the interactive OIDC sign-in, which reads the ID token's `groups` and `roles` claims.)
 
 ---
 

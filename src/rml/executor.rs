@@ -62,6 +62,24 @@ where
                 .to_string(),
         );
     }
+    // The same goes for a referencing object map: `rr:parentTriplesMap` needs
+    // a join resolver, and a file row stands alone. Resolving it to nothing
+    // dropped every link the mapping asked for and still reported success.
+    if let Some((tm, r)) = mapping.triples_maps.iter().find_map(|tm| {
+        tm.predicate_object_maps
+            .iter()
+            .find_map(|pom| match &pom.object {
+                ObjectMap::Ref(r) => Some((tm, r)),
+                _ => None,
+            })
+    }) {
+        return Err(format!(
+            "TriplesMap <{}> links to <{}> through rr:parentTriplesMap, which file sources \
+             (CSV, JSON, XML) cannot resolve; put the parent's subject in the child's own \
+             rows, or map a registered datasource, where joins run",
+            tm.iri, r.parent_triples_map
+        ));
+    }
 
     // Triples keyed by their target named graph (None = default/target_graph).
     let mut triples_by_graph: HashMap<Option<String>, Vec<String>> = HashMap::new();
@@ -159,8 +177,8 @@ fn execute_row(
     // per row so cross-row blank nodes never collide.
     let mut row_bnodes: HashMap<String, String> = HashMap::new();
 
-    // No column types (a file source reports none) and no join resolver: RML
-    // join conditions need a queryable source, which is the relational path.
+    // No column types (a file source reports none) and no join resolver: a
+    // mapping with an `rr:parentTriplesMap` was refused before the first row.
     for triple in super::sql::row_triples(tm, row, None, bnodes, &mut row_bnodes, &|_, _| None)? {
         out.entry(triple.graph).or_default().push(triple.text);
     }
@@ -220,6 +238,45 @@ mod tests {
         };
         let row = sols.next().expect("one row").unwrap();
         assert_eq!(row.get("name").unwrap().to_string(), "\"Alice\"");
+    }
+
+    #[test]
+    fn a_parent_triples_map_is_refused_not_dropped() {
+        // Resolving the reference to nothing used to write the person, drop the
+        // link to the organisation, and report success.
+        let mapping = parse_rml(
+            r#"
+            @prefix rr:  <http://www.w3.org/ns/r2rml#> .
+            @prefix rml: <http://semweb.mmlab.be/ns/rml#> .
+            @prefix ql:  <http://semweb.mmlab.be/ns/ql#> .
+            @prefix ex:  <http://example.org/> .
+
+            ex:PersonMap a rr:TriplesMap ;
+                rml:logicalSource [ rml:source "people.csv" ; rml:referenceFormulation ql:CSV ] ;
+                rr:subjectMap [ rr:template "http://example.org/person/{id}" ] ;
+                rr:predicateObjectMap [
+                    rr:predicate ex:worksFor ;
+                    rr:objectMap [
+                        rr:parentTriplesMap ex:OrgMap ;
+                        rr:joinCondition [ rr:child "org" ; rr:parent "id" ]
+                    ]
+                ] .
+            ex:OrgMap a rr:TriplesMap ;
+                rml:logicalSource [ rml:source "orgs.csv" ; rml:referenceFormulation ql:CSV ] ;
+                rr:subjectMap [ rr:template "http://example.org/org/{id}" ] .
+        "#,
+        )
+        .expect("mapping parses");
+
+        let mut sources = HashMap::new();
+        sources.insert("people.csv".to_string(), "id,org\n1,7\n".to_string());
+        sources.insert("orgs.csv".to_string(), "id\n7\n".to_string());
+
+        let store = TripleStore::in_memory().unwrap();
+        let err = execute(&mapping, &sources, &store, None).unwrap_err();
+        assert!(err.contains("<http://example.org/PersonMap>"), "{err}");
+        assert!(err.contains("rr:parentTriplesMap"), "{err}");
+        assert_eq!(store.len().unwrap(), 0, "a refused mapping writes nothing");
     }
 
     fn count(store: &TripleStore, q: &str) -> usize {

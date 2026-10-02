@@ -11,11 +11,11 @@ what is partially implemented, and what is planned.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Triple terms (RDF-star) | ✅ | `<< s p o >>` syntax, `TRIPLE()`, `SUBJECT()`, `PREDICATE()`, `OBJECT()`, `isTRIPLE()` |
+| Triple terms (RDF 1.2) | ✅ | `<<( s p o )>>` triple terms, `<< s p o >>` reifiers, `{\| \|}` annotations, `TRIPLE()`, `SUBJECT()`, `PREDICATE()`, `OBJECT()`, `isTRIPLE()` |
 | ADJUST function | ✅ | Timezone and duration arithmetic on `xsd:dateTime` |
 | `rdf:triple` / `rdf:subject` etc. | ✅ | Custom function registration under RDF 1.2 IRIs |
 | SPARQL Results JSON for triple terms | ✅ | `{"type":"triple","value":{...}}` serialization |
-| `LATERAL` joins | 🟡 | Planned — requires engine changes in the opengraph fork |
+| `LATERAL` joins | ✅ | The right-hand side sees each left-hand solution's bindings (see below) |
 | `CALL` (service extension) | 🟡 | Planned |
 | `COUNT` deduplication changes | 🟡 | Minor spec change, planned |
 
@@ -31,19 +31,32 @@ open-triplestore = { path = "../open-triplestore", features = ["rdf-12"] }
 
 Or at the binary level (already on if you build with `--features full`).
 
-## Triple Terms (RDF-star)
+## Triple Terms (RDF 1.2)
 
-Triple terms allow triples to appear as the subject or object of other triples,
-enabling annotation of statements:
+The engine implements the RDF 1.2 model, not the older RDF-star Community Group
+one. A *triple term* `<<( s p o )>>` may appear only as an **object**, and a
+statement is annotated through a *reifier* that `rdf:reifies` the triple term.
+`<< s p o >>` is shorthand for such a reifier (a fresh blank node): it annotates
+the statement **without asserting it**. The `{| … |}` annotation syntax asserts
+the triple and annotates it in one go:
 
 ```sparql
-PREFIX ex: <http://example.org/>
+PREFIX ex:  <http://example.org/>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 
-# Assert a reified triple and annotate it
+# Annotate the statement without asserting it
 INSERT DATA {
   << ex:alice ex:knows ex:bob >> ex:confidence "0.95"^^xsd:decimal .
 }
+
+# Assert the statement and annotate it
+INSERT DATA {
+  ex:alice ex:knows ex:bob {| ex:confidence "0.95"^^xsd:decimal |} .
+}
 ```
+
+Code written for the Community Group model, where a quoted triple could be a
+subject, needs updating; [Standards](standards.md) note 1 has the details.
 
 Query triple terms with pattern matching:
 
@@ -82,16 +95,17 @@ Supported second-argument forms:
 
 The function is registered at `<http://www.w3.org/ns/sparql#adjust>`.
 
-## Planned: LATERAL Joins
+## LATERAL Joins
 
-`LATERAL` joins allow a subquery in the right-hand side to reference variables
-bound by the left-hand side:
+`LATERAL` evaluates its right-hand side once per solution of the left-hand
+side, with that solution's bindings in place — so a subquery can take the
+latest, largest or first *n* of something per row:
 
 ```sparql
 SELECT ?person ?latestEvent WHERE {
   ?person a ex:Person .
   LATERAL {
-    SELECT ?latestEvent WHERE {
+    SELECT ?person ?latestEvent WHERE {
       ?person ex:hasEvent ?latestEvent .
     }
     ORDER BY DESC(?latestEvent)
@@ -100,25 +114,14 @@ SELECT ?person ?latestEvent WHERE {
 }
 ```
 
-This requires correlated subquery evaluation in the query engine. It is planned
-for the opengraph fork (`spareval` modification). Until then, queries using
-`LATERAL` will receive a parse error from the upstream Oxigraph parser.
+Two rules come from SEP-0006, which the engine follows:
 
-**Workaround:** Express `LATERAL` as a `OPTIONAL { ... }` with `BIND` where
-possible, or use aggregation:
-
-```sparql
-# Equivalent without LATERAL:
-SELECT ?person ?latestEvent WHERE {
-  ?person a ex:Person .
-  {
-    SELECT ?person (MAX(?e) AS ?latestEvent) WHERE {
-      ?person ex:hasEvent ?e .
-    }
-    GROUP BY ?person
-  }
-}
-```
+- A subquery sees an outer variable only if it **projects** it. Above,
+  `SELECT ?person ?latestEvent` correlates; `SELECT ?latestEvent` would not —
+  its `?person` would be a different variable, and every person would get the
+  same overall latest event.
+- The right-hand side may read a left-hand variable but not bind it again
+  (with `VALUES` or `BIND`); such a query is rejected when it is parsed.
 
 ## Configuration
 
@@ -159,6 +162,5 @@ The implementation is based on:
 - Oxigraph 0.5 native RDF 1.2 / triple-term support (via `spargebra` and `spareval`)
 
 Known gaps vs the full SPARQL 1.2 WD:
-- `LATERAL` not yet implemented (parser will reject)
 - `CALL` not yet implemented
 - Annotation syntax (`~`) in Turtle 1.2 parsing depends on Oxigraph RDF 1.2 parser progress

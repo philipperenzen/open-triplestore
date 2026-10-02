@@ -528,7 +528,7 @@ in [`docs/benchmarks/`](benchmarks/).
 | FILTER (numeric) | 262 µs | 2.44 ms | — |
 | REGEX filter | 218 µs | 1.80 ms | — |
 | OPTIONAL | 664 µs | 9.70 ms | — |
-| COUNT(*) | 620 µs | 7.09 ms | 66.2 ms |
+| COUNT(*) over all triples | 0.14 µs† | 0.14 µs† | 0.14 µs† |
 | GROUP BY + AVG | 604 µs | 8.84 ms | — |
 | GROUP_CONCAT | 639 µs | 7.71 ms | — |
 | subquery (MAX) | 741 µs | 9.57 ms | — |
@@ -541,6 +541,12 @@ in [`docs/benchmarks/`](benchmarks/).
 
 `LIMIT` short-circuits: `lookup_with_limit` stays ~17 µs regardless of dataset
 size (early termination), whereas an unbounded scan is O(n).
+
+† Not from this run: a whole-store `COUNT(*)` is now answered from the per-graph
+count index instead of a scan, so it costs the same at every size. The figure is
+`query_count_star` in the 2026-09-24 CI baseline (`benches/perf_baseline.json`,
+GitHub runner); this run, made while it still scanned, measured 620 µs, 7.09 ms
+and 66.2 ms. The chart above leaves it out.
 
 #### SPARQL operators — pick the cheaper equivalent
 

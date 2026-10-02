@@ -715,6 +715,8 @@ fn seed_bag_buildings(state: &AppState) {
 // bridge on its side.
 // v5: those headings are explicitly `^^xsd:double`, matching what the IFC
 // importer emits from TrueNorth, so the feed parses one datatype.
+// v14: the capabilities graph (its own `capabilities` dataset) gives each
+// standard the grade docs/standards.md gives it; it said "Full" for all of them.
 // v13: refreshes the demo dataset's own name/description from the current
 // seed spec (set at CREATE time only, so old installs still narrated the
 // withdrawn Schependomlaan IFC as a bundled downloadable asset).
@@ -744,7 +746,7 @@ fn seed_bag_buildings(state: &AppState) {
 // existing store on whatever landmarks.ttl shipped when its volume was first
 // created — neither v4 nor v5 could reach it. That is why the Dragon Bridge
 // stayed on its side and no bearing ever appeared.
-const DEMO_CONTENT_VERSION: u32 = 13;
+const DEMO_CONTENT_VERSION: u32 = 14;
 
 /// Wipe demo graphs whose content is stale relative to [`DEMO_CONTENT_VERSION`]
 /// so this boot's seeders re-fill them. Runs BEFORE the bundle engine, which
@@ -810,6 +812,17 @@ fn refresh_demo_content(state: &AppState) {
         }
         // Deregister removed graphs; the seeders re-register the ones they refill.
         let _ = state.auth_db.remove_dataset_graph(DS, &graph);
+    }
+    // Re-authored bundled graphs of the other demo datasets, as
+    // (dataset, suffix); the bundle engine refills them this boot.
+    const STALE_OTHER: &[(&str, &str)] = &[("capabilities", "capabilities")];
+    for (ds, s) in STALE_OTHER {
+        let graph = format!("{}/{}/{}", seed_data::DEMO_BASE, ds, s);
+        let had = state.store.graph_count_cached(Some(&graph)).unwrap_or(0) > 0;
+        if state.store.graph_store_delete(Some(&graph)).is_ok() && had {
+            wiped += 1;
+        }
+        let _ = state.auth_db.remove_dataset_graph(ds, &graph);
     }
     state.auth_db.invalidate_accessible_graphs_cache();
     // Refresh the demo dataset's own metadata too: name/description are set at
@@ -1141,5 +1154,59 @@ mod tests {
                 .is_empty(),
             "saved-query services back-filled once an owner exists"
         );
+    }
+
+    /// A store seeded by an older build gets the current capabilities graph:
+    /// the version refresh empties it and the bundle engine refills it, so a
+    /// grade corrected in the seed reaches installs that already have the demo.
+    #[tokio::test]
+    async fn version_refresh_replaces_a_stale_capabilities_graph() {
+        let state = AppState::test_default_with_store(TripleStore::in_memory().unwrap());
+        run_seed(&state).await;
+
+        let caps = format!("{}/capabilities/capabilities", seed_data::DEMO_BASE);
+        let ots = "https://opentriplestore.org/ns#";
+        let owlql_grade = |state: &AppState| -> Vec<String> {
+            let q = format!(
+                "SELECT ?c WHERE {{ GRAPH <{caps}> {{ <{ots}owlql> <{ots}conformance> ?c }} }}"
+            );
+            match state.store.query(&q).unwrap() {
+                oxigraph::sparql::QueryResults::Solutions(sols) => sols
+                    .map(|s| match s.unwrap().get("c") {
+                        Some(oxigraph::model::Term::Literal(l)) => l.value().to_string(),
+                        other => panic!("unexpected {other:?}"),
+                    })
+                    .collect(),
+                _ => panic!("not a SELECT result"),
+            }
+        };
+        assert_eq!(owlql_grade(&state), vec!["Partial".to_string()]);
+
+        // What a v13 install holds: every standard "Full", version 13 recorded.
+        state
+            .store
+            .graph_store_put(
+                Some(caps.as_str()),
+                &format!("<{ots}owlql> <{ots}conformance> \"Full\" .\n"),
+                oxigraph::io::RdfFormat::NTriples,
+            )
+            .unwrap();
+        let meta = format!("{}/viewer-3d-demo/seed-meta", seed_data::DEMO_BASE);
+        state
+            .store
+            .graph_store_put(
+                Some(meta.as_str()),
+                &format!(
+                    "<{}/viewer-3d-demo> <{ots}demoContentVersion> \
+                     \"13\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
+                    seed_data::DEMO_BASE
+                ),
+                oxigraph::io::RdfFormat::NTriples,
+            )
+            .unwrap();
+        assert_eq!(owlql_grade(&state), vec!["Full".to_string()]);
+
+        run_seed(&state).await;
+        assert_eq!(owlql_grade(&state), vec!["Partial".to_string()]);
     }
 }
