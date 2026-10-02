@@ -57,3 +57,14 @@ The Schema.org entry keeps the version label `29.0` it first shipped with, becau
 - **Subgraphs** — A single version can be split into named subgraphs that are staged, published, or deprecated independently — useful when one model bundles several modules with different release cadences.
 
 See also: [Linked Data Modelling](/docs/modelling), [Data Modeling Architecture](/docs/data-modeling), and [Named Graphs](/docs/named-graphs).
+
+## Datasets that depend on a model
+
+`GET /api/models/:id/dependents` lists the datasets whose `conforms_to_model` names
+this model — only those the caller may read — with the version each is pinned to
+(`pinned_version`, or `effective_version` when it floats with the latest published
+one), `update_available` when the pin is behind `latest_published`, and the dataset's
+latest published version together with the model version *that* version conformed to.
+Publishing a model version is recorded on the model's commit log
+(`GET /api/models/:id/commits`), so dependants can be found and notified from either
+side. See "Following a model update" in [datasets.md](datasets.md).
