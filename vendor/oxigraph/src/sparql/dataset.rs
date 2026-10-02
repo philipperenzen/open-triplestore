@@ -182,6 +182,19 @@ impl<'a> QueryableDataset<'a> for DatasetView<'a> {
             EncodedTerm::DoubleLiteral(value) => Some(Boolean::from(value).into()),
             EncodedTerm::IntegerLiteral(value) => Some(Boolean::from(value).into()),
             EncodedTerm::DecimalLiteral(value) => Some(Boolean::from(value).into()),
+            // A typed literal kept as written may still be a boolean or a
+            // number ("1"^^xsd:boolean, "8.0e0"^^xsd:double, "5"^^xsd:int):
+            // read its value.
+            EncodedTerm::SmallTypedLiteral { .. } | EncodedTerm::BigTypedLiteral { .. } => {
+                match self.externalize_expression_term(term)? {
+                    ExpressionTerm::BooleanLiteral(value) => Some(value.into()),
+                    ExpressionTerm::FloatLiteral(value) => Some(Boolean::from(value).into()),
+                    ExpressionTerm::DoubleLiteral(value) => Some(Boolean::from(value).into()),
+                    ExpressionTerm::IntegerLiteral(value) => Some(Boolean::from(value).into()),
+                    ExpressionTerm::DecimalLiteral(value) => Some(Boolean::from(value).into()),
+                    _ => None,
+                }
+            }
             _ => None,
         })
     }

@@ -42,6 +42,10 @@ else is stored with the existing `SmallTypedLiteral` / `BigTypedLiteral` variant
 already hold ill-typed literals and unknown datatypes. The check writes `Display` into
 a comparing `fmt::Write` sink, so it does not allocate.
 
+- `DatasetView::internal_term_effective_boolean_value` had a fast path for the native
+  variants only and answered "no boolean value" for every typed-literal variant. With
+  the change those can hold well-formed booleans and numbers (`"1"^^xsd:boolean`,
+  `"8.0e0"^^xsd:double`, `"5"^^xsd:int`), so they now fall back to the parsed value.
 - No on-disk format change: no new variant or type byte. Existing databases decode
   exactly as before (their literals were canonical), and a database written with the
   change opens with older versions, which decode the kept forms verbatim.

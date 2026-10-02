@@ -61,7 +61,10 @@ prints back to exactly the given lexical form. Everything else (derived types,
 `xsd:dateTimeStamp`, non-canonical lexical forms) goes to the `SmallTypedLiteral` /
 `BigTypedLiteral` variants that already held ill-typed literals and custom
 datatypes. The check writes the value's `Display` form into a comparator, so it
-allocates nothing.
+allocates nothing. `oxigraph/src/sparql/dataset.rs` follows: its fast path for the
+effective boolean value (`FILTER (?x)`) knew only the native variants, so it now
+reads the value of a typed literal kept as written (`"1"^^xsd:boolean`,
+`"8.0e0"^^xsd:double`, `"5"^^xsd:int`).
 
 **`spareval/src/eval.rs`**: when evaluation matches, binds or builds a triple term
 (a constant `<<( s p o )>>` in a pattern, a triple pattern with bound variables,
