@@ -146,3 +146,12 @@ reads whatever graphs it is given.
 ## SWRL rules
 
 Beyond the standard profiles, SWRL (Semantic Web Rule Language) Horn-clause rules derive new triples from custom *antecedent → consequent* patterns — useful for domain logic that doesn't fit an OWL profile. Submit rules to `POST /api/swrl/execute`.
+
+Rules are given as `"format": "text"` (`http://ex/A(?x) ^ http://ex/p(?x, ?y) -> http://ex/B(?y)`; absolute IRIs, no built-ins) or `"format": "xml"` (OWL/XML `DLSafeRule` elements, as written by the OWL API and Protégé). Derived triples go to `target_graph`, an absolute IRI, or to the default graph when it is omitted. Every rule is checked before any runs, and one the server cannot run as written refuses the whole request with `400`, so nothing is written:
+
+- an element the OWL/XML reader does not understand: class-expression atoms, `DataRangeAtom` and prefixed names are not supported yet;
+- an unsafe rule: a head variable the body does not bind, or a built-in variable only a built-in mentions (built-ins check values but cannot bind them);
+- a built-in in the head, or one outside the supported `swrlb:` comparisons, arithmetic, `stringConcat`, `contains` and `matches`;
+- a literal where an individual belongs, or the other way round.
+
+The response reports `iterations`, `triples_inferred` (what this run wrote to the target graph), and `converged` with its `stop_reason`: `fixpoint`, `max_iterations` or `timeout`. Execution counts against the server's limit on concurrent expensive operations and stops at the write timeout.

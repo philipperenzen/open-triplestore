@@ -251,6 +251,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rather than two `a-1`s). Versions cut earlier keep their IRIs, and their lost
   snapshot cannot be recovered: restoring one of them replaces that live graph
   with what the snapshot holds. Tests: `tests/dataset_versions_http.rs`.
+- **SWRL refuses rules it cannot run as written.** Every rule is now checked
+  before any runs, and one that fails refuses the whole request with `400`;
+  nothing is written. Previously an untranslatable rule was skipped with
+  `success: false` while the others ran. The checks:
+  - unsafe rules: a head variable not bound in the body, or a built-in
+    variable that only a built-in mentions (built-ins cannot bind yet);
+  - built-ins in the head, which were skipped with a warning;
+  - a literal in an individual position or an individual in a data position,
+    and a variable used as both.
+
+  Object and data property atoms are no longer translated alike: a typed
+  variable in an object position binds only its own kind of term. The text
+  form has no declarations, so `p(?x, ?y)` there stays untyped.
+
+  Any variable IRI now works (the OWL API's `urn:swrl#x`, an ontology
+  namespace, `abbreviatedIRI`), each mapped to a generated SPARQL variable.
+  Plain and language-tagged `Literal`s are read, and unknown `format` values
+  are refused.
+
+  The report counts only what the run wrote to the target graph, not the
+  whole store. It now says whether the fixed point was reached: `converged`,
+  and `stop_reason` (`fixpoint`, `max_iterations` or `timeout`). Hitting
+  `max_iterations` used to look like success.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if
@@ -399,6 +422,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no source is withheld from non-writers, as the version-data and saved-query
   paths already did. Every release since 0.4.0 is affected. Tests:
   `tests/security_routes.rs`.
+- **SWRL rules can no longer fire without their guards, and the target graph
+  is checked.** The OWL/XML reader behind `POST /api/swrl/execute`
+  (`format: "xml"`) matched only `BuiltinAtom`, but the OWL API and Protégé
+  write `BuiltInAtom`. That element, like any atom element it did not know
+  (`DataRangeAtom`, RDF/XML's `IndividualPropertyAtom`), was dropped, so its
+  rule ran with one condition fewer. A `ClassAtom` over a class expression was
+  read as its inner class (`ObjectComplementOf(A)(?x)` became `A(?x)`), and
+  `ObjectInverseOf(p)` lost its direction. `swrlb:stringConcat` became a
+  FILTER that every non-empty string passed. The reader now understands every
+  element inside a `DLSafeRule` or refuses the document with an error naming
+  the element. It accepts both built-in spellings and swaps the arguments of
+  `ObjectInverseOf`. It refuses class-expression atoms, `DataRangeAtom`,
+  anonymous individuals and prefixed names until they are supported, and
+  `stringConcat(?r, …)` now means `?r = CONCAT(…)`. Built-ins are recognised
+  only in the `swrlb:` namespace, and `matches` with more than three
+  arguments is refused rather than truncated. `target_graph` was pasted into
+  the generated update as `GRAPH <…>`; it must now be an absolute IRI (`400`
+  otherwise). Execution runs off the async runtime, under the
+  expensive-operations limit, and stops at the write timeout
+  (`write_timeout_secs`).
 - **Every configured secret goes through the secrets module.** `JWT_SECRET`,
   `LD_REGISTRY_TOKEN`, a replication follower's `OTS_REPLICATION_TOKEN` and the
   accounts-dashboard plugin's `ACCOUNTS_DASHBOARD_GATEWAY_KEY` were read as raw
