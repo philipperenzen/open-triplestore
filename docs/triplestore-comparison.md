@@ -101,8 +101,7 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
   the project's own grades, not W3C or OGC conformance claims, and nothing is OGC-certified.
   The **Open Triplestore** columns in the matrices below follow those grades for GeoSPARQL,
   SHACL and the W3C SPARQL tests; elsewhere a ✅ marks *feature presence*, and
-  `docs/standards.md` grades several of those rows **Partial**: SPARQL 1.1 federation (off by
-  default, per-endpoint allowlist), OWL 2 EL, RL and DL (DL runs RL+extension rules in
+  `docs/standards.md` grades several of those rows **Partial**: OWL 2 EL, RL and DL (DL runs RL+extension rules in
   process, with a full tableau only via the optional Konclude bridge), SHACL Advanced and
   SHACL-C, ShEx, SWRL, RML and DCAT. GeoSPARQL 1.1 lacks KML/DGGS literals and the Query
   Rewrite Extension (it has the geodesic `metric*` family, `aggUnion` and WKT/GML/GeoJSON
@@ -222,7 +221,7 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 |----------|-------|----------|--------|------------|----------|---------|---------|---------|---------|--------|
 | **SPARQL 1.1 Query** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **SPARQL 1.1 Update** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅¹ | 🟡 |
-| **SPARQL 1.1 Federation** | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | ✅ | 🟡 | ❌ |
+| **SPARQL 1.1 Federation** | ✅¹² | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | ✅ | 🟡 | ❌ |
 | **SPARQL 1.1 Service Desc.** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 |
 | **SPARQL 1.1 Protocol** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **SPARQL 1.2** (W3C WD) | 🟡² | 🟡² | 🟡 | ❌ | ❌ | 🟡 | 🟡 | 🟡 | ❌ | 🟡 |
@@ -237,6 +236,7 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > ² `rdf-12` feature flag; open-triplestore and Oxigraph track the SPARQL-star draft.
 > ³ `rdf-12` / `rdf-star` feature flag in oxrdf; triple terms parseable but not fully evaluated.
 > ⁴ Not claimed. Open Triplestore runs a hand-written, spec-derived SPARQL 1.1 suite (`tests/w3c_sparql11_conformance.rs`) and, for development and bug tracking, the query and update sections of the W3C SPARQL 1.1 test suite from w3c/rdf-tests, vendored unmodified (`tests/w3c_sparql11_manifests.rs`). Those sections are a subset of a W3C test suite, on which W3C's test-suite licence policy (https://www.w3.org/copyright/test-suites-licenses/) allows no performance claims, so no result is given here; the known evaluator gaps are tracked in `docs/conformance/sparql11.md`. The other systems' cells are as they were compiled for this comparison.
+> ¹² Full — deny-by-default (`docs/standards.md` footnote 3): `SERVICE` reaches only allowlisted endpoints, and a refused, failed or over-cap call is a failed invocation (an error, or the empty solution under `SILENT`). `SERVICE ?var` is supported; local bindings are not pushed to the remote. The federation sections of the W3C SPARQL 1.1 test suite run unscored in `tests/w3c_sparql11_federation.rs`.
 
 ### 4.2 Reasoning, Validation & Inference
 

@@ -43,10 +43,11 @@ stores numerics natively and writes them back in canonical form; every other
 literal by lexical form. Syntax tests assert parse success or failure only.
 
 **Not vendored:** the protocol, service-description, graph-store-protocol,
-federation (`service/`, `syntax-fed/`), result-format (`csv-tsv-res/`,
-`json-res/`) and entailment-regime (`entailment/`) sections — surfaces this
-runner does not cover. The Graph Store and SPARQL Protocol behaviour is
-pinned by `tests/api_protocol_conformance.rs`.
+result-format (`csv-tsv-res/`, `json-res/`) and entailment-regime
+(`entailment/`) sections — surfaces these runners do not cover. The Graph
+Store and SPARQL Protocol behaviour is pinned by
+`tests/api_protocol_conformance.rs`. The federation sections are vendored and
+run by their own runner (see [Federation](#federation) below).
 
 **Gap policy:** a two-way ratchet. Every entry not listed in
 `KNOWN_FAILURES` must pass, and every listed entry must still fail — silent
@@ -67,3 +68,31 @@ with evidence rather than re-derived.
 | `functions#bnode01` | `BNODE(str)` returns one blank node per string for the whole query; SPARQL 1.1 §17.4.2.9 requires a fresh node per solution. |
 | `negation#graph-minus` | The outer `GRAPH ?g` variable is implied on both sides of an inner `MINUS`, so the sides share `?g` and are not disjoint. |
 | `property-path#zero_or_more_set_start/end`, `#zero_or_one_set_start/end` | A zero-length path whose constant start or end is absent from the dataset yields no solution; the spec's zero-length path matches any term. |
+
+## Federation
+
+The federation sections — `service/` (query evaluation) and `syntax-fed/`
+(positive syntax), through `manifest-sparql11-fed.ttl` — are vendored from the
+same commit and run by
+[`tests/w3c_sparql11_federation.rs`](../../tests/w3c_sparql11_federation.rs),
+under the same licence terms: development and regression only, no score.
+
+**What runs:** the suite names its remote endpoints by fixed IRIs
+(`http://example.org/sparql`, `http://example1.org/sparql`, …) and gives each
+one's data in a `qt:serviceData` block. The runner starts one local listener
+per endpoint IRI, a SPARQL endpoint over a `TripleStore` loaded with that
+block's data, and replaces the IRIs by the listeners' URLs in memory: in the
+query, in the local and remote data and in the expected results. The files on
+disk stay byte-identical to upstream. Only the listeners are on
+`OTS_REMOTE_ALLOWLIST`, so the endpoint the suite expects to fail
+(`http://invalid.endpoint.org/sparql`, under `SERVICE SILENT`) is refused by
+the allowlist, never contacted. The listeners evaluate through `TripleStore`
+as well, so a `SERVICE` nested inside a remote pattern is federated again
+from the listener.
+
+**Comparison level:** solution multisets by result-set isomorphism, as for the
+query sections; syntax entries assert that the query parses.
+
+**Known failures:** none. `service5` — `SERVICE ?service` with the endpoint
+taken from the local data — runs since `SERVICE ?var` is evaluated as a
+lateral join (see [federation.md](../federation.md#service-var-endpoints-named-by-the-data)).

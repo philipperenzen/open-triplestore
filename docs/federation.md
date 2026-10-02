@@ -11,7 +11,7 @@ that identity may see. This is the pattern of the Dutch DSGO trust framework
 `SERVICE <endpoint> { P }` sends `P` to the endpoint as a stand-alone
 `SELECT`, reads the solutions and joins them with the rest of the query
 locally (SPARQL 1.1 Federated Query §3.2). Local bindings are not pushed to
-the remote, and `SERVICE ?var` (a variable endpoint) is not supported.
+the remote: `P` goes out as written.
 
 A call either returns the remote's complete answer or **fails**. It fails
 when:
@@ -33,6 +33,50 @@ never cut short: a truncated `SERVICE` result would silently change the
 answer of the query around it (a `COUNT`, a `MINUS`, a missing join
 partner), and nothing would tell the caller. To get past a cap, raise it or
 narrow the pattern inside `SERVICE`.
+
+### `SERVICE ?var`: endpoints named by the data
+
+The endpoint can be a variable bound by the pattern before the `SERVICE`
+(Federated Query §4, informative), for example from a catalogue:
+
+```sparql
+PREFIX void: <http://rdfs.org/ns/void#>
+SELECT ?dataset ?title WHERE {
+  ?dataset void:sparqlEndpoint ?endpoint .
+  SERVICE ?endpoint { ?doc <http://purl.org/dc/terms/title> ?title }
+}
+```
+
+The store evaluates this query as `LATERAL { SERVICE ?endpoint { … } }`: once
+per row of the part before it, with that row's endpoint. (The rewrite is made
+for queries; the `WHERE` of a SPARQL Update is evaluated as written, where a
+`SERVICE ?var` fails as unbound.) An `OPTIONAL { SERVICE
+?var { … } }` works the same way and keeps the rows the remote does not
+match. The rewrite applies only when the variable is bound before the
+`SERVICE` and not inside its pattern; any other `SERVICE ?var` is evaluated as
+written. A row where the variable is unbound, or bound to something that is
+not an IRI, is a failed invocation like any other. Each endpoint still has to
+pass the allowlist, and a `urn:source:<id>` value is resolved for the caller
+exactly as a written-out `SERVICE <urn:source:id>` (see
+[sources.md](sources.md#virtual-sources)): a source the caller may not use is
+refused as if it were not registered.
+
+### Per-query limits
+
+The calls one query makes share a budget:
+
+- an (endpoint, pattern) answer is fetched once and reused for the rest of the
+  query, so a `SERVICE ?var` over a hundred rows naming the same endpoint asks
+  it once;
+- a query may contact at most `OTS_SERVICE_MAX_ENDPOINTS` endpoints (default
+  16) and make at most `OTS_SERVICE_MAX_CALLS` requests (default 64; reused
+  answers do not count). Over either cap the call fails as above, naming the
+  variable;
+- its `SERVICE` calls must finish within `OTS_SERVICE_DEADLINE_SECS` of the
+  query's start (default 30). A request is cut short at the deadline, and the
+  query then fails with an error naming the variable, also under `SERVICE
+  SILENT`: a query past its deadline does not go on as if the remote had
+  matched nothing.
 
 ## Outbound: acting for a user at a peer
 

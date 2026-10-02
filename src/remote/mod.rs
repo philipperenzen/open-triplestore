@@ -15,7 +15,10 @@
 //! timeout (`OTS_REMOTE_TIMEOUT_SECS`, default 10) and a body limit
 //! (`OTS_REMOTE_MAX_BYTES`, default 64 MiB), and a `SERVICE` result a row cap
 //! (`OTS_SERVICE_MAX_ROWS`, default 10 000), so a slow or huge remote cannot
-//! stall or flood a local query. Exceeding a limit fails the request; nothing
+//! stall or flood a local query. One query may contact at most
+//! `OTS_SERVICE_MAX_ENDPOINTS` endpoints (16) with at most
+//! `OTS_SERVICE_MAX_CALLS` requests (64), all within
+//! `OTS_SERVICE_DEADLINE_SECS` (30) of its start (`crate::sparql::federation`). Exceeding a limit fails the request; nothing
 //! is ever cut short and passed on as if it were the whole answer.
 //!
 //! The allowlist is read on every call rather than cached: tests and operators
@@ -29,6 +32,9 @@ pub const ALLOWLIST_ENV: &str = "OTS_REMOTE_ALLOWLIST";
 pub const TIMEOUT_ENV: &str = "OTS_REMOTE_TIMEOUT_SECS";
 pub const MAX_ROWS_ENV: &str = "OTS_SERVICE_MAX_ROWS";
 pub const MAX_BYTES_ENV: &str = "OTS_REMOTE_MAX_BYTES";
+pub const MAX_ENDPOINTS_ENV: &str = "OTS_SERVICE_MAX_ENDPOINTS";
+pub const MAX_CALLS_ENV: &str = "OTS_SERVICE_MAX_CALLS";
+pub const DEADLINE_ENV: &str = "OTS_SERVICE_DEADLINE_SECS";
 
 /// The raw allowlist entries, trimmed, empty entries dropped.
 pub fn allowlist() -> Vec<String> {
@@ -171,6 +177,30 @@ pub fn max_rows() -> usize {
         .unwrap_or(10_000)
 }
 
+/// Distinct `SERVICE` endpoints one query may contact (default 16).
+pub fn max_endpoints() -> usize {
+    positive_env(MAX_ENDPOINTS_ENV).unwrap_or(16)
+}
+
+/// Remote requests one query may make through `SERVICE` (default 64);
+/// answers reused within the query do not count.
+pub fn max_calls() -> usize {
+    positive_env(MAX_CALLS_ENV).unwrap_or(64)
+}
+
+/// How long after it starts a query may still make `SERVICE` requests
+/// (default 30 s).
+pub fn deadline() -> Duration {
+    Duration::from_secs(positive_env(DEADLINE_ENV).unwrap_or(30) as u64)
+}
+
+fn positive_env(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+}
+
 pub fn max_bytes() -> usize {
     std::env::var(MAX_BYTES_ENV)
         .ok()
@@ -284,6 +314,18 @@ pub(crate) fn post_sparql_blocking(
     accept: &str,
     auth: Auth<'_>,
 ) -> Result<String, RemoteError> {
+    post_sparql_blocking_within(endpoint, query, accept, auth, timeout())
+}
+
+/// As [`post_sparql_blocking`], with an explicit timeout (a `SERVICE` call
+/// gets what is left of its query's deadline when that is shorter).
+pub(crate) fn post_sparql_blocking_within(
+    endpoint: &str,
+    query: &str,
+    accept: &str,
+    auth: Auth<'_>,
+    timeout: Duration,
+) -> Result<String, RemoteError> {
     if !is_allowed(endpoint) {
         return Err(RemoteError::NotAllowed(endpoint.to_string()));
     }
@@ -296,7 +338,7 @@ pub(crate) fn post_sparql_blocking(
         Auth::Basic(u, p) => Some((u.to_string(), Some(p.to_string()))),
     };
     blocking(async move {
-        let mut req = client().post(&endpoint).timeout(timeout());
+        let mut req = client().post(&endpoint).timeout(timeout);
         match &auth {
             Some((bearer, None)) => req = req.bearer_auth(bearer),
             Some((user, Some(password))) => req = req.basic_auth(user, Some(password)),

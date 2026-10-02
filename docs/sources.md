@@ -250,7 +250,9 @@ anonymous caller never qualifies, and a source bound to no dataset is for
 administrators and its owner only. For anyone else the source does not exist:
 the `SERVICE` fails exactly as one naming an unregistered source does (with
 `SILENT`, it contributes no rows), and the endpoint never sees the account on
-their behalf. Live queries are served by `/sparql` and by SPARQL Update (where
+their behalf. The same check applies when the data names the source:
+`SERVICE ?endpoint { … }` with `?endpoint` bound to `<urn:source:…>` (see
+[federation.md](federation.md#service-var-endpoints-named-by-the-data)). Live queries are served by `/sparql` and by SPARQL Update (where
 `SERVICE` is admin-only anyway); a query the store evaluates for any other
 purpose resolves no source.
 
