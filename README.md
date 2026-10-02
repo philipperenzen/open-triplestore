@@ -67,7 +67,7 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | Feature | Detail |
 |---|---|
 | **SPARQL 1.1** | SELECT, CONSTRUCT, ASK, DESCRIBE, UPDATE (INSERT/DELETE) |
-| **SPARQL 1.2** | Triple terms `<<( )>>` / `rdf:reifies` and the accessor functions (RDF 1.2 model); `LATERAL` and `CALL` are not implemented |
+| **SPARQL 1.2** | Triple terms `<<( )>>`, reifiers and `{\| \|}` annotations (RDF 1.2 model), the triple-term and base-direction functions, `VERSION`; plus Oxigraph's `LATERAL` and `ADJUST` extensions, which are not part of SPARQL 1.2 ([docs](docs/sparql-12.md)) |
 | **SPARQL federation** | `SERVICE` is off by default (SSRF mitigation) and enabled per endpoint with `OTS_REMOTE_ALLOWLIST`; calls are timed out, size- and row-capped (a result over a cap fails the call rather than being truncated), a query's calls share endpoint, request and deadline limits, `SERVICE ?var` takes its endpoint from the data, and the service description advertises federation only when an allowlist exists |
 | **GeoSPARQL 1.1** | Simple Features, Egenhofer and RCC8 relations, DE-9IM `relate`, distance/area/buffer and the constructive functions, the geodesic metric family (metres on the WGS84 ellipsoid), the `aggUnion` aggregate, WKT, GML and GeoJSON literals (`asGeoJSON`), CRS transform for the built-in CRS set. Not implemented: KML/DGGS literals, the Query Rewrite Extension, the other aggregates ([grades & gaps](docs/standards.md#known-limitations--conformance-findings)) |
 | **OWL 2 EL** | Native EL++ saturation engine for the whole profile: classification, realization and the property closure, with nominals, `hasSelf`, keys, equality and the EL datatypes; axioms outside the profile are reported ([docs](docs/owl2-el.md)) |
@@ -82,7 +82,7 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | **Dataset privacy** | Datasets default to `private`; public datasets are queryable without auth |
 | **SHACL validation** | Validate data on read or write; SHACL-AF rule inference; shapes stored per dataset |
 | **SHACL on write** | Automatic SHACL validation on every Graph Store PUT/POST — returns 422 with full report on violation |
-| **SHACL Compact Syntax** | Parse and serialize shapes in [SHACLC](https://w3c.github.io/shacl/shacl-compact-syntax/) via `Accept: text/shaclc` |
+| **SHACL Compact Syntax** | Parse and serialize shapes in a subset of [SHACLC](https://w3c.github.io/shacl/shacl-compact-syntax/) via `Accept: text/shaclc`; the export drops what it cannot write ([docs](docs/shacl.md#what-the-serializer-leaves-out)) |
 | **DCAT 2 catalog** | Full W3C DCAT 2 catalog at `/.well-known/void` — per-dataset distributions, VoID statistics, PROV-O provenance |
 | **RML mapping** | [RDF Mapping Language](https://rml.io/specs/rml/) — CSV, JSON (JSONPath), XML (XPath) → RDF with template expansion |
 | **OpenAPI docs** | Interactive Swagger UI at `/api-docs/` with JWT Bearer auth; machine-readable spec at `/api-docs/openapi.json` |
@@ -541,8 +541,14 @@ SELECT ?feature WHERE {
 | Simple Features | `sfContains` `sfCrosses` `sfDisjoint` `sfEquals` `sfIntersects` `sfOverlaps` `sfTouches` `sfWithin` |
 | Egenhofer | `ehContains` `ehCoveredBy` `ehCovers` `ehDisjoint` `ehEquals` `ehInside` `ehMeet` `ehOverlap` |
 | RCC8 | `rcc8dc` `rcc8ec` `rcc8po` `rcc8tppi` `rcc8tpp` `rcc8ntpp` `rcc8ntppi` `rcc8eq` |
+| DE-9IM | `relate` |
 | Constructive | `boundary` `buffer` `convexHull` `difference` `envelope` `intersection` `symDifference` `union` |
-| Metric | `distance` `area` `getSRID` |
+| Measurement | `distance` `area` |
+| Metric (metres, WGS84 ellipsoid) | `metricDistance` `metricLength` `metricPerimeter` `metricArea` `metricBuffer` |
+| CRS and serialisation | `getSRID` `transform` `asGeoJSON` |
+| Aggregate | `aggUnion` |
+
+The full list with its caveats is in [docs/geosparql.md](docs/geosparql.md#supported-functions).
 
 ---
 

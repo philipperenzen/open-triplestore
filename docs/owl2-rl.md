@@ -90,6 +90,17 @@ blank-node class expressions included.
 `dt-type2`, `dt-eq` and `dt-diff` are not run: they type, equate or
 distinguish literals *as subjects*, which an RDF graph cannot hold.
 
+**Literals are matched as terms, not values.** Every rule joins literals with
+SPARQL graph patterns, which compare RDF terms. The store canonicalises numbers,
+booleans and dates within one datatype, so `"01"^^xsd:integer` and
+`"1"^^xsd:integer` are the same term, but `"1"^^xsd:integer` and
+`"1.0"^^xsd:decimal` are not, and neither are an `xsd:string` and an
+`xsd:token` with the same text. `hasValue`, `hasKey`, `prp-npa2` and the
+functional and cardinality rules therefore miss values that are equal but
+written in different datatypes. Derived integer types (`xsd:byte`,
+`xsd:nonNegativeInteger`, …) are stored as `xsd:integer`, so `dt-not-type`
+never sees an out-of-range `"300"^^xsd:byte`.
+
 ### Schema Rules (scm-*)
 
 | Rule | Description |
@@ -206,19 +217,16 @@ After materialisation:
 
 ## Performance
 
-The fixed-point loop converges in O(depth of class hierarchy) iterations.  Each iteration
-executes a batch of SPARQL INSERT queries.
-
-| Dataset | Triples | Inferred | Time |
-|---------|---------|----------|------|
-| Pizza ontology (300 classes) | 3k | 12k | ~50ms |
-| DBpedia ontology (600 classes) | 40k | 120k | ~0.8s |
+The fixed-point loop runs every rule as a SPARQL update each round until nothing new is
+derived, so the number of rounds grows with the depth of the class and property hierarchies
+and the length of `sameAs` and transitive chains. No benchmark of the reasoner is published.
 
 ## Differences from OWL 2 DL
 
 OWL 2 RL covers only axioms that are expressible as SPARQL INSERT rules — it cannot generate
 existential witnesses (new blank nodes) or perform the ABox/TBox separation that full DL
-requires.  Use **OWL 2 DL** (with optional Konclude bridge) for:
+requires.  Use the **OWL 2 DL** regime with a complete backend (the bundled OWL API + HermiT
+reasoner sidecar, or Konclude; see [OWL 2 DL](owl2-dl.md)) for:
 - Complex cardinality constraints requiring witness generation.
 - Full SROIQ(D) expressivity (nominals, role inversions, complex role chains at DL level).
 - Soundness + completeness guarantees for classification.

@@ -247,8 +247,10 @@ The JSON fields are display strings: `focus_node` and `value` show an IRI or
 a literal's lexical form (no datatype or language tag), `path` is a SPARQL
 property path, and `source_constraint` is a short label such as
 `sh:minCount 1` (the UI groups results by it).
-`source_constraint_component` is the SHACL constraint component IRI. A test
-run adds `"test": true` and `"partial"`. The 422 body of a write gate uses
+`source_constraint_component` is the SHACL constraint component IRI.
+`message` is the shape's `sh:message` when it has one, else a default text.
+A test or partial run answers `"run_id": null, "ran_at": null` and adds
+`"test": true` and `"partial"`. The 422 body of a write gate uses
 camelCase keys instead (`focusNode`, `sourceShape`, `sourceConstraint`,
 `sourceConstraintComponent`).
 
@@ -837,9 +839,23 @@ curl -X POST http://localhost:7878/api/shaclc/serialize \
      -d 'urn:dataset:my-dataset:shapes'
 ```
 
-### Graceful degradation
+### What the serializer leaves out
 
-Shapes using SPARQL-based constraints or complex property paths that cannot be expressed in SHACLC are serialized as Turtle comments in the SHACLC output.
+`/api/shaclc/serialize` (and `Accept: text/shaclc`) writes only part of a shapes graph, and
+**drops the rest without a warning or a comment** in the output:
+
+- Only subjects typed `sh:NodeShape` are written, each with its first `sh:targetClass` and
+  `sh:closed`; other targets are dropped.
+- Per property shape it writes the path, `sh:datatype`, `sh:nodeKind`, `sh:node`,
+  `sh:minCount`/`sh:maxCount`, `sh:pattern` and `sh:message`. Node-level constraints and
+  `sh:class`, `sh:in`, `sh:hasValue`, value ranges, string lengths, the logical constraints and
+  SPARQL-based constraints are dropped. A property shape without `sh:path` is skipped.
+- A complex property path (sequence, inverse, alternative) comes out as a blank-node label,
+  which the parser cannot read back.
+- `sh:pattern` is written without escaping.
+
+So a SHACL-C export is not a faithful copy of a shapes graph; keep Turtle as the source of
+truth.
 
 ---
 

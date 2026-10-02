@@ -1,11 +1,13 @@
-//! GeoSPARQL 1.1 tests — hand-written and derived from the OGC GeoSPARQL 1.1
-//! standard. Not the OGC's compliance tests, and not an OGC certification.
+//! GeoSPARQL 1.1 tests — hand-written by this project from the OGC GeoSPARQL
+//! 1.1 standard. Not the OGC's compliance tests, and not an OGC certification;
+//! passing them makes no claim of OGC conformance.
 //!
-//! Derived from:
+//! Written against:
 //! - OGC GeoSPARQL 1.1 standard: https://docs.ogc.org/is/22-047r1/22-047r1.html
-//! - GeoSPARQL Compliance Benchmark (SIMPAC-2021-29):
-//!   https://github.com/SoftwareImpacts/SIMPAC-2021-29
-//!   206 SPARQL queries targeting 30 specific GeoSPARQL requirements
+//!
+//! The GeoSPARQL Compliance Benchmark (SIMPAC-2021-29) is not used: none of
+//! its queries, data or expected results are vendored or run here, and no
+//! benchmark score is claimed.
 //!
 //! The 30 requirements covered (this file's own numbering, not the OGC
 //! conformance classes):

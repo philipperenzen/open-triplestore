@@ -1234,6 +1234,40 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `### Security` / `### Deprecated` check use H3.
   - `frontend/public/vocab/NOTICE.md` counted 17 files from LOV; DOAP's
     replacement left 16.
+- **Feature docs that overstated the code.**
+  - `docs/sparql-12.md` now follows Appendix A of the SPARQL 1.2 Working Draft
+    of 2026-10-01. `LATERAL` and `ADJUST` are listed as Oxigraph's SEP
+    extensions, not SPARQL 1.2; `CALL` and "COUNT deduplication" (neither in
+    the draft) are gone. The `ADJUST` example passed a string offset, which the
+    built-in answers with unbound; it now uses an `xsd:dayTimeDuration`, and
+    the non-standard `sparql:adjust` function (reached only by its IRI) is
+    described separately. README, the FAQ and `docs/datatypes.md` describe
+    `<< >>` as RDF 1.2 reifier shorthand and base-direction strings as
+    supported; `docs/datatypes.md` warns that derived integer types are stored
+    as `xsd:integer`.
+  - OWL docs: `docs/owl2-el.md` claimed nominals and listed completion rules
+    the code does not have, and quoted unmeasured SNOMED/GO timings; its rule
+    table now matches the code, including the unsound CR3. `docs/owl2-rl.md`
+    mis-described `cls-uni`, `cls-svf1/2`, `cls-maxc`, `cls-nothing*` and
+    `cls-thing`, and said literals are compared by value (rules match terms).
+    `docs/owl2-ql.md` claimed PerfectRef and now lists the rewriter's limits.
+    `docs/rdfs-entailment.md` showed `RdfsMaterializer::new`, an
+    `Accept-Entailment` header and an `AppState` option that do not exist.
+  - `docs/owl2-dl.md` called Konclude Apache-2.0 (it is LGPL-3.0) and gave an
+    install recipe and a stdin hand-off that cannot work; the bridge is now
+    documented as experimental and not working. `docs/reasoning.md` no longer
+    names HermiT and Pellet as if they were wired.
+  - `docs/geosparql.md` lists every implemented function and what is missing;
+    the GeoSPARQL test header and `scripts/run_tests.sh` no longer say the
+    tests derive from the GeoSPARQL Compliance Benchmark or test "OGC
+    conformance".
+  - `docs/shacl.md`: the validate example showed camelCase keys and a
+    component IRI; the response is snake_case with a readable constraint label.
+    The SHACL-C serializer was said to keep what it cannot express as
+    comments; it drops it, and the doc now lists what.
+  - Design-note status lines (delta versioning, analytical mirror),
+    `docs/datasets.md` (change capture is not roadmap) and the 2026-06
+    reference tables in `docs/performance.md`, now dated.
 
 - **The Konclude bridge works.** It piped Turtle on stdin, but Konclude reads
   only OWL/XML or functional-style syntax, from files. It also passed an

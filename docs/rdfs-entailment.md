@@ -1,13 +1,14 @@
 # RDFS Entailment
 
-The `rdfs-entailment` feature enables full RDFS entailment (all 13 rules from the W3C RDFS
-semantics specification) via a forward-chaining materialiser.
+The `rdfs-entailment` feature enables RDFS entailment via a forward-chaining materialiser that
+runs the rdfs1–rdfs13 patterns of the W3C RDF 1.1 Semantics as SPARQL `INSERT` rules. A few
+parts of the specification are not covered; see [Gaps](#gaps).
 
 ## Rules Implemented
 
 | Rule | Description | Type |
 |------|-------------|------|
-| rdfs1 | Every datatype is a subClass of `rdfs:Literal` | Axiomatic |
+| rdfs1 | The datatype of every literal in the data is a subclass of `rdfs:Literal` (RDF 1.1's rdfs1 types it `rdfs:Datatype` instead) | Axiomatic |
 | rdfs2 | `?x rdf:type ?a` if `?p rdfs:domain ?a` and `?x ?p ?y` | Chained |
 | rdfs3 | `?y rdf:type ?a` if `?p rdfs:range ?a` and `?x ?p ?y` | Chained |
 | rdfs4a | Every subject → `rdf:type rdfs:Resource` | Axiomatic |
@@ -22,8 +23,17 @@ semantics specification) via a forward-chaining materialiser.
 | rdfs12 | Every `rdfs:ContainerMembershipProperty` → `rdfs:subPropertyOf rdfs:member` | Chained |
 | rdfs13 | Every `rdfs:Datatype` → `rdfs:subClassOf rdfs:Literal` | Chained |
 
-**Axiomatic** rules run once after the fixed-point loop (they produce no chained inferences of
-their own). **Chained** rules run inside the loop until no new triples are derived.
+**Axiomatic** rules run once after the fixed-point loop, so their output does not feed the
+chained rules (`rdfs:Resource rdfs:subClassOf ex:X`, say, never types anything as `ex:X`).
+**Chained** rules run inside the loop until no new triples are derived.
+
+### Gaps
+
+- `rdfD2` (`?p` of every triple is an `rdf:Property`) is not run.
+- RDF 1.1's `rdfs1` (`?dt rdf:type rdfs:Datatype` for each recognised datatype) is replaced by
+  the subclass form above.
+- The RDF and RDFS axiomatic triples (`rdf:type rdf:type rdf:Property`, `rdfs:domain rdfs:domain
+  rdf:Property`, …) and the `rdf:_n` membership properties are not added.
 
 ## Configuration
 
@@ -49,7 +59,7 @@ use open_triplestore::store::TripleStore;
 use std::path::Path;
 
 let store = TripleStore::open(Path::new("./data"))?;
-let materialiser = RdfsMaterializer::new(&store);
+let materialiser = RdfsMaterializer::with_target(&store, "urn:entailment:rdfs");
 let report = materialiser.materialize()?;
 
 println!(
@@ -65,21 +75,21 @@ query answers, add the graph to the dataset in your SPARQL query:
 SELECT * FROM <urn:entailment:rdfs> WHERE { ?s rdf:type ?c }
 ```
 
-Or configure the endpoint to merge the entailment graph into the default dataset automatically
-(see the `entailment_regime` option in `AppState`).
+## SPARQL Endpoint
 
-## SPARQL Endpoint Configuration
-
-When the server is started with RDFS entailment enabled, the `/sparql` endpoint automatically
-includes entailed triples when the client sends the `Accept-Entailment: rdfs` header or sets
-the `entailment` query parameter:
+`/sparql` adds the entailment graph to a query when the request sets the `entailment` query
+parameter. There is no header for it and no server-wide setting:
 
 ```http
-POST /sparql HTTP/1.1
-Accept-Entailment: rdfs
+POST /sparql?entailment=rdfs HTTP/1.1
+Content-Type: application/sparql-query
 
 SELECT * WHERE { ?s rdf:type ?c }
 ```
+
+The graph has to be materialised first (`POST /api/reasoning/materialize` with
+`{"regime": "rdfs"}`). A dataset with an entailment regime keeps its own graph; query it with
+`entailment_dataset=<id>` instead (see [Reasoning](reasoning.md)).
 
 ## Entailment Graph
 
@@ -90,15 +100,14 @@ cleared, and rebuilt independently of the asserted data:
 # Count entailed triples
 SELECT (COUNT(*) AS ?n) FROM <urn:entailment:rdfs> WHERE { ?s ?p ?o }
 
-# Clear and rebuild
-CLEAR GRAPH <urn:entailment:rdfs>;
--- then call RdfsMaterializer::materialize() again
+# Clear, then call RdfsMaterializer::materialize() again to rebuild
+CLEAR GRAPH <urn:entailment:rdfs>
 ```
 
 ## Performance Notes
 
-- Axiomatic rules (rdfs4a, rdfs4b, rdfs6, rdfs8, rdfs10) generate O(n) triples where n is the
-  number of existing triples.  On a 10M-triple dataset this adds ~2M entailment triples.
-- The fixed-point loop converges in ≤ `log(depth)` iterations for typical hierarchies.
-- On an Apple M3 Pro, RDFS materialisation of a 1M-triple FOAF+schema.org dataset completes
-  in under 2 seconds.
+- Axiomatic rules (rdfs4a, rdfs4b, rdfs6, rdfs8, rdfs10) add about one triple per distinct
+  resource, property or class in the data.
+- No benchmark of the materialiser is published. Each round re-runs every chained rule over the
+  whole scope, so the number of rounds grows with the depth of the class and property
+  hierarchies.

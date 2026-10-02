@@ -2,22 +2,56 @@
 
 ## Overview
 
-SPARQL 1.2 is the in-progress revision of the SPARQL query language, adding
-support for RDF 1.2 triple terms (embedded triples / RDF-star), new built-in
-functions, and new query forms. This document describes what is implemented,
-what is partially implemented, and what is planned.
+SPARQL 1.2 is the in-progress revision of the SPARQL query language. The
+reference here is the [W3C Working Draft of 1 October 2026](https://www.w3.org/TR/sparql12-query/);
+its Appendix A lists the changes from SPARQL 1.1. The query engine is
+Oxigraph 0.5 (`spargebra` and `spareval`), so most of what follows is its
+behaviour, compiled in with the `rdf-12` feature.
 
 ## Current Status
 
-| Feature | Status | Notes |
+The rows follow the normative changes in Appendix A of the Working Draft.
+
+| SPARQL 1.2 change | Status | Notes |
 |---------|--------|-------|
-| Triple terms (RDF 1.2) | ✅ | `<<( s p o )>>` triple terms, `<< s p o >>` reifiers, `{\| \|}` annotations, `TRIPLE()`, `SUBJECT()`, `PREDICATE()`, `OBJECT()`, `isTRIPLE()` |
-| ADJUST function | ✅ | Timezone and duration arithmetic on `xsd:dateTime` |
-| `rdf:triple` / `rdf:subject` etc. | ✅ | Custom function registration under RDF 1.2 IRIs |
+| Triple terms, reifiers, reified triples, annotation syntax | ✅ | `<<( s p o )>>` triple terms, `<< s p o >>` reified triples, `~ reifier`, `{\| \|}` annotations — see below |
+| `TRIPLE`, `isTRIPLE`, `SUBJECT`, `PREDICATE`, `OBJECT` | ✅ | Native built-ins |
+| Literal base direction (`"text"@ar--rtl`) | ✅ | Parsed, stored and returned by the engine. Known gap: the [columnar copy](performance.md#4-the-columnar-copy-opengraphcolumnar) that answers some queries drops the direction, so `DATATYPE` there returns `rdf:langString` |
+| `LANGDIR`, `hasLANG`, `hasLANGDIR`, `STRLANGDIR` | ✅ | Native built-ins |
+| `VERSION` declaration | ✅ | Accepted by the parser |
+| Duplicate variables in `VALUES` are an error | ✅ | Rejected at parse time |
+| `!!` (double negation) | ✅ | Accepted by the parser |
+| `ORDER BY` with triple terms, the formal `EXISTS` definition, `sameValue` | Engine | Oxigraph's evaluation; no test in this repository pins them |
 | SPARQL Results JSON for triple terms | ✅ | `{"type":"triple","value":{...}}` serialization |
-| `LATERAL` joins | ✅ | The right-hand side sees each left-hand solution's bindings (see below) |
-| `CALL` (service extension) | 🟡 | Planned |
-| `COUNT` deduplication changes | 🟡 | Minor spec change, planned |
+
+The remaining changes in Appendix A (XSD 1.1 and XPath 3.1 references, the
+removal of simple literals, escape processing, the algebra rewrites) change how
+the specification is written rather than what a query returns.
+
+**Evidence.** `tests/sparql12_conformance.rs` pins triple-term semantics
+(quoting, referential opacity, reifiers, `TRIPLE()`, nested and per-graph
+cases). The W3C SPARQL 1.2 test suite is not vendored or run here, and the
+other rows above have no test of their own yet.
+
+## SEP extensions (not part of SPARQL 1.2)
+
+Oxigraph also compiles in two extensions from the SPARQL 1.2 Community Group's
+SPARQL Enhancement Proposals. They are **not** in the Working Draft, are always
+on, and have no switch. Other SPARQL 1.2 engines may not accept them.
+
+| Extension | Proposal | Notes |
+|---|---|---|
+| `LATERAL` | SEP-0006 | Correlated join: the right-hand side runs once per left-hand solution ([below](#lateral-joins)) |
+| `ADJUST(temporal, duration)` | SEP-0002 | Timezone adjustment of `xsd:dateTime`, `xsd:date` and `xsd:time` values ([below](#adjust-function)) |
+
+`CALL` is neither in the Working Draft nor supported: the parser rejects it.
+
+The project also registers a few **non-standard** functions under fixed IRIs:
+aliases of the five triple-term built-ins in the `rdf:` namespace
+(`rdf:triple`, `rdf:subject`, `rdf:predicate`, `rdf:object`, `rdf:isTriple`)
+for older client tooling, and `<http://www.w3.org/ns/sparql#adjust>` (see
+below). No W3C specification defines these as functions (`rdf:subject`,
+`rdf:predicate` and `rdf:object` are RDF's reification properties).
 
 ## Enabling SPARQL 1.2 / RDF-star
 
@@ -78,28 +112,50 @@ Built-in functions (natively handled by the Oxigraph/spargebra engine):
 
 ## ADJUST Function
 
-The `ADJUST` function adjusts a `dateTime` or `date` value:
+`ADJUST` (SEP-0002) gives an `xsd:dateTime`, `xsd:date` or `xsd:time` value a new
+timezone. The second argument must be an `xsd:dayTimeDuration` (or an
+`xsd:duration` with no year or month part) between `-PT14H` and `PT14H`:
 
 ```sparql
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 
-SELECT (ADJUST(?dt, "+05:00"^^xsd:string) AS ?local) WHERE {
-  BIND("2024-01-15T10:00:00Z"^^xsd:dateTime AS ?dt)
+SELECT ?local WHERE {
+  BIND(ADJUST("2024-01-15T10:00:00Z"^^xsd:dateTime, "PT5H"^^xsd:dayTimeDuration) AS ?local)
+}
+# ?local = "2024-01-15T15:00:00+05:00"^^xsd:dateTime
+```
+
+A value that already has a timezone is converted (the instant stays the same);
+a value without one gets the timezone attached
+(`"2024-01-15T10:00:00"` with `"-PT3H30M"` gives `"2024-01-15T10:00:00-03:30"`).
+Any other second argument — a string such as `"+05:00"` included — leaves the
+result unbound.
+
+### `sparql:adjust` (non-standard)
+
+A separate custom function is registered at
+`<http://www.w3.org/ns/sparql#adjust>`. It is only reached by calling that IRI;
+the `ADJUST` keyword always means the built-in above. It takes the offset as a
+plain string and treats a duration as arithmetic:
+
+- `"+05:00"`, `"-03:30"`, `"Z"` or `"UTC"` converts the value to that timezone;
+- `"PT5H"`, `"P1DT2H30M"`, `"-PT30M"` **adds** the duration to the value.
+
+```sparql
+PREFIX xsd:    <http://www.w3.org/2001/XMLSchema#>
+PREFIX sparql: <http://www.w3.org/ns/sparql#>
+
+SELECT ?local WHERE {
+  BIND(sparql:adjust("2024-01-15T10:00:00Z"^^xsd:dateTime, "+05:00") AS ?local)
 }
 ```
 
-Supported second-argument forms:
-
-- Timezone offset: `"+05:00"`, `"-03:30"`, `"Z"`, `"UTC"`
-- `xsd:dayTimeDuration`: `"PT5H"`, `"P1DT2H30M"`, `"-PT30M"`
-
-The function is registered at `<http://www.w3.org/ns/sparql#adjust>`.
-
 ## LATERAL Joins
 
-`LATERAL` evaluates its right-hand side once per solution of the left-hand
-side, with that solution's bindings in place — so a subquery can take the
-latest, largest or first *n* of something per row:
+`LATERAL` (SEP-0006, not part of SPARQL 1.2) evaluates its right-hand side
+once per solution of the left-hand side, with that solution's bindings in
+place — so a subquery can take the latest, largest or first *n* of something
+per row:
 
 ```sparql
 SELECT ?person ?latestEvent WHERE {
@@ -114,7 +170,7 @@ SELECT ?person ?latestEvent WHERE {
 }
 ```
 
-Two rules come from SEP-0006, which the engine follows:
+Two rules come from SEP-0006:
 
 - A subquery sees an outer variable only if it **projects** it. Above,
   `SELECT ?person ?latestEvent` correlates; `SELECT ?latestEvent` would not —
@@ -157,10 +213,10 @@ This matches the SPARQL 1.2 Working Draft results format extension.
 ## Conformance Notes
 
 The implementation is based on:
-- [SPARQL 1.2 Query Language Working Draft](https://www.w3.org/TR/sparql12-query/)
+- [SPARQL 1.2 Query Language Working Draft](https://www.w3.org/TR/sparql12-query/) (1 October 2026)
 - [RDF 1.2 Concepts](https://www.w3.org/TR/rdf12-concepts/)
 - Oxigraph 0.5 native RDF 1.2 / triple-term support (via `spargebra` and `spareval`)
 
-Known gaps vs the full SPARQL 1.2 WD:
-- `CALL` not yet implemented
-- Annotation syntax (`~`) in Turtle 1.2 parsing depends on Oxigraph RDF 1.2 parser progress
+Turtle 1.2 and TriG 1.2 input, including `~` reifiers and `{| |}` annotations,
+is parsed by Oxigraph's `oxttl`. The grade and the remaining gaps are on the
+[Standards](standards.md) page.

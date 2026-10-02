@@ -206,6 +206,7 @@ pub const IMPLEMENTED_RULES: &[&str] = &[
 /// next to [`IMPLEMENTED_RULES`] so the two lists together are the whole
 /// specification and the documentation cannot drift from the code.
 pub const UNIMPLEMENTED_RULES: &[(&str, &str)] = &[
+
     ("dt-type2", "typing every literal with its datatype needs literal subjects, which an RDF graph cannot hold"),
     ("dt-eq", "owl:sameAs between literals with equal values needs literal subjects, and SPARQL joins compare terms, not values"),
     ("dt-diff", "owl:differentFrom between literals needs literal subjects"),
