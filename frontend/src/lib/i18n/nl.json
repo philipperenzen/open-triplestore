@@ -1184,7 +1184,10 @@
       "openValidationStudio": "Open validatiestudio",
       "moreActions": "Meer acties",
       "filesExpand": "Vergroten",
-      "filesOpenPage": "Bestandenpagina openen"
+      "filesOpenPage": "Bestandenpagina openen",
+      "modelUpdateAvailable": "model {version} gepubliceerd — update beschikbaar",
+      "modelUpdateAvailableHint": "Er is een nieuwere versie van het model gepubliceerd dan de versie waaraan deze dataset is vastgepind. Valideer opnieuw, corrigeer of verzamel wat er wordt gevraagd en pin dan de nieuwe versie.",
+      "modelCurrent": "actueel"
     },
     "validation": {
       "title": "SHACL-validatie",
@@ -2296,7 +2299,10 @@
         "possiblyModifiedHint": "Van deze kopie is niet vastgesteld dat ze het meegeleverde bestand ongewijzigd is: ze is in dit register gemaakt of bewerkt, of wijkt af van het bestand. De downloads vermelden dat.",
         "header": "Vermelding in het meegeleverde bestand {file}",
         "fullNotice": "Volledige naamsvermelding en licentieteksten"
-      }
+      },
+      "dependents": "Gebruikt door {count} dataset(s)",
+      "dependentBehind": "Vastgepind op een oudere versie — laatst gepubliceerd is {latest}",
+      "dependentCurrent": "Vastgepind op de laatst gepubliceerde versie"
     },
     "modelDiff": {
       "heading": "Verschil:",
