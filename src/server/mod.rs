@@ -1209,6 +1209,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/ldes/nodes/:n",
             get(crate::ldes::publish::get_node),
         )
+        .route(
+            "/api/datasets/:dataset_id/ldes/members/:member_id",
+            get(crate::ldes::publish::get_member),
+        )
         .route("/api/ldes/sync", post(crate::ldes::client::sync_handler))
         .route(
             "/api/datasets/:dataset_id/properties/state",

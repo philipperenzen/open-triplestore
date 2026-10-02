@@ -2090,9 +2090,9 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Datasets",
                     "Event stream",
-                    "The dataset's `ldes:EventStream` (Turtle, JSON-LD or N-Triples by `Accept`): its declared paths, `tree:view` to the first node that still has members, and — when declared — the retention policy on that root node as an IRI described in the same document.",
+                    "The dataset's `ldes:EventStream` (Turtle, JSON-LD or N-Triples by `Accept`): its declared paths, the delete path and object (`rdf:type` / `as:Delete`), `ldes:pollingInterval`, the `tree:shape` every member conforms to, `tree:view` to the root node (`nodes/0`), and — when declared — the retention policy on that root node as an IRI described in the same document. Every stream document carries an `ETag` and answers a matching `If-None-Match` with 304.",
                     vec![],
-                    vec![("200", "Stream description"), ("404", "No stream, or dataset not visible")],
+                    vec![("200", "Stream description"), ("304", "Not modified (`If-None-Match`)"), ("404", "No stream, or dataset not visible"), ("429", "The stream is busy; retry after `Retry-After` seconds")],
                     false,
                 ),
             ),
@@ -2107,6 +2107,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                         ObjectBuilder::new()
                             .property("enabled", ObjectBuilder::new().schema_type(Type::Boolean))
                             .property("page_size", ObjectBuilder::new().schema_type(Type::Integer).description(Some("Members per fragment, 1–10000 (default 100). Already-full pages keep their old size.")))
+                            .property("polling_interval", ObjectBuilder::new().schema_type(Type::Integer).description(Some("`ldes:pollingInterval` in seconds (at least 1). Absent: unchanged (60 until set).")))
                             .property(
                                 "retention",
                                 ObjectBuilder::new()
@@ -2121,8 +2122,8 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                         json!({ "enabled": true, "page_size": 100, "retention": { "full_log_duration": "P30D", "version_amount": 2, "version_delete_duration": "P7D" } }),
                     ),
                     vec![
-                        ("200", "`{dataset_id, enabled, page_size, stream, members_seeded, members_pruned, members, retention}`"),
-                        ("400", "Malformed retention policy"),
+                        ("200", "`{dataset_id, enabled, page_size, stream, members_seeded, members_pruned, members, retention, polling_interval}`"),
+                        ("400", "Malformed retention policy, or a polling interval of 0"),
                         ("401", "Authentication required"),
                         ("403", "Write access required"),
                         ("404", "Dataset not found"),
@@ -2139,13 +2140,35 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             M::Get,
             o(
                 "Datasets",
-                "Event stream fragment",
-                "Fragment `n` (1-based): the stream description, `<node> a tree:Node`, `ldes:immutable true` plus `Cache-Control: immutable` on every page but the last, a `tree:GreaterThanOrEqualToRelation` on `dct:created` to the next fragment that still has members, and the page's members as version objects.",
+                "Event stream node",
+                "Node 0 is the root (the `tree:view`): no members, a `tree:GreaterThanOrEqualToRelation` and a `tree:LessThanOrEqualToRelation` on `dct:created` to every sealed fragment that still has members, and a lower-bounded relation to the first unsealed fragment. Fragment `n` (from 1): the stream description, `<node> a tree:Node`, and its members as version objects. A sealed (full) fragment carries `ldes:immutable true` plus `Cache-Control: immutable` and links nowhere; an unsealed fragment links to the next with a lower bound.",
                 vec![],
                 vec![
-                    ("200", "Fragment"),
+                    ("200", "Node"),
+                    ("304", "Not modified (`If-None-Match`)"),
                     ("404", "No such node, or no stream"),
-                    ("410", "The node's members were all removed by the retention policy; the body names where the stream continues"),
+                    ("410", "The node's members were all removed by the retention policy; the root no longer links it"),
+                    ("429", "The stream is busy; retry after `Retry-After` seconds"),
+                ],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/ldes/members/:member_id",
+        vec![(
+            M::Get,
+            o(
+                "Datasets",
+                "Event stream member",
+                "One member, dereferenced: `<stream> tree:member <member>` and the member's quads, exactly as a fragment carries them. Members never change, so the response is `Cache-Control: immutable`.",
+                vec![],
+                vec![
+                    ("200", "Member"),
+                    ("304", "Not modified (`If-None-Match`)"),
+                    ("404", "Not a member of this stream (or removed by its retention policy), or no stream"),
+                    ("429", "The stream is busy; retry after `Retry-After` seconds"),
                 ],
                 false,
             ),

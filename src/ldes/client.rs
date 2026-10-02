@@ -209,7 +209,7 @@ fn members_of(store: &Store, tp: &str, vp: &str) -> Vec<RemoteMember> {
                 }
                 if p == "http://www.w3.org/1999/02/22-rdf-syntax-ns#type" {
                     if let Term::NamedNode(o) = &q.object {
-                        if o.as_str() == TOMBSTONE {
+                        if o.as_str() == TOMBSTONE || o.as_str() == super::AS_DELETE {
                             deleted = true;
                             continue;
                         }

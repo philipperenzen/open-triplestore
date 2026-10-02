@@ -22,30 +22,59 @@ member. From then on every write — Graph Store `PUT`/`POST`/`DELETE`, SPARQL
 Update, bulk import, version restore, an LDES sync into it — is compared with
 the state before it, per entity (IRI subject), and each changed entity becomes
 a new member: its current description (direct triples plus blank-node
-closure), timestamped. An entity that disappears becomes a *tombstone* member
-(`ots:Tombstone`). Writes to datasets that have not enabled a stream cost
-nothing extra.
+closure), timestamped. An edit anywhere inside the blank-node closure is a
+change; writing the same structure again under fresh blank-node labels (a
+Graph Store `PUT` of unchanged Turtle) is not. An entity that disappears
+becomes a *tombstone* member, typed `as:Delete` (the
+`ldes:versionDeleteObject` the stream declares on `ldes:versionDeletePath
+rdf:type`, LDES §4.3) and `ots:Tombstone` (the type earlier versions used).
+Writes to datasets that have not enabled a stream cost nothing extra.
+
+Timestamps never go backwards (LDES §4.1): a member is stamped with its
+write's time or with the newest timestamp the stream has already published,
+whichever is later, so two concurrent writes that read the clock in one order
+and append in the other cannot put a member below a bound a client holds.
+The newest published timestamp is kept on the stream, so it holds even after
+retention removed that member.
 
 The stream (`text/turtle`, `application/ld+json` or `application/n-triples`
 by `Accept`; readable by whoever may read the dataset):
 
 ```
-GET /api/datasets/<id>/ldes                 # the ldes:EventStream, tree:view → first node
-GET /api/datasets/<id>/ldes/nodes/<n>       # fragment n (1-based), page_size members
+GET /api/datasets/<id>/ldes                 # the ldes:EventStream, tree:view → the root node
+GET /api/datasets/<id>/ldes/nodes/0         # the root node: relations to every fragment
+GET /api/datasets/<id>/ldes/nodes/<n>       # fragment n (from 1), page_size members
+GET /api/datasets/<id>/ldes/members/<m>     # one member, dereferenced
 ```
 
 ```turtle
 <…/api/datasets/assets/ldes> a ldes:EventStream ;
     ldes:timestampPath dct:created ;
     ldes:versionOfPath dct:isVersionOf ;
-    tree:view <…/api/datasets/assets/ldes/nodes/1> .
+    ldes:versionDeletePath rdf:type ;
+    ldes:versionDeleteObject as:Delete ;
+    ldes:pollingInterval 60 ;
+    tree:shape <…/api/datasets/assets/ldes#member-shape> ;
+    tree:view <…/api/datasets/assets/ldes/nodes/0> .
 
-<…/api/datasets/assets/ldes/nodes/1> a tree:Node ;
-    tree:relation [ a tree:GreaterThanOrEqualToRelation ;
-                    tree:path dct:created ;
+<…/api/datasets/assets/ldes#member-shape> a sh:NodeShape ;
+    sh:property [ sh:path dct:isVersionOf ; sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ] ,
+                [ sh:path dct:created ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:dateTime ] .
+
+# the root node: a lower and an upper bound on each full fragment, a lower
+# bound on the first fragment still filling
+<…/api/datasets/assets/ldes/nodes/0> a tree:Node ;
+    tree:relation [ a tree:GreaterThanOrEqualToRelation ; tree:path dct:created ;
+                    tree:value "2026-09-02T09:58:12Z"^^xsd:dateTime ;
+                    tree:node <…/api/datasets/assets/ldes/nodes/1> ] ,
+                  [ a tree:LessThanOrEqualToRelation ; tree:path dct:created ;
+                    tree:value "2026-09-02T09:59:40Z"^^xsd:dateTime ;
+                    tree:node <…/api/datasets/assets/ldes/nodes/1> ] ,
+                  [ a tree:GreaterThanOrEqualToRelation ; tree:path dct:created ;
                     tree:value "2026-09-02T10:00:00Z"^^xsd:dateTime ;
                     tree:node <…/api/datasets/assets/ldes/nodes/2> ] .
 
+# a fragment
 <…/api/datasets/assets/ldes> tree:member <…/api/datasets/assets/ldes/members/17> .
 <…/api/datasets/assets/ldes/members/17>
     dct:isVersionOf <https://example.org/layered/asset/b1> ;
@@ -55,9 +84,37 @@ GET /api/datasets/<id>/ldes/nodes/<n>       # fragment n (1-based), page_size me
 
 Members are version objects: the member IRI carries the entity's properties
 at that moment, `dct:isVersionOf` names the entity, `dct:created` orders the
-stream. Full fragments are immutable — `<node> ldes:immutable true` and
-`Cache-Control: public, max-age=31536000, immutable` — and only the last one
-changes.
+stream. Every member conforms to the stream's `tree:shape` (one IRI
+`dct:isVersionOf`, one `xsd:dateTime` `dct:created`; open to the entity's own
+properties). Blank nodes are labelled per member, so two versions of one
+entity on a page never share a blank node.
+
+**The search tree** is the one the LDES Server Primer §4 recommends: one root
+node with two relations to each full fragment — the earliest and the latest
+`dct:created` on it, recorded when it filled — and one relation, lower
+bound only, to the first fragment still filling. Full fragments are
+immutable (`<node> ldes:immutable true` and `Cache-Control: public,
+max-age=31536000, immutable`) and link nowhere, so the bounds on each describe
+everything reachable through it (TREE §3) and a client can skip a fragment
+whose upper bound is before its bookmark. The fragments still filling chain
+forward with lower bounds; only they and the root change. The root lists two
+relations per full fragment, so it grows with the stream (about 2 000
+relations for 100 000 members at the default page size); a second level is
+the documented way to split it when that matters.
+
+Every document carries an `ETag`, and a request whose `If-None-Match` matches
+it is answered `304 Not Modified` (Server Primer §2, LDES §3.3).
+`ldes:pollingInterval` (default 60 seconds) is set with `"polling_interval"`
+in the same `PUT`. When a stream's documents are all being rendered — at most
+16 at once per stream and 64 across the server, set with
+`OTS_LDES_MAX_IN_FLIGHT_PER_STREAM` and `OTS_LDES_MAX_IN_FLIGHT` — further
+requests are answered `429 Too Many Requests` with `Retry-After: 1` (Server
+Primer §2) instead of queueing.
+
+Streams published before this layout had sealed fragments link onward to the
+next one. Clients that cached those immutable copies keep the stale forward
+link, which is harmless: they reach the same members, and a fresh fetch
+through the root gives the bounded tree.
 
 ## Retention
 
@@ -90,8 +147,8 @@ The policy is published on the root node — the `tree:view` target — as an IR
 whose description travels with every page that names it:
 
 ```turtle
-<…/ldes> tree:view <…/ldes/nodes/1> .
-<…/ldes/nodes/1> a ldes:EventSource ;
+<…/ldes> tree:view <…/ldes/nodes/0> .
+<…/ldes/nodes/0> a ldes:EventSource ;
     ldes:retentionPolicy <…/ldes#retention> .
 <…/ldes#retention> a ldes:RetentionPolicy ;
     ldes:fullLogDuration "P30D"^^xsd:duration ;
@@ -103,12 +160,11 @@ whose description travels with every page that names it:
 member→node assignment is frozen (the id range is recorded when the next
 member arrives). Retention only ever deletes members *inside* a frozen range:
 a page served as immutable can lose members, but never gains one, never hands
-one to another page and never changes the bound its relation carries — so a
-cached copy is a superset of the live page, which is exactly what a consumer
-of a retention-declaring stream must expect. A frozen page whose members are
-all gone answers **`410 Gone`**, and `tree:view` and every relation point past
-it to the next page that still has members. The last page is never frozen and
-never 410. Members are kept five minutes longer than declared, so a
+one to another page and never changes the bounds the root carries for it —
+so a cached copy is a superset of the live page, which is exactly what a
+consumer of a retention-declaring stream must expect. A frozen page whose
+members are all gone answers **`410 Gone`**, and the root no longer links it.
+The last page is never frozen and never 410. Members are kept five minutes longer than declared, so a
 consumer's own clock skew never finds the server stricter than its policy.
 
 The sweep runs when the policy is set and after writes to the dataset (at
@@ -153,9 +209,14 @@ must be listed in `OTS_REMOTE_ALLOWLIST`, and each fetch has the usual timeout.
 
 ## What is and is not implemented
 
-- Fragmentation: time-ordered, fixed-size pages with
-  `tree:GreaterThanOrEqualToRelation` on `dct:created`, frozen once full. No
-  geospatial or substring fragmentations, no `tree:shape`.
+- Fragmentation: time-ordered, fixed-size pages under one root node with
+  `tree:GreaterThanOrEqualToRelation` and `tree:LessThanOrEqualToRelation` on
+  `dct:created`, frozen once full. No geospatial or substring fragmentations
+  (optional TREE views), no `ldes:sequencePath` (members with equal
+  timestamps are ordered by member id only).
+- Publisher context: `ldes:timestampPath`, `ldes:versionOfPath`, the delete
+  path and object, `ldes:pollingInterval`, a generated `tree:shape`, `ETag` /
+  `304`, `429` when busy, dereferenceable member IRIs. No transactions.
 - Retention: `ldes:fullLogDuration`, `ldes:versionAmount`,
   `ldes:versionDuration`, `ldes:versionDeleteDuration`, `ldes:startingFrom`,
   enforced by in-place deletion inside frozen pages, `410 Gone` for a page
@@ -166,9 +227,10 @@ must be listed in `OTS_REMOTE_ALLOWLIST`, and each fetch has the usual timeout.
 - Client: follows any TREE relation (all are treated as "worth following"),
   honours the stream's declared `ldes:timestampPath` / `ldes:versionOfPath`
   (defaults `dct:created` / `dct:isVersionOf`), treats `410 Gone` as an empty
-  page, keeps the publisher's retention policy as context, and materialises
-  the newest version per entity. It does not evaluate relation values to
-  prune pages.
+  page, recognises deletes typed `as:Delete` or `ots:Tombstone`, keeps the
+  publisher's retention policy as context, and materialises the newest
+  version per entity. It does not evaluate relation values to prune pages,
+  and does not yet read a stream's declared delete path and object.
 
 The spec rules the implementation is held to are in
 `tests/ldes_conformance.rs`, one assertion per clause of the LDES
