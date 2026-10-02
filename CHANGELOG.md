@@ -14,6 +14,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **OWL 2 RL: `eq-ref` on request.** `Owl2RLReasoner::with_eq_ref(true)`, or
+  `"eq_ref": true` in the body of `POST /api/reasoning/materialize`, also writes
+  `x owl:sameAs x` for every subject, predicate and non-literal object. It is
+  off by default (about one triple per term); `sameas-off` skips it.
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -51,6 +55,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/ldp.md`, "Access control".
 
 ### Changed
+- **OWL 2 RL runs 75 of the 78 RL/RDF rules (was 63), and lists and inverse
+  properties work everywhere.** New: `eq-diff2`/`eq-diff3`
+  (`owl:AllDifferent`), `prp-pdw` (`owl:propertyDisjointWith`), `prp-adp`
+  (`owl:AllDisjointProperties`) — inconsistencies, reported as a 422 with their
+  rule id — and `prp-ap`, `cls-thing`, `cls-nothing1`, `scm-op`, `scm-dp`,
+  `prp-eqp1/2`, `eq-ref` (opt-in). `scm-cls` now derives all four of its
+  consequences (`C ≡ C` and `owl:Nothing ⊑ C` were missing). `cls-int1`,
+  `prp-spo2` and `prp-key` match lists of any length (intersections and chains
+  of three or more never fired); `scm-int`, `scm-uni` and `cax-adc` no longer
+  skip blank-node members. An inverse property expression `[ owl:inverseOf P ]`
+  works in domains, ranges, characteristics, sub-/equivalent properties, chains,
+  keys and restrictions. Before, those rules matched nothing, and an inverse key
+  property was dropped from the key, so individuals merged on the remaining
+  properties alone. `prp-npa1/2` no longer require an
+  `rdf:type owl:NegativePropertyAssertion` triple. `prp-trp` keeps the reflexive
+  triple a cycle derives. `x owl:differentFrom x` is an inconsistency. The
+  duplicate `prp-hv1/2` copies of `cls-hv1/2` are gone. Every run now adds the
+  13 axiomatic triples (9 annotation properties, `owl:Thing`/`owl:Nothing` as
+  classes) plus their `scm-cls` consequences, so an empty store's
+  materialisation reports 48 triples instead of 32. The only rules not run are
+  `dt-type2`, `dt-eq` and `dt-diff`.
 - **`ReasoningError::Inconsistency` names its rule.** The library variant is now
   `Inconsistency { rule, detail }` (it was `Inconsistency(String)`), and
   `ReasoningError::NotConverged { regime, iterations }` is new. Code that

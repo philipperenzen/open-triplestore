@@ -9891,6 +9891,10 @@ struct MaterializeRequest {
     /// plus the model version it conforms to (`GET …/conformance`). Any
     /// `source_graphs` are added on top.
     dataset: Option<String>,
+    /// `owl2-rl` only: also run eq-ref, writing `x owl:sameAs x` for every
+    /// term (about one triple per term). Default `false`.
+    #[serde(default)]
+    eq_ref: bool,
 }
 
 /// The HTTP error for a failed reasoning run. An inconsistent ontology and a
@@ -9939,9 +9943,18 @@ pub(crate) fn run_regime(
     sources: Option<Vec<String>>,
     target: &str,
     identity: crate::reasoning::identity::IdentityPolicy,
+    options: RegimeOptions,
 ) -> Result<Option<crate::reasoning::ReasoningReport>, AppError> {
-    run_reasoner(state, regime, sources, target, identity)
+    run_reasoner_with(state, regime, sources, target, identity, options)
         .map_err(|e| reasoning_failure(e, regime, target))
+}
+
+/// Per-run switches a regime may honour; the defaults are what every
+/// per-dataset run uses.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct RegimeOptions {
+    /// `owl2-rl`: run eq-ref (`Owl2RLReasoner::with_eq_ref`).
+    pub eq_ref: bool,
 }
 
 /// [`run_regime`] with the reasoner's own error, for a caller that records
@@ -9952,6 +9965,25 @@ pub(crate) fn run_reasoner(
     sources: Option<Vec<String>>,
     target: &str,
     identity: crate::reasoning::identity::IdentityPolicy,
+) -> Result<Option<crate::reasoning::ReasoningReport>, crate::reasoning::ReasoningError> {
+    run_reasoner_with(
+        state,
+        regime,
+        sources,
+        target,
+        identity,
+        RegimeOptions::default(),
+    )
+}
+
+/// [`run_reasoner`] with explicit [`RegimeOptions`].
+pub(crate) fn run_reasoner_with(
+    state: &AppState,
+    regime: &str,
+    sources: Option<Vec<String>>,
+    target: &str,
+    identity: crate::reasoning::identity::IdentityPolicy,
+    options: RegimeOptions,
 ) -> Result<Option<crate::reasoning::ReasoningReport>, crate::reasoning::ReasoningError> {
     let _sources: Vec<String> = sources.clone().unwrap_or_default();
     // Apply the scope to whichever reasoner the regime selects.
@@ -9968,7 +10000,7 @@ pub(crate) fn run_reasoner(
     }
     // Silence unused-variable warnings for the case where no reasoning feature is
     // compiled in (only the `_ => Err(...)` arm fires, leaving state/target unused).
-    let _ = (&state, target, identity);
+    let _ = (&state, target, identity, options);
 
     // Match returns Some(report) for a recognised regime or None for an unknown one.
     // Both branches are always present in the match so no unreachable-code warning fires.
@@ -9985,7 +10017,8 @@ pub(crate) fn run_reasoner(
         "owl2-rl" => {
             let m = scoped!(crate::reasoning::owl2_rl::Owl2RLReasoner::new(&state.store)
                 .with_target(target)
-                .with_identity_policy(identity));
+                .with_identity_policy(identity)
+                .with_eq_ref(options.eq_ref));
             Some(m.materialize()?)
         }
         #[cfg(feature = "owl2-el")]
@@ -10146,6 +10179,9 @@ async fn reasoning_materialize(
         let regime = body.regime.clone();
         let sources = sources.clone();
         let target = target.clone();
+        let options = RegimeOptions {
+            eq_ref: body.eq_ref,
+        };
         tokio::task::spawn_blocking(move || {
             // Entailment graphs are derived data and must be rebuilt from
             // scratch each run. Materialisation only ever INSERTed, so after a
@@ -10160,7 +10196,7 @@ async fn reasoning_materialize(
                     .update(&format!("CLEAR SILENT GRAPH <{target}>"))
                     .map_err(|e| AppError::Internal(format!("clearing <{target}>: {e}")))?;
             }
-            run_regime(&state, &regime, sources, &target, identity)
+            run_regime(&state, &regime, sources, &target, identity, options)
         })
         .await
         .map_err(|e| AppError::Internal(format!("reasoning task: {e}")))??
