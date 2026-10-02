@@ -4270,9 +4270,9 @@ mod delta_primitive_tests {
                 .update(&format!("DELETE WHERE {{ GRAPH <{g}> {{ ?s ?p ?o }} }}"))
                 .unwrap();
             store
-                .update(&format!(
-                    "DELETE DATA {{ GRAPH <http://e/other> {{ <http://e/a> <http://e/b> <http://e/c> }} }}"
-                ))
+                .update(
+                    "DELETE DATA { GRAPH <http://e/other> { <http://e/a> <http://e/b> <http://e/c> } }",
+                )
                 .unwrap();
             let mut entries = store.graph_index.all_entries();
             entries.sort();

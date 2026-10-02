@@ -130,7 +130,7 @@ impl SetHash {
     }
 
     /// 64 lower-case hex digits, most significant first.
-    pub fn to_hex(&self) -> String {
+    pub fn to_hex(self) -> String {
         self.0.iter().rev().map(|l| format!("{l:016x}")).collect()
     }
 
