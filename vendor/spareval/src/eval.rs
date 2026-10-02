@@ -2082,38 +2082,6 @@ fn to_string_and_language(
     }
 }
 
-#[cfg(feature = "sparql-12")]
-fn build_plain_literal(
-    value: String,
-    language: Option<LanguageWithMaybeBaseDirection>,
-) -> ExpressionTerm {
-    if let Some((language, direction)) = language {
-        if let Some(direction) = direction {
-            ExpressionTerm::DirLangStringLiteral {
-                value,
-                language,
-                direction,
-            }
-        } else {
-            ExpressionTerm::LangStringLiteral { value, language }
-        }
-    } else {
-        ExpressionTerm::StringLiteral(value)
-    }
-}
-
-#[cfg(not(feature = "sparql-12"))]
-fn build_plain_literal(
-    value: String,
-    language: Option<LanguageWithMaybeBaseDirection>,
-) -> ExpressionTerm {
-    if let Some(language) = language {
-        ExpressionTerm::LangStringLiteral { value, language }
-    } else {
-        ExpressionTerm::StringLiteral(value)
-    }
-}
-
 fn decode_bindings<'a, D: QueryableDataset<'a>>(
     dataset: EvalDataset<'a, D>,
     iter: InternalTuplesIterator<'a, D::InternalTerm>,
@@ -2456,10 +2424,13 @@ impl Accumulator for MaxAccumulator {
     }
 }
 
-#[expect(clippy::option_option)]
+/// `GROUP_CONCAT` returns a simple literal (an `xsd:string`), whatever the
+/// language tags of its inputs: SPARQL 1.1 §18.5.1.7 defines it by string
+/// concatenation of their lexical forms, and the SPARQL 1.2 draft builds it with
+/// `CONCAT("", …)`, which also yields an `xsd:string`.
 struct GroupConcatAccumulator {
     concat: Option<String>,
-    language: Option<Option<LanguageWithMaybeBaseDirection>>,
+    started: bool,
     separator: Rc<str>,
 }
 
@@ -2467,7 +2438,7 @@ impl GroupConcatAccumulator {
     fn new(separator: Rc<str>) -> Self {
         Self {
             concat: Some(String::new()),
-            language: None,
+            started: false,
             separator,
         }
     }
@@ -2478,25 +2449,20 @@ impl Accumulator for GroupConcatAccumulator {
         let Some(concat) = self.concat.as_mut() else {
             return;
         };
-        let Some((value, e_language)) = to_string_and_language(element) else {
+        let Some((value, _)) = to_string_and_language(element) else {
             self.concat = None;
             return;
         };
-        if let Some(lang) = &self.language {
-            if *lang != e_language {
-                self.language = Some(None)
-            }
+        if self.started {
             concat.push_str(&self.separator);
         } else {
-            self.language = Some(e_language)
+            self.started = true;
         }
         concat.push_str(&value);
     }
 
     fn finish(&mut self) -> Option<ExpressionTerm> {
-        self.concat
-            .take()
-            .map(|result| build_plain_literal(result, self.language.take().flatten()))
+        self.concat.take().map(ExpressionTerm::StringLiteral)
     }
 }
 

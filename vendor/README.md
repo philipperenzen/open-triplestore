@@ -63,6 +63,11 @@ One commit each, in this order:
    (through `^`, `|`, `?` and the first step of `+`, not past the middle of `/`).
    Fixes `property-path#zero_or_more_set_start/end` and
    `#zero_or_one_set_start/end`. Draft: `spareval/UPSTREAM-PR-zero-length-paths.md`.
+4. **`GROUP_CONCAT` returns an `xsd:string`** (`spareval` aggregate). It kept a
+   language tag shared by every input (`"1 2"@en`); SPARQL 1.1 §18.5.1.7, and the
+   SPARQL 1.2 draft, return a simple literal. Fixes
+   `aggregates#agg-groupconcat-04` and `-06`. Draft:
+   `spareval/UPSTREAM-PR-group-concat.md`.
 
 ### Verifying the fork
 
