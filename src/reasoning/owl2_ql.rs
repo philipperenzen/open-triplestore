@@ -1987,7 +1987,12 @@ fn ground(
     let reflexive = !tbox.reflexive.is_empty();
     src.each(None, None, None, |q| {
         if let Term::Literal(l) = &q.object {
-            if datatypes::literal_value(l).is_none() {
+            // Only the QL map's own datatypes are judged: a literal of an
+            // RL-only type (`xsd:double`, `xsd:boolean`, …) is outside the
+            // profile, as its axioms are.
+            if Dt::from_iri(l.datatype().as_str()).is_some()
+                && datatypes::literal_value(l).is_none()
+            {
                 note(
                     &mut clash,
                     "ql-dt-not-type",
