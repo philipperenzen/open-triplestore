@@ -1957,3 +1957,257 @@ fi
         );
     }
 }
+
+// ── live: the shipped reasoner sidecar (sidecars/reasoner, OWL API + HermiT) ──
+//
+// Skipped unless OTS_TEST_REASONER_URL points at a running sidecar
+// (OTS_TEST_REASONER_TOKEN: its bearer token). The CI conformance job builds
+// and starts it, and sets OTS_TEST_LIVE_REQUIRED so a missing variable fails
+// there instead of skipping. These are the tableau-only entailments the native
+// rules cannot make (see `dl_cx_native_tableau_reasoning_is_a_gap`).
+mod sidecar_live {
+    use super::*;
+    use std::time::Duration;
+
+    const TY: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+    const SAME_AS: &str = "http://www.w3.org/2002/07/owl#sameAs";
+
+    fn live() -> Option<DlConfig> {
+        let Ok(url) = std::env::var("OTS_TEST_REASONER_URL") else {
+            assert!(
+                std::env::var_os("OTS_TEST_LIVE_REQUIRED").is_none(),
+                "OTS_TEST_LIVE_REQUIRED is set but OTS_TEST_REASONER_URL is not"
+            );
+            return None;
+        };
+        let mut c = DlConfig::default().with_backend(DlBackendKind::Sidecar);
+        c.sidecar_url = Some(url);
+        c.sidecar_token = std::env::var("OTS_TEST_REASONER_TOKEN").ok();
+        c.timeout = Duration::from_secs(120);
+        Some(c)
+    }
+
+    fn live_run(ttl: &str) -> Option<(TripleStore, Result<dl_backend::DlRun, ReasoningError>)> {
+        let c = live()?;
+        let store = store_with(ttl);
+        let r = dl_backend::materialize(&store, &c, None, TG, IdentityPolicy::Full);
+        Some((store, r))
+    }
+
+    #[test]
+    fn sidecar_live_existential_witness() {
+        let Some((store, r)) = live_run(
+            r#"@prefix owl: <http://www.w3.org/2002/07/owl#> .
+               @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+               @prefix ex: <http://example.org/> .
+               ex:A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty ex:r ; owl:someValuesFrom ex:B ] .
+               [ a owl:Restriction ; owl:onProperty ex:r ; owl:someValuesFrom ex:B ] rdfs:subClassOf ex:C .
+               ex:a a ex:A ."#,
+        ) else {
+            return;
+        };
+        let run = r.unwrap();
+        assert_eq!(run.backend, "sidecar");
+        assert!(run.complete);
+        assert!(
+            run.version
+                .as_deref()
+                .is_some_and(|v| v.starts_with("hermit ")),
+            "{:?}",
+            run.version
+        );
+        assert!(ask_in_tg(
+            &store,
+            "http://example.org/a",
+            TY,
+            "http://example.org/C"
+        ));
+        assert!(
+            !ask(
+                &store,
+                &format!(
+                    "ASK {{ GRAPH <{TG}> {{ ?s ?p ?o FILTER(isBlank(?s) || isBlank(?o)) }} }}"
+                )
+            ),
+            "only triples about named entities reach the target graph"
+        );
+        assert!(
+            !ask(
+                &store,
+                &format!(
+                    "ASK {{ GRAPH <{TG}> {{ ?s ?p <http://www.w3.org/2002/07/owl#Thing> }} }}"
+                )
+            ),
+            "no owl:Thing noise"
+        );
+    }
+
+    #[test]
+    fn sidecar_live_case_split() {
+        let Some((store, r)) = live_run(
+            r#"@prefix owl: <http://www.w3.org/2002/07/owl#> .
+               @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+               @prefix ex: <http://example.org/> .
+               ex:A rdfs:subClassOf [ a owl:Class ; owl:unionOf ( ex:B ex:C ) ] .
+               ex:B rdfs:subClassOf ex:D . ex:C rdfs:subClassOf ex:D .
+               ex:a a ex:A ."#,
+        ) else {
+            return;
+        };
+        r.unwrap();
+        assert!(ask_in_tg(
+            &store,
+            "http://example.org/a",
+            TY,
+            "http://example.org/D"
+        ));
+        assert!(ask_in_tg(
+            &store,
+            "http://example.org/A",
+            "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+            "http://example.org/D"
+        ));
+    }
+
+    #[test]
+    fn sidecar_live_nominals_give_same_as() {
+        let Some((store, r)) = live_run(
+            r#"@prefix owl: <http://www.w3.org/2002/07/owl#> .
+               @prefix ex: <http://example.org/> .
+               ex:TheOne owl:equivalentClass [ a owl:Class ; owl:oneOf ( ex:x ) ] .
+               ex:a a ex:TheOne ."#,
+        ) else {
+            return;
+        };
+        r.unwrap();
+        assert!(ask_in_tg(
+            &store,
+            "http://example.org/a",
+            SAME_AS,
+            "http://example.org/x"
+        ));
+    }
+
+    #[test]
+    fn sidecar_live_property_assertions_and_same_as_are_materialised() {
+        let Some((store, r)) = live_run(
+            r#"@prefix owl: <http://www.w3.org/2002/07/owl#> .
+               @prefix ex: <http://example.org/> .
+               ex:hasUncle owl:propertyChainAxiom ( ex:hasParent ex:hasBrother ) .
+               ex:hasChild owl:inverseOf ex:hasParent .
+               ex:hasBirthMother a owl:FunctionalProperty .
+               ex:John ex:hasParent ex:Mary . ex:Mary ex:hasBrother ex:Bob .
+               ex:Ann ex:hasBirthMother ex:Mary , ex:Maria ."#,
+        ) else {
+            return;
+        };
+        r.unwrap();
+        assert!(ask_in_tg(
+            &store,
+            "http://example.org/John",
+            "http://example.org/hasUncle",
+            "http://example.org/Bob"
+        ));
+        assert!(ask_in_tg(
+            &store,
+            "http://example.org/Mary",
+            "http://example.org/hasChild",
+            "http://example.org/John"
+        ));
+        assert!(ask_in_tg(
+            &store,
+            "http://example.org/Mary",
+            SAME_AS,
+            "http://example.org/Maria"
+        ));
+    }
+
+    #[test]
+    fn sidecar_live_datatype_facet_inconsistency() {
+        let Some((store, r)) = live_run(
+            r#"@prefix owl: <http://www.w3.org/2002/07/owl#> .
+               @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+               @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+               @prefix ex: <http://example.org/> .
+               ex:age a owl:DatatypeProperty .
+               ex:Adult rdfs:subClassOf [ a owl:Restriction ; owl:onProperty ex:age ;
+                 owl:allValuesFrom [ a rdfs:Datatype ; owl:onDatatype xsd:integer ;
+                   owl:withRestrictions ( [ xsd:minInclusive 18 ] ) ] ] .
+               ex:kid a ex:Adult ; ex:age 5 ."#,
+        ) else {
+            return;
+        };
+        match r {
+            Err(ReasoningError::Inconsistency { rule, detail }) => {
+                assert_eq!(rule, "external-reasoner");
+                assert!(detail.contains("minimal inconsistent subset"), "{detail}");
+            }
+            other => panic!("expected an inconsistency, got {other:?}"),
+        }
+        assert_eq!(
+            count_in_tg(&store),
+            0,
+            "nothing is written for an inconsistent input"
+        );
+    }
+
+    #[test]
+    fn sidecar_live_checks() {
+        let Some(c) = live() else { return };
+        let store = TripleStore::in_memory().unwrap();
+        let premise = triples(
+            r#"@prefix owl: <http://www.w3.org/2002/07/owl#> .
+               @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+               @prefix ex: <http://example.org/> .
+               ex:A rdfs:subClassOf [ a owl:Class ; owl:unionOf ( ex:B ex:C ) ] .
+               ex:B rdfs:subClassOf ex:D . ex:C rdfs:subClassOf ex:D .
+               ex:E rdfs:subClassOf ex:B , ex:C . ex:B owl:disjointWith ex:C .
+               ex:a a ex:A ."#,
+        );
+        let check = |task: CheckTask| {
+            dl_backend::check(
+                &store,
+                &c,
+                None,
+                Some(premise.clone()),
+                &task,
+                IdentityPolicy::Full,
+            )
+            .unwrap()
+            .0
+            .result
+        };
+        assert_eq!(check(CheckTask::Consistency), Tri::True);
+        let entails = |ttl: &str| {
+            check(CheckTask::Entailment {
+                conclusion: triples(&format!(
+                    "@prefix ex: <http://example.org/> . @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> . {ttl}"
+                )),
+            })
+        };
+        assert_eq!(entails("ex:a a ex:D ."), Tri::True);
+        assert_eq!(entails("ex:A rdfs:subClassOf ex:D ."), Tri::True);
+        assert_eq!(entails("ex:a a ex:B ."), Tri::False);
+        assert_eq!(
+            check(CheckTask::Satisfiability {
+                class: "http://example.org/E".into()
+            }),
+            Tri::False
+        );
+        assert_eq!(
+            check(CheckTask::Satisfiability {
+                class: "http://example.org/A".into()
+            }),
+            Tri::True
+        );
+    }
+
+    #[test]
+    fn sidecar_live_wrong_token_is_not_answered() {
+        let Some(mut c) = live() else { return };
+        c.sidecar_token = Some("not-the-token".into());
+        let store = store_with("<http://example.org/a> a <http://example.org/A> .");
+        let r = dl_backend::materialize(&store, &c, None, TG, IdentityPolicy::Full);
+        assert!(matches!(r, Err(ReasoningError::Backend { .. })), "{r:?}");
+    }
+}

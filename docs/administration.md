@@ -290,10 +290,10 @@ See [rml.md](rml.md) for the full RML guide.
 | `CORS_ORIGINS` | *(empty — same-origin only)* | Comma-separated allowed origins, e.g. `https://app.example.com,https://www.example.com` |
 | `EMBED_FRAME_ANCESTORS` | `*` | CSP `frame-ancestors` source list for the `/embed/*` pages, used verbatim: `https://intranet.example https://*.example.org` restricts embedding to those sites, and `'none'` (or an empty value) disables it. Other pages are never frameable from another site. See [embedding.md](embedding.md#restricting-who-may-embed). |
 | `TRUSTED_PROXY_CIDRS` | *(empty — direct TCP IP)* | Comma-separated CIDRs of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` is believed, e.g. `10.0.0.0/8,172.16.0.0/12`. The client IP derived this way keys the per-IP rate limits and the guest AI budget and is the IP recorded in the audit log. From any other peer the headers are ignored and the TCP peer address is the client. Leave empty when not behind a proxy; behind one, set it, or every client appears as the proxy. |
-| `OTS_DL_BACKEND` | *(unset)* | Backend of the `owl2-dl` regime: `native` (OWL 2 RL + DL-syntax rules, sound but not complete), `konclude` or `sidecar`. Unset: `owl2-dl` answers 503 (see [owl2-dl.md](owl2-dl.md)). |
+| `OTS_DL_BACKEND` | *(unset)* | Backend of the `owl2-dl` regime: `sidecar` (the bundled OWL API + HermiT reasoner, `docker compose --profile reasoner`), `konclude`, or `native` (OWL 2 RL + DL-syntax rules, sound but not complete). Unset: `owl2-dl` answers 503 (see [owl2-dl.md](owl2-dl.md)). |
 | `OTS_KONCLUDE_BIN` | `Konclude` | Konclude binary for `OTS_DL_BACKEND=konclude` (not shipped in the image; LGPL-3.0). |
-| `OTS_REASONER_URL` | *(unset)* | Base URL of the reasoner sidecar for `OTS_DL_BACKEND=sidecar`. |
-| `OTS_REASONER_TOKEN` | *(unset)* | Bearer token sent to the reasoner sidecar. |
+| `OTS_REASONER_URL` | *(unset; `http://reasoner:8090` under Docker Compose)* | Base URL of the reasoner sidecar for `OTS_DL_BACKEND=sidecar`. |
+| `OTS_REASONER_TOKEN` | *(unset)* | Bearer token sent to the reasoner sidecar; the bundled sidecar reads the same variable and refuses to start without it. Its own settings are in [owl2-dl.md](owl2-dl.md#running-the-bundled-sidecar). |
 | `OTS_REASONER_TIMEOUT_SECS` | `300` | Time limit of one DL backend call; past it the answer is unknown (504). |
 | `OTS_REASONER_MAX_TRIPLES` | `1000000` | Most triples handed to an external DL backend; more is a 413. |
 | `OTS_DL_DEBOUNCE_MS` | `2000` | Quiet period after the last write before an `owl2-dl` dataset's background run starts. |

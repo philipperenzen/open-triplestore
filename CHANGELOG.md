@@ -58,6 +58,36 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `"eq_ref": true` in the body of `POST /api/reasoning/materialize`, also writes
   `x owl:sameAs x` for every subject, predicate and non-literal object. It is
   off by default (about one triple per term); `sameas-off` skips it.
+- **OWL 2 DL reasoner sidecar (OWL API + HermiT).** `sidecars/reasoner/` is a
+  small Java service that speaks the sidecar protocol v1 (`POST /v1/reason`,
+  `POST /v1/check`, bearer token) and is published as its own image,
+  `ghcr.io/philipperenzen/open-triplestore-reasoner`; `docker compose
+  --profile reasoner up` starts it on the internal network only, and
+  `OTS_DL_BACKEND=sidecar` with a shared `OTS_REASONER_TOKEN` points the server
+  at it. It parses with the OWL API, never follows `owl:imports`, types
+  undeclared properties by use the way the server's own mapping does, applies
+  the OWL 1 DL compatibility rules of the RDF mapping (Tables 14, 15 and 18),
+  checks the OWL 2 DL profile, and reasons with HermiT under a time limit
+  (interrupted at the deadline: 504, result unknown). A materialisation reports
+  class and property hierarchies, unsatisfiable classes, types, `owl:sameAs`
+  and property assertions about named entities; an inconsistency comes with a
+  minimal inconsistent subset of the axioms when the input is small enough
+  (`OTS_REASONER_EXPLAIN_MAX_AXIOMS`). Entailment is checked by reduction to
+  class satisfiability, because HermiT's own entailment check answered `false`
+  for entailed class assertions until the ABox had been realised. HermiT and
+  the OWL API ship unmodified as separate jars (LGPL-3.0; `NOTICE`, new
+  `LICENSES/LGPL-3.0.txt`, `GPL-3.0.txt`, `LGPL-2.1.txt`, `EDL-1.0.txt`, and a
+  generated `/app/THIRD-PARTY.txt` in the image).
+- **W3C OWL 2 test cases in CI.** The approved cases of the OWL 2 Test Case
+  Repository are vendored unmodified (`tests/fixtures/w3c-owl2/`, W3C
+  Document License), and `tests/w3c_owl2_dl_manifests.rs` runs the OWL 2 DL /
+  Direct Semantics ones through `POST /api/reasoning/check` against the
+  sidecar, with a known-failures list and a pass floor. The conformance job
+  builds and starts the sidecar and also runs new live tests in
+  `tests/owl2_dl_conformance.rs` (existential witnesses, case splits,
+  nominals, property assertions and `owl:sameAs`, facet inconsistencies,
+  checks). No score is published for the suite
+  ([docs/conformance/owl2-dl.md](docs/conformance/owl2-dl.md)).
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -212,6 +242,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   classes) plus their `scm-cls` consequences, so an empty store's
   materialisation reports 48 triples instead of 32. The only rules not run are
   `dt-type2`, `dt-eq` and `dt-diff`.
+- **OWL 2 DL is graded Full with the reasoner sidecar** (`docs/standards.md`
+  footnote 4, with a new legend sentence on grades that depend on an optional
+  component the project ships); without it the native rules stay sound but
+  incomplete. The comparison matrix's OWL DL cell follows. The server's RDF →
+  OWL 2 mapping now also reads a named class carrying several
+  `owl:oneOf`/`owl:intersectionOf`/… lists as one `EquivalentClasses` axiom per
+  list, OWL 1's `owl:DataRange` as `rdfs:Datatype`, and ignores
+  `rdf:type owl:NamedIndividual` on a blank node, instead of refusing them as
+  outside OWL 2 DL.
 - **`ReasoningError::Inconsistency` names its rule.** The library variant is now
   `Inconsistency { rule, detail }` (it was `Inconsistency(String)`), and
   `ReasoningError::NotConverged { regime, iterations }` is new. Code that
