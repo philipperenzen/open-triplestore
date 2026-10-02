@@ -14,6 +14,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **SWRL reads five more rule syntaxes and runs over datasets.**
+  - **Syntaxes.** `POST /api/swrl/execute` now takes every `format` below.
+    - `rdf`: the SWRL RDF syntax (`swrl:Imp` with argument lists), in any
+      serialisation given as `rdf_format`.
+    - `functional`: OWL 2 functional-syntax `DLSafeRule`.
+    - `swrlapi`: the SWRLAPI human-readable syntax. Prefixes come from the
+      request's `prefixes`, then the server's prefix registry.
+    - `ruleml`: the SWRL §4 RuleML XML syntax.
+    - OWL/XML (`xml`, now also `owlxml`) reads `Prefix` declarations,
+      `abbreviatedIRI` and `xml:base`.
+  - **Dataset scope.** A request may name a `dataset` and `source_graphs`.
+    Rule bodies then read those graphs, with the read checks of
+    `/api/reasoning/materialize`, instead of the unnamed default graph.
+    Without a `target_graph`, a dataset run writes to the dataset's inference
+    graph, which only its writers may fill. The response adds `target_graph`
+    and `sources`.
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -67,6 +83,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asks for, and re-pins; the store now tells everyone which datasets that applies to.
 
 ### Changed
+- **SWRL rules stored with a dataset always run with it.** `swrl:Imp` rules
+  in a dataset's `entailment`- and `model`-role graphs, and in the model
+  version it conforms to, re-run after every write to one of the dataset's
+  graphs.
+  - **Regime in `materialize` mode:** they reach one joint fixed point with
+    the regime in its graph.
+  - **No regime:** they run on their own into `urn:entailment:swrl:<dataset>`,
+    which `?entailment_dataset=` now adds to a query when the dataset has no
+    regime.
+
+  `GET /api/datasets/{id}/entailment` reports `inference_graph` and `rules`
+  (the graphs read, the count or why they cannot be read, the last run). The
+  seeded "Rules (SWRL)" demo dataset's rule had atoms without arguments and
+  could never run; it is now valid SWRL RDF.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were

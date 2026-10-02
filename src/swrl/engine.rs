@@ -291,16 +291,49 @@ pub struct RuleResult {
 pub struct CompiledRules {
     rules: Vec<(String, String)>,
     target: Option<NamedNode>,
+    /// The graphs rule bodies read, the target included; `None` reads the
+    /// default graph.
+    scope: Option<Vec<String>>,
 }
 
 /// Translate every rule, refusing the whole set if any rule cannot run as
 /// written. Running the rest would hand back a closure the caller did not
 /// ask for, so the error names each refused rule and nothing runs.
+///
+/// Rule bodies read the default graph, or with `sources` the merge of those
+/// graphs plus the target graph, so a rule sees what earlier iterations
+/// derived. A scoped run must name its target: the default graph cannot be
+/// part of a scope.
 pub fn compile_rules(
     rules: &[SwrlRule],
     target_graph: Option<&str>,
+    sources: Option<&[String]>,
 ) -> Result<CompiledRules, String> {
     let target = target_graph.map(validate_target_graph).transpose()?;
+    let scope = match sources {
+        None => None,
+        Some(sources) => {
+            let Some(t) = target.as_ref() else {
+                return Err(
+                    "a run scoped to named graphs needs a target_graph: what it derives \
+                     must be readable by its next iteration"
+                        .to_string(),
+                );
+            };
+            let mut scope = Vec::with_capacity(sources.len() + 1);
+            for g in sources {
+                NamedNode::new(g.as_str())
+                    .map_err(|e| format!("Invalid source graph '{g}': {e}"))?;
+                if !scope.contains(g) {
+                    scope.push(g.clone());
+                }
+            }
+            if !scope.iter().any(|g| g == t.as_str()) {
+                scope.push(t.as_str().to_string());
+            }
+            Some(scope)
+        }
+    };
     let mut compiled = Vec::with_capacity(rules.len());
     let mut errors = Vec::new();
     for (i, rule) in rules.iter().enumerate() {
@@ -319,6 +352,7 @@ pub fn compile_rules(
     Ok(CompiledRules {
         rules: compiled,
         target,
+        scope,
     })
 }
 
@@ -376,7 +410,11 @@ pub fn execute_compiled(
             // on the inner store: the store's write guard (mirror, query cache)
             // and per-graph count maintenance must see these writes like any
             // other update.
-            if let Err(e) = store.update(sparql) {
+            let outcome = match &compiled.scope {
+                Some(scope) => store.update_scoped(sparql, scope),
+                None => store.update(sparql),
+            };
+            if let Err(e) = outcome {
                 warn!("Rule {} failed: {}", name, e);
                 if result.success {
                     result.success = false;

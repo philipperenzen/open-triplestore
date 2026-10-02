@@ -299,3 +299,209 @@ async fn dataset_regime_materialises_on_write_and_joins_queries_on_request() {
         "{st}"
     );
 }
+
+// ─── SWRL rules stored with a dataset ──────────────────────────────────────
+
+#[cfg(feature = "swrl")]
+const RULES: &str = "https://example.org/ent/rules";
+#[cfg(feature = "swrl")]
+const SWRL_TTL_PREFIXES: &str = "@prefix ex: <https://example.org/ent/> . \
+     @prefix swrl: <http://www.w3.org/2003/11/swrl#> . ";
+
+/// A dataset `rul` with an instances graph and an `entailment`-role graph.
+#[cfg(feature = "swrl")]
+fn rules_dataset(state: &open_triplestore::server::AppState, id: &str) {
+    state
+        .auth_db
+        .create_dataset(
+            id,
+            "Rules",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    for (g, role) in [
+        (DATA, GraphKind::Instances),
+        (MODEL, GraphKind::Model),
+        (RULES, GraphKind::Entailment),
+    ] {
+        state.auth_db.add_dataset_graph(id, g).unwrap();
+        state
+            .auth_db
+            .set_dataset_graph_role(id, g, Some(role))
+            .unwrap();
+    }
+}
+
+/// `ex:Asset(?x) -> ex:Inspected(?x)`, in the SWRL RDF syntax.
+#[cfg(feature = "swrl")]
+fn inspected_rule() -> String {
+    format!(
+        "{SWRL_TTL_PREFIXES} ex:x a swrl:Variable . \
+         ex:inspect a swrl:Imp ; \
+           swrl:body ( [ a swrl:ClassAtom ; swrl:classPredicate ex:Asset ; swrl:argument1 ex:x ] ) ; \
+           swrl:head ( [ a swrl:ClassAtom ; swrl:classPredicate ex:Inspected ; swrl:argument1 ex:x ] ) ."
+    )
+}
+
+#[cfg(feature = "swrl")]
+async fn assets_inspected(app: &Router, token: &str, ds: &str) -> usize {
+    let q = format!("SELECT ?b WHERE {{ ?b a <{EX}Inspected> }}");
+    let (st, v, txt) = req(
+        app,
+        Method::GET,
+        &format!("/sparql?query={}&entailment_dataset={ds}", url_encode(&q)),
+        Some(token),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    rows(&v)
+}
+
+/// Stored rules always run (owner decision D13): a dataset with no regime
+/// configured still re-runs its `swrl:Imp` rules after every write, into its
+/// rules graph, rebuilt so a deleted premise drops its conclusion.
+#[cfg(feature = "swrl")]
+#[tokio::test]
+async fn dataset_rules_rerun_after_write() {
+    let (state, token) = admin_state();
+    rules_dataset(&state, "rul");
+    state
+        .store
+        .load_str(&inspected_rule(), RdfFormat::Turtle, Some(RULES))
+        .unwrap();
+    let app = test_app(state.clone());
+
+    // A write to the instances graph runs the stored rule.
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/store?graph={}", url_encode(DATA)),
+        Some(&token),
+        Some("text/turtle"),
+        &format!("<{EX}b1> a <{EX}Asset> ."),
+    )
+    .await;
+    assert!(st.is_success(), "{st} {txt}");
+    assert_eq!(assets_inspected(&app, &token, "rul").await, 1);
+
+    let (st, v, txt) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/rul/entailment",
+        Some(&token),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(v["inference_graph"], "urn:entailment:swrl:rul", "{txt}");
+    assert_eq!(v["rules"]["count"], 1, "{txt}");
+    assert_eq!(v["rules"]["last_run"]["converged"], true, "{txt}");
+
+    // Replacing the data rebuilds the conclusions.
+    let (st, _, txt) = req(
+        &app,
+        Method::PUT,
+        &format!("/store?graph={}", url_encode(DATA)),
+        Some(&token),
+        Some("text/turtle"),
+        &format!("<{EX}b2> a <{EX}Asset> . <{EX}b3> a <{EX}Asset> ."),
+    )
+    .await;
+    assert!(st.is_success(), "{st} {txt}");
+    assert_eq!(assets_inspected(&app, &token, "rul").await, 2);
+
+    // A rule the strict reader refuses is reported, not silently skipped.
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/store?graph={}", url_encode(RULES)),
+        Some(&token),
+        Some("text/turtle"),
+        &format!(
+            "{SWRL_TTL_PREFIXES} ex:broken a swrl:Imp ; \
+               swrl:head ( [ a swrl:ClassAtom ; swrl:classPredicate ex:T ] ) ."
+        ),
+    )
+    .await;
+    assert!(st.is_success(), "{st} {txt}");
+    let (_, v, txt) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/rul/entailment",
+        Some(&token),
+        None,
+        "",
+    )
+    .await;
+    assert!(
+        v["rules"]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("swrl:argument1")),
+        "{txt}"
+    );
+}
+
+/// Rules and the regime reach one joint fixed point: OWL 2 RL makes `b1` an
+/// Asset (Bridge ⊑ Asset), the stored rule makes every Asset Inspected, and
+/// RL again makes it Tracked (Inspected ⊑ Tracked). Neither alone gets there.
+#[cfg(feature = "swrl")]
+#[tokio::test]
+async fn swrl_and_rl_reach_joint_fixpoint() {
+    let (state, token) = admin_state();
+    rules_dataset(&state, "joint");
+    let sub = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+    state
+        .store
+        .load_str(
+            &format!("<{EX}Bridge> <{sub}> <{EX}Asset> . <{EX}Inspected> <{sub}> <{EX}Tracked> ."),
+            RdfFormat::Turtle,
+            Some(MODEL),
+        )
+        .unwrap();
+    state
+        .store
+        .load_str(
+            &format!("<{EX}b1> a <{EX}Bridge> ."),
+            RdfFormat::Turtle,
+            Some(DATA),
+        )
+        .unwrap();
+    state
+        .store
+        .load_str(&inspected_rule(), RdfFormat::Turtle, Some(RULES))
+        .unwrap();
+    let app = test_app(state.clone());
+
+    let (st, v, txt) = req(
+        &app,
+        Method::PUT,
+        "/api/datasets/joint/entailment",
+        Some(&token),
+        Some("application/json"),
+        &json!({ "regime": "owl2-rl", "mode": "materialize" }).to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(v["rules"]["converged"], true, "{txt}");
+    assert!(v["rules"]["rounds"].as_u64().unwrap() >= 2, "{txt}");
+    let graph = "urn:entailment:owl2-rl:joint";
+    assert_eq!(v["inference_graph"], graph, "{txt}");
+
+    let q = format!("ASK {{ GRAPH <{graph}> {{ <{EX}b1> a <{EX}Tracked> }} }}");
+    assert!(
+        matches!(
+            state.store.query(&q),
+            Ok(oxigraph::sparql::QueryResults::Boolean(true))
+        ),
+        "regime -> rule -> regime: b1 must end up Tracked: {txt}"
+    );
+    // Queries opting in see the joint closure.
+    assert_eq!(assets_inspected(&app, &token, "joint").await, 1);
+}

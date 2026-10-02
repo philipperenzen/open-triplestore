@@ -1,4 +1,8 @@
-//! SWRL rule parsers: OWL/XML `DLSafeRule` and an ad-hoc text form.
+//! SWRL rule parsers: OWL/XML `DLSafeRule` and an ad-hoc text form. The other
+//! syntaxes have their own modules: [`super::rdf`] (SWRL RDF syntax, any
+//! serialisation), [`super::functional`] (OWL 2 functional-syntax
+//! `DLSafeRule`), [`super::swrlapi`] (the SWRLAPI human-readable syntax) and
+//! [`super::ruleml`] (the SWRL §4 RuleML XML syntax).
 //!
 //! The OWL/XML reader ([`parse_swrl`]) is a whitelist state machine. Inside a
 //! `DLSafeRule` every element must be one it understands, in the place the
@@ -18,12 +22,14 @@
 //! Arguments are `Variable`, `NamedIndividual` and `Literal` (typed,
 //! language-tagged or plain), each checked against its position: an
 //! individual where a data value belongs, or a literal where an individual
-//! belongs, is refused. Refused with a message until later work supports them:
+//! belongs, is refused. IRIs are given as `IRI` (relative ones resolve against
+//! `xml:base`) or `abbreviatedIRI` (expanded with the document's `Prefix`
+//! declarations; `rdf:`, `rdfs:`, `xsd:`, `owl:`, `swrl:` and `swrlb:` are
+//! predeclared). Refused with a message until later work supports them:
 //! class-expression atoms (a `ClassAtom` over anything but a named class),
-//! `DataRangeAtom`, anonymous individuals, `abbreviatedIRI` on anything but a
-//! variable, and the SWRL RDF/XML (`swrl:Imp`) and RuleML XML syntaxes.
-//! Elements outside a `DLSafeRule` (the rest of an ontology) are ignored, and
-//! so is a rule's `Annotation`.
+//! `DataRangeAtom` and anonymous individuals. Elements outside a `DLSafeRule`
+//! (the rest of an ontology) are ignored, and so is a rule's `Annotation`;
+//! an `Imp` element is pointed at the reader for its syntax.
 //!
 //! The ad-hoc text form ([`parse_swrl_text`], `A(?x) ^ B(?x,?y) -> C(?y)`) is a
 //! convenience shorthand, not a second serialization of the same model. Two
@@ -31,7 +37,7 @@
 //! as an IRI — there are no prefix declarations — so it must be an absolute
 //! IRI (`http://ex/Person(?x)`; bare names are rejected); and every
 //! two-argument atom becomes a property atom, so `swrlb:` builtins cannot be
-//! expressed in the text form at all. Use the OWL/XML form for any rule with a
+//! expressed in the text form at all. Use another syntax for any rule with a
 //! builtin. Nor can the text form say whether a property is an object or a
 //! data property: a two-argument atom whose second argument is a variable is
 //! an untyped [`Atom::PropertyAtom`].
@@ -47,6 +53,7 @@ use quick_xml::Reader;
 use tracing::debug;
 
 use super::engine::{validate_predicate_iri, Atom, SwrlArg, SwrlRule};
+use super::names::Names;
 
 /// `rdf:PlainLiteral`: OWL 2's plain literal, lexical form `text@lang`.
 const RDF_PLAIN_LITERAL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral";
@@ -73,19 +80,7 @@ pub fn parse_swrl(xml: &str) -> Result<Vec<SwrlRule>, String> {
             Ok(Event::End(_)) => parser.close()?,
             Ok(Event::Text(ref e)) => parser.text(&e.xml10_content())?,
             Ok(Event::CData(ref e)) => parser.text(&e.xml10_content())?,
-            Ok(Event::GeneralRef(ref e)) => {
-                let resolved = match e.resolve_char_ref() {
-                    Ok(Some(c)) => c.to_string(),
-                    Ok(None) => {
-                        let name = e.xml10_content();
-                        quick_xml::escape::resolve_predefined_entity(&name)
-                            .ok_or_else(|| format!("XML parse error: unknown entity &{name};"))?
-                            .to_string()
-                    }
-                    Err(err) => return Err(format!("XML parse error: {err}")),
-                };
-                parser.text(&resolved)?
-            }
+            Ok(Event::GeneralRef(ref e)) => parser.text(&resolve_general_ref(e)?)?,
             Err(e) => return Err(format!("XML parse error: {}", e)),
             _ => {}
         }
@@ -274,23 +269,46 @@ enum Frame {
 struct OwlXmlRuleParser {
     stack: Vec<Frame>,
     rules: Vec<SwrlRule>,
+    /// `Prefix` declarations and `xml:base`, for `abbreviatedIRI` and
+    /// relative `IRI` attributes.
+    names: Names,
 }
 
 impl OwlXmlRuleParser {
     fn open(&mut self, e: &BytesStart) -> Result<(), String> {
         let name = local_name(e.name().as_ref());
         let attrs = collect_attrs(e)?;
+        if let Some(base) = attrs.get("xml:base") {
+            self.names.set_base(base)?;
+        }
+        let names = &self.names;
         let frame = match self.stack.last_mut() {
             None | Some(Frame::Outside) => match name.as_str() {
                 "DLSafeRule" => Frame::Rule(RuleBuilder {
-                    name: attrs.get("IRI").cloned(),
+                    name: attrs.get("IRI").map(|i| names.resolve(i)),
                     ..RuleBuilder::default()
                 }),
-                "Imp" | "imp" => {
-                    return Err(format!(
-                        "<{name}> is the SWRL RDF/XML or RuleML XML syntax, which format \
-                         \"xml\" does not read yet; it reads OWL/XML DLSafeRule elements"
-                    ))
+                "Prefix" => {
+                    let (Some(prefix), Some(iri)) = (attrs.get("name"), attrs.get("IRI")) else {
+                        return Err("<Prefix> needs name and IRI attributes".to_string());
+                    };
+                    let iri = names.resolve(iri);
+                    self.names.declare(prefix, &iri);
+                    Frame::Outside
+                }
+                "Imp" => {
+                    return Err(
+                        "<Imp> is the SWRL RDF/XML syntax: send it with format \"rdf\" and \
+                         rdf_format \"rdfxml\"; format \"xml\" reads OWL/XML DLSafeRule elements"
+                            .to_string(),
+                    )
+                }
+                "imp" => {
+                    return Err(
+                        "<imp> is the SWRL RuleML XML syntax: send it with format \"ruleml\"; \
+                         format \"xml\" reads OWL/XML DLSafeRule elements"
+                            .to_string(),
+                    )
                 }
                 _ => Frame::Outside,
             },
@@ -313,7 +331,7 @@ impl OwlXmlRuleParser {
                 match AtomKind::from_element(&name) {
                     Some(kind) => {
                         let predicate = if kind == AtomKind::Builtin {
-                            Some(iri_attr(&attrs, &name)?)
+                            Some(iri_attr(names, &attrs, &name)?)
                         } else {
                             None
                         };
@@ -340,14 +358,14 @@ impl OwlXmlRuleParser {
                     }
                 }
             }
-            Some(Frame::Atom(atom)) => open_in_atom(atom, &name, &attrs)?,
+            Some(Frame::Atom(atom)) => open_in_atom(names, atom, &name, &attrs)?,
             Some(Frame::InverseOf) => {
                 let Some(Frame::Atom(atom)) = self.stack.iter_mut().rev().nth(1) else {
                     unreachable!("ObjectInverseOf is only opened inside an atom");
                 };
                 match name.as_str() {
                     "ObjectProperty" if atom.predicate.is_none() => {
-                        atom.predicate = Some(iri_attr(&attrs, &name)?);
+                        atom.predicate = Some(iri_attr(names, &attrs, &name)?);
                         Frame::Leaf(name)
                     }
                     _ => {
@@ -434,6 +452,7 @@ impl OwlXmlRuleParser {
 /// property), then its arguments, each checked against the sort its position
 /// takes.
 fn open_in_atom(
+    names: &Names,
     atom: &mut AtomBuilder,
     name: &str,
     attrs: &HashMap<String, String>,
@@ -446,7 +465,7 @@ fn open_in_atom(
             _ => "DataProperty",
         };
         if name == expected {
-            atom.predicate = Some(iri_attr(attrs, name)?);
+            atom.predicate = Some(iri_attr(names, attrs, name)?);
             return Ok(Frame::Leaf(name.to_string()));
         }
         if atom.kind == AtomKind::ObjectProperty && name == "ObjectInverseOf" {
@@ -472,21 +491,26 @@ fn open_in_atom(
     let position = format!("argument {} of {el}", index + 1);
     match name {
         "Variable" => {
-            let var = attrs
-                .get("IRI")
-                .or(attrs.get("abbreviatedIRI"))
-                .filter(|v| !v.is_empty())
-                .ok_or("Variable without an IRI")?;
-            atom.args.push(SwrlArg::Variable(var.clone()));
+            // A variable is only an identity within its rule, so a prefixed
+            // name whose prefix is not declared still names one.
+            let var = match (attrs.get("IRI"), attrs.get("abbreviatedIRI")) {
+                (Some(iri), _) if !iri.is_empty() => names.resolve(iri),
+                (_, Some(short)) if !short.is_empty() => {
+                    names.expand(short).unwrap_or_else(|_| short.clone())
+                }
+                _ => return Err("Variable without an IRI".to_string()),
+            };
+            atom.args.push(SwrlArg::Variable(var));
             Ok(Frame::Leaf(name.to_string()))
         }
         "NamedIndividual" if sort == ArgSort::Individual => {
-            atom.args.push(SwrlArg::Individual(iri_attr(attrs, name)?));
+            atom.args
+                .push(SwrlArg::Individual(iri_attr(names, attrs, name)?));
             Ok(Frame::Leaf(name.to_string()))
         }
         "Literal" if sort == ArgSort::Data => Ok(Frame::Literal {
             value: String::new(),
-            datatype: attrs.get("datatypeIRI").cloned(),
+            datatype: attrs.get("datatypeIRI").map(|d| names.resolve(d)),
             language: attrs.get("xml:lang").cloned(),
         }),
         "NamedIndividual" => Err(format!(
@@ -502,16 +526,21 @@ fn open_in_atom(
     }
 }
 
-/// The `IRI` attribute of a class, property, individual or built-in element.
-fn iri_attr(attrs: &HashMap<String, String>, element: &str) -> Result<String, String> {
+/// The IRI of a class, property, individual or built-in element: its `IRI`
+/// attribute (relative IRIs resolve against `xml:base`) or its
+/// `abbreviatedIRI` (expanded with the document's `Prefix` declarations).
+fn iri_attr(
+    names: &Names,
+    attrs: &HashMap<String, String>,
+    element: &str,
+) -> Result<String, String> {
     if let Some(iri) = attrs.get("IRI") {
-        return Ok(iri.clone());
+        return Ok(names.resolve(iri));
     }
     if let Some(short) = attrs.get("abbreviatedIRI") {
-        return Err(format!(
-            "<{element} abbreviatedIRI=\"{short}\">: prefixed names are not supported yet; \
-             write the full IRI"
-        ));
+        return names
+            .expand(short)
+            .map_err(|e| format!("<{element} abbreviatedIRI=\"{short}\">: {e}"));
     }
     Err(format!("<{element}> without an IRI attribute"))
 }
@@ -646,15 +675,36 @@ fn parse_single_atom(input: &str) -> Result<Atom, String> {
     }
 }
 
-fn local_name(name: &str) -> String {
+pub(super) fn local_name(name: &str) -> String {
     name.rsplit_once(':')
         .map(|(_, local)| local.to_string())
         .unwrap_or_else(|| name.to_string())
 }
 
+/// The text of a character or predefined entity reference (`&#38;`,
+/// `&amp;`). Entities a DTD declares are not expanded: the document is
+/// refused naming the entity.
+pub(super) fn resolve_general_ref(e: &quick_xml::events::BytesRef) -> Result<String, String> {
+    match e.resolve_char_ref() {
+        Ok(Some(c)) => Ok(c.to_string()),
+        Ok(None) => {
+            let name = e.xml10_content();
+            quick_xml::escape::resolve_predefined_entity(&name)
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    format!(
+                        "XML parse error: unknown entity &{name}; (DTD entities are not \
+                         expanded; write the full IRI)"
+                    )
+                })
+        }
+        Err(err) => Err(format!("XML parse error: {err}")),
+    }
+}
+
 /// The element's attributes. A malformed attribute fails the document rather
 /// than vanishing: an `IRI` that silently went missing would change the rule.
-fn collect_attrs(e: &BytesStart) -> Result<HashMap<String, String>, String> {
+pub(super) fn collect_attrs(e: &BytesStart) -> Result<HashMap<String, String>, String> {
     let mut map = HashMap::new();
     for attr in e.attributes() {
         let attr = attr.map_err(|err| format!("XML parse error: {err}"))?;
