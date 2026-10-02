@@ -14,6 +14,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The buildingSMART IDS test corpus runs in CI.** `tests/buildingsmart_ids_conformance.rs`
+  runs all 334 IDS + IFC cases of the buildingSMART IDS repository's test
+  corpus through the IFC lift, the IDS importer and the SHACL validator, as a
+  two-way ratchet with a known-failures list. The corpus (CC BY-ND 4.0) is not
+  vendored: the runner downloads it from a pinned commit and checks every
+  file against `tests/fixtures/buildingsmart-ids/MANIFEST.sha256`, and
+  `OTS_TEST_IDS_CORPUS_REQUIRED=1` (set in CI) fails a missing download.
+  Development results only, no score published, not a buildingSMART
+  certification ([docs/conformance/ids.md](docs/conformance/ids.md)).
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the

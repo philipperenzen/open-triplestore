@@ -688,6 +688,15 @@ Fetched at run time, not redistributed:
     no licence (RIONED's CC0 covers the data on the GWSW Server) and quotes
     definitions from NEN and EN standards, so it is downloaded by fetch.sh and
     not redistributed.
+  - buildingSMART IDS 1.0 test corpus (Documentation/ImplementersDocumentation/
+    TestCases of https://github.com/buildingSMART/IDS, commit 870f9c4e) — ©
+    buildingSMART International Ltd., licensed under CC BY-ND 4.0
+    (https://creativecommons.org/licenses/by-nd/4.0/); its IFC files derive
+    from IfcOpenShell's ifctester work. Downloaded by
+    tests/buildingsmart_ids_conformance.rs, which checks each file against
+    tests/fixtures/buildingsmart-ids/MANIFEST.sha256 (this project's list of
+    paths and digests); never committed or shipped. Results on it are
+    development results, not a buildingSMART certification.
 
 The licenses of bundled and dependency components are unaffected by the Commons
 Clause condition above, which applies only to Open Triplestore itself.

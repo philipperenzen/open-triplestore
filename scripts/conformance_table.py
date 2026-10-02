@@ -15,8 +15,9 @@ runners record, and writes the result between `<!-- conformance-table:start -->`
 
 The *basis* column is the honest part: only the W3C SPARQL 1.1 query/update
 sections, the W3C SHACL core/sparql sections and the OGC GeoSPARQL validator
-shapes are vendored test corpora; every other suite is hand-written and
-*derived from* the spec text.
+shapes are vendored test corpora, and the buildingSMART IDS test corpus is
+fetched at test time from a pinned commit; every other suite is hand-written
+and *derived from* the spec text.
 
 Which corpus results are published is a licence question, not a style one:
 
@@ -35,6 +36,10 @@ Which corpus results are published is a licence question, not a style one:
   sets no such condition, so that row keeps its counts (`PUBLISH_SCORE`).
 - The OGC validator shapes are under the Apache License 2.0; only the OGC
   authorises compliance marks for its standards, so no row claims compliance.
+- The buildingSMART IDS corpus is CC BY-ND 4.0 and is never committed (the
+  runner downloads it and checks each file's SHA-256). Its results are
+  development results, not a buildingSMART certification, so its row
+  publishes no score either.
 """
 from __future__ import annotations
 
@@ -75,6 +80,7 @@ SUITES: dict[str, tuple[str, str]] = {
     "dcat_conformance": ("DCAT 2 / VoID", "spec-derived"),
     "rml_conformance": ("RML / R2RML", "spec-derived"),
     "standards_conformance": ("Cross-standard HTTP smoke", "spec-derived"),
+    "buildingsmart_ids_conformance": ("buildingSMART IDS 1.0", "**buildingSMART IDS test corpus**, fetched at a pinned commit and SHA-256 checked (not in the repository)"),
 }
 
 TEST_ATTR = re.compile(r"^\s*#\[(?:tokio::)?test(?:\(|\])", re.M)
@@ -92,6 +98,7 @@ def count(path: Path) -> tuple[int, int]:
 CORPUS_RUNNERS = {
     "w3c_shacl_conformance": 90,
     "w3c_sparql11_manifests": 450,
+    "buildingsmart_ids_conformance": 0,
 }
 
 # Runners whose score may be published (see the module docstring). A runner
@@ -100,11 +107,18 @@ CORPUS_RUNNERS = {
 # policy allows no public performance claims.
 PUBLISH_SCORE = {"w3c_shacl_conformance"}
 
-# The note for a corpus runner whose score is not published.
-UNSCORED_NOTE = (
-    "runs in CI as a development and regression ratchet; no score is published "
-    "(W3C test-suite policy); known gaps in `docs/conformance/sparql11.md`"
-)
+# The note for a corpus runner whose score is not published, per runner.
+UNSCORED_NOTES = {
+    "w3c_sparql11_manifests": (
+        "runs in CI as a development and regression ratchet; no score is published "
+        "(W3C test-suite policy); known gaps in `docs/conformance/sparql11.md`"
+    ),
+    "buildingsmart_ids_conformance": (
+        "runs in CI as a development and regression ratchet; no score is published, "
+        "and the results are not a buildingSMART certification; known gaps in "
+        "`docs/conformance/ids.md`"
+    ),
+}
 
 
 def corpus(stem: str) -> tuple[int, int, int, int]:
@@ -140,7 +154,7 @@ def render() -> str:
                     plural = "" if failed == 1 else "s"
                     note = f"{cases} corpus cases: {passed} pass, {failed} known failure{plural}, {skipped} runner-side skips (floor ≥{CORPUS_RUNNERS[stem]} asserted)"
                 else:
-                    note = UNSCORED_NOTE
+                    note = UNSCORED_NOTES[stem]
             elif ign:
                 note = f"{ign} ignored"
             rows.append((std, f"`tests/{stem}.rs`", basis, n, note))
@@ -161,12 +175,13 @@ def render() -> str:
         + (f" ({conf_ignored} ignored)" if conf_ignored else "")
         + f"; a further {other_total} tests in {other_suites} integration, security and "
         "regression suites under `tests/`, plus the crate's unit tests. Only the "
-        f"{len([r for r in rows if 'vendored' in r[2]])} **vendored** rows run a published "
-        "corpus; every other suite is hand-written and derived from the specification text. "
-        "The SHACL and GeoSPARQL corpus results are development and regression results on the "
-        "vendored sections (`docs/conformance/`), not W3C or OGC conformance claims. The SPARQL "
-        "1.1 sections are a subset of a W3C test suite, so under W3C's test-suite licence policy "
-        "they are used for development and bug tracking only, and no score is published for them."
+        f"{len([r for r in rows if 'vendored' in r[2]])} **vendored** rows and the buildingSMART IDS "
+        "row run a published corpus; every other suite is hand-written and derived from the "
+        "specification text. The SHACL, GeoSPARQL and IDS corpus results are development and "
+        "regression results (`docs/conformance/`), not W3C or OGC conformance claims or a "
+        "buildingSMART certification. The SPARQL 1.1 sections are a subset of a W3C test suite, "
+        "so under W3C's test-suite licence policy they are used for development and bug tracking "
+        "only, and no score is published for them."
     )
     lines.append("")
     lines.append("_Generated by `scripts/conformance_table.py` — edit the suites, not the table._")

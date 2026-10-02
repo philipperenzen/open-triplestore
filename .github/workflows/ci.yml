@@ -306,7 +306,13 @@ jobs:
 
       # W3C / GeoSPARQL / OWL2 / LDP conformance tests. Enabling all features
       # exercises the optional reasoning, ldp, shex, swrl and text-search paths.
+      # The buildingSMART IDS corpus is not vendored (CC BY-ND 4.0): its runner
+      # downloads it from a pinned commit and checks every file's SHA-256, and
+      # OTS_TEST_IDS_CORPUS_REQUIRED turns a failed download into a failure
+      # instead of a skip.
       - name: Run conformance tests
+        env:
+          OTS_TEST_IDS_CORPUS_REQUIRED: '1'
         run: cargo test --features full,saml,test-utils,backup-encrypt,alerting --locked --test '*conformance*'
 
       # The seed bundles built on national-standard data (NEN 2660-2, IMBOR,
