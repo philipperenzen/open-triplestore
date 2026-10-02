@@ -303,6 +303,51 @@ fn inferred_count_is_exact_not_inflated() {
     );
 }
 
+// ───────────── Blank-node heads (the repair layer's baseline) ─────────────
+
+const BRIDGES: &str = "ex:b1 a ex:Bridge . ex:b2 a ex:Bridge . ex:b3 a ex:Bridge .";
+
+/// Distinct deck nodes hanging off a bridge.
+fn decks(store: &TripleStore) -> usize {
+    rows(
+        store,
+        "SELECT DISTINCT ?w WHERE { ?b ex:hasDeck ?w . ?w a ex:Deck }",
+    )
+}
+
+/// A rule whose head has a blank node and whose body does not check that the
+/// head already holds mints a fresh node on every round: the run stops at its
+/// 100-round cap with 100 decks per bridge, two triples each. This is the
+/// behaviour the repair layer's labelled nulls replace
+/// (`docs/notes/repair-layer-design.md` §2.2); `/infer` keeps it.
+#[test]
+fn unguarded_blank_node_head_mints_a_witness_per_round() {
+    let shapes = r#"
+        ex:BridgeShape a sh:NodeShape ;
+            sh:targetClass ex:Bridge ;
+            sh:rule [ a sh:SPARQLRule ;
+                sh:construct "CONSTRUCT { $this <http://example.org/hasDeck> _:w . _:w a <http://example.org/Deck> } WHERE { $this a <http://example.org/Bridge> }" ] ."#;
+    let store = store_with(shapes, BRIDGES);
+    let n = infer(&store, "urn:shapes", &[]).unwrap();
+    assert_eq!(n, 100 * 3 * 2, "two new triples per bridge per round");
+    assert_eq!(decks(&store), 300);
+}
+
+/// The same rule guarded by `FILTER NOT EXISTS` on its own head fires once
+/// per bridge, and a second run derives nothing.
+#[test]
+fn guarded_blank_node_head_mints_one_witness_and_is_idempotent() {
+    let shapes = r#"
+        ex:BridgeShape a sh:NodeShape ;
+            sh:targetClass ex:Bridge ;
+            sh:rule [ a sh:SPARQLRule ;
+                sh:construct "CONSTRUCT { $this <http://example.org/hasDeck> _:w . _:w a <http://example.org/Deck> } WHERE { $this a <http://example.org/Bridge> . FILTER NOT EXISTS { $this <http://example.org/hasDeck> ?w0 . ?w0 a <http://example.org/Deck> } }" ] ."#;
+    let store = store_with(shapes, BRIDGES);
+    assert_eq!(infer(&store, "urn:shapes", &[]).unwrap(), 6);
+    assert_eq!(infer(&store, "urn:shapes", &[]).unwrap(), 0);
+    assert_eq!(decks(&store), 3);
+}
+
 // ──────────────── SHACL-AF features implemented on this branch ────────────────
 
 /// `sh:construct` accepts the spec **CONSTRUCT-template** query form
