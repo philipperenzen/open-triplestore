@@ -1328,7 +1328,7 @@ unchanged: they describe, they do not fix.
 
 **Test first.** 45 unit tests in `src/repair/`: chase, stratification,
 rules, vocabulary, persistence, the patch emitter, the apply helpers, the
-SHACL-AF import, the census. Three more cover the snapshot read. 25 HTTP
+SHACL-AF import, the census. Three more cover the snapshot read. 24 HTTP
 tests in `tests/repair_layer.rs` cover the note's test plan:
 401, 403 for a viewer and for a read-scoped token, 404, 400 for an
 unstratifiable set and a retract cycle, a partial `200` on an exhausted

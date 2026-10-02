@@ -256,16 +256,13 @@ fn graphs_of(rows: &[(bool, Quad)]) -> Vec<String> {
 }
 
 /// The dataset's graphs, as the base marker of a repair run counts them.
-fn dataset_graphs(state: &AppState, dataset_id: &str) -> Result<Vec<String>, Response> {
-    state
+fn dataset_graphs(state: &AppState, dataset_id: &str) -> anyhow::Result<Vec<String>> {
+    Ok(state
         .auth_db
-        .list_dataset_graphs(dataset_id)
-        .map(|gs| {
-            gs.into_iter()
-                .filter(|g| !g.starts_with("urn:system:reports:"))
-                .collect()
-        })
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())
+        .list_dataset_graphs(dataset_id)?
+        .into_iter()
+        .filter(|g| !g.starts_with("urn:system:reports:"))
+        .collect())
 }
 
 /// The layer on `POST /api/datasets/:dataset_id/patch`. A request without a
@@ -300,7 +297,7 @@ pub async fn patch_route_layer(
     }
     let graphs = match dataset_graphs(&state, &dataset_id) {
         Ok(g) => g,
-        Err(resp) => return resp,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
     let _held = lock_dataset(&dataset_id).await;
     if let Err(resp) = check_preconditions(&state, &graphs, &opts) {
