@@ -493,7 +493,10 @@ fn base_direction_survives_the_mirror() {
         let mut expected = sel(&engine, q);
         got.sort();
         expected.sort();
-        assert_eq!(got, expected, "the mirror diverged from the engine for: {q}");
+        assert_eq!(
+            got, expected,
+            "the mirror diverged from the engine for: {q}"
+        );
     }
     assert!(
         mirror.parallel_build_count() > 0,

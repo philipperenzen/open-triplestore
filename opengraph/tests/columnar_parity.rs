@@ -550,11 +550,13 @@ fn rdf12_terms_reaching_an_expression_are_declined() {
         cr.sort();
         assert_eq!((ev, er), (cv, cr), "differs for {q}");
     }
-    assert!(columnar(&c, &format!("{P}SELECT ?l WHERE {{ ?s ex:dlabel ?l }}"))
-        .unwrap()
-        .1
-        .iter()
-        .any(|r| r[0].as_deref() == Some("\"hello\"@en--ltr")));
+    assert!(
+        columnar(&c, &format!("{P}SELECT ?l WHERE {{ ?s ex:dlabel ?l }}"))
+            .unwrap()
+            .1
+            .iter()
+            .any(|r| r[0].as_deref() == Some("\"hello\"@en--ltr"))
+    );
 
     // Read by an expression: accepted on its text, declined at evaluation.
     for q in [

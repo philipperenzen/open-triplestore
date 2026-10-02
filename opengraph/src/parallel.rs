@@ -786,7 +786,10 @@ fn collect_rowable(pattern: &GraphPattern, out: &mut Vec<TriplePattern>) -> bool
         // An `EXISTS` reads triples about other subjects (`FILTER NOT EXISTS
         // { ?o :q ?x }`), which a subject shard does not hold: evaluated per
         // shard it would see only its own subjects and answer wrongly.
-        GraphPattern::Filter { inner, expr: expression }
+        GraphPattern::Filter {
+            inner,
+            expr: expression,
+        }
         | GraphPattern::Extend {
             inner, expression, ..
         } => !has_exists(expression) && collect_rowable(inner, out),
@@ -828,9 +831,7 @@ fn has_exists(expr: &Expression) -> bool {
         | Expression::Subtract(a, b)
         | Expression::Multiply(a, b)
         | Expression::Divide(a, b) => has_exists(a) || has_exists(b),
-        Expression::UnaryPlus(e) | Expression::UnaryMinus(e) | Expression::Not(e) => {
-            has_exists(e)
-        }
+        Expression::UnaryPlus(e) | Expression::UnaryMinus(e) | Expression::Not(e) => has_exists(e),
         Expression::If(a, b, c) => has_exists(a) || has_exists(b) || has_exists(c),
         Expression::In(a, list) => has_exists(a) || list.iter().any(has_exists),
         Expression::Coalesce(list) | Expression::FunctionCall(_, list) => {
