@@ -448,26 +448,6 @@ pub(crate) fn evaluate_constraint_with_values(
                 .as_deref()
                 .map(Severity::from_iri)
                 .unwrap_or_else(|| severity.clone());
-            // SHACL-SPARQL: execute the SELECT with $this PRE-BOUND to the focus
-            // node; each result row is a violation. $this must be bound (not
-            // textually replaced), otherwise it cannot appear in the SELECT
-            // projection or GROUP BY of an aggregate query; a constant does not
-            // reach a projection but does reach nested scopes. `prebind` does both
-            // (SHACL §5.3.3): constants in the body, the variable kept in the
-            // projection / GROUP BY and bound through an injected VALUES.
-            // Blank-node focus nodes cannot be addressed from SPARQL — skip.
-            if matches!(focus_node, Term::BlankNode(_)) {
-                return results;
-            }
-            let query = prebind(
-                select,
-                &[Prebound {
-                    name: "this",
-                    term: focus_node,
-                }],
-                path.map(|p| p.to_sparql()).as_deref(),
-                view.data_graphs,
-            );
             // A constraint that cannot be evaluated is a failure, not a pass:
             // `if let Ok(..)` used to drop the error, so a `sh:select` that did
             // not parse (or a SELECT that errored at evaluation) produced no
@@ -482,7 +462,15 @@ pub(crate) fn evaluate_constraint_with_values(
                 source_constraint: "sh:SPARQLConstraint".to_string(),
                 message: format!("SPARQL constraint could not be evaluated: {reason}"),
             };
-            match view.query(&query) {
+            // SHACL-SPARQL (§5.3): run the SELECT with $this PRE-BOUND to the
+            // focus node — as a term, so a blank-node focus is checked like any
+            // other — and $PATH replaced by the shape's path. Each solution is
+            // a violation, except that one binding ?failure to true makes the
+            // whole constraint a failure.
+            let path_sparql = path.map(|p| p.to_sparql());
+            let solutions = prepare_prebound(select, &["this"], path_sparql.as_deref())
+                .and_then(|q| view.query_prebound(q, &[("this", focus_node)]));
+            match solutions {
                 Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) => {
                     for solution in solutions {
                         let solution = match solution {
@@ -492,33 +480,31 @@ pub(crate) fn evaluate_constraint_with_values(
                                 break;
                             }
                         };
-                        let msg = message.as_deref().unwrap_or("SPARQL constraint violated");
+                        if is_failure(&solution) {
+                            results.push(unevaluable(FAILURE.to_string()));
+                            continue;
+                        }
+                        let msg = result_message(&solution, message.as_deref(), |_| None)
+                            .unwrap_or_else(|| "SPARQL constraint violated".to_string());
                         let value = solution.get("value").map(|v| v.to_string());
-                        let path_val = solution.get("path").map(|v| v.to_string());
-
                         results.push(ValidationResult {
                             severity: eff_severity.clone(),
                             focus_node: focus_str.get_or_init(|| display_term(focus_node)).clone(),
-                            path: path_val.or_else(path_str),
+                            path: result_path(&solution).or_else(path_str),
                             value,
                             source_shape: shape_iri.to_string(),
                             source_constraint: "sh:SPARQLConstraint".to_string(),
-                            message: msg.to_string(),
+                            message: msg,
                         });
                     }
                 }
                 Ok(_) => results.push(unevaluable("sh:select must be a SELECT query".to_string())),
-                Err(e) => results.push(unevaluable(e.to_string())),
+                Err(e) => results.push(unevaluable(e)),
             }
         }
 
         // ---- SHACL-AF constraint component (sh:validator / sh:ask / sh:select) ----
         Constraint::Custom(cc) => {
-            // Blank-node focus nodes cannot be pre-bound (no SPARQL syntax
-            // addresses a stored blank node) — skipped, as for sh:sparql.
-            if matches!(focus_node, Term::BlankNode(_)) {
-                return results;
-            }
             let path_sparql = path.map(|p| p.to_sparql());
             let unevaluable = |reason: String| ValidationResult {
                 severity: Severity::Violation,
@@ -532,57 +518,41 @@ pub(crate) fn evaluate_constraint_with_values(
                     cc.component
                 ),
             };
-            let params: Vec<Prebound<'_>> = cc
-                .params
-                .iter()
-                .map(|(n, t)| Prebound {
-                    name: n.as_str(),
-                    term: t,
-                })
-                .collect();
-            // `{$param}` / `{?param}` in the validator's sh:message.
-            let render = |template: &str, value: Option<&Term>| -> String {
-                let mut m = template.to_string();
-                for p in &params {
-                    let shown = display_term(p.term);
-                    m = m
-                        .replace(&format!("{{${}}}", p.name), &shown)
-                        .replace(&format!("{{?{}}}", p.name), &shown);
-                }
-                let this = display_term(focus_node);
-                m = m.replace("{$this}", &this).replace("{?this}", &this);
-                if let Some(v) = value {
-                    let shown = display_term(v);
-                    m = m.replace("{$value}", &shown).replace("{?value}", &shown);
-                }
-                m
+            // Every parameter value is pre-bound under the parameter's name
+            // (§6.3), alongside $this and — for ASK validators — $value.
+            let param = |name: &str| -> Option<Term> {
+                cc.params
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, t)| t.clone())
             };
             match &cc.validator {
                 CustomValidator::Ask(ask) => {
-                    for v in values.iter() {
-                        if matches!(v, Term::BlankNode(_)) {
-                            continue;
+                    let mut names = vec!["this", "value"];
+                    names.extend(cc.params.iter().map(|(n, _)| n.as_str()));
+                    let prepared = match prepare_prebound(ask, &names, path_sparql.as_deref()) {
+                        Ok(q) => q,
+                        Err(e) => {
+                            results.push(unevaluable(e));
+                            return results;
                         }
-                        let mut vars = vec![
-                            Prebound {
-                                name: "this",
-                                term: focus_node,
-                            },
-                            Prebound {
-                                name: "value",
-                                term: v,
-                            },
-                        ];
-                        vars.extend(params.iter().map(|p| Prebound {
-                            name: p.name,
-                            term: p.term,
-                        }));
-                        let q = prebind(ask, &vars, path_sparql.as_deref(), view.data_graphs);
-                        match view.query(&q) {
+                    };
+                    for v in values.iter() {
+                        let mut bindings: Vec<(&str, &Term)> =
+                            vec![("this", focus_node), ("value", v)];
+                        bindings.extend(cc.params.iter().map(|(n, t)| (n.as_str(), t)));
+                        match view.query_prebound(prepared.clone(), &bindings) {
                             Ok(oxigraph::sparql::QueryResults::Boolean(true)) => {}
                             Ok(oxigraph::sparql::QueryResults::Boolean(false)) => {
+                                // An ASK validator's solution is ($this, $value)
+                                // plus the parameters (§6.3).
+                                let lookup = |name: &str| match name {
+                                    "this" => Some(focus_node.clone()),
+                                    "value" => Some(v.clone()),
+                                    other => param(other),
+                                };
                                 let message = match &cc.message {
-                                    Some(t) => render(t, Some(v)),
+                                    Some(t) => fill_template(t, lookup),
                                     None => format!(
                                         "Value does not satisfy constraint component <{}>",
                                         cc.component
@@ -598,21 +568,18 @@ pub(crate) fn evaluate_constraint_with_values(
                             Ok(_) => {
                                 results.push(unevaluable("sh:ask must be an ASK query".to_string()))
                             }
-                            Err(e) => results.push(unevaluable(e.to_string())),
+                            Err(e) => results.push(unevaluable(e)),
                         }
                     }
                 }
                 CustomValidator::Select(select) => {
-                    let mut vars = vec![Prebound {
-                        name: "this",
-                        term: focus_node,
-                    }];
-                    vars.extend(params.iter().map(|p| Prebound {
-                        name: p.name,
-                        term: p.term,
-                    }));
-                    let q = prebind(select, &vars, path_sparql.as_deref(), view.data_graphs);
-                    match view.query(&q) {
+                    let mut names = vec!["this"];
+                    names.extend(cc.params.iter().map(|(n, _)| n.as_str()));
+                    let mut bindings: Vec<(&str, &Term)> = vec![("this", focus_node)];
+                    bindings.extend(cc.params.iter().map(|(n, t)| (n.as_str(), t)));
+                    let solutions = prepare_prebound(select, &names, path_sparql.as_deref())
+                        .and_then(|q| view.query_prebound(q, &bindings));
+                    match solutions {
                         Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) => {
                             for solution in solutions {
                                 let solution = match solution {
@@ -622,18 +589,22 @@ pub(crate) fn evaluate_constraint_with_values(
                                         break;
                                     }
                                 };
+                                if is_failure(&solution) {
+                                    results.push(unevaluable(FAILURE.to_string()));
+                                    continue;
+                                }
                                 let value = solution.get("value").cloned();
-                                let message = match &cc.message {
-                                    Some(t) => render(t, value.as_ref()),
-                                    None => format!(
-                                        "Constraint component <{}> reports a violation",
-                                        cc.component
-                                    ),
-                                };
-                                let path_val = solution.get("path").map(|v| v.to_string());
+                                let message =
+                                    result_message(&solution, cc.message.as_deref(), param)
+                                        .unwrap_or_else(|| {
+                                            format!(
+                                                "Constraint component <{}> reports a violation",
+                                                cc.component
+                                            )
+                                        });
                                 results.push(mk(
                                     value.as_ref().map(display_term),
-                                    path_val.or_else(path_str),
+                                    result_path(&solution).or_else(path_str),
                                     cc.component.clone(),
                                     message,
                                 ));
@@ -641,7 +612,7 @@ pub(crate) fn evaluate_constraint_with_values(
                         }
                         Ok(_) => results
                             .push(unevaluable("sh:select must be a SELECT query".to_string())),
-                        Err(e) => results.push(unevaluable(e.to_string())),
+                        Err(e) => results.push(unevaluable(e)),
                     }
                 }
             }
@@ -1033,17 +1004,22 @@ pub(crate) fn evaluate_constraint_with_values(
 /// a shapes graph whose SPARQL constraint cannot be evaluated fails to load
 /// (and a write gate built on it refuses the write) instead of silently
 /// producing no violations. A query using a feature SHACL forbids under
-/// pre-binding (§5.3.2) is rejected the same way.
+/// pre-binding (Appendix A) is rejected the same way.
 pub(crate) fn check_sparql_constraint(select: &str) -> Result<(), String> {
     check_prebound_query(select, &["this"], false)
 }
 
 /// As [`check_sparql_constraint`] for a constraint-component validator:
-/// `$this` and (for ASK validators) `$value` are pre-bound, and a
-/// property validator may use `$PATH`.
-pub(crate) fn check_validator_query(query: &str, ask: bool) -> Result<(), String> {
-    let vars: &[&str] = if ask { &["this", "value"] } else { &["this"] };
-    check_prebound_query(query, vars, true)
+/// `$this`, (for ASK validators) `$value` and the component's parameters
+/// `params` are pre-bound, and a property validator may use `$PATH`.
+pub(crate) fn check_validator_query(query: &str, ask: bool, params: &[&str]) -> Result<(), String> {
+    let mut vars: Vec<&str> = if ask {
+        vec!["this", "value"]
+    } else {
+        vec!["this"]
+    };
+    vars.extend_from_slice(params);
+    check_prebound_query(query, &vars, true)
 }
 
 fn check_prebound_query(query: &str, vars: &[&str], with_path: bool) -> Result<(), String> {
@@ -1063,269 +1039,103 @@ fn check_prebound_query(query: &str, vars: &[&str], with_path: bool) -> Result<(
             "{feature} is not supported in a pre-bound SHACL-SPARQL query"
         ));
     }
-    let placeholder = Term::NamedNode(oxigraph::model::NamedNode::new_unchecked(
-        "urn:ots:shacl:focus",
-    ));
-    let value = Term::NamedNode(oxigraph::model::NamedNode::new_unchecked(
-        "urn:ots:shacl:value",
-    ));
-    let bound: Vec<Prebound<'_>> = vars
-        .iter()
-        .map(|n| Prebound {
-            name: n,
-            term: if *n == "value" { &value } else { &placeholder },
-        })
-        .collect();
     let path = with_path.then_some("<urn:ots:shacl:path>");
-    let rewritten = prebind(query, &bound, path, &["urn:ots:shacl:data".to_string()]);
-    crate::sparql::parser()
-        .parse_query(&rewritten)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    prepare_prebound(query, vars, path).map(|_| ())
 }
 
 // ---------------------------------------------------------------------------
-// SHACL-SPARQL pre-binding (SHACL §5.3.3) and its restrictions (§5.3.2)
+// SHACL-SPARQL pre-binding (SHACL §5.3.1, Appendix A) and its restrictions
 // ---------------------------------------------------------------------------
 
-/// A pre-bound variable: its name without the sigil, and its value.
-pub(crate) struct Prebound<'a> {
-    pub name: &'a str,
-    pub term: &'a Term,
-}
-
-/// Rewrite `query` so that every variable in `vars` is pre-bound — evaluated
-/// as if each occurrence were its value (SHACL §5.3.3). Two mechanisms are
-/// combined so that both spec cases work:
-///
-/// * in the query body every `$v` / `?v` becomes the value's constant, so a
-///   `FILTER` in a nested group, a `UNION` branch or a sub-select sees it
-///   (a `VALUES` at the top of the query would not reach those scopes);
-/// * in a `SELECT` projection and in `GROUP BY` the variable is kept, and a
-///   `VALUES ?v { value }` injected at the top of the outermost block binds
-///   it — so `SELECT $this` and aggregate queries work.
-///
-/// `bound($v)` is `(true)`; `$PATH` (property-shape validators) is replaced
-/// textually by `path`; `FROM <g>` clauses scope the query to `data_graphs`.
-pub(crate) fn prebind(
+/// Parse a SHACL-SPARQL query for pre-bound evaluation (SHACL §5.3.1, §6.3):
+/// `$PATH` replaced by the shape's `path`, and every variable in `vars`
+/// pre-bound in every scope and projected ([`crate::sparql::prebind::rewrite`],
+/// SHACL Appendix A), so that message templates can name it.
+/// [`DataView::query_prebound`] supplies the values.
+pub(crate) fn prepare_prebound(
     query: &str,
-    vars: &[Prebound<'_>],
+    vars: &[&str],
     path: Option<&str>,
-    data_graphs: &[String],
-) -> String {
-    let mut text = match path {
+) -> Result<spargebra::Query, String> {
+    let text = match path {
         Some(p) => query.replace("$PATH", p),
         None => query.to_string(),
     };
-    // bound($v) → true, for every pre-bound variable.
-    for v in vars {
-        let lower = text.to_ascii_lowercase();
-        let mut out = String::with_capacity(text.len());
-        let mut i = 0;
-        while let Some(rel) = lower[i..].find("bound") {
-            let start = i + rel;
-            out.push_str(&text[i..start]);
-            let rest = &text[start + 5..];
-            let trimmed = rest.trim_start();
-            let consumed = |s: &str| {
-                let t = s.trim_start();
-                if !t.starts_with('(') {
-                    return None;
-                }
-                let inner = t[1..].trim_start();
-                let name_ok = inner.starts_with('$') || inner.starts_with('?');
-                if !name_ok {
-                    return None;
-                }
-                let after = &inner[1..];
-                if !after.starts_with(v.name)
-                    || after[v.name.len()..]
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_alphanumeric() || c == '_')
-                {
-                    return None;
-                }
-                let tail = after[v.name.len()..].trim_start();
-                tail.strip_prefix(')').map(|_| s.len() - (tail.len() - 1))
-            };
-            // Only a standalone `bound(` keyword (not e.g. `unbound`).
-            let word_before = out
-                .chars()
-                .last()
-                .is_some_and(|c| c.is_alphanumeric() || c == '_');
-            if !word_before {
-                if let Some(n) = consumed(trimmed) {
-                    out.push_str("(true)");
-                    i = start + 5 + (rest.len() - trimmed.len()) + n;
-                    continue;
-                }
-            }
-            out.push_str("bound");
-            i = start + 5;
-        }
-        out.push_str(&text[i..]);
-        text = out;
-    }
-    let constants: Vec<(&str, String)> =
-        vars.iter().map(|v| (v.name, v.term.to_string())).collect();
+    let mut parsed = crate::sparql::parser()
+        .parse_query(&text)
+        .map_err(|e| e.to_string())?;
+    crate::sparql::prebind::rewrite(&mut parsed, vars)?;
+    Ok(parsed)
+}
 
-    // Scan once: substitute in the body, keep variables in projection / GROUP
-    // BY, and note where the outermost block opens and where the top-level
-    // WHERE keyword is.
-    let mut out = String::with_capacity(text.len() + 64);
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    let mut depth = 0usize;
-    let mut in_projection = false;
-    let mut in_group_by = false;
-    let mut prev_kw_group = false;
-    let mut top_where: Option<usize> = None; // position in `out`
-    let mut top_open: Option<usize> = None; // position in `out`, right after `{`
-    while i < bytes.len() {
-        let c = bytes[i] as char;
-        // Comments.
-        if c == '#' {
-            let end = text[i..].find('\n').map(|n| i + n).unwrap_or(text.len());
-            out.push_str(&text[i..end]);
-            i = end;
-            continue;
-        }
-        // IRIs.
-        if c == '<' {
-            if let Some(n) = text[i..].find('>') {
-                let seg = &text[i..=i + n];
-                if !seg.contains(char::is_whitespace) {
-                    out.push_str(seg);
-                    i += n + 1;
-                    continue;
-                }
-            }
-        }
-        // String literals (short and long forms).
-        if c == '"' || c == '\'' {
-            let q = c;
-            let long = text[i..].starts_with(&format!("{q}{q}{q}"));
-            let delim = if long {
-                format!("{q}{q}{q}")
-            } else {
-                q.to_string()
-            };
-            let start = i;
-            i += delim.len();
-            loop {
-                if i >= bytes.len() {
-                    break;
-                }
-                if bytes[i] as char == '\\' {
-                    i += 2;
-                    continue;
-                }
-                if text[i..].starts_with(&delim) {
-                    i += delim.len();
-                    break;
-                }
-                i += 1;
-            }
-            out.push_str(&text[start..i.min(text.len())]);
-            continue;
-        }
-        if c == '{' {
-            depth += 1;
-            in_projection = false;
-            in_group_by = false;
-            out.push(c);
-            i += 1;
-            if depth == 1 && top_open.is_none() {
-                top_open = Some(out.len());
-            }
-            continue;
-        }
-        if c == '}' {
-            depth = depth.saturating_sub(1);
-            in_group_by = false;
-            out.push(c);
-            i += 1;
-            continue;
-        }
-        // Variables.
-        if (c == '$' || c == '?') && i + 1 < bytes.len() {
-            let name_end = text[i + 1..]
-                .find(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
-                .map(|n| i + 1 + n)
-                .unwrap_or(text.len());
-            let name = &text[i + 1..name_end];
-            if let Some((_, constant)) = constants.iter().find(|(n, _)| *n == name) {
-                if in_projection || in_group_by {
-                    out.push('?');
-                    out.push_str(name);
-                } else {
-                    out.push_str(constant);
-                }
-            } else {
-                out.push_str(&text[i..name_end]);
-            }
-            i = name_end;
-            continue;
-        }
-        // Keywords.
-        if c.is_alphabetic() {
-            let end = text[i..]
-                .find(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
-                .map(|n| i + n)
-                .unwrap_or(text.len());
-            let word = &text[i..end];
-            let upper = word.to_ascii_uppercase();
-            match upper.as_str() {
-                "SELECT" => in_projection = true,
-                "WHERE" => {
-                    in_projection = false;
-                    if depth == 0 && top_where.is_none() {
-                        top_where = Some(out.len());
-                    }
-                }
-                "BY" if prev_kw_group => in_group_by = true,
-                "HAVING" | "ORDER" | "LIMIT" | "OFFSET" | "VALUES" => in_group_by = false,
-                _ => {}
-            }
-            prev_kw_group = upper == "GROUP";
-            out.push_str(word);
-            i = end;
-            continue;
-        }
-        out.push(c);
-        i += 1;
-    }
+/// What a solution binding `?failure` to `true` reports (SHACL §5.3).
+const FAILURE: &str = "the query reported a failure (?failure is true)";
 
-    // Inject VALUES for the projected/grouped variables at the top of the
-    // outermost block, and the FROM clauses before the top-level WHERE (or
-    // before the block when the form is `ASK { … }` / `SELECT … { … }`).
-    let Some(open) = top_open else {
-        return out;
-    };
-    let values: String = constants
-        .iter()
-        .map(|(n, c)| format!(" VALUES ?{n} {{ {c} }}"))
-        .collect();
-    let from: String = data_graphs.iter().map(|g| format!("FROM <{g}> ")).collect();
-    let mut result = String::with_capacity(out.len() + values.len() + from.len() + 4);
-    match top_where {
-        Some(w) if w < open => {
-            result.push_str(&out[..w]);
-            result.push_str(&from);
-            result.push_str(&out[w..open]);
-        }
-        _ => {
-            // No WHERE keyword before the block: the block starts at `open - 1`.
-            result.push_str(&out[..open - 1]);
-            result.push_str(&from);
-            result.push_str(&out[open - 1..open]);
+/// Whether a constraint solution binds `?failure` to `true`: the validator
+/// then produces a failure instead of a validation result (SHACL §5.3).
+fn is_failure(solution: &oxigraph::sparql::QuerySolution) -> bool {
+    matches!(solution.get("failure"), Some(Term::Literal(l))
+        if l.datatype() == oxigraph::model::vocab::xsd::BOOLEAN
+            && matches!(l.value(), "true" | "1"))
+}
+
+/// `sh:resultPath` from a solution: the binding of `?path`, if it is an IRI
+/// (SHACL §5.3.2); otherwise the caller falls back to the shape's path.
+fn result_path(solution: &oxigraph::sparql::QuerySolution) -> Option<String> {
+    match solution.get("path") {
+        Some(t @ Term::NamedNode(_)) => Some(t.to_string()),
+        _ => None,
+    }
+}
+
+/// `sh:resultMessage` from a solution (SHACL §5.3.2): the binding of
+/// `?message`, else `template` with its `{?var}` / `{$var}` blocks filled from
+/// the solution and then from `extra` (a component's parameters). `None` when
+/// there is neither.
+fn result_message(
+    solution: &oxigraph::sparql::QuerySolution,
+    template: Option<&str>,
+    extra: impl Fn(&str) -> Option<Term>,
+) -> Option<String> {
+    if let Some(Term::Literal(l)) = solution.get("message") {
+        return Some(l.value().to_string());
+    }
+    template.map(|t| {
+        fill_template(t, |name| {
+            solution.get(name).cloned().or_else(|| extra(name))
+        })
+    })
+}
+
+/// Replace each `{?name}` and `{$name}` in a message template with the
+/// display form of `lookup(name)`. A block whose variable has no value is left
+/// as written, so a misspelt name shows up in the message instead of vanishing.
+pub(crate) fn fill_template(template: &str, lookup: impl Fn(&str) -> Option<Term>) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let block = after
+            .strip_prefix('?')
+            .or_else(|| after.strip_prefix('$'))
+            .and_then(|tail| {
+                let end = tail.find(|c: char| !(c.is_alphanumeric() || c == '_'))?;
+                (end > 0 && tail[end..].starts_with('}')).then(|| (&tail[..end], end + 3))
+            });
+        match block.and_then(|(name, len)| lookup(name).map(|t| (t, len))) {
+            Some((term, len)) => {
+                out.push_str(&display_term(&term));
+                rest = &rest[open + len..];
+            }
+            None => {
+                out.push('{');
+                rest = after;
+            }
         }
     }
-    result.push_str(&values);
-    result.push(' ');
-    result.push_str(&out[open..]);
-    result
+    out.push_str(rest);
+    out
 }
 
 /// Whether `query` uses the variable `name` (`$name` or `?name`) outside
@@ -1373,11 +1183,20 @@ pub(crate) fn mentions_variable(query: &str, name: &str) -> bool {
     false
 }
 
-/// The SPARQL features SHACL forbids in a pre-bound query (§5.3.2): `MINUS`,
-/// `VALUES`, `SERVICE`, assigning to a pre-bound variable (`AS $this`), and a
-/// nested `SELECT` that does not project `$this` explicitly (`SELECT *`
-/// included). Returns the offending feature.
+/// The SPARQL features SHACL forbids in a pre-bound query (Appendix A):
+/// `MINUS`, `VALUES`, `SERVICE`, assigning to a pre-bound variable
+/// (`AS $this`), and a nested `SELECT` that does not project every pre-bound
+/// variable explicitly (`SELECT *` included). Returns the offending feature.
 pub(crate) fn prebinding_violation(query: &str, vars: &[&str]) -> Option<String> {
+    // The first pre-bound variable a sub-select leaves out of its projection.
+    let unprojected = |names: &[String], star: bool| -> Option<String> {
+        if star {
+            return Some(vars.first().copied().unwrap_or("this").to_string());
+        }
+        vars.iter()
+            .find(|v| !names.iter().any(|n| n == *v))
+            .map(|v| v.to_string())
+    };
     let bytes = query.as_bytes();
     let mut i = 0;
     let mut depth = 0usize;
@@ -1425,8 +1244,8 @@ pub(crate) fn prebinding_violation(query: &str, vars: &[&str]) -> Option<String>
         if c == '{' {
             depth += 1;
             if let Some((names, star)) = nested_select.take() {
-                if star || !names.iter().any(|n| n == "this") {
-                    return Some("a nested SELECT that does not project $this".to_string());
+                if let Some(missing) = unprojected(&names, star) {
+                    return Some(format!("a nested SELECT that does not project ${missing}"));
                 }
             }
             i += 1;
@@ -1473,8 +1292,10 @@ pub(crate) fn prebinding_violation(query: &str, vars: &[&str]) -> Option<String>
                 "SELECT" if depth > 0 => nested_select = Some((Vec::new(), false)),
                 "WHERE" => {
                     if let Some((names, star)) = nested_select.take() {
-                        if star || !names.iter().any(|n| n == "this") {
-                            return Some("a nested SELECT that does not project $this".to_string());
+                        if let Some(missing) = unprojected(&names, star) {
+                            return Some(format!(
+                                "a nested SELECT that does not project ${missing}"
+                            ));
                         }
                     }
                 }
@@ -1519,12 +1340,15 @@ fn term_set(values: Vec<Term>) -> BTreeMap<String, Term> {
 /// Resolve the (distinct) value nodes along `path` from `focus`, natively over
 /// the run's quad index.
 ///
-/// IRI focus nodes evaluate per data graph with every hop of a sequence,
-/// alternative or closure kept inside that graph, results merged across graphs
-/// — exactly the `{ GRAPH <g1> { <focus> path ?v } } UNION { GRAPH <g2> … }`
-/// query this used to run per focus node. Blank-node and literal focus nodes
-/// keep the historical native walk where each hop unions over every data
-/// graph.
+/// SHACL validates against ONE data graph (§3.4), and a run over several data
+/// graphs validates their merge: every hop of a sequence, alternative or
+/// closure may continue in any of them, for every kind of focus node. That is
+/// how `sh:sparql`, `sh:class` and the target machinery already read the run,
+/// so a rule now gives one answer however it is written. IRI focus nodes used
+/// to be walked inside each data graph in turn, results unioned, so a path
+/// whose hops live in different graphs found nothing while the same path from
+/// a blank-node focus — or the same rule as a `sh:sparql` constraint — found
+/// the value.
 fn get_path_values(view: &DataView<'_>, focus: &Term, path: &PropertyPath) -> Vec<Term> {
     // One graph and a single predicate step (forward or inverse): the quad
     // index yields each `(focus, p, ?v)` match once, so the result is already
@@ -1534,60 +1358,10 @@ fn get_path_values(view: &DataView<'_>, focus: &Term, path: &PropertyPath) -> Ve
         return eval_path_native(view, focus, path, GraphSel::One(0));
     }
     let mut seen: HashSet<Term> = HashSet::new();
-    let mut out = Vec::new();
-    if matches!(focus, Term::NamedNode(_)) {
-        for i in 0..view.graph_count() {
-            for t in eval_path_native(view, focus, path, GraphSel::One(i)) {
-                if seen.insert(t.clone()) {
-                    out.push(t);
-                }
-            }
-        }
-        // Measurement only: how many more value nodes would the merge of the
-        // data graphs yield than the per-graph evaluation above? That is the
-        // divergence between `sh:path` and the constructs that read the graphs
-        // merged (`sh:sparql`, and the class machinery). The result is counted
-        // and dropped — `out` is returned unchanged.
-        //
-        // Only paths that can actually cross a graph boundary are examined; a
-        // single hop matches quads that each live in exactly one graph, so the
-        // two readings agree by construction and probing them would report a
-        // denominator that means nothing.
-        if view.reach_probe.enabled && can_cross_graphs(path) {
-            let merged = eval_path_native(view, focus, path, GraphSel::All);
-            let merged: HashSet<Term> = merged.into_iter().collect();
-            view.reach_probe
-                .record(merged.len().saturating_sub(out.len()));
-        }
-    } else {
-        for t in eval_path_native(view, focus, path, GraphSel::All) {
-            if seen.insert(t.clone()) {
-                out.push(t);
-            }
-        }
-    }
-    out
-}
-
-/// Whether evaluating `path` inside each data graph separately can yield a
-/// different set from evaluating it over their merge.
-///
-/// It can only differ when the path has an intermediate node: a hop lands on a
-/// term that the next hop must continue from, and the per-graph evaluation
-/// requires both hops to be in the same graph. A single hop — a predicate, its
-/// inverse, or an optional one — matches quads that each live in exactly one
-/// graph, so the union over graphs is the merged answer.
-fn can_cross_graphs(path: &PropertyPath) -> bool {
-    match path {
-        PropertyPath::Predicate(_) => false,
-        PropertyPath::Inverse(inner) | PropertyPath::ZeroOrOne(inner) => can_cross_graphs(inner),
-        PropertyPath::Alternative(branches) => branches.iter().any(can_cross_graphs),
-        // A sequence of one is still one hop; anything longer has an
-        // intermediate node. A closure repeats its inner path, so it has one
-        // as soon as it can repeat at all.
-        PropertyPath::Sequence(parts) => parts.len() > 1 || parts.iter().any(can_cross_graphs),
-        PropertyPath::ZeroOrMore(_) | PropertyPath::OneOrMore(_) => true,
-    }
+    eval_path_native(view, focus, path, GraphSel::All)
+        .into_iter()
+        .filter(|t| seen.insert(t.clone()))
+        .collect()
 }
 
 /// A plain predicate or its inverse — one quad-index step, whose results are

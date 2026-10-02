@@ -43,18 +43,24 @@ authorise compliance marks for its standards. The files are © Open Geospatial C
 and redistributed under the Apache License 2.0 — see
 [`LICENSE.md`](../../tests/fixtures/ogc-geosparql/LICENSE.md) there.
 
-### Results (2026-06-11)
+### Results (2026-10-02)
 
 | | count |
 |---|---|
-| **Examples matching the OGC oracle** | **46** |
-| Known deviations (ratcheted) | 2 |
+| **Examples matching the OGC oracle** | **47** |
+| Known deviations (ratcheted) | 1 |
 | Total examples | 48 |
 | **Reference-example round-trip** ([`example-bridge`](../../tests/fixtures/example-bridge/)) | **conforms ✓** |
 
-Known deviations (same two-way ratchet as the W3C suite): two validator
-`sh:sparql` subtleties. The two node-level lexical-form/datatype deviations were
-fixed by the typed focus-node engine refactor (see `docs/conformance/shacl.md`).
+*(Previous baseline: 2026-06-11, 46 matching / 2 known deviations.)*
+
+Known deviation (same two-way ratchet as the W3C suite): `S18-invalid.ttl`, a
+GeoJSON literal the validator's `sh:pattern` should reject. `S21-invalid.ttl`
+matches since 2026-10-02: its `sh:sparql` constraint has a blank-node geometry as
+focus node, and blank-node focus nodes used to be skipped by `sh:sparql`; they
+are now pre-bound as terms (see `docs/conformance/shacl.md`). The two node-level
+lexical-form/datatype deviations were fixed by the typed focus-node engine
+refactor.
 
 ### Why this suite mattered
 

@@ -382,6 +382,279 @@ fn unsupported_prebinding_features_fail_the_shapes_graph() {
     }
 }
 
+// ─── SHACL-SPARQL: pre-bound terms, ?failure, messages, deactivation ─────────
+//
+// Pre-bound variables are seeded as terms (oxigraph's `substitute_variable`),
+// not pasted into the query text. No SPARQL syntax names a stored blank node,
+// so the text form skipped blank-node focus and value nodes: their
+// constraints never ran and the node conformed.
+
+/// The nested-scope semantics of `prebinding_reaches_nested_scopes` hold for a
+/// blank-node focus too: it reaches a pattern inside a UNION branch.
+#[test]
+fn prebinding_reaches_nested_scopes_for_a_blank_node_focus() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+  sh:sparql [ sh:select """SELECT $this WHERE { { FILTER (false) } UNION { { $this <http://example.org/bad> true } FILTER bound($this) } }""" ] .
+"#;
+    let r = run(
+        shapes,
+        "[ a ex:T ; ex:bad true ] . [ a ex:T ; ex:bad false ] . ex:named a ex:T ; ex:bad false .",
+    );
+    let blank: Vec<_> = r
+        .results
+        .iter()
+        .filter(|x| x.focus_node.starts_with("_:"))
+        .collect();
+    assert_eq!(
+        blank.len(),
+        1,
+        "exactly the blank node with ex:bad true violates: {:?}",
+        r.results
+    );
+    assert_eq!(r.results_count, 1, "{:?}", r.results);
+}
+
+/// A `sh:sparql` constraint on a property shape checks a blank-node focus,
+/// with `$PATH` replaced by the shape's path.
+#[test]
+fn a_sparql_constraint_checks_a_blank_node_focus() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+  sh:property [ sh:path ex:size ;
+    sh:sparql [ sh:select """SELECT $this ?value WHERE { $this $PATH ?value . FILTER (?value > 10) }""" ] ] .
+"#;
+    let r = run(
+        shapes,
+        "[ a ex:T ; ex:size 20 ] . ex:ok a ex:T ; ex:size 5 .",
+    );
+    assert_eq!(r.results_count, 1, "{:?}", r.results);
+    assert!(r.results[0].focus_node.starts_with("_:"), "{:?}", r.results);
+    assert!(!violates(&r, "/ok"));
+}
+
+/// An ASK validator checks a blank-node value node: `$value` is bound to it.
+#[test]
+fn an_ask_validator_checks_a_blank_node_value() {
+    let shapes = r#"
+ex:IntactComponent a sh:ConstraintComponent ;
+  sh:parameter [ sh:path ex:intact ] ;
+  sh:validator [ a sh:SPARQLAskValidator ;
+    sh:ask """ASK { FILTER ($intact = false || NOT EXISTS { $value <http://example.org/broken> true }) }""" ] .
+ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+  sh:property [ sh:path ex:part ; ex:intact true ] .
+"#;
+    let r = run(
+        shapes,
+        "ex:a a ex:T ; ex:part [ ex:broken true ] . ex:b a ex:T ; ex:part [ ex:broken false ] .",
+    );
+    assert_eq!(flagged(&r), set(&["a"]), "{:?}", r.results);
+    assert!(r.results[0]
+        .value
+        .as_deref()
+        .unwrap_or("")
+        .starts_with("_:"));
+}
+
+/// A solution binding `?failure` to true is a failure of the constraint —
+/// reported, never a pass — while the other solutions stay ordinary results
+/// (SHACL §5.3).
+#[test]
+fn a_failure_binding_fails_the_constraint() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetSubjectsOf ex:p ;
+  sh:sparql [ sh:message "p is not positive" ;
+    sh:select """SELECT $this ?failure WHERE { $this <http://example.org/p> ?v . FILTER (?v <= 0) BIND (?v = 0 AS ?failure) }""" ] .
+"#;
+    let r = run(shapes, "ex:zero ex:p 0 . ex:neg ex:p -1 . ex:pos ex:p 1 .");
+    assert!(!r.conforms);
+    assert_eq!(flagged(&r), set(&["zero", "neg"]), "{:?}", r.results);
+    let zero = r
+        .results
+        .iter()
+        .find(|x| x.focus_node.ends_with("/zero"))
+        .unwrap();
+    assert!(zero.message.contains("?failure"), "{zero:?}");
+    let neg = r
+        .results
+        .iter()
+        .find(|x| x.focus_node.ends_with("/neg"))
+        .unwrap();
+    assert_eq!(neg.message, "p is not positive", "{neg:?}");
+
+    // The same for a SELECT validator of a constraint component.
+    let shapes = r#"
+ex:PositiveComponent a sh:ConstraintComponent ;
+  sh:parameter [ sh:path ex:positive ] ;
+  sh:nodeValidator [ a sh:SPARQLSelectValidator ;
+    sh:select """SELECT $this ?failure WHERE { $this <http://example.org/p> ?v . FILTER ($positive && ?v <= 0) BIND (?v = 0 AS ?failure) }""" ] .
+ex:S a sh:NodeShape ; sh:targetSubjectsOf ex:p ; ex:positive true .
+"#;
+    let r = run(shapes, "ex:zero ex:p 0 . ex:pos ex:p 1 .");
+    assert_eq!(flagged(&r), set(&["zero"]), "{:?}", r.results);
+    assert!(r.results[0].message.contains("?failure"), "{:?}", r.results);
+}
+
+/// `sh:resultMessage` (SHACL §5.3.2): a `?message` binding wins; otherwise the
+/// `sh:message` template is filled from the solution's `{?var}` / `{$var}`.
+/// A block naming no binding is left as written.
+#[test]
+fn sparql_messages_are_filled_from_the_solution() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetSubjectsOf ex:size ;
+  sh:sparql [ sh:message "Size {?value} of {$this} exceeds {?limit}{?nope}" ;
+    sh:select """SELECT $this ?value ?limit WHERE { $this <http://example.org/size> ?value . BIND (10 AS ?limit) FILTER (?value > ?limit && ?value < 100) }""" ] ;
+  sh:sparql [ sh:message "not used" ;
+    sh:select """SELECT $this ?message WHERE { $this <http://example.org/size> ?v . FILTER (?v >= 100) BIND (CONCAT("huge: ", STR(?v)) AS ?message) }""" ] .
+"#;
+    let r = run(
+        shapes,
+        "ex:big ex:size 20 . ex:huge ex:size 200 . ex:ok ex:size 5 .",
+    );
+    assert_eq!(flagged(&r), set(&["big", "huge"]), "{:?}", r.results);
+    let big = r
+        .results
+        .iter()
+        .find(|x| x.focus_node.ends_with("/big"))
+        .unwrap();
+    assert_eq!(
+        big.message,
+        "Size 20 of http://example.org/big exceeds 10{?nope}"
+    );
+    let huge = r
+        .results
+        .iter()
+        .find(|x| x.focus_node.ends_with("/huge"))
+        .unwrap();
+    assert_eq!(huge.message, "huge: 200");
+}
+
+/// A SPARQL-based constraint with `sh:deactivated true` produces no results
+/// (SHACL §5.3); its active sibling still does.
+#[test]
+fn a_deactivated_sparql_constraint_produces_no_results() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+  sh:sparql [ sh:deactivated true ; sh:message "off" ;
+    sh:select """SELECT $this WHERE { }""" ] ;
+  sh:sparql [ sh:message "on" ;
+    sh:select """SELECT $this WHERE { FILTER (false) }""" ] .
+"#;
+    let r = run(shapes, "ex:n ex:p 1 .");
+    assert!(r.conforms, "{:?}", r.results);
+
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+  sh:sparql [ sh:deactivated true ; sh:message "off" ;
+    sh:select """SELECT $this WHERE { }""" ] ;
+  sh:sparql [ sh:message "on" ;
+    sh:select """SELECT $this WHERE { }""" ] .
+"#;
+    let r = run(shapes, "ex:n ex:p 1 .");
+    let messages: Vec<_> = r.results.iter().map(|x| x.message.as_str()).collect();
+    assert_eq!(messages, ["on"]);
+}
+
+/// A validator carrying `sh:deactivated true` is not used: the shape falls
+/// back to the component's `sh:validator`, and when no validator is left the
+/// component is switched off — not an ill-formed shapes graph.
+#[test]
+fn a_deactivated_validator_is_not_used() {
+    let shapes = r#"
+ex:OffComponent a sh:ConstraintComponent ;
+  sh:parameter [ sh:path ex:off ] ;
+  sh:propertyValidator [ a sh:SPARQLSelectValidator ; sh:deactivated true ;
+    sh:select """SELECT $this WHERE { }""" ] .
+ex:FallbackComponent a sh:ConstraintComponent ;
+  sh:parameter [ sh:path ex:fallback ] ;
+  sh:propertyValidator [ a sh:SPARQLSelectValidator ; sh:deactivated true ;
+    sh:message "deactivated validator" ; sh:select """SELECT $this WHERE { }""" ] ;
+  sh:validator [ a sh:SPARQLAskValidator ; sh:message "fallback validator" ;
+    sh:ask """ASK { FILTER ($value != $fallback) }""" ] .
+ex:S a sh:NodeShape ; sh:targetSubjectsOf ex:colour ;
+  sh:property [ sh:path ex:colour ; ex:off true ; ex:fallback "red" ] .
+"#;
+    let r = try_run(shapes, "ex:a ex:colour \"red\" . ex:b ex:colour \"blue\" .")
+        .expect("a switched-off component is not an ill-formed shapes graph");
+    // Only the fallback validator ran: it flags the value equal to
+    // ex:fallback, and the switched-off components flag nothing.
+    assert_eq!(flagged(&r), set(&["a"]), "{:?}", r.results);
+    assert_eq!(r.results[0].message, "fallback validator");
+}
+
+/// Every value of a single-parameter component's parameter declares its own
+/// constraint (SHACL §4). Only the first value used to be read; which one was
+/// store order, so there is one node per value. The component's own
+/// `sh:message` is used when the validator has none.
+#[test]
+fn every_value_of_a_component_parameter_is_its_own_constraint() {
+    let shapes = r#"
+ex:ForbiddenComponent a sh:ConstraintComponent ;
+  sh:parameter [ sh:path ex:forbidden ] ;
+  sh:message "{$value} is forbidden ({$forbidden})" ;
+  sh:validator [ a sh:SPARQLAskValidator ; sh:ask """ASK { FILTER ($value != $forbidden) }""" ] .
+ex:S a sh:NodeShape ; sh:targetSubjectsOf ex:colour ;
+  sh:property [ sh:path ex:colour ; ex:forbidden "red" , "blue" ] .
+"#;
+    let r = run(
+        shapes,
+        "ex:r ex:colour \"red\" . ex:b ex:colour \"blue\" . ex:g ex:colour \"green\" .",
+    );
+    assert_eq!(flagged(&r), set(&["r", "b"]), "{:?}", r.results);
+    let red = r
+        .results
+        .iter()
+        .find(|x| x.focus_node.ends_with("/r"))
+        .unwrap();
+    assert_eq!(red.message, "red is forbidden (red)");
+}
+
+/// A component with several parameters takes one value for each: a shape
+/// giving one of them two values is ill-formed (SHACL §4) and fails the run.
+#[test]
+fn a_multi_parameter_component_given_two_values_fails_the_shapes_graph() {
+    let shapes = r#"
+ex:LangComponent a sh:ConstraintComponent ;
+  sh:parameter [ sh:path ex:lang ] ;
+  sh:parameter [ sh:path ex:note ; sh:optional true ] ;
+  sh:propertyValidator [ a sh:SPARQLSelectValidator ;
+    sh:select """SELECT $this ?value WHERE { $this $PATH ?value . FILTER (!langMatches(lang(?value), $lang)) }""" ] .
+ex:S a sh:NodeShape ; sh:targetSubjectsOf ex:label ;
+  sh:property [ sh:path ex:label ; ex:lang "de" , "fr" ] .
+"#;
+    let r = try_run(shapes, "ex:x ex:label \"x\"@en .");
+    let err = r.expect_err("two values for one of several parameters is ill-formed");
+    assert!(err.contains("$lang"), "{err}");
+}
+
+/// A sub-select must project every pre-bound variable, a component's
+/// parameters included (SHACL Appendix A): one that does not would see the
+/// parameter unbound. The shapes graph fails instead.
+#[test]
+fn a_sub_select_must_project_every_prebound_variable() {
+    let component = |inner_projection: &str| {
+        format!(
+            r#"
+ex:LimitComponent a sh:ConstraintComponent ;
+  sh:parameter [ sh:path ex:limit ] ;
+  sh:nodeValidator [ a sh:SPARQLSelectValidator ;
+    sh:select """SELECT $this WHERE {{ {{ SELECT {inner_projection} WHERE {{ $this <http://example.org/size> ?s . FILTER (?s > $limit) }} }} }}""" ] .
+ex:S a sh:NodeShape ; sh:targetSubjectsOf ex:size ; ex:limit 10 .
+"#
+        )
+    };
+    let err = try_run(&component("$this"), "ex:big ex:size 20 .")
+        .expect_err("a sub-select hiding $limit is refused");
+    assert!(err.contains("$limit"), "{err}");
+
+    let r = try_run(
+        &component("$this $limit"),
+        "ex:big ex:size 20 . ex:ok ex:size 5 .",
+    )
+    .expect("projecting every pre-bound variable is fine");
+    assert_eq!(flagged(&r), set(&["big"]), "{:?}", r.results);
+}
+
 // ─── Fail closed: inline shapes and SPARQL targets that cannot be loaded ──────
 
 /// An inline `sh:node` body whose constraint cannot be evaluated used to be
@@ -570,15 +843,13 @@ fn a_subclass_axiom_in_another_graph_still_targets_its_instances() {
     );
 }
 
-/// The same rule written two ways must not give opposite answers in one run.
-/// A `sh:path` used to be evaluated inside each data graph in turn, so a path
-/// that has to cross a graph boundary found nothing, while the identical rule
-/// as a `sh:sparql` constraint sees the graphs merged and finds the value.
-/// This test states today's behaviour so any change to it is deliberate: the
-/// two constructs still disagree, and that is the open question recorded in
-/// docs/notes/improvement-log.md.
+/// The same rule written two ways gives one answer. SHACL validates one data
+/// graph (§3.4), so a run over several validates their merge. A `sh:path` used
+/// to be evaluated inside each data graph in turn: a path that had to cross a
+/// graph boundary found nothing, while the identical rule as a `sh:sparql`
+/// constraint read the graphs merged and found the value.
 #[test]
-fn a_path_and_an_equivalent_sparql_constraint_disagree_across_graphs() {
+fn a_path_and_an_equivalent_sparql_constraint_agree_across_graphs() {
     let store = TripleStore::in_memory().unwrap();
     let shapes = r#"
 ex:PathShape a sh:NodeShape ; sh:targetNode ex:bridge1 ;
@@ -616,25 +887,53 @@ ex:SparqlShape a sh:NodeShape ; sh:targetNode ex:bridge1 ;
         &["urn:instances".to_string(), "urn:details".to_string()],
     )
     .unwrap();
-    let path_fired = r.results.iter().any(|x| x.message.starts_with("path:"));
-    let sparql_fired = r.results.iter().any(|x| x.message.starts_with("sparql:"));
     assert!(
-        path_fired,
-        "today a sh:path is confined to one graph per evaluation, so the cross-graph hop finds nothing: {:?}",
+        r.conforms,
+        "both spellings follow ex:hasDeck into urn:instances and ex:width into urn:details: {:?}",
         r.results
-    );
-    assert!(
-        !sparql_fired,
-        "today a sh:sparql constraint sees the graphs merged and finds the width: {:?}",
-        r.results
-    );
-    assert_ne!(
-        path_fired, sparql_fired,
-        "the two spellings of one rule disagree — the incoherence this test exists to pin"
     );
 
-    // Control: in a single graph the two spellings agree, which is why every
-    // existing fixture and the whole W3C suite miss this.
+    // Without the deck's width anywhere, both spellings report it.
+    let missing = TripleStore::in_memory().unwrap();
+    missing
+        .load_str(
+            &format!("{PFX}{shapes}"),
+            RdfFormat::Turtle,
+            Some("urn:shapes"),
+        )
+        .unwrap();
+    missing
+        .load_str(
+            &format!("{PFX}ex:bridge1 a ex:Bridge ; ex:hasDeck ex:deck1 ."),
+            RdfFormat::Turtle,
+            Some("urn:instances"),
+        )
+        .unwrap();
+    missing
+        .load_str(
+            &format!("{PFX}ex:deck1 ex:length 40 ."),
+            RdfFormat::Turtle,
+            Some("urn:details"),
+        )
+        .unwrap();
+    let r = validate(
+        &missing,
+        "urn:shapes",
+        &["urn:instances".to_string(), "urn:details".to_string()],
+    )
+    .unwrap();
+    assert!(
+        r.results.iter().any(|x| x.message.starts_with("path:")),
+        "{:?}",
+        r.results
+    );
+    assert!(
+        r.results.iter().any(|x| x.message.starts_with("sparql:")),
+        "{:?}",
+        r.results
+    );
+
+    // Control: in a single graph the two spellings agree too.
     let single = TripleStore::in_memory().unwrap();
     single
         .load_str(
@@ -695,71 +994,12 @@ fn a_recursive_shapes_graph_still_validates() {
     );
 }
 
-/// The graph-reach probe measures without changing an answer: the same run
-/// gives the same report with the probe on and off. It exists so a deployment
-/// can find out how often a `sh:path` would resolve differently over the merge
-/// of its data graphs before anyone changes the semantics.
-#[test]
-fn the_graph_reach_probe_changes_no_answer() {
-    // Serialised against other env-reading tests in this binary by construction:
-    // no other test in this file sets OTS_SHACL_REACH_PROBE.
-    let build = || {
-        let store = TripleStore::in_memory().unwrap();
-        store
-            .load_str(
-                &format!(
-                    "{PFX}ex:S a sh:NodeShape ; sh:targetNode ex:bridge1 ; \
-                     sh:property [ sh:path ( ex:hasDeck ex:width ) ; sh:minCount 1 ] ."
-                ),
-                RdfFormat::Turtle,
-                Some("urn:shapes"),
-            )
-            .unwrap();
-        store
-            .load_str(
-                &format!("{PFX}ex:bridge1 ex:hasDeck ex:deck1 ."),
-                RdfFormat::Turtle,
-                Some("urn:instances"),
-            )
-            .unwrap();
-        store
-            .load_str(
-                &format!("{PFX}ex:deck1 ex:width 12 ."),
-                RdfFormat::Turtle,
-                Some("urn:details"),
-            )
-            .unwrap();
-        store
-    };
-    let graphs = ["urn:instances".to_string(), "urn:details".to_string()];
-
-    let off = validate(&build(), "urn:shapes", &graphs).unwrap();
-    std::env::set_var("OTS_SHACL_REACH_PROBE", "1");
-    let on = validate(&build(), "urn:shapes", &graphs).unwrap();
-    std::env::remove_var("OTS_SHACL_REACH_PROBE");
-
-    assert_eq!(
-        off.conforms, on.conforms,
-        "the probe must not change conformance"
-    );
-    assert_eq!(
-        off.results_count, on.results_count,
-        "the probe must not change the result count"
-    );
-    assert!(
-        !off.conforms,
-        "the fixture is the cross-graph path, which today violates: {:?}",
-        off.results
-    );
-}
-
-/// `sh:closed` reads all data graphs at once while a `sh:path` reads each in
-/// turn, which looks like a sixth reach regime. It is not one: `sh:closed`
-/// enumerates the focus node's outgoing quads in a SINGLE hop, and every
-/// matching quad lives in exactly one graph, so "enumerate per graph and union"
-/// and "enumerate over the merge" return the same set by construction. The same
-/// argument covers `sh:targetSubjectsOf` and `sh:targetObjectsOf`. This test
-/// exists so the equivalence is asserted rather than argued.
+/// Splitting the data across graphs cannot change what `sh:closed` reports:
+/// it enumerates the focus node's outgoing quads in a SINGLE hop over the
+/// merge of the data graphs, and every matching quad lives in exactly one
+/// graph. The same argument covers `sh:targetSubjectsOf` and
+/// `sh:targetObjectsOf`. This test exists so the equivalence is asserted
+/// rather than argued.
 #[test]
 fn sh_closed_reports_the_same_across_graphs_as_within_them() {
     let shapes = "ex:S a sh:NodeShape ; sh:targetNode ex:n ; sh:closed true ; \
@@ -816,8 +1056,7 @@ fn sh_closed_reports_the_same_across_graphs_as_within_them() {
     assert_eq!(across.results_count, 2, "ex:stray and ex:other: {across:?}");
 }
 
-/// A single-hop path cannot diverge either, for the same reason — so the reach
-/// question is confined to paths with an intermediate node.
+/// A single-hop path reads the same split or merged, for the same reason.
 #[test]
 fn a_single_hop_path_reads_the_same_across_graphs_as_within_them() {
     let shapes =
@@ -857,13 +1096,12 @@ fn a_single_hop_path_reads_the_same_across_graphs_as_within_them() {
     );
 }
 
-/// The reach of a composite path depends on the KIND of the focus node: an IRI
-/// focus is evaluated inside each data graph in turn, while a blank-node focus
-/// takes the historical merged walk. So the same path over structurally
-/// identical data answers differently for `ex:iri` and for a blank node. Pinned,
-/// not fixed — see docs/notes/improvement-log.md.
+/// The reach of a composite path does not depend on the kind of the focus
+/// node. An IRI focus used to be walked inside each data graph in turn while a
+/// blank-node focus took the merged walk, so the same path over structurally
+/// identical data answered differently for `ex:iri` and for a blank node.
 #[test]
-fn a_composite_path_reaches_differently_for_an_iri_and_a_blank_node_focus() {
+fn a_composite_path_reaches_the_same_for_an_iri_and_a_blank_node_focus() {
     let store = TripleStore::in_memory().unwrap();
     store
         .load_str(
@@ -897,13 +1135,68 @@ fn a_composite_path_reaches_differently_for_an_iri_and_a_blank_node_focus() {
     )
     .unwrap();
     assert!(
-        violates(&r, "/iri"),
-        "an IRI focus is confined per graph, so the cross-graph hop finds nothing: {:?}",
+        r.conforms,
+        "both focus nodes reach their deck's width in the other graph: {:?}",
+        r.results
+    );
+}
+
+/// A closure path follows its chain through every data graph, and a value
+/// count adds up values from all of them: `sh:maxCount` sees both widths.
+#[test]
+fn closure_and_sequence_paths_cross_data_graphs() {
+    let store = TripleStore::in_memory().unwrap();
+    store
+        .load_str(
+            &format!(
+                "{PFX}ex:Root a sh:NodeShape ; sh:targetNode ex:leaf ; \
+                 sh:property [ sh:path [ sh:oneOrMorePath ex:partOf ] ; sh:hasValue ex:root ] . \
+                 ex:Width a sh:NodeShape ; sh:targetNode ex:bridge ; \
+                 sh:property [ sh:path ( ex:hasDeck ex:width ) ; sh:maxCount 1 ] ."
+            ),
+            RdfFormat::Turtle,
+            Some("urn:shapes"),
+        )
+        .unwrap();
+    store
+        .load_str(
+            &format!("{PFX}ex:leaf ex:partOf ex:mid . ex:bridge ex:hasDeck ex:d1 , ex:d2 ."),
+            RdfFormat::Turtle,
+            Some("urn:g1"),
+        )
+        .unwrap();
+    store
+        .load_str(
+            &format!("{PFX}ex:mid ex:partOf ex:root . ex:d1 ex:width 12 ."),
+            RdfFormat::Turtle,
+            Some("urn:g2"),
+        )
+        .unwrap();
+    store
+        .load_str(
+            &format!("{PFX}ex:d2 ex:width 14 ."),
+            RdfFormat::Turtle,
+            Some("urn:g3"),
+        )
+        .unwrap();
+    let r = validate(
+        &store,
+        "urn:shapes",
+        &[
+            "urn:g1".to_string(),
+            "urn:g2".to_string(),
+            "urn:g3".to_string(),
+        ],
+    )
+    .unwrap();
+    assert!(
+        !violates(&r, "/leaf"),
+        "ex:leaf reaches ex:root through ex:mid across graphs: {:?}",
         r.results
     );
     assert!(
-        !r.results.iter().any(|x| x.focus_node.starts_with("_:")),
-        "a blank-node focus takes the merged walk and finds the width: {:?}",
+        violates(&r, "/bridge"),
+        "two deck widths, one in each of two graphs, exceed maxCount 1: {:?}",
         r.results
     );
 }

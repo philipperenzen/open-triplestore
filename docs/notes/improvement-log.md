@@ -703,6 +703,17 @@ the status quo, because the split runs *through a single property shape* —
 would mean picking a correct default anyway and then also shipping the position
 just judged wrong.
 
+### Flipped (2026-10-02, owner decision D7)
+
+The owner decided to switch `sh:path` to the merge of the data graphs (standards
+plan 2026-10, card 10): `get_path_values` now walks every focus node's path
+over all data graphs, the two pinned inconsistency tests assert agreement, and
+the probe is removed. The three objections above stand as consequences, not as
+blockers: inference results change on multi-graph datasets (a `### Changed`
+release note), a single-graph write gate no longer predicts the dataset result
+for a path that crosses graphs (`docs/shacl.md` says so), and the change was
+never sized on real data. Single-graph runs are unaffected.
+
 ### Corrections to the author's starting position
 
 - "The layered convention depends on reaching across, which is why `sh:class`

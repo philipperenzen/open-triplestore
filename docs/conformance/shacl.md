@@ -87,6 +87,34 @@ the shapes forbid. They are covered by `tests/shacl_conformance.rs` and
   wrote the shapes graph's blank node into the data; they are refused at load
   until node expressions are implemented.
 
+## Beyond the suite: SHACL-SPARQL and multi-graph runs (2026-10-02)
+
+Also covered by `tests/shacl_conformance.rs` and
+`tests/shacl_rules_conformance.rs`, not by suite cases:
+
+- **Blank-node focus and value nodes** were skipped by `sh:sparql` constraints
+  and constraint-component validators: the pre-bound value was pasted into the
+  query text, and no SPARQL syntax names a stored blank node. `$this`, `$value`
+  and the parameters are now pre-bound as RDF terms the way SHACL Appendix A
+  defines it: every basic graph pattern, path and `GRAPH ?g` block of the query
+  is joined with a one-row table of the values (a `BIND` of a function that
+  returns the term, since `VALUES` cannot hold a blank node), so they reach
+  every scope and the query optimizer still sees them bound.
+- **`?failure`** bound to `true` is a failure (reported, so the node does not
+  conform); `?message` and `{?var}` / `{$var}` message templates are filled from
+  the solution; `?path` is used only when it is an IRI (SHACL §5.3, §5.3.2).
+- **`sh:deactivated`** on a SPARQL-based constraint removes its results; on a
+  validator it takes the validator out.
+- **Component parameters**: only the first value was read. Each value of a
+  single-parameter component is now its own constraint, and several values for
+  a parameter of a multi-parameter component fail the shapes graph (SHACL §4).
+  A sub-select must project every pre-bound variable, parameters included
+  (Appendix A).
+- **Multi-graph runs**: `sh:path` from an IRI focus node was evaluated inside
+  each data graph in turn, so a path crossing graphs found nothing while
+  `sh:sparql` and blank-node focus nodes saw the merge. Paths now read the
+  merge of the data graphs (SHACL §3.4) for every focus node.
+
 ## Typed-term engine refactor (2026-06-11)
 
 The previous engine carried focus nodes and value nodes as **lexical strings**, losing

@@ -26,7 +26,7 @@
 //!   1. `sh:construct` CONSTRUCT-template query form (`construct_query_form_materialises`).
 //!   2. `sh:TripleRule` focus-node binding via `sh:this` (`triple_rule_binds_focus_node`).
 
-use open_triplestore::shacl::infer;
+use open_triplestore::shacl::{infer, infer_into};
 use open_triplestore::store::TripleStore;
 use oxigraph::io::RdfFormat;
 use oxigraph::sparql::QueryResults;
@@ -733,4 +733,112 @@ ex:S a sh:NodeShape ; sh:targetClass ex:Thing ;
     let store = store_with(shapes, "ex:t a ex:Thing .");
     infer(&store, "urn:shapes", &[]).unwrap();
     assert!(ask(&store, "ASK { ex:t ex:seen true }"));
+}
+
+// ─── Conditions read the run the way validation does ────────────────────────
+
+/// Load `shapes` into `urn:shapes` and each `(graph, turtle)` into its graph.
+fn store_with_graphs(shapes: &str, graphs: &[(&str, &str)]) -> TripleStore {
+    let store = TripleStore::in_memory().unwrap();
+    store
+        .load_str(
+            &format!("{PFX}{shapes}"),
+            RdfFormat::Turtle,
+            Some("urn:shapes"),
+        )
+        .unwrap();
+    for (g, data) in graphs {
+        store
+            .load_str(&format!("{PFX}{data}"), RdfFormat::Turtle, Some(g))
+            .unwrap();
+    }
+    store
+}
+
+/// A rule condition evaluates its `sh:path` over the merge of the run's data
+/// graphs (SHACL §3.4). It used to walk an IRI focus node's path inside each
+/// graph in turn, so a condition whose path crossed from one graph into
+/// another was never met and the rule never fired.
+#[test]
+fn a_rule_condition_follows_a_path_across_data_graphs() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:Bridge ;
+  sh:rule [ a sh:TripleRule ; sh:condition ex:HasDeckWidth ;
+            sh:subject sh:this ; sh:predicate ex:measured ; sh:object true ] .
+ex:HasDeckWidth a sh:NodeShape ;
+  sh:property [ sh:path ( ex:hasDeck ex:width ) ; sh:minCount 1 ] .
+"#;
+    let store = store_with_graphs(
+        shapes,
+        &[
+            (
+                "urn:instances",
+                "ex:b1 a ex:Bridge ; ex:hasDeck ex:d1 . ex:b2 a ex:Bridge ; ex:hasDeck ex:d2 .",
+            ),
+            ("urn:details", "ex:d1 ex:width 12 ."),
+        ],
+    );
+    let n = infer_into(
+        &store,
+        "urn:shapes",
+        &["urn:instances".to_string(), "urn:details".to_string()],
+        Some("urn:inferred"),
+    )
+    .unwrap();
+    assert!(
+        ask(
+            &store,
+            "ASK { GRAPH <urn:inferred> { ex:b1 ex:measured true } }"
+        ),
+        "b1's deck width lives in urn:details, which the run reads"
+    );
+    assert!(
+        !ask(&store, "ASK { GRAPH ?g { ex:b2 ex:measured true } }"),
+        "b2's deck has no width in any graph"
+    );
+    assert_eq!(n, 1);
+}
+
+/// A `sh:sparql` condition checks a blank-node focus node. Blank nodes could
+/// not be pre-bound, so the constraint was skipped and every blank node met
+/// the condition: the rule fired for the very node the condition excludes.
+#[test]
+fn a_sparql_condition_checks_a_blank_node_focus() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:Person ;
+  sh:rule [ a sh:TripleRule ; sh:condition ex:Adult ;
+            sh:subject sh:this ; sh:predicate ex:mayVote ; sh:object true ] .
+ex:Adult a sh:NodeShape ;
+  sh:sparql [ sh:select """SELECT $this WHERE { $this <http://example.org/age> ?a . FILTER (?a < 18) }""" ] .
+"#;
+    let store = store_with(
+        shapes,
+        "[ a ex:Person ; ex:age 12 ; ex:name \"minor\" ] . [ a ex:Person ; ex:age 40 ; ex:name \"adult\" ] .",
+    );
+    let n = infer(&store, "urn:shapes", &[]).unwrap();
+    assert!(
+        ask(&store, "ASK { ?p ex:name \"adult\" ; ex:mayVote true }"),
+        "the adult meets the condition"
+    );
+    assert!(
+        !ask(&store, "ASK { ?p ex:name \"minor\" ; ex:mayVote true }"),
+        "the minor does not"
+    );
+    assert_eq!(n, 1);
+}
+
+/// `$this` reaches a filter that no triple pattern of the rule binds it in.
+/// The query optimizer took such a `$this` for a variable that is never bound
+/// and dropped the filter's group, so the rule never fired.
+#[test]
+fn a_sparql_rule_sees_this_in_a_filter_only_scope() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:Thing ;
+  sh:rule [ a sh:SPARQLRule ;
+    sh:construct """CONSTRUCT { $this <http://example.org/checked> true } WHERE { FILTER (isIRI($this) && bound($this)) }""" ] .
+"#;
+    let store = store_with(shapes, "ex:t a ex:Thing .");
+    let n = infer(&store, "urn:shapes", &[]).unwrap();
+    assert!(ask(&store, "ASK { ex:t ex:checked true }"));
+    assert_eq!(n, 1);
 }

@@ -92,6 +92,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `latest` GitHub Release and image tag alone. `release.yml` can be re-run for
   an existing tag. See `docs/release-process.md`.
 
+- **SHACL: a property path reads the merge of a run's data graphs.** SHACL
+  validates one data graph (§3.4), and a run over several validates their
+  merge. A `sh:path` from an IRI focus node used to be evaluated inside each
+  data graph in turn, so a path whose hops live in different graphs (a
+  sequence, `sh:zeroOrMorePath`, `sh:oneOrMorePath`) found nothing, while the
+  same rule as a `sh:sparql` constraint, or the same path from a blank-node
+  focus node, found the value. It now reads the merge for every focus node.
+  Validation and inference results change for datasets with more than one
+  graph: a `sh:minCount` can now pass, a `sh:maxCount`, `sh:uniqueLang` or
+  `sh:qualifiedMaxCount` can now fail, and a SHACL-AF rule whose `sh:condition`
+  reads such a path can now fire (scheduled inference materialises what it
+  derives). Single-graph runs, and so every write gate, are unchanged. The
+  `OTS_SHACL_REACH_PROBE` setting that measured the difference is removed.
+
 ### Fixed
 - **SHACL validation and write gates no longer pass data the shapes forbid.**
   Gates get stricter: data that used to be accepted may now be refused with
@@ -122,6 +136,34 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `docs/shacl.md` and pinned by tests; it is not fixed.
   - The IDS export reports a second `sh:pattern` or `sh:hasValue` and
     deactivated shapes as losses instead of exporting them with another meaning.
+- **SHACL-SPARQL constraints check blank nodes and follow the spec's result
+  rules.** Gates get stricter here too.
+  - `sh:sparql` constraints and constraint-component validators skipped
+    blank-node focus nodes, and ASK validators skipped blank-node values: the
+    pre-bound value was pasted into the query text, and no SPARQL syntax names
+    a stored blank node, so those nodes conformed unchecked. `$this`, `$value`
+    and the component parameters are now bound as RDF terms.
+  - A solution binding `?failure` to `true` is reported as a failure of the
+    constraint; it was an ordinary result. `?message` sets the result message,
+    `{?var}` / `{$var}` in `sh:message` are filled from the solution, and
+    `?path` is used only when it is an IRI.
+  - `sh:deactivated true` on a `sh:sparql` constraint or on a validator is
+    honoured; a constraint component falls back to `sh:validator` or switches
+    off.
+  - Every value of a single-parameter constraint component is its own
+    constraint; only the first was read. Several values for one parameter of a
+    multi-parameter component fail the shapes graph, as does a sub-select that
+    does not project every pre-bound variable (parameters included). A
+    validator without `sh:message` uses the component's.
+  - A SHACL-AF `sh:SPARQLRule` whose `$this` appears only in a `FILTER` (no
+    triple pattern binds it there) never fired: the query optimizer, not told
+    that `$this` is bound, dropped the filter's group. Rules now pre-bind
+    `$this` the way constraints do, in every scope of the query (SHACL
+    Appendix A).
+  - On the vendored OGC GeoSPARQL validator corpus, `S21-invalid.ttl` (a
+    blank-node geometry whose `geo:dimension` exceeds its
+    `geo:coordinateDimension`) is now caught: 47 of 48 examples match the OGC
+    oracle.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if
