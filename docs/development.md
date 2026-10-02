@@ -5,10 +5,22 @@ This is the canonical reference; [`CONTRIBUTING.md`](../CONTRIBUTING.md) has the
 contribution rules and the [README](../README.md) has the short version.
 
 > **Platform note.** A native build needs the **GEOS** C library on every OS (and
-> **libxmlsec1** for the `saml` feature in `--features full`). On Windows that is
+> **libxmlsec1** for the opt-in `saml` feature). On Windows that is
 > fiddly, so the native fast-loop tools below are smoothest on **Linux, macOS, or
 > WSL2** — see the [Windows guide](windows.md). The Docker speed-ups apply
 > everywhere.
+>
+> **macOS and `saml`:** Homebrew's `libxmlsec1` links Homebrew's `libxml2`, but
+> by default the build links the SDK's `/usr/lib/libxml2`, and a binary with both
+> crashes in `xmlFreeID` as soon as it signs or verifies SAML XML. Two things
+> pull in the SDK copy: pkg-config finds the SDK's `libxml-2.0.pc` first, and
+> Homebrew's shim `libxslt.pc` adds `-L/usr/lib` ahead of Homebrew's `libxml2`.
+> Put Homebrew's `libxml2` and `libxmlsec1` pkgconfig directories on
+> `PKG_CONFIG_PATH`, plus a directory holding a copy of the shim `libxslt.pc`
+> (`$(brew --prefix)/Library/Homebrew/os/mac/pkgconfig/<macOS>/libxslt.pc`) with
+> its `Libs:` line changed to `-lxslt`. Check the result with `otool -L` on the
+> test binary: it must list `…/libxml2/lib/libxml2.16.dylib` and not
+> `/usr/lib/libxml2.2.dylib`.
 
 ---
 

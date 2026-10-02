@@ -604,12 +604,13 @@ mod saml_sp_initiated {
     /// started: missing or foreign `saml_state` cookie (login CSRF), an
     /// unknown RelayState (IdP-initiated or forged), a response answering a
     /// different request, and a response signed by a key the provider does not
-    /// trust.
+    /// trust. Each case gets its own store: the SSO routes allow a burst of 8
+    /// requests per client.
     #[tokio::test]
     async fn acs_refuses_responses_not_bound_to_this_browsers_request() {
         let idp = TestIdp::new();
-        let (app, base_url) = store_trusting(&idp);
 
+        let (app, base_url) = store_trusting(&idp);
         let (relay, request_id) = start(&app, &base_url).await;
         let good = idp.response(&base_url, &request_id, "alice");
         // No cookie, or another browser's cookie.
@@ -633,6 +634,7 @@ mod saml_sp_initiated {
         );
 
         // A validly signed response to some other request.
+        let (app, base_url) = store_trusting(&idp);
         let (relay, _) = start(&app, &base_url).await;
         let other = idp.response(&base_url, "_another-request", "alice");
         assert_eq!(
@@ -641,6 +643,7 @@ mod saml_sp_initiated {
         );
 
         // The right request, signed by an IdP key the provider does not trust.
+        let (app, base_url) = store_trusting(&idp);
         let (relay, request_id) = start(&app, &base_url).await;
         let forged = TestIdp::new().response(&base_url, &request_id, "alice");
         assert_eq!(
