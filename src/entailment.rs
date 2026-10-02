@@ -27,6 +27,7 @@ use crate::auth::db::AuthDb;
 use crate::auth::middleware::AuthenticatedUser;
 use crate::auth::models::{Dataset, GraphKind, OwnerType, Role};
 use crate::reasoning::identity::IdentityPolicy;
+use crate::server::error::AppError;
 use crate::server::AppState;
 
 pub const REGIMES: &[&str] = &["rdfs", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl"];
@@ -41,6 +42,12 @@ pub struct EntailmentConfig {
     pub updated_at: String,
     pub last_run_at: Option<String>,
     pub last_triples: Option<i64>,
+    /// What the last run found: `true` consistent, `false` inconsistent (see
+    /// `inconsistency`), `null` when the regime has no inconsistency rules or
+    /// the last run failed for another reason.
+    pub consistent: Option<bool>,
+    /// `{rule, detail}` of the check that fired on the last run, if any.
+    pub inconsistency: Option<serde_json::Value>,
 }
 
 pub fn dataset_entailment_graph(regime: &str, dataset_id: &str) -> String {
@@ -51,7 +58,8 @@ pub fn config(db: &AuthDb, dataset_id: &str) -> anyhow::Result<Option<Entailment
     let conn = db.pool().get()?;
     Ok(conn
         .query_row(
-            "SELECT regime, mode, updated_at, last_run_at, last_triples FROM dataset_entailment WHERE dataset_id = ?1",
+            "SELECT regime, mode, updated_at, last_run_at, last_triples, last_consistent, last_inconsistency \
+             FROM dataset_entailment WHERE dataset_id = ?1",
             params![dataset_id],
             |r| {
                 let regime: String = r.get(0)?;
@@ -63,6 +71,10 @@ pub fn config(db: &AuthDb, dataset_id: &str) -> anyhow::Result<Option<Entailment
                     updated_at: r.get(2)?,
                     last_run_at: r.get(3)?,
                     last_triples: r.get(4)?,
+                    consistent: r.get::<_, Option<i64>>(5)?.map(|c| c != 0),
+                    inconsistency: r
+                        .get::<_, Option<String>>(6)?
+                        .and_then(|j| serde_json::from_str(&j).ok()),
                 })
             },
         )
@@ -79,11 +91,39 @@ fn set_config(db: &AuthDb, dataset_id: &str, regime: &str, mode: &str) -> anyhow
     Ok(())
 }
 
-fn record_run(db: &AuthDb, dataset_id: &str, triples: i64) -> anyhow::Result<()> {
+/// Record a completed run: its time, the entailment graph's size and what it
+/// found about consistency (`None`: not checked; `inconsistency` is the
+/// `{rule, detail}` of a check that fired).
+fn record_run(
+    db: &AuthDb,
+    dataset_id: &str,
+    triples: i64,
+    consistent: Option<bool>,
+    inconsistency: Option<&serde_json::Value>,
+) -> anyhow::Result<()> {
     let conn = db.pool().get()?;
     conn.execute(
-        "UPDATE dataset_entailment SET last_run_at = ?2, last_triples = ?3 WHERE dataset_id = ?1",
-        params![dataset_id, chrono::Utc::now().to_rfc3339(), triples],
+        "UPDATE dataset_entailment SET last_run_at = ?2, last_triples = ?3, \
+         last_consistent = ?4, last_inconsistency = ?5 WHERE dataset_id = ?1",
+        params![
+            dataset_id,
+            chrono::Utc::now().to_rfc3339(),
+            triples,
+            consistent.map(i64::from),
+            inconsistency.map(|v| v.to_string()),
+        ],
+    )?;
+    Ok(())
+}
+
+/// A run failed for a reason that says nothing about consistency: forget
+/// what the previous run found rather than keep reporting it.
+fn forget_consistency(db: &AuthDb, dataset_id: &str) -> anyhow::Result<()> {
+    let conn = db.pool().get()?;
+    conn.execute(
+        "UPDATE dataset_entailment SET last_consistent = NULL, last_inconsistency = NULL \
+         WHERE dataset_id = ?1",
+        params![dataset_id],
     )?;
     Ok(())
 }
@@ -140,7 +180,7 @@ fn last_run_generation(dataset_id: &str) -> Option<u64> {
 /// Re-materialise `regime` for `dataset_id` into its entailment graph —
 /// cleared and rebuilt from scratch. Returns the number of triples in the
 /// entailment graph afterwards.
-pub fn run_for_dataset(state: &AppState, dataset_id: &str, regime: &str) -> Result<i64, String> {
+pub fn run_for_dataset(state: &AppState, dataset_id: &str, regime: &str) -> Result<i64, AppError> {
     run_for_dataset_with(state, dataset_id, regime, false)
 }
 
@@ -153,28 +193,49 @@ pub fn run_for_dataset_with(
     dataset_id: &str,
     regime: &str,
     extend: bool,
-) -> Result<i64, String> {
+) -> Result<i64, AppError> {
+    use crate::reasoning::ReasoningError;
     let ds = state
         .auth_db
         .get_dataset(dataset_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("dataset {dataset_id} not found"))?;
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| AppError::NotFound(format!("dataset {dataset_id} not found")))?;
     let (sources, identity) = reasoning_sources(state, &ds);
     let target = dataset_entailment_graph(regime, dataset_id);
     if !extend {
         state
             .store
             .update(&format!("CLEAR SILENT GRAPH <{target}>"))
-            .map_err(|e| format!("clearing <{target}>: {e}"))?;
+            .map_err(|e| AppError::Internal(format!("clearing <{target}>: {e}")))?;
     }
-    crate::server::routes::run_regime(state, regime, Some(sources), &target, identity.policy)
-        .map_err(|e| format!("{e:?}"))?;
+    let outcome =
+        crate::server::routes::run_reasoner(state, regime, Some(sources), &target, identity.policy);
     let n = state.store.graph_count_cached(Some(&target)).unwrap_or(0) as i64;
-    let _ = record_run(&state.auth_db, dataset_id, n);
-    if let Ok(mut m) = last_run_generations().lock() {
-        m.insert(dataset_id.to_string(), state.store.write_generation());
+    match outcome {
+        Ok(_) => {
+            let consistent = crate::reasoning::common::checks_consistency(regime).then_some(true);
+            let _ = record_run(&state.auth_db, dataset_id, n, consistent, None);
+            if let Ok(mut m) = last_run_generations().lock() {
+                m.insert(dataset_id.to_string(), state.store.write_generation());
+            }
+            Ok(n)
+        }
+        Err(ReasoningError::Inconsistency { rule, detail }) => {
+            // The run finished; what it found is the result. The consequences
+            // derived before the check stay in the graph, as over the API.
+            let found = serde_json::json!({ "rule": rule, "detail": detail });
+            let _ = record_run(&state.auth_db, dataset_id, n, Some(false), Some(&found));
+            Err(crate::server::routes::reasoning_failure(
+                ReasoningError::Inconsistency { rule, detail },
+                regime,
+                &target,
+            ))
+        }
+        Err(e) => {
+            let _ = forget_consistency(&state.auth_db, dataset_id);
+            Err(crate::server::routes::reasoning_failure(e, regime, &target))
+        }
     }
-    Ok(n)
 }
 
 /// After a write to `graphs`: re-materialise every dataset in `materialize`
@@ -219,7 +280,10 @@ fn after_write_kind(state: &AppState, graphs: &[String], additive: bool) {
                     "re-materialised"
                 }
             ),
-            Err(e) => tracing::warn!("entailment: re-materialising {regime} for {ds} failed: {e}"),
+            Err(e) => tracing::warn!(
+                "entailment: re-materialising {regime} for {ds} failed: {}",
+                e.message()
+            ),
         }
     }
 }
@@ -353,19 +417,24 @@ pub async fn put_entailment(
     let r = regime.clone();
     let m = mode.clone();
     let g = graph.clone();
-    let triples = tokio::task::spawn_blocking(move || -> Result<i64, String> {
+    let run = tokio::task::spawn_blocking(move || -> Result<i64, AppError> {
         if m == "off" {
             st.store
                 .update(&format!("CLEAR SILENT GRAPH <{g}>"))
-                .map_err(|e| e.to_string())?;
-            let _ = record_run(&st.auth_db, &id, 0);
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            let _ = record_run(&st.auth_db, &id, 0, None, None);
             return Ok(0);
         }
         run_for_dataset(&st, &id, &r)
     })
     .await
-    .map_err(e500)?
-    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    .map_err(e500)?;
+    // An inconsistent dataset or a run without a fixed point is a 422 whose
+    // JSON body says what happened, exactly as `POST /api/reasoning/materialize`.
+    let triples = match run {
+        Ok(n) => n,
+        Err(e) => return Ok(e.into_response()),
+    };
     let identity = effective_identity(&state.auth_db, &ds);
     Ok(Json(serde_json::json!({
         "dataset_id": dataset_id,
@@ -373,9 +442,13 @@ pub async fn put_entailment(
         "mode": mode,
         "graph": graph,
         "triples": triples,
+        "consistent": (mode == "materialize"
+            && crate::reasoning::common::checks_consistency(&regime))
+            .then_some(true),
         "identity": identity.policy.as_str(),
         "identity_source": identity.source,
-    })))
+    }))
+    .into_response())
 }
 
 // ── Identity policy (owl:sameAs) ────────────────────────────────────────────
@@ -539,7 +612,10 @@ fn rematerialize_if_configured(state: &AppState, dataset_id: &str) {
     if let Ok(Some(c)) = config(&state.auth_db, dataset_id) {
         if c.mode == "materialize" {
             if let Err(e) = run_for_dataset(state, dataset_id, &c.regime) {
-                tracing::warn!("identity policy: re-materialising {dataset_id} failed: {e}");
+                tracing::warn!(
+                    "identity policy: re-materialising {dataset_id} failed: {}",
+                    e.message()
+                );
             }
         }
     }
@@ -574,7 +650,8 @@ fn rematerialize_org_datasets(state: &AppState, org_id: &str) {
         }
         if let Err(e) = run_for_dataset(state, &ds_id, &regime) {
             tracing::warn!(
-                "identity policy: re-materialising {ds_id} for organisation {org_id} failed: {e}"
+                "identity policy: re-materialising {ds_id} for organisation {org_id} failed: {}",
+                e.message()
             );
         }
     }

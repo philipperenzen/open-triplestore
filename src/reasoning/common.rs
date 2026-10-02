@@ -27,10 +27,34 @@ pub enum ReasoningError {
     Store(String),
     #[error("Query error: {0}")]
     Query(String),
-    #[error("Inconsistency detected: {0}")]
-    Inconsistency(String),
+    /// The input entails `false`. `rule` names the check that fired (an
+    /// OWL 2 RL/RDF rule such as `cax-dw`, or the DL check); the consequences
+    /// derived before the check stay in the target graph.
+    #[error("Inconsistency detected ({rule}): {detail}")]
+    Inconsistency { rule: String, detail: String },
+    /// The fixed point was not reached within the iteration limit, so the
+    /// target graph holds only part of the closure.
+    #[error("{regime} materialisation did not reach a fixed point within {iterations} iterations")]
+    NotConverged { regime: String, iterations: usize },
     #[error("Not supported: {0}")]
     NotSupported(String),
+}
+
+/// Whether `regime` checks consistency, i.e. can fail with
+/// [`ReasoningError::Inconsistency`]. A run of any other regime says nothing
+/// about consistency either way.
+pub fn checks_consistency(regime: &str) -> bool {
+    matches!(regime, "owl2-rl" | "owl2-dl")
+}
+
+impl ReasoningError {
+    /// An [`Inconsistency`](Self::Inconsistency) found by `rule`.
+    pub fn inconsistency(rule: &str, detail: impl Into<String>) -> Self {
+        ReasoningError::Inconsistency {
+            rule: rule.to_string(),
+            detail: detail.into(),
+        }
+    }
 }
 
 impl From<crate::store::StoreError> for ReasoningError {

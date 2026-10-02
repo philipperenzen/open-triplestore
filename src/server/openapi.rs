@@ -2246,9 +2246,18 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             "Inheriting datasets fall back to the built-in default (`sameas-narrow`).",
             vec![pp("org_id")], vec![("200", "Policy after the change"), ("403", "Organisation admin role required")], true)),
     ]);
+    mount(paths, "/api/datasets/:dataset_id/entailment", vec![
+        (M::Get, o("Reasoning", "Dataset entailment setting",
+            "The dataset's regime, mode (`materialize` | `off`), entailment graph `urn:entailment:<regime>:<id>`, identity policy and the graphs a run reads, plus the last run: `last_run_at`, `last_triples`, `consistent` (`true`/`false` for a regime that checks consistency, `null` otherwise or after a run that failed for another reason) and `inconsistency` (`{rule, detail}` of the check that fired).",
+            vec![pp("dataset_id")], vec![("200", "Setting and last run"), ("404", "Dataset not found")], true)),
+        (M::Put, o("Reasoning", "Select the dataset's entailment regime",
+            "Body `{\"regime\": \"rdfs|owl2-rl|owl2-el|owl2-ql|owl2-dl\", \"mode\": \"materialize|off\", \"identity\": \"…\"}`. In `materialize` mode the regime runs at once over the dataset's conformance layer and again after every write to its graphs. An inconsistent dataset, or a run that does not reach its fixed point, answers the same 422 as `POST /api/reasoning/materialize`; the setting is saved and the run recorded. Requires write access to the dataset.",
+            vec![pp("dataset_id")], vec![("200", "Setting, entailment graph size and `consistent`"), ("400", "Unknown regime, mode or identity policy"), ("403", "Write access required"), ("404", "Dataset not found"), ("422", "The dataset is inconsistent (`{consistent: false, rule, detail, regime, target_graph}`) or the run did not converge (`{converged: false, iterations, …}`)")], true)),
+    ]);
     mount(paths, "/api/reasoning/materialize", vec![
-        (M::Post, o("Reasoning", "Materialise entailments", "Materialise inferred triples for an entailment regime (rdfs, owl2-rl, owl2-el, owl2-ql, owl2-dl).",
-            vec![], vec![("200", "Reasoning report"), ("401", "Authentication required")], true)),
+        (M::Post, o("Reasoning", "Materialise entailments",
+            "Materialise inferred triples for an entailment regime (rdfs, owl2-rl, owl2-el, owl2-ql, owl2-dl). Body `{regime, target_graph?, dataset?, source_graphs?}`: without `dataset` or `source_graphs` the rules read the unnamed default graph; they always read the target graph too, so they see their own consequences. The report carries `triples_added`, `iterations`, `elapsed_ms`, `target_graph`, `sources` and `consistent` (`true` for `owl2-rl`/`owl2-dl`, `null` for a regime without inconsistency rules).",
+            vec![], vec![("200", "Reasoning report"), ("400", "Unknown regime"), ("401", "Authentication required"), ("403", "No write access to the target graph or no read access to a source graph"), ("404", "Dataset not found"), ("422", "The ontology is inconsistent — `{consistent: false, rule, detail, regime, target_graph}`, the derived triples stay in the target graph — or the run did not reach its fixed point within 500 iterations (`{converged: false, iterations, regime, target_graph}`)")], true)),
     ]);
     mount(
         paths,

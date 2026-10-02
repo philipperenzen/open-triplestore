@@ -1330,6 +1330,87 @@ impl TripleStore {
             .execute()?)
     }
 
+    /// The default graph plus `extra`: the unnamed default graph followed by
+    /// each named graph in `extra`.
+    fn default_graph_plus(extra: &[String]) -> Result<Vec<GraphName>, StoreError> {
+        let mut graphs = vec![GraphName::DefaultGraph];
+        for g in Self::scope_graphs(extra)? {
+            graphs.push(GraphName::NamedNode(g));
+        }
+        Ok(graphs)
+    }
+
+    /// Run an update whose `WHERE` clauses read the unnamed default graph
+    /// *together with* the named graphs in `extra`. Operations that declare
+    /// their own `USING` keep it, and named graphs stay reachable through
+    /// `GRAPH`.
+    ///
+    /// This is what an unscoped reasoner uses: its input is the default graph
+    /// and its consequences go to a named target graph, so with
+    /// [`update`](Self::update) a rule whose premises were both derived never
+    /// saw them. A SPARQL `USING` can only name IRIs, so it cannot express
+    /// "the unnamed graph plus <g>"; the prepared update's dataset can.
+    pub fn update_over(&self, sparql: &str, extra: &[String]) -> Result<(), StoreError> {
+        let _w = self.begin_write()?;
+        let parsed = crate::sparql::parser()
+            .parse_update(sparql)
+            .map_err(|e| StoreError::Parse(format!("update over default graph: {e}")))?;
+        // One entry per DELETE/INSERT operation, in order — the operations
+        // oxigraph keeps a dataset for — saying whether it declared `USING`.
+        let declared: Vec<bool> = parsed
+            .operations
+            .iter()
+            .filter_map(|op| match op {
+                spargebra::GraphUpdateOperation::DeleteInsert { using, .. } => {
+                    Some(using.is_some())
+                }
+                _ => None,
+            })
+            .collect();
+        let default = Self::default_graph_plus(extra)?;
+        let targets = Self::static_update_targets(sparql);
+        let mut prepared = self.query_options().for_update(parsed);
+        for (dataset, declared) in prepared.using_datasets_mut().zip(declared) {
+            if !declared {
+                dataset.set_default_graph(default.clone());
+            }
+        }
+        self.execute_update_captured("update_over", prepared, targets.as_deref(), None)?;
+        match targets {
+            Some(targets) => self
+                .graph_index
+                .recount_specific_graphs(&self.store, &targets),
+            None => self.graph_index.rebuild(&self.store),
+        }
+        Ok(())
+    }
+
+    /// The read-only counterpart of [`update_over`](Self::update_over): a
+    /// query without its own `FROM` clauses reads the unnamed default graph
+    /// together with the named graphs in `extra`. Uncached.
+    pub fn query_over(
+        &self,
+        sparql: &str,
+        extra: &[String],
+    ) -> Result<QueryResults<'static>, StoreError> {
+        let parsed = crate::sparql::parser()
+            .parse_query(sparql)
+            .map_err(|e| StoreError::Parse(format!("query over default graph: {e}")))?;
+        let declared = match &parsed {
+            spargebra::Query::Select { dataset, .. }
+            | spargebra::Query::Construct { dataset, .. }
+            | spargebra::Query::Describe { dataset, .. }
+            | spargebra::Query::Ask { dataset, .. } => dataset.is_some(),
+        };
+        let mut prepared = self.query_options().for_query(parsed);
+        if !declared {
+            prepared
+                .dataset_mut()
+                .set_default_graph(Self::default_graph_plus(extra)?);
+        }
+        Ok(prepared.on_store(&self.store).execute()?)
+    }
+
     /// Evaluate a caller-supplied CONSTRUCT query read-only, confined to `scope`.
     ///
     /// This is the safe way to run SPARQL that came from *data* — a SHACL-AF

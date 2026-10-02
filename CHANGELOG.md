@@ -51,6 +51,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/ldp.md`, "Access control".
 
 ### Changed
+- **`ReasoningError::Inconsistency` names its rule.** The library variant is now
+  `Inconsistency { rule, detail }` (it was `Inconsistency(String)`), and
+  `ReasoningError::NotConverged { regime, iterations }` is new. Code that
+  matched `Inconsistency(_)` matches `Inconsistency { .. }`.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were
@@ -77,6 +81,36 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an existing tag. See `docs/release-process.md`.
 
 ### Fixed
+- **Reasoners see their own consequences on an unscoped run.** Without
+  `dataset` or `source_graphs`, the OWL 2 RL, EL and DL rules read only the
+  unnamed default graph while every consequence went to the named target
+  graph, so a rule whose premises were both derived never fired: the third hop
+  of a transitive property, a three-link `owl:sameAs` chain,
+  `owl:equivalentProperty` propagation (`prp-eqp1/2` are subsumed only once
+  `prp-spo1` sees what `scm-eqp1/2` derived), a range reached through a
+  sub-property, and every consistency check on derived facts (`eq-diff1` after
+  `prp-fp`, `cls-nothing2` after `cax-sco`, `prp-irp`, `prp-asyp`, `cls-com`,
+  `cls-maxqc1/2`). Unscoped runs now read the default graph together with the
+  target graph (`TripleStore::update_over` / `query_over`). Scoped and
+  per-dataset runs already read their target graph and are unchanged. (OWL 2
+  QL computes its closure in memory and never reads its own output, so its
+  reads are unchanged.) An
+  unscoped run can therefore derive more than before, and a store that used to
+  pass may now be reported inconsistent.
+- **An inconsistent ontology is a 422, not a 500.** `POST
+  /api/reasoning/materialize` and `PUT /api/datasets/{id}/entailment` answer
+  `422` with `{consistent: false, rule, detail, regime, target_graph}`, naming
+  the check that fired; the consequences derived before it stay in the target
+  graph. A successful run reports `consistent` (`true` for `owl2-rl` and
+  `owl2-dl`, `null` for a regime without inconsistency rules), and
+  `GET /api/datasets/{id}/entailment` records what the last run found
+  (`consistent`, `inconsistency`).
+- **A reasoning run that hits the iteration limit fails instead of returning a
+  partial closure.** RDFS, OWL 2 RL, EL and DL stopped silently after 500
+  fixed-point rounds and reported success. They now fail with
+  `ReasoningError::NotConverged`, a `422` with `converged: false` over HTTP.
+- **`POST /api/reasoning/materialize` no longer blocks an async worker.** The
+  rules run on the blocking pool, as the per-dataset run already did.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if

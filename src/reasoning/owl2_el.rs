@@ -55,15 +55,16 @@ pub struct El2Classifier<'a> {
     store: &'a TripleStore,
     target_graph: String,
     /// When set, the rules read ONLY these graphs (plus the target graph).
-    /// Without it they read the unnamed default graph, as they always did.
+    /// Without it they read the unnamed default graph plus the target graph
+    /// (`TripleStore::update_over`), so rules see their own consequences.
     sources: Option<Vec<String>>,
 }
 
 impl<'a> El2Classifier<'a> {
     /// Restrict the rules to `sources` (plus the target graph). Without a
-    /// scope the rules read the unnamed default graph only, so a dataset's
-    /// named graphs — and the model version it conforms to — were invisible to
-    /// materialisation; this is what `POST /api/reasoning/materialize` sets
+    /// scope the rules read the unnamed default graph and the target graph, so
+    /// a dataset's named graphs — and the model version it conforms to — are
+    /// invisible to materialisation; this is what `POST /api/reasoning/materialize` sets
     /// from `source_graphs` or the dataset's conformance layer.
     pub fn with_sources(mut self, sources: Vec<String>) -> Self {
         self.sources = Some(sources);
@@ -83,7 +84,9 @@ impl<'a> El2Classifier<'a> {
     fn run_update(&self, sparql: &str) -> Result<(), crate::store::engine::StoreError> {
         match self.scope() {
             Some(scope) => self.store.update_scoped(sparql, &scope),
-            None => self.store.update(sparql),
+            None => self
+                .store
+                .update_over(sparql, std::slice::from_ref(&self.target_graph)),
         }
     }
 
@@ -93,7 +96,9 @@ impl<'a> El2Classifier<'a> {
     ) -> Result<oxigraph::sparql::QueryResults<'static>, crate::store::engine::StoreError> {
         match self.scope() {
             Some(scope) => self.store.query_scoped(sparql, &scope),
-            None => self.store.query(sparql),
+            None => self
+                .store
+                .query_over(sparql, std::slice::from_ref(&self.target_graph)),
         }
     }
 
@@ -144,8 +149,14 @@ impl<'a> El2Classifier<'a> {
                 iterations,
                 after.saturating_sub(before)
             );
-            if after == before || iterations >= MAX_ITERATIONS {
+            if after == before {
                 break;
+            }
+            if iterations >= MAX_ITERATIONS {
+                return Err(ReasoningError::NotConverged {
+                    regime: "owl2-el".to_string(),
+                    iterations,
+                });
             }
         }
 

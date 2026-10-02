@@ -20,6 +20,9 @@ pub enum AppError {
     UnsupportedMediaType(String),
     /// 422 Unprocessable Entity — SHACL validation failed
     ValidationFailed(crate::shacl::report::ValidationReport),
+    /// 422 Unprocessable Entity — the request was well-formed but its data
+    /// cannot be processed (an inconsistent ontology, say); the body says why
+    Unprocessable(serde_json::Value),
     /// 429 Too Many Requests — carries the Retry-After hint in seconds
     RateLimited {
         retry_after_secs: u64,
@@ -44,7 +47,7 @@ impl AppError {
             | AppError::UnsupportedMediaType(m)
             | AppError::Internal(m)
             | AppError::ServiceUnavailable(m) => m.clone(),
-            AppError::Conflict(v) => v.to_string(),
+            AppError::Conflict(v) | AppError::Unprocessable(v) => v.to_string(),
             AppError::RateLimited { message, .. } => message.clone(),
             AppError::ValidationFailed(_) => "SHACL validation failed".to_string(),
         }
@@ -73,6 +76,9 @@ impl IntoResponse for AppError {
                 (StatusCode::UNPROCESSABLE_ENTITY, axum::Json(body)).into_response()
             }
             AppError::Conflict(body) => (StatusCode::CONFLICT, axum::Json(body)).into_response(),
+            AppError::Unprocessable(body) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, axum::Json(body)).into_response()
+            }
             AppError::RateLimited {
                 retry_after_secs,
                 message,
@@ -107,6 +113,7 @@ impl IntoResponse for AppError {
                     }
                     AppError::ValidationFailed(_)
                     | AppError::Conflict(_)
+                    | AppError::Unprocessable(_)
                     | AppError::RateLimited { .. } => unreachable!(),
                 };
                 (status, message).into_response()

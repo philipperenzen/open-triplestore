@@ -669,3 +669,186 @@ mod identity_policy {
         assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 }
+
+// ── Inconsistency and non-convergence are 422s, not 500s ─────────────────────
+//
+// An ontology that entails `false` is a property of the caller's data, so the
+// run answers 422 with the rule that fired; the consequences derived before
+// the check stay in the target graph. The per-dataset endpoint answers the
+// same and records the outcome, which GET …/entailment reports.
+#[cfg(feature = "owl2-rl")]
+mod consistency {
+    use super::*;
+    use axum::Router;
+    use open_triplestore::auth::models::{GraphKind, OwnerType, Visibility};
+    use oxigraph::io::RdfFormat;
+
+    const RL_TG: &str = "urn:entailment:owl2-rl";
+    const EX: &str = "http://example.org/";
+    /// A class under one of two disjoint classes, and an individual in both:
+    /// cax-dw only fires on the type cax-sco derives.
+    const INCONSISTENT: &str = "@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> . \
+         @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> . \
+         @prefix owl: <http://www.w3.org/2002/07/owl#> . \
+         @prefix ex: <http://example.org/> . \
+         ex:Cat rdfs:subClassOf ex:Animal . \
+         ex:Animal owl:disjointWith ex:Mineral . \
+         ex:felix rdf:type ex:Cat , ex:Mineral .";
+
+    async fn req(
+        app: &Router,
+        method: Method,
+        uri: &str,
+        token: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value, String) {
+        let mut b = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"));
+        let body = match body {
+            Some(v) => {
+                b = b.header(header::CONTENT_TYPE, "application/json");
+                Body::from(v.to_string())
+            }
+            None => Body::empty(),
+        };
+        let resp = app.clone().oneshot(b.body(body).unwrap()).await.unwrap();
+        let st = resp.status();
+        let text = body_text(resp.into_body()).await;
+        (st, serde_json::from_str(&text).unwrap_or(Value::Null), text)
+    }
+
+    #[tokio::test]
+    async fn inconsistent_ontology_is_a_422_naming_the_rule() {
+        let (state, token) = admin_state();
+        state
+            .store
+            .load_str(INCONSISTENT, RdfFormat::Turtle, None)
+            .unwrap();
+
+        let (st, body) = materialize(&state, &token, "owl2-rl").await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body["consistent"], json!(false), "{body}");
+        assert_eq!(body["rule"], "cax-dw", "{body}");
+        assert_eq!(body["regime"], "owl2-rl", "{body}");
+        assert_eq!(body["target_graph"], RL_TG, "{body}");
+        assert!(
+            body["detail"].as_str().is_some_and(|d| !d.is_empty()),
+            "{body}"
+        );
+        // What was derived before the check is kept.
+        assert!(
+            matches!(
+                state.store.query(&format!(
+                    "ASK {{ GRAPH <{RL_TG}> {{ <{EX}felix> a <{EX}Animal> }} }}"
+                )),
+                Ok(QueryResults::Boolean(true))
+            ),
+            "cax-sco's consequence stays in the target graph"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_consistent_run_says_so_and_a_regime_without_checks_does_not() {
+        let (state, token) = admin_state();
+        state
+            .store
+            .load_str(
+                "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> . \
+                 @prefix ex: <http://example.org/> . \
+                 ex:Cat rdfs:subClassOf ex:Animal . ex:felix a ex:Cat .",
+                RdfFormat::Turtle,
+                None,
+            )
+            .unwrap();
+        let (st, body) = materialize(&state, &token, "owl2-rl").await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["consistent"], json!(true), "{body}");
+        // RDFS has no inconsistency rules: it cannot claim consistency.
+        let (st, body) = materialize(&state, &token, "rdfs").await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert!(body["consistent"].is_null(), "{body}");
+    }
+
+    #[tokio::test]
+    async fn dataset_run_answers_422_and_records_the_outcome() {
+        let (state, token) = admin_state();
+        state
+            .auth_db
+            .create_dataset(
+                "inc",
+                "inc",
+                None,
+                OwnerType::User,
+                "adm",
+                Visibility::Public,
+                None,
+            )
+            .unwrap();
+        let inst = "https://example.org/inc/instances";
+        state.auth_db.add_dataset_graph("inc", inst).unwrap();
+        state
+            .auth_db
+            .set_dataset_graph_role("inc", inst, Some(GraphKind::Instances))
+            .unwrap();
+        state
+            .store
+            .load_str(INCONSISTENT, RdfFormat::Turtle, Some(inst))
+            .unwrap();
+        let app = test_app(state.clone());
+
+        let (st, v, txt) = req(
+            &app,
+            Method::PUT,
+            "/api/datasets/inc/entailment",
+            &token,
+            Some(json!({ "regime": "owl2-rl", "mode": "materialize" })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{txt}");
+        assert_eq!(v["consistent"], json!(false), "{txt}");
+        assert_eq!(v["rule"], "cax-dw", "{txt}");
+        assert_eq!(v["target_graph"], "urn:entailment:owl2-rl:inc", "{txt}");
+
+        let (st, v, txt) = req(
+            &app,
+            Method::GET,
+            "/api/datasets/inc/entailment",
+            &token,
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{txt}");
+        assert_eq!(v["consistent"], json!(false), "{txt}");
+        assert_eq!(v["inconsistency"]["rule"], "cax-dw", "{txt}");
+        assert!(v["last_run_at"].is_string(), "{txt}");
+
+        // Repair the data: the next run is consistent and the record follows.
+        state
+            .store
+            .update(&format!(
+                "DELETE DATA {{ GRAPH <{inst}> {{ <{EX}felix> a <{EX}Mineral> }} }}"
+            ))
+            .unwrap();
+        let (st, _, txt) = req(
+            &app,
+            Method::PUT,
+            "/api/datasets/inc/entailment",
+            &token,
+            Some(json!({ "regime": "owl2-rl", "mode": "materialize" })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{txt}");
+        let (_, v, txt) = req(
+            &app,
+            Method::GET,
+            "/api/datasets/inc/entailment",
+            &token,
+            None,
+        )
+        .await;
+        assert_eq!(v["consistent"], json!(true), "{txt}");
+        assert!(v["inconsistency"].is_null(), "{txt}");
+    }
+}
