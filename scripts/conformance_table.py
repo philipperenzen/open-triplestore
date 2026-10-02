@@ -66,6 +66,9 @@ SUITES: dict[str, tuple[str, str]] = {
     "shacl_conformance": ("SHACL Core", "spec-derived"),
     "w3c_shacl_conformance": ("SHACL Core", "**vendored W3C corpus** (core + sparql sections, manifest-driven)"),
     "w3c_sparql11_manifests": ("SPARQL 1.1 Query/Update", "**vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven)"),
+    "w3c_sparql11_entailment_manifests": ("SPARQL 1.1 Entailment Regimes", "**vendored W3C test-suite subset** (entailment section of w3c/rdf-tests, unmodified; manifest-driven)"),
+    "w3c_rdf_mt_manifests": ("RDF 1.1 Semantics (RDF/RDFS entailment)", "**vendored W3C test-suite subset** (rdf-mt section of w3c/rdf-tests, unmodified; manifest-driven)"),
+    "w3c_owl2_rl_manifests": ("OWL 2 RL", "**vendored W3C test cases** (approved OWL 2 cases of the RL profile, unmodified; manifest-driven)"),
     "shacl_rules_conformance": ("SHACL-AF rules", "spec-derived"),
     "shaclc_conformance": ("SHACL Compact Syntax", "spec-derived"),
     "shex_conformance": ("ShEx", "spec-derived"),
@@ -92,6 +95,17 @@ def count(path: Path) -> tuple[int, int]:
 CORPUS_RUNNERS = {
     "w3c_shacl_conformance": 90,
     "w3c_sparql11_manifests": 450,
+    "w3c_sparql11_entailment_manifests": 0,
+    "w3c_rdf_mt_manifests": 0,
+    "w3c_owl2_rl_manifests": 0,
+}
+
+# Where each unscored runner's known gaps are summarised.
+GAP_DOCS = {
+    "w3c_sparql11_manifests": "docs/conformance/sparql11.md",
+    "w3c_sparql11_entailment_manifests": "docs/conformance/entailment.md",
+    "w3c_rdf_mt_manifests": "docs/conformance/entailment.md",
+    "w3c_owl2_rl_manifests": "docs/conformance/owl2-rl.md",
 }
 
 # Runners whose score may be published (see the module docstring). A runner
@@ -103,7 +117,7 @@ PUBLISH_SCORE = {"w3c_shacl_conformance"}
 # The note for a corpus runner whose score is not published.
 UNSCORED_NOTE = (
     "runs in CI as a development and regression ratchet; no score is published "
-    "(W3C test-suite policy); known gaps in `docs/conformance/sparql11.md`"
+    "(W3C test-suite policy); known gaps in `{doc}`"
 )
 
 
@@ -140,7 +154,7 @@ def render() -> str:
                     plural = "" if failed == 1 else "s"
                     note = f"{cases} corpus cases: {passed} pass, {failed} known failure{plural}, {skipped} runner-side skips (floor ≥{CORPUS_RUNNERS[stem]} asserted)"
                 else:
-                    note = UNSCORED_NOTE
+                    note = UNSCORED_NOTE.format(doc=GAP_DOCS[stem])
             elif ign:
                 note = f"{ign} ignored"
             rows.append((std, f"`tests/{stem}.rs`", basis, n, note))
