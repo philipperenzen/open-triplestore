@@ -12,7 +12,10 @@
 //! password/PAT auth is unaffected until an IdP is wired up:
 //! - `OIDC_ISSUER` — issuer URL, e.g. `https://idp/realms/example` (enables this)
 //! - `OIDC_AUDIENCE` — expected `aud` (REQUIRED once `OIDC_ISSUER` is set; tokens are rejected until it is configured)
-//! - `OIDC_DEFAULT_ROLE` — role for newly provisioned users (default `user`)
+//! - `OIDC_DEFAULT_ROLE` — role for newly provisioned users (default `user`;
+//!   capped at `user`, see [`capped_default_role`])
+//! - `OIDC_TOKEN_POLICY` — what an IdP token may do (default `session`: read
+//!   and write, but no API-token minting); see [`super::policy::idp_token_policy`]
 //! - `ACCEPT_LEGACY_TOKENS` — keep accepting password-session JWTs + `ots_` PATs (default true)
 
 use std::sync::Arc;
@@ -85,6 +88,20 @@ impl AuthExt {
         let default_role = std::env::var("OIDC_DEFAULT_ROLE")
             .ok()
             .filter(|s| !s.trim().is_empty())
+            .map(|raw| {
+                let role = capped_default_role(&raw);
+                if SystemRole::from_str(&raw.trim().to_ascii_lowercase())
+                    .is_some_and(|r| r.is_admin())
+                {
+                    tracing::error!(
+                        "OIDC_DEFAULT_ROLE={raw:?} would make every IdP account an \
+                         administrator; using '{}' instead. Grant admin through \
+                         OIDC_ROLE_CLAIM_MAP or in the UI.",
+                        role.as_str()
+                    );
+                }
+                role.as_str().to_string()
+            })
             .unwrap_or_else(|| "user".to_string());
         // Default ON; only "false"/"0" disables (transition safety).
         let accept_legacy_tokens = std::env::var("ACCEPT_LEGACY_TOKENS")
@@ -170,6 +187,17 @@ impl AuthExt {
     }
 }
 
+/// The role an IdP account gets when no claim maps to one: the configured
+/// value, but never above `user`. An admin default would make every account
+/// the IdP knows an administrator; admin is granted per account, through the
+/// claim map or the UI. A lower role (`guest`) is kept, an unknown one is `user`.
+pub fn capped_default_role(raw: &str) -> SystemRole {
+    match SystemRole::from_str(&raw.trim().to_ascii_lowercase()) {
+        Some(role) if role.level() <= SystemRole::User.level() => role,
+        _ => SystemRole::User,
+    }
+}
+
 fn default_role_claims() -> Vec<String> {
     // Cover the common shapes: flat `roles`, Keycloak `realm_access.roles`, `groups`.
     vec![
@@ -231,6 +259,25 @@ impl ExternalClaims {
             .or_else(|| self.preferred_username.clone())
             .or_else(|| self.email.clone())
             .unwrap_or_else(|| self.sub.clone())
+    }
+
+    /// The token's granted scopes as one space-separated string, from the
+    /// `scope` claim (RFC 9068, Keycloak) and the `scp` claim (Entra ID as a
+    /// string, Okta as an array). Empty when the token carries neither.
+    pub fn scope(&self) -> String {
+        ["scope", "scp"]
+            .iter()
+            .filter_map(|name| self.extra.get(*name))
+            .flat_map(|v| match v {
+                Value::String(s) => vec![s.clone()],
+                Value::Array(arr) => arr
+                    .iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// Collect string values from the named claims. Each name may be a dotted
@@ -480,7 +527,9 @@ pub fn provision_from_claims(
 
     // New users get the mapped role, else the configured default. SSO must never
     // confer super_admin (instance ownership is provisioned out-of-band), so any
-    // claim that maps to super_admin is capped at admin.
+    // claim that maps to super_admin is capped at admin. The default applies to
+    // every account the IdP knows, so it is capped at user — also when the
+    // provider row was created with, or later edited to, an admin default.
     let cap_role = |r: SystemRole| {
         if r == SystemRole::SuperAdmin {
             SystemRole::Admin
@@ -488,7 +537,7 @@ pub fn provision_from_claims(
             r
         }
     };
-    let default_role = SystemRole::from_str(&provider.default_role).unwrap_or(SystemRole::User);
+    let default_role = capped_default_role(&provider.default_role);
     let mapped_role = mapped.role.map(cap_role);
 
     // Honour the IdP's `email_verified` claim (bool, or "true"/"false" string).
@@ -551,6 +600,40 @@ mod tests {
         assert!(ext.oidc.is_none());
         assert!(ext.accept_legacy_tokens);
         assert_eq!(ext.default_role, "user");
+    }
+
+    #[test]
+    fn default_role_is_capped_at_user() {
+        for (raw, expected) in [
+            ("admin", SystemRole::User),
+            ("super_admin", SystemRole::User),
+            (" Admin ", SystemRole::User),
+            ("user", SystemRole::User),
+            ("publisher", SystemRole::User),
+            ("guest", SystemRole::Guest),
+            ("banana", SystemRole::User),
+        ] {
+            assert_eq!(capped_default_role(raw), expected, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn scope_reads_scope_and_scp_claims() {
+        let c = |extra| claims("s", "s@example.com", extra);
+        assert_eq!(c(serde_json::json!({})).scope(), "");
+        assert_eq!(
+            c(serde_json::json!({"scope": "openid write"})).scope(),
+            "openid write"
+        );
+        assert_eq!(
+            c(serde_json::json!({"scp": "ots.read ots.write"})).scope(),
+            "ots.read ots.write"
+        );
+        assert_eq!(
+            c(serde_json::json!({"scp": ["ots.read", "ots.write"]})).scope(),
+            "ots.read ots.write"
+        );
+        assert_eq!(c(serde_json::json!({"scp": 7})).scope(), "");
     }
 
     fn claims(sub: &str, email: &str, extra: serde_json::Value) -> ExternalClaims {

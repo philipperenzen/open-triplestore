@@ -179,14 +179,16 @@ environment variables and stays off unless `OIDC_ISSUER` is set.
 |---|---|---|
 | `OIDC_ISSUER` | *(unset: mode off)* | The IdP's issuer URL, e.g. `https://idp.example.org/realms/example`. Must be `https`; plain `http` is accepted only for `localhost` and loopback addresses. If you give a cleartext issuer, startup logs an error and leaves the mode off, because a man in the middle could otherwise serve forged keys. A trailing `/` is removed. |
 | `OIDC_AUDIENCE` | *(unset)* | The `aud` value a token must carry for this store. **Required.** If `OIDC_ISSUER` is set without it, startup logs a warning and every IdP token is refused. |
-| `OIDC_DEFAULT_ROLE` | `user` | The system role an account created from a token gets when no claim maps to a role. One of `user`, `guest`, `admin`, `super_admin`; an unknown value means `user`. Unlike mapped roles, this value is **not capped**: `admin` would make every IdP account an administrator. It is read only once (see [changing settings later](#changing-settings-later)). |
+| `OIDC_DEFAULT_ROLE` | `user` | The system role an account created from a token gets when no claim maps to a role: `user` or `guest`. The value is **capped at `user`**, because it applies to every account the IdP knows: `admin` or `super_admin` logs an error at startup and `user` is used instead. Grant admin per account, through `OIDC_ROLE_CLAIM_MAP` or the UI. An unknown value means `user`. It is read only once (see [changing settings later](#changing-settings-later)). |
 | `OIDC_ROLE_CLAIMS` | `roles,realm_access.roles,groups` | Comma-separated claim names to check for role mapping. A dotted name reaches into a nested object (`realm_access.roles` is Keycloak's shape). String and string-array values are read. |
 | `OIDC_ROLE_CLAIM_MAP` | *(unset: no mapping)* | A JSON object from claim value to role, e.g. `{"idp-admins": "admin", "idp-editors": "publisher", "staff": "user"}`. Invalid JSON is ignored without a warning, which disables mapping. |
 | `OIDC_GROUPS_CLAIM` | `groups` | The claim holding group names. Its values are matched against the role map and used for organisation membership. |
 | `OIDC_ORG_GROUP_PREFIX` | `org:` | The prefix that marks a group as an organisation membership: `org:example-gis` makes the account a member of the organisation whose slug is `example-gis`. |
+| `OIDC_TOKEN_POLICY` | `session` | What an IdP token may do: `session` reads and writes but cannot create API tokens; `scoped` writes only when the token's `scope` or `scp` claim grants it; `full` also creates API tokens. Unknown values mean `session`. See [what an IdP token may do](#what-an-idp-token-may-do). |
+| `OIDC_WRITE_SCOPES` | *(unset)* | Under `scoped`: extra scope values, comma- or space-separated, that count as a write grant besides `write` and `admin`, e.g. `ots.write` or `api://open-triplestore/write`. |
 | `ACCEPT_LEGACY_TOKENS` | `true` | Keep accepting this store's own session tokens and `ots_` API tokens. `false` or `0` refuses them; see [below](#turning-off-the-stores-own-tokens). |
 
-The Docker Compose file passes all eight through from `.env`.
+The Docker Compose file passes all ten through from `.env`.
 
 ### What a token must look like
 
@@ -253,15 +255,40 @@ added: one stays after the group disappears from the token.
 
 ### What an IdP token may do
 
-An IdP token carries the authority of an interactive session for its account:
-it may read, write wherever the account's dataset and graph permissions allow,
-and create long-lived API tokens at `POST /api/auth/tokens`.
-`OTS_OIDC_SESSION_POLICY` does **not** apply here; it governs only the tokens
-this store issues as an [OIDC provider](oidc-provider.md#what-a-provider-token-may-do).
-So any client that holds a user's IdP access token for this audience can turn
-it into a permanent `ots_` token for that account. If that is not acceptable,
-keep this store's audience out of the tokens issued to clients you do not
-fully trust.
+An IdP token is a delegation: any client that holds a user's access token for
+this store's audience can present it. `OIDC_TOKEN_POLICY` decides how far it
+reaches:
+
+| Policy | Read | Write | Create API tokens |
+|---|---|---|---|
+| `session` *(default)* | yes | yes | no |
+| `scoped` | yes | only if the token's scopes grant it (see below) | no |
+| `full` (`legacy` is accepted too) | yes | yes | yes |
+
+- Under the default, an IdP token reads and writes wherever the account's
+  dataset and graph permissions allow, whatever scopes it carries, like an
+  interactive session.
+- No policy except `full` lets an IdP token create a long-lived API token:
+  `POST /api/auth/tokens` answers `403`. This keeps a short-lived delegation
+  from becoming a permanent `ots_` token for the account. To create one, sign
+  in to the web UI. Before this setting existed, IdP tokens could always
+  create API tokens; `full` restores that.
+- Under `scoped`, the scopes are read from the `scope` claim (a space-separated
+  string, as Keycloak issues it) and the `scp` claim (a string, as Entra ID
+  issues it, or an array, as Okta does). `write` and `admin` grant writing, as
+  does any value listed in `OIDC_WRITE_SCOPES`. A token with only
+  `openid profile email` reads.
+- "Write" means every `POST`, `PUT`, `PATCH` and `DELETE` request, including
+  SPARQL Update. A refused write gets `403 This API token does not have write
+  scope`. A SPARQL *query* sent by `POST` is a read and still works.
+- **Admin and super-admin accounts are exempt from the write check** under
+  every policy.
+- An unknown value logs a warning and falls back to `session`, never to `full`.
+
+This setting is independent of `OTS_OIDC_SESSION_POLICY`, which governs only
+the tokens this store issues as an
+[OIDC provider](oidc-provider.md#what-a-provider-token-may-do). The two are
+issued to different clients, so tightening one must not change the other.
 
 Accounts with the `guest` role stay limited by `OTS_GUEST_CAPABILITIES`,
 whichever way they authenticate.
@@ -284,8 +311,10 @@ auto-provisioning on. Changing `OIDC_DEFAULT_ROLE` afterwards does not update
 the entry. Edit it under **Security & Access Control → Identity providers**
 (or `PUT /api/admin/oauth/providers/:id`) instead. There you can also turn
 auto-provisioning off, so that only accounts that already exist (linked by
-verified email) can use IdP tokens. The entry's own role claim map and its
-enabled switch do not affect this path; the environment variables above do.
+verified email) can use IdP tokens. The entry's default role is capped at
+`user` like `OIDC_DEFAULT_ROLE`: an `admin` value set there, or recorded by an
+earlier version, creates `user` accounts. The entry's own role claim map and
+its enabled switch do not affect this path; the environment variables above do.
 
 The entry does not appear on the login page: it has no client ID, and the
 login page lists only providers a browser sign-in can start from.

@@ -69,8 +69,9 @@ A provider access token is a delegation: the user consented to let a client
 act for them. `OTS_OIDC_SESSION_POLICY` decides how far that delegation
 reaches. It applies only to access tokens this store issues at
 `/oauth/token`. Tokens from an external IdP
-([resource-server mode](auth.md#oidc-resource-server-mode-idp-access-tokens)),
-session tokens and `ots_` API tokens are not affected.
+([resource-server mode](auth.md#oidc-resource-server-mode-idp-access-tokens))
+have their own setting, `OIDC_TOKEN_POLICY`, with the same values. Session
+tokens and `ots_` API tokens are not affected.
 
 | Policy | Read | Write | Create API tokens |
 |---|---|---|---|
@@ -85,8 +86,9 @@ session tokens and `ots_` API tokens are not affected.
   clients you would trust with that, or use `scoped`.
 - No policy except `full` lets a provider token mint an API token
   (`POST /api/auth/tokens` answers `403`). This keeps a one-hour delegation
-  from becoming permanent account access. (Tokens from an external IdP *can*
-  mint one; see [auth.md](auth.md#what-an-idp-token-may-do).)
+  from becoming permanent account access. Tokens from an external IdP follow
+  the same rule under their own default; see
+  [auth.md](auth.md#what-an-idp-token-may-do).
 - "Write" means every `POST`, `PUT`, `PATCH` and `DELETE` request, including
   SPARQL Update. A refused write gets `403 This API token does not have write
   scope`. A SPARQL *query* sent by `POST` is a read and still works.
