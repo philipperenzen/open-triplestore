@@ -143,9 +143,11 @@ impl KeyExtractor for SmartIpExtractor {
 /// **is** a real ambient credential. What keeps mirror mode safe is that both session
 /// cookies (`access_token`, `refresh_token`) are `SameSite=Strict`, so the browser
 /// withholds them on every cross-site request — even a credentialed `fetch` to a
-/// mirrored origin. (The lone `SameSite=Lax` cookie, `oauth_state`, is a short-lived
-/// CSRF nonce that is never sent on `fetch`/XHR and confers no access; there is no HTTP
-/// Basic auth.) A hostile origin therefore cannot make the browser attach a usable
+/// mirrored origin. (Two short-lived sign-in nonces are not `Strict`: `oauth_state`
+/// (`SameSite=Lax`, path `/api/auth/oauth`) and `saml_state` (`SameSite=None; Secure`
+/// over HTTPS, because the IdP returns to the ACS with a cross-site POST; path
+/// `/api/auth/saml`). Each only binds a pending sign-in to the browser that started it,
+/// is consumed once, and confers no access; there is no HTTP Basic auth.) A hostile origin therefore cannot make the browser attach a usable
 /// credential, and cannot forge the bearer header — so it gains nothing it could not
 /// already reach unauthenticated. **Load-bearing invariant:** if any auth cookie is ever
 /// downgraded to `SameSite=Lax`/`None`, mirror mode becomes a credentialed-CORS / CSRF
