@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use oxigraph::model::{GraphNameRef, NamedNodeRef, Term};
 
+use super::datatypes::{datatypes_of, value_of, Dt, Value};
 use super::saturate::{Axioms, Cid, FxMap, FxSet, Rid, BOTTOM, TOP};
 use crate::reasoning::common::ReasoningError;
 use crate::store::TripleStore;
@@ -37,8 +38,11 @@ pub(crate) enum Kind {
     Expr(Tid),
     /// The nominal of an individual (IRI or blank node).
     Individual(Tid),
-    /// The nominal of a literal.
+    /// The nominal of a data value; the term is the first literal read
+    /// with that value.
     Literal(Tid),
+    /// A datatype or a data range.
+    Datatype,
 }
 
 /// The vocabulary the loader interprets, interned up front.
@@ -80,6 +84,12 @@ pub(crate) struct Loaded {
     pub individuals: Vec<Cid>,
     /// Asserted property edges between nominals.
     pub edges: Vec<(Cid, Rid, Cid)>,
+    /// Every literal term read for each value nominal.
+    pub literal_terms: FxMap<Cid, Vec<Tid>>,
+    /// Literals whose lexical form is not in their datatype's lexical space.
+    pub ill_typed: FxSet<Cid>,
+    /// Concepts made for negative property assertions (for the message).
+    pub negative_assertions: FxSet<Cid>,
     /// `owl:hasKey`: the class and its key properties.
     pub keys: Vec<(Cid, Vec<Rid>)>,
     /// Every premise triple, as term ids, so derived triples already stated
@@ -176,6 +186,18 @@ struct Builder {
     individuals: Vec<Cid>,
     edges: Vec<(Cid, Rid, Cid)>,
     keys: Vec<(Cid, Vec<Rid>)>,
+    literal_terms: FxMap<Cid, Vec<Tid>>,
+    literal_values: HashMap<Value, Cid>,
+    ill_typed: FxSet<Cid>,
+    negative_assertions: FxSet<Cid>,
+    /// The EL datatypes' concepts, made on first use.
+    dt_atoms: Option<HashMap<Dt, Cid>>,
+    /// Data ranges read so far (datatype IRIs and blank nodes).
+    data_range_of: FxMap<Tid, Option<Cid>>,
+    /// Whether two individuals can turn out to be the same (sameAs, keys,
+    /// object nominals): then every edge matters, since it is also an edge
+    /// of the individuals equal to its ends.
+    equality: bool,
     object_props: FxSet<Tid>,
     data_props: FxSet<Tid>,
     annotation_props: FxSet<Tid>,
@@ -238,6 +260,10 @@ const OWL_TERMS: &[&str] = &[
     "bottomObjectProperty",
     "topDataProperty",
     "bottomDataProperty",
+    "sourceIndividual",
+    "assertionProperty",
+    "targetIndividual",
+    "targetValue",
 ];
 
 /// The datatype IRIs outside `xsd:` that name data ranges.
@@ -305,6 +331,13 @@ impl Builder {
             individuals: Vec::new(),
             edges: Vec::new(),
             keys: Vec::new(),
+            literal_terms: FxMap::default(),
+            literal_values: HashMap::new(),
+            ill_typed: FxSet::default(),
+            negative_assertions: FxSet::default(),
+            dt_atoms: None,
+            data_range_of: FxMap::default(),
+            equality: false,
             object_props: FxSet::default(),
             data_props: FxSet::default(),
             annotation_props: FxSet::default(),
@@ -330,10 +363,12 @@ impl Builder {
         matches!(self.terms[t as usize], Term::Literal(_))
     }
 
-    /// A predicate of the RDF, RDFS or OWL vocabulary.
+    /// A term of the RDF, RDFS, OWL or XSD vocabulary (an XSD predicate is a
+    /// facet of a datatype restriction).
     fn is_vocab(&self, t: Tid) -> bool {
-        self.iri_str(t)
-            .is_some_and(|s| s.starts_with(RDF) || s.starts_with(RDFS) || s.starts_with(OWL))
+        self.iri_str(t).is_some_and(|s| {
+            s.starts_with(RDF) || s.starts_with(RDFS) || s.starts_with(OWL) || s.starts_with(XSD)
+        })
     }
 
     fn is_datatype(&self, t: Tid) -> bool {
@@ -411,14 +446,128 @@ impl Builder {
         c
     }
 
+    /// The nominal of a literal's *value*: literals with equal values (`"1"`
+    /// and `"01"` as integers, a string and the same token) share one.
     fn literal(&mut self, t: Tid) -> Cid {
         if let Some(&c) = self.literal_of.get(&t) {
             return c;
         }
-        let c = self.new_concept(Kind::Literal(t));
-        self.ax.nominal.insert(c);
+        let Term::Literal(lit) = &self.terms[t as usize] else {
+            unreachable!("literal() is only called on literals")
+        };
+        let parsed = value_of(lit.value(), lit.datatype().as_str(), lit.language());
+        let value = parsed.clone().unwrap_or_else(|| Value::Other {
+            lexical: lit.value().to_string(),
+            datatype: lit.datatype().as_str().to_string(),
+        });
+        let c = match self.literal_values.get(&value) {
+            Some(&c) => c,
+            None => {
+                let c = self.new_concept(Kind::Literal(t));
+                self.ax.nominal.insert(c);
+                self.ax.literal.insert(c);
+                self.literal_values.insert(value.clone(), c);
+                for dt in datatypes_of(&value) {
+                    let d = self.dt_atom(dt);
+                    self.ax.add_sub(c, d);
+                }
+                if parsed.is_none() {
+                    // OWL 2: an ill-typed literal makes the ontology inconsistent.
+                    self.ill_typed.insert(c);
+                    self.ax.add_sub(c, BOTTOM);
+                }
+                c
+            }
+        };
         self.literal_of.insert(t, c);
+        self.literal_terms.entry(c).or_default().push(t);
         c
+    }
+
+    /// The concept of an EL datatype. The first call makes all nineteen,
+    /// with their hierarchy and the disjointness of the top-level value spaces.
+    fn dt_atom(&mut self, dt: Dt) -> Cid {
+        if self.dt_atoms.is_none() {
+            let mut atoms = HashMap::new();
+            for d in Dt::ALL {
+                let c = self.new_concept(Kind::Datatype);
+                self.ax.datatype.push(c);
+                atoms.insert(d, c);
+            }
+            for d in Dt::ALL {
+                if let Some(p) = d.parent() {
+                    self.ax.add_sub(atoms[&d], atoms[&p]);
+                }
+            }
+            for (i, a) in Dt::ROOTS.iter().enumerate() {
+                for b in &Dt::ROOTS[i + 1..] {
+                    self.ax.add_conj(atoms[a], atoms[b], BOTTOM);
+                }
+            }
+            self.dt_atoms = Some(atoms);
+        }
+        self.dt_atoms.as_ref().expect("made above")[&dt]
+    }
+
+    /// The concept of a data range in the EL profile: an EL datatype, a
+    /// declared datatype, an intersection of data ranges or a `oneOf` of one
+    /// literal. `None` (and a report) for anything else.
+    fn data_range(&mut self, t: Tid) -> Option<Cid> {
+        if let Some(&c) = self.data_range_of.get(&t) {
+            return c;
+        }
+        // Memoize a placeholder first: a cyclic definition ends here.
+        self.data_range_of.insert(t, None);
+        let c = self.read_data_range(t);
+        self.data_range_of.insert(t, c);
+        c
+    }
+
+    fn read_data_range(&mut self, t: Tid) -> Option<Cid> {
+        if let Some(iri) = self.iri_str(t) {
+            if let Some(dt) = Dt::from_iri(iri) {
+                return Some(self.dt_atom(dt));
+            }
+            if self.datatypes.contains(&t) && !iri.starts_with(XSD) {
+                // A datatype of the ontology's own (its definition, if any,
+                // is an owl:equivalentClass read with the axioms).
+                return Some(self.new_concept(Kind::Datatype));
+            }
+            self.ignore("datatype outside the EL profile", t);
+            return None;
+        }
+        if let Some(list) = self.object(t, self.o("intersectionOf")) {
+            let members = self.list(list)?;
+            let mut cs = Vec::new();
+            for m in members {
+                cs.push(self.data_range(m)?);
+            }
+            let c = self.new_concept(Kind::Datatype);
+            for &m in &cs {
+                self.ax.add_sub(c, m);
+            }
+            self.ax.add_conj_n(&cs, c);
+            return Some(c);
+        }
+        if let Some(list) = self.object(t, self.o("oneOf")) {
+            return match self.list(list).as_deref() {
+                Some([v]) if self.is_literal(*v) => Some(self.literal(*v)),
+                _ => {
+                    self.ignore("DataOneOf with more than one literal", t);
+                    None
+                }
+            };
+        }
+        if self.has(t, self.o("onDatatype")) {
+            self.ignore("DatatypeRestriction", t);
+        } else if self.has(t, self.o("datatypeComplementOf")) {
+            self.ignore("DataComplementOf", t);
+        } else if self.has(t, self.o("unionOf")) {
+            self.ignore("DataUnionOf", t);
+        } else {
+            self.ignore("unknown data range", t);
+        }
+        None
     }
 
     /// The concept id of a class expression node, defining it from its
@@ -471,23 +620,43 @@ impl Builder {
                 return false;
             }
             if let Some(f) = self.object(t, self.o("someValuesFrom")) {
-                if self.data_props.contains(&p) || self.is_datatype(f) || self.is_data_range(f) {
-                    self.ignore("DataSomeValuesFrom", t);
-                    return false;
-                }
                 let r = self.role(p);
-                let f = self.concept(f);
+                let filler =
+                    if self.data_props.contains(&p) || self.is_datatype(f) || self.is_data_range(f)
+                    {
+                        self.data_range(f)
+                    } else {
+                        Some(self.concept(f))
+                    };
+                let Some(f) = filler else {
+                    self.ignore(
+                        "DataSomeValuesFrom over a data range outside the EL profile",
+                        t,
+                    );
+                    return false;
+                };
                 self.ax.add_exists_rhs(c, r, f);
                 self.ax.add_exists_lhs(r, f, c);
                 return true;
             }
-            if self.has(t, self.o("hasValue")) {
-                self.ignore("ObjectHasValue / DataHasValue", t);
-                return false;
+            if let Some(v) = self.object(t, self.o("hasValue")) {
+                // ∃p.{v}: ObjectHasValue or DataHasValue.
+                let r = self.role(p);
+                let f = if self.is_literal(v) {
+                    self.literal(v)
+                } else {
+                    self.equality = true;
+                    self.individual(v)
+                };
+                self.ax.add_exists_rhs(c, r, f);
+                self.ax.add_exists_lhs(r, f, c);
+                return true;
             }
             if self.has(t, self.o("hasSelf")) {
-                self.ignore("ObjectHasSelf", t);
-                return false;
+                let r = self.role(p);
+                self.ax.self_rhs.entry(c).or_default().push(r);
+                self.ax.self_lhs.entry(r).or_default().push(c);
+                return true;
             }
             if self.has(t, self.o("allValuesFrom")) {
                 self.ignore("ObjectAllValuesFrom", t);
@@ -512,9 +681,20 @@ impl Builder {
             self.ignore("n-ary data restriction", t);
             return false;
         }
-        if self.has(t, self.o("oneOf")) {
-            self.ignore("ObjectOneOf / DataOneOf", t);
-            return false;
+        if let Some(list) = self.object(t, self.o("oneOf")) {
+            return match self.list(list).as_deref() {
+                Some([a]) if !self.is_literal(*a) => {
+                    self.equality = true;
+                    let n = self.individual(*a);
+                    self.ax.add_sub(c, n);
+                    self.ax.add_sub(n, c);
+                    true
+                }
+                _ => {
+                    self.ignore("ObjectOneOf with more than one individual", t);
+                    false
+                }
+            };
         }
         if self.has(t, self.o("unionOf")) {
             self.ignore("ObjectUnionOf", t);
@@ -580,16 +760,17 @@ impl Builder {
                 self.data_props.insert(s);
             }
         }
-        // A property used with literals and declared an object property is
-        // malformed; trust the declaration for the TBox, the data for the ABox.
+        // TBox and declarations.
         for &(s, p, o) in triples {
             if self.is_vocab(p) {
                 self.read_vocab(s, p, o);
             }
         }
-        // ABox. Edges over a property no axiom mentions cannot lead to a
-        // consequence, so they are not loaded (the endpoints still are).
+        // ABox. An edge over a property no axiom mentions cannot lead to a
+        // consequence, so it is not loaded (its ends still are) — unless two
+        // individuals can turn out equal, which copies edges between them.
         let relevant = self.relevant_roles();
+        let equality = self.equality;
         for &(s, p, o) in triples {
             if self.is_vocab(p) || self.annotation_props.contains(&p) {
                 continue;
@@ -598,15 +779,20 @@ impl Builder {
                 continue;
             }
             let x = self.individual(s);
-            let r = self.role_of.get(&p).copied();
+            let r = if equality {
+                Some(self.role(p))
+            } else {
+                self.role_of.get(&p).copied()
+            };
+            let relevant = |r: &Rid| equality || relevant.contains(r);
             if self.is_literal(o) {
-                if let Some(r) = r.filter(|r| relevant.contains(r)) {
+                if let Some(r) = r.filter(relevant) {
                     let y = self.literal(o);
                     self.edges.push((x, r, y));
                 }
             } else {
                 let y = self.individual(o);
-                if let Some(r) = r.filter(|r| relevant.contains(r)) {
+                if let Some(r) = r.filter(relevant) {
                     self.edges.push((x, r, y));
                 }
             }
@@ -623,6 +809,11 @@ impl Builder {
             out.extend([r, s, t]);
         }
         out.extend(self.ax.reflexive.iter().copied());
+        out.extend(self.ax.functional.iter().copied());
+        out.extend(self.ax.self_lhs.keys().copied());
+        for rs in self.ax.self_rhs.values() {
+            out.extend(rs.iter().copied());
+        }
         out.extend(self.ax.ranges.iter().map(|(r, _)| *r));
         for entries in self.ax.ex_rhs.values().chain(self.ax.ex_lhs.values()) {
             out.extend(entries.iter().map(|(r, _)| *r));
@@ -644,6 +835,12 @@ impl Builder {
         } else if p == v.sub_class_of {
             let (a, b) = (self.concept(s), self.concept(o));
             self.ax.add_sub(a, b);
+        } else if p == v.equivalent_class && self.datatypes.contains(&s) {
+            // A datatype definition: the datatype is the data range.
+            if let (Some(a), Some(b)) = (self.data_range(s), self.data_range(o)) {
+                self.ax.add_sub(a, b);
+                self.ax.add_sub(b, a);
+            }
         } else if p == v.equivalent_class {
             let (a, b) = (self.concept(s), self.concept(o));
             self.ax.add_sub(a, b);
@@ -674,12 +871,15 @@ impl Builder {
                 self.ignore("ObjectInverseOf", s);
                 return;
             }
-            if self.data_props.contains(&s) {
-                self.ignore("DataPropertyRange", s);
-                return;
-            }
             let r = self.role(s);
-            let c = self.concept(o);
+            let c = if self.data_props.contains(&s) {
+                match self.data_range(o) {
+                    Some(c) => c,
+                    None => return,
+                }
+            } else {
+                self.concept(o)
+            };
             self.ax.ranges.push((r, c));
         } else if p == self.o("propertyChainAxiom") {
             let chain = self.list(o).unwrap_or_default();
@@ -699,27 +899,35 @@ impl Builder {
             let c = self.concept(s);
             let props: Vec<Rid> = props.into_iter().map(|t| self.role(t)).collect();
             self.keys.push((c, props));
+            self.equality = true;
         } else if p == self.o("members") {
             let members = self.list(o).unwrap_or_default();
             let types: Vec<Tid> = self.objects(s, v.rdf_type).collect();
             if types.contains(&self.o("AllDisjointClasses")) {
                 let cs: Vec<Cid> = members.into_iter().map(|m| self.concept(m)).collect();
-                for i in 0..cs.len() {
-                    for j in i + 1..cs.len() {
-                        self.ax.add_conj(cs[i], cs[j], BOTTOM);
+                for (i, &a) in cs.iter().enumerate() {
+                    for &b in &cs[i + 1..] {
+                        self.ax.add_conj(a, b, BOTTOM);
                     }
                 }
             } else if types.contains(&self.o("AllDisjointProperties")) {
                 self.ignore("DisjointObjectProperties", s);
-            } else {
-                self.ignore("DifferentIndividuals", s);
+            } else if types.contains(&self.o("AllDifferent")) {
+                self.all_different(&members);
             }
         } else if p == self.o("distinctMembers") {
-            self.ignore("DifferentIndividuals", s);
+            let members = self.list(o).unwrap_or_default();
+            self.all_different(&members);
         } else if p == self.v.same_as {
-            self.ignore("SameIndividual", s);
+            if self.is_literal(s) || self.is_literal(o) {
+                return;
+            }
+            self.equality = true;
+            let (a, b) = (self.individual(s), self.individual(o));
+            self.ax.add_sub(a, b);
+            self.ax.add_sub(b, a);
         } else if p == self.o("differentFrom") {
-            self.ignore("DifferentIndividuals", s);
+            self.all_different(&[s, o]);
         } else if p == self.o("inverseOf") {
             self.ignore("InverseObjectProperties", s);
         } else if p == self.o("propertyDisjointWith") {
@@ -747,6 +955,52 @@ impl Builder {
         }
     }
 
+    /// `DifferentIndividuals`: pairwise `{a} ⊓ {b} ⊑ ⊥`.
+    fn all_different(&mut self, members: &[Tid]) {
+        let named: Vec<Tid> = members
+            .iter()
+            .copied()
+            .filter(|m| !self.is_literal(*m))
+            .collect();
+        let cs: Vec<Cid> = named.into_iter().map(|m| self.individual(m)).collect();
+        for (i, &a) in cs.iter().enumerate() {
+            for &b in &cs[i + 1..] {
+                if a != b {
+                    self.ax.add_conj(a, b, BOTTOM);
+                }
+            }
+        }
+    }
+
+    /// `NegativeObjectPropertyAssertion` / `NegativeDataPropertyAssertion`:
+    /// `{a} ⊓ ∃p.{b} ⊑ ⊥`.
+    fn negative_assertion(&mut self, n: Tid) {
+        let src = self.object(n, self.o("sourceIndividual"));
+        let prop = self.object(n, self.o("assertionProperty"));
+        let target = self
+            .object(n, self.o("targetIndividual"))
+            .or_else(|| self.object(n, self.o("targetValue")));
+        let (Some(src), Some(prop), Some(target)) = (src, prop, target) else {
+            self.ignore("malformed NegativePropertyAssertion", n);
+            return;
+        };
+        if !self.named(prop) || self.is_literal(src) {
+            self.ignore("malformed NegativePropertyAssertion", n);
+            return;
+        }
+        let a = self.individual(src);
+        let r = self.role(prop);
+        let b = if self.is_literal(target) {
+            self.literal(target)
+        } else {
+            self.individual(target)
+        };
+        let e = self.new_concept(Kind::Fresh);
+        self.negative_assertions.insert(e);
+        self.ax.add_exists_lhs(r, b, e);
+        self.ax.add_conj(a, e, BOTTOM);
+    }
+
     fn read_type(&mut self, s: Tid, o: Tid) {
         if o == self.o("TransitiveProperty") {
             if self.named(s) {
@@ -763,8 +1017,9 @@ impl Builder {
                 self.ignore("ObjectInverseOf", s);
             }
         } else if o == self.o("FunctionalProperty") {
-            if self.data_props.contains(&s) {
-                self.ignore("FunctionalDataProperty", s);
+            if self.data_props.contains(&s) && self.named(s) {
+                let r = self.role(s);
+                self.ax.functional.push(r);
             } else {
                 self.ignore("FunctionalObjectProperty", s);
             }
@@ -777,7 +1032,7 @@ impl Builder {
         } else if o == self.o("IrreflexiveProperty") {
             self.ignore("IrreflexiveObjectProperty", s);
         } else if o == self.o("NegativePropertyAssertion") {
-            self.ignore("NegativePropertyAssertion", s);
+            self.negative_assertion(s);
         } else if o == self.o("NamedIndividual") {
             if !self.is_literal(s) {
                 self.individual(s);
@@ -813,6 +1068,9 @@ impl Builder {
             defined_exprs: self.defined_exprs,
             individuals: self.individuals,
             edges: self.edges,
+            literal_terms: self.literal_terms,
+            ill_typed: self.ill_typed,
+            negative_assertions: self.negative_assertions,
             keys: self.keys,
             premises: self.premises,
             ignored: self.ignored,

@@ -10122,9 +10122,8 @@ async fn reasoning_materialize(
     let report = run_regime(&state, &body.regime, sources.clone(), &target, identity)?;
 
     match report {
-        Some(r) => Ok((
-            StatusCode::OK,
-            Json(serde_json::json!({
+        Some(r) => {
+            let mut body = serde_json::json!({
                 "regime": r.regime,
                 "triples_added": r.triples_added,
                 "iterations": r.iterations,
@@ -10132,9 +10131,14 @@ async fn reasoning_materialize(
                 "target_graph": r.target_graph,
                 // The graphs the rules read (null: the unnamed default graph).
                 "sources": sources,
-            })),
-        )
-            .into_response()),
+            });
+            // Axioms the regime could not use (outside its profile), by
+            // construct; only present when there were any.
+            if !r.ignored.is_empty() {
+                body["ignored"] = serde_json::json!(r.ignored);
+            }
+            Ok((StatusCode::OK, Json(body)).into_response())
+        }
         None => Err(AppError::BadRequest(format!(
             "Unknown reasoning regime: {}",
             body.regime

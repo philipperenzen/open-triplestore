@@ -2,8 +2,8 @@
 //!
 //! OWL 2 EL is the profile of large biomedical ontologies (SNOMED CT, the
 //! Gene Ontology). This module reads the ontology straight out of the quad
-//! index, normalizes it ([`load`]), saturates it with the EL++ completion
-//! rules ([`saturate`]) and writes what follows into the target graph:
+//! index, normalizes it (`load.rs`), saturates it with the EL++ completion
+//! rules (`saturate.rs`) and writes what follows into the target graph:
 //!
 //! - **classification** — `rdfs:subClassOf` from every class IRI to each
 //!   class IRI and EL class expression that subsumes it, `owl:equivalentClass`
@@ -14,39 +14,56 @@
 //!   `owl:equivalentProperty`) closed under inclusion;
 //! - **realization** — `rdf:type` from every individual to every class IRI
 //!   it belongs to (`owl:Nothing` when it belongs to none consistently);
-//! - the **property-assertion closure** between individuals (and literals):
-//!   through sub-properties, chains of any length, transitivity and
-//!   reflexivity;
-//! - `owl:sameAs` between individuals that agree on an `owl:hasKey`.
+//! - the **property-assertion closure** between individuals (and to data
+//!   values): through sub-properties, chains of any length, transitivity,
+//!   reflexivity and self restrictions, and the edges `owl:hasValue` implies;
+//! - **equality** — `owl:sameAs` between individuals that keys, nominals or
+//!   asserted `owl:sameAs` make the same.
 //!
 //! Only triples not already in a premise graph are written, through
 //! [`TripleStore::insert_quads`] so the graph index and change capture see
 //! them. The rules read the source graphs (or, unscoped, the unnamed default
 //! graph) plus the target graph itself.
 //!
-//! # Supported constructs
+//! # Supported constructs (OWL 2 Profiles §2.2)
 //!
 //! Class expressions: class IRIs, `owl:Thing`, `owl:Nothing`,
-//! `owl:intersectionOf` (any arity), `owl:someValuesFrom` over an object
-//! property. Axioms: `rdfs:subClassOf`, `owl:equivalentClass`,
+//! `owl:intersectionOf` of any arity, `owl:someValuesFrom`,
+//! `owl:hasValue` and `owl:hasSelf` over object properties, `owl:oneOf` of one
+//! individual; `owl:someValuesFrom` and `owl:hasValue` over data properties.
+//! Data ranges: the nineteen EL datatypes (`datatypes.rs`), datatypes declared
+//! in the ontology (and their definitions), intersections, `owl:oneOf` of one
+//! literal. Axioms: `rdfs:subClassOf`, `owl:equivalentClass`,
 //! `owl:disjointWith`, `owl:AllDisjointClasses`, `rdfs:subPropertyOf`,
-//! `owl:equivalentProperty`, `owl:propertyChainAxiom`,
-//! `owl:TransitiveProperty`, `owl:ReflexiveProperty`, `rdfs:domain`,
-//! `rdfs:range` (object properties), `owl:hasKey`, class and property
-//! assertions. What the loader cannot use is counted per construct in
-//! [`ReasoningReport::ignored`]; leaving an axiom out never adds a wrong
-//! consequence, it only loses some.
+//! `owl:equivalentProperty`, `owl:propertyChainAxiom`, `owl:TransitiveProperty`,
+//! `owl:ReflexiveProperty`, `rdfs:domain`, `rdfs:range` (object and data),
+//! `owl:FunctionalProperty` on data properties, `owl:hasKey`, `owl:sameAs`,
+//! `owl:differentFrom`, `owl:AllDifferent`, `owl:NegativePropertyAssertion`,
+//! class and property assertions. Literals compare by value.
+//!
+//! What the loader cannot use — constructs outside the profile, such as
+//! unions, universals, cardinalities, inverse properties or functional object
+//! properties — is counted per construct in [`ReasoningReport::ignored`].
+//! Leaving an axiom out never adds a wrong consequence, it only loses some.
 //!
 //! # Consistency
 //!
-//! An EL ontology is inconsistent when `owl:Thing ⊑ owl:Nothing` or an
-//! individual is an instance of `owl:Nothing` (directly, through its
-//! classes and successors, or by being typed with two disjoint classes). An
+//! An EL ontology is inconsistent when `owl:Thing ⊑ owl:Nothing`, an
+//! individual is an instance of `owl:Nothing` (directly, through its classes
+//! and successors, by being typed with two disjoint classes, by being the
+//! same as an individual it is different from, or by having a property value
+//! a negative property assertion denies), or a literal is ill-typed or
+//! outside a data range it must be in (a functional data property with two
+//! values, say). An
 //! unsatisfiable *class* without instances is not an inconsistency;
 //! [`El2Classifier::unsatisfiable_classes`] lists those.
 //! [`El2Classifier::classify`] fails with [`ReasoningError::Inconsistency`]
 //! after writing what it derived.
+// The binary re-declares the library's modules; the inspection methods
+// below are used by the library and its tests only.
+#![allow(dead_code)]
 
+mod datatypes;
 mod load;
 mod saturate;
 
@@ -83,6 +100,20 @@ struct Clash {
 struct Saturated {
     loaded: Loaded,
     sat: Saturation,
+    /// Rounds of saturation (keys can merge individuals, which needs another).
+    rounds: usize,
+    /// Subsumers of the classes that needed a hypothetical instance (see
+    /// [`Saturation::hypothetical_subsumers`]); the rest read `sat` directly.
+    hypothetical: FxMap<Cid, FxSet<Cid>>,
+}
+
+impl Saturated {
+    /// The subsumers of class `c`.
+    fn subs(&self, c: Cid) -> Option<&FxSet<Cid>> {
+        self.hypothetical
+            .get(&c)
+            .or_else(|| self.sat.context(c).map(|cx| &cx.subs))
+    }
 }
 
 impl<'a> El2Classifier<'a> {
@@ -138,7 +169,38 @@ impl<'a> El2Classifier<'a> {
             sat.add_link(x, r, y);
         }
         sat.run();
-        Ok(Saturated { loaded, sat })
+        // Keys: individuals that agree on a key are the same, which can make
+        // more individuals agree. Each round merges at least one pair.
+        let mut rounds = 1;
+        loop {
+            let same = key_matches(&loaded, &sat);
+            if same.is_empty() {
+                break;
+            }
+            for (x, y) in same {
+                sat.add_sub(x, y);
+                sat.add_sub(y, x);
+            }
+            sat.run();
+            rounds += 1;
+        }
+        // Classes whose subsumers may rest on two reachable contexts being
+        // the same nominal get a hypothetical instance (consistent ontologies
+        // only: in an inconsistent one every subsumption holds).
+        let mut hypothetical: FxMap<Cid, FxSet<Cid>> = FxMap::default();
+        if inconsistency(&loaded, &sat).is_none() && sat.has_unreached_nominal_members() {
+            for &c in &loaded.classes {
+                if sat.needs_hypothesis(c) {
+                    hypothetical.insert(c, sat.hypothetical_subsumers(c));
+                }
+            }
+        }
+        Ok(Saturated {
+            loaded,
+            sat,
+            rounds,
+            hypothetical,
+        })
     }
 
     /// Classify the ontology, write the consequences into the target graph
@@ -150,8 +212,14 @@ impl<'a> El2Classifier<'a> {
     pub fn classify(&self) -> Result<ReasoningReport, ReasoningError> {
         let start = Instant::now();
         info!("OWL 2 EL classification → <{}>", self.target_graph);
-        let Saturated { mut loaded, sat } = self.saturate()?;
-        let derived = derived_triples(&mut loaded, &sat);
+        let mut s = self.saturate()?;
+        let derived = derived_triples(&mut s);
+        let Saturated {
+            loaded,
+            sat,
+            rounds,
+            ..
+        } = s;
         let graph = GraphName::NamedNode(
             NamedNode::new(self.target_graph.as_str())
                 .map_err(|e| ReasoningError::Store(format!("target graph: {e}")))?,
@@ -194,7 +262,7 @@ impl<'a> El2Classifier<'a> {
         Ok(ReasoningReport {
             regime: "owl2-el".to_string(),
             triples_added: added,
-            iterations: 1,
+            iterations: rounds,
             elapsed_ms: start.elapsed().as_millis() as u64,
             target_graph: self.target_graph.clone(),
             ignored: loaded
@@ -228,7 +296,7 @@ impl<'a> El2Classifier<'a> {
             .loaded
             .classes
             .iter()
-            .filter(|&&c| s.sat.subsumes(c, BOTTOM))
+            .filter(|&&c| s.subs(c).is_some_and(|subs| subs.contains(&BOTTOM)))
             .filter_map(|&c| match s.loaded.kind(c) {
                 Kind::Class(t) => match s.loaded.term(t) {
                     Term::NamedNode(n) => Some(n.as_str().to_string()),
@@ -243,7 +311,11 @@ impl<'a> El2Classifier<'a> {
     }
 }
 
-/// The first reason the saturated ontology is inconsistent, if any.
+/// The first reason the saturated ontology is inconsistent, if any. The rule
+/// ids follow the OWL 2 RL names for the same clash where there is one. The
+/// checks go from the most specific cause to the least: an ill-typed
+/// literal, two values of a functional property, a value outside a range,
+/// then an individual's classes.
 fn inconsistency(loaded: &Loaded, sat: &Saturation) -> Option<Clash> {
     if sat.subsumes(TOP, BOTTOM) {
         return Some(Clash {
@@ -251,45 +323,104 @@ fn inconsistency(loaded: &Loaded, sat: &Saturation) -> Option<Clash> {
             detail: "owl:Thing is a subclass of owl:Nothing".to_string(),
         });
     }
-    for &x in &loaded.individuals {
-        let Some(ctx) = sat.context(x) else { continue };
-        if !ctx.subs.contains(&BOTTOM) {
-            continue;
+    let name = |c: Cid| match loaded.kind(c) {
+        Kind::Individual(t) | Kind::Literal(t) | Kind::Class(t) => loaded.term(t).to_string(),
+        _ => "a class expression".to_string(),
+    };
+    for &v in &loaded.ill_typed {
+        if sat.subsumes(v, BOTTOM) {
+            return Some(Clash {
+                rule: "dt-not-type",
+                detail: format!("{} is ill-typed", name(v)),
+            });
         }
-        let name = match loaded.kind(x) {
-            Kind::Individual(t) => loaded.term(t).to_string(),
-            _ => "an individual".to_string(),
-        };
-        let conj = &sat.axioms().conj;
-        let disjoint = ctx.subs.iter().any(|a| {
-            conj.get(a).is_some_and(|entries| {
-                entries
-                    .iter()
-                    .any(|&(a2, b)| b == BOTTOM && ctx.subs.contains(&a2))
-            })
-        });
-        return Some(if disjoint {
-            Clash {
-                rule: "cax-dw",
-                detail: format!("{name} is an instance of two disjoint classes"),
-            }
-        } else {
-            Clash {
-                rule: "cls-nothing2",
-                detail: format!("{name} is an instance of owl:Nothing"),
-            }
-        });
     }
-    None
+    let clashing: Vec<(Cid, &saturate::Context)> = loaded
+        .individuals
+        .iter()
+        .filter_map(|&x| sat.context(x).map(|cx| (x, cx)))
+        .filter(|(_, cx)| cx.subs.contains(&BOTTOM))
+        .collect();
+    for &(x, cx) in &clashing {
+        for &r in &sat.axioms().functional {
+            let values: FxSet<Cid> = cx
+                .succ
+                .get(&r)
+                .into_iter()
+                .flatten()
+                .filter_map(|&y| sat.context(y))
+                .flat_map(|ycx| ycx.noms.iter().copied())
+                .collect();
+            if values.len() > 1 {
+                let p = loaded.role_terms[r as usize]
+                    .map(|t| loaded.term(t).to_string())
+                    .unwrap_or_default();
+                return Some(Clash {
+                    rule: "prp-fp",
+                    detail: format!("{} has two values for the functional property {p}", name(x)),
+                });
+            }
+        }
+    }
+    for &v in loaded.literal_terms.keys() {
+        if sat.subsumes(v, BOTTOM) {
+            return Some(Clash {
+                rule: "dt-not-type",
+                detail: format!(
+                    "{} is outside a data range it is required to be in",
+                    name(v)
+                ),
+            });
+        }
+    }
+    let conj = &sat.axioms().conj;
+    let (x, cx) = *clashing.first()?;
+    let pair = cx.subs.iter().find_map(|&a| {
+        conj.get(&a).and_then(|entries| {
+            entries
+                .iter()
+                .find(|&&(a2, b)| b == BOTTOM && cx.subs.contains(&a2))
+                .map(|&(a2, _)| (a, a2))
+        })
+    });
+    let n = name(x);
+    Some(match pair {
+        Some((a, b)) if sat.is_nominal(a) && sat.is_nominal(b) => Clash {
+            rule: "eq-diff1",
+            detail: format!(
+                "{} and {} are the same individual and different ones",
+                name(a),
+                name(b)
+            ),
+        },
+        Some((a, b))
+            if loaded.negative_assertions.contains(&a)
+                || loaded.negative_assertions.contains(&b) =>
+        {
+            Clash {
+                rule: "prp-npa1",
+                detail: format!("{n} has a property value a negative property assertion denies"),
+            }
+        }
+        Some(_) => Clash {
+            rule: "cax-dw",
+            detail: format!("{n} is an instance of two disjoint classes"),
+        },
+        None => Clash {
+            rule: "cls-nothing2",
+            detail: format!("{n} is an instance of owl:Nothing"),
+        },
+    })
 }
 
 /// Every entailed triple of the output vocabulary not already a premise.
-fn derived_triples(loaded: &mut Loaded, sat: &Saturation) -> Vec<(Tid, Tid, Tid)> {
-    let v = loaded.vocab;
-    let equivalent_class = loaded.iri(&format!("{OWL}equivalentClass"));
-    let sub_property_of = loaded.iri(&format!("{RDFS}subPropertyOf"));
-    let equivalent_property = loaded.iri(&format!("{OWL}equivalentProperty"));
-    let loaded = &*loaded;
+fn derived_triples(s: &mut Saturated) -> Vec<(Tid, Tid, Tid)> {
+    let v = s.loaded.vocab;
+    let equivalent_class = s.loaded.iri(&format!("{OWL}equivalentClass"));
+    let sub_property_of = s.loaded.iri(&format!("{RDFS}subPropertyOf"));
+    let equivalent_property = s.loaded.iri(&format!("{OWL}equivalentProperty"));
+    let s = &*s;
+    let (loaded, sat) = (&s.loaded, &s.sat);
     let mut out: Vec<(Tid, Tid, Tid)> = Vec::new();
     let mut seen: FxSet<(Tid, Tid, Tid)> = FxSet::default();
     let mut emit = |t: (Tid, Tid, Tid)| {
@@ -300,11 +431,11 @@ fn derived_triples(loaded: &mut Loaded, sat: &Saturation) -> Vec<(Tid, Tid, Tid)
 
     // Classification.
     for &c in &loaded.classes {
-        let (Kind::Class(ct), Some(ctx)) = (loaded.kind(c), sat.context(c)) else {
+        let (Kind::Class(ct), Some(subs)) = (loaded.kind(c), s.subs(c)) else {
             continue;
         };
-        let unsat = ctx.subs.contains(&BOTTOM);
-        for &a in &ctx.subs {
+        let unsat = subs.contains(&BOTTOM);
+        for &a in subs {
             if a == c || a == TOP {
                 continue;
             }
@@ -315,7 +446,7 @@ fn derived_triples(loaded: &mut Loaded, sat: &Saturation) -> Vec<(Tid, Tid, Tid)
             match loaded.kind(a) {
                 Kind::Class(at) => {
                     emit((ct, v.sub_class_of, at));
-                    if !unsat && sat.subsumes(a, c) {
+                    if !unsat && s.subs(a).is_some_and(|sa| sa.contains(&c)) {
                         emit((ct, equivalent_class, at));
                     }
                 }
@@ -369,19 +500,35 @@ fn derived_triples(loaded: &mut Loaded, sat: &Saturation) -> Vec<(Tid, Tid, Tid)
             let Some(Some(rt)) = loaded.role_terms.get(r as usize) else {
                 continue;
             };
+            // An edge to any context that is a nominal — an individual, a
+            // value, or a `hasValue` filler — is an edge to that nominal.
+            let mut targets: FxSet<Cid> = FxSet::default();
             for &y in ys {
-                if let Kind::Individual(yt) | Kind::Literal(yt) = loaded.kind(y) {
-                    emit((xt, *rt, yt));
+                if let Some(ycx) = sat.context(y) {
+                    targets.extend(ycx.noms.iter().copied());
+                }
+            }
+            for n in targets {
+                match loaded.kind(n) {
+                    Kind::Individual(yt) => emit((xt, *rt, yt)),
+                    Kind::Literal(yt) => {
+                        // Stated already with an equal value in another form?
+                        let terms = loaded.literal_terms.get(&n);
+                        if !terms.is_some_and(|ts| {
+                            ts.iter().any(|t| loaded.premises.contains(&(xt, *rt, *t)))
+                        }) {
+                            emit((xt, *rt, yt));
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
-    }
-
-    // Keys.
-    for (x, y) in key_matches(loaded, sat) {
-        if let (Kind::Individual(xt), Kind::Individual(yt)) = (loaded.kind(x), loaded.kind(y)) {
-            emit((xt, v.same_as, yt));
-            emit((yt, v.same_as, xt));
+        // Equality: other individuals among x's nominals.
+        for &n in &ctx.noms {
+            if let (true, Kind::Individual(yt)) = (n != x, loaded.kind(n)) {
+                emit((xt, v.same_as, yt));
+            }
         }
     }
     out
@@ -403,6 +550,8 @@ fn key_matches(loaded: &Loaded, sat: &Saturation) -> Vec<(Cid, Cid)> {
                 continue;
             }
             let ctx = sat.context(x).expect("individual contexts exist");
+            // The values of a key property: the nominals of its successors
+            // (an individual, a data value, or a filler known to be one).
             let values: Vec<FxSet<Cid>> = props
                 .iter()
                 .map(|p| {
@@ -410,8 +559,8 @@ fn key_matches(loaded: &Loaded, sat: &Saturation) -> Vec<(Cid, Cid)> {
                         .get(p)
                         .into_iter()
                         .flatten()
-                        .copied()
-                        .filter(|y| sat.is_nominal(*y))
+                        .filter_map(|&y| sat.context(y))
+                        .flat_map(|ycx| ycx.noms.iter().copied())
                         .collect()
                 })
                 .collect();
@@ -434,9 +583,13 @@ fn key_matches(loaded: &Loaded, sat: &Saturation) -> Vec<(Cid, Cid)> {
                     if i == j || !pairs.insert((i, j)) {
                         continue;
                     }
+                    let (x, y) = (members[i].0, members[j].0);
+                    if sat.subsumes(x, y) {
+                        continue; // already the same individual
+                    }
                     let (a, b) = (&members[i].1, &members[j].1);
                     if a.iter().zip(b).all(|(va, vb)| !va.is_disjoint(vb)) {
-                        out.push((members[i].0, members[j].0));
+                        out.push((x, y));
                     }
                 }
             }

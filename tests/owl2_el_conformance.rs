@@ -333,6 +333,7 @@ fn scoped_store(ttl: &str) -> TripleStore {
     let preamble = "@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n\
                     @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
                     @prefix owl:  <http://www.w3.org/2002/07/owl#> .\n\
+                    @prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .\n\
                     @prefix ex:   <http://example.org/> .\n";
     store
         .load_str(&format!("{preamble}{ttl}"), RdfFormat::Turtle, Some(DATA))
@@ -630,9 +631,18 @@ fn test_unscoped_run_sees_its_own_derivations() {
          ex:c ex:directPartOf ex:d . ex:d ex:directPartOf ex:e .",
     );
     classify(&s);
-    assert!(ask_tg(&s, &format!("{} {} {} .", ex("a"), ex("partOf"), ex("e"))));
-    assert!(ask_tg(&s, &format!("{} rdf:type {} .", ex("a"), ex("Part"))));
-    assert!(!ask_tg(&s, &format!("{} rdf:type {} .", ex("e"), ex("Part"))));
+    assert!(ask_tg(
+        &s,
+        &format!("{} {} {} .", ex("a"), ex("partOf"), ex("e"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdf:type {} .", ex("a"), ex("Part"))
+    ));
+    assert!(!ask_tg(
+        &s,
+        &format!("{} rdf:type {} .", ex("e"), ex("Part"))
+    ));
 }
 
 /// CR11 in the TBox: `A ⊑ ∃r.B`, `B ⊑ ∃s.C`, `r ∘ s ⊑ t`, `∃t.C ⊑ D` ⊨ `A ⊑ D`.
@@ -644,8 +654,14 @@ fn test_tbox_property_chain() {
          ex:t owl:propertyChainAxiom ( ex:r ex:s ) . \
          [ owl:onProperty ex:t ; owl:someValuesFrom ex:C ] rdfs:subClassOf ex:D .",
     );
-    assert!(ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("A"), ex("D"))));
-    assert!(!ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("B"), ex("D"))));
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdfs:subClassOf {} .", ex("A"), ex("D"))
+    ));
+    assert!(!ask_tg(
+        &s,
+        &format!("{} rdfs:subClassOf {} .", ex("B"), ex("D"))
+    ));
 }
 
 /// Transitivity in the TBox: parts of parts are parts.
@@ -657,8 +673,14 @@ fn test_tbox_transitivity() {
          ex:Hand rdfs:subClassOf [ owl:onProperty ex:partOf ; owl:someValuesFrom ex:Arm ] . \
          ex:ArmPart owl:equivalentClass [ owl:onProperty ex:partOf ; owl:someValuesFrom ex:Arm ] .",
     );
-    assert!(ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("Finger"), ex("ArmPart"))));
-    assert!(ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("Hand"), ex("ArmPart"))));
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdfs:subClassOf {} .", ex("Finger"), ex("ArmPart"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdfs:subClassOf {} .", ex("Hand"), ex("ArmPart"))
+    ));
 }
 
 /// A property chain of four properties over individuals (the SPARQL loop
@@ -669,8 +691,14 @@ fn test_property_chain_of_four() {
         "ex:r owl:propertyChainAxiom ( ex:p1 ex:p2 ex:p3 ex:p4 ) . \
          ex:a ex:p1 ex:b . ex:b ex:p2 ex:c . ex:c ex:p3 ex:d . ex:d ex:p4 ex:e .",
     );
-    assert!(ask_tg(&s, &format!("{} {} {} .", ex("a"), ex("r"), ex("e"))));
-    assert!(!ask_tg(&s, &format!("{} {} {} .", ex("a"), ex("r"), ex("d"))));
+    assert!(ask_tg(
+        &s,
+        &format!("{} {} {} .", ex("a"), ex("r"), ex("e"))
+    ));
+    assert!(!ask_tg(
+        &s,
+        &format!("{} {} {} .", ex("a"), ex("r"), ex("d"))
+    ));
 }
 
 /// A range applies through the property hierarchy, to individuals and to
@@ -686,13 +714,25 @@ fn test_range_through_hierarchy_and_existentials() {
          [ owl:onProperty ex:hasParent ; owl:someValuesFrom \
              [ owl:intersectionOf ( ex:Female ex:Person ) ] ] rdfs:subClassOf ex:HasFemaleParent .",
     );
-    assert!(ask_tg(&s, &format!("{} rdf:type {} .", ex("y"), ex("Person"))));
-    assert!(ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("A"), ex("HasFemaleParent"))));
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdf:type {} .", ex("y"), ex("Person"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdfs:subClassOf {} .", ex("A"), ex("HasFemaleParent"))
+    ));
     assert!(
-        !ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("Female"), ex("Person"))),
+        !ask_tg(
+            &s,
+            &format!("{} rdfs:subClassOf {} .", ex("Female"), ex("Person"))
+        ),
         "the range does not leak into the shared filler"
     );
-    assert!(!ask_tg(&s, &format!("{} rdf:type {} .", ex("x"), ex("Person"))));
+    assert!(!ask_tg(
+        &s,
+        &format!("{} rdf:type {} .", ex("x"), ex("Person"))
+    ));
 }
 
 /// Reflexivity: every individual gets the loop, including one that only
@@ -706,10 +746,22 @@ fn test_reflexive_property() {
          [ owl:onProperty ex:knows ; owl:someValuesFrom ex:Expert ] rdfs:subClassOf ex:KnowsExpert . \
          ex:Expert rdfs:subClassOf ex:Person .",
     );
-    assert!(ask_tg(&s, &format!("{} {} {} .", ex("bob"), ex("knows"), ex("bob"))));
-    assert!(ask_tg(&s, &format!("{} {} {} .", ex("alice"), ex("knows"), ex("alice"))));
-    assert!(ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("Expert"), ex("KnowsExpert"))));
-    assert!(!ask_tg(&s, &format!("{} {} {} .", ex("Expert"), ex("knows"), ex("Expert"))));
+    assert!(ask_tg(
+        &s,
+        &format!("{} {} {} .", ex("bob"), ex("knows"), ex("bob"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} {} {} .", ex("alice"), ex("knows"), ex("alice"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdfs:subClassOf {} .", ex("Expert"), ex("KnowsExpert"))
+    ));
+    assert!(!ask_tg(
+        &s,
+        &format!("{} {} {} .", ex("Expert"), ex("knows"), ex("Expert"))
+    ));
 }
 
 /// ⊥ travels back along property edges: an individual whose successor is
@@ -765,10 +817,22 @@ fn test_equivalence_and_top_output() {
          owl:Thing rdfs:subClassOf ex:Entity . \
          ex:x ex:q ex:y .",
     );
-    assert!(ask_tg(&s, &format!("{} owl:equivalentClass {} .", ex("A"), ex("B"))));
-    assert!(ask_tg(&s, &format!("{} owl:equivalentClass {} .", ex("B"), ex("A"))));
-    assert!(ask_tg(&s, &format!("{} rdf:type {} .", ex("y"), ex("Entity"))));
-    assert!(ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("A"), ex("Entity"))));
+    assert!(ask_tg(
+        &s,
+        &format!("{} owl:equivalentClass {} .", ex("A"), ex("B"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} owl:equivalentClass {} .", ex("B"), ex("A"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdf:type {} .", ex("y"), ex("Entity"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdfs:subClassOf {} .", ex("A"), ex("Entity"))
+    ));
 }
 
 /// Intersections of any arity, on either side of an axiom.
@@ -793,7 +857,10 @@ fn test_writes_only_new_triples() {
         "ex:A rdfs:subClassOf ex:B . ex:B rdfs:subClassOf ex:C . \
          ex:x rdf:type ex:A , ex:B .",
     );
-    assert!(!ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("A"), ex("B"))));
+    assert!(!ask_tg(
+        &s,
+        &format!("{} rdfs:subClassOf {} .", ex("A"), ex("B"))
+    ));
     assert!(!ask_tg(&s, &format!("{} rdf:type {} .", ex("x"), ex("B"))));
     assert!(ask_tg(&s, &format!("{} rdf:type {} .", ex("x"), ex("C"))));
     assert_eq!(r.triples_added, 2, "A ⊑ C and x a C: {r:?}");
@@ -833,8 +900,14 @@ fn test_has_key_with_inferred_facts() {
          ex:bob rdf:type ex:Person ; ex:ssn \"42\" . \
          ex:carol ex:ssn \"42\" .",
     );
-    assert!(ask_tg(&s, &format!("{} owl:sameAs {} .", ex("alice"), ex("bob"))));
-    assert!(ask_tg(&s, &format!("{} owl:sameAs {} .", ex("bob"), ex("alice"))));
+    assert!(ask_tg(
+        &s,
+        &format!("{} owl:sameAs {} .", ex("alice"), ex("bob"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} owl:sameAs {} .", ex("bob"), ex("alice"))
+    ));
     assert!(
         !ask_tg(&s, &format!("{} owl:sameAs {} .", ex("alice"), ex("carol"))),
         "carol is not known to be a Person"
@@ -849,7 +922,10 @@ fn test_data_property_domain_and_hierarchy() {
          ex:exactAge rdfs:subPropertyOf ex:age . \
          ex:x ex:exactAge 42 .",
     );
-    assert!(ask_tg(&s, &format!("{} rdf:type {} .", ex("x"), ex("Agent"))));
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdf:type {} .", ex("x"), ex("Agent"))
+    ));
     assert!(ask_tg(&s, &format!("{} {} 42 .", ex("x"), ex("age"))));
     assert!(!ask_tg(&s, "?lit rdf:type ?c . FILTER(isLiteral(?lit))"));
 }
@@ -911,16 +987,24 @@ fn test_generated_ontology_classifies() {
         "ex:PartOfRoot owl:equivalentClass [ owl:onProperty ex:partOf ; owl:someValuesFrom ex:C0 ] . ",
     );
     let (s, r) = report_scoped(&ttl);
-    assert!(ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("C299"), ex("PartOfRoot"))));
-    assert!(ask_tg(&s, &format!("{} rdf:type {} .", ex("i299"), ex("C0"))));
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdfs:subClassOf {} .", ex("C299"), ex("PartOfRoot"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdf:type {} .", ex("i299"), ex("C0"))
+    ));
     assert!(r.triples_added > 1000, "{r:?}");
 }
 
 // ─── Differential test against the RL engine on EL ∩ RL ────────────────────────
 
 /// A deterministic generator (xorshift64*), so a failure names its seed.
+#[cfg(feature = "owl2-rl")]
 struct Rng(u64);
 
+#[cfg(feature = "owl2-rl")]
 impl Rng {
     fn next(&mut self) -> u64 {
         self.0 ^= self.0 >> 12;
@@ -936,6 +1020,7 @@ impl Rng {
 /// A random ontology in the intersection of OWL 2 EL and OWL 2 RL: no
 /// existential on the right, no reflexivity, no keys or equality, binary
 /// intersections and chains (the RL rules are binary), no disjointness.
+#[cfg(feature = "owl2-rl")]
 fn random_el_rl(seed: u64) -> String {
     let mut g = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
     let (nc, np, ni) = (8, 4, 7);
@@ -946,7 +1031,11 @@ fn random_el_rl(seed: u64) -> String {
     for _ in 0..14 {
         let line = match g.below(10) {
             0 | 1 => format!("{} rdfs:subClassOf {} .", c(g.below(nc)), c(g.below(nc))),
-            2 => format!("{} owl:equivalentClass {} .", c(g.below(nc)), c(g.below(nc))),
+            2 => format!(
+                "{} owl:equivalentClass {} .",
+                c(g.below(nc)),
+                c(g.below(nc))
+            ),
             3 => format!(
                 "[ owl:intersectionOf ( {} {} ) ] rdfs:subClassOf {} .",
                 c(g.below(nc)),
@@ -960,7 +1049,11 @@ fn random_el_rl(seed: u64) -> String {
                 c(g.below(nc))
             ),
             5 => {
-                let filler = if g.below(4) == 0 { "owl:Thing".to_string() } else { c(g.below(nc)) };
+                let filler = if g.below(4) == 0 {
+                    "owl:Thing".to_string()
+                } else {
+                    c(g.below(nc))
+                };
                 format!(
                     "[ owl:onProperty {} ; owl:someValuesFrom {} ] rdfs:subClassOf {} .",
                     p(g.below(np)),
@@ -985,7 +1078,11 @@ fn random_el_rl(seed: u64) -> String {
         t.push(' ');
     }
     for _ in 0..6 {
-        t.push_str(&format!("{} rdf:type {} . ", ind(g.below(ni)), c(g.below(nc))));
+        t.push_str(&format!(
+            "{} rdf:type {} . ",
+            ind(g.below(ni)),
+            c(g.below(nc))
+        ));
     }
     for _ in 0..9 {
         t.push_str(&format!(
@@ -999,7 +1096,9 @@ fn random_el_rl(seed: u64) -> String {
 }
 
 /// The named types of the individuals and the property edges between them,
-/// over every graph.
+/// over every graph. Loops (`x p x`) are left out: the RL engine's
+/// `prp-trp` filters `?x != ?z`, so it does not derive `x p x` from
+/// `x p y`, `y p x` with `p` transitive, which OWL 2 RL entails.
 #[cfg(feature = "owl2-rl")]
 fn abox_closure(s: &TripleStore) -> std::collections::BTreeSet<String> {
     let q = "SELECT DISTINCT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } \
@@ -1007,12 +1106,17 @@ fn abox_closure(s: &TripleStore) -> std::collections::BTreeSet<String> {
              FILTER((?p = <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> \
                      && STRSTARTS(STR(?o), \"http://example.org/C\")) \
                  || (STRSTARTS(STR(?p), \"http://example.org/p\") \
-                     && STRSTARTS(STR(?o), \"http://example.org/i\"))) }";
+                     && STRSTARTS(STR(?o), \"http://example.org/i\") && ?s != ?o)) }";
     let mut out = std::collections::BTreeSet::new();
     if let oxigraph::sparql::QueryResults::Solutions(sols) = s.query(q).unwrap() {
         for sol in sols {
             let sol = sol.unwrap();
-            out.insert(format!("{} {} {}", sol.get("s").unwrap(), sol.get("p").unwrap(), sol.get("o").unwrap()));
+            out.insert(format!(
+                "{} {} {}",
+                sol.get("s").unwrap(),
+                sol.get("p").unwrap(),
+                sol.get("o").unwrap()
+            ));
         }
     }
     out
@@ -1027,6 +1131,414 @@ fn test_differential_against_rl() {
     use open_triplestore::reasoning::owl2_rl::Owl2RLReasoner;
     for seed in 1..=40u64 {
         let ttl = random_el_rl(seed);
+        let el = scoped_store(&ttl);
+        classify_scoped(&el).unwrap();
+        let rl = scoped_store(&ttl);
+        Owl2RLReasoner::new(&rl)
+            .with_sources(vec![DATA.to_string()])
+            .materialize()
+            .unwrap();
+        let (a, b) = (abox_closure(&el), abox_closure(&rl));
+        assert_eq!(
+            a,
+            b,
+            "seed {seed}: EL-only {:?}, RL-only {:?}\n{ttl}",
+            a.difference(&b).collect::<Vec<_>>(),
+            b.difference(&a).collect::<Vec<_>>()
+        );
+    }
+}
+
+// ─── Nominals, self restrictions, data values, equality ───────────────────────
+
+fn inconsistent(ttl: &str) -> String {
+    match classify_scoped(&scoped_store(ttl)) {
+        Err(ReasoningError::Inconsistency(msg)) => msg,
+        other => panic!("expected an inconsistency, got {other:?}\n{ttl}"),
+    }
+}
+
+fn unsat(s: &TripleStore) -> Vec<String> {
+    El2Classifier::new(s)
+        .with_sources(vec![DATA.to_string()])
+        .unsatisfiable_classes()
+        .unwrap()
+}
+
+/// `owl:hasValue` over an object property, in both positions: a member gets
+/// the edge, and the edge makes a member.
+#[test]
+fn test_object_has_value() {
+    let (s, _) = report_scoped(
+        "ex:Parisian owl:equivalentClass [ owl:onProperty ex:livesIn ; owl:hasValue ex:paris ] . \
+         ex:x ex:livesIn ex:paris . ex:y rdf:type ex:Parisian . \
+         ex:livesIn rdfs:subPropertyOf ex:locatedIn .",
+    );
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdf:type {} .", ex("x"), ex("Parisian"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} {} {} .", ex("y"), ex("livesIn"), ex("paris"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} {} {} .", ex("y"), ex("locatedIn"), ex("paris"))
+    ));
+}
+
+/// `owl:hasValue` over a data property matches by value, not by term.
+#[test]
+fn test_data_has_value_by_value() {
+    let (s, _) = report_scoped(
+        "ex:Adult owl:equivalentClass [ owl:onProperty ex:age ; owl:hasValue 18 ] . \
+         ex:x ex:age \"18.0\"^^xsd:decimal . ex:y ex:age 19 . ex:z rdf:type ex:Adult .",
+    );
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdf:type {} .", ex("x"), ex("Adult"))
+    ));
+    assert!(!ask_tg(
+        &s,
+        &format!("{} rdf:type {} .", ex("y"), ex("Adult"))
+    ));
+    assert!(ask_tg(&s, &format!("{} {} 18 .", ex("z"), ex("age"))));
+    assert!(
+        !ask_tg(&s, &format!("{} {} ?v .", ex("x"), ex("age"))),
+        "x's age is stated already, in another lexical form"
+    );
+}
+
+/// `owl:oneOf` of one individual: the class is that individual. Whatever is
+/// in it is the same as it and shares its types and edges.
+#[test]
+fn test_one_of_nominal() {
+    let (s, _) = report_scoped(
+        "ex:TheCapital owl:equivalentClass [ owl:oneOf ( ex:paris ) ] . \
+         ex:paris rdf:type ex:City ; ex:locatedIn ex:france . \
+         ex:capitalOfFrance rdf:type ex:TheCapital .",
+    );
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdfs:subClassOf {} .", ex("TheCapital"), ex("City"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} owl:sameAs {} .", ex("capitalOfFrance"), ex("paris"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} owl:sameAs {} .", ex("paris"), ex("capitalOfFrance"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdf:type {} .", ex("capitalOfFrance"), ex("City"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!(
+            "{} {} {} .",
+            ex("capitalOfFrance"),
+            ex("locatedIn"),
+            ex("france")
+        )
+    ));
+}
+
+/// `owl:hasSelf`: a self loop makes a member and a member gets the loop; an
+/// existential whose filler is the class itself is not a loop.
+#[test]
+fn test_has_self() {
+    let (s, _) = report_scoped(
+        "ex:Narcissist owl:equivalentClass [ owl:onProperty ex:loves ; owl:hasSelf true ] . \
+         ex:x ex:loves ex:x . ex:y rdf:type ex:Narcissist . \
+         ex:Lover rdfs:subClassOf [ owl:onProperty ex:loves ; owl:someValuesFrom ex:Lover ] .",
+    );
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdf:type {} .", ex("x"), ex("Narcissist"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} {} {} .", ex("y"), ex("loves"), ex("y"))
+    ));
+    assert!(!ask_tg(
+        &s,
+        &format!("{} rdfs:subClassOf {} .", ex("Lover"), ex("Narcissist"))
+    ));
+}
+
+/// A reflexive property gives every element a self loop: `∃r.Self ⊑ C`
+/// makes `owl:Thing ⊑ C`.
+#[test]
+fn test_reflexive_gives_self() {
+    let (s, _) = report_scoped(
+        "ex:knows rdf:type owl:ReflexiveProperty . \
+         [ owl:onProperty ex:knows ; owl:hasSelf true ] rdfs:subClassOf ex:SelfAware . \
+         ex:x rdf:type ex:Person .",
+    );
+    assert!(ask_tg(
+        &s,
+        &format!("owl:Thing rdfs:subClassOf {} .", ex("SelfAware"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdf:type {} .", ex("x"), ex("SelfAware"))
+    ));
+}
+
+/// `owl:someValuesFrom` over a data property and an EL datatype, through
+/// the datatype hierarchy and by value.
+#[test]
+fn test_data_some_values_from() {
+    let (s, _) = report_scoped(
+        "[ owl:onProperty ex:age ; owl:someValuesFrom xsd:nonNegativeInteger ] \
+             rdfs:subClassOf ex:HasAge . \
+         [ owl:onProperty ex:age ; owl:someValuesFrom xsd:decimal ] rdfs:subClassOf ex:HasNumber . \
+         ex:A rdfs:subClassOf [ owl:onProperty ex:age ; owl:someValuesFrom xsd:integer ] . \
+         ex:x ex:age 42 . ex:y ex:age \"forty\" . ex:z ex:age -1 .",
+    );
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdf:type {} .", ex("x"), ex("HasAge"))
+    ));
+    assert!(!ask_tg(
+        &s,
+        &format!("{} rdf:type {} .", ex("y"), ex("HasAge"))
+    ));
+    assert!(!ask_tg(
+        &s,
+        &format!("{} rdf:type {} .", ex("z"), ex("HasAge"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdf:type {} .", ex("z"), ex("HasNumber"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdfs:subClassOf {} .", ex("A"), ex("HasNumber"))
+    ));
+    assert!(!ask_tg(
+        &s,
+        &format!("{} rdfs:subClassOf {} .", ex("A"), ex("HasAge"))
+    ));
+}
+
+/// A data range: a value outside it is an inconsistency; an intersection
+/// of disjoint datatypes is empty.
+#[test]
+fn test_data_ranges() {
+    let msg = inconsistent("ex:age rdfs:range xsd:integer . ex:x ex:age \"forty\" .");
+    assert!(msg.contains("forty"), "{msg}");
+    let s = scoped_store(
+        "ex:C rdfs:subClassOf [ owl:onProperty ex:p ; owl:someValuesFrom \
+             [ rdf:type rdfs:Datatype ; owl:intersectionOf ( xsd:string xsd:integer ) ] ] . \
+         ex:D rdfs:subClassOf [ owl:onProperty ex:p ; owl:someValuesFrom \
+             [ rdf:type rdfs:Datatype ; owl:intersectionOf ( xsd:integer xsd:decimal ) ] ] .",
+    );
+    classify_scoped(&s).unwrap();
+    assert_eq!(unsat(&s), vec!["http://example.org/C".to_string()]);
+}
+
+/// An ill-typed literal makes the ontology inconsistent.
+#[test]
+fn test_ill_typed_literal() {
+    let msg = inconsistent("ex:age rdfs:domain ex:Person . ex:x ex:age \"abc\"^^xsd:integer .");
+    assert!(msg.contains("ill-typed"), "{msg}");
+}
+
+/// A functional data property: two different values clash, two forms of
+/// one value do not, and a value must be in every range the existentials
+/// require. In the TBox the same makes a class unsatisfiable.
+#[test]
+fn test_functional_data_property() {
+    let decl = "ex:age rdf:type owl:DatatypeProperty , owl:FunctionalProperty . ";
+    let msg = inconsistent(&format!("{decl} ex:x ex:age 30 , 31 ."));
+    assert!(msg.contains("functional"), "{msg}");
+    let s = scoped_store(&format!("{decl} ex:x ex:age 30 , \"30.0\"^^xsd:decimal ."));
+    classify_scoped(&s).unwrap();
+    inconsistent(&format!(
+        "{decl} ex:A rdfs:subClassOf [ owl:onProperty ex:age ; owl:someValuesFrom xsd:string ] . \
+         ex:x rdf:type ex:A ; ex:age 5 ."
+    ));
+    let s = scoped_store(&format!(
+        "{decl} ex:B rdfs:subClassOf [ owl:onProperty ex:age ; owl:someValuesFrom xsd:string ] , \
+                                     [ owl:onProperty ex:age ; owl:someValuesFrom xsd:integer ] ."
+    ));
+    classify_scoped(&s).unwrap();
+    assert_eq!(unsat(&s), vec!["http://example.org/B".to_string()]);
+}
+
+/// `owl:sameAs`: equal individuals share types and edges.
+#[test]
+fn test_same_as() {
+    let (s, _) = report_scoped(
+        "ex:a owl:sameAs ex:b . ex:a rdf:type ex:A . ex:b ex:p ex:c . \
+         ex:c owl:sameAs ex:d .",
+    );
+    assert!(ask_tg(&s, &format!("{} rdf:type {} .", ex("b"), ex("A"))));
+    assert!(ask_tg(
+        &s,
+        &format!("{} {} {} .", ex("a"), ex("p"), ex("c"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} {} {} .", ex("a"), ex("p"), ex("d"))
+    ));
+    assert!(ask_tg(&s, &format!("{} owl:sameAs {} .", ex("b"), ex("a"))));
+}
+
+/// `owl:differentFrom` and `owl:AllDifferent` clash with equality.
+#[test]
+fn test_different_individuals() {
+    let msg = inconsistent("ex:a owl:sameAs ex:b . ex:a owl:differentFrom ex:b .");
+    assert!(msg.contains("different"), "{msg}");
+    inconsistent(
+        "[ rdf:type owl:AllDifferent ; owl:distinctMembers ( ex:a ex:b ex:c ) ] . \
+         ex:Only owl:equivalentClass [ owl:oneOf ( ex:a ) ] . ex:c rdf:type ex:Only .",
+    );
+    let s = scoped_store("ex:a owl:differentFrom ex:b . ex:a ex:p ex:b .");
+    classify_scoped(&s).unwrap();
+}
+
+/// A negative property assertion clashes with an entailed edge, object or
+/// data.
+#[test]
+fn test_negative_property_assertion() {
+    let msg = inconsistent(
+        "[ rdf:type owl:NegativePropertyAssertion ; owl:sourceIndividual ex:a ; \
+           owl:assertionProperty ex:knows ; owl:targetIndividual ex:b ] . \
+         ex:friendOf rdfs:subPropertyOf ex:knows . ex:a ex:friendOf ex:b .",
+    );
+    assert!(msg.contains("negative"), "{msg}");
+    inconsistent(
+        "[ rdf:type owl:NegativePropertyAssertion ; owl:sourceIndividual ex:a ; \
+           owl:assertionProperty ex:age ; owl:targetValue 30 ] . \
+         ex:a ex:age \"30.0\"^^xsd:decimal .",
+    );
+    let s = scoped_store(
+        "[ rdf:type owl:NegativePropertyAssertion ; owl:sourceIndividual ex:a ; \
+           owl:assertionProperty ex:knows ; owl:targetIndividual ex:b ] . \
+         ex:a ex:knows ex:c .",
+    );
+    classify_scoped(&s).unwrap();
+}
+
+/// Keys see value equality, and a merge they cause can enable another key.
+#[test]
+fn test_keys_cascade_and_values() {
+    let (s, r) = report_scoped(
+        "ex:Person owl:hasKey ( ex:ssn ) . ex:Account owl:hasKey ( ex:owner ) . \
+         ex:x rdf:type ex:Person ; ex:ssn 42 . \
+         ex:y rdf:type ex:Person ; ex:ssn \"42.0\"^^xsd:decimal . \
+         ex:acc1 rdf:type ex:Account ; ex:owner ex:x . \
+         ex:acc2 rdf:type ex:Account ; ex:owner ex:y .",
+    );
+    assert!(ask_tg(&s, &format!("{} owl:sameAs {} .", ex("x"), ex("y"))));
+    assert!(ask_tg(
+        &s,
+        &format!("{} owl:sameAs {} .", ex("acc1"), ex("acc2"))
+    ));
+    assert!(
+        r.iterations >= 3,
+        "two merging rounds and a quiet one: {r:?}"
+    );
+}
+
+/// The case shared contexts cannot settle for a class: `C ⊑ ∃r.D ⊓ ∃s.E`
+/// with `D` and `E` both the individual `a`. If `C` has an instance, `a` is
+/// in both, so the `r`-successor is an `X ⊓ Y` and `C ⊑ G`. No individual is
+/// affected: nothing says `C` has an instance.
+#[test]
+fn test_nominal_classification_needs_an_instance() {
+    let ttl = "ex:C rdfs:subClassOf [ owl:onProperty ex:r ; owl:someValuesFrom ex:D ] , \
+                                   [ owl:onProperty ex:s ; owl:someValuesFrom ex:E ] . \
+               ex:D rdfs:subClassOf [ owl:oneOf ( ex:a ) ] , ex:X . \
+               ex:E rdfs:subClassOf [ owl:oneOf ( ex:a ) ] , ex:Y . \
+               [ owl:onProperty ex:r ; owl:someValuesFrom \
+                   [ owl:intersectionOf ( ex:X ex:Y ) ] ] rdfs:subClassOf ex:G .";
+    let (s, _) = report_scoped(ttl);
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdfs:subClassOf {} .", ex("C"), ex("G"))
+    ));
+    assert!(!ask_tg(&s, &format!("{} rdf:type {} .", ex("a"), ex("X"))));
+    assert!(!ask_tg(
+        &s,
+        &format!("{} rdfs:subClassOf {} .", ex("D"), ex("G"))
+    ));
+
+    // With X and Y disjoint, C is unsatisfiable — the ontology is not
+    // inconsistent.
+    let s = scoped_store(&format!("{ttl} ex:X owl:disjointWith ex:Y ."));
+    classify_scoped(&s).unwrap();
+    assert_eq!(unsat(&s), vec!["http://example.org/C".to_string()]);
+}
+
+/// Datatypes outside the EL map and nominals of more than one individual
+/// are reported, not guessed at.
+#[test]
+fn test_non_el_data_and_nominals_reported() {
+    let (_, r) = report_scoped(
+        "ex:weight rdfs:range xsd:double . \
+         ex:Primary owl:equivalentClass [ owl:oneOf ( ex:red ex:green ex:blue ) ] . \
+         ex:Small owl:equivalentClass [ owl:onProperty ex:size ; owl:someValuesFrom \
+             [ rdf:type rdfs:Datatype ; owl:onDatatype xsd:integer ; \
+               owl:withRestrictions ( [ xsd:maxInclusive 3 ] ) ] ] .",
+    );
+    let names: Vec<&str> = r.ignored.iter().map(|i| i.construct.as_str()).collect();
+    for c in [
+        "datatype outside the EL profile",
+        "ObjectOneOf with more than one individual",
+        "DatatypeRestriction",
+    ] {
+        assert!(names.contains(&c), "{c} in {names:?}");
+    }
+}
+
+/// A random ontology in EL ∩ RL with equality: `owl:hasValue` in both
+/// positions, `owl:sameAs`, keys.
+#[cfg(feature = "owl2-rl")]
+fn random_el_rl_equality(seed: u64) -> String {
+    let mut g = Rng(seed.wrapping_mul(0xd1b5_4a32_d192_ed03) | 1);
+    let (nc, np, ni) = (6, 3, 6);
+    let c = |i: usize| format!("ex:C{i}");
+    let p = |i: usize| format!("ex:p{i}");
+    let ind = |i: usize| format!("ex:i{i}");
+    let mut t = random_el_rl(seed);
+    for _ in 0..6 {
+        let line = match g.below(6) {
+            0 => format!(
+                "[ owl:onProperty {} ; owl:hasValue {} ] rdfs:subClassOf {} .",
+                p(g.below(np)),
+                ind(g.below(ni)),
+                c(g.below(nc))
+            ),
+            1 => format!(
+                "{} rdfs:subClassOf [ owl:onProperty {} ; owl:hasValue {} ] .",
+                c(g.below(nc)),
+                p(g.below(np)),
+                ind(g.below(ni))
+            ),
+            2 => format!("{} owl:sameAs {} .", ind(g.below(ni)), ind(g.below(ni))),
+            3 => format!("{} owl:hasKey ( {} ) .", c(g.below(nc)), p(g.below(np))),
+            _ => format!("{} rdf:type {} .", ind(g.below(ni)), c(g.below(nc))),
+        };
+        t.push_str(&line);
+        t.push(' ');
+    }
+    t
+}
+
+/// The differential test again, with equality in play: RL's `eq-*`,
+/// `cls-hv*` and `prp-key` rules against nominals and keys here.
+#[cfg(feature = "owl2-rl")]
+#[test]
+fn test_differential_against_rl_with_equality() {
+    use open_triplestore::reasoning::owl2_rl::Owl2RLReasoner;
+    for seed in 1..=30u64 {
+        let ttl = random_el_rl_equality(seed);
         let el = scoped_store(&ttl);
         classify_scoped(&el).unwrap();
         let rl = scoped_store(&ttl);

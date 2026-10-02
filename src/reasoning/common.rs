@@ -103,8 +103,9 @@ pub fn count_graph(
 /// (the default graph when `None`), read from the quad index — the
 /// `rdf:rest*` walk is done here rather than as a SPARQL property path.
 /// Blank-node class expressions are skipped; the order of a key's properties
-/// does not matter. Shared by the RL (`prp-key`) and EL hasKey rules.
-#[cfg(any(feature = "owl2-rl", feature = "owl2-el"))]
+/// does not matter. Used by the RL `prp-key` rule (the EL engine reads keys
+/// with the rest of its ontology).
+#[cfg(feature = "owl2-rl")]
 pub fn has_keys(
     store: &crate::store::TripleStore,
     scope: Option<&[String]>,

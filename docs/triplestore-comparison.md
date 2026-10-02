@@ -254,7 +254,8 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 
 > ⁵ Full RDFS entailment (all 13 rules rdfs1–rdfs13) via `rdfs-entailment` feature flag.
 >   See [`docs/rdfs-entailment.md`](rdfs-entailment.md).
-> ⁶ OWL 2 EL (CR1–CR10 + hasKey + reflexivity), OWL 2 QL (AST-level PerfectRef query rewriting
+> ⁶ OWL 2 EL (a native EL++ saturation engine for the whole profile: nominals, `hasSelf`, the EL
+>   datatypes, keys and equality, with randomised differential tests against RL), OWL 2 QL (AST-level PerfectRef query rewriting
 >   with full TBox closure), and OWL 2 RL (~80 forward-chaining rules including maxCardinality,
 >   qualified cardinality, AllDisjointClasses, property chains, and hasKey) are all fully
 >   implemented via feature flags (`owl2-el`, `owl2-ql`, `owl2-rl`).
@@ -310,6 +311,10 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > carried forward. Three had drifted since April, where a row was edited without the
 > score being redone: Blazegraph 11 → 10, Neptune 10 → 9, QLever 8 → 7. The other seven
 > were already right.
+>
+> 2026-10-02: the OWL 2 EL ✅ in section 4.2 is now backed by a Full grade in `docs/standards.md`
+> (native EL++ engine covering the whole profile); the count does not change, since that cell was
+> already counted. Section 11.1 follows.
 >
 > Open Triplestore recounted again on 2026-09-23, 27 → 23: GeoSPARQL 1.0 and 1.1 and SHACL
 > validation now follow the Partial grades in `docs/standards.md`, and the W3C SPARQL 1.1 Tests
@@ -733,7 +738,7 @@ reduces GEOS calls by ~90%.
 | GraphDB | ✅ | ✅ | ✅ | ✅ | 🔒 | ✅ | ✅ | ❌ |
 | Stardog | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Virtuoso | ✅ | 🟡 | ✅ | ✅ | ❌ | 🟡 | ❌ | ❌ |
-| **Open Triplestore** | 🟡 | 🟡 | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ✅ |
+| **Open Triplestore** | 🟡 | ✅ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ✅ |
 | Jena 5 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | 🟡 | ❌ | ❌ |
 | RDF4J 5 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ✅ | ❌ | ❌ |
 | Blazegraph | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ❌ | ❌ |
