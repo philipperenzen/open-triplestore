@@ -268,6 +268,24 @@ class DlTest {
     }
 
     @Test
+    void managersCanBeCreatedConcurrently() throws Exception {
+        // OWL API 5.1.9's OWLManager is not thread-safe: concurrent requests
+        // failed with a ConcurrentModificationException in its injector.
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(16);
+        try {
+            List<java.util.concurrent.Future<?>> fs = new java.util.ArrayList<>();
+            for (int i = 0; i < 800; i++) {
+                fs.add(pool.submit(() -> Dl.manager()));
+            }
+            for (var f : fs) {
+                f.get();
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
     void anExpiredJobStops() {
         Job job = new Job(0);
         assertThrows(Job.Expired.class, job::check);
