@@ -79,7 +79,18 @@ for now. Public datasets are reachable anonymously.
 **3D Tiles 1.1**: a glTF (GLB) carrying `EXT_mesh_features` (per-feature ids) and
 `EXT_structural_metadata` (a property table with one STRING column **`iri`** =
 the RDF subject = the viewer's lookup key). Geometry is triangulated by the 3D
-engine and reprojected to **ECEF (EPSG:4978)**.
+engine and reprojected to **ECEF (EPSG:4978)**; the GLB's mesh node sits at a
+local origin in the middle of the content and the vertices are f32 offsets from
+it, so they keep millimetre precision.
+
+There is no tiling yet: the tileset is **one root tile with one GLB** holding the
+whole dataset. Until tiling lands, that GLB is capped at `TILES3D_MAX_FEATURES`
+features (default 10 000, the first in IRI order). A capped tileset says so in
+`asset.extras.truncated` (`served`, `total`, `maxFeatures`) and the GLB in an
+`X-Tiles3d-Truncated: served/total` response header. Both bodies are cached per
+dataset, caller read scope and store write, so repeat requests cost a lookup
+until the next write. Like the viewer feed, geo stats and public asset
+downloads, the routes sit behind a per-IP rate limit (60 a minute, burst 40).
 
 **The binding invariant:** every spatial object has one canonical IRI that is (a)
 the RDF subject, (b) the `iri` property-table value in the tile, and (c) the key
@@ -88,8 +99,8 @@ plumbing.
 
 ## 5. Viewers and gating
 
-- **CesiumJS 3D-Tiles viewer** (`/datasets/:id/cesium`): streams the tileset;
-  click a feature → read its `iri` from the tile metadata → `SELECT ?p ?o WHERE {
+- **CesiumJS 3D-Tiles viewer** (`/datasets/:id/cesium`): loads the single-tile
+  tileset (one GLB for the dataset; see §4); click a feature → read its `iri` from the tile metadata → `SELECT ?p ?o WHERE {
   <iri> ?p ?o }` in a side panel. Cesium's native globe/terrain depth handling
   means satellite imagery and 3D coexist correctly.
 - **MapLibre + Three.js viewer** (`/datasets/:id/viewer`): the 2D map (located

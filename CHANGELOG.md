@@ -14,6 +14,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **3D Tiles feature cap: `TILES3D_MAX_FEATURES`** (default 10 000). The 3D
+  Tiles tileset is still a single tile holding one GLB, so the GLB now carries at
+  most that many features, the first in IRI order. A capped tileset reports
+  `asset.extras.truncated` (`served`, `total`, `maxFeatures`), the GLB an
+  `X-Tiles3d-Truncated: served/total` header, and the server logs a warning.
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -51,6 +56,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/ldp.md`, "Access control".
 
 ### Changed
+- **3D Tiles GLB positions are relative to a local origin.** The mesh node
+  carries a `translation` to the centre of the content and the POSITION
+  accessor holds f32 offsets from it. Absolute ECEF coordinates in f32 had
+  snapped every vertex to a 0.25–0.5 m grid at Dutch latitudes; vertices now
+  keep millimetre precision. Clients that read the POSITION accessor directly
+  must apply the node translation. The tileset's bounding region is computed
+  from per-feature bounding boxes, without triangulating.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were
@@ -144,6 +156,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     where its summary line has a dash.
 
 ### Security
+- **The public map and 3D viewer endpoints are throttled, cached and off the
+  async runtime.** The viewer feed, geo stats (per dataset and batched), the
+  public asset download and both 3D Tiles routes are reachable anonymously for
+  public datasets, but had no rate limit; the 3D Tiles routes rebuilt the whole
+  dataset on every request inside the async handler. They now share a per-IP
+  rate limit (60 a minute, burst 40, its own bucket), the store work runs on
+  the blocking pool, and the tileset and GLB are cached per dataset, caller
+  read scope and store write generation.
 - **Every configured secret goes through the secrets module.** `JWT_SECRET`,
   `LD_REGISTRY_TOKEN`, a replication follower's `OTS_REPLICATION_TOKEN` and the
   accounts-dashboard plugin's `ACCOUNTS_DASHBOARD_GATEWAY_KEY` were read as raw
