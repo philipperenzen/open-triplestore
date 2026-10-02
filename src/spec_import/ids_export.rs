@@ -175,6 +175,45 @@ fn value_element(constraints: &[Constraint], losses: &mut Vec<String>, indent: &
             );
         }
     }
+    // The importer's equality forms: a tolerance range for a double, a closed
+    // range for an integer.
+    let bound = |f: fn(&Constraint) -> Option<&Term>| constraints.iter().find_map(f);
+    let min_ex = bound(|c| match c {
+        Constraint::MinExclusive(t) => Some(t),
+        _ => None,
+    });
+    let max_ex = bound(|c| match c {
+        Constraint::MaxExclusive(t) => Some(t),
+        _ => None,
+    });
+    let min_in = bound(|c| match c {
+        Constraint::MinInclusive(t) => Some(t),
+        _ => None,
+    });
+    let max_in = bound(|c| match c {
+        Constraint::MaxInclusive(t) => Some(t),
+        _ => None,
+    });
+    let tolerance_pair = (min_in.and_then(number), max_in.and_then(number));
+    let tolerance_pair = match tolerance_pair {
+        (Some(lo), Some(hi)) if lo != hi => (Some(lo), Some(hi)),
+        _ => (min_ex.and_then(number), max_ex.and_then(number)),
+    };
+    if let (Some(lo), Some(hi)) = tolerance_pair {
+        if let Some(v) = tolerance_centre(lo, hi) {
+            return format!(
+                "{indent}<ids:value><ids:simpleValue>{v:?}</ids:simpleValue></ids:value>\n"
+            );
+        }
+    }
+    if let (Some(lo), Some(hi)) = (min_in, max_in) {
+        if lo == hi && lexical(lo).parse::<i64>().is_ok() {
+            return format!(
+                "{indent}<ids:value><ids:simpleValue>{}</ids:simpleValue></ids:value>\n",
+                esc(&lexical(lo))
+            );
+        }
+    }
     let mut facets = String::new();
     for c in constraints {
         match c {
@@ -229,6 +268,8 @@ fn value_element(constraints: &[Constraint], losses: &mut Vec<String>, indent: &
                     losses.push(format!(
                         "sh:pattern `{pattern}` carries sh:flags, which xs:pattern has no form for — dropped"
                     ));
+                } else if let Some(xsd) = unanchor(pattern) {
+                    let _ = writeln!(facets, "{indent}    <xs:pattern value=\"{}\"/>", esc(&xsd));
                 } else {
                     losses.push(format!(
                         "sh:pattern `{pattern}` exported as xs:pattern, which is implicitly anchored — the match semantics differ"
@@ -307,6 +348,7 @@ fn note_unexportable(c: &Constraint, what: &str, losses: &mut Vec<String>) {
 fn render_facet(
     ps: &crate::shacl::shapes::PropertyShape,
     requirement: bool,
+    prohibited: bool,
     losses: &mut Vec<String>,
 ) -> Option<RenderedFacet> {
     let Some(facet) = classify(&ps.path, ps.name.as_deref()) else {
@@ -320,7 +362,11 @@ fn render_facet(
     for c in &ps.constraints {
         note_unexportable(c, &what, losses);
     }
-    let card = cardinality(&ps.constraints, losses, &what);
+    let card = if prohibited {
+        Some("prohibited")
+    } else {
+        cardinality(&ps.constraints, losses, &what)
+    };
     let card_attr = match (requirement, card) {
         (true, Some(c)) => format!(" cardinality=\"{c}\""),
         // In the applicability position IDS has no cardinality attribute.
@@ -392,22 +438,87 @@ fn render_facet(
     })
 }
 
+/// Property shapes under `sh:not [ sh:property … ]` — the importer's
+/// prohibited facets.
+fn scan_negations(constraints: &[Constraint]) -> Vec<&crate::shacl::shapes::PropertyShape> {
+    constraints
+        .iter()
+        .filter_map(|c| match c {
+            Constraint::Not(inner) if !inner.property_shapes.is_empty() => {
+                Some(inner.property_shapes.iter())
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
 /// Is this a helper shape the importer generates (`…-applies` / `…-requires`)?
 /// `load_shapes` returns them as top-level shapes because they carry
 /// `sh:property`, and exporting them would triple the specification count.
 fn is_helper(iri: &str) -> bool {
-    iri.ends_with("-applies") || iri.ends_with("-requires")
+    iri.ends_with("-applies") || iri.ends_with("-requires") || iri.ends_with("-exists")
 }
 
 fn target_classes(shape: &Shape) -> Vec<String> {
-    shape
-        .targets
-        .iter()
-        .filter_map(|t| match t {
-            Target::TargetClass(c) => Some(entity_name(c)),
-            _ => None,
-        })
-        .collect()
+    let mut out: Vec<String> = Vec::new();
+    for t in &shape.targets {
+        if let Target::TargetClass(c) = t {
+            let n = entity_name(c);
+            if !out.contains(&n) {
+                out.push(n);
+            }
+        }
+    }
+    out
+}
+
+/// The `ifcVersion` list the importer's target namespaces stand for.
+fn ifc_versions(shape: &Shape) -> String {
+    let mut v2x3 = false;
+    let mut v4 = false;
+    for t in &shape.targets {
+        if let Target::TargetClass(c) = t {
+            if c.contains("/IFC2x3/") {
+                v2x3 = true;
+            } else {
+                v4 = true;
+            }
+        }
+    }
+    match (v2x3, v4) {
+        (true, true) => "IFC2X3 IFC4",
+        (true, false) => "IFC2X3",
+        _ => "IFC4",
+    }
+    .to_string()
+}
+
+/// The XSD pattern behind an `sh:pattern` the importer anchored as
+/// `^(?:…)$`, with its `\^` / `\$` escapes undone; `None` for any other
+/// pattern.
+fn unanchor(pattern: &str) -> Option<String> {
+    let inner = pattern.strip_prefix("^(?:")?.strip_suffix(")$")?;
+    Some(inner.replace("\\^", "^").replace("\\$", "$"))
+}
+
+/// A tolerance range `(v − |v|·ε − ε, v + |v|·ε + ε)` the importer wrote for a
+/// double equality, back to `v`.
+fn tolerance_centre(lo: f64, hi: f64) -> Option<f64> {
+    let v = (lo + hi) / 2.0;
+    let eps = 1.0e-6;
+    let expect_lo = v - v.abs() * eps - eps;
+    let expect_hi = v + v.abs() * eps + eps;
+    ((lo - expect_lo).abs() <= 1e-12 * (1.0 + v.abs())
+        && (hi - expect_hi).abs() <= 1e-12 * (1.0 + v.abs()))
+    .then_some(v)
+}
+
+fn number(t: &Term) -> Option<f64> {
+    match t {
+        Term::Literal(l) => l.value().parse().ok(),
+        _ => None,
+    }
 }
 
 /// Export `shapes` as an IDS 1.0 document.
@@ -461,10 +572,28 @@ pub fn export(shapes: &[Shape], title: &str) -> anyhow::Result<ExportedSpec> {
         // Recover the applicability and requirement halves from it when present.
         let mut applies: Vec<&crate::shacl::shapes::PropertyShape> = Vec::new();
         let mut requires: Vec<&crate::shacl::shapes::PropertyShape> = Vec::new();
+        // Facets the importer wrote as `sh:not [ sh:property … ]`: prohibited.
+        let mut prohibited_reqs: Vec<&crate::shacl::shapes::PropertyShape> = Vec::new();
         let mut prohibited = false;
 
         for c in &shape.constraints {
             match c {
+                // The prohibited-specification forms: `sh:not` of the empty
+                // shape (no applicability facets), of the applicability helper,
+                // or (older imports) of the target class.
+                Constraint::Not(inner)
+                    if inner.constraints.is_empty() && inner.property_shapes.is_empty() =>
+                {
+                    prohibited = true;
+                }
+                Constraint::Not(inner) if inner.iri.ends_with("-applies") => {
+                    prohibited = true;
+                    let a = by_iri
+                        .get(inner.iri.as_str())
+                        .copied()
+                        .unwrap_or(inner.as_ref());
+                    applies.extend(a.property_shapes.iter());
+                }
                 Constraint::Not(inner)
                     if inner
                         .constraints
@@ -473,6 +602,7 @@ pub fn export(shapes: &[Shape], title: &str) -> anyhow::Result<ExportedSpec> {
                 {
                     prohibited = true;
                 }
+                Constraint::Not(inner) if !inner.property_shapes.is_empty() => {}
                 Constraint::Or(members) if members.len() == 2 => {
                     if let Some(Constraint::Not(applies_shape)) = members[0].constraints.first() {
                         let a = by_iri
@@ -485,24 +615,30 @@ pub fn export(shapes: &[Shape], title: &str) -> anyhow::Result<ExportedSpec> {
                             .copied()
                             .unwrap_or(&members[1]);
                         requires.extend(r.property_shapes.iter());
+                        prohibited_reqs.extend(scan_negations(&r.constraints));
                     }
                 }
+                Constraint::Class(_) | Constraint::Or(_) => {}
                 other => note_unexportable(other, &format!("shape <{}>", shape.iri), &mut losses),
             }
         }
-        if applies.is_empty() && requires.is_empty() {
+        if applies.is_empty() && requires.is_empty() && !prohibited {
             requires.extend(shape.property_shapes.iter());
+            prohibited_reqs.extend(scan_negations(&shape.constraints));
         }
 
         let mut app_facets: Vec<RenderedFacet> = applies
             .iter()
-            .filter_map(|ps| render_facet(ps, false, &mut losses))
+            .filter_map(|ps| render_facet(ps, false, false, &mut losses))
             .collect();
         app_facets.sort_by(|a, b| a.order.cmp(&b.order));
-        let mut req_facets: Vec<RenderedFacet> = requires
-            .iter()
-            .filter_map(|ps| render_facet(ps, true, &mut losses))
-            .collect();
+        let mut req_facets: Vec<RenderedFacet> = Vec::new();
+        for ps in &requires {
+            req_facets.extend(render_facet(ps, true, false, &mut losses));
+        }
+        for ps in &prohibited_reqs {
+            req_facets.extend(render_facet(ps, true, true, &mut losses));
+        }
         req_facets.sort_by(|a, b| a.order.cmp(&b.order));
 
         let occurs = if prohibited {
@@ -527,8 +663,9 @@ pub fn export(shapes: &[Shape], title: &str) -> anyhow::Result<ExportedSpec> {
 
         let _ = write!(
             specs,
-            "    <ids:specification name=\"{}\" ifcVersion=\"IFC4\">\n      <ids:applicability{occurs}>\n{entity}{}      </ids:applicability>\n",
+            "    <ids:specification name=\"{}\" ifcVersion=\"{}\">\n      <ids:applicability{occurs}>\n{entity}{}      </ids:applicability>\n",
             esc(&name),
+            ifc_versions(shape),
             app_facets.iter().map(|f| f.xml.as_str()).collect::<String>()
         );
         if !req_facets.is_empty() {

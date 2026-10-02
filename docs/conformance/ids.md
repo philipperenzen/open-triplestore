@@ -65,7 +65,11 @@ The list was measured first against the converter and lift as they were
 - **No IDS audit.** An invalid IDS is accepted.
 - **Bounds untyped.** A `0.` bound became invalid Turtle (four `pass-` cases).
 
-The cards that follow this baseline fix the converter's value, tolerance and
-cardinality mapping, and then add an IDS-oriented projection to the IFC lift
-beside the building-topology output, with IDS document validation; the list in
-the runner records what is still open after each step.
+After the converter's value, tolerance and cardinality mapping was fixed
+(typed values, the IDS tolerance, anchored patterns, prohibited facets as
+negation, the existence check, every listed `ifcVersion`), the satisfied
+cases are no longer vacuous, and the list shows what the building-topology
+layer cannot carry: a required specification now fails when the layer holds
+none of the model's applicable elements, which is most `pass-` cases. The
+next step adds an IDS-oriented projection to the IFC lift beside the
+building-topology output, with IDS document validation.
