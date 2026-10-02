@@ -141,7 +141,7 @@ Entailed triples go to `urn:entailment:owl2-rl`.
 ### Consistency Checking
 
 ```rust
-reasoner.check_consistency()?;   // returns Err(ReasoningError::Inconsistency(...)) if violated
+reasoner.check_consistency()?;   // Err(ReasoningError::Inconsistency { rule, detail }) if violated
 ```
 
 ## Example

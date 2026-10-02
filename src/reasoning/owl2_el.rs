@@ -78,7 +78,8 @@ pub struct El2Classifier<'a> {
     store: &'a TripleStore,
     target_graph: String,
     /// When set, the rules read ONLY these graphs (plus the target graph).
-    /// Without it they read the unnamed default graph, as they always did.
+    /// Without it they read the unnamed default graph plus the target graph
+    /// (`TripleStore::update_over`), so rules see their own consequences.
     sources: Option<Vec<String>>,
     /// Check consistency after the fixed point and fail with
     /// [`ReasoningError::Inconsistency`] when the ontology is inconsistent.
@@ -87,9 +88,9 @@ pub struct El2Classifier<'a> {
 
 impl<'a> El2Classifier<'a> {
     /// Restrict the rules to `sources` (plus the target graph). Without a
-    /// scope the rules read the unnamed default graph only, so a dataset's
-    /// named graphs — and the model version it conforms to — were invisible to
-    /// materialisation; this is what `POST /api/reasoning/materialize` sets
+    /// scope the rules read the unnamed default graph and the target graph, so
+    /// a dataset's named graphs — and the model version it conforms to — are
+    /// invisible to materialisation; this is what `POST /api/reasoning/materialize` sets
     /// from `source_graphs` or the dataset's conformance layer.
     pub fn with_sources(mut self, sources: Vec<String>) -> Self {
         self.sources = Some(sources);
@@ -109,7 +110,9 @@ impl<'a> El2Classifier<'a> {
     fn run_update(&self, sparql: &str) -> Result<(), crate::store::engine::StoreError> {
         match self.scope() {
             Some(scope) => self.store.update_scoped(sparql, &scope),
-            None => self.store.update(sparql),
+            None => self
+                .store
+                .update_over(sparql, std::slice::from_ref(&self.target_graph)),
         }
     }
 
@@ -119,7 +122,9 @@ impl<'a> El2Classifier<'a> {
     ) -> Result<oxigraph::sparql::QueryResults<'static>, crate::store::engine::StoreError> {
         match self.scope() {
             Some(scope) => self.store.query_scoped(sparql, &scope),
-            None => self.store.query(sparql),
+            None => self
+                .store
+                .query_over(sparql, std::slice::from_ref(&self.target_graph)),
         }
     }
 
@@ -181,14 +186,20 @@ impl<'a> El2Classifier<'a> {
                 iterations,
                 after.saturating_sub(before)
             );
-            if after == before || iterations >= MAX_ITERATIONS {
+            if after == before {
                 break;
+            }
+            if iterations >= MAX_ITERATIONS {
+                return Err(ReasoningError::NotConverged {
+                    regime: "owl2-el".to_string(),
+                    iterations,
+                });
             }
         }
 
         if self.detect_inconsistency {
-            if let Some(reason) = self.inconsistency()? {
-                return Err(ReasoningError::Inconsistency(reason));
+            if let Some((rule, detail)) = self.inconsistency()? {
+                return Err(ReasoningError::inconsistency(rule, detail));
             }
         }
 
@@ -221,8 +232,9 @@ impl<'a> El2Classifier<'a> {
         Ok(self.inconsistency()?.is_none())
     }
 
-    /// Why the ontology is inconsistent, or `None` when it is consistent.
-    fn inconsistency(&self) -> Result<Option<String>, ReasoningError> {
+    /// Why the ontology is inconsistent — the rule id and a detail — or
+    /// `None` when it is consistent.
+    fn inconsistency(&self) -> Result<Option<(&'static str, String)>, ReasoningError> {
         let tg = &self.target_graph;
         let in_nothing = format!(
             r#"SELECT ?x WHERE {{
@@ -231,7 +243,10 @@ impl<'a> El2Classifier<'a> {
                }} LIMIT 1"#
         );
         if let Some(x) = self.first_binding(&in_nothing, "x")? {
-            return Ok(Some(format!("{x} is an instance of owl:Nothing")));
+            return Ok(Some((
+                "cls-nothing2",
+                format!("{x} is an instance of owl:Nothing"),
+            )));
         }
         let top_bottom = format!(
             r#"ASK {{
@@ -240,7 +255,10 @@ impl<'a> El2Classifier<'a> {
                }}"#
         );
         if let oxigraph::sparql::QueryResults::Boolean(true) = self.run_query(&top_bottom)? {
-            return Ok(Some("owl:Thing is a subclass of owl:Nothing".to_string()));
+            return Ok(Some((
+                "el-top-bottom",
+                "owl:Thing is a subclass of owl:Nothing".to_string(),
+            )));
         }
         let disjoint = format!(
             r#"SELECT ?x WHERE {{
@@ -250,7 +268,10 @@ impl<'a> El2Classifier<'a> {
                }} LIMIT 1"#
         );
         if let Some(x) = self.first_binding(&disjoint, "x")? {
-            return Ok(Some(format!("{x} is an instance of two disjoint classes")));
+            return Ok(Some((
+                "cax-dw",
+                format!("{x} is an instance of two disjoint classes"),
+            )));
         }
         Ok(None)
     }

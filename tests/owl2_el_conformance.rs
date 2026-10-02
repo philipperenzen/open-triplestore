@@ -579,7 +579,7 @@ fn test_inconsistency_is_reported() {
     );
     assert!(matches!(
         classify_scoped(&s),
-        Err(ReasoningError::Inconsistency(_))
+        Err(ReasoningError::Inconsistency { .. })
     ));
 
     let s = scoped_store(
@@ -589,7 +589,7 @@ fn test_inconsistency_is_reported() {
     );
     assert!(matches!(
         classify_scoped(&s),
-        Err(ReasoningError::Inconsistency(_))
+        Err(ReasoningError::Inconsistency { .. })
     ));
 
     // With detection off the run completes, and the check reports it.

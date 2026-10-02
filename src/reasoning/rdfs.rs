@@ -133,8 +133,14 @@ impl<'a> RdfsMaterializer<'a> {
                 iterations, added_this_round
             );
 
-            if added_this_round == 0 || iterations >= MAX_ITERATIONS {
+            if added_this_round == 0 {
                 break;
+            }
+            if iterations >= MAX_ITERATIONS {
+                return Err(ReasoningError::NotConverged {
+                    regime: "rdfs".to_string(),
+                    iterations,
+                });
             }
         }
 

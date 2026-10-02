@@ -223,10 +223,13 @@ pub struct Owl2RLReasoner<'a> {
     store: &'a TripleStore,
     target_graph: String,
     /// When set, the rules read ONLY these graphs (plus the target graph).
-    /// Without it they read the unnamed default graph, as they always did.
+    /// Without it they read the unnamed default graph plus the target graph
+    /// (`TripleStore::update_over`), so rules see their own consequences.
     sources: Option<Vec<String>>,
     /// If `true`, inconsistency rules raise `ReasoningError::Inconsistency`.
     pub detect_inconsistency: bool,
+    /// Fixed-point rounds before the run fails with `NotConverged`.
+    max_iterations: usize,
     /// What to do with `owl:sameAs`: `sameas-off` skips the Table 4 equality
     /// rules. The raw engine defaults to `sameas-full`; the per-dataset policy
     /// is applied by the entailment layer (see `crate::entailment`).
@@ -235,9 +238,9 @@ pub struct Owl2RLReasoner<'a> {
 
 impl<'a> Owl2RLReasoner<'a> {
     /// Restrict the rules to `sources` (plus the target graph). Without a
-    /// scope the rules read the unnamed default graph only, so a dataset's
-    /// named graphs — and the model version it conforms to — were invisible to
-    /// materialisation; this is what `POST /api/reasoning/materialize` sets
+    /// scope the rules read the unnamed default graph and the target graph, so
+    /// a dataset's named graphs — and the model version it conforms to — are
+    /// invisible to materialisation; this is what `POST /api/reasoning/materialize` sets
     /// from `source_graphs` or the dataset's conformance layer.
     pub fn with_sources(mut self, sources: Vec<String>) -> Self {
         self.sources = Some(sources);
@@ -257,7 +260,9 @@ impl<'a> Owl2RLReasoner<'a> {
     fn run_update(&self, sparql: &str) -> Result<(), crate::store::engine::StoreError> {
         match self.scope() {
             Some(scope) => self.store.update_scoped(sparql, &scope),
-            None => self.store.update(sparql),
+            None => self
+                .store
+                .update_over(sparql, std::slice::from_ref(&self.target_graph)),
         }
     }
 
@@ -267,7 +272,9 @@ impl<'a> Owl2RLReasoner<'a> {
     ) -> Result<oxigraph::sparql::QueryResults<'static>, crate::store::engine::StoreError> {
         match self.scope() {
             Some(scope) => self.store.query_scoped(sparql, &scope),
-            None => self.store.query(sparql),
+            None => self
+                .store
+                .query_over(sparql, std::slice::from_ref(&self.target_graph)),
         }
     }
 
@@ -277,8 +284,16 @@ impl<'a> Owl2RLReasoner<'a> {
             target_graph: OWL2_RL_ENTAILMENT_GRAPH.to_string(),
             sources: None,
             detect_inconsistency: true,
+            max_iterations: MAX_ITERATIONS,
             identity: IdentityPolicy::Full,
         }
+    }
+
+    /// Fail with [`ReasoningError::NotConverged`] after `n` rounds without a
+    /// fixed point (default 500) instead of running on.
+    pub fn with_max_iterations(mut self, n: usize) -> Self {
+        self.max_iterations = n.max(1);
+        self
     }
 
     pub fn with_target(mut self, graph: impl Into<String>) -> Self {
@@ -385,8 +400,14 @@ impl<'a> Owl2RLReasoner<'a> {
             let after = count_graph(self.store, &self.target_graph)?;
             let added = after.saturating_sub(before);
             debug!("OWL 2 RL iteration {}: +{} triples", iterations, added);
-            if added == 0 || iterations >= MAX_ITERATIONS {
+            if added == 0 {
                 break;
+            }
+            if iterations >= self.max_iterations {
+                return Err(ReasoningError::NotConverged {
+                    regime: "owl2-rl".to_string(),
+                    iterations,
+                });
             }
         }
 
@@ -492,8 +513,9 @@ impl<'a> Owl2RLReasoner<'a> {
     fn rule_eq_diff1(&self) -> Result<(), ReasoningError> {
         let q = format!("ASK {{ ?x <{OWL_SAME_AS}> ?y . ?x <{OWL_DIFFERENT_FROM}> ?y }}");
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "owl:sameAs and owl:differentFrom on the same pair".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "eq-diff1",
+                "owl:sameAs and owl:differentFrom on the same pair",
             ));
         }
         Ok(())
@@ -557,8 +579,9 @@ impl<'a> Owl2RLReasoner<'a> {
     fn rule_prp_irp(&self) -> Result<(), ReasoningError> {
         let q = format!("ASK {{ ?p <{RDF_TYPE}> <{OWL_IRREFLEXIVE_PROP}> . ?x ?p ?x }}");
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "IrreflexiveProperty has reflexive triple".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "prp-irp",
+                "IrreflexiveProperty has reflexive triple",
             ));
         }
         Ok(())
@@ -579,8 +602,9 @@ impl<'a> Owl2RLReasoner<'a> {
     fn rule_prp_asyp(&self) -> Result<(), ReasoningError> {
         let q = format!("ASK {{ ?p <{RDF_TYPE}> <{OWL_ASYMMETRIC_PROP}> . ?x ?p ?y . ?y ?p ?x }}");
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "AsymmetricProperty violation".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "prp-asyp",
+                "AsymmetricProperty violation",
             ));
         }
         Ok(())
@@ -708,15 +732,15 @@ impl<'a> Owl2RLReasoner<'a> {
     /// Every XSD-typed literal in scope is checked with the same lexical rules
     /// SHACL's `sh:datatype` uses; oxigraph keeps an ill-formed typed literal
     /// as its lexical form plus datatype, so it is found here. The scan reads
-    /// the quad index directly (the scoped graphs, or the default graph when
-    /// unscoped) rather than a SPARQL query: a DISTINCT-over-FILTER query
+    /// the quad index directly (the scoped graphs, or the default and target graphs
+    /// when unscoped) rather than a SPARQL query: a DISTINCT-over-FILTER query
     /// would take the sharded mirror path, and this check must not depend on
     /// it.
     fn rule_dt_not_type(&self) -> Result<(), ReasoningError> {
         use oxigraph::model::{GraphNameRef, NamedNodeRef, Term};
         let graphs: Vec<Option<String>> = match self.scope() {
             Some(scope) => scope.into_iter().map(Some).collect(),
-            None => vec![None],
+            None => vec![None, Some(self.target_graph.clone())],
         };
         for graph in graphs {
             let graph_ref = match &graph {
@@ -739,9 +763,10 @@ impl<'a> Owl2RLReasoner<'a> {
                         .starts_with("http://www.w3.org/2001/XMLSchema#")
                         && !crate::shacl::constraints::xsd_lexical_valid(lit)
                     {
-                        return Err(ReasoningError::Inconsistency(format!(
-                            "dt-not-type: {lit} is not in the lexical space of its datatype"
-                        )));
+                        return Err(ReasoningError::inconsistency(
+                            "dt-not-type",
+                            format!("{lit} is not in the lexical space of its datatype"),
+                        ));
                     }
                 }
             }
@@ -761,8 +786,9 @@ impl<'a> Owl2RLReasoner<'a> {
              }}"
         );
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "NegativeObjectPropertyAssertion violated".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "prp-npa1",
+                "NegativeObjectPropertyAssertion violated",
             ));
         }
         Ok(())
@@ -780,8 +806,9 @@ impl<'a> Owl2RLReasoner<'a> {
              }}"
         );
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "NegativeDataPropertyAssertion violated".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "prp-npa2",
+                "NegativeDataPropertyAssertion violated",
             ));
         }
         Ok(())
@@ -819,8 +846,9 @@ impl<'a> Owl2RLReasoner<'a> {
     fn rule_cls_nothing2(&self) -> Result<(), ReasoningError> {
         let q = format!("ASK {{ ?x <{RDF_TYPE}> <{OWL_NOTHING}> }}");
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "An individual is an instance of owl:Nothing".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "cls-nothing2",
+                "An individual is an instance of owl:Nothing",
             ));
         }
         Ok(())
@@ -971,8 +999,9 @@ impl<'a> Owl2RLReasoner<'a> {
             tg = self.target_graph
         );
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "owl:maxCardinality 0 violated".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "cls-maxc1",
+                "owl:maxCardinality 0 violated",
             ));
         }
         Ok(())
@@ -1006,8 +1035,9 @@ impl<'a> Owl2RLReasoner<'a> {
             }}"#
         );
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "owl:maxQualifiedCardinality 0 violated".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "cls-maxqc1",
+                "owl:maxQualifiedCardinality 0 violated",
             ));
         }
         Ok(())
@@ -1024,8 +1054,9 @@ impl<'a> Owl2RLReasoner<'a> {
             }}"#
         );
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "owl:maxQualifiedCardinality 0 (Thing) violated".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "cls-maxqc2",
+                "owl:maxQualifiedCardinality 0 (Thing) violated",
             ));
         }
         Ok(())
@@ -1075,8 +1106,9 @@ impl<'a> Owl2RLReasoner<'a> {
             "ASK {{ ?c1 <{OWL_COMPLEMENT_OF}> ?c2 . ?x <{RDF_TYPE}> ?c1 . ?x <{RDF_TYPE}> ?c2 }}"
         );
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "owl:complementOf violated: individual is member of both classes".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "cls-com",
+                "owl:complementOf violated: individual is member of both classes",
             ));
         }
         Ok(())
@@ -1167,8 +1199,9 @@ impl<'a> Owl2RLReasoner<'a> {
              }}"
         );
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "owl:disjointWith violated".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "cax-dw",
+                "owl:disjointWith violated",
             ));
         }
         Ok(())

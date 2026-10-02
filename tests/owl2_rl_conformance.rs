@@ -55,7 +55,7 @@ fn ask_tg(store: &TripleStore, pattern: &str) -> bool {
 fn check_inconsistency(store: &TripleStore) -> bool {
     matches!(
         Owl2RLReasoner::new(store).materialize(),
-        Err(ReasoningError::Inconsistency(_))
+        Err(ReasoningError::Inconsistency { .. })
     )
 }
 
@@ -673,4 +673,117 @@ fn rule_inventory_is_the_whole_rl_rule_set() {
         assert!(IMPLEMENTED_RULES.contains(&must), "{must} is implemented");
     }
     assert_eq!(IMPLEMENTED_RULES.len(), 63);
+}
+
+// ─── Joins over two derived premises (unscoped runs) ─────────────────────────
+//
+// Without `with_sources` the rules used to read the unnamed default graph only,
+// while every consequence goes to the target graph. A rule whose premises are
+// both consequences therefore never fired. The rules now read the default
+// graph together with the target graph.
+
+/// The rule an inconsistent run names, or `None` if the run was consistent.
+fn inconsistent_rule(store: &TripleStore) -> Option<String> {
+    match Owl2RLReasoner::new(store).materialize() {
+        Err(ReasoningError::Inconsistency { rule, .. }) => Some(rule),
+        Err(e) => panic!("expected an inconsistency or success, got {e}"),
+        Ok(_) => None,
+    }
+}
+
+#[test]
+fn prp_trp_closes_a_three_hop_chain() {
+    let s = store_with(
+        "ex:partOf rdf:type owl:TransitiveProperty . \
+         ex:a ex:partOf ex:b . ex:b ex:partOf ex:c . ex:c ex:partOf ex:d .",
+    );
+    materialize(&s);
+    assert!(
+        ask_tg(&s, "ex:a ex:partOf ex:d ."),
+        "prp-trp: a→d joins two derived links (a→c, b→d) or a derived and an asserted one"
+    );
+}
+
+#[test]
+fn eq_trans_closes_a_three_link_same_as_chain() {
+    let s = store_with("ex:a owl:sameAs ex:b . ex:b owl:sameAs ex:c . ex:c owl:sameAs ex:d .");
+    materialize(&s);
+    assert!(ask_tg(&s, "ex:a owl:sameAs ex:d ."), "eq-trans: a = d");
+    assert!(
+        ask_tg(&s, "ex:d owl:sameAs ex:a ."),
+        "eq-sym over a derived a = d"
+    );
+}
+
+/// prp-eqp1/2 are listed as subsumed by scm-eqp1/2 + prp-spo1: that only holds
+/// when prp-spo1 sees the sub-property axioms scm-eqp derived.
+#[test]
+fn equivalent_property_propagates_both_ways() {
+    let s = store_with(
+        "ex:p owl:equivalentProperty ex:q . \
+         ex:x ex:p ex:y . ex:u ex:q ex:v .",
+    );
+    materialize(&s);
+    assert!(ask_tg(&s, "ex:x ex:q ex:y ."), "prp-eqp1");
+    assert!(ask_tg(&s, "ex:u ex:p ex:v ."), "prp-eqp2");
+}
+
+#[test]
+fn range_applies_through_a_sub_property() {
+    let s = store_with(
+        "ex:hasMother rdfs:subPropertyOf ex:hasParent . \
+         ex:hasParent rdfs:range ex:Person . \
+         ex:sam ex:hasMother ex:ann .",
+    );
+    materialize(&s);
+    assert!(
+        ask_tg(&s, "ex:ann rdf:type ex:Person ."),
+        "prp-rng over the derived ex:sam ex:hasParent ex:ann (or scm-rng2's derived range)"
+    );
+}
+
+#[test]
+fn derived_membership_of_owl_nothing_is_inconsistent() {
+    let s = store_with(
+        "ex:Unicorn rdfs:subClassOf ex:Impossible . \
+         ex:Impossible rdfs:subClassOf owl:Nothing . \
+         ex:u rdf:type ex:Unicorn .",
+    );
+    assert_eq!(
+        inconsistent_rule(&s).as_deref(),
+        Some("cls-nothing2"),
+        "ex:u rdf:type owl:Nothing is derived by cax-sco, and cls-nothing2 must see it"
+    );
+}
+
+#[test]
+fn derived_same_as_against_different_from_is_inconsistent() {
+    let s = store_with(
+        "ex:hasBirthMother rdf:type owl:FunctionalProperty . \
+         ex:kim ex:hasBirthMother ex:m1 . ex:kim ex:hasBirthMother ex:m2 . \
+         ex:m1 owl:differentFrom ex:m2 .",
+    );
+    assert_eq!(
+        inconsistent_rule(&s).as_deref(),
+        Some("eq-diff1"),
+        "prp-fp derives ex:m1 owl:sameAs ex:m2, and eq-diff1 must see it"
+    );
+}
+
+/// A run that reaches its iteration limit before the fixed point is an error,
+/// not a silently partial graph.
+#[test]
+fn hitting_the_iteration_limit_is_an_error() {
+    let s = store_with(
+        "ex:partOf rdf:type owl:TransitiveProperty . \
+         ex:a ex:partOf ex:b . ex:b ex:partOf ex:c . ex:c ex:partOf ex:d . ex:d ex:partOf ex:e .",
+    );
+    match Owl2RLReasoner::new(&s).with_max_iterations(1).materialize() {
+        Err(ReasoningError::NotConverged { iterations, .. }) => assert_eq!(iterations, 1),
+        other => panic!("expected NotConverged, got {other:?}"),
+    }
+    // With room to finish, the same input converges.
+    let r = Owl2RLReasoner::new(&s).materialize().unwrap();
+    assert!(r.iterations > 1, "{r:?}");
+    assert!(ask_tg(&s, "ex:a ex:partOf ex:e ."));
 }

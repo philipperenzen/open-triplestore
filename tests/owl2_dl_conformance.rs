@@ -431,7 +431,7 @@ fn dl_negative_object_assertion_violated() {
     "#,
     );
     let result = Owl2DLReasoner::new(&store).materialize();
-    assert!(matches!(result, Err(ReasoningError::Inconsistency(_))));
+    assert!(matches!(result, Err(ReasoningError::Inconsistency { .. })));
 }
 
 #[test]
@@ -448,7 +448,7 @@ fn dl_negative_data_assertion_violated() {
     "#,
     );
     let result = Owl2DLReasoner::new(&store).materialize();
-    assert!(matches!(result, Err(ReasoningError::Inconsistency(_))));
+    assert!(matches!(result, Err(ReasoningError::Inconsistency { .. })));
 }
 
 #[test]
@@ -736,7 +736,7 @@ fn dl_rl_disjoint_inconsistency_fires() {
     "#,
     );
     let result = Owl2DLReasoner::new(&store).materialize();
-    assert!(matches!(result, Err(ReasoningError::Inconsistency(_))));
+    assert!(matches!(result, Err(ReasoningError::Inconsistency { .. })));
 }
 
 #[test]

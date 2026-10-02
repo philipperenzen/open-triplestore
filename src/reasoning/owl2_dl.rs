@@ -93,7 +93,8 @@ pub struct Owl2DLReasoner<'a> {
     store: &'a TripleStore,
     target_graph: String,
     /// When set, the rules read ONLY these graphs (plus the target graph).
-    /// Without it they read the unnamed default graph, as they always did.
+    /// Without it they read the unnamed default graph plus the target graph
+    /// (`TripleStore::update_over`), so rules see their own consequences.
     sources: Option<Vec<String>>,
     /// If `true`, inconsistency rules raise `ReasoningError::Inconsistency`.
     pub detect_inconsistency: bool,
@@ -103,9 +104,9 @@ pub struct Owl2DLReasoner<'a> {
 
 impl<'a> Owl2DLReasoner<'a> {
     /// Restrict the rules to `sources` (plus the target graph). Without a
-    /// scope the rules read the unnamed default graph only, so a dataset's
-    /// named graphs — and the model version it conforms to — were invisible to
-    /// materialisation; this is what `POST /api/reasoning/materialize` sets
+    /// scope the rules read the unnamed default graph and the target graph, so
+    /// a dataset's named graphs — and the model version it conforms to — are
+    /// invisible to materialisation; this is what `POST /api/reasoning/materialize` sets
     /// from `source_graphs` or the dataset's conformance layer.
     pub fn with_sources(mut self, sources: Vec<String>) -> Self {
         self.sources = Some(sources);
@@ -125,7 +126,9 @@ impl<'a> Owl2DLReasoner<'a> {
     fn run_update(&self, sparql: &str) -> Result<(), crate::store::engine::StoreError> {
         match self.scope() {
             Some(scope) => self.store.update_scoped(sparql, &scope),
-            None => self.store.update(sparql),
+            None => self
+                .store
+                .update_over(sparql, std::slice::from_ref(&self.target_graph)),
         }
     }
 
@@ -135,7 +138,9 @@ impl<'a> Owl2DLReasoner<'a> {
     ) -> Result<oxigraph::sparql::QueryResults<'static>, crate::store::engine::StoreError> {
         match self.scope() {
             Some(scope) => self.store.query_scoped(sparql, &scope),
-            None => self.store.query(sparql),
+            None => self
+                .store
+                .query_over(sparql, std::slice::from_ref(&self.target_graph)),
         }
     }
 
@@ -209,8 +214,14 @@ impl<'a> Owl2DLReasoner<'a> {
             self.rule_dl_cax_sco_tg()?;
 
             let after = count_graph(self.store, &self.target_graph)?;
-            if after == before || dl_iterations >= MAX_ITERATIONS {
+            if after == before {
                 break;
+            }
+            if dl_iterations >= MAX_ITERATIONS {
+                return Err(ReasoningError::NotConverged {
+                    regime: "owl2-dl".to_string(),
+                    iterations: rl_report.iterations + dl_iterations,
+                });
             }
         }
 
@@ -337,7 +348,8 @@ impl<'a> Owl2DLReasoner<'a> {
              }}"
         );
         match self.run_query(&q)? {
-            oxigraph::sparql::QueryResults::Boolean(true) => Err(ReasoningError::Inconsistency(
+            oxigraph::sparql::QueryResults::Boolean(true) => Err(ReasoningError::inconsistency(
+                "dl-negative-object-assertion",
                 "NegativeObjectPropertyAssertion violated: an asserted triple contradicts a \
                  declared owl:NegativePropertyAssertion"
                     .to_string(),
@@ -359,7 +371,8 @@ impl<'a> Owl2DLReasoner<'a> {
              }}"
         );
         match self.run_query(&q)? {
-            oxigraph::sparql::QueryResults::Boolean(true) => Err(ReasoningError::Inconsistency(
+            oxigraph::sparql::QueryResults::Boolean(true) => Err(ReasoningError::inconsistency(
+                "dl-negative-data-assertion",
                 "NegativeDataPropertyAssertion violated: an asserted triple contradicts a \
                  declared owl:NegativePropertyAssertion"
                     .to_string(),
@@ -642,10 +655,13 @@ impl ExternalReasonerBridge {
             // classified subsumption hierarchy and the complete inference set (loads
             // are idempotent where they overlap).
             if !self.reasoner.check_consistency(&ontology_ttl)? {
-                return Err(ReasoningError::Inconsistency(format!(
-                    "external reasoner {} reported the ontology inconsistent",
-                    self.reasoner.name()
-                )));
+                return Err(ReasoningError::inconsistency(
+                    "external-reasoner",
+                    format!(
+                        "external reasoner {} reported the ontology inconsistent",
+                        self.reasoner.name()
+                    ),
+                ));
             }
             for ttl in [
                 self.reasoner.classify(&ontology_ttl)?,
@@ -809,7 +825,7 @@ mod tests {
         "#,
         );
         let result = Owl2DLReasoner::new(&store).materialize();
-        assert!(matches!(result, Err(ReasoningError::Inconsistency(_))));
+        assert!(matches!(result, Err(ReasoningError::Inconsistency { .. })));
     }
 
     #[test]
@@ -826,6 +842,6 @@ mod tests {
         "#,
         );
         let result = Owl2DLReasoner::new(&store).materialize();
-        assert!(matches!(result, Err(ReasoningError::Inconsistency(_))));
+        assert!(matches!(result, Err(ReasoningError::Inconsistency { .. })));
     }
 }

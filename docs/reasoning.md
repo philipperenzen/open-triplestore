@@ -27,13 +27,40 @@ domain values, linksets, unclassified) plus the graphs of the model version it
 declares conformance to — and nothing else; `GET /api/datasets/:id/conformance`
 shows exactly that set. With `source_graphs`, the listed graphs (each must be
 readable by the caller); with `dataset` *and* `source_graphs`, both. With
-neither, the rules read the unnamed default graph only, as they historically
-did — which means a dataset's named graphs are invisible to an unscoped run,
-so pass `dataset` for anything loaded through the dataset APIs. The scope is
-applied at the store level (a `USING` dataset on every rule), so all regimes
-behave the same.
+neither, the rules read the unnamed default graph — which means a dataset's
+named graphs are invisible to an unscoped run, so pass `dataset` for anything
+loaded through the dataset APIs. In every case the rules also read the target
+graph, so a rule whose premises are both consequences (a third hop of a
+transitive property, a range reached through a sub-property, an `owl:sameAs`
+that `prp-fp` derived meeting an `owl:differentFrom`) fires. The scope is
+applied at the store level (the dataset of every rule), so all regimes behave
+the same.
 
-The response is a count of the inferred triples added. Query the current status of all entailment graphs via `GET /api/reasoning/status`.
+The response reports the run: `triples_added`, `iterations`, `elapsed_ms`,
+`target_graph`, `sources` (null: the unnamed default graph) and `consistent`
+— `true` when the regime checks consistency (`owl2-rl`, `owl2-dl`) and found
+nothing violated, `null` for a regime without inconsistency rules. Query the
+current status of all entailment graphs via `GET /api/reasoning/status`.
+
+**When the run fails.** An inconsistent ontology is a `422` naming the check
+that fired; the consequences derived before the check stay in the target
+graph:
+
+```json
+{
+  "error": "the ontology is inconsistent (cax-dw): owl:disjointWith violated",
+  "consistent": false,
+  "rule": "cax-dw",
+  "detail": "owl:disjointWith violated",
+  "regime": "owl2-rl",
+  "target_graph": "urn:entailment:owl2-rl"
+}
+```
+
+A run that does not reach its fixed point within 500 iterations is also a
+`422` (`"converged": false`, `iterations`): the target graph then holds only
+part of the closure, so it is reported, never returned as a success. The rules
+run on a blocking worker, off the server's async threads.
 
 For OWL 2 QL you can rewrite a query against the schema instead of materialising — `POST /api/reasoning/rewrite` returns the expanded SPARQL, computed from the schema in the graphs you may read. You can also fold an entailment graph into a single query by adding `?entailment=rdfs|owl2-rl|owl2-el|owl2-ql|owl2-dl` to a SPARQL request.
 
@@ -71,7 +98,12 @@ POST /sparql  (application/sparql-query with the same query parameters,
 ```
 
 `GET /api/datasets/<id>/entailment` reports the regime, mode, graph and the
-last run. The global `?entailment=<regime>` (the shared
+last run: `last_run_at`, `last_triples`, and `consistent` — `true` or `false`
+for a regime that checks consistency, `null` for one that does not or after a
+run that failed for another reason — with `inconsistency: {rule, detail}` when
+the last run found the dataset inconsistent. A `PUT` whose run finds an
+inconsistency (or does not converge) answers the same `422` as
+`POST /api/reasoning/materialize`; the setting is saved and the run recorded. The global `?entailment=<regime>` (the shared
 `urn:entailment:<regime>` graphs filled by `POST /api/reasoning/materialize`)
 keeps working unchanged.
 
