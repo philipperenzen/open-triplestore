@@ -379,6 +379,10 @@ struct Ctx<'a> {
     values: HashMap<Id, Value>,
     default_graphs: Vec<Id>,
     named_graphs: Vec<Id>,
+    /// A term reached an expression that [`Value`] cannot represent (a
+    /// literal with a base direction, a triple term). Its `EvalError` would
+    /// read as a SPARQL type error, so the whole query is declined instead.
+    declined: bool,
 }
 
 impl<'a> Ctx<'a> {
@@ -402,6 +406,7 @@ impl<'a> Ctx<'a> {
             values: HashMap::new(),
             default_graphs,
             named_graphs,
+            declined: false,
         })
     }
 
@@ -422,9 +427,17 @@ impl<'a> Ctx<'a> {
             return Ok(v.clone());
         }
         let term = self.term(id).ok_or(EvalError)?.clone();
-        let v = Value::from_term(&term).map_err(|_| EvalError)?;
+        let v = self.decode(&term)?;
         self.values.insert(id, v.clone());
         Ok(v)
+    }
+
+    /// Decode `term`, recording a decline when [`Value`] cannot carry it.
+    fn decode(&mut self, term: &Term) -> Result<Value, EvalError> {
+        Value::from_term(term).map_err(|_| {
+            self.declined = true;
+            EvalError
+        })
     }
 
     fn intern(&mut self, term: &Term) -> Id {
@@ -678,8 +691,8 @@ pub fn evaluate_semantics(idx: &Columnar, query: &Query) -> Result<Option<ParAns
                 Err(_) => return Ok(None),
             };
             let table = match eval(pattern, &mut ctx, &Scope::Default, None) {
-                Ok(t) => t,
-                Err(_) => return Ok(None),
+                Ok(t) if !ctx.declined => t,
+                _ => return Ok(None),
             };
             let rows: Vec<Vec<Option<Term>>> = table
                 .rows
@@ -704,8 +717,8 @@ pub fn evaluate_semantics(idx: &Columnar, query: &Query) -> Result<Option<ParAns
             };
             // An ASK is answered by the first solution; one row is enough.
             match eval(pattern, &mut ctx, &Scope::Default, Some(1)) {
-                Ok(t) => Ok(Some(ParAnswer::Boolean(!t.rows.is_empty()))),
-                Err(_) => Ok(None),
+                Ok(t) if !ctx.declined => Ok(Some(ParAnswer::Boolean(!t.rows.is_empty()))),
+                _ => Ok(None),
             }
         }
         Query::Construct {
@@ -719,8 +732,8 @@ pub fn evaluate_semantics(idx: &Columnar, query: &Query) -> Result<Option<ParAns
                 Err(_) => return Ok(None),
             };
             let table = match eval(pattern, &mut ctx, &Scope::Default, None) {
-                Ok(t) => t,
-                Err(_) => return Ok(None),
+                Ok(t) if !ctx.declined => t,
+                _ => return Ok(None),
             };
             let mut out: Vec<Triple> = Vec::new();
             let mut seen: HashSet<Triple> = HashSet::new();
@@ -1711,9 +1724,7 @@ fn eval_expr(
 ) -> Result<Value, EvalError> {
     match e {
         Expression::NamedNode(n) => Ok(Value::Iri(n.clone())),
-        Expression::Literal(l) => {
-            Value::from_term(&Term::Literal(l.clone())).map_err(|_| EvalError)
-        }
+        Expression::Literal(l) => ctx.decode(&Term::Literal(l.clone())),
         Expression::Variable(v) => {
             let c = vars.iter().position(|x| x == v).ok_or(EvalError)?;
             let id = row[c].ok_or(EvalError)?;
