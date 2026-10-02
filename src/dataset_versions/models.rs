@@ -42,6 +42,14 @@ pub struct DatasetVersion {
     /// Branch name; `None` is the default "main" line.
     #[serde(default)]
     pub branch: Option<String>,
+    /// The data model this version's instances were pinned to when it was cut
+    /// (the dataset's `conforms_to_model` / `conforms_to_version` at that moment),
+    /// so a published version keeps saying which model version it conformed to
+    /// after the dataset moves on to a newer one.
+    #[serde(default)]
+    pub conforms_to_model: Option<String>,
+    #[serde(default)]
+    pub conforms_to_version: Option<String>,
 }
 
 // ─── Request bodies ─────────────────────────────────────────────────────────
