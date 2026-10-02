@@ -84,7 +84,8 @@ plugin-hello    = ["dep:ots-plugin-hello"]
 ## Accounts dashboard: users/orgs/entitlements + merged LLM usage at /ext/accounts-dashboard
 plugin-accounts-dashboard = ["dep:ots-plugin-accounts-dashboard"]
 ## Datasource connectors (docs/sources.md "Dialects"): PostgreSQL (`postgresql`),
-## MySQL / MariaDB (`mysql`) and SQL Server (`mssql`). Off by default.
+## MySQL / MariaDB (`mysql`) and SQL Server (`mssql`). Off by default and not in
+## `full`, but the Dockerfile's default CARGO_FEATURES puts all three in the image.
 plugin-postgres = ["dep:ots-plugin-postgres"]
 plugin-mysql    = ["dep:ots-plugin-mysql"]
 plugin-mssql    = ["dep:ots-plugin-mssql"]

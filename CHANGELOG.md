@@ -631,6 +631,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   keep millimetre precision. Clients that read the POSITION accessor directly
   must apply the node translation. The tileset's bounding region is computed
   from per-feature bounding boxes, without triangulating.
+- **The Docker image ships the SQL connectors.** 0.7.0 announced PostgreSQL,
+  MySQL / MariaDB and SQL Server datasources, but the image built only
+  `--features full`, which leaves `plugin-postgres`, `plugin-mysql` and
+  `plugin-mssql` out, so the published image could register only `sqlite` and
+  `sparql` sources. The Dockerfile's `CARGO_FEATURES` now defaults to
+  `full,plugin-postgres,plugin-mysql,plugin-mssql`. The connectors are pure
+  Rust over rustls and need no new system package; the binary grows by about
+  4%. `full` and a plain `cargo build` are unchanged. A custom image that sets
+  `CARGO_FEATURES` replaces this list, so it must name the connectors it wants
+  (`CARGO_FEATURES=full` builds an image without them). The SQL Server driver
+  brings tiberius's rustls 0.21 stack into the image; `deny.toml` now says so
+  and keeps its three advisory ignores on reachability grounds.
+  `docs/build-features.md` lists the three features, `docs/sources.md` says
+  what the image carries, and GitHub CI's backend job compiles the main crate
+  with all three (it built only `plugin-postgres`, in the live-sources job).
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were
@@ -1309,6 +1324,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rate limit (60 a minute, burst 40, its own bucket), the store work runs on
   the blocking pool, and the tileset and GLB are cached per dataset, caller
   read scope and store write generation.
+- **Known advisories now in the image, through the SQL Server driver.** With
+  `plugin-mssql` in the image (see *Changed*), tiberius 0.12.3, the latest
+  release, brings rustls 0.21 and rustls-webpki 0.101 with it. Their
+  advisories RUSTSEC-2026-0098 and RUSTSEC-2026-0099 (name constraints) need a
+  misissuing name-constrained CA among the roots a SQL Server connection
+  trusts, and RUSTSEC-2026-0104 (a CRL parsing panic) needs CRL checking,
+  which tiberius never turns on; rustls-pemfile 1 is unmaintained
+  (RUSTSEC-2025-0134). Only SQL Server connections use this stack. An image
+  built with `CARGO_FEATURES=full,plugin-postgres,plugin-mysql` leaves it out.
 - **Every configured secret goes through the secrets module.** `JWT_SECRET`,
   `LD_REGISTRY_TOKEN`, a replication follower's `OTS_REPLICATION_TOKEN` and the
   accounts-dashboard plugin's `ACCOUNTS_DASHBOARD_GATEWAY_KEY` were read as raw

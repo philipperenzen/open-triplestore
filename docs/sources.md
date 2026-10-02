@@ -124,9 +124,17 @@ carries the drivers its operator asked for and no others.
 | `mssql` | `plugin-mssql` | the account is checked at connect: `sysadmin`, `db_owner`, `db_datawriter` or `db_ddladmin` is refused; only a query the driver can wrap as a derived table runs | the driver bounds every statement and every wait for a next row; `SET LOCK_TIMEOUT` | rustls over the platform's roots; `options.sslrootcert` replaces them with one CA certificate (a `.pem`, `.crt` or `.der` file holding exactly one) |
 | `sparql` (virtual; Ontop or any endpoint) | core | a SPARQL endpoint has no write path | the remote timeout (`OTS_REMOTE_TIMEOUT_SECS`) | `tls` picks `https`; the endpoint must be on `OTS_REMOTE_ALLOWLIST` |
 
+The published Docker image carries all three connectors. A build from source
+carries them only when asked, since `full` leaves them out:
+
 ```bash
 cargo build --features full,plugin-postgres,plugin-mysql,plugin-mssql
 ```
+
+An image without them, or with only some, sets the Dockerfile's
+`CARGO_FEATURES` build argument (for example
+`docker build --build-arg CARGO_FEATURES=full,plugin-postgres .`); see
+[build features](build-features.md).
 
 The three networked drivers share one catalogue and one profiler
 ([`plugins/api/src/sources/catalogue.rs`](../plugins/api/src/sources/catalogue.rs)):

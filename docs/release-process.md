@@ -179,7 +179,7 @@ and are mirrored in [`.gitlab-ci.yml`](../.gitlab-ci.yml). For each release tag,
 
 - **`release.yml`** — extracts the `## [X.Y.Z]` section from `CHANGELOG.md`,
   publishes a **GitHub Release** with those notes, then builds the 3-stage Dockerfile
-  (already `--features full`) and pushes a **GHCR image** tagged
+  (`full` plus the SQL connectors) and pushes a **GHCR image** tagged
   `ghcr.io/philipperenzen/open-triplestore:{X.Y.Z, X.Y, latest}`. A tag with a hyphen
   is published as a pre-release. Only the newest version becomes the latest GitHub
   Release and gets the image's `latest` tag, so a patch on an older line leaves both
@@ -259,7 +259,8 @@ docker pull ghcr.io/philipperenzen/open-triplestore:0.2.1
 docker pull ghcr.io/philipperenzen/open-triplestore:0.2
 ```
 
-The image is built with `--features full`. Run it the same way as a locally-built
+The image is built with `--features full,plugin-postgres,plugin-mysql,plugin-mssql`
+(see [build features](build-features.md)). Run it the same way as a locally-built
 image — see [`../README.md`](../README.md#quick-start) for ports, volumes, and the
 required `JWT_SECRET`.
 

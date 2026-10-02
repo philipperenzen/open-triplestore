@@ -71,21 +71,24 @@ jobs:
       # (plugins/api / plugins/hello, src/plugins.rs) — is exercised on every CI run,
       # same as any other optional capability. The plugin crates ALSO build/test
       # standalone at their own default features in the "Plugin crates" job below.
+      # The three SQL connector plugins ride along too: their registration in
+      # src/plugins.rs compiles only when the main crate is built with them, and
+      # the live-sources job builds just `plugin-postgres`.
       # `--workspace` is load-bearing: without it cargo selects only the root
       # package, so the `opengraph` member was never linted or test-compiled. Its
       # test module had been broken (a stale oxigraph `on_store` signature) for
       # long enough that all 59 of its tests silently never ran.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard -- -D warnings
+        run: cargo clippy --workspace --all-targets --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard,plugin-postgres,plugin-mysql,plugin-mssql -- -D warnings
 
       - name: Build
-        run: cargo build --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked
+        run: cargo build --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard,plugin-postgres,plugin-mysql,plugin-mssql --locked
 
       # The Docker builder stage writes the crates' licence notices with this
-      # generator; run it here too so a change that breaks it fails a PR, not
-      # the next image release.
+      # generator; run it here too, with the image's default CARGO_FEATURES, so
+      # a change that breaks it fails a PR, not the next image release.
       - name: Third-party licence notices (server)
-        run: python3 scripts/gen_rust_third_party_licenses.py --features full --output "$RUNNER_TEMP/THIRD-PARTY-LICENSES-server.txt"
+        run: python3 scripts/gen_rust_third_party_licenses.py --features full,plugin-postgres,plugin-mysql,plugin-mssql --output "$RUNNER_TEMP/THIRD-PARTY-LICENSES-server.txt"
 
       # No test is ignored (scripts/no-ignored-tests.sh says why): the source
       # scan catches an `#[ignore]` behind a cfg_attr for another platform,
@@ -97,7 +100,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo test --workspace --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked 2>&1 | tee test.log
+          cargo test --workspace --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard,plugin-postgres,plugin-mysql,plugin-mssql --locked 2>&1 | tee test.log
           if grep -E 'test result: .* [1-9][0-9]* ignored' test.log; then
             echo "::error::Some tests were ignored — fix or delete them (scripts/no-ignored-tests.sh)."
             exit 1
@@ -124,7 +127,7 @@ jobs:
           set -o pipefail
           count_passed() { printf '%s\n' "$1" | grep -oE '[0-9]+ passed' | awk '{s+=$1} END{print s+0}'; }
 
-          files_out=$(cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked --test 'security_*' 2>&1)
+          files_out=$(cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard,plugin-postgres,plugin-mysql,plugin-mssql --locked --test 'security_*' 2>&1)
           echo "$files_out"
           files_passed=$(count_passed "$files_out")
           echo "==> tests/security_*.rs passed: $files_passed"
@@ -133,7 +136,7 @@ jobs:
             exit 1
           fi
 
-          named_out=$(cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked security 2>&1)
+          named_out=$(cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard,plugin-postgres,plugin-mysql,plugin-mssql --locked security 2>&1)
           echo "$named_out"
           named_passed=$(count_passed "$named_out")
           echo "==> security-named tests passed across all binaries: $named_passed"
