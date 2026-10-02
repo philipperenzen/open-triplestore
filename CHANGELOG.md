@@ -67,6 +67,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asks for, and re-pins; the store now tells everyone which datasets that applies to.
 
 ### Changed
+- **Federation: `SERVICE ?var`, per-query limits, and the W3C federation tests.**
+  An endpoint named by a variable that the pattern before the `SERVICE` binds —
+  `?d void:sparqlEndpoint ?ep . SERVICE ?ep { … }` — used to fail with "the
+  variable encoding the service name is unbound"; it is now evaluated as a
+  lateral join, once per row, with that row's endpoint (SPARQL 1.1 Federated
+  Query §4; `OPTIONAL { SERVICE ?ep { … } }` likewise). The endpoint still has
+  to pass the allowlist, and a `urn:source:<id>` value is resolved for the
+  caller exactly like a written-out `SERVICE <urn:source:id>`. The calls of one
+  query now share a budget: an answer for the same endpoint and pattern is
+  fetched once and reused; a query may contact `OTS_SERVICE_MAX_ENDPOINTS`
+  endpoints (default 16) with `OTS_SERVICE_MAX_CALLS` requests (default 64),
+  and over either cap the call fails like any other (an error, or the empty
+  solution under `SILENT`); and its `SERVICE` calls must finish within
+  `OTS_SERVICE_DEADLINE_SECS` (default 30) of its start, after which the query
+  fails, `SILENT` or not — before, nothing stopped a query that kept calling
+  remotes after its HTTP request had timed out. A query containing `SERVICE`
+  is evaluated against the store itself, never by the in-memory copies. The
+  `service/` and `syntax-fed/` sections of the W3C SPARQL 1.1 test suite are
+  vendored unmodified and run against local endpoints
+  (`tests/w3c_sparql11_federation.rs`, unscored), and `docs/standards.md` now
+  grades SPARQL 1.1 Federated Query **Full — deny-by-default** (was Partial).
+  See docs/federation.md.
 - **A `SERVICE` result over a cap fails instead of being truncated.** A remote
   result with more than `OTS_SERVICE_MAX_ROWS` rows used to be cut to the cap
   and joined as if it were the whole answer, which silently changed the result

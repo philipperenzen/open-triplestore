@@ -784,6 +784,16 @@ impl TripleStore {
     }
 
     pub(crate) fn query_options(&self) -> SparqlEvaluator {
+        self.query_options_with_budget().0
+    }
+
+    /// [`Self::query_options`], also returning the budget its `SERVICE` calls
+    /// share — whose token the caller may attach to cancel the query at the
+    /// federation deadline (see [`Self::query_federated`]).
+    fn query_options_with_budget(
+        &self,
+    ) -> (SparqlEvaluator, Arc<crate::sparql::federation::QueryBudget>) {
+        let budget = Arc::new(crate::sparql::federation::QueryBudget::default());
         // SPARQL federation (`SERVICE`) stays disabled: oxigraph is built without the
         // `http-client` feature, so there is no HTTP service handler and `SERVICE`/`LOAD`
         // error rather than fetch — SERVICE-based SSRF/exfiltration stays off. (SSRF-1)
@@ -796,6 +806,7 @@ impl TripleStore {
             crate::sparql::federation::AllowlistedServiceHandler {
                 identity: crate::federation::current_identity(),
                 source_caller: crate::sources::virtual_source::current_caller(),
+                budget: Arc::clone(&budget),
             },
         );
 
@@ -838,7 +849,7 @@ impl TripleStore {
             opts = opts.with_custom_function(iri.clone(), move |args| handler(args));
         }
 
-        opts
+        (opts, budget)
     }
 
     /// Execute a SPARQL query (SELECT, CONSTRUCT, ASK, DESCRIBE).
@@ -914,6 +925,12 @@ impl TripleStore {
         if let Some(fast) = self.try_fast_count(sparql) {
             return Ok((fast, Served::FastCount));
         }
+        // A federated query (`SERVICE`) is evaluated here, against the store,
+        // never by the copies below: its time goes to the remotes, and this
+        // path applies the `SERVICE ?var` rewrite and the deadline.
+        if let Some(federated) = self.query_federated(sparql)? {
+            return Ok((federated, Served::Engine));
+        }
         // Multi-core path: a decomposable aggregate / `ASK` is evaluated across
         // subject-hash shards (the in-memory mirror) and merged, using every core
         // instead of one. Returns `None` — falling through to the single-store
@@ -952,6 +969,41 @@ impl TripleStore {
             .on_store(&self.store)
             .execute()?;
         Ok((results, Served::Engine))
+    }
+
+    /// Evaluate a query that contains a `SERVICE`, or `None` when it has
+    /// none (the substring gate is the same as the result cache's; a false
+    /// positive costs one parse). The query is parsed once; `SERVICE ?var`
+    /// becomes a lateral join (`opengraph::service_var`) so the endpoint is
+    /// bound when the call is made; and the evaluator carries the budget's
+    /// cancellation token, so the query fails once its SERVICE calls pass the
+    /// federation deadline (`OTS_SERVICE_DEADLINE_SECS`), `SILENT` or not.
+    fn query_federated(&self, sparql: &str) -> Result<Option<QueryResults<'static>>, StoreError> {
+        const NEEDLE: &[u8] = b"service";
+        if !sparql
+            .as_bytes()
+            .windows(NEEDLE.len())
+            .any(|w| w.eq_ignore_ascii_case(NEEDLE))
+        {
+            return Ok(None);
+        }
+        let mut parsed = crate::sparql::parser().parse_query(sparql)?;
+        if !opengraph::service_var::has_service(&parsed) {
+            return Ok(None);
+        }
+        if opengraph::service_var::mentions_service_variable(sparql) {
+            opengraph::service_var::rewrite_service_var(&mut parsed);
+        }
+        let (opts, budget) = self.query_options_with_budget();
+        let results = opts
+            .with_cancellation_token(budget.token().clone())
+            .for_query(parsed)
+            .on_store(&self.store)
+            .execute()?;
+        if matches!(results, QueryResults::Boolean(_)) && budget.cancelled() {
+            return Err(budget.deadline_error().into());
+        }
+        Ok(Some(budget.guard(results)))
     }
 
     /// Recognise `SELECT (COUNT(*) AS ?v) WHERE { ?s ?p ?o }` (optionally with a
