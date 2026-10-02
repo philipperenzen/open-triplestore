@@ -252,11 +252,11 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 | **ShEx** | ✅⁸ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
 | **SWRL** | ✅⁹ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
 
-> ⁵ Full RDFS entailment (all 13 rules rdfs1–rdfs13) via `rdfs-entailment` feature flag.
->   See [`docs/rdfs-entailment.md`](rdfs-entailment.md).
-> ⁶ OWL 2 EL (CR1–CR10 + hasKey + reflexivity) and OWL 2 RL (~80 forward-chaining rules
->   including maxCardinality, qualified cardinality, AllDisjointClasses, property chains, and
->   hasKey) via feature flags (`owl2-el`, `owl2-rl`). OWL 2 QL (`owl2-ql`), the whole profile:
+> ⁵ RDFS entailment (RDF 1.1 Semantics: `rdfD2`, `rdfs1`–`rdfs13` and the axiomatic triples, in
+>   one fixed point; the infinite `rdf:_n` axioms bounded by the data, decision D11) via the
+>   `rdfs-entailment` feature flag. See [`docs/rdfs-entailment.md`](rdfs-entailment.md).
+> ⁶ OWL 2 EL (CR1–CR10 + hasKey + reflexivity) and OWL 2 RL (all 78 RL/RDF rules, the
+>   Table 8 datatype rules applied to data values; `eq-ref` opt-in, decision D2) via feature flags (`owl2-el`, `owl2-rl`). OWL 2 QL (`owl2-ql`), the whole profile:
 >   DL-Lite_R closure, ground materialisation, consistency checks (data ranges decided on values
 >   through the OWL 2 datatype map) and existential rewriting of query blank nodes.
 >   See [`docs/owl2-el.md`](owl2-el.md), [`docs/owl2-ql.md`](owl2-ql.md), [`docs/owl2-rl.md`](owl2-rl.md).
@@ -324,6 +324,11 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > Open Triplestore recounted again on 2026-10-02, 22 → 23: OWL 2 QL is graded Full in
 > `docs/standards.md` now that data ranges are checked on values (OWL 2 datatype map), and the
 > 4.2 cell follows. Section 11.1 follows too.
+
+> Open Triplestore checked again on 2026-10-03, no change (23): the RDFS and OWL 2 RL cells were
+> ✅ here while `docs/standards.md` graded RL Partial and RDFS lacked `rdfD2`, RDF 1.1 `rdfs1` and
+> the axiomatic triples. Both are now graded Full there (footnotes 13 and 14), so the cells hold;
+> section 11.1 now marks them ✅ too.
 
 ```
 Open Triplestore  ███████████████████████░░░░░░   23 / 29  (#1 open-source; GeoSPARQL, SHACL, SPARQL 1.2, RDF-star 🟡; W3C tests not claimed)
@@ -741,7 +746,7 @@ reduces GEOS calls by ~90%.
 | GraphDB | ✅ | ✅ | ✅ | ✅ | 🔒 | ✅ | ✅ | ❌ |
 | Stardog | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Virtuoso | ✅ | 🟡 | ✅ | ✅ | ❌ | 🟡 | ❌ | ❌ |
-| **Open Triplestore** | 🟡 | 🟡 | ✅ | 🟡 | ❌ | 🟡 | ✅ | ✅ |
+| **Open Triplestore** | ✅ | 🟡 | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ |
 | Jena 5 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | 🟡 | ❌ | ❌ |
 | RDF4J 5 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ✅ | ❌ | ❌ |
 | Blazegraph | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ❌ | ❌ |
