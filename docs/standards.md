@@ -27,7 +27,7 @@ claims, and nothing here is OGC-certified:
 | GeoSPARQL 1.1 | Spatial RDF, relation/metric functions | Partial⁵ |
 | SHACL Core | Structural constraint validation | Partial⁶ |
 | SHACL Advanced (AF / SPARQL) | SPARQL constraints, rules, targets | Partial⁷ |
-| SHACL-C | Compact-syntax parser/serializer | Partial⁸ |
+| SHACL-C | Compact-syntax parser/serializer (W3C CG report) | Full⁸ |
 | OPM (Ontology for Property Management) | Property states with history | Partial — `opm:Property` / `opm:PropertyState` / current-outdated / reliability classes via the property-state API; no `opm:Calculation` or derived-property inference. See [datasets.md](datasets.md#time-evolving-properties-opm-profile). |
 | buildingSMART IDS 1.0 | Information Delivery Specification → SHACL | Partial — entity, property, attribute, partOf facets with value restrictions and cardinality; classification and material facets target `props:ifcClassification` / `props:ifcMaterial`, which the IFC lift emits; predefinedType by convention only; dataset-level existence not enforced. See [shacl.md](shacl.md#importing-constraint-specifications-ids). Round-trips: export back to IDS 1.0 covers the shared subset, and anything outside the IDS facet model is reported as a loss. |
 | ISO 21597-1 ICDD | Information container for linked document delivery | Partial — Part 1 containers import (documents, linksets, payload triples, ontology resources, index) and export (RDF/XML index); Part 2 not interpreted. See [containers.md](containers.md). |
@@ -47,12 +47,13 @@ Conformance and high-complexity stress tests live in `tests/`. Each suite encode
 expected results taken from the specification text; intentional non-conformances
 are encoded as documented, flip-when-fixed tests. Two things the table makes
 explicit: only the **vendored** rows run a published test corpus (the W3C SPARQL
-1.1 query and update manifests, the W3C SHACL core and sparql manifests and the OGC
-GeoSPARQL validator shapes) — every other suite is hand-written and *derived
+1.1 query and update manifests, the W3C SHACL core and sparql manifests, the SHACL
+Compact Syntax Community Group test cases and the OGC GeoSPARQL validator shapes) — every other suite is hand-written and *derived
 from* its spec, not the W3C/OGC corpus — and the counts are generated from the
 suites themselves, so they cannot drift from the code. Results on the vendored
 SHACL and GeoSPARQL corpora are in [conformance/shacl.md](conformance/shacl.md)
-and [conformance/geosparql.md](conformance/geosparql.md).
+and [conformance/geosparql.md](conformance/geosparql.md); the SHACL-C cases'
+provenance and licence are in `tests/fixtures/w3c-shaclc/PROVENANCE.md`.
 [conformance/sparql11.md](conformance/sparql11.md) describes the SPARQL run and
 tracks its known gaps; it publishes no score, because the vendored SPARQL
 sections are a subset of a W3C test suite and W3C's test-suite licence policy
@@ -76,7 +77,7 @@ allows no performance claims on a subset.
 | RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 19 |  |
 | SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 23 |  |
 | SHACL-AF rules | `tests/shacl_rules_conformance.rs` | spec-derived | 20 |  |
-| SHACL Compact Syntax | `tests/shaclc_conformance.rs` | spec-derived | 11 |  |
+| SHACL Compact Syntax | `tests/shaclc_conformance.rs` | spec-derived | 16 |  |
 | ShEx | `tests/shex_conformance.rs` | spec-derived | 10 |  |
 | SPARQL 1.2 / RDF-star | `tests/sparql12_conformance.rs` | spec-derived | 14 |  |
 | SP2B / BSBM query shapes | `tests/sparql_benchmarks.rs` | benchmark-derived | 28 |  |
@@ -85,10 +86,11 @@ allows no performance claims on a subset.
 | Cross-standard HTTP smoke | `tests/standards_conformance.rs` | spec-derived | 26 |  |
 | SWRL | `tests/swrl_conformance.rs` | spec-derived | 4 |  |
 | SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (core + sparql sections, manifest-driven) | 1 | 136 corpus cases: 119 pass, 2 known failures, 15 runner-side skips (floor ≥90 asserted) |
+| SHACL Compact Syntax | `tests/w3c_shaclc_conformance.rs` | **vendored W3C CG test cases** (SHACL-C report, line endings normalised; parse + round trip) | 2 | 32 corpus cases: 32 pass, 0 known failures, 0 runner-side skips (floor ≥32 asserted) |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 125 |  |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 
-752 conformance tests across 26 suites; a further 712 tests in 104 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 3 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. The SHACL and GeoSPARQL corpus results are development and regression results on the vendored sections (`docs/conformance/`), not W3C or OGC conformance claims. The SPARQL 1.1 sections are a subset of a W3C test suite, so under W3C's test-suite licence policy they are used for development and bug tracking only, and no score is published for them.
+759 conformance tests across 27 suites; a further 712 tests in 104 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 4 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. The SHACL, SHACL-C and GeoSPARQL corpus results are development and regression results on the vendored sections (`docs/conformance/`), not W3C or OGC conformance claims. The SPARQL 1.1 sections are a subset of a W3C test suite, so under W3C's test-suite licence policy they are used for development and bug tracking only, and no score is published for them.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->
@@ -162,9 +164,21 @@ behavior and will flip green when the limitation is resolved.
    constraints, and rule `sh:condition` / `sh:order`. The W3C corpus score
    compares `sh:conforms` and the focus-node multiset, not result component
    IRIs, paths or values.
-8. **SHACL-C** is a pragmatic subset: `[min..max]` counts, `closed`, and `// "msg"`
-   messages. The parser rejects unrecognized trailing input (it used to discard it
-   silently, which could empty a shape graph on upload with a 200).
+8. **SHACL-C** — graded against the SHACL Community Group report
+   [SHACL Compact Syntax](https://w3c.github.io/shacl/shacl-compact-syntax/)
+   (not the SHACL 1.2 Compact Syntax draft). The parser implements the report's
+   whole grammar and production rules and builds the RDF graph directly; all 32
+   of the report's test cases (vendored under `tests/fixtures/w3c-shaclc/`, W3C
+   Software and Document License) parse to the expected graph, and the
+   serializer writes each expected graph back and parses it again to the same
+   graph (`tests/w3c_shaclc_conformance.rs`, two-way ratchet). The serializer is
+   lossless or loud: a shapes graph with triples the compact syntax cannot
+   express is a `422` listing them (`?lossy=true` for the partial document).
+   The proprietary dialect of 0.7 and earlier is accepted for one release behind
+   `?dialect=legacy` (deprecated, logged); see
+   [shacl.md](shacl.md#migrating-from-the-legacy-dialect). Updated 2026-10-03
+   (was Partial: a different dialect, and a serializer that dropped most
+   constraints silently).
 9. **RML / R2RML** — CSV/JSON/XML *file* sources with template/reference/constant
    term maps, datatype and language tags, `rr:class`, and inline blank-node term
    maps. **Not implemented:** SQL logical tables (`rr:logicalTable`,

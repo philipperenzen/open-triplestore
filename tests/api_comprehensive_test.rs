@@ -1944,7 +1944,7 @@ ex:PersonShape a sh:NodeShape ;
 BASE <http://example.org/>
 PREFIX sh: <http://www.w3.org/ns/shacl#>
 shape <PersonShape> -> <Person> {
-    <name> minCount 1 ;
+    <name> [1..*] .
 }
 "#;
         // The parser is authenticated compute now, so an anonymous request would

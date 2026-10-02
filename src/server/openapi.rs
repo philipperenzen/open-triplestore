@@ -1571,11 +1571,13 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Validation",
                     "Get shapes graph",
-                    "The dataset's SHACL shapes graph in Turtle. A shapes graph some dataset holds as private is served only to those who may read it (the `/sparql` rule: its dataset's writers, graph-ACL read grants, admins).",
-                    vec![],
+                    "The dataset's SHACL shapes graph in Turtle, or with `?format=shaclc` / `Accept: text/shaclc` in the W3C SHACL Compact Syntax: lossless, or a 422 whose `losses` list names every triple (subject, predicate, object, reason) the syntax cannot carry. A shapes graph some dataset holds as private is served only to those who may read it (the `/sparql` rule: its dataset's writers, graph-ACL read grants, admins).",
+                    vec![qp("format", false, "`shaclc` for SHACL Compact Syntax; otherwise Turtle"), qp("lossy", false, "With SHACL-C: `true` returns the partial document (200, `X-SHACLC-Losses` count, losses named in a leading comment) instead of a 422.")],
                     vec![
-                        ("200", "Shapes graph (text/turtle)"),
+                        ("200", "Shapes graph (text/turtle or text/shaclc)"),
+                        ("400", "SHACL-C requested for a dataset that resolves to several shapes graphs"),
                         ("401", "Authentication required"),
+                        ("422", "SHACL-C cannot express the whole graph (`losses` listed)"),
                         ("404", "No shapes graph, or none the caller may read"),
                     ],
                     true,
@@ -1586,12 +1588,8 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Validation",
                     "Upload shapes graph",
-                    "Replace the dataset's SHACL shapes graph (Turtle, or SHACL-C with Content-Type: text/shaclc). SHACL-C is parsed strictly: unrecognised input is a 400 naming its position and nothing is stored. A shapes graph the dataset only links (set with `PUT /shacl`, outside its namespace and not registered to it) is written only when it holds no data yet or the caller may write it directly; it is then registered to the dataset with the shapes role (an admin's write too), so the dataset's editors write it from then on. A SHACL Studio Library graph is written by those who may edit its Library entry.",
-                    vec![qp(
-                        "lenient",
-                        false,
-                        "SHACL-C only: `true` or `1` ignores unrecognised input instead of failing on it (default: strict).",
-                    )],
+                    "Replace the dataset's SHACL shapes graph (Turtle, or the W3C SHACL Compact Syntax with Content-Type: text/shaclc). SHACL-C is parsed strictly: input the grammar does not allow is a 400 naming its position and nothing is stored. A shapes graph the dataset only links (set with `PUT /shacl`, outside its namespace and not registered to it) is written only when it holds no data yet or the caller may write it directly; it is then registered to the dataset with the shapes role (an admin's write too), so the dataset's editors write it from then on. A SHACL Studio Library graph is written by those who may edit its Library entry.",
+                    vec![qp("dialect", false, "SHACL-C grammar: `w3c` (default, the W3C SHACL Compact Syntax) or `legacy` (the dialect of 0.7 and earlier; deprecated, logged, accepted for one more release)."), qp("lenient", false, "With `dialect=legacy` only: `true` or `1` ignores unrecognised input instead of failing on it. Refused (400) for the W3C grammar, which is always strict.")],
                     vec![
                         ("204", "Shapes graph updated"),
                         ("400", "SHACL-C parse error (position named)"),
@@ -1771,11 +1769,11 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             vec![], vec![("204", "Deleted"), ("403", "Not manageable"), ("404", "Not found")], true)),
     ]);
     mount(paths, "/api/shacl/shape-graphs/:id/turtle", vec![
-        (M::Get, o("Validation", "Read a shape graph's content", "The shapes as Turtle, with an `@prefix` header built from the prefix registry for the namespaces the graph actually uses. `?format=shaclc` (or `Accept: text/shaclc`) serialises to SHACL Compact Syntax instead.",
-            vec![qp("format", false, "`shaclc` for SHACL Compact Syntax; otherwise Turtle")],
-            vec![("200", "Turtle (`text/turtle`) or SHACL-C (`text/shaclc`)"), ("403", "Not readable"), ("404", "Not found")], true)),
-        (M::Put, o("Validation", "Replace a shape graph's content", "Body is the whole document: Turtle, or SHACL Compact Syntax with `Content-Type: text/shaclc` (parsed strictly before anything is stored). Writes a new revision and a Shapes commit. Managing the entry is not enough for a graph the Studio did not mint: the caller must be able to change that graph — an admin, write access to a dataset holding it (its namespace or registered to it), write access to the registry entry holding it, or a graph-ACL write grant. Restore and import-shapes follow the same rule.",
-            vec![qp("message", false, "Revision note shown in the history (default `Edited`); trimmed, control characters removed, at most 200 characters")],
+        (M::Get, o("Validation", "Read a shape graph's content", "The shapes as Turtle, with an `@prefix` header built from the prefix registry for the namespaces the graph actually uses. `?format=shaclc` (or `Accept: text/shaclc`) serialises to the W3C SHACL Compact Syntax instead: lossless, or a 422 listing what the syntax cannot carry.",
+            vec![qp("format", false, "`shaclc` for SHACL Compact Syntax; otherwise Turtle"), qp("lossy", false, "With SHACL-C: `true` returns the partial document (200, `X-SHACLC-Losses` count, losses named in a leading comment) instead of a 422.")],
+            vec![("200", "Turtle (`text/turtle`) or SHACL-C (`text/shaclc`)"), ("403", "Not readable"), ("404", "Not found"), ("422", "SHACL-C cannot express the whole graph (`losses` listed)")], true)),
+        (M::Put, o("Validation", "Replace a shape graph's content", "Body is the whole document: Turtle, or the W3C SHACL Compact Syntax with `Content-Type: text/shaclc` (parsed strictly before anything is stored; `?dialect=legacy` for the deprecated 0.7 dialect). Writes a new revision and a Shapes commit. Managing the entry is not enough for a graph the Studio did not mint: the caller must be able to change that graph — an admin, write access to a dataset holding it (its namespace or registered to it), write access to the registry entry holding it, or a graph-ACL write grant. Restore and import-shapes follow the same rule.",
+            vec![qp("message", false, "Revision note shown in the history (default `Edited`); trimmed, control characters removed, at most 200 characters"), qp("dialect", false, "SHACL-C grammar: `w3c` (default) or `legacy` (deprecated 0.7 dialect)")],
             vec![("200", "`{version}` — the new revision number"), ("400", "Invalid UTF-8, Turtle or SHACL-C"), ("403", "Not manageable, or the caller may not change the graph"), ("404", "Not found")], true)),
     ]);
     mount(paths, "/api/shacl/shape-graphs/:id/revisions", vec![
@@ -2194,12 +2192,8 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "SHACL-C",
                 "Parse SHACL Compact Syntax",
-                "Parse SHACL-C text and return the equivalent SHACL RDF. Strict by default: unrecognised input is a 400 naming its line and column.",
-                vec![qp(
-                    "lenient",
-                    false,
-                    "`true` or `1` ignores unrecognised input instead of failing on it (default: strict).",
-                )],
+                "Parse W3C SHACL Compact Syntax (the SHACL Community Group report's grammar and production rules) and return the equivalent SHACL RDF. Strict: input the grammar does not allow is a 400 naming its line and column.",
+                vec![qp("dialect", false, "SHACL-C grammar: `w3c` (default, the W3C SHACL Compact Syntax) or `legacy` (the dialect of 0.7 and earlier; deprecated, logged, accepted for one more release)."), qp("lenient", false, "With `dialect=legacy` only: `true` or `1` ignores unrecognised input instead of failing on it. Refused (400) for the W3C grammar, which is always strict."), qp("base", false, "Initial base IRI (the report's optional base URI); a `BASE` directive replaces it. Without either, no `owl:Ontology` triple is produced and relative IRIs are an error.")],
                 vec![("200", "SHACL graph (text/turtle)"), ("400", "Parse error (position named)"), ("401", "Authentication required")],
                 true,
             ),
@@ -2213,9 +2207,9 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "SHACL-C",
                 "Serialize to SHACL Compact Syntax",
-                "Serialise a SHACL RDF graph into SHACL-C text.",
-                vec![],
-                vec![("200", "SHACL-C text"), ("400", "Unsupported shapes")],
+                "Serialise a stored shapes graph (body: its IRI, or `{\"shapesGraphIri\": …}`) into W3C SHACL-C text. Lossless or loud: a graph with triples the compact syntax cannot express is a 422 listing them.",
+                vec![qp("lossy", false, "With SHACL-C: `true` returns the partial document (200, `X-SHACLC-Losses` count, losses named in a leading comment) instead of a 422.")],
+                vec![("200", "SHACL-C text"), ("400", "Invalid body"), ("403", "No read access to that graph"), ("422", "SHACL-C cannot express the whole graph (`losses` listed)")],
                 false,
             ),
         )],

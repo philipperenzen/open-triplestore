@@ -103,8 +103,8 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
   SHACL and the W3C SPARQL tests; elsewhere a ✅ marks *feature presence*, and
   `docs/standards.md` grades several of those rows **Partial**: SPARQL 1.1 federation (off by
   default, per-endpoint allowlist), OWL 2 EL, RL and DL (DL runs RL+extension rules in
-  process, with a full tableau only via the optional Konclude bridge), SHACL Advanced and
-  SHACL-C, ShEx, SWRL, RML and DCAT. GeoSPARQL 1.1 lacks KML/DGGS literals and the Query
+  process, with a full tableau only via the optional Konclude bridge), SHACL Advanced,
+  ShEx, SWRL, RML and DCAT (SHACL-C, Full since 2026-10-03, has no matrix row). GeoSPARQL 1.1 lacks KML/DGGS literals and the Query
   Rewrite Extension (it has the geodesic `metric*` family, `aggUnion` and WKT/GML/GeoJSON
   literals). SPARQL 1.2 /
   RDF 1.2 follows the RDF 1.2 triple-term model in object position only.

@@ -81,7 +81,7 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | **Dataset privacy** | Datasets default to `private`; public datasets are queryable without auth |
 | **SHACL validation** | Validate data on read or write; SHACL-AF rule inference; shapes stored per dataset |
 | **SHACL on write** | Automatic SHACL validation on every Graph Store PUT/POST — returns 422 with full report on violation |
-| **SHACL Compact Syntax** | Parse and serialize shapes in [SHACLC](https://w3c.github.io/shacl/shacl-compact-syntax/) via `Accept: text/shaclc` |
+| **SHACL Compact Syntax** | Parse and serialize shapes in the W3C [SHACL Compact Syntax](https://w3c.github.io/shacl/shacl-compact-syntax/) (CG report grammar, its test cases vendored and passing) via `Content-Type`/`Accept: text/shaclc`; serialization is lossless or a `422` listing what the syntax cannot carry |
 | **DCAT 2 catalog** | Full W3C DCAT 2 catalog at `/.well-known/void` — per-dataset distributions, VoID statistics, PROV-O provenance |
 | **RML mapping** | [RDF Mapping Language](https://rml.io/specs/rml/) — CSV, JSON (JSONPath), XML (XPath) → RDF with template expansion |
 | **OpenAPI docs** | Interactive Swagger UI at `/api-docs/` with JWT Bearer auth; machine-readable spec at `/api-docs/openapi.json` |
@@ -595,11 +595,11 @@ SELECT ?feature WHERE {
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/datasets/:id/validate` | Validate dataset against shapes graph |
-| `GET` | `/api/datasets/:id/shapes` | Get shapes graph (Turtle or `?format=shaclc`) |
+| `GET` | `/api/datasets/:id/shapes` | Get shapes graph (Turtle or `?format=shaclc`; 422 with `losses` when SHACL-C cannot carry it) |
 | `PUT` | `/api/datasets/:id/shapes` | Upload shapes graph (Turtle or `Content-Type: text/shaclc`) |
 | `POST` | `/api/datasets/:id/infer` | Run SHACL-AF inference, materialize triples |
-| `POST` | `/api/shaclc/parse` | Convert SHACLC → Turtle (stateless) |
-| `POST` | `/api/shaclc/serialize` | Convert shapes graph → SHACLC (body: IRI or JSON) |
+| `POST` | `/api/shaclc/parse` | Convert W3C SHACL-C → Turtle (stateless; `?dialect=legacy` deprecated) |
+| `POST` | `/api/shaclc/serialize` | Convert shapes graph → SHACL-C (body: IRI or JSON; lossless or 422) |
 
 ### RML Mapping
 
@@ -671,24 +671,32 @@ curl -X PUT http://localhost:7878/api/datasets/<dataset_id> \
 
 ### SHACL Compact Syntax (SHACLC)
 
-Retrieve shapes in compact syntax:
+The W3C SHACL Compact Syntax of the SHACL Community Group report. Retrieve
+shapes in compact syntax — a `422` with a `losses` list when the shapes use
+something the syntax cannot express (`?lossy=true` for the partial document):
 
 ```bash
-curl http://localhost:7878/api/datasets/<dataset_id>/shapes?format=shaclc \
+curl 'http://localhost:7878/api/datasets/<dataset_id>/shapes?format=shaclc' \
      -H 'Authorization: Bearer <token>'
 # or: Accept: text/shaclc
 ```
+
+The 0.7 dialect is still parsed for one release with `?dialect=legacy`
+(deprecated); [docs/shacl.md](docs/shacl.md#migrating-from-the-legacy-dialect)
+shows how to migrate.
 
 Standalone conversion endpoints:
 
 ```bash
 # SHACLC → Turtle
 curl -X POST http://localhost:7878/api/shaclc/parse \
+     -H 'Authorization: Bearer <token>' \
      -H 'Content-Type: text/shaclc' \
      --data-binary @shapes.shaclc
 
 # Shapes graph IRI → SHACLC
 curl -X POST http://localhost:7878/api/shaclc/serialize \
+     -H 'Authorization: Bearer <token>' \
      -H 'Content-Type: application/json' \
      -d '{"shapesGraphIri": "urn:dataset:my-dataset:shapes"}'
 ```
@@ -835,7 +843,7 @@ open-triplestore
 │   │   ├── openapi.rs  OpenAPI spec at /api-docs/openapi.json (the UI is a frontend page)
 │   │   └── linked_data.rs  /.well-known/void (DCAT 2), /resource/* (dereference)
 │   ├── shacl/          SHACL validation engine, SHACL-AF inference, reports
-│   ├── shaclc/         SHACL Compact Syntax parser (SHACLC → Turtle) and serializer
+│   ├── shaclc/         W3C SHACL Compact Syntax parser and lossless-or-422 serializer (+ deprecated legacy dialect)
 │   ├── dcat/           DCAT 2 catalog generator (VoID stats, distributions, PROV-O)
 │   ├── rml/            RDF Mapping Language executor
 │   │   └── sources/    CSV, JSON (JSONPath), XML (XPath) source adapters
@@ -884,7 +892,7 @@ licence policy allows no performance claims on a subset.
 | RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 19 |  |
 | SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 23 |  |
 | SHACL-AF rules | `tests/shacl_rules_conformance.rs` | spec-derived | 20 |  |
-| SHACL Compact Syntax | `tests/shaclc_conformance.rs` | spec-derived | 11 |  |
+| SHACL Compact Syntax | `tests/shaclc_conformance.rs` | spec-derived | 16 |  |
 | ShEx | `tests/shex_conformance.rs` | spec-derived | 10 |  |
 | SPARQL 1.2 / RDF-star | `tests/sparql12_conformance.rs` | spec-derived | 14 |  |
 | SP2B / BSBM query shapes | `tests/sparql_benchmarks.rs` | benchmark-derived | 28 |  |
@@ -893,10 +901,11 @@ licence policy allows no performance claims on a subset.
 | Cross-standard HTTP smoke | `tests/standards_conformance.rs` | spec-derived | 26 |  |
 | SWRL | `tests/swrl_conformance.rs` | spec-derived | 4 |  |
 | SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (core + sparql sections, manifest-driven) | 1 | 136 corpus cases: 119 pass, 2 known failures, 15 runner-side skips (floor ≥90 asserted) |
+| SHACL Compact Syntax | `tests/w3c_shaclc_conformance.rs` | **vendored W3C CG test cases** (SHACL-C report, line endings normalised; parse + round trip) | 2 | 32 corpus cases: 32 pass, 0 known failures, 0 runner-side skips (floor ≥32 asserted) |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 125 |  |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 
-752 conformance tests across 26 suites; a further 712 tests in 104 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 3 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. The SHACL and GeoSPARQL corpus results are development and regression results on the vendored sections (`docs/conformance/`), not W3C or OGC conformance claims. The SPARQL 1.1 sections are a subset of a W3C test suite, so under W3C's test-suite licence policy they are used for development and bug tracking only, and no score is published for them.
+759 conformance tests across 27 suites; a further 712 tests in 104 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 4 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. The SHACL, SHACL-C and GeoSPARQL corpus results are development and regression results on the vendored sections (`docs/conformance/`), not W3C or OGC conformance claims. The SPARQL 1.1 sections are a subset of a W3C test suite, so under W3C's test-suite licence policy they are used for development and bug tracking only, and no score is published for them.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->

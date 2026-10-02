@@ -87,8 +87,8 @@ Three facts worth knowing before an instance is exposed:
 | `GET` | `/api/shacl/detect-shapes` | **token** | SHACL studio: infer shapes from data. |
 | `GET` | `/api/shacl/dataset-shape-graphs` | **token** | The datasets that carry a shapes graph. |
 | `POST` | `/api/shacl/validation/latest` | **token** | The last validation run of several datasets at once. |
-| `POST` | `/api/shaclc/parse` | **token** | SHACLC → SHACL. Needs a token since 0.6.x: it spends the instance's CPU on caller-supplied text. |
-| `POST` | `/api/shaclc/serialize` | **token** | SHACL → SHACLC of a graph named by the caller. Needs a token since 0.6.x, and the caller must be allowed to read that graph: it reads whatever IRI it is given out of the store, so it was previously a way for anyone to read any graph. A graph you may not read answers `403`, whether or not it exists. |
+| `POST` | `/api/shaclc/parse` | **token** | W3C SHACL-C → SHACL (see below). Needs a token since 0.6.x: it spends the instance's CPU on caller-supplied text. |
+| `POST` | `/api/shaclc/serialize` | **token** | SHACL → SHACL-C of a graph named by the caller, lossless or `422` (see below). Needs a token since 0.6.x, and the caller must be allowed to read that graph: it reads whatever IRI it is given out of the store, so it was previously a way for anyone to read any graph. A graph you may not read answers `403`, whether or not it exists. |
 | `POST` | `/api/rml/preview` | **token** | Runs a mapping into a throwaway store. Needs a token since 0.6.x, for the same reason as `/api/shaclc/parse`. |
 | `GET` | `/api/prefixes` | **none** | Bundled prefix registry; rate-limited. |
 | `GET` | `/api/admin/prefixes` | **admin** | What this deployment has decided its prefixes mean. |
@@ -162,14 +162,28 @@ stream). Streams without a policy never answer 410. Full fragments also carry
 `<node> ldes:immutable true`. `POST /api/ldes/sync` reports gain
 `nodes_gone`, `retention_policy` and `warnings`; existing fields are unchanged.
 
-## SHACL Compact Syntax — `?lenient`
+## SHACL Compact Syntax — `?dialect`, `?lenient`, `?base`, `?lossy`
 
-`PUT /api/datasets/{dataset_id}/shapes` (with `Content-Type: text/shaclc`) and
-`POST /api/shaclc/parse` parse SHACLC **strictly**: input the grammar does not
-recognise is a `400` whose body names the line, column and offending text, and
-nothing is stored. The optional query parameter `lenient=true` (or `1`) restores
-the previous behaviour, in which unrecognised input is ignored and whatever parsed
-is kept. Status codes and response bodies are otherwise unchanged.
+`PUT /api/datasets/{dataset_id}/shapes`, `PUT /api/shacl/shape-graphs/{id}/turtle`
+(both with `Content-Type: text/shaclc`) and `POST /api/shaclc/parse` parse the
+**W3C SHACL Compact Syntax** (the SHACL Community Group report's grammar)
+**strictly**: input the grammar does not allow is a `400` whose body names the
+line, column and offending token, and nothing is stored. **Changed after 0.7:** a
+bare non-XSD IRI after a path is `sh:class` (it was `sh:node`), and the old
+dialect's keywords are refused. `dialect=legacy` (deprecated, accepted for one
+more release, logged on every use) parses the 0.7 dialect instead, and only
+with it does `lenient=true` (or `1`) keep its old meaning of ignoring
+unrecognised input; `lenient` without it is a `400`. `POST /api/shaclc/parse`
+also takes `base=<iri>`, the initial base IRI.
+
+Every SHACL-C read — `GET /api/datasets/{dataset_id}/shapes?format=shaclc`,
+`GET /api/shacl/shape-graphs/{id}/turtle?format=shaclc` (or
+`Accept: text/shaclc`) and `POST /api/shaclc/serialize` — is lossless or a
+**`422`** `{"error": …, "losses": [{"subject", "predicate", "object",
+"reason"}, …]}` listing every triple the compact syntax cannot express (it used
+to answer `200` with those constraints silently missing). `lossy=true` returns
+the partial document with `200`, an `X-SHACLC-Losses` count header and the
+losses named in a leading comment block.
 
 ## Browse scope — `dataset_id`, `dataset_ids`, `org_id`, `org_ids`
 

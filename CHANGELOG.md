@@ -67,6 +67,37 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asks for, and re-pins; the store now tells everyone which datasets that applies to.
 
 ### Changed
+- **SHACL-C is the W3C SHACL Compact Syntax.** The parser behind
+  `Content-Type: text/shaclc` (`PUT /api/datasets/{id}/shapes`,
+  `PUT /api/shacl/shape-graphs/{id}/turtle`, `POST /api/shaclc/parse`) now
+  implements the whole grammar and production rules of the SHACL Community
+  Group report and builds the RDF graph directly: `BASE`/`IMPORTS`/`PREFIX`,
+  `shapeClass`, several target classes after `->`, `param=value` node and
+  property parameters, `|` and `!`, `@shape` references, nested `{ }` bodies,
+  `[ … ]` arrays, full property paths, every Turtle literal form, and `.` after
+  every constraint. **Results change:** a bare non-XSD IRI after a path is now
+  `sh:class` (it was `sh:node`; write `@ex:Shape` for a shape reference), and
+  the old dialect's keywords (`closed` in the header, `pattern "x"`,
+  `// "msg"`, `or( … )`, `;`) are a `400` naming the line and column, with a
+  pointer to the dialect switch. The 32 test cases of the report are vendored
+  under `tests/fixtures/w3c-shaclc/` (W3C Software and Document License) and
+  pass, each also round-tripped through the serializer
+  (`tests/w3c_shaclc_conformance.rs`); `docs/standards.md` grades SHACL-C
+  **Full** (was Partial). Bugs of the old parser that made its Turtle invalid
+  (an undeclared `owl:` for `imports`, unescaped line breaks in messages and
+  patterns, bare `urn:` IRIs) are fixed in the legacy dialect too.
+- **SHACL-C downloads are lossless or a 422.** `GET …/shapes?format=shaclc`,
+  the Studio's `GET /api/shacl/shape-graphs/{id}/turtle?format=shaclc` and
+  `POST /api/shaclc/serialize` wrote only node shapes' first target class,
+  paths, datatypes, node kinds, counts, patterns and messages, and dropped
+  everything else without a word (`sh:class`, `sh:in`, `sh:hasValue`, ranges,
+  lengths, logical constraints, node-level constraints; complex paths came out
+  as an unparseable `_:b…`). The serializer now writes everything the syntax
+  can express, checks that its output parses back to exactly the triples it
+  wrote, and answers `422` with a `losses` list (subject, predicate, object,
+  reason) when anything is left over; `?lossy=true` returns the partial
+  document with an `X-SHACLC-Losses` count and a `# INCOMPLETE:` comment block.
+  The form manifest's `shaclc` field is `null` for such a graph.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were
@@ -91,6 +122,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   title. A `patch` on a `release/X.Y` branch releases that line and leaves the
   `latest` GitHub Release and image tag alone. `release.yml` can be re-run for
   an existing tag. See `docs/release-process.md`.
+
+### Deprecated
+- **The SHACL-C dialect of 0.7 and earlier** is parsed only when a request passes
+  `?dialect=legacy`, logs a deprecation warning each time, and is accepted for
+  one more release only; `?lenient=true` now applies to it alone. The migration
+  table is in `docs/shacl.md` ("Migrating from the legacy dialect").
 
 ### Fixed
 - **SHACL result paths no longer render with a stray `>`.** The backend

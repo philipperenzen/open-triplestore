@@ -1170,7 +1170,7 @@ async fn shaclc_compact_syntax_parses() {
     let shaclc = "PREFIX schema: <http://schema.org/>\n\
                   PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n\n\
                   shape schema:PersonShape -> schema:Person {\n\
-                  \tschema:name xsd:string [1..1] ;\n\
+                  \tschema:name xsd:string [1..1] .\n\
                   }\n";
     let resp = app(state)
         .oneshot(
