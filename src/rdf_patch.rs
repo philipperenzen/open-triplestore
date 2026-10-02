@@ -617,8 +617,24 @@ pub struct PatchParams {
     pub graph: Option<String>,
 }
 
-fn refuse(status: StatusCode, message: impl Into<String>) -> Response {
-    (status, message.into()).into_response()
+/// A refused patch request: the response it is answered with, boxed so the
+/// handler's `Result` stays small.
+pub struct Refused(Box<Response>);
+
+impl IntoResponse for Refused {
+    fn into_response(self) -> Response {
+        *self.0
+    }
+}
+
+impl From<crate::server::error::AppError> for Refused {
+    fn from(e: crate::server::error::AppError) -> Self {
+        Refused(Box::new(e.into_response()))
+    }
+}
+
+fn refuse(status: StatusCode, message: impl Into<String>) -> Refused {
+    Refused(Box::new((status, message.into()).into_response()))
 }
 
 /// The SHACL write gates a Graph Store write to the same graphs passes —
@@ -676,7 +692,7 @@ pub async fn apply_patch_handler(
     Query(params): Query<PatchParams>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Json<serde_json::Value>, Response> {
+) -> Result<Json<serde_json::Value>, Refused> {
     let e500 = |e: anyhow::Error| refuse(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     let ds = state
         .auth_db
@@ -769,22 +785,17 @@ pub async fn apply_patch_handler(
     let gs = graphs.clone();
     let writer = user.clone();
     let (added, removed) =
-        tokio::task::spawn_blocking(move || -> Result<(usize, usize), Box<Response>> {
+        tokio::task::spawn_blocking(move || -> Result<(usize, usize), Refused> {
             use crate::server::error::AppError;
-            check_gates(&st, &writer, &ops, &gs)
-                .map_err(|r| Box::new(AppError::ValidationFailed(r).into_response()))?;
+            check_gates(&st, &writer, &ops, &gs).map_err(AppError::ValidationFailed)?;
             let before = crate::ldes::capture::before(&st, &gs);
-            let counts = st
-                .store
-                .apply_quad_ops(&ops)
-                .map_err(|e| Box::new(AppError::from(e).into_response()))?;
+            let counts = st.store.apply_quad_ops(&ops).map_err(AppError::from)?;
             crate::ldes::capture::after(&st, before);
             crate::entailment::after_write(&st, &gs);
             Ok(counts)
         })
         .await
-        .map_err(|e| refuse(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| *e)?;
+        .map_err(|e| refuse(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
     for g in &graphs {
         crate::server::routes::sync_text_index_after_graph_write(&state, Some(g.clone())).await;
     }
