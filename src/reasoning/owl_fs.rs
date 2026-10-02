@@ -6,6 +6,10 @@ use std::fmt::Write as _;
 
 use super::owl_model::*;
 
+/// The empty data range. `DataComplementOf(rdfs:Literal)` says the same, but
+/// Konclude v0.7.0 reads it as non-empty; disjoint value spaces it gets right.
+const EMPTY_DATA_RANGE: &str = "DataIntersectionOf(<http://www.w3.org/2001/XMLSchema#integer> <http://www.w3.org/2001/XMLSchema#string>)";
+
 /// Writes an [`Ontology`]; anonymous individuals get stable `_:bN` labels.
 #[derive(Default)]
 pub struct FsWriter {
@@ -207,6 +211,12 @@ impl FsWriter {
         };
         match c {
             Class(i) => iri_ref(i),
+            // The grammar wants two or more operands (OneOf: one or more), but
+            // an RDF list can be shorter: write what it means instead.
+            IntersectionOf(v) | UnionOf(v) if v.len() == 1 => self.ce(&v[0]),
+            IntersectionOf(v) if v.is_empty() => iri_ref(OWL_THING),
+            UnionOf(v) if v.is_empty() => iri_ref(OWL_NOTHING),
+            OneOf(v) if v.is_empty() => iri_ref(OWL_NOTHING),
             IntersectionOf(v) => format!("ObjectIntersectionOf({})", self.ces(v)),
             UnionOf(v) => format!("ObjectUnionOf({})", self.ces(v)),
             ComplementOf(x) => format!("ObjectComplementOf({})", self.ce(x)),
@@ -250,6 +260,12 @@ fn opes(v: &[ObjectProp]) -> String {
 pub fn dr(r: &DataRange) -> String {
     match r {
         DataRange::Datatype(d) => iri_ref(d),
+        // As in `ce`: one operand is the operand; no operands is everything or
+        // nothing.
+        DataRange::IntersectionOf(v) | DataRange::UnionOf(v) if v.len() == 1 => dr(&v[0]),
+        DataRange::IntersectionOf(v) if v.is_empty() => iri_ref(RDFS_LITERAL),
+        DataRange::UnionOf(v) if v.is_empty() => EMPTY_DATA_RANGE.into(),
+        DataRange::OneOf(ls) if ls.is_empty() => EMPTY_DATA_RANGE.into(),
         DataRange::IntersectionOf(v) => {
             format!(
                 "DataIntersectionOf({})",
@@ -329,5 +345,78 @@ mod tests {
             text.contains("ClassAssertion(<http://example.org/A> _:b0)"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn short_operand_lists_stay_in_the_grammar() {
+        // ObjectIntersectionOf/UnionOf and their Data* forms need two or more
+        // operands, the OneOf forms one or more; RDF lists can be shorter.
+        let a = || ClassExpr::Class("http://example.org/A".into());
+        let int = || DataRange::Datatype("http://www.w3.org/2001/XMLSchema#integer".into());
+        let mut w = FsWriter::new();
+        assert_eq!(
+            w.ce(&ClassExpr::IntersectionOf(vec![a()])),
+            "<http://example.org/A>"
+        );
+        assert_eq!(
+            w.ce(&ClassExpr::UnionOf(vec![a()])),
+            "<http://example.org/A>"
+        );
+        assert_eq!(
+            w.ce(&ClassExpr::IntersectionOf(vec![])),
+            "<http://www.w3.org/2002/07/owl#Thing>"
+        );
+        assert_eq!(
+            w.ce(&ClassExpr::UnionOf(vec![])),
+            "<http://www.w3.org/2002/07/owl#Nothing>"
+        );
+        assert_eq!(
+            w.ce(&ClassExpr::OneOf(vec![])),
+            "<http://www.w3.org/2002/07/owl#Nothing>"
+        );
+        // Nested: the operand itself is still written in full.
+        assert_eq!(
+            w.ce(&ClassExpr::UnionOf(vec![ClassExpr::IntersectionOf(vec![
+                a(),
+                ClassExpr::Class("http://example.org/B".into()),
+            ])])),
+            "ObjectIntersectionOf(<http://example.org/A> <http://example.org/B>)"
+        );
+
+        let int_iri = "<http://www.w3.org/2001/XMLSchema#integer>";
+        assert_eq!(dr(&DataRange::IntersectionOf(vec![int()])), int_iri);
+        assert_eq!(dr(&DataRange::UnionOf(vec![int()])), int_iri);
+        let literal = "<http://www.w3.org/2000/01/rdf-schema#Literal>";
+        assert_eq!(dr(&DataRange::IntersectionOf(vec![])), literal);
+        assert_eq!(dr(&DataRange::UnionOf(vec![])), EMPTY_DATA_RANGE);
+        assert_eq!(dr(&DataRange::OneOf(vec![])), EMPTY_DATA_RANGE);
+    }
+
+    #[test]
+    fn one_element_rdf_list_writes_the_operand() {
+        // WebOnt-I5.26-002 shape: `owl:intersectionOf ( ex:B )`.
+        let ttl = "@prefix owl: <http://www.w3.org/2002/07/owl#> . \
+                   @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> . \
+                   @prefix ex: <http://example.org/> . \
+                   ex:A rdfs:subClassOf [ a owl:Class ; owl:intersectionOf ( ex:B ) ] . \
+                   ex:C rdfs:subClassOf [ a owl:Class ; owl:unionOf ( ex:B ) ] .";
+        let triples: Vec<oxigraph::model::Triple> =
+            oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::Turtle)
+                .for_slice(ttl.as_bytes())
+                .map(|q| q.unwrap().into())
+                .collect();
+        let m = crate::reasoning::owl_mapping::map_triples(&triples);
+        assert!(m.unmapped.is_empty(), "{:?}", m.unmapped);
+        let text = FsWriter::new().ontology(&m.ontology, &[]);
+        assert!(
+            text.contains("SubClassOf(<http://example.org/A> <http://example.org/B>)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("SubClassOf(<http://example.org/C> <http://example.org/B>)"),
+            "{text}"
+        );
+        assert!(!text.contains("IntersectionOf"), "{text}");
+        assert!(!text.contains("UnionOf"), "{text}");
     }
 }
