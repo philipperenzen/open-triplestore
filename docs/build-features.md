@@ -1,11 +1,13 @@
 # Build Features
 
 Open Triplestore has optional Cargo features. This page says, per feature,
-whether it is in the default `full` set (and therefore in a plain `cargo build`
-and in the published Docker image, which builds with `--features full`), and
-which CI pipeline compiles it. A feature that no pipeline compiles can break
-without anyone noticing; a feature outside `full` is absent from the image no
-matter what the docs say about its knobs.
+whether it is in the default `full` set (and therefore in a plain `cargo build`),
+whether the published Docker image has it, and which CI pipeline compiles it.
+The image builds with the Dockerfile's `CARGO_FEATURES`, which defaults to
+`full,plugin-postgres,plugin-mysql,plugin-mssql`: everything in `full` plus the
+three SQL connectors. A feature that no pipeline compiles can break without
+anyone noticing; a feature in neither `full` nor that list is absent from the
+image no matter what the docs say about its knobs.
 
 | Feature | What it enables | In `full` / image | Compiled in CI |
 |---|---|---|---|
@@ -21,15 +23,23 @@ matter what the docs say about its knobs.
 | `alerting` | Ops alert dispatch (`ALERT_*`) | yes | GitHub, GitLab |
 | `asset-pdf`, `asset-exif`, `asset-media`, `asset-archive`, `asset-spreadsheet`, `asset-thumbnail`, `asset-clamav` | Asset metadata extraction, thumbnails, ClamAV scanning | yes | GitHub, GitLab |
 | `saml` | SAML 2.0 SSO — **experimental**, known non-working ACS path ([auth](auth.md)) | **no** | GitHub (explicit `saml` in the feature list), GitLab |
+| `plugin-postgres`, `plugin-mysql`, `plugin-mssql` | SQL datasource connectors for PostgreSQL, MySQL / MariaDB and SQL Server ([sources](sources.md)); pure Rust over rustls, no system libraries | not in `full`; **yes** in the image | GitHub (backend job; `live-sources` runs each against a live server), GitLab |
 | `plugin-hello`, `plugin-accounts-dashboard` | Example / accounts-dashboard plugins mounted at `/ext` | **no** | GitHub, GitLab |
 | `test-utils` | Test-only helpers | no | GitHub, GitLab (tests) |
 
 Notes:
 
-- `default = ["full"]`, so `cargo build --release` produces the same feature set
-  as the image. Before this default existed, a plain build produced a binary
-  with none of the optional standards compiled in.
-- GitHub CI compiles `full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard`
+- `default = ["full"]`, so `cargo build --release` produces the image's feature
+  set without the SQL connectors; add
+  `--features full,plugin-postgres,plugin-mysql,plugin-mssql` to match the image
+  exactly. Before this default existed, a plain build produced a binary with
+  none of the optional standards compiled in.
+- The connectors stay out of `full` so a source build carries only the drivers
+  its operator asks for. An image without them builds with
+  `docker build --build-arg CARGO_FEATURES=full .`; an image with more plugins
+  repeats the connector list in its `CARGO_FEATURES`, since the argument
+  replaces the default rather than adding to it.
+- GitHub CI compiles `full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard,plugin-postgres,plugin-mysql,plugin-mssql`
   and, separately, `--no-default-features`; GitLab compiles `--all-features`
   (the only pipeline that builds `sfcgal3d`, which needs `libsfcgal-dev`).
 - The conformance table in [standards](standards.md) is generated from the test

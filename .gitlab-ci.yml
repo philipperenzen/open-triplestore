@@ -67,6 +67,8 @@ rust:
     - cargo fmt --all --check
     # `--workspace`: without it cargo selects only the root package, so the
     # `opengraph` member is neither linted nor test-compiled (see ci.yml).
+    # `--all-features` also wires the three SQL connector plugins into the main
+    # crate, as ci.yml's backend job does by naming them.
     - cargo clippy --workspace --all-targets --all-features -- -D warnings
     - cargo build --all-features --locked
     # No test is ignored (see scripts/no-ignored-tests.sh and ci.yml).
