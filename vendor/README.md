@@ -35,7 +35,16 @@ upstream unchanged (`UPSTREAM-PR.md` in the crate it touches).
 
 ### The changes
 
-None yet: this directory holds the published crates unmodified.
+One commit each, in this order:
+
+1. **`GRAPH ?g` scoping** (`sparopt` algebra and optimizer, `spareval` evaluator).
+   Backport of upstream commit `fdc32b5` (issue #1905, on `main` only):
+   `Graph { graph_name, inner }` stays a node of the optimizer algebra and is
+   evaluated per named graph, so `?g` is not in scope inside the inner pattern
+   (SPARQL 1.1 §18.6, `Graph(var, P)`). Before, `?g` was pushed into every quad
+   pattern inside, which gave wrong answers around `VALUES`, sub-selects and
+   `MINUS`. Fixes `bindings#graph`, `aggregates#agg-empty-group-count-graph` and
+   `negation#graph-minus`. Draft: `spareval/UPSTREAM-PR-graph-scoping.md`.
 
 ### Verifying the fork
 
