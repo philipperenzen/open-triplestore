@@ -37,7 +37,9 @@
 //! an empty dataset.
 
 use crate::store::TripleStore;
-use opengraph::spargebra::algebra::GraphPattern;
+use opengraph::spargebra::algebra::{
+    AggregateExpression, Expression, Function, GraphPattern, OrderExpression,
+};
 use opengraph::spargebra::Query as SpargebraQuery;
 use oxigraph::model::{GraphNameRef, NamedNodeRef, NamedOrBlankNode, TermRef};
 use oxigraph::sparql::{
@@ -499,6 +501,169 @@ pub(crate) fn project_onto(pattern: &mut GraphPattern, vars: &[Variable]) {
                     };
                 }
                 return;
+            }
+        }
+    }
+}
+
+/// Pre-bind `bindings` in the expressions of `pattern` the way SHACL
+/// pre-binding defines it (SHACL §5.6.1, which SHACL-AF rules follow): in an
+/// expression a pre-bound variable *is* its value, and `BOUND` of it is true.
+///
+/// `substitute_variable` binds the variables for the triple patterns, but the
+/// query optimizer is not told about it and types them as never bound: it
+/// drops `BIND ($this AS ?x)`, folds `BOUND ($this)` to false and turns
+/// `?v = $this` into `sameTerm`. Written as constants, the optimizer reasons
+/// about them correctly and the query keeps its join reordering. A blank node
+/// has no constant form, so it becomes `COALESCE ($this, BNODE ())`: the
+/// optimizer types that as a blank node, and evaluation returns the bound
+/// `$this` (the `BNODE ()` is never reached).
+///
+/// A subquery sees a binding only if it projects the variable, as spareval
+/// passes it. Returns `false` when some occurrence has no stand-in (a triple
+/// term): the caller must then evaluate without the optimizer.
+pub(crate) fn prebind_expressions(
+    pattern: &mut GraphPattern,
+    bindings: &[(Variable, Term)],
+) -> bool {
+    let mut complete = true;
+    prebind_pattern(pattern, bindings, &mut complete);
+    complete
+}
+
+fn prebind_pattern(pattern: &mut GraphPattern, bindings: &[(Variable, Term)], complete: &mut bool) {
+    match pattern {
+        // SERVICE is the remote endpoint's to evaluate.
+        GraphPattern::Bgp { .. }
+        | GraphPattern::Path { .. }
+        | GraphPattern::Values { .. }
+        | GraphPattern::Service { .. } => {}
+        GraphPattern::Join { left, right }
+        | GraphPattern::Union { left, right }
+        | GraphPattern::Minus { left, right }
+        | GraphPattern::Lateral { left, right } => {
+            prebind_pattern(left, bindings, complete);
+            prebind_pattern(right, bindings, complete);
+        }
+        GraphPattern::LeftJoin {
+            left,
+            right,
+            expression,
+        } => {
+            prebind_pattern(left, bindings, complete);
+            prebind_pattern(right, bindings, complete);
+            if let Some(expression) = expression {
+                prebind_expression(expression, bindings, complete);
+            }
+        }
+        GraphPattern::Filter { expr, inner } => {
+            prebind_pattern(inner, bindings, complete);
+            prebind_expression(expr, bindings, complete);
+        }
+        GraphPattern::Extend {
+            inner, expression, ..
+        } => {
+            prebind_pattern(inner, bindings, complete);
+            prebind_expression(expression, bindings, complete);
+        }
+        GraphPattern::OrderBy { inner, expression } => {
+            prebind_pattern(inner, bindings, complete);
+            for order in expression {
+                match order {
+                    OrderExpression::Asc(e) | OrderExpression::Desc(e) => {
+                        prebind_expression(e, bindings, complete)
+                    }
+                }
+            }
+        }
+        GraphPattern::Group {
+            inner, aggregates, ..
+        } => {
+            prebind_pattern(inner, bindings, complete);
+            for (_, aggregate) in aggregates {
+                if let AggregateExpression::FunctionCall { expr, .. } = aggregate {
+                    prebind_expression(expr, bindings, complete);
+                }
+            }
+        }
+        GraphPattern::Graph { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Slice { inner, .. } => prebind_pattern(inner, bindings, complete),
+        GraphPattern::Project { inner, variables } => {
+            let visible: Vec<(Variable, Term)> = bindings
+                .iter()
+                .filter(|(v, _)| variables.contains(v))
+                .cloned()
+                .collect();
+            if !visible.is_empty() {
+                prebind_pattern(inner, &visible, complete);
+            }
+        }
+    }
+}
+
+fn prebind_expression(
+    expression: &mut Expression,
+    bindings: &[(Variable, Term)],
+    complete: &mut bool,
+) {
+    match expression {
+        Expression::Variable(var) => {
+            let Some((_, term)) = bindings.iter().find(|(v, _)| v == var) else {
+                return;
+            };
+            match term {
+                Term::NamedNode(n) => *expression = Expression::NamedNode(n.clone()),
+                Term::Literal(l) => *expression = Expression::Literal(l.clone()),
+                Term::BlankNode(_) => {
+                    *expression = Expression::Coalesce(vec![
+                        Expression::Variable(var.clone()),
+                        Expression::FunctionCall(Function::BNode, Vec::new()),
+                    ])
+                }
+                Term::Triple(_) => *complete = false,
+            }
+        }
+        Expression::Bound(var) => {
+            if bindings.iter().any(|(v, _)| v == var) {
+                *expression = Expression::Literal(oxrdf::Literal::from(true));
+            }
+        }
+        Expression::Exists(pattern) => prebind_pattern(pattern, bindings, complete),
+        Expression::NamedNode(_) | Expression::Literal(_) => {}
+        Expression::Or(a, b)
+        | Expression::And(a, b)
+        | Expression::Equal(a, b)
+        | Expression::SameTerm(a, b)
+        | Expression::Greater(a, b)
+        | Expression::GreaterOrEqual(a, b)
+        | Expression::Less(a, b)
+        | Expression::LessOrEqual(a, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b) => {
+            prebind_expression(a, bindings, complete);
+            prebind_expression(b, bindings, complete);
+        }
+        Expression::In(a, list) => {
+            prebind_expression(a, bindings, complete);
+            for e in list {
+                prebind_expression(e, bindings, complete);
+            }
+        }
+        Expression::UnaryPlus(a) | Expression::UnaryMinus(a) | Expression::Not(a) => {
+            prebind_expression(a, bindings, complete)
+        }
+        Expression::If(a, b, c) => {
+            prebind_expression(a, bindings, complete);
+            prebind_expression(b, bindings, complete);
+            prebind_expression(c, bindings, complete);
+        }
+        Expression::Coalesce(list) | Expression::FunctionCall(_, list) => {
+            for e in list {
+                prebind_expression(e, bindings, complete);
             }
         }
     }

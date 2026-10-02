@@ -978,3 +978,90 @@ ex:S a sh:NodeShape ; sh:targetClass ex:Thing ;
     infer(&store, "urn:shapes", &[]).unwrap();
     assert!(ask(&store, "ASK { ex:t ex:seen true }"));
 }
+
+// ─── Pre-bound $this in rule expressions (SHACL §5.6.1, SHACL-AF §8.3) ───────
+//
+// A rule's `$this` is pre-bound: in an expression it stands for the focus node
+// exactly as a constant would. The query optimizer was never told the variable
+// is bound, so it treated it as unbound and rewrote the expressions that
+// mention it — these rules derived nothing, or the wrong thing.
+
+/// `BIND ($this AS ?x)` copies the focus node; the optimizer dropped the
+/// `BIND` as binding nothing, at the top of the WHERE clause and in a nested
+/// group alike, for an IRI and a blank-node focus node alike.
+#[test]
+fn sparql_rule_bind_of_this_copies_the_focus_node() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:Thing ;
+  sh:rule [ a sh:SPARQLRule ;
+    sh:construct "CONSTRUCT { ?x <http://example.org/self> ?x } WHERE { BIND ($this AS ?x) }" ] ;
+  sh:rule [ a sh:SPARQLRule ;
+    sh:construct "CONSTRUCT { $this <http://example.org/tag> ?y } WHERE { { BIND ($this AS ?y) } UNION { $this <http://example.org/alias> ?y } }" ] ."#;
+    let store = store_with(
+        shapes,
+        r#"ex:t a ex:Thing . [] a ex:Thing ; ex:name "anon" ."#,
+    );
+    infer(&store, "urn:shapes", &[]).unwrap();
+    assert!(ask(&store, "ASK { ex:t ex:self ex:t }"), "top-level BIND");
+    assert!(
+        ask(&store, "ASK { ex:t ex:tag ex:t }"),
+        "BIND in a UNION branch"
+    );
+    assert!(
+        ask(
+            &store,
+            r#"ASK { ?b ex:name "anon" ; ex:self ?b ; ex:tag ?b }"#
+        ),
+        "a blank-node focus node is copied too"
+    );
+}
+
+/// `BOUND ($this)` is true: the optimizer folded it to false.
+#[test]
+fn sparql_rule_this_is_bound() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:Thing ;
+  sh:rule [ a sh:SPARQLRule ;
+    sh:construct "CONSTRUCT { $this <http://example.org/bound> true } WHERE { FILTER (BOUND($this)) }" ] ."#;
+    let store = store_with(
+        shapes,
+        r#"ex:t a ex:Thing . [] a ex:Thing ; ex:name "anon" ."#,
+    );
+    infer(&store, "urn:shapes", &[]).unwrap();
+    assert!(ask(&store, "ASK { ex:t ex:bound true }"));
+    assert!(ask(&store, r#"ASK { [] ex:name "anon" ; ex:bound true }"#));
+}
+
+/// `?v = $this` compares values: a literal focus node `1` equals `1.0`. When
+/// `$this` occurs in the expression only, the optimizer turned `=` into
+/// `sameTerm`, which compares the terms. (Two lexical forms of one `xsd:int`
+/// would not show it: the store keeps derived integer types as canonical
+/// `xsd:integer`.)
+#[test]
+fn sparql_rule_compares_a_literal_focus_node_by_value() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetObjectsOf ex:code ;
+  sh:rule [ a sh:SPARQLRule ;
+    sh:construct "CONSTRUCT { ?b <http://example.org/sameCode> $this } WHERE { ?b <http://example.org/alt> ?v . FILTER (?v = $this) }" ] ."#;
+    let data = r#"
+ex:a ex:code "1"^^xsd:int .
+ex:b ex:alt "1.0"^^xsd:decimal .
+ex:c ex:alt "2"^^xsd:int ."#;
+    let store = store_with(shapes, data);
+    infer(&store, "urn:shapes", &[]).unwrap();
+    assert!(ask(&store, "ASK { ex:b ex:sameCode 1 }"), "1.0 = 1");
+    assert!(!ask(&store, "ASK { ex:c ex:sameCode 1 }"), "2 != 1");
+}
+
+/// A triple-term focus node has no constant form in an expression; the rule
+/// still sees it bound.
+#[test]
+fn sparql_rule_bind_of_a_triple_term_focus_node() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetObjectsOf ex:about ;
+  sh:rule [ a sh:SPARQLRule ;
+    sh:construct "CONSTRUCT { ?s <http://example.org/mentioned> true } WHERE { BIND ($this AS ?t) BIND (SUBJECT(?t) AS ?s) }" ] ."#;
+    let store = store_with(shapes, "ex:note ex:about <<( ex:s ex:p ex:o )>> .");
+    infer(&store, "urn:shapes", &[]).unwrap();
+    assert!(ask(&store, "ASK { ex:s ex:mentioned true }"));
+}

@@ -140,6 +140,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (ex:labelOf($this) AS ?l) }`, `$this` was left unbound — the query parser
   projects the WHERE onto the variables its patterns bind, and the focus node
   was bound only through that projection — so the rule derived nothing.
+- **A SHACL rule's expressions see `$this` as bound.** The query optimizer
+  treated the pre-bound focus node as unbound wherever an expression used it:
+  `BIND ($this AS ?x)` was dropped, `FILTER (BOUND ($this))` was always false,
+  and `FILTER (?v = $this)` compared terms instead of values when `$this`
+  occurred in no triple pattern (a literal focus node `1` did not equal
+  `1.0`). Each `sh:SPARQLRule` CONSTRUCT now has `$this` written into its
+  expressions as the focus node itself, as SHACL pre-binding defines, so rules
+  derive what they say and keep the optimizer's join ordering. A triple-term
+  focus node, which has no constant form in an expression, runs that rule
+  unoptimized.
 - **SHACL validation and write gates no longer pass data the shapes forbid.**
   Gates get stricter: data that used to be accepted may now be refused with
   422, and a shapes graph that used to load may now fail the run.

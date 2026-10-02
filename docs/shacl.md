@@ -544,7 +544,10 @@ that of the store.
   (registered with the `entailment` role, so it is ACL'd, listed and deleted
   with the dataset).
 * **`$this` is bound as a term**, never pasted into the query text, so a focus
-  node with a hostile lexical form (`sh:targetNode "…"`) is just a term.
+  node with a hostile lexical form (`sh:targetNode "…"`) is just a term. In an
+  expression it is the focus node, as SHACL pre-binding defines it:
+  `BIND ($this AS ?x)` copies it, `BOUND ($this)` is true, and `?v = $this`
+  compares values (a literal focus node `1` equals `1.0`).
 
 ---
 

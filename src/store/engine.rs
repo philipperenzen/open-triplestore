@@ -1472,10 +1472,27 @@ impl TripleStore {
         // `$this` used in an expression alone (`BIND (f($this) AS ?x)`) was
         // silently left unbound. Project the bound variables too.
         let mut query = query.clone();
+        let mut optimize = true;
         if let SpargebraQuery::Construct { pattern, .. } = &mut query {
             crate::shacl::sparql_functions::project_onto(pattern, &vars);
+            // The optimizer types substituted variables as never bound and
+            // rewrites the expressions that use them (`BIND ($this AS ?x)`
+            // dropped, `BOUND ($this)` false, `=` made `sameTerm`). Pre-bind
+            // them in the expressions so it sees the values; a term with no
+            // expression form runs the rule unoptimized instead.
+            let bound: Vec<_> = vars
+                .iter()
+                .cloned()
+                .zip(bindings.iter().map(|(_, term)| term.clone()))
+                .collect();
+            optimize = crate::shacl::sparql_functions::prebind_expressions(pattern, &bound);
         }
-        let mut prepared = evaluator.clone().for_query(query);
+        let mut prepared = if optimize {
+            evaluator.clone()
+        } else {
+            crate::shacl::sparql_functions::without_optimizer(evaluator.clone())
+        }
+        .for_query(query);
         confine_dataset(prepared.dataset_mut(), scope)?;
         for (var, (_, term)) in vars.into_iter().zip(bindings) {
             prepared = prepared.substitute_variable(var, term.clone());
