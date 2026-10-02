@@ -8,9 +8,11 @@
 //! | RDF | DL-Lite |
 //! |---|---|
 //! | `rdfs:subClassOf`, `owl:equivalentClass` | `B ⊑ C` for every QL sub/superclass expression |
-//! | `rdfs:domain` / `rdfs:range` | `∃P ⊑ C` / `∃P⁻ ⊑ C` (a datatype range on a data property is a value check) |
+//! | `rdfs:domain` / `rdfs:range` | `∃P ⊑ C` / `∃P⁻ ⊑ C`; on a data property, a data range its values are in |
 //! | `[owl:onProperty R; owl:someValuesFrom owl:Thing]` | `∃R` on either side |
 //! | `[owl:onProperty R; owl:someValuesFrom A]` on the right | `B ⊑ ∃R.A`, read with a fresh role `F`: `F ⊑ R`, `∃F⁻ ⊑ A`, `B ⊑ ∃F` |
+//! | `[owl:onProperty U; owl:someValuesFrom D]`, `U` a data property | `∃U.D` on either side, read with a fresh data role `F ⊑ U` whose values are in `D` |
+//! | a datatype of the QL map, `owl:intersectionOf` of data ranges, a datatype definition (`DT owl:equivalentClass D`) | a data range `D` |
 //! | `owl:intersectionOf` on the right | one inclusion per conjunct |
 //! | `owl:complementOf`, `owl:disjointWith`, `owl:AllDisjointClasses`, `owl:Nothing` | `B ⊑ ¬C` |
 //! | `rdfs:subPropertyOf`, `owl:equivalentProperty`, `owl:inverseOf`, `owl:SymmetricProperty` | `R ⊑ S` (both polarities) |
@@ -21,13 +23,22 @@
 //! chains, `owl:sameAs`, unions, cardinalities, …) is outside the profile; it
 //! is not used and is reported in [`ReasoningReport::ignored_axioms`].
 //!
+//! Data ranges are decided on values, through the OWL 2 datatype map
+//! ([`super::datatypes`]): a data role's values lie in the intersection of
+//! the ranges on it and its super-roles, so `∃R ⊑ ∃U.D` when `R ⊑ U` and
+//! that intersection is inside `D`, and a role whose values must lie in
+//! disjoint datatypes (`C ⊑ ∃U.xsd:string` with `U` ranging over
+//! `xsd:integer`) is empty.
+//!
 //! [`QLQueryRewriter::materialize`] closes the hierarchies and the negative
 //! inclusions (unsatisfiability propagates through roles and fresh roles),
 //! writes every entailed *ground* atom over the individuals in the data
 //! (class memberships, property assertions, the named-class and
 //! named-property closure), and checks consistency: a negative inclusion, an
-//! irreflexive or asymmetric property, `a owl:differentFrom a`, or a
-//! data-property value outside its declared datatype makes the run fail with
+//! irreflexive or asymmetric property, `a owl:differentFrom a`, an
+//! ill-typed literal, a data-property value outside its range, or one value
+//! for two disjoint data properties (compared by value, so `"1"` and
+//! `"1.0"^^xsd:decimal` are one) makes the run fail with
 //! [`ReasoningError::Inconsistency`]; what was derived stays in the target.
 //!
 //! Ground atoms cannot express an existential: `Parent ⊑ ∃hasChild` says that
@@ -62,13 +73,14 @@ use oxigraph::model::{
     GraphName, Literal, NamedNode, NamedNodeRef, NamedOrBlankNode, NamedOrBlankNodeRef, Quad, Term,
     TermRef,
 };
-use spargebra::algebra::{Expression, GraphPattern};
+use spargebra::algebra::{Expression, Function, GraphPattern};
 use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern, Variable};
 use spargebra::Query;
 
 use super::common::{
     IgnoredAxiom, ReasoningError, ReasoningReport, IGNORED_SAMPLE, OWL2_QL_ENTAILMENT_GRAPH,
 };
+use super::datatypes::{self, Dt, Value};
 use crate::store::TripleStore;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -199,7 +211,12 @@ struct Axioms {
     irreflexive: Vec<String>,
     data_props: HashSet<String>,
     datatypes: HashSet<String>,
-    data_ranges: Vec<(String, String)>,
+    /// Data property → a data range its values are in.
+    data_ranges: Vec<(String, DataRange)>,
+    /// `∃U.D` on the left: (fresh role `F`, `U`, `D`), `F` the `U` values in `D`.
+    restrictions: Vec<(String, String, DataRange)>,
+    /// Fresh role → how to show it (`<U>.D`).
+    labels: HashMap<String, String>,
     fresh: usize,
     ignored: Ignored,
 }
@@ -265,10 +282,16 @@ pub struct QlTBox {
     reflexive: Vec<usize>,
     /// Basic concepts every element belongs to (sorted, upward closed).
     top: Vec<usize>,
-    /// Roles whose values are literals (data properties).
+    /// Roles whose values are literals (data properties, and roles under
+    /// one).
     data_roles: Vec<bool>,
-    /// Positive data role → the datatypes its values must belong to.
-    data_ranges: HashMap<usize, Vec<String>>,
+    /// Positive data role → the data range every value of it is in: the
+    /// intersection of the ranges declared on it and its super-roles.
+    value_range: Vec<DataRange>,
+    /// `∃U.D` on the left: (fresh role `F`, `U`, `D`).
+    restrictions: Vec<(usize, usize, DataRange)>,
+    /// Fresh role → how to show it.
+    labels: HashMap<usize, String>,
     /// An inconsistency that holds whatever the data (the domain of an
     /// interpretation is never empty).
     clash: Option<(String, String)>,
@@ -298,7 +321,9 @@ impl QlTBox {
             reflexive: Vec::new(),
             top: Vec::new(),
             data_roles: Vec::new(),
-            data_ranges: HashMap::new(),
+            value_range: Vec::new(),
+            restrictions: Vec::new(),
+            labels: HashMap::new(),
             clash: None,
             ignored: Ignored::default(),
         }
@@ -376,9 +401,22 @@ impl QlTBox {
             .iter()
             .map(|p| t.role_id(&Role::named(p.as_str())))
             .collect();
-        for (p, dt) in &ax.data_ranges {
+        let mut declared: HashMap<usize, DataRange> = HashMap::new();
+        for (p, d) in &ax.data_ranges {
             let r = t.role_id(&Role::named(p.as_str()));
-            t.data_ranges.entry(r).or_default().push(dt.clone());
+            declared.entry(r).or_default().and(d);
+        }
+        let restrictions: Vec<(usize, usize, DataRange)> = ax
+            .restrictions
+            .iter()
+            .map(|(f, u, d)| {
+                let f = t.role_id(&Role::named(f.as_str()));
+                (f, t.role_id(&Role::named(u.as_str())), d.clone())
+            })
+            .collect();
+        for (iri, label) in &ax.labels {
+            let r = t.role_id(&Role::named(iri.as_str()));
+            t.labels.insert(r, label.clone());
         }
 
         let nb = t.basics.len();
@@ -395,6 +433,25 @@ impl QlTBox {
         t.role_sup = (0..nr).map(|r| reach(r, &redges)).collect();
         t.role_sub = invert(&t.role_sup);
 
+        // Data roles, and the range of values each one has.
+        t.data_roles = (0..nr)
+            .map(|r| {
+                t.role_sup[r]
+                    .iter()
+                    .any(|&s| ax.data_props.contains(&t.roles[s].iri))
+            })
+            .collect();
+        t.value_range = vec![DataRange::default(); nr];
+        for r in 0..nr {
+            if t.data_roles[r] && !t.roles[r].inverse {
+                for s in &t.role_sup[r] {
+                    if let Some(d) = declared.get(s) {
+                        t.value_range[r].and(d);
+                    }
+                }
+            }
+        }
+
         // Concept hierarchy: declared inclusions, and ∃R ⊑ ∃S for R ⊑ S.
         let mut cedges: Vec<Vec<usize>> = vec![Vec::new(); nb];
         for &(a, b) in &ci {
@@ -407,6 +464,15 @@ impl QlTBox {
                 cedges[t.exists[r]].push(t.exists[s]);
             }
         }
+        // ∃R ⊑ ∃U.D when R ⊑ U and every R value is in D.
+        for (f, u, d) in &restrictions {
+            for &r in &t.role_sub[*u] {
+                if r != *f && t.data_roles[r] && !t.roles[r].inverse && t.value_range[r].within(d) {
+                    cedges[t.exists[r]].push(t.exists[*f]);
+                }
+            }
+        }
+        t.restrictions = restrictions;
         t.sup = (0..nb).map(|b| reach(b, &cedges)).collect();
         t.sub = invert(&t.sup);
         t.exists_of = vec![None; nb];
@@ -427,10 +493,6 @@ impl QlTBox {
             t.role_ni[ia].push(ib);
             t.role_ni[ib].push(ia);
         }
-
-        t.data_roles = (0..nr)
-            .map(|r| ax.data_props.contains(&t.roles[r].iri))
-            .collect();
 
         // Reflexivity: every element has a loop of every super-role of a
         // reflexive role, and so is in ∃R and ∃R⁻ of each.
@@ -454,6 +516,12 @@ impl QlTBox {
         // empty with its ∃ (either side), its inverse, or a super-role.
         t.unsat = vec![false; nb];
         t.role_unsat = vec![false; nr];
+        // A data role whose values must lie in disjoint datatypes has none.
+        for r in 0..nr {
+            if t.data_roles[r] && !t.roles[r].inverse && t.value_range[r].is_empty() {
+                t.role_unsat[r] = true;
+            }
+        }
         loop {
             let mut changed = false;
             for b in 0..nb {
@@ -539,7 +607,9 @@ impl QlTBox {
 
     fn show_role(&self, r: usize) -> String {
         let role = &self.roles[r];
-        if role.is_fresh() {
+        if let Some(label) = self.labels.get(&r) {
+            label.clone()
+        } else if role.is_fresh() {
             "a qualified existential".into()
         } else if role.inverse {
             format!("inverse(<{}>)", role.iri)
@@ -804,12 +874,18 @@ enum SupAtom {
     Pos(Basic),
     Neg(Basic),
     Qualified(Role, String),
+    /// `∃U.D` for a data property `U` and a data range `D`.
+    DataQualified(Role, DataRange),
     Bottom,
 }
 
 struct Loader<'s, 'a> {
     src: &'s Src<'a>,
     ax: Axioms,
+    /// Datatype definitions: a declared datatype → the data range it names.
+    defs: HashMap<String, Term>,
+    /// `∃U.D` on the left, one fresh role per `(U, D)`.
+    restricted: HashMap<(String, DataRange), Role>,
 }
 
 impl Loader<'_, '_> {
@@ -836,6 +912,80 @@ impl Loader<'_, '_> {
     fn fresh_role(&mut self) -> Role {
         self.ax.fresh += 1;
         Role::named(format!("{FRESH}{}", self.ax.fresh))
+    }
+
+    /// A fresh data role under `u` whose values are in `d`: the `u` values
+    /// in `d`, so that `∃F` is `∃u.d`.
+    fn data_sub_role(&mut self, u: &str, d: DataRange) -> Role {
+        let f = self.fresh_role();
+        self.ax.data_props.insert(u.to_string());
+        self.ax.data_props.insert(f.iri.clone());
+        self.ax.role_incl.push((f.clone(), Role::named(u)));
+        self.ax
+            .labels
+            .insert(f.iri.clone(), format!("<{u}>.{}", d.show()));
+        self.ax.data_ranges.push((f.iri.clone(), d));
+        f
+    }
+
+    /// `∃u.d` as a subclass expression: one fresh role per `(u, d)`.
+    fn restriction(&mut self, u: &str, d: DataRange) -> Role {
+        if let Some(f) = self.restricted.get(&(u.to_string(), d.clone())) {
+            return f.clone();
+        }
+        let f = self.data_sub_role(u, d.clone());
+        self.ax
+            .restrictions
+            .push((f.iri.clone(), u.to_string(), d.clone()));
+        self.restricted.insert((u.to_string(), d), f.clone());
+        f
+    }
+
+    /// A QL data range: a datatype of the map (`rdfs:Literal` included), a
+    /// datatype named by a definition, a declared datatype without one
+    /// (opaque), or an intersection of data ranges. `None` for anything
+    /// else, a datatype outside the QL map included.
+    fn data_range(&self, t: &Term, depth: usize) -> Result<Option<DataRange>, ReasoningError> {
+        if depth > 16 {
+            return Ok(None);
+        }
+        Ok(match t {
+            Term::NamedNode(n) => {
+                let iri = n.as_str();
+                if let Some(def) = self.defs.get(iri) {
+                    return self.data_range(def, depth + 1);
+                }
+                if iri == RDF_LANG_STRING {
+                    None
+                } else if let Some(dt) = Dt::from_iri(iri) {
+                    Some(DataRange::of(dt))
+                } else if self.ax.datatypes.contains(iri) && !iri.starts_with(XSD_NS) {
+                    Some(DataRange {
+                        opaque: BTreeSet::from([iri.to_string()]),
+                        ..DataRange::default()
+                    })
+                } else {
+                    None
+                }
+            }
+            Term::BlankNode(_) => {
+                let Some(list) = self.src.object(t, OWL_INTERSECTION_OF)? else {
+                    return Ok(None);
+                };
+                let Some(members) = self.src.list(&list)? else {
+                    return Ok(None);
+                };
+                let mut out = DataRange::default();
+                for m in &members {
+                    match self.data_range(m, depth + 1)? {
+                        Some(d) => out.and(&d),
+                        None => return Ok(None),
+                    }
+                }
+                (!members.is_empty()).then_some(out)
+            }
+            _ => None,
+        })
     }
 
     /// A property expression: `P`, or `[owl:inverseOf P]`.
@@ -865,15 +1015,20 @@ impl Loader<'_, '_> {
                 let Some(role) = self.prop_expr(&on)? else {
                     return Ok(SubExpr::Unsupported);
                 };
-                match &filler {
-                    Term::NamedNode(f) if f.as_str() == OWL_THING => {
-                        SubExpr::Basic(Basic::Exists(role))
-                    }
-                    Term::NamedNode(f) if f.as_str() == RDFS_LITERAL && !role.inverse => {
+                if matches!(&filler, Term::NamedNode(f) if f.as_str() == OWL_THING) {
+                    return Ok(SubExpr::Basic(Basic::Exists(role)));
+                }
+                if role.inverse {
+                    return Ok(SubExpr::Unsupported);
+                }
+                match self.data_range(&filler, 0)? {
+                    // ∃U.rdfs:Literal is ∃U.
+                    Some(d) if d.is_literal() => {
                         self.ax.data_props.insert(role.iri.clone());
                         SubExpr::Basic(Basic::Exists(role))
                     }
-                    _ => SubExpr::Unsupported,
+                    Some(d) => SubExpr::Basic(Basic::Exists(self.restriction(&role.iri, d))),
+                    None => SubExpr::Unsupported,
                 }
             }
             _ => SubExpr::Unsupported,
@@ -932,17 +1087,30 @@ impl Loader<'_, '_> {
                 let Some(role) = self.prop_expr(&on)? else {
                     return Ok(false);
                 };
-                match &filler {
-                    Term::NamedNode(f) if f.as_str() == OWL_THING => {
+                if let Term::NamedNode(f) = &filler {
+                    if f.as_str() == OWL_THING {
                         out.push(SupAtom::Pos(Basic::Exists(role)));
+                        return Ok(true);
                     }
-                    Term::NamedNode(f) if f.as_str() == OWL_NOTHING => out.push(SupAtom::Bottom),
-                    Term::NamedNode(f) if self.is_datatype(f.as_str()) && !role.inverse => {
-                        // C ⊑ ∃U.D: C has some U value. That the value is in
-                        // D adds nothing to the ground closure.
+                    if f.as_str() == OWL_NOTHING {
+                        out.push(SupAtom::Bottom);
+                        return Ok(true);
+                    }
+                }
+                if !role.inverse {
+                    if let Some(d) = self.data_range(&filler, 0)? {
                         self.ax.data_props.insert(role.iri.clone());
-                        out.push(SupAtom::Pos(Basic::Exists(role)));
+                        if d.is_literal() {
+                            out.push(SupAtom::Pos(Basic::Exists(role)));
+                        } else {
+                            out.push(SupAtom::DataQualified(role, d));
+                        }
+                        return Ok(true);
                     }
+                }
+                match &filler {
+                    // A datatype outside the QL map.
+                    Term::NamedNode(f) if self.is_datatype(f.as_str()) => return Ok(false),
                     Term::NamedNode(f) => {
                         out.push(SupAtom::Qualified(role, f.as_str().to_string()));
                     }
@@ -968,6 +1136,11 @@ impl Loader<'_, '_> {
                         .concept_incl
                         .push((Basic::Exists(f.inv()), Basic::Class(class)));
                     self.ax.concept_incl.push((sub.clone(), Basic::Exists(f)));
+                }
+                SupAtom::DataQualified(u, d) => {
+                    // B ⊑ ∃U.D: B ⊑ ∃G for a fresh G ⊑ U whose values are in D.
+                    let g = self.data_sub_role(&u.iri, d);
+                    self.ax.concept_incl.push((sub.clone(), Basic::Exists(g)));
                 }
             }
         }
@@ -1013,10 +1186,39 @@ impl Loader<'_, '_> {
                 self.ax.data_props.insert(n.as_str().to_string());
             }
         }
+        // Datatype definitions: `DT owl:equivalentClass DR` for a declared
+        // datatype DT. They are not class axioms.
+        let mut definitions: HashSet<(Term, Term)> = HashSet::new();
+        for (s, o) in src.pairs(OWL_EQUIV_CLASS)? {
+            let s = Term::from(s);
+            for (dt, dr) in [(&s, &o), (&o, &s)] {
+                if let Term::NamedNode(n) = dt {
+                    if self.ax.datatypes.contains(n.as_str()) && Dt::from_iri(n.as_str()).is_none()
+                    {
+                        self.defs
+                            .entry(n.as_str().to_string())
+                            .or_insert_with(|| dr.clone());
+                        definitions.insert((s.clone(), o.clone()));
+                    }
+                }
+            }
+        }
+        for (dt, dr) in self.defs.clone() {
+            if self.data_range(&dr, 0)?.is_none() {
+                self.defs.remove(&dt);
+                self.ignore(
+                    "owl:equivalentClass",
+                    &Term::NamedNode(NamedNode::new_unchecked(dt)),
+                    "a datatype definition outside OWL 2 QL",
+                );
+            }
+        }
         let ranges = src.pairs(RDFS_RANGE)?;
         for (p, c) in &ranges {
-            if let (NamedOrBlankNode::NamedNode(p), Term::NamedNode(c)) = (p, c) {
-                if self.is_datatype(c.as_str()) {
+            if let NamedOrBlankNode::NamedNode(p) = p {
+                let named_datatype =
+                    matches!(c, Term::NamedNode(c) if self.is_datatype(c.as_str()));
+                if named_datatype || self.data_range(c, 0)?.is_some() {
                     self.ax.data_props.insert(p.as_str().to_string());
                 }
             }
@@ -1030,6 +1232,9 @@ impl Loader<'_, '_> {
         }
         for (s, o) in src.pairs(OWL_EQUIV_CLASS)? {
             let s = Term::from(s);
+            if definitions.contains(&(s.clone(), o.clone())) {
+                continue;
+            }
             let forward = self.inclusion(&s, &o)?;
             let backward = self.inclusion(&o, &s)?;
             if !forward && !backward {
@@ -1178,20 +1383,22 @@ impl Loader<'_, '_> {
                 self.ignore("rdfs:range", &p, "a property expression outside OWL 2 QL");
                 continue;
             };
-            if let Term::NamedNode(c) = &c {
-                if self.is_datatype(c.as_str()) {
-                    if c.as_str() != RDFS_LITERAL && !r.inverse {
-                        self.ax.data_ranges.push((r.iri, c.as_str().to_string()));
-                    }
-                    continue;
+            if let Some(d) = self.data_range(&c, 0)? {
+                if !d.is_literal() && !r.inverse {
+                    self.ax.data_ranges.push((r.iri, d));
                 }
+                continue;
             }
-            if self.ax.data_props.contains(&r.iri) {
+            if matches!(&c, Term::NamedNode(c) if self.is_datatype(c.as_str())) {
                 self.ignore(
                     "rdfs:range",
                     &p,
-                    "a data range outside OWL 2 QL (only datatypes are checked)",
+                    "a datatype outside the OWL 2 QL datatype map",
                 );
+                continue;
+            }
+            if self.ax.data_props.contains(&r.iri) {
+                self.ignore("rdfs:range", &p, "a data range outside OWL 2 QL");
                 continue;
             }
             let mut sups = Vec::new();
@@ -1245,101 +1452,136 @@ impl QlTBox {
         let ax = Loader {
             src,
             ax: Axioms::default(),
+            defs: HashMap::new(),
+            restricted: HashMap::new(),
         }
         .load()?;
         Ok(Self::build(ax))
     }
 }
 
-// ─── Datatypes (until the OWL 2 datatype map lands) ─────────────────────────
+// ─── Data ranges ────────────────────────────────────────────────────────────
 
-const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
-const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
-const XSD_NON_NEGATIVE_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#nonNegativeInteger";
-const XSD_NON_POSITIVE_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#nonPositiveInteger";
-const XSD_LONG: &str = "http://www.w3.org/2001/XMLSchema#long";
-const XSD_INT: &str = "http://www.w3.org/2001/XMLSchema#int";
-const XSD_SHORT: &str = "http://www.w3.org/2001/XMLSchema#short";
-const XSD_UNSIGNED_LONG: &str = "http://www.w3.org/2001/XMLSchema#unsignedLong";
-const XSD_UNSIGNED_INT: &str = "http://www.w3.org/2001/XMLSchema#unsignedInt";
-const XSD_UNSIGNED_SHORT: &str = "http://www.w3.org/2001/XMLSchema#unsignedShort";
-const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
-const XSD_NORMALIZED_STRING: &str = "http://www.w3.org/2001/XMLSchema#normalizedString";
-const XSD_TOKEN: &str = "http://www.w3.org/2001/XMLSchema#token";
-const XSD_NAME: &str = "http://www.w3.org/2001/XMLSchema#Name";
-const XSD_DATE_TIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
-
-/// The datatype directly above `dt` (XSD, `owl:real`/`rational`,
-/// `rdf:PlainLiteral`) and the primitive value space it belongs to. Value
-/// spaces of different families are disjoint; `None` for a datatype outside
-/// the table.
-fn datatype_parent(dt: &str) -> Option<(Option<&'static str>, &'static str)> {
-    const NUM: &str = "numeric";
-    const PLAIN: &str = "plain";
-    if let Some(local) = dt.strip_prefix(XSD_NS) {
-        return Some(match local {
-            "decimal" => (Some(OWL_RATIONAL), NUM),
-            "integer" => (Some(XSD_DECIMAL), NUM),
-            "nonNegativeInteger" | "nonPositiveInteger" | "long" => (Some(XSD_INTEGER), NUM),
-            "positiveInteger" | "unsignedLong" => (Some(XSD_NON_NEGATIVE_INTEGER), NUM),
-            "negativeInteger" => (Some(XSD_NON_POSITIVE_INTEGER), NUM),
-            "int" => (Some(XSD_LONG), NUM),
-            "short" => (Some(XSD_INT), NUM),
-            "byte" => (Some(XSD_SHORT), NUM),
-            "unsignedInt" => (Some(XSD_UNSIGNED_LONG), NUM),
-            "unsignedShort" => (Some(XSD_UNSIGNED_INT), NUM),
-            "unsignedByte" => (Some(XSD_UNSIGNED_SHORT), NUM),
-            "string" => (Some(RDF_PLAIN_LITERAL), PLAIN),
-            "normalizedString" => (Some(XSD_STRING), PLAIN),
-            "token" => (Some(XSD_NORMALIZED_STRING), PLAIN),
-            "language" | "NMTOKEN" | "Name" => (Some(XSD_TOKEN), PLAIN),
-            "NCName" => (Some(XSD_NAME), PLAIN),
-            "dateTime" => (None, "dateTime"),
-            "dateTimeStamp" => (Some(XSD_DATE_TIME), "dateTime"),
-            "boolean" => (None, "boolean"),
-            "double" => (None, "double"),
-            "float" => (None, "float"),
-            "hexBinary" => (None, "hexBinary"),
-            "base64Binary" => (None, "base64Binary"),
-            "anyURI" => (None, "anyURI"),
-            _ => return None,
-        });
-    }
-    Some(match dt {
-        OWL_REAL => (None, NUM),
-        OWL_RATIONAL => (Some(OWL_REAL), NUM),
-        RDF_PLAIN_LITERAL => (None, PLAIN),
-        RDF_LANG_STRING => (Some(RDF_PLAIN_LITERAL), PLAIN),
-        RDF_XML_LITERAL => (None, "XMLLiteral"),
-        _ => return None,
-    })
+/// A QL data range: an intersection of datatypes (no datatype at all is
+/// `rdfs:Literal`). The QL datatype map makes intersections either empty or
+/// infinite, so a range is decided by its datatypes alone.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct DataRange {
+    /// Datatypes of the map, `rdfs:Literal` left out.
+    dts: BTreeSet<Dt>,
+    /// Declared datatypes without a definition: nothing is known of their
+    /// values.
+    opaque: BTreeSet<String>,
 }
 
-/// Whether `lit` is in datatype `range`: `Some(false)` only when their value
-/// spaces are disjoint, `None` when telling needs the literal's value (an
-/// `xsd:integer` against `xsd:nonNegativeInteger`) or a datatype is unknown.
-fn literal_in_range(lit: &Literal, range: &str) -> Option<bool> {
-    if range == RDFS_LITERAL {
-        return Some(true);
-    }
-    let dt = lit.datatype().as_str();
-    let (_, range_family) = datatype_parent(range)?;
-    let (_, dt_family) = datatype_parent(dt)?;
-    if dt_family != range_family {
-        return Some(false);
-    }
-    let mut cur = Some(dt.to_string());
-    while let Some(c) = cur {
-        if c == range {
-            return Some(true);
+impl DataRange {
+    fn of(dt: Dt) -> Self {
+        let mut d = Self::default();
+        if dt != Dt::Literal {
+            d.dts.insert(dt);
         }
-        cur = datatype_parent(&c).and_then(|(p, _)| p.map(str::to_string));
+        d
     }
-    // A plain string is never a language-tagged one, nor the reverse.
-    if range == RDF_LANG_STRING || dt == RDF_LANG_STRING {
-        return Some(false);
+
+    /// Intersect with `other`.
+    fn and(&mut self, other: &DataRange) {
+        self.dts.extend(other.dts.iter().copied());
+        self.opaque.extend(other.opaque.iter().cloned());
     }
-    None
+
+    fn is_literal(&self) -> bool {
+        self.dts.is_empty() && self.opaque.is_empty()
+    }
+
+    /// Whether no value is in it: two of its datatypes are disjoint.
+    fn is_empty(&self) -> bool {
+        let dts: Vec<Dt> = self.dts.iter().copied().collect();
+        dts.iter()
+            .enumerate()
+            .any(|(i, a)| dts[i + 1..].iter().any(|b| a.disjoint(*b)))
+    }
+
+    /// Whether every value in `self` is in `other`. An intersection of
+    /// datatypes of the QL map is inside a datatype only when one of them
+    /// is (the one overlap that is no datatype, Name ∩ NMTOKEN, is inside
+    /// exactly their common ancestors).
+    fn within(&self, other: &DataRange) -> bool {
+        self.is_empty()
+            || (other
+                .dts
+                .iter()
+                .all(|o| self.dts.iter().any(|d| d.is_within(*o)))
+                && other.opaque.is_subset(&self.opaque))
+    }
+
+    /// Whether `v` is in the range; `None` when that cannot be told.
+    fn contains(&self, v: &Value) -> Option<bool> {
+        let mut known = self.opaque.is_empty();
+        for &dt in &self.dts {
+            match datatypes::in_value_space(v, dt) {
+                Some(false) => return Some(false),
+                Some(true) => {}
+                None => known = false,
+            }
+        }
+        known.then_some(true)
+    }
+
+    fn iris(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.dts.iter().map(|d| d.iri().to_string()).collect();
+        out.extend(self.opaque.iter().cloned());
+        out
+    }
+
+    fn show(&self) -> String {
+        if self.is_literal() {
+            return "rdfs:Literal".into();
+        }
+        let short = |iri: &str| -> String {
+            for (ns, p) in [
+                (XSD_NS, "xsd:"),
+                (OWL_NS, "owl:"),
+                (RDFS_NS, "rdfs:"),
+                (RDF_NS, "rdf:"),
+            ] {
+                if let Some(local) = iri.strip_prefix(ns) {
+                    return format!("{p}{local}");
+                }
+            }
+            format!("<{iri}>")
+        };
+        let names: Vec<String> = self.iris().iter().map(|i| short(i)).collect();
+        if names.len() == 1 {
+            names[0].clone()
+        } else {
+            format!("({})", names.join(" ⊓ "))
+        }
+    }
+}
+
+/// The custom SPARQL function the standalone rewriting uses for `∃U.D` on
+/// the left: `inDataRange(?v, dt…)` is true when the value of `?v` is in
+/// every datatype listed, false when it is outside one, and an error (so a
+/// FILTER drops the row) when that cannot be told.
+pub const IN_DATA_RANGE: &str = "https://open-triplestore.org/def/function/owl2/inDataRange";
+
+/// The handler for [`IN_DATA_RANGE`], for `QueryOptions::with_custom_function`.
+pub fn in_data_range(args: &[Term]) -> Option<Term> {
+    let (Term::Literal(lit), dts) = args.split_first()? else {
+        return Some(Literal::from(false).into());
+    };
+    let mut range = DataRange::default();
+    for dt in dts {
+        let Term::NamedNode(dt) = dt else { return None };
+        match Dt::from_iri(dt.as_str()) {
+            Some(d) if dt.as_str() != RDF_LANG_STRING => range.and(&DataRange::of(d)),
+            _ => {
+                range.opaque.insert(dt.as_str().to_string());
+            }
+        }
+    }
+    let value = datatypes::literal_value(lit)?;
+    range.contains(&value).map(|b| Literal::from(b).into())
 }
 
 // ─── The TBox cache for query-time rewriting ────────────────────────────────
@@ -1666,10 +1908,13 @@ fn ground(
             || sups
                 .iter()
                 .any(|&s| !tbox.role_ni[s].is_empty() || tbox.irreflexive.contains(&s));
-        let ranges: Vec<&String> = sups
+        let range = &tbox.value_range[r];
+        // `∃U.D` on the left that an `r` value can put its subject in.
+        let restrictions: Vec<(usize, &DataRange)> = tbox
+            .restrictions
             .iter()
-            .filter_map(|s| tbox.data_ranges.get(s))
-            .flatten()
+            .filter(|(_, u, _)| sups.binary_search(u).is_ok())
+            .map(|(f, _, d)| (*f, d))
             .collect();
         let pred = NamedNode::new_unchecked(role.iri.as_str());
         let mut literal_sups: Vec<(Term, NamedNode, Term)> = Vec::new();
@@ -1678,16 +1923,25 @@ fn ground(
             members.entry(s.clone()).or_default().push(tbox.exists[r]);
             match q.object {
                 Term::Literal(l) => {
-                    for range in &ranges {
-                        if literal_in_range(&l, range) == Some(false) {
+                    // Decided on the value: a stored `xsd:integer` may have
+                    // been written as any integer-derived type.
+                    if let Some(v) = datatypes::literal_value(&l) {
+                        if range.contains(&v) == Some(false) {
                             note(
                                 &mut clash,
                                 "ql-dt-range",
                                 format!(
-                                    "{} is not a value of <{range}>, the range of <{}>",
-                                    l, role.iri
+                                    "{} is not a value of {}, the range of <{}>",
+                                    l,
+                                    range.show(),
+                                    role.iri
                                 ),
                             );
+                        }
+                        for &(f, d) in &restrictions {
+                            if d.contains(&v) == Some(true) {
+                                members.entry(s.clone()).or_default().push(tbox.exists[f]);
+                            }
                         }
                     }
                     for &q2 in sups {
@@ -1726,27 +1980,40 @@ fn ground(
         }
     }
 
-    // Reflexive properties: every individual has the loop.
+    // One pass over the data: an ill-typed literal makes it inconsistent
+    // (OWL 2: its lexical form denotes no value of its datatype); with a
+    // reflexive property, every individual has the loop.
     let mut individuals: HashSet<Term> = HashSet::new();
-    if !tbox.reflexive.is_empty() {
-        src.each(None, None, None, |q| {
-            let p = q.predicate.as_str();
-            if p == RDF_TYPE {
-                if let Term::NamedNode(c) = &q.object {
-                    if !reserved(c.as_str()) {
-                        individuals.insert(q.subject.into());
-                    }
-                }
-            } else if !reserved(p) {
-                if !matches!(q.object, Term::Literal(_)) {
-                    individuals.insert(q.object);
-                }
-                individuals.insert(q.subject.into());
+    let reflexive = !tbox.reflexive.is_empty();
+    src.each(None, None, None, |q| {
+        if let Term::Literal(l) = &q.object {
+            if datatypes::literal_value(l).is_none() {
+                note(
+                    &mut clash,
+                    "ql-dt-not-type",
+                    format!("{l} is ill-typed: no value of its datatype has that lexical form"),
+                );
             }
-        })?;
-        for x in &individuals {
-            members.entry(x.clone()).or_default();
         }
+        if !reflexive {
+            return;
+        }
+        let p = q.predicate.as_str();
+        if p == RDF_TYPE {
+            if let Term::NamedNode(c) = &q.object {
+                if !reserved(c.as_str()) {
+                    individuals.insert(q.subject.into());
+                }
+            }
+        } else if !reserved(p) {
+            if !matches!(q.object, Term::Literal(_)) {
+                individuals.insert(q.object);
+            }
+            individuals.insert(q.subject.into());
+        }
+    })?;
+    for x in &individuals {
+        members.entry(x.clone()).or_default();
     }
 
     // Each individual: everything above what it is asserted in.
@@ -1822,6 +2089,32 @@ fn ground(
     for v in holds.values_mut() {
         v.sort_unstable();
         v.dedup();
+    }
+    // Disjoint data properties compare values, not terms: `x U "1"` and
+    // `x V "1.0"^^xsd:decimal` with U, V disjoint is a clash.
+    let mut by_value: HashMap<(&Term, Value), Vec<usize>> = HashMap::new();
+    for ((x, y), qs) in &holds {
+        if let Term::Literal(l) = y {
+            by_value
+                .entry((x, datatypes::value_key(l)))
+                .or_default()
+                .extend(qs);
+        }
+    }
+    for ((x, _), qs) in &by_value {
+        for &q in qs {
+            if let Some(&p) = tbox.role_ni[q].iter().find(|p| qs.contains(p)) {
+                note(
+                    &mut clash,
+                    "ql-prp-disjoint",
+                    format!(
+                        "{x} has the same value for {} and {}, declared disjoint",
+                        tbox.show_role(q),
+                        tbox.show_role(p)
+                    ),
+                );
+            }
+        }
     }
     for ((x, y), qs) in &holds {
         for &q in qs {
@@ -2163,21 +2456,14 @@ impl<'t> Rewriter<'t> {
         }
         let parts: Vec<GraphPattern> = patterns
             .iter()
-            .map(|tp| {
-                let alts: Vec<GraphPattern> = self
-                    .expand(tp)
-                    .into_iter()
-                    .map(|tp| bgp(vec![tp]))
-                    .collect();
-                union(alts).unwrap_or(bgp(vec![]))
-            })
+            .map(|tp| union(self.expand(tp)).unwrap_or(bgp(vec![])))
             .collect();
         join(parts)
     }
 
     /// Every rewriting of one ground atom under the TBox (itself first).
-    fn expand(&mut self, tp: &TriplePattern) -> Vec<TriplePattern> {
-        let mut results: Vec<TriplePattern> = vec![tp.clone()];
+    fn expand(&mut self, tp: &TriplePattern) -> Vec<GraphPattern> {
+        let mut results: Vec<GraphPattern> = vec![bgp(vec![tp.clone()])];
         let tbox = self.tbox;
         match &tp.predicate {
             NamedNodePattern::NamedNode(pred) if pred.as_str() == RDF_TYPE => {
@@ -2185,8 +2471,8 @@ impl<'t> Rewriter<'t> {
                     if let Some(c) = tbox.class_id(class.as_str()) {
                         for &b in &tbox.sub[c] {
                             if b != c {
-                                if let Some(tp) = self.membership(&tp.subject, b) {
-                                    results.push(tp);
+                                if let Some(p) = self.membership(&tp.subject, b) {
+                                    results.push(p);
                                 }
                             }
                         }
@@ -2197,7 +2483,11 @@ impl<'t> Rewriter<'t> {
                 if let Some(p) = tbox.property_id(pred.as_str()) {
                     for &r in &tbox.role_sub[p] {
                         if r != p && !tbox.roles[r].is_fresh() {
-                            results.push(role_pattern(&tp.subject, &tbox.roles[r], &tp.object));
+                            results.push(bgp(vec![role_pattern(
+                                &tp.subject,
+                                &tbox.roles[r],
+                                &tp.object,
+                            )]));
                         }
                     }
                 }
@@ -2209,16 +2499,46 @@ impl<'t> Rewriter<'t> {
         results
     }
 
-    /// The atom for `subject` being in basic concept `b`, if it has one over
-    /// named data (`∃` of a fresh role has none).
-    fn membership(&mut self, subject: &TermPattern, b: usize) -> Option<TriplePattern> {
-        match &self.tbox.basics[b] {
+    /// The pattern for `subject` being in basic concept `b`, if it has one
+    /// over named data (`∃` of a fresh role has none, but for `∃U.D` on the
+    /// left: a `U` value that passes [`IN_DATA_RANGE`]).
+    fn membership(&mut self, subject: &TermPattern, b: usize) -> Option<GraphPattern> {
+        let tbox = self.tbox;
+        match &tbox.basics[b] {
             Basic::Class(c) if c == OWL_THING => None,
-            Basic::Class(c) => Some(type_pattern(subject.clone(), c)),
-            Basic::Exists(r) if r.is_fresh() => None,
+            Basic::Class(c) => Some(bgp(vec![type_pattern(subject.clone(), c)])),
+            Basic::Exists(r) if r.is_fresh() => {
+                let f = tbox.exists_of[b]?;
+                let (_, u, d) = tbox.restrictions.iter().find(|(x, _, _)| *x == f)?;
+                let alts: Vec<GraphPattern> = tbox.role_sub[*u]
+                    .iter()
+                    .filter(|&&r| !tbox.roles[r].is_fresh() && !tbox.roles[r].inverse)
+                    .map(|&r| {
+                        let v = self.fresh.variable();
+                        let mut args = vec![Expression::Variable(v.clone())];
+                        args.extend(
+                            d.iris()
+                                .into_iter()
+                                .map(|i| Expression::NamedNode(oxrdf::NamedNode::new_unchecked(i))),
+                        );
+                        GraphPattern::Filter {
+                            expr: Expression::FunctionCall(
+                                Function::Custom(oxrdf::NamedNode::new_unchecked(IN_DATA_RANGE)),
+                                args,
+                            ),
+                            inner: Box::new(bgp(vec![role_pattern(
+                                subject,
+                                &tbox.roles[r],
+                                &TermPattern::Variable(v),
+                            )])),
+                        }
+                    })
+                    .collect();
+                union(alts)
+            }
             Basic::Exists(r) => {
                 let f = self.fresh.var();
-                Some(role_pattern(subject, r, &f))
+                Some(bgp(vec![role_pattern(subject, r, &f)]))
             }
         }
     }
@@ -2229,7 +2549,6 @@ impl<'t> Rewriter<'t> {
         let alts: Vec<GraphPattern> = subs
             .into_iter()
             .filter_map(|b| self.membership(subject, b))
-            .map(|tp| bgp(vec![tp]))
             .collect();
         union(alts)
     }

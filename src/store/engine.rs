@@ -743,6 +743,15 @@ impl TripleStore {
             opts = opts.with_custom_function(iri, move |args| handler(args));
         }
 
+        // OWL 2 QL value test for `∃U.D` in rewritten queries.
+        #[cfg(feature = "owl2-ql")]
+        {
+            use crate::reasoning::owl2_ql::{in_data_range, IN_DATA_RANGE};
+            opts = opts.with_custom_function(NamedNode::new_unchecked(IN_DATA_RANGE), |args| {
+                in_data_range(args)
+            });
+        }
+
         // Register SHACL-AF user-defined functions (sh:SPARQLFunction) discovered in the
         // store. Discovery uses the raw quad index (never store.query), so this does not
         // re-enter query_options; each function evaluates against a fresh in-memory store.

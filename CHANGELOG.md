@@ -85,6 +85,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asks for, and re-pins; the store now tells everyone which datasets that applies to.
 
 ### Changed
+- **OWL 2 QL is graded Full.** Data ranges are now decided on values through
+  the OWL 2 datatype map (`src/reasoning/datatypes.rs`, the nineteen
+  datatypes of the EL and QL maps): `-5` against `xsd:nonNegativeInteger`,
+  `"1.5"^^xsd:decimal` against `xsd:integer` and a language-tagged string
+  against `xsd:string` are inconsistent (`ql-dt-range`), and so is an
+  ill-typed literal anywhere in the data (`ql-dt-not-type`). `∃U.D` with a
+  data range `D` works on the left of an inclusion (a subject with a `U` value
+  in `D` gets the class, in materialisation and in the stand-alone
+  rewriting), a class that needs a value outside its property's range is
+  unsatisfiable, data ranges may be intersections or datatype definitions, and
+  disjoint data properties compare values (`1` and `"1.0"^^xsd:decimal` clash).
+  Ranges on datatypes outside the QL map (`xsd:boolean`, `xsd:double`, …) are
+  reported as ignored axioms instead of being checked by datatype family.
+  `docs/standards.md` grades OWL 2 QL Full and the Standards Score in
+  `docs/triplestore-comparison.md` goes 22 → 23.
 - **OWL 2 QL is graded Partial.** `docs/standards.md` graded it Full while the
   rewriter was unsound and wrote no individual inferences. With the DL-Lite_R
   closure in place, what remains is checking data-property values against the
