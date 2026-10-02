@@ -356,13 +356,11 @@ pub fn infer_into(
                     continue;
                 }
                 apply_rule(
-                    store,
                     &view,
                     &rule.conditions,
                     &evaluator,
                     focus_node,
                     &rule.body,
-                    data_graphs,
                     target_graph,
                 )?;
             }
@@ -1834,7 +1832,7 @@ fn load_rules(store: &TripleStore, shapes_graph: &str) -> Result<Vec<Rule>, Stri
     Ok(rules)
 }
 
-/// Apply one rule to one focus node: evaluate it read-only over `data_graphs`,
+/// Apply one rule to one focus node: evaluate it read-only over the view's data graphs,
 /// and materialise what it derives into `target_graph` (the unnamed default
 /// graph when there is none). The number of *new* triples is not measured here —
 /// `infer` tracks it via the store's count delta per round (see there), so a
@@ -1846,15 +1844,14 @@ fn load_rules(store: &TripleStore, shapes_graph: &str) -> Result<Vec<Rule>, Stri
 /// the body is data that any writer of a dataset can upload, and it used to be
 /// handed to `TripleStore::update`, which authorizes nothing.
 fn apply_rule(
-    store: &TripleStore,
     view: &DataView<'_>,
     shapes: &[Shape],
     evaluator: &oxigraph::sparql::SparqlEvaluator,
     focus_node: &Term,
     body: &RuleBody,
-    data_graphs: &[String],
     target_graph: Option<&str>,
 ) -> Result<(), String> {
+    let (store, data_graphs) = (view.store, view.data_graphs);
     let triples = match body {
         RuleBody::Construct { query, binds_this } => {
             // The focus node is bound as a *term*, never pasted into the query
