@@ -840,6 +840,13 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // is heavy: a bigger burst than SPARQL, but a tighter sustained rate.
     let bulk_import_rate_conf = make_rate_conf(10, 30);
 
+    // Public map / 3D viewer surface (viewer feed, geo stats, asset download,
+    // 3D Tiles): anonymous-capable and expensive per request, so it carries
+    // the SPARQL quota (60/min sustained, burst 40) in its own bucket — one
+    // viewer open fires a handful of these, and browsing a map must not eat
+    // the caller's SPARQL allowance.
+    let viewer_rate_conf = make_rate_conf(1, 40);
+
     // Public auth routes (no auth required) — rate-limited against brute force
     let auth_public_routes = Router::new()
         .route("/api/auth/register", post(handlers::register))
@@ -1419,6 +1426,15 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/banner-preset",
             put(handlers::set_dataset_banner_preset),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
+        .with_state(state.clone());
+
+    // Map / 3D viewer reads, rate-limited (see `viewer_rate_conf`).
+    let viewer_routes = Router::new()
         // Viewer feed: per-element geometry + 3D-file references (map/3D viewers).
         // Optional auth so public datasets are viewable anonymously.
         .route(
@@ -1444,6 +1460,9 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             endpoint_acl_guard,
         ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
+        .route_layer(GovernorLayer {
+            config: viewer_rate_conf.clone(),
+        })
         .with_state(state.clone());
 
     // SHACL validation routes
@@ -1951,6 +1970,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(avatar_get_routes)
         .merge(org_image_routes)
         .merge(dataset_image_routes)
+        .merge(viewer_routes)
         .merge(dataset_mixed_routes)
         .merge(dataset_protected_routes)
         .merge(asset_routes)
@@ -2005,7 +2025,8 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             .with_state(state.clone()),
     );
 
-    // 3D Tiles 1.1 (P5): tileset.json + content.glb, anonymous-capable.
+    // 3D Tiles 1.1 (P5): tileset.json + content.glb, anonymous-capable, in the
+    // viewer rate-limit bucket.
     #[cfg(feature = "geometry3d")]
     {
         let tiles3d_routes = Router::new()
@@ -2015,6 +2036,9 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 endpoint_acl_guard,
             ))
             .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
+            .route_layer(GovernorLayer {
+                config: viewer_rate_conf.clone(),
+            })
             .with_state(state.clone());
         router = router.merge(tiles3d_routes);
     }

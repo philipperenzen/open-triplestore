@@ -11371,27 +11371,30 @@ pub async fn viewer_feed(
         q.located.as_deref().map(str::trim),
         Some("true" | "1" | "yes" | "on")
     );
-    let mut elements = crate::geo::viewer_feed::build_viewer_feed_opts(
-        &state.store,
-        &data_graphs,
-        q.root.as_deref(),
-        located,
-        q.lang.as_deref().map(str::trim).filter(|s| !s.is_empty()),
-    );
-    // Hand the browser origin-relative URLs for models this deployment serves
-    // itself, so they resolve against the host the user actually opened — a
-    // LAN IP, a reverse-proxy hostname — and not the origin baked in at seed
-    // time (which is `localhost` on a default install, and therefore dead for
-    // every device except this one).
-    crate::geo::viewer_feed::relativise_self_urls(&mut elements, &state.base_url);
-    // Administrative place path (country → region → city) for the viewer's
-    // "Group by location" lens, inferred from the RDF only.
-    crate::geo::viewer_feed::resolve_places(
-        &state.store,
-        &data_graphs,
-        &mut elements,
-        &state.base_url,
-    );
+    // The feed walks every element of the dataset: CPU- and store-bound work
+    // that belongs on the blocking pool, not on an async worker.
+    let (store, base_url) = (state.store.clone(), state.base_url.clone());
+    let elements = tokio::task::spawn_blocking(move || {
+        let mut elements = crate::geo::viewer_feed::build_viewer_feed_opts(
+            &store,
+            &data_graphs,
+            q.root.as_deref(),
+            located,
+            q.lang.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+        );
+        // Hand the browser origin-relative URLs for models this deployment serves
+        // itself, so they resolve against the host the user actually opened — a
+        // LAN IP, a reverse-proxy hostname — and not the origin baked in at seed
+        // time (which is `localhost` on a default install, and therefore dead for
+        // every device except this one).
+        crate::geo::viewer_feed::relativise_self_urls(&mut elements, &base_url);
+        // Administrative place path (country → region → city) for the viewer's
+        // "Group by location" lens, inferred from the RDF only.
+        crate::geo::viewer_feed::resolve_places(&store, &data_graphs, &mut elements, &base_url);
+        elements
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(serde_json::json!({
         "dataset_id": dataset_id,
         "count": elements.len(),
@@ -11431,8 +11434,20 @@ pub async fn geo_stats(
         .into_iter()
         .filter(|g| !g.ends_with("/ifcowl") && !is_tiles3d_graph(g))
         .collect();
-    let stats = crate::geo::viewer_feed::dataset_geo_stats(&state.store, &data_graphs);
-    Ok(Json(stats))
+    Ok(Json(geo_stats_blocking(&state, data_graphs).await?))
+}
+
+/// `dataset_geo_stats` (four store probes) on the blocking pool.
+async fn geo_stats_blocking(
+    state: &AppState,
+    data_graphs: Vec<String>,
+) -> Result<crate::geo::viewer_feed::GeoStats, (StatusCode, String)> {
+    let store = state.store.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::geo::viewer_feed::dataset_geo_stats(&store, &data_graphs)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 #[derive(Deserialize)]
@@ -11509,8 +11524,7 @@ pub async fn geo_stats_batch(
         return Ok(Json(crate::geo::viewer_feed::GeoStats::default()));
     }
 
-    let stats = crate::geo::viewer_feed::dataset_geo_stats(&state.store, &data_graphs);
-    Ok(Json(stats))
+    Ok(Json(geo_stats_blocking(&state, data_graphs).await?))
 }
 
 #[cfg(test)]
