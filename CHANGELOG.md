@@ -72,9 +72,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   applied with `POST …/repair/proposals/:pid/apply`. The apply checks the
   proposal's base (`409` and `superseded` when the dataset moved), runs the
   write gates (`422`), and records one commit whose `metadata.repair` names
-  the proposal. `POST /api/datasets/:id/patch` gains the same checks, opt-in:
-  `?if-base-commit=` (or `If-Match`), `?if-base-sequence=` with the change
-  log, and `?validate=true`. Without them it behaves as before. SHACL
+  the proposal. `POST /api/datasets/:id/patch` gains the base check as two
+  opt-in preconditions over the dataset's graphs: `?if-base-commit=` (or
+  `If-Match`) and `?if-base-sequence=` with the change log. Without them it
+  behaves as before. SHACL
   Studio's assistant takes `task: "repair"`: it sends the model what no rule
   repaired, runs the rules the model answers with under a heuristic guard
   (smaller budget, nothing destructive, only predicates already in use), and

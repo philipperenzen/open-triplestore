@@ -256,20 +256,23 @@ applied here.
 
 ### The same checks on the patch route
 
-`POST /api/datasets/{id}/patch` takes three opt-in options for a patch you
-apply yourself — a downloaded proposal, or any other:
+`POST /api/datasets/{id}/patch` takes the base check as two opt-in
+preconditions, for a patch you apply yourself (a downloaded proposal, or any
+other). Both are about the dataset's graphs, the ones a proposal's base was
+computed over:
 
 | Option | |
 |---|---|
-| `?if-base-commit=<iri>` or `If-Match: "<iri>"` | `409` unless `<iri>` (or the bare commit id) is still the newest commit touching a graph the patch names. An empty value means no commit has touched them yet. |
-| `?if-base-sequence=<n>&if-base-epoch=<e>` | `409` if a change-log row after `n` touches those graphs. This also sees writes that record no commit. Needs `OTS_CHANGE_CAPTURE=on` (`400` without). |
-| `?validate=true` | Run the write gates of the graphs the patch touches first; `422` with the report on a refusal. |
+| `?if-base-commit=<iri>` or `If-Match: "<iri>"` | `409` unless `<iri>` (or the bare commit id) is still the newest commit touching one of the dataset's graphs. An empty value means no commit has touched them yet. |
+| `?if-base-sequence=<n>&if-base-epoch=<e>` | `409` if a change-log row after `n` touches one of the dataset's graphs. This also sees writes that record no commit. Needs `OTS_CHANGE_CAPTURE=on` (`400` without). |
 
 A `409` body is `{"error": "stale_base", "message", "precondition",
 "current"}`, where `current` is the newest commit or the log's sequence and
 epoch. A proposal's `H base-commit`, `H base-sequence` and `H base-epoch`
-headers are the values to pass. Without an option the route applies a patch
-exactly as it always has.
+headers are the values to pass. For a proposal whose run left graphs out
+(`scope.graphs`, or graphs the caller may not read), the apply route checks
+exactly the graphs it read and is the one to use. Without an option the route
+applies a patch exactly as it always has.
 
 ### The assistant
 

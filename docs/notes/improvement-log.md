@@ -1359,7 +1359,8 @@ reasons):
 4. Proposals are files.
 5. The commit kind is `Sparql` plus `metadata`.
 6. `Rewrite` is opt-in per rule and never heuristic.
-7. `?validate=true` stays opt-in on the patch route.
+7. No `?validate=true` on the patch route: the owner's D10 for #434 gates
+   every patch.
 8. Compiled rules are `PerGraph`.
 9. `datatype-relabel` stays opt-in.
 10. Not reached.
@@ -1371,11 +1372,13 @@ None of them changes an existing feature, so none needed the owner.
 `src/rdf_patch.rs`, `src/shacl/engine.rs`, `src/shacl/report.rs`,
 `src/shacl_studio/gate.rs` and `src/commit_log.rs` are not touched.
 
-- **PR #434** rewrites the patch module and gates every patch. So the
-  emitter lives in `repair::proposal`. The apply writes through the public
-  `update_targeted_delta`. The patch route's options are a route layer at
-  its mount, and one adapter (`repair::apply::patch_rows`) is the only code
-  to change when #434 lands.
+- **PR #434** rewrites the patch module and, by the owner's D10, gates
+  every patch. So the emitter lives in `repair::proposal`, and the apply
+  writes through the public `update_targeted_delta`. The patch route gets
+  only the two preconditions, as a route layer at its mount that never
+  reads the patch: they cover the dataset's graphs, which is what a
+  proposal's base headers mean. No `?validate=true` was added, since it
+  would run #434's gates a second time.
 - **PR #432** adds `source_constraint_component` to `ValidationResult`. The
   repair layer maps `source_constraint` itself, so it works with and
   without #432.
@@ -1417,11 +1420,10 @@ is how a proposal's apply writes it, about 260 times less. PR #434's
 
 **Merge points left for whoever lands second.** These are listed in the
 note's 11.4:
-- #434: the adapter; the layer's now-redundant `validate` step; one test
-  asserting the ungated default.
+- #434: none in the code. Only the changelog and table lines conflict.
 - #436: `DataView::new` gains an evaluator.
-- #418: `ip` in `shacl_assist`.
-- #427: the `/patch` OpenAPI entry should list the three options.
+- #418: `ip` in `shacl_assist`. It is `Option<String>` on both sides.
+- #427: the `/patch` OpenAPI entry should list the two preconditions.
 - The delta branch: one lock instead of two.
 
 ## Checkpoint (2026-09-16, HEAD `e94d889` + this note)

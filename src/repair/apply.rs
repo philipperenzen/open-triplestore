@@ -1,21 +1,21 @@
 //! Applying a patch against a base marker (`docs/notes/repair-layer-design.md`
-//! §8.3): the opt-in preconditions and gate of `POST
-//! /api/datasets/:dataset_id/patch`, and `POST
-//! /api/datasets/:dataset_id/repair/proposals/:proposal_id/apply`.
+//! §8.3): `POST /api/datasets/:dataset_id/repair/proposals/:proposal_id/apply`,
+//! and the opt-in preconditions of `POST /api/datasets/:dataset_id/patch`.
 //!
-//! On the patch route everything here is opt-in. Without a query parameter
-//! or `If-Match` the request reaches the handler untouched; with them:
+//! On the patch route both preconditions are opt-in. Without them, the
+//! request reaches the handler untouched; with them:
 //!
 //! * `?if-base-commit=<iri>` (or `If-Match: "<iri>"`): the newest commit
-//!   touching any graph the patch names must still be that one (an empty
+//!   touching any of the dataset's graphs must still be that one (an empty
 //!   value: no commit touched them yet), else 409;
 //! * `?if-base-sequence=<n>` (and `&if-base-epoch=` when the client has it):
 //!   no change-log row after `n` may touch those graphs, else 409. It needs
 //!   change capture (400 without it), and unlike the commit check it also
-//!   sees writes that record no commit;
-//! * `?validate=true`: the SHACL write gates of every graph the patch touches
-//!   run over what the graph would hold after it, and a refusal is the 422 a
-//!   Graph Store write's gate refusal is.
+//!   sees writes that record no commit.
+//!
+//! The graphs are the dataset's, not only the ones the patch names: they are
+//! what a proposal's `H base-commit` and `H base-sequence` were computed
+//! over, so a downloaded proposal checks out exactly as its apply would.
 //!
 //! Both routes take the dataset's patch lock ([`lock_dataset`]) from the
 //! precondition through the write, so two patch applies to one dataset never
@@ -26,12 +26,11 @@
 use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, OnceLock};
 
-use axum::body::{Body, Bytes};
 use axum::extract::{FromRequestParts, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::{Extension, Json, RequestExt};
+use axum::{Extension, Json};
 use dashmap::DashMap;
 use oxigraph::model::{GraphName, GraphNameRef, NamedNode, Quad};
 use serde::Deserialize;
@@ -81,9 +80,6 @@ impl Drop for PatchLock {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct ApplyOptions {
-    /// `true` / `1` / `yes` / `on` turn the gate on; any other value leaves
-    /// it off, as the route did before it read the parameter.
-    pub validate: Option<String>,
     #[serde(rename = "if-base-commit")]
     pub if_base_commit: Option<String>,
     #[serde(rename = "if-base-sequence")]
@@ -106,16 +102,8 @@ impl ApplyOptions {
         self
     }
 
-    fn validate(&self) -> bool {
-        self.validate.as_deref().is_some_and(|v| {
-            ["true", "1", "yes", "on"]
-                .iter()
-                .any(|t| v.trim().eq_ignore_ascii_case(t))
-        })
-    }
-
     fn any(&self) -> bool {
-        self.validate() || self.if_base_commit.is_some() || self.if_base_sequence.is_some()
+        self.if_base_commit.is_some() || self.if_base_sequence.is_some()
     }
 }
 
@@ -247,26 +235,6 @@ fn check_gates(
     Ok(())
 }
 
-/// A patch's rows as quads, in order, `true` for an add: `None` when a row
-/// names no graph. The one place that reads `rdf_patch`'s row type.
-fn patch_rows(patch: &crate::rdf_patch::Patch) -> Result<Option<Vec<(bool, Quad)>>, String> {
-    use crate::rdf_patch::Op;
-    let mut rows = Vec::with_capacity(patch.ops.len());
-    for op in &patch.ops {
-        let (add, q) = match op {
-            Op::Add(q) => (true, q),
-            Op::Delete(q) => (false, q),
-        };
-        let Some(g) = &q.g else {
-            return Ok(None);
-        };
-        let line = format!("{} {} {} {g} .", q.s, q.p, q.o);
-        let quad = parse_nquad(&line)?;
-        rows.push((add, quad));
-    }
-    Ok(Some(rows))
-}
-
 fn parse_nquad(line: &str) -> Result<Quad, String> {
     oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::NQuads)
         .for_reader(line.as_bytes())
@@ -287,13 +255,26 @@ fn graphs_of(rows: &[(bool, Quad)]) -> Vec<String> {
         .collect()
 }
 
-/// The layer on `POST /api/datasets/:dataset_id/patch`. A request without an
-/// option goes to the handler as it is, under the dataset's patch lock. A
-/// request with one has its access checked as the handler checks it, its
-/// preconditions and gate evaluated, and then reaches the handler with the
-/// lock still held. A patch this layer cannot read (no graph on a row, an
-/// unregistered graph, a parse error) also goes to the handler, which
-/// refuses it as it always has.
+/// The dataset's graphs, as the base marker of a repair run counts them.
+fn dataset_graphs(state: &AppState, dataset_id: &str) -> Result<Vec<String>, Response> {
+    state
+        .auth_db
+        .list_dataset_graphs(dataset_id)
+        .map(|gs| {
+            gs.into_iter()
+                .filter(|g| !g.starts_with("urn:system:reports:"))
+                .collect()
+        })
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())
+}
+
+/// The layer on `POST /api/datasets/:dataset_id/patch`. A request without a
+/// precondition goes to the handler as it is, under the dataset's patch
+/// lock. A request with one has its access checked as the handler checks
+/// it and its preconditions evaluated over the dataset's graphs — the graphs
+/// a proposal's `H base-commit` and `H base-sequence` are about — and then
+/// reaches the handler with the lock still held. The patch itself is not
+/// read here: parsing and the write gates stay the handler's.
 pub async fn patch_route_layer(
     State(state): State<AppState>,
     req: Request,
@@ -308,64 +289,24 @@ pub async fn patch_route_layer(
         Ok(Path(id)) => id,
         Err(e) => return e.into_response(),
     };
-    let user = parts.extensions.get::<AuthenticatedUser>().cloned();
+    let req = Request::from_parts(parts, body);
+    let user = req.extensions().get::<AuthenticatedUser>().cloned();
     let (Some(user), true) = (user, opts.any()) else {
         let _held = lock_dataset(&dataset_id).await;
-        return next.run(Request::from_parts(parts, body)).await;
+        return next.run(req).await;
     };
     if let Err(e) = writable_dataset(&state, &user, &dataset_id) {
         return e.into_response();
     }
-    // The body under the route's own size limit, as the handler reads it.
-    let (parts, body) = Request::from_parts(parts, body)
-        .with_limited_body()
-        .into_parts();
-    let bytes: Bytes = match axum::body::to_bytes(body, usize::MAX).await {
-        Ok(b) => b,
-        Err(e) => {
-            return (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!("Failed to buffer the request body: {e}"),
-            )
-                .into_response()
-        }
+    let graphs = match dataset_graphs(&state, &dataset_id) {
+        Ok(g) => g,
+        Err(resp) => return resp,
     };
-    let pass = |parts, bytes: Bytes| Request::from_parts(parts, Body::from(bytes));
-    let rows = std::str::from_utf8(&bytes)
-        .ok()
-        .and_then(|t| crate::rdf_patch::parse(t).ok())
-        .and_then(|p| patch_rows(&p).ok().flatten());
-    let registered: HashSet<String> = state
-        .auth_db
-        .list_dataset_graphs(&dataset_id)
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-    let readable = |r: &Vec<(bool, Quad)>| {
-        !r.is_empty() && graphs_of(r).iter().all(|g| registered.contains(g))
-    };
-    let Some(rows) = rows.filter(readable) else {
-        let _held = lock_dataset(&dataset_id).await;
-        return next.run(pass(parts, bytes)).await;
-    };
-    let graphs = graphs_of(&rows);
     let _held = lock_dataset(&dataset_id).await;
     if let Err(resp) = check_preconditions(&state, &graphs, &opts) {
         return *resp;
     }
-    if opts.validate() {
-        let st = state.clone();
-        let gs = graphs.clone();
-        let gated = tokio::task::spawn_blocking(move || check_gates(&st, &user, &rows, &gs)).await;
-        match gated {
-            Ok(Ok(())) => {}
-            Ok(Err(report)) => return AppError::ValidationFailed(report).into_response(),
-            Err(e) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-            }
-        }
-    }
-    next.run(pass(parts, bytes)).await
+    next.run(req).await
 }
 
 /// A stored proposal's rows, in patch order: the patch is ours, so every
@@ -429,8 +370,8 @@ pub(crate) fn ground_update(rows: &[(bool, Quad)]) -> String {
 /// adds; a proposal computed from a state the dataset has left becomes
 /// `superseded` (409). The write gates always run: this route is new, so
 /// gating it changes no existing contract, and a write the dataset's own
-/// gates refuse on the Graph Store route must not go through here
-/// (`?validate=true` is accepted and changes nothing). The write is one
+/// gates refuse on the Graph Store route must not go through here. The
+/// write is one
 /// ground update, so the count and text indexes take the exact delta; the
 /// commit records the proposal in its metadata, and the apply is audited as
 /// the SPARQL update it is.
@@ -685,7 +626,7 @@ mod tests {
         h.insert(header::IF_MATCH, "W/\"urn:c:1\"".parse().unwrap());
         let o = ApplyOptions::default().with_headers(&h);
         assert_eq!(o.if_base_commit.as_deref(), Some("urn:c:1"));
-        assert!(o.any() && !o.validate());
+        assert!(o.any());
         let q = ApplyOptions {
             if_base_commit: Some("urn:c:2".into()),
             ..Default::default()

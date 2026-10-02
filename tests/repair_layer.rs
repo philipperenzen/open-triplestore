@@ -910,7 +910,8 @@ async fn the_apply_runs_the_write_gates_and_a_refusal_keeps_the_proposal() {
 }
 
 /// The patch route's opt-in base-commit precondition, by query or
-/// `If-Match`. Without it the route is unchanged.
+/// `If-Match`, over the dataset's graphs. Without it the route is
+/// unchanged.
 #[tokio::test]
 async fn the_patch_route_checks_a_base_commit_when_asked() {
     let (state, token) = bridge_state();
@@ -1029,40 +1030,6 @@ async fn the_patch_route_checks_a_base_sequence_against_the_change_log() {
         .unwrap();
     let (s, _) = post_patch(&app, &token, &q(seq, &epoch), None, name_patch(26)).await;
     assert_eq!(s, StatusCode::CONFLICT);
-}
-
-/// `?validate=true` runs the write gates of the graphs the patch touches
-/// over what they would hold. The option is what turns the gate on for this
-/// route (PR #434 proposes gating every patch).
-#[tokio::test]
-async fn validate_true_runs_the_write_gates_on_the_patch_route() {
-    let (state, token) = bridge_state();
-    state
-        .auth_db
-        .update_dataset_shacl("ds", true, Some(SHAPES))
-        .unwrap();
-    let app = test_app(state.clone());
-    let bridge = format!("TX .\nA <http://example.org/b30> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.org/Bridge> <{DATA}> .\nTC .\n");
-    let (s, body) = post_patch(&app, &token, "?validate=true", None, bridge.clone()).await;
-    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-    assert!(
-        body["results"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r["focusNode"] == "http://example.org/b30"),
-        "{body}"
-    );
-    assert!(!ask(
-        &state,
-        &format!("ASK {{ GRAPH <{DATA}> {{ <http://example.org/b30> ?p ?o }} }}")
-    ));
-    let (s, body) = post_patch(&app, &token, "", None, bridge).await;
-    assert_eq!(
-        s,
-        StatusCode::OK,
-        "without the option the route applies as before: {body}"
-    );
 }
 
 /// The test plan's last item: a `Rewrite` merge applied through the
