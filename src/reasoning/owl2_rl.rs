@@ -1,10 +1,18 @@
 //! OWL 2 RL profile — forward-chaining materialization.
 //!
 //! Implements the W3C OWL 2 Profiles §4.3 RL/RDF rules (Tables 4–9) as
-//! SPARQL INSERT operations executed in a fixed-point loop: 75 of the 78
-//! rules run ([`IMPLEMENTED_RULES`]); the 3 that do not are listed with
-//! their reason in [`UNIMPLEMENTED_RULES`], and `tests/owl2_rl_conformance.rs`
-//! pins both lists against the specification's inventory.
+//! SPARQL INSERT operations executed in a fixed-point loop: all 78 rules run
+//! ([`IMPLEMENTED_RULES`]; [`UNIMPLEMENTED_RULES`] is empty), and
+//! `tests/owl2_rl_conformance.rs` pins both lists against the specification's
+//! inventory.
+//!
+//! The Table 8 rules that conclude triples with a literal subject
+//! (`dt-type2`, `dt-eq`, `dt-diff`) run in Rust over the data values of the
+//! literals in scope (the `literals` module, with the OWL 2 RL datatype map
+//! of `reasoning::datatypes`): equal-valued literals written differently get
+//! each other's triples, data values type the subjects of `someValuesFrom`
+//! restrictions, and a literal outside its range, or two different values of
+//! a functional data property, is an inconsistency.
 //!
 //! Inconsistency-detection rules raise `ReasoningError::Inconsistency` rather
 //! than inserting triples.
@@ -43,6 +51,8 @@ use tracing::{debug, info};
 use super::common::{count_graph, ReasoningError, ReasoningReport, OWL2_RL_ENTAILMENT_GRAPH};
 use super::identity::IdentityPolicy;
 use crate::store::TripleStore;
+
+mod literals;
 
 // ─── Namespace constants ──────────────────────────────────────────────────────
 
@@ -178,6 +188,9 @@ pub const IMPLEMENTED_RULES: &[&str] = &[
     "cax-adc",
     // Table 8 — datatypes
     "dt-type1",
+    "dt-type2",
+    "dt-eq",
+    "dt-diff",
     "dt-not-type",
     // Table 9 — schema
     "scm-cls",
@@ -204,12 +217,10 @@ pub const IMPLEMENTED_RULES: &[&str] = &[
 
 /// The RL/RDF rules this engine does not run, each with the reason. Kept
 /// next to [`IMPLEMENTED_RULES`] so the two lists together are the whole
-/// specification and the documentation cannot drift from the code.
-pub const UNIMPLEMENTED_RULES: &[(&str, &str)] = &[
-    ("dt-type2", "typing every literal with its datatype needs literal subjects, which an RDF graph cannot hold"),
-    ("dt-eq", "owl:sameAs between literals with equal values needs literal subjects, and SPARQL joins compare terms, not values"),
-    ("dt-diff", "owl:differentFrom between literals needs literal subjects"),
-];
+/// specification and the documentation cannot drift from the code. Empty:
+/// the three Table 8 rules with literal subjects (`dt-type2`, `dt-eq`,
+/// `dt-diff`) are simulated over data values (see the module docs).
+pub const UNIMPLEMENTED_RULES: &[(&str, &str)] = &[];
 
 /// The datatypes of the OWL 2 RL datatype map (OWL 2 Profiles §4.2): what
 /// `dt-type1` declares as `rdfs:Datatype`.
@@ -516,7 +527,9 @@ impl<'a> Owl2RLReasoner<'a> {
             let after = count_graph(self.store, &self.target_graph)?;
             let added = after.saturating_sub(before);
             debug!("OWL 2 RL iteration {}: +{} triples", iterations, added);
-            if added == 0 {
+            // At the SPARQL rules' fixed point, run Table 8 over the data
+            // values; only when it adds nothing is the closure complete.
+            if added == 0 && self.literal_pass()? == 0 {
                 break;
             }
             if iterations >= self.max_iterations {
@@ -552,7 +565,9 @@ impl<'a> Owl2RLReasoner<'a> {
 
     /// Run inconsistency checks.  Returns `Err(Inconsistency)` if any are triggered.
     pub fn check_consistency(&self) -> Result<(), ReasoningError> {
-        self.rule_dt_not_type()?;
+        // Table 8 (dt-not-type, dt-diff) and the literal side of the class
+        // rules.
+        self.check_literals()?;
         self.rule_eq_diff1()?;
         self.rule_eq_diff23()?;
         self.rule_prp_irp()?;
@@ -994,53 +1009,6 @@ impl<'a> Owl2RLReasoner<'a> {
             tg = self.target_graph
         );
         self.run_update(&q)?;
-        Ok(())
-    }
-
-    /// dt-not-type: a literal whose lexical form is not in the lexical space
-    /// of its datatype (`"abc"^^xsd:integer`) makes the ontology inconsistent.
-    /// Every XSD-typed literal in scope is checked with the same lexical rules
-    /// SHACL's `sh:datatype` uses; oxigraph keeps an ill-formed typed literal
-    /// as its lexical form plus datatype, so it is found here. The scan reads
-    /// the quad index directly (the scoped graphs, or the default and target graphs
-    /// when unscoped) rather than a SPARQL query: a DISTINCT-over-FILTER query
-    /// would take the sharded mirror path, and this check must not depend on
-    /// it.
-    fn rule_dt_not_type(&self) -> Result<(), ReasoningError> {
-        use oxigraph::model::{GraphNameRef, NamedNodeRef, Term};
-        let graphs: Vec<Option<String>> = match self.scope() {
-            Some(scope) => scope.into_iter().map(Some).collect(),
-            None => vec![None, Some(self.target_graph.clone())],
-        };
-        for graph in graphs {
-            let graph_ref = match &graph {
-                Some(g) => match NamedNodeRef::new(g) {
-                    Ok(nn) => GraphNameRef::NamedNode(nn),
-                    Err(_) => continue,
-                },
-                None => GraphNameRef::DefaultGraph,
-            };
-            for quad in self
-                .store
-                .store()
-                .quads_for_pattern(None, None, None, Some(graph_ref))
-            {
-                let quad = quad.map_err(|e| ReasoningError::Store(e.to_string()))?;
-                if let Term::Literal(lit) = &quad.object {
-                    if lit
-                        .datatype()
-                        .as_str()
-                        .starts_with("http://www.w3.org/2001/XMLSchema#")
-                        && !crate::shacl::constraints::xsd_lexical_valid(lit)
-                    {
-                        return Err(ReasoningError::inconsistency(
-                            "dt-not-type",
-                            format!("{lit} is not in the lexical space of its datatype"),
-                        ));
-                    }
-                }
-            }
-        }
         Ok(())
     }
 

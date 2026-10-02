@@ -672,7 +672,8 @@ fn rule_inventory_is_the_whole_rl_rule_set() {
     for must in ["prp-key", "dt-type1", "dt-not-type", "eq-rep-s", "prp-trp"] {
         assert!(IMPLEMENTED_RULES.contains(&must), "{must} is implemented");
     }
-    assert_eq!(IMPLEMENTED_RULES.len(), 75);
+    assert_eq!(IMPLEMENTED_RULES.len(), 78);
+    assert!(UNIMPLEMENTED_RULES.is_empty(), "every rule runs");
 }
 
 // ─── Joins over two derived premises (unscoped runs) ─────────────────────────
@@ -1191,4 +1192,148 @@ fn inverse_property_characteristics_and_domain() {
         ask_tg(&s, "ex:acme owl:sameAs ex:acme2 ."),
         "prp-fp over an inverse (ex:employs is inverse-functional)"
     );
+}
+
+// ─── Table 8 over data values (dt-type2, dt-eq, dt-diff) ─────────────────────
+//
+// The three rules conclude triples with a literal subject. The engine works
+// out their RDF-representable consequences from the literals' data values.
+
+/// dt-eq + eq-rep-o: equal values written with different datatypes get each
+/// other's triples.
+#[test]
+fn dt_eq_copies_triples_to_equal_valued_literals() {
+    let s = store_with("ex:x ex:p \"1\"^^xsd:integer . ex:y ex:q \"1.0\"^^xsd:decimal .");
+    materialize(&s);
+    assert!(
+        ask_tg(&s, "ex:x ex:p ?o . FILTER(datatype(?o) = xsd:decimal)"),
+        "the integer 1 and the decimal 1.0 are one value"
+    );
+    assert!(
+        ask_tg(&s, "ex:y ex:q ?o . FILTER(datatype(?o) = xsd:integer)"),
+        "and the copy goes both ways"
+    );
+    let s = store_with("ex:x ex:p \"1\"^^xsd:integer . ex:y ex:q \"1.5\"^^xsd:decimal .");
+    materialize(&s);
+    assert!(
+        !ask_tg(&s, "ex:x ex:p ?o . FILTER(datatype(?o) = xsd:decimal)"),
+        "different values are not copied"
+    );
+}
+
+/// cls-hv2 by value: a hasValue restriction matches an equal value written
+/// differently.
+#[test]
+fn has_value_matches_by_value() {
+    let s = store_with(
+        "ex:One owl:onProperty ex:n ; owl:hasValue \"1\"^^xsd:integer . \
+         ex:a ex:n \"1.0\"^^xsd:decimal . ex:b ex:n \"2\"^^xsd:integer .",
+    );
+    materialize(&s);
+    assert!(ask_tg(&s, "ex:a rdf:type ex:One ."), "1.0 is the value 1");
+    assert!(!ask_tg(&s, "ex:b rdf:type ex:One ."), "2 is not");
+}
+
+/// prp-key by value: key values that are one value make the individuals
+/// the same.
+#[test]
+fn has_key_matches_by_value() {
+    let s = store_with(
+        "ex:C owl:hasKey ( ex:id ) . ex:a a ex:C ; ex:id \"7\"^^xsd:integer . \
+         ex:b a ex:C ; ex:id \"7.0\"^^xsd:decimal . ex:c a ex:C ; ex:id \"8\"^^xsd:integer .",
+    );
+    materialize(&s);
+    assert!(ask_tg(&s, "ex:a owl:sameAs ex:b ."), "7 and 7.0 are one key value");
+    assert!(!ask_tg(&s, "ex:a owl:sameAs ex:c ."), "8 is another");
+}
+
+/// prp-npa2 by value: a negative data assertion is violated by an equal
+/// value written differently.
+#[test]
+fn negative_data_assertion_matches_by_value() {
+    let s = store_with(
+        "[] owl:sourceIndividual ex:i ; owl:assertionProperty ex:n ; \
+            owl:targetValue \"5\"^^xsd:integer . \
+         ex:i ex:n \"5.0\"^^xsd:decimal .",
+    );
+    assert_eq!(inconsistent_rule(&s).as_deref(), Some("prp-npa2"));
+    let s = store_with(
+        "[] owl:sourceIndividual ex:i ; owl:assertionProperty ex:n ; \
+            owl:targetValue \"5\"^^xsd:integer . \
+         ex:i ex:n \"6\"^^xsd:integer .",
+    );
+    assert_eq!(inconsistent_rule(&s), None);
+}
+
+/// dt-diff + eq-diff1: two different values of a functional data property
+/// are an inconsistency; one value written two ways is not.
+#[test]
+fn functional_data_property_with_two_values_is_inconsistent() {
+    let s = store_with("ex:age a owl:FunctionalProperty . ex:x ex:age 41, 42 .");
+    assert_eq!(inconsistent_rule(&s).as_deref(), Some("dt-diff"));
+    let s = store_with(
+        "ex:age a owl:FunctionalProperty . ex:x ex:age \"1\"^^xsd:integer, \"1.0\"^^xsd:decimal .",
+    );
+    assert_eq!(inconsistent_rule(&s), None, "one value, two lexical forms");
+}
+
+/// cls-maxc2 over a data property: a maximum cardinality of one with two
+/// different values is an inconsistency.
+#[test]
+fn max_cardinality_one_with_two_data_values_is_inconsistent() {
+    let s = store_with(
+        "ex:R owl:onProperty ex:code ; owl:maxCardinality \"1\"^^xsd:nonNegativeInteger . \
+         ex:x a ex:R ; ex:code \"a\", \"b\" .",
+    );
+    assert_eq!(inconsistent_rule(&s).as_deref(), Some("dt-diff"));
+}
+
+/// dt-not-type through prp-rng: a value outside its property's datatype
+/// range is an inconsistency.
+#[test]
+fn value_outside_a_datatype_range_is_inconsistent() {
+    let s = store_with("ex:age rdfs:range xsd:integer . ex:x ex:age \"forty\" .");
+    assert_eq!(inconsistent_rule(&s).as_deref(), Some("dt-not-type"));
+    let s = store_with("ex:age rdfs:range xsd:decimal . ex:x ex:age 40 .");
+    assert_eq!(inconsistent_rule(&s), None, "an integer is a decimal value");
+    let s = store_with("ex:age rdfs:range xsd:nonNegativeInteger . ex:x ex:age -1 .");
+    assert_eq!(inconsistent_rule(&s).as_deref(), Some("dt-not-type"));
+}
+
+/// dt-type2 feeding cls-svf1: a data value types the subject of a
+/// someValuesFrom restriction on a datatype that holds the value.
+#[test]
+fn data_values_type_some_values_from_subjects() {
+    let s = store_with(
+        "ex:HasCount owl:onProperty ex:n ; owl:someValuesFrom xsd:decimal . \
+         ex:Flagged owl:onProperty ex:n ; owl:someValuesFrom xsd:boolean . \
+         ex:a ex:n 3 . ex:b ex:n \"three\" .",
+    );
+    materialize(&s);
+    assert!(ask_tg(&s, "ex:a rdf:type ex:HasCount ."), "3 is a decimal value");
+    assert!(!ask_tg(&s, "ex:b rdf:type ex:HasCount ."), "a string is not");
+    assert!(!ask_tg(&s, "ex:a rdf:type ex:Flagged ."), "3 is no boolean");
+}
+
+/// A double is not a decimal: the float/double value spaces are disjoint
+/// from the decimal one.
+#[test]
+fn double_values_are_not_decimal_values() {
+    let s = store_with(
+        "ex:HasDecimal owl:onProperty ex:n ; owl:someValuesFrom xsd:decimal . \
+         ex:a ex:n \"1.0E0\"^^xsd:double .",
+    );
+    materialize(&s);
+    assert!(!ask_tg(&s, "ex:a rdf:type ex:HasDecimal ."));
+    let s = store_with(
+        "ex:age a owl:FunctionalProperty . ex:x ex:age \"1\"^^xsd:integer, \"1.0E0\"^^xsd:double .",
+    );
+    assert_eq!(inconsistent_rule(&s).as_deref(), Some("dt-diff"), "1 and 1.0E0 differ");
+}
+
+/// cls-nothing2 over a literal: a range of owl:Nothing has no values.
+#[test]
+fn a_literal_in_owl_nothing_is_inconsistent() {
+    let s = store_with("ex:p rdfs:range owl:Nothing . ex:x ex:p \"v\" .");
+    assert_eq!(inconsistent_rule(&s).as_deref(), Some("cls-nothing2"));
 }
