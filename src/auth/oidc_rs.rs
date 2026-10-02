@@ -433,6 +433,8 @@ impl OidcVerifier {
 
 /// Ensure the synthetic env-OIDC provider row exists (idempotent) and return it.
 /// Required because `oauth_identities` FK-references `oauth_providers(id)`.
+/// It has no client ID, so the login page does not offer it
+/// ([`OauthProvider::offers_login`]); this path never consults `is_active`.
 pub fn ensure_env_provider(
     auth_db: &Arc<AuthDb>,
     issuer: &str,
