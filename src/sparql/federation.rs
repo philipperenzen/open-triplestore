@@ -4,9 +4,15 @@
 //! unconditionally (an SSRF mitigation, but also no federation at all). This
 //! handler is registered as the evaluator's default service handler: it
 //! forwards the SERVICE pattern as a stand-alone SELECT to the named endpoint
-//! — only if `crate::remote::is_allowed` says so — with the module's timeout,
-//! caps the rows at `OTS_SERVICE_MAX_ROWS`, and hands the solutions back to
-//! the local evaluator, which joins them with the rest of the query.
+//! — only if `crate::remote::is_allowed` says so — with the module's timeout
+//! and body limit, and hands the solutions back to the local evaluator, which
+//! joins them with the rest of the query.
+//!
+//! A remote result with more than `OTS_SERVICE_MAX_ROWS` rows is a failed
+//! invocation, like a refused endpoint or a timeout: the query errors, or
+//! under `SERVICE SILENT` the evaluator substitutes the empty solution (Ω0).
+//! It is never truncated, because a truncated SERVICE result silently changes
+//! the answer of the query around it.
 //!
 //! Not supported: `SERVICE ?var` (a variable endpoint) and pushing local
 //! bindings into the remote query; each SERVICE is evaluated once, on its own.
@@ -29,9 +35,14 @@ pub enum FederationError {
     Parse { url: String, reason: String },
     #[error("remote <{0}> answered a boolean result where solutions were expected")]
     NotSolutions(String),
+    #[error(
+        "remote <{url}> answered more than {cap} rows; raise {} or narrow the SERVICE pattern",
+        crate::remote::MAX_ROWS_ENV
+    )]
+    TooManyRows { url: String, cap: usize },
 }
 
-/// The default service handler: allowlist, timeout, row cap.
+/// The default service handler: allowlist, timeout, body limit, row cap.
 #[derive(Debug, Clone, Default)]
 pub struct AllowlistedServiceHandler {
     /// The identity the query acts for (captured on the request thread), for
@@ -113,7 +124,10 @@ impl DefaultServiceHandler for AllowlistedServiceHandler {
                 let mut rows: Vec<QuerySolution> = Vec::new();
                 for row in iter {
                     if rows.len() >= cap {
-                        break;
+                        return Err(FederationError::TooManyRows {
+                            url: endpoint.to_string(),
+                            cap,
+                        });
                     }
                     rows.push(row.map_err(|e| FederationError::Parse {
                         url: endpoint.to_string(),

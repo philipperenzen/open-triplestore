@@ -118,9 +118,12 @@ behavior and will flip green when the limitation is resolved.
    include it).
 3. **Federation/`SERVICE` is off by default** as an SSRF mitigation and can be
    enabled per endpoint: `OTS_REMOTE_ALLOWLIST` lists the URL prefixes the
-   server may contact; a `SERVICE` naming anything else errors (or yields no
-   rows under `SERVICE SILENT`). Every call has a timeout and a row cap
-   (`OTS_SERVICE_MAX_ROWS`). Without an allowlist the service description does
+   server may contact; a `SERVICE` naming anything else errors (or, under
+   `SERVICE SILENT`, yields the single empty solution). Every call has a timeout
+   (`OTS_REMOTE_TIMEOUT_SECS`), a response-body limit (`OTS_REMOTE_MAX_BYTES`)
+   and a row cap (`OTS_SERVICE_MAX_ROWS`); exceeding any of them is a failed
+   invocation — an error, or the single empty solution under `SERVICE SILENT`
+   — never a truncated result. Without an allowlist the service description does
    not advertise `sd:BasicFederatedQuery`; with one it does. Not supported:
    `SERVICE ?var` (a variable endpoint) and pushing local bindings to the
    remote — each SERVICE is evaluated as a stand-alone query and joined locally.
