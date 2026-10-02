@@ -14,8 +14,8 @@ Open Triplestore implements it in three parts:
 3. **Existential query rewriting.** A query's blank nodes are rewritten so they can match the
    anonymous elements that the TBox's existentials imply.
 
-The OWL 2 QL grade is **Partial** (see [Standards](standards.md)). One gap remains, the datatype
-map; see [Limitations](#limitations).
+The OWL 2 QL grade is **Full** (see [Standards](standards.md)): the whole profile, data ranges
+included. See [Limitations](#limitations) for what lies outside it.
 
 > **Open Triplestore role names:** In the OTS UI and API, class definitions and class axioms are stored with graph role **Model** (the T-Box) and ABox content with graph role **Instances**.  Property definitions and relations (`rdfs:subPropertyOf`, `owl:inverseOf`, `rdfs:domain`/`range`) are the **R-Box** and belong to the **Vocabulary** role, even though OWL groups them with the TBox for reasoning purposes.  The standard OWL 2 terms TBox and ABox are used throughout this document as they are defined in the W3C OWL 2 specification, and the reasoner classifies over the TBox+RBox schema together.
 
@@ -30,7 +30,7 @@ property `P` or its inverse `P⁻`, so `∃P⁻` is the set of objects of `P`. T
 | `P rdfs:domain C` / `P rdfs:range C` | `∃P ⊑ C` / `∃P⁻ ⊑ C` |
 | `[ owl:onProperty R ; owl:someValuesFrom owl:Thing ]` | `∃R`, on either side (`R` may be `[ owl:inverseOf P ]`) |
 | `[ owl:onProperty R ; owl:someValuesFrom A ]` on the right | `B ⊑ ∃R.A`, a *qualified existential* |
-| `[ owl:onProperty U ; owl:someValuesFrom xsd:… ]` | `∃U` for a data property `U` |
+| `[ owl:onProperty U ; owl:someValuesFrom D ]`, `U` a data property | `∃U.D`, on either side (`∃U` for `rdfs:Literal`) |
 | `owl:intersectionOf` on the right | one inclusion per member |
 | `owl:complementOf`, `owl:disjointWith`, `owl:AllDisjointClasses`, `⊑ owl:Nothing` | negative inclusion `B ⊑ ¬C` |
 | `rdfs:subPropertyOf`, `owl:equivalentProperty`, `owl:inverseOf` | `R ⊑ S`, in both polarities (`R⁻ ⊑ S⁻`) |
@@ -38,15 +38,37 @@ property `P` or its inverse `P⁻`, so `∃P⁻` is the set of objects of `P`. T
 | `owl:propertyDisjointWith`, `owl:AllDisjointProperties` | negative inclusion `R ⊑ ¬S` |
 | `owl:AsymmetricProperty` | `P ⊑ ¬P⁻` |
 | `owl:ReflexiveProperty` / `owl:IrreflexiveProperty` | every element has / has no `P`-loop |
-| `rdfs:range xsd:…` on a data property | the property's values must be in that datatype |
+| `rdfs:range D` on a data property | the property's values must be in `D` |
+| a datatype of the QL map, `[ owl:intersectionOf ( D₁ D₂ … ) ]`, `DT owl:equivalentClass D` for a declared `DT rdfs:Datatype` | a data range `D` |
 
 A qualified existential `B ⊑ ∃R.A` is read with a fresh role `F`: `F ⊑ R`, `∃F⁻ ⊑ A` and
 `B ⊑ ∃F`. It says that every `B` has *some* `R`-value in `A`. It does **not** make every subject
 of `R` a `B`.
 
+A data range is decided on values through the OWL 2 datatype map: the nineteen datatypes of
+the QL map (`rdfs:Literal`, `owl:real`, `owl:rational`, `xsd:decimal`, `xsd:integer`,
+`xsd:nonNegativeInteger`, the string types down to `xsd:NCName` and `xsd:NMTOKEN`,
+`rdf:PlainLiteral`, `rdf:XMLLiteral`, `xsd:hexBinary`, `xsd:base64Binary`, `xsd:anyURI`,
+`xsd:dateTime`, `xsd:dateTimeStamp`). So `"1.0"^^xsd:decimal` is an `xsd:integer`, `-5` is no
+`xsd:nonNegativeInteger`, and a language-tagged string is no `xsd:string`.
+
+- A data property's values lie in the intersection of the ranges on it and on its
+  super-properties. If two of them are disjoint (an integer range and a string one), the property
+  has no values, and so a class that needs one is empty.
+- `∃U.D` on the left holds of a subject with a `U` value in `D`. In the TBox, `∃R ⊑ ∃U.D` when
+  `R` is below `U` and every `R` value is in `D`. So `C ⊑ ∃age.xsd:nonNegativeInteger` reaches
+  `∃age.xsd:integer`, and an unqualified `C ⊑ ∃age` reaches it too when the range of `age` is
+  inside `xsd:integer`.
+- Disjoint data properties compare values: `x U 1` and `x V "1.0"^^xsd:decimal` clash.
+
+Oxigraph stores every integer-derived literal (`xsd:byte`, `xsd:long`, …) as `xsd:integer` and
+`xsd:dateTimeStamp` as `xsd:dateTime`. The checks therefore read the value: `"7"^^xsd:byte` fits
+an `xsd:nonNegativeInteger` range, and `"-5"^^xsd:nonNegativeInteger`, read back as the integer
+`-5`, is out of it.
+
 Axioms outside the profile are not used, for example `owl:TransitiveProperty`, functional
-properties, `owl:hasKey`, property chains, `owl:sameAs`, unions and cardinalities. Each run lists
-them in its report:
+properties, `owl:hasKey`, property chains, `owl:sameAs`, unions, cardinalities, and datatypes
+outside the QL map (`xsd:boolean`, `xsd:double`, `xsd:int`, …). Each run lists them in its report:
 
 ```json
 { "regime": "owl2-ql", "triples_added": 12, "ignored_axioms": 2,
@@ -85,7 +107,9 @@ A run is **inconsistent** if any of these hold:
 | `ql-prp-nothing` | a pair is in an unsatisfiable role |
 | `ql-prp-irp` | an irreflexive property has a loop, or includes a reflexive one |
 | `ql-different-from` | `a owl:differentFrom a` |
-| `ql-dt-range` | a data-property value lies outside its declared datatype |
+| `ql-prp-disjoint` (data) | one value (compared by value) for two disjoint data properties |
+| `ql-dt-range` | a data-property value lies outside its range |
+| `ql-dt-not-type` | an ill-typed literal: its lexical form is no value of its datatype (`"abc"^^xsd:integer`) |
 
 Some of these hold whatever the data says, because a model always has at least one element. A
 reflexive property that is also irreflexive is an example. An inconsistency fails the run with the
@@ -155,7 +179,10 @@ individuals, so the answers stay sound.
 
 `QLQueryRewriter::rewrite_query` and `POST /api/reasoning/rewrite` give a stand-alone rewriting
 over the asserted data. Every atom is also expanded through the hierarchies: `?x a C` becomes a
-`UNION` over every basic concept under `C`, and `?x P ?y` a `UNION` over every role under `P`. This
+`UNION` over every basic concept under `C`, and `?x P ?y` a `UNION` over every role under `P`.
+A basic concept `∃U.D` becomes `?x U ?v` with a `FILTER` on the custom function
+`<https://open-triplestore.org/def/function/owl2/inDataRange>(?v, D…)`, which this store's query
+engine provides; another engine running the rewritten query would need it too. This
 endpoint reads the TBox only from graphs the caller may read; an admin's reads the unnamed default
 graph.
 
@@ -199,12 +226,8 @@ differential test in `tests/owl2_ql_conformance.rs` checks this.
 
 ## Limitations
 
-- **Datatypes.** A data-property value is checked against its declared range by datatype family:
-  a string where an integer is required is an inconsistency. A check that needs the literal's
-  value is not made yet, for example `-5` against `xsd:nonNegativeInteger`. The same applies to
-  `∃U.D` on the left with `D` other than `rdfs:Literal`, and to two data ranges that cannot
-  overlap. These checks wait for the OWL 2 datatype map. Oxigraph also stores every
-  integer-derived literal as `xsd:integer`, so a declared `xsd:byte` reads back as an integer.
+- A declared datatype without a definition is opaque: nothing is known of its values, so it
+  never makes a value fit or clash.
 - `owl:Thing` memberships are not materialised. `?x a owl:Thing` matches only asserted ones, but
   an anonymous element is a `Thing`.
 - Existential rewriting applies to blank nodes in basic graph patterns. It does not apply to

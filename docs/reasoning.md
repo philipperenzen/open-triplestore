@@ -5,7 +5,7 @@ Reasoning can be applied to materialise inferred triples across all named graphs
 | Profile | Best for | Notes |
 |---|---|---|
 | RDFS | Simple schema inference | Lowest overhead. Infers subclass hierarchies, property domains and ranges. |
-| OWL 2 QL | Large read-heavy datasets | DL-Lite_R closure: materialises ground atoms, checks consistency (disjointness, asymmetric/irreflexive properties); existentials are answered through query blank nodes on `?entailment=owl2-ql`. No equality, keys or transitivity. |
+| OWL 2 QL | Large read-heavy datasets | DL-Lite_R closure: materialises ground atoms, checks consistency (disjointness, asymmetric/irreflexive properties, data ranges by value); existentials are answered through query blank nodes on `?entailment=owl2-ql`. No equality, keys or transitivity. |
 | OWL 2 EL | Life sciences (SNOMED-CT, Gene Ontology) | Supports existential restrictions. Polynomial time. |
 | OWL 2 RL | Rule-based integration with RDF | Materialises triples. Most complete; may significantly grow graph size. |
 | OWL 2 DL | Full OWL expressivity | Native support for `hasSelf`, `disjointUnionOf`, `NegativePropertyAssertion`, `hasKey` (1–2 keys), and cardinality annotations on top of all OWL 2 RL rules. Full existential completion (tableau) requires an external reasoner (HermiT, Pellet). |

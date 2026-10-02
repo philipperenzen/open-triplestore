@@ -244,7 +244,7 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 |----------|-------|----------|--------|------------|----------|---------|---------|---------|---------|--------|
 | **RDFS Entailment** | ✅⁵ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ❌ |
 | **OWL 2 EL** | ✅⁶ | ❌ | 🟡 | 🟡 | 🟡 | ✅ | ✅ | 🟡 | ❌ | ❌ |
-| **OWL 2 QL** | 🟡⁶ | ❌ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ | ❌ |
+| **OWL 2 QL** | ✅⁶ | ❌ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ | ❌ |
 | **OWL 2 RL** | ✅⁶ | ❌ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ | ❌ |
 | **OWL 2 DL** | ✅⁷ | ❌ | ❌ | ❌ | ❌ | 🔒 | ✅ | ❌ | ❌ | ❌ |
 | **SHACL Validation** | 🟡¹⁰ | ❌ | 🟡 | ❌ | 🟡 | ✅ | ✅ | ✅ | ❌ | ❌ |
@@ -256,9 +256,9 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >   See [`docs/rdfs-entailment.md`](rdfs-entailment.md).
 > ⁶ OWL 2 EL (CR1–CR10 + hasKey + reflexivity) and OWL 2 RL (~80 forward-chaining rules
 >   including maxCardinality, qualified cardinality, AllDisjointClasses, property chains, and
->   hasKey) via feature flags (`owl2-el`, `owl2-rl`). OWL 2 QL (`owl2-ql`): DL-Lite_R closure,
->   ground materialisation, consistency checks and existential rewriting of query blank nodes;
->   Partial until data-property values are checked against the OWL 2 datatype map.
+>   hasKey) via feature flags (`owl2-el`, `owl2-rl`). OWL 2 QL (`owl2-ql`), the whole profile:
+>   DL-Lite_R closure, ground materialisation, consistency checks (data ranges decided on values
+>   through the OWL 2 datatype map) and existential rewriting of query blank nodes.
 >   See [`docs/owl2-el.md`](owl2-el.md), [`docs/owl2-ql.md`](owl2-ql.md), [`docs/owl2-rl.md`](owl2-rl.md).
 > ⁷ OWL 2 DL: native RL+DL-extension rules (hasSelf, disjointUnion, negativePropertyAssertion,
 >   hasKey, cardinality annotations) run in-process; full tableau via optional Konclude subprocess
@@ -320,10 +320,14 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >
 > Open Triplestore recounted on 2026-10-02, 23 → 22: OWL 2 QL follows its Partial grade in
 > `docs/standards.md` (value checks on data-property ranges are pending).
+>
+> Open Triplestore recounted again on 2026-10-02, 22 → 23: OWL 2 QL is graded Full in
+> `docs/standards.md` now that data ranges are checked on values (OWL 2 datatype map), and the
+> 4.2 cell follows. Section 11.1 follows too.
 
 ```
+Open Triplestore  ███████████████████████░░░░░░   23 / 29  (#1 open-source; GeoSPARQL, SHACL, SPARQL 1.2, RDF-star 🟡; W3C tests not claimed)
 Stardog           ██████████████████████░░░░░░░   22 / 29  (commercial; full OWL DL + ShEx + SWRL; GeoSPARQL 1.1 partial)
-Open Triplestore  ██████████████████████░░░░░░░   22 / 29  (#1 open-source; GeoSPARQL, SHACL, OWL 2 QL, SPARQL 1.2, RDF-star 🟡; W3C tests not claimed)
 GraphDB           █████████████████████░░░░░░░░   21 / 29  (commercial; OWL DL commercial-only; no ShEx/SWRL/LDP/RML)
 Virtuoso          ██████████████░░░░░░░░░░░░░░░   14 / 29
 RDF4J 5           ██████████████░░░░░░░░░░░░░░░   14 / 29  (improved from v4)
@@ -737,7 +741,7 @@ reduces GEOS calls by ~90%.
 | GraphDB | ✅ | ✅ | ✅ | ✅ | 🔒 | ✅ | ✅ | ❌ |
 | Stardog | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Virtuoso | ✅ | 🟡 | ✅ | ✅ | ❌ | 🟡 | ❌ | ❌ |
-| **Open Triplestore** | 🟡 | 🟡 | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ✅ |
+| **Open Triplestore** | 🟡 | 🟡 | ✅ | 🟡 | ❌ | 🟡 | ✅ | ✅ |
 | Jena 5 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | 🟡 | ❌ | ❌ |
 | RDF4J 5 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ✅ | ❌ | ❌ |
 | Blazegraph | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ❌ | ❌ |

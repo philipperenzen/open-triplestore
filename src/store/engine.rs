@@ -391,6 +391,12 @@ fn builtin_functions() -> Vec<(NamedNode, crate::shacl::sparql_functions::FnHand
     fns.extend(crate::sparql::rdf12_functions::all_functions());
     // SPARQL 1.2 ADJUST (always available).
     fns.push(crate::sparql::rdf12_functions::adjust_function());
+    // OWL 2 QL value test for `∃U.D` in rewritten queries.
+    #[cfg(feature = "owl2-ql")]
+    fns.push((
+        NamedNode::new_unchecked(crate::reasoning::owl2_ql::IN_DATA_RANGE),
+        Arc::new(crate::reasoning::owl2_ql::in_data_range),
+    ));
     fns
 }
 

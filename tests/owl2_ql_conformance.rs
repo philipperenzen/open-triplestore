@@ -918,12 +918,236 @@ fn test_ql_data_properties() {
         "ex:age a owl:DatatypeProperty ; rdfs:range xsd:integer . ex:a ex:age \"old\" .",
     );
     assert!(m.contains("ql-dt-range"), "{m}");
-    // ...but one that needs a value check is not judged until the OWL 2
-    // datatype map lands (stored integers all read back as xsd:integer).
+    // ...and so is one whose datatype fits but whose value does not: the
+    // check reads the value through the OWL 2 datatype map.
     assert!(materialise(&data_store(
         "ex:age a owl:DatatypeProperty ; rdfs:range xsd:nonNegativeInteger . ex:a ex:age 5 ."
     ))
     .is_ok());
+    let m = inconsistency(
+        "ex:age a owl:DatatypeProperty ; rdfs:range xsd:nonNegativeInteger . ex:a ex:age -5 .",
+    );
+    assert!(m.contains("ql-dt-range"), "{m}");
+}
+
+#[test]
+fn test_ql_data_value_ranges() {
+    let ok = |ttl: &str| {
+        materialise(&data_store(ttl)).unwrap_or_else(|e| panic!("{ttl}: {e:?}"));
+    };
+    let bad = |ttl: &str, rule: &str| {
+        let m = inconsistency(ttl);
+        assert!(m.contains(rule), "{ttl}: {m}");
+    };
+    // Numbers compare by value: 1.0 is an integer, 1.5 is not.
+    let int = "ex:n rdfs:range xsd:integer . ";
+    ok(&format!("{int} ex:a ex:n \"1.0\"^^xsd:decimal ."));
+    bad(
+        &format!("{int} ex:a ex:n \"1.5\"^^xsd:decimal ."),
+        "ql-dt-range",
+    );
+    // Storage limit (D4): oxigraph stores every integer-derived type as
+    // xsd:integer, so the value decides. A well-typed xsd:byte fits a
+    // nonNegativeInteger range; "-5"^^xsd:nonNegativeInteger is read back
+    // as the integer -5, and is caught as a value outside the range.
+    let nni = "ex:n rdfs:range xsd:nonNegativeInteger . ";
+    ok(&format!("{nni} ex:a ex:n \"7\"^^xsd:byte ."));
+    bad(
+        &format!("{nni} ex:a ex:n \"-5\"^^xsd:nonNegativeInteger ."),
+        "ql-dt-range",
+    );
+    // Strings: a language-tagged string is no xsd:string; NCName has no colon.
+    let st = "ex:n rdfs:range xsd:string . ";
+    ok(&format!("{st} ex:a ex:n \"abc\" ."));
+    bad(&format!("{st} ex:a ex:n \"abc\"@en ."), "ql-dt-range");
+    let nc = "ex:n rdfs:range xsd:NCName . ";
+    ok(&format!("{nc} ex:a ex:n \"abc\" ."));
+    bad(&format!("{nc} ex:a ex:n \"a:b\" ."), "ql-dt-range");
+    // A date-time stamp needs a time zone.
+    let dts = "ex:n rdfs:range xsd:dateTimeStamp . ";
+    ok(&format!(
+        "{dts} ex:a ex:n \"2020-01-01T00:00:00Z\"^^xsd:dateTime ."
+    ));
+    bad(
+        &format!("{dts} ex:a ex:n \"2020-01-01T00:00:00\"^^xsd:dateTime ."),
+        "ql-dt-range",
+    );
+    // An intersection of datatypes, and a datatype definition.
+    let both = "ex:n rdfs:range [ a rdfs:Datatype ; \
+                owl:intersectionOf ( xsd:decimal xsd:nonNegativeInteger ) ] . ";
+    ok(&format!("{both} ex:a ex:n 3 ."));
+    bad(&format!("{both} ex:a ex:n -3 ."), "ql-dt-range");
+    let def = "ex:Age a rdfs:Datatype ; owl:equivalentClass xsd:nonNegativeInteger . \
+               ex:n rdfs:range ex:Age . ";
+    ok(&format!("{def} ex:a ex:n 3 ."));
+    bad(&format!("{def} ex:a ex:n -1 ."), "ql-dt-range");
+    // The range of a super-property applies.
+    bad(
+        &format!("{nni} ex:m rdfs:subPropertyOf ex:n . ex:a ex:m -2 ."),
+        "ql-dt-range",
+    );
+    // An ill-typed literal is inconsistent wherever it appears.
+    bad("ex:a ex:note \"abc\"^^xsd:integer .", "ql-dt-not-type");
+}
+
+#[test]
+fn test_ql_data_some_values_from_on_the_left() {
+    // ∃age.nonNegativeInteger ⊑ Aged: a subject with an age value in the
+    // datatype is Aged, through sub-properties too; -3 and "thirty" are not.
+    let tbox = "[ owl:onProperty ex:age ; owl:someValuesFrom xsd:nonNegativeInteger ] \
+                    rdfs:subClassOf ex:Aged . \
+                ex:years rdfs:subPropertyOf ex:age . ";
+    let abox = "ex:a ex:age 30 . ex:b ex:age -3 . ex:c ex:years 7 . ex:d ex:age \"thirty\" . \
+                ex:e ex:age \"30.0\"^^xsd:decimal .";
+    let s = closed(&format!("{tbox}{abox}"));
+    for x in ["a", "c", "e"] {
+        assert!(in_entailment_graph(&s, &format!("ex:{x} a ex:Aged")), "{x}");
+    }
+    for x in ["b", "d"] {
+        assert!(
+            !in_entailment_graph(&s, &format!("ex:{x} a ex:Aged")),
+            "{x}"
+        );
+    }
+    // The standalone rewriting answers the same over the asserted data,
+    // through a value test in the rewritten query.
+    let s = store_with(&format!("{tbox}{abox}"));
+    assert!(ask_ql(&s, "ASK { ex:a a ex:Aged }"));
+    assert!(ask_ql(&s, "ASK { ex:c a ex:Aged }"));
+    assert!(!ask_ql(&s, "ASK { ex:b a ex:Aged }"));
+    assert!(!ask_ql(&s, "ASK { ex:d a ex:Aged }"));
+    assert_eq!(count_select(&s, "SELECT ?x WHERE { ?x a ex:Aged }"), 3);
+
+    // In the TBox closure: a qualified existential on the right reaches one
+    // on the left when its datatype is inside the left one's...
+    let s = closed(
+        "[ owl:onProperty ex:age ; owl:someValuesFrom xsd:integer ] rdfs:subClassOf ex:Numbered . \
+         [ owl:onProperty ex:age ; owl:someValuesFrom xsd:nonNegativeInteger ] \
+             rdfs:subClassOf ex:Aged . \
+         ex:Adult rdfs:subClassOf [ owl:onProperty ex:age ; owl:someValuesFrom xsd:nonNegativeInteger ] . \
+         ex:Kid rdfs:subClassOf [ owl:onProperty ex:age ; owl:someValuesFrom xsd:integer ] . \
+         ex:score rdfs:range xsd:nonNegativeInteger . \
+         [ owl:onProperty ex:score ; owl:someValuesFrom xsd:integer ] rdfs:subClassOf ex:Scored . \
+         ex:Player rdfs:subClassOf [ owl:onProperty ex:score ; owl:someValuesFrom rdfs:Literal ] . \
+         ex:k a ex:Kid .",
+    );
+    assert!(in_entailment_graph(
+        &s,
+        "ex:Adult rdfs:subClassOf ex:Numbered"
+    ));
+    assert!(in_entailment_graph(&s, "ex:Adult rdfs:subClassOf ex:Aged"));
+    assert!(in_entailment_graph(
+        &s,
+        "ex:Kid rdfs:subClassOf ex:Numbered"
+    ));
+    // ...and not when it is wider.
+    assert!(!in_entailment_graph(&s, "ex:Kid rdfs:subClassOf ex:Aged"));
+    assert!(!in_entailment_graph(&s, "ex:k a ex:Aged"));
+    assert!(in_entailment_graph(&s, "ex:k a ex:Numbered"));
+    // An unqualified existential reaches it through the property's range.
+    assert!(in_entailment_graph(
+        &s,
+        "ex:Player rdfs:subClassOf ex:Scored"
+    ));
+
+    // On the left of a disjointness.
+    let m = inconsistency(
+        "ex:Unborn owl:disjointWith \
+             [ owl:onProperty ex:age ; owl:someValuesFrom xsd:nonNegativeInteger ] . \
+         ex:u a ex:Unborn ; ex:age 0 .",
+    );
+    assert!(m.contains("ql-cls-disjoint"), "{m}");
+    assert!(materialise(&data_store(
+        "ex:Unborn owl:disjointWith \
+             [ owl:onProperty ex:age ; owl:someValuesFrom xsd:nonNegativeInteger ] . \
+         ex:u a ex:Unborn ; ex:age -1 ."
+    ))
+    .is_ok());
+}
+
+#[test]
+fn test_ql_unsatisfiable_data_existential() {
+    // C ⊑ ∃age.xsd:string while every age is an integer: no C can exist.
+    let ttl = "ex:age rdfs:range xsd:integer . \
+               ex:years rdfs:subPropertyOf ex:age . \
+               ex:Named rdfs:subClassOf [ owl:onProperty ex:age ; owl:someValuesFrom xsd:string ] . \
+               ex:Dated rdfs:subClassOf [ owl:onProperty ex:years ; owl:someValuesFrom xsd:dateTime ] . \
+               ex:Fine rdfs:subClassOf \
+                   [ owl:onProperty ex:years ; owl:someValuesFrom xsd:nonNegativeInteger ] . \
+               ex:Both rdfs:subClassOf [ owl:onProperty ex:both ; owl:someValuesFrom rdfs:Literal ] . \
+               ex:both rdfs:range xsd:integer , xsd:anyURI .";
+    let s = closed(ttl);
+    for c in ["Named", "Dated", "Both"] {
+        assert!(
+            in_entailment_graph(&s, &format!("ex:{c} rdfs:subClassOf owl:Nothing")),
+            "{c}"
+        );
+    }
+    assert!(!in_entailment_graph(
+        &s,
+        "ex:Fine rdfs:subClassOf owl:Nothing"
+    ));
+    let m = inconsistency(&format!("{ttl} ex:n a ex:Named ."));
+    assert!(m.contains("ql-cls-nothing"), "{m}");
+    assert!(materialise(&data_store(&format!("{ttl} ex:f a ex:Fine ."))).is_ok());
+}
+
+#[test]
+fn test_ql_disjoint_data_properties_by_value() {
+    // Disjoint data properties compare values: 1 and 1.0 are one value.
+    let m = inconsistency(
+        "ex:min owl:propertyDisjointWith ex:max . \
+         ex:a ex:min 1 ; ex:max \"1.0\"^^xsd:decimal .",
+    );
+    assert!(m.contains("ql-prp-disjoint"), "{m}");
+    // Strings too, through a sub-property: a token collapses its spaces.
+    let m = inconsistency(
+        "[] a owl:AllDisjointProperties ; owl:members ( ex:first ex:last ) . \
+         ex:given rdfs:subPropertyOf ex:first . \
+         ex:a ex:given \"Ann\" ; ex:last \" Ann \"^^xsd:token .",
+    );
+    assert!(m.contains("ql-prp-disjoint"), "{m}");
+    // Different values, or the same value on different subjects, are fine.
+    assert!(materialise(&data_store(
+        "ex:min owl:propertyDisjointWith ex:max . \
+         ex:a ex:min 1 ; ex:max 2 . ex:b ex:min 1 . ex:c ex:max 1 . \
+         ex:d ex:min \"1\" ; ex:max 1 ."
+    ))
+    .is_ok());
+}
+
+#[test]
+fn test_ql_data_ranges_outside_the_map_are_reported() {
+    // xsd:boolean and xsd:double are not in the OWL 2 QL datatype map: the
+    // axioms using them are not used, and the report says so.
+    let s = data_store(
+        "ex:active rdfs:range xsd:boolean . \
+         [ owl:onProperty ex:weight ; owl:someValuesFrom xsd:double ] rdfs:subClassOf ex:Weighed . \
+         ex:Half a rdfs:Datatype ; owl:equivalentClass xsd:float . \
+         ex:a ex:active \"maybe\" ; ex:weight \"1.5E0\"^^xsd:double .",
+    );
+    let report = materialise(&s).unwrap();
+    let axioms: Vec<(&str, &str)> = report
+        .ignored_sample
+        .iter()
+        .map(|a| (a.axiom.as_str(), a.reason.as_str()))
+        .collect();
+    assert!(
+        axioms.contains(&("rdfs:range", "a datatype outside the OWL 2 QL datatype map")),
+        "{axioms:?}"
+    );
+    assert!(
+        axioms.iter().any(|(a, _)| *a == "rdfs:subClassOf"),
+        "{axioms:?}"
+    );
+    assert!(
+        axioms
+            .iter()
+            .any(|(_, r)| *r == "a datatype definition outside OWL 2 QL"),
+        "{axioms:?}"
+    );
+    assert_eq!(report.ignored_axioms, 3, "{axioms:?}");
+    assert!(!in_entailment_graph(&s, "ex:a a ex:Weighed"));
 }
 
 #[test]

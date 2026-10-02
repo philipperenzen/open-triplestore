@@ -33,6 +33,10 @@ pub mod owl2_rl;
 #[cfg(feature = "owl2-el")]
 pub mod owl2_el;
 
+/// The OWL 2 datatype map: value spaces and value equality.
+#[cfg(feature = "owl2-ql")]
+pub(crate) mod datatypes;
+
 #[cfg(feature = "owl2-ql")]
 pub mod owl2_ql;
 
