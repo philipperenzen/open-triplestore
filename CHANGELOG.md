@@ -291,6 +291,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     where its summary line has a dash.
 
 ### Security
+- **Audit rows and the guest AI budget record the real client IP.** Both took
+  the left-most `X-Forwarded-For` entry (then `X-Real-IP`) from any caller and
+  never saw the TCP peer address, so a login failure, a permission denial or an
+  SSO failure could be attributed to an IP of the caller's choosing. A random
+  header also bought a fresh guest budget on the AI endpoints
+  (`LLM_RATE_LIMIT_ANON_PER_MIN`). On a deployment without a proxy, audit rows
+  carried no IP at all and every guest shared one budget. They now derive the
+  client IP the way the per-IP rate limiter already did: the TCP peer address,
+  with forwarded headers believed only when the peer is inside
+  `TRUSTED_PROXY_CIDRS` and the chain read right to left. **Behaviour change:**
+  behind a reverse proxy, set `TRUSTED_PROXY_CIDRS` to its address range, or
+  every audit row and guest budget is keyed on the proxy's address.
+  `docs/administration.md` and `docs/operations.md` say so.
 - **Every configured secret goes through the secrets module.** `JWT_SECRET`,
   `LD_REGISTRY_TOKEN`, a replication follower's `OTS_REPLICATION_TOKEN` and the
   accounts-dashboard plugin's `ACCOUNTS_DASHBOARD_GATEWAY_KEY` were read as raw

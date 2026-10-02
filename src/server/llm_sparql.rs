@@ -19,7 +19,6 @@ use std::time::{Duration, Instant};
 
 use axum::{
     extract::State,
-    http::HeaderMap,
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
     Extension, Json, Router,
@@ -32,9 +31,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::auth::audit::client_ip;
 use crate::auth::middleware::AuthenticatedUser;
 use crate::saved_queries::store::SavedQueryStore;
+use crate::server::client_ip::ClientIp;
 use crate::store::TripleStore;
 
 use super::error::AppError;
@@ -514,13 +513,13 @@ const SHACL_IMPROVE_SYSTEM: &str = "You are a SHACL expert reviewing a shapes Tu
 async fn shacl_assist(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
-    headers: HeaderMap,
+    client_ip: ClientIp,
     Json(req): Json<ShaclAssistRequest>,
 ) -> Result<Json<ShaclAssistResponse>, AppError> {
     let task = req.task.trim().to_lowercase();
     let model = req.model.clone().unwrap_or_else(shacl_model);
     let user = user.map(|Extension(u)| u);
-    let ip = client_ip(&headers, None);
+    let ip = client_ip.as_string();
     // Screen the natural-language description; the Turtle payload is data.
     let description = req.description.clone().unwrap_or_default();
     let guard_flag = guard_gate(
@@ -812,14 +811,14 @@ pub struct NlSparqlResponse {
 async fn nl_to_sparql(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
-    headers: HeaderMap,
+    client_ip: ClientIp,
     Json(req): Json<NlSparqlRequest>,
 ) -> Result<Json<NlSparqlResponse>, AppError> {
     if req.question.trim().is_empty() {
         return Err(AppError::BadRequest("question is required".to_string()));
     }
     let user = user.map(|Extension(u)| u);
-    let ip = client_ip(&headers, None);
+    let ip = client_ip.as_string();
     let guard_flag = guard_gate(
         &state,
         "sparql",
@@ -1170,7 +1169,7 @@ fn string_leaves<'a>(value: &'a Value, depth: usize, out: &mut Vec<&'a str>) -> 
 async fn forward_feedback(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
-    headers: HeaderMap,
+    client_ip: ClientIp,
     Json(signal): Json<Value>,
 ) -> Result<Json<Value>, AppError> {
     // Same gate as every other endpoint that reaches the gateway. This one had
@@ -1179,7 +1178,7 @@ async fn forward_feedback(
     // unlogged — an open relay to `/v1/signals`. The signal's free-text fields
     // are screened, since they are what a training pipeline ingests.
     let user = user.map(|Extension(u)| u);
-    let ip = client_ip(&headers, None);
+    let ip = client_ip.as_string();
     // The whole signal, not its top level: the free text a pipeline ingests
     // sits nested (`input.nl_question`, `label.comment`, `output.*`), and a
     // string in an object or an array used to reach the gateway unscreened.
@@ -2079,12 +2078,12 @@ fn log_chat_turn(
 async fn llm_chat(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
-    headers: HeaderMap,
+    client_ip: ClientIp,
     Json(req): Json<ChatRequest>,
 ) -> Result<Json<ChatResponse>, AppError> {
     validate_chat_request(&req)?;
     let user = user.map(|Extension(u)| u);
-    let ip = client_ip(&headers, None);
+    let ip = client_ip.as_string();
     let guard_flag = guard_gate(
         &state,
         "chat",
@@ -2133,12 +2132,12 @@ async fn llm_chat(
 async fn llm_chat_stream(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
-    headers: HeaderMap,
+    client_ip: ClientIp,
     Json(req): Json<ChatRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
     validate_chat_request(&req)?;
     let user = user.map(|Extension(u)| u);
-    let ip = client_ip(&headers, None);
+    let ip = client_ip.as_string();
     let guard_flag = guard_gate(
         &state,
         "chat_stream",
