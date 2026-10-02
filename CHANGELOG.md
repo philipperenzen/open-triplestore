@@ -706,6 +706,52 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reads such a path can now fire (scheduled inference materialises what it
   derives). Single-graph runs, and so every write gate, are unchanged. The
   `OTS_SHACL_REACH_PROBE` setting that measured the difference is removed.
+- **GeoSPARQL: a GML literal's `srsName` counts everywhere.** Only the metric
+  functions read it. Topology, `geof:relate`, the constructive functions,
+  `getSRID`, `transform` and `aggUnion` took every GML literal for CRS84, so
+  `sfEquals` and `metricDistance` disagreed about the same literal. Every
+  function now reads a literal's CRS from one place: the WKT `<crs>` prefix or
+  the GML `srsName`. `EPSG:28992`, `urn:ogc:def:crs:EPSG::28992` and the other
+  spellings normalise to `http://www.opengis.net/def/crs/EPSG/0/28992`. Axis
+  order follows the CRS, so an EPSG:4326 GML `<gml:pos>1 2</gml:pos>` is
+  latitude 1, longitude 2: `sfEquals` with `"POINT(2 1)"` is now true, and
+  with `"POINT(1 2)"` false. `getSRID` reports the `srsName`, and a
+  constructive result or `aggUnion` keeps it.
+- **GeoSPARQL: `geof:relate` harmonises its operands' CRSs**, as the sf/eh/rcc8
+  functions do. It compared RD New metres with CRS84 degrees.
+- **GeoSPARQL: `geof:ehCoveredBy` uses the spec's DE-9IM mask `TFF*TFT**`**,
+  which makes it the exact inverse of `ehCovers`. It used GEOS `covered_by`, so
+  a line on a polygon's boundary was covered by it (now false). A geometry
+  strictly inside another is now `ehInside` and not `ehCoveredBy`; one inside
+  that touches the other's boundary is still covered by it.
+- **GeoSPARQL: the perimeter of a non-areal geometry is its length.**
+  `geof:metricPerimeter` of a line returned 0. It now returns the line's
+  geodesic length (0 for a point), as GeoSPARQL 1.1 says.
+- **GeoSPARQL: `geof:transform` fails instead of passing coordinates through.**
+  A coordinate outside a CRS's domain was copied into the result unchanged, so
+  the north pole "transformed" into Web Mercator and Paris got RD New
+  coordinates. That result is now unbound, and so is any operation that has to
+  harmonise such a geometry. RD New has a domain: its EPSG area of use plus
+  about 50 km. Outside it the polynomial approximation returned plausible
+  garbage. `transform` now keeps Z, and it accepts its target CRS as an
+  `xsd:anyURI` literal as well as an IRI. Building now needs **GEOS 3.11 or
+  later** (the `geos` crate's `v3_11_0` feature, for `transform_xy`). Debian
+  bookworm, current Ubuntu, Debian trixie and vcpkg all ship 3.11 or later;
+  Ubuntu 22.04's 3.10 no longer builds.
+- **GeoSPARQL: an empty geometry literal is the empty geometry.** `""^^geo:wktLiteral`
+  (with or without a CRS), `""^^geo:gmlLiteral` and `""^^geo:geoJSONLiteral` were
+  not geometries, so every function over them was unbound (GeoSPARQL 1.1
+  Req 17, 21 and 27). An empty plain string is still not a geometry.
+- **GeoSPARQL units of measure: more IRIs, and no silent fallback.** Unit
+  arguments accept QUDT units (`unit:M`, `KiloM`, `CentiM`, `MilliM`, `FT`,
+  `MI`, `MI_N`, `DEG`, `RAD`, `M2`, `KiloM2`, `HA`), EPSG units (9001, 9002,
+  9036, 9101, 9102) and the OGC `uom:` units, given as an IRI or as an
+  `xsd:anyURI` literal. An unknown unit used to be ignored, which returned
+  planar degrees as if they were metres. It is now unbound. So are an angular
+  unit on a projected CRS, any unit on a CRS this build cannot reproject, and
+  an area unit for a distance. `geof:area` takes an area unit: geodesic on a
+  geographic CRS, planar on a projected one. No unit, or `uom:unity`, still
+  means the CRS's own units.
 
 ### Fixed
 - **More `.env` settings reach the server under Docker Compose.**

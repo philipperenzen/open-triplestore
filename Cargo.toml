@@ -157,7 +157,8 @@ tower_governor = { version = "0.4", features = ["axum"] }
 
 # GeoSPARQL spatial operations
 geo = "0.28"
-geos = "11.0"
+# v3_11_0: `transform_xy` (geof:transform keeps Z and fails cleanly). GEOS >= 3.11.
+geos = { version = "11.0", features = ["v3_11_0"] }
 wkt = { version = "0.14", features = ["geo-types"] }
 
 # Serialization

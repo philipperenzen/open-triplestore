@@ -25,9 +25,8 @@ use oxrdf::{Literal, NamedNode, Term};
 
 use super::crs::Crs;
 use super::datatypes::{
-    geometry_to_wkt_literal_in, literal_crs_uri, literal_wkt, parse_wkt_literal,
+    geometry_to_wkt_literal_in, literal_crs, literal_crs_uri, parse_wkt_literal, reproject_geometry,
 };
-use super::geodesic::{literal_crs, reproject};
 use super::vocabulary as vocab;
 
 /// A factory for a fresh accumulator, as the evaluator wants it.
@@ -81,9 +80,10 @@ fn empty_geometry() -> Term {
 
 /// The union of a group's geometry literals as one `geo:wktLiteral`.
 ///
-/// One CRS in, the same CRS out. Values in different CRSs are unioned in CRS84
+/// One CRS in, the same CRS out — a GML literal's `srsName` included (see
+/// [`literal_crs_uri`]). Values in different CRSs are unioned in CRS84
 /// (GeoSPARQL's default), each reprojected first; a value in a CRS this build
-/// cannot reproject then makes the result unbound.
+/// cannot reproject, or outside its CRS's domain, then makes the result unbound.
 pub fn union_of(mut values: Vec<Term>) -> Option<Term> {
     if values.is_empty() {
         return Some(empty_geometry());
@@ -98,10 +98,10 @@ pub fn union_of(mut values: Vec<Term>) -> Option<Term> {
     let parse_all = |values: &[Term]| -> Option<Vec<GeosGeometry>> {
         values.iter().map(parse_wkt_literal).collect()
     };
-    let first_uri = literal_crs_uri(&values[0]).map(str::to_string);
+    let first_uri = literal_crs_uri(&values[0]).map(|uri| uri.into_owned());
     let (geoms, crs_out) = if values
         .iter()
-        .all(|v| literal_crs_uri(v) == first_uri.as_deref())
+        .all(|v| literal_crs_uri(v).as_deref() == first_uri.as_deref())
     {
         // One CRS: nothing to reproject — which also keeps a CRS this build
         // does not know usable, as long as every value shares it.
@@ -129,15 +129,7 @@ pub fn union_of(mut values: Vec<Term>) -> Option<Term> {
 
 /// A geometry literal reprojected into CRS84, as GEOS.
 fn in_crs84(term: &Term) -> Option<GeosGeometry> {
-    use wkt::{ToWkt, TryFromWkt};
-    match literal_crs(term)? {
-        Crs::Wgs84 => parse_wkt_literal(term),
-        from => {
-            let body = literal_wkt(term)?;
-            let g: geo::Geometry<f64> = geo::Geometry::try_from_wkt_str(&body).ok()?;
-            GeosGeometry::new_from_wkt(&reproject(&g, from, Crs::Wgs84)?.wkt_string()).ok()
-        }
-    }
+    reproject_geometry(&parse_wkt_literal(term)?, literal_crs(term)?, Crs::Wgs84)
 }
 
 #[cfg(test)]
