@@ -67,6 +67,7 @@ impl IntoResponse for AppError {
                             "message": r.message,
                             "sourceShape": r.source_shape,
                             "sourceConstraint": r.source_constraint,
+                            "sourceConstraintComponent": r.source_constraint_component,
                         })
                     }).collect::<Vec<_>>(),
                 });

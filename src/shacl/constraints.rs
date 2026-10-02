@@ -1,4 +1,4 @@
-use super::report::{Severity, ValidationResult};
+use super::report::{ResultTerms, Severity, ValidationResult};
 use super::shapes::*;
 use super::view::{DataView, GraphSel};
 use oxigraph::model::{Literal, Term};
@@ -47,6 +47,66 @@ pub fn display_term(term: &Term) -> String {
         Term::Literal(lit) => lit.value().to_string(),
         Term::BlankNode(bn) => format!("_:{}", bn.as_str()),
         other => other.to_string(),
+    }
+}
+
+const SH_QUALIFIED_MAX_COUNT_COMPONENT: &str =
+    "http://www.w3.org/ns/shacl#QualifiedMaxCountConstraintComponent";
+
+/// The IRI of the constraint component a result of `constraint` reports as
+/// `sh:sourceConstraintComponent` (SHACL §4, SHACL-AF §6 and §7.4). A
+/// qualified value shape reports `sh:QualifiedMinCountConstraintComponent`
+/// here; its max-count result names its own component at the call site.
+/// `sh:property` nested in a property shape never yields a result of its
+/// own (its constraints do), so it maps to the component for completeness.
+pub(crate) fn component_iri(constraint: &Constraint) -> &str {
+    match constraint {
+        Constraint::Class(_) => "http://www.w3.org/ns/shacl#ClassConstraintComponent",
+        Constraint::Datatype(_) => "http://www.w3.org/ns/shacl#DatatypeConstraintComponent",
+        Constraint::NodeKind(_) => "http://www.w3.org/ns/shacl#NodeKindConstraintComponent",
+        Constraint::MinCount(_) => "http://www.w3.org/ns/shacl#MinCountConstraintComponent",
+        Constraint::MaxCount(_) => "http://www.w3.org/ns/shacl#MaxCountConstraintComponent",
+        Constraint::MinExclusive(_) => "http://www.w3.org/ns/shacl#MinExclusiveConstraintComponent",
+        Constraint::MinInclusive(_) => "http://www.w3.org/ns/shacl#MinInclusiveConstraintComponent",
+        Constraint::MaxExclusive(_) => "http://www.w3.org/ns/shacl#MaxExclusiveConstraintComponent",
+        Constraint::MaxInclusive(_) => "http://www.w3.org/ns/shacl#MaxInclusiveConstraintComponent",
+        Constraint::MinLength(_) => "http://www.w3.org/ns/shacl#MinLengthConstraintComponent",
+        Constraint::MaxLength(_) => "http://www.w3.org/ns/shacl#MaxLengthConstraintComponent",
+        Constraint::Pattern { .. } => "http://www.w3.org/ns/shacl#PatternConstraintComponent",
+        Constraint::LanguageIn(_) => "http://www.w3.org/ns/shacl#LanguageInConstraintComponent",
+        Constraint::UniqueLang(_) => "http://www.w3.org/ns/shacl#UniqueLangConstraintComponent",
+        Constraint::Equals(_) => "http://www.w3.org/ns/shacl#EqualsConstraintComponent",
+        Constraint::Disjoint(_) => "http://www.w3.org/ns/shacl#DisjointConstraintComponent",
+        Constraint::LessThan(_) => "http://www.w3.org/ns/shacl#LessThanConstraintComponent",
+        Constraint::LessThanOrEquals(_) => {
+            "http://www.w3.org/ns/shacl#LessThanOrEqualsConstraintComponent"
+        }
+        Constraint::Not(_) => "http://www.w3.org/ns/shacl#NotConstraintComponent",
+        Constraint::And(_) => "http://www.w3.org/ns/shacl#AndConstraintComponent",
+        Constraint::Or(_) => "http://www.w3.org/ns/shacl#OrConstraintComponent",
+        Constraint::Xone(_) => "http://www.w3.org/ns/shacl#XoneConstraintComponent",
+        Constraint::Node(_) => "http://www.w3.org/ns/shacl#NodeConstraintComponent",
+        Constraint::Property(_) => "http://www.w3.org/ns/shacl#PropertyConstraintComponent",
+        Constraint::QualifiedValueShape { .. } => {
+            "http://www.w3.org/ns/shacl#QualifiedMinCountConstraintComponent"
+        }
+        Constraint::Closed { .. } => "http://www.w3.org/ns/shacl#ClosedConstraintComponent",
+        Constraint::HasValue(_) => "http://www.w3.org/ns/shacl#HasValueConstraintComponent",
+        Constraint::In(_) => "http://www.w3.org/ns/shacl#InConstraintComponent",
+        Constraint::SparqlConstraint { .. } => {
+            "http://www.w3.org/ns/shacl#SPARQLConstraintComponent"
+        }
+        Constraint::Custom(cc) => &cc.component,
+        Constraint::Expression { .. } => "http://www.w3.org/ns/shacl#ExpressionConstraintComponent",
+    }
+}
+
+/// A shapes-graph node as the loader names it — an IRI, or `_:label` for a
+/// blank node (`Shape::iri`, the `sh:sparql` node) — back as a typed term.
+pub(crate) fn lexical_term(s: &str) -> Term {
+    match s.strip_prefix("_:") {
+        Some(label) => Term::BlankNode(oxigraph::model::BlankNode::new_unchecked(label)),
+        None => Term::NamedNode(oxigraph::model::NamedNode::new_unchecked(s)),
     }
 }
 
@@ -145,24 +205,41 @@ pub(crate) fn evaluate_constraint_with_values(
     // Report strings are built only when a result is actually produced: the
     // overwhelmingly common outcome of a constraint is "no result".
     let focus_str: std::cell::OnceCell<String> = std::cell::OnceCell::new();
-    let path_str = || path.map(|p| p.to_sparql());
-    // sh:value for value-node-oriented results (SHACL sets it to the offending
-    // value node — the focus itself in a node-shape context).
-    let mk = |value: Option<String>,
-              path: Option<String>,
-              source_constraint: String,
-              message: String|
+    let component = component_iri(constraint);
+    // One result of `component`: the display strings plus the typed terms the
+    // RDF report is written from. `value` is sh:value for value-node-oriented
+    // results (SHACL sets it to the offending value node — the focus itself in
+    // a node-shape context).
+    let mk_of = |component: &str,
+                 value: Option<&Term>,
+                 path: Option<&PropertyPath>,
+                 source_constraint: String,
+                 message: String|
      -> ValidationResult {
         ValidationResult {
             severity: severity.clone(),
             focus_node: focus_str.get_or_init(|| display_term(focus_node)).clone(),
-            path,
-            value,
+            path: path.map(|p| p.to_sparql()),
+            value: value.map(display_term),
             source_shape: shape_iri.to_string(),
             source_constraint,
+            source_constraint_component: component.to_string(),
             message,
+            terms: ResultTerms {
+                focus_node: Some(focus_node.clone()),
+                value: value.cloned(),
+                path: path.cloned(),
+                source_shape: Some(lexical_term(shape_iri)),
+                source_constraint: None,
+                severity: None,
+            },
         }
     };
+    let mk = |value: Option<&Term>,
+              path: Option<&PropertyPath>,
+              source_constraint: String,
+              message: String|
+     -> ValidationResult { mk_of(component, value, path, source_constraint, message) };
 
     match constraint {
         Constraint::Class(class_iri) => {
@@ -171,8 +248,8 @@ pub(crate) fn evaluate_constraint_with_values(
             for v in values.iter() {
                 if !view.is_instance_of(v, class_iri) {
                     results.push(mk(
-                        Some(display_term(v)),
-                        path_str(),
+                        Some(v),
+                        path,
                         format!("sh:class <{}>", class_iri),
                         format!("Value does not have class <{}>", class_iri),
                     ));
@@ -193,8 +270,8 @@ pub(crate) fn evaluate_constraint_with_values(
                 };
                 if !ok {
                     results.push(mk(
-                        Some(display_term(v)),
-                        path_str(),
+                        Some(v),
+                        path,
                         format!("sh:datatype <{}>", dt_iri),
                         format!("Value has wrong datatype, expected <{}>", dt_iri),
                     ));
@@ -220,8 +297,8 @@ pub(crate) fn evaluate_constraint_with_values(
                 };
                 if !is_valid {
                     results.push(mk(
-                        Some(display_term(v)),
-                        path_str(),
+                        Some(v),
+                        path,
                         format!("sh:nodeKind {:?}", expected),
                         format!("Value does not match expected node kind {:?}", expected),
                     ));
@@ -234,7 +311,7 @@ pub(crate) fn evaluate_constraint_with_values(
             if count < *min {
                 results.push(mk(
                     None,
-                    path_str(),
+                    path,
                     format!("sh:minCount {}", min),
                     format!("Expected at least {} values, found {}", min, count),
                 ));
@@ -246,7 +323,7 @@ pub(crate) fn evaluate_constraint_with_values(
             if count > *max {
                 results.push(mk(
                     None,
-                    path_str(),
+                    path,
                     format!("sh:maxCount {}", max),
                     format!("Expected at most {} values, found {}", max, count),
                 ));
@@ -263,8 +340,8 @@ pub(crate) fn evaluate_constraint_with_values(
                 };
                 if !ok {
                     results.push(mk(
-                        Some(display_term(v)),
-                        path_str(),
+                        Some(v),
+                        path,
                         format!("sh:minLength {}", min_len),
                         format!("Value length is less than minimum {}", min_len),
                     ));
@@ -280,8 +357,8 @@ pub(crate) fn evaluate_constraint_with_values(
                 };
                 if !ok {
                     results.push(mk(
-                        Some(display_term(v)),
-                        path_str(),
+                        Some(v),
+                        path,
                         format!("sh:maxLength {}", max_len),
                         format!("Value length exceeds maximum {}", max_len),
                     ));
@@ -299,7 +376,7 @@ pub(crate) fn evaluate_constraint_with_values(
             if pattern.len() > MAX_PATTERN_LEN {
                 results.push(mk(
                     None,
-                    path_str(),
+                    path,
                     "sh:pattern".to_string(),
                     "sh:pattern is too long to evaluate".to_string(),
                 ));
@@ -309,8 +386,8 @@ pub(crate) fn evaluate_constraint_with_values(
                 // Blank nodes always violate sh:pattern (SHACL §4.4.2).
                 let Some(value) = string_repr(v) else {
                     results.push(mk(
-                        Some(display_term(v)),
-                        path_str(),
+                        Some(v),
+                        path,
                         format!("sh:pattern \"{}\"", pattern),
                         format!("Value does not match pattern \"{}\"", pattern),
                     ));
@@ -342,8 +419,8 @@ pub(crate) fn evaluate_constraint_with_values(
                 {
                     if !matches {
                         results.push(mk(
-                            Some(value.clone()),
-                            path_str(),
+                            Some(v),
+                            path,
                             format!("sh:pattern \"{}\"", pattern),
                             format!("Value does not match pattern \"{}\"", pattern),
                         ));
@@ -356,7 +433,7 @@ pub(crate) fn evaluate_constraint_with_values(
             if !values.iter().any(|v| v == expected) {
                 results.push(mk(
                     None,
-                    path_str(),
+                    path,
                     format!("sh:hasValue {}", display_term(expected)),
                     format!("Missing required value: {}", display_term(expected)),
                 ));
@@ -367,8 +444,8 @@ pub(crate) fn evaluate_constraint_with_values(
             for v in values.iter() {
                 if !allowed.iter().any(|a| a == v) {
                     results.push(mk(
-                        Some(display_term(v)),
-                        path_str(),
+                        Some(v),
+                        path,
                         "sh:in".to_string(),
                         format!("Value \"{}\" is not in the allowed list", display_term(v)),
                     ));
@@ -391,7 +468,7 @@ pub(crate) fn evaluate_constraint_with_values(
                     if n > 1 {
                         results.push(mk(
                             None,
-                            path_str(),
+                            path,
                             "sh:uniqueLang true".to_string(),
                             format!("Duplicate language tag: {}", lang),
                         ));
@@ -411,8 +488,8 @@ pub(crate) fn evaluate_constraint_with_values(
                 };
                 if !lang_ok {
                     results.push(mk(
-                        Some(display_term(v)),
-                        path_str(),
+                        Some(v),
+                        path,
                         "sh:languageIn".to_string(),
                         "Language tag not in allowed list".to_string(),
                     ));
@@ -429,8 +506,8 @@ pub(crate) fn evaluate_constraint_with_values(
             for (p, o) in view.subject_predicate_objects(focus_node, GraphSel::All) {
                 if !ignored_properties.contains(&p) && !allowed_properties.contains(&p) {
                     results.push(mk(
-                        Some(display_term(&o)),
-                        Some(format!("<{}>", p)),
+                        Some(&o),
+                        Some(&PropertyPath::Predicate(p.clone())),
                         "sh:closed true".to_string(),
                         format!("Property <{}> is not allowed by closed shape", p),
                     ));
@@ -439,6 +516,7 @@ pub(crate) fn evaluate_constraint_with_values(
         }
 
         Constraint::SparqlConstraint {
+            node,
             select,
             message,
             severity: severity_override,
@@ -453,14 +531,22 @@ pub(crate) fn evaluate_constraint_with_values(
             // not parse (or a SELECT that errored at evaluation) produced no
             // violations and the focus node conformed by accident — and a
             // write gate built on it waved the write through.
+            // Every result names the sh:sparql node (sh:sourceConstraint).
+            let sparql_result = |value: Option<&Term>,
+                                 path: Option<&PropertyPath>,
+                                 message: String|
+             -> ValidationResult {
+                let mut r = mk(value, path, "sh:SPARQLConstraint".to_string(), message);
+                r.terms.source_constraint = Some(lexical_term(node));
+                r
+            };
             let unevaluable = |reason: String| ValidationResult {
                 severity: Severity::Violation,
-                focus_node: focus_str.get_or_init(|| display_term(focus_node)).clone(),
-                path: path_str(),
-                value: None,
-                source_shape: shape_iri.to_string(),
-                source_constraint: "sh:SPARQLConstraint".to_string(),
-                message: format!("SPARQL constraint could not be evaluated: {reason}"),
+                ..sparql_result(
+                    None,
+                    path,
+                    format!("SPARQL constraint could not be evaluated: {reason}"),
+                )
             };
             // SHACL-SPARQL (§5.3): run the SELECT with $this PRE-BOUND to the
             // focus node — as a term, so a blank-node focus is checked like any
@@ -486,16 +572,19 @@ pub(crate) fn evaluate_constraint_with_values(
                         }
                         let msg = result_message(&solution, message.as_deref(), |_| None)
                             .unwrap_or_else(|| "SPARQL constraint violated".to_string());
-                        let value = solution.get("value").map(|v| v.to_string());
-                        results.push(ValidationResult {
-                            severity: eff_severity.clone(),
-                            focus_node: focus_str.get_or_init(|| display_term(focus_node)).clone(),
-                            path: result_path(&solution).or_else(path_str),
-                            value,
-                            source_shape: shape_iri.to_string(),
-                            source_constraint: "sh:SPARQLConstraint".to_string(),
-                            message: msg,
-                        });
+                        // sh:value is ?value; unbound, the focus node of a
+                        // node shape (SHACL §5.3.2).
+                        let value = solution
+                            .get("value")
+                            .or(path.is_none().then_some(focus_node));
+                        let row_path = result_path(&solution);
+                        let mut r = sparql_result(value, row_path.as_ref().or(path), msg);
+                        // The value's display keeps the N-Triples form it has
+                        // always had for sh:sparql results.
+                        r.value = value.map(|v| v.to_string());
+                        r.severity = eff_severity.clone();
+                        r.terms.severity = severity_override.clone();
+                        results.push(r);
                     }
                 }
                 Ok(_) => results.push(unevaluable("sh:select must be a SELECT query".to_string())),
@@ -508,15 +597,15 @@ pub(crate) fn evaluate_constraint_with_values(
             let path_sparql = path.map(|p| p.to_sparql());
             let unevaluable = |reason: String| ValidationResult {
                 severity: Severity::Violation,
-                focus_node: focus_str.get_or_init(|| display_term(focus_node)).clone(),
-                path: path_str(),
-                value: None,
-                source_shape: shape_iri.to_string(),
-                source_constraint: cc.component.clone(),
-                message: format!(
-                    "constraint component <{}> could not be evaluated: {reason}",
-                    cc.component
-                ),
+                ..mk(
+                    None,
+                    path,
+                    cc.component.clone(),
+                    format!(
+                        "constraint component <{}> could not be evaluated: {reason}",
+                        cc.component
+                    ),
+                )
             };
             // Every parameter value is pre-bound under the parameter's name
             // (§6.3), alongside $this and — for ASK validators — $value.
@@ -558,12 +647,7 @@ pub(crate) fn evaluate_constraint_with_values(
                                         cc.component
                                     ),
                                 };
-                                results.push(mk(
-                                    Some(display_term(v)),
-                                    path_str(),
-                                    cc.component.clone(),
-                                    message,
-                                ));
+                                results.push(mk(Some(v), path, cc.component.clone(), message));
                             }
                             Ok(_) => {
                                 results.push(unevaluable("sh:ask must be an ASK query".to_string()))
@@ -593,7 +677,11 @@ pub(crate) fn evaluate_constraint_with_values(
                                     results.push(unevaluable(FAILURE.to_string()));
                                     continue;
                                 }
-                                let value = solution.get("value").cloned();
+                                // As for sh:sparql (SHACL §5.3.2, §6.3).
+                                let value = solution
+                                    .get("value")
+                                    .or(path.is_none().then_some(focus_node))
+                                    .cloned();
                                 let message =
                                     result_message(&solution, cc.message.as_deref(), param)
                                         .unwrap_or_else(|| {
@@ -602,9 +690,10 @@ pub(crate) fn evaluate_constraint_with_values(
                                                 cc.component
                                             )
                                         });
+                                let row_path = result_path(&solution);
                                 results.push(mk(
-                                    value.as_ref().map(display_term),
-                                    result_path(&solution).or_else(path_str),
+                                    value.as_ref(),
+                                    row_path.as_ref().or(path),
                                     cc.component.clone(),
                                     message,
                                 ));
@@ -642,8 +731,12 @@ pub(crate) fn evaluate_constraint_with_values(
             }
             if !inner.is_empty() {
                 results.push(mk(
-                    inner.into_iter().next().and_then(|r| r.value),
-                    Some(expr_path.to_sparql()),
+                    inner
+                        .into_iter()
+                        .next()
+                        .and_then(|r| r.terms.value)
+                        .as_ref(),
+                    Some(expr_path),
                     "sh:expression".to_string(),
                     message
                         .clone()
@@ -659,8 +752,8 @@ pub(crate) fn evaluate_constraint_with_values(
             for v in values.iter() {
                 if !matches!(compare_terms(v, bound), Some(Ordering::Greater)) {
                     results.push(mk(
-                        Some(display_term(v)),
-                        path_str(),
+                        Some(v),
+                        path,
                         format!("sh:minExclusive {}", display_term(bound)),
                         format!("Value {} is not > {}", display_term(v), display_term(bound)),
                     ));
@@ -675,8 +768,8 @@ pub(crate) fn evaluate_constraint_with_values(
                     Some(Ordering::Greater | Ordering::Equal)
                 ) {
                     results.push(mk(
-                        Some(display_term(v)),
-                        path_str(),
+                        Some(v),
+                        path,
                         format!("sh:minInclusive {}", display_term(bound)),
                         format!(
                             "Value {} is not >= {}",
@@ -692,8 +785,8 @@ pub(crate) fn evaluate_constraint_with_values(
             for v in values.iter() {
                 if !matches!(compare_terms(v, bound), Some(Ordering::Less)) {
                     results.push(mk(
-                        Some(display_term(v)),
-                        path_str(),
+                        Some(v),
+                        path,
                         format!("sh:maxExclusive {}", display_term(bound)),
                         format!("Value {} is not < {}", display_term(v), display_term(bound)),
                     ));
@@ -708,8 +801,8 @@ pub(crate) fn evaluate_constraint_with_values(
                     Some(Ordering::Less | Ordering::Equal)
                 ) {
                     results.push(mk(
-                        Some(display_term(v)),
-                        path_str(),
+                        Some(v),
+                        path,
                         format!("sh:maxInclusive {}", display_term(bound)),
                         format!(
                             "Value {} is not <= {}",
@@ -737,8 +830,8 @@ pub(crate) fn evaluate_constraint_with_values(
                 )
             {
                 results.push(mk(
-                    Some(display_term(v)),
-                    path_str(),
+                    Some(v),
+                    path,
                     format!("sh:equals <{}>", prop_iri),
                     format!(
                         "Value set at path does not equal value set at <{}>",
@@ -757,8 +850,8 @@ pub(crate) fn evaluate_constraint_with_values(
                 .filter(|(k, _)| other_values.contains_key(*k))
             {
                 results.push(mk(
-                    Some(display_term(v)),
-                    path_str(),
+                    Some(v),
+                    path,
                     format!("sh:disjoint <{}>", prop_iri),
                     format!(
                         "Value \"{}\" appears in both path and <{}>",
@@ -778,8 +871,8 @@ pub(crate) fn evaluate_constraint_with_values(
                     // Violated unless definitively pv < ov (incomparable pairs violate).
                     if !matches!(compare_terms(pv, ov), Some(Ordering::Less)) {
                         results.push(mk(
-                            Some(display_term(pv)),
-                            path_str(),
+                            Some(pv),
+                            path,
                             format!("sh:lessThan <{}>", prop_iri),
                             format!(
                                 "Value {} is not < {} (value at <{}>)",
@@ -804,8 +897,8 @@ pub(crate) fn evaluate_constraint_with_values(
                         Some(Ordering::Less | Ordering::Equal)
                     ) {
                         results.push(mk(
-                            Some(display_term(pv)),
-                            path_str(),
+                            Some(pv),
+                            path,
                             format!("sh:lessThanOrEquals <{}>", prop_iri),
                             format!(
                                 "Value {} is not <= {} (value at <{}>)",
@@ -831,8 +924,8 @@ pub(crate) fn evaluate_constraint_with_values(
                     validate_inline_shape(view, shapes, value, inner_shape, severity);
                 if inner_violations.is_empty() {
                     results.push(mk(
-                        Some(display_term(value)),
-                        path_str(),
+                        Some(value),
+                        path,
                         "sh:not".to_string(),
                         "Value conforms to sh:not shape (must not conform)".to_string(),
                     ));
@@ -849,8 +942,8 @@ pub(crate) fn evaluate_constraint_with_values(
                 });
                 if fails {
                     results.push(mk(
-                        Some(display_term(value)),
-                        path_str(),
+                        Some(value),
+                        path,
                         "sh:and".to_string(),
                         "Value does not conform to all sh:and shapes".to_string(),
                     ));
@@ -866,8 +959,8 @@ pub(crate) fn evaluate_constraint_with_values(
                 });
                 if !any_conforms {
                     results.push(mk(
-                        Some(display_term(value)),
-                        path_str(),
+                        Some(value),
+                        path,
                         "sh:or".to_string(),
                         "Value does not conform to any sh:or shape".to_string(),
                     ));
@@ -886,8 +979,8 @@ pub(crate) fn evaluate_constraint_with_values(
                     .count();
                 if conforming_count != 1 {
                     results.push(mk(
-                        Some(display_term(value)),
-                        path_str(),
+                        Some(value),
+                        path,
                         "sh:xone".to_string(),
                         format!(
                             "Value conforms to {} sh:xone shapes, expected exactly 1",
@@ -906,8 +999,8 @@ pub(crate) fn evaluate_constraint_with_values(
                 let inner = validate_inline_shape(view, shapes, value, ref_shape, severity);
                 if !inner.is_empty() {
                     results.push(mk(
-                        Some(display_term(value)),
-                        path_str(),
+                        Some(value),
+                        path,
                         format!("sh:node <{}>", ref_shape.iri),
                         format!("Value does not conform to shape <{}>", ref_shape.iri),
                     ));
@@ -965,7 +1058,7 @@ pub(crate) fn evaluate_constraint_with_values(
                 if conforming_count < *min {
                     results.push(mk(
                         None,
-                        path_str(),
+                        path,
                         format!("sh:qualifiedMinCount {}", min),
                         format!(
                             "Only {} values conform to qualified shape, expected at least {}",
@@ -976,9 +1069,10 @@ pub(crate) fn evaluate_constraint_with_values(
             }
             if let Some(max) = max_count {
                 if conforming_count > *max {
-                    results.push(mk(
+                    results.push(mk_of(
+                        SH_QUALIFIED_MAX_COUNT_COMPONENT,
                         None,
-                        path_str(),
+                        path,
                         format!("sh:qualifiedMaxCount {}", max),
                         format!(
                             "{} values conform to qualified shape, expected at most {}",
@@ -1081,9 +1175,9 @@ fn is_failure(solution: &oxigraph::sparql::QuerySolution) -> bool {
 
 /// `sh:resultPath` from a solution: the binding of `?path`, if it is an IRI
 /// (SHACL §5.3.2); otherwise the caller falls back to the shape's path.
-fn result_path(solution: &oxigraph::sparql::QuerySolution) -> Option<String> {
+fn result_path(solution: &oxigraph::sparql::QuerySolution) -> Option<PropertyPath> {
     match solution.get("path") {
-        Some(t @ Term::NamedNode(_)) => Some(t.to_string()),
+        Some(Term::NamedNode(p)) => Some(PropertyPath::Predicate(p.as_str().to_string())),
         _ => None,
     }
 }

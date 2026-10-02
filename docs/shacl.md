@@ -215,25 +215,48 @@ curl -X POST http://localhost:7878/api/datasets/<dataset_id>/validate \
      -H 'Authorization: Bearer <token>'
 ```
 
-Response:
+Response (the keys are snake_case):
 
 ```json
 {
-  "conforms": false,
-  "results_count": 2,
-  "results": [
-    {
-      "severity": "Violation",
-      "focusNode": "http://example.org/alice",
-      "path": "http://schema.org/name",
-      "value": null,
-      "message": "Less than 1 values on schema:name",
-      "sourceShape": "urn:dataset:my-dataset:shapes#PersonShape",
-      "sourceConstraint": "http://www.w3.org/ns/shacl#MinCountConstraintComponent"
-    }
-  ]
+  "report": {
+    "conforms": false,
+    "results": [
+      {
+        "severity": "violation",
+        "focus_node": "http://example.org/alice",
+        "path": "<http://schema.org/name>",
+        "value": null,
+        "source_shape": "urn:dataset:my-dataset:shapes#PersonShape",
+        "source_constraint": "sh:minCount 1",
+        "source_constraint_component": "http://www.w3.org/ns/shacl#MinCountConstraintComponent",
+        "message": "Expected at least 1 values, found 0"
+      }
+    ],
+    "results_count": 1,
+    "metrics": { "path": "dataset", "duration_ms": 4, "quads": 120, "graphs": 1,
+                 "source": "snapshot", "run_index": false }
+  },
+  "run_id": "<run id>",
+  "ran_at": "<timestamp>"
 }
 ```
+
+The JSON fields are display strings: `focus_node` and `value` show an IRI or
+a literal's lexical form (no datatype or language tag), `path` is a SPARQL
+property path, and `source_constraint` is a short label such as
+`sh:minCount 1` (the UI groups results by it).
+`source_constraint_component` is the SHACL constraint component IRI. A test
+run adds `"test": true` and `"partial"`. The 422 body of a write gate uses
+camelCase keys instead (`focusNode`, `sourceShape`, `sourceConstraint`,
+`sourceConstraintComponent`).
+
+The report RDF the run writes (below) is the W3C form: typed `sh:focusNode`
+and `sh:value` terms (datatype and language kept), `sh:resultPath` as a SHACL
+path structure (`[ sh:inversePath ex:p ]`, RDF lists for sequences),
+`sh:sourceConstraintComponent` as the component IRI, `sh:sourceConstraint` for
+`sh:sparql` constraints, and the declared `sh:severity` IRI, custom ones
+included.
 
 ### What a run reads, and who sees its report
 
@@ -595,7 +618,8 @@ ex:TitleShape a sh:NodeShape ; sh:targetClass ex:Doc ;
 * **`sh:message`** on the validator is the result message, falling back to the
   component's own `sh:message`, with `{$param}`, `{?param}`, `{$this}` and
   `{$value}` — and, for a SELECT validator, any variable of the solution —
-  rendered; `sourceConstraint` names the component.
+  rendered; `source_constraint` and `source_constraint_component` name the
+  component.
 * **`sh:deactivated true`** on a validator takes it out: the shape falls back
   to `sh:validator`, and if no validator is left the component checks nothing.
 

@@ -892,7 +892,7 @@ licence policy allows no performance claims on a subset.
 | SPARQL engine coverage (sparqloscope) | `tests/sparqloscope_conformance.rs` | sparqloscope-derived | 67 |  |
 | Cross-standard HTTP smoke | `tests/standards_conformance.rs` | spec-derived | 26 |  |
 | SWRL | `tests/swrl_conformance.rs` | spec-derived | 4 |  |
-| SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (core + sparql sections, manifest-driven) | 1 | 136 corpus cases: 119 pass, 2 known failures, 15 runner-side skips (floor ≥90 asserted) |
+| SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (core + sparql sections, manifest-driven) | 2 | 136 corpus cases: 119 pass, 1 known failure, 1 optional feature unsupported (reported as the failure the spec requires), 15 runner-side skips (floor ≥90 asserted); at full report equality 119 pass, 0 known mismatches |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 125 |  |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 

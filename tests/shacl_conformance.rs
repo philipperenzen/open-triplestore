@@ -1636,3 +1636,146 @@ fn pinned_a_non_canonical_true_activates_a_flag() {
         r.results
     );
 }
+
+// ---------------------------------------------------------------------------
+// Result fidelity: constraint-component IRIs and typed terms (SHACL §3.6)
+// ---------------------------------------------------------------------------
+
+const SH: &str = "http://www.w3.org/ns/shacl#";
+
+/// Every result names the IRI of the constraint component that produced it,
+/// next to the display label the UI groups by (which does not change).
+#[test]
+fn results_name_their_constraint_component() {
+    let shapes = r#"
+      ex:S a sh:NodeShape ; sh:targetNode ex:a ;
+        sh:property [ sh:path ex:name ; sh:minCount 1 ] ;
+        sh:property [ sh:path ex:age ; sh:datatype xsd:integer ; sh:maxInclusive 150 ] ;
+        sh:property [ sh:path ex:tag ; sh:in ( "x" ) ; sh:pattern "^x$" ] ;
+        sh:property [ sh:path ex:knows ;
+                      sh:qualifiedValueShape [ sh:class ex:Person ] ; sh:qualifiedMaxCount 0 ] ;
+        sh:sparql [ sh:select "SELECT $this WHERE { $this <http://example.org/flag> true }" ] ."#;
+    let data = r#"
+      ex:a ex:age "200"^^xsd:integer , "old" ; ex:tag "y" ; ex:knows ex:p ; ex:flag true .
+      ex:p a ex:Person ."#;
+    let r = run(shapes, data);
+    let components: std::collections::BTreeSet<(String, String)> = r
+        .results
+        .iter()
+        .map(|v| {
+            (
+                v.source_constraint_component
+                    .strip_prefix(SH)
+                    .unwrap_or(&v.source_constraint_component)
+                    .to_string(),
+                v.source_constraint.clone(),
+            )
+        })
+        .collect();
+    for (component, label) in [
+        ("MinCountConstraintComponent", "sh:minCount 1"),
+        (
+            "DatatypeConstraintComponent",
+            "sh:datatype <http://www.w3.org/2001/XMLSchema#integer>",
+        ),
+        ("MaxInclusiveConstraintComponent", "sh:maxInclusive 150"),
+        ("InConstraintComponent", "sh:in"),
+        ("PatternConstraintComponent", "sh:pattern \"^x$\""),
+        (
+            "QualifiedMaxCountConstraintComponent",
+            "sh:qualifiedMaxCount 0",
+        ),
+        ("SPARQLConstraintComponent", "sh:SPARQLConstraint"),
+    ] {
+        assert!(
+            components.contains(&(component.to_string(), label.to_string())),
+            "missing ({component}, {label}) in {components:?}"
+        );
+    }
+    // The JSON form carries the IRI and not the typed terms.
+    let json = serde_json::to_value(&r.results[0]).unwrap();
+    assert!(json["source_constraint_component"]
+        .as_str()
+        .is_some_and(|c| c.starts_with(SH)));
+    assert!(json.get("terms").is_none(), "{json}");
+    // A stored report from before the field existed still reads back.
+    let mut old = json.clone();
+    old.as_object_mut()
+        .unwrap()
+        .remove("source_constraint_component");
+    let back: open_triplestore::shacl::report::ValidationResult =
+        serde_json::from_value(old).unwrap();
+    assert_eq!(back.source_constraint_component, "");
+}
+
+/// The RDF report keeps what the display strings drop: literal datatypes and
+/// language tags, path structures, the `sh:sparql` node as
+/// `sh:sourceConstraint`, and a custom `sh:severity` IRI.
+#[test]
+fn rdf_report_keeps_typed_terms() {
+    use open_triplestore::shacl_studio::report_rdf::report_to_turtle;
+    let shapes = r#"
+      ex:Ages a sh:NodeShape ; sh:targetNode ex:a ; sh:severity ex:MySeverity ;
+        sh:property [ sh:path ex:age ; sh:maxInclusive 150 ] .
+      ex:Labels a sh:NodeShape ; sh:targetNode ex:a ;
+        sh:property ex:Labels-label .
+      ex:Labels-label sh:path ( [ sh:inversePath ex:child ] ex:label ) ; sh:languageIn ( "nl" ) .
+      ex:Flags a sh:NodeShape ; sh:targetNode ex:a ; sh:sparql ex:Flags-sparql .
+      ex:Flags-sparql sh:select "SELECT $this ?value WHERE { $this <http://example.org/flag> ?value }" ."#;
+    let data = r#"
+      ex:a ex:age 200 ; ex:flag "on"^^xsd:token .
+      ex:parent ex:child ex:a ; ex:label "parent"@en ."#;
+    let r = run(shapes, data);
+    assert_eq!(r.results_count, 3, "{:#?}", r.results);
+    // Display strings stay as they were.
+    let age = r
+        .results
+        .iter()
+        .find(|v| v.source_constraint.starts_with("sh:maxInclusive"))
+        .unwrap();
+    assert_eq!(age.value.as_deref(), Some("200"));
+    assert_eq!(age.path.as_deref(), Some("<http://example.org/age>"));
+
+    let ttl = report_to_turtle(&r, "urn:report#run-1");
+    let store = TripleStore::in_memory().unwrap();
+    store
+        .load_str(&ttl, RdfFormat::Turtle, Some("urn:report"))
+        .unwrap_or_else(|e| panic!("{e}\n{ttl}"));
+    let ask = |pattern: &str| -> bool {
+        let q = format!(
+            "PREFIX ex: <http://example.org/> PREFIX sh: <{SH}> \
+             PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> \
+             PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
+             ASK {{ GRAPH <urn:report> {{ ?res a sh:ValidationResult ; sh:focusNode ex:a . {pattern} }} }}"
+        );
+        matches!(
+            store.query(&q).unwrap(),
+            oxigraph::sparql::QueryResults::Boolean(true)
+        )
+    };
+    assert!(
+        ask(
+            "?res sh:value 200 ; sh:resultPath ex:age ; sh:resultSeverity ex:MySeverity ; \
+             sh:sourceConstraintComponent sh:MaxInclusiveConstraintComponent ."
+        ),
+        "{ttl}"
+    );
+    assert!(
+        ask(
+            "?res sh:value \"parent\"@en ; sh:sourceShape ex:Labels-label ; \
+             sh:resultSeverity sh:Violation ; \
+             sh:sourceConstraintComponent sh:LanguageInConstraintComponent ; \
+             sh:resultPath ?p . ?p rdf:first [ sh:inversePath ex:child ] ; \
+             rdf:rest ( ex:label ) ."
+        ),
+        "{ttl}"
+    );
+    assert!(
+        ask(
+            "?res sh:value \"on\"^^xsd:token ; sh:sourceShape ex:Flags ; \
+             sh:sourceConstraint ex:Flags-sparql ; \
+             sh:sourceConstraintComponent sh:SPARQLConstraintComponent ."
+        ),
+        "{ttl}"
+    );
+}

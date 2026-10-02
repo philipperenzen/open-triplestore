@@ -107,21 +107,57 @@ UNSCORED_NOTE = (
 )
 
 
-def corpus(stem: str) -> tuple[int, int, int, int]:
-    """(cases, pass, known failures, runner-side skips) from the runner's own
-    recorded baseline (`Empirical baseline: N pass / N known-fail / N aux skips`
-    in tests/<stem>.rs) and its KNOWN_FAILURES list. File counts are not used:
-    the corpus directories hold shared/aux files beyond the cases."""
+def corpus(stem: str) -> tuple[int, int, int, int, int, tuple[int, int] | None]:
+    """(cases, pass, known failures, runner-side skips, optional-unsupported,
+    report-equality (pass, mismatches) or None) from the runner's own recorded
+    baselines (`Empirical baseline: N pass / N known-fail / N aux skips
+    [/ N optional unsupported]`, and optionally `Report-equality baseline:
+    N pass / N mismatch`, in tests/<stem>.rs) and its KNOWN_FAILURES,
+    OPTIONAL_UNSUPPORTED and KNOWN_REPORT_MISMATCHES lists. File counts are
+    not used: the corpus directories hold shared/aux files beyond the cases.
+
+    Optional-unsupported cases test a feature the specification makes optional
+    and requires a processor without it to report as a failure; the runner
+    passes them only when that failure is reported."""
     src = (TESTS / f"{stem}.rs").read_text(encoding="utf-8")
-    m = re.search(r"baseline: (\d+) pass / (\d+) known-fail / (\d+) aux skips", src)
+    m = re.search(
+        r"Empirical baseline: (\d+) pass / (\d+) known-fail / (\d+) aux skips(?: / (\d+) optional unsupported)?",
+        src,
+    )
     if not m:
         raise SystemExit(f"{stem}.rs: baseline comment not found")
-    passed, failed, skipped = (int(x) for x in m.groups())
-    block = src.split("const KNOWN_FAILURES", 1)[1].split("];", 1)[0]
-    known = len(re.findall(r'^\s*\("', block, re.M))
+    passed, failed, skipped = (int(x) for x in m.groups()[:3])
+    optional = int(m.group(4) or 0)
+
+    def entries(const: str) -> int:
+        if f"const {const}" not in src:
+            return 0
+        block = src.split(f"const {const}", 1)[1].split("];", 1)[0]
+        # An entry is a tuple whose first element is its key: `("key", …`,
+        # with the key on the same line as `(` or the next (rustfmt).
+        return len(re.findall(r'\(\s*"[^"]+"\s*,', block))
+
+    known = entries("KNOWN_FAILURES")
     if known != failed:
         raise SystemExit(f"{stem}.rs: KNOWN_FAILURES has {known} entries but the baseline says {failed}")
-    return passed + failed + skipped, passed, failed, skipped
+    if entries("OPTIONAL_UNSUPPORTED") != optional:
+        raise SystemExit(
+            f"{stem}.rs: OPTIONAL_UNSUPPORTED has {entries('OPTIONAL_UNSUPPORTED')} entries but the baseline says {optional}"
+        )
+    equality = None
+    e = re.search(r"Report-equality baseline: (\d+) pass / (\d+) mismatch", src)
+    if e:
+        eq_pass, eq_mismatch = int(e.group(1)), int(e.group(2))
+        if entries("KNOWN_REPORT_MISMATCHES") != eq_mismatch:
+            raise SystemExit(
+                f"{stem}.rs: KNOWN_REPORT_MISMATCHES has {entries('KNOWN_REPORT_MISMATCHES')} entries but the baseline says {eq_mismatch}"
+            )
+        if eq_pass + eq_mismatch != passed:
+            raise SystemExit(
+                f"{stem}.rs: report-equality baseline ({eq_pass} + {eq_mismatch}) does not add up to the {passed} tier-1 passes"
+            )
+        equality = (eq_pass, eq_mismatch)
+    return passed + failed + skipped + optional, passed, failed, skipped, optional, equality
 
 
 def render() -> str:
@@ -136,9 +172,16 @@ def render() -> str:
             if stem in CORPUS_RUNNERS:
                 if stem in PUBLISH_SCORE:
                     # Parsed on every run, so a stale baseline fails --check.
-                    cases, passed, failed, skipped = corpus(stem)
+                    cases, passed, failed, skipped, optional, equality = corpus(stem)
                     plural = "" if failed == 1 else "s"
-                    note = f"{cases} corpus cases: {passed} pass, {failed} known failure{plural}, {skipped} runner-side skips (floor ≥{CORPUS_RUNNERS[stem]} asserted)"
+                    note = f"{cases} corpus cases: {passed} pass, {failed} known failure{plural}"
+                    if optional:
+                        note += f", {optional} optional feature unsupported (reported as the failure the spec requires)"
+                    note += f", {skipped} runner-side skips (floor ≥{CORPUS_RUNNERS[stem]} asserted)"
+                    if equality:
+                        eq_pass, eq_mismatch = equality
+                        eq_plural = "" if eq_mismatch == 1 else "es"
+                        note += f"; at full report equality {eq_pass} pass, {eq_mismatch} known mismatch{eq_plural}"
                 else:
                     note = UNSCORED_NOTE
             elif ign:

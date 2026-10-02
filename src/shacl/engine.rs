@@ -128,7 +128,8 @@ pub fn validate(
                             None,
                             &severity,
                         );
-                        results.extend(apply_message(rs, &shape.message, constraint));
+                        let rs = apply_message(rs, &shape.message, constraint);
+                        results.extend(keep_severity_iri(rs, shape.severity.as_deref()));
                     }
 
                     // Property shape constraints. A property shape's own
@@ -160,7 +161,11 @@ pub fn validate(
                                 &values,
                                 &prop_severity,
                             );
-                            results.extend(apply_message(rs, &prop_shape.message, constraint));
+                            let rs = apply_message(rs, &prop_shape.message, constraint);
+                            results.extend(keep_severity_iri(
+                                rs,
+                                prop_shape.severity.as_deref().or(shape.severity.as_deref()),
+                            ));
                         }
                     }
 
@@ -226,6 +231,28 @@ fn apply_message(
             for r in &mut results {
                 r.message = msg.clone();
             }
+        }
+    }
+    results
+}
+
+/// Keep a declared `sh:severity` that is not one of SHACL's three (e.g.
+/// `ex:MySeverity`) on the results it produced: [`Severity`] maps it to
+/// `Violation`, and the RDF report must still name the declared IRI.
+fn keep_severity_iri(
+    mut results: Vec<ValidationResult>,
+    declared: Option<&str>,
+) -> Vec<ValidationResult> {
+    let Some(iri) = declared else {
+        return results;
+    };
+    let as_enum = Severity::from_iri(iri);
+    if as_enum.iri() == iri {
+        return results;
+    }
+    for r in &mut results {
+        if r.terms.severity.is_none() && r.severity == as_enum {
+            r.terms.severity = Some(iri.to_string());
         }
     }
     results
@@ -830,6 +857,7 @@ fn load_constraints(
                 format!("shape <{shape_iri}>: sh:sparql constraint does not parse: {e}")
             })?;
             constraints.push(Constraint::SparqlConstraint {
+                node: sparql_node.clone(),
                 select,
                 message,
                 severity,

@@ -190,6 +190,8 @@ pub enum Constraint {
     // SHACL-AF: SPARQL-based constraint. `severity` is the optional sh:severity declared
     // on the sh:SPARQLConstraint node itself (e.g. sh:Warning), overriding the shape's.
     SparqlConstraint {
+        /// The `sh:sparql` node (an IRI, or `_:label`): `sh:sourceConstraint`.
+        node: String,
         select: String,
         message: Option<String>,
         severity: Option<String>,

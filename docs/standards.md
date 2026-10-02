@@ -84,7 +84,7 @@ allows no performance claims on a subset.
 | SPARQL engine coverage (sparqloscope) | `tests/sparqloscope_conformance.rs` | sparqloscope-derived | 67 |  |
 | Cross-standard HTTP smoke | `tests/standards_conformance.rs` | spec-derived | 26 |  |
 | SWRL | `tests/swrl_conformance.rs` | spec-derived | 4 |  |
-| SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (core + sparql sections, manifest-driven) | 1 | 136 corpus cases: 119 pass, 2 known failures, 15 runner-side skips (floor ≥90 asserted) |
+| SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (core + sparql sections, manifest-driven) | 2 | 136 corpus cases: 119 pass, 1 known failure, 1 optional feature unsupported (reported as the failure the spec requires), 15 runner-side skips (floor ≥90 asserted); at full report equality 119 pass, 0 known mismatches |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 125 |  |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 
@@ -174,16 +174,20 @@ behavior and will flip green when the limitation is resolved.
    they used to be skipped); `?failure`, `?message` and `{?var}` message
    templates; `sh:deactivated` on constraints and validators; `sh:SPARQLFunction`
    with `sh:select` bodies; rules (`sh:SPARQLRule`, `sh:TripleRule` with
-   constant terms) with `sh:order`, `sh:condition` and `sh:deactivated`.
-   **Not implemented:** `$shapesGraph` / `$currentShape` (optional in SHACL
-   §5.3.1; a query using them fails the shapes graph, which is the reported
-   failure the spec requires, and the one W3C case using them is a known
-   failure); `sh:SPARQLTargetType`; `sh:resultAnnotation`; `sh:sourceConstraint`
-   in results; SHACL-AF node expressions (only a proprietary `sh:expression`
-   subset, and triple rules with node-expression terms are refused);
-   `sh:SPARQLFunction` with `sh:ask` bodies or data access. The W3C corpus score
-   compares `sh:conforms` and the focus-node multiset, not result component
-   IRIs, paths or values.
+   constant terms) with `sh:order`, `sh:condition` and `sh:deactivated`
+   ([shacl.md](shacl.md)). Results name their constraint component IRI, and a
+   SPARQL constraint's results its `sh:sourceConstraint`. **Optional, not
+   supported:** `$shapesGraph` and `$currentShape` (SHACL §5.3.1). A constraint
+   that uses them fails the shapes graph at load, which is the failure the spec
+   requires of a processor without them; the W3C test `shapesGraph-001` is
+   counted as "optional, unsupported", not as a pass or a known failure
+   (w3c/data-shapes#426). The W3C corpus is compared at two levels: the
+   focus-node multiset, and full result-set equality (all but
+   `sh:resultMessage`; [conformance/shacl.md](conformance/shacl.md)). **Not
+   implemented:** `sh:SPARQLTargetType`; `sh:resultAnnotation`; SHACL-AF node
+   expressions (only a proprietary `sh:expression` subset, and triple rules
+   with node-expression terms are refused); `sh:SPARQLFunction` with `sh:ask`
+   bodies or data access.
 8. **SHACL-C** is a pragmatic subset: `[min..max]` counts, `closed`, and `// "msg"`
    messages. The parser rejects unrecognized trailing input (it used to discard it
    silently, which could empty a shape graph on upload with a 200).

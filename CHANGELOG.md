@@ -67,6 +67,44 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asks for, and re-pins; the store now tells everyone which datasets that applies to.
 
 ### Changed
+- **SHACL report graphs follow the W3C results vocabulary** (release note for
+  anyone who reads `urn:system:reports:*` or a SHACL Studio pipeline's report
+  graph). The RDF a validation run writes used to carry display strings; it
+  now carries the terms the engine saw:
+  - `sh:focusNode` and `sh:value` are typed terms: a literal keeps its
+    datatype and language tag (`200`, not `"200"`; `"x"@en`, not `"x"`), and a
+    blank node stays a blank node instead of the string `"_:b0"`.
+  - `sh:resultPath` is a SHACL path structure (`[ sh:inversePath ex:p ]`, an
+    RDF list for a sequence) instead of a string literal in SPARQL syntax.
+  - `sh:sourceConstraintComponent` is the component IRI
+    (`sh:MinCountConstraintComponent`); it used to be a string literal such as
+    `"sh:minCount 1"`.
+  - `sh:sourceConstraint` names the `sh:sparql` node of a SPARQL-based
+    constraint, and `sh:resultSeverity` keeps a custom `sh:severity` IRI
+    (it collapsed to `sh:Violation`).
+  - `sh:result` nodes are written by an RDF serializer, so messages with any
+    characters round-trip.
+
+  Queries that matched the old string literals must match terms now (for
+  example `sh:sourceConstraintComponent sh:MinCountConstraintComponent`, or
+  `FILTER(str(?value) = "200")`). Reports written before the upgrade keep the
+  old shape until the next run replaces them. The JSON report adds
+  `source_constraint_component` (the component IRI; empty on stored runs from
+  before) and the write gate's 422 body `sourceConstraintComponent`; the
+  existing JSON fields are unchanged. One result changes in the JSON too: a
+  `sh:sparql` constraint or `sh:select` validator on a node shape whose row
+  leaves `?value` unbound now reports the focus node as the value, as SHACL
+  §5.3.2 says (it reported none).
+- **The W3C SHACL corpus runs at two comparison levels.** A second test,
+  `w3c_shacl_full_report_equality`, compares every result on focus node,
+  path, value, source shape, component, severity and `sh:sourceConstraint`
+  (everything but the message), through the RDF report the engine writes. It
+  carries its own ratchet list (`KNOWN_REPORT_MISMATCHES`).
+  `sparql/pre-binding/shapesGraph-001` moved from the known failures to a new
+  category, optional and unsupported: `$shapesGraph` / `$currentShape` are
+  optional in SHACL §5.3.1, which requires a processor without them to report
+  a failure, which this one does (w3c/data-shapes#426 contests the test; SHACL
+  1.2 drops the variables). `docs/conformance/shacl.md` has the results.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were
