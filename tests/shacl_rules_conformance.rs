@@ -669,3 +669,68 @@ ex:Off a sh:NodeShape ; sh:targetClass ex:Thing ; sh:deactivated true ;
     );
     assert_eq!(n, 0);
 }
+
+// ─── Fail closed: node expressions in triple rules, unusable targets ─────────
+
+/// SHACL-AF makes `sh:subject`/`sh:predicate`/`sh:object` node expressions; a
+/// blank node there (`sh:object [ sh:path ex:p ]`) is an expression to
+/// evaluate, not a term. The engine has no node-expression evaluator, and it
+/// used to load the blank node as a fixed term: every focus node got a triple
+/// pointing at the shapes graph's own node, written into the data graph. Such
+/// rules are refused at load until node expressions are implemented.
+#[test]
+fn a_triple_rule_with_a_node_expression_is_refused() {
+    for (what, rule) in [
+        (
+            "object",
+            "sh:subject sh:this ; sh:predicate ex:copy ; sh:object [ sh:path ex:p ]",
+        ),
+        (
+            "subject",
+            "sh:subject [ sh:path ex:p ] ; sh:predicate ex:copy ; sh:object true",
+        ),
+        (
+            "predicate",
+            "sh:subject sh:this ; sh:predicate [ sh:path ex:p ] ; sh:object true",
+        ),
+    ] {
+        let shapes = format!(
+            "ex:S a sh:NodeShape ; sh:targetClass ex:Thing ; sh:rule [ a sh:TripleRule ; {rule} ] ."
+        );
+        let store = store_with(&shapes, "ex:t a ex:Thing ; ex:p ex:v .");
+        let r = infer(&store, "urn:shapes", &[]);
+        assert!(
+            r.as_ref().is_err_and(|e| e.contains("node expression")),
+            "{what}: must be refused, got {r:?}"
+        );
+        assert!(
+            !ask(&store, "ASK { ?s ex:copy ?o }"),
+            "{what}: nothing is written"
+        );
+    }
+}
+
+/// A rule shape whose `sh:target` cannot select focus nodes used to fall back
+/// to no targets (`unwrap_or_default`), so the rule silently never fired.
+#[test]
+fn a_rule_whose_target_cannot_be_loaded_fails_the_run() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:target [ sh:select "THIS IS NOT SPARQL" ] ;
+  sh:rule [ a sh:TripleRule ; sh:subject sh:this ; sh:predicate ex:seen ; sh:object true ] ."#;
+    let store = store_with(shapes, "ex:t a ex:Thing .");
+    let r = infer(&store, "urn:shapes", &[]);
+    assert!(r.is_err(), "got {r:?}");
+}
+
+/// A deactivated `sh:condition` shape is one every node conforms to, so the
+/// rule fires (SHACL §2.1.6).
+#[test]
+fn a_deactivated_condition_does_not_block_its_rule() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:Thing ;
+  sh:rule [ a sh:TripleRule ; sh:subject sh:this ; sh:predicate ex:seen ; sh:object true ;
+            sh:condition [ sh:class ex:Missing ; sh:deactivated true ] ] ."#;
+    let store = store_with(shapes, "ex:t a ex:Thing .");
+    infer(&store, "urn:shapes", &[]).unwrap();
+    assert!(ask(&store, "ASK { ex:t ex:seen true }"));
+}
