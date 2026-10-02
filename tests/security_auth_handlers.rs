@@ -367,7 +367,14 @@ async fn provider_edit_keeps_redacted_secret_and_certificate() {
     let mut create = base.clone();
     create["idp_certificate"] = "CERT-A".into();
     create["client_secret"] = "secret-a".into();
-    let (st, txt) = admin_json(&app, Method::POST, "/api/admin/oauth/providers", &token, Some(create)).await;
+    let (st, txt) = admin_json(
+        &app,
+        Method::POST,
+        "/api/admin/oauth/providers",
+        &token,
+        Some(create),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED, "{txt}");
     let id = serde_json::from_str::<serde_json::Value>(&txt).unwrap()["id"]
         .as_str()
@@ -401,7 +408,14 @@ async fn provider_edit_keeps_redacted_secret_and_certificate() {
 
     // The list the form reads carries `is_active` and string `scopes`, and
     // never the certificate.
-    let (st, txt) = admin_json(&app, Method::GET, "/api/admin/oauth/providers", &token, None).await;
+    let (st, txt) = admin_json(
+        &app,
+        Method::GET,
+        "/api/admin/oauth/providers",
+        &token,
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
     let list: serde_json::Value = serde_json::from_str(&txt).unwrap();
     assert_eq!(list[0]["is_active"], true);
