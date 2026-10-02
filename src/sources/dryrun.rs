@@ -778,6 +778,8 @@ mod tests {
             value: None,
             source_shape: shape.to_string(),
             source_constraint: "sh:datatype".to_string(),
+            source_constraint_component: String::new(),
+            terms: Default::default(),
             message: "wrong datatype".to_string(),
         }
     }

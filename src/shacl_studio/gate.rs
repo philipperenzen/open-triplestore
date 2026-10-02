@@ -80,6 +80,8 @@ pub(crate) fn report_for_writer(
             value: None,
             source_shape: String::new(),
             source_constraint: "withheld".to_string(),
+            source_constraint_component: String::new(),
+            terms: Default::default(),
             message: format!(
                 "The write does not conform to the shapes that gate this graph ({} result(s)). \
                  Some of those shapes are in a graph you may not read, so the details are \
@@ -149,6 +151,8 @@ pub(crate) fn gate_error(reason: impl std::fmt::Display) -> ValidationReport {
             value: None,
             source_shape: String::new(),
             source_constraint: "gate-evaluation-failure".to_string(),
+            source_constraint_component: String::new(),
+            terms: Default::default(),
             message,
         }],
         results_count: 1,
@@ -1228,6 +1232,8 @@ mod tests {
             value: None,
             source_shape: "http://example.org/S".to_string(),
             source_constraint: "minCount".to_string(),
+            source_constraint_component: String::new(),
+            terms: Default::default(),
             message: format!("missing name {n}"),
         };
         let report = ValidationReport {

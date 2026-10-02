@@ -70,7 +70,7 @@ SUITES: dict[str, tuple[str, str]] = {
     "owl2_dl_conformance": ("OWL 2 DL", "spec-derived (+ live tests against the reasoner sidecar)"),
     "w3c_owl2_dl_manifests": ("OWL 2 DL", "**vendored W3C test cases** (approved OWL 2 DL / Direct Semantics cases of the OWL 2 Test Case Repository, unmodified; manifest-driven, against the reasoner sidecar)"),
     "shacl_conformance": ("SHACL Core", "spec-derived"),
-    "w3c_shacl_conformance": ("SHACL Core", "**vendored W3C corpus** (core + sparql sections, manifest-driven)"),
+    "w3c_shacl_conformance": ("SHACL Core", "**vendored W3C corpus** (core + sparql sections, manifest-driven, full report equality)"),
     "w3c_sparql11_manifests": ("SPARQL 1.1 Query/Update", "**vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven)"),
     "w3c_sparql11_federation": ("SPARQL 1.1 Federated Query", "**vendored W3C test-suite subset** (`service/` + `syntax-fed/` sections of w3c/rdf-tests, unmodified; manifest-driven, local endpoints)"),
     "shacl_rules_conformance": ("SHACL-AF rules", "spec-derived"),
@@ -127,21 +127,42 @@ UNSCORED_NOTES = {
 }
 
 
-def corpus(stem: str) -> tuple[int, int, int, int]:
-    """(cases, pass, known failures, runner-side skips) from the runner's own
-    recorded baseline (`Empirical baseline: N pass / N known-fail / N aux skips`
-    in tests/<stem>.rs) and its KNOWN_FAILURES list. File counts are not used:
-    the corpus directories hold shared/aux files beyond the cases."""
+def corpus(stem: str) -> tuple[int, int, int, int, int]:
+    """(cases, pass, known failures, runner-side skips, optional-unsupported)
+    from the runner's own recorded baseline (`Empirical baseline: N pass /
+    N known-fail / N aux skips [/ N optional unsupported]` in tests/<stem>.rs)
+    and its KNOWN_FAILURES and OPTIONAL_UNSUPPORTED lists. File counts are not
+    used: the corpus directories hold shared/aux files beyond the cases.
+
+    Optional-unsupported cases test a feature the specification makes optional
+    and requires a processor without it to report as a failure; the runner
+    passes them only when that failure is reported."""
     src = (TESTS / f"{stem}.rs").read_text(encoding="utf-8")
-    m = re.search(r"baseline: (\d+) pass / (\d+) known-fail / (\d+) aux skips", src)
+    m = re.search(
+        r"Empirical baseline: (\d+) pass / (\d+) known-fail / (\d+) aux skips(?: / (\d+) optional unsupported)?",
+        src,
+    )
     if not m:
         raise SystemExit(f"{stem}.rs: baseline comment not found")
-    passed, failed, skipped = (int(x) for x in m.groups())
-    block = src.split("const KNOWN_FAILURES", 1)[1].split("];", 1)[0]
-    known = len(re.findall(r'^\s*\("', block, re.M))
+    passed, failed, skipped = (int(x) for x in m.groups()[:3])
+    optional = int(m.group(4) or 0)
+
+    def entries(const: str) -> int:
+        if f"const {const}" not in src:
+            return 0
+        block = src.split(f"const {const}", 1)[1].split("];", 1)[0]
+        # An entry is a tuple whose first element is its key: `("key", …`,
+        # with the key on the same line as `(` or the next (rustfmt).
+        return len(re.findall(r'\(\s*"[^"]+"\s*,', block))
+
+    known = entries("KNOWN_FAILURES")
     if known != failed:
         raise SystemExit(f"{stem}.rs: KNOWN_FAILURES has {known} entries but the baseline says {failed}")
-    return passed + failed + skipped, passed, failed, skipped
+    if entries("OPTIONAL_UNSUPPORTED") != optional:
+        raise SystemExit(
+            f"{stem}.rs: OPTIONAL_UNSUPPORTED has {entries('OPTIONAL_UNSUPPORTED')} entries but the baseline says {optional}"
+        )
+    return passed + failed + skipped + optional, passed, failed, skipped, optional
 
 
 def render() -> str:
@@ -156,9 +177,12 @@ def render() -> str:
             if stem in CORPUS_RUNNERS:
                 if stem in PUBLISH_SCORE:
                     # Parsed on every run, so a stale baseline fails --check.
-                    cases, passed, failed, skipped = corpus(stem)
+                    cases, passed, failed, skipped, optional = corpus(stem)
                     plural = "" if failed == 1 else "s"
-                    note = f"{cases} corpus cases: {passed} pass, {failed} known failure{plural}, {skipped} runner-side skips (floor ≥{CORPUS_RUNNERS[stem]} asserted)"
+                    note = f"{cases} corpus cases: {passed} pass, {failed} known failure{plural}"
+                    if optional:
+                        note += f", {optional} optional feature unsupported (reported as the failure the spec requires)"
+                    note += f", {skipped} runner-side skips (floor ≥{CORPUS_RUNNERS[stem]} asserted)"
                 else:
                     note = UNSCORED_NOTES[stem]
             elif ign:
