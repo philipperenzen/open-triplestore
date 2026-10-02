@@ -4417,6 +4417,7 @@ dependencies = [
  "criterion",
  "hex",
  "oxigraph",
+ "oxiri",
  "oxrdf",
  "oxsdatatypes",
  "rayon",

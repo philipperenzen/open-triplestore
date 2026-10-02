@@ -383,10 +383,16 @@ struct Ctx<'a> {
     /// literal with a base direction, a triple term). Its `EvalError` would
     /// read as a SPARQL type error, so the whole query is declined instead.
     declined: bool,
+    /// The query's `BASE`: `IRI("rel")` resolves against it, as in the engine.
+    base_iri: Option<oxiri::Iri<String>>,
 }
 
 impl<'a> Ctx<'a> {
-    fn new(idx: &'a Columnar, dataset: Option<&QueryDataset>) -> Result<Self, Decline> {
+    fn new(
+        idx: &'a Columnar,
+        dataset: Option<&QueryDataset>,
+        base_iri: Option<&oxiri::Iri<String>>,
+    ) -> Result<Self, Decline> {
         let (default_graphs, named_graphs) = match dataset {
             None => (vec![DEFAULT_GRAPH], idx.named_graphs().collect()),
             Some(ds) => {
@@ -407,6 +413,7 @@ impl<'a> Ctx<'a> {
             default_graphs,
             named_graphs,
             declined: false,
+            base_iri: base_iri.cloned(),
         })
     }
 
@@ -684,9 +691,11 @@ pub fn evaluate_semantics(idx: &Columnar, query: &Query) -> Result<Option<ParAns
     }
     match query {
         Query::Select {
-            pattern, dataset, ..
+            pattern,
+            dataset,
+            base_iri,
         } => {
-            let mut ctx = match Ctx::new(idx, dataset.as_ref()) {
+            let mut ctx = match Ctx::new(idx, dataset.as_ref(), base_iri.as_ref()) {
                 Ok(c) => c,
                 Err(_) => return Ok(None),
             };
@@ -709,9 +718,11 @@ pub fn evaluate_semantics(idx: &Columnar, query: &Query) -> Result<Option<ParAns
             }))
         }
         Query::Ask {
-            pattern, dataset, ..
+            pattern,
+            dataset,
+            base_iri,
         } => {
-            let mut ctx = match Ctx::new(idx, dataset.as_ref()) {
+            let mut ctx = match Ctx::new(idx, dataset.as_ref(), base_iri.as_ref()) {
                 Ok(c) => c,
                 Err(_) => return Ok(None),
             };
@@ -725,9 +736,9 @@ pub fn evaluate_semantics(idx: &Columnar, query: &Query) -> Result<Option<ParAns
             template,
             pattern,
             dataset,
-            ..
+            base_iri,
         } => {
-            let mut ctx = match Ctx::new(idx, dataset.as_ref()) {
+            let mut ctx = match Ctx::new(idx, dataset.as_ref(), base_iri.as_ref()) {
                 Ok(c) => c,
                 Err(_) => return Ok(None),
             };
@@ -1817,6 +1828,13 @@ fn eval_expr(
             let mut vals = Vec::with_capacity(args.len());
             for a in args {
                 vals.push(eval_expr(a, row, vars, ctx)?);
+            }
+            // A relative `IRI("x")` resolves against the query's BASE.
+            if let (Function::Iri, Some(base), [Value::Str(s)]) = (f, &ctx.base_iri, &vals[..]) {
+                return base
+                    .resolve(s)
+                    .map(|iri| Value::Iri(NamedNode::new_unchecked(iri.into_inner())))
+                    .map_err(|_| EvalError);
             }
             function(f, &vals)
         }

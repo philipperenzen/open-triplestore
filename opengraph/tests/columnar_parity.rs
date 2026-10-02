@@ -175,6 +175,14 @@ fn basic_graph_patterns_and_joins() {
     ] {
         assert_same(&format!("{P}{q}"), false);
     }
+    // `IRI()` resolves a relative string against the query's BASE, as the
+    // engine does (W3C functions#iri01), and parses it absolutely without one.
+    for q in [
+        "BASE <http://example.org/b/> SELECT ?s (IRI(\"rel\") AS ?i) (URI(\"../up\") AS ?u) WHERE { ?s ex:name ?n }",
+        "SELECT ?s (IRI(\"rel\") AS ?i) (IRI(\"http://example.org/abs\") AS ?a) WHERE { ?s ex:name ?n }",
+    ] {
+        assert_same(&format!("{P}{q}"), false);
+    }
 }
 
 #[test]

@@ -112,7 +112,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The W3C SPARQL 1.1 runner also checks the in-memory mirror.** Every
   query-evaluation entry now runs a second time with the mirror on (four
   shards, the columnar copy, the full copy, no rebuild debounce) and must end
-  as it does on the engine.
+  as it does on the engine. Its first run found one more divergence, now
+  fixed: the columnar copy ignored the query's `BASE` in `IRI()`/`URI()`, so
+  `BASE <http://example.org/> SELECT (IRI("x") AS ?i) {}` returned an unbound
+  `?i` instead of `<http://example.org/x>`.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if

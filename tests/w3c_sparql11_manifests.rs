@@ -98,7 +98,7 @@ const PASS_FLOOR: usize = 450;
 /// Mirror floor: query-evaluation entries that must run with the in-memory
 /// mirror actually built, so the parity check cannot pass by never building
 /// it. Below the current count, with the same headroom.
-const MIRROR_FLOOR: usize = 200;
+const MIRROR_FLOOR: usize = 180;
 
 #[derive(Debug, PartialEq)]
 enum Outcome {

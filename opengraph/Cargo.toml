@@ -24,6 +24,8 @@ sparql-12 = ["oxigraph/rdf-12", "spargebra/sparql-12"]
 oxigraph  = "0.5"
 oxrdf     = "0.3"
 spargebra = "0.4"
+# The query's BASE, which `IRI()` resolves against: the oxiri line spargebra uses.
+oxiri     = "0.2.11"
 
 # Durable blank-node identity: SHA-256 canonical hashing + hex encoding.
 # 0.11 to match the workspace root (RustCrypto `digest` 0.11 family).
