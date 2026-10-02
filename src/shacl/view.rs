@@ -422,8 +422,7 @@ impl<'a> DataView<'a> {
         query: spargebra::Query,
         bindings: &[(&str, &Term)],
     ) -> Result<oxigraph::sparql::QueryResults<'_>, String> {
-        let prepared =
-            crate::sparql::prebind::bind(self.evaluator.clone(), bindings).for_query(query);
+        let prepared = crate::sparql::prebind::prepare(self.evaluator.clone(), query, bindings)?;
         self.execute(prepared)
     }
 

@@ -1360,15 +1360,17 @@ impl TripleStore {
             ));
         }
         // The bindings reach every scope of the query, as SHACL pre-binding
-        // defines it (crate::sparql::prebind). Seeding them with
-        // `substitute_variable` let the optimizer drop a `FILTER` whose
-        // `$this` no triple pattern binds, and the rule never fired.
+        // defines it, and seed the evaluation so that triple patterns are
+        // looked up by them (crate::sparql::prebind). Seeding alone let the
+        // optimizer drop a `FILTER` whose `$this` no triple pattern binds, and
+        // the rule never fired; the rewrite alone scanned every pattern in
+        // full for each focus node.
         let mut query = query.clone();
         let names: Vec<&str> = bindings.iter().map(|(n, _)| *n).collect();
         crate::sparql::prebind::rewrite(&mut query, &names).map_err(StoreError::Parse)?;
         let terms: Vec<(&str, &Term)> = bindings.iter().map(|(n, t)| (*n, t)).collect();
-        let mut prepared =
-            crate::sparql::prebind::bind(self.query_options(), &terms).for_query(query);
+        let mut prepared = crate::sparql::prebind::prepare(self.query_options(), query, &terms)
+            .map_err(StoreError::Parse)?;
         confine_dataset(prepared.dataset_mut(), scope)?;
         match prepared.on_store(&self.store).execute()? {
             QueryResults::Graph(triples) => Ok(triples.collect::<Result<Vec<_>, _>>()?),

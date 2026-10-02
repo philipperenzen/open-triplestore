@@ -11,7 +11,7 @@
 //! `VALUES` would be the natural `Table(μ)`, but `VALUES` cannot hold a blank
 //! node and a focus or value node often is one, so the table is
 //! `BIND(<urn:ots:prebound:v>() AS ?v)` over the empty group, one per variable:
-//! a call to a function that [`bind`] registers on the evaluator of the one
+//! a call to a function that [`prepare`] registers on the evaluator of the one
 //! query, returning the term.
 //!
 //! Two simpler routes fail:
@@ -23,12 +23,20 @@
 //!   folds `bound($this)` to false. With the optimizer off instead, every basic
 //!   graph pattern becomes a chain of cartesian products.
 //!
-//! The function calls leave the optimizer free: it sees `$this` bound in each
-//! scope, starts each join from the one-row table and looks the triple
-//! patterns up by the bound value.
+//! The rewrite alone is correct but slow: the optimizer types a custom
+//! function's result as possibly unbound, so it finds no join key between the
+//! table and a triple pattern, and evaluates the pattern with `$this` free —
+//! a scan of every triple with that predicate, per focus node. [`prepare`]
+//! therefore *also* seeds the evaluation with `substitute_variable`. The two
+//! carry the same term: the rewrite tells the optimizer the variable is bound
+//! in every scope, the seed is what the triple-pattern lookups below the table
+//! see, so they look up by the value. They differ only for a query whose top
+//! level is nothing but a sub-select that does not project the variable — a
+//! query SHACL forbids under pre-binding — where the seed binds it at the top
+//! level and the rewrite alone left it unbound there.
 
 use oxigraph::model::{NamedNode, Term};
-use oxigraph::sparql::SparqlEvaluator;
+use oxigraph::sparql::{PreparedSparqlQuery, SparqlEvaluator};
 use spargebra::algebra::{Expression, Function, GraphPattern};
 use spargebra::term::{NamedNodePattern, Variable};
 use spargebra::Query;
@@ -41,7 +49,7 @@ fn function(var: &str) -> NamedNode {
 }
 
 /// Rewrite `query` so that every variable in `vars` is pre-bound when it is
-/// evaluated with an evaluator from [`bind`]: `Replace(E, μ)` of SHACL
+/// evaluated through [`prepare`]: `Replace(E, μ)` of SHACL
 /// Appendix A. An error names a variable that is no valid SPARQL variable.
 pub fn rewrite(query: &mut Query, vars: &[&str]) -> Result<(), String> {
     if vars.is_empty() {
@@ -93,14 +101,27 @@ pub fn rewrite(query: &mut Query, vars: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-/// `evaluator` with the functions a [`rewrite`]-ten query calls, each
-/// returning its variable's value from `bindings`.
-pub fn bind(mut evaluator: SparqlEvaluator, bindings: &[(&str, &Term)]) -> SparqlEvaluator {
+/// Prepare a [`rewrite`]-ten `query` on `evaluator` with `bindings`
+/// pre-bound: the functions the rewritten query calls, each returning its
+/// variable's value, and the same values seeded into the evaluation so that
+/// triple patterns are looked up by them (see the module docs). An error
+/// names a variable that is no valid SPARQL variable.
+pub fn prepare(
+    mut evaluator: SparqlEvaluator,
+    query: Query,
+    bindings: &[(&str, &Term)],
+) -> Result<PreparedSparqlQuery, String> {
     for (name, term) in bindings {
         let term = (*term).clone();
         evaluator = evaluator.with_custom_function(function(name), move |_| Some(term.clone()));
     }
-    evaluator
+    let mut prepared = evaluator.for_query(query);
+    for (name, term) in bindings {
+        let variable =
+            Variable::new(*name).map_err(|e| format!("pre-bound variable ${name}: {e}"))?;
+        prepared = prepared.substitute_variable(variable, (*term).clone());
+    }
+    Ok(prepared)
 }
 
 fn join_table(pattern: &mut GraphPattern, table: &GraphPattern) {

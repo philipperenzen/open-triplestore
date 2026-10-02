@@ -159,7 +159,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     triple pattern binds it there) never fired: the query optimizer, not told
     that `$this` is bound, dropped the filter's group. Rules now pre-bind
     `$this` the way constraints do, in every scope of the query (SHACL
-    Appendix A).
+    Appendix A). The pre-bound values also seed the evaluation, so a triple
+    pattern on `$this` is still looked up by the focus node in rules and
+    constraints alike, not scanned in full once per focus node.
   - On the vendored OGC GeoSPARQL validator corpus, `S21-invalid.ttl` (a
     blank-node geometry whose `geo:dimension` exceeds its
     `geo:coordinateDimension`) is now caught: 47 of 48 examples match the OGC

@@ -415,6 +415,73 @@ ex:S a sh:NodeShape ; sh:targetClass ex:T ;
     assert_eq!(r.results_count, 1, "{:?}", r.results);
 }
 
+/// Pre-binding keeps triple patterns bound. The optimizer cannot tell that
+/// the rewrite's table binds `$this`, so without the seed every pattern was
+/// scanned in full for each focus node (seconds per shape on 20 000 triples).
+/// Counted, not timed: with one focus node on a ring of 1 000, each pattern of
+/// the plan yields one row, not one per subject.
+#[test]
+fn prebound_triple_patterns_are_looked_up_by_the_value() {
+    use open_triplestore::sparql::prebind;
+    use oxigraph::model::{NamedNode, Term};
+    use oxigraph::sparql::{QueryResults, SparqlEvaluator};
+    use oxigraph::store::Store;
+
+    fn quad_pattern_rows(node: &serde_json::Value, out: &mut Vec<(String, u64)>) {
+        let name = node["name"].as_str().unwrap_or_default();
+        if name.starts_with("QuadPattern") {
+            out.push((
+                name.to_string(),
+                node["number of results"].as_u64().unwrap(),
+            ));
+        }
+        for child in node["children"].as_array().into_iter().flatten() {
+            quad_pattern_rows(child, out);
+        }
+    }
+
+    let store = Store::new().unwrap();
+    let ring: String = (0..1000)
+        .map(|i| {
+            format!(
+                "<http://example.org/n{i}> <http://example.org/next> <http://example.org/n{}> .\n",
+                (i + 1) % 1000
+            )
+        })
+        .collect();
+    store
+        .load_from_reader(RdfFormat::NTriples, ring.as_bytes())
+        .unwrap();
+    let this: Term = NamedNode::new("http://example.org/n1").unwrap().into();
+    for text in [
+        "CONSTRUCT { $this <http://example.org/one> ?a } WHERE { $this <http://example.org/next> ?a }",
+        "CONSTRUCT { $this <http://example.org/two> ?b } WHERE { $this <http://example.org/next> ?a . ?a <http://example.org/next> ?b FILTER (bound($this)) }",
+    ] {
+        let mut query = open_triplestore::sparql::parser().parse_query(text).unwrap();
+        prebind::rewrite(&mut query, &["this"]).unwrap();
+        let (results, explanation) =
+            prebind::prepare(SparqlEvaluator::new(), query, &[("this", &this)])
+                .unwrap()
+                .on_store(&store)
+                .compute_statistics()
+                .explain();
+        let Ok(QueryResults::Graph(triples)) = results else {
+            panic!("{text}: no graph");
+        };
+        assert_eq!(triples.count(), 1, "{text}");
+        let mut json = Vec::new();
+        explanation.write_in_json(&mut json).unwrap();
+        let plan: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        let mut rows = Vec::new();
+        quad_pattern_rows(&plan["plan"], &mut rows);
+        assert!(!rows.is_empty(), "{text}: {plan}");
+        assert!(
+            rows.iter().all(|(_, n)| *n <= 1),
+            "{text}: a triple pattern was scanned instead of looked up: {rows:?}"
+        );
+    }
+}
+
 /// A `sh:sparql` constraint on a property shape checks a blank-node focus,
 /// with `$PATH` replaced by the shape's path.
 #[test]
