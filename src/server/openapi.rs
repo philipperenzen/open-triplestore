@@ -2294,11 +2294,20 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Reasoning",
                 "Execute SWRL rules",
-                "Run SWRL rules and materialise their consequences.",
+                "Run SWRL rules (format `text` or OWL/XML `xml`) to a fixed point and \
+                 materialise their consequences into `target_graph` (an absolute IRI; \
+                 default graph when omitted). Every rule is checked before any runs: an \
+                 element the OWL/XML reader does not understand, an unsafe rule, a \
+                 built-in in the head or an unsupported built-in refuses the request \
+                 and nothing is written. The report carries `converged` and \
+                 `stop_reason` (`fixpoint`, `max_iterations` or `timeout`).",
                 vec![],
                 vec![
                     ("200", "Rule execution report"),
+                    ("400", "Rules, format or target graph refused"),
                     ("401", "Authentication required"),
+                    ("403", "No write access to the target graph"),
+                    ("503", "Server overloaded or execution timed out"),
                 ],
                 true,
             ),

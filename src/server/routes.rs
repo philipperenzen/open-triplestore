@@ -10330,7 +10330,7 @@ pub fn swrl_routes() -> Router<AppState> {
 struct SwrlExecuteRequest {
     /// SWRL rules in text format (simple) or XML (OWL)
     rules: String,
-    /// Format: "text" (default) or "xml"
+    /// Format: "text" (default) or "xml" (OWL/XML); anything else is refused
     #[serde(default = "default_swrl_format")]
     format: String,
     /// Maximum fixed-point iterations (default: 100)
@@ -10363,6 +10363,12 @@ async fn swrl_execute(
     // the shared `urn:entailment:*` graphs and other tenants'. Mirrors
     // `/api/reasoning/materialize` above; as there, a `None` target means the
     // default graph, which carries the write-scope check but no per-graph ACL.
+    //
+    // The target goes into the generated update as `GRAPH <…>`, so it must be
+    // an IRI before it is used for anything.
+    if let Some(g) = body.target_graph.as_deref() {
+        crate::swrl::engine::validate_target_graph(g).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    }
     require_graph_write(&state, Some(&user), body.target_graph.as_deref()).map_err(|e| {
         let status = match &e {
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
@@ -10372,20 +10378,69 @@ async fn swrl_execute(
     })?;
 
     let rules = match body.format.as_str() {
-        "xml" => crate::swrl::parser::parse_swrl(&body.rules)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e))?,
-        _ => crate::swrl::parser::parse_swrl_text(&body.rules)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e))?,
-    };
+        "xml" => crate::swrl::parser::parse_swrl(&body.rules),
+        "text" => crate::swrl::parser::parse_swrl_text(&body.rules),
+        other => Err(format!(
+            "Unknown SWRL format '{other}': use \"text\" or \"xml\""
+        )),
+    }
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     if rules.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "No valid rules found".to_string()));
     }
 
+    // Every rule is translated before any runs; a rule that cannot run as
+    // written (unsafe, a head built-in, an untranslatable built-in) refuses
+    // the request and nothing is written.
+    let compiled = crate::swrl::compile_rules(&rules, body.target_graph.as_deref())
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    // Rule execution is a store-wide fixed point: bounded like the other
+    // expensive operations, run off the async runtime, and stopped by the
+    // write timeout. The permit moves into the blocking task, so a run that
+    // outlives the HTTP timeout still counts against the bound until it stops
+    // at its next deadline check.
+    let permit = state
+        .expensive_semaphore
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Server overloaded".to_string(),
+            )
+        })?;
     let max_iter = body.max_iterations.min(1000);
-    let result =
-        crate::swrl::execute_rules(&state.store, &rules, max_iter, body.target_graph.as_deref())
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let limit = std::time::Duration::from_secs(state.write_timeout_secs);
+    let deadline = std::time::Instant::now() + limit;
+    let store = state.store.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        crate::swrl::execute_compiled(&store, &compiled, max_iter, Some(deadline))
+    });
+    // The engine stops itself at the deadline between rules and reports
+    // `stop_reason: "timeout"`; this outer limit only fires when a single
+    // rule's update runs far past it.
+    let result = tokio::time::timeout(limit + std::time::Duration::from_secs(10), task)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
+                    "SWRL execution timed out after {}s; triples derived so far stay written",
+                    state.write_timeout_secs
+                ),
+            )
+        })?
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("SWRL execution task failed: {e}"),
+            )
+        })?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(result))
 }
