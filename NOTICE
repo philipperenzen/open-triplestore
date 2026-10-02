@@ -115,6 +115,17 @@ Bundled binaries and frontend libraries:
     them all, with each package's licence and the verbatim text of every
     LICENSE, COPYING and NOTICE file it ships.
 
+Vendored source code:
+
+  - Oxigraph 0.5.11 (vendor/oxigraph/), the `oxigraph` crate as published on
+    crates.io (upstream https://github.com/oxigraph/oxigraph, path lib/oxigraph,
+    commit df37a5c98e2497135cdd4cfce01a049b78ca6740) — dual-licensed MIT or
+    Apache-2.0, at your option; Copyright (c) 2018 Oxigraph developers. Both
+    licence texts are beside it (vendor/oxigraph/LICENSE-MIT and LICENSE-APACHE).
+    Modified: its literal encoder keeps the lexical form and exact datatype of
+    typed literals. vendor/README.md describes every change, and
+    vendor/oxigraph/UPSTREAM-PR.md the change as proposed upstream.
+
 Bundled datasets and vocabularies:
 
   - Vocabularies bundled in frontend/public/vocab/. The web UI serves them at
