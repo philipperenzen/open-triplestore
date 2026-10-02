@@ -15,6 +15,22 @@ pub struct ReasoningReport {
     pub elapsed_ms: u64,
     /// IRI of the named graph that received the entailed triples.
     pub target_graph: String,
+    /// Axioms the regime read but could not use: constructs outside its
+    /// profile, by construct. Empty (and not serialized) for a regime that
+    /// does not report them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored: Vec<IgnoredAxioms>,
+}
+
+/// Axioms of one construct that a reasoning run left out.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IgnoredAxioms {
+    /// The OWL 2 construct, e.g. `ObjectUnionOf` or `FunctionalObjectProperty`.
+    pub construct: String,
+    /// How many axioms or expressions used it.
+    pub count: usize,
+    /// One of them: the subject term of the first one read.
+    pub example: String,
 }
 
 /// Errors that can occur during reasoning.

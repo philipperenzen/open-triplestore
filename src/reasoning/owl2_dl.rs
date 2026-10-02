@@ -226,6 +226,7 @@ impl<'a> Owl2DLReasoner<'a> {
             iterations: rl_report.iterations + dl_iterations,
             elapsed_ms: start.elapsed().as_millis() as u64,
             target_graph: self.target_graph.clone(),
+            ignored: Vec::new(),
         })
     }
 
@@ -665,6 +666,7 @@ impl ExternalReasonerBridge {
             iterations: native_report.iterations + 1,
             elapsed_ms: start.elapsed().as_millis() as u64,
             target_graph: target_graph.to_string(),
+            ignored: Vec::new(),
         })
     }
 }

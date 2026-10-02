@@ -163,6 +163,7 @@ impl<'a> RdfsMaterializer<'a> {
             iterations,
             elapsed_ms: start.elapsed().as_millis() as u64,
             target_graph: self.target_graph.clone(),
+            ignored: Vec::new(),
         })
     }
 

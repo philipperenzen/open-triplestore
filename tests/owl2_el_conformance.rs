@@ -262,20 +262,30 @@ fn test_has_key_merges_individuals() {
 
 // ─── Complex scenario: biomedical-style classification ─────────────────────────
 
+/// SNOMED-style definitions: a disorder is classified under another through
+/// its definition, and under a body-system disorder through a TBox property
+/// chain (`findingSite ∘ partOf ⊑ findingSite`). This used to accept an
+/// asserted triple, so it passed whatever the reasoner did.
 #[test]
 fn test_biomedical_classification() {
-    // SNOMED-like classification: Drug --hasClinicalModality--> Analgesic subClassOf Drug
     let s = store_with(
-        "ex:hasClinicalModality rdfs:range ex:ClinicalModality . \
-         ex:Analgesic rdfs:subClassOf ex:Drug . \
-         ex:Aspirin ex:hasClinicalModality ex:AnalgesicModality . \
-         ex:AnalgesicModality rdf:type ex:ClinicalModality .",
+        "ex:findingSite owl:propertyChainAxiom ( ex:findingSite ex:partOf ) . \
+         ex:Lung rdfs:subClassOf [ owl:onProperty ex:partOf ; owl:someValuesFrom ex:RespiratorySystem ] . \
+         ex:Pneumonia owl:equivalentClass [ owl:intersectionOf ( ex:Disorder \
+             [ owl:onProperty ex:findingSite ; owl:someValuesFrom ex:Lung ] ) ] . \
+         ex:BacterialPneumonia owl:equivalentClass [ owl:intersectionOf ( ex:Disorder \
+             [ owl:onProperty ex:findingSite ; owl:someValuesFrom ex:Lung ] \
+             [ owl:onProperty ex:causativeAgent ; owl:someValuesFrom ex:Bacterium ] ) ] . \
+         ex:RespiratoryDisorder owl:equivalentClass [ owl:intersectionOf ( ex:Disorder \
+             [ owl:onProperty ex:findingSite ; owl:someValuesFrom ex:RespiratorySystem ] ) ] .",
     );
     classify(&s);
-    // Aspirin gets typed as ClinicalModality's domain participant (via CR8 range)
-    assert!(ask_tg(&s, "<http://example.org/AnalgesicModality> rdf:type <http://example.org/ClinicalModality> .") ||
-            ask_tg(&s, "<http://example.org/Analgesic> rdfs:subClassOf <http://example.org/Drug> ."),
-        "biomedical classification produces expected inferences");
+    let sub = |a: &str, b: &str| ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex(a), ex(b)));
+    assert!(sub("BacterialPneumonia", "Pneumonia"), "by definition");
+    assert!(sub("Pneumonia", "RespiratoryDisorder"), "through the chain");
+    assert!(sub("BacterialPneumonia", "RespiratoryDisorder"));
+    assert!(!sub("Pneumonia", "BacterialPneumonia"));
+    assert!(!sub("RespiratoryDisorder", "Pneumonia"));
 }
 
 // ─── Idempotency ──────────────────────────────────────────────────────────────
@@ -597,4 +607,440 @@ fn test_inconsistency_is_reported() {
     c.detect_inconsistency = false;
     c.classify().unwrap();
     assert!(!c.check_consistency().unwrap());
+}
+
+// ─── Native engine: completeness, output and reporting ─────────────────────────
+
+fn report_scoped(ttl: &str) -> (TripleStore, ReasoningReport) {
+    let s = scoped_store(ttl);
+    let r = classify_scoped(&s).unwrap();
+    (s, r)
+}
+
+/// An unscoped run sees its own consequences: a sub-property edge feeds a
+/// domain, a transitive closure of four links, all from the default graph.
+/// The SPARQL loop read the default graph only, so none of these fired.
+#[test]
+fn test_unscoped_run_sees_its_own_derivations() {
+    let s = store_with(
+        "ex:partOf rdf:type owl:TransitiveProperty . \
+         ex:directPartOf rdfs:subPropertyOf ex:partOf . \
+         ex:partOf rdfs:domain ex:Part . \
+         ex:a ex:directPartOf ex:b . ex:b ex:directPartOf ex:c . \
+         ex:c ex:directPartOf ex:d . ex:d ex:directPartOf ex:e .",
+    );
+    classify(&s);
+    assert!(ask_tg(&s, &format!("{} {} {} .", ex("a"), ex("partOf"), ex("e"))));
+    assert!(ask_tg(&s, &format!("{} rdf:type {} .", ex("a"), ex("Part"))));
+    assert!(!ask_tg(&s, &format!("{} rdf:type {} .", ex("e"), ex("Part"))));
+}
+
+/// CR11 in the TBox: `A ⊑ ∃r.B`, `B ⊑ ∃s.C`, `r ∘ s ⊑ t`, `∃t.C ⊑ D` ⊨ `A ⊑ D`.
+#[test]
+fn test_tbox_property_chain() {
+    let (s, _) = report_scoped(
+        "ex:A rdfs:subClassOf [ owl:onProperty ex:r ; owl:someValuesFrom ex:B ] . \
+         ex:B rdfs:subClassOf [ owl:onProperty ex:s ; owl:someValuesFrom ex:C ] . \
+         ex:t owl:propertyChainAxiom ( ex:r ex:s ) . \
+         [ owl:onProperty ex:t ; owl:someValuesFrom ex:C ] rdfs:subClassOf ex:D .",
+    );
+    assert!(ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("A"), ex("D"))));
+    assert!(!ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("B"), ex("D"))));
+}
+
+/// Transitivity in the TBox: parts of parts are parts.
+#[test]
+fn test_tbox_transitivity() {
+    let (s, _) = report_scoped(
+        "ex:partOf rdf:type owl:TransitiveProperty . \
+         ex:Finger rdfs:subClassOf [ owl:onProperty ex:partOf ; owl:someValuesFrom ex:Hand ] . \
+         ex:Hand rdfs:subClassOf [ owl:onProperty ex:partOf ; owl:someValuesFrom ex:Arm ] . \
+         ex:ArmPart owl:equivalentClass [ owl:onProperty ex:partOf ; owl:someValuesFrom ex:Arm ] .",
+    );
+    assert!(ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("Finger"), ex("ArmPart"))));
+    assert!(ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("Hand"), ex("ArmPart"))));
+}
+
+/// A property chain of four properties over individuals (the SPARQL loop
+/// stopped at three).
+#[test]
+fn test_property_chain_of_four() {
+    let (s, _) = report_scoped(
+        "ex:r owl:propertyChainAxiom ( ex:p1 ex:p2 ex:p3 ex:p4 ) . \
+         ex:a ex:p1 ex:b . ex:b ex:p2 ex:c . ex:c ex:p3 ex:d . ex:d ex:p4 ex:e .",
+    );
+    assert!(ask_tg(&s, &format!("{} {} {} .", ex("a"), ex("r"), ex("e"))));
+    assert!(!ask_tg(&s, &format!("{} {} {} .", ex("a"), ex("r"), ex("d"))));
+}
+
+/// A range applies through the property hierarchy, to individuals and to
+/// the successor of an existential — without making every filler an
+/// instance of the range.
+#[test]
+fn test_range_through_hierarchy_and_existentials() {
+    let (s, _) = report_scoped(
+        "ex:hasMother rdfs:subPropertyOf ex:hasParent . \
+         ex:hasParent rdfs:range ex:Person . \
+         ex:x ex:hasMother ex:y . \
+         ex:A rdfs:subClassOf [ owl:onProperty ex:hasMother ; owl:someValuesFrom ex:Female ] . \
+         [ owl:onProperty ex:hasParent ; owl:someValuesFrom \
+             [ owl:intersectionOf ( ex:Female ex:Person ) ] ] rdfs:subClassOf ex:HasFemaleParent .",
+    );
+    assert!(ask_tg(&s, &format!("{} rdf:type {} .", ex("y"), ex("Person"))));
+    assert!(ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("A"), ex("HasFemaleParent"))));
+    assert!(
+        !ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("Female"), ex("Person"))),
+        "the range does not leak into the shared filler"
+    );
+    assert!(!ask_tg(&s, &format!("{} rdf:type {} .", ex("x"), ex("Person"))));
+}
+
+/// Reflexivity: every individual gets the loop, including one that only
+/// appears as an object (the SPARQL rule missed it), and `∃r.A ⊑ B` with
+/// `r` reflexive gives `A ⊑ B`. Classes get no loop.
+#[test]
+fn test_reflexive_property() {
+    let (s, _) = report_scoped(
+        "ex:knows rdf:type owl:ReflexiveProperty . \
+         ex:alice ex:likes ex:bob . ex:likes rdfs:subPropertyOf ex:likes2 . \
+         [ owl:onProperty ex:knows ; owl:someValuesFrom ex:Expert ] rdfs:subClassOf ex:KnowsExpert . \
+         ex:Expert rdfs:subClassOf ex:Person .",
+    );
+    assert!(ask_tg(&s, &format!("{} {} {} .", ex("bob"), ex("knows"), ex("bob"))));
+    assert!(ask_tg(&s, &format!("{} {} {} .", ex("alice"), ex("knows"), ex("alice"))));
+    assert!(ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("Expert"), ex("KnowsExpert"))));
+    assert!(!ask_tg(&s, &format!("{} {} {} .", ex("Expert"), ex("knows"), ex("Expert"))));
+}
+
+/// ⊥ travels back along property edges: an individual whose successor is
+/// unsatisfiable makes the ontology inconsistent.
+#[test]
+fn test_bottom_through_successor_is_inconsistent() {
+    let s = scoped_store(
+        "ex:Empty rdfs:subClassOf owl:Nothing . \
+         ex:x ex:p ex:y . ex:A owl:equivalentClass [ owl:onProperty ex:p ; owl:someValuesFrom ex:B ] . \
+         ex:B rdfs:subClassOf ex:Empty . ex:y rdf:type ex:B .",
+    );
+    let err = classify_scoped(&s).unwrap_err();
+    assert!(matches!(err, ReasoningError::Inconsistency(_)), "{err}");
+}
+
+/// `owl:Thing ⊑ owl:Nothing` is an inconsistency even without individuals.
+#[test]
+fn test_top_below_bottom_is_inconsistent() {
+    let s = scoped_store("owl:Thing rdfs:subClassOf ex:A . ex:A rdfs:subClassOf owl:Nothing .");
+    match classify_scoped(&s) {
+        Err(ReasoningError::Inconsistency(msg)) => assert!(msg.contains("owl:Thing"), "{msg}"),
+        other => panic!("expected an inconsistency, got {other:?}"),
+    }
+}
+
+/// `owl:AllDisjointClasses` makes its members pairwise disjoint.
+#[test]
+fn test_all_disjoint_classes() {
+    let ttl = "[ rdf:type owl:AllDisjointClasses ; owl:members ( ex:A ex:B ex:C ) ] . \
+               ex:D rdfs:subClassOf ex:A , ex:C .";
+    let s = scoped_store(ttl);
+    classify_scoped(&s).unwrap();
+    let unsat = El2Classifier::new(&s)
+        .with_sources(vec![DATA.to_string()])
+        .unsatisfiable_classes()
+        .unwrap();
+    assert_eq!(unsat, vec!["http://example.org/D".to_string()]);
+
+    let s = scoped_store(&format!("{ttl} ex:x rdf:type ex:B , ex:C ."));
+    match classify_scoped(&s) {
+        Err(ReasoningError::Inconsistency(msg)) => assert!(msg.contains("disjoint"), "{msg}"),
+        other => panic!("expected an inconsistency, got {other:?}"),
+    }
+}
+
+/// Classification writes `owl:equivalentClass` between equivalent class IRIs,
+/// told or entailed, and `owl:Thing ⊑ C` types every individual as a `C`.
+#[test]
+fn test_equivalence_and_top_output() {
+    let (s, _) = report_scoped(
+        "ex:A owl:equivalentClass [ owl:onProperty ex:p ; owl:someValuesFrom ex:C ] . \
+         ex:B owl:equivalentClass [ owl:onProperty ex:p ; owl:someValuesFrom ex:C ] . \
+         owl:Thing rdfs:subClassOf ex:Entity . \
+         ex:x ex:q ex:y .",
+    );
+    assert!(ask_tg(&s, &format!("{} owl:equivalentClass {} .", ex("A"), ex("B"))));
+    assert!(ask_tg(&s, &format!("{} owl:equivalentClass {} .", ex("B"), ex("A"))));
+    assert!(ask_tg(&s, &format!("{} rdf:type {} .", ex("y"), ex("Entity"))));
+    assert!(ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("A"), ex("Entity"))));
+}
+
+/// Intersections of any arity, on either side of an axiom.
+#[test]
+fn test_nary_intersection() {
+    let (s, _) = report_scoped(
+        "ex:C owl:equivalentClass [ owl:intersectionOf ( ex:A1 ex:A2 ex:A3 ex:A4 ) ] . \
+         ex:x rdf:type ex:A1 , ex:A2 , ex:A3 , ex:A4 . \
+         ex:y rdf:type ex:A1 , ex:A2 , ex:A3 . \
+         ex:z rdf:type ex:C .",
+    );
+    assert!(ask_tg(&s, &format!("{} rdf:type {} .", ex("x"), ex("C"))));
+    assert!(!ask_tg(&s, &format!("{} rdf:type {} .", ex("y"), ex("C"))));
+    assert!(ask_tg(&s, &format!("{} rdf:type {} .", ex("z"), ex("A4"))));
+}
+
+/// Only new triples are written: nothing already stated in a source graph,
+/// and nothing the target graph already holds.
+#[test]
+fn test_writes_only_new_triples() {
+    let (s, r) = report_scoped(
+        "ex:A rdfs:subClassOf ex:B . ex:B rdfs:subClassOf ex:C . \
+         ex:x rdf:type ex:A , ex:B .",
+    );
+    assert!(!ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("A"), ex("B"))));
+    assert!(!ask_tg(&s, &format!("{} rdf:type {} .", ex("x"), ex("B"))));
+    assert!(ask_tg(&s, &format!("{} rdf:type {} .", ex("x"), ex("C"))));
+    assert_eq!(r.triples_added, 2, "A ⊑ C and x a C: {r:?}");
+    assert_eq!(count_tg(&s), 2);
+    // The writes went through insert_quads: the graph index knows the count.
+    assert_eq!(s.graph_count_cached(Some(TG)), Some(2));
+}
+
+/// A scoped run reads only its sources (and the target graph).
+#[test]
+fn test_scope_excludes_other_graphs() {
+    let s = scoped_store("ex:x rdf:type ex:A .");
+    s.load_str(
+        "<http://example.org/A> <http://www.w3.org/2000/01/rdf-schema#subClassOf> \
+         <http://example.org/B> .",
+        RdfFormat::Turtle,
+        Some("urn:test:other"),
+    )
+    .unwrap();
+    classify_scoped(&s).unwrap();
+    assert!(!ask_tg(&s, &format!("{} rdf:type {} .", ex("x"), ex("B"))));
+    El2Classifier::new(&s)
+        .with_sources(vec![DATA.to_string(), "urn:test:other".to_string()])
+        .classify()
+        .unwrap();
+    assert!(ask_tg(&s, &format!("{} rdf:type {} .", ex("x"), ex("B"))));
+}
+
+/// Keys see inferred types and sub-property edges.
+#[test]
+fn test_has_key_with_inferred_facts() {
+    let (s, _) = report_scoped(
+        "ex:Person owl:hasKey ( ex:ssn ) . \
+         ex:Student rdfs:subClassOf ex:Person . \
+         ex:studentNumber rdfs:subPropertyOf ex:ssn . \
+         ex:alice rdf:type ex:Student ; ex:studentNumber \"42\" . \
+         ex:bob rdf:type ex:Person ; ex:ssn \"42\" . \
+         ex:carol ex:ssn \"42\" .",
+    );
+    assert!(ask_tg(&s, &format!("{} owl:sameAs {} .", ex("alice"), ex("bob"))));
+    assert!(ask_tg(&s, &format!("{} owl:sameAs {} .", ex("bob"), ex("alice"))));
+    assert!(
+        !ask_tg(&s, &format!("{} owl:sameAs {} .", ex("alice"), ex("carol"))),
+        "carol is not known to be a Person"
+    );
+}
+
+/// A data property's domain types the subject; the literal gets no type.
+#[test]
+fn test_data_property_domain_and_hierarchy() {
+    let (s, _) = report_scoped(
+        "ex:age rdf:type owl:DatatypeProperty ; rdfs:domain ex:Agent . \
+         ex:exactAge rdfs:subPropertyOf ex:age . \
+         ex:x ex:exactAge 42 .",
+    );
+    assert!(ask_tg(&s, &format!("{} rdf:type {} .", ex("x"), ex("Agent"))));
+    assert!(ask_tg(&s, &format!("{} {} 42 .", ex("x"), ex("age"))));
+    assert!(!ask_tg(&s, "?lit rdf:type ?c . FILTER(isLiteral(?lit))"));
+}
+
+/// Constructs outside the profile are counted in the report, and leaving
+/// them out adds no wrong consequence.
+#[test]
+fn test_ignored_constructs_are_reported() {
+    let (s, r) = report_scoped(
+        "ex:A rdfs:subClassOf [ owl:unionOf ( ex:B ex:C ) ] . \
+         ex:D rdfs:subClassOf [ owl:onProperty ex:p ; owl:allValuesFrom ex:E ] . \
+         ex:F rdfs:subClassOf [ owl:onProperty ex:p ; owl:maxCardinality 1 ] . \
+         ex:G rdfs:subClassOf [ owl:onProperty ex:p ; owl:maxCardinality 2 ] . \
+         ex:p owl:inverseOf ex:q . \
+         ex:p rdf:type owl:FunctionalProperty . \
+         ex:x rdf:type ex:A .",
+    );
+    let ignored: Vec<(String, usize)> = r
+        .ignored
+        .iter()
+        .map(|i| (i.construct.clone(), i.count))
+        .collect();
+    for (construct, count) in [
+        ("ObjectUnionOf", 1),
+        ("ObjectAllValuesFrom", 1),
+        ("cardinality restriction", 2),
+        ("InverseObjectProperties", 1),
+        ("FunctionalObjectProperty", 1),
+    ] {
+        assert!(
+            ignored.contains(&(construct.to_string(), count)),
+            "{construct} × {count} in {ignored:?}"
+        );
+    }
+    assert!(!ask_tg(&s, &format!("{} rdf:type {} .", ex("x"), ex("B"))));
+    let json = serde_json::to_value(&r).unwrap();
+    assert!(json["ignored"].is_array());
+
+    // A report with nothing ignored serializes without the field.
+    let (_, r) = report_scoped("ex:A rdfs:subClassOf ex:B .");
+    assert!(r.ignored.is_empty());
+    assert!(serde_json::to_value(&r).unwrap().get("ignored").is_none());
+}
+
+/// A three-hundred-class generated ontology with existentials, chains and an
+/// ABox classifies, and the deepest class lands under the root definition.
+#[test]
+fn test_generated_ontology_classifies() {
+    let mut ttl = String::from("ex:partOf rdf:type owl:TransitiveProperty . ");
+    for i in 1..300 {
+        ttl.push_str(&format!(
+            "ex:C{i} rdfs:subClassOf ex:C{} , [ owl:onProperty ex:partOf ; owl:someValuesFrom ex:C{} ] . ",
+            i - 1,
+            i / 2
+        ));
+        ttl.push_str(&format!("ex:i{i} rdf:type ex:C{i} . "));
+    }
+    ttl.push_str(
+        "ex:PartOfRoot owl:equivalentClass [ owl:onProperty ex:partOf ; owl:someValuesFrom ex:C0 ] . ",
+    );
+    let (s, r) = report_scoped(&ttl);
+    assert!(ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("C299"), ex("PartOfRoot"))));
+    assert!(ask_tg(&s, &format!("{} rdf:type {} .", ex("i299"), ex("C0"))));
+    assert!(r.triples_added > 1000, "{r:?}");
+}
+
+// ─── Differential test against the RL engine on EL ∩ RL ────────────────────────
+
+/// A deterministic generator (xorshift64*), so a failure names its seed.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+}
+
+/// A random ontology in the intersection of OWL 2 EL and OWL 2 RL: no
+/// existential on the right, no reflexivity, no keys or equality, binary
+/// intersections and chains (the RL rules are binary), no disjointness.
+fn random_el_rl(seed: u64) -> String {
+    let mut g = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+    let (nc, np, ni) = (8, 4, 7);
+    let c = |i: usize| format!("ex:C{i}");
+    let p = |i: usize| format!("ex:p{i}");
+    let ind = |i: usize| format!("ex:i{i}");
+    let mut t = String::new();
+    for _ in 0..14 {
+        let line = match g.below(10) {
+            0 | 1 => format!("{} rdfs:subClassOf {} .", c(g.below(nc)), c(g.below(nc))),
+            2 => format!("{} owl:equivalentClass {} .", c(g.below(nc)), c(g.below(nc))),
+            3 => format!(
+                "[ owl:intersectionOf ( {} {} ) ] rdfs:subClassOf {} .",
+                c(g.below(nc)),
+                c(g.below(nc)),
+                c(g.below(nc))
+            ),
+            4 => format!(
+                "{} rdfs:subClassOf [ owl:intersectionOf ( {} {} ) ] .",
+                c(g.below(nc)),
+                c(g.below(nc)),
+                c(g.below(nc))
+            ),
+            5 => {
+                let filler = if g.below(4) == 0 { "owl:Thing".to_string() } else { c(g.below(nc)) };
+                format!(
+                    "[ owl:onProperty {} ; owl:someValuesFrom {} ] rdfs:subClassOf {} .",
+                    p(g.below(np)),
+                    filler,
+                    c(g.below(nc))
+                )
+            }
+            6 => format!("{} rdfs:subPropertyOf {} .", p(g.below(np)), p(g.below(np))),
+            7 => match g.below(3) {
+                0 => format!("{} rdf:type owl:TransitiveProperty .", p(g.below(np))),
+                _ => format!(
+                    "{} owl:propertyChainAxiom ( {} {} ) .",
+                    p(g.below(np)),
+                    p(g.below(np)),
+                    p(g.below(np))
+                ),
+            },
+            8 => format!("{} rdfs:domain {} .", p(g.below(np)), c(g.below(nc))),
+            _ => format!("{} rdfs:range {} .", p(g.below(np)), c(g.below(nc))),
+        };
+        t.push_str(&line);
+        t.push(' ');
+    }
+    for _ in 0..6 {
+        t.push_str(&format!("{} rdf:type {} . ", ind(g.below(ni)), c(g.below(nc))));
+    }
+    for _ in 0..9 {
+        t.push_str(&format!(
+            "{} {} {} . ",
+            ind(g.below(ni)),
+            p(g.below(np)),
+            ind(g.below(ni))
+        ));
+    }
+    t
+}
+
+/// The named types of the individuals and the property edges between them,
+/// over every graph.
+#[cfg(feature = "owl2-rl")]
+fn abox_closure(s: &TripleStore) -> std::collections::BTreeSet<String> {
+    let q = "SELECT DISTINCT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } \
+             FILTER(STRSTARTS(STR(?s), \"http://example.org/i\")) \
+             FILTER((?p = <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> \
+                     && STRSTARTS(STR(?o), \"http://example.org/C\")) \
+                 || (STRSTARTS(STR(?p), \"http://example.org/p\") \
+                     && STRSTARTS(STR(?o), \"http://example.org/i\"))) }";
+    let mut out = std::collections::BTreeSet::new();
+    if let oxigraph::sparql::QueryResults::Solutions(sols) = s.query(q).unwrap() {
+        for sol in sols {
+            let sol = sol.unwrap();
+            out.insert(format!("{} {} {}", sol.get("s").unwrap(), sol.get("p").unwrap(), sol.get("o").unwrap()));
+        }
+    }
+    out
+}
+
+/// On ontologies in both profiles, the EL engine's realization and property
+/// closure equal the RL engine's (OWL 2 Profiles Theorem PR1 makes RL
+/// complete for these atomic consequences).
+#[cfg(feature = "owl2-rl")]
+#[test]
+fn test_differential_against_rl() {
+    use open_triplestore::reasoning::owl2_rl::Owl2RLReasoner;
+    for seed in 1..=40u64 {
+        let ttl = random_el_rl(seed);
+        let el = scoped_store(&ttl);
+        classify_scoped(&el).unwrap();
+        let rl = scoped_store(&ttl);
+        Owl2RLReasoner::new(&rl)
+            .with_sources(vec![DATA.to_string()])
+            .materialize()
+            .unwrap();
+        let (a, b) = (abox_closure(&el), abox_closure(&rl));
+        assert_eq!(
+            a,
+            b,
+            "seed {seed}: EL-only {:?}, RL-only {:?}\n{ttl}",
+            a.difference(&b).collect::<Vec<_>>(),
+            b.difference(&a).collect::<Vec<_>>()
+        );
+    }
 }
