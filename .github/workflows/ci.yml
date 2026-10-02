@@ -309,6 +309,44 @@ jobs:
       - name: Run conformance tests
         run: cargo test --features full,saml,test-utils,backup-encrypt,alerting --locked --test '*conformance*'
 
+      # OWL 2 DL against the reasoner sidecar the project ships
+      # (sidecars/reasoner: OWL API + HermiT). Its live tests and the W3C OWL 2
+      # DL runner skip everywhere else; here the sidecar is built (with its own
+      # unit tests) and started, and OTS_TEST_LIVE_REQUIRED turns a missing
+      # variable into a failure. The test-name filter leaves out the Konclude
+      # live tests, which need a Konclude binary this job does not install.
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: sidecars/reasoner/pom.xml
+
+      - name: Build and start the reasoner sidecar
+        working-directory: sidecars/reasoner
+        env:
+          OTS_REASONER_TOKEN: ots-ci-reasoner-token
+        run: |
+          ./mvnw -B -q package
+          nohup java -jar target/ots-reasoner.jar > "$RUNNER_TEMP/reasoner.log" 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8090/version && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/reasoner.log"
+          exit 1
+
+      - name: OWL 2 DL against the reasoner sidecar (W3C OWL 2 DL test cases + live tests)
+        env:
+          OTS_TEST_LIVE_REQUIRED: '1'
+          OTS_TEST_REASONER_URL: http://127.0.0.1:8090
+          OTS_TEST_REASONER_TOKEN: ots-ci-reasoner-token
+        run: cargo test --features full,saml,test-utils,backup-encrypt,alerting --locked --test owl2_dl_conformance --test w3c_owl2_dl_manifests -- sidecar_live w3c_owl2_dl
+
+      - name: Reasoner sidecar log
+        if: always()
+        run: cat "$RUNNER_TEMP/reasoner.log" || true
+
       # The seed bundles built on national-standard data (NEN 2660-2, IMBOR,
       # GWSW) are not vendored — NEN 2660-2 carries no licence that allows
       # redistributing it, GWSW's ontology states none — so their tests skip

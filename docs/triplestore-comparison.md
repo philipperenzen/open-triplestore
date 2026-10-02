@@ -259,9 +259,10 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >   qualified cardinality, AllDisjointClasses, property chains, and hasKey) are all fully
 >   implemented via feature flags (`owl2-el`, `owl2-ql`, `owl2-rl`).
 >   See [`docs/owl2-el.md`](owl2-el.md), [`docs/owl2-ql.md`](owl2-ql.md), [`docs/owl2-rl.md`](owl2-rl.md).
-> ⁷ OWL 2 DL: a configured backend (`OTS_DL_BACKEND`) — the in-process RL + DL-syntax rules
->   (sound, not complete), a user-installed Konclude driven over OWLlink, or an HTTP reasoner
->   sidecar; an OWL 2 DL profile check precedes every run. Graded Partial in `docs/standards.md`.
+> ⁷ OWL 2 DL: graded Full in `docs/standards.md` **with the reasoner sidecar the project ships**
+>   (OWL API + HermiT, `docker compose --profile reasoner`), which CI runs against the approved W3C
+>   OWL 2 DL test cases. Without it, the in-process RL + DL-syntax rules are sound but not complete,
+>   and Konclude is bring-your-own. An OWL 2 DL profile check precedes every run.
 >   See [`docs/owl2-dl.md`](owl2-dl.md).
 > ⁸ ShEx (Shape Expressions) support via `shex` feature flag. ShExC parser, recursive descent
 >   validator with cardinality checking, CLOSED/EXTRA, inverse constraints, and value sets.
@@ -316,6 +317,9 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > row is not claimed (footnote ⁴). The other 🟡 rows are SPARQL 1.2 and RDF 1.2/RDF-star
 > (upstream oxrdf blocker — triple-term evaluation not yet complete). The count is of ✅ cells,
 > which elsewhere in the Open Triplestore column mark feature presence (see §2.3).
+>
+> 2026-10-02: the OWL 2 DL row is now graded Full in `docs/standards.md` with the reasoner
+> sidecar (footnote ⁷), so its ✅, already counted, follows the grade. No count changes.
 
 ```
 Open Triplestore  ███████████████████████░░░░░░   23 / 29  (#1 open-source; GeoSPARQL, SHACL, SPARQL 1.2, RDF-star 🟡; W3C tests not claimed)
@@ -733,7 +737,7 @@ reduces GEOS calls by ~90%.
 | GraphDB | ✅ | ✅ | ✅ | ✅ | 🔒 | ✅ | ✅ | ❌ |
 | Stardog | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Virtuoso | ✅ | 🟡 | ✅ | ✅ | ❌ | 🟡 | ❌ | ❌ |
-| **Open Triplestore** | 🟡 | 🟡 | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ✅ |
+| **Open Triplestore** | 🟡 | 🟡 | 🟡 | 🟡 | ✅ | 🟡 | ✅ | ✅ |
 | Jena 5 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | 🟡 | ❌ | ❌ |
 | RDF4J 5 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ✅ | ❌ | ❌ |
 | Blazegraph | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ❌ | ❌ |
@@ -741,8 +745,8 @@ reduces GEOS calls by ~90%.
 | QLever | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 
 > Open Triplestore: RDFS and OWL 2 EL/QL/RL are available via feature flags (`rdfs-entailment`,
-> `owl2-el`, `owl2-ql`, `owl2-rl`). Not enabled by default. OWL 2 DL requires a full HermiT/Pellet-
-> class reasoner, which is out of scope for this project.
+> `owl2-el`, `owl2-ql`, `owl2-rl`). Not enabled by default. OWL 2 DL runs on the HermiT reasoner
+> sidecar the project ships (`docker compose --profile reasoner`; see footnote ⁷).
 
 ### 11.2 Reasoning Approaches Compared
 
@@ -752,8 +756,9 @@ even after updates. Best OWL DL implementation available.
 **GraphDB** uses forward-chaining (materialisation) — fast reads; requires re-inference after
 updates. OWL DL requires the commercial edition.
 
-**Open Triplestore** has no OWL reasoning but supports **SHACL-AF** (rule-based inference
-via SHACL Advanced Features), which covers many practical derivation needs:
+**Open Triplestore** materialises RDFS and the OWL 2 EL, QL and RL profiles in process and OWL 2
+DL through its HermiT sidecar. It also supports **SHACL-AF** (rule-based inference via SHACL
+Advanced Features), which covers many practical derivation needs without a reasoner:
 
 | OWL RL Pattern | SHACL-AF Equivalent | Coverage |
 |----------------|---------------------|----------|
@@ -1025,7 +1030,6 @@ security patches not applied. Any existing deployment should migrate to QLever o
 | Gap | Severity | Current Workaround |
 |-----|----------|--------------------|
 | No SPARQL 1.2 full support | Medium | `rdf-12` flag + `ADJUST` function; LATERAL/CALL await Oxigraph upstream |
-| No OWL DL reasoning | Low for typical use | SHACL-AF covers ~70% of OWL RL |
 | Single-node only | Medium for HA | RocksDB read-replica snapshot copy |
 | Write-lock degrades readers | Medium under write load | Bulk-load then read-only |
 

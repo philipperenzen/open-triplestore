@@ -9,7 +9,7 @@ OWL 2 DL (SROIQ(D)) is the most expressive OWL 2 profile. Reasoning in it needs 
 | *(unset)* | nothing — `owl2-dl` answers 503 | — |
 | `native` | OWL 2 RL plus DL-syntax rules, in process | **no** — sound, not complete (`complete: false`) |
 | `konclude` | the [Konclude](https://github.com/konclude/Konclude) binary (`OTS_KONCLUDE_BIN`) | yes, for what it reports (see below) |
-| `sidecar` | an HTTP reasoner service (`OTS_REASONER_URL`) speaking the protocol below | as the sidecar says (`complete` in its answer) |
+| `sidecar` | an HTTP reasoner service (`OTS_REASONER_URL`) speaking the protocol below; the project ships one, OWL API + HermiT (`docker compose --profile reasoner`) | yes, with the bundled sidecar (`complete` in its answer) |
 
 A failing external backend never falls back to the native rules: an unreachable backend is a 503, a run past the time limit a 504 with `"result": "unknown"`.
 
@@ -92,12 +92,70 @@ Konclude does not report data values entailed by `owl:hasValue` and ignores anno
 
 ## Reasoner sidecar (`OTS_DL_BACKEND=sidecar`)
 
-A sidecar is an HTTP service that wraps a DL reasoner. Configure it with:
+A sidecar is an HTTP service that wraps a DL reasoner. The project ships one: **OWL API 5 + HermiT** in `sidecars/reasoner/`, published as the image `ghcr.io/philipperenzen/open-triplestore-reasoner` next to the server's image. Any service that speaks the protocol below can take its place.
+
+### Running the bundled sidecar
+
+With Docker Compose, set two variables in `.env` and start the `reasoner` profile:
+
+```bash
+OTS_DL_BACKEND=sidecar
+OTS_REASONER_TOKEN=<openssl rand -hex 32>
+```
+
+```bash
+docker compose --profile reasoner up -d
+```
+
+The `reasoner` service publishes no host port: only the triplestore reaches it, over the compose network, at `http://reasoner:8090` (the compose default of `OTS_REASONER_URL`). Without a token the sidecar refuses to start. Outside Compose, run the image (or `java -jar target/ots-reasoner.jar` after `./mvnw package` in `sidecars/reasoner/`) and point `OTS_REASONER_URL` at it.
+
+The sidecar's own settings:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OTS_REASONER_TOKEN` | *(required)* | The bearer token the triplestore must send. `OTS_REASONER_ALLOW_NO_TOKEN=1` runs without one (tests only). |
+| `OTS_REASONER_PORT`, `OTS_REASONER_BIND` | `8090`, `0.0.0.0` | Where it listens. |
+| `OTS_REASONER_CONCURRENCY` | `2` | Reasoning runs at once. Further requests wait up to `OTS_REASONER_QUEUE_WAIT_MS` (60 s), then get a 503. |
+| `OTS_REASONER_MAX_BODY_MB` | `512` | Largest request body; more is a 413. |
+| `OTS_REASONER_DEFAULT_TIMEOUT_MS`, `OTS_REASONER_MAX_TIMEOUT_MS` | `300000`, `3600000` | Time limit when a request gives none, and the cap on the one it gives. |
+| `OTS_REASONER_EXPLAIN_MAX_AXIOMS` | `2000` | Explain an inconsistency for inputs up to this many logical axioms; `0` turns explanations off. |
+| `JAVA_OPTS` | `-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError` | JVM options. HermiT holds the whole ontology and its tableau in memory: size the container (`REASONER_MEM_LIMIT`, default 4g) to the ontologies you reason over. |
+
+### What the bundled sidecar does
+
+For every request it:
+1. never follows `owl:imports` (it drops those triples and says so in `warnings`; nothing is ever fetched);
+2. applies the RDF mapping's compatibility rules for OWL 1 DL (Tables 14, 15 and 18), which the OWL API leaves out: an `owl:intersectionOf` or `owl:unionOf` list of one member reads as that member, an empty one as `owl:Thing` or `owl:Nothing`;
+3. declares undeclared properties by use, as the server's own mapping does (a literal object makes a data property, any other an object property; schema-only properties are settled from their restrictions and ranges), and any other undeclared entity as the OWL API reads it, with a warning;
+4. parses the N-Triples with the OWL API 5.1.9, the version HermiT 1.4.5.519 is built against;
+5. checks the OWL 2 DL profile with the OWL API's `OWL2DLProfile`, plus the property and class/datatype punning rules of the typing constraints, and refuses triples the OWL API could not read. Input outside OWL 2 DL is a 422 with `in_profile: false` and the violations, each named after the OWL API's violation class (for example `UseOfNonSimplePropertyInCardinalityRestriction`) or `unmapped-triple`. The server has already run its own check, so this is a second line. Annotations of annotations, which the OWL API does not read, are dropped with a warning: they do not affect reasoning;
+6. reasons with HermiT, which is interrupted when the time limit passes (504, result unknown).
+
+What `/v1/reason` reports — only triples about named entities:
+- `rdfs:subClassOf` (the transitive closure, without `⊑ owl:Thing`) and `owl:equivalentClass` between named classes;
+- `C rdfs:subClassOf owl:Nothing` for every unsatisfiable class, also listed in `unsatisfiable`;
+- `rdfs:subPropertyOf` and `owl:equivalentProperty` between named object properties and between named data properties;
+- `rdf:type` of every named individual (without `owl:Thing`);
+- `owl:sameAs` between named individuals;
+- the object property assertions between named individuals, including those entailed through chains, inverses, functional properties, nominals and existentials;
+- data property values as HermiT returns them: the asserted values and those reached through sub-properties and `owl:sameAs`. HermiT does not report values entailed by `owl:hasValue` restrictions; a run over data properties says so in `warnings`.
+
+It does not report disjointness between classes, property characteristics, or anything about anonymous individuals and class expressions.
+
+**Inconsistency.** An inconsistent input is reported with a minimal inconsistent subset of its axioms when there are at most `OTS_REASONER_EXPLAIN_MAX_AXIOMS` of them and time is left: QuickXplain over HermiT consistency tests, at most 400 tests. The server returns it as the 422's `detail`, for example `HermiT found the ontology inconsistent; a minimal inconsistent subset (3 axioms): ClassAssertion(<…#A> <…#a>); ClassAssertion(<…#B> <…#a>); DisjointClasses(<…#A> <…#B>)`.
+
+**Checks.** `/v1/check` answers with HermiT: `consistency`; `satisfiability` of a class; `entailment` of every logical axiom of the conclusion. Entailment is checked by reduction to class satisfiability (O ⊨ α iff a class expression saying "α fails here" is unsatisfiable): class and property assertions, sub-, equivalent and disjoint classes, same and different individuals, domains, ranges and the property characteristics each take one HermiT satisfiability test. HermiT's own entailment check answered `false` for an entailed class assertion until the ABox had been realised, so it is used only for the remaining axiom types and for conclusions with blank nodes, after every inference has been precomputed. The conclusion is read with the premise's declarations, so an entity keeps the kind the premise gives it, and its blank nodes are read as anonymous individuals, that is, existentials. An inconsistent premise entails everything and makes no class satisfiable. An axiom HermiT cannot check gives `unknown`.
+
+The sidecar runs the W3C OWL 2 test cases in CI; see [conformance/owl2-dl.md](conformance/owl2-dl.md).
+
+### Protocol, version 1
+
+Configure the server with:
 - `OTS_REASONER_URL` (base URL);
 - `OTS_REASONER_TOKEN` (sent as `Authorization: Bearer …`);
 - `OTS_REASONER_TIMEOUT_SECS` and `OTS_REASONER_MAX_TRIPLES`.
 
-The client waits a quarter longer than the timeout (at most 5 s more), so the sidecar's own answer can arrive first. Protocol, version 1:
+The client waits a quarter longer than the timeout (at most 5 s more), so the sidecar's own answer can arrive first.
 
 **`POST /v1/reason`** — body `{"data": "<N-Triples>", "timeout_ms": n}`; answer:
 
@@ -110,18 +168,20 @@ The client waits a quarter longer than the timeout (at most 5 s more), so the si
   "unsatisfiable": ["http://example.org/Impossible"],
   "inferred": "<http://example.org/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.org/B> .\n",
   "complete": true,
-  "backend": { "name": "hermit", "version": "1.4.5" },
+  "backend": { "name": "hermit", "version": "1.4.5.519" },
   "warnings": []
 }
 ```
 
 **`POST /v1/check`** — body `{"task": "consistency" | "entailment" | "satisfiability", "data", "conclusion"?, "class"?, "timeout_ms"}`; answer `{"result": "true" | "false" | "unknown", "detail"?, "in_profile", "violations", "backend", "warnings"}`.
 
+**`GET /health`** and **`GET /version`** (`{protocol, sidecar, backend, owlapi}`) need no token.
+
 How the server reads the sidecar's answers:
 - a sidecar that cannot be reached, or answers 503, makes the request a 503;
 - a 504, or no answer in time, makes it a 504 with result unknown;
 - `in_profile: false`, or a 422 with `violations`, makes it a 422 with those violations;
-- any other non-200 is a 502;
+- any other non-200 (a wrong token is a 401) is a 502;
 - inferred triples with a blank node, and triples that were already asserted, are dropped.
 
 ---

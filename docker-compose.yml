@@ -101,6 +101,15 @@ services:
       # naming this var whenever a store is over the cap, so an off accelerator is
       # never silent.
       - OTS_PARALLEL_QUERY_MAX_TRIPLES=${OTS_PARALLEL_QUERY_MAX_TRIPLES:-}
+      # OWL 2 DL reasoning (docs/owl2-dl.md). Unset OTS_DL_BACKEND: the `owl2-dl`
+      # regime answers 503. With the bundled reasoner (`--profile reasoner`, below)
+      # set OTS_DL_BACKEND=sidecar and OTS_REASONER_TOKEN in .env.
+      - OTS_DL_BACKEND=${OTS_DL_BACKEND:-}
+      - OTS_REASONER_URL=${OTS_REASONER_URL:-http://reasoner:8090}
+      - OTS_REASONER_TOKEN=${OTS_REASONER_TOKEN:-}
+      - OTS_REASONER_TIMEOUT_SECS=${OTS_REASONER_TIMEOUT_SECS:-}
+      - OTS_REASONER_MAX_TRIPLES=${OTS_REASONER_MAX_TRIPLES:-}
+      - OTS_DL_DEBOUNCE_MS=${OTS_DL_DEBOUNCE_MS:-}
     # Make `host.docker.internal` (used by LD_REGISTRY_URL above) resolve on every
     # platform. Docker Desktop (Windows/macOS) provides it automatically; this mapping
     # adds the same hostname on plain Linux Docker so the config stays portable.
@@ -338,6 +347,30 @@ services:
       # First start downloads + loads the model; give it plenty of room.
       start_period: 600s
       retries: 10
+
+  # OWL 2 DL reasoner sidecar: OWL API + HermiT (LGPL-3.0, shipped unmodified;
+  # sidecars/reasoner/). Start it with `--profile reasoner` and set in .env:
+  #   OTS_DL_BACKEND=sidecar
+  #   OTS_REASONER_TOKEN=<openssl rand -hex 32>   # shared by both services
+  # It publishes no host port: only the triplestore reaches it, over the compose
+  # network. Without a token it refuses to start.
+  reasoner:
+    build:
+      context: .
+      dockerfile: sidecars/reasoner/Dockerfile
+    # Pull the published image instead of building (needs no Java toolchain):
+    # image: ghcr.io/philipperenzen/open-triplestore-reasoner:latest
+    profiles: ["reasoner"]
+    environment:
+      - OTS_REASONER_TOKEN=${OTS_REASONER_TOKEN:-}
+      # Reasoning runs at once; more requests wait up to OTS_REASONER_QUEUE_WAIT_MS, then 503.
+      - OTS_REASONER_CONCURRENCY=${OTS_REASONER_CONCURRENCY:-2}
+      # Inconsistency explanations (a minimal inconsistent subset) up to this many axioms; 0 = off.
+      - OTS_REASONER_EXPLAIN_MAX_AXIOMS=${OTS_REASONER_EXPLAIN_MAX_AXIOMS:-2000}
+      - JAVA_OPTS=${REASONER_JAVA_OPTS:--XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError}
+    restart: unless-stopped
+    # HermiT keeps the whole ontology and its tableau in memory; the heap is 75% of this.
+    mem_limit: ${REASONER_MEM_LIMIT:-4g}
 
 volumes:
   triplestore_data:
