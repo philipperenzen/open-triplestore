@@ -304,6 +304,40 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   behind a reverse proxy, set `TRUSTED_PROXY_CIDRS` to its address range, or
   every audit row and guest budget is keyed on the proxy's address.
   `docs/administration.md` and `docs/operations.md` say so.
+- **A `sh:SPARQLFunction` stored in any graph could redefine functions for
+  every caller.** Definitions were collected from the whole store and
+  registered into every query's evaluator after the built-ins. The SPARQL
+  engine consults custom functions before its `xsd:` casts, and the last
+  registration of an IRI wins, so any writer of any graph could redefine
+  `xsd:integer(…)`, `geof:sfWithin` or a function another tenant's shapes call,
+  for other tenants' `/sparql` queries, `sh:sparql` constraints, write gates and
+  pipelines. A function now belongs to the runs of the shapes graph that
+  declares it: validation, inference, Studio pipelines and write gates that use
+  that graph. `/sparql`, SPARQL Update and the reasoners see only the server's
+  own functions and those in the graphs an admin names in the new
+  `OTS_SPARQL_FUNCTION_GRAPHS` setting. Only `urn:system:functions` and graphs
+  under `urn:system:functions:` can be named there, so only an admin can write
+  them. No function may take an IRI in the `xsd:`, `rdf:`, `rdfs:`, `owl:`,
+  `sh:`, `sparql:`, XPath or GeoSPARQL namespaces or one the server registers
+  (GeoSPARQL, 3D, RDF 1.2, `ADJUST`). A shapes graph that declares one fails
+  its run, naming the function. A designated graph's definition is skipped
+  with a warning instead. **Upgrade note:** a query that called a function
+  stored in an ordinary graph now fails with an unsupported-function error. So
+  does a constraint whose shapes graph calls a function that only another
+  shapes graph declares, which is now reported as unevaluable. Move the
+  definition into a designated function graph, or into the shapes graph that
+  calls it. Tests:
+  `tests/sparql_scope_boundary_http.rs`, `tests/shacl_conformance.rs`.
+- **ShEx validation read the whole store.** `POST /api/shex/validate` and
+  `POST /api/datasets/{id}/shex/validate` matched triples and discovered focus
+  nodes in every graph, whoever asked. The dataset route checked access to the
+  dataset and then ignored it. A report names its focus nodes, and a verdict
+  such as `PATTERN "^123"` answers a question about the data, so any signed-in
+  user could probe private graphs and other tenants' datasets. Both routes now
+  read what `/sparql` lets the caller read (admins: everything). The dataset
+  route reads only that dataset's graphs, without its stored report graphs. A
+  triple held by two graphs in scope is now counted once. Tests:
+  `tests/dataset_validation_read_scope_http.rs`.
 - **Every configured secret goes through the secrets module.** `JWT_SECRET`,
   `LD_REGISTRY_TOKEN`, a replication follower's `OTS_REPLICATION_TOKEN` and the
   accounts-dashboard plugin's `ACCOUNTS_DASHBOARD_GATEWAY_KEY` were read as raw

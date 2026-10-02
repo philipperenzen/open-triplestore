@@ -102,12 +102,13 @@ pub(crate) struct DataView<'a> {
     /// can hold no quads), so the other graphs are still validated.
     graphs: Vec<GraphName>,
     classes: HashMap<(String, GraphSel), ClassInfo>,
-    /// The run's SPARQL evaluator, built once from the store's own options so
-    /// the GeoSPARQL, 3D, RDF 1.2 and `sh:SPARQLFunction` registrations are
-    /// present. Building it scans the store for user-defined functions, which
-    /// is exactly the per-probe cost this module exists to remove, so it is
-    /// built once here and cloned per query (`SparqlEvaluator` is `Clone`;
-    /// `parse_query` consumes it).
+    /// The run's SPARQL evaluator, built by the caller from
+    /// `TripleStore::query_options_for_shapes` so the GeoSPARQL, 3D, RDF 1.2
+    /// and the run's own `sh:SPARQLFunction` registrations are present.
+    /// Building it scans for user-defined functions, which is exactly the
+    /// per-probe cost this module exists to remove, so it is built once per
+    /// run and cloned per query (`SparqlEvaluator` is `Clone`; `parse_query`
+    /// consumes it).
     evaluator: oxigraph::sparql::SparqlEvaluator,
     /// Graph-reach measurement for this run (see [`ReachProbe`]).
     pub(crate) reach_probe: ReachProbe,
@@ -255,7 +256,12 @@ const _: () = {
 
 impl<'a> DataView<'a> {
     /// Open the run's data source (see the module docs for the choice).
-    pub(crate) fn new(store: &'a TripleStore, data_graphs: &'a [String]) -> Self {
+    /// `evaluator` evaluates the shapes graph's SPARQL (see the field).
+    pub(crate) fn new(
+        store: &'a TripleStore,
+        data_graphs: &'a [String],
+        evaluator: oxigraph::sparql::SparqlEvaluator,
+    ) -> Self {
         let raw = if let Some(full) = store.mirror_full_copy() {
             RawSource::Mirror(full)
         } else if store.is_persistent() {
@@ -280,7 +286,7 @@ impl<'a> DataView<'a> {
             raw,
             graphs,
             classes: HashMap::new(),
-            evaluator: store.query_options(),
+            evaluator,
             reach_probe: ReachProbe::from_env(),
             index: None,
         }

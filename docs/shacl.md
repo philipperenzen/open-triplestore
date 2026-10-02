@@ -528,6 +528,41 @@ ex:TitleShape a sh:NodeShape ; sh:targetClass ex:Doc ;
 A component a shape uses without a validator for the shape's kind, or a
 validator that does not parse, fails the shapes graph.
 
+### SPARQL functions (`sh:SPARQLFunction`, SHACL-AF §5)
+
+A shapes graph can declare functions its own `sh:sparql` constraints,
+validators, SPARQL targets and rules call:
+
+```turtle
+ex:double a sh:SPARQLFunction ;
+  sh:parameter [ sh:path ex:x ; sh:order 0 ] ;
+  sh:returnType xsd:integer ;
+  sh:select "SELECT ($x * 2 AS ?result) WHERE {}" .
+```
+
+* **Scope.** A function belongs to the runs of the shapes graph that declares
+  it: validation, inference, Studio pipelines and write gates that use that
+  graph. No other shapes graph's run sees it, and `/sparql`, SPARQL Update and
+  the reasoners do not see it at all.
+* **Reserved IRIs.** A function may not take an IRI in the `xsd:`, `rdf:`,
+  `rdfs:`, `owl:`, `sh:`, `sparql:`, XPath `fn:`/`math:` or GeoSPARQL `geof:`
+  namespaces, in the server's own function namespace
+  (`https://open-triplestore.org/def/function/`), or any IRI the server
+  registers itself (GeoSPARQL functions and aggregates, the 3D functions,
+  RDF 1.2, `ADJUST`). The SPARQL engine consults custom functions before its
+  `xsd:` casts, so a definition at such an IRI would change what every caller
+  computes. A shapes graph that declares one fails its run, naming the
+  function.
+* **Functions for every query.** An admin can make functions callable from
+  `/sparql` by storing them in a graph named in `OTS_SPARQL_FUNCTION_GRAPHS`
+  (see [administration](administration.md)). Only `urn:system:functions` and
+  graphs under `urn:system:functions:` can be named: no dataset can hold such
+  a graph, so only an admin can write one. Shapes runs see these functions too,
+  and a shapes graph may not redefine one.
+* **Evaluation.** Only `sh:select` bodies are supported. A body runs on an
+  empty store with its parameters substituted, so it can compute from its
+  arguments but not read data; a body that queries data returns unbound.
+
 ---
 
 ## SHACL Compact Syntax (SHACLC)

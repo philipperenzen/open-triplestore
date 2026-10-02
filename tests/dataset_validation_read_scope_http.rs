@@ -483,3 +483,170 @@ async fn a_reader_cannot_record_forge_or_evict_an_official_run() {
         "the owner's official run must still be in history: {ids:?}"
     );
 }
+
+// ─── ShEx ───────────────────────────────────────────────────────────────────
+//
+// ShEx reports name their focus nodes, and conformance itself answers
+// questions about the data (`PATTERN "^123"` conforms only when the hidden
+// value starts with 123). Both ShEx routes therefore read what `/sparql` lets
+// the caller read, and the dataset route reads only that dataset's graphs.
+
+/// Another tenant's PRIVATE dataset holding one more patient.
+#[cfg(feature = "shex")]
+const OTHER_DATA: &str = "http://other.example/data";
+
+#[cfg(feature = "shex")]
+fn shex_fixture() -> (AppState, String, String, String) {
+    let (state, admin, alice, bob) = fixture();
+    state
+        .auth_db
+        .create_user("carol", "carol", "carol@t.com", "hash", SystemRole::User)
+        .unwrap();
+    state
+        .auth_db
+        .create_dataset(
+            "other-ds",
+            "other-ds",
+            None,
+            OwnerType::User,
+            "carol",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    load(&state.store, OTHER_DATA, &patient("p9", "987-65-4321"));
+    state
+        .auth_db
+        .add_dataset_graph("other-ds", OTHER_DATA)
+        .unwrap();
+    (state, admin, alice, bob)
+}
+
+/// POST a ShEx validation; `focus` empty means "no shape map" (the validator
+/// then finds its own focus nodes).
+#[cfg(feature = "shex")]
+async fn shex(state: &AppState, token: &str, uri: &str, pattern: &str, focus: &[&str]) -> Value {
+    let shape = "http://ex.org/SsnShape";
+    let schema = format!(
+        "PREFIX ex: <http://ex.org/>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n\
+         ex:SsnShape {{ ex:ssn xsd:string PATTERN \"{pattern}\" }}"
+    );
+    let shape_map = if focus.is_empty() {
+        json!({})
+    } else {
+        let nodes: Vec<String> = focus.iter().map(|f| format!("http://ex.org/{f}")).collect();
+        json!({ shape: nodes })
+    };
+    let (st, text) = send(
+        state,
+        Method::POST,
+        uri,
+        token,
+        json!({ "schema": schema, "shape_map": shape_map }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{uri}: {text}");
+    serde_json::from_str(&text).unwrap()
+}
+
+#[cfg(feature = "shex")]
+fn status_of(report: &Value, focus: &str) -> Option<bool> {
+    report["results"].as_array()?.iter().find_map(|r| {
+        let node = r["focus_node"].as_str()?;
+        node.contains(&format!("ex.org/{focus}"))
+            .then(|| r["status"].as_str() == Some("Conformant"))
+    })
+}
+
+/// Without a shape map the validator discovers focus nodes itself. A viewer
+/// of the dataset discovers only those in graphs they may read; nobody, an
+/// admin included, discovers another dataset's nodes through this dataset.
+#[cfg(feature = "shex")]
+#[tokio::test]
+async fn shex_on_a_dataset_discovers_only_its_readable_nodes() {
+    let (state, admin, _alice, bob) = shex_fixture();
+    let uri = "/api/datasets/pub-ds/shex/validate";
+
+    let report = shex(&state, &bob, uri, ".*", &[]).await;
+    let text = report.to_string();
+    assert!(
+        text.contains("ex.org/p0"),
+        "the public node is validated: {text}"
+    );
+    assert!(!text.contains("ex.org/p1"), "private graph leaked: {text}");
+    assert!(
+        !text.contains("ex.org/p9"),
+        "another dataset leaked: {text}"
+    );
+
+    let report = shex(&state, &admin, uri, ".*", &[]).await;
+    let text = report.to_string();
+    assert!(
+        text.contains("ex.org/p1"),
+        "admin reads the private graph: {text}"
+    );
+    assert!(
+        !text.contains("ex.org/p9"),
+        "the dataset route reads only its own dataset: {text}"
+    );
+}
+
+/// With a shape map the verdict is the leak: `PATTERN "^123"` conforms only
+/// when the secret starts with 123. A viewer gets the verdict on data they
+/// may read and never one computed from a graph they may not.
+#[cfg(feature = "shex")]
+#[tokio::test]
+async fn shex_verdicts_never_come_from_unreadable_graphs() {
+    let (state, admin, _alice, bob) = shex_fixture();
+    for uri in ["/api/datasets/pub-ds/shex/validate", "/api/shex/validate"] {
+        // The oracle exists: an admin's verdict reads the secret.
+        let report = shex(&state, &admin, uri, "^123", &["p1"]).await;
+        assert_eq!(status_of(&report, "p1"), Some(true), "{uri}: {report}");
+
+        let report = shex(&state, &bob, uri, "^public", &["p0"]).await;
+        assert_eq!(
+            status_of(&report, "p0"),
+            Some(true),
+            "{uri}: a viewer validates what they may read: {report}"
+        );
+        let report = shex(&state, &bob, uri, "^123", &["p1"]).await;
+        assert_eq!(
+            status_of(&report, "p1"),
+            Some(false),
+            "{uri}: a private graph answered the viewer's question: {report}"
+        );
+        let report = shex(&state, &bob, uri, "^987", &["p9"]).await;
+        assert_eq!(
+            status_of(&report, "p9"),
+            Some(false),
+            "{uri}: another tenant's dataset answered the viewer's question: {report}"
+        );
+    }
+}
+
+/// The inline route has no dataset: it reads what `/sparql` would let the
+/// caller read, across datasets.
+#[cfg(feature = "shex")]
+#[tokio::test]
+async fn shex_inline_discovers_only_readable_nodes() {
+    let (state, admin, alice, bob) = shex_fixture();
+    let uri = "/api/shex/validate";
+
+    let text = shex(&state, &bob, uri, ".*", &[]).await.to_string();
+    assert!(text.contains("ex.org/p0"), "{text}");
+    assert!(!text.contains("ex.org/p1"), "private graph leaked: {text}");
+    assert!(!text.contains("ex.org/p9"), "another tenant leaked: {text}");
+
+    // alice writes pub-ds, so she reads its private graph; carol's she does not.
+    let text = shex(&state, &alice, uri, ".*", &[]).await.to_string();
+    assert!(text.contains("ex.org/p1"), "{text}");
+    assert!(!text.contains("ex.org/p9"), "another tenant leaked: {text}");
+
+    let text = shex(&state, &admin, uri, ".*", &[]).await.to_string();
+    for p in ["p0", "p1", "p9"] {
+        assert!(
+            text.contains(&format!("ex.org/{p}")),
+            "admin reads all: {text}"
+        );
+    }
+}
