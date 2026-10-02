@@ -127,6 +127,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cut with and a restore brings it back. The dataset's Turtle and TriG
   exports (the Graph Store read of its graphs, a version's `/data`) declare
   it ahead of the prefix registry.
+- **LDES publisher context and endpoints.** The event stream declares a
+  generated `tree:shape` (one IRI `dct:isVersionOf`, one `xsd:dateTime`
+  `dct:created`; open otherwise), `ldes:pollingInterval` (60 s by default, set
+  with `"polling_interval"` on `PUT /api/datasets/:id/ldes`), and
+  `ldes:versionDeletePath rdf:type` / `ldes:versionDeleteObject as:Delete`.
+  Every stream document carries an `ETag` and answers a matching
+  `If-None-Match` with `304`. Member IRIs dereference
+  (`GET /api/datasets/:id/ldes/members/:m`, immutable). Stream documents render
+  on the blocking pool behind a gate that answers `429` with `Retry-After`
+  when a stream (16) or the server (64) has too many in flight
+  (`OTS_LDES_MAX_IN_FLIGHT_PER_STREAM`, `OTS_LDES_MAX_IN_FLIGHT`).
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -559,6 +570,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rml:null`. The legacy-format converter writes `rml:null ""` on every
   logical source, so a converted mapping still reproduces the legacy
   transformer's output.
+- **LDES search tree: one root node with bounded relations.** `tree:view` now
+  points at a root node (`/ldes/nodes/0`, no members) that links every full
+  fragment with a `tree:GreaterThanOrEqualToRelation` and a
+  `tree:LessThanOrEqualToRelation` on `dct:created` (Server Primer §4), and
+  the first unsealed fragment with a lower bound. Full fragments no longer
+  link onward, so each bound covers everything reachable through it; unsealed
+  fragments still chain forward. Page numbers are unchanged. Tombstones are
+  typed `as:Delete` as well as `ots:Tombstone`.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were
@@ -909,6 +928,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fixed: the columnar copy ignored the query's `BASE` in `IRI()`/`URI()`, so
   `BASE <http://example.org/> SELECT (IRI("x") AS ?i) {}` returned an unbound
   `?i` instead of `<http://example.org/x>`.
+- **LDES member timestamps never go backwards.** A member was stamped with the
+  time its write started, so two concurrent writes could publish a member
+  earlier than one already published, below a bound clients held (LDES 1.0
+  §4.1). The stamp is now raised to the newest published timestamp inside the
+  same SQLite transaction as the insert, and that mark survives retention.
+- **LDES: edits inside blank nodes publish a version.** Change capture hashed
+  only an entity's direct triples while the member carried the whole
+  blank-node closure, so an edit to, say, an address node published nothing.
+  The hash now covers the closure by content (re-writing the same structure
+  under new blank-node labels is still not a change). Two versions of one
+  entity on a page no longer share blank-node labels, which merged their
+  structures in the served document.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if

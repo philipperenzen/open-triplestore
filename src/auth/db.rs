@@ -1455,6 +1455,16 @@ impl AuthDb {
             "ALTER TABLE dataset_entailment ADD COLUMN last_error TEXT",
             "ALTER TABLE dataset_entailment ADD COLUMN last_backend TEXT",
             "ALTER TABLE dataset_entailment ADD COLUMN last_complete INTEGER",
+            // LDES: the newest member timestamp ever published (a member is
+            // never stamped earlier, LDES 1.0 §4.1, even after retention
+            // pruned that member), and the declared ldes:pollingInterval.
+            "ALTER TABLE ldes_streams ADD COLUMN last_created_at TEXT",
+            "ALTER TABLE ldes_streams ADD COLUMN polling_interval INTEGER",
+            // The earliest and latest dct:created on a sealed node, recorded
+            // when it seals: the bounds of the root node's relations to it.
+            // NULL on nodes sealed before these existed (filled on first read).
+            "ALTER TABLE ldes_nodes ADD COLUMN min_created_at TEXT",
+            "ALTER TABLE ldes_nodes ADD COLUMN max_created_at TEXT",
         ];
         for sql in &upgrades {
             let _ = conn.execute_batch(sql); // ignore "duplicate column" / already-run errors
