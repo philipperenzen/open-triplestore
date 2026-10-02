@@ -34,7 +34,7 @@ use super::sql::{
     pushdown_subject, row_triples, sanitise_label, split_row, JoinStrategy, ParentIndex, RefKey,
     TmPlan,
 };
-use super::terms::{BlankNodes, Kinds, Row};
+use super::terms::{At, Kinds, Row, TermGen};
 use crate::store::engine::TripleStore;
 
 /// Most rows one triples map contributes directly. Parents pulled in by key
@@ -220,7 +220,7 @@ pub fn execute_sample(
     // ── 3. Indexes for the references the plan did not push down ──
     // Built from the rows in hand, never from the database: the sample is
     // closed under its joins, so every parent a child row can reach is here.
-    let mut bnodes = BlankNodes::new(format!("d{}_", sanitise_label(run_id)));
+    let mut gen = TermGen::new(mapping.semantics, format!("d{}_", sanitise_label(run_id)));
     let mut indexes: HashMap<RefKey, ParentIndex> = HashMap::new();
     for tm in &mapping.triples_maps {
         for pom in &tm.predicate_object_maps {
@@ -245,14 +245,14 @@ pub fn execute_sample(
                 let Some(k) = join_key(row, &parent_cols) else {
                     continue;
                 };
-                let mut row_bnodes = HashMap::new();
-                if let Some(subject) = eval_subject(
-                    &parent.subject_map,
-                    row,
-                    Some(kinds),
-                    &mut bnodes,
-                    &mut row_bnodes,
-                )? {
+                gen.start_row();
+                let at = At {
+                    base: mapping.base_for(parent),
+                    graph: None,
+                };
+                if let Some(subject) =
+                    eval_subject(&parent.subject_map, row, Some(kinds), &mut gen, at)?
+                {
                     let entry = index.entry(k).or_default();
                     if !entry.contains(&subject) {
                         entry.push(subject);
@@ -266,6 +266,10 @@ pub fn execute_sample(
     // ── 4. Emit, in mapping order ──
     let mut buffer = String::new();
     let mut outcome = SampleOutcome::default();
+    let parent_gen = std::cell::RefCell::new(TermGen::new(
+        mapping.semantics,
+        format!("d{}_", sanitise_label(run_id)),
+    ));
     for tm in &mapping.triples_maps {
         let Some(rows) = rows_of.get(&tm.iri) else {
             continue;
@@ -273,17 +277,25 @@ pub fn execute_sample(
         let plan = &plans[&tm.iri];
         let mut triples = 0u64;
         for (row, kinds) in rows {
-            let mut row_bnodes = HashMap::new();
+            gen.start_row();
             let generated = row_triples(
                 tm,
                 row,
                 Some(kinds),
-                &mut bnodes,
-                &mut row_bnodes,
+                &mut gen,
+                mapping.base_for(tm),
                 &|r, child_row| match plan.strategies.get(&index_key(r)) {
                     Some(JoinStrategy::Pushdown { alias, witness }) => {
                         let parent = mapping.find(&r.parent_triples_map)?;
-                        pushdown_subject(parent, alias, witness, child_row).map(|s| vec![s])
+                        pushdown_subject(
+                            parent,
+                            alias,
+                            witness,
+                            child_row,
+                            &mut parent_gen.borrow_mut(),
+                            mapping.base_for(parent),
+                        )
+                        .map(|s| vec![s])
                     }
                     _ => {
                         let index = indexes.get(&index_key(r))?;

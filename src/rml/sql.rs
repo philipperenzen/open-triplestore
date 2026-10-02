@@ -29,7 +29,11 @@ use std::collections::HashMap;
 use ots_plugin_api::sources::{Row as SourceRow, SourceConnection, SourceError};
 
 use super::model::*;
-use super::terms::{eval_function, eval_term, BlankNodes, Kinds, Row};
+use super::parser::DEFAULT_GRAPH;
+use super::terms::{
+    eval_function, eval_iri, eval_parent_subject, eval_term, position_independent, At, Kinds, Row,
+    TermGen,
+};
 use crate::store::engine::TripleStore;
 
 /// Flush the N-Triples buffer once it exceeds this many bytes.
@@ -59,70 +63,144 @@ pub struct SqlOutcome {
     pub triples: u64,
 }
 
-/// Generate one row's triples for one triples map.
+/// Generate one row's triples for one triples map (R2RML §11.1).
 ///
 /// `resolve_ref` answers a `rr:parentTriplesMap` object: the subject terms the
 /// parent map generates for the rows this row joins to. `None` means the
-/// caller has no index for it (the file-based path), and the reference is
-/// skipped.
+/// caller has no index for it, and the reference is skipped. Joins run only
+/// on relational sources, which take no graph maps, so a parent's subject is
+/// always rendered for the run's target graph.
+///
+/// **Graphs.** A triple goes to every graph its subject map names, *and* every
+/// graph its predicate-object map names — the union, not an override — and to
+/// the default graph when neither names one. `rr:class` triples go to the
+/// subject's graphs. A graph map that generates `rr:defaultGraph` names the
+/// default graph. In the result, `None` is the default graph: the caller's
+/// target graph.
 pub fn row_triples(
     tm: &TriplesMap,
     row: &Row,
     kinds: Option<&Kinds>,
-    bnodes: &mut BlankNodes,
-    row_bnodes: &mut HashMap<String, String>,
+    gen: &mut TermGen,
+    base: Option<&str>,
     resolve_ref: &dyn Fn(&RefObjectMap, &Row) -> Option<Vec<String>>,
 ) -> Result<Vec<EmittedTriple>, String> {
     let mut out = Vec::new();
+    // The subject, once per graph it lands in: a blank node is scoped to its
+    // graph (§9.1), so the same row can yield a different node in each.
+    let mut subjects: Vec<(Option<String>, String)> = Vec::new();
+    let mut subject_in =
+        |graph: &Option<String>, gen: &mut TermGen| -> Result<Option<String>, String> {
+            if let Some((_, s)) = subjects.iter().find(|(g, _)| g == graph) {
+                return Ok(Some(s.clone()));
+            }
+            let at = At {
+                base,
+                graph: graph.as_deref(),
+            };
+            let s = eval_subject(&tm.subject_map, row, kinds, gen, at)?;
+            if let Some(s) = &s {
+                subjects.push((graph.clone(), s.clone()));
+            }
+            Ok(s)
+        };
 
-    // The TriplesMap-level graph map, evaluated once per row.
-    let tm_graph: Option<String> = tm
-        .graph_map
-        .as_ref()
-        .and_then(|gm| super::terms::eval_iri(gm, row, kinds, bnodes, row_bnodes));
-
-    let Some(subject) = eval_subject(&tm.subject_map, row, kinds, bnodes, row_bnodes)? else {
+    if subject_in(&None, gen)?.is_none() {
         // No subject — R2RML says the row generates nothing at all.
         return Ok(out);
-    };
-
-    for class_iri in &tm.subject_map.classes {
-        out.push(EmittedTriple {
-            graph: tm_graph.clone(),
-            text: format!(
-                "{subject} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{class_iri}> ."
-            ),
-        });
     }
 
-    for pom in &tm.predicate_object_maps {
-        let Some(predicate) = eval_term(&pom.predicate_map, row, kinds, bnodes, row_bnodes) else {
+    let subject_graphs = eval_graphs(&tm.subject_map.graph_maps, row, kinds, gen, base);
+    let class_graphs = if tm.subject_map.graph_maps.is_empty() {
+        vec![None]
+    } else {
+        subject_graphs.clone()
+    };
+    for graph in &class_graphs {
+        let Some(subject) = subject_in(graph, gen)? else {
             continue;
         };
-        let objects: Vec<String> = match &pom.object {
-            ObjectMap::Term(tm_obj) => eval_term(tm_obj, row, kinds, bnodes, row_bnodes)
-                .into_iter()
-                .collect(),
-            ObjectMap::Function(f) => eval_function(f, row, kinds)?.into_iter().collect(),
-            ObjectMap::Ref(r) => resolve_ref(r, row).unwrap_or_default(),
-        };
-
-        // A POM-level graph map overrides the TriplesMap-level one.
-        let graph_key: Option<String> = pom
-            .graph_map
-            .as_ref()
-            .and_then(|gm| super::terms::eval_iri(gm, row, kinds, bnodes, row_bnodes))
-            .or_else(|| tm_graph.clone());
-
-        for object in objects {
+        for class_iri in &tm.subject_map.classes {
             out.push(EmittedTriple {
-                graph: graph_key.clone(),
-                text: format!("{subject} {predicate} {object} ."),
+                graph: graph.clone(),
+                text: format!(
+                    "{subject} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{class_iri}> ."
+                ),
             });
         }
     }
 
+    for pom in &tm.predicate_object_maps {
+        let Some(predicate) = eval_term(
+            &pom.predicate_map,
+            row,
+            kinds,
+            gen,
+            At { base, graph: None },
+        ) else {
+            continue;
+        };
+        let graphs = if tm.subject_map.graph_maps.is_empty() && pom.graph_maps.is_empty() {
+            vec![None]
+        } else {
+            let mut union = subject_graphs.clone();
+            for g in eval_graphs(&pom.graph_maps, row, kinds, gen, base) {
+                if !union.contains(&g) {
+                    union.push(g);
+                }
+            }
+            union
+        };
+        for graph in &graphs {
+            let Some(subject) = subject_in(graph, gen)? else {
+                continue;
+            };
+            let at = At {
+                base,
+                graph: graph.as_deref(),
+            };
+            let objects: Vec<String> = match &pom.object {
+                ObjectMap::Term(tm_obj) => {
+                    eval_term(tm_obj, row, kinds, gen, at).into_iter().collect()
+                }
+                ObjectMap::Function(f) => eval_function(f, row, kinds, gen.semantics())?
+                    .into_iter()
+                    .collect(),
+                ObjectMap::Ref(r) => resolve_ref(r, row).unwrap_or_default(),
+            };
+            for object in objects {
+                out.push(EmittedTriple {
+                    graph: graph.clone(),
+                    text: format!("{subject} {predicate} {object} ."),
+                });
+            }
+        }
+    }
+
     Ok(out)
+}
+
+/// The graphs a list of graph maps names for a row, without repeats. `None`
+/// is the default graph (`rr:defaultGraph`). A graph map that generates no
+/// term for the row contributes no graph.
+fn eval_graphs(
+    maps: &[TermMap],
+    row: &Row,
+    kinds: Option<&Kinds>,
+    gen: &mut TermGen,
+    base: Option<&str>,
+) -> Vec<Option<String>> {
+    let mut out: Vec<Option<String>> = Vec::new();
+    for gm in maps {
+        let Some(iri) = eval_iri(gm, row, kinds, gen, base) else {
+            continue;
+        };
+        let graph = (iri != DEFAULT_GRAPH).then_some(iri);
+        if !out.contains(&graph) {
+            out.push(graph);
+        }
+    }
+    out
 }
 
 /// The subject a subject map generates for a row: its function when it has
@@ -131,12 +209,12 @@ pub(crate) fn eval_subject(
     sm: &SubjectMap,
     row: &Row,
     kinds: Option<&Kinds>,
-    bnodes: &mut BlankNodes,
-    row_bnodes: &mut HashMap<String, String>,
+    gen: &mut TermGen,
+    at: At<'_>,
 ) -> Result<Option<String>, String> {
     match &sm.function {
-        Some(f) => eval_function(f, row, kinds),
-        None => Ok(eval_term(&sm.term_map, row, kinds, bnodes, row_bnodes)),
+        Some(f) => eval_function(f, row, kinds, gen.semantics()),
+        None => Ok(eval_term(&sm.term_map, row, kinds, gen, at)),
     }
 }
 
@@ -237,32 +315,31 @@ pub(crate) type RefKey = (String, Vec<(String, String)>);
 /// Four conditions, all necessary:
 /// * there is at least one join condition — a join-less reference is a cross
 ///   join, which multiplies rows by definition;
-/// * the parent reads a named table, so its keys can be looked up at all (an
-///   `rml:query` parent is opaque to the catalogue);
+/// * the parent reads a named, unqualified table, so its keys can be looked up
+///   at all (an `rml:query` parent is opaque to the catalogue);
 /// * the parent's join columns cover one of that table's unique keys, so the
 ///   join cannot duplicate a child row;
-/// * the parent's subject is an IRI. A blank-node subject must be minted once
-///   per PARENT row; pushed down it would be minted once per child row, so two
-///   children of one parent would stop sharing a node.
+/// * the parent's subject does not depend on which row computes it: an IRI,
+///   or an R2RML blank node (a function of its value). A legacy blank node is
+///   minted once per PARENT row; pushed down it would be minted once per child
+///   row, so two children of one parent would stop sharing a node.
 fn can_push_down(
     parent: &TriplesMap,
     joins: &[JoinCondition],
     unique_keys: &HashMap<String, Vec<Vec<String>>>,
+    semantics: Semantics,
 ) -> bool {
     if joins.is_empty()
         || parent.subject_map.function.is_some()
-        || parent.subject_map.term_map.term_type != TermType::IRI
+        || !position_independent(&parent.subject_map.term_map, semantics)
     {
         return false;
     }
-    let Some(table) = parent.logical_source.table_name.as_deref() else {
+    let Some(table) = parent.logical_source.catalogue_table() else {
         return false;
     };
-    if parent.logical_source.query.is_some() {
-        return false;
-    }
     let parent_cols: Vec<&str> = joins.iter().map(|j| j.parent.as_str()).collect();
-    unique_keys.get(table).is_some_and(|keys| {
+    unique_keys.get(&table).is_some_and(|keys| {
         keys.iter()
             .any(|k| k.iter().all(|c| parent_cols.contains(&c.as_str())))
     })
@@ -306,7 +383,7 @@ pub(crate) fn plan_triples_map(
         let parent = mapping
             .find(&r.parent_triples_map)
             .ok_or_else(|| format!("unknown parent TriplesMap <{}>", r.parent_triples_map))?;
-        if !can_push_down(parent, &r.joins, unique_keys) {
+        if !can_push_down(parent, &r.joins, unique_keys, mapping.semantics) {
             strategies.insert(key, JoinStrategy::Index);
             continue;
         }
@@ -381,6 +458,8 @@ pub(crate) fn pushdown_subject(
     alias: &str,
     witness: &[String],
     child_row: &Row,
+    gen: &mut TermGen,
+    base: Option<&str>,
 ) -> Option<String> {
     let prefix = format!("{alias}_");
     if !witness
@@ -395,9 +474,9 @@ pub(crate) fn pushdown_subject(
             parent_row.insert(col.to_string(), value.clone());
         }
     }
-    // Kinds are irrelevant: the subject is an IRI, so no natural datatype
-    // applies (`can_push_down` guarantees the term type).
-    super::terms::eval_iri_term(&parent.subject_map.term_map, &parent_row, None)
+    // Kinds are irrelevant: the subject is an IRI or a blank node, so no
+    // natural datatype applies (`can_push_down` guarantees the term type).
+    eval_parent_subject(&parent.subject_map.term_map, &parent_row, None, gen, base)
 }
 
 /// Stream a parent triples map once and index its subject terms by join key.
@@ -406,7 +485,8 @@ fn build_parent_index(
     joins: &[JoinCondition],
     conn: &mut dyn SourceConnection,
     quote: &dyn Fn(&str) -> String,
-    bnodes: &mut BlankNodes,
+    gen: &mut TermGen,
+    base: Option<&str>,
 ) -> Result<ParentIndex, String> {
     let sql = parent.logical_source.sql(quote).ok_or_else(|| {
         format!(
@@ -428,13 +508,13 @@ fn build_parent_index(
             let Some(key) = join_key(&row, &parent_columns) else {
                 continue;
             };
-            let mut row_bnodes = HashMap::new();
+            gen.start_row();
             let subject = match eval_subject(
                 &parent.subject_map,
                 &row,
                 Some(&kinds),
-                bnodes,
-                &mut row_bnodes,
+                gen,
+                At { base, graph: None },
             ) {
                 Ok(Some(s)) => s,
                 Ok(None) => continue,
@@ -483,9 +563,9 @@ pub(crate) fn collect_unique_keys(
             let Some(parent) = mapping.find(&r.parent_triples_map) else {
                 continue;
             };
-            if let Some(t) = &parent.logical_source.table_name {
-                if parent.logical_source.query.is_none() && !tables.contains(t) {
-                    tables.push(t.clone());
+            if let Some(t) = parent.logical_source.catalogue_table() {
+                if !tables.contains(&t) {
+                    tables.push(t);
                 }
             }
         }
@@ -550,7 +630,7 @@ pub fn execute_relational_filtered(
     let batch_size = batch_size.clamp(1, 100_000);
     // Blank-node labels carry the run id, so two runs' graphs never share a
     // node and a batch-by-batch load never merges rows.
-    let mut bnodes = BlankNodes::new(format!("r{}_", sanitise_label(run_id)));
+    let mut gen = TermGen::new(mapping.semantics, format!("r{}_", sanitise_label(run_id)));
     let mut outcome = SqlOutcome::default();
 
     let unique_keys = collect_unique_keys(mapping, conn)?;
@@ -582,7 +662,14 @@ pub fn execute_relational_filtered(
             let parent = mapping
                 .find(&r.parent_triples_map)
                 .ok_or_else(|| format!("unknown parent TriplesMap <{}>", r.parent_triples_map))?;
-            let index = build_parent_index(parent, &r.joins, conn, quote, &mut bnodes)?;
+            let index = build_parent_index(
+                parent,
+                &r.joins,
+                conn,
+                quote,
+                &mut gen,
+                mapping.base_for(parent),
+            )?;
             indexes.insert(key, index);
         }
     }
@@ -600,28 +687,37 @@ pub fn execute_relational_filtered(
     let mut row: Row = HashMap::new();
     let mut kinds: Kinds = HashMap::new();
 
+    // A pushed-down parent subject is computed from the child row, with its
+    // own generator: the term does not depend on it (`can_push_down`).
+    let parent_gen = std::cell::RefCell::new(TermGen::new(
+        mapping.semantics,
+        format!("r{}_", sanitise_label(run_id)),
+    ));
     for tm in &mapping.triples_maps {
         let plan = &plans[&tm.iri];
+        let base = mapping.base_for(tm);
         let mut emit_error: Option<String> = None;
         let mut triples: u64 = 0;
         let rows = conn
             .stream(&plan.sql, batch_size, &mut |batch| {
                 for src in &batch {
                     split_row(src, &mut row, &mut kinds);
-                    let mut row_bnodes = HashMap::new();
-                    let generated = row_triples(
-                        tm,
-                        &row,
-                        Some(&kinds),
-                        &mut bnodes,
-                        &mut row_bnodes,
-                        &|r, child_row| {
+                    gen.start_row();
+                    let generated =
+                        row_triples(tm, &row, Some(&kinds), &mut gen, base, &|r, child_row| {
                             let key = index_key(r);
                             match plan.strategies.get(&key) {
                                 Some(JoinStrategy::Pushdown { alias, witness }) => {
                                     let parent = mapping.find(&r.parent_triples_map)?;
-                                    pushdown_subject(parent, alias, witness, child_row)
-                                        .map(|s| vec![s])
+                                    pushdown_subject(
+                                        parent,
+                                        alias,
+                                        witness,
+                                        child_row,
+                                        &mut parent_gen.borrow_mut(),
+                                        mapping.base_for(parent),
+                                    )
+                                    .map(|s| vec![s])
                                 }
                                 _ => {
                                     let index = indexes.get(&key)?;
@@ -636,8 +732,7 @@ pub fn execute_relational_filtered(
                                     index.get(&k).cloned()
                                 }
                             }
-                        },
-                    );
+                        });
                     let generated = match generated {
                         Ok(g) => g,
                         Err(e) => {
@@ -978,16 +1073,17 @@ mod tests {
         let unique: HashMap<String, Vec<Vec<String>>> =
             HashMap::from([("supplier".to_string(), vec![vec!["sid".to_string()]])]);
 
+        let r2rml = Semantics::R2rml;
         assert!(
-            can_push_down(parent, &joins, &unique),
+            can_push_down(parent, &joins, &unique, r2rml),
             "a primary-key join is safe"
         );
         assert!(
-            !can_push_down(parent, &[], &unique),
+            !can_push_down(parent, &[], &unique, r2rml),
             "a join-less reference is a cross join"
         );
         assert!(
-            !can_push_down(parent, &joins, &HashMap::new()),
+            !can_push_down(parent, &joins, &HashMap::new(), r2rml),
             "no known key means no proof of uniqueness"
         );
         assert!(
@@ -997,16 +1093,28 @@ mod tests {
                     child: "sid".into(),
                     parent: "label".into()
                 }],
-                &unique
+                &unique,
+                r2rml
             ),
             "joining on a non-key column is not safe"
         );
 
-        // A blank-node parent subject must be minted per parent row, not per
-        // child row, so it is never pushed down.
+        // A legacy blank-node parent subject is minted per parent row, not per
+        // child row, so it is never pushed down. An R2RML one is a function of
+        // its value, so any row computes the same node.
         let mut bnode_parent = parent.clone();
         bnode_parent.subject_map.term_map.term_type = TermType::BlankNode;
-        assert!(!can_push_down(&bnode_parent, &joins, &unique));
+        assert!(!can_push_down(
+            &bnode_parent,
+            &joins,
+            &unique,
+            Semantics::Legacy
+        ));
+        assert!(can_push_down(&bnode_parent, &joins, &unique, r2rml));
+        // A schema-qualified table is not looked up in the current schema.
+        let mut qualified = parent.clone();
+        qualified.logical_source.table_name = Some("main.supplier".into());
+        assert!(!can_push_down(&qualified, &joins, &unique, r2rml));
     }
 
     #[test]
@@ -1028,7 +1136,7 @@ mod tests {
             },
         ];
         assert!(
-            can_push_down(parent, &both, &unique),
+            can_push_down(parent, &both, &unique, Semantics::R2rml),
             "both key columns are joined"
         );
         let partial = vec![JoinCondition {
@@ -1036,7 +1144,7 @@ mod tests {
             parent: "sid".into(),
         }];
         assert!(
-            !can_push_down(parent, &partial, &unique),
+            !can_push_down(parent, &partial, &unique, Semantics::R2rml),
             "half a composite key does not make the match unique"
         );
     }

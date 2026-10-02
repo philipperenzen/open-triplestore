@@ -425,6 +425,46 @@ pub fn list_mappings(store: &TripleStore, source_id: Option<&str>) -> Vec<Mappin
         .collect()
 }
 
+/// Record the term-generation rules a frozen mapping version runs under.
+/// Written once, when the version is frozen; the version entity carries it,
+/// not the version's RML graph, so the document a person edits stays theirs.
+pub fn put_version_semantics(
+    store: &TripleStore,
+    id: &str,
+    version: u32,
+    semantics: crate::rml::model::Semantics,
+) -> Result<(), String> {
+    let vi = iri(&mapping_version_iri(id, version));
+    let sparql = format!(
+        "{pfx}DELETE {{ GRAPH <{SOURCES_GRAPH}> {{ {vi} ds:rmlSemantics ?s }} }}\n\
+         WHERE {{ GRAPH <{SOURCES_GRAPH}> {{ {vi} ds:rmlSemantics ?s }} }};\n\
+         INSERT DATA {{ GRAPH <{SOURCES_GRAPH}> {{ {vi} ds:rmlSemantics {} }} }}",
+        lit(semantics.as_str()),
+        pfx = prefixes(),
+    );
+    store.update(&sparql).map_err(|e| e.to_string())
+}
+
+/// The term-generation rules a frozen mapping version runs under. A version
+/// frozen before versions were stamped carries none and keeps the rules it
+/// was written against: [`Semantics::Legacy`](crate::rml::model::Semantics).
+pub fn version_semantics(
+    store: &TripleStore,
+    id: &str,
+    version: u32,
+) -> crate::rml::model::Semantics {
+    let sparql = format!(
+        "{}SELECT ?s WHERE {{ GRAPH <{SOURCES_GRAPH}> {{ {} ds:rmlSemantics ?s }} }}",
+        prefixes(),
+        iri(&mapping_version_iri(id, version))
+    );
+    select(store, &sparql)
+        .first()
+        .and_then(|row| row.get("s"))
+        .and_then(|s| crate::rml::model::Semantics::parse(s))
+        .unwrap_or(crate::rml::model::Semantics::Legacy)
+}
+
 /// Remove a mapping, its version entities and every version graph.
 pub fn delete_mapping(store: &TripleStore, m: &MappingRecord) -> Result<(), String> {
     let graphs: Vec<String> = (1..=m.version)

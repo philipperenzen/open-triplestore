@@ -769,6 +769,7 @@ pub fn routes() -> Router<AppState> {
 mod tests {
     use super::*;
     use crate::rml::model::ObjectMap;
+    use crate::rml::model::Semantics;
     use crate::rml::terms::{expand_slug_template, slug, Row};
     use crate::store::TripleStore;
     use ots_plugin_api::sources::SourceConnector;
@@ -1099,14 +1100,32 @@ entities:
             ("id".to_string(), "a b".to_string()),
         ]);
         assert_eq!(
-            expand_slug_template("http://x/{id}/{category_slug}", &row).as_deref(),
+            expand_slug_template("http://x/{id}/{category_slug}", &row, Semantics::R2rml)
+                .as_deref(),
             Some("http://x/a%20b/fasteners-bolts")
         );
-        assert_eq!(expand_slug_template("http://x/{missing_slug}", &row), None);
-        assert_eq!(expand_slug_template("http://x/{missing}", &row), None);
+        // `{column}` is IRI-safe encoded (R2RML §7.3); a legacy version keeps
+        // the old encoding of everything but letters and digits.
+        let dashed: Row = Row::from([("id".to_string(), "a-b.c".to_string())]);
+        assert_eq!(
+            expand_slug_template("http://x/{id}", &dashed, Semantics::R2rml).as_deref(),
+            Some("http://x/a-b.c")
+        );
+        assert_eq!(
+            expand_slug_template("http://x/{id}", &dashed, Semantics::Legacy).as_deref(),
+            Some("http://x/a%2Db%2Ec")
+        );
+        assert_eq!(
+            expand_slug_template("http://x/{missing_slug}", &row, Semantics::R2rml),
+            None
+        );
+        assert_eq!(
+            expand_slug_template("http://x/{missing}", &row, Semantics::R2rml),
+            None
+        );
         let blank: Row = Row::from([("category".to_string(), "***".to_string())]);
         assert_eq!(
-            expand_slug_template("http://x/{category_slug}", &blank),
+            expand_slug_template("http://x/{category_slug}", &blank, Semantics::R2rml),
             None,
             "a value that slugs to nothing mints nothing"
         );

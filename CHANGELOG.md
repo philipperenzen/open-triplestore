@@ -51,6 +51,43 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/ldp.md`, "Access control".
 
 ### Changed
+- **RML / R2RML terms follow R2RML.** A file mapping, a dataset's stored
+  mapping and every newly frozen datasource mapping version now generate terms
+  by R2RML's rules, so their output changes:
+  - a template object map with no `rr:termType` is an **IRI** (§7.4), not a
+    literal — write `rr:termType rr:Literal` for text;
+  - a template value is encoded only when the term is an IRI, and only outside
+    RFC 3987 `iunreserved` (§7.3): `a-b.c_d~e` and non-ASCII letters stay as
+    they are where they used to become `a%2Db%2Ec%5Fd%7Ee`, and a literal
+    template is no longer percent-encoded;
+  - a blank node is one per value and graph (§11.2, §9.1), not one per row;
+  - graph maps sit on the subject map (`rr:graphMap` or `rr:graph`) and
+    predicate-object maps, and a triple goes to the **union** of both graphs
+    instead of the predicate-object map's overriding the subject's; `rr:class`
+    triples go to the subject's graphs, `rr:defaultGraph` names the default
+    graph, every graph map is used rather than the first, and a malformed one
+    is an error instead of being dropped. A graph map on the triples map is
+    still read, as a subject graph map;
+  - a relative IRI resolves against a base IRI: a triples map's `rml:baseIRI`,
+    or `?base=` on `POST /api/datasets/:id/mappings/execute`.
+  **Existing datasource mapping versions keep their output.** Each version is
+  now stamped with the rules it runs under (`semantics`: `r2rml` or `legacy`,
+  on the version entity and in the API); a version frozen before carries no
+  stamp and runs as `legacy`. `POST`/`PUT /api/mappings` and an inline dry-run
+  accept `"semantics": "legacy"` to freeze a new version under the old rules,
+  so a fix does not rename every entity. Whatever the rules:
+  - `rr:object <IRI>` is an IRI — it used to be written as a string literal,
+    which YARRRML's `[ex:p, ex:Term]` produced — and a constant literal keeps
+    its datatype and language tag (a constant is no longer typed by whether it
+    contains `://`);
+  - a literal constant in a subject, predicate or graph position is a mapping
+    error;
+  - `rr:tableName` may be schema-qualified and its parts delimited
+    (`"Student"`, `` `x` ``, `[x]`), each re-quoted by the dialect; a delimited
+    column name (`rr:column "\"ID\""`, `{"ID"}`, join columns) reads column
+    `ID`.
+  The YARRRML and legacy-format converters now write an explicit `rr:termType`
+  on every template and column term map.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were

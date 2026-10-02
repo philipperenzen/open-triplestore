@@ -2345,7 +2345,24 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 "Mappings",
                 "Execute RML mapping",
                 "Run the stored RML mapping against its sources and load the resulting triples.",
-                vec![],
+                vec![
+                    qp(
+                        "preview",
+                        false,
+                        "true: return the generated Turtle without writing it",
+                    ),
+                    qp(
+                        "graph",
+                        false,
+                        "Target graph (default: urn:dataset:<id>:rml-output)",
+                    ),
+                    qp(
+                        "base",
+                        false,
+                        "Base IRI that relative IRIs resolve against (R2RML §11.2); a triples \
+                         map's rml:baseIRI wins",
+                    ),
+                ],
                 vec![
                     ("200", "Mapping result with triple count"),
                     ("401", "Authentication required"),
@@ -2723,7 +2740,9 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                     "Register a mapping",
                     "Store RML as version 1, in its own named graph. The datasource is read from \
                      the RML itself, so 'source' is optional. A mapping must read exactly one \
-                     registered datasource and may not declare rr:graphMap.",
+                     registered datasource and may not declare rr:graphMap or rr:graph. The \
+                     version is stamped with the term-generation rules it runs under: \
+                     'semantics' is 'r2rml' (the default) or 'legacy'.",
                     vec![],
                     vec![
                         ("201", "Registered"),
@@ -2756,7 +2775,11 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                     "Sources",
                     "Update a mapping",
                     "New RML freezes the NEXT version; earlier versions are never rewritten, \
-                     because runs reference them. A metadata-only edit keeps the current version.",
+                     because runs reference them, and each keeps the term-generation rules it \
+                     was frozen with. 'semantics' ('r2rml', the default, or 'legacy') stamps the \
+                     new version; 'legacy' keeps the IRIs and blank nodes a version frozen \
+                     before the R2RML term rules produced. A metadata-only edit keeps the \
+                     current version.",
                     vec![],
                     vec![
                         ("200", "Updated"),

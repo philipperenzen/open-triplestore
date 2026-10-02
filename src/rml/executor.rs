@@ -18,7 +18,7 @@
 
 use super::model::*;
 use super::sources::load_rows;
-use super::terms::{BlankNodes, Row};
+use super::terms::{Row, TermGen};
 use crate::store::engine::TripleStore;
 use std::collections::HashMap;
 
@@ -36,9 +36,9 @@ pub fn execute(
 }
 
 /// Like [`execute`], but `authorize` gates **every effective target graph** before
-/// any write. A `rml:graphMap` (TriplesMap- or POM-level) overrides
-/// `target_graph` per triple, so a caller-supplied mapping can name an arbitrary
-/// destination graph; the dataset-scoped HTTP path passes an `authorize` that
+/// any write. A graph map (on a subject map or a predicate-object map) sends
+/// triples to a graph other than `target_graph`, so a caller-supplied mapping
+/// can name an arbitrary destination graph; the dataset-scoped HTTP path passes an `authorize` that
 /// keeps those targets inside the dataset's own graph boundary (preventing a
 /// cross-tenant write). Authorization runs over the full resolved set *before*
 /// the first insert, so a rejected mapping writes nothing.
@@ -83,7 +83,7 @@ where
 
     // Triples keyed by their target named graph (None = default/target_graph).
     let mut triples_by_graph: HashMap<Option<String>, Vec<String>> = HashMap::new();
-    let mut bnodes = BlankNodes::new("b");
+    let mut gen = TermGen::new(mapping.semantics, "b");
 
     for tm in &mapping.triples_maps {
         let source_key = match &tm.logical_source.source {
@@ -96,7 +96,8 @@ where
             source_data,
             &source_key,
             &mut triples_by_graph,
-            &mut bnodes,
+            &mut gen,
+            mapping.base_for(tm),
         )?;
     }
 
@@ -145,7 +146,8 @@ fn execute_triples_map(
     source_data: &HashMap<String, String>,
     source_key: &str,
     out: &mut HashMap<Option<String>, Vec<String>>,
-    bnodes: &mut BlankNodes,
+    gen: &mut TermGen,
+    base: Option<&str>,
 ) -> Result<(), String> {
     let content = source_data
         .get(source_key)
@@ -159,7 +161,7 @@ fn execute_triples_map(
 
     for row_result in rows {
         let row = row_result?;
-        execute_row(tm, &row, out, bnodes)?;
+        execute_row(tm, &row, out, gen, base)?;
     }
 
     Ok(())
@@ -169,17 +171,17 @@ fn execute_row(
     tm: &TriplesMap,
     row: &Row,
     out: &mut HashMap<Option<String>, Vec<String>>,
-    bnodes: &mut BlankNodes,
+    gen: &mut TermGen,
+    base: Option<&str>,
 ) -> Result<(), String> {
-    // Blank nodes are scoped to a single row (R2RML §generated RDF term): two term
-    // maps yielding the same value in this row must denote the SAME blank node, but
-    // a fresh row produces distinct nodes. Keyed by the generated value; reset here
-    // per row so cross-row blank nodes never collide.
-    let mut row_bnodes: HashMap<String, String> = HashMap::new();
+    // Two term maps yielding the same blank-node value in this row denote the
+    // SAME node. Under R2RML so does the same value in another row of the same
+    // graph; a legacy mapping mints afresh per row, which this resets.
+    gen.start_row();
 
     // No column types (a file source reports none) and no join resolver: a
     // mapping with an `rr:parentTriplesMap` was refused before the first row.
-    for triple in super::sql::row_triples(tm, row, None, bnodes, &mut row_bnodes, &|_, _| None)? {
+    for triple in super::sql::row_triples(tm, row, None, gen, base, &|_, _| None)? {
         out.entry(triple.graph).or_default().push(triple.text);
     }
     Ok(())
