@@ -329,7 +329,9 @@ impl SparqlConnection {
     fn text(&self, query: &str, accept: &str) -> Result<String, SourceError> {
         remote::post_sparql_blocking(&self.endpoint, query, accept, self.auth()).map_err(
             |e| match e {
-                RemoteError::NotAllowed(_) => SourceError::Config(e.to_string()),
+                RemoteError::NotAllowed(_) | RemoteError::RedirectNotAllowed { .. } => {
+                    SourceError::Config(e.to_string())
+                }
                 RemoteError::Request { reason, .. } if reason.contains("timed out") => {
                     SourceError::Timeout
                 }

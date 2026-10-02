@@ -16,6 +16,13 @@
 //! (`OTS_SERVICE_MAX_ROWS`, default 10 000) so a slow or huge remote cannot
 //! stall or flood a local query.
 //!
+//! Redirects are followed (LDES 1.0 §3.3 and TREE require it), at most
+//! [`MAX_REDIRECTS`] hops, and **every hop is checked against the allowlist
+//! again**: an allowlisted host cannot bounce a request to one that is not.
+//! A hop to another host or port also loses the `Authorization` header
+//! (reqwest strips sensitive headers there), so an identity assertion minted
+//! for one peer is never shown to another.
+//!
 //! The allowlist is read on every call rather than cached: tests and operators
 //! change it at runtime, and the cost is one environment read.
 
@@ -168,10 +175,15 @@ pub fn max_rows() -> usize {
         .unwrap_or(10_000)
 }
 
+/// The most redirects one request follows before it fails.
+pub const MAX_REDIRECTS: usize = 10;
+
 #[derive(Debug, thiserror::Error)]
 pub enum RemoteError {
     #[error("remote access to <{0}> is not allowed: it is not in {ALLOWLIST_ENV}")]
     NotAllowed(String),
+    #[error("remote <{from}> redirected to <{to}>, which is not in {ALLOWLIST_ENV}")]
+    RedirectNotAllowed { from: String, to: String },
     #[error("remote request to <{url}> failed: {reason}")]
     Request { url: String, reason: String },
     #[error("remote <{url}> answered {status}")]
@@ -189,17 +201,55 @@ fn runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
+/// The reason a redirect was refused, carried through reqwest's error chain
+/// so [`request_error`] can report it as [`RemoteError::RedirectNotAllowed`].
+#[derive(Debug, thiserror::Error)]
+#[error("redirect to <{0}> is not in the remote allowlist")]
+struct RefusedRedirect(String);
+
+/// Follow a redirect only to a URL the allowlist covers, re-checked on every
+/// hop (the allowlist is read afresh, like everywhere else in this module).
+fn redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() > MAX_REDIRECTS {
+            attempt.error(format!("more than {MAX_REDIRECTS} redirects"))
+        } else if is_allowed(attempt.url().as_str()) {
+            attempt.follow()
+        } else {
+            let to = attempt.url().to_string();
+            attempt.error(RefusedRedirect(to))
+        }
+    })
+}
+
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .user_agent(concat!("open-triplestore/", env!("CARGO_PKG_VERSION")))
-            // No redirects: an allowlisted host must not be able to bounce a
-            // request to one that is not.
-            .redirect(reqwest::redirect::Policy::none())
+            .redirect(redirect_policy())
             .build()
             .expect("reqwest client")
     })
+}
+
+/// A transport error as a [`RemoteError`]: a redirect the allowlist refused
+/// is reported as such, anything else as a failed request.
+fn request_error(url: &str, e: reqwest::Error) -> RemoteError {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&e);
+    while let Some(err) = source {
+        if let Some(RefusedRedirect(to)) = err.downcast_ref::<RefusedRedirect>() {
+            return RemoteError::RedirectNotAllowed {
+                from: url.to_string(),
+                to: to.clone(),
+            };
+        }
+        source = err.source();
+    }
+    RemoteError::Request {
+        url: url.to_string(),
+        reason: e.to_string(),
+    }
 }
 
 /// A blocking request from synchronous code (the SPARQL evaluator runs on a
@@ -261,10 +311,7 @@ pub(crate) fn post_sparql_blocking(
             .body(query)
             .send()
             .await
-            .map_err(|e| RemoteError::Request {
-                url: endpoint.clone(),
-                reason: e.to_string(),
-            })?;
+            .map_err(|e| request_error(&endpoint, e))?;
         let status = resp.status();
         if !status.is_success() {
             return Err(RemoteError::Status {
@@ -279,56 +326,169 @@ pub(crate) fn post_sparql_blocking(
     })
 }
 
-/// `GET` a URL with an RDF `Accept` header (LDES client). Returns
-/// `(content-type, body)`.
-#[allow(dead_code)] // the LDES client (6.1) is its caller; the binary sees it before then
-pub fn get_rdf_blocking(url: &str) -> Result<(String, String), RemoteError> {
-    get_rdf_blocking_with_auth(url, crate::federation::assertion_for(url).as_deref())
+pub const RETRIES_ENV: &str = "OTS_REMOTE_RETRIES";
+pub const MAX_RETRY_WAIT_ENV: &str = "OTS_REMOTE_MAX_RETRY_WAIT_SECS";
+
+/// The statuses LDES 1.0 §3.3 says a client retries with back-off.
+pub const RETRYABLE_STATUSES: [u16; 7] = [408, 425, 429, 500, 502, 503, 504];
+
+/// How many times a document fetch is retried after a retryable status
+/// (default 4, so five attempts at most; 0 turns retrying off).
+pub fn retries() -> u32 {
+    std::env::var(RETRIES_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(4)
+        .min(16)
+}
+
+/// The longest single wait before a retry (default 60 s). A `Retry-After`
+/// asking for longer fails the fetch instead of holding the sync that long.
+pub fn max_retry_wait() -> Duration {
+    let secs = std::env::var(MAX_RETRY_WAIT_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(60);
+    Duration::from_secs(secs)
+}
+
+/// The wait a `Retry-After` header asks for: delay-seconds or an HTTP-date
+/// (RFC 9110 §10.2.3). A date in the past is no wait at all.
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let v = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if let Ok(secs) = v.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    let at = chrono::DateTime::parse_from_rfc2822(v).ok()?;
+    let ms = (at.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_milliseconds();
+    Some(Duration::from_millis(ms.max(0) as u64))
+}
+
+/// Exponential back-off with jitter for retry `attempt` (0-based) when the
+/// server named no wait: 250 ms doubling per attempt, capped at 8 s, and a
+/// random half to full of that, so clients that failed together do not
+/// retry together.
+fn backoff(attempt: u32) -> Duration {
+    let ceiling = (250u64 << attempt.min(5)).min(8_000);
+    let jittered = ceiling / 2 + rand::random_range(0..=ceiling / 2);
+    Duration::from_millis(jittered)
+}
+
+/// One RDF document fetched for the LDES client.
+#[derive(Debug, Clone)]
+pub struct RdfDocument {
+    /// The URL the document was served from after any redirects: its base
+    /// IRI (LDES 1.0 §3.1 "the base IRI (after redirect)").
+    pub url: String,
+    /// `None` when the server answered `304 Not Modified`.
+    pub body: Option<String>,
+    pub content_type: String,
+    pub etag: Option<String>,
+    /// `Cache-Control` says `immutable` (LDES 1.0 §3.2).
+    pub immutable: bool,
+    /// Retries it took (retryable statuses answered first).
+    pub retries: u32,
+}
+
+/// The Accept header of a document fetch: every format LDES 1.0 §3.3 says a
+/// client supports, quad formats first so a member's named graph survives.
+pub const RDF_ACCEPT: &str = "application/trig, application/n-quads, text/turtle;q=0.9, \
+     application/n-triples;q=0.8, application/ld+json;q=0.7";
+
+/// `GET` an RDF document (LDES client), behind the allowlist, following
+/// allowlisted redirects. `if_none_match` is an ETag kept from an earlier
+/// fetch; a `304` comes back as a document without a body. A retryable
+/// status ([`RETRYABLE_STATUSES`]) is retried up to [`retries`] times,
+/// waiting what `Retry-After` asks or an exponential back-off with jitter.
+pub fn get_rdf_blocking(
+    url: &str,
+    if_none_match: Option<&str>,
+) -> Result<RdfDocument, RemoteError> {
+    get_rdf_blocking_with_auth(
+        url,
+        if_none_match,
+        crate::federation::assertion_for(url).as_deref(),
+    )
 }
 
 pub fn get_rdf_blocking_with_auth(
     url: &str,
+    if_none_match: Option<&str>,
     bearer: Option<&str>,
-) -> Result<(String, String), RemoteError> {
+) -> Result<RdfDocument, RemoteError> {
     if !is_allowed(url) {
         return Err(RemoteError::NotAllowed(url.to_string()));
     }
     let url = url.to_string();
     let bearer = bearer.map(str::to_string);
+    let if_none_match = if_none_match.map(str::to_string);
+    let (max_retries, max_wait) = (retries(), max_retry_wait());
     blocking(async move {
-        let mut req = client().get(&url).timeout(timeout());
-        if let Some(b) = &bearer {
-            req = req.bearer_auth(b);
-        }
-        let resp = req
-            .header(
-                "Accept",
-                "text/turtle, application/n-triples;q=0.9, application/ld+json;q=0.8",
-            )
-            .send()
-            .await
-            .map_err(|e| RemoteError::Request {
-                url: url.clone(),
-                reason: e.to_string(),
-            })?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(RemoteError::Status {
-                url: url.clone(),
-                status: status.as_u16(),
+        let mut attempt = 0u32;
+        loop {
+            let mut req = client()
+                .get(&url)
+                .timeout(timeout())
+                .header("Accept", RDF_ACCEPT);
+            if let Some(b) = &bearer {
+                req = req.bearer_auth(b);
+            }
+            if let Some(tag) = &if_none_match {
+                req = req.header("If-None-Match", tag);
+            }
+            let resp = req.send().await.map_err(|e| request_error(&url, e))?;
+            let status = resp.status().as_u16();
+            if RETRYABLE_STATUSES.contains(&status) && attempt < max_retries {
+                let wait = retry_after(resp.headers()).unwrap_or_else(|| backoff(attempt));
+                if wait <= max_wait {
+                    attempt += 1;
+                    tracing::debug!(%url, status, ?wait, attempt, "remote: retrying");
+                    tokio::time::sleep(wait).await;
+                    continue;
+                }
+            }
+            let headers = resp.headers();
+            let header = |name: reqwest::header::HeaderName| {
+                headers
+                    .get(name)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string)
+            };
+            let etag = header(reqwest::header::ETAG);
+            let immutable = header(reqwest::header::CACHE_CONTROL).is_some_and(|cc| {
+                cc.split(',')
+                    .any(|d| d.trim().eq_ignore_ascii_case("immutable"))
+            });
+            let content_type =
+                header(reqwest::header::CONTENT_TYPE).unwrap_or_else(|| "text/turtle".to_string());
+            let final_url = resp.url().to_string();
+            if status == 304 {
+                return Ok(RdfDocument {
+                    url: final_url,
+                    body: None,
+                    content_type,
+                    etag: etag.or(if_none_match),
+                    immutable,
+                    retries: attempt,
+                });
+            }
+            if !resp.status().is_success() {
+                return Err(RemoteError::Status { url, status });
+            }
+            let body = resp.text().await.map_err(|e| request_error(&url, e))?;
+            return Ok(RdfDocument {
+                url: final_url,
+                body: Some(body),
+                content_type,
+                etag,
+                immutable,
+                retries: attempt,
             });
         }
-        let ct = resp
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("text/turtle")
-            .to_string();
-        let body = resp.text().await.map_err(|e| RemoteError::Request {
-            url,
-            reason: e.to_string(),
-        })?;
-        Ok((ct, body))
     })
 }
 
@@ -417,6 +577,35 @@ mod tests {
         assert!(allowed_by(&e, "https://h.example/sparql/x"));
         assert!(!allowed_by(&e, "https://h.example/sparql"));
         assert!(!allowed_by(&e, "https://h.example/sparqlx"));
+    }
+
+    #[test]
+    fn retry_after_reads_seconds_and_http_dates() {
+        let mut h = reqwest::header::HeaderMap::new();
+        assert_eq!(retry_after(&h), None);
+        h.insert(reqwest::header::RETRY_AFTER, "7".parse().unwrap());
+        assert_eq!(retry_after(&h), Some(Duration::from_secs(7)));
+        h.insert(
+            reqwest::header::RETRY_AFTER,
+            "Sun, 06 Nov 1994 08:49:37 GMT".parse().unwrap(),
+        );
+        assert_eq!(retry_after(&h), Some(Duration::ZERO), "a past date: now");
+        let soon = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc2822();
+        h.insert(reqwest::header::RETRY_AFTER, soon.parse().unwrap());
+        let wait = retry_after(&h).unwrap();
+        assert!(wait > Duration::from_secs(25) && wait <= Duration::from_secs(30));
+        h.insert(reqwest::header::RETRY_AFTER, "soon".parse().unwrap());
+        assert_eq!(retry_after(&h), None);
+    }
+
+    #[test]
+    fn backoff_grows_with_jitter_and_is_capped() {
+        for attempt in 0..20 {
+            let ceiling = (250u64 << attempt.min(5)).min(8_000);
+            let d = backoff(attempt).as_millis() as u64;
+            assert!(d >= ceiling / 2 && d <= ceiling, "{attempt}: {d}");
+        }
+        assert!(backoff(30) <= Duration::from_secs(8));
     }
 
     #[test]

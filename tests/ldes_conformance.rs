@@ -7,8 +7,13 @@
 
 mod common;
 
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+
 use axum::body::Body;
-use axum::http::{header, HeaderMap, Method, Request, StatusCode};
+use axum::extract::State;
+use axum::http::{header, HeaderMap, Method, Request, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
 use axum::Router;
 use common::*;
 use open_triplestore::auth::models::{OwnerType, Visibility};
@@ -883,6 +888,7 @@ fn the_sweep_applies_the_declared_windows() {
 /// client keeps "the retention policy of the root node" as context.
 #[tokio::test]
 async fn the_client_treats_a_gone_node_as_empty_and_keeps_the_publisher_policy() {
+    let _turn = REMOTE.lock().await;
     std::env::set_var("OTS_LDES_SWEEP_INTERVAL_SECS", "0");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -1737,4 +1743,764 @@ async fn an_overloaded_stream_answers_429_with_retry_after() {
     .await;
     assert_eq!(st, StatusCode::OK, "{ttl}");
     drop(held);
+}
+
+// ─── Client MUSTs and SHOULDs (LDES 1.0 §3, §4.3, §4.4) ─────────────────────
+
+/// Client tests point the process-wide `OTS_REMOTE_ALLOWLIST` at their own
+/// listeners, so they take turns.
+static REMOTE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+const PFX: &str = "@prefix ldes: <https://w3id.org/ldes#> .
+@prefix tree: <https://w3id.org/tree#> .
+@prefix dct: <http://purl.org/dc/terms/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix as: <https://www.w3.org/ns/activitystreams#> .
+@prefix ex: <https://example.org/ldes-conf/> .
+";
+
+const MIRROR: &str = "https://example.org/mirror/instances";
+
+/// One scripted answer of a mock remote.
+#[derive(Clone)]
+struct Reply {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
+impl Reply {
+    fn status(status: u16) -> Self {
+        Reply {
+            status,
+            headers: Vec::new(),
+            body: String::new(),
+        }
+    }
+    fn rdf(content_type: &str, body: impl Into<String>) -> Self {
+        Reply {
+            body: body.into(),
+            ..Reply::status(200)
+        }
+        .header("content-type", content_type)
+    }
+    fn turtle(body: impl Into<String>) -> Self {
+        Reply::rdf("text/turtle", format!("{PFX}{}", body.into()))
+    }
+    fn header(mut self, name: &str, value: impl Into<String>) -> Self {
+        self.headers.push((name.to_string(), value.into()));
+        self
+    }
+}
+
+/// A remote on a local listener that answers each path from a script: the
+/// replies are used in order and the last one repeats. Every request is
+/// recorded with its headers.
+#[derive(Clone, Default)]
+struct Mock {
+    script: Arc<Mutex<HashMap<String, VecDeque<Reply>>>>,
+    hits: Arc<Mutex<Vec<(String, HeaderMap)>>>,
+}
+
+impl Mock {
+    fn start() -> (Self, String) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let mock = Mock::default();
+        let app = Router::new().fallback(mock_reply).with_state(mock.clone());
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                axum::serve(listener, app).await.unwrap();
+            });
+        });
+        (mock, origin)
+    }
+
+    fn on(&self, path: &str, replies: Vec<Reply>) {
+        self.script
+            .lock()
+            .unwrap()
+            .insert(path.to_string(), replies.into());
+    }
+
+    fn hits(&self, path: &str) -> Vec<HeaderMap> {
+        self.hits
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _)| p == path)
+            .map(|(_, h)| h.clone())
+            .collect()
+    }
+}
+
+async fn mock_reply(State(mock): State<Mock>, uri: Uri, headers: HeaderMap) -> Response {
+    let path = uri.path().to_string();
+    mock.hits.lock().unwrap().push((path.clone(), headers));
+    let reply = {
+        let mut script = mock.script.lock().unwrap();
+        match script.get_mut(&path) {
+            Some(q) if q.len() > 1 => q.pop_front(),
+            Some(q) => q.front().cloned(),
+            None => None,
+        }
+    };
+    let Some(r) = reply else {
+        return (StatusCode::NOT_FOUND, "no such page").into_response();
+    };
+    let mut b = Response::builder().status(r.status);
+    for (k, v) in r.headers {
+        b = b.header(k, v);
+    }
+    b.body(Body::from(r.body)).unwrap()
+}
+
+/// A local instance with an empty dataset to sync into.
+fn mirror() -> (AppState, String, Router) {
+    let (local, token) = admin_state();
+    local
+        .auth_db
+        .create_dataset(
+            "mirror",
+            "Mirror",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    let app = test_app(local.clone());
+    (local, token, app)
+}
+
+async fn sync_from(
+    app: &Router,
+    token: &str,
+    url: &str,
+) -> (StatusCode, serde_json::Value, String) {
+    let (st, _, txt) = req(
+        app,
+        Method::POST,
+        "/api/ldes/sync",
+        Some(token),
+        Some((
+            "application/json",
+            json!({ "url": url, "dataset_id": "mirror", "graph_iri": MIRROR }).to_string(),
+        )),
+    )
+    .await;
+    let r = serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
+    (st, r, txt)
+}
+
+fn mirrored(local: &AppState, pattern: &str) -> bool {
+    matches!(
+        local
+            .store
+            .query(&format!("ASK {{ GRAPH <{MIRROR}> {{ {pattern} }} }}")),
+        Ok(QueryResults::Boolean(true))
+    )
+}
+
+/// LDES §3.3: "A client MUST follow redirects"; §3.1: the root node is the
+/// page matching `?s tree:view <>` "with <> the base IRI (after redirect)".
+/// The allowlist is checked again on every hop, so an allowlisted host
+/// cannot bounce the client to one that is not.
+#[tokio::test]
+async fn the_client_follows_allowlisted_redirects_and_resolves_against_the_final_url() {
+    let _turn = REMOTE.lock().await;
+    let (remote, origin) = Mock::start();
+    let (outside, outside_origin) = Mock::start();
+    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    remote.on(
+        "/start",
+        vec![Reply::status(301).header("location", "/hop")],
+    );
+    remote.on(
+        "/hop",
+        vec![Reply::status(307).header("location", format!("{origin}/stream/root"))],
+    );
+    remote.on(
+        "/stream/root",
+        vec![Reply::turtle(
+            "<#es> a ldes:EventStream ; tree:view <> ; tree:member <m1> .
+             <m1> ex:name \"redirected\" .",
+        )],
+    );
+    remote.on(
+        "/escape",
+        vec![Reply::status(302).header("location", format!("{outside_origin}/stream"))],
+    );
+    outside.on(
+        "/stream",
+        vec![Reply::turtle("<#es> a ldes:EventStream ; tree:view <> .")],
+    );
+    let (local, token, app) = mirror();
+
+    let (st, r, txt) = sync_from(&app, &token, &format!("{origin}/start")).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(r["root_node"], format!("{origin}/stream/root"), "{txt}");
+    assert_eq!(r["stream"], format!("{origin}/stream/root#es"), "{txt}");
+    assert_eq!(r["entities_updated"], 1, "{txt}");
+    assert!(
+        mirrored(
+            &local,
+            &format!("<{origin}/stream/m1> <{EX}name> \"redirected\"")
+        ),
+        "relative IRIs resolve against the URL after the redirects"
+    );
+
+    let (st, _, txt) = sync_from(&app, &token, &format!("{origin}/escape")).await;
+    assert_eq!(st, StatusCode::BAD_GATEWAY, "{txt}");
+    assert!(
+        txt.contains("redirected to") && txt.contains(&outside_origin),
+        "{txt}"
+    );
+    assert!(
+        outside.hits("/stream").is_empty(),
+        "a hop off the allowlist is never requested"
+    );
+}
+
+/// LDES §3.3: "For the following status codes, the client MUST implement a
+/// retry mechanism with a back-off strategy: 408, 425, 429, 500, 502, 503,
+/// 504" — the publisher answers 429 with Retry-After when busy (Server
+/// Primer §2) — and "A client MUST abort and throw an error on any other 4xx
+/// or 5xx status codes."
+#[tokio::test]
+async fn the_client_retries_with_back_off_and_aborts_on_other_errors() {
+    let _turn = REMOTE.lock().await;
+    let (remote, origin) = Mock::start();
+    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    let root = || {
+        Reply::turtle(
+            "<#es> a ldes:EventStream ; tree:view <> ; tree:member <m1> .
+             <m1> ex:name \"patient\" .",
+        )
+    };
+    remote.on(
+        "/busy",
+        vec![
+            Reply::status(429).header("retry-after", "1"),
+            Reply::status(503),
+            root(),
+        ],
+    );
+    let (local, token, app) = mirror();
+    let started = std::time::Instant::now();
+    let (st, r, txt) = sync_from(&app, &token, &format!("{origin}/busy")).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(r["retries"], 2, "{txt}");
+    assert_eq!(remote.hits("/busy").len(), 3);
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(1),
+        "Retry-After: 1 was honoured"
+    );
+    assert!(mirrored(
+        &local,
+        &format!("<{origin}/m1> <{EX}name> \"patient\"")
+    ));
+
+    for code in [408u16, 425, 500, 502, 504] {
+        let path = format!("/s{code}");
+        remote.on(
+            &path,
+            vec![Reply::status(code).header("retry-after", "0"), root()],
+        );
+        let (st, r, txt) = sync_from(&app, &token, &format!("{origin}{path}")).await;
+        assert_eq!(st, StatusCode::OK, "{code} is retried: {txt}");
+        assert_eq!(r["retries"], 1, "{code}: {txt}");
+    }
+
+    remote.on("/broken", vec![Reply::status(400)]);
+    let (st, _, txt) = sync_from(&app, &token, &format!("{origin}/broken")).await;
+    assert_eq!(st, StatusCode::BAD_GATEWAY, "{txt}");
+    assert!(txt.contains("400"), "{txt}");
+    assert_eq!(remote.hits("/broken").len(), 1, "a 400 is not retried");
+}
+
+/// LDES §3.3: "A client MUST support HTTP responses in at least [n-quads],
+/// [n-triples], [trig], [turtle], and [json-ld]" and "An Accept request
+/// header MUST be set". §3.4: a member is the star pattern `<m> ?p ?o` in the
+/// default graph plus "all quads in the named graph m", blank nodes followed;
+/// §4.3: the named graph is the payload of the version.
+#[tokio::test]
+async fn the_client_reads_trig_and_n_quads_and_extracts_a_members_named_graph() {
+    let _turn = REMOTE.lock().await;
+    let (remote, origin) = Mock::start();
+    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    remote.on(
+        "/root",
+        vec![Reply::rdf(
+            "application/trig",
+            format!(
+                "{PFX}
+                <#es> a ldes:EventStream ; ldes:timestampPath dct:created ;
+                    ldes:versionOfPath dct:isVersionOf ; tree:view <> ; tree:member ex:rec1-v1 .
+                <> tree:relation [ a tree:Relation ; tree:node <page2> ] .
+                ex:rec1-v1 dct:created \"2026-01-01T00:00:00Z\"^^xsd:dateTime ;
+                    dct:isVersionOf ex:rec1 ; ex:versionNotes \"first version\" .
+                ex:rec1-v1 {{ ex:rec1 ex:title \"Streetname X\" ; ex:detail [ ex:value \"inner\" ] . }}"
+            ),
+        )],
+    );
+    remote.on(
+        "/page2",
+        vec![Reply::rdf(
+            "application/n-quads",
+            format!(
+                "<{origin}/root#es> <{TREE}member> <{EX}rec2-v1> .
+<{EX}rec2-v1> <http://purl.org/dc/terms/created> \"2026-01-02T00:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+<{EX}rec2-v1> <http://purl.org/dc/terms/isVersionOf> <{EX}rec2> .
+<{EX}rec2> <{EX}title> \"Streetname Y\" <{EX}rec2-v1> .
+"
+            ),
+        )],
+    );
+    let (local, token, app) = mirror();
+    let (st, r, txt) = sync_from(&app, &token, &format!("{origin}/root")).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(r["entities_updated"], 2, "{txt}");
+    let accept = remote.hits("/root")[0]
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    for ct in ["application/n-quads", "application/trig", "text/turtle"] {
+        assert!(accept.contains(ct), "§3.3 Accept names {ct}: {accept}");
+    }
+    assert!(mirrored(
+        &local,
+        &format!("<{EX}rec1> <{EX}title> \"Streetname X\"")
+    ));
+    assert!(
+        mirrored(
+            &local,
+            &format!("<{EX}rec1> <{EX}detail> ?d . ?d <{EX}value> \"inner\"")
+        ),
+        "a blank node inside the member's graph comes along"
+    );
+    assert!(
+        !mirrored(&local, &format!("?s <{EX}versionNotes> ?o")),
+        "the default-graph triples of a member with a payload graph are version metadata"
+    );
+    assert!(
+        mirrored(&local, &format!("<{EX}rec2> <{EX}title> \"Streetname Y\"")),
+        "N-Quads page"
+    );
+}
+
+/// LDES §3.4 extracts members whatever the stream declares: a stream without
+/// `ldes:versionOfPath` (the specification's sensor example) is a log of
+/// immutable members, each its own entity.
+#[tokio::test]
+async fn a_stream_without_version_paths_yields_its_members() {
+    let _turn = REMOTE.lock().await;
+    let (remote, origin) = Mock::start();
+    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    remote.on(
+        "/root",
+        vec![Reply::turtle(
+            "<#es> a ldes:EventStream ; ldes:timestampPath ex:resultTime ;
+                 tree:view <> ; tree:member ex:obs1, ex:obs2 .
+             ex:obs1 a ex:Observation ; ex:resultTime \"2026-01-01T00:00:00Z\"^^xsd:dateTime ; ex:result 21 .
+             ex:obs2 a ex:Observation ; ex:resultTime \"2026-01-01T00:01:00Z\"^^xsd:dateTime ; ex:result 22 .",
+        )],
+    );
+    let (local, token, app) = mirror();
+    let (st, r, txt) = sync_from(&app, &token, &format!("{origin}/root")).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(r["entities_updated"], 2, "{txt}");
+    assert_eq!(r["last_timestamp"], "2026-01-01T00:01:00Z", "{txt}");
+    assert!(mirrored(&local, &format!("<{EX}obs1> <{EX}result> 21")));
+    assert!(
+        mirrored(&local, &format!("<{EX}obs2> <{EX}resultTime> ?t")),
+        "a member's own data is kept whole"
+    );
+}
+
+/// LDES §3.2: "A client MUST ensure a member is only emitted once", and the
+/// NOTE: when a client bookmarks the last timestamp, "the members that have
+/// exactly this timestamp ... will still need to be kept in the state". §4.1:
+/// timestamps are `xsd:dateTime` values, so they compare as instants.
+#[tokio::test]
+async fn members_that_share_the_bookmark_timestamp_are_each_emitted_once() {
+    let _turn = REMOTE.lock().await;
+    let (remote, origin) = Mock::start();
+    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    let page = |members: &[(&str, &str)]| {
+        let list: Vec<String> = members.iter().map(|(m, _)| format!("ex:{m}")).collect();
+        let mut doc = format!(
+            "<#es> a ldes:EventStream ; ldes:timestampPath dct:created ; tree:view <> ; tree:member {} .\n",
+            list.join(", ")
+        );
+        for (m, t) in members {
+            doc.push_str(&format!(
+                "ex:{m} dct:created \"{t}\"^^xsd:dateTime ; ex:name \"{m}\" .\n"
+            ));
+        }
+        Reply::turtle(doc)
+    };
+    let ten = "2026-01-01T10:00:00Z";
+    remote.on("/root", vec![page(&[("m1", ten), ("m2", ten)])]);
+    let (local, token, app) = mirror();
+    let url = format!("{origin}/root");
+    let (st, r, txt) = sync_from(&app, &token, &url).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(r["entities_updated"], 2, "{txt}");
+    assert_eq!(r["last_timestamp"], ten, "{txt}");
+
+    // m3 shares the bookmark's instant (written differently); m4 is later as
+    // an instant though its lexical form sorts earlier.
+    let all = [
+        ("m1", ten),
+        ("m2", ten),
+        ("m3", "2026-01-01T10:00:00.000+00:00"),
+        ("m4", "2026-01-01T09:30:00-02:00"),
+    ];
+    remote.on("/root", vec![page(&all)]);
+    let (st, r, txt) = sync_from(&app, &token, &url).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(
+        r["members_skipped_older"], 2,
+        "m1 and m2 were emitted: {txt}"
+    );
+    assert_eq!(r["entities_updated"], 2, "m3 and m4 are new: {txt}");
+    assert!(mirrored(&local, &format!("<{EX}m3> <{EX}name> \"m3\"")));
+    assert!(mirrored(&local, &format!("<{EX}m4> <{EX}name> \"m4\"")));
+
+    let (st, r, txt) = sync_from(&app, &token, &url).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(r["members_skipped_older"], 4, "{txt}");
+    assert_eq!(r["entities_updated"], 0, "nothing is emitted twice: {txt}");
+}
+
+/// LDES §4.3: a consumer uses the declared version properties — the create,
+/// update and delete paths (default `rdf:type`) and objects — and "A
+/// consumer that needs to interpret versions and select the latest MUST use"
+/// `ldes:versionTimestampPath` when versions are published out of order.
+#[tokio::test]
+async fn versions_follow_the_declared_paths_objects_and_version_timestamps() {
+    let _turn = REMOTE.lock().await;
+    let (remote, origin) = Mock::start();
+    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    let doc = |extra_members: &str, extra: &str| {
+        Reply::turtle(format!(
+            "<#es> a ldes:EventStream ; ldes:timestampPath dct:created ;
+                 ldes:versionOfPath dct:isVersionOf ; ldes:versionTimestampPath ex:validFrom ;
+                 ldes:versionCreateObject as:Create ; ldes:versionUpdateObject as:Update ;
+                 ldes:versionDeletePath ex:action ; ldes:versionDeleteObject ex:Removed ;
+                 tree:view <> ; tree:member ex:a-1, ex:a-2, ex:b-1, ex:b-2, ex:c-1 {extra_members} .
+             ex:a-1 a as:Create ; dct:isVersionOf ex:a ; dct:created \"2026-04-01T00:00:00Z\"^^xsd:dateTime ;
+                 ex:validFrom \"2026-03-01T00:00:00Z\"^^xsd:dateTime ; ex:name \"a current\" .
+             ex:a-2 a as:Update ; dct:isVersionOf ex:a ; dct:created \"2026-04-02T00:00:00Z\"^^xsd:dateTime ;
+                 ex:validFrom \"2026-02-01T00:00:00Z\"^^xsd:dateTime ; ex:name \"a backdated\" .
+             ex:b-1 a as:Create ; dct:isVersionOf ex:b ; dct:created \"2026-04-01T00:00:00Z\"^^xsd:dateTime ;
+                 ex:validFrom \"2026-01-01T00:00:00Z\"^^xsd:dateTime ; ex:name \"b\" .
+             ex:b-2 dct:isVersionOf ex:b ; dct:created \"2026-04-02T00:00:00Z\"^^xsd:dateTime ;
+                 ex:validFrom \"2026-01-02T00:00:00Z\"^^xsd:dateTime ; ex:action ex:Removed .
+             ex:c-1 a as:Delete ; dct:isVersionOf ex:c ; dct:created \"2026-04-01T00:00:00Z\"^^xsd:dateTime ;
+                 ex:validFrom \"2026-01-01T00:00:00Z\"^^xsd:dateTime ; ex:name \"c\" .
+             {extra}"
+        ))
+    };
+    remote.on("/root", vec![doc("", "")]);
+    let (local, token, app) = mirror();
+    let url = format!("{origin}/root");
+    let (st, r, txt) = sync_from(&app, &token, &url).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert!(
+        mirrored(&local, &format!("<{EX}a> <{EX}name> \"a current\"")),
+        "the later version timestamp wins over the later publication: {txt}"
+    );
+    assert!(!mirrored(
+        &local,
+        &format!("<{EX}a> <{EX}name> \"a backdated\"")
+    ));
+    assert_eq!(r["versions_superseded"], 2, "a-2 by a-1, b-1 by b-2: {txt}");
+    assert!(
+        !mirrored(&local, &format!("<{EX}b> ?p ?o")),
+        "the declared delete path and object remove the entity"
+    );
+    assert_eq!(r["entities_deleted"], 1, "{txt}");
+    assert!(
+        mirrored(&local, &format!("<{EX}c> <{EX}name> \"c\"")),
+        "as:Delete is not this stream's delete object"
+    );
+    assert!(
+        !mirrored(
+            &local,
+            "?s a <https://www.w3.org/ns/activitystreams#Create>"
+        ),
+        "the version markers stay out of the entity"
+    );
+
+    // A version older than the one applied, published later, is not applied.
+    remote.on(
+        "/root",
+        vec![doc(
+            ", ex:a-3",
+            "ex:a-3 a as:Update ; dct:isVersionOf ex:a ; dct:created \"2026-04-03T00:00:00Z\"^^xsd:dateTime ;
+                 ex:validFrom \"2026-01-15T00:00:00Z\"^^xsd:dateTime ; ex:name \"a older\" .",
+        )],
+    );
+    let (st, r, txt) = sync_from(&app, &token, &url).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(r["versions_superseded"], 1, "{txt}");
+    assert_eq!(r["entities_updated"], 0, "{txt}");
+    assert!(mirrored(
+        &local,
+        &format!("<{EX}a> <{EX}name> \"a current\"")
+    ));
+}
+
+/// LDES §4.1: `ldes:timestampPath` "is a SHACL property path"; §3.5.2: the
+/// client "MUST be able to evaluate SHACL property paths". The client parses
+/// them with the SHACL engine's path parser.
+#[tokio::test]
+async fn declared_paths_are_evaluated_as_shacl_property_paths() {
+    let _turn = REMOTE.lock().await;
+    let (remote, origin) = Mock::start();
+    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    remote.on(
+        "/root",
+        vec![Reply::turtle(
+            "<#es> a ldes:EventStream ;
+                 ldes:timestampPath ( ex:meta ex:at ) ;
+                 ldes:versionOfPath [ sh:alternativePath ( dct:isVersionOf ex:versionOf ) ] ;
+                 tree:view <> ; tree:member ex:p-1, ex:q-1 .
+             ex:p-1 ex:versionOf ex:p ; ex:meta [ ex:at \"2026-05-01T00:00:00Z\"^^xsd:dateTime ] ; ex:name \"p\" .
+             ex:q-1 dct:isVersionOf ex:q ; ex:meta [ ex:at \"2026-05-02T00:00:00Z\"^^xsd:dateTime ] ; ex:name \"q\" .",
+        )],
+    );
+    let (local, token, app) = mirror();
+    let (st, r, txt) = sync_from(&app, &token, &format!("{origin}/root")).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert!(
+        mirrored(&local, &format!("<{EX}p> <{EX}name> \"p\"")),
+        "{txt}"
+    );
+    assert!(
+        mirrored(&local, &format!("<{EX}q> <{EX}name> \"q\"")),
+        "{txt}"
+    );
+    assert_eq!(
+        r["last_timestamp"], "2026-05-02T00:00:00Z",
+        "the sequence path reached the nested timestamp: {txt}"
+    );
+}
+
+/// LDES §3.1: the client looks for `?s tree:view <>` (the page is the root
+/// node), else `I tree:view ?o` (I is the stream; ?o is dereferenced). "In
+/// case it was matched multiple times, an error MUST be returned"; with no
+/// match "an error SHOULD be returned".
+#[tokio::test]
+async fn initialisation_finds_the_root_and_refuses_ambiguous_views() {
+    let _turn = REMOTE.lock().await;
+    let (remote, origin) = Mock::start();
+    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    remote.on(
+        "/es",
+        vec![Reply::turtle(
+            "<> a ldes:EventStream ; ldes:pollingInterval 30 ; tree:view <root> .",
+        )],
+    );
+    remote.on(
+        "/root",
+        vec![Reply::turtle(
+            "<es> a ldes:EventStream ; tree:view <> ; tree:member <m1> .
+             <m1> ex:name \"one\" .",
+        )],
+    );
+    remote.on(
+        "/two-roots",
+        vec![Reply::turtle(
+            "<> a ldes:EventStream ; tree:view <r1>, <r2> .",
+        )],
+    );
+    remote.on(
+        "/two-streams",
+        vec![Reply::turtle("<a> tree:view <> . <b> tree:view <> .")],
+    );
+    remote.on("/nothing", vec![Reply::turtle("<x> ex:p <y> .")]);
+    let (local, token, app) = mirror();
+
+    let (st, r, txt) = sync_from(&app, &token, &format!("{origin}/es")).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(r["stream"], format!("{origin}/es"), "{txt}");
+    assert_eq!(r["root_node"], format!("{origin}/root"), "{txt}");
+    assert_eq!(
+        r["polling_interval"], 30,
+        "§3 the client reads ldes:pollingInterval: {txt}"
+    );
+    assert_eq!(remote.hits("/root").len(), 1, "the root is dereferenced");
+    assert!(mirrored(
+        &local,
+        &format!("<{origin}/m1> <{EX}name> \"one\"")
+    ));
+
+    for path in ["/two-roots", "/two-streams", "/nothing"] {
+        let (st, _, txt) = sync_from(&app, &token, &format!("{origin}{path}")).await;
+        assert_eq!(st, StatusCode::BAD_GATEWAY, "{path}: {txt}");
+        assert!(txt.contains("§3.1"), "{path}: {txt}");
+    }
+}
+
+/// LDES §3.2: "A client SHOULD ensure an immutable tree:Node is not fetched
+/// more than once", and "When a tree:Node is not immutable, the ETag SHOULD
+/// be kept"; §3.3: the client sends it as If-None-Match "and process[es] the
+/// 304 Not Modified response accordingly". Against this project's publisher.
+#[tokio::test]
+async fn immutable_nodes_are_fetched_once_and_mutable_nodes_revalidate() {
+    let _turn = REMOTE.lock().await;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (mut remote, remote_token) = admin_state();
+    remote.base_url = std::sync::Arc::new(origin.clone());
+    setup(&remote, "pub");
+    let remote_app = test_app(remote.clone());
+    {
+        let app = remote_app.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                axum::serve(listener, app).await.unwrap();
+            });
+        });
+    }
+    let (st, txt) = put_stream(
+        &remote_app,
+        &remote_token,
+        "pub",
+        json!({ "enabled": true, "page_size": 2 }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    // b1 and b2 fill node 1; b3 starts node 2, which seals node 1.
+    post_entity(&remote_app, &remote_token, "b3", "three").await;
+    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    let (local, token, app) = mirror();
+    let url = format!("{origin}/api/datasets/pub/ldes");
+
+    let (st, r, txt) = sync_from(&app, &token, &url).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(r["root_node"], format!("{url}/nodes/0"), "{txt}");
+    assert_eq!(
+        r["nodes_visited"], 3,
+        "root, sealed node 1, tail node 2: {txt}"
+    );
+    assert_eq!(r["entities_updated"], 3, "{txt}");
+
+    let (st, r, txt) = sync_from(&app, &token, &url).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(
+        r["nodes_skipped_immutable"], 1,
+        "node 1 is not fetched again: {txt}"
+    );
+    assert_eq!(r["nodes_not_modified"], 1, "node 2 answered 304: {txt}");
+    assert_eq!(r["nodes_visited"], 1, "only the root came in full: {txt}");
+    assert_eq!(r["entities_updated"], 0, "{txt}");
+
+    post_entity(&remote_app, &remote_token, "b4", "four").await;
+    let (st, r, txt) = sync_from(&app, &token, &url).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(r["entities_updated"], 1, "only b4 is new: {txt}");
+    assert!(mirrored(&local, &format!("<{EX}b4> <{EX}name> \"four\"")));
+}
+
+/// LDES §3.2: a client MAY treat a node as immutable when "the tree:Relation
+/// with a tree:path equal to the ldes:timestampPath that pointed us to the
+/// tree:Node had an upper bound that is earlier than the time of the latest
+/// processed member".
+#[tokio::test]
+async fn a_node_bounded_below_the_bookmark_is_not_fetched() {
+    let _turn = REMOTE.lock().await;
+    let (remote, origin) = Mock::start();
+    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    remote.on(
+        "/root",
+        vec![Reply::turtle(
+            "<#es> a ldes:EventStream ; ldes:timestampPath dct:created ; tree:view <> .
+             <> tree:relation
+               [ a tree:LessThanRelation ; tree:path dct:created ; tree:node <old> ;
+                 tree:value \"2026-01-01T00:00:00Z\"^^xsd:dateTime ] ,
+               [ a tree:GreaterThanOrEqualToRelation ; tree:path dct:created ; tree:node <new> ;
+                 tree:value \"2026-01-01T00:00:00Z\"^^xsd:dateTime ] ,
+               [ a tree:LessThanRelation ; tree:path ex:observed ; tree:node <other> ;
+                 tree:value \"2020-01-01T00:00:00Z\"^^xsd:dateTime ] .",
+        )],
+    );
+    for p in ["/old", "/new", "/other"] {
+        remote.on(p, vec![Reply::turtle("<root#es> a ldes:EventStream .")]);
+    }
+    let (local, token, app) = mirror();
+    let url = format!("{origin}/root");
+    open_triplestore::ldes::store::set_sync_bookmark(
+        &local.auth_db,
+        "mirror",
+        &url,
+        Some("2026-06-01T00:00:00Z"),
+        0,
+    )
+    .unwrap();
+    let (st, r, txt) = sync_from(&app, &token, &url).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(r["nodes_pruned"], 1, "{txt}");
+    assert!(remote.hits("/old").is_empty(), "bounded below the bookmark");
+    assert_eq!(remote.hits("/new").len(), 1);
+    assert_eq!(
+        remote.hits("/other").len(),
+        1,
+        "a bound on another path says nothing about the timestamp"
+    );
+}
+
+/// LDES §4.4: "ldes:PointInTimePolicy: a point-in-time retention policy in
+/// which data generated before a specific time is not retained" is one of
+/// the historical types that "MUST remain supported".
+#[tokio::test]
+async fn the_legacy_point_in_time_policy_is_read() {
+    let _turn = REMOTE.lock().await;
+    let (remote, origin) = Mock::start();
+    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    remote.on(
+        "/root",
+        vec![Reply::turtle(
+            "<#es> a ldes:EventStream ; ldes:timestampPath dct:created ; tree:view <> .
+             <> ldes:retentionPolicy <#p> .
+             <#p> a ldes:PointInTimePolicy ; ldes:pointInTime \"2026-06-01T00:00:00Z\"^^xsd:dateTime .",
+        )],
+    );
+    let (local, token, app) = mirror();
+    let url = format!("{origin}/root");
+    open_triplestore::ldes::store::set_sync_bookmark(
+        &local.auth_db,
+        "mirror",
+        &url,
+        Some("2026-01-01T00:00:00Z"),
+        0,
+    )
+    .unwrap();
+    let (st, r, txt) = sync_from(&app, &token, &url).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(r["retention_policy"]["legacy"], true, "{txt}");
+    assert_eq!(
+        r["retention_policy"]["starting_from"], "2026-06-01T00:00:00Z",
+        "{txt}"
+    );
+    assert!(
+        r["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("starts at")),
+        "a bookmark before the point in time is a hole: {txt}"
+    );
 }

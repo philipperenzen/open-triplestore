@@ -1847,94 +1847,20 @@ fn multi_values(
         .collect()
 }
 
-/// Parse a SHACL property path (SHACL §2.3) starting at `node` into a [`PropertyPath`].
-///
-/// Handles a predicate IRI; an RDF-list **sequence** path `( p1 p2 … )`; and the blank-node
-/// path operators `sh:inversePath`, `sh:alternativePath` (an RDF list), `sh:zeroOrMorePath`,
-/// `sh:oneOrMorePath`, `sh:zeroOrOnePath`. Blank-node cells are walked through the raw quad
-/// index (SPARQL surface syntax cannot re-address them). Returns `None` for an empty or
-/// malformed path so the caller can skip the property shape rather than mis-bind it.
-///
-/// A node carrying BOTH list cells (`rdf:first`/`rdf:rest`) and a path operator is
-/// interpreted as the sequence path — matching the W3C suite's `path-strange-*`
-/// expectations, which treat the list reading as authoritative.
+/// Parse a SHACL property path (SHACL §2.3) starting at `node` in the shapes
+/// graph into a [`PropertyPath`]; see [`parse_property_path_with`].
 fn parse_property_path(
     store: &TripleStore,
     shapes_graph: &str,
     node: &str,
 ) -> Option<PropertyPath> {
-    // A predicate path is a plain IRI.
-    if !node.starts_with("_:") {
-        return Some(PropertyPath::Predicate(node.to_string()));
-    }
-    // Blank node: an RDF-list sequence path takes precedence over operators.
-    let seq: Vec<PropertyPath> = rdf_list_elements(store, shapes_graph, node)
-        .iter()
-        .filter_map(|e| parse_property_path(store, shapes_graph, e))
-        .collect();
-    if !seq.is_empty() {
-        return Some(PropertyPath::Sequence(seq));
-    }
-    let op = |p: &str| -> Option<String> {
+    parse_property_path_with(node, &|subject, predicate| {
         store
-            .objects_for_subject_in_graph(node, &format!("{SH}{p}"), Some(shapes_graph))
-            .first()
-            .map(term_to_lexical)
-    };
-    if let Some(inner) = op("inversePath") {
-        return parse_property_path(store, shapes_graph, &inner)
-            .map(|p| PropertyPath::Inverse(Box::new(p)));
-    }
-    if let Some(head) = op("alternativePath") {
-        let parts: Vec<PropertyPath> = rdf_list_elements(store, shapes_graph, &head)
+            .objects_for_subject_in_graph(subject, predicate, Some(shapes_graph))
             .iter()
-            .filter_map(|e| parse_property_path(store, shapes_graph, e))
-            .collect();
-        return (!parts.is_empty()).then_some(PropertyPath::Alternative(parts));
-    }
-    if let Some(inner) = op("zeroOrMorePath") {
-        return parse_property_path(store, shapes_graph, &inner)
-            .map(|p| PropertyPath::ZeroOrMore(Box::new(p)));
-    }
-    if let Some(inner) = op("oneOrMorePath") {
-        return parse_property_path(store, shapes_graph, &inner)
-            .map(|p| PropertyPath::OneOrMore(Box::new(p)));
-    }
-    if let Some(inner) = op("zeroOrOnePath") {
-        return parse_property_path(store, shapes_graph, &inner)
-            .map(|p| PropertyPath::ZeroOrOne(Box::new(p)));
-    }
-    None
-}
-
-/// Walk the RDF list whose head is `head`, returning each member's lexical node form
-/// (IRI, `_:label`, or literal value) via the raw quad index. Empty if `head` is not a list.
-fn rdf_list_elements(store: &TripleStore, shapes_graph: &str, head: &str) -> Vec<String> {
-    const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
-    const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
-    const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
-    let mut out = Vec::new();
-    let mut current = head.to_string();
-    for _ in 0..10_000 {
-        if current == RDF_NIL {
-            break;
-        }
-        match store
-            .objects_for_subject_in_graph(&current, RDF_FIRST, Some(shapes_graph))
-            .first()
-        {
-            Some(first) => out.push(term_to_lexical(first)),
-            None => break,
-        }
-        match store
-            .objects_for_subject_in_graph(&current, RDF_REST, Some(shapes_graph))
-            .first()
-        {
-            Some(rest) => current = term_to_lexical(rest),
-            None => break,
-        }
-    }
-    out
+            .map(term_to_lexical)
+            .collect()
+    })
 }
 
 /// Build the SPARQL `PREFIX` prologue declared via SHACL's prefixes mechanism for a
