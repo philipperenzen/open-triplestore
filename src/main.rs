@@ -39,6 +39,11 @@ mod provenance;
 mod rdf_patch;
 mod reasoning;
 mod remote;
+// The binary serves the repair routes; the rest of the module's public
+// surface (the report's stable view, the per-store quad cap override) is
+// the library's, for its integration tests.
+#[allow(dead_code)]
+mod repair;
 mod rml;
 mod saved_queries;
 mod secrets;

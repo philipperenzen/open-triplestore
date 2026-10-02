@@ -1488,6 +1488,16 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
+    // Repair proposals (docs/repair.md): beside /validate and /infer, behind
+    // the same token and endpoint-ACL gate.
+    let repair_routes = crate::repair::handlers::routes()
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .with_state(state.clone());
+
     // Internal prefix service (bundled prefix.cc/LOV snapshot + platform
     // registry) — anonymous, in-memory, rate-limited like every public
     // anonymous surface.
@@ -1930,6 +1940,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(asset_routes)
         .merge(dataset_sparql_routes)
         .merge(shacl_routes)
+        .merge(repair_routes)
         .merge(studio_auth)
         .merge(studio_optional)
         .merge(rml_routes)
@@ -2456,6 +2467,8 @@ pub async fn run(
         #[cfg(feature = "vocab-search")]
         vocab_engine,
     };
+    // Repair proposals are kept beside the store (docs/repair.md).
+    crate::repair::configure(&state.store, &data_dir);
     if let Some(keys) = state.oidc_provider.clone() {
         crate::federation::init(keys, &state.base_url);
     }

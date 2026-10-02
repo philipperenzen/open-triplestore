@@ -68,6 +68,10 @@ Three facts worth knowing before an instance is exposed:
 | `POST` | `/api/datasets/{dataset_id}/assets` | **token** | Upload a file. |
 | `POST` | `/api/datasets/{dataset_id}/validate` | **token** | Run SHACL validation over the dataset graphs the caller may read; a run that could not read them all is a test run. |
 | `GET` | `/api/datasets/{dataset_id}/validation/latest` | **token** | The dataset's last validation run; its full report only for those who may read every graph it validated. |
+| `POST` | `/api/datasets/{dataset_id}/repair` | **token** | Propose a repair (see `docs/repair.md`): an explained RDF Patch computed in a throwaway copy of the dataset. Write access to the dataset; nothing is written. |
+| `GET` | `/api/datasets/{dataset_id}/repair/proposals` | **token** | The dataset's kept repair proposals, to its writers. |
+| `GET` | `/api/datasets/{dataset_id}/repair/proposals/{proposal_id}` | **token** | One kept proposal: its report, patch and a page of its actions, to the dataset's writers. |
+| `POST` | `/api/datasets/{dataset_id}/repair/proposals/{proposal_id}/reject` | **token** | Reject a kept proposal. Write access. |
 | `GET` | `/api/datasets/{dataset_id}/shapes` | **token** | The dataset's shapes graph; a private one only for those who may read it. |
 | `PUT` | `/api/datasets/{dataset_id}/shapes` | **token** | Replace the shapes graph (`text/shaclc` or RDF). |
 | `GET` | `/api/models` | **none** | The model-registry entries the caller may see; anonymously, the public ones. |
