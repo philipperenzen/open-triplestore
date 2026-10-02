@@ -93,6 +93,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an existing tag. See `docs/release-process.md`.
 
 ### Fixed
+- **The OpenAPI document describes every route the server mounts.** About 60
+  operations were missing from `/api-docs/openapi.json`, so Postman and
+  generated clients could not see them: the OGC API – Features endpoints, 3D
+  Tiles, the viewer feed and geo-stats probes, the built-in OIDC provider and
+  its client registry, `/livez`, `/api/browse/facets`, the admin prefix
+  overrides, `/api/docs`, `/api/plugins`, `/ldp/constraints` and LDP's
+  `HEAD`/`OPTIONS` (plus `PUT`/`PATCH`/`DELETE` on the root container), and on a
+  dataset `permissions/me`, `conformance`, `provenance`, `patch`,
+  `entailment`, `containers/{import,export}`, `properties/*`, `form-manifest`,
+  `ingest/cityjson`, `assets/{id}/{download,metadata}`, `versions/gc`,
+  `versions/{ver}/diff/{other}` and `DELETE versions/{ver}`. A unit test now
+  compares every `.route(...)` with the document, both ways, against a short
+  list of deliberate exceptions. The Raft transport between cluster members
+  is one of them and has left the document. Two documented paths that answered
+  `404` are corrected: a dataset's SPARQL endpoint is
+  `/api/datasets/{id}/services/{service}/sparql` (docs/embedding.md), and an
+  IFC file is uploaded through `POST /api/import/bulk`
+  (docs/geo-3d-platform.md).
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if

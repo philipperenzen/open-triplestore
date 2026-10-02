@@ -2,7 +2,7 @@
 
 The full machine-readable API specification is available as an OpenAPI 3 JSON document. You can import it into **Postman**, **Insomnia**, or any OpenAPI-compatible tooling to explore and test all available endpoints.
 
-- **OpenAPI specification** — <a href="/api-docs/openapi.json" target="_blank" rel="noopener noreferrer">/api-docs/openapi.json</a> — machine-readable JSON, always up to date. (An interactive viewer is available at [API Reference](/api-docs).)
+- **OpenAPI specification** — <a href="/api-docs/openapi.json" target="_blank" rel="noopener noreferrer">/api-docs/openapi.json</a> — machine-readable JSON. A unit test (`spec_documents_every_mounted_route` in `src/server/openapi.rs`) fails the build when a route the server mounts is missing from it, or when it documents one the server does not mount. The only routes it leaves out on purpose are the Raft transport between cluster members, the consent step behind the `/oauth/authorize` page, the banner-preset pickers of the web UI and the `/api/ogc/` alias of `/api/ogc`; plugin routes under `/ext/{name}` are the plugin's own. Each copy is tailored to the caller: operations it may not reach are left out. (An interactive viewer is available at [API Reference](/api-docs).)
 - **Authentication** — every endpoint needs one of three levels, **none**, **token** or **admin**; [the table below](#authentication--the-level-every-endpoint-needs) states the level per endpoint. A **token** or **admin** endpoint wants an `Authorization: Bearer <token>` header, generated in **Settings → API Tokens**.
 
 ## Authentication — the level every endpoint needs
@@ -227,7 +227,7 @@ See `docs/operations.md, "Replication"`. Two new routes, no change to existing o
 |---|---|---|
 | `GET` | `/api/replication/status` | This node's `role`, `mode`, `scope`, `leader_url`, `node_id`, `read_only`; on a follower also `epoch`, `applied_seq`, `leader_newest_seq`, `lag_rows`, `last_sync_at`, `last_error`, `applied_rows`, `refetched_graphs`, `resyncs`, `interval_secs`, `healthy`. Public, beside `/livez`. |
 | `GET` | `/api/replication/manifest` | The leader's change-log `epoch`, `newest_seq`, `capture_enabled`, every graph (`graphs`, `null` for the default graph), `datasets` (`id`, `graphs`) and `identity_version` (SQLite's change counter of the identity database; `null` for an in-memory one). Admin only (`401` / `403`). |
-| `POST` | `/api/replication/raft/vote`, `/append`, `/snapshot` | The Raft transport between cluster members (JSON, `X-Cluster-Secret`). Not user routes: `404` off a cluster, `401` without the secret, `503` while the member starts. |
+| `POST` | `/api/replication/raft/vote`, `/append`, `/snapshot` | The Raft transport between cluster members (JSON, `X-Cluster-Secret`). Not user routes, and not in the OpenAPI document: `404` off a cluster, `401` without the secret, `503` while the member starts. |
 | `GET` | `/api/replication/identity` | The identity database, whole, as a consistent SQLite snapshot (`application/vnd.sqlite3`). Admin only (`401` / `403`). |
 
 `GET /api/admin/changes` takes `wait_ms` (at most 30000): when no row is
