@@ -25,6 +25,8 @@ oxigraph  = "0.5"
 oxrdf     = "0.3"
 # sep-0006 (LATERAL): oxigraph turns it on too; `service_var` builds on it.
 spargebra = { version = "0.4", features = ["sep-0006"] }
+# The query's BASE, which `IRI()` resolves against: the oxiri line spargebra uses.
+oxiri     = "0.2.11"
 
 # Durable blank-node identity: SHA-256 canonical hashing + hex encoding.
 # 0.11 to match the workspace root (RustCrypto `digest` 0.11 family).
