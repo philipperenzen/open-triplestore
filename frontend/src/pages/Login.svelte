@@ -1,4 +1,5 @@
 <script>
+  import { withBase } from '../lib/basePath';
   import { onMount } from 'svelte';
   import { login as apiLogin, verify2fa, setTokens, getOauthProviders, passkeyLoginStart, passkeyLoginFinish } from '../lib/api.js';
   import { isPasskeySupported, getPasskeyAssertion } from '../lib/webauthn.js';
@@ -108,7 +109,7 @@
 
   function beginSso(slug) {
     // Redirect to server-side OIDC/SAML authorize endpoint
-    window.location.href = `/api/auth/oauth/${slug}/authorize`;
+    window.location.href = withBase(`/api/auth/oauth/${slug}/authorize`);
   }
 </script>
 

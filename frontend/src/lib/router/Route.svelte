@@ -5,6 +5,8 @@
   export let path: string = '/';
   export let component: any = undefined;
 
+  // The router location's pathname is the app path (the deployment base is
+  // already stripped, see locationStore.ts), so `path` never names the base.
   interface Location { pathname: string }
   const loc = getContext<Readable<Location>>('router_location');
 

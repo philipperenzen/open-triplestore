@@ -317,16 +317,22 @@ services:
       - ./config.json:/app/frontend/dist/config.json:ro
 ```
 
-### Base path (static sub-path deploys)
+### Base path (sub-path deploys)
 
-If the built frontend is published under a sub-path (e.g.
-`https://example.gitlab.io/ld-suite/`), set `OTS_BASE_PATH` at **build** time:
+If the web UI is published under a sub-path (e.g. `https://example.org/ots/`),
+set `OTS_BASE_PATH` at **build** time:
 
 ```bash
-OTS_BASE_PATH=/ld-suite/ npm run build
+OTS_BASE_PATH=/ots/ npm run build
 ```
 
-Defaults to `/`, so every existing deployment is unaffected.
+The router, links, API calls, `config.json` and `/embed/*` then all live below
+`/ots/`; `config.json` itself is fetched from `/ots/config.json`, and a
+root-relative `branding.logoUrl` resolves below the prefix too. Defaults to `/`,
+so every existing deployment is unaffected. Serving the whole instance under a
+prefix also needs `BASE_URL` and the reverse proxy set up to match: see
+[Serving under a path prefix](operations.md#serving-under-a-path-prefix) for the
+nginx and Traefik configuration.
 
 ---
 

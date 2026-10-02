@@ -1,4 +1,5 @@
 <script>
+  import { stripBase } from './lib/basePath';
   import { Router, Route, Link, navigate } from './lib/router/index.js';
   import { onMount, tick } from 'svelte';
   import { t, locale, isLoading } from 'svelte-i18n';
@@ -204,7 +205,7 @@
 
     function handleKeydown(e) {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-        if (!searchEnabledFor(window.location.pathname)) return;
+        if (!searchEnabledFor(stripBase(window.location.pathname))) return;
         e.preventDefault();
         searchOpen = !searchOpen;
         if (searchOpen) setTimeout(() => searchBarRef?.focus(), 50);

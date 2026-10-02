@@ -1,4 +1,5 @@
 <script>
+  import { absoluteUrl } from '../lib/basePath';
   import { onMount } from 'svelte';
   import {
     getOrganisation,
@@ -202,7 +203,7 @@
   // Copy SPARQL endpoint URL
   let copiedSparql = false;
   async function copyOrgSparqlUrl() {
-    const url = `${window.location.origin}/api/organisations/${id}/sparql`;
+    const url = absoluteUrl(`/api/organisations/${id}/sparql`);
     if (await copyToClipboard(url)) {
       copiedSparql = true;
       setTimeout(() => { copiedSparql = false; }, 2000);

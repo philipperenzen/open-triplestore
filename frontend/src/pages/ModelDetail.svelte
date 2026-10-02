@@ -1,4 +1,5 @@
 <script>
+  import { withBase, absoluteUrl } from '../lib/basePath';
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
   import { navigate } from '../lib/router/index.js';
@@ -218,7 +219,7 @@
   }
 
   function diffUrl(from, to) {
-    return `/models/${id}/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+    return withBase(`/models/${id}/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
   }
 
   function statusBadge(status) {
@@ -351,7 +352,7 @@
         <span class="api-method">GET</span>
         <code class="api-url">/api/models/{id}/versions</code>
         <button class="btn btn-xs btn-ghost copy-btn" title={$t('system.copy')}
-          on:click={() => copyApiUrl('versions', `${window.location.origin}/api/models/${id}/versions`)}>
+          on:click={() => copyApiUrl('versions', absoluteUrl(`/api/models/${id}/versions`))}>
           {#if copiedApi === 'versions'}<CheckCheck size={12} />{:else}<Copy size={12} />{/if}
         </button>
         <span class="api-note">{$t('pages.modelDetail.listAllVersions')}</span>
@@ -360,7 +361,7 @@
         <span class="api-method">GET</span>
         <code class="api-url">/api/models/{id}/latest/data</code>
         <button class="btn btn-xs btn-ghost copy-btn" title={$t('system.copy')}
-          on:click={() => copyApiUrl('latest', `${window.location.origin}/api/models/${id}/latest/data`)}>
+          on:click={() => copyApiUrl('latest', absoluteUrl(`/api/models/${id}/latest/data`))}>
           {#if copiedApi === 'latest'}<CheckCheck size={12} />{:else}<Copy size={12} />{/if}
         </button>
         <span class="api-note">{$t('pages.modelDetail.latestPublishedData')} (<code>Accept</code>)</span>
@@ -391,7 +392,7 @@
         </div>
         <div class="ownership-body">
           {#if model.owner_type === 'organisation' && ownerOrg}
-            <a href="/organisations/{model.owner_id}" class="ownership-name">{ownerOrg.name}</a>
+            <a href={withBase(`/organisations/${model.owner_id}`)} class="ownership-name">{ownerOrg.name}</a>
             {#if ownerOrg.description}
               <p class="ownership-desc">{ownerOrg.description}</p>
             {/if}
@@ -425,7 +426,7 @@
         <div class="ownership-body">
           <div class="members-list">
             {#each dependents.datasets as d}
-              <a class="member-chip" href="/datasets/{d.dataset_id}"
+              <a class="member-chip" href={withBase(`/datasets/${d.dataset_id}`)}
                  title={d.update_available ? $t('pages.modelDetail.dependentBehind', { values: { latest: dependents.latest_published } }) : $t('pages.modelDetail.dependentCurrent')}>
                 {d.name} · v{d.effective_version || '—'}
                 {#if d.update_available}<span class="dep-behind">⬆ {dependents.latest_published}</span>{:else}<span class="dep-ok">✓</span>{/if}
@@ -533,7 +534,7 @@
                   <button
                     class="ver-btn"
                     title={$t('pages.modelDetail.copyEndpointUrl')}
-                    on:click={() => copyApiUrl(`ver-${ver.version}`, `${window.location.origin}/api/models/${id}/versions/${ver.version}/data`)}
+                    on:click={() => copyApiUrl(`ver-${ver.version}`, absoluteUrl(`/api/models/${id}/versions/${ver.version}/data`))}
                   >
                     {#if copiedApi === `ver-${ver.version}`}
                       <CheckCheck size={13} class="text-green-600" /> {$t('system.copied')}

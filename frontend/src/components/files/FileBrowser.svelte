@@ -13,6 +13,7 @@
   //   initialPath        – folder to open first
   //   datasetVisibility  – 'public' | 'members' | 'private' (pre-flight for asset visibility)
   // Events: pathchange(path), select(asset) [pick mode]
+  import { withBase, absoluteUrl } from '../../lib/basePath';
   import { createEventDispatcher } from 'svelte';
   import { t } from 'svelte-i18n';
   import {
@@ -335,14 +336,14 @@
 
   // ── File actions ──────────────────────────────────────────────────────────
   function assetIri(asset) {
-    return asset.iri || `${window.location.origin}/datasets/${datasetId}/assets/${asset.id}`;
+    return asset.iri || absoluteUrl(`/datasets/${datasetId}/assets/${asset.id}`);
   }
 
   // Plain anchor target: the optional-auth /download route streams with ETag
   // caching and works for anonymous visitors — no blob round-trip through memory
   // (a 50 MB IFC would otherwise be buffered twice).
   function downloadUrl(asset) {
-    return `/api/datasets/${datasetId}/assets/${asset.id}/download`;
+    return withBase(`/api/datasets/${datasetId}/assets/${asset.id}/download`);
   }
 
   function downloadFile(asset) {
@@ -812,7 +813,7 @@
           <Lock size={34} />
           <p class="fb-empty-title">{$t('components.fileBrowser.signInTitle')}</p>
           <p class="fb-empty-sub">{$t('components.fileBrowser.signInHint')}</p>
-          <a class="btn btn-sm" href="/login">{$t('nav.signIn')}</a>
+          <a class="btn btn-sm" href={withBase('/login')}>{$t('nav.signIn')}</a>
         </div>
       {:else if state === 'error'}
         <div class="fb-state fb-empty-state">

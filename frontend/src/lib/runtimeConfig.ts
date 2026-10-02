@@ -1,7 +1,8 @@
 // Runtime configuration — lets a container operator customize a deployed
 // instance (backend URLs + branding) WITHOUT rebuilding the frontend bundle.
 //
-// On boot, fetches `/config.json`. This app's own backend serves the static
+// On boot, fetches `config.json` from the deployment base (`/config.json` at the
+// root, `/ots/config.json` under OTS_BASE_PATH=/ots/). This app's own backend serves the static
 // frontend from `frontend/dist` (see `src/server/mod.rs`'s `ServeDir` +
 // SPA-fallback), so an operator can drop a `config.json` file straight into
 // that directory — e.g. a Docker volume mount over the built image — with NO
@@ -24,6 +25,7 @@
 
 import { writable } from 'svelte/store';
 import { setRuntimeServiceOverrides } from './serviceRegistry.js';
+import { withBase } from './basePath';
 
 export interface RuntimeBranding {
   title: string;
@@ -63,7 +65,8 @@ function applyBranding(branding: RuntimeConfigDoc['branding']): void {
   if (!branding) return;
   const next: RuntimeBranding = {
     title: branding.title?.trim() || DEFAULT_BRANDING.title,
-    logoUrl: branding.logoUrl?.trim() || null,
+    // A root-relative logo is a file in this deployment (next to config.json).
+    logoUrl: branding.logoUrl?.trim() ? withBase(branding.logoUrl.trim()) : null,
     accent: branding.accent?.trim() || null,
   };
   runtimeBranding.set(next);
@@ -90,7 +93,7 @@ export function loadRuntimeConfig(): void {
   if (started || typeof window === 'undefined') return;
   started = true;
 
-  fetch('/config.json', { headers: { accept: 'application/json' } })
+  fetch(withBase('/config.json'), { headers: { accept: 'application/json' } })
     .then((r) => {
       // This app's SPA fallback serves `index.html` (text/html, 200) for any
       // path with no matching static file — including a missing config.json —

@@ -5,6 +5,7 @@
   // saved-query client, and renders the negotiated result (SPARQL JSON table,
   // CSV, RDF, JSON, …). Any other same-origin GET /api path runs as a plain
   // authenticated read. Only GETs ever run — chat content cannot trigger writes.
+  import { withBase, absoluteUrl } from '../../lib/basePath';
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
   import { navigate } from '../../lib/router/index.js';
@@ -99,7 +100,7 @@
         contentType = r.contentType;
         versionServed = r.versionServed;
       } else {
-        const res = await fetch(path, {
+        const res = await fetch(withBase(path), {
           headers: { Accept: 'application/sparql-results+json, application/json;q=0.9, */*;q=0.8' },
           credentials: 'include',
         });
@@ -116,7 +117,7 @@
     }
   }
 
-  const copyUrl = () => copyWithReset(`${location.origin}${effectivePath}`, (v) => { copied = v; });
+  const copyUrl = () => copyWithReset(absoluteUrl(effectivePath), (v) => { copied = v; });
 
   function download() {
     const c = contentType.toLowerCase();

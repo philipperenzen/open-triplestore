@@ -4,6 +4,7 @@
   // detail page when the requested IRI is actually a file — clicking e.g.
   // "/samples/schependomlaan-3dbag.city.json" lands here instead of erroring on
   // the "IRI must be absolute" browseResource path.
+  import { withBase } from '../../lib/basePath';
   import { onMount } from 'svelte';
   import { t as i18nT } from 'svelte-i18n';
   import { Download, ExternalLink, FileText, FileJson, Image as ImageIcon, Boxes, File as FileIcon, FileType2 } from 'lucide-svelte';
@@ -43,7 +44,8 @@
   // (Model3D and fetch both want a fully-qualified or same-origin URL).
   function resolveUrl(u) {
     try {
-      return new URL(u, typeof window !== 'undefined' ? window.location.origin : 'http://localhost').href;
+      // A root-absolute path (`/samples/…`, `/api/…/download`) is an app path.
+      return new URL(withBase(u), typeof window !== 'undefined' ? window.location.origin : 'http://localhost').href;
     } catch {
       return u;
     }

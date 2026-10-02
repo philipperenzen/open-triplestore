@@ -14,6 +14,7 @@
 import * as WebIFC from 'web-ifc';
 import { BufferGeometry, BufferAttribute } from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
+import { withBase } from '../basePath';
 
 interface GuidRange {
   start: number;
@@ -43,7 +44,7 @@ function post(msg: unknown, transfer?: Transferable[]) {
 
 /** Fetch the file, streaming download progress back to the page. */
 async function fetchBytes(url: string): Promise<Uint8Array> {
-  const res = await fetch(url);
+  const res = await fetch(withBase(url));
   if (!res.ok) throw new Error(`IFC fetch failed: ${res.status}`);
   // Content-Length counts *encoded* bytes; when the transfer is compressed the
   // decoded stream overshoots it, so only trust it for identity transfers.
@@ -80,7 +81,7 @@ async function parse(url: string) {
       const engine = new WebIFC.IfcAPI();
       // Absolute path: the wasm binary is a static file (see /public/wasm) —
       // same base the main-thread engine uses.
-      engine.SetWasmPath('/wasm/', true);
+      engine.SetWasmPath(withBase('/wasm/'), true);
       await engine.Init();
       return engine;
     })(),

@@ -93,6 +93,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an existing tag. See `docs/release-process.md`.
 
 ### Fixed
+- **Serving under a path prefix.** The web UI built with `OTS_BASE_PATH=/ots/`
+  (or `docker build --build-arg OTS_BASE_PATH=/ots/`) now works below that
+  prefix, behind a reverse proxy that strips it. Before, only the bundler knew
+  the prefix: the router matched the raw `/ots/…` path against its routes and
+  showed an empty page, and links, `config.json`, the API calls and the
+  `/embed/*` detection all went to the host root. The router now matches the
+  path below the prefix, and links, history entries, fetches, downloads, copied
+  endpoint URLs and embed snippets carry it. The server scopes its session and
+  OIDC-state cookies below the proxy's `X-Forwarded-Prefix`, so refresh and
+  single sign-on keep working. The 303 from an IRI to its page in the UI uses a
+  relative `Location`, and a 3D Tiles tileset refers to its content relative to
+  `tileset.json`. A prefix that starts with one of the app's own paths (`/api`,
+  `/sparql`, …) fails the build. nginx and Traefik configuration in
+  [docs/operations.md](docs/operations.md#serving-under-a-path-prefix); a root
+  deployment is unchanged. A Playwright smoke test (`npm run e2e:subpath`)
+  builds the UI under `/ots/` and loads deep links.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if

@@ -250,6 +250,7 @@ pub async fn oidc_authorize(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     axum::extract::Extension(sessions): axum::extract::Extension<OAuthSessions>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
     let provider = match state.auth_db.get_oauth_provider_by_slug(&slug) {
         Ok(Some(p)) if p.is_active && p.provider_type == "oidc" => p,
@@ -280,8 +281,14 @@ pub async fn oidc_authorize(
             // short-lived cookie that the callback must echo. SameSite=Lax so it is
             // still sent on the top-level GET navigation back from the IdP.
             let secure = if state.secure_cookies { "; Secure" } else { "" };
+            // Scoped below a reverse proxy's path prefix, or the callback (at
+            // `/ots/api/auth/oauth/…` in the browser) would never get it back.
+            let path = crate::auth::handlers::cookie_path(
+                &crate::auth::handlers::forwarded_prefix(&headers),
+                "/api/auth/oauth",
+            );
             let cookie = format!(
-                "oauth_state={state_key}; HttpOnly; SameSite=Lax; Path=/api/auth/oauth; Max-Age=600{secure}"
+                "oauth_state={state_key}; HttpOnly; SameSite=Lax; Path={path}; Max-Age=600{secure}"
             );
             (
                 [(axum::http::header::SET_COOKIE, cookie)],

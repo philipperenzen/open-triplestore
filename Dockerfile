@@ -40,7 +40,11 @@ COPY frontend/ ./
 # (web-ifc.wasm's linked libraries, inline icons) from LICENSES/ and fails
 # without them.
 COPY LICENSES/ /app/LICENSES/
-RUN npm run build
+# Path prefix the web UI is published under behind a reverse proxy, e.g.
+#   --build-arg OTS_BASE_PATH=/ots/
+# Default `/` (served at the root). See docs/operations.md#serving-under-a-path-prefix.
+ARG OTS_BASE_PATH=/
+RUN OTS_BASE_PATH="${OTS_BASE_PATH}" npm run build
 
 # ─── Stage 2: Builder (cargo-chef for reliable dependency-layer caching) ───
 FROM rust:1.94-bookworm AS chef

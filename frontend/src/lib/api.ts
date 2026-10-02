@@ -3,8 +3,12 @@
 // getViewerFeed). termDisplay owns it and pulls in nothing itself, so this stays
 // free of the import cycle api.ts is otherwise careful to avoid.
 import { uiLang } from './ontology/termDisplay';
+import { BASE_PATH, withBase } from './basePath';
 
-const API_BASE = '';
+// The backend sits under the same path prefix as the web UI (a reverse proxy
+// strips it for both, see docs/operations.md): '' at the root, `/ots` under
+// OTS_BASE_PATH=/ots/. Every URL below is `${API_BASE}/api/…`.
+const API_BASE = BASE_PATH;
 
 // In-memory token storage (M-2: avoids localStorage XSS exposure).
 // The server sets HttpOnly cookies for the actual auth; these in-memory copies
@@ -157,12 +161,12 @@ async function request(method, path, body = null, init: { signal?: AbortSignal }
   const opts: RequestInit = { method, headers: authHeaders(), credentials: 'include' };
   if (init.signal) opts.signal = init.signal;
   if (body) opts.body = JSON.stringify(body);
-  let res = await fetch(`${API_BASE}${path}`, opts);
+  let res = await fetch(withBase(path), opts);
 
   // Transparent retry on 429 (rate limited).
   for (let attempt = 0; attempt < 3 && res.status === 429; attempt++) {
     await sleep(backoffDelayMs(res, attempt));
-    res = await fetch(`${API_BASE}${path}`, opts);
+    res = await fetch(withBase(path), opts);
   }
 
   if (res.status === 401 && true /* always try refresh if 401 */) {
@@ -170,7 +174,7 @@ async function request(method, path, body = null, init: { signal?: AbortSignal }
     const refreshed = await tryRefreshToken();
     if (refreshed) {
       opts.headers = authHeaders();
-      res = await fetch(`${API_BASE}${path}`, opts);
+      res = await fetch(withBase(path), opts);
     } else {
       clearTokens();
       // Only redirect to login if the user was previously authenticated.
@@ -197,16 +201,16 @@ async function request(method, path, body = null, init: { signal?: AbortSignal }
 // Turtle). Uses the same cookie-based auth + 429/401 handling as `request`.
 async function requestRaw(method, path, body, contentType) {
   const makeOpts = (): RequestInit => ({ method, headers: { 'Content-Type': contentType }, credentials: 'include', body });
-  let res = await fetch(`${API_BASE}${path}`, makeOpts());
+  let res = await fetch(withBase(path), makeOpts());
   for (let attempt = 0; attempt < 3 && res.status === 429; attempt++) {
     await sleep(backoffDelayMs(res, attempt));
-    res = await fetch(`${API_BASE}${path}`, makeOpts());
+    res = await fetch(withBase(path), makeOpts());
   }
   if (res.status === 401) {
     const wasAuthenticated = _accessToken !== null;
     const refreshed = await tryRefreshToken();
     if (refreshed) {
-      res = await fetch(`${API_BASE}${path}`, makeOpts());
+      res = await fetch(withBase(path), makeOpts());
     } else {
       clearTokens();
       if (wasAuthenticated) window.dispatchEvent(new CustomEvent('auth-expired'));
@@ -476,7 +480,7 @@ export const acknowledgeSavedQueryTest = (scope: SavedQueryScope, ownerId: strin
 export const repairSavedQuery = (scope: SavedQueryScope, ownerId: string, slug: string, data): Promise<{ sparql: string; model: string; savedRevision: number | null }> =>
   request('POST', `${sqBase(scope, ownerId)}/${encodeURIComponent(slug)}/repair`, data);
 export const savedQueryOpenApiUrl = (scope: SavedQueryScope, ownerId: string) =>
-  `/api/${scope}/${encodeURIComponent(ownerId)}/openapi.json`;
+  withBase(`/api/${scope}/${encodeURIComponent(ownerId)}/openapi.json`);
 
 /// Run a saved query as an API. Returns parsed SPARQL-results JSON plus the
 /// dataset version that served it (from the `x-ots-dataset-version` header).
@@ -541,7 +545,7 @@ export const getDatasetBranches = (id) => request('GET', `/api/datasets/${id}/br
 export const createDatasetBranch = (id, branch, fromVersion, targetVersion?) =>
   request('POST', `/api/datasets/${id}/branches`, { branch, from_version: fromVersion, target_version: targetVersion || undefined });
 export function getDatasetVersionDataUrl(id, ver, format?, graph?) {
-  let url = `/api/datasets/${id}/versions/${ver}/data?format=${format || 'trig'}`;
+  let url = withBase(`/api/datasets/${id}/versions/${ver}/data?format=${format || 'trig'}`);
   if (graph) url += `&graph=${encodeURIComponent(graph)}`;
   return url;
 }
@@ -1039,7 +1043,7 @@ export const getShapeGraphCommits = (id, limit = 50) =>
 
 /** Fetch the shape graph's Turtle (or SHACLC via `?format=shaclc`). */
 export async function getShapeGraphTurtle(id: string, format: 'turtle' | 'shaclc' = 'turtle'): Promise<string> {
-  const url = `/api/shacl/shape-graphs/${id}/turtle${format === 'shaclc' ? '?format=shaclc' : ''}`;
+  const url = withBase(`/api/shacl/shape-graphs/${id}/turtle${format === 'shaclc' ? '?format=shaclc' : ''}`);
   const res = await fetch(url, { credentials: 'include' });
   if (!res.ok) throw new Error(`Failed to load shape graph turtle: ${res.status}`);
   return res.text();
@@ -1060,7 +1064,7 @@ export async function putShapeGraphTurtle(
 ): Promise<{ version: number }> {
   const { message = '', contentType = 'text/turtle' } = options;
   const query = message.trim() ? `?message=${encodeURIComponent(message.trim())}` : '';
-  const res = await fetch(`/api/shacl/shape-graphs/${id}/turtle${query}`, {
+  const res = await fetch(`${API_BASE}/api/shacl/shape-graphs/${id}/turtle${query}`, {
     method: 'PUT',
     credentials: 'include',
     headers: { 'Content-Type': contentType },
@@ -1246,7 +1250,7 @@ export function deleteGraph(graphIri) {
   const token = getAccessToken();
   const headers = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  return fetchRetry429(`/store?graph=${encodeURIComponent(graphIri)}`, { method: 'DELETE', headers }).then(async (res) => {
+  return fetchRetry429(withBase(`/store?graph=${encodeURIComponent(graphIri)}`), { method: 'DELETE', headers }).then(async (res) => {
     if (!res.ok) throw new Error(await res.text());
     return true;
   });
@@ -1257,7 +1261,7 @@ export async function uploadToGraph(graphIri, body, contentType, replace = false
   const headers = { 'Content-Type': contentType };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const method = replace ? 'PUT' : 'POST';
-  const url = `/store?graph=${encodeURIComponent(graphIri)}`;
+  const url = withBase(`/store?graph=${encodeURIComponent(graphIri)}`);
   let res = await fetch(url, { method, headers, body });
   for (let attempt = 0; attempt < 3 && res.status === 429; attempt++) {
     await sleep(backoffDelayMs(res, attempt));
@@ -1348,7 +1352,7 @@ export function exportGraph(graphIri) {
   const token = getAccessToken();
   const headers = { 'Accept': 'text/turtle' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  return fetchRetry429(`/store?graph=${encodeURIComponent(graphIri)}`, { method: 'GET', headers }).then(async (res) => {
+  return fetchRetry429(withBase(`/store?graph=${encodeURIComponent(graphIri)}`), { method: 'GET', headers }).then(async (res) => {
     if (!res.ok) throw new Error(await res.text());
     return res.text();
   });
@@ -1363,11 +1367,11 @@ export async function sparqlUpdate(update) {
     return h;
   }
   // A 429 rejection happens before the update executes, so retrying is safe.
-  let res = await fetchRetry429('/sparql', { method: 'POST', headers: buildHeaders(), body: update });
+  let res = await fetchRetry429(withBase('/sparql'), { method: 'POST', headers: buildHeaders(), body: update });
   if (res.status === 401 && getRefreshToken()) {
     const refreshed = await tryRefreshToken();
     if (refreshed) {
-      res = await fetchRetry429('/sparql', { method: 'POST', headers: buildHeaders(), body: update });
+      res = await fetchRetry429(withBase('/sparql'), { method: 'POST', headers: buildHeaders(), body: update });
     } else {
       clearTokens();
       window.dispatchEvent(new CustomEvent('auth-expired'));
@@ -1394,7 +1398,7 @@ async function uploadImage(path, file) {
   formData.append('file', file);
   const headers = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(`${API_BASE}${path}`, { method: 'PUT', headers, body: formData });
+  const res = await fetch(withBase(path), { method: 'PUT', headers, body: formData });
   if (!res.ok) {
     const msg = await extractErrorMessage(res);
     const err = new ApiError(msg);
@@ -1443,7 +1447,7 @@ export function uploadAsset(datasetId, file, onProgress, folder = '') {
   formData.append('file', file);
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', `/api/datasets/${datasetId}/assets`);
+    xhr.open('POST', withBase(`/api/datasets/${datasetId}/assets`));
     if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
     if (onProgress) {
       xhr.upload.addEventListener('progress', (e) => {
@@ -1514,7 +1518,7 @@ export function fetchAssetContent(datasetId, assetId) {
   const token = getAccessToken();
   const headers = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  return fetch(`/api/datasets/${datasetId}/assets/${assetId}`, { headers });
+  return fetch(`${API_BASE}/api/datasets/${datasetId}/assets/${assetId}`, { headers });
 }
 
 // Auth state
@@ -1677,7 +1681,7 @@ export function uploadDataModelVersion(id, file, versionOverride, notes, merge, 
   if (notes) form.append('notes', notes);
   if (merge) form.append('merge', 'true');
   form.append('is_public', isPublic ? 'true' : 'false');
-  return fetch(`/api/models/${id}/versions`, { method: 'POST', headers, body: form })
+  return fetch(`${API_BASE}/api/models/${id}/versions`, { method: 'POST', headers, body: form })
     .then(async (res) => {
       if (!res.ok) {
         const msg = await res.text().then(t => {
@@ -1692,7 +1696,7 @@ export function uploadDataModelVersion(id, file, versionOverride, notes, merge, 
 }
 
 export function getDataModelVersionDataUrl(id, ver, format, graph) {
-  let url = `/api/models/${id}/versions/${ver}/data?format=${format || 'trig'}`;
+  let url = withBase(`/api/models/${id}/versions/${ver}/data?format=${format || 'trig'}`);
   if (graph) url += `&graph=${encodeURIComponent(graph)}`;
   return url;
 }

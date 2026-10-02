@@ -10,6 +10,7 @@ import { initIriDisplay } from './lib/iriDisplay';
 import { initServiceRegistry } from './lib/serviceRegistry.js';
 import { loadRuntimeConfig } from './lib/runtimeConfig.js';
 import { logBanner } from './lib/banner.js';
+import { isEmbedPath } from './lib/basePath';
 
 // Greet the console with the brand mark + wordmark.
 logBanner();
@@ -43,7 +44,8 @@ let app: ReturnType<typeof mount>;
 
 // /embed/* mounts a chrome-less single-viewer app for iframing by external
 // sites (see EmbedApp.svelte + docs/embedding.md) — no nav, auth or polling.
-const isEmbed = /^\/embed(\/|$)/.test(window.location.pathname);
+// Matched on the app path, so `/ots/embed/…` counts under a sub-path deploy.
+const isEmbed = isEmbedPath(window.location.pathname);
 
 waitLocale().then(async () => {
   const Root = isEmbed ? (await import('./EmbedApp.svelte')).default : App;

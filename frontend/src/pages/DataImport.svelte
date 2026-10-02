@@ -1,4 +1,5 @@
 <script>
+  import { withBase } from '../lib/basePath';
   import { onMount } from 'svelte';
   import { t as i18nT } from 'svelte-i18n';
   import { Link } from '../lib/router/index.js';
@@ -2727,11 +2728,11 @@ INTO GRAPH <http://example.org/import/loaded>`,
                       {$i18nT('pages.import.viewDataset')}
                     </Link>
                   {/if}
-                  <a href="/browse?graph={encodeURIComponent(importResult.graphIri)}" class="btn btn-sm btn-ghost">
+                  <a href={withBase(`/browse?graph=${encodeURIComponent(importResult.graphIri)}`)} class="btn btn-sm btn-ghost">
                     <BarChart3 size={14} />
                     {$i18nT('pages.import.browseGraph')}
                   </a>
-                  <a href="/browse?view=graph&subject={encodeURIComponent(importResult.graphIri)}" class="btn btn-sm btn-ghost">
+                  <a href={withBase(`/browse?view=graph&subject=${encodeURIComponent(importResult.graphIri)}`)} class="btn btn-sm btn-ghost">
                     <ExternalLink size={14} />
                     {$i18nT('pages.import.visualize')}
                   </a>

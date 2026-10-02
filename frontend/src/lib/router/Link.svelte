@@ -1,5 +1,6 @@
 <script lang="ts">
   import { navigate } from '../locationStore.js';
+  import { withBase } from '../basePath';
 
   export let to: string;
   export let replace: boolean = false;
@@ -12,4 +13,6 @@
   }
 </script>
 
-<a href={to} on:click={handleClick} {...$$restProps}><slot /></a>
+<!-- `to` is an app path; the rendered href carries the deployment base so a
+     new-tab / copy-link / no-JS visit lands on the same page. -->
+<a href={withBase(to)} on:click={handleClick} {...$$restProps}><slot /></a>

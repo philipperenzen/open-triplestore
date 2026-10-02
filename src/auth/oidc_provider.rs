@@ -447,7 +447,10 @@ pub async fn end_session(
         None => format!("{base}/login"),
     };
 
-    let mut out = super::handlers::clear_auth_cookie_headers(cookie_config.secure);
+    let mut out = super::handlers::clear_auth_cookie_headers(
+        cookie_config.secure,
+        &super::handlers::forwarded_prefix(&headers),
+    );
     match axum::http::HeaderValue::from_str(&location) {
         Ok(v) => {
             out.insert(LOCATION, v);
