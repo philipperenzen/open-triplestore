@@ -1882,6 +1882,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(oauth_handlers::oidc_callback),
         )
         .route(
+            "/api/auth/saml/:slug/login",
+            get(oauth_handlers::saml_login),
+        )
+        .route(
             "/api/auth/saml/:slug/metadata",
             get(oauth_handlers::saml_metadata),
         )

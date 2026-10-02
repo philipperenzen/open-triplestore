@@ -20,7 +20,7 @@ matter what the docs say about its knobs.
 | `backup-encrypt` | age-encrypted backups (`BACKUP_ENCRYPT`) | yes | GitHub, GitLab |
 | `alerting` | Ops alert dispatch (`ALERT_*`) | yes | GitHub, GitLab |
 | `asset-pdf`, `asset-exif`, `asset-media`, `asset-archive`, `asset-spreadsheet`, `asset-thumbnail`, `asset-clamav` | Asset metadata extraction, thumbnails, ClamAV scanning | yes | GitHub, GitLab |
-| `saml` | SAML 2.0 SSO — **experimental**, known non-working ACS path ([auth](auth.md)) | **no** | GitHub (explicit `saml` in the feature list), GitLab |
+| `saml` | SAML 2.0 SSO, SP-initiated — **experimental**, not yet verified against a real IdP ([auth](auth.md#saml-20)) | **no** | GitHub (explicit `saml` in the feature list), GitLab |
 | `plugin-hello`, `plugin-accounts-dashboard` | Example / accounts-dashboard plugins mounted at `/ext` | **no** | GitHub, GitLab |
 | `test-utils` | Test-only helpers | no | GitHub, GitLab (tests) |
 

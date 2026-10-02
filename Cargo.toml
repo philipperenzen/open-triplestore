@@ -71,12 +71,10 @@ geometry3d      = ["dep:parry3d-f64"]
 ## .gitlab-ci.yml).
 sfcgal3d        = ["geometry3d", "dep:sfcgal"]
 ## SAML 2.0 SSO support (requires libxml2 + openssl via samael's xmlsec feature).
-## EXPERIMENTAL and deliberately NOT in `full`: the ACS handler has never been
-## verified against a real IdP and has a known request-ID validation defect
-## (`parse_base64_response` is handed a confirmation-method URN where samael
-## expects request IDs, with IdP-initiated responses disallowed), so no login
-## can currently succeed. Kept compiling — CI enables it explicitly — for
-## whoever picks it up; see docs/auth.md.
+## EXPERIMENTAL and deliberately NOT in `full`: the SP-initiated flow (login
+## route → AuthnRequest → ACS bound to that request) is covered by tests against
+## a simulated IdP (tests/security_federated.rs) but has not been verified
+## against a real one. CI enables it explicitly; see docs/auth.md.
 saml            = ["dep:samael", "samael/xmlsec"]
 ## Test helpers (AppState::test_default_with_store etc.)
 test-utils      = []

@@ -12,7 +12,10 @@ use super::audit::{self, AuditEventBuilder, AuditEventType, AuditOutcome};
 use super::middleware::AuthenticatedUser;
 use super::models::OauthProviderCreate;
 use super::oauth::{begin_oidc_flow, complete_oidc_flow, OAuthSessions};
-use super::saml::{complete_saml_flow, generate_sp_metadata};
+use super::saml::{
+    acs_url, begin_saml_flow, complete_saml_flow, generate_sp_metadata, sp_entity_id,
+    take_pending_request,
+};
 use super::secret::store_configured_secret;
 use crate::server::AppState;
 
@@ -379,13 +382,7 @@ pub async fn oidc_callback(
         Ok((access, refresh)) => {
             audit_sso_login_success(&state, &headers, "oidc", &slug, &access);
             // M-3: redirect to the SPA with tokens in the URL fragment (never server-logged).
-            // The frontend OAuthCallback.svelte reads them from window.location.hash and
-            // immediately calls history.replaceState to remove them from the URL bar.
-            let redirect_url = format!(
-                "{}/#access_token={}&refresh_token={}",
-                state.base_url, access, refresh
-            );
-            axum::response::Redirect::to(&redirect_url).into_response()
+            Redirect::to(&sso_landing_url(&state.base_url, &access, &refresh)).into_response()
         }
         Err(e) => {
             tracing::error!("OIDC callback error for '{}': {e}", slug);
@@ -395,7 +392,85 @@ pub async fn oidc_callback(
     }
 }
 
+/// Where a completed SSO sign-in sends the browser: the SPA's
+/// `/oauth/callback` page (`OAuthCallback.svelte`), which reads the tokens from
+/// the fragment and immediately removes them from the URL bar. A fragment is
+/// never sent to a server, so the tokens stay out of access logs and `Referer`.
+fn sso_landing_url(base_url: &str, access: &str, refresh: &str) -> String {
+    format!(
+        "{}/oauth/callback#access_token={access}&refresh_token={refresh}",
+        base_url.trim_end_matches('/')
+    )
+}
+
 // ─── SAML flow ────────────────────────────────────────────────────────────────
+
+/// Cookie binding an SP-initiated SAML sign-in to the browser that started it.
+const SAML_STATE_COOKIE: &str = "saml_state";
+
+/// The `saml_state` cookie. The IdP returns the browser to the ACS with a
+/// cross-site POST, which a `SameSite=Lax` cookie does not accompany, so over
+/// HTTPS it is `SameSite=None; Secure`. Without secure cookies (local dev) it
+/// stays `Lax`, which still works when the IdP is same-site (e.g. `localhost`).
+fn saml_state_cookie(value: &str, max_age: u32, secure: bool) -> String {
+    let same_site = if secure { "None; Secure" } else { "Lax" };
+    format!(
+        "{SAML_STATE_COOKIE}={value}; HttpOnly; SameSite={same_site}; Path=/api/auth/saml; \
+         Max-Age={max_age}"
+    )
+}
+
+fn cookie_value(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|c| c.split(';'))
+        .find_map(|p| {
+            p.trim()
+                .strip_prefix(name)
+                .and_then(|r| r.strip_prefix('='))
+                .map(str::to_string)
+        })
+}
+
+/// GET /api/auth/saml/:slug/login — start an SP-initiated SAML sign-in.
+/// Redirects to the IdP's SSO URL with an AuthnRequest and binds the flow to
+/// this browser with the `saml_state` cookie.
+pub async fn saml_login(State(state): State<AppState>, Path(slug): Path<String>) -> Response {
+    let provider = match state.auth_db.get_oauth_provider_by_slug(&slug) {
+        Ok(Some(p)) if p.provider_type == "saml" && p.offers_login() => p,
+        Ok(_) => {
+            return (StatusCode::NOT_FOUND, "{\"error\":\"Provider not found\"}").into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{{\"error\":\"{e}\"}}"),
+            )
+                .into_response()
+        }
+    };
+
+    match begin_saml_flow(&provider, &state.base_url) {
+        Ok((url, relay_state)) => (
+            [(
+                header::SET_COOKIE,
+                saml_state_cookie(&relay_state, 600, state.secure_cookies),
+            )],
+            Redirect::temporary(&url),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("SAML login error for '{}': {e}", slug);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"Could not start the SAML sign-in\"}",
+            )
+                .into_response()
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct SamlAcsForm {
@@ -421,8 +496,11 @@ pub async fn saml_metadata(State(state): State<AppState>, Path(slug): Path<Strin
         }
     };
 
-    let acs_url = format!("{}/api/auth/saml/{}/acs", state.base_url, slug);
-    match generate_sp_metadata(&provider, &acs_url) {
+    match generate_sp_metadata(
+        &provider,
+        &sp_entity_id(&state.base_url, &slug),
+        &acs_url(&state.base_url, &slug),
+    ) {
         Ok(xml) => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "application/samlmetadata+xml")],
@@ -460,12 +538,37 @@ pub async fn saml_acs(
         }
     };
 
-    let acs_url = format!("{}/api/auth/saml/{}/acs", state.base_url, slug);
+    // Login-CSRF defence: the RelayState must be the one this browser was given
+    // when it started the sign-in (see saml_login). Otherwise an attacker could
+    // deliver their own signed response to a victim's browser and sign the
+    // victim in as the attacker.
+    let relay_state = form.relay_state.as_deref().unwrap_or_default();
+    if relay_state.is_empty()
+        || cookie_value(&headers, SAML_STATE_COOKIE).as_deref() != Some(relay_state)
+    {
+        audit_sso_login_failure(&state, &headers, "saml", &slug, "invalid_state_binding");
+        return (
+            StatusCode::BAD_REQUEST,
+            "{\"error\":\"Invalid or missing state binding\"}",
+        )
+            .into_response();
+    }
+    // The AuthnRequest this response must answer. Consumed here, so a response
+    // can be presented once; IdP-initiated responses have no request to answer.
+    let Some(request_id) = take_pending_request(relay_state, &slug) else {
+        audit_sso_login_failure(&state, &headers, "saml", &slug, "unknown_request");
+        return (
+            StatusCode::BAD_REQUEST,
+            "{\"error\":\"Unknown or expired sign-in request\"}",
+        )
+            .into_response();
+    };
 
     match complete_saml_flow(
         &form.saml_response,
+        &request_id,
         &provider,
-        &acs_url,
+        &state.base_url,
         &state.auth_db,
         &state.jwt_config,
     )
@@ -473,13 +576,14 @@ pub async fn saml_acs(
     {
         Ok((access, refresh)) => {
             audit_sso_login_success(&state, &headers, "saml", &slug, &access);
-            Json(serde_json::json!({
-                "access_token": access,
-                "refresh_token": refresh,
-                "token_type": "Bearer",
-                "relay_state": form.relay_state,
-            }))
-            .into_response()
+            (
+                [(
+                    header::SET_COOKIE,
+                    saml_state_cookie("", 0, state.secure_cookies),
+                )],
+                Redirect::to(&sso_landing_url(&state.base_url, &access, &refresh)),
+            )
+                .into_response()
         }
         Err(e) => {
             tracing::error!("SAML ACS error for '{}': {e}", slug);

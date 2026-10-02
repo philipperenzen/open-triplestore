@@ -15,6 +15,9 @@
 //!    synthetic `env-oidc` row that `OIDC_ISSUER` creates (no client_id) stays
 //!    off it, through admin edits, while bearer tokens from that IdP keep
 //!    verifying and JIT-provisioning against the row.
+//!  * SP-initiated SAML (`saml` feature): the login route sends an AuthnRequest
+//!    to the IdP, and the ACS accepts only a signed response that answers that
+//!    request, presented once, from the browser that started it.
 
 mod common;
 use common::*;
@@ -238,14 +241,20 @@ async fn authorize_status(app: &axum::Router, slug: &str) -> StatusCode {
 /// An OIDC row without a client_id cannot start a browser login (the flow bails
 /// on the missing client_id), so the login page must not render it as a button:
 /// that covers the synthetic `env-oidc` row `OIDC_ISSUER` creates and an OIDC
-/// row an admin saved without one. SAML rows carry no client_id by design and
-/// stay listed.
+/// row an admin saved without one. SAML rows carry no client_id by design; one
+/// with an SSO URL is listed when the build supports SAML.
 #[tokio::test]
 async fn providers_without_a_client_id_are_not_offered_on_the_login_page() {
     let state = test_state();
     let db = &state.auth_db;
     make_oidc_provider(db, "acme", true);
-    db.create_oauth_provider(&provider_row("corp-saml", "saml", None))
+    db.create_oauth_provider(&OauthProviderCreate {
+        sso_url: Some("https://idp.example.com/saml/sso".to_string()),
+        ..provider_row("corp-saml", "saml", None)
+    })
+    .unwrap();
+    // Nowhere to send an AuthnRequest.
+    db.create_oauth_provider(&provider_row("no-sso-url", "saml", None))
         .unwrap();
     db.create_oauth_provider(&provider_row("no-client", "oidc", None))
         .unwrap();
@@ -254,7 +263,12 @@ async fn providers_without_a_client_id_are_not_offered_on_the_login_page() {
     ensure_env_provider(db, "https://idp.example.org", "user").unwrap();
     let app = test_app(state);
 
-    assert_eq!(login_page_slugs(&app).await, ["acme", "corp-saml"]);
+    let expected: &[&str] = if cfg!(feature = "saml") {
+        &["acme", "corp-saml"]
+    } else {
+        &["acme"]
+    };
+    assert_eq!(login_page_slugs(&app).await, expected);
     // Hitting the authorize URL directly finds no login to start either.
     for slug in [ENV_OIDC_PROVIDER_SLUG, "no-client", "blank-client"] {
         assert_eq!(
@@ -371,4 +385,270 @@ async fn edited_env_oidc_row_stays_off_the_login_page_and_keeps_serving_bearer_t
     let row = ensure_env_provider(&rs.auth_db, &issuer, "user").unwrap();
     assert_eq!(row.id, env.id);
     assert_eq!(row.name, "Company IdP");
+}
+
+// ─── SP-initiated SAML ────────────────────────────────────────────────────────
+
+#[cfg(feature = "saml")]
+mod saml_sp_initiated {
+    use super::*;
+    use base64::Engine as _;
+    use samael::crypto::{CertificateDer, Crypto, CryptoProvider};
+    use samael::idp::response_builder::{build_response_template, ResponseAttribute};
+    use samael::idp::sp_extractor::RequiredAttribute;
+    use samael::idp::{CertificateParams, IdentityProvider, KeyType, Rsa};
+    use samael::traits::ToXml;
+    use std::io::Read as _;
+
+    const IDP_ENTITY: &str = "https://idp.example.org/saml";
+    const IDP_SSO: &str = "https://idp.example.org/saml/sso";
+    const SLUG: &str = "corp";
+    const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+
+    /// An IdP with its own signing key, standing in for the real one.
+    struct TestIdp {
+        key: IdentityProvider,
+        cert: CertificateDer,
+    }
+
+    impl TestIdp {
+        fn new() -> Self {
+            let key = IdentityProvider::generate_new(KeyType::Rsa(Rsa::Rsa2048)).unwrap();
+            let cert = key
+                .create_certificate(&CertificateParams {
+                    common_name: "idp.example.org",
+                    issuer_name: "idp.example.org",
+                    days_until_expiration: 30,
+                })
+                .unwrap();
+            Self { key, cert }
+        }
+
+        /// A signed, base64-encoded response for `name_id` (with an `email`
+        /// attribute) answering the AuthnRequest `in_response_to`.
+        fn response(&self, base_url: &str, in_response_to: &str, name_id: &str) -> String {
+            let audience = format!("{base_url}/api/auth/saml/{SLUG}/metadata");
+            let acs = format!("{base_url}/api/auth/saml/{SLUG}/acs");
+            let email = format!("{name_id}@example.org");
+            let attributes = [ResponseAttribute {
+                required_attribute: RequiredAttribute {
+                    name: "email".to_string(),
+                    format: None,
+                },
+                value: &email,
+            }];
+            let mut response = build_response_template(
+                &self.cert,
+                name_id,
+                &audience,
+                IDP_ENTITY,
+                &acs,
+                in_response_to,
+                &attributes,
+            );
+            // samael's template leaves the bearer confirmation without
+            // NotOnOrAfter, which a real IdP sets and the SP side requires.
+            let confirmation = &mut response
+                .assertion
+                .as_mut()
+                .unwrap()
+                .subject
+                .as_mut()
+                .unwrap()
+                .subject_confirmations
+                .as_mut()
+                .unwrap()[0];
+            confirmation
+                .subject_confirmation_data
+                .as_mut()
+                .unwrap()
+                .not_on_or_after = Some(chrono::Utc::now() + chrono::Duration::minutes(5));
+            let xml = response.to_string().unwrap();
+            let signed =
+                Crypto::sign_xml(&xml, &self.key.export_private_key_der().unwrap()).unwrap();
+            B64.encode(signed)
+        }
+    }
+
+    /// A store with one SAML provider trusting `idp`; returns the app and its
+    /// base URL.
+    fn store_trusting(idp: &TestIdp) -> (axum::Router, String) {
+        let state = test_state();
+        state
+            .auth_db
+            .create_oauth_provider(&OauthProviderCreate {
+                entity_id: Some(IDP_ENTITY.to_string()),
+                sso_url: Some(IDP_SSO.to_string()),
+                idp_certificate: Some(B64.encode(idp.cert.der_data())),
+                discovery_url: None,
+                ..provider_row(SLUG, "saml", None)
+            })
+            .unwrap();
+        let base_url = state.base_url.to_string();
+        (test_app(state), base_url)
+    }
+
+    /// Start a sign-in the way the login button does. Returns the RelayState
+    /// (also set as the `saml_state` cookie) and the AuthnRequest's ID.
+    async fn start(app: &axum::Router, base_url: &str) -> (String, String) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/auth/saml/{SLUG}/login"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+        let cookie = resp.headers()[header::SET_COOKIE].to_str().unwrap();
+        let cookie_relay = cookie
+            .strip_prefix("saml_state=")
+            .and_then(|c| c.split(';').next())
+            .unwrap()
+            .to_string();
+        let location = url::Url::parse(resp.headers()[header::LOCATION].to_str().unwrap()).unwrap();
+        assert!(location.as_str().starts_with(IDP_SSO), "{location}");
+        let query: std::collections::HashMap<_, _> = location.query_pairs().into_owned().collect();
+        assert_eq!(query["RelayState"], cookie_relay);
+
+        // HTTP-Redirect binding: base64 of a raw-DEFLATEd AuthnRequest.
+        let mut request = String::new();
+        flate2::read::DeflateDecoder::new(B64.decode(&query["SAMLRequest"]).unwrap().as_slice())
+            .read_to_string(&mut request)
+            .unwrap();
+        assert!(request.contains(&format!("{base_url}/api/auth/saml/{SLUG}/acs")));
+        assert!(request.contains(&format!("{base_url}/api/auth/saml/{SLUG}/metadata")));
+        let id = request
+            .split(" ID=\"")
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .unwrap()
+            .to_string();
+        (cookie_relay, id)
+    }
+
+    async fn post_acs(
+        app: &axum::Router,
+        saml_response: &str,
+        relay_state: &str,
+        cookie: Option<&str>,
+    ) -> axum::response::Response {
+        let body = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("SAMLResponse", saml_response)
+            .append_pair("RelayState", relay_state)
+            .finish();
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/auth/saml/{SLUG}/acs"))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+        if let Some(c) = cookie {
+            req = req.header(header::COOKIE, format!("saml_state={c}"));
+        }
+        app.clone()
+            .oneshot(req.body(Body::from(body)).unwrap())
+            .await
+            .unwrap()
+    }
+
+    /// The whole browser round trip: login button → IdP → ACS → the SPA's
+    /// callback page, signed in as the asserted user. The response cannot be
+    /// presented a second time.
+    #[tokio::test]
+    async fn sp_initiated_sign_in_lands_on_the_callback_page_signed_in() {
+        let idp = TestIdp::new();
+        let (app, base_url) = store_trusting(&idp);
+
+        let (relay, request_id) = start(&app, &base_url).await;
+        let response = idp.response(&base_url, &request_id, "alice");
+        let resp = post_acs(&app, &response, &relay, Some(&relay)).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let location = resp.headers()[header::LOCATION].to_str().unwrap();
+        let fragment = location
+            .strip_prefix(&format!("{base_url}/oauth/callback#"))
+            .unwrap_or_else(|| panic!("unexpected landing {location}"));
+        let tokens: std::collections::HashMap<_, _> =
+            url::form_urlencoded::parse(fragment.as_bytes())
+                .into_owned()
+                .collect();
+        let cleared = resp.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(cleared.starts_with("saml_state=;") && cleared.contains("Max-Age=0"));
+
+        let me = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/me")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", tokens["access_token"]),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(me.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(me.into_body()).await["email"],
+            "alice@example.org"
+        );
+
+        // Replay: the request it answered has been used up.
+        let resp = post_acs(&app, &response, &relay, Some(&relay)).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// The ACS refuses a response that is not bound to a request this browser
+    /// started: missing or foreign `saml_state` cookie (login CSRF), an
+    /// unknown RelayState (IdP-initiated or forged), a response answering a
+    /// different request, and a response signed by a key the provider does not
+    /// trust. Each case gets its own store: the SSO routes allow a burst of 8
+    /// requests per client.
+    #[tokio::test]
+    async fn acs_refuses_responses_not_bound_to_this_browsers_request() {
+        let idp = TestIdp::new();
+
+        let (app, base_url) = store_trusting(&idp);
+        let (relay, request_id) = start(&app, &base_url).await;
+        let good = idp.response(&base_url, &request_id, "alice");
+        // No cookie, or another browser's cookie.
+        assert_eq!(
+            post_acs(&app, &good, &relay, None).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        let (other_relay, _) = start(&app, &base_url).await;
+        assert_eq!(
+            post_acs(&app, &good, &relay, Some(&other_relay))
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        // A RelayState this store never issued.
+        assert_eq!(
+            post_acs(&app, &good, "made-up", Some("made-up"))
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        // A validly signed response to some other request.
+        let (app, base_url) = store_trusting(&idp);
+        let (relay, _) = start(&app, &base_url).await;
+        let other = idp.response(&base_url, "_another-request", "alice");
+        assert_eq!(
+            post_acs(&app, &other, &relay, Some(&relay)).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // The right request, signed by an IdP key the provider does not trust.
+        let (app, base_url) = store_trusting(&idp);
+        let (relay, request_id) = start(&app, &base_url).await;
+        let forged = TestIdp::new().response(&base_url, &request_id, "alice");
+        assert_eq!(
+            post_acs(&app, &forged, &relay, Some(&relay)).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
 }

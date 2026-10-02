@@ -129,11 +129,11 @@ The relay listens only on the compose network (no host port is published, so it 
 ## SSO provider setup (OIDC / SAML)
 
 > **SAML is experimental and not in the default build.** The `saml` feature is
-> excluded from `full` (and therefore from the published image): the ACS handler
-> has never been verified against a real identity provider and carries a known
-> request-ID validation defect, so at present no SAML login can succeed. The
-> provider type is still listed in the admin UI, marked experimental, for builds
-> that enable the feature. Use OIDC, which is complete and tested.
+> excluded from `full` (and therefore from the published image) because the
+> flow has been tested only against a simulated identity provider, not a real
+> one. Builds that enable it support SP-initiated sign-in (see
+> [SAML 2.0](#saml-20) below). The provider type is listed in the admin UI,
+> marked experimental. Prefer OIDC where the IdP offers it.
 
 
 Providers are configured by admins under **Security & Access Control → Identity providers**. Any standards-compliant OIDC or SAML 2.0 IdP works; the callback/redirect URL to register at the IdP is always:
@@ -162,7 +162,54 @@ Sign in with Apple is **not yet supported** by the generic OIDC integration: App
 
 ### Other IdPs (Keycloak, Auth0, Okta, …)
 
-Any IdP exposing a `.well-known/openid-configuration` works with the generic OIDC type; enterprise IdPs can also connect via SAML 2.0 (upload the IdP certificate, set the SSO URL, and exchange SP metadata from `/api/auth/saml/<slug>/metadata`).
+Any IdP exposing a `.well-known/openid-configuration` works with the generic OIDC type; enterprise IdPs can also connect via SAML 2.0 (see below).
+
+### SAML 2.0
+
+Requires a build with the `saml` feature. Add a provider with type **SAML** and
+these values from the IdP's metadata:
+
+- **Entity ID**: the IdP's entity ID. Responses must carry it as `Issuer`.
+- **SSO URL**: the IdP's single sign-on endpoint for the HTTP-Redirect binding
+  (`https`, or `http` on loopback only).
+- **IdP certificate**: the IdP's signing certificate, PEM or bare base64.
+
+Register the store at the IdP as a service provider:
+
+```
+Entity ID:  https://<your-host>/api/auth/saml/<slug>/metadata
+ACS URL:    https://<your-host>/api/auth/saml/<slug>/acs   (HTTP-POST binding)
+```
+
+The metadata URL also serves the SP metadata XML, for IdPs that import it.
+
+Sign-in is **SP-initiated only**. The login page button sends the browser to
+`/api/auth/saml/<slug>/login`, which redirects to the IdP with an AuthnRequest
+and binds the attempt to the browser with a short-lived `saml_state` cookie.
+The ACS accepts a response only if it comes back within 10 minutes, from the
+same browser, answers that AuthnRequest (`InResponseTo`) and is signed with
+the configured certificate, and only once. A response started at the IdP
+(for example from its app portal) is refused. The browser then lands on
+`/oauth/callback`, signed in.
+
+IdP settings that matter:
+
+- The store sends **unsigned** AuthnRequests. Turn off "require signed
+  requests" for this client (in Keycloak: *Client signature required*).
+- Sign the response or the assertion, and give the bearer subject
+  confirmation a `NotOnOrAfter`.
+- Send the email as `email`, `mail` or the `…/claims/emailaddress` attribute,
+  the display name as `displayName`, `cn` or `…/claims/name`, and groups as
+  `groups`, `memberOf` or `…/claims/groups` (for the role claim map).
+- The IdP returns the browser with a cross-site POST, so the `saml_state`
+  cookie is sent as `SameSite=None; Secure`. That needs HTTPS with
+  `SECURE_COOKIES=true`. Without it the cookie is `SameSite=Lax`, which only
+  works when the IdP is on the same site (for example a local test IdP on
+  `localhost`).
+
+SAML has no standard `email_verified` assertion, so a SAML sign-in never links
+to an existing local account by email. A new subject gets a new account (with
+auto-provisioning on).
 
 ## OIDC resource-server mode (IdP access tokens)
 
