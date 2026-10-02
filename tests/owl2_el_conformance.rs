@@ -2,9 +2,15 @@
 //!
 //! Tests the EL++ completion rules CR1–CR10, hasKey, and reflexivity,
 //! verifying that the `El2Classifier` produces correct classifications.
+//!
+//! The tests near the end run *scoped* (`with_sources`, as a dataset run
+//! does): an unscoped run reads the unnamed default graph only, so a rule
+//! whose premise was itself derived into the target graph does not fire
+//! there yet.
 
 #![cfg(feature = "owl2-el")]
 
+use open_triplestore::reasoning::common::{ReasoningError, ReasoningReport};
 use open_triplestore::reasoning::owl2_el::El2Classifier;
 use open_triplestore::store::TripleStore;
 use oxigraph::io::RdfFormat;
@@ -305,4 +311,290 @@ fn count_tg(s: &TripleStore) -> usize {
             .unwrap_or(0),
         _ => 0,
     }
+}
+
+// ─── Scoped runs: soundness, equivalence, roles, keys, consistency ────────────
+
+const DATA: &str = "urn:test:el-data";
+
+/// A store with `ttl` in the named graph [`DATA`].
+fn scoped_store(ttl: &str) -> TripleStore {
+    let store = TripleStore::in_memory().unwrap();
+    let preamble = "@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n\
+                    @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+                    @prefix owl:  <http://www.w3.org/2002/07/owl#> .\n\
+                    @prefix ex:   <http://example.org/> .\n";
+    store
+        .load_str(&format!("{preamble}{ttl}"), RdfFormat::Turtle, Some(DATA))
+        .unwrap();
+    store
+}
+
+fn classify_scoped(store: &TripleStore) -> Result<ReasoningReport, ReasoningError> {
+    El2Classifier::new(store)
+        .with_sources(vec![DATA.to_string()])
+        .classify()
+}
+
+fn ask(store: &TripleStore, q: &str) -> bool {
+    match store.query(q).unwrap() {
+        oxigraph::sparql::QueryResults::Boolean(b) => b,
+        _ => panic!("expected ASK result"),
+    }
+}
+
+fn ex(local: &str) -> String {
+    format!("<http://example.org/{local}>")
+}
+
+/// The old CR3 turned `A ⊑ ∃p.B` and `B ⊑ C` into `∃p.C ⊑ A`, which does not
+/// follow; the ABox existential rule then typed any `x p y, y a C` as an `A`.
+/// What does follow is the other direction, `A ⊑ ∃p.C`.
+#[test]
+fn test_cr3_soundness_regression() {
+    let ttl = "ex:A rdfs:subClassOf [ owl:onProperty ex:p ; owl:someValuesFrom ex:B ] . \
+               ex:B rdfs:subClassOf ex:C . \
+               ex:D rdfs:subClassOf [ owl:onProperty ex:p ; owl:someValuesFrom ex:C ] . \
+               ex:x ex:p ex:y . ex:y rdf:type ex:C .";
+    let s = scoped_store(ttl);
+    classify_scoped(&s).unwrap();
+    assert!(
+        !ask_tg(&s, &format!("{} rdf:type {} .", ex("x"), ex("A"))),
+        "x p y, y a C does not make x an A"
+    );
+    assert!(
+        !ask_tg(&s, &format!("?r rdfs:subClassOf {} .", ex("A"))),
+        "nothing is entailed to be under A (∃p.C ⊑ A does not follow)"
+    );
+    assert!(
+        ask(
+            &s,
+            &format!(
+                "ASK {{ GRAPH <{TG}> {{ {} <http://www.w3.org/2000/01/rdf-schema#subClassOf> ?r }} \
+                 GRAPH ?g {{ ?r <http://www.w3.org/2002/07/owl#someValuesFrom> {} }} }}",
+                ex("A"),
+                ex("C")
+            )
+        ),
+        "A ⊑ ∃p.C is entailed"
+    );
+
+    // The unscoped run never writes the unsound axiom either.
+    let s = store_with(ttl);
+    classify(&s);
+    assert!(!ask_tg(&s, &format!("?r rdfs:subClassOf {} .", ex("A"))));
+}
+
+/// CR4 with filler subsumption: `A ⊑ ∃r.B`, `B ⊑ C`, `∃r.C ⊑ D` ⊨ `A ⊑ D`.
+#[test]
+fn test_cr4_filler_subsumption() {
+    let s = scoped_store(
+        "ex:A rdfs:subClassOf [ owl:onProperty ex:r ; owl:someValuesFrom ex:B ] . \
+         ex:B rdfs:subClassOf ex:C . \
+         [ owl:onProperty ex:r ; owl:someValuesFrom ex:C ] rdfs:subClassOf ex:D . \
+         ex:a rdf:type ex:A .",
+    );
+    classify_scoped(&s).unwrap();
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdfs:subClassOf {} .", ex("A"), ex("D"))
+    ));
+    assert!(ask_tg(&s, &format!("{} rdf:type {} .", ex("a"), ex("D"))));
+    assert!(
+        !ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("D"), ex("A"))),
+        "subsumption runs one way"
+    );
+}
+
+/// CR4 through the role hierarchy, and restrictions identified by structure:
+/// `A ⊑ ∃r.B`, `r ⊑ s`, and a *different* blank node `∃s.B ⊑ D` ⊨ `A ⊑ D`;
+/// `∃r.⊤ ⊑ E` (a `someValuesFrom owl:Thing`) ⊨ `A ⊑ E`.
+#[test]
+fn test_cr4_role_hierarchy_and_structural_identity() {
+    let s = scoped_store(
+        "ex:A rdfs:subClassOf [ owl:onProperty ex:r ; owl:someValuesFrom ex:B ] . \
+         ex:r rdfs:subPropertyOf ex:s . \
+         [ owl:onProperty ex:s ; owl:someValuesFrom ex:B ] rdfs:subClassOf ex:D . \
+         [ owl:onProperty ex:r ; owl:someValuesFrom owl:Thing ] rdfs:subClassOf ex:E . \
+         [ owl:onProperty ex:r ; owl:someValuesFrom ex:B ] rdfs:subClassOf ex:F .",
+    );
+    classify_scoped(&s).unwrap();
+    for sup in ["D", "E", "F"] {
+        assert!(
+            ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("A"), ex(sup))),
+            "A ⊑ {sup}"
+        );
+    }
+    // The hierarchy runs one way: ∃s.B is not under ∃r.B.
+    let s = scoped_store(
+        "ex:A rdfs:subClassOf [ owl:onProperty ex:s ; owl:someValuesFrom ex:B ] . \
+         ex:r rdfs:subPropertyOf ex:s . \
+         [ owl:onProperty ex:r ; owl:someValuesFrom ex:B ] rdfs:subClassOf ex:D .",
+    );
+    classify_scoped(&s).unwrap();
+    assert!(!ask_tg(
+        &s,
+        &format!("{} rdfs:subClassOf {} .", ex("A"), ex("D"))
+    ));
+}
+
+/// `owl:equivalentClass` holds in both directions, for a named class and for
+/// a definition (`D ≡ E ⊓ ∃p.C`, the usual shape of an EL definition).
+#[test]
+fn test_equivalent_class_both_directions() {
+    let s = scoped_store(
+        "ex:Faculty owl:equivalentClass ex:AcademicStaff . \
+         ex:alice rdf:type ex:Faculty . ex:bob rdf:type ex:AcademicStaff . \
+         ex:D owl:equivalentClass [ owl:intersectionOf ( ex:E \
+              [ owl:onProperty ex:p ; owl:someValuesFrom ex:C ] ) ] . \
+         ex:x rdf:type ex:E ; ex:p ex:y . ex:y rdf:type ex:C . \
+         ex:z rdf:type ex:D . \
+         ex:G rdfs:subClassOf ex:E , [ owl:onProperty ex:p ; owl:someValuesFrom ex:C ] .",
+    );
+    classify_scoped(&s).unwrap();
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdf:type {} .", ex("alice"), ex("AcademicStaff"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdf:type {} .", ex("bob"), ex("Faculty"))
+    ));
+    assert!(
+        ask_tg(&s, &format!("{} rdf:type {} .", ex("x"), ex("D"))),
+        "E ⊓ ∃p.C ⊑ D"
+    );
+    assert!(
+        ask_tg(&s, &format!("{} rdf:type {} .", ex("z"), ex("E"))),
+        "D ⊑ E"
+    );
+    assert!(
+        ask_tg(&s, &format!("{} rdfs:subClassOf {} .", ex("G"), ex("D"))),
+        "G ⊑ E ⊓ ∃p.C ⊑ D"
+    );
+}
+
+/// `rdfs:subPropertyOf` and `owl:equivalentProperty` in the ABox, with a
+/// domain on the super-property.
+#[test]
+fn test_subproperty_and_equivalent_property() {
+    let s = scoped_store(
+        "ex:fatherOf rdfs:subPropertyOf ex:parentOf . \
+         ex:parentOf owl:equivalentProperty ex:hasChild . \
+         ex:hasChild rdfs:domain ex:Parent . \
+         ex:bob ex:fatherOf ex:alice .",
+    );
+    classify_scoped(&s).unwrap();
+    for p in ["parentOf", "hasChild"] {
+        assert!(
+            ask_tg(&s, &format!("{} {} {} .", ex("bob"), ex(p), ex("alice"))),
+            "bob {p} alice"
+        );
+    }
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdfs:subPropertyOf {} .", ex("fatherOf"), ex("hasChild"))
+    ));
+    assert!(ask_tg(
+        &s,
+        &format!("{} rdf:type {} .", ex("bob"), ex("Parent"))
+    ));
+    assert!(!ask_tg(
+        &s,
+        &format!("{} {} {} .", ex("bob"), ex("fatherOf"), ex("carol"))
+    ));
+}
+
+/// `owl:TransitiveProperty` closes a chain of any length.
+#[test]
+fn test_transitive_property() {
+    let s = scoped_store(
+        "ex:partOf rdf:type owl:TransitiveProperty . \
+         ex:a ex:partOf ex:b . ex:b ex:partOf ex:c . ex:c ex:partOf ex:d . ex:d ex:partOf ex:e .",
+    );
+    classify_scoped(&s).unwrap();
+    for o in ["c", "d", "e"] {
+        assert!(
+            ask_tg(&s, &format!("{} {} {} .", ex("a"), ex("partOf"), ex(o))),
+            "a partOf {o}"
+        );
+    }
+    assert!(!ask_tg(
+        &s,
+        &format!("{} {} {} .", ex("e"), ex("partOf"), ex("a"))
+    ));
+}
+
+/// A composite key merges only individuals that share every key property.
+#[test]
+fn test_has_key_composite() {
+    let s = store_with(
+        "ex:Person owl:hasKey ( ex:country ex:ssn ) . \
+         ex:alice rdf:type ex:Person ; ex:country ex:NL ; ex:ssn ex:S1 . \
+         ex:bob   rdf:type ex:Person ; ex:country ex:NL ; ex:ssn ex:S1 . \
+         ex:carol rdf:type ex:Person ; ex:country ex:BE ; ex:ssn ex:S1 .",
+    );
+    classify(&s);
+    assert!(ask_tg(
+        &s,
+        &format!("{} owl:sameAs {} .", ex("alice"), ex("bob"))
+    ));
+    assert!(
+        !ask_tg(&s, &format!("{} owl:sameAs {} .", ex("alice"), ex("carol"))),
+        "carol shares only one of the two key properties"
+    );
+}
+
+/// An unsatisfiable class without instances is not an inconsistency — the
+/// old `check_consistency` said it was. Unsatisfiability also reaches a
+/// class through `∃p.⊥` and through two disjoint superclasses.
+#[test]
+fn test_unsatisfiable_class_is_consistent() {
+    let s = scoped_store(
+        "ex:A rdfs:subClassOf ex:B . ex:B rdfs:subClassOf owl:Nothing . \
+         ex:E rdfs:subClassOf [ owl:onProperty ex:p ; owl:someValuesFrom ex:B ] . \
+         ex:F rdfs:subClassOf ex:G , ex:H . ex:G owl:disjointWith ex:H . \
+         ex:x rdf:type ex:C .",
+    );
+    classify_scoped(&s).unwrap();
+    let c = El2Classifier::new(&s).with_sources(vec![DATA.to_string()]);
+    assert!(c.check_consistency().unwrap());
+    let unsat = c.unsatisfiable_classes().unwrap();
+    for cls in ["A", "B", "E", "F"] {
+        assert!(
+            unsat.contains(&format!("http://example.org/{cls}")),
+            "{cls} is unsatisfiable: {unsat:?}"
+        );
+    }
+    assert!(!unsat.contains(&"http://example.org/C".to_string()));
+}
+
+/// An individual of an unsatisfiable class, or of two disjoint classes,
+/// makes the ontology inconsistent, and `classify` says so.
+#[test]
+fn test_inconsistency_is_reported() {
+    let s = scoped_store(
+        "ex:A rdfs:subClassOf ex:B . ex:B rdfs:subClassOf owl:Nothing . \
+         ex:x rdf:type ex:A .",
+    );
+    assert!(matches!(
+        classify_scoped(&s),
+        Err(ReasoningError::Inconsistency(_))
+    ));
+
+    let s = scoped_store(
+        "ex:Cat owl:disjointWith ex:Dog . \
+         ex:Kitten rdfs:subClassOf ex:Cat . \
+         ex:rex rdf:type ex:Kitten , ex:Dog .",
+    );
+    assert!(matches!(
+        classify_scoped(&s),
+        Err(ReasoningError::Inconsistency(_))
+    ));
+
+    // With detection off the run completes, and the check reports it.
+    let mut c = El2Classifier::new(&s).with_sources(vec![DATA.to_string()]);
+    c.detect_inconsistency = false;
+    c.classify().unwrap();
+    assert!(!c.check_consistency().unwrap());
 }

@@ -679,78 +679,10 @@ impl<'a> Owl2RLReasoner<'a> {
         Ok(())
     }
 
-    /// `(class IRI, key property IRIs)` for every `owl:hasKey` list in scope,
-    /// read from the quad index (the scoped graphs, or the default graph when
-    /// unscoped) — the `rdf:rest*` walk is done here rather than as a SPARQL
-    /// property path. Blank-node class expressions are skipped; the order of
-    /// a key's properties does not matter.
+    /// `(class IRI, key property IRIs)` for every `owl:hasKey` list in scope;
+    /// see [`super::common::has_keys`].
     fn has_keys(&self) -> Result<Vec<(String, Vec<String>)>, ReasoningError> {
-        use oxigraph::model::{GraphNameRef, NamedNodeRef, NamedOrBlankNode, Term};
-        let graphs: Vec<Option<String>> = match self.scope() {
-            Some(scope) => scope.into_iter().map(Some).collect(),
-            None => vec![None],
-        };
-        let has_key = NamedNodeRef::new_unchecked(OWL_HAS_KEY);
-        let first = NamedNodeRef::new_unchecked(RDF_FIRST);
-        let rest = NamedNodeRef::new_unchecked(RDF_REST);
-        let mut keys: Vec<(String, Vec<String>)> = Vec::new();
-        for graph in graphs {
-            let graph_ref = match &graph {
-                Some(g) => match NamedNodeRef::new(g) {
-                    Ok(nn) => GraphNameRef::NamedNode(nn),
-                    Err(_) => continue,
-                },
-                None => GraphNameRef::DefaultGraph,
-            };
-            let object_of = |subject: &NamedOrBlankNode, pred: NamedNodeRef<'_>| {
-                self.store
-                    .store()
-                    .quads_for_pattern(Some(subject.as_ref()), Some(pred), None, Some(graph_ref))
-                    .next()
-                    .and_then(|q| q.ok())
-                    .map(|q| q.object)
-            };
-            for quad in
-                self.store
-                    .store()
-                    .quads_for_pattern(None, Some(has_key), None, Some(graph_ref))
-            {
-                let quad = quad.map_err(|e| ReasoningError::Store(e.to_string()))?;
-                let NamedOrBlankNode::NamedNode(class) = quad.subject else {
-                    continue;
-                };
-                let mut props: Vec<String> = Vec::new();
-                let mut cell = match quad.object {
-                    Term::NamedNode(n) => NamedOrBlankNode::NamedNode(n),
-                    Term::BlankNode(b) => NamedOrBlankNode::BlankNode(b),
-                    _ => continue,
-                };
-                // Walk the list; a malformed list simply ends.
-                for _ in 0..64 {
-                    if let NamedOrBlankNode::NamedNode(n) = &cell {
-                        if n.as_str() == RDF_NIL {
-                            break;
-                        }
-                    }
-                    if let Some(Term::NamedNode(p)) = object_of(&cell, first) {
-                        props.push(p.as_str().to_string());
-                    }
-                    cell = match object_of(&cell, rest) {
-                        Some(Term::NamedNode(n)) => NamedOrBlankNode::NamedNode(n),
-                        Some(Term::BlankNode(b)) => NamedOrBlankNode::BlankNode(b),
-                        _ => break,
-                    };
-                }
-                props.sort();
-                props.dedup();
-                if !props.is_empty() {
-                    keys.push((class.as_str().to_string(), props));
-                }
-            }
-        }
-        keys.sort();
-        keys.dedup();
-        Ok(keys)
+        super::common::has_keys(self.store, self.scope().as_deref())
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

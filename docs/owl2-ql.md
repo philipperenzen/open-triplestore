@@ -12,23 +12,31 @@ This makes it ideal for:
 - Scenarios where storage of entailed triples is prohibitive.
 - Integration with existing relational databases via SPARQL-to-SQL rewriting.
 
-## Algorithm: PerfectRef
+## Algorithm
 
-The implementation uses the **PerfectRef** algorithm (Calvanese et al., 2007) at the SPARQL AST
-level (not string-based rewriting):
+The rewriter does the atom-by-atom part of **PerfectRef** (Calvanese et al.,
+2007) at the SPARQL AST level (not string-based rewriting). The OWL 2 QL grade
+is **Partial** (see [Standards](standards.md) and the limits below).
 
-1. Load the TBox from the store (subClassOf, equivalentClass, subPropertyOf, equivalentProperty,
-   inverseOf, rdfs:domain).
-2. Compute full transitive closure in pure Rust.
-3. Parse the incoming SPARQL query to an AST via the `spargebra` crate.
-4. Walk the AST and rewrite each Basic Graph Pattern (BGP) triple:
-   - `?x rdf:type <C>` → `UNION` branches for all subclasses of `C` (because any individual of
-     a subclass of `C` satisfies the query).
-   - `?x <P> ?y` → `UNION` branches for all subproperties of `P`, plus inverse alternatives
-     where `owl:inverseOf` applies.
-   - `rdf:domain` axioms generate existential alternatives: if `P rdfs:domain C` then
-     `?x rdf:type C` can be satisfied by `?x <P> ?_`.
-5. Serialize the rewritten AST back to SPARQL and execute.
+1. Load the TBox from the store as inclusions between basic concepts (a named
+   class `A`, `∃P` = the subjects of `P`, `∃P⁻` = its objects) and between
+   roles (a property `P` or its inverse `P⁻`).
+2. Parse the incoming SPARQL query to an AST via the `spargebra` crate.
+3. Walk the AST and rewrite each Basic Graph Pattern (BGP) triple:
+   - `?x rdf:type <C>` → `UNION` branches for every basic concept under `C`:
+     its subclasses (`?x rdf:type <A>`), the domain side of every property
+     whose domain is under `C` (`?x <P> ?fresh`), and the range side of every
+     property whose range is (`?fresh <P> ?x`), through the property
+     hierarchy and inverses.
+   - `?x <P> ?y` → `UNION` branches for every role under `P`: sub-properties
+     (`?x <Q> ?y`), and inverses or sub-properties of an inverse (`?y <Q> ?x`).
+   - Each generated existential atom gets its own fresh variable, so two of
+     them are never joined.
+4. Serialize the rewritten AST back to SPARQL and execute.
+
+An existential on the right of an axiom (`C ⊑ ∃P.D`) is not used: it answers
+only an atom whose other end is an unbound, unshared variable, which a
+one-atom rewriter cannot tell. It does **not** make every subject of `P` a `C`.
 
 ## Supported TBox Axioms
 
@@ -40,8 +48,10 @@ level (not string-based rewriting):
 | `owl:equivalentProperty` | `ex:knows owl:equivalentProperty ex:acquaintedWith` |
 | `owl:inverseOf` | `ex:teaches owl:inverseOf ex:taughtBy` |
 | `rdfs:domain` | `ex:teaches rdfs:domain ex:Person` |
+| `rdfs:range` | `ex:teaches rdfs:range ex:Course` |
+| unqualified existential on the left | `[ owl:onProperty ex:teaches ; owl:someValuesFrom owl:Thing ] rdfs:subClassOf ex:Teacher` (also on `[ owl:inverseOf ex:teaches ]`) |
 
-> **Note on graph roles:** the *class* axioms above (`rdfs:subClassOf`, `owl:equivalentClass`) are T-Box terms and live in a **Model** graph; the *property* axioms (`rdfs:subPropertyOf`, `owl:equivalentProperty`, `owl:inverseOf`, `rdfs:domain`) are R-Box terms and live in a **Vocabulary** graph.  OWL groups all of them under "TBox" for reasoning, and the QL rewriter loads them together — the role split is about *where the terms are stored and registered*, not about how the reasoner uses them.
+> **Note on graph roles:** the *class* axioms above (`rdfs:subClassOf`, `owl:equivalentClass`) are T-Box terms and live in a **Model** graph; the *property* axioms (`rdfs:subPropertyOf`, `owl:equivalentProperty`, `owl:inverseOf`, `rdfs:domain`, `rdfs:range`) are R-Box terms and live in a **Vocabulary** graph.  OWL groups all of them under "TBox" for reasoning, and the QL rewriter loads them together — the role split is about *where the terms are stored and registered*, not about how the reasoner uses them.
 
 ## Configuration
 
@@ -76,7 +86,7 @@ println!("TBox closure: {} axioms in <{}>", report.triples_added, report.target_
 ```
 
 This writes the transitively closed `rdfs:subClassOf` and `rdfs:subPropertyOf` hierarchy into
-`urn:entailment:owl2-ql`.
+`urn:entailment:owl2-ql` (sub-properties entailed through inverses included).
 
 ## Example
 
@@ -121,8 +131,14 @@ ASK {
 
 ## Limitations
 
-- Variable predicates (`?x ?p ?y`) cannot be statically rewritten.
-- `owl:someValuesFrom` restrictions in the TBox require an existential witness that QL rewriting
-  cannot generate; use OWL 2 EL or RL for those axioms.
+- Variable predicates (`?x ?p ?y`) and variable classes (`?x a ?c`) cannot be statically
+  rewritten.
+- Existentials on the right (`C ⊑ ∃P.D`), negative inclusions (`owl:disjointWith`,
+  `owl:propertyDisjointWith`), consistency checks, symmetric and reflexive properties and data
+  properties are not used.
+- The `owl2-ql` regime of `POST /api/reasoning/materialize` writes only the TBox closure, so
+  `?entailment=owl2-ql` adds no inferences about individuals.
+- `POST /api/reasoning/rewrite` reads the TBox from the graphs the caller may read (an admin's,
+  from the unnamed default graph).
 - The rewriter loads the full TBox on each call.  For high-throughput scenarios, cache the
   `QLQueryRewriter` instance across requests.

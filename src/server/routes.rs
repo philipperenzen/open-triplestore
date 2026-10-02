@@ -10166,17 +10166,36 @@ struct RewriteRequest {
 }
 
 /// POST /api/reasoning/rewrite — debug endpoint: return the rewritten query.
+///
+/// The rewriting spells out the TBox it was computed from (every subclass and
+/// sub-property it unions in), so the TBox is read only from graphs the
+/// caller may read — the same set `/sparql` scopes them to. An admin's
+/// rewriting reads the unnamed default graph, as it always did.
 async fn reasoning_rewrite(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
     Json(body): Json<RewriteRequest>,
 ) -> Result<Response, AppError> {
     // Silence unused-variable warning when no reasoning features are compiled in.
-    let _ = &state;
+    let _ = (&state, &user);
     let regime = body.regime.as_deref().unwrap_or("owl2-ql");
     let rewritten = match regime {
         #[cfg(feature = "owl2-ql")]
         "owl2-ql" => {
             let rw = crate::reasoning::owl2_ql::QLQueryRewriter::new(&state.store);
+            let rw = if user.is_admin() {
+                rw
+            } else {
+                let mut readable: Vec<String> = accessible_read_graphs(&state, Some(&user))?
+                    .into_iter()
+                    .collect();
+                readable.sort_unstable();
+                if readable.is_empty() {
+                    // An empty scope must read nothing, not fall back to a default.
+                    readable.push(EMPTY_SCOPE_GRAPH.to_string());
+                }
+                rw.with_sources(readable)
+            };
             rw.rewrite_query(&body.query)
                 .map_err(|e| AppError::Internal(e.to_string()))?
         }

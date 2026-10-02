@@ -77,6 +77,32 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an existing tag. See `docs/release-process.md`.
 
 ### Fixed
+- **OWL 2 EL and QL no longer derive what does not follow.** Results change.
+  - EL: the CR3 rule turned `A ⊑ ∃p.B` and `B ⊑ C` into `∃p.C ⊑ A`, so in a
+    dataset run any individual with a `p`-successor typed `C` was typed `A`.
+    It is gone. In its place, a structural CR4 handles filler subsumption and
+    the property hierarchy (`A ⊑ ∃r.B`, `B ⊑ C`, `r ⊑ s`, `∃s.C ⊑ D` give
+    `A ⊑ D`). EL now also reads `owl:equivalentClass` (both directions),
+    `rdfs:subPropertyOf` / `owl:equivalentProperty`, `owl:TransitiveProperty`
+    and `owl:disjointWith`, and keys with any number of properties.
+    Individuals get the existential restrictions they satisfy as types, so a
+    definition such as `D ≡ E ⊓ ∃p.C` classifies them.
+  - EL consistency: an unsatisfiable class with no instances is no longer
+    called an inconsistency. `classify()` now checks consistency (an
+    individual in `owl:Nothing` or in two disjoint classes) and fails with
+    `ReasoningError::Inconsistency`, as RL does. An inconsistent EL run of
+    `POST /api/reasoning/materialize` that used to succeed now returns an
+    error.
+  - QL: `C ⊑ ∃P.D` was read as `∃P ⊑ C`, so `x P y` made `x` a `C`; that
+    rewrite is gone. Every rewritten existential atom gets its own fresh
+    variable (one shared name joined independent atoms). The rewriter now uses
+    `rdfs:range`, expands domains and ranges through the class and property
+    hierarchies, and composes inverses with sub-properties. The `owl2-ql` TBox
+    closure gains the sub-properties entailed through inverses.
+  - `POST /api/reasoning/rewrite` reads the TBox only from graphs the caller
+    may read. It used to read the unnamed default graph for any authenticated
+    caller and spell its class hierarchy out in the answer. An admin's
+    rewriting still reads the default graph.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if
