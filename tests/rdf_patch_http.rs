@@ -10,6 +10,7 @@ use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
 use common::*;
 use open_triplestore::auth::models::{OwnerType, SystemRole, Visibility};
+use open_triplestore::store::TripleStore;
 use oxigraph::io::RdfFormat;
 use oxigraph::sparql::QueryResults;
 use serde_json::{json, Value};
@@ -654,4 +655,447 @@ async fn patch_passes_the_shacl_write_gates() {
         2,
         "the name is still there"
     );
+}
+
+// ── the dataset prefix table (PA / PD) ──────────────────────────────────────
+
+const PG: &str = "https://example.org/prefixes/g";
+
+fn prefix_dataset(visibility: Visibility) -> (open_triplestore::server::AppState, String, Router) {
+    let (state, token) = admin_state();
+    state
+        .auth_db
+        .create_dataset("pfx", "pfx", None, OwnerType::User, "adm", visibility, None)
+        .unwrap();
+    state.auth_db.add_dataset_graph("pfx", PG).unwrap();
+    state
+        .store
+        .load_str(
+            "<http://example.org/a/s> <http://example.org/a/p> \"1\" .",
+            RdfFormat::Turtle,
+            Some(PG),
+        )
+        .unwrap();
+    let app = test_app(state.clone());
+    (state, token, app)
+}
+
+/// The prefix table has its own API: read with the dataset, written by its
+/// writers, labels and namespaces checked.
+#[tokio::test]
+async fn dataset_prefix_table_api() {
+    let (state, token, app) = prefix_dataset(Visibility::Private);
+    let put = |uri: &'static str, body: &'static str| {
+        let app = app.clone();
+        let token = token.clone();
+        async move {
+            req(
+                &app,
+                Method::PUT,
+                uri,
+                Some(&token),
+                Some("application/json"),
+                None,
+                body,
+            )
+            .await
+        }
+    };
+    let (st, _, txt) = put(
+        "/api/datasets/pfx/prefixes/ex",
+        r#"{"namespace":"http://example.org/a/"}"#,
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    let (st, _, txt) = put(
+        "/api/datasets/pfx/prefixes/ex",
+        r#"{"namespace":"http://example.org/b/"}"#,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "repointed: {txt}");
+    for (uri, body) in [
+        (
+            "/api/datasets/pfx/prefixes/1x",
+            r#"{"namespace":"http://example.org/"}"#,
+        ),
+        (
+            "/api/datasets/pfx/prefixes/ok",
+            r#"{"namespace":"not an iri"}"#,
+        ),
+    ] {
+        let (st, _, txt) = put(uri, body).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{uri}: {txt}");
+    }
+    // The whole table, the default prefix included.
+    let (st, _, txt) = put(
+        "/api/datasets/pfx/prefixes",
+        r#"{"":"http://example.org/default/","ex":"http://example.org/a/","dc":"http://purl.org/dc/terms/"}"#,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let (st, _, txt) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/pfx/prefixes",
+        Some(&token),
+        None,
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let rows: Value = serde_json::from_str(&txt).unwrap();
+    let labels: Vec<&str> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels, ["", "dc", "ex"], "{txt}");
+    let (st, _, _) = req(
+        &app,
+        Method::DELETE,
+        "/api/datasets/pfx/prefixes/dc",
+        Some(&token),
+        None,
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    let (st, _, _) = req(
+        &app,
+        Method::DELETE,
+        "/api/datasets/pfx/prefixes/dc",
+        Some(&token),
+        None,
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    // Anonymous: the private dataset is not there; a write needs a login.
+    let (st, _, _) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/pfx/prefixes",
+        None,
+        None,
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let (st, _, _) = req(
+        &app,
+        Method::PUT,
+        "/api/datasets/pfx/prefixes/x",
+        None,
+        Some("application/json"),
+        None,
+        r#"{"namespace":"http://example.org/x/"}"#,
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    assert_eq!(state.auth_db.dataset_prefix_pairs("pfx").unwrap().len(), 2);
+}
+
+/// The dataset's Turtle and TriG exports declare its prefix table; a
+/// version's data declares the table it was cut with and keeps each graph
+/// under its live name; diffs carry the table changes as PD / PA and
+/// chain through H prev; a restore brings the table back.
+#[tokio::test]
+async fn prefix_table_in_exports_diffs_and_restore() {
+    let (state, token, app) = prefix_dataset(Visibility::Private);
+    let patch = "TX .\nPA \"ex\" <http://example.org/a/> .\nPA \"gone\" <http://example.org/gone#> .\nTC .\n";
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/datasets/pfx/patch",
+        Some(&token),
+        Some(MEDIA),
+        None,
+        patch,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+
+    // The Graph Store read of the dataset's graph.
+    let (st, _, ttl) = req(
+        &app,
+        Method::GET,
+        &format!("/store?graph={}", url_encode(PG)),
+        Some(&token),
+        None,
+        Some("text/turtle"),
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{ttl}");
+    assert!(ttl.contains("@prefix ex: <http://example.org/a/>"), "{ttl}");
+    assert!(
+        ttl.contains("@prefix gone: <http://example.org/gone#>"),
+        "declared though unused: {ttl}"
+    );
+    assert!(ttl.contains("ex:s ex:p"), "{ttl}");
+
+    // Cut 1.0.0, change the table, cut 2.0.0.
+    let cut = |v: &'static str| {
+        let app = app.clone();
+        let token = token.clone();
+        async move {
+            let (st, _, txt) = req(
+                &app,
+                Method::POST,
+                "/api/datasets/pfx/versions",
+                Some(&token),
+                Some("application/json"),
+                None,
+                &json!({ "version": v }).to_string(),
+            )
+            .await;
+            assert!(st.is_success(), "{st} {txt}");
+        }
+    };
+    cut("1.0.0").await;
+    let patch = "TX .\nPD \"gone\" .\nPA \"new\" <http://example.org/new#> .\nTC .\n";
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/datasets/pfx/patch",
+        Some(&token),
+        Some(MEDIA),
+        None,
+        patch,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    cut("2.0.0").await;
+
+    let (st, _, trig) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/pfx/versions/1.0.0/data",
+        Some(&token),
+        None,
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{trig}");
+    assert!(
+        trig.contains("@prefix gone: <http://example.org/gone#>"),
+        "the table of 1.0.0: {trig}"
+    );
+    assert!(!trig.contains("@prefix new:"), "{trig}");
+    let parsed = TripleStore::in_memory().unwrap();
+    parsed.load_str(&trig, RdfFormat::TriG, None).unwrap();
+    assert!(
+        matches!(
+            parsed.query(&format!("ASK {{ GRAPH <{PG}> {{ ?s ?p \"1\" }} }}")),
+            Ok(QueryResults::Boolean(true))
+        ),
+        "the snapshot is written under its live graph: {trig}"
+    );
+
+    let diff = |a: &'static str, b: &'static str| {
+        let app = app.clone();
+        let token = token.clone();
+        async move {
+            let (st, _, p) = req(
+                &app,
+                Method::GET,
+                &format!("/api/datasets/pfx/versions/{a}/diff/{b}?format=rdf-patch"),
+                Some(&token),
+                None,
+                None,
+                "",
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{p}");
+            open_triplestore::rdf_patch::parse(&p).unwrap()
+        }
+    };
+    let d12 = diff("1.0.0", "2.0.0").await;
+    assert_eq!(
+        d12.prefix_ops,
+        vec![
+            open_triplestore::rdf_patch::PrefixOp::Delete {
+                name: "gone".into()
+            },
+            open_triplestore::rdf_patch::PrefixOp::Add {
+                name: "new".into(),
+                namespace: "http://example.org/new#".into()
+            },
+        ]
+    );
+    assert_eq!(
+        d12.header_values("prev").count(),
+        0,
+        "1.0.0 is the first version"
+    );
+    assert_eq!(
+        diff("1.0.0", "2.0.0").await.id(),
+        d12.id(),
+        "a diff between versions keeps its id"
+    );
+    let d2l = diff("2.0.0", "live").await;
+    assert_eq!(
+        d2l.header_values("prev").next(),
+        d12.id(),
+        "chained through H prev"
+    );
+
+    // Restore 1.0.0: the table comes back with the data.
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/datasets/pfx/versions/1.0.0/restore",
+        Some(&token),
+        None,
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert!(txt.contains("\"prefixes_restored\":true"), "{txt}");
+    let table = state.auth_db.dataset_prefix_pairs("pfx").unwrap();
+    assert!(
+        table.iter().any(|(l, _)| l == "gone") && !table.iter().any(|(l, _)| l == "new"),
+        "{table:?}"
+    );
+}
+
+const MEDIA: &str = "application/rdf-patch";
+
+/// Log entries that change a private graph are withheld from a reader who
+/// may not see it; a version-cut entry keeps its text when the versions it
+/// compares are deleted.
+#[tokio::test]
+async fn log_entries_respect_private_graphs_and_survive_version_deletes() {
+    let (state, token, app) = prefix_dataset(Visibility::Public);
+    let append =
+        format!("H id <urn:uuid:priv-1> .\nTX .\nA <urn:x> <urn:p> \"1\" <{PG}> .\nTC .\n");
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/datasets/pfx/log",
+        Some(&token),
+        Some(MEDIA),
+        None,
+        &append,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/datasets/pfx/versions",
+        Some(&token),
+        Some("application/json"),
+        None,
+        r#"{"version":"1.0.0"}"#,
+    )
+    .await;
+    assert!(st.is_success(), "{txt}");
+
+    // Public graph: anyone reads the log.
+    let (st, _, txt) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/pfx/log/patch/1",
+        None,
+        None,
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(txt, append);
+    // Once the graph is private, its entries are withheld from anonymous readers.
+    state
+        .auth_db
+        .set_dataset_graph_private("pfx", PG, true)
+        .unwrap();
+    let (st, _, _) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/pfx/log/patch/1",
+        None,
+        None,
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, _, txt) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/pfx/log",
+        None,
+        None,
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert!(
+        txt.contains("\"withheld\":true") && !txt.contains(PG),
+        "{txt}"
+    );
+    let (st, _, init) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/pfx/log/init",
+        None,
+        None,
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{init}");
+    assert!(
+        !init.contains("example.org/a/s"),
+        "private data stays out of version 0: {init}"
+    );
+
+    // The version entry, before and after its versions are deleted.
+    let (st, _, before) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/pfx/log/patch/2",
+        Some(&token),
+        None,
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{before}");
+    assert!(
+        before.contains("H prev <urn:uuid:priv-1>") && before.contains("H to \"1.0.0\""),
+        "{before}"
+    );
+    let (st, _, txt) = req(
+        &app,
+        Method::DELETE,
+        "/api/datasets/pfx/versions/1.0.0",
+        Some(&token),
+        None,
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let (st, _, after) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/pfx/log/patch/2",
+        Some(&token),
+        None,
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{after}");
+    assert_eq!(before, after, "an entry never changes once appended");
 }

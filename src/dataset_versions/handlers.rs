@@ -22,7 +22,7 @@ use super::{registry, snapshot};
 
 // ─── helpers ──────────────────────────────────────────────────────────────
 
-fn load_dataset(state: &AppState, id: &str) -> Result<Dataset, AppError> {
+pub(crate) fn load_dataset(state: &AppState, id: &str) -> Result<Dataset, AppError> {
     state
         .auth_db
         .get_dataset(id)
@@ -30,7 +30,11 @@ fn load_dataset(state: &AppState, id: &str) -> Result<Dataset, AppError> {
         .ok_or_else(|| AppError::NotFound(format!("Dataset '{id}' not found")))
 }
 
-fn require_read(state: &AppState, ds: &Dataset, uid: Option<&str>) -> Result<(), AppError> {
+pub(crate) fn require_read(
+    state: &AppState,
+    ds: &Dataset,
+    uid: Option<&str>,
+) -> Result<(), AppError> {
     if state
         .auth_db
         .can_access_dataset(uid, ds)
@@ -56,7 +60,7 @@ fn require_read(state: &AppState, ds: &Dataset, uid: Option<&str>) -> Result<(),
 /// the callers below use to drop the matching snapshot graphs. Fails closed: a
 /// lookup error propagates as `500`, so nothing is served, rather than defaulting
 /// to "nothing private".
-fn private_source_filter(
+pub(crate) fn private_source_filter(
     state: &AppState,
     ds: &Dataset,
     uid: Option<&str>,
@@ -90,7 +94,7 @@ fn private_source_filter(
 /// common case (and legacy versions with an empty `source_map`) is untouched;
 /// once anything is private, a non-writer sees only snapshots with a non-private
 /// source in the map (an unmapped snapshot is dropped, fail-closed).
-fn readable_snapshot_graphs(
+pub(crate) fn readable_snapshot_graphs(
     state: &AppState,
     ds: &Dataset,
     uid: Option<&str>,
@@ -108,7 +112,7 @@ fn readable_snapshot_graphs(
     }
 }
 
-fn require_write(state: &AppState, ds: &Dataset, uid: &str) -> Result<(), AppError> {
+pub(crate) fn require_write(state: &AppState, ds: &Dataset, uid: &str) -> Result<(), AppError> {
     if state
         .auth_db
         .can_write_dataset(uid, ds)
@@ -201,14 +205,40 @@ pub async fn get_version_data(
         _ => "application/trig",
     };
 
+    // One document. TriG writes each snapshot under the live graph it was cut
+    // from (what the version's RDF Patch diffs name), and declares the prefix
+    // table the version was cut with — or, for a version cut before prefix
+    // tables existed, the dataset's current one — ahead of the registry's.
+    let named: Vec<(String, String)> = graphs
+        .iter()
+        .map(|g| {
+            let source = record
+                .source_map
+                .iter()
+                .find(|m| m.snapshot_graph == *g)
+                .map_or_else(|| g.clone(), |m| m.source_graph.clone());
+            (g.clone(), source)
+        })
+        .collect();
+    let fixed = match state
+        .auth_db
+        .dataset_version_prefixes(&id, &ver)
+        .map_err(|e| AppError::Internal(e.to_string()))?
+    {
+        Some(p) => p,
+        None => state
+            .auth_db
+            .dataset_prefix_pairs(&id)
+            .map_err(|e| AppError::Internal(e.to_string()))?,
+    };
+    let registry = state.prefix_registry.clone();
     let mut out = Vec::new();
-    for g in &graphs {
-        let data = state
-            .store
-            .graph_store_get(Some(g), fmt)
-            .map_err(AppError::from)?;
-        out.extend_from_slice(&data);
-    }
+    state
+        .store
+        .dump_graphs_with_prefixes_to_writer(&mut out, fmt, &named, &fixed, |ns| {
+            registry.declaration_for(ns)
+        })
+        .map_err(AppError::from)?;
 
     use axum::http::HeaderValue;
     use axum::response::Response;
@@ -294,6 +324,12 @@ pub async fn create_version(
         registry::update_latest_draft(&state.store, &state.base_url, &id, &body.version)
             .map_err(AppError::from)?;
     }
+    crate::rdf_patch_log::on_version_cut(
+        &state.auth_db,
+        &state.base_url,
+        &record,
+        Some(&user.user_id),
+    );
     // Snapshot the validation layer alongside the data (best-effort: the version
     // already persisted, so a binding-snapshot hiccup must not fail the request).
     if let Err(e) = crate::shacl_studio::bindings::snapshot_dataset_bindings(
@@ -541,6 +577,18 @@ pub async fn restore_version(
         Ok(_) => {}
         Err(e) => tracing::warn!("failed to restore validation bindings for {id} v{ver}: {e}"),
     }
+    // The prefix table is part of the dataset's data: back to the version's,
+    // when it recorded one.
+    let prefixes = state
+        .auth_db
+        .dataset_version_prefixes(&id, &ver)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    if let Some(p) = &prefixes {
+        state
+            .auth_db
+            .replace_dataset_prefixes(&id, p, Some(&user.user_id))
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+    }
     version_commit(
         &state,
         &user.user_id,
@@ -548,9 +596,12 @@ pub async fn restore_version(
         Some(&ver),
         format!("Restored version {ver}"),
     );
-    Ok(Json(
-        json!({ "restored": restored, "skipped": skipped, "version": ver }),
-    ))
+    Ok(Json(json!({
+        "restored": restored,
+        "skipped": skipped,
+        "version": ver,
+        "prefixes_restored": prefixes.is_some(),
+    })))
 }
 
 // ─── branches ─────────────────────────────────────────────────────────────
@@ -727,6 +778,7 @@ fn purge_version(
         dataset_id,
         &record.version,
     ));
+    crate::rdf_patch_log::before_version_purge(&state.store, &state.auth_db, record);
     let refs: Vec<&str> = dropped.iter().map(String::as_str).collect();
     state
         .store
@@ -859,13 +911,59 @@ pub async fn diff_versions(
             }
         }
         let dataset_iri = format!("{}/dataset/{}", state.base_url.trim_end_matches('/'), id);
-        let text = crate::rdf_patch::generate(
+        // Diffs between consecutive versions chain: a diff to a version has a
+        // name-based id, and its `H prev` is the id of the diff from the
+        // version cut before `ver` (on the same line) to `ver`.
+        use crate::rdf_patch_log::diff_id;
+        let sources =
+            |a: &DatasetVersion, b: &DatasetVersion| -> std::collections::BTreeSet<String> {
+                a.source_map
+                    .iter()
+                    .chain(&b.source_map)
+                    .map(|m| m.source_graph.clone())
+                    .filter(|g| visible(g.as_str()))
+                    .collect()
+            };
+        let patch_id = if other == "live" {
+            format!("urn:uuid:{}", uuid::Uuid::new_v4())
+        } else {
+            let seen: std::collections::BTreeSet<String> =
+                mappings.iter().map(|(t, _, _)| t.clone()).collect();
+            diff_id(&dataset_iri, &ver, &other, &seen)
+        };
+        let prev = registry::list_versions(&state.store, &state.base_url, &id)
+            .into_iter()
+            .filter(|v| v.branch == from.branch && v.created_at < from.created_at)
+            .max_by(|a, b| a.created_at.cmp(&b.created_at))
+            .map(|p| diff_id(&dataset_iri, &p.version, &ver, &sources(&p, &from)));
+        // `PA` / `PD` for the prefix tables, when both sides recorded one.
+        let db_err = |e: anyhow::Error| AppError::Internal(e.to_string());
+        let from_prefixes = state
+            .auth_db
+            .dataset_version_prefixes(&id, &ver)
+            .map_err(db_err)?;
+        let to_prefixes = if other == "live" {
+            Some(state.auth_db.dataset_prefix_pairs(&id).map_err(db_err)?)
+        } else {
+            state
+                .auth_db
+                .dataset_version_prefixes(&id, &other)
+                .map_err(db_err)?
+        };
+        let prefix_changes = match (&from_prefixes, &to_prefixes) {
+            (Some(a), Some(b)) => crate::rdf_patch::prefix_changes(a, b),
+            _ => Vec::new(),
+        };
+        let text = crate::rdf_patch::render(
             &state.store,
+            &patch_id,
+            prev.as_deref(),
             &[
                 ("dataset", dataset_iri.as_str()),
                 ("from", ver.as_str()),
                 ("to", other.as_str()),
             ],
+            &prefix_changes,
             &mappings,
         );
         return Ok((

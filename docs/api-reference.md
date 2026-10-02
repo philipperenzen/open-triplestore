@@ -49,7 +49,7 @@ Three facts worth knowing before an instance is exposed:
 | `GET` | `/livez` | **none** | Liveness only; never touches the store. |
 | `GET` | `/sparql` | **none** | Query over the graphs the caller may read — anonymously, the public ones: the graphs of public datasets and of every published version of a public model-registry entry (the bundled vocabularies included). A private entry's version graphs are read by its owner, the owner organisation's members and admins, exactly as `/api/models/{id}/versions/{ver}/data` serves them. |
 | `POST` | `/sparql` | **none** | The same query endpoint in the protocol's POST form. A body sent as `application/sparql-update` is a write and needs a **token**; writing a model-registry graph is refused unless the caller may write the entry, whether or not they may read it. |
-| `GET` | `/store?graph={graph_iri}` | **none** | Graph Store read of one named graph, scoped exactly like the query endpoint: a public graph (a public dataset's, or a published version's of a public model) answers anonymously, a private one `401`/`403`. Turtle and TriG carry an `@prefix` header built from the prefix registry for the namespaces the graph actually uses; the line-based formats write every IRI in full. |
+| `GET` | `/store?graph={graph_iri}` | **none** | Graph Store read of one named graph, scoped exactly like the query endpoint: a public graph (a public dataset's, or a published version's of a public model) answers anonymously, a private one `401`/`403`. Turtle and TriG carry an `@prefix` header: a dataset graph's own prefix table first, then the prefix registry for the namespaces the graph actually uses; the line-based formats write every IRI in full. |
 | `GET` | `/store` | **admin** | A read that names no graph dumps the **default graph**, which no per-graph ACL covers, so it is admin-only — a non-admin token is refused here too, with `401` rather than `403`. |
 | `PUT` | `/store` | **token** | Graph Store Protocol: replace a graph. |
 | `POST` | `/store` | **token** | Graph Store Protocol: merge into a graph. |
@@ -70,6 +70,11 @@ Three facts worth knowing before an instance is exposed:
 | `GET` | `/api/datasets/{dataset_id}/validation/latest` | **token** | The dataset's last validation run; its full report only for those who may read every graph it validated. |
 | `GET` | `/api/datasets/{dataset_id}/shapes` | **token** | The dataset's shapes graph; a private one only for those who may read it. |
 | `PUT` | `/api/datasets/{dataset_id}/shapes` | **token** | Replace the shapes graph (`text/shaclc` or RDF). |
+| `POST` | `/api/datasets/{dataset_id}/patch` | **token** | Apply an RDF Patch (writers only); `PA` / `PD` change the dataset's prefix table. See [versioning.md](versioning.md#rdf-patch). |
+| `GET` | `/api/datasets/{dataset_id}/prefixes` | **none** | A public dataset's prefix table; a private one only to those who may read it. |
+| `PUT` | `/api/datasets/{dataset_id}/prefixes` | **token** | Replace the prefix table (writers only); `PUT` / `DELETE …/prefixes/{label}` change one entry. |
+| `GET` | `/api/datasets/{dataset_id}/log` | **none** | A public dataset's RDF Patch log; `…/log/init`, `…/log/current` and `…/log/patch/{version-or-id}` serve its version 0 and patches. Entries that change a graph the caller may not read are withheld. |
+| `POST` | `/api/datasets/{dataset_id}/log` | **token** | Append a patch to the log (writers only): `H prev` must name the latest entry (`409` otherwise). |
 | `GET` | `/api/models` | **none** | The model-registry entries the caller may see; anonymously, the public ones. |
 | `GET` | `/api/models/{id}/versions/{ver}/data` | **none** | A published version's graphs as RDF, to whoever may see the entry: a public model anonymously, a private one to its owner, the owner organisation's members and admins (`404` to everyone else, so the entry cannot be discovered). |
 | `GET` | `/api/models/{id}/versions/{ver}/profile` | **none** | The version flattened for a mapping proposer (classes, properties, shapes, enumerations). Read by exactly who may read `/data`; it used to sit behind the admin-gated sources router and answer `401` for a public model. |

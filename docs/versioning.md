@@ -44,25 +44,35 @@ See also: [Datasets](/docs/datasets) and [Model & Vocabulary Versioning](/docs/m
 ## RDF Patch
 
 Any version diff is available as an [RDF Patch](https://afs.github.io/rdf-delta/rdf-patch.html)
-document — one transaction of `A`/`D` quads against the dataset's live graph
-IRIs that transforms the version into the other side. Blank nodes are
+document — one transaction that transforms the version into the other side:
+`PD` / `PA` rows for the changes to the [prefix table](#the-prefix-table),
+then `D` / `A` quads against the dataset's live graph IRIs. Blank nodes are
 written with the store's own ids:
 
 ```bash
 curl -H 'Accept: application/rdf-patch' \
-  http://localhost:7878/api/datasets/<id>/versions/1.0.0/diff/live
+  http://localhost:7878/api/datasets/<id>/versions/1.0.0/diff/2.0.0
 ```
 
 ```
 H id <urn:uuid:…> .
+H prev <urn:uuid:…> .
 H dataset <http://localhost:7878/dataset/assets> .
 H from "1.0.0" .
-H to "live" .
+H to "2.0.0" .
 TX .
+PA "status" <https://example.org/status/> .
 D <https://example.org/asset/b2> <https://example.org/status> "planned" <https://example.org/assets/instances> .
 A <https://example.org/asset/b2> <https://example.org/status> "in-service" <https://example.org/assets/instances> .
 TC .
 ```
+
+Diffs between versions chain. A diff to a version always has the same
+`H id` (a name-based UUID of the dataset, both versions and the graphs the
+caller sees), and its `H prev` names the diff from the version cut just
+before `from` (on the same branch) to `from`. A diff to `live` gets a fresh
+id. Prefix rows appear only when both sides recorded a prefix table:
+versions cut before prefix tables existed have none.
 
 A patch applies to a dataset atomically, as one commit in its history:
 
@@ -83,9 +93,11 @@ and `#` starts a comment that runs to the end of the line).
   that fails anywhere changes nothing.
 - **Prefixes** — `PA rdf <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .` or
   `PA "rdf" "http://www.w3.org/1999/02/22-rdf-syntax-ns#" .`, and `PD rdf .`
-  (the older `PA rdf: <…>` form is still read). They do not change the
-  dataset yet. As an extension, `A`/`D` rows may use the prefixed names they
-  declare.
+  (the older `PA rdf: <…>` form is still read). As the page says, prefixes
+  "are changes to the data the patch is applied to": they change the
+  dataset's [prefix table](#the-prefix-table), in order, and not its triples.
+  As an extension, `A`/`D` rows may use the prefixed names the patch itself
+  declares; the dataset's table plays no part in reading a patch.
 - **Changes** — `A`/`D` with a triple or a quad. A dataset patch only touches
   the dataset's registered graphs. A triple goes to the registered graph
   named by `?graph=`, and without that parameter it is refused:
@@ -107,7 +119,7 @@ and `#` starts a comment that runs to the end of the line).
 
 Adding a quad that is present or deleting one that is absent changes
 nothing. The response reports the net `added` / `removed` counts and the
-`transactions` committed and aborted.
+`transactions` committed and aborted, with their `prefix_rows`.
 
 Patches pass the same SHACL write gates as a Graph Store write to the same
 graphs: Studio pipelines with `gate_writes`, shapes bound to the graph or its
@@ -115,6 +127,103 @@ dataset, and the dataset's `shacl_on_write` shapes. The gates run over what
 each graph would hold after the patch. A refusal is a `422` with the report,
 and nothing is applied. The write is captured by the dataset's LDES stream,
 the change log and the text index like any other.
+
+### The prefix table
+
+Each dataset has its own prefix table, part of its data in the RDF Patch
+sense. An applied patch's `PA` / `PD` rows change it; each version records
+the table it was cut with, and restoring the version brings that table back
+(the response says `prefixes_restored`). The dataset's Turtle and TriG
+exports — the Graph Store read of one of its graphs and a version's
+`/data` — declare every prefix in it, used or not, before the instance's
+[prefix registry](prefixes.md) fills in the rest. A version's TriG writes
+each snapshot under the live graph it was cut from.
+
+```bash
+curl http://localhost:7878/api/datasets/<id>/prefixes            # [{label, namespace, …}]
+curl -X PUT http://localhost:7878/api/datasets/<id>/prefixes/ex \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
+  -d '{"namespace":"https://example.org/"}'
+curl -X PUT http://localhost:7878/api/datasets/<id>/prefixes \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
+  -d '{"":"https://example.org/default/","ex":"https://example.org/"}'
+curl -X DELETE http://localhost:7878/api/datasets/<id>/prefixes/ex -H "Authorization: Bearer <token>"
+```
+
+A label is a Turtle prefix name (a letter first, then letters, digits, `_`,
+`-` and inner `.`) or empty for the default prefix `:`, which only the
+whole-table `PUT` and patches can set. A namespace is any absolute IRI.
+Reading needs read access to the dataset, writing needs write access.
+
+### Patch logs
+
+Each dataset has an [RDF Patch log](https://afs.github.io/rdf-delta/rdf-patch-logs.html),
+named by the dataset id: a linear sequence of patches, each appended after
+the one its `H prev` names.
+
+| Request | Effect |
+|---|---|
+| `POST /api/datasets/{id}/log` | Append a patch (optionally `?graph=` for its triples) |
+| `GET /api/datasets/{id}/log` | The log: version 0, the latest entry and the entries (`?after=`, `?limit=`) |
+| `GET /api/datasets/{id}/log/init` | Version 0, the dataset the log starts from (TriG, or N-Quads with `?format=nquads`) |
+| `GET /api/datasets/{id}/log/current` | The latest patch |
+| `GET /api/datasets/{id}/log/patch/{version}` | A patch by log version (all digits) |
+| `GET /api/datasets/{id}/log/patch/{id}` | A patch by id: the full IRI, or the UUID of a `uuid:` / `urn:uuid:` id |
+
+```bash
+curl -X POST http://localhost:7878/api/datasets/<id>/log \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/rdf-patch' \
+  --data-binary @next.rdfp
+```
+
+An appended patch has exactly one `H id`, an IRI the log does not hold yet,
+and at most one `H prev`, which must name the log's latest entry. Without
+`H prev` the log must be empty. Otherwise the append is a `409` that names
+the latest entry, and nothing changes; this is the page's optimistic
+concurrency control, so a client that lost the race rebases and retries. A
+second append to the same log while one is being applied is a `409` too.
+The patch is then applied exactly as `POST …/patch` applies one, with the
+same gates and refusals, and appended only when that succeeds. The response
+is the apply result plus the entry's log `version` and `prev`. Log versions
+run 1, 2, 3, … and an entry never changes once appended.
+
+The log holds two kinds of entry:
+
+- **`patch`** — a patch appended here, stored as sent. Its triples went to
+  the `?graph=` it was sent with, which the listing shows and
+  `X-Patch-Default-Graph` repeats.
+- **`version`** — every version cut from the live graphs (`POST …/versions`,
+  validate-and-commit, a replace import's archive, a validation pipeline's
+  auto-version) appends the diff, as a patch, from the state the log's
+  previous version entry reached to the new version, prefix-table changes
+  included. It is chained after the latest entry like any other. Branching
+  from a version is not a cut and is not journaled.
+
+Other writes — SPARQL Update, the Graph Store, imports, `POST …/patch`, a
+version restore — are **not journaled**. Replaying the log from version 0
+redoes what went through it, and each version entry brings the graphs that
+version holds to its contents for every triple that changed between the two
+cuts. A write made elsewhere that undoes a patch's rows between two cuts is
+the one case replay does not reproduce.
+
+Version 0 is fixed when the log gets its first entry. A log a version cut
+starts begins at the empty dataset (its first entry adds the whole version).
+A log an append starts begins at the dataset as it stood: empty when its
+graphs held nothing, else a draft version named `log-init-…` that is cut for
+the purpose; if that first patch is refused, the version is dropped again.
+`/init` answers `410` once that version is deleted.
+
+A version entry is rendered from the snapshot graphs it compares, which do
+not change. Before a version is deleted, the text of every entry that reads
+it is written out, so the entry is served unchanged afterwards. If the
+version a log's last version entry reached is deleted, the next cut's entry
+is a diff from the empty graph for those graphs: it adds what the version
+holds but cannot delete what replay may still carry.
+
+Reading the log needs read access to the dataset. An entry that changes a
+graph the caller may not read (a private graph, for a caller who cannot
+write the dataset) is listed as `withheld` and refused with `403`, and
+version 0 leaves those graphs out.
 
 ## Change log
 

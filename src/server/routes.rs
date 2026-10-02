@@ -1479,6 +1479,25 @@ async fn graph_store_get(
     let registry = state.prefix_registry.clone();
     let graph_iri = params.graph_iri().map(|s| s.to_string());
     let rdf_format = format.to_rdf_format();
+    // A dataset's graph also declares the dataset's own prefix table (what its
+    // applied RDF Patches' `PA` / `PD` rows set), ahead of the registry's.
+    let dataset_prefixes = match graph_iri.as_deref() {
+        Some(g)
+            if matches!(
+                rdf_format,
+                oxigraph::io::RdfFormat::Turtle | oxigraph::io::RdfFormat::TriG
+            ) =>
+        {
+            state
+                .auth_db
+                .find_dataset_by_graph_iri(g)
+                .ok()
+                .flatten()
+                .and_then(|ds| state.auth_db.dataset_prefix_pairs(&ds.id).ok())
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
     let (chunk_tx, chunk_rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(8);
     let (start_tx, start_rx) = oneshot::channel::<Result<(), AppError>>();
 
@@ -1492,9 +1511,13 @@ async fn graph_store_get(
         // full IRIs. The line-based formats fall straight through to the plain
         // dump; they have no header to fill.
         let result = store
-            .dump_prefixed_to_writer(&mut writer, rdf_format, graph_iri.as_deref(), |ns| {
-                registry.declaration_for(ns)
-            })
+            .dump_with_prefixes_to_writer(
+                &mut writer,
+                rdf_format,
+                graph_iri.as_deref(),
+                &dataset_prefixes,
+                |ns| registry.declaration_for(ns),
+            )
             .map_err(|e| e.to_string())
             // Emit the tail of the buffered stream, else the dump is truncated.
             .and_then(|_| writer.finish().map_err(|e| e.to_string()));
