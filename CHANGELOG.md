@@ -18,6 +18,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `"eq_ref": true` in the body of `POST /api/reasoning/materialize`, also writes
   `x owl:sameAs x` for every subject, predicate and non-literal object. It is
   off by default (about one triple per term); `sameas-off` skips it.
+- **OWL 2 QL: DL-Lite_R closure, ground materialisation, consistency and
+  existential query rewriting.** The `owl2-ql` regime of
+  `POST /api/reasoning/materialize` and of a dataset's entailment now writes
+  every entailed class membership and property assertion over the data's
+  individuals (it wrote only the subclass/subproperty closure, so
+  `?entailment=owl2-ql` said nothing about individuals). The TBox is closed
+  over basic concepts and roles with qualified existentials on the right,
+  intersections, complements, disjoint classes and properties,
+  symmetric/asymmetric/reflexive/irreflexive properties and data properties;
+  unsatisfiability propagates through negative inclusions, and an
+  inconsistency fails the run with its rule (`ql-cls-disjoint`,
+  `ql-prp-irp`, …). On `/sparql?entailment=owl2-ql` (and a dataset whose
+  regime is `owl2-ql`) the query's blank nodes are rewritten existentially, so
+  `ASK { ex:ann ex:hasChild [ a ex:Person ] }` is true when the schema says
+  every parent has a child, with one solution per binding of the variables;
+  the TBox is cached until the next write and a query without blank nodes is
+  untouched. Reasoning reports gain `ignored_axioms` and `ignored_sample`,
+  the axioms outside the profile that were not used. See `docs/owl2-ql.md`.
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -96,6 +114,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Inconsistency { rule, detail }` (it was `Inconsistency(String)`), and
   `ReasoningError::NotConverged { regime, iterations }` is new. Code that
   matched `Inconsistency(_)` matches `Inconsistency { .. }`.
+- **OWL 2 QL is graded Full.** Data ranges are now decided on values through
+  the OWL 2 datatype map (`src/reasoning/datatypes.rs`, the nineteen
+  datatypes of the EL and QL maps): `-5` against `xsd:nonNegativeInteger`,
+  `"1.5"^^xsd:decimal` against `xsd:integer` and a language-tagged string
+  against `xsd:string` are inconsistent (`ql-dt-range`), and so is an
+  ill-typed literal anywhere in the data (`ql-dt-not-type`). `∃U.D` with a
+  data range `D` works on the left of an inclusion (a subject with a `U` value
+  in `D` gets the class, in materialisation and in the stand-alone
+  rewriting), a class that needs a value outside its property's range is
+  unsatisfiable, data ranges may be intersections or datatype definitions, and
+  disjoint data properties compare values (`1` and `"1.0"^^xsd:decimal` clash).
+  Ranges on datatypes outside the QL map (`xsd:boolean`, `xsd:double`, …) are
+  reported as ignored axioms instead of being checked by datatype family.
+  `docs/standards.md` grades OWL 2 QL Full and the Standards Score in
+  `docs/triplestore-comparison.md` goes 22 → 23.
+- **OWL 2 QL is graded Partial.** `docs/standards.md` graded it Full while the
+  rewriter was unsound and wrote no individual inferences. With the DL-Lite_R
+  closure in place, what remains is checking data-property values against the
+  OWL 2 datatype map; the comparison matrix follows (Standards Score 23 → 22).
+- **`owl2-ql` materialisation results change** (see Added): the target graph
+  now holds ground atoms, a dataset run writes to the dataset's own
+  `urn:entailment:owl2-ql:<id>` graph (it wrote the TBox closure to the shared
+  graph), and an inconsistent ontology fails the run.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were
@@ -152,6 +193,32 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ReasoningError::NotConverged`, a `422` with `converged: false` over HTTP.
 - **`POST /api/reasoning/materialize` no longer blocks an async worker.** The
   rules run on the blocking pool, as the per-dataset run already did.
+- **OWL 2 EL and QL no longer derive what does not follow.** Results change.
+  - EL: the CR3 rule turned `A ⊑ ∃p.B` and `B ⊑ C` into `∃p.C ⊑ A`, so in a
+    dataset run any individual with a `p`-successor typed `C` was typed `A`.
+    It is gone. In its place, a structural CR4 handles filler subsumption and
+    the property hierarchy (`A ⊑ ∃r.B`, `B ⊑ C`, `r ⊑ s`, `∃s.C ⊑ D` give
+    `A ⊑ D`). EL now also reads `owl:equivalentClass` (both directions),
+    `rdfs:subPropertyOf` / `owl:equivalentProperty`, `owl:TransitiveProperty`
+    and `owl:disjointWith`, and keys with any number of properties.
+    Individuals get the existential restrictions they satisfy as types, so a
+    definition such as `D ≡ E ⊓ ∃p.C` classifies them.
+  - EL consistency: an unsatisfiable class with no instances is no longer
+    called an inconsistency. `classify()` now checks consistency (an
+    individual in `owl:Nothing` or in two disjoint classes) and fails with
+    `ReasoningError::Inconsistency`, as RL does. An inconsistent EL run of
+    `POST /api/reasoning/materialize` that used to succeed now returns an
+    error.
+  - QL: `C ⊑ ∃P.D` was read as `∃P ⊑ C`, so `x P y` made `x` a `C`; that
+    rewrite is gone. Every rewritten existential atom gets its own fresh
+    variable (one shared name joined independent atoms). The rewriter now uses
+    `rdfs:range`, expands domains and ranges through the class and property
+    hierarchies, and composes inverses with sub-properties. The `owl2-ql` TBox
+    closure gains the sub-properties entailed through inverses.
+  - `POST /api/reasoning/rewrite` reads the TBox only from graphs the caller
+    may read. It used to read the unnamed default graph for any authenticated
+    caller and spell its class hierarchy out in the answer. An admin's
+    rewriting still reads the default graph.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if

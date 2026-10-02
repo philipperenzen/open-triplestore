@@ -5,7 +5,7 @@ Reasoning can be applied to materialise inferred triples across all named graphs
 | Profile | Best for | Notes |
 |---|---|---|
 | RDFS | Simple schema inference | Lowest overhead. Infers subclass hierarchies, property domains and ranges. |
-| OWL 2 QL | Large read-heavy datasets | No existentials. Uses query rewriting — minimal extra storage. |
+| OWL 2 QL | Large read-heavy datasets | DL-Lite_R closure: materialises ground atoms, checks consistency (disjointness, asymmetric/irreflexive properties, data ranges by value); existentials are answered through query blank nodes on `?entailment=owl2-ql`. No equality, keys or transitivity. |
 | OWL 2 EL | Life sciences (SNOMED-CT, Gene Ontology) | Supports existential restrictions. Polynomial time. |
 | OWL 2 RL | Rule-based integration with RDF | Materialises triples. Most complete; may significantly grow graph size. |
 | OWL 2 DL | Full OWL expressivity | Native support for `hasSelf`, `disjointUnionOf`, `NegativePropertyAssertion`, `hasKey` (1–2 keys), and cardinality annotations on top of all OWL 2 RL rules. Full existential completion (tableau) requires an external reasoner (HermiT, Pellet). |
@@ -38,8 +38,8 @@ the same.
 
 The response reports the run: `triples_added`, `iterations`, `elapsed_ms`,
 `target_graph`, `sources` (null: the unnamed default graph) and `consistent`
-— `true` when the regime checks consistency (`owl2-rl`, `owl2-dl`) and found
-nothing violated, `null` for a regime without inconsistency rules. Query the
+— `true` when the regime checks consistency (`owl2-rl`, `owl2-el`, `owl2-ql`, `owl2-dl`) and found
+nothing violated, `null` for a regime without inconsistency rules. A regime that skips axioms outside its profile (OWL 2 QL) also reports `ignored_axioms`, their count, and `ignored_sample`, the first 20 by construct and subject. Query the
 current status of all entailment graphs via `GET /api/reasoning/status`.
 
 **When the run fails.** An inconsistent ontology is a `422` naming the check
@@ -62,7 +62,7 @@ A run that does not reach its fixed point within 500 iterations is also a
 part of the closure, so it is reported, never returned as a success. The rules
 run on a blocking worker, off the server's async threads.
 
-For OWL 2 QL you can rewrite a query against the schema instead of materialising — `POST /api/reasoning/rewrite` returns the expanded SPARQL. You can also fold an entailment graph into a single query by adding `?entailment=rdfs|owl2-rl|owl2-el|owl2-ql|owl2-dl` to a SPARQL request.
+For OWL 2 QL, `?entailment=owl2-ql` also rewrites the query's blank nodes so they match the anonymous elements the schema's existentials imply ([OWL 2 QL](owl2-ql.md)). `POST /api/reasoning/rewrite` returns a stand-alone rewriting that needs no materialised graph, computed from the schema in the graphs you may read. You can also fold an entailment graph into a single query by adding `?entailment=rdfs|owl2-rl|owl2-el|owl2-ql|owl2-dl` to a SPARQL request.
 
 ## Per-dataset entailment: selectable regime, materialisation toggle
 

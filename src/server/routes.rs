@@ -606,6 +606,9 @@ async fn execute_query(
     // Entailment: a dataset's own entailment graph (`entailment_dataset`, regime
     // from the parameter or the dataset's configuration), else the shared
     // `urn:entailment:<regime>` graph, joins the default graph via FROM.
+    // Whether the regime is OWL 2 QL: its blank nodes are then rewritten
+    // existentially over the TBox (see below).
+    let mut ql_existentials = false;
     let entailment_graph: Option<String> = if let Some(ds_id) = entailment_dataset {
         let ds = state
             .auth_db
@@ -635,10 +638,14 @@ async fn execute_query(
                     "unknown entailment regime `{r}`"
                 )));
             }
-            Some(r) => Some(crate::entailment::dataset_entailment_graph(&r, ds_id)),
+            Some(r) => {
+                ql_existentials = r == "owl2-ql";
+                Some(crate::entailment::dataset_entailment_graph(&r, ds_id))
+            }
             None => None,
         }
     } else if let Some(regime) = entailment {
+        ql_existentials = regime == "owl2-ql";
         match regime {
             "rdfs" => Some(crate::reasoning::common::RDFS_ENTAILMENT_GRAPH.to_string()),
             "owl2-rl" => Some(crate::reasoning::common::OWL2_RL_ENTAILMENT_GRAPH.to_string()),
@@ -696,6 +703,25 @@ async fn execute_query(
     tokio::task::spawn_blocking(move || {
         // SERVICE clauses evaluated inside this query act for the caller.
         let _identity = crate::federation::IdentityGuard::set(federated_identity);
+        // OWL 2 QL: the materialised graph answers every atom over named
+        // individuals; blank nodes may also stand for the anonymous elements
+        // the TBox's existentials imply, so those parts are rewritten. The
+        // rewriting reads only the graphs the (already scoped) query reads.
+        #[cfg(feature = "owl2-ql")]
+        let effective_query_str = if ql_existentials {
+            match crate::reasoning::owl2_ql::rewrite_existentials(&store, &effective_query_str) {
+                Ok(Some(rewritten)) => rewritten,
+                Ok(None) => effective_query_str,
+                Err(e) => {
+                    let _ = ct_tx.send(Err(AppError::Internal(e.to_string())));
+                    return;
+                }
+            }
+        } else {
+            effective_query_str
+        };
+        #[cfg(not(feature = "owl2-ql"))]
+        let _ = ql_existentials;
         let results = match store.query(&effective_query_str) {
             Ok(r) => r,
             Err(e) => {
@@ -10030,10 +10056,10 @@ pub(crate) fn run_reasoner_with(
         }
         #[cfg(feature = "owl2-ql")]
         "owl2-ql" => {
-            let rw = scoped!(crate::reasoning::owl2_ql::QLQueryRewriter::new(
-                &state.store
-            ));
-            Some(rw.materialize_tbox()?)
+            let rw = scoped!(
+                crate::reasoning::owl2_ql::QLQueryRewriter::new(&state.store).with_target(target)
+            );
+            Some(rw.materialize()?)
         }
         #[cfg(feature = "owl2-dl")]
         "owl2-dl" => {
@@ -10217,6 +10243,9 @@ async fn reasoning_materialize(
                 // null: the regime has no inconsistency rules (an inconsistent
                 // run is a 422, never a 200).
                 "consistent": crate::reasoning::common::checks_consistency(&r.regime).then_some(true),
+                // Axioms outside the regime's profile that were not used.
+                "ignored_axioms": r.ignored_axioms,
+                "ignored_sample": r.ignored_sample,
             })),
         )
             .into_response()),
@@ -10251,17 +10280,36 @@ struct RewriteRequest {
 }
 
 /// POST /api/reasoning/rewrite — debug endpoint: return the rewritten query.
+///
+/// The rewriting spells out the TBox it was computed from (every subclass and
+/// sub-property it unions in), so the TBox is read only from graphs the
+/// caller may read — the same set `/sparql` scopes them to. An admin's
+/// rewriting reads the unnamed default graph, as it always did.
 async fn reasoning_rewrite(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
     Json(body): Json<RewriteRequest>,
 ) -> Result<Response, AppError> {
     // Silence unused-variable warning when no reasoning features are compiled in.
-    let _ = &state;
+    let _ = (&state, &user);
     let regime = body.regime.as_deref().unwrap_or("owl2-ql");
     let rewritten = match regime {
         #[cfg(feature = "owl2-ql")]
         "owl2-ql" => {
             let rw = crate::reasoning::owl2_ql::QLQueryRewriter::new(&state.store);
+            let rw = if user.is_admin() {
+                rw
+            } else {
+                let mut readable: Vec<String> = accessible_read_graphs(&state, Some(&user))?
+                    .into_iter()
+                    .collect();
+                readable.sort_unstable();
+                if readable.is_empty() {
+                    // An empty scope must read nothing, not fall back to a default.
+                    readable.push(EMPTY_SCOPE_GRAPH.to_string());
+                }
+                rw.with_sources(readable)
+            };
             rw.rewrite_query(&body.query)
                 .map_err(|e| AppError::Internal(e.to_string()))?
         }

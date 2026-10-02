@@ -213,6 +213,85 @@ async fn entailment_owl2_dl_selects_the_dl_graph() {
     );
 }
 
+/// `POST /api/reasoning/rewrite` spells out the TBox in its answer (every
+/// subclass it unions in), so it reads the TBox only from graphs the caller
+/// may read. It read the whole unnamed default graph for anyone, and none of
+/// the named graphs `/sparql` would have scoped the same caller to.
+#[cfg(feature = "owl2-ql")]
+#[tokio::test]
+async fn rewrite_reads_only_the_callers_graphs() {
+    use open_triplestore::auth::models::SystemRole;
+    const MINE: &str = "http://example.org/g/mine";
+    const SECRET: &str = "http://example.org/g/secret";
+    let (state, _admin) = admin_state();
+    let load = |ttl: &str, graph: Option<&str>| {
+        state
+            .store
+            .load_str(ttl, oxigraph::io::RdfFormat::Turtle, graph)
+            .unwrap()
+    };
+    load(
+        "<http://example.org/Lecturer> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://example.org/Staff> .",
+        Some(MINE),
+    );
+    load(
+        "<http://example.org/SecretAgent> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://example.org/Staff> .",
+        Some(SECRET),
+    );
+    load(
+        "<http://example.org/Hidden> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://example.org/Staff> .",
+        None,
+    );
+    state
+        .auth_db
+        .create_user("reader", "reader", "reader@t.com", "hash", SystemRole::User)
+        .unwrap();
+    state
+        .auth_db
+        .grant_graph_permission("rule-1", MINE, "user", "reader", "read", "adm")
+        .unwrap();
+    let rewrite = |user: &str, role: &str| {
+        let app = test_app(state.clone());
+        let token = mint_token(user, user, role);
+        async move {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/api/reasoning/rewrite")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::from(
+                            json!({ "query": "SELECT ?x WHERE { ?x a <http://example.org/Staff> }" })
+                                .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            body_json(resp.into_body()).await["rewritten"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+    };
+
+    let rewritten = rewrite("reader", "user").await;
+    assert!(rewritten.contains("Lecturer"), "{rewritten}");
+    assert!(!rewritten.contains("SecretAgent"), "{rewritten}");
+    assert!(!rewritten.contains("Hidden"), "{rewritten}");
+
+    // A caller who may read nothing gets the query back unchanged.
+    state
+        .auth_db
+        .create_user("nobody", "nobody", "nobody@t.com", "hash", SystemRole::User)
+        .unwrap();
+    let rewritten = rewrite("nobody", "user").await;
+    assert!(!rewritten.contains("Lecturer"), "{rewritten}");
+    assert!(!rewritten.contains("Hidden"), "{rewritten}");
+}
+
 // ── Identity policy (owl:sameAs) — P1 item 1 ─────────────────────────────────
 //
 // What a dataset's materialisation does with owl:sameAs is a per-dataset (or
@@ -902,4 +981,147 @@ mod consistency {
         assert_eq!(v["consistent"], json!(true), "{txt}");
         assert!(v["inconsistency"].is_null(), "{txt}");
     }
+}
+
+/// `POST /api/reasoning/materialize` with `owl2-ql` writes the ground closure
+/// (it wrote only the subclass/subproperty closure, so `?entailment=owl2-ql`
+/// answered nothing about individuals), reports the axioms outside the
+/// profile it did not use, and `?entailment=owl2-ql` rewrites blank nodes
+/// existentially.
+#[cfg(feature = "owl2-ql")]
+#[tokio::test]
+async fn owl2_ql_materialises_ground_atoms_and_rewrites_blank_nodes() {
+    use open_triplestore::auth::models::{OwnerType, Visibility};
+    const DATA: &str = "http://example.org/g/ql";
+    let (state, token) = admin_state();
+    // `/sparql` reads registered graphs (plus the entailment graph).
+    state
+        .auth_db
+        .create_dataset(
+            "qlds",
+            "QL",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    state.auth_db.add_dataset_graph("qlds", DATA).unwrap();
+    state
+        .store
+        .load_str(
+            "@prefix owl: <http://www.w3.org/2002/07/owl#> . \
+             @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> . \
+             @prefix ex: <http://example.org/> . \
+             ex:Parent rdfs:subClassOf ex:Person , \
+                 [ owl:onProperty ex:hasChild ; owl:someValuesFrom ex:Person ] . \
+             ex:ancestorOf a owl:TransitiveProperty . \
+             ex:ann a ex:Parent .",
+            oxigraph::io::RdfFormat::Turtle,
+            Some(DATA),
+        )
+        .unwrap();
+    let resp = test_app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/reasoning/materialize")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(
+                    json!({ "regime": "owl2-ql", "source_graphs": [DATA] }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let st = resp.status();
+    let body = body_json(resp.into_body()).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["ignored_axioms"], 1, "{body}");
+    assert_eq!(
+        body["ignored_sample"][0]["axiom"], "owl:TransitiveProperty",
+        "{body}"
+    );
+    assert!(matches!(
+        state.store.query(
+            "ASK { GRAPH <urn:entailment:owl2-ql> \
+               { <http://example.org/ann> a <http://example.org/Person> } }"
+        ),
+        Ok(QueryResults::Boolean(true))
+    ));
+
+    let ask = |q: &str, regime: Option<&str>| {
+        let app = test_app(state.clone());
+        let token = token.clone();
+        let q = url_encode(q);
+        let uri = match regime {
+            Some(r) => format!("/sparql?query={q}&entailment={r}"),
+            None => format!("/sparql?query={q}"),
+        };
+        async move {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .header(header::ACCEPT, "application/sparql-results+json")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let v = body_json(resp.into_body()).await;
+            v["boolean"]
+                .as_bool()
+                .unwrap_or_else(|| panic!("not an ASK result: {v}"))
+        }
+    };
+    let child = "ASK { <http://example.org/ann> <http://example.org/hasChild> \
+                 [ a <http://example.org/Person> ] }";
+    assert!(ask(child, Some("owl2-ql")).await);
+    assert!(!ask(child, None).await, "no entailment, no anonymous child");
+    assert!(
+        !ask(
+            "ASK { <http://example.org/ann> <http://example.org/hasChild> ?c }",
+            Some("owl2-ql")
+        )
+        .await,
+        "a variable binds only to named individuals"
+    );
+    assert!(
+        ask(
+            "ASK { <http://example.org/ann> a <http://example.org/Person> }",
+            Some("owl2-ql")
+        )
+        .await
+    );
+}
+
+/// An inconsistent ontology fails the QL run instead of reporting success.
+#[cfg(feature = "owl2-ql")]
+#[tokio::test]
+async fn owl2_ql_inconsistency_fails_the_run() {
+    let (state, token) = admin_state();
+    state
+        .store
+        .load_str(
+            "@prefix owl: <http://www.w3.org/2002/07/owl#> . \
+             @prefix ex: <http://example.org/> . \
+             ex:Cat owl:disjointWith ex:Dog . \
+             ex:tom a ex:Cat , ex:Dog .",
+            oxigraph::io::RdfFormat::Turtle,
+            None,
+        )
+        .unwrap();
+    let (st, body) = materialize(&state, &token, "owl2-ql").await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["consistent"], json!(false), "{body}");
+    assert!(
+        body["rule"].as_str().is_some_and(|r| !r.is_empty()),
+        "{body}"
+    );
 }
