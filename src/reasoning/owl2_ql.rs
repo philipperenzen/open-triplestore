@@ -1,14 +1,23 @@
-//! OWL 2 QL profile — query rewriting via the PerfectRef algorithm.
+//! OWL 2 QL profile — query rewriting over the DL-Lite_R concept and role
+//! hierarchies.
 //!
 //! OWL 2 QL is based on DL-Lite and enables LOGSPACE query answering through
 //! *query rewriting* rather than materialisation.  Instead of storing entailed
 //! triples, the SPARQL query is rewritten at the AST level to include `UNION`
 //! branches that account for TBox axioms:
 //!
-//! - `rdfs:subClassOf` / `owl:equivalentClass`
-//! - `rdfs:subPropertyOf` / `owl:equivalentProperty`
-//! - `owl:inverseOf`
-//! - `owl:someValuesFrom` existential restrictions
+//! - `rdfs:subClassOf` / `owl:equivalentClass` between named classes
+//! - `rdfs:subPropertyOf` / `owl:equivalentProperty` / `owl:inverseOf`,
+//!   composed (a sub-property of an inverse is a sub-property of the inverse)
+//! - `rdfs:domain`, `rdfs:range`, and unqualified existentials on the left
+//!   (`[owl:onProperty P; owl:someValuesFrom owl:Thing] rdfs:subClassOf C`),
+//!   through both hierarchies
+//!
+//! This is the part of PerfectRef that rewrites one atom at a time. It does
+//! not use existentials on the right (`C ⊑ ∃P.D`): those only answer an atom
+//! whose other end is an unbound, unshared variable, and a one-atom rewriter
+//! cannot tell. In particular `C ⊑ ∃P.D` does **not** make `∃P ⊑ C` — a
+//! subject of `P` is not thereby a `C`.
 //!
 //! The implementation uses the `spargebra` crate for AST-level query parsing
 //! and manipulation, avoiding the fragile string-level approach.
@@ -48,51 +57,161 @@ const OWL_EQUIV_PROP: &str = "http://www.w3.org/2002/07/owl#equivalentProperty";
 const OWL_INVERSE_OF: &str = "http://www.w3.org/2002/07/owl#inverseOf";
 const OWL_SOME_VALUES_FROM: &str = "http://www.w3.org/2002/07/owl#someValuesFrom";
 const OWL_ON_PROPERTY: &str = "http://www.w3.org/2002/07/owl#onProperty";
+const OWL_THING: &str = "http://www.w3.org/2002/07/owl#Thing";
+const RDFS_DOMAIN: &str = "http://www.w3.org/2000/01/rdf-schema#domain";
+const RDFS_RANGE: &str = "http://www.w3.org/2000/01/rdf-schema#range";
 
-// ─── TBox snapshot with transitive closure ───────────────────────────────────
+// ─── TBox: basic concepts and roles ──────────────────────────────────────────
 
-/// Lightweight in-memory TBox with full transitive closure.
+/// A DL-Lite role: a property, or its inverse.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct Role {
+    iri: String,
+    inverse: bool,
+}
+
+impl Role {
+    fn named(iri: impl Into<String>) -> Self {
+        Self {
+            iri: iri.into(),
+            inverse: false,
+        }
+    }
+
+    fn inv(&self) -> Self {
+        Self {
+            iri: self.iri.clone(),
+            inverse: !self.inverse,
+        }
+    }
+}
+
+/// A DL-Lite basic concept: a named class, or `∃R` (the subjects of a role,
+/// so `∃P⁻` is the objects of `P`).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Basic {
+    Class(String),
+    Exists(Role),
+}
+
+/// The TBox as direct inclusions between basic concepts and between roles,
+/// indexed by the super side. Queries walk them downwards: everything under
+/// what an atom asks for answers it.
 #[derive(Default)]
 struct TBox {
-    /// Subclasses: class IRI → set of all subclass IRIs (incl. equivalents).
-    /// Used for query rewriting: "?x type C" expands to include all subclasses.
-    subclasses: HashMap<String, HashSet<String>>,
-    /// Subproperties: property IRI → set of all subproperty IRIs (incl. equivalents).
-    /// Used for query rewriting: "?x P ?y" expands to include all subproperties.
-    subproperties: HashMap<String, HashSet<String>>,
-    /// Inverse pairs: property IRI → set of inverse property IRIs
-    inverses: HashMap<String, HashSet<String>>,
-    /// Existential domain: property IRI → set of class IRIs (∃P.⊤ ⊑ C)
-    existential_domain: HashMap<String, HashSet<String>>,
+    /// Named class `C` → the basic concepts declared directly under it
+    /// (subclasses, `∃P` from domains, `∃P⁻` from ranges).
+    concept_subs: HashMap<String, HashSet<Basic>>,
+    /// Role → the roles declared directly under it. Every inclusion is stored
+    /// in both polarities (`R ⊑ S` also as `R⁻ ⊑ S⁻`).
+    role_subs: HashMap<Role, HashSet<Role>>,
 }
 
 impl TBox {
-    /// Compute transitive closure of a relation stored as Vec<(sub, sup)> pairs.
-    fn transitive_closure(pairs: Vec<(String, String)>) -> HashMap<String, HashSet<String>> {
-        let mut map: HashMap<String, HashSet<String>> = HashMap::new();
-        for (sub, sup) in &pairs {
-            map.entry(sub.clone()).or_default().insert(sup.clone());
+    fn add_concept(&mut self, sub: Basic, sup: &str) {
+        if sub != Basic::Class(sup.to_string()) {
+            self.concept_subs
+                .entry(sup.to_string())
+                .or_default()
+                .insert(sub);
         }
-        // Fixed-point iteration
-        let mut changed = true;
-        while changed {
-            changed = false;
-            let keys: Vec<String> = map.keys().cloned().collect();
-            for k in keys {
-                let supers: Vec<String> = map[&k].iter().cloned().collect();
-                for sup in supers {
-                    if let Some(grand) = map.get(&sup).cloned() {
-                        let entry = map.entry(k.clone()).or_default();
-                        for g in grand {
-                            if entry.insert(g) {
-                                changed = true;
-                            }
-                        }
+    }
+
+    fn add_role(&mut self, sub: Role, sup: Role) {
+        if sub != sup {
+            self.role_subs
+                .entry(sup.inv())
+                .or_default()
+                .insert(sub.inv());
+            self.role_subs.entry(sup).or_default().insert(sub);
+        }
+    }
+
+    /// `role` and every role under it, through sub-properties, equivalences
+    /// and inverses in any combination.
+    fn sub_roles(&self, role: &Role) -> Vec<Role> {
+        let mut seen: HashSet<Role> = HashSet::from([role.clone()]);
+        let mut out = vec![role.clone()];
+        let mut i = 0;
+        while i < out.len() {
+            if let Some(subs) = self.role_subs.get(&out[i]) {
+                for s in subs {
+                    if seen.insert(s.clone()) {
+                        out.push(s.clone());
                     }
                 }
             }
+            i += 1;
         }
-        map
+        out
+    }
+
+    /// `Class(class)` and every basic concept under it: subclasses, and the
+    /// subjects (or objects) of every property whose domain (or range) is
+    /// one of them, through the role hierarchy.
+    fn sub_concepts(&self, class: &str) -> Vec<Basic> {
+        let first = Basic::Class(class.to_string());
+        let mut seen: HashSet<Basic> = HashSet::from([first.clone()]);
+        let mut out = vec![first];
+        let mut i = 0;
+        while i < out.len() {
+            let next: Vec<Basic> = match &out[i] {
+                Basic::Class(c) => self
+                    .concept_subs
+                    .get(c)
+                    .map(|s| s.iter().cloned().collect())
+                    .unwrap_or_default(),
+                Basic::Exists(r) => self.sub_roles(r).into_iter().map(Basic::Exists).collect(),
+            };
+            for b in next {
+                if seen.insert(b.clone()) {
+                    out.push(b);
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// Every named class mentioned on the super side of an inclusion.
+    fn classes(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.concept_subs.keys().cloned().collect();
+        out.sort();
+        out
+    }
+
+    /// Every property mentioned in a role inclusion.
+    fn properties(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.role_subs.keys().map(|r| r.iri.clone()).collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+}
+
+/// Fresh variables for the rewritten atoms: one per atom, so two existential
+/// atoms are never joined by accident, named so they cannot collide with a
+/// variable of the query.
+struct Fresh {
+    prefix: String,
+    next: usize,
+}
+
+impl Fresh {
+    fn for_query(sparql: &str) -> Self {
+        let mut prefix = "_ql".to_string();
+        while sparql.contains(prefix.as_str()) {
+            prefix.push('_');
+        }
+        Self { prefix, next: 0 }
+    }
+
+    fn var(&mut self) -> TermPattern {
+        self.next += 1;
+        TermPattern::Variable(
+            spargebra::term::Variable::new(format!("{}{}", self.prefix, self.next))
+                .expect("a fresh variable name is valid"),
+        )
     }
 }
 
@@ -102,37 +221,26 @@ impl TBox {
 pub struct QLQueryRewriter<'a> {
     store: &'a TripleStore,
     pub target_graph: String,
-    /// When set, the rules read ONLY these graphs (plus the target graph).
-    /// Without it they read the unnamed default graph, as they always did.
+    /// When set, the TBox is read from ONLY these graphs. Without it, from
+    /// the unnamed default graph.
     sources: Option<Vec<String>>,
 }
 
 impl<'a> QLQueryRewriter<'a> {
-    /// Restrict the rules to `sources` (plus the target graph). Without a
-    /// scope the rules read the unnamed default graph only, so a dataset's
-    /// named graphs — and the model version it conforms to — were invisible to
-    /// materialisation; this is what `POST /api/reasoning/materialize` sets
-    /// from `source_graphs` or the dataset's conformance layer.
+    /// Read the TBox from `sources` only. Without a scope it is read from the
+    /// unnamed default graph. `POST /api/reasoning/materialize` sets this from
+    /// `source_graphs` or the dataset's conformance layer, and
+    /// `POST /api/reasoning/rewrite` from the graphs the caller may read.
+    ///
+    /// Unlike the materialising reasoners, the target graph is not added: the
+    /// rewriter computes its closure in memory and never reads its own output.
     pub fn with_sources(mut self, sources: Vec<String>) -> Self {
         self.sources = Some(sources);
         self
     }
 
     fn scope(&self) -> Option<Vec<String>> {
-        self.sources.as_ref().map(|s| {
-            let mut g = s.clone();
-            if !g.contains(&self.target_graph) {
-                g.push(self.target_graph.clone());
-            }
-            g
-        })
-    }
-
-    fn run_update(&self, sparql: &str) -> Result<(), crate::store::engine::StoreError> {
-        match self.scope() {
-            Some(scope) => self.store.update_scoped(sparql, &scope),
-            None => self.store.update(sparql),
-        }
+        self.sources.clone()
     }
 
     fn run_query(
@@ -153,17 +261,19 @@ impl<'a> QLQueryRewriter<'a> {
         }
     }
 
-    /// Rewrite a SPARQL SELECT/ASK/CONSTRUCT query using the PerfectRef algorithm.
+    /// Rewrite a SPARQL SELECT/ASK/CONSTRUCT query over the TBox.
     ///
-    /// The rewritten query is semantically equivalent to the original under the
-    /// OWL 2 QL entailment regime: every answer to the original query over the
-    /// entailed dataset is also an answer to the rewritten query over the
-    /// asserted dataset alone.
+    /// Every answer of the rewritten query over the asserted data is an
+    /// answer of the original under OWL 2 QL entailment (the rewriting is
+    /// sound). It is not complete: atoms that only an existential on the
+    /// right of an axiom would answer are not rewritten (see the module
+    /// documentation).
     pub fn rewrite_query(&self, sparql: &str) -> Result<String, ReasoningError> {
         let tbox = self.load_tbox()?;
         let query = crate::sparql::parser()
             .parse_query(sparql)
             .map_err(|e| ReasoningError::Query(format!("SPARQL parse error: {e}")))?;
+        let fresh = &mut Fresh::for_query(sparql);
 
         let rewritten = match query {
             Query::Select {
@@ -171,7 +281,7 @@ impl<'a> QLQueryRewriter<'a> {
                 pattern,
                 base_iri,
             } => {
-                let new_pattern = self.rewrite_pattern(pattern, &tbox);
+                let new_pattern = self.rewrite_pattern(pattern, &tbox, fresh);
                 Query::Select {
                     dataset,
                     pattern: new_pattern,
@@ -183,7 +293,7 @@ impl<'a> QLQueryRewriter<'a> {
                 pattern,
                 base_iri,
             } => {
-                let new_pattern = self.rewrite_pattern(pattern, &tbox);
+                let new_pattern = self.rewrite_pattern(pattern, &tbox, fresh);
                 Query::Ask {
                     dataset,
                     pattern: new_pattern,
@@ -196,7 +306,7 @@ impl<'a> QLQueryRewriter<'a> {
                 pattern,
                 base_iri,
             } => {
-                let new_pattern = self.rewrite_pattern(pattern, &tbox);
+                let new_pattern = self.rewrite_pattern(pattern, &tbox, fresh);
                 Query::Construct {
                     template,
                     dataset,
@@ -217,31 +327,36 @@ impl<'a> QLQueryRewriter<'a> {
         let start = Instant::now();
         let tbox = self.load_tbox()?;
 
+        // The named-class and named-property closure: `sub ⊑ sup` for every
+        // pair the hierarchies (inverses included) entail.
+        let mut triples = String::new();
         let mut count = 0usize;
-        // subclasses map: sup → {subs}; write sub rdfs:subClassOf sup
-        for (sup, subs) in &tbox.subclasses {
-            for sub in subs {
-                if sub != sup {
-                    let q = format!(
-                        "INSERT {{ GRAPH <{}> {{ <{sub}> <{RDFS_SUB_CLASS_OF}> <{sup}> }} }} WHERE {{}}",
-                        self.target_graph
-                    );
-                    self.run_update(&q)?;
+        for sup in tbox.classes() {
+            for sub in tbox.sub_concepts(&sup) {
+                if let Basic::Class(sub) = sub {
+                    if sub != sup {
+                        triples.push_str(&format!("<{sub}> <{RDFS_SUB_CLASS_OF}> <{sup}> .\n"));
+                        count += 1;
+                    }
+                }
+            }
+        }
+        for sup in tbox.properties() {
+            for sub in tbox.sub_roles(&Role::named(sup.clone())) {
+                if !sub.inverse && sub.iri != sup {
+                    triples.push_str(&format!(
+                        "<{}> <{RDFS_SUB_PROPERTY_OF}> <{sup}> .\n",
+                        sub.iri
+                    ));
                     count += 1;
                 }
             }
         }
-        for (sup, subs) in &tbox.subproperties {
-            for sub in subs {
-                if sub != sup {
-                    let q = format!(
-                        "INSERT {{ GRAPH <{}> {{ <{sub}> <{RDFS_SUB_PROPERTY_OF}> <{sup}> }} }} WHERE {{}}",
-                        self.target_graph
-                    );
-                    self.run_update(&q)?;
-                    count += 1;
-                }
-            }
+        if count > 0 {
+            self.store.update(&format!(
+                "INSERT DATA {{ GRAPH <{}> {{ {triples} }} }}",
+                self.target_graph
+            ))?;
         }
 
         Ok(ReasoningReport {
@@ -255,67 +370,72 @@ impl<'a> QLQueryRewriter<'a> {
 
     // ─── Pattern rewriting ────────────────────────────────────────────────────
 
-    fn rewrite_pattern(&self, pattern: GraphPattern, tbox: &TBox) -> GraphPattern {
+    fn rewrite_pattern(
+        &self,
+        pattern: GraphPattern,
+        tbox: &TBox,
+        fresh: &mut Fresh,
+    ) -> GraphPattern {
         match pattern {
-            GraphPattern::Bgp { patterns } => self.rewrite_bgp(patterns, tbox),
+            GraphPattern::Bgp { patterns } => self.rewrite_bgp(patterns, tbox, fresh),
             GraphPattern::Join { left, right } => GraphPattern::Join {
-                left: Box::new(self.rewrite_pattern(*left, tbox)),
-                right: Box::new(self.rewrite_pattern(*right, tbox)),
+                left: Box::new(self.rewrite_pattern(*left, tbox, fresh)),
+                right: Box::new(self.rewrite_pattern(*right, tbox, fresh)),
             },
             GraphPattern::LeftJoin {
                 left,
                 right,
                 expression,
             } => GraphPattern::LeftJoin {
-                left: Box::new(self.rewrite_pattern(*left, tbox)),
-                right: Box::new(self.rewrite_pattern(*right, tbox)),
+                left: Box::new(self.rewrite_pattern(*left, tbox, fresh)),
+                right: Box::new(self.rewrite_pattern(*right, tbox, fresh)),
                 expression,
             },
             GraphPattern::Filter { expr, inner } => GraphPattern::Filter {
                 expr,
-                inner: Box::new(self.rewrite_pattern(*inner, tbox)),
+                inner: Box::new(self.rewrite_pattern(*inner, tbox, fresh)),
             },
             GraphPattern::Union { left, right } => GraphPattern::Union {
-                left: Box::new(self.rewrite_pattern(*left, tbox)),
-                right: Box::new(self.rewrite_pattern(*right, tbox)),
+                left: Box::new(self.rewrite_pattern(*left, tbox, fresh)),
+                right: Box::new(self.rewrite_pattern(*right, tbox, fresh)),
             },
             GraphPattern::Graph { name, inner } => GraphPattern::Graph {
                 name,
-                inner: Box::new(self.rewrite_pattern(*inner, tbox)),
+                inner: Box::new(self.rewrite_pattern(*inner, tbox, fresh)),
             },
             GraphPattern::Extend {
                 inner,
                 variable,
                 expression,
             } => GraphPattern::Extend {
-                inner: Box::new(self.rewrite_pattern(*inner, tbox)),
+                inner: Box::new(self.rewrite_pattern(*inner, tbox, fresh)),
                 variable,
                 expression,
             },
             GraphPattern::Minus { left, right } => GraphPattern::Minus {
-                left: Box::new(self.rewrite_pattern(*left, tbox)),
-                right: Box::new(self.rewrite_pattern(*right, tbox)),
+                left: Box::new(self.rewrite_pattern(*left, tbox, fresh)),
+                right: Box::new(self.rewrite_pattern(*right, tbox, fresh)),
             },
             GraphPattern::OrderBy { inner, expression } => GraphPattern::OrderBy {
-                inner: Box::new(self.rewrite_pattern(*inner, tbox)),
+                inner: Box::new(self.rewrite_pattern(*inner, tbox, fresh)),
                 expression,
             },
             GraphPattern::Project { inner, variables } => GraphPattern::Project {
-                inner: Box::new(self.rewrite_pattern(*inner, tbox)),
+                inner: Box::new(self.rewrite_pattern(*inner, tbox, fresh)),
                 variables,
             },
             GraphPattern::Distinct { inner } => GraphPattern::Distinct {
-                inner: Box::new(self.rewrite_pattern(*inner, tbox)),
+                inner: Box::new(self.rewrite_pattern(*inner, tbox, fresh)),
             },
             GraphPattern::Reduced { inner } => GraphPattern::Reduced {
-                inner: Box::new(self.rewrite_pattern(*inner, tbox)),
+                inner: Box::new(self.rewrite_pattern(*inner, tbox, fresh)),
             },
             GraphPattern::Slice {
                 inner,
                 start,
                 length,
             } => GraphPattern::Slice {
-                inner: Box::new(self.rewrite_pattern(*inner, tbox)),
+                inner: Box::new(self.rewrite_pattern(*inner, tbox, fresh)),
                 start,
                 length,
             },
@@ -324,7 +444,7 @@ impl<'a> QLQueryRewriter<'a> {
                 variables,
                 aggregates,
             } => GraphPattern::Group {
-                inner: Box::new(self.rewrite_pattern(*inner, tbox)),
+                inner: Box::new(self.rewrite_pattern(*inner, tbox, fresh)),
                 variables,
                 aggregates,
             },
@@ -334,22 +454,17 @@ impl<'a> QLQueryRewriter<'a> {
 
     /// Rewrite a BGP: for each triple pattern, collect all rewritings and
     /// combine them via UNION. Patterns with no rewritings are kept as-is.
-    fn rewrite_bgp(&self, patterns: Vec<TriplePattern>, tbox: &TBox) -> GraphPattern {
+    fn rewrite_bgp(
+        &self,
+        patterns: Vec<TriplePattern>,
+        tbox: &TBox,
+        fresh: &mut Fresh,
+    ) -> GraphPattern {
         // Each triple produces one or more alternative BGP patterns (Union).
         // We then join all the alternatives together.
-        let mut alternatives_per_triple: Vec<Vec<TriplePattern>> = Vec::new();
-
-        for tp in &patterns {
-            let rewrites = self.rewrite_triple(tp, tbox);
-            alternatives_per_triple.push(rewrites);
-        }
-
-        // Build the combined pattern as a Join of Unions.
-        // Start with the first triple's alternatives, then join with each subsequent.
         let mut result: Option<GraphPattern> = None;
-
-        for alts in alternatives_per_triple {
-            let union = Self::alternatives_to_union(alts);
+        for tp in &patterns {
+            let union = Self::alternatives_to_union(self.rewrite_triple(tp, tbox, fresh));
             result = Some(match result {
                 None => union,
                 Some(prev) => GraphPattern::Join {
@@ -358,7 +473,6 @@ impl<'a> QLQueryRewriter<'a> {
                 },
             });
         }
-
         result.unwrap_or(GraphPattern::Bgp { patterns: vec![] })
     }
 
@@ -376,77 +490,60 @@ impl<'a> QLQueryRewriter<'a> {
         })
     }
 
+    /// The atom for `subject` being in `basic`: `?s a A`, `?s P ?fresh`, or
+    /// `?fresh P ?s` for `∃P⁻`.
+    fn concept_atom(subject: &TermPattern, basic: &Basic, fresh: &mut Fresh) -> TriplePattern {
+        match basic {
+            Basic::Class(c) => TriplePattern {
+                subject: subject.clone(),
+                predicate: NamedNodePattern::NamedNode(oxrdf::NamedNode::new_unchecked(RDF_TYPE)),
+                object: TermPattern::NamedNode(oxrdf::NamedNode::new_unchecked(c)),
+            },
+            Basic::Exists(r) => Self::role_atom(subject, r, &fresh.var()),
+        }
+    }
+
+    /// The atom for `subject R object`: `subject P object`, or
+    /// `object P subject` when `R` is `P⁻`.
+    fn role_atom(subject: &TermPattern, role: &Role, object: &TermPattern) -> TriplePattern {
+        let (s, o) = if role.inverse {
+            (object, subject)
+        } else {
+            (subject, object)
+        };
+        TriplePattern {
+            subject: s.clone(),
+            predicate: NamedNodePattern::NamedNode(oxrdf::NamedNode::new_unchecked(&role.iri)),
+            object: o.clone(),
+        }
+    }
+
     /// Produce all rewritings of a single triple pattern under the TBox.
-    fn rewrite_triple(&self, tp: &TriplePattern, tbox: &TBox) -> Vec<TriplePattern> {
+    fn rewrite_triple(
+        &self,
+        tp: &TriplePattern,
+        tbox: &TBox,
+        fresh: &mut Fresh,
+    ) -> Vec<TriplePattern> {
         let mut results: Vec<TriplePattern> = vec![tp.clone()];
 
         match &tp.predicate {
-            // ?s rdf:type <C> → also ?s rdf:type <C'> for each C' ⊑* C (subclass of C)
-            // because any individual of type C' satisfies the query for C.
+            // ?s rdf:type <C> → ?s answers it if it is in any basic concept
+            // under C: a subclass, the domain side of a property whose domain
+            // is under C, the range side of one whose range is, each through
+            // the role hierarchy.
             NamedNodePattern::NamedNode(pred) if pred.as_str() == RDF_TYPE => {
                 if let TermPattern::NamedNode(class) = &tp.object {
-                    let class_iri = class.as_str();
-                    // Add alternatives for each subclass of the queried class
-                    if let Some(subs) = tbox.subclasses.get(class_iri) {
-                        for sub in subs {
-                            if sub != class_iri {
-                                if let Ok(sub_node) = oxrdf::NamedNode::new(sub) {
-                                    results.push(TriplePattern {
-                                        subject: tp.subject.clone(),
-                                        predicate: tp.predicate.clone(),
-                                        object: TermPattern::NamedNode(sub_node),
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    // Add alternatives for existential domain: ∃P.⊤ ⊑ C → ?s ?P ?any
-                    for (prop_iri, domains) in &tbox.existential_domain {
-                        if domains.contains(class_iri) {
-                            if let Ok(prop) = oxrdf::NamedNode::new(prop_iri) {
-                                let fresh_var = spargebra::term::Variable::new("_ql_any")
-                                    .unwrap_or_else(|_| {
-                                        spargebra::term::Variable::new("ql_any").unwrap()
-                                    });
-                                results.push(TriplePattern {
-                                    subject: tp.subject.clone(),
-                                    predicate: NamedNodePattern::NamedNode(prop),
-                                    object: TermPattern::Variable(fresh_var),
-                                });
-                            }
-                        }
+                    for basic in tbox.sub_concepts(class.as_str()).iter().skip(1) {
+                        results.push(Self::concept_atom(&tp.subject, basic, fresh));
                     }
                 }
             }
-            // ?s <P> ?o → also ?s <P'> ?o for each subproperty P' ⊑* P, plus inverses
-            // because any triple with P' satisfies the query for P.
+            // ?s <P> ?o → ?s <Q> ?o for every Q ⊑ P, and ?o <Q> ?s for every
+            // Q ⊑ P⁻ (an inverse, or a sub-property of one).
             NamedNodePattern::NamedNode(pred) => {
-                let pred_iri = pred.as_str().to_string();
-                // Subproperty rewritings
-                if let Some(subs) = tbox.subproperties.get(&pred_iri) {
-                    for sub in subs {
-                        if sub != &pred_iri {
-                            if let Ok(sub_node) = oxrdf::NamedNode::new(sub) {
-                                results.push(TriplePattern {
-                                    subject: tp.subject.clone(),
-                                    predicate: NamedNodePattern::NamedNode(sub_node),
-                                    object: tp.object.clone(),
-                                });
-                            }
-                        }
-                    }
-                }
-                // Inverse rewritings: ?s <P> ?o → ?o <Q> ?s  (where Q inverseOf P)
-                if let Some(invs) = tbox.inverses.get(&pred_iri) {
-                    for inv in invs {
-                        if let Ok(inv_node) = oxrdf::NamedNode::new(inv) {
-                            results.push(TriplePattern {
-                                subject: tp.object.clone(),
-                                predicate: NamedNodePattern::NamedNode(inv_node),
-                                object: tp.subject.clone(),
-                            });
-                        }
-                    }
+                for role in tbox.sub_roles(&Role::named(pred.as_str())).iter().skip(1) {
+                    results.push(Self::role_atom(&tp.subject, role, &tp.object));
                 }
             }
             // Variable predicate — no static rewriting possible
@@ -464,84 +561,68 @@ impl<'a> QLQueryRewriter<'a> {
     fn load_tbox(&self) -> Result<TBox, ReasoningError> {
         let mut tbox = TBox::default();
 
-        // Collect raw subClassOf pairs (sub → super), including equivalentClass both ways.
-        // For query rewriting we need the inverse: super → {subs} (subclasses map).
-        let mut subclass_pairs = self.query_pairs(RDFS_SUB_CLASS_OF)?;
-        let equiv_class = self.query_pairs(OWL_EQUIV_CLASS)?;
-        for (a, b) in equiv_class {
-            subclass_pairs.push((a.clone(), b.clone()));
-            subclass_pairs.push((b, a));
+        // Class inclusions between named classes, equivalence both ways.
+        for (sub, sup) in self.query_pairs(RDFS_SUB_CLASS_OF)? {
+            tbox.add_concept(Basic::Class(sub), &sup);
         }
-        // Invert: (sub, sup) → (sup, sub) so transitive_closure gives super → {subs}
-        let inverted_class: Vec<(String, String)> = subclass_pairs
-            .iter()
-            .map(|(sub, sup)| (sup.clone(), sub.clone()))
-            .collect();
-        tbox.subclasses = TBox::transitive_closure(inverted_class);
-
-        // Collect raw subPropertyOf pairs, similarly inverted.
-        let mut subprop_pairs = self.query_pairs(RDFS_SUB_PROPERTY_OF)?;
-        let equiv_prop = self.query_pairs(OWL_EQUIV_PROP)?;
-        for (a, b) in equiv_prop {
-            subprop_pairs.push((a.clone(), b.clone()));
-            subprop_pairs.push((b, a));
-        }
-        let inverted_prop: Vec<(String, String)> = subprop_pairs
-            .iter()
-            .map(|(sub, sup)| (sup.clone(), sub.clone()))
-            .collect();
-        tbox.subproperties = TBox::transitive_closure(inverted_prop);
-
-        // Inverse properties (symmetric: if P inverseOf Q then Q inverseOf P)
-        let inv_pairs = self.query_pairs(OWL_INVERSE_OF)?;
-        for (p, q) in &inv_pairs {
-            tbox.inverses
-                .entry(p.clone())
-                .or_default()
-                .insert(q.clone());
-            tbox.inverses
-                .entry(q.clone())
-                .or_default()
-                .insert(p.clone());
+        for (a, b) in self.query_pairs(OWL_EQUIV_CLASS)? {
+            tbox.add_concept(Basic::Class(a.clone()), &b);
+            tbox.add_concept(Basic::Class(b), &a);
         }
 
-        // Existential domain: ∃P.⊤ ⊑ C, collected from two axiom patterns:
-        //
-        // 1. rdfs:domain — "P rdfs:domain C" is equivalent to ∃P.⊤ ⊑ C in OWL 2 QL.
-        let domain_pairs = self.query_pairs("http://www.w3.org/2000/01/rdf-schema#domain")?;
-        for (prop, cls) in domain_pairs {
-            tbox.existential_domain.entry(prop).or_default().insert(cls);
+        // Role inclusions. `P inverseOf Q` is `P ≡ Q⁻`.
+        for (sub, sup) in self.query_pairs(RDFS_SUB_PROPERTY_OF)? {
+            tbox.add_role(Role::named(sub), Role::named(sup));
+        }
+        for (a, b) in self.query_pairs(OWL_EQUIV_PROP)? {
+            tbox.add_role(Role::named(a.clone()), Role::named(b.clone()));
+            tbox.add_role(Role::named(b), Role::named(a));
+        }
+        for (p, q) in self.query_pairs(OWL_INVERSE_OF)? {
+            tbox.add_role(Role::named(p.clone()), Role::named(q.clone()).inv());
+            tbox.add_role(Role::named(q).inv(), Role::named(p));
         }
 
-        // 2. OWL existential restrictions — "?restr owl:someValuesFrom ?filler .
-        //    ?restr owl:onProperty ?prop . ?class rdfs:subClassOf ?restr"
-        //    means the class is in the existential domain of the property.
+        // Domains and ranges: `P rdfs:domain C` is ∃P ⊑ C, `P rdfs:range C`
+        // is ∃P⁻ ⊑ C.
+        for (prop, cls) in self.query_pairs(RDFS_DOMAIN)? {
+            tbox.add_concept(Basic::Exists(Role::named(prop)), &cls);
+        }
+        for (prop, cls) in self.query_pairs(RDFS_RANGE)? {
+            tbox.add_concept(Basic::Exists(Role::named(prop).inv()), &cls);
+        }
+
+        // An unqualified existential on the left says the same as a domain
+        // (or, on `[owl:inverseOf P]`, a range):
+        // `[owl:onProperty P; owl:someValuesFrom owl:Thing] rdfs:subClassOf C`
+        // is ∃P ⊑ C, and an equivalence includes it. A restriction on the
+        // *right* (`C ⊑ ∃P.D`) says nothing of the kind and is not read.
         let q = format!(
-            "SELECT ?prop ?class WHERE {{ \
-               ?restr <{OWL_SOME_VALUES_FROM}> ?filler . \
-               ?restr <{OWL_ON_PROPERTY}> ?prop . \
-               ?class <{RDFS_SUB_CLASS_OF}> ?restr . \
+            "SELECT ?prop ?inv ?class WHERE {{ \
+               ?restr <{OWL_SOME_VALUES_FROM}> <{OWL_THING}> . \
+               {{ ?restr <{RDFS_SUB_CLASS_OF}> ?class }} \
+               UNION {{ ?restr <{OWL_EQUIV_CLASS}> ?class }} \
+               UNION {{ ?class <{OWL_EQUIV_CLASS}> ?restr }} \
+               {{ ?restr <{OWL_ON_PROPERTY}> ?prop }} \
+               UNION {{ ?restr <{OWL_ON_PROPERTY}> ?on . ?on <{OWL_INVERSE_OF}> ?prop . \
+                        FILTER(isBlank(?on)) BIND(true AS ?inv) }} \
                FILTER(isIRI(?prop) && isIRI(?class)) \
              }}"
         );
         if let oxigraph::sparql::QueryResults::Solutions(sols) = self.run_query(&q)? {
             for sol in sols.flatten() {
-                let prop = sol.get("prop").and_then(|v| {
-                    if let oxigraph::model::Term::NamedNode(nn) = v {
-                        Some(nn.as_str().to_string())
+                let iri = |v: &str| match sol.get(v) {
+                    Some(oxigraph::model::Term::NamedNode(nn)) => Some(nn.as_str().to_string()),
+                    _ => None,
+                };
+                if let (Some(p), Some(c)) = (iri("prop"), iri("class")) {
+                    let role = Role::named(p);
+                    let role = if sol.get("inv").is_some() {
+                        role.inv()
                     } else {
-                        None
-                    }
-                });
-                let cls = sol.get("class").and_then(|v| {
-                    if let oxigraph::model::Term::NamedNode(nn) = v {
-                        Some(nn.as_str().to_string())
-                    } else {
-                        None
-                    }
-                });
-                if let (Some(p), Some(c)) = (prop, cls) {
-                    tbox.existential_domain.entry(p).or_default().insert(c);
+                        role
+                    };
+                    tbox.add_concept(Basic::Exists(role), &c);
                 }
             }
         }

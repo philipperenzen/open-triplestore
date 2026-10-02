@@ -1,4 +1,4 @@
-//! OWL 2 QL conformance tests — PerfectRef query rewriting coverage.
+//! OWL 2 QL conformance tests — query rewriting coverage.
 //!
 //! Tests the AST-level query rewriter for OWL 2 QL (DL-Lite_R), verifying
 //! that queries return correct answers via rewriting without materialisation.
@@ -231,17 +231,25 @@ fn test_ql_inverse_of_symmetric() {
 
 #[test]
 fn test_ql_inverse_with_subproperty() {
-    // P ⊑ Q, Q inverseOf R: bob Q alice (direct, not via sub) → alice R bob
-    // The single-pass rewriter expands inverseOf but not subprops-of-inverses in one step.
-    // Test what is supported: direct inverse expansion.
+    // fatherOf ⊑ parentOf, parentOf inverseOf childOf: an inverse and a
+    // sub-property compose, so a fatherOf edge answers a childOf query.
     let s = store_with(
         "ex:fatherOf rdfs:subPropertyOf ex:parentOf . \
          ex:parentOf owl:inverseOf ex:childOf . \
-         ex:bob ex:parentOf ex:alice .",
+         ex:bob ex:parentOf ex:alice . \
+         ex:dan ex:fatherOf ex:erin .",
     );
     assert!(
         ask_ql(&s, "ASK { <http://example.org/alice> <http://example.org/childOf> <http://example.org/bob> }"),
         "inverseOf: parentOf → childOf rewriting"
+    );
+    assert!(
+        ask_ql(&s, "ASK { <http://example.org/erin> <http://example.org/childOf> <http://example.org/dan> }"),
+        "fatherOf ⊑ parentOf ≡ childOf⁻"
+    );
+    assert!(
+        !ask_ql(&s, "ASK { <http://example.org/dan> <http://example.org/childOf> <http://example.org/erin> }"),
+        "the composition keeps its direction"
     );
 }
 
@@ -420,4 +428,117 @@ fn test_ql_diamond_hierarchy() {
         ),
         "diamond hierarchy: A → D via both B and C paths"
     );
+}
+
+// ─── Soundness: existentials on the right ─────────────────────────────────────
+
+#[test]
+fn test_ql_some_values_from_on_the_right_is_not_a_domain() {
+    // Parent ⊑ ∃hasChild.Person says every parent has a child; it does not
+    // say that whoever has a child is a Parent. The rewriter used to read it
+    // as ∃hasChild ⊑ Parent.
+    let s = store_with(
+        "ex:Parent rdfs:subClassOf [ owl:onProperty ex:hasChild ; owl:someValuesFrom ex:Person ] . \
+         ex:x ex:hasChild ex:y .",
+    );
+    assert!(
+        !ask_ql(&s, "ASK { ex:x rdf:type ex:Parent }"),
+        "C ⊑ ∃P.D must not type the subjects of P as C"
+    );
+}
+
+// ─── Fresh variables ──────────────────────────────────────────────────────────
+
+#[test]
+fn test_ql_fresh_variable_per_atom() {
+    // Two atoms rewritten through domains each get their own existential
+    // variable. With one shared name the two rewritings were joined on it,
+    // so this query (alice's employer ≠ bob's team) returned nothing.
+    let s = store_with(
+        "ex:worksFor rdfs:domain ex:Employee . \
+         ex:manages rdfs:domain ex:Manager . \
+         ex:alice ex:worksFor ex:acme . \
+         ex:bob ex:manages ex:team1 .",
+    );
+    assert_eq!(
+        count_select(
+            &s,
+            "SELECT ?x ?y WHERE { ?x a ex:Employee . ?y a ex:Manager }"
+        ),
+        1
+    );
+
+    // The fresh variables are not projected by SELECT *.
+    let rw = QLQueryRewriter::new(&s);
+    let rewritten = rw
+        .rewrite_query(&format!(
+            "{SPARQL_PREFIXES}SELECT * WHERE {{ ?x a ex:Employee . ?y a ex:Manager }}"
+        ))
+        .unwrap();
+    match s.query(&rewritten).unwrap() {
+        oxigraph::sparql::QueryResults::Solutions(sols) => {
+            let vars: Vec<String> = sols
+                .variables()
+                .iter()
+                .map(|v| v.as_str().to_string())
+                .collect();
+            assert_eq!(vars, ["x", "y"], "rewritten: {rewritten}");
+        }
+        _ => panic!("expected SELECT result"),
+    }
+}
+
+// ─── Range, and domain/range through the hierarchies ──────────────────────────
+
+#[test]
+fn test_ql_range() {
+    let s = store_with(
+        "ex:hasChild rdfs:range ex:Person . \
+         ex:alice ex:hasChild ex:bob .",
+    );
+    assert!(ask_ql(&s, "ASK { ex:bob rdf:type ex:Person }"));
+    assert!(
+        !ask_ql(&s, "ASK { ex:alice rdf:type ex:Person }"),
+        "a range types the object, not the subject"
+    );
+}
+
+#[test]
+fn test_ql_domain_and_range_through_hierarchies() {
+    // The queried class is a superclass of the domain, and the asserted
+    // property a sub-property of the one with the domain (or range).
+    let s = store_with(
+        "ex:worksFor rdfs:domain ex:Employee . \
+         ex:worksFor rdfs:range ex:Organisation . \
+         ex:Employee rdfs:subClassOf ex:Person . \
+         ex:Organisation rdfs:subClassOf ex:Agent . \
+         ex:headOf rdfs:subPropertyOf ex:worksFor . \
+         ex:alice ex:headOf ex:acme .",
+    );
+    assert!(ask_ql(&s, "ASK { ex:alice rdf:type ex:Person }"));
+    assert!(ask_ql(&s, "ASK { ex:acme rdf:type ex:Agent }"));
+    assert!(!ask_ql(&s, "ASK { ex:acme rdf:type ex:Person }"));
+
+    // Through an inverse: the range of an inverse is the domain.
+    let s = store_with(
+        "ex:employs owl:inverseOf ex:worksFor . \
+         ex:worksFor rdfs:domain ex:Employee . \
+         ex:acme ex:employs ex:carol .",
+    );
+    assert!(ask_ql(&s, "ASK { ex:carol rdf:type ex:Employee }"));
+    assert!(!ask_ql(&s, "ASK { ex:acme rdf:type ex:Employee }"));
+}
+
+#[test]
+fn test_ql_unqualified_existential_on_the_left() {
+    // ∃teaches ⊑ Teacher and ∃teaches⁻ ⊑ Course, written as restrictions.
+    let s = store_with(
+        "[ owl:onProperty ex:teaches ; owl:someValuesFrom owl:Thing ] rdfs:subClassOf ex:Teacher . \
+         [ owl:onProperty [ owl:inverseOf ex:teaches ] ; owl:someValuesFrom owl:Thing ] \
+             rdfs:subClassOf ex:Course . \
+         ex:bob ex:teaches ex:cs101 .",
+    );
+    assert!(ask_ql(&s, "ASK { ex:bob rdf:type ex:Teacher }"));
+    assert!(ask_ql(&s, "ASK { ex:cs101 rdf:type ex:Course }"));
+    assert!(!ask_ql(&s, "ASK { ex:cs101 rdf:type ex:Teacher }"));
 }

@@ -35,7 +35,7 @@ behave the same.
 
 The response is a count of the inferred triples added. Query the current status of all entailment graphs via `GET /api/reasoning/status`.
 
-For OWL 2 QL you can rewrite a query against the schema instead of materialising — `POST /api/reasoning/rewrite` returns the expanded SPARQL. You can also fold an entailment graph into a single query by adding `?entailment=rdfs|owl2-rl|owl2-el|owl2-ql|owl2-dl` to a SPARQL request.
+For OWL 2 QL you can rewrite a query against the schema instead of materialising — `POST /api/reasoning/rewrite` returns the expanded SPARQL, computed from the schema in the graphs you may read. You can also fold an entailment graph into a single query by adding `?entailment=rdfs|owl2-rl|owl2-el|owl2-ql|owl2-dl` to a SPARQL request.
 
 ## Per-dataset entailment: selectable regime, materialisation toggle
 

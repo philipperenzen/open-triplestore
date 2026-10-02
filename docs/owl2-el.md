@@ -5,33 +5,64 @@ biomedical ontologies such as SNOMED CT, GO, and NCI Thesaurus.
 
 > **Open Triplestore role names:** class definitions and class axioms = graph role **Model** (the T-Box); ABox content = graph role **Instances**.  Property definitions and relations (the R-Box) belong to the **Vocabulary** role, even though OWL groups them with the TBox for reasoning.  The EL reasoner classifies over the TBox+RBox schema together — the role split concerns where terms are stored and registered, not the reasoning semantics.
 
-It supports:
+The classifier here is a set of SPARQL `INSERT` rules run to a fixed point. It
+covers part of the profile (the [Standards](standards.md) page grades it
+**Partial**). It reads:
 
-- Class intersection (`owl:intersectionOf`)
-- Existential restriction (`owl:someValuesFrom`)
-- Property chains (`owl:propertyChainAxiom`)
-- Reflexive properties
-- Nominal individuals (`owl:oneOf`)
-- `owl:hasKey`
+- `rdfs:subClassOf` and `owl:equivalentClass` (both directions, named classes
+  and class expressions alike)
+- `owl:intersectionOf` (two-operand lists for the joins below)
+- existential restrictions (`owl:someValuesFrom` with `owl:onProperty`)
+- `rdfs:subPropertyOf`, `owl:equivalentProperty`, `owl:TransitiveProperty` and
+  `owl:ReflexiveProperty`
+- property chains of two or three properties (`owl:propertyChainAxiom`)
+- `rdfs:domain`, `rdfs:range` and `owl:disjointWith`
+- `owl:hasKey`, with any number of key properties
 
-Reasoning is PTIME-complete (polynomial in the ontology size), making it practical for
-ontologies with millions of axioms.
+It does not read `owl:hasValue`, nominals (`owl:oneOf`), `owl:hasSelf` or the
+EL datatypes; axioms it does not read are ignored without a warning.
 
 ## Completion Rules Implemented
 
-| Rule | Description |
-|------|-------------|
-| CR1 | If `C ⊑ D` and `x type C` then `x type D` (subClassOf inheritance) |
-| CR2 | If `C1 ⊓ C2 ⊑ D` and `x type C1` and `x type C2` then `x type D` |
-| CR3 | If `C ⊑ ∃r.D` and `x type C` then there exists `y` with `x r y` and `y type D` |
-| CR4 | If `∃r.C ⊑ D` and `x r y` and `y type C` then `x type D` |
-| CR5 | Property chain: if `r ∘ s ⊑ t` and `x r y` and `y s z` then `x t z` |
-| CR6 | Top class subsumption propagation |
-| CR7 | Domain propagation: if `p rdfs:domain A` and `x p y` then `x type A` |
-| CR8 | Range propagation: if `p rdfs:range A` and `x p y` then `y type A` |
-| CR9 | Reflexivity: if `p type ReflexiveProperty` and `x` appears in any triple then `x p x` |
-| CR10 | 3-element property chain (`r ∘ s ∘ t ⊑ u`) |
-| hasKey | If two individuals share all key property values, assert `owl:sameAs` |
+The rule names are this implementation's own; they do not follow the CR
+numbering of the EL++ literature. `x type C` is `x rdf:type C`, and every
+derived triple is written to the target graph.
+
+| Rule | What it derives |
+|------|-----------------|
+| EQC | `A ≡ B` ⇒ `A ⊑ B` and `B ⊑ A` |
+| CR1 | `A ⊑ B`, `B ⊑ C` ⇒ `A ⊑ C` |
+| CR2 | `C ≡ B₁ ⊓ … ⊓ Bₙ` ⇒ `C ⊑ Bᵢ`; for two operands, `A ⊑ B₁` and `A ⊑ B₂` ⇒ `A ⊑ C` |
+| ROLE | `p ≡ q` ⇒ `p ⊑ q`, `q ⊑ p`; `p ⊑ q`, `q ⊑ r` ⇒ `p ⊑ r` |
+| CR4 | `A ⊑ ∃r.B`, `B ⊑ C` (or `C = owl:Thing`), `r ⊑ s` ⇒ `A ⊑ ∃s.C` for every restriction `∃s.C` in scope; two restrictions on the same property and filler are the same class |
+| CR5 | Two-property chain: `p ← p₁ ∘ p₂`, `x p₁ y`, `y p₂ z` ⇒ `x p z` |
+| CR6 | `A ⊑ D`, `D ⊑ ⊥` ⇒ `A ⊑ ⊥`; `A ⊑ ∃r.B`, `B ⊑ ⊥` ⇒ `A ⊑ ⊥`; `A ⊑ B`, `A ⊑ C`, `B` disjoint with `C` ⇒ `A ⊑ ⊥` |
+| CR7 | `p rdfs:domain A`, `x p y` ⇒ `x type A` |
+| CR8 | `p rdfs:range A`, `x p y` (y an IRI or blank node) ⇒ `y type A` |
+| CR9 | `p` reflexive ⇒ `x p x` for every IRI `x` that is the subject of a triple |
+| CR10 | Three-property chain: `p ← p₁ ∘ p₂ ∘ p₃` ⇒ `x p w` |
+| ABox | `x type C`, `C ⊑ D` ⇒ `x type D`; two-operand intersection membership; `x p y`, `y type B` (or `B = owl:Thing`) ⇒ `x type ∃p.B`; `x p y`, `p ⊑ q` ⇒ `x q y`; `p` transitive ⇒ `x p z` from `x p y`, `y p z` |
+| hasKey | `C hasKey (p₁ … pₙ)`, `x` and `y` of type `C` share a value of every `pᵢ` ⇒ `x owl:sameAs y` |
+
+There is no rule from `A ⊑ ∃p.B` and `B ⊑ C` to a subsumption *into* `A`.
+An earlier CR3 derived `∃p.C ⊑ A`, which does not follow; with the ABox
+existential rule it typed any `x p y, y type C` as an `A`.
+
+## Consistency
+
+After the fixed point `classify()` checks consistency and fails with
+`ReasoningError::Inconsistency` (HTTP 500 from `POST /api/reasoning/materialize`)
+when an individual is an instance of `owl:Nothing` (directly or through its
+classes), an individual is an instance of two disjoint classes, or
+`owl:Thing ⊑ owl:Nothing`. What was derived stays in the target graph. An
+unsatisfiable class without instances is not an inconsistency;
+`El2Classifier::unsatisfiable_classes()` lists those. Set
+`detect_inconsistency = false` to skip the check.
+
+A run without a dataset or source graphs reads only the unnamed default graph,
+so a rule whose premise was itself derived into the target graph does not
+fire there (a transitive chain longer than two, `A ⊑ ∃r.B ⊑ … ⊑ D`). Dataset
+runs read the target graph too.
 
 ## Configuration
 
@@ -50,11 +81,11 @@ open-triplestore = { features = ["full"] }
 ## API Usage
 
 ```rust
-use open_triplestore::reasoning::owl2_el::Owl2ELReasoner;
+use open_triplestore::reasoning::owl2_el::El2Classifier;
 use open_triplestore::store::TripleStore;
 
 let store = TripleStore::open("./data")?;
-let reasoner = Owl2ELReasoner::new(&store);
+let reasoner = El2Classifier::new(&store);
 let report = reasoner.classify()?;
 
 println!(

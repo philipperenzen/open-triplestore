@@ -1,27 +1,46 @@
 //! OWL 2 EL profile — EL++ completion-rule classifier.
 //!
 //! OWL 2 EL is the profile used for large biomedical ontologies (SNOMED CT,
-//! Gene Ontology).  It supports intersection, existential quantification,
-//! property chains, transitivity, reflexivity, domain/range, and hasKey.
+//! Gene Ontology). This module covers part of it: intersections, existential
+//! restrictions, equivalent classes, the property hierarchy, transitive and
+//! reflexive properties, property chains of two or three properties,
+//! domain/range, disjoint classes and hasKey.
 //!
-//! This implementation expresses the EL++ completion rules (CR1–CR6) as
-//! SPARQL INSERT operations executed in a fixed-point loop, writing the
-//! derived subsumption hierarchy into the `target_graph`.
+//! The completion rules are SPARQL INSERT operations executed in a
+//! fixed-point loop, writing what they derive into the `target_graph`. The
+//! rule names are this module's own; they do not follow the CR numbering of
+//! the EL++ literature.
 //!
 //! # Completion Rules
 //!
-//! | Rule | Description                                              |
-//! |------|----------------------------------------------------------|
-//! | CR1  | subClassOf transitivity                                  |
-//! | CR2  | Intersection decomposition and composition               |
-//! | CR3  | Existential introduction (∃P.C ⊑ D → C ⊑ ∀P.D)         |
-//! | CR4  | Existential propagation along subClassOf                 |
-//! | CR5  | Property chains (P1 ∘ P2 ⊑ P)                           |
-//! | CR6  | Bottom propagation (owl:Nothing)                         |
-//! | CR7  | Role domain: ∃P.⊤ ⊑ A + x P y → x type A               |
-//! | CR8  | Role range: ⊤ ⊑ ∀P.A + x P y → y type A                |
-//! | CR9  | Reflexivity: P reflexive + x type C → x P x             |
-//! | CR10 | Arbitrary-length property chains (N-element)             |
+//! | Rule  | Description                                                  |
+//! |-------|--------------------------------------------------------------|
+//! | EQC   | `A ≡ B` → `A ⊑ B`, `B ⊑ A`                                   |
+//! | CR1   | subClassOf transitivity                                      |
+//! | CR2   | Intersection decomposition and (two-operand) composition     |
+//! | ROLE  | `p ≡ q` → `p ⊑ q`, `q ⊑ p`; subPropertyOf transitivity       |
+//! | CR4   | `A ⊑ ∃r.B`, `B ⊑ C` (or `C = ⊤`), `r ⊑ s` → `A ⊑ ∃s.C`       |
+//! | CR5   | Property chains (P1 ∘ P2 ⊑ P)                                |
+//! | CR6   | Bottom: along subClassOf, through `∃r.⊥`, and from disjoint superclasses |
+//! | CR7   | Role domain: `P rdfs:domain A` + `x P y` → `x type A`        |
+//! | CR8   | Role range: `P rdfs:range A` + `x P y` → `y type A`          |
+//! | CR9   | Reflexivity: P reflexive → `x P x`                           |
+//! | CR10  | Three-element property chains                                |
+//! | ABox  | Typing, intersection and existential membership; sub-property and transitive property assertions; n-ary hasKey |
+//!
+//! There is deliberately no rule that turns `A ⊑ ∃p.B` and `B ⊑ C` into a
+//! subsumption *into* `A`: the old CR3 wrote `∃p.C ⊑ A`, which does not
+//! follow, and with the ABox existential rule it typed any `x p y, y a C`
+//! as an `A`.
+//!
+//! # Consistency
+//!
+//! An EL ontology is inconsistent when an individual is an instance of
+//! `owl:Nothing` (directly, through its classes, or by being typed with two
+//! disjoint classes) or `owl:Thing ⊑ owl:Nothing`. An unsatisfiable *class*
+//! (`C ⊑ owl:Nothing`) without instances is not an inconsistency;
+//! [`El2Classifier::unsatisfiable_classes`] lists those.
+//! [`El2Classifier::classify`] checks consistency after the fixed point.
 #![allow(dead_code)]
 
 use std::time::Instant;
@@ -32,6 +51,11 @@ use crate::store::TripleStore;
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const RDFS_SUB_CLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+const RDFS_SUB_PROPERTY_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subPropertyOf";
+const OWL_EQUIVALENT_CLASS: &str = "http://www.w3.org/2002/07/owl#equivalentClass";
+const OWL_EQUIVALENT_PROPERTY: &str = "http://www.w3.org/2002/07/owl#equivalentProperty";
+const OWL_TRANSITIVE_PROPERTY: &str = "http://www.w3.org/2002/07/owl#TransitiveProperty";
+const OWL_DISJOINT_WITH: &str = "http://www.w3.org/2002/07/owl#disjointWith";
 const OWL_INTERSECTION_OF: &str = "http://www.w3.org/2002/07/owl#intersectionOf";
 const OWL_SOME_VALUES_FROM: &str = "http://www.w3.org/2002/07/owl#someValuesFrom";
 const OWL_ON_PROPERTY: &str = "http://www.w3.org/2002/07/owl#onProperty";
@@ -40,7 +64,6 @@ const OWL_NOTHING: &str = "http://www.w3.org/2002/07/owl#Nothing";
 const OWL_THING: &str = "http://www.w3.org/2002/07/owl#Thing";
 const OWL_ALL_VALUES_FROM: &str = "http://www.w3.org/2002/07/owl#allValuesFrom";
 const OWL_REFLEXIVE_PROPERTY: &str = "http://www.w3.org/2002/07/owl#ReflexiveProperty";
-const OWL_HAS_KEY: &str = "http://www.w3.org/2002/07/owl#hasKey";
 const OWL_SAME_AS: &str = "http://www.w3.org/2002/07/owl#sameAs";
 const RDFS_DOMAIN: &str = "http://www.w3.org/2000/01/rdf-schema#domain";
 const RDFS_RANGE: &str = "http://www.w3.org/2000/01/rdf-schema#range";
@@ -57,6 +80,9 @@ pub struct El2Classifier<'a> {
     /// When set, the rules read ONLY these graphs (plus the target graph).
     /// Without it they read the unnamed default graph, as they always did.
     sources: Option<Vec<String>>,
+    /// Check consistency after the fixed point and fail with
+    /// [`ReasoningError::Inconsistency`] when the ontology is inconsistent.
+    pub detect_inconsistency: bool,
 }
 
 impl<'a> El2Classifier<'a> {
@@ -102,6 +128,7 @@ impl<'a> El2Classifier<'a> {
             store,
             target_graph: OWL2_EL_ENTAILMENT_GRAPH.to_string(),
             sources: None,
+            detect_inconsistency: true,
         }
     }
 
@@ -111,6 +138,11 @@ impl<'a> El2Classifier<'a> {
     }
 
     /// Classify the ontology and return a report.
+    ///
+    /// Fails with [`ReasoningError::Inconsistency`] when the result is
+    /// inconsistent (see [`check_consistency`](Self::check_consistency)) and
+    /// `detect_inconsistency` is set; what was derived stays in the target
+    /// graph.
     pub fn classify(&self) -> Result<ReasoningReport, ReasoningError> {
         let start = Instant::now();
         let mut iterations = 0usize;
@@ -123,12 +155,17 @@ impl<'a> El2Classifier<'a> {
             iterations += 1;
             let before = count_graph(self.store, &self.target_graph)?;
 
+            // TBox
+            self.rule_equivalent_class()?;
             self.rule_cr1()?;
             self.rule_cr2()?;
-            self.rule_cr3()?;
+            self.rule_role_hierarchy()?;
             self.rule_cr4()?;
-            self.rule_cr5()?;
             self.rule_cr6()?;
+            // ABox
+            self.rule_abox_subproperty()?;
+            self.rule_abox_transitive()?;
+            self.rule_cr5()?;
             self.rule_cr7()?;
             self.rule_cr8()?;
             self.rule_cr9()?;
@@ -149,6 +186,12 @@ impl<'a> El2Classifier<'a> {
             }
         }
 
+        if self.detect_inconsistency {
+            if let Some(reason) = self.inconsistency()? {
+                return Err(ReasoningError::Inconsistency(reason));
+            }
+        }
+
         let final_count = count_graph(self.store, &self.target_graph)?;
         info!(
             "EL classification complete: {} triples in {} iterations ({} ms)",
@@ -166,16 +209,98 @@ impl<'a> El2Classifier<'a> {
         })
     }
 
-    /// Check whether the ontology is consistent (owl:Nothing has no subclasses
-    /// other than itself).
+    /// Whether the classified ontology is consistent: no individual is an
+    /// instance of `owl:Nothing` or of two disjoint classes, and
+    /// `owl:Thing ⊑ owl:Nothing` does not hold. Run it after
+    /// [`classify`](Self::classify) (with `detect_inconsistency` off), since
+    /// it reads what the rules derived.
+    ///
+    /// An unsatisfiable class (`C ⊑ owl:Nothing`) is *not* an inconsistency
+    /// on its own — see [`unsatisfiable_classes`](Self::unsatisfiable_classes).
     pub fn check_consistency(&self) -> Result<bool, ReasoningError> {
-        let q = format!(
-            "ASK {{ ?c <{RDFS_SUB_CLASS_OF}> <{OWL_NOTHING}> . FILTER(?c != <{OWL_NOTHING}>) }}"
+        Ok(self.inconsistency()?.is_none())
+    }
+
+    /// Why the ontology is inconsistent, or `None` when it is consistent.
+    fn inconsistency(&self) -> Result<Option<String>, ReasoningError> {
+        let tg = &self.target_graph;
+        let in_nothing = format!(
+            r#"SELECT ?x WHERE {{
+                   {{ ?x <{RDF_TYPE}> <{OWL_NOTHING}> }}
+                   UNION {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> <{OWL_NOTHING}> }} }}
+               }} LIMIT 1"#
         );
-        match self.run_query(&q)? {
-            oxigraph::sparql::QueryResults::Boolean(b) => Ok(!b),
-            _ => Ok(true),
+        if let Some(x) = self.first_binding(&in_nothing, "x")? {
+            return Ok(Some(format!("{x} is an instance of owl:Nothing")));
         }
+        let top_bottom = format!(
+            r#"ASK {{
+                   {{ <{OWL_THING}> <{RDFS_SUB_CLASS_OF}> <{OWL_NOTHING}> }}
+                   UNION {{ GRAPH <{tg}> {{ <{OWL_THING}> <{RDFS_SUB_CLASS_OF}> <{OWL_NOTHING}> }} }}
+               }}"#
+        );
+        if let oxigraph::sparql::QueryResults::Boolean(true) = self.run_query(&top_bottom)? {
+            return Ok(Some("owl:Thing is a subclass of owl:Nothing".to_string()));
+        }
+        let disjoint = format!(
+            r#"SELECT ?x WHERE {{
+                   {{ ?a <{OWL_DISJOINT_WITH}> ?b }}
+                   {{ ?x <{RDF_TYPE}> ?a }} UNION {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?a }} }}
+                   {{ ?x <{RDF_TYPE}> ?b }} UNION {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?b }} }}
+               }} LIMIT 1"#
+        );
+        if let Some(x) = self.first_binding(&disjoint, "x")? {
+            return Ok(Some(format!("{x} is an instance of two disjoint classes")));
+        }
+        Ok(None)
+    }
+
+    /// The named classes other than `owl:Nothing` that are subclasses of
+    /// `owl:Nothing` after classification, sorted.
+    pub fn unsatisfiable_classes(&self) -> Result<Vec<String>, ReasoningError> {
+        let tg = &self.target_graph;
+        let q = format!(
+            r#"SELECT DISTINCT ?c WHERE {{
+                   {{ ?c <{RDFS_SUB_CLASS_OF}> <{OWL_NOTHING}> }}
+                   UNION {{ GRAPH <{tg}> {{ ?c <{RDFS_SUB_CLASS_OF}> <{OWL_NOTHING}> }} }}
+                   FILTER(isIRI(?c) && ?c != <{OWL_NOTHING}>)
+               }}"#
+        );
+        let mut out = Vec::new();
+        if let oxigraph::sparql::QueryResults::Solutions(sols) = self.run_query(&q)? {
+            for sol in sols {
+                let sol = sol.map_err(|e| ReasoningError::Query(e.to_string()))?;
+                if let Some(oxigraph::model::Term::NamedNode(c)) = sol.get("c") {
+                    out.push(c.as_str().to_string());
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    fn first_binding(&self, sparql: &str, var: &str) -> Result<Option<String>, ReasoningError> {
+        if let oxigraph::sparql::QueryResults::Solutions(mut sols) = self.run_query(sparql)? {
+            if let Some(sol) = sols.next() {
+                let sol = sol.map_err(|e| ReasoningError::Query(e.to_string()))?;
+                return Ok(sol.get(var).map(|t| t.to_string()));
+            }
+        }
+        Ok(None)
+    }
+
+    // ─── EQC: equivalent classes ─────────────────────────────────────────────
+    // A ≡ B → A ⊑ B and B ⊑ A. Either side may be a class expression (an
+    // intersection or a restriction), which is how EL definitions are written.
+
+    fn rule_equivalent_class(&self) -> Result<(), ReasoningError> {
+        let q = format!(
+            r#"INSERT {{ GRAPH <{tg}> {{ ?a <{RDFS_SUB_CLASS_OF}> ?b . ?b <{RDFS_SUB_CLASS_OF}> ?a }} }}
+               WHERE  {{ ?a <{OWL_EQUIVALENT_CLASS}> ?b . FILTER(?a != ?b) }}"#,
+            tg = self.target_graph
+        );
+        self.run_update(&q)?;
+        Ok(())
     }
 
     // ─── CR1: subClassOf transitivity ────────────────────────────────────────
@@ -228,39 +353,43 @@ impl<'a> El2Classifier<'a> {
         Ok(())
     }
 
-    // ─── CR3: existential introduction ────────────────────────────────────────
-    // If A ⊑ ∃P.B and B ⊑ C → A ⊑ ∃P.C
+    // ─── ROLE: the property hierarchy ────────────────────────────────────────
+    // p ≡ q → p ⊑ q and q ⊑ p; p ⊑ q, q ⊑ r → p ⊑ r.
 
-    fn rule_cr3(&self) -> Result<(), ReasoningError> {
+    fn rule_role_hierarchy(&self) -> Result<(), ReasoningError> {
+        let tg = &self.target_graph;
         let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?restr2 <{RDFS_SUB_CLASS_OF}> ?a }} }}
-               WHERE {{
-                   ?restr1 <{OWL_SOME_VALUES_FROM}> ?b .
-                   ?restr1 <{OWL_ON_PROPERTY}> ?p .
-                   ?restr2 <{OWL_SOME_VALUES_FROM}> ?c .
-                   ?restr2 <{OWL_ON_PROPERTY}> ?p .
-                   ?b <{RDFS_SUB_CLASS_OF}> ?c .
-                   ?a <{RDFS_SUB_CLASS_OF}> ?restr1 .
-                   FILTER(?restr1 != ?restr2) FILTER(?b != ?c)
-               }}"#,
-            tg = self.target_graph
+            r#"INSERT {{ GRAPH <{tg}> {{ ?p <{RDFS_SUB_PROPERTY_OF}> ?q . ?q <{RDFS_SUB_PROPERTY_OF}> ?p }} }}
+               WHERE  {{ ?p <{OWL_EQUIVALENT_PROPERTY}> ?q . FILTER(?p != ?q) }} ;
+               INSERT {{ GRAPH <{tg}> {{ ?p <{RDFS_SUB_PROPERTY_OF}> ?r }} }}
+               WHERE  {{ ?p <{RDFS_SUB_PROPERTY_OF}> ?q .
+                         ?q <{RDFS_SUB_PROPERTY_OF}> ?r .
+                         FILTER(?p != ?r) }}"#
         );
         self.run_update(&q)?;
         Ok(())
     }
 
-    // ─── CR4: existential propagation ─────────────────────────────────────────
-    // If A ⊑ ∃P.B and ∃P.B ⊑ C → A ⊑ C
+    // ─── CR4: existential subsumption, structurally ──────────────────────────
+    // A ⊑ ∃r.B, B ⊑ C (or B = C, or C = ⊤), r ⊑ s (or r = s) → A ⊑ ∃s.C,
+    // for every restriction ∃s.C in scope. CR1 then carries A to whatever
+    // ∃s.C is a subclass of (∃s.C ⊑ D gives A ⊑ D), and CR2 to intersections
+    // that have ∃s.C as an operand. Two restrictions on the same property
+    // with the same filler are the same class: each subsumes the other.
 
     fn rule_cr4(&self) -> Result<(), ReasoningError> {
         let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?a <{RDFS_SUB_CLASS_OF}> ?c }} }}
+            r#"INSERT {{ GRAPH <{tg}> {{ ?a <{RDFS_SUB_CLASS_OF}> ?r2 }} }}
                WHERE {{
-                   ?restr <{OWL_SOME_VALUES_FROM}> ?b .
-                   ?restr <{OWL_ON_PROPERTY}> ?p .
-                   ?restr <{RDFS_SUB_CLASS_OF}> ?c .
-                   ?a <{RDFS_SUB_CLASS_OF}> ?restr .
-                   FILTER(?a != ?c)
+                   ?a  <{RDFS_SUB_CLASS_OF}> ?r1 .
+                   ?r1 <{OWL_ON_PROPERTY}> ?p ;
+                       <{OWL_SOME_VALUES_FROM}> ?b .
+                   {{ ?r2 <{OWL_SOME_VALUES_FROM}> ?b }}
+                   UNION {{ ?b <{RDFS_SUB_CLASS_OF}> ?c . ?r2 <{OWL_SOME_VALUES_FROM}> ?c }}
+                   UNION {{ ?r2 <{OWL_SOME_VALUES_FROM}> <{OWL_THING}> }}
+                   ?r2 <{OWL_ON_PROPERTY}> ?s .
+                   FILTER(?s = ?p || EXISTS {{ ?p <{RDFS_SUB_PROPERTY_OF}> ?s }})
+                   FILTER(?r1 != ?r2 && ?a != ?r2)
                }}"#,
             tg = self.target_graph
         );
@@ -291,17 +420,39 @@ impl<'a> El2Classifier<'a> {
     }
 
     // ─── CR6: bottom propagation ──────────────────────────────────────────────
-    // If A ⊑ owl:Nothing → all descendants of A also ⊑ owl:Nothing
+    // A ⊑ D, D ⊑ ⊥ → A ⊑ ⊥; A ⊑ ∃r.B, B ⊑ ⊥ → A ⊑ ⊥ (∃r.⊥ is empty);
+    // A ⊑ B, A ⊑ C, B disjointWith C → A ⊑ ⊥ (and A ⊑ C, A disjointWith C).
 
     fn rule_cr6(&self) -> Result<(), ReasoningError> {
+        let tg = &self.target_graph;
         let q = format!(
             r#"INSERT {{ GRAPH <{tg}> {{ ?c <{RDFS_SUB_CLASS_OF}> <{OWL_NOTHING}> }} }}
                WHERE {{
                    ?c <{RDFS_SUB_CLASS_OF}> ?d .
                    ?d <{RDFS_SUB_CLASS_OF}> <{OWL_NOTHING}> .
                    FILTER(?c != <{OWL_NOTHING}>)
-               }}"#,
-            tg = self.target_graph
+               }} ;
+               INSERT {{ GRAPH <{tg}> {{ ?a <{RDFS_SUB_CLASS_OF}> <{OWL_NOTHING}> }} }}
+               WHERE {{
+                   ?a <{RDFS_SUB_CLASS_OF}> ?r .
+                   ?r <{OWL_ON_PROPERTY}> ?p ;
+                      <{OWL_SOME_VALUES_FROM}> ?b .
+                   {{ ?b <{RDFS_SUB_CLASS_OF}> <{OWL_NOTHING}> }}
+                   UNION {{ BIND(<{OWL_NOTHING}> AS ?b) }}
+               }} ;
+               INSERT {{ GRAPH <{tg}> {{ ?a <{RDFS_SUB_CLASS_OF}> <{OWL_NOTHING}> }} }}
+               WHERE {{
+                   {{ ?b <{OWL_DISJOINT_WITH}> ?c }} UNION {{ ?c <{OWL_DISJOINT_WITH}> ?b }}
+                   ?a <{RDFS_SUB_CLASS_OF}> ?b .
+                   ?a <{RDFS_SUB_CLASS_OF}> ?c .
+                   FILTER(?a != <{OWL_NOTHING}>)
+               }} ;
+               INSERT {{ GRAPH <{tg}> {{ ?a <{RDFS_SUB_CLASS_OF}> <{OWL_NOTHING}> }} }}
+               WHERE {{
+                   {{ ?a <{OWL_DISJOINT_WITH}> ?c }} UNION {{ ?c <{OWL_DISJOINT_WITH}> ?a }}
+                   ?a <{RDFS_SUB_CLASS_OF}> ?c .
+                   FILTER(?a != <{OWL_NOTHING}>)
+               }}"#
         );
         self.run_update(&q)?;
         Ok(())
@@ -374,6 +525,31 @@ impl<'a> El2Classifier<'a> {
         Ok(())
     }
 
+    // ─── ABox: property hierarchy and transitivity ───────────────────────────
+    // x p y, p ⊑ q → x q y;  x p y, y p z, p transitive → x p z
+
+    fn rule_abox_subproperty(&self) -> Result<(), ReasoningError> {
+        let q = format!(
+            r#"INSERT {{ GRAPH <{tg}> {{ ?x ?q ?y }} }}
+               WHERE {{ ?p <{RDFS_SUB_PROPERTY_OF}> ?q . ?x ?p ?y .
+                        FILTER(isIRI(?q) && ?p != ?q) }}"#,
+            tg = self.target_graph
+        );
+        self.run_update(&q)?;
+        Ok(())
+    }
+
+    fn rule_abox_transitive(&self) -> Result<(), ReasoningError> {
+        let q = format!(
+            r#"INSERT {{ GRAPH <{tg}> {{ ?x ?p ?z }} }}
+               WHERE {{ ?p <{RDF_TYPE}> <{OWL_TRANSITIVE_PROPERTY}> .
+                        ?x ?p ?y . ?y ?p ?z . FILTER(isIRI(?p)) }}"#,
+            tg = self.target_graph
+        );
+        self.run_update(&q)?;
+        Ok(())
+    }
+
     // ─── ABox: individual type propagation ──────────────────────────────────
     // x type C, C subClassOf D → x type D  (applies TBox to individuals)
 
@@ -422,17 +598,20 @@ impl<'a> El2Classifier<'a> {
     }
 
     // ─── ABox: existential restriction membership ────────────────────────────
-    // x P y, y type B, [someValuesFrom B, onProperty P] subClassOf C → x type C
+    // x P y, y type B (or B = ⊤), R = [someValuesFrom B, onProperty P]
+    // → x type R. ABox typing then carries x to every superclass of R, and the
+    // intersection rule to an intersection that has R as an operand.
 
     fn rule_abox_existential(&self) -> Result<(), ReasoningError> {
         let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?c }} }}
+            r#"INSERT {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?restr }} }}
                WHERE {{
                    ?restr <{OWL_SOME_VALUES_FROM}> ?b ;
                           <{OWL_ON_PROPERTY}> ?p .
-                   ?restr <{RDFS_SUB_CLASS_OF}> ?c .
                    ?x ?p ?y .
-                   ?y <{RDF_TYPE}> ?b .
+                   {{ ?y <{RDF_TYPE}> ?b }}
+                   UNION {{ GRAPH <{tg}> {{ ?y <{RDF_TYPE}> ?b }} }}
+                   UNION {{ BIND(<{OWL_THING}> AS ?b) }}
                    FILTER(isIRI(?x))
                }}"#,
             tg = self.target_graph
@@ -442,24 +621,28 @@ impl<'a> El2Classifier<'a> {
     }
 
     // ─── hasKey for EL ───────────────────────────────────────────────────────
-    // Reuses RL pattern: C hasKey (p) . x type C . y type C . x p v . y p v → x sameAs y
+    // C hasKey (p1 … pn) . x type C . y type C . x pi vi . y pi vi for every
+    // key property → x sameAs y. The keys are read in Rust (the list walk is
+    // shared with the RL `prp-key` rule), then one INSERT per key.
 
     fn rule_has_key(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?x <{OWL_SAME_AS}> ?y }} }}
-               WHERE {{
-                   ?c <{OWL_HAS_KEY}> ?list .
-                   ?list <{RDF_FIRST}> ?p ;
-                         <{RDF_REST}>  <{RDF_NIL}> .
-                   ?x <{RDF_TYPE}> ?c .
-                   ?y <{RDF_TYPE}> ?c .
-                   ?x ?p ?v .
-                   ?y ?p ?v .
-                   FILTER(?x != ?y) FILTER(isIRI(?x)) FILTER(isIRI(?y))
-               }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
+        let tg = &self.target_graph;
+        for (class, props) in super::common::has_keys(self.store, self.scope().as_deref())? {
+            let mut patterns = String::new();
+            for (i, p) in props.iter().enumerate() {
+                patterns.push_str(&format!("?x <{p}> ?v{i} . ?y <{p}> ?v{i} . "));
+            }
+            let q = format!(
+                r#"INSERT {{ GRAPH <{tg}> {{ ?x <{OWL_SAME_AS}> ?y }} }}
+                   WHERE {{
+                       {{ ?x <{RDF_TYPE}> <{class}> }} UNION {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> <{class}> }} }}
+                       {{ ?y <{RDF_TYPE}> <{class}> }} UNION {{ GRAPH <{tg}> {{ ?y <{RDF_TYPE}> <{class}> }} }}
+                       {patterns}
+                       FILTER(?x != ?y) FILTER(isIRI(?x)) FILTER(isIRI(?y))
+                   }}"#
+            );
+            self.run_update(&q)?;
+        }
         Ok(())
     }
 }

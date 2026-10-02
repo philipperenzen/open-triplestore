@@ -213,6 +213,85 @@ async fn entailment_owl2_dl_selects_the_dl_graph() {
     );
 }
 
+/// `POST /api/reasoning/rewrite` spells out the TBox in its answer (every
+/// subclass it unions in), so it reads the TBox only from graphs the caller
+/// may read. It read the whole unnamed default graph for anyone, and none of
+/// the named graphs `/sparql` would have scoped the same caller to.
+#[cfg(feature = "owl2-ql")]
+#[tokio::test]
+async fn rewrite_reads_only_the_callers_graphs() {
+    use open_triplestore::auth::models::SystemRole;
+    const MINE: &str = "http://example.org/g/mine";
+    const SECRET: &str = "http://example.org/g/secret";
+    let (state, _admin) = admin_state();
+    let load = |ttl: &str, graph: Option<&str>| {
+        state
+            .store
+            .load_str(ttl, oxigraph::io::RdfFormat::Turtle, graph)
+            .unwrap()
+    };
+    load(
+        "<http://example.org/Lecturer> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://example.org/Staff> .",
+        Some(MINE),
+    );
+    load(
+        "<http://example.org/SecretAgent> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://example.org/Staff> .",
+        Some(SECRET),
+    );
+    load(
+        "<http://example.org/Hidden> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://example.org/Staff> .",
+        None,
+    );
+    state
+        .auth_db
+        .create_user("reader", "reader", "reader@t.com", "hash", SystemRole::User)
+        .unwrap();
+    state
+        .auth_db
+        .grant_graph_permission("rule-1", MINE, "user", "reader", "read", "adm")
+        .unwrap();
+    let rewrite = |user: &str, role: &str| {
+        let app = test_app(state.clone());
+        let token = mint_token(user, user, role);
+        async move {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/api/reasoning/rewrite")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::from(
+                            json!({ "query": "SELECT ?x WHERE { ?x a <http://example.org/Staff> }" })
+                                .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            body_json(resp.into_body()).await["rewritten"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+    };
+
+    let rewritten = rewrite("reader", "user").await;
+    assert!(rewritten.contains("Lecturer"), "{rewritten}");
+    assert!(!rewritten.contains("SecretAgent"), "{rewritten}");
+    assert!(!rewritten.contains("Hidden"), "{rewritten}");
+
+    // A caller who may read nothing gets the query back unchanged.
+    state
+        .auth_db
+        .create_user("nobody", "nobody", "nobody@t.com", "hash", SystemRole::User)
+        .unwrap();
+    let rewritten = rewrite("nobody", "user").await;
+    assert!(!rewritten.contains("Lecturer"), "{rewritten}");
+    assert!(!rewritten.contains("Hidden"), "{rewritten}");
+}
+
 // ── Identity policy (owl:sameAs) — P1 item 1 ─────────────────────────────────
 //
 // What a dataset's materialisation does with owl:sameAs is a per-dataset (or
