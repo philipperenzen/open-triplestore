@@ -605,6 +605,16 @@ Bundled test data:
     core and 10 sparql files; the suite's root tests/manifest.ttl is not
     included; otherwise unmodified. The notice of changes is in
     tests/fixtures/w3c-shacl/PROVENANCE.md.
+  - TopQuadrant SHACL API, SHACL Advanced Features tests —
+    tests/fixtures/shacl-af-topquadrant/{expression,function,rules,target}/
+    (11 files). TopBraid SHACL API; original commit content Copyright
+    2015-2017 TopQuadrant Inc. (upstream NOTICE, copied unchanged as
+    tests/fixtures/shacl-af-topquadrant/NOTICE). From
+    https://github.com/TopQuadrant/shacl (src/test/resources/sh/tests),
+    commit 6687b48bd2c81eda369f224598061f87dce0d425. Unmodified. Apache-2.0;
+    upstream LICENSE in tests/fixtures/shacl-af-topquadrant/LICENSE-Apache-2.0.txt,
+    licence text also in LICENSES/Apache-2.0.txt; details in
+    tests/fixtures/shacl-af-topquadrant/LICENSE.md and PROVENANCE.md.
   - OGC GeoSPARQL 1.1 SHACL validator and example corpus —
     tests/fixtures/ogc-geosparql/validator.ttl and
     tests/fixtures/ogc-geosparql/examples/*.ttl (48 files). © Open Geospatial

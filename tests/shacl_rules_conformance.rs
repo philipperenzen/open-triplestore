@@ -670,44 +670,288 @@ ex:Off a sh:NodeShape ; sh:targetClass ex:Thing ; sh:deactivated true ;
     assert_eq!(n, 0);
 }
 
-// ─── Fail closed: node expressions in triple rules, unusable targets ─────────
+// ─── Node expressions in triple rules (SHACL-AF §6, §8.5) ─────────────────────
 
-/// SHACL-AF makes `sh:subject`/`sh:predicate`/`sh:object` node expressions; a
-/// blank node there (`sh:object [ sh:path ex:p ]`) is an expression to
-/// evaluate, not a term. The engine has no node-expression evaluator, and it
-/// used to load the blank node as a fixed term: every focus node got a triple
-/// pointing at the shapes graph's own node, written into the data graph. Such
-/// rules are refused at load until node expressions are implemented.
+/// SHACL-AF makes `sh:subject`/`sh:predicate`/`sh:object` node expressions: a
+/// blank node there (`sh:object [ sh:path ex:p ]`) is an expression the rule
+/// evaluates per focus node, and the rule derives one triple per combination
+/// of the three result sets. It used to be loaded as a fixed term, so every
+/// focus node got a triple pointing at the shapes graph's own blank node,
+/// written into the data graph; then it was refused at load.
 #[test]
-fn a_triple_rule_with_a_node_expression_is_refused() {
-    for (what, rule) in [
-        (
-            "object",
-            "sh:subject sh:this ; sh:predicate ex:copy ; sh:object [ sh:path ex:p ]",
+fn triple_rule_node_expressions_compute_their_terms() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:Thing ;
+  sh:rule [ a sh:TripleRule ; sh:subject sh:this ; sh:predicate ex:copy ; sh:object [ sh:path ex:p ] ] ;
+  sh:rule [ a sh:TripleRule ; sh:subject [ sh:path ex:p ] ; sh:predicate ex:backTo ; sh:object sh:this ] ;
+  sh:rule [ a sh:TripleRule ; sh:subject sh:this ; sh:predicate [ sh:path ex:pred ] ; sh:object true ] ."#;
+    let store = store_with(
+        shapes,
+        "ex:t a ex:Thing ; ex:p ex:v1, ex:v2 ; ex:pred ex:q . ex:v1 ex:name \"one\" .",
+    );
+    infer(&store, "urn:shapes", &[]).unwrap();
+    for q in [
+        "ASK { ex:t ex:copy ex:v1 }",
+        "ASK { ex:t ex:copy ex:v2 }",
+        "ASK { ex:v1 ex:backTo ex:t }",
+        "ASK { ex:v2 ex:backTo ex:t }",
+        "ASK { ex:t ex:q true }",
+    ] {
+        assert!(ask(&store, q), "missing: {q}");
+    }
+    assert!(
+        !ask(
+            &store,
+            "ASK { ?s ?p ?o FILTER(isBlank(?o) || isBlank(?s)) }"
         ),
+        "no triple may point at the shapes graph's expression node"
+    );
+    assert_eq!(rows(&store, "SELECT ?o WHERE { ex:t ex:copy ?o }"), 2);
+}
+
+/// A function expression calls its SHACL function once per combination of
+/// its arguments' outputs (§6.4): two values of `ex:p1`, one of `ex:p2` and
+/// three of `ex:p3` derive six triples. (After TopQuadrant's
+/// `rules/triple/functions-permutations` test.)
+#[test]
+fn triple_rule_function_expression_takes_every_argument_combination() {
+    let shapes = r#"
+ex:concat3 a sh:SPARQLFunction ;
+  sh:parameter [ sh:path ex:arg1 ] ; sh:parameter [ sh:path ex:arg2 ] ; sh:parameter [ sh:path ex:arg3 ] ;
+  sh:select "SELECT ?result WHERE { BIND (CONCAT($arg1, $arg2, $arg3) AS ?result) }" .
+ex:S a sh:NodeShape ; sh:targetClass ex:Thing ;
+  sh:rule [ a sh:TripleRule ; sh:subject sh:this ; sh:predicate ex:target ;
+    sh:object [ ex:concat3 ( [ sh:path ex:p1 ] [ sh:path ex:p2 ] [ sh:path ex:p3 ] ) ] ] ."#;
+    let store = store_with(
+        shapes,
+        r#"ex:t a ex:Thing ; ex:p1 "1a ", "1b " ; ex:p2 "2a " ; ex:p3 "3a ", "3b ", "3c " ."#,
+    );
+    infer(&store, "urn:shapes", &[]).unwrap();
+    assert_eq!(rows(&store, "SELECT ?o WHERE { ex:t ex:target ?o }"), 6);
+    assert!(ask(&store, r#"ASK { ex:t ex:target "1b 2a 3c " }"#));
+    // An argument with no value: the call is not made at all.
+    let store = store_with(shapes, r#"ex:t a ex:Thing ; ex:p1 "1a " ; ex:p3 "3a " ."#);
+    infer(&store, "urn:shapes", &[]).unwrap();
+    assert_eq!(rows(&store, "SELECT ?o WHERE { ex:t ex:target ?o }"), 0);
+}
+
+/// Union, intersection, filter-shape and chained path (`sh:nodes`)
+/// expressions (§6.3, §6.5–6.7).
+#[test]
+fn node_expression_kinds_union_intersection_filter_and_nodes() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:Thing ;
+  sh:rule [ a sh:TripleRule ; sh:subject sh:this ; sh:predicate ex:any ;
+    sh:object [ sh:union ( [ sh:path ex:a ] [ sh:path ex:b ] ) ] ] ;
+  sh:rule [ a sh:TripleRule ; sh:subject sh:this ; sh:predicate ex:both ;
+    sh:object [ sh:intersection ( [ sh:path ex:a ] [ sh:path ex:b ] ) ] ] ;
+  sh:rule [ a sh:TripleRule ; sh:subject sh:this ; sh:predicate ex:goodA ;
+    sh:object [ sh:filterShape [ sh:class ex:Good ] ; sh:nodes [ sh:path ex:a ] ] ] ;
+  sh:rule [ a sh:TripleRule ; sh:subject sh:this ; sh:predicate ex:aName ;
+    sh:object [ sh:path ex:name ; sh:nodes [ sh:path ex:a ] ] ] ."#;
+    let data = r#"
+ex:t a ex:Thing ; ex:a ex:x, ex:y ; ex:b ex:y, ex:z .
+ex:x a ex:Good ; ex:name "x" .
+ex:y ex:name "y" ."#;
+    let store = store_with(shapes, data);
+    infer(&store, "urn:shapes", &[]).unwrap();
+    assert_eq!(rows(&store, "SELECT ?o WHERE { ex:t ex:any ?o }"), 3);
+    assert_eq!(rows(&store, "SELECT ?o WHERE { ex:t ex:both ?o }"), 1);
+    assert!(ask(&store, "ASK { ex:t ex:both ex:y }"));
+    assert_eq!(rows(&store, "SELECT ?o WHERE { ex:t ex:goodA ?o }"), 1);
+    assert!(ask(&store, "ASK { ex:t ex:goodA ex:x }"));
+    assert_eq!(rows(&store, "SELECT ?o WHERE { ex:t ex:aName ?o }"), 2);
+}
+
+/// A node expression may not contain itself (§6): such a rule fails the run
+/// at load, before anything is written.
+#[test]
+fn a_node_expression_that_contains_itself_is_refused() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:Thing ;
+  sh:rule [ a sh:TripleRule ; sh:subject sh:this ; sh:predicate ex:copy ; sh:object _:loop ] .
+_:loop sh:path ex:p ; sh:nodes _:loop ."#;
+    let store = store_with(shapes, "ex:t a ex:Thing ; ex:p ex:v .");
+    let r = infer(&store, "urn:shapes", &[]);
+    assert!(r.as_ref().is_err_and(|e| e.contains("itself")), "got {r:?}");
+    assert!(!ask(&store, "ASK { ?s ex:copy ?o }"), "nothing is written");
+}
+
+/// A blank node that is none of the seven node-expression kinds (here two
+/// list-valued triples) is not a term to copy into the data either: the run
+/// fails at load.
+#[test]
+fn an_ill_formed_node_expression_is_refused() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:Thing ;
+  sh:rule [ a sh:TripleRule ; sh:subject sh:this ; sh:predicate ex:copy ;
+    sh:object [ ex:f ( 1 ) ; ex:g ( 2 ) ] ] ."#;
+    let store = store_with(shapes, "ex:t a ex:Thing .");
+    let r = infer(&store, "urn:shapes", &[]);
+    assert!(
+        r.as_ref().is_err_and(|e| e.contains("node expression")),
+        "got {r:?}"
+    );
+    assert!(!ask(&store, "ASK { ?s ex:copy ?o }"), "nothing is written");
+}
+
+// ─── sh:SPARQLFunction: sh:ask, arguments as terms, data access ───────────────
+
+/// An `sh:ask` body returns the ASK result as `xsd:boolean` (SHACL-AF §5.4).
+#[test]
+fn sparql_function_with_an_ask_body() {
+    let shapes = r#"
+ex:isBig a sh:SPARQLFunction ; sh:parameter [ sh:path ex:x ] ;
+  sh:returnType xsd:boolean ; sh:ask "ASK { FILTER ($x > 10) }" .
+ex:S a sh:NodeShape ; sh:targetClass ex:Thing ;
+  sh:rule [ a sh:SPARQLRule ;
+    sh:construct "CONSTRUCT { $this <http://example.org/big> true } WHERE { $this <http://example.org/v> ?v FILTER (<http://example.org/isBig>(?v)) }" ] ."#;
+    let store = store_with(
+        shapes,
+        "ex:t1 a ex:Thing ; ex:v 20 . ex:t2 a ex:Thing ; ex:v 5 .",
+    );
+    infer(&store, "urn:shapes", &[]).unwrap();
+    assert!(ask(&store, "ASK { ex:t1 ex:big true }"));
+    assert!(!ask(&store, "ASK { ex:t2 ex:big true }"));
+}
+
+/// Arguments are bound to the body's variables as RDF terms. Textual
+/// replacement of `$x` also rewrote `$xy`, and pasted an argument's lexical
+/// form into the query, where a literal could close a string and add clauses.
+#[test]
+fn sparql_function_arguments_are_bound_as_terms() {
+    let shapes = r#"
+ex:pair a sh:SPARQLFunction ;
+  sh:parameter [ sh:path ex:x ; sh:order 0 ] ; sh:parameter [ sh:path ex:xy ; sh:order 1 ] ;
+  sh:select "SELECT (CONCAT(STR($x), '|', STR($xy)) AS ?r) WHERE {}" .
+ex:same a sh:SPARQLFunction ; sh:parameter [ sh:path ex:x ] ;
+  sh:select "SELECT ?r WHERE { BIND ($x AS ?r) }" .
+ex:S a sh:NodeShape ; sh:targetClass ex:Thing ;
+  sh:rule [ a sh:SPARQLRule ;
+    sh:construct "CONSTRUCT { $this <http://example.org/pair> ?p . $this <http://example.org/same> ?s } WHERE { $this <http://example.org/label> ?l . BIND (<http://example.org/pair>('a', 'b') AS ?p) BIND (<http://example.org/same>(?l) AS ?s) }" ] ."#;
+    let hostile = r#"x") AS ?r) WHERE {} #"#;
+    let data = format!(
+        "ex:t a ex:Thing ; ex:label \"{}\" .",
+        hostile.replace('"', "\\\"")
+    );
+    let store = store_with(shapes, &data);
+    infer(&store, "urn:shapes", &[]).unwrap();
+    assert!(
+        ask(&store, r#"ASK { ex:t ex:pair "a|b" }"#),
+        "$x and $xy are different variables"
+    );
+    assert!(
+        ask(&store, "ASK { ex:t ex:same ?s . ex:t ex:label ?s }"),
+        "a literal argument comes back unchanged"
+    );
+}
+
+/// Without `sh:order`, parameters are ordered by the local names of their
+/// paths (SHACL-AF §5.2), whatever order the shapes graph lists them in.
+#[test]
+fn sparql_function_parameters_without_order_sort_by_local_name() {
+    let shapes = r#"
+ex:cat a sh:SPARQLFunction ; sh:parameter [ sh:path ex:b ] ; sh:parameter [ sh:path ex:a ] ;
+  sh:select "SELECT (CONCAT($a, $b) AS ?r) WHERE {}" .
+ex:S a sh:NodeShape ; sh:targetNode ex:t ;
+  sh:rule [ a sh:SPARQLRule ;
+    sh:construct "CONSTRUCT { $this <http://example.org/cat> ?c } WHERE { BIND (<http://example.org/cat>('1', '2') AS ?c) }" ] ."#;
+    let store = store_with(shapes, "ex:t a ex:Thing .");
+    infer(&store, "urn:shapes", &[]).unwrap();
+    assert!(ask(&store, r#"ASK { ex:t ex:cat "12" }"#));
+}
+
+/// A function body reads the run's data graphs — and nothing else. It used to
+/// run against an empty store, so any body that queried data returned
+/// unbound. A `GRAPH` or `FROM NAMED` in the body reaches no other graph.
+#[test]
+fn sparql_function_body_reads_the_run_data_graphs_only() {
+    let shapes = r#"
+ex:labelOf a sh:SPARQLFunction ; sh:parameter [ sh:path ex:node ] ;
+  sh:select "SELECT ?l WHERE { $node <http://www.w3.org/2000/01/rdf-schema#label> ?l }" .
+ex:peek a sh:SPARQLFunction ;
+  sh:select "SELECT ?l FROM NAMED <urn:other> WHERE { GRAPH ?g { ?s <http://example.org/secret> ?l } }" .
+ex:S a sh:NodeShape ; sh:targetClass ex:Thing ;
+  sh:rule [ a sh:SPARQLRule ;
+    sh:construct "CONSTRUCT { $this <http://example.org/label> ?l . $this <http://example.org/peeked> ?p } WHERE { BIND (<http://example.org/labelOf>($this) AS ?l) BIND (<http://example.org/peek>() AS ?p) }" ] ."#;
+    let store = TripleStore::in_memory().unwrap();
+    for (graph, ttl) in [
+        ("urn:shapes", shapes),
+        ("urn:data", "ex:t a ex:Thing ; rdfs:label \"in data\" ."),
         (
-            "subject",
-            "sh:subject [ sh:path ex:p ] ; sh:predicate ex:copy ; sh:object true",
-        ),
-        (
-            "predicate",
-            "sh:subject sh:this ; sh:predicate [ sh:path ex:p ] ; sh:object true",
+            "urn:other",
+            "ex:t rdfs:label \"elsewhere\" . ex:x ex:secret \"SECRET\" .",
         ),
     ] {
-        let shapes = format!(
-            "ex:S a sh:NodeShape ; sh:targetClass ex:Thing ; sh:rule [ a sh:TripleRule ; {rule} ] ."
-        );
-        let store = store_with(&shapes, "ex:t a ex:Thing ; ex:p ex:v .");
-        let r = infer(&store, "urn:shapes", &[]);
-        assert!(
-            r.as_ref().is_err_and(|e| e.contains("node expression")),
-            "{what}: must be refused, got {r:?}"
-        );
-        assert!(
-            !ask(&store, "ASK { ?s ex:copy ?o }"),
-            "{what}: nothing is written"
-        );
+        store
+            .load_str(&format!("{PFX}{ttl}"), RdfFormat::Turtle, Some(graph))
+            .unwrap();
     }
+    infer(&store, "urn:shapes", &["urn:data".to_string()]).unwrap();
+    assert!(ask(
+        &store,
+        r#"ASK { GRAPH <urn:data> { ex:t ex:label "in data" } }"#
+    ));
+    assert!(
+        !ask(&store, r#"ASK { GRAPH ?g { ex:t ex:label "elsewhere" } }"#),
+        "the body read a graph outside the run"
+    );
+    assert!(
+        !ask(&store, "ASK { GRAPH ?g { ?s ex:peeked ?p } }"),
+        "the body escaped the run's data graphs"
+    );
+}
+
+/// A function that calls itself stops at the recursion bound instead of
+/// exhausting the stack: the call is unbound and the run completes.
+#[test]
+fn a_recursive_sparql_function_is_bounded() {
+    let shapes = r#"
+ex:loop a sh:SPARQLFunction ; sh:parameter [ sh:path ex:x ] ;
+  sh:select "SELECT (<http://example.org/loop>($x) AS ?r) WHERE {}" .
+ex:S a sh:NodeShape ; sh:targetNode ex:t ;
+  sh:rule [ a sh:SPARQLRule ;
+    sh:construct "CONSTRUCT { $this <http://example.org/r> ?r } WHERE { BIND (<http://example.org/loop>(1) AS ?r) }" ] ."#;
+    let store = store_with(shapes, "ex:t a ex:Thing .");
+    infer(&store, "urn:shapes", &[]).unwrap();
+    assert!(!ask(&store, "ASK { ?s ex:r ?o }"));
+}
+
+/// `sh:prefixes` of a function follows `owl:imports` (SHACL §5.2.1), as it
+/// does for constraints and rules.
+#[test]
+fn sparql_function_prefixes_follow_owl_imports() {
+    let shapes = r#"
+ex:onto owl:imports ex:base .
+ex:base sh:declare [ sh:prefix "q" ; sh:namespace "http://example.org/q#"^^xsd:anyURI ] .
+ex:ns a sh:SPARQLFunction ; sh:prefixes ex:onto ;
+  sh:select "SELECT (STR(q:thing) AS ?r) WHERE {}" .
+ex:S a sh:NodeShape ; sh:targetNode ex:t ;
+  sh:rule [ a sh:SPARQLRule ;
+    sh:construct "CONSTRUCT { $this <http://example.org/ns> ?n } WHERE { BIND (<http://example.org/ns>() AS ?n) }" ] ."#;
+    let store = store_with(
+        &format!("@prefix owl: <http://www.w3.org/2002/07/owl#> .\n{shapes}"),
+        "ex:t a ex:Thing .",
+    );
+    infer(&store, "urn:shapes", &[]).unwrap();
+    assert!(ask(
+        &store,
+        r#"ASK { ex:t ex:ns "http://example.org/q#thing" }"#
+    ));
+}
+
+/// A function whose body does not parse fails the run of the shapes graph
+/// that declares it, as a constraint or rule body does; it used to be dropped,
+/// and every call to it was silently unbound.
+#[test]
+fn a_sparql_function_whose_body_does_not_parse_fails_the_run() {
+    let shapes = r#"
+ex:broken a sh:SPARQLFunction ; sh:select "SELECT ?r WHERE { THIS IS NOT SPARQL" .
+ex:S a sh:NodeShape ; sh:targetNode ex:t ;
+  sh:rule [ a sh:TripleRule ; sh:subject sh:this ; sh:predicate ex:seen ; sh:object true ] ."#;
+    let store = store_with(shapes, "ex:t a ex:Thing .");
+    let r = infer(&store, "urn:shapes", &[]);
+    assert!(r.as_ref().is_err_and(|e| e.contains("broken")), "got {r:?}");
 }
 
 /// A rule shape whose `sh:target` cannot select focus nodes used to fall back

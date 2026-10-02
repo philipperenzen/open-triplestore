@@ -41,6 +41,13 @@ pub enum Target {
     TargetSubjectsOf(String),
     TargetObjectsOf(String),
     SparqlTarget(String), // SHACL-AF: custom SPARQL target
+    /// SHACL-AF §3.2: a target whose type is a `sh:SPARQLTargetType` — the
+    /// type's `SELECT ?this`, with the target's parameter values bound as
+    /// terms (every parameter variable is projected so it can be bound).
+    SparqlTargetType {
+        query: Box<opengraph::spargebra::Query>,
+        bindings: Vec<(oxigraph::sparql::Variable, Term)>,
+    },
 }
 
 /// A property shape with path and constraints.
@@ -200,12 +207,11 @@ pub enum Constraint {
     // for a shape that carries the component's parameter predicates.
     Custom(Box<CustomConstraint>),
 
-    // SHACL-AF: sh:expression (node expression) — path + comparison subset. The values
-    // reached along `path` from the focus node must satisfy every constraint in `checks`
-    // (e.g. sh:minExclusive); a single violation is reported with `message`.
+    // SHACL-AF §7: sh:expression — a node expression that must produce exactly
+    // `{ true }` with each value node as its focus node. `message` is the
+    // expression node's sh:message.
     Expression {
-        path: PropertyPath,
-        checks: Vec<Constraint>,
+        expr: super::node_expr::NodeExpr,
         message: Option<String>,
     },
 }

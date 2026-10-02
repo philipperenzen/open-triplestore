@@ -1,4 +1,4 @@
-# SHACL — results on the W3C SHACL test suite
+# SHACL — results on the W3C SHACL test suite and the SHACL-AF tests
 
 The `core` and `sparql` sections of the W3C Data Shapes Working Group's **SHACL test
 suite** are vendored under
@@ -65,6 +65,48 @@ CI red, so the list cannot go stale.
   refuse non-canonical booleans on activation flags (see
   [shacl.md](../shacl.md#literal-forms-the-engine-cannot-see)).
 
+## SHACL Advanced Features — TopQuadrant's tests (2026-10-02)
+
+No W3C test suite covers the SHACL Advanced Features Note (2017), so the
+SHACL-AF tests of TopQuadrant's SHACL API are vendored under
+[`tests/fixtures/shacl-af-topquadrant/`](../../tests/fixtures/shacl-af-topquadrant/PROVENANCE.md)
+(Apache-2.0) and run in CI via
+[`tests/shacl_af_corpus.rs`](../../tests/shacl_af_corpus.rs): the
+`expression/`, `function/`, `rules/` and `target/` directories at commit
+`6687b48bd2c81eda369f224598061f87dce0d425`. The counts are development and
+regression results on those files, not a claim of conformance to anything, and
+TopQuadrant has not reviewed them.
+
+| | expression | function | rules | target | total |
+|---|---|---|---|---|---|
+| **Pass** | **1** | **1** | **7** | 0 | **9** |
+| Known-fail (ratcheted) | 0 | 0 | 0 | 1 | 1 |
+| Cases | 1 | 1 | 7 | 1 | 10 |
+
+The tests use TopQuadrant's `dash:` test vocabulary, one self-contained file
+per case (data, shapes and expected outcome in one graph, merged with the
+sibling files it `owl:imports`). Comparison levels:
+
+- **`dash:GraphValidationTestCase`** — `sh:conforms` and the multiset of focus
+  nodes, as for the W3C suite above;
+- **`dash:InferencingTestCase`** — the exact set of inferred triples (what the
+  rules write, less what the file asserts) against `dash:expectedResult`;
+- **`dash:FunctionTestCase`** — the value of the SPARQL expression in
+  `dash:expression`, evaluated in a run of the file's shapes graph, against
+  `dash:expectedResult` (term equality).
+
+Same two-way ratchet as above, plus no skips allowed and a floor of 9 passes.
+The one known failure:
+
+- **`target/sparqlTarget-001.test.ttl`** — the target's `sh:select` uses the
+  `owl:` prefix, but the ontology its `sh:prefixes` names declares no
+  `sh:declare` for it. TopBraid falls back to the Turtle prefixes of the file
+  it loaded; the SHACL prefix mechanism (SHACL §5.2.1, which SHACL-AF reuses)
+  does not, so the shapes graph fails to load here.
+
+Not covered by these tests and still missing: `sh:resultAnnotation` (§4, it
+needs result properties the report model does not have yet).
+
 ## Beyond the suite: fail-open gaps (2026-10-01)
 
 The suite has no case for several places where the engine let data through that
@@ -84,8 +126,9 @@ the shapes forbid. They are covered by `tests/shacl_conformance.rs` and
 - **A SPARQL target that errors when it runs** yielded no focus nodes; it now
   fails the run.
 - **Triple rules with node-expression terms** (`sh:object [ sh:path ex:p ]`)
-  wrote the shapes graph's blank node into the data; they are refused at load
-  until node expressions are implemented.
+  wrote the shapes graph's blank node into the data. They were refused at load
+  on 2026-10-01, and are evaluated as node expressions since 2026-10-02 (see the
+  SHACL-AF section above).
 
 ## Typed-term engine refactor (2026-06-11)
 

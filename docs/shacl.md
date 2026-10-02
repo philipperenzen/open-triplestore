@@ -487,15 +487,27 @@ dataset's writers, graph-ACL readers and admins. `partial: true` says a shapes
 graph was left out; with none left the call answers 400.
 
 Supports `sh:SPARQLRule` (`sh:construct`) and `sh:TripleRule` (`sh:subject` /
-`sh:predicate` / `sh:object`, with `sh:this` standing for the focus node; a
-literal object keeps its datatype). Inferred triples are written back into the
-data graph, and the rules run to a fixed point. A triple rule's terms must be
-constants (IRIs or literals) or `sh:this`: the other SHACL-AF node expressions
-— a blank node such as `sh:object [ sh:path ex:p ]` — are not evaluated yet,
-and a rule using one fails the run with a message naming its shape, instead of
-writing the shapes graph's blank node into the data. Use a `sh:SPARQLRule` for
-those. A rule shape whose target cannot be loaded fails the run too. The
-SHACL-AF rule modifiers are honoured:
+`sh:predicate` / `sh:object`). Inferred triples are written back into the data
+graph, and the rules run to a fixed point. A triple rule's three terms are
+[node expressions](#node-expressions-shacl-af-6): `sh:this` stands for the
+focus node, an IRI or a literal for itself (a literal keeps its datatype), and
+a blank node is evaluated per focus node — `sh:object [ sh:path ex:p ]` copies
+the focus node's `ex:p` values. The rule derives one triple per combination of
+the three result sets, skipping combinations that are no RDF triple (a literal
+subject, a predicate that is not an IRI):
+
+```turtle
+ex:RectangleShape a sh:NodeShape ; sh:targetClass ex:Rectangle ;
+  sh:rule [ a sh:TripleRule ;
+    sh:subject sh:this ; sh:predicate ex:area ;
+    sh:object [ ex:multiply ( [ sh:path ex:width ] [ sh:path ex:height ] ) ] ] .
+```
+
+A blank node that is none of the node-expression kinds, or an expression that
+contains itself, fails the run at load, naming the shape. (Before 2026-10 such
+a blank node was written into the data as a term, pointing at the shapes
+graph's own node.) A rule shape whose target cannot be loaded fails the run
+too. The SHACL-AF rule modifiers are honoured:
 
 | Modifier | Effect |
 |---|---|
@@ -621,9 +633,106 @@ ex:double a sh:SPARQLFunction ;
   graphs under `urn:system:functions:` can be named: no dataset can hold such
   a graph, so only an admin can write one. Shapes runs see these functions too,
   and a shapes graph may not redefine one.
-* **Evaluation.** Only `sh:select` bodies are supported. A body runs on an
-  empty store with its parameters substituted, so it can compute from its
-  arguments but not read data; a body that queries data returns unbound.
+* **Bodies.** `sh:select` (a `SELECT` with exactly one result variable; the
+  function returns its binding in the first solution) or `sh:ask` (the
+  function returns the ASK result as `xsd:boolean`). The `sh:prefixes`
+  prologue follows `owl:imports`, as for constraints. A body that does not
+  parse, or a `SELECT` with more or fewer than one result variable, fails the
+  run of the shapes graph that declares it.
+* **Arguments are bound as terms.** Each argument is bound to its parameter's
+  variable (the local name of its `sh:path`) as an RDF term, never pasted into
+  the query text. Parameters are ordered by `sh:order` (0 when unset) when any
+  has one, otherwise by the local names of their paths. A call without a
+  mandatory argument, or with too many, is an error — unbound in a `BIND`;
+  `sh:optional true` parameters may be left out.
+* **Bodies read the run's data.** A body called from a shapes run reads that
+  run's data graphs, from the same snapshot the rest of the run reads —
+  `SELECT ?l WHERE { $node rdfs:label ?l }` returns the node's label. Like the
+  constraint calling it, a body cannot widen its dataset: whatever `FROM`,
+  `FROM NAMED` or `GRAPH` it names, it reads the run's data graphs (the default
+  graph when the run names none) and no named graph. A function called from
+  `/sparql` (from a designated graph) has no run to read and sees an empty
+  dataset, so it can compute from its arguments only.
+* **Recursion is bounded.** Calls may nest 16 deep (a function whose body calls
+  a function …); a call beyond that is unbound and logged, so a function that
+  calls itself ends instead of exhausting the stack.
+
+### Custom targets (SHACL-AF §3)
+
+`sh:target` gives a shape focus nodes computed by SPARQL, and makes its subject
+a shape even with no `rdf:type sh:NodeShape`:
+
+* **A SPARQL-based target** has a `sh:select` that projects `?this`.
+* **A SPARQL-based target type** is a class declared `a sh:SPARQLTargetType`
+  with a `sh:select` and `sh:parameter`s; a target that is an instance of it
+  supplies the parameter values, which are bound into the query as terms:
+
+```turtle
+ex:BornIn a sh:SPARQLTargetType ; rdfs:subClassOf sh:Target ;
+  sh:parameter [ sh:path ex:country ] ;
+  sh:select "SELECT ?this WHERE { ?this ex:bornIn $country }" .
+ex:DutchCitizenShape a sh:NodeShape ;
+  sh:target [ a ex:BornIn ; ex:country ex:NL ] ;
+  sh:property [ sh:path ex:name ; sh:minCount 1 ] .
+```
+
+  A target that lacks a value for a non-optional parameter selects nothing
+  (§3.2). A parameter value that is a blank node, or two values for one
+  parameter, fail the shapes graph.
+
+Both read the run's data graphs only. A `sh:target` with neither a `sh:select`
+nor a `sh:SPARQLTargetType` type fails the shapes graph: the engine cannot
+compute its focus nodes, and a shape that validated nothing would pass every
+write. `sh:resultAnnotation` (§4) is not supported yet: the report model has
+no place for the extra properties.
+
+### Node expressions (SHACL-AF §6)
+
+A node expression computes a set of nodes for a focus node. Triple rules use
+them for their three terms, and expression constraints for their condition.
+All seven kinds of the 2017 Note are evaluated:
+
+| Kind | Syntax | Produces |
+|---|---|---|
+| Focus node | `sh:this` | the focus node |
+| Constant | any other IRI, or a literal | that term |
+| Path | `[ sh:path P ; sh:nodes N ]` | the values of `P` from each node of `N` (the focus node when `sh:nodes` is absent) |
+| Filter shape | `[ sh:filterShape S ; sh:nodes N ]` | the nodes of `N` that conform to `S` |
+| Intersection | `[ sh:intersection ( E1 E2 … ) ]` | the nodes every `Ei` produces |
+| Union | `[ sh:union ( E1 E2 … ) ]` | the nodes any `Ei` produces |
+| Function | `[ f ( E1 E2 … ) ]` | `f` called with every combination of the `Ei`'s nodes |
+
+A function can be a `sh:SPARQLFunction` of the shapes graph, a designated
+function, or a built-in one (`geof:distance`, an `xsd:` cast). A mandatory
+argument whose expression produces nothing means no call; a call whose result
+is unbound produces no node; more than 10 000 calls for one focus node fail the
+evaluation. Paths read the run's data graphs, like every other path.
+
+### Expression constraints (`sh:expression`, SHACL-AF §7)
+
+`sh:expression` holds a node expression that must produce exactly `{ true }`
+for each value node (the focus node on a node shape), evaluated with that node
+as its focus node. Anything else — `false`, another value, several values, or
+nothing — is a result whose `sh:value` is the value node; the expression
+node's `sh:message` is the result message:
+
+```turtle
+ex:atLeast a sh:SPARQLFunction ;
+  sh:parameter [ sh:path ex:value ; sh:order 1 ] ;
+  sh:parameter [ sh:path ex:minimum ; sh:order 2 ] ;
+  sh:ask "ASK { FILTER ($value >= $minimum) }" .
+
+ex:ClearanceShape a sh:NodeShape ; sh:targetClass ex:NavigableBridge ;
+  sh:expression [ sh:message "Clearance must be at least 9.10 m" ;
+    ex:atLeast ( [ sh:path ( ex:clearanceHeight qudt:numericValue ) ] 9.10 ) ] .
+```
+
+Before 2026-10 this engine read a form of its own here: a path plus comparison
+constraints on the expression node, `sh:expression [ sh:path P ;
+sh:minExclusive 9.09 ]`. That node is a plain path expression under the Note,
+so a shapes graph written that way now reports every focus node whose values
+are not `true`. Rewrite it as a function expression, as above, or as a property
+shape (`sh:property [ sh:path P ; sh:minExclusive 9.09 ]`).
 
 ---
 

@@ -1461,15 +1461,32 @@ impl TripleStore {
                 "only a CONSTRUCT query can be evaluated confined".to_string(),
             ));
         }
-        let mut prepared = evaluator.for_query(query.clone());
-        confine_dataset(prepared.dataset_mut(), scope)?;
-        let mut bound = prepared.on_store(&self.store);
-        for (name, term) in bindings {
-            let var = oxigraph::sparql::Variable::new(*name)
-                .map_err(|e| StoreError::Parse(e.to_string()))?;
-            bound = bound.substitute_variable(var, term.clone());
+        let vars = bindings
+            .iter()
+            .map(|(name, _)| {
+                oxigraph::sparql::Variable::new(*name).map_err(|e| StoreError::Parse(e.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // The parser projects a CONSTRUCT's WHERE onto the variables its
+        // patterns bind, and spareval binds only top-level variables: a
+        // `$this` used in an expression alone (`BIND (f($this) AS ?x)`) was
+        // silently left unbound. Project the bound variables too.
+        let mut query = query.clone();
+        if let SpargebraQuery::Construct { pattern, .. } = &mut query {
+            crate::shacl::sparql_functions::project_onto(pattern, &vars);
         }
-        match bound.execute()? {
+        let mut prepared = evaluator.clone().for_query(query);
+        confine_dataset(prepared.dataset_mut(), scope)?;
+        for (var, (_, term)) in vars.into_iter().zip(bindings) {
+            prepared = prepared.substitute_variable(var, term.clone());
+        }
+        // A `sh:SPARQLFunction` the rule calls reads what the rule reads.
+        let data = crate::shacl::sparql_functions::DataScope {
+            source: crate::shacl::sparql_functions::ScopeSource::Store(&self.store),
+            data_graphs: scope,
+            evaluator: &evaluator,
+        };
+        match data.execute(prepared)? {
             QueryResults::Graph(triples) => Ok(triples.collect::<Result<Vec<_>, _>>()?),
             // A CONSTRUCT always evaluates to a graph; the other arms cannot
             // happen, and an empty result is the honest answer if they did.

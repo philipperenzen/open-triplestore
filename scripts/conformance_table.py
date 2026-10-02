@@ -14,8 +14,8 @@ runners record, and writes the result between `<!-- conformance-table:start -->`
     scripts/conformance_table.py --check    # exit 1 if either file is stale (CI)
 
 The *basis* column is the honest part: only the W3C SPARQL 1.1 query/update
-sections, the W3C SHACL core/sparql sections and the OGC GeoSPARQL validator
-shapes are vendored test corpora; every other suite is hand-written and
+sections, the W3C SHACL core/sparql sections, TopQuadrant's SHACL-AF tests and
+the OGC GeoSPARQL validator shapes are vendored test corpora; every other suite is hand-written and
 *derived from* the spec text.
 
 Which corpus results are published is a licence question, not a style one:
@@ -33,6 +33,10 @@ Which corpus results are published is a licence question, not a style one:
   from it.
 - The SHACL sections are under the W3C Software and Document License, which
   sets no such condition, so that row keeps its counts (`PUBLISH_SCORE`).
+- The SHACL-AF tests are TopQuadrant's, under the Apache License 2.0, which
+  sets no such condition either; the owner decided to publish their counts
+  (2026-10-02). They are TopQuadrant's tests of its own engine, not a W3C
+  suite, so a count is no claim of conformance to anything.
 - The OGC validator shapes are under the Apache License 2.0; only the OGC
   authorises compliance marks for its standards, so no row claims compliance.
 """
@@ -67,6 +71,7 @@ SUITES: dict[str, tuple[str, str]] = {
     "w3c_shacl_conformance": ("SHACL Core", "**vendored W3C corpus** (core + sparql sections, manifest-driven)"),
     "w3c_sparql11_manifests": ("SPARQL 1.1 Query/Update", "**vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven)"),
     "shacl_rules_conformance": ("SHACL-AF rules", "spec-derived"),
+    "shacl_af_corpus": ("SHACL Advanced Features", "**vendored TopQuadrant corpus** (expression, function, rule and target tests of TopQuadrant/shacl, unmodified; dash-driven)"),
     "shaclc_conformance": ("SHACL Compact Syntax", "spec-derived"),
     "shex_conformance": ("ShEx", "spec-derived"),
     "swrl_conformance": ("SWRL", "spec-derived"),
@@ -90,6 +95,7 @@ def count(path: Path) -> tuple[int, int]:
 # is published (PUBLISH_SCORE) also records an `Empirical baseline` comment
 # above its KNOWN_FAILURES list, which this script reads and cross-checks.
 CORPUS_RUNNERS = {
+    "shacl_af_corpus": 9,
     "w3c_shacl_conformance": 90,
     "w3c_sparql11_manifests": 450,
 }
@@ -98,7 +104,7 @@ CORPUS_RUNNERS = {
 # missing here is still checked, but its row carries no numbers: the W3C SPARQL
 # 1.1 sections are a subset of a W3C test suite, on which W3C's test-suite
 # policy allows no public performance claims.
-PUBLISH_SCORE = {"w3c_shacl_conformance"}
+PUBLISH_SCORE = {"shacl_af_corpus", "w3c_shacl_conformance"}
 
 # The note for a corpus runner whose score is not published.
 UNSCORED_NOTE = (
@@ -163,8 +169,9 @@ def render() -> str:
         "regression suites under `tests/`, plus the crate's unit tests. Only the "
         f"{len([r for r in rows if 'vendored' in r[2]])} **vendored** rows run a published "
         "corpus; every other suite is hand-written and derived from the specification text. "
-        "The SHACL and GeoSPARQL corpus results are development and regression results on the "
-        "vendored sections (`docs/conformance/`), not W3C or OGC conformance claims. The SPARQL "
+        "The SHACL, SHACL-AF and GeoSPARQL corpus results are development and regression results "
+        "on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant or OGC conformance "
+        "claims. The SPARQL "
         "1.1 sections are a subset of a W3C test suite, so under W3C's test-suite licence policy "
         "they are used for development and bug tracking only, and no score is published for them."
     )
