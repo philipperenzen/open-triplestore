@@ -842,6 +842,11 @@ impl<'a, D: QueryableDataset<'a>> SimpleEvaluator<'a, D> {
                     encoded_variables,
                     &self.dataset,
                 )?;
+                // A path endpoint written as an RDF term (not a variable) matches the
+                // zero-length path even if it is not a node of the active graph
+                // (SPARQL 1.1 §18.6, eval(Path(X:term, ZeroLengthPath, Y))).
+                let subject_is_term = matches!(subject_selector, TupleSelector::Constant(_));
+                let object_is_term = matches!(object_selector, TupleSelector::Constant(_));
                 let dataset = self.dataset.clone();
                 Rc::new(move |from| {
                     let input_subject = match subject_selector.get_pattern_value(
@@ -865,11 +870,13 @@ impl<'a, D: QueryableDataset<'a>> SimpleEvaluator<'a, D> {
                     };
                     match (input_subject, input_object) {
                         (Some(input_subject), Some(input_object)) => {
-                            match path_eval.eval_closed(
+                            match path_eval.eval_closed_term(
                                 &path,
                                 &input_subject,
                                 &input_object,
                                 from.graph_name.as_ref(),
+                                subject_is_term,
+                                object_is_term,
                             ) {
                                 Ok(true) => Box::new(once(Ok(from))),
                                 Ok(false) => Box::new(empty()),
@@ -880,9 +887,17 @@ impl<'a, D: QueryableDataset<'a>> SimpleEvaluator<'a, D> {
                             let object_selector = object_selector.clone();
                             #[cfg(feature = "sparql-12")]
                             let dataset = dataset.clone();
+                            let ends = if subject_is_term {
+                                path_eval.eval_from_term(
+                                    &path,
+                                    &input_subject,
+                                    from.graph_name.as_ref(),
+                                )
+                            } else {
+                                path_eval.eval_from(&path, &input_subject, from.graph_name.as_ref())
+                            };
                             Box::new(
-                                path_eval
-                                    .eval_from(&path, &input_subject, from.graph_name.as_ref())
+                                ends
                                     .map(move |o| {
                                         let o = o?;
                                         let mut new_tuple = from.clone();
@@ -904,9 +919,17 @@ impl<'a, D: QueryableDataset<'a>> SimpleEvaluator<'a, D> {
                             let subject_selector = subject_selector.clone();
                             #[cfg(feature = "sparql-12")]
                             let dataset = dataset.clone();
+                            let starts = if object_is_term {
+                                path_eval.eval_to_term(
+                                    &path,
+                                    &input_object,
+                                    from.graph_name.as_ref(),
+                                )
+                            } else {
+                                path_eval.eval_to(&path, &input_object, from.graph_name.as_ref())
+                            };
                             Box::new(
-                                path_eval
-                                    .eval_to(&path, &input_object, from.graph_name.as_ref())
+                                starts
                                     .map(move |s| {
                                         let s = s?;
                                         let mut new_tuple = from.clone();
@@ -3090,6 +3113,169 @@ impl<'a, D: QueryableDataset<'a>> PathEvaluator<'a, D> {
                             Err(e) => Some(Err(e)),
                         }),
                 )
+            }
+        }
+    }
+
+    /// [`Self::eval_closed`] where `start` and/or `end` is an RDF term of the
+    /// query rather than a variable binding.
+    ///
+    /// SPARQL 1.1 §18.6 evaluates a zero-length path against a term endpoint
+    /// without requiring the term to be a node of the active graph
+    /// (`Path(X:term, ZeroLengthPath, Y:term)` is `{ {} }` exactly when X and Y
+    /// are the same term, `Path(X:var, ZeroLengthPath, Y:term)` binds X to Y); only
+    /// a variable endpoint ranges over the graph's nodes. The term property
+    /// follows the endpoint through `^` (swapped) and `|`, and stops at the
+    /// middle of a `/`, which the spec translates into a fresh variable.
+    fn eval_closed_term(
+        &self,
+        path: &PropertyPath<D::InternalTerm>,
+        start: &D::InternalTerm,
+        end: &D::InternalTerm,
+        graph_name: Option<&D::InternalTerm>,
+        start_is_term: bool,
+        end_is_term: bool,
+    ) -> Result<bool, QueryEvaluationError> {
+        if !start_is_term && !end_is_term {
+            return self.eval_closed(path, start, end, graph_name);
+        }
+        Ok(match path {
+            PropertyPath::Reverse(p) => {
+                self.eval_closed_term(p, end, start, graph_name, end_is_term, start_is_term)?
+            }
+            PropertyPath::Sequence(a, b) => {
+                let mut middles = if start_is_term {
+                    self.eval_from_term(a, start, graph_name)
+                } else {
+                    self.eval_from(a, start, graph_name)
+                };
+                middles
+                    .find_map(|middle| {
+                        middle
+                            .and_then(|middle| {
+                                Ok(self
+                                    .eval_closed_term(b, &middle, end, graph_name, false, end_is_term)?
+                                    .then_some(()))
+                            })
+                            .transpose()
+                    })
+                    .transpose()?
+                    .is_some()
+            }
+            PropertyPath::Alternative(a, b) => {
+                self.eval_closed_term(a, start, end, graph_name, start_is_term, end_is_term)?
+                    || self.eval_closed_term(b, start, end, graph_name, start_is_term, end_is_term)?
+            }
+            PropertyPath::ZeroOrMore(_) | PropertyPath::ZeroOrOne(_) if start == end => true,
+            PropertyPath::ZeroOrOne(p) => {
+                self.eval_closed_term(p, start, end, graph_name, start_is_term, end_is_term)?
+            }
+            PropertyPath::OneOrMore(p) if start_is_term => look_in_transitive_closure(
+                self.eval_from_term(p, start, graph_name),
+                move |e| self.eval_from(p, &e, graph_name),
+                end,
+            )?,
+            _ => self.eval_closed(path, start, end, graph_name)?,
+        })
+    }
+
+    /// [`Self::eval_from`] where `start` is an RDF term of the query rather than
+    /// a variable binding: a zero-length path yields `start` even if it is not a
+    /// node of the active graph (see [`Self::eval_closed_term`]).
+    fn eval_from_term(
+        &self,
+        path: &PropertyPath<D::InternalTerm>,
+        start: &D::InternalTerm,
+        graph_name: Option<&D::InternalTerm>,
+    ) -> Box<dyn Iterator<Item = Result<D::InternalTerm, QueryEvaluationError>> + 'a> {
+        match path {
+            PropertyPath::Reverse(p) => self.eval_to_term(p, start, graph_name),
+            PropertyPath::Sequence(a, b) => {
+                let eval = self.clone();
+                let b = Rc::clone(b);
+                let graph_name2 = graph_name.cloned();
+                Box::new(
+                    self.eval_from_term(a, start, graph_name)
+                        .flat_map_ok(move |middle| {
+                            eval.eval_from(&b, &middle, graph_name2.as_ref())
+                        }),
+                )
+            }
+            PropertyPath::Alternative(a, b) => Box::new(hash_deduplicate(
+                self.eval_from_term(a, start, graph_name)
+                    .chain(self.eval_from_term(b, start, graph_name)),
+            )),
+            PropertyPath::ZeroOrMore(p) => {
+                let eval = self.clone();
+                let p = Rc::clone(p);
+                let graph_name2 = graph_name.cloned();
+                Box::new(transitive_closure(Some(Ok(start.clone())), move |e| {
+                    eval.eval_from(&p, &e, graph_name2.as_ref())
+                }))
+            }
+            PropertyPath::OneOrMore(p) => {
+                let eval = self.clone();
+                let p = Rc::clone(p);
+                let graph_name2 = graph_name.cloned();
+                Box::new(transitive_closure(
+                    self.eval_from_term(&p, start, graph_name),
+                    move |e| eval.eval_from(&p, &e, graph_name2.as_ref()),
+                ))
+            }
+            PropertyPath::ZeroOrOne(p) => Box::new(hash_deduplicate(
+                once(Ok(start.clone())).chain(self.eval_from_term(p, start, graph_name)),
+            )),
+            PropertyPath::Path(_) | PropertyPath::NegatedPropertySet(_) => {
+                self.eval_from(path, start, graph_name)
+            }
+        }
+    }
+
+    /// [`Self::eval_to`] where `end` is an RDF term of the query rather than a
+    /// variable binding (see [`Self::eval_from_term`]).
+    fn eval_to_term(
+        &self,
+        path: &PropertyPath<D::InternalTerm>,
+        end: &D::InternalTerm,
+        graph_name: Option<&D::InternalTerm>,
+    ) -> Box<dyn Iterator<Item = Result<D::InternalTerm, QueryEvaluationError>> + 'a> {
+        match path {
+            PropertyPath::Reverse(p) => self.eval_from_term(p, end, graph_name),
+            PropertyPath::Sequence(a, b) => {
+                let eval = self.clone();
+                let a = Rc::clone(a);
+                let graph_name2 = graph_name.cloned();
+                Box::new(
+                    self.eval_to_term(b, end, graph_name)
+                        .flat_map_ok(move |middle| eval.eval_to(&a, &middle, graph_name2.as_ref())),
+                )
+            }
+            PropertyPath::Alternative(a, b) => Box::new(hash_deduplicate(
+                self.eval_to_term(a, end, graph_name)
+                    .chain(self.eval_to_term(b, end, graph_name)),
+            )),
+            PropertyPath::ZeroOrMore(p) => {
+                let eval = self.clone();
+                let p = Rc::clone(p);
+                let graph_name2 = graph_name.cloned();
+                Box::new(transitive_closure(Some(Ok(end.clone())), move |e| {
+                    eval.eval_to(&p, &e, graph_name2.as_ref())
+                }))
+            }
+            PropertyPath::OneOrMore(p) => {
+                let eval = self.clone();
+                let p = Rc::clone(p);
+                let graph_name2 = graph_name.cloned();
+                Box::new(transitive_closure(
+                    self.eval_to_term(&p, end, graph_name),
+                    move |e| eval.eval_to(&p, &e, graph_name2.as_ref()),
+                ))
+            }
+            PropertyPath::ZeroOrOne(p) => Box::new(hash_deduplicate(
+                once(Ok(end.clone())).chain(self.eval_to_term(p, end, graph_name)),
+            )),
+            PropertyPath::Path(_) | PropertyPath::NegatedPropertySet(_) => {
+                self.eval_to(path, end, graph_name)
             }
         }
     }

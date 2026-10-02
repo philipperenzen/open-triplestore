@@ -54,6 +54,15 @@ One commit each, in this order:
    `oxigraph` crate needs no change (it gets the default method; upstream's
    RocksDB fast path is not taken). The columnar copy in `opengraph` deduplicates
    the same way. Draft: `spareval/UPSTREAM-PR-merged-default-graph.md`.
+3. **Zero-length paths with a constant endpoint** (`spareval` path evaluator).
+   `:s :p* ?o`, `?s :p? :o` and `ASK { :x :p* :x }` matched the zero-length
+   path only when the constant was a node of the active graph. SPARQL 1.1 §18.6
+   evaluates the zero-length path against a term endpoint without looking at the
+   graph; only a variable endpoint ranges over `nodes(G)`. The path evaluator now
+   knows which endpoints are constants and skips the membership check for them
+   (through `^`, `|`, `?` and the first step of `+`, not past the middle of `/`).
+   Fixes `property-path#zero_or_more_set_start/end` and
+   `#zero_or_one_set_start/end`. Draft: `spareval/UPSTREAM-PR-zero-length-paths.md`.
 
 ### Verifying the fork
 
