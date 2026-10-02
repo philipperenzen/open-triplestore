@@ -60,6 +60,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   edited like any other. A `foaf:Agent` Read grant makes a resource readable
   without a token. Not in scope: WebID-TLS, Solid-OIDC, `acl:origin`. See
   `docs/ldp.md`, "Access control".
+- **Model versions and the datasets that depend on them are linked.** A dataset
+  version now records the model version its instances were pinned to when it was
+  cut (`conforms_to_model` / `conforms_to_version` on `DatasetVersion`, stored as
+  `ver:conformsToModel` / `ver:conformsToVersion` plus `dct:conformsTo` on the
+  model-version IRI), so a published dataset version keeps saying which model
+  version it conformed to after the dataset moves on. `GET /api/datasets/:id/conformance`
+  reports the model's `latest_published`, whether the dataset is `pinned`, and
+  `update_available` when a newer model version has been published than the pinned
+  one. New `GET /api/models/:id/dependents` lists the (visible) datasets that declare
+  conformance to a model, each with its pinned/effective version, whether it is
+  behind, and its latest published dataset version. Publishing a model version is
+  recorded on the model's commit log. Studio shows an "update available" badge on
+  the dataset page and a "used by N datasets" card on the model page — the
+  store-side half of a model-update procedure: an external validation service
+  re-validates a dataset against the new version, collects or corrects what it
+  asks for, and re-pins; the store now tells everyone which datasets that applies to.
 
 ### Changed
 - **LDES search tree: one root node with bounded relations.** `tree:view` now
@@ -108,6 +124,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   under new blank-node labels is still not a change). Two versions of one
   entity on a page no longer share blank-node labels, which merged their
   structures in the served document.
+- **SHACL result paths no longer render with a stray `>`.** The backend
+  serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
+  `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if
+  it were a bare IRI, showing `ex.org:label>`. The dataset validation dialog,
+  `/validation`, `/shacl/results`, the shape-graph meta report and the source
+  dry-run findings now shorten every `<…>` term and keep the operators, so a
+  sequence path reads `ex.org:a/ex.org:b`; the tooltip keeps the raw path.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if
