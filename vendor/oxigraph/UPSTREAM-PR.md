@@ -1,6 +1,7 @@
 # Draft upstream pull request (not posted)
 
-Target: `oxigraph/oxigraph`, branch `main`, file `lib/oxigraph/src/storage/numeric_encoder.rs`.
+Target: `oxigraph/oxigraph`, branch `main`, files `lib/oxigraph/src/storage/numeric_encoder.rs`
+and `lib/spareval/src/eval.rs` (two commits; the second is needed once the first lands).
 
 ---
 
@@ -55,6 +56,24 @@ a comparing `fmt::Write` sink, so it does not allocate.
 - Data loaded before the upgrade stays in canonical form; re-loading the same source
   afterwards (append, not replace) can add the lexical-form variant beside it.
 - Cost: one `Display` pass per native literal on write.
+
+**Second commit: spareval rebuilds triple terms through `Term`**
+
+When evaluation matches, binds or builds a triple term (a constant `<<( s p o )>>` in
+a pattern, a triple pattern with bound variables, `VALUES`), `spareval` goes through
+`ExpressionTerm` (`externalize_expression_term` per component, `ExpressionTriple::new`,
+`internalize_expression_term`). An expression term holds the *value* of a typed
+literal, so with the storage change a stored `<<( :a :age "41"^^xsd:int )>>` comes
+back as `<<( :a :age 41 )>>`: the stored triple term can no longer be found by its own
+constant, and `?s :age ?age {| :source ?src |}` returns rows or not depending on join
+order. The commit uses `externalize_term` / `internalize_term` instead
+(`internalize_triple_term` in `from_ground_term_pattern` and `get_pattern_value`,
+`encode_triple`, `put_pattern_value`). Expression functions (`TRIPLE()`, `OBJECT()`,
+`=` on triple terms) are untouched and keep value semantics; a triple-term constant
+inside an expression is still built from values, so `sameTerm(?t, <<( :a :b "05"^^xsd:integer )>>)`
+is false against a stored triple term with that literal (left for a follow-up: it
+needs a way to build an internal triple term from internal components in
+`ExpressionEvaluatorContext`).
 
 **Tests**
 

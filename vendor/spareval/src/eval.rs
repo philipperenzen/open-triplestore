@@ -2057,9 +2057,11 @@ impl<'a, D: QueryableDataset<'a>> SimpleEvaluator<'a, D> {
         &self,
         triple: &GroundTriple,
     ) -> Result<D::InternalTerm, QueryEvaluationError> {
-        self.dataset.internalize_expression_term(
-            ExpressionTriple::from(Triple::from(triple.clone())).into(),
-        )
+        // Through `Term`, not `ExpressionTerm`: an expression term holds the
+        // value of a typed literal, so `"05"^^xsd:integer` would come back as
+        // `5` and the triple term would not be the one written.
+        self.dataset
+            .internalize_term(Triple::from(triple.clone()).into())
     }
 
     fn encode_property_path(
@@ -2785,17 +2787,9 @@ impl<T> TupleSelector<T> {
                         Self::Constant(subject),
                         Self::Constant(predicate),
                         Self::Constant(object),
-                    ) => Self::Constant(
-                        dataset.internalize_expression_term(
-                            ExpressionTriple::new(
-                                dataset.externalize_expression_term(subject)?,
-                                dataset.externalize_expression_term(predicate)?,
-                                dataset.externalize_expression_term(object)?,
-                            )
-                            .ok_or_else(|| QueryEvaluationError::InvalidStorageTripleTerm)?
-                            .into(),
-                        )?,
-                    ),
+                    ) => Self::Constant(internalize_triple_term(
+                        dataset, subject, predicate, object,
+                    )?),
                     (subject, predicate, object) => {
                         Self::TriplePattern(Rc::new(TripleTupleSelector {
                             subject,
@@ -2855,17 +2849,9 @@ impl<T: Clone> TupleSelector<T> {
                 let Some(object) = triple.object.get_pattern_value(tuple, dataset)? else {
                     return Ok(None);
                 };
-                Some(
-                    dataset.internalize_expression_term(
-                        ExpressionTriple::new(
-                            dataset.externalize_expression_term(subject)?,
-                            dataset.externalize_expression_term(predicate)?,
-                            dataset.externalize_expression_term(object)?,
-                        )
-                        .ok_or(QueryEvaluationError::InvalidStorageTripleTerm)?
-                        .into(),
-                    )?,
-                )
+                Some(internalize_triple_term(
+                    dataset, subject, predicate, object,
+                )?)
             }
         })
     }
@@ -2880,6 +2866,31 @@ impl<T: Clone> Clone for TupleSelector<T> {
             Self::TriplePattern(t) => Self::TriplePattern(Rc::clone(t)),
         }
     }
+}
+
+/// The internal triple term with these internal components.
+///
+/// Built through `Term`, not `ExpressionTerm`: an expression term holds the
+/// value of a typed literal, so a component such as `"05"^^xsd:integer` or
+/// `"5"^^xsd:int` would come back as `5` and the triple term would differ
+/// from the stored one whenever the dataset keeps literals as written.
+#[cfg(feature = "sparql-12")]
+fn internalize_triple_term<'a, D: QueryableDataset<'a>>(
+    dataset: &EvalDataset<'a, D>,
+    subject: D::InternalTerm,
+    predicate: D::InternalTerm,
+    object: D::InternalTerm,
+) -> Result<D::InternalTerm, QueryEvaluationError> {
+    let subject = match dataset.externalize_term(subject)? {
+        Term::NamedNode(subject) => NamedOrBlankNode::from(subject),
+        Term::BlankNode(subject) => subject.into(),
+        _ => return Err(QueryEvaluationError::InvalidStorageTripleTerm),
+    };
+    let Term::NamedNode(predicate) = dataset.externalize_term(predicate)? else {
+        return Err(QueryEvaluationError::InvalidStorageTripleTerm);
+    };
+    let object = dataset.externalize_term(object)?;
+    dataset.internalize_term(Triple::new(subject, predicate, object).into())
 }
 
 #[cfg(feature = "sparql-12")]
@@ -2908,22 +2919,28 @@ fn put_pattern_value<'a, D: QueryableDataset<'a>>(
         }
         #[cfg(feature = "sparql-12")]
         TupleSelector::TriplePattern(triple) => {
-            let ExpressionTerm::Triple(value) = dataset.externalize_expression_term(value)? else {
+            // Through `Term`, see `internalize_triple_term`.
+            let Term::Triple(value) = dataset.externalize_term(value)? else {
                 return Ok(false);
             };
+            let Triple {
+                subject,
+                predicate,
+                object,
+            } = *value;
             put_pattern_value(
                 &triple.subject,
-                dataset.internalize_expression_term(value.subject.into())?,
+                dataset.internalize_term(subject.into())?,
                 tuple,
                 dataset,
             )? && put_pattern_value(
                 &triple.predicate,
-                dataset.internalize_expression_term(value.predicate.into())?,
+                dataset.internalize_term(predicate.into())?,
                 tuple,
                 dataset,
             )? && put_pattern_value(
                 &triple.object,
-                dataset.internalize_expression_term(value.object)?,
+                dataset.internalize_term(object)?,
                 tuple,
                 dataset,
             )?
