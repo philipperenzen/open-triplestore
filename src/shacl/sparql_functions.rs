@@ -622,6 +622,7 @@ fn prebind_expression(
                         Expression::FunctionCall(Function::BNode, Vec::new()),
                     ])
                 }
+                #[cfg(feature = "rdf-12")]
                 Term::Triple(_) => *complete = false,
             }
         }
