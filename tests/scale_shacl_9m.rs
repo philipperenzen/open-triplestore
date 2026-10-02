@@ -196,8 +196,20 @@ fn validate(store: &TripleStore, label: &str) -> (f64, usize, bool) {
     (secs, report.results.len(), report.conforms)
 }
 
+/// One test at a time. Both load and validate the same data, and run side by
+/// side they compete for the CPU the first one's mirror build needs inside its
+/// settle window — on a small CI runner, enough to miss it.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn whole_dataset_validation_on_a_persistent_store() {
+    let _serial = serial();
     let assets = env_usize("OTS_SCALE_ASSETS", 20_000);
     let settle = env_usize("OTS_SCALE_SETTLE_SECS", 60);
     // The fixture plants one bad code every 10 000 assets.
@@ -373,6 +385,7 @@ fn keys(results: &[ValidationResult]) -> Vec<(String, Option<String>, String)> {
 ///    copies the whole graph into a sandbox before it validates.
 #[tokio::test]
 async fn write_triggered_shape_update_and_gate_runs() {
+    let _serial = serial();
     let assets = env_usize("OTS_SCALE_ASSETS", 20_000);
     let planted = assets / 10_000;
     assert!(
