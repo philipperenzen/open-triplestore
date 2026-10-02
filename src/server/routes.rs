@@ -693,9 +693,13 @@ async fn execute_query(
     let (chunk_tx, chunk_rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(8);
 
     let federated_identity = user.and_then(|u| crate::federation::identity_for(state, &u.user_id));
+    let source_caller =
+        crate::sources::virtual_source::SourceCaller::for_request(&state.auth_db, user);
     tokio::task::spawn_blocking(move || {
         // SERVICE clauses evaluated inside this query act for the caller.
         let _identity = crate::federation::IdentityGuard::set(federated_identity);
+        let _source_caller =
+            crate::sources::virtual_source::SourceCallerGuard::set(Some(source_caller));
         let results = match store.query(&effective_query_str) {
             Ok(r) => r,
             Err(e) => {
@@ -821,10 +825,16 @@ pub(crate) async fn execute_update(
     // not count toward the timeout.
     let reverify = authorized.writes_unnamed_graphs;
     let st = state.clone();
+    let source_caller =
+        crate::sources::virtual_source::SourceCaller::for_request(&state.auth_db, user);
     let (result_tx, result_rx) = oneshot::channel();
     let write = tokio::task::spawn_blocking(move || {
         let result = {
             let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
+            // A SERVICE in the WHERE clause (admin only, see
+            // `authorize_update`) acts for the caller.
+            let _source_caller =
+                crate::sources::virtual_source::SourceCallerGuard::set(Some(source_caller));
             store.update_targeted_delta(&effective, &affected, requires_admin)
         };
         // A replica refuses every write before anything is written.
@@ -951,8 +961,13 @@ struct UpdateGraphAccess {
 /// variable `GRAPH ?g` block or a `SERVICE` call as unscoped. Default-graph leaf
 /// reads (`Bgp`/`Path`/`Values` outside any `GRAPH`) are harmless here: the store
 /// keeps all data in named graphs and the engine uses a non-union default graph.
+/// The patterns inside `EXISTS` / `NOT EXISTS` expressions are reads too: a
+/// `FILTER EXISTS { GRAPH <g> {…} }` learns whether `<g>` holds a triple.
 fn collect_where_graph_access(p: &spargebra::algebra::GraphPattern, acc: &mut UpdateGraphAccess) {
     use spargebra::algebra::GraphPattern as GP;
+    for inner in crate::sparql::exists_patterns(p) {
+        collect_where_graph_access(inner, acc);
+    }
     match p {
         GP::Graph { name, inner } => {
             match name {
@@ -1213,6 +1228,26 @@ mod update_graph_access_tests {
             assert!(!a.unnamed_write && !a.requires_admin, "{update}");
         }
     }
+    /// A graph named only inside an EXISTS is read like any other, and a
+    /// variable graph or a SERVICE inside one is as unbounded as outside.
+    #[test]
+    fn graphs_inside_exists_are_reads() {
+        let a = access(
+            "INSERT { GRAPH <urn:mine> { <urn:s> <urn:p> 1 } } WHERE { \
+             FILTER NOT EXISTS { GRAPH <urn:secret> { ?s ?p ?o } } }",
+        );
+        assert!(a.read_iris.contains("urn:secret") && !a.unscoped);
+        let a = access(
+            "INSERT { GRAPH <urn:mine> { <urn:s> <urn:p> ?x } } WHERE { \
+             BIND(EXISTS { GRAPH ?g { ?s ?p ?o } } AS ?x) }",
+        );
+        assert!(a.unscoped, "a variable graph inside EXISTS");
+        let a = access(
+            "INSERT { GRAPH <urn:mine> { <urn:s> <urn:p> 1 } } WHERE { \
+             FILTER EXISTS { SERVICE <urn:source:x> { ?s ?p ?o } } }",
+        );
+        assert!(a.unscoped, "a SERVICE inside EXISTS");
+    }
 }
 
 // ─── Batch SPARQL UPDATE ──────────────────────────────────────────────────────
@@ -1267,7 +1302,12 @@ async fn sparql_batch_update(
     // being called unchanged before it runs.
     mark_model_versions_written(&state, &model_versions)?;
 
-    let results = state.store.batch_update(&resolved)?;
+    let results = {
+        let _source_caller = crate::sources::virtual_source::SourceCallerGuard::set(Some(
+            crate::sources::virtual_source::SourceCaller::for_request(&state.auth_db, Some(&user)),
+        ));
+        state.store.batch_update(&resolved)?
+    };
     if writes_unnamed_graphs {
         // In a blocking task of its own, which runs to the end even when the
         // client goes away while this request waits for it.

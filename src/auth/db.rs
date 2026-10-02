@@ -4222,6 +4222,26 @@ impl AuthDb {
             }
         };
 
+        let mut best = self.held_dataset_role(user_id, dataset)?;
+
+        // Public datasets are always at least readable.
+        if best.is_none() && dataset.visibility == Visibility::Public {
+            best = Some(ResourceRole::Viewer);
+        }
+
+        Ok(best)
+    }
+
+    /// The role `user_id` holds on a dataset in their own right — as an
+    /// administrator, its owner, a member of the owning organisation or group,
+    /// through a grant or the legacy allow-list — leaving out the viewer role
+    /// everyone has on a public dataset. For what a dataset shares beyond its
+    /// graphs, such as the account of a datasource bound to it.
+    pub fn held_dataset_role(
+        &self,
+        user_id: &str,
+        dataset: &Dataset,
+    ) -> anyhow::Result<Option<ResourceRole>> {
         if let Some(user) = self.get_user_by_id(user_id)? {
             if user.role.is_admin() {
                 return Ok(Some(ResourceRole::Admin));
@@ -4243,11 +4263,6 @@ impl AuthDb {
             && dataset.visibility == Visibility::Private
             && self.has_dataset_access(&dataset.id, user_id)?
         {
-            best = Some(ResourceRole::Viewer);
-        }
-
-        // Public datasets are always at least readable.
-        if best.is_none() && dataset.visibility == Visibility::Public {
             best = Some(ResourceRole::Viewer);
         }
 
