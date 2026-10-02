@@ -4,11 +4,11 @@
 # needed here. It still needs an optional dependency entry + feature flag
 # below, and a registration in `src/plugins.rs`, to actually be built in.
 members = [".", "opengraph", "plugins/*", "tools/*"]
-# The vendored Oxigraph fork (see vendor/README.md) is a path dependency inside
-# the workspace directory, which would otherwise make it a member: it would then
-# be linted, formatted and tested as our own code, and its dev-dependencies
-# would enter Cargo.lock.
-exclude = ["vendor/oxigraph"]
+# The vendored Oxigraph crates (see vendor/README.md) are path dependencies
+# inside the workspace directory, which would otherwise make them members: they
+# would then be linted, formatted and tested as our own code, and their
+# dev-dependencies would enter Cargo.lock.
+exclude = ["vendor/oxigraph", "vendor/spareval"]
 resolver = "2"
 
 [package]
@@ -407,11 +407,13 @@ debug = false
 [profile.test.package."*"]
 debug = false
 
-# Oxigraph 0.5.11 with one storage change: typed literals keep their lexical
-# form and exact datatype (vendor/README.md has the why, the diff and how to
-# rebase onto a new upstream release). A path patch, not a git one, so
-# cargo-deny's `unknown-git = "deny"` keeps holding; every other crate of the
-# oxigraph family (oxrdf, spargebra, sparopt, spareval, oxrocksdb-sys...) still
-# comes from crates.io at the versions oxigraph 0.5.11 pins.
+# Oxigraph 0.5.11 and its SPARQL evaluator spareval 0.2.7, changed so typed
+# literals keep their lexical form and exact datatype (vendor/README.md has the
+# why, the diffs and how to rebase onto a new upstream release). Path patches,
+# not git ones, so cargo-deny's `unknown-git = "deny"` keeps holding; every
+# other crate of the oxigraph family (oxrdf, spargebra, sparopt, sparesults,
+# oxrocksdb-sys...) still comes from crates.io at the versions oxigraph 0.5.11
+# pins.
 [patch.crates-io]
 oxigraph = { path = "vendor/oxigraph" }
+spareval = { path = "vendor/spareval" }
