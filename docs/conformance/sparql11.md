@@ -64,8 +64,8 @@ with evidence rather than re-derived.
 | Entry | Gap |
 |---|---|
 | `aggregates#agg-empty-group-count-graph`, `bindings#graph` | `GRAPH ?g { … }` around a pattern that binds no quads (an aggregate sub-select, a `VALUES` with `UNDEF`) does not enumerate the named graphs, so `?g` stays unbound. |
-| `aggregates#agg-groupconcat-04`, `#agg-groupconcat-06` | `GROUP_CONCAT` keeps a language tag shared by every input (`"1 2"@en`), the SPARQL 1.2 rule; the 1.1 suite expects the plain literal. A spec-version divergence, not a defect. |
-| `functions#bnode01` | `BNODE(str)` returns one blank node per string for the whole query; SPARQL 1.1 §17.4.2.9 requires a fresh node per solution. |
+| `aggregates#agg-groupconcat-04`, `#agg-groupconcat-06` | `GROUP_CONCAT` keeps a language tag shared by every input (`"1 2"@en`); the 1.1 suite expects the plain literal. An evaluator defect (spareval's `GroupConcatAccumulator`), not a spec-version divergence: the SPARQL 1.2 draft also defines `GroupConcat` as returning an `xsd:string`, built with `CONCAT("", L1)`. On oxigraph's own known-failures list. |
+| `functions#bnode01` | `BNODE(str)` returns one blank node per string for the whole query (and across requests), and none for a string that is not a legal blank-node label; SPARQL 1.1 §17.4.2.9 requires a fresh node per solution. Not on oxigraph's own known-failures list. |
 | `negation#graph-minus` | The outer `GRAPH ?g` variable is implied on both sides of an inner `MINUS`, so the sides share `?g` and are not disjoint. |
 | `property-path#zero_or_more_set_start/end`, `#zero_or_one_set_start/end` | A zero-length path whose constant start or end is absent from the dataset yields no solution; the spec's zero-length path matches any term. |
 

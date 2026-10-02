@@ -18,16 +18,16 @@ applies.
 |---|---|---|
 | RDF 1.1 | Core triple data model | Full |
 | RDF-star (CG) / RDF 1.2 (WD) | Quoted/nested triples `<< >>` | Partial¹ |
-| SPARQL 1.1 Query | SELECT, ASK, CONSTRUCT, DESCRIBE | Full² |
+| SPARQL 1.1 Query | SELECT, ASK, CONSTRUCT, DESCRIBE | Partial² |
 | SPARQL 1.1 Update | INSERT, DELETE, LOAD, CLEAR, COPY, WITH/USING | Full |
 | SPARQL 1.1 Graph Store HTTP | Named-graph CRUD over HTTP | Full |
 | SPARQL 1.1 Federated Query (`SERVICE`) | Remote query | Full³ — deny-by-default: off until endpoints are allowlisted |
 | SPARQL 1.1 Service Description | Capability advertisement | Full |
 | SPARQL 1.2 (WD) | Triple terms, accessor functions | Partial¹ |
 | RDFS | subClass/subProperty/domain/range inference | Full |
-| OWL 2 QL | Profile reasoning (materialised) | Full¹² |
-| OWL 2 EL | Profile reasoning (materialised) | Full¹¹ |
-| OWL 2 RL | Profile reasoning (materialised) | Partial¹¹ |
+| OWL 2 QL | Profile reasoning (materialised) | Full¹⁰ |
+| OWL 2 EL | Profile reasoning (materialised) | Full¹⁰ |
+| OWL 2 RL | Profile reasoning (materialised) | Partial¹⁰ |
 | OWL 2 DL | Description-logic expressivity | Full⁴ (with the reasoner sidecar) |
 | GeoSPARQL 1.1 | Spatial RDF, relation/metric functions | Partial⁵ |
 | SHACL Core | Structural constraint validation | Partial⁶ |
@@ -51,25 +51,24 @@ applies.
 Conformance and high-complexity stress tests live in `tests/`. Each suite encodes
 expected results taken from the specification text; intentional non-conformances
 are encoded as documented, flip-when-fixed tests. Two things the table makes
-explicit: only the **vendored** rows run a published test corpus (the W3C SPARQL
-1.1 query, update and federation manifests, the W3C SHACL core and sparql
-manifests, TopQuadrant's SHACL-AF tests and the OGC GeoSPARQL validator shapes)
-— every other suite is hand-written and *derived from* its spec, not a
-published corpus — and the counts are generated from the suites themselves, so
-they cannot drift from the code. Results on the vendored SHACL, SHACL-AF and
-GeoSPARQL corpora are in [conformance/shacl.md](conformance/shacl.md)
-and [conformance/geosparql.md](conformance/geosparql.md).
-[conformance/sparql11.md](conformance/sparql11.md) describes the SPARQL run and
-tracks its known gaps; it publishes no score, because the vendored SPARQL
-sections are a subset of a W3C test suite and W3C's test-suite licence policy
-allows no performance claims on a subset.
+explicit: only the rows marked **vendored** run a published test corpus — every
+other suite is hand-written and *derived from* its spec, not from a W3C, OGC or
+community corpus — and the counts are generated from the suites themselves, so
+they cannot drift from the code. Whether a vendored corpus's results are
+published depends on its licence: each corpus has its own page under
+[conformance/](conformance/) (for example [shacl.md](conformance/shacl.md),
+[geosparql.md](conformance/geosparql.md) and [sparql11.md](conformance/sparql11.md)).
+The SPARQL sections, for one, are a subset of a W3C test suite, and W3C's
+test-suite licence policy allows no performance claims on a subset, so their
+page tracks known gaps but gives no score.
 
 <!-- conformance-table:start -->
 | Standard | Suite | Basis | Tests | Notes |
 |---|---|---|---:|---|
 | SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 17 |  |
-| DCAT 2 / VoID | `tests/dcat_conformance.rs` | spec-derived | 4 |  |
+| DCAT 3 / DCAT-AP 3 / VoID | `tests/dcat_conformance.rs` | spec-derived | 4 |  |
 | GeoSPARQL 1.1 | `tests/geosparql_conformance.rs` | spec-derived | 143 |  |
+| LDES 1.0 / TREE | `tests/ldes_conformance.rs` | spec-derived | 28 |  |
 | LDP 1.0 (store level) | `tests/ldp_conformance.rs` | spec-derived | 43 |  |
 | LDP 1.0 (HTTP) | `tests/ldp_http_conformance.rs` | spec-derived | 13 |  |
 | OGC GeoSPARQL 1.1 validator shapes | `tests/ogc_geosparql_shacl_roundtrip.rs` | **vendored OGC corpus** (unmodified) | 2 |  |
@@ -98,7 +97,7 @@ allows no performance claims on a subset.
 | SPARQL 1.1 Federated Query | `tests/w3c_sparql11_federation.rs` | **vendored W3C test-suite subset** (`service/` + `syntax-fed/` sections of w3c/rdf-tests, unmodified; manifest-driven, local endpoints) | 1 | runs in CI as a development and regression ratchet against local endpoints; no score is published (W3C test-suite policy); see `docs/conformance/sparql11.md` §Federation |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 
-1019 conformance tests across 30 suites; a further 818 tests in 106 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 6 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. The SHACL, SHACL-AF and GeoSPARQL corpus results are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant or OGC conformance claims. The SPARQL 1.1 sections (query, update and federation) and the OWL 2 DL test cases are partial runs of W3C test suites, so under W3C's licence terms they are used for development and bug tracking only, and no score is published for them.
+1047 conformance tests across 31 suites; a further 790 tests in 105 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 6 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation) and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->
@@ -123,9 +122,42 @@ behavior and will flip green when the limitation is resolved.
    `isTRIPLE` is false for it and true for the triple term it points at.
    Code written against the older RDF-star CG model (quoted triples usable in
    subject position) needs updating; see `tests/sparql12_conformance.rs`.
-2. **Zero-length property paths.** `:x :p* ?y` does not yield a constant start node
-   `:x` when `:x` is absent from the data (oxigraph behavior; the ALP algebra would
-   include it).
+2. **SPARQL 1.1 Query** is graded *Partial*. The engine is oxigraph 0.5.11 with
+   spareval 0.2.7, the latest release; the first two groups below sit there, the
+   last one in this server. (Parallel shards no longer evaluate `EXISTS` per
+   shard: since 2026-10-02 a query with `EXISTS` / `NOT EXISTS` is not split.)
+   - **Entries of the W3C SPARQL 1.1 query sections that fail** (tracked, with no
+     score, in [conformance/sparql11.md](conformance/sparql11.md)):
+     - `bindings#graph`, `aggregates#agg-empty-group-count-graph` and
+       `negation#graph-minus`: `GRAPH ?g` around a non-BGP inner pattern
+       (`VALUES`, a sub-select, `MINUS`) loses the graph variable
+       ([oxigraph#1905](https://github.com/oxigraph/oxigraph/issues/1905),
+       fixed on oxigraph's main branch for its next major release; upstream
+       ties `graph-minus` to the same cause);
+     - `property-path#zero_or_more_set_start`, `…_set_end`,
+       `zero_or_one_set_start` and `…_set_end`: a zero-length path (`*`, `?`)
+       whose constant end is absent from the data yields no solution, where the
+       spec's path semantics include the start term (`ASK { :x :p* :x }` is
+       false on an empty graph);
+     - `aggregates#agg-groupconcat-04` and `-06`: `GROUP_CONCAT` keeps a
+       language tag that every input shares; SPARQL 1.1, and the SPARQL 1.2
+       draft too, return a plain `xsd:string`;
+     - `functions#bnode01`: `BNODE(str)` returns the same blank node for the
+       same string in every solution (and across requests), and no node when
+       the string is not a legal blank-node label.
+   - **Several `FROM` graphs keep duplicates.** A triple present in two `FROM`
+     graphs matches twice, which inflates rows, `COUNT` and `SUM`
+     ([oxigraph#1919](https://github.com/oxigraph/oxigraph/issues/1919), fixed by
+     [#1920](https://github.com/oxigraph/oxigraph/pull/1920) on main, not yet
+     released). `/sparql` scopes every non-admin query with one `FROM` /
+     `FROM NAMED` pair per readable graph, so a triple held in two readable
+     graphs counts twice there; the columnar copy matches this on purpose.
+   - **The HTTP dataset is rewritten.** `/sparql` intersects a caller's
+     `FROM` / `FROM NAMED` graphs with the graphs the caller may read, and every
+     graph it keeps becomes both a `FROM` and a `FROM NAMED` graph: `FROM <a>`
+     alone also makes `<a>` a named graph, and the reverse. An admin's query gets
+     every registered graph added to the dataset it names. The protocol's
+     `default-graph-uri` / `named-graph-uri` parameters are ignored.
 3. **Federation/`SERVICE` is deny-by-default.** It is off as an SSRF mitigation
    until `OTS_REMOTE_ALLOWLIST` lists the URL prefixes the server may contact; a
    `SERVICE` naming anything else is a failed invocation — an error, or under
@@ -183,7 +215,17 @@ behavior and will flip green when the limitation is resolved.
    aggregates (`aggBoundingBox`, `aggBoundingCircle`, `aggCentroid`,
    `aggConcaveHull`, `aggConvexHull`), and the non-metric functions GeoSPARQL 1.1
    added besides `transform` and `asGeoJSON` (`length`, `perimeter`, `centroid`,
-   `geometryN`, `isEmpty`, `asWKT`, …).
+   `geometryN`, `isEmpty`, `asWKT`, …). **Wrong or missing answers today:** a GML
+   literal's `srsName` is honoured by the metric functions only, not by the
+   topology and constructive functions, `getSRID`, `transform` or `aggUnion`; a
+   unit IRI other than the OGC units (a QUDT unit, say) is ignored and the
+   answer comes back in the CRS's own units; `geof:transform` passes a
+   coordinate through unchanged when it cannot transform it, and drops Z/M;
+   `geof:relate` does not bring its operands into one CRS; `ehCoveredBy` uses
+   GEOS `coveredBy` rather than the spec's DE-9IM mask; and an empty WKT, GML or
+   GeoJSON literal (`""`) is unbound instead of the empty geometry. Operations
+   across two CRSs work only between the built-in CRSs above. No query uses the
+   spatial R-tree in `src/geo/spatial_index.rs`.
 6. **SHACL Core** — the Core constraint components are implemented, and
    blank-node property shapes (`sh:property [ … ]`, the standard idiom) are
    enforced (the loader dereferences blank nodes through the raw quad index;
@@ -256,30 +298,33 @@ behavior and will flip green when the limitation is resolved.
    rules (an empty value generates no term there). **Not implemented:** joins
    on file sources (the mapping is refused), and the RML-Core / RML-IO
    vocabulary beyond `rml:baseIRI` and `rml:null`.
-10. **Zero-length property paths:** `:x :p* ?y` includes start nodes present in the
-    data; the pure ALP edge of a *constant* start node absent from the graph is an
-    oxigraph-evaluator divergence.
-11. **OWL 2 RL / EL:** RL runs 75 of the 78 RL/RDF rules, lists of any length and
-    inverse property expressions included (`eq-ref` on request); the Table 8 rules
-    `dt-type2`, `dt-eq` and `dt-diff` are not run, so literals are matched as terms,
-    not by value. EL is a native EL++ saturation engine
-    covering the whole profile — intersections, existentials, `owl:hasValue`,
-    one-individual `owl:oneOf`, `owl:hasSelf`, the role hierarchy, property chains,
-    transitivity, reflexivity, ranges, disjointness, keys, equality and negative
-    assertions, and the EL datatype map with value semantics — with
-    classification, realization and the property-assertion closure; axioms outside
-    the profile are left out and reported (`ignored`). One storage limit applies: an
-    integer-derived XSD literal is stored as `xsd:integer`, so an ill-typed one
-    (`"-5"^^xsd:nonNegativeInteger`) is not detected. Both are pinned by
-    `tests/owl2_rl_conformance.rs` / `tests/owl2_el_conformance.rs`; the EL suite
-    includes randomised differential tests against RL on the EL ∩ RL fragment.
-12. **OWL 2 QL:** the whole profile: the DL-Lite_R closure, ground
-    materialisation, consistency (negative inclusions, asymmetric/irreflexive
-    properties, ill-typed literals, data ranges) and existential rewriting of
-    query blank nodes ([OWL 2 QL](/docs/owl2-ql)). Data ranges are decided on
-    values through the OWL 2 datatype map. Oxigraph stores integer-derived
-    types as `xsd:integer`, so a check reads the value, not the datatype it
-    was written with.
+10. **OWL 2 RL / EL / QL.**
+    - **RL** runs 75 of the 78 RL/RDF rules, lists of any length and inverse
+      property expressions included (`eq-ref` on request); the Table 8 rules
+      `dt-type2`, `dt-eq` and `dt-diff` are not run, so literals are matched as
+      terms, not by value.
+    - **EL** is a native EL++ saturation engine covering the whole profile —
+      intersections, existentials, `owl:hasValue`, one-individual `owl:oneOf`,
+      `owl:hasSelf`, the role hierarchy, property chains, transitivity,
+      reflexivity, ranges, disjointness, keys, equality and negative assertions,
+      and the EL datatype map with value semantics — with classification,
+      realization and the property-assertion closure; axioms outside the profile
+      are left out and reported (`ignored`). One storage limit applies: an
+      integer-derived XSD literal is stored as `xsd:integer`, so an ill-typed
+      one (`"-5"^^xsd:nonNegativeInteger`) is not detected. Both are pinned by
+      `tests/owl2_rl_conformance.rs` / `tests/owl2_el_conformance.rs`; the EL
+      suite includes randomised differential tests against RL on the EL ∩ RL
+      fragment.
+    - **QL** covers the whole profile: the DL-Lite_R closure, ground
+      materialisation, consistency (negative inclusions, asymmetric/irreflexive
+      properties, ill-typed literals, data ranges) and existential rewriting of
+      query blank nodes ([OWL 2 QL](/docs/owl2-ql)). Data ranges are decided on
+      values through the OWL 2 datatype map. Oxigraph stores integer-derived
+      types as `xsd:integer`, so a check reads the value, not the datatype it
+      was written with.
+
+    See [owl2-rl.md](owl2-rl.md), [owl2-el.md](owl2-el.md) and
+    [owl2-ql.md](owl2-ql.md).
 
 Related guides: [OWL Reasoning](/docs/reasoning), [SHACL Validation](/docs/shacl),
 [GeoSPARQL](/docs/geosparql), [Performance](/docs/performance),

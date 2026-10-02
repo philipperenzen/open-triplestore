@@ -44,7 +44,13 @@ Turtle also has literal **shorthands** so common values need no `^^`:
 > and computed **by value**, so `"01"^^xsd:integer` equals `"1"^^xsd:integer`, and
 > `"1.0E2"^^xsd:double` equals `100.0` in a `FILTER`. It also **stores** them as
 > values, so a literal comes back in canonical form: `"01"^^xsd:integer` reads
-> back as `"1"`, `"1"^^xsd:boolean` as `"true"`. Strings, language-tagged
+> back as `"1"`, `"1"^^xsd:boolean` as `"true"`. The integer-derived datatypes
+> (`xsd:byte`, `xsd:int`, `xsd:nonNegativeInteger` and the others) are stored as
+> `xsd:integer` and read back with that datatype, and `xsd:dateTimeStamp` reads
+> back as `xsd:dateTime` — so `sh:datatype xsd:nonNegativeInteger` does not match
+> stored data, and a range check such as `"300"^^xsd:byte` is not made at storage
+> ([known limitations](standards.md#known-limitations--conformance-findings)).
+> Strings, language-tagged
 > strings and datatypes outside the XSD value space (see
 > [Other & custom datatypes](#other-custom-datatypes)) keep their lexical form
 > exactly as written and are compared by exact match.

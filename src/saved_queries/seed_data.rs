@@ -948,27 +948,111 @@ const CAPABILITIES_JSONLD: &str = r#"{
     "AuthMethod": "ots:AuthMethod"
   },
   "@graph": [
-    { "@id": "ots:rdf11",      "@type": "Standard", "title": "RDF 1.1",                 "conformance": "Full" },
-    { "@id": "ots:rdf12",      "@type": "Standard", "title": "RDF-star / RDF 1.2",      "conformance": "Full" },
-    { "@id": "ots:sparql11",   "@type": "Standard", "title": "SPARQL 1.1 Query & Update","conformance": "Full" },
-    { "@id": "ots:sparql12",   "@type": "Standard", "title": "SPARQL 1.2",              "conformance": "Full" },
-    { "@id": "ots:gsp",        "@type": "Standard", "title": "SPARQL Graph Store HTTP", "conformance": "Full" },
-    { "@id": "ots:sd",         "@type": "Standard", "title": "SPARQL Service Description","conformance": "Full" },
-    { "@id": "ots:rdfs",       "@type": "Standard", "title": "RDFS",                    "conformance": "Full" },
-    { "@id": "ots:owlql",      "@type": "Standard", "title": "OWL 2 QL",                "conformance": "Full" },
-    { "@id": "ots:owlel",      "@type": "Standard", "title": "OWL 2 EL",                "conformance": "Full" },
-    { "@id": "ots:owlrl",      "@type": "Standard", "title": "OWL 2 RL",                "conformance": "Full" },
-    { "@id": "ots:owldl",      "@type": "Standard", "title": "OWL 2 DL",                "conformance": "Full" },
-    { "@id": "ots:geosparql",  "@type": "Standard", "title": "GeoSPARQL 1.1",           "conformance": "Full" },
-    { "@id": "ots:shaclcore",  "@type": "Standard", "title": "SHACL Core",              "conformance": "Full" },
-    { "@id": "ots:shacladv",   "@type": "Standard", "title": "SHACL Advanced",          "conformance": "Full" },
-    { "@id": "ots:shaclc",     "@type": "Standard", "title": "SHACL Compact Syntax",    "conformance": "Full" },
-    { "@id": "ots:shex",       "@type": "Standard", "title": "ShEx",                    "conformance": "Full" },
-    { "@id": "ots:swrl",       "@type": "Standard", "title": "SWRL",                    "conformance": "Full" },
-    { "@id": "ots:ldp",        "@type": "Standard", "title": "Linked Data Platform 1.0","conformance": "Full" },
-    { "@id": "ots:dcat",       "@type": "Standard", "title": "DCAT 2 / VoID",           "conformance": "Full" },
+    { "@id": "ots:rdf11",          "@type": "Standard", "title": "RDF 1.1",                                "conformance": "Full" },
+    { "@id": "ots:rdf12",          "@type": "Standard", "title": "RDF-star (CG) / RDF 1.2 (WD)",           "conformance": "Partial" },
+    { "@id": "ots:sparql11",       "@type": "Standard", "title": "SPARQL 1.1 Query",                       "conformance": "Partial" },
+    { "@id": "ots:sparql11update", "@type": "Standard", "title": "SPARQL 1.1 Update",                      "conformance": "Full" },
+    { "@id": "ots:gsp",            "@type": "Standard", "title": "SPARQL 1.1 Graph Store HTTP",            "conformance": "Full" },
+    { "@id": "ots:sparqlfed",      "@type": "Standard", "title": "SPARQL 1.1 Federated Query (SERVICE)",   "conformance": "Full" },
+    { "@id": "ots:sd",             "@type": "Standard", "title": "SPARQL 1.1 Service Description",         "conformance": "Full" },
+    { "@id": "ots:sparql12",       "@type": "Standard", "title": "SPARQL 1.2 (WD)",                        "conformance": "Partial" },
+    { "@id": "ots:rdfs",           "@type": "Standard", "title": "RDFS",                                   "conformance": "Full" },
+    { "@id": "ots:owlql",          "@type": "Standard", "title": "OWL 2 QL",                               "conformance": "Full" },
+    { "@id": "ots:owlel",          "@type": "Standard", "title": "OWL 2 EL",                               "conformance": "Full" },
+    { "@id": "ots:owlrl",          "@type": "Standard", "title": "OWL 2 RL",                               "conformance": "Partial" },
+    { "@id": "ots:owldl",          "@type": "Standard", "title": "OWL 2 DL",                               "conformance": "Full" },
+    { "@id": "ots:geosparql",      "@type": "Standard", "title": "GeoSPARQL 1.1",                          "conformance": "Partial" },
+    { "@id": "ots:shaclcore",      "@type": "Standard", "title": "SHACL Core",                             "conformance": "Partial" },
+    { "@id": "ots:shacladv",       "@type": "Standard", "title": "SHACL Advanced (AF / SPARQL)",           "conformance": "Partial" },
+    { "@id": "ots:shaclc",         "@type": "Standard", "title": "SHACL-C",                                "conformance": "Partial" },
+    { "@id": "ots:opm",            "@type": "Standard", "title": "OPM (Ontology for Property Management)", "conformance": "Partial" },
+    { "@id": "ots:ids",            "@type": "Standard", "title": "buildingSMART IDS 1.0",                  "conformance": "Partial" },
+    { "@id": "ots:icdd",           "@type": "Standard", "title": "ISO 21597-1 ICDD",                       "conformance": "Partial" },
+    { "@id": "ots:rdfpatch",       "@type": "Standard", "title": "RDF Patch (RDF Delta)",                  "conformance": "Full" },
+    { "@id": "ots:ldes",           "@type": "Standard", "title": "LDES / TREE",                            "conformance": "Full" },
+    { "@id": "ots:ldp",            "@type": "Standard", "title": "LDP (Linked Data Platform) 1.0",         "conformance": "Full" },
+    { "@id": "ots:dcat",           "@type": "Standard", "title": "DCAT 3 / DCAT-AP 3 / DCAT-AP-NL 3",      "conformance": "Partial" },
+    { "@id": "ots:rml",            "@type": "Standard", "title": "RML / R2RML",                            "conformance": "Partial" },
+    { "@id": "ots:shex",           "@type": "Standard", "title": "ShEx",                                   "conformance": "Partial" },
+    { "@id": "ots:swrl",           "@type": "Standard", "title": "SWRL",                                   "conformance": "Partial" },
     { "@id": "ots:jwt",        "@type": "AuthMethod", "title": "JSON Web Tokens (JWT)" },
     { "@id": "ots:oauth",      "@type": "AuthMethod", "title": "OAuth 2.0 / OIDC" },
     { "@id": "ots:saml",       "@type": "AuthMethod", "title": "SAML 2.0 SSO" }
   ]
 }"#;
+
+#[cfg(test)]
+mod tests {
+    use super::CAPABILITIES_JSONLD;
+
+    /// The grades table of `docs/standards.md` as (standard, grade) pairs: the
+    /// first column with code marks removed, and the first word of the Support
+    /// column without its footnote marks ("Partial² — …" → "Partial").
+    fn standards_md_grades() -> Vec<(String, String)> {
+        let doc = include_str!("../../docs/standards.md");
+        let mut rows = Vec::new();
+        let mut in_table = false;
+        for line in doc.lines() {
+            if line.starts_with("| Standard | Role | Support |") {
+                in_table = true;
+                continue;
+            }
+            if !in_table || line.starts_with("|---") {
+                continue;
+            }
+            if !line.starts_with('|') {
+                break;
+            }
+            let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+            let standard = cells[1].replace('`', "");
+            let grade: String = cells[3]
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .filter(|c| c.is_ascii_alphabetic())
+                .collect();
+            rows.push((standard, grade));
+        }
+        rows
+    }
+
+    /// The in-app capabilities graph advertises the grades `docs/standards.md`
+    /// gives, row for row: every Standard in the seed names a row there with
+    /// the same grade, and every row except the authentication ones (seeded as
+    /// AuthMethods, which carry no grade) is in the seed.
+    #[test]
+    fn capabilities_seed_matches_standards_md() {
+        let grades = standards_md_grades();
+        assert!(grades.len() > 20, "grades table not found: {grades:?}");
+        let caps: serde_json::Value = serde_json::from_str(CAPABILITIES_JSONLD).unwrap();
+        let seeded: Vec<(String, String)> = caps["@graph"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| n["@type"] == "Standard")
+            .map(|n| {
+                (
+                    n["title"].as_str().unwrap().to_string(),
+                    n["conformance"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        for (title, level) in &seeded {
+            let row = grades.iter().find(|(s, _)| s == title);
+            let Some((_, grade)) = row else {
+                panic!("seeded standard {title:?} has no row in docs/standards.md");
+            };
+            assert_eq!(level, grade, "conformance of {title:?}");
+        }
+        for (standard, _) in &grades {
+            if standard.starts_with("JWT") || standard.starts_with("SAML") {
+                continue;
+            }
+            assert!(
+                seeded.iter().any(|(t, _)| t == standard),
+                "docs/standards.md row {standard:?} is missing from the capabilities seed"
+            );
+        }
+    }
+}
