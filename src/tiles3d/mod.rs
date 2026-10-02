@@ -1083,7 +1083,9 @@ mod tests {
         let off = view["byteOffset"].as_u64().unwrap() as usize;
         let len = view["byteLength"].as_u64().unwrap() as usize;
         bin[off..off + len]
-            .chunks_exact(12)
+            .as_chunks::<12>()
+            .0
+            .iter()
             .map(|c| {
                 let f = |i: usize| f32::from_le_bytes([c[i], c[i + 1], c[i + 2], c[i + 3]]);
                 [f(0), f(4), f(8)]
