@@ -7,55 +7,79 @@
 //! * `POST /api/datasets/:id/patch` — apply a patch to the dataset's graphs
 //!   atomically, as one commit.
 //!
-//! Supported lines: `H` (headers), `TX` / `TC` / `TA` (one transaction;
-//! `TA` aborts, nothing is applied), `PA` / `PD` (prefixes), `A` / `D`
-//! (add / delete a quad — the graph term is required here, since a dataset
-//! patch may only touch the dataset's registered graphs). Deleting a triple
-//! whose subject or object is a blank node is refused: the patch is applied
-//! as SPARQL `DELETE DATA`, which cannot name blank nodes.
+//! The format (<https://afs.github.io/rdf-delta/rdf-patch.html>): rows of
+//! N-Triples-like tokens, each ending with `.` — `H` (headers), `TX` / `TC` /
+//! `TA` (transaction blocks; several per patch, a `TA` discards its own block
+//! only), `PA` / `PD` (prefixes, the name as a keyword or a quoted string, the
+//! namespace as an IRI or a string) and `A` / `D` (add / delete a triple or a
+//! quad). A blank node, `_:label` or `<_:label>`, names the store's own blank
+//! node with that id, so a patch can delete one and a version diff applies
+//! faithfully. Two extensions: prefixed names in `A` / `D` rows expand through
+//! the patch's own `PA` declarations, and a dataset patch puts triples written
+//! without a graph into the graph its `?graph=` parameter names.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
-use oxigraph::model::{BlankNode, GraphNameRef, Literal, NamedNode, NamedNodeRef};
+use oxigraph::model::vocab::xsd;
+use oxigraph::model::{
+    BlankNode, GraphName, GraphNameRef, Literal, NamedNode, NamedNodeRef, NamedOrBlankNode, Quad,
+    Term,
+};
 
 use crate::auth::middleware::AuthenticatedUser;
 use crate::server::AppState;
-use crate::store::{escape_sparql_iri, TripleStore};
+use crate::store::{escape_sparql_iri, QuadOp, TripleStore};
 
 pub const MEDIA_TYPE: &str = "application/rdf-patch";
 
-/// One quad of the patch, each term in canonical N-Triples form: IRIs as
-/// `<…>` (prefixed names expanded through the patch's own `PA` declarations),
-/// blank nodes as `_:label`, literals quoted and escaped. Every term went
-/// through the oxrdf constructors in [`parse`], so [`to_sparql_update`] can
-/// concatenate them: nothing in a term can close a `GRAPH { … }` block or
-/// start another operation.
+/// One `A` / `D` row: a triple, or a quad when it names a graph. Every term
+/// was built by the oxrdf constructors, so it is a valid RDF term.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QuadText {
-    pub s: String,
-    pub p: String,
-    pub o: String,
-    pub g: Option<String>,
+pub struct PatchQuad {
+    pub subject: NamedOrBlankNode,
+    pub predicate: NamedNode,
+    pub object: Term,
+    /// `None`: the row was a triple.
+    pub graph: Option<NamedNode>,
+}
+
+impl PatchQuad {
+    /// The quad, in `default` when the row named no graph (`None` then).
+    pub fn to_quad(&self, default: Option<&NamedNode>) -> Option<Quad> {
+        let graph = self.graph.as_ref().or(default)?;
+        Some(Quad::new(
+            self.subject.clone(),
+            self.predicate.clone(),
+            self.object.clone(),
+            GraphName::NamedNode(graph.clone()),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
-    Add(QuadText),
-    Delete(QuadText),
+    Add(PatchQuad),
+    Delete(PatchQuad),
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct Patch {
     pub headers: Vec<(String, String)>,
+    /// The prefix table the patch leaves (name without the `:`, namespace):
+    /// its `PA` / `PD` rows in order, an aborted block's rows undone.
     pub prefixes: Vec<(String, String)>,
+    /// The `A` / `D` rows of every committed block, and of rows outside any
+    /// block, in patch order.
     pub ops: Vec<Op>,
-    /// A `TA` line was seen: the transaction is void.
-    pub aborted: bool,
+    /// Blocks closed with `TC`.
+    pub committed: usize,
+    /// Blocks closed with `TA`: their rows are discarded.
+    pub aborted: usize,
 }
 
 impl Patch {
@@ -74,11 +98,26 @@ impl Patch {
             .filter(|o| matches!(o, Op::Delete(_)))
             .count()
     }
-    pub fn graphs(&self) -> BTreeSet<Option<String>> {
+    /// The rows as store operations, a row without a graph put in `default`.
+    /// `Err` names the first row that has no graph when there is no default.
+    pub fn quad_ops(&self, default: Option<&NamedNode>) -> Result<Vec<QuadOp>, String> {
         self.ops
             .iter()
-            .map(|o| match o {
-                Op::Add(q) | Op::Delete(q) => q.g.clone(),
+            .map(|op| {
+                let (q, add) = match op {
+                    Op::Add(q) => (q, true),
+                    Op::Delete(q) => (q, false),
+                };
+                let quad = q.to_quad(default).ok_or_else(|| {
+                    "a row names no graph: a dataset patch applies to the dataset's registered \
+                     graphs, so write quads or name the graph for triples with ?graph="
+                        .to_string()
+                })?;
+                Ok(if add {
+                    QuadOp::Add(quad)
+                } else {
+                    QuadOp::Remove(quad)
+                })
             })
             .collect()
     }
@@ -86,92 +125,167 @@ impl Patch {
 
 // ── tokenizer ───────────────────────────────────────────────────────────────
 
-/// Split one patch line into RDF terms / keywords, honouring `<…>`, `"…"`
-/// (with escapes, language tags and datatypes) and the terminating `.`.
-fn tokenize(line: &str) -> Result<Vec<String>, String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Tok {
+    /// `<…>`, without the brackets.
+    Iri(String),
+    /// `_:label` or `<_:label>`: the label.
+    BNode(String),
+    /// A literal as written: quoted body plus any `@lang` / `^^datatype`.
+    Literal(String),
+    /// A keyword, an operation code or a prefixed name.
+    Word(String),
+}
+
+/// Split a patch into rows: each row's line number and its tokens, the
+/// terminating `.` dropped. A row ends at its `.`, not at a line break, and
+/// `#` outside a term starts a comment that runs to the end of the line.
+fn rows(text: &str) -> Result<Vec<(usize, Vec<Tok>)>, String> {
+    let chars: Vec<char> = text.chars().collect();
     let mut out = Vec::new();
-    let chars: Vec<char> = line.chars().collect();
+    let mut row: Vec<Tok> = Vec::new();
+    let mut row_line = 1;
+    let mut line = 1;
     let mut i = 0;
+    // A bare token runs to whitespace, so a malformed prefixed name stays
+    // one token and is refused as such. A trailing `.` is the row's end, as
+    // in Turtle (a prefixed name or a blank-node label cannot end with one).
+    let bare = |i: &mut usize| -> (String, bool) {
+        let start = *i;
+        while *i < chars.len() && !chars[*i].is_whitespace() {
+            *i += 1;
+        }
+        let word: String = chars[start..*i].iter().collect();
+        match word.strip_suffix('.') {
+            Some(w) if !w.is_empty() => (w.trim_end_matches('.').to_string(), true),
+            _ => (word, false),
+        }
+    };
     while i < chars.len() {
         let c = chars[i];
+        if c == '\n' {
+            line += 1;
+        }
         if c.is_whitespace() {
             i += 1;
             continue;
         }
-        let start = i;
+        if row.is_empty() {
+            row_line = line;
+        }
+        let err = |m: &str| format!("line {line}: {m}");
+        let mut dot = false;
         match c {
-            '<' => {
-                while i < chars.len() && chars[i] != '>' {
+            '#' => {
+                while i < chars.len() && chars[i] != '\n' {
                     i += 1;
                 }
-                if i >= chars.len() {
-                    return Err("unterminated IRI".into());
-                }
+                continue;
+            }
+            '.' => {
                 i += 1;
+                dot = true;
+            }
+            '<' if chars.get(i + 1) == Some(&'<') => {
+                return Err(err("RDF 1.2 triple terms (`<<( … )>>`) are not supported"));
+            }
+            '<' => {
+                let start = i + 1;
+                while i < chars.len() && chars[i] != '>' && chars[i] != '\n' {
+                    i += 1;
+                }
+                if i >= chars.len() || chars[i] != '>' {
+                    return Err(err("unterminated IRI"));
+                }
+                let body: String = chars[start..i].iter().collect();
+                i += 1;
+                row.push(match body.strip_prefix("_:") {
+                    Some(label) => Tok::BNode(label.to_string()),
+                    None => Tok::Iri(body),
+                });
             }
             '"' => {
+                let start = i;
                 i += 1;
-                while i < chars.len() {
-                    if chars[i] == '\\' {
-                        i += 2;
-                        continue;
-                    }
-                    if chars[i] == '"' {
-                        break;
-                    }
+                while i < chars.len() && chars[i] != '"' && chars[i] != '\n' {
+                    i += if chars[i] == '\\' { 2 } else { 1 };
+                }
+                if i >= chars.len() || chars[i] != '"' {
+                    return Err(err("unterminated literal"));
+                }
+                i += 1;
+                let body: String = chars[start..i].iter().collect();
+                let mut suffix = String::new();
+                if chars.get(i) == Some(&'@') {
+                    let tag = i;
                     i += 1;
-                }
-                if i >= chars.len() {
-                    return Err("unterminated literal".into());
-                }
-                i += 1;
-                // language tag or datatype
-                if i < chars.len() && chars[i] == '@' {
-                    while i < chars.len() && !chars[i].is_whitespace() {
+                    while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '-') {
                         i += 1;
                     }
-                } else if i + 1 < chars.len() && chars[i] == '^' && chars[i + 1] == '^' {
+                    suffix = chars[tag..i].iter().collect();
+                } else if chars.get(i) == Some(&'^') && chars.get(i + 1) == Some(&'^') {
                     i += 2;
-                    if i < chars.len() && chars[i] == '<' {
-                        while i < chars.len() && chars[i] != '>' {
+                    if chars.get(i) == Some(&'<') {
+                        let dt = i;
+                        while i < chars.len() && chars[i] != '>' && chars[i] != '\n' {
                             i += 1;
                         }
-                        if i >= chars.len() {
-                            return Err("unterminated datatype IRI".into());
+                        if i >= chars.len() || chars[i] != '>' {
+                            return Err(err("unterminated datatype IRI"));
                         }
                         i += 1;
+                        suffix = format!("^^{}", chars[dt..i].iter().collect::<String>());
                     } else {
-                        while i < chars.len() && !chars[i].is_whitespace() {
-                            i += 1;
-                        }
+                        // A prefixed datatype, expanded with the other terms.
+                        let (dt, ends) = bare(&mut i);
+                        suffix = format!("^^{dt}");
+                        dot = ends;
                     }
                 }
+                row.push(Tok::Literal(format!("{body}{suffix}")));
+            }
+            '_' if chars.get(i + 1) == Some(&':') => {
+                i += 2;
+                let (label, ends) = bare(&mut i);
+                row.push(Tok::BNode(label));
+                dot = ends;
             }
             _ => {
-                while i < chars.len() && !chars[i].is_whitespace() {
-                    i += 1;
-                }
+                let (word, ends) = bare(&mut i);
+                row.push(Tok::Word(word));
+                dot = ends;
             }
         }
-        out.push(chars[start..i].iter().collect());
+        if dot {
+            if row.is_empty() {
+                return Err(err("empty row"));
+            }
+            out.push((row_line, std::mem::take(&mut row)));
+        }
+    }
+    if !row.is_empty() {
+        return Err(format!("line {row_line}: missing terminating `.`"));
     }
     Ok(out)
 }
 
-fn is_iri(t: &str) -> bool {
-    t.starts_with('<') && t.ends_with('>') && t.len() > 2
+/// Whether `name` is a Turtle `PN_PREFIX` (or empty, the default prefix).
+fn is_pn_prefix(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return true;
+    };
+    let base = |c: char| c.is_ascii_alphabetic() || (!c.is_ascii() && c.is_alphanumeric());
+    base(first)
+        && !name.ends_with('.')
+        && chars.all(|c| base(c) || c.is_ascii_digit() || matches!(c, '_' | '-' | '.'))
 }
-fn is_bnode(t: &str) -> bool {
-    t.starts_with("_:")
-}
-fn is_literal(t: &str) -> bool {
-    t.starts_with('"')
-}
+
 /// Whether `local` is acceptable as the local part of a prefixed name: the
 /// SPARQL `PN_LOCAL` production, minus its `\`-escapes. Letters, digits, `_`,
 /// `-`, `.`, `:`, `%XX` and non-ASCII characters; nothing else — in particular
-/// none of `{ } ; < > " ' \` or whitespace, which is what let a "prefixed
-/// name" carry SPARQL syntax into the generated update.
+/// none of `{ } ; < > " ' \` or whitespace, which is what once let a
+/// "prefixed name" carry SPARQL syntax into a generated update.
 fn is_pn_local(local: &str) -> bool {
     let mut chars = local.chars();
     while let Some(c) = chars.next() {
@@ -193,14 +307,13 @@ fn is_pn_local(local: &str) -> bool {
 
 /// Expand `pfx:local` through the patch's `PA` declarations into a validated
 /// IRI. The prefix must have been declared (and not `PD`-removed) on an
-/// earlier line.
+/// earlier row.
 fn expand_prefixed(t: &str, prefixes: &[(String, String)]) -> Result<NamedNode, String> {
     let Some((pfx, local)) = t.split_once(':') else {
         return Err(format!("`{t}` is not an RDF term"));
     };
-    let key = format!("{pfx}:");
-    let Some((_, ns)) = prefixes.iter().find(|(p, _)| *p == key) else {
-        return Err(format!("`{t}` uses the undeclared prefix `{key}`"));
+    let Some((_, ns)) = prefixes.iter().find(|(p, _)| p == pfx) else {
+        return Err(format!("`{t}` uses the undeclared prefix `{pfx}:`"));
     };
     if !is_pn_local(local) {
         return Err(format!(
@@ -225,216 +338,211 @@ fn split_literal(t: &str) -> Result<(&str, &str), String> {
     Err(format!("unterminated literal {t}"))
 }
 
-/// Parse one term of an `A`/`D` line into its canonical N-Triples text.
-///
-/// Every kind of term is rebuilt from an oxrdf value — `NamedNode`,
-/// `BlankNode`, `Literal` — so what comes out is exactly what the store's own
-/// serializer would print, and nothing the patch author typed reaches the
-/// SPARQL text unchecked. Prefixed names (also in a literal's datatype) are
-/// expanded here; the generated update declares no prefixes.
-fn canonical_term(
-    t: &str,
-    prefixes: &[(String, String)],
-    allow_bnode: bool,
-    allow_literal: bool,
-    what: &str,
-    ln: usize,
-) -> Result<String, String> {
-    let err = |e: String| format!("line {ln}: {what}: {e}");
-    if is_iri(t) {
-        return NamedNode::new(&t[1..t.len() - 1])
-            .map(|n| n.to_string())
-            .map_err(|e| err(format!("{t}: {e}")));
-    }
-    if is_bnode(t) {
-        if !allow_bnode {
-            return Err(err(format!("must not be a blank node ({t})")));
-        }
-        return BlankNode::new(&t[2..])
-            .map(|b| b.to_string())
-            .map_err(|e| err(format!("{t}: {e}")));
-    }
-    if is_literal(t) {
-        if !allow_literal {
-            return Err(err(format!("must not be a literal ({t})")));
-        }
-        let (body, suffix) = split_literal(t).map_err(err)?;
-        let full = match suffix.strip_prefix("^^") {
-            Some(dt) if !dt.starts_with('<') => {
-                format!("{body}^^{}", expand_prefixed(dt, prefixes).map_err(err)?)
-            }
-            _ => t.to_string(),
-        };
-        return full
-            .parse::<Literal>()
-            .map(|l| l.to_string())
-            .map_err(|e| err(format!("{t}: {e}")));
-    }
-    expand_prefixed(t, prefixes)
-        .map(|n| n.to_string())
-        .map_err(err)
+fn literal(t: &str, prefixes: &[(String, String)]) -> Result<Literal, String> {
+    let (body, suffix) = split_literal(t)?;
+    let full = match suffix.strip_prefix("^^") {
+        Some(dt) if !dt.starts_with('<') => format!("{body}^^{}", expand_prefixed(dt, prefixes)?),
+        _ => t.to_string(),
+    };
+    full.parse::<Literal>().map_err(|e| format!("{t}: {e}"))
 }
+
+/// A string written as a plain literal (`"…"`): its value.
+fn plain_string(t: &str) -> Option<String> {
+    let l = t.parse::<Literal>().ok()?;
+    (l.language().is_none() && l.datatype() == xsd::STRING).then(|| l.value().to_string())
+}
+
+/// A blank node by its label, which names the store's node with that id.
+fn blank_node(label: &str) -> Result<BlankNode, String> {
+    BlankNode::new(label).map_err(|_| {
+        format!(
+            "`_:{label}` is not a blank-node label this store uses: letters, digits, `_` and `-`, \
+             with `.` only inside"
+        )
+    })
+}
+
+/// What a term position accepts.
+#[derive(Clone, Copy, PartialEq)]
+enum Pos {
+    Subject,
+    Predicate,
+    Object,
+    Graph,
+}
+
+fn term(t: &Tok, prefixes: &[(String, String)], pos: Pos) -> Result<Term, String> {
+    let what = match pos {
+        Pos::Subject => "subject",
+        Pos::Predicate => "predicate",
+        Pos::Object => "object",
+        Pos::Graph => "graph",
+    };
+    let at = |e: String| format!("{what}: {e}");
+    match t {
+        Tok::Iri(iri) => NamedNode::new(iri)
+            .map(Term::from)
+            .map_err(|e| at(format!("<{iri}>: {e}"))),
+        Tok::BNode(label) if matches!(pos, Pos::Subject | Pos::Object) => {
+            blank_node(label).map(Term::from).map_err(at)
+        }
+        Tok::BNode(label) => Err(at(format!("must not be a blank node (_:{label})"))),
+        Tok::Literal(l) if pos == Pos::Object => literal(l, prefixes).map(Term::from).map_err(at),
+        Tok::Literal(l) => Err(at(format!("must not be a literal ({l})"))),
+        Tok::Word(w) => expand_prefixed(w, prefixes).map(Term::from).map_err(at),
+    }
+}
+
+fn quad(args: &[Tok], prefixes: &[(String, String)]) -> Result<PatchQuad, String> {
+    let named = |t: Term| match t {
+        Term::NamedNode(n) => n,
+        _ => unreachable!("a predicate or graph position only yields IRIs"),
+    };
+    let subject = match term(&args[0], prefixes, Pos::Subject)? {
+        Term::NamedNode(n) => NamedOrBlankNode::NamedNode(n),
+        Term::BlankNode(b) => NamedOrBlankNode::BlankNode(b),
+        _ => unreachable!("a subject position only yields IRIs and blank nodes"),
+    };
+    Ok(PatchQuad {
+        subject,
+        predicate: named(term(&args[1], prefixes, Pos::Predicate)?),
+        object: term(&args[2], prefixes, Pos::Object)?,
+        graph: match args.get(3) {
+            Some(g) => Some(named(term(g, prefixes, Pos::Graph)?)),
+            None => None,
+        },
+    })
+}
+
+/// A `PA` / `PD` prefix name: a keyword or a quoted string, without the
+/// trailing `:` (one is tolerated, as earlier versions of this parser
+/// required it).
+fn prefix_name(t: &Tok) -> Result<String, String> {
+    let name = match t {
+        Tok::Word(w) => w.strip_suffix(':').unwrap_or(w).to_string(),
+        Tok::Literal(l) => plain_string(l).ok_or_else(|| format!("{l} is not a prefix name"))?,
+        other => return Err(format!("{other:?} is not a prefix name")),
+    };
+    if !is_pn_prefix(&name) {
+        return Err(format!("`{name}` is not a prefix name"));
+    }
+    Ok(name)
+}
+
+/// A header's value: an IRI, a string's value, or the term as written.
+fn header_value(t: &Tok) -> String {
+    match t {
+        Tok::Iri(i) => i.clone(),
+        Tok::BNode(b) => format!("_:{b}"),
+        Tok::Literal(l) => match l.parse::<Literal>() {
+            Ok(lit) => lit.value().to_string(),
+            Err(_) => l.clone(),
+        },
+        Tok::Word(w) => w.clone(),
+    }
+}
+
+/// A prefix table: names without the `:`, and their namespaces.
+type Prefixes = Vec<(String, String)>;
 
 /// Parse a patch document.
 pub fn parse(text: &str) -> Result<Patch, String> {
     let mut patch = Patch::default();
-    let mut in_tx = false;
-    let mut tx_seen = false;
-    for (idx, raw) in text.lines().enumerate() {
-        let ln = idx + 1;
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let mut toks = tokenize(line).map_err(|e| format!("line {ln}: {e}"))?;
-        if toks.last().map(String::as_str) != Some(".") {
-            return Err(format!("line {ln}: missing terminating `.`"));
-        }
-        toks.pop();
-        let Some(code) = toks.first().cloned() else {
-            return Err(format!("line {ln}: empty statement"));
+    // The open block: its rows, and the prefix table to restore on `TA`.
+    let mut open: Option<(Vec<Op>, Prefixes)> = None;
+    for (ln, toks) in rows(text)? {
+        let at = |e: String| format!("line {ln}: {e}");
+        let (code, args) = match toks.split_first() {
+            Some((Tok::Word(code), args)) => (code.as_str(), args),
+            Some((other, _)) => return Err(at(format!("unknown code `{other:?}`"))),
+            None => return Err(at("empty row".into())),
         };
-        let args = &toks[1..];
-        match code.as_str() {
+        match code {
             "H" => {
-                if args.len() < 2 {
-                    return Err(format!("line {ln}: H needs a name and a value"));
+                if args.len() != 2 {
+                    return Err(at("H needs a name and one value".into()));
                 }
-                let v = args[1..].join(" ");
-                let v = v
-                    .trim_matches('"')
-                    .trim_matches(|c| c == '<' || c == '>')
-                    .to_string();
-                patch.headers.push((args[0].clone(), v));
+                let name = match &args[0] {
+                    Tok::Word(w) => w.clone(),
+                    Tok::Literal(l) => {
+                        plain_string(l).ok_or_else(|| at(format!("{l} is not a header name")))?
+                    }
+                    other => return Err(at(format!("{other:?} is not a header name"))),
+                };
+                patch.headers.push((name, header_value(&args[1])));
             }
             "TX" => {
-                if tx_seen {
-                    return Err(format!(
-                        "line {ln}: only one transaction per patch is supported"
+                if open.is_some() {
+                    return Err(at(
+                        "TX inside an open transaction: blocks do not nest, close it with TC or TA"
+                            .into(),
                     ));
                 }
-                in_tx = true;
-                tx_seen = true;
+                open = Some((Vec::new(), patch.prefixes.clone()));
             }
             "TC" => {
-                if !in_tx {
-                    return Err(format!("line {ln}: TC without TX"));
-                }
-                in_tx = false;
+                let Some((ops, _)) = open.take() else {
+                    return Err(at("TC without TX".into()));
+                };
+                patch.ops.extend(ops);
+                patch.committed += 1;
             }
             "TA" => {
-                if !in_tx {
-                    return Err(format!("line {ln}: TA without TX"));
-                }
-                in_tx = false;
-                patch.aborted = true;
-                patch.ops.clear();
+                let Some((_, prefixes)) = open.take() else {
+                    return Err(at("TA without TX".into()));
+                };
+                patch.prefixes = prefixes;
+                patch.aborted += 1;
             }
             "PA" => {
-                if args.len() != 2 || !args[0].ends_with(':') || !is_iri(&args[1]) {
-                    return Err(format!("line {ln}: PA needs `prefix: <iri>`"));
+                if args.len() != 2 {
+                    return Err(at("PA needs a prefix name and a namespace".into()));
                 }
-                let ns = args[1][1..args[1].len() - 1].to_string();
-                patch.prefixes.retain(|(p, _)| *p != args[0]);
-                patch.prefixes.push((args[0].clone(), ns));
+                let name = prefix_name(&args[0]).map_err(at)?;
+                let ns = match &args[1] {
+                    Tok::Iri(i) => i.clone(),
+                    Tok::Literal(l) => {
+                        plain_string(l).ok_or_else(|| at(format!("PA: {l} is not a namespace")))?
+                    }
+                    other => return Err(at(format!("PA: {other:?} is not a namespace"))),
+                };
+                NamedNode::new(&ns).map_err(|e| at(format!("PA: <{ns}>: {e}")))?;
+                patch.prefixes.retain(|(p, _)| *p != name);
+                patch.prefixes.push((name, ns));
             }
             "PD" => {
                 if args.len() != 1 {
-                    return Err(format!("line {ln}: PD needs a prefix"));
+                    return Err(at("PD needs a prefix name".into()));
                 }
-                patch.prefixes.retain(|(p, _)| *p != args[0]);
+                let name = prefix_name(&args[0]).map_err(at)?;
+                patch.prefixes.retain(|(p, _)| *p != name);
             }
             "A" | "D" => {
                 if args.len() != 3 && args.len() != 4 {
-                    return Err(format!(
-                        "line {ln}: {code} needs a triple or quad, found {} terms",
+                    return Err(at(format!(
+                        "{code} needs a triple or quad, found {} terms",
                         args.len()
-                    ));
+                    )));
                 }
-                let delete = code == "D";
-                let px = &patch.prefixes;
-                let s = canonical_term(&args[0], px, !delete, false, "subject", ln)?;
-                let p = canonical_term(&args[1], px, false, false, "predicate", ln)?;
-                let o = canonical_term(&args[2], px, !delete, true, "object", ln)?;
-                let g = if args.len() == 4 {
-                    Some(canonical_term(&args[3], px, false, false, "graph", ln)?)
+                let q = quad(args, &patch.prefixes).map_err(at)?;
+                let op = if code == "D" {
+                    Op::Delete(q)
                 } else {
-                    None
+                    Op::Add(q)
                 };
-                let q = QuadText { s, p, o, g };
-                patch
-                    .ops
-                    .push(if delete { Op::Delete(q) } else { Op::Add(q) });
+                match &mut open {
+                    Some((ops, _)) => ops.push(op),
+                    None => patch.ops.push(op),
+                }
             }
-            other => return Err(format!("line {ln}: unknown code `{other}`")),
+            other => return Err(at(format!("unknown code `{other}`"))),
         }
     }
-    if in_tx {
+    if open.is_some() {
         return Err("transaction not closed (missing TC or TA)".into());
     }
     Ok(patch)
-}
-
-// ── SPARQL rendering ────────────────────────────────────────────────────────
-
-/// The patch as one SPARQL Update request: runs of adds / deletes become
-/// `INSERT DATA` / `DELETE DATA` blocks in order, grouped by graph, so the
-/// sequence semantics of the patch are preserved inside one transaction.
-///
-/// The terms are the canonical ones [`parse`] produced (prefixed names already
-/// expanded), so no `PREFIX` header is emitted and every token is a complete,
-/// validated N-Triples term.
-pub fn to_sparql_update(patch: &Patch) -> String {
-    let mut out = String::new();
-    let mut blocks: Vec<String> = Vec::new();
-    let mut run: Vec<&QuadText> = Vec::new();
-    let mut run_is_add: Option<bool> = None;
-    let flush = |blocks: &mut Vec<String>, run: &mut Vec<&QuadText>, is_add: bool| {
-        if run.is_empty() {
-            return;
-        }
-        let mut by_graph: Vec<(Option<&str>, Vec<&QuadText>)> = Vec::new();
-        for q in run.iter() {
-            match by_graph.iter_mut().find(|(g, _)| *g == q.g.as_deref()) {
-                Some((_, v)) => v.push(q),
-                None => by_graph.push((q.g.as_deref(), vec![q])),
-            }
-        }
-        let mut b = String::from(if is_add {
-            "INSERT DATA {\n"
-        } else {
-            "DELETE DATA {\n"
-        });
-        for (g, quads) in by_graph {
-            let body: String = quads
-                .iter()
-                .map(|q| format!("    {} {} {} .\n", q.s, q.p, q.o))
-                .collect();
-            match g {
-                Some(g) => b.push_str(&format!("  GRAPH {g} {{\n{body}  }}\n")),
-                None => b.push_str(&body),
-            }
-        }
-        b.push('}');
-        blocks.push(b);
-        run.clear();
-    };
-    for op in &patch.ops {
-        let (is_add, q) = match op {
-            Op::Add(q) => (true, q),
-            Op::Delete(q) => (false, q),
-        };
-        if run_is_add.is_some_and(|r| r != is_add) {
-            flush(&mut blocks, &mut run, run_is_add.unwrap());
-        }
-        run_is_add = Some(is_add);
-        run.push(q);
-    }
-    if let Some(is_add) = run_is_add {
-        flush(&mut blocks, &mut run, is_add);
-    }
-    out.push_str(&blocks.join(";\n"));
-    out
 }
 
 // ── generation ──────────────────────────────────────────────────────────────
@@ -456,7 +564,8 @@ fn triples_of(store: &TripleStore, graph: &str) -> HashSet<String> {
 
 /// A patch that transforms the `from` graphs into the `to` graphs, expressed
 /// against `target` graph IRIs: `(target, from, to)` per graph, where a
-/// missing side is the empty graph.
+/// missing side is the empty graph. Blank nodes are written with the store's
+/// own ids, so the patch applies faithfully to a store that holds them.
 pub fn generate(
     store: &TripleStore,
     headers: &[(&str, &str)],
@@ -501,113 +610,192 @@ pub fn generate(
 
 // ── HTTP ────────────────────────────────────────────────────────────────────
 
-type ApiErr = (StatusCode, String);
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct PatchParams {
+    /// A registered graph of the dataset that receives the rows written
+    /// without a graph. Without it such rows are refused.
+    pub graph: Option<String>,
+}
+
+/// A refused patch request: the response it is answered with, boxed so the
+/// handler's `Result` stays small.
+pub struct Refused(Box<Response>);
+
+impl IntoResponse for Refused {
+    fn into_response(self) -> Response {
+        *self.0
+    }
+}
+
+impl From<crate::server::error::AppError> for Refused {
+    fn from(e: crate::server::error::AppError) -> Self {
+        Refused(Box::new(e.into_response()))
+    }
+}
+
+fn refuse(status: StatusCode, message: impl Into<String>) -> Refused {
+    Refused(Box::new((status, message.into()).into_response()))
+}
+
+/// The SHACL write gates a Graph Store write to the same graphs passes —
+/// `gate_writes` pipelines, validation-layer bindings and the owning
+/// dataset's `shacl_on_write` shapes — run over what each graph the patch
+/// touches would hold after it. `Err` carries the first refusal's report, as
+/// `writer` may see it. A failed gate lookup refuses.
+fn check_gates(
+    state: &AppState,
+    writer: &AuthenticatedUser,
+    ops: &[QuadOp],
+    graphs: &[String],
+) -> Result<(), crate::shacl::report::ValidationReport> {
+    use crate::shacl_studio::gate;
+    let studio = crate::shacl_studio::store::ShaclStudioStore::new(state.auth_db.pool());
+    let ctx = gate::GateContext {
+        main_store: &state.store,
+        auth_db: &state.auth_db,
+        studio: &studio,
+        base_url: &state.base_url,
+        writer: Some(writer),
+    };
+    for g in graphs {
+        if !gate::import_gates_apply(ctx, g) {
+            continue;
+        }
+        let name = NamedNode::new(g).map_err(gate::gate_error)?;
+        let mut future: HashSet<Quad> = state
+            .store
+            .quads_for_graph(GraphNameRef::NamedNode(name.as_ref()))
+            .map_err(gate::gate_error)?
+            .into_iter()
+            .collect();
+        for op in ops {
+            let q = op.quad();
+            if q.graph_name.as_ref() != GraphNameRef::NamedNode(name.as_ref()) {
+                continue;
+            }
+            match op {
+                QuadOp::Add(q) => future.insert(q.clone()),
+                QuadOp::Remove(q) => future.remove(q),
+            };
+        }
+        let future: Vec<Quad> = future.into_iter().collect();
+        gate::check_import_gates(ctx, g, &future)?;
+    }
+    Ok(())
+}
 
 /// POST /api/datasets/:id/patch — apply an RDF Patch to the dataset's graphs.
 pub async fn apply_patch_handler(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(dataset_id): Path<String>,
+    Query(params): Query<PatchParams>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<impl IntoResponse, ApiErr> {
-    let e500 = |e: anyhow::Error| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+) -> Result<Json<serde_json::Value>, Refused> {
+    let e500 = |e: anyhow::Error| refuse(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     let ds = state
         .auth_db
         .get_dataset(&dataset_id)
         .map_err(e500)?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "Dataset not found".to_string()))?;
+        .ok_or_else(|| refuse(StatusCode::NOT_FOUND, "Dataset not found"))?;
     if !state
         .auth_db
         .can_access_dataset(Some(&user.user_id), &ds)
         .map_err(e500)?
     {
-        return Err((StatusCode::NOT_FOUND, "Dataset not found".to_string()));
+        return Err(refuse(StatusCode::NOT_FOUND, "Dataset not found"));
     }
     if !state
         .auth_db
         .can_write_dataset(&user.user_id, &ds)
         .map_err(e500)?
     {
-        return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
+        return Err(refuse(StatusCode::FORBIDDEN, "Write access required"));
     }
     let ct = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if !(ct.is_empty() || ct.contains("rdf-patch") || ct.starts_with("text/plain")) {
-        return Err((
+        return Err(refuse(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             format!("send the patch as {MEDIA_TYPE} (got {ct})"),
         ));
     }
-    let text =
-        String::from_utf8(body.to_vec()).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let patch =
-        parse(&text).map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid RDF Patch: {e}")))?;
+    let bad = |m: String| refuse(StatusCode::BAD_REQUEST, m);
+    let text = String::from_utf8(body.to_vec()).map_err(|e| bad(e.to_string()))?;
+    let patch = parse(&text).map_err(|e| bad(format!("invalid RDF Patch: {e}")))?;
     let id = patch.id().unwrap_or("-").to_string();
-    if patch.aborted || patch.ops.is_empty() {
+    // The rows as written, beside the net `added` / `removed` they make.
+    let transactions = serde_json::json!({
+        "committed": patch.committed,
+        "aborted": patch.aborted,
+        "add_rows": patch.adds(),
+        "delete_rows": patch.deletes(),
+    });
+    if patch.ops.is_empty() {
         return Ok(Json(serde_json::json!({
             "applied": false,
             "id": id,
-            "aborted": patch.aborted,
+            "aborted": patch.aborted > 0,
+            "transactions": transactions,
             "added": 0,
             "removed": 0,
-            "reason": if patch.aborted { "the transaction was aborted (TA)" } else { "no A/D lines" },
+            "reason": if patch.aborted > 0 { "every transaction was aborted (TA)" } else { "no A/D rows" },
         })));
     }
-    // Every quad names one of the dataset's graphs. `parse` already expanded
-    // prefixed graph names through the patch's own PA declarations, so each
-    // graph term is a canonical `<iri>`.
+    // Every quad lands in one of the dataset's registered graphs: the one it
+    // names, or for a triple the `?graph=` default.
     let registered: HashSet<String> = state
         .auth_db
         .list_dataset_graphs(&dataset_id)
         .map_err(e500)?
         .into_iter()
         .collect();
-    let mut graphs: Vec<String> = Vec::new();
-    for g in patch.graphs() {
-        let Some(g) = g else {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "every A/D line must name a graph: a dataset patch applies to the dataset's registered graphs".to_string(),
-            ));
-        };
-        let iri = g
-            .strip_prefix('<')
-            .and_then(|g| g.strip_suffix('>'))
-            .unwrap_or(&g)
-            .to_string();
-        if !registered.contains(&iri) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("graph <{iri}> is not registered to dataset {dataset_id}"),
-            ));
+    let not_registered = |iri: &str| {
+        bad(format!(
+            "graph <{iri}> is not registered to dataset {dataset_id}"
+        ))
+    };
+    let default = match params.graph.as_deref() {
+        Some(iri) => {
+            if !registered.contains(iri) {
+                return Err(not_registered(iri));
+            }
+            Some(NamedNode::new(iri).map_err(|e| bad(format!("?graph=: {e}")))?)
         }
-        if !graphs.contains(&iri) {
-            graphs.push(iri);
+        None => None,
+    };
+    let ops = patch.quad_ops(default.as_ref()).map_err(bad)?;
+    let mut graphs: Vec<String> = Vec::new();
+    for op in &ops {
+        let GraphName::NamedNode(g) = &op.quad().graph_name else {
+            unreachable!("quad_ops puts every row in a named graph");
+        };
+        let iri = g.as_str();
+        if !registered.contains(iri) {
+            return Err(not_registered(iri));
+        }
+        if !graphs.iter().any(|x| x == iri) {
+            graphs.push(iri.to_string());
         }
     }
-    let update = to_sparql_update(&patch);
-    let (added, removed) = (patch.adds(), patch.deletes());
     let st = state.clone();
     let gs = graphs.clone();
-    let update_text = update.clone();
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let before = crate::ldes::capture::before(&st, &gs);
-        st.store.update(&update_text).map_err(|e| e.to_string())?;
-        crate::ldes::capture::after(&st, before);
-        crate::entailment::after_write(&st, &gs);
-        Ok(())
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("applying the patch failed: {e}"),
-        )
-    })?;
+    let writer = user.clone();
+    let (added, removed) =
+        tokio::task::spawn_blocking(move || -> Result<(usize, usize), Refused> {
+            use crate::server::error::AppError;
+            check_gates(&st, &writer, &ops, &gs).map_err(AppError::ValidationFailed)?;
+            let before = crate::ldes::capture::before(&st, &gs);
+            let counts = st.store.apply_quad_ops(&ops).map_err(AppError::from)?;
+            crate::ldes::capture::after(&st, before);
+            crate::entailment::after_write(&st, &gs);
+            Ok(counts)
+        })
+        .await
+        .map_err(|e| refuse(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
     for g in &graphs {
         crate::server::routes::sync_text_index_after_graph_write(&state, Some(g.clone())).await;
     }
@@ -630,7 +818,8 @@ pub async fn apply_patch_handler(
     Ok(Json(serde_json::json!({
         "applied": true,
         "id": id,
-        "aborted": false,
+        "aborted": patch.aborted > 0,
+        "transactions": transactions,
         "added": added,
         "removed": removed,
         "graphs": graphs,
@@ -641,6 +830,13 @@ pub async fn apply_patch_handler(
 mod tests {
     use super::*;
 
+    fn add(p: &Patch, i: usize) -> &PatchQuad {
+        match &p.ops[i] {
+            Op::Add(q) => q,
+            Op::Delete(_) => panic!("row {i} is a delete"),
+        }
+    }
+
     #[test]
     fn parses_headers_prefixes_transactions_and_quads() {
         let p = parse(
@@ -650,33 +846,20 @@ mod tests {
         assert_eq!(p.id(), Some("urn:uuid:1"));
         assert_eq!(
             p.prefixes,
-            vec![("ex:".to_string(), "http://example.org/".to_string())]
+            vec![("ex".to_string(), "http://example.org/".to_string())]
         );
-        assert_eq!(p.adds(), 1);
-        assert_eq!(p.deletes(), 1);
-        assert!(!p.aborted);
-        let sparql = to_sparql_update(&p);
-        assert!(
-            !sparql.contains("PREFIX"),
-            "terms are expanded at parse time, the update declares no prefixes: {sparql}"
+        assert_eq!(
+            (p.adds(), p.deletes(), p.committed, p.aborted),
+            (1, 1, 1, 0)
         );
-        assert!(
-            sparql.contains(
-                "INSERT DATA {\n  GRAPH <urn:g> {\n    <http://example.org/s> <http://example.org/p> \"v \\\"q\\\" .\"@en .\n"
-            ),
-            "{sparql}"
-        );
-        assert!(
-            sparql.contains(";\nDELETE DATA {"),
-            "adds then deletes, in order: {sparql}"
-        );
+        let q = add(&p, 0);
+        assert_eq!(q.subject.to_string(), "<http://example.org/s>");
+        assert_eq!(q.object.to_string(), "\"v \\\"q\\\" .\"@en");
+        assert_eq!(q.graph.as_ref().unwrap().as_str(), "urn:g");
     }
 
     #[test]
-    fn rejects_blank_node_deletes_unknown_codes_and_open_transactions() {
-        assert!(parse("TX .\nD _:b <urn:p> <urn:o> <urn:g> .\nTC .\n")
-            .unwrap_err()
-            .contains("blank node"));
+    fn rejects_unknown_codes_and_open_or_nested_transactions() {
         assert!(parse("X .\n").unwrap_err().contains("unknown code"));
         assert!(parse("TX .\nA <urn:s> <urn:p> <urn:o> .\n")
             .unwrap_err()
@@ -684,15 +867,20 @@ mod tests {
         assert!(parse("A <urn:s> <urn:p> <urn:o>\n")
             .unwrap_err()
             .contains("terminating"));
+        assert!(parse("TX .\nTX .\nTC .\nTC .\n")
+            .unwrap_err()
+            .contains("do not nest"));
+        assert!(parse("TC .\n").unwrap_err().contains("without TX"));
         let aborted = parse("TX .\nA <urn:s> <urn:p> <urn:o> <urn:g> .\nTA .\n").unwrap();
-        assert!(aborted.aborted && aborted.ops.is_empty());
+        assert!(aborted.aborted == 1 && aborted.ops.is_empty());
     }
 
     /// A "prefixed name" is only accepted when its prefix was declared and its
-    /// local part is a `PN_LOCAL`. The old check took any whitespace-free token
+    /// local part is a `PN_LOCAL`. An old check took any whitespace-free token
     /// containing `:`, so `ex:o}GRAPH<urn:x>{<a><b><c>` — SPARQL needs no
-    /// whitespace between IRIs — closed the registered `GRAPH { … }` block and
-    /// wrote to a graph the dataset never registered.
+    /// whitespace between IRIs — closed the registered `GRAPH { … }` block of
+    /// the update the patch was then applied as, and wrote to a graph the
+    /// dataset never registered.
     #[test]
     fn prefixed_names_must_be_declared_and_well_formed() {
         let undeclared = parse("TX .\nA ex:s <urn:p> <urn:o> <urn:g> .\nTC .\n").unwrap_err();
@@ -718,22 +906,31 @@ mod tests {
             "PA xsd: <http://www.w3.org/2001/XMLSchema#> .\nPA ex: <http://example.org/> .\nTX .\nA ex:s ex:p \"1\"^^xsd:integer ex:g .\nTC .\n",
         )
         .unwrap();
-        let Op::Add(q) = &p.ops[0] else { panic!() };
-        assert_eq!(q.s, "<http://example.org/s>");
-        assert_eq!(q.o, "\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>");
-        assert_eq!(q.g.as_deref(), Some("<http://example.org/g>"));
-        // `PD` removes the declaration for the lines after it.
+        let q = add(&p, 0);
+        assert_eq!(q.subject.to_string(), "<http://example.org/s>");
+        assert_eq!(
+            q.object.to_string(),
+            "\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+        );
+        assert_eq!(q.graph.as_ref().unwrap().as_str(), "http://example.org/g");
+        // `PD` removes the declaration for the rows after it.
         let after_pd = parse(
             "PA ex: <http://example.org/> .\nPD ex: .\nTX .\nA ex:s <urn:p> <urn:o> <urn:g> .\nTC .\n",
         )
         .unwrap_err();
         assert!(after_pd.contains("undeclared prefix"), "{after_pd}");
-        // The generated update is exactly one INSERT DATA into the named graph.
-        let sparql = to_sparql_update(&p);
-        let parsed = spargebra::SparqlParser::new()
-            .parse_update(&sparql)
-            .expect("generated update must parse");
-        assert_eq!(parsed.operations.len(), 1, "{sparql}");
+    }
+
+    #[test]
+    fn tokens_end_rows_without_spaces_and_comments_run_to_the_line_end() {
+        let p = parse(
+            "TX. # a comment\nA <urn:s> <urn:p> \"x\"@en-GB. A _:b1 <urn:p> \"1\"^^<urn:dt>.\nA <urn:s>\n  <urn:p> _:b2 .\nTC.\n",
+        )
+        .unwrap();
+        assert_eq!(p.adds(), 3);
+        assert_eq!(add(&p, 0).object.to_string(), "\"x\"@en-gb");
+        assert_eq!(add(&p, 1).subject.to_string(), "_:b1");
+        assert_eq!(add(&p, 2).object.to_string(), "_:b2");
     }
 
     #[test]
@@ -764,7 +961,10 @@ mod tests {
         store
             .update("INSERT DATA { GRAPH <urn:target> { <urn:a> <urn:p> 1 . <urn:b> <urn:p> 2 } }")
             .unwrap();
-        store.update(&to_sparql_update(&p)).unwrap();
+        assert_eq!(
+            store.apply_quad_ops(&p.quad_ops(None).unwrap()).unwrap(),
+            (1, 1)
+        );
         let ask = |q: &str| {
             matches!(
                 store.query(q),

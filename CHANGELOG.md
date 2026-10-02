@@ -424,6 +424,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   node expression that contains itself or is none of the seven kinds, and a
   target-type parameter given twice or as a blank node fail the shapes graph
   too.
+- **RDF Patch follows the format page.** `PA`/`PD` take the prefix name as a
+  keyword or a quoted string and the namespace as an IRI or a string, so
+  patches written by Jena or RDF Delta (`PA "rdf" "http://…" .`) apply; the
+  old `PA ex: <…>` form is still read. A patch may hold several `TX` blocks,
+  and a `TA` discards only its own. Rows end at their `.`, not at a line
+  break, and `#` comments may follow a row. Blank nodes, `_:x` or `<_:x>`,
+  name the store's own nodes: a patch can delete a blank-node triple, and a
+  version diff with blank nodes applies faithfully (adds used to go through
+  `INSERT DATA`, which minted fresh nodes). Triples without a graph go to the
+  registered graph `?graph=` names. Patches are applied by a new
+  transactional quad path (`TripleStore::apply_quad_ops`) that records the
+  exact net change in the change log, and the response's `added`/`removed`
+  are that net change. Spec-derived tests in `tests/rdf_patch_conformance.rs`.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were
@@ -943,6 +956,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   otherwise). Execution runs off the async runtime, under the
   expensive-operations limit, and stops at the write timeout
   (`write_timeout_secs`).
+- **RDF Patch passes the SHACL write gates.** `POST /api/datasets/:id/patch`
+  skipped the gates a Graph Store write to the same graph passes. It now runs
+  Studio `gate_writes` pipelines, bound shapes and the dataset's
+  `shacl_on_write` shapes over what each touched graph would hold after the
+  patch, and refuses with a `422` and the report.
 - **Every configured secret goes through the secrets module.** `JWT_SECRET`,
   `LD_REGISTRY_TOKEN`, a replication follower's `OTS_REPLICATION_TOKEN` and the
   accounts-dashboard plugin's `ACCOUNTS_DASHBOARD_GATEWAY_KEY` were read as raw
