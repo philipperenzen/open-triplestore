@@ -82,6 +82,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asks for, and re-pins; the store now tells everyone which datasets that applies to.
 
 ### Changed
+- **The Docker image ships the SQL connectors.** 0.7.0 announced PostgreSQL,
+  MySQL / MariaDB and SQL Server datasources, but the image built only
+  `--features full`, which leaves `plugin-postgres`, `plugin-mysql` and
+  `plugin-mssql` out, so the published image could register only `sqlite` and
+  `sparql` sources. The Dockerfile's `CARGO_FEATURES` now defaults to
+  `full,plugin-postgres,plugin-mysql,plugin-mssql`. The connectors are pure
+  Rust over rustls and need no new system package; the binary grows by about
+  4%. `full` and a plain `cargo build` are unchanged. A custom image that sets
+  `CARGO_FEATURES` replaces this list, so it must name the connectors it wants
+  (`CARGO_FEATURES=full` builds an image without them). The SQL Server driver
+  brings tiberius's rustls 0.21 stack into the image; `deny.toml` now says so
+  and keeps its three advisory ignores on reachability grounds.
+  `docs/build-features.md` lists the three features, `docs/sources.md` says
+  what the image carries, and GitHub CI's backend job compiles the main crate
+  with all three (it built only `plugin-postgres`, in the live-sources job).
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were
@@ -142,13 +157,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   overwrote it with nothing. `PUT /api/admin/oauth/providers/:id` now keeps
   the stored certificate when the body omits it, as it already did for the
   client secret.
-- **SHACL result paths no longer render with a stray `>`.** The backend
-  serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
-  `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if
-  it were a bare IRI, showing `ex.org:label>`. The dataset validation dialog,
-  `/validation`, `/shacl/results`, the shape-graph meta report and the source
-  dry-run findings now shorten every `<…>` term and keep the operators, so a
-  sequence path reads `ex.org:a/ex.org:b`; the tooltip keeps the raw path.
+- **MySQL / MariaDB datasources connect over TLS.** The `plugin-mysql` driver
+  was built without a TLS backend, so `tls: true` against a server that offers
+  TLS (MySQL 8 does by default) panicked inside the driver and every probe,
+  introspection and run answered an opaque 500 — leaving cleartext as the only
+  setting that worked. The driver now carries rustls over ring, as the
+  PostgreSQL plugin does, with the bundled Mozilla roots plus a private CA from
+  `options.sslrootcert`. Beyond MySQL: the host now contains a panic in any
+  source driver as a named `driver failure` error (the detail goes to the
+  server log, and that connection is retired), and a PostgreSQL TLS refusal
+  says why (`invalid peer certificate: UnknownIssuer`) instead of only "error
+  performing TLS handshake". CI's `live-sources` job gives PostgreSQL, MySQL,
+  MariaDB and SQL Server a certificate from a throwaway CA and runs every
+  driver once more with `tls: true`
+  ([`scripts/live-sources-tls.sh`](scripts/live-sources-tls.sh)).
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if
@@ -216,6 +238,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     where its summary line has a dash.
 
 ### Security
+- **Known advisories now in the image, through the SQL Server driver.** With
+  `plugin-mssql` in the image (see *Changed*), tiberius 0.12.3, the latest
+  release, brings rustls 0.21 and rustls-webpki 0.101 with it. Their
+  advisories RUSTSEC-2026-0098 and RUSTSEC-2026-0099 (name constraints) need a
+  misissuing name-constrained CA among the roots a SQL Server connection
+  trusts, and RUSTSEC-2026-0104 (a CRL parsing panic) needs CRL checking,
+  which tiberius never turns on; rustls-pemfile 1 is unmaintained
+  (RUSTSEC-2025-0134). Only SQL Server connections use this stack. An image
+  built with `CARGO_FEATURES=full,plugin-postgres,plugin-mysql` leaves it out.
 - **Every configured secret goes through the secrets module.** `JWT_SECRET`,
   `LD_REGISTRY_TOKEN`, a replication follower's `OTS_REPLICATION_TOKEN` and the
   accounts-dashboard plugin's `ACCOUNTS_DASHBOARD_GATEWAY_KEY` were read as raw

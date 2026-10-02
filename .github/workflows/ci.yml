@@ -71,21 +71,24 @@ jobs:
       # (plugins/api / plugins/hello, src/plugins.rs) — is exercised on every CI run,
       # same as any other optional capability. The plugin crates ALSO build/test
       # standalone at their own default features in the "Plugin crates" job below.
+      # The three SQL connector plugins ride along too: their registration in
+      # src/plugins.rs compiles only when the main crate is built with them, and
+      # the live-sources job builds just `plugin-postgres`.
       # `--workspace` is load-bearing: without it cargo selects only the root
       # package, so the `opengraph` member was never linted or test-compiled. Its
       # test module had been broken (a stale oxigraph `on_store` signature) for
       # long enough that all 59 of its tests silently never ran.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard -- -D warnings
+        run: cargo clippy --workspace --all-targets --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard,plugin-postgres,plugin-mysql,plugin-mssql -- -D warnings
 
       - name: Build
-        run: cargo build --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked
+        run: cargo build --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard,plugin-postgres,plugin-mysql,plugin-mssql --locked
 
       # The Docker builder stage writes the crates' licence notices with this
-      # generator; run it here too so a change that breaks it fails a PR, not
-      # the next image release.
+      # generator; run it here too, with the image's default CARGO_FEATURES, so
+      # a change that breaks it fails a PR, not the next image release.
       - name: Third-party licence notices (server)
-        run: python3 scripts/gen_rust_third_party_licenses.py --features full --output "$RUNNER_TEMP/THIRD-PARTY-LICENSES-server.txt"
+        run: python3 scripts/gen_rust_third_party_licenses.py --features full,plugin-postgres,plugin-mysql,plugin-mssql --output "$RUNNER_TEMP/THIRD-PARTY-LICENSES-server.txt"
 
       # No test is ignored (scripts/no-ignored-tests.sh says why): the source
       # scan catches an `#[ignore]` behind a cfg_attr for another platform,
@@ -97,7 +100,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo test --workspace --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked 2>&1 | tee test.log
+          cargo test --workspace --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard,plugin-postgres,plugin-mysql,plugin-mssql --locked 2>&1 | tee test.log
           if grep -E 'test result: .* [1-9][0-9]* ignored' test.log; then
             echo "::error::Some tests were ignored — fix or delete them (scripts/no-ignored-tests.sh)."
             exit 1
@@ -124,7 +127,7 @@ jobs:
           set -o pipefail
           count_passed() { printf '%s\n' "$1" | grep -oE '[0-9]+ passed' | awk '{s+=$1} END{print s+0}'; }
 
-          files_out=$(cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked --test 'security_*' 2>&1)
+          files_out=$(cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard,plugin-postgres,plugin-mysql,plugin-mssql --locked --test 'security_*' 2>&1)
           echo "$files_out"
           files_passed=$(count_passed "$files_out")
           echo "==> tests/security_*.rs passed: $files_passed"
@@ -133,7 +136,7 @@ jobs:
             exit 1
           fi
 
-          named_out=$(cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked security 2>&1)
+          named_out=$(cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard,plugin-postgres,plugin-mysql,plugin-mssql --locked security 2>&1)
           echo "$named_out"
           named_passed=$(count_passed "$named_out")
           echo "==> security-named tests passed across all binaries: $named_passed"
@@ -193,6 +196,9 @@ jobs:
   # sets OTS_TEST_LIVE_REQUIRED: a missing or renamed variable fails here
   # instead of skipping. The MySQL plugin serves MariaDB too, so its test runs
   # against both. The passwords are throwaway values for these containers.
+  # Every server also gets a certificate from a throwaway CA, so each driver
+  # runs once more with tls: true against that CA (OTS_TEST_<DIALECT>_TLS_CA
+  # names where it lies on the server; the test reads it back).
   live-sources:
     name: Database connectors against live servers
     runs-on: ubuntu-latest
@@ -240,8 +246,19 @@ jobs:
       OTS_TEST_MSSQL_HOST: 127.0.0.1
       OTS_TEST_MSSQL_PASSWORD: OtsLive-Passw0rd
       OTS_TEST_MSSQL_READER_PASSWORD: OtsLive-R3ader
+      OTS_TEST_POSTGRES_TLS_CA: /var/lib/postgresql/ots-tls/ca.pem
+      OTS_TEST_MYSQL_TLS_CA: /var/lib/mysql-files/ots-tls/ca.pem
+      OTS_TEST_MSSQL_TLS_CA: /var/opt/mssql/ots-tls/ca.pem
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # First, so the MariaDB and SQL Server restarts it needs overlap with
+      # the build; the tests wait for a server that is still coming back.
+      - name: Turn on TLS in the servers
+        run: >-
+          scripts/live-sources-tls.sh
+          ${{ job.services.postgres.id }} ${{ job.services.mysql.id }}
+          ${{ job.services.mariadb.id }} ${{ job.services.mssql.id }}
 
       # The HTTP pipeline test builds the main crate (see the backend job).
       - name: Free up disk space

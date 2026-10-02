@@ -119,14 +119,22 @@ carries the drivers its operator asked for and no others.
 | Dialect | Build feature | Read-only, enforced how | Statement timeout | TLS |
 |---|---|---|---|---|
 | `sqlite` | core | `SQLITE_OPEN_READ_ONLY` | progress handler | — |
-| `postgresql` | `plugin-postgres` | `SET default_transaction_read_only = on` per session | `SET statement_timeout` | rustls; `options.sslrootcert` for a private CA |
-| `mysql` (MariaDB too) | `plugin-mysql` | `SET SESSION TRANSACTION READ ONLY` per session | `max_execution_time` (MySQL) or `max_statement_time` (MariaDB); a server that knows neither is refused | rustls; `options.sslrootcert` |
-| `mssql` | `plugin-mssql` | the account is checked at connect: `sysadmin`, `db_owner`, `db_datawriter` or `db_ddladmin` is refused; only a query the driver can wrap as a derived table runs | the driver bounds every statement and every wait for a next row; `SET LOCK_TIMEOUT` | rustls; `options.sslrootcert` |
+| `postgresql` | `plugin-postgres` | `SET default_transaction_read_only = on` per session | `SET statement_timeout` | rustls over the platform's roots; `options.sslrootcert` adds a private CA bundle |
+| `mysql` (MariaDB too) | `plugin-mysql` | `SET SESSION TRANSACTION READ ONLY` per session | `max_execution_time` (MySQL) or `max_statement_time` (MariaDB); a server that knows neither is refused | rustls over the bundled Mozilla roots; `options.sslrootcert` adds a private CA bundle |
+| `mssql` | `plugin-mssql` | the account is checked at connect: `sysadmin`, `db_owner`, `db_datawriter` or `db_ddladmin` is refused; only a query the driver can wrap as a derived table runs | the driver bounds every statement and every wait for a next row; `SET LOCK_TIMEOUT` | rustls over the platform's roots; `options.sslrootcert` replaces them with one CA certificate (a `.pem`, `.crt` or `.der` file holding exactly one) |
 | `sparql` (virtual; Ontop or any endpoint) | core | a SPARQL endpoint has no write path | the remote timeout (`OTS_REMOTE_TIMEOUT_SECS`) | `tls` picks `https`; the endpoint must be on `OTS_REMOTE_ALLOWLIST` |
+
+The published Docker image carries all three connectors. A build from source
+carries them only when asked, since `full` leaves them out:
 
 ```bash
 cargo build --features full,plugin-postgres,plugin-mysql,plugin-mssql
 ```
+
+An image without them, or with only some, sets the Dockerfile's
+`CARGO_FEATURES` build argument (for example
+`docker build --build-arg CARGO_FEATURES=full,plugin-postgres .`); see
+[build features](build-features.md).
 
 The three networked drivers share one catalogue and one profiler
 ([`plugins/api/src/sources/catalogue.rs`](../plugins/api/src/sources/catalogue.rs)):
@@ -143,7 +151,13 @@ expects (`true` / `false`, `2026-01-01T12:00:00+00:00`, hex for binary).
 
 A datasource in a schema of its own names it in `options.search_path`
 (PostgreSQL). `options.sslrootcert` points at a PEM bundle for a private CA;
-host names are always verified and there is no trust-all switch.
+host names are always verified and there is no trust-all switch. With `tls`
+set, a server that offers no TLS, or a certificate that does not verify, is
+a connection error that says why (`invalid peer certificate: UnknownIssuer`);
+the driver never falls back to cleartext. A driver that fails without
+reporting an error — a panic inside it — is a `driver failure` naming the
+dialect, not a bare 500; the detail goes to the server log, and the
+connection it happened on is not used again.
 
 Two server differences surface in what a profile shows. On SQL Server give
 the reading account `db_datareader` plus `VIEW DEFINITION`: without the
@@ -170,7 +184,13 @@ HTTP through the PostgreSQL plugin (`--features plugin-postgres`). CI's
 `live-sources` job (GitHub and GitLab alike) starts PostgreSQL 16, MySQL 8.4,
 MariaDB 11.4 and SQL Server 2022 as service containers and runs all of them
 with `OTS_TEST_LIVE_REQUIRED=1`, which turns a missing server variable into
-a failure instead of a skip.
+a failure instead of a skip. Each server also gets a certificate from a
+throwaway CA ([`scripts/live-sources-tls.sh`](../scripts/live-sources-tls.sh)
+on GitHub and for local containers; on GitLab each service makes its own as
+it starts), and every driver runs once more with `tls: true`: refused
+without that CA, encrypted and streaming with it in `options.sslrootcert`
+(`OTS_TEST_<DIALECT>_TLS_CA` names where the CA lies on the server; the test
+reads it back).
 
 ---
 

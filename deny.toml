@@ -12,8 +12,10 @@ ignore = [
     # for upgrade; the rsa "Marvin" advisory currently has no fixed upstream release.
     "RUSTSEC-2023-0071",  # rsa — Marvin timing side-channel (no upstream fix; via `saml`)
     # rustls 0.21 / rustls-webpki 0.101 / rustls-pemfile 1, pinned by tiberius 0.12.3 (the
-    # latest release) behind `plugin-mssql`, which is off by default and not in the release
-    # image. The webpki name-constraint flaws need a misissuing name-constrained CA; the CRL
+    # latest release) behind `plugin-mssql`. That feature is off in `full` but IS in the
+    # release image (the Dockerfile's default CARGO_FEATURES), so these ignores rest on
+    # reachability, not on the code being absent: the webpki name-constraint flaws need a
+    # misissuing name-constrained CA in the roots a SQL Server connection trusts; the CRL
     # panic needs CRL parsing, which tiberius never configures. Kept on rustls rather than
     # tiberius's `native-tls`, which would add `options.sslrootcert` to the system roots
     # instead of trusting only that CA. Revisit when tiberius moves to rustls >= 0.23.
