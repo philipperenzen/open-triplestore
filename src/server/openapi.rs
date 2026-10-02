@@ -1654,6 +1654,138 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             ),
         )],
     );
+    // Repair layer (docs/repair.md): proposals computed in a sandbox,
+    // reviewed, then applied through the write gates.
+    {
+        let repair_body = json_body(
+            ObjectBuilder::new()
+                .property("rules", ArrayBuilder::new().items(ObjectBuilder::new().schema_type(Type::String)).description(Some("Graphs holding authored ots:Rule resources the caller may read.")))
+                .property("derive", ObjectBuilder::new().description(Some("Which rules to compile: from_shapes (default true), from_owl (default true), entailment_rules (rdfs:domain/range/subClassOf, default false), shacl_rules (import SHACL-AF sh:rule, default false).")))
+                .property("policies", ArrayBuilder::new().items(ObjectBuilder::new().schema_type(Type::String).enum_values(Some(["closed-delete", "maxCount-keep-lexmin", "datatype-relabel"]))).description(Some("Opt-in policies that make a declared choice.")))
+                .property("shapes_graph", ObjectBuilder::new().schema_type(Type::String).description(Some("Use this shapes graph instead of the dataset's.")))
+                .property("scope", ObjectBuilder::new().description(Some("graphs: dataset graphs to copy (default all); focus: focus-node IRIs the rules are limited to.")))
+                .property("budget", ObjectBuilder::new().description(Some("rounds (default 100, cap 1000), nulls (10 000, cap 1 000 000), ops (50 000, cap 500 000), timeout_secs (the query timeout, cap 240).")))
+                .property("validate", ObjectBuilder::new().schema_type(Type::Boolean).description(Some("Validate the sandbox before and after: counts by severity and the residual results.")))
+                .property("persist", ObjectBuilder::new().schema_type(Type::Boolean).description(Some("Keep the proposal for review (…/repair/proposals).")))
+                .property("semi_naive", ObjectBuilder::new().schema_type(Type::Boolean).description(Some("false re-evaluates every rule in full each round (default true).")))
+                .property("heuristic_rules", ObjectBuilder::new().schema_type(Type::String).description(Some("Turtle ots:Rules proposed by the assistant: run alone under the heuristic guard and a smaller budget."))),
+            json!({ "validate": true, "persist": true, "policies": [], "budget": { "rounds": 100 } }),
+        );
+        mount(
+            paths,
+            "/api/datasets/:dataset_id/repair",
+            vec![(
+                M::Post,
+                ob(
+                    "Validation",
+                    "Propose a repair",
+                    "Run the dataset's repair rules — compiled from its SHACL Core shapes and OWL axioms, authored as ots:Rule, or both — as a restricted chase over a throwaway copy, and answer with a proposal: an RDF Patch whose every line is explained (rule, trigger, premises, the violation it answers), plus merges, conflicts, what was left report-only and why, and optionally the validation before and after. Nothing is written. Needs write access to the dataset (a proposal quotes what it would delete). `Accept: application/rdf-patch` returns the patch text only. A budget that runs out returns the partial proposal with `summary.exhausted`.",
+                    vec![],
+                    repair_body,
+                    vec![
+                        ("200", "The proposal (JSON report, or the patch text)"),
+                        ("400", "A rule that does not load, a rule set that cannot be stratified, no shapes graph, or premises over OTS_REPAIR_MAX_QUADS"),
+                        ("401", "Authentication required"),
+                        ("403", "Write access to the dataset required, or a named graph the caller may not read"),
+                        ("404", "No such dataset, or one the caller cannot see"),
+                        ("503", "Server overloaded (a repair is already running), or the time budget ran out copying the dataset"),
+                    ],
+                    true,
+                ),
+            )],
+        );
+        mount(
+            paths,
+            "/api/datasets/:dataset_id/repair/proposals",
+            vec![(
+                M::Get,
+                o(
+                    "Validation",
+                    "List repair proposals",
+                    "The proposals kept for the dataset (newest 20, OTS_REPAIR_PROPOSAL_TTL days), newest first, with status and `stale` — a proposal whose dataset changed since it was computed becomes `superseded`. Write access required.",
+                    vec![],
+                    vec![
+                        ("200", "`{proposals: [...]}`"),
+                        ("401", "Authentication required"),
+                        ("403", "Write access to the dataset required"),
+                        ("404", "No such dataset"),
+                    ],
+                    true,
+                ),
+            )],
+        );
+        mount(
+            paths,
+            "/api/datasets/:dataset_id/repair/proposals/:proposal_id",
+            vec![(
+                M::Get,
+                o(
+                    "Validation",
+                    "Get a repair proposal",
+                    "One kept proposal: report, patch, a page of its actions and `stale`. `Accept: application/rdf-patch` returns the patch text. Write access required.",
+                    vec![
+                        qp("offset", false, "First action of the page (default 0)."),
+                        qp("limit", false, "Actions per page (default and cap 10 000)."),
+                    ],
+                    vec![
+                        ("200", "The proposal"),
+                        ("401", "Authentication required"),
+                        ("403", "Write access to the dataset required"),
+                        ("404", "No such dataset or proposal"),
+                    ],
+                    true,
+                ),
+            )],
+        );
+        mount(
+            paths,
+            "/api/datasets/:dataset_id/repair/proposals/:proposal_id/reject",
+            vec![(
+                M::Post,
+                o(
+                    "Validation",
+                    "Reject a repair proposal",
+                    "Mark a kept proposal rejected. An applied proposal cannot be rejected (409). Write access required.",
+                    vec![],
+                    vec![
+                        ("200", "`{proposal_id, status}`"),
+                        ("401", "Authentication required"),
+                        ("403", "Write access to the dataset required"),
+                        ("404", "No such dataset or proposal"),
+                        ("409", "The proposal was applied"),
+                    ],
+                    true,
+                ),
+            )],
+        );
+        mount(
+            paths,
+            "/api/datasets/:dataset_id/repair/proposals/:proposal_id/apply",
+            vec![(
+                M::Post,
+                o(
+                    "Validation",
+                    "Apply a repair proposal",
+                    "Apply a kept proposal under the dataset's patch lock. Its own base marker is the precondition (the change-log sequence when it carries one, else its base commit): a dataset that moved since answers 409 and the proposal becomes `superseded`. The write gates of every graph it touches run over the patched graphs, as for a Graph Store write (422 with the report; the proposal stays `proposed`). The patch is one ground update, recorded as a commit whose `metadata.repair` names the proposal; the proposal becomes `applied`. The optional `if-base-commit` / `if-base-sequence` / `if-base-epoch` add preconditions. Write access required.",
+                    vec![
+                        qp("if-base-commit", false, "Also require this commit IRI (or id) to be the newest touching the proposal's graphs."),
+                        qp("if-base-sequence", false, "Also require no change-log row after this sequence to touch them (change capture on)."),
+                        qp("if-base-epoch", false, "The change log's epoch the sequence belongs to."),
+                    ],
+                    vec![
+                        ("200", "`{applied, proposal_id, status, commit, added, removed, graphs}`"),
+                        ("400", "if-base-sequence without change capture"),
+                        ("401", "Authentication required"),
+                        ("403", "Write access to the dataset required"),
+                        ("404", "No such dataset or proposal"),
+                        ("409", "The dataset changed since the proposal was computed, or the proposal is not `proposed`"),
+                        ("422", "A write gate refused the patched graphs"),
+                    ],
+                    true,
+                ),
+            )],
+        );
+    }
     mount(
         paths,
         "/api/datasets/:dataset_id/validation-reports",

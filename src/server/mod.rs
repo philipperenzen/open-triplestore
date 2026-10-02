@@ -1204,7 +1204,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         )
         .route(
             "/api/datasets/:dataset_id/patch",
-            post(crate::rdf_patch::apply_patch_handler),
+            post(crate::rdf_patch::apply_patch_handler).layer(middleware::from_fn_with_state(
+                state.clone(),
+                crate::repair::apply::patch_route_layer,
+            )),
         )
         .route(
             "/api/datasets/:dataset_id/entailment",
@@ -1461,6 +1464,16 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         // read that graph, because a token alone would only narrow the leak
         // from everyone to every signed-in user.
         .route("/api/shaclc/serialize", post(routes::shaclc_serialize))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .with_state(state.clone());
+
+    // Repair proposals (docs/repair.md): beside /validate and /infer, behind
+    // the same token and endpoint-ACL gate.
+    let repair_routes = crate::repair::handlers::routes()
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             endpoint_acl_guard,
@@ -1914,6 +1927,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(asset_routes)
         .merge(dataset_sparql_routes)
         .merge(shacl_routes)
+        .merge(repair_routes)
         .merge(studio_auth)
         .merge(studio_optional)
         .merge(rml_routes)
@@ -2450,6 +2464,8 @@ pub async fn run(
         #[cfg(feature = "vocab-search")]
         vocab_engine,
     };
+    // Repair proposals are kept beside the store (docs/repair.md).
+    crate::repair::configure(&state.store, &data_dir);
     if let Some(keys) = state.oidc_provider.clone() {
         crate::federation::init(keys, &state.base_url);
     }

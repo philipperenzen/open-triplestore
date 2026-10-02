@@ -491,6 +491,15 @@ pub struct ShaclAssistRequest {
     /// Optional model override (defaults to the configured model — see `LLM_SHACL_MODEL` / `LLM_MODEL`).
     #[serde(default)]
     pub model: Option<String>,
+    /// task=repair: the dataset whose residual violations the assistant
+    /// proposes repair rules for (write access required).
+    #[serde(default)]
+    pub dataset_id: Option<String>,
+    /// task=repair: what no deterministic rule repaired — a repair report's
+    /// `validation.residual`, `report_only` and `conflicts`. When absent the
+    /// assistant computes it with a deterministic run first.
+    #[serde(default)]
+    pub residual: Option<Value>,
 }
 
 #[derive(Serialize)]
@@ -501,11 +510,22 @@ pub struct ShaclAssistResponse {
     pub turtle: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub explanation: Option<String>,
+    /// task=repair: the proposal the assistant's rules produced (kept, with
+    /// confidence `heuristic`, for review and a gated apply).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<Value>,
+    /// task=repair: why the assistant's rules were refused (they do not
+    /// load, do not stratify, or break the heuristic guard) — the next
+    /// residual to answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rejected: Option<String>,
 }
 
 const SHACL_DRAFT_SYSTEM: &str = "You are a SHACL shapes author. Generate ONLY valid SHACL Turtle — no prose, no markdown fences. Use the `sh:` prefix and standard prefixes (rdf, rdfs, xsd). Prefer `sh:targetClass` to bind shapes to a class. Each property shape MUST include `sh:path`, a sensible cardinality (`sh:minCount` / `sh:maxCount`) when implied, and a human `sh:message`. When a model context is provided, reuse its real class and property IRIs exactly — do NOT invent vocabulary.";
 
 const SHACL_EXPLAIN_SYSTEM: &str = "You are a SHACL expert. Given a shapes Turtle document, explain in clear, non-technical prose what each shape validates, what would fail, and why. Use short bullet points per shape. Do not output Turtle.";
+
+const SHACL_REPAIR_SYSTEM: &str = "You propose repair rules for an RDF dataset whose remaining SHACL violations no deterministic rule could fix. Output ONLY Turtle — no prose, no markdown fences — declaring `@prefix ots: <https://opentriplestore.org/ns#> .` and one or more `ots:Rule` resources with IRIs. Each rule has `ots:construct` holding a SPARQL `CONSTRUCT { head } WHERE { body }` string that declares its own PREFIXes or uses full IRIs; `ots:message` explaining the fix with `{?var}` placeholders; and, for a head variable the body does not bind, `ots:nulls ( \"name\" )`. Never put a blank node in the head. Never use `ots:retract`, `ots:destructive` or `ots:mergeMode`. The body may use triple patterns, FILTER, BIND, VALUES, FILTER NOT EXISTS and GRAPH; no OPTIONAL, UNION, SERVICE, aggregates or property paths. Use only classes and predicates that occur in the residual or the model context. Prefer one small rule per kind of violation.";
 
 const SHACL_IMPROVE_SYSTEM: &str = "You are a SHACL expert reviewing a shapes Turtle document. Suggest concrete, prioritised improvements: missing constraints, missing `sh:message`, over- or under-constrained cardinality, missing `sh:datatype` / `sh:class`, severity that doesn't match the rule's intent, redundancy, and naming conventions. Output a short markdown list. Do not rewrite the Turtle.";
 
@@ -542,6 +562,10 @@ async fn shacl_assist(
             )
         })
         .unwrap_or_default();
+
+    if task == "repair" {
+        return shacl_assist_repair(&state, user.as_ref(), ip, req, model, guard_flag, start).await;
+    }
 
     let (system, user_msg, want_turtle) = match task.as_str() {
         "draft" => {
@@ -589,7 +613,7 @@ async fn shacl_assist(
         }
         _ => {
             return Err(AppError::BadRequest(
-                "task must be one of: draft, explain, improve".into(),
+                "task must be one of: draft, explain, improve, repair".into(),
             ))
         }
     };
@@ -620,6 +644,8 @@ async fn shacl_assist(
             task,
             turtle: Some(answer),
             explanation: None,
+            proposal: None,
+            rejected: None,
         }
     } else {
         ShaclAssistResponse {
@@ -627,8 +653,164 @@ async fn shacl_assist(
             task,
             turtle: None,
             explanation: Some(answer),
+            proposal: None,
+            rejected: None,
         }
     }))
+}
+
+/// The residual the assistant is shown: the results no deterministic rule
+/// repaired (at most 50), what was report-only and why, and the conflicts.
+fn residual_view(report: &Value) -> Value {
+    let residual: Vec<Value> = report["validation"]["residual"]
+        .as_array()
+        .map(|a| a.iter().take(50).cloned().collect())
+        .unwrap_or_default();
+    json!({
+        "residual": residual,
+        "residual_total": report["validation"]["residual_total"],
+        "report_only": report["report_only"],
+        "conflicts": report["conflicts"],
+    })
+}
+
+/// `task: "repair"` (`docs/notes/repair-layer-design.md` §9): the residual
+/// of a deterministic repair goes to the model, whose answer may only be
+/// `ots:Rule`s; they run through the chase under the heuristic guard (no
+/// deletion, no retract, no rewriting merge, only predicates the premises
+/// use) and a smaller budget, and their proposal is kept with confidence
+/// `heuristic` for review and a gated apply. Nothing is written to the
+/// store and no rule is saved anywhere. A rule set the guard refuses comes
+/// back as `rejected`, the next residual for the assistant to answer.
+async fn shacl_assist_repair(
+    state: &AppState,
+    user: Option<&AuthenticatedUser>,
+    ip: Option<String>,
+    req: ShaclAssistRequest,
+    model: String,
+    guard_flag: Option<String>,
+    start: Instant,
+) -> Result<Json<ShaclAssistResponse>, AppError> {
+    let Some(user) = user else {
+        return Err(AppError::Unauthorized(
+            "task=repair needs an account with write access to the dataset".into(),
+        ));
+    };
+    let dataset_id = req
+        .dataset_id
+        .clone()
+        .filter(|d| !d.trim().is_empty())
+        .ok_or_else(|| AppError::BadRequest("dataset_id is required for task=repair".into()))?;
+    let as_app_error = |(status, msg): (axum::http::StatusCode, String)| match status.as_u16() {
+        400 => AppError::BadRequest(msg),
+        401 => AppError::Unauthorized(msg),
+        403 => AppError::Forbidden(msg),
+        404 => AppError::NotFound(msg),
+        503 => AppError::ServiceUnavailable(msg),
+        _ => AppError::Internal(msg),
+    };
+    crate::repair::handlers::writable_dataset(state, user, &dataset_id).map_err(as_app_error)?;
+    // The residual: given, or computed by a deterministic run.
+    let residual = match req.residual.clone() {
+        Some(r) => r,
+        None => {
+            let request = crate::repair::run::RepairRequest {
+                validate: true,
+                ..Default::default()
+            };
+            let prepared = crate::repair::handlers::prepare_job(state, user, &dataset_id, request)
+                .map_err(as_app_error)?;
+            let proposal = crate::repair::handlers::execute(state, prepared)
+                .await
+                .map_err(as_app_error)?;
+            residual_view(&proposal.report)
+        }
+    };
+    let context_block = req
+        .model_context
+        .as_ref()
+        .map(|c| format!("\n\n# MODEL CONTEXT\n{c}"))
+        .unwrap_or_default();
+    let mut residual_text = residual.to_string();
+    if residual_text.len() > 24_000 {
+        residual_text.truncate(
+            (0..=24_000)
+                .rev()
+                .find(|i| residual_text.is_char_boundary(*i))
+                .unwrap_or(0),
+        );
+    }
+    let user_msg = format!(
+        "Propose ots:Rule repair rules for these remaining violations of dataset {dataset_id}:\n\n{residual_text}{context_block}"
+    );
+    let result = chat_completion(&model, SHACL_REPAIR_SYSTEM, &user_msg, 1500).await;
+    let mut entry = LlmLogEntry::new("shacl");
+    entry.model = Some(model.clone());
+    entry.user_id = Some(user.user_id.clone());
+    entry.ip = ip;
+    entry.guard_flag = guard_flag;
+    entry.duration_ms = Some(start.elapsed().as_millis() as i64);
+    entry.prompt_chars = Some(user_msg.chars().count() as i64);
+    entry.question_preview = llm_guard::question_preview("repair");
+    match &result {
+        Ok(answer) => entry.answer_chars = Some(answer.chars().count() as i64),
+        Err(e) => {
+            entry.status = "error";
+            entry.error = Some(truncate(&e.message(), 300));
+        }
+    }
+    llm_guard::record(&state.auth_db.pool(), entry);
+    let answer = result?;
+    let turtle = strip_turtle_fence(&answer);
+    let request = crate::repair::run::RepairRequest {
+        heuristic_rules: Some(turtle.clone()),
+        validate: true,
+        persist: true,
+        ..Default::default()
+    };
+    let outcome = match crate::repair::handlers::prepare_job(state, user, &dataset_id, request) {
+        Ok(prepared) => crate::repair::handlers::execute(state, prepared).await,
+        Err(e) => Err(e),
+    };
+    let (proposal, rejected) = match outcome {
+        Ok(p) => {
+            crate::repair::persist::save(state, &dataset_id, &p)
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            let mut report = p.report;
+            report["persisted"] = Value::Bool(true);
+            (Some(report), None)
+        }
+        Err((status, msg)) if status == axum::http::StatusCode::BAD_REQUEST => (None, Some(msg)),
+        Err(e) => return Err(as_app_error(e)),
+    };
+    Ok(Json(ShaclAssistResponse {
+        model,
+        task: "repair".into(),
+        turtle: Some(turtle),
+        explanation: None,
+        proposal,
+        rejected,
+    }))
+}
+
+/// A model's Turtle answer without the markdown fence small models add.
+/// `chat_completion` already drops a fence, but not the `turtle` tag that
+/// opened it, so a first line that is only a language tag goes too.
+fn strip_turtle_fence(s: &str) -> String {
+    let t = s.trim();
+    let t = t.strip_prefix("```").unwrap_or(t);
+    let t = match t.split_once('\n') {
+        Some((tag, rest))
+            if ["turtle", "ttl"].contains(&tag.trim().to_ascii_lowercase().as_str()) =>
+        {
+            rest
+        }
+        _ => t,
+    };
+    match t.find("```") {
+        Some(end) => t[..end].trim().to_string(),
+        None => t.trim().to_string(),
+    }
 }
 
 #[derive(Serialize)]

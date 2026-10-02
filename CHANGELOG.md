@@ -147,6 +147,39 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   edited like any other. A `foaf:Agent` Read grant makes a resource readable
   without a token. Not in scope: WebID-TLS, Solid-OIDC, `acl:origin`. See
   `docs/ldp.md`, "Access control".
+- **Repair proposals.** `POST /api/datasets/:id/repair` proposes a fix for
+  what the dataset's rules determine, and never applies it. The rules are
+  compiled from its SHACL Core shapes (`sh:hasValue`, `sh:class`, a
+  `sh:minCount` an IRI can satisfy, a one-member `sh:in`, through `sh:node`
+  and nested property shapes) and its OWL axioms (`owl:hasKey`, functional
+  and inverse-functional properties, `someValuesFrom` and `minCardinality 1`
+  restrictions), or authored as `ots:Rule`s. They run as a restricted chase
+  over an in-memory copy of the dataset, and the answer is an RDF Patch plus
+  a report that explains every line: rule, trigger, premises, the violation
+  it answers. Missing values are minted as content-derived IRIs under
+  `{base}/.well-known/genid/`: a run repeated before the apply mints the same
+  IRIs, and one after it proposes nothing. Equal
+  terms are merged (`owl:sameAs`, or rewritten with `ots:mergeMode
+  ots:Rewrite`), and a merge the data forbids is reported as a conflict.
+  Three opt-in policies make a declared choice: `closed-delete`,
+  `maxCount-keep-lexmin`, `datatype-relabel`. Everything else is listed
+  report-only with its reason. The same dataset state gives byte-identical
+  patch text. Budgets (rounds, nulls, lines, time) end a run with a partial
+  proposal, never an error. Kept proposals (`persist: true`) are files under
+  `{data_dir}/repair-proposals/`, listed, read page by page, rejected, or
+  applied with `POST …/repair/proposals/:pid/apply`. The apply checks the
+  proposal's base (`409` and `superseded` when the dataset moved), runs the
+  write gates (`422`), and records one commit whose `metadata.repair` names
+  the proposal. `POST /api/datasets/:id/patch` gains the base check as two
+  opt-in preconditions over the dataset's graphs: `?if-base-commit=` (or
+  `If-Match`) and `?if-base-sequence=` with the change log. Without them it
+  behaves as before. SHACL
+  Studio's assistant takes `task: "repair"`: it sends the model what no rule
+  repaired, runs the rules the model answers with under a heuristic guard
+  (smaller budget, nothing destructive, only predicates already in use), and
+  keeps their proposal for review. Settings: `OTS_REPAIR_MAX_QUADS`,
+  `OTS_REPAIR_CONCURRENCY` (default 1), `OTS_REPAIR_PROPOSAL_TTL` (days,
+  default 30). See `docs/repair.md`.
 - **Model versions and the datasets that depend on them are linked.** A dataset
   version now records the model version its instances were pinned to when it was
   cut (`conforms_to_model` / `conforms_to_version` on `DatasetVersion`, stored as

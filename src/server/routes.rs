@@ -8165,19 +8165,19 @@ pub async fn linked_data_asset(
 /// Shapes-graph sources for a dataset, in resolution order: the configured
 /// `shapes_graph_iri` (legacy column), SHACL Studio validation-layer bindings,
 /// and dataset graphs carrying the `shapes` role.
-struct DatasetShapesSources {
+pub(crate) struct DatasetShapesSources {
     configured: Option<String>,
     bound: Vec<String>,
     role_graphs: Vec<String>,
 }
 
 impl DatasetShapesSources {
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.configured.is_none() && self.bound.is_empty() && self.role_graphs.is_empty()
     }
 }
 
-fn dataset_shapes_sources(
+pub(crate) fn dataset_shapes_sources(
     state: &AppState,
     dataset: &crate::auth::models::Dataset,
 ) -> DatasetShapesSources {
@@ -8213,7 +8213,7 @@ fn dataset_shapes_sources(
 /// union (rather than first-source-wins) keeps validation consistent with the
 /// dataset page's "Effective shapes" panel: everything the user sees attached
 /// is what actually validates.
-fn resolve_shapes_graphs(sources: DatasetShapesSources) -> Vec<String> {
+pub(crate) fn resolve_shapes_graphs(sources: DatasetShapesSources) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let candidates = sources
         .configured
@@ -8228,10 +8228,12 @@ fn resolve_shapes_graphs(sources: DatasetShapesSources) -> Vec<String> {
     out
 }
 
-const NO_SHAPES_GRAPH_MSG: &str = "No shapes graph found for this dataset. Upload a SHACL \
+pub(crate) const NO_SHAPES_GRAPH_MSG: &str =
+    "No shapes graph found for this dataset. Upload a SHACL \
      shapes file, set a graph's role to 'shapes', or bind a shape graph in SHACL Studio.";
 
-const NO_READABLE_SHAPES_GRAPH_MSG: &str = "No shapes graph of this dataset is one you may read.";
+pub(crate) const NO_READABLE_SHAPES_GRAPH_MSG: &str =
+    "No shapes graph of this dataset is one you may read.";
 
 /// Merge per-shapes-graph validation reports into one: conforms = all conform,
 /// results concatenated, results_count = sum.

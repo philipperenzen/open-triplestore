@@ -14,6 +14,8 @@
 //! - [`sparql`], [`geo`] — SPARQL evaluation helpers and GeoSPARQL functions.
 //! - [`reasoning`], [`shacl`], [`shaclc`], [`shex`], [`swrl`] — entailment
 //!   (RDFS, OWL 2 RL/EL/QL/DL) and shape/rule validation.
+//! - [`repair`] — TGD/EGD repair rules, a restricted chase in a sandbox, and
+//!   repair proposals as RDF Patch.
 //! - [`imports`], [`rml`], [`data_models`] — bulk ingest, RML mappings, and the
 //!   unified model registry (OWL/RDFS ontologies and SKOS vocabularies).
 //! - [`catalog`], [`dcat`], [`dataset_versions`], [`commit_log`] — dataset
@@ -59,6 +61,7 @@ pub mod provenance;
 pub mod rdf_patch;
 pub mod reasoning;
 pub mod remote;
+pub mod repair;
 pub mod rml;
 pub mod saved_queries;
 pub mod secrets;
