@@ -216,6 +216,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   overwrote it with nothing. `PUT /api/admin/oauth/providers/:id` now keeps
   the stored certificate when the body omits it, as it already did for the
   client secret.
+- **A graph named `…/validation` keeps its version snapshot.** A snapshot
+  graph is named after its source graph's last path segment, under the version
+  IRI, which is also where the version's validation-layer graph lives
+  (`{base}/dataset/{id}/version/{v}/validation`). A source graph whose last
+  segment slugified to `validation` was copied there, then cleared when the
+  bindings snapshot was written, so the version kept none of its triples (only
+  the bindings, if any), and deleting the version dropped that graph twice.
+  Snapshots, branches included, no longer take the name `validation`: such a
+  graph becomes `validation-1`. An index suffix can no longer collide with
+  another graph's name either (`a`, `a-1`, `a` now give `a`, `a-1`, `a-2`
+  rather than two `a-1`s). Versions cut earlier keep their IRIs, and their lost
+  snapshot cannot be recovered: restoring one of them replaces that live graph
+  with what the snapshot holds. Tests: `tests/dataset_versions_http.rs`.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if
@@ -351,6 +364,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   route reads only that dataset's graphs, without its stored report graphs. A
   triple held by two graphs in scope is now counted once. Tests:
   `tests/dataset_validation_read_scope_http.rs`.
+- **A padded version label no longer reads a dataset's private snapshots.**
+  The dataset service (`GET`/`POST /api/datasets/{id}/services/{slug}/sparql`)
+  trimmed `version` before resolving the pinned version's snapshot graphs, but
+  handed the private-graph filter the raw label, which the version registry
+  refuses. With whitespace around the label (`?version=1.0.0%20`, a `+`, a tab,
+  or the same in a form body) the filter found no version and withheld nothing,
+  so a viewer, or an anonymous caller on a public dataset, read the snapshots
+  of graphs flagged private. Both lookups now use the one trimmed label, and
+  the filter fails closed: a pinned version it cannot read, or private flags it
+  cannot list, refuse the read, and a snapshot graph the version's map ties to
+  no source is withheld from non-writers, as the version-data and saved-query
+  paths already did. Every release since 0.4.0 is affected. Tests:
+  `tests/security_routes.rs`.
 - **Every configured secret goes through the secrets module.** `JWT_SECRET`,
   `LD_REGISTRY_TOKEN`, a replication follower's `OTS_REPLICATION_TOKEN` and the
   accounts-dashboard plugin's `ACCOUNTS_DASHBOARD_GATEWAY_KEY` were read as raw

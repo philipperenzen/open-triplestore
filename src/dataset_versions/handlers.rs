@@ -722,11 +722,16 @@ fn purge_version(
     record: &DatasetVersion,
 ) -> Result<Vec<String>, AppError> {
     let mut dropped: Vec<String> = record.snapshot_graphs.clone();
-    dropped.push(crate::shacl_studio::bindings::version_validation_graph(
+    let validation = crate::shacl_studio::bindings::version_validation_graph(
         &state.base_url,
         dataset_id,
         &record.version,
-    ));
+    );
+    // A version cut before data snapshots stopped taking the `validation` name
+    // can list that graph among its snapshots already; drop it once.
+    if !dropped.contains(&validation) {
+        dropped.push(validation);
+    }
     let refs: Vec<&str> = dropped.iter().map(String::as_str).collect();
     state
         .store
