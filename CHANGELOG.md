@@ -88,6 +88,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nominals, property assertions and `owl:sameAs`, facet inconsistencies,
   checks). No score is published for the suite
   ([docs/conformance/owl2-dl.md](docs/conformance/owl2-dl.md)).
+- **SHACL-AF node expressions, expression constraints and target types.** The
+  seven node-expression kinds of the SHACL Advanced Features Note — `sh:this`,
+  constants, path (`sh:path` / `sh:nodes`), filter shape, intersection, union
+  and function expressions — are evaluated against the run's data graphs.
+  `sh:TripleRule` subjects, predicates and objects are node expressions (a rule
+  derives a triple per combination of their results), and `sh:expression`
+  checks that its expression produces exactly `true` for every value node.
+  `sh:SPARQLTargetType` targets run their type's query with the target's
+  parameter values bound as terms, and a shape whose only target is
+  `sh:target` is found without an `rdf:type`. See `docs/shacl.md`.
+- **`sh:SPARQLFunction` bodies read data, and `sh:ask` bodies work.** A
+  function called from a shapes run reads that run's data graphs, from the same
+  snapshot, confined to them whatever `FROM`, `FROM NAMED` or `GRAPH` the body
+  names; it used to run on an empty store and return unbound for any body that
+  read data. Arguments are bound to the body's variables as RDF terms (binding
+  `$x` used to rewrite `$xy` too), parameters without `sh:order` are ordered by
+  the local names of their paths (SHACL-AF §5.2), `sh:prefixes` follows
+  `owl:imports`, and nested calls stop at 16 levels. A function called from
+  `/sparql` still sees no data.
+- **TopQuadrant's SHACL-AF tests run in CI.** The `expression`, `function`,
+  `rules` and `target` tests of TopQuadrant/shacl (Apache-2.0, commit
+  `6687b48`) are vendored under `tests/fixtures/shacl-af-topquadrant/` and run
+  by `tests/shacl_af_corpus.rs` as a two-way ratchet: 9 of 10 cases pass
+  (`docs/conformance/shacl.md`).
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -349,6 +373,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   optional in SHACL §5.3.1, which requires a processor without them to report
   a failure, which this one does (w3c/data-shapes#426 contests the test; SHACL
   1.2 drops the variables). `docs/conformance/shacl.md` has the results.
+- **`sh:expression` has the SHACL-AF semantics.** It used to read a form of
+  this engine's own: a path plus comparison constraints on the expression node
+  (`sh:expression [ sh:path P ; sh:minExclusive 9.09 ]`). Under the Note that
+  node is a path expression, whose values must all be `true`, so **a shapes
+  graph in the old form now reports every focus node** whose values are not
+  `true`. Rewrite it as a function expression (`docs/shacl.md`, *Expression
+  constraints*) or as a property shape; the reference example
+  `tests/fixtures/example-bridge/shapes-af.ttl` shows the first.
+- **More SHACL-AF declarations fail the shapes graph instead of being
+  ignored.** A `sh:SPARQLFunction` whose body does not parse, whose `sh:select`
+  has other than one result variable, or which has both or neither of
+  `sh:select` and `sh:ask` fails the run of the shapes graph that declares it
+  (in an admin-designated function graph it is skipped with a warning); the
+  function used to be left out, and every call to it was unbound. A
+  `sh:target` with neither a `sh:select` nor a `sh:SPARQLTargetType` type, a
+  node expression that contains itself or is none of the seven kinds, and a
+  target-type parameter given twice or as a blank node fail the shapes graph
+  too.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were
@@ -589,6 +631,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ReasoningError::NotConverged`, a `422` with `converged: false` over HTTP.
 - **`POST /api/reasoning/materialize` no longer blocks an async worker.** The
   rules run on the blocking pool, as the per-dataset run already did.
+- **A SHACL rule's `$this` reaches an expression that is its only use.** In
+  a `sh:SPARQLRule` such as `CONSTRUCT { $this ex:label ?l } WHERE { BIND
+  (ex:labelOf($this) AS ?l) }`, `$this` was left unbound — the query parser
+  projects the WHERE onto the variables its patterns bind, and the focus node
+  was bound only through that projection — so the rule derived nothing.
 - **SHACL validation and write gates no longer pass data the shapes forbid.**
   Gates get stricter: data that used to be accepted may now be refused with
   422, and a shapes graph that used to load may now fail the run.
@@ -606,8 +653,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     the run; it selected no focus nodes. A rule shape whose target cannot be
     loaded fails inference instead of never firing.
   - A `sh:TripleRule` whose subject, predicate or object is a node expression
-    (a blank node such as `[ sh:path ex:p ]`) is refused at load. It wrote the
-    shapes graph's own blank node into the data graph.
+    (a blank node such as `[ sh:path ex:p ]`) is evaluated as one (see
+    *SHACL-AF node expressions* under Added). It wrote the shapes graph's own
+    blank node into the data graph.
   - The dataset `PUT /api/datasets/{id}/shapes` and SHACL Studio create and
     `PUT …/turtle` refuse (422) an activation flag (`sh:uniqueLang`,
     `sh:closed`, `sh:deactivated`, `sh:qualifiedValueShapesDisjoint`,

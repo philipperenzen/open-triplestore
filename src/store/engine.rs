@@ -1701,15 +1701,22 @@ impl TripleStore {
         // looked up by them (crate::sparql::prebind). Seeding alone let the
         // optimizer drop a `FILTER` whose `$this` no triple pattern binds, and
         // the rule never fired; the rewrite alone scanned every pattern in
-        // full for each focus node.
+        // full for each focus node. The rewrite also reaches a `$this` used in
+        // an expression alone (`BIND (f($this) AS ?x)`).
         let mut query = query.clone();
         let names: Vec<&str> = bindings.iter().map(|(n, _)| *n).collect();
         crate::sparql::prebind::rewrite(&mut query, &names).map_err(StoreError::Parse)?;
         let terms: Vec<(&str, &Term)> = bindings.iter().map(|(n, t)| (*n, t)).collect();
-        let mut prepared =
-            crate::sparql::prebind::prepare(evaluator, query, &terms).map_err(StoreError::Parse)?;
+        let mut prepared = crate::sparql::prebind::prepare(evaluator.clone(), query, &terms)
+            .map_err(StoreError::Parse)?;
         confine_dataset(prepared.dataset_mut(), scope)?;
-        match prepared.on_store(&self.store).execute()? {
+        // A `sh:SPARQLFunction` the rule calls reads what the rule reads.
+        let data = crate::shacl::sparql_functions::DataScope {
+            source: crate::shacl::sparql_functions::ScopeSource::Store(&self.store),
+            data_graphs: scope,
+            evaluator: &evaluator,
+        };
+        match data.execute(prepared)? {
             QueryResults::Graph(triples) => Ok(triples.collect::<Result<Vec<_>, _>>()?),
             // A CONSTRUCT always evaluates to a graph; the other arms cannot
             // happen, and an empty result is the honest answer if they did.

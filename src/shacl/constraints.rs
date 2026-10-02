@@ -214,42 +214,31 @@ pub(crate) fn evaluate_constraint_with_values(
     let ctx = ResultCtx::new(severity, shape_iri, focus_node);
     let component = component_iri(constraint);
     match constraint {
-        // ---- SHACL-AF node expression (path + comparison subset) ----
-        Constraint::Expression {
-            path: expr_path,
-            checks,
-            message,
-        } => {
-            // Evaluate the inner comparison constraints against the values reached
-            // along the expression path; any inner violation fails the expression.
-            let mut inner = Vec::new();
-            let expr_values = value_nodes(view, focus_node, Some(expr_path));
-            for check in checks {
-                inner.extend(evaluate_constraint_with_values(
-                    view,
-                    shapes,
-                    shape_iri,
-                    focus_node,
-                    check,
-                    Some(expr_path),
-                    &expr_values,
-                    severity,
-                ));
-            }
-            if !inner.is_empty() {
+        // ---- SHACL-AF §7: expression constraint ----
+        // A result for every value node whose expression, evaluated with the
+        // value node as its focus node, does not produce exactly `{ true }`.
+        Constraint::Expression { expr, message } => {
+            for v in values.iter() {
+                let outcome = super::node_expr::eval(view, shapes, expr, v);
+                let detail = match &outcome {
+                    Ok(nodes) if super::node_expr::is_exactly_true(nodes) => continue,
+                    Ok(nodes) => format!(
+                        "sh:expression produced {{ {} }}, not {{ true }}",
+                        nodes
+                            .iter()
+                            .map(display_term)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    Err(e) => format!("sh:expression could not be evaluated: {e}"),
+                };
                 ctx.push(
                     &mut results,
                     component,
-                    inner
-                        .into_iter()
-                        .next()
-                        .and_then(|r| r.terms.value)
-                        .as_ref(),
-                    Some(expr_path),
+                    Some(v),
+                    path,
                     "sh:expression".to_string(),
-                    message
-                        .clone()
-                        .unwrap_or_else(|| "sh:expression constraint not satisfied".to_string()),
+                    message.clone().unwrap_or(detail),
                 );
             }
         }

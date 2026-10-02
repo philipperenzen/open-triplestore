@@ -456,7 +456,7 @@ pub fn export(shapes: &[Shape], title: &str) -> anyhow::Result<ExportedSpec> {
                     Target::TargetNode(_) => "sh:targetNode",
                     Target::TargetSubjectsOf(_) => "sh:targetSubjectsOf",
                     Target::TargetObjectsOf(_) => "sh:targetObjectsOf",
-                    Target::SparqlTarget(_) => "a SPARQL target",
+                    Target::SparqlTarget(_) | Target::SparqlTargetType { .. } => "a SPARQL target",
                     Target::TargetClass(_) => continue,
                 };
                 losses.push(format!(

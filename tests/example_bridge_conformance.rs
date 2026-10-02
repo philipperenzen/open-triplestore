@@ -233,7 +233,34 @@ fn fail_clearance_expression() {
     );
     assert!(
         focus_violations(&r, "LowBridge") >= 1,
-        "sh:expression minExclusive violation: {:?}",
+        "sh:expression violation (8.50 m is below 9.10 m): {:?}",
+        r.results
+    );
+    assert!(
+        r.results
+            .iter()
+            .any(|x| x.message.contains("at least 9.10 m")),
+        "the expression's sh:message is reported: {:?}",
+        r.results
+    );
+}
+
+/// The positive half of the expression oracle: `ex:atLeast` over the clearance
+/// path is exactly `{ true }` for a clearance of 9.50 m.
+#[test]
+fn pass_clearance_expression() {
+    let r = validate_case(
+        &[SHAPES_SPARQL, SHAPES_AF],
+        r#"@prefix def:  <https://example.org/def/> .
+           @prefix eb:   <https://example.org/id/example-bridge/> .
+           @prefix qudt: <http://qudt.org/schema/qudt/> .
+           eb:HighBridge a def:NavigableBridge ;
+               def:clearanceHeight [ a qudt:QuantityValue ; qudt:numericValue 9.50 ] ."#,
+    );
+    assert_eq!(
+        focus_violations(&r, "HighBridge"),
+        0,
+        "9.50 m is at least 9.10 m: {:?}",
         r.results
     );
 }

@@ -360,3 +360,71 @@ async fn a_designated_function_graph_serves_sparql_but_not_builtins() {
     .await;
     assert!(!body.contains(SECRET_FN_MARKER), "{body}");
 }
+
+// ─── A shapes run's function bodies read that run's data graphs only ───────
+//
+// A function body is SPARQL that any writer of a shapes graph uploads. It
+// reads data now (it used to see an empty store), so it is confined like
+// every other query of the run: to the run's data graphs, whatever `FROM`,
+// `FROM NAMED` or `GRAPH` the body names.
+
+const B_SHAPES: &str = "http://example.org/g/tenant-b-shapes";
+
+/// Bob's own dataset gets a shapes graph whose function concatenates every
+/// literal it can reach — through the default graph, `FROM <alice's private
+/// graph>` and `GRAPH ?g` — and reports it for one focus node.
+#[tokio::test]
+async fn a_function_body_cannot_read_outside_the_validated_dataset() {
+    use open_triplestore::auth::models::GraphKind;
+    let state = test_state();
+    let app = setup_on(state.clone());
+    let peek = format!(
+        "@prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+         <http://example.org/fn/peek> a sh:SPARQLFunction ;\n\
+           sh:select \"\"\"SELECT (GROUP_CONCAT(STR(?v)) AS ?r) FROM <{PRIV_GRAPH}> FROM NAMED <{PRIV_GRAPH}> FROM NAMED <{PUB_GRAPH}>\n\
+             WHERE {{ {{ ?s ?p ?v }} UNION {{ GRAPH ?g {{ ?s ?p ?v }} }} FILTER(isLiteral(?v)) }}\"\"\" .\n\
+         <http://example.org/S> a sh:NodeShape ; sh:targetNode <http://example.org/probe> ;\n\
+           sh:sparql [ sh:select \"\"\"SELECT $this ?value WHERE {{ BIND(<http://example.org/fn/peek>() AS ?value) }}\"\"\" ] .\n"
+    );
+    state
+        .store
+        .load_str(&peek, oxigraph::io::RdfFormat::Turtle, Some(B_SHAPES))
+        .unwrap();
+    state
+        .auth_db
+        .add_dataset_graph("ds-tenant-b", B_SHAPES)
+        .unwrap();
+    state
+        .auth_db
+        .set_dataset_graph_role("ds-tenant-b", B_SHAPES, Some(GraphKind::Shapes))
+        .unwrap();
+
+    let bob = mint_token("bob", "bob", "user");
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/datasets/ds-tenant-b/validate?test=true")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {bob}"))
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = body_text(resp.into_body()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.contains(TENANT_B_MARKER),
+        "the body reads the run's own data graph: {body}"
+    );
+    assert!(
+        !body.contains(PRIVATE_MARKER),
+        "a function body read another tenant's private graph: {body}"
+    );
+    assert!(
+        !body.contains(PUBLIC_MARKER),
+        "a function body read a graph outside the run: {body}"
+    );
+}
