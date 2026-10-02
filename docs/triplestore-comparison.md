@@ -101,8 +101,8 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
   the project's own grades, not W3C or OGC conformance claims, and nothing is OGC-certified.
   The **Open Triplestore** columns in the matrices below follow those grades for GeoSPARQL,
   SHACL and the W3C SPARQL tests; elsewhere a ✅ marks *feature presence*, and
-  `docs/standards.md` grades several of those rows **Partial**: OWL 2 EL, RL and DL (DL runs RL+extension rules in
-  process, with a full tableau only via the optional Konclude bridge), SHACL Advanced and
+  `docs/standards.md` grades several of those rows **Partial**: OWL 2 EL, RL and DL (DL needs a configured backend: the
+  incomplete in-process RL + DL-syntax rules, or a user-installed Konclude or reasoner sidecar), SHACL Advanced and
   SHACL-C, ShEx, SWRL, RML and DCAT. GeoSPARQL 1.1 lacks KML/DGGS literals and the Query
   Rewrite Extension (it has the geodesic `metric*` family, `aggUnion` and WKT/GML/GeoJSON
   literals). SPARQL 1.2 /
@@ -261,9 +261,9 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >   profile: DL-Lite_R closure, ground materialisation, consistency checks (data ranges decided on
 >   values through the OWL 2 datatype map) and existential rewriting of query blank nodes.
 >   See [`docs/owl2-el.md`](owl2-el.md), [`docs/owl2-ql.md`](owl2-ql.md), [`docs/owl2-rl.md`](owl2-rl.md).
-> ⁷ OWL 2 DL: native RL+DL-extension rules (hasSelf, disjointUnion, negativePropertyAssertion,
->   hasKey, cardinality annotations) run in-process; full tableau via optional Konclude subprocess
->   bridge (`KoncludeReasoner` in `src/reasoning/konclude_bridge.rs`).
+> ⁷ OWL 2 DL: a configured backend (`OTS_DL_BACKEND`) — the in-process RL + DL-syntax rules
+>   (sound, not complete), a user-installed Konclude driven over OWLlink, or an HTTP reasoner
+>   sidecar; an OWL 2 DL profile check precedes every run. Graded Partial in `docs/standards.md`.
 >   See [`docs/owl2-dl.md`](owl2-dl.md).
 > ⁸ ShEx (Shape Expressions) support via `shex` feature flag. ShExC parser, recursive descent
 >   validator with cardinality checking, CLOSED/EXTRA, inverse constraints, and value sets.
