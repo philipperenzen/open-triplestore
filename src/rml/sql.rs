@@ -23,6 +23,16 @@
 //! changes the row count, inflates the triple count, and re-emits every one of
 //! the child's own predicate-object maps per match. The index has no such
 //! effect, so it stays the fallback rather than a legacy path.
+//!
+//! The index is built by [`ParentIndexBuilder`], which takes rows from any
+//! source — the file executor joins CSV, JSON and XML sources with it too.
+//!
+//! **No join condition.** A referencing object map without one is legal only
+//! when the child and the parent read the same logical source, and then it
+//! joins each row to *itself* (R2RML §8: the joint query is
+//! `SELECT * FROM ({child-query}) AS tmp`): the object is the subject the
+//! parent map generates for the child's own row ([`same_row_subject`]). It is
+//! not a cross join over every parent row.
 
 use std::collections::HashMap;
 
@@ -70,10 +80,10 @@ pub struct SqlOutcome {
 /// Generate one row's triples for one triples map (R2RML §11.1).
 ///
 /// `resolve_ref` answers a `rr:parentTriplesMap` object: the subject terms the
-/// parent map generates for the rows this row joins to. `None` means the
-/// caller has no index for it, and the reference is skipped. Joins run only
-/// on relational sources, which take no graph maps, so a parent's subject is
-/// always rendered for the run's target graph.
+/// parent map generates for the rows this row joins to, given where the
+/// triple lands (a blank node is scoped to its graph). `None` means the
+/// caller has no index for it, and the reference is skipped. A parent's
+/// subject reached through an index is rendered for the default graph.
 ///
 /// **Graphs.** A triple goes to every graph its subject map names, *and* every
 /// graph its predicate-object map names — the union, not an override — and to
@@ -87,7 +97,7 @@ pub fn row_triples(
     kinds: Option<&Kinds>,
     gen: &mut TermGen,
     base: Option<&str>,
-    resolve_ref: &dyn Fn(&RefObjectMap, &Row) -> Option<Vec<String>>,
+    resolve_ref: &dyn Fn(&RefObjectMap, &Row, At<'_>) -> Option<Vec<String>>,
 ) -> Result<Vec<EmittedTriple>, String> {
     let mut out = Vec::new();
     // The subject, once per graph it lands in: a blank node is scoped to its
@@ -171,7 +181,9 @@ pub fn row_triples(
                         objects.extend(eval_term(tm_obj, row, kinds, gen, at))
                     }
                     ObjectMap::Function(f) => objects.extend(eval_function(f, row, kinds, gen)?),
-                    ObjectMap::Ref(r) => objects.extend(resolve_ref(r, row).unwrap_or_default()),
+                    ObjectMap::Ref(r) => {
+                        objects.extend(resolve_ref(r, row, at).unwrap_or_default())
+                    }
                 }
             }
             for predicate in &predicates {
@@ -264,6 +276,9 @@ pub(crate) enum JoinStrategy {
     },
     /// Resolved through a pre-built index of the parent's subject terms.
     Index,
+    /// No join condition: the parent's subject for the child's own row
+    /// ([`same_row_subject`]). Needs neither an index nor a second scan.
+    SameRow,
 }
 
 /// Restrict a triples map's own rows to those past a cursor.
@@ -321,8 +336,8 @@ pub(crate) type RefKey = (String, Vec<(String, String)>);
 /// Whether a reference can be pushed into the child's query.
 ///
 /// Four conditions, all necessary:
-/// * there is at least one join condition — a join-less reference is a cross
-///   join, which multiplies rows by definition;
+/// * there is at least one join condition — a join-less reference is
+///   resolved from the child's own row ([`JoinStrategy::SameRow`]);
 /// * the parent reads a named, unqualified table, so its keys can be looked up
 ///   at all (an `rml:query` parent is opaque to the catalogue);
 /// * the parent's join columns cover one of that table's unique keys, so the
@@ -388,6 +403,10 @@ pub(crate) fn plan_triples_map(
         let parent = mapping
             .find(&r.parent_triples_map)
             .ok_or_else(|| format!("unknown parent TriplesMap <{}>", r.parent_triples_map))?;
+        if r.joins.is_empty() {
+            strategies.insert(key, JoinStrategy::SameRow);
+            continue;
+        }
         if !can_push_down(parent, &r.joins, unique_keys, mapping.semantics) {
             strategies.insert(key, JoinStrategy::Index);
             continue;
@@ -490,6 +509,109 @@ pub(crate) fn pushdown_subject(
     eval_parent_subject(&parent.subject_map.term_map, &parent_row, None, gen, base)
 }
 
+/// Builds the index a join resolves through: each parent row's join-key
+/// values, mapped to the subject terms its triples map generates for it.
+///
+/// It takes rows one at a time from any source — a relational stream, a
+/// sample held in memory, a parsed CSV, JSON or XML file — so every executor
+/// joins by the same rules: the parent's own `rml:null` values apply, a key
+/// with a NULL in it matches nothing, a row that generates no subject is not
+/// indexed, and the number of distinct keys is bounded by
+/// `OTS_SOURCES_JOIN_MAX_ROWS` (default 1 000 000), past which the mapping is
+/// refused by name rather than exhausting memory.
+pub(crate) struct ParentIndexBuilder<'a> {
+    parent: &'a TriplesMap,
+    columns: Vec<String>,
+    base: Option<&'a str>,
+    cap: usize,
+    index: ParentIndex,
+}
+
+impl<'a> ParentIndexBuilder<'a> {
+    pub(crate) fn new(parent: &'a TriplesMap, joins: &[JoinCondition], base: Option<&'a str>) -> Self {
+        Self {
+            parent,
+            columns: joins.iter().map(|j| j.parent.clone()).collect(),
+            base,
+            cap: join_max_rows(),
+            index: ParentIndex::new(),
+        }
+    }
+
+    /// Index one parent row. `row` is the row as the source delivered it;
+    /// the parent's `rml:null` values are dropped from it here.
+    pub(crate) fn push(
+        &mut self,
+        row: &mut Row,
+        kinds: Option<&Kinds>,
+        gen: &mut TermGen,
+    ) -> Result<(), String> {
+        gen.apply_nulls(&self.parent.logical_source, row);
+        let Some(key) = join_key(row, &self.columns) else {
+            return Ok(());
+        };
+        gen.start_row();
+        let at = At {
+            base: self.base,
+            graph: None,
+        };
+        let Some(subject) = eval_subject(&self.parent.subject_map, row, kinds, gen, at)? else {
+            return Ok(());
+        };
+        if self.index.len() >= self.cap && !self.index.contains_key(&key) {
+            return Err(format!(
+                "the join index for parent TriplesMap <{}> exceeded {} distinct keys; \
+                 raise {JOIN_MAX_ROWS_ENV} or narrow the parent's logical source",
+                self.parent.iri, self.cap
+            ));
+        }
+        let entry = self.index.entry(key).or_default();
+        if !entry.contains(&subject) {
+            entry.push(subject);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(self) -> ParentIndex {
+        self.index
+    }
+}
+
+/// Look a child row up in a parent index: the parent subjects whose join key
+/// equals the child's. `None` when a child join column is NULL.
+pub(crate) fn lookup(index: &ParentIndex, r: &RefObjectMap, child_row: &Row) -> Option<Vec<String>> {
+    let child_columns: Vec<String> = r.joins.iter().map(|j| j.child.clone()).collect();
+    index.get(&join_key(child_row, &child_columns)?).cloned()
+}
+
+/// The object of a referencing object map with no join condition: the
+/// subject the parent map generates for the child's *own* row (R2RML §8; the
+/// parser has checked that both maps read the same logical source). The
+/// parent's `rml:null` values are its source's, which is the child's.
+///
+/// `gen` must not be the child row's own generator: under R2RML a blank node
+/// is a function of its value and graph, so any generator labels it the same;
+/// a legacy blank node is minted per row and does not survive the hop either
+/// way.
+pub(crate) fn same_row_subject(
+    mapping: &RmlMapping,
+    r: &RefObjectMap,
+    row: &Row,
+    gen: &mut TermGen,
+    at: At<'_>,
+) -> Option<Vec<String>> {
+    let parent = mapping.find(&r.parent_triples_map)?;
+    let at = At {
+        base: mapping.base_for(parent),
+        graph: at.graph,
+    };
+    // Kinds are irrelevant: a subject is an IRI or a blank node.
+    match eval_subject(&parent.subject_map, row, None, gen, at) {
+        Ok(Some(s)) => Some(vec![s]),
+        _ => None,
+    }
+}
+
 /// Stream a parent triples map once and index its subject terms by join key.
 fn build_parent_index(
     parent: &TriplesMap,
@@ -505,58 +627,28 @@ fn build_parent_index(
             parent.iri
         )
     })?;
-    let parent_columns: Vec<String> = joins.iter().map(|j| j.parent.clone()).collect();
-    let cap = join_max_rows();
-
-    let mut index: ParentIndex = HashMap::new();
+    let mut builder = ParentIndexBuilder::new(parent, joins, base);
     let mut row: Row = HashMap::new();
     let mut kinds: Kinds = HashMap::new();
-    let mut overflow: Option<String> = None;
+    let mut failure: Option<String> = None;
 
     conn.stream(&sql, 1_000, &mut |batch| {
         for src in &batch {
             split_row(src, &mut row, &mut kinds);
-            gen.apply_nulls(&parent.logical_source, &mut row);
-            let Some(key) = join_key(&row, &parent_columns) else {
-                continue;
-            };
-            gen.start_row();
-            let subject = match eval_subject(
-                &parent.subject_map,
-                &row,
-                Some(&kinds),
-                gen,
-                At { base, graph: None },
-            ) {
-                Ok(Some(s)) => s,
-                Ok(None) => continue,
-                Err(e) => {
-                    overflow = Some(e);
-                    return Err(SourceError::Query("mapping error".into()));
-                }
-            };
-            if index.len() >= cap && !index.contains_key(&key) {
-                overflow = Some(format!(
-                    "the join index for parent TriplesMap <{}> exceeded {cap} distinct keys; \
-                     raise {JOIN_MAX_ROWS_ENV} or narrow the parent's logical source",
-                    parent.iri
-                ));
-                return Err(SourceError::Query("join index overflow".into()));
-            }
-            let entry = index.entry(key).or_default();
-            if !entry.contains(&subject) {
-                entry.push(subject);
+            if let Err(e) = builder.push(&mut row, Some(&kinds), gen) {
+                failure = Some(e);
+                return Err(SourceError::Query("join index".into()));
             }
         }
         Ok(())
     })
     .map_err(|e| {
-        overflow
+        failure
             .clone()
             .unwrap_or_else(|| format!("reading join parent <{}>: {e}", parent.iri))
     })?;
 
-    Ok(index)
+    Ok(builder.finish())
 }
 
 /// Every parent table a reference joins to, with its unique keys — the input
@@ -649,6 +741,114 @@ pub fn execute_relational_filtered(
     filter: Option<&RowFilter>,
     on_data_error: OnDataError,
 ) -> Result<SqlOutcome, String> {
+    run_relational(
+        mapping,
+        conn,
+        quote,
+        store,
+        Target::Into(target_graph),
+        batch_size,
+        run_id,
+        filter,
+        on_data_error,
+    )
+}
+
+/// Run a relational mapping into `store` with every triple in the graphs its
+/// graph maps name, and a triple no graph map routes in the default graph —
+/// the output dataset R2RML §11 defines. What a conformance run compares; a
+/// registered mapping runs through [`execute_relational`] instead, whose run
+/// graph has to hold the whole result.
+pub fn execute_relational_as_mapped(
+    mapping: &RmlMapping,
+    conn: &mut dyn SourceConnection,
+    quote: &dyn Fn(&str) -> String,
+    store: &TripleStore,
+    batch_size: usize,
+    run_id: &str,
+    on_data_error: OnDataError,
+) -> Result<SqlOutcome, String> {
+    run_relational(
+        mapping,
+        conn,
+        quote,
+        store,
+        Target::AsMapped,
+        batch_size,
+        run_id,
+        None,
+        on_data_error,
+    )
+}
+
+/// Where a relational run writes.
+#[derive(Debug, Clone, Copy)]
+enum Target<'a> {
+    /// Every triple into this graph, whatever its graph maps say.
+    Into(&'a str),
+    /// Every triple into the graphs it was generated for.
+    AsMapped,
+}
+
+/// Generated N-Triples lines, by the graph they go to.
+#[derive(Default)]
+struct Buffers {
+    /// The default graph's lines — every line, for [`Target::Into`].
+    default: String,
+    named: HashMap<String, String>,
+    bytes: usize,
+}
+
+impl Buffers {
+    fn push(&mut self, target: Target<'_>, t: &EmittedTriple) {
+        let buf = match (target, &t.graph) {
+            (Target::AsMapped, Some(g)) => self.named.entry(g.clone()).or_default(),
+            _ => &mut self.default,
+        };
+        buf.push_str(&t.text);
+        buf.push('\n');
+        self.bytes += t.text.len() + 1;
+    }
+
+    fn clear(&mut self) {
+        self.default.clear();
+        self.named.clear();
+        self.bytes = 0;
+    }
+
+    fn flush(&mut self, store: &TripleStore, target: Target<'_>) -> Result<(), String> {
+        match target {
+            Target::Into(g) => flush(store, &mut self.default, g)?,
+            Target::AsMapped => {
+                if !self.default.is_empty() {
+                    store
+                        .load_str(&self.default, oxigraph::io::RdfFormat::NTriples, None)
+                        .map_err(|e| format!("writing generated triples: {e}"))?;
+                    self.default.clear();
+                }
+            }
+        }
+        for (graph, buf) in self.named.iter_mut() {
+            flush(store, buf, graph)?;
+        }
+        self.bytes = 0;
+        Ok(())
+    }
+}
+
+/// The body of [`execute_relational_filtered`] and [`execute_relational_as_mapped`].
+#[allow(clippy::too_many_arguments)]
+fn run_relational(
+    mapping: &RmlMapping,
+    conn: &mut dyn SourceConnection,
+    quote: &dyn Fn(&str) -> String,
+    store: &TripleStore,
+    target: Target<'_>,
+    batch_size: usize,
+    run_id: &str,
+    filter: Option<&RowFilter>,
+    on_data_error: OnDataError,
+) -> Result<SqlOutcome, String> {
     let batch_size = batch_size.clamp(1, 100_000);
     // Blank-node labels carry the run id, so two runs' graphs never share a
     // node and a batch-by-batch load never merges rows.
@@ -705,7 +905,7 @@ pub fn execute_relational_filtered(
         "relational join plan"
     );
 
-    let mut buffer = String::with_capacity(FLUSH_BYTES / 4);
+    let mut buffer = Buffers::default();
     let mut row: Row = HashMap::new();
     let mut kinds: Kinds = HashMap::new();
 
@@ -729,8 +929,13 @@ pub fn execute_relational_filtered(
                 apply_own_nulls(&gen, &tm.logical_source, &mut row);
                 seen += 1;
                 gen.start_row();
-                let generated =
-                    row_triples(tm, &row, Some(&kinds), &mut gen, base, &|r, child_row| {
+                let generated = row_triples(
+                    tm,
+                    &row,
+                    Some(&kinds),
+                    &mut gen,
+                    base,
+                    &|r, child_row, at| {
                         let key = index_key(r);
                         match plan.strategies.get(&key) {
                             Some(JoinStrategy::Pushdown { alias, witness }) => {
@@ -745,20 +950,17 @@ pub fn execute_relational_filtered(
                                 )
                                 .map(|s| vec![s])
                             }
-                            _ => {
-                                let index = indexes.get(&key)?;
-                                let child_columns: Vec<String> =
-                                    r.joins.iter().map(|j| j.child.clone()).collect();
-                                if child_columns.is_empty() {
-                                    // A join-less reference over the same
-                                    // logical source: every parent matches.
-                                    return Some(index.values().flatten().cloned().collect());
-                                }
-                                let k = join_key(child_row, &child_columns)?;
-                                index.get(&k).cloned()
-                            }
+                            Some(JoinStrategy::SameRow) => same_row_subject(
+                                mapping,
+                                r,
+                                child_row,
+                                &mut parent_gen.borrow_mut(),
+                                at,
+                            ),
+                            _ => lookup(indexes.get(&key)?, r, child_row),
                         }
-                    });
+                    },
+                );
                 let generated = match generated {
                     Ok(g) => g,
                     Err(e) => {
@@ -779,13 +981,12 @@ pub fn execute_relational_filtered(
                     continue;
                 }
                 for t in generated {
-                    buffer.push_str(&t.text);
-                    buffer.push('\n');
+                    buffer.push(target, &t);
                     triples += 1;
                 }
             }
-            if !aborting && buffer.len() >= FLUSH_BYTES {
-                if let Err(e) = flush(store, &mut buffer, target_graph) {
+            if !aborting && buffer.bytes >= FLUSH_BYTES {
+                if let Err(e) = buffer.flush(store, target) {
                     emit_error = Some(e);
                     return Err(SourceError::Query("write error".into()));
                 }
@@ -808,7 +1009,7 @@ pub fn execute_relational_filtered(
         outcome.data_errors.merge(errors);
     }
 
-    flush(store, &mut buffer, target_graph)?;
+    buffer.flush(store, target)?;
     Ok(outcome)
 }
 
@@ -1220,6 +1421,121 @@ mod tests {
             !can_push_down(parent, &partial, &unique, Semantics::R2rml),
             "half a composite key does not make the match unique"
         );
+    }
+
+    /// A referencing object map with no join condition over the child's own
+    /// table: each row joins to itself (R2RML §8).
+    const SAME_ROW: &str = r#"
+        ex:Product a rr:TriplesMap ;
+          rml:logicalSource [ rml:source <urn:source:s> ; rr:tableName "product" ] ;
+          rr:subjectMap [ rr:template "http://example.org/p{pid}" ] ;
+          rr:predicateObjectMap [ rr:predicate ex:status ;
+             rr:objectMap [ rr:parentTriplesMap ex:Status ] ] .
+        ex:Status a rr:TriplesMap ;
+          rml:logicalSource [ rml:source <urn:source:s> ; rr:tableName "product" ] ;
+          rr:subjectMap [ rr:template "http://example.org/status/{status}" ] .
+    "#;
+
+    #[test]
+    fn a_join_less_reference_joins_each_row_to_itself_not_every_row() {
+        let (store, outcome) = run(SAME_ROW, 1);
+        assert!(ask(
+            &store,
+            "<http://example.org/p10> ex:status <http://example.org/status/active> ."
+        ));
+        assert!(ask(
+            &store,
+            "<http://example.org/p12> ex:status <http://example.org/status/retired> ."
+        ));
+        assert!(
+            !ask(
+                &store,
+                "<http://example.org/p10> ex:status <http://example.org/status/retired> ."
+            ),
+            "the old cross join linked every product to every status"
+        );
+        assert_eq!(outcome.triples, 3, "one link per product row");
+        assert_eq!(count(&store), 3);
+    }
+
+    #[test]
+    fn a_join_less_reference_builds_no_index() {
+        // It needs no second scan, so the index cap cannot refuse it.
+        let _guard = EnvGuard::with_cap("1");
+        let mapping = parse_rml(&format!("{PFX}{SAME_ROW}")).unwrap();
+        let plan = plan_triples_map(
+            mapping.find("http://example.org/Product").unwrap(),
+            &mapping,
+            &HashMap::new(),
+            &quote,
+            None,
+        )
+        .unwrap();
+        assert!(plan
+            .strategies
+            .values()
+            .all(|s| matches!(s, JoinStrategy::SameRow)));
+        let (_dir, mut conn) = db();
+        let store = TripleStore::in_memory().unwrap();
+        execute_relational(
+            &mapping,
+            conn.as_mut(),
+            &quote,
+            &store,
+            "urn:run:test",
+            10,
+            "r",
+            OnDataError::Abort,
+        )
+        .expect("no index, so no cap");
+    }
+
+    #[test]
+    fn as_mapped_routing_keeps_graph_maps_and_into_routing_does_not() {
+        let _guard = env_guard();
+        let ttl = format!(
+            "{PFX}
+             ex:P a rr:TriplesMap ;
+               rml:logicalSource [ rml:source <urn:source:s> ; rr:tableName \"supplier\" ] ;
+               rr:subjectMap [ rr:template \"http://example.org/s{{sid}}\" ;
+                               rr:graph ex:Suppliers ] ;
+               rr:predicateObjectMap [ rr:predicate ex:label ; rr:objectMap [ rr:column \"label\" ] ] ;
+               rr:predicateObjectMap [ rr:predicate ex:id ; rr:objectMap [ rr:column \"sid\" ] ;
+                                       rr:graph rr:defaultGraph ] ."
+        );
+        let mapping = parse_rml(&ttl).unwrap();
+        let (_dir, mut conn) = db();
+        let store = TripleStore::in_memory().unwrap();
+        execute_relational_as_mapped(
+            &mapping,
+            conn.as_mut(),
+            &quote,
+            &store,
+            10,
+            "r",
+            OnDataError::Abort,
+        )
+        .unwrap();
+        assert_eq!(
+            store.count_graph(Some("http://example.org/Suppliers")).unwrap(),
+            4,
+            "two labels and two ids in the subject's graph"
+        );
+        assert_eq!(
+            store.count_graph(None).unwrap(),
+            2,
+            "the ids also go to rr:defaultGraph"
+        );
+        let (into, _) = run(
+            r#"
+             ex:P a rr:TriplesMap ;
+               rml:logicalSource [ rml:source <urn:source:s> ; rr:tableName "supplier" ] ;
+               rr:subjectMap [ rr:template "http://example.org/s{sid}" ; rr:graph ex:Suppliers ] ;
+               rr:predicateObjectMap [ rr:predicate ex:label ; rr:objectMap [ rr:column "label" ] ] .
+            "#,
+            10,
+        );
+        assert_eq!(count(&into), 2, "a run's graph holds the whole result");
     }
 
     #[test]

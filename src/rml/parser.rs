@@ -140,8 +140,17 @@ fn validate_references(mapping: &RmlMapping) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether two logical sources are the same source read the same way —
+/// "effectively equal" (RML-Core §joins): the same source, table or query,
+/// iterator and reference formulation. A join-less reference resolves from
+/// the child's own row, which is only meaningful when that row is also one of
+/// the parent's.
 fn same_logical_source(a: &LogicalSource, b: &LogicalSource) -> bool {
-    a.source == b.source && a.query == b.query && a.table_name == b.table_name
+    a.source == b.source
+        && a.query == b.query
+        && a.table_name == b.table_name
+        && a.iterator == b.iterator
+        && a.reference_formulation == b.reference_formulation
 }
 
 /// The store, graph and rules a document is parsed under.

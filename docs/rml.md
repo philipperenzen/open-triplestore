@@ -2,7 +2,7 @@
 
 The triplestore supports the [RDF Mapping Language (RML)](https://rml.io/specs/rml/) for converting tabular and semi-structured data (CSV, JSON, XML) into RDF triples.
 
-This page covers mappings over uploaded **files**. Relational databases (PostgreSQL, MySQL / MariaDB, SQL Server) and SPARQL endpoints are mapped as registered datasources instead — see [Sources](sources.md) — and that path also resolves joins between triples maps.
+This page covers mappings over uploaded **files**. Relational databases (PostgreSQL, MySQL / MariaDB, SQL Server) and SPARQL endpoints are mapped as registered datasources instead — see [Sources](sources.md). Joins between triples maps run on both paths, by the same rules.
 
 ---
 
@@ -38,10 +38,44 @@ RML extends W3C R2RML to non-relational data sources. A mapping document is a Tu
 | `rr:predicateMap` shortcut (`rr:predicate`) | Supported |
 | `rr:objectMap` shortcut (`rr:object`) | Supported |
 | Several predicate and object maps per predicate-object map | Every predicate map × every object map, shortcuts included (R2RML §6.3, §11.1): `rr:predicate ex:a, ex:b ; rr:object ex:X ; rr:objectMap [ … ]` generates four triples per row |
-| `rr:parentTriplesMap` (referencing object maps, joins) | Not on file sources: a mapping that uses one is refused with `400` and names the triples map. Registered datasources resolve them ([Sources](sources.md)). |
+| `rr:parentTriplesMap` (referencing object maps, joins) | Full — on CSV, JSON and XML sources, and between them — see [Joins](#joins) |
 | Empty values and `rml:null` | An empty CSV cell, an empty JSON string and an empty XML element are values — an empty literal, or an IRI built from the empty string (RML-IO: nothing is NULL unless the source says so). A JSON `null` and a missing key or element are no value. `rml:null "…"` on the logical source (RML-IO's `<http://w3id.org/rml/null>`, or `rml:null` in the legacy namespace) lists values that count as NULL — `rml:null ""` restores "an empty cell generates nothing" |
 | Mapping validation | A non-conforming mapping is refused at upload with the construct named — see [Errors](#errors) |
 | Data errors | A value that cannot become its term aborts the run and names the rows, or is skipped and reported with `on_data_error=skip` — see [Errors](#errors) |
+
+---
+
+## Joins
+
+A referencing object map makes the object the subject another triples map
+generates (R2RML §8):
+
+```turtle
+ex:StudentMap a rr:TriplesMap ;
+  rml:logicalSource [ rml:source "students.json" ; rml:referenceFormulation ql:JSONPath ;
+                      rml:iterator "$.students[*]" ] ;
+  rr:subjectMap [ rr:template "http://example.org/student/{ID}" ] ;
+  rr:predicateObjectMap [ rr:predicate ex:practises ; rr:objectMap [
+      rr:parentTriplesMap ex:SportMap ;
+      rr:joinCondition [ rr:child "Sport" ; rr:parent "ID" ] ] ] .
+ex:SportMap a rr:TriplesMap ;
+  rml:logicalSource [ rml:source "sports.csv" ; rml:referenceFormulation ql:CSV ] ;
+  rr:subjectMap [ rr:template "http://example.org/sport/{ID}" ] .
+```
+
+- **With join conditions**, the parent's rows are read once and indexed by the
+  parent side of the join; each child row links to the subject of every parent
+  row whose values equal its own on every condition. The two maps may read
+  different files and different formats. A key with a NULL in it (a missing
+  JSON key or XML element, a JSON `null`, a value the logical source lists
+  under `rml:null`) matches nothing; an empty CSV cell is the value `""`. The
+  index is bounded by `OTS_SOURCES_JOIN_MAX_ROWS` (default 1 000 000 distinct
+  keys); a mapping that would exceed it is refused by name before anything is
+  written.
+- **Without a join condition**, both maps must read the same logical source
+  (the same file, iterator and reference formulation; a mapping where they do
+  not is refused at upload), and each row joins to *itself*: the object is the
+  parent's subject for the child's own row. It is not a cross join.
 
 ---
 
@@ -372,7 +406,6 @@ Both graphs appear in the dataset graph list and participate in dataset-scoped S
 
 ## Limitations
 
-- **Joins between TriplesMap entries**: a file row stands alone, so `rr:parentTriplesMap` (with or without `rr:joinCondition`) cannot be resolved here and the whole mapping is refused rather than run without its links. Put the parent's key in the child's rows and build the object with `rr:template`, or load the data as a registered datasource, where joins run ([Sources](sources.md)).
 - **SQL / SPARQL sources**: this upload path reads files only. SQL logical tables (`rr:tableName`, `rml:query`) and SPARQL endpoints are mapped through registered datasources ([Sources](sources.md)); a mapping that names one is refused here with a pointer to that path.
 - **Large files**: Source files are read entirely into memory. For very large files (> 100 MB), consider splitting them before upload.
 - **Nested JSON/XML**: Deep nesting (e.g. accessing `$.orders[].items[].price`) requires the iterator to point to the innermost array. Nested sibling references are flattened at a single object level.

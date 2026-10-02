@@ -269,8 +269,10 @@ pub enum ObjectMap {
 pub struct RefObjectMap {
     /// IRI of the parent `rr:TriplesMap`.
     pub parent_triples_map: String,
-    /// `rr:joinCondition` pairs. An empty list is a cross join, which R2RML
-    /// permits only when both logical sources are identical.
+    /// `rr:joinCondition` pairs. With none, R2RML permits the reference only
+    /// when both triples maps read the same logical source, and each row
+    /// joins to itself: the object is the parent's subject for the child's
+    /// own row (R2RML §8).
     pub joins: Vec<JoinCondition>,
 }
 

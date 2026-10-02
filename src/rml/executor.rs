@@ -11,16 +11,20 @@
 //!       → Quad(subject, predicate, object, graph)
 //! ```
 //!
-//! This is the **file-based** path (CSV / JSON / XML), where every row is
-//! self-contained. Relational sources stream through
-//! [`super::sql`](super::sql) instead, because they can join across triples
-//! maps; both share the term-map evaluation in [`super::terms`].
+//! This is the **file-based** path (CSV / JSON / XML). Relational sources
+//! stream through [`super::sql`](super::sql) instead; both share the
+//! term-map evaluation in [`super::terms`] and the join rules: a referencing
+//! object map with join conditions resolves through an index of the parent's
+//! rows ([`ParentIndexBuilder`]), built once per parent and join, and one
+//! without resolves from the child's own row (R2RML §8).
 
 use super::checks::{check_columns, DataErrors, OnDataError};
 use super::model::*;
-use super::sources::load_rows;
+use super::sources::{load_rows, RowIter};
+use super::sql::{index_key, lookup, same_row_subject, ParentIndex, ParentIndexBuilder, RefKey};
 use super::terms::{Row, TermGen};
 use crate::store::engine::TripleStore;
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 /// What a file-mapping run wrote, and the rows it skipped terms from.
@@ -67,38 +71,18 @@ where
                 .to_string(),
         );
     }
-    // The same goes for a referencing object map: `rr:parentTriplesMap` needs
-    // a join resolver, and a file row stands alone. Resolving it to nothing
-    // dropped every link the mapping asked for and still reported success.
-    if let Some((tm, r)) = mapping
-        .triples_maps
-        .iter()
-        .find_map(|tm| tm.refs().next().map(|r| (tm, r)))
-    {
-        return Err(format!(
-            "TriplesMap <{}> links to <{}> through rr:parentTriplesMap, which file sources \
-             (CSV, JSON, XML) cannot resolve; put the parent's subject in the child's own \
-             rows, or map a registered datasource, where joins run",
-            tm.iri, r.parent_triples_map
-        ));
-    }
-
     // Triples keyed by their target named graph (None = default/target_graph).
     let mut triples_by_graph: HashMap<Option<String>, Vec<String>> = HashMap::new();
     let mut gen = TermGen::new(mapping.semantics, "b");
     let mut data_errors = DataErrors::default();
+    let indexes = build_indexes(mapping, source_data, &mut gen)?;
 
     for tm in &mapping.triples_maps {
-        let source_key = match &tm.logical_source.source {
-            SourceRef::File(path) => path.clone(),
-            SourceRef::Datasource(_) => unreachable!("guarded by has_sql_source above"),
-        };
-
         execute_triples_map(
             mapping,
             tm,
             source_data,
-            &source_key,
+            &indexes,
             &mut triples_by_graph,
             &mut gen,
             on_data_error,
@@ -160,16 +144,45 @@ fn execute_triples_map(
     mapping: &RmlMapping,
     tm: &TriplesMap,
     source_data: &HashMap<String, String>,
-    source_key: &str,
+    indexes: &HashMap<RefKey, ParentIndex>,
     out: &mut HashMap<Option<String>, Vec<String>>,
     gen: &mut TermGen,
     on_data_error: OnDataError,
     data_errors: &mut DataErrors,
 ) -> Result<(), String> {
+    let rows = rows_of(mapping, tm, source_data)?;
+    let base = mapping.base_for(tm);
+    // A join-less parent's subject is computed from the child's row with a
+    // generator of its own, as the relational executor does.
+    let parent_gen = RefCell::new(TermGen::new(mapping.semantics, "b"));
+    for (i, row_result) in rows.enumerate() {
+        let mut row = row_result?;
+        gen.apply_nulls(&tm.logical_source, &mut row);
+        execute_row(mapping, tm, &row, out, gen, &parent_gen, indexes, base)?;
+        data_errors.record(&tm.iri, i as u64 + 1, gen.take_errors());
+        // An aborting run reads on only to name a few more offending rows.
+        if on_data_error == OnDataError::Abort && data_errors.sample_full() {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// The rows of `tm`'s logical source, after checking the columns the
+/// mapping names against the source's own (a CSV header).
+fn rows_of(
+    mapping: &RmlMapping,
+    tm: &TriplesMap,
+    source_data: &HashMap<String, String>,
+) -> Result<RowIter, String> {
+    let source_key = match &tm.logical_source.source {
+        SourceRef::File(path) => path.as_str(),
+        SourceRef::Datasource(_) => unreachable!("guarded by has_sql_source"),
+    };
     let content = source_data
         .get(source_key)
         .ok_or_else(|| format!("Source data not found for key: {source_key}"))?;
-
     let (columns, rows) = load_rows(
         content,
         &tm.logical_source.reference_formulation,
@@ -182,27 +195,50 @@ fn execute_triples_map(
     if let Some(columns) = columns {
         check_columns(mapping, tm, &columns)?;
     }
-
-    let base = mapping.base_for(tm);
-    for (i, row_result) in rows.enumerate() {
-        let mut row = row_result?;
-        gen.apply_nulls(&tm.logical_source, &mut row);
-        execute_row(tm, &row, out, gen, base)?;
-        data_errors.record(&tm.iri, i as u64 + 1, gen.take_errors());
-        // An aborting run reads on only to name a few more offending rows.
-        if on_data_error == OnDataError::Abort && data_errors.sample_full() {
-            break;
-        }
-    }
-
-    Ok(())
+    Ok(rows)
 }
 
+/// One index per distinct (parent, join conditions) a referencing object map
+/// with join conditions names: the parent's rows read once, keyed by the
+/// parent side of the join. Built before the first triple, so an index over
+/// the `OTS_SOURCES_JOIN_MAX_ROWS` cap fails the run before anything is
+/// generated.
+fn build_indexes(
+    mapping: &RmlMapping,
+    source_data: &HashMap<String, String>,
+    gen: &mut TermGen,
+) -> Result<HashMap<RefKey, ParentIndex>, String> {
+    let mut indexes: HashMap<RefKey, ParentIndex> = HashMap::new();
+    for tm in &mapping.triples_maps {
+        for r in tm.refs().filter(|r| !r.joins.is_empty()) {
+            let key = index_key(r);
+            if indexes.contains_key(&key) {
+                continue;
+            }
+            let parent = mapping
+                .find(&r.parent_triples_map)
+                .ok_or_else(|| format!("unknown parent TriplesMap <{}>", r.parent_triples_map))?;
+            let mut builder = ParentIndexBuilder::new(parent, &r.joins, mapping.base_for(parent));
+            for row in rows_of(mapping, parent, source_data)? {
+                builder.push(&mut row?, None, gen)?;
+            }
+            indexes.insert(key, builder.finish());
+        }
+    }
+    // A parent row's data error is reported when the parent's own rows run.
+    gen.take_errors();
+    Ok(indexes)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn execute_row(
+    mapping: &RmlMapping,
     tm: &TriplesMap,
     row: &Row,
     out: &mut HashMap<Option<String>, Vec<String>>,
     gen: &mut TermGen,
+    parent_gen: &RefCell<TermGen>,
+    indexes: &HashMap<RefKey, ParentIndex>,
     base: Option<&str>,
 ) -> Result<(), String> {
     // Two term maps yielding the same blank-node value in this row denote the
@@ -210,9 +246,16 @@ fn execute_row(
     // graph; a legacy mapping mints afresh per row, which this resets.
     gen.start_row();
 
-    // No column types (a file source reports none) and no join resolver: a
-    // mapping with an `rr:parentTriplesMap` was refused before the first row.
-    for triple in super::sql::row_triples(tm, row, None, gen, base, &|_, _| None)? {
+    // No column types: a file source reports none.
+    let triples = super::sql::row_triples(tm, row, None, gen, base, &|r, child_row, at| {
+        if r.joins.is_empty() {
+            same_row_subject(mapping, r, child_row, &mut parent_gen.borrow_mut(), at)
+        } else {
+            lookup(indexes.get(&index_key(r))?, r, child_row)
+        }
+    })?;
+    parent_gen.borrow_mut().take_errors();
+    for triple in triples {
         out.entry(triple.graph).or_default().push(triple.text);
     }
     Ok(())
@@ -291,9 +334,10 @@ mod tests {
     }
 
     #[test]
-    fn a_parent_triples_map_is_refused_not_dropped() {
-        // Resolving the reference to nothing used to write the person, drop the
-        // link to the organisation, and report success.
+    fn a_parent_triples_map_on_file_sources_resolves_the_link() {
+        // Resolving the reference to nothing used to write the person, drop
+        // the link to the organisation, and report success; then the file
+        // executor refused the mapping. Now the parent's rows are indexed.
         let mapping = parse_rml(
             r#"
             @prefix rr:  <http://www.w3.org/ns/r2rml#> .
@@ -319,14 +363,80 @@ mod tests {
         .expect("mapping parses");
 
         let mut sources = HashMap::new();
-        sources.insert("people.csv".to_string(), "id,org\n1,7\n".to_string());
-        sources.insert("orgs.csv".to_string(), "id\n7\n".to_string());
+        sources.insert(
+            "people.csv".to_string(),
+            "id,org\n1,7\n2,8\n3,7\n".to_string(),
+        );
+        sources.insert("orgs.csv".to_string(), "id\n7\n9\n".to_string());
 
         let store = TripleStore::in_memory().unwrap();
-        let err = execute(&mapping, &sources, &store, None).unwrap_err();
-        assert!(err.contains("<http://example.org/PersonMap>"), "{err}");
-        assert!(err.contains("rr:parentTriplesMap"), "{err}");
-        assert_eq!(store.len().unwrap(), 0, "a refused mapping writes nothing");
+        let inserted = execute(&mapping, &sources, &store, None).unwrap();
+        assert_eq!(inserted, 2, "persons 1 and 3 work for org 7; org 8 is absent");
+        assert_eq!(
+            count(
+                &store,
+                "SELECT ?p WHERE { ?p <http://example.org/worksFor> <http://example.org/org/7> }"
+            ),
+            2
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT * WHERE { <http://example.org/person/2> ?p ?o }"
+            ),
+            0,
+            "a key with no parent row joins to nothing"
+        );
+    }
+
+    #[test]
+    fn a_join_less_reference_takes_the_parent_subject_of_the_same_row() {
+        // R2RML §8: no join condition joins each row to itself — not every
+        // parent row to every child row.
+        let mapping = parse_rml(
+            r#"
+            @prefix rr:  <http://www.w3.org/ns/r2rml#> .
+            @prefix rml: <http://semweb.mmlab.be/ns/rml#> .
+            @prefix ql:  <http://semweb.mmlab.be/ns/ql#> .
+            @prefix ex:  <http://example.org/> .
+
+            ex:Person a rr:TriplesMap ;
+                rml:logicalSource [ rml:source "p.csv" ; rml:referenceFormulation ql:CSV ] ;
+                rr:subjectMap [ rr:template "http://example.org/person/{id}" ] ;
+                rr:predicateObjectMap [
+                    rr:predicate ex:address ;
+                    rr:objectMap [ rr:parentTriplesMap ex:Address ]
+                ] .
+            ex:Address a rr:TriplesMap ;
+                rml:logicalSource [ rml:source "p.csv" ; rml:referenceFormulation ql:CSV ] ;
+                rr:subjectMap [ rr:template "http://example.org/address/{city}" ] .
+        "#,
+        )
+        .expect("mapping parses");
+        let mut sources = HashMap::new();
+        sources.insert(
+            "p.csv".to_string(),
+            "id,city\n1,Ghent\n2,Delft\n".to_string(),
+        );
+        let store = TripleStore::in_memory().unwrap();
+        assert_eq!(execute(&mapping, &sources, &store, None).unwrap(), 2);
+        assert_eq!(
+            count(
+                &store,
+                "SELECT * WHERE { <http://example.org/person/1> <http://example.org/address> \
+                 <http://example.org/address/Ghent> }"
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT * WHERE { <http://example.org/person/1> <http://example.org/address> \
+                 <http://example.org/address/Delft> }"
+            ),
+            0,
+            "person 1's row is not joined to person 2's"
+        );
     }
 
     fn count(store: &TripleStore, q: &str) -> usize {

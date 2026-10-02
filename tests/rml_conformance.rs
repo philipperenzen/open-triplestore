@@ -18,8 +18,10 @@
 //! (§4.3) aborts the run unless it opts into skipping and reporting. An empty
 //! value is a value; RML-IO `rml:null` names the values that count as NULL.
 //!
-//! Referencing object maps (joins / `rr:parentTriplesMap`) run on relational
-//! sources only; the file executor refuses them (see the test below).
+//! Referencing object maps (`rr:parentTriplesMap`) join on every kind of
+//! source: CSV, JSON and XML files as well as relational sources, by an index
+//! of the parent's rows (R2RML §8, §11.1). One without a join condition joins
+//! each row to itself, not to every parent row.
 //!
 //! A mapping version frozen before the engine followed R2RML's term rules
 //! keeps the old ones (`Semantics::Legacy`); `rml_legacy_semantics_*` pin them.
@@ -490,53 +492,249 @@ fn rml_blank_node_subject_shared_across_poms() {
     );
 }
 
-// Referencing object maps (`rr:parentTriplesMap` + `rr:joinCondition`) are
-// modelled and executed for RELATIONAL logical sources, where the parent can be
-// streamed and indexed (see the `rml::sql` unit tests). A FILE source has no
-// parent to join against, so the file executor refuses the mapping by name
-// instead of dropping the link and reporting success.
-#[test]
-fn rml_referencing_object_map_parses_but_the_file_executor_refuses_it() {
-    let mapping = r#"
-      ex:Child a rr:TriplesMap ;
-        rml:logicalSource ex:CSrc ; rr:subjectMap ex:CSubj ;
-        rr:predicateObjectMap ex:ParentPOM, ex:OwnPOM .
-      ex:CSrc rml:source "c.csv" ; rml:referenceFormulation ql:CSV .
-      ex:CSubj rr:template "http://example.org/c/{id}" .
-      ex:ParentPOM rr:predicate ex:parent ; rr:objectMap ex:ParentObj .
-      ex:ParentObj rr:parentTriplesMap ex:Parent ;
-        rr:joinCondition ex:Join .
-      ex:Join rr:child "pid" ; rr:parent "id" .
-      ex:OwnPOM rr:predicate ex:own ; rr:objectMap ex:OwnObj .
-      ex:OwnObj rml:reference "pid" .
-      ex:Parent a rr:TriplesMap ;
-        rml:logicalSource ex:PSrc ; rr:subjectMap ex:PSubj ;
-        rr:predicateObjectMap ex:NamePOM .
-      ex:PSrc rml:source "p.csv" ; rml:referenceFormulation ql:CSV .
-      ex:PSubj rr:template "http://example.org/p/{id}" .
-      ex:NamePOM rr:predicate foaf:name ; rr:objectMap ex:NameObj .
-      ex:NameObj rml:reference "name" ."#;
+// Referencing object maps (`rr:parentTriplesMap` + `rr:joinCondition`) on
+// FILE sources: the parent's rows are indexed by the parent side of the join,
+// and each child row links to the subject of every parent row whose key
+// equals its own (R2RML §8, §11.1). The file executor used to drop the link
+// and report success, and then refused the mapping.
+const CSV_JOIN: &str = r#"
+  ex:Child a rr:TriplesMap ;
+    rml:logicalSource ex:CSrc ; rr:subjectMap ex:CSubj ;
+    rr:predicateObjectMap ex:ParentPOM, ex:OwnPOM .
+  ex:CSrc rml:source "c.csv" ; rml:referenceFormulation ql:CSV .
+  ex:CSubj rr:template "http://example.org/c/{id}" .
+  ex:ParentPOM rr:predicate ex:parent ; rr:objectMap ex:ParentObj .
+  ex:ParentObj rr:parentTriplesMap ex:Parent ;
+    rr:joinCondition ex:Join .
+  ex:Join rr:child "pid" ; rr:parent "id" .
+  ex:OwnPOM rr:predicate ex:own ; rr:objectMap ex:OwnObj .
+  ex:OwnObj rml:reference "pid" .
+  ex:Parent a rr:TriplesMap ;
+    rml:logicalSource ex:PSrc ; rr:subjectMap ex:PSubj ;
+    rr:predicateObjectMap ex:NamePOM .
+  ex:PSrc rml:source "p.csv" ; rml:referenceFormulation ql:CSV .
+  ex:PSubj rr:template "http://example.org/p/{id}" .
+  ex:NamePOM rr:predicate foaf:name ; rr:objectMap ex:NameObj .
+  ex:NameObj rml:reference "name" ."#;
 
-    let m = parse_rml(&format!("{PFX}{mapping}"))
-        .expect("a referencing object map is part of the model, so the mapping parses");
-    let mut src = HashMap::new();
-    src.insert("c.csv".to_string(), "id,pid\n1,10\n".to_string());
-    src.insert("p.csv".to_string(), "id,name\n10,Pat\n".to_string());
-    let store = TripleStore::in_memory().unwrap();
-    let err = execute(&m, &src, &store, None)
-        .expect_err("a file source cannot resolve rr:parentTriplesMap");
-    assert!(
-        err.contains("<http://example.org/Child>"),
-        "names the triples map: {err}"
-    );
-    assert!(
-        err.contains("rr:parentTriplesMap"),
-        "names the construct: {err}"
+#[test]
+fn rml_referencing_object_map_joins_csv_sources() {
+    let (store, n) = run_rml(
+        CSV_JOIN,
+        &[
+            ("c.csv", "id,pid\n1,10\n2,10\n3,11\n4,99\n"),
+            ("p.csv", "id,name\n10,Pat\n11,Sam\n"),
+        ],
     );
     assert_eq!(
-        count(&store, "SELECT * WHERE { ?s ?p ?o }"),
+        count(
+            &store,
+            "SELECT ?c WHERE { ?c ex:parent <http://example.org/p/10> }"
+        ),
+        2,
+        "two children of one parent both link to it"
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT * WHERE { <http://example.org/c/3> ex:parent <http://example.org/p/11> }"
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT * WHERE { <http://example.org/c/4> ex:parent ?p }"
+        ),
         0,
-        "a refused mapping writes nothing, not the triples it could make"
+        "a key no parent row has joins to nothing"
+    );
+    // 4 own + 3 links + 2 names.
+    assert_eq!(n, 9);
+}
+
+#[test]
+fn rml_referencing_object_map_joins_json_sources() {
+    let mapping = r#"
+      ex:Student a rr:TriplesMap ;
+        rml:logicalSource [ rml:source "students.json" ; rml:referenceFormulation ql:JSONPath ;
+                            rml:iterator "$.students[*]" ] ;
+        rr:subjectMap [ rr:template "http://example.org/student/{ID}" ] ;
+        rr:predicateObjectMap [ rr:predicate ex:practises ; rr:objectMap [
+            rr:parentTriplesMap ex:Sport ;
+            rr:joinCondition [ rr:child "Sport" ; rr:parent "ID" ] ] ] .
+      ex:Sport a rr:TriplesMap ;
+        rml:logicalSource [ rml:source "sports.json" ; rml:referenceFormulation ql:JSONPath ;
+                            rml:iterator "$.sports[*]" ] ;
+        rr:subjectMap [ rr:template "http://example.org/sport/{ID}" ] ."#;
+    let (store, n) = run_rml(
+        mapping,
+        &[
+            (
+                "students.json",
+                r#"{"students":[{"ID":10,"Sport":100},{"ID":20},{"ID":30,"Sport":null}]}"#,
+            ),
+            ("sports.json", r#"{"sports":[{"ID":100},{"ID":200}]}"#),
+        ],
+    );
+    assert_eq!(n, 1, "only student 10 names a sport");
+    assert_eq!(
+        count(
+            &store,
+            "SELECT * WHERE { <http://example.org/student/10> ex:practises \
+             <http://example.org/sport/100> }"
+        ),
+        1,
+        "a JSON number joins by its value"
+    );
+}
+
+#[test]
+fn rml_referencing_object_map_joins_xml_sources() {
+    let mapping = r#"
+      ex:Student a rr:TriplesMap ;
+        rml:logicalSource [ rml:source "students.xml" ; rml:referenceFormulation ql:XPath ;
+                            rml:iterator "/students/student" ] ;
+        rr:subjectMap [ rr:template "http://example.org/student/{ID}" ] ;
+        rr:predicateObjectMap [ rr:predicate ex:practises ; rr:objectMap [
+            rr:parentTriplesMap ex:Sport ;
+            rr:joinCondition [ rr:child "Sport" ; rr:parent "ID" ] ] ] .
+      ex:Sport a rr:TriplesMap ;
+        rml:logicalSource [ rml:source "sports.xml" ; rml:referenceFormulation ql:XPath ;
+                            rml:iterator "/sports/sport" ] ;
+        rr:subjectMap [ rr:template "http://example.org/sport/{ID}" ] ."#;
+    let (store, n) = run_rml(
+        mapping,
+        &[
+            (
+                "students.xml",
+                "<students><student><ID>10</ID><Sport>100</Sport></student>\
+                 <student><ID>20</ID></student></students>",
+            ),
+            (
+                "sports.xml",
+                "<sports><sport><ID>100</ID></sport><sport><ID>200</ID></sport></sports>",
+            ),
+        ],
+    );
+    assert_eq!(n, 1);
+    assert_eq!(
+        count(
+            &store,
+            "SELECT * WHERE { <http://example.org/student/10> ex:practises \
+             <http://example.org/sport/100> }"
+        ),
+        1
+    );
+}
+
+#[test]
+fn rml_composite_key_join_needs_every_condition() {
+    // Two join conditions: both must hold (R2RML §8).
+    let mapping = r#"
+      ex:Enrolment a rr:TriplesMap ;
+        rml:logicalSource [ rml:source "e.csv" ; rml:referenceFormulation ql:CSV ] ;
+        rr:subjectMap [ rr:template "http://example.org/e/{id}" ] ;
+        rr:predicateObjectMap [ rr:predicate ex:course ; rr:objectMap [
+            rr:parentTriplesMap ex:Course ;
+            rr:joinCondition [ rr:child "dept" ; rr:parent "dept" ] ;
+            rr:joinCondition [ rr:child "code" ; rr:parent "code" ] ] ] .
+      ex:Course a rr:TriplesMap ;
+        rml:logicalSource [ rml:source "c.csv" ; rml:referenceFormulation ql:CSV ] ;
+        rr:subjectMap [ rr:template "http://example.org/course/{dept}/{code}" ] ."#;
+    let (store, n) = run_rml(
+        mapping,
+        &[
+            ("e.csv", "id,dept,code\n1,CS,101\n2,CS,102\n3,MA,101\n"),
+            ("c.csv", "dept,code\nCS,101\nMA,101\nMA,102\n"),
+        ],
+    );
+    assert_eq!(n, 2, "enrolment 2 names CS 102, which no course is");
+    assert_eq!(
+        count(
+            &store,
+            "SELECT * WHERE { <http://example.org/e/3> ex:course <http://example.org/course/MA/101> }"
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT * WHERE { <http://example.org/e/1> ex:course ?c }"
+        ),
+        1,
+        "matching one condition of two is no match"
+    );
+}
+
+#[test]
+fn rml_a_null_join_key_matches_nothing_and_an_empty_one_is_a_value() {
+    // A key named by rml:null is NULL on either side, and NULL never equals
+    // NULL (R2RML §8 joins by SQL equality). Without rml:null an empty CSV
+    // cell is the value "" (RML-IO), which an empty parent key equals.
+    let mapping = r#"
+      ex:Child a rr:TriplesMap ;
+        rml:logicalSource [ rml:source "c.csv" ; rml:referenceFormulation ql:CSV ; rml:null "NULL" ] ;
+        rr:subjectMap [ rr:template "http://example.org/c/{id}" ] ;
+        rr:predicateObjectMap [ rr:predicate ex:parent ; rr:objectMap [
+            rr:parentTriplesMap ex:Parent ;
+            rr:joinCondition [ rr:child "pid" ; rr:parent "id" ] ] ] .
+      ex:Parent a rr:TriplesMap ;
+        rml:logicalSource [ rml:source "p.csv" ; rml:referenceFormulation ql:CSV ; rml:null "NULL" ] ;
+        rr:subjectMap [ rr:template "http://example.org/p/{name}" ] ."#;
+    let (store, _) = run_rml(
+        mapping,
+        &[
+            ("c.csv", "id,pid\n1,NULL\n2,\n3,7\n"),
+            ("p.csv", "id,name\nNULL,nobody\n,empty\n7,seven\n"),
+        ],
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT * WHERE { <http://example.org/c/1> ex:parent ?p }"
+        ),
+        0,
+        "NULL joins to nothing, not to the parent whose key is NULL too"
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT * WHERE { <http://example.org/c/2> ex:parent <http://example.org/p/empty> }"
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT * WHERE { <http://example.org/c/3> ex:parent <http://example.org/p/seven> }"
+        ),
+        1
+    );
+}
+
+#[test]
+fn rml_join_less_reference_is_the_same_row_not_a_cross_join() {
+    // R2RML §8: with no join condition, the joint query is the child query
+    // itself — every row links to the parent subject of the same row.
+    let mapping = r#"
+      ex:Person a rr:TriplesMap ;
+        rml:logicalSource ex:Src ;
+        rr:subjectMap [ rr:template "http://example.org/person/{id}" ] ;
+        rr:predicateObjectMap [ rr:predicate ex:lives ;
+            rr:objectMap [ rr:parentTriplesMap ex:City ] ] .
+      ex:City a rr:TriplesMap ;
+        rml:logicalSource ex:Src ;
+        rr:subjectMap [ rr:template "http://example.org/city/{city}" ] .
+      ex:Src rml:source "p.csv" ; rml:referenceFormulation ql:CSV ."#;
+    let (store, n) = run_rml(mapping, &[("p.csv", "id,city\n1,Ghent\n2,Delft\n")]);
+    assert_eq!(n, 2, "one link per row, not rows × rows");
+    assert_eq!(
+        count(
+            &store,
+            "SELECT * WHERE { <http://example.org/person/2> ex:lives <http://example.org/city/Delft> }"
+        ),
+        1
     );
 }
 
