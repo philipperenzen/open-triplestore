@@ -942,7 +942,7 @@ impl TripleStore {
                 .graph_index
                 .all_entries()
                 .into_iter()
-                .filter(|(k, _)| k.as_deref().is_some_and(&named_in_dataset))
+                .filter(|(k, _)| k.as_deref().is_some_and(named_in_dataset))
                 .map(|(_, c)| c)
                 .sum(),
         };

@@ -252,3 +252,10 @@ less; the scan cost does not shrink.
   `urn:system:commit-log` graph would otherwise produce a row per row);
   registry writes to the identity database (not RDF); the text, spatial and
   parallel-mirror indexes (each node rebuilds its own).
+
+## Which model version a dataset version conformed to
+
+Cutting a dataset version stamps the dataset's current model pin onto it
+(`conforms_to_model` / `conforms_to_version` in the version record, `dct:conformsTo`
+on the model-version IRI in the registry graph). The pin is captured, not resolved:
+a dataset that floats with the latest published model version records no version.

@@ -113,6 +113,29 @@ with `"dataset": "bridges"`; `validation_shapes` is what validation applies
 be resolved is reported in `unresolved_model` rather than silently ignored. The
 layer is domain-neutral: a model is whatever the data-model registry holds.
 
+
+### Following a model update
+
+`conforms_to_version` pins a dataset to one published model version; without it the
+dataset floats with the model's latest published version. A pinned dataset does not
+change when a newer model version is published — but the conformance layer says so:
+
+```json
+GET /api/datasets/:id/conformance
+{ "conforms_to_model": { "id": "bridges", "version": "1.0.0", "status": "deprecated",
+                          "latest_published": "2.0.0", "pinned": true, "update_available": true }, … }
+```
+
+`update_available` is the signal for the data owner's update procedure: re-validate
+the instances against the new version (SHACL), correct what no longer conforms and
+collect what the new version requires, then re-pin (`PUT /api/datasets/:id` with the
+new `conforms_to_version`) and cut + publish the next dataset version. Every dataset
+version records the model version it was pinned to when it was cut
+(`conforms_to_model` / `conforms_to_version` in `GET /api/datasets/:id/versions`), so
+the published history of a dataset reads as "v1.0.0 conforms to bridges@1.0.0, v1.1.0
+conforms to bridges@2.0.0". `GET /api/models/:id/dependents` lists it from the model's
+side (see [models.md](models.md)).
+
 ### Notes on Graph Roles
 
 - **Three first-class layers**: `model`, `vocabulary` and `instances` are the three primary layers; `shapes` and `entailment` are orthogonal roles and `system` is internal. A single upload that mixes them can be **auto-split** into one graph per role on import (see [Import Auto-Detection](/docs/import)).
