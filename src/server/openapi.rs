@@ -3891,6 +3891,28 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
         );
         mount(
             paths,
+            &format!("{base}/:id/dependents"),
+            vec![(
+                M::Get,
+                o(
+                    tag,
+                    &format!("List dependent datasets ({tag})"),
+                    "The datasets that declare conformance to this entry, each with the version \
+                     it is pinned to, the version in effect, whether a newer version has been \
+                     published since (`update_available`) and its own latest published version. \
+                     Only datasets the caller may read are listed; an entry the caller may not \
+                     see answers 404.",
+                    vec![],
+                    vec![
+                        ("200", "`{model_id, latest_published, datasets}`"),
+                        ("404", "Not found or not visible"),
+                    ],
+                    false,
+                ),
+            )],
+        );
+        mount(
+            paths,
             &format!("{base}/:id/branches"),
             vec![
                 (
