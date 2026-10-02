@@ -45,7 +45,8 @@ See also: [Datasets](/docs/datasets) and [Model & Vocabulary Versioning](/docs/m
 
 Any version diff is available as an [RDF Patch](https://afs.github.io/rdf-delta/rdf-patch.html)
 document — one transaction of `A`/`D` quads against the dataset's live graph
-IRIs that transforms the version into the other side:
+IRIs that transforms the version into the other side. Blank nodes are
+written with the store's own ids:
 
 ```bash
 curl -H 'Accept: application/rdf-patch' \
@@ -71,13 +72,49 @@ curl -X POST http://localhost:7878/api/datasets/<id>/patch \
   --data-binary @changes.rdfp
 ```
 
-Supported: `H`, one `TX`…`TC` (or `TA`, which applies nothing), `PA`/`PD`
-prefixes, `A`/`D` with a graph term — a dataset patch may only touch the
-dataset's registered graphs, so triples without a graph are refused. The
-patch runs as one SPARQL Update (`INSERT DATA` / `DELETE DATA` blocks in
-the patch's order), so deleting a triple with a blank node is refused, and
-the write is captured by the dataset's LDES stream and text index like any
-other.
+The format follows the [RDF Patch](https://afs.github.io/rdf-delta/rdf-patch.html)
+page: rows of N-Triples terms, each ending with `.` (a row may span lines,
+and `#` starts a comment that runs to the end of the line).
+
+- **Headers** — `H name value .`, the name a keyword or a quoted string.
+- **Transactions** — any number of `TX` … `TC` blocks, applied in order. A
+  `TA` discards its own block only. Blocks do not nest. The whole patch is
+  applied in one store transaction and recorded as one commit, so a patch
+  that fails anywhere changes nothing.
+- **Prefixes** — `PA rdf <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .` or
+  `PA "rdf" "http://www.w3.org/1999/02/22-rdf-syntax-ns#" .`, and `PD rdf .`
+  (the older `PA rdf: <…>` form is still read). They do not change the
+  dataset yet. As an extension, `A`/`D` rows may use the prefixed names they
+  declare.
+- **Changes** — `A`/`D` with a triple or a quad. A dataset patch only touches
+  the dataset's registered graphs. A triple goes to the registered graph
+  named by `?graph=`, and without that parameter it is refused:
+
+  ```bash
+  curl -X POST "http://localhost:7878/api/datasets/<id>/patch?graph=https://example.org/assets/instances" \
+    -H "Authorization: Bearer <token>" -H 'Content-Type: application/rdf-patch' \
+    --data-binary @triples.rdfp
+  ```
+
+- **Blank nodes** — `_:label` and `<_:label>` name the store's own blank node
+  with that id. A patch can delete a blank-node triple or link to an existing
+  node, and a version diff, which writes the store's ids, applies faithfully
+  to a copy that holds the same nodes. A label must be a valid N-Triples
+  blank-node label. A label the data does not hold creates a node with that
+  id.
+- **Not supported** — RDF 1.2 triple terms (`<<( … )>>`), which RDF Patch has
+  no syntax for yet. They are refused.
+
+Adding a quad that is present or deleting one that is absent changes
+nothing. The response reports the net `added` / `removed` counts and the
+`transactions` committed and aborted.
+
+Patches pass the same SHACL write gates as a Graph Store write to the same
+graphs: Studio pipelines with `gate_writes`, shapes bound to the graph or its
+dataset, and the dataset's `shacl_on_write` shapes. The gates run over what
+each graph would hold after the patch. A refusal is a `422` with the report,
+and nothing is applied. The write is captured by the dataset's LDES stream,
+the change log and the text index like any other.
 
 ## Change log
 
@@ -108,7 +145,7 @@ than apply them.
 | `extent` | `full` — `added` and `removed` carry the net delta as N-Quads (gzipped above 64 KiB; `added_n` / `removed_n` are the counts); `counts` — the counts are exact but the payload was above the cap; `unknown` — the graph changed, nothing more is known |
 | `post_count` | the graph's quad count after the write, when known |
 | `state` | `committed`, `unknown`, `pending` (a write in flight — or one a crash interrupted, settled at the next start), `aborted` |
-| `origin` | the engine primitive: `update`, `update_targeted`, `update_scoped`, `batch_update`, `graph_store_put`, `graph_store_delete`, `load`, `load_reader`, `bulk_insert_quads`, `bulk_delete_graphs`, `store_quad`, `late` (a graph the write discovered while running) |
+| `origin` | the engine primitive: `update`, `update_targeted`, `update_scoped`, `batch_update`, `graph_store_put`, `graph_store_delete`, `load`, `load_reader`, `bulk_insert_quads`, `bulk_delete_graphs`, `store_quad`, `patch` (an RDF Patch), `late` (a graph the write discovered while running) |
 | `kind`, `actor_iri`, `commit_iri` | the commit-trail kind (`sparql`, `graph-store`, …) and the actor IRI as the trail mints it, when the write came through a handler; `null` for system writes |
 | `has_bnode` | the payload names a blank node; a consumer that re-labels blank nodes cannot apply it verbatim |
 

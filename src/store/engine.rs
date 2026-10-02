@@ -98,6 +98,21 @@ pub enum StoreError {
     ReadOnly(String),
 }
 
+/// One step of [`TripleStore::apply_quad_ops`]: add or remove a quad.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QuadOp {
+    Add(Quad),
+    Remove(Quad),
+}
+
+impl QuadOp {
+    pub fn quad(&self) -> &Quad {
+        match self {
+            QuadOp::Add(q) | QuadOp::Remove(q) => q,
+        }
+    }
+}
+
 /// How blank nodes are treated when data is imported.
 ///
 /// Plain RDF blank nodes are not durable: each parse mints fresh labels, so
@@ -2602,6 +2617,91 @@ impl TripleStore {
         #[cfg(feature = "geometry3d")]
         self.spatial_index_3d.mark_dirty();
         Ok(())
+    }
+
+    /// Apply a sequence of quad additions and removals in one transaction,
+    /// in order — the RDF Patch path. Terms are taken as they are: a blank
+    /// node is the store's own node with that id, so a removal can name one
+    /// and an addition can link to one (nothing is relabelled, unlike
+    /// `INSERT DATA`). Adding a quad that is present or removing one that is
+    /// absent is a no-op. The change log gets the exact net delta per graph
+    /// and the count index is adjusted by it. Returns the net number of
+    /// quads added and removed.
+    pub fn apply_quad_ops(&self, ops: &[QuadOp]) -> Result<(usize, usize), StoreError> {
+        let _w = self.begin_write()?;
+        let mut graphs: Vec<Option<String>> = Vec::new();
+        for op in ops {
+            let g = Self::graph_key_of(op.quad());
+            if !graphs.contains(&g) {
+                graphs.push(g);
+            }
+        }
+        let pre_count = self.pre_count();
+        let intent = self.changes.begin("patch", Some(&graphs), &pre_count);
+        let mut tx = self.store.start_transaction()?;
+        // The net delta against the state before the write: an addition that
+        // a later removal undoes (or the reverse) is no change at all.
+        let mut added: std::collections::HashSet<Quad> = std::collections::HashSet::new();
+        let mut removed: std::collections::HashSet<Quad> = std::collections::HashSet::new();
+        let mut run = || -> Result<(), StoreError> {
+            for op in ops {
+                match op {
+                    QuadOp::Add(q) => {
+                        if !tx.contains(q.as_ref())? {
+                            tx.insert(q.as_ref());
+                            if !removed.remove(q) {
+                                added.insert(q.clone());
+                            }
+                        }
+                    }
+                    QuadOp::Remove(q) => {
+                        if tx.contains(q.as_ref())? {
+                            tx.remove(q.as_ref());
+                            if !added.remove(q) {
+                                removed.insert(q.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        };
+        if let Err(e) = run() {
+            drop(tx);
+            if let Some(intent) = intent {
+                self.changes.abort(intent);
+            }
+            return Err(e);
+        }
+        let added: Vec<Quad> = added.into_iter().collect();
+        let removed: Vec<Quad> = removed.into_iter().collect();
+        let deltas = if intent.is_some() {
+            Self::deltas_by_graph(&added, &removed, self.changes.max_payload())
+        } else {
+            Vec::new()
+        };
+        self.changes
+            .commit_with(intent, deltas, || tx.commit().map_err(StoreError::from))?;
+        for g in &graphs {
+            let in_g = |quads: &[Quad]| {
+                quads.iter().filter(|q| Self::graph_key_of(q) == *g).count() as i64
+            };
+            let net = in_g(&added) - in_g(&removed);
+            match self.graph_index.get_count(g.as_deref()) {
+                // An emptied named graph leaves the index on a recount, as
+                // it would on a rebuild.
+                Some(n) if n as i64 + net > 0 || g.is_none() => {
+                    self.graph_index.adjust(g.as_deref(), net)
+                }
+                _ => self
+                    .graph_index
+                    .recount_specific_graphs(&self.store, std::slice::from_ref(g)),
+            }
+        }
+        self.spatial_index.mark_dirty();
+        #[cfg(feature = "geometry3d")]
+        self.spatial_index_3d.mark_dirty();
+        Ok((added.len(), removed.len()))
     }
 
     pub fn store_quad(&self, quad: Quad) -> Result<(), StoreError> {

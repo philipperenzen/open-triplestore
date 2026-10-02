@@ -7,7 +7,7 @@ pub mod recovery;
 pub mod replication;
 pub mod telemetry;
 
-pub use engine::{StoreError, TripleStore};
+pub use engine::{QuadOp, StoreError, TripleStore};
 
 /// Percent-encode the characters that are illegal inside a SPARQL `IRIREF`
 /// (the `<...>` form): `<>"{}|^`\` plus any control/space char (≤ 0x20).

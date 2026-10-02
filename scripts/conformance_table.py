@@ -74,6 +74,7 @@ SUITES: dict[str, tuple[str, str]] = {
     "ldp_http_conformance": ("LDP 1.0 (HTTP)", "spec-derived"),
     "dcat_conformance": ("DCAT 2 / VoID", "spec-derived"),
     "rml_conformance": ("RML / R2RML", "spec-derived"),
+    "rdf_patch_conformance": ("RDF Patch (RDF Delta)", "spec-derived"),
     "standards_conformance": ("Cross-standard HTTP smoke", "spec-derived"),
 }
 
