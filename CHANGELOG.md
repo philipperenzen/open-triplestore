@@ -14,6 +14,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **ICDD container validation.** Every container import now returns a
+  `validation` report (`conforms`, `violations`, `warnings`, `findings[]` with
+  severity, code, message, index node and archive entry), `strict=true`
+  refuses a container with any violation (422, nothing stored), and
+  `POST /api/containers/validate` validates an archive without storing it.
+  For ISO 21597-1 the validator runs the project's own SHACL shapes, written
+  from the Part 1 ontology restrictions (`src/containers/icdd_shapes.ttl`; ISO's
+  SHACL annexes are not used), plus structural checks: one root `Index.rdf`,
+  one container description, the three folders, the ISO ontology files, every
+  listed file at its path, duplicate names, path escapes, checksums, link
+  elements naming listed documents, and no extension of the ICDD classes in a
+  Part 1 container.
+- **`OTS_ICDD_ONTOLOGY_DIR`.** Point it at a directory holding ISO's
+  `Container.rdf` and `Linkset.rdf` (downloaded from ISO's maintenance portal;
+  the project does not ship them) and ICDD exports embed both unchanged.
+  Without it an export carries the `ontology-resource-missing` warning: not
+  Part 1-conformant for that reason.
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -67,6 +84,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asks for, and re-pins; the store now tells everyone which datasets that applies to.
 
 ### Changed
+- **ICDD import is complete for Part 1.** Folder documents import as asset
+  sub-folders (they were skipped), secured documents' checksums are verified
+  (`checksum_status`), encrypted documents are kept as flagged opaque files,
+  `ct:filename` sub-folders are kept as asset folders, ISO's own ontology files
+  are recognised instead of loaded as model graphs, and each document's name,
+  versions, alternatives, `requested` flag and parties are reported (the
+  container's parties and version too). An index with several container
+  descriptions is refused; a root `index.*` other than `Index.rdf` still
+  imports but is reported. Anonymous imports answer 401 (they were a 500), and
+  the import accepts archives up to `OTS_MAX_UPLOAD_MB` (512 MB) instead of the
+  8 MB default.
+- **ICDD export passes its own validator.** Documents carry `ct:name` and
+  `ct:belongsToContainer`, parties are `ct:Person` / `ct:Organisation` with a
+  real IRI (not the abstract `ct:Party` named by its own name), filenames are
+  relative to `Payload documents/` with asset folders kept and clashes renamed
+  (two assets of one name in different folders made a duplicate ZIP entry and a
+  500), linksets are RDF/XML, data graphs are RDF documents under
+  `Payload documents/`, the folders are explicit entries, the index imports the
+  Container ontology, and the download is `<dataset>.icdd`. The README.txt that
+  stood in for the ontology files is gone. Documents an earlier import brought
+  in keep their index IRIs, kinds, names, versions, alternatives and parties, so
+  linksets still resolve after a round trip. The `X-Container-Conforms`,
+  `X-Container-Validation` and `X-Container-Findings` headers report the
+  export's validation.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were
