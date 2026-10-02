@@ -286,6 +286,8 @@ pub async fn create_version(
         derived_from: None,
         notes: body.notes.clone(),
         branch: body.branch.clone(),
+        conforms_to_model: ds.conforms_to_model.clone().filter(|m| !m.is_empty()),
+        conforms_to_version: ds.conforms_to_version.clone().filter(|v| !v.is_empty()),
     };
     registry::insert_version(&state.store, &state.base_url, &record).map_err(AppError::from)?;
     if record.branch.is_none() {
@@ -644,6 +646,7 @@ pub async fn create_branch(
     .map_err(AppError::from)?;
     let snapshot_graphs: Vec<String> = new_map.iter().map(|m| m.snapshot_graph.clone()).collect();
 
+    let pin = registry::dataset_pin(&state.auth_db, &id);
     let record = DatasetVersion {
         dataset_id: id.clone(),
         version: target_ver.clone(),
@@ -656,6 +659,8 @@ pub async fn create_branch(
         derived_from: Some(body.from_version.clone()),
         notes: None,
         branch: Some(branch),
+        conforms_to_model: pin.0,
+        conforms_to_version: pin.1,
     };
     registry::insert_version(&state.store, &state.base_url, &record).map_err(AppError::from)?;
     version_commit(
