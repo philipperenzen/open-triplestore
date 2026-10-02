@@ -45,6 +45,15 @@ One commit each, in this order:
    pattern inside, which gave wrong answers around `VALUES`, sub-selects and
    `MINUS`. Fixes `bindings#graph`, `aggregates#agg-empty-group-count-graph` and
    `negation#graph-minus`. Draft: `spareval/UPSTREAM-PR-graph-scoping.md`.
+2. **A multi-graph default graph is an RDF merge** (`spareval`). Backport of the
+   `spareval` half of upstream PR #1920 (issue #1919, on `main` only): a default
+   graph made of several graphs (several `FROM` or `USING`, or the union default
+   graph) is scanned through the new defaulted
+   `QueryableDataset::internal_triples_for_pattern`, which hash-deduplicates
+   whole triples, so a triple held in two of the graphs matches once. The
+   `oxigraph` crate needs no change (it gets the default method; upstream's
+   RocksDB fast path is not taken). The columnar copy in `opengraph` deduplicates
+   the same way. Draft: `spareval/UPSTREAM-PR-merged-default-graph.md`.
 
 ### Verifying the fork
 

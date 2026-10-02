@@ -1275,9 +1275,11 @@ fn extend(
                 None => ctx.named_graphs.clone(),
             },
         };
-        // The engine evaluates a multi-graph default (several FROM) as the
-        // union *with* duplicates, not the RDF merge; parity means the same.
-        let dedup = false;
+        // A default graph built from several graphs (several FROM) is their
+        // RDF merge (SPARQL 1.1 §13.2): a triple present in two of them
+        // matches once. The engine (vendored spareval) deduplicates the same
+        // way, per scan, on the whole triple.
+        let dedup = matches!(scope, Scope::Default) && graphs.len() > 1;
         let mut seen: HashSet<[Id; 3]> = HashSet::new();
         for g in graphs {
             let (perm, prefix) = Columnar::plan(g, bs, bp, bo);
