@@ -123,6 +123,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fragment, so the tokens were dropped and the user arrived signed out. It now
   redirects to `/oauth/callback#…`, which stores them and removes them from the
   URL bar.
+- **Security → Identity providers form now matches the provider API.**
+  Opening a provider for editing threw (the form treated `scopes` as an
+  array), and saving was refused with a 422 (`scopes` and `role_claim_map`
+  were sent as an array and an object, and the required `is_active` as
+  `enabled`); the table showed every provider as Disabled. The form now reads
+  and sends `scopes` and `role_claim_map` as strings and `is_active` as the
+  on/off switch, refuses a role claim map the server would read as empty, and
+  keeps fields it does not show (such as `tenant_id`) through an edit. Fields
+  the API never had (`role_claim`, explicit endpoints) are gone. The separate
+  "Azure AD" type is folded into OIDC, which is the only type the sign-in
+  flow runs. SAML providers get entity ID, SSO URL and certificate fields in
+  place of an IdP-metadata field the server never read. The default-role list
+  no longer offers `super_admin`, which sign-in caps at `admin`. The synthetic
+  `env-oidc` row (`OIDC_ISSUER`) can be edited, but its slug cannot be changed.
+- **Editing a SAML provider no longer erases its IdP certificate.** Reads
+  redact the certificate, so no client could send it back, and an update
+  overwrote it with nothing. `PUT /api/admin/oauth/providers/:id` now keeps
+  the stored certificate when the body omits it, as it already did for the
+  client secret.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if
