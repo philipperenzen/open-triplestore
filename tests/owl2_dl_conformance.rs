@@ -1892,4 +1892,65 @@ fi
             Tri::True
         );
     }
+
+    /// RDF lists shorter than the functional-syntax grammar allows (WebOnt
+    /// I5.26 uses one-element `owl:intersectionOf`); Konclude refuses
+    /// `ObjectUnionOf()` and friends, so the writer spells out their meaning.
+    #[test]
+    fn dl_konclude_live_short_operand_lists() {
+        let Some(c) = live() else { return };
+        let store = TripleStore::in_memory().unwrap();
+        let check = |premise: &str, task: CheckTask| {
+            let premise = triples(&format!(
+                "@prefix owl: <http://www.w3.org/2002/07/owl#> .
+                 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+                 @prefix ex: <http://example.org/> . {premise}"
+            ));
+            dl_backend::check(&store, &c, None, Some(premise), &task, IdentityPolicy::Full)
+                .unwrap()
+                .0
+                .result
+        };
+        let entails = |premise: &str, conclusion: &str| {
+            check(
+                premise,
+                CheckTask::Entailment {
+                    conclusion: triples(&format!(
+                        "@prefix ex: <http://example.org/> . {conclusion}"
+                    )),
+                },
+            )
+        };
+        let one = "ex:A rdfs:subClassOf [ a owl:Class ; owl:intersectionOf ( ex:B ) ] .
+                   ex:C rdfs:subClassOf [ a owl:Class ; owl:unionOf ( ex:D ) ] .
+                   ex:a a ex:A . ex:c a ex:C .";
+        assert_eq!(entails(one, "ex:a a ex:B ."), Tri::True);
+        assert_eq!(entails(one, "ex:c a ex:D ."), Tri::True);
+        // An empty intersection is owl:Thing, an empty union owl:Nothing.
+        assert_eq!(
+            entails(
+                "ex:T owl:equivalentClass [ a owl:Class ; owl:intersectionOf () ] . ex:t a ex:E .",
+                "ex:t a ex:T ."
+            ),
+            Tri::True
+        );
+        assert_eq!(
+            check(
+                "ex:N rdfs:subClassOf [ a owl:Class ; owl:unionOf () ] . ex:n a ex:N .",
+                CheckTask::Consistency
+            ),
+            Tri::False
+        );
+        // The data-range forms: an empty union has no values to point at.
+        assert_eq!(
+            check(
+                "ex:p a owl:DatatypeProperty .
+                 ex:V rdfs:subClassOf [ a owl:Restriction ; owl:onProperty ex:p ;
+                   owl:someValuesFrom [ a rdfs:Datatype ; owl:unionOf () ] ] .
+                 ex:v a ex:V .",
+                CheckTask::Consistency
+            ),
+            Tri::False
+        );
+    }
 }
