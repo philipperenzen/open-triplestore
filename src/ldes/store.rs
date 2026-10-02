@@ -761,23 +761,9 @@ pub fn sweep(db: &AuthDb, dataset_id: &str, force: bool) -> usize {
 
 // ─── Sync bookmarks ─────────────────────────────────────────────────────────
 
-/// The newest member timestamp applied from `source_url` into `dataset_id`.
-pub fn sync_bookmark(
-    db: &AuthDb,
-    dataset_id: &str,
-    source_url: &str,
-) -> anyhow::Result<Option<String>> {
-    let conn = db.pool().get()?;
-    Ok(conn
-        .query_row(
-            "SELECT last_timestamp FROM ldes_sync_state WHERE dataset_id = ?1 AND source_url = ?2",
-            params![dataset_id, source_url],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .optional()?
-        .flatten())
-}
-
+/// Set the bookmark of a `(dataset, source)` sync directly — the newest
+/// member timestamp applied — keeping the other state.
+#[allow(dead_code)] // tests seed a bookmark with it; the binary has no caller
 pub fn set_sync_bookmark(
     db: &AuthDb,
     dataset_id: &str,
@@ -795,6 +781,182 @@ pub fn set_sync_bookmark(
            synced_at = excluded.synced_at",
         params![dataset_id, source_url, last_timestamp, applied as i64, chrono::Utc::now().to_rfc3339()],
     )?;
+    Ok(())
+}
+
+/// What the client remembers about one page of a synced stream.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SyncPage {
+    /// Processed and immutable: never fetched again (LDES 1.0 §3.2).
+    pub immutable: bool,
+    /// The ETag of a mutable page, sent as `If-None-Match` next time.
+    pub etag: Option<String>,
+    /// The nodes its relations pointed to — followed again on a `304`.
+    pub links: Vec<String>,
+    /// The members it held, kept only for a stream without a timestamp path,
+    /// where they are the only way to tell an already emitted member.
+    pub members: Vec<String>,
+}
+
+/// The version of an entity a sync last applied and the subjects it wrote.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SyncEntity {
+    /// A serialised version key, compared by the client (see `client.rs`).
+    pub version: String,
+    pub subjects: Vec<String>,
+}
+
+/// The client's resumable state for one `(dataset, source)` sync.
+#[derive(Debug, Default, Clone)]
+pub struct SyncState {
+    pub bookmark: Option<String>,
+    /// Member IRIs whose timestamp equals the bookmark: already emitted.
+    pub bookmark_members: Vec<String>,
+    pub pages: HashMap<String, SyncPage>,
+}
+
+fn json_list(s: Option<String>) -> Vec<String> {
+    s.and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn sync_state(db: &AuthDb, dataset_id: &str, source_url: &str) -> anyhow::Result<SyncState> {
+    let conn = db.pool().get()?;
+    let (bookmark, members) = conn
+        .query_row(
+            "SELECT last_timestamp, bookmark_members FROM ldes_sync_state \
+             WHERE dataset_id = ?1 AND source_url = ?2",
+            params![dataset_id, source_url],
+            |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )
+        .optional()?
+        .unwrap_or_default();
+    let mut stmt = conn.prepare(
+        "SELECT page_url, immutable, etag, links, members FROM ldes_sync_pages \
+         WHERE dataset_id = ?1 AND source_url = ?2",
+    )?;
+    let pages = stmt
+        .query_map(params![dataset_id, source_url], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                SyncPage {
+                    immutable: r.get::<_, i64>(1)? != 0,
+                    etag: r.get(2)?,
+                    links: json_list(r.get(3)?),
+                    members: json_list(r.get(4)?),
+                },
+            ))
+        })?
+        .collect::<Result<HashMap<_, _>, _>>()?;
+    Ok(SyncState {
+        bookmark,
+        bookmark_members: json_list(members),
+        pages,
+    })
+}
+
+pub fn sync_entity(
+    db: &AuthDb,
+    dataset_id: &str,
+    source_url: &str,
+    entity_iri: &str,
+) -> anyhow::Result<Option<SyncEntity>> {
+    let conn = db.pool().get()?;
+    Ok(conn
+        .query_row(
+            "SELECT version, subjects FROM ldes_sync_entities \
+             WHERE dataset_id = ?1 AND source_url = ?2 AND entity_iri = ?3",
+            params![dataset_id, source_url, entity_iri],
+            |r| {
+                Ok(SyncEntity {
+                    version: r.get(0)?,
+                    subjects: json_list(r.get(1)?),
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// Everything one finished sync run learned, written in one transaction so a
+/// run that failed half-way leaves the previous state to resume from.
+pub struct SyncRun<'a> {
+    pub bookmark: Option<&'a str>,
+    pub bookmark_members: &'a [String],
+    pub applied: u64,
+    pub pages: &'a [(String, SyncPage)],
+    pub entities: &'a [(String, SyncEntity)],
+}
+
+pub fn save_sync_run(
+    db: &AuthDb,
+    dataset_id: &str,
+    source_url: &str,
+    run: &SyncRun<'_>,
+) -> anyhow::Result<()> {
+    let mut conn = db.pool().get()?;
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT INTO ldes_sync_state \
+           (dataset_id, source_url, last_timestamp, bookmark_members, members_applied, synced_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+         ON CONFLICT(dataset_id, source_url) DO UPDATE SET \
+           last_timestamp = excluded.last_timestamp, \
+           bookmark_members = excluded.bookmark_members, \
+           members_applied = ldes_sync_state.members_applied + excluded.members_applied, \
+           synced_at = excluded.synced_at",
+        params![
+            dataset_id,
+            source_url,
+            run.bookmark,
+            serde_json::to_string(run.bookmark_members)?,
+            run.applied as i64,
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    for (url, p) in run.pages {
+        let (links, members) = if p.immutable {
+            (None, None)
+        } else {
+            (
+                Some(serde_json::to_string(&p.links)?),
+                Some(serde_json::to_string(&p.members)?),
+            )
+        };
+        tx.execute(
+            "INSERT OR REPLACE INTO ldes_sync_pages \
+               (dataset_id, source_url, page_url, immutable, etag, links, members) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                dataset_id,
+                source_url,
+                url,
+                p.immutable as i64,
+                p.etag,
+                links,
+                members
+            ],
+        )?;
+    }
+    for (entity, e) in run.entities {
+        tx.execute(
+            "INSERT OR REPLACE INTO ldes_sync_entities \
+               (dataset_id, source_url, entity_iri, version, subjects) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                dataset_id,
+                source_url,
+                entity,
+                e.version,
+                serde_json::to_string(&e.subjects)?
+            ],
+        )?;
+    }
+    tx.commit()?;
     Ok(())
 }
 

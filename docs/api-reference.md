@@ -175,6 +175,21 @@ stream). Streams without a policy never answer 410. Full fragments also carry
 `<node> ldes:immutable true`. `POST /api/ldes/sync` reports gain
 `nodes_gone`, `retention_policy` and `warnings`; existing fields are unchanged.
 
+## LDES sync — an LDES 1.0 consumer
+
+`POST /api/ldes/sync` initialises as LDES 1.0 §3.1 says: `url` must be the
+event stream, its root node, a redirect to either, or a page with exactly one
+`tree:view`. Anything else (several views, none at all) is a **`502`** whose
+body names §3.1; it used to crawl whatever links it found. Redirects are
+followed within `OTS_REMOTE_ALLOWLIST`, `408`/`425`/`429`/`5xx` are retried
+with back-off, and any other error status is a `502`. The report gains
+`stream`, `root_node`, `polling_interval`, `shapes`, `nodes_not_modified`,
+`nodes_skipped_immutable`, `nodes_pruned`, `retries` and
+`versions_superseded`; existing fields keep their meaning, except that
+`members_skipped_older` no longer counts members on immutable pages the
+client did not fetch again (those are in `nodes_skipped_immutable`). See
+[ldes.md](ldes.md#syncing-a-stream-into-a-dataset).
+
 ## SHACL Compact Syntax — `?lenient`
 
 `PUT /api/datasets/{dataset_id}/shapes` (with `Content-Type: text/shaclc`) and

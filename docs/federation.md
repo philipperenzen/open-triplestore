@@ -94,6 +94,12 @@ contacted. That matters here because the assertion below is minted *for the
 origin the URL resolves to*, so a matcher an attacker could stretch would
 hand them a valid assertion for their own host.
 
+Redirects are followed, at most 10, and every hop must be covered by the
+allowlist as well; a hop off the list fails the request without contacting
+it. A hop to another host or port drops the `Authorization` header, so an
+assertion minted for one peer is never shown to another (that hop goes
+anonymous).
+
 When this instance calls an allowlisted peer on behalf of a user — a
 `SERVICE <https://peer.example.org/sparql>` clause in that user's query, or
 an LDES sync the user started — it mints an ES256 identity assertion with

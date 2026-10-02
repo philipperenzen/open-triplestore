@@ -118,6 +118,88 @@ impl PropertyPath {
     }
 }
 
+const SH_NS: &str = "http://www.w3.org/ns/shacl#";
+
+/// Parse a SHACL property path (SHACL §2.3) starting at `node` into a [`PropertyPath`],
+/// over any graph: `objects(subject, predicate)` returns the objects of a node in
+/// lexical form (an IRI, `_:label` for a blank node, or a literal's value).
+///
+/// Handles a predicate IRI; an RDF-list **sequence** path `( p1 p2 … )`; and the blank-node
+/// path operators `sh:inversePath`, `sh:alternativePath` (an RDF list), `sh:zeroOrMorePath`,
+/// `sh:oneOrMorePath`, `sh:zeroOrOnePath`. Returns `None` for an empty or malformed path so
+/// the caller can skip the property shape rather than mis-bind it.
+///
+/// A node carrying BOTH list cells (`rdf:first`/`rdf:rest`) and a path operator is
+/// interpreted as the sequence path — matching the W3C suite's `path-strange-*`
+/// expectations, which treat the list reading as authoritative.
+pub(crate) fn parse_property_path_with(
+    node: &str,
+    objects: &dyn Fn(&str, &str) -> Vec<String>,
+) -> Option<PropertyPath> {
+    // A predicate path is a plain IRI.
+    if !node.starts_with("_:") {
+        return Some(PropertyPath::Predicate(node.to_string()));
+    }
+    // Blank node: an RDF-list sequence path takes precedence over operators.
+    let seq: Vec<PropertyPath> = rdf_list_elements(node, objects)
+        .iter()
+        .filter_map(|e| parse_property_path_with(e, objects))
+        .collect();
+    if !seq.is_empty() {
+        return Some(PropertyPath::Sequence(seq));
+    }
+    let op =
+        |p: &str| -> Option<String> { objects(node, &format!("{SH_NS}{p}")).into_iter().next() };
+    if let Some(inner) = op("inversePath") {
+        return parse_property_path_with(&inner, objects)
+            .map(|p| PropertyPath::Inverse(Box::new(p)));
+    }
+    if let Some(head) = op("alternativePath") {
+        let parts: Vec<PropertyPath> = rdf_list_elements(&head, objects)
+            .iter()
+            .filter_map(|e| parse_property_path_with(e, objects))
+            .collect();
+        return (!parts.is_empty()).then_some(PropertyPath::Alternative(parts));
+    }
+    if let Some(inner) = op("zeroOrMorePath") {
+        return parse_property_path_with(&inner, objects)
+            .map(|p| PropertyPath::ZeroOrMore(Box::new(p)));
+    }
+    if let Some(inner) = op("oneOrMorePath") {
+        return parse_property_path_with(&inner, objects)
+            .map(|p| PropertyPath::OneOrMore(Box::new(p)));
+    }
+    if let Some(inner) = op("zeroOrOnePath") {
+        return parse_property_path_with(&inner, objects)
+            .map(|p| PropertyPath::ZeroOrOne(Box::new(p)));
+    }
+    None
+}
+
+/// Walk the RDF list whose head is `head`, returning each member's lexical node form
+/// (IRI, `_:label`, or literal value). Empty if `head` is not a list.
+fn rdf_list_elements(head: &str, objects: &dyn Fn(&str, &str) -> Vec<String>) -> Vec<String> {
+    const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
+    const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
+    const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
+    let mut out = Vec::new();
+    let mut current = head.to_string();
+    for _ in 0..10_000 {
+        if current == RDF_NIL {
+            break;
+        }
+        match objects(&current, RDF_FIRST).into_iter().next() {
+            Some(first) => out.push(first),
+            None => break,
+        }
+        match objects(&current, RDF_REST).into_iter().next() {
+            Some(rest) => current = rest,
+            None => break,
+        }
+    }
+    out
+}
+
 /// SHACL constraint components.
 #[derive(Debug, Clone)]
 #[allow(clippy::enum_variant_names)]

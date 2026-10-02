@@ -138,6 +138,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on the blocking pool behind a gate that answers `429` with `Retry-After`
   when a stream (16) or the server (64) has too many in flight
   (`OTS_LDES_MAX_IN_FLIGHT_PER_STREAM`, `OTS_LDES_MAX_IN_FLIGHT`).
+- **LDES client: retries, conditional fetches, resumable state.** A sync
+  retries `408`, `425`, `429`, `500`, `502`, `503` and `504` with exponential
+  back-off and jitter, honouring `Retry-After` (`OTS_REMOTE_RETRIES`, default
+  4; `OTS_REMOTE_MAX_RETRY_WAIT_SECS`, default 60 — a longer `Retry-After`
+  fails the sync instead of holding it), and aborts on any other error status
+  (LDES 1.0 §3.3). It asks for TriG, N-Quads, Turtle, N-Triples and JSON-LD.
+  It remembers per stream the pages it processed as immutable (never fetched
+  again), the `ETag` and relations of mutable pages (sent as `If-None-Match`;
+  a `304` follows the remembered relations), and skips a node whose relations
+  bound it below the bookmark on the timestamp path. The report adds
+  `stream`, `root_node`, `polling_interval`, `shapes`, `nodes_not_modified`,
+  `nodes_skipped_immutable`, `nodes_pruned`, `retries` and
+  `versions_superseded`.
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -578,6 +591,34 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   link onward, so each bound covers everything reachable through it; unsealed
   fragments still chain forward. Page numbers are unchanged. Tombstones are
   typed `as:Delete` as well as `ots:Tombstone`.
+- **Outbound requests follow redirects within the allowlist.** SPARQL
+  federation (`SERVICE`), virtual SPARQL sources and LDES sync used to refuse
+  every redirect. They now follow up to 10, and each hop must be covered by
+  `OTS_REMOTE_ALLOWLIST` again; a hop off the list fails the request ("redirected
+  to … which is not in OTS_REMOTE_ALLOWLIST") without contacting it, and a hop
+  to another host or port drops the `Authorization` header. LDES 1.0 §3.3 and
+  TREE require clients to follow redirects.
+- **The LDES client follows the LDES 1.0 consumer specification.** It
+  initialises as §3.1 says: the URL given is the event stream (its one
+  `tree:view` is dereferenced), its root node, a redirect to either, or a page
+  with exactly one `tree:view`; anything else is an error naming §3.1, where it
+  used to crawl whatever `tree:view` or `tree:node` it found. It reads context
+  from the root node, follows only the page's own `tree:relation`s, and
+  extracts members as §3.4 does: `<stream> tree:member ?m`, the star pattern of
+  `m` and every quad in the named graph `m`. A member's named graph, when it has
+  one, is the payload written for its entity. The declared paths
+  (`ldes:timestampPath`, `versionOfPath`, `versionTimestampPath`,
+  `sequencePath`, `versionSequencePath`, and the create / update / delete
+  paths) are evaluated as SHACL property paths with the SHACL engine's
+  parser. Deletes are recognised by the stream's declared
+  `ldes:versionDeletePath` / `ldes:versionDeleteObject` — `as:Delete` is no
+  longer hard-coded; `ots:Tombstone` still counts for a stream that declares
+  no delete object. A create adds to an entity without removing what it held;
+  versions published out of order are ordered by `ldes:versionTimestampPath`
+  and `ldes:versionSequencePath`, so an older version arriving later is not
+  applied. The legacy `ldes:PointInTimePolicy` is read as `starting_from`.
+  The client records which subjects each entity's version wrote, and replaces
+  exactly those (with their blank nodes) when a newer version arrives.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were
@@ -940,6 +981,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   under new blank-node labels is still not a change). Two versions of one
   entity on a page no longer share blank-node labels, which merged their
   structures in the served document.
+- **LDES sync no longer drops members that share a timestamp.** The
+  bookmark skipped every member at or before the newest timestamp applied, so
+  a member published later with that same timestamp never arrived, and
+  timestamps were compared as strings (`09:30:00-02:00` sorted before
+  `10:00:00Z`). Timestamps now compare as `xsd:dateTime` instants and the
+  client remembers the members at the bookmark's own timestamp (LDES 1.0
+  §3.2). A stream without `ldes:versionOfPath` or a timestamp path used to
+  yield no members at all; each member is now its own entity.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if

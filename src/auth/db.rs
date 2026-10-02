@@ -772,6 +772,31 @@ impl AuthDb {
                 synced_at TEXT,
                 PRIMARY KEY (dataset_id, source_url)
             );
+            -- LDES client state per page of a synced stream (LDES 1.0 §3.2):
+            -- an immutable page is processed once and never fetched again;
+            -- a mutable one keeps its ETag, the relations it had and, for a
+            -- stream without a timestamp path, the members it held.
+            CREATE TABLE IF NOT EXISTS ldes_sync_pages (
+                dataset_id TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                page_url TEXT NOT NULL,
+                immutable INTEGER NOT NULL DEFAULT 0,
+                etag TEXT,
+                links TEXT,
+                members TEXT,
+                PRIMARY KEY (dataset_id, source_url, page_url)
+            );
+            -- The version of each entity a sync last applied, and the subjects
+            -- it wrote, so a later version (LDES 1.0 §4.3) replaces exactly
+            -- that group and an older one arriving later is not applied.
+            CREATE TABLE IF NOT EXISTS ldes_sync_entities (
+                dataset_id TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                entity_iri TEXT NOT NULL,
+                version TEXT NOT NULL,
+                subjects TEXT NOT NULL,
+                PRIMARY KEY (dataset_id, source_url, entity_iri)
+            );
             -- Frozen fragment bounds: once a page is full, its member→node
             -- assignment is sealed here so retention can delete rows without
             -- renumbering pages already served as immutable. next_created_at
@@ -1465,6 +1490,10 @@ impl AuthDb {
             // NULL on nodes sealed before these existed (filled on first read).
             "ALTER TABLE ldes_nodes ADD COLUMN min_created_at TEXT",
             "ALTER TABLE ldes_nodes ADD COLUMN max_created_at TEXT",
+            // LDES client: the member IRIs that carry the bookmark's own
+            // timestamp (JSON array) — a later member may share it (LDES 1.0
+            // §3.2), so "not after the bookmark" alone would drop it.
+            "ALTER TABLE ldes_sync_state ADD COLUMN bookmark_members TEXT",
         ];
         for sql in &upgrades {
             let _ = conn.execute_batch(sql); // ignore "duplicate column" / already-run errors
@@ -4234,6 +4263,14 @@ impl AuthDb {
         // reusable slugs, so a leftover `visibility='public'` service would attach
         // to a future dataset that reused this id and expose its data.
         Self::delete_saved_queries_for_owner(&tx, "dataset", id)?;
+        // LDES sync state too: a dataset that reuses the id would otherwise
+        // skip the pages and members this one already applied.
+        for table in ["ldes_sync_state", "ldes_sync_pages", "ldes_sync_entities"] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE dataset_id = ?1"),
+                params![id],
+            )?;
+        }
         tx.execute("DELETE FROM datasets WHERE id = ?1", params![id])?;
         tx.commit()?;
         self.invalidate_accessible_graphs_cache();

@@ -175,10 +175,11 @@ Declaring a policy without enforcing it is harmless; the reverse — removing
 members a consumer was told would be there — is the violation, and it cannot
 happen here because nothing is removed before a policy is declared.
 
-Not supported: `ldes:versionKey` (compound keys over arbitrary property
-paths — the member log has one entity per member) and the discouraged pre-1.0
-classes (`ldes:DurationAgoPolicy`, `ldes:LatestVersionSubset`) on the
-publishing side; the client reads both forms.
+The publisher does not write the discouraged pre-1.0 classes
+(`ldes:DurationAgoPolicy`, `ldes:LatestVersionSubset`,
+`ldes:PointInTimePolicy`); the client reads them as well as the 1.0
+properties. (`ldes:versionKey`, which earlier drafts had, is not in the
+LDES 1.0.0 vocabulary.)
 
 ## Syncing a stream into a dataset
 
@@ -189,23 +190,78 @@ curl -X POST http://localhost:7878/api/ldes/sync \
        "dataset_id": "roads-mirror", "graph_iri": "https://example.org/roads-mirror/instances"}'
 ```
 
-The server follows the stream's `tree:view` and every `tree:relation`,
-collects the members, keeps the newest version of each entity, and writes each
-entity's current description into the target graph (replacing what it held for
-that entity; tombstones delete it). The sync remembers the newest timestamp it
-applied per `(dataset, url)`, so running it again applies only newer members.
-Every sync is a commit in the dataset's history.
+The `url` may be the event stream, its root node, a redirect to either, or a
+page with exactly one `tree:view` (LDES 1.0 §3.1); the report names the
+`stream` and `root_node` it found and the stream's `polling_interval` — how
+long to wait before the next run, since nothing here schedules one. The client
+reads the stream's context from the root node, follows each page's
+`tree:relation`s, and extracts every member: its triples in the default graph,
+every quad in the graph named after it, and the blank nodes they reach
+(§3.4). It keeps the newest version of each entity and writes that entity's
+description into the target graph, replacing exactly what the entity's
+previous version wrote there (its subjects and their blank nodes); a delete
+removes it. Every sync is a commit in the dataset's history.
+
+How a member maps to an entity and its version follows the stream's
+declarations (§4.3), each a SHACL property path:
+
+- `ldes:versionOfPath` names the entity; without it every member is its own
+  entity (a log of immutable members, like sensor observations).
+- The version is ordered by `ldes:versionTimestampPath` (else
+  `ldes:timestampPath`), then `ldes:versionSequencePath` (else
+  `ldes:sequencePath`), so a version published out of order, older than one
+  already applied, is not applied (`versions_superseded`).
+- `ldes:versionDeletePath` / `ldes:versionDeleteObject` mark deletes,
+  `…CreatePath` / `…CreateObject` creates (added without removing what the
+  entity held), `…UpdatePath` / `…UpdateObject` updates; each path defaults to
+  `rdf:type`. A stream that declares no delete object still has its members
+  typed `ots:Tombstone` treated as deletes (this project's publishers before
+  LDES 1.0).
+- When the member IRI names a graph with quads in it, that graph is the
+  entity's description and the member's own triples are version metadata.
+  Otherwise the member's triples are re-subjected to the entity, without the
+  stream's version properties and markers.
+
+The sync remembers, per `(dataset, url)`:
+
+- a bookmark — the newest member timestamp it saw, compared as an
+  `xsd:dateTime` instant (no timezone is read as UTC) — and the members that
+  carry exactly that timestamp, so a member published later with the same
+  timestamp is still emitted and none is emitted twice (§3.2);
+- the pages it processed as immutable (`<page> ldes:immutable true` or
+  `Cache-Control: immutable`), which it never fetches again
+  (`nodes_skipped_immutable`);
+- the `ETag` and relations of each mutable page: the next run sends
+  `If-None-Match`, and a `304` follows the remembered relations
+  (`nodes_not_modified`);
+- the version and subjects it last applied per entity.
+
+A node whose relations, on the stream's timestamp path, bound every member it
+can hold below the bookmark (`tree:LessThanRelation` at or before it,
+`tree:LessThanOrEqualToRelation` before it) is not fetched (`nodes_pruned`).
+The root node is fetched in full every run, since it carries the context.
 
 A fragment that answers `410 Gone` — compacted away by the publisher's
 retention policy — is processed as an empty page, not as a failure (LDES
-§3.3); the report counts them in `nodes_gone`. The report also carries the
-publisher's declared policy (`retention_policy`, read from the root node in
-either the 1.0 or the legacy form) and a warning when the sync's bookmark is
-older than the publisher's full-log window, because members created between
-the two may have been compacted before this mirror saw them.
+§3.3); the report counts them in `nodes_gone`. `408`, `425`, `429`, `500`,
+`502`, `503` and `504` are retried with exponential back-off and jitter, or
+after the wait a `Retry-After` header asks for (`OTS_REMOTE_RETRIES`, default 4;
+`OTS_REMOTE_MAX_RETRY_WAIT_SECS`, default 60: a longer `Retry-After` fails
+the sync rather than holding it); `retries` counts them. Any other error
+status aborts the sync. The client asks for TriG, N-Quads, Turtle, N-Triples
+and JSON-LD.
+
+The report also carries the publisher's declared policy (`retention_policy`,
+read from the root node in the 1.0 form or a legacy one, including
+`ldes:PointInTimePolicy` as `starting_from`) and a warning when the sync's
+bookmark is older than the publisher's window (its full-log duration or its
+starting point), because members created between the two may never reach this
+mirror.
 
 Outbound requests are subject to the remote allowlist: the stream's origin
-must be listed in `OTS_REMOTE_ALLOWLIST`, and each fetch has the usual timeout and
+must be listed in `OTS_REMOTE_ALLOWLIST`, a redirect is followed only to a URL
+the allowlist covers too (§3.3: "A client MUST follow redirects"; the URL after
+the redirects is the page's base IRI), and each fetch has the usual timeout and
 body limit (`OTS_REMOTE_TIMEOUT_SECS`, `OTS_REMOTE_MAX_BYTES`).
 
 ## What is and is not implemented
@@ -213,25 +269,32 @@ body limit (`OTS_REMOTE_TIMEOUT_SECS`, `OTS_REMOTE_MAX_BYTES`).
 - Fragmentation: time-ordered, fixed-size pages under one root node with
   `tree:GreaterThanOrEqualToRelation` and `tree:LessThanOrEqualToRelation` on
   `dct:created`, frozen once full. No geospatial or substring fragmentations
-  (optional TREE views), no `ldes:sequencePath` (members with equal
-  timestamps are ordered by member id only).
+  or search forms — optional TREE views, not required by LDES 1.0 — and no
+  `ldes:sequencePath` (members with equal timestamps are ordered by member id
+  only).
 - Publisher context: `ldes:timestampPath`, `ldes:versionOfPath`, the delete
   path and object, `ldes:pollingInterval`, a generated `tree:shape`, `ETag` /
   `304`, `429` when busy, dereferenceable member IRIs. No transactions.
 - Retention: `ldes:fullLogDuration`, `ldes:versionAmount`,
   `ldes:versionDuration`, `ldes:versionDeleteDuration`, `ldes:startingFrom`,
   enforced by in-place deletion inside frozen pages, `410 Gone` for a page
-  emptied by it. Not `ldes:versionKey`.
+  emptied by it.
 - Members: entity-level version objects (IRI subjects; blank-node closure
   included). Triple-level changes to an entity produce a full new version of
   it, not a delta.
-- Client: follows any TREE relation (all are treated as "worth following"),
-  honours the stream's declared `ldes:timestampPath` / `ldes:versionOfPath`
-  (defaults `dct:created` / `dct:isVersionOf`), treats `410 Gone` as an empty
-  page, recognises deletes typed `as:Delete` or `ots:Tombstone`, keeps the
-  publisher's retention policy as context, and materialises the newest
-  version per entity. It does not evaluate relation values to prune pages,
-  and does not yet read a stream's declared delete path and object.
+- Client (unordered mode, LDES 1.0 §3): §3.1 initialisation; redirects
+  within the allowlist; retries with back-off on 408/425/429/5xx; every RDF
+  format the spec lists; §3.4 member extraction including named graphs;
+  declared paths evaluated as SHACL property paths; version, create, update
+  and delete semantics from the stream's declarations; a bookmark on
+  `xsd:dateTime` values that keeps the members at its own timestamp;
+  immutable pages fetched once, ETags kept, nodes pruned by relation bounds;
+  `410 Gone` as an empty page; the retention policy, legacy classes included,
+  kept as context. The run's end is its finalisation: entities are written
+  when every page has been read. Not implemented, and not required: an ordered
+  mode (a priority queue over relation values), transactions
+  (`ldes:transactionPath`), scheduled polling (the report gives
+  `polling_interval` to whoever schedules runs), and source selection.
 
 The spec rules the implementation is held to are in
 `tests/ldes_conformance.rs`, one assertion per clause of the LDES

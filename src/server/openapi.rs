@@ -2352,7 +2352,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             ob(
                 "Datasets",
                 "Sync a remote event stream",
-                "Follow a remote LDES from `url` (origin must be in `OTS_REMOTE_ALLOWLIST`), keep the newest version of each entity and materialise it into `graph_iri` of `dataset_id`; a bookmark makes later runs incremental. A `410 Gone` fragment is processed as an empty page. The report carries the publisher's declared retention policy and warns when the bookmark predates its window.",
+                "Replicate a remote LDES (LDES 1.0 consumer, unordered mode) into `graph_iri` of `dataset_id`. `url` is the event stream, its root node, a redirect to either, or a page with exactly one `tree:view`; its origin, and every redirect hop, must be in `OTS_REMOTE_ALLOWLIST`. Members are extracted with their named graphs, versions ordered and deletes recognised by the stream's declared (SHACL) paths, and the newest version of each entity replaces what the previous one wrote. State per `(dataset, url)` makes later runs incremental: a bookmark on `xsd:dateTime` values with the members at its own timestamp, immutable pages (not fetched again), ETags of mutable pages (`If-None-Match`). 408/425/429/5xx are retried with back-off; `410 Gone` is an empty page. The report carries the publisher's declared retention policy and warns when the bookmark predates its window.",
                 vec![],
                 json_body(
                     ObjectBuilder::new()
@@ -2365,11 +2365,11 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     json!({ "url": "https://other.example.org/api/datasets/roads/ldes", "dataset_id": "roads-mirror", "graph_iri": "https://example.org/roads-mirror/instances" }),
                 ),
                 vec![
-                    ("200", "Sync report: nodes_visited, nodes_gone, members_seen, members_skipped_older, entities_updated, entities_deleted, last_timestamp, retention_policy, warnings"),
+                    ("200", "Sync report: stream, root_node, polling_interval, shapes, nodes_visited, nodes_gone, nodes_not_modified, nodes_skipped_immutable, nodes_pruned, retries, members_seen, members_skipped_older, versions_superseded, entities_updated, entities_deleted, last_timestamp, retention_policy, warnings"),
                     ("401", "Authentication required"),
                     ("403", "Write access required, or the origin is not allow-listed"),
                     ("404", "Dataset not found"),
-                    ("502", "The remote stream could not be read"),
+                    ("502", "The remote stream could not be read, is not an LDES entry point (LDES 1.0 §3.1), or answered an error status that is not retried"),
                 ],
                 true,
             ),
