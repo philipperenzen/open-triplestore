@@ -77,6 +77,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an existing tag. See `docs/release-process.md`.
 
 ### Fixed
+- **`EXISTS` no longer runs per shard.** The in-memory mirror split a query
+  across subject shards whenever its triple patterns shared a subject, without
+  looking inside `FILTER`, `BIND` or `COUNT` expressions. An `EXISTS` there
+  reads triples about *other* subjects, so `ASK { ?s :p ?o FILTER NOT EXISTS
+  { ?o :q ?x } }`, or a `COUNT` over that pattern, was answered by shards that
+  each saw only their own subjects: `true` where the store says `false`, a
+  count that was too low. Such queries now stay off the shards (the full copy
+  or the store answers them).
+- **RDF 1.2 base direction survives the columnar copy.** The columnar copy
+  decoded `"hello"@en--ltr` as a plain language-tagged string, so on the
+  default read path `DATATYPE` returned `rdf:langString`, the literal compared
+  equal to `"hello"@en`, and `LANG`/`ORDER BY` treated it the same way. A query
+  whose expressions reach a literal with a direction, or a triple term, is
+  now declined by that copy at evaluation, and the full copy or the store
+  answers it. A triple term in an expression used to read as a type error
+  there, which dropped rows a `FILTER` should have kept.
+- **The W3C SPARQL 1.1 runner also checks the in-memory mirror.** Every
+  query-evaluation entry now runs a second time with the mirror on (four
+  shards, the columnar copy, the full copy, no rebuild debounce) and must end
+  as it does on the engine.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if
