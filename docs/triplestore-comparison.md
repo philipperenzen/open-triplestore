@@ -104,9 +104,10 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
   `docs/standards.md` grades several of those rows **Partial**: SPARQL 1.1 federation (off by
   default, per-endpoint allowlist), OWL 2 EL, RL and DL (DL runs RL+extension rules in
   process, with a full tableau only via the optional Konclude bridge), SHACL Advanced and
-  SHACL-C, ShEx, SWRL, RML and DCAT. GeoSPARQL 1.1 lacks KML/DGGS literals and the Query
-  Rewrite Extension (it has the geodesic `metric*` family, `aggUnion` and WKT/GML/GeoJSON
-  literals). SPARQL 1.2 /
+  SHACL-C, ShEx, SWRL, RML and DCAT. GeoSPARQL 1.1 lacks KML/DGGS literals, most aggregates
+  and several functions (it has the geodesic `metric*` family, `aggUnion`, WKT/GML/GeoJSON
+  literals and the RDFS Entailment and Query Rewrite extensions); GeoSPARQL 1.0 meets 28 of
+  its 30 requirements, all but the GML literal profile. SPARQL 1.2 /
   RDF 1.2 follows the RDF 1.2 triple-term model in object position only.
 - **Reference system.** Open Triplestore performance figures in this document were measured on an
   **Apple M3 Pro**. Reproducible numbers for the documented reference system (AMD Ryzen 9
@@ -283,9 +284,12 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > ⁷ Tantivy full-text search via `text-search` feature flag with automatic index
 >   sync on every SPARQL UPDATE / Graph Store write (lazy dirty-flag pattern).
 > ¹¹ Partial, not OGC-certified (only the OGC authorises compliance marks for its standards):
->   the topology families, `geof:relate`, the constructive functions, WKT and GML literals and
->   CRS transforms are implemented; the geodesic metric family, `geof:aggUnion`,
->   GeoJSON/KML/DGGS literals and the Query Rewrite Extension are not. See
+>   the topology families, `geof:relate`, the constructive and geodesic metric functions,
+>   `geof:aggUnion`, WKT, GML and GeoJSON literals, CRS transforms, and the RDFS Entailment and
+>   Query Rewrite extensions are implemented. GeoSPARQL 1.0 meets 28 of its 30 requirements;
+>   the GML literal profile (R15, R17) is not complete. GeoSPARQL 1.1 also lacks KML/DGGS
+>   literals, most aggregates and several functions. Requirement matrix:
+>   [`docs/conformance/geosparql.md`](conformance/geosparql.md#3-requirement-matrix); grades:
 >   [`docs/standards.md`](standards.md).
 
 ### 4.4 Protocols, Catalogs & Mapping
@@ -680,7 +684,7 @@ From BSBM and published benchmarks at concurrency factor 16, 32 GB RAM:
 | `geof:envelope` | ✅ | ❌ | ✅ | ✅ | ❌ | 🟡 | ❌ |
 | `geof:convexHull` | ✅ | ❌ | ✅ | ✅ | ❌ | 🟡 | ❌ |
 | Spatial R-tree index | ✅¹ | ❌ | ✅ | ✅ | ✅ | ✅ | N/A |
-| GeoSPARQL 1.1 rules | ❌³ | ❌ | ✅ | 🟡 | ❌ | 🟡 | ❌ |
+| GeoSPARQL 1.1 rules | ✅³ | ❌ | ✅ | 🟡 | ❌ | 🟡 | ❌ |
 | Conformance tests | 🟡² | ❌ | ✅ | 🟡 | ❌ | 🟡 | N/A |
 
 > ¹ Spatial R-tree index (`rstar` crate) over `geo:asWKT` bounding boxes. Lazily rebuilt
@@ -688,7 +692,9 @@ From BSBM and published benchmarks at concurrency factor 16, 32 GB RAM:
 > ² Open Triplestore runs a hand-written, spec-derived suite (`tests/geosparql_conformance.rs`)
 > and the OGC GeoSPARQL 1.1 validator shapes (`tests/ogc_geosparql_shacl_roundtrip.rs`) in CI;
 > these are development results, not an OGC compliance test or certification.
-> ³ The GeoSPARQL Query Rewrite Extension (the RIF rules) is not implemented.
+> ³ The GeoSPARQL Query Rewrite Extension (the RIF rules, all 24 sf/eh/rcc8 relations) rewrites
+> relation patterns in queries and update `WHERE` clauses, on by default
+> (`OTS_GEOSPARQL_QUERY_REWRITE=off` turns it off); see [`docs/geosparql.md`](geosparql.md#query-rewrite).
 
 ### 10.2 GeoSPARQL Performance (measured — see section 2.4 for the system)
 
@@ -1002,8 +1008,9 @@ security patches not applied. Any existing deployment should migrate to QLever o
    Neptune (Graviton4 cloud bulk loader) match this.
 
 2. **GeoSPARQL 1.1:** Broad GeoSPARQL 1.1 coverage via the GEOS C++ library: all DE-9IM
-   relations and the constructive functions. Partial overall (no geodesic metrics, `aggUnion`
-   or GeoJSON literals; see [`docs/standards.md`](standards.md)), and not OGC-certified.
+   relations, the constructive and geodesic metric functions, `aggUnion`, WKT/GML/GeoJSON
+   literals and the RDFS Entailment and Query Rewrite extensions. Partial overall (no KML/DGGS
+   literals, most aggregates; see [`docs/standards.md`](standards.md)), and not OGC-certified.
 
 3. **SHACL + SHACL-AF:** Combined validation and inference in a single lightweight binary is rare.
    Only GraphDB and Stardog match this in a server-grade product.

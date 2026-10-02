@@ -39,6 +39,12 @@
 //!   Req 28: Metric – geof:area
 //!   Req 29: Constructive – spatial set operations
 //!   Req 30: Aggregate – geof:getSRID, geometry properties
+//!
+//! Tests added since are named by the OGC requirement they pin: `ogc_req<N>_…`
+//! for 22-047r1 (GeoSPARQL 1.1), `ogc10_r<N>_…` for 11-052r4 (GeoSPARQL 1.0),
+//! `rdfs_ent_req<N>_…` (RDFS Entailment Extension, Req 47–49 / R25–R27) and
+//! `query_rewrite_req<N>_…` (Query Rewrite Extension, Req 50–52 / R28–R30).
+//! `docs/conformance/geosparql.md` maps every OGC requirement to its tests.
 
 use oxigraph::io::RdfFormat;
 use oxigraph::sparql::QueryResults;
@@ -3710,4 +3716,630 @@ fn ogc_req39_unknown_or_incompatible_units_are_unbound() {
         geof_num(&s, &format!("geof:distance({ra}, {rb}, uom:unity)")),
         5.0
     );
+}
+
+// ═══════════════════════════════════════════════════════════
+// RDFS Entailment Extension — 11-052r4 R25–R27, 22-047r1 Req 47–49
+// (/req/rdfs-entailment-extension/bgp-rdfs-ent, wkt-geometry-types,
+// gml-geometry-types)
+// ═══════════════════════════════════════════════════════════
+
+/// The premise graphs, loaded from the bundled files the server seeds.
+#[cfg(feature = "rdfs-entailment")]
+const ENT_ONTOLOGY: &str = "http://example.org/premise/geosparql";
+#[cfg(feature = "rdfs-entailment")]
+const ENT_SF: &str = "http://example.org/premise/sf";
+#[cfg(feature = "rdfs-entailment")]
+const ENT_GML: &str = "http://example.org/premise/gml";
+#[cfg(feature = "rdfs-entailment")]
+const ENT_DATA: &str = "http://example.org/geo-data";
+#[cfg(feature = "rdfs-entailment")]
+const ENT_TARGET: &str = "urn:entailment:rdfs:geo-test";
+
+/// A store holding `data` (Turtle, in [`ENT_DATA`]) and the three premise
+/// vocabularies, materialised under RDFS over all four.
+#[cfg(feature = "rdfs-entailment")]
+fn entailed(data: &str) -> open_triplestore::store::TripleStore {
+    use open_triplestore::data_models::vocab_files as vf;
+    use open_triplestore::reasoning::rdfs::RdfsMaterializer;
+    let s = ts();
+    for (g, f) in [
+        (ENT_ONTOLOGY, &vf::GEOSPARQL),
+        (ENT_SF, &vf::SF),
+        (ENT_GML, &vf::GML_GEOMETRIES),
+    ] {
+        s.load_str(f.ttl, RdfFormat::Turtle, Some(g)).unwrap();
+    }
+    s.load_str(
+        &format!("{TTL_PREFIXES}@prefix gml: <http://www.opengis.net/ont/gml#> .\n{data}"),
+        RdfFormat::Turtle,
+        Some(ENT_DATA),
+    )
+    .unwrap();
+    RdfsMaterializer::with_target(&s, ENT_TARGET)
+        .with_sources(vec![
+            ENT_DATA.to_string(),
+            ENT_ONTOLOGY.to_string(),
+            ENT_SF.to_string(),
+            ENT_GML.to_string(),
+        ])
+        .materialize()
+        .unwrap();
+    s
+}
+
+/// An ASK over the data plus its entailments, as a query with the
+/// entailment graph in its default graph sees them.
+#[cfg(feature = "rdfs-entailment")]
+fn entails(s: &open_triplestore::store::TripleStore, pattern: &str) -> bool {
+    ask_geo(
+        s,
+        &format!(
+            "PREFIX gml: <http://www.opengis.net/ont/gml#>\n\
+             ASK FROM <{ENT_DATA}> FROM <{ENT_TARGET}> {{ {pattern} }}"
+        ),
+    )
+}
+
+#[cfg(feature = "rdfs-entailment")]
+#[test]
+fn rdfs_ent_req47_feature_and_geometry_from_the_ontology() {
+    let s = entailed(
+        "ex:f geo:hasDefaultGeometry ex:g .\n\
+         ex:g geo:asWKT \"POINT(1 2)\"^^geo:wktLiteral .",
+    );
+    // Domain and range of geo:hasDefaultGeometry, and its super-property.
+    assert!(entails(&s, "ex:f a geo:Feature"));
+    assert!(entails(&s, "ex:g a geo:Geometry"));
+    assert!(entails(&s, "ex:f geo:hasGeometry ex:g"));
+    // geo:Feature and geo:Geometry are spatial objects.
+    assert!(entails(
+        &s,
+        "ex:f a geo:SpatialObject . ex:g a geo:SpatialObject"
+    ));
+    // geo:asWKT is a geo:hasSerialization.
+    assert!(entails(
+        &s,
+        "ex:g geo:hasSerialization \"POINT(1 2)\"^^geo:wktLiteral"
+    ));
+    // Nothing is said about what the data does not state.
+    assert!(!entails(&s, "ex:f a geo:Geometry"));
+}
+
+#[cfg(feature = "rdfs-entailment")]
+#[test]
+fn rdfs_ent_req47_basic_graph_patterns_match_entailed_triples() {
+    let s = entailed(
+        "ex:a geo:hasGeometry ex:ga . ex:b geo:hasDefaultGeometry ex:gb .\n\
+         ex:c a ex:Thing .",
+    );
+    let rows = sel(
+        &s,
+        &format!("SELECT ?f FROM <{ENT_DATA}> FROM <{ENT_TARGET}> WHERE {{ ?f a geo:Feature }} ORDER BY ?f"),
+    );
+    assert_eq!(
+        rows,
+        vec![
+            vec!["<http://example.org/a>".to_string()],
+            vec!["<http://example.org/b>".to_string()]
+        ]
+    );
+}
+
+#[cfg(feature = "rdfs-entailment")]
+#[test]
+fn rdfs_ent_req48_simple_features_geometry_types() {
+    let s = entailed(
+        "ex:p a sf:Polygon . ex:t a sf:Triangle . ex:tin a sf:TIN .\n\
+         ex:r a sf:LinearRing . ex:mp a sf:MultiPolygon .",
+    );
+    for (x, class) in [
+        ("ex:p", "sf:Surface"),
+        ("ex:p", "sf:Geometry"),
+        ("ex:p", "geo:Geometry"),
+        ("ex:p", "geo:SpatialObject"),
+        ("ex:t", "sf:Polygon"),
+        ("ex:tin", "sf:PolyhedralSurface"),
+        ("ex:tin", "sf:Surface"),
+        ("ex:r", "sf:LineString"),
+        ("ex:r", "sf:Curve"),
+        ("ex:mp", "sf:MultiSurface"),
+        ("ex:mp", "sf:GeometryCollection"),
+    ] {
+        assert!(entails(&s, &format!("{x} a {class}")), "{x} a {class}");
+    }
+    assert!(!entails(&s, "ex:p a sf:Curve"));
+    assert!(!entails(&s, "ex:mp a sf:Polygon"));
+}
+
+#[cfg(feature = "rdfs-entailment")]
+#[test]
+fn rdfs_ent_req49_gml_geometry_types() {
+    let s = entailed(
+        "ex:p a gml:Polygon . ex:tin a gml:Tin . ex:lr a gml:LinearRing .\n\
+         ex:ms a gml:MultiSurface . ex:cs a gml:CompositeSolid .",
+    );
+    for (x, class) in [
+        // gml:Polygon substitutes for gml:AbstractSurface in the GML 3.2.1
+        // schema (not gml:SurfacePatch, as the 1.0 text's example has it).
+        ("ex:p", "gml:AbstractSurface"),
+        ("ex:p", "gml:AbstractGeometricPrimitive"),
+        ("ex:p", "gml:AbstractGeometry"),
+        ("ex:p", "geo:Geometry"),
+        ("ex:tin", "gml:TriangulatedSurface"),
+        ("ex:tin", "gml:Surface"),
+        ("ex:lr", "gml:AbstractRing"),
+        ("ex:lr", "gml:AbstractCurve"),
+        ("ex:ms", "gml:AbstractGeometricAggregate"),
+        ("ex:cs", "gml:AbstractSolid"),
+    ] {
+        assert!(entails(&s, &format!("{x} a {class}")), "{x} a {class}");
+    }
+    assert!(!entails(&s, "ex:p a gml:AbstractCurve"));
+}
+
+// ═══════════════════════════════════════════════════════════
+// Query Rewrite Extension — 11-052r4 R28–R30, 22-047r1 Req 50–52
+// (/req/query-rewrite-extension/sf-query-rewrite, eh-query-rewrite,
+// rcc8-query-rewrite)
+// ═══════════════════════════════════════════════════════════
+
+/// Features and geometries for the rewrite tests. `ex:city` has two
+/// serialisations of one polygon (WKT and GML); `ex:park` lies strictly
+/// inside it; `ex:far` is away from both; `ex:lake` lies inside the city but
+/// has its geometry only through `geo:hasGeometry`, which the spec-strict
+/// rules do not follow; `ex:told` has no geometry and an asserted relation.
+const REWRITE_DATA: &str = r#"
+ex:city geo:hasDefaultGeometry ex:cityGeom .
+ex:cityGeom geo:asWKT "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))"^^geo:wktLiteral ;
+    geo:asGML "<gml:Polygon><gml:exterior><gml:LinearRing><gml:posList>0 0 10 0 10 10 0 10 0 0</gml:posList></gml:LinearRing></gml:exterior></gml:Polygon>"^^geo:gmlLiteral .
+ex:park a ex:Park ; geo:hasDefaultGeometry ex:parkGeom .
+ex:parkGeom geo:asWKT "POLYGON((1 1, 2 1, 2 2, 1 2, 1 1))"^^geo:wktLiteral .
+ex:far a ex:Park ; geo:hasDefaultGeometry ex:farGeom .
+ex:farGeom geo:asGeoJSON "{\"type\":\"Polygon\",\"coordinates\":[[[20,20],[21,20],[21,21],[20,21],[20,20]]]}"^^geo:geoJSONLiteral .
+ex:lake geo:hasGeometry ex:lakeGeom .
+ex:lakeGeom geo:asWKT "POLYGON((3 3, 4 3, 4 4, 3 4, 3 3))"^^geo:wktLiteral .
+ex:told geo:sfWithin ex:city .
+"#;
+
+fn rewrite_store() -> open_triplestore::store::TripleStore {
+    let s = ts();
+    load(&s, REWRITE_DATA);
+    s
+}
+
+/// For one relation that holds between the park and the city: all four rule
+/// shapes (feature–feature, feature–geometry, geometry–feature,
+/// geometry–geometry) match, and the same relation to the far feature does not.
+fn assert_four_rule_shapes(s: &open_triplestore::store::TripleStore, rel: &str) {
+    for (a, b) in [
+        ("ex:park", "ex:city"),
+        ("ex:park", "ex:cityGeom"),
+        ("ex:parkGeom", "ex:city"),
+        ("ex:parkGeom", "ex:cityGeom"),
+    ] {
+        assert!(
+            ask_geo(s, &format!("ASK {{ {a} geo:{rel} {b} }}")),
+            "{a} {rel} {b}"
+        );
+    }
+    assert!(
+        !ask_geo(s, &format!("ASK {{ ex:far geo:{rel} ex:city }}")),
+        "far {rel}"
+    );
+}
+
+#[test]
+fn query_rewrite_req50_sf_relations() {
+    let s = rewrite_store();
+    assert_four_rule_shapes(&s, "sfWithin");
+    assert_four_rule_shapes(&s, "sfIntersects");
+    assert!(ask_geo(&s, "ASK { ex:city geo:sfContains ex:park }"));
+    assert!(ask_geo(&s, "ASK { ex:far geo:sfDisjoint ex:city }"));
+    assert!(ask_geo(&s, "ASK { ex:city geo:sfEquals ex:cityGeom }"));
+    assert!(!ask_geo(&s, "ASK { ex:park geo:sfOverlaps ex:city }"));
+    assert!(!ask_geo(&s, "ASK { ex:park geo:sfTouches ex:city }"));
+    assert!(!ask_geo(&s, "ASK { ex:park geo:sfCrosses ex:city }"));
+}
+
+#[test]
+fn query_rewrite_req51_eh_relations() {
+    let s = rewrite_store();
+    assert_four_rule_shapes(&s, "ehInside");
+    assert!(ask_geo(&s, "ASK { ex:city geo:ehContains ex:park }"));
+    // Covering needs boundary contact (TFF*TFT**); the park is strictly inside.
+    assert!(!ask_geo(&s, "ASK { ex:park geo:ehCoveredBy ex:city }"));
+    assert!(!ask_geo(&s, "ASK { ex:city geo:ehCovers ex:park }"));
+    assert!(ask_geo(&s, "ASK { ex:far geo:ehDisjoint ex:city }"));
+    assert!(ask_geo(&s, "ASK { ex:cityGeom geo:ehEquals ex:city }"));
+    assert!(!ask_geo(&s, "ASK { ex:park geo:ehMeet ex:city }"));
+    assert!(!ask_geo(&s, "ASK { ex:park geo:ehOverlap ex:city }"));
+}
+
+#[test]
+fn query_rewrite_req52_rcc8_relations() {
+    let s = rewrite_store();
+    assert_four_rule_shapes(&s, "rcc8ntpp");
+    assert!(ask_geo(&s, "ASK { ex:city geo:rcc8ntppi ex:park }"));
+    assert!(ask_geo(&s, "ASK { ex:far geo:rcc8dc ex:city }"));
+    assert!(ask_geo(&s, "ASK { ex:city geo:rcc8eq ex:cityGeom }"));
+    assert!(!ask_geo(&s, "ASK { ex:park geo:rcc8tpp ex:city }"));
+    assert!(!ask_geo(&s, "ASK { ex:park geo:rcc8ec ex:city }"));
+    assert!(!ask_geo(&s, "ASK { ex:park geo:rcc8po ex:city }"));
+    assert!(!ask_geo(&s, "ASK { ex:city geo:rcc8tppi ex:park }"));
+}
+
+/// Every one of the 24 relations is rewritten to its own function: on two
+/// identical polygons exactly the relations that hold for equal regions match.
+#[test]
+fn query_rewrite_every_relation_uses_its_own_function() {
+    let s = ts();
+    load(
+        &s,
+        r#"ex:a geo:hasDefaultGeometry [ geo:asWKT "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))"^^geo:wktLiteral ] .
+           ex:b geo:hasDefaultGeometry [ geo:asWKT "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))"^^geo:wktLiteral ] ."#,
+    );
+    for rel in [
+        "sfEquals",
+        "sfDisjoint",
+        "sfIntersects",
+        "sfTouches",
+        "sfCrosses",
+        "sfWithin",
+        "sfContains",
+        "sfOverlaps",
+        "ehEquals",
+        "ehDisjoint",
+        "ehMeet",
+        "ehOverlap",
+        "ehCovers",
+        "ehCoveredBy",
+        "ehInside",
+        "ehContains",
+        "rcc8eq",
+        "rcc8dc",
+        "rcc8ec",
+        "rcc8po",
+        "rcc8tppi",
+        "rcc8tpp",
+        "rcc8ntpp",
+        "rcc8ntppi",
+    ] {
+        let got = ask_geo(&s, &format!("ASK {{ ex:a geo:{rel} ex:b }}"));
+        let direct = bind_fn(
+            &s,
+            &format!(
+                "geof:{rel}(\"POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))\"^^geo:wktLiteral, \
+                 \"POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))\"^^geo:wktLiteral)"
+            ),
+        );
+        assert_eq!(
+            got,
+            direct.contains("true"),
+            "{rel}: rewrite {got}, function {direct}"
+        );
+        if rel.ends_with("quals") || rel == "rcc8eq" {
+            assert!(got, "{rel} holds for equal regions");
+        }
+        if rel.ends_with("isjoint") || rel == "rcc8dc" {
+            assert!(!got, "{rel} fails for equal regions");
+        }
+    }
+}
+
+/// Every serialisation the rules read: WKT, GML and GeoJSON geometries are
+/// related to each other through the rewrite.
+#[test]
+fn query_rewrite_reads_every_serialisation() {
+    let s = rewrite_store();
+    // GML-only geometry (city via its GML, too) and a GeoJSON-only geometry.
+    load(
+        &s,
+        r#"ex:gmlOnly geo:hasDefaultGeometry [ geo:asGML "<gml:Point><gml:pos>5 5</gml:pos></gml:Point>"^^geo:gmlLiteral ] .
+           ex:jsonOnly geo:hasDefaultGeometry [ geo:asGeoJSON "{\"type\":\"Point\",\"coordinates\":[6,6]}"^^geo:geoJSONLiteral ] ."#,
+    );
+    assert!(ask_geo(&s, "ASK { ex:gmlOnly geo:sfWithin ex:city }"));
+    assert!(ask_geo(&s, "ASK { ex:jsonOnly geo:sfWithin ex:city }"));
+    assert!(ask_geo(&s, "ASK { ex:far geo:sfDisjoint ex:jsonOnly }"));
+}
+
+/// Spec-strict: a feature is related through its default geometry only. Its
+/// geometry itself is still related.
+#[test]
+fn query_rewrite_follows_default_geometry_only() {
+    let s = rewrite_store();
+    assert!(!ask_geo(&s, "ASK { ex:lake geo:sfWithin ex:city }"));
+    assert!(ask_geo(&s, "ASK { ex:lakeGeom geo:sfWithin ex:city }"));
+}
+
+/// An asserted relation still matches, with no geometry behind it; an
+/// asserted and derived pair, and a pair related through two serialisations
+/// (the city's WKT and GML), each match once: set semantics, as if the
+/// relation were materialised.
+#[test]
+fn query_rewrite_keeps_asserted_triples_and_set_semantics() {
+    let s = rewrite_store();
+    assert!(ask_geo(&s, "ASK { ex:told geo:sfWithin ex:city }"));
+    load(&s, "ex:park geo:sfWithin ex:city .");
+    let rows = sel(
+        &s,
+        "SELECT ?f (COUNT(*) AS ?n) WHERE { ?f geo:sfWithin ex:city } GROUP BY ?f ORDER BY ?f",
+    );
+    let n = |f: &str| {
+        rows.iter()
+            .find(|r| r[0] == format!("<http://example.org/{f}>"))
+            .map(|r| extract_f64(&r[1]) as usize)
+    };
+    assert_eq!(n("park"), Some(1), "{rows:?}");
+    assert_eq!(n("told"), Some(1), "{rows:?}");
+    assert_eq!(n("parkGeom"), Some(1), "{rows:?}");
+    assert_eq!(n("far"), None, "{rows:?}");
+    // The city is within itself (sfWithin is reflexive on equal geometries),
+    // once, though it has two serialisations.
+    assert_eq!(n("city"), Some(1), "{rows:?}");
+    assert_eq!(n("cityGeom"), Some(1), "{rows:?}");
+}
+
+/// A constant subject or object, a join with other patterns, OPTIONAL and
+/// FILTER EXISTS all see derived relations.
+#[test]
+fn query_rewrite_in_joins_and_nested_patterns() {
+    let s = rewrite_store();
+    let rows = sel(
+        &s,
+        "SELECT ?p WHERE { ?p a ex:Park . ?p geo:sfWithin ex:city }",
+    );
+    assert_eq!(rows, vec![vec!["<http://example.org/park>".to_string()]]);
+
+    let rows = sel(
+        &s,
+        "SELECT ?x WHERE { ex:city geo:sfContains ?x . ?x a ex:Park }",
+    );
+    assert_eq!(rows, vec![vec!["<http://example.org/park>".to_string()]]);
+
+    let rows = sel(
+        &s,
+        "SELECT ?p ?c WHERE { ?p a ex:Park OPTIONAL { ?p geo:sfWithin ?c FILTER(?c = ex:city) } } ORDER BY ?p",
+    );
+    assert_eq!(
+        rows,
+        vec![
+            vec!["<http://example.org/far>".to_string(), String::new()],
+            vec![
+                "<http://example.org/park>".to_string(),
+                "<http://example.org/city>".to_string()
+            ],
+        ]
+    );
+
+    let rows = sel(
+        &s,
+        "SELECT ?p WHERE { ?p a ex:Park FILTER NOT EXISTS { ?p geo:sfWithin ex:city } }",
+    );
+    assert_eq!(rows, vec![vec!["<http://example.org/far>".to_string()]]);
+
+    // A blank node in the pattern joins like the variable it stands for.
+    assert!(ask_geo(
+        &s,
+        "ASK { _:x geo:sfWithin ex:city . _:x a ex:Park }"
+    ));
+}
+
+/// Inside GRAPH the rule reads that graph only: both geometries must be in it.
+#[test]
+fn query_rewrite_stays_inside_the_graph() {
+    let s = ts();
+    let ttl = format!(
+        "{TTL_PREFIXES}\
+         GRAPH ex:g1 {{ ex:a geo:hasDefaultGeometry [ geo:asWKT \"POINT(1 1)\"^^geo:wktLiteral ] .\n\
+                       ex:b a ex:Region ; geo:hasDefaultGeometry [ geo:asWKT \"POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))\"^^geo:wktLiteral ] }}\n\
+         GRAPH ex:g2 {{ ex:c a ex:Region ; geo:hasDefaultGeometry [ geo:asWKT \"POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))\"^^geo:wktLiteral ] }}"
+    );
+    s.load_str(&ttl, RdfFormat::TriG, None).unwrap();
+    let rows = sel(
+        &s,
+        "SELECT ?g ?o WHERE { GRAPH ?g { ex:a geo:sfWithin ?o . ?o a ex:Region } }",
+    );
+    assert_eq!(
+        rows,
+        vec![vec![
+            "<http://example.org/g1>".to_string(),
+            "<http://example.org/b>".to_string()
+        ]]
+    );
+    assert!(!ask_geo(
+        &s,
+        "ASK { GRAPH ex:g2 { ex:a geo:sfWithin ex:c } }"
+    ));
+    assert!(!ask_geo(&s, "ASK { GRAPH ?g { ex:a geo:sfWithin ex:c } }"));
+}
+
+/// The rewrite applies in the WHERE clause of an update, so a derived
+/// relation can be materialised; through `update` and `batch_update` alike.
+#[test]
+fn query_rewrite_applies_to_update_where_clauses() {
+    let s = rewrite_store();
+    s.update(&format!(
+        "{GEO_PFX}\nINSERT {{ GRAPH ex:rel {{ ?p geo:sfWithin ?c }} }} \
+         WHERE {{ ?p a ex:Park . ?p geo:sfWithin ?c . FILTER(?c = ex:city) }}"
+    ))
+    .unwrap();
+    assert!(ask_geo(
+        &s,
+        "ASK { GRAPH ex:rel { ex:park geo:sfWithin ex:city } }"
+    ));
+    assert!(!ask_geo(
+        &s,
+        "ASK { GRAPH ex:rel { ex:far geo:sfWithin ex:city } }"
+    ));
+
+    let out = s
+        .batch_update(&[format!(
+            "{GEO_PFX}\nINSERT {{ GRAPH ex:rel2 {{ ?c geo:rcc8ntppi ?p }} }} \
+             WHERE {{ ?p a ex:Park . ?c geo:rcc8ntppi ?p . FILTER(?c = ex:city) }}"
+        )])
+        .unwrap();
+    assert_eq!(out.len(), 1);
+    assert!(ask_geo(
+        &s,
+        "ASK { GRAPH ex:rel2 { ex:city geo:rcc8ntppi ex:park } }"
+    ));
+}
+
+/// Scoped queries, scoped updates and confined CONSTRUCTs are rewritten too.
+#[test]
+fn query_rewrite_on_scoped_and_confined_paths() {
+    let s = ts();
+    let g = "http://example.org/scoped";
+    s.load_str(
+        &format!("{TTL_PREFIXES}{REWRITE_DATA}"),
+        RdfFormat::Turtle,
+        Some(g),
+    )
+    .unwrap();
+    let scope = vec![g.to_string()];
+    match s
+        .query_scoped(
+            &format!("{GEO_PFX}\nASK {{ ex:park geo:sfWithin ex:city }}"),
+            &scope,
+        )
+        .unwrap()
+    {
+        QueryResults::Boolean(b) => assert!(b, "scoped query"),
+        _ => panic!("expected ASK"),
+    }
+    s.update_scoped(
+        &format!(
+            "{GEO_PFX}\nINSERT {{ GRAPH ex:out {{ ?p geo:sfWithin ex:city }} }} \
+             WHERE {{ ?p a ex:Park . ?p geo:sfWithin ex:city }}"
+        ),
+        &scope,
+    )
+    .unwrap();
+    assert!(ask_geo(
+        &s,
+        "ASK { GRAPH ex:out { ex:park geo:sfWithin ex:city } }"
+    ));
+
+    let q = open_triplestore::sparql::parser()
+        .parse_query(&format!(
+            "{GEO_PFX}\nCONSTRUCT {{ ?p geo:sfWithin ex:city }} WHERE {{ ?p a ex:Park . ?p geo:sfWithin ex:city }}"
+        ))
+        .unwrap();
+    let triples = s.construct_confined(&q, &scope, &[]).unwrap();
+    assert_eq!(triples.len(), 1, "{triples:?}");
+    assert_eq!(triples[0].subject.to_string(), "<http://example.org/park>");
+}
+
+/// The accelerated paths and the engine answer a rewritten query alike, and a
+/// repeated query is served from the cache with the same answer.
+#[test]
+fn query_rewrite_takes_every_query_path() {
+    let fast = accelerated();
+    load(&fast, REWRITE_DATA);
+    let plain = engine_only();
+    load(&plain, REWRITE_DATA);
+    let _ = fast.query("SELECT ?s WHERE { ?s ?p ?o } LIMIT 1").unwrap();
+    for q in [
+        "SELECT ?a ?b WHERE { ?a geo:sfWithin ?b }",
+        "SELECT (COUNT(*) AS ?n) WHERE { ?a geo:ehInside ?b }",
+        "SELECT ?p WHERE { ?p a ex:Park . ?p geo:rcc8ntpp ex:city }",
+    ] {
+        let q = format!("{GEO_PFX}\n{q}");
+        let mut a = solutions(fast.query(&q).unwrap());
+        let mut b = solutions(plain.query(&q).unwrap());
+        a.sort();
+        b.sort();
+        assert!(!a.is_empty(), "{q}");
+        assert_eq!(a, b, "accelerated vs engine: {q}");
+    }
+    let cached = open_triplestore::store::TripleStore::in_memory()
+        .unwrap()
+        .with_query_cache(true, 16, 1000)
+        .with_parallel_query(false, 1, 0);
+    load(&cached, REWRITE_DATA);
+    let q = format!("{GEO_PFX}\nSELECT ?a WHERE {{ ?a geo:sfWithin ex:city }} ORDER BY ?a");
+    let first = solutions(cached.query(&q).unwrap());
+    let second = solutions(cached.query(&q).unwrap());
+    assert_eq!(first, second);
+    assert!(first.len() >= 4, "{first:?}");
+}
+
+/// `OTS_GEOSPARQL_QUERY_REWRITE=off` (here the store's builder): only
+/// asserted relations match.
+#[test]
+fn query_rewrite_can_be_switched_off() {
+    let s = open_triplestore::store::TripleStore::in_memory()
+        .unwrap()
+        .with_geosparql_query_rewrite(false);
+    load(&s, REWRITE_DATA);
+    assert!(!ask_geo(&s, "ASK { ex:park geo:sfWithin ex:city }"));
+    assert!(ask_geo(&s, "ASK { ex:told geo:sfWithin ex:city }"));
+}
+
+// ═══════════════════════════════════════════════════════════
+// GeoSPARQL 1.0 core, topology vocabulary and geometry classes —
+// 11-052r4 R2–R9 (22-047r1 Req 2–3, 7–13): the vocabulary is usable in
+// graph patterns. Any SPARQL store satisfies these; the tests pin it.
+// ═══════════════════════════════════════════════════════════
+
+const VOCAB_DATA: &str = r#"
+ex:f a geo:Feature ; geo:hasGeometry ex:g ; geo:hasDefaultGeometry ex:g .
+ex:g a geo:Geometry , sf:Polygon ;
+    geo:asWKT "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))"^^geo:wktLiteral ;
+    geo:dimension 2 ; geo:coordinateDimension 2 ; geo:spatialDimension 2 ;
+    geo:isEmpty false ; geo:isSimple true .
+ex:o a geo:SpatialObject .
+ex:a geo:sfTouches ex:b ; geo:ehMeet ex:b ; geo:rcc8ec ex:b .
+"#;
+
+#[test]
+fn ogc10_r02_r03_spatial_object_and_feature_classes() {
+    let s = ts();
+    load(&s, VOCAB_DATA);
+    assert!(ask_geo(&s, "ASK { ex:o a geo:SpatialObject }"));
+    assert!(ask_geo(&s, "ASK { ex:f a geo:Feature }"));
+}
+
+#[test]
+fn ogc10_r04_r05_r06_topology_vocabulary_properties() {
+    // Asserted relation triples are ordinary triples, with or without the
+    // Query Rewrite Extension.
+    for rewrite in [true, false] {
+        let s = open_triplestore::store::TripleStore::in_memory()
+            .unwrap()
+            .with_geosparql_query_rewrite(rewrite);
+        load(&s, VOCAB_DATA);
+        for rel in ["sfTouches", "ehMeet", "rcc8ec"] {
+            assert!(
+                ask_geo(&s, &format!("ASK {{ ex:a geo:{rel} ex:b }}")),
+                "{rel}, rewrite {rewrite}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ogc10_r07_r08_r09_geometry_class_and_properties() {
+    let s = ts();
+    load(&s, VOCAB_DATA);
+    assert!(ask_geo(&s, "ASK { ex:g a geo:Geometry }"));
+    assert!(ask_geo(
+        &s,
+        "ASK { ex:f geo:hasGeometry ex:g ; geo:hasDefaultGeometry ex:g }"
+    ));
+    let rows = sel(
+        &s,
+        "SELECT ?d ?c ?sd ?e ?simple WHERE { ex:g geo:dimension ?d ; geo:coordinateDimension ?c ; \
+         geo:spatialDimension ?sd ; geo:isEmpty ?e ; geo:isSimple ?simple }",
+    );
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0][4].contains("true"), "{rows:?}");
+    // geo:hasSerialization is the super-property of the serialisations; data
+    // can also state it directly.
+    load(
+        &s,
+        "ex:g2 geo:hasSerialization \"POINT(1 1)\"^^geo:wktLiteral .",
+    );
+    assert!(ask_geo(&s, "ASK { ex:g2 geo:hasSerialization ?l }"));
 }

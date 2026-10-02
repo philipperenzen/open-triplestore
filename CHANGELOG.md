@@ -14,6 +14,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **GeoSPARQL Query Rewrite Extension.** A triple pattern whose predicate is
+  one of the 24 topological relations (`geo:sfWithin`, `geo:ehMeet`,
+  `geo:rcc8ntpp`, …) now also matches where the geometries imply the relation,
+  as the standard's rules give it: each side a feature through
+  `geo:hasDefaultGeometry` or a geometry itself, its literal from `geo:asWKT`,
+  `asGML`, `asGeoJSON` or `asKML`, decided by the `geof:` function of the same
+  name. Results have set semantics (two serialisations of one geometry, or an
+  asserted and a derived relation, match once), stay inside a `GRAPH` pattern,
+  and apply in queries and in the `WHERE` clause of `DELETE`/`INSERT` updates.
+  Variable predicates, property paths and `SERVICE` blocks are left alone.
+  `OTS_GEOSPARQL_QUERY_REWRITE=off` turns it off (`src/geo/query_rewrite.rs`).
+- **GeoSPARQL RDFS Entailment Extension: geometry class hierarchies as
+  premises.** OGC's Simple Features vocabulary (`sf.ttl`, registry entry `sf`,
+  Apache-2.0, bundled unchanged) and a GML 3.2.1 geometry class hierarchy
+  (`gml.ttl`, registry entry `gml-geometries`), which Open Triplestore wrote
+  from the GML 3.2.1 schema's substitution groups because OGC no longer
+  publishes one, are seeded as public reference models. A dataset whose graphs
+  use any GeoSPARQL term now reasons over them and the GeoSPARQL ontology,
+  without declaring conformance to them; `GET /api/datasets/{id}/conformance`
+  lists them as `vocabulary_premises`.
+- **GeoSPARQL requirement matrix.** `docs/conformance/geosparql.md` maps every
+  requirement of GeoSPARQL 1.0 and 1.1 to its status and tests. GeoSPARQL 1.0
+  meets 28 of 30; the GML literal profile (R15, R17) keeps it Partial, now with
+  its own row in `docs/standards.md`.
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -67,6 +91,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asks for, and re-pins; the store now tells everyone which datasets that applies to.
 
 ### Changed
+- **GeoSPARQL relation patterns match derived relations.** A query or update
+  that reads `?a geo:sfWithin ?b` (or any other of the 24 relations) used to
+  match asserted triples only; it now also matches pairs whose geometries are
+  related, and each pair once. Set `OTS_GEOSPARQL_QUERY_REWRITE=off` for the
+  old behaviour. A pattern with both sides unbound compares every pair of
+  geometries in scope.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were

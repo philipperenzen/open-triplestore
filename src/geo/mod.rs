@@ -6,6 +6,8 @@ pub mod geodesic;
 pub mod geojson;
 pub mod gml;
 pub mod places;
+pub mod premises;
+pub mod query_rewrite;
 pub mod spatial_index;
 pub mod viewer_feed;
 pub mod vocabulary;
