@@ -24,10 +24,10 @@ pub struct AuthenticatedUser {
     /// this is `true` only when the token was issued with `write` or `admin` scope (M-8).
     pub write_access: bool,
     /// True if this principal may exchange itself for a long-lived API token at
-    /// `POST /api/auth/tokens`. False for OIDC access tokens under the default
-    /// policy: a credential delegated to a client (possibly for read-only
-    /// scopes) must not be upgradable into permanent account access. See
-    /// [`crate::auth::policy::OidcSessionPolicy`].
+    /// `POST /api/auth/tokens`. False for OIDC access tokens — ours and the
+    /// external IdP's — under the default policy: a credential delegated to a
+    /// client (possibly for read-only scopes) must not be upgradable into
+    /// permanent account access. See [`crate::auth::policy::OidcSessionPolicy`].
     pub can_mint_api_tokens: bool,
     /// The scopes an API token was issued with. Empty for a session, whose
     /// authority is the user's own; a resource scope (`sources:read`,
@@ -236,12 +236,19 @@ async fn resolve_oidc_token(
         return Err((StatusCode::UNAUTHORIZED, "User account is deactivated").into_response());
     }
 
+    // An IdP token is a delegation too: whichever client holds it for this
+    // audience may present it. By default (`OIDC_TOKEN_POLICY=session`) it
+    // writes like an interactive session but may not mint a long-lived API
+    // token, which would turn that delegation into permanent account access.
+    // The same rule `OTS_OIDC_SESSION_POLICY` sets for our own provider tokens,
+    // configured separately because the two are issued to different clients.
+    let policy = crate::auth::policy::idp_token_policy();
     Ok(AuthenticatedUser {
         user_id: user.id,
         role: user.role,
         can_publish: user.can_publish,
-        write_access: true, // interactive (OIDC) sessions always have write access
-        can_mint_api_tokens: true,
+        write_access: policy.allows_idp_write(&claims.scope()),
+        can_mint_api_tokens: policy.allows_api_token_minting(),
         scopes: Vec::new(),
     }
     .clamped_to_role_policy())

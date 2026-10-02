@@ -1,8 +1,9 @@
-//! Configurable capability policy for the two principals whose power used to be
-//! implicit: self-registered **guests**, and **OIDC access tokens** this server
-//! issues to registered clients.
+//! Configurable capability policy for the principals whose power used to be
+//! implicit: self-registered **guests**, **OIDC access tokens** this server
+//! issues to registered clients, and access tokens an **external IdP** issues
+//! for this store's audience (resource-server mode).
 //!
-//! Both are deliberately env-driven with a conservative default, because the
+//! All three are deliberately env-driven with a conservative default, because the
 //! right answer differs per deployment: a public demo wants guests who can only
 //! look, an internal instance may want them to fill forms.
 //!
@@ -14,6 +15,12 @@
 //!   access token was accepted as a full-power credential and could be exchanged
 //!   for a long-lived API token at `POST /api/auth/tokens`, turning a read-only
 //!   delegation into permanent account access.
+//! * [`idp_token_policy`] — `OIDC_TOKEN_POLICY`, default `session`. The same
+//!   choice for IdP access tokens, which used to mint API tokens too. It is a
+//!   separate setting because the two token sources are configured for
+//!   different audiences: tightening this store's own provider for third-party
+//!   clients must not silently make every IdP user read-only, and loosening it
+//!   for one legacy client must not reopen minting for every IdP token.
 //!
 //! The parsing is pure so the decisions are unit-testable without a server.
 
@@ -78,7 +85,9 @@ pub fn guest_capabilities() -> GuestCapabilities {
     }
 }
 
-/// How much authority an OIDC access token issued by this server carries.
+/// How much authority a delegated OIDC access token carries: one issued by
+/// this server ([`oidc_session_policy`]) or by the external IdP
+/// ([`idp_token_policy`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OidcSessionPolicy {
     /// Interactive-session semantics: may read and write, but may NOT mint API
@@ -98,11 +107,22 @@ pub enum OidcSessionPolicy {
 }
 
 impl OidcSessionPolicy {
-    /// Whether a token carrying `scope` may write.
+    /// Whether a provider token carrying `scope` may write. Extra write
+    /// scopes come from `OTS_OIDC_WRITE_SCOPES`.
     pub fn allows_write(self, scope: &str) -> bool {
+        self.allows_write_with(scope, || env_or_empty("OTS_OIDC_WRITE_SCOPES"))
+    }
+
+    /// Whether an IdP token carrying `scope` may write. Extra write scopes
+    /// come from `OIDC_WRITE_SCOPES`.
+    pub fn allows_idp_write(self, scope: &str) -> bool {
+        self.allows_write_with(scope, || env_or_empty("OIDC_WRITE_SCOPES"))
+    }
+
+    fn allows_write_with(self, scope: &str, extra_scopes: impl FnOnce() -> String) -> bool {
         match self {
             OidcSessionPolicy::Session | OidcSessionPolicy::Full => true,
-            OidcSessionPolicy::Scoped => scope_grants_write(scope),
+            OidcSessionPolicy::Scoped => scope_grants_write_with(scope, &extra_scopes()),
         }
     }
 
@@ -112,16 +132,15 @@ impl OidcSessionPolicy {
     }
 }
 
-/// Scope values understood as granting write. `admin` implies write.
-///
-/// Clients that namespace their scopes (`myapp:write`) name the extra spellings
-/// in `OTS_OIDC_WRITE_SCOPES` rather than teaching this server about them.
-fn scope_grants_write(scope: &str) -> bool {
-    let extra = std::env::var("OTS_OIDC_WRITE_SCOPES").unwrap_or_default();
-    scope_grants_write_with(scope, &extra)
+fn env_or_empty(var: &str) -> String {
+    std::env::var(var).unwrap_or_default()
 }
 
-/// Pure form of [`scope_grants_write`], so the matching is testable without env.
+/// Scope values understood as granting write. `admin` implies write.
+///
+/// Issuers that namespace their scopes (`myapp:write`) name the extra
+/// spellings in `extra_scopes` (`OTS_OIDC_WRITE_SCOPES` / `OIDC_WRITE_SCOPES`)
+/// rather than teaching this server about them.
 fn scope_grants_write_with(scope: &str, extra_scopes: &str) -> bool {
     let extra: Vec<String> = scope_words(extra_scopes).collect();
     scope_words(scope).any(|s| matches!(s.as_str(), "write" | "admin") || extra.contains(&s))
@@ -136,24 +155,43 @@ fn scope_words(raw: &str) -> impl Iterator<Item = String> + '_ {
 /// Parse `OTS_OIDC_SESSION_POLICY`. Anything unrecognised falls back to the
 /// default rather than to the permissive setting.
 pub fn parse_oidc_session_policy(raw: &str) -> OidcSessionPolicy {
+    parse_policy("OTS_OIDC_SESSION_POLICY", raw)
+}
+
+/// Parse `OIDC_TOKEN_POLICY`; same values and fallback as
+/// [`parse_oidc_session_policy`].
+pub fn parse_idp_token_policy(raw: &str) -> OidcSessionPolicy {
+    parse_policy("OIDC_TOKEN_POLICY", raw)
+}
+
+fn parse_policy(var: &str, raw: &str) -> OidcSessionPolicy {
     match raw.trim().to_ascii_lowercase().as_str() {
         "scoped" => OidcSessionPolicy::Scoped,
         "full" | "legacy" => OidcSessionPolicy::Full,
         "session" | "" => OidcSessionPolicy::Session,
         other => {
             tracing::warn!(
-                "OTS_OIDC_SESSION_POLICY: unknown value {other:?}, using 'session' \
-                 (known: session, scoped, full)"
+                "{var}: unknown value {other:?}, using 'session' (known: session, scoped, full)"
             );
             OidcSessionPolicy::Session
         }
     }
 }
 
-/// The OIDC access-token policy for this deployment (default: `session`).
+/// The policy for access tokens this server issues as an OIDC provider
+/// (default: `session`).
 pub fn oidc_session_policy() -> OidcSessionPolicy {
     match std::env::var("OTS_OIDC_SESSION_POLICY") {
         Ok(raw) => parse_oidc_session_policy(&raw),
+        Err(_) => OidcSessionPolicy::Session,
+    }
+}
+
+/// The policy for access tokens the external IdP issues for this store's
+/// audience (default: `session`). Independent of [`oidc_session_policy`].
+pub fn idp_token_policy() -> OidcSessionPolicy {
+    match std::env::var("OIDC_TOKEN_POLICY") {
+        Ok(raw) => parse_idp_token_policy(&raw),
         Err(_) => OidcSessionPolicy::Session,
     }
 }
@@ -237,5 +275,14 @@ mod tests {
         let p = parse_oidc_session_policy("banana");
         assert_eq!(p, OidcSessionPolicy::Session);
         assert!(!p.allows_api_token_minting());
+    }
+
+    #[test]
+    fn idp_token_policy_reads_the_same_values_and_defaults_to_session() {
+        assert_eq!(parse_idp_token_policy(""), OidcSessionPolicy::Session);
+        assert!(!parse_idp_token_policy("").allows_api_token_minting());
+        assert_eq!(parse_idp_token_policy("Scoped"), OidcSessionPolicy::Scoped);
+        assert_eq!(parse_idp_token_policy("legacy"), OidcSessionPolicy::Full);
+        assert_eq!(parse_idp_token_policy("banana"), OidcSessionPolicy::Session);
     }
 }

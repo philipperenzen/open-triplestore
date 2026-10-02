@@ -14,6 +14,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`OIDC_TOKEN_POLICY` and `OIDC_WRITE_SCOPES`.** What an access token from
+  an external IdP (OIDC resource-server mode) may do is now a setting, with the
+  same values as `OTS_OIDC_SESSION_POLICY`: `session` (default), `scoped`
+  (write only when the token's `scope` or `scp` claim carries `write`,
+  `admin` or a value listed in `OIDC_WRITE_SCOPES`) and `full`. It is separate
+  from `OTS_OIDC_SESSION_POLICY` because the two token sources are issued to
+  different clients. `docker-compose.yml` passes both through.
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -51,6 +58,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/ldp.md`, "Access control".
 
 ### Changed
+- **IdP access tokens no longer create API tokens by default.** In OIDC
+  resource-server mode an access token issued by the external IdP was treated
+  as a full interactive session, including `POST /api/auth/tokens`, so any
+  client holding a user's IdP token for this store's audience could turn it
+  into a permanent `ots_` token for that account. Under the new default
+  `OIDC_TOKEN_POLICY=session` such a token still reads and writes but gets
+  `403` when it asks for an API token, the rule `OTS_OIDC_SESSION_POLICY`
+  already set for this store's own provider tokens. Create API tokens from a
+  web UI sign-in, or set `OIDC_TOKEN_POLICY=full` to restore the old behaviour.
+- **`OIDC_DEFAULT_ROLE` is capped at `user`.** The default role applies to
+  every account an IdP token creates, so `admin` or `super_admin` made every
+  account the IdP knows an administrator; claim-mapped roles were already
+  capped at `admin`. Such a value now logs an error at startup and `user` is
+  used. The cap also applies to the `env-oidc` provider entry's default role,
+  so an entry created by an earlier version with an admin default, or edited
+  to one, creates `user` accounts. `guest` is kept. Grant admin per account
+  through `OIDC_ROLE_CLAIM_MAP` or the UI.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were
