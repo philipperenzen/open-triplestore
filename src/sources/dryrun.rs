@@ -239,6 +239,11 @@ pub struct DryRunResponse {
     pub classification: Classification,
     pub entities: Vec<Entity>,
     pub warnings: Vec<String>,
+    /// Sampled rows whose values cannot become the terms the mapping asks for
+    /// (R2RML §4.3). The sample leaves those terms out; a run over the same
+    /// rows fails unless it runs with `onDataError: "skip"`. Absent when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_errors: Option<crate::rml::checks::DataErrors>,
 }
 
 // ───────────────────────────── Classification ─────────────────────────────
@@ -756,6 +761,7 @@ pub async fn dry_run(
         rows: outcome.rows,
         triples: outcome.triples,
         maps: outcome.maps,
+        data_errors: (!outcome.data_errors.is_empty()).then_some(outcome.data_errors),
         shapes_graphs,
         report: report.map(|r| ReportSummary {
             conforms: r.conforms,

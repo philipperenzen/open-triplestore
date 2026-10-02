@@ -127,6 +127,12 @@ pub struct LogicalSource {
     pub query: Option<String>,
     /// `rr:tableName` — a whole table or view as the logical source.
     pub table_name: Option<String>,
+    /// `rml:null` (RML-IO): source values that count as NULL, besides the
+    /// source's own NULL (a SQL NULL, a JSON `null`). CSV and XML have none,
+    /// so there nothing is NULL unless listed here. Honoured under
+    /// [`Semantics::R2rml`]; a legacy version treats every empty value as
+    /// NULL instead.
+    pub nulls: Vec<String>,
 }
 
 impl LogicalSource {
@@ -214,13 +220,36 @@ pub struct SubjectMap {
 }
 
 /// rr:PredicateObjectMap — maps source rows to predicate-object pairs.
+///
+/// A map generates one triple for every predicate map × every object map
+/// (R2RML §6.3, §11.1); `rr:predicate` and `rr:object` shortcuts count as
+/// maps of their own.
 #[derive(Debug, Clone)]
 pub struct PredicateObjectMap {
-    pub predicate_map: TermMap,
-    pub object: ObjectMap,
+    /// Never empty.
+    pub predicate_maps: Vec<TermMap>,
+    /// Never empty.
+    pub object_maps: Vec<ObjectMap>,
     /// Graphs this map's triples go to *as well as* the subject's: R2RML
     /// takes the union, it does not override.
     pub graph_maps: Vec<TermMap>,
+}
+
+impl PredicateObjectMap {
+    /// The referencing object maps among this map's objects.
+    pub fn refs(&self) -> impl Iterator<Item = &RefObjectMap> {
+        self.object_maps.iter().filter_map(|o| match o {
+            ObjectMap::Ref(r) => Some(r),
+            _ => None,
+        })
+    }
+}
+
+impl TriplesMap {
+    /// Every referencing object map of every predicate-object map.
+    pub fn refs(&self) -> impl Iterator<Item = &RefObjectMap> {
+        self.predicate_object_maps.iter().flat_map(|p| p.refs())
+    }
 }
 
 /// How a predicate-object map produces its object.
@@ -418,6 +447,7 @@ mod tests {
             iterator: None,
             query: None,
             table_name: Some("products".into()),
+            nulls: Vec::new(),
         };
         assert_eq!(table.sql(&quote).unwrap(), "SELECT * FROM \"products\"");
         let query = LogicalSource {
@@ -436,6 +466,7 @@ mod tests {
             iterator: None,
             query: None,
             table_name: None,
+            nulls: Vec::new(),
         };
         assert_eq!(file.sql(&quote), None);
     }

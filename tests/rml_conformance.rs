@@ -12,14 +12,22 @@
 //! Most tests name their term maps (`ex:Subj rr:template …`); inline blank
 //! nodes parse the same way (`rml_inline_blank_node_mapping`).
 //!
+//! A predicate-object map generates every predicate map × every object map
+//! (§6.3, §11.1). A non-conforming mapping is refused at parse with the
+//! construct named, a column the source lacks is an error, and a data error
+//! (§4.3) aborts the run unless it opts into skipping and reporting. An empty
+//! value is a value; RML-IO `rml:null` names the values that count as NULL.
+//!
 //! Referencing object maps (joins / `rr:parentTriplesMap`) run on relational
 //! sources only; the file executor refuses them (see the test below).
 //!
 //! A mapping version frozen before the engine followed R2RML's term rules
 //! keeps the old ones (`Semantics::Legacy`); `rml_legacy_semantics_*` pin them.
 
-use open_triplestore::rml::model::Semantics;
-use open_triplestore::rml::{execute, parse_from_store_as, parse_rml};
+use open_triplestore::rml::checks::OnDataError;
+use open_triplestore::rml::model::{RmlMapping, Semantics};
+use open_triplestore::rml::sql::{execute_relational_filtered, SqlOutcome};
+use open_triplestore::rml::{execute_with, parse_from_store_as, parse_rml};
 use open_triplestore::store::TripleStore;
 use oxigraph::sparql::QueryResults;
 use std::collections::HashMap;
@@ -37,6 +45,24 @@ PREFIX foaf: <http://xmlns.com/foaf/0.1/> \
 PREFIX ex: <http://example.org/> \
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> \
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> ";
+
+/// Run a file mapping the default way: a data error aborts.
+fn execute(
+    mapping: &RmlMapping,
+    source_data: &HashMap<String, String>,
+    store: &TripleStore,
+    target_graph: Option<&str>,
+) -> Result<usize, String> {
+    execute_with(
+        mapping,
+        source_data,
+        store,
+        target_graph,
+        OnDataError::Abort,
+        |_| Ok(()),
+    )
+    .map(|o| o.triples)
+}
 
 fn run_rml(mapping: &str, sources: &[(&str, &str)]) -> (TripleStore, usize) {
     let m = parse_rml(&format!("{PFX}{mapping}")).expect("parse_rml");
@@ -240,25 +266,6 @@ fn rml_duplicate_rows_dedup() {
         1,
         "three identical triples deduplicate to one"
     );
-}
-
-// Documented behavior: an EMPTY CSV cell currently produces an (empty-string)
-// literal rather than suppressing the triple. The RML spec suppresses triples for
-// NULL/absent values; for CSV the engine treats an empty cell as an empty string.
-#[test]
-fn rml_empty_csv_cell_behavior() {
-    let mapping = r#"
-      ex:M a rr:TriplesMap ;
-        rml:logicalSource ex:Src ; rr:subjectMap ex:Subj ;
-        rr:predicateObjectMap ex:POM .
-      ex:Src rml:source "d.csv" ; rml:referenceFormulation ql:CSV .
-      ex:Subj rr:template "http://example.org/r/{id}" .
-      ex:POM rr:predicate ex:nickname ; rr:objectMap ex:Obj .
-      ex:Obj rml:reference "nickname" ."#;
-    let (store, _) = run_rml(mapping, &[("d.csv", "id,nickname\n1,Ace\n2,\n")]);
-    let n = count(&store, "SELECT ?o WHERE { ?s ex:nickname ?o }");
-    // Row 1 -> "Ace"; row 2 -> "" (empty literal). Document current (non-suppressing) behavior.
-    assert!(n >= 1, "at least the non-empty value is mapped, got {n}");
 }
 
 // Inline blank-node term maps (the natural RML authoring form) produce the correct
@@ -600,15 +607,15 @@ fn rml_literal_with_newline_does_not_break_the_mapping() {
     );
 }
 
-// A reference-derived IRI whose value is not a valid IRI must skip that term,
-// not emit invalid Turtle that fails the whole batch.
+// A reference-derived IRI whose value is not a valid IRI is a data error
+// (R2RML §4.3, §11.2): the run aborts, writes nothing, and names the row.
 //
-// `rr:termType rr:IRI` on an `rml:reference` interpolated the raw cell value
-// between angle brackets with no validation or encoding, so a value with a
-// space produced an unparseable document and a value containing `>` could
-// close the IRI and inject further triples.
+// `rr:termType rr:IRI` on an `rml:reference` once interpolated the raw cell
+// value between angle brackets, so a value with a space produced an
+// unparseable document and one containing `>` could close the IRI and inject
+// further triples. Then it skipped the term silently. Now it is reported.
 #[test]
-fn rml_invalid_iri_reference_skips_the_term_not_the_batch() {
+fn rml_invalid_iri_is_a_data_error_that_aborts_and_names_the_row() {
     let mapping = r#"
       ex:M a rr:TriplesMap ;
         rml:logicalSource ex:Src ; rr:subjectMap ex:Subj ;
@@ -617,17 +624,28 @@ fn rml_invalid_iri_reference_skips_the_term_not_the_batch() {
       ex:Subj rr:template "http://example.org/link/{id}" .
       ex:POM rr:predicate ex:target ; rr:objectMap ex:Obj .
       ex:Obj rml:reference "target" ; rr:termType rr:IRI ."#;
-    let csv = "id,target\n1,http://example.org/ok\n2,not a valid iri\n";
-    let (store, _n) = run_rml(mapping, &[("links.csv", csv)]);
+    let csv = "id,target\n1,http://example.org/ok\n2,not a valid iri\n3,http://example.org/ok2\n";
+    let m = parse_rml(&format!("{PFX}{mapping}")).unwrap();
+    let src = HashMap::from([("links.csv".to_string(), csv.to_string())]);
 
-    assert_eq!(
-        first(
-            &store,
-            "SELECT ?t WHERE { <http://example.org/link/1> ex:target ?t }"
-        )
-        .as_deref(),
-        Some("<http://example.org/ok>"),
-        "the valid row must still be mapped"
+    let store = TripleStore::in_memory().unwrap();
+    let err = execute(&m, &src, &store, None).unwrap_err();
+    assert!(err.contains("data error"), "{err}");
+    assert!(err.contains("row 2"), "the offending row is named: {err}");
+    assert!(err.contains("\"not a valid iri\""), "and its value: {err}");
+    assert!(err.contains("column \"target\""), "and the term map: {err}");
+    assert!(err.contains("on_data_error=skip"), "and the way out: {err}");
+    assert_eq!(store.len().unwrap(), 0, "an aborted run writes nothing");
+
+    // The opt-in lenient mode leaves the term out and reports the row.
+    let store = TripleStore::in_memory().unwrap();
+    let outcome = execute_with(&m, &src, &store, None, OnDataError::Skip, |_| Ok(())).unwrap();
+    assert_eq!(outcome.triples, 2, "the valid rows are mapped");
+    assert_eq!(outcome.data_errors.rows, 1);
+    assert!(
+        outcome.data_errors.first[0].contains("row 2"),
+        "{:?}",
+        outcome.data_errors
     );
     assert_eq!(
         count(
@@ -635,7 +653,311 @@ fn rml_invalid_iri_reference_skips_the_term_not_the_batch() {
             "SELECT ?t WHERE { <http://example.org/link/2> ex:target ?t }"
         ),
         0,
-        "the unrepresentable IRI must be skipped"
+        "the unrepresentable IRI is skipped"
+    );
+}
+
+// R2RML §10.3: a literal whose rr:datatype overrides the natural one and whose
+// value is outside that datatype's lexical space is ill-typed — a data error.
+#[test]
+fn r2rml_ill_typed_datatype_override_is_a_data_error() {
+    let ddl = "CREATE TABLE m (id INTEGER PRIMARY KEY, v TEXT);
+               INSERT INTO m VALUES (1, '42'), (2, 'forty-two'), (3, '7');";
+    let rml = format!(
+        "{PFX}
+         ex:M a rr:TriplesMap ;
+           rr:logicalTable [ rr:tableName \"m\" ] ;
+           rr:subjectMap [ rr:template \"http://example.org/m/{{id}}\" ] ;
+           rr:predicateObjectMap [ rr:predicate ex:v ;
+             rr:objectMap [ rr:column \"v\" ; rr:datatype xsd:integer ] ] ."
+    );
+    let err = relational(ddl, &rml, OnDataError::Abort)
+        .err()
+        .expect("the run fails");
+    assert!(
+        err.contains("row 2") && err.contains("\"forty-two\""),
+        "{err}"
+    );
+    assert!(err.contains("integer"), "{err}");
+
+    let (store, outcome) = relational(ddl, &rml, OnDataError::Skip).unwrap();
+    assert_eq!(outcome.data_errors.rows, 1);
+    assert_eq!(
+        count(
+            &store,
+            "SELECT ?v WHERE { GRAPH <urn:run:test> { ?s ex:v ?v } }"
+        ),
+        2
+    );
+}
+
+// ── Mapping validation (R2RML: a non-conforming mapping is refused) ──
+
+#[test]
+fn r2rml_non_conforming_mappings_are_refused_naming_the_construct() {
+    let ls = "rml:logicalSource [ rml:source \"d.csv\" ; rml:referenceFormulation ql:CSV ]";
+    let sm = "rr:subjectMap [ rr:template \"http://example.org/r/{id}\" ]";
+    let om = |body: &str| {
+        format!(
+            "{ls} ; {sm} ; rr:predicateObjectMap [ rr:predicate ex:p ; rr:objectMap [ {body} ] ]"
+        )
+    };
+    let cases: Vec<(String, &str)> = vec![
+        (
+            format!("{ls} ; {sm} ; rr:subject ex:Other"),
+            "2 subject maps",
+        ),
+        (
+            format!("{ls} ; rr:logicalTable [ rr:tableName \"t\" ] ; {sm}"),
+            "2 logical sources",
+        ),
+        (om("rr:column \"a\" ; rr:template \"{b}\""), "both rr:template and rr:column"),
+        (om("rr:column \"a\", \"b\""), "2 values of rr:column"),
+        (
+            om("rr:column \"a\" ; rr:language \"en\" ; rr:datatype xsd:string"),
+            "both rr:language and rr:datatype",
+        ),
+        (om("rr:column \"a\" ; rr:language \"not a tag\""), "not a valid BCP 47"),
+        (om("rr:column \"a\" ; rr:datatype \"xsd:int\""), "rr:datatype"),
+        (om("rr:column \"a\" ; rr:termType rr:Thing"), "rr:termType"),
+        (
+            om("rr:column \"a\" ; rr:termType rr:IRI ; rr:language \"en\""),
+            "only a literal takes a language tag",
+        ),
+        (
+            om("rr:parentTriplesMap ex:M ; rr:column \"a\""),
+            "both rr:parentTriplesMap and rr:column",
+        ),
+        (
+            om("rr:parentTriplesMap ex:M ; rr:joinCondition [ rr:child \"a\", \"b\" ; rr:parent \"a\" ]"),
+            "2 values of rr:child",
+        ),
+        (
+            format!("{ls} ; rr:subjectMap [ rr:column \"id\" ; rr:termType rr:Literal ]"),
+            "the subject map generates rr:Literal",
+        ),
+        (
+            format!("{ls} ; {sm} ; rr:predicateObjectMap [ rr:predicateMap [ rr:column \"p\" ; rr:termType rr:BlankNode ] ; rr:object ex:o ]"),
+            "the predicate map generates rr:BlankNode",
+        ),
+        (
+            format!("{ls} ; rr:subjectMap [ rr:template \"http://example.org/r/{{id}}\" ; rr:graphMap [ rr:template \"g{{id}}\" ; rr:termType rr:BlankNode ] ]"),
+            "the graph map generates rr:BlankNode",
+        ),
+        (
+            format!("{ls} ; rr:subjectMap [ rr:template \"http://example.org/r/{{id}}\" ; rr:class \"Person\" ]"),
+            "rr:class \"Person\" is not an IRI",
+        ),
+        (
+            "rml:logicalSource [ rml:source <urn:source:s> ; rr:tableName \"t\" ; rr:sqlQuery \"SELECT 1\" ] ; rr:subjectMap [ rr:template \"http://example.org/r/{id}\" ]".to_string(),
+            "both rr:tableName and a query",
+        ),
+    ];
+    for (body, construct) in cases {
+        let doc = format!("{PFX}ex:M a rr:TriplesMap ; {body} .");
+        let err = parse_rml(&doc).expect_err(construct);
+        assert!(
+            err.contains(construct),
+            "expected '{construct}' in: {err}\n---\n{doc}"
+        );
+        assert!(
+            err.contains("<http://example.org/M>"),
+            "the triples map is named: {err}"
+        );
+    }
+    // rr:sqlVersion and rr:inverseExpression are R2RML and are accepted.
+    parse_rml(&format!(
+        "{PFX}ex:M a rr:TriplesMap ;
+           rr:logicalTable [ rr:sqlQuery \"SELECT 1 AS id\" ; rr:sqlVersion rr:SQL2008 ] ;
+           rr:subjectMap [ rr:template \"http://example.org/r/{{id}}\" ;
+                           rr:inverseExpression \"{{id}}\" ] ."
+    ))
+    .expect("rr:sqlVersion and rr:inverseExpression are accepted");
+}
+
+// R2RML §6: every column a triples map names must exist in its logical table.
+// A typo used to produce no triples at all and report success.
+#[test]
+fn rml_a_column_the_csv_header_lacks_is_an_error() {
+    let m = parse_rml(&format!(
+        "{PFX}ex:M a rr:TriplesMap ;
+           rml:logicalSource [ rml:source \"d.csv\" ; rml:referenceFormulation ql:CSV ] ;
+           rr:subjectMap [ rr:template \"http://example.org/r/{{id}}\" ] ;
+           rr:predicateObjectMap [ rr:predicate ex:n ; rr:objectMap [ rml:reference \"nmae\" ] ] ."
+    ))
+    .unwrap();
+    let src = HashMap::from([("d.csv".to_string(), "id,name\n1,Al\n".to_string())]);
+    let err = execute(&m, &src, &TripleStore::in_memory().unwrap(), None).unwrap_err();
+    assert!(err.contains("\"nmae\" (in an object map)"), "{err}");
+    assert!(
+        err.contains("\"id\", \"name\""),
+        "the columns it has: {err}"
+    );
+}
+
+#[test]
+fn r2rml_a_column_the_sql_source_lacks_is_an_error() {
+    let ddl = "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, alt TEXT);
+               INSERT INTO t VALUES (1, NULL, NULL);";
+    for ls in [
+        "rr:tableName \"t\"",
+        "rr:sqlQuery \"SELECT id, name FROM t\"",
+    ] {
+        let rml = format!(
+            "{PFX}ex:M a rr:TriplesMap ;
+               rr:logicalTable [ {ls} ] ;
+               rr:subjectMap [ rr:template \"http://example.org/r/{{id}}\" ] ;
+               rr:predicateObjectMap [ rr:predicate ex:n ; rr:objectMap [ rr:column \"nmae\" ] ] ."
+        );
+        let err = relational(ddl, &rml, OnDataError::Abort)
+            .err()
+            .expect("the run fails");
+        assert!(err.contains("\"nmae\""), "{ls}: {err}");
+    }
+    // A column that exists but is NULL in every row is not an error: it
+    // generates no term.
+    let rml = format!(
+        "{PFX}ex:M a rr:TriplesMap ;
+           rr:logicalTable [ rr:tableName \"t\" ] ;
+           rr:subjectMap [ rr:template \"http://example.org/r/{{id}}\" ] ;
+           rr:predicateObjectMap [ rr:predicate ex:n ; rr:objectMap [ rr:column \"name\" ] ] ."
+    );
+    relational(ddl, &rml, OnDataError::Abort).expect("an all-NULL column is a column");
+    // R2RML §5.2: a query's result must not repeat a column name.
+    let rml = format!(
+        "{PFX}ex:M a rr:TriplesMap ;
+           rr:logicalTable [ rr:sqlQuery \"SELECT id, name AS v, alt AS v FROM t\" ] ;
+           rr:subjectMap [ rr:template \"http://example.org/r/{{id}}\" ] ."
+    );
+    let err = relational(ddl, &rml, OnDataError::Abort)
+        .err()
+        .expect("the run fails");
+    assert!(err.contains("two columns named \"v\""), "{err}");
+}
+
+// ── Empty values and rml:null (RML-IO) ──
+
+// RML-IO: CSV has no NULL, so an empty cell is a value — an empty literal —
+// unless the source lists it under rml:null. A legacy mapping version keeps
+// generating no term from an empty value.
+#[test]
+fn rml_empty_csv_cell_is_a_value_unless_rml_null_says_otherwise() {
+    let mapping = |nulls: &str| {
+        format!(
+            "{PFX}ex:M a rr:TriplesMap ;
+               rml:logicalSource [ rml:source \"d.csv\" ; rml:referenceFormulation ql:CSV {nulls} ] ;
+               rr:subjectMap [ rr:template \"http://example.org/r/{{id}}\" ] ;
+               rr:predicateObjectMap [ rr:predicate ex:nickname ; rr:objectMap [ rml:reference \"nickname\" ] ] ."
+        )
+    };
+    let src = HashMap::from([(
+        "d.csv".to_string(),
+        "id,nickname\n1,Ace\n2,\n3,n/a\n".to_string(),
+    )]);
+    let nicknames = |m: &RmlMapping| -> Vec<String> {
+        let store = TripleStore::in_memory().unwrap();
+        execute(m, &src, &store, None).unwrap();
+        let QueryResults::Solutions(sols) = store
+            .query(&format!(
+                "{SPARQL_PFX} SELECT ?s ?o WHERE {{ ?s ex:nickname ?o }} ORDER BY ?s"
+            ))
+            .unwrap()
+        else {
+            panic!()
+        };
+        sols.map(|s| s.unwrap().get("o").unwrap().to_string())
+            .collect()
+    };
+
+    let plain = parse_rml(&mapping("")).unwrap();
+    assert_eq!(nicknames(&plain), vec!["\"Ace\"", "\"\"", "\"n/a\""]);
+
+    for ns in ["<http://w3id.org/rml/null>", "rml:null"] {
+        let nulled = parse_rml(&mapping(&format!("; {ns} \"\", \"n/a\""))).unwrap();
+        assert_eq!(nicknames(&nulled), vec!["\"Ace\""], "{ns}");
+    }
+
+    let doc = TripleStore::in_memory().unwrap();
+    doc.load_str(&mapping(""), oxigraph::io::RdfFormat::Turtle, None)
+        .unwrap();
+    let legacy = parse_from_store_as(&doc, None, Semantics::Legacy).unwrap();
+    assert_eq!(
+        nicknames(&legacy),
+        vec!["\"Ace\"", "\"n/a\""],
+        "legacy: an empty value generates no term"
+    );
+}
+
+// R2RML: only a SQL NULL generates no term; '' is a string like any other.
+// rml:null adds values that count as NULL.
+#[test]
+fn r2rml_sql_empty_string_is_a_value_and_only_null_is_not() {
+    let ddl = "CREATE TABLE t (id INTEGER PRIMARY KEY, nick TEXT);
+               INSERT INTO t VALUES (1, 'Ace'), (2, ''), (3, NULL);";
+    let rml = |nulls: &str| {
+        format!(
+            "{PFX}ex:M a rr:TriplesMap ;
+               rml:logicalSource [ rml:source <urn:source:s> ; rr:tableName \"t\" {nulls} ] ;
+               rr:subjectMap [ rr:template \"http://example.org/r/{{id}}\" ] ;
+               rr:predicateObjectMap [ rr:predicate ex:nick ; rr:objectMap [ rr:column \"nick\" ] ] ."
+        )
+    };
+    let nicks = |store: &TripleStore| {
+        count(
+            store,
+            "SELECT ?o WHERE { GRAPH <urn:run:test> { ?s ex:nick ?o } }",
+        )
+    };
+    assert_eq!(nicks(&run_relational(ddl, &rml(""))), 2, "'Ace' and ''");
+    assert_eq!(
+        nicks(&run_relational(
+            ddl,
+            &rml("; <http://w3id.org/rml/null> \"\"")
+        )),
+        1,
+        "rml:null \"\" makes '' a NULL"
+    );
+}
+
+// RML-IO: in JSON only `null` is NULL; in XML nothing is, so an empty element
+// is the empty string.
+#[test]
+fn rml_json_null_is_null_and_empty_xml_text_is_a_value() {
+    let json = r#"
+      ex:J a rr:TriplesMap ;
+        rml:logicalSource [ rml:source "d.json" ; rml:referenceFormulation ql:JSONPath ; rml:iterator "$.items[*]" ] ;
+        rr:subjectMap [ rr:template "http://example.org/j/{id}" ] ;
+        rr:predicateObjectMap [ rr:predicate ex:v ; rr:objectMap [ rml:reference "v" ] ] ."#;
+    let (store, _) = run_rml(
+        json,
+        &[(
+            "d.json",
+            r#"{"items": [{"id": "1", "v": ""}, {"id": "2", "v": null}, {"id": "3"}]}"#,
+        )],
+    );
+    assert_eq!(
+        count(&store, "SELECT ?s WHERE { ?s ex:v \"\" }"),
+        1,
+        "only the empty string, not null or a missing key"
+    );
+
+    let xml = r#"
+      ex:X a rr:TriplesMap ;
+        rml:logicalSource [ rml:source "d.xml" ; rml:referenceFormulation ql:XPath ; rml:iterator "/people/person" ] ;
+        rr:subjectMap [ rr:template "http://example.org/x/{id}" ] ;
+        rr:predicateObjectMap [ rr:predicate ex:nick ; rr:objectMap [ rml:reference "nick" ] ] ."#;
+    let (store, _) = run_rml(
+        xml,
+        &[(
+            "d.xml",
+            "<people><person><id>1</id><nick></nick></person>\
+             <person><id>2</id><nick/></person><person><id>3</id></person></people>",
+        )],
+    );
+    assert_eq!(
+        count(&store, "SELECT ?s WHERE { ?s ex:nick \"\" }"),
+        2,
+        "<nick></nick> and <nick/> are empty strings; a missing element is no value"
     );
 }
 
@@ -644,6 +966,17 @@ fn rml_invalid_iri_reference_skips_the_term_not_the_batch() {
 /// Run `rml` against a fresh SQLite database built from `ddl`, into
 /// `urn:run:test`.
 fn run_relational(ddl: &str, rml: &str) -> TripleStore {
+    relational(ddl, rml, OnDataError::Abort)
+        .unwrap_or_else(|e| panic!("run fails: {e}"))
+        .0
+}
+
+/// [`run_relational`], with a data-error policy and the run's result.
+fn relational(
+    ddl: &str,
+    rml: &str,
+    on_data_error: OnDataError,
+) -> Result<(TripleStore, SqlOutcome), String> {
     use ots_plugin_api::sources::{ConnectParams, SourceConnector};
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("t.db");
@@ -669,7 +1002,7 @@ fn run_relational(ddl: &str, rml: &str) -> TripleStore {
     let mapping = parse_rml(rml).unwrap_or_else(|e| panic!("{e}\n---\n{rml}"));
     let store = TripleStore::in_memory().unwrap();
     let quote = |i: &str| connector.quote_identifier(i);
-    open_triplestore::rml::execute_relational(
+    let outcome = execute_relational_filtered(
         &mapping,
         conn.as_mut(),
         &quote,
@@ -677,9 +1010,10 @@ fn run_relational(ddl: &str, rml: &str) -> TripleStore {
         "urn:run:test",
         100,
         "run-1",
-    )
-    .expect("run succeeds");
-    store
+        None,
+        on_data_error,
+    )?;
+    Ok((store, outcome))
 }
 
 // YARRRML `[ex:category, ex:Hardware]` names a term, and the translator emits
@@ -952,8 +1286,17 @@ fn rml_relative_iris_resolve_against_the_base_iri() {
     let m = parse_rml(&format!("{PFX}{mapping}")).expect("parse_rml");
     let src = HashMap::from([("d.csv".to_string(), "id,name\n10,Venus\n".to_string())]);
 
+    // No base IRI for ex:Other: "Person/10" is not an IRI, which is a data
+    // error (§11.2) — the run aborts, naming the row…
+    let err = execute(&m, &src, &TripleStore::in_memory().unwrap(), None).unwrap_err();
+    assert!(
+        err.contains("<http://example.org/Other> row 1") && err.contains("\"Person/10\""),
+        "{err}"
+    );
+    // …or, skipping it, generates nothing for that row.
     let store = TripleStore::in_memory().unwrap();
-    execute(&m, &src, &store, None).unwrap();
+    let outcome = execute_with(&m, &src, &store, None, OnDataError::Skip, |_| Ok(())).unwrap();
+    assert_eq!(outcome.data_errors.rows, 1);
     assert_eq!(
         count(
             &store,
@@ -1072,4 +1415,86 @@ fn rml_legacy_semantics_keep_the_old_terms() {
         2,
         "legacy: one blank node per row, even for the same value"
     );
+}
+
+// ── Many predicate maps and object maps per predicate-object map ──
+
+// R2RML §6.3, §11.1: a predicate-object map generates one triple for every
+// predicate map × every object map — `rr:predicate` and `rr:object` shortcuts
+// and full maps alike — into each of its graphs.
+#[test]
+fn rml_predicate_object_map_generates_every_predicate_object_pair() {
+    let mapping = r#"
+      ex:M a rr:TriplesMap ;
+        rml:logicalSource ex:Src ; rr:subjectMap ex:Subj ;
+        rr:predicateObjectMap ex:POM .
+      ex:Src rml:source "d.csv" ; rml:referenceFormulation ql:CSV .
+      ex:Subj rr:template "http://example.org/r/{id}" .
+      ex:POM rr:predicate ex:p1, ex:p2 ;
+        rr:predicateMap [ rr:template "http://example.org/p/{kind}" ] ;
+        rr:object ex:Const ;
+        rr:objectMap [ rml:reference "name" ] ;
+        rr:graph ex:G1, ex:G2 ."#;
+    let (store, n) = run_rml(mapping, &[("d.csv", "id,kind,name\n1,k,Alice\n")]);
+    assert_eq!(n, 12, "3 predicates × 2 objects × 2 graphs");
+    for p in ["ex:p1", "ex:p2", "<http://example.org/p/k>"] {
+        for o in ["ex:Const", "\"Alice\""] {
+            assert_eq!(
+                count(
+                    &store,
+                    &format!(
+                        "SELECT ?g WHERE {{ GRAPH ?g {{ <http://example.org/r/1> {p} {o} }} }}"
+                    )
+                ),
+                2,
+                "{p} {o} in both graphs"
+            );
+        }
+    }
+}
+
+// Each predicate × each referencing object map, and a term object map beside
+// it in the same predicate-object map (R2RML §8, §11.1).
+#[test]
+fn r2rml_every_predicate_takes_every_referencing_object_map() {
+    let store = run_relational(
+        "CREATE TABLE emp (eid INTEGER PRIMARY KEY, dept INTEGER, boss INTEGER);
+         CREATE TABLE dept (did INTEGER PRIMARY KEY);
+         INSERT INTO dept VALUES (7);
+         INSERT INTO emp VALUES (1, 7, 2), (2, 7, NULL);",
+        &format!(
+            "{PFX}
+             ex:Emp a rr:TriplesMap ;
+               rr:logicalTable [ rr:tableName \"emp\" ] ;
+               rr:subjectMap [ rr:template \"http://example.org/e/{{eid}}\" ] ;
+               rr:predicateObjectMap [
+                 rr:predicate ex:linked, ex:related ;
+                 rr:objectMap [ rr:parentTriplesMap ex:Dept ;
+                                rr:joinCondition [ rr:child \"dept\" ; rr:parent \"did\" ] ] ;
+                 rr:objectMap [ rr:parentTriplesMap ex:Emp ;
+                                rr:joinCondition [ rr:child \"boss\" ; rr:parent \"eid\" ] ] ;
+                 rr:object ex:Staff ] .
+             ex:Dept a rr:TriplesMap ;
+               rr:logicalTable [ rr:tableName \"dept\" ] ;
+               rr:subjectMap [ rr:template \"http://example.org/d/{{did}}\" ] ."
+        ),
+    );
+    for p in ["ex:linked", "ex:related"] {
+        let objects = |s: &str| -> usize {
+            count(
+                &store,
+                &format!("SELECT ?o WHERE {{ GRAPH <urn:run:test> {{ <{s}> {p} ?o }} }}"),
+            )
+        };
+        assert_eq!(
+            objects("http://example.org/e/1"),
+            3,
+            "{p}: dept, boss, ex:Staff"
+        );
+        assert_eq!(
+            objects("http://example.org/e/2"),
+            2,
+            "{p}: dept, ex:Staff — no boss"
+        );
+    }
 }

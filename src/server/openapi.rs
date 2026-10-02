@@ -2562,9 +2562,20 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                         "Base IRI that relative IRIs resolve against (R2RML §11.2); a triples \
                          map's rml:baseIRI wins",
                     ),
+                    qp(
+                        "on_data_error",
+                        false,
+                        "abort (default): a row value that cannot become its term (R2RML §4.3) \
+                         fails the run, which writes nothing and names the rows; skip: leave \
+                         those terms out and report the rows as data_errors",
+                    ),
                 ],
                 vec![
                     ("200", "Mapping result with triple count"),
+                    (
+                        "400",
+                        "Invalid mapping, a column the source lacks, or a data error",
+                    ),
                     ("401", "Authentication required"),
                 ],
                 true,
@@ -2573,7 +2584,8 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     );
     mount(paths, "/api/rml/preview", vec![
         (M::Post, o("Mappings", "Preview RML mapping", "Run an inline RML mapping against sample input and return the generated triples without storing them.",
-            vec![], vec![("200", "Generated triples"), ("400", "Invalid mapping"), ("401", "Authentication required")], true)),
+            vec![qp("on_data_error", false, "abort (default) or skip, as on the execute endpoint")],
+            vec![("200", "Generated triples"), ("400", "Invalid mapping, a column the source lacks, or a data error"), ("401", "Authentication required")], true)),
     ]);
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -2792,14 +2804,17 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                      report; production is untouched and the candidate graph is kept. `mode` is \
                      `full` (default), `watermark` (only rows past the last cursor), or \
                      `snapshot` — a virtual (`sparql`) source's whole graph as the endpoint \
-                     serves it, with no mapping involved; a snapshot run carries no `mapping`.",
+                     serves it, with no mapping involved; a snapshot run carries no `mapping`. \
+                     `onDataError` decides what a row value that cannot become its term does \
+                     (R2RML §4.3): `abort` (default) fails the run and names the offending rows; \
+                     `skip` leaves those terms out and reports the rows as `dataErrors` on the run.",
                     vec![],
                     vec![
                         ("201", "The run"),
                         (
                             "400",
-                            "Unknown mode, no mapping outside snapshot mode, a snapshot of a \
-                             database, or the mapping belongs to another datasource",
+                            "Unknown mode or onDataError, no mapping outside snapshot mode, a \
+                             snapshot of a database, or the mapping belongs to another datasource",
                         ),
                         ("404", "Datasource or mapping not found"),
                         ("422", "The SHACL write gate refused the run"),

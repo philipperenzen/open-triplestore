@@ -344,6 +344,29 @@ Under both rules a constant is the term written (`rr:object <IRI>` is an IRI, a
 typed or language-tagged literal keeps its datatype or tag), and SQL
 identifiers are read as SQL (see below).
 
+**Empty values** follow the rules too. Under `r2rml` only a SQL NULL — and a
+value the logical source lists under RML-IO's `rml:null` — generates no term:
+`''` is a string like any other, so a column holding it gives an empty
+literal. Under `legacy` an empty value generates no term, as it always did,
+and `rml:null` is not read. To keep "an empty string is no value" in a new
+version, write it into the logical source:
+
+```turtle
+rml:logicalSource [ rml:source <urn:source:legacy-assets> ; rr:tableName "products" ;
+                    <http://w3id.org/rml/null> "" ] ;
+```
+
+The [legacy converter](#converting-a-legacy-bundle) writes exactly that.
+
+**Checked under both rules:** a non-conforming mapping is refused when the
+version is frozen, with the construct named ([rml.md](rml.md#errors) lists
+the rules); a column the logical table's query does not return is refused
+before the first row — the connector describes the query without running it,
+so a column that is NULL in every row still counts as there; and a **data
+error** (R2RML §4.3: an IRI term map whose value is not a valid IRI, a value
+outside its `rr:datatype`'s lexical space) fails the run — see
+[Runs](#runs).
+
 ```bash
 curl -X POST http://localhost:7878/api/mappings \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{
@@ -469,7 +492,9 @@ ex:SuppliersMap a rr:TriplesMap ;
 
 **A SQL NULL produces no triple.** It is an absent column, not an empty value,
 so a missing required value surfaces as a `sh:minCount` violation rather than
-as an empty string in the data.
+as an empty string in the data. An empty string is a value — unless the
+logical source lists it under `rml:null`, or the version runs under the
+`legacy` rules (see [Term-generation rules](#term-generation-rules)).
 
 **Natural datatypes.** A bare `rr:column` with no `rr:datatype` takes the XSD
 type its SQL type implies (`integer`, `decimal`, `double`, `boolean`, `date`,
@@ -591,7 +616,13 @@ What a run does, in order:
 
 1. **Materialise** into a fresh graph `urn:run:<id>`. Rows stream in batches;
    nothing is ever held whole. Blank-node labels carry the run id, so two runs
-   never share a node.
+   never share a node. Every triples map's columns are checked against what
+   its query returns first. A **data error** — a row value that cannot become
+   its term (R2RML §4.3) — fails the run by default: the candidate graph is
+   dropped, and the run's `error` names the first ten offending rows with
+   their values. A run started with `"onDataError": "skip"` leaves those
+   terms out instead, goes on, and reports the rows as `dataErrors`
+   (`{"rows": n, "first": [...]}`) on the run record.
 2. **Record** a PROV activity at `urn:run:<id>:activity` — `prov:used` the
    datasource and the mapping *version*, `prov:generated` the graph, the agent,
    the interval, and the row and triple counts.
@@ -847,8 +878,9 @@ each with the shape, path, constraint, message, affected and population
 counts, share and the first focus nodes), the merged validation `report`,
 `entities` — each subject with its types, its own Turtle and the violations
 that name it — what each triples map contributed (`sampledRows`,
-`pulledInRows`, `triples`), the total `rows` and `triples`, and the scratch
-`graph` with its `expiresAt`. The graph is readable through the Graph Store
+`pulledInRows`, `triples`), the total `rows` and `triples`, `dataErrors` —
+sampled rows whose values cannot become their terms, which the sample leaves
+out but a run would fail on — and the scratch `graph` with its `expiresAt`. The graph is readable through the Graph Store
 protocol (admin) until then, and dropped after: `OTS_DRYRUN_TTL_SECS`, default
 fifteen minutes. Scratch graphs an earlier process left behind are dropped at
 start-up.
@@ -918,16 +950,16 @@ Prefixes come from the document's `prefixes` block; `rdf`, `rdfs`, `xsd`,
 `owl`, `skos`, `dct`, `schema`, `foaf`, `prov` and `geo` need no declaration.
 An undeclared one is an error naming the entity, never a guess.
 
-**Empty cells.** The legacy transformer emitted nothing for an empty cell.
-So does this store's engine — a term map over an empty value yields no term —
-so a converted mapping reproduces the legacy output here as it stands, with
-`rr:tableName` sources that keep join pushdown and watermark runs available.
-R2RML proper says an empty cell is an empty literal; a mapping that must
-behave the same under another processor is converted with `"emptyAsNull":
-true`, which turns the logical sources into queries reading each text-valued
-column through `NULLIF(col, '')`. That query is opaque to the catalogue, so
-joins are indexed rather than pushed down and watermark runs are not
-available. Either way the response says which it did in `warnings`.
+**Empty cells.** The legacy transformer emitted nothing for an empty cell,
+where R2RML reads an empty string as a value. Every converted logical source
+therefore carries RML-IO's `rml:null ""`, which says so in the mapping and
+keeps `rr:tableName` sources, so join pushdown and watermark runs stay
+available. A mapping that must behave the same under a processor that does
+not read `rml:null` is converted with `"emptyAsNull": true`, which turns the
+logical sources into queries reading each text-valued column through
+`NULLIF(col, '')`. That query is opaque to the catalogue, so joins are indexed
+rather than pushed down and watermark runs are not available. Either way the
+response says which it did in `warnings`.
 
 The converter's own fixture — the appendix document, over a SQLite table with
 a slugged category, an unmapped status, a NULL price and an empty city —

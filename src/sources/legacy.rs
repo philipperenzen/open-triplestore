@@ -26,16 +26,15 @@
 //! |                                       | linked from the parent by a template object map       |
 //!
 //! **Empty cells.** The legacy transformer emitted nothing for an empty cell.
-//! So does this store's engine — a term map over an empty value yields no
-//! term — so a converted mapping reproduces the legacy output here as it
-//! stands, with `rr:tableName` logical sources that keep join pushdown and
-//! watermark runs available. R2RML proper says an empty cell is an empty
-//! literal, and a mapping that has to behave the same under another
-//! processor can be converted with `emptyAsNull=true`: the logical source
-//! then becomes a query reading each text-valued column through
-//! `NULLIF(col, '')`, which is opaque to the catalogue, so joins are indexed
-//! rather than pushed down and watermark runs are not available. Either way
-//! the choice is reported back as a warning.
+//! R2RML and RML-IO read an empty value as a value — an empty literal — so
+//! every converted logical source says otherwise in the mapping itself:
+//! `rml:null ""` (RML-IO), which keeps `rr:tableName` logical sources, and so
+//! join pushdown and watermark runs. A mapping that has to behave the same
+//! under a processor without `rml:null` can be converted with
+//! `emptyAsNull=true`: the logical source then becomes a query reading each
+//! text-valued column through `NULLIF(col, '')`, which is opaque to the
+//! catalogue, so joins are indexed rather than pushed down and watermark runs
+//! are not available. Either way the choice is reported back as a warning.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -164,9 +163,10 @@ pub fn convert(yaml: &str, source_id: &str, empty_as_null: bool) -> Result<Conve
          convert with emptyAsNull=false to keep rr:tableName"
             .to_string()
     } else {
-        "logical sources are rr:tableName; this store's engine emits no term for an empty cell, \
-         as the legacy transformer did, but a standard RML processor would emit an empty \
-         literal — convert with emptyAsNull=true for a mapping that behaves the same everywhere"
+        "logical sources are rr:tableName with rml:null \"\" (RML-IO), so an empty cell \
+         produces no triple, as the legacy transformer did; a processor that does not read \
+         rml:null would emit an empty literal instead — convert with emptyAsNull=true for a \
+         mapping that behaves the same everywhere"
             .to_string()
     });
 
@@ -179,6 +179,13 @@ pub fn convert(yaml: &str, source_id: &str, empty_as_null: bool) -> Result<Conve
         rml,
         warnings,
     })
+}
+
+/// The legacy transformer emitted nothing for an empty cell; `rml:null ""`
+/// says so in the mapping, where RML-IO would otherwise read an empty value
+/// as a value.
+fn legacy_nulls() -> Vec<String> {
+    vec![String::new()]
 }
 
 fn unique_name(names: &mut BTreeSet<String>, base: &str) -> String {
@@ -358,6 +365,7 @@ impl Entity {
                             subject_mint: has_slug(&template),
                             classes: class.iter().cloned().collect(),
                             poms: lookup_poms,
+                            nulls: legacy_nulls(),
                         });
                     }
                     iri_object(template)
@@ -429,6 +437,7 @@ impl Entity {
                 subject_mint: has_slug(&n.subject),
                 classes: n.class.iter().cloned().collect(),
                 poms: nested_poms,
+                nulls: legacy_nulls(),
             });
         }
 
@@ -442,6 +451,7 @@ impl Entity {
             subject_mint: has_slug(&self.subject),
             classes: self.class.iter().cloned().collect(),
             poms,
+            nulls: legacy_nulls(),
         });
         maps.extend(extra);
         Ok(())
@@ -911,6 +921,7 @@ entities:
             "urn:run:legacy",
             100,
             "legacy-run",
+            crate::rml::checks::OnDataError::Abort,
         )
         .unwrap_or_else(|e| panic!("{e}\n{}", converted.rml));
         assert_eq!(
@@ -923,12 +934,17 @@ entities:
 
     #[test]
     fn the_table_form_reproduces_the_same_triples_in_this_engine() {
-        // The default: rr:tableName, no query. This engine emits no term for
-        // an empty cell, so the output is the legacy transformer's here too —
-        // the NULLIF form exists for other processors, and says so.
+        // The default: rr:tableName, no query, and rml:null "" — so an empty
+        // cell produces no term and the output is the legacy transformer's
+        // here too. The NULLIF form exists for processors without rml:null.
         let converted = convert(BUNDLE, "legacy", false).expect("converts");
         assert!(
             converted.rml.contains("rr:tableName \"products\""),
+            "{}",
+            converted.rml
+        );
+        assert!(
+            converted.rml.contains("<http://w3id.org/rml/null> \"\""),
             "{}",
             converted.rml
         );
@@ -949,6 +965,7 @@ entities:
             "urn:run:t",
             100,
             "r",
+            crate::rml::checks::OnDataError::Abort,
         )
         .unwrap();
         assert_eq!(
@@ -1027,7 +1044,7 @@ entities:
         assert!(products
             .predicate_object_maps
             .iter()
-            .any(|p| matches!(p.object, ObjectMap::Function(_))));
+            .any(|p| matches!(p.object_maps[0], ObjectMap::Function(_))));
     }
 
     #[test]

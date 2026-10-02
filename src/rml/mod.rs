@@ -20,6 +20,7 @@
 //! mapping version written before this engine followed R2RML there keeps the
 //! rules it was written against.
 
+pub mod checks;
 pub mod executor;
 pub mod iri;
 pub mod model;
@@ -29,7 +30,8 @@ pub mod sources;
 pub mod sql;
 pub mod sqlident;
 pub mod terms;
+pub mod xsd;
 
-pub use executor::{execute, execute_authorized};
+pub use executor::execute_with;
 pub use parser::{parse_from_store_as, parse_rml};
 pub use sql::execute_relational;

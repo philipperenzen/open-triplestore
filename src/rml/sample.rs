@@ -28,11 +28,12 @@ use std::collections::{HashMap, HashSet};
 use ots_plugin_api::sources::{Row as SourceRow, SourceConnection, SourceError};
 use serde::Serialize;
 
+use super::checks::DataErrors;
 use super::model::*;
 use super::sql::{
-    collect_unique_keys, eval_subject, flush, index_key, join_key, plan_triples_map,
-    pushdown_subject, row_triples, sanitise_label, split_row, JoinStrategy, ParentIndex, RefKey,
-    TmPlan,
+    apply_own_nulls, check_relational_columns, collect_unique_keys, eval_subject, flush, index_key,
+    join_key, plan_triples_map, pushdown_subject, row_triples, sanitise_label, split_row,
+    JoinStrategy, ParentIndex, RefKey, TmPlan,
 };
 use super::terms::{At, Kinds, Row, TermGen};
 use crate::store::engine::TripleStore;
@@ -85,6 +86,10 @@ pub struct SampleOutcome {
     pub rows: u64,
     pub triples: u64,
     pub maps: Vec<SampledMap>,
+    /// Sampled rows that raised data errors. A sample never aborts on one —
+    /// showing them is its purpose — but a run over the same rows would,
+    /// unless it skips them.
+    pub data_errors: DataErrors,
 }
 
 /// A row with the column types it came with.
@@ -101,6 +106,7 @@ pub fn execute_sample(
     spec: &SampleSpec,
 ) -> Result<SampleOutcome, String> {
     let limit = spec.limit.clamp(1, MAX_SAMPLE_ROWS);
+    check_relational_columns(mapping, conn, quote)?;
     let unique_keys = collect_unique_keys(mapping, conn)?;
     let mut plans: HashMap<String, TmPlan> = HashMap::new();
     for tm in &mapping.triples_maps {
@@ -163,10 +169,7 @@ pub fn execute_sample(
         let tm = mapping
             .find(&tm_iri)
             .ok_or_else(|| format!("unknown TriplesMap <{tm_iri}>"))?;
-        for pom in &tm.predicate_object_maps {
-            let ObjectMap::Ref(r) = &pom.object else {
-                continue;
-            };
+        for r in tm.refs() {
             // A join-less reference over the same logical source resolves to
             // the parent map's own sample; there is no key to pull in by.
             if r.joins.is_empty() {
@@ -223,10 +226,7 @@ pub fn execute_sample(
     let mut gen = TermGen::new(mapping.semantics, format!("d{}_", sanitise_label(run_id)));
     let mut indexes: HashMap<RefKey, ParentIndex> = HashMap::new();
     for tm in &mapping.triples_maps {
-        for pom in &tm.predicate_object_maps {
-            let ObjectMap::Ref(r) = &pom.object else {
-                continue;
-            };
+        for r in tm.refs() {
             let key = index_key(r);
             if indexes.contains_key(&key)
                 || !matches!(
@@ -242,6 +242,9 @@ pub fn execute_sample(
             let parent_cols: Vec<String> = r.joins.iter().map(|j| j.parent.clone()).collect();
             let mut index = ParentIndex::new();
             for (row, kinds) in rows_of.get(&parent.iri).map(Vec::as_slice).unwrap_or(&[]) {
+                let mut row = row.clone();
+                gen.apply_nulls(&parent.logical_source, &mut row);
+                let row = &row;
                 let Some(k) = join_key(row, &parent_cols) else {
                     continue;
                 };
@@ -260,6 +263,8 @@ pub fn execute_sample(
                 }
             }
             indexes.insert(key, index);
+            // A parent row's data error is reported by the parent's own rows.
+            gen.take_errors();
         }
     }
 
@@ -276,7 +281,10 @@ pub fn execute_sample(
         };
         let plan = &plans[&tm.iri];
         let mut triples = 0u64;
-        for (row, kinds) in rows {
+        for (i, (row, kinds)) in rows.iter().enumerate() {
+            let mut row = row.clone();
+            apply_own_nulls(&gen, &tm.logical_source, &mut row);
+            let row = &row;
             gen.start_row();
             let generated = row_triples(
                 tm,
@@ -308,6 +316,10 @@ pub fn execute_sample(
                     }
                 },
             )?;
+            parent_gen.borrow_mut().take_errors();
+            outcome
+                .data_errors
+                .record(&tm.iri, i as u64 + 1, gen.take_errors());
             for t in generated {
                 buffer.push_str(&t.text);
                 buffer.push('\n');

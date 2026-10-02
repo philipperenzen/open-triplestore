@@ -786,6 +786,14 @@ pub async fn create_run(
         }
     };
     let batch_size = body.batch_size.unwrap_or(1_000);
+    let on_data_error = match body.on_data_error.as_deref() {
+        None => crate::rml::checks::OnDataError::Abort,
+        Some(v) => crate::rml::checks::OnDataError::parse(v).ok_or_else(|| {
+            bad(format!(
+                "unknown onDataError '{v}'; expected abort (the default) or skip"
+            ))
+        })?,
+    };
     let model_version = body.model_version.clone();
     let actor = actor_iri(&state, &user);
 
@@ -799,6 +807,7 @@ pub async fn create_run(
             model_version,
             batch_size,
             Some(&actor),
+            on_data_error,
         )
     })
     .await
