@@ -278,6 +278,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Checked against Konclude v0.7.0-1138. Data values entailed through
   `owl:hasValue` are not reported by Konclude and not materialised.
 
+- **Konclude: wrong answers for `owl:datatypeComplementOf`.** Konclude
+  v0.7.0-1138 says "consistent" for some inconsistent data complements, for
+  example `∃p.(xsd:integer ⊓ ¬xsd:integer)`, `∃p.¬rdfs:Literal`, or a range
+  `¬xsd:integer` with the value `1`. The bridge now writes `¬rdfs:Literal` as
+  the empty data range, so the entailment check for a `rdfs:Literal` range no
+  longer answers "not entailed". When the input still contains a data
+  complement after that, a check answers `unknown` instead of consistent, not
+  entailed or satisfiable. A materialisation reports `complete: false` with a
+  warning. Answers that rest on a clash (inconsistent, entailed,
+  unsatisfiable) are unchanged. See `docs/owl2-dl.md`.
+
 ### Security
 - **Every configured secret goes through the secrets module.** `JWT_SECRET`,
   `LD_REGISTRY_TOKEN`, a replication follower's `OTS_REPLICATION_TOKEN` and the

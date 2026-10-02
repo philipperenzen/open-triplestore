@@ -24,6 +24,16 @@
 //! iff `O ∪ ¬α` is inconsistent, one knowledge base per negated axiom in a
 //! single OWLlink request. Axioms without such a reduction (data sub-property,
 //! keys, datatype definitions, anonymous individuals) answer `unknown`.
+//!
+//! Konclude v0.7.0 misses the clash of some `DataComplementOf` shapes:
+//! `∃p.(D ⊓ ¬D)`, `∃p.¬rdfs:Literal`, a complement range against an asserted
+//! value. Every wrong answer seen says "satisfiable" where the right one is
+//! "unsatisfiable", never the reverse. So when the input itself keeps a data
+//! complement, an answer that rests on a knowledge base being satisfiable
+//! (consistent, not entailed, satisfiable class) is `unknown`, and a run is
+//! marked incomplete; the answers that rest on a clash stand. The bridge's
+//! own negations (`∀p.¬{v}`, `∃p.¬R` for a range `R`) probe correct, and
+//! [`super::owl_fs`] writes `¬rdfs:Literal` as an empty range.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -48,6 +58,10 @@ const OWL_EQUIVALENT_CLASS: &str = "http://www.w3.org/2002/07/owl#equivalentClas
 const OWL_SAME_AS: &str = "http://www.w3.org/2002/07/owl#sameAs";
 /// Entailment sub-checks per request before the answer is `unknown`.
 const MAX_SUBCHECKS: usize = 64;
+/// Why an answer is withheld or a run incomplete when the input keeps a
+/// `DataComplementOf` (see the module comment).
+const DATA_COMPLEMENT: &str = "the input uses owl:datatypeComplementOf, and Konclude v0.7.0 can \
+     miss the inconsistency some data complements cause";
 
 pub struct KoncludeBackend {
     bin: String,
@@ -208,7 +222,9 @@ impl DlBackend for KoncludeBackend {
     fn reason(&self, input: &DlInput) -> Result<DlOutcome, ReasoningError> {
         let deadline = Instant::now() + self.timeout;
         let dir = self.scratch()?;
-        let text = FsWriter::new().ontology(&input.ontology, &[]);
+        let mut writer = FsWriter::new();
+        let text = writer.ontology(&input.ontology, &[]);
+        let complement = writer.wrote_data_complement();
         let mut req = Self::load(&dir.0, "input.ofn", &text, KB)?;
         req.push_str(&format!(
             "<IsKBSatisfiable kb=\"{KB}\"/>\n<GetSubClassHierarchy kb=\"{KB}\"/>\n"
@@ -250,6 +266,15 @@ impl DlBackend for KoncludeBackend {
             out.inconsistency =
                 Some("Konclude: the ontology is inconsistent (IsKBSatisfiable = false)".into());
             return Ok(out);
+        }
+        if complement {
+            // Konclude's "consistent" may be a missed clash, and so may every
+            // subsumption or type it did not report.
+            out.consistent = None;
+            out.incomplete = true;
+            out.warnings.push(format!(
+                "{DATA_COMPLEMENT}: consistency is unknown and entailments may be missing"
+            ));
         }
         let (unsat, edges, synsets) = hierarchy(&resp[3])?;
         out.unsatisfiable = unsat
@@ -294,6 +319,8 @@ impl DlBackend for KoncludeBackend {
         // derived from which of them are satisfiable.
         let mut kbs: Vec<Vec<Axiom>> = Vec::new();
         let mut unknown = false;
+        // A data complement in the conclusion reaches Konclude inside `¬α`.
+        let mut conclusion_complement = false;
         match task {
             CheckTask::Consistency => kbs.push(Vec::new()),
             CheckTask::Satisfiability { class } => {
@@ -308,12 +335,15 @@ impl DlBackend for KoncludeBackend {
                     unknown = true;
                 }
                 let mut n = 0usize;
+                let mut writer = FsWriter::new();
                 for a in &mapped.ontology.axioms {
+                    writer.axiom(a);
                     match negations(&a.kind, &mut n) {
                         Some(subs) => kbs.extend(subs),
                         None => unknown = true,
                     }
                 }
+                conclusion_complement = writer.wrote_data_complement();
                 if kbs.len() > MAX_SUBCHECKS {
                     let mut o = CheckOutcome::of(Tri::Unknown);
                     o.detail = Some(format!(
@@ -327,7 +357,9 @@ impl DlBackend for KoncludeBackend {
         }
         // Premise consistency first: an inconsistent premise entails
         // everything and satisfies nothing.
-        let premise = FsWriter::new().ontology(&input.ontology, &[]);
+        let mut writer = FsWriter::new();
+        let premise = writer.ontology(&input.ontology, &[]);
+        let complement = conclusion_complement || writer.wrote_data_complement();
         let mut req = Self::load(&dir.0, "premise.ofn", &premise, KB)?;
         req.push_str(&format!(
             "<IsKBSatisfiable kb=\"{KB}\"/>\n<ReleaseKB kb=\"{KB}\"/>\n"
@@ -392,6 +424,18 @@ impl DlBackend for KoncludeBackend {
                  datatype definitions, anonymous individuals)"
                     .into(),
             );
+        }
+        // Only a clash is trusted: inconsistent, entailed, unsatisfiable.
+        let trusted = match task {
+            CheckTask::Consistency | CheckTask::Satisfiability { .. } => o.result != Tri::True,
+            _ => o.result != Tri::False,
+        };
+        if complement && !trusted {
+            o.detail = Some(format!(
+                "{DATA_COMPLEMENT}, so its \"{}\" answer is not trusted",
+                if o.result == Tri::True { "yes" } else { "no" }
+            ));
+            o.result = Tri::Unknown;
         }
         Ok(o)
     }

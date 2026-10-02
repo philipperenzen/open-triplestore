@@ -253,6 +253,7 @@ impl DlBackend for SidecarBackend {
             inferred,
             version: version(&a.backend),
             warnings: a.warnings,
+            incomplete: false,
         })
     }
 

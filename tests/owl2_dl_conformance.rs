@@ -1711,6 +1711,81 @@ fi
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// The input keeps a data complement Konclude v0.7.0 can misread.
+    const COMPLEMENT: &str = r#"@prefix owl: <http://www.w3.org/2002/07/owl#> .
+        @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+        @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+        @prefix ex: <http://example.org/> .
+        ex:A rdfs:subClassOf ex:B . ex:a a ex:A ; ex:r ex:b .
+        ex:p a owl:DatatypeProperty .
+        ex:B rdfs:subClassOf [ a owl:Restriction ; owl:onProperty ex:p ;
+          owl:someValuesFrom [ a rdfs:Datatype ; owl:datatypeComplementOf xsd:integer ] ] ."#;
+
+    /// KB, OK, IsKBSatisfiable = true, ReleaseKB.
+    const CONSISTENT: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<ResponseMessage xmlns="http://www.owllink.org/owllink#">
+ <KB kb="urn:ots:kb"/>
+ <OK/>
+ <BooleanResponse result="true"/>
+ <OK/>
+</ResponseMessage>"#;
+
+    /// Konclude's "satisfiable" over an input with a data complement may be
+    /// a missed clash (see `dl_konclude_live_data_complements`): `unknown`,
+    /// and a run over it is incomplete.
+    #[test]
+    fn dl_konclude_data_complement_satisfiable_is_not_trusted() {
+        let dir = tmp();
+        let c = cfg(fake(&dir, CONSISTENT, SPARQL, 0));
+        let store = TripleStore::in_memory().unwrap();
+        let consistency = |ttl: &str| {
+            dl_backend::check(
+                &store,
+                &c,
+                None,
+                Some(triples(ttl)),
+                &CheckTask::Consistency,
+                IdentityPolicy::Full,
+            )
+            .unwrap()
+            .0
+        };
+        let o = consistency(COMPLEMENT);
+        assert_eq!(o.result, Tri::Unknown);
+        let detail = o.detail.unwrap_or_default();
+        assert!(
+            detail.contains("owl:datatypeComplementOf") && detail.contains("\"yes\""),
+            "{detail}"
+        );
+        // Without the complement the same answer stands.
+        assert_eq!(consistency(DATA).result, Tri::True);
+        // ¬rdfs:Literal is written as the empty range, so it is no reason.
+        assert_eq!(
+            consistency(&COMPLEMENT.replace("xsd:integer ]", "rdfs:Literal ]")).result,
+            Tri::True
+        );
+
+        let c = cfg(fake(&dir, OWLLINK, SPARQL, 0));
+        let store = store_with(COMPLEMENT);
+        let run = dl_backend::materialize(&store, &c, None, TG, IdentityPolicy::Full).unwrap();
+        assert!(!run.complete);
+        assert!(
+            run.warnings
+                .iter()
+                .any(|w| w.contains("owl:datatypeComplementOf")),
+            "{:?}",
+            run.warnings
+        );
+        // What Konclude did report is still written.
+        assert!(ask_in_tg(
+            &store,
+            "http://example.org/a",
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+            "http://example.org/B"
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     // ── live: OTS_TEST_KONCLUDE_BIN=/path/to/Konclude ──────────────────────
 
     fn live() -> Option<DlConfig> {
@@ -1952,5 +2027,181 @@ fi
             ),
             Tri::False
         );
+    }
+
+    /// Konclude v0.7.0 says "consistent" for some inconsistent data
+    /// complements; the bridge answers `unknown` for those inputs and keeps
+    /// every answer that rests on a clash.
+    #[test]
+    fn dl_konclude_live_data_complements() {
+        let Some(c) = live() else { return };
+        let store = TripleStore::in_memory().unwrap();
+        let ttl = |body: &str| {
+            triples(&format!(
+                "@prefix owl: <http://www.w3.org/2002/07/owl#> .
+                 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+                 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+                 @prefix ex: <http://example.org/> .
+                 ex:p a owl:DatatypeProperty . {body}"
+            ))
+        };
+        let check = |premise: &str, task: CheckTask| {
+            dl_backend::check(
+                &store,
+                &c,
+                None,
+                Some(ttl(premise)),
+                &task,
+                IdentityPolicy::Full,
+            )
+            .unwrap()
+            .0
+        };
+        let consistent = |premise: &str| check(premise, CheckTask::Consistency).result;
+        let entails = |premise: &str, conclusion: &str| {
+            check(
+                premise,
+                CheckTask::Entailment {
+                    conclusion: ttl(conclusion),
+                },
+            )
+            .result
+        };
+        let not = |d: &str| format!("[ a rdfs:Datatype ; owl:datatypeComplementOf {d} ]");
+        let some = |range: &str| {
+            format!(
+                "ex:A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty ex:p ;
+                   owl:someValuesFrom {range} ] . ex:a a ex:A ."
+            )
+        };
+        let all = |range: &str| {
+            format!(
+                "ex:a a [ a owl:Restriction ; owl:onProperty ex:p ; owl:allValuesFrom {range} ] ."
+            )
+        };
+        let one = "[ a rdfs:Datatype ; owl:oneOf ( 1 ) ]";
+        let and =
+            |x: &str, y: &str| format!("[ a rdfs:Datatype ; owl:intersectionOf ( {x} {y} ) ]");
+
+        // Inconsistent, and Konclude says consistent: never "yes".
+        for premise in [
+            some(&and("xsd:integer", &not("xsd:integer"))),
+            format!("ex:p rdfs:range {} . ex:a ex:p 1 .", not("xsd:integer")),
+            format!("ex:p rdfs:range {} . ex:a ex:p 1 .", not(one)),
+        ] {
+            let o = check(&premise, CheckTask::Consistency);
+            assert_eq!(o.result, Tri::Unknown, "{premise}");
+            // The withheld answer is Konclude's wrong "yes".
+            let detail = o.detail.unwrap_or_default();
+            assert!(detail.contains("\"yes\" answer"), "{premise}: {detail}");
+        }
+        assert_eq!(
+            check(
+                &some(&and("xsd:integer", &not("xsd:integer"))),
+                CheckTask::Satisfiability {
+                    class: "http://example.org/A".into()
+                }
+            )
+            .result,
+            Tri::Unknown
+        );
+        // Written as the empty range, ¬rdfs:Literal is read right.
+        assert_eq!(consistent(&some(&not("rdfs:Literal"))), Tri::False);
+
+        // Shapes Konclude gets right keep their answer.
+        assert_eq!(
+            consistent(&some(&and("xsd:integer", "xsd:string"))),
+            Tri::False
+        );
+        assert_eq!(
+            consistent(&format!("ex:a ex:p 1 . {}", all(&not(one)))),
+            Tri::False
+        );
+        assert_eq!(
+            consistent(&format!(
+                "ex:p rdfs:range xsd:integer . ex:a a [ a owl:Restriction ; owl:onProperty ex:p ;
+                   owl:someValuesFrom {} ] .",
+                not("xsd:integer")
+            )),
+            Tri::False
+        );
+        // Right, but no longer trusted: the price of the fallback.
+        assert_eq!(
+            consistent(&format!("ex:a ex:p \"x\" . {}", all(&not("xsd:integer")))),
+            Tri::Unknown
+        );
+
+        // The bridge's own negations: ∃p.¬R for a range, ∀p.¬{v} for a value.
+        let ranged = "ex:p rdfs:range xsd:integer . ex:a ex:p 1 .";
+        assert_eq!(entails(ranged, "ex:p rdfs:range rdfs:Literal ."), Tri::True);
+        assert_eq!(entails(ranged, "ex:a ex:p 1 ."), Tri::True);
+        assert_eq!(entails(ranged, "ex:p rdfs:range xsd:string ."), Tri::False);
+        // A complement in the conclusion: a clash still counts, no clash
+        // does not.
+        assert_eq!(
+            entails(ranged, &format!("ex:p rdfs:range {} .", not("xsd:string"))),
+            Tri::True
+        );
+        assert_eq!(
+            entails(ranged, &format!("ex:p rdfs:range {} .", not("xsd:integer"))),
+            Tri::Unknown
+        );
+
+        // A run says it may be missing entailments, and still writes what
+        // Konclude did find.
+        let store = store_with(&format!(
+            "@prefix owl: <http://www.w3.org/2002/07/owl#> .
+             @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+             @prefix ex: <http://example.org/> .
+             ex:p a owl:DatatypeProperty . ex:A rdfs:subClassOf ex:B . {}",
+            some(&and("xsd:integer", &not("xsd:integer")))
+        ));
+        let run = dl_backend::materialize(&store, &c, None, TG, IdentityPolicy::Full).unwrap();
+        assert!(!run.complete);
+        assert!(
+            run.warnings
+                .iter()
+                .any(|w| w.contains("owl:datatypeComplementOf")),
+            "{:?}",
+            run.warnings
+        );
+        assert!(ask_in_tg(
+            &store,
+            "http://example.org/a",
+            TY,
+            "http://example.org/B"
+        ));
+    }
+
+    /// Konclude itself still misreads `∃p.(D ⊓ ¬D)`. When this fails, the
+    /// Konclude in use reads it right and the fallback above can be narrowed.
+    #[test]
+    fn dl_konclude_live_still_misses_the_complement_clash() {
+        let Some(c) = live() else { return };
+        let dir = tmp();
+        let ofn = dir.join("complement.ofn");
+        std::fs::write(
+            &ofn,
+            "Ontology(<http://example.org/o>
+             Declaration(Class(<http://example.org/A>))
+             Declaration(DataProperty(<http://example.org/p>))
+             Declaration(NamedIndividual(<http://example.org/a>))
+             SubClassOf(<http://example.org/A> DataSomeValuesFrom(<http://example.org/p>
+               DataIntersectionOf(<http://www.w3.org/2001/XMLSchema#integer>
+                 DataComplementOf(<http://www.w3.org/2001/XMLSchema#integer>))))
+             ClassAssertion(<http://example.org/A> <http://example.org/a>))
+            ",
+        )
+        .unwrap();
+        let out = std::process::Command::new(&c.konclude_bin)
+            .arg("consistency")
+            .arg("-i")
+            .arg(&ofn)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("is consistent"), "{text}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
