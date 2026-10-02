@@ -353,6 +353,11 @@ pub async fn validate_and_commit(
         derived_from: None,
         notes: c.message.clone(),
         branch: None,
+        conforms_to_model: dataset.conforms_to_model.clone().filter(|m| !m.is_empty()),
+        conforms_to_version: dataset
+            .conforms_to_version
+            .clone()
+            .filter(|v| !v.is_empty()),
     };
     registry::insert_version(&state.store, &state.base_url, &record).map_err(AppError::from)?;
     registry::update_latest_draft(&state.store, &state.base_url, &dataset.id, &version)

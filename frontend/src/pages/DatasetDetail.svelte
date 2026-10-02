@@ -42,6 +42,7 @@
     getLatestValidationRun,
     getValidationHistory,
     getGeoStats,
+    getDatasetConformance,
   } from '../lib/api.js';
   import { unwrapValidationRun, validationErrorMessage, formatShaclPath } from '../lib/validationReport.js';
   import { toastSuccess } from '../lib/toast.ts';
@@ -84,6 +85,7 @@
   export let id;
 
   let dataset = null;
+  let conformance = null;
   let graphs = [];
   let services = [];
   // Content summary, derived cheaply from the browse facets (index-backed graph
@@ -739,6 +741,8 @@
   async function fetchDataset() {
     try {
       dataset = await getDataset(id);
+      // The model-version layer: tells the owner when a newer model version was published.
+      getDatasetConformance(id).then(c => { conformance = c; }).catch(() => { conformance = null; });
       editConformsToOntology = dataset.conforms_to_model || '';
       editConformsToVersion = dataset.conforms_to_version || '';
       imageKey = dataset.image_key;
@@ -1666,7 +1670,16 @@
     {#if dataset.conforms_to_model}
       <div class="meta-item">
         <dt>{$i18nT('pages.datasetDetail.conformsToModel')}</dt>
-        <dd><a href="/models/{dataset.conforms_to_model}" class="md-link">{dataset.conforms_to_model}{#if dataset.conforms_to_version} · v{dataset.conforms_to_version}{/if}</a></dd>
+        <dd>
+          <a href="/models/{dataset.conforms_to_model}" class="md-link">{dataset.conforms_to_model}{#if dataset.conforms_to_version} · v{dataset.conforms_to_version}{/if}</a>
+          {#if conformance?.conforms_to_model?.update_available}
+            <span class="model-update-badge" title={$i18nT('pages.datasetDetail.modelUpdateAvailableHint')}>
+              ⬆ {$i18nT('pages.datasetDetail.modelUpdateAvailable', { values: { version: conformance.conforms_to_model.latest_published } })}
+            </span>
+          {:else if conformance?.conforms_to_model?.pinned}
+            <span class="model-current-badge">{$i18nT('pages.datasetDetail.modelCurrent')}</span>
+          {/if}
+        </dd>
       </div>
     {/if}
 
@@ -3184,4 +3197,6 @@
   :global(:is([data-theme="dark"], .dark)) .modal-box,
   :global(:is([data-theme="dark"], .dark)) .preview-modal { background: var(--bg-strong); }
   :global(:is([data-theme="dark"], .dark)) .svc-graph-item.checked { background: rgba(16,185,129,0.12); }
+  .model-update-badge { margin-left: .4rem; font-size: .72rem; padding: .1rem .45rem; border-radius: 999px; background: var(--warning-100, #fde9c8); color: var(--warning-800, #7a4b00); border: 1px solid var(--warning-300, #f3c37a); }
+  .model-current-badge { margin-left: .4rem; font-size: .72rem; padding: .1rem .45rem; border-radius: 999px; background: var(--success-100, #dcf5e3); color: var(--success-800, #0f5a2a); }
 </style>
