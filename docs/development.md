@@ -4,7 +4,7 @@ How to get a fast edit → compile → run loop, and what makes the build quick.
 This is the canonical reference; [`CONTRIBUTING.md`](../CONTRIBUTING.md) has the
 contribution rules and the [README](../README.md) has the short version.
 
-> **Platform note.** A native build needs the **GEOS** C library on every OS (and
+> **Platform note.** A native build needs the **GEOS** C library, 3.11 or later, on every OS (and
 > **libxmlsec1** for the `saml` feature in `--features full`). On Windows that is
 > fiddly, so the native fast-loop tools below are smoothest on **Linux, macOS, or
 > WSL2** — see the [Windows guide](windows.md). The Docker speed-ups apply
