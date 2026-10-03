@@ -1,9 +1,11 @@
 # Benchmark harness & charts
 
-Reproducibility artifacts for [`docs/performance.md`](../performance.md). All
-results in that document were produced on the reference system documented there
-(AMD Ryzen 9 7900X3D, 24 vCPU / 30.9 GiB, Docker Desktop on WSL2, release build,
-Oxigraph 0.4.11).
+Reproducibility artifacts for [`docs/performance.md`](../performance.md). The
+charts in this folder and the reference tables in that document come from a run
+in **June 2026** on the reference system documented there (AMD Ryzen 9 7900X3D,
+24 vCPU, Docker Desktop on WSL2, release build, Oxigraph 0.4.11), and have not
+been regenerated since the Oxigraph 0.5 upgrade; later measurements in that
+document carry their own dates.
 
 ## 1. In-process micro-benchmarks (Criterion)
 

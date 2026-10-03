@@ -394,6 +394,21 @@ dependency on this project's internal types:
   `ots_plugin_api::sources::catalogue`; a driver for another dialect
   implements `Executor` and `Dialect` there and owns only its wire protocol.
 
+### Plugin settings
+
+Plugins read their settings from the environment. The shipped plugins use
+these:
+
+| Plugin | Variable | Default | Meaning |
+|---|---|---|---|
+| `accounts-dashboard` | `ACCOUNTS_DASHBOARD_APP_GROUPS` | *(unset)* | Comma-separated `app=group` pairs, e.g. `validation=data-stewards,forms-design=form-designers`. The dashboard lists them under *Per-app entitlements* exactly as configured; it does not work out which accounts belong to each group. Malformed pairs are skipped. |
+| `accounts-dashboard` | `ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL` | *(unset)* | Base URL of an external LLM gateway whose usage ledger is merged into the dashboard's LLM section. The plugin calls `GET <url>/v1/usage?group_by=user` with a 5-second timeout on each dashboard load. If the gateway is unreachable or answers with an error, that part is marked unavailable with the reason and the rest of the dashboard still loads. |
+| `accounts-dashboard` | `ACCOUNTS_DASHBOARD_GATEWAY_KEY` | *(unset)* | Bearer token for that call, read through the host's secrets module: a reference such as `env:NAME` or `file:/path`. A raw value is refused under `OTS_ENV=production`. |
+| SQL connectors | *(none)* | | `plugin-postgres`, `plugin-mysql` and `plugin-mssql` take their connection settings per source, not from the environment; see [sources.md](sources.md). |
+
+The `plugin-*` features are not part of `full`, so the published image
+contains none of these plugins. Build with the feature to use one.
+
 ### Writing a new plugin (cookiecutter flow)
 
 1. Copy the template crate: `cp -r plugins/hello plugins/my-plugin`.

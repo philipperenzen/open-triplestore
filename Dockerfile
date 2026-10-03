@@ -18,10 +18,14 @@
 # fully optimised, for production and CI. `release-dev` is thin LTO + 16 codegen
 # units: it links far faster at a small runtime cost, for quick local iteration.
 ARG CARGO_PROFILE=release
-# Cargo feature set for the image. Default 'full'; a downstream deployment can
-# additionally enable compile-time plugins, e.g.
-#   --build-arg CARGO_FEATURES="full,plugin-accounts-dashboard"
-ARG CARGO_FEATURES=full
+# Cargo feature set for the image: 'full' plus the three SQL datasource
+# connectors (PostgreSQL, MySQL / MariaDB, SQL Server; docs/sources.md). The
+# connectors are pure Rust over rustls, so they need no system library here or
+# in the runtime image (which already carries ca-certificates for their roots).
+# A deployment that enables more compile-time plugins repeats the list, e.g.
+#   --build-arg CARGO_FEATURES="full,plugin-postgres,plugin-mysql,plugin-mssql,plugin-accounts-dashboard"
+# and one that wants no connectors builds with CARGO_FEATURES=full.
+ARG CARGO_FEATURES=full,plugin-postgres,plugin-mysql,plugin-mssql
 
 # ─── Stage 1: Frontend ───
 FROM node:24-slim AS frontend
@@ -68,8 +72,8 @@ COPY opengraph/ opengraph/
 # `ots-plugin-api` is an unconditional dependency (src/plugins.rs' registry needs
 # its types regardless of which plugin-<name> features are on) and `ots-plugin-hello`
 # is pulled in by the `plugin-hello` feature — both must be present for ANY build,
-# including the default `--features full` release image, which does not enable
-# `plugin-hello` but still needs `plugins/api` to resolve.
+# including the release image, which does not enable `plugin-hello` but still
+# needs `plugins/api` to resolve (and the connector crates it does enable).
 COPY plugins/ plugins/
 # `tools/*` is a workspace member glob too: without the directory cargo cannot
 # load the workspace at all ("failed to read tools/*/Cargo.toml"). The image
@@ -95,14 +99,16 @@ ENV RUST_MIN_STACK=33554432
 COPY .cargo/ .cargo/
 COPY --from=planner /app/recipe.json recipe.json
 # This layer is cached as long as the dependency set is unchanged — source-only
-# edits no longer trigger a full dependency rebuild. `--features full` enables
-# every standard (RDF 1.2, OWL 2 RL/EL/QL/DL, LDP, ShEx, SWRL, full-text search),
+# edits no longer trigger a full dependency rebuild. `full` enables every
+# standard (RDF 1.2, OWL 2 RL/EL/QL/DL, LDP, ShEx, SWRL, full-text search),
 # encrypted backups and alerting, so the running server matches what the docs
-# advertise. NOT included: `saml` (experimental) and `sfcgal3d` (native SFCGAL);
-# see docs/build-features.md.
+# advertise; the default CARGO_FEATURES adds the SQL connectors. NOT included:
+# `saml` (experimental) and `sfcgal3d` (native SFCGAL); see
+# docs/build-features.md. Cooking with the same features as the build below
+# keeps the plugin dependencies in this cached layer too.
 RUN --mount=type=cache,id=cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git,sharing=locked,target=/usr/local/cargo/git \
-    cargo chef cook --profile ${CARGO_PROFILE} --features full --recipe-path recipe.json
+    cargo chef cook --profile ${CARGO_PROFILE} --features "${CARGO_FEATURES}" --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock* ./
 COPY src/ src/
 COPY benches/ benches/

@@ -22,7 +22,8 @@
 //! Value nodes are then resolved natively from the quad index for every path
 //! form SHACL has, targets and `sh:class` checks come from per-run class sets,
 //! and no SPARQL is evaluated on the per-focus-node path at all. SPARQL-based
-//! constraints (`sh:sparql`) and SPARQL targets keep reading the live store.
+//! constraints (`sh:sparql`), SPARQL targets and the bodies of the
+//! `sh:SPARQLFunction`s they call read the same source ([`DataView::query`]).
 
 use super::shapes::{Constraint, PropertyPath, Shape, Target};
 use crate::store::TripleStore;
@@ -39,11 +40,11 @@ pub(crate) const RDFS_SUBCLASS: &str = "http://www.w3.org/2000/01/rdf-schema#sub
 
 /// Which of the run's data graphs a lookup spans.
 ///
-/// SPARQL property paths keep every hop inside one graph (`GRAPH <g> { … }`
-/// per data graph, UNIONed), which is what IRI focus nodes evaluate with:
-/// [`GraphSel::One`] per graph, results merged. Blank-node and literal focus
-/// nodes keep the engine's historical native walk, where each hop unions over
-/// every data graph ([`GraphSel::All`]); so do `sh:class` membership checks.
+/// Property paths and `sh:class` membership read the merge of the data
+/// graphs ([`GraphSel::All`]): SHACL validates one data graph, and a run over
+/// several validates their merge. [`GraphSel::One`] serves the per-graph
+/// instance scans of `sh:targetClass`, whose union is the merged answer (a
+/// type triple lives in one graph), and the single-graph fast path.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum GraphSel {
     All,
@@ -110,8 +111,6 @@ pub(crate) struct DataView<'a> {
     /// run and cloned per query (`SparqlEvaluator` is `Clone`; `parse_query`
     /// consumes it).
     evaluator: oxigraph::sparql::SparqlEvaluator,
-    /// Graph-reach measurement for this run (see [`ReachProbe`]).
-    pub(crate) reach_probe: ReachProbe,
     /// Per-run adjacency for the shape predicates, built for the snapshot and
     /// live sources when the run is large enough to pay for it (see
     /// [`RunIndex`]). `None` on the mirror source, whose probes are RAM lookups.
@@ -144,66 +143,6 @@ struct RunIndex {
 pub(crate) struct IndexPolicy {
     pub min_probes: usize,
     pub max_quads: usize,
-}
-
-/// Counts, for one validation run, how often a property path yields FEWER
-/// value nodes when evaluated inside each data graph separately than it would
-/// over the merge of them — the observable consequence of evaluating `sh:path`
-/// per graph while `sh:sparql` and the class machinery read the graphs merged.
-///
-/// It measures; it never changes an answer: the extra evaluation's result is
-/// counted and dropped. Two things bound its cost. It only runs for paths that
-/// *can* cross a graph boundary — a single hop matches quads that each live in
-/// exactly one graph, so per-graph-and-union and merged evaluation return the
-/// same set by construction — and it only runs when the flag is set.
-///
-/// Off unless `OTS_SHACL_REACH_PROBE` is `1` or `true`. An earlier form of this
-/// probe only fired when the per-graph result was *empty*, which made it blind
-/// to every lookup where the merge adds values to a non-empty result — the case
-/// that changes a `sh:maxCount`, `sh:uniqueLang` or `sh:qualifiedMaxCount`
-/// answer. A zero reading from that form was not evidence.
-#[derive(Debug, Default)]
-pub(crate) struct ReachProbe {
-    pub(crate) enabled: bool,
-    /// Lookups whose merged evaluation yielded more value nodes.
-    pub(crate) diverged: std::sync::atomic::AtomicUsize,
-    /// Value nodes the merge would have added, summed over those lookups.
-    pub(crate) extra_values: std::sync::atomic::AtomicUsize,
-    /// Cross-graph-capable lookups examined, the denominator for `diverged`.
-    pub(crate) examined: std::sync::atomic::AtomicUsize,
-}
-
-impl ReachProbe {
-    fn from_env() -> Self {
-        let enabled = std::env::var("OTS_SHACL_REACH_PROBE")
-            .ok()
-            .is_some_and(|v| matches!(v.trim(), "1" | "true"));
-        Self {
-            enabled,
-            ..Default::default()
-        }
-    }
-
-    /// `(diverged lookups, extra value nodes, lookups examined)`.
-    pub(crate) fn totals(&self) -> (usize, usize, usize) {
-        use std::sync::atomic::Ordering::Relaxed;
-        (
-            self.diverged.load(Relaxed),
-            self.extra_values.load(Relaxed),
-            self.examined.load(Relaxed),
-        )
-    }
-
-    /// Record one examined lookup. `extra` is how many more value nodes the
-    /// merged evaluation produced; zero means the two agreed.
-    pub(crate) fn record(&self, extra: usize) {
-        use std::sync::atomic::Ordering::Relaxed;
-        self.examined.fetch_add(1, Relaxed);
-        if extra > 0 {
-            self.diverged.fetch_add(1, Relaxed);
-            self.extra_values.fetch_add(extra, Relaxed);
-        }
-    }
 }
 
 impl IndexPolicy {
@@ -287,7 +226,6 @@ impl<'a> DataView<'a> {
             graphs,
             classes: HashMap::new(),
             evaluator,
-            reach_probe: ReachProbe::from_env(),
             index: None,
         }
     }
@@ -471,28 +409,82 @@ impl<'a> DataView<'a> {
     /// `TripleStore::query` would have applied and this does not — the same
     /// trade every native probe in the run already makes.
     pub(crate) fn query(&self, query: &str) -> Result<oxigraph::sparql::QueryResults<'_>, String> {
-        let mut prepared = self
+        let prepared = self
             .evaluator
             .clone()
             .parse_query(query)
             .map_err(|e| e.to_string())?;
+        self.execute(prepared)
+    }
+
+    /// As [`Self::query`] for a query [`super::constraints::prepare_prebound`]
+    /// rewrote, with `bindings` pre-bound as **terms** (SHACL §5.3.1, Appendix
+    /// A; see [`crate::sparql::prebind`]): `$this`, `$value` and component
+    /// parameters are never pasted into the text, which is what lets a
+    /// blank-node focus or value node be addressed at all (no SPARQL syntax
+    /// names a stored blank node), and keeps a hostile literal from closing a
+    /// clause.
+    pub(crate) fn query_prebound(
+        &self,
+        query: spargebra::Query,
+        bindings: &[(&str, &Term)],
+    ) -> Result<oxigraph::sparql::QueryResults<'_>, String> {
+        let prepared = crate::sparql::prebind::prepare(self.evaluator.clone(), query, bindings)?;
+        self.execute(prepared)
+    }
+
+    fn execute(
+        &self,
+        mut prepared: oxigraph::sparql::PreparedSparqlQuery,
+    ) -> Result<oxigraph::sparql::QueryResults<'_>, String> {
         // The query text comes from the shapes graph — `sh:select`, `sh:ask`,
-        // a `sh:SPARQLTarget` — which any writer of a dataset can upload. The
-        // callers prepend `FROM <data graph>` clauses, but a prologue cannot
-        // take away what the text itself asks for: a `FROM NAMED <victim>`
-        // written into the shape would simply be added to it, and a `GRAPH`
-        // block would then read a graph this run may not. Replacing the
-        // dataset outright is what confines it.
+        // a `sh:SPARQLTarget` — which any writer of a dataset can upload. A
+        // `FROM NAMED <victim>` written into the shape, followed by a `GRAPH`
+        // block, would read a graph this run may not. Replacing the dataset
+        // outright — the run's data graphs as the default graph, no named
+        // graphs — is what confines it.
         if !self.data_graphs.is_empty() {
             crate::store::engine::confine_dataset(prepared.dataset_mut(), self.data_graphs)
                 .map_err(|e| e.to_string())?;
         }
-        match &self.raw {
-            RawSource::Snapshot(tx) => prepared.on_transaction(tx).execute(),
-            RawSource::Mirror(store) => prepared.on_store(store).execute(),
-            RawSource::Live(store) => prepared.on_store(store).execute(),
+        self.scope().execute(prepared).map_err(|e| e.to_string())
+    }
+
+    /// Evaluate a parsed query against the run's data source with `bindings`
+    /// bound as terms, its dataset confined to the run's data graphs (the
+    /// default graph when the run names none). Every variable in `bindings`
+    /// must be a top-level variable of `query` (spareval refuses the rest).
+    pub(crate) fn query_bound(
+        &self,
+        query: &opengraph::spargebra::Query,
+        bindings: &[(oxigraph::sparql::Variable, Term)],
+    ) -> Result<oxigraph::sparql::QueryResults<'_>, String> {
+        // Without the optimizer, which would treat the bound variables as
+        // unbound (see `sparql_functions::without_optimizer`).
+        let evaluator = crate::shacl::sparql_functions::without_optimizer(self.evaluator.clone());
+        let mut prepared = evaluator.for_query(query.clone());
+        crate::store::engine::confine_dataset(prepared.dataset_mut(), self.data_graphs)
+            .map_err(|e| e.to_string())?;
+        for (var, term) in bindings {
+            prepared = prepared.substitute_variable(var.clone(), term.clone());
         }
-        .map_err(|e| e.to_string())
+        self.scope().execute(prepared).map_err(|e| e.to_string())
+    }
+
+    /// The run's data as a function body called from one of its queries sees
+    /// it: the same source, data graphs and evaluator (see
+    /// [`crate::shacl::sparql_functions::DataScope`]).
+    pub(crate) fn scope(&self) -> crate::shacl::sparql_functions::DataScope<'_> {
+        use crate::shacl::sparql_functions::{DataScope, ScopeSource};
+        DataScope {
+            source: match &self.raw {
+                RawSource::Snapshot(tx) => ScopeSource::Transaction(tx),
+                RawSource::Mirror(store) => ScopeSource::Store(store),
+                RawSource::Live(store) => ScopeSource::Store(store),
+            },
+            data_graphs: self.data_graphs,
+            evaluator: &self.evaluator,
+        }
     }
 
     /// A bare-evaluator SELECT for the view's own internal scans (instance
@@ -916,10 +908,8 @@ fn collect_constraint_classes(
                 collect_constraint_classes(c, graph_count, out);
             }
         }
-        Constraint::Expression { checks, .. } => {
-            for c in checks {
-                collect_constraint_classes(c, graph_count, out);
-            }
+        Constraint::Expression { expr, .. } => {
+            expr.visit(&mut |s| collect_classes(s, graph_count, out), &mut |_| {});
         }
         _ => {}
     }
@@ -970,10 +960,17 @@ fn collect_constraint_predicates(constraint: &Constraint, out: &mut HashSet<(Str
                 collect_constraint_predicates(c, out);
             }
         }
-        Constraint::Expression { path, checks, .. } => {
-            collect_path_predicates(path, false, out);
-            for c in checks {
-                collect_constraint_predicates(c, out);
+        Constraint::Expression { expr, .. } => {
+            let mut paths = Vec::new();
+            let mut shapes = Vec::new();
+            expr.visit(&mut |s| shapes.push(s.clone()), &mut |p| {
+                paths.push(p.clone())
+            });
+            for p in &paths {
+                collect_path_predicates(p, false, out);
+            }
+            for s in &shapes {
+                collect_shape_predicates(s, out);
             }
         }
         _ => {}

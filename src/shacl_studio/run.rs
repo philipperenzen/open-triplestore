@@ -237,6 +237,8 @@ mod tests {
             value: None,
             source_shape: "urn:shape".into(),
             source_constraint: "sh:Test".into(),
+            source_constraint_component: String::new(),
+            terms: Default::default(),
             message: "test".into(),
         }
     }

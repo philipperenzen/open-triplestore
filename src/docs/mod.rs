@@ -362,6 +362,14 @@ const BUILTINS: &[Builtin] = &[
         category: "Reasoning & Validation",
         body: include_str!("../../docs/shex.md"),
         admin_only: false,
+        sort: 82,
+    },
+    Builtin {
+        slug: "repair",
+        title: "Repair Proposals",
+        category: "Reasoning & Validation",
+        body: include_str!("../../docs/repair.md"),
+        admin_only: false,
         sort: 83,
     },
     // ── Security ──

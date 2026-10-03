@@ -8,7 +8,8 @@
   import { isAdmin } from '../lib/stores.js';
   import { Link, navigate } from '../lib/router/index.js';
   import { renderMarkdown } from '../lib/markdown.js';
-  import { BookOpen, Pencil, AlertTriangle, FileQuestion } from 'lucide-svelte';
+  import { BookOpen, Pencil, AlertTriangle, FileQuestion, LifeBuoy, HelpCircle, Bug, Lightbulb } from 'lucide-svelte';
+  import { openFeedback } from '../lib/feedback.ts';
   import { t } from 'svelte-i18n';
 
   // Doc slug from the /docs/:slug route. Undefined on the bare /docs index, in
@@ -245,6 +246,34 @@
       <!-- eslint-disable-next-line svelte/no-at-html-tags -->
       {@html rendered.html}
     </article>
+
+    {#if current}
+      <!-- Every page ends with a way out: the FAQ, or a question or report to
+           this instance's admins through the feedback dialog. -->
+      <section class="doc-help" aria-labelledby="doc-help-h">
+        <div class="doc-help-icon"><LifeBuoy size={20} /></div>
+        <div class="doc-help-text">
+          <h2 id="doc-help-h">{$t('pages.documentation.helpTitle')}</h2>
+          <p>
+            {$t('pages.documentation.helpBody')}
+            {#if effectiveSlug !== 'faq'}
+              <Link to="/docs/faq">{$t('pages.documentation.helpFaq')}</Link>
+            {/if}
+          </p>
+          <div class="doc-help-actions">
+            <button class="btn btn-sm btn-ghost" on:click={() => openFeedback('question')}>
+              <HelpCircle size={14} /> {$t('pages.documentation.helpAsk')}
+            </button>
+            <button class="btn btn-sm btn-ghost" on:click={() => openFeedback('bug')}>
+              <Bug size={14} /> {$t('pages.documentation.helpBug')}
+            </button>
+            <button class="btn btn-sm btn-ghost" on:click={() => openFeedback('feature')}>
+              <Lightbulb size={14} /> {$t('pages.documentation.helpFeature')}
+            </button>
+          </div>
+        </div>
+      </section>
+    {/if}
   </main>
 
   <!-- Right: on this page -->
@@ -295,6 +324,34 @@
   .docs-main {
     flex: 1;
     min-width: 0;
+  }
+
+  .doc-help {
+    display: flex;
+    gap: 0.9rem;
+    margin-top: 2.5rem;
+    padding: 1rem 1.1rem;
+    border: 1px solid var(--line-soft);
+    border-radius: 12px;
+    background: var(--bg-float, #fff);
+  }
+  .doc-help-icon {
+    flex-shrink: 0;
+    display: grid;
+    place-items: center;
+    width: 2.4rem;
+    height: 2.4rem;
+    border-radius: 50%;
+    background: var(--bg-accent-soft, #eef9f9);
+    color: var(--brand-600);
+  }
+  .doc-help-text { min-width: 0; }
+  .doc-help h2 { margin: 0; font-size: 1rem; }
+  .doc-help p { margin: 0.3rem 0 0.75rem; font-size: 0.88rem; color: var(--ink-600); line-height: 1.5; }
+  .doc-help-actions { display: flex; flex-wrap: wrap; gap: 0.45rem; }
+  @media (max-width: 720px) {
+    .doc-help { flex-direction: column; }
+    .doc-help-actions :global(.btn) { width: auto; flex: 1 1 auto; }
   }
   .docs-toc {
     width: 13rem;

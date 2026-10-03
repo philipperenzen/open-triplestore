@@ -1,4 +1,5 @@
 use super::constraints::{evaluate_constraint, evaluate_constraint_with_values};
+use super::node_expr::{FunctionCall, NodeExpr};
 use super::report::{RunMetrics, Severity, ValidationReport, ValidationResult};
 use super::shapes::*;
 use super::view::{DataView, GraphSel};
@@ -84,15 +85,15 @@ pub fn validate(
             .par_iter()
             .filter(|shape| !shape.deactivated)
             .map(|shape| {
-                let focus_nodes = resolve_targets(view, shape);
+                let focus_nodes = resolve_targets(view, shape)?;
                 debug!(
                     "Shape <{}> has {} target nodes",
                     shape.iri,
                     focus_nodes.len()
                 );
-                (shape, focus_nodes)
+                Ok((shape, focus_nodes))
             })
-            .collect()
+            .collect::<Result<_, String>>()?
     };
     // Sized by the real focus counts: one scan per (graph, shape predicate)
     // when the run is large enough for hash lookups to beat index seeks.
@@ -131,7 +132,8 @@ pub fn validate(
                             None,
                             &severity,
                         );
-                        results.extend(apply_message(rs, &shape.message, constraint));
+                        let rs = apply_message(rs, &shape.message, constraint);
+                        results.extend(keep_severity_iri(rs, shape.severity.as_deref()));
                     }
 
                     // Property shape constraints. A property shape's own
@@ -139,7 +141,7 @@ pub fn validate(
                     // (SHACL §3.6 — the shape that declares the constraint).
                     // The value nodes along the shape's path are fetched once
                     // and shared by all of its constraints.
-                    for prop_shape in &shape.property_shapes {
+                    for prop_shape in shape.property_shapes.iter().filter(|ps| !ps.deactivated) {
                         let shape_iri = prop_shape.iri.as_deref().unwrap_or(&shape.iri);
                         let prop_severity = prop_shape
                             .severity
@@ -163,7 +165,11 @@ pub fn validate(
                                 &values,
                                 &prop_severity,
                             );
-                            results.extend(apply_message(rs, &prop_shape.message, constraint));
+                            let rs = apply_message(rs, &prop_shape.message, constraint);
+                            results.extend(keep_severity_iri(
+                                rs,
+                                prop_shape.severity.as_deref().or(shape.severity.as_deref()),
+                            ));
                         }
                     }
 
@@ -177,25 +183,6 @@ pub fn validate(
     let results_count = all_results.len();
 
     debug!("SHACL validation complete: {} violations", results_count);
-
-    // Graph-reach measurement (off unless OTS_SHACL_REACH_PROBE is set): how
-    // often a `sh:path` found nothing per data graph where the merge of them
-    // would have found values. Reported here and nowhere else — never as a
-    // result, because `conforms` is `results.is_empty()`.
-    let (diverged, extra_values, examined) = view.reach_probe.totals();
-    if examined > 0 {
-        warn!(
-            shapes_graph = %shapes_graph,
-            data_graphs = data_graphs.len(),
-            diverged,
-            extra_values,
-            examined,
-            "graph-reach probe: of {examined} cross-graph-capable value-node lookups, \
-             {diverged} would yield more values over the merge of the data graphs \
-             ({extra_values} extra value nodes in total); sh:path is evaluated per graph \
-             while sh:sparql and the class machinery read them merged"
-        );
-    }
 
     // The run's own account of itself: for the report, the run row and the
     // workload telemetry (docs/notes/analytical-mirror-design.md §1.4).
@@ -248,6 +235,28 @@ fn apply_message(
             for r in &mut results {
                 r.message = msg.clone();
             }
+        }
+    }
+    results
+}
+
+/// Keep a declared `sh:severity` that is not one of SHACL's three (e.g.
+/// `ex:MySeverity`) on the results it produced: [`Severity`] maps it to
+/// `Violation`, and the RDF report must still name the declared IRI.
+fn keep_severity_iri(
+    mut results: Vec<ValidationResult>,
+    declared: Option<&str>,
+) -> Vec<ValidationResult> {
+    let Some(iri) = declared else {
+        return results;
+    };
+    let as_enum = Severity::from_iri(iri);
+    if as_enum.iri() == iri {
+        return results;
+    }
+    for r in &mut results {
+        if r.terms.severity.is_none() && r.severity == as_enum {
+            r.terms.severity = Some(iri.to_string());
         }
     }
     results
@@ -336,7 +345,7 @@ pub fn infer_into(
             prepared.extend(rule.conditions.iter().cloned());
             let mut view = DataView::new(store, data_graphs, evaluator.clone());
             view.prepare(&prepared);
-            let focus_nodes = resolve_targets(&view, &target_shape);
+            let focus_nodes = resolve_targets(&view, &target_shape)?;
 
             for focus_node in &focus_nodes {
                 // sh:condition: the focus node must conform to every condition
@@ -355,11 +364,11 @@ pub fn infer_into(
                     continue;
                 }
                 apply_rule(
-                    store,
+                    &view,
+                    &rule.conditions,
                     &evaluator,
                     focus_node,
                     &rule.body,
-                    data_graphs,
                     target_graph,
                 )?;
             }
@@ -403,6 +412,8 @@ pub(crate) fn load_shapes(store: &TripleStore, shapes_graph: &str) -> Result<Vec
                 {{ ?shape sh:targetObjectsOf ?too }}
                 UNION
                 {{ ?shape sh:property ?p }}
+                UNION
+                {{ ?shape sh:target ?t }}
             }}
         }}
         "#,
@@ -433,11 +444,7 @@ fn load_single_shape(
     // Load targets
     let targets = load_targets(store, shapes_graph, shape_iri)?;
 
-    // Deactivated?
-    let deactivated = ask(
-        store,
-        &format!("ASK {{ GRAPH <{shapes_graph}> {{ <{shape_iri}> <{SH}deactivated> true }} }}"),
-    );
+    let deactivated = is_deactivated(store, shapes_graph, shape_iri);
 
     // Severity
     let severity = single_value(store, shapes_graph, shape_iri, &format!("{}severity", SH));
@@ -457,10 +464,7 @@ fn load_single_shape(
     // its constraints apply along that path, and any nested sh:property children
     // apply to the path's value nodes. Model it as a single own-path property
     // shape so the engine evaluates everything in path context.
-    let shape_type = if let Some(own_path) =
-        single_value(store, shapes_graph, shape_iri, &format!("{}path", SH))
-            .and_then(|p| parse_property_path(store, shapes_graph, &p))
-    {
+    let shape_type = if let Some(own_path) = own_path(store, shapes_graph, shape_iri)? {
         constraints.extend(
             property_shapes
                 .drain(..)
@@ -474,6 +478,8 @@ fn load_single_shape(
             description: None,
             severity: None,
             message: None,
+            // The shape itself carries the flag (`Shape::deactivated`).
+            deactivated: false,
         }];
         ShapeType::PropertyShape
     } else {
@@ -572,10 +578,86 @@ fn load_targets(
             check_sparql_target(&query)
                 .map_err(|e| format!("shape <{shape_iri}>: sh:target <{target_node}> {e}"))?;
             targets.push(Target::SparqlTarget(query));
+        } else if let Some(target) = load_target_type(store, shapes_graph, &target_node)
+            .map_err(|e| format!("shape <{shape_iri}>: sh:target <{target_node}> {e}"))?
+        {
+            targets.push(target);
         }
     }
 
     Ok(targets)
+}
+
+/// A custom target whose type is a `sh:SPARQLTargetType` (SHACL-AF §3.2):
+/// the type's `SELECT ?this` with the target's parameter values pre-bound as
+/// terms. `Ok(None)` when the target lacks a value for a non-optional
+/// parameter — such a target is ignored, producing no target nodes.
+///
+/// A custom target this engine cannot run — no `sh:select` and no
+/// `sh:SPARQLTargetType` type — fails the shapes graph: SHACL-AF leaves its
+/// meaning open, and a shape that validated nothing in silence would let a
+/// write gate pass everything.
+fn load_target_type(
+    store: &TripleStore,
+    shapes_graph: &str,
+    target_node: &str,
+) -> Result<Option<Target>, String> {
+    let objects =
+        |subject: &str, p: &str| store.objects_for_subject_in_graph(subject, p, Some(shapes_graph));
+    let target_type_class = format!("{SH}SPARQLTargetType");
+    let target_type = objects(target_node, RDF_TYPE)
+        .iter()
+        .map(term_to_lexical)
+        .find(|t| {
+            objects(t, RDF_TYPE)
+                .iter()
+                .any(|c| matches!(c, Term::NamedNode(n) if n.as_str() == target_type_class))
+        })
+        .ok_or_else(|| {
+            "has neither a sh:select nor a type declared as sh:SPARQLTargetType in the shapes graph"
+                .to_string()
+        })?;
+    let select = single_value(store, shapes_graph, &target_type, &format!("{SH}select"))
+        .ok_or_else(|| format!("type <{target_type}> has no sh:select"))?;
+    let prefixes = sparql_prefixes(store, shapes_graph, &target_type);
+    let text = format!("{prefixes}{select}");
+    check_sparql_target(&text).map_err(|e| format!("type <{target_type}>: {e}"))?;
+
+    let mut bindings = Vec::new();
+    for param in objects(&target_type, &format!("{SH}parameter"))
+        .iter()
+        .map(term_to_lexical)
+    {
+        let path = single_value(store, shapes_graph, &param, &format!("{SH}path"))
+            .ok_or_else(|| format!("type <{target_type}>: a sh:parameter has no sh:path"))?;
+        let optional = single_value(store, shapes_graph, &param, &format!("{SH}optional"))
+            .is_some_and(|v| v == "true" || v == "1");
+        let name = path.rsplit(['#', '/']).next().unwrap_or(&path).to_string();
+        let var = oxigraph::sparql::Variable::new(&name)
+            .map_err(|e| format!("type <{target_type}>: parameter `{name}`: {e}"))?;
+        let values = objects(target_node, &path);
+        match values.as_slice() {
+            [] if optional => {}
+            [] => return Ok(None),
+            [Term::BlankNode(_)] => {
+                return Err(format!("the value of parameter <{path}> is a blank node"))
+            }
+            [value] => bindings.push((var, value.clone())),
+            _ => return Err(format!("has more than one value for parameter <{path}>")),
+        }
+    }
+
+    let mut query = crate::sparql::parser()
+        .parse_query(&text)
+        .map_err(|e| format!("type <{target_type}>: sh:select does not parse: {e}"))?;
+    if let SpargebraQuery::Select { pattern, .. } = &mut query {
+        let vars: Vec<_> = bindings.iter().map(|(v, _)| v.clone()).collect();
+        super::sparql_functions::project_onto(pattern, &vars);
+    }
+    Ok(Some(Target::SparqlTargetType {
+        query: Box::new(query),
+        bindings,
+    }))
 }
 
 fn load_constraints(
@@ -638,10 +720,14 @@ fn load_constraints(
         }
     }
 
-    // sh:pattern + sh:flags
-    if let Some(pattern) = single_value(store, shapes_graph, shape_iri, &format!("{}pattern", SH)) {
-        let flags = single_value(store, shapes_graph, shape_iri, &format!("{}flags", SH));
-        constraints.push(Constraint::Pattern { pattern, flags });
+    // sh:pattern + sh:flags. A shape may have several patterns (SHACL §4.4.3
+    // allows it; only sh:flags is at-most-one), and every one must match.
+    let flags = single_value(store, shapes_graph, shape_iri, &format!("{}flags", SH));
+    for pattern in multi_values(store, shapes_graph, shape_iri, &format!("{}pattern", SH)) {
+        constraints.push(Constraint::Pattern {
+            pattern,
+            flags: flags.clone(),
+        });
     }
 
     // sh:minExclusive / sh:minInclusive / sh:maxExclusive / sh:maxInclusive —
@@ -684,8 +770,11 @@ fn load_constraints(
         constraints.push(Constraint::LessThanOrEquals(v));
     }
 
-    // sh:hasValue (typed: may be an IRI or a literal)
-    if let Some(v) = typed_value("hasValue") {
+    // sh:hasValue (typed: may be an IRI or a literal). Each value is its own
+    // constraint, so every one of them must be present.
+    for v in
+        store.objects_for_subject_in_graph(shape_iri, &format!("{SH}hasValue"), Some(shapes_graph))
+    {
         constraints.push(Constraint::HasValue(v));
     }
 
@@ -752,57 +841,39 @@ fn load_constraints(
         }
     }
 
-    // sh:not
-    if let Some(not_iri) = single_value(store, shapes_graph, shape_iri, &format!("{}not", SH)) {
+    // sh:not, sh:and, sh:or, sh:xone: a single-parameter component, so each
+    // value of the parameter is its own constraint (SHACL §4: "each value of
+    // such a parameter declares an individual constraint"). Only the first
+    // value used to be read, and the other ones were never checked.
+    for not_iri in multi_values(store, shapes_graph, shape_iri, &format!("{}not", SH)) {
         if let Some(not_shape) = load_member_shape(store, shapes_graph, &not_iri)? {
             constraints.push(Constraint::Not(Box::new(not_shape)));
         }
     }
 
-    // sh:and (RDF list of shape IRIs)
-    let and_iris = load_rdf_list(store, shapes_graph, shape_iri, &format!("{}and", SH));
-    if !and_iris.is_empty() {
-        let mut and_shapes = Vec::new();
-        for iri in &and_iris {
-            if let Some(s) = load_member_shape(store, shapes_graph, iri)? {
-                and_shapes.push(s);
+    // sh:and / sh:or / sh:xone: each value is an RDF list of shapes.
+    type Logical = fn(Vec<Shape>) -> Constraint;
+    for (pred, make) in [
+        ("and", Constraint::And as Logical),
+        ("or", Constraint::Or as Logical),
+        ("xone", Constraint::Xone as Logical),
+    ] {
+        for members in rdf_lists(store, shapes_graph, shape_iri, &format!("{SH}{pred}")) {
+            let mut shapes = Vec::new();
+            for member in &members {
+                if let Some(s) = load_member_shape(store, shapes_graph, &term_to_lexical(member))? {
+                    shapes.push(s);
+                }
             }
-        }
-        if !and_shapes.is_empty() {
-            constraints.push(Constraint::And(and_shapes));
+            if !shapes.is_empty() {
+                constraints.push(make(shapes));
+            }
         }
     }
 
-    // sh:or (RDF list of shape IRIs)
-    let or_iris = load_rdf_list(store, shapes_graph, shape_iri, &format!("{}or", SH));
-    if !or_iris.is_empty() {
-        let mut or_shapes = Vec::new();
-        for iri in &or_iris {
-            if let Some(s) = load_member_shape(store, shapes_graph, iri)? {
-                or_shapes.push(s);
-            }
-        }
-        if !or_shapes.is_empty() {
-            constraints.push(Constraint::Or(or_shapes));
-        }
-    }
-
-    // sh:xone (RDF list of shape IRIs)
-    let xone_iris = load_rdf_list(store, shapes_graph, shape_iri, &format!("{}xone", SH));
-    if !xone_iris.is_empty() {
-        let mut xone_shapes = Vec::new();
-        for iri in &xone_iris {
-            if let Some(s) = load_member_shape(store, shapes_graph, iri)? {
-                xone_shapes.push(s);
-            }
-        }
-        if !xone_shapes.is_empty() {
-            constraints.push(Constraint::Xone(xone_shapes));
-        }
-    }
-
-    // sh:qualifiedValueShape + sh:qualifiedMinCount / sh:qualifiedMaxCount
-    if let Some(qvs_iri) = single_value(
+    // sh:qualifiedValueShape + sh:qualifiedMinCount / sh:qualifiedMaxCount.
+    // The counts are at-most-one; each value shape is a constraint of its own.
+    for qvs_iri in multi_values(
         store,
         shapes_graph,
         shape_iri,
@@ -854,6 +925,11 @@ fn load_constraints(
         .iter()
         .map(term_to_lexical)
     {
+        // SHACL §5.3: a SPARQL-based constraint with `sh:deactivated true`
+        // produces no validation results.
+        if is_deactivated(store, shapes_graph, &sparql_node) {
+            continue;
+        }
         if let Some(select) =
             single_value(store, shapes_graph, &sparql_node, &format!("{SH}select"))
         {
@@ -873,6 +949,7 @@ fn load_constraints(
                 format!("shape <{shape_iri}>: sh:sparql constraint does not parse: {e}")
             })?;
             constraints.push(Constraint::SparqlConstraint {
+                node: sparql_node.clone(),
                 select,
                 message,
                 severity,
@@ -888,32 +965,59 @@ fn load_constraints(
     let is_property_shape =
         single_value(store, shapes_graph, shape_iri, &format!("{SH}path")).is_some();
     for comp in constraint_components(store, shapes_graph)?.iter() {
-        let mut params: Vec<(String, Term)> = Vec::new();
+        // Every value the shape gives each parameter. A component with a
+        // single parameter declares one constraint per value (SHACL §4, "each
+        // value of such a parameter declares an individual constraint"); with
+        // several parameters, more than one value for any of them makes the
+        // shape ill-formed. Only the first value used to be read, so the rest
+        // were never checked — and which one counted as first was store order.
+        let mut supplied: Vec<(&str, Vec<Term>)> = Vec::new();
         let mut complete = true;
         for p in &comp.parameters {
-            match store
-                .objects_for_subject_in_graph(shape_iri, &p.path, Some(shapes_graph))
-                .into_iter()
-                .next()
-            {
-                Some(v) => params.push((p.name.clone(), v)),
-                None if p.optional => {}
-                None => complete = false,
+            let values = store.objects_for_subject_in_graph(shape_iri, &p.path, Some(shapes_graph));
+            if values.is_empty() {
+                complete &= p.optional;
+            } else {
+                supplied.push((p.name.as_str(), values));
             }
         }
-        if params.is_empty() || !complete {
+        if supplied.is_empty() || !complete {
             continue;
         }
-        let validator = if is_property_shape {
-            comp.property_validator
-                .clone()
-                .or_else(|| comp.validator.clone())
+        let instances: Vec<Vec<(String, Term)>> = if comp.parameters.len() == 1 {
+            let (name, values) = &supplied[0];
+            values
+                .iter()
+                .map(|v| vec![(name.to_string(), v.clone())])
+                .collect()
         } else {
-            comp.node_validator
-                .clone()
-                .or_else(|| comp.validator.clone())
+            if let Some((name, _)) = supplied.iter().find(|(_, vs)| vs.len() > 1) {
+                return Err(format!(
+                    "shape <{shape_iri}>: constraint component <{}> declares several \
+                     parameters, and the shape gives its parameter ${name} more than one value",
+                    comp.iri
+                ));
+            }
+            vec![supplied
+                .iter()
+                .map(|(n, vs)| (n.to_string(), vs[0].clone()))
+                .collect()]
         };
-        let Some(validator) = validator else {
+        let (validator, deactivated) = if is_property_shape {
+            (
+                &comp.property_validator,
+                comp.property_validator_deactivated,
+            )
+        } else {
+            (&comp.node_validator, comp.node_validator_deactivated)
+        };
+        let Some(validator) = validator.clone().or_else(|| comp.validator.clone()) else {
+            // Every validator that would apply carries `sh:deactivated true`:
+            // the author switched the component off, and its constraints
+            // produce nothing.
+            if deactivated || comp.validator_deactivated {
+                continue;
+            }
             // A component the shape uses but that has no validator for the
             // shape's kind is an ill-formed shapes graph (§6.2.2), not a
             // constraint that quietly never fires.
@@ -927,43 +1031,197 @@ fn load_constraints(
                 }
             ));
         };
-        constraints.push(Constraint::Custom(Box::new(CustomConstraint {
-            component: comp.iri.clone(),
-            params,
-            validator: validator.query,
-            message: validator.message,
-        })));
-    }
-
-    // SHACL-AF: sh:expression node expressions (path + comparison subset). The
-    // expression node carries an sh:path and comparison constraints (e.g.
-    // sh:minExclusive); values along the path from the focus must satisfy them.
-    for expr_node in store
-        .objects_for_subject_in_graph(shape_iri, &format!("{SH}expression"), Some(shapes_graph))
-        .iter()
-        .map(term_to_lexical)
-    {
-        let Some(path_val) = single_value(store, shapes_graph, &expr_node, &format!("{SH}path"))
-        else {
-            continue;
-        };
-        let Some(path) = parse_property_path(store, shapes_graph, &path_val) else {
-            continue;
-        };
-        // Comparison/value constraints declared on the expression node (recursion is
-        // bounded: the expression node carries no further sh:expression).
-        let checks = load_constraints(store, shapes_graph, &expr_node)?;
-        if !checks.is_empty() {
-            let message = single_value(store, shapes_graph, &expr_node, &format!("{SH}message"));
-            constraints.push(Constraint::Expression {
-                path,
-                checks,
-                message,
-            });
+        for params in instances {
+            constraints.push(Constraint::Custom(Box::new(CustomConstraint {
+                component: comp.iri.clone(),
+                params,
+                validator: validator.query.clone(),
+                // SHACL §5.3.2: the validator's sh:message, else the component's.
+                message: validator.message.clone().or_else(|| comp.message.clone()),
+            })));
         }
     }
 
+    // SHACL-AF §7: sh:expression — a node expression that must produce
+    // exactly `{ true }` for each value node. (The engine used to read a
+    // proprietary form here: a path plus comparison constraints on the
+    // expression node. Under the Note that node is a plain path expression.)
+    for expr_node in store.objects_for_subject_in_graph(
+        shape_iri,
+        &format!("{SH}expression"),
+        Some(shapes_graph),
+    ) {
+        let expr = load_node_expr(store, shapes_graph, &expr_node, &mut Vec::new())
+            .map_err(|e| format!("shape <{shape_iri}>: sh:expression {e}"))?;
+        let message = match &expr_node {
+            Term::BlankNode(_) => single_value(
+                store,
+                shapes_graph,
+                &term_to_lexical(&expr_node),
+                &format!("{SH}message"),
+            ),
+            _ => None,
+        };
+        constraints.push(Constraint::Expression { expr, message });
+    }
+
     Ok(constraints)
+}
+
+/// Parse the node expression at `term` (SHACL-AF §6). `seen` holds the
+/// expression nodes enclosing this one: an expression may not contain itself.
+fn load_node_expr(
+    store: &TripleStore,
+    shapes_graph: &str,
+    term: &Term,
+    seen: &mut Vec<String>,
+) -> Result<NodeExpr, String> {
+    let node = match term {
+        Term::NamedNode(nn) if nn.as_str() == format!("{SH}this") => return Ok(NodeExpr::This),
+        Term::NamedNode(_) | Term::Literal(_) => return Ok(NodeExpr::Constant(term.clone())),
+        Term::BlankNode(b) => format!("_:{}", b.as_str()),
+        #[cfg(feature = "rdf-12")]
+        Term::Triple(_) => return Err("a triple term is not a node expression".to_string()),
+    };
+    if seen.contains(&node) {
+        return Err(format!("node expression {node} contains itself"));
+    }
+    if seen.len() >= MAX_NODE_EXPR_DEPTH {
+        return Err(format!(
+            "node expressions nested more than {MAX_NODE_EXPR_DEPTH} deep"
+        ));
+    }
+    seen.push(node.clone());
+    let expr = load_node_expr_at(store, shapes_graph, &node, seen);
+    seen.pop();
+    expr
+}
+
+/// How deep node expressions may nest in a shapes graph.
+const MAX_NODE_EXPR_DEPTH: usize = 32;
+
+/// [`load_node_expr`] for the blank node `node`: a path, filter-shape,
+/// intersection, union or function expression, or an error naming why it is
+/// none of them.
+fn load_node_expr_at(
+    store: &TripleStore,
+    shapes_graph: &str,
+    node: &str,
+    seen: &mut Vec<String>,
+) -> Result<NodeExpr, String> {
+    let at_most_one = |p: &str| -> Result<Option<Term>, String> {
+        let values =
+            store.objects_for_subject_in_graph(node, &format!("{SH}{p}"), Some(shapes_graph));
+        match values.as_slice() {
+            [] => Ok(None),
+            [one] => Ok(Some(one.clone())),
+            _ => Err(format!("node expression {node} has more than one sh:{p}")),
+        }
+    };
+    let nodes = match at_most_one("nodes")? {
+        Some(n) => Some(Box::new(load_node_expr(store, shapes_graph, &n, seen)?)),
+        None => None,
+    };
+    if let Some(shape) = at_most_one("filterShape")? {
+        let nodes =
+            nodes.ok_or_else(|| format!("filter shape expression {node} has no sh:nodes"))?;
+        let shape = load_inline_shape(store, shapes_graph, &term_to_lexical(&shape))
+            .map_err(|e| format!("filter shape expression {node}: {e}"))?;
+        return Ok(NodeExpr::Filter {
+            shape: Box::new(shape),
+            nodes,
+        });
+    }
+    if let Some(path) = load_path(store, shapes_graph, node)? {
+        return Ok(NodeExpr::Path { path, nodes });
+    }
+    if nodes.is_some() {
+        return Err(format!(
+            "node expression {node} has sh:nodes but neither sh:path nor sh:filterShape"
+        ));
+    }
+    for (kind, union) in [("intersection", false), ("union", true)] {
+        if at_most_one(kind)?.is_some() {
+            let members = load_rdf_list_terms(store, shapes_graph, node, &format!("{SH}{kind}"));
+            if members.len() < 2 {
+                return Err(format!(
+                    "{kind} expression {node} needs a list of at least two node expressions"
+                ));
+            }
+            let members = members
+                .iter()
+                .map(|m| load_node_expr(store, shapes_graph, m, seen))
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(if union {
+                NodeExpr::Union(members)
+            } else {
+                NodeExpr::Intersection(members)
+            });
+        }
+    }
+    // A function expression: the one triple whose object is a list (§6.4).
+    let calls: Vec<String> = list_valued_predicates(store, shapes_graph, node);
+    let [function] = calls.as_slice() else {
+        return Err(format!(
+            "{node} is not a node expression (SHACL-AF §6): it has no sh:path, sh:filterShape, \
+             sh:intersection or sh:union, and {} list-valued triples where a function \
+             expression has exactly one",
+            calls.len()
+        ));
+    };
+    let args = load_rdf_list_terms(store, shapes_graph, node, function)
+        .iter()
+        .map(|a| load_node_expr(store, shapes_graph, a, seen))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut optional =
+        crate::shacl::sparql_functions::parameter_optionality(store, shapes_graph, function);
+    optional.resize(args.len(), false);
+    Ok(NodeExpr::Function(Box::new(FunctionCall::new(
+        function.clone(),
+        args,
+        optional,
+    )?)))
+}
+
+/// The predicates of `node`'s triples in the shapes graph whose object is an
+/// RDF list (`rdf:nil`, or a node with `rdf:first`).
+fn list_valued_predicates(store: &TripleStore, shapes_graph: &str, node: &str) -> Vec<String> {
+    use oxigraph::model::{BlankNodeRef, GraphNameRef, NamedNodeRef, NamedOrBlankNodeRef};
+    let (Some(label), Ok(graph)) = (node.strip_prefix("_:"), NamedNodeRef::new(shapes_graph))
+    else {
+        return Vec::new();
+    };
+    let rdf_nil = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
+    let rdf_first = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
+    let mut out = Vec::new();
+    for quad in store
+        .store()
+        .quads_for_pattern(
+            Some(NamedOrBlankNodeRef::BlankNode(BlankNodeRef::new_unchecked(
+                label,
+            ))),
+            None,
+            None,
+            Some(GraphNameRef::NamedNode(graph)),
+        )
+        .flatten()
+    {
+        let is_list = match &quad.object {
+            Term::NamedNode(n) => n.as_str() == rdf_nil,
+            Term::BlankNode(_) => !store
+                .objects_for_subject_in_graph(
+                    &term_to_lexical(&quad.object),
+                    rdf_first,
+                    Some(shapes_graph),
+                )
+                .is_empty(),
+            _ => false,
+        };
+        if is_list {
+            out.push(quad.predicate.as_str().to_string());
+        }
+    }
+    out
 }
 
 /// Load an inline (possibly blank-node) shape by IRI for use in logical constraint
@@ -991,9 +1249,17 @@ struct ComponentValidator {
 struct ConstraintComponentDecl {
     iri: String,
     parameters: Vec<ComponentParameter>,
+    /// The component's own `sh:message`, used when the validator has none.
+    message: Option<String>,
+    /// A validator carrying `sh:deactivated true` is not loaded (`None`
+    /// above) and its flag is set here, so a shape that finds no validator
+    /// can tell "switched off" from "never declared".
     validator: Option<ComponentValidator>,
+    validator_deactivated: bool,
     node_validator: Option<ComponentValidator>,
+    node_validator_deactivated: bool,
     property_validator: Option<ComponentValidator>,
+    property_validator_deactivated: bool,
 }
 
 /// (shapes graph, store instance, store write generation, declarations).
@@ -1069,41 +1335,55 @@ fn constraint_components(
                 optional,
             });
         }
-        let load_validator = |pred: &str| -> Result<Option<ComponentValidator>, String> {
+        let param_names: Vec<&str> = parameters.iter().map(|p| p.name.as_str()).collect();
+        let check = |q: &str, ask: bool, pred: &str, form: &str| {
+            super::constraints::check_validator_query(q, ask, &param_names).map_err(|e| {
+                format!("constraint component <{iri}>: sh:{pred} sh:{form} does not parse: {e}")
+            })
+        };
+        // `Ok((validator, deactivated))`.
+        let load_validator = |pred: &str| -> Result<(Option<ComponentValidator>, bool), String> {
             let Some(vnode) = single_value(store, shapes_graph, iri, &format!("{SH}{pred}")) else {
-                return Ok(None);
+                return Ok((None, false));
             };
+            if is_deactivated(store, shapes_graph, &vnode) {
+                return Ok((None, true));
+            }
             let prefixes = sparql_prefixes(store, shapes_graph, &vnode);
             let message = single_value(store, shapes_graph, &vnode, &format!("{SH}message"));
-            let query = if let Some(ask) =
-                single_value(store, shapes_graph, &vnode, &format!("{SH}ask"))
-            {
-                let q = format!("{prefixes}{ask}");
-                super::constraints::check_validator_query(&q, true).map_err(|e| {
-                    format!("constraint component <{iri}>: sh:{pred} sh:ask does not parse: {e}")
-                })?;
-                CustomValidator::Ask(q)
-            } else if let Some(select) =
-                single_value(store, shapes_graph, &vnode, &format!("{SH}select"))
-            {
-                let q = format!("{prefixes}{select}");
-                super::constraints::check_validator_query(&q, false).map_err(|e| {
-                    format!("constraint component <{iri}>: sh:{pred} sh:select does not parse: {e}")
-                })?;
-                CustomValidator::Select(q)
-            } else {
-                return Err(format!(
+            let query =
+                if let Some(ask) = single_value(store, shapes_graph, &vnode, &format!("{SH}ask")) {
+                    let q = format!("{prefixes}{ask}");
+                    check(&q, true, pred, "ask")?;
+                    CustomValidator::Ask(q)
+                } else if let Some(select) =
+                    single_value(store, shapes_graph, &vnode, &format!("{SH}select"))
+                {
+                    let q = format!("{prefixes}{select}");
+                    check(&q, false, pred, "select")?;
+                    CustomValidator::Select(q)
+                } else {
+                    return Err(format!(
                     "constraint component <{iri}>: sh:{pred} carries neither sh:ask nor sh:select"
                 ));
-            };
-            Ok(Some(ComponentValidator { query, message }))
+                };
+            Ok((Some(ComponentValidator { query, message }), false))
         };
+        let (validator, validator_deactivated) = load_validator("validator")?;
+        let (node_validator, node_validator_deactivated) = load_validator("nodeValidator")?;
+        let (property_validator, property_validator_deactivated) =
+            load_validator("propertyValidator")?;
+        let message = single_value(store, shapes_graph, iri, &format!("{SH}message"));
         out.push(ConstraintComponentDecl {
             iri: iri.clone(),
             parameters,
-            validator: load_validator("validator")?,
-            node_validator: load_validator("nodeValidator")?,
-            property_validator: load_validator("propertyValidator")?,
+            message,
+            validator,
+            validator_deactivated,
+            node_validator,
+            node_validator_deactivated,
+            property_validator,
+            property_validator_deactivated,
         });
     }
     let out = std::sync::Arc::new(out);
@@ -1151,9 +1431,7 @@ fn load_inline_shape(
     let mut constraints = load_constraints(store, shapes_graph, shape_iri)?;
     let mut property_shapes = load_property_shapes_inner(store, shapes_graph, shape_iri)?;
 
-    if let Some(own_path) = single_value(store, shapes_graph, shape_iri, &format!("{SH}path"))
-        .and_then(|p| parse_property_path(store, shapes_graph, &p))
-    {
+    if let Some(own_path) = own_path(store, shapes_graph, shape_iri)? {
         constraints.extend(
             property_shapes
                 .drain(..)
@@ -1167,6 +1445,8 @@ fn load_inline_shape(
             description: None,
             severity: None,
             message: None,
+            // The shape itself carries the flag (`Shape::deactivated`).
+            deactivated: false,
         }];
     }
 
@@ -1179,7 +1459,11 @@ fn load_inline_shape(
         property_shapes,
         severity: None,
         message: None,
-        deactivated: false,
+        // An inline shape (sh:node, sh:not, sh:and/or/xone members,
+        // sh:qualifiedValueShape, sh:condition) may be deactivated too, and
+        // every term then conforms to it (SHACL §2.1.6) — so `sh:not` of it
+        // fails, rather than the member being dropped.
+        deactivated: is_deactivated(store, shapes_graph, shape_iri),
     })
 }
 
@@ -1218,35 +1502,31 @@ fn load_property_shapes_inner(
     for ps_iri in &ps_iris {
         // Load and parse the property path: a predicate IRI, or a blank-node path
         // (sequence list, sh:inversePath, sh:alternativePath, sh:zeroOrMorePath, …).
-        let path = match single_value(store, shapes_graph, ps_iri, &format!("{}path", SH)) {
-            Some(p) => match parse_property_path(store, shapes_graph, &p) {
-                Some(pp) => pp,
-                None => {
-                    warn!(
-                        "Property shape <{}> has an unparseable sh:path, skipping",
-                        ps_iri
-                    );
-                    continue;
-                }
-            },
-            None => {
-                warn!("Property shape <{}> has no sh:path, skipping", ps_iri);
-                continue;
-            }
-        };
+        // A value of sh:property without exactly one well-formed path is an
+        // ill-formed shapes graph. It used to be skipped with a warning, so
+        // its constraints were never checked and the graph conformed by
+        // omission while every other load error failed the run.
+        let path = own_path(store, shapes_graph, ps_iri)?
+            .ok_or_else(|| format!("property shape <{ps_iri}> has no sh:path"))?;
 
         // Load constraints on the property shape
         let mut constraints = load_constraints(store, shapes_graph, ps_iri)?;
 
         // Nested `sh:property` on a property shape: each value node along this
         // shape's path is validated against the nested property shape
-        // (SHACL §2.1.3, see w3c property/property-001).
-        if let Ok(nested) = load_property_shapes_inner(store, shapes_graph, ps_iri) {
-            constraints.extend(
+        // (SHACL §2.1.3, see w3c property/property-001). Only the recursion
+        // bound drops them (as `load_member_shape` does); any other error —
+        // a nested shape without a usable path, say — fails the shapes graph.
+        match load_property_shapes_inner(store, shapes_graph, ps_iri) {
+            Ok(nested) => constraints.extend(
                 nested
                     .into_iter()
                     .map(|ps| Constraint::Property(Box::new(ps))),
-            );
+            ),
+            Err(e) if e.starts_with(RECURSION_BOUND) => {
+                warn!("{e}; the nested property shapes are not enforced for this run");
+            }
+            Err(e) => return Err(e),
         }
 
         let name = single_value(store, shapes_graph, ps_iri, &format!("{}name", SH));
@@ -1262,19 +1542,24 @@ fn load_property_shapes_inner(
             description,
             severity,
             message,
+            deactivated: is_deactivated(store, shapes_graph, ps_iri),
         });
     }
 
     // sh:qualifiedValueShapesDisjoint: a property shape's *sibling shapes* are the
     // qualified value shapes of the other property shapes that share its parent
     // (SHACL §4.5.4). Wire them now that every sibling is loaded.
-    let sibling_qvs: Vec<Option<Shape>> = result
+    // Every value of sh:qualifiedValueShape of the other property shapes counts.
+    let sibling_qvs: Vec<Vec<Shape>> = result
         .iter()
         .map(|ps| {
-            ps.constraints.iter().find_map(|c| match c {
-                Constraint::QualifiedValueShape { shape, .. } => Some((**shape).clone()),
-                _ => None,
-            })
+            ps.constraints
+                .iter()
+                .filter_map(|c| match c {
+                    Constraint::QualifiedValueShape { shape, .. } => Some((**shape).clone()),
+                    _ => None,
+                })
+                .collect()
         })
         .collect();
     for (i, ps) in result.iter_mut().enumerate() {
@@ -1289,7 +1574,7 @@ fn load_property_shapes_inner(
                     .iter()
                     .enumerate()
                     .filter(|(j, _)| *j != i)
-                    .filter_map(|(_, s)| s.clone())
+                    .flat_map(|(_, s)| s.iter().cloned())
                     .collect();
             }
         }
@@ -1302,7 +1587,7 @@ fn load_property_shapes_inner(
 // Target resolution
 // ---------------------------------------------------------------------------
 
-fn resolve_targets(view: &DataView<'_>, shape: &Shape) -> Vec<Term> {
+fn resolve_targets(view: &DataView<'_>, shape: &Shape) -> Result<Vec<Term>, String> {
     let mut focus_nodes: Vec<Term> = Vec::new();
 
     for target in &shape.targets {
@@ -1354,13 +1639,38 @@ fn resolve_targets(view: &DataView<'_>, shape: &Shape) -> Vec<Term> {
                 // in any shapes graph the caller could write selected focus
                 // nodes from EVERY graph in the store, other tenants' included,
                 // and `sh:value` carried their terms back in the report. The
-                // same `FROM <g>` prologue a `sh:sparql` constraint gets
-                // confines it to the graphs this run may read; with no
-                // `FROM NAMED`, a `GRAPH` block inside the target matches
-                // nothing, exactly as for constraints.
-                let scoped = super::constraints::prebind(sparql, &[], None, view.data_graphs);
-                if let Ok(nodes) = execute_select_terms(view, &scoped, "this") {
-                    focus_nodes.extend(nodes);
+                // run's view confines it, as it does a `sh:sparql` constraint,
+                // to the graphs this run may read; with no named graphs, a
+                // `GRAPH` block inside the target matches nothing.
+                //
+                // A target that fails to evaluate fails the run: it used to
+                // yield no focus nodes, so the shape validated nothing and a
+                // write gate let the write through.
+                let nodes = execute_select_terms(view, sparql, "this").map_err(|e| {
+                    format!(
+                        "shape <{}>: sh:target could not be evaluated: {e}",
+                        shape.iri
+                    )
+                })?;
+                focus_nodes.extend(nodes);
+            }
+            Target::SparqlTargetType { query, bindings } => {
+                // The type's query with the target's parameter values bound
+                // as terms, reading the run's data graphs only.
+                let failed = |e: String| {
+                    format!(
+                        "shape <{}>: sh:target could not be evaluated: {e}",
+                        shape.iri
+                    )
+                };
+                match view.query_bound(query, bindings).map_err(failed)? {
+                    oxigraph::sparql::QueryResults::Solutions(rows) => {
+                        for row in rows {
+                            let row = row.map_err(|e| failed(e.to_string()))?;
+                            focus_nodes.extend(row.get("this").cloned());
+                        }
+                    }
+                    _ => return Err(failed("not a SELECT query".to_string())),
                 }
             }
         }
@@ -1378,7 +1688,7 @@ fn resolve_targets(view: &DataView<'_>, shape: &Shape) -> Vec<Term> {
     if !already_distinct {
         dedup_terms(&mut focus_nodes);
     }
-    focus_nodes
+    Ok(focus_nodes)
 }
 
 /// Drop repeated terms, keeping first occurrences in order, without cloning a
@@ -1405,22 +1715,6 @@ fn dedup_terms(terms: &mut Vec<Term>) {
 // SHACL-AF rules
 // ---------------------------------------------------------------------------
 
-/// One term of a `sh:TripleRule`, kept as an RDF term rather than as text:
-/// `sh:this` stands for the focus node (SHACL-AF §4.3), anything else is the
-/// term the shapes graph gave.
-///
-/// It used to be a string, spliced into a generated `INSERT DATA { … }` with
-/// the focus node pasted in as `<{focus}>` — and a focus node may be a
-/// *literal* (`sh:targetNode "…"`), whose lexical form the shapes author
-/// writes. A literal holding `> } } ; DROP GRAPH <…> ; INSERT DATA { GRAPH <g> { <x`
-/// therefore closed the generated update and appended operations of its own.
-#[derive(Debug, Clone)]
-enum RuleTerm {
-    /// `sh:this` — the focus node this run of the rule fires for.
-    This,
-    Fixed(Term),
-}
-
 /// A SHACL-AF rule's executable body.
 enum RuleBody {
     /// `sh:SPARQLRule`: its `sh:construct`, parsed as the CONSTRUCT query
@@ -1431,11 +1725,15 @@ enum RuleBody {
         query: Box<SpargebraQuery>,
         binds_this: bool,
     },
-    /// `sh:TripleRule`: the `sh:subject` / `sh:predicate` / `sh:object` terms.
+    /// `sh:TripleRule`: the `sh:subject` / `sh:predicate` / `sh:object` node
+    /// expressions (SHACL-AF §8.5), evaluated per focus node. They are
+    /// evaluated as RDF terms, never spliced into an update: a literal focus
+    /// node's lexical form used to be pasted into `INSERT DATA { … }`, where
+    /// it could close the update and append operations of its own.
     Triple {
-        subject: RuleTerm,
-        predicate: RuleTerm,
-        object: RuleTerm,
+        subject: NodeExpr,
+        predicate: NodeExpr,
+        object: NodeExpr,
     },
 }
 
@@ -1459,11 +1757,9 @@ fn rule_modifiers(
     shape_iri: &str,
     rule_node: &str,
 ) -> Result<Option<(f64, Vec<Shape>)>, String> {
-    let deactivated = |node: &str| {
-        single_value(store, shapes_graph, node, &format!("{SH}deactivated"))
-            .is_some_and(|v| v == "true" || v == "1")
-    };
-    if deactivated(rule_node) || deactivated(shape_iri) {
+    if is_deactivated(store, shapes_graph, rule_node)
+        || is_deactivated(store, shapes_graph, shape_iri)
+    {
         return Ok(None);
     }
     let order = single_value(store, shapes_graph, rule_node, &format!("{SH}order"))
@@ -1502,7 +1798,10 @@ fn load_rules(store: &TripleStore, shapes_graph: &str) -> Result<Vec<Rule>, Stri
         "shape",
     )?;
     for shape_iri in &sparql_rule_shapes {
-        let targets = load_targets(store, shapes_graph, shape_iri).unwrap_or_default();
+        // A target that cannot be loaded fails the run, as it does for
+        // validation; it used to fall back to no targets, so the rule silently
+        // never fired.
+        let targets = load_targets(store, shapes_graph, shape_iri)?;
         for rule_node in store
             .objects_for_subject_in_graph(shape_iri, &format!("{SH}rule"), Some(shapes_graph))
             .iter()
@@ -1567,15 +1866,17 @@ fn load_rules(store: &TripleStore, shapes_graph: &str) -> Result<Vec<Rule>, Stri
             else {
                 continue;
             };
-            let (Some(subject), Some(predicate), Some(object)) = (
-                triple_rule_term(solution.get("subject")),
-                triple_rule_term(solution.get("predicate")),
-                triple_rule_term(solution.get("object")),
-            ) else {
-                continue;
+            let term = |var: &str| -> Result<NodeExpr, String> {
+                let t = solution
+                    .get(var)
+                    .ok_or_else(|| format!("triple rule of shape <{shape_iri}>: no sh:{var}"))?;
+                load_node_expr(store, shapes_graph, t, &mut Vec::new())
+                    .map_err(|e| format!("triple rule of shape <{shape_iri}>: sh:{var} {e}"))
             };
+            let (subject, predicate, object) =
+                (term("subject")?, term("predicate")?, term("object")?);
 
-            let targets = load_targets(store, shapes_graph, &shape_iri).unwrap_or_default();
+            let targets = load_targets(store, shapes_graph, &shape_iri)?;
             rules.push(Rule {
                 shape_iri,
                 targets,
@@ -1595,7 +1896,7 @@ fn load_rules(store: &TripleStore, shapes_graph: &str) -> Result<Vec<Rule>, Stri
     Ok(rules)
 }
 
-/// Apply one rule to one focus node: evaluate it read-only over `data_graphs`,
+/// Apply one rule to one focus node: evaluate it read-only over the view's data graphs,
 /// and materialise what it derives into `target_graph` (the unnamed default
 /// graph when there is none). The number of *new* triples is not measured here —
 /// `infer` tracks it via the store's count delta per round (see there), so a
@@ -1607,13 +1908,14 @@ fn load_rules(store: &TripleStore, shapes_graph: &str) -> Result<Vec<Rule>, Stri
 /// the body is data that any writer of a dataset can upload, and it used to be
 /// handed to `TripleStore::update`, which authorizes nothing.
 fn apply_rule(
-    store: &TripleStore,
+    view: &DataView<'_>,
+    shapes: &[Shape],
     evaluator: &oxigraph::sparql::SparqlEvaluator,
     focus_node: &Term,
     body: &RuleBody,
-    data_graphs: &[String],
     target_graph: Option<&str>,
 ) -> Result<(), String> {
+    let (store, data_graphs) = (view.store, view.data_graphs);
     let triples = match body {
         RuleBody::Construct { query, binds_this } => {
             // The focus node is bound as a *term*, never pasted into the query
@@ -1634,9 +1936,8 @@ fn apply_rule(
             subject,
             predicate,
             object,
-        } => triple_rule_output(subject, predicate, object, focus_node)
-            .into_iter()
-            .collect(),
+        } => triple_rule_output(view, shapes, subject, predicate, object, focus_node)
+            .map_err(|e| format!("SHACL rule could not be evaluated: {e}"))?,
     };
     if triples.is_empty() {
         return Ok(());
@@ -1657,24 +1958,40 @@ fn apply_rule(
         .map_err(|e| format!("SHACL rule output could not be materialised: {e}"))
 }
 
-/// The triple a `sh:TripleRule` derives for one focus node, or `None` when the
-/// terms do not form one — `sh:subject sh:this` with a literal focus node, say,
-/// since RDF has no literal subjects. The rule simply does not fire there.
+/// The triples a `sh:TripleRule` derives for one focus node (SHACL-AF §8.5):
+/// one per combination of the subject, predicate and object expressions'
+/// outputs. A combination that is no triple — a literal subject, a predicate
+/// that is not an IRI — is skipped: RDF has no such triple.
 fn triple_rule_output(
-    subject: &RuleTerm,
-    predicate: &RuleTerm,
-    object: &RuleTerm,
+    view: &DataView<'_>,
+    shapes: &[Shape],
+    subject: &NodeExpr,
+    predicate: &NodeExpr,
+    object: &NodeExpr,
     focus_node: &Term,
-) -> Option<Triple> {
-    let resolve = |t: &RuleTerm| match t {
-        RuleTerm::This => focus_node.clone(),
-        RuleTerm::Fixed(term) => term.clone(),
-    };
-    let subject = NamedOrBlankNode::try_from(resolve(subject)).ok()?;
-    let Term::NamedNode(predicate) = resolve(predicate) else {
-        return None;
-    };
-    Some(Triple::new(subject, predicate, resolve(object)))
+) -> Result<Vec<Triple>, String> {
+    let eval = |e: &NodeExpr| super::node_expr::eval(view, shapes, e, focus_node);
+    let subjects: Vec<NamedOrBlankNode> = eval(subject)?
+        .into_iter()
+        .filter_map(|t| NamedOrBlankNode::try_from(t).ok())
+        .collect();
+    let predicates: Vec<NamedNode> = eval(predicate)?
+        .into_iter()
+        .filter_map(|t| match t {
+            Term::NamedNode(n) => Some(n),
+            _ => None,
+        })
+        .collect();
+    let objects = eval(object)?;
+    let mut out = Vec::new();
+    for s in &subjects {
+        for p in &predicates {
+            for o in &objects {
+                out.push(Triple::new(s.clone(), p.clone(), o.clone()));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Parse a `sh:construct` rule body as the CONSTRUCT query SHACL-AF says it is.
@@ -1739,18 +2056,6 @@ fn leading_token(s: &str) -> &str {
     s.split(|c: char| c.is_whitespace() || c == '<' || c == '{')
         .next()
         .unwrap_or("")
-}
-
-/// A triple-rule term, mapping `sh:this` to the focus-node placeholder so
-/// `apply_rule` resolves it per focus node (SHACL-AF §4.3 — `sh:this` denotes the
-/// focus node, not the literal `sh:this` IRI).
-fn triple_rule_term(term: Option<&Term>) -> Option<RuleTerm> {
-    match term? {
-        Term::NamedNode(nn) if nn.as_str() == "http://www.w3.org/ns/shacl#this" => {
-            Some(RuleTerm::This)
-        }
-        other => Some(RuleTerm::Fixed(other.clone())),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1818,12 +2123,19 @@ fn check_sparql_target(query: &str) -> Result<(), String> {
 }
 
 /// Run a SELECT against the run's own data source and collect one variable.
+///
+/// Evaluation is lazy, so an error may surface on any solution, not only when
+/// the query starts; it is an error of the whole query either way.
 fn execute_select_terms(view: &DataView<'_>, query: &str, var: &str) -> Result<Vec<Term>, String> {
     match view.query(query) {
-        Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) => Ok(solutions
-            .filter_map(|s| s.ok())
-            .filter_map(|s| s.get(var).cloned())
-            .collect()),
+        Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) => {
+            let mut out = Vec::new();
+            for s in solutions {
+                let s = s.map_err(|e| format!("Query error: {e}"))?;
+                out.extend(s.get(var).cloned());
+            }
+            Ok(out)
+        }
         Ok(_) => Ok(Vec::new()),
         Err(e) => Err(format!("Query error: {}", e)),
     }
@@ -1861,13 +2173,57 @@ fn multi_values(
         .collect()
 }
 
-/// Parse a SHACL property path (SHACL §2.3) starting at `node` into a [`PropertyPath`].
+/// `node`'s `sh:path`, parsed: `None` when it has none, an error when it has
+/// several or one that is not a well-formed SHACL property path (SHACL §2.3:
+/// "a shape has at most one value for sh:path" and "each value of sh:path in a
+/// shape must be a well-formed SHACL property path").
+fn load_path(
+    store: &TripleStore,
+    shapes_graph: &str,
+    node: &str,
+) -> Result<Option<PropertyPath>, String> {
+    let paths = store.objects_for_subject_in_graph(node, &format!("{SH}path"), Some(shapes_graph));
+    match paths.as_slice() {
+        [] => Ok(None),
+        [path] => parse_property_path(store, shapes_graph, path, 0)
+            .map(Some)
+            .ok_or_else(|| {
+                format!("shape <{node}>: sh:path {path} is not a well-formed SHACL property path")
+            }),
+        more => Err(format!(
+            "shape <{node}> has {} values for sh:path; a shape has at most one",
+            more.len()
+        )),
+    }
+}
+
+/// A shape's own path ([`load_path`]), which a SHACL instance of
+/// `sh:PropertyShape` must have (SHACL §2.3, PropertyShape-path-minCount).
+fn own_path(
+    store: &TripleStore,
+    shapes_graph: &str,
+    shape: &str,
+) -> Result<Option<PropertyPath>, String> {
+    let path = load_path(store, shapes_graph, shape)?;
+    if path.is_none()
+        && store
+            .objects_for_subject_in_graph(shape, RDF_TYPE, Some(shapes_graph))
+            .iter()
+            .any(|t| matches!(t, Term::NamedNode(c) if c.as_str() == format!("{SH}PropertyShape")))
+    {
+        return Err(format!("property shape <{shape}> has no sh:path"));
+    }
+    Ok(path)
+}
+
+/// Parse a SHACL property path (SHACL §2.3) at `node` into a [`PropertyPath`].
 ///
 /// Handles a predicate IRI; an RDF-list **sequence** path `( p1 p2 … )`; and the blank-node
 /// path operators `sh:inversePath`, `sh:alternativePath` (an RDF list), `sh:zeroOrMorePath`,
 /// `sh:oneOrMorePath`, `sh:zeroOrOnePath`. Blank-node cells are walked through the raw quad
-/// index (SPARQL surface syntax cannot re-address them). Returns `None` for an empty or
-/// malformed path so the caller can skip the property shape rather than mis-bind it.
+/// index (SPARQL surface syntax cannot re-address them). Returns `None` for anything else —
+/// a literal, a blank node that is no path, a list with a member that is no path — so the
+/// caller fails the shapes graph rather than mis-binding or shortening the path.
 ///
 /// A node carrying BOTH list cells (`rdf:first`/`rdf:rest`) and a path operator is
 /// interpreted as the sequence path — matching the W3C suite's `path-strange-*`
@@ -1875,96 +2231,73 @@ fn multi_values(
 fn parse_property_path(
     store: &TripleStore,
     shapes_graph: &str,
-    node: &str,
+    node: &Term,
+    depth: u32,
 ) -> Option<PropertyPath> {
-    // A predicate path is a plain IRI.
-    if !node.starts_with("_:") {
-        return Some(PropertyPath::Predicate(node.to_string()));
+    // A path that refers back to itself is ill-formed (path-non-recursive).
+    if depth > MAX_SHAPE_LOAD_DEPTH {
+        return None;
     }
-    // Blank node: an RDF-list sequence path takes precedence over operators.
-    let seq: Vec<PropertyPath> = rdf_list_elements(store, shapes_graph, node)
-        .iter()
-        .filter_map(|e| parse_property_path(store, shapes_graph, e))
-        .collect();
-    if !seq.is_empty() {
-        return Some(PropertyPath::Sequence(seq));
-    }
-    let op = |p: &str| -> Option<String> {
-        store
-            .objects_for_subject_in_graph(node, &format!("{SH}{p}"), Some(shapes_graph))
-            .first()
-            .map(term_to_lexical)
+    let label = match node {
+        // A predicate path is a plain IRI.
+        Term::NamedNode(nn) => return Some(PropertyPath::Predicate(nn.as_str().to_string())),
+        Term::BlankNode(bn) => format!("_:{}", bn.as_str()),
+        _ => return None,
     };
-    if let Some(inner) = op("inversePath") {
-        return parse_property_path(store, shapes_graph, &inner)
-            .map(|p| PropertyPath::Inverse(Box::new(p)));
+    let parse_all = |members: Vec<Term>| -> Option<Vec<PropertyPath>> {
+        if members.is_empty() {
+            return None;
+        }
+        members
+            .iter()
+            .map(|m| parse_property_path(store, shapes_graph, m, depth + 1))
+            .collect()
+    };
+    // Blank node: an RDF-list sequence path takes precedence over operators.
+    const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
+    if !store
+        .objects_for_subject_in_graph(&label, RDF_FIRST, Some(shapes_graph))
+        .is_empty()
+    {
+        return parse_all(walk_rdf_list(store, shapes_graph, node.clone()))
+            .map(PropertyPath::Sequence);
+    }
+    let op = |p: &str| -> Option<Term> {
+        store
+            .objects_for_subject_in_graph(&label, &format!("{SH}{p}"), Some(shapes_graph))
+            .into_iter()
+            .next()
+    };
+    let inner = |t: Term| parse_property_path(store, shapes_graph, &t, depth + 1).map(Box::new);
+    if let Some(t) = op("inversePath") {
+        return inner(t).map(PropertyPath::Inverse);
     }
     if let Some(head) = op("alternativePath") {
-        let parts: Vec<PropertyPath> = rdf_list_elements(store, shapes_graph, &head)
-            .iter()
-            .filter_map(|e| parse_property_path(store, shapes_graph, e))
-            .collect();
-        return (!parts.is_empty()).then_some(PropertyPath::Alternative(parts));
+        return parse_all(walk_rdf_list(store, shapes_graph, head)).map(PropertyPath::Alternative);
     }
-    if let Some(inner) = op("zeroOrMorePath") {
-        return parse_property_path(store, shapes_graph, &inner)
-            .map(|p| PropertyPath::ZeroOrMore(Box::new(p)));
+    if let Some(t) = op("zeroOrMorePath") {
+        return inner(t).map(PropertyPath::ZeroOrMore);
     }
-    if let Some(inner) = op("oneOrMorePath") {
-        return parse_property_path(store, shapes_graph, &inner)
-            .map(|p| PropertyPath::OneOrMore(Box::new(p)));
+    if let Some(t) = op("oneOrMorePath") {
+        return inner(t).map(PropertyPath::OneOrMore);
     }
-    if let Some(inner) = op("zeroOrOnePath") {
-        return parse_property_path(store, shapes_graph, &inner)
-            .map(|p| PropertyPath::ZeroOrOne(Box::new(p)));
+    if let Some(t) = op("zeroOrOnePath") {
+        return inner(t).map(PropertyPath::ZeroOrOne);
     }
     None
 }
 
-/// Walk the RDF list whose head is `head`, returning each member's lexical node form
-/// (IRI, `_:label`, or literal value) via the raw quad index. Empty if `head` is not a list.
-fn rdf_list_elements(store: &TripleStore, shapes_graph: &str, head: &str) -> Vec<String> {
-    const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
-    const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
-    const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
-    let mut out = Vec::new();
-    let mut current = head.to_string();
-    for _ in 0..10_000 {
-        if current == RDF_NIL {
-            break;
-        }
-        match store
-            .objects_for_subject_in_graph(&current, RDF_FIRST, Some(shapes_graph))
-            .first()
-        {
-            Some(first) => out.push(term_to_lexical(first)),
-            None => break,
-        }
-        match store
-            .objects_for_subject_in_graph(&current, RDF_REST, Some(shapes_graph))
-            .first()
-        {
-            Some(rest) => current = term_to_lexical(rest),
-            None => break,
-        }
-    }
-    out
-}
-
-/// Build the SPARQL `PREFIX` prologue declared via SHACL's prefixes mechanism for a
-/// constraint / rule / target `node`: `node sh:prefixes ?owner`, `?owner sh:declare
-/// [ sh:prefix "p" ; sh:namespace "ns"^^xsd:anyURI ]`. Returns `""` when none are
-/// declared. The declaration nodes are typically blank, so they are resolved through
-/// the raw quad index (SPARQL surface syntax cannot re-address a stored blank node).
+/// The SPARQL `PREFIX` prologue of a SPARQL-based constraint, rule, target,
+/// validator or function `node` (SHACL §5.2.1): the `sh:declare`
+/// declarations (`[ sh:prefix "p" ; sh:namespace "ns"^^xsd:anyURI ]`) of every
+/// `sh:prefixes` value and, transitively, of the ontologies it `owl:imports`,
+/// as far as they are in the shapes graph. `""` when none are declared. The
+/// declaration nodes are typically blank, so they are resolved through the raw
+/// quad index (SPARQL surface syntax cannot re-address a stored blank node).
 ///
-/// Without this prologue a SHACL-SPARQL body that uses prefixed names (`da:`, `geo:`,
-/// `geof:` …) fails to parse, and the `if let Ok(..)` guards in evaluation silently
-/// drop the whole constraint/rule/target — see SHACL-SPARQL §5.2 (prefixes mechanism).
-/// The `PREFIX` prologue of a SPARQL-based constraint, rule or validator:
-/// the `sh:declare` declarations of every `sh:prefixes` value and,
-/// transitively, of the ontologies it `owl:imports` (SHACL §5.2.1), as far
-/// as they are in the shapes graph.
-fn sparql_prefixes(store: &TripleStore, shapes_graph: &str, node: &str) -> String {
+/// Without this prologue a body that uses prefixed names (`da:`, `geo:`,
+/// `geof:` …) fails to parse, which fails the shapes graph.
+pub(crate) fn sparql_prefixes(store: &TripleStore, shapes_graph: &str, node: &str) -> String {
     let mut out = String::new();
     let mut owners: Vec<String> = store
         .objects_for_subject_in_graph(node, &format!("{SH}prefixes"), Some(shapes_graph))
@@ -2022,32 +2355,50 @@ fn load_rdf_list(
         .collect()
 }
 
-/// Walk the RDF list reached from `subject` via `predicate`, keeping each
-/// member's *typed* term (sh:in members may be typed literals). In standard
-/// Turtle `( … )` syntax the list cells are blank nodes, which SPARQL surface
-/// syntax cannot re-address (`_:x` in a query is a fresh existential), so cells
-/// are resolved through the raw quad index.
+/// The members of the RDF list that is `subject`'s first value of
+/// `predicate`, keeping each member's *typed* term (sh:in members may be typed
+/// literals). For the at-most-one parameters (sh:in, sh:languageIn,
+/// sh:ignoredProperties); see [`rdf_lists`] for the others.
 fn load_rdf_list_terms(
     store: &TripleStore,
     shapes_graph: &str,
     subject: &str,
     predicate: &str,
 ) -> Vec<Term> {
+    store
+        .objects_for_subject_in_graph(subject, predicate, Some(shapes_graph))
+        .into_iter()
+        .next()
+        .map(|head| walk_rdf_list(store, shapes_graph, head))
+        .unwrap_or_default()
+}
+
+/// The members of every RDF list that is a value of `predicate` on `subject`
+/// — one list per value (sh:and, sh:or, sh:xone may each have several).
+fn rdf_lists(
+    store: &TripleStore,
+    shapes_graph: &str,
+    subject: &str,
+    predicate: &str,
+) -> Vec<Vec<Term>> {
+    store
+        .objects_for_subject_in_graph(subject, predicate, Some(shapes_graph))
+        .into_iter()
+        .map(|head| walk_rdf_list(store, shapes_graph, head))
+        .collect()
+}
+
+/// Walk the RDF list whose head is `head`. In standard Turtle `( … )` syntax
+/// the list cells are blank nodes, which SPARQL surface syntax cannot
+/// re-address (`_:x` in a query is a fresh existential), so cells are resolved
+/// through the raw quad index.
+fn walk_rdf_list(store: &TripleStore, shapes_graph: &str, head: Term) -> Vec<Term> {
     const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
     const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
     const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
 
     let mut values = Vec::new();
-
-    let mut current = match store
-        .objects_for_subject_in_graph(subject, predicate, Some(shapes_graph))
-        .into_iter()
-        .next()
-    {
-        Some(h) => term_to_lexical(&h),
-        None => return values,
-    };
-
+    let mut current = term_to_lexical(&head);
     for _ in 0..10_000 {
         if current == RDF_NIL {
             break;
@@ -2068,8 +2419,22 @@ fn load_rdf_list_terms(
             None => break,
         }
     }
-
     values
+}
+
+/// Whether `node` carries `sh:deactivated true` (SHACL §2.1.6). The store
+/// returns `"1"^^xsd:boolean` as `true` (native boolean storage), so that
+/// form deactivates too — a documented deviation, refused at upload by
+/// [`super::lint`].
+fn is_deactivated(store: &TripleStore, shapes_graph: &str, node: &str) -> bool {
+    store
+        .objects_for_subject_in_graph(node, &format!("{SH}deactivated"), Some(shapes_graph))
+        .iter()
+        .any(|t| {
+            matches!(t, Term::Literal(l)
+                if l.datatype() == oxigraph::model::vocab::xsd::BOOLEAN
+                    && matches!(l.value(), "true" | "1"))
+        })
 }
 
 /// Lexical form of a term matching [`execute_select_single`]'s convention:

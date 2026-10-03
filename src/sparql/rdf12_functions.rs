@@ -1,24 +1,26 @@
 //! SPARQL 1.2 / RDF-star built-in function registration.
 #![allow(dead_code)]
 //!
-//! Oxigraph 0.4 with `rdf-star` (enabled via the `rdf-12` crate feature, and
-//! already unconditionally active inside `spargebra`/`spareval` as shipped)
-//! handles the native SPARQL 1.2 built-ins — `TRIPLE()`, `SUBJECT()`,
-//! `PREDICATE()`, `OBJECT()`, and `isTRIPLE()` — at the query-parser /
-//! evaluator level without any custom-function registration.
+//! Oxigraph 0.5 with its `rdf-12` feature (enabled by this crate's `rdf-12`
+//! feature, which also turns on `spargebra/sparql-12`) handles the native
+//! SPARQL 1.2 built-ins — `TRIPLE()`, `SUBJECT()`, `PREDICATE()`, `OBJECT()`
+//! and `isTRIPLE()` — in the parser and evaluator, without any
+//! custom-function registration.
 //!
 //! This module provides:
 //!
-//! 1. A list of the canonical IRIs so they can be referenced elsewhere.
-//! 2. A fallback registration of the five functions as *custom* SPARQL
-//!    functions under alternative IRIs (matching some legacy or non-standard
-//!    client tooling), gated behind `#[cfg(feature = "rdf-12")]`.
-//! 3. A JSON serializer for `Term::Triple` results (used in `routes.rs`).
+//! 1. The IRIs of the alias functions below.
+//! 2. The five functions registered again as *custom* SPARQL functions under
+//!    `rdf:` IRIs (`rdf:triple`, `rdf:subject`, …) for client tooling that
+//!    expects them, gated behind `#[cfg(feature = "rdf-12")]`. These are
+//!    non-standard aliases: no W3C specification defines them as functions.
+//! 3. A non-standard `sparql:adjust` custom function (see `adjust_function`).
+//! 4. A JSON serializer for `Term::Triple` results (used in `routes.rs`).
 
 use oxrdf::NamedNode;
 use std::sync::Arc;
 
-// ─── Canonical SPARQL 1.2 / RDF 1.2 IRIs ────────────────────────────────────
+// ─── Alias function IRIs (non-standard) ──────────────────────────────────────
 
 pub const RDF_TRIPLE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#triple";
 pub const RDF_SUBJECT: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#subject";
@@ -32,7 +34,7 @@ pub const RDF_IS_TRIPLE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#isTr
 type FnHandler = Arc<dyn Fn(&[oxrdf::Term]) -> Option<oxrdf::Term> + Send + Sync>;
 
 /// Returns `(IRI, handler)` pairs for the five SPARQL 1.2 built-ins exposed
-/// as *custom* functions under alternative namespace IRIs for compatibility
+/// as *custom* functions under non-standard `rdf:` IRIs, for compatibility
 /// with tools that do not yet speak native SPARQL 1.2.
 ///
 /// These are registered in `store::engine::TripleStore::query_options()` when
@@ -119,15 +121,18 @@ pub fn all_functions() -> Vec<(NamedNode, FnHandler)> {
 
 // ─── SPARQL 1.2 ADJUST function ──────────────────────────────────────────────
 
-/// IRI for the SPARQL 1.2 ADJUST function.
+/// IRI of the non-standard `sparql:adjust` custom function.
 pub const SPARQL_ADJUST: &str = "http://www.w3.org/ns/sparql#adjust";
 
-/// Returns the SPARQL 1.2 ADJUST function as a custom function handler.
+/// Returns the non-standard `sparql:adjust` custom function.
 ///
-/// `ADJUST(dateTime, duration)` adds a duration to a dateTime value.
-/// `ADJUST(dateTime, timezone)` adjusts the timezone of a dateTime.
+/// `sparql:adjust(dateTime, "+05:00")` converts a dateTime to that timezone;
+/// `sparql:adjust(dateTime, "PT5H")` adds the duration to it.
 ///
-/// This implements the W3C SPARQL 1.2 Working Draft ADJUST function.
+/// This is not the `ADJUST` keyword. `ADJUST` is SEP-0002, which Oxigraph
+/// compiles in natively (it is not part of the SPARQL 1.2 Working Draft); it
+/// takes an `xsd:dayTimeDuration` timezone offset and always wins over this
+/// function, which is only reached by calling its IRI.
 pub fn adjust_function() -> (NamedNode, FnHandler) {
     use oxrdf::{Literal, Term};
 

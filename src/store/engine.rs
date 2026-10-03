@@ -98,6 +98,21 @@ pub enum StoreError {
     ReadOnly(String),
 }
 
+/// One step of [`TripleStore::apply_quad_ops`]: add or remove a quad.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QuadOp {
+    Add(Quad),
+    Remove(Quad),
+}
+
+impl QuadOp {
+    pub fn quad(&self) -> &Quad {
+        match self {
+            QuadOp::Add(q) | QuadOp::Remove(q) => q,
+        }
+    }
+}
+
 /// How blank nodes are treated when data is imported.
 ///
 /// Plain RDF blank nodes are not durable: each parse mints fresh labels, so
@@ -287,6 +302,13 @@ pub struct VoidStats {
     pub named_graphs: usize,
 }
 
+/// [`TripleStore::void_stats_over`]'s cache: sorted graph set → (write
+/// generation, statistics).
+type VoidScopedCache = std::collections::HashMap<Vec<String>, (u64, VoidStats)>;
+
+/// Graph sets whose statistics are kept at once; one more clears them all.
+const VOID_SCOPED_CACHE_CAP: usize = 64;
+
 fn next_instance_id() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -328,6 +350,10 @@ pub struct TripleStore {
     /// VoID statistics for the whole store, keyed by the write generation
     /// they were computed at (see [`TripleStore::void_stats`]).
     void_stats_cache: std::sync::Arc<std::sync::Mutex<Option<(u64, VoidStats)>>>,
+    /// VoID statistics over a set of graphs (a caller's readable graphs),
+    /// keyed by the sorted set and stamped with the write generation (see
+    /// [`TripleStore::void_stats_over`]).
+    void_scoped_cache: std::sync::Arc<std::sync::Mutex<VoidScopedCache>>,
     /// Blank-node durability policy applied on import. Defaults to
     /// [`BlankNodeMode::Preserve`] (opt into durability via
     /// [`TripleStore::with_blank_node_mode`]).
@@ -380,6 +406,12 @@ fn builtin_functions() -> Vec<(NamedNode, crate::shacl::sparql_functions::FnHand
     fns.extend(crate::sparql::rdf12_functions::all_functions());
     // SPARQL 1.2 ADJUST (always available).
     fns.push(crate::sparql::rdf12_functions::adjust_function());
+    // OWL 2 QL value test for `∃U.D` in rewritten queries.
+    #[cfg(feature = "owl2-ql")]
+    fns.push((
+        NamedNode::new_unchecked(crate::reasoning::owl2_ql::IN_DATA_RANGE),
+        Arc::new(crate::reasoning::owl2_ql::in_data_range),
+    ));
     fns
 }
 
@@ -403,7 +435,7 @@ pub(crate) fn builtin_function_iris() -> &'static std::collections::HashSet<Stri
 
 /// An evaluator with the server's own functions and aggregates and the
 /// allowlisted federation handler, and no user-defined function.
-fn builtin_options() -> SparqlEvaluator {
+fn builtin_options(budget: Arc<crate::sparql::federation::QueryBudget>) -> SparqlEvaluator {
     // SPARQL federation (`SERVICE`) stays disabled: oxigraph is built without the
     // `http-client` feature, so there is no HTTP service handler and `SERVICE`/`LOAD`
     // error rather than fetch — SERVICE-based SSRF/exfiltration stays off. (SSRF-1)
@@ -415,6 +447,8 @@ fn builtin_options() -> SparqlEvaluator {
     opts =
         opts.with_default_service_handler(crate::sparql::federation::AllowlistedServiceHandler {
             identity: crate::federation::current_identity(),
+            source_caller: crate::sources::virtual_source::current_caller(),
+            budget,
         });
     opts = with_functions(opts, &builtin_functions());
     // …and the GeoSPARQL aggregates (`geof:aggUnion`). This declares them to
@@ -496,6 +530,9 @@ impl TripleStore {
             telemetry: Arc::new(Telemetry::new()),
             instance_id: next_instance_id(),
             void_stats_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            void_scoped_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             blank_node_mode: BlankNodeMode::default(),
             cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             changes: Arc::new(changes),
@@ -527,6 +564,9 @@ impl TripleStore {
             telemetry: Arc::new(Telemetry::new()),
             instance_id: next_instance_id(),
             void_stats_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            void_scoped_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             blank_node_mode: BlankNodeMode::default(),
             cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             changes: Arc::new(ChangeLog::open(None)?),
@@ -813,12 +853,95 @@ impl TripleStore {
         stats
     }
 
+    /// VoID statistics over the named graphs in `graphs` only — what a caller
+    /// who reads exactly those graphs may learn about the store, where
+    /// [`Self::void_stats`] counts every graph, private and system ones too.
+    /// `triples` sums the graphs' sizes; the distinct counts are over their
+    /// union; `named_graphs` counts the ones that exist. Cached per graph set
+    /// until the next write.
+    pub fn void_stats_over(&self, graphs: &std::collections::HashSet<String>) -> VoidStats {
+        let mut key: Vec<String> = graphs.iter().cloned().collect();
+        key.sort_unstable();
+        let generation = self.write_generation();
+        if let Ok(guard) = self.void_scoped_cache.lock() {
+            if let Some((g, stats)) = guard.get(&key) {
+                if *g == generation {
+                    return *stats;
+                }
+            }
+        }
+        let present: Vec<&String> = match self.named_graphs() {
+            Ok(all) => {
+                let all: std::collections::HashSet<String> =
+                    all.into_iter().map(|g| g.into_string()).collect();
+                key.iter().filter(|g| all.contains(*g)).collect()
+            }
+            Err(_) => Vec::new(),
+        };
+        let stats = if present.is_empty() {
+            VoidStats::default()
+        } else {
+            let values: String = present
+                .iter()
+                .map(|g| format!("<{}>", crate::store::escape_sparql_iri(g)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let count = |var: &str| -> usize {
+                let q = format!(
+                    "SELECT (COUNT(DISTINCT ?{var}) AS ?c) WHERE {{ VALUES ?g {{ {values} }} GRAPH ?g {{ ?s ?p ?o }} }}"
+                );
+                match self.query(&q) {
+                    Ok(oxigraph::sparql::QueryResults::Solutions(mut sols)) => sols
+                        .next()
+                        .and_then(|r| r.ok())
+                        .and_then(|r| match r.get(0) {
+                            Some(oxigraph::model::Term::Literal(l)) => l.value().parse().ok(),
+                            _ => None,
+                        })
+                        .unwrap_or(0),
+                    _ => 0,
+                }
+            };
+            VoidStats {
+                triples: present
+                    .iter()
+                    .map(|g| self.count_graph(Some(g.as_str())).unwrap_or(0))
+                    .sum(),
+                distinct_subjects: count("s"),
+                distinct_predicates: count("p"),
+                distinct_objects: count("o"),
+                named_graphs: present.len(),
+            }
+        };
+        if let Ok(mut guard) = self.void_scoped_cache.lock() {
+            if guard.len() >= VOID_SCOPED_CACHE_CAP && !guard.contains_key(&key) {
+                guard.clear();
+            }
+            guard.insert(key, (generation, stats));
+        }
+        stats
+    }
+
     /// Query options for every query of this store: the server's own
     /// functions plus the `sh:SPARQLFunction`s of the admin-designated function
     /// graphs. A function a shapes graph declares is not here; it belongs to
     /// that graph's runs ([`Self::query_options_for_shapes`]).
     pub(crate) fn query_options(&self) -> SparqlEvaluator {
-        with_functions(builtin_options(), &self.registered_functions())
+        self.query_options_with_budget().0
+    }
+
+    /// [`Self::query_options`], also returning the budget its `SERVICE` calls
+    /// share — whose token the caller may attach to cancel the query at the
+    /// federation deadline (see [`Self::query_federated`]).
+    fn query_options_with_budget(
+        &self,
+    ) -> (SparqlEvaluator, Arc<crate::sparql::federation::QueryBudget>) {
+        let budget = Arc::new(crate::sparql::federation::QueryBudget::default());
+        let opts = with_functions(
+            builtin_options(Arc::clone(&budget)),
+            &self.registered_functions(),
+        );
+        (opts, budget)
     }
 
     /// Query options for a run of `shapes_graph` (SHACL validation and
@@ -849,7 +972,10 @@ impl TripleStore {
             )?
         };
         Ok(with_functions(
-            with_functions(builtin_options(), &registered),
+            with_functions(
+                builtin_options(Arc::new(crate::sparql::federation::QueryBudget::default())),
+                &registered,
+            ),
             &declared,
         ))
     }
@@ -927,6 +1053,12 @@ impl TripleStore {
         if let Some(fast) = self.try_fast_count(sparql) {
             return Ok((fast, Served::FastCount));
         }
+        // A federated query (`SERVICE`) is evaluated here, against the store,
+        // never by the copies below: its time goes to the remotes, and this
+        // path applies the `SERVICE ?var` rewrite and the deadline.
+        if let Some(federated) = self.query_federated(sparql)? {
+            return Ok((federated, Served::Engine));
+        }
         // Multi-core path: a decomposable aggregate / `ASK` is evaluated across
         // subject-hash shards (the in-memory mirror) and merged, using every core
         // instead of one. Returns `None` — falling through to the single-store
@@ -965,6 +1097,41 @@ impl TripleStore {
             .on_store(&self.store)
             .execute()?;
         Ok((results, Served::Engine))
+    }
+
+    /// Evaluate a query that contains a `SERVICE`, or `None` when it has
+    /// none (the substring gate is the same as the result cache's; a false
+    /// positive costs one parse). The query is parsed once; `SERVICE ?var`
+    /// becomes a lateral join (`opengraph::service_var`) so the endpoint is
+    /// bound when the call is made; and the evaluator carries the budget's
+    /// cancellation token, so the query fails once its SERVICE calls pass the
+    /// federation deadline (`OTS_SERVICE_DEADLINE_SECS`), `SILENT` or not.
+    fn query_federated(&self, sparql: &str) -> Result<Option<QueryResults<'static>>, StoreError> {
+        const NEEDLE: &[u8] = b"service";
+        if !sparql
+            .as_bytes()
+            .windows(NEEDLE.len())
+            .any(|w| w.eq_ignore_ascii_case(NEEDLE))
+        {
+            return Ok(None);
+        }
+        let mut parsed = crate::sparql::parser().parse_query(sparql)?;
+        if !opengraph::service_var::has_service(&parsed) {
+            return Ok(None);
+        }
+        if opengraph::service_var::mentions_service_variable(sparql) {
+            opengraph::service_var::rewrite_service_var(&mut parsed);
+        }
+        let (opts, budget) = self.query_options_with_budget();
+        let results = opts
+            .with_cancellation_token(budget.token().clone())
+            .for_query(parsed)
+            .on_store(&self.store)
+            .execute()?;
+        if matches!(results, QueryResults::Boolean(_)) && budget.cancelled() {
+            return Err(budget.deadline_error().into());
+        }
+        Ok(Some(budget.guard(results)))
     }
 
     /// Recognise `SELECT (COUNT(*) AS ?v) WHERE { ?s ?p ?o }` (optionally with a
@@ -1430,6 +1597,87 @@ impl TripleStore {
             .execute()?)
     }
 
+    /// The default graph plus `extra`: the unnamed default graph followed by
+    /// each named graph in `extra`.
+    fn default_graph_plus(extra: &[String]) -> Result<Vec<GraphName>, StoreError> {
+        let mut graphs = vec![GraphName::DefaultGraph];
+        for g in Self::scope_graphs(extra)? {
+            graphs.push(GraphName::NamedNode(g));
+        }
+        Ok(graphs)
+    }
+
+    /// Run an update whose `WHERE` clauses read the unnamed default graph
+    /// *together with* the named graphs in `extra`. Operations that declare
+    /// their own `USING` keep it, and named graphs stay reachable through
+    /// `GRAPH`.
+    ///
+    /// This is what an unscoped reasoner uses: its input is the default graph
+    /// and its consequences go to a named target graph, so with
+    /// [`update`](Self::update) a rule whose premises were both derived never
+    /// saw them. A SPARQL `USING` can only name IRIs, so it cannot express
+    /// "the unnamed graph plus <g>"; the prepared update's dataset can.
+    pub fn update_over(&self, sparql: &str, extra: &[String]) -> Result<(), StoreError> {
+        let _w = self.begin_write()?;
+        let parsed = crate::sparql::parser()
+            .parse_update(sparql)
+            .map_err(|e| StoreError::Parse(format!("update over default graph: {e}")))?;
+        // One entry per DELETE/INSERT operation, in order — the operations
+        // oxigraph keeps a dataset for — saying whether it declared `USING`.
+        let declared: Vec<bool> = parsed
+            .operations
+            .iter()
+            .filter_map(|op| match op {
+                spargebra::GraphUpdateOperation::DeleteInsert { using, .. } => {
+                    Some(using.is_some())
+                }
+                _ => None,
+            })
+            .collect();
+        let default = Self::default_graph_plus(extra)?;
+        let targets = Self::static_update_targets(sparql);
+        let mut prepared = self.query_options().for_update(parsed);
+        for (dataset, declared) in prepared.using_datasets_mut().zip(declared) {
+            if !declared {
+                dataset.set_default_graph(default.clone());
+            }
+        }
+        self.execute_update_captured("update_over", prepared, targets.as_deref(), None)?;
+        match targets {
+            Some(targets) => self
+                .graph_index
+                .recount_specific_graphs(&self.store, &targets),
+            None => self.graph_index.rebuild(&self.store),
+        }
+        Ok(())
+    }
+
+    /// The read-only counterpart of [`update_over`](Self::update_over): a
+    /// query without its own `FROM` clauses reads the unnamed default graph
+    /// together with the named graphs in `extra`. Uncached.
+    pub fn query_over(
+        &self,
+        sparql: &str,
+        extra: &[String],
+    ) -> Result<QueryResults<'static>, StoreError> {
+        let parsed = crate::sparql::parser()
+            .parse_query(sparql)
+            .map_err(|e| StoreError::Parse(format!("query over default graph: {e}")))?;
+        let declared = match &parsed {
+            spargebra::Query::Select { dataset, .. }
+            | spargebra::Query::Construct { dataset, .. }
+            | spargebra::Query::Describe { dataset, .. }
+            | spargebra::Query::Ask { dataset, .. } => dataset.is_some(),
+        };
+        let mut prepared = self.query_options().for_query(parsed);
+        if !declared {
+            prepared
+                .dataset_mut()
+                .set_default_graph(Self::default_graph_plus(extra)?);
+        }
+        Ok(prepared.on_store(&self.store).execute()?)
+    }
+
     /// Evaluate a caller-supplied CONSTRUCT query read-only, confined to `scope`.
     ///
     /// This is the safe way to run SPARQL that came from *data* — a SHACL-AF
@@ -1445,7 +1693,9 @@ impl TripleStore {
     ///   the query left unset and leaves every named graph reachable;
     /// * variables are bound as **terms** through `bindings`, never pasted
     ///   into the text, so a focus node whose lexical form is hostile (a
-    ///   literal `sh:targetNode`) cannot close a clause and open another.
+    ///   literal `sh:targetNode`) cannot close a clause and open another; they
+    ///   reach every scope of the query, as SHACL pre-binding defines it
+    ///   ([`crate::sparql::prebind`]).
     ///
     /// `evaluator` supplies the functions the query may call: for a rule, the
     /// run's own ([`Self::query_options_for_shapes`]).
@@ -1461,15 +1711,27 @@ impl TripleStore {
                 "only a CONSTRUCT query can be evaluated confined".to_string(),
             ));
         }
-        let mut prepared = evaluator.for_query(query.clone());
+        // The bindings reach every scope of the query, as SHACL pre-binding
+        // defines it, and seed the evaluation so that triple patterns are
+        // looked up by them (crate::sparql::prebind). Seeding alone let the
+        // optimizer drop a `FILTER` whose `$this` no triple pattern binds, and
+        // the rule never fired; the rewrite alone scanned every pattern in
+        // full for each focus node. The rewrite also reaches a `$this` used in
+        // an expression alone (`BIND (f($this) AS ?x)`).
+        let mut query = query.clone();
+        let names: Vec<&str> = bindings.iter().map(|(n, _)| *n).collect();
+        crate::sparql::prebind::rewrite(&mut query, &names).map_err(StoreError::Parse)?;
+        let terms: Vec<(&str, &Term)> = bindings.iter().map(|(n, t)| (*n, t)).collect();
+        let mut prepared = crate::sparql::prebind::prepare(evaluator.clone(), query, &terms)
+            .map_err(StoreError::Parse)?;
         confine_dataset(prepared.dataset_mut(), scope)?;
-        let mut bound = prepared.on_store(&self.store);
-        for (name, term) in bindings {
-            let var = oxigraph::sparql::Variable::new(*name)
-                .map_err(|e| StoreError::Parse(e.to_string()))?;
-            bound = bound.substitute_variable(var, term.clone());
-        }
-        match bound.execute()? {
+        // A `sh:SPARQLFunction` the rule calls reads what the rule reads.
+        let data = crate::shacl::sparql_functions::DataScope {
+            source: crate::shacl::sparql_functions::ScopeSource::Store(&self.store),
+            data_graphs: scope,
+            evaluator: &evaluator,
+        };
+        match data.execute(prepared)? {
             QueryResults::Graph(triples) => Ok(triples.collect::<Result<Vec<_>, _>>()?),
             // A CONSTRUCT always evaluates to a graph; the other arms cannot
             // happen, and an empty result is the honest answer if they did.
@@ -2209,9 +2471,28 @@ impl TripleStore {
     /// and get nothing for it.
     pub fn dump_prefixed_to_writer<W, F>(
         &self,
+        writer: W,
+        format: RdfFormat,
+        from_graph: Option<&str>,
+        resolve_ns: F,
+    ) -> Result<(), StoreError>
+    where
+        W: Write,
+        F: Fn(&str) -> Option<(String, String)>,
+    {
+        self.dump_with_prefixes_to_writer(writer, format, from_graph, &[], resolve_ns)
+    }
+
+    /// [`Self::dump_prefixed_to_writer`] that declares `fixed` first, as given
+    /// and whether the graph uses them or not: a dataset's own prefix table,
+    /// which is part of its data (RDF Patch `PA` / `PD`). `resolve_ns` then
+    /// fills in the namespaces they leave, under labels they leave free.
+    pub fn dump_with_prefixes_to_writer<W, F>(
+        &self,
         mut writer: W,
         format: RdfFormat,
         from_graph: Option<&str>,
+        fixed: &[(String, String)],
         resolve_ns: F,
     ) -> Result<(), StoreError>
     where
@@ -2221,6 +2502,95 @@ impl TripleStore {
         if !matches!(format, RdfFormat::Turtle | RdfFormat::TriG) {
             return self.dump_to_writer(writer, format, from_graph);
         }
+        let serializer = Self::prefixed_serializer(
+            format,
+            self.graph_namespaces(from_graph)?,
+            fixed,
+            resolve_ns,
+        )?;
+        let graph = Self::graph_ref(from_graph)?;
+        let mut ser = serializer.for_writer(&mut writer);
+        for quad in self.store.quads_for_pattern(None, None, None, Some(graph)) {
+            let quad = quad?;
+            ser.serialize_triple(quad.as_ref())?;
+        }
+        ser.finish()?;
+        Ok(())
+    }
+
+    /// Several graphs as one document: `graphs` is `(stored graph, name to
+    /// write it under)`. A dataset format (TriG, N-Quads) writes each graph's
+    /// triples in a graph of that name; a graph format writes them all as one
+    /// graph. Turtle and TriG declare `fixed` and then what `resolve_ns`
+    /// answers, as [`Self::dump_with_prefixes_to_writer`] does.
+    pub fn dump_graphs_with_prefixes_to_writer<W, F>(
+        &self,
+        mut writer: W,
+        format: RdfFormat,
+        graphs: &[(String, String)],
+        fixed: &[(String, String)],
+        resolve_ns: F,
+    ) -> Result<(), StoreError>
+    where
+        W: Write,
+        F: Fn(&str) -> Option<(String, String)>,
+    {
+        let serializer = if matches!(format, RdfFormat::Turtle | RdfFormat::TriG) {
+            let mut namespaces = std::collections::BTreeSet::new();
+            for (stored, _) in graphs {
+                namespaces.extend(self.graph_namespaces(Some(stored))?);
+            }
+            Self::prefixed_serializer(format, namespaces, fixed, resolve_ns)?
+        } else {
+            RdfSerializer::from_format(format)
+        };
+        let dataset = format.supports_datasets();
+        let mut ser = serializer.for_writer(&mut writer);
+        for (stored, name) in graphs {
+            let name = NamedNode::new(name.as_str())
+                .map_err(|e| StoreError::Parse(format!("Invalid IRI: {e}")))?;
+            let graph = Self::graph_ref(Some(stored))?;
+            for quad in self.store.quads_for_pattern(None, None, None, Some(graph)) {
+                let quad = quad?;
+                if dataset {
+                    ser.serialize_quad(QuadRef::new(
+                        &quad.subject,
+                        &quad.predicate,
+                        &quad.object,
+                        GraphNameRef::NamedNode(name.as_ref()),
+                    ))?;
+                } else {
+                    ser.serialize_triple(quad.as_ref())?;
+                }
+            }
+        }
+        ser.finish()?;
+        Ok(())
+    }
+
+    /// A Turtle / TriG serializer declaring `fixed`, then a label for each of
+    /// `namespaces` that `resolve_ns` answers for.
+    fn prefixed_serializer<F>(
+        format: RdfFormat,
+        namespaces: std::collections::BTreeSet<String>,
+        fixed: &[(String, String)],
+        resolve_ns: F,
+    ) -> Result<RdfSerializer, StoreError>
+    where
+        F: Fn(&str) -> Option<(String, String)>,
+    {
+        let mut serializer = RdfSerializer::from_format(format);
+        let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut declared_ns: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (label, ns) in fixed {
+            if !taken.insert(label.clone()) {
+                continue;
+            }
+            declared_ns.insert(ns.clone());
+            serializer = serializer
+                .with_prefix(label, ns)
+                .map_err(|e| StoreError::Parse(format!("Invalid namespace '{ns}': {e}")))?;
+        }
 
         // The resolver may answer with a namespace SHORTER than the one derived
         // from the IRI, so a label can be claimed either by the namespace it was
@@ -2229,18 +2599,18 @@ impl TripleStore {
         // derived namespace take `foaf` and leave the real FOAF namespace
         // undeclared. Exact self-declarations are therefore claimed first, and
         // fallbacks only fill what is left.
-        let resolved: Vec<(String, String, String)> = self
-            .graph_namespaces(from_graph)?
+        let resolved: Vec<(String, String, String)> = namespaces
             .into_iter()
             .filter_map(|ns| resolve_ns(&ns).map(|(label, declared)| (ns, label, declared)))
             .filter(|(_, label, _)| crate::prefixes::is_valid_label(label))
             .collect();
-
-        let mut serializer = RdfSerializer::from_format(format);
-        let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
         for exact_first in [true, false] {
             for (ns, label, declared) in &resolved {
                 if (declared == ns) != exact_first {
+                    continue;
+                }
+                // A namespace the fixed table declares keeps its label there.
+                if declared_ns.contains(declared) {
                     continue;
                 }
                 // A label names one namespace only: re-declaring it would
@@ -2253,15 +2623,7 @@ impl TripleStore {
                 })?;
             }
         }
-
-        let graph = Self::graph_ref(from_graph)?;
-        let mut ser = serializer.for_writer(&mut writer);
-        for quad in self.store.quads_for_pattern(None, None, None, Some(graph)) {
-            let quad = quad?;
-            ser.serialize_triple(quad.as_ref())?;
-        }
-        ser.finish()?;
-        Ok(())
+        Ok(serializer)
     }
 
     /// Buffered [`Self::dump_prefixed_to_writer`], for callers that need bytes.
@@ -2706,6 +3068,91 @@ impl TripleStore {
         #[cfg(feature = "geometry3d")]
         self.spatial_index_3d.mark_dirty();
         Ok(())
+    }
+
+    /// Apply a sequence of quad additions and removals in one transaction,
+    /// in order — the RDF Patch path. Terms are taken as they are: a blank
+    /// node is the store's own node with that id, so a removal can name one
+    /// and an addition can link to one (nothing is relabelled, unlike
+    /// `INSERT DATA`). Adding a quad that is present or removing one that is
+    /// absent is a no-op. The change log gets the exact net delta per graph
+    /// and the count index is adjusted by it. Returns the net number of
+    /// quads added and removed.
+    pub fn apply_quad_ops(&self, ops: &[QuadOp]) -> Result<(usize, usize), StoreError> {
+        let _w = self.begin_write()?;
+        let mut graphs: Vec<Option<String>> = Vec::new();
+        for op in ops {
+            let g = Self::graph_key_of(op.quad());
+            if !graphs.contains(&g) {
+                graphs.push(g);
+            }
+        }
+        let pre_count = self.pre_count();
+        let intent = self.changes.begin("patch", Some(&graphs), &pre_count);
+        let mut tx = self.store.start_transaction()?;
+        // The net delta against the state before the write: an addition that
+        // a later removal undoes (or the reverse) is no change at all.
+        let mut added: std::collections::HashSet<Quad> = std::collections::HashSet::new();
+        let mut removed: std::collections::HashSet<Quad> = std::collections::HashSet::new();
+        let mut run = || -> Result<(), StoreError> {
+            for op in ops {
+                match op {
+                    QuadOp::Add(q) => {
+                        if !tx.contains(q.as_ref())? {
+                            tx.insert(q.as_ref());
+                            if !removed.remove(q) {
+                                added.insert(q.clone());
+                            }
+                        }
+                    }
+                    QuadOp::Remove(q) => {
+                        if tx.contains(q.as_ref())? {
+                            tx.remove(q.as_ref());
+                            if !added.remove(q) {
+                                removed.insert(q.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        };
+        if let Err(e) = run() {
+            drop(tx);
+            if let Some(intent) = intent {
+                self.changes.abort(intent);
+            }
+            return Err(e);
+        }
+        let added: Vec<Quad> = added.into_iter().collect();
+        let removed: Vec<Quad> = removed.into_iter().collect();
+        let deltas = if intent.is_some() {
+            Self::deltas_by_graph(&added, &removed, self.changes.max_payload())
+        } else {
+            Vec::new()
+        };
+        self.changes
+            .commit_with(intent, deltas, || tx.commit().map_err(StoreError::from))?;
+        for g in &graphs {
+            let in_g = |quads: &[Quad]| {
+                quads.iter().filter(|q| Self::graph_key_of(q) == *g).count() as i64
+            };
+            let net = in_g(&added) - in_g(&removed);
+            match self.graph_index.get_count(g.as_deref()) {
+                // An emptied named graph leaves the index on a recount, as
+                // it would on a rebuild.
+                Some(n) if n as i64 + net > 0 || g.is_none() => {
+                    self.graph_index.adjust(g.as_deref(), net)
+                }
+                _ => self
+                    .graph_index
+                    .recount_specific_graphs(&self.store, std::slice::from_ref(g)),
+            }
+        }
+        self.spatial_index.mark_dirty();
+        #[cfg(feature = "geometry3d")]
+        self.spatial_index_3d.mark_dirty();
+        Ok((added.len(), removed.len()))
     }
 
     pub fn store_quad(&self, quad: Quad) -> Result<(), StoreError> {

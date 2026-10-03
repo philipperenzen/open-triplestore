@@ -16,6 +16,7 @@
     adminGetGuestRegistration, adminSetGuestRegistration,
     adminListOauthClients, adminUpsertOauthClient, adminDeleteOauthClient,
   } from '../lib/api.js';
+  import { emptyProviderForm, providerToForm, formToBody, ProviderFormError, ENV_OIDC_SLUG } from '../lib/oauthProviderForm';
 
   // ── Tab state ────────────────────────────────────────────────────────────────
   let activeTab = 'providers'; // 'providers' | 'endpoint-acl' | 'graph-acl' | 'triple-labels' | 'registration'
@@ -90,20 +91,7 @@
   let providerError = '';
   let providerLoading = false;
 
-  const ROLE_CLAIM_MAP_PLACEHOLDER = '{"Administrators": "admin", "Publishers": "user"}';
-
-  function emptyProviderForm() {
-    return {
-      name: '', slug: '', provider_type: 'oidc',
-      client_id: '', client_secret: '',
-      discovery_url: '', authorization_endpoint: '',
-      token_endpoint: '', userinfo_endpoint: '',
-      scopes: 'openid email profile',
-      role_claim: '', default_role: 'user',
-      role_claim_map: '{}',
-      auto_provision: true, enabled: true,
-    };
-  }
+  const ROLE_CLAIM_MAP_PLACEHOLDER = '{"Administrators": "admin", "Publishers": "publisher"}';
 
   async function loadProviders() {
     providersLoading = true;
@@ -120,38 +108,26 @@
 
   function openEditProvider(p) {
     editingProvider = p;
-    providerForm = {
-      name: p.name, slug: p.slug, provider_type: p.provider_type,
-      client_id: p.client_id, client_secret: '',
-      discovery_url: p.discovery_url || '',
-      authorization_endpoint: p.authorization_endpoint || '',
-      token_endpoint: p.token_endpoint || '',
-      userinfo_endpoint: p.userinfo_endpoint || '',
-      scopes: (p.scopes || []).join(' '),
-      role_claim: p.role_claim || '',
-      default_role: p.default_role || 'user',
-      role_claim_map: p.role_claim_map ? JSON.stringify(p.role_claim_map, null, 2) : '{}',
-      auto_provision: p.auto_provision !== false,
-      enabled: p.enabled !== false,
-    };
+    providerForm = providerToForm(p);
     providerError = '';
     showProviderForm = true;
   }
 
   async function submitProvider() {
     providerError = '';
+    let body;
+    try {
+      body = formToBody(providerForm);
+    } catch (e) {
+      providerError = e instanceof ProviderFormError ? $t(e.key) : e.message;
+      return;
+    }
     providerLoading = true;
     try {
-      const payload = {
-        ...providerForm,
-        scopes: providerForm.scopes.split(/\s+/).filter(Boolean),
-        role_claim_map: JSON.parse(providerForm.role_claim_map || '{}'),
-      };
-      if (!payload.client_secret) delete payload.client_secret;
       if (editingProvider) {
-        await adminUpdateOauthProvider(editingProvider.id, payload);
+        await adminUpdateOauthProvider(editingProvider.id, body);
       } else {
-        await adminCreateOauthProvider(payload);
+        await adminCreateOauthProvider(body);
       }
       showProviderForm = false;
       await loadProviders();
@@ -500,25 +476,25 @@
             </div>
             <div class="form-group">
               <label for="prov-slug">{$t('pages.adminSecurity.slug')} <span class="hint-sm">{$t('pages.adminSecurity.slugHint')}</span></label>
-              <input id="prov-slug" bind:value={providerForm.slug} placeholder="azure-ad" required />
+              <input id="prov-slug" bind:value={providerForm.slug} placeholder="azure-ad" required
+                disabled={editingProvider?.slug === ENV_OIDC_SLUG} />
             </div>
             <div class="form-group">
               <label for="prov-type">{$t('pages.adminSecurity.providerType')}</label>
               <Select id="prov-type" bind:value={providerForm.provider_type} options={[
                 { value: 'oidc', label: $t('pages.adminSecurity.providerTypeOidc') },
-                { value: 'azure_ad', label: $t('pages.adminSecurity.providerTypeAzure') },
                 { value: 'saml', label: $t('pages.adminSecurity.providerTypeSaml') },
               ]} />
             </div>
-            <div class="form-group">
-              <label for="prov-client-id">{$t('pages.adminSecurity.clientId')}</label>
-              <input id="prov-client-id" bind:value={providerForm.client_id} placeholder={$t('pages.adminSecurity.clientIdPlaceholder')} />
-            </div>
-            <div class="form-group">
-              <label for="prov-client-secret">{$t('pages.adminSecurity.clientSecret')} {editingProvider ? $t('pages.adminSecurity.clientSecretKeep') : ''}</label>
-              <input id="prov-client-secret" type="password" bind:value={providerForm.client_secret} placeholder="••••••••" />
-            </div>
             {#if providerForm.provider_type !== 'saml'}
+              <div class="form-group">
+                <label for="prov-client-id">{$t('pages.adminSecurity.clientId')}</label>
+                <input id="prov-client-id" bind:value={providerForm.client_id} placeholder={$t('pages.adminSecurity.clientIdPlaceholder')} />
+              </div>
+              <div class="form-group">
+                <label for="prov-client-secret">{$t('pages.adminSecurity.clientSecret')} {editingProvider ? $t('pages.adminSecurity.clientSecretKeep') : ''}</label>
+                <input id="prov-client-secret" type="password" bind:value={providerForm.client_secret} placeholder="••••••••" />
+              </div>
               <div class="form-group full">
                 <label for="prov-discovery-url">{$t('pages.adminSecurity.discoveryUrl')} <span class="hint-sm">{$t('pages.adminSecurity.discoveryUrlHint')}</span></label>
                 <input id="prov-discovery-url" bind:value={providerForm.discovery_url}
@@ -530,21 +506,25 @@
               </div>
             {/if}
             {#if providerForm.provider_type === 'saml'}
+              <div class="form-group">
+                <label for="prov-entity-id">{$t('pages.adminSecurity.samlEntityId')}</label>
+                <input id="prov-entity-id" bind:value={providerForm.entity_id} placeholder="https://idp.example.org/saml" />
+              </div>
+              <div class="form-group">
+                <label for="prov-sso-url">{$t('pages.adminSecurity.samlSsoUrl')}</label>
+                <input id="prov-sso-url" bind:value={providerForm.sso_url} placeholder="https://idp.example.org/saml/sso" />
+              </div>
               <div class="form-group full">
-                <label for="prov-idp-metadata">{$t('pages.adminSecurity.idpMetadata')}</label>
-                <input id="prov-idp-metadata" bind:value={providerForm.discovery_url} placeholder="https://login.microsoftonline.com/[TENANT_ID]/federationmetadata/2007-06/federationmetadata.xml" />
+                <label for="prov-idp-cert">{$t('pages.adminSecurity.samlCertificate')} <span class="hint-sm">{editingProvider ? $t('pages.adminSecurity.samlCertificateKeep') : $t('pages.adminSecurity.samlCertificateHint')}</span></label>
+                <textarea id="prov-idp-cert" bind:value={providerForm.idp_certificate} rows="3"
+                  placeholder="-----BEGIN CERTIFICATE-----"></textarea>
               </div>
             {/if}
-            <div class="form-group">
-              <label for="prov-role-claim">{$t('pages.adminSecurity.roleClaimKey')} <span class="hint-sm">{$t('pages.adminSecurity.roleClaimKeyHint')}</span></label>
-              <input id="prov-role-claim" bind:value={providerForm.role_claim} placeholder="roles" />
-            </div>
             <div class="form-group">
               <label for="prov-default-role">{$t('pages.adminSecurity.defaultRole')}</label>
               <Select id="prov-default-role" bind:value={providerForm.default_role} options={[
                 { value: 'user', label: $t('pages.adminSecurity.roleUser') },
                 { value: 'admin', label: $t('pages.adminSecurity.roleAdmin') },
-                { value: 'super_admin', label: $t('pages.adminSecurity.roleSuperAdmin') },
               ]} />
             </div>
             <div class="form-group full">
@@ -576,11 +556,11 @@
                 <button
                   type="button"
                   class="ios-toggle"
-                  class:ios-toggle-on={providerForm.enabled}
+                  class:ios-toggle-on={providerForm.is_active}
                   role="switch"
-                  aria-checked={providerForm.enabled}
+                  aria-checked={providerForm.is_active}
                   aria-label={$t('pages.adminSecurity.enabled')}
-                  on:click={() => providerForm.enabled = !providerForm.enabled}
+                  on:click={() => providerForm.is_active = !providerForm.is_active}
                 ><span class="ios-thumb"></span></button>
               </div>
             </div>
@@ -620,8 +600,8 @@
                   {/if}
                 </td>
                 <td>
-                  <span class="status-badge {p.enabled ? 'badge-green' : 'badge-gray'}">
-                    <span class="status-dot"></span>{p.enabled ? $t('pages.adminSecurity.statusEnabled') : $t('pages.adminSecurity.statusDisabled')}
+                  <span class="status-badge {p.is_active ? 'badge-green' : 'badge-gray'}">
+                    <span class="status-dot"></span>{p.is_active ? $t('pages.adminSecurity.statusEnabled') : $t('pages.adminSecurity.statusDisabled')}
                   </span>
                 </td>
                 <td class="actions">
