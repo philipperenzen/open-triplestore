@@ -728,6 +728,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/build-features.md` lists the three features, `docs/sources.md` says
   what the image carries, and GitHub CI's backend job compiles the main crate
   with all three (it built only `plugin-postgres`, in the live-sources job).
+- **SPARQL query results follow the specification in six more places.** The
+  engine's SPARQL parser, evaluator and optimizer (Oxigraph's `spargebra` 0.4.7,
+  `spareval` 0.2.7 and `sparopt` 0.3.7) are now vendored under `vendor/` and patched, one commit per fix, each with a
+  draft upstream PR (`vendor/README.md`):
+  - `GRAPH ?g { … }` no longer puts `?g` in scope inside the pattern: around a
+    `VALUES`, an aggregate sub-select or a `MINUS` it now enumerates the named
+    graphs as SPARQL defines (backport of oxigraph `fdc32b5`, issue #1905).
+  - A default graph made of several `FROM` (or `USING`) graphs is their RDF merge:
+    a triple held in two of them matches once, so `COUNT` and `SUM` over it no
+    longer double-count (backport of oxigraph #1920, issue #1919). The columnar
+    query copy deduplicates the same way.
+  - A zero-length property path (`*`, `?`) with a constant endpoint matches that
+    term even when the graph does not hold it (`ASK { :x :p* :x }` is true on an
+    empty graph).
+  - `GROUP_CONCAT` returns a plain `xsd:string`, never a language-tagged string.
+  - `BNODE("label")` returns a fresh blank node per solution (the same one within
+    a solution), accepts any string, and no longer returns the same node in every
+    later request.
+  - An aggregate nested in another one's argument (`SUM(COUNT(?x))`) is a syntax
+    error (400), as SPARQL requires; it used to be accepted (the vendored
+    `spargebra` 0.4.7 parser).
+  The vendored W3C SPARQL 1.1 query and update sections have no open known
+  failures left (`docs/conformance/sparql11.md`).
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were

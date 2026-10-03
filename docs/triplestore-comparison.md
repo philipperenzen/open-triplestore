@@ -249,12 +249,13 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >   `SERVICE ?var` is supported; local bindings are not pushed to the remote. The federation
 >   sections of the W3C SPARQL 1.1 test suite run unscored in `tests/w3c_sparql11_federation.rs`.
 >   See [`docs/federation.md`](federation.md).
-> ⁶ Partial in [`docs/standards.md`](standards.md): the oxigraph 0.5 evaluator fails some
->   entries of the W3C query sections (`GRAPH ?g` around non-BGP patterns, zero-length paths with
->   a constant end, `GROUP_CONCAT` language tags, `BNODE(str)`); several `FROM` graphs keep
->   duplicate triples (oxigraph#1919, fixed upstream but not released); `/sparql` rewrites the
->   query's dataset to the caller's readable graphs. Oxigraph's column shows the same engine
->   before this project's HTTP layer.
+> ⁶ Partial in [`docs/standards.md`](standards.md): `/sparql` rewrites the query's dataset to
+>   the caller's readable graphs (`FROM` and `FROM NAMED` collapse into one another, and the
+>   protocol's dataset parameters are ignored). The engine itself is oxigraph 0.5.11 with its
+>   SPARQL evaluator vendored and patched ([`vendor/README.md`](../vendor/README.md)) for the
+>   evaluator gaps tracked in [`docs/conformance/sparql11.md`](conformance/sparql11.md); the
+>   Oxigraph column shows the unpatched 0.5 engine, which has them (among them oxigraph#1905
+>   and #1919, fixed on its main branch but not released).
 
 ### 4.2 Reasoning, Validation & Inference
 

@@ -77,20 +77,11 @@ const RS: &str = "http://www.w3.org/2001/sw/DataAccess/tests/result-set#";
 
 /// Entries that currently fail, with the engine gap they sit behind. Keep
 /// sorted. Removing an entry requires the entry to actually pass (the ratchet
-/// asserts both directions). Each is an oxigraph 0.5 evaluator behaviour,
-/// reproduced against the raw engine; none is in the platform layer.
-const KNOWN_FAILURES: &[(&str, &str)] = &[
-    ("aggregates/manifest#agg-empty-group-count-graph", "oxigraph 0.5: `GRAPH ?g { <aggregate sub-select> }` does not enumerate the named graphs when the inner pattern binds no quads, so ?g stays unbound and the empty-group count is one row instead of one per graph"),
-    ("aggregates/manifest#agg-groupconcat-04", "oxigraph 0.5 implements the SPARQL 1.2 GROUP_CONCAT (a language tag shared by every input is kept: \"1 2\"@en); the 1.1 suite expects the plain literal \"1 2\""),
-    ("aggregates/manifest#agg-groupconcat-06", "as agg-groupconcat-04: a single @en input yields \"1\"@en, the 1.1 suite expects \"1\""),
-    ("bindings/manifest#graph", "oxigraph 0.5: `GRAPH ?g { VALUES (?g ?t) { (UNDEF …) } }` does not enumerate the named graphs for the UNDEF row, so ?g stays unbound"),
-    ("functions/manifest#bnode01", "oxigraph 0.5: BNODE(str) returns one blank node per string for the whole query; SPARQL 1.1 §17.4.2.9 requires a fresh node per solution (same string → same node only within a solution)"),
-    ("negation/manifest#graph-minus", "oxigraph 0.5: the outer `GRAPH ?g` variable is implied on both sides of an inner MINUS, so the sides share ?g and are not disjoint; the suite expects the outer graph variable to be ignored for the disjointness check"),
-    ("property-path/manifest#zero_or_more_set_end", "oxigraph 0.5: a zero-length path (`*`) whose constant end is absent from the dataset yields no solution; the spec's zero-length path matches any term, so `?s :p* :o` on an empty dataset binds ?s = :o"),
-    ("property-path/manifest#zero_or_more_set_start", "as zero_or_more_set_end, constant start"),
-    ("property-path/manifest#zero_or_one_set_end", "as zero_or_more_set_end, for `?`"),
-    ("property-path/manifest#zero_or_one_set_start", "as zero_or_more_set_end, for `?` with a constant start"),
-];
+/// asserts both directions). Empty since the vendored spareval/sparopt fork
+/// (`vendor/README.md`) fixed the last ten, all oxigraph 0.5 evaluator gaps:
+/// `GRAPH ?g` scoping, zero-length paths with a constant endpoint,
+/// `GROUP_CONCAT` language tags and `BNODE(str)`.
+const KNOWN_FAILURES: &[(&str, &str)] = &[];
 
 /// Pass floor: a loader or parser regression turns passes into skips or
 /// failures; the two ratchet asserts alone would not notice a wholesale skip.

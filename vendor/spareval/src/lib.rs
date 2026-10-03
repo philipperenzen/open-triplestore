@@ -14,7 +14,7 @@ mod update;
 
 #[cfg(feature = "sparql-12")]
 pub use crate::dataset::ExpressionTriple;
-pub use crate::dataset::{ExpressionTerm, InternalQuad, QueryableDataset};
+pub use crate::dataset::{ExpressionTerm, InternalQuad, InternalTriple, QueryableDataset};
 pub use crate::error::QueryEvaluationError;
 pub use crate::eval::CancellationToken;
 use crate::eval::{EvalNodeWithStats, SimpleEvaluator, Timer};
@@ -27,7 +27,7 @@ pub use crate::service::{DefaultServiceHandler, ServiceHandler};
 pub use crate::update::{DeleteInsertIter, DeleteInsertQuad};
 use json_event_parser::{JsonEvent, WriterJsonSerializer};
 use oxiri::Iri;
-use oxrdf::{GraphName, Literal, NamedNode, NamedOrBlankNode, Term, Variable};
+use oxrdf::{BlankNode, GraphName, Literal, NamedNode, NamedOrBlankNode, Term, Variable};
 use oxsdatatypes::{DateTime, DayTimeDuration, Float};
 use spargebra::Query;
 use spargebra::algebra::QueryDataset;
@@ -35,6 +35,8 @@ use spargebra::term::{GroundQuadPattern, QuadPattern};
 use sparopt::Optimizer;
 use sparopt::algebra::GraphPattern;
 use std::collections::HashMap;
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::{fmt, io};
@@ -382,6 +384,9 @@ impl QueryEvaluator {
         struct Context<'a> {
             now: Option<DateTime>,
             custom_functions: &'a CustomFunctionRegistry,
+            /// One evaluation of one expression is one solution: `BNODE(label)`
+            /// returns the same node for the same label within it.
+            blank_node_keys: [RandomState; 2],
         }
 
         impl<'a> ExpressionEvaluatorContext<'a> for Context<'a> {
@@ -454,6 +459,17 @@ impl QueryEvaluator {
             fn custom_functions(&mut self) -> &CustomFunctionRegistry {
                 self.custom_functions
             }
+
+            fn build_blank_node_for_label(
+                &mut self,
+            ) -> impl Fn(&HashMap<&'a Variable, Term>, &str) -> BlankNode + 'a {
+                let [a, b] = self.blank_node_keys.clone();
+                move |_, label| {
+                    BlankNode::new_from_unique_id(
+                        (u128::from(a.hash_one(label)) << 64) | u128::from(b.hash_one(label)),
+                    )
+                }
+            }
         }
 
         build_expression_evaluator(
@@ -461,6 +477,7 @@ impl QueryEvaluator {
             &mut Context {
                 now: None,
                 custom_functions: &self.custom_functions,
+                blank_node_keys: [RandomState::new(), RandomState::new()],
             },
         )
         .ok()?(&substitutions.into_iter().collect::<HashMap<_, _>>())
@@ -918,29 +935,38 @@ impl QueryDatasetSpecification {
     }
 
     /// Sets the default graph of the query to be the union of all the graphs in the queried store.
+    /// Triples present in multiple graphs are returned only once.
     ///
     /// ```
     /// use oxrdf::{Dataset, NamedNode, Quad};
     /// use spareval::{QueryEvaluator, QueryResults};
     /// use spargebra::SparqlParser;
     ///
-    /// let dataset = Dataset::from_iter([Quad::new(
+    /// let quad = Quad::new(
     ///     NamedNode::new("http://example.com/s")?,
     ///     NamedNode::new("http://example.com/p")?,
     ///     NamedNode::new("http://example.com/o")?,
     ///     NamedNode::new("http://example.com/g")?,
-    /// )]);
+    /// );
+    /// let dataset = Dataset::from_iter([
+    ///     quad.clone(),
+    ///     Quad {
+    ///         graph_name: NamedNode::new("http://example.com/g2")?.into(),
+    ///         ..quad
+    ///     },
+    /// ]);
     /// let query = SparqlParser::new().parse_query("SELECT * WHERE { ?s ?p ?o }")?;
     /// let evaluator = QueryEvaluator::new();
     /// let mut prepared = evaluator.prepare(&query);
     /// prepared
     ///     .dataset_mut()
-    ///     .set_default_graph(vec![NamedNode::new("http://example.com/g")?.into()]);
+    ///     .set_default_graph_as_union();
     /// if let QueryResults::Solutions(mut solutions) = prepared.execute(&dataset)? {
     ///     assert_eq!(
     ///         solutions.next().unwrap()?.get("s"),
     ///         Some(&NamedNode::new("http://example.com/s")?.into())
     ///     );
+    ///     assert!(solutions.next().is_none());
     /// }
     ///
     /// # Ok::<_, Box<dyn std::error::Error>>(())
@@ -950,6 +976,9 @@ impl QueryDatasetSpecification {
     }
 
     /// Sets the list of graphs the query should consider as being part of the default graph.
+    ///
+    /// Triples present in multiple graphs are matched only once in the merged default graph.
+    /// This does not remove duplicate query solutions produced by joins or projection.
     ///
     /// By default, only the store default graph is considered.
     /// ```
@@ -1078,7 +1107,8 @@ impl fmt::Debug for QueryExplanation {
 mod tests {
     use super::*;
     use oxrdf::vocab::xsd;
-    use oxrdf::{Literal, Term};
+    use oxrdf::{Dataset, Literal, Quad, Term};
+    use spargebra::SparqlParser;
     use sparopt::algebra::{Expression, GraphPattern};
 
     #[test]
@@ -1171,6 +1201,50 @@ mod tests {
             evaluator.evaluate_effective_boolean_value_expression(&exists_unit, std::iter::empty()),
             Some(true)
         );
+    }
+
+    #[test]
+    fn merged_default_graph_streams_and_honors_cancellation() {
+        let dataset = Dataset::from_iter(
+            [
+                ("urn:g1", "urn:o"),
+                ("urn:g2", "urn:o"),
+                ("urn:g2", "urn:other"),
+            ]
+            .map(|(graph, object)| {
+                Quad::new(
+                    NamedNode::new_unchecked("urn:s"),
+                    NamedNode::new_unchecked("urn:p"),
+                    NamedNode::new_unchecked(object),
+                    NamedNode::new_unchecked(graph),
+                )
+            }),
+        );
+        let query = SparqlParser::new()
+            .parse_query("SELECT * FROM <urn:g1> FROM <urn:g2> WHERE { ?s ?p ?o }")
+            .unwrap();
+        for union in [false, true] {
+            let cancellation_token = CancellationToken::new();
+            let evaluator =
+                QueryEvaluator::new().with_cancellation_token(cancellation_token.clone());
+            let mut prepared = evaluator.prepare(&query);
+            if union {
+                prepared.dataset_mut().set_default_graph_as_union();
+            }
+            let results = prepared.execute(&dataset).unwrap();
+            assert!(matches!(&results, QueryResults::Solutions(_)));
+            if let QueryResults::Solutions(mut solutions) = results {
+                assert_eq!(
+                    solutions.next().unwrap().unwrap().get("s"),
+                    Some(&NamedNode::new_unchecked("urn:s").into())
+                );
+                cancellation_token.cancel();
+                assert!(matches!(
+                    solutions.next().unwrap(),
+                    Err(QueryEvaluationError::Cancelled)
+                ));
+            }
+        }
     }
 
     #[test]
