@@ -16,6 +16,16 @@
 //! to pick a regime other than the configured one): the dataset's entailment
 //! graph joins the query's default graph, exactly as the global
 //! `?entailment=` graphs do.
+//!
+//! SWRL rules stored with a dataset always run (`swrl` feature): every
+//! `swrl:Imp` in the dataset's `entailment`- and `model`-role graphs and in
+//! the model version it conforms to is read in the SWRL RDF syntax and run
+//! over the same reasoning sources as the regime. With a regime in
+//! `materialize` mode the rules and the regime run to one joint fixed point
+//! in the regime's graph; without one, the rules run on their own into
+//! `urn:entailment:swrl:<dataset>`. Either way they re-run after every write
+//! to one of the dataset's graphs, and `GET …/entailment` reports how the
+//! last run went.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -217,6 +227,260 @@ fn last_run_generation(dataset_id: &str) -> Option<u64> {
         .and_then(|m| m.get(dataset_id).copied())
 }
 
+/// The graph a dataset's stored SWRL rules write to when the dataset has no
+/// regime in `materialize` mode.
+pub fn dataset_rules_graph(dataset_id: &str) -> String {
+    format!("urn:entailment:swrl:{dataset_id}")
+}
+
+/// The dataset's inference graph: its regime's entailment graph in
+/// `materialize` mode, else the graph its stored rules write to.
+pub fn inference_graph(db: &AuthDb, dataset_id: &str) -> String {
+    match config(db, dataset_id) {
+        Ok(Some(c)) if c.mode == "materialize" => c.graph,
+        _ => dataset_rules_graph(dataset_id),
+    }
+}
+
+/// The most rounds of rules-then-regime a joint fixed point may take.
+#[cfg(feature = "swrl")]
+const MAX_JOINT_ROUNDS: usize = 32;
+
+/// The most iterations one pass of a dataset's stored rules may take.
+#[cfg(feature = "swrl")]
+const RULE_MAX_ITERATIONS: usize = 1000;
+
+/// What the last run of a dataset's stored SWRL rules did.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RulesReport {
+    /// The graphs the rules were read from.
+    pub rule_graphs: Vec<String>,
+    /// How many rules ran.
+    pub rules: usize,
+    /// The graph they wrote to.
+    pub target_graph: String,
+    /// Triples the rules derived (the regime's own are counted separately).
+    pub triples_inferred: usize,
+    /// Rounds of rules-then-regime it took.
+    pub rounds: usize,
+    /// Whether the joint fixed point was reached.
+    pub converged: bool,
+    /// Why the rules did not run, or stopped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub ran_at: String,
+}
+
+fn last_rules_reports() -> &'static std::sync::Mutex<std::collections::HashMap<String, RulesReport>>
+{
+    static MAP: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, RulesReport>>,
+    > = std::sync::OnceLock::new();
+    MAP.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn record_rules(dataset_id: &str, report: Option<&RulesReport>) {
+    if let Ok(mut m) = last_rules_reports().lock() {
+        match report {
+            Some(r) => {
+                m.insert(dataset_id.to_string(), r.clone());
+            }
+            None => {
+                m.remove(dataset_id);
+            }
+        }
+    }
+}
+
+/// The last rules report recorded for `dataset_id` in this process.
+pub fn last_rules_report(dataset_id: &str) -> Option<RulesReport> {
+    last_rules_reports()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(dataset_id).cloned())
+}
+
+/// The graphs whose `swrl:Imp` rules run with `ds`: its `entailment`- and
+/// `model`-role graphs and the graphs of the model version it conforms to.
+pub fn rule_graphs(state: &AppState, ds: &Dataset) -> Vec<String> {
+    let layer = crate::conformance::resolve(state, ds);
+    let mut graphs: Vec<String> = layer
+        .graphs
+        .iter()
+        .filter(|g| matches!(g.role, Some(GraphKind::Entailment | GraphKind::Model)))
+        .map(|g| g.graph_iri.clone())
+        .collect();
+    if let Some(model) = layer.conforms_to_model {
+        graphs.push(model.graph_iri);
+        graphs.extend(model.sub_graphs);
+    }
+    graphs.sort();
+    graphs.dedup();
+    graphs
+}
+
+/// Whether `ds` stores any SWRL rule. Probes the dataset's own rule graphs
+/// first and resolves its model version only when it declares one, as this
+/// runs after every write.
+#[cfg(feature = "swrl")]
+fn holds_rules(state: &AppState, ds: &Dataset) -> bool {
+    let own: Vec<String> = state
+        .auth_db
+        .list_dataset_graph_entries(&ds.id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| matches!(e.graph_role, Some(GraphKind::Entailment | GraphKind::Model)))
+        .map(|e| e.graph_iri)
+        .collect();
+    if crate::swrl::rdf::graphs_hold_rules(state.store.store(), &own) {
+        return true;
+    }
+    ds.conforms_to_model
+        .as_deref()
+        .is_some_and(|m| !m.is_empty())
+        && crate::swrl::rdf::graphs_hold_rules(state.store.store(), &rule_graphs(state, ds))
+}
+
+#[cfg(not(feature = "swrl"))]
+fn holds_rules(_state: &AppState, _ds: &Dataset) -> bool {
+    false
+}
+
+/// Run the stored rules of `ds` over `sources` into `target`; with a
+/// `regime`, alternate rules and regime until neither derives anything new.
+/// `None` when the dataset stores no rules. The caller has already run the
+/// regime to its own fixed point.
+#[cfg(feature = "swrl")]
+fn run_stored_rules(
+    state: &AppState,
+    ds: &Dataset,
+    sources: &[String],
+    target: &str,
+    regime: Option<(&str, IdentityPolicy)>,
+) -> Option<RulesReport> {
+    if !holds_rules(state, ds) {
+        return None;
+    }
+    let graphs = rule_graphs(state, ds);
+    let mut report = RulesReport {
+        rule_graphs: graphs.clone(),
+        target_graph: target.to_string(),
+        ran_at: chrono::Utc::now().to_rfc3339(),
+        ..RulesReport::default()
+    };
+    let rules = match crate::swrl::rdf::rules_in_graphs(state.store.store(), &graphs) {
+        Ok(rules) => rules,
+        Err(e) => {
+            report.error = Some(e);
+            return Some(report);
+        }
+    };
+    report.rules = rules.len();
+    let compiled = match crate::swrl::compile_rules(&rules, Some(target), Some(sources)) {
+        Ok(c) => c,
+        Err(e) => {
+            report.error = Some(e);
+            return Some(report);
+        }
+    };
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(state.write_timeout_secs);
+    for round in 1..=MAX_JOINT_ROUNDS {
+        report.rounds = round;
+        let run = match crate::swrl::execute_compiled(
+            &state.store,
+            &compiled,
+            RULE_MAX_ITERATIONS,
+            Some(deadline),
+        ) {
+            Ok(run) => run,
+            Err(e) => {
+                report.error = Some(e);
+                return Some(report);
+            }
+        };
+        report.triples_inferred += run.triples_inferred;
+        if !run.converged {
+            report.error = Some(format!(
+                "the rules stopped before their fixed point ({:?})",
+                run.stop_reason
+            ));
+            return Some(report);
+        }
+        // The regime was at its fixed point before this pass: if the rules
+        // added nothing, so is the pair.
+        if run.triples_inferred == 0 {
+            report.converged = true;
+            return Some(report);
+        }
+        let Some((regime, policy)) = regime else {
+            report.converged = true;
+            return Some(report);
+        };
+        match crate::server::routes::run_regime(
+            state,
+            regime,
+            Some(sources.to_vec()),
+            target,
+            policy,
+        ) {
+            Ok(Some(r)) if r.triples_added == 0 => {
+                report.converged = true;
+                return Some(report);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                report.error = Some(format!("{e:?}"));
+                return Some(report);
+            }
+        }
+    }
+    report.error = Some(format!(
+        "no joint fixed point with {} after {MAX_JOINT_ROUNDS} rounds",
+        regime.map(|(r, _)| r).unwrap_or("the regime")
+    ));
+    Some(report)
+}
+
+#[cfg(not(feature = "swrl"))]
+fn run_stored_rules(
+    _state: &AppState,
+    _ds: &Dataset,
+    _sources: &[String],
+    _target: &str,
+    _regime: Option<(&str, IdentityPolicy)>,
+) -> Option<RulesReport> {
+    None
+}
+
+/// Run the stored rules of a dataset that has no regime in `materialize`
+/// mode into its rules graph, cleared first unless `extend`.
+pub fn run_rules_for_dataset(
+    state: &AppState,
+    dataset_id: &str,
+    extend: bool,
+) -> Result<Option<RulesReport>, String> {
+    let ds = state
+        .auth_db
+        .get_dataset(dataset_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("dataset {dataset_id} not found"))?;
+    let (sources, _) = reasoning_sources(state, &ds);
+    let target = dataset_rules_graph(dataset_id);
+    if !extend {
+        state
+            .store
+            .update(&format!("CLEAR SILENT GRAPH <{target}>"))
+            .map_err(|e| format!("clearing <{target}>: {e}"))?;
+    }
+    let report = run_stored_rules(state, &ds, &sources, &target, None);
+    record_rules(dataset_id, report.as_ref());
+    if let Ok(mut m) = last_run_generations().lock() {
+        m.insert(dataset_id.to_string(), state.store.write_generation());
+    }
+    Ok(report)
+}
+
 /// Re-materialise `regime` for `dataset_id` into its entailment graph —
 /// cleared and rebuilt from scratch. Returns the number of triples in the
 /// entailment graph afterwards.
@@ -248,13 +512,22 @@ pub fn run_for_dataset_with(
     let (sources, engine) = skos_premise(state, regime, sources)?;
     let target = dataset_entailment_graph(regime, dataset_id);
     if !extend {
-        state
-            .store
-            .update(&format!("CLEAR SILENT GRAPH <{target}>"))
-            .map_err(|e| AppError::Internal(format!("clearing <{target}>: {e}")))?;
+        // The regime's graph is the inference graph now; stored rules write
+        // there, not to the rules-only graph.
+        for g in [target.clone(), dataset_rules_graph(dataset_id)] {
+            state
+                .store
+                .update(&format!("CLEAR SILENT GRAPH <{g}>"))
+                .map_err(|e| AppError::Internal(format!("clearing <{g}>: {e}")))?;
+        }
     }
-    let outcome =
-        crate::server::routes::run_reasoner(state, engine, Some(sources), &target, identity.policy);
+    let outcome = crate::server::routes::run_reasoner(
+        state,
+        engine,
+        Some(sources.clone()),
+        &target,
+        identity.policy,
+    );
     // What the run derived about the SKOS schema itself is pruned — after an
     // inconsistent run too, whose consequences stay in the graph.
     #[cfg(feature = "owl2-rl")]
@@ -264,6 +537,18 @@ pub fn run_for_dataset_with(
                 "pruning the SKOS schema closure from <{target}>: {e}"
             ))
         })?;
+    }
+    // Stored rules join the regime to one joint fixed point (not after a run
+    // that failed: its 422 says why).
+    if outcome.is_ok() {
+        let rules = run_stored_rules(
+            state,
+            &ds,
+            &sources,
+            &target,
+            Some((regime, identity.policy)),
+        );
+        record_rules(dataset_id, rules.as_ref());
     }
     let n = state.store.graph_count_cached(Some(&target)).unwrap_or(0) as i64;
     // Which backend ran is known only from a successful run; a failed DL run
@@ -490,6 +775,42 @@ pub fn after_additive_write(state: &AppState, graphs: &[String]) {
     after_write_kind(state, graphs, true)
 }
 
+/// Datasets that own any of `graphs`, are not in `skip`, and store SWRL
+/// rules: their rules re-run after the write even without a regime.
+fn rule_datasets_for(state: &AppState, graphs: &[String], skip: &[String]) -> Vec<String> {
+    let owners = (|| -> anyhow::Result<Vec<String>> {
+        let conn = state.auth_db.pool().get()?;
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT dataset_id FROM dataset_graphs WHERE graph_iri = ?1")?;
+        let mut out: Vec<String> = Vec::new();
+        for g in graphs {
+            if g.starts_with("urn:entailment:") {
+                continue;
+            }
+            for id in stmt.query_map(params![g], |r| r.get::<_, String>(0))? {
+                let id = id?;
+                if !out.contains(&id) && !skip.contains(&id) {
+                    out.push(id);
+                }
+            }
+        }
+        Ok(out)
+    })();
+    let owners = match owners {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!("entailment: rule-dataset lookup failed: {e}");
+            return Vec::new();
+        }
+    };
+    owners
+        .into_iter()
+        .filter(
+            |id| matches!(state.auth_db.get_dataset(id), Ok(Some(ds)) if holds_rules(state, &ds)),
+        )
+        .collect()
+}
+
 fn after_write_kind(state: &AppState, graphs: &[String], additive: bool) {
     let targets = match materialized_datasets_for(&state.auth_db, graphs) {
         Ok(t) => t,
@@ -498,6 +819,16 @@ fn after_write_kind(state: &AppState, graphs: &[String], additive: bool) {
             return;
         }
     };
+    let regime_ids: Vec<String> = targets.iter().map(|(ds, _)| ds.clone()).collect();
+    let mut targets: Vec<(String, Option<String>)> = targets
+        .into_iter()
+        .map(|(ds, regime)| (ds, Some(regime)))
+        .collect();
+    targets.extend(
+        rule_datasets_for(state, graphs, &regime_ids)
+            .into_iter()
+            .map(|ds| (ds, None)),
+    );
     let generation = state.store.write_generation();
     for (ds, regime) in targets {
         // A DL run can take minutes (an external reasoner, a timeout of five):
@@ -513,6 +844,16 @@ fn after_write_kind(state: &AppState, graphs: &[String], additive: bool) {
             continue;
         }
         let extend = additive && last.is_some();
+        let Some(regime) = regime else {
+            match run_rules_for_dataset(state, &ds, extend) {
+                Ok(r) => tracing::debug!(
+                    "entailment: stored rules for {ds}: {} triples",
+                    r.map(|r| r.triples_inferred).unwrap_or(0)
+                ),
+                Err(e) => tracing::warn!("entailment: stored rules for {ds} failed: {e}"),
+            }
+            continue;
+        };
         match run_for_dataset_with(state, &ds, &regime, extend) {
             Ok(n) => tracing::debug!(
                 "entailment: {} {regime} for {ds}: {n} triples",
@@ -590,8 +931,35 @@ pub async fn get_entailment(
             "dl_backend".into(),
             serde_json::json!(state.dl.backend.map(|b| b.as_str())),
         );
+        obj.insert(
+            "inference_graph".into(),
+            serde_json::json!(inference_graph(&state.auth_db, &dataset_id)),
+        );
+        obj.insert("rules".into(), rules_json(&state, &ds));
     }
     Ok(Json(v))
+}
+
+/// The stored rules of `ds` for `GET …/entailment`: where they are read
+/// from, how many there are (or why they cannot be read), and the last run.
+#[cfg(feature = "swrl")]
+fn rules_json(state: &AppState, ds: &Dataset) -> serde_json::Value {
+    let graphs = rule_graphs(state, ds);
+    let (count, error) = match crate::swrl::rdf::rules_in_graphs(state.store.store(), &graphs) {
+        Ok(rules) => (rules.len(), None),
+        Err(e) => (0, Some(e)),
+    };
+    serde_json::json!({
+        "graphs": graphs,
+        "count": count,
+        "error": error,
+        "last_run": last_rules_report(&ds.id),
+    })
+}
+
+#[cfg(not(feature = "swrl"))]
+fn rules_json(_state: &AppState, _ds: &Dataset) -> serde_json::Value {
+    serde_json::Value::Null
 }
 
 #[derive(Debug, Deserialize)]
@@ -665,34 +1033,38 @@ pub async fn put_entailment(
     let r = regime.clone();
     let m = mode.clone();
     let g = graph.clone();
-    let run = tokio::task::spawn_blocking(move || -> Result<i64, AppError> {
-        if m == "off" {
-            st.store
-                .update(&format!("CLEAR SILENT GRAPH <{g}>"))
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-            let _ = record_run(
-                &st.auth_db,
-                &id,
-                RunRecord {
-                    triples: 0,
-                    consistent: None,
-                    inconsistency: None,
-                    status: "ok",
-                    error: None,
-                    backend: None,
-                    complete: None,
-                },
-            );
-            return Ok(0);
-        }
-        run_for_dataset(&st, &id, &r)
-    })
-    .await
-    .map_err(e500)?;
+    let run =
+        tokio::task::spawn_blocking(move || -> Result<(i64, Option<RulesReport>), AppError> {
+            if m == "off" {
+                st.store
+                    .update(&format!("CLEAR SILENT GRAPH <{g}>"))
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                let _ = record_run(
+                    &st.auth_db,
+                    &id,
+                    RunRecord {
+                        triples: 0,
+                        consistent: None,
+                        inconsistency: None,
+                        status: "ok",
+                        error: None,
+                        backend: None,
+                        complete: None,
+                    },
+                );
+                // Stored rules still run, into the rules-only graph.
+                let rules = run_rules_for_dataset(&st, &id, false).map_err(AppError::Internal)?;
+                return Ok((0, rules));
+            }
+            let n = run_for_dataset(&st, &id, &r)?;
+            Ok((n, last_rules_report(&id)))
+        })
+        .await
+        .map_err(e500)?;
     // An inconsistent dataset or a run without a fixed point is a 422 whose
     // JSON body says what happened, exactly as `POST /api/reasoning/materialize`.
-    let triples = match run {
-        Ok(n) => n,
+    let (triples, rules) = match run {
+        Ok(v) => v,
         Err(e) => return Ok(e.into_response()),
     };
     let identity = effective_identity(&state.auth_db, &ds);
@@ -709,6 +1081,8 @@ pub async fn put_entailment(
         "status": recorded.as_ref().and_then(|c| c.status.clone()),
         "backend": recorded.as_ref().and_then(|c| c.backend.clone()),
         "complete": recorded.as_ref().and_then(|c| c.complete),
+        "rules": rules,
+        "inference_graph": inference_graph(&state.auth_db, &dataset_id),
         "identity": identity.policy.as_str(),
         "identity_source": identity.source,
     }))
@@ -873,13 +1247,22 @@ fn parse_policy(raw: &str) -> Result<IdentityPolicy, ApiErr> {
 /// Re-materialise `dataset_id` if it is in `materialize` mode, so a policy
 /// change takes effect at once. Best-effort; failures are logged.
 fn rematerialize_if_configured(state: &AppState, dataset_id: &str) {
-    if let Ok(Some(c)) = config(&state.auth_db, dataset_id) {
-        if c.mode == "materialize" {
+    match config(&state.auth_db, dataset_id) {
+        Ok(Some(c)) if c.mode == "materialize" => {
             if let Err(e) = run_for_dataset(state, dataset_id, &c.regime) {
                 tracing::warn!(
                     "identity policy: re-materialising {dataset_id} failed: {}",
                     e.message()
                 );
+            }
+        }
+        // Stored rules read the same sources, so they re-run too.
+        _ => {
+            if matches!(state.auth_db.get_dataset(dataset_id), Ok(Some(ds)) if holds_rules(state, &ds))
+            {
+                if let Err(e) = run_rules_for_dataset(state, dataset_id, false) {
+                    tracing::warn!("identity policy: re-running rules of {dataset_id} failed: {e}");
+                }
             }
         }
     }
