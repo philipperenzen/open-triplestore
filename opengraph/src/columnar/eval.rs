@@ -92,6 +92,17 @@ fn accepts_pattern(p: &GraphPattern) -> Result<(), Decline> {
                 if pattern_uses_variable(inner, v) {
                     return Err(Decline("GRAPH ?g with ?g used inside"));
                 }
+                // This evaluator carries `?g` into every triple pattern of the
+                // body. SPARQL evaluates the body once per named graph with `?g`
+                // out of scope (§18.6), which is the same thing only for
+                // operators that do not look at the variables they share or
+                // range over all rows at once: under MINUS the pushed `?g`
+                // would make both sides share a variable, and a GROUP, LIMIT,
+                // DISTINCT or projection would run across graphs instead of
+                // within each one.
+                if !evaluates_the_same_per_graph(inner) {
+                    return Err(Decline("GRAPH ?g around an operator evaluated per graph"));
+                }
             }
             accepts_pattern(inner)
         }
@@ -191,6 +202,25 @@ fn surely_binds_a_triple(p: &GraphPattern) -> bool {
         | GraphPattern::Slice { inner, .. }
         | GraphPattern::Group { inner, .. }
         | GraphPattern::Lateral { right: inner, .. } => surely_binds_a_triple(inner),
+        _ => false,
+    }
+}
+
+/// Whether `p` gives the same answer evaluated once per named graph (and
+/// joined with that graph's name) as evaluated once with the graph name carried
+/// in every triple pattern: true for patterns built only from triple patterns,
+/// paths, `VALUES`, joins, unions, optionals, filters and `BIND`.
+fn evaluates_the_same_per_graph(p: &GraphPattern) -> bool {
+    match p {
+        GraphPattern::Bgp { .. } | GraphPattern::Path { .. } | GraphPattern::Values { .. } => true,
+        GraphPattern::Join { left, right }
+        | GraphPattern::Union { left, right }
+        | GraphPattern::LeftJoin { left, right, .. } => {
+            evaluates_the_same_per_graph(left) && evaluates_the_same_per_graph(right)
+        }
+        GraphPattern::Filter { inner, .. } | GraphPattern::Extend { inner, .. } => {
+            evaluates_the_same_per_graph(inner)
+        }
         _ => false,
     }
 }
@@ -1275,9 +1305,11 @@ fn extend(
                 None => ctx.named_graphs.clone(),
             },
         };
-        // The engine evaluates a multi-graph default (several FROM) as the
-        // union *with* duplicates, not the RDF merge; parity means the same.
-        let dedup = false;
+        // A default graph built from several graphs (several FROM) is their
+        // RDF merge (SPARQL 1.1 §13.2): a triple present in two of them
+        // matches once. The engine (vendored spareval) deduplicates the same
+        // way, per scan, on the whole triple.
+        let dedup = matches!(scope, Scope::Default) && graphs.len() > 1;
         let mut seen: HashSet<[Id; 3]> = HashSet::new();
         for g in graphs {
             let (perm, prefix) = Columnar::plan(g, bs, bp, bo);

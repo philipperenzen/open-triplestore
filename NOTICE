@@ -158,6 +158,19 @@ Open Triplestore server binary or copied into its image):
     (OpenJDK) — GNU GPL-2.0 with the Classpath Exception; its licence and
     notices are in /opt/java/legal/.
 
+Vendored source code:
+
+  - spargebra 0.4.7 (vendor/spargebra/), spareval 0.2.7 (vendor/spareval/) and
+    sparopt 0.3.7 (vendor/sparopt/), the SPARQL parser, evaluator and optimizer
+    crates of Oxigraph as published on crates.io (upstream
+    https://github.com/oxigraph/oxigraph, paths lib/spargebra, lib/spareval and
+    lib/sparopt, commit 0e81a29d27575ab69e7f85ea9c7f1058b277fcd0) —
+    dual-licensed MIT or Apache-2.0, at your option; Copyright (c) 2018
+    Oxigraph developers. Both licence texts are beside each crate
+    (LICENSE-MIT and LICENSE-APACHE). Modified: SPARQL 1.1 conformance fixes,
+    some backported from upstream Oxigraph. vendor/README.md describes every
+    change, and vendor/*/UPSTREAM-PR.md each change as proposed upstream.
+
 Bundled datasets and vocabularies:
 
   - Vocabularies bundled in frontend/public/vocab/. The web UI serves them at
