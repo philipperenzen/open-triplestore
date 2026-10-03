@@ -313,7 +313,17 @@ fn parse_lenient_bool(s: &str) -> Result<bool, String> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let matches = <Cli as clap::CommandFactory>::command().get_matches();
+    let cli =
+        <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    // Whether the operator set the base URL (`--base-url` or `BASE_URL`), as
+    // opposed to the built-in default: federated identity assertions are only
+    // audience-checked against a base URL somebody configured.
+    let base_url_configured =
+        matches.value_source("base_url") != Some(clap::parser::ValueSource::DefaultValue);
+    // Where backups live, read once: the restore path, store auto-recovery and
+    // the backup subsystem all use this value (an empty BACKUP_DIR means unset).
+    let backup_dir = server::default_backup_dir(&cli.data_dir);
 
     // Initialize tracing
     tracing_subscriber::fmt()
@@ -333,9 +343,6 @@ async fn main() -> anyhow::Result<()> {
     // Handle --restore: rebuild the store + identity DB from a backup, then exit.
     // Runs before the identity DB is opened so its SQLite file can be replaced.
     if let Some(ref id) = cli.restore {
-        let backup_dir = std::env::var("BACKUP_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| cli.data_dir.join("backups"));
         let target_sqlite = cli
             .db_path
             .clone()
@@ -378,9 +385,6 @@ async fn main() -> anyhow::Result<()> {
     // Initialize the store, auto-recovering from RocksDB corruption (e.g. an
     // unclean shutdown that left "SST file is ahead of WALs") so the service comes
     // back instead of crash-looping. See store::recovery.
-    let backup_dir = std::env::var("BACKUP_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| cli.data_dir.join("backups"));
     let store = store::recovery::open_store_with_recovery(&cli.data_dir, &backup_dir)?;
     info!("Store opened at {:?}", cli.data_dir);
 
@@ -587,6 +591,7 @@ async fn main() -> anyhow::Result<()> {
         jwt_config,
         object_store,
         &cli.base_url,
+        base_url_configured,
         &addr,
         &cli.cors_origins,
         trusted_cidrs,
@@ -601,6 +606,7 @@ async fn main() -> anyhow::Result<()> {
         registry_token,
         cli.data_dir.clone(),
         db_path.clone(),
+        backup_dir,
         #[cfg(feature = "text-search")]
         text_index,
         #[cfg(feature = "vocab-search")]

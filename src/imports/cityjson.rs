@@ -20,6 +20,7 @@ use axum::Json;
 use serde_json::Value;
 
 use crate::auth::middleware::AuthenticatedUser;
+use crate::geo::vocabulary::CITYJSON_LITERAL;
 use crate::server::error::AppError;
 use crate::server::AppState;
 
@@ -35,7 +36,6 @@ const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const RDFS_LABEL: &str = "http://www.w3.org/2000/01/rdf-schema#label";
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 const WKT_LITERAL: &str = "http://www.opengis.net/ont/geosparql#wktLiteral";
-const CITYJSON_LITERAL: &str = "https://open-triplestore.org/def/cityjsonGeometryLiteral";
 
 /// Options for a CityJSON conversion.
 pub struct CityJsonOptions {

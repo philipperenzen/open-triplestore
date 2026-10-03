@@ -306,7 +306,7 @@ See [rml.md](rml.md) for the full RML guide.
 
 | Variable | Default | Description |
 |---|---|---|
-| `JWT_SECRET` | *(random, saved to `data/jwt_secret`)* | JWT signing secret, as a raw value or a secret reference (`env:NAME`, `file:/path`, `vault:…`; see [sources.md](sources.md#secret-references)). Under `OTS_ENV=production` a raw value is **refused at startup**; in development it is accepted with a one-time warning. Set explicitly in production so tokens survive restarts. The on-disk file is written `0600`. The server **refuses to start** if this is a well-known default/placeholder (e.g. `change-me-in-production`), naming the fix — leave it unset to auto-generate a strong one. |
+| `JWT_SECRET` | *(random, saved to `data/jwt_secret`)* | JWT signing secret, as a raw value or a secret reference (`env:NAME`, `file:/path`, `vault:…`; see [sources.md](sources.md#credentials-are-references-never-values)). Under `OTS_ENV=production` a raw value is **refused at startup**; in development it is accepted with a one-time warning. Set explicitly in production so tokens survive restarts. The on-disk file is written `0600`. The server **refuses to start** if this is a well-known default/placeholder (e.g. `change-me-in-production`), naming the fix — leave it unset to auto-generate a strong one. |
 | `AUTH_DB_PATH` | `<data-dir>/auth.db` | Path to the SQLite identity database |
 | `ACCESS_TOKEN_EXPIRY_MINUTES` | `30` | Access token lifetime |
 | `REFRESH_TOKEN_EXPIRY_DAYS` | `30` | Refresh token lifetime |
@@ -402,7 +402,7 @@ See [rml.md](rml.md) for the full RML guide.
 | `AUDIT_PSEUDONYMISE_AFTER_DAYS` | `365` | GDPR/AVG: pseudonymise audit rows older than this |
 | `TEXT_SEARCH_DIR` | `<data-dir>/tantivy` | Tantivy full-text index directory (requires the `text-search` build feature) |
 | `SMTP_HOST` / `SMTP_*` | *(unset — account email is written to the server log)* | Outbound account email (verification, password reset, reminders) — see [auth.md](auth.md#email-delivery-configuration); the compose stack bundles an optional Postfix relay (`--profile mail`) |
-| `ALERT_WEBHOOK_URL` / `ALERT_SMTP_*` | *(unset — alerting off)* | Optional webhook / SMTP alerting (requires the `alerting` build feature) |
+| `ALERT_WEBHOOK_URL` / `ALERT_SMTP_*` | *(unset — alerting off)* | Optional webhook / SMTP alerting (requires the `alerting` build feature); without `ALERT_SMTP_HOST` the SMTP channel uses the `SMTP_*` relay — see [Alerting](#alerting) |
 
 ### Recommended production `.env`
 
@@ -540,7 +540,19 @@ Two backends, both opt-in via env vars, both no-ops when unset:
 | Channel | Env vars | Build flag |
 |---|---|---|
 | HTTP webhook | `ALERT_WEBHOOK_URL` | always available |
-| SMTP email | `ALERT_SMTP_HOST`, `ALERT_SMTP_PORT`, `ALERT_SMTP_USER`, `ALERT_SMTP_PASS`, `ALERT_SMTP_FROM`, `ALERT_SMTP_TO` (comma-separated) | `--features alerting` |
+| SMTP email | `ALERT_SMTP_HOST`, `ALERT_SMTP_PORT`, `ALERT_SMTP_USER`, `ALERT_SMTP_PASS`, `ALERT_SMTP_TLS`, `ALERT_SMTP_FROM`, `ALERT_SMTP_TO` (comma-separated) | `--features alerting` |
+
+`ALERT_SMTP_TLS` is `none`, `starttls` or `implicit`, as for `SMTP_TLS`; unset,
+alerting uses implicit TLS (SMTPS), as it always has. When `ALERT_SMTP_HOST` is
+unset, alerting uses the account-email relay instead, as a whole: `SMTP_HOST`,
+`SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD` and `SMTP_TLS` (resolved as for
+account email, so port 465 means implicit TLS and anything else STARTTLS). It
+never mixes the two, so the account relay's credentials are not sent to a
+separate alert host. The sender is `ALERT_SMTP_FROM`, else `SMTP_FROM`.
+Recipients come only from `ALERT_SMTP_TO`, so the fallback sends no ops alert
+until that is set. Saved-query breakage notices, which go to the affected
+dataset's owners rather than `ALERT_SMTP_TO`, use the same relay, so on a
+deployment with only `SMTP_*` configured they are now delivered.
 
 Every successful dispatch is recorded in the audit log as `alert_sent`.
 
