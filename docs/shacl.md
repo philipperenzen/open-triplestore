@@ -632,7 +632,8 @@ The compact syntax covers part of SHACL Core, so not every shapes graph has a
 SHACL-C form. The serializer writes everything the syntax can express and
 keeps track of each triple it wrote; it then parses its own output back and
 checks the result is isomorphic to those triples. If any triple of the graph
-was not written, every SHACL-C response — `GET …/shapes?format=shaclc`, the
+was not written — other than the [implied triples](#implied-triples) below —
+every SHACL-C response — `GET …/shapes?format=shaclc`, the
 Studio's `GET …/turtle?format=shaclc` and `POST /api/shaclc/serialize` — is a
 `422` instead of a thinner document:
 
@@ -640,9 +641,9 @@ Studio's `GET …/turtle?format=shaclc` and `POST /api/shaclc/serialize` — is 
 {
   "error": "this shapes graph cannot be written in SHACL Compact Syntax without losing 2 triples; request Turtle, or pass lossy=true for the partial document",
   "losses": [
-    { "subject": "_:b0", "predicate": "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>",
-      "object": "<http://www.w3.org/ns/shacl#PropertyShape>",
-      "reason": "the compact syntax types no property shape: the rdf:type triple is not written" },
+    { "subject": "_:b0", "predicate": "<http://www.w3.org/ns/shacl#name>",
+      "object": "\"Name\"",
+      "reason": "sh:name is not a property parameter of the compact syntax" },
     { "subject": "<http://example.org/S>", "predicate": "<http://www.w3.org/ns/shacl#sparql>",
       "object": "<http://example.org/NoMinors>",
       "reason": "sh:sparql is not a node parameter of the compact syntax" }
@@ -658,11 +659,27 @@ What has no SHACL-C form (each such triple is a loss): SPARQL-based
 constraints and targets, rules and functions; `sh:and`, `sh:xone`,
 `sh:property` at property level, `sh:qualifiedValueShape` with a blank-node
 shape, and `sh:not` with a named shape; named (IRI) property shapes and
-blank-node property shapes shared between shapes; `rdf:type sh:PropertyShape`
-(the syntax types no property shape); `sh:minCount 0`; non-SHACL triples such
+blank-node property shapes shared between shapes; non-SHACL triples such
 as `rdfs:label`, and `sh:name`, `sh:description`, `sh:order`, `sh:group`,
 `sh:defaultValue`; top-level blank-node shapes; a second `owl:Ontology`.
 Literals with a base direction (RDF 1.2) are losses too.
+
+### Implied triples
+
+A few triples have no SHACL-C form but say nothing validation depends on. The
+serializer leaves them out without counting them as losses, so an ordinary
+hand-written shapes graph does not get a `422` for them. The set is small and
+fixed; anything else the syntax cannot carry is a loss:
+
+| Triple | When it is implied | Why omitting it changes nothing |
+|---|---|---|
+| `_:p rdf:type sh:PropertyShape` | `_:p` is a property shape the document writes (its `sh:path` is written) | a property shape is whatever has an `sh:path` (SHACL §2.2); the type is a declaration only |
+| `_:n rdf:type sh:NodeShape` | `_:n` is a blank-node shape the document writes — a nested `{ … }` body, or a member of `\|` or `!` — and has no `sh:path` | a shape without `sh:path` is a node shape; the type adds nothing |
+| `_:p sh:minCount 0` | on a property shape the document writes | every focus node satisfies it; `[0..n]` writes no `sh:minCount` triple |
+
+A top-level node shape's own `rdf:type sh:NodeShape` is not in this table
+because `shape ex:S { … }` writes it. Parsing the document back gives the graph
+without the implied triples; re-serializing that graph gives the same document.
 
 ### Migrating from the legacy dialect
 

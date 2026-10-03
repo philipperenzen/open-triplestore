@@ -611,7 +611,12 @@ impl<'g, 'f> Writer<'g, 'f> {
         if !self.inlinable(b) {
             return None;
         }
-        let ts = self.triples_of(b.into());
+        // A member's own `rdf:type sh:NodeShape` is implied (see `implied`).
+        let ts: Vec<TripleRef<'g>> = self
+            .triples_of(b.into())
+            .into_iter()
+            .filter(|t| !is_type(*t, "NodeShape"))
+            .collect();
         if ts.len() != 1 {
             return None;
         }
@@ -765,7 +770,7 @@ impl<'g, 'f> Writer<'g, 'f> {
         let mins: Vec<TripleRef<'g>> = ts
             .iter()
             .copied()
-            .filter(|t| t.predicate.as_str() == sh("minCount"))
+            .filter(|t| t.predicate.as_str() == sh("minCount") && !is_zero_min_count(*t))
             .collect();
         let maxs: Vec<TripleRef<'g>> = ts
             .iter()
@@ -776,14 +781,10 @@ impl<'g, 'f> Writer<'g, 'f> {
         let mut max = None;
         if let [m] = mins.as_slice() {
             match count_of(m) {
-                Some(v) if v != "0" => {
+                Some(v) => {
                     min = Some(v);
                     consumed.push(*m);
                 }
-                Some(_) => self.note(
-                    *m,
-                    "sh:minCount 0 has no compact form: `[0..n]` writes no sh:minCount triple",
-                ),
                 None => self.note(*m, "a count is written `[min..max]` with an xsd:integer"),
             }
         } else {
@@ -999,11 +1000,54 @@ impl<'g, 'f> Writer<'g, 'f> {
         h
     }
 
+    /// Whether `t` is one of the few triples whose omission leaves the
+    /// validation semantics unchanged, given what was written:
+    ///
+    /// - `rdf:type sh:PropertyShape` on a property shape whose `sh:path` was
+    ///   written (a property shape is whatever has an `sh:path`, SHACL §2.2);
+    /// - `rdf:type sh:NodeShape` on a blank-node shape that was written (a
+    ///   nested `{ … }` body or a `|` / `!` member) and has no `sh:path`;
+    /// - `sh:minCount 0` on a written property shape (it holds for every
+    ///   focus node; `[0..n]` writes no triple for it).
+    ///
+    /// They are neither written nor reported. docs/shacl.md lists the same
+    /// set under "Implied triples"; keep the two in step.
+    fn implied(&self, t: TripleRef<'g>, written_bnodes: &HashSet<BlankNodeRef<'g>>) -> bool {
+        let NamedOrBlankNodeRef::BlankNode(b) = t.subject else {
+            return false;
+        };
+        let path_written = || {
+            self.graph
+                .triples_for_subject(b)
+                .any(|x| x.predicate.as_str() == sh("path") && self.used.contains(&x))
+        };
+        if is_type(t, "PropertyShape") || is_zero_min_count(t) {
+            return path_written();
+        }
+        if is_type(t, "NodeShape") {
+            let has_path = self
+                .graph
+                .triples_for_subject(b)
+                .any(|x| x.predicate.as_str() == sh("path"));
+            return !has_path && written_bnodes.contains(&b);
+        }
+        false
+    }
+
     fn losses(&self) -> Vec<Loss> {
+        let mut written_bnodes: HashSet<BlankNodeRef<'g>> = HashSet::new();
+        for t in &self.used {
+            if let NamedOrBlankNodeRef::BlankNode(b) = t.subject {
+                written_bnodes.insert(b);
+            }
+            if let TermRef::BlankNode(b) = t.object {
+                written_bnodes.insert(b);
+            }
+        }
         let mut out: Vec<Loss> = self
             .graph
             .iter()
-            .filter(|t| !self.used.contains(t))
+            .filter(|t| !self.used.contains(t) && !self.implied(*t, &written_bnodes))
             .map(|t| Loss {
                 subject: t.subject.to_string(),
                 predicate: t.predicate.to_string(),
@@ -1020,6 +1064,20 @@ impl<'g, 'f> Writer<'g, 'f> {
         });
         out
     }
+}
+
+/// `?s rdf:type sh:<local>`.
+fn is_type(t: TripleRef<'_>, local: &str) -> bool {
+    t.predicate.as_str() == RDF_TYPE
+        && matches!(t.object, TermRef::NamedNode(n) if n.as_str().strip_prefix(SH) == Some(local))
+}
+
+/// `?s sh:minCount 0` (any integer lexical form of zero).
+fn is_zero_min_count(t: TripleRef<'_>) -> bool {
+    t.predicate.as_str() == sh("minCount")
+        && matches!(t.object, TermRef::Literal(l)
+            if l.datatype().as_str().strip_prefix(XSD) == Some("integer")
+                && l.value().parse::<i64>() == Ok(0))
 }
 
 fn default_reason(t: TripleRef<'_>) -> String {
@@ -1084,15 +1142,17 @@ mod tests {
     fn losses_are_listed_not_dropped() {
         let g = graph(&format!(
             "{PFX}ex:S a sh:NodeShape ; sh:sparql [ sh:select \"SELECT $this WHERE {{}}\" ] ;
-             sh:property [ a sh:PropertyShape ; sh:path ex:p ; sh:minCount 0 ] ."
+             sh:property [ a sh:PropertyShape ; sh:path ex:p ; sh:minCount 0 ; sh:name \"p\" ] ."
         ));
         match serialize_graph(&g, resolve) {
             Err(SerializeError::Losses(l)) => {
                 let preds: Vec<&str> = l.iter().map(|x| x.predicate.as_str()).collect();
                 assert!(preds.iter().any(|p| p.contains("sparql")), "{l:?}");
-                assert!(preds.iter().any(|p| p.contains("minCount")), "{l:?}");
+                assert!(preds.iter().any(|p| p.contains("#name")), "{l:?}");
+                // Implied triples are not losses.
+                assert!(!preds.iter().any(|p| p.contains("minCount")), "{l:?}");
                 assert!(
-                    preds.iter().any(|p| p.contains("22-rdf-syntax-ns#type")),
+                    !preds.iter().any(|p| p.contains("22-rdf-syntax-ns#type")),
                     "{l:?}"
                 );
             }
@@ -1118,6 +1178,66 @@ mod tests {
         let g = graph(&format!("{PFX}<http://example.org/x?a=b> a sh:NodeShape ."));
         let text = serialize_graph(&g, resolve).expect("lossless");
         assert!(text.contains("\\u003D"), "{text}");
+    }
+
+    /// `ttl` serializes without a loss, and the re-parsed document holds
+    /// every triple but the `implied` ones.
+    fn implied_round_trip(ttl: &str, implied: usize) {
+        let g = graph(&format!("{PFX}{ttl}"));
+        let text = serialize_graph(&g, resolve).unwrap_or_else(|e| panic!("{e:?}"));
+        let back = parse_document(&text, None).expect("re-parse").graph;
+        assert_eq!(
+            back.len() + implied,
+            g.len(),
+            "only the implied triples are omitted:\n{text}"
+        );
+    }
+
+    #[test]
+    fn property_shape_type_is_implied() {
+        implied_round_trip(
+            "ex:S a sh:NodeShape ; sh:property [ a sh:PropertyShape ; sh:path ex:p ; sh:minCount 1 ] .",
+            1,
+        );
+    }
+
+    #[test]
+    fn node_shape_type_on_nested_and_member_shapes_is_implied() {
+        implied_round_trip(
+            "ex:S a sh:NodeShape ;
+               sh:property [ sh:path ex:p ;
+                 sh:node [ a sh:NodeShape ; sh:property [ sh:path ex:q ; sh:minCount 1 ] ] ;
+                 sh:or ( [ a sh:NodeShape ; sh:datatype xsd:string ] [ a sh:NodeShape ; sh:class ex:C ] ) ] ;
+               sh:not [ a sh:NodeShape ; sh:class ex:D ] .",
+            4,
+        );
+    }
+
+    #[test]
+    fn min_count_zero_is_implied() {
+        implied_round_trip(
+            "ex:S a sh:NodeShape ; sh:property [ sh:path ex:p ; sh:minCount 0 ; sh:maxCount 3 ] .",
+            1,
+        );
+    }
+
+    #[test]
+    fn implied_only_where_the_shape_is_written() {
+        // A named property shape cannot be written, so its type is a loss
+        // along with the rest of it, not an implied triple.
+        let g = graph(&format!(
+            "{PFX}ex:S a sh:NodeShape ; sh:property ex:P . ex:P a sh:PropertyShape ; sh:path ex:p ; sh:minCount 0 ."
+        ));
+        match serialize_graph(&g, resolve) {
+            Err(SerializeError::Losses(l)) => {
+                assert!(
+                    l.iter().any(|x| x.object.contains("PropertyShape")),
+                    "{l:?}"
+                );
+                assert!(l.iter().any(|x| x.predicate.contains("minCount")), "{l:?}");
+            }
+            other => panic!("expected losses, got {other:?}"),
+        }
     }
 
     #[test]

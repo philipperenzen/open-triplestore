@@ -293,7 +293,8 @@ ex:PersonShape a sh:NodeShape ;
 }
 
 // What the compact syntax cannot say is reported, never dropped: SPARQL
-// constraints, typed property shapes, sh:minCount 0, named property shapes.
+// constraints, sh:name, named property shapes. The implied triples
+// (rdf:type sh:PropertyShape / sh:NodeShape, sh:minCount 0) are not losses.
 #[test]
 fn shaclc_serializer_reports_every_loss() {
     let turtle = r#"
@@ -312,14 +313,11 @@ ex:NamedProp sh:path ex:q .
         other => panic!("expected a losses report, got {other:?}"),
     };
     let has = |pred: &str| losses.iter().any(|l| l.predicate.contains(pred));
-    for pred in [
-        "#sparql",
-        "#select",
-        "#minCount",
-        "#name",
-        "22-rdf-syntax-ns#type",
-    ] {
+    for pred in ["#sparql", "#select", "#name"] {
         assert!(has(pred), "{pred} must be reported: {losses:#?}");
+    }
+    for pred in ["#minCount", "22-rdf-syntax-ns#type"] {
+        assert!(!has(pred), "{pred} is implied, not a loss: {losses:#?}");
     }
     assert!(
         losses.iter().any(|l| l.object.contains("NamedProp")),
@@ -331,6 +329,28 @@ ex:NamedProp sh:path ex:q .
     assert!(!losses
         .iter()
         .any(|l| l.predicate.ends_with("#type>") && l.object.contains("NodeShape")));
+}
+
+// An ordinary hand-written shapes graph — typed property shapes, typed
+// nested shapes, sh:minCount 0 — serializes without a 422.
+#[test]
+fn shaclc_typical_typed_shapes_graph_is_lossless() {
+    let turtle = r#"
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix ex: <http://example.org/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+ex:PersonShape a sh:NodeShape ;
+    sh:targetClass ex:Person ;
+    sh:property [ a sh:PropertyShape ; sh:path ex:name ; sh:datatype xsd:string ;
+                  sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:property [ a sh:PropertyShape ; sh:path ex:nickname ; sh:minCount 0 ] ;
+    sh:property [ a sh:PropertyShape ; sh:path ex:address ;
+                  sh:node [ a sh:NodeShape ; sh:property [ a sh:PropertyShape ; sh:path ex:city ; sh:minCount 1 ] ] ] .
+"#;
+    let store = load_turtle(turtle);
+    let out = serialize(&store, "urn:shapes").expect("lossless: only implied triples are omitted");
+    assert!(out.contains("[1..1]") && out.contains("{"), "{out}");
 }
 
 // Over HTTP: the parse endpoint, the dialect switch, and the GET handlers'
@@ -447,7 +467,7 @@ mod http {
     }
 
     const EXPRESSIBLE: &str = "@prefix sh: <http://www.w3.org/ns/shacl#> .\n@prefix ex: <http://example.org/> .\nex:S a sh:NodeShape ; sh:targetClass ex:T ; sh:property [ sh:path ex:p ; sh:minCount 1 ] .\n";
-    const LOSSY: &str = "@prefix sh: <http://www.w3.org/ns/shacl#> .\n@prefix ex: <http://example.org/> .\nex:S a sh:NodeShape ; sh:targetClass ex:T ; sh:property [ a sh:PropertyShape ; sh:path ex:p ; sh:minCount 1 ] .\n";
+    const LOSSY: &str = "@prefix sh: <http://www.w3.org/ns/shacl#> .\n@prefix ex: <http://example.org/> .\nex:S a sh:NodeShape ; sh:targetClass ex:T ; sh:sparql ex:Check ; sh:property [ a sh:PropertyShape ; sh:path ex:p ; sh:minCount 0 ] .\n";
 
     async fn check_get(app: &Router, token: &str, put: &str, put_ct: &str, get: &str) {
         // Lossy graph: 422 with the losses, never a thinner 200.
@@ -467,10 +487,7 @@ mod http {
         let losses = v["losses"].as_array().expect("losses list");
         assert_eq!(losses.len(), 1, "{txt}");
         assert!(
-            losses[0]["object"]
-                .as_str()
-                .unwrap()
-                .contains("PropertyShape"),
+            losses[0]["predicate"].as_str().unwrap().contains("#sparql"),
             "{txt}"
         );
         assert!(

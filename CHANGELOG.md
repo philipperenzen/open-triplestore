@@ -95,7 +95,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as an unparseable `_:b…`). The serializer now writes everything the syntax
   can express, checks that its output parses back to exactly the triples it
   wrote, and answers `422` with a `losses` list (subject, predicate, object,
-  reason) when anything is left over; `?lossy=true` returns the partial
+  reason) when anything is left over. Three implied triples are omitted without
+  counting as losses: `rdf:type sh:PropertyShape` and blank-node
+  `rdf:type sh:NodeShape` on shapes it writes, and `sh:minCount 0`
+  (docs/shacl.md, "Implied triples"); `?lossy=true` returns the partial
   document with an `X-SHACLC-Losses` count and a `# INCOMPLETE:` comment block.
   The form manifest's `shaclc` field is `null` for such a graph.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
