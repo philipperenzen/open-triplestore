@@ -2272,7 +2272,12 @@ impl TripleStore {
     ) -> Result<(), StoreError> {
         let _w = self.begin_write()?;
         // Fast path: nothing to rewrite and no forced graph → stream directly.
-        if self.blank_node_mode == BlankNodeMode::Preserve && to_graph.is_none() {
+        // JSON-LD takes the parse below: the bulk loader parses by itself and
+        // has no document loader for remote contexts.
+        if self.blank_node_mode == BlankNodeMode::Preserve
+            && to_graph.is_none()
+            && !matches!(format, RdfFormat::JsonLd { .. })
+        {
             // oxigraph 0.5: the bulk loader stages batches and only persists them on
             // an explicit `commit()` — dropping it without committing loses the data.
             // Streamed straight into the store: the delta is never
@@ -2330,10 +2335,10 @@ impl TripleStore {
     ) -> Result<Vec<Quad>, StoreError> {
         // Embedded graph names from NQuads/TriG are preserved; triple formats
         // land in the default graph. Parse errors are propagated.
-        let mut quads: Vec<Quad> = Self::parser_for(format, base_iri)?
-            .for_reader(reader)
-            .map(|r| r.map_err(|e| StoreError::Parse(e.to_string())))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut quads: Vec<Quad> =
+            crate::jsonld::with_loader(Self::parser_for(format, base_iri)?.for_reader(reader))
+                .map(|r| r.map_err(|e| StoreError::Parse(e.to_string())))
+                .collect::<Result<Vec<_>, _>>()?;
 
         // Force everything into the target graph if one was requested.
         if let Some(graph_iri) = to_graph {

@@ -1202,13 +1202,15 @@ fn payload_as_stored(
         .rdf_format()
         .ok_or_else(|| anyhow::anyhow!("payload format cannot be compared"))?;
     let graph = GraphName::NamedNode(NamedNode::new(graph_iri)?);
-    let quads: Vec<Quad> = oxigraph::io::RdfParser::from_format(format)
-        .for_reader(std::io::BufReader::new(data.as_bytes()))
-        .map(|r| {
-            r.map(|q| Quad::new(q.subject, q.predicate, q.object, graph.clone()))
-                .map_err(|e| anyhow::anyhow!("{e}"))
-        })
-        .collect::<anyhow::Result<_>>()?;
+    let quads: Vec<Quad> = crate::jsonld::with_loader(
+        oxigraph::io::RdfParser::from_format(format)
+            .for_reader(std::io::BufReader::new(data.as_bytes())),
+    )
+    .map(|r| {
+        r.map(|q| Quad::new(q.subject, q.predicate, q.object, graph.clone()))
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    })
+    .collect::<anyhow::Result<_>>()?;
     let quads = match state.store.blank_node_mode() {
         crate::store::engine::BlankNodeMode::Skolem => {
             opengraph::skolem::skolemize(&quads, opengraph::DEFAULT_SKOLEM_BASE).0

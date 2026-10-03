@@ -318,6 +318,19 @@ Bundled datasets and vocabularies:
         https://docs.crow.nl/imbor/beheerplan/) names CC BY-ND 4.0
         (https://creativecommons.org/licenses/by-nd/4.0/). The file is therefore
         redistributed only unmodified, with no header added.
+  - JSON-LD contexts bundled in src/jsonld/contexts/ and compiled into the
+    server binary, so documents that name them parse offline:
+    activitystreams.jsonld (https://www.w3.org/ns/activitystreams.jsonld),
+    csvw.jsonld (https://www.w3.org/ns/csvw.jsonld), ldp.jsonld
+    (https://www.w3.org/ns/ldp.jsonld) and odrl.jsonld
+    (https://www.w3.org/ns/odrl.jsonld), downloaded 2026-10-03, byte-identical.
+    W3C Document License (2023), https://www.w3.org/copyright/document-license-2023/
+    (W3C's intellectual-rights statement; the files state no other licence);
+    text in LICENSES/W3C-Document-License-2023.txt. Copyright © 2023 World Wide
+    Web Consortium. This software or document includes material copied from or
+    derived from the Activity Streams 2.0, CSVW, LDP and ODRL 2.2 JSON-LD
+    contexts at the URLs above. Copyright © 2023 W3C®. Details and checksums in
+    src/jsonld/contexts/PROVENANCE.md.
   - Linked Open Vocabularies (LOV): vocabulary catalogue and vocabulary corpus.
     Paths: assets/vocab/lov-catalog.json.gz (compiled into the server binary)
     and assets/vocab/lov-redistributable.txt; in the Docker image
@@ -708,6 +721,17 @@ Bundled test data:
     core and 10 sparql files; the suite's root tests/manifest.ttl is not
     included; otherwise unmodified. The notice of changes is in
     tests/fixtures/w3c-shacl/PROVENANCE.md.
+  - W3C JSON-LD 1.1 API test suite, toRdf and fromRdf sections —
+    tests/fixtures/w3c-jsonld-api/ (toRdf/, fromRdf/ and their two
+    manifests). Copyright © 2010–2026 World Wide Web Consortium. From
+    https://github.com/w3c/json-ld-api (tests/), commit
+    ffdb326121ea89b7b8280e76a5caea923834bcef. Unmodified. W3C Software and
+    Document License, https://www.w3.org/copyright/software-license-2023/; full
+    text in tests/fixtures/w3c-jsonld-api/LICENSE-W3C-Software-and-Document-2023.txt
+    and LICENSES/W3C-Software-and-Document-License-2023.txt; upstream LICENSE.md
+    kept unchanged; details in tests/fixtures/w3c-jsonld-api/PROVENANCE.md. A
+    subset of a W3C test suite, used for development and bug tracking only: no
+    results are published for it.
   - TopQuadrant SHACL API, SHACL Advanced Features tests —
     tests/fixtures/shacl-af-topquadrant/{expression,function,rules,target}/
     (11 files). TopBraid SHACL API; original commit content Copyright
