@@ -93,6 +93,13 @@ One commit each, in this order:
    term equality), as the `Hash` impl already did. No W3C entry reaches it;
    `directional_literal_equality` in `tests/sparql12_conformance.rs` pins it.
    Draft: `spareval/UPSTREAM-PR-dir-lang-string-equality.md`.
+8. **Triple-term expression subjects** (`spargebra` parser).
+   `ExprTripleTermSubject` was `ExprTripleTermObject`, so a literal or a triple
+   term could be the subject of a triple-term expression
+   (`BIND(<<( "x" :q :z )>> AS ?X)`). The SPARQL 1.2 grammar has
+   `ExprTripleTermSubject ::= iri | Var`; oxigraph's `main` already parses it so
+   in its rewritten parser. Fixes `tripleterm-subject-03` and `-06` of the
+   SPARQL 1.2 suite. Draft: `spargebra/UPSTREAM-PR-triple-term-expression-subject.md`.
 
 ### Verifying the fork
 

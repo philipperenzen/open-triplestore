@@ -2257,7 +2257,11 @@ parser! {
             #[cfg(not(feature = "sparql-12"))]{Err("Triple terms are only available in SPARQL 1.2")}
         }
 
-        rule ExprTripleTermSubject() -> Expression = ExprTripleTermObject()
+        // SPARQL 1.2: `ExprTripleTermSubject ::= iri | Var`. A literal or a triple
+        // term cannot be the subject of a triple term (w3c/sparql-query#282, #283).
+        rule ExprTripleTermSubject() -> Expression =
+            i:iri() { i.into() } /
+            v:Var() { v.into() }
 
         rule ExprTripleTermObject() -> Expression =
             ExprTripleTerm() /

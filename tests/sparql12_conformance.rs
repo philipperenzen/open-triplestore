@@ -801,3 +801,39 @@ fn nested_aggregates_are_a_syntax_error() {
         );
     }
 }
+
+/// SPARQL 1.2 grammar: `ExprTripleTermSubject ::= iri | Var` (W3C sparql12
+/// tests `tripleterm-subject-03` and `-06`). spargebra 0.4.7 accepted a literal
+/// or a triple term there; the vendored copy refuses both. Literal and
+/// triple-term objects, and a variable subject, stay valid.
+#[test]
+fn triple_term_expression_subject_is_iri_or_var() {
+    for s in stores() {
+        for q in [
+            r#"SELECT * WHERE { BIND(<<( "literal" :q :z )>> AS ?X) }"#,
+            "SELECT * WHERE { BIND(<<( 42 :q :z )>> AS ?X) }",
+            "SELECT * WHERE { BIND(<<( <<( :s :p :o )>> :q :z )>> AS ?X) }",
+        ] {
+            assert!(
+                s.query(&format!("{PFX}{q}")).is_err(),
+                "must not parse: {q}"
+            );
+        }
+        let r = sel(
+            &s,
+            r#"SELECT ?X ?Y WHERE {
+                 VALUES ?s { :a }
+                 BIND(<<( :s :p "o" )>> AS ?X)
+                 BIND(<<( ?s :p <<( :b :c :d )>> )>> AS ?Y)
+               }"#,
+        );
+        assert_eq!(
+            r,
+            vec![vec![
+                "<<( <http://ex/s> <http://ex/p> \"o\" )>>".to_string(),
+                "<<( <http://ex/a> <http://ex/p> <<( <http://ex/b> <http://ex/c> <http://ex/d> )>> )>>"
+                    .to_string(),
+            ]]
+        );
+    }
+}

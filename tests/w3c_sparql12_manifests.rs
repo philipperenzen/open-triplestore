@@ -82,17 +82,15 @@ const RS: &str = "http://www.w3.org/2001/sw/DataAccess/tests/result-set#";
 
 /// Entries that currently fail, with the gap they sit behind. Keep sorted.
 /// Removing an entry requires the entry to actually pass (the ratchet asserts
-/// both directions). None is in the platform layer: three are the oxigraph
-/// 0.5.11 SPARQL parser (spargebra 0.4.7) behind grammar decisions the
-/// Working Group has since closed, and one asks for a feature
+/// both directions). None is in the platform layer: one is the oxigraph
+/// 0.5.11 SPARQL parser (spargebra 0.4.7) behind a rule the Working Group has
+/// since adopted, and one asks for a feature
 /// (`mf:NoCanonicalizationOfNumerics`) the oxigraph 0.5 storage lacks. The
-/// vendored spargebra already refuses nested aggregates
-/// (`syntax#nested-aggregate-functions`; vendor/README.md).
+/// vendored spargebra already refuses nested aggregates and literal or
+/// triple-term subjects in triple-term expressions (vendor/README.md).
 const KNOWN_FAILURES: &[(&str, &str)] = &[
     ("grouping/manifest#group01", "requires mf:NoCanonicalizationOfNumerics: storage keeps numerics as values, so `\"001\"^^xsd:integer` reads back as `\"1\"` and groups with it; fixed by the lexical-form storage change"),
     ("grouping/manifest#select-variable-reuse", "spargebra 0.4.7 rejects a SELECT expression that uses a variable an earlier SELECT expression of an aggregating query binds (`(COUNT(?v) AS ?count) (?count + 1 AS ?p)`); allowed since w3c/sparql-query PR #380 (closed 2026-05-28)"),
-    ("syntax-triple-terms-negative/manifest#tripleterm-subject-03", "spargebra 0.4.7 accepts a triple term as the subject of a triple-term expression (`<<( <<( :s :p :o )>> :q :z )>>`); the grammar forbids it since w3c/sparql-query#282/#283 closed 2025-12-26"),
-    ("syntax-triple-terms-negative/manifest#tripleterm-subject-06", "as tripleterm-subject-03, with a literal subject (`<<( \"literal\" :q :z )>>`)"),
 ];
 
 /// Pass floor: a loader or parser regression turns passes into skips or
