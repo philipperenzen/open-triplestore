@@ -884,12 +884,22 @@ const SWRL_TTL: &str = r#"
 ex:hasParent      a rdfs:Property .
 ex:hasGrandparent a rdfs:Property .
 
-# SWRL: hasParent(?x,?y) ∧ hasParent(?y,?z) ⇒ hasGrandparent(?x,?z)
+# SWRL: hasParent(?x,?y) ∧ hasParent(?y,?z) ⇒ hasGrandparent(?x,?z), in the
+# SWRL RDF syntax. Stored with the dataset, the rule runs after every write;
+# its conclusions are in the dataset's inference graph
+# (?entailment_dataset=<id> on /sparql).
+ex:x a swrl:Variable .
+ex:y a swrl:Variable .
+ex:z a swrl:Variable .
+
 ex:GrandparentRule a swrl:Imp ;
     rdfs:comment "hasParent(?x,?y) ^ hasParent(?y,?z) -> hasGrandparent(?x,?z)" ;
-    swrl:body ( [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasParent ]
-                [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasParent ] ) ;
-    swrl:head ( [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasGrandparent ] ) .
+    swrl:body ( [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasParent ;
+                  swrl:argument1 ex:x ; swrl:argument2 ex:y ]
+                [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasParent ;
+                  swrl:argument1 ex:y ; swrl:argument2 ex:z ] ) ;
+    swrl:head ( [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasGrandparent ;
+                  swrl:argument1 ex:x ; swrl:argument2 ex:z ] ) .
 
 ex:Tom   ex:hasParent ex:Mary .
 ex:Mary  ex:hasParent ex:Sophie .

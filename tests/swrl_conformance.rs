@@ -898,3 +898,531 @@ async fn swrl_reports_non_convergence() {
     assert_eq!(report["converged"], false, "{resp}");
     assert_eq!(report["stop_reason"], "timeout", "{resp}");
 }
+
+// ─── Dataset scope (rules over a dataset's graphs) ────────────────────────
+
+const DS_DATA: &str = "http://example.org/swrl/data";
+const DS_OTHER: &str = "http://example.org/swrl/other";
+
+/// A dataset `fam` (owner `adm`) whose instances graph holds a parent chain.
+fn family_dataset(state: &AppState) {
+    use open_triplestore::auth::models::{GraphKind, OwnerType, Visibility};
+    state
+        .auth_db
+        .create_dataset(
+            "fam",
+            "Family",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    state.auth_db.add_dataset_graph("fam", DS_DATA).unwrap();
+    state
+        .auth_db
+        .set_dataset_graph_role("fam", DS_DATA, Some(GraphKind::Instances))
+        .unwrap();
+    // A graph of another dataset, readable but outside `fam`'s layer: explicit
+    // source graphs are read-checked, and a graph no dataset holds is not
+    // readable even for an admin.
+    state
+        .auth_db
+        .create_dataset(
+            "kin",
+            "Kin",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    state.auth_db.add_dataset_graph("kin", DS_OTHER).unwrap();
+    state
+        .store
+        .update(&format!(
+            "INSERT DATA {{ GRAPH <{DS_DATA}> {{ \
+               <http://ex/a> <http://ex/parentOf> <http://ex/b> . \
+               <http://ex/b> <http://ex/parentOf> <http://ex/c> . }} \
+             GRAPH <{DS_OTHER}> {{ <http://ex/c> <http://ex/parentOf> <http://ex/d> . }} }}"
+        ))
+        .unwrap();
+    // Outside the dataset: the default graph extends the chain, and must not
+    // be read by a dataset run.
+    load(state, "<http://ex/b> <http://ex/parentOf> <http://ex/q> .");
+}
+
+const GRANDPARENT: &str =
+    "http://ex/parentOf(?x, ?y) ^ http://ex/parentOf(?y, ?z) -> http://ex/grandparentOf(?x, ?z)";
+
+/// Rules used to see only the unnamed default graph, so they never saw a
+/// dataset. With `dataset` they read its graphs — and only those — and write
+/// to its inference graph unless a target is given.
+#[tokio::test]
+async fn swrl_dataset_scope_reads_named_graphs() {
+    let (state, token) = admin_state();
+    family_dataset(&state);
+    let app = test_app(state.clone());
+
+    let (st, resp) = post_swrl(
+        &app,
+        &token,
+        json!({ "rules": GRANDPARENT, "format": "text", "dataset": "fam" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{resp}");
+    let report = json_body(&resp);
+    let target = "urn:entailment:swrl:fam";
+    assert_eq!(report["target_graph"], target, "{resp}");
+    assert!(
+        report["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g == DS_DATA),
+        "{resp}"
+    );
+    assert!(ask(
+        &state,
+        &format!("GRAPH <{target}> {{ <http://ex/a> <http://ex/grandparentOf> <http://ex/c> }}")
+    ));
+    assert!(
+        !ask(
+            &state,
+            &format!(
+                "GRAPH <{target}> {{ <http://ex/a> <http://ex/grandparentOf> <http://ex/q> }}"
+            )
+        ),
+        "the default graph is outside the dataset: {resp}"
+    );
+    assert!(
+        !ask(
+            &state,
+            "<http://ex/a> <http://ex/grandparentOf> <http://ex/c>"
+        ),
+        "nothing is written to the default graph"
+    );
+
+    // Extra source graphs join the dataset's; a target overrides the default.
+    let (st, resp) = post_swrl(
+        &app,
+        &token,
+        json!({
+            "rules": GRANDPARENT, "format": "text", "dataset": "fam",
+            "source_graphs": [DS_OTHER], "target_graph": "urn:swrl:out"
+        }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{resp}");
+    assert!(ask(
+        &state,
+        "GRAPH <urn:swrl:out> { <http://ex/b> <http://ex/grandparentOf> <http://ex/d> }"
+    ));
+
+    // Explicit graphs without a dataset need a named target: what a run
+    // derives must be readable by its next iteration.
+    let (st, resp) = post_swrl(
+        &app,
+        &token,
+        json!({ "rules": GRANDPARENT, "format": "text", "source_graphs": [DS_DATA] }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{resp}");
+    assert!(resp.contains("needs a target_graph"), "{resp}");
+
+    // The derived graph joins queries that opt in with entailment_dataset.
+    let q = "SELECT ?o WHERE { <http://ex/a> <http://ex/grandparentOf> ?o }";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/sparql?query={}&entailment_dataset=fam",
+                    url_encode(q)
+                ))
+                .header(header::ACCEPT, "application/sparql-results+json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let text = body_text(resp.into_body()).await;
+    assert!(text.contains("http://ex/c"), "{text}");
+}
+
+/// A dataset run reads only what the caller may read, as
+/// `/api/reasoning/materialize` does: a viewer's run leaves the dataset's
+/// private graph out, an explicit unreadable graph is refused, and only the
+/// dataset's writers may fill its inference graph.
+#[tokio::test]
+async fn swrl_dataset_scope_respects_read_acl() {
+    use open_triplestore::auth::models::{OwnerType, SystemRole, Visibility};
+    let (state, _admin) = admin_state();
+    for id in ["owner", "mallory"] {
+        state
+            .auth_db
+            .create_user(id, id, &format!("{id}@t.com"), "hash", SystemRole::User)
+            .unwrap();
+    }
+    let owner = mint_token("owner", "owner", "user");
+    let mallory = mint_token("mallory", "mallory", "user");
+    let (pub_g, priv_g, target) = (
+        "http://example.org/g/pub",
+        "http://example.org/g/priv",
+        "http://example.org/g/target",
+    );
+    state
+        .auth_db
+        .create_dataset(
+            "victim",
+            "Victim",
+            None,
+            OwnerType::User,
+            "owner",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    state.auth_db.add_dataset_graph("victim", pub_g).unwrap();
+    state.auth_db.add_dataset_graph("victim", priv_g).unwrap();
+    state
+        .auth_db
+        .set_dataset_graph_private("victim", priv_g, true)
+        .unwrap();
+    state
+        .store
+        .update(&format!(
+            "INSERT DATA {{ GRAPH <{pub_g}> {{ <http://ex/pub> a <http://ex/Thing> }} \
+             GRAPH <{priv_g}> {{ <http://ex/secret> a <http://ex/Thing> }} }}"
+        ))
+        .unwrap();
+    for (id, who) in [("acl-o", "owner"), ("acl-m", "mallory")] {
+        state
+            .auth_db
+            .grant_graph_permission(id, target, "user", who, "write", "adm")
+            .unwrap();
+    }
+    let app = test_app(state.clone());
+    let rule = "http://ex/Thing(?x) -> http://ex/Copied(?x)";
+
+    // The viewer's run skips the private graph.
+    let (st, resp) = post_swrl(
+        &app,
+        &mallory,
+        json!({ "rules": rule, "format": "text", "dataset": "victim", "target_graph": target }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{resp}");
+    let sources = json_body(&resp)["sources"].clone();
+    assert!(
+        !sources.as_array().unwrap().iter().any(|g| g == priv_g),
+        "{resp}"
+    );
+    assert!(ask(
+        &state,
+        &format!("GRAPH <{target}> {{ <http://ex/pub> a <http://ex/Copied> }}")
+    ));
+    assert!(
+        !ask(
+            &state,
+            &format!("GRAPH <{target}> {{ <http://ex/secret> ?p ?o }}")
+        ),
+        "a private-graph triple must not be laundered into the viewer's target"
+    );
+
+    // An explicit graph the caller cannot read is refused.
+    let (st, resp) = post_swrl(
+        &app,
+        &mallory,
+        json!({ "rules": rule, "format": "text", "source_graphs": [priv_g], "target_graph": target }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{resp}");
+
+    // The dataset's inference graph is its writers' to fill.
+    let (st, resp) = post_swrl(
+        &app,
+        &mallory,
+        json!({ "rules": rule, "format": "text", "dataset": "victim" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{resp}");
+    let (st, resp) = post_swrl(
+        &app,
+        &owner,
+        json!({ "rules": rule, "format": "text", "dataset": "victim" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{resp}");
+    assert!(ask(
+        &state,
+        "GRAPH <urn:entailment:swrl:victim> { <http://ex/secret> a <http://ex/Copied> }"
+    ));
+}
+
+// ─── Rule syntaxes ─────────────────────────────────────────────────────────
+
+/// The SWRL RDF syntax (§5): `swrl:Imp` with argument lists, from Turtle and
+/// from RDF/XML. The reader used to read neither the arguments nor the rule.
+#[tokio::test]
+async fn swrl_rdf_syntax_rules_fire() {
+    let (state, token) = admin_state();
+    load(
+        &state,
+        r#"<http://ex/a> <http://ex/parentOf> <http://ex/b> .
+           <http://ex/b> <http://ex/parentOf> <http://ex/c> .
+           <http://ex/p1> <http://ex/age> 30 . <http://ex/p2> <http://ex/age> 10 ."#,
+    );
+    let app = test_app(state.clone());
+    let turtle = r#"
+@prefix ex:   <http://ex/> .
+@prefix swrl: <http://www.w3.org/2003/11/swrl#> .
+@prefix swrlb: <http://www.w3.org/2003/11/swrlb#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+ex:x a swrl:Variable . ex:y a swrl:Variable . ex:z a swrl:Variable . ex:n a swrl:Variable .
+ex:grand a swrl:Imp ;
+  swrl:body ( [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:parentOf ;
+                swrl:argument1 ex:x ; swrl:argument2 ex:y ]
+              [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:parentOf ;
+                swrl:argument1 ex:y ; swrl:argument2 ex:z ] ) ;
+  swrl:head ( [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:grandparentOf ;
+                swrl:argument1 ex:x ; swrl:argument2 ex:z ] ) .
+ex:adult a swrl:Imp ;
+  swrl:body ( [ a swrl:DatavaluedPropertyAtom ; swrl:propertyPredicate ex:age ;
+                swrl:argument1 ex:x ; swrl:argument2 ex:n ]
+              [ a swrl:BuiltinAtom ; swrl:builtin swrlb:greaterThanOrEqual ;
+                swrl:arguments ( ex:n "18"^^xsd:integer ) ] ) ;
+  swrl:head ( [ a swrl:ClassAtom ; swrl:classPredicate ex:Adult ; swrl:argument1 ex:x ] ) .
+"#;
+    let (st, resp) = post_swrl(&app, &token, json!({ "rules": turtle, "format": "rdf" })).await;
+    assert_eq!(st, StatusCode::OK, "{resp}");
+    assert!(
+        ask(
+            &state,
+            "<http://ex/a> <http://ex/grandparentOf> <http://ex/c>"
+        ),
+        "{resp}"
+    );
+    assert!(ask(&state, "<http://ex/p1> a <http://ex/Adult>"), "{resp}");
+    assert!(!ask(&state, "<http://ex/p2> a <http://ex/Adult>"), "{resp}");
+
+    let rdfxml = r#"<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:swrl="http://www.w3.org/2003/11/swrl#">
+  <swrl:Variable rdf:about="http://ex/v"/>
+  <swrl:Imp rdf:about="http://ex/tagged">
+    <swrl:body rdf:parseType="Collection">
+      <swrl:ClassAtom>
+        <swrl:classPredicate rdf:resource="http://ex/Adult"/>
+        <swrl:argument1 rdf:resource="http://ex/v"/>
+      </swrl:ClassAtom>
+    </swrl:body>
+    <swrl:head rdf:parseType="Collection">
+      <swrl:ClassAtom>
+        <swrl:classPredicate rdf:resource="http://ex/Voter"/>
+        <swrl:argument1 rdf:resource="http://ex/v"/>
+      </swrl:ClassAtom>
+    </swrl:head>
+  </swrl:Imp>
+</rdf:RDF>"#;
+    let (st, resp) = post_swrl(
+        &app,
+        &token,
+        json!({ "rules": rdfxml, "format": "rdf", "rdf_format": "rdfxml" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{resp}");
+    assert!(ask(&state, "<http://ex/p1> a <http://ex/Voter>"), "{resp}");
+
+    // Sent as OWL/XML by mistake, the RDF/XML is pointed at the right format.
+    let (st, resp) = post_swrl(&app, &token, json!({ "rules": rdfxml, "format": "xml" })).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{resp}");
+    assert!(
+        resp.contains("format \\\"rdf\\\"") || resp.contains("format \"rdf\""),
+        "{resp}"
+    );
+}
+
+/// OWL/XML as Protégé saves it: `Prefix` declarations with `abbreviatedIRI`,
+/// `xml:base` for relative `IRI`s, and plain literals.
+#[tokio::test]
+async fn swrl_owlxml_prefixes_and_relative_iris() {
+    let (state, token) = admin_state();
+    load(
+        &state,
+        r#"<http://ex/onto#p1> a <http://ex/onto#Person> ; <http://ex/onto#nick> "Bo" ."#,
+    );
+    let app = test_app(state.clone());
+    let xml = r##"<?xml version="1.0"?>
+<Ontology xmlns="http://www.w3.org/2002/07/owl#" xml:base="http://ex/onto"
+          ontologyIRI="http://ex/onto">
+  <Prefix name="" IRI="http://ex/onto#"/>
+  <Prefix name="ex" IRI="http://ex/onto#"/>
+  <DLSafeRule>
+    <Body>
+      <ClassAtom><Class abbreviatedIRI=":Person"/><Variable abbreviatedIRI="ex:x"/></ClassAtom>
+      <DataPropertyAtom>
+        <DataProperty IRI="#nick"/>
+        <Variable abbreviatedIRI="ex:x"/>
+        <Literal>Bo</Literal>
+      </DataPropertyAtom>
+    </Body>
+    <Head>
+      <ClassAtom><Class abbreviatedIRI="ex:Nicknamed"/><Variable abbreviatedIRI="ex:x"/></ClassAtom>
+    </Head>
+  </DLSafeRule>
+</Ontology>"##;
+    let (st, resp) = post_swrl(&app, &token, json!({ "rules": xml, "format": "xml" })).await;
+    assert_eq!(st, StatusCode::OK, "{resp}");
+    assert!(
+        ask(&state, "<http://ex/onto#p1> a <http://ex/onto#Nicknamed>"),
+        "prefixed names, the relative #nick and the plain literal must all resolve: {resp}"
+    );
+
+    // An undeclared prefix is refused by name.
+    let bad = xml.replace("ex:Nicknamed", "zz:Nicknamed");
+    let (st, resp) = post_swrl(&app, &token, json!({ "rules": bad, "format": "xml" })).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{resp}");
+    assert!(resp.contains("zz:"), "{resp}");
+}
+
+/// OWL 2 functional syntax, as the OWL API writes `.ofn`: `Prefix(…)`, the
+/// rule inside `Ontology(…)` among other axioms, `BuiltInAtom` and a typed
+/// literal.
+#[tokio::test]
+async fn swrl_functional_syntax_rule() {
+    let (state, token) = admin_state();
+    load(
+        &state,
+        r#"<http://ex/p1> a <http://ex/Person> ; <http://ex/age> 30 .
+           <http://ex/p2> a <http://ex/Person> ; <http://ex/age> 10 ."#,
+    );
+    let app = test_app(state.clone());
+    let ofn = r#"
+Prefix(:=<http://ex/>)
+Ontology(<http://ex/onto>
+  Declaration(Class(:Person))
+  SubClassOf(:Adult :Person)
+  DLSafeRule(
+    Annotation(rdfs:comment "adults")
+    Body(
+      ClassAtom(:Person Variable(<urn:swrl#x>))
+      DataPropertyAtom(:age Variable(<urn:swrl#x>) Variable(<urn:swrl#a>))
+      BuiltInAtom(swrlb:greaterThan Variable(<urn:swrl#a>) "17"^^xsd:integer)
+    )
+    Head(ClassAtom(:Adult Variable(<urn:swrl#x>)))
+  )
+)"#;
+    let (st, resp) = post_swrl(
+        &app,
+        &token,
+        json!({ "rules": ofn, "format": "functional" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{resp}");
+    assert!(ask(&state, "<http://ex/p1> a <http://ex/Adult>"), "{resp}");
+    assert!(!ask(&state, "<http://ex/p2> a <http://ex/Adult>"), "{resp}");
+}
+
+/// The SWRLAPI human-readable syntax: prefixes from the request (`""` the
+/// default prefix) and from the server's registry (`foaf:`), built-ins, and
+/// literals that hold `^` and `,` — which the ad-hoc text form split on.
+#[tokio::test]
+async fn swrl_human_readable_syntax_with_prefixes_and_builtins() {
+    // The bundled prefix.cc/LOV snapshot knows `foaf:`.
+    let (state, token) = admin_state_over(test_state_with_bundled_prefixes());
+    load(
+        &state,
+        r#"<http://ex/p1> a <http://xmlns.com/foaf/0.1/Person> ; <http://ex/age> 30 ;
+                          <http://ex/motto> "a, ^ b" .
+           <http://ex/p2> a <http://xmlns.com/foaf/0.1/Person> ; <http://ex/age> 10 ."#,
+    );
+    let app = test_app(state.clone());
+    let rules = r#"foaf:Person(?p) ^ hasAge(?p, ?a) ^ swrlb:greaterThan(?a, 17) -> Adult(?p)
+                   ex:motto(?p, "a, ^ b") -> ex:Quoted(?p)"#;
+    let (st, resp) = post_swrl(
+        &app,
+        &token,
+        json!({
+            "rules": rules,
+            "format": "swrlapi",
+            "prefixes": { "": "http://ex/", "ex": "http://ex/" }
+        }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{resp}");
+    // `hasAge` is the default prefix's: http://ex/hasAge, not http://ex/age.
+    assert!(!ask(&state, "<http://ex/p1> a <http://ex/Adult>"), "{resp}");
+    assert!(ask(&state, "<http://ex/p1> a <http://ex/Quoted>"), "{resp}");
+
+    let rules = rules.replace("hasAge", "age");
+    let (st, resp) = post_swrl(
+        &app,
+        &token,
+        json!({ "rules": rules, "format": "swrlapi", "prefixes": { "": "http://ex/", "ex": "http://ex/" } }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{resp}");
+    assert!(ask(&state, "<http://ex/p1> a <http://ex/Adult>"), "{resp}");
+    assert!(!ask(&state, "<http://ex/p2> a <http://ex/Adult>"), "{resp}");
+
+    // A bare name without a default prefix is refused by name.
+    let (st, resp) = post_swrl(
+        &app,
+        &token,
+        json!({ "rules": "Person(?p) -> foaf:Agent(?p)", "format": "swrlapi" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{resp}");
+    assert!(resp.contains("bare name 'Person'"), "{resp}");
+}
+
+/// The SWRL §4 XML concrete syntax (RuleML `imp`, `swrlx:` atoms), with the
+/// submission's uncle example.
+#[tokio::test]
+async fn swrl_xml_concrete_syntax() {
+    let (state, token) = admin_state();
+    load(
+        &state,
+        r#"<http://ex/fam#ann> <http://ex/fam#hasParent> <http://ex/fam#bob> .
+           <http://ex/fam#bob> <http://ex/fam#hasBrother> <http://ex/fam#carl> ."#,
+    );
+    let app = test_app(state.clone());
+    let xml = r##"<?xml version="1.0"?>
+<swrlx:Ontology xmlns:swrlx="http://www.w3.org/2003/11/swrlx#"
+                xmlns:owlx="http://www.w3.org/2003/05/owl-xml"
+                xmlns:ruleml="http://www.w3.org/2003/11/ruleml"
+                xml:base="http://ex/fam">
+  <ruleml:imp>
+    <ruleml:_rlab ruleml:href="#uncle"/>
+    <ruleml:_body>
+      <swrlx:individualPropertyAtom swrlx:property="#hasParent">
+        <ruleml:var>x1</ruleml:var>
+        <ruleml:var>x2</ruleml:var>
+      </swrlx:individualPropertyAtom>
+      <swrlx:individualPropertyAtom swrlx:property="#hasBrother">
+        <ruleml:var>x2</ruleml:var>
+        <ruleml:var>x3</ruleml:var>
+      </swrlx:individualPropertyAtom>
+    </ruleml:_body>
+    <ruleml:_head>
+      <swrlx:individualPropertyAtom swrlx:property="#hasUncle">
+        <ruleml:var>x1</ruleml:var>
+        <ruleml:var>x3</ruleml:var>
+      </swrlx:individualPropertyAtom>
+    </ruleml:_head>
+  </ruleml:imp>
+</swrlx:Ontology>"##;
+    let (st, resp) = post_swrl(&app, &token, json!({ "rules": xml, "format": "ruleml" })).await;
+    assert_eq!(st, StatusCode::OK, "{resp}");
+    assert!(
+        ask(
+            &state,
+            "<http://ex/fam#ann> <http://ex/fam#hasUncle> <http://ex/fam#carl>"
+        ),
+        "{resp}"
+    );
+}

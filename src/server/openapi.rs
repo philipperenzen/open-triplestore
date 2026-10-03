@@ -2294,19 +2294,29 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Reasoning",
                 "Execute SWRL rules",
-                "Run SWRL rules (format `text` or OWL/XML `xml`) to a fixed point and \
-                 materialise their consequences into `target_graph` (an absolute IRI; \
-                 default graph when omitted). Every rule is checked before any runs: an \
-                 element the OWL/XML reader does not understand, an unsafe rule, a \
-                 built-in in the head or an unsupported built-in refuses the request \
-                 and nothing is written. The report carries `converged` and \
-                 `stop_reason` (`fixpoint`, `max_iterations` or `timeout`).",
+                "Run SWRL rules to a fixed point and materialise their consequences. \
+                 `format`: `text`, `xml`/`owlxml` (OWL/XML), `rdf` (SWRL RDF syntax in \
+                 `rdf_format`, default turtle), `functional` (OWL 2 functional syntax), \
+                 `swrlapi` (human-readable; `prefixes` then the server's registry) or \
+                 `ruleml` (SWRL §4 XML). Rule bodies read the default graph, or a \
+                 `dataset`'s reasoning sources and `source_graphs`, read-checked like \
+                 /api/reasoning/materialize. Derived triples go to `target_graph` (an \
+                 absolute IRI), else the dataset's inference graph (its writers only), \
+                 else the default graph. Every rule is checked before any runs: an \
+                 element a reader does not understand, an unsafe rule, a built-in in the \
+                 head or an unsupported built-in refuses the request and nothing is \
+                 written. The report carries `converged`, `stop_reason` (`fixpoint`, \
+                 `max_iterations` or `timeout`), `target_graph` and `sources`.",
                 vec![],
                 vec![
                     ("200", "Rule execution report"),
-                    ("400", "Rules, format or target graph refused"),
+                    ("400", "Rules, format, scope or target graph refused"),
                     ("401", "Authentication required"),
-                    ("403", "No write access to the target graph"),
+                    (
+                        "403",
+                        "No write access to the target, or no read access to a source graph",
+                    ),
+                    ("404", "Dataset not found"),
                     ("503", "Server overloaded or execution timed out"),
                 ],
                 true,

@@ -619,14 +619,16 @@ async fn execute_query(
         {
             return Err(AppError::NotFound(format!("Dataset '{ds_id}' not found")));
         }
-        // The regime: the parameter, else the dataset's configuration. A dataset
-        // with no regime configured makes the parameter a no-op, so a client can
-        // always send it.
+        // The regime: the parameter, else the dataset's configuration in
+        // `materialize` mode. Without either, the graph the dataset's stored
+        // SWRL rules write to, when they wrote anything; a dataset with
+        // neither makes the parameter a no-op, so a client can always send it.
         let regime = match entailment {
             Some(r) => Some(r.to_string()),
             None => crate::entailment::config(&state.auth_db, ds_id)
                 .ok()
                 .flatten()
+                .filter(|c| c.mode == "materialize")
                 .map(|c| c.regime),
         };
         match regime {
@@ -636,7 +638,15 @@ async fn execute_query(
                 )));
             }
             Some(r) => Some(crate::entailment::dataset_entailment_graph(&r, ds_id)),
-            None => None,
+            None => {
+                let rules_graph = crate::entailment::dataset_rules_graph(ds_id);
+                (state
+                    .store
+                    .graph_count_cached(Some(&rules_graph))
+                    .unwrap_or(0)
+                    > 0)
+                .then_some(rules_graph)
+            }
         }
     } else if let Some(regime) = entailment {
         match regime {
@@ -10002,6 +10012,90 @@ pub(crate) fn run_regime(
     Ok(report)
 }
 
+/// The graphs a reasoning run may read, for `POST /api/reasoning/materialize`
+/// and `POST /api/swrl/execute`: a dataset's conformance layer as far as
+/// `user` may read it, plus explicit `source_graphs` (each read-checked), or
+/// `None` (neither given) for the unnamed default graph. Also returns the
+/// identity policy the run applies: the dataset's, or `sameas-full` for an
+/// unscoped run, which reads whatever it is given.
+fn resolve_reasoning_scope(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    dataset: Option<&str>,
+    source_graphs: Option<&[String]>,
+) -> Result<
+    (
+        Option<Vec<String>>,
+        crate::reasoning::identity::IdentityPolicy,
+    ),
+    AppError,
+> {
+    let mut identity = crate::reasoning::identity::IdentityPolicy::Full;
+    let sources: Option<Vec<String>> = if let Some(ds_id) = dataset {
+        let ds = state
+            .auth_db
+            .get_dataset(ds_id)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::NotFound(format!("Dataset '{ds_id}' not found")))?;
+        let visible = state
+            .auth_db
+            .can_access_dataset(Some(&user.user_id), &ds)
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        if !visible {
+            return Err(AppError::NotFound(format!("Dataset '{ds_id}' not found")));
+        }
+        let (layer, effective) = crate::entailment::reasoning_sources(state, &ds);
+        identity = effective.policy;
+        // `reasoning_sources` (via `conformance::resolve`) hands back the
+        // dataset's whole reasoning layer, its private graphs included: it does
+        // not filter on who is asking. But materialisation writes the derived
+        // consequences into a caller-chosen target the caller can read, so a
+        // viewer could launder a private graph's triples out through it. Keep
+        // only the layer graphs the caller may read — the model registry's own
+        // visibility rule still admits model graphs — exactly as the explicit
+        // `source_graphs` below are read-checked. Admins read every graph.
+        let mut layer: Vec<String> = if user.is_admin() {
+            layer
+        } else {
+            let mut kept = Vec::with_capacity(layer.len());
+            for g in layer {
+                if check_graph_read_access(state, Some(user), &g)
+                    .map_err(|e| AppError::Internal(e.to_string()))?
+                    || crate::conformance::model_graph_readable(state, Some(&user.user_id), &g)
+                {
+                    kept.push(g);
+                }
+            }
+            kept
+        };
+        for g in source_graphs.map(<[String]>::to_vec).unwrap_or_default() {
+            if !check_graph_read_access(state, Some(user), &g)
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                && !crate::conformance::model_graph_readable(state, Some(&user.user_id), &g)
+            {
+                return Err(AppError::Forbidden(format!("no read access to <{g}>")));
+            }
+            if !layer.contains(&g) {
+                layer.push(g);
+            }
+        }
+        Some(layer)
+    } else if let Some(explicit) = source_graphs.map(<[String]>::to_vec) {
+        for g in &explicit {
+            if !check_graph_read_access(state, Some(user), g)
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                && !crate::conformance::model_graph_readable(state, Some(&user.user_id), g)
+            {
+                return Err(AppError::Forbidden(format!("no read access to <{g}>")));
+            }
+        }
+        Some(explicit)
+    } else {
+        None
+    };
+    Ok((sources, identity))
+}
+
 /// POST /api/reasoning/materialize — run an entailment regime.
 async fn reasoning_materialize(
     State(state): State<AppState>,
@@ -10056,69 +10150,12 @@ async fn reasoning_materialize(
     // A dataset run applies the dataset's identity policy (what owl:sameAs
     // may do, whether linksets are premises); an unscoped run reads whatever
     // it is given and keeps the full behaviour.
-    let mut identity = crate::reasoning::identity::IdentityPolicy::Full;
-    let sources: Option<Vec<String>> = if let Some(ds_id) = body.dataset.as_deref() {
-        let ds = state
-            .auth_db
-            .get_dataset(ds_id)
-            .map_err(|e| AppError::Internal(e.to_string()))?
-            .ok_or_else(|| AppError::NotFound(format!("Dataset '{ds_id}' not found")))?;
-        let visible = state
-            .auth_db
-            .can_access_dataset(Some(&user.user_id), &ds)
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-        if !visible {
-            return Err(AppError::NotFound(format!("Dataset '{ds_id}' not found")));
-        }
-        let (layer, effective) = crate::entailment::reasoning_sources(&state, &ds);
-        identity = effective.policy;
-        // `reasoning_sources` (via `conformance::resolve`) hands back the
-        // dataset's whole reasoning layer, its private graphs included: it does
-        // not filter on who is asking. But materialisation writes the derived
-        // consequences into a caller-chosen target the caller can read, so a
-        // viewer could launder a private graph's triples out through it. Keep
-        // only the layer graphs the caller may read — the model registry's own
-        // visibility rule still admits model graphs — exactly as the explicit
-        // `source_graphs` below are read-checked. Admins read every graph.
-        let mut layer: Vec<String> = if user.is_admin() {
-            layer
-        } else {
-            let mut kept = Vec::with_capacity(layer.len());
-            for g in layer {
-                if check_graph_read_access(&state, Some(&user), &g)
-                    .map_err(|e| AppError::Internal(e.to_string()))?
-                    || crate::conformance::model_graph_readable(&state, Some(&user.user_id), &g)
-                {
-                    kept.push(g);
-                }
-            }
-            kept
-        };
-        for g in body.source_graphs.clone().unwrap_or_default() {
-            if !check_graph_read_access(&state, Some(&user), &g)
-                .map_err(|e| AppError::Internal(e.to_string()))?
-                && !crate::conformance::model_graph_readable(&state, Some(&user.user_id), &g)
-            {
-                return Err(AppError::Forbidden(format!("no read access to <{g}>")));
-            }
-            if !layer.contains(&g) {
-                layer.push(g);
-            }
-        }
-        Some(layer)
-    } else if let Some(explicit) = body.source_graphs.clone() {
-        for g in &explicit {
-            if !check_graph_read_access(&state, Some(&user), g)
-                .map_err(|e| AppError::Internal(e.to_string()))?
-                && !crate::conformance::model_graph_readable(&state, Some(&user.user_id), g)
-            {
-                return Err(AppError::Forbidden(format!("no read access to <{g}>")));
-            }
-        }
-        Some(explicit)
-    } else {
-        None
-    };
+    let (sources, identity) = resolve_reasoning_scope(
+        &state,
+        &user,
+        body.dataset.as_deref(),
+        body.source_graphs.as_deref(),
+    )?;
     let report = run_regime(&state, &body.regime, sources.clone(), &target, identity)?;
 
     match report {
@@ -10328,16 +10365,38 @@ pub fn swrl_routes() -> Router<AppState> {
 #[cfg(feature = "swrl")]
 #[derive(Debug, Deserialize)]
 struct SwrlExecuteRequest {
-    /// SWRL rules in text format (simple) or XML (OWL)
+    /// The rules, in `format`.
     rules: String,
-    /// Format: "text" (default) or "xml" (OWL/XML); anything else is refused
+    /// `text` (default), `xml` (OWL/XML; also `owlxml`), `rdf` (the SWRL RDF
+    /// syntax, serialised as `rdf_format`), `functional` (OWL 2 functional
+    /// syntax), `swrlapi` (the SWRLAPI human-readable syntax) or `ruleml`
+    /// (the SWRL §4 RuleML XML syntax); anything else is refused.
     #[serde(default = "default_swrl_format")]
     format: String,
+    /// Serialisation of `rules` for format `rdf` (default `turtle`).
+    #[serde(default)]
+    rdf_format: Option<String>,
+    /// Base IRI for relative IRIs in format `rdf`.
+    #[serde(default)]
+    base_iri: Option<String>,
+    /// Prefixes for format `swrlapi` (`""` is the default prefix), ahead of
+    /// the server's prefix registry.
+    #[serde(default)]
+    prefixes: std::collections::HashMap<String, String>,
     /// Maximum fixed-point iterations (default: 100)
     #[serde(default = "default_max_iterations")]
     max_iterations: usize,
-    /// Target named graph for inferred triples
+    /// Target named graph for inferred triples. Default: the dataset's
+    /// inference graph with a `dataset`, else the default graph.
     target_graph: Option<String>,
+    /// Run over this dataset's reasoning sources (its conformance layer, as
+    /// far as the caller may read it), like `/api/reasoning/materialize`.
+    #[serde(default)]
+    dataset: Option<String>,
+    /// Graphs rule bodies read (each read-checked), on top of the dataset's.
+    /// Neither given: the unnamed default graph.
+    #[serde(default)]
+    source_graphs: Option<Vec<String>>,
 }
 
 #[cfg(feature = "swrl")]
@@ -10350,6 +10409,13 @@ fn default_max_iterations() -> usize {
     100
 }
 
+/// An [`AppError`] as the `(status, message)` pair the SWRL handler returns.
+#[cfg(feature = "swrl")]
+fn swrl_err(e: AppError) -> (StatusCode, String) {
+    let message = e.message();
+    (e.into_response().status(), message)
+}
+
 /// POST /api/swrl/execute — parse and execute SWRL rules
 #[cfg(feature = "swrl")]
 async fn swrl_execute(
@@ -10357,34 +10423,80 @@ async fn swrl_execute(
     Extension(user): Extension<AuthenticatedUser>,
     Json(body): Json<SwrlExecuteRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    // Rule execution INSERTs derived triples into `target_graph` — previously
-    // with no authorization at all (the handler took no `AuthenticatedUser`), so
-    // any caller could materialise arbitrary triples into any graph, including
-    // the shared `urn:entailment:*` graphs and other tenants'. Mirrors
-    // `/api/reasoning/materialize` above; as there, a `None` target means the
-    // default graph, which carries the write-scope check but no per-graph ACL.
-    //
     // The target goes into the generated update as `GRAPH <…>`, so it must be
     // an IRI before it is used for anything.
     if let Some(g) = body.target_graph.as_deref() {
         crate::swrl::engine::validate_target_graph(g).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     }
-    require_graph_write(&state, Some(&user), body.target_graph.as_deref()).map_err(|e| {
-        let status = match &e {
-            AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
-            _ => StatusCode::FORBIDDEN,
-        };
-        (status, e.message())
-    })?;
 
-    let rules = match body.format.as_str() {
-        "xml" => crate::swrl::parser::parse_swrl(&body.rules),
-        "text" => crate::swrl::parser::parse_swrl_text(&body.rules),
-        other => Err(format!(
-            "Unknown SWRL format '{other}': use \"text\" or \"xml\""
-        )),
-    }
-    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    // What rule bodies read: a dataset's reasoning sources and explicit
+    // graphs, each as far as the caller may read them (the checks of
+    // `/api/reasoning/materialize`), or the default graph.
+    let (sources, _identity) = resolve_reasoning_scope(
+        &state,
+        &user,
+        body.dataset.as_deref(),
+        body.source_graphs.as_deref(),
+    )
+    .map_err(swrl_err)?;
+
+    // Rule execution INSERTs derived triples into the target — previously
+    // with no authorization at all (the handler took no `AuthenticatedUser`), so
+    // any caller could materialise arbitrary triples into any graph, including
+    // the shared `urn:entailment:*` graphs and other tenants'. An explicit
+    // target needs write access, as for `/api/reasoning/materialize`; a `None`
+    // target means the default graph, which carries the write-scope check but
+    // no per-graph ACL. With a dataset and no target, the derived triples go
+    // to the dataset's inference graph, which its writers may fill.
+    let target: Option<String> = match (body.target_graph.clone(), body.dataset.as_deref()) {
+        (Some(t), _) => {
+            require_graph_write(&state, Some(&user), Some(&t)).map_err(swrl_err)?;
+            Some(t)
+        }
+        (None, Some(ds_id)) => {
+            let ds = state
+                .auth_db
+                .get_dataset(ds_id)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                .ok_or_else(|| {
+                    (
+                        StatusCode::NOT_FOUND,
+                        format!("Dataset '{ds_id}' not found"),
+                    )
+                })?;
+            let can_write = user.is_admin()
+                || state
+                    .auth_db
+                    .can_write_dataset(&user.user_id, &ds)
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            if !can_write {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "writing dataset '{ds_id}''s inference graph needs write access to \
+                         the dataset; pass a target_graph you may write instead"
+                    ),
+                ));
+            }
+            Some(crate::entailment::inference_graph(&state.auth_db, ds_id))
+        }
+        (None, None) => {
+            require_graph_write(&state, Some(&user), None).map_err(swrl_err)?;
+            None
+        }
+    };
+
+    let registry = state.prefix_registry.clone();
+    let options = crate::swrl::ParseOptions {
+        rdf_format: body.rdf_format.as_deref(),
+        base_iri: body.base_iri.as_deref(),
+        prefixes: body.prefixes.clone(),
+        prefix_fallback: Some(std::sync::Arc::new(move |p: &str| {
+            registry.lookup_local(p).map(|r| r.namespace)
+        })),
+    };
+    let rules = crate::swrl::parse_rules(body.format.as_str(), &body.rules, &options)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     if rules.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "No valid rules found".to_string()));
@@ -10393,7 +10505,7 @@ async fn swrl_execute(
     // Every rule is translated before any runs; a rule that cannot run as
     // written (unsafe, a head built-in, an untranslatable built-in) refuses
     // the request and nothing is written.
-    let compiled = crate::swrl::compile_rules(&rules, body.target_graph.as_deref())
+    let compiled = crate::swrl::compile_rules(&rules, target.as_deref(), sources.as_deref())
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     // Rule execution is a store-wide fixed point: bounded like the other
@@ -10442,7 +10554,14 @@ async fn swrl_execute(
         })?
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    Ok(Json(result))
+    let mut report = serde_json::to_value(&result)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(obj) = report.as_object_mut() {
+        obj.insert("target_graph".into(), serde_json::json!(target));
+        // The graphs rule bodies read (null: the unnamed default graph).
+        obj.insert("sources".into(), serde_json::json!(sources));
+    }
+    Ok(Json(report))
 }
 
 // ─── SHACL detect-shapes ─────────────────────────────────────────────────────
