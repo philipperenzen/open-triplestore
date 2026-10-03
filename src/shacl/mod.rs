@@ -1,6 +1,5 @@
 pub mod constraints;
 pub mod engine;
-pub mod lint;
 pub mod node_expr;
 pub mod report;
 pub mod shapes;

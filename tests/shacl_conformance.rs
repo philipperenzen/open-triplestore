@@ -1679,19 +1679,18 @@ ex:S a sh:NodeShape ;
     );
 }
 
-// ─── Pinned deviations: literal canonicalisation in storage ──────────────────
+// ─── Literal forms: what the store keeps is what the engine sees ─────────────
 //
-// oxigraph stores xsd:boolean, the numerics and the temporals as native
-// values: every derived integer type reads back as xsd:integer, and
-// "1"^^xsd:boolean reads back as true. The engine only ever sees what the
-// store returns. These tests pin today's behaviour so the change is visible
-// when storage keeps lexical forms (plan card 15); flip them then.
+// The store keeps every literal as written (vendor/README.md). Until it did,
+// every derived integer type read back as xsd:integer and "1"^^xsd:boolean
+// as true; the two tests below pinned that and are now flipped.
 
-/// PINNED (wrong per SHACL §4.1.2): a valid `"5"^^xsd:nonNegativeInteger`
-/// violates `sh:datatype xsd:nonNegativeInteger`, because the store hands it
-/// back as `"5"^^xsd:integer`. A write gate answers 422 on valid data.
+/// SHACL §4.1.2: a valid `"5"^^xsd:nonNegativeInteger` conforms to
+/// `sh:datatype xsd:nonNegativeInteger`, because the store hands it back with
+/// its datatype (it used to read back as `"5"^^xsd:integer`, and a write gate
+/// answered 422 on valid data).
 #[test]
-fn pinned_a_derived_integer_type_violates_its_own_sh_datatype() {
+fn a_derived_integer_type_conforms_to_its_own_sh_datatype() {
     for dt in [
         "nonNegativeInteger",
         "positiveInteger",
@@ -1704,13 +1703,9 @@ fn pinned_a_derived_integer_type_violates_its_own_sh_datatype() {
             "ex:S a sh:NodeShape ; sh:targetNode ex:a ; sh:property [ sh:path ex:n ; sh:datatype xsd:{dt} ] ."
         );
         let r = run(&shapes, &format!("ex:a ex:n \"5\"^^xsd:{dt} ."));
-        assert!(
-            !r.conforms,
-            "xsd:{dt}: storage now keeps the derived datatype — flip this pin \
-             and the docs (footnote 6, docs/shacl.md): {:?}",
-            r.results
-        );
-        // The cause: the stored term reads back as xsd:integer.
+        assert!(r.conforms, "xsd:{dt}: {:?}", r.results);
+        // The stored term keeps the datatype; DATATYPE() in a query is the
+        // value's type, xsd:integer, as SPARQL's value semantics have it.
         let store = TripleStore::in_memory().unwrap();
         store
             .load_str(
@@ -1720,25 +1715,23 @@ fn pinned_a_derived_integer_type_violates_its_own_sh_datatype() {
             )
             .unwrap();
         let Ok(oxigraph::sparql::QueryResults::Solutions(mut rows)) =
-            store.query("SELECT (DATATYPE(?o) AS ?d) WHERE { GRAPH <urn:data> { ?s ?p ?o } }")
+            store.query("SELECT ?o WHERE { GRAPH <urn:data> { ?s ?p ?o } }")
         else {
-            panic!("datatype query failed");
+            panic!("query failed");
         };
-        let d = rows.next().unwrap().unwrap().get("d").unwrap().to_string();
+        let o = rows.next().unwrap().unwrap().get("o").unwrap().to_string();
         assert_eq!(
-            d, "<http://www.w3.org/2001/XMLSchema#integer>",
-            "xsd:{dt} reads back as xsd:integer"
+            o,
+            format!("\"5\"^^<http://www.w3.org/2001/XMLSchema#{dt}>"),
+            "xsd:{dt} reads back as written"
         );
     }
-    // xsd:dateTimeStamp reads back as xsd:dateTime the same way.
+    // xsd:dateTimeStamp keeps its datatype the same way.
     let r = run(
         "ex:S a sh:NodeShape ; sh:targetNode ex:a ; sh:property [ sh:path ex:t ; sh:datatype xsd:dateTimeStamp ] .",
         "ex:a ex:t \"2026-10-01T12:00:00Z\"^^xsd:dateTimeStamp .",
     );
-    assert!(
-        !r.conforms,
-        "xsd:dateTimeStamp: storage now keeps it — flip this pin and the docs"
-    );
+    assert!(r.conforms, "xsd:dateTimeStamp: {:?}", r.results);
     // xsd:integer itself is unaffected.
     let r = run(
         "ex:S a sh:NodeShape ; sh:targetNode ex:a ; sh:property [ sh:path ex:n ; sh:datatype xsd:integer ] .",
@@ -1747,31 +1740,40 @@ fn pinned_a_derived_integer_type_violates_its_own_sh_datatype() {
     assert!(r.conforms, "{:?}", r.results);
 }
 
-/// PINNED (wrong per SHACL; W3C core/property/uniqueLang-002): only the
-/// literal `true` activates a flag, but the store turns `"1"^^xsd:boolean`
-/// into `true`, so `"1"` activates `sh:uniqueLang` and `sh:deactivated` too.
-/// `put_shapes` and Studio PUT refuse such uploads (see
-/// `tests/shacl_studio_http.rs`); other write paths still store them.
+/// W3C core/property/uniqueLang-002: only the literal `true` activates a
+/// flag. The store keeps `"1"^^xsd:boolean` as written, so it activates
+/// neither `sh:uniqueLang` nor `sh:closed`, nor deactivates a shape (it used
+/// to read back as `true` and do all three).
 #[test]
-fn pinned_a_non_canonical_true_activates_a_flag() {
+fn a_non_canonical_true_activates_no_flag() {
     let r = run(
         "ex:S a sh:PropertyShape ; sh:targetNode ex:i ; sh:path ex:m ; sh:uniqueLang \"1\"^^xsd:boolean .",
         "ex:i ex:m \"HI\"@en, \"Hi\"@en .",
     );
     assert!(
-        !r.conforms,
-        "\"1\" no longer activates sh:uniqueLang — flip this pin and remove \
-         uniqueLang-002 from KNOWN_FAILURES"
+        r.conforms,
+        "\"1\" activates no sh:uniqueLang: {:?}",
+        r.results
     );
+    let r = run(
+        "ex:S a sh:NodeShape ; sh:targetNode ex:i ; sh:closed \"1\"^^xsd:boolean .",
+        "ex:i ex:m 1 .",
+    );
+    assert!(r.conforms, "\"1\" closes no shape: {:?}", r.results);
     let r = run(
         "ex:S a sh:NodeShape ; sh:targetNode ex:i ; sh:class ex:Missing ; sh:deactivated \"1\"^^xsd:boolean .",
         "ex:i ex:m 1 .",
     );
-    assert!(
-        r.conforms,
-        "\"1\" no longer deactivates — flip this pin: {:?}",
-        r.results
-    );
+    assert!(!r.conforms, "\"1\" deactivates nothing");
+    // The literal true does all three.
+    for (shapes, conforms) in [
+        ("ex:S a sh:PropertyShape ; sh:targetNode ex:i ; sh:path ex:m ; sh:uniqueLang true .", false),
+        ("ex:S a sh:NodeShape ; sh:targetNode ex:i ; sh:closed true .", false),
+        ("ex:S a sh:NodeShape ; sh:targetNode ex:i ; sh:class ex:Missing ; sh:deactivated true .", true),
+    ] {
+        let r = run(shapes, "ex:i ex:m \"HI\"@en, \"Hi\"@en .");
+        assert_eq!(r.conforms, conforms, "{shapes}: {:?}", r.results);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2116,21 +2118,6 @@ fn sh_datatype_holds_for_derived_types_as_stored() {
     }
 }
 
-/// W3C core/property/uniqueLang-002: a boolean flag activates only as the
-/// literal `true`; `"1"^^xsd:boolean`, kept as written, does not.
-#[test]
-fn a_non_canonical_true_does_not_activate_unique_lang_or_closed() {
-    let shapes = r#"
-      ex:U a sh:NodeShape ; sh:targetNode ex:i ;
-        sh:property [ sh:path ex:label ; sh:uniqueLang "1"^^xsd:boolean ] .
-      ex:C a sh:NodeShape ; sh:targetNode ex:i ; sh:closed "1"^^xsd:boolean ."#;
-    let data = r#"ex:i ex:label "a"@en , "b"@en ."#;
-    let r = run(shapes, data);
-    assert!(r.conforms, "{:?}", r.results);
-    let r = run(&shapes.replace("\"1\"^^xsd:boolean", "true"), data);
-    assert!(!r.conforms, "the literal true activates both");
-}
-
 /// `sh:hasValue` and `sh:in` compare RDF terms: the literal as written, not
 /// its value (`"05"^^xsd:integer` is not `5`, `"5"^^xsd:int` is not `5`).
 #[test]
@@ -2147,4 +2134,16 @@ fn sh_has_value_and_sh_in_compare_terms_as_written() {
     assert!(!violates(&r, "/exact"), "{:?}", r.results);
     assert!(violates(&r, "/padded"), "{:?}", r.results);
     assert!(violates(&r, "/derived"), "{:?}", r.results);
+}
+
+/// SHACL §2.1.3.3: a shape that is a SHACL instance of `rdfs:Class` targets
+/// its instances, also through `rdfs:subClassOf` in the shapes graph.
+#[test]
+fn an_implicit_class_target_follows_subclass_of_rdfs_class() {
+    let shapes = r#"
+      ex:MyClass rdfs:subClassOf rdfs:Class .
+      ex:Person a ex:MyClass , sh:NodeShape ;
+        sh:property [ sh:path ex:name ; sh:minCount 1 ] ."#;
+    let r = run(shapes, "ex:p a ex:Person .");
+    assert!(violates(&r, "/p"), "{:?}", r.results);
 }

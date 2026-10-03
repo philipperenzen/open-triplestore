@@ -342,7 +342,7 @@ impl FunctionBody {
                 .and_then(|o| lexical(o).trim().parse::<f64>().ok());
             let optional = objects(&node, "optional")
                 .first()
-                .is_some_and(|o| matches!(lexical(o).as_str(), "true" | "1"));
+                .is_some_and(|o| lexical(o) == "true");
             params.push((order, local_name(&path), optional));
         }
         // §5.2: by sh:order (0 when unspecified) if any parameter has one,
