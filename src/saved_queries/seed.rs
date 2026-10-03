@@ -719,6 +719,8 @@ fn seed_bag_buildings(state: &AppState) {
 // keeps literals as written, so the W3C core section has no known failure).
 // v16: the capabilities graph names RDF 1.2 and SPARQL 1.2 by the dated drafts
 // docs/standards.md grades them against.
+// v16: the capabilities graph gains the graded rows for full-text search, SKOS
+// and JSON-LD 1.1 (docs/standards.md, 2026-10-03).
 // v15: the capabilities graph follows the 2026-10-03 regrades in
 // docs/standards.md: SPARQL 1.1 federation, OWL 2 QL, EL and DL (with the
 // reasoner sidecar), RDF Patch and LDES are Full.

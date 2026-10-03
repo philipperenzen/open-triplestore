@@ -361,7 +361,7 @@ impl AppState {
     /// the async-safe entry point.
     #[cfg(feature = "text-search")]
     pub fn sync_text_index_if_dirty(&self) {
-        if !self.text_dirty.load(Ordering::Relaxed) {
+        if !self.text_index_stale() {
             return;
         }
         let Some(ref idx) = self.text_index else {
@@ -371,20 +371,47 @@ impl AppState {
             .text_sync_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !self.text_dirty.load(Ordering::Relaxed) {
+        if !self.text_index_stale() {
             return;
         }
-        // Cleared *before* the rebuild: a write landing mid-rebuild must leave
-        // the index dirty afterwards, not have its mark erased by the rebuild
+        // Both taken *before* the work: a write landing mid-sync must leave
+        // the index stale afterwards, not have its record erased by a sync
         // that could not have seen it.
-        self.text_dirty.store(false, Ordering::Relaxed);
-        match idx.reindex_from_store(&self.store) {
-            Ok(n) => tracing::debug!("Text index auto-synced: {} documents", n),
+        let touched = self.store.search_journal().take();
+        let full = self.text_dirty.swap(false, Ordering::Relaxed) || touched.all;
+        let result = if full {
+            idx.reindex_from_store(&self.store)
+        } else {
+            idx.apply_touched(&self.store, &touched)
+        };
+        match result {
+            Ok(n) => tracing::debug!(
+                "Text index auto-synced ({}): {} documents",
+                if full { "rebuild" } else { "touched graphs" },
+                n
+            ),
             Err(e) => {
                 tracing::warn!("Text index auto-sync failed: {}", e);
                 self.text_dirty.store(true, Ordering::Relaxed);
             }
         }
+    }
+
+    /// Whether the text index may lag the store: marked dirty, or a store
+    /// write has been recorded in the store's search journal since the last
+    /// sync (see [`crate::store::search_journal`]). Every store write is
+    /// recorded there — LDP, RDF Patch, RML runs, SHACL rule output,
+    /// entailment, replication, LDES and repair included — so no writer has
+    /// to remember the index. Also switches the journal on: the first look
+    /// at the index starts the recording.
+    #[cfg(feature = "text-search")]
+    pub fn text_index_stale(&self) -> bool {
+        if self.text_index.is_none() {
+            return false;
+        }
+        let journal = self.store.search_journal();
+        journal.enable();
+        self.text_dirty.load(Ordering::Relaxed) || journal.has_pending()
     }
 
     /// Run [`AppState::sync_text_index_if_dirty`] on a detached thread.
@@ -396,7 +423,7 @@ impl AppState {
     /// after a write starts one rebuild thread, not one each.
     #[cfg(feature = "text-search")]
     pub fn spawn_text_index_sync(&self) {
-        if !self.text_dirty.load(Ordering::Relaxed) || self.text_index.is_none() {
+        if !self.text_index_stale() {
             return;
         }
         if self
@@ -543,7 +570,7 @@ impl AppState {
         let Some(ref idx) = self.text_index else {
             return sparql.to_string();
         };
-        if self.text_dirty.load(Ordering::Relaxed) {
+        if self.text_index_stale() {
             if sparql_fn::mentions_text_search(sparql) {
                 // `text:search` REQUIRES the index — its expansion IS the result
                 // set — so this query waits for the sync.

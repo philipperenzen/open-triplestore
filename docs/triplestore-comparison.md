@@ -105,8 +105,9 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
   (since 2026-10-01): a ✅ means `docs/standards.md` grades the standard **Full**, and every
   row it grades **Partial** shows 🟡 — SPARQL 1.2 and RDF 1.2, OWL 2 RL,
   SHACL Core and Advanced, ShEx, SWRL, GeoSPARQL, DCAT and VoID, and RML. OWL 2 DL is graded
-  Full with the reasoner sidecar the project ships (footnote ⁹). Four rows have
-  no grade there (JSON-LD 1.1, N-Quads/TriG, text search, SKOS); their ✅
+  Full with the reasoner sidecar the project ships (footnote ⁹), and full-text search is
+  graded Full as a feature (footnote ¹⁵). Three rows have
+  no grade there (JSON-LD 1.1, N-Quads/TriG, SKOS); their ✅
   marks feature presence, as in the other columns.
   The W3C SPARQL tests are not claimed. The other systems' cells were compiled from their documentation and
   mark feature presence, so a column-by-column count favours them. GeoSPARQL 1.1 lacks
@@ -320,8 +321,12 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >   built-in CRSs are implemented. Not implemented: KML/DGGS literals, the Query Rewrite
 >   Extension, the other GeoSPARQL 1.1 aggregates and most of its new non-topological
 >   functions. See [`docs/standards.md`](standards.md) (footnote 5).
-> ¹⁵ Tantivy full-text search via `text-search` feature flag with automatic index
->   sync on every SPARQL UPDATE / Graph Store write (lazy dirty-flag pattern).
+> ¹⁵ Tantivy full-text search via the `text-search` feature flag, graded *Full* as a feature
+>   (not a standard) in `docs/standards.md` since 2026-10-03. The index follows every store
+>   write — SPARQL Update, Graph Store, imports, LDP, RDF Patch, RML runs, SHACL rule output,
+>   entailment, replication, LDES sync and repair — through the store's search journal, and
+>   catches up before the next text query; before, only SPARQL Update, Graph Store and import
+>   writes reached it.
 
 ### 4.4 Protocols, Catalogs & Mapping
 

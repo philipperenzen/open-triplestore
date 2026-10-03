@@ -976,6 +976,7 @@ const CAPABILITIES_JSONLD: &str = r#"{
     { "@id": "ots:rml",            "@type": "Standard", "title": "RML / R2RML",                            "conformance": "Partial" },
     { "@id": "ots:shex",           "@type": "Standard", "title": "ShEx",                                   "conformance": "Partial" },
     { "@id": "ots:swrl",           "@type": "Standard", "title": "SWRL",                                   "conformance": "Partial" },
+    { "@id": "ots:textsearch",     "@type": "Standard", "title": "SPARQL + full-text search (Tantivy)",    "conformance": "Full" },
     { "@id": "ots:jwt",        "@type": "AuthMethod", "title": "JSON Web Tokens (JWT)" },
     { "@id": "ots:oauth",      "@type": "AuthMethod", "title": "OAuth 2.0 / OIDC" },
     { "@id": "ots:saml",       "@type": "AuthMethod", "title": "SAML 2.0 SSO" }
