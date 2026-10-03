@@ -449,6 +449,14 @@ pub struct UpdateDatasetRequest {
     pub version_notes: Option<String>,
     pub spatial: Option<String>,
     pub landing_page: Option<String>,
+    /// Start of the period the data covers (`dct:temporal`): `YYYY-MM-DD` or an
+    /// RFC 3339 date-time.
+    pub temporal_start: Option<String>,
+    /// End of the period the data covers; same forms, not before the start.
+    pub temporal_end: Option<String>,
+    /// Update frequency (`dct:accrualPeriodicity`): a code of the EU frequency
+    /// table (`ANNUAL`, `MONTHLY`, …) or its IRI. Stored as the IRI.
+    pub accrual_periodicity: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -4100,6 +4108,16 @@ pub async fn update_dataset(
     validate_metadata_url("spatial", req.spatial.as_deref())?;
     validate_metadata_url("landing_page", req.landing_page.as_deref())?;
     validate_metadata_url("contact_url", req.contact_url.as_deref())?;
+    let coverage = crate::dcat::catalog::check_coverage(
+        req.temporal_start.as_deref(),
+        req.temporal_end.as_deref(),
+        req.accrual_periodicity.as_deref(),
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    validate_metadata_url(
+        "accrual_periodicity",
+        coverage.accrual_periodicity.as_deref(),
+    )?;
 
     db.update_dataset(
         &dataset_id,
@@ -4139,6 +4157,13 @@ pub async fn update_dataset(
         req.version_notes.as_deref(),
         req.spatial.as_deref(),
         req.landing_page.as_deref(),
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    db.update_dataset_coverage(
+        &dataset_id,
+        coverage.temporal_start.as_deref(),
+        coverage.temporal_end.as_deref(),
+        coverage.accrual_periodicity.as_deref(),
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

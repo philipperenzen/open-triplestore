@@ -200,7 +200,7 @@ async fn void_handler(
         format.to_rdf_format(),
     )
     .map_err(AppError::Internal)?;
-    catalog_response(format, bytes)
+    catalog_response(format, bytes, user_id.is_some())
 }
 
 /// `?format=` wins over `Accept`; Turtle is the default.
@@ -220,12 +220,27 @@ fn catalog_format(params: &FormatParam, headers: &HeaderMap) -> GraphFormat {
     negotiate_graph_format(&effective_accept)
 }
 
-fn catalog_response(format: GraphFormat, bytes: Vec<u8>) -> Result<Response, AppError> {
+/// The catalogue is scoped to the caller (their datasets, their readable
+/// graphs' statistics), so a signed-in caller's copy is `private`: a shared
+/// cache must not hand it to anyone else. `public` would let it, even for a
+/// request that carried credentials (RFC 9111 §3.5).
+fn catalog_response(
+    format: GraphFormat,
+    bytes: Vec<u8>,
+    signed_in: bool,
+) -> Result<Response, AppError> {
     axum::http::Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, format.content_type())
-        .header("vary", "Accept")
-        .header("cache-control", "public, max-age=60")
+        .header("vary", "Accept, Authorization, Cookie")
+        .header(
+            "cache-control",
+            if signed_in {
+                "private, max-age=60"
+            } else {
+                "public, max-age=60"
+            },
+        )
         .body(axum::body::Body::from(bytes))
         .map_err(|e| AppError::Internal(e.to_string()))
 }
@@ -262,7 +277,7 @@ async fn org_void_handler(
         format.to_rdf_format(),
     )
     .map_err(AppError::Internal)?;
-    catalog_response(format, bytes)
+    catalog_response(format, bytes, user_id.is_some())
 }
 
 /// Compute the set of named graph IRIs a NON-ADMIN caller may read when

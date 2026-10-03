@@ -83,7 +83,7 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | **SHACL validation** | Validate data on read or write; SHACL-AF rule inference; shapes stored per dataset |
 | **SHACL on write** | Automatic SHACL validation on every Graph Store PUT/POST — returns 422 with full report on violation |
 | **SHACL Compact Syntax** | Parse and serialize shapes in a subset of [SHACLC](https://w3c.github.io/shacl/shacl-compact-syntax/) via `Accept: text/shaclc`; the export drops what it cannot write ([docs](docs/shacl.md#what-the-serializer-leaves-out)) |
-| **DCAT catalog** | W3C DCAT 3 catalog at `/.well-known/void` — per-dataset distributions, VoID statistics, PROV-O provenance; optional DCAT-AP 3 / DCAT-AP-NL 3 profiles ([grades & gaps](docs/standards.md)) |
+| **DCAT 3 catalog** | W3C DCAT 3 catalogue at `/.well-known/void` (DCAT-AP 3 / DCAT-AP-NL 3 profiles) — distributions, versions, data services, VoID statistics, PROV-O provenance |
 | **RML mapping** | [RDF Mapping Language](https://rml.io/specs/rml/) — CSV, JSON (JSONPath), XML (XPath) → RDF with template expansion |
 | **OpenAPI docs** | Interactive Swagger UI at `/api-docs/` with JWT Bearer auth; machine-readable spec at `/api-docs/openapi.json` |
 | **AI assistant** *(optional)* | Natural-language → SPARQL, a grounded knowledge-graph chat, and a SHACL drafting assistant — run the **bundled local model** (`docker compose --profile llm up`, GPU-accelerated on NVIDIA) or **bring your own** OpenAI-compatible API (OpenAI, vLLM, Azure, …) via `LLM_GATEWAY_URL`; off by default, hidden until reachable ([docs](docs/api-services.md), [chat](docs/spark.md)) |
@@ -622,7 +622,7 @@ The full list with its caveats is in [docs/geosparql.md](docs/geosparql.md#suppo
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/.well-known/void` | DCAT 2 catalog + VoID statistics (content-negotiated) |
+| `GET` | `/.well-known/void` | DCAT 3 catalog + VoID statistics (content-negotiated) |
 | `GET` | `/resource/*path` | IRI dereference — RDF or 303 redirect to SPA |
 | `GET` | `/api-docs/` | Swagger UI (OpenAPI 3.0) |
 | `GET` | `/api-docs/openapi.json` | Raw OpenAPI spec |
@@ -705,12 +705,14 @@ See [docs/shacl.md](docs/shacl.md) for the full SHACL guide.
 
 ---
 
-## DCAT 2 Catalog
+## DCAT 3 Catalog
 
-The `/.well-known/void` endpoint returns a full **W3C DCAT 2** catalog including:
+The `/.well-known/void` endpoint returns a **W3C DCAT 3** catalog (optionally under the DCAT-AP 3 or DCAT-AP-NL 3 profile, `DCAT_PROFILE`) including:
 
-- `dcat:Catalog` with all registered datasets
-- Per-dataset `dcat:Dataset` with distributions (SPARQL endpoint + Graph Store)
+- `dcat:Catalog` with all registered datasets the caller may see
+- Per-dataset `dcat:Dataset` with distributions (SPARQL endpoint, Graph Store, per-graph downloads, LDES, OGC API), temporal coverage and update frequency
+- Released versions as DCAT 3 versions (`dcat:hasVersion`, `dcat:hasCurrentVersion`, `dcat:previousVersion`)
+- The SPARQL endpoint as a `dcat:DataService` with `dcat:servesDataset`
 - VoID statistics (`void:triples`, `void:distinctSubjects`, `void:properties`) per dataset
 - Organization metadata from dataset owners
 - `dct:conformsTo` linking to SHACL shapes graphs where configured
@@ -727,7 +729,7 @@ curl -H 'Accept: application/ld+json' http://localhost:7878/.well-known/void
 curl 'http://localhost:7878/.well-known/void?format=jsonld'
 ```
 
-See [docs/dcat.md](docs/dcat.md) for the full DCAT 2 guide, and [docs/linked-data-modelling-styleguide.md](docs/linked-data-modelling-styleguide.md) for the canonical linked-data modelling standard (the "holy" styleguide covering SKOS/OWL/SHACL/DCAT/VoID/ADMS conventions, graph roles, IRIs and versioning).
+See [docs/dcat.md](docs/dcat.md) for the full DCAT 3 guide, and [docs/linked-data-modelling-styleguide.md](docs/linked-data-modelling-styleguide.md) for the canonical linked-data modelling standard (the "holy" styleguide covering SKOS/OWL/SHACL/DCAT/VoID/ADMS conventions, graph roles, IRIs and versioning).
 
 ---
 
@@ -846,10 +848,10 @@ open-triplestore
 │   ├── store/          TripleStore (Oxigraph wrapper)
 │   ├── server/         Axum HTTP server — routes, OpenAPI spec, error handling
 │   │   ├── openapi.rs  OpenAPI spec at /api-docs/openapi.json (the UI is a frontend page)
-│   │   └── linked_data.rs  /.well-known/void (DCAT 2), /resource/* (dereference)
+│   │   └── linked_data.rs  /.well-known/void (DCAT 3), /resource/* (dereference)
 │   ├── shacl/          SHACL validation engine, SHACL-AF inference, reports
 │   ├── shaclc/         SHACL Compact Syntax parser (SHACLC → Turtle) and serializer
-│   ├── dcat/           DCAT 2 catalog generator (VoID stats, distributions, PROV-O)
+│   ├── dcat/           DCAT 3 catalog generator (VoID stats, distributions, PROV-O)
 │   ├── rml/            RDF Mapping Language executor
 │   │   └── sources/    CSV, JSON (JSONPath), XML (XPath) source adapters
 │   ├── geo/            GeoSPARQL function registry (GEOS bindings)
@@ -862,7 +864,7 @@ open-triplestore
 │   │   ├── components/ SparqlEditorCM, GraphCanvas, RdfTerm
 │   │   └── pages/      One .svelte file per route
 │   └── dist/           Production build (served by the Rust binary)
-├── docs/               Feature guides (SHACL, DCAT 2, RML, performance, administration)
+├── docs/               Feature guides (SHACL, DCAT 3, RML, performance, administration)
 ├── tests/              Conformance & benchmark test suites
 ├── benches/            Criterion performance benchmarks
 └── scripts/            Test runners, conformance-table generator, benchmark tooling
@@ -883,7 +885,7 @@ licence policy allows no performance claims on a subset.
 | Standard | Suite | Basis | Tests | Notes |
 |---|---|---|---:|---|
 | SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 17 |  |
-| DCAT 3 / DCAT-AP 3 / VoID | `tests/dcat_conformance.rs` | spec-derived | 4 |  |
+| DCAT 3 / DCAT-AP 3 / VoID | `tests/dcat_conformance.rs` | spec-derived | 12 |  |
 | GeoSPARQL 1.1 | `tests/geosparql_conformance.rs` | spec-derived | 143 |  |
 | LDES 1.0 / TREE | `tests/ldes_conformance.rs` | spec-derived | 28 |  |
 | LDP 1.0 (store level) | `tests/ldp_conformance.rs` | spec-derived | 43 |  |
@@ -914,7 +916,7 @@ licence policy allows no performance claims on a subset.
 | SPARQL 1.1 Federated Query | `tests/w3c_sparql11_federation.rs` | **vendored W3C test-suite subset** (`service/` + `syntax-fed/` sections of w3c/rdf-tests, unmodified; manifest-driven, local endpoints) | 1 | runs in CI as a development and regression ratchet against local endpoints; no score is published (W3C test-suite policy); see `docs/conformance/sparql11.md` §Federation |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 
-1047 conformance tests across 31 suites; a further 795 tests in 106 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 6 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation) and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
+1055 conformance tests across 31 suites; a further 797 tests in 106 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 6 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation) and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->
