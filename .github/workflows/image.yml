@@ -1,0 +1,95 @@
+name: Container image
+
+# Builds the release image without pushing it, so a change that breaks the
+# Dockerfile, the image's feature set or a native dependency fails a pull
+# request (or the nightly run), not the next release. release.yml builds the
+# same Dockerfile with the same default CARGO_FEATURES and pushes it.
+#
+# Pull requests run it only when they touch what the image build depends on
+# beyond the source tree the other CI jobs already compile: the Dockerfile and
+# its ignore file, the manifests and lock file, the cargo config (linker
+# flags) and the vendored crates. Everything else is covered by the nightly
+# run.
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - Cargo.toml
+      - Cargo.lock
+      - '**/Cargo.toml'
+      - '.cargo/**'
+      - 'vendor/**'
+      - .github/workflows/image.yml
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: Build and start the container image
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The release-profile build of the full feature set inside the builder
+      # stage needs most of the runner's disk (see the backend job in ci.yml).
+      - name: Free up disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/.ghcup \
+            /usr/local/share/powershell /usr/share/swift
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          df -h /
+
+      # No CARGO_FEATURES build-arg: the Dockerfile's default is the image's
+      # feature set (`full` plus the SQL connectors, and `saml` once the SAML
+      # packaging change lands there), and building any other list here would
+      # test a different image from the one release.yml publishes. Pull requests
+      # build the thin-LTO `release-dev` profile, which links far faster; the
+      # nightly and manual runs build `release`, exactly what ships.
+      - name: Build the image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: open-triplestore:ci
+          build-args: |
+            CARGO_PROFILE=${{ github.event_name == 'pull_request' && 'release-dev' || 'release' }}
+
+      # Start it the way docker-compose.yml does and wait for the liveness
+      # probe: a missing runtime library or a binary that cannot start fails
+      # here. The demo seed is off so the boot does no downloads.
+      - name: Start the image and wait for /livez
+        run: |
+          docker run -d --name ots -p 127.0.0.1:7878:7878 \
+            -e SEED_STANDARDS_DEMO=false -e SEED_IFC_URL= \
+            open-triplestore:ci
+          for i in $(seq 1 90); do
+            if curl -sf http://127.0.0.1:7878/livez; then
+              echo
+              echo "The image answers /livez after ${i} s."
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' ots)" != true ]; then
+              echo "::error::The container exited."
+              break
+            fi
+            sleep 1
+          done
+          docker logs ots
+          exit 1
+
+      - name: Container log
+        if: always()
+        run: docker logs ots 2>&1 | tail -n 200 || true
