@@ -1308,6 +1308,7 @@ pub async fn refresh(
 /// the IdP has a Single Logout endpoint the answer is `200` with
 /// `{"saml_logout_url": …}`, where the browser goes next to end the IdP
 /// session. Access tokens already issued stay valid until they expire.
+#[allow(clippy::too_many_arguments)] // axum extractors
 pub async fn logout(
     State(db): State<Arc<AuthDb>>,
     State(jwt_config): State<Arc<JwtConfig>>,
