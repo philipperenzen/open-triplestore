@@ -252,14 +252,17 @@ property path, and `source_constraint` is a short label such as
 A test or partial run answers `"run_id": null, "ran_at": null` and adds
 `"test": true` and `"partial"`. The 422 body of a write gate uses
 camelCase keys instead (`focusNode`, `sourceShape`, `sourceConstraint`,
-`sourceConstraintComponent`).
+`sourceConstraintComponent`). A result of a SPARQL constraint or validator
+that declares [result annotations](#result-annotations-shresultannotation-shacl-af-4)
+also has an `annotations` list; no other result has the key.
 
 The report RDF the run writes (below) is the W3C form: typed `sh:focusNode`
 and `sh:value` terms (datatype and language kept), `sh:resultPath` as a SHACL
 path structure (`[ sh:inversePath ex:p ]`, RDF lists for sequences),
 `sh:sourceConstraintComponent` as the component IRI, `sh:sourceConstraint` for
-`sh:sparql` constraints, and the declared `sh:severity` IRI, custom ones
-included.
+`sh:sparql` constraints (the `sh:sparql` node) and expression constraints (the
+node expression), the declared `sh:severity` IRI, custom ones included, and
+any result annotations.
 
 ### What a run reads, and who sees its report
 
@@ -727,8 +730,40 @@ ex:DutchCitizenShape a sh:NodeShape ;
 Both read the run's data graphs only. A `sh:target` with neither a `sh:select`
 nor a `sh:SPARQLTargetType` type fails the shapes graph: the engine cannot
 compute its focus nodes, and a shape that validated nothing would pass every
-write. `sh:resultAnnotation` (§4) is not supported yet: the report model has
-no place for the extra properties.
+write.
+
+### Result annotations (`sh:resultAnnotation`, SHACL-AF §4)
+
+The node that carries a `sh:sparql` constraint's query, or a component
+validator's `sh:select` / `sh:ask`, can declare extra properties for the
+results that query produces:
+
+```turtle
+ex:AnnotationExample a sh:NodeShape ;
+  sh:targetNode ex:ExampleResource ;
+  sh:sparql [
+    sh:resultAnnotation [ sh:annotationProperty ex:time ; sh:annotationVarName "time" ] ;
+    sh:select """
+      SELECT $this ?message ?time WHERE {
+        BIND (CONCAT("The ", "message.") AS ?message) .
+        BIND (NOW() AS ?time) .
+      }""" ] .
+```
+
+* Each result of a solution gets `sh:annotationProperty` set to the solution's
+  binding of `sh:annotationVarName` — or, without one, of the property's local
+  name (`ex:time` → `?time`).
+* When that variable is unbound, the annotation's `sh:annotationValue`s are
+  used instead, if it has any. An `sh:ask` validator has no solution to read,
+  so its results get the `sh:annotationValue`s only.
+* The RDF report writes each annotation as a property of the
+  `sh:ValidationResult` node, typed (`ex:time "…"^^xsd:dateTime`). The JSON
+  result lists them under `annotations`, as `{"property": IRI, "value":
+  display string}`, and so does the 422 body of a write gate; results without
+  annotations have no `annotations` key.
+* An annotation that is a literal, has no or several `sh:annotationProperty`
+  values (or one that is not an IRI), or more than one `sh:annotationVarName`
+  (or one that is not a string) fails the shapes graph.
 
 ### Node expressions (SHACL-AF §6)
 
@@ -757,8 +792,9 @@ evaluation. Paths read the run's data graphs, like every other path.
 `sh:expression` holds a node expression that must produce exactly `{ true }`
 for each value node (the focus node on a node shape), evaluated with that node
 as its focus node. Anything else — `false`, another value, several values, or
-nothing — is a result whose `sh:value` is the value node; the expression
-node's `sh:message` is the result message:
+nothing — is a result whose `sh:value` is the value node and whose
+`sh:sourceConstraint` is the node expression; the expression node's
+`sh:message` is the result message:
 
 ```turtle
 ex:atLeast a sh:SPARQLFunction ;

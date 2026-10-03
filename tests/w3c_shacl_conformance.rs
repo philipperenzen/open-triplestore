@@ -11,9 +11,10 @@
 //! `sht:shapesGraph <>` reference the file itself), runs our validator and
 //! compares `sh:conforms` and the **multiset of results**, each on focus
 //! node, `sh:resultPath` (as a path structure), `sh:value`, `sh:sourceShape`,
-//! `sh:sourceConstraintComponent`, `sh:resultSeverity` and
-//! `sh:sourceConstraint` — everything but `sh:resultMessage`, whose wording the
-//! spec leaves to the processor. Our side is the RDF report `report_rdf`
+//! `sh:sourceConstraintComponent`, `sh:resultSeverity`, `sh:sourceConstraint`
+//! and any other result property — everything but `sh:resultMessage`, whose
+//! wording the spec leaves to the processor (`tests/common/shacl_report.rs`,
+//! shared with the SHACL-AF runner). Our side is the RDF report `report_rdf`
 //! writes, loaded back, so the RDF serialisation is under test too. Blank nodes
 //! of the data graph (focus nodes, values) are wildcards; shape and constraint
 //! blank nodes must be the very node of the shapes graph. (Until 2026-10-02 the
@@ -31,14 +32,14 @@
 //! report as a failure: such a test passes when validation fails with that
 //! failure, and fails if it ever produces a report.
 
+#[path = "common/shacl_report.rs"]
+mod shacl_report;
+
 use open_triplestore::shacl::report::ValidationReport;
 use open_triplestore::shacl::validate;
-use open_triplestore::shacl_studio::report_rdf::report_to_turtle;
 use open_triplestore::store::TripleStore;
 use oxigraph::io::RdfFormat;
-use oxigraph::model::Term;
 use oxigraph::sparql::QueryResults;
-use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 /// The two vendored sections: SHACL Core, and SHACL-SPARQL (sh:sparql
@@ -262,148 +263,6 @@ fn validated(case: &Case) -> Result<ValidationReport, Outcome> {
     }
 }
 
-const SH: &str = "http://www.w3.org/ns/shacl#";
-const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
-
-/// The triples of one graph, by subject.
-type Triples = HashMap<Term, Vec<(String, Term)>>;
-
-fn graph_triples(store: &TripleStore, graph: &str) -> Triples {
-    let mut out: Triples = HashMap::new();
-    let q = format!("SELECT ?s ?p ?o WHERE {{ GRAPH <{graph}> {{ ?s ?p ?o }} }}");
-    if let Ok(QueryResults::Solutions(sols)) = store.query(&q) {
-        for sol in sols.flatten() {
-            if let (Some(s), Some(Term::NamedNode(p)), Some(o)) =
-                (sol.get("s"), sol.get("p"), sol.get("o"))
-            {
-                out.entry(s.clone())
-                    .or_default()
-                    .push((p.as_str().to_string(), o.clone()));
-            }
-        }
-    }
-    out
-}
-
-fn objects<'a>(triples: &'a Triples, s: &Term, p: &str) -> Vec<&'a Term> {
-    triples
-        .get(s)
-        .map(|po| po.iter().filter(|(q, _)| q == p).map(|(_, o)| o).collect())
-        .unwrap_or_default()
-}
-
-/// The exact term: shapes-graph nodes must be the same node.
-fn exact_key(t: &Term) -> String {
-    t.to_string()
-}
-
-/// Data-graph nodes: a blank node matches any blank node.
-fn wildcard_key(t: &Term) -> String {
-    match t {
-        Term::BlankNode(_) => "_:".to_string(),
-        other => other.to_string(),
-    }
-}
-
-/// The members of an RDF list.
-fn list_items<'a>(triples: &'a Triples, mut head: &'a Term) -> Vec<&'a Term> {
-    let mut items = Vec::new();
-    while let Some(first) = objects(triples, head, &format!("{RDF}first")).first() {
-        items.push(*first);
-        match objects(triples, head, &format!("{RDF}rest")).first() {
-            Some(rest) => head = rest,
-            None => break,
-        }
-        if items.len() > 64 {
-            break;
-        }
-    }
-    items
-}
-
-/// A SHACL path structure as a canonical, fully parenthesised string.
-fn path_key(triples: &Triples, t: &Term, depth: usize) -> String {
-    if depth > 16 {
-        return "…".to_string();
-    }
-    let Term::BlankNode(_) = t else {
-        return exact_key(t);
-    };
-    let sub = |p: &str| -> Option<String> {
-        objects(triples, t, &format!("{SH}{p}"))
-            .first()
-            .map(|o| path_key(triples, o, depth + 1))
-    };
-    let list = |head: &Term, sep: &str| -> String {
-        list_items(triples, head)
-            .into_iter()
-            .map(|i| path_key(triples, i, depth + 1))
-            .collect::<Vec<_>>()
-            .join(sep)
-    };
-    if !objects(triples, t, &format!("{RDF}first")).is_empty() {
-        return format!("({})", list(t, "/"));
-    }
-    if let Some(alt) = objects(triples, t, &format!("{SH}alternativePath")).first() {
-        return format!("({})", list(alt, "|"));
-    }
-    for (p, fmt) in [
-        ("inversePath", "^"),
-        ("zeroOrMorePath", "*"),
-        ("oneOrMorePath", "+"),
-        ("zeroOrOnePath", "?"),
-    ] {
-        if let Some(inner) = sub(p) {
-            return if fmt == "^" {
-                format!("^({inner})")
-            } else {
-                format!("({inner}){fmt}")
-            };
-        }
-    }
-    "_:?".to_string()
-}
-
-/// The multiset of results of the report(s) selected by `report_pattern`
-/// (a SPARQL pattern binding `?res`) in `graph`, each as a comparable key over
-/// everything but `sh:resultMessage`.
-fn result_keys(store: &TripleStore, graph: &str, report_pattern: &str) -> BTreeMap<String, usize> {
-    let triples = graph_triples(store, graph);
-    let q = format!(
-        "PREFIX sht: <http://www.w3.org/ns/shacl-test#> \
-         PREFIX mf: <http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#> \
-         PREFIX sh: <http://www.w3.org/ns/shacl#> \
-         SELECT DISTINCT ?res WHERE {{ GRAPH <{graph}> {{ {report_pattern} }} }}"
-    );
-    let mut out = BTreeMap::new();
-    let Ok(QueryResults::Solutions(sols)) = store.query(&q) else {
-        return out;
-    };
-    for sol in sols.flatten() {
-        let Some(res) = sol.get("res") else { continue };
-        let field = |p: &str, key: &dyn Fn(&Term) -> String| -> String {
-            let mut v: Vec<String> = objects(&triples, res, &format!("{SH}{p}"))
-                .into_iter()
-                .map(key)
-                .collect();
-            v.sort();
-            v.join(",")
-        };
-        let key = format!(
-            "focus={} path={} value={} shape={} component={} severity={} constraint={}",
-            field("focusNode", &wildcard_key),
-            field("resultPath", &|t| path_key(&triples, t, 0)),
-            field("value", &wildcard_key),
-            field("sourceShape", &exact_key),
-            field("sourceConstraintComponent", &exact_key),
-            field("resultSeverity", &exact_key),
-            field("sourceConstraint", &exact_key),
-        );
-        *out.entry(key).or_insert(0) += 1;
-    }
-    out
-}
-
 /// `sh:conforms` and the full result multiset, compared through the RDF report
 /// our writer produces.
 fn run_case(case: &Case) -> Outcome {
@@ -411,43 +270,16 @@ fn run_case(case: &Case) -> Outcome {
         Ok(v) => v,
         Err(outcome) => return outcome,
     };
-    let want = result_keys(
+    match shacl_report::compare_results(
         &case.store,
+        &report,
         "urn:t:shapes",
         "?t a sht:Validate ; mf:result ?r . ?r sh:result ?res",
-    );
-    let ttl = report_to_turtle(&report, "urn:t:report#run");
-    if let Err(e) = case.store.load_str_with_base(
-        &ttl,
-        RdfFormat::Turtle,
         "urn:t:report",
-        Some("urn:t:report"),
     ) {
-        return Outcome::Fail(format!("our report RDF does not load: {e}"));
+        Ok(()) => Outcome::Pass,
+        Err(diff) => Outcome::Fail(diff),
     }
-    let got = result_keys(
-        &case.store,
-        "urn:t:report",
-        "?r a sh:ValidationReport ; sh:result ?res",
-    );
-    if got == want {
-        return Outcome::Pass;
-    }
-    let diff = |a: &BTreeMap<String, usize>, b: &BTreeMap<String, usize>| -> Vec<String> {
-        a.iter()
-            .filter_map(|(k, n)| {
-                let m = b.get(k).copied().unwrap_or(0);
-                (*n > m).then(|| format!("{}x {k}", n - m))
-            })
-            .collect()
-    };
-    Outcome::Fail(format!(
-        "results differ ({} expected, {} got)\n      missing: {:?}\n      unexpected: {:?}",
-        want.values().sum::<usize>(),
-        got.values().sum::<usize>(),
-        diff(&want, &got),
-        diff(&got, &want),
-    ))
 }
 
 /// What a pass over every suite file found.

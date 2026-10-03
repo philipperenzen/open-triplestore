@@ -2079,3 +2079,213 @@ ex:S a sh:NodeShape ; sh:targetNode ex:t ;
     assert_eq!(values.len(), 1, "{:?}", r.results);
     assert!(values[0].starts_with("\"2\""), "{:?}", r.results);
 }
+
+// ─── SHACL-AF: result annotations (§4) ──────────────────────────────────────
+//
+// `sh:resultAnnotation` on the node of a SPARQL constraint's or validator's
+// query adds a property to every result that query produces: the solution's
+// binding of `sh:annotationVarName` (else of the property's local name), or
+// the `sh:annotationValue` defaults when it is unbound.
+
+/// The (property, value) display pairs of a result's annotations, sorted.
+fn annotations(r: &open_triplestore::shacl::report::ValidationResult) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = r
+        .annotations
+        .iter()
+        .map(|a| (a.property.clone(), a.value.clone()))
+        .collect();
+    out.sort();
+    out
+}
+
+/// After the Note's example: an annotation by variable name, one by the
+/// property's local name, and a default for an unbound variable — in the
+/// JSON result, the typed terms and the RDF report.
+#[test]
+fn result_annotations_on_sparql_constraints() {
+    use open_triplestore::shacl_studio::report_rdf::report_to_turtle;
+    let shapes = r#"
+      ex:AnnotationExample a sh:NodeShape ;
+        sh:targetNode ex:ExampleResource ;
+        sh:sparql [
+          sh:resultAnnotation [ sh:annotationProperty ex:time ; sh:annotationVarName "time" ] ,
+                              [ sh:annotationProperty ex:size ] ,
+                              [ sh:annotationProperty ex:origin ; sh:annotationVarName "nowhere" ;
+                                sh:annotationValue ex:Default , "fallback" ] ;
+          sh:select """
+            SELECT $this ?message ?time ?size
+            WHERE {
+              BIND (CONCAT("The ", "message.") AS ?message) .
+              BIND ("2015-03-27T10:58:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> AS ?time) .
+              BIND (42 AS ?size) .
+            }""" ;
+        ] ;
+        sh:property [ sh:path ex:name ; sh:minCount 1 ] ."#;
+    let r = run(shapes, "");
+    assert!(!r.conforms);
+    let sparql = r
+        .results
+        .iter()
+        .find(|v| v.source_constraint == "sh:SPARQLConstraint")
+        .expect("the SPARQL constraint's result");
+    assert_eq!(sparql.message, "The message.");
+    assert_eq!(
+        annotations(sparql),
+        vec![
+            ("http://example.org/origin".into(), "fallback".into()),
+            (
+                "http://example.org/origin".into(),
+                "http://example.org/Default".into()
+            ),
+            ("http://example.org/size".into(), "42".into()),
+            (
+                "http://example.org/time".into(),
+                "2015-03-27T10:58:00".into()
+            ),
+        ]
+    );
+    assert_eq!(sparql.terms.annotations.len(), 4);
+    // JSON: present where declared, omitted elsewhere.
+    let json = serde_json::to_value(sparql).unwrap();
+    assert_eq!(
+        json["annotations"].as_array().map(Vec::len),
+        Some(4),
+        "{json}"
+    );
+    let min_count = r
+        .results
+        .iter()
+        .find(|v| v.source_constraint.starts_with("sh:minCount"))
+        .expect("the minCount result");
+    assert!(min_count.annotations.is_empty());
+    let json = serde_json::to_value(min_count).unwrap();
+    assert!(json.get("annotations").is_none(), "{json}");
+    // A result read back from JSON keeps them.
+    let back: open_triplestore::shacl::report::ValidationResult =
+        serde_json::from_value(serde_json::to_value(sparql).unwrap()).unwrap();
+    assert_eq!(annotations(&back), annotations(sparql));
+
+    // The RDF report writes them typed.
+    let ttl = report_to_turtle(&r, "urn:t:report#run");
+    let store = TripleStore::in_memory().unwrap();
+    store
+        .load_str(&ttl, RdfFormat::Turtle, Some("urn:t:report"))
+        .unwrap();
+    let ask = |pattern: &str| {
+        matches!(
+            store.query(&format!(
+                "PREFIX sh: <http://www.w3.org/ns/shacl#> PREFIX ex: <http://example.org/> \
+                 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> \
+                 ASK {{ GRAPH <urn:t:report> {{ {pattern} }} }}"
+            )),
+            Ok(oxigraph::sparql::QueryResults::Boolean(true))
+        )
+    };
+    assert!(ask(
+        "?res sh:sourceConstraintComponent sh:SPARQLConstraintComponent ; \
+         ex:time \"2015-03-27T10:58:00\"^^xsd:dateTime ; ex:size 42 ; \
+         ex:origin ex:Default , \"fallback\""
+    ));
+    assert!(ask(
+        "?res sh:sourceConstraintComponent sh:MinCountConstraintComponent \
+         FILTER NOT EXISTS { ?res ex:time ?t }"
+    ));
+}
+
+/// Result annotations on a constraint component's validators: a SELECT
+/// validator reads its solutions, an ASK validator (which has none) gets the
+/// defaults.
+#[test]
+fn result_annotations_on_component_validators() {
+    let shapes = r#"
+      ex:SelectComponent a sh:ConstraintComponent ;
+        sh:parameter [ sh:path ex:forbidden ] ;
+        sh:validator [
+          a sh:SPARQLSelectValidator ;
+          sh:resultAnnotation [ sh:annotationProperty ex:culprit ; sh:annotationVarName "p" ] ;
+          sh:select """SELECT $this ?p WHERE { $this ?p $forbidden }""" ] .
+      ex:AskComponent a sh:ConstraintComponent ;
+        sh:parameter [ sh:path ex:mustBe ] ;
+        sh:propertyValidator [
+          a sh:SPARQLAskValidator ;
+          sh:resultAnnotation [ sh:annotationProperty ex:hint ; sh:annotationValue "check the value" ] ;
+          sh:ask """ASK { FILTER ($value = $mustBe) }""" ] .
+      ex:S a sh:NodeShape ; sh:targetNode ex:a ;
+        ex:forbidden ex:Bad ;
+        sh:property [ sh:path ex:colour ; ex:mustBe "red" ] ."#;
+    let data = r#"ex:a ex:likes ex:Bad ; ex:colour "blue" ."#;
+    let r = run(shapes, data);
+    let of = |component: &str| {
+        r.results
+            .iter()
+            .find(|v| v.source_constraint_component.ends_with(component))
+            .unwrap_or_else(|| panic!("no {component} result in {:?}", r.results))
+    };
+    assert_eq!(
+        annotations(of("SelectComponent")),
+        vec![(
+            "http://example.org/culprit".into(),
+            "http://example.org/likes".into()
+        )]
+    );
+    assert_eq!(
+        annotations(of("AskComponent")),
+        vec![("http://example.org/hint".into(), "check the value".into())]
+    );
+}
+
+/// A result annotation that breaks the Note's syntax rules fails the shapes
+/// graph instead of being dropped.
+#[test]
+fn ill_formed_result_annotations_fail_the_shapes_graph() {
+    for (annotation, needle) in [
+        ("[ sh:annotationVarName \"x\" ]", "no sh:annotationProperty"),
+        ("[ sh:annotationProperty \"ex:p\" ]", "must be an IRI"),
+        (
+            "[ sh:annotationProperty ex:p , ex:q ]",
+            "more than one sh:annotationProperty",
+        ),
+        (
+            "[ sh:annotationProperty ex:p ; sh:annotationVarName \"a\" , \"b\" ]",
+            "more than one sh:annotationVarName",
+        ),
+        (
+            "[ sh:annotationProperty ex:p ; sh:annotationVarName 7 ]",
+            "xsd:string",
+        ),
+        ("\"ex:p\"", "is a literal"),
+    ] {
+        let shapes = format!(
+            "ex:S a sh:NodeShape ; sh:targetNode ex:a ; sh:sparql [ \
+               sh:resultAnnotation {annotation} ; \
+               sh:select \"SELECT $this WHERE {{ }}\" ] ."
+        );
+        match try_run(&shapes, "") {
+            Err(e) => assert!(e.contains(needle), "{annotation}: {e}"),
+            Ok(r) => panic!(
+                "{annotation}: expected a failure, got conforms={}",
+                r.conforms
+            ),
+        }
+    }
+}
+
+/// An expression constraint's result names the node expression as its
+/// `sh:sourceConstraint` (SHACL-AF §7), as TopQuadrant's booleans-001 expects.
+#[test]
+fn expression_results_name_the_expression() {
+    let r = run(
+        "ex:S a sh:NodeShape ; sh:expression sh:this ; sh:targetNode true, false .",
+        "",
+    );
+    assert_eq!(r.results.len(), 1, "{:?}", r.results);
+    let res = &r.results[0];
+    assert_eq!(
+        res.source_constraint_component,
+        "http://www.w3.org/ns/shacl#ExpressionConstraintComponent"
+    );
+    assert_eq!(
+        res.terms.source_constraint.as_ref().map(|t| t.to_string()),
+        Some("<http://www.w3.org/ns/shacl#this>".to_string())
+    );
+}

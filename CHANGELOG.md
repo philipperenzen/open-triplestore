@@ -110,8 +110,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **TopQuadrant's SHACL-AF tests run in CI.** The `expression`, `function`,
   `rules` and `target` tests of TopQuadrant/shacl (Apache-2.0, commit
   `6687b48`) are vendored under `tests/fixtures/shacl-af-topquadrant/` and run
-  by `tests/shacl_af_corpus.rs` as a two-way ratchet: 9 of 10 cases pass
-  (`docs/conformance/shacl.md`).
+  by `tests/shacl_af_corpus.rs` as a two-way ratchet, validation cases at full
+  report equality like the W3C suite: 9 of 10 cases pass. The tenth,
+  `target/sparqlTarget-001`, expects TopBraid's fallback to the file's Turtle
+  prefixes, which the SHACL prefix mechanism (§5.2.1) does not have; it is
+  counted as expecting behaviour outside the spec, and passes when validation
+  fails as the spec requires (`docs/conformance/shacl.md`).
+- **SHACL-AF result annotations (`sh:resultAnnotation`).** A `sh:sparql`
+  constraint or a component validator can declare properties to add to its
+  results (SHACL-AF §4): the value of a variable of the solution, or the
+  annotation's `sh:annotationValue` when it is unbound. They are written into
+  the RDF report as properties of the result node, typed, and listed in the
+  JSON result and the write gate's 422 body as `annotations`
+  (`[{"property", "value"}]`); a result without annotations has no such key,
+  so other JSON is unchanged. An ill-formed annotation fails the shapes graph.
 - **RDF Patch logs per dataset.** Each dataset has an
   [RDF Patch log](https://afs.github.io/rdf-delta/rdf-patch-logs.html) at
   `/api/datasets/{id}/log`: `POST` appends a patch (exactly one `H id`, at
@@ -486,7 +498,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   graph in the old form now reports every focus node** whose values are not
   `true`. Rewrite it as a function expression (`docs/shacl.md`, *Expression
   constraints*) or as a property shape; the reference example
-  `tests/fixtures/example-bridge/shapes-af.ttl` shows the first.
+  `tests/fixtures/example-bridge/shapes-af.ttl` shows the first. In the RDF
+  report each result names the node expression as its `sh:sourceConstraint`
+  (SHACL-AF §7).
 - **More SHACL-AF declarations fail the shapes graph instead of being
   ignored.** A `sh:SPARQLFunction` whose body does not parse, whose `sh:select`
   has other than one result variable, or which has both or neither of
