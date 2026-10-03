@@ -3121,7 +3121,11 @@ mod tests {
                 digest,
                 "{id} {version} was reloaded"
             );
-            if vocab(id).versions.iter().any(|v| v.version == version && v.file.third_party) {
+            if vocab(id)
+                .versions
+                .iter()
+                .any(|v| v.version == version && v.file.third_party)
+            {
                 assert!(record(&state, id, version).unchanged, "{id} {version}");
             }
             assert_eq!(
