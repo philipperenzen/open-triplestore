@@ -17,7 +17,7 @@ When a backup directory is configured, admins can create, list, and verify backu
 
 ## Rate limiting
 
-Requests are rate-limited per client IP, with stricter quotas on authentication endpoints to resist brute-force attacks and separate quotas for query and import traffic. When running behind a reverse proxy, configure the trusted proxy ranges so limits apply per real client IP rather than the proxy's own address.
+Requests are rate-limited per client IP, with stricter quotas on authentication endpoints to resist brute-force attacks and separate quotas for query, import and map/3D viewer traffic (viewer feed, geo stats, public asset downloads, 3D Tiles). When running behind a reverse proxy, configure the trusted proxy ranges (`TRUSTED_PROXY_CIDRS`) so limits apply per real client IP rather than the proxy's own address. The same client IP is recorded in the audit log and keys the guest budget on the AI endpoints; `X-Forwarded-For` from any peer outside those ranges is ignored.
 
 For trusted/internal deployments or automated test harnesses that drive many requests from a single IP, the limiter can be switched off with `RATE_LIMIT_DISABLED=true` (see [administration.md](administration.md)). It is secure by default — leave it unset on any public server.
 

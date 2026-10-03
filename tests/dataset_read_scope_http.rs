@@ -412,6 +412,112 @@ async fn tiles3d_content_excludes_private_features_from_viewer() {
     );
 }
 
+// ─── 3D Tiles: output, cache and write invalidation ──────────────────────────
+
+#[cfg(feature = "geometry3d")]
+#[tokio::test]
+async fn tiles3d_tileset_and_glb_follow_writes() {
+    let state = setup();
+    let app = test_app(state.clone());
+    let tileset_uri = "/api/datasets/ds1/3dtiles/tileset.json";
+    let glb_uri = "/api/datasets/ds1/3dtiles/content.glb";
+    const LATE: &str = "http://example.org/el/LATE_ARRIVAL_MARKER";
+
+    // The region of the anonymous caller's one public square, grounded flat —
+    // exactly what the triangle-based pass produced before it used boxes.
+    let (status, body) = get_text(&app, tileset_uri, None).await;
+    assert_eq!(status, StatusCode::OK, "tileset should succeed: {body}");
+    let tileset: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let d = 0.001_f64.to_radians();
+    assert_eq!(
+        tileset["root"]["boundingVolume"]["region"],
+        serde_json::json!([0.0, 0.0, d, d, 0.0, 0.0])
+    );
+    assert_eq!(
+        tileset["root"]["content"]["uri"],
+        "/api/datasets/ds1/3dtiles/content.glb"
+    );
+    assert!(
+        tileset["asset"].get("extras").is_none(),
+        "far under the cap, nothing is flagged: {tileset}"
+    );
+
+    let (status, glb) = get_bytes(&app, glb_uri, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!String::from_utf8_lossy(&glb).contains("LATE_ARRIVAL_MARKER"));
+    // Asked again before any write: the same bytes (served from the cache).
+    assert_eq!(get_bytes(&app, glb_uri, None).await.1, glb);
+
+    // A write lands: both bodies must reflect it on the next request.
+    seed_element(
+        &state,
+        PUB_GRAPH,
+        LATE,
+        "POLYGON((0.002 0.002, 0.003 0.002, 0.003 0.003, 0.002 0.003, 0.002 0.002))",
+    );
+    let (_, body) = get_text(&app, tileset_uri, None).await;
+    let tileset: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let d3 = 0.003_f64.to_radians();
+    assert_eq!(
+        tileset["root"]["boundingVolume"]["region"],
+        serde_json::json!([0.0, 0.0, d3, d3, 0.0, 0.0]),
+        "the region grows with the new feature"
+    );
+    let (_, glb) = get_bytes(&app, glb_uri, None).await;
+    let blob = String::from_utf8_lossy(&glb);
+    assert!(
+        blob.contains("LATE_ARRIVAL_MARKER"),
+        "the GLB carries the new feature"
+    );
+    assert!(!blob.contains(PRIVATE_MARKER), "and still no private one");
+}
+
+// ─── Rate limiting of the map / 3D viewer surface ─────────────────────────────
+
+#[tokio::test]
+async fn viewer_routes_are_rate_limited_per_ip() {
+    let app = test_app(setup());
+
+    // Every oneshot request comes from the same (unknown) peer, so they share
+    // one bucket: burst 40, then one a second.
+    let mut limited = None;
+    for i in 0..60 {
+        let req = Request::builder()
+            .uri("/api/datasets/ds1/geo-stats")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+            limited = Some((i, resp));
+            break;
+        }
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+    let (i, resp) = limited.expect("a burst of 60 geo-stats requests must be throttled");
+    assert!(i >= 40, "the burst allowance holds: throttled after {i}");
+    assert!(
+        resp.headers().contains_key(header::RETRY_AFTER),
+        "a 429 tells the client when to come back"
+    );
+
+    // The rest of the viewer surface shares that bucket…
+    for uri in [
+        "/api/datasets/ds1/viewer-feed",
+        "/api/geo-stats?datasets=ds1",
+        "/api/datasets/ds1/assets/none/download",
+        #[cfg(feature = "geometry3d")]
+        "/api/datasets/ds1/3dtiles/tileset.json",
+        #[cfg(feature = "geometry3d")]
+        "/api/datasets/ds1/3dtiles/content.glb",
+    ] {
+        let (status, _) = get_bytes(&app, uri, None).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{uri}");
+    }
+    // …but the dataset cards' images are not in it.
+    let (status, _) = get_bytes(&app, "/api/datasets/ds1/image", None).await;
+    assert_ne!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
 // ─── Container export (gated on the ZIP feature that backs the export) ────────
 
 #[cfg(feature = "asset-archive")]

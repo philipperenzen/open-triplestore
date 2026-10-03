@@ -8,6 +8,9 @@ node_modules/
 
 # ─── Local data & runtime state ─────────────────────────────────────────────
 /data
+# A machine's own Compose tweaks (e.g. the `release-dev` profile, fewer build
+# jobs); Compose merges this file automatically, so it must not ship.
+/docker-compose.override.yml
 *.db
 *.sqlite
 *.sqlite3

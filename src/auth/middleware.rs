@@ -12,6 +12,7 @@ use super::db::AuthDb;
 use super::jwt::{hash_token, verify_token, JwtConfig};
 use super::models::{AccessLevel, ApiScope, SystemRole};
 use super::oidc_rs::AuthExt;
+use crate::server::client_ip::ClientIp;
 
 /// Authenticated user extracted from JWT token or API token.
 #[derive(Debug, Clone)]
@@ -24,10 +25,10 @@ pub struct AuthenticatedUser {
     /// this is `true` only when the token was issued with `write` or `admin` scope (M-8).
     pub write_access: bool,
     /// True if this principal may exchange itself for a long-lived API token at
-    /// `POST /api/auth/tokens`. False for OIDC access tokens under the default
-    /// policy: a credential delegated to a client (possibly for read-only
-    /// scopes) must not be upgradable into permanent account access. See
-    /// [`crate::auth::policy::OidcSessionPolicy`].
+    /// `POST /api/auth/tokens`. False for OIDC access tokens — ours and the
+    /// external IdP's — under the default policy: a credential delegated to a
+    /// client (possibly for read-only scopes) must not be upgradable into
+    /// permanent account access. See [`crate::auth::policy::OidcSessionPolicy`].
     pub can_mint_api_tokens: bool,
     /// The scopes an API token was issued with. Empty for a session, whose
     /// authority is the user's own; a resource scope (`sources:read`,
@@ -236,12 +237,19 @@ async fn resolve_oidc_token(
         return Err((StatusCode::UNAUTHORIZED, "User account is deactivated").into_response());
     }
 
+    // An IdP token is a delegation too: whichever client holds it for this
+    // audience may present it. By default (`OTS_OIDC_IDP_TOKEN_POLICY=session`) it
+    // writes like an interactive session but may not mint a long-lived API
+    // token, which would turn that delegation into permanent account access.
+    // The same rule `OTS_OIDC_SESSION_POLICY` sets for our own provider tokens,
+    // configured separately because the two are issued to different clients.
+    let policy = crate::auth::policy::idp_token_policy();
     Ok(AuthenticatedUser {
         user_id: user.id,
         role: user.role,
         can_publish: user.can_publish,
-        write_access: true, // interactive (OIDC) sessions always have write access
-        can_mint_api_tokens: true,
+        write_access: policy.allows_idp_write(&claims.scope()),
+        can_mint_api_tokens: policy.allows_api_token_minting(),
         scopes: Vec::new(),
     }
     .clamped_to_role_policy())
@@ -465,14 +473,14 @@ struct DenialContext {
 }
 
 impl DenialContext {
-    fn capture(req: &Request) -> Self {
+    fn capture(req: &Request, client_ip: ClientIp) -> Self {
         let user = req.extensions().get::<AuthenticatedUser>();
         Self {
             method: req.method().as_str().to_string(),
             path: req.uri().path().to_string(),
             actor_id: user.map(|u| u.user_id.clone()),
             actor_role: user.map(|u| u.role.as_str().to_string()),
-            ip: super::audit::client_ip(req.headers(), None),
+            ip: client_ip.as_string(),
             request_id: req
                 .extensions()
                 .get::<crate::server::RequestId>()
@@ -521,6 +529,7 @@ pub async fn require_auth(
     State(base_url): State<crate::server::BaseUrl>,
     State(audit): State<Arc<AuditLogger>>,
     #[cfg(feature = "ldp")] State(app_state): State<crate::server::AppState>,
+    client_ip: ClientIp,
     mut req: Request,
     next: Next,
 ) -> Result<Response, Response> {
@@ -536,7 +545,7 @@ pub async fn require_auth(
             req.method(),
             req.uri().path(),
         ) {
-            let ctx = DenialContext::capture(&req);
+            let ctx = DenialContext::capture(&req, client_ip);
             let resp = next.run(req).await;
             audit_forbidden(&audit, &ctx, &resp);
             return Ok(resp);
@@ -559,7 +568,7 @@ pub async fn require_auth(
 
     // Capture identity/endpoint context, then audit if the handler (or an inner
     // guard) denies with 403 (see `audit_forbidden`).
-    let ctx = DenialContext::capture(&req);
+    let ctx = DenialContext::capture(&req, client_ip);
     let resp = next.run(req).await;
     audit_forbidden(&audit, &ctx, &resp);
     Ok(resp)
@@ -575,6 +584,7 @@ pub async fn optional_auth(
     State(provider): State<crate::server::OidcProviderState>,
     State(base_url): State<crate::server::BaseUrl>,
     State(audit): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     mut req: Request,
     next: Next,
 ) -> Response {
@@ -600,7 +610,7 @@ pub async fn optional_auth(
 
     // Audit any downstream 403 — including anonymous cross-tenant read probes on
     // visibility-scoped routes that this middleware lets through unauthenticated.
-    let ctx = DenialContext::capture(&req);
+    let ctx = DenialContext::capture(&req, client_ip);
     let resp = next.run(req).await;
     audit_forbidden(&audit, &ctx, &resp);
     resp

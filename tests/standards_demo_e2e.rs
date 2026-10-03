@@ -68,6 +68,7 @@ fn test_state() -> AppState {
         query_timeout_secs: 30,
         write_timeout_secs: 120,
         secure_cookies: false,
+        trusted_proxies: open_triplestore::server::client_ip::TrustedProxies::default(),
         browse_semaphore: Arc::new(tokio::sync::Semaphore::new(64)),
         expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         #[cfg(feature = "text-search")]
@@ -81,6 +82,7 @@ fn test_state() -> AppState {
         vocab_catalog: Arc::new(open_triplestore::vocab_search::catalog::VocabCatalog::bundled()),
         vocab_registry_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
+        dl: Default::default(),
         #[cfg(feature = "vocab-search")]
         vocab_engine: None,
     }

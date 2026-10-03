@@ -78,9 +78,9 @@ You **MUST NOT** mix layers in a single graph (see §2). A class definition, a p
 
 The triplestore is quad-based: every triple lives in a **named graph**, and every named graph has a **role**. Roles are the operational form of the layered model.
 
-### 2.1 The six graph roles
+### 2.1 The graph roles
 
-The store recognises exactly six roles (`GraphKind` in [`src/auth/models.rs`](../src/auth/models.rs)):
+The store recognises ten roles (`GraphKind` in [`src/auth/models.rs`](../src/auth/models.rs)):
 
 | Role | Layer | Holds | Registered under |
 |---|---|---|---|
@@ -89,9 +89,13 @@ The store recognises exactly six roles (`GraphKind` in [`src/auth/models.rs`](..
 | `shapes` | 2 | SHACL node/property shapes | Model Registry |
 | `entailment` | — | SWRL / SPIN rule sets and inferred triples | Model Registry |
 | `instances` | 3 | Concrete facts (the A-Box) | Datasets |
+| `domain-values` | — | Code lists and enumerations (SKOS collections): the values an instance property may take | Datasets |
+| `linkset` | — | Alignments between sources (`owl:sameAs`, `skos:*Match`) | Datasets |
+| `provenance` | — | PROV-O records: who produced what, when, from which sources | Datasets |
+| `catalog` | — | DCAT / VoID descriptions of datasets and distributions | Datasets |
 | `system` | — | Internal bookkeeping (`urn:system:*`) | reserved |
 
-`model`, `vocabulary` and `instances` are the **three first-class layers**, each independently registrable and versionable; `shapes` and `entailment` are **orthogonal roles** that cut across them, and `system` is internal.
+`model`, `vocabulary` and `instances` are the **three first-class layers**, each independently registrable and versionable; `shapes` and `entailment` are **orthogonal roles** that cut across them; `domain-values`, `linkset`, `provenance` and `catalog` are the **layered-convention roles** a dataset declares for its code lists, alignments, provenance and catalogue records; and `system` is internal. [Datasets](datasets.md#dataset-graphs--roles) says what each role means to queries and reasoning.
 
 **Rules:**
 
@@ -99,7 +103,7 @@ The store recognises exactly six roles (`GraphKind` in [`src/auth/models.rs`](..
 - Instance data **MUST** be registered as a **Dataset**; models/vocabularies/shapes **MUST** be registered in the **Model Registry** with a version lifecycle (§8).
 - The role of each registered graph is published in the DCAT catalogue as `ots:graphRole` on the graph IRI (§7).
 
-> **Each role's graph can be decomposed.** A single upload that carries several kinds of content is split into per-role sub-graphs by the auto-split import feature (§2.2): classes route to a `model` sub-graph, properties and concept schemes to a `vocabulary` sub-graph, and individuals to an `instances` sub-graph. All three layers are first-class targets of that split — none is subordinate to the others.
+> **Each role's graph can be decomposed.** A single upload that carries several kinds of content is split into per-role sub-graphs by the auto-split import feature (§2.2): classes route to a `model` sub-graph, properties and concept schemes to a `vocabulary` sub-graph, and individuals to an `instances` sub-graph; DCAT/VoID records go to `catalog`, PROV records to `provenance`, bare SKOS collections to `domain-values`, and alignment-only statements (`owl:sameAs`, `skos:*Match`) to `linkset`. The three layers are first-class targets of that split — none is subordinate to the others.
 
 ### 2.2 Automatic role detection
 
@@ -683,11 +687,11 @@ Each registered graph is annotated with its role via the project's own predicate
 
 ```turtle
 <urn:catalogue:2025>
-    <https://opentriplestore.org/ns/role#graphRole>
-        <https://opentriplestore.org/ns/role#Instances> .
+    <https://opentriplestore.org/ns#graphRole>
+        <https://opentriplestore.org/ns#Instances> .
 ```
 
-The `ots:` role namespace `https://opentriplestore.org/ns/role#` defines `graphRole` and the role individuals `Instances`, `Model`, `Vocabulary`, `Shapes`, `Entailment`, `System` — the RDF form of §2.1.
+The project namespace `ots:` (`https://opentriplestore.org/ns#`) defines `graphRole` and one role individual per role of §2.1: `Instances`, `Model`, `Vocabulary`, `Shapes`, `Entailment`, `DomainValues`, `Linkset`, `Provenance`, `Catalog`, `System`.
 
 ### 7.6 Describing an organisation
 
@@ -1003,8 +1007,7 @@ The exact prefixes the triplestore emits. Use these spellings.
 | `unit` | `http://qudt.org/vocab/unit/` | units |
 | `om` | `http://www.ontology-of-units-of-measure.org/resource/om-2/` | units (alt) |
 | `xsd` | `http://www.w3.org/2001/XMLSchema#` | datatypes |
-| `ots:role` | `https://opentriplestore.org/ns/role#` | graph-role annotations (`graphRole` + the role individuals, §7.5) |
-| `ots` | `https://opentriplestore.org/ns/` | project terms; validation-layer bindings (`ots:validatedBy`, §5.4) |
+| `ots` | `https://opentriplestore.org/ns#` | project terms: graph-role annotations (`ots:graphRole` + the role individuals, §7.5), validation-layer bindings (`ots:validatedBy`, §5.4) |
 
 ## Appendix B — Graph-role detection cheat-sheet
 
@@ -1016,7 +1019,7 @@ The exact prefixes the triplestore emits. Use these spellings.
 | `sh:NodeShape` / `sh:*` predicates / `sh:targetClass` | — | `shapes` | shapes (in registry) |
 | `swrl:Imp` / `spin:`/`sp:` | — | `entailment` | entailment |
 | subjects typed with non-schema classes | A-Box | `instances` | dataset |
-| a substantial mix of classes **and** properties/concepts | — | `mixed` → auto-split per role | (split into model / vocabulary / instances) |
+| a substantial mix of classes **and** properties/concepts | — | `mixed` → auto-split per role | (split into model / vocabulary / instances, plus catalog / provenance / domain-values / linkset where such records are present) |
 | a balanced mix with no clear winner | — | *ambiguous* → set `?kind=` | (your call) |
 
 The detector compares the **class** count against the combined **property + SKOS** count; the larger side wins and an exact tie breaks toward `model` (§2.2).

@@ -12,4 +12,4 @@
 pub mod engine;
 pub mod parser;
 
-pub use engine::execute_rules;
+pub use engine::{compile_rules, execute_compiled};

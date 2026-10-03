@@ -2,7 +2,7 @@
 
 The full machine-readable API specification is available as an OpenAPI 3 JSON document. You can import it into **Postman**, **Insomnia**, or any OpenAPI-compatible tooling to explore and test all available endpoints.
 
-- **OpenAPI specification** — <a href="/api-docs/openapi.json" target="_blank" rel="noopener noreferrer">/api-docs/openapi.json</a> — machine-readable JSON, always up to date. (An interactive viewer is available at [API Reference](/api-docs).)
+- **OpenAPI specification** — <a href="/api-docs/openapi.json" target="_blank" rel="noopener noreferrer">/api-docs/openapi.json</a> — machine-readable JSON. A unit test (`spec_documents_every_mounted_route` in `src/server/openapi.rs`) fails the build when a route the server mounts is missing from it, or when it documents one the server does not mount. The only routes it leaves out on purpose are the Raft transport between cluster members, the consent step behind the `/oauth/authorize` page, the banner-preset pickers of the web UI and the `/api/ogc/` alias of `/api/ogc`; plugin routes under `/ext/{name}` are the plugin's own. Each copy is tailored to the caller: operations it may not reach are left out. (An interactive viewer is available at [API Reference](/api-docs).)
 - **Authentication** — every endpoint needs one of three levels, **none**, **token** or **admin**; [the table below](#authentication--the-level-every-endpoint-needs) states the level per endpoint. A **token** or **admin** endpoint wants an `Authorization: Bearer <token>` header, generated in **Settings → API Tokens**.
 
 ## Authentication — the level every endpoint needs
@@ -49,7 +49,7 @@ Three facts worth knowing before an instance is exposed:
 | `GET` | `/livez` | **none** | Liveness only; never touches the store. |
 | `GET` | `/sparql` | **none** | Query over the graphs the caller may read — anonymously, the public ones: the graphs of public datasets and of every published version of a public model-registry entry (the bundled vocabularies included). A private entry's version graphs are read by its owner, the owner organisation's members and admins, exactly as `/api/models/{id}/versions/{ver}/data` serves them. |
 | `POST` | `/sparql` | **none** | The same query endpoint in the protocol's POST form. A body sent as `application/sparql-update` is a write and needs a **token**; writing a model-registry graph is refused unless the caller may write the entry, whether or not they may read it. |
-| `GET` | `/store?graph={graph_iri}` | **none** | Graph Store read of one named graph, scoped exactly like the query endpoint: a public graph (a public dataset's, or a published version's of a public model) answers anonymously, a private one `401`/`403`. Turtle and TriG carry an `@prefix` header built from the prefix registry for the namespaces the graph actually uses; the line-based formats write every IRI in full. |
+| `GET` | `/store?graph={graph_iri}` | **none** | Graph Store read of one named graph, scoped exactly like the query endpoint: a public graph (a public dataset's, or a published version's of a public model) answers anonymously, a private one `401`/`403`. Turtle and TriG carry an `@prefix` header: a dataset graph's own prefix table first, then the prefix registry for the namespaces the graph actually uses; the line-based formats write every IRI in full. |
 | `GET` | `/store` | **admin** | A read that names no graph dumps the **default graph**, which no per-graph ACL covers, so it is admin-only — a non-admin token is refused here too, with `401` rather than `403`. |
 | `PUT` | `/store` | **token** | Graph Store Protocol: replace a graph. |
 | `POST` | `/store` | **token** | Graph Store Protocol: merge into a graph. |
@@ -68,8 +68,18 @@ Three facts worth knowing before an instance is exposed:
 | `POST` | `/api/datasets/{dataset_id}/assets` | **token** | Upload a file. |
 | `POST` | `/api/datasets/{dataset_id}/validate` | **token** | Run SHACL validation over the dataset graphs the caller may read; a run that could not read them all is a test run. |
 | `GET` | `/api/datasets/{dataset_id}/validation/latest` | **token** | The dataset's last validation run; its full report only for those who may read every graph it validated. |
+| `POST` | `/api/datasets/{dataset_id}/repair` | **token** | Propose a repair (see `docs/repair.md`): an explained RDF Patch computed in a throwaway copy of the dataset. Write access to the dataset; nothing is written. |
+| `GET` | `/api/datasets/{dataset_id}/repair/proposals` | **token** | The dataset's kept repair proposals, to its writers. |
+| `GET` | `/api/datasets/{dataset_id}/repair/proposals/{proposal_id}` | **token** | One kept proposal: its report, patch and a page of its actions, to the dataset's writers. |
+| `POST` | `/api/datasets/{dataset_id}/repair/proposals/{proposal_id}/apply` | **token** | Apply a kept proposal: its base is checked (`409`), the write gates run (`422`), and the commit names it. Write access. |
+| `POST` | `/api/datasets/{dataset_id}/repair/proposals/{proposal_id}/reject` | **token** | Reject a kept proposal. Write access. |
 | `GET` | `/api/datasets/{dataset_id}/shapes` | **token** | The dataset's shapes graph; a private one only for those who may read it. |
 | `PUT` | `/api/datasets/{dataset_id}/shapes` | **token** | Replace the shapes graph (`text/shaclc` or RDF). |
+| `POST` | `/api/datasets/{dataset_id}/patch` | **token** | Apply an RDF Patch (writers only); `PA` / `PD` change the dataset's prefix table. See [versioning.md](versioning.md#rdf-patch). |
+| `GET` | `/api/datasets/{dataset_id}/prefixes` | **none** | A public dataset's prefix table; a private one only to those who may read it. |
+| `PUT` | `/api/datasets/{dataset_id}/prefixes` | **token** | Replace the prefix table (writers only); `PUT` / `DELETE …/prefixes/{label}` change one entry. |
+| `GET` | `/api/datasets/{dataset_id}/log` | **none** | A public dataset's RDF Patch log; `…/log/init`, `…/log/current` and `…/log/patch/{version-or-id}` serve its version 0 and patches. Entries that change a graph the caller may not read are withheld. |
+| `POST` | `/api/datasets/{dataset_id}/log` | **token** | Append a patch to the log (writers only): `H prev` must name the latest entry (`409` otherwise). |
 | `GET` | `/api/models` | **none** | The model-registry entries the caller may see; anonymously, the public ones. |
 | `GET` | `/api/models/{id}/versions/{ver}/data` | **none** | A published version's graphs as RDF, to whoever may see the entry: a public model anonymously, a private one to its owner, the owner organisation's members and admins (`404` to everyone else, so the entry cannot be discovered). |
 | `GET` | `/api/models/{id}/versions/{ver}/profile` | **none** | The version flattened for a mapping proposer (classes, properties, shapes, enumerations). Read by exactly who may read `/data`; it used to sit behind the admin-gated sources router and answer `401` for a public model. |
@@ -88,6 +98,9 @@ Three facts worth knowing before an instance is exposed:
 | `GET` | `/api/shacl/dataset-shape-graphs` | **token** | The datasets that carry a shapes graph. |
 | `POST` | `/api/shacl/validation/latest` | **token** | The last validation run of several datasets at once. |
 | `POST` | `/api/shaclc/parse` | **token** | W3C SHACL-C → SHACL (see below). Needs a token since 0.6.x: it spends the instance's CPU on caller-supplied text. |
+| `POST` | `/api/reasoning/materialize` | **token** | Materialise an entailment regime into a graph the caller may write, over graphs the caller may read; `?async=true` queues it as a job (202). `owl2-dl` needs a configured DL backend (503 without one). |
+| `POST` | `/api/reasoning/check` | **token** | OWL 2 DL consistency, entailment, satisfiability or profile check over graphs the caller may read, or over Turtle in the body; `?async=true` queues it as a job. |
+| `GET` | `/api/reasoning/jobs/{job_id}` | **token** | A background reasoning job, to the user who started it and admins (`404` to anyone else). |
 | `POST` | `/api/shaclc/serialize` | **token** | SHACL → SHACL-C of a graph named by the caller, lossless or `422` (see below). Needs a token since 0.6.x, and the caller must be allowed to read that graph: it reads whatever IRI it is given out of the store, so it was previously a way for anyone to read any graph. A graph you may not read answers `403`, whether or not it exists. |
 | `POST` | `/api/rml/preview` | **token** | Runs a mapping into a throwaway store. Needs a token since 0.6.x, for the same reason as `/api/shaclc/parse`. |
 | `GET` | `/api/prefixes` | **none** | Bundled prefix registry; rate-limited. |
@@ -112,6 +125,11 @@ Three facts worth knowing before an instance is exposed:
 | `GET` | `/.well-known/void` | **none** | Catalog of the public datasets. |
 | `GET` | `/api-docs/openapi.json` | **none** | The spec is tailored to the caller: operations it may not reach are left out. |
 | `GET` | `/api/docs` | **none** | Documentation pages; admin-only pages are filtered out. |
+| `POST` | `/api/feedback` | **token** | Send a bug report, feature request or question to this instance's admins. Needs a write-capable token; rate-limited and capped at 20 a day per user. |
+| `GET` | `/api/feedback/mine` | **token** | Your own reports, with their status and the admins' reply. |
+| `GET` | `/api/admin/feedback` | **admin** | The feedback inbox; `?status=` and `?kind=` narrow it. |
+| `PATCH` | `/api/admin/feedback/{id}` | **admin** | Set a report's status, reply to the reporter, or keep an internal note. |
+| `DELETE` | `/api/admin/feedback/{id}` | **admin** | Delete a report. |
 
 `tests/api_reference_auth.rs` reads this table out of the shipped Markdown and
 fires an anonymous request at every row it can address, so a level stated here
@@ -161,6 +179,21 @@ node the stream continues at. `404` keeps its meaning (no such node, no
 stream). Streams without a policy never answer 410. Full fragments also carry
 `<node> ldes:immutable true`. `POST /api/ldes/sync` reports gain
 `nodes_gone`, `retention_policy` and `warnings`; existing fields are unchanged.
+
+## LDES sync — an LDES 1.0 consumer
+
+`POST /api/ldes/sync` initialises as LDES 1.0 §3.1 says: `url` must be the
+event stream, its root node, a redirect to either, or a page with exactly one
+`tree:view`. Anything else (several views, none at all) is a **`502`** whose
+body names §3.1; it used to crawl whatever links it found. Redirects are
+followed within `OTS_REMOTE_ALLOWLIST`, `408`/`425`/`429`/`5xx` are retried
+with back-off, and any other error status is a `502`. The report gains
+`stream`, `root_node`, `polling_interval`, `shapes`, `nodes_not_modified`,
+`nodes_skipped_immutable`, `nodes_pruned`, `retries` and
+`versions_superseded`; existing fields keep their meaning, except that
+`members_skipped_older` no longer counts members on immutable pages the
+client did not fetch again (those are in `nodes_skipped_immutable`). See
+[ldes.md](ldes.md#syncing-a-stream-into-a-dataset).
 
 ## SHACL Compact Syntax — `?dialect`, `?lenient`, `?base`, `?lossy`
 
@@ -241,7 +274,7 @@ See `docs/operations.md, "Replication"`. Two new routes, no change to existing o
 |---|---|---|
 | `GET` | `/api/replication/status` | This node's `role`, `mode`, `scope`, `leader_url`, `node_id`, `read_only`; on a follower also `epoch`, `applied_seq`, `leader_newest_seq`, `lag_rows`, `last_sync_at`, `last_error`, `applied_rows`, `refetched_graphs`, `resyncs`, `interval_secs`, `healthy`. Public, beside `/livez`. |
 | `GET` | `/api/replication/manifest` | The leader's change-log `epoch`, `newest_seq`, `capture_enabled`, every graph (`graphs`, `null` for the default graph), `datasets` (`id`, `graphs`) and `identity_version` (SQLite's change counter of the identity database; `null` for an in-memory one). Admin only (`401` / `403`). |
-| `POST` | `/api/replication/raft/vote`, `/append`, `/snapshot` | The Raft transport between cluster members (JSON, `X-Cluster-Secret`). Not user routes: `404` off a cluster, `401` without the secret, `503` while the member starts. |
+| `POST` | `/api/replication/raft/vote`, `/append`, `/snapshot` | The Raft transport between cluster members (JSON, `X-Cluster-Secret`). Not user routes, and not in the OpenAPI document: `404` off a cluster, `401` without the secret, `503` while the member starts. |
 | `GET` | `/api/replication/identity` | The identity database, whole, as a consistent SQLite snapshot (`application/vnd.sqlite3`). Admin only (`401` / `403`). |
 
 `GET /api/admin/changes` takes `wait_ms` (at most 30000): when no row is

@@ -299,3 +299,242 @@ async fn dataset_regime_materialises_on_write_and_joins_queries_on_request() {
         "{st}"
     );
 }
+
+/// OWL 2 QL as a dataset regime: a write re-materialises the ground closure
+/// into the dataset's entailment graph, and a query that opts in has its
+/// blank nodes rewritten over the TBox, so it reaches the elements the
+/// model's existentials imply. The materialisation used to write only the
+/// TBox closure, and to the shared graph rather than the dataset's.
+#[cfg(feature = "owl2-ql")]
+#[tokio::test]
+async fn dataset_owl2_ql_materialises_and_rewrites_blank_nodes() {
+    let (state, token) = admin_state();
+    state
+        .auth_db
+        .create_dataset(
+            "ql",
+            "QL",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    for (g, kind) in [(MODEL, GraphKind::Model), (DATA, GraphKind::Instances)] {
+        state.auth_db.add_dataset_graph("ql", g).unwrap();
+        state
+            .auth_db
+            .set_dataset_graph_role("ql", g, Some(kind))
+            .unwrap();
+    }
+    state
+        .store
+        .load_str(
+            &format!(
+                "@prefix owl: <http://www.w3.org/2002/07/owl#> . \
+                 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> . \
+                 <{EX}Bridge> rdfs:subClassOf <{EX}Asset> , \
+                     [ owl:onProperty <{EX}hasSpan> ; owl:someValuesFrom <{EX}Span> ] . \
+                 <{EX}hasSpan> rdfs:domain <{EX}Structure> ."
+            ),
+            RdfFormat::Turtle,
+            Some(MODEL),
+        )
+        .unwrap();
+    state
+        .store
+        .load_str(
+            &format!("<{EX}b1> a <{EX}Bridge> ."),
+            RdfFormat::Turtle,
+            Some(DATA),
+        )
+        .unwrap();
+    let app = test_app(state.clone());
+    let (st, v, txt) = req(
+        &app,
+        Method::PUT,
+        "/api/datasets/ql/entailment",
+        Some(&token),
+        Some("application/json"),
+        &json!({ "regime": "owl2-ql", "mode": "materialize" }).to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(v["graph"], "urn:entailment:owl2-ql:ql");
+    let select = |q: &str| {
+        let app = app.clone();
+        let token = token.clone();
+        let uri = format!("/sparql?query={}&entailment_dataset=ql", url_encode(q));
+        async move {
+            let (st, v, txt) = req(&app, Method::GET, &uri, Some(&token), None, "").await;
+            assert_eq!(st, StatusCode::OK, "{txt}");
+            rows(&v)
+        }
+    };
+    // Ground atoms, through the hierarchy and the existential's domain.
+    assert_eq!(
+        select(&format!("SELECT ?b WHERE {{ ?b a <{EX}Asset> }}")).await,
+        1
+    );
+    assert_eq!(
+        select(&format!("SELECT ?b WHERE {{ ?b a <{EX}Structure> }}")).await,
+        1
+    );
+    // The span exists but has no name: a blank node finds it, a variable not.
+    let anon = format!("SELECT ?b WHERE {{ ?b <{EX}hasSpan> [ a <{EX}Span> ] }}");
+    assert_eq!(select(&anon).await, 1);
+    assert_eq!(
+        select(&format!("SELECT ?b ?s WHERE {{ ?b <{EX}hasSpan> ?s }}")).await,
+        0
+    );
+    // A write re-materialises: a second bridge has a span too.
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/store?graph={}", url_encode(DATA)),
+        Some(&token),
+        Some("text/turtle"),
+        &format!("<{EX}b2> a <{EX}Bridge> ."),
+    )
+    .await;
+    assert!(st.is_success(), "{st} {txt}");
+    assert_eq!(select(&anon).await, 2);
+    assert_eq!(
+        select(&format!("SELECT ?b WHERE {{ ?b a <{EX}Asset> }}")).await,
+        2
+    );
+    // Without opting in, blank nodes are plain variables over the data.
+    let (_, v, txt) = req(
+        &app,
+        Method::GET,
+        &format!("/sparql?query={}", url_encode(&anon)),
+        Some(&token),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(rows(&v), 0, "{txt}");
+}
+
+/// An `owl2-dl` dataset is not re-materialised inside the write: the write
+/// answers at once and a debounced background run follows (D9). `GET
+/// …/entailment` says `queued` meanwhile and then what the run found, with
+/// the backend that ran and whether it is complete.
+#[cfg(feature = "owl2-dl")]
+#[tokio::test]
+async fn dl_dataset_reruns_in_the_background_after_a_write() {
+    use open_triplestore::reasoning::dl_config::{DlBackendKind, DlConfig};
+    let (mut state, token) = admin_state();
+    let mut cfg = DlConfig::default().with_backend(DlBackendKind::Native);
+    cfg.debounce = std::time::Duration::from_millis(1500);
+    state.dl = std::sync::Arc::new(cfg);
+    state
+        .auth_db
+        .create_dataset(
+            "dlbg",
+            "DL",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    for (g, role) in [(MODEL, GraphKind::Model), (DATA, GraphKind::Instances)] {
+        state.auth_db.add_dataset_graph("dlbg", g).unwrap();
+        state
+            .auth_db
+            .set_dataset_graph_role("dlbg", g, Some(role))
+            .unwrap();
+    }
+    state
+        .store
+        .load_str(
+            &format!(
+                "<{EX}Bridge> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <{EX}Asset> ."
+            ),
+            RdfFormat::Turtle,
+            Some(MODEL),
+        )
+        .unwrap();
+    state
+        .store
+        .load_str(
+            &format!("<{EX}b1> a <{EX}Bridge> ."),
+            RdfFormat::Turtle,
+            Some(DATA),
+        )
+        .unwrap();
+    let app = test_app(state.clone());
+    let enc = url_encode(&format!("SELECT ?b WHERE {{ ?b a <{EX}Asset> }}"));
+
+    // Selecting the regime runs at once, as for every regime.
+    let (st, v, txt) = req(
+        &app,
+        Method::PUT,
+        "/api/datasets/dlbg/entailment",
+        Some(&token),
+        Some("application/json"),
+        &json!({ "regime": "owl2-dl", "mode": "materialize" }).to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(v["backend"], "native", "{txt}");
+    assert_eq!(v["complete"], json!(false), "{txt}");
+
+    // The write answers without waiting for the DL run.
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/store?graph={}", url_encode(DATA)),
+        Some(&token),
+        Some("text/turtle"),
+        &format!("<{EX}b2> a <{EX}Bridge> ."),
+    )
+    .await;
+    assert!(st.is_success(), "{st} {txt}");
+    let (_, v, txt) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/dlbg/entailment",
+        Some(&token),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(v["status"], "queued", "{txt}");
+    assert_eq!(v["dl_backend"], "native", "{txt}");
+
+    // …and the background run catches up.
+    let mut caught_up = false;
+    for _ in 0..300 {
+        let (_, v, _) = req(
+            &app,
+            Method::GET,
+            "/api/datasets/dlbg/entailment",
+            Some(&token),
+            None,
+            "",
+        )
+        .await;
+        let (_, rows_v, _) = req(
+            &app,
+            Method::GET,
+            &format!("/sparql?query={enc}&entailment_dataset=dlbg"),
+            Some(&token),
+            None,
+            "",
+        )
+        .await;
+        if v["status"] == "ok" && rows(&rows_v) == 2 {
+            assert_eq!(v["backend"], "native", "{v}");
+            assert_eq!(v["complete"], json!(false), "{v}");
+            assert_eq!(v["consistent"], json!(true), "{v}");
+            caught_up = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(caught_up, "the background owl2-dl run did not finish");
+}
