@@ -346,6 +346,9 @@ pub struct TripleStore {
     /// the whole store's `rdf:type` index for them — a RocksDB snapshot plus a
     /// prefix scan per SPARQL query, 12% of a large SHACL run's CPU.
     shacl_functions: std::sync::Arc<std::sync::Mutex<Option<(u64, ShaclFunctions)>>>,
+    /// The GeoSPARQL Query Rewrite Extension ([`crate::geo::query_rewrite`]):
+    /// on unless `OTS_GEOSPARQL_QUERY_REWRITE=off`.
+    geo_query_rewrite: bool,
 }
 
 /// The `sh:SPARQLFunction` handlers discovered at one write generation.
@@ -430,6 +433,7 @@ impl TripleStore {
             replication: Arc::new(Replication::from_env(Some(path))),
             persistent: true,
             shacl_functions: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            geo_query_rewrite: crate::geo::query_rewrite::enabled_from_env(),
         })
         .inspect(replication::spawn_follower_if_configured)
     }
@@ -459,8 +463,16 @@ impl TripleStore {
             replication: Arc::new(Replication::from_env(None)),
             persistent: false,
             shacl_functions: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            geo_query_rewrite: crate::geo::query_rewrite::enabled_from_env(),
         })
         .inspect(replication::spawn_follower_if_configured)
+    }
+
+    /// Turn the GeoSPARQL Query Rewrite Extension on or off for this store
+    /// (builder style; the default comes from `OTS_GEOSPARQL_QUERY_REWRITE`).
+    pub fn with_geosparql_query_rewrite(mut self, enabled: bool) -> Self {
+        self.geo_query_rewrite = enabled;
+        self
     }
 
     /// Set the blank-node durability policy applied on import (builder style).
@@ -789,15 +801,19 @@ impl TripleStore {
                 .record_query(Served::FastCount, t0.map(|t| t.elapsed()), shape);
             return Ok(results);
         }
+        // GeoSPARQL Query Rewrite: relation patterns also match derived
+        // relations. The cache stays keyed by the text the caller sent.
+        let rewritten = self.geo_rewrite_query_text(sparql);
+        let eval = rewritten.as_deref().unwrap_or(sparql);
         // The shape bits, once per uncached evaluation: the classifier parses
         // (the mirror reuses its verdict rather than parsing again), and the
         // bits are stamped on the cache entry so a hit inherits them.
-        let class = parallel::classify(sparql);
+        let class = parallel::classify(eval);
         let shape = QueryShape {
             analytical: class == Some(ParClass::Aggregate),
-            aggregate_text: QueryShape::mentions_aggregate(sparql),
+            aggregate_text: QueryShape::mentions_aggregate(eval),
         };
-        let (results, served) = self.query_uncached(sparql, class)?;
+        let (results, served) = self.query_uncached(eval, class)?;
         let results = self.query_cache.put(sparql, gen, results, shape);
         self.telemetry
             .record_query(served, t0.map(|t| t.elapsed()), shape);
@@ -942,9 +958,26 @@ impl TripleStore {
         Some(QueryResults::Solutions(iter))
     }
 
+    /// The query text with the GeoSPARQL Query Rewrite applied, or `None`
+    /// when it is off or the query has no relation pattern.
+    fn geo_rewrite_query_text(&self, sparql: &str) -> Option<String> {
+        self.geo_query_rewrite
+            .then(|| crate::geo::query_rewrite::rewrite_query_text(sparql))
+            .flatten()
+    }
+
+    /// As [`Self::geo_rewrite_query_text`], for the `WHERE` clauses of an update.
+    fn geo_rewrite_update_text(&self, sparql: &str) -> Option<String> {
+        self.geo_query_rewrite
+            .then(|| crate::geo::query_rewrite::rewrite_update_text(sparql))
+            .flatten()
+    }
+
     /// Execute a SPARQL UPDATE operation.
     pub fn update(&self, sparql: &str) -> Result<(), StoreError> {
         let _w = self.begin_write()?;
+        let rewritten = self.geo_rewrite_update_text(sparql);
+        let sparql = rewritten.as_deref().unwrap_or(sparql);
         // Use char-boundary-safe slicing to avoid panics on multi-byte UTF-8 input.
         let prefix_end = (0..=sparql.len().min(200))
             .rfind(|&i| sparql.is_char_boundary(i))
@@ -1275,6 +1308,9 @@ impl TripleStore {
         let mut parsed = crate::sparql::parser()
             .parse_update(sparql)
             .map_err(|e| StoreError::Parse(format!("scoped update: {e}")))?;
+        if self.geo_query_rewrite && crate::geo::query_rewrite::mentions_relation(sparql) {
+            crate::geo::query_rewrite::rewrite_update(&mut parsed);
+        }
         let default = Self::scope_graphs(scope)?;
         for op in &mut parsed.operations {
             if let spargebra::GraphUpdateOperation::DeleteInsert { using, .. } = op {
@@ -1309,6 +1345,9 @@ impl TripleStore {
         let mut parsed = crate::sparql::parser()
             .parse_query(sparql)
             .map_err(|e| StoreError::Parse(format!("scoped query: {e}")))?;
+        if self.geo_query_rewrite && crate::geo::query_rewrite::mentions_relation(sparql) {
+            crate::geo::query_rewrite::rewrite_query(&mut parsed);
+        }
         let ds = spargebra::algebra::QueryDataset {
             default: Self::scope_graphs(scope)?,
             named: None,
@@ -1357,7 +1396,11 @@ impl TripleStore {
                 "only a CONSTRUCT query can be evaluated confined".to_string(),
             ));
         }
-        let mut prepared = self.query_options().for_query(query.clone());
+        let mut query = query.clone();
+        if self.geo_query_rewrite {
+            crate::geo::query_rewrite::rewrite_query(&mut query);
+        }
+        let mut prepared = self.query_options().for_query(query);
         confine_dataset(prepared.dataset_mut(), scope)?;
         let mut bound = prepared.on_store(&self.store);
         for (name, term) in bindings {
@@ -1419,6 +1462,8 @@ impl TripleStore {
         full_rebuild: bool,
     ) -> Result<Option<QuadDelta>, StoreError> {
         let _w = self.begin_write()?;
+        let rewritten = self.geo_rewrite_update_text(sparql);
+        let sparql = rewritten.as_deref().unwrap_or(sparql);
         let prefix_end = (0..=sparql.len().min(200))
             .rfind(|&i| sparql.is_char_boundary(i))
             .unwrap_or(0);
@@ -1633,7 +1678,12 @@ impl TripleStore {
         let mut parsed: Vec<SpargebraUpdate> = Vec::with_capacity(statements.len());
         for (i, s) in statements.iter().enumerate() {
             match crate::sparql::parser().parse_update(s) {
-                Ok(u) => parsed.push(u),
+                Ok(mut u) => {
+                    if self.geo_query_rewrite && crate::geo::query_rewrite::mentions_relation(s) {
+                        crate::geo::query_rewrite::rewrite_update(&mut u);
+                    }
+                    parsed.push(u)
+                }
                 Err(e) => return Ok(rolled_back(i, e.to_string())),
             }
         }

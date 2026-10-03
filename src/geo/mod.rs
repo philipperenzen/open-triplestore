@@ -7,6 +7,8 @@ pub mod geojson;
 pub mod gml;
 pub mod kml;
 pub mod places;
+pub mod premises;
+pub mod query_rewrite;
 pub mod spatial_index;
 pub mod viewer_feed;
 pub mod vocabulary;

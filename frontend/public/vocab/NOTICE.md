@@ -5,7 +5,7 @@ bundles. The web UI serves them at `/vocab/<file>` to show term definitions, and
 the server compiles them in (`src/data_models/seed_vocab.rs`) and loads them into
 the store as public, read-only reference models (`/api/models`).
 
-Every file except `ots.ttl` and the Open Triplestore parts of `xsd.ttl` is
+Every file except `ots.ttl`, `gml.ttl` and the Open Triplestore parts of `xsd.ttl` is
 third-party work and stays under its publisher's licence, listed below. The Open
 Triplestore licence (AGPL-3.0 with the Commons Clause, see `LICENSE`) does not
 apply to them. The store keeps triples, not comments, so a file's header does not
@@ -19,7 +19,7 @@ may have been modified. They name the licence in `Link` headers (`imbor.ttl`:
 file's triples, which the seeder checks against the file. The store writes
 typed literals in its canonical form, with the same values: some
 `xsd:nonNegativeInteger` literals in `dcat.ttl`, `dcat/2.0.0.ttl`, `prov.ttl`,
-`time.ttl`, `vcard.ttl`, `ssn.ttl`, `bibo.ttl`, `saref.ttl` and `locn.ttl` read
+`time.ttl`, `vcard.ttl`, `ssn.ttl`, `bibo.ttl`, `saref.ttl`, `locn.ttl` and `sf.ttl` read
 as `xsd:integer`, and two `+00:00` time zones in `pav.ttl` read as `Z`.
 `imbor.ttl` has no typed literals and is held exactly. The `imbor` entry accepts
 no upload, edit, draft, branch, merge, rebase or publish. The server also serves this file at
@@ -348,6 +348,14 @@ of the licence requires.
 - **Licence:** Apache-2.0, per the source repository's LICENSE and README. The file also contains the DCMI Metadata Element Set definitions (dc:contributor … dc:type), which fall under DCMI's CC BY 4.0 Schema Use Notice quoted above.
 - **Changes:** comment header added (2026-09-23); otherwise byte-identical
 
+### `sf.ttl` — OGC Simple Features Vocabulary
+- **Version:** owl:versionInfo "1.1.1 - 2026-02" (owl:versionIRI http://www.opengis.net/ont/sf/1.1.1)
+- **Source:** https://github.com/opengeospatial/geosemantics-semantic-resources/blob/main/resources/geosparql-swg/geosparql-1.1/ontologies/sf_geometries.ttl at commit 658d2ad16e4c28a786ff657a8517fa8f7c50abe7
+- **Copyright:** "(c) 2022 Open Geospatial Consortium" (the file's own copyright triple, which upstream spells schema:coyrightNotice)
+- **Licence:** Apache-2.0: the file's own schema:license and the source repository's LICENSE
+- **Changes:** comment header added (2026-10-03); otherwise byte-identical
+- **Used for:** the Simple Features geometry class hierarchy of GeoSPARQL's RDFS Entailment Extension; datasets that use GeoSPARQL terms reason over it (docs/geosparql.md).
+
 ## BSD 3-Clause License (ETSI)
 
 ### `saref.ttl` — SAREF (Smart Applications REFerence ontology) Core v3.1.1
@@ -396,6 +404,7 @@ disclaimer that distributions must keep is in appendix E).
 
 - `ots.ttl` — Open Triplestore (OTS) vocabulary, written by Open Triplestore; it contains no third-party material. It is under the project licence (see `LICENSE`).
 - `xsd.ttl` — written by Open Triplestore, with W3C-derived descriptions; see its entry above.
+- `gml.ttl` — GML 3.2.1 geometry types, written by Open Triplestore (2026-10-03): one class per GML geometry element, with `rdfs:subClassOf` following the element's substitution group in the GML 3.2.1 schema at https://schemas.opengis.net/gml/3.2.1/. It copies no schema text, only element names and their substitution groups. OGC publishes no RDF version of this hierarchy any more. It is under the project licence (see `LICENSE`).
 
 ## Appendix: licence texts
 
@@ -613,8 +622,8 @@ EXCEPT IN THE CASES OF WILFUL MISCONDUCT OR DAMAGES DIRECTLY CAUSED TO NATURAL P
 ### F. Apache License, Version 2.0
 
 Source: https://www.apache.org/licenses/LICENSE-2.0.txt (also
-`LICENSES/Apache-2.0.txt`). It applies to `pav.ttl`, `geosparql.ttl` and
-`geosparql/1.0.0.ttl`.
+`LICENSES/Apache-2.0.txt`). It applies to `pav.ttl`, `geosparql.ttl`,
+`geosparql/1.0.0.ttl` and `sf.ttl`.
 
 ```text
 
