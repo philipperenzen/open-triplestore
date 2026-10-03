@@ -268,6 +268,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `?async=true` on materialise and check queues a job (202) that
   `GET /api/reasoning/jobs/{job_id}` reports, with the status and body the
   synchronous call would have answered.
+- **Feedback dialog and admin inbox.** Signed-in users send a bug report,
+  feature request, question or other note from the new **Feedback** button in
+  the sidebar footer, or from the help card that now ends every documentation
+  page. A report can carry the in-app page and the browser it was sent from;
+  both are opt-out. It goes to this instance's admins, who triage it at
+  **Admin → Feedback**: set its status, correct its type, reply to the reporter (who follows
+  status and replies under **My reports**) and keep an internal note. New
+  routes: `POST /api/feedback`, `GET /api/feedback/mine`, and
+  `GET`/`PATCH`/`DELETE /api/admin/feedback[/{id}]`. Submissions need a
+  write-capable principal, are rate-limited per client address and are capped
+  at 20 per user per day.
+- **A real FAQ.** `/docs/faq` grew from five technical answers to about sixty
+  questions for people using the platform: accounts, datasets and access,
+  importing, querying, validation, models, Spark, the API, troubleshooting and
+  how to get help.
 
 ### Changed
 - **IdP access tokens no longer create API tokens by default.** In OIDC

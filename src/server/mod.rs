@@ -847,6 +847,11 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // the caller's SPARQL allowance.
     let viewer_rate_conf = make_rate_conf(1, 40);
 
+    // Feedback reports: one token a minute with a burst of 5 — enough to send a
+    // few reports back to back, too slow to flood the admins' inbox. A per-user
+    // daily cap in the handler backs this up for users on many addresses.
+    let feedback_rate_conf = make_rate_conf(60, 5);
+
     // Public auth routes (no auth required) — rate-limited against brute force
     let auth_public_routes = Router::new()
         .route("/api/auth/register", post(handlers::register))
@@ -1951,8 +1956,30 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
+    // Feedback: reporters read back their own reports; the admin inbox is
+    // admin-gated in-handler. Submitting has its own rate limit.
+    let feedback_submit_routes = crate::feedback::submit_routes()
+        .route_layer(GovernorLayer {
+            config: feedback_rate_conf,
+        })
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .with_state(state.clone());
+    let feedback_routes = crate::feedback::routes()
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .with_state(state.clone());
+
     let mut router = Router::new()
         .merge(docs_routes)
+        .merge(feedback_submit_routes)
+        .merge(feedback_routes)
         .merge(auth_public_routes)
         .merge(oidc_provider_public_routes)
         .merge(oidc_provider_authorize_routes)

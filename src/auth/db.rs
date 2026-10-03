@@ -1164,6 +1164,29 @@ impl AuthDb {
             );
             CREATE INDEX IF NOT EXISTS idx_docs_category ON docs(category, sort_order);
 
+            -- User feedback: bug reports, feature requests and questions sent
+            -- from the in-app dialog to this deployment's admins. A reporter
+            -- reads back only their own reports (status + admin_response);
+            -- the inbox and admin_note are admin-only. Deleting the user drops
+            -- their reports with them.
+            CREATE TABLE IF NOT EXISTS feedback_reports (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                page TEXT,
+                user_agent TEXT,
+                app_version TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                admin_response TEXT,
+                admin_note TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_feedback_user ON feedback_reports(user_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_feedback_status ON feedback_reports(status, created_at DESC);
+
             -- ── Spark chat history ────────────────────────────────────────────
             -- Per-user chat conversations with the Spark assistant. The client
             -- appends messages after each turn; the assistant's retrieval trail

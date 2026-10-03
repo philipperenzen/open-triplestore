@@ -72,7 +72,10 @@
     "adminPrefixes": "Prefixes",
     "vocabularySearch": "Vocabulary Search",
     "files": "Files",
-    "sqlSources": "SQL sources"
+    "sqlSources": "SQL sources",
+    "feedback": "Feedback",
+    "feedbackHint": "Send feedback: report a bug, request a feature or ask a question",
+    "adminFeedback": "Feedback"
   },
   "system": {
     "checkingBackend": "Checking backend",
@@ -2223,7 +2226,13 @@
       "createFirst": "Create the first doc",
       "onThisPage": "On this page",
       "title": "Documentation",
-      "detail": "Supported standards, capabilities, and usage guide for the Open Triplestore platform."
+      "detail": "Supported standards, capabilities, and usage guide for the Open Triplestore platform.",
+      "helpTitle": "Didn't find what you need?",
+      "helpBody": "Ask the administrators of this platform a question, report something that doesn't work, or suggest an improvement.",
+      "helpFaq": "Or check the FAQ first.",
+      "helpAsk": "Ask a question",
+      "helpBug": "Report a bug",
+      "helpFeature": "Suggest a feature"
     },
     "modelDetail": {
       "createDraftPrompt": "Create a new draft from v{version}.\n\nEnter the new version string:",
@@ -3393,6 +3402,39 @@
       "entities": "Entities",
       "violations": "{count} violations",
       "rounds": "Rounds"
+    },
+    "adminFeedback": {
+      "title": "Feedback",
+      "detail": "Bug reports, feature requests and questions sent by users of this platform from the feedback dialog.",
+      "refresh": "Refresh",
+      "statusFilter": "Filter by status",
+      "all": "All",
+      "kindFilter": "Type",
+      "allKinds": "All types",
+      "loading": "Loading reports…",
+      "emptyTitle": "No feedback yet",
+      "emptyBody": "When users send a bug report, feature request or question from the Feedback button in the sidebar, it appears here.",
+      "noMatchTitle": "Nothing matches these filters",
+      "noMatchBody": "Choose another status or type to see more reports.",
+      "unknownUser": "Deleted user",
+      "from": "From",
+      "page": "Page",
+      "browser": "Browser",
+      "version": "Version",
+      "updated": "Last updated",
+      "status": "Status",
+      "response": "Reply to the reporter",
+      "responsePlaceholder": "Visible to the reporter under My reports",
+      "responseHint": "The reporter sees this text next to their report.",
+      "note": "Internal note",
+      "notePlaceholder": "Only administrators see this",
+      "noteHint": "For other administrators, e.g. a link to an issue tracker. Never shown to the reporter.",
+      "save": "Save",
+      "saved": "Report updated",
+      "delete": "Delete",
+      "deleteTitle": "Delete this report?",
+      "deleteMessage": "“{title}” will be removed permanently, for the reporter as well.",
+      "kind": "Type"
     }
   },
   "toast": {
@@ -4472,6 +4514,64 @@
       "facts": "{count}{more} facts in the store",
       "clickToOpen": "click to open",
       "notInStore": "No data about this IRI in the store — external link"
+    },
+    "feedback": {
+      "title": "Send feedback",
+      "subtitle": "Your report goes to the administrators of this platform. They can reply, and you can follow it under My reports.",
+      "close": "Close",
+      "tabNew": "New report",
+      "tabMine": "My reports",
+      "kindLegend": "What is it about?",
+      "kinds": {
+        "bug": "Bug report",
+        "feature": "Feature request",
+        "question": "Question",
+        "other": "Other"
+      },
+      "kindHints": {
+        "bug": "Something is broken or behaves unexpectedly",
+        "feature": "An idea or improvement",
+        "question": "Help with using the platform",
+        "other": "Anything else"
+      },
+      "titleLabel": "Summary",
+      "titlePlaceholders": {
+        "bug": "e.g. Import fails for Turtle files with blank nodes",
+        "feature": "e.g. Export query results to Excel",
+        "question": "e.g. How do I share a dataset with my team?",
+        "other": "A short summary"
+      },
+      "bodyLabel": "Details",
+      "bodyPlaceholders": {
+        "bug": "What did you do (step by step)?\nWhat did you expect to happen?\nWhat happened instead? Include any error message, dataset or query involved.",
+        "feature": "What would you like to do, and why? Describe the problem it solves for you.",
+        "question": "What are you trying to do, and what have you tried so far?",
+        "other": "Tell us more."
+      },
+      "contextHeading": "Include with the report",
+      "includePage": "The page you're on:",
+      "includeBrowser": "Your browser and operating system",
+      "securityNote": "Found a security vulnerability? Don't report it here. Contact the administrators of this platform privately instead.",
+      "cancel": "Cancel",
+      "send": "Send report",
+      "rateLimited": "You've sent several reports in a short time. Please wait a minute and try again.",
+      "sentTitle": "Thanks, your report was sent",
+      "sentBody": "The administrators will look at it. Any reply and status change will show up under My reports.",
+      "viewMine": "View my reports",
+      "sendAnother": "Send another",
+      "done": "Done",
+      "loading": "Loading your reports…",
+      "mineEmpty": "You haven't sent any reports yet.",
+      "replyHeading": "Reply from the administrators",
+      "statuses": {
+        "open": "Open",
+        "in_progress": "In progress",
+        "resolved": "Resolved",
+        "closed": "Closed"
+      },
+      "signInTitle": "Sign in to send feedback",
+      "signInBody": "Reports are linked to your account so the administrators can follow up with you.",
+      "readFaq": "Read the FAQ"
     }
   },
   "viewer": {

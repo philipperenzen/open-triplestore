@@ -45,6 +45,7 @@ pub mod docs;
 pub mod email;
 pub mod entailment;
 pub mod federation;
+pub mod feedback;
 pub mod geo;
 pub mod ifc;
 pub mod imports;

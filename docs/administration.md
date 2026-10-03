@@ -187,6 +187,40 @@ curl -X DELETE http://localhost:7878/api/admin/users/<user_id> \
 
 ---
 
+## User feedback
+
+Signed-in users send bug reports, feature requests and questions from the
+**Feedback** button in the sidebar footer, or from the buttons at the end of
+every documentation page. Reports go to the admins of this instance, not to the
+upstream project, and land in **Admin → Feedback** (`/admin/feedback`).
+
+For each report the inbox shows the reporter, the in-app page it was sent from
+and, if the reporter allowed it, their browser. An admin can:
+
+- set the status: **Open**, **In progress**, **Resolved** or **Closed**;
+- write a **reply to the reporter**, which they read next to their report under
+  **My reports** in the dialog;
+- keep an **internal note**, which only admins see;
+- delete the report.
+
+A user may send at most 20 reports in 24 hours, and submissions are rate-limited
+per client address. Read-only API tokens cannot send reports. Deleting a user
+deletes their reports too. The dialog tells users not to report security
+vulnerabilities through it.
+
+```bash
+# The inbox, narrowed to open bug reports
+curl "http://localhost:7878/api/admin/feedback?status=open&kind=bug" \
+  -H "Authorization: Bearer <token>"
+
+# Reply and mark as resolved
+curl -X PATCH http://localhost:7878/api/admin/feedback/<id> \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"status": "resolved", "admin_response": "Fixed in 0.7.1 — thanks!"}'
+```
+
+---
+
 ## Self-service (any authenticated user)
 
 ### Change your own password
