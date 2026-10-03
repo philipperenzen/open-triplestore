@@ -48,9 +48,9 @@
 | 9 | **Blazegraph** | Legacy Wikidata workloads | Abandoned 2019; Wikimedia migration complete |
 
 **Bottom line for this project:** Open Triplestore covers the most standards of the ten systems
-— **28 of the 29** rows in section 4 at least partially — and grades **15** of them Full
+— **28 of the 29** rows in section 4 at least partially — and grades **14** of them Full
 against its own tests (section 4, recounted 2026-10-03), below Stardog (22) and GraphDB (21) and
-above Virtuoso and RDF4J 5 (14). The other systems' cells mark feature presence, so the
+level with Virtuoso and RDF4J 5 (14). The other systems' cells mark feature presence, so the
 full-support counts are not like for like. Its **~430,000 t/s** bulk load (section 5.1,
 re-measured) beats every Java competitor by 1.1–2.9×. GeoSPARQL 1.1, SHACL-AF, DCAT 3, VoID
 and RML, all graded Partial, are still rare in open-source stores. The primary gap vs. QLever and Virtuoso is scale: those
@@ -106,8 +106,9 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
   row it grades **Partial** shows 🟡 — SPARQL 1.1 Query, SPARQL 1.2 and RDF 1.2, OWL 2 RL,
   SHACL Core and Advanced, ShEx, SWRL, GeoSPARQL, DCAT and VoID, and RML. OWL 2 DL is graded
   Full with the reasoner sidecar the project ships (footnote ⁹), and full-text search is
-  graded Full as a feature (footnote ¹⁵), SKOS as SKOS-aware inferencing (footnote ¹⁹). Three rows have
-  no grade there (SPARQL 1.1 Protocol, JSON-LD 1.1, N-Quads/TriG); their ✅
+  graded Full as a feature (footnote ¹⁵), SKOS as SKOS-aware inferencing (footnote ¹⁹);
+  JSON-LD 1.1 is graded Partial (footnote ²⁰). Two rows have
+  no grade there (SPARQL 1.1 Protocol, N-Quads/TriG); their ✅
   marks feature presence, as in the other columns — note that `/sparql`
   ignores the protocol's `default-graph-uri` / `named-graph-uri` parameters (footnote ⁶).
   The W3C SPARQL tests are not claimed. The other systems' cells were compiled from their documentation and
@@ -236,7 +237,7 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 | **Graph Store Protocol** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
 | **RDF 1.1** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **RDF 1.2 / RDF-star** | 🟡³ | 🟡³ | 🟡 | ❌ | ❌ | 🟡 | 🟡 | 🟡 | ❌ | ❌ |
-| **JSON-LD 1.1** | ✅ | ✅ | ✅ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ |
+| **JSON-LD 1.1** | 🟡²⁰ | ✅ | ✅ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ |
 | **N-Quads / TriG** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **W3C SPARQL 1.1 Tests** | —⁴ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
@@ -256,6 +257,13 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >   duplicate triples (oxigraph#1919, fixed upstream but not released); `/sparql` rewrites the
 >   query's dataset to the caller's readable graphs. Oxigraph's column shows the same engine
 >   before this project's HTTP layer.
+> ²⁰ Partial in [`docs/standards.md`](standards.md) (graded 2026-10-03; the cell used to mark
+>   feature presence). Remote `@context`s now resolve — bundled W3C contexts offline, others from
+>   `OTS_REMOTE_ALLOWLIST` — and the W3C json-ld-api toRdf/fromRdf sections run as a regression
+>   ratchet (no published score): the JSON-LD processor keeps base-IRI dot segments, writes
+>   `@direction` as an RDF 1.2 directional string in the `rdf-12` build, mis-scopes type-scoped
+>   contexts in type maps and serialises invalid `rdf:JSON` literals
+>   (`docs/conformance/jsonld.md`).
 
 ### 4.2 Reasoning, Validation & Inference
 
@@ -388,11 +396,16 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > OWL 2 DL (with the reasoner sidecar the project ships) are graded Full in `docs/standards.md`,
 > and their cells follow. RDF Patch and LDES were regraded Full the same day; neither has a row
 > here. 13 rows are 🟡 and the W3C SPARQL 1.1 Tests row is not claimed.
+>
+> Open Triplestore recounted later on 2026-10-03, 15 → 14: JSON-LD 1.1, until then counted on
+> feature presence, is graded *Partial* in `docs/standards.md` on the W3C json-ld-api run
+> (footnote ²⁰). Full-text search and SKOS, the other presence rows touched that day, are graded
+> *Full* (footnotes ¹⁵ and ¹⁹), so their ✅ now rests on a grade. 14 rows are 🟡.
 
 ```
 Stardog           ██████████████████████░░░░░░░   22 / 29  (commercial; full OWL DL + ShEx + SWRL; GeoSPARQL 1.1 partial)
 GraphDB           █████████████████████░░░░░░░░   21 / 29  (commercial; OWL DL commercial-only; no ShEx/SWRL/LDP/RML)
-Open Triplestore  ███████████████░░░░░░░░░░░░░░   15 / 29  (own grades, Full only; 13 more rows 🟡 — 28 of 29 at least partial, the most of the ten; W3C tests not claimed)
+Open Triplestore  ██████████████░░░░░░░░░░░░░░░   14 / 29  (own grades, Full only; 14 more rows 🟡 — 28 of 29 at least partial, the most of the ten; W3C tests not claimed)
 Virtuoso          ██████████████░░░░░░░░░░░░░░░   14 / 29
 RDF4J 5           ██████████████░░░░░░░░░░░░░░░   14 / 29  (improved from v4)
 Jena 5            ████████████░░░░░░░░░░░░░░░░░   12 / 29  (improved from v4)

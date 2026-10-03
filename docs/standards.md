@@ -47,6 +47,7 @@ applies.
 | SWRL | Horn-clause rules | Partial — class/property atoms and the built-ins in `src/swrl`; an unsupported built-in is a hard error rather than a silently dropped filter. Semantics pinned by `tests/swrl_conformance.rs`. |
 | SPARQL + full-text search (Tantivy) | A feature, not a standard: the `ft:search` / `text:search` magic property and `CONTAINS` / `STRSTARTS` push-down | Full¹¹ |
 | SKOS | Simple Knowledge Organization System: SKOS-aware inferencing and integrity checking | Full¹² |
+| JSON-LD 1.1 | JSON-based RDF syntax: parsing (toRdf), serialisation (fromRdf), remote contexts | Partial¹³ |
 
 ## Conformance test suites
 
@@ -59,10 +60,11 @@ community corpus — and the counts are generated from the suites themselves, so
 they cannot drift from the code. Whether a vendored corpus's results are
 published depends on its licence: each corpus has its own page under
 [conformance/](conformance/) (for example [shacl.md](conformance/shacl.md),
-[geosparql.md](conformance/geosparql.md) and [sparql11.md](conformance/sparql11.md)).
-The SPARQL sections, for one, are a subset of a W3C test suite, and W3C's
-test-suite licence policy allows no performance claims on a subset, so their
-page tracks known gaps but gives no score.
+[geosparql.md](conformance/geosparql.md), [sparql11.md](conformance/sparql11.md) and
+[jsonld.md](conformance/jsonld.md)). The SPARQL and JSON-LD API sections, for
+example, are subsets of W3C test suites, and W3C's test-suite licence policy
+allows no performance claims on a subset, so their pages track known gaps but
+give no score.
 
 <!-- conformance-table:start -->
 | Standard | Suite | Basis | Tests | Notes |
@@ -93,13 +95,14 @@ page tracks known gaps but gives no score.
 | SPARQL engine coverage (sparqloscope) | `tests/sparqloscope_conformance.rs` | sparqloscope-derived | 67 |  |
 | Cross-standard HTTP smoke | `tests/standards_conformance.rs` | spec-derived | 26 |  |
 | SWRL | `tests/swrl_conformance.rs` | spec-derived | 15 |  |
+| JSON-LD 1.1 API | `tests/w3c_jsonld_api_manifests.rs` | **vendored W3C test-suite subset** (toRdf + fromRdf sections of w3c/json-ld-api, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/jsonld.md` |
 | OWL 2 DL | `tests/w3c_owl2_dl_manifests.rs` | **vendored W3C test cases** (approved OWL 2 DL / Direct Semantics cases of the OWL 2 Test Case Repository, unmodified; manifest-driven, against the reasoner sidecar) | 2 | runs in CI against the reasoner sidecar as a development and regression ratchet; no score is published (W3C licence: no performance claims on a partial run); known gaps in `docs/conformance/owl2-dl.md` |
 | SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (core + sparql sections, manifest-driven, full report equality) | 1 | 136 corpus cases: 119 pass, 1 known failure, 1 optional feature unsupported (reported as the failure the spec requires), 15 runner-side skips (floor ≥90 asserted) |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 125 |  |
 | SPARQL 1.1 Federated Query | `tests/w3c_sparql11_federation.rs` | **vendored W3C test-suite subset** (`service/` + `syntax-fed/` sections of w3c/rdf-tests, unmodified; manifest-driven, local endpoints) | 1 | runs in CI as a development and regression ratchet against local endpoints; no score is published (W3C test-suite policy); see `docs/conformance/sparql11.md` §Federation |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 
-1047 conformance tests across 31 suites; a further 801 tests in 106 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 6 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation) and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
+1048 conformance tests across 32 suites; a further 802 tests in 107 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 7 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->
@@ -354,6 +357,20 @@ behavior and will flip green when the limitation is resolved.
     them), which OWL 2 RL cannot express. Pinned by `tests/entailment_http.rs`
     and the shape tests in `src/shacl_studio/seed.rs`; there is no published
     SKOS test suite.
+
+13. **JSON-LD 1.1** — every JSON-LD parse resolves a remote `@context`
+    through the server's document loader (since 2026-10-03; until then any
+    context named by IRI failed): the bundled W3C contexts of ActivityStreams,
+    CSVW, LDP and ODRL offline, other URLs only when `OTS_REMOTE_ALLOWLIST`
+    covers them, size-capped and cached ([formats.md](formats.md#json-ld-remote-contexts)).
+    Graded *Partial* on the W3C json-ld-api `toRdf` and `fromRdf` sections,
+    which run as a regression ratchet with no published score
+    ([conformance/jsonld.md](conformance/jsonld.md)): the processor keeps the
+    dot segments of a base IRI when resolving, writes `@direction` as an RDF
+    1.2 directional string in the `rdf-12` build, mis-scopes type-scoped
+    contexts in type maps, refuses an invalid `@base`, and serialises invalid
+    `rdf:JSON` literals; `rdfDirection`, `expandContext`, `useNativeTypes` /
+    `useRdfType` and generalized RDF are not offered.
 
 Related guides: [OWL Reasoning](/docs/reasoning), [SHACL Validation](/docs/shacl),
 [GeoSPARQL](/docs/geosparql), [Performance](/docs/performance),
