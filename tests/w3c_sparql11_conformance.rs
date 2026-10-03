@@ -1929,8 +1929,13 @@ fn dataset_from_graphs_merge_as_a_set() {
     )
     .unwrap();
     assert_eq!(
-        select(&s, "SELECT ?sum WHERE { GRAPH <http://ex/total> { ?x <http://ex/sum> ?sum } }"),
-        vec![vec!["\"40\"^^<http://www.w3.org/2001/XMLSchema#integer>".to_string()]]
+        select(
+            &s,
+            "SELECT ?sum WHERE { GRAPH <http://ex/total> { ?x <http://ex/sum> ?sum } }"
+        ),
+        vec![vec![
+            "\"40\"^^<http://www.w3.org/2001/XMLSchema#integer>".to_string()
+        ]]
     );
     assert_eq!(
         select(&s, "SELECT ?g (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s <http://ex/v> ?v } } GROUP BY ?g ORDER BY ?g").len(),

@@ -317,7 +317,10 @@ fn a_multi_from_default_graph_is_a_set() {
             3,
         ),
         // The same graph twice is the same graph.
-        ("SELECT ?s ?c FROM ex:g1 FROM ex:g1 WHERE { ?s ex:city ?c }", 2),
+        (
+            "SELECT ?s ?c FROM ex:g1 FROM ex:g1 WHERE { ?s ex:city ?c }",
+            2,
+        ),
         // A join over the merge: each side matches the shared triple once.
         (
             "SELECT ?s ?c ?d FROM ex:g1 FROM ex:g2 WHERE { ?s ex:city ?c . ?s ex:city ?d }",
