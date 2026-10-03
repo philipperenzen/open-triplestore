@@ -118,7 +118,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   axiomatic triples, so the entailment graph holds more triples than before. A
   datatype clash (an ill-typed literal such as `"ten"^^xsd:integer`, or a value
   outside the datatype its property's range names) now ends an RDFS run in an
-  inconsistency (422 over HTTP) instead of being ignored.
+  inconsistency (422 over HTTP) instead of being ignored, and a clean RDFS run
+  reports `"consistent": true` (it was `null`).
 - **OWL 2 RL runs 75 of the 78 RL/RDF rules (was 63), and lists and inverse
   properties work everywhere.** New: `eq-diff2`/`eq-diff3`
   (`owl:AllDifferent`), `prp-pdw` (`owl:propertyDisjointWith`), `prp-adp`
