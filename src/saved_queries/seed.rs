@@ -715,6 +715,7 @@ fn seed_bag_buildings(state: &AppState) {
 // bridge on its side.
 // v5: those headings are explicitly `^^xsd:double`, matching what the IFC
 // importer emits from TrueNorth, so the feed parses one datatype.
+// v16: OWL 2 RL is Full in the capabilities graph, as docs/standards.md grades it.
 // v15: the capabilities graph follows the 2026-10-03 regrades in
 // docs/standards.md: SPARQL 1.1 federation, OWL 2 QL, EL and DL (with the
 // reasoner sidecar), RDF Patch and LDES are Full.
@@ -749,7 +750,7 @@ fn seed_bag_buildings(state: &AppState) {
 // existing store on whatever landmarks.ttl shipped when its volume was first
 // created — neither v4 nor v5 could reach it. That is why the Dragon Bridge
 // stayed on its side and no bearing ever appeared.
-const DEMO_CONTENT_VERSION: u32 = 15;
+const DEMO_CONTENT_VERSION: u32 = 16;
 
 /// Wipe demo graphs whose content is stale relative to [`DEMO_CONTENT_VERSION`]
 /// so this boot's seeders re-fill them. Runs BEFORE the bundle engine, which
@@ -1162,6 +1163,8 @@ mod tests {
     /// A store seeded by an older build gets the current capabilities graph:
     /// the version refresh empties it and the bundle engine refills it, so a
     /// grade corrected in the seed reaches installs that already have the demo.
+    /// SPARQL 1.2 (a Working Draft, so Partial for as long as it is one) stands
+    /// in for the corrected grade.
     #[tokio::test]
     async fn version_refresh_replaces_a_stale_capabilities_graph() {
         let state = AppState::test_default_with_store(TripleStore::in_memory().unwrap());
@@ -1169,9 +1172,9 @@ mod tests {
 
         let caps = format!("{}/capabilities/capabilities", seed_data::DEMO_BASE);
         let ots = "https://opentriplestore.org/ns#";
-        let owlrl_grade = |state: &AppState| -> Vec<String> {
+        let sparql12_grade = |state: &AppState| -> Vec<String> {
             let q = format!(
-                "SELECT ?c WHERE {{ GRAPH <{caps}> {{ <{ots}owlrl> <{ots}conformance> ?c }} }}"
+                "SELECT ?c WHERE {{ GRAPH <{caps}> {{ <{ots}sparql12> <{ots}conformance> ?c }} }}"
             );
             match state.store.query(&q).unwrap() {
                 oxigraph::sparql::QueryResults::Solutions(sols) => sols
@@ -1183,14 +1186,14 @@ mod tests {
                 _ => panic!("not a SELECT result"),
             }
         };
-        assert_eq!(owlrl_grade(&state), vec!["Partial".to_string()]);
+        assert_eq!(sparql12_grade(&state), vec!["Partial".to_string()]);
 
         // What a v13 install holds: every standard "Full", version 13 recorded.
         state
             .store
             .graph_store_put(
                 Some(caps.as_str()),
-                &format!("<{ots}owlrl> <{ots}conformance> \"Full\" .\n"),
+                &format!("<{ots}sparql12> <{ots}conformance> \"Full\" .\n"),
                 oxigraph::io::RdfFormat::NTriples,
             )
             .unwrap();
@@ -1207,9 +1210,9 @@ mod tests {
                 oxigraph::io::RdfFormat::NTriples,
             )
             .unwrap();
-        assert_eq!(owlrl_grade(&state), vec!["Full".to_string()]);
+        assert_eq!(sparql12_grade(&state), vec!["Full".to_string()]);
 
         run_seed(&state).await;
-        assert_eq!(owlrl_grade(&state), vec!["Partial".to_string()]);
+        assert_eq!(sparql12_grade(&state), vec!["Partial".to_string()]);
     }
 }

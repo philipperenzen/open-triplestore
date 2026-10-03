@@ -959,7 +959,7 @@ const CAPABILITIES_JSONLD: &str = r#"{
     { "@id": "ots:rdfs",           "@type": "Standard", "title": "RDFS",                                   "conformance": "Full" },
     { "@id": "ots:owlql",          "@type": "Standard", "title": "OWL 2 QL",                               "conformance": "Full" },
     { "@id": "ots:owlel",          "@type": "Standard", "title": "OWL 2 EL",                               "conformance": "Full" },
-    { "@id": "ots:owlrl",          "@type": "Standard", "title": "OWL 2 RL",                               "conformance": "Partial" },
+    { "@id": "ots:owlrl",          "@type": "Standard", "title": "OWL 2 RL",                               "conformance": "Full" },
     { "@id": "ots:owldl",          "@type": "Standard", "title": "OWL 2 DL",                               "conformance": "Full" },
     { "@id": "ots:geosparql",      "@type": "Standard", "title": "GeoSPARQL 1.1",                          "conformance": "Partial" },
     { "@id": "ots:shaclcore",      "@type": "Standard", "title": "SHACL Core",                             "conformance": "Partial" },

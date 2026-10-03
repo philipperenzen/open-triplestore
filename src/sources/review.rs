@@ -276,7 +276,9 @@ fn insert_all(store: &TripleStore, graph: &str, items: &[ReviewItem]) -> Result<
     Ok(())
 }
 
-fn item_select(graph_pattern: &str, filter: &str) -> String {
+/// `filter` sits inside the graph pattern; `outer` after it, where a `GRAPH ?g`
+/// variable is in scope (SPARQL binds it only once the group is evaluated).
+fn item_select(graph_pattern: &str, filter: &str, outer: &str) -> String {
     format!(
         "{}SELECT ?i ?id ?source ?run ?graph ?mapping ?version ?subject ?status ?violations ?snapshot \
          ?fixes ?reviewer ?decision ?created ?modified WHERE {{ {graph_pattern} {{\n\
@@ -289,13 +291,14 @@ fn item_select(graph_pattern: &str, filter: &str) -> String {
            OPTIONAL {{ ?i ds:fixes ?fixes }}\n\
            OPTIONAL {{ ?i prov:wasAttributedTo ?reviewer }}\n\
            OPTIONAL {{ ?i ds:decision ?decision }}\n\
-         }} }} ORDER BY DESC(?created) ?subject",
+         }} {outer} }} ORDER BY DESC(?created) ?subject",
         prefixes()
     )
 }
 
-fn items(store: &TripleStore, graph_pattern: &str, filter: &str) -> Vec<ReviewItem> {
-    let Ok(QueryResults::Solutions(rows)) = store.query(&item_select(graph_pattern, filter)) else {
+fn items(store: &TripleStore, graph_pattern: &str, filter: &str, outer: &str) -> Vec<ReviewItem> {
+    let Ok(QueryResults::Solutions(rows)) = store.query(&item_select(graph_pattern, filter, outer))
+    else {
         return Vec::new();
     };
     rows.flatten()
@@ -339,7 +342,7 @@ pub fn list(store: &TripleStore, source_id: &str, status: Option<&str>) -> Vec<R
         Some(s) => format!("FILTER(?status = \"{}\")", escape_sparql_literal(s)),
         None => String::new(),
     };
-    items(store, &graph, &filter)
+    items(store, &graph, &filter, "")
 }
 
 /// One item, by id, whichever datasource it belongs to.
@@ -350,10 +353,8 @@ pub fn find(store: &TripleStore, id: &str) -> Option<ReviewItem> {
     items(
         store,
         "GRAPH ?g",
-        &format!(
-            "FILTER(STRSTARTS(STR(?g), \"urn:system:reviews:\") && ?i = <{}>)",
-            escape_sparql_iri(&item_iri(id))
-        ),
+        &format!("FILTER(?i = <{}>)", escape_sparql_iri(&item_iri(id))),
+        "FILTER(STRSTARTS(STR(?g), \"urn:system:reviews:\"))",
     )
     .into_iter()
     .next()
