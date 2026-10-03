@@ -349,6 +349,14 @@ const BUILTINS: &[Builtin] = &[
         sort: 80,
     },
     Builtin {
+        slug: "swrl",
+        title: "SWRL Rules",
+        category: "Reasoning & Validation",
+        body: include_str!("../../docs/swrl.md"),
+        admin_only: false,
+        sort: 81,
+    },
+    Builtin {
         slug: "shacl",
         title: "SHACL Validation",
         category: "Reasoning & Validation",

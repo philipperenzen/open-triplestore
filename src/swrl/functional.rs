@@ -7,11 +7,20 @@
 //! rule's `Annotation( … )`. Atoms: `ClassAtom`, `ObjectPropertyAtom` (with
 //! `ObjectInverseOf`, arguments swapped), `DataPropertyAtom`, `BuiltInAtom`,
 //! `SameIndividualAtom`, `DifferentIndividualsAtom`; arguments `Variable(…)`,
-//! named individuals and literals (`"v"`, `"v"^^dt`, `"v"@lang`). As with the
-//! other readers, an unknown atom, a class expression, a `DataRangeAtom` or an
-//! anonymous individual refuses the document with a message naming it.
+//! named individuals and literals (`"v"`, `"v"^^dt`, `"v"@lang`).
+//! `ClassAtom` takes any OWL 2 class expression (`ObjectIntersectionOf`,
+//! `ObjectUnionOf`, `ObjectComplementOf`, `ObjectOneOf`,
+//! `ObjectSome/AllValuesFrom`, `ObjectHasValue`, `ObjectHasSelf`,
+//! `ObjectMin/Max/ExactCardinality` and their `Data…` counterparts), and
+//! `DataRangeAtom` any data range (a datatype, `DataIntersectionOf`,
+//! `DataUnionOf`, `DataComplementOf`, `DataOneOf`, `DatatypeRestriction`). As
+//! with the other readers, an unknown atom or expression, or an anonymous
+//! individual, refuses the document with a message naming it.
 
-use super::engine::{Atom, SwrlArg, SwrlRule};
+use oxigraph::model::Literal;
+
+use super::engine::{constant_term, Atom, SwrlArg, SwrlRule};
+use super::expr::{CardKind, ClassExpr, DataRange, PropExpr};
 use super::lexer::{Tok, Tokens};
 use super::names::Names;
 
@@ -159,22 +168,11 @@ impl Parser {
         self.toks.expect(&Tok::LParen)?;
         let atom = match kind {
             "ClassAtom" => {
-                if matches!(self.toks.peek(), Some(Tok::Name(n)) if !n.contains(':'))
-                    && self.toks.peek_at(1) == Some(&Tok::LParen)
-                {
-                    let expr = match self.toks.peek() {
-                        Some(Tok::Name(n)) => n.clone(),
-                        _ => unreachable!(),
-                    };
-                    return Err(self.toks.error(format!(
-                        "ClassAtom over the class expression {expr}( is not supported yet; \
-                         only a named class is"
-                    )));
-                }
-                let class_iri = self.iri("a class")?;
-                Atom::ClassAtom {
-                    class_iri,
-                    arg: self.arg()?,
+                let expr = self.class_expr()?;
+                let arg = self.arg()?;
+                match expr {
+                    ClassExpr::Named(class_iri) => Atom::ClassAtom { class_iri, arg },
+                    expr => Atom::ClassExpressionAtom { expr, arg },
                 }
             }
             "ObjectPropertyAtom" => {
@@ -222,10 +220,11 @@ impl Parser {
                 Atom::BuiltinAtom { builtin, args }
             }
             "DataRangeAtom" => {
-                return Err(self.toks.error(
-                    "DataRangeAtom is not supported yet; refusing the document rather than \
-                     running its rule without that condition",
-                ))
+                let range = self.data_range()?;
+                Atom::DataRangeAtom {
+                    range,
+                    arg: self.arg()?,
+                }
             }
             other => {
                 return Err(self.toks.error(format!(
@@ -239,6 +238,201 @@ impl Parser {
                 .error(format!("{kind} has more arguments than it takes"))
         })?;
         Ok(atom)
+    }
+
+    /// Whether the next tokens open a constructor `Name(`.
+    fn at_constructor(&self) -> Option<String> {
+        match (self.toks.peek(), self.toks.peek_at(1)) {
+            (Some(Tok::Name(n)), Some(Tok::LParen)) if !n.contains(':') => Some(n.clone()),
+            _ => None,
+        }
+    }
+
+    /// An object property expression: a property or `ObjectInverseOf(p)`.
+    fn prop_expr(&mut self) -> Result<PropExpr, String> {
+        if self.at_constructor().as_deref() == Some("ObjectInverseOf") {
+            self.toks.next();
+            self.toks.expect(&Tok::LParen)?;
+            let p = self.iri("an object property")?;
+            self.toks.expect(&Tok::RParen)?;
+            return Ok(PropExpr::Inverse(p));
+        }
+        Ok(PropExpr::Named(self.iri("an object property")?))
+    }
+
+    fn cardinality(&mut self) -> Result<u64, String> {
+        match self.toks.next() {
+            Some(Tok::Number(n)) => n
+                .parse::<u64>()
+                .map_err(|_| self.toks.error(format!("'{n}' is not a cardinality"))),
+            other => Err(self.toks.error(format!(
+                "expected a cardinality, found {}",
+                describe(other.as_ref())
+            ))),
+        }
+    }
+
+    fn individual(&mut self) -> Result<String, String> {
+        match self.arg()? {
+            SwrlArg::Individual(i) => Ok(i),
+            _ => Err(self.toks.error("expected a named individual")),
+        }
+    }
+
+    fn literal(&mut self) -> Result<Literal, String> {
+        match self.arg()? {
+            arg @ SwrlArg::Literal { .. } => match constant_term(&arg)? {
+                oxigraph::model::Term::Literal(l) => Ok(l),
+                _ => unreachable!("a literal argument is a literal"),
+            },
+            _ => Err(self.toks.error("expected a literal")),
+        }
+    }
+
+    /// Expressions up to the closing parenthesis.
+    fn until_close<T>(
+        &mut self,
+        mut item: impl FnMut(&mut Self) -> Result<T, String>,
+    ) -> Result<Vec<T>, String> {
+        let mut out = Vec::new();
+        while self.toks.peek() != Some(&Tok::RParen) {
+            if self.toks.peek().is_none() {
+                return Err(self.toks.error("an expression is not closed"));
+            }
+            out.push(item(self)?);
+        }
+        Ok(out)
+    }
+
+    /// An OWL 2 class expression.
+    fn class_expr(&mut self) -> Result<ClassExpr, String> {
+        let Some(kind) = self.at_constructor() else {
+            return Ok(ClassExpr::Named(self.iri("a class")?));
+        };
+        self.toks.next();
+        self.toks.expect(&Tok::LParen)?;
+        let card = |k: &str| match k {
+            "Min" => CardKind::Min,
+            "Max" => CardKind::Max,
+            _ => CardKind::Exact,
+        };
+        let expr = match kind.as_str() {
+            "ObjectIntersectionOf" => {
+                ClassExpr::IntersectionOf(self.until_close(Self::class_expr)?)
+            }
+            "ObjectUnionOf" => ClassExpr::UnionOf(self.until_close(Self::class_expr)?),
+            "ObjectComplementOf" => ClassExpr::ComplementOf(Box::new(self.class_expr()?)),
+            "ObjectOneOf" => ClassExpr::OneOf(self.until_close(Self::individual)?),
+            "ObjectSomeValuesFrom" => {
+                let p = self.prop_expr()?;
+                ClassExpr::SomeValuesFrom(p, Box::new(self.class_expr()?))
+            }
+            "ObjectAllValuesFrom" => {
+                let p = self.prop_expr()?;
+                ClassExpr::AllValuesFrom(p, Box::new(self.class_expr()?))
+            }
+            "ObjectHasValue" => {
+                let p = self.prop_expr()?;
+                ClassExpr::HasValue(p, self.individual()?)
+            }
+            "ObjectHasSelf" => ClassExpr::HasSelf(self.prop_expr()?),
+            k @ ("ObjectMinCardinality" | "ObjectMaxCardinality" | "ObjectExactCardinality") => {
+                let n = self.cardinality()?;
+                let prop = self.prop_expr()?;
+                let filler = if self.toks.peek() == Some(&Tok::RParen) {
+                    None
+                } else {
+                    Some(Box::new(self.class_expr()?))
+                };
+                ClassExpr::Cardinality {
+                    kind: card(&k["Object".len()..k.len() - "Cardinality".len()]),
+                    n,
+                    prop,
+                    filler,
+                }
+            }
+            "DataSomeValuesFrom" | "DataAllValuesFrom" => {
+                let p = self.iri("a data property")?;
+                if self.at_constructor().is_none()
+                    && !matches!(self.toks.peek_at(1), Some(Tok::RParen))
+                {
+                    return Err(self.toks.error(format!(
+                        "{kind} over several data properties is not supported"
+                    )));
+                }
+                let r = self.data_range()?;
+                if kind == "DataSomeValuesFrom" {
+                    ClassExpr::DataSomeValuesFrom(p, r)
+                } else {
+                    ClassExpr::DataAllValuesFrom(p, r)
+                }
+            }
+            "DataHasValue" => {
+                let p = self.iri("a data property")?;
+                ClassExpr::DataHasValue(p, self.literal()?)
+            }
+            k @ ("DataMinCardinality" | "DataMaxCardinality" | "DataExactCardinality") => {
+                let n = self.cardinality()?;
+                let prop = self.iri("a data property")?;
+                let range = if self.toks.peek() == Some(&Tok::RParen) {
+                    None
+                } else {
+                    Some(self.data_range()?)
+                };
+                ClassExpr::DataCardinality {
+                    kind: card(&k["Data".len()..k.len() - "Cardinality".len()]),
+                    n,
+                    prop,
+                    range,
+                }
+            }
+            other => {
+                return Err(self
+                    .toks
+                    .error(format!("Unknown class expression {other}( in a ClassAtom")))
+            }
+        };
+        self.toks.expect(&Tok::RParen).map_err(|_| {
+            self.toks
+                .error(format!("{kind} has more operands than it takes"))
+        })?;
+        Ok(expr)
+    }
+
+    /// An OWL 2 data range.
+    fn data_range(&mut self) -> Result<DataRange, String> {
+        let Some(kind) = self.at_constructor() else {
+            return Ok(DataRange::Datatype(self.iri("a datatype")?));
+        };
+        self.toks.next();
+        self.toks.expect(&Tok::LParen)?;
+        let range = match kind.as_str() {
+            "DataIntersectionOf" => DataRange::IntersectionOf(self.until_close(Self::data_range)?),
+            "DataUnionOf" => DataRange::UnionOf(self.until_close(Self::data_range)?),
+            "DataComplementOf" => DataRange::ComplementOf(Box::new(self.data_range()?)),
+            "DataOneOf" => DataRange::OneOf(self.until_close(Self::literal)?),
+            "DatatypeRestriction" => {
+                let dt = self.iri("a datatype")?;
+                let facets = self.until_close(|p| {
+                    let f = p.iri("a facet")?;
+                    Ok((f, p.literal()?))
+                })?;
+                if facets.is_empty() {
+                    return Err(self.toks.error("DatatypeRestriction without a facet"));
+                }
+                DataRange::Restriction(dt, facets)
+            }
+            other => {
+                return Err(self
+                    .toks
+                    .error(format!("Unknown data range {other}( in a DataRangeAtom")))
+            }
+        };
+        self.toks.expect(&Tok::RParen).map_err(|_| {
+            self.toks
+                .error(format!("{kind} has more operands than it takes"))
+        })?;
+        Ok(range)
     }
 
     /// `Variable(<iri>)`, a named individual, or a literal.
@@ -349,16 +543,48 @@ Ontology(<http://ex/onto>
     }
 
     #[test]
+    fn reads_class_expressions_and_data_ranges() {
+        let doc = r#"Prefix(:=<http://ex/>)
+DLSafeRule(Body(
+    ClassAtom(ObjectIntersectionOf(:A ObjectSomeValuesFrom(ObjectInverseOf(:p) :B)) Variable(<urn:v#x>))
+    DataPropertyAtom(:age Variable(<urn:v#x>) Variable(<urn:v#a>))
+    DataRangeAtom(DatatypeRestriction(xsd:integer xsd:minInclusive "18"^^xsd:integer) Variable(<urn:v#a>))
+    ClassAtom(ObjectMinCardinality(2 :q) Variable(<urn:v#x>))
+  ) Head(ClassAtom(:Adult Variable(<urn:v#x>))))"#;
+        let rules = parse_swrl_functional(doc).unwrap();
+        let body = &rules[0].body;
+        assert!(
+            matches!(&body[0], Atom::ClassExpressionAtom { expr: ClassExpr::IntersectionOf(xs), .. }
+            if matches!(&xs[1], ClassExpr::SomeValuesFrom(PropExpr::Inverse(p), _) if p == "http://ex/p"))
+        );
+        assert!(
+            matches!(&body[2], Atom::DataRangeAtom { range: DataRange::Restriction(_, f), .. } if f.len() == 1)
+        );
+        assert!(matches!(
+            &body[3],
+            Atom::ClassExpressionAtom {
+                expr: ClassExpr::Cardinality {
+                    kind: CardKind::Min,
+                    n: 2,
+                    filler: None,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn refuses_what_it_cannot_read() {
         let head = "Head(ClassAtom(<http://ex/B> Variable(<urn:v#x>)))";
         let cases = [
             (
-                format!("DLSafeRule(Body(ClassAtom(ObjectComplementOf(<http://ex/A>) Variable(<urn:v#x>))) {head})"),
-                "class expression",
+                format!("DLSafeRule(Body(ClassAtom(ObjectFancyOf(<http://ex/A>) Variable(<urn:v#x>))) {head})"),
+                "Unknown class expression",
             ),
             (
-                format!("DLSafeRule(Body(DataRangeAtom(xsd:integer Variable(<urn:v#x>))) {head})"),
-                "DataRangeAtom",
+                format!("DLSafeRule(Body(DataRangeAtom(DataFancyOf(xsd:integer) Variable(<urn:v#x>))) {head})"),
+                "Unknown data range",
             ),
             (
                 format!("DLSafeRule(Body(FancyAtom(Variable(<urn:v#x>))) {head})"),

@@ -11,9 +11,18 @@
 //! - `functional` — OWL 2 functional-syntax `DLSafeRule`
 //! - `swrlapi` — the SWRLAPI human-readable syntax
 //! - `ruleml` — the SWRL §4 RuleML XML syntax
-//! - `engine` — Rule evaluation via SPARQL INSERT WHERE translation
+//! - `engine` — rule evaluation: SPARQL INSERT WHERE for plain rules, a
+//!   SELECT plus native built-ins for the rest
+//! - `builtins` — the SWRL §8 built-ins, evaluated in Rust
+//! - `datarange` — `DataRangeAtom` membership
+//! - `expr` — class expressions and data ranges, and the auxiliary classes
+//!   that stand for class-expression atoms
+//! - `values` — XSD value semantics shared by built-ins and data ranges
 
+pub mod builtins;
+mod datarange;
 pub mod engine;
+pub mod expr;
 pub mod functional;
 mod lexer;
 mod names;
@@ -21,6 +30,7 @@ pub mod parser;
 pub mod rdf;
 pub mod ruleml;
 pub mod swrlapi;
+mod values;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,7 +38,7 @@ use std::sync::Arc;
 use oxigraph::io::{JsonLdProfileSet, RdfFormat};
 
 use engine::SwrlRule;
-pub use engine::{compile_rules, execute_compiled};
+pub use engine::{compile_rules_for_regime, execute_compiled};
 
 /// The rule syntaxes `parse_rules` reads, by their `format` name.
 pub const FORMATS: &[&str] = &[

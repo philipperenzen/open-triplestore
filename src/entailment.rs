@@ -266,6 +266,126 @@ fn holds_rules(_state: &AppState, _ds: &Dataset) -> bool {
     false
 }
 
+/// How a joint run of SWRL rules and a regime went.
+#[cfg(feature = "swrl")]
+#[derive(Debug, Default)]
+pub(crate) struct JointRun {
+    /// Triples the rules derived, over every round.
+    pub rules_triples: usize,
+    /// Triples the regime derived in the rounds after the rules'.
+    pub regime_triples: usize,
+    /// Rounds of rules-then-regime.
+    pub rounds: usize,
+    /// Whether neither derives anything more.
+    pub converged: bool,
+    /// Why the run stopped short.
+    pub error: Option<String>,
+    /// The last pass of the rules.
+    pub last: Option<crate::swrl::engine::SwrlExecutionResult>,
+}
+
+/// Run `compiled` over `sources` into `target`; with a `regime`, alternate
+/// rules and regime until neither derives anything new. The auxiliary class
+/// axioms of class-expression atoms are written to `target` first, and the
+/// regime runs before the first pass of the rules when `regime_first` (the
+/// caller has not just run it) or when those axioms are new.
+#[cfg(feature = "swrl")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_rules_jointly(
+    state: &AppState,
+    compiled: &crate::swrl::engine::CompiledRules,
+    sources: &[String],
+    target: &str,
+    regime: Option<(&str, IdentityPolicy)>,
+    regime_first: bool,
+    max_iterations: usize,
+    deadline: std::time::Instant,
+) -> JointRun {
+    let mut run = JointRun::default();
+    let regime_pass =
+        |run: &mut JointRun, regime: &str, policy: IdentityPolicy| -> Result<usize, String> {
+            match crate::server::routes::run_regime(
+                state,
+                regime,
+                Some(sources.to_vec()),
+                target,
+                policy,
+            ) {
+                Ok(Some(r)) => {
+                    run.regime_triples += r.triples_added;
+                    Ok(r.triples_added)
+                }
+                Ok(None) => Err(format!("unknown entailment regime '{regime}'")),
+                Err(e) => Err(format!("{e:?}")),
+            }
+        };
+    let installed = match compiled.install_aux(&state.store) {
+        Ok(n) => n,
+        Err(e) => {
+            run.error = Some(e);
+            return run;
+        }
+    };
+    if let Some((regime, policy)) = regime {
+        if regime_first || installed > 0 {
+            if let Err(e) = regime_pass(&mut run, regime, policy) {
+                run.error = Some(e);
+                return run;
+            }
+        }
+    }
+    for round in 1..=MAX_JOINT_ROUNDS {
+        run.rounds = round;
+        let pass = match crate::swrl::execute_compiled(
+            &state.store,
+            compiled,
+            max_iterations,
+            Some(deadline),
+        ) {
+            Ok(pass) => pass,
+            Err(e) => {
+                run.error = Some(e);
+                return run;
+            }
+        };
+        run.rules_triples += pass.triples_inferred;
+        let (converged, derived, stop) = (pass.converged, pass.triples_inferred, pass.stop_reason);
+        run.last = Some(pass);
+        if !converged {
+            run.error = Some(format!(
+                "the rules stopped before their fixed point ({stop:?})"
+            ));
+            return run;
+        }
+        // The regime was at its fixed point before this pass: if the rules
+        // added nothing, so is the pair.
+        if derived == 0 {
+            run.converged = true;
+            return run;
+        }
+        let Some((regime, policy)) = regime else {
+            run.converged = true;
+            return run;
+        };
+        match regime_pass(&mut run, regime, policy) {
+            Ok(0) => {
+                run.converged = true;
+                return run;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                run.error = Some(e);
+                return run;
+            }
+        }
+    }
+    run.error = Some(format!(
+        "no joint fixed point with {} after {MAX_JOINT_ROUNDS} rounds",
+        regime.map(|(r, _)| r).unwrap_or("the regime")
+    ));
+    run
+}
+
 /// Run the stored rules of `ds` over `sources` into `target`; with a
 /// `regime`, alternate rules and regime until neither derives anything new.
 /// `None` when the dataset stores no rules. The caller has already run the
@@ -296,7 +416,12 @@ fn run_stored_rules(
         }
     };
     report.rules = rules.len();
-    let compiled = match crate::swrl::compile_rules(&rules, Some(target), Some(sources)) {
+    let compiled = match crate::swrl::compile_rules_for_regime(
+        &rules,
+        Some(target),
+        Some(sources),
+        regime.map(|(r, _)| r),
+    ) {
         Ok(c) => c,
         Err(e) => {
             report.error = Some(e);
@@ -305,60 +430,20 @@ fn run_stored_rules(
     };
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_secs(state.write_timeout_secs);
-    for round in 1..=MAX_JOINT_ROUNDS {
-        report.rounds = round;
-        let run = match crate::swrl::execute_compiled(
-            &state.store,
-            &compiled,
-            RULE_MAX_ITERATIONS,
-            Some(deadline),
-        ) {
-            Ok(run) => run,
-            Err(e) => {
-                report.error = Some(e);
-                return Some(report);
-            }
-        };
-        report.triples_inferred += run.triples_inferred;
-        if !run.converged {
-            report.error = Some(format!(
-                "the rules stopped before their fixed point ({:?})",
-                run.stop_reason
-            ));
-            return Some(report);
-        }
-        // The regime was at its fixed point before this pass: if the rules
-        // added nothing, so is the pair.
-        if run.triples_inferred == 0 {
-            report.converged = true;
-            return Some(report);
-        }
-        let Some((regime, policy)) = regime else {
-            report.converged = true;
-            return Some(report);
-        };
-        match crate::server::routes::run_regime(
-            state,
-            regime,
-            Some(sources.to_vec()),
-            target,
-            policy,
-        ) {
-            Ok(Some(r)) if r.triples_added == 0 => {
-                report.converged = true;
-                return Some(report);
-            }
-            Ok(_) => {}
-            Err(e) => {
-                report.error = Some(format!("{e:?}"));
-                return Some(report);
-            }
-        }
-    }
-    report.error = Some(format!(
-        "no joint fixed point with {} after {MAX_JOINT_ROUNDS} rounds",
-        regime.map(|(r, _)| r).unwrap_or("the regime")
-    ));
+    let run = run_rules_jointly(
+        state,
+        &compiled,
+        sources,
+        target,
+        regime,
+        false,
+        RULE_MAX_ITERATIONS,
+        deadline,
+    );
+    report.rounds = run.rounds;
+    report.triples_inferred = run.rules_triples;
+    report.converged = run.converged;
+    report.error = run.error;
     Some(report)
 }
 

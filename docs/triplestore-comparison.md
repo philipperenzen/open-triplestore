@@ -104,7 +104,7 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
   `docs/standards.md` grades several of those rows **Partial**: SPARQL 1.1 federation (off by
   default, per-endpoint allowlist), OWL 2 EL, RL and DL (DL runs RL+extension rules in
   process, with a full tableau only via the optional Konclude bridge), SHACL Advanced and
-  SHACL-C, ShEx, SWRL, RML and DCAT. GeoSPARQL 1.1 lacks KML/DGGS literals and the Query
+  SHACL-C, ShEx, RML and DCAT. SWRL is graded Full (2026-10-03), so its ✅ follows the grade. GeoSPARQL 1.1 lacks KML/DGGS literals and the Query
   Rewrite Extension (it has the geodesic `metric*` family, `aggUnion` and WKT/GML/GeoJSON
   literals). SPARQL 1.2 /
   RDF 1.2 follows the RDF 1.2 triple-term model in object position only.
@@ -265,8 +265,11 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >   See [`docs/owl2-dl.md`](owl2-dl.md).
 > ⁸ ShEx (Shape Expressions) support via `shex` feature flag. ShExC parser, recursive descent
 >   validator with cardinality checking, CLOSED/EXTRA, inverse constraints, and value sets.
-> ⁹ SWRL rule engine via `swrl` feature flag. Supports OWL/XML and text-based rule formats.
->   Rules are translated to SPARQL INSERT WHERE and executed in a fixed-point loop.
+> ⁹ SWRL via the `swrl` feature flag, graded Full in [`docs/standards.md`](standards.md): six
+>   rule syntaxes (§4 XML, §5 RDF, OWL/XML, functional, SWRLAPI, a text form), all 79 §8
+>   built-ins evaluated natively with binding, data-range atoms natively, class-expression
+>   atoms through the entailment regime the rules run with, and rules stored with a dataset
+>   running to a joint fixed point with its regime. See [`docs/swrl.md`](swrl.md).
 > ¹⁰ SHACL Core is graded Partial in [`docs/standards.md`](standards.md): one known failure in
 >   the core section of the W3C SHACL test suite, and results compared on `sh:conforms` and
 >   focus nodes rather than full result-set equality; see
@@ -316,6 +319,10 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > row is not claimed (footnote ⁴). The other 🟡 rows are SPARQL 1.2 and RDF 1.2/RDF-star
 > (upstream oxrdf blocker — triple-term evaluation not yet complete). The count is of ✅ cells,
 > which elsewhere in the Open Triplestore column mark feature presence (see §2.3).
+>
+> Recounted 2026-10-03, unchanged at 23: SWRL is now graded Full in `docs/standards.md`, so
+> its ✅ (footnote ⁹) follows the grade instead of marking feature presence. No other row
+> changed.
 
 ```
 Open Triplestore  ███████████████████████░░░░░░   23 / 29  (#1 open-source; GeoSPARQL, SHACL, SPARQL 1.2, RDF-star 🟡; W3C tests not claimed)
@@ -741,7 +748,9 @@ reduces GEOS calls by ~90%.
 | QLever | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 
 > Open Triplestore: RDFS and OWL 2 EL/QL/RL are available via feature flags (`rdfs-entailment`,
-> `owl2-el`, `owl2-ql`, `owl2-rl`). Not enabled by default. OWL 2 DL requires a full HermiT/Pellet-
+> `owl2-el`, `owl2-ql`, `owl2-rl`). Not enabled by default. SWRL (`swrl`) is graded Full: all
+> §8 built-ins, data-range and class-expression atoms, rules run jointly with a regime
+> ([`docs/swrl.md`](swrl.md)). OWL 2 DL requires a full HermiT/Pellet-
 > class reasoner, which is out of scope for this project.
 
 ### 11.2 Reasoning Approaches Compared

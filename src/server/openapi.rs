@@ -2302,11 +2302,16 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                  `dataset`'s reasoning sources and `source_graphs`, read-checked like \
                  /api/reasoning/materialize. Derived triples go to `target_graph` (an \
                  absolute IRI), else the dataset's inference graph (its writers only), \
-                 else the default graph. Every rule is checked before any runs: an \
-                 element a reader does not understand, an unsafe rule, a built-in in the \
-                 head or an unsupported built-in refuses the request and nothing is \
-                 written. The report carries `converged`, `stop_reason` (`fixpoint`, \
-                 `max_iterations` or `timeout`), `target_graph` and `sources`.",
+                 else the default graph. All SWRL §8 built-ins are evaluated natively and \
+                 may bind variables; data-range atoms are evaluated natively; class-expression \
+                 atoms need `regime` (rdfs, owl2-rl, owl2-el, owl2-ql, owl2-dl), which runs \
+                 the rules and that regime to one joint fixed point. Every rule is checked \
+                 before any runs: an element a reader does not understand, an unsafe rule, \
+                 a built-in in the head, an unknown built-in, a built-in pattern with \
+                 infinitely many solutions or a class expression without a regime refuses \
+                 the request and nothing is written. The report carries `converged`, \
+                 `stop_reason` (`fixpoint`, `max_iterations` or `timeout`), `target_graph` \
+                 and `sources`; with a regime also `rounds` and `regime_triples`.",
                 vec![],
                 vec![
                     ("200", "Rule execution report"),

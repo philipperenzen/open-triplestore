@@ -10397,6 +10397,13 @@ struct SwrlExecuteRequest {
     /// Neither given: the unnamed default graph.
     #[serde(default)]
     source_graphs: Option<Vec<String>>,
+    /// Run the rules jointly with this entailment regime (`rdfs`, `owl2-rl`,
+    /// `owl2-el`, `owl2-ql`, `owl2-dl`) to one fixed point in the target graph:
+    /// the regime's consequences feed rule bodies and the other way round.
+    /// Needed by class-expression atoms, whose membership the regime
+    /// materialises. Needs a scope (`dataset` or `source_graphs`) and a target.
+    #[serde(default)]
+    regime: Option<String>,
 }
 
 #[cfg(feature = "swrl")]
@@ -10432,7 +10439,7 @@ async fn swrl_execute(
     // What rule bodies read: a dataset's reasoning sources and explicit
     // graphs, each as far as the caller may read them (the checks of
     // `/api/reasoning/materialize`), or the default graph.
-    let (sources, _identity) = resolve_reasoning_scope(
+    let (sources, identity) = resolve_reasoning_scope(
         &state,
         &user,
         body.dataset.as_deref(),
@@ -10501,12 +10508,40 @@ async fn swrl_execute(
     if rules.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "No valid rules found".to_string()));
     }
+    let rules_count = rules.len();
+
+    // A joint run with a regime needs named graphs to read and a graph to
+    // write: the regime reads the scope plus its own target.
+    if let Some(regime) = body.regime.as_deref() {
+        if !["rdfs", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl"].contains(&regime) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "Unknown regime '{regime}': use rdfs, owl2-rl, owl2-el, owl2-ql or owl2-dl"
+                ),
+            ));
+        }
+        if sources.is_none() || target.is_none() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "a run with a regime needs a dataset or source_graphs to read and a target \
+                 graph to write (target_graph, or the dataset's inference graph)"
+                    .to_string(),
+            ));
+        }
+    }
 
     // Every rule is translated before any runs; a rule that cannot run as
-    // written (unsafe, a head built-in, an untranslatable built-in) refuses
-    // the request and nothing is written.
-    let compiled = crate::swrl::compile_rules(&rules, target.as_deref(), sources.as_deref())
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    // written (unsafe, a head built-in, a built-in pattern with infinitely
+    // many solutions, a class expression without a regime) refuses the
+    // request and nothing is written.
+    let compiled = crate::swrl::compile_rules_for_regime(
+        &rules,
+        target.as_deref(),
+        sources.as_deref(),
+        body.regime.as_deref(),
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     // Rule execution is a store-wide fixed point: bounded like the other
     // expensive operations, run off the async runtime, and stopped by the
@@ -10527,10 +10562,53 @@ async fn swrl_execute(
     let max_iter = body.max_iterations.min(1000);
     let limit = std::time::Duration::from_secs(state.write_timeout_secs);
     let deadline = std::time::Instant::now() + limit;
-    let store = state.store.clone();
-    let task = tokio::task::spawn_blocking(move || {
+    let run_state = state.clone();
+    let regime = body.regime.clone();
+    let (run_sources, run_target) = (sources.clone(), target.clone());
+    let task = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let _permit = permit;
-        crate::swrl::execute_compiled(&store, &compiled, max_iter, Some(deadline))
+        let Some(regime) = regime else {
+            let result = crate::swrl::execute_compiled(
+                &run_state.store,
+                &compiled,
+                max_iter,
+                Some(deadline),
+            )?;
+            return serde_json::to_value(&result).map_err(|e| e.to_string());
+        };
+        let (scope, target) = (
+            run_sources.expect("checked above"),
+            run_target.expect("checked above"),
+        );
+        let run = crate::entailment::run_rules_jointly(
+            &run_state,
+            &compiled,
+            &scope,
+            &target,
+            Some((regime.as_str(), identity)),
+            true,
+            max_iter,
+            deadline,
+        );
+        let mut v = match &run.last {
+            Some(last) => serde_json::to_value(last).map_err(|e| e.to_string())?,
+            None => serde_json::json!({ "rules_count": rules_count, "rule_results": [] }),
+        };
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert(
+                "triples_inferred".into(),
+                serde_json::json!(run.rules_triples),
+            );
+            obj.insert("converged".into(), serde_json::json!(run.converged));
+            obj.insert("regime".into(), serde_json::json!(regime));
+            obj.insert("rounds".into(), serde_json::json!(run.rounds));
+            obj.insert(
+                "regime_triples".into(),
+                serde_json::json!(run.regime_triples),
+            );
+            obj.insert("error".into(), serde_json::json!(run.error));
+        }
+        Ok(v)
     });
     // The engine stops itself at the deadline between rules and reports
     // `stop_reason: "timeout"`; this outer limit only fires when a single
@@ -10554,8 +10632,7 @@ async fn swrl_execute(
         })?
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let mut report = serde_json::to_value(&result)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut report = result;
     if let Some(obj) = report.as_object_mut() {
         obj.insert("target_graph".into(), serde_json::json!(target));
         // The graphs rule bodies read (null: the unnamed default graph).

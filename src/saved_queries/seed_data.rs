@@ -877,9 +877,10 @@ ex:carol a ex:User ; ex:email "carol@example.org" .
 "#;
 
 const SWRL_TTL: &str = r#"
-@prefix ex:   <https://opentriplestore.org/demo/rules#> .
-@prefix swrl: <http://www.w3.org/2003/11/swrl#> .
-@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix ex:    <https://opentriplestore.org/demo/rules#> .
+@prefix swrl:  <http://www.w3.org/2003/11/swrl#> .
+@prefix swrlb: <http://www.w3.org/2003/11/swrlb#> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
 
 ex:hasParent      a rdfs:Property .
 ex:hasGrandparent a rdfs:Property .
@@ -901,8 +902,29 @@ ex:GrandparentRule a swrl:Imp ;
     swrl:head ( [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasGrandparent ;
                   swrl:argument1 ex:x ; swrl:argument2 ex:z ] ) .
 
-ex:Tom   ex:hasParent ex:Mary .
-ex:Mary  ex:hasParent ex:Sophie .
+# A rule with a built-in that binds a value: swrlb:subtract computes the
+# age gap between a person and their parent.
+ex:p a swrl:Variable .
+ex:a a swrl:Variable .
+ex:b a swrl:Variable .
+ex:gap a swrl:Variable .
+
+ex:AgeGapRule a swrl:Imp ;
+    rdfs:comment "hasParent(?x,?p) ^ age(?x,?a) ^ age(?p,?b) ^ subtract(?gap,?b,?a) -> parentAgeGap(?x,?gap)" ;
+    swrl:body ( [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasParent ;
+                  swrl:argument1 ex:x ; swrl:argument2 ex:p ]
+                [ a swrl:DatavaluedPropertyAtom ; swrl:propertyPredicate ex:age ;
+                  swrl:argument1 ex:x ; swrl:argument2 ex:a ]
+                [ a swrl:DatavaluedPropertyAtom ; swrl:propertyPredicate ex:age ;
+                  swrl:argument1 ex:p ; swrl:argument2 ex:b ]
+                [ a swrl:BuiltinAtom ; swrl:builtin swrlb:subtract ;
+                  swrl:arguments ( ex:gap ex:b ex:a ) ] ) ;
+    swrl:head ( [ a swrl:DatavaluedPropertyAtom ; swrl:propertyPredicate ex:parentAgeGap ;
+                  swrl:argument1 ex:x ; swrl:argument2 ex:gap ] ) .
+
+ex:Tom   ex:hasParent ex:Mary ; ex:age 12 .
+ex:Mary  ex:hasParent ex:Sophie ; ex:age 41 .
+ex:Sophie ex:age 70 .
 "#;
 
 const LDP_TTL: &str = r#"
