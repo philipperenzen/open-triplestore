@@ -25,8 +25,6 @@ pub enum SchemaId {
 }
 
 impl SchemaId {
-    pub const ALL: [SchemaId; 3] = [SchemaId::Ifc2x3, SchemaId::Ifc4, SchemaId::Ifc4x3];
-
     /// The schema of a STEP file's `FILE_SCHEMA`: `IFC2X3`, `IFC4` (any
     /// addendum) or `IFC4X3…` (4.3 and its addenda).
     pub fn from_file_schema(s: &str) -> Option<SchemaId> {
@@ -68,7 +66,7 @@ impl SchemaId {
             SchemaId::Ifc4 => (&S[1], include_str!("schema/IFC4.txt")),
             SchemaId::Ifc4x3 => (&S[2], include_str!("schema/IFC4X3_ADD2.txt")),
         };
-        slot.get_or_init(|| Schema::parse(self, text))
+        slot.get_or_init(|| Schema::parse(text))
     }
 }
 
@@ -105,15 +103,14 @@ pub enum TypeDef {
     /// A defined type over another named type (`IfcBoxAlignment = IfcLabel`).
     Alias(String),
     Enum(Vec<String>),
-    Select(Vec<String>),
+    Select,
     /// A defined aggregate (`IfcCompoundPlaneAngleMeasure = LIST OF INTEGER`).
-    Aggregate(String),
+    Aggregate,
 }
 
 #[derive(Debug, Clone)]
 pub struct Attr {
     pub name: String,
-    pub optional: bool,
     /// Declared type: a type or entity name, an EXPRESS primitive, or
     /// `AGG:<element>` for a LIST/SET/ARRAY/BAG.
     pub ty: String,
@@ -146,18 +143,14 @@ pub enum AttrKind {
 }
 
 pub struct Schema {
-    pub id: SchemaId,
     entities: HashMap<String, Entity>,
     types: HashMap<String, TypeDef>,
-    /// Upper-case type name → CamelCase.
-    type_names: HashMap<String, String>,
 }
 
 impl Schema {
-    fn parse(id: SchemaId, text: &str) -> Schema {
+    fn parse(text: &str) -> Schema {
         let mut entities: HashMap<String, Entity> = HashMap::new();
         let mut types = HashMap::new();
-        let mut type_names = HashMap::new();
         let mut current: Option<String> = None;
         for line in text.lines() {
             if line.starts_with('#') || line.is_empty() {
@@ -181,18 +174,10 @@ impl Schema {
                         }
                         "alias" => TypeDef::Alias(detail.to_ascii_uppercase()),
                         "enum" => TypeDef::Enum(words()),
-                        "select" => TypeDef::Select(
-                            detail
-                                .split(' ')
-                                .filter(|w| !w.is_empty())
-                                .map(|w| w.to_ascii_uppercase())
-                                .collect(),
-                        ),
-                        _ => TypeDef::Aggregate(detail.to_ascii_uppercase()),
+                        "select" => TypeDef::Select,
+                        _ => TypeDef::Aggregate,
                     };
-                    let upper = name.to_ascii_uppercase();
-                    type_names.insert(upper.clone(), name.to_string());
-                    types.insert(upper, def);
+                    types.insert(name.to_ascii_uppercase(), def);
                 }
                 "E" => {
                     let upper = cols[1].to_ascii_uppercase();
@@ -216,7 +201,6 @@ impl Schema {
                     match cols[0] {
                         "A" => e.own_attrs.push(Attr {
                             name: cols[1].to_string(),
-                            optional: cols.get(2) == Some(&"1"),
                             ty: cols.get(3).copied().unwrap_or("").to_string(),
                         }),
                         "D" => e.derived.push(cols[1].to_string()),
@@ -226,20 +210,11 @@ impl Schema {
                 _ => {}
             }
         }
-        Schema {
-            id,
-            entities,
-            types,
-            type_names,
-        }
+        Schema { entities, types }
     }
 
     pub fn entity(&self, upper: &str) -> Option<&Entity> {
         self.entities.get(upper)
-    }
-
-    pub fn has_entity(&self, upper: &str) -> bool {
-        self.entities.contains_key(upper)
     }
 
     /// Upper-case names of every entity.
@@ -286,6 +261,7 @@ impl Schema {
     }
 
     /// Names of the entity's derived attributes (own and inherited).
+    #[cfg(test)]
     pub fn derived_attributes(&self, upper: &str) -> Vec<&str> {
         self.lineage(upper)
             .iter()
@@ -294,23 +270,12 @@ impl Schema {
     }
 
     /// Names of the entity's inverse attributes (own and inherited).
+    #[cfg(test)]
     pub fn inverse_attributes(&self, upper: &str) -> Vec<&str> {
         self.lineage(upper)
             .iter()
             .flat_map(|e| e.inverse.iter().map(String::as_str))
             .collect()
-    }
-
-    pub fn type_def(&self, upper: &str) -> Option<&TypeDef> {
-        self.types.get(upper)
-    }
-
-    /// CamelCase of a type or entity name.
-    pub fn camel<'a>(&'a self, upper: &str) -> Option<&'a str> {
-        self.type_names
-            .get(upper)
-            .map(String::as_str)
-            .or_else(|| self.entities.get(upper).map(|e| e.name.as_str()))
     }
 
     /// How a declared attribute type resolves (aliases followed).
@@ -330,8 +295,8 @@ impl Schema {
                 Some(TypeDef::Simple(p)) => return AttrKind::Primitive(*p),
                 Some(TypeDef::Alias(next)) => cur = next.clone(),
                 Some(TypeDef::Enum(_)) => return AttrKind::Enum,
-                Some(TypeDef::Select(_)) => return AttrKind::Select,
-                Some(TypeDef::Aggregate(_)) => return AttrKind::Aggregate,
+                Some(TypeDef::Select) => return AttrKind::Select,
+                Some(TypeDef::Aggregate) => return AttrKind::Aggregate,
                 None => return AttrKind::Unknown,
             }
         }
@@ -362,13 +327,6 @@ impl Schema {
             .enumerate()
             .find(|(_, (a, _))| a.name == "PredefinedType")
             .map(|(i, (a, _))| (i, a))
-    }
-
-    /// Position of a named explicit attribute in the entity's STEP record.
-    pub fn attr_index(&self, upper: &str, name: &str) -> Option<usize> {
-        self.attributes(upper)
-            .iter()
-            .position(|(a, _)| a.name == name)
     }
 }
 
@@ -651,8 +609,8 @@ mod tests {
         assert_eq!(s.attr_kind("IfcValue"), AttrKind::Select);
         assert_eq!(s.attr_kind("IfcWallTypeEnum"), AttrKind::Enum);
         assert_eq!(s.attr_kind("IfcTaskTime"), AttrKind::Entity);
-        assert!(SchemaId::Ifc4x3.schema().has_entity("IFCALIGNMENT"));
-        assert!(!SchemaId::Ifc4.schema().has_entity("IFCALIGNMENT"));
+        assert!(SchemaId::Ifc4x3.schema().entity("IFCALIGNMENT").is_some());
+        assert!(!SchemaId::Ifc4.schema().entity("IFCALIGNMENT").is_some());
     }
 
     #[test]

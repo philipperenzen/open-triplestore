@@ -1032,15 +1032,27 @@ curl -X POST http://localhost:7878/api/shacl/export/ids \
 curl -X POST 'http://localhost:7878/api/shacl/export/ids?raw=true' …
 ```
 
-**The report is the default representation, and `losses` is the reason.** IDS's
-whole expressive surface for a requirement is a facet kind, a cardinality of
-`required` / `prohibited` / `optional`, and one value restriction. Most of SHACL
-has no IDS form at all, so an exporter that silently wrote a thinner document
-than the shapes it was given would be actively misleading for a delivery
-contract. Every constraint that cannot be carried is listed, and a shape graph
-from which nothing at all can be expressed is a `422`, not an empty document.
+**An imported IDS exports as it was imported.** The importer records each
+specification on its shape (`ots:idsSpecification`, re-serialised from the
+parsed document) with a fingerprint of the targets and SPARQL constraints it
+generated from it; the exporter writes the recorded specification back, with
+the document's `info`, while the shape graph still carries exactly those
+constraints. Import → export → import is a fixpoint: the second import
+produces the same Turtle as the first (`tests/spec_export_http.rs`), and the
+exported document passes the importer's XSD and audit checks. A specification
+whose shapes were edited after import is not exported from its stale source;
+it is listed in `losses` instead.
 
-### What survives
+**Other shapes go through the older translator, and `losses` is the reason
+the report is the default representation.** IDS's whole expressive surface for
+a requirement is a facet kind, a cardinality of `required` / `prohibited` /
+`optional`, and one value restriction. Most of SHACL has no IDS form at all,
+so an exporter that silently wrote a thinner document than the shapes it was
+given would be actively misleading for a delivery contract. Every constraint
+that cannot be carried is listed, and a shape graph from which nothing at all
+can be expressed is a `422`, not an empty document.
+
+### What survives (shapes not from an IDS import)
 
 | SHACL | IDS |
 |---|---|
@@ -1066,26 +1078,14 @@ multiplicity. A shape targeted by `sh:targetNode`, `sh:targetSubjectsOf`,
 `sh:targetObjectsOf` or a SPARQL target cannot become a specification at all,
 because IDS applicability is class-based.
 
-Three further caveats, each reported in `losses` when it applies:
+Two further caveats, each reported in `losses` when it applies:
 
 - **A classification facet is dropped.** `ids:classificationType/system` is
-  mandatory and the importer keeps it only as free text, so it cannot be
+  mandatory and older imports kept it only as free text, so it cannot be
   recovered; synthesising one would emit a document that lies.
 - **`xs:pattern` is implicitly anchored and has no flags**, while `sh:pattern`
   is an XPath/SPARQL regex. A flagless pattern is exported with a warning that
-  the match semantics differ; a flagged one is dropped. So is every pattern
-  after the first: several `sh:pattern` values must all match, while several
-  `xs:pattern` facets are alternatives. Likewise only the first of several
-  `sh:hasValue` values is exported, and a deactivated shape or property shape
-  is not exported at all.
-- **This is not a general SHACL-to-IDS translator.** It exports shapes written
-  over *this store's* IFC RDF vocabulary — the `props:` / `bot:` convention the
-  IFC lift emits and the IDS importer targets. Shapes produced by other tools
-  will mostly land in the loss list.
-
-The tests pin an import → export → import fixpoint over that shared subset; they
-do not prove the output is schema-valid, because validating against the IDS XSD
-would need a network fetch and an XSD validator, and neither is available here.
+  the match semantics differ; a flagged one is dropped.
 
 ---
 
@@ -1105,42 +1105,69 @@ curl -X POST 'http://localhost:7878/api/shacl/import/ids?create=true' \
 ```
 
 Without `create=true` the response carries the Turtle and the report only.
-Each `ids:specification` becomes a node shape targeting the entity's ifcOWL
-class — in every namespace its `ifcVersion` list names (`IFC2X3 IFC4` targets
-both; an entity pattern is expanded against the schema's entity list; a
-specification without an entity targets every typed node) — over the RDF the
-built-in IFC importer emits (`props:<Pset>_<Name>` properties,
-`props:ifcName`/`props:ifcGuid` attributes, BOT containment for `partOf`).
-Applicability facets beyond the entity become an "applies" shape combined with
-the "requires" shape as `sh:or ( [ sh:not applies ] requires )`.
 
-Values are compared by the XSD base type of the facet's IDS `dataType` (the IDS
-data-type table) or of the restriction's `base`:
+**Validation first.** The document is checked against the IDS 1.0 XSD
+(elements, their order and attributes, `ifcVersion` tokens, cardinality values)
+and the IDS audit rules after the buildingSMART IDS Audit Tool: entity names
+must exist (in upper case) in every schema the specification names; a
+predefined type must be one the entity can carry; an attribute must be an
+explicit attribute (not derived or inverse) of an entity the applicability
+admits, and a value can only be checked on a value attribute (not a
+reference, list or select); a property `dataType` must exist in the schema, a
+value needs one, and every value and bound must be lexically valid for its
+XSD base (`42.0` is not an integer, `FALSE` not a boolean, `42,3` not a
+double); a restriction's `base` must match the type it constrains; a
+prohibited specification may not carry requirements; and the applicability and
+requirements must be satisfiable together. A document that fails any of this
+is refused with every problem listed (422): an IDS that no model could satisfy
+does not become shapes that quietly pass. The standard property-set templates
+(`Pset_…` names) are not checked.
 
-- a double `simpleValue` becomes the IDS tolerance range
-  `v ± (|v|·1e-6 + 1e-6)` (the bound itself included, as the corpus requires), an integer a closed range, a boolean or
-  string `sh:hasValue`; enumerations become `sh:in`, or `sh:or` of ranges for
-  numbers;
-- an `xs:pattern` is matched against the whole value, as XSD requires: it is
-  anchored and translated (`^`/`$` escaped, `\i`/`\c` and class subtraction
-  rewritten), and several patterns are alternatives;
-- bounds are typed by the base and carry no tolerance; a value that is not
-  valid for its base (`42.0` for an integer, `FALSE` for a boolean) is refused.
+**What the shapes check.** The shapes are SHACL-SPARQL over the **IDS
+projection** of the IFC lift — the graph an IFC import writes to
+`…/building/ids` (see [geo-3d-platform.md §9](geo-3d-platform.md)). Run a
+pipeline or a dataset validation over that graph. Each specification becomes a
+node shape:
 
-Cardinality: `required` → `sh:minCount 1` with the value constraints;
-`prohibited` → `sh:not` of the required facet (the opposite of required, not a
-count of zero); `optional` → the value constraints only. In the applicability
-every facet is a condition the node must meet. A required specification (the
-XSD default) also gets an existence shape — a SPARQL constraint that fails when
-no node of an applicable class exists — and a prohibited specification fails
-on every applicable node and may not carry requirements.
+- **targets**: the exact classes its entity facet admits; a pattern or
+  enumeration is expanded against the tables of the schemas its `ifcVersion`
+  lists, an IFC2X3 name from the occurrence/type mapping table resolves
+  through the type object, and a specification without an entity targets
+  every concrete class. The `ifcVersion` list decides which names the audit
+  accepts; like the reference implementations, and as the buildingSMART corpus
+  requires, the checks then apply to a model of any schema.
+  Subclasses never match;
+- **one `sh:sparql` constraint per requirement facet**, which fails a node that
+  meets the applicability when the facet's cardinality is broken: `required` —
+  the facet does not hold; `prohibited` — it holds (the opposite of required);
+  `optional` — it is present but does not hold. The message names the facet;
+- **existence**: a required specification (the XSD default) also gets a shape
+  on the model node that fails when the model has no applicable entity; it
+  checks the whole model, so it is not meant for write gates. A prohibited
+  specification fails on every applicable entity.
 
-What relies on a value the building-topology lift does not populate
-(predefined types, attributes other than Name/GlobalId, elements outside the
-spatial tree) is listed under `warnings`. Classification and material facets
-target `props:ifcClassification` / `props:ifcMaterial`, which the lift emits
-from `IfcRelAssociatesClassification` (the reference's identification) and
-`IfcRelAssociatesMaterial` (the material's name); a model lifted before it
-did carries neither, and the warning says so. The buildingSMART IDS test
-corpus runs against this path in CI (`docs/conformance/ids.md`).
+Facets follow the IDS documentation and the buildingSMART test corpus:
+
+| Facet | Holds when |
+|---|---|
+| entity | the node's exact class matches, and its predefined type (the type object's unless NOTDEFINED, else its own; the user-defined label counts beside `USERDEFINED`) |
+| attribute | any attribute the name admits has a value that matches; an empty string, a logical UNKNOWN or an empty list is never a value |
+| property | at least one property set matches the name, and every matching set has a matching property, and every matching property has a value of the data type that matches. Sets come from the type object, overridden property by property by the occurrence; quantities are properties; measures are compared in SI units |
+| classification | a classification of the node is in a matching system, and (with a value) its reference or one of its parent references matches; the type's classifications are inherited, overridden per system |
+| material | the node (or, without its own, its type) has a material whose name or category — or any layer, profile, constituent or set name — matches |
+| partOf | a matching whole (exact class, predefined type) is reached through the relation: aggregation and nesting transitively, containment through the node's aggregation ancestors, group assignment and voids/fills directly; without a relation, any of them |
+
+Values are compared by the XSD base of the facet's data type: a double within
+the IDS tolerance `v ± (|v|·1e-6 + 1e-6)` (the bound itself included, as the
+corpus requires), ranges without
+tolerance, integers by value, booleans as `true`/`false`, everything else as a
+case-sensitive string (dates and durations included); an `xs:pattern` is an
+XSD pattern, anchored and translated (`^`/`$` are literal, `\i`/`\c` and class
+subtraction are rewritten), and several are alternatives.
+
+Each specification shape keeps the specification it came from
+(`ots:idsSpecification`) with a fingerprint of the constraints generated from
+it, which is what makes export lossless (below). The buildingSMART IDS test
+corpus runs against this path in CI ([conformance/ids.md](conformance/ids.md));
+the results are development results, not a buildingSMART certification.
 

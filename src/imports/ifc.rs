@@ -1,11 +1,12 @@
 //! IFC file import: store the source file as a downloadable dataset asset and
-//! transform it into linked data (BOT layer + optional full ifcOWL lift).
+//! transform it into linked data (BOT layer + optional full ifcOWL lift +
+//! optional IDS projection).
 //! Shared by the bulk-import endpoint (multipart `.ifc` parts) and the demo
 //! seeder.
 
 use axum::body::Bytes;
 
-use crate::ifc::{convert, ConvertOptions, IfcStats};
+use crate::ifc::{convert_layers, ConvertOptions, IfcStats};
 use crate::server::AppState;
 
 /// What an IFC import produced.
@@ -19,6 +20,8 @@ pub struct IfcImportOutcome {
     pub bot_graph: String,
     /// Graph holding the full ifcOWL-style lift (when requested).
     pub ifcowl_graph: Option<String>,
+    /// Graph holding the IDS projection (when requested): `{bot_graph}/ids`.
+    pub ids_graph: Option<String>,
     pub stats: IfcStats,
 }
 
@@ -54,6 +57,8 @@ pub async fn import_ifc_bytes(
     target_graph: Option<String>,
     public_asset: bool,
     include_ifcowl: bool,
+    // The IDS projection (`crate::ifc::ids_projection`) into `{bot}/ids`.
+    include_ids: bool,
     // FOG file URL fallback when no object store is configured (e.g. the
     // original public source of a seeded file) — keeps the 3D viewer working
     // without S3.
@@ -114,6 +119,7 @@ pub async fn import_ifc_bytes(
         .filter(|g| !g.trim().is_empty())
         .unwrap_or_else(|| format!("{base}/dataset/{dataset_id}/building"));
     let ifcowl_graph = include_ifcowl.then(|| format!("{bot_graph}/ifcowl"));
+    let ids_graph = include_ids.then(|| format!("{bot_graph}/ids"));
     let inst_base = if bot_graph.ends_with('/') || bot_graph.ends_with('#') {
         bot_graph.clone()
     } else {
@@ -126,6 +132,7 @@ pub async fn import_ifc_bytes(
         ifc_file_url: asset_url.clone(),
         anchor_wkt, // None ⇒ emit() falls back to the file's own IfcSite georeference
         include_ifcowl,
+        include_ids,
         root_label: branding.root_label,
         provenance_source: branding.source,
         license: branding.license,
@@ -134,6 +141,7 @@ pub async fn import_ifc_bytes(
     };
     let bot_graph_c = bot_graph.clone();
     let ifcowl_graph_c = ifcowl_graph.clone();
+    let ids_graph_c = ids_graph.clone();
     let stats = tokio::task::spawn_blocking(move || -> Result<IfcStats, String> {
         let text = String::from_utf8_lossy(&bytes).into_owned();
         drop(bytes);
@@ -143,6 +151,7 @@ pub async fn import_ifc_bytes(
         let err: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
         let mut bot_first = true;
         let mut owl_first = true;
+        let mut ids_first = true;
         let stats = {
             let mut bot_sink = |chunk: &str| {
                 if err.borrow().is_some() {
@@ -175,7 +184,24 @@ pub async fn import_ifc_bytes(
                     *err.borrow_mut() = Some(format!("loading ifcOWL graph failed: {e}"));
                 }
             };
-            convert(&text, &opts, &mut bot_sink, &mut owl_sink)?
+            let mut ids_sink = |chunk: &str| {
+                if err.borrow().is_some() {
+                    return;
+                }
+                let Some(g) = ids_graph_c.as_deref() else {
+                    return;
+                };
+                let r = if ids_first {
+                    ids_first = false;
+                    store.graph_store_put(Some(g), chunk, RdfFormat::NTriples)
+                } else {
+                    store.graph_store_post(Some(g), chunk, RdfFormat::NTriples)
+                };
+                if let Err(e) = r {
+                    *err.borrow_mut() = Some(format!("loading IDS projection graph failed: {e}"));
+                }
+            };
+            convert_layers(&text, &opts, &mut bot_sink, &mut owl_sink, &mut ids_sink)?
         };
         match err.into_inner() {
             Some(e) => Err(e),
@@ -191,6 +217,9 @@ pub async fn import_ifc_bytes(
     if let Some(g) = &ifcowl_graph {
         let _ = state.auth_db.add_dataset_graph(dataset_id, g);
     }
+    if let Some(g) = &ids_graph {
+        let _ = state.auth_db.add_dataset_graph(dataset_id, g);
+    }
     state.auth_db.invalidate_accessible_graphs_cache();
     // Writer-pays text-index maintenance for exactly the graphs this import
     // produced (instead of a whole-store rebuild on some later query).
@@ -201,6 +230,9 @@ pub async fn import_ifc_bytes(
         if let Some(g) = &ifcowl_graph {
             graphs.push(g.clone());
         }
+        if let Some(g) = &ids_graph {
+            graphs.push(g.clone());
+        }
         let _ = tokio::task::spawn_blocking(move || st.refresh_text_index_graphs(&graphs)).await;
     }
 
@@ -209,6 +241,7 @@ pub async fn import_ifc_bytes(
         asset_url,
         bot_graph,
         ifcowl_graph,
+        ids_graph,
         stats,
     })
 }

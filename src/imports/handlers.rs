@@ -574,6 +574,7 @@ pub async fn bulk_import(
         // graph `{target}/ifcowl` next to the target, which the dataset takes
         // up like any other new graph (see `gate_dataset_graph_target`).
         let mut ifcowl_claim = None;
+        let mut ids_claim = None;
         if let Some(t) = target.as_deref().filter(|t| !t.trim().is_empty()) {
             dataset_graph::authorize_dataset_write_target(
                 &state.store,
@@ -597,6 +598,20 @@ pub async fn bulk_import(
                 .map_err(AppError::Forbidden)?,
                 ifcowl,
             ));
+            // And the IDS projection `{target}/ids`, the same way.
+            let ids = format!("{t}/ids");
+            ids_claim = Some((
+                dataset_graph::gate_dataset_graph_target(
+                    &state.store,
+                    &state.auth_db,
+                    &state.base_url,
+                    ds_id,
+                    &ids,
+                    &user,
+                )
+                .map_err(AppError::Forbidden)?,
+                ids,
+            ));
         }
         match crate::imports::ifc::import_ifc_bytes(
             &state,
@@ -607,6 +622,7 @@ pub async fn bulk_import(
             target,
             false,
             true,
+            true,
             None,
             None,
             crate::imports::ifc::IfcImportBranding::default(),
@@ -615,16 +631,15 @@ pub async fn bulk_import(
         {
             Ok(outcome) => {
                 result.success_count += 1;
-                if let Some((claim, ifcowl)) = &ifcowl_claim {
-                    let _ = dataset_graph::register_claimed_graph(
-                        &state.auth_db,
-                        ds_id,
-                        ifcowl,
-                        *claim,
-                    );
+                for (claim, graph) in ifcowl_claim.iter().chain(ids_claim.iter()) {
+                    let _ =
+                        dataset_graph::register_claimed_graph(&state.auth_db, ds_id, graph, *claim);
                 }
                 let mut graphs = vec![outcome.bot_graph.clone()];
                 if let Some(g) = &outcome.ifcowl_graph {
+                    graphs.push(g.clone());
+                }
+                if let Some(g) = &outcome.ids_graph {
                     graphs.push(g.clone());
                 }
                 result.file_results.push(crate::imports::bulk::FileResult {
@@ -632,7 +647,11 @@ pub async fn bulk_import(
                     status: "ok",
                     error: None,
                     graph_iris: graphs,
-                    quad_count: Some(outcome.stats.bot_triples + outcome.stats.ifcowl_triples),
+                    quad_count: Some(
+                        outcome.stats.bot_triples
+                            + outcome.stats.ifcowl_triples
+                            + outcome.stats.ids_triples,
+                    ),
                 });
             }
             Err(e) => {

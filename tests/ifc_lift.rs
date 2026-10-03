@@ -8,6 +8,12 @@
 //! emitter mints under its own namespace is declared by the `ifc-lift`
 //! ontology bundle, and that the bundle seeds under the base URL.
 //!
+//! The IDS projection (an opt-in third output) is pinned at the end: that it
+//! leaves the BOT output exactly as it was, and that it carries the facts an
+//! IDS checker reads — exact classes, attributes, predefined types, property
+//! sets in SI units, part-of edges, classifications and materials — and that
+//! an imported IDS validates against it.
+//!
 //! No IFC 4.3 model exists in the repository or the boot seed, so 4.3
 //! behaviour is verified against these fixtures only.
 
@@ -18,7 +24,7 @@ use std::path::Path;
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use common::*;
-use open_triplestore::ifc::{convert, ConvertOptions, IfcStats};
+use open_triplestore::ifc::{convert, convert_layers, ConvertOptions, IfcStats};
 use open_triplestore::seed_bundles::load_seed_dir;
 use open_triplestore::shacl::validate;
 use open_triplestore::store::TripleStore;
@@ -853,4 +859,216 @@ async fn the_ifc_lift_bundle_seeds_the_ontology_under_the_base_url() {
     assert_eq!(resp.status(), StatusCode::OK);
     let txt = body_text(resp.into_body()).await;
     assert!(txt.contains(&format!("{base}/ns/ifc-lift#")), "{txt}");
+}
+
+// ── The IDS projection ─────────────────────────────────────────────────────
+
+const IDSP: &str = "https://opentriplestore.org/ns/ifc-ids#";
+const ATTR: &str = "https://opentriplestore.org/ns/ifc-ids/attr#";
+const IFC4_IDS: &str = "https://opentriplestore.org/ns/ifc-ids/IFC4#";
+
+/// All three outputs, with the IDS projection on.
+fn lift_with_ids(step: &str) -> (String, String, IfcStats) {
+    let mut bot = String::new();
+    let mut ids = String::new();
+    let stats = convert_layers(
+        step,
+        &ConvertOptions {
+            inst_base: BASE.into(),
+            ifc_file_url: Some("http://ex.test/files/model.ifc".into()),
+            include_ids: true,
+            ..Default::default()
+        },
+        &mut |c| bot.push_str(c),
+        &mut |_| {},
+        &mut |c| ids.push_str(c),
+    )
+    .unwrap();
+    (bot, ids, stats)
+}
+
+fn sorted_lines(s: &str) -> Vec<&str> {
+    let mut v: Vec<&str> = s.lines().collect();
+    v.sort_unstable();
+    v
+}
+
+/// The projection is a separate output: the BOT layer the viewer feed and
+/// SHACL Studio read is the same set of triples with it on or off (the
+/// emitter iterates a hash map, so order is not part of the contract).
+#[test]
+fn the_ids_projection_leaves_the_bot_layer_unchanged() {
+    for f in [
+        "qto-and-classification.ifc",
+        "ifc4x3-georef.ifc",
+        "nen-relations.ifc",
+    ] {
+        let step = fixture(f);
+        let (bot_off, stats_off) = lift(&step);
+        let (bot_on, ids, stats_on) = lift_with_ids(&step);
+        assert_eq!(
+            sorted_lines(&bot_off),
+            sorted_lines(&bot_on),
+            "{f}: BOT output changed"
+        );
+        assert_eq!(stats_off.bot_triples, stats_on.bot_triples, "{f}");
+        assert_eq!(stats_off.ids_triples, 0, "{f}: off means off");
+        assert!(
+            stats_on.ids_triples > 0 && !ids.is_empty(),
+            "{f}: no projection"
+        );
+        assert_eq!(ids.lines().count(), stats_on.ids_triples, "{f}");
+        // Nothing of the BOT vocabulary leaks into the projection.
+        assert!(!ids.contains(BOT), "{f}");
+    }
+}
+
+#[test]
+fn the_ids_projection_carries_what_ids_checks() {
+    let (_, ids, _) = lift_with_ids(&fixture("qto-and-classification.ifc"));
+    let a = i("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+    let wall = e("0BBBBBBBBBBBBBBBBBBBW1");
+    let p = |local: &str| i(&format!("{IDSP}{local}"));
+    let attr = |name: &str| i(&format!("{ATTR}{name}"));
+    // The exact class, schema-qualified, and every instance — the project and
+    // a classification reference too, not only the spatial tree.
+    assert_has(&ids, &t(&wall, &a, &i(&format!("{IFC4_IDS}IFCWALL"))));
+    assert_has(
+        &ids,
+        &t(
+            &e("0BBBBBBBBBBBBBBBBBBBP1"),
+            &a,
+            &i(&format!("{IFC4_IDS}IFCPROJECT")),
+        ),
+    );
+    assert_has(
+        &ids,
+        &t(
+            &i(&format!("{BASE}i102")),
+            &a,
+            &i(&format!("{IFC4_IDS}IFCCLASSIFICATIONREFERENCE")),
+        ),
+    );
+    // Attributes beyond Name/GlobalId, from the schema tables.
+    assert_has(&ids, &t(&wall, &attr("Name"), "\"Wall-01\""));
+    assert_has(&ids, &t(&wall, &attr("Tag"), "\"W1\""));
+    assert_has(&ids, &t(&wall, &attr("PredefinedType"), "\"SOLIDWALL\""));
+    assert_has(&ids, &t(&wall, &p("predefinedType"), "\"SOLIDWALL\""));
+    // Part-of per relation: contained in the storey, which is aggregated.
+    assert_has(
+        &ids,
+        &t(&wall, &p("containedIn"), &e("0BBBBBBBBBBBBBBBBBBBL1")),
+    );
+    assert_has(
+        &ids,
+        &t(
+            &e("0BBBBBBBBBBBBBBBBBBBL1"),
+            &p("aggregatedIn"),
+            &e("0BBBBBBBBBBBBBBBBBBBB1"),
+        ),
+    );
+    // Property sets: values in SI units with their IFC data type.
+    let pset = i(&format!(
+        "{BASE}0BBBBBBBBBBBBBBBBBBBW1/ids/pset/Pset_WallCommon"
+    ));
+    assert_has(&ids, &t(&wall, &p("pset"), &pset));
+    assert_has(&ids, &t(&pset, &p("name"), "\"Pset_WallCommon\""));
+    let height = i(&format!("{BASE}i82"));
+    assert_has(&ids, &t(&pset, &p("property"), &height));
+    assert_has(
+        &ids,
+        &t(&height, &p("dataType"), "\"IFCPOSITIVELENGTHMEASURE\""),
+    );
+    assert_has(&ids, &t(&height, &p("value"), &double("2.8")));
+    // A quantity set is a property set too: 4000 mm → 4 m.
+    let length = i(&format!("{BASE}i61"));
+    assert_has(&ids, &t(&length, &p("dataType"), "\"IFCLENGTHMEASURE\""));
+    assert_has(&ids, &t(&length, &p("value"), &double("4.0")));
+    // A conversion-based inch: 36 in → 0.9144 m.
+    let width = i(&format!("{BASE}i69"));
+    assert_has(&ids, &t(&width, &p("value"), &double("0.9144")));
+    // Classification: the reference's system and its chain of identifications.
+    let reference = i(&format!("{BASE}i102"));
+    assert_has(&ids, &t(&wall, &p("classification"), &reference));
+    assert_has(
+        &ids,
+        &t(&reference, &p("system"), "\"Example Classification\""),
+    );
+    assert_has(&ids, &t(&reference, &p("reference"), "\"EX_20_10\""));
+    assert_has(&ids, &t(&reference, &p("reference"), "\"EX\""));
+    // Material.
+    let brick = i(&format!("{BASE}i110"));
+    assert_has(&ids, &t(&wall, &p("material"), &brick));
+    assert_has(&ids, &t(&brick, &p("materialValue"), "\"Brick\""));
+    // The model node names its schema.
+    assert_has(
+        &ids,
+        &t(&i(&format!("{BASE}ids-model")), &p("schema"), "\"IFC4\""),
+    );
+}
+
+/// End to end: an IDS imported through the importer validates against the
+/// projection of a lifted fixture — the required specification passes, the
+/// broken requirement is the only violation, on the wall.
+#[test]
+fn an_imported_ids_validates_against_the_projection() {
+    let (_, ids, _) = lift_with_ids(&fixture("qto-and-classification.ifc"));
+    let doc = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ids xmlns="http://standards.buildingsmart.org/IDS" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <info><title>Walls</title></info>
+  <specifications>
+    <specification name="Walls are rated and classified" ifcVersion="IFC4">
+      <applicability><entity><name><simpleValue>IFCWALL</simpleValue></name></entity></applicability>
+      <requirements>
+        <property dataType="IFCLABEL"><propertySet><simpleValue>Pset_WallCommon</simpleValue></propertySet><baseName><simpleValue>FireRating</simpleValue></baseName><value><simpleValue>REI60</simpleValue></value></property>
+        <property dataType="IFCPOSITIVELENGTHMEASURE"><propertySet><simpleValue>Pset_WallCommon</simpleValue></propertySet><baseName><simpleValue>Height</simpleValue></baseName><value><simpleValue>2.8</simpleValue></value></property>
+        <classification><value><simpleValue>EX</simpleValue></value><system><simpleValue>Example Classification</simpleValue></system></classification>
+        <partOf relation="IFCRELCONTAINEDINSPATIALSTRUCTURE"><entity><name><simpleValue>IFCBUILDINGSTOREY</simpleValue></name></entity></partOf>
+        <material><value><simpleValue>Concrete</simpleValue></value></material>
+      </requirements>
+    </specification>
+    <specification name="There is a slab" ifcVersion="IFC4">
+      <applicability><entity><name><simpleValue>IFCSLAB</simpleValue></name></entity></applicability>
+    </specification>
+  </specifications>
+</ids>"#;
+    let shapes = open_triplestore::spec_import::importer("ids")
+        .unwrap()
+        .import(doc.as_bytes())
+        .expect("imports");
+    let store = TripleStore::in_memory().unwrap();
+    store
+        .load_str(&ids, RdfFormat::NTriples, Some("urn:ids:data"))
+        .unwrap();
+    store
+        .load_str(&shapes.turtle, RdfFormat::Turtle, Some("urn:ids:shapes"))
+        .unwrap();
+    let report = validate(&store, "urn:ids:shapes", &["urn:ids:data".to_string()]).unwrap();
+    assert!(!report.conforms);
+    let mut focus: Vec<&str> = report
+        .results
+        .iter()
+        .map(|r| r.focus_node.as_str())
+        .collect();
+    focus.sort_unstable();
+    // The wall's material is Brick, not Concrete; and there is no slab.
+    assert_eq!(report.results_count, 2, "{:#?}", report.results);
+    assert!(
+        focus.iter().any(|f| f.contains("0BBBBBBBBBBBBBBBBBBBW1")),
+        "{focus:?}"
+    );
+    assert!(
+        focus
+            .iter()
+            .any(|f| f.ends_with("ids-model") || f.ends_with("ids-model>")),
+        "{focus:?}"
+    );
+    assert!(
+        report
+            .results
+            .iter()
+            .any(|r| r.message.contains("material")),
+        "{:#?}",
+        report.results
+    );
 }

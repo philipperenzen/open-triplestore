@@ -449,6 +449,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   test cases (`tests/rml_io_conformance.rs`) and the CSV, JSON and XML cases
   of the legacy rml-test-cases (`tests/rml_legacy_conformance.rs`), with
   their licences and provenance beside them and in `NOTICE`.
+- **The IFC lift writes an IDS projection.** Beside the building-topology
+  graph, an IFC import (`POST /api/datasets/:id/import/ifc`) now writes
+  `…/building/ids`: every instance with its exact, schema-qualified class
+  (no subclass axioms, so a class target matches the class alone) and all
+  its explicit attributes from per-schema IFC2X3 / IFC4 / IFC4X3_ADD2
+  tables; resolved predefined types (type object first, IFC2X3 type mapping
+  table included); property and quantity sets with type inheritance,
+  occurrence override and values in the SI units IDS nominates; part-of
+  edges per relation (aggregation, nesting, containment, groups,
+  voids/fills); materials with every name and category in their sets; and
+  classifications with their system and reference chain. The
+  building-topology output is unchanged (`tests/ifc_lift.rs` checks it is
+  the same with the projection on or off). `ConvertOptions::include_ids` and
+  `ifc::convert_layers` expose it to library callers; the demo seed does not
+  write it.
 - **The buildingSMART IDS test corpus runs in CI.** `tests/buildingsmart_ids_conformance.rs`
   runs all 334 IDS + IFC cases of the buildingSMART IDS repository's test
   corpus through the IFC lift, the IDS importer and the SHACL validator, as a
@@ -1318,6 +1333,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   related, and each pair once. Set `OTS_GEOSPARQL_QUERY_REWRITE=off` for the
   old behaviour. A pattern with both sides unbound compares every pair of
   geometries in scope.
+- **buildingSMART IDS 1.0 is graded Full** in `docs/standards.md`: all 334
+  cases of the buildingSMART IDS test corpus pass in CI with an empty
+  known-failures list — a development result, not a buildingSMART
+  certification (no comparison-matrix row).
+- **IDS import validates the document and checks the IDS projection.** An
+  IDS is checked against the IDS 1.0 XSD and the IDS audit rules (entity,
+  attribute and data-type names per schema, predefined types, value and
+  restriction types, lexical validity, satisfiable specifications) and
+  refused with every problem listed when it fails. The shapes are now
+  SHACL-SPARQL over the IDS projection, one constraint per requirement facet
+  with IDS facet semantics (exact classes, every matching property set and
+  property, transitive aggregation and nesting, classification parents,
+  material sets), plus a model-level shape for required specifications.
+  Shapes written over `props:` / `bot:` by earlier imports keep working as
+  they are; re-import the IDS and import the IFC again to check a model with
+  the new shapes.
+- **IDS export is lossless for imported specifications.** The importer
+  records each specification and a fingerprint of its shapes; the exporter
+  writes the recorded specification back while the shapes are unchanged
+  (import → export → import is a fixpoint), and reports an edited one
+  instead of exporting a stale source.
 - **IDS import compares values the way IDS does.** Values are typed by the
   facet's IDS `dataType` (the IDS data-type table) or the restriction's
   `base`: a double is equal within the IDS tolerance (`v ± (|v|·1e-6 +
