@@ -73,7 +73,8 @@ The calls one query makes share a budget:
   answers do not count). Over either cap the call fails as above, naming the
   variable;
 - its `SERVICE` calls must finish within `OTS_SERVICE_DEADLINE_SECS` of the
-  query's start (default 30). A request is cut short at the deadline, and the
+  query's start (default: the SPARQL query timeout, `SPARQL_QUERY_TIMEOUT_SECS`,
+  itself 30 by default). A request is cut short at the deadline, and the
   query then fails with an error naming the variable, also under `SERVICE
   SILENT`: a query past its deadline does not go on as if the remote had
   matched nothing.

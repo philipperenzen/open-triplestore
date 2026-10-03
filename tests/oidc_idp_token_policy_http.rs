@@ -1,7 +1,7 @@
 //! OIDC resource-server mode: what an access token issued by an external IdP
 //! may do here.
 //!
-//! - By default (`OIDC_TOKEN_POLICY=session`) it reads and writes like an
+//! - By default (`OTS_OIDC_IDP_TOKEN_POLICY=session`) it reads and writes like an
 //!   interactive session but may not mint a long-lived `ots_` API token, the
 //!   same rule `OTS_OIDC_SESSION_POLICY` sets for this store's own provider.
 //! - `scoped` takes write from the token's `scope`/`scp` claim; `full` is the
@@ -32,8 +32,8 @@ static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn clear_policy_env() {
     for var in [
-        "OIDC_TOKEN_POLICY",
-        "OIDC_WRITE_SCOPES",
+        "OTS_OIDC_IDP_TOKEN_POLICY",
+        "OTS_OIDC_IDP_WRITE_SCOPES",
         "OIDC_DEFAULT_ROLE",
     ] {
         std::env::remove_var(var);
@@ -198,13 +198,13 @@ async fn idp_tokens_write_but_cannot_mint_api_tokens_by_default() {
     );
 
     // An unknown policy value falls back to the default, not to the permissive one.
-    std::env::set_var("OIDC_TOKEN_POLICY", "banana");
+    std::env::set_var("OTS_OIDC_IDP_TOKEN_POLICY", "banana");
     let (status, body) = mint(&app, &token).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
 
     // The provider-token policy does not reach IdP tokens: `full` there keeps
     // IdP tokens at the default.
-    std::env::remove_var("OIDC_TOKEN_POLICY");
+    std::env::remove_var("OTS_OIDC_IDP_TOKEN_POLICY");
     std::env::set_var("OTS_OIDC_SESSION_POLICY", "full");
     let (status, body) = mint(&app, &token).await;
     std::env::remove_var("OTS_OIDC_SESSION_POLICY");
@@ -215,7 +215,7 @@ async fn idp_tokens_write_but_cannot_mint_api_tokens_by_default() {
 async fn scoped_idp_policy_reads_write_from_scope_and_scp() {
     let _env = ENV_LOCK.lock().await;
     clear_policy_env();
-    std::env::set_var("OIDC_TOKEN_POLICY", "scoped");
+    std::env::set_var("OTS_OIDC_IDP_TOKEN_POLICY", "scoped");
     let idp = Idp::start();
     let (_state, app) = resource_server(&idp, |_| {});
 
@@ -232,7 +232,7 @@ async fn scoped_idp_policy_reads_write_from_scope_and_scp() {
     assert_eq!(status, StatusCode::FORBIDDEN, "scoped never mints: {body}");
 
     // Entra ID / Okta style: `scp`, as a string or an array, with namespaced
-    // scope names the deployment lists in OIDC_WRITE_SCOPES.
+    // scope names the deployment lists in OTS_OIDC_IDP_WRITE_SCOPES.
     let scp_array = idp.token(
         "scp-array",
         serde_json::json!({ "scp": ["ots.read", "ots.write"] }),
@@ -245,7 +245,7 @@ async fn scoped_idp_policy_reads_write_from_scope_and_scp() {
         !may_write(&app, &scp_array).await,
         "a namespaced scope is not write until configured"
     );
-    std::env::set_var("OIDC_WRITE_SCOPES", "ots.write");
+    std::env::set_var("OTS_OIDC_IDP_WRITE_SCOPES", "ots.write");
     assert!(may_write(&app, &scp_array).await, "scp array");
     assert!(may_write(&app, &scp_string).await, "scp string");
     clear_policy_env();
@@ -255,7 +255,7 @@ async fn scoped_idp_policy_reads_write_from_scope_and_scp() {
 async fn full_idp_policy_restores_minting() {
     let _env = ENV_LOCK.lock().await;
     clear_policy_env();
-    std::env::set_var("OIDC_TOKEN_POLICY", "full");
+    std::env::set_var("OTS_OIDC_IDP_TOKEN_POLICY", "full");
     let idp = Idp::start();
     let (_state, app) = resource_server(&idp, |_| {});
 

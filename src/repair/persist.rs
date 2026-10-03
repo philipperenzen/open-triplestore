@@ -8,7 +8,7 @@
 //! quarantined by recovery (no file ends in `.log`): a proposal is
 //! ephemeral, like the text index, and can be computed again from its base
 //! marker and rules. The newest 20 per dataset are kept, anything older than
-//! `OTS_REPAIR_PROPOSAL_TTL` days (default 30) expires on the next list or
+//! `OTS_REPAIR_PROPOSAL_TTL_DAYS` days (default 30) expires on the next list or
 //! insert, and a dataset that no longer exists loses its directory on the
 //! next insert. States: `proposed → applied | rejected | superseded |
 //! expired`.
@@ -26,7 +26,7 @@ pub const KEEP_PER_DATASET: usize = 20;
 pub const DEFAULT_TTL_DAYS: i64 = 30;
 
 fn ttl_days() -> i64 {
-    std::env::var("OTS_REPAIR_PROPOSAL_TTL")
+    std::env::var("OTS_REPAIR_PROPOSAL_TTL_DAYS")
         .ok()
         .and_then(|v| v.trim().parse::<i64>().ok())
         .filter(|d| *d > 0)

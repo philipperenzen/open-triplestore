@@ -18,7 +18,7 @@
 //! stall or flood a local query. One query may contact at most
 //! `OTS_SERVICE_MAX_ENDPOINTS` endpoints (16) with at most
 //! `OTS_SERVICE_MAX_CALLS` requests (64), all within
-//! `OTS_SERVICE_DEADLINE_SECS` (30) of its start (`crate::sparql::federation`). Exceeding a limit fails the request; nothing
+//! `OTS_SERVICE_DEADLINE_SECS` (default: the SPARQL query timeout) of its start (`crate::sparql::federation`). Exceeding a limit fails the request; nothing
 //! is ever cut short and passed on as if it were the whole answer.
 //!
 //! Redirects are followed (LDES 1.0 §3.3 and TREE require it), at most
@@ -195,10 +195,23 @@ pub fn max_calls() -> usize {
     positive_env(MAX_CALLS_ENV).unwrap_or(64)
 }
 
-/// How long after it starts a query may still make `SERVICE` requests
-/// (default 30 s).
+/// The server's SPARQL query timeout (`SPARQL_QUERY_TIMEOUT_SECS`), recorded
+/// at startup by [`set_query_timeout_secs`]; 0 until then.
+static QUERY_TIMEOUT_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Record the server's SPARQL query timeout, which [`deadline`] defaults to.
+pub fn set_query_timeout_secs(secs: u64) {
+    QUERY_TIMEOUT_SECS.store(secs, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How long after it starts a query may still make `SERVICE` requests:
+/// `OTS_SERVICE_DEADLINE_SECS`, else the server's SPARQL query timeout
+/// (`SPARQL_QUERY_TIMEOUT_SECS`, default 30 s), so raising the query timeout
+/// raises the federation deadline with it.
 pub fn deadline() -> Duration {
-    Duration::from_secs(positive_env(DEADLINE_ENV).unwrap_or(30) as u64)
+    let query_timeout = QUERY_TIMEOUT_SECS.load(std::sync::atomic::Ordering::Relaxed);
+    let default = if query_timeout > 0 { query_timeout } else { 30 };
+    Duration::from_secs(positive_env(DEADLINE_ENV).map_or(default, |n| n as u64))
 }
 
 fn positive_env(name: &str) -> Option<usize> {
@@ -412,8 +425,8 @@ pub(crate) fn post_sparql_blocking_within(
     })
 }
 
-pub const RETRIES_ENV: &str = "OTS_REMOTE_RETRIES";
-pub const MAX_RETRY_WAIT_ENV: &str = "OTS_REMOTE_MAX_RETRY_WAIT_SECS";
+pub const RETRIES_ENV: &str = "OTS_LDES_RETRIES";
+pub const MAX_RETRY_WAIT_ENV: &str = "OTS_LDES_MAX_RETRY_WAIT_SECS";
 
 /// The statuses LDES 1.0 §3.3 says a client retries with back-off.
 pub const RETRYABLE_STATUSES: [u16; 7] = [408, 425, 429, 500, 502, 503, 504];

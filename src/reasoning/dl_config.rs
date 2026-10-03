@@ -50,7 +50,8 @@ pub struct DlConfig {
     pub konclude_bin: String,
     /// Sidecar base URL (`OTS_REASONER_URL`).
     pub sidecar_url: Option<String>,
-    /// Bearer token sent to the sidecar (`OTS_REASONER_TOKEN`).
+    /// Bearer token sent to the sidecar (`OTS_REASONER_TOKEN`, a secret
+    /// reference or, outside production, a raw value).
     pub sidecar_token: Option<String>,
     /// Time limit per backend call (`OTS_REASONER_TIMEOUT_SECS`).
     pub timeout: Duration,
@@ -103,7 +104,14 @@ impl DlConfig {
             c.konclude_bin = b.trim().to_string();
         }
         c.sidecar_url = var("OTS_REASONER_URL").map(|u| u.trim().trim_end_matches('/').to_string());
-        c.sidecar_token = var("OTS_REASONER_TOKEN").map(|t| t.trim().to_string());
+        // A secret reference (`env:`, `file:`, `vault:`) like `LLM_API_KEY`: a
+        // raw token is accepted with a warning outside the production posture
+        // and refused in it; one that does not resolve leaves the sidecar
+        // without a token (it then refuses the call) rather than sending the
+        // reference text.
+        c.sidecar_token = crate::secrets::env_secret_opt("OTS_REASONER_TOKEN")
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
         if let Some(s) = var("OTS_REASONER_TIMEOUT_SECS").and_then(|v| v.trim().parse().ok()) {
             c.timeout = Duration::from_secs(s);
         }

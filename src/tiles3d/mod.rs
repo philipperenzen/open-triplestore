@@ -723,12 +723,12 @@ fn footprint_triangles(body: &str) -> Vec<[(f64, f64, f64); 3]> {
 /// order of 100–150 MB, about what a browser loads as a single tile.
 pub const DEFAULT_MAX_FEATURES: usize = 10_000;
 
-/// How many features one tileset carries: `TILES3D_MAX_FEATURES`, or
+/// How many features one tileset carries: `OTS_TILES3D_MAX_FEATURES`, or
 /// [`DEFAULT_MAX_FEATURES`] when unset or not a positive integer. The cap
 /// stands in for tiling: past it the content is truncated (and says so), not
 /// refused.
 pub fn max_features() -> usize {
-    std::env::var("TILES3D_MAX_FEATURES")
+    std::env::var("OTS_TILES3D_MAX_FEATURES")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|n| *n > 0)
@@ -990,7 +990,7 @@ async fn cached_build(
             dataset = %key.dataset,
             served = t.served,
             total = t.total,
-            "3D Tiles {:?} capped at TILES3D_MAX_FEATURES={}",
+            "3D Tiles {:?} capped at OTS_TILES3D_MAX_FEATURES={}",
             key.kind,
             t.cap
         );

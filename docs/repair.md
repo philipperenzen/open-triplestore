@@ -213,7 +213,7 @@ proposal whose dataset changed after it was computed is `superseded` (the
 change log's sequence when capture is on, else the newest commit) and a
 `GET` says `stale: true`. Proposals are files under
 `{data-dir}/repair-proposals/`: the newest 20 per dataset are kept, older
-ones and anything past `OTS_REPAIR_PROPOSAL_TTL` days (default 30) expire.
+ones and anything past `OTS_REPAIR_PROPOSAL_TTL_DAYS` days (default 30) expire.
 They are not in backups — a proposal can always be computed again.
 
 **Nothing is ever applied automatically.**
@@ -306,7 +306,7 @@ your own under the same restrictions.
 |---|---|---|
 | `OTS_REPAIR_MAX_QUADS` | memory limit ÷ 8 ÷ 512 B (2 000 000 when the limit cannot be read) | The most quads one run may copy. |
 | `OTS_REPAIR_CONCURRENCY` | 1 | Runs at once (each holds a copy in memory). |
-| `OTS_REPAIR_PROPOSAL_TTL` | 30 | Days a kept proposal lives. |
+| `OTS_REPAIR_PROPOSAL_TTL_DAYS` | 30 | Days a kept proposal lives. |
 
 ## Limits
 

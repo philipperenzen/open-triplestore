@@ -70,7 +70,7 @@ act for them. `OTS_OIDC_SESSION_POLICY` decides how far that delegation
 reaches. It applies only to access tokens this store issues at
 `/oauth/token`. Tokens from an external IdP
 ([resource-server mode](auth.md#oidc-resource-server-mode-idp-access-tokens))
-have their own setting, `OIDC_TOKEN_POLICY`, with the same values. Session
+have their own setting, `OTS_OIDC_IDP_TOKEN_POLICY`, with the same values. Session
 tokens and `ots_` API tokens are not affected.
 
 | Policy | Read | Write | Create API tokens |

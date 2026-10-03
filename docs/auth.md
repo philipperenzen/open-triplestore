@@ -232,8 +232,8 @@ environment variables and stays off unless `OIDC_ISSUER` is set.
 | `OIDC_ROLE_CLAIM_MAP` | *(unset: no mapping)* | A JSON object from claim value to role, e.g. `{"idp-admins": "admin", "idp-editors": "publisher", "staff": "user"}`. Invalid JSON is ignored without a warning, which disables mapping. |
 | `OIDC_GROUPS_CLAIM` | `groups` | The claim holding group names. Its values are matched against the role map and used for organisation membership. |
 | `OIDC_ORG_GROUP_PREFIX` | `org:` | The prefix that marks a group as an organisation membership: `org:example-gis` makes the account a member of the organisation whose slug is `example-gis`. |
-| `OIDC_TOKEN_POLICY` | `session` | What an IdP token may do: `session` reads and writes but cannot create API tokens; `scoped` writes only when the token's `scope` or `scp` claim grants it; `full` also creates API tokens. Unknown values mean `session`. See [what an IdP token may do](#what-an-idp-token-may-do). |
-| `OIDC_WRITE_SCOPES` | *(unset)* | Under `scoped`: extra scope values, comma- or space-separated, that count as a write grant besides `write` and `admin`, e.g. `ots.write` or `api://open-triplestore/write`. |
+| `OTS_OIDC_IDP_TOKEN_POLICY` | `session` | What an IdP token may do: `session` reads and writes but cannot create API tokens; `scoped` writes only when the token's `scope` or `scp` claim grants it; `full` also creates API tokens. Unknown values mean `session`. See [what an IdP token may do](#what-an-idp-token-may-do). |
+| `OTS_OIDC_IDP_WRITE_SCOPES` | *(unset)* | Under `scoped`: extra scope values, comma- or space-separated, that count as a write grant besides `write` and `admin`, e.g. `ots.write` or `api://open-triplestore/write`. |
 | `ACCEPT_LEGACY_TOKENS` | `true` | Keep accepting this store's own session tokens and `ots_` API tokens. `false` or `0` refuses them; see [below](#turning-off-the-stores-own-tokens). |
 
 The Docker Compose file passes all ten through from `.env`.
@@ -304,7 +304,7 @@ added: one stays after the group disappears from the token.
 ### What an IdP token may do
 
 An IdP token is a delegation: any client that holds a user's access token for
-this store's audience can present it. `OIDC_TOKEN_POLICY` decides how far it
+this store's audience can present it. `OTS_OIDC_IDP_TOKEN_POLICY` decides how far it
 reaches:
 
 | Policy | Read | Write | Create API tokens |
@@ -324,7 +324,7 @@ reaches:
 - Under `scoped`, the scopes are read from the `scope` claim (a space-separated
   string, as Keycloak issues it) and the `scp` claim (a string, as Entra ID
   issues it, or an array, as Okta does). `write` and `admin` grant writing, as
-  does any value listed in `OIDC_WRITE_SCOPES`. A token with only
+  does any value listed in `OTS_OIDC_IDP_WRITE_SCOPES`. A token with only
   `openid profile email` reads.
 - "Write" means every `POST`, `PUT`, `PATCH` and `DELETE` request, including
   SPARQL Update. A refused write gets `403 This API token does not have write

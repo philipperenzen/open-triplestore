@@ -15,7 +15,7 @@
 //!   access token was accepted as a full-power credential and could be exchanged
 //!   for a long-lived API token at `POST /api/auth/tokens`, turning a read-only
 //!   delegation into permanent account access.
-//! * [`idp_token_policy`] — `OIDC_TOKEN_POLICY`, default `session`. The same
+//! * [`idp_token_policy`] — `OTS_OIDC_IDP_TOKEN_POLICY`, default `session`. The same
 //!   choice for IdP access tokens, which used to mint API tokens too. It is a
 //!   separate setting because the two token sources are configured for
 //!   different audiences: tightening this store's own provider for third-party
@@ -114,9 +114,9 @@ impl OidcSessionPolicy {
     }
 
     /// Whether an IdP token carrying `scope` may write. Extra write scopes
-    /// come from `OIDC_WRITE_SCOPES`.
+    /// come from `OTS_OIDC_IDP_WRITE_SCOPES`.
     pub fn allows_idp_write(self, scope: &str) -> bool {
-        self.allows_write_with(scope, || env_or_empty("OIDC_WRITE_SCOPES"))
+        self.allows_write_with(scope, || env_or_empty("OTS_OIDC_IDP_WRITE_SCOPES"))
     }
 
     fn allows_write_with(self, scope: &str, extra_scopes: impl FnOnce() -> String) -> bool {
@@ -139,7 +139,7 @@ fn env_or_empty(var: &str) -> String {
 /// Scope values understood as granting write. `admin` implies write.
 ///
 /// Issuers that namespace their scopes (`myapp:write`) name the extra
-/// spellings in `extra_scopes` (`OTS_OIDC_WRITE_SCOPES` / `OIDC_WRITE_SCOPES`)
+/// spellings in `extra_scopes` (`OTS_OIDC_WRITE_SCOPES` / `OTS_OIDC_IDP_WRITE_SCOPES`)
 /// rather than teaching this server about them.
 fn scope_grants_write_with(scope: &str, extra_scopes: &str) -> bool {
     let extra: Vec<String> = scope_words(extra_scopes).collect();
@@ -158,10 +158,10 @@ pub fn parse_oidc_session_policy(raw: &str) -> OidcSessionPolicy {
     parse_policy("OTS_OIDC_SESSION_POLICY", raw)
 }
 
-/// Parse `OIDC_TOKEN_POLICY`; same values and fallback as
+/// Parse `OTS_OIDC_IDP_TOKEN_POLICY`; same values and fallback as
 /// [`parse_oidc_session_policy`].
 pub fn parse_idp_token_policy(raw: &str) -> OidcSessionPolicy {
-    parse_policy("OIDC_TOKEN_POLICY", raw)
+    parse_policy("OTS_OIDC_IDP_TOKEN_POLICY", raw)
 }
 
 fn parse_policy(var: &str, raw: &str) -> OidcSessionPolicy {
@@ -190,7 +190,7 @@ pub fn oidc_session_policy() -> OidcSessionPolicy {
 /// The policy for access tokens the external IdP issues for this store's
 /// audience (default: `session`). Independent of [`oidc_session_policy`].
 pub fn idp_token_policy() -> OidcSessionPolicy {
-    match std::env::var("OIDC_TOKEN_POLICY") {
+    match std::env::var("OTS_OIDC_IDP_TOKEN_POLICY") {
         Ok(raw) => parse_idp_token_policy(&raw),
         Err(_) => OidcSessionPolicy::Session,
     }

@@ -2390,6 +2390,8 @@ pub async fn run(
         Arc<crate::vocab_search::index::VocabSearchEngine>,
     >,
 ) -> anyhow::Result<()> {
+    // The federation deadline defaults to the query timeout.
+    crate::remote::set_query_timeout_secs(query_timeout_secs);
     let audit = Arc::new(crate::auth::audit::AuditLogger::new(auth_db.pool()));
 
     // ── Backup subsystem (optional) ─────────────────────────────────────────

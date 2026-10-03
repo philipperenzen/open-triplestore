@@ -238,7 +238,7 @@ async fn resolve_oidc_token(
     }
 
     // An IdP token is a delegation too: whichever client holds it for this
-    // audience may present it. By default (`OIDC_TOKEN_POLICY=session`) it
+    // audience may present it. By default (`OTS_OIDC_IDP_TOKEN_POLICY=session`) it
     // writes like an interactive session but may not mint a long-lived API
     // token, which would turn that delegation into permanent account access.
     // The same rule `OTS_OIDC_SESSION_POLICY` sets for our own provider tokens,

@@ -14,7 +14,7 @@
 //! - `OIDC_AUDIENCE` — expected `aud` (REQUIRED once `OIDC_ISSUER` is set; tokens are rejected until it is configured)
 //! - `OIDC_DEFAULT_ROLE` — role for newly provisioned users (default `user`;
 //!   capped at `user`, see [`capped_default_role`])
-//! - `OIDC_TOKEN_POLICY` — what an IdP token may do (default `session`: read
+//! - `OTS_OIDC_IDP_TOKEN_POLICY` — what an IdP token may do (default `session`: read
 //!   and write, but no API-token minting); see [`super::policy::idp_token_policy`]
 //! - `ACCEPT_LEGACY_TOKENS` — keep accepting password-session JWTs + `ots_` PATs (default true)
 

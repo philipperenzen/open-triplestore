@@ -84,7 +84,7 @@ local origin in the middle of the content and the vertices are f32 offsets from
 it, so they keep millimetre precision.
 
 There is no tiling yet: the tileset is **one root tile with one GLB** holding the
-whole dataset. Until tiling lands, that GLB is capped at `TILES3D_MAX_FEATURES`
+whole dataset. Until tiling lands, that GLB is capped at `OTS_TILES3D_MAX_FEATURES`
 features (default 10 000, the first in IRI order). A capped tileset says so in
 `asset.extras.truncated` (`served`, `total`, `maxFeatures`) and the GLB in an
 `X-Tiles3d-Truncated: served/total` response header. Both bodies are cached per

@@ -245,8 +245,8 @@ A fragment that answers `410 Gone` — compacted away by the publisher's
 retention policy — is processed as an empty page, not as a failure (LDES
 §3.3); the report counts them in `nodes_gone`. `408`, `425`, `429`, `500`,
 `502`, `503` and `504` are retried with exponential back-off and jitter, or
-after the wait a `Retry-After` header asks for (`OTS_REMOTE_RETRIES`, default 4;
-`OTS_REMOTE_MAX_RETRY_WAIT_SECS`, default 60: a longer `Retry-After` fails
+after the wait a `Retry-After` header asks for (`OTS_LDES_RETRIES`, default 4;
+`OTS_LDES_MAX_RETRY_WAIT_SECS`, default 60: a longer `Retry-After` fails
 the sync rather than holding it); `retries` counts them. Any other error
 status aborts the sync. The client asks for TriG, N-Quads, Turtle, N-Triples
 and JSON-LD.

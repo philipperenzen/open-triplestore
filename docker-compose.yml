@@ -44,8 +44,8 @@ services:
       - ACCEPT_LEGACY_TOKENS=${ACCEPT_LEGACY_TOKENS:-true}
       # What an IdP token may do (session | scoped | full; default session:
       # read and write, but no API-token minting) — see .env.example.
-      - OIDC_TOKEN_POLICY=${OIDC_TOKEN_POLICY:-}
-      - OIDC_WRITE_SCOPES=${OIDC_WRITE_SCOPES:-}
+      - OTS_OIDC_IDP_TOKEN_POLICY=${OTS_OIDC_IDP_TOKEN_POLICY:-}
+      - OTS_OIDC_IDP_WRITE_SCOPES=${OTS_OIDC_IDP_WRITE_SCOPES:-}
       # Claims-driven roles & org membership (all optional):
       #   OIDC_ROLE_CLAIM_MAP: JSON '{"<claim value>":"admin|user|guest|publisher"}' (super_admin is capped at admin)
       #   OIDC_ROLE_CLAIMS:    comma-sep claim names (default roles,realm_access.roles,groups)

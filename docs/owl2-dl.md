@@ -154,7 +154,9 @@ The sidecar runs the W3C OWL 2 test cases in CI; see [conformance/owl2-dl.md](co
 
 Configure the server with:
 - `OTS_REASONER_URL` (base URL);
-- `OTS_REASONER_TOKEN` (sent as `Authorization: Bearer …`);
+- `OTS_REASONER_TOKEN` (sent as `Authorization: Bearer …`). The server reads it as a secret
+  reference (`env:NAME`, `file:/path`, `vault:…`), as it does `LLM_API_KEY`; a raw value works
+  with a deprecation warning and is refused under `OTS_ENV=production`;
 - `OTS_REASONER_TIMEOUT_SECS` and `OTS_REASONER_MAX_TRIPLES`.
 
 The client waits a quarter longer than the timeout (at most 5 s more), so the sidecar's own answer can arrive first.

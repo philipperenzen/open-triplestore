@@ -1936,7 +1936,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Validation",
                     "List repair proposals",
-                    "The proposals kept for the dataset (newest 20, OTS_REPAIR_PROPOSAL_TTL days), newest first, with status and `stale` — a proposal whose dataset changed since it was computed becomes `superseded`. Write access required.",
+                    "The proposals kept for the dataset (newest 20, OTS_REPAIR_PROPOSAL_TTL_DAYS days), newest first, with status and `stale` — a proposal whose dataset changed since it was computed becomes `superseded`. Write access required.",
                     vec![],
                     vec![
                         ("200", "`{proposals: [...]}`"),

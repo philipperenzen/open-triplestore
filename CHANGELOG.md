@@ -14,11 +14,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- **`OIDC_TOKEN_POLICY` and `OIDC_WRITE_SCOPES`.** What an access token from
+- **`OTS_OIDC_IDP_TOKEN_POLICY` and `OTS_OIDC_IDP_WRITE_SCOPES`.** What an access token from
   an external IdP (OIDC resource-server mode) may do is now a setting, with the
   same values as `OTS_OIDC_SESSION_POLICY`: `session` (default), `scoped`
   (write only when the token's `scope` or `scp` claim carries `write`,
-  `admin` or a value listed in `OIDC_WRITE_SCOPES`) and `full`. It is separate
+  `admin` or a value listed in `OTS_OIDC_IDP_WRITE_SCOPES`) and `full`. It is separate
   from `OTS_OIDC_SESSION_POLICY` because the two token sources are issued to
   different clients. `docker-compose.yml` passes both through.
 - **SP-initiated SAML sign-in (experimental `saml` feature).** A SAML button on
@@ -140,8 +140,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`OTS_LDES_MAX_IN_FLIGHT_PER_STREAM`, `OTS_LDES_MAX_IN_FLIGHT`).
 - **LDES client: retries, conditional fetches, resumable state.** A sync
   retries `408`, `425`, `429`, `500`, `502`, `503` and `504` with exponential
-  back-off and jitter, honouring `Retry-After` (`OTS_REMOTE_RETRIES`, default
-  4; `OTS_REMOTE_MAX_RETRY_WAIT_SECS`, default 60 — a longer `Retry-After`
+  back-off and jitter, honouring `Retry-After` (`OTS_LDES_RETRIES`, default
+  4; `OTS_LDES_MAX_RETRY_WAIT_SECS`, default 60 — a longer `Retry-After`
   fails the sync instead of holding it), and aborts on any other error status
   (LDES 1.0 §3.3). It asks for TriG, N-Quads, Turtle, N-Triples and JSON-LD.
   It remembers per stream the pages it processed as immutable (never fetched
@@ -151,7 +151,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `stream`, `root_node`, `polling_interval`, `shapes`, `nodes_not_modified`,
   `nodes_skipped_immutable`, `nodes_pruned`, `retries` and
   `versions_superseded`.
-- **3D Tiles feature cap: `TILES3D_MAX_FEATURES`** (default 10 000). The 3D
+- **3D Tiles feature cap: `OTS_TILES3D_MAX_FEATURES`** (default 10 000). The 3D
   Tiles tileset is still a single tile holding one GLB, so the GLB now carries at
   most that many features, the first in IRI order. A capped tileset reports
   `asset.extras.truncated` (`served`, `total`, `maxFeatures`), the GLB an
@@ -222,7 +222,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   repaired, runs the rules the model answers with under a heuristic guard
   (smaller budget, nothing destructive, only predicates already in use), and
   keeps their proposal for review. Settings: `OTS_REPAIR_MAX_QUADS`,
-  `OTS_REPAIR_CONCURRENCY` (default 1), `OTS_REPAIR_PROPOSAL_TTL` (days,
+  `OTS_REPAIR_CONCURRENCY` (default 1), `OTS_REPAIR_PROPOSAL_TTL_DAYS` (days,
   default 30). See `docs/repair.md`.
 - **Model versions and the datasets that depend on them are linked.** A dataset
   version now records the model version its instances were pinned to when it was
@@ -285,15 +285,33 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   how to get help.
 
 ### Changed
+- **Settings added in this release are named for what they cover.** Before
+  release, five new settings were renamed, and the old names are not read:
+  `OIDC_TOKEN_POLICY` and `OIDC_WRITE_SCOPES` are now
+  `OTS_OIDC_IDP_TOKEN_POLICY` and `OTS_OIDC_IDP_WRITE_SCOPES` (IdP tokens;
+  `OTS_OIDC_SESSION_POLICY` and `OTS_OIDC_WRITE_SCOPES` keep governing this
+  store's own provider tokens); `OTS_REMOTE_RETRIES` and
+  `OTS_REMOTE_MAX_RETRY_WAIT_SECS` are `OTS_LDES_RETRIES` and
+  `OTS_LDES_MAX_RETRY_WAIT_SECS`, since only LDES sync retries;
+  `OTS_REPAIR_PROPOSAL_TTL` is `OTS_REPAIR_PROPOSAL_TTL_DAYS`; and
+  `TILES3D_MAX_FEATURES` is `OTS_TILES3D_MAX_FEATURES`.
+- **The `SERVICE` deadline follows the query timeout.** Unset,
+  `OTS_SERVICE_DEADLINE_SECS` now defaults to `SPARQL_QUERY_TIMEOUT_SECS`
+  (30 by default), so raising the query timeout no longer leaves federated
+  queries failing at 30 s.
+- **`OTS_REASONER_TOKEN` is read as a secret.** The server resolves it like
+  `LLM_API_KEY`: `env:`, `file:` and `vault:` references work, a raw value is
+  accepted with a deprecation warning, and `OTS_ENV=production` refuses a raw
+  value.
 - **IdP access tokens no longer create API tokens by default.** In OIDC
   resource-server mode an access token issued by the external IdP was treated
   as a full interactive session, including `POST /api/auth/tokens`, so any
   client holding a user's IdP token for this store's audience could turn it
   into a permanent `ots_` token for that account. Under the new default
-  `OIDC_TOKEN_POLICY=session` such a token still reads and writes but gets
+  `OTS_OIDC_IDP_TOKEN_POLICY=session` such a token still reads and writes but gets
   `403` when it asks for an API token, the rule `OTS_OIDC_SESSION_POLICY`
   already set for this store's own provider tokens. Create API tokens from a
-  web UI sign-in, or set `OIDC_TOKEN_POLICY=full` to restore the old behaviour.
+  web UI sign-in, or set `OTS_OIDC_IDP_TOKEN_POLICY=full` to restore the old behaviour.
 - **`OIDC_DEFAULT_ROLE` is capped at `user`.** The default role applies to
   every account an IdP token creates, so `admin` or `super_admin` made every
   account the IdP knows an administrator; claim-mapped roles were already
