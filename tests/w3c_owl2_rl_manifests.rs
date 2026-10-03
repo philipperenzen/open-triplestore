@@ -43,11 +43,30 @@ const TG: &str = "urn:entailment:owl2-rl";
 
 /// `(test:identifier, why)`: cases that fail today. See
 /// docs/conformance/owl2-rl.md.
-const KNOWN_FAILURES: &[(&str, &str)] = &[];
+const KNOWN_FAILURES: &[(&str, &str)] = &[
+    ("DisjointClasses-001", "the conclusion is a class axiom over a class expression the premise does not contain; the RL/RDF rules conclude no new class expressions (OWL 2 Profiles §4.3, Theorem PR1 covers assertions)"),
+    ("DisjointClasses-003", "the conclusion is a class axiom over a class expression the premise does not contain; the RL/RDF rules conclude no new class expressions (OWL 2 Profiles §4.3, Theorem PR1 covers assertions)"),
+    ("New-Feature-DisjointDataProperties-002", "the conclusion is an owl:AllDifferent axiom; no OWL 2 RL/RDF rule concludes owl:differentFrom or owl:AllDifferent"),
+    ("New-Feature-DisjointObjectProperties-001", "no OWL 2 RL/RDF rule concludes owl:differentFrom"),
+    ("New-Feature-DisjointObjectProperties-002", "the conclusion is an owl:AllDifferent axiom; no OWL 2 RL/RDF rule concludes owl:differentFrom or owl:AllDifferent"),
+    ("New-Feature-ObjectQCR-002", "the conclusion is a class axiom over a class expression the premise does not contain; the RL/RDF rules conclude no new class expressions (OWL 2 Profiles §4.3, Theorem PR1 covers assertions)"),
+    ("New-Feature-ReflexiveProperty-001", "owl:ReflexiveProperty is outside OWL 2 RL; no RL/RDF rule reads it"),
+    ("WebOnt-I4.6-005-Direct", "the conclusion carries an annotation the premise does not; annotations have no Direct Semantics meaning, but the runner matches triples"),
+    ("WebOnt-I5.26-010", "the conclusion is an owl:minCardinality restriction, an existential the RL/RDF rules never conclude"),
+    ("WebOnt-I5.5-005", "the conclusion is a class axiom over a class expression the premise does not contain; the RL/RDF rules conclude no new class expressions (OWL 2 Profiles §4.3, Theorem PR1 covers assertions)"),
+    ("WebOnt-I5.8-006", "the conclusion is a datatype range derived from datatype intersections; the RL/RDF rules conclude no datatype ranges"),
+    ("WebOnt-I5.8-008", "as WebOnt-I5.8-006"),
+    ("WebOnt-I5.8-009", "as WebOnt-I5.8-006"),
+    ("WebOnt-differentFrom-001", "the symmetry of owl:differentFrom: no OWL 2 RL/RDF rule concludes owl:differentFrom"),
+    ("WebOnt-equivalentClass-008-Direct", "as WebOnt-I4.6-005-Direct: an annotation in the conclusion"),
+    ("chain2trans1", "the conclusion is owl:TransitiveProperty, a property axiom the RL/RDF rules never conclude"),
+    ("owl2-rl-rules-fp-differentFrom", "no OWL 2 RL/RDF rule concludes owl:differentFrom (here from a functional property and different values)"),
+    ("owl2-rl-rules-ifp-differentFrom", "no OWL 2 RL/RDF rule concludes owl:differentFrom (here from an inverse-functional property)"),
+];
 
 /// Pass floor: a loader regression that turns passes into skips must not go
 /// unnoticed. It sits a little below the current count.
-const PASS_FLOOR: usize = 0;
+const PASS_FLOOR: usize = 999;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -297,7 +316,7 @@ fn run(c: &Case) -> Outcome {
 }
 
 /// Approved cases of the RL profile in the vendored file.
-const SELECTED: usize = 0;
+const SELECTED: usize = 70;
 
 #[test]
 fn w3c_owl2_rl_manifest_selection() {

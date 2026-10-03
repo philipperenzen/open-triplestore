@@ -166,14 +166,27 @@ fn run(e: &Entry) -> Result<(), String> {
     if got == e.positive {
         Ok(())
     } else if e.positive {
-        Err(format!("{} regime: the result is not entailed", e.regime))
+        let mut detail = String::new();
+        // With OTS_TEST_W3C_RDF_MT_EXPLAIN set: the result triples that do not
+        // match one by one (at most five).
+        if let (Some(result), Some(_)) = (&e.result, std::env::var_os("OTS_TEST_W3C_RDF_MT_EXPLAIN")) {
+            let graph = parse(result)?;
+            let missing: Vec<String> = graph
+                .iter()
+                .filter(|t| !entails(&store, std::slice::from_ref(*t)).unwrap_or(false))
+                .take(5)
+                .map(|t| t.to_string())
+                .collect();
+            detail = format!(": unmatched {missing:?}");
+        }
+        Err(format!("{} regime: the result is not entailed{detail}", e.regime))
     } else {
         Err(format!("{} regime: the result is entailed but must not be", e.regime))
     }
 }
 
 /// Entries in the vendored manifest.
-const ENTRIES: usize = 0;
+const ENTRIES: usize = 51;
 
 #[test]
 fn w3c_rdf_mt_manifest_entries() {

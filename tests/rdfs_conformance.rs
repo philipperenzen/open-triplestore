@@ -598,3 +598,13 @@ fn datatype_clashes_are_inconsistent() {
     let s = store_with("ex:n rdfs:range xsd:decimal . ex:a ex:n 3 ; ex:v \"x\"^^ex:unknown .");
     assert_eq!(rdfs_inconsistency(&s), None, "an integer is a decimal value");
 }
+
+/// A resource typed with two datatypes whose value spaces are disjoint can
+/// denote no value.
+#[test]
+fn a_resource_in_two_disjoint_datatypes_is_inconsistent() {
+    let s = store_with("ex:n rdfs:range xsd:integer, xsd:string . ex:a ex:n ex:b .");
+    assert_eq!(rdfs_inconsistency(&s).as_deref(), Some("datatype-clash"));
+    let s = store_with("ex:n rdfs:range xsd:integer, xsd:decimal . ex:a ex:n ex:b .");
+    assert_eq!(rdfs_inconsistency(&s), None, "every integer is a decimal");
+}

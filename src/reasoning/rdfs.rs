@@ -421,6 +421,26 @@ impl<'a> RdfsMaterializer<'a> {
                 ));
             }
         }
+        // A resource typed with two recognized datatypes whose value spaces
+        // are disjoint (xsd:integer and xsd:string) can denote no value.
+        let q = format!(
+            "SELECT DISTINCT ?d1 ?d2 WHERE {{ ?x <{RDF_NS}type> ?d1 . \
+             FILTER(STRSTARTS(STR(?d1), \"http://www.w3.org/2001/XMLSchema#\")) \
+             ?x <{RDF_NS}type> ?d2 . FILTER(STR(?d1) < STR(?d2)) }}"
+        );
+        for r in self.rows(&q, &["d1", "d2"])? {
+            let (Some(Term::NamedNode(a)), Some(Term::NamedNode(b))) = (&r[0], &r[1]) else {
+                continue;
+            };
+            if let (Some(x), Some(y)) = (Dt::from_any_iri(a.as_str()), Dt::from_any_iri(b.as_str())) {
+                if x.disjoint(y) {
+                    return Err(ReasoningError::inconsistency(
+                        "datatype-clash",
+                        format!("a resource is typed with the disjoint datatypes {a} and {b}"),
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
