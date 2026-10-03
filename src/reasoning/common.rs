@@ -72,7 +72,10 @@ pub enum ReasoningError {
 /// about consistency either way.
 pub fn checks_consistency(regime: &str) -> bool {
     // RDFS checks datatype clashes (RDF 1.1 Semantics, recognized datatypes).
-    matches!(regime, "rdfs" | "owl2-rl" | "owl2-el" | "owl2-ql" | "owl2-dl")
+    matches!(
+        regime,
+        "rdfs" | "owl2-rl" | "owl2-el" | "owl2-ql" | "owl2-dl"
+    )
 }
 
 impl ReasoningError {
