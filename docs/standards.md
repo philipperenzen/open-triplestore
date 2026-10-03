@@ -85,7 +85,7 @@ page tracks known gaps but gives no score.
 | SHACL-AF rules | `tests/shacl_rules_conformance.rs` | spec-derived | 43 |  |
 | SHACL Compact Syntax | `tests/shaclc_conformance.rs` | spec-derived | 11 |  |
 | ShEx | `tests/shex_conformance.rs` | spec-derived | 10 |  |
-| SPARQL 1.2 / RDF-star | `tests/sparql12_conformance.rs` | spec-derived | 15 |  |
+| SPARQL 1.2 / RDF-star | `tests/sparql12_conformance.rs` | spec-derived | 16 |  |
 | SP2B / BSBM query shapes | `tests/sparql_benchmarks.rs` | benchmark-derived | 28 |  |
 | SPARQL 1.1 functions | `tests/sparql_functions_conformance.rs` | spec-derived | 9 |  |
 | SPARQL engine coverage (sparqloscope) | `tests/sparqloscope_conformance.rs` | sparqloscope-derived | 67 |  |
@@ -126,35 +126,16 @@ behavior and will flip green when the limitation is resolved.
    Code written against the older RDF-star CG model (quoted triples usable in
    subject position) needs updating; see `tests/sparql12_conformance.rs`.
 2. **SPARQL 1.1 Query** is graded *Partial*. The engine is oxigraph 0.5.11 with
-   spareval 0.2.7, the latest release; the first two groups below sit there, the
-   last one in this server. (Parallel shards no longer evaluate `EXISTS` per
-   shard: since 2026-10-02 a query with `EXISTS` / `NOT EXISTS` is not split.)
-   - **Entries of the W3C SPARQL 1.1 query sections that fail** (tracked, with no
-     score, in [conformance/sparql11.md](conformance/sparql11.md)):
-     - `bindings#graph`, `aggregates#agg-empty-group-count-graph` and
-       `negation#graph-minus`: `GRAPH ?g` around a non-BGP inner pattern
-       (`VALUES`, a sub-select, `MINUS`) loses the graph variable
-       ([oxigraph#1905](https://github.com/oxigraph/oxigraph/issues/1905),
-       fixed on oxigraph's main branch for its next major release; upstream
-       ties `graph-minus` to the same cause);
-     - `property-path#zero_or_more_set_start`, `…_set_end`,
-       `zero_or_one_set_start` and `…_set_end`: a zero-length path (`*`, `?`)
-       whose constant end is absent from the data yields no solution, where the
-       spec's path semantics include the start term (`ASK { :x :p* :x }` is
-       false on an empty graph);
-     - `aggregates#agg-groupconcat-04` and `-06`: `GROUP_CONCAT` keeps a
-       language tag that every input shares; SPARQL 1.1, and the SPARQL 1.2
-       draft too, return a plain `xsd:string`;
-     - `functions#bnode01`: `BNODE(str)` returns the same blank node for the
-       same string in every solution (and across requests), and no node when
-       the string is not a legal blank-node label.
-   - **Several `FROM` graphs keep duplicates.** A triple present in two `FROM`
-     graphs matches twice, which inflates rows, `COUNT` and `SUM`
-     ([oxigraph#1919](https://github.com/oxigraph/oxigraph/issues/1919), fixed by
-     [#1920](https://github.com/oxigraph/oxigraph/pull/1920) on main, not yet
-     released). `/sparql` scopes every non-admin query with one `FROM` /
-     `FROM NAMED` pair per readable graph, so a triple held in two readable
-     graphs counts twice there; the columnar copy matches this on purpose.
+   its SPARQL parser, evaluator and optimizer (spargebra 0.4.7, spareval 0.2.7,
+   sparopt 0.3.7) vendored and patched for conformance
+   ([vendor/README.md](../vendor/README.md)): `GRAPH ?g` scoping around non-BGP
+   patterns and the RDF merge of several `FROM` graphs (both backported from
+   oxigraph's main branch), zero-length property paths with a constant endpoint,
+   `GROUP_CONCAT` returning an `xsd:string`, `BNODE(str)` fresh per solution, and
+   nested aggregates refused. Among them are all the engine gaps that the
+   vendored W3C query and update sections had found (bug tracking only, with no
+   score: [conformance/sparql11.md](conformance/sparql11.md)); none is open now.
+   What keeps the grade at Partial is in this server:
    - **The HTTP dataset is rewritten.** `/sparql` intersects a caller's
      `FROM` / `FROM NAMED` graphs with the graphs the caller may read, and every
      graph it keeps becomes both a `FROM` and a `FROM NAMED` graph: `FROM <a>`

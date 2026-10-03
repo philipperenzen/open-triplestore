@@ -69,6 +69,8 @@ COPY Cargo.toml Cargo.lock* ./
 COPY src/ src/
 COPY benches/ benches/
 COPY opengraph/ opengraph/
+# The Oxigraph fork patched in through [patch.crates-io] (vendor/README.md).
+COPY vendor/ vendor/
 # `ots-plugin-api` is an unconditional dependency (src/plugins.rs' registry needs
 # its types regardless of which plugin-<name> features are on) and `ots-plugin-hello`
 # is pulled in by the `plugin-hello` feature — both must be present for ANY build,
@@ -113,6 +115,8 @@ COPY Cargo.toml Cargo.lock* ./
 COPY src/ src/
 COPY benches/ benches/
 COPY opengraph/ opengraph/
+# The Oxigraph fork patched in through [patch.crates-io] (vendor/README.md).
+COPY vendor/ vendor/
 COPY plugins/ plugins/
 COPY tools/ tools/
 # The binary embeds the user-facing docs at compile time — src/docs/mod.rs uses

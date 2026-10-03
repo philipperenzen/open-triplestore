@@ -503,3 +503,38 @@ fn base_direction_survives_the_mirror() {
         "the mirror must have been built, else this compared the engine with itself"
     );
 }
+
+/// SPARQL 1.2 (and the W3C sparql12 test `nested-aggregate-functions`): an
+/// aggregate cannot appear inside another aggregate's argument. The vendored
+/// spargebra refuses it at parse time; aggregates side by side, in a HAVING, or
+/// over a sub-select's aggregate stay valid.
+#[test]
+fn nested_aggregates_are_a_syntax_error() {
+    let s = ts();
+    upd(&s, "INSERT DATA { :a :p 1 . :b :p 2 }");
+    for q in [
+        "SELECT (SUM(COUNT(?x)) AS ?s) WHERE { ?x :p ?o }",
+        "SELECT (MAX(1 + AVG(?o)) AS ?m) WHERE { ?x :p ?o }",
+        "SELECT ?p WHERE { ?x ?p ?o } GROUP BY ?p HAVING (SUM(COUNT(?x)) > 1)",
+    ] {
+        assert!(
+            s.query(&format!("{PFX}{q}")).is_err(),
+            "must not parse: {q}"
+        );
+    }
+    assert_eq!(
+        sel(
+            &s,
+            "SELECT (SUM(?o) / COUNT(?o) AS ?avg) WHERE { ?x :p ?o }"
+        )
+        .len(),
+        1
+    );
+    assert_eq!(
+        sel(
+            &s,
+            "SELECT (SUM(?c) AS ?n) WHERE { { SELECT (COUNT(?x) AS ?c) WHERE { ?x :p ?o } GROUP BY ?o } }"
+        ),
+        vec![vec!["\"2\"^^<http://www.w3.org/2001/XMLSchema#integer>".to_string()]]
+    );
+}
