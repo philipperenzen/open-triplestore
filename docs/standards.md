@@ -149,15 +149,17 @@ behavior and will flip green when the limitation is resolved.
      `rdf:parseType="Literal"` entries wait on the open issue
      [w3c/rdf-xml#97](https://github.com/w3c/rdf-xml/issues/97) (opened
      2026-04-20) and do not count against the grade.
-   - **SPARQL 1.2:** the parser (spargebra 0.4.7) accepts a literal or a
-     triple term as the subject of a triple-term expression and an aggregate
-     inside an aggregate, and rejects a SELECT expression that reuses a
-     variable an earlier SELECT expression of an aggregating query binds;
-     `grouping#group01` needs numeric lexical forms kept; and `=` between two
-     literals that both carry a base direction panics in the evaluator
-     (spareval 0.2.7), a server error instead of `false`
-     (`tests/sparql12_conformance.rs` pins it, flip when fixed). Each needs
-     an oxigraph fix, upstream or in the vendored copy.
+   - **SPARQL 1.2:** the row waits only on lexical-form storage. The one
+     entry that fails, `grouping#group01`, needs numeric lexical forms kept
+     (`"001"^^xsd:integer` must not group with `"1"`); the lexical-form
+     storage change fixes it, and with it the row becomes *Full*. The parser
+     and evaluator gaps the suite found are fixed in the vendored copy of
+     spargebra and spareval ([vendor/README.md](../vendor/README.md)): a
+     literal or triple term as the subject of a triple-term expression and an
+     aggregate inside an aggregate are refused, an aggregating query's SELECT
+     expression may reuse an earlier SELECT expression's variable, and `=`
+     between two literals that both carry a base direction answers instead of
+     panicking (a server error before).
    `LATERAL` (SEP-0006) and `ADJUST` (SEP-0002) are extensions oxigraph
    compiles in; they are not part of SPARQL 1.2 and are pinned separately.
 2. **SPARQL 1.1 Query** is graded *Partial*. The engine is oxigraph 0.5.11 with

@@ -712,6 +712,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `spargebra` 0.4.7 parser).
   The vendored W3C SPARQL 1.1 query and update sections have no open known
   failures left (`docs/conformance/sparql11.md`).
+- **SPARQL 1.2: three more fixes in the vendored engine; the W3C suite is down
+  to one known failure.** One commit each in `vendor/`, each with a draft
+  upstream PR:
+  - `=`, `!=` and `IN` between two literals that both carry a base direction
+    (`"abc"@en--ltr = "abc"@en--rtl`) answer by RDF 1.2 term equality; they used
+    to panic in the evaluator, a 500 over HTTP.
+  - A literal or a triple term as the subject of a triple-term expression
+    (`BIND(<<( "x" :p :o )>> AS ?t)`) is a syntax error (400), as the SPARQL 1.2
+    grammar requires (`ExprTripleTermSubject ::= iri | Var`).
+  - In an aggregating query a SELECT expression may use the variable of an
+    earlier SELECT expression, `SELECT (COUNT(?v) AS ?n) (?n + 1 AS ?m)`, as
+    SPARQL 1.2 allows; it used to be refused as an unbound variable.
+  With the nested-aggregate refusal above, every entry of the vendored W3C
+  SPARQL 1.2 suite passes except `grouping#group01`, which needs numeric lexical
+  forms kept in storage. SPARQL 1.2 stays *Partial* in `docs/standards.md`, now
+  waiting only on that change (`docs/conformance/sparql12.md`).
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were

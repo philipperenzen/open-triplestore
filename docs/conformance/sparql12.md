@@ -62,34 +62,43 @@ loader regression turning passes into failures.
 
 ## Known failures (bug tracking)
 
-Checked against the W3C issue trackers on 2026-10-03. No entry below is
-blocked by an *open* Working Group issue: the grammar questions behind the
-triple-term entries were settled when w3c/sparql-query#282 and #283 closed
-(2025-12-26), and the rule behind `select-variable-reuse` came with
-w3c/sparql-query PR #380 (closed 2026-05-28). Each is a behaviour of the
-oxigraph 0.5.11 parser (spargebra 0.4.7) or of its storage; none is in the
-platform layer. They keep the SPARQL 1.2 grade at Partial
-([Standards](../standards.md) note 1).
+Checked against the W3C issue trackers on 2026-10-03. One entry is left, and
+it is not blocked by a Working Group issue: it waits on this project's change
+to keep numeric lexical forms in storage. It keeps the SPARQL 1.2 grade at
+Partial ([Standards](../standards.md) note 1).
 
 | Entry | Gap |
 |---|---|
-| `syntax-triple-terms-negative#tripleterm-subject-03`, `#tripleterm-subject-06` | The parser accepts a triple term or a literal as the subject of a triple-term expression (`BIND(<<( "literal" :q :z )>> AS ?X)`). The 1.2 grammar forbids both since #282/#283 closed. |
-| `syntax#nested-aggregate-functions` | The parser accepts an aggregate inside an aggregate's argument (`COUNT(COUNT(*))`), which SPARQL 1.1 erratum query-5 and SPARQL 1.2 forbid. |
-| `grouping#select-variable-reuse` | The parser rejects a SELECT expression that uses the variable an earlier SELECT expression of the same aggregating query binds (`(COUNT(?v) AS ?count) (?count + 1 AS ?countPlusOne)`), which SPARQL 1.2 allows. |
 | `grouping#group01` | The entry declares `mf:requires mf:NoCanonicalizationOfNumerics`. Storage keeps numerics as values, so `"001"^^xsd:integer` reads back as `"1"^^xsd:integer` and groups with it. The lexical-form storage change fixes it. |
 
-One defect the suite does not reach is pinned by a flip-when-fixed test in
-`tests/sparql12_conformance.rs`: `=` between two literals that both carry a
-base direction (`"abc"@en--ltr = "abc"@en--rtl`) panics inside the evaluator
-(spareval 0.2.7 has no equality arm for directional strings), so such a query
-fails with a server error instead of answering `false`.
+The other gaps the run found were in Oxigraph 0.5.11's SPARQL parser and
+evaluator (spargebra 0.4.7, spareval 0.2.7), which this project carries as a
+vendored, patched copy ([`vendor/README.md`](../../vendor/README.md), one
+commit per fix, each with a draft upstream PR in `vendor/*/UPSTREAM-PR-*.md`).
+They are listed here so the history is not re-derived:
+
+| Entry | Gap | Fix |
+|---|---|---|
+| `syntax-triple-terms-negative#tripleterm-subject-03`, `#tripleterm-subject-06` | The parser accepted a triple term or a literal as the subject of a triple-term expression (`BIND(<<( "literal" :q :z )>> AS ?X)`); the 1.2 grammar has `ExprTripleTermSubject ::= iri \| Var` since w3c/sparql-query#282/#283 closed (2025-12-26). | `ExprTripleTermSubject` is `iri` or `Var` (oxigraph's main branch already has this in its rewritten parser). |
+| `syntax#nested-aggregate-functions` | The parser accepted an aggregate inside an aggregate's argument (`COUNT(COUNT(*))`), which SPARQL 1.1 erratum query-5 and SPARQL 1.2 forbid. | The parser refuses an aggregate whose argument mentions another aggregate of the same `SELECT` level. |
+| `grouping#select-variable-reuse` | The parser rejected a SELECT expression that uses the variable an earlier SELECT expression of the same aggregating query binds (`(COUNT(?v) AS ?count) (?count + 1 AS ?countPlusOne)`), which SPARQL 1.2 allows since w3c/sparql-query PR #380 (closed 2026-05-28). | An aggregating query's SELECT expressions are checked against the grouped variables plus the variables of the SELECT expressions before them. |
+
+One defect the suite does not reach was fixed in the same fork and is pinned
+in `tests/sparql12_conformance.rs` (`directional_literal_equality`): `=`
+between two literals that both carry a base direction
+(`"abc"@en--ltr = "abc"@en--rtl`) panicked inside the evaluator (spareval
+0.2.7 had no equality arm for directional strings), so such a query failed
+with a server error instead of answering `false`.
 
 ## Hand-written pins
 
 `tests/sparql12_conformance.rs` runs every pin on the engine and on the
 in-memory mirror. Beyond the triple-term cases it pins `VERSION`, the
 `LANGDIR` family and base direction as part of the term, `~ reifier` and
-`{| |}` annotations in `INSERT DATA` and in query patterns, and the rejection
-of duplicate `VALUES` variables; and, for the two SEP extensions oxigraph
+`{| |}` annotations in `INSERT DATA` and in query patterns, the rejection
+of duplicate `VALUES` variables, of nested aggregates and of literal or
+triple-term subjects in triple-term expressions, the reuse of a SELECT
+expression's variable in an aggregating query, and `=` between directional
+literals; and, for the two SEP extensions oxigraph
 compiles in (not part of the Working Draft), `LATERAL` with a per-row
 `LIMIT 1` and `ADJUST` with an `xsd:dayTimeDuration`.

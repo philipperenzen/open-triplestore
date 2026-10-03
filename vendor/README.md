@@ -31,8 +31,11 @@ its own commit first, like them.
 Every SPARQL 1.1 Query entry of the vendored W3C test-suite subset that this
 project failed (`tests/w3c_sparql11_manifests.rs`, `docs/conformance/sparql11.md`)
 failed inside `spareval` and `sparopt`, and so did the duplicate rows a
-multi-`FROM` query returned; `spargebra` accepted nested aggregates, which SPARQL
-does not allow. Oxigraph has fixed some of them on its main branch, for its next
+multi-`FROM` query returned. In the SPARQL 1.2 suite
+(`tests/w3c_sparql12_manifests.rs`, `docs/conformance/sparql12.md`) every entry
+the project failed, except one that needs numeric lexical forms kept in storage,
+failed inside `spargebra`; and `spareval` panicked on `=` between two
+directional literals. Oxigraph has fixed some of them on its main branch, for its next
 major release, and none in a 0.5.x release. Carrying the fixes here lets the
 project follow the specification now; each one is written so it can be proposed
 upstream unchanged (`UPSTREAM-PR-*.md` in the crate it touches).
@@ -134,10 +137,13 @@ commit above (the crates.io packages do not ship them).
    `LICENSE-MIT`, `LICENSE-APACHE` and the `UPSTREAM-PR*.md` files; drop
    `.cargo-ok`. Commit that alone.
 3. Re-apply each change below that upstream has not released, one commit each.
-   Drop the ones upstream has released; `tests/w3c_sparql11_manifests.rs` is a
-   two-way ratchet, so a released fix shows up there as an unexpected pass.
+   Drop the ones upstream has released; `tests/w3c_sparql11_manifests.rs` and
+   `tests/w3c_sparql12_manifests.rs` are two-way ratchets, so a released fix
+   shows up there as an unexpected pass (and a dropped fix that upstream has not
+   released, as a new failure).
 4. If upstream has released all of them, delete the three directories, the
    `[patch.crates-io]` entries, the `exclude` entries and (once no vendored crate
    is left) the `COPY vendor/` lines in the `Dockerfile`.
-5. Run `tests/w3c_sparql11_manifests.rs`, `tests/w3c_sparql11_conformance.rs`, the
+5. Run `tests/w3c_sparql11_manifests.rs`, `tests/w3c_sparql11_conformance.rs`,
+   `tests/w3c_sparql12_manifests.rs`, `tests/sparql12_conformance.rs`, the
    parallel/columnar parity tests and the perf gate.
