@@ -1,0 +1,253 @@
+# Open Triplestore's own SHACL shapes for ISO 21597-1 (ICDD Part 1) indexes
+# and linksets. Written by the project from the cardinality restrictions the
+# Part 1 ontologies (Container.rdf, Linkset.rdf) state; not a copy of ISO's
+# SHACL annexes. Run by src/containers/icdd_validate.rs over Index.rdf and the
+# linksets together; the archive-level checks (files, checksums, folders,
+# Part 1 extensions) are made in Rust beside it.
+#
+# Severity: sh:Violation for restrictions the ontologies state, sh:Warning for
+# the identifier and directed-link rules this file adds from the class
+# definitions.
+
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix ct:   <https://standards.iso.org/iso/21597/-1/ed-1/en/Container#> .
+@prefix ls:   <https://standards.iso.org/iso/21597/-1/ed-1/en/Linkset#> .
+@prefix icdd: <https://opentriplestore.org/shapes/icdd#> .
+
+# ── Container description ───────────────────────────────────────────────────
+
+icdd:ContainerDescriptionShape a sh:NodeShape ;
+    sh:targetClass ct:ContainerDescription ;
+    sh:property icdd:ContainerDescriptionShape-conformanceIndicator ;
+    sh:property icdd:ContainerDescriptionShape-publishedBy .
+
+icdd:ContainerDescriptionShape-conformanceIndicator a sh:PropertyShape ;
+    sh:path ct:conformanceIndicator ;
+    sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:Literal ;
+    sh:message "A container description has exactly one ct:conformanceIndicator (\"ICDD-Part1-Container\")." .
+
+icdd:ContainerDescriptionShape-publishedBy a sh:PropertyShape ;
+    sh:path ct:publishedBy ;
+    sh:minCount 1 ; sh:maxCount 1 ;
+    sh:message "A container description has exactly one ct:publishedBy party." .
+
+# ── Documents ───────────────────────────────────────────────────────────────
+
+icdd:DocumentShape a sh:NodeShape ;
+    sh:targetObjectsOf ct:containsDocument ;
+    sh:targetClass ct:Document , ct:InternalDocument , ct:ExternalDocument ,
+        ct:FolderDocument , ct:SecuredDocument , ct:EncryptedDocument ;
+    sh:property icdd:DocumentShape-name .
+
+icdd:DocumentShape-name a sh:PropertyShape ;
+    sh:path ct:name ;
+    sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:Literal ;
+    sh:message "Every document has exactly one ct:name." .
+
+icdd:InternalDocumentShape a sh:NodeShape ;
+    sh:targetClass ct:InternalDocument , ct:SecuredDocument , ct:EncryptedDocument ;
+    sh:property icdd:InternalDocumentShape-filename ;
+    sh:property icdd:InternalDocumentShape-filetype ;
+    sh:property icdd:InternalDocumentShape-belongsToContainer .
+
+icdd:InternalDocumentShape-filename a sh:PropertyShape ;
+    sh:path ct:filename ;
+    sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:Literal ;
+    sh:message "An internal document has exactly one ct:filename (relative to 'Payload documents/')." .
+
+icdd:InternalDocumentShape-filetype a sh:PropertyShape ;
+    sh:path ct:filetype ;
+    sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:Literal ;
+    sh:message "An internal document has exactly one ct:filetype." .
+
+icdd:InternalDocumentShape-belongsToContainer a sh:PropertyShape ;
+    sh:path ct:belongsToContainer ;
+    sh:minCount 1 ; sh:maxCount 1 ;
+    sh:message "An internal document has exactly one ct:belongsToContainer." .
+
+icdd:ExternalDocumentShape a sh:NodeShape ;
+    sh:targetClass ct:ExternalDocument ;
+    sh:property icdd:ExternalDocumentShape-url .
+
+icdd:ExternalDocumentShape-url a sh:PropertyShape ;
+    sh:path ct:url ;
+    sh:minCount 1 ; sh:maxCount 1 ;
+    sh:message "An external document has exactly one ct:url." .
+
+icdd:FolderDocumentShape a sh:NodeShape ;
+    sh:targetClass ct:FolderDocument ;
+    sh:property icdd:FolderDocumentShape-foldername .
+
+icdd:FolderDocumentShape-foldername a sh:PropertyShape ;
+    sh:path ct:foldername ;
+    sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:Literal ;
+    sh:message "A folder document has exactly one ct:foldername." .
+
+icdd:SecuredDocumentShape a sh:NodeShape ;
+    sh:targetClass ct:SecuredDocument ;
+    sh:property icdd:SecuredDocumentShape-checksum ;
+    sh:property icdd:SecuredDocumentShape-checksumAlgorithm .
+
+icdd:SecuredDocumentShape-checksum a sh:PropertyShape ;
+    sh:path ct:checksum ;
+    sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:Literal ;
+    sh:message "A secured document has exactly one ct:checksum." .
+
+icdd:SecuredDocumentShape-checksumAlgorithm a sh:PropertyShape ;
+    sh:path ct:checksumAlgorithm ;
+    sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:Literal ;
+    sh:message "A secured document has exactly one ct:checksumAlgorithm." .
+
+icdd:EncryptedDocumentShape a sh:NodeShape ;
+    sh:targetClass ct:EncryptedDocument ;
+    sh:property icdd:EncryptedDocumentShape-encryptionAlgorithm .
+
+icdd:EncryptedDocumentShape-encryptionAlgorithm a sh:PropertyShape ;
+    sh:path ct:encryptionAlgorithm ;
+    sh:maxCount 1 ;
+    sh:severity sh:Warning ;
+    sh:message "An encrypted document names at most one ct:encryptionAlgorithm." .
+
+# ── Parties ─────────────────────────────────────────────────────────────────
+
+icdd:PartyShape a sh:NodeShape ;
+    sh:targetObjectsOf ct:createdBy , ct:publishedBy , ct:modifiedBy ;
+    sh:targetClass ct:Party , ct:Person , ct:Organisation ;
+    sh:or (
+        [ sh:class ct:Person ]
+        [ sh:class ct:Organisation ]
+    ) ;
+    sh:message "ct:Party is abstract: a party is a ct:Person or a ct:Organisation with exactly one ct:name." ;
+    sh:property icdd:PartyShape-name .
+
+icdd:PartyShape-name a sh:PropertyShape ;
+    sh:path ct:name ;
+    sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:Literal ;
+    sh:message "A party has exactly one ct:name." .
+
+# ── Linksets ────────────────────────────────────────────────────────────────
+
+icdd:LinksetShape a sh:NodeShape ;
+    sh:targetObjectsOf ct:containsLinkset ;
+    sh:targetClass ct:Linkset ;
+    sh:property icdd:LinksetShape-filename .
+
+icdd:LinksetShape-filename a sh:PropertyShape ;
+    sh:path ct:filename ;
+    sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:Literal ;
+    sh:message "A linkset has exactly one ct:filename (relative to 'Payload triples/')." .
+
+icdd:LinkShape a sh:NodeShape ;
+    sh:targetClass ls:Link , ls:BinaryLink , ls:DirectedLink , ls:DirectedBinaryLink , ls:Directed1toNLink ;
+    sh:property icdd:LinkShape-elements .
+
+icdd:LinkShape-elements a sh:PropertyShape ;
+    sh:path [ sh:alternativePath ( ls:hasLinkElement ls:hasFromLinkElement ls:hasToLinkElement ) ] ;
+    sh:minCount 2 ;
+    sh:message "A link has at least two link elements." .
+
+icdd:BinaryLinkShape a sh:NodeShape ;
+    sh:targetClass ls:BinaryLink , ls:DirectedBinaryLink ;
+    sh:property icdd:BinaryLinkShape-elements .
+
+icdd:BinaryLinkShape-elements a sh:PropertyShape ;
+    sh:path [ sh:alternativePath ( ls:hasLinkElement ls:hasFromLinkElement ls:hasToLinkElement ) ] ;
+    sh:maxCount 2 ;
+    sh:message "A binary link has exactly two link elements." .
+
+icdd:DirectedBinaryLinkShape a sh:NodeShape ;
+    sh:targetClass ls:DirectedBinaryLink ;
+    sh:property icdd:DirectedBinaryLinkShape-hasFromLinkElement ;
+    sh:property icdd:DirectedBinaryLinkShape-hasToLinkElement .
+
+icdd:DirectedBinaryLinkShape-hasFromLinkElement a sh:PropertyShape ;
+    sh:path ls:hasFromLinkElement ;
+    sh:minCount 1 ; sh:maxCount 1 ;
+    sh:message "A directed binary link has exactly one ls:hasFromLinkElement." .
+
+icdd:DirectedBinaryLinkShape-hasToLinkElement a sh:PropertyShape ;
+    sh:path ls:hasToLinkElement ;
+    sh:minCount 1 ; sh:maxCount 1 ;
+    sh:message "A directed binary link has exactly one ls:hasToLinkElement." .
+
+icdd:DirectedLinkShape a sh:NodeShape ;
+    sh:targetClass ls:DirectedLink , ls:Directed1toNLink ;
+    sh:severity sh:Warning ;
+    sh:property icdd:DirectedLinkShape-hasFromLinkElement ;
+    sh:property icdd:DirectedLinkShape-hasToLinkElement .
+
+icdd:DirectedLinkShape-hasFromLinkElement a sh:PropertyShape ;
+    sh:path ls:hasFromLinkElement ;
+    sh:minCount 1 ;
+    sh:severity sh:Warning ;
+    sh:message "A directed link has at least one ls:hasFromLinkElement." .
+
+icdd:DirectedLinkShape-hasToLinkElement a sh:PropertyShape ;
+    sh:path ls:hasToLinkElement ;
+    sh:minCount 1 ;
+    sh:severity sh:Warning ;
+    sh:message "A directed link has at least one ls:hasToLinkElement." .
+
+icdd:Directed1toNLinkShape a sh:NodeShape ;
+    sh:targetClass ls:Directed1toNLink ;
+    sh:property icdd:Directed1toNLinkShape-hasFromLinkElement .
+
+icdd:Directed1toNLinkShape-hasFromLinkElement a sh:PropertyShape ;
+    sh:path ls:hasFromLinkElement ;
+    sh:maxCount 1 ;
+    sh:severity sh:Warning ;
+    sh:message "A directed one-to-many link has one ls:hasFromLinkElement." .
+
+icdd:LinkElementShape a sh:NodeShape ;
+    sh:targetObjectsOf ls:hasLinkElement , ls:hasFromLinkElement , ls:hasToLinkElement ;
+    sh:targetClass ls:LinkElement ;
+    sh:property icdd:LinkElementShape-hasDocument ;
+    sh:property icdd:LinkElementShape-hasIdentifier .
+
+icdd:LinkElementShape-hasDocument a sh:PropertyShape ;
+    sh:path ls:hasDocument ;
+    sh:minCount 1 ; sh:maxCount 1 ;
+    sh:message "A link element refers to exactly one document (ls:hasDocument)." .
+
+icdd:LinkElementShape-hasIdentifier a sh:PropertyShape ;
+    sh:path ls:hasIdentifier ;
+    sh:maxCount 1 ;
+    sh:severity sh:Warning ;
+    sh:message "A link element has at most one ls:hasIdentifier." .
+
+icdd:StringBasedIdentifierShape a sh:NodeShape ;
+    sh:targetClass ls:StringBasedIdentifier ;
+    sh:property icdd:StringBasedIdentifierShape-identifier .
+
+icdd:StringBasedIdentifierShape-identifier a sh:PropertyShape ;
+    sh:path ls:identifier ;
+    sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:Literal ;
+    sh:severity sh:Warning ;
+    sh:message "A string-based identifier has one ls:identifier." .
+
+icdd:URIBasedIdentifierShape a sh:NodeShape ;
+    sh:targetClass ls:URIBasedIdentifier ;
+    sh:property icdd:URIBasedIdentifierShape-uri .
+
+icdd:URIBasedIdentifierShape-uri a sh:PropertyShape ;
+    sh:path ls:uri ;
+    sh:minCount 1 ; sh:maxCount 1 ;
+    sh:severity sh:Warning ;
+    sh:message "A URI-based identifier has one ls:uri." .
+
+icdd:QueryBasedIdentifierShape a sh:NodeShape ;
+    sh:targetClass ls:QueryBasedIdentifier ;
+    sh:property icdd:QueryBasedIdentifierShape-queryExpression ;
+    sh:property icdd:QueryBasedIdentifierShape-queryLanguage .
+
+icdd:QueryBasedIdentifierShape-queryExpression a sh:PropertyShape ;
+    sh:path ls:queryExpression ;
+    sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:Literal ;
+    sh:severity sh:Warning ;
+    sh:message "A query-based identifier has one ls:queryExpression." .
+
+icdd:QueryBasedIdentifierShape-queryLanguage a sh:PropertyShape ;
+    sh:path ls:queryLanguage ;
+    sh:minCount 1 ; sh:maxCount 1 ;
+    sh:severity sh:Warning ;
+    sh:message "A query-based identifier has one ls:queryLanguage." .

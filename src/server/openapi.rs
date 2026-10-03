@@ -1133,11 +1133,37 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             ),
         )],
     );
+    // A container archive as the request body.
+    fn zip_body() -> RequestBody {
+        RequestBodyBuilder::new()
+            .required(Some(Required::True))
+            .description(Some("The container archive (ZIP; an `.icdd` file is one)."))
+            .content(
+                "application/zip",
+                ContentBuilder::new()
+                    .schema(Some(ObjectBuilder::new().schema_type(Type::String).format(
+                        Some(utoipa::openapi::schema::SchemaFormat::KnownFormat(
+                            utoipa::openapi::schema::KnownFormat::Binary,
+                        )),
+                    )))
+                    .build(),
+            )
+            .build()
+    }
     mount(paths, "/api/datasets/:dataset_id/containers/import", vec![
-        (M::Post, o("Import", "Import a linked-document container",
-            "Import an ISO 21597 ICDD container (`?profile=icdd`, body: the ZIP). Payload documents become assets of the dataset, RDF payloads role-typed graphs, and the index a catalogue graph. Needs write access and the `asset-archive` feature. See docs/containers.md.",
-            vec![qp("profile", false, "Container profile; `icdd` (default)")],
-            vec![("200", "Import summary"), ("400", "Not a valid container"), ("401", "Authentication required"), ("403", "Write access required")], true)),
+        (M::Post, ob("Import", "Import a linked-document container",
+            "Import an ISO 21597-1 ICDD container (`?profile=icdd`, or detected from its `Index.rdf`). Internal, secured and encrypted documents become assets of the dataset (in folder `containers/<cid>`, sub-folders kept), a folder document becomes an asset sub-folder, an external document is recorded with its URL; linksets, RDF data documents and ontology resources become role-typed graphs, and the index a catalogue graph. Secured documents' checksums are verified (SHA-1/224/256/384/512); encrypted documents are kept as flagged opaque files; ISO's own `Container.rdf` / `Linkset.rdf` are recognised and not loaded. The response lists each document's kind, name, version, alternatives, parties and checksum status, the container's parties, and `validation` — the profile validator's report (`conforms`, `violations`, `warnings`, `findings[]` with `severity`, `code`, `message`, `focus`, `file`). A non-conformant container still imports what it can unless `strict=true`, which refuses it with 422 and the report. An index with several container descriptions is always refused. Needs write access and the `asset-archive` feature; body limit `OTS_MAX_UPLOAD_MB` (512 MB). See docs/containers.md.",
+            vec![qp("profile", false, "Container profile; `icdd` (default: detected)"),
+                 qp("strict", false, "`true`: refuse (422) a container the validator finds a violation in; nothing is stored")],
+            zip_body(),
+            vec![("201", "Import summary with the validation report"), ("400", "Empty body or not a readable archive"), ("401", "Authentication required"), ("403", "Write access required"), ("404", "Dataset not found, or unknown profile"), ("422", "No profile recognises the archive, the index is unreadable or has several container descriptions, or (strict=true) the container is not conformant — `{error, validation}`"), ("503", "The container carries documents but no object storage is configured")], true)),
+    ]);
+    mount(paths, "/api/containers/validate", vec![
+        (M::Post, ob("Import", "Validate a linked-document container",
+            "Validate an archive against a container profile without storing anything. For ICDD: Open Triplestore's own SHACL shapes for the Part 1 index and linksets (container description, documents, parties, links, link elements, identifiers — derived from the ontology restrictions, not ISO's annexes) plus structural checks (the root `Index.rdf`, the three folders, `Container.rdf` / `Linkset.rdf` in `Ontology resources/`, every listed file present at its path, duplicate names, path traversal, checksums, link elements naming listed documents, and no extension of the ICDD classes in a Part 1 container). Returns `{profile, conforms, violations, warnings, findings[]}`; `conforms` means no violation.",
+            vec![qp("profile", false, "Container profile; `icdd` (default: detected, else `icdd`)")],
+            zip_body(),
+            vec![("200", "Validation report"), ("400", "Empty body or not a readable archive"), ("401", "Authentication required"), ("404", "Unknown profile")], true)),
     ]);
     mount(
         paths,
@@ -1147,11 +1173,11 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Import",
                 "Export as a linked-document container",
-                "The dataset as an ICDD container (ZIP): its readable graphs, assets and an index.",
+                "The dataset as an ICDD container (`<dataset>.icdd`, a ZIP): `Index.rdf` (RDF/XML, `ICDD-Part1-Container`) with typed parties, every document's `ct:name`, `ct:filename` relative to `Payload documents/` (asset folders kept, names made unique), `ct:filetype`, `ct:format` and `ct:belongsToContainer`; linkset graphs as RDF/XML under `Payload triples/`; other data graphs as RDF documents under `Payload documents/`; model graphs under `Ontology resources/`, plus ISO's `Container.rdf` and `Linkset.rdf` when the operator sets `OTS_ICDD_ONTOLOGY_DIR`. Documents an earlier import brought in keep their IRIs, names, versions, alternatives, parties and kinds. Private graphs and non-public assets only reach callers who may see them. The export runs the validator on itself: `X-Container-Conforms`, `X-Container-Validation` (`violations=…; warnings=…`) and `X-Container-Findings` (finding codes; `ontology-resource-missing` when the ISO files are not configured — not Part 1-conformant).",
                 vec![qp("profile", false, "Container profile; `icdd` (default)")],
                 vec![
                     ("200", "The container (application/zip)"),
-                    ("404", "Dataset not found or not visible"),
+                    ("404", "Dataset not found or not visible, or unknown profile"),
                 ],
                 false,
             ),

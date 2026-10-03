@@ -1328,10 +1328,6 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(crate::entailment::get_entailment).put(crate::entailment::put_entailment),
         )
         .route(
-            "/api/datasets/:dataset_id/containers/import",
-            post(crate::containers::import_container),
-        )
-        .route(
             "/api/datasets/:dataset_id/containers/export",
             get(crate::containers::export_container),
         )
@@ -1692,6 +1688,27 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             endpoint_acl_guard,
         ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .with_state(state.clone());
+
+    // Linked-document containers: import into a dataset, and validate without
+    // storing anything. Archives carry documents, so the body limit is the
+    // RDF-upload one (OTS_MAX_UPLOAD_MB), not the 8 MB default; the unpacker
+    // caps entries and the unpacked total on its own.
+    let container_routes = Router::new()
+        .route(
+            "/api/datasets/:dataset_id/containers/import",
+            post(crate::containers::import_container),
+        )
+        .route(
+            "/api/containers/validate",
+            post(crate::containers::validate_container),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .layer(DefaultBodyLimit::max(upload_limit_bytes(512)))
         .with_state(state.clone());
 
     // Triple browsing API (optional auth)
@@ -2108,6 +2125,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(studio_auth)
         .merge(studio_optional)
         .merge(rml_routes)
+        .merge(container_routes)
         .merge(source_routes)
         .merge(browse_routes)
         .merge(sparql_routes)
