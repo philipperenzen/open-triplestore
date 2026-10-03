@@ -248,25 +248,19 @@ fn try_seed(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Drive `fut` to completion from any calling context. The seed normally runs
-/// on a `spawn_blocking` thread, where `Handle::current().block_on` would be
-/// fine — but tests call it straight from async workers, where that panics
-/// ("Cannot start a runtime from within a runtime"). A throwaway
-/// single-thread runtime on a scoped OS thread works from both.
-fn block_on_anywhere<T: Send>(
-    fut: impl std::future::Future<Output = T> + Send,
-) -> anyhow::Result<T> {
-    std::thread::scope(|scope| {
-        scope
-            .spawn(|| {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()?;
-                Ok(rt.block_on(fut))
-            })
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-    })
+/// Drive `fut` to completion on the caller's tokio runtime. The seed runs on a
+/// `spawn_blocking` thread, so a runtime is current but this thread may block.
+///
+/// It has to be the caller's runtime and not a throwaway one. The S3 client's
+/// connection pool is process-wide (`storage::https_client`) and each pooled
+/// connection is driven by a task on the runtime that opened it, so a seed
+/// upload on a short-lived runtime left a connection in the pool that died with
+/// that runtime, failing whichever request had just taken it with "dispatch
+/// failure". Called from an async worker this panics rather than block it.
+fn block_on_current_runtime<T>(fut: impl std::future::Future<Output = T>) -> anyhow::Result<T> {
+    let rt = tokio::runtime::Handle::try_current()
+        .map_err(|e| anyhow::anyhow!("the seed needs a tokio runtime: {e}"))?;
+    Ok(rt.block_on(fut))
 }
 
 /// Default source of the headline IFC building — the Esplanades project
@@ -455,7 +449,7 @@ fn seed_stl_landmarks(state: &AppState, owner_id: &str) {
             continue; // already seeded
         }
         tracing::info!("seed: downloading landmark STL {filename} ({url})");
-        let downloaded = block_on_anywhere(async {
+        let downloaded = block_on_current_runtime(async {
             // Wikimedia's robot policy 403s requests without a descriptive
             // User-Agent — reqwest's default is not accepted.
             let client = reqwest::Client::builder()
@@ -486,7 +480,7 @@ fn seed_stl_landmarks(state: &AppState, owner_id: &str) {
         let storage = state.object_store.clone();
         let key = s3_key.clone();
         if let Err(e) =
-            block_on_anywhere(async move { storage.upload(&key, bytes, "model/stl").await })
+            block_on_current_runtime(async move { storage.upload(&key, bytes, "model/stl").await })
         {
             tracing::warn!("landmark STL {filename} upload failed: {e}");
             continue;
@@ -542,7 +536,7 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
             "seed: downloading {} IFC ({url}) — first boot only",
             b.label
         );
-        let downloaded = block_on_anywhere(async {
+        let downloaded = block_on_current_runtime(async {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(600))
                 .build()?;
@@ -566,7 +560,7 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
                 continue;
             }
         };
-        let imported = block_on_anywhere(crate::imports::ifc::import_ifc_bytes(
+        let imported = block_on_current_runtime(crate::imports::ifc::import_ifc_bytes(
             state,
             DS,
             owner_id,
@@ -873,7 +867,7 @@ fn refresh_demo_content(state: &AppState) {
             let key = a.s3_key.clone();
             // Best-effort object delete on the blocking-safe path; the DB row
             // goes regardless so the asset stops being listed/served.
-            let _ = block_on_anywhere(async move { storage.delete(&key).await });
+            let _ = block_on_current_runtime(async move { storage.delete(&key).await });
             if let Err(e) = state.auth_db.delete_asset(&a.id) {
                 tracing::warn!("demo refresh: could not purge {}: {e}", a.filename);
             }
@@ -990,7 +984,7 @@ fn seed_org_branding(state: &AppState, org_id: &str, do_logo: bool, do_banner: b
             continue;
         }
         let key = format!("{prefix}/{org_id}.png");
-        let uploaded = block_on_anywhere(state.object_store.upload(
+        let uploaded = block_on_current_runtime(state.object_store.upload(
             &key,
             Bytes::from_static(bytes),
             "image/png",
@@ -1034,13 +1028,14 @@ fn seed_dataset_branding(
         }
     }
     if do_image && state.object_store.is_configured() {
-        let rt = tokio::runtime::Handle::current();
         let key = format!("dataset-images/{dataset_id}.png");
-        match rt.block_on(state.object_store.upload(
+        match block_on_current_runtime(state.object_store.upload(
             &key,
             Bytes::from_static(brand.image_png),
             "image/png",
-        )) {
+        ))
+        .and_then(|r| r)
+        {
             Ok(()) => {
                 if let Err(e) = state.auth_db.update_dataset_image(dataset_id, Some(&key)) {
                     tracing::warn!(
@@ -1065,8 +1060,8 @@ mod tests {
     use crate::store::TripleStore;
 
     /// Run the demo seed the way production does — on the blocking pool, so the
-    /// branding helpers' `Handle::current().block_on` has a runtime to use and the
-    /// seeder's internal `block_on`s don't panic on an async worker. An empty
+    /// seeder's `block_on_current_runtime` has a runtime to use and doesn't panic
+    /// on an async worker. An empty
     /// `SEED_IFC_URL` keeps the seeder off the network (no IFC download).
     async fn run_seed(state: &AppState) {
         std::env::set_var("SEED_IFC_URL", "");
@@ -1223,5 +1218,99 @@ mod tests {
 
         run_seed(&state).await;
         assert_eq!(owlrl_grade(&state), vec!["Partial".to_string()]);
+    }
+
+    /// A stand-in S3 endpoint on its own runtime, alive for the rest of the test
+    /// process. Every request gets an empty 200 and keeps its connection, so the
+    /// S3 client pools it, except HEAD (the bucket check in `ObjectStore::new`),
+    /// which closes its connection so the pool starts out empty. A request for a
+    /// key named `slow` notifies `slow_arrived` and is answered half a second
+    /// later, so it is still in flight while the test acts.
+    fn keep_alive_s3_endpoint(slow_arrived: std::sync::Arc<tokio::sync::Notify>) -> String {
+        use axum::http::{header, Method, Uri};
+        use axum::response::IntoResponse;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                // Taking the body lets hyper keep the connection afterwards.
+                let app = axum::Router::new().fallback(
+                    move |method: Method, uri: Uri, _body: Bytes| async move {
+                        if method == Method::HEAD {
+                            return [(header::CONNECTION, "close")].into_response();
+                        }
+                        if uri.path().ends_with("/slow") {
+                            slow_arrived.notify_one();
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        }
+                        ().into_response()
+                    },
+                );
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                axum::serve(listener, app).await.unwrap();
+            });
+        });
+        format!("http://{addr}")
+    }
+
+    /// The S3 client's connection pool is process-wide and each pooled
+    /// connection is driven by a task on the runtime that opened it. A seed
+    /// upload used to run on a throwaway runtime: its connection went back to
+    /// the pool, a request on the main runtime could take it, and when the
+    /// throwaway runtime ended a moment later that request failed with
+    /// "dispatch failure". Here the seed waits until the main runtime's request
+    /// is in flight before it returns, which makes that window certain.
+    #[test]
+    fn seed_uploads_leave_no_pooled_connection_on_a_dead_runtime() {
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        let slow_arrived = Arc::new(Notify::new());
+        let seed_uploaded = Arc::new(Notify::new());
+        let endpoint = keep_alive_s3_endpoint(slow_arrived.clone());
+        let main = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        main.block_on(async {
+            let store = crate::storage::ObjectStore::new(
+                &endpoint,
+                "seed-pool",
+                "access",
+                "secret",
+                "us-east-1",
+            )
+            .await
+            .unwrap();
+            // The seed's path: a blocking thread of the main runtime.
+            let seed = {
+                let store = store.clone();
+                let seed_uploaded = seed_uploaded.clone();
+                tokio::task::spawn_blocking(move || {
+                    block_on_current_runtime(async {
+                        let uploaded = store
+                            .upload("seed", Bytes::from_static(b"seed"), "image/png")
+                            .await;
+                        seed_uploaded.notify_one();
+                        slow_arrived.notified().await;
+                        uploaded
+                    })
+                })
+            };
+            // A request handler on the main runtime takes the pooled connection.
+            seed_uploaded.notified().await;
+            let after = store
+                .upload("slow", Bytes::from_static(b"after"), "image/png")
+                .await;
+            seed.await.unwrap().unwrap().expect("seed upload");
+            after.expect("an upload after the seed runs on a live connection");
+        });
     }
 }
