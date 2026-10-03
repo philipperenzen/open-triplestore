@@ -390,10 +390,11 @@ pub(crate) fn run_rules_jointly(
                 Some(sources.to_vec()),
                 target,
                 policy,
+                crate::server::routes::RegimeOptions::default(),
             ) {
                 Ok(Some(r)) => {
-                    run.regime_triples += r.triples_added;
-                    Ok(r.triples_added)
+                    run.regime_triples += r.report.triples_added;
+                    Ok(r.report.triples_added)
                 }
                 Ok(None) => Err(format!("unknown entailment regime '{regime}'")),
                 Err(e) => Err(format!("{e:?}")),
@@ -919,7 +920,7 @@ fn after_write_kind(state: &AppState, graphs: &[String], additive: bool) {
         // A DL run can take minutes (an external reasoner, a timeout of five):
         // it never holds up the write. Eventually consistent — see
         // `schedule_background_run`.
-        if regime == "owl2-dl" {
+        if regime.as_deref() == Some("owl2-dl") {
             schedule_background_run(state, &ds);
             continue;
         }
