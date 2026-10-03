@@ -16,8 +16,10 @@
 //! tiles instead of rendering flat-white blocks), u32 indices, a `u8`/`u16`
 //! feature id, a UTF-8 values + offsets pair for the STRING property, and one
 //! matte light-grey material. No Draco, no implicit tiling. Coordinates are
-//! expected to be **ECEF metres** (EPSG:4978); the tile transform is identity
-//! (see `mod.rs`).
+//! **ECEF metres** (EPSG:4978) relative to a local origin that
+//! [`encode_glb`] writes as the node's `translation` (see `mod.rs`): f32 has
+//! a 0.5 m step at Earth-radius magnitudes, so absolute ECEF in a POSITION
+//! accessor would snap every vertex to that grid.
 //!
 //! Everything is built with byte buffers and `to_le_bytes` — no new crates.
 
@@ -31,7 +33,7 @@ use serde_json::{json, Value};
 pub struct GlbFeature {
     /// Stable IRI — the RDF subject and viewer lookup key.
     pub iri: String,
-    /// Flat ECEF position triples.
+    /// Flat ECEF position triples, relative to the mesh origin.
     pub positions: Vec<f32>,
     /// Triangle indices into `positions` (vertex granularity).
     pub indices: Vec<u32>,
@@ -95,7 +97,12 @@ fn push_padded(buf: &mut Vec<u8>, bytes: &[u8], pad: u8) -> usize {
 /// `_FEATURE_ID_0` equal to that feature's index, and the property table's row
 /// `i` holds `features[i].iri`. Features with no geometry still get a row in the
 /// property table (so the index space matches), but contribute no vertices.
-pub fn encode_glb(features: &[GlbFeature]) -> Vec<u8> {
+///
+/// `origin`, when given, is the ECEF point the mesh node is translated to and
+/// the positions are relative to it. glTF node transforms are JSON numbers,
+/// which clients such as Cesium apply in double precision, so the absolute
+/// position keeps f64 accuracy while the accessor holds only small offsets.
+pub fn encode_glb(features: &[GlbFeature], origin: Option<[f64; 3]>) -> Vec<u8> {
     // ── 1. Merge geometry, assigning a per-vertex feature id ───────────────────
     let mut positions: Vec<f32> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
@@ -135,8 +142,8 @@ pub fn encode_glb(features: &[GlbFeature]) -> Vec<u8> {
     // PBR material can actually be shaded — without a NORMAL attribute Cesium
     // can't light the surface and every tile renders as a flat white block.
     // Works for indexed meshes and the synthesised non-indexed triangle soup
-    // alike. Positions are big absolute ECEF metres but the demo features are
-    // large flat-faced solids, so f32 face normals are accurate enough to shade.
+    // alike. Positions are small offsets from the node origin, so f32 face
+    // normals are accurate.
     let mut normals = vec![0.0f32; positions.len()];
     for tri in indices.as_chunks::<3>().0 {
         let (i0, i1, i2) = (
@@ -342,13 +349,18 @@ pub fn encode_glb(features: &[GlbFeature]) -> Vec<u8> {
         ]
     });
 
+    let mut node = json!({ "mesh": 0 });
+    if let Some(origin) = origin {
+        node["translation"] = json!(origin);
+    }
+
     let gltf = json!({
         "asset": { "version": "2.0", "generator": "open-triplestore 3D Tiles 1.1" },
         "extensionsUsed": ["EXT_mesh_features", "EXT_structural_metadata"],
         "extensions": { "EXT_structural_metadata": structural_metadata },
         "scene": 0,
         "scenes": [ { "nodes": [0] } ],
-        "nodes": [ { "mesh": 0 } ],
+        "nodes": [ node ],
         "meshes": [ { "primitives": [ primitive ] } ],
         "materials": [
             {
@@ -434,7 +446,7 @@ mod tests {
                 indices: vec![0, 1, 2],
             },
         ];
-        let glb = encode_glb(&features);
+        let glb = encode_glb(&features, None);
 
         // ── 12-byte header: magic, version, total length ──
         assert!(glb.len() >= 12, "GLB too short");
@@ -551,7 +563,7 @@ mod tests {
 
     #[test]
     fn empty_feature_set_is_valid_glb() {
-        let glb = encode_glb(&[]);
+        let glb = encode_glb(&[], None);
         let magic = u32::from_le_bytes([glb[0], glb[1], glb[2], glb[3]]);
         assert_eq!(magic, 0x4654_6C67);
         let total = u32::from_le_bytes([glb[8], glb[9], glb[10], glb[11]]) as usize;

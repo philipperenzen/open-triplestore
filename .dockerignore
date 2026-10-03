@@ -3,6 +3,9 @@
 # stage, and copying a Windows/macOS node_modules over it would drop the wrong-arch
 # esbuild/rollup binaries into the image and break `npm run build`.
 target/
+# The OWL 2 DL reasoner sidecar has its own image (sidecars/reasoner/Dockerfile,
+# whose Dockerfile.dockerignore replaces this file for that build).
+sidecars/
 **/node_modules/
 frontend/dist/
 

@@ -1,11 +1,13 @@
-//! GeoSPARQL 1.1 tests — hand-written and derived from the OGC GeoSPARQL 1.1
-//! standard. Not the OGC's compliance tests, and not an OGC certification.
+//! GeoSPARQL 1.1 tests — hand-written by this project from the OGC GeoSPARQL
+//! 1.1 standard. Not the OGC's compliance tests, and not an OGC certification;
+//! passing them makes no claim of OGC conformance.
 //!
-//! Derived from:
+//! Written against:
 //! - OGC GeoSPARQL 1.1 standard: https://docs.ogc.org/is/22-047r1/22-047r1.html
-//! - GeoSPARQL Compliance Benchmark (SIMPAC-2021-29):
-//!   https://github.com/SoftwareImpacts/SIMPAC-2021-29
-//!   206 SPARQL queries targeting 30 specific GeoSPARQL requirements
+//!
+//! The GeoSPARQL Compliance Benchmark (SIMPAC-2021-29) is not used: none of
+//! its queries, data or expected results are vendored or run here, and no
+//! benchmark score is claimed.
 //!
 //! The 30 requirements covered (this file's own numbering, not the OGC
 //! conformance classes):
@@ -1659,6 +1661,16 @@ fn geof_num(s: &open_triplestore::store::TripleStore, expr: &str) -> f64 {
     num_of(geof_opt(s, expr).as_deref())
 }
 
+/// The coordinates of the `POINT` in a WKT result, as text (`POINT(x y)` or
+/// GEOS's `POINT (x y)`, `POINT Z (x y z)`).
+fn point_body(wkt: &str) -> String {
+    wkt.split_once("POINT")
+        .and_then(|(_, r)| r.split_once('('))
+        .and_then(|(_, r)| r.split_once(')'))
+        .map(|(c, _)| c.to_string())
+        .unwrap_or_default()
+}
+
 /// A geometry literal in RD New (EPSG:28992), a projected CRS in metres.
 fn rd(wkt_body: &str) -> String {
     format!("\"<http://www.opengis.net/def/crs/EPSG/0/28992> {wkt_body}\"^^geo:wktLiteral")
@@ -1706,7 +1718,8 @@ fn geos_cx_sfcrosses_polygon_polygon_false() {
 }
 
 // geos-09 (CORRECTED): a line on a polygon's boundary has empty interior-interior
-// intersection, so sfContains / sfWithin / ehCovers / ehCoveredBy are ALL false.
+// intersection, so sfContains / sfWithin / ehCovers / ehCoveredBy are ALL false
+// (OGC GeoSPARQL 1.1 Req 45: ehCoveredBy is the DE-9IM mask TFF*TFT**).
 #[test]
 fn geos_cx_eh_covers_line_on_polygon_boundary() {
     let s = ts();
@@ -1725,14 +1738,12 @@ fn geos_cx_eh_covers_line_on_polygon_boundary() {
             r
         );
     }
-    // DOCUMENTED DIVERGENCE: geof:ehCoveredBy uses GEOS-native covered_by() (chosen so a
-    // point in a polygon's interior is correctly reported as covered), so a line lying on
-    // the polygon boundary returns TRUE here — unlike ehCovers's strict DE-9IM mask. The
-    // two are therefore not exact inverses for mixed-dimension boundary cases.
+    // ehCoveredBy is ehCovers's exact inverse: it used GEOS covered_by(), which
+    // said true here.
     let covered_by = geof_opt(&s, &format!("geof:ehCoveredBy({line}, {poly})"));
     assert!(
-        covered_by.as_deref().unwrap_or("").contains("true"),
-        "engine uses GEOS-native coveredBy: line-on-boundary => true, got {:?}",
+        covered_by.as_deref().unwrap_or("").contains("false"),
+        "ehCoveredBy must be false for a line on the polygon boundary (DE-9IM mask), got {:?}",
         covered_by
     );
 }
@@ -2037,7 +2048,9 @@ fn metric_length_of_equator_and_meridian_arcs() {
 }
 
 // metricArea and metricPerimeter: winding does not matter, a hole is subtracted from
-// the area and added to the perimeter, and non-polygons have no area or perimeter.
+// the area and added to the perimeter, and non-polygons have no area. The perimeter
+// of a non-areal geometry is its length (OGC GeoSPARQL 1.1 Req 40) — zero for a
+// point; it used to be zero for a line too.
 #[test]
 fn metric_area_and_perimeter() {
     let s = ts();
@@ -2097,10 +2110,21 @@ fn metric_area_and_perimeter() {
         );
         assert_eq!(
             geof_num(&s, &format!("geof:metricPerimeter({})", wkt(g))),
-            0.0,
-            "{g} has no perimeter"
+            geof_num(&s, &format!("geof:metricLength({})", wkt(g))),
+            "{g}'s perimeter is its length"
         );
     }
+    assert_eq!(
+        geof_num(&s, &format!("geof:metricPerimeter({})", wkt("POINT(5 52)"))),
+        0.0
+    );
+    assert!(
+        geof_num(
+            &s,
+            &format!("geof:metricPerimeter({})", wkt("LINESTRING(0 0, 1 1)"))
+        ) > 150_000.0,
+        "a line's perimeter is its geodesic length, ~157 km"
+    );
     // The perimeter is the geodesic length of the rings — equal to measuring the
     // exterior ring as a line.
     let perimeter = geof_num(
@@ -2289,11 +2313,7 @@ fn geos_cx_transform_rd_to_wgs84() {
     .unwrap_or_default();
     assert!(out.contains("POINT"), "expected a WKT point, got {:?}", out);
     // Extract the two coordinates and check they land near Nijmegen.
-    let inner = out
-        .split_once("POINT(")
-        .and_then(|(_, r)| r.split_once(')'))
-        .map(|(c, _)| c.to_string())
-        .unwrap_or_default();
+    let inner = point_body(&out);
     let nums: Vec<f64> = inner
         .split_whitespace()
         .filter_map(|t| t.parse::<f64>().ok())
@@ -2713,11 +2733,14 @@ fn geold_polygon_with_hole_containment() {
 
 // GeoSPARQL Req 2: geo:gmlLiteral is parsed (GML 3.2 subset → WKT → GEOS), so topology
 // functions accept a GML literal argument. (Was a tracked gap; closed in the GML milestone.)
+// Its srsName counts, axis order included (OGC GeoSPARQL 1.1 Req 16, 20): EPSG:4326
+// is latitude first, so `pos "1 2"` is longitude 2, latitude 1 — CRS84 POINT(2 1).
+// The topology functions used to ignore srsName and compare it as POINT(1 2).
 #[test]
 fn geold_gml_literal_supported() {
     let s = ts();
     let gml = "\"<gml:Point srsName='urn:ogc:def:crs:EPSG::4326'><gml:pos>1 2</gml:pos></gml:Point>\"^^geo:gmlLiteral";
-    // POINT(1 2) lies within the 0..5 square.
+    // POINT(2 1) lies within the 0..5 square.
     let inside = geof_opt(
         &s,
         &format!("geof:sfWithin({gml}, \"POLYGON((0 0, 5 0, 5 5, 0 5, 0 0))\"^^geo:wktLiteral)"),
@@ -2728,16 +2751,25 @@ fn geold_gml_literal_supported() {
         "GML point (1,2) is within the square, got {:?}",
         inside
     );
-    // A GML and a WKT literal at the same coordinates are spatially equal.
+    // A GML and a WKT literal at the same place are spatially equal.
     let eq = geof_opt(
         &s,
-        &format!("geof:sfEquals({gml}, \"POINT(1 2)\"^^geo:wktLiteral)"),
+        &format!("geof:sfEquals({gml}, \"POINT(2 1)\"^^geo:wktLiteral)"),
     )
     .unwrap_or_default();
     assert!(
         eq.contains("true"),
         "GML/WKT round-trip equal, got {:?}",
         eq
+    );
+    let transposed = geof_opt(
+        &s,
+        &format!("geof:sfEquals({gml}, \"POINT(1 2)\"^^geo:wktLiteral)"),
+    )
+    .unwrap_or_default();
+    assert!(
+        transposed.contains("false"),
+        "EPSG:4326 GML is latitude first, got {transposed:?}"
     );
 }
 
@@ -2888,11 +2920,7 @@ fn transform_into_epsg4326_emits_lat_lon() {
         &format!("geof:transform({rd}, <http://www.opengis.net/def/crs/EPSG/0/4326>)"),
     )
     .unwrap_or_default();
-    let inner = out
-        .split_once("POINT(")
-        .and_then(|(_, r)| r.split_once(')'))
-        .map(|(c, _)| c.to_string())
-        .unwrap_or_default();
+    let inner = point_body(&out);
     let nums: Vec<f64> = inner
         .split_whitespace()
         .filter_map(|t| t.parse::<f64>().ok())
@@ -3299,5 +3327,389 @@ fn agg_union_in_update_and_scoped_query() {
     assert!(
         (extract_f64(rows[0][1].as_deref().unwrap_or("")) - 6.0).abs() < 1e-9,
         "{rows:?}"
+    );
+}
+
+// ─── CRS, empty literals, relate, transform and units (OGC GeoSPARQL 1.1) ─────
+//
+// Named by OGC requirement: `ogc_req17_…` is /req/geometry-extension/wkt-literal-empty.
+
+/// A GML literal in `srs` with the given `gml:pos` / `gml:posList` body.
+fn gml_point(srs: &str, pos: &str) -> String {
+    format!("\"<gml:Point srsName='{srs}'><gml:pos>{pos}</gml:pos></gml:Point>\"^^geo:gmlLiteral")
+}
+
+fn is_true(r: Option<String>) -> bool {
+    r.as_deref().unwrap_or("").contains("true")
+}
+
+fn is_false(r: Option<String>) -> bool {
+    r.as_deref().unwrap_or("").contains("false")
+}
+
+// Req 17 /req/geometry-extension/wkt-literal-empty: an empty WKT literal is the empty
+// geometry — with or without a CRS. A plain empty string is still not a geometry.
+#[test]
+fn ogc_req17_wkt_literal_empty_is_the_empty_geometry() {
+    let s = ts();
+    // Each beside a point in its own CRS (CRS84 POINT(1 1) has no RD New coordinates).
+    for (empty, point) in [
+        ("\"\"^^geo:wktLiteral".to_string(), wkt("POINT(1 1)")),
+        (
+            "\"<http://www.opengis.net/def/crs/EPSG/0/28992>\"^^geo:wktLiteral".to_string(),
+            rd("POINT(155000 463000)"),
+        ),
+    ] {
+        assert!(
+            geof_opt(&s, &format!("geof:envelope({empty})")).is_some(),
+            "{empty} is a geometry"
+        );
+        assert!(
+            is_true(geof_opt(&s, &format!("geof:sfDisjoint({empty}, {point})"))),
+            "{empty} is disjoint from everything"
+        );
+        assert_eq!(geof_num(&s, &format!("geof:area({empty})")), 0.0);
+    }
+    assert!(
+        geof_opt(&s, "geof:sfDisjoint(\"\", \"POINT(1 1)\"^^geo:wktLiteral)").is_none(),
+        "an empty plain string is not a geometry"
+    );
+}
+
+// Req 21 /req/geometry-extension/gml-literal-empty.
+#[test]
+fn ogc_req21_gml_literal_empty_is_the_empty_geometry() {
+    let s = ts();
+    let empty = "\"\"^^geo:gmlLiteral";
+    assert!(is_true(geof_opt(
+        &s,
+        &format!("geof:sfDisjoint({empty}, {})", wkt("POINT(1 1)"))
+    )));
+    assert_eq!(geof_num(&s, &format!("geof:metricArea({empty})")), 0.0);
+}
+
+// Req 27 /req/geometry-extension/geojson-literal-empty.
+#[test]
+fn ogc_req27_geojson_literal_empty_is_the_empty_geometry() {
+    let s = ts();
+    let empty = "\"\"^^geo:geoJSONLiteral";
+    assert!(is_true(geof_opt(
+        &s,
+        &format!("geof:sfDisjoint({empty}, {})", wkt("POINT(1 1)"))
+    )));
+    assert_eq!(geof_num(&s, &format!("geof:metricLength({empty})")), 0.0);
+}
+
+// Req 16 /req/geometry-extension/wkt-axis-order and Req 20 gml-literal: a GML literal's
+// srsName drives topology like a WKT prefix. A GML point in RD New meets a CRS84 WKT
+// box around the same place; before, its metres were compared against degrees.
+#[test]
+fn ogc_req20_gml_srs_name_is_harmonised_against_wkt() {
+    let s = ts();
+    // Rijksmuseum, Amsterdam: RD New (121 800, 487 400) is CRS84 (4.885, 52.360).
+    let wgs_box = wkt("POLYGON((4.80 52.30, 4.95 52.30, 4.95 52.42, 4.80 52.42, 4.80 52.30))");
+    for srs in [
+        "EPSG:28992",
+        "urn:ogc:def:crs:EPSG::28992",
+        "http://www.opengis.net/def/crs/EPSG/0/28992",
+    ] {
+        let rd = gml_point(srs, "121800 487400");
+        assert!(
+            is_true(geof_opt(&s, &format!("geof:sfWithin({rd}, {wgs_box})"))),
+            "GML in {srs} is within the CRS84 box"
+        );
+        assert!(
+            is_true(geof_opt(&s, &format!("geof:sfIntersects({wgs_box}, {rd})"))),
+            "and the other way round ({srs})"
+        );
+    }
+    // The metric and the topology functions now agree about one GML literal.
+    let gml84 = gml_point("urn:ogc:def:crs:EPSG::4326", "52 5");
+    let wkt84 = wkt("POINT(5 52)");
+    assert!(is_true(geof_opt(
+        &s,
+        &format!("geof:sfEquals({gml84}, {wkt84})")
+    )));
+    assert_eq!(
+        geof_num(&s, &format!("geof:metricDistance({gml84}, {wkt84})")),
+        0.0
+    );
+}
+
+// Req 41 /req/geometry-extension/srid-function: getSRID of a GML literal is its
+// srsName (normalised), not CRS84.
+#[test]
+fn ogc_req41_get_srid_of_a_gml_literal() {
+    let s = ts();
+    let srid = geof_opt(
+        &s,
+        &format!("geof:getSRID({})", gml_point("EPSG:28992", "1 2")),
+    )
+    .unwrap_or_default();
+    assert_eq!(srid, "<http://www.opengis.net/def/crs/EPSG/0/28992>");
+    let bare = "\"<gml:Point><gml:pos>1 2</gml:pos></gml:Point>\"^^geo:gmlLiteral";
+    let srid = geof_opt(&s, &format!("geof:getSRID({bare})")).unwrap_or_default();
+    assert!(srid.contains("CRS84"), "no srsName is CRS84: {srid}");
+}
+
+// Req 43 /req/geometry-topology-extension/relate-query-function: relate brings its
+// operands into one CRS, like the sf/eh/rcc8 families.
+#[test]
+fn ogc_req43_relate_harmonises_operand_crs() {
+    let s = ts();
+    let rd_point = rd("POINT(121800 487400)");
+    let wgs_box = wkt("POLYGON((4.80 52.30, 4.95 52.30, 4.95 52.42, 4.80 52.42, 4.80 52.30))");
+    // Point inside a polygon: interior ∩ interior is 0-dimensional.
+    let inside = geof_opt(
+        &s,
+        &format!("geof:relate({rd_point}, {wgs_box}, \"0FFFFF212\")"),
+    );
+    assert!(
+        is_true(inside.clone()),
+        "RD point inside the CRS84 box: {inside:?}"
+    );
+    let gml = gml_point("EPSG:28992", "121800 487400");
+    assert!(is_true(geof_opt(
+        &s,
+        &format!("geof:relate({gml}, {wgs_box}, \"T********\")")
+    )));
+}
+
+// Req 45 /req/geometry-topology-extension/eh-query-functions: ehCoveredBy is the mask
+// TFF*TFT**, the exact inverse of ehCovers. A geometry inside another that touches its
+// boundary is covered by it; one strictly inside is ehInside, not ehCoveredBy.
+#[test]
+fn ogc_req45_eh_covered_by_uses_the_spec_mask() {
+    let s = ts();
+    let big = wkt("POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))");
+    let touching = wkt("POLYGON((0 0, 5 0, 5 5, 0 5, 0 0))");
+    let strictly_inside = wkt("POLYGON((2 2, 4 2, 4 4, 2 4, 2 2))");
+    assert!(is_true(geof_opt(
+        &s,
+        &format!("geof:ehCoveredBy({touching}, {big})")
+    )));
+    assert!(is_false(geof_opt(
+        &s,
+        &format!("geof:ehCoveredBy({strictly_inside}, {big})")
+    )));
+    assert!(is_true(geof_opt(
+        &s,
+        &format!("geof:ehInside({strictly_inside}, {big})")
+    )));
+    for (a, b) in [
+        (&touching, &big),
+        (&strictly_inside, &big),
+        (&wkt("LINESTRING(0 0, 1 0)"), &big),
+        (&wkt("POINT(0 5)"), &big),
+    ] {
+        assert_eq!(
+            geof_opt(&s, &format!("geof:ehCoveredBy({a}, {b})")),
+            geof_opt(&s, &format!("geof:ehCovers({b}, {a})")),
+            "ehCoveredBy({a}, {b}) = ehCovers({b}, {a})"
+        );
+    }
+}
+
+// Req 39 /req/geometry-extension/query-functions, geof:transform: a coordinate that
+// does not transform makes the result unbound — it used to be copied through, so the
+// north pole "transformed" into Web Mercator.
+#[test]
+fn ogc_req39_transform_outside_the_domain_is_unbound() {
+    let s = ts();
+    let mercator = "<http://www.opengis.net/def/crs/EPSG/0/3857>";
+    let rd_new = "<http://www.opengis.net/def/crs/EPSG/0/28992>";
+    for (geom, target) in [
+        (wkt("POINT(0 90)"), mercator),
+        (wkt("LINESTRING(5 52, 5 89.9)"), mercator),
+        // RD New is defined for the Netherlands only: Paris has no RD coordinates.
+        (wkt("POINT(2.35 48.85)"), rd_new),
+        (
+            rd("POINT(1155000 463000)"),
+            "<http://www.opengis.net/def/crs/OGC/1.3/CRS84>",
+        ),
+    ] {
+        let r = geof_opt(&s, &format!("geof:transform({geom}, {target})"));
+        assert!(r.is_none(), "{geom} → {target} must be unbound, got {r:?}");
+    }
+    // Inside the domain it still works.
+    assert!(geof_opt(
+        &s,
+        &format!("geof:transform({}, {mercator})", wkt("POINT(5 52)"))
+    )
+    .is_some());
+}
+
+// geof:transform takes its target as an xsd:anyURI literal too (the signature's type),
+// and keeps Z.
+#[test]
+fn ogc_req39_transform_accepts_any_uri_and_keeps_z() {
+    let s = ts();
+    let out = geof_opt(
+        &s,
+        &format!(
+            "geof:transform({}, \"http://www.opengis.net/def/crs/OGC/1.3/CRS84\"^^xsd:anyURI)",
+            rd("POINT Z (187420 428470 12.5)")
+        ),
+    )
+    .unwrap_or_default();
+    assert!(out.contains("CRS84"), "{out}");
+    let nums: Vec<f64> = point_body(&out)
+        .split_whitespace()
+        .filter_map(|t| t.parse().ok())
+        .collect();
+    assert_eq!(nums.len(), 3, "Z kept: {out}");
+    assert!(
+        (nums[0] - 5.86).abs() < 0.1 && (nums[1] - 51.85).abs() < 0.1,
+        "{out}"
+    );
+    assert_eq!(nums[2], 12.5, "Z passes through unchanged: {out}");
+    // A GML literal's srsName is the source CRS.
+    let gml = geof_opt(
+        &s,
+        &format!(
+            "geof:transform({}, <http://www.opengis.net/def/crs/OGC/1.3/CRS84>)",
+            gml_point("EPSG:28992", "187420 428470")
+        ),
+    )
+    .unwrap_or_default();
+    let nums: Vec<f64> = point_body(&gml)
+        .split_whitespace()
+        .filter_map(|t| t.parse().ok())
+        .collect();
+    assert!(
+        nums.len() == 2 && (nums[0] - 5.86).abs() < 0.1,
+        "GML in RD New transforms from RD New: {gml}"
+    );
+    // A plain string is not a CRS.
+    assert!(geof_opt(
+        &s,
+        &format!(
+            "geof:transform({}, \"http://www.opengis.net/def/crs/OGC/1.3/CRS84\")",
+            wkt("POINT(5 52)")
+        )
+    )
+    .is_none());
+}
+
+// Req 39 constructive functions and Req 42 aggUnion keep a GML operand's srsName: the
+// result is a WKT literal in that CRS, not relabelled CRS84.
+#[test]
+fn ogc_req39_buffer_and_agg_union_keep_a_gml_srs_name() {
+    let s = ts();
+    let gml = gml_point("EPSG:28992", "155000 463000");
+    let srid = geof_opt(&s, &format!("geof:getSRID(geof:buffer({gml}, 10))")).unwrap_or_default();
+    assert!(srid.contains("EPSG/0/28992"), "{srid}");
+    // A 10 m RD New buffer is ~314 m² on the ellipsoid, not a 10-degree disc.
+    let area = geof_num(&s, &format!("geof:metricArea(geof:buffer({gml}, 10))"));
+    assert!((area - 314.0).abs() < 5.0, "{area}");
+    load(
+        &s,
+        "ex:a geo:asGML \"<gml:Point srsName='EPSG:28992'><gml:pos>155000 463000</gml:pos></gml:Point>\"^^geo:gmlLiteral .\n\
+         ex:b geo:asGML \"<gml:Point srsName='urn:ogc:def:crs:EPSG::28992'><gml:pos>155010 463000</gml:pos></gml:Point>\"^^geo:gmlLiteral .\n",
+    );
+    let r = sel(
+        &s,
+        "SELECT (geof:getSRID(geof:aggUnion(?g)) AS ?srid) WHERE { ?f geo:asGML ?g }",
+    );
+    assert!(r[0][0].contains("EPSG/0/28992"), "{r:?}");
+}
+
+// Req 39/40 units, OGC GeoSPARQL 1.1 §10.9.1: QUDT and EPSG unit IRIs, and xsd:anyURI
+// literals, name units like the OGC ones.
+#[test]
+fn ogc_req39_units_qudt_epsg_and_any_uri() {
+    let s = ts();
+    let (london, paris) = (wkt("POINT(-0.1278 51.5074)"), wkt("POINT(2.3522 48.8566)"));
+    let metres = geof_num(&s, &format!("geof:distance({london}, {paris}, uom:metre)"));
+    for unit in [
+        "<http://qudt.org/vocab/unit/M>",
+        "<http://www.opengis.net/def/uom/EPSG/0/9001>",
+        "\"http://qudt.org/vocab/unit/M\"^^xsd:anyURI",
+        "\"http://www.opengis.net/def/uom/OGC/1.0/metre\"^^xsd:anyURI",
+    ] {
+        let d = geof_num(&s, &format!("geof:distance({london}, {paris}, {unit})"));
+        assert!((d - metres).abs() < 1e-6, "{unit}: {d} vs {metres}");
+    }
+    let km = geof_num(
+        &s,
+        &format!("geof:distance({london}, {paris}, <http://qudt.org/vocab/unit/KiloM>)"),
+    );
+    assert!((km - metres / 1000.0).abs() < 1e-9, "{km}");
+    let feet = geof_num(
+        &s,
+        &format!("geof:distance({london}, {paris}, <http://www.opengis.net/def/uom/EPSG/0/9002>)"),
+    );
+    assert!((feet - metres / 0.3048).abs() < 1e-6, "{feet}");
+    let degrees = geof_num(
+        &s,
+        &format!("geof:distance({london}, {paris}, <http://qudt.org/vocab/unit/DEG>)"),
+    );
+    assert!((degrees - geof_num(&s, &format!("geof:distance({london}, {paris})"))).abs() < 1e-12);
+}
+
+// Req 40 geof:area with an area unit: geodesic on a geographic CRS, planar on a
+// projected one. It used to ignore its unit.
+#[test]
+fn ogc_req40_area_with_area_units() {
+    let s = ts();
+    let square =
+        rd("POLYGON((155000 463000, 155100 463000, 155100 463100, 155000 463100, 155000 463000))");
+    let ha = geof_num(
+        &s,
+        &format!("geof:area({square}, <http://qudt.org/vocab/unit/HA>)"),
+    );
+    assert!((ha - 1.0).abs() < 1e-9, "100 m × 100 m is a hectare: {ha}");
+    let crs84 = wkt("POLYGON((5 52, 5.01 52, 5.01 52.01, 5 52.01, 5 52))");
+    let m2 = geof_num(
+        &s,
+        &format!("geof:area({crs84}, <http://qudt.org/vocab/unit/M2>)"),
+    );
+    let metric = geof_num(&s, &format!("geof:metricArea({crs84})"));
+    assert!((m2 - metric).abs() < 1e-6, "{m2} vs {metric}");
+    // A length is not an area.
+    assert!(geof_opt(&s, &format!("geof:area({square}, uom:metre)")).is_none());
+}
+
+// §10.9.1: an unknown unit, an angular unit on a projected CRS, a unit on a CRS this
+// build cannot reproject, and an area unit for a distance are errors — unbound — not a
+// silent planar answer in the geometry's own units.
+#[test]
+fn ogc_req39_unknown_or_incompatible_units_are_unbound() {
+    let s = ts();
+    let (a, b) = (wkt("POINT(5 52)"), wkt("POINT(5.1 52)"));
+    let (ra, rb) = (rd("POINT(155000 463000)"), rd("POINT(155003 463004)"));
+    let lambert =
+        "\"<http://www.opengis.net/def/crs/EPSG/0/2154> POINT(650000 6860000)\"^^geo:wktLiteral";
+    let lambert2 =
+        "\"<http://www.opengis.net/def/crs/EPSG/0/2154> POINT(650003 6860004)\"^^geo:wktLiteral";
+    for expr in [
+        format!("geof:distance({a}, {b}, <http://qudt.org/vocab/unit/M>)"),
+        format!("geof:distance({ra}, {rb}, uom:metre)"),
+    ] {
+        assert!(geof_opt(&s, &expr).is_some(), "{expr} is fine");
+    }
+    for expr in [
+        format!("geof:distance({a}, {b}, <http://qudt.org/vocab/unit/PARSEC>)"),
+        format!("geof:distance({a}, {b}, <http://example.org/furlong>)"),
+        format!("geof:distance({a}, {b}, \"metre\")"),
+        format!("geof:distance({a}, {b}, <http://qudt.org/vocab/unit/HA>)"),
+        format!("geof:distance({ra}, {rb}, uom:degree)"),
+        format!("geof:distance({lambert}, {lambert2}, uom:metre)"),
+        format!("geof:buffer({a}, 1, <http://example.org/furlong>)"),
+        format!("geof:buffer({ra}, 1, uom:radian)"),
+        format!("geof:buffer({lambert}, 1, uom:metre)"),
+        format!("geof:area({a}, <http://example.org/acre>)"),
+    ] {
+        let r = geof_opt(&s, &expr);
+        assert!(r.is_none(), "{expr} must be unbound, got {r:?}");
+    }
+    // No unit, or uom:unity: the CRS's own units, as before.
+    assert_eq!(
+        geof_num(&s, &format!("geof:distance({lambert}, {lambert2})")),
+        5.0
+    );
+    assert_eq!(
+        geof_num(&s, &format!("geof:distance({ra}, {rb}, uom:unity)")),
+        5.0
     );
 }
