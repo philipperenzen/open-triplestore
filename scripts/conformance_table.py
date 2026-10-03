@@ -74,6 +74,9 @@ SUITES: dict[str, tuple[str, str]] = {
     "ldp_http_conformance": ("LDP 1.0 (HTTP)", "spec-derived"),
     "dcat_conformance": ("DCAT 2 / VoID", "spec-derived"),
     "rml_conformance": ("RML / R2RML", "spec-derived"),
+    "rml_core_conformance": ("RML-Core", "**vendored KG-Construct CG corpus** (the RML-Core test cases, unmodified; manifest-driven)"),
+    "rml_io_conformance": ("RML-IO (sources)", "**vendored KG-Construct CG corpus** (the RML-IO source test cases, unmodified; manifest-driven)"),
+    "rml_legacy_conformance": ("RML (legacy vocabulary)", "**vendored RML.io corpus** (the CSV, JSON and XML cases of rml-test-cases, unmodified)"),
     "w3c_r2rml_conformance": ("R2RML", "**fetched W3C test cases** (pinned commit + sha256, not vendored; SQLite here, PostgreSQL and MySQL in the live-database job)"),
     "standards_conformance": ("Cross-standard HTTP smoke", "spec-derived"),
 }
@@ -93,13 +96,24 @@ def count(path: Path) -> tuple[int, int]:
 CORPUS_RUNNERS = {
     "w3c_shacl_conformance": 90,
     "w3c_sparql11_manifests": 450,
+    "rml_core_conformance": 70,
+    "rml_io_conformance": 25,
+    "rml_legacy_conformance": 100,
 }
 
 # Runners whose score may be published (see the module docstring). A runner
 # missing here is still checked, but its row carries no numbers: the W3C SPARQL
 # 1.1 sections are a subset of a W3C test suite, on which W3C's test-suite
 # policy allows no public performance claims.
-PUBLISH_SCORE = {"w3c_shacl_conformance"}
+PUBLISH_SCORE = {
+    "w3c_shacl_conformance",
+    # The RML corpora are Creative Commons material (CC BY 4.0 and, treated as
+    # the stricter of two stated licences, CC BY-SA 4.0), which set no
+    # condition on reporting results.
+    "rml_core_conformance",
+    "rml_io_conformance",
+    "rml_legacy_conformance",
+}
 
 # Runners over a corpus that is fetched at CI time rather than vendored, and
 # whose score is not published either: the note their row carries.
@@ -175,7 +189,7 @@ def render() -> str:
         "regression suites under `tests/`, plus the crate's unit tests. Only the "
         f"{len([r for r in rows if 'vendored' in r[2]])} **vendored** rows run a published "
         "corpus; every other suite is hand-written and derived from the specification text. "
-        "The SHACL and GeoSPARQL corpus results are development and regression results on the "
+        "The SHACL, GeoSPARQL and RML corpus results are development and regression results on the "
         "vendored sections (`docs/conformance/`), not W3C or OGC conformance claims. The SPARQL "
         "1.1 sections are a subset of a W3C test suite, so under W3C's test-suite licence policy "
         "they are used for development and bug tracking only, and no score is published for them; "

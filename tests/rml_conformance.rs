@@ -1,8 +1,10 @@
 //! RML (RDF Mapping Language) + R2RML conformance tests.
 //!
-//! Grounded in the RML spec (https://rml.io/specs/rml/) and R2RML
-//! (https://www.w3.org/TR/r2rml/), adversarially fact-checked. The engine
-//! implements R2RML vocabulary (`rr:`) + RML source extensions (`rml:`) for
+//! Grounded in R2RML (https://www.w3.org/TR/r2rml/), RML-Core
+//! (https://w3id.org/rml/core/spec) and RML-IO, adversarially fact-checked.
+//! The engine reads the R2RML vocabulary (`rr:`), the legacy RML source
+//! extensions (`http://semweb.mmlab.be/ns/rml#`) and the RML-Core / RML-IO
+//! vocabulary (`http://w3id.org/rml/`, the tests at the end of this file) for
 //! CSV / JSONPath / XPath logical sources and registered relational sources,
 //! with template / reference / constant term maps, R2RML's term types and
 //! defaults (§7.4), IRI-safe template values (§7.3), blank nodes per value and
@@ -1695,4 +1697,267 @@ fn r2rml_every_predicate_takes_every_referencing_object_map() {
             "{p}: dept, ex:Staff — no boss"
         );
     }
+}
+
+// ── RML-Core / RML-IO (http://w3id.org/rml/) ──
+
+const CORE: &str = "@prefix rml: <http://w3id.org/rml/> .\n\
+@prefix csvw: <http://www.w3.org/ns/csvw#> .\n\
+@prefix ex: <http://example.org/> .\n\
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n";
+
+/// Run an RML-Core mapping over file sources given as bytes.
+fn run_core(mapping: &str, sources: &[(&str, Vec<u8>)]) -> Result<(TripleStore, usize), String> {
+    let m = parse_rml(&format!("{CORE}{mapping}"))?;
+    let src: HashMap<String, Vec<u8>> = sources
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect();
+    let store = TripleStore::in_memory().unwrap();
+    let n = execute_with(&m, &src, &store, None, OnDataError::Abort, |_| Ok(()))?.triples;
+    Ok((store, n))
+}
+
+fn ask_core(store: &TripleStore, pattern: &str) -> bool {
+    match store
+        .query(&format!(
+            "PREFIX ex: <http://example.org/> PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> \
+             ASK {{ {pattern} }}"
+        ))
+        .unwrap()
+    {
+        QueryResults::Boolean(b) => b,
+        _ => false,
+    }
+}
+
+// The RML-Core vocabulary runs as R2RML's does; a JSON number keeps its
+// natural datatype (RML-IO registry), and a reference that selects several
+// values generates a term for each (RML-Core §expressions).
+#[test]
+fn rml_core_vocabulary_multi_valued_references_and_natural_datatypes() {
+    let (store, _) = run_core(
+        r#"
+        ex:M a rml:TriplesMap ;
+          rml:logicalSource [ rml:source [ a rml:RelativePathSource ; rml:path "p.json" ] ;
+                              rml:referenceFormulation rml:JSONPath ; rml:iterator "$.people[*]" ] ;
+          rml:subjectMap [ rml:template "http://example.org/p/{$.id}" ; rml:class ex:Person ] ;
+          rml:predicateObjectMap [ rml:predicate ex:age ; rml:objectMap [ rml:reference "$.age" ] ] ;
+          rml:predicateObjectMap [ rml:predicate ex:tag ; rml:objectMap [ rml:reference "$.tags[*]" ] ] ;
+          rml:predicateObjectMap [ rml:predicate ex:alias ;
+              rml:objectMap [ rml:template "http://example.org/alias/{$.names[*]}" ] ] ."#,
+        &[(
+            "p.json",
+            br#"{"people":[{"id":1,"age":30,"tags":["a","b"],"names":["x","y"]}]}"#.to_vec(),
+        )],
+    )
+    .unwrap();
+    assert!(ask_core(
+        &store,
+        "<http://example.org/p/1> a ex:Person ; ex:age 30"
+    ));
+    assert!(ask_core(
+        &store,
+        "<http://example.org/p/1> ex:age ?a FILTER(datatype(?a) = xsd:integer)"
+    ));
+    assert!(ask_core(
+        &store,
+        "<http://example.org/p/1> ex:tag \"a\", \"b\""
+    ));
+    assert!(ask_core(
+        &store,
+        "<http://example.org/p/1> ex:alias <http://example.org/alias/x>, <http://example.org/alias/y>"
+    ));
+}
+
+// RML-Core language and datatype maps: the tag or datatype comes from the
+// iteration, and a constant map is the shortcut.
+#[test]
+fn rml_core_language_and_datatype_maps() {
+    let (store, _) = run_core(
+        r#"
+        ex:M a rml:TriplesMap ;
+          rml:logicalSource [ rml:source [ a rml:RelativePathSource ; rml:path "d.json" ] ;
+                              rml:referenceFormulation rml:JSONPath ; rml:iterator "$[*]" ] ;
+          rml:subjectMap [ rml:template "http://example.org/d/{$.id}" ] ;
+          rml:predicateObjectMap [ rml:predicate ex:label ;
+              rml:objectMap [ rml:reference "$.label" ; rml:languageMap [ rml:reference "$.lang" ] ] ] ;
+          rml:predicateObjectMap [ rml:predicate ex:when ;
+              rml:objectMap [ rml:reference "$.when" ;
+                  rml:datatypeMap [ rml:template "http://www.w3.org/2001/XMLSchema#{$.type}" ] ] ] ;
+          rml:predicateObjectMap [ rml:predicate ex:note ;
+              rml:objectMap [ rml:reference "$.label" ; rml:languageMap [ rml:constant "nl" ] ] ] ."#,
+        &[(
+            "d.json",
+            br#"[{"id":1,"label":"Brug","lang":"nl","when":"2026-10-03","type":"date"}]"#.to_vec(),
+        )],
+    )
+    .unwrap();
+    assert!(ask_core(
+        &store,
+        "<http://example.org/d/1> ex:label \"Brug\"@nl ; ex:note \"Brug\"@nl"
+    ));
+    assert!(ask_core(
+        &store,
+        "<http://example.org/d/1> ex:when \"2026-10-03\"^^xsd:date"
+    ));
+}
+
+// rml:URI encodes every non-ASCII character; rml:UnsafeIRI none; rml:IRI
+// only what lies outside iunreserved (RML-Core §IRI encoding).
+#[test]
+fn rml_core_uri_and_unsafe_iri_term_types() {
+    let mapping = |tt: &str| {
+        format!(
+            r#"
+        ex:M a rml:TriplesMap ;
+          rml:logicalSource [ rml:source [ a rml:RelativePathSource ; rml:path "n.json" ] ;
+                              rml:referenceFormulation rml:JSONPath ; rml:iterator "$[*]" ] ;
+          rml:subjectMap [ rml:template "http://example.org/{{$.n}}" ; rml:termType rml:{tt} ] ;
+          rml:predicateObjectMap [ rml:predicate ex:p ; rml:object ex:o ] ."#
+        )
+    };
+    let src = || vec![("n.json", r#"[{"n":"Zoë/K"}]"#.as_bytes().to_vec())];
+    let (s, _) = run_core(&mapping("URI"), &src()).unwrap();
+    assert!(ask_core(&s, "<http://example.org/Zo%C3%AB%2FK> ex:p ex:o"));
+    let (s, _) = run_core(&mapping("IRI"), &src()).unwrap();
+    assert!(ask_core(&s, "<http://example.org/Zoë%2FK> ex:p ex:o"));
+    let (s, _) = run_core(&mapping("UnsafeIRI"), &src()).unwrap();
+    assert!(ask_core(&s, "<http://example.org/Zoë/K> ex:p ex:o"));
+}
+
+// RML-Core join expression maps: a template or constant may stand where
+// rr:child / rr:parent name a reference.
+#[test]
+fn rml_core_child_and_parent_maps() {
+    let (store, _) = run_core(
+        r#"
+        ex:Child a rml:TriplesMap ;
+          rml:logicalSource [ rml:source [ a rml:RelativePathSource ; rml:path "c.json" ] ;
+                              rml:referenceFormulation rml:JSONPath ; rml:iterator "$[*]" ] ;
+          rml:subjectMap [ rml:template "http://example.org/c/{$.id}" ] ;
+          rml:predicateObjectMap [ rml:predicate ex:parent ; rml:objectMap [
+              rml:parentTriplesMap ex:Parent ;
+              rml:joinCondition [ rml:childMap [ rml:template "P-{$.pid}" ] ;
+                                  rml:parentMap [ rml:reference "$.code" ] ] ] ] .
+        ex:Parent a rml:TriplesMap ;
+          rml:logicalSource [ rml:source [ a rml:RelativePathSource ; rml:path "p.json" ] ;
+                              rml:referenceFormulation rml:JSONPath ; rml:iterator "$[*]" ] ;
+          rml:subjectMap [ rml:template "http://example.org/p/{$.code}" ] ."#,
+        &[
+            ("c.json", br#"[{"id":1,"pid":7},{"id":2,"pid":8}]"#.to_vec()),
+            ("p.json", br#"[{"code":"P-7"}]"#.to_vec()),
+        ],
+    )
+    .unwrap();
+    assert!(ask_core(
+        &store,
+        "<http://example.org/c/1> ex:parent <http://example.org/p/P-7>"
+    ));
+    assert!(!ask_core(&store, "<http://example.org/c/2> ex:parent ?p"));
+}
+
+// RML-IO sources: compression, encodings, CSVW dialects and JSON Lines.
+#[test]
+fn rml_io_compression_encoding_csvw_and_json_lines() {
+    use std::io::Write;
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(b"[{\"id\":\"g\"}]").unwrap();
+    let gz = gz.finish().unwrap();
+    let mut utf16 = vec![0xFF, 0xFE];
+    for u in "id;name\n1;Zoë\n".encode_utf16() {
+        utf16.extend_from_slice(&u.to_le_bytes());
+    }
+    let (store, _) = run_core(
+        r#"
+        ex:Gz a rml:TriplesMap ;
+          rml:logicalSource [ rml:source [ a rml:RelativePathSource ; rml:path "a.json.gz" ;
+                                           rml:compression rml:gzip ] ;
+                              rml:referenceFormulation rml:JSONPath ; rml:iterator "$[*]" ] ;
+          rml:subjectMap [ rml:template "http://example.org/gz/{$.id}" ] ;
+          rml:predicateObjectMap [ rml:predicate ex:p ; rml:object ex:o ] .
+        ex:Csvw a rml:TriplesMap ;
+          rml:logicalSource [ rml:source [ a csvw:Table ; csvw:url "b.csv" ;
+                                           csvw:dialect [ csvw:delimiter ";" ; csvw:encoding "utf-16" ] ] ;
+                              rml:referenceFormulation rml:CSV ] ;
+          rml:subjectMap [ rml:template "http://example.org/csv/{id}" ] ;
+          rml:predicateObjectMap [ rml:predicate ex:name ; rml:objectMap [ rml:reference "name" ] ] .
+        ex:Lines a rml:TriplesMap ;
+          rml:logicalSource [ rml:source [ a rml:RelativePathSource ; rml:path "c.jsonl" ] ;
+                              rml:referenceFormulation rml:JSONPath ; rml:iterator "$" ] ;
+          rml:subjectMap [ rml:template "http://example.org/line/{$.n}" ] ;
+          rml:predicateObjectMap [ rml:predicate ex:p ; rml:object ex:o ] ."#,
+        &[
+            ("a.json.gz", gz),
+            ("b.csv", utf16),
+            ("c.jsonl", b"{\"n\":1}\n{\"n\":2}\n".to_vec()),
+        ],
+    )
+    .unwrap();
+    assert!(ask_core(&store, "<http://example.org/gz/g> ex:p ex:o"));
+    assert!(ask_core(
+        &store,
+        "<http://example.org/csv/1> ex:name \"Zoë\""
+    ));
+    assert!(ask_core(&store, "<http://example.org/line/1> ex:p ex:o"));
+    assert!(ask_core(&store, "<http://example.org/line/2> ex:p ex:o"));
+}
+
+// XPath with attributes, parent axes and declared namespaces (RML-IO
+// registry §XPath).
+#[test]
+fn rml_io_xpath_attributes_parents_and_namespaces() {
+    let (store, _) = run_core(
+        r#"
+        ex:M a rml:TriplesMap ;
+          rml:logicalSource [ rml:source [ a rml:RelativePathSource ; rml:path "f.xml" ] ;
+                              rml:referenceFormulation [ a rml:XPathReferenceFormulation ;
+                                  rml:namespace [ rml:namespacePrefix "x" ;
+                                                  rml:namespaceURL "http://example.org/ns" ] ] ;
+                              rml:iterator "/r/x:dept/x:e" ] ;
+          rml:subjectMap [ rml:template "http://example.org/e/{@id}" ] ;
+          rml:predicateObjectMap [ rml:predicate ex:dept ;
+              rml:objectMap [ rml:template "http://example.org/d/{../@id}" ] ] ;
+          rml:predicateObjectMap [ rml:predicate ex:name ; rml:objectMap [ rml:reference "x:name" ] ] ."#,
+        &[(
+            "f.xml",
+            br#"<r xmlns:n="http://example.org/ns"><n:dept id="d1"><n:e id="e1"><n:name>Ann</n:name></n:e></n:dept></r>"#
+                .to_vec(),
+        )],
+    )
+    .unwrap();
+    assert!(ask_core(
+        &store,
+        "<http://example.org/e/e1> ex:dept <http://example.org/d/d1> ; ex:name \"Ann\""
+    ));
+}
+
+// Modules this engine does not implement are refused by name, and a remote
+// source is not fetched.
+#[test]
+fn rml_unimplemented_modules_and_remote_sources_are_refused() {
+    let err = run_core(
+        r#"
+        ex:M a rml:TriplesMap ;
+          rml:logicalSource [ rml:source [ a rml:RelativePathSource ; rml:path "x.json" ] ;
+                              rml:referenceFormulation rml:JSONPath ] ;
+          rml:subjectMap [ rml:template "http://example.org/{$.id}" ] ;
+          rml:predicateObjectMap [ rml:predicate ex:p ;
+              rml:objectMap [ rml:functionExecution [ rml:function ex:f ] ] ] ."#,
+        &[],
+    )
+    .err()
+    .expect("an RML-FNML term is refused");
+    assert!(err.contains("RML-FNML"), "{err}");
+    let err = run_core(
+        r#"
+        ex:M a rml:TriplesMap ;
+          rml:logicalSource [ rml:source [ a csvw:Table ; csvw:url "http://example.org/data.csv" ] ;
+                              rml:referenceFormulation rml:CSV ] ;
+          rml:subjectMap [ rml:template "http://example.org/{id}" ] ."#,
+        &[],
+    )
+    .err()
+    .expect("a remote source is refused");
+    assert!(err.contains("does not fetch"), "{err}");
 }

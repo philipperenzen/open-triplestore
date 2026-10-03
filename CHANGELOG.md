@@ -14,6 +14,33 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **RML-Core and RML-IO.** RML mappings may be written in the W3C Knowledge
+  Graph Construction Community Group's vocabulary (`http://w3id.org/rml/`),
+  alongside R2RML and the legacy RML namespace, mixed freely. New with it:
+  RFC 9535 JSONPath iterators and references (`serde_json_path`), XPath 1.0
+  with attributes, axes and declared namespaces (`sxd-xpath`), references that
+  select several values (a term per value, templates as the cartesian product
+  of their references' values), `rml:languageMap` and `rml:datatypeMap`,
+  `rml:childMap` / `rml:parentMap` join expressions, the `rml:URI`,
+  `rml:UnsafeIRI` and `rml:UnsafeURI` term types, a blank-node term map with
+  no expression, `rml:RelativePathSource` / `rml:FilePath` sources and CSVW
+  `csvw:Table` sources with their dialect (delimiter, quote, header rows,
+  skipped rows, comment prefix, trim, `csvw:null`), `rml:encoding` (any WHATWG
+  label; a byte-order mark wins), `rml:compression` (gzip, zip, tar.gz,
+  tar.xz; a decompressed source over `OTS_RML_MAX_SOURCE_BYTES`, default
+  256 MiB, is refused) and JSON Lines files. A JSON value in an RML-Core
+  mapping carries its natural datatype (`xsd:integer`, `xsd:double`,
+  `xsd:boolean`, per the RML-IO registry); the legacy vocabulary keeps reading
+  JSON values as plain strings. An SQL timestamp or boolean takes its natural
+  RDF lexical form (`2009-10-10T12:12:22`, `true`) in literals and templates
+  (R2RML §10.2). RML-FNML, RML-CC, RML-LV, RML-star and RML-IO targets are not
+  implemented, and a mapping that uses their terms is refused naming the
+  module; a remote source is never fetched. The file-mapping endpoints accept
+  source parts that are not UTF-8. Three vendored corpora run in CI: the
+  RML-Core test cases (`tests/rml_core_conformance.rs`), the RML-IO source
+  test cases (`tests/rml_io_conformance.rs`) and the CSV, JSON and XML cases
+  of the legacy rml-test-cases (`tests/rml_legacy_conformance.rs`), with
+  their licences and provenance beside them and in `NOTICE`.
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -67,6 +94,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asks for, and re-pins; the store now tells everyone which datasets that applies to.
 
 ### Changed
+- **RML file sources read JSON and XML by the RML-IO registry.** A JSONPath
+  iterator or reference is now RFC 9535 JSONPath and an XPath one is XPath
+  1.0, where the engine walked dotted keys and matched element names. Under
+  the legacy RML vocabulary this keeps what worked — a bare name is the member
+  or child element of that name, an iterator that selects one array iterates
+  its elements, a relative XML iterator (`person`) matches anywhere — and
+  adds nested references (`a.b`, `../@id`, attributes). An XML reference's
+  value is the node's string value (all its text, nested elements included)
+  rather than its first text child. A template with an unbalanced brace —
+  one opened inside a reference, closed outside one, or never closed — is
+  refused at upload instead of being read as best it could. RML is now graded
+  Full in `docs/standards.md` and counts in the comparison's Standards Score
+  (16 → 17).
 - **RML / R2RML terms follow R2RML.** A file mapping, a dataset's stored
   mapping and every newly frozen datasource mapping version now generate terms
   by R2RML's rules, so their output changes:

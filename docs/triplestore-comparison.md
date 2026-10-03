@@ -306,7 +306,7 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 | **LDP (Linked Data Plat.)** | ✅⁸ | ❌ | ❌ | ❌ | 🟡 | ❌ | ❌ | 🟡 | ❌ | ❌ |
 | **DCAT 2.0** | ✅ | ❌ | ❌ | ❌ | ❌ | 🟡 | ❌ | ❌ | ❌ | ❌ |
 | **VoID** | ✅ | ❌ | ❌ | ❌ | 🟡 | ✅ | 🟡 | ❌ | ❌ | ❌ |
-| **RML** | 🟡¹⁰ | ❌ | ❌ | ❌ | ❌ | 🟡 | ❌ | ❌ | ❌ | ❌ |
+| **RML** | ✅¹⁰ | ❌ | ❌ | ❌ | ❌ | 🟡 | ❌ | ❌ | ❌ | ❌ |
 | **SKOS** | ✅⁹ | ✅⁹ | ✅⁹ | ✅⁹ | ✅⁹ | ✅ | ✅ | ✅⁹ | ✅⁹ | ✅⁹ |
 
 > ⁸ Full LDP 1.0 support via `ldp` feature flag: Basic/Direct/Indirect containers, NonRDFSource,
@@ -314,10 +314,11 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >   content negotiation (Turtle, N-Triples, RDF/XML, JSON-LD), and Prefer include/omit headers.
 >   All 39 conformance tests pass (`tests/ldp_conformance.rs`).
 > ⁹ SKOS is a vocabulary; all systems store SKOS triples — "support" means SKOS-aware inferencing.
-> ¹⁰ RML, graded Partial in [`docs/standards.md`](standards.md): CSV/JSON/XML files and
->   registered SQL and SPARQL datasources, with joins (`rr:parentTriplesMap`) on both; the W3C
->   R2RML test cases run in CI on SQLite, PostgreSQL and MySQL (no score published). The
->   RML-Core / RML-IO vocabulary is not implemented yet.
+> ¹⁰ RML, graded Full in [`docs/standards.md`](standards.md) (footnote 9): RML-Core /
+>   RML-IO, legacy RML and R2RML over CSV/JSON/XML files and registered SQL and SPARQL
+>   datasources, joins on both. Graded on the W3C R2RML test cases (SQLite, PostgreSQL, MySQL;
+>   no score published) and the vendored RML-Core and RML-IO source test cases; RML-FNML,
+>   RML-CC, RML-LV, RML-star and RML-IO targets are not implemented.
 
 ### Standards Score (count of full ✅ across all 29 rows above)
 
@@ -331,6 +332,11 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > row is not claimed (footnote ⁴). The other 🟡 rows are SPARQL 1.2 and RDF 1.2/RDF-star
 > (upstream oxrdf blocker — triple-term evaluation not yet complete).
 >
+> Open Triplestore recounted again on 2026-10-03, 16 → 17: RML is graded Full in
+> `docs/standards.md` (RML-Core / RML-IO and R2RML on their test corpora, owner decision D1:
+> one row for the family; the modules RML-FNML, RML-CC, RML-LV and RML-star are not
+> implemented and do not count toward it).
+>
 > Open Triplestore recounted again on 2026-10-01, 23 → 16: SPARQL 1.1 federation, OWL 2 EL, RL
 > and DL, ShEx, SWRL and RML now follow their Partial grades in `docs/standards.md` as well.
 > SHACL-AF inference and DCAT 2.0 still count as feature presence (see §2.3).
@@ -338,7 +344,7 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 ```
 Stardog           ██████████████████████░░░░░░░   22 / 29  (commercial; full OWL DL + ShEx + SWRL; GeoSPARQL 1.1 partial)
 GraphDB           █████████████████████░░░░░░░░   21 / 29  (commercial; OWL DL commercial-only; no ShEx/SWRL/LDP/RML)
-Open Triplestore  ████████████████░░░░░░░░░░░░░   16 / 29  (#1 open-source; federation, OWL 2 EL/RL/DL, ShEx, SWRL, RML, GeoSPARQL, SHACL, SPARQL 1.2, RDF-star 🟡; W3C tests not claimed)
+Open Triplestore  █████████████████░░░░░░░░░░░░   17 / 29  (#1 open-source; federation, OWL 2 EL/RL/DL, ShEx, SWRL, GeoSPARQL, SHACL, SPARQL 1.2, RDF-star 🟡; W3C tests not claimed)
 Virtuoso          ██████████████░░░░░░░░░░░░░░░   14 / 29
 RDF4J 5           ██████████████░░░░░░░░░░░░░░░   14 / 29  (improved from v4)
 Jena 5            ████████████░░░░░░░░░░░░░░░░░   12 / 29  (improved from v4)

@@ -2344,7 +2344,9 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Mappings",
                 "Execute RML mapping",
-                "Run the stored RML mapping against its sources and load the resulting triples.",
+                "Run the stored RML mapping against its source files — multipart parts named \
+                 as the logical sources name them, decompressed and decoded as the mapping \
+                 declares (rml:compression, rml:encoding) — and load the resulting triples.",
                 vec![
                     qp(
                         "preview",

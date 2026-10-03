@@ -83,7 +83,7 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | **SHACL on write** | Automatic SHACL validation on every Graph Store PUT/POST — returns 422 with full report on violation |
 | **SHACL Compact Syntax** | Parse and serialize shapes in [SHACLC](https://w3c.github.io/shacl/shacl-compact-syntax/) via `Accept: text/shaclc` |
 | **DCAT 2 catalog** | Full W3C DCAT 2 catalog at `/.well-known/void` — per-dataset distributions, VoID statistics, PROV-O provenance |
-| **RML mapping** | [RDF Mapping Language](https://rml.io/specs/rml/) — CSV, JSON (JSONPath), XML (XPath) → RDF with template expansion |
+| **RML mapping** | [RML-Core / RML-IO](https://w3id.org/rml/core/spec), legacy RML and R2RML — CSV (with CSVW dialects), JSON and JSON Lines (RFC 9535 JSONPath), XML (XPath), compressed or not, and SQL datasources → RDF, with joins across sources |
 | **OpenAPI docs** | Interactive Swagger UI at `/api-docs/` with JWT Bearer auth; machine-readable spec at `/api-docs/openapi.json` |
 | **AI assistant** *(optional)* | Natural-language → SPARQL, a grounded knowledge-graph chat, and a SHACL drafting assistant — run the **bundled local model** (`docker compose --profile llm up`, GPU-accelerated on NVIDIA) or **bring your own** OpenAI-compatible API (OpenAI, vLLM, Azure, …) via `LLM_GATEWAY_URL`; off by default, hidden until reachable ([docs](docs/api-services.md), [chat](docs/spark.md)) |
 | **Vocabulary search** | Internal [LOV](https://lov.linkeddata.es/) mirror: a catalogue of ~900 vocabularies, each with its licence status (the licence the vocabulary declares or, where it names none, its publisher's published terms); term search and one-click offline install into the registry for those whose licence lets the image ship them (install also works for the others from a dump you supply, privately); CLARIAH-style vocabulary recommender ([docs](docs/vocabulary-search.md)) |
@@ -881,7 +881,10 @@ licence policy allows no performance claims on a subset.
 | OWL 2 RL | `tests/owl2_rl_conformance.rs` | spec-derived | 30 |  |
 | RDF 1.1 formats | `tests/rdf11_conformance.rs` | spec-derived | 63 |  |
 | RDFS entailment | `tests/rdfs_conformance.rs` | spec-derived | 23 |  |
-| RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 43 |  |
+| RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 50 |  |
+| RML-Core | `tests/rml_core_conformance.rs` | **vendored KG-Construct CG corpus** (the RML-Core test cases, unmodified; manifest-driven) | 2 | 76 corpus cases: 75 pass, 1 known failure, 0 runner-side skips (floor ≥70 asserted) |
+| RML-IO (sources) | `tests/rml_io_conformance.rs` | **vendored KG-Construct CG corpus** (the RML-IO source test cases, unmodified; manifest-driven) | 2 | 32 corpus cases: 29 pass, 1 known failure, 2 runner-side skips (floor ≥25 asserted) |
+| RML (legacy vocabulary) | `tests/rml_legacy_conformance.rs` | **vendored RML.io corpus** (the CSV, JSON and XML cases of rml-test-cases, unmodified) | 2 | 117 corpus cases: 112 pass, 5 known failures, 0 runner-side skips (floor ≥100 asserted) |
 | SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 23 |  |
 | SHACL-AF rules | `tests/shacl_rules_conformance.rs` | spec-derived | 20 |  |
 | SHACL Compact Syntax | `tests/shaclc_conformance.rs` | spec-derived | 11 |  |
@@ -897,7 +900,7 @@ licence policy allows no performance claims on a subset.
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 125 |  |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 
-781 conformance tests across 27 suites; a further 713 tests in 104 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 4 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. The SHACL and GeoSPARQL corpus results are development and regression results on the vendored sections (`docs/conformance/`), not W3C or OGC conformance claims. The SPARQL 1.1 sections are a subset of a W3C test suite, so under W3C's test-suite licence policy they are used for development and bug tracking only, and no score is published for them; the same holds for the W3C R2RML test cases, which CI fetches at a pinned commit rather than vendoring.
+794 conformance tests across 30 suites; a further 713 tests in 104 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 7 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. The SHACL, GeoSPARQL and RML corpus results are development and regression results on the vendored sections (`docs/conformance/`), not W3C or OGC conformance claims. The SPARQL 1.1 sections are a subset of a W3C test suite, so under W3C's test-suite licence policy they are used for development and bug tracking only, and no score is published for them; the same holds for the W3C R2RML test cases, which CI fetches at a pinned commit rather than vendoring.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->
