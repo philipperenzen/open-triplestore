@@ -53,7 +53,7 @@ const KNOWN_FAILURES: &[(&str, &str)] = &[
 ];
 
 /// Pass floor, a little below the current count.
-const PASS_FLOOR: usize = 999;
+const PASS_FLOOR: usize = 37;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Engine {

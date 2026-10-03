@@ -139,8 +139,6 @@ fn double_quoted_entities(xml: &str) -> String {
     out
 }
 
-/// The approved OWL 2 DL / Direct Semantics cases, in identifier order.
-
 /// The approved RL-profile cases, in identifier order.
 fn cases() -> Vec<Case> {
     let raw = std::fs::read_to_string(MANIFEST).expect("the vendored OWL 2 test manifest");
