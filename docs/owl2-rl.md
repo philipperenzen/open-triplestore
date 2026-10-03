@@ -66,8 +66,15 @@ OWL 2 RL is suitable for:
 | dt-not-type | A literal whose lexical form is not in the lexical space of its datatype (`"abc"^^xsd:integer`) is an **inconsistency**; every XSD-typed literal in scope is checked with the lexical rules SHACL's `sh:datatype` uses |
 
 `dt-type2`, `dt-eq` and `dt-diff` are not run: they type, equate or
-distinguish literals *as subjects*, which an RDF graph cannot hold; literal
-values are compared by SPARQL value semantics in every other rule.
+distinguish literals *as subjects*, which an RDF graph cannot hold. The store
+keeps literals as written, so `dt-not-type` sees the datatype the data states
+(`"300"^^xsd:byte` is an inconsistency; it used to be stored as the integer
+300). The cardinality rules (`cls-maxc1/2`, `cls-maxqc1–4`) and `owl:hasSelf`
+read their number or flag by value, so `owl:maxCardinality 1` (Turtle's
+`xsd:integer`) and `"1"^^xsd:nonNegativeInteger` both apply. The rules that join
+on a literal (`prp-key`, `prp-npa2`, `prp-hv`, `cls-hv1/2`, `scm-hv`) match the
+literal as written, as the RL/RDF rules are stated: `"5"^^xsd:int` and `5` are
+different terms there.
 
 ### Schema Rules (scm-*)
 

@@ -11,18 +11,19 @@ of conformance to the W3C SHACL Recommendation, and W3C has not reviewed or endo
 them. The tests are redistributed under the W3C Software and Document License — see
 [`PROVENANCE.md`](../../tests/fixtures/w3c-shacl/PROVENANCE.md) there.
 
-## Results (2026-09-10)
+## Results (2026-10-03)
 
 | | core | sparql | total |
 |---|---|---|---|
-| **Pass** | **97** | **22** | **119** |
-| Known-fail (ratcheted) | 1 | 1 | 2 |
+| **Pass** | **98** | **22** | **120** |
+| Known-fail (ratcheted) | 0 | 1 | 1 |
 | Skipped (auxiliary `-data`/`-shapes` files, no test entry) | 15 | 0 | 15 |
 | Total files | 113 | 23 | 136 |
 
-*(Previous baselines: 2026-06-11, core only: 97 pass / 1 known-fail; 2026-06-10:
-46 pass / 52 known-fail — see "Typed-term engine refactor" below for what closed
-that gap.)*
+*(Previous baselines: 2026-09-10: 119 pass / 2 known-fail, before the store kept
+literals as written (see "Lexical forms" below); 2026-06-11, core only: 97 pass /
+1 known-fail; 2026-06-10: 46 pass / 52 known-fail — see "Typed-term engine
+refactor" below for what closed that gap.)*
 
 The `sparql` section (vendored 2026-09-10) covers `sh:sparql` constraints on node
 and property shapes, `sh:prefixes` (including `owl:imports`), custom constraint
@@ -50,13 +51,20 @@ CI red, so the list cannot go stale.
   evaluates against the data graphs only, so a constraint that uses them fails
   the shapes graph (loudly, as a load error) instead of producing the report the
   test expects.
-- **`core/property/uniqueLang-002.ttl`** — the test asserts that
-  `sh:uniqueLang "1"^^xsd:boolean` does **not** activate the constraint (the spec
-  activates it only for the literal `true`). Oxigraph's storage encodes
-  `xsd:boolean` natively and reads the literal back in canonical form (`"1"` →
-  `"true"`), so the distinction is unrecoverable after loading. This is a storage
-  canonicalisation property, not an engine gap; fixing it would require keeping
-  the original lexical form alongside every stored literal.
+
+## Lexical forms (2026-10-03)
+
+**`core/property/uniqueLang-002.ttl`** passes since the store keeps every literal
+as written (the vendored Oxigraph, [`vendor/README.md`](../../vendor/README.md)).
+The test asserts that `sh:uniqueLang "1"^^xsd:boolean` does **not** activate the
+constraint: the spec activates it only for the literal `true`. Oxigraph used to
+store `xsd:boolean` as a value and read `"1"` back as `"true"`, so the shapes
+graph the engine loaded said `true`. The same change fixes `sh:datatype` on the
+types derived from `xsd:integer` and on `xsd:dateTimeStamp` (a stored
+`"5"^^xsd:nonNegativeInteger` used to read back as `xsd:integer` and violate
+`sh:datatype xsd:nonNegativeInteger`), and `sh:hasValue` / `sh:in` /
+`sh:equals` now compare the terms as written (`sh:hasValue 5` does not match
+`"05"^^xsd:integer` or `"5"^^xsd:int`), as SHACL's term equality requires.
 
 ## Typed-term engine refactor (2026-06-11)
 

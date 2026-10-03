@@ -39,13 +39,37 @@ Turtle also has literal **shorthands** so common values need no `^^`:
 | `4.2` | `xsd:decimal` |
 | `4.2e1` | `xsd:double` |
 
-> **Value space vs. stored form.** The store keeps your lexical form **exactly as
-> written**, but the engine (Oxigraph) implements the XSD *value spaces*, so
-> numbers, booleans, dates and durations are compared, ordered and computed
-> **by value**. That means `"01"^^xsd:integer` equals `"1"^^xsd:integer`, and
-> `"1.0E2"^^xsd:double` equals `100.0` in a `FILTER`. Datatypes outside the XSD
-> value space (see [Other & custom datatypes](#other-custom-datatypes)) are kept
-> verbatim and compared by exact match.
+> **Value space vs. stored form.** The store keeps every literal **exactly as
+> written**: its lexical form and its datatype. `"01"^^xsd:integer`,
+> `"1"^^xsd:boolean`, `"5"^^xsd:nonNegativeInteger` and a `+00:00` time zone
+> come back the way you wrote them, from SPARQL, the Graph Store Protocol and
+> every download. Two things follow:
+>
+> - **Expressions compare values.** The engine (Oxigraph) implements the XSD
+>   *value spaces*, so in a `FILTER`, `ORDER BY`, arithmetic or an aggregate,
+>   numbers, booleans, dates and durations are compared and computed **by
+>   value**: `"01"^^xsd:integer = 1`, `"5"^^xsd:int = 5` and
+>   `"1.0E2"^^xsd:double = 100.0` are all true. A computed value is printed in
+>   its canonical form (`?x + 0` gives `1`, not `01`).
+> - **Graph patterns compare terms.** A triple pattern, a join between two
+>   patterns, `DISTINCT`, `GROUP BY`, `sameTerm` and `DELETE DATA` match the
+>   literal as written, as RDF defines it: `{ ?s ex:n 1 }` does not find
+>   `"01"^^xsd:integer` or `"1"^^xsd:int`, `true` does not find
+>   `"1"^^xsd:boolean`, and `SELECT DISTINCT` returns `"5"^^xsd:int` and `5` as
+>   two values. To match by value, bind a variable and filter:
+>   `{ ?s ex:n ?n FILTER(?n = 1) }`.
+>
+> Datatypes outside the XSD value space (see
+> [Other & custom datatypes](#other-custom-datatypes)) compare by exact match
+> in expressions too.
+>
+> Until the store kept lexical forms (see the changelog), it wrote the typed
+> literals of those value spaces in a canonical form: `"01"` as `"1"`,
+> `"1"^^xsd:boolean` as `true`, every type derived from `xsd:integer` as
+> `xsd:integer`, `xsd:dateTimeStamp` as `xsd:dateTime`. Data loaded then still
+> reads that way. Appending the same file again adds the literals as written
+> beside the old ones, so replace a graph (`PUT`) rather than appending to it
+> when you reload such data.
 
 <details>
 <summary>▸ View example — what datatypes are in my data?</summary>
@@ -119,7 +143,10 @@ The derived integer types are also value-typed: `xsd:long`, `xsd:int`,
 `xsd:short`, `xsd:byte`, `xsd:nonNegativeInteger`, `xsd:positiveInteger`,
 `xsd:negativeInteger`, `xsd:nonPositiveInteger`, and the `unsigned*` family. Use
 them when a value is bounded or sign-constrained (e.g. a count is a
-`xsd:nonNegativeInteger`).
+`xsd:nonNegativeInteger`). They compute as integers in expressions, but the
+store keeps the datatype you wrote, so `DATATYPE(?n)` in a query still reports
+`xsd:integer` (the value's type) while SHACL `sh:datatype xsd:nonNegativeInteger`
+and a download see `xsd:nonNegativeInteger`.
 
 > Prefer `xsd:decimal` over `xsd:double` for quantities you compare for equality
 > (`xsd:double` is subject to floating-point rounding).
@@ -332,8 +359,9 @@ parameter types are: **IRI**, **string**, **integer**, **decimal**, **boolean**,
   [Supported Standards](/docs/standards).
 - **Base-direction strings** (`rdf:dirLangString`) are not currently supported;
   use `rdf:langString` with a plain language tag.
-- Datatypes outside the XSD value space are never rewritten or canonicalised —
-  they are returned byte-for-byte as you stored them.
+- No literal is rewritten or canonicalised in storage: every one is returned
+  byte-for-byte as you stored it. Only values an expression computes are
+  printed in canonical form.
 
 Related: [Linked Data Modelling](/docs/modelling) ·
 [Modelling Styleguide](/docs/linked-data-modelling-styleguide) ·

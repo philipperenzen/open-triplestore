@@ -67,6 +67,55 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asks for, and re-pins; the store now tells everyone which datasets that applies to.
 
 ### Changed
+- **The store keeps every literal exactly as written.** Typed literals used to
+  be stored as values and read back in a canonical form: `"1"^^xsd:boolean` as
+  `true`, `"05"^^xsd:integer` as `"5"`, a `+00:00` time zone as `Z`, every type
+  derived from `xsd:integer` (`xsd:int`, `xsd:nonNegativeInteger`, …) as
+  `xsd:integer` and `xsd:dateTimeStamp` as `xsd:dateTime`. They now come back
+  with the lexical form and datatype they were written with, from SPARQL, the
+  Graph Store Protocol and downloads (RDF 1.1 Concepts §3.3). Oxigraph 0.5.11
+  and its evaluator spareval 0.2.7 are vendored with this change
+  (`vendor/README.md`; the on-disk format is unchanged and existing stores open
+  as they are). What changes for queries:
+  - **Graph patterns, joins, `DISTINCT`, `GROUP BY`, `sameTerm` and
+    `DELETE DATA` match terms, not values.** `{ ?s ex:n 1 }` no longer finds
+    `"01"^^xsd:integer` or `"1"^^xsd:int`, `true` no longer finds
+    `"1"^^xsd:boolean`, a join between `"5"^^xsd:int` and `5` no longer
+    matches, and `SELECT DISTINCT` returns both. Use a `FILTER` to match by
+    value: `FILTER`, `ORDER BY`, arithmetic and aggregates still compare
+    values as before. The same holds inside RDF 1.2 triple terms.
+  - **Data loaded before this version keeps its canonical form**, so a query
+    constant written as in the source file may no longer match it
+    (`"05"^^xsd:integer` against a stored `"5"`), and appending the same file
+    again adds the as-written literals beside the old ones. Reload such data
+    with a replace (`PUT`, or `DROP` then load) rather than an append.
+  - **Seeded vocabularies and seed-bundle models** are checked once on the first
+    start and, where a copy holds its file's triples in the old canonical form,
+    replaced by the file's triples (nobody's edit, so nothing is kept aside);
+    their licence records then say "unchanged" without the canonical-form
+    caveat. LOV installs record the copy exactly as installed.
+  - **SHACL**: `sh:datatype` accepts valid data of the derived integer types
+    and `xsd:dateTimeStamp` (it used to report every stored
+    `"5"^^xsd:nonNegativeInteger` as a violation, which made write gates answer
+    422 on valid data), checks their ranges (`"300"^^xsd:byte` is a violation),
+    and requires a time zone on `xsd:dateTimeStamp`; `sh:minInclusive` and
+    friends compare `xsd:dateTimeStamp` with `xsd:dateTime`. Activation flags
+    take only the literal `true`: `sh:uniqueLang`, `sh:closed`,
+    `sh:qualifiedValueShapesDisjoint` and a shape's `sh:deactivated` written as
+    `"1"^^xsd:boolean` no longer activate. `sh:hasValue`, `sh:in`, `sh:equals`
+    and `sh:disjoint` compare terms as written. W3C SHACL core:
+    `core/property/uniqueLang-002` passes; no core test is a known failure.
+  - **OWL**: `dt-not-type` sees the datatype as written (`"300"^^xsd:byte` is
+    an inconsistency). `cls-maxc1/2`, `cls-maxqc1–4` and `owl:hasSelf` read
+    their number or flag by value, so `owl:maxCardinality 1` and
+    `"1"^^xsd:nonNegativeInteger` both apply. Rules that join on a literal
+    match it as written.
+  - **Parallel and columnar query paths** keep the term as written wherever
+    the engine does (`BIND(?o AS ?x)`, `IF`, `COALESCE`, `sameTerm`,
+    `COUNT(DISTINCT ?o)`) and read `xsd:dateTimeStamp` as a dateTime.
+  - **LDES**: member timestamps and sync bookmarks are ordered by instant, not
+    as text, since publishers' time-zone spellings now reach the client as
+    written.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were
