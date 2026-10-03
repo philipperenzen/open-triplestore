@@ -2567,6 +2567,10 @@ pub async fn deprecate_version(
 
 // ─── Delete a version ─────────────────────────────────────────────────────────
 
+/// A dataset depending on a model version, why (`pinned`, `floating`,
+/// `dataset_version`), and the dataset version that records it, if any.
+type VersionDependent = (crate::auth::models::Dataset, &'static str, Option<String>);
+
 /// Why a dataset depends on model version `ver`: its current pin names it, it
 /// floats on the latest published version and that is `ver`, or one of its
 /// dataset versions that is not deprecated records it as the model version it
@@ -2575,7 +2579,7 @@ fn version_dependents(
     state: &AppState,
     model: &DataModelRecord,
     ver: &str,
-) -> Result<Vec<(crate::auth::models::Dataset, &'static str, Option<String>)>, AppError> {
+) -> Result<Vec<VersionDependent>, AppError> {
     let mut out = Vec::new();
     for ds in state
         .auth_db
