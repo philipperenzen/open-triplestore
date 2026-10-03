@@ -3926,7 +3926,7 @@ fn ogc_req19_as_wkt_keeps_the_srs_and_z() {
         ),
     )
     .unwrap_or_default();
-    assert!(!out.contains('<') && out.contains("POINT"), "{out}");
+    assert!(!out.contains("> POINT") && out.contains("\"POINT"), "{out}");
     let eq = geof_opt(
         &s,
         &format!(
@@ -4043,7 +4043,7 @@ fn ogc_req30_kml_literal_is_a_geometry() {
 #[test]
 fn ogc_req31_kml_literal_is_crs84() {
     let s = ts();
-    let k = kml_lit("<Point><coordinates>4.885,52.36,3</coordinates></Point>");
+    let k = kml_lit("<Point><coordinates>4.8997,52.3735,3</coordinates></Point>");
     let srid = geof_opt(&s, &format!("geof:getSRID({k})")).unwrap_or_default();
     assert!(srid.contains("CRS84"), "{srid}");
     let near = geof_num(
@@ -4053,10 +4053,7 @@ fn ogc_req31_kml_literal_is_crs84() {
             rd("POINT(121800 487400)")
         ),
     );
-    assert!(
-        near < 200.0,
-        "the Rijksmuseum point in RD New and in KML: {near}"
-    );
+    assert!(near < 200.0, "one point in RD New and in KML: {near}");
 }
 
 // Req 32 /req/geometry-extension/kml-literal-empty: an empty KML literal is the empty
@@ -4102,7 +4099,7 @@ fn ogc_req34_as_kml_reprojects_and_round_trips() {
     assert_eq!(datatype_of(&out), "kmlLiteral");
     let out = out.unwrap_or_default();
     assert!(
-        out.contains("<coordinates>4.88") && out.contains(",52.3"),
+        out.contains("<coordinates>4.89") && out.contains(",52.37"),
         "{out}"
     );
     for g in [

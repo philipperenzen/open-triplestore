@@ -831,6 +831,7 @@ pub(super) fn from_geos(
         T::MultiLineString => members(MultiKind::Line)?,
         T::MultiPolygon => members(MultiKind::Poly)?,
         T::GeometryCollection => members(MultiKind::Geom)?,
+        #[allow(unreachable_patterns)] // curve types, with GEOS >= 3.13 features
         _ => return None,
     })
 }
