@@ -33,10 +33,7 @@ fn normalized_path(base: &Iri<String>, reference: &str, resolved: &Iri<String>) 
         // and `Iri::resolve` returns it unchanged: keep it.
         return None;
     }
-    let reference_path = reference
-        .split(['?', '#'])
-        .next()
-        .unwrap_or_default();
+    let reference_path = reference.split(['?', '#']).next().unwrap_or_default();
     if reference.starts_with("//") {
         // A network-path reference: T.path = remove_dot_segments(R.path), and the resolved
         // path is R.path as written.
@@ -89,17 +86,19 @@ pub fn has_scheme(reference: &str) -> bool {
         return false;
     }
     for c in chars {
-        match c {
-            ':' => return true,
-            c if c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.') => (),
-            _ => return false,
+        if c == ':' {
+            return true;
+        }
+        if !c.is_ascii_alphanumeric() && !matches!(c, '+' | '-' | '.') {
+            return false;
         }
     }
     false
 }
 
 fn has_dot_segment(path: &str) -> bool {
-    path.split('/').any(|segment| segment == "." || segment == "..")
+    path.split('/')
+        .any(|segment| segment == "." || segment == "..")
 }
 
 /// [RFC 3986 §5.2.4](https://www.rfc-editor.org/rfc/rfc3986#section-5.2.4)
@@ -164,9 +163,15 @@ mod tests {
         assert_eq!(resolve(&b, "../g").unwrap().as_str(), "http://a/bb/g");
         assert_eq!(resolve(&b, ".").unwrap().as_str(), "http://a/bb/ccc/");
         // An empty path keeps the base path as written (RFC 3986 §5.2.2).
-        assert_eq!(resolve(&b, "?y").unwrap().as_str(), "http://a/bb/ccc/./d;p?y");
+        assert_eq!(
+            resolve(&b, "?y").unwrap().as_str(),
+            "http://a/bb/ccc/./d;p?y"
+        );
         assert_eq!(resolve(&b, "").unwrap().as_str(), "http://a/bb/ccc/./d;p?q");
-        assert_eq!(resolve(&b, "#s").unwrap().as_str(), "http://a/bb/ccc/./d;p?q#s");
+        assert_eq!(
+            resolve(&b, "#s").unwrap().as_str(),
+            "http://a/bb/ccc/./d;p?q#s"
+        );
         let b = base("http://a/bb/ccc/../d;p?q");
         assert_eq!(resolve(&b, "g").unwrap().as_str(), "http://a/bb/g");
         assert_eq!(resolve(&b, "../../../g").unwrap().as_str(), "http://a/g");
@@ -180,7 +185,9 @@ mod tests {
     fn network_path_dot_segments_are_removed() {
         let b = base("http://example.com/some/file");
         assert_eq!(
-            resolve(&b, "//example.org/../scheme-relative").unwrap().as_str(),
+            resolve(&b, "//example.org/../scheme-relative")
+                .unwrap()
+                .as_str(),
             "http://example.org/scheme-relative"
         );
         assert_eq!(
@@ -197,6 +204,9 @@ mod tests {
         assert_eq!(resolve(&b, "g:h").unwrap().as_str(), "g:h");
         assert_eq!(resolve(&b, "../g").unwrap().as_str(), "http://a/b/g");
         assert_eq!(resolve(&b, "/./g").unwrap().as_str(), "http://a/g");
-        assert_eq!(resolve(&b, "g?y/./x").unwrap().as_str(), "http://a/b/c/g?y/./x");
+        assert_eq!(
+            resolve(&b, "g?y/./x").unwrap().as_str(),
+            "http://a/b/c/g?y/./x"
+        );
     }
 }
