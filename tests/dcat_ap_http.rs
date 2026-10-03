@@ -296,3 +296,107 @@ async fn dcat_ap_nl_catalogue_validates_negotiates_and_survives_hostile_metadata
         "the user's dataset is not in the organisation's catalogue"
     );
 }
+
+/// The catalogue's VoID statistics count what the caller may read, and
+/// nothing else: a private dataset's graphs, a public dataset's private graph
+/// and the store's own system graphs stay out of an anonymous caller's
+/// totals, as they do in the service description, and a private graph is not
+/// listed as a public dataset's subset. A caller who may read more sees more;
+/// an administrator sees the whole store.
+#[tokio::test]
+async fn the_aggregate_statistics_count_only_what_the_caller_may_read() {
+    let (state, admin) = admin_state();
+    state
+        .auth_db
+        .create_user(
+            "insider",
+            "insider",
+            "insider@test.com",
+            "hash",
+            open_triplestore::auth::models::SystemRole::User,
+        )
+        .unwrap();
+    let insider = mint_token("insider", "insider", "user");
+    for (id, visibility, graph, data) in [
+        (
+            "open",
+            Visibility::Public,
+            "https://example.org/open/g",
+            "<urn:a> <urn:p> 1 . <urn:b> <urn:p> 2 .",
+        ),
+        (
+            "closed",
+            Visibility::Private,
+            "https://example.org/closed/g",
+            "<urn:c> <urn:q> 3 . <urn:d> <urn:q> 4 . <urn:e> <urn:q> 5 .",
+        ),
+    ] {
+        state
+            .auth_db
+            .create_dataset(id, id, None, OwnerType::User, "insider", visibility, None)
+            .unwrap();
+        state.auth_db.add_dataset_graph(id, graph).unwrap();
+        state
+            .store
+            .load_str(data, RdfFormat::Turtle, Some(graph))
+            .unwrap();
+    }
+    // A private graph inside the public dataset: its writers' only.
+    let hidden = "https://example.org/open/private";
+    state.auth_db.add_dataset_graph("open", hidden).unwrap();
+    state
+        .auth_db
+        .set_dataset_graph_private("open", hidden, true)
+        .unwrap();
+    state
+        .store
+        .load_str(
+            "<urn:f> <urn:r> 6 . <urn:g> <urn:r> 7 . <urn:h> <urn:r> 8 . <urn:i> <urn:r> 9 .",
+            RdfFormat::Turtle,
+            Some(hidden),
+        )
+        .unwrap();
+    let app = test_app(state);
+    let stat_of = |cat: &TripleStore, dataset: &str, property: &str| -> u64 {
+        let q = format!(
+            "SELECT ?n WHERE {{ GRAPH <urn:cat> {{ <http://localhost:7878/{dataset}> <http://rdfs.org/ns/void#{property}> ?n }} }}"
+        );
+        match cat.query(&q).unwrap() {
+            QueryResults::Solutions(mut rows) => match rows.next().unwrap().unwrap().get("n") {
+                Some(oxigraph::model::Term::Literal(l)) => l.value().parse().unwrap(),
+                other => panic!("{dataset} {property}: {other:?}"),
+            },
+            _ => unreachable!(),
+        }
+    };
+    let stat = |cat: &TripleStore, property: &str| stat_of(cat, "dataset", property);
+
+    let (st, _, ttl) = fetch(&app, "/.well-known/void", "text/turtle", None).await;
+    assert_eq!(st, StatusCode::OK, "{ttl}");
+    let cat = parse(&ttl, RdfFormat::Turtle);
+    assert_eq!(stat(&cat, "triples"), 2, "{ttl}");
+    assert_eq!(stat(&cat, "distinctSubjects"), 2, "{ttl}");
+    assert_eq!(stat(&cat, "properties"), 1, "{ttl}");
+    assert_eq!(stat(&cat, "documents"), 1, "{ttl}");
+    // The public dataset's own entry leaves its private graph out too.
+    assert_eq!(stat_of(&cat, "dataset/open", "triples"), 2, "{ttl}");
+    assert!(
+        !ttl.contains(hidden),
+        "a private graph is not listed:\n{ttl}"
+    );
+
+    // The datasets' owner writes both and reads every graph of them.
+    let (_, _, ttl) = fetch(&app, "/.well-known/void", "text/turtle", Some(&insider)).await;
+    let cat = parse(&ttl, RdfFormat::Turtle);
+    assert_eq!(stat(&cat, "triples"), 9, "{ttl}");
+    assert_eq!(stat(&cat, "distinctSubjects"), 9, "{ttl}");
+    assert_eq!(stat(&cat, "properties"), 3, "{ttl}");
+    assert_eq!(stat(&cat, "documents"), 3, "{ttl}");
+    assert_eq!(stat_of(&cat, "dataset/open", "triples"), 6, "{ttl}");
+    assert!(ttl.contains(hidden), "{ttl}");
+
+    let (_, _, ttl) = fetch(&app, "/.well-known/void", "text/turtle", Some(&admin)).await;
+    let cat = parse(&ttl, RdfFormat::Turtle);
+    assert!(stat(&cat, "triples") >= 9, "{ttl}");
+    assert!(stat(&cat, "distinctSubjects") >= 9, "{ttl}");
+}

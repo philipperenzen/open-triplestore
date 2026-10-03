@@ -33,7 +33,7 @@ How to read the entries:
 - **Changes** lists every difference from the source. Open Triplestore has added a
   comment header to every file except `imbor.ttl`. Where the rest of a file is
   the upstream content, the header ends with a line marking where that starts.
-- 17 files came from the Linked Open Vocabularies (LOV) corpus snapshot of
+- 16 files came from the Linked Open Vocabularies (LOV) corpus snapshot of
   2025-12-18 (`https://lov.linkeddata.es/lov.nq.gz`, sha256 `7b5522b4…c233`),
   and LOV re-serialized them as Turtle. LOV's own CC BY 4.0 licence covers LOV's
   catalogue. It does not relicense these vocabularies.

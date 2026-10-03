@@ -12,8 +12,12 @@ use super::audit::{self, AuditEventBuilder, AuditEventType, AuditOutcome};
 use super::middleware::AuthenticatedUser;
 use super::models::OauthProviderCreate;
 use super::oauth::{begin_oidc_flow, complete_oidc_flow, OAuthSessions};
-use super::saml::{complete_saml_flow, generate_sp_metadata};
+use super::saml::{
+    acs_url, begin_saml_flow, complete_saml_flow, generate_sp_metadata, sp_entity_id,
+    take_pending_request,
+};
 use super::secret::store_configured_secret;
+use crate::server::client_ip::ClientIp;
 use crate::server::AppState;
 
 // ─── Public provider listing (for login UI) ────────────────────────────────────
@@ -26,12 +30,15 @@ pub struct PublicProvider {
 }
 
 /// GET /api/auth/oauth/providers
-/// Returns active SSO providers (no secrets) for the login UI.
+/// Returns the SSO providers a sign-in can start from (no secrets) for the
+/// login UI. Active entries without a client ID, such as `env-oidc`, are left
+/// out: they still serve IdP bearer tokens, which never consult this list.
 pub async fn list_active_providers(State(state): State<AppState>) -> impl IntoResponse {
     match state.auth_db.list_oauth_providers(true) {
         Ok(providers) => {
             let public: Vec<PublicProvider> = providers
                 .into_iter()
+                .filter(|p| p.offers_login())
                 .map(|p| PublicProvider {
                     slug: p.slug,
                     name: p.name,
@@ -155,6 +162,13 @@ pub async fn admin_update_provider(
             body.client_secret_enc = existing.client_secret_enc;
         }
     }
+    // The IdP certificate is redacted from every read, so a client editing the
+    // provider cannot send it back. Absent means "keep the stored one".
+    if body.idp_certificate.is_none() {
+        if let Ok(Some(existing)) = state.auth_db.get_oauth_provider_by_id(&id) {
+            body.idp_certificate = existing.idp_certificate;
+        }
+    }
     match state.auth_db.update_oauth_provider(&id, &body) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (
@@ -192,6 +206,7 @@ pub async fn admin_delete_provider(
 fn audit_sso_login_success(
     state: &AppState,
     headers: &axum::http::HeaderMap,
+    client_ip: ClientIp,
     provider_type: &str,
     slug: &str,
     access_token: &str,
@@ -205,7 +220,7 @@ fn audit_sso_login_success(
     if let Ok(claims) = crate::auth::jwt::verify_token(&state.jwt_config, access_token) {
         b = b.actor(claims.sub, claims.username, claims.role);
     }
-    b.ip_address = audit::client_ip(headers, None);
+    b.ip_address = client_ip.as_string();
     b.user_agent = audit::user_agent(headers);
     b.request_id = audit::request_id_from_headers(headers);
     state.audit.log(b);
@@ -217,6 +232,7 @@ fn audit_sso_login_success(
 fn audit_sso_login_failure(
     state: &AppState,
     headers: &axum::http::HeaderMap,
+    client_ip: ClientIp,
     provider_type: &str,
     slug: &str,
     reason: &str,
@@ -228,7 +244,7 @@ fn audit_sso_login_failure(
             "provider_slug": slug,
             "reason": reason,
         }));
-    b.ip_address = audit::client_ip(headers, None);
+    b.ip_address = client_ip.as_string();
     b.user_agent = audit::user_agent(headers);
     b.request_id = audit::request_id_from_headers(headers);
     state.audit.log(b);
@@ -252,7 +268,7 @@ pub async fn oidc_authorize(
     axum::extract::Extension(sessions): axum::extract::Extension<OAuthSessions>,
 ) -> Response {
     let provider = match state.auth_db.get_oauth_provider_by_slug(&slug) {
-        Ok(Some(p)) if p.is_active && p.provider_type == "oidc" => p,
+        Ok(Some(p)) if p.provider_type == "oidc" && p.offers_login() => p,
         Ok(_) => {
             return (StatusCode::NOT_FOUND, "{\"error\":\"Provider not found\"}").into_response()
         }
@@ -306,12 +322,20 @@ pub async fn oidc_callback(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     axum::extract::Extension(sessions): axum::extract::Extension<OAuthSessions>,
+    client_ip: ClientIp,
     headers: axum::http::HeaderMap,
     Query(params): Query<OidcCallbackParams>,
 ) -> Response {
     if let Some(err) = params.error {
         let desc = params.error_description.as_deref().unwrap_or("");
-        audit_sso_login_failure(&state, &headers, "oidc", &slug, &format!("idp_error:{err}"));
+        audit_sso_login_failure(
+            &state,
+            &headers,
+            client_ip,
+            "oidc",
+            &slug,
+            &format!("idp_error:{err}"),
+        );
         return (
             StatusCode::BAD_REQUEST,
             format!("{{\"error\":\"{err}\",\"error_description\":\"{desc}\"}}"),
@@ -352,7 +376,14 @@ pub async fn oidc_callback(
                 .find_map(|p| p.trim().strip_prefix("oauth_state=").map(str::to_string))
         });
     if cookie_state.as_deref() != Some(state_key.as_str()) {
-        audit_sso_login_failure(&state, &headers, "oidc", &slug, "invalid_state_binding");
+        audit_sso_login_failure(
+            &state,
+            &headers,
+            client_ip,
+            "oidc",
+            &slug,
+            "invalid_state_binding",
+        );
         return (
             StatusCode::BAD_REQUEST,
             "{\"error\":\"Invalid or missing state binding\"}",
@@ -374,25 +405,104 @@ pub async fn oidc_callback(
     .await
     {
         Ok((access, refresh)) => {
-            audit_sso_login_success(&state, &headers, "oidc", &slug, &access);
+            audit_sso_login_success(&state, &headers, client_ip, "oidc", &slug, &access);
             // M-3: redirect to the SPA with tokens in the URL fragment (never server-logged).
-            // The frontend OAuthCallback.svelte reads them from window.location.hash and
-            // immediately calls history.replaceState to remove them from the URL bar.
-            let redirect_url = format!(
-                "{}/#access_token={}&refresh_token={}",
-                state.base_url, access, refresh
-            );
-            axum::response::Redirect::to(&redirect_url).into_response()
+            Redirect::to(&sso_landing_url(&state.base_url, &access, &refresh)).into_response()
         }
         Err(e) => {
             tracing::error!("OIDC callback error for '{}': {e}", slug);
-            audit_sso_login_failure(&state, &headers, "oidc", &slug, "code_exchange_failed");
+            audit_sso_login_failure(
+                &state,
+                &headers,
+                client_ip,
+                "oidc",
+                &slug,
+                "code_exchange_failed",
+            );
             (StatusCode::UNAUTHORIZED, format!("{{\"error\":\"{e}\"}}")).into_response()
         }
     }
 }
 
+/// Where a completed SSO sign-in sends the browser: the SPA's
+/// `/oauth/callback` page (`OAuthCallback.svelte`), which reads the tokens from
+/// the fragment and immediately removes them from the URL bar. A fragment is
+/// never sent to a server, so the tokens stay out of access logs and `Referer`.
+fn sso_landing_url(base_url: &str, access: &str, refresh: &str) -> String {
+    format!(
+        "{}/oauth/callback#access_token={access}&refresh_token={refresh}",
+        base_url.trim_end_matches('/')
+    )
+}
+
 // ─── SAML flow ────────────────────────────────────────────────────────────────
+
+/// Cookie binding an SP-initiated SAML sign-in to the browser that started it.
+const SAML_STATE_COOKIE: &str = "saml_state";
+
+/// The `saml_state` cookie. The IdP returns the browser to the ACS with a
+/// cross-site POST, which a `SameSite=Lax` cookie does not accompany, so over
+/// HTTPS it is `SameSite=None; Secure`. Without secure cookies (local dev) it
+/// stays `Lax`, which still works when the IdP is same-site (e.g. `localhost`).
+fn saml_state_cookie(value: &str, max_age: u32, secure: bool) -> String {
+    let same_site = if secure { "None; Secure" } else { "Lax" };
+    format!(
+        "{SAML_STATE_COOKIE}={value}; HttpOnly; SameSite={same_site}; Path=/api/auth/saml; \
+         Max-Age={max_age}"
+    )
+}
+
+fn cookie_value(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|c| c.split(';'))
+        .find_map(|p| {
+            p.trim()
+                .strip_prefix(name)
+                .and_then(|r| r.strip_prefix('='))
+                .map(str::to_string)
+        })
+}
+
+/// GET /api/auth/saml/:slug/login — start an SP-initiated SAML sign-in.
+/// Redirects to the IdP's SSO URL with an AuthnRequest and binds the flow to
+/// this browser with the `saml_state` cookie.
+pub async fn saml_login(State(state): State<AppState>, Path(slug): Path<String>) -> Response {
+    let provider = match state.auth_db.get_oauth_provider_by_slug(&slug) {
+        Ok(Some(p)) if p.provider_type == "saml" && p.offers_login() => p,
+        Ok(_) => {
+            return (StatusCode::NOT_FOUND, "{\"error\":\"Provider not found\"}").into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{{\"error\":\"{e}\"}}"),
+            )
+                .into_response()
+        }
+    };
+
+    match begin_saml_flow(&provider, &state.base_url) {
+        Ok((url, relay_state)) => (
+            [(
+                header::SET_COOKIE,
+                saml_state_cookie(&relay_state, 600, state.secure_cookies),
+            )],
+            Redirect::temporary(&url),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("SAML login error for '{}': {e}", slug);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"Could not start the SAML sign-in\"}",
+            )
+                .into_response()
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct SamlAcsForm {
@@ -418,8 +528,11 @@ pub async fn saml_metadata(State(state): State<AppState>, Path(slug): Path<Strin
         }
     };
 
-    let acs_url = format!("{}/api/auth/saml/{}/acs", state.base_url, slug);
-    match generate_sp_metadata(&provider, &acs_url) {
+    match generate_sp_metadata(
+        &provider,
+        &sp_entity_id(&state.base_url, &slug),
+        &acs_url(&state.base_url, &slug),
+    ) {
         Ok(xml) => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "application/samlmetadata+xml")],
@@ -438,6 +551,7 @@ pub async fn saml_metadata(State(state): State<AppState>, Path(slug): Path<Strin
 pub async fn saml_acs(
     State(state): State<AppState>,
     Path(slug): Path<String>,
+    client_ip: ClientIp,
     headers: axum::http::HeaderMap,
     // `axum::Form` consumes the request body and so must be the LAST extractor.
     axum::Form(form): axum::Form<SamlAcsForm>,
@@ -445,7 +559,14 @@ pub async fn saml_acs(
     let provider = match state.auth_db.get_oauth_provider_by_slug(&slug) {
         Ok(Some(p)) if p.is_active && p.provider_type == "saml" => p,
         Ok(_) => {
-            audit_sso_login_failure(&state, &headers, "saml", &slug, "provider_not_found");
+            audit_sso_login_failure(
+                &state,
+                &headers,
+                client_ip,
+                "saml",
+                &slug,
+                "provider_not_found",
+            );
             return (StatusCode::NOT_FOUND, "{\"error\":\"Provider not found\"}").into_response();
         }
         Err(e) => {
@@ -457,30 +578,77 @@ pub async fn saml_acs(
         }
     };
 
-    let acs_url = format!("{}/api/auth/saml/{}/acs", state.base_url, slug);
+    // Login-CSRF defence: the RelayState must be the one this browser was given
+    // when it started the sign-in (see saml_login). Otherwise an attacker could
+    // deliver their own signed response to a victim's browser and sign the
+    // victim in as the attacker.
+    let relay_state = form.relay_state.as_deref().unwrap_or_default();
+    if relay_state.is_empty()
+        || cookie_value(&headers, SAML_STATE_COOKIE).as_deref() != Some(relay_state)
+    {
+        audit_sso_login_failure(
+            &state,
+            &headers,
+            client_ip,
+            "saml",
+            &slug,
+            "invalid_state_binding",
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            "{\"error\":\"Invalid or missing state binding\"}",
+        )
+            .into_response();
+    }
+    // The AuthnRequest this response must answer. Consumed here, so a response
+    // can be presented once; IdP-initiated responses have no request to answer.
+    let Some(request_id) = take_pending_request(relay_state, &slug) else {
+        audit_sso_login_failure(
+            &state,
+            &headers,
+            client_ip,
+            "saml",
+            &slug,
+            "unknown_request",
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            "{\"error\":\"Unknown or expired sign-in request\"}",
+        )
+            .into_response();
+    };
 
     match complete_saml_flow(
         &form.saml_response,
+        &request_id,
         &provider,
-        &acs_url,
+        &state.base_url,
         &state.auth_db,
         &state.jwt_config,
     )
     .await
     {
         Ok((access, refresh)) => {
-            audit_sso_login_success(&state, &headers, "saml", &slug, &access);
-            Json(serde_json::json!({
-                "access_token": access,
-                "refresh_token": refresh,
-                "token_type": "Bearer",
-                "relay_state": form.relay_state,
-            }))
-            .into_response()
+            audit_sso_login_success(&state, &headers, client_ip, "saml", &slug, &access);
+            (
+                [(
+                    header::SET_COOKIE,
+                    saml_state_cookie("", 0, state.secure_cookies),
+                )],
+                Redirect::to(&sso_landing_url(&state.base_url, &access, &refresh)),
+            )
+                .into_response()
         }
         Err(e) => {
             tracing::error!("SAML ACS error for '{}': {e}", slug);
-            audit_sso_login_failure(&state, &headers, "saml", &slug, "assertion_rejected");
+            audit_sso_login_failure(
+                &state,
+                &headers,
+                client_ip,
+                "saml",
+                &slug,
+                "assertion_rejected",
+            );
             (StatusCode::UNAUTHORIZED, format!("{{\"error\":\"{e}\"}}")).into_response()
         }
     }

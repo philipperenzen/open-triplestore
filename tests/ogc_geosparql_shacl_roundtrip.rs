@@ -28,15 +28,13 @@ const EXAMPLES: &str = "tests/fixtures/ogc-geosparql/examples";
 /// Example files whose verdict currently deviates from the OGC oracle, with the
 /// engine gap they sit behind. Keep sorted; the ratchet asserts both directions.
 const KNOWN_DEVIATIONS: &[(&str, &str)] = &[
-    // Empirical baseline: 46/48 match the OGC oracle — see docs/conformance/geosparql.md.
+    // Empirical baseline: 47/48 match the OGC oracle — see docs/conformance/geosparql.md.
     // (S04-invalid-01/02 fixed by the typed-term SHACL engine refactor: node-level
-    // datatype/lexical-form checks now see the focus literal's datatype.)
+    // datatype/lexical-form checks now see the focus literal's datatype. S21-invalid
+    // fixed when sh:sparql began pre-binding blank-node focus nodes as terms: its
+    // focus is the blank-node geometry, whose constraint used to be skipped.)
     (
         "S18-invalid.ttl",
-        "validator sh:sparql constraint subtlety not caught",
-    ),
-    (
-        "S21-invalid.ttl",
         "validator sh:sparql constraint subtlety not caught",
     ),
 ];

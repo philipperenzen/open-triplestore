@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  OWL 2 DL reasoner sidecar for Open Triplestore: OWL API 5 + HermiT behind
+  the sidecar wire protocol v1 (docs/owl2-dl.md, "Reasoner sidecar").
+
+  Build:   mvn -B package            (runs the unit tests)
+  Run:     OTS_REASONER_TOKEN=... java -jar target/ots-reasoner.jar
+  Image:   docker build -f sidecars/reasoner/Dockerfile .   (from the repo root)
+
+  The jars in target/lib/ stay separate files on the class path, so a user can
+  replace HermiT or the OWL API with a modified version (LGPL-3.0 section 4).
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>org.opentriplestore</groupId>
+  <artifactId>ots-reasoner</artifactId>
+  <version>1.0.0</version>
+  <packaging>jar</packaging>
+  <name>Open Triplestore OWL 2 DL reasoner sidecar</name>
+
+  <licenses>
+    <license>
+      <name>AGPL-3.0 with the Commons Clause License Condition v1.0 (see LICENSE in the repository root)</name>
+    </license>
+  </licenses>
+
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- The version HermiT 1.4.5.519 is built against: with 5.1.20, HermiT's
+         normalisation of a top-bottom inclusion builds an empty union that
+         newer OWL API releases reject (NullPointerException). -->
+    <owlapi.version>5.1.9</owlapi.version>
+    <hermit.version>1.4.5.519</hermit.version>
+    <jackson.version>2.18.2</jackson.version>
+    <junit.version>5.11.4</junit.version>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <!-- One Jackson version: the OWL API brings an older jackson-core. -->
+      <dependency>
+        <groupId>com.fasterxml.jackson</groupId>
+        <artifactId>jackson-bom</artifactId>
+        <version>${jackson.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <dependency>
+      <groupId>net.sourceforge.owlapi</groupId>
+      <artifactId>owlapi-distribution</artifactId>
+      <version>${owlapi.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>net.sourceforge.owlapi</groupId>
+      <artifactId>org.semanticweb.hermit</artifactId>
+      <version>${hermit.version}</version>
+      <exclusions>
+        <!-- Only HermiT's command-line front end uses it. -->
+        <exclusion>
+          <groupId>gnu.getopt</groupId>
+          <artifactId>java-getopt</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <!-- HermiT's datatype handling uses javax.xml.bind (hexBinary, base64Binary),
+         which Java 11+ no longer bundles. 2.3.x keeps the javax package name. -->
+    <dependency>
+      <groupId>jakarta.xml.bind</groupId>
+      <artifactId>jakarta.xml.bind-api</artifactId>
+      <version>2.3.3</version>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>${jackson.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-nop</artifactId>
+      <version>1.7.36</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>ots-reasoner</finalName>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.2</version>
+      </plugin>
+      <!-- Runtime jars as separate files in target/lib/ (see the header). -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <version>3.8.1</version>
+        <executions>
+          <execution>
+            <id>copy-lib</id>
+            <phase>package</phase>
+            <goals><goal>copy-dependencies</goal></goals>
+            <configuration>
+              <includeScope>runtime</includeScope>
+              <outputDirectory>${project.build.directory}/lib</outputDirectory>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.4.2</version>
+        <configuration>
+          <archive>
+            <manifest>
+              <mainClass>org.opentriplestore.reasoner.Main</mainClass>
+              <addClasspath>true</addClasspath>
+              <classpathPrefix>lib/</classpathPrefix>
+            </manifest>
+            <manifestEntries>
+              <Implementation-Version>${project.version}</Implementation-Version>
+            </manifestEntries>
+          </archive>
+        </configuration>
+      </plugin>
+      <!-- target/generated-sources/license/THIRD-PARTY.txt: every runtime jar
+           with the licence its POM declares (shipped in the image). -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>license-maven-plugin</artifactId>
+        <version>2.4.0</version>
+        <executions>
+          <execution>
+            <id>third-party</id>
+            <phase>package</phase>
+            <goals><goal>add-third-party</goal></goals>
+            <configuration>
+              <excludedScopes>test,provided,system</excludedScopes>
+              <thirdPartyFilename>THIRD-PARTY.txt</thirdPartyFilename>
+              <fileTemplate>/org/codehaus/mojo/license/third-party-file-groupByLicense.ftl</fileTemplate>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

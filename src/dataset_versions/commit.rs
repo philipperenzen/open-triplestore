@@ -362,6 +362,12 @@ pub async fn validate_and_commit(
     registry::insert_version(&state.store, &state.base_url, &record).map_err(AppError::from)?;
     registry::update_latest_draft(&state.store, &state.base_url, &dataset.id, &version)
         .map_err(AppError::from)?;
+    crate::rdf_patch_log::on_version_cut(
+        &state.auth_db,
+        &state.base_url,
+        &record,
+        Some(&user.user_id),
+    );
     // Snapshot the validation layer alongside the committed data (best-effort).
     if let Err(e) = crate::shacl_studio::bindings::snapshot_dataset_bindings(
         &state.store,

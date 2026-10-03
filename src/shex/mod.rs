@@ -19,4 +19,4 @@ pub mod schema;
 pub mod validator;
 
 pub use parser::parse_shexc;
-pub use validator::validate;
+pub use validator::{validate_in, GraphScope};
