@@ -74,6 +74,10 @@ minted at `POST /api/auth/tokens`. Send it as `Authorization: Bearer <token>`.",
         (name = "LLM", description = "Natural-language → SPARQL assistance and feedback"),
         (name = "Linked Data", description = "IRI dereferencing and VoID/DCAT discovery"),
         (name = "LDP", description = "Linked Data Platform container and resource interaction"),
+        (name = "Geo", description = "Map and 3D-viewer feeds, geo capability probes and 3D Tiles"),
+        (name = "OGC API Features", description = "OGC API – Features Part 1 (Core): each readable dataset with geometry is a collection of GeoJSON features"),
+        (name = "OIDC Provider", description = "The built-in OpenID Connect provider for client apps: discovery, keys, token, userinfo and logout"),
+        (name = "Docs", description = "In-app documentation pages"),
     ),
     modifiers(&SecurityAddon),
     components(
@@ -215,6 +219,8 @@ impl utoipa::Modify for SecurityAddon {
 }
 
 /// Build the OpenAPI spec with manually-described paths for every endpoint.
+/// `tests::spec_documents_every_mounted_route` holds it to the router: a new
+/// `.route(...)` needs an operation here or an `UNDOCUMENTED_ROUTES` entry.
 pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     let mut spec = ApiDoc::openapi();
 
@@ -452,7 +458,9 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             // method appears once per path, so there's nothing to clobber).
             item.merge_operations(PathItem::new(method, b.build()));
         }
-        paths.paths.insert(p, item);
+        let previous = paths.paths.insert(p, item);
+        // A second mount of one path would silently replace the first.
+        debug_assert!(previous.is_none(), "path mounted twice in the OpenAPI spec");
     }
 
     let paths = &mut spec.paths;
@@ -601,6 +609,49 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
         )],
     );
 
+    mount(paths, "/livez", vec![
+        (M::Get, o("Management", "Liveness probe",
+            "Answers 200 as long as the process serves HTTP; never touches the store, so a slow query cannot fail it. Use `/health` for store counters.",
+            vec![], vec![("200", "Alive")], false)),
+    ]);
+    mount(paths, "/api/plugins", vec![
+        (M::Get, o("Management", "List compiled-in plugins",
+            "Every plugin compiled into this binary, with name and version. Each plugin's own routes live under `/ext/{name}` and are described by the plugin, not by this document.",
+            vec![], vec![("200", "Array of `{name, version}`")], false)),
+    ]);
+    mount(paths, "/api/docs", vec![
+        (M::Get, o("Docs", "List documentation pages",
+            "The in-app documentation pages: the built-in guides plus pages admins added. Admin-only pages are left out for everyone but admins.",
+            vec![], vec![("200", "Array of pages")], false)),
+    ]);
+    mount(paths, "/api/docs/:slug", vec![
+        (M::Get, o("Docs", "Get a documentation page",
+            "One page by slug, with its Markdown body. An admin-only page answers 404 to non-admins, so its existence is not revealed.",
+            vec![], vec![("200", "The page"), ("404", "No such page, or not visible to the caller")], false)),
+        (M::Put, ob("Admin", "Create or replace a documentation page",
+            "Upsert the page at this slug (admin only). Editing a built-in page keeps the edit across restarts.",
+            vec![], json_body(ObjectBuilder::new()
+                .property("title", ObjectBuilder::new().schema_type(Type::String))
+                .property("category", ObjectBuilder::new().schema_type(Type::String))
+                .property("body_md", ObjectBuilder::new().schema_type(Type::String).description(Some("Markdown body.")))
+                .property("admin_only", ObjectBuilder::new().schema_type(Type::Boolean))
+                .property("sort_order", ObjectBuilder::new().schema_type(Type::Integer))
+                .required("title"),
+                json!({"title": "Loading data", "category": "Guides", "body_md": "# Loading data\n…", "admin_only": false})),
+            vec![("200", "The saved page"), ("401", "Authentication required"), ("403", "Admin role required")], true)),
+        (M::Post, ob("Admin", "Create or replace a documentation page (POST)",
+            "Same as PUT on this path.",
+            vec![], json_body(ObjectBuilder::new()
+                .property("title", ObjectBuilder::new().schema_type(Type::String))
+                .property("body_md", ObjectBuilder::new().schema_type(Type::String))
+                .required("title"),
+                json!({"title": "Loading data", "body_md": "# Loading data\n…"})),
+            vec![("200", "The saved page"), ("401", "Authentication required"), ("403", "Admin role required")], true)),
+        (M::Delete, o("Admin", "Delete a documentation page",
+            "Remove the page (admin only). A deleted built-in page is seeded again on the next start.",
+            vec![], vec![("204", "Deleted"), ("401", "Authentication required"), ("403", "Admin role required")], true)),
+    ]);
+
     // ═══════════════════════════════════════════════════════════════════════
     // Browse
     // ═══════════════════════════════════════════════════════════════════════
@@ -692,6 +743,18 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             ),
         )],
     );
+
+    mount(paths, "/api/browse/facets", vec![
+        (M::Get, o("Browse", "Facet counts",
+            "Classes, properties and named graphs present in the browse scope, with counts. Takes the same scope parameters as `/api/browse/triples`, so the facets always match what the caller can browse.",
+            vec![qp("graph", false, "Single graph IRI; wins over the other scopes"),
+                 qp("dataset_id", false, "Dataset id scope"),
+                 qp("dataset_ids", false, "Comma-separated dataset ids"),
+                 qp("org_id", false, "Organisation id scope"),
+                 qp("org_ids", false, "Comma-separated organisation ids"),
+                 qp("versions", false, "Per-dataset version pins")],
+            vec![("200", "Classes, properties and graphs with counts")], false)),
+    ]);
 
     // ═══════════════════════════════════════════════════════════════════════
     // Datasets
@@ -945,6 +1008,157 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             ),
         ],
     );
+
+    mount(paths, "/api/datasets/:dataset_id/permissions/me", vec![
+        (M::Get, o("Datasets", "The caller's access to a dataset",
+            "The caller's effective role on one dataset through the whole ACL stack (system role, ownership, organisation and group membership, grants, public readability), so a client can ask \"may I write this?\" without re-deriving the rules. Anonymous callers get the public answer. A dataset the caller may not see answers 404, not 403, so ids cannot be probed.",
+            vec![], vec![("200", "`{dataset_id, role, read, write, manage}`"), ("404", "Dataset not found or not visible")], false)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/conformance", vec![
+        (M::Get, o("Datasets", "Conformance layer",
+            "Which graphs of the dataset play which role, which model versions and shape graphs it declares conformance to (`dct:conformsTo`), and the graphs reasoning reads and the shapes validation applies as a result.",
+            vec![], vec![("200", "Conformance layer JSON"), ("404", "Dataset not found or not visible")], false)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/provenance", vec![
+        (M::Get, o("Datasets", "PROV-O provenance",
+            "The dataset's provenance trail as one PROV-O document in Turtle: the dataset and its graphs as entities, the commits that changed them as activities, their agents, and the dataset's versions. Graph-level, not per triple.",
+            vec![], vec![("200", "PROV-O (text/turtle)"), ("404", "Dataset not found or not visible")], false)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/properties/state", vec![
+        (M::Post, ob("Datasets", "Record a property state",
+            "Record a new value of a time-evolving property as an `opm:PropertyState` in the dataset's states graph, and set it as the current value in the data graph. Needs write access to the dataset. See docs/datasets.md (Time-evolving properties).",
+            vec![], json_body(ObjectBuilder::new()
+                .property("entity", ObjectBuilder::new().schema_type(Type::String).description(Some("Subject IRI.")))
+                .property("property", ObjectBuilder::new().schema_type(Type::String).description(Some("Property IRI.")))
+                .property("value", ObjectBuilder::new().schema_type(Type::String))
+                .property("datatype", ObjectBuilder::new().schema_type(Type::String).description(Some("XSD datatype (`xsd:decimal` or a full IRI), or `iri` for an IRI value.")))
+                .property("language", ObjectBuilder::new().schema_type(Type::String))
+                .property("graph", ObjectBuilder::new().schema_type(Type::String).description(Some("Data graph holding the current value; defaults to the dataset's instances graph.")))
+                .property("valid_from", ObjectBuilder::new().schema_type(Type::String).description(Some("When the value became true; default now.")))
+                .property("reliability", ObjectBuilder::new().schema_type(Type::String).description(Some("`assumed` | `confirmed` | `derived`.")))
+                .property("note", ObjectBuilder::new().schema_type(Type::String))
+                .required("entity").required("property").required("value"),
+                json!({"entity": "https://example.org/bridge/b1", "property": "https://example.org/loadRating", "value": "45", "valid_from": "2026-01-01", "reliability": "confirmed", "note": "inspection"})),
+            vec![("200", "The recorded state"), ("400", "Invalid body"), ("401", "Authentication required"), ("403", "Write access required")], true)),
+    ]);
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/history",
+        vec![(
+            M::Get,
+            o(
+                "Datasets",
+                "Property history",
+                "Every recorded state of one property of one entity, newest first.",
+                vec![
+                    qp("entity", true, "Subject IRI"),
+                    qp("property", true, "Property IRI"),
+                ],
+                vec![
+                    ("200", "Array of states"),
+                    ("404", "Dataset not found or not visible"),
+                ],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/as-of",
+        vec![(
+            M::Get,
+            o(
+                "Datasets",
+                "Property value as of a time",
+                "The state of one property of one entity that was valid at `at`.",
+                vec![
+                    qp("entity", true, "Subject IRI"),
+                    qp("property", true, "Property IRI"),
+                    qp("at", true, "Point in time (xsd:date or xsd:dateTime)"),
+                ],
+                vec![
+                    ("200", "The state valid at that time"),
+                    ("400", "`at` missing or not a date/dateTime"),
+                    ("404", "Dataset not visible, or no state valid at that time"),
+                ],
+                false,
+            ),
+        )],
+    );
+    mount(paths, "/api/datasets/:dataset_id/patch", vec![
+        (M::Post, o("Datasets", "Apply an RDF Patch",
+            "Apply an RDF Patch (`Content-Type: application/rdf-patch`; `A`/`D` quad lines, `PA`/`PD` prefixes, one `TX`…`TC` transaction, `TA` aborts) to the dataset's graphs atomically, as one commit. Every quad must name one of the dataset's graphs. Deleting a triple with a blank node is refused. Needs write access.",
+            vec![], vec![("200", "`{applied, id, added, removed}`"), ("400", "Invalid patch"), ("401", "Authentication required"), ("403", "Write access required"), ("404", "Dataset not found"), ("415", "Not application/rdf-patch")], true)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/entailment", vec![
+        (M::Get, o("Reasoning", "Dataset entailment settings",
+            "The dataset's entailment regime and mode, the identity (`owl:sameAs`) policy in force and where it comes from, and the graphs a run reads.",
+            vec![], vec![("200", "Entailment configuration"), ("404", "Dataset not found or not visible")], false)),
+        (M::Put, ob("Reasoning", "Set dataset entailment",
+            "Select a regime (`rdfs`, `owl2-rl`, `owl2-el`, `owl2-ql`, `owl2-dl`) and mode. In `materialize` mode the regime runs now and after every write to the dataset's graphs, into the dataset's own entailment graph; `off` clears that graph. Queries opt in with `?entailment_dataset=<id>`. Needs write access.",
+            vec![], json_body(ObjectBuilder::new()
+                .property("regime", ObjectBuilder::new().schema_type(Type::String))
+                .property("mode", ObjectBuilder::new().schema_type(Type::String).description(Some("`materialize` (default) | `off`.")))
+                .property("identity", ObjectBuilder::new().schema_type(Type::String).description(Some("`sameas-off` | `sameas-narrow` | `sameas-full`, or `inherit`. Omitted: unchanged.")))
+                .required("regime"),
+                json!({"regime": "owl2-rl", "mode": "materialize"})),
+            vec![("200", "The new configuration"), ("400", "Unknown regime or mode"), ("401", "Authentication required"), ("403", "Write access required"), ("404", "Dataset not found")], true)),
+    ]);
+    // A container archive as the request body.
+    fn zip_body() -> RequestBody {
+        RequestBodyBuilder::new()
+            .required(Some(Required::True))
+            .description(Some("The container archive (ZIP; an `.icdd` file is one)."))
+            .content(
+                "application/zip",
+                ContentBuilder::new()
+                    .schema(Some(ObjectBuilder::new().schema_type(Type::String).format(
+                        Some(utoipa::openapi::schema::SchemaFormat::KnownFormat(
+                            utoipa::openapi::schema::KnownFormat::Binary,
+                        )),
+                    )))
+                    .build(),
+            )
+            .build()
+    }
+    mount(paths, "/api/datasets/:dataset_id/containers/import", vec![
+        (M::Post, ob("Import", "Import a linked-document container",
+            "Import an ISO 21597-1 ICDD container (`?profile=icdd`, or detected from its `Index.rdf`). Internal, secured and encrypted documents become assets of the dataset (in folder `containers/<cid>`, sub-folders kept), a folder document becomes an asset sub-folder, an external document is recorded with its URL; linksets, RDF data documents and ontology resources become role-typed graphs, and the index a catalogue graph. Secured documents' checksums are verified (SHA-1/224/256/384/512); encrypted documents are kept as flagged opaque files; ISO's own `Container.rdf` / `Linkset.rdf` are recognised and not loaded. The response lists each document's kind, name, version, alternatives, parties and checksum status, the container's parties, and `validation` — the profile validator's report (`conforms`, `violations`, `warnings`, `findings[]` with `severity`, `code`, `message`, `focus`, `file`). A non-conformant container still imports what it can unless `strict=true`, which refuses it with 422 and the report. An index with several container descriptions is always refused. Needs write access and the `asset-archive` feature; body limit `OTS_MAX_UPLOAD_MB` (512 MB). See docs/containers.md.",
+            vec![qp("profile", false, "Container profile; `icdd` (default: detected)"),
+                 qp("strict", false, "`true`: refuse (422) a container the validator finds a violation in; nothing is stored")],
+            zip_body(),
+            vec![("201", "Import summary with the validation report"), ("400", "Empty body or not a readable archive"), ("401", "Authentication required"), ("403", "Write access required"), ("404", "Dataset not found, or unknown profile"), ("422", "No profile recognises the archive, the index is unreadable or has several container descriptions, or (strict=true) the container is not conformant — `{error, validation}`"), ("503", "The container carries documents but no object storage is configured")], true)),
+    ]);
+    mount(paths, "/api/containers/validate", vec![
+        (M::Post, ob("Import", "Validate a linked-document container",
+            "Validate an archive against a container profile without storing anything. For ICDD: Open Triplestore's own SHACL shapes for the Part 1 index and linksets (container description, documents, parties, links, link elements, identifiers — derived from the ontology restrictions, not ISO's annexes) plus structural checks (the root `Index.rdf`, the three folders, `Container.rdf` / `Linkset.rdf` in `Ontology resources/`, every listed file present at its path, duplicate names, path traversal, checksums, link elements naming listed documents, and no extension of the ICDD classes in a Part 1 container). Returns `{profile, conforms, violations, warnings, findings[]}`; `conforms` means no violation.",
+            vec![qp("profile", false, "Container profile; `icdd` (default: detected, else `icdd`)")],
+            zip_body(),
+            vec![("200", "Validation report"), ("400", "Empty body or not a readable archive"), ("401", "Authentication required"), ("404", "Unknown profile")], true)),
+    ]);
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/containers/export",
+        vec![(
+            M::Get,
+            o(
+                "Import",
+                "Export as a linked-document container",
+                "The dataset as an ICDD container (`<dataset>.icdd`, a ZIP): `Index.rdf` (RDF/XML, `ICDD-Part1-Container`) with typed parties, every document's `ct:name`, `ct:filename` relative to `Payload documents/` (asset folders kept, names made unique), `ct:filetype`, `ct:format` and `ct:belongsToContainer`; linkset graphs as RDF/XML under `Payload triples/`; other data graphs as RDF documents under `Payload documents/`; model graphs under `Ontology resources/`, plus ISO's `Container.rdf` and `Linkset.rdf` when the operator sets `OTS_ICDD_ONTOLOGY_DIR`. Documents an earlier import brought in keep their IRIs, names, versions, alternatives, parties and kinds. Private graphs and non-public assets only reach callers who may see them. The export runs the validator on itself: `X-Container-Conforms`, `X-Container-Validation` (`violations=…; warnings=…`) and `X-Container-Findings` (finding codes; `ontology-resource-missing` when the ISO files are not configured — not Part 1-conformant).",
+                vec![qp("profile", false, "Container profile; `icdd` (default)")],
+                vec![
+                    ("200", "The container (application/zip)"),
+                    ("404", "Dataset not found or not visible, or unknown profile"),
+                ],
+                false,
+            ),
+        )],
+    );
+    mount(paths, "/api/datasets/:dataset_id/form-manifest", vec![
+        (M::Get, o("Validation", "Form manifest",
+            "Everything an external form platform needs to load the dataset and its SHACL shapes itself: dataset metadata, prefixes, the effective shapes (Turtle and SHACLC) with their target classes, the data graph IRIs and the SPARQL and Graph Store endpoints. Anonymous for a public dataset; private graphs the caller may not read are left out.",
+            vec![], vec![("200", "Form manifest JSON"), ("403", "Access denied"), ("404", "Dataset not found")], false)),
+    ]);
 
     // ═══════════════════════════════════════════════════════════════════════
     // Access Control
@@ -1403,6 +1617,23 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     true,
                 ),
             ),
+            (
+                M::Delete,
+                o(
+                    "Versions",
+                    "Delete version",
+                    "Remove a version and drop its snapshot graphs. A published version is refused with 409 unless `?force=true`; deprecate it first.",
+                    vec![qp("force", false, "`true` to delete a published version")],
+                    vec![
+                        ("200", "`{deleted, graphs_dropped}`"),
+                        ("401", "Authentication required"),
+                        ("403", "Write access required"),
+                        ("404", "Version not found"),
+                        ("409", "Published version; force required"),
+                    ],
+                    true,
+                ),
+            ),
         ],
     );
     mount(
@@ -1483,6 +1714,22 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     mount(paths, "/api/datasets/validate-and-commit", vec![
         (M::Post, o("Versions", "Validate and commit", "Validate a proposed dataset change and, if it passes, commit it as a new version atomically.",
             vec![], vec![("200", "Committed"), ("400", "Validation failed"), ("401", "Authentication required")], true)),
+    ]);
+
+    mount(paths, "/api/datasets/:dataset_id/versions/gc", vec![
+        (M::Post, ob("Versions", "Collect old versions",
+            "Retention: keep the newest `keep` non-published versions and delete the rest with their snapshot graphs. Published versions are never collected; deprecate and delete them explicitly.",
+            vec![], json_body(ObjectBuilder::new()
+                .property("keep", ObjectBuilder::new().schema_type(Type::Integer))
+                .required("keep"),
+                json!({"keep": 10})),
+            vec![("200", "`{kept, deleted}`"), ("401", "Authentication required"), ("403", "Write access required")], true)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/versions/:ver/diff/:other", vec![
+        (M::Get, o("Versions", "Diff two versions",
+            "The per-graph triple delta from `ver` to `other`, where `other` is another version or `live` (the current graphs). `added`/`removed` count from `ver`'s point of view. `?format=rdf-patch` (or `Accept: application/rdf-patch`) returns the diff as an RDF Patch that turns `ver` into `other`.",
+            vec![qp("format", false, "`rdf-patch` for an RDF Patch document")],
+            vec![("200", "Per-graph delta (JSON) or an RDF Patch"), ("404", "Version not found")], false)),
     ]);
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -3091,6 +3338,17 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
         )],
     );
 
+    mount(paths, "/api/datasets/:dataset_id/assets/:asset_id/download", vec![
+        (M::Get, o("Assets", "Download an asset (anonymous-capable)",
+            "The asset's bytes. The dataset's visibility decides: a public dataset's files, such as the IFC file behind a 3D model, download without a session; a private one needs read access.",
+            vec![], vec![("200", "The file"), ("403", "Access denied"), ("404", "Dataset or asset not found")], false)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/assets/:asset_id/metadata", vec![
+        (M::Get, o("Assets", "Asset metadata",
+            "The typed metadata derived on upload, as JSON: dimensions, duration, page/point/row counts, checksum, geographic extent, thumbnail and the like. The JSON view of what `/datasets/{dataset_id}/assets/{asset_id}` serves as RDF.",
+            vec![], vec![("200", "Metadata JSON"), ("403", "Access denied"), ("404", "Asset not found")], false)),
+    ]);
+
     // ═══════════════════════════════════════════════════════════════════════
     // Import
     // ═══════════════════════════════════════════════════════════════════════
@@ -3117,6 +3375,13 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             ),
         )],
     );
+
+    mount(paths, "/api/datasets/:dataset_id/ingest/cityjson", vec![
+        (M::Post, o("Import", "Ingest CityJSON",
+            "Convert a CityJSON document (multipart field `file`; optional `target_graph`, and `public=true` to make the stored source asset public) to RDF and load it into the dataset. `?preview=true` converts without writing and returns stats and sample N-Triples. Needs write access.",
+            vec![qp("preview", false, "`true` for a dry run")],
+            vec![("200", "`{graph, asset_id, asset_url, stats}`"), ("400", "Invalid CityJSON"), ("401", "Authentication required"), ("403", "Write access required")], true)),
+    ]);
 
     // ═══════════════════════════════════════════════════════════════════════
     // Catalog
@@ -3646,6 +3911,28 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                     "Users with access to the entry.",
                     vec![],
                     vec![("200", "Array of collaborators")],
+                    false,
+                ),
+            )],
+        );
+        mount(
+            paths,
+            &format!("{base}/:id/dependents"),
+            vec![(
+                M::Get,
+                o(
+                    tag,
+                    &format!("List dependent datasets ({tag})"),
+                    "The datasets that declare conformance to this entry, each with the version \
+                     it is pinned to, the version in effect, whether a newer version has been \
+                     published since (`update_available`) and its own latest published version. \
+                     Only datasets the caller may read are listed; an entry the caller may not \
+                     see answers 404.",
+                    vec![],
+                    vec![
+                        ("200", "`{model_id, latest_published, datasets}`"),
+                        ("404", "Not found or not visible"),
+                    ],
                     false,
                 ),
             )],
@@ -4568,6 +4855,51 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
         )],
     );
 
+    mount(paths, "/api/me/dataset-usage", vec![
+        (M::Get, o("Auth", "My dataset usage",
+            "The caller's own dataset usage, per dataset (count, last used), most used first. Only the caller's activity.",
+            vec![], vec![("200", "Array of usage rows"), ("401", "Authentication required")], true)),
+    ]);
+    mount(paths, "/.well-known/openid-configuration", vec![
+        (M::Get, o("OIDC Provider", "OpenID Provider discovery",
+            "OpenID Connect discovery document of the built-in provider: issuer, endpoints, supported scopes, grant types and PKCE methods. See docs/oidc-provider.md.",
+            vec![], vec![("200", "Discovery document")], false)),
+    ]);
+    mount(
+        paths,
+        "/oauth/jwks",
+        vec![(
+            M::Get,
+            o(
+                "OIDC Provider",
+                "JSON Web Key Set",
+                "The public keys that verify ID tokens and access tokens the provider issues.",
+                vec![],
+                vec![("200", "JWKS")],
+                false,
+            ),
+        )],
+    );
+    mount(paths, "/oauth/token", vec![
+        (M::Post, o("OIDC Provider", "Token endpoint",
+            "RFC 6749 token endpoint, form-encoded: `grant_type=authorization_code` (with `code`, `redirect_uri`, `client_id`, and `code_verifier` for PKCE or `client_secret` for a confidential client) or `grant_type=refresh_token`. Rate-limited.",
+            vec![], vec![("200", "`{access_token, token_type, expires_in, id_token, refresh_token}`"), ("400", "OAuth error (`invalid_grant`, `invalid_client`, …)")], false)),
+    ]);
+    mount(paths, "/oauth/userinfo", vec![
+        (M::Get, o("OIDC Provider", "UserInfo",
+            "Standard claims for the user of a provider-issued access token, sent as `Authorization: Bearer <access_token>`.",
+            vec![], vec![("200", "Claims"), ("401", "Missing or invalid access token")], false)),
+    ]);
+    mount(paths, "/oauth/logout", vec![
+        (M::Get, o("OIDC Provider", "End session",
+            "The `end_session_endpoint`: ends the store's own browser session, then redirects to `post_logout_redirect_uri` when it is on a registered client's origin (echoing `state`), else to the sign-in page.",
+            vec![qp("client_id", false, "Client id"),
+                 qp("post_logout_redirect_uri", false, "Where to send the browser afterwards"),
+                 qp("state", false, "Echoed back on the redirect"),
+                 qp("id_token_hint", false, "Accepted and ignored")],
+            vec![("302", "Redirect"), ("400", "Invalid redirect")], false)),
+    ]);
+
     // ═══════════════════════════════════════════════════════════════════════
     // Users
     // ═══════════════════════════════════════════════════════════════════════
@@ -5290,35 +5622,6 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             ),
         )],
     );
-    for (path, what) in [
-        ("/api/replication/raft/vote", "a vote request"),
-        ("/api/replication/raft/append", "an append-entries request"),
-        (
-            "/api/replication/raft/snapshot",
-            "an install-snapshot chunk",
-        ),
-    ] {
-        mount(
-            paths,
-            path,
-            vec![(
-                M::Post,
-                o(
-                    "Replication",
-                    "Raft RPC (cluster members only)",
-                    &format!("The Raft transport between the members of a consensus cluster: {what}, as JSON, authenticated by the shared `X-Cluster-Secret`. Not a user route: 404 on a node that is not a cluster member, 401 without the secret, 503 while the member starts. See docs/operations.md (Consensus)."),
-                    vec![],
-                    vec![
-                        ("200", "The Raft response"),
-                        ("401", "Cluster secret missing or wrong"),
-                        ("404", "Not a cluster member"),
-                        ("503", "Member starting"),
-                    ],
-                    false,
-                ),
-            )],
-        );
-    }
     mount(
         paths,
         "/api/admin/acl/endpoints",
@@ -5612,6 +5915,86 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
         ],
     );
 
+    mount(paths, "/api/admin/dataset-usage", vec![
+        (M::Get, o("Admin", "Dataset usage across users",
+            "Dataset usage aggregated over every user. Private activity data: super_admin only.",
+            vec![qp("since", false, "Only usage after this timestamp"), qp("limit", false, "Max rows")],
+            vec![("200", "Array of usage rows"), ("401", "Authentication required"), ("403", "super_admin required")], true)),
+    ]);
+    mount(paths, "/api/admin/settings/guest-registration", vec![
+        (M::Get, o("Admin", "Guest registration setting",
+            "Whether guest self-registration is on, with the current guest counts.",
+            vec![], vec![("200", "Setting and counts"), ("401", "Authentication required"), ("403", "Admin role required")], true)),
+        (M::Put, ob("Admin", "Turn guest registration on or off",
+            "Turning it off deactivates every active guest account; turning it back on reactivates exactly those. Guests an admin deactivated one by one are left alone.",
+            vec![], json_body(ObjectBuilder::new()
+                .property("enabled", ObjectBuilder::new().schema_type(Type::Boolean))
+                .required("enabled"),
+                json!({"enabled": false})),
+            vec![("200", "The new setting"), ("401", "Authentication required"), ("403", "Admin role required")], true)),
+    ]);
+    mount(paths, "/api/admin/oauth-clients", vec![
+        (M::Get, o("Admin", "List OIDC clients",
+            "Every relying-party client registered with the built-in OIDC provider. Secrets never leave the server; only `has_secret` is reported.",
+            vec![], vec![("200", "Array of clients"), ("401", "Authentication required"), ("403", "Admin role required")], true)),
+        (M::Post, ob("Admin", "Create or update an OIDC client",
+            "Register a client app or update one by `client_id`. A public client uses PKCE; a confidential one (`public: false`) also needs a `secret`, which is kept when omitted on update.",
+            vec![], json_body(ObjectBuilder::new()
+                .property("client_id", ObjectBuilder::new().schema_type(Type::String))
+                .property("name", ObjectBuilder::new().schema_type(Type::String))
+                .property("redirect_uris", ArrayBuilder::new().items(ObjectBuilder::new().schema_type(Type::String)))
+                .property("public", ObjectBuilder::new().schema_type(Type::Boolean).description(Some("Default true.")))
+                .property("secret", ObjectBuilder::new().schema_type(Type::String))
+                .required("client_id").required("name").required("redirect_uris"),
+                json!({"client_id": "viewer", "name": "Viewer app", "redirect_uris": ["https://viewer.example.org/callback"], "public": true})),
+            vec![("200", "The saved client"), ("400", "Invalid client"), ("401", "Authentication required"), ("403", "Admin role required")], true)),
+    ]);
+    mount(
+        paths,
+        "/api/admin/oauth-clients/:client_id",
+        vec![(
+            M::Delete,
+            o(
+                "Admin",
+                "Delete an OIDC client",
+                "Remove the client and revoke its outstanding refresh tokens.",
+                vec![],
+                vec![
+                    ("200", "`{deleted}`"),
+                    ("401", "Authentication required"),
+                    ("403", "Admin role required"),
+                    ("404", "No such client"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(paths, "/api/admin/prefixes", vec![
+        (M::Get, o("Admin", "List prefix overrides",
+            "The prefixes this deployment has decided on, which win over the platform overlay, installed bundles and the community snapshot.",
+            vec![], vec![("200", "Array of overrides"), ("401", "Authentication required"), ("403", "Admin role required")], true)),
+        (M::Post, ob("Admin", "Claim a prefix",
+            "Claim a shorthand for a namespace. A label that already has an override is refused with 409 and what it resolves to now; use PUT to repoint it.",
+            vec![], json_body(ObjectBuilder::new()
+                .property("label", ObjectBuilder::new().schema_type(Type::String))
+                .property("namespace", ObjectBuilder::new().schema_type(Type::String))
+                .required("label").required("namespace"),
+                json!({"label": "ex", "namespace": "https://example.org/ns#"})),
+            vec![("201", "Created"), ("400", "Invalid label or namespace"), ("401", "Authentication required"), ("403", "Admin role required"), ("409", "Label already overridden")], true)),
+    ]);
+    mount(paths, "/api/admin/prefixes/:label", vec![
+        (M::Put, ob("Admin", "Set or repoint a prefix",
+            "Set the namespace of a shorthand. 201 when new, 200 when it repointed one.",
+            vec![], json_body(ObjectBuilder::new()
+                .property("namespace", ObjectBuilder::new().schema_type(Type::String))
+                .required("namespace"),
+                json!({"namespace": "https://example.org/ns#"})),
+            vec![("200", "Repointed"), ("201", "Created"), ("400", "Invalid label or namespace"), ("401", "Authentication required"), ("403", "Admin role required")], true)),
+        (M::Delete, o("Admin", "Drop a prefix override",
+            "Drop this deployment's override. The prefix falls back to the platform overlay, an installed bundle's seeds or the community snapshot.",
+            vec![], vec![("204", "Dropped"), ("401", "Authentication required"), ("403", "Admin role required"), ("404", "No override for this label")], true)),
+    ]);
+
     // ═══════════════════════════════════════════════════════════════════════
     // LLM
     // ═══════════════════════════════════════════════════════════════════════
@@ -5706,6 +6089,123 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
     );
 
     // ═══════════════════════════════════════════════════════════════════════
+    // Geo, 3D Tiles and OGC API – Features
+    // ═══════════════════════════════════════════════════════════════════════
+    mount(paths, "/api/datasets/:dataset_id/viewer-feed", vec![
+        (M::Get, o("Geo", "Viewer feed",
+            "Per-element geometry, reprojected to EPSG:4326/3857, plus references to 3D model files (glTF, IFC, …), resolved from the BOT/OMG/FOG/GeoSPARQL layering. Feeds the map and 3D viewers. Anonymous for a public dataset.",
+            vec![qp("root", false, "Restrict to this object IRI and the elements it directly contains"),
+                 qp("located", false, "`true` for coordinate-bearing elements only (the 2D map's subset)"),
+                 qp("lang", false, "Preferred label language")],
+            vec![("200", "Feed JSON"), ("403", "Access denied"), ("404", "Dataset not found")], false)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/geo-stats", vec![
+        (M::Get, o("Geo", "Geo capability of a dataset",
+            "Whether the dataset has mappable coordinates, loadable 3D models and volumetric geometry: the cheap probe the UI uses to offer a map or 3D view.",
+            vec![], vec![("200", "Capability flags"), ("403", "Access denied"), ("404", "Dataset not found")], false)),
+    ]);
+    mount(paths, "/api/geo-stats", vec![
+        (M::Get, o("Geo", "Geo capability across datasets",
+            "The same capability flags OR-aggregated over several datasets in one probe. Datasets the caller cannot read, or that do not exist, are skipped.",
+            vec![qp("datasets", false, "Comma-separated dataset ids")],
+            vec![("200", "Capability flags")], false)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/3dtiles/tileset.json", vec![
+        (M::Get, o("Geo", "3D Tiles tileset",
+            "A 3D Tiles 1.1 tileset with one root tile whose content is `content.glb` below. Needs the `geometry3d` feature. Anonymous for a public dataset.",
+            vec![], vec![("200", "tileset.json"), ("403", "Access denied"), ("404", "Dataset not found")], false)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/3dtiles/content.glb", vec![
+        (M::Get, o("Geo", "3D Tiles content",
+            "Binary glTF (GLB) with the dataset's building meshes, carrying EXT_mesh_features and EXT_structural_metadata: each feature's `iri` property is the RDF subject, so a picked feature leads back to SPARQL. Needs the `geometry3d` feature.",
+            vec![], vec![("200", "GLB (model/gltf-binary)"), ("403", "Access denied"), ("404", "Dataset not found")], false)),
+    ]);
+    mount(paths, "/api/ogc", vec![
+        (M::Get, o("OGC API Features", "Landing page",
+            "OGC API – Features landing page with links to the conformance declaration and the collections. Also served at `/api/ogc/`.",
+            vec![], vec![("200", "Landing page JSON")], false)),
+    ]);
+    mount(
+        paths,
+        "/api/ogc/conformance",
+        vec![(
+            M::Get,
+            o(
+                "OGC API Features",
+                "Conformance declaration",
+                "The conformance classes implemented: Core, OpenAPI 3.0 and GeoJSON.",
+                vec![],
+                vec![("200", "`{conformsTo: [...]}`")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/ogc/collections",
+        vec![(
+            M::Get,
+            o(
+                "OGC API Features",
+                "Collections",
+                "One collection per dataset the caller can read that carries geometry.",
+                vec![],
+                vec![("200", "Collections JSON")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/ogc/collections/:collectionId",
+        vec![(
+            M::Get,
+            o(
+                "OGC API Features",
+                "Collection",
+                "One collection (a dataset id) with its extent and links.",
+                vec![],
+                vec![
+                    ("200", "Collection JSON"),
+                    ("403", "Access denied"),
+                    ("404", "Unknown collection"),
+                ],
+                false,
+            ),
+        )],
+    );
+    mount(paths, "/api/ogc/collections/:collectionId/items", vec![
+        (M::Get, o("OGC API Features", "Features",
+            "The collection's features as a GeoJSON FeatureCollection (`application/geo+json`) in WGS84; each feature's `id` is its RDF subject IRI.",
+            vec![qp("bbox", false, "`minx,miny,maxx,maxy` in WGS84 lon/lat"),
+                 qp("limit", false, "Page size (default 100, max 1000)"),
+                 qp("offset", false, "Paging offset")],
+            vec![("200", "GeoJSON FeatureCollection"), ("400", "Invalid bbox"), ("403", "Access denied"), ("404", "Unknown collection")], false)),
+    ]);
+    mount(
+        paths,
+        "/api/ogc/collections/:collectionId/items/:featureId",
+        vec![(
+            M::Get,
+            o(
+                "OGC API Features",
+                "Feature",
+                "One feature as GeoJSON.",
+                vec![],
+                vec![
+                    ("200", "GeoJSON Feature"),
+                    ("403", "Access denied"),
+                    (
+                        "404",
+                        "Unknown feature or collection, or a feature without geometry",
+                    ),
+                ],
+                false,
+            ),
+        )],
+    );
+
+    // ═══════════════════════════════════════════════════════════════════════
     // Linked Data
     // ═══════════════════════════════════════════════════════════════════════
     mount(
@@ -5776,6 +6276,61 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                     true,
                 ),
             ),
+            (
+                M::Put,
+                o(
+                    "LDP",
+                    "Replace root container",
+                    "Replace the root container's own triples; behaves like PUT on any container.",
+                    vec![],
+                    vec![("204", "Replaced"), ("401", "Authentication required")],
+                    true,
+                ),
+            ),
+            (
+                M::Patch,
+                o(
+                    "LDP",
+                    "Patch root container",
+                    "Modify the root container (SPARQL Update patch).",
+                    vec![],
+                    vec![("204", "Patched"), ("401", "Authentication required")],
+                    true,
+                ),
+            ),
+            (
+                M::Delete,
+                o(
+                    "LDP",
+                    "Delete root container",
+                    "Remove the root container's own triples, like a DELETE on any container; its members are not touched.",
+                    vec![],
+                    vec![("204", "Deleted"), ("401", "Authentication required")],
+                    true,
+                ),
+            ),
+            (
+                M::Head,
+                o(
+                    "LDP",
+                    "Headers of the root container",
+                    "Same as GET without a body: `ETag`, `Link` and `WAC-Allow`.",
+                    vec![],
+                    vec![("200", "Headers only"), ("404", "Not found")],
+                    false,
+                ),
+            ),
+            (
+                M::Options,
+                o(
+                    "LDP",
+                    "Options of the root container",
+                    "Advertises `Allow`, `Accept-Post`, `Accept-Patch` and `Link`.",
+                    vec![],
+                    vec![("200", "Headers only")],
+                    false,
+                ),
+            ),
         ],
     );
     mount(
@@ -5840,8 +6395,35 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                     true,
                 ),
             ),
+            (
+                M::Head,
+                o(
+                    "LDP",
+                    "Headers of an LDP resource",
+                    "Same as GET without a body: `ETag`, `Link` and `WAC-Allow`.",
+                    vec![],
+                    vec![("200", "Headers only"), ("404", "Not found")],
+                    false,
+                ),
+            ),
+            (
+                M::Options,
+                o(
+                    "LDP",
+                    "Options of an LDP resource",
+                    "Advertises `Allow`, `Accept-Post`, `Accept-Patch` and `Link`.",
+                    vec![],
+                    vec![("200", "Headers only")],
+                    false,
+                ),
+            ),
         ],
     );
+    mount(paths, "/ldp/constraints", vec![
+        (M::Get, o("LDP", "LDP server constraints",
+            "The document every LDP response's `Link: rel=\"http://www.w3.org/ns/ldp#constrainedBy\"` points at: authentication, Web Access Control, accepted media types and reserved names. A static segment, so no LDP resource can be called `constraints`.",
+            vec![], vec![("200", "Constraints (text/markdown)")], false)),
+    ]);
 
     spec
 }
@@ -6090,6 +6672,193 @@ mod tests {
         assert!(
             !paths.contains_key("/api/admin/users"),
             "regular user must not see admin operations"
+        );
+    }
+
+    /// Routes the spec deliberately leaves out, as `(METHOD, axum path)`.
+    /// Everything else a `.route(...)` registers must be documented.
+    const UNDOCUMENTED_ROUTES: &[(&str, &str)] = &[
+        // Built inside a unit test of the panic-catching layer; never mounted.
+        ("GET", "/boom"),
+        // Raft transport between cluster members (X-Cluster-Secret), not a
+        // user API; docs/operations.md (Consensus) describes it.
+        ("POST", "/api/replication/raft/vote"),
+        ("POST", "/api/replication/raft/append"),
+        ("POST", "/api/replication/raft/snapshot"),
+        // Driven by the web UI only: the consent step of the /oauth/authorize
+        // page, and the animated-banner pickers.
+        ("POST", "/api/oauth/authorize"),
+        ("PUT", "/api/datasets/:dataset_id/banner-preset"),
+        ("PUT", "/api/organisations/:org_id/banner-preset"),
+        // Trailing-slash alias of the documented `/api/ogc` landing page.
+        ("GET", "/api/ogc/"),
+    ];
+
+    /// Index of the `)` that closes the `(` at `open`, skipping string literals.
+    fn closing_paren(src: &str, open: usize) -> usize {
+        let b = src.as_bytes();
+        let (mut depth, mut i) = (0usize, open);
+        loop {
+            match b[i] {
+                b'"' => {
+                    i += 1;
+                    while b[i] != b'"' {
+                        i += if b[i] == b'\\' { 2 } else { 1 };
+                    }
+                }
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return i;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+
+    fn rust_sources(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).expect("read src dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let text = std::fs::read_to_string(&path).expect("read source");
+                out.push((path.display().to_string(), text));
+            }
+        }
+    }
+
+    /// `/a/:id/*rest` and `/a/{id}/{rest}` both become `/a/{}/{}`: the parity
+    /// check is about which operations exist, not what a parameter is called.
+    fn shape(path: &str) -> String {
+        path.split('/')
+            .map(|s| {
+                if s.starts_with(':') || s.starts_with('*') || s.starts_with('{') {
+                    "{}"
+                } else {
+                    s
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    /// Every `(METHOD, path)` a `.route(...)` call under `src/` registers.
+    /// Paths are read from the string literal (or the `&str` const it names);
+    /// methods from the `get(…)`/`.post(…)`/… calls of the method router.
+    fn router_pairs() -> std::collections::BTreeSet<(String, String)> {
+        let mut files = Vec::new();
+        rust_sources(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        let method_re = regex::Regex::new(
+            r"(?:^|[^A-Za-z0-9_])(get|post|put|delete|patch|head|options|any|on)\(",
+        )
+        .unwrap();
+        let path_re = regex::Regex::new(r#"^\s*"([^"]*)"\s*,"#).unwrap();
+        let const_path = |name: &str| -> String {
+            let re = regex::Regex::new(&format!(r#"const {name}: &str = "([^"]*)""#)).unwrap();
+            files
+                .iter()
+                .find_map(|(_, text)| re.captures(text).map(|c| c[1].to_string()))
+                .unwrap_or_else(|| panic!("route path const {name} not found"))
+        };
+
+        let mut pairs = std::collections::BTreeSet::new();
+        for (file, text) in &files {
+            if file.ends_with(file!()) {
+                continue; // mounts no routes, but these tests spell `.route(`
+            }
+            for (at, _) in text.match_indices(".route(") {
+                let line_start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+                if text[line_start..at].contains("//") {
+                    continue; // commented out
+                }
+                let open = at + ".route".len();
+                let args = &text[open + 1..closing_paren(text, open)];
+                let (path, router) = match path_re.captures(args) {
+                    Some(c) => (c[1].to_string(), &args[c.get(0).unwrap().end()..]),
+                    None => {
+                        let (name, router) = args
+                            .split_once(',')
+                            .unwrap_or_else(|| panic!("{file}: cannot read .route({args})"));
+                        let name = name.trim().rsplit("::").next().unwrap();
+                        (const_path(name), router)
+                    }
+                };
+                let methods: Vec<_> = method_re
+                    .captures_iter(router)
+                    .map(|c| c[1].to_uppercase())
+                    .collect();
+                assert!(
+                    !methods.is_empty(),
+                    "{file}: no HTTP method found in .route(\"{path}\", …)"
+                );
+                for m in methods {
+                    assert!(
+                        m != "ANY" && m != "ON",
+                        "{file}: .route(\"{path}\", {m}(…)) — list the methods so the parity test can check them"
+                    );
+                    pairs.insert((m, path.clone()));
+                }
+            }
+        }
+        pairs
+    }
+
+    /// Every route the server mounts is in the spec, and every operation the
+    /// spec documents is mounted. Internal routes go in [`UNDOCUMENTED_ROUTES`].
+    #[test]
+    fn spec_documents_every_mounted_route() {
+        let skip: std::collections::BTreeSet<(String, String)> = UNDOCUMENTED_ROUTES
+            .iter()
+            .map(|(m, p)| (m.to_string(), shape(p)))
+            .collect();
+        let all_routes: std::collections::BTreeSet<(String, String)> = router_pairs()
+            .into_iter()
+            .map(|(m, p)| (m, shape(&p)))
+            .collect();
+        let stale: Vec<_> = skip.difference(&all_routes).collect();
+        assert!(
+            stale.is_empty(),
+            "UNDOCUMENTED_ROUTES names routes the router no longer has: {stale:?}"
+        );
+        let routed: std::collections::BTreeSet<(String, String)> =
+            all_routes.difference(&skip).cloned().collect();
+
+        let spec = serde_json::to_value(openapi_spec()).unwrap();
+        let mut documented = std::collections::BTreeSet::new();
+        for (path, item) in spec["paths"].as_object().unwrap() {
+            for method in ["get", "post", "put", "delete", "patch", "head", "options"] {
+                if item.get(method).is_some() {
+                    documented.insert((method.to_uppercase(), shape(path)));
+                }
+            }
+        }
+
+        let missing: Vec<_> = routed.difference(&documented).collect();
+        let phantom: Vec<_> = documented.difference(&routed).collect();
+        assert!(
+            missing.is_empty() && phantom.is_empty(),
+            "OpenAPI spec and router disagree.\n\
+             Mounted but not documented ({}):\n{}\n\
+             Documented but not mounted ({}):\n{}",
+            missing.len(),
+            missing
+                .iter()
+                .map(|(m, p)| format!("  {m} {p}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            phantom.len(),
+            phantom
+                .iter()
+                .map(|(m, p)| format!("  {m} {p}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
         );
     }
 }

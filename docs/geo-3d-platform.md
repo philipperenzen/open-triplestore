@@ -123,9 +123,12 @@ web app — see **Embedding & Web Apps** (`docs/embedding.md`).
 
 ## 9. IFC → linked data: the lift
 
-An IFC file (`POST /api/datasets/:id/import/ifc`) becomes two graphs: the
-**BOT layer** the platform queries, `…/dataset/{id}/building`, and, when
-asked for, a complete **ifcOWL** instance lift beside it. The BOT layer is
+An IFC file becomes two graphs. Upload it as a `file` part of
+`POST /api/import/bulk` together with a `dataset_id` field; the bulk importer
+recognises `.ifc` by name or content type, and there is no IFC-specific route.
+The two graphs are the **BOT layer** the platform queries — the file's target
+graph, by default `…/dataset/{id}/building` — and a complete **ifcOWL**
+instance lift beside it, `{target}/ifcowl`. The BOT layer is
 the contract the viewer feed, the IDS importer and the SHACL Studio `ifc`
 shapes read, and it is stable: `bot:Site/Building/Storey/Space/Element`,
 `bot:hasBuilding/hasStorey/hasSpace/containsElement/hasSubElement`, the
