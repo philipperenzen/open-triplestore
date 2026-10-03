@@ -5,7 +5,12 @@ project's own grades, from its test suites and a conformance review of the
 engine and high-complexity edge cases. They are not W3C or OGC conformance
 claims, and nothing here is OGC-certified or buildingSMART-certified:
 
-- **Full** — the normative core plus tested edge cases pass.
+- **Full** — the normative core plus tested edge cases pass. Since 2026-10-03
+  a row is Full only when every failure that remains is one of these, each
+  named in its footnote with its issue: (a) a defect in the test suite, (b)
+  blocked on an open external specification or Working Group issue, or (c) a
+  limit of an external database engine. A deliberate deviation from the
+  specification keeps a row Partial until it is fixed.
 - **Partial** — core works; specific features are unimplemented or deviate (see
   [Known limitations](#known-limitations--conformance-findings)).
 
@@ -17,14 +22,14 @@ applies.
 | Standard | Role | Support |
 |---|---|---|
 | RDF 1.1 | Core triple data model | Full |
-| RDF 1.2 (CR 2026-04-07) | Triple terms, reifiers and annotations, base direction; N-Triples, N-Quads, Turtle, TriG, RDF/XML 1.2 | Partial¹ |
+| RDF 1.2 (CR 2026-04-07) | Triple terms, reifiers and annotations, base direction; N-Triples, N-Quads, Turtle, TriG, RDF/XML 1.2 | Full¹ |
 | SPARQL 1.1 Query | SELECT, ASK, CONSTRUCT, DESCRIBE | Full² |
 | SPARQL 1.1 Update | INSERT, DELETE, LOAD, CLEAR, COPY, WITH/USING | Full |
 | SPARQL 1.1 Protocol | Query and update over HTTP (`/sparql`) | Full² |
 | SPARQL 1.1 Graph Store HTTP | Named-graph CRUD over HTTP | Full |
 | SPARQL 1.1 Federated Query (`SERVICE`) | Remote query | Full³ — deny-by-default: off until endpoints are allowlisted |
 | SPARQL 1.1 Service Description | Capability advertisement | Full |
-| SPARQL 1.2 (WD 2026-10-01) | Triple terms and reified triples, `LANGDIR` family, `VERSION` | Partial¹ |
+| SPARQL 1.2 (WD 2026-10-01) | Triple terms and reified triples, `LANGDIR` family, `VERSION` | Full¹ |
 | RDFS | subClass/subProperty/domain/range inference | Full¹⁴ |
 | OWL 2 QL | Profile reasoning (materialised) | Full¹⁰ |
 | OWL 2 EL | Profile reasoning (materialised) | Full¹⁰ |
@@ -158,32 +163,28 @@ behavior and will flip green when the limitation is resolved.
    subset of a W3C test suite), and
    [conformance/sparql12.md](conformance/sparql12.md) and
    [conformance/rdf12.md](conformance/rdf12.md) list every entry that fails,
-   with its cause. Every RDF 1.2 and RDF 1.1 syntax entry passes except
-   those whose literal is a non-canonical number or an `rdf:XMLLiteral`, and
-   triple terms and base direction survive the canonical and Skolem
-   blank-node modes, version diffs, the commit log and the JSON term views. Both rows stay *Partial*
-   because entries fail for reasons other than an open W3C Working Group
-   issue (checked 2026-10-03; the issues the plan expected to block SPARQL
-   1.2, w3c/sparql-query#282 and #283, closed on 2025-12-26):
-   - **RDF 1.2:** storage keeps numeric literals as values (the oxigraph 0.5
-     literal encoder), so `1.0`, `1e0`, `+1` or `01` read back in canonical
-     form — 22 Turtle and TriG evaluation entries (20 of them from the RDF
-     1.1 suites the RDF 1.2 manifests include). The lexical-form storage
-     change fixes them, and with it the row becomes *Full*. Four
-     `rdf:parseType="Literal"` entries wait on the open issue
-     [w3c/rdf-xml#97](https://github.com/w3c/rdf-xml/issues/97) (opened
-     2026-04-20) and do not count against the grade.
-   - **SPARQL 1.2:** the row waits only on lexical-form storage. The one
-     entry that fails, `grouping#group01`, needs numeric lexical forms kept
-     (`"001"^^xsd:integer` must not group with `"1"`); the lexical-form
-     storage change fixes it, and with it the row becomes *Full*. The parser
-     and evaluator gaps the suite found are fixed in the vendored copy of
-     spargebra and spareval ([vendor/README.md](../vendor/README.md)): a
-     literal or triple term as the subject of a triple-term expression and an
-     aggregate inside an aggregate are refused, an aggregating query's SELECT
-     expression may reuse an earlier SELECT expression's variable, and `=`
-     between two literals that both carry a base direction answers instead of
-     panicking (a server error before).
+   with its cause. Both rows are graded *Full* since 2026-10-03, when the
+   store began keeping literals exactly as written and the vendored SPARQL
+   fork fixes met them in one tree:
+   - **SPARQL 1.2:** every entry of the suite passes. `grouping#group01`
+     (`mf:NoCanonicalizationOfNumerics`) passes now that `"001"^^xsd:integer`
+     no longer groups with `"1"`, and the parser and evaluator gaps the suite
+     found are fixed in the vendored copy of spargebra and spareval
+     ([vendor/README.md](../vendor/README.md)): a literal or triple term as
+     the subject of a triple-term expression and an aggregate inside an
+     aggregate are refused, an aggregating query's SELECT expression may
+     reuse an earlier SELECT expression's variable, and `=` between two
+     literals that both carry a base direction answers instead of panicking.
+   - **RDF 1.2:** every N-Triples, N-Quads, Turtle, TriG and RDF/XML entry
+     passes, those of the RDF 1.1 suites the manifests include as well —
+     non-canonical numbers (`1.0`, `1e0`, `+1`, `01`) included — except four
+     `rdf:parseType="Literal"` entries. Their expected form of an
+     `rdf:XMLLiteral` changed upstream on 2026-04-20 and is the subject of the
+     open W3C issue [w3c/rdf-xml#97](https://github.com/w3c/rdf-xml/issues/97);
+     under the project's Full rubric a failure blocked on an open
+     specification issue does not count against the grade. Triple terms and
+     base direction survive the canonical and Skolem blank-node modes, version
+     diffs, the commit log and the JSON term views.
    `LATERAL` (SEP-0006) and `ADJUST` (SEP-0002) are extensions oxigraph
    compiles in; they are not part of SPARQL 1.2 and are pinned separately.
 2. **SPARQL 1.1 Query** and **SPARQL 1.1 Protocol** are graded *Full* (since
@@ -425,9 +426,10 @@ behavior and will flip green when the limitation is resolved.
       reflexivity, ranges, disjointness, keys, equality and negative assertions,
       and the EL datatype map with value semantics — with classification,
       realization and the property-assertion closure; axioms outside the profile
-      are left out and reported (`ignored`). One storage limit applies: an
-      integer-derived XSD literal is stored as `xsd:integer`, so an ill-typed
-      one (`"-5"^^xsd:nonNegativeInteger`) is not detected. Both are pinned by
+      are left out and reported (`ignored`). The store keeps literals as
+      written (since 2026-10-03), so an integer-derived literal such as
+      `"-5"^^xsd:nonNegativeInteger` reaches the reasoner with the datatype it
+      was written with (data loaded earlier holds it as `xsd:integer`). Both are pinned by
       `tests/owl2_rl_conformance.rs` / `tests/owl2_el_conformance.rs`; the EL
       suite includes randomised differential tests against RL on the EL ∩ RL
       fragment.
@@ -435,9 +437,9 @@ behavior and will flip green when the limitation is resolved.
       materialisation, consistency (negative inclusions, asymmetric/irreflexive
       properties, ill-typed literals, data ranges) and existential rewriting of
       query blank nodes ([OWL 2 QL](/docs/owl2-ql)). Data ranges are decided on
-      values through the OWL 2 datatype map. Oxigraph stores integer-derived
-      types as `xsd:integer`, so a check reads the value, not the datatype it
-      was written with.
+      values through the OWL 2 datatype map, which gives the same answer for
+      a literal kept as written and for one an earlier version stored as
+      `xsd:integer`.
 
     See [owl2-rl.md](owl2-rl.md), [owl2-el.md](owl2-el.md) and
     [owl2-ql.md](owl2-ql.md).
@@ -488,7 +490,8 @@ behavior and will flip green when the limitation is resolved.
     string, where a JSON-LD 1.1 processor without `rdfDirection` drops it;
     the runner sets the option each test names. `expandContext`,
     `useNativeTypes` / `useRdfType`, generalized RDF and the JSON-LD 1.0
-    processing mode are not offered.
+    processing mode are not offered. The three `fromRdf` failures are deliberate
+    deviations, which keep the row Partial under the Full rubric above.
 
 14. **RDFS:** the RDF 1.1 Semantics patterns `rdfD2` and `rdfs1`–`rdfs13` with the RDF and RDFS
     axiomatic triples, in one fixed-point loop, and datatype clashes reported as

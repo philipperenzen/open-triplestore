@@ -710,20 +710,15 @@ fn seed_bag_buildings(state: &AppState) {
 // bridge on its side.
 // v5: those headings are explicitly `^^xsd:double`, matching what the IFC
 // importer emits from TrueNorth, so the feed parses one datatype.
-// v16: the capabilities graph follows SHACL Core's regrade to Full (the store
-// keeps literals as written, so the W3C core section has no known failure).
-// v16: the capabilities graph names RDF 1.2 and SPARQL 1.2 by the dated drafts
-// docs/standards.md grades them against.
-// v16: the capabilities graph gains the graded rows for full-text search, SKOS
-// and JSON-LD 1.1 (docs/standards.md, 2026-10-03).
-// v16: the capabilities graph grades DCAT 3 / DCAT-AP Full and gives VoID
-// its own Full row, as docs/standards.md does since the official DCAT-AP
-// shapes run in CI.
+// v16: the capabilities graph follows the second round of 2026-10-03
+// regrades in docs/standards.md: SPARQL 1.1 Query, SPARQL 1.2, RDF 1.2 (named
+// by their dated drafts), OWL 2 RL, GeoSPARQL 1.0 (a new row) and 1.1, SHACL
+// Core, SHACL-C, ShEx 2.1, SWRL, OPM, buildingSMART IDS, DCAT 3 / DCAT-AP and
+// VoID (a new row) are Full; the SPARQL 1.1 Protocol, full-text search, SKOS
+// and JSON-LD 1.1 rows are new, JSON-LD graded Partial.
 // v15: the capabilities graph follows the 2026-10-03 regrades in
 // docs/standards.md: SPARQL 1.1 federation, OWL 2 QL, EL and DL (with the
 // reasoner sidecar), RDF Patch and LDES are Full.
-// v15: the capabilities demo graph grades SPARQL 1.1 Query Full and adds the
-// SPARQL 1.1 Protocol row (docs/standards.md, 2026-10-03).
 // v14: the capabilities graph (its own `capabilities` dataset) gives each
 // standard the grade docs/standards.md gives it; it said "Full" for all of them.
 // v13: refreshes the demo dataset's own name/description from the current
@@ -755,7 +750,7 @@ fn seed_bag_buildings(state: &AppState) {
 // existing store on whatever landmarks.ttl shipped when its volume was first
 // created — neither v4 nor v5 could reach it. That is why the Dragon Bridge
 // stayed on its side and no bearing ever appeared.
-const DEMO_CONTENT_VERSION: u32 = 17;
+const DEMO_CONTENT_VERSION: u32 = 16;
 
 /// Wipe demo graphs whose content is stale relative to [`DEMO_CONTENT_VERSION`]
 /// so this boot's seeders re-fill them. Runs BEFORE the bundle engine, which

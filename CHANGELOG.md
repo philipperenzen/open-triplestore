@@ -657,6 +657,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are listed as a warning. `RUST_LOG` is now in the environment table.
 
 ### Changed
+
+- **Standards Score recounted once for the second merge train: 25 of 28.**
+  The "W3C SPARQL 1.1 Tests" row of `docs/triplestore-comparison.md` is
+  retired for every system (owner decision, 2026-10-03): the W3C test-suite
+  licence allows no performance claims on a subset of a suite, so the row
+  could not be graded for this project; measured comparisons take its place in
+  `docs/performance-comparison.md`. The matrix has 28 rows, and every other
+  system's count drops by one. Open Triplestore's column, recounted from the
+  merged matrix, is 25 of 28 (it was 15 of 29): SPARQL 1.1 Query, SPARQL 1.2,
+  RDF 1.2, OWL 2 RL, SHACL Validation, ShEx, SWRL, GeoSPARQL 1.0 and 1.1, DCAT
+  3 and VoID follow new Full grades, and JSON-LD 1.1 now shows its Partial
+  grade. `docs/standards.md` states the Full rubric: a row is Full only when
+  every remaining failure is a test-suite defect, blocked on an open external
+  specification issue, or a limit of an external database engine, and a
+  deliberate deviation keeps it Partial (JSON-LD 1.1 and RML for now).
+  SPARQL 1.2 and RDF 1.2 are graded Full: every SPARQL 1.2 entry passes, and
+  RDF 1.2's four remaining `rdf:XMLLiteral` entries wait on w3c/rdf-xml#97.
 - **JSON-LD 1.1 graded *Partial*.** `docs/standards.md` grades it for the
   first time, on the json-ld-api run: three `fromRdf` entries fail because the
   serialiser writes every stored quad as it is, where the algorithm folds a
@@ -664,7 +681,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rdf:JSON` literal that is not JSON; and uploads keep `@direction` as an RDF
   1.2 directional string, where a JSON-LD 1.1 processor drops it by default.
   The comparison's JSON-LD cell, which marked feature presence, follows
-  (✅ → 🟡), and the standards score is recounted 15 → 14.
+  (✅ → 🟡).
 - **The JSON-LD processor is vendored with four fixes** (`oxjsonld` 0.2.6 in
   `vendor/oxjsonld/`, one commit and one upstream draft each, see
   `vendor/README.md`), and every `toRdf` entry of the W3C json-ld-api run now
@@ -742,8 +759,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   segments of a base IRI, writes `@direction` as an RDF 1.2 directional string
   in the `rdf-12` build, mis-scopes type-scoped contexts in type maps and
   serialises invalid `rdf:JSON` literals. The comparison's JSON-LD cell, which
-  marked feature presence, follows (✅ → 🟡), and the standards score is
-  recounted 15 → 14.
+  marked feature presence, follows (✅ → 🟡).
 - **OWL 2 RL runs all 78 RL/RDF rules; graded Full.** The Table 8 rules with
   literal subjects (`dt-type2`, `dt-eq`, `dt-diff`) are applied to data values
   through the 32-type RL datatype map: a literal written two ways
@@ -812,11 +828,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   maps, are now a `400`; a validation whose references nest deeper than
   20 000 levels is a `422` (validation runs off the async runtime on a
   thread sized for that depth). ShEx is graded Full in
-  `docs/standards.md`, and the comparison's Standards Score is recounted
-  15 → 16.
+  `docs/standards.md`, and the comparison's ShEx cell follows.
 - **DCAT 3 / DCAT-AP 3 / DCAT-AP-NL 3 and VoID are graded Full.**
   `docs/standards.md` gives VoID its own row; the comparison's "DCAT" row is
-  now "DCAT 3", and both cells follow the grades (Standards Score 15 → 17). The
+  now "DCAT 3", and both cells follow the grades. The
   capabilities seed follows (`DEMO_CONTENT_VERSION` 16 refreshes it). The
   aggregate dataset carries the themes of the datasets it covers.
 - **The DCAT catalogues use DCAT terms with their declared semantics.** The
@@ -1154,9 +1169,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   value is the node's string value (all its text, nested elements included)
   rather than its first text child. A template with an unbalanced brace —
   one opened inside a reference, closed outside one, or never closed — is
-  refused at upload instead of being read as best it could. RML is now graded
-  Full in `docs/standards.md` and counts in the comparison's Standards Score
-  (16 → 17).
+  refused at upload instead of being read as best it could. RML stays graded
+  Partial in `docs/standards.md`: one remaining R2RML failure, R2RMLTC0002f
+  (SQL identifier case-folding), is a deliberate deviation, which the Full
+  rubric does not accept.
 - **RML / R2RML terms follow R2RML.** A file mapping, a dataset's stored
   mapping and every newly frozen datasource mapping version now generate terms
   by R2RML's rules, so their output changes:
@@ -1322,8 +1338,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and holds a sub-select no longer fails with 400. Clients that relied on
   `FROM <g>` also exposing `<g>` to `GRAPH ?g` must add `FROM NAMED <g>`.
 - **Grades:** SPARQL 1.1 Query is graded Full again, and SPARQL 1.1 Protocol has
-  its own graded row (Full) in `docs/standards.md`; the comparison's Standards
-  Score is recounted (11 → 12).
+  its own graded row (Full) in `docs/standards.md`, and the comparison's cells
+  follow.
 - **SPARQL query results follow the specification in six more places.** The
   engine's SPARQL parser, evaluator and optimizer (Oxigraph's `spargebra` 0.4.7,
   `spareval` 0.2.7 and `sparopt` 0.3.7) are now vendored under `vendor/` and
@@ -1392,13 +1408,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **GeoSPARQL 1.1 is graded Full for every conformance class but DGGS.** The
   requirement matrix (`docs/conformance/geosparql.md`) has every requirement of
   OGC 22-047r1 met outside the optional DGGS class; `docs/standards.md` grades
-  1.1 Full with that scope stated, and the comparison matrix follows (Standards
-  Score 24 → 25). The project's own grade, not an OGC certification.
+  1.1 Full with that scope stated, and the comparison matrix follows. The
+  project's own grade, not an OGC certification.
 - **GeoSPARQL 1.0 is graded Full.** With the documented GML profile (R15, R17)
   it meets every requirement of OGC 11-052r4 in the requirement matrix
   (`docs/conformance/geosparql.md`); `docs/standards.md` and the comparison
-  matrix follow (Standards Score 23 → 24). The project's own grade, not an OGC
-  certification.
+  matrix follow. The project's own grade, not an OGC certification.
 - **GeoSPARQL: geometry results follow their first operand's serialisation.**
   `buffer`, `union`, `envelope`, `transform` and the other functions that
   return a geometry used to return a `geo:wktLiteral` whatever the operand; they
