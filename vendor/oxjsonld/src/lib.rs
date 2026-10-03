@@ -20,6 +20,8 @@ pub use from_rdf::{JsonLdSerializer, WriterJsonLdSerializer};
 pub use profile::{JsonLdProcessingMode, JsonLdProfile, JsonLdProfileSet};
 #[cfg(feature = "async-tokio")]
 pub use to_rdf::TokioAsyncReaderJsonLdParser;
-pub use to_rdf::{JsonLdParser, JsonLdPrefixesIter, ReaderJsonLdParser, SliceJsonLdParser};
+pub use to_rdf::{
+    JsonLdParser, JsonLdPrefixesIter, JsonLdRdfDirection, ReaderJsonLdParser, SliceJsonLdParser,
+};
 
 const MAX_CONTEXT_RECURSION: usize = 8;

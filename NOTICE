@@ -137,7 +137,8 @@ Vendored source code:
     Oxigraph developers. Both licence texts are beside it. Modified: IRI
     resolution removes the dot segments of the whole target path; an @base
     in absolute form is the base even when it is not a valid IRI; a type map
-    applies the type's scoped context to the map context.
+    applies the type's scoped context to the map context; the parser takes
+    the JSON-LD 1.1 rdfDirection option.
     vendor/README.md describes every change in these crates, and the
     UPSTREAM-PR*.md files beside them the changes as proposed upstream.
 

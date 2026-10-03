@@ -179,3 +179,15 @@ an `UPSTREAM-PR-*.md` draft beside the crate.
    propagates into nested nodes, and the node gets the type already expanded, so
    it does not apply the context a second time as its own non-propagating
    type-scoped context. W3C json-ld-api toRdf `c013`.
+
+4. **The `rdfDirection` option** (`src/to_rdf.rs`, `JsonLdRdfDirection` and
+   `JsonLdParser::with_rdf_direction`, exported from `src/lib.rs`;
+   `UPSTREAM-PR-4-rdf-direction.md`): `Ignore` (JSON-LD 1.1's `null`, the
+   direction is dropped), `I18nDatatype`, `CompoundLiteral`, and
+   `DirectionalLanguageTaggedString` (RDF 1.2 `"abc"@ar--rtl`). The default is
+   unchanged — the RDF 1.2 directional string in the `rdf-12` build this server
+   uses, so every upload, import and Graph Store parse keeps the direction as
+   before. `oxrdfio`'s `RdfParser` has no setting for it; the W3C runner calls
+   `JsonLdParser` directly with the option each test names (absent = `null`).
+   W3C json-ld-api toRdf `di02`, `di04`–`di06`, and the non-normative
+   `di09`–`di12` that the runner used to skip.

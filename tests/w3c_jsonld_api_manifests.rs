@@ -1,8 +1,9 @@
 //! W3C JSON-LD 1.1 API test suite — the `toRdf` and `fromRdf` sections,
 //! vendored unmodified in `tests/fixtures/w3c-jsonld-api/` and driven by
 //! their manifests, through the JSON-LD processor every RDF parse and
-//! serialisation of this server uses (oxigraph's, behind `RdfParser` /
-//! `RdfSerializer` with `RdfFormat::JsonLd`).
+//! serialisation of this server uses (`oxjsonld`, vendored in
+//! `vendor/oxjsonld/`, behind `RdfParser` / `RdfSerializer` with
+//! `RdfFormat::JsonLd`).
 //!
 //! This is a development and regression ratchet. The two sections are a
 //! subset of a W3C test suite, so no score is published for them (W3C's
@@ -17,59 +18,64 @@
 //! How an entry is evaluated:
 //!
 //! * `toRdf`: the input is parsed with the base IRI the manifest gives it
-//!   (`baseIri` + input path, or the entry's `base` option), remote documents
-//!   (contexts the tests name by IRI) resolved from the vendored files by a
-//!   document loader. A `PositiveEvaluationTest` passes when the dataset is
+//!   (`baseIri` + input path, or the entry's `base` option) and the entry's
+//!   `rdfDirection` option, remote documents (contexts the tests name by IRI)
+//!   resolved from the vendored files by a document loader. The parse goes
+//!   straight to `oxjsonld::JsonLdParser`, because `RdfParser` has no
+//!   `rdfDirection` setting: an entry without the option gets JSON-LD 1.1's
+//!   `null` (the direction is dropped), where the server's parses keep it as
+//!   an RDF 1.2 directional language-tagged string (pinned by the
+//!   `jsonld::` unit tests). A `PositiveEvaluationTest` passes when the dataset is
 //!   isomorphic to the expected N-Quads; a `NegativeEvaluationTest` when the
 //!   parse fails (the error code itself is not compared); a
 //!   `PositiveSyntaxTest` when the parse succeeds.
 //! * `fromRdf`: the input N-Quads are serialised as JSON-LD and parsed back,
 //!   and the result must be isomorphic to the expected document parsed by the
-//!   same processor. The comparison is at the RDF level, not JSON-LD object
-//!   equality: the serialiser writes a compacted form, the expected outputs
-//!   are expanded.
+//!   same processor, both read with the entry's `rdfDirection` option. The
+//!   comparison is at the RDF level, not JSON-LD object equality: the
+//!   serialiser writes every quad as it is (no `@list`, `@json` or
+//!   `@direction` folding), the expected outputs are expanded.
 //!
 //! Entries are skipped by design (and counted, never silently) when they test
 //! an option this processor does not offer: JSON-LD 1.0-only behaviour
 //! (`specVersion` / `processingMode` `json-ld-1.0`), generalized RDF,
-//! `rdfDirection`, `expandContext`, and the `useNativeTypes` / `useRdfType`
-//! serialisation options. A manifest input that is missing from the vendored
-//! files fails the run instead of counting as a parse error.
+//! `expandContext`, and the `useNativeTypes` / `useRdfType` serialisation
+//! options. A manifest input that is missing from the vendored files fails
+//! the run instead of counting as a parse error.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use oxigraph::io::{JsonLdProfileSet, LoadedDocument, RdfFormat, RdfParser, RdfSerializer};
+use oxigraph::io::{JsonLdProfileSet, RdfFormat, RdfParser, RdfSerializer};
 use oxigraph::model::dataset::CanonicalizationAlgorithm;
 use oxigraph::model::Dataset;
+use oxjsonld::{JsonLdParser, JsonLdRdfDirection, JsonLdRemoteDocument};
 use serde_json::Value;
 
 const ROOT: &str = "tests/fixtures/w3c-jsonld-api";
 const BASE: &str = "https://w3c.github.io/json-ld-api/tests/";
 
-/// Entries this processor gets wrong, `(section#id, reason)`. Every one is a
-/// processor (oxjsonld 0.2.6) deviation, not a runner limitation.
+/// Entries that fail, `(section#id, reason)`. Each one is a deliberate
+/// difference of the serialiser (oxjsonld's streaming JSON-LD writer) from
+/// the fromRdf algorithm, kept so that a JSON-LD download returns every quad
+/// the store holds, as written (`docs/conformance/jsonld.md`).
 const KNOWN_FAILURES: &[(&str, &str)] = &[
-    ("toRdf#tdi02", "built with rdf-12, @direction becomes an RDF 1.2 directional language string; JSON-LD 1.1 drops it unless rdfDirection is set"),
-    ("toRdf#tdi04", "built with rdf-12, @direction becomes an RDF 1.2 directional language string; JSON-LD 1.1 drops it unless rdfDirection is set"),
-    ("toRdf#tdi05", "built with rdf-12, @direction becomes an RDF 1.2 directional language string; JSON-LD 1.1 drops it unless rdfDirection is set"),
-    ("toRdf#tdi06", "built with rdf-12, @direction becomes an RDF 1.2 directional language string; JSON-LD 1.1 drops it unless rdfDirection is set"),
     (
         "fromRdf#t0016",
-        "a list whose nodes are typed rdf:List is written as nodes that read back as a different dataset",
+        "every quad is written as is; fromRdf folds a well-formed list into @list and drops the rdf:type rdf:List quads of its nodes",
     ),
     (
         "fromRdf#tjs08",
-        "an invalid rdf:JSON literal is serialised instead of refused",
+        "an rdf:JSON literal that is not valid JSON is written as a typed literal; fromRdf refuses it (invalid JSON literal)",
     ),
     (
         "fromRdf#tjs09",
-        "an invalid rdf:JSON literal is serialised instead of refused",
+        "an rdf:JSON literal that is not valid JSON is written as a typed literal; fromRdf refuses it (invalid JSON literal)",
     ),
 ];
 
 /// Fewest passing entries across both sections.
-const PASS_FLOOR: usize = 470;
+const PASS_FLOOR: usize = 493;
 
 fn json_ld() -> RdfFormat {
     RdfFormat::JsonLd {
@@ -80,17 +86,16 @@ fn json_ld() -> RdfFormat {
 /// Serve `https://w3c.github.io/json-ld-api/tests/<path>` from the vendored
 /// files; everything else is not dereferenceable, as for any processor run
 /// offline.
-fn loader(url: &str) -> Result<LoadedDocument, Box<dyn std::error::Error + Send + Sync>> {
+fn loader(url: &str) -> Result<JsonLdRemoteDocument, Box<dyn std::error::Error + Send + Sync>> {
     let url = url.split('#').next().unwrap_or(url);
     let rel = url
         .strip_prefix(BASE)
         .ok_or_else(|| format!("<{url}> is not part of the vendored suite"))?;
     let path = Path::new(ROOT).join(rel);
-    let content = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(LoadedDocument {
-        url: url.to_string(),
-        content,
-        format: json_ld(),
+    let document = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(JsonLdRemoteDocument {
+        document,
+        document_url: url.to_string(),
     })
 }
 
@@ -101,12 +106,30 @@ fn read_fixture(rel: &str) -> Vec<u8> {
     std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
-fn parse_json_ld_bytes(bytes: &[u8], base: &str) -> Result<Dataset, String> {
-    let parser = RdfParser::from_format(json_ld())
+/// The entry's `rdfDirection` option; absent is JSON-LD 1.1's `null`.
+fn rdf_direction(entry: &Value) -> JsonLdRdfDirection {
+    match entry["option"]["rdfDirection"].as_str() {
+        None => JsonLdRdfDirection::Ignore,
+        Some("i18n-datatype") => JsonLdRdfDirection::I18nDatatype,
+        Some("compound-literal") => JsonLdRdfDirection::CompoundLiteral,
+        Some(other) => panic!("unknown rdfDirection {other}"),
+    }
+}
+
+fn parse_json_ld_bytes(
+    bytes: &[u8],
+    base: &str,
+    rdf_direction: JsonLdRdfDirection,
+) -> Result<Dataset, String> {
+    let parser = JsonLdParser::new()
+        .with_rdf_direction(rdf_direction)
         .with_base_iri(base)
         .map_err(|e| e.to_string())?;
     let mut ds = Dataset::new();
-    for q in parser.for_reader(bytes).with_document_loader(loader) {
+    for q in parser
+        .for_slice(bytes)
+        .with_load_document_callback(|url, _| loader(url))
+    {
         ds.insert(&q.map_err(|e| e.to_string())?);
     }
     Ok(ds)
@@ -163,9 +186,6 @@ fn skip_reason(entry: &Value) -> Option<&'static str> {
     if opt["produceGeneralizedRdf"] == true {
         return Some("generalized RDF");
     }
-    if !opt["rdfDirection"].is_null() {
-        return Some("rdfDirection");
-    }
     if !opt["expandContext"].is_null() {
         return Some("expandContext");
     }
@@ -201,7 +221,7 @@ fn run_to_rdf(tally: &mut Tally) {
             .as_str()
             .map(str::to_string)
             .unwrap_or_else(|| format!("{BASE}{input}"));
-        let result = parse_json_ld_bytes(&read_fixture(input), &base);
+        let result = parse_json_ld_bytes(&read_fixture(input), &base, rdf_direction(&entry));
         let types = types(&entry);
         let outcome: Result<(), String> = if types.iter().any(|t| t == "jld:NegativeEvaluationTest")
         {
@@ -248,6 +268,7 @@ fn run_from_rdf(tally: &mut Tally) {
             continue;
         }
         let input = entry["input"].as_str().unwrap();
+        let direction = rdf_direction(&entry);
         let serialised = (|| -> Result<Vec<u8>, String> {
             let source = parse_nquads(&read_fixture(input))?;
             let mut out = RdfSerializer::from_format(json_ld()).for_writer(Vec::new());
@@ -263,7 +284,7 @@ fn run_from_rdf(tally: &mut Tally) {
             // An error while serialising, or output that does not parse back.
             let failed = match &serialised {
                 Err(_) => true,
-                Ok(w) => parse_json_ld_bytes(w, &format!("{BASE}{input}")).is_err(),
+                Ok(w) => parse_json_ld_bytes(w, &format!("{BASE}{input}"), direction).is_err(),
             };
             if failed {
                 tally.pass += 1;
@@ -281,15 +302,16 @@ fn run_from_rdf(tally: &mut Tally) {
         let expect = entry["expect"].as_str().unwrap();
         let outcome = (|| -> Result<(), String> {
             let written = serialised?;
-            let round_trip =
-                parse_json_ld_bytes(&written, &format!("{BASE}{expect}")).map_err(|e| {
-                    format!(
-                        "the serialised JSON-LD does not parse back: {e}\n{}",
-                        String::from_utf8_lossy(&written)
-                    )
-                })?;
-            let expected = parse_json_ld_bytes(&read_fixture(expect), &format!("{BASE}{expect}"))
-                .map_err(|e| format!("expected output unreadable: {e}"))?;
+            let round_trip = parse_json_ld_bytes(&written, &format!("{BASE}{expect}"), direction)
+                .map_err(|e| {
+                format!(
+                    "the serialised JSON-LD does not parse back: {e}\n{}",
+                    String::from_utf8_lossy(&written)
+                )
+            })?;
+            let expected =
+                parse_json_ld_bytes(&read_fixture(expect), &format!("{BASE}{expect}"), direction)
+                    .map_err(|e| format!("expected output unreadable: {e}"))?;
             if isomorphic(round_trip, expected) {
                 Ok(())
             } else {

@@ -4357,6 +4357,7 @@ dependencies = [
  "ots-plugin-postgres",
  "oxigraph",
  "oxiri",
+ "oxjsonld",
  "oxrdf",
  "oxsdatatypes",
  "parry3d-f64",

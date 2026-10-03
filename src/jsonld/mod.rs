@@ -334,6 +334,29 @@ mod tests {
         );
     }
 
+    /// The server's parses keep `@direction` as an RDF 1.2 directional
+    /// language-tagged string; JSON-LD 1.1 without `rdfDirection` drops it
+    /// (tests/w3c_jsonld_api_manifests.rs runs the suite that way).
+    #[cfg(feature = "rdf-12")]
+    #[test]
+    fn direction_is_kept_as_an_rdf12_directional_string() {
+        use oxigraph::io::RdfParser;
+        use oxigraph::model::{BaseDirection, Literal, Term};
+        let doc = br#"{"@id": "http://example.com/s",
+            "http://example.com/label": {"@value": "abc", "@language": "ar", "@direction": "rtl"}}"#;
+        let parser = RdfParser::from_format(json_ld()).for_reader(&doc[..]);
+        let quads: Vec<_> = with_loader(parser).collect::<Result<_, _>>().unwrap();
+        assert_eq!(quads.len(), 1);
+        assert_eq!(
+            quads[0].object,
+            Term::from(Literal::new_directional_language_tagged_literal_unchecked(
+                "abc",
+                "ar",
+                BaseDirection::Rtl
+            ))
+        );
+    }
+
     #[test]
     fn json_media_types() {
         assert!(is_json("application/ld+json; profile=x"));

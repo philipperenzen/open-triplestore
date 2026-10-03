@@ -65,6 +65,49 @@ pub struct JsonLdParser {
     lenient: bool,
     profile: JsonLdProfileSet,
     base: Option<Iri<String>>,
+    rdf_direction: JsonLdRdfDirection,
+}
+
+/// How a string with a [base direction](https://www.w3.org/TR/json-ld11/#base-direction)
+/// (`@direction`) becomes RDF: the
+/// [`rdfDirection` option](https://www.w3.org/TR/json-ld11-api/#dom-jsonldoptions-rdfdirection)
+/// of the JSON-LD 1.1 API, plus RDF 1.2 directional language-tagged strings.
+///
+/// The default is [`DirectionalLanguageTaggedString`](Self::DirectionalLanguageTaggedString)
+/// with the `rdf-12` feature and [`Ignore`](Self::Ignore) without it.
+///
+/// ```
+/// use oxjsonld::{JsonLdParser, JsonLdRdfDirection};
+///
+/// let file = r#"{"http://example.com/label": {"@value": "abc", "@language": "ar", "@direction": "rtl"}}"#;
+/// let quads = JsonLdParser::new()
+///     .with_rdf_direction(JsonLdRdfDirection::I18nDatatype)
+///     .for_slice(file)
+///     .collect::<Result<Vec<_>, _>>()?;
+/// assert_eq!(
+///     quads[0].object.to_string(),
+///     "\"abc\"^^<https://www.w3.org/ns/i18n#ar_rtl>"
+/// );
+/// # Result::<_, Box<dyn std::error::Error>>::Ok(())
+/// ```
+#[derive(Eq, PartialEq, Debug, Clone, Copy, Hash, Default)]
+#[non_exhaustive]
+pub enum JsonLdRdfDirection {
+    /// The direction is dropped: `"abc"@ar`.
+    ///
+    /// The JSON-LD 1.1 API behaviour when `rdfDirection` is not set.
+    #[cfg_attr(not(feature = "rdf-12"), default)]
+    Ignore,
+    /// `rdfDirection` `i18n-datatype`: `"abc"^^<https://www.w3.org/ns/i18n#ar_rtl>`.
+    I18nDatatype,
+    /// `rdfDirection` `compound-literal`: a blank node with `rdf:value`, `rdf:language` and
+    /// `rdf:direction`.
+    CompoundLiteral,
+    /// An [RDF 1.2 directional language-tagged string](https://www.w3.org/TR/rdf12-concepts/#dfn-dir-lang-string):
+    /// `"abc"@ar--rtl`. A string with a direction but no language drops the direction.
+    #[cfg(feature = "rdf-12")]
+    #[cfg_attr(feature = "rdf-12", default)]
+    DirectionalLanguageTaggedString,
 }
 
 impl JsonLdParser {
@@ -123,6 +166,16 @@ impl JsonLdParser {
     #[inline]
     pub fn with_profile(mut self, profile: impl Into<JsonLdProfileSet>) -> Self {
         self.profile = profile.into();
+        self
+    }
+
+    /// How a string with a base direction (`@direction`) becomes RDF.
+    ///
+    /// It corresponds to the [`rdfDirection` option from the algorithm specification](https://www.w3.org/TR/json-ld11-api/#dom-jsonldoptions-rdfdirection),
+    /// see [`JsonLdRdfDirection`].
+    #[inline]
+    pub fn with_rdf_direction(mut self, rdf_direction: JsonLdRdfDirection) -> Self {
+        self.rdf_direction = rdf_direction;
         self
     }
 
@@ -291,6 +344,7 @@ impl JsonLdParser {
             to_rdf: JsonLdToRdfConverter {
                 state: vec![JsonLdToRdfState::Graph(Some(GraphName::DefaultGraph))],
                 lenient: self.lenient,
+                rdf_direction: self.rdf_direction,
             },
             json_error: false,
         }
@@ -901,6 +955,7 @@ enum JsonLdToRdfState {
 struct JsonLdToRdfConverter {
     state: Vec<JsonLdToRdfState>,
     lenient: bool,
+    rdf_direction: JsonLdRdfDirection,
 }
 
 impl JsonLdToRdfConverter {
@@ -1023,10 +1078,7 @@ impl JsonLdToRdfConverter {
                     direction,
                 } => {
                     self.state.push(state);
-                    self.emit_quad_for_new_literal(
-                        self.convert_literal(value, language, direction, r#type),
-                        results,
-                    )
+                    self.emit_quads_for_new_value(value, language, direction, r#type, results)
                 }
                 JsonLdEvent::Json(value) => {
                     self.state.push(state);
@@ -1065,10 +1117,7 @@ impl JsonLdToRdfConverter {
                     direction,
                 } => {
                     self.add_new_list_node_state(current_node, results);
-                    self.emit_quad_for_new_literal(
-                        self.convert_literal(value, language, direction, r#type),
-                        results,
-                    )
+                    self.emit_quads_for_new_value(value, language, direction, r#type, results)
                 }
                 JsonLdEvent::Json(value) => {
                     self.add_new_list_node_state(current_node, results);
@@ -1178,6 +1227,83 @@ impl JsonLdToRdfConverter {
         }
     }
 
+    fn emit_quads_for_new_value(
+        &self,
+        value: JsonLdValue,
+        language: Option<String>,
+        direction: Option<&'static str>,
+        r#type: Option<String>,
+        results: &mut Vec<Quad>,
+    ) {
+        if self.rdf_direction == JsonLdRdfDirection::CompoundLiteral {
+            if let (JsonLdValue::String(value), Some(direction)) = (&value, direction) {
+                return self.emit_quads_for_compound_literal(value, language, direction, results);
+            }
+        }
+        self.emit_quad_for_new_literal(
+            self.convert_literal(value, language, direction, r#type),
+            results,
+        )
+    }
+
+    /// `rdfDirection` `compound-literal` (JSON-LD 1.1 API §8.2, Object to RDF Conversion).
+    fn emit_quads_for_compound_literal(
+        &self,
+        value: &str,
+        language: Option<String>,
+        direction: &'static str,
+        results: &mut Vec<Quad>,
+    ) {
+        let Some(graph_name) = self.last_graph_name() else {
+            return;
+        };
+        let Some(subject) = self.last_subject() else {
+            return;
+        };
+        let Some((predicate, reverse)) = self.last_predicate() else {
+            return;
+        };
+        if reverse {
+            return;
+        }
+        let language = if let Some(language) = language {
+            let language = language.to_ascii_lowercase();
+            if !self.lenient && Literal::new_language_tagged_literal(value, &language).is_err() {
+                return; // Not well-formed
+            }
+            Some(language)
+        } else {
+            None
+        };
+        let node = BlankNode::default();
+        results.push(Quad::new(
+            subject.clone(),
+            predicate,
+            node.clone(),
+            graph_name.clone(),
+        ));
+        results.push(Quad::new(
+            node.clone(),
+            rdf::VALUE,
+            Literal::new_simple_literal(value),
+            graph_name.clone(),
+        ));
+        if let Some(language) = language {
+            results.push(Quad::new(
+                node.clone(),
+                NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#language"),
+                Literal::new_simple_literal(language),
+                graph_name.clone(),
+            ));
+        }
+        results.push(Quad::new(
+            node,
+            NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#direction"),
+            Literal::new_simple_literal(direction),
+            graph_name.clone(),
+        ));
+    }
+
     fn emit_quad_for_new_literal(&self, literal: Option<Literal>, results: &mut Vec<Quad>) {
         let Some(literal) = literal else {
             return;
@@ -1245,7 +1371,6 @@ impl JsonLdToRdfConverter {
         }
     }
 
-    #[cfg_attr(not(feature = "rdf-12"), expect(unused_variables))]
     fn convert_literal(
         &self,
         value: JsonLdValue,
@@ -1260,9 +1385,23 @@ impl JsonLdToRdfConverter {
         };
         Some(match value {
             JsonLdValue::String(value) => {
+                if let (Some(direction), JsonLdRdfDirection::I18nDatatype) =
+                    (direction, self.rdf_direction)
+                {
+                    // `rdfDirection` `i18n-datatype` (JSON-LD 1.1 API §8.2, Object to RDF Conversion)
+                    let language = language.unwrap_or_default().to_ascii_lowercase();
+                    return Some(Literal::new_typed_literal(
+                        value,
+                        self.convert_named_node(format!(
+                            "https://www.w3.org/ns/i18n#{language}_{direction}"
+                        ))?,
+                    ));
+                }
                 if let Some(language) = language {
                     #[cfg(feature = "rdf-12")]
-                    if let Some(direction) = direction {
+                    if let (Some(direction), JsonLdRdfDirection::DirectionalLanguageTaggedString) =
+                        (direction, self.rdf_direction)
+                    {
                         if r#type.is_some_and(|t| t != rdf::DIR_LANG_STRING) {
                             return None; // Expansion already returns an error
                         }
