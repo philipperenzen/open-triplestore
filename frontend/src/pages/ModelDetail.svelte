@@ -169,18 +169,49 @@
   }
 
   let deleteVersionTarget = null;
+  // A delete the server refused with 409: { version, published, forceAllowed,
+  // dependents: { datasets, hidden, count } | null }. A published version can
+  // be deleted anyway (force); dependent datasets have to be re-pinned first.
+  let deleteBlocked = null;
 
-  async function doDeleteVersion() {
-    const ver = deleteVersionTarget;
+  function blockedFrom(ver, body) {
+    const reasons = Array.isArray(body?.reasons) ? body.reasons : [];
+    const deps = reasons.find((r) => r.code === 'dependents');
+    return {
+      version: ver,
+      published: reasons.some((r) => r.code === 'published'),
+      forceAllowed: !!body?.force_allowed,
+      dependents: deps
+        ? {
+            datasets: deps.datasets || [],
+            hidden: deps.hidden_datasets || 0,
+            count: (deps.datasets || []).length + (deps.hidden_datasets || 0),
+          }
+        : null,
+    };
+  }
+
+  async function doDeleteVersion(ver = deleteVersionTarget, force = false) {
     deleteVersionTarget = null;
+    deleteBlocked = null;
     deleteLoading = ver;
     try {
-      await deleteDataModelVersion(id, ver);
+      await deleteDataModelVersion(id, ver, force);
       await load();
     } catch (e) {
-      alert(e.message);
+      if (e.status === 409 && e.body?.reasons) {
+        deleteBlocked = blockedFrom(ver, e.body);
+      } else {
+        alert(e.message);
+      }
     }
     deleteLoading = '';
+  }
+
+  function dependentReason(d) {
+    if (d.reason === 'pinned') return $t('pages.modelDetail.deleteVersionReasonPinned');
+    if (d.reason === 'floating') return $t('pages.modelDetail.deleteVersionReasonFloating');
+    return $t('pages.modelDetail.deleteVersionReasonDatasetVersion', { values: { version: d.dataset_version } });
   }
 
   async function handleCreateDraft(fromVer) {
@@ -603,8 +634,8 @@
                     </button>
                   {/if}
 
-                  <!-- Delete -->
-                  {#if $isAdmin}
+                  <!-- Delete (the server allows admins and publishers who may write the entry) -->
+                  {#if $isAdmin || isPublisher}
                     <button
                       class="ver-btn ver-btn-danger"
                       title={$t('pages.modelDetail.deleteVersion')}
@@ -733,12 +764,43 @@
     title={$t('pages.modelDetail.deleteVersionConfirmTitle', { values: { version: deleteVersionTarget } })}
     message={$t('pages.modelDetail.deleteVersionConfirmMessage')}
     confirmLabel={$t('pages.modelDetail.deleteVersion')}
-    on:confirm={doDeleteVersion}
+    on:confirm={() => doDeleteVersion()}
     on:cancel={() => deleteVersionTarget = null}
   />
 {/if}
 
+{#if deleteBlocked}
+  <ConfirmModal
+    title={$t('pages.modelDetail.deleteVersionBlockedTitle', { values: { version: deleteBlocked.version } })}
+    confirmVariant="warning"
+    confirmLabel={deleteBlocked.forceAllowed ? $t('pages.modelDetail.deleteVersionForce') : $t('pages.modelDetail.deleteVersionClose')}
+    on:confirm={() => deleteBlocked.forceAllowed ? doDeleteVersion(deleteBlocked.version, true) : (deleteBlocked = null)}
+    on:cancel={() => deleteBlocked = null}
+  >
+    <div class="delete-blocked" data-testid="delete-version-blocked">
+      {#if deleteBlocked.published}
+        <p>{$t('pages.modelDetail.deleteVersionPublished')}</p>
+      {/if}
+      {#if deleteBlocked.dependents}
+        <p>{$t('pages.modelDetail.deleteVersionDependents', { values: { count: deleteBlocked.dependents.count } })}</p>
+        <ul>
+          {#each deleteBlocked.dependents.datasets as d}
+            <li><a href="/datasets/{d.dataset_id}">{d.name || d.dataset_id}</a> — {dependentReason(d)}</li>
+          {/each}
+          {#if deleteBlocked.dependents.hidden > 0}
+            <li>{$t('pages.modelDetail.deleteVersionHidden', { values: { count: deleteBlocked.dependents.hidden } })}</li>
+          {/if}
+        </ul>
+      {/if}
+    </div>
+  </ConfirmModal>
+{/if}
+
 <style>
+  .delete-blocked { width: 100%; text-align: left; font-size: 0.875rem; color: var(--ink-600, #475569); }
+  .delete-blocked p { margin: 0.25rem 0; line-height: 1.5; }
+  .delete-blocked ul { margin: 0.25rem 0 0; padding-left: 1.25rem; }
+  .delete-blocked li { margin: 0.125rem 0; }
   .btn { display: inline-flex; align-items: center; gap: 0.375rem; padding: 0.5rem 1rem; border-radius: 0.75rem; font-size: 0.875rem; font-weight: 500; cursor: pointer; border: none; transition: all 0.15s; text-decoration: none; }
   .btn-primary { background: var(--brand-500, #6366f1); color: white; }
   .btn-primary:hover { background: var(--brand-600, #4f46e5); }

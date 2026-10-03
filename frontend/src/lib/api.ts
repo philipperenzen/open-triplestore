@@ -1673,7 +1673,14 @@ export const updateDataModel = (id, data) => request('PATCH', `/api/models/${id}
 
 export const listDataModelVersions = (id) => request('GET', `/api/models/${id}/versions`);
 export const getDataModelVersion = (id, ver) => request('GET', `/api/models/${id}/versions/${ver}`);
-export const deleteDataModelVersion = (id, ver) => request('DELETE', `/api/models/${id}/versions/${ver}`);
+/**
+ * Delete one model version (admins, and publishers who may write the entry).
+ * A published version answers 409 unless `force`; datasets depending on it
+ * answer 409 whatever `force` says. The 409 body (on `err.body`) carries
+ * `reasons` and `force_allowed`.
+ */
+export const deleteDataModelVersion = (id, ver, force = false) =>
+  request('DELETE', `/api/models/${id}/versions/${ver}${force ? '?force=true' : ''}`);
 export const updateDataModelVersionNotes = (id, ver, notes) => request('PATCH', `/api/models/${id}/versions/${ver}`, { notes });
 export const stageDataModelVersion = (id, ver) => request('POST', `/api/models/${id}/versions/${ver}/stage`);
 export const publishDataModelVersion = (id, ver) => request('POST', `/api/models/${id}/versions/${ver}/publish`);
