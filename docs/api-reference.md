@@ -148,6 +148,32 @@ and the level the router enforces cannot drift apart.
 
 Use the **Copy URL** buttons on dataset, organisation, and model detail pages to quickly grab the correct endpoint URL for each resource.
 
+## The dataset of a `/sparql` query
+
+A query's RDF dataset is the one SPARQL 1.1 defines, confined to the graphs the
+caller may read:
+
+- **The request names a dataset** with `FROM` / `FROM NAMED` in the query, or with
+  the protocol parameters `default-graph-uri` / `named-graph-uri` (each repeatable;
+  they take precedence over the query's own clauses, SPARQL 1.1 Protocol §2.1.4).
+  The clauses keep their meaning: `FROM <a>` alone makes `<a>` the default graph
+  and leaves no named graphs, `FROM NAMED <b>` alone gives an empty default graph
+  and the one named graph `<b>`, and several `FROM` graphs merge into one default
+  graph (a triple held in two of them counts once). A graph the caller may not read
+  is dropped, as if it were empty, so the answer does not reveal whether it exists.
+  An admin's dataset is used as written (admins may name any graph).
+- **The request names no dataset:** the default graph is the merge of every graph
+  the caller may read (every registered graph, for an admin), and those graphs are
+  also the named graphs, so a plain `SELECT * { ?s ?p ?o }` sees the data, which
+  this store keeps in named graphs. The service description advertises this as
+  `sd:UnionDefaultGraph`.
+- `?entailment=<regime>` adds the regime's entailment graph to the default graph
+  (and to the named graphs when no dataset is named).
+
+GET carries the parameters in the URL; a form-encoded POST in its body (or the URL);
+a POST with an `application/sparql-query` body in the URL. A parameter that is not
+an absolute IRI is a `400`.
+
 ## Batched SPARQL updates — `/sparql/batch`
 
 `POST /sparql/batch` with a JSON body `{"updates": ["<update 1>", "<update 2>", …]}`

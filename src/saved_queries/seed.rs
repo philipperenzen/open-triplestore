@@ -720,6 +720,8 @@ fn seed_bag_buildings(state: &AppState) {
 // v15: the capabilities graph follows the 2026-10-03 regrades in
 // docs/standards.md: SPARQL 1.1 federation, OWL 2 QL, EL and DL (with the
 // reasoner sidecar), RDF Patch and LDES are Full.
+// v15: the capabilities demo graph grades SPARQL 1.1 Query Full and adds the
+// SPARQL 1.1 Protocol row (docs/standards.md, 2026-10-03).
 // v14: the capabilities graph (its own `capabilities` dataset) gives each
 // standard the grade docs/standards.md gives it; it said "Full" for all of them.
 // v13: refreshes the demo dataset's own name/description from the current

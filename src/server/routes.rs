@@ -17,7 +17,7 @@
 //! prefixes like `foaf:`, `schema:`, or `owl:` without boilerplate.
 
 use axum::body::Bytes;
-use axum::extract::{Extension, Multipart, Path, Query, State};
+use axum::extract::{Extension, Multipart, Path, Query, RawQuery, State};
 use axum::http::header::{ACCEPT, CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -135,6 +135,7 @@ async fn sparql_query_get(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
     Query(params): Query<SparqlQueryParams>,
+    RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let query = match params.query {
@@ -158,6 +159,7 @@ async fn sparql_query_get(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/sparql-results+json");
 
+    let protocol = protocol_dataset_from_url(raw_query.as_deref())?;
     execute_query(
         &state,
         user.as_deref(),
@@ -165,8 +167,30 @@ async fn sparql_query_get(
         accept,
         params.entailment.as_deref(),
         params.entailment_dataset.as_deref(),
+        &protocol,
     )
     .await
+}
+
+/// The `default-graph-uri` / `named-graph-uri` parameters of a URL query string
+/// (SPARQL 1.1 Protocol §2.1.1, §2.1.3). `Query<SparqlQueryParams>` cannot
+/// collect them: both may repeat.
+fn protocol_dataset_from_url(raw_query: Option<&str>) -> Result<ProtocolDataset, AppError> {
+    let pairs = url_pairs(raw_query);
+    ProtocolDataset::from_pairs(pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+}
+
+/// The `using-graph-uri` / `using-named-graph-uri` parameters of a URL query
+/// string (SPARQL 1.1 Protocol §2.2.2).
+fn update_dataset_from_url(raw_query: Option<&str>) -> Result<ProtocolDataset, AppError> {
+    let pairs = url_pairs(raw_query);
+    ProtocolDataset::from_update_pairs(pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+}
+
+fn url_pairs(raw_query: Option<&str>) -> Vec<(String, String)> {
+    url::form_urlencoded::parse(raw_query.unwrap_or("").as_bytes())
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect()
 }
 
 /// POST /sparql
@@ -178,6 +202,7 @@ async fn sparql_post(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
     Query(url_params): Query<SparqlQueryParams>,
+    RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
@@ -202,7 +227,8 @@ async fn sparql_post(
         .filter(|s| !s.is_empty());
 
     if content_type.starts_with("application/sparql-query") {
-        // Direct query in body
+        // Direct query in body; the dataset parameters ride in the URL (§2.1.2).
+        let protocol = protocol_dataset_from_url(raw_query.as_deref())?;
         execute_query(
             &state,
             user.as_deref(),
@@ -210,6 +236,7 @@ async fn sparql_post(
             accept,
             url_params.entailment.as_deref(),
             url_params.entailment_dataset.as_deref(),
+            &protocol,
         )
         .await
     } else if content_type.starts_with("application/sparql-update") {
@@ -219,7 +246,8 @@ async fn sparql_post(
                 "Authentication required for SPARQL updates".to_string(),
             ));
         }
-        execute_update(&state, user.as_deref(), &body_str, commit_msg).await
+        let using = update_dataset_from_url(raw_query.as_deref())?;
+        execute_update(&state, user.as_deref(), &body_str, commit_msg, &using).await
     } else if content_type.starts_with("application/x-www-form-urlencoded") {
         // Parse form body
         let params: Vec<(String, String)> = url::form_urlencoded::parse(body_str.as_bytes())
@@ -245,14 +273,27 @@ async fn sparql_post(
         let ent = field("entailment").or(url_params.entailment.as_deref());
         let ent_ds = field("entailment_dataset").or(url_params.entailment_dataset.as_deref());
         if let Some(q) = query {
-            execute_query(&state, user.as_deref(), q, accept, ent, ent_ds).await
+            // The dataset parameters ride in the form body (§2.1.3), or in the
+            // URL when the form has none.
+            let mut protocol =
+                ProtocolDataset::from_pairs(params.iter().map(|(k, v)| (k.as_str(), v.as_str())))?;
+            if protocol.is_empty() {
+                protocol = protocol_dataset_from_url(raw_query.as_deref())?;
+            }
+            execute_query(&state, user.as_deref(), q, accept, ent, ent_ds, &protocol).await
         } else if let Some(u) = update {
             if user.is_none() {
                 return Err(AppError::Unauthorized(
                     "Authentication required for SPARQL updates".to_string(),
                 ));
             }
-            execute_update(&state, user.as_deref(), u, commit_msg).await
+            let mut using = ProtocolDataset::from_update_pairs(
+                params.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+            )?;
+            if using.is_empty() {
+                using = update_dataset_from_url(raw_query.as_deref())?;
+            }
+            execute_update(&state, user.as_deref(), u, commit_msg, &using).await
         } else {
             Err(AppError::BadRequest(
                 "Missing 'query' or 'update' in form body".to_string(),
@@ -505,6 +546,7 @@ async fn execute_query(
     accept: &str,
     entailment: Option<&str>,
     entailment_dataset: Option<&str>,
+    protocol: &ProtocolDataset,
 ) -> Result<Response, AppError> {
     debug!("Executing query, Accept: {}", accept);
 
@@ -539,73 +581,27 @@ async fn execute_query(
         }
     }
 
-    // We always scope the query to FROM/FROM NAMED clauses so plain `WHERE { ?s ?p ?o }`
-    // queries (which match only the default graph in standard SPARQL) still see triples
-    // held in named graphs — otherwise querying the main store with `?s ?p ?o` would yield
-    // an empty result, since this store keeps all data in named graphs.
-    //
-    // Admins may read every registered graph and may legitimately name additional
-    // server-owned graphs (entailment regimes, system graphs) in their own FROM clauses,
-    // so their dataset is preserved and all registered graphs are exposed additively.
-    // Everyone else is strictly re-scoped: any FROM / FROM NAMED clause they supplied is
-    // intersected with the graphs they may read, so naming a private graph in FROM NAMED
-    // cannot widen what the query can see (security boundary — see scope_query_to_authorized).
-    let scoped_query = if user.map(|u| u.is_admin()).unwrap_or(false) {
-        if all_registered.is_empty() {
-            Some(query.to_string())
-        } else {
-            let mut from_clauses = String::new();
-            // Sorted: see `sorted_iris` — an unordered HashSet walk makes this
-            // prologue (and therefore the query-cache key) change every TTL refresh.
-            for iri in sorted_iris(all_registered) {
-                from_clauses.push_str(&format!("FROM <{}>\nFROM NAMED <{}>\n", iri, iri));
-            }
-            Some(inject_from_clauses(query, &from_clauses))
-        }
-    } else {
-        Some(scope_query_to_authorized(query, &accessible))
-    };
-
-    // Fail-closed read boundary (non-admins only). Capture the graphs the caller
-    // may read now, before the text-search block consumes `accessible`; the
-    // server-owned entailment graph (added additively below) is folded in once it
-    // is known. The final query is checked against this set just before execution,
-    // so a literal-spliced or unstripped `FROM` clause cannot widen the read past
-    // it. Admins are scoped additively over every registered graph, so they are
-    // exempt. See [`ensure_query_within_scope`].
-    let mut guard_scope: Option<std::collections::HashSet<String>> =
-        if user.map(|u| u.is_admin()).unwrap_or(false) {
-            None
-        } else {
-            Some(accessible.clone())
-        };
+    let is_admin = user.map(|u| u.is_admin()).unwrap_or(false);
 
     // Full-text preprocessing: `text:search` expansion + CONTAINS/STRSTARTS
-    // push-down (text-search feature). Runs on the already-scoped query, and
-    // is handed the same graph set so index hits obey the same read boundary.
-    // Admins read every registered graph, matching the FROM branch above.
+    // push-down (text-search feature). It rewrites the caller's query before the
+    // dataset is set below, and is handed the readable graph set so index hits
+    // obey the same read boundary. Admins read every registered graph.
     #[cfg(feature = "text-search")]
     let query_after_text_search: String;
     #[cfg(feature = "text-search")]
     let query = {
-        // `accessible` is already an owned per-request set (the cached one plus
-        // this caller's graph-ACL grants), so handing it to the blocking task
-        // costs an Arc, not a second copy. It is not read again below.
         let scope = crate::text_search::sparql_fn::graph_scope(
-            user.map(|u| u.is_admin()).unwrap_or(false),
-            std::sync::Arc::new(accessible),
+            is_admin,
+            std::sync::Arc::new(accessible.clone()),
         );
-        query_after_text_search = state
-            .apply_text_search(scoped_query.as_deref().unwrap_or(query), scope)
-            .await?;
+        query_after_text_search = state.apply_text_search(query, scope).await?;
         &query_after_text_search as &str
     };
-    #[cfg(not(feature = "text-search"))]
-    let query = scoped_query.as_deref().unwrap_or(query);
 
     // Entailment: a dataset's own entailment graph (`entailment_dataset`, regime
     // from the parameter or the dataset's configuration), else the shared
-    // `urn:entailment:<regime>` graph, joins the default graph via FROM.
+    // `urn:entailment:<regime>` graph, joins the default graph (below).
     // Whether the regime is OWL 2 QL: its blank nodes are then rewritten
     // existentially over the TBox (see below).
     let mut ql_existentials = false;
@@ -660,28 +656,55 @@ async fn execute_query(
     } else {
         None
     };
-    let entailment_query: String;
-    let query = if let Some(iri) = entailment_graph {
-        // The regime graph is server-owned and added additively, so it is part of
-        // the readable scope for the guard below.
-        if let Some(scope) = guard_scope.as_mut() {
-            scope.insert(iri.clone());
+    let resolved = resolve_prefixes(state, query).await;
+    let query = resolved.as_deref().unwrap_or(query);
+
+    // The query's RDF dataset (SPARQL 1.1 §13; Protocol §2.1.4), set on the parsed
+    // query rather than spliced into its text (see [`scope_query_dataset`]):
+    // `default-graph-uri` / `named-graph-uri` replace the query's own `FROM` /
+    // `FROM NAMED`; whichever names a dataset keeps its meaning, confined to the
+    // graphs the caller may read (admins: any graph); only a request naming no
+    // dataset gets the union of the readable graphs (every registered graph,
+    // for an admin) as its default graph. The server-owned entailment graph
+    // joins the default graph. This store keeps its data in named graphs, so
+    // a plain `?s ?p ?o` still sees it.
+    let read_scope = if is_admin {
+        ReadScope::Everything {
+            registered: all_registered,
         }
-        entailment_query =
-            inject_from_clauses(query, &format!("FROM <{iri}>\nFROM NAMED <{iri}>\n"));
-        &entailment_query as &str
     } else {
-        query
+        ReadScope::Within(&accessible)
+    };
+    let effective_query_str = match scope_query_dataset(
+        query,
+        read_scope,
+        Some(protocol),
+        entailment_graph.as_deref(),
+    ) {
+        Some(scoped) => scoped,
+        // Not parseable by our parser: the store will reject it too. Scope the
+        // text the old way, so nothing reaches the store unscoped (the guard
+        // below still checks it) — but a dataset given through the protocol
+        // cannot be honoured on text we cannot parse.
+        None if !protocol.is_empty() => return Err(AppError::BadRequest(
+            "the query does not parse, so default-graph-uri / named-graph-uri cannot be applied"
+                .to_string(),
+        )),
+        None if is_admin => query.to_string(),
+        None => scope_query_to_authorized_text(query, &accessible),
     };
 
-    let effective_query = resolve_prefixes(state, query).await;
-    let effective_query_str = effective_query.as_deref().unwrap_or(query).to_string();
-
-    // Fail-closed: the rewritten non-admin query must name only graphs the caller
-    // may read (see [`ensure_query_within_scope`]). Runs before the query reaches
-    // the store, so an out-of-scope graph is a 403, never a read.
-    if let Some(allowed) = &guard_scope {
-        ensure_query_within_scope(&effective_query_str, allowed)?;
+    // Fail-closed read boundary (non-admins only): parse the exact text about
+    // to reach the store and refuse it unless its dataset names only graphs the
+    // caller may read (plus the server-owned entailment graph). Runs before the
+    // query reaches the store, so an out-of-scope graph is a 403, never a read.
+    // Admins may read every graph. See [`ensure_query_within_scope`].
+    if !is_admin {
+        let mut allowed = accessible;
+        if let Some(iri) = &entailment_graph {
+            allowed.insert(iri.clone());
+        }
+        ensure_query_within_scope(&effective_query_str, &allowed)?;
     }
 
     // M-1: Enforce a configurable SPARQL query timeout to prevent runaway queries.
@@ -795,21 +818,67 @@ async fn execute_query(
 /// graph IRIs. `require_graph_write` is called for each one so that the
 /// graph-level ACL is enforced for SPARQL UPDATE the same way it is for
 /// the Graph Store Protocol PUT/POST/DELETE endpoints.
+/// Set the protocol's `using-graph-uri` / `using-named-graph-uri` dataset on
+/// every `DELETE` / `INSERT … WHERE` operation of `update`. `400` when an
+/// operation already names one (`USING`, `USING NAMED`, or `WITH`, which the
+/// parser records the same way), as SPARQL 1.1 Protocol §2.2.3 requires.
+fn apply_update_protocol_dataset(
+    update: &mut spargebra::Update,
+    using: &ProtocolDataset,
+) -> Result<(), AppError> {
+    use spargebra::term::NamedNode;
+    let nodes = |list: &[String]| -> Vec<NamedNode> {
+        list.iter()
+            .map(|g| NamedNode::new_unchecked(g.clone()))
+            .collect()
+    };
+    for op in &mut update.operations {
+        if let GraphUpdateOperation::DeleteInsert {
+            using: op_using, ..
+        } = op
+        {
+            if op_using.is_some() {
+                return Err(AppError::BadRequest(
+                    "using-graph-uri / using-named-graph-uri cannot be combined with an \
+                     operation that has its own USING, USING NAMED or WITH clause"
+                        .to_string(),
+                ));
+            }
+            *op_using = Some(spargebra::algebra::QueryDataset {
+                default: nodes(&using.default),
+                named: Some(nodes(&using.named)),
+            });
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn execute_update(
     state: &AppState,
     user: Option<&AuthenticatedUser>,
     update: &str,
     message: Option<&str>,
+    using: &ProtocolDataset,
 ) -> Result<Response, AppError> {
     debug!("Executing update");
 
     let effective_update = resolve_prefixes(state, update).await;
-    let effective_str = effective_update.as_deref().unwrap_or(update);
+    let mut effective_str = effective_update.as_deref().unwrap_or(update).to_string();
 
     // Parse with spargebra to extract target graph IRIs for ACL checking.
-    let parsed = crate::sparql::parser()
-        .parse_update(effective_str)
+    let mut parsed = crate::sparql::parser()
+        .parse_update(&effective_str)
         .map_err(|e| AppError::BadRequest(format!("Invalid SPARQL UPDATE: {}", e)))?;
+
+    // `using-graph-uri` / `using-named-graph-uri` (SPARQL 1.1 Protocol §2.2.3):
+    // the RDF dataset of every `DELETE` / `INSERT … WHERE` operation, set on the
+    // parsed request (and so seen by the read-side ACL check below). Combining
+    // them with an operation's own `USING`, `USING NAMED` or `WITH` is an error.
+    if !using.is_empty() {
+        apply_update_protocol_dataset(&mut parsed, using)?;
+        effective_str = parsed.to_string();
+    }
+    let effective_str = effective_str.as_str();
 
     // M-8: Enforce API token write scope — read-only tokens may not perform SPARQL UPDATE.
     if let Some(u) = user {
@@ -6038,19 +6107,205 @@ fn extract_and_strip_dataset(head: &str) -> (Vec<String>, String) {
     )
 }
 
+/// The RDF dataset a SPARQL Protocol request names through its
+/// `default-graph-uri` and `named-graph-uri` parameters (SPARQL 1.1 Protocol
+/// §2.1.4), each repeatable. When either is present it replaces any `FROM` /
+/// `FROM NAMED` in the query text.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct ProtocolDataset {
+    pub default: Vec<String>,
+    pub named: Vec<String>,
+}
+
+impl ProtocolDataset {
+    /// Collect a query's dataset parameters (`default-graph-uri`,
+    /// `named-graph-uri`) from `key=value` pairs (a URL query string or a form
+    /// body). An IRI that is not absolute is a 400.
+    pub(crate) fn from_pairs<'a>(
+        pairs: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Result<Self, AppError> {
+        Self::from_pairs_named(pairs, "default-graph-uri", "named-graph-uri")
+    }
+
+    /// Collect an update's dataset parameters (`using-graph-uri`,
+    /// `using-named-graph-uri`, SPARQL 1.1 Protocol §2.2.3).
+    pub(crate) fn from_update_pairs<'a>(
+        pairs: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Result<Self, AppError> {
+        Self::from_pairs_named(pairs, "using-graph-uri", "using-named-graph-uri")
+    }
+
+    fn from_pairs_named<'a>(
+        pairs: impl IntoIterator<Item = (&'a str, &'a str)>,
+        default_key: &str,
+        named_key: &str,
+    ) -> Result<Self, AppError> {
+        let mut out = Self::default();
+        for (k, v) in pairs {
+            let list = if k == default_key {
+                &mut out.default
+            } else if k == named_key {
+                &mut out.named
+            } else {
+                continue;
+            };
+            oxigraph::model::NamedNode::new(v).map_err(|e| {
+                AppError::BadRequest(format!("{k} is not an absolute IRI: <{v}>: {e}"))
+            })?;
+            list.push(v.to_string());
+        }
+        Ok(out)
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.default.is_empty() && self.named.is_empty()
+    }
+}
+
+/// Which graphs a query may read, for [`scope_query_dataset`].
+#[derive(Clone, Copy)]
+pub(crate) enum ReadScope<'a> {
+    /// An admin: any graph it names, and every registered graph when it names
+    /// none.
+    Everything {
+        registered: &'a std::collections::HashSet<String>,
+    },
+    /// Everyone else: only these graphs.
+    Within(&'a std::collections::HashSet<String>),
+}
+
+/// Give a query the RDF dataset SPARQL 1.1 defines for it, confined to what the
+/// caller may read, by parsing it and setting its dataset — never by splicing
+/// text. `None` when the query does not parse with [`crate::sparql::parser`].
+///
+/// - The dataset the request names — the protocol's `default-graph-uri` /
+///   `named-graph-uri` if given, else the query's own `FROM` / `FROM NAMED` —
+///   keeps its meaning: `FROM <a>` alone makes `<a>` the default graph and
+///   leaves no named graphs, `FROM NAMED <b>` alone gives an empty default
+///   graph. Each graph the caller may not read is dropped, exactly as if it
+///   were empty, so the answer does not reveal whether it exists.
+/// - Only a request that names no dataset gets the union default: every
+///   readable graph merged into the default graph (several `FROM`, merged as a
+///   set), each also a named graph. This store keeps its data in named graphs,
+///   so a plain `?s ?p ?o` sees it.
+/// - `extra_default` (a server-owned entailment graph) joins the default graph,
+///   and in the union case the named graphs too.
+///
+/// A dataset with nothing left in it is pinned to [`EMPTY_SCOPE_GRAPH`].
+pub(crate) fn scope_query_dataset(
+    query: &str,
+    scope: ReadScope<'_>,
+    protocol: Option<&ProtocolDataset>,
+    extra_default: Option<&str>,
+) -> Option<String> {
+    use spargebra::algebra::QueryDataset;
+    use spargebra::term::NamedNode;
+
+    let mut parsed = crate::sparql::parser().parse_query(query).ok()?;
+    let slot = match &mut parsed {
+        spargebra::Query::Select { dataset, .. }
+        | spargebra::Query::Construct { dataset, .. }
+        | spargebra::Query::Describe { dataset, .. }
+        | spargebra::Query::Ask { dataset, .. } => dataset,
+    };
+    let requested: Option<(Vec<String>, Vec<String>)> = match protocol {
+        Some(p) if !p.is_empty() => Some((p.default.clone(), p.named.clone())),
+        _ => slot.as_ref().map(|ds| {
+            (
+                ds.default.iter().map(|g| g.as_str().to_string()).collect(),
+                ds.named
+                    .iter()
+                    .flatten()
+                    .map(|g| g.as_str().to_string())
+                    .collect(),
+            )
+        }),
+    };
+    let readable = |g: &str| match scope {
+        ReadScope::Everything { .. } => true,
+        ReadScope::Within(allowed) => allowed.contains(g),
+    };
+    // Requested lists keep their order, minus duplicates and unreadable graphs.
+    let confine = |list: Vec<String>| {
+        let mut seen = std::collections::HashSet::new();
+        list.into_iter()
+            .filter(|g| readable(g) && seen.insert(g.clone()))
+            .collect::<Vec<_>>()
+    };
+    let (mut default, mut named, union) = match requested {
+        Some((d, n)) => (confine(d), confine(n), false),
+        None => {
+            let all = match scope {
+                ReadScope::Everything { registered } => registered,
+                ReadScope::Within(allowed) => allowed,
+            };
+            // Sorted: `all` is a HashSet rebuilt on a TTL with a fresh
+            // RandomState, and this text is the result-cache key.
+            let all: Vec<String> = sorted_iris(all).into_iter().map(str::to_string).collect();
+            if all.is_empty() && extra_default.is_none() {
+                if let ReadScope::Everything { .. } = scope {
+                    // An admin on a store with no registered graph keeps the
+                    // store's own default graph.
+                    return Some(query.to_string());
+                }
+            }
+            (all.clone(), all, true)
+        }
+    };
+    if let Some(g) = extra_default {
+        if !default.iter().any(|d| d == g) {
+            default.push(g.to_string());
+        }
+        if union && !named.iter().any(|n| n == g) {
+            named.push(g.to_string());
+        }
+    }
+    if default.is_empty() && named.is_empty() {
+        // A dataset with no graph at all prints as no dataset clause, which
+        // would read the store's default graph; pin it to a graph that holds
+        // nothing instead (and name no graph, so `GRAPH ?g` stays empty).
+        default.push(EMPTY_SCOPE_GRAPH.to_string());
+    }
+    let to_nodes = |list: Vec<String>| -> Vec<NamedNode> {
+        list.into_iter()
+            .filter_map(|g| NamedNode::new(g).ok())
+            .collect()
+    };
+    *slot = Some(QueryDataset {
+        default: to_nodes(default),
+        named: Some(to_nodes(named)),
+    });
+    Some(parsed.to_string())
+}
+
 /// Re-scope a caller-supplied query so it can only read graphs in `authorized`.
 ///
-/// Any `FROM` / `FROM NAMED` clause the caller wrote is treated as a *request*
-/// and intersected with `authorized`; graphs the caller may not read are
-/// dropped. A caller that names no dataset is scoped to the full `authorized`
-/// set, so a plain `?s ?p ?o` query still sees data held in named graphs
-/// (this store keeps all data in named graphs).
+/// [`scope_query_dataset`] with [`ReadScope::Within`]: the query's own
+/// `FROM` / `FROM NAMED` keep their meaning, intersected with `authorized`
+/// (graphs the caller may not read are dropped), and a query that names no
+/// dataset is scoped to the union of the `authorized` graphs, so a plain
+/// `?s ?p ?o` still sees data held in named graphs (this store keeps all data
+/// in named graphs).
 ///
 /// This is the read-access security boundary: it is what stops an
 /// unauthenticated or under-privileged caller from naming a private graph in
-/// `FROM NAMED <…>` to exfiltrate it. Unlike [`inject_from_clauses`], it removes
-/// the caller's dataset before applying the authorized scope.
+/// `FROM NAMED <…>` to exfiltrate it. A query that does not parse falls back to
+/// the textual rewriter, [`scope_query_to_authorized_text`]; the store then
+/// rejects it, and [`ensure_query_within_scope`] backstops both paths.
 pub(crate) fn scope_query_to_authorized(
+    query: &str,
+    authorized: &std::collections::HashSet<String>,
+) -> String {
+    scope_query_dataset(query, ReadScope::Within(authorized), None, None)
+        .unwrap_or_else(|| scope_query_to_authorized_text(query, authorized))
+}
+
+/// The textual fallback of [`scope_query_to_authorized`], for a query
+/// [`crate::sparql::parser`] cannot parse: strips the `FROM` / `FROM NAMED`
+/// clauses it recognises, intersects them with `authorized` and injects one
+/// `FROM` / `FROM NAMED` pair per graph it keeps (all of `authorized` if the
+/// caller named none) before the first `WHERE`.
+fn scope_query_to_authorized_text(
     query: &str,
     authorized: &std::collections::HashSet<String>,
 ) -> String {
@@ -6169,7 +6424,8 @@ fn ensure_query_within_scope(
 mod query_scoping_tests {
     use super::{
         ensure_query_within_scope, extract_and_strip_dataset, first_top_level_where,
-        scope_query_to_authorized,
+        scope_query_dataset, scope_query_to_authorized, scope_query_to_authorized_text,
+        ProtocolDataset, ReadScope,
     };
     use std::collections::HashSet;
 
@@ -6210,32 +6466,192 @@ mod query_scoping_tests {
 
     #[test]
     fn guard_rejects_a_from_named_that_the_scanner_left_in_place() {
-        // No space before `<`, so `extract_and_strip_dataset` never strips it and
-        // the caller's own graph survives beside the injected prologue.
+        // No space before `<`, so the textual fallback never strips it and the
+        // caller's own graph survives beside the injected prologue.
         let iris = ["http://ex.org/g/a"];
-        let (ok, scoped) = scope_then_guard(
-            "SELECT * FROM NAMED<http://secret/private> WHERE { GRAPH ?g { ?s ?p ?o } }",
-            &iris,
-        );
+        let attack = "SELECT * FROM NAMED<http://secret/private> WHERE { GRAPH ?g { ?s ?p ?o } }";
+        let set = authz(&iris);
+        let scoped = scope_query_to_authorized_text(attack, &set);
         assert!(
-            !ok,
+            ensure_query_within_scope(&scoped, &set).is_err(),
             "an unstripped FROM NAMED of an unauthorized graph must be refused: {scoped}"
         );
+        // The parse-based scoper reads the clause as the grammar does and drops it.
+        let (ok, scoped) = scope_then_guard(attack, &iris);
+        assert!(ok, "{scoped}");
+        assert!(!scoped.contains("secret"), "{scoped}");
     }
 
     #[test]
     fn guard_rejects_a_prologue_spliced_into_a_string_literal() {
-        // A ` WHERE ` inside a triple-quoted literal mis-anchors the rewriter, so
-        // the injected prologue lands inside the literal and the query is left with
-        // no dataset clause — which would read every named graph in the store.
+        // A ` WHERE ` inside a triple-quoted literal mis-anchors the textual
+        // fallback, so the injected prologue lands inside the literal and the query
+        // is left with no dataset clause — which would read every named graph.
         let iris = ["http://ex.org/g/a"];
         let attack = "SELECT ?g ?o (\"\"\"x WHERE x\"\"\" AS ?z) \
              WHERE { GRAPH ?g { ?s ?p ?o } }";
-        let (ok, scoped) = scope_then_guard(attack, &iris);
+        let set = authz(&iris);
+        let scoped = scope_query_to_authorized_text(attack, &set);
         assert!(
-            !ok,
+            ensure_query_within_scope(&scoped, &set).is_err(),
             "a query whose scope prologue was neutralised must be refused: {scoped}"
         );
+        // Setting the dataset on the parsed query cannot be mis-anchored.
+        let (ok, scoped) = scope_then_guard(attack, &iris);
+        assert!(ok, "{scoped}");
+        assert!(
+            scoped.contains("FROM NAMED <http://ex.org/g/a>"),
+            "{scoped}"
+        );
+    }
+
+    /// Parse a scoped query back and return its (default, named) graph lists.
+    fn dataset_of(query: &str) -> (Vec<String>, Option<Vec<String>>) {
+        let parsed = crate::sparql::parser().parse_query(query).unwrap();
+        let ds = match &parsed {
+            spargebra::Query::Select { dataset, .. }
+            | spargebra::Query::Construct { dataset, .. }
+            | spargebra::Query::Describe { dataset, .. }
+            | spargebra::Query::Ask { dataset, .. } => dataset.clone(),
+        }
+        .expect("a scoped query always has a dataset");
+        (
+            ds.default.iter().map(|g| g.as_str().to_string()).collect(),
+            ds.named
+                .map(|n| n.iter().map(|g| g.as_str().to_string()).collect()),
+        )
+    }
+
+    fn strings(iris: &[&str]) -> Vec<String> {
+        iris.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn from_alone_keeps_its_meaning_and_names_no_graph() {
+        let set = authz(&["urn:g:a", "urn:g:b"]);
+        let scoped = scope_query_to_authorized("SELECT * FROM <urn:g:a> WHERE { ?s ?p ?o }", &set);
+        assert_eq!(dataset_of(&scoped), (strings(&["urn:g:a"]), Some(vec![])));
+    }
+
+    #[test]
+    fn from_named_alone_keeps_an_empty_default_graph() {
+        let set = authz(&["urn:g:a", "urn:g:b"]);
+        let scoped = scope_query_to_authorized(
+            "SELECT * FROM NAMED <urn:g:b> WHERE { GRAPH ?g { ?s ?p ?o } }",
+            &set,
+        );
+        assert_eq!(dataset_of(&scoped), (vec![], Some(strings(&["urn:g:b"]))));
+    }
+
+    #[test]
+    fn a_sub_select_without_an_outer_where_gets_the_dataset_at_the_top() {
+        // No outer `WHERE` keyword: the textual rewriter spliced the prologue into
+        // the inner sub-select, which the grammar does not allow (400).
+        let set = authz(&["urn:g:a"]);
+        let scoped =
+            scope_query_to_authorized("SELECT ?s { { SELECT ?s WHERE { ?s ?p ?o } } }", &set);
+        assert_eq!(
+            dataset_of(&scoped),
+            (strings(&["urn:g:a"]), Some(strings(&["urn:g:a"])))
+        );
+    }
+
+    #[test]
+    fn protocol_dataset_replaces_the_query_dataset() {
+        let set = authz(&["urn:g:a", "urn:g:b", "urn:g:c"]);
+        let protocol = ProtocolDataset {
+            default: strings(&["urn:g:b", "urn:g:secret"]),
+            named: strings(&["urn:g:c"]),
+        };
+        let scoped = scope_query_dataset(
+            "SELECT * FROM <urn:g:a> WHERE { ?s ?p ?o }",
+            ReadScope::Within(&set),
+            Some(&protocol),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            dataset_of(&scoped),
+            (strings(&["urn:g:b"]), Some(strings(&["urn:g:c"])))
+        );
+    }
+
+    #[test]
+    fn an_admin_dataset_is_kept_as_named_and_the_union_only_without_one() {
+        let registered = authz(&["urn:g:a", "urn:g:b"]);
+        let admin = ReadScope::Everything {
+            registered: &registered,
+        };
+        let scoped = scope_query_dataset(
+            "SELECT * FROM <urn:system:x> WHERE { ?s ?p ?o }",
+            admin,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            dataset_of(&scoped),
+            (strings(&["urn:system:x"]), Some(vec![]))
+        );
+        let scoped = scope_query_dataset("SELECT * { ?s ?p ?o }", admin, None, None).unwrap();
+        assert_eq!(
+            dataset_of(&scoped),
+            (
+                strings(&["urn:g:a", "urn:g:b"]),
+                Some(strings(&["urn:g:a", "urn:g:b"]))
+            )
+        );
+        // No registered graph: the admin's query keeps the store's default graph.
+        let none = authz(&[]);
+        let q = "SELECT * { ?s ?p ?o }";
+        assert_eq!(
+            scope_query_dataset(q, ReadScope::Everything { registered: &none }, None, None),
+            Some(q.to_string())
+        );
+    }
+
+    #[test]
+    fn the_entailment_graph_joins_the_default_graph() {
+        let set = authz(&["urn:g:a"]);
+        let named = scope_query_dataset(
+            "SELECT * FROM <urn:g:a> WHERE { ?s ?p ?o }",
+            ReadScope::Within(&set),
+            None,
+            Some("urn:entailment:rdfs"),
+        )
+        .unwrap();
+        assert_eq!(
+            dataset_of(&named),
+            (strings(&["urn:g:a", "urn:entailment:rdfs"]), Some(vec![]))
+        );
+        let union = scope_query_dataset(
+            "SELECT * { ?s ?p ?o }",
+            ReadScope::Within(&set),
+            None,
+            Some("urn:entailment:rdfs"),
+        )
+        .unwrap();
+        assert_eq!(
+            dataset_of(&union),
+            (
+                strings(&["urn:g:a", "urn:entailment:rdfs"]),
+                Some(strings(&["urn:g:a", "urn:entailment:rdfs"]))
+            )
+        );
+    }
+
+    #[test]
+    fn protocol_parameters_must_be_absolute_iris() {
+        assert!(ProtocolDataset::from_pairs([("default-graph-uri", "relative")]).is_err());
+        let p = ProtocolDataset::from_pairs([
+            ("default-graph-uri", "urn:g:a"),
+            ("named-graph-uri", "urn:g:b"),
+            ("default-graph-uri", "urn:g:c"),
+            ("query", "ignored"),
+        ])
+        .unwrap();
+        assert_eq!(p.default, strings(&["urn:g:a", "urn:g:c"]));
+        assert_eq!(p.named, strings(&["urn:g:b"]));
     }
 
     /// The scoped prologue must be byte-identical for the same SET of graphs,
@@ -6328,7 +6744,8 @@ mod query_scoping_tests {
             &authz(&["urn:public:open", "urn:public:other"]),
         );
         assert!(scoped.contains("FROM <urn:public:open>"));
-        assert!(scoped.contains("FROM NAMED <urn:public:open>"));
+        // `FROM` alone names no graph, so it is not turned into a `FROM NAMED`.
+        assert!(!scoped.contains("FROM NAMED"), "got: {scoped}");
         // Intersection: a graph the caller did NOT ask for is not added back.
         assert!(!scoped.contains("urn:public:other"), "got: {scoped}");
     }

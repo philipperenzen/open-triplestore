@@ -728,9 +728,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/build-features.md` lists the three features, `docs/sources.md` says
   what the image carries, and GitHub CI's backend job compiles the main crate
   with all three (it built only `plugin-postgres`, in the live-sources job).
+- **`/sparql` gives a query the dataset SPARQL defines.** The dataset is now set
+  on the parsed query instead of being spliced into its text, and keeps its
+  meaning: `FROM <a>` alone makes `<a>` the default graph and no longer also a
+  named graph, `FROM NAMED <b>` alone leaves the default graph empty, and an
+  admin's `FROM` is no longer widened with every registered graph. Only a query
+  that names no dataset gets the union of the caller's readable graphs (as
+  before). Graphs the caller may not read are still dropped silently. The
+  protocol's `default-graph-uri` / `named-graph-uri` (queries) and
+  `using-graph-uri` / `using-named-graph-uri` (updates) are now honoured; they
+  were advertised but ignored. A query whose outer group has no `WHERE` keyword
+  and holds a sub-select no longer fails with 400. Clients that relied on
+  `FROM <g>` also exposing `<g>` to `GRAPH ?g` must add `FROM NAMED <g>`.
+- **Grades:** SPARQL 1.1 Query is graded Full again, and SPARQL 1.1 Protocol has
+  its own graded row (Full) in `docs/standards.md`; the comparison's Standards
+  Score is recounted (11 → 12).
 - **SPARQL query results follow the specification in six more places.** The
   engine's SPARQL parser, evaluator and optimizer (Oxigraph's `spargebra` 0.4.7,
-  `spareval` 0.2.7 and `sparopt` 0.3.7) are now vendored under `vendor/` and patched, one commit per fix, each with a
+  `spareval` 0.2.7 and `sparopt` 0.3.7) are now vendored under `vendor/` and
+  patched, one commit per fix, each with a
   draft upstream PR (`vendor/README.md`):
   - `GRAPH ?g { … }` no longer puts `?g` in scope inside the pattern: around a
     `VALUES`, an aggregate sub-select or a `MINUS` it now enumerates the named
