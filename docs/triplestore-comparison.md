@@ -103,12 +103,10 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
   the project's own grades, not W3C or OGC conformance claims, and nothing is OGC-certified.
   The **Open Triplestore** columns in the matrices below follow those grades on every row
   (since 2026-10-01): a ✅ means `docs/standards.md` grades the standard **Full**, and every
-  row it grades **Partial** shows 🟡 — SPARQL 1.1 Query and federation, OWL 2 EL, QL, RL and
-  DL, SHACL Core and Advanced, ShEx, SWRL, GeoSPARQL, DCAT and VoID, and RML. Five rows have
-  no grade there (SPARQL 1.1 Protocol, JSON-LD 1.1, N-Quads/TriG, text search, SKOS); their ✅
-  marks feature presence, as in the other columns — note that `/sparql`
-  ignores the protocol's `default-graph-uri` / `named-graph-uri` parameters (footnote ⁶).
-  The W3C SPARQL tests are not claimed. The other systems' cells were compiled from their documentation and
+  row it grades **Partial** shows 🟡 — SPARQL 1.1 federation, OWL 2 EL, QL, RL and
+  DL, SHACL Core and Advanced, ShEx, SWRL, GeoSPARQL, DCAT and VoID, and RML. Four rows have
+  no grade there (JSON-LD 1.1, N-Quads/TriG, text search, SKOS); their ✅ marks feature
+  presence, as in the other columns. The W3C SPARQL tests are not claimed. The other systems' cells were compiled from their documentation and
   mark feature presence, so a column-by-column count favours them. GeoSPARQL 1.1 lacks
   KML/DGGS literals and the Query Rewrite Extension (it has the geodesic `metric*` family,
   `aggUnion` and WKT/GML/GeoJSON literals). SPARQL 1.2 / RDF 1.2 follows the RDF 1.2
@@ -225,11 +223,11 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 
 | Standard | Open Triplestore | Oxigraph | Jena 5 | Blazegraph | Virtuoso | GraphDB | Stardog | RDF4J 5 | Neptune | QLever |
 |----------|-------|----------|--------|------------|----------|---------|---------|---------|---------|--------|
-| **SPARQL 1.1 Query** | 🟡⁶ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **SPARQL 1.1 Query** | ✅⁶ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **SPARQL 1.1 Update** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅¹ | 🟡 |
 | **SPARQL 1.1 Federation** | 🟡⁵ | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | ✅ | 🟡 | ❌ |
 | **SPARQL 1.1 Service Desc.** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 |
-| **SPARQL 1.1 Protocol** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **SPARQL 1.1 Protocol** | ✅⁶ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **SPARQL 1.2** (W3C WD) | 🟡² | 🟡² | 🟡 | ❌ | ❌ | 🟡 | 🟡 | 🟡 | ❌ | 🟡 |
 | **Graph Store Protocol** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
 | **RDF 1.1** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -245,13 +243,15 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > ⁵ Partial in [`docs/standards.md`](standards.md): `SERVICE` is off by default (an SSRF
 >   guard) and reaches only the endpoints an operator lists in `OTS_REMOTE_ALLOWLIST`; see
 >   [`docs/federation.md`](federation.md).
-> ⁶ Partial in [`docs/standards.md`](standards.md): `/sparql` rewrites the query's dataset to
->   the caller's readable graphs (`FROM` and `FROM NAMED` collapse into one another, and the
->   protocol's dataset parameters are ignored). The engine itself is oxigraph 0.5.11 with its
->   SPARQL evaluator vendored and patched ([`vendor/README.md`](../vendor/README.md)) for the
->   evaluator gaps tracked in [`docs/conformance/sparql11.md`](conformance/sparql11.md); the
->   Oxigraph column shows the unpatched 0.5 engine, which has them (among them oxigraph#1905
->   and #1919, fixed on its main branch but not released).
+> ⁶ Full in [`docs/standards.md`](standards.md) since 2026-10-03, Query and Protocol both:
+>   the engine is oxigraph 0.5.11 with its SPARQL evaluator vendored and patched
+>   ([`vendor/README.md`](../vendor/README.md)) for the evaluator gaps tracked in
+>   [`docs/conformance/sparql11.md`](conformance/sparql11.md), and `/sparql` gives a query the
+>   dataset SPARQL defines (`FROM` / `FROM NAMED` and the protocol's `default-graph-uri` /
+>   `named-graph-uri` keep their meaning, confined to the caller's readable graphs; the union of
+>   those graphs only when no dataset is named). The Oxigraph column shows the unpatched 0.5
+>   engine, which has those gaps (among them oxigraph#1905 and #1919, fixed on its main branch
+>   but not released).
 
 ### 4.2 Reasoning, Validation & Inference
 
@@ -369,6 +369,11 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > other systems' cells are as they were compiled for this comparison from each system's
 > documentation, so they mark feature presence and the totals are not like for like: on a
 > graded row, a ✅ here means this project grades the standard Full against its own tests.
+>
+> Open Triplestore recounted again on 2026-10-03, 11 → 12: SPARQL 1.1 Query is graded Full
+> (the vendored, patched SPARQL evaluator and the SPARQL dataset semantics on `/sparql`), and
+> SPARQL 1.1 Protocol, until then ungraded feature presence, is graded Full too (its cell
+> stays ✅). Four rows remain ungraded.
 
 ```
 Stardog           ██████████████████████░░░░░░░   22 / 29  (commercial; full OWL DL + ShEx + SWRL; GeoSPARQL 1.1 partial)
@@ -376,7 +381,7 @@ GraphDB           ████████████████████�
 Virtuoso          ██████████████░░░░░░░░░░░░░░░   14 / 29
 RDF4J 5           ██████████████░░░░░░░░░░░░░░░   14 / 29  (improved from v4)
 Jena 5            ████████████░░░░░░░░░░░░░░░░░   12 / 29  (improved from v4)
-Open Triplestore  ███████████░░░░░░░░░░░░░░░░░░   11 / 29  (own grades, Full only; 17 more rows 🟡 — 28 of 29 at least partial, the most of the ten; W3C tests not claimed)
+Open Triplestore  ████████████░░░░░░░░░░░░░░░░░   12 / 29  (own grades, Full only; 16 more rows 🟡 — 28 of 29 at least partial, the most of the ten; W3C tests not claimed)
 Oxigraph          ███████████░░░░░░░░░░░░░░░░░░   11 / 29  (lean standalone; open-triplestore extends it)
 Blazegraph        ██████████░░░░░░░░░░░░░░░░░░░   10 / 29  (abandoned 2019)
 Neptune           █████████░░░░░░░░░░░░░░░░░░░░    9 / 29

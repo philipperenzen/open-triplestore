@@ -950,8 +950,9 @@ const CAPABILITIES_JSONLD: &str = r#"{
   "@graph": [
     { "@id": "ots:rdf11",          "@type": "Standard", "title": "RDF 1.1",                                "conformance": "Full" },
     { "@id": "ots:rdf12",          "@type": "Standard", "title": "RDF-star (CG) / RDF 1.2 (WD)",           "conformance": "Partial" },
-    { "@id": "ots:sparql11",       "@type": "Standard", "title": "SPARQL 1.1 Query",                       "conformance": "Partial" },
+    { "@id": "ots:sparql11",       "@type": "Standard", "title": "SPARQL 1.1 Query",                       "conformance": "Full" },
     { "@id": "ots:sparql11update", "@type": "Standard", "title": "SPARQL 1.1 Update",                      "conformance": "Full" },
+    { "@id": "ots:sparqlprotocol", "@type": "Standard", "title": "SPARQL 1.1 Protocol",                    "conformance": "Full" },
     { "@id": "ots:gsp",            "@type": "Standard", "title": "SPARQL 1.1 Graph Store HTTP",            "conformance": "Full" },
     { "@id": "ots:sparqlfed",      "@type": "Standard", "title": "SPARQL 1.1 Federated Query (SERVICE)",   "conformance": "Partial" },
     { "@id": "ots:sd",             "@type": "Standard", "title": "SPARQL 1.1 Service Description",         "conformance": "Full" },
