@@ -1,4 +1,5 @@
 <script>
+  import { withBase, stripBase, absoluteUrl } from '../lib/basePath';
   import { onMount } from 'svelte';
   import {
     listSavedQueries, getSavedQuery, createSavedQuery, updateSavedQuery, deleteSavedQuery,
@@ -321,7 +322,7 @@
     let sparql = q.sparql;
     if (!sparql) { try { sparql = (await getSavedQuery(qScope(q), qOwner(q), q.slug)).sparql; } catch {} }
     try { sessionStorage.setItem('ots_sparql_load', sparql ?? ''); } catch {}
-    const ret = `${window.location.pathname}?open=${encodeURIComponent(q.id)}`;
+    const ret = `${stripBase(window.location.pathname)}?open=${encodeURIComponent(q.id)}`;
     const ep = q.scope === 'dataset' ? `/datasets/${q.owner_id}/sparql` : editorPath;
     const sep = ep.includes('?') ? '&' : '?';
     navigate(`${ep}${sep}return=${encodeURIComponent(ret)}&from=${encodeURIComponent(q.name)}`);
@@ -835,7 +836,7 @@
 
   {#if !canWrite}
     <p class="signin-note">
-      {$i18nT('pages.apiServices.signinBrowse')} <a href="/login">{$i18nT('pages.apiServices.signinLink')}</a> {$i18nT('pages.apiServices.signinRights')}
+      {$i18nT('pages.apiServices.signinBrowse')} <a href={withBase('/login')}>{$i18nT('pages.apiServices.signinLink')}</a> {$i18nT('pages.apiServices.signinRights')}
     </p>
   {/if}
 
@@ -895,7 +896,7 @@
                       <div class="endpoint">
                         <span class="method-chip">GET</span>
                         <code class="endpoint-path">{runPath(q)}</code>
-                        <button class="icon-btn" title={$i18nT('pages.apiServices.copyEndpointUrl')} on:click={() => copyText(window.location.origin + runPath(q))}><Copy size={13} /></button>
+                        <button class="icon-btn" title={$i18nT('pages.apiServices.copyEndpointUrl')} on:click={() => copyText(absoluteUrl(runPath(q)))}><Copy size={13} /></button>
                       </div>
                       {#if paramSpecsFor(q).length}
                         <div class="run-params">

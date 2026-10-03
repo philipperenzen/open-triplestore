@@ -1,4 +1,5 @@
 <script>
+  import { withBase, withBaseUrl } from '../lib/basePath';
   import { onMount, tick } from 'svelte';
   import { t } from 'svelte-i18n';
   import PageHeader from '../components/PageHeader.svelte';
@@ -12,7 +13,7 @@
   // the whole-triplestore spec. Specs are fetched WITH credentials, so they reflect
   // the public endpoints plus whatever the signed-in user is allowed to see, and
   // "Try it out" calls are credentialed the same way.
-  const SERVER = { kind: 'server', labelKey: 'pages.apiDocs.scopeWholeTriplestore', url: '/api-docs/openapi.json' };
+  const SERVER = { kind: 'server', labelKey: 'pages.apiDocs.scopeWholeTriplestore', url: withBase('/api-docs/openapi.json') };
   let scope = SERVER;       // the scoped spec target (dataset/org/group) or SERVER
   let active = 'scope';     // 'scope' | 'server' — which spec is displayed
 
@@ -26,11 +27,11 @@
   onMount(async () => {
     const p = new URLSearchParams(window.location.search);
     if (p.get('dataset'))
-      scope = { kind: 'dataset', labelKey: 'pages.apiDocs.scopeDataset', url: `/api/datasets/${encodeURIComponent(p.get('dataset'))}/openapi.json` };
+      scope = { kind: 'dataset', labelKey: 'pages.apiDocs.scopeDataset', url: withBase(`/api/datasets/${encodeURIComponent(p.get('dataset'))}/openapi.json`) };
     else if (p.get('organisation'))
-      scope = { kind: 'organisation', labelKey: 'pages.apiDocs.scopeOrganisation', url: `/api/organisations/${encodeURIComponent(p.get('organisation'))}/openapi.json` };
+      scope = { kind: 'organisation', labelKey: 'pages.apiDocs.scopeOrganisation', url: withBase(`/api/organisations/${encodeURIComponent(p.get('organisation'))}/openapi.json`) };
     else if (p.get('group'))
-      scope = { kind: 'group', labelKey: 'pages.apiDocs.scopeGroup', url: `/api/groups/${encodeURIComponent(p.get('group'))}/openapi.json` };
+      scope = { kind: 'group', labelKey: 'pages.apiDocs.scopeGroup', url: withBase(`/api/groups/${encodeURIComponent(p.get('group'))}/openapi.json`) };
     else scope = SERVER;
     active = 'scope';
     await load();
@@ -70,6 +71,9 @@
       // exercise the services they have access to straight from the docs.
       requestInterceptor: (req) => {
         req.credentials = 'include';
+        // A spec without `servers` resolves its paths against this origin's
+        // root; under a sub-path deploy the API lives below the base.
+        req.url = withBaseUrl(req.url, window.location.origin);
         return req;
       },
     });

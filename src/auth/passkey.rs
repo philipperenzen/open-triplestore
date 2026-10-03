@@ -32,8 +32,8 @@ use webauthn_rs::prelude::{
 use super::audit::{self, AuditEventBuilder, AuditEventType, AuditLogger, AuditOutcome};
 use super::db::AuthDb;
 use super::handlers::{
-    auth_cookie_headers, issue_tokens, require_verified_email, AuthResponse, MfaRequiredResponse,
-    UserResponse,
+    auth_cookie_headers, forwarded_prefix, issue_tokens, require_verified_email, AuthResponse,
+    MfaRequiredResponse, UserResponse,
 };
 use super::jwt::{self, JwtConfig};
 use super::middleware::AuthenticatedUser;
@@ -643,6 +643,7 @@ pub async fn login_finish(
         expires_in,
         jwt_config.refresh_expiry_days * 86400,
         cookie_config.secure,
+        &forwarded_prefix(&headers),
     );
 
     Ok((

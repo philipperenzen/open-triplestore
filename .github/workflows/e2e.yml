@@ -72,6 +72,14 @@ jobs:
         working-directory: frontend
         run: npx playwright install --with-deps chromium
 
+      # Hermetic (no backend): builds the UI with OTS_BASE_PATH=/ots/, serves it
+      # with `vite preview` and loads deep links below the prefix.
+      - name: Sub-path deploy smoke test
+        working-directory: frontend
+        env:
+          CI: 'true'
+        run: npm run e2e:subpath
+
       - name: Run e2e
         working-directory: frontend
         env:
@@ -93,5 +101,7 @@ jobs:
         if: ${{ !cancelled() }}
         with:
           name: playwright-report
-          path: frontend/playwright-report/
+          path: |
+            frontend/playwright-report/
+            frontend/playwright-report-subpath/
           retention-days: 7

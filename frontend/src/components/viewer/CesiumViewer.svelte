@@ -15,6 +15,7 @@
   // gets a neutral base colour so even a failed imagery layer reads as a surface,
   // not black. The viewer renders on-demand (requestRenderMode) so it idles at
   // ~0 fps over a near-static scene; every mutation requests a frame.
+  import { withBase } from '../../lib/basePath';
   import { onMount, onDestroy, createEventDispatcher } from 'svelte';
   import {
     Boxes, X, MapPin, Satellite, ExternalLink, Sparkles, Loader2,
@@ -61,7 +62,7 @@
   // air-gapped. This used to point at a CDN pinned to 1.123.0 while npm had
   // resolved 1.144.0: the 1.144 engine fetched 1.123 workers, and any
   // deployment without internet access got no globe at all.
-  const CESIUM_BASE_URL = '/cesium/';
+  const CESIUM_BASE_URL = withBase('/cesium/');
   // Satellite: Esri World Imagery, only with the deployment's own ArcGIS key
   // (runtime config `basemaps.esriApiKey`) — Esri's terms tie it to one.
   const ESRI_CREDIT = 'Esri, Maxar, Earthstar Geographics, and the GIS User Community';
@@ -197,7 +198,7 @@
       tileset = null;
     }
     tileset = await Cesium.Cesium3DTileset.fromUrl(
-      `/api/datasets/${encodeURIComponent(datasetId)}/3dtiles/tileset.json`,
+      withBase(`/api/datasets/${encodeURIComponent(datasetId)}/3dtiles/tileset.json`),
     );
     // Load the (single) tile a touch more eagerly so the block fills in quickly.
     tileset.maximumScreenSpaceError = 16;
@@ -343,7 +344,7 @@
     try {
       const query =
         'SELECT ?p ?o WHERE { <' + iri.replace(/>/g, '%3E') + '> ?p ?o } LIMIT 500';
-      const res = await fetch(`/sparql?query=${encodeURIComponent(query)}`, {
+      const res = await fetch(withBase(`/sparql?query=${encodeURIComponent(query)}`), {
         method: 'GET',
         headers: { Accept: 'application/sparql-results+json' },
         credentials: 'include',
@@ -495,7 +496,7 @@
         >
           <Sparkles size={13} />
         </button>
-        <a class="info-link" href={`/resource?iri=${encodeURIComponent(selectedIri)}`} target="_blank" rel="noopener" title="Open resource">
+        <a class="info-link" href={withBase(`/resource?iri=${encodeURIComponent(selectedIri)}`)} target="_blank" rel="noopener" title="Open resource">
           <ExternalLink size={13} />
         </a>
         <button class="info-close" on:click={closePanel} aria-label="Close">
@@ -519,7 +520,7 @@
                   </th>
                   <td title={r.o}>
                     {#if r.isIri}
-                      <a href={`/resource?iri=${encodeURIComponent(r.o)}`} target="_blank" rel="noopener">{shortenIRI(r.o)}</a>
+                      <a href={withBase(`/resource?iri=${encodeURIComponent(r.o)}`)} target="_blank" rel="noopener">{shortenIRI(r.o)}</a>
                     {:else if r.isBnode}
                       <span class="bnode" title="Blank node (not dereferenceable)">{r.o}</span>
                     {:else}

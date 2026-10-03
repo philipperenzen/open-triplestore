@@ -1,9 +1,12 @@
 import { writable } from 'svelte/store';
+import { stripBase, withBase } from './basePath';
 
 interface Location {
+  /** The app path: `window.location.pathname` without the deployment base (see basePath.ts). */
   pathname: string;
   search: string;
   hash: string;
+  /** App-relative too: `pathname` + `search` + `hash`. */
   href: string;
 }
 
@@ -12,12 +15,13 @@ function readLocation(): Location {
     return { pathname: '/', search: '', hash: '', href: '/' };
   }
 
-  const { pathname, search, hash } = window.location;
+  const { search, hash } = window.location;
+  const pathname = stripBase(window.location.pathname || '/');
   return {
-    pathname: pathname || '/',
+    pathname,
     search: search || '',
     hash: hash || '',
-    href: `${pathname || '/'}${search || ''}${hash || ''}`,
+    href: `${pathname}${search || ''}${hash || ''}`,
   };
 }
 
@@ -38,12 +42,17 @@ export function ensureRouterListener(): void {
   window.addEventListener('popstate', syncLocation);
 }
 
+/**
+ * Go to an app path (`/datasets/x?tab=y`). A root-absolute path gets the
+ * deployment base prefix before it reaches the history API, so callers never
+ * spell it out; a path that already carries it is left alone.
+ */
 export function navigate(to: string, { replace = false }: { replace?: boolean } = {}): void {
   if (typeof window === 'undefined') {
     return;
   }
 
-  const href = String(to || '/');
+  const href = withBase(String(to || '/'));
   if (replace) {
     window.history.replaceState({}, '', href);
   } else {

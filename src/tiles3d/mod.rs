@@ -772,7 +772,10 @@ fn build_tileset(
         (span_m).max(1.0)
     };
 
-    let content_uri = format!("/api/datasets/{dataset_id}/3dtiles/content.glb");
+    // Relative to tileset.json (3D Tiles resolves content URIs against the
+    // tileset's own URL), so the reference survives a reverse proxy that serves
+    // the instance under a path prefix: `/ots/api/…/tileset.json` → `…/content.glb`.
+    let content_uri = "content.glb";
     let credits = dataset_credits(store, data_graphs);
 
     let tileset = serde_json::json!({

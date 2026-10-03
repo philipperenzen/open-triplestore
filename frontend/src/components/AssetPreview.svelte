@@ -1,4 +1,5 @@
 <script>
+  import { withBase } from '../lib/basePath';
   import { onMount, onDestroy, createEventDispatcher } from 'svelte';
   import { t } from 'svelte-i18n';
   import { fetchAssetContent, assetMetadata } from '../lib/api.js';
@@ -89,7 +90,7 @@
   $: isText   = ['text','code','rdf','csv'].includes(category);
   $: isBinary = ['image','pdf','audio','video'].includes(category);
   $: downloadUrl = asset && datasetId
-    ? `/api/datasets/${datasetId}/assets/${asset.id}/download`
+    ? withBase(`/api/datasets/${datasetId}/assets/${asset.id}/download`)
     : null;
 
   // Reload content when asset changes

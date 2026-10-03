@@ -1,4 +1,5 @@
 <script>
+  import { withBase, absoluteUrl } from '../lib/basePath';
   import { onMount, onDestroy } from 'svelte';
   import {
     getDataset,
@@ -455,7 +456,7 @@
   // Copy-to-clipboard state per service
   let copiedSlug = null;
   async function copyEndpoint(slug) {
-    const url = `${window.location.origin}/api/datasets/${id}/services/${slug}/sparql`;
+    const url = absoluteUrl(`/api/datasets/${id}/services/${slug}/sparql`);
     if (await copyToClipboard(url)) {
       copiedSlug = slug;
       setTimeout(() => { copiedSlug = null; }, 2000);
@@ -1686,7 +1687,7 @@
       <div class="meta-item">
         <dt>{$i18nT('pages.datasetDetail.conformsToModel')}</dt>
         <dd>
-          <a href="/models/{dataset.conforms_to_model}" class="md-link">{dataset.conforms_to_model}{#if dataset.conforms_to_version} · v{dataset.conforms_to_version}{/if}</a>
+          <a href={withBase(`/models/${dataset.conforms_to_model}`)} class="md-link">{dataset.conforms_to_model}{#if dataset.conforms_to_version} · v{dataset.conforms_to_version}{/if}</a>
           {#if conformance?.conforms_to_model?.update_available}
             <span class="model-update-badge" title={$i18nT('pages.datasetDetail.modelUpdateAvailableHint')}>
               ⬆ {$i18nT('pages.datasetDetail.modelUpdateAvailable', { values: { version: conformance.conforms_to_model.latest_published } })}
@@ -1778,7 +1779,7 @@
             {:else}
               {#if svc.is_active}
                 <div class="svc-endpoint-row">
-                  <code class="endpoint-url">{window.location.origin}/api/datasets/{id}/services/{svc.slug}/sparql</code>
+                  <code class="endpoint-url">{absoluteUrl(`/api/datasets/${id}/services/${svc.slug}/sparql`)}</code>
                   <button class="btn btn-xs btn-ghost copy-btn" on:click={() => copyEndpoint(svc.slug)} title={$i18nT('pages.datasetDetail.copyEndpointUrl')}>
                     {#if copiedSlug === svc.slug}<CheckCheck size={12} />{:else}<Copy size={12} />{/if}
                   </button>

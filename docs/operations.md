@@ -21,6 +21,87 @@ Requests are rate-limited per client IP, with stricter quotas on authentication 
 
 For trusted/internal deployments or automated test harnesses that drive many requests from a single IP, the limiter can be switched off with `RATE_LIMIT_DISABLED=true` (see [administration.md](administration.md)). It is secure by default — leave it unset on any public server.
 
+## Serving under a path prefix
+
+The triplestore, API and web UI together, can be served below a path on a
+shared host, such as `https://example.org/ots/`, instead of on a host of its own.
+The reverse proxy in front strips the prefix, so the server itself still sees
+`/api/…`, `/sparql`, `/resource/…`, and serves the web UI from `/` with its
+`index.html` fallback, unchanged. Three things have to agree on the prefix:
+
+1. **The web UI build.** Build it with `OTS_BASE_PATH` (it is read at build
+   time, not at run time):
+
+   ```bash
+   OTS_BASE_PATH=/ots/ npm run build                       # in frontend/
+   docker build --build-arg OTS_BASE_PATH=/ots/ -t open-triplestore:ots .
+   ```
+
+   The router then matches routes below the prefix, so a deep link such as
+   `https://example.org/ots/datasets/demo` opens that page. Links, browser history,
+   API calls, `config.json`, the static assets and the `/embed/*` pages all
+   carry the prefix. `ots`, `/ots` and `/ots/` mean the same. A prefix that starts
+   with one of the app's own paths (`/api`, `/sparql`, `/datasets`, `/embed`, …)
+   is refused, because the UI could no longer tell its own paths from prefixed
+   ones.
+2. **`BASE_URL`** includes the prefix: `BASE_URL=https://example.org/ots`. IRIs
+   are minted under it (`https://example.org/ots/resource/…`) and dereference
+   through the proxy. It is also the base of the links in emails, of the OIDC
+   callback the server registers (`{BASE_URL}/api/auth/oauth/{slug}/callback`:
+   this is the redirect URI to enter at the identity provider), and of the
+   issuer when the instance is an [OpenID provider](oidc-provider.md).
+3. **The proxy** strips the prefix and sends `X-Forwarded-Prefix: /ots`. The
+   server scopes its session cookies with that header (`Path=/ots`,
+   `Path=/ots/api/auth`). Without it, the browser never sends the refresh cookie
+   back to `/ots/api/auth/refresh`, and every session ends when its access token
+   expires. Traefik's `StripPrefix` adds the header itself; nginx needs the
+   `proxy_set_header` line below. A value that is not a plain path is ignored.
+
+The server's own redirects need no prefix of their own. Its 303 from an IRI to
+its page in the UI uses a relative `Location`, and a 3D Tiles tileset refers to
+its content relative to `tileset.json`.
+
+### nginx
+
+```nginx
+location = /ots { return 301 /ots/; }
+location /ots/ {
+    proxy_pass http://127.0.0.1:7878/;          # the trailing slash strips /ots
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-Prefix /ots;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_http_version 1.1;
+    proxy_buffering    off;                     # streamed answers (assistant chat, exports)
+    client_max_body_size 1024m;                 # bulk import (OTS_MAX_UPLOAD_MB)
+}
+```
+
+### Traefik (Docker labels)
+
+```yaml
+services:
+  triplestore:
+    image: open-triplestore:ots          # built with --build-arg OTS_BASE_PATH=/ots/
+    environment:
+      BASE_URL: https://example.org/ots
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.ots.rule=Host(`example.org`) && PathPrefix(`/ots`)
+      - traefik.http.routers.ots.middlewares=ots-slash,ots-strip
+      # /ots → /ots/ (the UI's base needs its trailing slash)
+      - traefik.http.middlewares.ots-slash.redirectregex.regex=^(https?://[^/]+/ots)$$
+      - traefik.http.middlewares.ots-slash.redirectregex.replacement=$${1}/
+      # strips /ots and sets X-Forwarded-Prefix: /ots
+      - traefik.http.middlewares.ots-strip.stripprefix.prefixes=/ots
+      - traefik.http.services.ots.loadbalancer.server.port=7878
+```
+
+Set `TRUSTED_PROXY_CIDRS` to the proxy's address as well, so rate limits apply
+per client rather than to the proxy as a whole (see [Rate limiting](#rate-limiting)). An existing root deployment needs none of this:
+without `OTS_BASE_PATH` the UI is built for `/`, and without the header the
+cookies keep their root paths.
+
 ## Replication
 
 Open Triplestore replicates by **logical log shipping**: a leader records

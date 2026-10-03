@@ -1,5 +1,6 @@
 import { writable, derived } from 'svelte/store';
 import { getHealth, tryRefreshToken } from './api.js';
+import { withBase } from './basePath';
 
 export interface User {
   id: string;
@@ -74,7 +75,7 @@ export async function refreshUser(): Promise<void> {
   // Restore the session from the HttpOnly auth cookies (sent automatically via
   // credentials:'include'). A raw fetch is used rather than the request() wrapper
   // so a genuinely-anonymous 401 stays silent (no auth-expired event / redirect).
-  const fetchMe = () => fetch('/api/auth/me', {
+  const fetchMe = () => fetch(withBase('/api/auth/me'), {
     credentials: 'include',
     headers: { Accept: 'application/json' },
   });

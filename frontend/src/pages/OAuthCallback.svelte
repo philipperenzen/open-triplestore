@@ -1,4 +1,5 @@
 <script>
+  import { withBase } from '../lib/basePath';
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
   import { navigate } from '../lib/router/index.js';
@@ -57,7 +58,7 @@
     <div class="card callback-card error-card">
       <h2>{$t('pages.oAuthCallback.loginFailed')}</h2>
       <p class="error">{error}</p>
-      <a href="/login" class="btn">{$t('pages.oAuthCallback.backToLogin')}</a>
+      <a href={withBase('/login')} class="btn">{$t('pages.oAuthCallback.backToLogin')}</a>
     </div>
   {:else}
     <div class="card callback-card">

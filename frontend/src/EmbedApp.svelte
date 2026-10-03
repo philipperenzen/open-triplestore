@@ -28,9 +28,11 @@
   import ViewerMap from './components/viewer/ViewerMap.svelte';
   import Model3D from './components/viewer/Model3D.svelte';
   import CesiumViewer from './components/viewer/CesiumViewer.svelte';
+  import { stripBase, withBase } from './lib/basePath';
 
   // ── URL → view state (parsed once; embeds are single-view pages) ───────────
-  const segs = window.location.pathname.split('/').filter(Boolean); // ['embed', kind, id?]
+  // The app path (deployment base stripped): ['embed', kind, id?].
+  const segs = stripBase(window.location.pathname).split('/').filter(Boolean);
   const kind = segs[1] || '';
   const datasetId = decodeURIComponent(segs[2] || '');
   const params = new URLSearchParams(window.location.search);
@@ -183,7 +185,7 @@
     return el ? el.label || el.id.split(/[/#]/).pop() : '';
   })();
 
-  const appHref = kind === 'model' ? '/' : `/datasets/${encodeURIComponent(datasetId)}/viewer`;
+  const appHref = withBase(kind === 'model' ? '/' : `/datasets/${encodeURIComponent(datasetId)}/viewer`);
 
   if (kind !== 'model') load();
 </script>
