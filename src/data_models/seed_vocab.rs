@@ -536,6 +536,40 @@ const VOCABS: &[StdVocab] = &[
             },
         ],
     },
+    // The geometry class hierarchies GeoSPARQL's RDFS Entailment Extension
+    // reasons over (Req 48/49 of 22-047r1; R26/R27 of 11-052r4). Datasets that
+    // use GeoSPARQL terms get both, with the ontology, as reasoning premises
+    // (`crate::geo::premises`).
+    StdVocab {
+        id: "sf",
+        title: "Simple Features Vocabulary",
+        namespace: "http://www.opengis.net/ont/sf#",
+        versions: &[StdVersion {
+            version: "1.1.1",
+            official_name: "OGC Simple Features Vocabulary 1.1.1 (2026)",
+            date: "2026-02-27",
+            spec_url: "https://docs.ogc.org/is/22-047r1/22-047r1.html",
+            status: VersionStatus::Published,
+            latest: true,
+            prior: None,
+            file: &vf::SF,
+        }],
+    },
+    StdVocab {
+        id: "gml-geometries",
+        title: "GML 3.2.1 geometry types",
+        namespace: "http://www.opengis.net/ont/gml#",
+        versions: &[StdVersion {
+            version: "1.0",
+            official_name: "GML 3.2.1 geometry types (Open Triplestore, 2026)",
+            date: "2026-10-03",
+            spec_url: "https://schemas.opengis.net/gml/3.2.1/",
+            status: VersionStatus::Published,
+            latest: true,
+            prior: None,
+            file: &vf::GML_GEOMETRIES,
+        }],
+    },
     StdVocab {
         id: "ots",
         title: "Open Triplestore Vocabulary",
@@ -2684,7 +2718,8 @@ mod tests {
                     &version_iri(&state, v.id, ver.version),
                 );
                 assert_eq!(got, ver.attribution(true), "{} {}", v.id, ver.version);
-                if v.id != "ots" {
+                // Open Triplestore's own vocabularies carry no licence record.
+                if ver.file.third_party {
                     let a = got.unwrap();
                     assert_eq!(a.file, ver.file.path);
                     assert_eq!(a.specification_url.as_deref(), Some(ver.spec_url));
@@ -3005,7 +3040,7 @@ mod tests {
                     v.id,
                     ver.version
                 );
-                if v.id != "ots" {
+                if ver.file.third_party {
                     assert!(record(&state, v.id, ver.version).unchanged);
                 }
             }
@@ -3219,7 +3254,11 @@ mod tests {
                 digest,
                 "{id} {version} was reloaded"
             );
-            if id != "ots" {
+            if vocab(id)
+                .versions
+                .iter()
+                .any(|v| v.version == version && v.file.third_party)
+            {
                 assert!(record(&state, id, version).unchanged, "{id} {version}");
             }
             assert_eq!(

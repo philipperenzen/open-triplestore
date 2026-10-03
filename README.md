@@ -69,7 +69,7 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | **SPARQL 1.1** | SELECT, CONSTRUCT, ASK, DESCRIBE, UPDATE (INSERT/DELETE) |
 | **SPARQL 1.2** | Triple terms `<<( )>>`, reifiers and `{\| \|}` annotations (RDF 1.2 model), the triple-term and base-direction functions, `VERSION`; plus Oxigraph's `LATERAL` and `ADJUST` extensions, which are not part of SPARQL 1.2 ([docs](docs/sparql-12.md)) |
 | **SPARQL federation** | `SERVICE` is off by default (SSRF mitigation) and enabled per endpoint with `OTS_REMOTE_ALLOWLIST`; calls are timed out, size- and row-capped (a result over a cap fails the call rather than being truncated), a query's calls share endpoint, request and deadline limits, `SERVICE ?var` takes its endpoint from the data, and the service description advertises federation only when an allowlist exists |
-| **GeoSPARQL 1.1** | Simple Features, Egenhofer and RCC8 relations, DE-9IM `relate`, distance/area/buffer and the constructive functions, the geodesic metric family (metres on the WGS84 ellipsoid), the `aggUnion` aggregate, WKT, GML and GeoJSON literals (`asGeoJSON`), CRS transform for the built-in CRS set. Not implemented: KML/DGGS literals, the Query Rewrite Extension, the other aggregates ([grades & gaps](docs/standards.md#known-limitations--conformance-findings)) |
+| **GeoSPARQL 1.1** | Simple Features, Egenhofer and RCC8 relations, DE-9IM `relate`, distance/area/buffer and the constructive functions, the geodesic metric family (metres on the WGS84 ellipsoid), the `aggUnion` aggregate, WKT, GML and GeoJSON literals (`asGeoJSON`), CRS transform for the built-in CRS set, the RDFS Entailment and Query Rewrite extensions. Not implemented: KML/DGGS literals, the other aggregates ([grades & gaps](docs/standards.md#known-limitations--conformance-findings)) |
 | **OWL 2 EL** | Native EL++ saturation engine for the whole profile: classification, realization and the property closure, with nominals, `hasSelf`, keys, equality and the EL datatypes; axioms outside the profile are reported ([docs](docs/owl2-el.md)) |
 | **OWL 2 DL** | Backend chosen with `OTS_DL_BACKEND`: `sidecar` (the bundled OWL API + HermiT reasoner, `docker compose --profile reasoner`, checked in CI against the W3C OWL 2 DL test cases), `konclude`, or `native` RL + DL-syntax rules, sound but incomplete; OWL 2 DL profile check; `POST /api/reasoning/check` for consistency, entailment, satisfiability; background runs ([docs](docs/owl2-dl.md)) |
 | **Federated access control** | Signed identity assertions between instances (`SERVICE`, LDES sync); verified against the peer's JWKS, authorised locally ([docs](docs/federation.md)) |
@@ -518,9 +518,13 @@ are geodesic too. `geof:transform` converts between the built-in CRSs (RD New,
 CRS84, EPSG:4326 in authority axis order, Web Mercator), and binary predicates
 harmonise their operands' CRSs — a GML literal's `srsName` counts like a WKT
 prefix. `geof:aggUnion` is a real SPARQL aggregate —
-the union of a group's geometries, with or without `GROUP BY`.
+the union of a group's geometries, with or without `GROUP BY`. A triple pattern
+such as `?park geo:sfWithin ex:city` also matches where the geometries imply the
+relation (the Query Rewrite Extension, on by default), and RDFS entailment over a
+dataset with GeoSPARQL data reasons over the GeoSPARQL ontology and the Simple
+Features and GML geometry hierarchies.
 
-**Not implemented:** KML/DGGS literals, the Query Rewrite Extension, the other
+**Not implemented:** KML/DGGS literals, the other
 GeoSPARQL 1.1 aggregates and several of its non-metric functions. (Earlier versions of this
 README claimed "all 30 OGC requirements" — that number was the test file's own
 numbering, not the OGC conformance classes. The honest grade is *Partial*; see
@@ -892,7 +896,7 @@ licence policy allows no performance claims on a subset.
 |---|---|---|---:|---|
 | SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 27 |  |
 | DCAT 3 / DCAT-AP 3 / VoID | `tests/dcat_conformance.rs` | spec-derived | 4 |  |
-| GeoSPARQL 1.1 | `tests/geosparql_conformance.rs` | spec-derived | 143 |  |
+| GeoSPARQL 1.1 | `tests/geosparql_conformance.rs` | spec-derived | 163 |  |
 | LDES 1.0 / TREE | `tests/ldes_conformance.rs` | spec-derived | 28 |  |
 | LDP 1.0 (store level) | `tests/ldp_conformance.rs` | spec-derived | 43 |  |
 | LDP 1.0 (HTTP) | `tests/ldp_http_conformance.rs` | spec-derived | 13 |  |
@@ -915,7 +919,7 @@ licence policy allows no performance claims on a subset.
 | SP2B / BSBM query shapes | `tests/sparql_benchmarks.rs` | benchmark-derived | 28 |  |
 | SPARQL 1.1 functions | `tests/sparql_functions_conformance.rs` | spec-derived | 9 |  |
 | SPARQL engine coverage (sparqloscope) | `tests/sparqloscope_conformance.rs` | sparqloscope-derived | 67 |  |
-| Cross-standard HTTP smoke | `tests/standards_conformance.rs` | spec-derived | 26 |  |
+| Cross-standard HTTP smoke | `tests/standards_conformance.rs` | spec-derived | 28 |  |
 | SWRL | `tests/swrl_conformance.rs` | spec-derived | 33 |  |
 | JSON-LD 1.1 API | `tests/w3c_jsonld_api_manifests.rs` | **vendored W3C test-suite subset** (toRdf + fromRdf sections of w3c/json-ld-api, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/jsonld.md` |
 | OWL 2 DL | `tests/w3c_owl2_dl_manifests.rs` | **vendored W3C test cases** (approved OWL 2 DL / Direct Semantics cases of the OWL 2 Test Case Repository, unmodified; manifest-driven, against the reasoner sidecar) | 2 | runs in CI against the reasoner sidecar as a development and regression ratchet; no score is published (W3C licence: no performance claims on a partial run); known gaps in `docs/conformance/owl2-dl.md` |
@@ -930,7 +934,7 @@ licence policy allows no performance claims on a subset.
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 | SPARQL 1.2 | `tests/w3c_sparql12_manifests.rs` | **vendored W3C test-suite subset** (`sparql/sparql12` of w3c/rdf-tests, unmodified; manifest-driven, engine and mirror paths) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql12.md` |
 
-1157 conformance tests across 39 suites; a further 806 tests in 107 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 14 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
+1179 conformance tests across 39 suites; a further 806 tests in 107 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 14 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->

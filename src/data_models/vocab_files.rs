@@ -602,6 +602,20 @@ pub const GEOSPARQL_1_0: BundledFile = bundled!("geosparql/1.0.0.ttl", {
                    dc:type), which fall under DCMI's CC BY 4.0 Schema Use Notice."),
 });
 
+/// OGC's Simple Features geometry class hierarchy, the SF half of the
+/// GeoSPARQL RDFS Entailment Extension's premises.
+pub const SF: BundledFile = bundled!("sf.ttl", {
+    licenses: &[Licence {
+        name: "Apache License 2.0",
+        uri: "https://www.apache.org/licenses/LICENSE-2.0",
+    }],
+    copyright: &["(c) 2022 Open Geospatial Consortium"],
+    source: "https://github.com/opengeospatial/geosemantics-semantic-resources/blob/main/\
+             resources/geosparql-swg/geosparql-1.1/ontologies/sf_geometries.ttl",
+    remarks: Some("The file's copyright triple is spelled schema:coyrightNotice upstream."),
+    store_form: Some("2 xsd:nonNegativeInteger literals (OWL cardinalities) read as xsd:integer"),
+});
+
 // ─── BSD 3-Clause (ETSI) ───────────────────────────────────────────────────────
 
 pub const SAREF: BundledFile = bundled!("saref.ttl", {
@@ -664,6 +678,13 @@ pub const OTS: BundledFile = bundled!("ots.ttl", {
     source: "https://opentriplestore.org/ns#",
 });
 
+/// The GML 3.2.1 geometry class hierarchy, written by Open Triplestore from
+/// the GML schema's substitution groups (the file's header says how).
+pub const GML_GEOMETRIES: BundledFile = bundled!("gml.ttl", {
+    third_party: false,
+    source: "https://schemas.opengis.net/gml/3.2.1/",
+});
+
 /// Every bundled file.
 pub const ALL: &[&BundledFile] = &[
     &RDF,
@@ -705,11 +726,13 @@ pub const ALL: &[&BundledFile] = &[
     &PAV,
     &GEOSPARQL,
     &GEOSPARQL_1_0,
+    &SF,
     &SAREF,
     &LOCN,
     &IMBOR,
     &DOAP,
     &OTS,
+    &GML_GEOMETRIES,
 ];
 
 // ─── Header and attribution ────────────────────────────────────────────────────

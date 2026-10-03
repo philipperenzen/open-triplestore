@@ -124,3 +124,49 @@ SELECT ?feature ?geom WHERE {
 ```
 
 Geometry is typically attached with the GeoSPARQL blank-node shape — see the instance-data example in [Linked Data Modelling](/docs/modelling).
+
+## Query rewrite
+
+A triple pattern with one of the 24 topological relations as its predicate matches the relation where the geometries imply it, not only where a triple asserts it. This is the Query Rewrite Extension (OGC 11-052r4 Req 28–30, 22-047r1 §13). It is on by default:
+
+```sparql
+PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+
+SELECT ?park WHERE {
+  ?park a <https://example.org/Park> ;
+        geo:sfWithin <https://example.org/city> .
+}
+```
+
+The relations are `geo:sfEquals`, `sfDisjoint`, `sfIntersects`, `sfTouches`, `sfCrosses`, `sfWithin`, `sfContains`, `sfOverlaps`, `ehEquals`, `ehDisjoint`, `ehMeet`, `ehOverlap`, `ehCovers`, `ehCoveredBy`, `ehInside`, `ehContains`, `rcc8eq`, `rcc8dc`, `rcc8ec`, `rcc8po`, `rcc8tppi`, `rcc8tpp`, `rcc8ntpp` and `rcc8ntppi`. Each is decided by the `geof:` function of the same name.
+
+The rules follow the standard strictly:
+
+- A side of the relation is either a feature, reached through `geo:hasDefaultGeometry`, or a geometry itself. A feature with a geometry only through `geo:hasGeometry` is not related. Its geometry still is.
+- The geometry's literal is read from `geo:asWKT`, `geo:asGML`, `geo:asGeoJSON` or `geo:asKML`. Two serialisations of one geometry, or a relation that is both asserted and derived, give one match: results are the set a materialised relation would give.
+- That covers the standard's four rule shapes, feature–feature, feature–geometry, geometry–feature and geometry–geometry. An asserted relation triple still matches, with or without geometries.
+- Inside `GRAPH`, both geometries must be in that graph.
+
+What is rewritten: triple patterns with a constant relation predicate, in queries (`SELECT`, `ASK`, `CONSTRUCT`, `DESCRIBE`, sub-queries, `OPTIONAL`, `MINUS`, `FILTER EXISTS`) and in the `WHERE` clause of `DELETE`/`INSERT` updates. An update can therefore materialise a derived relation:
+
+```sparql
+PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+
+INSERT { GRAPH <https://example.org/relations> { ?a geo:sfWithin ?b } }
+WHERE  { ?a a <https://example.org/Park> ; geo:sfWithin ?b }
+```
+
+What is left alone: a variable predicate (`?a ?p ?b`, as the standard allows), property paths (`geo:sfWithin+`), `SERVICE` blocks, which the remote endpoint evaluates, and `INSERT DATA`/`DELETE DATA`. A blank node in a rewritten pattern is treated as the variable it stands for.
+
+Cost: a query that names no relation is not parsed again. A relation pattern with both sides unbound compares every pair of geometries in scope, so bind one side (by type or by IRI) on large data.
+
+`OTS_GEOSPARQL_QUERY_REWRITE=off` (or `0`, `false`, `no`) turns the rewrite off for the server. Relation patterns then match asserted triples only.
+
+## RDFS entailment
+
+The RDFS Entailment Extension (OGC 11-052r4 Req 25–27, 22-047r1 §12) reasons over the GeoSPARQL ontology and two geometry class hierarchies:
+
+- **Simple Features**: OGC's `sf_geometries.ttl` (registry entry `sf`), bundled unchanged: `sf:Polygon` ⊑ `sf:Surface` ⊑ `sf:Geometry` ⊑ `geo:Geometry`, `sf:Triangle` ⊑ `sf:Polygon`, and so on.
+- **GML 3.2.1**: registry entry `gml-geometries`. OGC no longer publishes this hierarchy as RDF, so Open Triplestore wrote it from the GML 3.2.1 schema at `https://schemas.opengis.net/gml/3.2.1/`. Each GML geometry element is a class, and `rdfs:subClassOf` follows the element's substitution group, so `gml:Polygon` ⊑ `gml:AbstractSurface` ⊑ `gml:AbstractGeometricPrimitive` ⊑ `gml:AbstractGeometry` ⊑ `geo:Geometry`. The GeoSPARQL 1.0 text gives `gml:Polygon` ⊑ `gml:SurfacePatch` as an example. That does not match the schema, so the file follows the schema. Surface patches, curve segments and `gml:Envelope` are not geometries in GML 3.2.1 and have no class. The file's header lists the schema files it was derived from.
+
+A dataset whose graphs use any GeoSPARQL term gets all three as reasoning premises. It does not need to declare conformance to them. A GeoSPARQL term here is a GeoSPARQL property used as a predicate, or a GeoSPARQL, SF or GML class used as a type or specialised with `rdfs:subClassOf`. `GET /api/datasets/{id}/conformance` lists them under `vocabulary_premises`. With the dataset's entailment set to `rdfs` and `materialize` (see [Reasoning](/docs/reasoning)), queries with `?entailment_dataset={id}` see, for example, `?f a geo:Feature` for every `?f geo:hasGeometry ?g`, `?g geo:hasSerialization ?wkt` for every `geo:asWKT`, and `?p a sf:Surface` for every `sf:Polygon`.

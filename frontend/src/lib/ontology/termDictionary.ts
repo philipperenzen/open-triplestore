@@ -156,6 +156,8 @@ export const VOCAB_FILES: Record<string, VocabFileSpec> = {
   'http://www.w3.org/ns/org#': { file: 'org.ttl', source: 'org' },
   'http://purl.org/linked-data/cube#': { file: 'qb.ttl', source: 'qb' },
   'http://www.opengis.net/ont/geosparql#': { file: 'geosparql.ttl', source: 'geo' },
+  'http://www.opengis.net/ont/sf#': { file: 'sf.ttl', source: 'sf' },
+  'http://www.opengis.net/ont/gml#': { file: 'gml.ttl', source: 'gml' },
   'https://w3id.org/bot#': { file: 'bot.ttl', source: 'bot' },
   'https://w3id.org/omg#': { file: 'omg.ttl', source: 'omg' },
   'https://w3id.org/fog#': { file: 'fog.ttl', source: 'fog' },

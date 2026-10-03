@@ -293,8 +293,10 @@ Bundled datasets and vocabularies:
         (LICENSES/Apache-2.0.txt) — PAV 2.3.1 (pav.ttl, Copyright 2008-2014
         Massachusetts General Hospital; Harvard Medical School; Balboa Systems;
         University of Manchester); OGC GeoSPARQL 1.1 (geosparql.ttl, (c) 2021
-        Open Geospatial Consortium) and GeoSPARQL 1.0 (geosparql/1.0.0.ttl,
-        Copyright (c) 2012 Open Geospatial Consortium), both from
+        Open Geospatial Consortium), GeoSPARQL 1.0 (geosparql/1.0.0.ttl,
+        Copyright (c) 2012 Open Geospatial Consortium) and the OGC Simple
+        Features Vocabulary 1.1.1 (sf.ttl, (c) 2022 Open Geospatial
+        Consortium), all three from
         https://github.com/opengeospatial/geosemantics-semantic-resources; the
         DOAP vocabulary (doap.ttl, Copyright © 2004-2016 Edd Dumbill, 2016-2017
         Edd Wilder-James, 2018- The DOAP Authors), from
