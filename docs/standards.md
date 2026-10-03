@@ -43,7 +43,7 @@ applies.
 | LDP (Linked Data Platform) 1.0 | Basic/Direct/Indirect Containers; NonRDFSource; per-resource access control with Web Access Control (`.acl` resources, `acl:` vocabulary, `Link rel="acl"`, `WAC-Allow`) | Full — WAC agents are this store's principals; no WebID-TLS / Solid-OIDC, no `acl:origin`. See [ldp.md](ldp.md#access-control). |
 | DCAT 3 / DCAT-AP 3 / DCAT-AP-NL 3 | Dataset catalogue description; EU / NL application profiles | Full¹¹ — DCAT 3 catalogue: DCAT 3 §11 versions, data services with `dcat:servesDataset`, temporal coverage, update frequency, DCAT range typing; `DCAT_PROFILE` adds the AP/AP-NL properties (identifiers, language, file types, catalogue records). CI validates it against SEMIC's DCAT-AP 3.0.1 shapes and Geonovum's DCAT-AP-NL 3 shapes. See [dcat.md](dcat.md). |
 | VoID | Dataset statistics, partitions and linksets | Full¹¹ — per dataset, over the graphs the caller may read: statistics, class and property partitions, vocabularies, example resources, features, data dumps, SPARQL endpoint; linkset-role graphs as `void:Linkset`s; store-wide counts only, never partitions. See [dcat.md](dcat.md#void-statistics). |
-| RML / R2RML | CSV/JSON/XML files and SQL / SPARQL datasources → RDF | Partial⁹ |
+| RML / R2RML | RML-Core / RML-IO, legacy RML and R2RML: CSV/JSON/XML files and SQL / SPARQL datasources → RDF | Partial⁹ |
 | JWT / OAuth 2.0 / OIDC | Authentication | Full |
 | SAML 2.0 | Authentication | Experimental — not in the `full` feature or the published image. SP-initiated Web Browser SSO (HTTP-Redirect AuthnRequest, HTTP-POST response bound to the request, signed by the configured IdP certificate); no IdP-initiated SSO, signed AuthnRequests, encrypted assertions or Single Logout. Tested against a simulated IdP only. See [auth.md](auth.md#saml-20). |
 | ShEx 2.1 | Shape Expressions: ShExC, ShExJ, ShExR, ShapeMap | Full¹⁶ — see [shex.md](shex.md). |
@@ -91,7 +91,10 @@ gives their source and licence. The shexTest results are in
 | RDF 1.1 formats | `tests/rdf11_conformance.rs` | spec-derived | 69 |  |
 | RDF Patch (RDF Delta) | `tests/rdf_patch_conformance.rs` | spec-derived | 24 |  |
 | RDFS entailment | `tests/rdfs_conformance.rs` | spec-derived | 32 |  |
-| RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 43 |  |
+| RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 50 |  |
+| RML-Core | `tests/rml_core_conformance.rs` | **vendored KG-Construct CG corpus** (the RML-Core test cases, unmodified; manifest-driven) | 2 | 76 corpus cases: 75 pass, 1 known failure, 0 runner-side skips (floor ≥70 asserted) |
+| RML-IO (sources) | `tests/rml_io_conformance.rs` | **vendored KG-Construct CG corpus** (the RML-IO source test cases, unmodified; manifest-driven) | 2 | 32 corpus cases: 29 pass, 1 known failure, 2 runner-side skips (floor ≥25 asserted) |
+| RML (legacy vocabulary) | `tests/rml_legacy_conformance.rs` | **vendored RML.io corpus** (the CSV, JSON and XML cases of rml-test-cases, unmodified) | 2 | 117 corpus cases: 112 pass, 5 known failures, 0 runner-side skips (floor ≥100 asserted) |
 | SHACL Advanced Features | `tests/shacl_af_corpus.rs` | **vendored TopQuadrant corpus** (expression, function, rule and target tests of TopQuadrant/shacl, unmodified; dash-driven, full report equality) | 1 | 10 corpus cases: 9 pass, 0 known failures, 1 expecting behaviour outside the spec (reported as the failure the spec requires), 0 runner-side skips (floor ≥9 asserted) |
 | SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 66 |  |
 | SHACL-AF rules | `tests/shacl_rules_conformance.rs` | spec-derived | 43 |  |
@@ -118,7 +121,7 @@ gives their source and licence. The shexTest results are in
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 | SPARQL 1.2 | `tests/w3c_sparql12_manifests.rs` | **vendored W3C test-suite subset** (`sparql/sparql12` of w3c/rdf-tests, unmodified; manifest-driven, engine and mirror paths) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql12.md` |
 
-1232 conformance tests across 40 suites; a further 808 tests in 107 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 16 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only; the same holds for the W3C R2RML test cases, which CI fetches at a pinned commit rather than vendoring.
+1245 conformance tests across 43 suites; a further 808 tests in 107 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 19 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`, the RML corpora), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only; the same holds for the W3C R2RML test cases, which CI fetches at a pinned commit rather than vendoring.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->
@@ -356,29 +359,47 @@ behavior and will flip green when the limitation is resolved.
    [shacl.md](shacl.md#migrating-from-the-legacy-dialect). Updated 2026-10-03
    (was Partial: a different dialect, and a serializer that dropped most
    constraints silently).
-9. **RML / R2RML** — CSV/JSON/XML *file* sources with template/reference/constant
-   term maps, datatype and language tags, `rr:class`, and inline blank-node term
-   maps ([rml.md](rml.md)); relational logical sources (`rr:tableName`,
-   `rml:query`, R2RML's `rr:logicalTable` / `rr:sqlQuery`) over registered
-   PostgreSQL, MySQL / MariaDB and SQL Server datasources and virtual SPARQL
-   sources ([sources.md](sources.md)). Referencing object maps
-   (`rr:parentTriplesMap` joins) resolve on both, across files and formats; one
-   without a join condition joins each row to itself (R2RML §8). Terms follow R2RML: §7.4 term types
-   (constants keep their kind, datatype and language; template objects are
-   IRIs), §7.3 IRI-safe encoding of IRI templates only, blank nodes per value
-   and graph, union graph-map semantics with `rr:defaultGraph`, a base IRI
-   (`rml:baseIRI` or the run's), and delimited / schema-qualified SQL
-   identifiers. A predicate-object map generates every predicate map × every
-   object map. A non-conforming mapping is refused at parse with the construct
-   named, a column the source lacks is an error, and a data error (§4.3: an
-   invalid IRI, an ill-typed datatype override) aborts the run and names the
-   rows unless the run opts into skipping and reporting them. An empty value
-   is a value; RML-IO `rml:null` lists the values that count as NULL. A
-   datasource mapping version frozen before these rules keeps the old term
-   rules (an empty value generates no term there). The W3C R2RML test cases
-   run in CI on SQLite, PostgreSQL and MySQL (`tests/w3c_r2rml_conformance.rs`,
-   fetched at a pinned commit, no score published). **Not implemented:** the
-   RML-Core / RML-IO vocabulary beyond `rml:baseIRI` and `rml:null`.
+9. **RML / R2RML** — one row for the family (owner decision D1, 2026-10-03),
+   graded on three corpora: the W3C R2RML test cases on SQLite, PostgreSQL
+   and MySQL (`tests/w3c_r2rml_conformance.rs`, fetched at a pinned commit, no
+   score published), the RML-Core test cases (`tests/rml_core_conformance.rs`)
+   and the offline RML-IO source test cases (`tests/rml_io_conformance.rs`),
+   both vendored; the CSV, JSON and XML cases of the legacy rml-test-cases run
+   as well (`tests/rml_legacy_conformance.rs`). Mappings are read in R2RML,
+   legacy RML and RML-Core / RML-IO, mixed freely ([rml.md](rml.md)). File
+   sources: CSV with CSVW dialects, JSON and JSON Lines with RFC 9535 JSONPath,
+   XML with XPath 1.0 and namespaces; `rml:encoding`, `rml:compression`
+   (gzip, zip, tar.gz, tar.xz) and `rml:null`. Relational sources: `rr:tableName`,
+   `rml:query`, R2RML's `rr:logicalTable` / `rr:sqlQuery` and RML-IO's
+   `rml:SQL2008Table` / `rml:SQL2008Query` over registered PostgreSQL, MySQL /
+   MariaDB and SQL Server datasources and virtual SPARQL sources
+   ([sources.md](sources.md)). Multi-valued references generate a term per
+   value, templates the cartesian product; language and datatype maps, join
+   expression maps, `rml:URI` / `rml:UnsafeIRI` / `rml:UnsafeURI`, blank-node
+   term maps without an expression, `rml:baseIRI`; joins on every source, and
+   a join-less reference joins a row to itself (R2RML §8). Terms follow R2RML
+   §7.3, §7.4, §10.2 and §11 (IRI-safe templates, natural datatypes and
+   lexical forms, blank nodes per value and graph, union graph maps), a
+   non-conforming mapping is refused at parse naming the construct, and a data
+   error aborts the run naming the rows unless the run opts into skipping and
+   reporting them. A datasource mapping version frozen before these rules keeps
+   the old term rules. Cases that do not pass, each listed with its reason in
+   its runner: R2RMLTC0002f (a regular SQL identifier is matched as the
+   database reports its columns, not case-folded as SQL 2008 would), R2RMLTC0018a
+   on SQLite and MySQL (neither returns `CHAR` values padded), RMLTC0027b (its
+   expected output holds IRIs with spaces, which RDF does not allow) and
+   RMLSTC0009a (the suite's manifest expects an error its own description and
+   expected output do not); the RML-IO SPARQL-endpoint and D2RQ cases map
+   through registered datasources and are not run.
+   Graded *Partial* under the project's Full rubric (2026-10-03): R2RMLTC0002f
+   is a deliberate deviation, which the rubric does not accept as a remaining
+   failure; R2RMLTC0018a is a limit of the database engines, and RMLTC0027b and
+   RMLSTC0009a are defects in the test suites.
+   **Not implemented:** RML-FNML (new-vocabulary functions; the legacy
+   `fnml:functionValue` with this store's own functions works), RML-CC
+   (collections and containers), RML-LV (logical views), RML-star and RML-IO
+   logical targets — a mapping that uses their terms is refused naming the
+   module — and remote sources (never fetched; the file is given to the run).
 10. **OWL 2 RL / EL / QL.**
     - **RL** runs all 78 RL/RDF rules (OWL 2 Profiles §4.3), lists of any
       length and inverse property expressions included. The Table 8 rules with

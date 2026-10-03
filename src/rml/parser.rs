@@ -12,8 +12,12 @@ use crate::store::engine::TripleStore;
 
 const RR: &str = "http://www.w3.org/ns/r2rml#";
 const RML: &str = "http://semweb.mmlab.be/ns/rml#";
-/// The RML-Core / RML-IO namespace. Only `rml:baseIRI` is read from it so far.
+/// The RML-Core / RML-IO namespace. Its terms with an R2RML or legacy RML
+/// counterpart are rewritten to it before parsing ([`super::vocab`]); the
+/// parser reads the rest here.
 const RML_CORE: &str = "http://w3id.org/rml/";
+const CSVW: &str = "http://www.w3.org/ns/csvw#";
+const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const FNML: &str = "http://semweb.mmlab.be/ns/fnml#";
 /// FnO moved host; both spellings of `fno:executes` are accepted.
 const FNO_EXECUTES: [&str; 2] = [
@@ -36,6 +40,8 @@ enum Position {
     Predicate,
     Object,
     Graph,
+    /// `rml:datatypeMap` (RML-Core): generates datatype IRIs.
+    Datatype,
 }
 
 impl Position {
@@ -45,6 +51,7 @@ impl Position {
             Position::Predicate => "predicate map",
             Position::Object => "object map",
             Position::Graph => "graph map",
+            Position::Datatype => "datatype map",
         }
     }
 }
@@ -73,14 +80,12 @@ pub fn parse_from_store_as(
     graph: Option<&str>,
     semantics: Semantics,
 ) -> Result<RmlMapping, String> {
-    let graph_clause = match graph {
-        Some(g) => format!("GRAPH <{}> {{", crate::store::escape_sparql_iri(g)),
-        None => String::new(),
-    };
-    let graph_close = if graph.is_some() { "}" } else { "" };
+    // RML-Core terms become their R2RML / legacy RML counterparts, in a copy.
+    let (normalised, vocabulary) = super::vocab::normalise(store, graph)?;
+    let store = &normalised;
 
     // Find all TriplesMap IRIs
-    let q = format!("SELECT ?tm WHERE {{ {graph_clause} ?tm a <{RR}TriplesMap> {graph_close} }}");
+    let q = format!("SELECT ?tm WHERE {{ ?tm a <{RR}TriplesMap> }}");
     let mut tm_iris = query_col(store, &q, "tm");
     // Deterministic order: a mapping's triples maps run (and their parent
     // indexes build) in a stable sequence, so two runs of the same mapping
@@ -90,7 +95,7 @@ pub fn parse_from_store_as(
 
     let ctx = Ctx {
         store,
-        graph,
+        graph: None,
         semantics,
     };
     let mut triples_maps = Vec::new();
@@ -108,6 +113,7 @@ pub fn parse_from_store_as(
         triples_maps,
         semantics,
         base_iri: None,
+        rml_core: vocabulary.rml_core,
     };
     validate_references(&mapping)?;
     Ok(mapping)
@@ -151,6 +157,8 @@ fn same_logical_source(a: &LogicalSource, b: &LogicalSource) -> bool {
         && a.table_name == b.table_name
         && a.iterator == b.iterator
         && a.reference_formulation == b.reference_formulation
+        && a.nulls == b.nulls
+        && a.access == b.access
 }
 
 /// The store, graph and rules a document is parsed under.
@@ -231,18 +239,67 @@ impl Ctx<'_> {
             other => other.to_string(),
         };
 
+        // The reference formulation: an IRI (`ql:CSV`, `rml:JSONPath`, …), or
+        // RML-IO's description of one — `[ a rml:XPathReferenceFormulation ;
+        // rml:namespace [ … ] ]`.
+        let mut namespaces: Vec<(String, String)> = Vec::new();
+        let declared = match self.single(ls_iri, &[format!("{RML}referenceFormulation")], OWNER)? {
+            None => None,
+            Some(Term::NamedNode(n)) => Some(n.into_string()),
+            Some(Term::BlankNode(b)) => {
+                let node = format!("_:{}", b.as_str());
+                for ns in self.objects(&node, &format!("{RML_CORE}namespace")) {
+                    let one = |p: &str| -> Result<String, String> {
+                        match self.single(&ns, &[format!("{RML_CORE}{p}")], "rml:namespace")? {
+                            Some(t) => Ok(text(t)),
+                            None => Err(format!("an rml:namespace is missing rml:{p}")),
+                        }
+                    };
+                    namespaces.push((one("namespacePrefix")?, one("namespaceURL")?));
+                }
+                let types = self.objects(&node, RDF_TYPE);
+                Some(
+                    types
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| format!("{RML_CORE}XPathReferenceFormulation")),
+                )
+            }
+            Some(other) => {
+                return Err(format!(
+                    "rml:referenceFormulation {other} is neither an IRI nor a description"
+                ))
+            }
+        };
+        let rml_io_sql = declared.as_deref().and_then(|f| {
+            f.strip_prefix(RML_CORE)
+                .filter(|l| matches!(*l, "SQL2008Table" | "SQL2008Query"))
+        });
+
+        let iterator = self
+            .single(ls_iri, &[format!("{RML}iterator")], OWNER)?
+            .map(text);
+
         // `rr:tableName` / `rml:query` / `rr:sqlQuery` describe a relational
-        // source: a table or an R2RML view, never both (R2RML §5).
-        let table_name = self
+        // source: a table or an R2RML view, never both (R2RML §5). RML-IO says
+        // the same with `rml:SQL2008Table` / `rml:SQL2008Query` and the table
+        // or query as the iterator.
+        let mut table_name = self
             .single(ls_iri, &[format!("{RR}tableName")], OWNER)?
             .map(text);
-        let query = self
+        let mut query = self
             .single(
                 ls_iri,
                 &[format!("{RML}query"), format!("{RR}sqlQuery")],
                 OWNER,
             )?
             .map(text);
+        let mut iterator = iterator;
+        match rml_io_sql {
+            Some("SQL2008Table") if table_name.is_none() => table_name = iterator.take(),
+            Some("SQL2008Query") if query.is_none() => query = iterator.take(),
+            _ => {}
+        }
         if table_name.is_some() && query.is_some() {
             return Err(
                 "the logical source has both rr:tableName and a query (rr:sqlQuery / rml:query); \
@@ -251,15 +308,33 @@ impl Ctx<'_> {
             );
         }
 
-        // rml:source — a datasource IRI, or a file part name / path.
+        // rml:source — a datasource IRI, a file part name / path, or an
+        // RML-IO source description.
         let source_term = self.single(ls_iri, &[format!("{RML}source")], OWNER)?;
+        let mut access = Access {
+            namespaces,
+            ..Access::default()
+        };
+        let mut nulls: Vec<String> = Vec::new();
         let source = match &source_term {
             Some(Term::NamedNode(n)) if n.as_str().starts_with(DATASOURCE_PREFIX) => {
                 SourceRef::Datasource(n.as_str().to_string())
             }
-            Some(Term::NamedNode(n)) => SourceRef::File(n.as_str().to_string()),
-            Some(Term::BlankNode(b)) => SourceRef::File(format!("_:{}", b.as_str())),
-            Some(Term::Literal(l)) => SourceRef::File(l.value().to_string()),
+            Some(Term::NamedNode(n)) => {
+                let node = n.as_str().to_string();
+                match self.source_description(&node, &mut access, &mut nulls)? {
+                    Some(path) => SourceRef::File(path),
+                    None => SourceRef::File(node),
+                }
+            }
+            Some(Term::BlankNode(b)) => {
+                let node = format!("_:{}", b.as_str());
+                match self.source_description(&node, &mut access, &mut nulls)? {
+                    Some(path) => SourceRef::File(path),
+                    None => SourceRef::File(node),
+                }
+            }
+            Some(Term::Literal(l)) => SourceRef::File(file_key(l.value())),
             #[cfg(feature = "rdf-12")]
             Some(Term::Triple(_)) => return Err("rml:source cannot be a triple term".to_string()),
             // R2RML's `rr:logicalTable` names no source: the datasource is the
@@ -267,10 +342,17 @@ impl Ctx<'_> {
             None if table_name.is_some() || query.is_some() => SourceRef::Datasource(String::new()),
             None => return Err("Missing rml:source".to_string()),
         };
+        if let SourceRef::File(path) = &source {
+            let lower = path.to_ascii_lowercase();
+            access.json_lines = lower.ends_with(".jsonl")
+                || lower.ends_with(".ndjson")
+                || lower.ends_with(".jsonl.gz")
+                || lower.ends_with(".ndjson.gz");
+        }
 
-        let mut formulation = self
-            .single(ls_iri, &[format!("{RML}referenceFormulation")], OWNER)?
-            .map(|t| ReferenceFormulation::from_iri(&text(t)))
+        let mut formulation = declared
+            .as_deref()
+            .map(ReferenceFormulation::from_iri)
             .unwrap_or(ReferenceFormulation::Csv);
         // A datasource source IS relational, whatever (if anything) the document
         // declared: the reference formulation is advisory, the source is not.
@@ -283,40 +365,15 @@ impl Ctx<'_> {
                     .to_string(),
             );
         }
-
-        let iterator = self
-            .single(ls_iri, &[format!("{RML}iterator")], OWNER)?
-            .map(text);
+        if formulation == ReferenceFormulation::Csv && iterator.is_some() {
+            // RML-IO: a CSV source iterates by row and takes no iterator.
+            iterator = None;
+        }
 
         // `rml:null` (RML-IO): source values that count as NULL. Read on the
         // logical source, where this engine's sources are described, and on
-        // a source node that has properties of its own.
-        let mut nulls: Vec<String> = Vec::new();
-        let mut null_holders = vec![ls_iri.to_string()];
-        match &source_term {
-            Some(Term::NamedNode(n)) => null_holders.push(n.as_str().to_string()),
-            Some(Term::BlankNode(b)) => null_holders.push(format!("_:{}", b.as_str())),
-            _ => {}
-        }
-        for holder in &null_holders {
-            for p in [format!("{RML_CORE}null"), format!("{RML}null")] {
-                for t in self.terms(holder, &p) {
-                    match t {
-                        Term::Literal(l) => {
-                            if !nulls.iter().any(|n| n == l.value()) {
-                                nulls.push(l.value().to_string());
-                            }
-                        }
-                        other => {
-                            return Err(format!(
-                                "rml:null {other} is not a string; it names a value that \
-                                 counts as NULL"
-                            ))
-                        }
-                    }
-                }
-            }
-        }
+        // the source description (done above).
+        self.nulls_of(ls_iri, &mut nulls)?;
 
         Ok(LogicalSource {
             source,
@@ -325,7 +382,199 @@ impl Ctx<'_> {
             query,
             table_name,
             nulls,
+            access,
         })
+    }
+
+    /// `rml:null` values on `node`, added to `nulls`.
+    fn nulls_of(&self, node: &str, nulls: &mut Vec<String>) -> Result<(), String> {
+        for p in [format!("{RML_CORE}null"), format!("{RML}null")] {
+            for t in self.terms(node, &p) {
+                match t {
+                    Term::Literal(l) => {
+                        if !nulls.iter().any(|n| n == l.value()) {
+                            nulls.push(l.value().to_string());
+                        }
+                    }
+                    other => {
+                        return Err(format!(
+                            "rml:null {other} is not a string; it names a value that counts \
+                             as NULL"
+                        ))
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Read an RML-IO source description (`rml:Source`, `rml:FilePath`,
+    /// `rml:RelativePathSource`, `csvw:Table`): the file it names, its
+    /// encoding, compression and NULL values, and a CSVW dialect. `Ok(None)`
+    /// when `node` describes nothing — a plain IRI naming a file.
+    fn source_description(
+        &self,
+        node: &str,
+        access: &mut Access,
+        nulls: &mut Vec<String>,
+    ) -> Result<Option<String>, String> {
+        const OWNER: &str = "source description";
+        let literal = |t: Term| match t {
+            Term::Literal(l) => l.value().to_string(),
+            Term::NamedNode(n) => n.into_string(),
+            other => other.to_string(),
+        };
+        let types: Vec<String> = self.objects(node, RDF_TYPE);
+        for unsupported in ["http://www.wiwiss.fu-berlin.de/suhl/bizer/D2RQ/0.1#Database"] {
+            if types.iter().any(|t| t == unsupported)
+                || !self
+                    .objects(
+                        node,
+                        "http://www.wiwiss.fu-berlin.de/suhl/bizer/D2RQ/0.1#jdbcDSN",
+                    )
+                    .is_empty()
+            {
+                return Err(
+                    "a D2RQ database description names its connection in the mapping; register \
+                     the database as a datasource and name it rml:source <urn:source:…> instead"
+                        .to_string(),
+                );
+            }
+        }
+        if types
+            .iter()
+            .any(|t| t == "http://www.w3.org/ns/sparql-service-description#Service")
+        {
+            return Err(
+                "a SPARQL endpoint source is mapped through a registered datasource, not from \
+                 uploaded files"
+                    .to_string(),
+            );
+        }
+
+        let path = self
+            .single(node, &[format!("{RML_CORE}path")], OWNER)?
+            .map(literal);
+        let url = self
+            .single(node, &[format!("{CSVW}url")], OWNER)?
+            .map(literal);
+        let file = path.or(url).map(|p| file_key(&p));
+
+        match self
+            .single(node, &[format!("{RML_CORE}encoding")], OWNER)?
+            .map(literal)
+            .as_deref()
+        {
+            None => {}
+            Some(e) => access.encoding = Some(encoding_label(e)?),
+        }
+        access.compression = match self
+            .single(node, &[format!("{RML_CORE}compression")], OWNER)?
+            .map(literal)
+            .as_deref()
+            .map(|c| c.strip_prefix(RML_CORE).unwrap_or(c))
+        {
+            None | Some("none") => Compression::None,
+            Some("gzip") => Compression::Gzip,
+            Some("zip") => Compression::Zip,
+            Some("tarxz") => Compression::TarXz,
+            Some("targz") => Compression::TarGz,
+            Some(other) => {
+                return Err(format!(
+                    "rml:compression {other} is not rml:none, rml:gzip, rml:zip, rml:tarxz or \
+                     rml:targz"
+                ))
+            }
+        };
+        self.nulls_of(node, nulls)?;
+
+        // CSVW: the dialect, and NULL values on the table.
+        let is_table = types.iter().any(|t| t == &format!("{CSVW}Table"))
+            || !self.objects(node, &format!("{CSVW}dialect")).is_empty();
+        if is_table {
+            for t in self.terms(node, &format!("{CSVW}null")) {
+                if let Term::Literal(l) = t {
+                    access.dialect.nulls.push(l.value().to_string());
+                }
+            }
+            if let Some(d) = self
+                .single(node, &[format!("{CSVW}dialect")], OWNER)?
+                .map(|t| match t {
+                    Term::BlankNode(b) => format!("_:{}", b.as_str()),
+                    Term::NamedNode(n) => n.into_string(),
+                    other => other.to_string(),
+                })
+            {
+                self.csv_dialect(&d, access)?;
+            }
+        }
+        Ok(file)
+    }
+
+    /// A `csvw:Dialect`.
+    fn csv_dialect(&self, node: &str, access: &mut Access) -> Result<(), String> {
+        const OWNER: &str = "csvw:dialect";
+        let get = |p: &str| -> Result<Option<String>, String> {
+            Ok(self
+                .single(node, &[format!("{CSVW}{p}")], OWNER)?
+                .map(|t| match t {
+                    Term::Literal(l) => l.value().to_string(),
+                    other => other.to_string(),
+                }))
+        };
+        let byte = |p: &str, v: String| -> Result<u8, String> {
+            let v = if v == "\\t" { "\t".to_string() } else { v };
+            match v.as_bytes() {
+                [b] => Ok(*b),
+                _ => Err(format!(
+                    "csvw:{p} \"{v}\" must be a single ASCII character for this engine"
+                )),
+            }
+        };
+        let boolean = |p: &str, v: String| -> Result<bool, String> {
+            match v.trim() {
+                "true" | "1" => Ok(true),
+                "false" | "0" => Ok(false),
+                other => Err(format!("csvw:{p} \"{other}\" is not a boolean")),
+            }
+        };
+        let count = |p: &str, v: String| -> Result<usize, String> {
+            v.trim()
+                .parse()
+                .map_err(|_| format!("csvw:{p} \"{v}\" is not a non-negative integer"))
+        };
+        let d = &mut access.dialect;
+        if let Some(v) = get("delimiter")? {
+            d.delimiter = byte("delimiter", v)?;
+        }
+        if let Some(v) = get("quoteChar")? {
+            d.quote = byte("quoteChar", v)?;
+        }
+        if let Some(v) = get("doubleQuote")? {
+            d.double_quote = boolean("doubleQuote", v)?;
+        }
+        if let Some(v) = get("header")? {
+            d.header = boolean("header", v)?;
+        }
+        if let Some(v) = get("headerRowCount")? {
+            d.header_rows = count("headerRowCount", v)?;
+            d.header = d.header_rows > 0;
+        }
+        if let Some(v) = get("skipRows")? {
+            d.skip_rows = count("skipRows", v)?;
+        }
+        if let Some(v) = get("commentPrefix")? {
+            d.comment = Some(byte("commentPrefix", v)?);
+        }
+        if let Some(v) = get("trim")? {
+            d.trim = matches!(v.trim(), "true" | "1" | "start" | "end");
+        }
+        if let Some(v) = get("encoding")? {
+            if access.encoding.is_none() {
+                access.encoding = Some(encoding_label(&v)?);
+            }
+        }
+        Ok(())
     }
 
     fn subject_map(&self, tm_iri: &str) -> Result<SubjectMap, String> {
@@ -353,14 +602,12 @@ impl Ctx<'_> {
             None => None,
         };
         let term_map = if function.is_some() {
-            TermMap {
-                kind: TermMapKind::Constant(Term::Literal(
-                    oxigraph::model::Literal::new_simple_literal(""),
-                )),
-                term_type: TermType::IRI,
-                datatype: None,
-                language: None,
-            }
+            TermMap::new(
+                TermMapKind::Constant(Term::Literal(oxigraph::model::Literal::new_simple_literal(
+                    "",
+                ))),
+                TermType::IRI,
+            )
         } else if let Some(ref sm) = sm_node {
             self.term_map(sm, Position::Subject)?
         } else {
@@ -482,24 +729,33 @@ impl Ctx<'_> {
             }
             let mut joins = Vec::new();
             for jc in self.objects(om, &format!("{RR}joinCondition")) {
-                let one = |p: &str| -> Result<String, String> {
-                    let mut v = self.objects(&jc, &format!("{RR}{p}"));
-                    match v.len() {
-                        0 => Err(format!("rr:joinCondition is missing rr:{p}")),
-                        1 => Ok(v.remove(0)),
-                        n => Err(format!(
-                            "rr:joinCondition has {n} values of rr:{p}; it takes exactly one"
+                // `rr:child "c"` / `rr:parent "p"`, or RML-Core's
+                // `rml:childMap` / `rml:parentMap`, expression maps that may
+                // also be a template or a constant.
+                let side = |short: &str, map: &str| -> Result<JoinSide, String> {
+                    let mut v = self.objects(&jc, &format!("{RR}{short}"));
+                    let maps = self.objects(&jc, &format!("{RML_CORE}{map}"));
+                    match (v.len(), maps.len()) {
+                        (1, 0) => Ok(JoinSide::Reference(v.remove(0))),
+                        (0, 1) => self.join_side(&maps[0], map),
+                        (0, 0) => Err(format!(
+                            "rr:joinCondition is missing rr:{short} (or rml:{map})"
+                        )),
+                        (a, b) => Err(format!(
+                            "rr:joinCondition has {} values of rr:{short} / rml:{map}; it takes \
+                             exactly one",
+                            a + b
                         )),
                     }
                 };
-                let child = one("child")?;
-                let parent_col = one("parent")?;
+                let child = side("child", "childMap")?;
+                let parent_side = side("parent", "parentMap")?;
                 joins.push(JoinCondition {
                     child,
-                    parent: parent_col,
+                    parent: parent_side,
                 });
             }
-            joins.sort_by(|a, b| (&a.child, &a.parent).cmp(&(&b.child, &b.parent)));
+            joins.sort_by_key(|a| (a.child.key(), a.parent.key()));
             return Ok(ObjectMap::Ref(RefObjectMap {
                 parent_triples_map: parent,
                 joins,
@@ -523,6 +779,76 @@ impl Ctx<'_> {
         }
 
         self.term_map(om, Position::Object).map(ObjectMap::Term)
+    }
+
+    /// An `rml:childMap` / `rml:parentMap`: a reference, a template or a
+    /// constant.
+    fn join_side(&self, node: &str, what: &str) -> Result<JoinSide, String> {
+        let kinds = self.term_map_kinds(node);
+        match kinds.as_slice() {
+            ["rr:constant"] => match self.terms(node, &format!("{RR}constant")).remove(0) {
+                Term::Literal(l) => Ok(JoinSide::Constant(l.value().to_string())),
+                Term::NamedNode(n) => Ok(JoinSide::Constant(n.into_string())),
+                other => Err(format!("the constant of rml:{what} {other} is not a value")),
+            },
+            ["rr:template"] => {
+                let t = self.objects(node, &format!("{RR}template")).remove(0);
+                validate_template(&t).map_err(|e| format!("rml:{what}: {e}"))?;
+                Ok(JoinSide::Template(t))
+            }
+            ["rml:reference"] => Ok(JoinSide::Reference(
+                self.objects(node, &format!("{RML}reference")).remove(0),
+            )),
+            ["rr:column"] => Ok(JoinSide::Reference(
+                self.objects(node, &format!("{RR}column")).remove(0),
+            )),
+            [] => Err(format!(
+                "rml:{what} has no rml:constant, rml:reference or rml:template"
+            )),
+            _ => Err(format!(
+                "rml:{what} is exactly one of a constant, a reference or a template"
+            )),
+        }
+    }
+
+    /// An expression map that generates language tags (`rml:languageMap`):
+    /// a constant folds into the term map's language, anything else is kept.
+    fn language_map(&self, node: &str, owner: &str) -> Result<LanguageOrMap, String> {
+        let kinds = self.term_map_kinds(node);
+        match kinds.as_slice() {
+            ["rr:constant"] => match self.terms(node, &format!("{RR}constant")).remove(0) {
+                Term::Literal(l) => Ok(LanguageOrMap::Tag(checked_language(l.value(), owner)?)),
+                other => Err(format!(
+                    "the rml:languageMap of the {owner} has the constant {other}; a language \
+                     tag is a string"
+                )),
+            },
+            [_] => {
+                let kind = match kinds[0] {
+                    "rr:template" => {
+                        let t = self.objects(node, &format!("{RR}template")).remove(0);
+                        validate_template(&t)
+                            .map_err(|e| format!("the rml:languageMap of the {owner}: {e}"))?;
+                        TermMapKind::Template(t)
+                    }
+                    "rml:reference" => TermMapKind::Reference(
+                        self.objects(node, &format!("{RML}reference")).remove(0),
+                    ),
+                    _ => {
+                        TermMapKind::Reference(self.objects(node, &format!("{RR}column")).remove(0))
+                    }
+                };
+                Ok(LanguageOrMap::Map(TermMap::new(kind, TermType::Literal)))
+            }
+            [] => Err(format!(
+                "the rml:languageMap of the {owner} has no rml:constant, rml:reference or \
+                 rml:template"
+            )),
+            _ => Err(format!(
+                "the rml:languageMap of the {owner} is exactly one of a constant, a reference \
+                 or a template"
+            )),
+        }
     }
 
     /// Which of the four term-map kinds `node` declares, one entry per value.
@@ -597,6 +923,7 @@ impl Ctx<'_> {
                     TermMapKind::Reference(c) => FunctionArg::Reference(c),
                     TermMapKind::Constant(c) => FunctionArg::Constant(term_value(&c)),
                     TermMapKind::Template(t) => FunctionArg::Constant(t),
+                    TermMapKind::Fresh => continue,
                 });
             }
             if FNO_EXECUTES.contains(&predicate.as_str()) {
@@ -627,10 +954,31 @@ impl Ctx<'_> {
 
     fn term_map(&self, node: &str, position: Position) -> Result<TermMap, String> {
         let owner = position.name();
+        let declared_type = match self.single(node, &[format!("{RR}termType")], owner)? {
+            Some(Term::NamedNode(n)) => Some(term_type_from_iri(n.as_str()).ok_or_else(|| {
+                format!(
+                    "rr:termType <{}> on the {owner} is not rr:IRI, rr:BlankNode, rr:Literal, \
+                     rml:URI, rml:UnsafeIRI or rml:UnsafeURI",
+                    n.as_str()
+                )
+            })?),
+            Some(other) => {
+                return Err(format!(
+                    "rr:termType {other} on the {owner} is not an IRI (R2RML §7.4)"
+                ))
+            }
+            None => None,
+        };
         // A term map is exactly one of a constant, a column (`rr:column` or
-        // `rml:reference`) or a template (R2RML §7).
+        // `rml:reference`) or a template (R2RML §7) — or, in RML-Core, a
+        // blank-node term map with no expression at all.
         let kinds = self.term_map_kinds(node);
         match kinds.as_slice() {
+            [] if declared_type == Some(TermType::BlankNode)
+                && matches!(position, Position::Subject | Position::Object) =>
+            {
+                return Ok(TermMap::new(TermMapKind::Fresh, TermType::BlankNode));
+            }
             [] => {
                 return Err(format!(
                     "the {owner} has no rr:constant, rr:template, rr:column or rml:reference"
@@ -656,7 +1004,9 @@ impl Ctx<'_> {
         }
         let kind = match kinds[0] {
             "rr:template" => {
-                TermMapKind::Template(self.objects(node, &format!("{RR}template")).remove(0))
+                let t = self.objects(node, &format!("{RR}template")).remove(0);
+                validate_template(&t).map_err(|e| format!("the {owner}: {e}"))?;
+                TermMapKind::Template(t)
             }
             "rml:reference" => {
                 TermMapKind::Reference(self.objects(node, &format!("{RML}reference")).remove(0))
@@ -664,7 +1014,9 @@ impl Ctx<'_> {
             _ => TermMapKind::Reference(self.objects(node, &format!("{RR}column")).remove(0)),
         };
 
-        let datatype = match self.single(node, &[format!("{RR}datatype")], owner)? {
+        // A datatype: `rr:datatype` (or RML-Core's shortcut, the same), or an
+        // `rml:datatypeMap`, whose constant is the same as the shortcut.
+        let mut datatype = match self.single(node, &[format!("{RR}datatype")], owner)? {
             Some(Term::NamedNode(n)) => Some(n.into_string()),
             Some(other) => {
                 return Err(format!(
@@ -673,18 +1025,31 @@ impl Ctx<'_> {
             }
             None => None,
         };
-        let language = match self.single(node, &[format!("{RR}language")], owner)? {
-            Some(Term::Literal(l)) => {
-                let tag = l.value().to_string();
-                // Validated by the BCP 47 parser the store itself uses.
-                if !valid_language_tag(&tag) {
-                    return Err(format!(
-                        "rr:language \"{tag}\" on the {owner} is not a valid BCP 47 language \
-                         tag (R2RML §7.5)"
-                    ));
-                }
-                Some(tag)
+        let mut datatype_map = None;
+        if let Some(dm) = self
+            .single(node, &[format!("{RML_CORE}datatypeMap")], owner)?
+            .map(|t| node_id(&t))
+        {
+            if datatype.is_some() {
+                return Err(format!(
+                    "the {owner} has both rr:datatype and rml:datatypeMap; it takes one datatype \
+                     map"
+                ));
             }
+            let map = self
+                .term_map(&dm, Position::Datatype)
+                .map_err(|e| format!("rml:datatypeMap of the {owner}: {e}"))?;
+            match &map.kind {
+                TermMapKind::Constant(Term::NamedNode(n)) => {
+                    datatype = Some(n.as_str().to_string())
+                }
+                _ => datatype_map = Some(Box::new(map)),
+            }
+        }
+
+        // A language: `rr:language` (or the shortcut), or an `rml:languageMap`.
+        let mut language = match self.single(node, &[format!("{RR}language")], owner)? {
+            Some(Term::Literal(l)) => Some(checked_language(l.value(), owner)?),
             Some(other) => {
                 return Err(format!(
                     "rr:language {other} on the {owner} must be a string (R2RML §7.5)"
@@ -692,7 +1057,25 @@ impl Ctx<'_> {
             }
             None => None,
         };
-        if datatype.is_some() && language.is_some() {
+        let mut language_map = None;
+        if let Some(lm) = self
+            .single(node, &[format!("{RML}languageMap")], owner)?
+            .map(|t| node_id(&t))
+        {
+            if language.is_some() {
+                return Err(format!(
+                    "the {owner} has both rr:language and rml:languageMap; it takes one language \
+                     map"
+                ));
+            }
+            match self.language_map(&lm, owner)? {
+                LanguageOrMap::Tag(t) => language = Some(t),
+                LanguageOrMap::Map(m) => language_map = Some(Box::new(m)),
+            }
+        }
+        let has_datatype = datatype.is_some() || datatype_map.is_some();
+        let has_language = language.is_some() || language_map.is_some();
+        if has_datatype && has_language {
             return Err(format!(
                 "the {owner} has both rr:language and rr:datatype; a literal carries a language \
                  tag or a datatype, not both (R2RML §7.6)"
@@ -709,9 +1092,7 @@ impl Ctx<'_> {
                 let literal = match self.semantics {
                     Semantics::Legacy => true,
                     Semantics::R2rml => {
-                        matches!(kind, TermMapKind::Reference(_))
-                            || language.is_some()
-                            || datatype.is_some()
+                        matches!(kind, TermMapKind::Reference(_)) || has_language || has_datatype
                     }
                 };
                 if literal {
@@ -722,24 +1103,25 @@ impl Ctx<'_> {
             }
             _ => TermType::IRI,
         };
-        let term_type = match self.single(node, &[format!("{RR}termType")], owner)? {
-            Some(Term::NamedNode(n)) => term_type_from_iri(n.as_str()).ok_or_else(|| {
-                format!(
-                    "rr:termType <{}> on the {owner} is not rr:IRI, rr:BlankNode or rr:Literal",
-                    n.as_str()
-                )
-            })?,
-            Some(other) => {
-                return Err(format!(
-                    "rr:termType {other} on the {owner} is not an IRI (R2RML §7.4)"
-                ))
-            }
-            None => default_type,
-        };
-        let allowed: &[TermType] = match position {
-            Position::Subject => &[TermType::IRI, TermType::BlankNode],
-            Position::Predicate | Position::Graph => &[TermType::IRI],
-            Position::Object => &[TermType::IRI, TermType::BlankNode, TermType::Literal],
+        let term_type = declared_type.unwrap_or(default_type);
+        let iris = [
+            TermType::IRI,
+            TermType::URI,
+            TermType::UnsafeIRI,
+            TermType::UnsafeURI,
+        ];
+        let allowed: Vec<TermType> = match position {
+            Position::Subject => iris
+                .iter()
+                .cloned()
+                .chain(std::iter::once(TermType::BlankNode))
+                .collect(),
+            Position::Predicate | Position::Graph | Position::Datatype => iris.to_vec(),
+            Position::Object => iris
+                .iter()
+                .cloned()
+                .chain([TermType::BlankNode, TermType::Literal])
+                .collect(),
         };
         if !allowed.contains(&term_type) {
             let names: Vec<&str> = allowed.iter().map(term_type_name).collect();
@@ -750,11 +1132,11 @@ impl Ctx<'_> {
                 names.join(" or ")
             ));
         }
-        if term_type != TermType::Literal && (language.is_some() || datatype.is_some()) {
+        if term_type != TermType::Literal && (has_language || has_datatype) {
             return Err(format!(
                 "the {owner} declares {} but generates {}; only a literal takes a language tag \
                  or a datatype (R2RML §7.5, §7.6)",
-                if language.is_some() {
+                if has_language {
                     "rr:language"
                 } else {
                     "rr:datatype"
@@ -768,6 +1150,8 @@ impl Ctx<'_> {
             term_type,
             datatype,
             language,
+            language_map,
+            datatype_map,
         })
     }
 }
@@ -786,6 +1170,53 @@ pub(crate) fn valid_language_tag(tag: &str) -> bool {
     matches!(primary.len(), 2 | 3)
         || primary.eq_ignore_ascii_case("i")
         || primary.eq_ignore_ascii_case("x")
+}
+
+/// A language map's constant, or the map itself.
+enum LanguageOrMap {
+    Tag(String),
+    Map(TermMap),
+}
+
+/// A BCP 47 language tag, validated by the parser the store itself uses.
+fn checked_language(tag: &str, owner: &str) -> Result<String, String> {
+    if !valid_language_tag(tag) {
+        return Err(format!(
+            "rr:language \"{tag}\" on the {owner} is not a valid BCP 47 language tag \
+             (R2RML §7.5)"
+        ));
+    }
+    Ok(tag.to_string())
+}
+
+/// A node as the store's lookups name it: an IRI, or `_:label`.
+fn node_id(t: &Term) -> String {
+    match t {
+        Term::NamedNode(n) => n.as_str().to_string(),
+        Term::BlankNode(b) => format!("_:{}", b.as_str()),
+        other => other.to_string(),
+    }
+}
+
+/// The part name a file source is looked up by: its path without a leading
+/// `./` or `file://`. A remote URL stays as it is; the executor refuses it
+/// unless the run supplied it as an upload part of that name.
+fn file_key(path: &str) -> String {
+    let p = path.trim();
+    let p = p.strip_prefix("file://").unwrap_or(p);
+    p.strip_prefix("./").unwrap_or(p).to_string()
+}
+
+/// An `rml:encoding` IRI or a `csvw:encoding` name as an encoding label.
+fn encoding_label(value: &str) -> Result<String, String> {
+    let local = value.strip_prefix(RML_CORE).unwrap_or(value);
+    match encoding_rs::Encoding::for_label(local.as_bytes()) {
+        Some(e) => Ok(e.name().to_string()),
+        None => Err(format!(
+            "the encoding {value} is not one this engine reads (rml:UTF-8, rml:UTF-16 or a \
+             WHATWG encoding label)"
+        )),
+    }
 }
 
 /// A constant-valued term map. Its term type is the constant's own kind
@@ -815,12 +1246,7 @@ fn constant(value: Term, position: Position) -> Result<TermMap, String> {
             ))
         }
     };
-    Ok(TermMap {
-        kind: TermMapKind::Constant(value),
-        term_type,
-        datatype: None,
-        language: None,
-    })
+    Ok(TermMap::new(TermMapKind::Constant(value), term_type))
 }
 
 /// A constant's lexical value: the IRI itself, or a literal's text.
@@ -839,10 +1265,23 @@ fn term_value(t: &Term) -> String {
 /// takes column names from SQL, where the quotes are spelling, not name.
 fn normalise_sql_columns(tm: &mut TriplesMap) {
     use super::sqlident::column_name;
-    let fix = |m: &mut TermMap| match &mut m.kind {
-        TermMapKind::Reference(c) => *c = column_name(c),
-        TermMapKind::Template(t) => *t = map_template_columns(t, &column_name),
-        TermMapKind::Constant(_) => {}
+    fn fix(m: &mut TermMap) {
+        match &mut m.kind {
+            TermMapKind::Reference(c) => *c = column_name(c),
+            TermMapKind::Template(t) => *t = map_template_columns(t, &column_name),
+            TermMapKind::Constant(_) | TermMapKind::Fresh => {}
+        }
+        if let Some(lm) = &mut m.language_map {
+            fix(lm);
+        }
+        if let Some(dm) = &mut m.datatype_map {
+            fix(dm);
+        }
+    }
+    let fix_side = |side: &mut JoinSide| match side {
+        JoinSide::Reference(c) => *c = column_name(c),
+        JoinSide::Template(t) => *t = map_template_columns(t, &column_name),
+        JoinSide::Constant(_) => {}
     };
     let fix_function = |f: &mut FunctionMap| {
         for args in f.params.values_mut() {
@@ -867,8 +1306,8 @@ fn normalise_sql_columns(tm: &mut TriplesMap) {
                 ObjectMap::Function(f) => fix_function(f),
                 ObjectMap::Ref(r) => {
                     for j in &mut r.joins {
-                        j.child = column_name(&j.child);
-                        j.parent = column_name(&j.parent);
+                        fix_side(&mut j.child);
+                        fix_side(&mut j.parent);
                     }
                 }
             }
@@ -924,8 +1363,17 @@ fn map_template_columns(template: &str, f: &dyn Fn(&str) -> String) -> String {
 }
 
 /// `rr:IRI`, `rr:BlankNode` or `rr:Literal`, in the R2RML or the RML-Core
-/// namespace. Anything else is not a term type.
+/// namespace, and RML-Core's `rml:URI`, `rml:UnsafeIRI` and `rml:UnsafeURI`.
+/// Anything else is not a term type.
 fn term_type_from_iri(iri: &str) -> Option<TermType> {
+    if let Some(local) = iri.strip_prefix(RML_CORE) {
+        match local {
+            "URI" => return Some(TermType::URI),
+            "UnsafeIRI" => return Some(TermType::UnsafeIRI),
+            "UnsafeURI" => return Some(TermType::UnsafeURI),
+            _ => {}
+        }
+    }
     let local = iri
         .strip_prefix(RR)
         .or_else(|| iri.strip_prefix(RML_CORE))?;
@@ -942,6 +1390,9 @@ fn term_type_name(t: &TermType) -> &'static str {
         TermType::IRI => "rr:IRI",
         TermType::BlankNode => "rr:BlankNode",
         TermType::Literal => "rr:Literal",
+        TermType::URI => "rml:URI",
+        TermType::UnsafeIRI => "rml:UnsafeIRI",
+        TermType::UnsafeURI => "rml:UnsafeURI",
     }
 }
 
@@ -1124,13 +1575,7 @@ mod tests {
             panic!("expected a referencing object map");
         };
         assert_eq!(r.parent_triples_map, "http://example.org/Parent");
-        assert_eq!(
-            r.joins,
-            vec![JoinCondition {
-                child: "pid".into(),
-                parent: "id".into()
-            }]
-        );
+        assert_eq!(r.joins, vec![JoinCondition::columns("pid", "id")]);
     }
 
     #[test]
@@ -1306,13 +1751,7 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        assert_eq!(
-            r.joins,
-            vec![JoinCondition {
-                child: "PID".into(),
-                parent: "ID".into()
-            }]
-        );
+        assert_eq!(r.joins, vec![JoinCondition::columns("PID", "ID")]);
     }
 
     #[test]

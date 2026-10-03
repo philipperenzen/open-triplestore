@@ -293,6 +293,18 @@ sfcgal = { version = "0.8", optional = true }
 # RML mapping sources
 csv = "1"
 quick-xml = "0.42"
+# RFC 9535 JSONPath for JSON logical sources (RML-IO registry).
+serde_json_path = "0.7"
+# XPath 1.0 over a DOM for XML logical sources: attributes, parent axes,
+# namespaces. Picked over xee-xpath (XPath 3.1), which pulls in the
+# unmaintained `json` crate (RUSTSEC-2022-0081) and ICU.
+sxd-document = "0.3"
+sxd-xpath = "0.4"
+# `rml:compression` (RML-IO): tar archives, xz (pure Rust), and decoding an
+# `rml:encoding` other than UTF-8. gzip is flate2's; zip is behind asset-archive.
+tar = { version = "0.4.46", default-features = false }
+lzma-rs = "0.3"
+encoding_rs = "0.8"
 
 # Seed bundle manifests (src/seed_bundles/manifest.rs)
 toml = "1"

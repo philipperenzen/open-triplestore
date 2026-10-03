@@ -177,7 +177,9 @@ pub fn needed_columns(mapping: &RmlMapping, tm: &TriplesMap) -> Vec<Needed> {
                 ObjectMap::Function(f) => function(&mut add, f, "an object map's function"),
                 ObjectMap::Ref(r) => {
                     for j in &r.joins {
-                        add(j.child.clone(), "rr:child of a join condition");
+                        for c in j.child.referenced_columns() {
+                            add(c, "rr:child of a join condition");
+                        }
                     }
                 }
             }
@@ -186,7 +188,9 @@ pub fn needed_columns(mapping: &RmlMapping, tm: &TriplesMap) -> Vec<Needed> {
     for other in &mapping.triples_maps {
         for r in other.refs().filter(|r| r.parent_triples_map == tm.iri) {
             for j in &r.joins {
-                add(j.parent.clone(), "rr:parent of a join condition");
+                for c in j.parent.referenced_columns() {
+                    add(c, "rr:parent of a join condition");
+                }
             }
         }
     }

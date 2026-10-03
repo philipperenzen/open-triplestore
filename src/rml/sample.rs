@@ -35,7 +35,7 @@ use super::sql::{
     lookup, plan_triples_map, pushdown_subject, row_triples, same_row_subject, sanitise_label,
     split_row, JoinStrategy, ParentIndex, ParentIndexBuilder, RefKey, TmPlan,
 };
-use super::terms::{Kinds, Row, TermGen};
+use super::terms::{Cells, Kinds, Row, TermGen};
 use crate::store::engine::TripleStore;
 
 /// Most rows one triples map contributes directly. Parents pulled in by key
@@ -178,8 +178,20 @@ pub fn execute_sample(
             let parent = mapping
                 .find(&r.parent_triples_map)
                 .ok_or_else(|| format!("unknown parent TriplesMap <{}>", r.parent_triples_map))?;
-            let child_cols: Vec<String> = r.joins.iter().map(|j| j.child.clone()).collect();
-            let parent_cols: Vec<String> = r.joins.iter().map(|j| j.parent.clone()).collect();
+            // Rows are pulled in by column value; a join on a template or a
+            // constant (RML-Core) has no column to fetch by, and resolves
+            // against the parent's own sample instead.
+            let columns = |side: fn(&JoinCondition) -> &JoinSide| -> Option<Vec<String>> {
+                r.joins
+                    .iter()
+                    .map(|j| side(j).column().map(str::to_string))
+                    .collect()
+            };
+            let (Some(child_cols), Some(parent_cols)) =
+                (columns(|j| &j.child), columns(|j| &j.parent))
+            else {
+                continue;
+            };
 
             let wanted: HashSet<Vec<String>> = rows_of
                 .get(&tm_iri)
@@ -270,27 +282,29 @@ pub fn execute_sample(
             gen.start_row();
             let generated = row_triples(
                 tm,
-                row,
-                Some(kinds),
+                &Cells {
+                    row,
+                    kinds: Some(kinds),
+                },
                 &mut gen,
                 mapping.base_for(tm),
-                &|r, child_row, at| match plan.strategies.get(&index_key(r)) {
+                &|r, child: &Cells<'_>, at| match plan.strategies.get(&index_key(r)) {
                     Some(JoinStrategy::Pushdown { alias, witness }) => {
                         let parent = mapping.find(&r.parent_triples_map)?;
                         pushdown_subject(
                             parent,
                             alias,
                             witness,
-                            child_row,
+                            child.row,
                             &mut parent_gen.borrow_mut(),
                             mapping.base_for(parent),
                         )
                         .map(|s| vec![s])
                     }
                     Some(JoinStrategy::SameRow) => {
-                        same_row_subject(mapping, r, child_row, &mut parent_gen.borrow_mut(), at)
+                        same_row_subject(mapping, r, child, &mut parent_gen.borrow_mut(), at)
                     }
-                    _ => lookup(indexes.get(&index_key(r))?, r, child_row),
+                    _ => lookup(indexes.get(&index_key(r))?, r, child),
                 },
             )?;
             parent_gen.borrow_mut().take_errors();

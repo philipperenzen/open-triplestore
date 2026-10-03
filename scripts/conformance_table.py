@@ -107,6 +107,9 @@ SUITES: dict[str, tuple[str, str]] = {
     "ldes_conformance": ("LDES 1.0 / TREE", "spec-derived"),
     "rml_conformance": ("RML / R2RML", "spec-derived"),
     "rdf_patch_conformance": ("RDF Patch (RDF Delta)", "spec-derived"),
+    "rml_core_conformance": ("RML-Core", "**vendored KG-Construct CG corpus** (the RML-Core test cases, unmodified; manifest-driven)"),
+    "rml_io_conformance": ("RML-IO (sources)", "**vendored KG-Construct CG corpus** (the RML-IO source test cases, unmodified; manifest-driven)"),
+    "rml_legacy_conformance": ("RML (legacy vocabulary)", "**vendored RML.io corpus** (the CSV, JSON and XML cases of rml-test-cases, unmodified)"),
     "w3c_r2rml_conformance": ("R2RML", "**fetched W3C test cases** (pinned commit + sha256, not vendored; SQLite here, PostgreSQL and MySQL in the live-database job)"),
     "standards_conformance": ("Cross-standard HTTP smoke", "spec-derived"),
 }
@@ -137,13 +140,27 @@ CORPUS_RUNNERS = {
     "w3c_sparql11_entailment_manifests": 37,
     "w3c_rdf_mt_manifests": 41,
     "w3c_owl2_rl_manifests": 45,
+    "rml_core_conformance": 70,
+    "rml_io_conformance": 25,
+    "rml_legacy_conformance": 100,
 }
 
 # Runners whose score may be published (see the module docstring). A runner
 # missing here is still checked, but its row carries no numbers: the W3C SPARQL
 # 1.1 and JSON-LD API sections and the OWL 2 DL cases are partial runs of W3C test suites, on
 # which W3C allows no public performance claims.
-PUBLISH_SCORE = {"shacl_af_corpus", "shextest_conformance", "w3c_shacl_conformance", "w3c_shaclc_conformance"}
+PUBLISH_SCORE = {
+    "shacl_af_corpus",
+    "shextest_conformance",
+    "w3c_shacl_conformance",
+    "w3c_shaclc_conformance",
+    # The RML corpora are Creative Commons material (CC BY 4.0 and, treated as
+    # the stricter of two stated licences, CC BY-SA 4.0), which set no
+    # condition on reporting results.
+    "rml_core_conformance",
+    "rml_io_conformance",
+    "rml_legacy_conformance",
+}
 
 # The note for each corpus runner whose score is not published. Every
 # CORPUS_RUNNERS entry outside PUBLISH_SCORE needs one: it says why no score is
@@ -300,7 +317,7 @@ def render() -> str:
         "corpus; every other suite is hand-written and derived from the specification text. "
         "A vendored row gives results only where its corpus licence allows performance claims; "
         "those are development and regression results on the vendored sections "
-        "(`docs/conformance/`, `docs/shex.md`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C "
+        "(`docs/conformance/`, `docs/shex.md`, the RML corpora), not W3C, TopQuadrant, OGC or other conformance claims. The W3C "
         "SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 "
         "syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of "
         "W3C test suites, so they carry no results and are used for development and bug tracking "

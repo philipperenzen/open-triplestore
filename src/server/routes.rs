@@ -10094,7 +10094,9 @@ pub async fn execute_rml_mapping(
 
     // Parse multipart: collect mapping override and source files
     let mut mapping_turtle_override: Option<String> = None;
-    let mut source_data: std::collections::HashMap<String, String> =
+    // Source parts are bytes: a source may be compressed or in an encoding
+    // other than UTF-8, which its logical source declares (RML-IO).
+    let mut source_data: std::collections::HashMap<String, Vec<u8>> =
         std::collections::HashMap::new();
 
     while let Ok(Some(field)) = multipart.next_field().await {
@@ -10105,13 +10107,17 @@ pub async fn execute_rml_mapping(
                 format!("Multipart read error: {e}"),
             )
         })?;
-        let text = String::from_utf8(bytes.to_vec())
-            .map_err(|_| (StatusCode::BAD_REQUEST, "Non-UTF-8 field".to_string()))?;
 
         if name == "mapping" {
+            let text = String::from_utf8(bytes.to_vec()).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "The mapping part is not UTF-8".to_string(),
+                )
+            })?;
             mapping_turtle_override = Some(text);
         } else {
-            source_data.insert(name, text);
+            source_data.insert(name, bytes.to_vec());
         }
     }
 
@@ -10292,7 +10298,7 @@ pub async fn rml_preview(
 ) -> Result<Response, (StatusCode, String)> {
     let on_data_error = on_data_error_param(&params)?;
     let mut mapping_turtle: Option<String> = None;
-    let mut source_data: std::collections::HashMap<String, String> =
+    let mut source_data: std::collections::HashMap<String, Vec<u8>> =
         std::collections::HashMap::new();
 
     while let Ok(Some(field)) = multipart.next_field().await {
@@ -10303,12 +10309,16 @@ pub async fn rml_preview(
                 format!("Multipart read error: {e}"),
             )
         })?;
-        let text = String::from_utf8(bytes.to_vec())
-            .map_err(|_| (StatusCode::BAD_REQUEST, "Non-UTF-8 field".to_string()))?;
         if name == "mapping" {
+            let text = String::from_utf8(bytes.to_vec()).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "The mapping part is not UTF-8".to_string(),
+                )
+            })?;
             mapping_turtle = Some(text);
         } else {
-            source_data.insert(name, text);
+            source_data.insert(name, bytes.to_vec());
         }
     }
 

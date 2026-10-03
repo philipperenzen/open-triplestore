@@ -786,6 +786,31 @@ Bundled test data:
     tests/fixtures/semic-dcat-ap-3.0.1/LICENSE-CC-BY-4.0.txt, details in its
     LICENSE.md and PROVENANCE.md. Unmodified. Test results are not a
     certification by SEMIC or the European Commission.
+  - RML-Core test cases — tests/fixtures/rml-core/ (76 case directories and
+    manifest.ttl). RML-Core (c) by W3C Community Group on Knowledge Graph
+    Construction. From https://github.com/kg-construct/rml-core
+    (test-cases/), commit 82ab28d46803ba66a83c133f1db371a60116f84d. The
+    repository's LICENSE file is CC BY 4.0 and its README says CC BY-SA 4.0;
+    used under the stricter, CC BY-SA 4.0,
+    https://creativecommons.org/licenses/by-sa/4.0/ . Unmodified (byte-identical
+    files; each case's README.md and the suite's documentation not included).
+    Details in tests/fixtures/rml-core/LICENSE.md and PROVENANCE.md.
+  - RML-IO source test cases — tests/fixtures/rml-io/ (the 32 RMLSTC* case
+    directories and manifest.ttl). RML-IO (c) by W3C Community Group on
+    Knowledge Graph Construction. From https://github.com/kg-construct/rml-io
+    (test-cases/), commit c0c5902bc547f7867afe746625ed18d418b06cdb. Licensed
+    as the RML-Core cases above (CC BY 4.0 file, CC BY-SA 4.0 README; used
+    under CC BY-SA 4.0). Unmodified (byte-identical files; the logical-target
+    cases and each case's README.md not included). Details in
+    tests/fixtures/rml-io/LICENSE.md and PROVENANCE.md.
+  - Legacy RML test cases for CSV, JSON and XML sources —
+    tests/fixtures/rml-legacy/ (118 case directories and metadata.csv).
+    Copyright (c) 2019–present RML.io, IDLab, Ghent University – imec. From
+    https://github.com/kg-construct/rml-test-cases (test-cases/), commit
+    803dd3ec6b7185801cf19ebecaa18513baf78613. CC BY 4.0,
+    https://creativecommons.org/licenses/by/4.0/ . Unmodified (byte-identical
+    files; the database and SPARQL cases not included). Details in
+    tests/fixtures/rml-legacy/LICENSE.md and PROVENANCE.md.
 
 Demo content (seeded datasets):
 
