@@ -467,7 +467,12 @@ impl Builder {
                 self.ax.nominal.insert(c);
                 self.ax.literal.insert(c);
                 self.literal_values.insert(value.clone(), c);
-                for dt in datatypes_of(&value) {
+                // Only the EL map's datatypes: `datatypes_of` also names the
+                // RL-only ones (`xsd:int`, `xsd:double`, …).
+                for dt in datatypes_of(&value)
+                    .into_iter()
+                    .filter(|d| Dt::ALL.contains(d))
+                {
                     let d = self.dt_atom(dt);
                     self.ax.add_sub(c, d);
                 }

@@ -46,3 +46,22 @@ test), so these are limits of the rule set rather than of the implementation. Th
 | Annotations in the conclusion | `WebOnt-I4.6-005-Direct`, `WebOnt-equivalentClass-008-Direct` | the conclusion carries an annotation the premise lacks; annotations have no Direct Semantics meaning, but the runner matches triples |
 
 Cases without an RDF/XML premise or conclusion are skipped by the runner.
+
+### Theorem PR1
+
+OWL 2 Profiles §4.3, Theorem PR1, is the completeness the RL/RDF rules promise: for an OWL 2 RL
+premise (no IRI used both as an individual and as a class or property), they derive every
+entailed assertion of the forms `ClassAssertion` with a named class, `ObjectPropertyAssertion`,
+`DataPropertyAssertion` and `SameIndividual`. None of the known failures is inside that scope:
+
+- the `owl:differentFrom` / `owl:AllDifferent` conclusions are `DifferentIndividuals`, which
+  is not among the forms (no rule concludes it, so the theorem could not hold otherwise);
+- `New-Feature-ObjectQCR-002` concludes a `ClassAssertion` whose class is a complement, not a
+  named class; the other class-expression and schema cases conclude class or property axioms;
+- the two annotation cases conclude annotation assertions;
+- `New-Feature-ReflexiveProperty-001` concludes an `ObjectPropertyAssertion`, a form PR1
+  covers, but its premise declares an `owl:ReflexiveProperty`, which the OWL 2 RL grammar
+  (§4.2) does not allow, so the premise is no OWL 2 RL ontology even though the test case is
+  tagged `test:profile test:RL`. It stays a known failure; supporting reflexive properties in
+  the RL engine would go beyond the rule set (the OWL 2 DL backends handle them).
+

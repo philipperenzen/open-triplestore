@@ -50,7 +50,7 @@ const KNOWN_FAILURES: &[(&str, &str)] = &[
     ("New-Feature-DisjointObjectProperties-001", "no OWL 2 RL/RDF rule concludes owl:differentFrom"),
     ("New-Feature-DisjointObjectProperties-002", "the conclusion is an owl:AllDifferent axiom; no OWL 2 RL/RDF rule concludes owl:differentFrom or owl:AllDifferent"),
     ("New-Feature-ObjectQCR-002", "the conclusion is a class axiom over a class expression the premise does not contain; the RL/RDF rules conclude no new class expressions (OWL 2 Profiles §4.3, Theorem PR1 covers assertions)"),
-    ("New-Feature-ReflexiveProperty-001", "owl:ReflexiveProperty is outside OWL 2 RL; no RL/RDF rule reads it"),
+    ("New-Feature-ReflexiveProperty-001", "the premise declares an owl:ReflexiveProperty, which the OWL 2 RL grammar does not allow (the case is tagged RL all the same); no RL/RDF rule reads it"),
     ("WebOnt-I4.6-005-Direct", "the conclusion carries an annotation the premise does not; annotations have no Direct Semantics meaning, but the runner matches triples"),
     ("WebOnt-I5.26-010", "the conclusion is an owl:minCardinality restriction, an existential the RL/RDF rules never conclude"),
     ("WebOnt-I5.5-005", "the conclusion is a class axiom over a class expression the premise does not contain; the RL/RDF rules conclude no new class expressions (OWL 2 Profiles §4.3, Theorem PR1 covers assertions)"),
