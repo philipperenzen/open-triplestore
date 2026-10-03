@@ -78,6 +78,7 @@ minted at `POST /api/auth/tokens`. Send it as `Authorization: Bearer <token>`.",
         (name = "OGC API Features", description = "OGC API – Features Part 1 (Core): each readable dataset with geometry is a collection of GeoJSON features"),
         (name = "OIDC Provider", description = "The built-in OpenID Connect provider for client apps: discovery, keys, token, userinfo and logout"),
         (name = "Docs", description = "In-app documentation pages"),
+        (name = "Feedback", description = "Feedback reports from users to this instance's admins"),
     ),
     modifiers(&SecurityAddon),
     components(
@@ -650,6 +651,48 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
         (M::Delete, o("Admin", "Delete a documentation page",
             "Remove the page (admin only). A deleted built-in page is seeded again on the next start.",
             vec![], vec![("204", "Deleted"), ("401", "Authentication required"), ("403", "Admin role required")], true)),
+    ]);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Feedback
+    // ═══════════════════════════════════════════════════════════════════════
+    mount(paths, "/api/feedback", vec![
+        (M::Post, ob("Feedback", "Send a feedback report",
+            "File a bug report, feature request, question or other note for this instance's admins. Needs a write-capable principal; rate-limited per client address and capped at 20 reports per user per day. `page` (the in-app path) is optional; `include_browser` records the browser's User-Agent.",
+            vec![], json_body(ObjectBuilder::new()
+                .property("kind", ObjectBuilder::new().schema_type(Type::String).description(Some("`bug` | `feature` | `question` | `other`.")))
+                .property("title", ObjectBuilder::new().schema_type(Type::String))
+                .property("body", ObjectBuilder::new().schema_type(Type::String))
+                .property("page", ObjectBuilder::new().schema_type(Type::String))
+                .property("include_browser", ObjectBuilder::new().schema_type(Type::Boolean))
+                .required("kind").required("title").required("body"),
+                json!({"kind": "bug", "title": "Import stalls", "body": "The import wizard stops at 90 %.", "page": "/import", "include_browser": true})),
+            vec![("201", "The report as its sender sees it"), ("400", "Invalid kind, or a field too long or empty"), ("401", "Authentication required"), ("403", "Read-only principal"), ("429", "Too many reports")], true)),
+    ]);
+    mount(paths, "/api/feedback/mine", vec![
+        (M::Get, o("Feedback", "My feedback reports",
+            "The caller's own reports, newest first: `{id, kind, title, body, page, status, admin_response, created_at, updated_at}`. Never another user's reports or the admin's internal note.",
+            vec![], vec![("200", "The caller's reports"), ("401", "Authentication required")], true)),
+    ]);
+    mount(paths, "/api/admin/feedback", vec![
+        (M::Get, o("Admin", "Feedback inbox",
+            "Every report, newest first, with its sender, browser, app version and internal note (admin only).",
+            vec![qp("status", false, "`open` | `in_progress` | `resolved` | `closed`"), qp("kind", false, "`bug` | `feature` | `question` | `other`")],
+            vec![("200", "The reports"), ("401", "Authentication required"), ("403", "Admin role required")], true)),
+    ]);
+    mount(paths, "/api/admin/feedback/:id", vec![
+        (M::Patch, ob("Admin", "Triage a feedback report",
+            "Set a report's `kind` and `status`, its `admin_response` (shown to the sender) and its internal `admin_note`; an empty string clears a text (admin only).",
+            vec![pp("id")], json_body(ObjectBuilder::new()
+                .property("kind", ObjectBuilder::new().schema_type(Type::String))
+                .property("status", ObjectBuilder::new().schema_type(Type::String))
+                .property("admin_response", ObjectBuilder::new().schema_type(Type::String))
+                .property("admin_note", ObjectBuilder::new().schema_type(Type::String)),
+                json!({"status": "resolved", "admin_response": "Fixed in 0.7.1."})),
+            vec![("200", "The updated report"), ("400", "Unknown kind or status"), ("401", "Authentication required"), ("403", "Admin role required"), ("404", "Report not found")], true)),
+        (M::Delete, o("Admin", "Delete a feedback report",
+            "Remove a report (admin only).",
+            vec![pp("id")], vec![("204", "Deleted"), ("401", "Authentication required"), ("403", "Admin role required"), ("404", "Report not found")], true)),
     ]);
 
     // ═══════════════════════════════════════════════════════════════════════
