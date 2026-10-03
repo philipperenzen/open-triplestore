@@ -838,6 +838,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   means the CRS's own units.
 
 ### Fixed
+- **The Docker image builds again.** `Cargo.toml` declares `[[test]]` targets
+  (`replication`, `ldp_conformance`, `query_cache`), and cargo refuses to load a
+  manifest whose declared target file is missing, even for `cargo build`. The
+  Dockerfile did not copy `tests/`, so `cargo chef cook` and the final build
+  both failed with "can't find `ldp_conformance` test". v0.7.0 is not
+  affected; the next release's image build would have failed after its GitHub
+  Release was published. The planner stage now copies `tests/`, the builder
+  takes its manifest tree from the planner, and a new CI job
+  (`docker-manifests`) checks on every PR that cargo can load what the image
+  builds.
 - **More `.env` settings reach the server under Docker Compose.**
   `docker-compose.yml` passes the server an explicit environment list, so a
   setting `.env.example` documents had no effect until it was on that list.

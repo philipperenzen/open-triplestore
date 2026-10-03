@@ -136,7 +136,10 @@ The [`Dockerfile`](../Dockerfile) is a multi-stage build tuned for both cold CI
 builds and warm local rebuilds:
 
 - **cargo-chef** caches the compiled-dependency *layer*, so editing source no
-  longer triggers a full dependency rebuild.
+  longer triggers a full dependency rebuild. Every tree a `Cargo.toml` names
+  (workspace members, path dependencies, declared `[[test]]` and `[[bench]]`
+  files) must be copied into the planner stage; the builder takes its manifest
+  tree from there. CI's `docker-manifests` job fails a PR when one is missing.
 - **BuildKit cache mounts** keep cargo's crate downloads and npm's package cache
   across builds (no re-fetching on a dependency change). BuildKit is the default
   in modern Docker; nothing to enable.
