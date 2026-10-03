@@ -528,10 +528,7 @@ impl KoncludeBackend {
 // ── OWLlink responses ────────────────────────────────────────────────────────
 
 fn attr<'a>(el: &'a El, k: &str) -> Option<&'a str> {
-    el.attrs
-        .iter()
-        .find(|(a, _)| a == k)
-        .map(|(_, v)| v.as_str())
+    el.attr(k)
 }
 
 fn error_text(el: &El) -> Option<String> {

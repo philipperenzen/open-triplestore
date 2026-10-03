@@ -613,7 +613,6 @@ pub const SF: BundledFile = bundled!("sf.ttl", {
     source: "https://github.com/opengeospatial/geosemantics-semantic-resources/blob/main/\
              resources/geosparql-swg/geosparql-1.1/ontologies/sf_geometries.ttl",
     remarks: Some("The file's copyright triple is spelled schema:coyrightNotice upstream."),
-    store_form: Some("2 xsd:nonNegativeInteger literals (OWL cardinalities) read as xsd:integer"),
 });
 
 // ─── BSD 3-Clause (ETSI) ───────────────────────────────────────────────────────
