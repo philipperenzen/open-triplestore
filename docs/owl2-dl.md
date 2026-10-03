@@ -90,6 +90,22 @@ What reaches the target graph — only triples about named entities, and only on
 
 Konclude does not report data values entailed by `owl:hasValue` and ignores annotations, so **data property values are not materialised**. A run over data properties says so in `warnings`. An inconsistent ontology is a 422 with `rule: "external-reasoner"`, and nothing is written. Checked against Konclude v0.7.0-1138; the live tests (`OTS_TEST_KONCLUDE_BIN=/path/to/Konclude cargo test --test owl2_dl_conformance`) run a real binary.
 
+**Data complements (`owl:datatypeComplementOf`).** Konclude v0.7.0-1138 says "consistent" for some inconsistent uses of a data complement:
+
+| Input | Right answer | Konclude |
+|---|---|---|
+| `A ⊑ ∃p.¬rdfs:Literal`, `a : A` | inconsistent | consistent |
+| `A ⊑ ∃p.(xsd:integer ⊓ ¬xsd:integer)`, `a : A` (also for `xsd:string`) | inconsistent | consistent |
+| `p` has range `¬xsd:integer`, `p(a, 1)` | inconsistent | consistent |
+| `p` has range `¬{1}`, `p(a, 1)` | inconsistent | consistent |
+
+Every wrong answer seen so far is "consistent" where the right one is "inconsistent". Konclude never reported a clash that is not there. Other shapes come out right: `a : ∀p.¬{1}` with `p(a, 1)`, `a : ∀p.¬xsd:integer` with `p(a, 1)`, and range `xsd:integer` with `a : ∃p.¬xsd:integer` are all inconsistent, as they should be. The server therefore:
+
+- writes `¬rdfs:Literal` as the empty data range, `¬¬D` as `D`, and the complement of an empty range as `rdfs:Literal`, so these never reach Konclude as complements;
+- when the input still contains a data complement after that, gives no answer that depends on Konclude finding no clash. A check answers `unknown`, with a `detail` that says why, instead of `consistent: true`, `entailed: false` or `satisfiable: true`. A materialisation reports `complete: false` and a warning, and still writes what Konclude derived. Answers that rest on a clash are kept: inconsistent, entailed, unsatisfiable.
+
+A complement that only appears in an entailment conclusion is treated the same way. The bridge's own negations (`∀p.¬{v}` for a data assertion, `∃p.¬R` for a range) are not affected: they come out right in the probes, once `¬rdfs:Literal` is written as the empty range. The test `dl_konclude_live_still_misses_the_complement_clash` fails once the Konclude in use reads `∃p.(D ⊓ ¬D)` correctly, and that is the time to narrow this fallback.
+
 ---
 
 ## Reasoner sidecar (`OTS_DL_BACKEND=sidecar`)
@@ -220,7 +236,7 @@ The premise is one of:
 A check that ran answers **200** with `{task, result, backend, backend_version, complete, regime, sources, warnings}`. An inconsistent premise adds the materialisation 422's fields `consistent: false`, `rule`, `detail`. Errors use the same statuses as materialisation: 422 (not in OWL 2 DL), 503, 504 with `"result": "unknown"`, 413 and 502.
 
 How each backend answers:
-- **Konclude** reduces entailment to consistency (`O ⊨ α` iff `O ∪ ¬α` is inconsistent), one knowledge base per negated axiom. Axioms with no such reduction answer `unknown`: data sub-properties, keys, datatype definitions, conclusions with anonymous individuals.
+- **Konclude** reduces entailment to consistency (`O ⊨ α` iff `O ∪ ¬α` is inconsistent), one knowledge base per negated axiom. Axioms with no such reduction answer `unknown`: data sub-properties, keys, datatype definitions, conclusions with anonymous individuals. A premise or conclusion with `owl:datatypeComplementOf` answers `unknown` where Konclude found no clash; see "Data complements" under [Konclude](#konclude-ots_dl_backendkonclude).
 - **Native** answers entailment `true` when the conclusion (blank nodes as variables) matches the premise plus its closure, and `unknown` otherwise.
 
 ### Jobs — `GET /api/reasoning/jobs/{job_id}`
