@@ -769,3 +769,209 @@ async fn gsp_get_fails_closed_when_the_label_table_cannot_be_read() {
         "no graph data may be served when labels cannot be checked"
     );
 }
+
+// ── Literals keep their lexical form and datatype ────────────────────────────
+
+const LEXICAL_TTL: &str = "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+    <http://ex/s> <http://ex/v> \"1\"^^xsd:boolean , \"05\"^^xsd:integer , \
+    \"5\"^^xsd:nonNegativeInteger , \"7\"^^xsd:int , \"1.50\"^^xsd:decimal , \
+    \"2020-01-01T00:00:00+00:00\"^^xsd:dateTime , \
+    \"2020-01-01T00:00:00Z\"^^xsd:dateTimeStamp .";
+
+const LEXICAL_NT: [&str; 7] = [
+    "\"1\"^^<http://www.w3.org/2001/XMLSchema#boolean>",
+    "\"05\"^^<http://www.w3.org/2001/XMLSchema#integer>",
+    "\"5\"^^<http://www.w3.org/2001/XMLSchema#nonNegativeInteger>",
+    "\"7\"^^<http://www.w3.org/2001/XMLSchema#int>",
+    "\"1.50\"^^<http://www.w3.org/2001/XMLSchema#decimal>",
+    "\"2020-01-01T00:00:00+00:00\"^^<http://www.w3.org/2001/XMLSchema#dateTime>",
+    "\"2020-01-01T00:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTimeStamp>",
+];
+
+/// A typed literal written through the Graph Store Protocol comes back as
+/// written, lexical form and datatype, through a SPARQL SELECT (JSON results)
+/// and a Graph Store GET; a graph pattern matches the term as written, a
+/// FILTER the value.
+#[tokio::test]
+async fn gsp_and_sparql_return_typed_literals_as_written() {
+    let (state, token) = admin_state();
+    let app = test_app(state);
+    let g = graph_uri("http://example.org/lexical");
+    let (st, body, _) = send(
+        &app,
+        Method::PUT,
+        g.clone(),
+        Some(&token),
+        Some("text/turtle"),
+        None,
+        LEXICAL_TTL,
+    )
+    .await;
+    assert!(st.is_success(), "PUT => {st}: {body}");
+
+    let (st, nt, _) = send(
+        &app,
+        Method::GET,
+        g,
+        Some(&token),
+        None,
+        Some("application/n-triples"),
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{nt}");
+    for lit in LEXICAL_NT {
+        assert!(
+            nt.contains(&format!("<http://ex/s> <http://ex/v> {lit} .")),
+            "GET lost {lit}:\n{nt}"
+        );
+    }
+
+    let select = |q: &str| {
+        format!(
+            "/sparql?query={}",
+            url_encode(&format!(
+                "SELECT ?o WHERE {{ GRAPH <http://example.org/lexical> {{ {q} }} }}"
+            ))
+        )
+    };
+    let (st, json, _) = send(
+        &app,
+        Method::GET,
+        select("<http://ex/s> <http://ex/v> ?o"),
+        Some(&token),
+        None,
+        Some("application/sparql-results+json"),
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{json}");
+    let v = body_json_value(&json);
+    let mut got: Vec<(String, String)> = v["results"]["bindings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| {
+            (
+                b["o"]["value"].as_str().unwrap().to_string(),
+                b["o"]["datatype"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    got.sort();
+    let xsd = |l: &str, d: &str| {
+        (
+            l.to_string(),
+            format!("http://www.w3.org/2001/XMLSchema#{d}"),
+        )
+    };
+    let mut want = vec![
+        xsd("1", "boolean"),
+        xsd("05", "integer"),
+        xsd("5", "nonNegativeInteger"),
+        xsd("7", "int"),
+        xsd("1.50", "decimal"),
+        xsd("2020-01-01T00:00:00+00:00", "dateTime"),
+        xsd("2020-01-01T00:00:00Z", "dateTimeStamp"),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+
+    // A pattern with the canonical value does not find "05"; a FILTER does.
+    let count = |q: String| {
+        let app = app.clone();
+        let token = token.clone();
+        async move {
+            let (st, json, _) = send(
+                &app,
+                Method::GET,
+                q,
+                Some(&token),
+                None,
+                Some("application/sparql-results+json"),
+                "",
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{json}");
+            body_json_value(&json)["results"]["bindings"]
+                .as_array()
+                .unwrap()
+                .len()
+        }
+    };
+    assert_eq!(
+        count(select("BIND(5 AS ?o) <http://ex/s> <http://ex/v> ?o")).await,
+        0
+    );
+    assert_eq!(
+        count(select(
+            "<http://ex/s> <http://ex/v> ?o FILTER(isNumeric(?o) && ?o = 5)"
+        ))
+        .await,
+        2,
+        "\"05\"^^xsd:integer and \"5\"^^xsd:nonNegativeInteger equal 5 by value"
+    );
+}
+
+/// A write gate whose shape says `sh:datatype xsd:nonNegativeInteger` accepts a
+/// valid `"5"^^xsd:nonNegativeInteger` (the store used to read it back as
+/// `xsd:integer`, so the gate answered 422 on valid data) and still refuses an
+/// `xsd:integer`, an out-of-range value and a `xsd:dateTimeStamp` without a
+/// time zone.
+#[tokio::test]
+async fn shacl_on_write_accepts_valid_derived_datatypes() {
+    let (app, token) = app_with_shacl_on_write_shapes(
+        "@prefix sh: <http://www.w3.org/ns/shacl#> . @prefix ex: <http://example.org/> . \
+         @prefix xsd: <http://www.w3.org/2001/XMLSchema#> . \
+         ex:CountShape a sh:NodeShape ; sh:targetClass ex:Item ; \
+         sh:property [ sh:path ex:count ; sh:datatype xsd:nonNegativeInteger ] ; \
+         sh:property [ sh:path ex:small ; sh:datatype xsd:byte ] ; \
+         sh:property [ sh:path ex:at ; sh:datatype xsd:dateTimeStamp ] .",
+    )
+    .await;
+    let put = |ttl: &'static str| {
+        let app = app.clone();
+        let token = token.clone();
+        async move {
+            send(
+                &app,
+                Method::PUT,
+                graph_uri("urn:data:d1"),
+                Some(&token),
+                Some("text/turtle"),
+                None,
+                &format!(
+                    "@prefix ex: <http://example.org/> . \
+                     @prefix xsd: <http://www.w3.org/2001/XMLSchema#> . {ttl}"
+                ),
+            )
+            .await
+        }
+    };
+    let (st, body, _) = put(
+        "ex:i a ex:Item ; ex:count \"5\"^^xsd:nonNegativeInteger ; ex:small \"12\"^^xsd:byte ; \
+         ex:at \"2020-01-01T00:00:00Z\"^^xsd:dateTimeStamp .",
+    )
+    .await;
+    assert!(
+        st.is_success(),
+        "valid derived-type data must pass: {st} {body}"
+    );
+    for (bad, why) in [
+        (
+            "ex:i a ex:Item ; ex:count 5 .",
+            "xsd:integer is not xsd:nonNegativeInteger",
+        ),
+        (
+            "ex:i a ex:Item ; ex:small \"300\"^^xsd:byte .",
+            "300 is out of xsd:byte's range",
+        ),
+        (
+            "ex:i a ex:Item ; ex:at \"2020-01-01T00:00:00\"^^xsd:dateTimeStamp .",
+            "xsd:dateTimeStamp needs a time zone",
+        ),
+    ] {
+        let (st, body, _) = put(bad).await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{why}: {body}");
+    }
+}

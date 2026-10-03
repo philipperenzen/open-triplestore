@@ -907,3 +907,72 @@ fn a_composite_path_reaches_differently_for_an_iri_and_a_blank_node_focus() {
         r.results
     );
 }
+
+// ─── Literals as written (the store keeps lexical forms and datatypes) ────────
+
+/// SHACL §4.1.2: `sh:datatype` holds for a literal whose datatype is the given
+/// IRI and whose lexical form is valid for it. The store keeps the derived
+/// integer types and `xsd:dateTimeStamp` as written, so valid data of those
+/// types conforms, and their range and time-zone rules are checked.
+#[test]
+fn sh_datatype_holds_for_derived_types_as_stored() {
+    let shapes = r#"
+      ex:S a sh:NodeShape ; sh:targetClass ex:Item ;
+        sh:property [ sh:path ex:count ; sh:datatype xsd:nonNegativeInteger ] ;
+        sh:property [ sh:path ex:n ; sh:datatype xsd:int ] ;
+        sh:property [ sh:path ex:small ; sh:datatype xsd:byte ] ;
+        sh:property [ sh:path ex:at ; sh:datatype xsd:dateTimeStamp ] ."#;
+    let data = r#"
+      ex:ok a ex:Item ; ex:count "5"^^xsd:nonNegativeInteger ; ex:n "-7"^^xsd:int ;
+        ex:small "12"^^xsd:byte ; ex:at "2020-01-01T00:00:00+02:00"^^xsd:dateTimeStamp .
+      ex:integer a ex:Item ; ex:count 5 .
+      ex:negative a ex:Item ; ex:count "-5"^^xsd:nonNegativeInteger .
+      ex:range a ex:Item ; ex:small "300"^^xsd:byte .
+      ex:notz a ex:Item ; ex:at "2020-01-01T00:00:00"^^xsd:dateTimeStamp ."#;
+    let r = run(shapes, data);
+    assert!(
+        !violates(&r, "/ok"),
+        "valid derived types conform: {:?}",
+        r.results
+    );
+    for bad in ["/integer", "/negative", "/range", "/notz"] {
+        assert!(
+            violates(&r, bad),
+            "{bad} violates sh:datatype: {:?}",
+            r.results
+        );
+    }
+}
+
+/// W3C core/property/uniqueLang-002: a boolean flag activates only as the
+/// literal `true`; `"1"^^xsd:boolean`, kept as written, does not.
+#[test]
+fn a_non_canonical_true_does_not_activate_unique_lang_or_closed() {
+    let shapes = r#"
+      ex:U a sh:NodeShape ; sh:targetNode ex:i ;
+        sh:property [ sh:path ex:label ; sh:uniqueLang "1"^^xsd:boolean ] .
+      ex:C a sh:NodeShape ; sh:targetNode ex:i ; sh:closed "1"^^xsd:boolean ."#;
+    let data = r#"ex:i ex:label "a"@en , "b"@en ."#;
+    let r = run(shapes, data);
+    assert!(r.conforms, "{:?}", r.results);
+    let r = run(&shapes.replace("\"1\"^^xsd:boolean", "true"), data);
+    assert!(!r.conforms, "the literal true activates both");
+}
+
+/// `sh:hasValue` and `sh:in` compare RDF terms: the literal as written, not
+/// its value (`"05"^^xsd:integer` is not `5`, `"5"^^xsd:int` is not `5`).
+#[test]
+fn sh_has_value_and_sh_in_compare_terms_as_written() {
+    let shapes = r#"
+      ex:H a sh:NodeShape ; sh:targetClass ex:Item ;
+        sh:property [ sh:path ex:v ; sh:hasValue 5 ] ;
+        sh:property [ sh:path ex:w ; sh:in ( "05"^^xsd:integer ) ] ."#;
+    let data = r#"
+      ex:exact a ex:Item ; ex:v 5 ; ex:w "05"^^xsd:integer .
+      ex:padded a ex:Item ; ex:v "05"^^xsd:integer ; ex:w 5 .
+      ex:derived a ex:Item ; ex:v "5"^^xsd:int ; ex:w "05"^^xsd:integer ."#;
+    let r = run(shapes, data);
+    assert!(!violates(&r, "/exact"), "{:?}", r.results);
+    assert!(violates(&r, "/padded"), "{:?}", r.results);
+    assert!(violates(&r, "/derived"), "{:?}", r.results);
+}

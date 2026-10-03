@@ -42,12 +42,13 @@ const FIXTURES: &str = "tests/fixtures/w3c-shacl";
 /// Removing an entry requires the test to actually pass (the ratchet asserts
 /// both directions). Keys are `<suite>/<path within the suite>`.
 ///
-/// Empirical baseline: 119 pass / 2 known-fail / 15 aux skips
+/// Empirical baseline: 120 pass / 1 known-fail / 15 aux skips
 const KNOWN_FAILURES: &[(&str, &str)] = &[
-    // core: 97 pass / 1 known-fail / 15 aux skips (was 46/52/15 before the
+    // core: 98 pass / 0 known-fail / 15 aux skips (was 46/52/15 before the
     // typed-term engine refactor — focus and value nodes are now oxigraph
-    // Terms end-to-end). See docs/conformance/shacl.md.
-    ("core/property/uniqueLang-002.ttl", "oxigraph's storage canonicalises \"1\"^^xsd:boolean to \"true\" (native value encoding), so the spec's literal-\"true\"-only activation of sh:uniqueLang is indistinguishable post-load"),
+    // Terms end-to-end — and 97/1/15 until the store kept literals as
+    // written: uniqueLang-002's "1"^^xsd:boolean read back as true). See
+    // docs/conformance/shacl.md.
     // sparql: 22 pass / 1 known-fail / 0 skips.
     ("sparql/pre-binding/shapesGraph-001.ttl", "$shapesGraph / $currentShape are not supported (SHACL §5.3.1 leaves them to processors that expose the shapes graph to constraint queries); a constraint using them fails the shapes graph instead of producing the expected report"),
 ];
@@ -348,7 +349,7 @@ fn w3c_shacl_core_suite() {
     // A floor as well as a ratchet. The runner turns an unreadable or
     // unparseable file into a silent `Skip`, so a Turtle-parser regression
     // would have turned every file into a skip and still passed the two
-    // asserts above. 119 pass today (97 core + 22 sparql); 110 leaves headroom
+    // asserts above. 120 pass today (98 core + 22 sparql); 110 leaves headroom
     // for suite churn.
     assert!(
         pass >= 110,
