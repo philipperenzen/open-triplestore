@@ -538,3 +538,117 @@ async fn dl_dataset_reruns_in_the_background_after_a_write() {
     }
     assert!(caught_up, "the background owl2-dl run did not finish");
 }
+
+/// The `skos` regime: OWL 2 RL over the dataset with the bundled SKOS schema
+/// as a premise, so the SKOS data model's inverses, symmetric and transitive
+/// properties and label sub-properties are materialised — and the schema's
+/// own closure is not.
+#[cfg(feature = "owl2-rl")]
+#[tokio::test]
+async fn skos_regime_materialises_the_skos_data_model() {
+    const THES: &str = "https://example.org/thes/concepts";
+    const SKOS: &str = "http://www.w3.org/2004/02/skos/core#";
+    let (state, token) = admin_state();
+    state
+        .auth_db
+        .create_dataset(
+            "thes",
+            "Thesaurus",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    state.auth_db.add_dataset_graph("thes", THES).unwrap();
+    state
+        .auth_db
+        .set_dataset_graph_role("thes", THES, Some(GraphKind::Instances))
+        .unwrap();
+    state
+        .store
+        .load_str(
+            &format!(
+                "@prefix skos: <{SKOS}> . @prefix ex: <{EX}> .\n\
+                 ex:poodle skos:broader ex:dog . ex:dog skos:broader ex:mammal .\n\
+                 ex:cat skos:related ex:mouse .\n\
+                 ex:dog skos:prefLabel \"dog\"@en ."
+            ),
+            RdfFormat::Turtle,
+            Some(THES),
+        )
+        .unwrap();
+    let app = test_app(state.clone());
+
+    let (st, v, txt) = req(
+        &app,
+        Method::PUT,
+        "/api/datasets/thes/entailment",
+        Some(&token),
+        Some("application/json"),
+        &json!({ "regime": "skos", "mode": "materialize" }).to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let graph = "urn:entailment:skos:thes";
+    assert_eq!(v["graph"], graph);
+
+    let ask = |pattern: &str| {
+        matches!(
+            state.store.query(&format!(
+                "PREFIX skos: <{SKOS}> PREFIX ex: <{EX}> \
+                 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> \
+                 ASK {{ GRAPH <{graph}> {{ {pattern} }} }}"
+            )),
+            Ok(oxigraph::sparql::QueryResults::Boolean(true))
+        )
+    };
+    assert!(ask("ex:dog skos:narrower ex:poodle"), "owl:inverseOf");
+    assert!(
+        ask("ex:poodle skos:broaderTransitive ex:mammal"),
+        "sub-property of a transitive property"
+    );
+    assert!(
+        ask("ex:mammal skos:narrowerTransitive ex:poodle"),
+        "inverse of the transitive closure"
+    );
+    assert!(ask("ex:mouse skos:related ex:cat"), "owl:SymmetricProperty");
+    assert!(
+        ask("ex:dog rdfs:label \"dog\"@en"),
+        "skos:prefLabel is a sub-property of rdfs:label"
+    );
+    assert!(
+        !ask(&format!(
+            "?s ?p ?o FILTER(isIRI(?s) && STRSTARTS(STR(?s), \"{SKOS}\"))"
+        )),
+        "the SKOS schema's own closure is pruned from the dataset's graph"
+    );
+
+    // Queries opt in as for every other regime.
+    let q = format!("SELECT ?n WHERE {{ <{EX}mammal> <{SKOS}narrowerTransitive> ?n }}");
+    let (st, v, txt) = req(
+        &app,
+        Method::GET,
+        &format!("/sparql?query={}&entailment_dataset=thes", url_encode(&q)),
+        Some(&token),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(rows(&v), 2, "dog and poodle: {txt}");
+
+    // A write re-materialises.
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/store?graph={}", url_encode(THES)),
+        Some(&token),
+        Some("text/turtle"),
+        &format!("<{EX}puppy> <{SKOS}broader> <{EX}poodle> ."),
+    )
+    .await;
+    assert!(st.is_success(), "{st} {txt}");
+    assert!(ask("ex:puppy skos:broaderTransitive ex:mammal"));
+}

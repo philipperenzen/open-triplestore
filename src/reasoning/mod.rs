@@ -37,6 +37,10 @@ pub mod rdfs;
 #[cfg(feature = "owl2-rl")]
 pub mod owl2_rl;
 
+/// SKOS-aware inferencing: OWL 2 RL over the bundled SKOS schema.
+#[cfg(feature = "owl2-rl")]
+pub mod skos;
+
 #[cfg(feature = "owl2-el")]
 pub mod owl2_el;
 

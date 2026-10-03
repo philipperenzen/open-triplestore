@@ -3049,6 +3049,9 @@ pub fn run_boot_seed(
     if let Err(e) = crate::shacl_studio::seed::seed_shacl_shacl(store, auth) {
         tracing::warn!("shacl_studio: SHACL-SHACL seed failed: {e}");
     }
+    if let Err(e) = crate::shacl_studio::seed::seed_skos_integrity(store, auth) {
+        tracing::warn!("shacl_studio: SKOS integrity seed failed: {e}");
+    }
     // Registrations of model-registry graphs made before the dataset graph
     // gate refused them go first, so the Library adoptions below no longer
     // treat those graphs as a dataset's (runs once; see the function).
