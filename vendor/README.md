@@ -80,6 +80,11 @@ One commit each, in this order:
    solution's bindings (leaving out variables that `BIND` / `SELECT` expressions
    assign), with keys drawn at random per evaluation. Fixes `functions#bnode01`.
    Draft: `spareval/UPSTREAM-PR-bnode-label.md`.
+6. **Nested aggregates are refused** (`spargebra` parser). `SUM(COUNT(?x))` used to
+   parse; SPARQL does not allow an aggregate inside another one's argument (the
+   SPARQL 1.2 test `nested-aggregate-functions`). The parser refuses an aggregate
+   whose argument mentions an aggregate it already replaced by a variable at the
+   same `SELECT` level. Draft: `spargebra/UPSTREAM-PR-nested-aggregates.md`.
 
 ### Verifying the fork
 

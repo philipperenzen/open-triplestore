@@ -967,6 +967,18 @@ impl ParserState {
 
     fn new_aggregation(&mut self, agg: AggregateExpression) -> Result<Variable, &'static str> {
         let aggregates = self.aggregates.last_mut().ok_or("Unexpected aggregate")?;
+        // An aggregate inside another one's argument (`SUM(COUNT(?x))`) was parsed
+        // first and replaced by the variable holding it, one of this level's
+        // aggregate variables (fresh names nothing else can mention). SPARQL does not
+        // allow nested aggregates.
+        if let AggregateExpression::FunctionCall { expr, .. } = &agg {
+            if aggregates
+                .iter()
+                .any(|(v, _)| expression_mentions_variable(expr, v))
+            {
+                return Err("Aggregate functions cannot be nested");
+            }
+        }
         Ok(aggregates
             .iter()
             .find_map(|(v, a)| (a == &agg).then_some(v))
@@ -976,6 +988,43 @@ impl ParserState {
                 aggregates.push((new_var.clone(), agg));
                 new_var
             }))
+    }
+}
+
+/// Whether `variable` occurs in `expression` outside an `EXISTS` pattern.
+fn expression_mentions_variable(expression: &Expression, variable: &Variable) -> bool {
+    match expression {
+        Expression::Variable(v) | Expression::Bound(v) => v == variable,
+        Expression::NamedNode(_) | Expression::Literal(_) | Expression::Exists(_) => false,
+        Expression::Or(a, b)
+        | Expression::And(a, b)
+        | Expression::Equal(a, b)
+        | Expression::SameTerm(a, b)
+        | Expression::Greater(a, b)
+        | Expression::GreaterOrEqual(a, b)
+        | Expression::Less(a, b)
+        | Expression::LessOrEqual(a, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b) => {
+            expression_mentions_variable(a, variable) || expression_mentions_variable(b, variable)
+        }
+        Expression::UnaryPlus(e) | Expression::UnaryMinus(e) | Expression::Not(e) => {
+            expression_mentions_variable(e, variable)
+        }
+        Expression::In(e, list) => {
+            expression_mentions_variable(e, variable)
+                || list.iter().any(|e| expression_mentions_variable(e, variable))
+        }
+        Expression::If(a, b, c) => {
+            expression_mentions_variable(a, variable)
+                || expression_mentions_variable(b, variable)
+                || expression_mentions_variable(c, variable)
+        }
+        Expression::Coalesce(list) | Expression::FunctionCall(_, list) => list
+            .iter()
+            .any(|e| expression_mentions_variable(e, variable)),
     }
 }
 

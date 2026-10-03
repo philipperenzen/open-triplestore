@@ -67,9 +67,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asks for, and re-pins; the store now tells everyone which datasets that applies to.
 
 ### Changed
-- **SPARQL query results follow SPARQL 1.1 in five more places.** The engine's
-  SPARQL evaluator and optimizer (Oxigraph's `spareval` 0.2.7 and `sparopt` 0.3.7)
-  are now vendored under `vendor/` and patched, one commit per fix, each with a
+- **SPARQL query results follow the specification in six more places.** The
+  engine's SPARQL parser, evaluator and optimizer (Oxigraph's `spargebra` 0.4.7,
+  `spareval` 0.2.7 and `sparopt` 0.3.7) are now vendored under `vendor/` and patched, one commit per fix, each with a
   draft upstream PR (`vendor/README.md`):
   - `GRAPH ?g { … }` no longer puts `?g` in scope inside the pattern: around a
     `VALUES`, an aggregate sub-select or a `MINUS` it now enumerates the named
@@ -85,6 +85,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `BNODE("label")` returns a fresh blank node per solution (the same one within
     a solution), accepts any string, and no longer returns the same node in every
     later request.
+  - An aggregate nested in another one's argument (`SUM(COUNT(?x))`) is a syntax
+    error (400), as SPARQL requires; it used to be accepted (the vendored
+    `spargebra` 0.4.7 parser).
   The vendored W3C SPARQL 1.1 query and update sections have no open known
   failures left (`docs/conformance/sparql11.md`).
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
