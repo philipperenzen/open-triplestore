@@ -1,0 +1,24 @@
+# Apache Jena Fuseki 6.2.0 "main" (Apache-2.0), TDB2. The official release jar
+# from Maven Central (fetched and SHA-256-checked by fetch.sh) on a pinned
+# Eclipse Temurin JDK image; Apache publishes no multi-arch Fuseki image.
+name: benchcmp
+x-image: &image eclipse-temurin:21-jdk@sha256:3e3c176ffed168beb42c607be9bc1639b466cf00261a0fb04425562c9d0c5c2b
+services:
+  fuseki:
+    image: *image
+    command: ["java", "-Xmx3g", "-jar", "/jars/jena-fuseki-server-6.2.0.jar", "--config", "/cfg/fuseki-config.ttl", "--port", "3030"]
+    volumes: [db:/db, "${BENCH_DATA:?}:/bench:ro", "${BENCH_CACHE:?}:/jars:ro", "../config:/cfg:ro"]
+    ports: ["127.0.0.1:${BENCH_PORT:-17001}:3030"]
+    mem_limit: ${BENCH_MEM:-4g}
+    memswap_limit: ${BENCH_MEM:-4g}
+    cpus: ${BENCH_CPUS:-4}
+  load:
+    profiles: [load]
+    image: *image
+    command: ["java", "-Xmx3g", "-cp", "/jars/jena-fuseki-server-6.2.0.jar", "tdb2.tdbloader", "--loc", "/db", "/bench/dataset.nt"]
+    volumes: [db:/db, "${BENCH_DATA:?}:/bench:ro", "${BENCH_CACHE:?}:/jars:ro"]
+    mem_limit: ${BENCH_MEM:-4g}
+    memswap_limit: ${BENCH_MEM:-4g}
+    cpus: ${BENCH_CPUS:-4}
+volumes:
+  db: {}

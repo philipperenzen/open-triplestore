@@ -1,0 +1,32 @@
+# Oxigraph server, upstream and unpatched (MIT OR Apache-2.0).
+name: benchcmp
+x-image: &image ghcr.io/oxigraph/oxigraph:0.5.11@sha256:7532c1f9aa5f28c0dc6a4243198f7f6144017fab7429bf6c164a89fec9411767
+services:
+  oxigraph:
+    image: *image
+    command: ["serve", "--location", "/db", "--bind", "0.0.0.0:7878"]
+    volumes: [db:/db, "${BENCH_DATA:?}:/bench:ro"]
+    ports: ["127.0.0.1:${BENCH_PORT:-17001}:7878"]
+    mem_limit: ${BENCH_MEM:-4g}
+    memswap_limit: ${BENCH_MEM:-4g}
+    cpus: ${BENCH_CPUS:-4}
+  load:
+    profiles: [load]
+    image: *image
+    command: ["load", "--location", "/db", "--file", "/bench/dataset.nt"]
+    volumes: [db:/db, "${BENCH_DATA:?}:/bench:ro"]
+    mem_limit: ${BENCH_MEM:-4g}
+    memswap_limit: ${BENCH_MEM:-4g}
+    cpus: ${BENCH_CPUS:-4}
+  optimize:
+    profiles: [load]
+    image: *image
+    # Oxigraph's loader recommends this before a read-heavy workload; its time
+    # is counted in the load.
+    command: ["optimize", "--location", "/db"]
+    volumes: [db:/db]
+    mem_limit: ${BENCH_MEM:-4g}
+    memswap_limit: ${BENCH_MEM:-4g}
+    cpus: ${BENCH_CPUS:-4}
+volumes:
+  db: {}

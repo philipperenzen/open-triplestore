@@ -1,0 +1,99 @@
+{
+ "store": "fuseki",
+ "scale": "10k",
+ "limits": {
+  "memory": "4g",
+  "cpus": 4
+ },
+ "load_method": "`tdb2.tdbloader` (offline, default loader)",
+ "phases": {
+  "load": {
+   "seconds": 19.782,
+   "peak_mem_bytes": 3071975358.464,
+   "load_after": [
+    3.7568359375,
+    3.39794921875,
+    3.13671875
+   ],
+   "method": "`tdb2.tdbloader` (offline, default loader)"
+  },
+  "explore": {
+   "seconds": 82.95,
+   "peak_mem_bytes": 797127475.2,
+   "load_after": [
+    3.06201171875,
+    3.14013671875,
+    3.06396484375
+   ]
+  },
+  "features": {
+   "seconds": 185.762,
+   "peak_mem_bytes": 2033667014.656,
+   "load_after": [
+    2.171875,
+    2.791015625,
+    2.9345703125
+   ]
+  },
+  "concurrent": {
+   "seconds": 204.505,
+   "peak_mem_bytes": 2409476653.056,
+   "load_after": [
+    4.32763671875,
+    3.33154296875,
+    3.1025390625
+   ]
+  },
+  "shacl": {
+   "seconds": 76.442,
+   "peak_mem_bytes": 2383706849.28,
+   "load_after": [
+    2.4443359375,
+    2.95703125,
+    2.9765625
+   ]
+  },
+  "load_http": {
+   "seconds": 26.715,
+   "peak_mem_bytes": 1525787131.904,
+   "load_after": [
+    2.18505859375,
+    2.84716796875,
+    2.935546875
+   ],
+   "method": "HTTP Graph Store POST, 100 MB N-Triples chunks"
+  }
+ },
+ "commands": [
+  "docker compose -f <repo>/scripts/bench-compare/compose/fuseki.yml -p benchcmp --profile load down -v --remove-orphans",
+  "docker compose -f <repo>/scripts/bench-compare/compose/fuseki.yml -p benchcmp --profile load run --rm --name benchcmp-loader load",
+  "docker compose -f <repo>/scripts/bench-compare/compose/fuseki.yml -p benchcmp up -d fuseki",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/fuseki/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store fuseki --workload explore --out /out/explore.json --endpoint http://fuseki:3030/ds/sparql --params /bench/params.json",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/fuseki/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store fuseki --workload features --out /out/features.json --endpoint http://fuseki:3030/ds/sparql --features /h/queries/features --feature-runs 10",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/fuseki/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store fuseki --workload concurrent --out /out/concurrent.json --endpoint http://fuseki:3030/ds/sparql --params /bench/params.json --clients 1,4,8 --seconds 60",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/fuseki/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store fuseki --workload shacl --out /out/shacl.json --endpoint http://fuseki:3030/ds/shacl?graph=default --shacl-kind fuseki --shapes /h/shapes/bsbm-shapes.ttl --shacl-runs 5",
+  "docker compose -f <repo>/scripts/bench-compare/compose/fuseki.yml -p benchcmp --profile load down -v --remove-orphans",
+  "docker compose -f <repo>/scripts/bench-compare/compose/fuseki.yml -p benchcmp up -d fuseki",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/fuseki/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store fuseki --workload load-http --out /out/load_http.json --endpoint http://fuseki:3030/ds/data?default --file /bench/dataset.nt --chunk-mb 100",
+  "docker compose -f <repo>/scripts/bench-compare/compose/fuseki.yml -p benchcmp --profile load down -v --remove-orphans"
+ ],
+ "quiet": {
+  "load_before": [
+   3.798828125,
+   3.3759765625,
+   3.123046875
+  ],
+  "waited_s": 0,
+  "free_gib": 21.4,
+  "swap": "total = 9216.00M  used = 8397.50M  free = 818.50M  (encrypted)"
+ },
+ "started": "2026-10-03T16:57:02+0200",
+ "db_bytes_after_load": 737947648,
+ "image": "sha256:05e5dc64672d5a2233e7a3c7b527b43d6e7d0bb8231d21582c1729282404d259 eclipse-temurin:21-jdk@sha256:3e3c176ffed168beb42c607be9bc1639b466cf00261a0fb04425562c9d0c5c2b",
+ "finished": "2026-10-03T17:08:03+0200",
+ "load_after": [
+  2.18505859375,
+  2.84716796875,
+  2.935546875
+ ]
+}

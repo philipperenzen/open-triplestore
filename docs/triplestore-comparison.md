@@ -238,6 +238,10 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > ³ `rdf-12` / `rdf-star` feature flag in oxrdf; triple terms parseable but not fully evaluated.
 > ⁴ Not claimed. Open Triplestore runs a hand-written, spec-derived SPARQL 1.1 suite (`tests/w3c_sparql11_conformance.rs`) and, for development and bug tracking, the query and update sections of the W3C SPARQL 1.1 test suite from w3c/rdf-tests, vendored unmodified (`tests/w3c_sparql11_manifests.rs`). Those sections are a subset of a W3C test suite, on which W3C's test-suite licence policy (https://www.w3.org/copyright/test-suites-licenses/) allows no performance claims, so no result is given here; the known evaluator gaps are tracked in `docs/conformance/sparql11.md`. The other systems' cells are as they were compiled for this comparison.
 
+> **Measured performance.** Open Triplestore against Oxigraph, Apache Jena Fuseki, QLever,
+> Virtuoso and RDF4J — one machine, the same container limits, the same data and queries, result
+> counts cross-checked: [performance-comparison.md](performance-comparison.md).
+
 ### 4.2 Reasoning, Validation & Inference
 
 | Standard | Open Triplestore | Oxigraph | Jena 5 | Blazegraph | Virtuoso | GraphDB | Stardog | RDF4J 5 | Neptune | QLever |

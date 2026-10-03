@@ -1,0 +1,16 @@
+{
+  "what": "Follow-up probes after the campaign, same images and limits. Five BSBM explore instances per query (10k, from params.json measured mixes), each run three times; the median of the third runs, in ms.",
+  "ots_vs_oxigraph_10k": {
+    "oxigraph, data in a named graph, FROM <g>":                 {"Q1": 0.99, "Q2": 0.86, "Q3": 1.34, "Q9": 0.20, "Q10": 0.52},
+    "oxigraph, data in a named graph, FROM <g> FROM NAMED <g>":  {"Q1": 1.06, "Q2": 0.94, "Q3": 1.47, "Q9": 0.22, "Q10": 0.54},
+    "open triplestore, dataset SPARQL service endpoint":         {"Q1": 4.96, "Q2": 1.69, "Q3": 3.12, "Q9": 42.45, "Q10": 2.34},
+    "result counts": "identical in all three configurations"
+  },
+  "ots_admin_from_duplicates_1k": {
+    "query": "SELECT ?label FROM <g> WHERE { <Product1> rdfs:label ?label } as an admin on /sparql",
+    "rows": {"/sparql": 2, "dataset endpoint": 1, "expected": 1},
+    "two_patterns_rows": {"/sparql": 92, "dataset endpoint": 23, "expected": 23},
+    "cause": "the admin branch keeps the caller's FROM <g> and appends FROM <g> for every registered graph (src/server/routes.rs, scoped_query for admins); oxigraph 0.5.11 returns duplicate solutions when one graph is named twice in FROM (SELECT ... FROM <g> FROM <g>: 2 rows for 1)"
+  },
+  "ots_10k_accelerator": "in-memory query accelerator OFF: store has 2,268,709 triples, over the 2,000,000 cap (server log during the 10k load) — the 10k runs are answered from RocksDB"
+}

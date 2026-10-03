@@ -1,0 +1,76 @@
+{
+ "store": "rdf4j",
+ "scale": "10k",
+ "limits": {
+  "memory": "4g",
+  "cpus": 4
+ },
+ "load_method": "HTTP `POST /statements`, 100 MB N-Triples chunks",
+ "phases": {
+  "load": {
+   "seconds": 35.34,
+   "peak_mem_bytes": 1452772687.872,
+   "load_after": [
+    4.14501953125,
+    3.669921875,
+    3.21337890625
+   ],
+   "method": "HTTP `POST /statements`, 100 MB N-Triples chunks"
+  },
+  "explore": {
+   "seconds": 121.775,
+   "peak_mem_bytes": 1231581872.128,
+   "load_after": [
+    2.42236328125,
+    2.93017578125,
+    2.97509765625
+   ]
+  },
+  "features": {
+   "seconds": 416.061,
+   "peak_mem_bytes": 1114544013.312,
+   "load_after": [
+    2.52880859375,
+    2.294921875,
+    2.60205078125
+   ]
+  },
+  "concurrent": {
+   "seconds": 204.788,
+   "peak_mem_bytes": 1390495662.08,
+   "load_after": [
+    3.9404296875,
+    3.087890625,
+    2.859375
+   ]
+  }
+ },
+ "commands": [
+  "docker compose -f <repo>/scripts/bench-compare/compose/rdf4j.yml -p benchcmp --profile load down -v --remove-orphans",
+  "docker compose -f <repo>/scripts/bench-compare/compose/rdf4j.yml -p benchcmp up -d rdf4j",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/rdf4j/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store rdf4j --workload load-http --out /out/load.json --endpoint http://rdf4j:8080/rdf4j-server/repositories/bench/statements --file /bench/dataset.nt --chunk-mb 100",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/rdf4j/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store rdf4j --workload explore --out /out/explore.json --endpoint http://rdf4j:8080/rdf4j-server/repositories/bench --params /bench/params.json",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/rdf4j/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store rdf4j --workload features --out /out/features.json --endpoint http://rdf4j:8080/rdf4j-server/repositories/bench --features /h/queries/features --feature-runs 10",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/rdf4j/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store rdf4j --workload concurrent --out /out/concurrent.json --endpoint http://rdf4j:8080/rdf4j-server/repositories/bench --params /bench/params.json --clients 1,4,8 --seconds 60",
+  "docker compose -f <repo>/scripts/bench-compare/compose/rdf4j.yml -p benchcmp --profile load down -v --remove-orphans"
+ ],
+ "quiet": {
+  "load_before": [
+   4.443359375,
+   3.5224609375,
+   3.134765625
+  ],
+  "waited_s": 0,
+  "free_gib": 22.5,
+  "swap": "total = 9216.00M  used = 8630.06M  free = 585.94M  (encrypted)"
+ },
+ "started": "2026-10-03T17:21:12+0200",
+ "db_bytes_after_load": 656064512,
+ "image": "sha256:80354a64388a0c719e15f9b3bb4d51f52177e6eb7c908b365eb44fcd746cd9b4 eclipse/rdf4j-workbench:6.1.0-tomcat@sha256:7a18cecfc879f3143b5a57fe31176a0774fa57e5313f639c6f51756f390f7670",
+ "finished": "2026-10-03T17:35:16+0200",
+ "load_after": [
+  3.9404296875,
+  3.087890625,
+  2.859375
+ ]
+}

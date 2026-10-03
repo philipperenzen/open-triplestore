@@ -974,12 +974,13 @@ graph; Fuseki via GSP; QLever via `qlever-index`), and times the queries with
 **Why not a large multi-store leaderboard?** A fair cross-store benchmark needs
 the *same* hardware, dataset, query mix and protocol; published BSBM/SP2Bench
 figures run on different machines and configurations and are not comparable
-line-for-line. Open Triplestore embeds **Oxigraph** as its engine (0.4.11 when these
-figures were measured; 0.5 today), so its raw
-query/parse throughput tracks Oxigraph's (a modern Rust store competitive with
-RDF4J and Jena on many workloads). The Fuseki comparison is included precisely
-because it could be run here under identical conditions; apply the same recipe to
-GraphDB, Virtuoso or RDF4J on your own hardware for an apples-to-apples result.
+line-for-line. That is why the multi-store comparison is its own measurement:
+[performance-comparison.md](performance-comparison.md) runs Open Triplestore,
+upstream Oxigraph, Fuseki, QLever, Virtuoso and RDF4J one at a time on the same
+machine, under the same container limits, on BSBM data with the explore mix, a
+SPARQL 1.1 feature mix, loading, SHACL (the method of the Jena comparison above)
+and 1/4/8 concurrent clients, with every answer's result count cross-checked.
+Its harness is [`scripts/bench-compare/`](../scripts/bench-compare/).
 
 ---
 
