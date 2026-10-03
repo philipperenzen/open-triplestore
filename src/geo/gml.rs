@@ -274,7 +274,7 @@ pub(super) fn numbers(text: &str) -> Option<Vec<f64>> {
 
 /// Group `nums` into positions of `dim` (2 or 3) numbers, exactly.
 fn group(nums: &[f64], dim: usize) -> Option<Vec<P>> {
-    if !(2..=3).contains(&dim) || nums.len() % dim != 0 {
+    if !(2..=3).contains(&dim) || !nums.len().is_multiple_of(dim) {
         return None;
     }
     Some(
