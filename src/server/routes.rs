@@ -275,9 +275,8 @@ async fn sparql_post(
         if let Some(q) = query {
             // The dataset parameters ride in the form body (§2.1.3), or in the
             // URL when the form has none.
-            let mut protocol = ProtocolDataset::from_pairs(
-                params.iter().map(|(k, v)| (k.as_str(), v.as_str())),
-            )?;
+            let mut protocol =
+                ProtocolDataset::from_pairs(params.iter().map(|(k, v)| (k.as_str(), v.as_str())))?;
             if protocol.is_empty() {
                 protocol = protocol_dataset_from_url(raw_query.as_deref())?;
             }
@@ -680,12 +679,10 @@ async fn execute_query(
         // text the old way, so nothing reaches the store unscoped (the guard
         // below still checks it) — but a dataset given through the protocol
         // cannot be honoured on text we cannot parse.
-        None if !protocol.is_empty() => {
-            return Err(AppError::BadRequest(
-                "the query does not parse, so default-graph-uri / named-graph-uri cannot be applied"
-                    .to_string(),
-            ))
-        }
+        None if !protocol.is_empty() => return Err(AppError::BadRequest(
+            "the query does not parse, so default-graph-uri / named-graph-uri cannot be applied"
+                .to_string(),
+        )),
         None if is_admin => query.to_string(),
         None => scope_query_to_authorized_text(query, &accessible),
     };
@@ -806,7 +803,10 @@ fn apply_update_protocol_dataset(
             .collect()
     };
     for op in &mut update.operations {
-        if let GraphUpdateOperation::DeleteInsert { using: op_using, .. } = op {
+        if let GraphUpdateOperation::DeleteInsert {
+            using: op_using, ..
+        } = op
+        {
             if op_using.is_some() {
                 return Err(AppError::BadRequest(
                     "using-graph-uri / using-named-graph-uri cannot be combined with an \
@@ -6261,7 +6261,10 @@ mod query_scoping_tests {
         // Setting the dataset on the parsed query cannot be mis-anchored.
         let (ok, scoped) = scope_then_guard(attack, &iris);
         assert!(ok, "{scoped}");
-        assert!(scoped.contains("FROM NAMED <http://ex.org/g/a>"), "{scoped}");
+        assert!(
+            scoped.contains("FROM NAMED <http://ex.org/g/a>"),
+            "{scoped}"
+        );
     }
 
     /// Parse a scoped query back and return its (default, named) graph lists.
@@ -6288,8 +6291,7 @@ mod query_scoping_tests {
     #[test]
     fn from_alone_keeps_its_meaning_and_names_no_graph() {
         let set = authz(&["urn:g:a", "urn:g:b"]);
-        let scoped =
-            scope_query_to_authorized("SELECT * FROM <urn:g:a> WHERE { ?s ?p ?o }", &set);
+        let scoped = scope_query_to_authorized("SELECT * FROM <urn:g:a> WHERE { ?s ?p ?o }", &set);
         assert_eq!(dataset_of(&scoped), (strings(&["urn:g:a"]), Some(vec![])));
     }
 
@@ -6308,10 +6310,8 @@ mod query_scoping_tests {
         // No outer `WHERE` keyword: the textual rewriter spliced the prologue into
         // the inner sub-select, which the grammar does not allow (400).
         let set = authz(&["urn:g:a"]);
-        let scoped = scope_query_to_authorized(
-            "SELECT ?s { { SELECT ?s WHERE { ?s ?p ?o } } }",
-            &set,
-        );
+        let scoped =
+            scope_query_to_authorized("SELECT ?s { { SELECT ?s WHERE { ?s ?p ?o } } }", &set);
         assert_eq!(
             dataset_of(&scoped),
             (strings(&["urn:g:a"]), Some(strings(&["urn:g:a"])))

@@ -790,13 +790,30 @@ fn dataset_app() -> (Router, String, String) {
     for user in ["alice", "bob"] {
         state
             .auth_db
-            .create_user(user, user, &format!("{user}@test.com"), "hash", SystemRole::User)
+            .create_user(
+                user,
+                user,
+                &format!("{user}@test.com"),
+                "hash",
+                SystemRole::User,
+            )
             .unwrap();
     }
-    for (id, owner, graphs) in [("ds-alice", "alice", vec![DS_A, DS_B]), ("ds-bob", "bob", vec![DS_C])] {
+    for (id, owner, graphs) in [
+        ("ds-alice", "alice", vec![DS_A, DS_B]),
+        ("ds-bob", "bob", vec![DS_C]),
+    ] {
         let ds = state
             .auth_db
-            .create_dataset(id, id, None, OwnerType::User, owner, Visibility::Private, None)
+            .create_dataset(
+                id,
+                id,
+                None,
+                OwnerType::User,
+                owner,
+                Visibility::Private,
+                None,
+            )
             .unwrap();
         for g in graphs {
             state.auth_db.add_dataset_graph(&ds.id, g).unwrap();
@@ -935,7 +952,10 @@ async fn sparql_dataset_from_named_alone_leaves_the_default_graph_empty() {
         "",
     )
     .await;
-    assert_eq!(v, strs(&[&format!("b-only|{DS_B}"), &format!("shared|{DS_B}")]));
+    assert_eq!(
+        v,
+        strs(&[&format!("b-only|{DS_B}"), &format!("shared|{DS_B}")])
+    );
 }
 
 /// A graph the caller may not read is dropped from the dataset it names, as if
@@ -1042,7 +1062,10 @@ async fn sparql_protocol_dataset_parameters_are_honoured() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{body}");
-    assert!(body.contains("a-only") && !body.contains("b-only"), "{body}");
+    assert!(
+        body.contains("a-only") && !body.contains("b-only"),
+        "{body}"
+    );
     // POST, query in the body: the parameters ride in the URL.
     let (st, body, _) = send(
         &app,
@@ -1055,7 +1078,10 @@ async fn sparql_protocol_dataset_parameters_are_honoured() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{body}");
-    assert!(body.contains("b-only") && !body.contains("a-only"), "{body}");
+    assert!(
+        body.contains("b-only") && !body.contains("a-only"),
+        "{body}"
+    );
 }
 
 /// `using-graph-uri` / `using-named-graph-uri` (Protocol §2.2.3) set the dataset
@@ -1121,10 +1147,18 @@ async fn sparql_update_protocol_using_parameters() {
         Some(&admin),
         Some("application/sparql-update"),
         None,
-        &format!("WITH <{DS_B}> INSERT {{ ?s <http://ex/bad> ?o }} WHERE {{ ?s <http://ex/v> ?o }}"),
+        &format!(
+            "WITH <{DS_B}> INSERT {{ ?s <http://ex/bad> ?o }} WHERE {{ ?s <http://ex/v> ?o }}"
+        ),
     )
     .await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
-    let (_, v) = values(&app, &admin, "ASK { GRAPH ?g { ?s <http://ex/bad> ?o } }", "").await;
+    let (_, v) = values(
+        &app,
+        &admin,
+        "ASK { GRAPH ?g { ?s <http://ex/bad> ?o } }",
+        "",
+    )
+    .await;
     assert_eq!(v, strs(&["false"]));
 }
