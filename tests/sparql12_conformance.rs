@@ -721,23 +721,47 @@ fn duplicate_values_variables_are_rejected() {
         .is_ok());
 }
 
-/// Known upstream defect, flip when fixed: in spareval 0.2.7 (oxigraph
-/// 0.5.11) `=` between two literals that both carry a base direction reaches
-/// an `unreachable!()` in its term equality (`ExpressionTerm::eq` has no arm
-/// for directional strings), so the query panics — a 500 over HTTP — instead
-/// of answering. Once fixed, `"abc"@en--ltr = "abc"@en--rtl` must be false
-/// and `"abc"@en--ltr = "abc"@en--ltr` true; replace this test with that.
+/// RDF 1.2 term equality for literals with a base direction: `=` between two
+/// of them is true exactly when lexical form, language tag and direction all
+/// match. spareval 0.2.7 (oxigraph 0.5.11) hit an `unreachable!()` here — its
+/// `ExpressionTerm` equality had no arm for directional strings — so the
+/// query panicked (a 500 over HTTP); the vendored copy carries the fix
+/// (`vendor/spareval/UPSTREAM-PR-dir-lang-string-equality.md`).
 #[test]
-fn directional_literal_equality_panics_upstream() {
-    for q in [
-        r#"SELECT ?eq WHERE { BIND("abc"@en--ltr = "abc"@en--rtl AS ?eq) }"#,
-        r#"SELECT ?eq WHERE { BIND("abc"@en--ltr = "abc"@en--ltr AS ?eq) }"#,
-    ] {
-        let s = &stores()[0];
-        let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sel(s, q)));
-        assert!(
-            got.is_err(),
-            "fixed upstream — pin the answer instead (got {got:?}) for {q}"
+fn directional_literal_equality() {
+    for s in stores() {
+        let r = sel(
+            &s,
+            r#"SELECT ?same ?dir ?nodir ?lang ?ne ?in WHERE {
+                 BIND("abc"@en--ltr = "abc"@en--ltr AS ?same)
+                 BIND("abc"@en--ltr = "abc"@en--rtl AS ?dir)
+                 BIND("abc"@en--ltr = "abc"@en AS ?nodir)
+                 BIND("abc"@en--ltr = "abc"@fr--ltr AS ?lang)
+                 BIND("abc"@en--ltr != "abc"@en--rtl AS ?ne)
+                 BIND("abc"@en--rtl IN ("abc"@en--ltr, "abc"@en--rtl) AS ?in)
+               }"#,
+        );
+        let t = typed("true", "boolean");
+        let f = typed("false", "boolean");
+        assert_eq!(
+            r,
+            vec![vec![t.clone(), f.clone(), f.clone(), f, t.clone(), t]]
+        );
+        upd(
+            &s,
+            r#"INSERT DATA { :a :label "x"@en--ltr . :b :label "x"@en--ltr . :c :label "x"@en--rtl . }"#,
+        );
+        let mut joined = sel(
+            &s,
+            r#"SELECT ?s WHERE { ?s :label ?l FILTER(?l = "x"@en--ltr) }"#,
+        );
+        joined.sort();
+        assert_eq!(
+            joined,
+            vec![
+                vec!["<http://ex/a>".to_string()],
+                vec!["<http://ex/b>".to_string()]
+            ]
         );
     }
 }

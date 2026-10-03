@@ -85,6 +85,14 @@ One commit each, in this order:
    SPARQL 1.2 test `nested-aggregate-functions`). The parser refuses an aggregate
    whose argument mentions an aggregate it already replaced by a variable at the
    same `SELECT` level. Draft: `spargebra/UPSTREAM-PR-nested-aggregates.md`.
+7. **`=` between directional literals** (`spareval` term equality). With
+   `sparql-12`, `impl PartialEq for ExpressionTerm` had no arm for two
+   `DirLangStringLiteral`s and reached `unreachable!()`, so `=`, `!=` or `IN`
+   between two literals that both carry a base direction panicked (a 500 over
+   HTTP). The arm compares lexical form, language tag and direction (RDF 1.2
+   term equality), as the `Hash` impl already did. No W3C entry reaches it;
+   `directional_literal_equality` in `tests/sparql12_conformance.rs` pins it.
+   Draft: `spareval/UPSTREAM-PR-dir-lang-string-equality.md`.
 
 ### Verifying the fork
 
