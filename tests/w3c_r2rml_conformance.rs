@@ -46,7 +46,40 @@ use oxigraph::sparql::QueryResults;
 const BASE: &str = "http://example.com/base/";
 
 /// Cases that do not pass, per database: `(database, case, reason)`.
-const KNOWN_FAILURES: &[(&str, &str, &str)] = &[];
+const KNOWN_FAILURES: &[(&str, &str, &str)] = &[
+    (
+        "sqlite",
+        "R2RMLTC0002f",
+        "SQL 2008 folds the regular identifier Name to NAME, which the delimited column \"Name\" \
+         is not; SQLite compares identifiers without regard to case, and the engine matches a \
+         regular identifier as the database reports its columns",
+    ),
+    (
+        "postgresql",
+        "R2RMLTC0002f",
+        "SQL 2008 folds the regular identifier Name to NAME (PostgreSQL to name), which the \
+         delimited column \"Name\" is not; the engine matches a regular identifier as written, \
+         as the database reports its columns",
+    ),
+    (
+        "mysql",
+        "R2RMLTC0002f",
+        "MySQL compares column names without regard to case, so Name names the column \
+         \"Name\"; the suite itself lists this case as MySQL non-compliance",
+    ),
+    (
+        "mysql",
+        "R2RMLTC0018a",
+        "MySQL strips the padding of CHAR values unless the server runs with the deprecated \
+         PAD_CHAR_TO_FULL_LENGTH SQL mode; the suite lists this case as MySQL non-compliance",
+    ),
+    (
+        "sqlite",
+        "R2RMLTC0018a",
+        "SQLite does not pad CHAR(15) values to their declared length, so \"Venus\" comes back \
+         without the trailing spaces the case expects",
+    ),
+];
 
 /// One R2RML case from the manifest.
 #[derive(Debug, Clone)]
@@ -128,11 +161,14 @@ fn manifest(dir: &Path) -> Vec<Database> {
     let mut by_script: BTreeMap<String, Vec<Case>> = BTreeMap::new();
     for r in rows {
         let expected = r["expected"] == "true";
-        by_script.entry(r["script"].clone()).or_default().push(Case {
-            id: r["id"].clone(),
-            mapping: r["mapping"].clone(),
-            output: expected.then(|| r["output"].clone()),
-        });
+        by_script
+            .entry(r["script"].clone())
+            .or_default()
+            .push(Case {
+                id: r["id"].clone(),
+                mapping: r["mapping"].clone(),
+                output: expected.then(|| r["output"].clone()),
+            });
     }
     by_script
         .into_iter()
@@ -610,10 +646,9 @@ mod mysql_server {
             let _ = self
                 .admin
                 .query_drop(format!("DROP DATABASE IF EXISTS {}", self.database));
-            let _ = self.admin.exec_drop(
-                "SET GLOBAL sql_mode = ?",
-                (self.previous_mode.clone(),),
-            );
+            let _ = self
+                .admin
+                .exec_drop("SET GLOBAL sql_mode = ?", (self.previous_mode.clone(),));
         }
     }
 

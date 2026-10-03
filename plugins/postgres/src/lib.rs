@@ -317,9 +317,24 @@ impl SourceConnection for PostgresConnection {
         // Positional aliases, so two columns with one name in the query do
         // not make the cast ambiguous.
         let aliases: Vec<String> = (0..names.len()).map(|i| format!("\"c{i}\"")).collect();
+        // A CHAR(n) value keeps its padding: the cast to text would strip
+        // it, so it goes through the type's output function instead (R2RML
+        // §10.2 — the natural lexical form is the value as the server has it).
+        let types: Vec<String> = statement
+            .columns()
+            .iter()
+            .map(|c| c.type_().name().to_string())
+            .collect();
         let casts: Vec<String> = aliases
             .iter()
-            .map(|a| format!("CAST({a} AS TEXT) AS {a}"))
+            .zip(&types)
+            .map(|(a, t)| {
+                if t == "bpchar" {
+                    format!("CASE WHEN {a} IS NULL THEN NULL ELSE format('%s', {a}) END AS {a}")
+                } else {
+                    format!("CAST({a} AS TEXT) AS {a}")
+                }
+            })
             .collect();
         let wrapped = format!(
             "SELECT {} FROM ({query}) AS ots_q ({})",

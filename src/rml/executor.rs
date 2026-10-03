@@ -371,7 +371,10 @@ mod tests {
 
         let store = TripleStore::in_memory().unwrap();
         let inserted = execute(&mapping, &sources, &store, None).unwrap();
-        assert_eq!(inserted, 2, "persons 1 and 3 work for org 7; org 8 is absent");
+        assert_eq!(
+            inserted, 2,
+            "persons 1 and 3 work for org 7; org 8 is absent"
+        );
         assert_eq!(
             count(
                 &store,

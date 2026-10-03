@@ -286,12 +286,15 @@ pub fn eval_term(
         // A constant is the term the mapping wrote, datatype and language
         // included (R2RML §7.4).
         TermMapKind::Constant(term) => return render_constant(term),
-        TermMapKind::Template(template) => expand_template_encoded(
+        TermMapKind::Template(template) => expand_template_typed(
             template,
             row,
+            kinds,
             Encoding::for_term(gen.semantics, &tm.term_type),
         )?,
-        TermMapKind::Reference(col) => row.get(col)?.clone(),
+        TermMapKind::Reference(col) => {
+            natural_lexical(row.get(col)?, kinds.and_then(|k| k.get(col).copied())).into_owned()
+        }
     };
 
     // An empty value is a value (RML-IO: nothing is NULL unless the source
@@ -439,6 +442,48 @@ pub fn eval_iri(
         .strip_prefix('<')
         .and_then(|s| s.strip_suffix('>'))
         .map(str::to_string)
+}
+
+/// The natural RDF lexical form of a typed source value (R2RML §10.2): an
+/// SQL timestamp's space becomes the `T` of `xsd:dateTime`, and an SQL
+/// boolean written as a number or a letter becomes `true` / `false`. Every
+/// other value is already its own lexical form.
+fn natural_lexical(value: &str, kind: Option<ValueKind>) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    match kind {
+        Some(ValueKind::DateTime) if value.len() > 10 && value.as_bytes()[10] == b' ' => {
+            Cow::Owned(format!("{}T{}", &value[..10], &value[11..]))
+        }
+        Some(ValueKind::Boolean) => match value {
+            "1" | "t" | "T" | "TRUE" | "True" => Cow::Borrowed("true"),
+            "0" | "f" | "F" | "FALSE" | "False" => Cow::Borrowed("false"),
+            _ => Cow::Borrowed(value),
+        },
+        _ => Cow::Borrowed(value),
+    }
+}
+
+/// [`expand_template_encoded`], with each value in its natural lexical form
+/// (R2RML §10.2: a template uses the natural RDF lexical form of its values).
+fn expand_template_typed(
+    template: &str,
+    row: &Row,
+    kinds: Option<&Kinds>,
+    encoding: Encoding,
+) -> Option<String> {
+    let Some(kinds) = kinds else {
+        return expand_template_encoded(template, row, encoding);
+    };
+    let typed: Row = row
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                natural_lexical(v, kinds.get(k).copied()).into_owned(),
+            )
+        })
+        .collect();
+    expand_template_encoded(template, &typed, encoding)
 }
 
 /// Expand an `rr:template`: replace `{column}` with the row's value, encoded

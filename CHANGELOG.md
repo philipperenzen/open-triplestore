@@ -220,6 +220,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   It is now ignored; keep a local copy if you use one.
 
 ### Fixed
+- **R2RML natural lexical forms and language tags.** An SQL timestamp read
+  as `xsd:dateTime` kept the space between date and time
+  (`"2009-10-10 12:12:22"`, which is not an `xsd:dateTime`), and an SQL
+  boolean stored as `0` / `1` stayed so; both now take their natural RDF
+  lexical form (`2009-10-10T12:12:22`, `false`, R2RML §10.2), in literals and
+  in templates. `rr:language` now refuses a well-formed tag whose primary
+  language subtag cannot name a language (`english`: BCP 47 has no
+  registered subtags of four to eight letters). An `rr:sqlQuery` /
+  `rml:query` that ends in `;` no longer fails when it is wrapped as a
+  subquery (a join, a column check, the PostgreSQL cursor), and the
+  PostgreSQL connector reads a `CHAR(n)` value with its padding, as the
+  server holds it, where the cast to text stripped it. Found by the W3C R2RML
+  test cases (R2RMLTC0016c, R2RMLTC0015b, R2RMLTC0011a, R2RMLTC0015a,
+  R2RMLTC0018a).
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if

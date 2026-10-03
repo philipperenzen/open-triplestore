@@ -115,13 +115,17 @@ live-sources:
       - target/
   before_script:
     - apt-get update -qq
-    - apt-get install -y -qq libgeos-dev libsfcgal-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld
+    - apt-get install -y -qq libgeos-dev libsfcgal-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld curl
   script:
     - cargo test -p ots-plugin-postgres --test live --locked
     - cargo test -p ots-plugin-mysql --test live --locked
     - OTS_TEST_MYSQL_HOST=mariadb cargo test -p ots-plugin-mysql --test live --locked
     - cargo test -p ots-plugin-mssql --test live --locked
     - cargo test --features test-utils,plugin-postgres --test sources_postgres_http --locked
+    # The W3C R2RML test cases on SQLite, PostgreSQL and MySQL — fetched at a
+    # pinned commit, never vendored (see the script).
+    - scripts/fetch-w3c-r2rml-tests.sh
+    - OTS_TEST_R2RML_REQUIRED=1 cargo test --features test-utils,plugin-postgres,plugin-mysql --test w3c_r2rml_conformance --locked
 
 # ── Minimal build (mirrors ci.yml minimal-build) ──────────────────────────────
 # `--no-default-features` must keep compiling: a feature gate that only the full

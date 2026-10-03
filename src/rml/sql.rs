@@ -77,6 +77,10 @@ pub struct SqlOutcome {
     pub data_errors: DataErrors,
 }
 
+/// How [`row_triples`] resolves a referencing object map: the parent
+/// subjects for one row, given where the triple lands.
+pub type ResolveRef<'f> = dyn Fn(&RefObjectMap, &Row, At<'_>) -> Option<Vec<String>> + 'f;
+
 /// Generate one row's triples for one triples map (R2RML §11.1).
 ///
 /// `resolve_ref` answers a `rr:parentTriplesMap` object: the subject terms the
@@ -97,7 +101,7 @@ pub fn row_triples(
     kinds: Option<&Kinds>,
     gen: &mut TermGen,
     base: Option<&str>,
-    resolve_ref: &dyn Fn(&RefObjectMap, &Row, At<'_>) -> Option<Vec<String>>,
+    resolve_ref: &ResolveRef<'_>,
 ) -> Result<Vec<EmittedTriple>, String> {
     let mut out = Vec::new();
     // The subject, once per graph it lands in: a blank node is scoped to its
@@ -528,7 +532,11 @@ pub(crate) struct ParentIndexBuilder<'a> {
 }
 
 impl<'a> ParentIndexBuilder<'a> {
-    pub(crate) fn new(parent: &'a TriplesMap, joins: &[JoinCondition], base: Option<&'a str>) -> Self {
+    pub(crate) fn new(
+        parent: &'a TriplesMap,
+        joins: &[JoinCondition],
+        base: Option<&'a str>,
+    ) -> Self {
         Self {
             parent,
             columns: joins.iter().map(|j| j.parent.clone()).collect(),
@@ -579,7 +587,11 @@ impl<'a> ParentIndexBuilder<'a> {
 
 /// Look a child row up in a parent index: the parent subjects whose join key
 /// equals the child's. `None` when a child join column is NULL.
-pub(crate) fn lookup(index: &ParentIndex, r: &RefObjectMap, child_row: &Row) -> Option<Vec<String>> {
+pub(crate) fn lookup(
+    index: &ParentIndex,
+    r: &RefObjectMap,
+    child_row: &Row,
+) -> Option<Vec<String>> {
     let child_columns: Vec<String> = r.joins.iter().map(|j| j.child.clone()).collect();
     index.get(&join_key(child_row, &child_columns)?).cloned()
 }
@@ -759,6 +771,9 @@ pub fn execute_relational_filtered(
 /// the output dataset R2RML §11 defines. What a conformance run compares; a
 /// registered mapping runs through [`execute_relational`] instead, whose run
 /// graph has to hold the whole result.
+// Library API for conformance runs; the binary, which re-declares this
+// module, never calls it.
+#[allow(dead_code)]
 pub fn execute_relational_as_mapped(
     mapping: &RmlMapping,
     conn: &mut dyn SourceConnection,
@@ -787,6 +802,7 @@ enum Target<'a> {
     /// Every triple into this graph, whatever its graph maps say.
     Into(&'a str),
     /// Every triple into the graphs it was generated for.
+    #[allow(dead_code)] // built only by `execute_relational_as_mapped`
     AsMapped,
 }
 
@@ -1492,7 +1508,8 @@ mod tests {
 
     #[test]
     fn as_mapped_routing_keeps_graph_maps_and_into_routing_does_not() {
-        let _guard = env_guard();
+        // `run` below takes the env lock itself, so this one is scoped.
+        let guard = env_guard();
         let ttl = format!(
             "{PFX}
              ex:P a rr:TriplesMap ;
@@ -1517,7 +1534,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            store.count_graph(Some("http://example.org/Suppliers")).unwrap(),
+            store
+                .count_graph(Some("http://example.org/Suppliers"))
+                .unwrap(),
             4,
             "two labels and two ids in the subject's graph"
         );
@@ -1526,6 +1545,7 @@ mod tests {
             2,
             "the ids also go to rr:defaultGraph"
         );
+        drop(guard);
         let (into, _) = run(
             r#"
              ex:P a rr:TriplesMap ;
