@@ -1,33 +1,48 @@
-//! buildingSMART IDS (Information Delivery Specification, 1.0) → SHACL Core.
+//! buildingSMART IDS (Information Delivery Specification, 1.0) → SHACL.
 //!
 //! Every `ids:specification` becomes a node shape targeting the applicable
-//! entity's ifcOWL class. Applicability facets beyond the entity (properties,
-//! attributes, classification, material, part-of) become a separate
-//! "applies" shape and the requirements a "requires" shape, combined as the
-//! implication `sh:or ( [ sh:not applies ] requires )` — SHACL Core, no
-//! SPARQL. Facets map to the RDF the built-in IFC importer emits:
+//! entity's ifcOWL class, in the namespace of each schema its `ifcVersion`
+//! list names (`IFC2X3 IFC4` targets both). Applicability facets beyond the
+//! entity (properties, attributes, classification, material, part-of) become a
+//! separate "applies" shape and the requirements a "requires" shape, combined
+//! as the implication `sh:or ( [ sh:not applies ] requires )`. Facets map to
+//! the RDF the built-in IFC importer emits:
 //!
 //! | IDS facet | RDF |
 //! |---|---|
-//! | entity name | `rdf:type ifc:<Entity>` (ifcOWL) |
+//! | entity name | `rdf:type ifc:<Entity>` (ifcOWL); a pattern is expanded against the schema's entities |
 //! | property `Pset.Name` | `props:<Pset>_<Name>` |
 //! | attribute `Name` / `GlobalId` / other | `props:ifcName` / `props:ifcGuid` / `props:ifc<Attr>` |
 //! | partOf `IFCRELCONTAINEDINSPATIALSTRUCTURE` | `^bot:containsElement` |
 //! | partOf `IFCRELAGGREGATES` | `^bot:hasSubElement` |
 //! | classification / material | `props:ifcClassification` / `props:ifcMaterial` (the lift emits both) |
 //!
-//! Value restrictions: `simpleValue` → `sh:hasValue`; `xs:enumeration` →
-//! `sh:in`; `xs:pattern` → `sh:pattern`; bounds → `sh:min/maxInclusive` /
-//! `Exclusive`; lengths → `sh:min/maxLength`. Cardinality: `required` →
-//! `sh:minCount 1`, `prohibited` → `sh:maxCount 0`, `optional` → value
-//! constraints only. Anything approximated is listed in the report.
+//! Values are compared by the XSD base type of the facet's IDS `dataType`
+//! (the IDS data-type table) or of the restriction's `base`: a double
+//! `simpleValue` becomes the tolerance range of the IDS implementer
+//! documentation (`v ± (|v|·1e-6 + 1e-6)`, the bound included as the corpus requires), an integer a closed
+//! range, a boolean or string `sh:hasValue`; `xs:enumeration` → `sh:in` (or
+//! `sh:or` of ranges for numbers); `xs:pattern` → an anchored, translated
+//! `sh:pattern` (several are alternatives); bounds → typed
+//! `sh:min/maxInclusive` / `Exclusive` with no tolerance; lengths →
+//! `sh:min/maxLength`.
+//!
+//! Cardinality: `required` → `sh:minCount 1` plus the value constraints;
+//! `prohibited` → `sh:not` of the required facet (the opposite of required,
+//! not a count of zero); `optional` → the value constraints only. In the
+//! applicability every facet has `required` semantics. A required
+//! specification (the XSD default) also gets an existence shape: a SPARQL
+//! constraint that fails when no node of an applicable class exists. A
+//! prohibited specification violates on every applicable node and may not
+//! carry requirements. Anything approximated is listed in the report.
 
 use std::fmt::Write as _;
 
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
-use super::{ImportedShapes, SpecImporter, SpecSummary};
+use super::{xsd_regex, ImportedShapes, SpecImporter, SpecSummary};
+use crate::ifc::schema::{self, SchemaId, XsBase};
 
 pub struct IdsImporter;
 
@@ -375,123 +390,290 @@ fn ttl_str(s: &str) -> String {
     )
 }
 
-/// `xsd:` datatype for an IDS `dataType` (IFC defined type), where the built-in
-/// importer emits one; numeric measures are left untyped (their RDF datatype
-/// depends on the importer's number handling).
-fn xsd_for(ifc_type: &str) -> Option<&'static str> {
-    let t = ifc_type.trim().to_ascii_uppercase();
-    match t.as_str() {
-        "IFCLABEL"
-        | "IFCTEXT"
-        | "IFCIDENTIFIER"
-        | "IFCDESCRIPTIVEMEASURE"
-        | "IFCPRESENTABLETEXT"
-        | "IFCURIREFERENCE"
-        | "IFCDATE"
-        | "IFCDATETIME"
-        | "IFCTIME"
-        | "IFCDURATION" => Some("xsd:string"),
-        "IFCBOOLEAN" | "IFCLOGICAL" => Some("xsd:boolean"),
-        "IFCINTEGER" | "IFCCOUNTMEASURE" | "IFCINTEGERCOUNTRATEMEASURE" => Some("xsd:integer"),
-        _ => None,
+// ── values ──────────────────────────────────────────────────────────────
+
+/// The IDS tolerance for floating-point equality (implementer docs,
+/// tolerance.md): `x == v ⇔ v − |v|·ε − ε < x < v + |v|·ε + ε`.
+const TOLERANCE: f64 = 1.0e-6;
+
+/// How a value is compared: the XSD base type of the facet's data type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Base {
+    String,
+    Double,
+    Integer,
+    Boolean,
+}
+
+impl Base {
+    fn of(xs: XsBase) -> Base {
+        match xs {
+            XsBase::Double => Base::Double,
+            XsBase::Integer => Base::Integer,
+            XsBase::Boolean => Base::Boolean,
+            _ => Base::String,
+        }
     }
 }
 
-// ── conversion ──────────────────────────────────────────────────────────────
+/// `sh:datatype` (when the lift's literal type is fixed) and comparison base
+/// of an IDS `dataType`, from the IDS data-type table.
+fn datatype_info(ifc_type: &str, warnings: &mut Vec<String>) -> (Option<&'static str>, Base) {
+    let t = ifc_type.trim().to_ascii_uppercase();
+    match schema::ids_datatype(&t).and_then(|d| d.base) {
+        Some(XsBase::Boolean) => (Some("xsd:boolean"), Base::Boolean),
+        // Numbers come out of the lift as xsd:integer or xsd:double depending
+        // on how the file wrote them, so they are compared by value, not type.
+        Some(XsBase::Double) => (None, Base::Double),
+        Some(XsBase::Integer) => (None, Base::Integer),
+        Some(_) => (Some("xsd:string"), Base::String),
+        None => {
+            if schema::ids_datatype(&t).is_none() {
+                warnings.push(format!(
+                    "dataType `{ifc_type}` is not an IFC data type IDS knows; values are compared as text"
+                ));
+            }
+            (None, Base::String)
+        }
+    }
+}
+
+fn dbl(v: f64) -> String {
+    format!("\"{v:?}\"^^xsd:double")
+}
+
+/// The buildingSMART corpus accepts a value exactly on the bound, so the range
+/// is closed, widened by a few ulps so the bound computed in binary floating
+/// point does not reject the decimal boundary itself.
+fn tolerance_range(v: f64) -> (f64, f64) {
+    let lo = v - v.abs() * TOLERANCE - TOLERANCE;
+    let hi = v + v.abs() * TOLERANCE + TOLERANCE;
+    let slack = |b: f64| b.abs() * 4.0 * f64::EPSILON;
+    (lo - slack(lo), hi + slack(hi))
+}
+
+/// A bound or enumeration member as a typed Turtle literal.
+fn typed_value(raw: &str, base: Base) -> Result<String, String> {
+    let s = raw.trim();
+    match base {
+        Base::Double => s
+            .parse::<f64>()
+            .ok()
+            .filter(|_| XsBase::Double.lexically_valid(s))
+            .map(dbl)
+            .ok_or_else(|| format!("`{raw}` is not a valid xs:double")),
+        Base::Integer => s
+            .parse::<i64>()
+            .ok()
+            .filter(|_| XsBase::Integer.lexically_valid(s))
+            .map(|i| i.to_string())
+            .ok_or_else(|| format!("`{raw}` is not a valid xs:integer")),
+        Base::Boolean => match s {
+            "true" | "1" => Ok("true".into()),
+            "false" | "0" => Ok("false".into()),
+            _ => Err(format!(
+                "`{raw}` is not a valid xs:boolean (IDS booleans are lowercase `true` / `false`)"
+            )),
+        },
+        Base::String => Ok(ttl_str(raw)),
+    }
+}
+
+/// Equality with one value, as constraint lines on the value nodes: a
+/// tolerance range for doubles, a closed range for integers (so an integer
+/// stored as a double still compares), the term itself otherwise.
+fn equals(raw: &str, base: Base) -> Result<Vec<String>, String> {
+    Ok(match base {
+        Base::Double => {
+            let v: f64 = raw
+                .trim()
+                .parse()
+                .map_err(|_| format!("`{raw}` is not a valid xs:double"))?;
+            if !XsBase::Double.lexically_valid(raw.trim()) {
+                return Err(format!("`{raw}` is not a valid xs:double"));
+            }
+            let (lo, hi) = tolerance_range(v);
+            vec![
+                format!("sh:minInclusive {}", dbl(lo)),
+                format!("sh:maxInclusive {}", dbl(hi)),
+            ]
+        }
+        Base::Integer => {
+            let n = typed_value(raw, base)?;
+            vec![
+                format!("sh:minInclusive {n}"),
+                format!("sh:maxInclusive {n}"),
+            ]
+        }
+        _ => vec![format!("sh:hasValue {}", typed_value(raw, base)?)],
+    })
+}
 
 /// A value restriction, as SHACL property-constraint lines.
 fn value_constraints(
     value: Option<&El>,
-    datatype: Option<&str>,
+    base: Base,
     warnings: &mut Vec<String>,
-) -> Vec<String> {
+) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
-    let Some(v) = value else { return out };
+    let Some(v) = value else { return Ok(out) };
     if let Some(s) = v.child("simpleValue") {
-        let s = s.text.trim();
-        let lit = match datatype {
-            Some("xsd:boolean") => format!("{}", s.eq_ignore_ascii_case("true")),
-            Some("xsd:integer") if s.parse::<i64>().is_ok() => s.to_string(),
-            _ => ttl_str(s),
-        };
-        out.push(format!("sh:hasValue {lit}"));
-        return out;
+        return equals(&s.text, base);
     }
-    if let Some(r) = v.child("restriction") {
-        let base = r.attr("base").unwrap_or("xs:string");
-        let enums: Vec<String> = r
-            .children_named("enumeration")
-            .filter_map(|e| e.attr("value"))
-            .map(|s| match datatype {
-                Some("xsd:integer") if s.parse::<i64>().is_ok() => s.to_string(),
-                Some("xsd:boolean") => s.eq_ignore_ascii_case("true").to_string(),
-                _ => ttl_str(s),
-            })
-            .collect();
-        if !enums.is_empty() {
-            out.push(format!("sh:in ( {} )", enums.join(" ")));
-        }
-        if let Some(p) = r.child("pattern").and_then(|p| p.attr("value")) {
-            out.push(format!("sh:pattern {}", ttl_str(p)));
-        }
-        for (facet, sh) in [
-            ("minInclusive", "sh:minInclusive"),
-            ("maxInclusive", "sh:maxInclusive"),
-            ("minExclusive", "sh:minExclusive"),
-            ("maxExclusive", "sh:maxExclusive"),
-            ("minLength", "sh:minLength"),
-            ("maxLength", "sh:maxLength"),
-        ] {
-            if let Some(val) = r.child(facet).and_then(|f| f.attr("value")) {
-                out.push(format!("{sh} {val}"));
+    let Some(r) = v.child("restriction") else {
+        return Ok(out);
+    };
+    // A restriction's own base wins over the facet's data type.
+    let base = match r.attr("base").and_then(XsBase::parse) {
+        Some(b) => Base::of(b),
+        None => base,
+    };
+    let enums: Vec<&str> = r
+        .children_named("enumeration")
+        .filter_map(|e| e.attr("value"))
+        .collect();
+    if !enums.is_empty() {
+        match base {
+            Base::Double | Base::Integer => {
+                let members = enums
+                    .iter()
+                    .map(|e| equals(e, base).map(|lines| format!("[ {} ]", lines.join(" ; "))))
+                    .collect::<Result<Vec<_>, _>>()?;
+                out.push(format!("sh:or ( {} )", members.join(" ")));
+            }
+            _ => {
+                let members = enums
+                    .iter()
+                    .map(|e| typed_value(e, base))
+                    .collect::<Result<Vec<_>, _>>()?;
+                out.push(format!("sh:in ( {} )", members.join(" ")));
             }
         }
-        if let Some(len) = r.child("length").and_then(|f| f.attr("value")) {
-            out.push(format!("sh:minLength {len}"));
-            out.push(format!("sh:maxLength {len}"));
-        }
-        if out.is_empty() {
-            warnings.push(format!(
-                "value restriction on {base} has no facet this importer maps (enumeration, pattern, bounds, length)"
-            ));
+    }
+    // Several xs:pattern facets in one restriction are alternatives (XSD).
+    let patterns = r
+        .children_named("pattern")
+        .filter_map(|p| p.attr("value"))
+        .map(xsd_regex::to_sparql)
+        .collect::<Result<Vec<_>, _>>()?;
+    match patterns.len() {
+        0 => {}
+        1 => out.push(format!("sh:pattern {}", ttl_str(&patterns[0]))),
+        _ => out.push(format!(
+            "sh:or ( {} )",
+            patterns
+                .iter()
+                .map(|p| format!("[ sh:pattern {} ]", ttl_str(p)))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )),
+    }
+    // Ranges carry no tolerance (tolerance.md) and are typed by the base.
+    for (facet, sh) in [
+        ("minInclusive", "sh:minInclusive"),
+        ("maxInclusive", "sh:maxInclusive"),
+        ("minExclusive", "sh:minExclusive"),
+        ("maxExclusive", "sh:maxExclusive"),
+    ] {
+        if let Some(val) = r.child(facet).and_then(|f| f.attr("value")) {
+            out.push(format!("{sh} {}", typed_value(val, base)?));
         }
     }
-    out
+    for (facet, sh) in [("minLength", "sh:minLength"), ("maxLength", "sh:maxLength")] {
+        if let Some(val) = r.child(facet).and_then(|f| f.attr("value")) {
+            out.push(format!("{sh} {}", typed_value(val, Base::Integer)?));
+        }
+    }
+    if let Some(len) = r.child("length").and_then(|f| f.attr("value")) {
+        let n = typed_value(len, Base::Integer)?;
+        out.push(format!("sh:minLength {n}"));
+        out.push(format!("sh:maxLength {n}"));
+    }
+    if out.is_empty() {
+        warnings.push(
+            "value restriction has no facet this importer maps (enumeration, pattern, bounds, length)"
+                .to_string(),
+        );
+    }
+    Ok(out)
 }
 
-/// Cardinality of a facet: IDS 1.0 `cardinality`, IDS 0.9 `minOccurs`/`maxOccurs`.
-fn cardinality(f: &El) -> &'static str {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Card {
+    Required,
+    Optional,
+    Prohibited,
+}
+
+/// Cardinality of a facet: IDS 1.0 `cardinality` (default `required`), IDS
+/// 0.9 `minOccurs`/`maxOccurs`.
+fn cardinality(f: &El) -> Card {
     match f.attr("cardinality").map(|c| c.to_ascii_lowercase()) {
-        Some(c) if c == "prohibited" => "prohibited",
-        Some(c) if c == "optional" => "optional",
-        Some(_) => "required",
+        Some(c) if c == "prohibited" => Card::Prohibited,
+        Some(c) if c == "optional" => Card::Optional,
+        Some(_) => Card::Required,
         None => {
             if f.attr("maxOccurs") == Some("0") {
-                "prohibited"
+                Card::Prohibited
             } else if f.attr("minOccurs") == Some("0") {
-                "optional"
+                Card::Optional
             } else {
-                "required"
+                Card::Required
             }
         }
     }
 }
 
-/// One facet as a property shape body (`sh:path …; …`), or an entity/partOf
-/// constraint. `as_requirement` applies cardinality; applicability facets are
-/// pure conditions.
-fn facet_constraint(f: &El, as_requirement: bool, warnings: &mut Vec<String>) -> Option<String> {
+/// What one facet becomes: a property shape body (`sh:path …; …`), or a
+/// constraint on the focus node itself.
+enum FacetOut {
+    Property(String),
+    Node(String),
+}
+
+/// One facet with its cardinality applied. In the applicability position a
+/// facet is a condition with `required` semantics (the facet must hold for a
+/// node to be applicable). `prohibited` is the negation of `required` — not a
+/// count of zero, which would let a matching value through when the
+/// requirement carried one; `optional` keeps the value constraints only, so
+/// an absent value passes and a present one must satisfy them.
+fn facet_constraint(
+    f: &El,
+    as_requirement: bool,
+    ctx: &SpecCtx,
+    warnings: &mut Vec<String>,
+) -> Result<Option<FacetOut>, String> {
     let card = if as_requirement {
         cardinality(f)
     } else {
-        "optional"
+        Card::Required
     };
-    let count = |lines: &mut Vec<String>| match card {
-        "prohibited" => lines.push("sh:maxCount 0".into()),
-        "required" => lines.push("sh:minCount 1".into()),
-        _ => {}
+    let Some(mut lines) = facet_lines(f, ctx, warnings)? else {
+        return Ok(None);
     };
-    match f.name.as_str() {
+    Ok(Some(match card {
+        Card::Required => {
+            lines.push("sh:minCount 1".into());
+            FacetOut::Property(lines.join(" ;\n        "))
+        }
+        Card::Optional => FacetOut::Property(lines.join(" ;\n        ")),
+        Card::Prohibited => {
+            lines.push("sh:minCount 1".into());
+            FacetOut::Node(format!(
+                "sh:not [ sh:property [\n        {}\n    ] ]",
+                lines.join(" ;\n        ")
+            ))
+        }
+    }))
+}
+
+/// A facet's path and value constraints, without cardinality.
+fn facet_lines(
+    f: &El,
+    ctx: &SpecCtx,
+    warnings: &mut Vec<String>,
+) -> Result<Option<Vec<String>>, String> {
+    Ok(match f.name.as_str() {
         "property" => {
             let pset = f.simple("propertySet").unwrap_or_default();
             let name = f
@@ -500,31 +682,28 @@ fn facet_constraint(f: &El, as_requirement: bool, warnings: &mut Vec<String>) ->
                 .unwrap_or_default();
             if pset.is_empty() || name.is_empty() {
                 warnings.push("property facet needs a simpleValue propertySet and baseName; enumerated names are not expanded".into());
-                return None;
+                return Ok(None);
             }
             let path = format!("props:{}_{}", sanitize(&pset), sanitize(&name));
-            let dt = f
-                .attr("dataType")
-                .or_else(|| f.attr("datatype"))
-                .and_then(xsd_for);
+            let (dt, base) = match f.attr("dataType").or_else(|| f.attr("datatype")) {
+                Some(d) => datatype_info(d, warnings),
+                None => (None, Base::String),
+            };
             let mut lines = vec![
                 format!("sh:path {path}"),
                 format!("sh:name {}", ttl_str(&format!("{pset}.{name}"))),
             ];
-            if card != "prohibited" {
-                if let Some(dt) = dt {
-                    lines.push(format!("sh:datatype {dt}"));
-                }
-                lines.extend(value_constraints(f.child("value"), dt, warnings));
+            if let Some(dt) = dt {
+                lines.push(format!("sh:datatype {dt}"));
             }
-            count(&mut lines);
-            Some(lines.join(" ;\n        "))
+            lines.extend(value_constraints(f.child("value"), base, warnings)?);
+            Some(lines)
         }
         "attribute" => {
             let name = f.simple("name").unwrap_or_default();
             if name.is_empty() {
                 warnings.push("attribute facet without a simpleValue name skipped".into());
-                return None;
+                return Ok(None);
             }
             let path = match name.as_str() {
                 "Name" => "props:ifcName".to_string(),
@@ -540,15 +719,8 @@ fn facet_constraint(f: &El, as_requirement: bool, warnings: &mut Vec<String>) ->
                 format!("sh:path {path}"),
                 format!("sh:name {}", ttl_str(&name)),
             ];
-            if card != "prohibited" {
-                lines.extend(value_constraints(
-                    f.child("value"),
-                    Some("xsd:string"),
-                    warnings,
-                ));
-            }
-            count(&mut lines);
-            Some(lines.join(" ;\n        "))
+            lines.extend(value_constraints(f.child("value"), Base::String, warnings)?);
+            Some(lines)
         }
         "classification" | "material" => {
             let (path, label) = if f.name == "classification" {
@@ -567,15 +739,8 @@ fn facet_constraint(f: &El, as_requirement: bool, warnings: &mut Vec<String>) ->
                     ttl_str(&format!("system: {sys}"))
                 ));
             }
-            if card != "prohibited" {
-                lines.extend(value_constraints(
-                    f.child("value"),
-                    Some("xsd:string"),
-                    warnings,
-                ));
-            }
-            count(&mut lines);
-            Some(lines.join(" ;\n        "))
+            lines.extend(value_constraints(f.child("value"), Base::String, warnings)?);
+            Some(lines)
         }
         "partOf" => {
             let relation = f
@@ -591,15 +756,17 @@ fn facet_constraint(f: &El, as_requirement: bool, warnings: &mut Vec<String>) ->
                     warnings.push(format!(
                         "partOf relation {other} has no BOT equivalent; using ots:partOf_{other}"
                     ));
-                    format!("ots:partOf_{other}")
+                    format!("ots:partOf_{}", sanitize(other))
                 }
             };
             let mut lines = vec![format!("sh:path {path}")];
-            if let Some(ent) = f.child("entity").and_then(|e| e.simple("name")) {
-                lines.push(format!("sh:class ifc:{}", ifc_class(&ent, warnings)));
+            if let Some(e) = f.child("entity") {
+                let classes = ctx.entity_class_iris(e, warnings)?;
+                if !classes.is_empty() {
+                    lines.push(class_constraint(&classes));
+                }
             }
-            count(&mut lines);
-            Some(lines.join(" ;\n        "))
+            Some(lines)
         }
         // In the applicability position an entity facet IS the target, and is
         // consumed by `entity_classes`. In the requirements position it is a
@@ -611,53 +778,148 @@ fn facet_constraint(f: &El, as_requirement: bool, warnings: &mut Vec<String>) ->
             warnings.push(format!("facet `{other}` is not supported"));
             None
         }
+    })
+}
+
+/// `sh:class` for one class, `sh:or` of them for several.
+fn class_constraint(classes: &[String]) -> String {
+    if classes.len() == 1 {
+        format!("sh:class {}", classes[0])
+    } else {
+        format!(
+            "sh:or ( {} )",
+            classes
+                .iter()
+                .map(|c| format!("[ sh:class {c} ]"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
     }
 }
 
 /// A requirement facet that constrains the focus NODE rather than a path.
 ///
 /// Only `<ids:entity>` is one: inside `<ids:requirements>` it says the
-/// applicable node must (or must not) be of that IFC class. It used to be
-/// dropped without even a warning, so a requirement the author wrote was
-/// silently not enforced.
-fn requirement_node_constraint(f: &El, prefix: &str, warnings: &mut Vec<String>) -> Option<String> {
+/// applicable node must be of that IFC class (IDS gives the requirement entity
+/// no cardinality: it is always required).
+fn requirement_node_constraint(
+    f: &El,
+    ctx: &SpecCtx,
+    warnings: &mut Vec<String>,
+) -> Result<Option<String>, String> {
     if f.name != "entity" {
-        return None;
+        return Ok(None);
     }
-    let name = f.simple("name").or_else(|| {
-        warnings.push(
-            "requirement `entity` has no simple name (a restriction is not supported here); ignored"
-                .to_string(),
-        );
-        None
-    })?;
-    let class = ifc_class(&name, warnings);
-    Some(match cardinality(f) {
-        "prohibited" => format!("sh:not [ sh:class {prefix}:{class} ]"),
-        _ => format!("sh:class {prefix}:{class}"),
-    })
+    let classes = ctx.entity_class_iris(f, warnings)?;
+    if classes.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(class_constraint(&classes)))
 }
 
-fn entity_classes(applicability: &El, warnings: &mut Vec<String>) -> Vec<String> {
-    let mut out = Vec::new();
-    for e in applicability.children_named("entity") {
+/// The schema context of one specification: its `ifcVersion` list.
+struct SpecCtx {
+    versions: Vec<SchemaId>,
+}
+
+impl SpecCtx {
+    /// `ifc:` for IFC4 and IFC4X3 (the lift types 4.3 files in the IFC4
+    /// namespace), `ifc2x3:` for IFC2X3.
+    fn prefixes(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        for v in &self.versions {
+            let p = if *v == SchemaId::Ifc2x3 {
+                "ifc2x3"
+            } else {
+                "ifc"
+            };
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    /// The entity names an `<ids:entity>` facet's `name` admits: a simple
+    /// value, an enumeration, or a pattern expanded against the schemas.
+    fn entity_names(&self, e: &El, warnings: &mut Vec<String>) -> Result<Vec<String>, String> {
+        let mut out: Vec<String> = Vec::new();
         if let Some(n) = e.simple("name") {
-            out.push(ifc_class(&n, warnings));
+            out.push(n);
         } else if let Some(r) = e.child("name").and_then(|n| n.child("restriction")) {
             for v in r
                 .children_named("enumeration")
                 .filter_map(|x| x.attr("value"))
             {
-                out.push(ifc_class(v, warnings));
+                out.push(v.to_string());
+            }
+            let patterns = r
+                .children_named("pattern")
+                .filter_map(|p| p.attr("value"))
+                .map(xsd_regex::to_sparql)
+                .collect::<Result<Vec<_>, _>>()?;
+            if !patterns.is_empty() {
+                let res: Vec<regex::Regex> = patterns
+                    .iter()
+                    .filter_map(|p| regex::Regex::new(p).ok())
+                    .collect();
+                let mut names: Vec<String> = self
+                    .versions
+                    .iter()
+                    .flat_map(|v| {
+                        v.schema()
+                            .entity_names()
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|n| res.iter().any(|r| r.is_match(n)))
+                    .collect();
+                names.sort();
+                names.dedup();
+                if names.is_empty() {
+                    warnings.push(format!(
+                        "entity pattern {patterns:?} matches no entity of the specification's schemas"
+                    ));
+                }
+                out.extend(names);
             }
         }
-        if let Some(pt) = e.simple("predefinedType") {
-            warnings.push(format!(
-                "predefinedType `{pt}` restricts applicability via props:ifcPredefinedType, which the built-in IFC importer does not populate"
-            ));
+        if e.simple("predefinedType").is_some() || e.child("predefinedType").is_some() {
+            warnings.push(
+                "predefinedType is not checked: the building-topology lift does not record predefined types"
+                    .to_string(),
+            );
         }
+        Ok(out)
     }
-    out
+
+    /// Class IRIs (prefixed) for an entity facet, in every namespace the
+    /// specification's schemas use.
+    fn entity_class_iris(&self, e: &El, warnings: &mut Vec<String>) -> Result<Vec<String>, String> {
+        let mut out = Vec::new();
+        for name in self.entity_names(e, warnings)? {
+            // The schema tables' CamelCase, else the title-casing fallback.
+            let upper = name.trim().to_ascii_uppercase();
+            let class = match self.versions.iter().find_map(|v| v.schema().camel(&upper)) {
+                Some(c) => c.to_string(),
+                None => ifc_class(&name, warnings),
+            };
+            for p in self.prefixes() {
+                let iri = format!("{p}:{class}");
+                if !out.contains(&iri) {
+                    out.push(iri);
+                }
+            }
+            if self.versions.contains(&SchemaId::Ifc4x3)
+                && crate::ifc::names::IFC4X3_ONLY.contains(&name.to_ascii_uppercase().as_str())
+            {
+                warnings.push(format!(
+                    "entity `{name}` exists only in IFC 4.3, which the lift types in its own namespace; this target does not reach it"
+                ));
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// The importer's own sample document, so the exporter's tests can
@@ -665,6 +927,257 @@ fn entity_classes(applicability: &El, warnings: &mut Vec<String>) -> Vec<String>
 #[cfg(test)]
 pub(crate) fn tests_sample() -> &'static str {
     tests::SAMPLE
+}
+
+/// The IFC versions a specification names (`ifcVersion` is a list).
+fn spec_versions(spec: &El) -> Result<Vec<SchemaId>, String> {
+    let raw = spec.attr("ifcVersion").unwrap_or("IFC4");
+    let mut out = Vec::new();
+    for tok in raw.split_whitespace() {
+        let v = SchemaId::from_ids(tok)
+            .ok_or_else(|| format!("ifcVersion `{tok}` is not IFC2X3, IFC4 or IFC4X3_ADD2"))?;
+        if !out.contains(&v) {
+            out.push(v);
+        }
+    }
+    if out.is_empty() {
+        return Err("ifcVersion is empty".into());
+    }
+    Ok(out)
+}
+
+/// The full IRI behind a `prefix:Class` written by this importer.
+fn expand(prefixed: &str) -> String {
+    match prefixed.split_once(':') {
+        Some(("ifc2x3", c)) => format!("{IFC2X3_OWL}{c}"),
+        Some((_, c)) => format!("{IFC4_OWL}{c}"),
+        None => prefixed.to_string(),
+    }
+}
+
+/// One specification as shapes; `Ok(None)` when it is skipped with a warning.
+fn convert_spec(
+    spec: &El,
+    n: usize,
+    name: &str,
+    ttl: &mut String,
+    warnings: &mut Vec<String>,
+) -> Result<Option<(SpecSummary, usize)>, String> {
+    let shape = format!("{SHAPE_NS}spec{n}");
+    let ctx = SpecCtx {
+        versions: spec_versions(spec)?,
+    };
+    let Some(applicability) = spec.child("applicability") else {
+        warnings.push(format!(
+            "specification `{name}` has no applicability; skipped"
+        ));
+        return Ok(None);
+    };
+    // The applicable classes, in every namespace the ifcVersion list uses. A
+    // specification without an entity facet applies to every typed node.
+    let classes: Vec<String> = match applicability.child("entity") {
+        Some(e) => {
+            let c = ctx.entity_class_iris(e, warnings)?;
+            if c.is_empty() {
+                warnings.push(format!(
+                    "specification `{name}`: the entity facet admits no entity; skipped"
+                ));
+                return Ok(None);
+            }
+            c
+        }
+        None => Vec::new(),
+    };
+    let applies: Vec<FacetOut> = applicability
+        .children
+        .iter()
+        .filter(|f| f.name != "entity")
+        .map(|f| facet_constraint(f, false, &ctx, warnings))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    let requirements: Vec<FacetOut> = match spec.child("requirements") {
+        Some(r) => r
+            .children
+            .iter()
+            .map(|f| facet_constraint(f, true, &ctx, warnings))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect(),
+        None => Vec::new(),
+    };
+    let req_node: Vec<String> = match spec.child("requirements") {
+        Some(r) => r
+            .children
+            .iter()
+            .map(|f| requirement_node_constraint(f, &ctx, warnings))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect(),
+        None => Vec::new(),
+    };
+    // IDS 1.0 puts `xs:occurs` (minOccurs/maxOccurs) on `applicabilityType`,
+    // i.e. on <ids:applicability>; IDS 0.9 carried them on the
+    // <ids:specification>. Read the 1.0 position first and fall back. The XSD
+    // default is minOccurs="1": a specification is required unless it says
+    // otherwise.
+    let occurs = |a: &str| -> Option<&str> { applicability.attr(a).or_else(|| spec.attr(a)) };
+    let prohibited_spec = occurs("maxOccurs") == Some("0");
+    let required_spec = !prohibited_spec && occurs("minOccurs") != Some("0");
+    if prohibited_spec && !(requirements.is_empty() && req_node.is_empty()) {
+        return Err(
+            "a prohibited specification (maxOccurs=\"0\") cannot carry requirements".into(),
+        );
+    }
+
+    let version_list = ctx
+        .versions
+        .iter()
+        .map(|v| v.ids_name())
+        .collect::<Vec<_>>()
+        .join(" ");
+    writeln!(ttl, "<{shape}> a sh:NodeShape ;").unwrap();
+    writeln!(ttl, "    sh:name {} ;", ttl_str(name)).unwrap();
+    if let Some(d) = spec.attr("description") {
+        writeln!(ttl, "    sh:description {} ;", ttl_str(d)).unwrap();
+    }
+    writeln!(
+        ttl,
+        "    rdfs:comment {} ;",
+        ttl_str(&format!("IDS specification {n} ({version_list})"))
+    )
+    .unwrap();
+    if classes.is_empty() {
+        writeln!(ttl, "    sh:targetSubjectsOf rdf:type ;").unwrap();
+    }
+    for c in &classes {
+        writeln!(ttl, "    sh:targetClass {c} ;").unwrap();
+    }
+    let render = |outs: &[FacetOut]| -> Vec<String> {
+        outs.iter()
+            .map(|o| match o {
+                FacetOut::Property(l) => format!("    sh:property [\n        {l}\n    ]"),
+                FacetOut::Node(c) => format!("    {c}"),
+            })
+            .collect()
+    };
+    let mut shapes = 1;
+    let requirement_blocks = || -> Vec<String> {
+        let mut blocks: Vec<String> = req_node.iter().map(|c| format!("    {c}")).collect();
+        blocks.extend(render(&requirements));
+        blocks
+    };
+    if prohibited_spec {
+        if applies.is_empty() {
+            // Every applicable node violates: `sh:not` of the empty shape.
+            writeln!(ttl, "    sh:not [ a sh:NodeShape ] .\n").unwrap();
+        } else {
+            writeln!(ttl, "    sh:not <{shape}-applies> .\n").unwrap();
+            writeln!(ttl, "<{shape}-applies> a sh:NodeShape ;").unwrap();
+            writeln!(
+                ttl,
+                "    sh:name {} ;",
+                ttl_str(&format!("{name} — applicability"))
+            )
+            .unwrap();
+            writeln!(ttl, "{} .\n", render(&applies).join(" ;\n")).unwrap();
+            shapes += 1;
+        }
+    } else if applies.is_empty() {
+        let blocks = requirement_blocks();
+        if blocks.is_empty() {
+            writeln!(ttl, "    sh:deactivated false .\n").unwrap();
+        } else {
+            writeln!(ttl, "{} .\n", blocks.join(" ;\n")).unwrap();
+        }
+    } else {
+        writeln!(
+            ttl,
+            "    sh:or ( [ sh:not <{shape}-applies> ] <{shape}-requires> ) .\n"
+        )
+        .unwrap();
+        writeln!(ttl, "<{shape}-applies> a sh:NodeShape ;").unwrap();
+        writeln!(
+            ttl,
+            "    sh:name {} ;",
+            ttl_str(&format!("{name} — applicability"))
+        )
+        .unwrap();
+        writeln!(ttl, "{} .\n", render(&applies).join(" ;\n")).unwrap();
+        writeln!(ttl, "<{shape}-requires> a sh:NodeShape ;").unwrap();
+        writeln!(
+            ttl,
+            "    sh:name {} ;",
+            ttl_str(&format!("{name} — requirements"))
+        )
+        .unwrap();
+        let blocks = requirement_blocks();
+        if blocks.is_empty() {
+            writeln!(ttl, "    sh:deactivated false .\n").unwrap();
+        } else {
+            writeln!(ttl, "{} .\n", blocks.join(" ;\n")).unwrap();
+        }
+        shapes += 2;
+    }
+    if required_spec {
+        // "At least one applicable entity must exist" is a statement about the
+        // whole model, not about any one node, so it is a SPARQL constraint on
+        // a fixed focus node. Only the entity part of the applicability is
+        // checked here: the other facets are SHACL Core shapes a SPARQL query
+        // cannot call.
+        if !applies.is_empty() {
+            warnings.push(format!(
+                "specification `{name}` is required: the existence check counts applicable entities by class only, not by its other applicability facets"
+            ));
+        }
+        let exists = if classes.is_empty() {
+            "?x a ?class .".to_string()
+        } else {
+            format!(
+                "?x a ?class . FILTER(?class IN ({}))",
+                classes
+                    .iter()
+                    .map(|c| format!("<{}>", expand(c)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        writeln!(ttl, "<{shape}-exists> a sh:NodeShape ;").unwrap();
+        writeln!(
+            ttl,
+            "    sh:name {} ;",
+            ttl_str(&format!("{name} — at least one applicable entity"))
+        )
+        .unwrap();
+        writeln!(ttl, "    sh:targetNode <{shape}-exists> ;").unwrap();
+        writeln!(
+            ttl,
+            "    sh:sparql [ a sh:SPARQLConstraint ;\n        sh:message {} ;\n        sh:select {} ] .\n",
+            ttl_str(&format!("the required specification `{name}` has no applicable entity in the model")),
+            ttl_long(&format!("SELECT $this WHERE {{ FILTER NOT EXISTS {{ {exists} }} }}"))
+        )
+        .unwrap();
+        shapes += 1;
+    }
+    Ok(Some((
+        SpecSummary {
+            name: name.to_string(),
+            shape,
+            target_classes: classes,
+            requirements: requirements.len() + req_node.len(),
+        },
+        shapes,
+    )))
+}
+
+fn ttl_long(s: &str) -> String {
+    format!(
+        "\"\"\"{}\"\"\"",
+        s.replace('\\', "\\\\").replace("\"\"\"", "\\\"\\\"\\\"")
+    )
 }
 
 pub(crate) fn convert(doc: &El) -> anyhow::Result<ImportedShapes> {
@@ -713,144 +1226,24 @@ pub(crate) fn convert(doc: &El) -> anyhow::Result<ImportedShapes> {
 
     let mut summaries = Vec::new();
     let mut shape_count = 0;
+    let mut errors: Vec<String> = Vec::new();
     for (i, spec) in specs.iter().enumerate() {
         let n = i + 1;
         let name = spec
             .attr("name")
             .map(str::to_string)
             .unwrap_or_else(|| format!("Specification {n}"));
-        let shape = format!("{SHAPE_NS}spec{n}");
-        let ifc_version = spec.attr("ifcVersion").unwrap_or("IFC4");
-        let prefix = if ifc_version.to_ascii_uppercase().starts_with("IFC2X3") {
-            "ifc2x3"
-        } else {
-            "ifc"
-        };
-        let Some(applicability) = spec.child("applicability") else {
-            warnings.push(format!(
-                "specification `{name}` has no applicability; skipped"
-            ));
-            continue;
-        };
-        let classes = entity_classes(applicability, &mut warnings);
-        if classes.is_empty() {
-            warnings.push(format!(
-                "specification `{name}` names no entity; SHACL needs a target class — skipped"
-            ));
-            continue;
-        }
-        let applies: Vec<String> = applicability
-            .children
-            .iter()
-            .filter(|f| f.name != "entity")
-            .filter_map(|f| facet_constraint(f, false, &mut warnings))
-            .collect();
-        let requirements: Vec<String> = spec
-            .child("requirements")
-            .map(|r| {
-                r.children
-                    .iter()
-                    .filter_map(|f| facet_constraint(f, true, &mut warnings))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let req_node: Vec<String> = spec
-            .child("requirements")
-            .map(|r| {
-                r.children
-                    .iter()
-                    .filter_map(|f| requirement_node_constraint(f, prefix, &mut warnings))
-                    .collect()
-            })
-            .unwrap_or_default();
-        // IDS 1.0 puts `xs:occurs` (minOccurs/maxOccurs) on `applicabilityType`,
-        // i.e. on <ids:applicability>; IDS 0.9 carried them on the
-        // <ids:specification>. Read the 1.0 position first and fall back, or a
-        // conformant 1.0 document's prohibited specification is never seen —
-        // which it was not, because this importer's own SAMPLE writes them in
-        // the 0.9 position and so exercised only the fallback.
-        let occurs =
-            |name: &str| -> Option<&str> { applicability.attr(name).or_else(|| spec.attr(name)) };
-        let prohibited_spec = occurs("maxOccurs") == Some("0");
-        if occurs("minOccurs").is_some_and(|m| m != "0") && !prohibited_spec {
-            warnings.push(format!(
-                "specification `{name}` requires at least one applicable entity to exist; SHACL validates per node, so existence is not enforced"
-            ));
-        }
-
-        writeln!(ttl, "<{shape}> a sh:NodeShape ;").unwrap();
-        writeln!(ttl, "    sh:name {} ;", ttl_str(&name)).unwrap();
-        if let Some(d) = spec.attr("description") {
-            writeln!(ttl, "    sh:description {} ;", ttl_str(d)).unwrap();
-        }
-        writeln!(
-            ttl,
-            "    rdfs:comment {} ;",
-            ttl_str(&format!("IDS specification {n} ({ifc_version})"))
-        )
-        .unwrap();
-        for c in &classes {
-            writeln!(ttl, "    sh:targetClass {prefix}:{c} ;").unwrap();
-        }
-        let props_block = |lines: &[String]| -> String {
-            lines
-                .iter()
-                .map(|l| format!("    sh:property [\n        {l}\n    ]"))
-                .collect::<Vec<_>>()
-                .join(" ;\n")
-        };
-        if prohibited_spec {
-            // No applicable entity may exist: every target violates.
-            writeln!(ttl, "    sh:not [ sh:class {prefix}:{} ] .\n", classes[0]).unwrap();
-        } else if applies.is_empty() {
-            let mut blocks: Vec<String> = req_node.iter().map(|c| format!("    {c}")).collect();
-            if !requirements.is_empty() {
-                blocks.push(props_block(&requirements));
+        match convert_spec(spec, n, &name, &mut ttl, &mut warnings) {
+            Ok(Some((summary, shapes))) => {
+                shape_count += shapes;
+                summaries.push(summary);
             }
-            if blocks.is_empty() {
-                writeln!(ttl, "    sh:deactivated false .\n").unwrap();
-            } else {
-                writeln!(ttl, "{} .\n", blocks.join(" ;\n")).unwrap();
-            }
-        } else {
-            writeln!(
-                ttl,
-                "    sh:or ( [ sh:not <{shape}-applies> ] <{shape}-requires> ) .\n"
-            )
-            .unwrap();
-            writeln!(ttl, "<{shape}-applies> a sh:NodeShape ;").unwrap();
-            writeln!(
-                ttl,
-                "    sh:name {} ;",
-                ttl_str(&format!("{name} — applicability"))
-            )
-            .unwrap();
-            writeln!(ttl, "{} .\n", props_block(&applies)).unwrap();
-            writeln!(ttl, "<{shape}-requires> a sh:NodeShape ;").unwrap();
-            writeln!(
-                ttl,
-                "    sh:name {} ;",
-                ttl_str(&format!("{name} — requirements"))
-            )
-            .unwrap();
-            let mut blocks: Vec<String> = req_node.iter().map(|c| format!("    {c}")).collect();
-            if !requirements.is_empty() {
-                blocks.push(props_block(&requirements));
-            }
-            if blocks.is_empty() {
-                writeln!(ttl, "    sh:deactivated false .\n").unwrap();
-            } else {
-                writeln!(ttl, "{} .\n", blocks.join(" ;\n")).unwrap();
-            }
-            shape_count += 2;
+            Ok(None) => {}
+            Err(e) => errors.push(format!("specification `{name}`: {e}")),
         }
-        shape_count += 1;
-        summaries.push(SpecSummary {
-            name,
-            shape,
-            target_classes: classes.iter().map(|c| format!("{prefix}:{c}")).collect(),
-            requirements: requirements.len(),
-        });
+    }
+    if !errors.is_empty() {
+        anyhow::bail!("the IDS cannot be converted: {}", errors.join("; "));
     }
     if summaries.is_empty() {
         anyhow::bail!(
@@ -890,8 +1283,13 @@ mod tests {
 </ids:ids>"#;
         let out = convert(&parse_xml(doc.as_bytes()).expect("parses")).expect("converts");
         assert!(
-            out.turtle.contains("sh:not [ sh:class"),
+            out.turtle.contains("sh:not [ a sh:NodeShape ]"),
             "a prohibited specification must become sh:not: {}",
+            out.turtle
+        );
+        assert!(
+            !out.turtle.contains("-exists>"),
+            "a prohibited specification has no existence requirement: {}",
             out.turtle
         );
     }
@@ -995,15 +1393,10 @@ mod tests {
         );
         assert!(t.contains("sh:targetClass ifc:IfcWindow"), "{t}");
         assert!(t.contains("sh:path [ sh:inversePath bot:containsElement ] ;\n        sh:class ifc:IfcBuildingStorey ;\n        sh:minCount 1"), "{t}");
-        // The applicability's IsExternal has no dataType attribute → typed as a string literal
-        // (documented convention); the existence requirement is reported, not enforced.
-        assert!(
-            out.warnings
-                .iter()
-                .any(|w| w.contains("existence is not enforced")),
-            "{:?}",
-            out.warnings
-        );
+        // The applicability's IsExternal has no dataType attribute → compared as a
+        // string; a required specification gets its existence shape.
+        assert!(t.contains("<urn:ids:spec1-exists> a sh:NodeShape"), "{t}");
+        assert!(t.contains("FILTER NOT EXISTS { ?x a ?class . FILTER(?class IN (<https://standards.buildingsmart.org/IFC/DEV/IFC4/ADD2_TC1/OWL#IfcWall>))"), "{t}");
         // It is valid Turtle.
         let tmp = crate::store::TripleStore::in_memory().unwrap();
         tmp.load_str(t, oxigraph::io::RdfFormat::Turtle, Some("urn:x"))
@@ -1022,5 +1415,114 @@ mod tests {
         assert_eq!(w.len(), 1);
         let err = IdsImporter.import(b"<root/>").unwrap_err().to_string();
         assert!(err.contains("not an IDS document"), "{err}");
+    }
+    fn spec(body: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<ids:ids xmlns:ids="http://standards.buildingsmart.org/IDS" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <ids:info><ids:title>t</ids:title></ids:info>
+  <ids:specifications>{body}</ids:specifications>
+</ids:ids>"#
+        )
+    }
+
+    fn turtle_of(body: &str) -> String {
+        let out = IdsImporter.import(spec(body).as_bytes()).expect("converts");
+        let tmp = crate::store::TripleStore::in_memory().unwrap();
+        tmp.load_str(&out.turtle, oxigraph::io::RdfFormat::Turtle, Some("urn:x"))
+            .unwrap_or_else(|e| panic!("valid Turtle ({e}): {}", out.turtle));
+        out.turtle
+    }
+
+    const WALL: &str =
+        "<ids:entity><ids:name><ids:simpleValue>IFCWALL</ids:simpleValue></ids:name></ids:entity>";
+
+    #[test]
+    fn a_double_value_becomes_the_ids_tolerance_range() {
+        let t = turtle_of(&format!(
+            r#"<ids:specification name="s" ifcVersion="IFC4"><ids:applicability>{WALL}</ids:applicability>
+            <ids:requirements><ids:property dataType="IFCREAL"><ids:propertySet><ids:simpleValue>P</ids:simpleValue></ids:propertySet><ids:baseName><ids:simpleValue>V</ids:simpleValue></ids:baseName><ids:value><ids:simpleValue>1.</ids:simpleValue></ids:value></ids:property></ids:requirements></ids:specification>"#
+        ));
+        // 1 − 1e-6 − 1e-6 and 1 + 1e-6 + 1e-6, exclusive.
+        assert!(t.contains("sh:minInclusive \"0.99999799999999"), "{t}");
+        assert!(t.contains("sh:maxInclusive \"1.00000200000000"), "{t}");
+        assert!(!t.contains("sh:hasValue"), "{t}");
+    }
+
+    #[test]
+    fn patterns_are_anchored_and_alternatives_or_together() {
+        let t = turtle_of(&format!(
+            r#"<ids:specification name="s" ifcVersion="IFC4"><ids:applicability>{WALL}</ids:applicability>
+            <ids:requirements><ids:attribute><ids:name><ids:simpleValue>Name</ids:simpleValue></ids:name><ids:value><xs:restriction base="xs:string"><xs:pattern value="[A-Z]{{2}}"/><xs:pattern value="[a-z]{{2}}"/></xs:restriction></ids:value></ids:attribute></ids:requirements></ids:specification>"#
+        ));
+        assert!(
+            t.contains(
+                r#"sh:or ( [ sh:pattern "^(?:[A-Z]{2})$" ] [ sh:pattern "^(?:[a-z]{2})$" ] )"#
+            ),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn a_prohibited_facet_is_the_negation_of_the_required_one() {
+        let t = turtle_of(&format!(
+            r#"<ids:specification name="s" ifcVersion="IFC4"><ids:applicability>{WALL}</ids:applicability>
+            <ids:requirements><ids:attribute cardinality="prohibited"><ids:name><ids:simpleValue>Name</ids:simpleValue></ids:name><ids:value><ids:simpleValue>X</ids:simpleValue></ids:value></ids:attribute></ids:requirements></ids:specification>"#
+        ));
+        assert!(t.contains("sh:not [ sh:property ["), "{t}");
+        assert!(
+            t.contains("sh:hasValue \"X\" ;\n        sh:minCount 1"),
+            "{t}"
+        );
+        assert!(!t.contains("sh:maxCount 0"), "{t}");
+    }
+
+    #[test]
+    fn every_listed_ifc_version_is_targeted_and_an_entityless_spec_targets_all() {
+        let t = turtle_of(&format!(
+            r#"<ids:specification name="a" ifcVersion="IFC2X3 IFC4"><ids:applicability>{WALL}</ids:applicability></ids:specification>
+            <ids:specification name="b" ifcVersion="IFC4"><ids:applicability minOccurs="0" maxOccurs="unbounded"><ids:attribute><ids:name><ids:simpleValue>Name</ids:simpleValue></ids:name></ids:attribute></ids:applicability>
+            <ids:requirements><ids:attribute><ids:name><ids:simpleValue>GlobalId</ids:simpleValue></ids:name></ids:attribute></ids:requirements></ids:specification>"#
+        ));
+        assert!(t.contains("sh:targetClass ifc2x3:IfcWall"), "{t}");
+        assert!(t.contains("sh:targetClass ifc:IfcWall"), "{t}");
+        assert!(t.contains("sh:targetSubjectsOf rdf:type"), "{t}");
+        // b is optional: no existence shape.
+        assert!(t.contains("<urn:ids:spec1-exists>"), "{t}");
+        assert!(!t.contains("<urn:ids:spec2-exists>"), "{t}");
+        // An applicability facet is a condition the node must meet.
+        assert!(
+            t.contains(
+                "sh:path props:ifcName ;\n        sh:name \"Name\" ;\n        sh:minCount 1"
+            ),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn a_prohibited_specification_with_requirements_and_a_bad_version_are_refused() {
+        let err = IdsImporter
+            .import(spec(&format!(
+                r#"<ids:specification name="s" ifcVersion="IFC4"><ids:applicability minOccurs="0" maxOccurs="0">{WALL}</ids:applicability>
+                <ids:requirements><ids:attribute><ids:name><ids:simpleValue>Name</ids:simpleValue></ids:name></ids:attribute></ids:requirements></ids:specification>"#
+            )).as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cannot carry requirements"), "{err}");
+        let err = IdsImporter
+            .import(spec(&format!(
+                r#"<ids:specification name="s" ifcVersion="IFC5"><ids:applicability>{WALL}</ids:applicability></ids:specification>"#
+            )).as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ifcVersion `IFC5`"), "{err}");
+        let err = IdsImporter
+            .import(spec(&format!(
+                r#"<ids:specification name="s" ifcVersion="IFC4"><ids:applicability>{WALL}</ids:applicability>
+                <ids:requirements><ids:property dataType="IFCINTEGER"><ids:propertySet><ids:simpleValue>P</ids:simpleValue></ids:propertySet><ids:baseName><ids:simpleValue>V</ids:simpleValue></ids:baseName><ids:value><ids:simpleValue>42.0</ids:simpleValue></ids:value></ids:property></ids:requirements></ids:specification>"#
+            )).as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a valid xs:integer"), "{err}");
     }
 }

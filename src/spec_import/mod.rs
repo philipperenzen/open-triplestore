@@ -17,6 +17,7 @@
 
 pub mod ids;
 pub mod ids_export;
+pub mod xsd_regex;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};

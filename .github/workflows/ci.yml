@@ -341,11 +341,16 @@ jobs:
       # instead of a skip.
       - name: Fetch the W3C R2RML test cases
         run: scripts/fetch-w3c-r2rml-tests.sh
+      # The buildingSMART IDS corpus is not vendored (CC BY-ND 4.0): its runner
+      # downloads it from a pinned commit and checks every file's SHA-256, and
+      # OTS_TEST_IDS_CORPUS_REQUIRED turns a failed download into a failure
+      # instead of a skip.
 
       - name: Run conformance tests
         env:
           OTS_TEST_DCAT_AP_NL_REQUIRED: '1'
           OTS_TEST_R2RML_REQUIRED: '1'
+          OTS_TEST_IDS_CORPUS_REQUIRED: '1'
         run: cargo test --features full,saml,test-utils,backup-encrypt,alerting --locked --test '*conformance*'
 
       # OWL 2 DL against the reasoner sidecar the project ships

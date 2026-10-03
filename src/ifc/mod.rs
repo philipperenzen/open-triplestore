@@ -26,6 +26,7 @@
 
 pub mod names;
 pub mod rdf;
+pub mod schema;
 pub mod step;
 pub mod units;
 

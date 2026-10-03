@@ -1106,18 +1106,41 @@ curl -X POST 'http://localhost:7878/api/shacl/import/ids?create=true' \
 
 Without `create=true` the response carries the Turtle and the report only.
 Each `ids:specification` becomes a node shape targeting the entity's ifcOWL
-class over the RDF the built-in IFC importer emits (`props:<Pset>_<Name>`
-properties, `props:ifcName`/`props:ifcGuid` attributes, BOT containment for
-`partOf`). Applicability facets beyond the entity become an "applies" shape
-combined with the "requires" shape as `sh:or ( [ sh:not applies ] requires )`
-— SHACL Core throughout. Value restrictions map to `sh:hasValue`, `sh:in`,
-`sh:pattern`, bounds and lengths; cardinality to `sh:minCount 1` /
-`sh:maxCount 0`. Whatever cannot be expressed per node (a specification's
-"at least one such entity must exist"), or relies on a value the IFC lift
-does not populate (predefined types, attributes other than Name/GlobalId), is
-listed under `warnings`. Classification and material facets target
-`props:ifcClassification` / `props:ifcMaterial`, which the lift emits from
-`IfcRelAssociatesClassification` (the reference's identification) and
+class — in every namespace its `ifcVersion` list names (`IFC2X3 IFC4` targets
+both; an entity pattern is expanded against the schema's entity list; a
+specification without an entity targets every typed node) — over the RDF the
+built-in IFC importer emits (`props:<Pset>_<Name>` properties,
+`props:ifcName`/`props:ifcGuid` attributes, BOT containment for `partOf`).
+Applicability facets beyond the entity become an "applies" shape combined with
+the "requires" shape as `sh:or ( [ sh:not applies ] requires )`.
+
+Values are compared by the XSD base type of the facet's IDS `dataType` (the IDS
+data-type table) or of the restriction's `base`:
+
+- a double `simpleValue` becomes the IDS tolerance range
+  `v ± (|v|·1e-6 + 1e-6)` (the bound itself included, as the corpus requires), an integer a closed range, a boolean or
+  string `sh:hasValue`; enumerations become `sh:in`, or `sh:or` of ranges for
+  numbers;
+- an `xs:pattern` is matched against the whole value, as XSD requires: it is
+  anchored and translated (`^`/`$` escaped, `\i`/`\c` and class subtraction
+  rewritten), and several patterns are alternatives;
+- bounds are typed by the base and carry no tolerance; a value that is not
+  valid for its base (`42.0` for an integer, `FALSE` for a boolean) is refused.
+
+Cardinality: `required` → `sh:minCount 1` with the value constraints;
+`prohibited` → `sh:not` of the required facet (the opposite of required, not a
+count of zero); `optional` → the value constraints only. In the applicability
+every facet is a condition the node must meet. A required specification (the
+XSD default) also gets an existence shape — a SPARQL constraint that fails when
+no node of an applicable class exists — and a prohibited specification fails
+on every applicable node and may not carry requirements.
+
+What relies on a value the building-topology lift does not populate
+(predefined types, attributes other than Name/GlobalId, elements outside the
+spatial tree) is listed under `warnings`. Classification and material facets
+target `props:ifcClassification` / `props:ifcMaterial`, which the lift emits
+from `IfcRelAssociatesClassification` (the reference's identification) and
 `IfcRelAssociatesMaterial` (the material's name); a model lifted before it
-did carries neither, and the warning says so.
+did carries neither, and the warning says so. The buildingSMART IDS test
+corpus runs against this path in CI (`docs/conformance/ids.md`).
 
