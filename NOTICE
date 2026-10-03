@@ -131,9 +131,9 @@ Vendored source code:
     lib/sparopt, commit 0e81a29d27575ab69e7f85ea9c7f1058b277fcd0) —
     dual-licensed MIT or Apache-2.0, at your option; Copyright (c) 2018
     Oxigraph developers. Both licence texts are beside each crate
-    (LICENSE-MIT and LICENSE-APACHE). Modified: SPARQL 1.1 conformance fixes,
-    some backported from upstream Oxigraph; spareval also rebuilds triple terms
-    without reading their literals as values.
+    (LICENSE-MIT and LICENSE-APACHE). Modified: SPARQL 1.1 and SPARQL 1.2
+    conformance fixes, some backported from upstream Oxigraph; spareval also
+    rebuilds triple terms without reading their literals as values.
     vendor/README.md describes every change in the four crates, and
     vendor/*/UPSTREAM-PR*.md the changes as proposed upstream.
 

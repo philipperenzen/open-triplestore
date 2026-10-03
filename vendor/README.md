@@ -177,8 +177,11 @@ its own commit first, like them.
 Every SPARQL 1.1 Query entry of the vendored W3C test-suite subset that this
 project failed (`tests/w3c_sparql11_manifests.rs`, `docs/conformance/sparql11.md`)
 failed inside `spareval` and `sparopt`, and so did the duplicate rows a
-multi-`FROM` query returned; `spargebra` accepted nested aggregates, which SPARQL
-does not allow. Oxigraph has fixed some of them on its main branch, for its next
+multi-`FROM` query returned. In the SPARQL 1.2 suite
+(`tests/w3c_sparql12_manifests.rs`, `docs/conformance/sparql12.md`) every entry
+the project failed, except one that needs numeric lexical forms kept in storage,
+failed inside `spargebra`; and `spareval` panicked on `=` between two
+directional literals. Oxigraph has fixed some of them on its main branch, for its next
 major release, and none in a 0.5.x release. Carrying the fixes here lets the
 project follow the specification now; each one is written so it can be proposed
 upstream unchanged (`UPSTREAM-PR-*.md` in the crate it touches).
@@ -231,6 +234,29 @@ One commit each, in this order:
    SPARQL 1.2 test `nested-aggregate-functions`). The parser refuses an aggregate
    whose argument mentions an aggregate it already replaced by a variable at the
    same `SELECT` level. Draft: `spargebra/UPSTREAM-PR-nested-aggregates.md`.
+7. **`=` between directional literals** (`spareval` term equality). With
+   `sparql-12`, `impl PartialEq for ExpressionTerm` had no arm for two
+   `DirLangStringLiteral`s and reached `unreachable!()`, so `=`, `!=` or `IN`
+   between two literals that both carry a base direction panicked (a 500 over
+   HTTP). The arm compares lexical form, language tag and direction (RDF 1.2
+   term equality), as the `Hash` impl already did. No W3C entry reaches it;
+   `directional_literal_equality` in `tests/sparql12_conformance.rs` pins it.
+   Draft: `spareval/UPSTREAM-PR-dir-lang-string-equality.md`.
+8. **Triple-term expression subjects** (`spargebra` parser).
+   `ExprTripleTermSubject` was `ExprTripleTermObject`, so a literal or a triple
+   term could be the subject of a triple-term expression
+   (`BIND(<<( "x" :q :z )>> AS ?X)`). The SPARQL 1.2 grammar has
+   `ExprTripleTermSubject ::= iri | Var`; oxigraph's `main` already parses it so
+   in its rewritten parser. Fixes `tripleterm-subject-03` and `-06` of the
+   SPARQL 1.2 suite. Draft: `spargebra/UPSTREAM-PR-triple-term-expression-subject.md`.
+9. **SELECT-expression variable reuse** (`spargebra` parser). In an
+   aggregating query, `build_select` checked each SELECT expression against the
+   variables in scope after the grouping only, so
+   `(COUNT(?v) AS ?count) (?count + 1 AS ?countPlusOne)` was refused. SPARQL 1.2
+   allows it (w3c/sparql-query PR #380); each expression is now also allowed the
+   variables of the SELECT expressions before it, which the `Extend` chain
+   already binds. Fixes `grouping#select-variable-reuse` of the SPARQL 1.2
+   suite. Draft: `spargebra/UPSTREAM-PR-select-variable-reuse.md`.
 
 ### Verifying the fork
 
@@ -257,10 +283,13 @@ commit above (the crates.io packages do not ship them).
    `LICENSE-MIT`, `LICENSE-APACHE` and the `UPSTREAM-PR*.md` files; drop
    `.cargo-ok`. Commit that alone.
 3. Re-apply each change below that upstream has not released, one commit each.
-   Drop the ones upstream has released; `tests/w3c_sparql11_manifests.rs` is a
-   two-way ratchet, so a released fix shows up there as an unexpected pass.
+   Drop the ones upstream has released; `tests/w3c_sparql11_manifests.rs` and
+   `tests/w3c_sparql12_manifests.rs` are two-way ratchets, so a released fix
+   shows up there as an unexpected pass (and a dropped fix that upstream has not
+   released, as a new failure).
 4. If upstream has released all of them, delete the three directories, the
    `[patch.crates-io]` entries, the `exclude` entries and (once no vendored crate
    is left) the `COPY vendor/` lines in the `Dockerfile`.
-5. Run `tests/w3c_sparql11_manifests.rs`, `tests/w3c_sparql11_conformance.rs`, the
+5. Run `tests/w3c_sparql11_manifests.rs`, `tests/w3c_sparql11_conformance.rs`,
+   `tests/w3c_sparql12_manifests.rs`, `tests/sparql12_conformance.rs`, the
    parallel/columnar parity tests and the perf gate.

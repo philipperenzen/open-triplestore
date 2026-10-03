@@ -82,16 +82,12 @@ const RS: &str = "http://www.w3.org/2001/sw/DataAccess/tests/result-set#";
 
 /// Entries that currently fail, with the gap they sit behind. Keep sorted.
 /// Removing an entry requires the entry to actually pass (the ratchet asserts
-/// both directions). None is in the platform layer: four are the oxigraph
-/// 0.5.11 SPARQL parser (spargebra 0.4.7) behind grammar decisions the
-/// Working Group has since closed, and one asks for a feature
-/// (`mf:NoCanonicalizationOfNumerics`) the oxigraph 0.5 storage lacks.
+/// both directions). None is in the platform layer: the one entry left asks
+/// for a feature (`mf:NoCanonicalizationOfNumerics`) the oxigraph 0.5 storage
+/// lacks, which the lexical-form storage change brings. The parser entries
+/// listed here before pass with the vendored spargebra (vendor/README.md).
 const KNOWN_FAILURES: &[(&str, &str)] = &[
     ("grouping/manifest#group01", "requires mf:NoCanonicalizationOfNumerics: storage keeps numerics as values, so `\"001\"^^xsd:integer` reads back as `\"1\"` and groups with it; fixed by the lexical-form storage change"),
-    ("grouping/manifest#select-variable-reuse", "spargebra 0.4.7 rejects a SELECT expression that uses a variable an earlier SELECT expression of an aggregating query binds (`(COUNT(?v) AS ?count) (?count + 1 AS ?p)`); allowed since w3c/sparql-query PR #380 (closed 2026-05-28)"),
-    ("syntax-triple-terms-negative/manifest#tripleterm-subject-03", "spargebra 0.4.7 accepts a triple term as the subject of a triple-term expression (`<<( <<( :s :p :o )>> :q :z )>>`); the grammar forbids it since w3c/sparql-query#282/#283 closed 2025-12-26"),
-    ("syntax-triple-terms-negative/manifest#tripleterm-subject-06", "as tripleterm-subject-03, with a literal subject (`<<( \"literal\" :q :z )>>`)"),
-    ("syntax/manifest#nested-aggregate-functions", "spargebra 0.4.7 accepts an aggregate inside an aggregate's argument (`COUNT(COUNT(*))`), which SPARQL 1.1 errata-query-5 and SPARQL 1.2 forbid"),
 ];
 
 /// Pass floor: a loader or parser regression turns passes into skips or

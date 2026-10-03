@@ -32,13 +32,18 @@ the specification is written rather than what a query returns.
 w3c/rdf-tests) is vendored unmodified and runs in CI through
 `tests/w3c_sparql12_manifests.rs`, every query-evaluation entry on the engine
 and again through the in-memory mirror; [conformance/sparql12.md](conformance/sparql12.md)
-describes the run and lists the entries that wait on an open W3C Working
-Group issue (no score is published: the copy is a subset of a W3C test suite).
+describes the run, the one entry that still fails (it needs numeric lexical
+forms kept in storage) and the parser and evaluator gaps fixed in the
+[vendored engine crates](../vendor/README.md) (no score is published: the copy
+is a subset of a W3C test suite).
 `tests/sparql12_conformance.rs` pins, on both read paths, triple-term
 semantics (quoting, referential opacity, reifiers, `TRIPLE()`, nested and
-per-graph cases), `VERSION`, the `LANGDIR` family and base direction, `~` and
-`{| |}` in updates and queries, the rejection of duplicate `VALUES`
-variables, and the two SEP extensions below. The RDF 1.2 syntax suites run
+per-graph cases), `VERSION`, the `LANGDIR` family and base direction
+(including `=` between directional literals), `~` and `{| |}` in updates and
+queries, the rejection of duplicate `VALUES` variables, of nested aggregates
+and of literal or triple-term subjects in triple-term expressions, the reuse
+of a SELECT expression's variable in an aggregating query, and the two SEP
+extensions below. The RDF 1.2 syntax suites run
 through `tests/w3c_rdf12_manifests.rs` ([conformance/rdf12.md](conformance/rdf12.md)).
 
 ## SEP extensions (not part of SPARQL 1.2)

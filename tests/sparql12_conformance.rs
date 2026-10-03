@@ -610,42 +610,6 @@ fn base_direction_survives_the_mirror() {
     );
 }
 
-/// SPARQL 1.2 (and the W3C sparql12 test `nested-aggregate-functions`): an
-/// aggregate cannot appear inside another aggregate's argument. The vendored
-/// spargebra refuses it at parse time; aggregates side by side, in a HAVING, or
-/// over a sub-select's aggregate stay valid.
-#[test]
-fn nested_aggregates_are_a_syntax_error() {
-    for s in stores() {
-        upd(&s, "INSERT DATA { :a :p 1 . :b :p 2 }");
-        for q in [
-            "SELECT (SUM(COUNT(?x)) AS ?s) WHERE { ?x :p ?o }",
-            "SELECT (MAX(1 + AVG(?o)) AS ?m) WHERE { ?x :p ?o }",
-            "SELECT ?p WHERE { ?x ?p ?o } GROUP BY ?p HAVING (SUM(COUNT(?x)) > 1)",
-        ] {
-            assert!(
-                s.query(&format!("{PFX}{q}")).is_err(),
-                "must not parse: {q}"
-            );
-        }
-        assert_eq!(
-            sel(
-                &s,
-                "SELECT (SUM(?o) / COUNT(?o) AS ?avg) WHERE { ?x :p ?o }"
-            )
-            .len(),
-            1
-        );
-        assert_eq!(
-        sel(
-            &s,
-            "SELECT (SUM(?c) AS ?n) WHERE { { SELECT (COUNT(?x) AS ?c) WHERE { ?x :p ?o } GROUP BY ?o } }"
-        ),
-        vec![vec!["\"2\"^^<http://www.w3.org/2001/XMLSchema#integer>".to_string()]]
-    );
-    }
-}
-
 // ═══════════════════════════════════════════════════════════
 // SPARQL 1.2 (WD 2026-10-01) syntax and functions, and the SEP extensions
 // oxigraph enables. The W3C suite (tests/w3c_sparql12_manifests.rs) covers
@@ -837,23 +801,164 @@ fn duplicate_values_variables_are_rejected() {
         .is_ok());
 }
 
-/// Known upstream defect, flip when fixed: in spareval 0.2.7 (oxigraph
-/// 0.5.11) `=` between two literals that both carry a base direction reaches
-/// an `unreachable!()` in its term equality (`ExpressionTerm::eq` has no arm
-/// for directional strings), so the query panics — a 500 over HTTP — instead
-/// of answering. Once fixed, `"abc"@en--ltr = "abc"@en--rtl` must be false
-/// and `"abc"@en--ltr = "abc"@en--ltr` true; replace this test with that.
+/// RDF 1.2 term equality for literals with a base direction: `=` between two
+/// of them is true exactly when lexical form, language tag and direction all
+/// match. spareval 0.2.7 (oxigraph 0.5.11) hit an `unreachable!()` here — its
+/// `ExpressionTerm` equality had no arm for directional strings — so the
+/// query panicked (a 500 over HTTP); the vendored copy carries the fix
+/// (`vendor/spareval/UPSTREAM-PR-dir-lang-string-equality.md`).
 #[test]
-fn directional_literal_equality_panics_upstream() {
-    for q in [
-        r#"SELECT ?eq WHERE { BIND("abc"@en--ltr = "abc"@en--rtl AS ?eq) }"#,
-        r#"SELECT ?eq WHERE { BIND("abc"@en--ltr = "abc"@en--ltr AS ?eq) }"#,
-    ] {
-        let s = &stores()[0];
-        let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sel(s, q)));
-        assert!(
-            got.is_err(),
-            "fixed upstream — pin the answer instead (got {got:?}) for {q}"
+fn directional_literal_equality() {
+    for s in stores() {
+        let r = sel(
+            &s,
+            r#"SELECT ?same ?dir ?nodir ?lang ?ne ?in WHERE {
+                 BIND("abc"@en--ltr = "abc"@en--ltr AS ?same)
+                 BIND("abc"@en--ltr = "abc"@en--rtl AS ?dir)
+                 BIND("abc"@en--ltr = "abc"@en AS ?nodir)
+                 BIND("abc"@en--ltr = "abc"@fr--ltr AS ?lang)
+                 BIND("abc"@en--ltr != "abc"@en--rtl AS ?ne)
+                 BIND("abc"@en--rtl IN ("abc"@en--ltr, "abc"@en--rtl) AS ?in)
+               }"#,
         );
+        let t = typed("true", "boolean");
+        let f = typed("false", "boolean");
+        assert_eq!(
+            r,
+            vec![vec![t.clone(), f.clone(), f.clone(), f, t.clone(), t]]
+        );
+        upd(
+            &s,
+            r#"INSERT DATA { :a :label "x"@en--ltr . :b :label "x"@en--ltr . :c :label "x"@en--rtl . }"#,
+        );
+        let mut joined = sel(
+            &s,
+            r#"SELECT ?s WHERE { ?s :label ?l FILTER(?l = "x"@en--ltr) }"#,
+        );
+        joined.sort();
+        assert_eq!(
+            joined,
+            vec![
+                vec!["<http://ex/a>".to_string()],
+                vec!["<http://ex/b>".to_string()]
+            ]
+        );
+    }
+}
+
+/// SPARQL 1.2 (and the W3C sparql12 test `nested-aggregate-functions`): an
+/// aggregate cannot appear inside another aggregate's argument. The vendored
+/// spargebra refuses it at parse time; aggregates side by side, in a HAVING, or
+/// over a sub-select's aggregate stay valid.
+#[test]
+fn nested_aggregates_are_a_syntax_error() {
+    for s in stores() {
+        upd(&s, "INSERT DATA { :a :p 1 . :b :p 2 }");
+        for q in [
+            "SELECT (SUM(COUNT(?x)) AS ?s) WHERE { ?x :p ?o }",
+            "SELECT (MAX(1 + AVG(?o)) AS ?m) WHERE { ?x :p ?o }",
+            "SELECT ?p WHERE { ?x ?p ?o } GROUP BY ?p HAVING (SUM(COUNT(?x)) > 1)",
+        ] {
+            assert!(
+                s.query(&format!("{PFX}{q}")).is_err(),
+                "must not parse: {q}"
+            );
+        }
+        assert_eq!(
+            sel(
+                &s,
+                "SELECT (SUM(?o) / COUNT(?o) AS ?avg) WHERE { ?x :p ?o }"
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            sel(
+                &s,
+                "SELECT (SUM(?c) AS ?n) WHERE { { SELECT (COUNT(?x) AS ?c) WHERE { ?x :p ?o } GROUP BY ?o } }"
+            ),
+            vec![vec!["\"2\"^^<http://www.w3.org/2001/XMLSchema#integer>".to_string()]]
+        );
+    }
+}
+
+/// SPARQL 1.2 grammar: `ExprTripleTermSubject ::= iri | Var` (W3C sparql12
+/// tests `tripleterm-subject-03` and `-06`). spargebra 0.4.7 accepted a literal
+/// or a triple term there; the vendored copy refuses both. Literal and
+/// triple-term objects, and a variable subject, stay valid.
+#[test]
+fn triple_term_expression_subject_is_iri_or_var() {
+    for s in stores() {
+        for q in [
+            r#"SELECT * WHERE { BIND(<<( "literal" :q :z )>> AS ?X) }"#,
+            "SELECT * WHERE { BIND(<<( 42 :q :z )>> AS ?X) }",
+            "SELECT * WHERE { BIND(<<( <<( :s :p :o )>> :q :z )>> AS ?X) }",
+        ] {
+            assert!(
+                s.query(&format!("{PFX}{q}")).is_err(),
+                "must not parse: {q}"
+            );
+        }
+        let r = sel(
+            &s,
+            r#"SELECT ?X ?Y WHERE {
+                 VALUES ?s { :a }
+                 BIND(<<( :s :p "o" )>> AS ?X)
+                 BIND(<<( ?s :p <<( :b :c :d )>> )>> AS ?Y)
+               }"#,
+        );
+        assert_eq!(
+            r,
+            vec![vec![
+                "<<( <http://ex/s> <http://ex/p> \"o\" )>>".to_string(),
+                "<<( <http://ex/a> <http://ex/p> <<( <http://ex/b> <http://ex/c> <http://ex/d> )>> )>>"
+                    .to_string(),
+            ]]
+        );
+    }
+}
+
+/// SPARQL 1.2 (w3c/sparql-query PR #380; W3C sparql12 test
+/// `select-variable-reuse`): in an aggregating query a SELECT expression may
+/// use the variable an earlier SELECT expression binds. spargebra 0.4.7
+/// refused it; the vendored copy accepts it. A variable used before it is
+/// bound, or neither grouped nor bound by the SELECT, is still refused.
+#[test]
+fn select_expression_reuses_an_earlier_select_variable() {
+    for s in stores() {
+        let r = sel(
+            &s,
+            "SELECT (COUNT(?v) AS ?c) (?c * 2 AS ?d) (?d + ?c AS ?e) WHERE { VALUES ?v { 0 1 2 3 } }",
+        );
+        assert_eq!(
+            r,
+            vec![vec![
+                typed("4", "integer"),
+                typed("8", "integer"),
+                typed("12", "integer")
+            ]]
+        );
+        let grouped = sel(
+            &s,
+            "SELECT ?k (SUM(?v) AS ?t) (?t + 1 AS ?u) WHERE { VALUES (?k ?v) { (1 1) (1 2) } } GROUP BY ?k",
+        );
+        assert_eq!(
+            grouped,
+            vec![vec![
+                typed("1", "integer"),
+                typed("3", "integer"),
+                typed("4", "integer")
+            ]]
+        );
+        for q in [
+            "SELECT (?x + 1 AS ?y) (COUNT(?v) AS ?x) WHERE { VALUES ?v { 0 1 } }",
+            "SELECT (COUNT(?v) AS ?c) (?w AS ?d) WHERE { VALUES (?v ?w) { (0 1) } }",
+            "SELECT (COUNT(?v) AS ?c) (?c + 1 AS ?c) WHERE { VALUES ?v { 0 1 } }",
+        ] {
+            assert!(
+                s.query(&format!("{PFX}{q}")).is_err(),
+                "must not parse: {q}"
+            );
+        }
     }
 }
