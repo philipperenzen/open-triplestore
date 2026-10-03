@@ -41,19 +41,13 @@ const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 
 /// `(entry IRI fragment, why)`: cases that fail today. See docs/conformance/entailment.md.
 const KNOWN_FAILURES: &[(&str, &str)] = &[
-    ("paper-sparqldl-Q1", "as rdfs05: duplicate solutions"),
-    ("paper-sparqldl-Q1-rdfs", "as rdfs05: duplicate solutions"),
-    ("paper-sparqldl-Q4", "as rdfs05: duplicate solutions"),
-    ("rdfs05", "duplicate solutions: a triple both asserted and derived is in the default graph and in the entailment graph, and a query over their union counts it twice"),
-    ("rdfs11", "duplicate solutions: a triple both asserted and derived is in the default graph and in the entailment graph, and a query over their union counts it twice"),
     ("sparqldl-10", "the expected answers need OWL reasoning beyond the RL/RDF rules (RL is a partial axiomatization of the RDF-Based Semantics)"),
     ("sparqldl-11", "as sparqldl-10"),
     ("sparqldl-12", "an answer binds a blank-node class (a restriction); the regime answers only with terms that name things in the queried graph"),
-    ("sparqldl-13", "duplicate solutions: a triple both asserted and derived is in the default graph and in the entailment graph, and a query over their union counts it twice"),
 ];
 
 /// Pass floor, a little below the current count.
-const PASS_FLOOR: usize = 37;
+const PASS_FLOOR: usize = 43;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Engine {

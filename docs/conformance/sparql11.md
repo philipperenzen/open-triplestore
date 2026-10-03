@@ -80,8 +80,11 @@ The same fork also makes a default graph built from several `FROM` graphs their
 RDF merge, as SPARQL 1.1 §13.2 defines it: before, a triple held in two of them
 matched twice ([oxigraph#1919](https://github.com/oxigraph/oxigraph/issues/1919),
 backport of [#1920](https://github.com/oxigraph/oxigraph/pull/1920)). No entry of
-the vendored sections exercises that; `tests/w3c_sparql11_conformance.rs`
-(`dataset_from_graphs_merge_as_a_set`) pins it.
+the vendored query and update sections exercises that;
+`tests/w3c_sparql11_conformance.rs` (`dataset_from_graphs_merge_as_a_set`) pins it.
+The entailment section does: a triple both asserted and derived sits in the
+default graph and in the entailment graph, and six of its cases
+([entailment.md](entailment.md)) counted it twice until the merge was a set.
 
 ## Federation
 

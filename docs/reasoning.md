@@ -90,7 +90,7 @@ premise is a `200` carrying the fields above (`consistent: false`, `rule`,
 `detail`), because the check ran and that is its answer. See
 [owl2-dl.md](owl2-dl.md#check--post-apireasoningcheck).
 
-For OWL 2 QL, `?entailment=owl2-ql` also rewrites the query's blank nodes so they match the anonymous elements the schema's existentials imply ([OWL 2 QL](owl2-ql.md)). `POST /api/reasoning/rewrite` returns a stand-alone rewriting that needs no materialised graph, computed from the schema in the graphs you may read. You can also fold an entailment graph into a single query by adding `?entailment=rdfs|owl2-rl|owl2-el|owl2-ql|owl2-dl` to a SPARQL request.
+For OWL 2 QL, `?entailment=owl2-ql` also rewrites the query's blank nodes so they match the anonymous elements the schema's existentials imply ([OWL 2 QL](owl2-ql.md)). `POST /api/reasoning/rewrite` returns a stand-alone rewriting that needs no materialised graph, computed from the schema in the graphs you may read. You can also fold an entailment graph into a single query by adding `?entailment=rdfs|owl2-rl|owl2-el|owl2-ql|owl2-dl` to a SPARQL request. The query's default graph is then the RDF merge of the graphs you may read and the entailment graph, a set: a triple that is both asserted and derived is one answer, not two. `GRAPH ?g` still sees each graph apart, so there it matches once in the data graph and once in the entailment graph.
 
 ## Per-dataset entailment: selectable regime, materialisation toggle
 
