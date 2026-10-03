@@ -4366,6 +4366,7 @@ dependencies = [
  "oxigraph",
  "oxiri",
  "oxrdf",
+ "oxsdatatypes",
  "parry3d-f64",
  "percent-encoding",
  "quick-xml 0.42.0",

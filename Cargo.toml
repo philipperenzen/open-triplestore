@@ -141,6 +141,9 @@ libc = "0.2"
 # (a mismatch splits e.g. oxrdf and breaks rdf-star feature unification).
 oxigraph = "0.5"
 oxrdf = "0.3"
+# XSD value types (already in the tree through oxigraph): to compute the form an
+# older store wrote typed literals in (data_models::content_digest).
+oxsdatatypes = "0.2"
 # Needed only to name `Iri` in the federation service-handler trait; already in the tree.
 # Must stay on the oxiri line Oxigraph itself uses (0.2 as of oxigraph 0.5.11): the
 # `DefaultServiceHandler::handle` signature and `spargebra::Query::Select { base_iri }`

@@ -16,12 +16,14 @@ the file's header as `#` comments, then a line saying whether the content is
 that file's triples, unchanged, or a copy made or edited in the registry that
 may have been modified. They name the licence in `Link` headers (`imbor.ttl`:
 `Link` headers only, nothing added to the copy). The seeded graphs hold each
-file's triples, which the seeder checks against the file. The store writes
-typed literals in its canonical form, with the same values: some
-`xsd:nonNegativeInteger` literals in `dcat.ttl`, `dcat/2.0.0.ttl`, `prov.ttl`,
-`time.ttl`, `vcard.ttl`, `ssn.ttl`, `bibo.ttl`, `saref.ttl` and `locn.ttl` read
-as `xsd:integer`, and two `+00:00` time zones in `pav.ttl` read as `Z`.
-`imbor.ttl` has no typed literals and is held exactly. The `imbor` entry accepts
+file's triples, exactly as in the file, which the seeder checks against the
+file. (Earlier versions of the store wrote typed literals in a canonical form:
+some `xsd:nonNegativeInteger` literals in `dcat.ttl`, `dcat/2.0.0.ttl`,
+`prov.ttl`, `time.ttl`, `vcard.ttl`, `ssn.ttl`, `bibo.ttl`, `saref.ttl` and
+`locn.ttl` read as `xsd:integer`, and two `+00:00` time zones in `pav.ttl` as
+`Z`. The first start of a version that keeps lexical forms restores such a
+copy to the file's triples.) `imbor.ttl` has no typed literals and was always
+held exactly. The `imbor` entry accepts
 no upload, edit, draft, branch, merge, rebase or publish. The server also serves this file at
 `/vocab/NOTICE.md`. This file and the root `NOTICE` carry the full attribution
 and licence texts.
