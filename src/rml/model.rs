@@ -142,7 +142,9 @@ impl LogicalSource {
     /// source is not relational.
     pub fn sql(&self, quote: &dyn Fn(&str) -> String) -> Option<String> {
         if let Some(q) = &self.query {
-            return Some(q.clone());
+            // A view written as a statement may end in `;`, which a query
+            // wrapped as a subquery (a join, a cursor, a column check) cannot.
+            return Some(q.trim().trim_end_matches(';').trim_end().to_string());
         }
         self.table_name
             .as_ref()
@@ -269,8 +271,10 @@ pub enum ObjectMap {
 pub struct RefObjectMap {
     /// IRI of the parent `rr:TriplesMap`.
     pub parent_triples_map: String,
-    /// `rr:joinCondition` pairs. An empty list is a cross join, which R2RML
-    /// permits only when both logical sources are identical.
+    /// `rr:joinCondition` pairs. With none, R2RML permits the reference only
+    /// when both triples maps read the same logical source, and each row
+    /// joins to itself: the object is the parent's subject for the child's
+    /// own row (R2RML §8).
     pub joins: Vec<JoinCondition>,
 }
 
@@ -459,6 +463,15 @@ mod tests {
             query.sql(&quote).unwrap(),
             "SELECT 1",
             "an explicit query wins"
+        );
+        let terminated = LogicalSource {
+            query: Some("\n  SELECT 1 ;\n  ".into()),
+            ..table.clone()
+        };
+        assert_eq!(
+            terminated.sql(&quote).unwrap(),
+            "SELECT 1",
+            "a statement terminator is not part of the view"
         );
         let file = LogicalSource {
             source: SourceRef::File("x.csv".into()),

@@ -91,7 +91,7 @@ gives their source and licence. The shexTest results are in
 | RDF 1.1 formats | `tests/rdf11_conformance.rs` | spec-derived | 69 |  |
 | RDF Patch (RDF Delta) | `tests/rdf_patch_conformance.rs` | spec-derived | 24 |  |
 | RDFS entailment | `tests/rdfs_conformance.rs` | spec-derived | 32 |  |
-| RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 38 |  |
+| RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 43 |  |
 | SHACL Advanced Features | `tests/shacl_af_corpus.rs` | **vendored TopQuadrant corpus** (expression, function, rule and target tests of TopQuadrant/shacl, unmodified; dash-driven, full report equality) | 1 | 10 corpus cases: 9 pass, 0 known failures, 1 expecting behaviour outside the spec (reported as the failure the spec requires), 0 runner-side skips (floor ≥9 asserted) |
 | SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 66 |  |
 | SHACL-AF rules | `tests/shacl_rules_conformance.rs` | spec-derived | 43 |  |
@@ -107,6 +107,7 @@ gives their source and licence. The shexTest results are in
 | JSON-LD 1.1 API | `tests/w3c_jsonld_api_manifests.rs` | **vendored W3C test-suite subset** (toRdf + fromRdf sections of w3c/json-ld-api, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/jsonld.md` |
 | OWL 2 DL | `tests/w3c_owl2_dl_manifests.rs` | **vendored W3C test cases** (approved OWL 2 DL / Direct Semantics cases of the OWL 2 Test Case Repository, unmodified; manifest-driven, against the reasoner sidecar) | 2 | runs in CI against the reasoner sidecar as a development and regression ratchet; no score is published (W3C licence: no performance claims on a partial run); known gaps in `docs/conformance/owl2-dl.md` |
 | OWL 2 RL | `tests/w3c_owl2_rl_manifests.rs` | **vendored W3C test cases** (approved OWL 2 cases of the RL profile, unmodified; manifest-driven) | 2 | runs in CI as a development and regression ratchet; no score is published (W3C licence: no performance claims on a partial run); known gaps in `docs/conformance/owl2-rl.md` |
+| R2RML | `tests/w3c_r2rml_conformance.rs` | **fetched W3C test cases** (pinned commit + sha256, not vendored; SQLite here, PostgreSQL and MySQL in the live-database job) | 5 | runs in CI as a development and regression ratchet over the cases fetched by `scripts/fetch-w3c-r2rml-tests.sh`; no score is published (W3C test-suite policy) |
 | RDF 1.2 formats | `tests/w3c_rdf12_manifests.rs` | **vendored W3C test-suite subset** (N-Triples, N-Quads, Turtle, TriG, RDF/XML suites of `rdf/rdf12` + the `rdf/rdf11` suites they include, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/rdf12.md` |
 | RDF 1.1 Semantics (RDF/RDFS entailment) | `tests/w3c_rdf_mt_manifests.rs` | **vendored W3C test-suite subset** (rdf-mt section of w3c/rdf-tests, unmodified; manifest-driven) | 2 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/entailment.md` |
 | SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (core + sparql sections, manifest-driven, full report equality) | 1 | 136 corpus cases: 120 pass, 0 known failures, 1 optional feature unsupported (reported as the failure the spec requires), 15 runner-side skips (floor ≥90 asserted) |
@@ -117,7 +118,7 @@ gives their source and licence. The shexTest results are in
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 | SPARQL 1.2 | `tests/w3c_sparql12_manifests.rs` | **vendored W3C test-suite subset** (`sparql/sparql12` of w3c/rdf-tests, unmodified; manifest-driven, engine and mirror paths) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql12.md` |
 
-1222 conformance tests across 39 suites; a further 808 tests in 107 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 15 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
+1232 conformance tests across 40 suites; a further 808 tests in 107 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 16 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only; the same holds for the W3C R2RML test cases, which CI fetches at a pinned commit rather than vendoring.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->
@@ -360,8 +361,9 @@ behavior and will flip green when the limitation is resolved.
    maps ([rml.md](rml.md)); relational logical sources (`rr:tableName`,
    `rml:query`, R2RML's `rr:logicalTable` / `rr:sqlQuery`) over registered
    PostgreSQL, MySQL / MariaDB and SQL Server datasources and virtual SPARQL
-   sources, with referencing object maps (`rr:parentTriplesMap` joins) resolved
-   there ([sources.md](sources.md)). Terms follow R2RML: §7.4 term types
+   sources ([sources.md](sources.md)). Referencing object maps
+   (`rr:parentTriplesMap` joins) resolve on both, across files and formats; one
+   without a join condition joins each row to itself (R2RML §8). Terms follow R2RML: §7.4 term types
    (constants keep their kind, datatype and language; template objects are
    IRIs), §7.3 IRI-safe encoding of IRI templates only, blank nodes per value
    and graph, union graph-map semantics with `rr:defaultGraph`, a base IRI
@@ -373,9 +375,10 @@ behavior and will flip green when the limitation is resolved.
    rows unless the run opts into skipping and reporting them. An empty value
    is a value; RML-IO `rml:null` lists the values that count as NULL. A
    datasource mapping version frozen before these rules keeps the old term
-   rules (an empty value generates no term there). **Not implemented:** joins
-   on file sources (the mapping is refused), and the RML-Core / RML-IO
-   vocabulary beyond `rml:baseIRI` and `rml:null`.
+   rules (an empty value generates no term there). The W3C R2RML test cases
+   run in CI on SQLite, PostgreSQL and MySQL (`tests/w3c_r2rml_conformance.rs`,
+   fetched at a pinned commit, no score published). **Not implemented:** the
+   RML-Core / RML-IO vocabulary beyond `rml:baseIRI` and `rml:null`.
 10. **OWL 2 RL / EL / QL.**
     - **RL** runs all 78 RL/RDF rules (OWL 2 Profiles §4.3), lists of any
       length and inverse property expressions included. The Table 8 rules with

@@ -862,5 +862,18 @@ Fetched at run time, not redistributed:
     downloaded by that folder's fetch.sh for a test run (sha256-checked) and
     not redistributed.
 
+  - W3C R2RML test cases (RDB2RDF Working Group, W3C Recommendation test
+    cases of 2012) — Copyright © 2012 W3C® (MIT, ERCIM, Keio), All Rights
+    Reserved, under W3C's test-suite licences
+    (https://www.w3.org/copyright/test-suites-licenses/). Downloaded by
+    scripts/fetch-w3c-r2rml-tests.sh, for the conformance runner
+    tests/w3c_r2rml_conformance.rs, from the copy with per-database SQL
+    scripts that the W3C Knowledge Graph Construction Community Group keeps at
+    https://github.com/kg-construct/r2rml-test-cases-support, commit
+    976098802e9bb0e297d196b26a4c2e0b95fd7644; every file is checked against
+    scripts/w3c-r2rml-tests.sha256. Not redistributed: whether the 3-clause BSD
+    option covers this suite is unconfirmed. Used for development and bug
+    tracking only; no results are published for these tests.
+
 The licenses of bundled and dependency components are unaffected by the Commons
 Clause condition above, which applies only to Open Triplestore itself.

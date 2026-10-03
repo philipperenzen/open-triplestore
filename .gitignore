@@ -48,3 +48,7 @@ jwt_secret
 SECURITY_ASSESSMENT.md
 docs/audit-report-2026-04-22.md
 scratch/
+
+# The W3C R2RML test cases are fetched for the conformance runner, never
+# committed (scripts/fetch-w3c-r2rml-tests.sh explains why).
+/tests/fixtures/w3c-r2rml/

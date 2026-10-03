@@ -1208,13 +1208,34 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   title. A `patch` on a `release/X.Y` branch releases that line and leaves the
   `latest` GitHub Release and image tag alone. `release.yml` can be re-run for
   an existing tag. See `docs/release-process.md`.
-- **An RML file mapping with `rr:parentTriplesMap` is refused.** The upload
-  path (CSV, JSON, XML) has no join resolver, so a referencing object map
-  resolved to nothing: the run wrote the rest of the mapping, dropped every link
-  it asked for, and reported success. It now answers `400` naming the triples
-  map, as it already did for a mapping that reads a registered datasource.
-  Joins run on registered datasources (`docs/sources.md`). Tests:
+- **RML joins run on file sources.** The upload path (CSV, JSON, XML) had no
+  join resolver, so a referencing object map resolved to nothing: the run
+  wrote the rest of the mapping, dropped every link it asked for, and reported
+  success. Now the parent's rows are indexed by the parent side of the join —
+  the same index the relational executor uses, bounded by
+  `OTS_SOURCES_JOIN_MAX_ROWS` — and each child row links to every parent row
+  whose values equal its own on every join condition, across files and
+  formats. A key with a NULL in it matches nothing. Tests:
   `src/rml/executor.rs`, `tests/rml_conformance.rs`.
+- **A join-less referencing object map joins each row to itself.** Without a
+  `rr:joinCondition` (legal only when both triples maps read the same logical
+  source), R2RML §8's joint query is the child query itself: the object is the
+  parent's subject for the same row. The relational executor and the dry-run
+  sampler made it a cross join, linking every child row to every parent row's
+  subject. This applies to every mapping version, legacy-stamped ones
+  included: the old output was wrong data, not different names. Two maps over
+  the same file now count as the same logical source only when their iterator
+  and reference formulation match too.
+- **The W3C R2RML test cases run in CI.** `tests/w3c_r2rml_conformance.rs`
+  runs the RDB2RDF Working Group's R2RML cases on SQLite in the conformance job
+  and on PostgreSQL 16 and MySQL 8.4 in the live-database job, comparing each
+  output dataset by isomorphism and holding a per-database known-failure list
+  as a two-way ratchet. The cases are fetched at a pinned commit and checked by
+  sha256 (`scripts/fetch-w3c-r2rml-tests.sh`), not vendored, and no score is
+  published (W3C test-suite policy). `rml::sql::execute_relational_as_mapped`
+  runs a relational mapping into the graphs its graph maps name — the output
+  dataset R2RML defines — where a registered mapping's run still writes
+  everything into its run graph.
 - **`docker-compose.override.yml` no longer ships.** It was one machine's
   workaround for an unstable build host (thin LTO, two build jobs), and Compose
   merges the file automatically, so every `docker compose build` got the slow,
@@ -1690,6 +1711,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `/api/datasets/{id}/services/{service}/sparql` (docs/embedding.md), and an
   IFC file is uploaded through `POST /api/import/bulk`
   (docs/geo-3d-platform.md).
+- **R2RML natural lexical forms and language tags.** An SQL timestamp read
+  as `xsd:dateTime` kept the space between date and time
+  (`"2009-10-10 12:12:22"`, which is not an `xsd:dateTime`), and an SQL
+  boolean stored as `0` / `1` stayed so; both now take their natural RDF
+  lexical form (`2009-10-10T12:12:22`, `false`, R2RML §10.2), in literals and
+  in templates. `rr:language` now refuses a well-formed tag whose primary
+  language subtag cannot name a language (`english`: BCP 47 has no
+  registered subtags of four to eight letters). An `rr:sqlQuery` /
+  `rml:query` that ends in `;` no longer fails when it is wrapped as a
+  subquery (a join, a column check, the PostgreSQL cursor), and the
+  PostgreSQL connector reads a `CHAR(n)` value with its padding, as the
+  server holds it, where the cast to text stripped it. Found by the W3C R2RML
+  test cases (R2RMLTC0016c, R2RMLTC0015b, R2RMLTC0011a, R2RMLTC0015a,
+  R2RMLTC0018a).
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if
