@@ -104,8 +104,8 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
   `docs/standards.md` grades several of those rows **Partial**: SPARQL 1.1 federation (off by
   default, per-endpoint allowlist), OWL 2 EL, RL and DL (DL runs RL+extension rules in
   process, with a full tableau only via the optional Konclude bridge), SHACL Advanced and
-  SHACL-C, ShEx, SWRL, RML and DCAT. GeoSPARQL 1.1 lacks KML/DGGS literals and the Query
-  Rewrite Extension (it has the geodesic `metric*` family, `aggUnion` and WKT/GML/GeoJSON
+  SHACL-C, ShEx, SWRL, RML and DCAT. GeoSPARQL 1.1 lacks DGGS literals and the Query
+  Rewrite Extension (it has the geodesic `metric*` family, `aggUnion` and WKT/GML/GeoJSON/KML
   literals). SPARQL 1.2 /
   RDF 1.2 follows the RDF 1.2 triple-term model in object position only.
 - **Reference system.** Open Triplestore performance figures in this document were measured on an
@@ -283,9 +283,10 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > ⁷ Tantivy full-text search via `text-search` feature flag with automatic index
 >   sync on every SPARQL UPDATE / Graph Store write (lazy dirty-flag pattern).
 > ¹¹ Partial, not OGC-certified (only the OGC authorises compliance marks for its standards):
->   the topology families, `geof:relate`, the constructive functions, WKT and GML literals and
->   CRS transforms are implemented; the geodesic metric family, `geof:aggUnion`,
->   GeoJSON/KML/DGGS literals and the Query Rewrite Extension are not. See
+>   the topology families, `geof:relate`, the constructive functions, the geodesic metric
+>   family, `geof:aggUnion`, WKT, GML, GeoJSON and KML literals with their serialisation
+>   functions, and CRS transforms are implemented; DGGS literals, the Query Rewrite Extension,
+>   the other aggregates and several GeoSPARQL 1.1 non-topological functions are not. See
 >   [`docs/standards.md`](standards.md).
 
 ### 4.4 Protocols, Catalogs & Mapping

@@ -3561,11 +3561,25 @@ fn ogc_req39_transform_accepts_any_uri_and_keeps_z() {
         "{out}"
     );
     assert_eq!(nums[2], 12.5, "Z passes through unchanged: {out}");
-    // A GML literal's srsName is the source CRS.
-    let gml = geof_opt(
+    // A GML literal's srsName is the source CRS, and the result is GML again,
+    // with the target as its srsName.
+    let as_gml = geof_opt(
         &s,
         &format!(
             "geof:transform({}, <http://www.opengis.net/def/crs/OGC/1.3/CRS84>)",
+            gml_point("EPSG:28992", "187420 428470")
+        ),
+    )
+    .unwrap_or_default();
+    assert!(
+        as_gml.contains("gmlLiteral")
+            && as_gml.contains("srsName=\\\"http://www.opengis.net/def/crs/OGC/1.3/CRS84\\\""),
+        "{as_gml}"
+    );
+    let gml = geof_opt(
+        &s,
+        &format!(
+            "geof:asWKT(geof:transform({}, <http://www.opengis.net/def/crs/OGC/1.3/CRS84>))",
             gml_point("EPSG:28992", "187420 428470")
         ),
     )
@@ -3590,7 +3604,7 @@ fn ogc_req39_transform_accepts_any_uri_and_keeps_z() {
 }
 
 // Req 39 constructive functions and Req 42 aggUnion keep a GML operand's srsName: the
-// result is a WKT literal in that CRS, not relabelled CRS84.
+// result is a GML literal in that CRS, not relabelled CRS84.
 #[test]
 fn ogc_req39_buffer_and_agg_union_keep_a_gml_srs_name() {
     let s = ts();
@@ -3710,4 +3724,455 @@ fn ogc_req39_unknown_or_incompatible_units_are_unbound() {
         geof_num(&s, &format!("geof:distance({ra}, {rb}, uom:unity)")),
         5.0
     );
+}
+
+// ─── GML profile, serialisation functions and KML (OGC GeoSPARQL 1.1 Req 19–34) ────
+//
+// Named by OGC requirement, as above: `ogc_req24_…` is
+// /req/geometry-extension/asGML-function.
+
+/// A `geo:gmlLiteral` (attributes single-quoted inside the SPARQL string).
+fn gml_lit(body: &str) -> String {
+    format!("\"{body}\"^^geo:gmlLiteral")
+}
+
+/// A `geo:kmlLiteral`.
+fn kml_lit(body: &str) -> String {
+    format!("\"{body}\"^^geo:kmlLiteral")
+}
+
+/// The datatype local name of a result term (`gmlLiteral`, `wktLiteral`, …).
+fn datatype_of(r: &Option<String>) -> String {
+    r.as_deref()
+        .and_then(|t| t.rsplit_once("^^<"))
+        .and_then(|(_, dt)| dt.strip_suffix('>'))
+        .and_then(|dt| dt.rsplit_once('#'))
+        .map(|(_, local)| local.to_string())
+        .unwrap_or_default()
+}
+
+fn ring(coords: &str) -> String {
+    format!("<gml:LinearRing><gml:posList>{coords}</gml:posList></gml:LinearRing>")
+}
+
+fn patch(coords: &str) -> String {
+    format!(
+        "<gml:PolygonPatch><gml:exterior>{}</gml:exterior></gml:PolygonPatch>",
+        ring(coords)
+    )
+}
+
+// Req 20 /req/geometry-extension/gml-literal: every element of the documented GML
+// profile reads as the geometry it describes — measured by area and length.
+#[test]
+fn ogc_req20_gml_profile_elements() {
+    let s = ts();
+    let area = |body: &str| geof_num(&s, &format!("geof:area({})", gml_lit(body)));
+    let length = |body: &str| {
+        geof_num(
+            &s,
+            &format!(
+                "geof:distance({}, {})",
+                gml_lit(body),
+                wkt("POINT(100 100)")
+            ),
+        )
+    };
+    // Envelope: the rectangle between its corners.
+    assert_eq!(
+        area("<gml:Envelope><gml:lowerCorner>0 0</gml:lowerCorner><gml:upperCorner>2 3</gml:upperCorner></gml:Envelope>"),
+        6.0
+    );
+    // A Surface of two patches is both of them, not one with a hole.
+    let surface = format!(
+        "<gml:Surface><gml:patches>{}{}</gml:patches></gml:Surface>",
+        patch("0 0 2 0 2 2 0 2 0 0"),
+        patch("5 5 6 5 6 6 5 6 5 5")
+    );
+    assert_eq!(area(&surface), 5.0);
+    // A Ring of linear curve members.
+    let ring_poly = "<gml:Polygon><gml:exterior><gml:Ring>\
+        <gml:curveMember><gml:LineString><gml:posList>0 0 4 0 4 4</gml:posList></gml:LineString></gml:curveMember>\
+        <gml:curveMember><gml:LineString><gml:posList>4 4 0 4 0 0</gml:posList></gml:LineString></gml:curveMember>\
+        </gml:Ring></gml:exterior></gml:Polygon>";
+    assert_eq!(area(ring_poly), 16.0);
+    // Triangle, Tin, PolyhedralSurface, CompositeSurface.
+    let tri = |c: &str| {
+        format!(
+            "<gml:Triangle><gml:exterior>{}</gml:exterior></gml:Triangle>",
+            ring(c)
+        )
+    };
+    assert_eq!(area(&tri("0 0 2 0 0 2 0 0")), 2.0);
+    let tin = format!(
+        "<gml:Tin><gml:patches>{}{}</gml:patches></gml:Tin>",
+        tri("0 0 2 0 0 2 0 0"),
+        tri("2 0 2 2 0 2 2 0")
+    );
+    assert_eq!(area(&tin), 4.0);
+    let phs = format!(
+        "<gml:PolyhedralSurface><gml:polygonPatches>{}</gml:polygonPatches></gml:PolyhedralSurface>",
+        patch("0 0 3 0 3 3 0 3 0 0")
+    );
+    assert_eq!(area(&phs), 9.0);
+    let composite = format!(
+        "<gml:CompositeSurface><gml:surfaceMember><gml:Polygon><gml:exterior>{}</gml:exterior></gml:Polygon></gml:surfaceMember></gml:CompositeSurface>",
+        ring("0 0 1 0 1 1 0 1 0 0")
+    );
+    assert_eq!(area(&composite), 1.0);
+    // A CompositeCurve and a Curve of LineStringSegments reach (100 100) like the
+    // line they are; a standalone LinearRing is a closed line.
+    let curve = "<gml:Curve><gml:segments><gml:LineStringSegment><gml:posList>0 0 100 0</gml:posList></gml:LineStringSegment>\
+        <gml:LineStringSegment><gml:posList>100 0 100 100</gml:posList></gml:LineStringSegment></gml:segments></gml:Curve>";
+    assert_eq!(length(curve), 0.0);
+    let cc = "<gml:CompositeCurve><gml:curveMember><gml:LineString><gml:posList>0 0 100 0</gml:posList></gml:LineString></gml:curveMember>\
+        <gml:curveMember><gml:LineString><gml:posList>100 0 100 100</gml:posList></gml:LineString></gml:curveMember></gml:CompositeCurve>";
+    assert_eq!(length(cc), 0.0);
+    assert_eq!(length(&ring("0 0 100 0 100 100 0 0")), 0.0);
+    // gml:coordinates with cs/ts/decimal.
+    let coords = "<gml:Polygon><gml:exterior><gml:LinearRing><gml:coordinates cs=' ' ts=';' decimal=','>0 0;1,5 0;1,5 2;0 2;0 0</gml:coordinates></gml:LinearRing></gml:exterior></gml:Polygon>";
+    assert_eq!(area(coords), 3.0);
+}
+
+// Req 20/22: what the profile leaves out — arcs and other curved segments, solids —
+// is not a geometry, so functions over it are unbound rather than computed on a
+// straight-line reading of the control points.
+#[test]
+fn ogc_req20_gml_outside_the_profile_is_unbound() {
+    let s = ts();
+    for body in [
+        "<gml:Curve><gml:segments><gml:Arc><gml:posList>0 0 1 1 2 0</gml:posList></gml:Arc></gml:segments></gml:Curve>",
+        "<gml:Solid><gml:exterior><gml:Shell/></gml:exterior></gml:Solid>",
+        "<gml:LineString srsDimension='4'><gml:posList>0 0 0 0 1 1 1 1</gml:posList></gml:LineString>",
+        "<gml:LineString><gml:posList>0 0 1</gml:posList></gml:LineString>",
+    ] {
+        let r = geof_opt(&s, &format!("geof:asWKT({})", gml_lit(body)));
+        assert!(r.is_none(), "{body} must be unbound, got {r:?}");
+    }
+}
+
+// Req 20: srsDimension 3 is kept as Z.
+#[test]
+fn ogc_req20_gml_srs_dimension_3_keeps_z() {
+    let s = ts();
+    let out = geof_opt(
+        &s,
+        &format!(
+            "geof:asWKT({})",
+            gml_lit("<gml:LineString srsName='EPSG:28992' srsDimension='3'><gml:posList>155000 463000 1.5 155010 463000 2.5</gml:posList></gml:LineString>")
+        ),
+    )
+    .unwrap_or_default();
+    assert!(
+        out.contains("EPSG/0/28992") && out.contains("Z") && out.contains("2.5"),
+        "{out}"
+    );
+}
+
+// Req 22 /req/geometry-extension/gml-profile: the supported GML profile is documented.
+#[test]
+fn ogc_req22_gml_profile_is_documented() {
+    let doc = include_str!("../docs/geosparql.md");
+    let section = doc
+        .split("## Supported GML profile")
+        .nth(1)
+        .expect("docs/geosparql.md documents the GML profile");
+    for element in [
+        "Envelope",
+        "LinearRing",
+        "PolygonPatch",
+        "Ring",
+        "CompositeCurve",
+        "Triangle",
+        "Tin",
+        "PolyhedralSurface",
+        "srsDimension",
+        "cs",
+    ] {
+        assert!(section.contains(element), "the profile names {element}");
+    }
+}
+
+// Req 19 /req/geometry-extension/asWKT-function: geof:asWKT keeps the SRS (a GML
+// srsName becomes the WKT prefix) and Z.
+#[test]
+fn ogc_req19_as_wkt_keeps_the_srs_and_z() {
+    let s = ts();
+    let out = geof_opt(
+        &s,
+        &format!(
+            "geof:asWKT({})",
+            gml_lit("<gml:Point srsName='urn:ogc:def:crs:EPSG::28992'><gml:pos>155000 463000 4</gml:pos></gml:Point>")
+        ),
+    );
+    assert_eq!(datatype_of(&out), "wktLiteral");
+    let out = out.unwrap_or_default();
+    assert!(
+        out.contains("<http://www.opengis.net/def/crs/EPSG/0/28992> POINT Z"),
+        "{out}"
+    );
+    // GeoJSON is CRS84: no prefix needed.
+    let out = geof_opt(
+        &s,
+        &format!(
+            "geof:asWKT({})",
+            gj(r#"{"type":"Point","coordinates":[5,52]}"#)
+        ),
+    )
+    .unwrap_or_default();
+    assert!(!out.contains('<') && out.contains("POINT"), "{out}");
+    let eq = geof_opt(
+        &s,
+        &format!(
+            "geof:sfEquals(geof:asWKT({}), {})",
+            rd("POINT(1 2)"),
+            rd("POINT(1 2)")
+        ),
+    );
+    assert!(is_true(eq));
+}
+
+// Req 24 /req/geometry-extension/asGML-function: geof:asGML writes GML 3.2 with the
+// SRS as srsName and srsDimension for Z; the GML reads back as the same geometry,
+// so WKT → GML → WKT round-trips.
+#[test]
+fn ogc_req24_as_gml_round_trips() {
+    let s = ts();
+    let poly = rd("POLYGON((155000 463000, 155010 463000, 155010 463010, 155000 463000), (155002 463001, 155008 463001, 155008 463007, 155002 463001))");
+    let out = geof_opt(&s, &format!("geof:asGML({poly})"));
+    assert_eq!(datatype_of(&out), "gmlLiteral");
+    let out = out.unwrap_or_default();
+    assert!(
+        out.contains("http://www.opengis.net/gml/3.2")
+            && out.contains("srsName=\\\"http://www.opengis.net/def/crs/EPSG/0/28992\\\""),
+        "{out}"
+    );
+    for expr in [
+        format!("geof:sfEquals(geof:asGML({poly}), {poly})"),
+        format!("geof:sfEquals(geof:asWKT(geof:asGML({poly})), {poly})"),
+        format!("geof:sfEquals(geof:asGML({poly}, \"GML3.2\"), {poly})"),
+        format!(
+            "geof:sfEquals(geof:asGML({}), {})",
+            wkt("MULTILINESTRING((0 0, 1 1), (2 2, 3 3))"),
+            wkt("MULTILINESTRING((0 0, 1 1), (2 2, 3 3))")
+        ),
+    ] {
+        assert!(is_true(geof_opt(&s, &expr)), "{expr}");
+    }
+    let srid = geof_opt(&s, &format!("geof:getSRID(geof:asGML({poly}))")).unwrap_or_default();
+    assert!(srid.contains("EPSG/0/28992"), "{srid}");
+    // CRS84 is written out; Z is srsDimension 3.
+    let z = geof_opt(&s, &format!("geof:asGML({})", wkt("POINT Z (5 52 7)"))).unwrap_or_default();
+    assert!(
+        z.contains("OGC/1.3/CRS84") && z.contains("srsDimension=\\\"3\\\"") && z.contains("5 52 7"),
+        "{z}"
+    );
+    let back = geof_opt(
+        &s,
+        &format!("geof:asWKT(geof:asGML({}))", wkt("POINT Z (5 52 7)")),
+    )
+    .unwrap_or_default();
+    assert!(back.contains("POINT Z") && back.contains('7'), "{back}");
+}
+
+// Req 25 /req/geometry-extension/geojson-literal: a GeoJSON position's altitude is Z,
+// and geof:asGeoJSON writes it back.
+#[test]
+fn ogc_req25_geojson_literal_keeps_altitude() {
+    let s = ts();
+    let out = geof_opt(
+        &s,
+        &format!(
+            "geof:asWKT({})",
+            gj(r#"{"type":"Point","coordinates":[5,52,12.5]}"#)
+        ),
+    )
+    .unwrap_or_default();
+    assert!(out.contains("POINT Z") && out.contains("12.5"), "{out}");
+    let json = geof_opt(
+        &s,
+        &format!("geof:asGeoJSON({})", wkt("POINT Z (5 52 12.5)")),
+    )
+    .unwrap_or_default();
+    assert!(
+        json.contains("[5.0,52.0,12.5]") || json.contains("[5,52,12.5]"),
+        "{json}"
+    );
+}
+
+// Req 30 /req/geometry-extension/kml-literal: a KML geometry is a geometry like WKT.
+#[test]
+fn ogc_req30_kml_literal_is_a_geometry() {
+    let s = ts();
+    let point = kml_lit("<Point><coordinates>0.5,0.5</coordinates></Point>");
+    let square = kml_lit(
+        "<Polygon><outerBoundaryIs><LinearRing><coordinates>0,0 2,0 2,2 0,2 0,0</coordinates></LinearRing></outerBoundaryIs></Polygon>",
+    );
+    assert!(is_true(geof_opt(
+        &s,
+        &format!("geof:sfWithin({point}, {square})")
+    )));
+    assert_eq!(geof_num(&s, &format!("geof:area({square})")), 4.0);
+    let multi = kml_lit(
+        "<MultiGeometry><Point><coordinates>1,1</coordinates></Point><Point><coordinates>9,9</coordinates></Point></MultiGeometry>",
+    );
+    assert!(is_true(geof_opt(
+        &s,
+        &format!("geof:sfIntersects({multi}, {square})")
+    )));
+    // Malformed KML, and elements outside the profile, are unbound.
+    for bad in [
+        "<Point><coordinates>1</coordinates></Point>",
+        "<Polygon><outerBoundaryIs><LinearRing><coordinates>0,0 1,0 1,1 0,1</coordinates></LinearRing></outerBoundaryIs></Polygon>",
+        "<Model><Location><longitude>1</longitude></Location></Model>",
+        "not xml <",
+    ] {
+        let r = geof_opt(&s, &format!("geof:sfIntersects({}, {square})", kml_lit(bad)));
+        assert!(r.is_none(), "{bad} must be unbound, got {r:?}");
+    }
+}
+
+// Req 31 /req/geometry-extension/kml-literal-default-srs: KML is CRS84, and harmonises
+// with a projected operand.
+#[test]
+fn ogc_req31_kml_literal_is_crs84() {
+    let s = ts();
+    let k = kml_lit("<Point><coordinates>4.885,52.36,3</coordinates></Point>");
+    let srid = geof_opt(&s, &format!("geof:getSRID({k})")).unwrap_or_default();
+    assert!(srid.contains("CRS84"), "{srid}");
+    let near = geof_num(
+        &s,
+        &format!(
+            "geof:distance({}, {k}, uom:metre)",
+            rd("POINT(121800 487400)")
+        ),
+    );
+    assert!(
+        near < 200.0,
+        "the Rijksmuseum point in RD New and in KML: {near}"
+    );
+}
+
+// Req 32 /req/geometry-extension/kml-literal-empty: an empty KML literal is the empty
+// geometry.
+#[test]
+fn ogc_req32_kml_literal_empty_is_the_empty_geometry() {
+    let s = ts();
+    let empty = "\"\"^^geo:kmlLiteral";
+    assert!(is_false(geof_opt(
+        &s,
+        &format!("geof:sfIntersects({empty}, {})", wkt("POINT(0 0)"))
+    )));
+    let w = geof_opt(&s, &format!("geof:asWKT({empty})")).unwrap_or_default();
+    assert!(w.contains("EMPTY"), "{w}");
+}
+
+// Req 33 /req/geometry-extension/geometry-as-kml-literal: geo:asKML links a geometry to
+// its KML serialisation, which queries find like any other.
+#[test]
+fn ogc_req33_geometry_as_kml_literal_is_queryable() {
+    let s = ts();
+    load(
+        &s,
+        r#"
+        ex:in geo:hasGeometry [ geo:asKML "<Point><coordinates>0.5,0.5</coordinates></Point>"^^geo:kmlLiteral ] .
+        ex:out geo:hasGeometry [ geo:asKML "<Point><coordinates>5,5</coordinates></Point>"^^geo:kmlLiteral ] .
+    "#,
+    );
+    let r = sel(
+        &s,
+        "SELECT ?f WHERE { ?f geo:hasGeometry/geo:asKML ?k .
+           FILTER(geof:sfWithin(?k, \"POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))\"^^geo:wktLiteral)) }",
+    );
+    assert_eq!(r, vec![vec!["<http://example.org/in>".to_string()]]);
+}
+
+// Req 34 /req/geometry-extension/asKML-function: geof:asKML writes CRS84 KML,
+// reprojecting the operand, Z as altitude; it reads back as the same geometry.
+#[test]
+fn ogc_req34_as_kml_reprojects_and_round_trips() {
+    let s = ts();
+    let out = geof_opt(&s, &format!("geof:asKML({})", rd("POINT(121800 487400)")));
+    assert_eq!(datatype_of(&out), "kmlLiteral");
+    let out = out.unwrap_or_default();
+    assert!(
+        out.contains("<coordinates>4.88") && out.contains(",52.3"),
+        "{out}"
+    );
+    for g in [
+        wkt("POLYGON((0 0, 4 0, 4 4, 0 4, 0 0), (1 1, 2 1, 2 2, 1 1))"),
+        wkt("MULTIPOINT((1 2), (3 4))"),
+        wkt("LINESTRING Z (0 0 1, 1 1 2)"),
+    ] {
+        assert!(
+            is_true(geof_opt(
+                &s,
+                &format!("geof:sfEquals(geof:asKML({g}), {g})")
+            )),
+            "{g}"
+        );
+    }
+    let z = geof_opt(&s, &format!("geof:asKML({})", wkt("POINT Z (5 52 7)"))).unwrap_or_default();
+    assert!(z.contains("5,52,7"), "{z}");
+    // A CRS this build cannot reproject is unbound, not mislabelled.
+    let lambert =
+        "\"<http://www.opengis.net/def/crs/EPSG/0/2154> POINT(650000 6860000)\"^^geo:wktLiteral";
+    assert!(geof_opt(&s, &format!("geof:asKML({lambert})")).is_none());
+}
+
+// GeoSPARQL 1.1 §10.9.1 (Req 39): a geometry result is in the first operand's
+// serialisation and SRS.
+#[test]
+fn ogc_req39_geometry_results_follow_the_first_operand() {
+    let s = ts();
+    let gml_rd = gml_point("EPSG:28992", "155000 463000");
+    let square_gj = gj(r#"{"type":"Polygon","coordinates":[[[0,0],[2,0],[2,2],[0,2],[0,0]]]}"#);
+    let square_kml = kml_lit(
+        "<Polygon><outerBoundaryIs><LinearRing><coordinates>1,1 3,1 3,3 1,3 1,1</coordinates></LinearRing></outerBoundaryIs></Polygon>",
+    );
+    for (expr, datatype) in [
+        (format!("geof:buffer({gml_rd}, 10)"), "gmlLiteral"),
+        (format!("geof:envelope({gml_rd})"), "gmlLiteral"),
+        (
+            format!("geof:union({square_gj}, {})", wkt("POINT(5 5)")),
+            "geoJSONLiteral",
+        ),
+        (
+            format!("geof:intersection({square_kml}, {square_gj})"),
+            "kmlLiteral",
+        ),
+        (format!("geof:convexHull({square_kml})"), "kmlLiteral"),
+        (
+            format!("geof:difference({}, {square_gj})", wkt("POINT(5 5)")),
+            "wktLiteral",
+        ),
+        (format!("geof:boundary({square_gj})"), "geoJSONLiteral"),
+        // GeoJSON cannot be in RD New: transformed out of CRS84 it is WKT.
+        (
+            format!("geof:transform({square_gj}, <http://www.opengis.net/def/crs/EPSG/0/3857>)"),
+            "wktLiteral",
+        ),
+    ] {
+        let r = geof_opt(&s, &expr);
+        assert_eq!(datatype_of(&r), datatype, "{expr} -> {r:?}");
+    }
+    // The GML result keeps the srsName as written, and measures the same.
+    let buffered = geof_opt(&s, &format!("geof:buffer({gml_rd}, 10)")).unwrap_or_default();
+    assert!(
+        buffered.contains("srsName=\\\"EPSG:28992\\\""),
+        "{buffered}"
+    );
+    let area = geof_num(&s, &format!("geof:area(geof:buffer({gml_rd}, 10))"));
+    assert!((area - 312.0).abs() < 3.0, "{area}");
+    // A group of GML literals unions into GML.
+    load(
+        &s,
+        "ex:a geo:asGML \"<gml:Point srsName='EPSG:28992'><gml:pos>155000 463000</gml:pos></gml:Point>\"^^geo:gmlLiteral .\n\
+         ex:b geo:asGML \"<gml:Point srsName='EPSG:28992'><gml:pos>155010 463000</gml:pos></gml:Point>\"^^geo:gmlLiteral .\n",
+    );
+    let r = sel(
+        &s,
+        "SELECT (geof:aggUnion(?g) AS ?u) WHERE { ?f geo:asGML ?g }",
+    );
+    assert_eq!(datatype_of(&r[0].first().cloned()), "gmlLiteral", "{r:?}");
 }

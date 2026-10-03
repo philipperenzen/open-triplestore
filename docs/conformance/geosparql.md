@@ -9,8 +9,9 @@ tests derived from the OGC GeoSPARQL 1.1 standard (count in the
 [generated table](../standards.md#conformance-test-suites)), grouped by the test file's
 own 30-item requirement list, not the OGC conformance classes: Simple Features /
 Egenhofer / RCC8 relation families, constructive and metric functions, `geo:wktLiteral`,
-`geo:gmlLiteral` and `geo:geoJSONLiteral` parsing (every RFC 7946 geometry type, malformed
-input unbound rather than a panic) with `geof:asGeoJSON` round trips, `geof:getSRID`, and
+`geo:gmlLiteral` (the documented GML profile), `geo:geoJSONLiteral` (every RFC 7946
+geometry type, malformed input unbound rather than a panic) and `geo:kmlLiteral` parsing
+with `geof:asWKT`, `geof:asGML`, `geof:asGeoJSON` and `geof:asKML` round trips, `geof:getSRID`, and
 `geof:transform` (EPSG:28992 ↔ 4326 ↔ 3857, pure-Rust closed-form). The GeoSPARQL 1.1
 metric functions (`metricDistance`, `metricLength`, `metricPerimeter`, `metricArea`,
 `metricBuffer`) are checked against published WGS84 geodesic values — GeographicLib's
@@ -24,8 +25,28 @@ in-memory copy, the engine, the result cache, scoped queries and updates — wit
 byte-identical answers across them; `tests/standards_conformance.rs` runs it over HTTP.
 
 No functional gap is tracked in this suite any more. What GeoSPARQL 1.1 still lacks
-here — KML/DGGS literals, the Query Rewrite Extension, the other aggregates and several
+here — DGGS literals, the Query Rewrite Extension, the other aggregates and several
 non-metric functions — is listed in [standards.md](../standards.md#known-limitations--conformance-findings).
+
+### Requirement matrix (OGC 22-047r1)
+
+Requirements of GeoSPARQL 1.1 and the tests in `tests/geosparql_conformance.rs` that
+check them. The tests are named by requirement: `ogc_req24_…` checks Req 24. This is the
+project's own mapping, not an OGC test result.
+
+| Req | ID | Tests |
+|---|---|---|
+| 19 | `/req/geometry-extension/asWKT-function` | `ogc_req19_as_wkt_keeps_the_srs_and_z` |
+| 20 | `/req/geometry-extension/gml-literal` | `ogc_req20_gml_profile_elements`, `ogc_req20_gml_outside_the_profile_is_unbound`, `ogc_req20_gml_srs_dimension_3_keeps_z`, `ogc_req20_gml_srs_name_is_harmonised_against_wkt` |
+| 22 | `/req/geometry-extension/gml-profile` | `ogc_req22_gml_profile_is_documented` (the profile: [geosparql.md](../geosparql.md#supported-gml-profile)) |
+| 24 | `/req/geometry-extension/asGML-function` | `ogc_req24_as_gml_round_trips` |
+| 25 | `/req/geometry-extension/geojson-literal` | `ogc_req25_geojson_literal_keeps_altitude`, `geojson_multi_geometries_and_collections`, `malformed_geojson_literal_is_unbound_not_a_panic` |
+| 30 | `/req/geometry-extension/kml-literal` | `ogc_req30_kml_literal_is_a_geometry` |
+| 31 | `/req/geometry-extension/kml-literal-default-srs` | `ogc_req31_kml_literal_is_crs84` |
+| 32 | `/req/geometry-extension/kml-literal-empty` | `ogc_req32_kml_literal_empty_is_the_empty_geometry` |
+| 33 | `/req/geometry-extension/geometry-as-kml-literal` | `ogc_req33_geometry_as_kml_literal_is_queryable` |
+| 34 | `/req/geometry-extension/asKML-function` | `ogc_req34_as_kml_reprojects_and_round_trips` |
+| 39 | `/req/geometry-extension/query-functions` (§10.9.1 result serialisation) | `ogc_req39_geometry_results_follow_the_first_operand` |
 
 ## 2. OGC GeoSPARQL 1.1 SHACL validator (vendored) — the round-trip
 

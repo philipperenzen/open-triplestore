@@ -14,6 +14,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **GeoSPARQL: KML literals, `geof:asWKT`, `geof:asGML` and `geof:asKML`.**
+  `geo:kmlLiteral` (KML 2.2 `Point`, `LineString`, `LinearRing`, `Polygon`,
+  `MultiGeometry`; always CRS84; an empty literal is the empty geometry) is a
+  geometry for every `geof:` function, `geo:asKML` is indexed and fed to the
+  map viewer, and four serialisation functions write any geometry as WKT (its
+  CRS as the prefix), GML 3.2 (its CRS as `srsName`, `srsDimension="3"` for
+  Z), GeoJSON or KML (both reprojected to CRS84). GeoSPARQL 1.1 Req 19, 24 and
+  30–34.
+- **GeoSPARQL: a documented GML profile.** The GML reader now also takes
+  `Envelope`, a standalone `LinearRing`, `Curve` of `LineStringSegment`s,
+  `OrientableCurve`, `CompositeCurve`, `Ring`s of linear `curveMember`s,
+  `Triangle`, `Rectangle`, `Tin`/`TriangulatedSurface`, `PolyhedralSurface`,
+  `CompositeSurface`, `OrientableSurface`, `pointMembers`/`curveMembers`/
+  `surfaceMembers`, `gml:coordinates` with `cs`/`ts`/`decimal`, and GML 2's
+  `gml:coord`. The profile is listed in `docs/geosparql.md` (Req 22).
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -67,6 +82,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asks for, and re-pins; the store now tells everyone which datasets that applies to.
 
 ### Changed
+- **GeoSPARQL: geometry results follow their first operand's serialisation.**
+  `buffer`, `union`, `envelope`, `transform` and the other functions that
+  return a geometry used to return a `geo:wktLiteral` whatever the operand; they
+  now return a GML, GeoJSON or KML literal for a GML, GeoJSON or KML first
+  operand, in its CRS (a GML `srsName` kept as written), as GeoSPARQL 1.1
+  §10.9.1 says. GeoJSON and KML exist only in CRS84, so one transformed into
+  another CRS is still a WKT literal. `geof:aggUnion` returns the group's
+  serialisation when every value shares one.
+- **GeoSPARQL: Z survives GML and GeoJSON.** `srsDimension="3"` GML and GeoJSON
+  positions with an altitude were read in 2D; they now keep Z (a geometry
+  mixing 2D and 3D positions is still read in 2D). The geometry cache keeps Z
+  on GEOS 3.11 too. The map viewer still draws the 2D footprint.
+- **GeoSPARQL: GML is read strictly.** A multi-patch `gml:Surface` is now a
+  `MULTIPOLYGON` of its patches (its second patch used to become a hole of the
+  first). Arcs and other curved segments, solids, a `posList` whose numbers do
+  not divide into positions, a number that does not parse and a `Multi*`
+  member that does not read now make the literal unbound; they used to be read
+  as straight lines through the control points, or silently dropped. Text
+  outside the coordinate elements (`gml:name`) is no longer read as
+  coordinates.
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were

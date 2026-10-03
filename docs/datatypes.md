@@ -212,13 +212,17 @@ For real files, prefer the asset/upload pipeline over inline binary literals.
 
 ## Spatial (GeoSPARQL)
 
-Geometry is stored as a **WKT literal** with the datatype `geo:wktLiteral`
-(`http://www.opengis.net/ont/geosparql#wktLiteral`). These literals feed the
-GeoSPARQL functions (`geof:distance`, `geof:sfWithin`, …).
+Geometry is usually stored as a **WKT literal** with the datatype `geo:wktLiteral`
+(`http://www.opengis.net/ont/geosparql#wktLiteral`); GML, GeoJSON and KML
+literals are geometries too. These literals feed the GeoSPARQL functions
+(`geof:distance`, `geof:sfWithin`, …).
 
 | Datatype | Use for | Example literal |
 |---|---|---|
 | `geo:wktLiteral` | a geometry in Well-Known Text | `"POINT(4.4870 51.9094)"^^geo:wktLiteral` |
+| `geo:gmlLiteral` | a GML 3.2 geometry ([supported profile](/docs/geosparql#supported-gml-profile)) | `"<gml:Point srsName='EPSG:28992'><gml:pos>92000 437000</gml:pos></gml:Point>"^^geo:gmlLiteral` |
+| `geo:geoJSONLiteral` | an RFC 7946 geometry object, CRS84 | `'{"type":"Point","coordinates":[4.487,51.909]}'^^geo:geoJSONLiteral` |
+| `geo:kmlLiteral` | a KML 2.2 geometry element, CRS84 | `"<Point><coordinates>4.487,51.909</coordinates></Point>"^^geo:kmlLiteral` |
 
 WKT coordinate order is **`POINT(lon lat)`**. A literal may be prefixed with a
 CRS IRI: `"<http://www.opengis.net/def/crs/EPSG/0/4326> POINT(4.49 51.91)"`.

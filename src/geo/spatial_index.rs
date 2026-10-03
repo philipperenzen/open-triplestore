@@ -4,7 +4,7 @@
 //! pruning candidates to O(log n + k) before expensive GEOS evaluation.
 //!
 //! The index stores bounding boxes (envelopes) of every serialised geometry —
-//! `geo:asWKT`, `geo:asGML` and `geo:asGeoJSON` — and supports efficient range
+//! `geo:asWKT`, `geo:asGML`, `geo:asGeoJSON` and `geo:asKML` — and supports efficient range
 //! queries via an R-tree data structure.
 
 use geos::Geom;
@@ -15,12 +15,17 @@ use std::sync::{Arc, RwLock};
 use tracing::{info, warn};
 
 use super::datatypes::parse_wkt_literal;
-use super::vocabulary::{AS_GEOJSON_PROPERTY, AS_GML_PROPERTY, AS_WKT_PROPERTY};
+use super::vocabulary::{AS_GEOJSON_PROPERTY, AS_GML_PROPERTY, AS_KML_PROPERTY, AS_WKT_PROPERTY};
 
 const GEO_HAS_GEOMETRY: &str = "http://www.opengis.net/ont/geosparql#hasGeometry";
 
 /// The geometry serialisation properties the index scans.
-const SERIALISATIONS: [&str; 3] = [AS_WKT_PROPERTY, AS_GML_PROPERTY, AS_GEOJSON_PROPERTY];
+const SERIALISATIONS: [&str; 4] = [
+    AS_WKT_PROPERTY,
+    AS_GML_PROPERTY,
+    AS_GEOJSON_PROPERTY,
+    AS_KML_PROPERTY,
+];
 
 /// An entry in the spatial R-tree index: a subject IRI with its bounding box.
 #[derive(Clone, Debug)]
@@ -293,6 +298,7 @@ mod tests {
                 <http://example.org/w> geo:asWKT "POINT(1 1)"^^geo:wktLiteral .
                 <http://example.org/g> geo:asGML "<gml:Point><gml:pos>2 2</gml:pos></gml:Point>"^^geo:gmlLiteral .
                 <http://example.org/j> geo:asGeoJSON '{"type":"Point","coordinates":[3,3]}'^^geo:geoJSONLiteral .
+                <http://example.org/k> geo:asKML "<Point><coordinates>4,4</coordinates></Point>"^^geo:kmlLiteral .
                 <http://example.org/bad> geo:asGeoJSON '{"type":"Point"}'^^geo:geoJSONLiteral .
                 "#,
             )
@@ -310,6 +316,7 @@ mod tests {
             [
                 "http://example.org/g",
                 "http://example.org/j",
+                "http://example.org/k",
                 "http://example.org/w"
             ]
         );

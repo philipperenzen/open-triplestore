@@ -128,8 +128,10 @@ behavior and will flip green when the limitation is resolved.
    rules (hasSelf, disjointUnion, NegativePropertyAssertion, hasKey, cardinality).
    Full DL tableau (consistency detection, profile validation, nominal/datatype
    reasoning) requires the external reasoner bridge (e.g. Konclude).
-5. **GeoSPARQL 1.1:** WKT, GML and GeoJSON (RFC 7946, CRS84) geometry literals,
-   with `geof:asGeoJSON`; the full topology family
+5. **GeoSPARQL 1.1:** WKT, GML (a documented GML 3.2 profile, Z kept), GeoJSON
+   (RFC 7946, CRS84, altitude kept) and KML (CRS84) geometry literals, with
+   `geof:asWKT`, `asGML`, `asGeoJSON` and `asKML`, and geometry results in their
+   first operand's serialisation and CRS; the full topology family
    (sf/eh/rcc8); `geof:relate` with DE-9IM patterns; distance, area, buffer,
    getSRID and the constructive functions; the metric family
    (`geof:metricDistance`, `metricLength`, `metricPerimeter`, `metricArea`,
@@ -138,16 +140,16 @@ behavior and will flip green when the limitation is resolved.
    Mercator), keeping Z and unbound outside a CRS's domain; binary functions,
    `geof:relate` included, harmonise their operands' CRSs. A literal's CRS is its
    WKT prefix or GML `srsName` for every function, axis order included, and an
-   empty WKT/GML/GeoJSON literal is the empty geometry. Units are OGC, QUDT or
+   empty WKT/GML/GeoJSON/KML literal is the empty geometry. Units are OGC, QUDT or
    EPSG IRIs (or `xsd:anyURI`); `geof:distance` and `geof:buffer` with a linear
    unit on a geographic CRS are geodesic, on a projected CRS planar in its
    metres, and an unknown or incompatible unit is unbound. The `geof:aggUnion`
    aggregate, with or without `GROUP BY`. **Not
-   implemented:** KML/DGGS literals, the Query Rewrite Extension, the other
+   implemented:** DGGS literals, the Query Rewrite Extension, the other
    aggregates (`aggBoundingBox`, `aggBoundingCircle`, `aggCentroid`,
    `aggConcaveHull`, `aggConvexHull`), and the non-metric functions GeoSPARQL 1.1
-   added besides `transform` and `asGeoJSON` (`length`, `perimeter`, `centroid`,
-   `geometryN`, `isEmpty`, `asWKT`, …).
+   added besides `transform` and the serialisation functions (`length`,
+   `perimeter`, `centroid`, `geometryN`, `isEmpty`, …).
 6. **SHACL Core** — the Core constraint components are implemented, and
    blank-node property shapes (`sh:property [ … ]`, the standard idiom) are
    enforced (the loader dereferences blank nodes through the raw quad index;

@@ -5,6 +5,7 @@ pub mod functions;
 pub mod geodesic;
 pub mod geojson;
 pub mod gml;
+pub mod kml;
 pub mod places;
 pub mod spatial_index;
 pub mod viewer_feed;
