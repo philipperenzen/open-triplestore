@@ -117,9 +117,10 @@ Bundled binaries and frontend libraries:
 
 Vendored source code:
 
-  - spareval 0.2.7 (vendor/spareval/) and sparopt 0.3.7 (vendor/sparopt/), the
-    SPARQL evaluator and optimizer crates of Oxigraph as published on crates.io
-    (upstream https://github.com/oxigraph/oxigraph, paths lib/spareval and
+  - spargebra 0.4.7 (vendor/spargebra/), spareval 0.2.7 (vendor/spareval/) and
+    sparopt 0.3.7 (vendor/sparopt/), the SPARQL parser, evaluator and optimizer
+    crates of Oxigraph as published on crates.io (upstream
+    https://github.com/oxigraph/oxigraph, paths lib/spargebra, lib/spareval and
     lib/sparopt, commit 0e81a29d27575ab69e7f85ea9c7f1058b277fcd0) —
     dual-licensed MIT or Apache-2.0, at your option; Copyright (c) 2018
     Oxigraph developers. Both licence texts are beside each crate
