@@ -48,9 +48,10 @@ canonicalised, so blank nodes are matched structurally, also inside triple
 terms; order is asserted only when the query has an outer `ORDER BY`);
 CONSTRUCT/DESCRIBE by graph isomorphism; updates by dataset isomorphism.
 Numeric literals are compared by value (`"2.0"^^xsd:decimal` equals
-`"2"^^xsd:decimal`), at any depth inside triple terms, because the engine
-stores numerics natively and writes them back in canonical form; an entry that
-declares `mf:requires mf:NoCanonicalizationOfNumerics` is compared exactly.
+`"2"^^xsd:decimal`), at any depth inside triple terms, as the suite's result
+comparison allows; an entry that declares `mf:requires
+mf:NoCanonicalizationOfNumerics` is compared exactly, and passes, since the
+store keeps literals as written.
 Every other literal is compared by lexical form, language tag, base direction
 and datatype. Syntax tests assert parse success or failure only.
 
@@ -62,14 +63,12 @@ loader regression turning passes into failures.
 
 ## Known failures (bug tracking)
 
-Checked against the W3C issue trackers on 2026-10-03. One entry is left, and
-it is not blocked by a Working Group issue: it waits on this project's change
-to keep numeric lexical forms in storage. It keeps the SPARQL 1.2 grade at
-Partial ([Standards](../standards.md) note 1).
-
-| Entry | Gap |
-|---|---|
-| `grouping#group01` | The entry declares `mf:requires mf:NoCanonicalizationOfNumerics`. Storage keeps numerics as values, so `"001"^^xsd:integer` reads back as `"1"^^xsd:integer` and groups with it. The lexical-form storage change fixes it. |
+Checked against the W3C issue trackers on 2026-10-03. No entry fails.
+`grouping#group01`, the last one, declares `mf:requires
+mf:NoCanonicalizationOfNumerics`: storage used to keep numerics as values, so
+`"001"^^xsd:integer` read back as `"1"^^xsd:integer` and grouped with it. It
+passes since the store keeps every literal as written
+([`vendor/README.md`](../../vendor/README.md)).
 
 The other gaps the run found were in Oxigraph 0.5.11's SPARQL parser and
 evaluator (spargebra 0.4.7, spareval 0.2.7), which this project carries as a

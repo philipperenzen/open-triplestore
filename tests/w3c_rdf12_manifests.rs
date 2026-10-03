@@ -67,36 +67,14 @@ const RDFT: &str = "http://www.w3.org/ns/rdftest#";
 
 /// Entries that currently fail, with the gap they sit behind. Keep sorted.
 /// Removing an entry requires the entry to actually pass (the ratchet asserts
-/// both directions). Two causes, both below the platform layer: the oxigraph
-/// 0.5 literal encoder stores numerics as values (so a non-canonical lexical
-/// form is lost), and oxrdfxml's `rdf:parseType="Literal"` output, which the
-/// suite changed on 2026-04-20 while the canonical form of `rdf:XMLLiteral`
-/// is an open W3C issue.
+/// both directions). One cause, below the platform layer: oxrdfxml's
+/// `rdf:parseType="Literal"` output, which the suite changed on 2026-04-20
+/// while the canonical form of `rdf:XMLLiteral` is an open W3C issue
+/// (w3c/rdf-xml#97). The numeric lexical-form entries listed here before pass
+/// now that the store keeps literals as written (vendor/README.md).
 const KNOWN_FAILURES: &[(&str, &str)] = &[
-    ("rdf11/rdf-trig/manifest.ttl#bareword_decimal", "storage rewrites numeric lexical forms to canonical (oxigraph 0.5 stores numerics as values): `1.0` reads back as `\"1\"^^xsd:decimal`"),
-    ("rdf11/rdf-trig/manifest.ttl#bareword_double", "as bareword_decimal: `1E0` reads back as `\"1\"^^xsd:double`"),
-    ("rdf11/rdf-trig/manifest.ttl#double_lower_case_e", "as bareword_decimal: `1e0` reads back as `\"1\"^^xsd:double`"),
-    ("rdf11/rdf-trig/manifest.ttl#numeric_with_leading_0", "as bareword_decimal: `01` reads back as `\"1\"^^xsd:integer`"),
-    ("rdf11/rdf-trig/manifest.ttl#positive_numeric", "as bareword_decimal: `+1` reads back as `\"1\"^^xsd:integer`"),
-    ("rdf11/rdf-trig/manifest.ttl#trig-subm-11", "as bareword_decimal: `000000`, `000001` read back as `0`, `1`"),
-    ("rdf11/rdf-trig/manifest.ttl#trig-subm-17", "as bareword_decimal: decimal and double literals such as `1.0` and `1.0e0` read back in canonical form"),
-    ("rdf11/rdf-trig/manifest.ttl#trig-subm-19", "as bareword_decimal: signed decimal and double literals read back in canonical form"),
-    ("rdf11/rdf-trig/manifest.ttl#trig-subm-20", "as bareword_decimal: negative decimal and double literals read back in canonical form"),
-    ("rdf11/rdf-trig/manifest.ttl#trig-subm-26", "as bareword_decimal: `1.`, `1.000000000` and long decimals read back in canonical form"),
-    ("rdf11/rdf-turtle/manifest.ttl#bareword_decimal", "storage rewrites numeric lexical forms to canonical (oxigraph 0.5 stores numerics as values): `1.0` reads back as `\"1\"^^xsd:decimal`"),
-    ("rdf11/rdf-turtle/manifest.ttl#bareword_double", "as bareword_decimal: `1E0` reads back as `\"1\"^^xsd:double`"),
-    ("rdf11/rdf-turtle/manifest.ttl#double_lower_case_e", "as bareword_decimal: `1e0` reads back as `\"1\"^^xsd:double`"),
-    ("rdf11/rdf-turtle/manifest.ttl#numeric_with_leading_0", "as bareword_decimal: `01` reads back as `\"1\"^^xsd:integer`"),
-    ("rdf11/rdf-turtle/manifest.ttl#positive_numeric", "as bareword_decimal: `+1` reads back as `\"1\"^^xsd:integer`"),
-    ("rdf11/rdf-turtle/manifest.ttl#turtle-subm-11", "as bareword_decimal: `000000`, `000001` read back as `0`, `1`"),
-    ("rdf11/rdf-turtle/manifest.ttl#turtle-subm-17", "as bareword_decimal: decimal and double literals such as `1.0` and `1.0e0` read back in canonical form"),
-    ("rdf11/rdf-turtle/manifest.ttl#turtle-subm-19", "as bareword_decimal: signed decimal and double literals read back in canonical form"),
-    ("rdf11/rdf-turtle/manifest.ttl#turtle-subm-20", "as bareword_decimal: negative decimal and double literals read back in canonical form"),
-    ("rdf11/rdf-turtle/manifest.ttl#turtle-subm-26", "as bareword_decimal: `1.`, `1.000000000` and long decimals read back in canonical form"),
     ("rdf11/rdf-xml/manifest.ttl#xml-canon-test001", "`rdf:parseType=\"Literal\"`: oxrdfxml 0.2.4 keeps the in-scope namespace declarations on the literal's root element; the suite expects `\"<br></br>\"` again since rdf-tests d974697 (2026-04-20). The canonical form of `rdf:XMLLiteral` is open W3C issue w3c/rdf-xml#97 (opened 2026-04-20)"),
     ("rdf11/rdf-xml/manifest.ttl#xml-canon-test002", "as xml-canon-test001"),
-    ("rdf12/rdf-turtle/eval#turtle12-rt-09", "as rdf11 bareword_decimal, inside triple terms: `1.0`, `1e0` read back in canonical form"),
-    ("rdf12/rdf-turtle/eval#turtle12-tt-05", "as turtle12-rt-09"),
     ("rdf12/rdf-xml/eval#rdf12-xml-an-13", "as rdf11 xml-canon-test001, inside a triple term (rdf-tests 7633586, 2026-05-31; w3c/rdf-xml#97)"),
     ("rdf12/rdf-xml/eval#rdf12-xml-an-14", "as rdf12-xml-an-13"),
 ];

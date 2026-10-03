@@ -58,16 +58,20 @@ loader regression turning passes into failures.
 ## Known failures (bug tracking)
 
 Checked against the W3C issue trackers on 2026-10-03. Triple terms,
-reifiers, annotations, base direction, `VERSION` and the canonical N-Triples
-and N-Quads forms all pass; an entry fails only where its literal is a
-non-canonical number or an `rdf:XMLLiteral`. Two causes, both below the
-platform layer:
+reifiers, annotations, base direction, `VERSION`, non-canonical numbers and
+the canonical N-Triples and N-Quads forms all pass; an entry fails only where
+its literal is an `rdf:XMLLiteral`, and those wait on an open W3C issue:
 
 | Entries | Gap |
 |---|---|
-| `rdf11/rdf-turtle#bareword_decimal`, `#bareword_double`, `#double_lower_case_e`, `#numeric_with_leading_0`, `#positive_numeric`, `#turtle-subm-11`, `-17`, `-19`, `-20`, `-26`; the same ten in `rdf11/rdf-trig`; `rdf12/rdf-turtle/eval#turtle12-rt-09`, `#turtle12-tt-05` | Storage keeps numeric literals as values (the oxigraph 0.5 literal encoder), so a non-canonical lexical form is lost: `1.0`, `1e0`, `+1`, `01` read back as `"1"^^xsd:decimal`, `"1"^^xsd:double`, `"1"^^xsd:integer`. The parsers produce the right terms; the store changes them. The lexical-form storage change fixes all 22. |
 | `rdf11/rdf-xml#xml-canon-test001`, `#xml-canon-test002`; `rdf12/rdf-xml/eval#rdf12-xml-an-13`, `#rdf12-xml-an-14` | `rdf:parseType="Literal"`: oxrdfxml keeps the in-scope namespace declarations on the literal's root element (`"<br xmlns:rdf=… xmlns:eg=…></br>"`). The suite expected that form from June 2025 and went back to `"<br></br>"` on 2026-04-20 (rdf-tests d974697, and 7633586 on 2026-05-31 for the RDF 1.2 entries); the canonical form of `rdf:XMLLiteral` is open W3C issue [w3c/rdf-xml#97](https://github.com/w3c/rdf-xml/issues/97) (opened 2026-04-20). |
 
-The numeric entries keep the RDF 1.2 grade at Partial until the storage
-change lands ([Standards](../standards.md) note 1); the `rdf:XMLLiteral`
-entries wait on the open issue.
+Until 2026-10-03, 22 more Turtle and TriG entries failed (`bareword_decimal`,
+`bareword_double`, `double_lower_case_e`, `numeric_with_leading_0`,
+`positive_numeric`, `turtle-subm-11`, `-17`, `-19`, `-20`, `-26`, the same ten
+in TriG, and `rdf12/rdf-turtle/eval#turtle12-rt-09`, `#turtle12-tt-05`):
+storage kept numeric literals as values, so `1.0`, `1e0`, `+1` or `01` read
+back in canonical form. The store now keeps every literal as written
+([`vendor/README.md`](../../vendor/README.md)), and they pass. The remaining
+entries are blocked on the open W3C issue, so they do not count against the
+grade ([Standards](../standards.md) note 1).

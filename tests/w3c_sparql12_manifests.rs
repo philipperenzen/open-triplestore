@@ -82,13 +82,11 @@ const RS: &str = "http://www.w3.org/2001/sw/DataAccess/tests/result-set#";
 
 /// Entries that currently fail, with the gap they sit behind. Keep sorted.
 /// Removing an entry requires the entry to actually pass (the ratchet asserts
-/// both directions). None is in the platform layer: the one entry left asks
-/// for a feature (`mf:NoCanonicalizationOfNumerics`) the oxigraph 0.5 storage
-/// lacks, which the lexical-form storage change brings. The parser entries
-/// listed here before pass with the vendored spargebra (vendor/README.md).
-const KNOWN_FAILURES: &[(&str, &str)] = &[
-    ("grouping/manifest#group01", "requires mf:NoCanonicalizationOfNumerics: storage keeps numerics as values, so `\"001\"^^xsd:integer` reads back as `\"1\"` and groups with it; fixed by the lexical-form storage change"),
-];
+/// both directions). None is open: the parser entries listed here before pass
+/// with the vendored spargebra (vendor/README.md), and `grouping#group01`
+/// (`mf:NoCanonicalizationOfNumerics`) passes now that the store keeps
+/// literals as written.
+const KNOWN_FAILURES: &[(&str, &str)] = &[];
 
 /// Pass floor: a loader or parser regression turns passes into skips or
 /// failures; the two ratchet asserts alone would not notice a wholesale skip.
