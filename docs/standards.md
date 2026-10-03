@@ -44,7 +44,7 @@ applies.
 | RML / R2RML | CSV/JSON/XML files and SQL / SPARQL datasources → RDF | Partial⁹ |
 | JWT / OAuth 2.0 / OIDC | Authentication | Full |
 | SAML 2.0 | Authentication | Experimental — not in the `full` feature or the published image. SP-initiated Web Browser SSO (HTTP-Redirect AuthnRequest, HTTP-POST response bound to the request, signed by the configured IdP certificate); no IdP-initiated SSO, signed AuthnRequests, encrypted assertions or Single Logout. Tested against a simulated IdP only. See [auth.md](auth.md#saml-20). |
-| ShEx | Shape Expressions (ShExC) | Partial — node kinds, datatypes with lexical checks, string/numeric facets, value sets, cardinalities, EachOf/OneOf, inverse constraints, CLOSED/EXTRA, shape references; no semantic actions, imports or annotations. Semantics pinned by `tests/shex_conformance.rs`. |
+| ShEx 2.1 | Shape Expressions: ShExC, ShExJ, ShExR, ShapeMap | Full¹⁶ — see [shex.md](shex.md). |
 | SWRL | Horn-clause rules | Full¹⁵ — every atom (class expressions via the regime, data ranges natively), all §8 built-ins with binding, six syntaxes, rules stored with a dataset. See [swrl.md](swrl.md). |
 | SPARQL + full-text search (Tantivy) | A feature, not a standard: the `ft:search` / `text:search` magic property and `CONTAINS` / `STRSTARTS` push-down | Full¹¹ |
 | SKOS | Simple Knowledge Organization System: SKOS-aware inferencing and integrity checking | Full¹² |
@@ -69,7 +69,8 @@ allows no performance claims on a subset, so their pages track known gaps but
 give no score.
 The SHACL Compact Syntax Community Group test cases (W3C Software and Document
 License) are vendored under `tests/fixtures/w3c-shaclc/`, whose `PROVENANCE.md`
-gives their source and licence.
+gives their source and licence. The shexTest results are in
+[shex.md](shex.md#conformance).
 
 <!-- conformance-table:start -->
 | Standard | Suite | Basis | Tests | Notes |
@@ -93,7 +94,8 @@ gives their source and licence.
 | SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 66 |  |
 | SHACL-AF rules | `tests/shacl_rules_conformance.rs` | spec-derived | 43 |  |
 | SHACL Compact Syntax | `tests/shaclc_conformance.rs` | spec-derived | 17 |  |
-| ShEx | `tests/shex_conformance.rs` | spec-derived | 10 |  |
+| ShEx | `tests/shex_conformance.rs` | spec-derived | 21 |  |
+| ShEx 2.1 | `tests/shextest_conformance.rs` | **vendored shexTest corpus** (validation, representation, negative syntax/structure; manifest-driven) | 6 | 1917 corpus cases: 1795 pass, 0 known failures, 122 runner-side skips (floor ≥1795 asserted) |
 | SPARQL 1.2 / RDF 1.2 | `tests/sparql12_conformance.rs` | spec-derived | 27 |  |
 | SP2B / BSBM query shapes | `tests/sparql_benchmarks.rs` | benchmark-derived | 28 |  |
 | SPARQL 1.1 functions | `tests/sparql_functions_conformance.rs` | spec-derived | 9 |  |
@@ -113,7 +115,7 @@ gives their source and licence.
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 | SPARQL 1.2 | `tests/w3c_sparql12_manifests.rs` | **vendored W3C test-suite subset** (`sparql/sparql12` of w3c/rdf-tests, unmodified; manifest-driven, engine and mirror paths) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql12.md` |
 
-1140 conformance tests across 38 suites; a further 805 tests in 107 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 13 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
+1157 conformance tests across 39 suites; a further 806 tests in 107 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 14 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->
@@ -400,7 +402,6 @@ behavior and will flip green when the limitation is resolved.
 
     See [owl2-rl.md](owl2-rl.md), [owl2-el.md](owl2-el.md) and
     [owl2-ql.md](owl2-ql.md).
-
 11. **Full-text search** is graded as a feature: no W3C or OGC standard
     defines it. *Full* means the index covers every literal of the store and
     follows **every** write. Since 2026-10-03 each store write records what it
@@ -472,7 +473,25 @@ behavior and will flip green when the limitation is resolved.
     semantics are pinned by `tests/swrl_conformance.rs` (one table-driven test per §8
     subsection) and `tests/entailment_http.rs`.
 
+16. **ShEx 2.1** — graded against the ShEx 2.1 Final Community Group Report
+    (2019-10-08). The engine passes the whole 2.1 part of the vendored
+    shexTest suite (`tests/shextest_conformance.rs`): 1209 validation, 462
+    representation (ShExC = ShExJ = ShExR), 105 negative-syntax and 19
+    negative-structure tests, no known failures. Skipped: the 122 tests of
+    ShEx 2.next (`EXTENDS`, `ABSTRACT`), which 2.1 does not include and the
+    engine refuses. Where the specification leaves a choice to the
+    implementation: `IMPORT` is resolved only from named graphs of the store
+    the caller may read (ShExR), never over the network; semantic actions
+    evaluate only the shexTest Test extension and never execute code;
+    `EXTERNAL` shapes have no definition mechanism, so they are never
+    satisfied; ShapeMap `SPARQL` selectors are not supported. Stored data: the
+    store keeps typed literals as written, so every validation case answers
+    the same through the store as on the parsed data (`STORE_DIVERGENCES` is
+    empty).
+
+
 Related guides: [OWL Reasoning](/docs/reasoning), [SHACL Validation](/docs/shacl),
+[ShEx Validation](/docs/shex),
 [GeoSPARQL](/docs/geosparql), [Performance](/docs/performance),
 [Triplestore comparison](/docs/triplestore-comparison),
 [Authentication & API Tokens](/docs/auth).

@@ -71,3 +71,7 @@ tests/fixtures/w3c-rdf12/** -text
 tests/fixtures/w3c-rdf-mt/**             -text
 tests/fixtures/w3c-sparql11/entailment/** -text
 tests/fixtures/w3c-owl2/approved/**      -text
+# The vendored shexTest suite is kept byte-identical to upstream: one data file
+# carries a carriage return inside a string literal, which the *.ttl rule
+# above would rewrite.
+tests/fixtures/shextest/** -text

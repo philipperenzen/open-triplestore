@@ -50,6 +50,9 @@ is decided per corpus when it is vendored (`CORPUS_RUNNERS`, `PUBLISH_SCORE`,
   sets no such condition either; the owner decided to publish their counts
   (2026-10-02). They are TopQuadrant's tests of its own engine, not a W3C
   suite, so a count is no claim of conformance to anything.
+- The shexTest suite (ShEx Community Group) carries the W3C Software and
+  Document License in its own LICENSE file, and is not a W3C test suite, so
+  its row keeps its counts too.
 - The OGC validator shapes are under the Apache License 2.0; only the OGC
   authorises compliance marks for its standards, so no row claims compliance.
 """
@@ -96,6 +99,7 @@ SUITES: dict[str, tuple[str, str]] = {
     "shaclc_conformance": ("SHACL Compact Syntax", "spec-derived"),
     "w3c_shaclc_conformance": ("SHACL Compact Syntax", "**vendored W3C CG test cases** (SHACL-C report, line endings normalised; parse + round trip)"),
     "shex_conformance": ("ShEx", "spec-derived"),
+    "shextest_conformance": ("ShEx 2.1", "**vendored shexTest corpus** (validation, representation, negative syntax/structure; manifest-driven)"),
     "swrl_conformance": ("SWRL", "spec-derived"),
     "ldp_conformance": ("LDP 1.0 (store level)", "spec-derived"),
     "ldp_http_conformance": ("LDP 1.0 (HTTP)", "spec-derived"),
@@ -122,6 +126,7 @@ CORPUS_RUNNERS = {
     "shacl_af_corpus": 9,
     "w3c_shacl_conformance": 90,
     "w3c_shaclc_conformance": 32,
+    "shextest_conformance": 1795,
     "w3c_sparql11_manifests": 450,
     "w3c_sparql11_federation": 9,
     "w3c_owl2_dl_manifests": 235,
@@ -137,7 +142,7 @@ CORPUS_RUNNERS = {
 # missing here is still checked, but its row carries no numbers: the W3C SPARQL
 # 1.1 and JSON-LD API sections and the OWL 2 DL cases are partial runs of W3C test suites, on
 # which W3C allows no public performance claims.
-PUBLISH_SCORE = {"shacl_af_corpus", "w3c_shacl_conformance", "w3c_shaclc_conformance"}
+PUBLISH_SCORE = {"shacl_af_corpus", "shextest_conformance", "w3c_shacl_conformance", "w3c_shaclc_conformance"}
 
 # The note for each corpus runner whose score is not published. Every
 # CORPUS_RUNNERS entry outside PUBLISH_SCORE needs one: it says why no score is
@@ -283,7 +288,7 @@ def render() -> str:
         "corpus; every other suite is hand-written and derived from the specification text. "
         "A vendored row gives results only where its corpus licence allows performance claims; "
         "those are development and regression results on the vendored sections "
-        "(`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C "
+        "(`docs/conformance/`, `docs/shex.md`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C "
         "SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 "
         "syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of "
         "W3C test suites, so they carry no results and are used for development and bug tracking "
