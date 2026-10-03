@@ -14,6 +14,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **VoID per dataset.** Each dataset in the catalogue is described over the
+  graphs the caller may read with `void:distinctSubjects`,
+  `void:distinctObjects`, `void:properties`, `void:classes`,
+  `void:documents`, class and property partitions (`void:classPartition`,
+  `void:propertyPartition`), `void:vocabulary`, `void:exampleResource`,
+  `void:feature`, `void:dataDump` and `void:sparqlEndpoint`; a graph whose
+  role is `linkset` is a `void:Linkset` with its link predicates and targets.
+  Partitions are never computed for the store-wide aggregate. New settings
+  `OTS_VOID_PARTITION_LIMIT` (partitions listed per kind, default 100) and
+  `OTS_VOID_PARTITION_MAX_TRIPLES` (no partitions above it, default
+  5,000,000); a value that is not a whole number stops the server at startup.
+- **The official DCAT-AP shapes run in CI.** `tests/dcat_conformance.rs`
+  validates the catalogue against SEMIC's DCAT-AP 3.0.1 shapes (vendored in
+  `tests/fixtures/semic-dcat-ap-3.0.1/`, CC BY 4.0) and Geonovum's DCAT-AP-NL 3
+  shapes (fetched at a pinned commit by
+  `tests/fixtures/geonovum-dcat-ap-nl-3/fetch.sh`, sha256-checked) and
+  asserts no violation; `tests/dcat_ap_http.rs` validates the served
+  catalogue against the SEMIC shapes instead of a hand-written subset.
 - **DCAT 3 versions, data services, coverage and catalogue records.** The
   dataset catalogue (`/.well-known/void`) describes each released (published
   or deprecated) dataset version as a DCAT 3 §11 `dcat:Dataset` —
@@ -306,6 +324,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   how to get help.
 
 ### Changed
+- **DCAT 3 / DCAT-AP 3 / DCAT-AP-NL 3 and VoID are graded Full.**
+  `docs/standards.md` gives VoID its own row; the comparison's "DCAT" row is
+  now "DCAT 3", and both cells follow the grades (Standards Score 15 → 17). The
+  capabilities seed follows (`DEMO_CONTENT_VERSION` 16 refreshes it). The
+  aggregate dataset carries the themes of the datasets it covers.
 - **The DCAT catalogues use DCAT terms with their declared semantics.** The
   model registry's catalogue (`/api/catalog`) is built as RDF terms instead of
   hand-written Turtle: `dcat:hasVersion` points at version resources (it was a

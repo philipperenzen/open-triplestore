@@ -539,3 +539,468 @@ fn the_registry_catalogue_is_dcat3() {
         "the data endpoint serves neither RDF/XML nor JSON-LD, so neither is offered:\n{ttl}"
     );
 }
+
+// ── Official DCAT-AP 3.0.1 / DCAT-AP-NL 3 shapes, and VoID ───────────────────
+
+const SEMIC: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/semic-dcat-ap-3.0.1"
+);
+const GEONOVUM: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/geonovum-dcat-ap-nl-3"
+);
+const VOID: &str = "http://rdfs.org/ns/void#";
+
+/// A registry that exercises every branch of the catalogue generator: an
+/// organisation-, a user- and a group-owned dataset; geometry (so the OGC API
+/// is a data service); an LDES stream; released and draft versions; a
+/// linkset-role graph; a private graph; temporal coverage, frequency,
+/// keywords, spatial coverage; a dataset without a licence of its own (the
+/// catalogue's applies) and one without a contact point (its organisation's
+/// or the catalogue's applies).
+fn rich_fixture() -> (TripleStore, Arc<AuthDb>) {
+    use open_triplestore::auth::models::{GraphKind, SystemRole};
+    use open_triplestore::dataset_versions::models::VersionStatus::*;
+    use open_triplestore::dataset_versions::registry::insert_version;
+    let store = TripleStore::in_memory().unwrap();
+    let db = Arc::new(AuthDb::in_memory().unwrap());
+    db.create_user("u1", "ada", "ada@example.org", "h", SystemRole::User)
+        .unwrap();
+    db.create_user(
+        "root",
+        "root",
+        "root@example.org",
+        "h",
+        SystemRole::SuperAdmin,
+    )
+    .unwrap();
+    db.create_organisation(
+        "o1",
+        "Acme Data",
+        "acme",
+        Some("Publishes census data."),
+        None,
+    )
+    .unwrap();
+    db.update_organisation(
+        "o1",
+        "Acme Data",
+        Some("Publishes census data."),
+        Some("https://acme.example.org/"),
+        Some("00000001234567890000"),
+        Some("Acme data desk"),
+        Some("desk@acme.example.org"),
+        None,
+        Some("FormalOrganization"),
+        None,
+    )
+    .unwrap();
+    db.create_group("g1", "o1", "Survey team", None).unwrap();
+    let theme = |t: &str| format!("[\"{EU}data-theme/{t}\"]");
+    for (id, name, owner_type, owner, t) in [
+        (
+            "census",
+            "Census 2020",
+            OwnerType::Organisation,
+            "o1",
+            "SOCI",
+        ),
+        ("notes", "Field notes", OwnerType::User, "u1", "ENVI"),
+        ("survey", "Survey results", OwnerType::Group, "g1", "GOVE"),
+    ] {
+        db.create_dataset(
+            id,
+            name,
+            Some(&format!("{name}, described.")),
+            owner_type,
+            owner,
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+        db.update_dataset_metadata(
+            id,
+            (id == "census").then_some("http://creativecommons.org/licenses/by/4.0/"),
+            Some(&theme(t)),
+            Some("[\"open data\"]"),
+            (id == "notes").then_some("Ada"),
+            (id == "notes").then_some("ada@example.org"),
+            None,
+            Some("completed"),
+            None,
+            Some("http://sws.geonames.org/2750405/"),
+            None,
+        )
+        .unwrap();
+    }
+    db.update_dataset_coverage(
+        "census",
+        Some("2020-01-01"),
+        Some("2020-12-31"),
+        Some("http://publications.europa.eu/resource/authority/frequency/DECENNIAL"),
+    )
+    .unwrap();
+    let g_data = "https://example.org/census/instances";
+    let g_links = "https://example.org/census/links";
+    let g_private = "https://example.org/census/embargoed";
+    for g in [g_data, g_links, g_private] {
+        db.add_dataset_graph("census", g).unwrap();
+    }
+    db.set_dataset_graph_role("census", g_data, Some(GraphKind::Instances))
+        .unwrap();
+    db.set_dataset_graph_role("census", g_links, Some(GraphKind::Linkset))
+        .unwrap();
+    db.set_dataset_graph_private("census", g_private, true)
+        .unwrap();
+    store
+        .load_str(
+            "@prefix ex: <https://example.org/census/> . \
+             @prefix geo: <http://www.opengis.net/ont/geosparql#> . \
+             ex:p1 a ex:Person ; ex:age 31 ; ex:livesIn ex:t1 . \
+             ex:p2 a ex:Person ; ex:age 47 . \
+             ex:t1 a ex:Town ; geo:hasGeometry ex:t1g . \
+             ex:t1g geo:asWKT \"POINT(5.1 52.1)\"^^geo:wktLiteral .",
+            RdfFormat::Turtle,
+            Some(g_data),
+        )
+        .unwrap();
+    store
+        .load_str(
+            "<https://example.org/census/t1> <http://www.w3.org/2002/07/owl#sameAs> <http://www.wikidata.org/entity/Q803> . \
+             <https://example.org/census/p1> <http://www.w3.org/2000/01/rdf-schema#seeAlso> <http://www.wikidata.org/entity/Q42> .",
+            RdfFormat::Turtle,
+            Some(g_links),
+        )
+        .unwrap();
+    store
+        .load_str(
+            "<https://example.org/census/s1> a <https://example.org/secret/Informant> .",
+            RdfFormat::Turtle,
+            Some(g_private),
+        )
+        .unwrap();
+    db.add_dataset_graph("notes", "https://example.org/notes/g")
+        .unwrap();
+    store
+        .load_str(
+            "<https://example.org/notes/n1> <http://purl.org/dc/terms/title> \"A note\" .",
+            RdfFormat::Turtle,
+            Some("https://example.org/notes/g"),
+        )
+        .unwrap();
+    open_triplestore::ldes::store::set_stream(&db, "notes", true, 100).unwrap();
+    for v in [
+        version(
+            "census",
+            "1.0.0",
+            Published,
+            "2026-01-01T00:00:00Z",
+            None,
+            Some("First count"),
+        ),
+        version(
+            "census",
+            "1.1.0",
+            Deprecated,
+            "2026-02-01T00:00:00Z",
+            Some("1.0.0"),
+            None,
+        ),
+        version(
+            "census",
+            "1.2.0",
+            Published,
+            "2026-03-01T00:00:00Z",
+            Some("1.1.0"),
+            None,
+        ),
+        version(
+            "census",
+            "2.0.0",
+            Draft,
+            "2026-04-01T00:00:00Z",
+            Some("1.2.0"),
+            None,
+        ),
+    ] {
+        insert_version(&store, BASE, &v).unwrap();
+    }
+    (store, db)
+}
+
+fn ap_options(profile: Profile) -> CatalogOptions {
+    let mut o = CatalogOptions::new(BASE, profile);
+    o.publisher_name = "Example Municipality".into();
+    o.publisher_identifier = Some("00000009876543210000".into());
+    o.publisher_type = Some("http://purl.org/adms/publishertype/LocalAuthority".into());
+    o.license = Some("http://creativecommons.org/publicdomain/zero/1.0/".into());
+    o.contact_name = Some("Open data office".into());
+    o.contact_email = Some("opendata@example.org".into());
+    o
+}
+
+/// Validate `ttl` against the shape files, returning (violations, warnings)
+/// as readable lines.
+fn validate_against(ttl: &str, shape_files: &[String]) -> (Vec<String>, Vec<String>) {
+    use open_triplestore::shacl::report::Severity;
+    let s = TripleStore::in_memory().unwrap();
+    s.load_str(ttl, RdfFormat::Turtle, Some("urn:test:catalogue"))
+        .unwrap();
+    for f in shape_files {
+        let shapes = std::fs::read_to_string(f).unwrap_or_else(|e| panic!("{f}: {e}"));
+        s.load_str(&shapes, RdfFormat::Turtle, Some("urn:test:shapes"))
+            .unwrap_or_else(|e| panic!("{f} does not parse: {e}"));
+    }
+    let pruned = prune_undefined_property_shapes(&s, "urn:test:shapes");
+    assert_eq!(
+        pruned, SEMIC_UNDEFINED_PROPERTY_SHAPES,
+        "the upstream shapes' undefined property shapes changed; recheck PROVENANCE.md"
+    );
+    let report = open_triplestore::shacl::validate(
+        &s,
+        "urn:test:shapes",
+        &["urn:test:catalogue".to_string()],
+    )
+    .expect("validation runs");
+    let line = |r: &open_triplestore::shacl::report::ValidationResult| {
+        format!(
+            "{} {} {:?} = {:?} [{}]: {}",
+            r.focus_node, r.source_constraint, r.path, r.value, r.source_shape, r.message
+        )
+    };
+    let mut violations: Vec<String> = report
+        .results
+        .iter()
+        .filter(|r| matches!(r.severity, Severity::Violation))
+        .map(line)
+        .collect();
+    let mut warnings: Vec<String> = report
+        .results
+        .iter()
+        .filter(|r| !matches!(r.severity, Severity::Violation))
+        .map(line)
+        .collect();
+    violations.sort();
+    warnings.sort();
+    (violations, warnings)
+}
+
+/// `sh:property` links in SEMIC's DCAT-AP 3.0.1 shapes (`dcat-ap-SHACL.ttl`
+/// and `ranges.ttl` together) to property shapes that neither file defines:
+/// no `sh:path`, no constraint, no triple at all. A shapes graph with a
+/// pathless property shape is ill-formed, and the engine refuses all of it
+/// (fail-closed), so the runner drops those links before validating. They
+/// constrain nothing; the vendored files stay byte-identical (PROVENANCE.md
+/// lists the five).
+const SEMIC_UNDEFINED_PROPERTY_SHAPES: usize = 5;
+
+/// Drop `?shape sh:property ?ps` where `?ps` has no `sh:path`; returns how
+/// many links were dropped.
+fn prune_undefined_property_shapes(s: &TripleStore, graph: &str) -> usize {
+    let q = format!(
+        "SELECT (COUNT(*) AS ?n) WHERE {{ GRAPH <{graph}> {{ ?s <http://www.w3.org/ns/shacl#property> ?ps \
+         FILTER NOT EXISTS {{ ?ps <http://www.w3.org/ns/shacl#path> ?p }} }} }}"
+    );
+    let n = match s.query(&q).unwrap() {
+        QueryResults::Solutions(mut rows) => match rows.next().unwrap().unwrap().get("n") {
+            Some(oxigraph::model::Term::Literal(l)) => l.value().parse().unwrap(),
+            _ => 0,
+        },
+        _ => 0,
+    };
+    s.update(&format!(
+        "DELETE {{ GRAPH <{graph}> {{ ?s <http://www.w3.org/ns/shacl#property> ?ps }} }} \
+         WHERE {{ GRAPH <{graph}> {{ ?s <http://www.w3.org/ns/shacl#property> ?ps \
+         FILTER NOT EXISTS {{ ?ps <http://www.w3.org/ns/shacl#path> ?p }} }} }}"
+    ))
+    .unwrap();
+    n
+}
+
+fn semic_shapes() -> Vec<String> {
+    ["dcat-ap-SHACL.ttl", "ranges.ttl"]
+        .iter()
+        .map(|f| format!("{SEMIC}/{f}"))
+        .collect()
+}
+
+// The DCAT-AP 3.0.1 catalogue satisfies SEMIC's published shapes (mandatory
+// properties, cardinalities, node kinds and ranges): no violation over a
+// fixture that takes every branch of the generator.
+#[test]
+fn dcat_ap_catalogue_satisfies_the_semic_dcat_ap_301_shapes() {
+    let (store, db) = rich_fixture();
+    let (_, ttl, profile_warnings) = catalogue(&store, &db, &ap_options(Profile::DcatAp), None);
+    let (violations, warnings) = validate_against(&ttl, &semic_shapes());
+    assert!(
+        violations.is_empty(),
+        "{} violation(s) of the DCAT-AP 3.0.1 shapes:\n{}\n---\n{ttl}",
+        violations.len(),
+        violations.join("\n")
+    );
+    eprintln!(
+        "DCAT-AP 3.0.1: 0 violations, {} other results; profile warnings: {profile_warnings:?}",
+        warnings.len()
+    );
+}
+
+// The DCAT-AP-NL 3 catalogue satisfies SEMIC's shapes plus Geonovum's
+// DCAT-AP-NL 3 shapes (mandatory, class ranges, code-list ranges; the
+// recommended ones are sh:Warning and only reported). Geonovum's shapes are
+// fetched by `tests/fixtures/geonovum-dcat-ap-nl-3/fetch.sh`, not vendored.
+#[test]
+fn dcat_ap_nl_catalogue_satisfies_the_geonovum_dcat_ap_nl_3_shapes() {
+    let nl: Vec<String> = [
+        "dcat-ap-nl-SHACL.ttl",
+        "dcat-ap-nl-SHACL-klassebereik.ttl",
+        "dcat-ap-nl-SHACL-klassebereik-codelijsten.ttl",
+        "dcat-ap-nl-SHACL-aanbevolen.ttl",
+    ]
+    .iter()
+    .map(|f| format!("{GEONOVUM}/{f}"))
+    .collect();
+    if nl.iter().any(|f| !std::path::Path::new(f).exists()) {
+        assert!(
+            std::env::var("OTS_TEST_DCAT_AP_NL_REQUIRED").as_deref() != Ok("1"),
+            "the DCAT-AP-NL 3 shapes are missing: run tests/fixtures/geonovum-dcat-ap-nl-3/fetch.sh"
+        );
+        eprintln!("skipped: DCAT-AP-NL 3 shapes not fetched (tests/fixtures/geonovum-dcat-ap-nl-3/fetch.sh)");
+        return;
+    }
+    let (store, db) = rich_fixture();
+    let (_, ttl, profile_warnings) = catalogue(&store, &db, &ap_options(Profile::DcatApNl), None);
+    let mut shapes = semic_shapes();
+    shapes.extend(nl);
+    let (violations, warnings) = validate_against(&ttl, &shapes);
+    assert!(
+        violations.is_empty(),
+        "{} violation(s) of the DCAT-AP-NL 3 shapes:\n{}\n---\n{ttl}",
+        violations.len(),
+        violations.join("\n")
+    );
+    assert!(
+        profile_warnings.is_empty(),
+        "a fully described registry leaves nothing to warn about: {profile_warnings:?}"
+    );
+    eprintln!(
+        "DCAT-AP-NL 3: 0 violations, {} warnings (recommended properties):\n{}",
+        warnings.len(),
+        warnings.join("\n")
+    );
+}
+
+/// The value of `<s> <p> ?n` as a number.
+fn number(s: &TripleStore, subject: &str, predicate: &str) -> Option<u64> {
+    let q = format!("SELECT ?n WHERE {{ {subject} <{predicate}> ?n }}");
+    match s.query(&q).ok()? {
+        QueryResults::Solutions(mut rows) => match rows.next()?.ok()?.get("n")? {
+            oxigraph::model::Term::Literal(l) => l.value().parse().ok(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+// VoID per dataset: statistics, class and property partitions, vocabularies,
+// example resources, features, data dumps and the SPARQL endpoint — over the
+// dataset's graphs the caller may read.
+#[test]
+fn void_describes_each_dataset() {
+    let (store, db) = rich_fixture();
+    let (s, ttl, _) = catalogue(&store, &db, &CatalogOptions::new(BASE, Profile::Dcat), None);
+    let d = format!("<{BASE}/dataset/census>");
+    // Instances (8 triples) + linkset (2); the private graph is left out.
+    assert_eq!(number(&s, &d, &format!("{VOID}triples")), Some(10), "{ttl}");
+    assert_eq!(
+        number(&s, &d, &format!("{VOID}documents")),
+        Some(2),
+        "{ttl}"
+    );
+    assert_eq!(number(&s, &d, &format!("{VOID}classes")), Some(2), "{ttl}");
+    assert!(
+        number(&s, &d, &format!("{VOID}distinctSubjects")).unwrap() >= 4,
+        "{ttl}"
+    );
+    assert!(ask(&s, &format!("ASK {{ {d} <{VOID}classPartition> ?c . ?c <{VOID}class> <https://example.org/census/Person> ; <{VOID}entities> 2 }}")), "{ttl}");
+    assert!(ask(&s, &format!("ASK {{ {d} <{VOID}propertyPartition> ?c . ?c <{VOID}property> <https://example.org/census/age> ; <{VOID}triples> 2 }}")), "{ttl}");
+    assert!(ask(&s, &format!("ASK {{ {d} <{VOID}vocabulary> <https://example.org/census/> , <http://www.opengis.net/ont/geosparql#> }}")), "{ttl}");
+    assert!(ask(&s, &format!("ASK {{ {d} <{VOID}exampleResource> ?x ; <{VOID}sparqlEndpoint> <{BASE}/sparql> ; <{VOID}feature> <http://www.w3.org/ns/formats/Turtle> ; <{VOID}dataDump> <{BASE}/store?graph=https%3A%2F%2Fexample%2Eorg%2Fcensus%2Finstances> }}")), "{ttl}");
+}
+
+// A linkset-role graph is a void:Linkset: the dataset is its subjects'
+// target, the namespace its links point into is its objects' target, and its
+// link predicates are listed.
+#[test]
+fn void_describes_linksets() {
+    let (store, db) = rich_fixture();
+    let (s, ttl, _) = catalogue(&store, &db, &CatalogOptions::new(BASE, Profile::Dcat), None);
+    let ls = "<https://example.org/census/links>";
+    assert!(ask(&s, &format!("ASK {{ <{BASE}/dataset/census> <{VOID}subset> {ls} . {ls} a <{VOID}Linkset> ; <{VOID}subjectsTarget> <{BASE}/dataset/census> ; <{VOID}objectsTarget> ?t ; <{VOID}linkPredicate> <http://www.w3.org/2002/07/owl#sameAs> , <http://www.w3.org/2000/01/rdf-schema#seeAlso> ; <{VOID}triples> 2 . ?t <{VOID}uriSpace> \"http://www.wikidata.org/entity/\" }}")), "{ttl}");
+}
+
+// Partitions name the vocabulary of the data, so they are computed only per
+// dataset over the graphs the caller may read: never at the anonymous
+// aggregate level, and a private graph's classes stay out of an anonymous
+// caller's partitions while its readers see them.
+#[test]
+fn void_partitions_never_leak_unreadable_graphs() {
+    let (store, db) = rich_fixture();
+    let secret = "https://example.org/secret/Informant";
+    let (s, ttl, _) = catalogue(&store, &db, &CatalogOptions::new(BASE, Profile::Dcat), None);
+    assert!(!ttl.contains(secret), "anonymous: {ttl}");
+    assert!(
+        !ask(&s, &format!("ASK {{ <{BASE}/dataset> <{VOID}classPartition>|<{VOID}propertyPartition>|<{VOID}vocabulary>|<{VOID}exampleResource> ?x }}")),
+        "the aggregate carries counts only:\n{ttl}"
+    );
+    let (s, ttl, _) = catalogue(
+        &store,
+        &db,
+        &CatalogOptions::new(BASE, Profile::Dcat),
+        Some("root"),
+    );
+    assert!(ask(&s, &format!("ASK {{ <{BASE}/dataset/census> <{VOID}classPartition> ?c . ?c <{VOID}class> <{secret}> }}")), "an administrator reads the private graph:\n{ttl}");
+    assert!(
+        !ask(
+            &s,
+            &format!("ASK {{ <{BASE}/dataset> <{VOID}classPartition> ?x }}")
+        ),
+        "not even an administrator's aggregate has partitions:\n{ttl}"
+    );
+}
+
+// The shapes bite: a theme the catalogue has no label for violates the
+// DCAT-AP `skos:Concept` shape (and is a profile warning), so the zero
+// violations above are not vacuous.
+#[test]
+fn the_semic_shapes_catch_an_unlabelled_theme() {
+    let (store, db) = rich_fixture();
+    db.update_dataset_metadata(
+        "notes",
+        None,
+        Some("[\"https://example.org/themes/birds\"]"),
+        None,
+        Some("Ada"),
+        Some("ada@example.org"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let (_, ttl, profile_warnings) = catalogue(&store, &db, &ap_options(Profile::DcatAp), None);
+    let (violations, _) = validate_against(&ttl, &semic_shapes());
+    assert!(
+        violations
+            .iter()
+            .any(|v| v.contains("https://example.org/themes/birds") && v.contains("prefLabel")),
+        "{violations:#?}"
+    );
+    assert!(
+        profile_warnings
+            .iter()
+            .any(|w| w.contains("https://example.org/themes/birds")),
+        "{profile_warnings:?}"
+    );
+}

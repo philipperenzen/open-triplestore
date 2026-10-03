@@ -337,6 +337,8 @@ See [rml.md](rml.md) for the full RML guide.
 | `CATALOG_PUBLISHER_TYPE` | unset | The publisher's ADMS publisher type: a code (`LocalAuthority`, `NationalAuthority`, `Company`, …) or an IRI. An unknown code stops the server at startup. |
 | `CATALOG_CONTACT_NAME` / `CATALOG_CONTACT_EMAIL` | unset | Contact point of the catalogue and its data services, and the fallback for datasets without one under a profile (DCAT-AP-NL requires a contact point on each). |
 | `CATALOG_LANGUAGE` | `ENG` (`NLD` under dcat-ap-nl) | ISO 639-3 code for the catalogue language. |
+| `OTS_VOID_PARTITION_LIMIT` | `100` | Class and property partitions listed per dataset in the catalogue's VoID (most frequent first). |
+| `OTS_VOID_PARTITION_MAX_TRIPLES` | `5000000` | Datasets larger than this get VoID counts but no partitions (those take a grouping scan). |
 | `CATALOG_LICENSE` | unset | Licence IRI for the catalogue and for distributions of datasets without one. |
 | `OTS_REMOTE_AUTH` | unset | `assert` mints a signed identity assertion for allowlisted peers when acting for a user (see [federation.md](federation.md)). |
 | `OTS_TRUSTED_ISSUERS` | unset | Comma-separated peer base URLs whose identity assertions are accepted (needs `BASE_URL`). |

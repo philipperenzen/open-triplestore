@@ -323,7 +323,14 @@ jobs:
 
       # W3C / GeoSPARQL / OWL2 / LDP conformance tests. Enabling all features
       # exercises the optional reasoning, ldp, shex, swrl and text-search paths.
+      # Geonovum's DCAT-AP-NL 3 shapes are fetched at a pinned commit (sha256-
+      # checked), not vendored: their repository has no LICENSE file.
+      - name: Fetch the DCAT-AP-NL 3 shapes
+        run: tests/fixtures/geonovum-dcat-ap-nl-3/fetch.sh
+
       - name: Run conformance tests
+        env:
+          OTS_TEST_DCAT_AP_NL_REQUIRED: '1'
         run: cargo test --features full,saml,test-utils,backup-encrypt,alerting --locked --test '*conformance*'
 
       # OWL 2 DL against the reasoner sidecar the project ships

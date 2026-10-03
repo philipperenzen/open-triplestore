@@ -33,8 +33,13 @@
 //!   `dct:language`, `dct:format` (EU file-type authority) on every
 //!   distribution, licences repeated on distributions, and a
 //!   `dcat:CatalogRecord` per dataset;
+//! - VoID per dataset, over the dataset's graphs the caller may read:
+//!   statistics, class and property partitions, vocabularies, example
+//!   resources, features, data dumps, and its linkset-role graphs as
+//!   `void:Linkset`s with their link predicates and targets;
 //! - the aggregate `void:Dataset` for the whole store with statistics over the
-//!   graphs the caller may read, cached until the next write.
+//!   graphs the caller may read, cached until the next write — counts only,
+//!   never partitions.
 //!
 //! `dcat:DatasetSeries` is not emitted: the product has no series concept (a
 //! dataset's versions are versions, DCAT 3 §11, not members of a series).
@@ -156,6 +161,13 @@ pub fn check_env() -> Result<(), String> {
         if let Some(v) = env_nonempty(k) {
             if NamedNode::new(v.as_str()).is_err() {
                 errors.push(format!("{k} `{v}` is not an absolute IRI"));
+            }
+        }
+    }
+    for k in ["OTS_VOID_PARTITION_LIMIT", "OTS_VOID_PARTITION_MAX_TRIPLES"] {
+        if let Some(v) = env_nonempty(k) {
+            if v.parse::<usize>().is_err() {
+                errors.push(format!("{k} `{v}` is not a whole number"));
             }
         }
     }
@@ -1471,6 +1483,7 @@ fn dataset_entry(
         }
     }
     g.int(s.clone(), &p(VOID, "triples"), total);
+    void_description(g, opts, store, &s, &entries, total);
 
     // Conformance.
     if ds.shacl_on_write {
@@ -1647,6 +1660,163 @@ fn dataset_entry(
     EntryInfo {
         themes,
         geo: has_geo,
+    }
+}
+
+/// The formats the Graph Store and the downloads serve (`void:feature`).
+const FORMATS_NS: &str = "http://www.w3.org/ns/formats/";
+const VOID_FEATURES: &[&str] = &[
+    "Turtle",
+    "N-Triples",
+    "RDF_XML",
+    "JSON-LD",
+    "TriG",
+    "N-Quads",
+];
+
+/// Partitions listed per kind unless `OTS_VOID_PARTITION_LIMIT` says otherwise.
+const DEFAULT_PARTITION_LIMIT: usize = 100;
+/// Datasets larger than this (`OTS_VOID_PARTITION_MAX_TRIPLES`) get counts but
+/// no partitions: those take a grouping scan of the data.
+const DEFAULT_PARTITION_MAX_TRIPLES: usize = 5_000_000;
+
+fn env_usize(k: &str, default: usize) -> usize {
+    env_nonempty(k)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// A dataset's VoID description beyond `void:triples`: statistics, class and
+/// property partitions, vocabularies, example resources, features, data dumps,
+/// its SPARQL endpoint and its linksets — all over `entries`, the dataset's
+/// graphs the caller may read. Nothing here is computed over a store-wide
+/// aggregate: a partition names classes and predicates, and an aggregate
+/// would name those of graphs the caller may not read.
+fn void_description(
+    g: &mut G,
+    opts: &CatalogOptions,
+    store: &TripleStore,
+    s: &NamedNode,
+    entries: &[crate::auth::models::DatasetGraphEntry],
+    total: usize,
+) {
+    let base = opts.base_url.as_str();
+    let graphs: HashSet<String> = entries.iter().map(|e| e.graph_iri.clone()).collect();
+    g.add(
+        s.clone(),
+        &p(VOID, "sparqlEndpoint"),
+        nn(&format!("{base}/sparql")),
+    );
+    for f in VOID_FEATURES {
+        g.add(
+            s.clone(),
+            &p(VOID, "feature"),
+            nn(&format!("{FORMATS_NS}{f}")),
+        );
+    }
+    for e in entries
+        .iter()
+        .filter(|e| !e.graph_iri.starts_with("urn:system:"))
+    {
+        if g.iri(&e.graph_iri, "graph IRI").is_some() {
+            g.add(
+                s.clone(),
+                &p(VOID, "dataDump"),
+                nn(&format!("{base}/store?graph={}", enc(&e.graph_iri))),
+            );
+        }
+    }
+    if graphs.is_empty() {
+        return;
+    }
+    let stats = store.void_stats_over(&graphs);
+    g.int(
+        s.clone(),
+        &p(VOID, "distinctSubjects"),
+        stats.distinct_subjects,
+    );
+    g.int(
+        s.clone(),
+        &p(VOID, "distinctObjects"),
+        stats.distinct_objects,
+    );
+    g.int(s.clone(), &p(VOID, "properties"), stats.distinct_predicates);
+    g.int(s.clone(), &p(VOID, "documents"), stats.named_graphs);
+
+    if total
+        <= env_usize(
+            "OTS_VOID_PARTITION_MAX_TRIPLES",
+            DEFAULT_PARTITION_MAX_TRIPLES,
+        )
+    {
+        let limit = env_usize("OTS_VOID_PARTITION_LIMIT", DEFAULT_PARTITION_LIMIT);
+        let parts = store.void_partitions_over(&graphs, limit);
+        g.int(s.clone(), &p(VOID, "classes"), parts.class_count);
+        let mut vocabularies: Vec<String> = Vec::new();
+        let mut vocab = |iri: &str| {
+            let ns = namespace_of(iri);
+            if !ns.is_empty() && !vocabularies.iter().any(|v| v == ns) {
+                vocabularies.push(ns.to_string());
+            }
+        };
+        for (class, n) in &parts.classes {
+            let cp = BlankNode::default();
+            g.add(s.clone(), &p(VOID, "classPartition"), cp.clone());
+            g.add(cp.clone(), &p(VOID, "class"), nn(class));
+            g.int(cp, &p(VOID, "entities"), *n);
+            vocab(class);
+        }
+        for (property, n) in &parts.properties {
+            let pp = BlankNode::default();
+            g.add(s.clone(), &p(VOID, "propertyPartition"), pp.clone());
+            g.add(pp.clone(), &p(VOID, "property"), nn(property));
+            g.int(pp, &p(VOID, "triples"), *n);
+            vocab(property);
+        }
+        for v in vocabularies.iter().take(limit) {
+            g.link(s.clone(), &p(VOID, "vocabulary"), v, "vocabulary");
+        }
+        for e in &parts.examples {
+            g.add(s.clone(), &p(VOID, "exampleResource"), nn(e));
+        }
+    }
+
+    // Linksets: the dataset's graphs whose role is `linkset`.
+    for e in entries
+        .iter()
+        .filter(|e| e.graph_role == Some(crate::auth::models::GraphKind::Linkset))
+    {
+        let Some(ls) = g.iri(&e.graph_iri, "linkset graph") else {
+            continue;
+        };
+        let links = store.void_linkset(
+            &e.graph_iri,
+            env_usize("OTS_VOID_PARTITION_LIMIT", DEFAULT_PARTITION_LIMIT),
+        );
+        g.typ(ls.clone(), &p(VOID, "Linkset"));
+        g.add(ls.clone(), &p(VOID, "subjectsTarget"), s.clone());
+        if let Some(space) = &links.object_space {
+            let target = BlankNode::default();
+            g.add(ls.clone(), &p(VOID, "objectsTarget"), target.clone());
+            g.typ(target.clone(), &p(VOID, "Dataset"));
+            g.lit(target, &p(VOID, "uriSpace"), space);
+        }
+        for (pred, _) in &links.predicates {
+            g.add(ls.clone(), &p(VOID, "linkPredicate"), nn(pred));
+        }
+        g.int(
+            ls,
+            &p(VOID, "triples"),
+            store.graph_count_cached(Some(&e.graph_iri)).unwrap_or(0),
+        );
+    }
+}
+
+/// An IRI's namespace: up to and including its last `#` or `/`.
+fn namespace_of(iri: &str) -> &str {
+    match iri.rfind(['#', '/']) {
+        Some(i) if i + 1 < iri.len() => &iri[..=i],
+        _ => "",
     }
 }
 

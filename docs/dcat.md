@@ -193,7 +193,27 @@ Dataset visibility maps to EU Publications Office access rights URIs:
 
 ## VoID Statistics
 
-The root dataset's statistics (`void:triples`, `void:distinctSubjects`, `void:distinctObjects`, `void:properties`, `void:documents`) cover the graphs the caller may read — the whole store, default and named graphs alike, for an administrator; the readable named graphs for anyone else, so an anonymous caller counts only public graphs. They are computed with `COUNT` queries the first time a caller with that set of graphs requests the catalogue after a write, and cached until the next write.
+Each dataset is also a `void:Dataset`, described over **its graphs the caller may read** (a private graph only for its writers, system graphs never):
+
+| Property | Value |
+|---|---|
+| `void:triples`, `void:distinctSubjects`, `void:distinctObjects`, `void:properties`, `void:classes`, `void:documents` | Statistics over those graphs |
+| `void:classPartition` | `[ void:class C ; void:entities n ]` per class, most instances first |
+| `void:propertyPartition` | `[ void:property P ; void:triples n ]` per predicate, most triples first |
+| `void:vocabulary` | The namespaces of those classes and predicates |
+| `void:exampleResource` | Up to three subject IRIs |
+| `void:feature` | The serialisations the Graph Store serves (`formats:Turtle`, `N-Triples`, `RDF_XML`, `JSON-LD`, `TriG`, `N-Quads`) |
+| `void:dataDump` | One Graph Store download per graph |
+| `void:sparqlEndpoint` | `{base}/sparql` |
+| `void:subset` | Each graph; a graph whose role is `linkset` is a `void:Linkset` with `void:linkPredicate`s, `void:subjectsTarget` (the dataset) and `void:objectsTarget` (a `void:Dataset` with the `void:uriSpace` most link objects share) |
+
+Partitions are computed per dataset only: the store-wide aggregate below carries counts, never partitions, because a partition names classes and predicates and an aggregate would name those of graphs the caller may not read. They are cached until the next write, listed up to `OTS_VOID_PARTITION_LIMIT` per kind (default 100), and skipped for a dataset larger than `OTS_VOID_PARTITION_MAX_TRIPLES` triples (default 5,000,000). VoID's optional `void:uriLookupEndpoint` is not offered: `/resource/*` dereferences only this instance's own IRIs.
+
+### Validation against the official shapes
+
+`tests/dcat_conformance.rs` validates the catalogue under each profile — over a fixture with organisation-, user- and group-owned datasets, geometry, an LDES stream, released and draft versions, a linkset and a private graph — against SEMIC's DCAT-AP 3.0.1 shapes (vendored in `tests/fixtures/semic-dcat-ap-3.0.1/`, CC BY 4.0) and Geonovum's DCAT-AP-NL 3 shapes (fetched at a pinned commit by `tests/fixtures/geonovum-dcat-ap-nl-3/fetch.sh`), and asserts no violation. Taken together, the SEMIC files link five property shapes that neither defines (no `sh:path`); a pathless property shape makes a shapes graph ill-formed and the engine refuses it whole, so the runners drop those five links in memory first (they constrain nothing; the files stay unmodified, see the fixture's PROVENANCE.md). `tests/dcat_ap_http.rs` validates the served `/.well-known/void` against the SEMIC shapes through a SHACL Studio pipeline.
+
+The aggregate dataset's statistics (`void:triples`, `void:distinctSubjects`, `void:distinctObjects`, `void:properties`, `void:documents`) cover the graphs the caller may read — the whole store, default and named graphs alike, for an administrator; the readable named graphs for anyone else, so an anonymous caller counts only public graphs. They are computed with `COUNT` queries the first time a caller with that set of graphs requests the catalogue after a write, and cached until the next write.
 
 A dataset's `void:triples` is the sum of its registered graphs' triple counts, which the store keeps current on every write — no query runs for it. Each registered graph (system graphs excluded) is also listed as a `void:subset`.
 
