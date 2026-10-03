@@ -106,8 +106,15 @@ final class Dl {
         }
     }
 
+    private static final Object MANAGER_LOCK = new Object();
+
     static OWLOntologyManager manager() {
-        OWLOntologyManager m = OWLManager.createOWLOntologyManager();
+        OWLOntologyManager m;
+        // OWL API 5.1.9's OWLManager shares one injector that is not
+        // thread-safe; concurrent requests must not create managers at once.
+        synchronized (MANAGER_LOCK) {
+            m = OWLManager.createOWLOntologyManager();
+        }
         // Nothing is ever fetched: no document IRI is resolved over the network.
         m.getIRIMappers().clear();
         m.setOntologyLoaderConfiguration(loaderConfiguration());

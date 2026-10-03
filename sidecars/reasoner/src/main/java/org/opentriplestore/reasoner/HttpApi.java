@@ -242,6 +242,8 @@ final class HttpApi {
             } catch (OutOfMemoryError e) {
                 throw e;
             } catch (Exception | Error e) {
+                // Unexpected: keep the whole trace in the log, not in the answer.
+                e.printStackTrace();
                 reply = new Reply(500, Map.of("error", e.getClass().getSimpleName() + ": " + Dl.firstLine(e)));
             }
             send(ex, status = reply.status(), reply.body());

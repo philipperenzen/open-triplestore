@@ -81,6 +81,9 @@ Building the run surfaced these problems, all fixed:
   class assertion of a blank-node class expression), and does not read
   `rdf:type owl:Nothing` on a blank node or annotations of ontology
   annotations; the sidecar accounts for each.
+- OWL API 5.1.9 cannot create two ontology managers at once (a
+  `ConcurrentModificationException` in its injector), which made concurrent
+  requests fail now and then; the sidecar creates them one at a time.
 - HermiT's own entailment check answered `false` for an entailed class
   assertion until the ABox had been realised; the sidecar now checks
   entailment by reduction to class satisfiability.
