@@ -699,8 +699,9 @@ pub fn proposed_patch(
 /// mark the item corrected.
 pub fn apply(store: &TripleStore, item: &mut ReviewItem, plan: &FixPlan) -> Result<(), String> {
     let patch = crate::rdf_patch::parse(&plan.patch)?;
-    let sparql = crate::rdf_patch::to_sparql_update(&patch);
-    store.update(&sparql).map_err(|e| e.to_string())?;
+    store
+        .apply_quad_ops(&patch.quad_ops(None)?)
+        .map_err(|e| e.to_string())?;
     item.snapshot = crate::ldes::capture::describe_entity(store, &item.graph, &item.subject);
     item.fixes.extend(plan.fixes.iter().cloned());
     item.status = "corrected".to_string();

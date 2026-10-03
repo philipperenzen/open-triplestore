@@ -14,6 +14,80 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`OTS_OIDC_IDP_TOKEN_POLICY` and `OTS_OIDC_IDP_WRITE_SCOPES`.** What an access token from
+  an external IdP (OIDC resource-server mode) may do is now a setting, with the
+  same values as `OTS_OIDC_SESSION_POLICY`: `session` (default), `scoped`
+  (write only when the token's `scope` or `scp` claim carries `write`,
+  `admin` or a value listed in `OTS_OIDC_IDP_WRITE_SCOPES`) and `full`. It is separate
+  from `OTS_OIDC_SESSION_POLICY` because the two token sources are issued to
+  different clients. `docker-compose.yml` passes both through.
+- **SP-initiated SAML sign-in (experimental `saml` feature).** A SAML button on
+  the login page now goes to `GET /api/auth/saml/{slug}/login`, which redirects
+  to the IdP's SSO URL with an AuthnRequest (HTTP-Redirect binding) and binds
+  the attempt to the browser with a short-lived `saml_state` cookie
+  (`SameSite=None; Secure` with `SECURE_COOKIES`). The ACS now accepts only a
+  signed response that answers that request (`InResponseTo`), from that
+  browser, once and within 10 minutes. It then redirects to the SPA's
+  `/oauth/callback` page instead of returning the tokens as JSON.
+  IdP-initiated responses are refused. Before this, the ACS passed a
+  confirmation-method URN where request IDs belong, so no SAML sign-in could
+  succeed, and the login button led to a `404`. The store now identifies itself
+  to the IdP with its own entity ID, the SP metadata URL
+  `…/api/auth/saml/{slug}/metadata`, rather than reusing the IdP's entity ID.
+  Re-register the SP at the IdP with that entity ID. SAML stays out of `full`
+  until it has been verified against a real IdP. See `docs/auth.md`.
+- **OWL 2 QL: DL-Lite_R closure, ground materialisation, consistency and
+  existential query rewriting.** The `owl2-ql` regime of
+  `POST /api/reasoning/materialize` and of a dataset's entailment now writes
+  every entailed class membership and property assertion over the data's
+  individuals (it wrote only the subclass/subproperty closure, so
+  `?entailment=owl2-ql` said nothing about individuals). The TBox is closed
+  over basic concepts and roles with qualified existentials on the right,
+  intersections, complements, disjoint classes and properties,
+  symmetric/asymmetric/reflexive/irreflexive properties and data properties;
+  unsatisfiability propagates through negative inclusions, and an
+  inconsistency fails the run with its rule (`ql-cls-disjoint`,
+  `ql-prp-irp`, …). On `/sparql?entailment=owl2-ql` (and a dataset whose
+  regime is `owl2-ql`) the query's blank nodes are rewritten existentially, so
+  `ASK { ex:ann ex:hasChild [ a ex:Person ] }` is true when the schema says
+  every parent has a child, with one solution per binding of the variables;
+  the TBox is cached until the next write and a query without blank nodes is
+  untouched. Reasoning reports gain `ignored_axioms` and `ignored_sample`,
+  the axioms outside the profile that were not used. See `docs/owl2-ql.md`.
+- **OWL 2 RL: `eq-ref` on request.** `Owl2RLReasoner::with_eq_ref(true)`, or
+  `"eq_ref": true` in the body of `POST /api/reasoning/materialize`, also writes
+  `x owl:sameAs x` for every subject, predicate and non-literal object. It is
+  off by default (about one triple per term); `sameas-off` skips it.
+- **OWL 2 DL reasoner sidecar (OWL API + HermiT).** `sidecars/reasoner/` is a
+  small Java service that speaks the sidecar protocol v1 (`POST /v1/reason`,
+  `POST /v1/check`, bearer token) and is published as its own image,
+  `ghcr.io/philipperenzen/open-triplestore-reasoner`; `docker compose
+  --profile reasoner up` starts it on the internal network only, and
+  `OTS_DL_BACKEND=sidecar` with a shared `OTS_REASONER_TOKEN` points the server
+  at it. It parses with the OWL API, never follows `owl:imports`, types
+  undeclared properties by use the way the server's own mapping does, applies
+  the OWL 1 DL compatibility rules of the RDF mapping (Tables 14, 15 and 18),
+  checks the OWL 2 DL profile, and reasons with HermiT under a time limit
+  (interrupted at the deadline: 504, result unknown). A materialisation reports
+  class and property hierarchies, unsatisfiable classes, types, `owl:sameAs`
+  and property assertions about named entities; an inconsistency comes with a
+  minimal inconsistent subset of the axioms when the input is small enough
+  (`OTS_REASONER_EXPLAIN_MAX_AXIOMS`). Entailment is checked by reduction to
+  class satisfiability, because HermiT's own entailment check answered `false`
+  for entailed class assertions until the ABox had been realised. HermiT and
+  the OWL API ship unmodified as separate jars (LGPL-3.0; `NOTICE`, new
+  `LICENSES/LGPL-3.0.txt`, `GPL-3.0.txt`, `LGPL-2.1.txt`, `EDL-1.0.txt`, and a
+  generated `/app/THIRD-PARTY.txt` in the image).
+- **W3C OWL 2 test cases in CI.** The approved cases of the OWL 2 Test Case
+  Repository are vendored unmodified (`tests/fixtures/w3c-owl2/`, W3C
+  Document License), and `tests/w3c_owl2_dl_manifests.rs` runs the OWL 2 DL /
+  Direct Semantics ones through `POST /api/reasoning/check` against the
+  sidecar, with a known-failures list and a pass floor. The conformance job
+  builds and starts the sidecar and also runs new live tests in
+  `tests/owl2_dl_conformance.rs` (existential witnesses, case splits,
+  nominals, property assertions and `owl:sameAs`, facet inconsistencies,
+  checks). No score is published for the suite
+  ([docs/conformance/owl2-dl.md](docs/conformance/owl2-dl.md)).
 - **SHACL-AF node expressions, expression constraints and target types.** The
   seven node-expression kinds of the SHACL Advanced Features Note — `sh:this`,
   constants, path (`sh:path` / `sh:nodes`), filter shape, intersection, union
@@ -61,6 +135,50 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   regime (`http://www.w3.org/ns/entailment/RDFS`) uses the `rdfs-entailment`
   materialiser the same way; declared together, rules and RDFS run in turn
   until neither adds a triple. See `docs/shacl.md`.
+- **RDF Patch logs per dataset.** Each dataset has an
+  [RDF Patch log](https://afs.github.io/rdf-delta/rdf-patch-logs.html) at
+  `/api/datasets/{id}/log`: `POST` appends a patch (exactly one `H id`, at
+  most one `H prev`, which must name the latest entry, else `409` and nothing
+  changes), applying it like `POST …/patch` and appending it only when that
+  succeeds; `GET …/log`, `…/log/init` (version 0 as TriG), `…/log/current`
+  and `…/log/patch/{version|id}` read it. Every version cut also appends the
+  diff from the previous cut as a chained patch. SPARQL, Graph Store and
+  import writes are not journaled. Entries that change a graph the caller may
+  not read are withheld. See `docs/versioning.md#patch-logs`.
+- **A prefix table per dataset.** `GET`/`PUT /api/datasets/{id}/prefixes` and
+  `PUT`/`DELETE …/prefixes/{label}`. Each version records the table it was
+  cut with and a restore brings it back. The dataset's Turtle and TriG
+  exports (the Graph Store read of its graphs, a version's `/data`) declare
+  it ahead of the prefix registry.
+- **LDES publisher context and endpoints.** The event stream declares a
+  generated `tree:shape` (one IRI `dct:isVersionOf`, one `xsd:dateTime`
+  `dct:created`; open otherwise), `ldes:pollingInterval` (60 s by default, set
+  with `"polling_interval"` on `PUT /api/datasets/:id/ldes`), and
+  `ldes:versionDeletePath rdf:type` / `ldes:versionDeleteObject as:Delete`.
+  Every stream document carries an `ETag` and answers a matching
+  `If-None-Match` with `304`. Member IRIs dereference
+  (`GET /api/datasets/:id/ldes/members/:m`, immutable). Stream documents render
+  on the blocking pool behind a gate that answers `429` with `Retry-After`
+  when a stream (16) or the server (64) has too many in flight
+  (`OTS_LDES_MAX_IN_FLIGHT_PER_STREAM`, `OTS_LDES_MAX_IN_FLIGHT`).
+- **LDES client: retries, conditional fetches, resumable state.** A sync
+  retries `408`, `425`, `429`, `500`, `502`, `503` and `504` with exponential
+  back-off and jitter, honouring `Retry-After` (`OTS_LDES_RETRIES`, default
+  4; `OTS_LDES_MAX_RETRY_WAIT_SECS`, default 60 — a longer `Retry-After`
+  fails the sync instead of holding it), and aborts on any other error status
+  (LDES 1.0 §3.3). It asks for TriG, N-Quads, Turtle, N-Triples and JSON-LD.
+  It remembers per stream the pages it processed as immutable (never fetched
+  again), the `ETag` and relations of mutable pages (sent as `If-None-Match`;
+  a `304` follows the remembered relations), and skips a node whose relations
+  bound it below the bookmark on the timestamp path. The report adds
+  `stream`, `root_node`, `polling_interval`, `shapes`, `nodes_not_modified`,
+  `nodes_skipped_immutable`, `nodes_pruned`, `retries` and
+  `versions_superseded`.
+- **3D Tiles feature cap: `OTS_TILES3D_MAX_FEATURES`** (default 10 000). The 3D
+  Tiles tileset is still a single tile holding one GLB, so the GLB now carries at
+  most that many features, the first in IRI order. A capped tileset reports
+  `asset.extras.truncated` (`served`, `total`, `maxFeatures`), the GLB an
+  `X-Tiles3d-Truncated: served/total` header, and the server logs a warning.
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -96,6 +214,39 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   edited like any other. A `foaf:Agent` Read grant makes a resource readable
   without a token. Not in scope: WebID-TLS, Solid-OIDC, `acl:origin`. See
   `docs/ldp.md`, "Access control".
+- **Repair proposals.** `POST /api/datasets/:id/repair` proposes a fix for
+  what the dataset's rules determine, and never applies it. The rules are
+  compiled from its SHACL Core shapes (`sh:hasValue`, `sh:class`, a
+  `sh:minCount` an IRI can satisfy, a one-member `sh:in`, through `sh:node`
+  and nested property shapes) and its OWL axioms (`owl:hasKey`, functional
+  and inverse-functional properties, `someValuesFrom` and `minCardinality 1`
+  restrictions), or authored as `ots:Rule`s. They run as a restricted chase
+  over an in-memory copy of the dataset, and the answer is an RDF Patch plus
+  a report that explains every line: rule, trigger, premises, the violation
+  it answers. Missing values are minted as content-derived IRIs under
+  `{base}/.well-known/genid/`: a run repeated before the apply mints the same
+  IRIs, and one after it proposes nothing. Equal
+  terms are merged (`owl:sameAs`, or rewritten with `ots:mergeMode
+  ots:Rewrite`), and a merge the data forbids is reported as a conflict.
+  Three opt-in policies make a declared choice: `closed-delete`,
+  `maxCount-keep-lexmin`, `datatype-relabel`. Everything else is listed
+  report-only with its reason. The same dataset state gives byte-identical
+  patch text. Budgets (rounds, nulls, lines, time) end a run with a partial
+  proposal, never an error. Kept proposals (`persist: true`) are files under
+  `{data_dir}/repair-proposals/`, listed, read page by page, rejected, or
+  applied with `POST …/repair/proposals/:pid/apply`. The apply checks the
+  proposal's base (`409` and `superseded` when the dataset moved), runs the
+  write gates (`422`), and records one commit whose `metadata.repair` names
+  the proposal. `POST /api/datasets/:id/patch` gains the base check as two
+  opt-in preconditions over the dataset's graphs: `?if-base-commit=` (or
+  `If-Match`) and `?if-base-sequence=` with the change log. Without them it
+  behaves as before. SHACL
+  Studio's assistant takes `task: "repair"`: it sends the model what no rule
+  repaired, runs the rules the model answers with under a heuristic guard
+  (smaller budget, nothing destructive, only predicates already in use), and
+  keeps their proposal for review. Settings: `OTS_REPAIR_MAX_QUADS`,
+  `OTS_REPAIR_CONCURRENCY` (default 1), `OTS_REPAIR_PROPOSAL_TTL_DAYS` (days,
+  default 30). See `docs/repair.md`.
 - **Model versions and the datasets that depend on them are linked.** A dataset
   version now records the model version its instances were pinned to when it was
   cut (`conforms_to_model` / `conforms_to_version` on `DatasetVersion`, stored as
@@ -113,6 +264,49 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   re-validates a dataset against the new version, collects or corrects what it
   asks for, and re-pins; the store now tells everyone which datasets that applies to.
 
+- **OWL 2 DL backends, checks and background runs.** The `owl2-dl` regime
+  now runs on the backend `OTS_DL_BACKEND` names:
+  - `konclude`: a Konclude binary (`OTS_KONCLUDE_BIN`), driven through OWLlink
+    and SPARQL files with a time limit;
+  - `sidecar`: an HTTP reasoner service (`OTS_REASONER_URL`,
+    `OTS_REASONER_TOKEN`) speaking the version-1 protocol in `docs/owl2-dl.md`;
+  - `native`: the in-process rules.
+
+  `OTS_REASONER_TIMEOUT_SECS` (default 300) and `OTS_REASONER_MAX_TRIPLES`
+  (default 1,000,000) bound every external call. The input is mapped from RDF
+  to OWL 2 (the reverse OWL 2 RDF mapping) and checked against the OWL 2 DL
+  typing constraints and global restrictions before any backend sees it.
+  - Input outside OWL 2 DL is a 422 `{in_profile: false, violations}`.
+  - No backend, or an unreachable one, is a 503.
+  - A run past the time limit is a 504 with `"result": "unknown"`.
+  - Too much input is a 413; a backend failure is a 502.
+  - A failing external backend never falls back to the native rules.
+  - Only triples about named entities reach the target graph.
+  - Reports add `backend`, `backend_version`, `complete` and `warnings`.
+
+  New `POST /api/reasoning/check` answers consistency, entailment,
+  satisfiability and profile questions with `true`, `false` or `unknown`
+  (OWL 2 Conformance §2.2), as a 200; an inconsistent premise carries the
+  materialisation 422's `consistent`, `rule` and `detail`.
+  `?async=true` on materialise and check queues a job (202) that
+  `GET /api/reasoning/jobs/{job_id}` reports, with the status and body the
+  synchronous call would have answered.
+- **Feedback dialog and admin inbox.** Signed-in users send a bug report,
+  feature request, question or other note from the new **Feedback** button in
+  the sidebar footer, or from the help card that now ends every documentation
+  page. A report can carry the in-app page and the browser it was sent from;
+  both are opt-out. It goes to this instance's admins, who triage it at
+  **Admin → Feedback**: set its status, correct its type, reply to the reporter (who follows
+  status and replies under **My reports**) and keep an internal note. New
+  routes: `POST /api/feedback`, `GET /api/feedback/mine`, and
+  `GET`/`PATCH`/`DELETE /api/admin/feedback[/{id}]`. Submissions need a
+  write-capable principal, are rate-limited per client address and are capped
+  at 20 per user per day.
+- **A real FAQ.** `/docs/faq` grew from five technical answers to about sixty
+  questions for people using the platform: accounts, datasets and access,
+  importing, querying, validation, models, Spark, the API, troubleshooting and
+  how to get help.
+
 ### Changed
 - **A shapes graph that declares an unsupported `sh:entailment` fails
   validation.** SHACL §1.5 requires a processor to signal a failure for an
@@ -122,6 +316,161 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the run with an error naming the value — a write gate refuses the write
   (`422`). Shapes graphs declaring `sh:Rules` now report what the rules infer
   (see Added). SHACL Advanced is graded *Full* in `docs/standards.md`.
+- **Settings added in this release are named for what they cover.** Before
+  release, five new settings were renamed, and the old names are not read:
+  `OIDC_TOKEN_POLICY` and `OIDC_WRITE_SCOPES` are now
+  `OTS_OIDC_IDP_TOKEN_POLICY` and `OTS_OIDC_IDP_WRITE_SCOPES` (IdP tokens;
+  `OTS_OIDC_SESSION_POLICY` and `OTS_OIDC_WRITE_SCOPES` keep governing this
+  store's own provider tokens); `OTS_REMOTE_RETRIES` and
+  `OTS_REMOTE_MAX_RETRY_WAIT_SECS` are `OTS_LDES_RETRIES` and
+  `OTS_LDES_MAX_RETRY_WAIT_SECS`, since only LDES sync retries;
+  `OTS_REPAIR_PROPOSAL_TTL` is `OTS_REPAIR_PROPOSAL_TTL_DAYS`; and
+  `TILES3D_MAX_FEATURES` is `OTS_TILES3D_MAX_FEATURES`.
+- **The `SERVICE` deadline follows the query timeout.** Unset,
+  `OTS_SERVICE_DEADLINE_SECS` now defaults to `SPARQL_QUERY_TIMEOUT_SECS`
+  (30 by default), so raising the query timeout no longer leaves federated
+  queries failing at 30 s.
+- **`OTS_REASONER_TOKEN` is read as a secret.** The server resolves it like
+  `LLM_API_KEY`: `env:`, `file:` and `vault:` references work, a raw value is
+  accepted with a deprecation warning, and `OTS_ENV=production` refuses a raw
+  value.
+- **IdP access tokens no longer create API tokens by default.** In OIDC
+  resource-server mode an access token issued by the external IdP was treated
+  as a full interactive session, including `POST /api/auth/tokens`, so any
+  client holding a user's IdP token for this store's audience could turn it
+  into a permanent `ots_` token for that account. Under the new default
+  `OTS_OIDC_IDP_TOKEN_POLICY=session` such a token still reads and writes but gets
+  `403` when it asks for an API token, the rule `OTS_OIDC_SESSION_POLICY`
+  already set for this store's own provider tokens. Create API tokens from a
+  web UI sign-in, or set `OTS_OIDC_IDP_TOKEN_POLICY=full` to restore the old behaviour.
+- **`OIDC_DEFAULT_ROLE` is capped at `user`.** The default role applies to
+  every account an IdP token creates, so `admin` or `super_admin` made every
+  account the IdP knows an administrator; claim-mapped roles were already
+  capped at `admin`. Such a value now logs an error at startup and `user` is
+  used. The cap also applies to the `env-oidc` provider entry's default role,
+  so an entry created by an earlier version with an admin default, or edited
+  to one, creates `user` accounts. `guest` is kept. Grant admin per account
+  through `OIDC_ROLE_CLAIM_MAP` or the UI.
+- **Federation: `SERVICE ?var`, per-query limits, and the W3C federation tests.**
+  An endpoint named by a variable that the pattern before the `SERVICE` binds —
+  `?d void:sparqlEndpoint ?ep . SERVICE ?ep { … }` — used to fail with "the
+  variable encoding the service name is unbound"; it is now evaluated as a
+  lateral join, once per row, with that row's endpoint (SPARQL 1.1 Federated
+  Query §4; `OPTIONAL { SERVICE ?ep { … } }` likewise). The endpoint still has
+  to pass the allowlist, and a `urn:source:<id>` value is resolved for the
+  caller exactly like a written-out `SERVICE <urn:source:id>`. The calls of one
+  query now share a budget: an answer for the same endpoint and pattern is
+  fetched once and reused; a query may contact `OTS_SERVICE_MAX_ENDPOINTS`
+  endpoints (default 16) with `OTS_SERVICE_MAX_CALLS` requests (default 64),
+  and over either cap the call fails like any other (an error, or the empty
+  solution under `SILENT`); and its `SERVICE` calls must finish within
+  `OTS_SERVICE_DEADLINE_SECS` (default 30) of its start, after which the query
+  fails, `SILENT` or not — before, nothing stopped a query that kept calling
+  remotes after its HTTP request had timed out. A query containing `SERVICE`
+  is evaluated against the store itself, never by the in-memory copies. The
+  `service/` and `syntax-fed/` sections of the W3C SPARQL 1.1 test suite are
+  vendored unmodified and run against local endpoints
+  (`tests/w3c_sparql11_federation.rs`, unscored), and `docs/standards.md` now
+  grades SPARQL 1.1 Federated Query **Full — deny-by-default** (was Partial).
+  See docs/federation.md.
+- **A `SERVICE` result over a cap fails instead of being truncated.** A remote
+  result with more than `OTS_SERVICE_MAX_ROWS` rows used to be cut to the cap
+  and joined as if it were the whole answer, which silently changed the result
+  of the query around it. It is now a failed invocation, like a refused
+  endpoint or a timeout: the query errors with a message naming
+  `OTS_SERVICE_MAX_ROWS`, and under `SERVICE SILENT` the clause yields the
+  single empty solution (SPARQL 1.1 Federated Query §3.2). Every outbound
+  response body — `SERVICE` results, virtual-datasource queries and snapshots,
+  LDES pages — is now read as a stream under a new limit,
+  `OTS_REMOTE_MAX_BYTES` (default 64 MiB), and a body over it fails the same
+  way; before, bodies were read whole with no limit. A query or a snapshot
+  that relied on truncation, or on a body above 64 MiB, now fails: raise the
+  variable or narrow the pattern. See docs/federation.md.
+- **OWL 2 RL runs 75 of the 78 RL/RDF rules (was 63), and lists and inverse
+  properties work everywhere.** New: `eq-diff2`/`eq-diff3`
+  (`owl:AllDifferent`), `prp-pdw` (`owl:propertyDisjointWith`), `prp-adp`
+  (`owl:AllDisjointProperties`) — inconsistencies, reported as a 422 with their
+  rule id — and `prp-ap`, `cls-thing`, `cls-nothing1`, `scm-op`, `scm-dp`,
+  `prp-eqp1/2`, `eq-ref` (opt-in). `scm-cls` now derives all four of its
+  consequences (`C ≡ C` and `owl:Nothing ⊑ C` were missing). `cls-int1`,
+  `prp-spo2` and `prp-key` match lists of any length (intersections and chains
+  of three or more never fired); `scm-int`, `scm-uni` and `cax-adc` no longer
+  skip blank-node members. An inverse property expression `[ owl:inverseOf P ]`
+  works in domains, ranges, characteristics, sub-/equivalent properties, chains,
+  keys and restrictions. Before, those rules matched nothing, and an inverse key
+  property was dropped from the key, so individuals merged on the remaining
+  properties alone. `prp-npa1/2` no longer require an
+  `rdf:type owl:NegativePropertyAssertion` triple. `prp-trp` keeps the reflexive
+  triple a cycle derives. `x owl:differentFrom x` is an inconsistency. The
+  duplicate `prp-hv1/2` copies of `cls-hv1/2` are gone. Every run now adds the
+  13 axiomatic triples (9 annotation properties, `owl:Thing`/`owl:Nothing` as
+  classes) plus their `scm-cls` consequences, so an empty store's
+  materialisation reports 48 triples instead of 32. The only rules not run are
+  `dt-type2`, `dt-eq` and `dt-diff`.
+- **OWL 2 DL is graded Full with the reasoner sidecar** (`docs/standards.md`
+  footnote 4, with a new legend sentence on grades that depend on an optional
+  component the project ships); without it the native rules stay sound but
+  incomplete. The comparison matrix's OWL DL cell follows. The server's RDF →
+  OWL 2 mapping now also reads a named class carrying several
+  `owl:oneOf`/`owl:intersectionOf`/… lists as one `EquivalentClasses` axiom per
+  list, OWL 1's `owl:DataRange` as `rdfs:Datatype`, and ignores
+  `rdf:type owl:NamedIndividual` on a blank node, instead of refusing them as
+  outside OWL 2 DL.
+- **`ReasoningError::Inconsistency` names its rule.** The library variant is now
+  `Inconsistency { rule, detail }` (it was `Inconsistency(String)`), and
+  `ReasoningError::NotConverged { regime, iterations }` is new. Code that
+  matched `Inconsistency(_)` matches `Inconsistency { .. }`.
+- **OWL 2 QL is graded Full.** Data ranges are now decided on values through
+  the OWL 2 datatype map (`src/reasoning/datatypes.rs`, the nineteen
+  datatypes of the EL and QL maps): `-5` against `xsd:nonNegativeInteger`,
+  `"1.5"^^xsd:decimal` against `xsd:integer` and a language-tagged string
+  against `xsd:string` are inconsistent (`ql-dt-range`), and so is an
+  ill-typed literal anywhere in the data (`ql-dt-not-type`). `∃U.D` with a
+  data range `D` works on the left of an inclusion (a subject with a `U` value
+  in `D` gets the class, in materialisation and in the stand-alone
+  rewriting), a class that needs a value outside its property's range is
+  unsatisfiable, data ranges may be intersections or datatype definitions, and
+  disjoint data properties compare values (`1` and `"1.0"^^xsd:decimal` clash).
+  Ranges on datatypes outside the QL map (`xsd:boolean`, `xsd:double`, …) are
+  reported as ignored axioms instead of being checked by datatype family.
+  `docs/standards.md` grades OWL 2 QL Full, and its cells in
+  `docs/triplestore-comparison.md` follow.
+- **`owl2-ql` materialisation results change** (see Added): the target graph
+  now holds ground atoms, a dataset run writes to the dataset's own
+  `urn:entailment:owl2-ql:<id>` graph (it wrote the TBox closure to the shared
+  graph), and an inconsistent ontology fails the run.
+- **OWL 2 EL is a native EL++ reasoner covering the whole profile; graded Full.**
+  Results change. The SPARQL `INSERT` loop is replaced by a saturation engine in
+  Rust (`src/reasoning/owl2_el/`): it reads the ontology from the quad index,
+  normalizes it, applies the EL++ completion rules with a worklist and writes
+  the new consequences with one `insert_quads` call.
+  - It now derives what the loop missed: every subsumption that needs an
+    anonymous successor, TBox property chains (`findingSite ∘ partOf ⊑
+    findingSite`), chains of any length, ranges on existential successors,
+    ⊥ through successors, and `owl:Thing ⊑ C`. An unscoped run sees its own
+    consequences. Classification also writes `owl:equivalentClass`, and the
+    property hierarchy writes `owl:equivalentProperty`.
+  - New constructs: `owl:hasValue` (object and data), one-individual
+    `owl:oneOf`, `owl:hasSelf`, `owl:sameAs`, `owl:differentFrom`,
+    `owl:AllDifferent`, negative property assertions, functional data
+    properties, data ranges and the nineteen EL datatypes with value semantics
+    (`"1"^^xsd:integer` equals `"1.0"^^xsd:decimal`). Classification stays
+    complete with nominals: a class whose subsumers depend on them is checked
+    against a hypothetical instance.
+  - Inconsistency also covers equality against `owl:differentFrom`, negative
+    property assertions, ill-typed literals and data-range violations,
+    including two values of a functional data property.
+  - Only triples that are not already in a premise graph are written. A
+    triple that is both asserted and entailed is no longer copied into
+    `urn:entailment:owl2-el`.
+  - **API addition (`ReasoningReport::ignored`):** the axioms outside the EL
+    profile that a run left out, as `[{construct, count, example}]`.
+    `POST /api/reasoning/materialize` returns the list when it is not empty.
+  - `docs/owl2-el.md` is rewritten, with performance measured on the
+    saturation core, and `docs/standards.md` grades OWL 2 EL Full.
+    `tests/owl2_el_conformance.rs` adds 34 tests, two of them randomised
+    differential tests against the RL engine on the EL ∩ RL fragment;
+    `test_biomedical_classification` no longer passes on an asserted triple.
 - **SHACL report graphs follow the W3C results vocabulary** (release note for
   anyone who reads `urn:system:reports:*` or a SHACL Studio pipeline's report
   graph). The RDF a validation run writes used to carry display strings; it
@@ -181,6 +530,184 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   node expression that contains itself or is none of the seven kinds, and a
   target-type parameter given twice or as a blank node fail the shapes graph
   too.
+- **RDF Patch `PA`/`PD` change the dataset's prefix table**, as the format
+  page has it ("Prefixes do not apply to the data of the patch. They are
+  changes to the data the patch is applied to"); they used to change nothing.
+  A version diff served as a patch carries the prefix-table changes as
+  `PD`/`PA` rows, and diffs between versions chain: a diff to a version keeps
+  one name-based `H id`, and its `H prev` names the diff into `from`. `A`/`D`
+  rows may still use the patch's own prefixed names (a documented extension).
+  `POST …/patch` answers `401` instead of `500` without a token. The RDF
+  Patch row of `docs/standards.md` is now Full.
+- **A version's TriG download is one document with named graphs.**
+  `GET /api/datasets/{id}/versions/{ver}/data` wrote every snapshot's triples
+  into the default graph; each graph is now written under the live graph it
+  was cut from, so the download lines up with the version's RDF Patch diffs.
+- **RDF Patch follows the format page.** `PA`/`PD` take the prefix name as a
+  keyword or a quoted string and the namespace as an IRI or a string, so
+  patches written by Jena or RDF Delta (`PA "rdf" "http://…" .`) apply; the
+  old `PA ex: <…>` form is still read. A patch may hold several `TX` blocks,
+  and a `TA` discards only its own. Rows end at their `.`, not at a line
+  break, and `#` comments may follow a row. Blank nodes, `_:x` or `<_:x>`,
+  name the store's own nodes: a patch can delete a blank-node triple, and a
+  version diff with blank nodes applies faithfully (adds used to go through
+  `INSERT DATA`, which minted fresh nodes). Triples without a graph go to the
+  registered graph `?graph=` names. Patches are applied by a new
+  transactional quad path (`TripleStore::apply_quad_ops`) that records the
+  exact net change in the change log, and the response's `added`/`removed`
+  are that net change. Spec-derived tests in `tests/rdf_patch_conformance.rs`.
+- **RML / R2RML terms follow R2RML.** A file mapping, a dataset's stored
+  mapping and every newly frozen datasource mapping version now generate terms
+  by R2RML's rules, so their output changes:
+  - a template object map with no `rr:termType` is an **IRI** (§7.4), not a
+    literal — write `rr:termType rr:Literal` for text;
+  - a template value is encoded only when the term is an IRI, and only outside
+    RFC 3987 `iunreserved` (§7.3): `a-b.c_d~e` and non-ASCII letters stay as
+    they are where they used to become `a%2Db%2Ec%5Fd%7Ee`, and a literal
+    template is no longer percent-encoded;
+  - a blank node is one per value and graph (§11.2, §9.1), not one per row;
+  - graph maps sit on the subject map (`rr:graphMap` or `rr:graph`) and
+    predicate-object maps, and a triple goes to the **union** of both graphs
+    instead of the predicate-object map's overriding the subject's; `rr:class`
+    triples go to the subject's graphs, `rr:defaultGraph` names the default
+    graph, every graph map is used rather than the first, and a malformed one
+    is an error instead of being dropped. A graph map on the triples map is
+    still read, as a subject graph map;
+  - a relative IRI resolves against a base IRI: a triples map's `rml:baseIRI`,
+    or `?base=` on `POST /api/datasets/:id/mappings/execute`.
+  **Existing datasource mapping versions keep their output.** Each version is
+  now stamped with the rules it runs under (`semantics`: `r2rml` or `legacy`,
+  on the version entity and in the API); a version frozen before carries no
+  stamp and runs as `legacy`. `POST`/`PUT /api/mappings` and an inline dry-run
+  accept `"semantics": "legacy"` to freeze a new version under the old rules,
+  so a fix does not rename every entity. Whatever the rules:
+  - `rr:object <IRI>` is an IRI — it used to be written as a string literal,
+    which YARRRML's `[ex:p, ex:Term]` produced — and a constant literal keeps
+    its datatype and language tag (a constant is no longer typed by whether it
+    contains `://`);
+  - a literal constant in a subject, predicate or graph position is a mapping
+    error;
+  - `rr:tableName` may be schema-qualified and its parts delimited
+    (`"Student"`, `` `x` ``, `[x]`), each re-quoted by the dialect; a delimited
+    column name (`rr:column "\"ID\""`, `{"ID"}`, join columns) reads column
+    `ID`.
+  The YARRRML and legacy-format converters now write an explicit `rr:termType`
+  on every template and column term map.
+- **An RML predicate-object map generates every predicate × every object.**
+  A predicate-object map with several `rr:predicateMap` / `rr:predicate` or
+  `rr:objectMap` / `rr:object` values used only the first of each, in store
+  order, and dropped the rest without a word. It now generates one triple per
+  predicate per object (R2RML §6.3, §11.1), referencing object maps included,
+  into each of its graphs, on file and datasource runs and in dry runs. This
+  applies to every mapping version, legacy-stamped ones included: the triples
+  it adds were missing, and no existing term changes.
+- **An RML mapping that does not conform to R2RML is refused, with the
+  construct named.** Parsing used to take the first of two subject maps,
+  logical sources or term-map kinds, drop an invalid language tag at run
+  time and ignore an unknown `rr:termType`. Now a triples map needs exactly
+  one logical source and one subject map; a term map exactly one of
+  `rr:constant`, `rr:template`, `rr:column` / `rml:reference`, each once;
+  `rr:termType` must be `rr:IRI`, `rr:BlankNode` or `rr:Literal` and legal
+  where it stands (a literal subject, predicate or graph, or a blank-node
+  predicate or graph, is an error); `rr:language` and `rr:datatype` exclude
+  each other and apply to literals only; a language tag must be valid BCP 47;
+  `rr:class` values must be IRIs; a logical table cannot have both
+  `rr:tableName` and a query; a referencing object map takes no term map of
+  its own. The error names the triples map and the construct. A mapping
+  version stored before that breaks one of these rules now fails to run with
+  that message, under either term-rules stamp.
+- **A column the source does not have is an error.** A term map, function
+  parameter or join condition naming a column that a CSV header lacks, or
+  that a datasource's query does not return, failed silently — every row
+  generated nothing for it. It is now refused before the first row, naming
+  the column, where the mapping uses it and the columns the source has. A
+  query result with two columns of one name is refused too (R2RML §5.2).
+  Connectors gain `SourceConnection::columns(query)` in `ots-plugin-api`
+  (additive, default `None`); SQLite, PostgreSQL, MySQL and SQL Server
+  describe a query without running it.
+- **A data error aborts an RML run and names the rows.** A value an IRI term
+  map cannot make a valid IRI of — and, new, a value outside its
+  `rr:datatype`'s lexical space (R2RML §10.3: `"forty-two"` as
+  `xsd:integer`) — used to drop that term without a word. Now the run fails
+  and writes nothing, and its error names the first ten offending rows with
+  their values (R2RML §4.3), for every mapping version, legacy-stamped ones
+  included. A run that would rather go on can opt in: `"onDataError": "skip"`
+  on `POST /api/sources/:id/runs`, `?on_data_error=skip` on
+  `POST /api/datasets/:id/mappings/execute` and `POST /api/rml/preview`. It
+  leaves those terms out and reports the rows (`dataErrors` on the run
+  record, `data_errors` in the file endpoints' response). A dry-run never
+  aborts on one and lists them as `dataErrors`. `otsfn:mintIri` reports an
+  IRI it cannot make the same way.
+- **An empty value is a value; RML-IO `rml:null` says what is NULL.** An
+  empty CSV cell, an empty JSON string, an empty XML element and a SQL `''`
+  generated no term. Under R2RML and RML-IO only a NULL does — a SQL NULL, a
+  JSON `null` or missing key — so these now generate an empty literal (or an
+  IRI built from the empty string), and an empty XML element `<a/>` reads as
+  `""` where it read as missing. `rml:null "…"` on the logical source (RML-IO
+  `<http://w3id.org/rml/null>`, also read in the legacy `rml:` namespace)
+  lists further values that count as NULL. A mapping version stamped
+  `legacy` keeps generating no term from an empty value and ignores
+  `rml:null`. The legacy-format converter writes `rml:null ""` on every
+  logical source, so a converted mapping still reproduces the legacy
+  transformer's output.
+- **LDES search tree: one root node with bounded relations.** `tree:view` now
+  points at a root node (`/ldes/nodes/0`, no members) that links every full
+  fragment with a `tree:GreaterThanOrEqualToRelation` and a
+  `tree:LessThanOrEqualToRelation` on `dct:created` (Server Primer §4), and
+  the first unsealed fragment with a lower bound. Full fragments no longer
+  link onward, so each bound covers everything reachable through it; unsealed
+  fragments still chain forward. Page numbers are unchanged. Tombstones are
+  typed `as:Delete` as well as `ots:Tombstone`.
+- **Outbound requests follow redirects within the allowlist.** SPARQL
+  federation (`SERVICE`), virtual SPARQL sources and LDES sync used to refuse
+  every redirect. They now follow up to 10, and each hop must be covered by
+  `OTS_REMOTE_ALLOWLIST` again; a hop off the list fails the request ("redirected
+  to … which is not in OTS_REMOTE_ALLOWLIST") without contacting it, and a hop
+  to another host or port drops the `Authorization` header. LDES 1.0 §3.3 and
+  TREE require clients to follow redirects.
+- **The LDES client follows the LDES 1.0 consumer specification.** It
+  initialises as §3.1 says: the URL given is the event stream (its one
+  `tree:view` is dereferenced), its root node, a redirect to either, or a page
+  with exactly one `tree:view`; anything else is an error naming §3.1, where it
+  used to crawl whatever `tree:view` or `tree:node` it found. It reads context
+  from the root node, follows only the page's own `tree:relation`s, and
+  extracts members as §3.4 does: `<stream> tree:member ?m`, the star pattern of
+  `m` and every quad in the named graph `m`. A member's named graph, when it has
+  one, is the payload written for its entity. The declared paths
+  (`ldes:timestampPath`, `versionOfPath`, `versionTimestampPath`,
+  `sequencePath`, `versionSequencePath`, and the create / update / delete
+  paths) are evaluated as SHACL property paths with the SHACL engine's
+  parser. Deletes are recognised by the stream's declared
+  `ldes:versionDeletePath` / `ldes:versionDeleteObject` — `as:Delete` is no
+  longer hard-coded; `ots:Tombstone` still counts for a stream that declares
+  no delete object. A create adds to an entity without removing what it held;
+  versions published out of order are ordered by `ldes:versionTimestampPath`
+  and `ldes:versionSequencePath`, so an older version arriving later is not
+  applied. The legacy `ldes:PointInTimePolicy` is read as `starting_from`.
+  The client records which subjects each entity's version wrote, and replaces
+  exactly those (with their blank nodes) when a newer version arrives.
+- **3D Tiles GLB positions are relative to a local origin.** The mesh node
+  carries a `translation` to the centre of the content and the POSITION
+  accessor holds f32 offsets from it. Absolute ECEF coordinates in f32 had
+  snapped every vertex to a 0.25–0.5 m grid at Dutch latitudes; vertices now
+  keep millimetre precision. Clients that read the POSITION accessor directly
+  must apply the node translation. The tileset's bounding region is computed
+  from per-feature bounding boxes, without triangulating.
+- **The Docker image ships the SQL connectors.** 0.7.0 announced PostgreSQL,
+  MySQL / MariaDB and SQL Server datasources, but the image built only
+  `--features full`, which leaves `plugin-postgres`, `plugin-mysql` and
+  `plugin-mssql` out, so the published image could register only `sqlite` and
+  `sparql` sources. The Dockerfile's `CARGO_FEATURES` now defaults to
+  `full,plugin-postgres,plugin-mysql,plugin-mssql`. The connectors are pure
+  Rust over rustls and need no new system package; the binary grows by about
+  4%. `full` and a plain `cargo build` are unchanged. A custom image that sets
+  `CARGO_FEATURES` replaces this list, so it must name the connectors it wants
+  (`CARGO_FEATURES=full` builds an image without them). The SQL Server driver
+  brings tiberius's rustls 0.21 stack into the image; `deny.toml` now says so
+  and keeps its three advisory ignores on reachability grounds.
+  `docs/build-features.md` lists the three features, `docs/sources.md` says
+  what the image carries, and GitHub CI's backend job compiles the main crate
+  with all three (it built only `plugin-postgres`, in the live-sources job).
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were
@@ -205,6 +732,83 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   title. A `patch` on a `release/X.Y` branch releases that line and leaves the
   `latest` GitHub Release and image tag alone. `release.yml` can be re-run for
   an existing tag. See `docs/release-process.md`.
+- **An RML file mapping with `rr:parentTriplesMap` is refused.** The upload
+  path (CSV, JSON, XML) has no join resolver, so a referencing object map
+  resolved to nothing: the run wrote the rest of the mapping, dropped every link
+  it asked for, and reported success. It now answers `400` naming the triples
+  map, as it already did for a mapping that reads a registered datasource.
+  Joins run on registered datasources (`docs/sources.md`). Tests:
+  `src/rml/executor.rs`, `tests/rml_conformance.rs`.
+- **`docker-compose.override.yml` no longer ships.** It was one machine's
+  workaround for an unstable build host (thin LTO, two build jobs), and Compose
+  merges the file automatically, so every `docker compose build` got the slow,
+  less optimised image while `docs/development.md` called the file git-ignored.
+  It is now ignored; keep a local copy if you use one.
+- **Standards grades follow the code.** `docs/standards.md` regrades
+  **SPARQL 1.1 Query** and **OWL 2 QL** from Full to Partial, and every footnote
+  now lists the real gaps. SPARQL 1.1 Query: the W3C entries the oxigraph 0.5
+  evaluator fails and why, duplicate matches across several `FROM` graphs
+  (oxigraph#1919), the `/sparql` dataset rewrite, and shards that evaluate
+  `EXISTS` per shard. OWL 2 QL: two unsound rewrites, no `rdfs:range`, and a
+  regime that materialises only the TBox closure. OWL 2 EL: an unsound CR3 rule.
+  OWL 2 RL: `dt-type1` and `dt-not-type` are implemented (the docs and README
+  said they were not), and unscoped runs miss joins over two derived premises.
+  SHACL Core: literal canonicalisation, including derived integer datatypes
+  stored as `xsd:integer`. SHACL Advanced: the gaps that remain. GeoSPARQL: the
+  functions that answer wrongly today. The RDF Patch and LDES rows are reworded:
+  RDF Patch lacks multiple transaction blocks (there are no nested ones), and
+  `ldes:versionKey` is not part of LDES 1.0. The in-app capabilities graph (the
+  `capabilities` demo dataset) gave every standard "Full"; it now lists every
+  row of `docs/standards.md` with its grade, a unit test keeps the two in step,
+  and existing installs get the new graph on their next start (demo content
+  version 14). The conformance table counts `tests/ldes_conformance.rs` as the
+  "LDES 1.0 / TREE" suite and relabels the DCAT and OWL 2 DL rows.
+- **The comparison matrix follows the grades on every row.**
+  `docs/triplestore-comparison.md` shows 🟡 for every standard
+  `docs/standards.md` grades Partial, including SPARQL 1.1 Query, OWL 2 QL,
+  SHACL-AF inference, DCAT and VoID, so the standards score is recounted,
+  16 → 11 of 29. With this release's Full grades for SPARQL 1.1 federation,
+  OWL 2 EL, OWL 2 QL and OWL 2 DL (with the reasoner sidecar) it is recounted
+  again, 11 → 15 of 29 (2026-10-03). The OWL DL and SWRL text no longer contradicts the matrix. The
+  unused spatial R-tree, the unbuilt property-path memoisation and
+  "single-node only" are corrected, and its footnote numbers no longer collide.
+
+- **`owl2-dl` needs a configured backend (breaking).** There is no default
+  any more: without `OTS_DL_BACKEND` every `owl2-dl` request answers 503.
+  Set `OTS_DL_BACKEND=native` to keep the previous in-process rules, which are
+  sound but not complete (`complete: false` and a warning in every report).
+  `OTS_EXTERNAL_REASONER` and `OTS_EXTERNAL_REASONER_BIN` are removed; a server
+  that still sets them logs a warning. Input that is not OWL 2 DL is refused
+  with the violations listed, where it was reasoned over before. In the library,
+  `owl2_dl::{ExternalReasoner, ExternalReasonerBridge, NativeTableauStub}` and
+  `konclude_bridge::KoncludeReasoner` are replaced by `dl_backend::DlBackend`,
+  `dl_backend::{materialize, check}` and `konclude_bridge::KoncludeBackend`.
+- **The native OWL 2 DL rules reach one joint fixed point with OWL 2 RL.** The
+  RL rules used to run once, before the DL rules, so a DL consequence such as
+  `x p x` from `owl:hasSelf` never reached `rdfs:domain`, `rdfs:subPropertyOf`
+  or any other RL rule. They now alternate until neither adds anything. New:
+  - `owl:hasSelf` also works backwards (`x p x` ⇒ `x : ∃p.Self`);
+  - `owl:ReflexiveProperty` relates every individual in scope to itself, so a
+    property that is also irreflexive is reported inconsistent (`prp-irp`).
+
+  The DL layer's own 1- and 2-property `owl:hasKey` rules and its
+  negative-assertion checks duplicated RL `prp-key` and `prp-npa1/2` and are
+  gone. An inconsistent negative assertion now names `prp-npa1` or `prp-npa2`
+  instead of `dl-negative-object-assertion` / `dl-negative-data-assertion`.
+- **Cardinality obligations moved to a diagnostics graph (breaking).** The
+  `urn:dl:minCardinality` / `exactCardinality` / `minQualifiedCardinality` /
+  `exactQualifiedCardinality` triples are not inferences. They are now written
+  to `<target>:diagnostics` (for example
+  `urn:entailment:owl2-dl:diagnostics`), which `?entailment=` never folds into
+  a query, instead of the entailment graph itself.
+- **`owl2-dl` datasets re-materialise in the background.** After a write, a
+  dataset in `materialize` mode with the `owl2-dl` regime no longer reasons
+  inside the write. A background run starts once no write has arrived for
+  `OTS_DL_DEBOUNCE_MS` (default 2000), and writes during a run queue one more.
+  `GET /api/datasets/{id}/entailment` adds `status` (`queued`, `running`, `ok`,
+  `inconsistent`, `not_in_profile`, `unavailable`, `timeout`, `too_large`,
+  `failed`, …), `error`, `backend`, `complete` and `dl_backend`. A `PUT` of the
+  setting still runs at once.
 
 - **SHACL: a property path reads the merge of a run's data graphs.** SHACL
   validates one data graph (§3.4), and a run over several validates their
@@ -219,13 +823,232 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reads such a path can now fire (scheduled inference materialises what it
   derives). Single-graph runs, and so every write gate, are unchanged. The
   `OTS_SHACL_REACH_PROBE` setting that measured the difference is removed.
+- **GeoSPARQL: a GML literal's `srsName` counts everywhere.** Only the metric
+  functions read it. Topology, `geof:relate`, the constructive functions,
+  `getSRID`, `transform` and `aggUnion` took every GML literal for CRS84, so
+  `sfEquals` and `metricDistance` disagreed about the same literal. Every
+  function now reads a literal's CRS from one place: the WKT `<crs>` prefix or
+  the GML `srsName`. `EPSG:28992`, `urn:ogc:def:crs:EPSG::28992` and the other
+  spellings normalise to `http://www.opengis.net/def/crs/EPSG/0/28992`. Axis
+  order follows the CRS, so an EPSG:4326 GML `<gml:pos>1 2</gml:pos>` is
+  latitude 1, longitude 2: `sfEquals` with `"POINT(2 1)"` is now true, and
+  with `"POINT(1 2)"` false. `getSRID` reports the `srsName`, and a
+  constructive result or `aggUnion` keeps it.
+- **GeoSPARQL: `geof:relate` harmonises its operands' CRSs**, as the sf/eh/rcc8
+  functions do. It compared RD New metres with CRS84 degrees.
+- **GeoSPARQL: `geof:ehCoveredBy` uses the spec's DE-9IM mask `TFF*TFT**`**,
+  which makes it the exact inverse of `ehCovers`. It used GEOS `covered_by`, so
+  a line on a polygon's boundary was covered by it (now false). A geometry
+  strictly inside another is now `ehInside` and not `ehCoveredBy`; one inside
+  that touches the other's boundary is still covered by it.
+- **GeoSPARQL: the perimeter of a non-areal geometry is its length.**
+  `geof:metricPerimeter` of a line returned 0. It now returns the line's
+  geodesic length (0 for a point), as GeoSPARQL 1.1 says.
+- **GeoSPARQL: `geof:transform` fails instead of passing coordinates through.**
+  A coordinate outside a CRS's domain was copied into the result unchanged, so
+  the north pole "transformed" into Web Mercator and Paris got RD New
+  coordinates. That result is now unbound, and so is any operation that has to
+  harmonise such a geometry. RD New has a domain: its EPSG area of use plus
+  about 50 km. Outside it the polynomial approximation returned plausible
+  garbage. `transform` now keeps Z, and it accepts its target CRS as an
+  `xsd:anyURI` literal as well as an IRI. Building now needs **GEOS 3.11 or
+  later** (the `geos` crate's `v3_11_0` feature, for `transform_xy`). Debian
+  bookworm, current Ubuntu, Debian trixie and vcpkg all ship 3.11 or later;
+  Ubuntu 22.04's 3.10 no longer builds.
+- **GeoSPARQL: an empty geometry literal is the empty geometry.** `""^^geo:wktLiteral`
+  (with or without a CRS), `""^^geo:gmlLiteral` and `""^^geo:geoJSONLiteral` were
+  not geometries, so every function over them was unbound (GeoSPARQL 1.1
+  Req 17, 21 and 27). An empty plain string is still not a geometry.
+- **GeoSPARQL units of measure: more IRIs, and no silent fallback.** Unit
+  arguments accept QUDT units (`unit:M`, `KiloM`, `CentiM`, `MilliM`, `FT`,
+  `MI`, `MI_N`, `DEG`, `RAD`, `M2`, `KiloM2`, `HA`), EPSG units (9001, 9002,
+  9036, 9101, 9102) and the OGC `uom:` units, given as an IRI or as an
+  `xsd:anyURI` literal. An unknown unit used to be ignored, which returned
+  planar degrees as if they were metres. It is now unbound. So are an angular
+  unit on a projected CRS, any unit on a CRS this build cannot reproject, and
+  an area unit for a distance. `geof:area` takes an area unit: geodesic on a
+  geographic CRS, planar on a projected one. No unit, or `uom:unity`, still
+  means the CRS's own units.
 
 ### Fixed
+- **More `.env` settings reach the server under Docker Compose.**
+  `docker-compose.yml` passes the server an explicit environment list, so a
+  setting `.env.example` documents had no effect until it was on that list.
+  The list now includes the per-task model overrides (`LLM_SPARQL_MODEL`,
+  `LLM_SHACL_MODEL`, `LLM_CHAT_MODEL`), the LLM rate limits
+  (`LLM_RATE_LIMIT_PER_MIN`, `LLM_RATE_LIMIT_ANON_PER_MIN`), the prompt guard
+  (`LLM_GUARD_INJECTION_ACTION`, `LLM_GUARD_BLOCKLIST`,
+  `LLM_GUARD_MAX_MESSAGE_CHARS`, `LLM_GUARD_MAX_MESSAGES`,
+  `LLM_GUARD_MAX_TOTAL_CHARS`), the LLM request log
+  (`LLM_LOG_PREVIEW_DISABLED`, `LLM_LOG_RETENTION_DAYS`), `CLAMAV_ADDR` and
+  `OTS_ENV`. Each is passed empty when unset, which the server treats as
+  unset. `.env.example` now lists `OTS_ENV` and `LLM_CHAT_MODEL`. It also notes
+  that the production posture refuses the raw `JWT_SECRET` and
+  `S3_SECRET_KEY` this compose file passes, so those must be references first.
+- **OIDC resource-server mode, provider-token policy and several settings
+  are documented.** The resource-server mode, which accepts an external IdP's
+  access tokens (`OIDC_ISSUER`, `OIDC_AUDIENCE`, `OIDC_DEFAULT_ROLE`, the
+  claim-mapping variables and `ACCEPT_LEGACY_TOKENS`), was configured only
+  through `docker-compose.yml` and `.env.example`. It now has a section in
+  `docs/auth.md`: token requirements, account linking, role and organisation
+  mapping, what an IdP token may do (including minting API tokens), and that
+  `ACCEPT_LEGACY_TOKENS=false` also refuses the web UI's own sign-in.
+  `docs/oidc-provider.md` said provider tokens work "like any session token".
+  It now describes `OTS_OIDC_SESSION_POLICY` and `OTS_OIDC_WRITE_SCOPES`:
+  under the default `session` policy every registered client's token can
+  write, admin tokens always write, and because the provider issues only
+  `openid profile email`, `scoped` makes provider tokens read-only.
+  `.env.example` had claimed a client could widen its scopes; that claim is
+  corrected. The administration env table gains `WRITE_TIMEOUT_SECS` (a
+  timed-out write answers `503` but may still complete), `VALIDATION_API_URL`
+  (forwards the caller's bearer token), `SEED_STANDARDS_DEMO`,
+  `EMBED_FRAME_ANCESTORS` and the query-cache, mirror, SHACL run-index and
+  telemetry tuning knobs. `docs/plugins.md` lists the accounts-dashboard
+  settings. `docker-compose.yml` now passes `OTS_OIDC_SESSION_POLICY`,
+  `OTS_OIDC_WRITE_SCOPES`, `OTS_GUEST_CAPABILITIES` and
+  `EMBED_FRAME_ANCESTORS` through to the server; before, setting them in
+  `.env` had no effect.
+- **The login page no longer offers SSO buttons that cannot sign in.** With
+  `OIDC_ISSUER` set, the store creates an *Environment OIDC* provider entry
+  (slug `env-oidc`, no client ID) to hold the accounts of IdP bearer tokens,
+  and the login page listed it as a sign-in option that failed with "has no
+  client_id". `GET /api/auth/oauth/providers` now lists only active entries a
+  browser sign-in can start from: OIDC entries with a client ID, and SAML
+  entries with an SSO URL in a build with the `saml` feature.
+  `GET /api/auth/oauth/{slug}/authorize` answers `404` for the others instead
+  of `500`. IdP bearer tokens are unaffected, whatever an admin later
+  edits on the entry; turning it off is no longer needed to hide it.
+- **OIDC browser sign-in lands signed in.** After the code exchange the
+  callback redirected to `/#access_token=…`, a page that never reads the
+  fragment, so the tokens were dropped and the user arrived signed out. It now
+  redirects to `/oauth/callback#…`, which stores them and removes them from the
+  URL bar.
+- **Security → Identity providers form now matches the provider API.**
+  Opening a provider for editing threw (the form treated `scopes` as an
+  array), and saving was refused with a 422 (`scopes` and `role_claim_map`
+  were sent as an array and an object, and the required `is_active` as
+  `enabled`); the table showed every provider as Disabled. The form now reads
+  and sends `scopes` and `role_claim_map` as strings and `is_active` as the
+  on/off switch, refuses a role claim map the server would read as empty, and
+  keeps fields it does not show (such as `tenant_id`) through an edit. Fields
+  the API never had (`role_claim`, explicit endpoints) are gone. The separate
+  "Azure AD" type is folded into OIDC, which is the only type the sign-in
+  flow runs. SAML providers get entity ID, SSO URL and certificate fields in
+  place of an IdP-metadata field the server never read. The default-role list
+  no longer offers `super_admin`, which sign-in caps at `admin`. The synthetic
+  `env-oidc` row (`OIDC_ISSUER`) can be edited, but its slug cannot be changed.
+- **Editing a SAML provider no longer erases its IdP certificate.** Reads
+  redact the certificate, so no client could send it back, and an update
+  overwrote it with nothing. `PUT /api/admin/oauth/providers/:id` now keeps
+  the stored certificate when the body omits it, as it already did for the
+  client secret.
+- **A graph named `…/validation` keeps its version snapshot.** A snapshot
+  graph is named after its source graph's last path segment, under the version
+  IRI, which is also where the version's validation-layer graph lives
+  (`{base}/dataset/{id}/version/{v}/validation`). A source graph whose last
+  segment slugified to `validation` was copied there, then cleared when the
+  bindings snapshot was written, so the version kept none of its triples (only
+  the bindings, if any), and deleting the version dropped that graph twice.
+  Snapshots, branches included, no longer take the name `validation`: such a
+  graph becomes `validation-1`. An index suffix can no longer collide with
+  another graph's name either (`a`, `a-1`, `a` now give `a`, `a-1`, `a-2`
+  rather than two `a-1`s). Versions cut earlier keep their IRIs, and their lost
+  snapshot cannot be recovered: restoring one of them replaces that live graph
+  with what the snapshot holds. Tests: `tests/dataset_versions_http.rs`.
+- **SWRL refuses rules it cannot run as written.** Every rule is now checked
+  before any runs, and one that fails refuses the whole request with `400`;
+  nothing is written. Previously an untranslatable rule was skipped with
+  `success: false` while the others ran. The checks:
+  - unsafe rules: a head variable not bound in the body, or a built-in
+    variable that only a built-in mentions (built-ins cannot bind yet);
+  - built-ins in the head, which were skipped with a warning;
+  - a literal in an individual position or an individual in a data position,
+    and a variable used as both.
+
+  Object and data property atoms are no longer translated alike: a typed
+  variable in an object position binds only its own kind of term. The text
+  form has no declarations, so `p(?x, ?y)` there stays untyped.
+
+  Any variable IRI now works (the OWL API's `urn:swrl#x`, an ontology
+  namespace, `abbreviatedIRI`), each mapped to a generated SPARQL variable.
+  Plain and language-tagged `Literal`s are read, and unknown `format` values
+  are refused.
+
+  The report counts only what the run wrote to the target graph, not the
+  whole store. It now says whether the fixed point was reached: `converged`,
+  and `stop_reason` (`fixpoint`, `max_iterations` or `timeout`). Hitting
+  `max_iterations` used to look like success.
+- **OWL 2 EL and QL no longer derive what does not follow.** Results change.
+  - EL: the CR3 rule turned `A ⊑ ∃p.B` and `B ⊑ C` into `∃p.C ⊑ A`, so in a
+    dataset run any individual with a `p`-successor typed `C` was typed `A`.
+    It is gone. In its place, a structural CR4 handles filler subsumption and
+    the property hierarchy (`A ⊑ ∃r.B`, `B ⊑ C`, `r ⊑ s`, `∃s.C ⊑ D` give
+    `A ⊑ D`). EL now also reads `owl:equivalentClass` (both directions),
+    `rdfs:subPropertyOf` / `owl:equivalentProperty`, `owl:TransitiveProperty`
+    and `owl:disjointWith`, and keys with any number of properties.
+    Individuals get the existential restrictions they satisfy as types, so a
+    definition such as `D ≡ E ⊓ ∃p.C` classifies them.
+  - EL consistency: an unsatisfiable class with no instances is no longer
+    called an inconsistency. `classify()` now checks consistency (an
+    individual in `owl:Nothing` or in two disjoint classes) and fails with
+    `ReasoningError::Inconsistency`, as RL does. An inconsistent EL run of
+    `POST /api/reasoning/materialize` that used to succeed now returns an
+    error.
+  - QL: `C ⊑ ∃P.D` was read as `∃P ⊑ C`, so `x P y` made `x` a `C`; that
+    rewrite is gone. Every rewritten existential atom gets its own fresh
+    variable (one shared name joined independent atoms). The rewriter now uses
+    `rdfs:range`, expands domains and ranges through the class and property
+    hierarchies, and composes inverses with sub-properties. The `owl2-ql` TBox
+    closure gains the sub-properties entailed through inverses.
+  - `POST /api/reasoning/rewrite` reads the TBox only from graphs the caller
+    may read. It used to read the unnamed default graph for any authenticated
+    caller and spell its class hierarchy out in the answer. An admin's
+    rewriting still reads the default graph.
+- **Reasoners see their own consequences on an unscoped run.** Without
+  `dataset` or `source_graphs`, the OWL 2 RL, EL and DL rules read only the
+  unnamed default graph while every consequence went to the named target
+  graph, so a rule whose premises were both derived never fired: the third hop
+  of a transitive property, a three-link `owl:sameAs` chain,
+  `owl:equivalentProperty` propagation (`prp-eqp1/2` are subsumed only once
+  `prp-spo1` sees what `scm-eqp1/2` derived), a range reached through a
+  sub-property, and every consistency check on derived facts (`eq-diff1` after
+  `prp-fp`, `cls-nothing2` after `cax-sco`, `prp-irp`, `prp-asyp`, `cls-com`,
+  `cls-maxqc1/2`). Unscoped runs now read the default graph together with the
+  target graph (`TripleStore::update_over` / `query_over`). Scoped and
+  per-dataset runs already read their target graph and are unchanged. (OWL 2
+  QL computes its closure in memory and never reads its own output, so its
+  reads are unchanged.) An
+  unscoped run can therefore derive more than before, and a store that used to
+  pass may now be reported inconsistent.
+- **An inconsistent ontology is a 422, not a 500.** `POST
+  /api/reasoning/materialize` and `PUT /api/datasets/{id}/entailment` answer
+  `422` with `{consistent: false, rule, detail, regime, target_graph}`, naming
+  the check that fired; the consequences derived before it stay in the target
+  graph. A successful run reports `consistent` (`true` for `owl2-rl` and
+  `owl2-dl`, `null` for a regime without inconsistency rules), and
+  `GET /api/datasets/{id}/entailment` records what the last run found
+  (`consistent`, `inconsistency`).
+- **A reasoning run that hits the iteration limit fails instead of returning a
+  partial closure.** RDFS, OWL 2 RL, EL and DL stopped silently after 500
+  fixed-point rounds and reported success. They now fail with
+  `ReasoningError::NotConverged`, a `422` with `converged: false` over HTTP.
+- **`POST /api/reasoning/materialize` no longer blocks an async worker.** The
+  rules run on the blocking pool, as the per-dataset run already did.
 - **A SHACL rule's `$this` reaches an expression that is its only use.** In
   a `sh:SPARQLRule` such as `CONSTRUCT { $this ex:label ?l } WHERE { BIND
   (ex:labelOf($this) AS ?l) }`, `$this` was left unbound — the query parser
   projects the WHERE onto the variables its patterns bind, and the focus node
   was bound only through that projection — so the rule derived nothing.
+- **A SHACL rule's expressions see `$this` as bound.** The query optimizer
+  treated the pre-bound focus node as unbound wherever an expression used it:
+  `BIND ($this AS ?x)` was dropped, `FILTER (BOUND ($this))` was always false,
+  and `FILTER (?v = $this)` compared terms instead of values when `$this`
+  occurred in no triple pattern (a literal focus node `1` did not equal
+  `1.0`). Each `sh:SPARQLRule` CONSTRUCT now has `$this` pre-bound in every
+  scope of the query, as SHACL pre-binding defines — the same mechanism the
+  `sh:sparql` constraints use — and its triple patterns are still seeded with
+  the focus node, so rules derive what they say and keep the optimizer's join
+  ordering.
 - **SHACL validation and write gates no longer pass data the shapes forbid.**
   Gates get stricter: data that used to be accepted may now be refused with
   422, and a shapes graph that used to load may now fail the run.
@@ -286,6 +1109,81 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     blank-node geometry whose `geo:dimension` exceeds its
     `geo:coordinateDimension`) is now caught: 47 of 48 examples match the OGC
     oracle.
+- **`EXISTS` no longer runs per shard.** The in-memory mirror split a query
+  across subject shards whenever its triple patterns shared a subject, without
+  looking inside `FILTER`, `BIND` or `COUNT` expressions. An `EXISTS` there
+  reads triples about *other* subjects, so `ASK { ?s :p ?o FILTER NOT EXISTS
+  { ?o :q ?x } }`, or a `COUNT` over that pattern, was answered by shards that
+  each saw only their own subjects: `true` where the store says `false`, a
+  count that was too low. Such queries now stay off the shards (the full copy
+  or the store answers them).
+- **RDF 1.2 base direction survives the columnar copy.** The columnar copy
+  decoded `"hello"@en--ltr` as a plain language-tagged string, so on the
+  default read path `DATATYPE` returned `rdf:langString`, the literal compared
+  equal to `"hello"@en`, and `LANG`/`ORDER BY` treated it the same way. A query
+  whose expressions reach a literal with a direction, or a triple term, is
+  now declined by that copy at evaluation, and the full copy or the store
+  answers it. A triple term in an expression used to read as a type error
+  there, which dropped rows a `FILTER` should have kept.
+- **The W3C SPARQL 1.1 runner also checks the in-memory mirror.** Every
+  query-evaluation entry now runs a second time with the mirror on (four
+  shards, the columnar copy, the full copy, no rebuild debounce) and must end
+  as it does on the engine. Its first run found one more divergence, now
+  fixed: the columnar copy ignored the query's `BASE` in `IRI()`/`URI()`, so
+  `BASE <http://example.org/> SELECT (IRI("x") AS ?i) {}` returned an unbound
+  `?i` instead of `<http://example.org/x>`.
+- **LDES member timestamps never go backwards.** A member was stamped with the
+  time its write started, so two concurrent writes could publish a member
+  earlier than one already published, below a bound clients held (LDES 1.0
+  §4.1). The stamp is now raised to the newest published timestamp inside the
+  same SQLite transaction as the insert, and that mark survives retention.
+- **LDES: edits inside blank nodes publish a version.** Change capture hashed
+  only an entity's direct triples while the member carried the whole
+  blank-node closure, so an edit to, say, an address node published nothing.
+  The hash now covers the closure by content (re-writing the same structure
+  under new blank-node labels is still not a change). Two versions of one
+  entity on a page no longer share blank-node labels, which merged their
+  structures in the served document.
+- **LDES sync no longer drops members that share a timestamp.** The
+  bookmark skipped every member at or before the newest timestamp applied, so
+  a member published later with that same timestamp never arrived, and
+  timestamps were compared as strings (`09:30:00-02:00` sorted before
+  `10:00:00Z`). Timestamps now compare as `xsd:dateTime` instants and the
+  client remembers the members at the bookmark's own timestamp (LDES 1.0
+  §3.2). A stream without `ldes:versionOfPath` or a timestamp path used to
+  yield no members at all; each member is now its own entity.
+- **MySQL / MariaDB datasources connect over TLS.** The `plugin-mysql` driver
+  was built without a TLS backend, so `tls: true` against a server that offers
+  TLS (MySQL 8 does by default) panicked inside the driver and every probe,
+  introspection and run answered an opaque 500 — leaving cleartext as the only
+  setting that worked. The driver now carries rustls over ring, as the
+  PostgreSQL plugin does, with the bundled Mozilla roots plus a private CA from
+  `options.sslrootcert`. Beyond MySQL: the host now contains a panic in any
+  source driver as a named `driver failure` error (the detail goes to the
+  server log, and that connection is retired), and a PostgreSQL TLS refusal
+  says why (`invalid peer certificate: UnknownIssuer`) instead of only "error
+  performing TLS handshake". CI's `live-sources` job gives PostgreSQL, MySQL,
+  MariaDB and SQL Server a certificate from a throwaway CA and runs every
+  driver once more with `tls: true`
+  ([`scripts/live-sources-tls.sh`](scripts/live-sources-tls.sh)).
+- **The OpenAPI document describes every route the server mounts.** About 60
+  operations were missing from `/api-docs/openapi.json`, so Postman and
+  generated clients could not see them: the OGC API – Features endpoints, 3D
+  Tiles, the viewer feed and geo-stats probes, the built-in OIDC provider and
+  its client registry, `/livez`, `/api/browse/facets`, the admin prefix
+  overrides, `/api/docs`, `/api/plugins`, `/ldp/constraints` and LDP's
+  `HEAD`/`OPTIONS` (plus `PUT`/`PATCH`/`DELETE` on the root container), and on a
+  dataset `permissions/me`, `conformance`, `provenance`, `patch`,
+  `entailment`, `containers/{import,export}`, `properties/*`, `form-manifest`,
+  `ingest/cityjson`, `assets/{id}/{download,metadata}`, `versions/gc`,
+  `versions/{ver}/diff/{other}` and `DELETE versions/{ver}`. A unit test now
+  compares every `.route(...)` with the document, both ways, against a short
+  list of deliberate exceptions. The Raft transport between cluster members
+  is one of them and has left the document. Two documented paths that answered
+  `404` are corrected: a dataset's SPARQL endpoint is
+  `/api/datasets/{id}/services/{service}/sparql` (docs/embedding.md), and an
+  IFC file is uploaded through `POST /api/import/bulk`
+  (docs/geo-3d-platform.md).
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if
@@ -293,13 +1191,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `/validation`, `/shacl/results`, the shape-graph meta report and the source
   dry-run findings now shorten every `<…>` term and keep the operators, so a
   sequence path reads `ex.org:a/ex.org:b`; the tooltip keeps the raw path.
-- **SHACL result paths no longer render with a stray `>`.** The backend
-  serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
-  `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if
-  it were a bare IRI, showing `ex.org:label>`. The dataset validation dialog,
-  `/validation`, `/shacl/results`, the shape-graph meta report and the source
-  dry-run findings now shorten every `<…>` term and keep the operators, so a
-  sequence path reads `ex.org:a/ex.org:b`; the tooltip keeps the raw path.
+- **Docs and UI help text match the server again.**
+  - `docs/datasets.md` said any signed-in user can read a `members`
+    dataset. Only members of the owning organisation or group, and users with
+    an explicit grant, can. It also said a grant combines with membership by
+    taking the strongest role; in fact the grant replaces the membership role,
+    except that an org/group admin is never demoted.
+  - `docs/named-graphs.md` and the Graphs page placed the Graph Store Protocol
+    at `/sparql?graph=`; it lives at `/store?graph=`.
+  - The Datasets page's help (English and Dutch) advertised a per-dataset
+    endpoint at `/api/datasets/{id}/sparql`, which does not exist. Each SPARQL
+    service on a dataset answers at
+    `/api/datasets/{id}/services/{slug}/sparql`.
+  - The Datasets and organisation pages' help (English and Dutch) said a
+    `private` dataset is visible to its owner only, and that every member of
+    an organisation can see the datasets it owns. Organisation admins and
+    users granted access can also see a `private` dataset, and plain members
+    of the organisation cannot.
+  - `docs/shacl.md` now says which writes are validated (Graph Store
+    `PUT`/`POST`, bulk import, validate-and-commit). It also says that SPARQL
+    Update skips every write gate, SHACL Studio pipelines and bindings
+    included, not only `shacl_on_write`.
 - **A published model's graphs read the same everywhere.** The graphs of a
   published model-registry version were served by
   `GET /api/models/{id}/versions/{ver}/data` to whoever may see the entry (a
@@ -358,8 +1270,122 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     found", even for conforming data.
   - The dataset page's validation dialog showed the escape `\u2014` as text
     where its summary line has a dash.
+- **The bundled Open Triplestore ontology names all ten graph roles.** The
+  catalogue writes `ots:graphRole` values for `DomainValues`, `Linkset`,
+  `Provenance` and `Catalog`, but the `ots-ontology` demo dataset defined only
+  the first six roles, as `GraphRole` individuals and as SKOS concepts. New
+  installs get all ten; existing ones keep their seeded copy.
+- **GitLab CI runs the gates GitHub runs.** The frontend job type-checks
+  (`npm run typecheck`); e2e uses Node 24; `cargo-deny` covers every feature;
+  new `minimal-build` (`--no-default-features`) and `plugins` (each plugin crate
+  on its own) jobs; and the perf job self-tests the gate, screens softly and
+  re-benches flagged benchmarks before failing, and clears each pass's
+  directory first — the cached `target/` could nest one pass inside the last
+  and switch off every tolerance key.
+- **Docs that contradicted the code.**
+  - Graph roles: the styleguide said six (there are ten) and gave them an
+    `…/ns/role#` namespace (they are `https://opentriplestore.org/ns#`);
+    `docs/datasets.md` had its `catalog` row stranded below the table.
+  - `docs/rml.md` and `docs/standards.md` said SQL and SPARQL sources and joins
+    were not implemented; `standards.md` also listed SHACL-AF custom constraint
+    components, `sh:ask` validators and rule `sh:condition` / `sh:order` as
+    missing.
+  - `docs/sparql-12.md` called `LATERAL` planned and rejected by the parser (it
+    works) and let triple terms be subjects (RDF 1.2 allows objects only).
+  - `docs/owl2-el.md` named `Owl2ELReasoner` (the type is `El2Classifier`), and
+    the reasoner examples passed a string to `TripleStore::open`, which takes a
+    `Path`. The OWL 2 DL docs said keys of more than two properties produce no
+    `owl:sameAs`; the RL phase merges keys of any length.
+  - `docs/datatypes.md` said XSD literals keep their lexical form; numbers,
+    booleans and dates come back canonical (`"01"^^xsd:integer` → `"1"`).
+  - `docs/dcat.md` said VoID statistics are computed per request and never
+    cached; they are cached until the next write.
+  - `docs/data-modeling.md` said SHACL-on-write covers LDP writes; it covers
+    Graph Store writes to dataset graphs only.
+  - `docs/administration.md` said interactive OIDC sign-in ignores group
+    claims; it maps `groups` and `roles`. `docs/auth.md` left the `guest` role
+    and `OTS_GUEST_CAPABILITIES` out.
+  - `docs/development.md` and `docs/windows.md` put `saml` in `full` (it is not);
+    the native Windows build drops its hand-written feature list for the
+    default `full`.
+  - `docs/triplestore-comparison.md` marked federation, OWL 2 EL, RL and DL,
+    ShEx, SWRL and RML full where `docs/standards.md` grades them Partial; the
+    standards score is recounted, 23 → 16 of 29. Its GeoSPARQL note still
+    called the geodesic metric functions, `aggUnion` and GeoJSON missing.
+  - `docs/performance.md` showed a whole-store `COUNT(*)` scanning (7.09 ms at
+    10k); the count index answers it in ~0.14 µs at every size.
+  - `PRIVACY.md` listed Leaflet from unpkg and OpenStreetMap tiles; the UI
+    bundles its map libraries and fetches OpenFreeMap and, with an operator's
+    key, Esri imagery. `frontend/index.html` no longer pre-resolves an Esri
+    host the code stopped using.
+  - `CONTRIBUTING.md` told contributors to use `--all-features`, which needs
+    native SFCGAL; it now gives CI's feature set and the typecheck step.
+    `.github/RELEASE_TEMPLATE.md` used H2 groups where release notes and the
+    `### Security` / `### Deprecated` check use H3.
+  - `frontend/public/vocab/NOTICE.md` counted 17 files from LOV; DOAP's
+    replacement left 16.
+- **Feature docs that overstated the code.**
+  - `docs/sparql-12.md` now follows Appendix A of the SPARQL 1.2 Working Draft
+    of 2026-10-01. `LATERAL` and `ADJUST` are listed as Oxigraph's SEP
+    extensions, not SPARQL 1.2; `CALL` and "COUNT deduplication" (neither in
+    the draft) are gone. The `ADJUST` example passed a string offset, which the
+    built-in answers with unbound; it now uses an `xsd:dayTimeDuration`, and
+    the non-standard `sparql:adjust` function (reached only by its IRI) is
+    described separately. README, the FAQ and `docs/datatypes.md` describe
+    `<< >>` as RDF 1.2 reifier shorthand and base-direction strings as
+    supported; `docs/datatypes.md` warns that derived integer types are stored
+    as `xsd:integer`.
+  - OWL docs: `docs/owl2-el.md` claimed nominals and listed completion rules
+    the code does not have, and quoted unmeasured SNOMED/GO timings; its rule
+    table now matches the code, including the unsound CR3. `docs/owl2-rl.md`
+    mis-described `cls-uni`, `cls-svf1/2`, `cls-maxc`, `cls-nothing*` and
+    `cls-thing`, and said literals are compared by value (rules match terms).
+    `docs/owl2-ql.md` claimed PerfectRef and now lists the rewriter's limits.
+    `docs/rdfs-entailment.md` showed `RdfsMaterializer::new`, an
+    `Accept-Entailment` header and an `AppState` option that do not exist.
+  - `docs/owl2-dl.md` called Konclude Apache-2.0 (it is LGPL-3.0) and gave an
+    install recipe and a stdin hand-off that cannot work; the bridge is now
+    documented as experimental and not working. `docs/reasoning.md` no longer
+    names HermiT and Pellet as if they were wired.
+  - `docs/geosparql.md` lists every implemented function and what is missing;
+    the GeoSPARQL test header and `scripts/run_tests.sh` no longer say the
+    tests derive from the GeoSPARQL Compliance Benchmark or test "OGC
+    conformance".
+  - `docs/shacl.md`: the validate example showed camelCase keys and a
+    component IRI; the response is snake_case with a readable constraint label.
+    The SHACL-C serializer was said to keep what it cannot express as
+    comments; it drops it, and the doc now lists what.
+  - Design-note status lines (delta versioning, analytical mirror),
+    `docs/datasets.md` (change capture is not roadmap) and the 2026-06
+    reference tables in `docs/performance.md`, now dated.
+
+- **The Konclude bridge works.** It piped Turtle on stdin, but Konclude reads
+  only OWL/XML or functional-style syntax, from files. It also passed an
+  undocumented `-f` flag, guessed consistency from the log text, had no time
+  limit and kept only subclass edges. It now:
+  - writes functional-style syntax mapped from the RDF;
+  - asks for consistency (`IsKBSatisfiable`), classification and realisation
+    (types and `owl:sameAs`) over OWLlink, and for object property assertions
+    over SPARQL;
+  - kills the process at the time limit.
+
+  Checked against Konclude v0.7.0-1138. Data values entailed through
+  `owl:hasValue` are not reported by Konclude and not materialised.
 
 ### Security
+- **Audit rows and the guest AI budget record the real client IP.** Both took
+  the left-most `X-Forwarded-For` entry (then `X-Real-IP`) from any caller and
+  never saw the TCP peer address, so a login failure, a permission denial or an
+  SSO failure could be attributed to an IP of the caller's choosing. A random
+  header also bought a fresh guest budget on the AI endpoints
+  (`LLM_RATE_LIMIT_ANON_PER_MIN`). On a deployment without a proxy, audit rows
+  carried no IP at all and every guest shared one budget. They now derive the
+  client IP the way the per-IP rate limiter already did: the TCP peer address,
+  with forwarded headers believed only when the peer is inside
+  `TRUSTED_PROXY_CIDRS` and the chain read right to left. **Behaviour change:**
+  behind a reverse proxy, set `TRUSTED_PROXY_CIDRS` to its address range, or
+  every audit row and guest budget is keyed on the proxy's address.
+  `docs/administration.md` and `docs/operations.md` say so.
 - **A `sh:SPARQLFunction` stored in any graph could redefine functions for
   every caller.** Definitions were collected from the whole store and
   registered into every query's evaluator after the built-ins. The SPARQL
@@ -394,6 +1420,61 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   route reads only that dataset's graphs, without its stored report graphs. A
   triple held by two graphs in scope is now counted once. Tests:
   `tests/dataset_validation_read_scope_http.rs`.
+- **A padded version label no longer reads a dataset's private snapshots.**
+  The dataset service (`GET`/`POST /api/datasets/{id}/services/{slug}/sparql`)
+  trimmed `version` before resolving the pinned version's snapshot graphs, but
+  handed the private-graph filter the raw label, which the version registry
+  refuses. With whitespace around the label (`?version=1.0.0%20`, a `+`, a tab,
+  or the same in a form body) the filter found no version and withheld nothing,
+  so a viewer, or an anonymous caller on a public dataset, read the snapshots
+  of graphs flagged private. Both lookups now use the one trimmed label, and
+  the filter fails closed: a pinned version it cannot read, or private flags it
+  cannot list, refuse the read, and a snapshot graph the version's map ties to
+  no source is withheld from non-writers, as the version-data and saved-query
+  paths already did. Every release since 0.4.0 is affected. Tests:
+  `tests/security_routes.rs`.
+- **SWRL rules can no longer fire without their guards, and the target graph
+  is checked.** The OWL/XML reader behind `POST /api/swrl/execute`
+  (`format: "xml"`) matched only `BuiltinAtom`, but the OWL API and Protégé
+  write `BuiltInAtom`. That element, like any atom element it did not know
+  (`DataRangeAtom`, RDF/XML's `IndividualPropertyAtom`), was dropped, so its
+  rule ran with one condition fewer. A `ClassAtom` over a class expression was
+  read as its inner class (`ObjectComplementOf(A)(?x)` became `A(?x)`), and
+  `ObjectInverseOf(p)` lost its direction. `swrlb:stringConcat` became a
+  FILTER that every non-empty string passed. The reader now understands every
+  element inside a `DLSafeRule` or refuses the document with an error naming
+  the element. It accepts both built-in spellings and swaps the arguments of
+  `ObjectInverseOf`. It refuses class-expression atoms, `DataRangeAtom`,
+  anonymous individuals and prefixed names until they are supported, and
+  `stringConcat(?r, …)` now means `?r = CONCAT(…)`. Built-ins are recognised
+  only in the `swrlb:` namespace, and `matches` with more than three
+  arguments is refused rather than truncated. `target_graph` was pasted into
+  the generated update as `GRAPH <…>`; it must now be an absolute IRI (`400`
+  otherwise). Execution runs off the async runtime, under the
+  expensive-operations limit, and stops at the write timeout
+  (`write_timeout_secs`).
+- **RDF Patch passes the SHACL write gates.** `POST /api/datasets/:id/patch`
+  skipped the gates a Graph Store write to the same graph passes. It now runs
+  Studio `gate_writes` pipelines, bound shapes and the dataset's
+  `shacl_on_write` shapes over what each touched graph would hold after the
+  patch, and refuses with a `422` and the report.
+- **The public map and 3D viewer endpoints are throttled, cached and off the
+  async runtime.** The viewer feed, geo stats (per dataset and batched), the
+  public asset download and both 3D Tiles routes are reachable anonymously for
+  public datasets, but had no rate limit; the 3D Tiles routes rebuilt the whole
+  dataset on every request inside the async handler. They now share a per-IP
+  rate limit (60 a minute, burst 40, its own bucket), the store work runs on
+  the blocking pool, and the tileset and GLB are cached per dataset, caller
+  read scope and store write generation.
+- **Known advisories now in the image, through the SQL Server driver.** With
+  `plugin-mssql` in the image (see *Changed*), tiberius 0.12.3, the latest
+  release, brings rustls 0.21 and rustls-webpki 0.101 with it. Their
+  advisories RUSTSEC-2026-0098 and RUSTSEC-2026-0099 (name constraints) need a
+  misissuing name-constrained CA among the roots a SQL Server connection
+  trusts, and RUSTSEC-2026-0104 (a CRL parsing panic) needs CRL checking,
+  which tiberius never turns on; rustls-pemfile 1 is unmaintained
+  (RUSTSEC-2025-0134). Only SQL Server connections use this stack. An image
+  built with `CARGO_FEATURES=full,plugin-postgres,plugin-mysql` leaves it out.
 - **Every configured secret goes through the secrets module.** `JWT_SECRET`,
   `LD_REGISTRY_TOKEN`, a replication follower's `OTS_REPLICATION_TOKEN` and the
   accounts-dashboard plugin's `ACCOUNTS_DASHBOARD_GATEWAY_KEY` were read as raw
@@ -436,6 +1517,41 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   request that worked before working; operators who want a closed space set
   `LDP_ROOT_ACL=owners` before first start or tighten `/ldp/.acl` afterwards.
   Tests: `tests/ldp_wac_security_http.rs`.
+- **`SERVICE <urn:source:id>` used a datasource's stored account for any
+  caller.** A local query naming a registered virtual source was sent to its
+  endpoint with the account the source was registered with, whoever asked —
+  including an anonymous caller of `/sparql`. The account is now the source's
+  to share: it resolves for an administrator, for the source's owner, and for
+  a signed-in user who holds a role on the dataset the source is bound to (as
+  its owner, a member of the owning organisation or group, or through a
+  grant). A public dataset's visibility alone does not count, and an
+  anonymous caller never qualifies. For anyone else the source does not
+  exist: the `SERVICE` fails exactly as one naming an unregistered source
+  does, and the endpoint never sees the account. Live queries over a source
+  are served by `/sparql` and SPARQL Update; a query evaluated anywhere else
+  — a path that does not say whom it acts for — resolves no source. Tests:
+  `tests/sources_virtual_http.rs`.
+- **A SPARQL Update could probe a graph its writer cannot read through
+  `EXISTS`.** The update's read-side ACL walked the `WHERE` clause's patterns
+  but not its expressions, so `INSERT { GRAPH <mine> { … } } WHERE { FILTER
+  EXISTS { GRAPH <other> { … } } }` told a writer of `<mine>` whether
+  `<other>` held a triple. Every `EXISTS` / `NOT EXISTS` — in a `FILTER`, a
+  `BIND`, an `OPTIONAL`'s condition, an `ORDER BY` key or an aggregate — is
+  now checked like the rest of the clause: a named graph needs read access,
+  and a variable graph or a `SERVICE` inside one makes the update admin-only.
+  LDP `PATCH` applies its no-`GRAPH`, no-`SERVICE` rule inside `EXISTS` too.
+  Tests: `tests/security_graph_acl_protocol_parity.rs`.
+- **The catalogue's aggregate VoID statistics counted private graphs.** The
+  whole-store dataset in `/.well-known/void` (`void:triples`,
+  `void:distinctSubjects`, `void:distinctObjects`, `void:properties`,
+  `void:documents`) counted every graph, private and system ones included,
+  for anonymous callers too, and each dataset's entry listed its private
+  graphs as `void:subset`s and counted them in its `void:triples` for anyone
+  who could see the dataset. Both now stay inside the graphs the caller may
+  read over `/sparql` (an anonymous caller: the public ones), as the service
+  description at `/` already did: a private graph is listed and counted for
+  its dataset's writers only. An administrator still sees the whole store.
+  Tests: `tests/dcat_ap_http.rs`.
 
 ## [0.7.0] — 2026-09-28
 

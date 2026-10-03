@@ -13,6 +13,7 @@ The triplestore has built-in support for:
 - **SHACL Studio** — reusable shape graphs, an RDF **validation layer** (graph-attached shapes that inherit into datasets), pipelines, write-gating, and **meta-validation** (SHACL-SHACL). See [SHACL Studio](#shacl-studio--shape-graphs-the-validation-layer--meta-validation) below
 - **SHACL-AF inference** — materialize inferred triples by executing `sh:SPARQLRule` and `sh:TripleRule` rules
 - **SHACLC** — upload and download shapes in [SHACL Compact Syntax](https://w3c.github.io/shacl/shacl-compact-syntax/) as well as Turtle
+- **Repair proposals** — turn what the shapes determine into an explained RDF Patch, computed in a throwaway copy and applied only after review (`POST /api/datasets/:id/repair`). See [Repair proposals](repair.md)
 
 ---
 
@@ -246,8 +247,10 @@ The JSON fields are display strings: `focus_node` and `value` show an IRI or
 a literal's lexical form (no datatype or language tag), `path` is a SPARQL
 property path, and `source_constraint` is a short label such as
 `sh:minCount 1` (the UI groups results by it).
-`source_constraint_component` is the SHACL constraint component IRI. A test
-run adds `"test": true` and `"partial"`. The 422 body of a write gate uses
+`source_constraint_component` is the SHACL constraint component IRI.
+`message` is the shape's `sh:message` when it has one, else a default text.
+A test or partial run answers `"run_id": null, "ran_at": null` and adds
+`"test": true` and `"partial"`. The 422 body of a write gate uses
 camelCase keys instead (`focusNode`, `sourceShape`, `sourceConstraint`,
 `sourceConstraintComponent`). A result of a SPARQL constraint or validator
 that declares [result annotations](#result-annotations-shresultannotation-shacl-af-4)
@@ -349,9 +352,11 @@ curl -X PUT 'http://localhost:7878/store?graph=http://example.org/people' \
 
 ### Limitations
 
-- Validation is applied to `PUT` and `POST` on the Graph Store Protocol (`/store`).
-- SPARQL `UPDATE` statements are not validated automatically (target graphs cannot be reliably determined without executing the update).
-- Only named graphs registered to the dataset trigger validation; writes to unregistered graphs pass through unchecked.
+These apply to every write gate: this per-dataset `shacl_on_write` gate, and the SHACL Studio gates below (validation-layer bindings and pipelines with `gate_writes`).
+
+- Writes are validated on Graph Store `PUT` and `POST` (`/store`), bulk import (`/api/import/bulk`) and `POST /api/datasets/validate-and-commit`.
+- SPARQL Update (`/sparql`, `/sparql/batch`) is still not validated, Studio gates included: an update can write data that a gate would refuse on `/store`. To keep a gated graph valid, write it through one of the paths above, or run the pipeline (or `POST /api/datasets/{id}/validate`) after the update.
+- Only graphs a gate covers are validated: graphs registered to the dataset, graphs that carry a binding, and graphs in a gating pipeline's scope. Writes to other graphs pass through unchecked.
 
 ---
 
@@ -435,7 +440,7 @@ A pipeline is a saved, runnable validation. Its scope is a set of **targets** �
 
 A run's report carries the data it validated (focus nodes and values), so a pipeline's whole scope — every dataset, every data graph it resolves to and every shape graph it composes — must be readable by whoever creates or updates it, runs or test-runs it, or opens a stored run's report (`GET /api/shacl/pipelines/{id}/runs/{run_id}`); anything else answers 403. Reading follows the `/sparql` rule above, and a Library shape graph is readable by whoever the Library shows it to. The shapes bound to a dataset or graph in scope come with it, except a graph some dataset holds as private that the caller may not read: a pipeline with one in scope answers 403. The check is made each time, so a revoked grant takes effect at the next run. A scheduled run is checked against the pipeline's creator and skipped when they may no longer read its scope. Run summaries (`…/runs`, counts only) are listed to everyone who can see the pipeline. A report persisted as RDF (`results_target`) or inferred triples written to a new graph are attached to a dataset only when that dataset holds every graph the run validated, and are private there when any of them is private. The pipeline's own report graph collects every run, so a run over other data first detaches it, and it is attached again only while empty.
 
-A pipeline with `gate_writes` refuses (422) every write its shapes reject to the graphs it covers, whoever makes it, the graphs' owners and editors included. So setting a gate (creating or updating a pipeline with `gate_writes`) needs what a validation-layer binding needs: write access to every dataset it covers (dataset targets, and `dataset_ids` while no `graph_iris` narrow the scope) and a graph-ACL write grant on every graph it names (graph targets, `graph_iris`). Admins pass. Anything else answers 403, and a dataset that does not exist 404. Read access is enough only for a pipeline that validates without gating. The gate acts with its creator's authority, checked at every write: once the creator may no longer write what it covers (a revoked grant, a deactivated account), the pipeline stops gating, and the server logs a warning at each write it would have gated.
+A pipeline with `gate_writes` refuses (422) every write its shapes reject to the graphs it covers, whoever makes it, the graphs' owners and editors included. So setting a gate (creating or updating a pipeline with `gate_writes`) needs what a validation-layer binding needs: write access to every dataset it covers (dataset targets, and `dataset_ids` while no `graph_iris` narrow the scope) and a graph-ACL write grant on every graph it names (graph targets, `graph_iris`). Admins pass. Anything else answers 403, and a dataset that does not exist 404. Read access is enough only for a pipeline that validates without gating. The gate acts with its creator's authority, checked at every write: once the creator may no longer write what it covers (a revoked grant, a deactivated account), the pipeline stops gating, and the server logs a warning at each write it would have gated. The gate covers the write paths listed under [Limitations](#limitations); SPARQL Update is not gated.
 
 ### Meta-validation (SHACL-SHACL)
 
@@ -558,7 +563,10 @@ that of the store.
   (registered with the `entailment` role, so it is ACL'd, listed and deleted
   with the dataset).
 * **`$this` is bound as a term**, never pasted into the query text, so a focus
-  node with a hostile lexical form (`sh:targetNode "…"`) is just a term.
+  node with a hostile lexical form (`sh:targetNode "…"`) is just a term. In an
+  expression it is the focus node, as SHACL pre-binding defines it:
+  `BIND ($this AS ?x)` copies it, `BOUND ($this)` is true, and `?v = $this`
+  compares values (a literal focus node `1` equals `1.0`).
 
 ### Validating with the rules' inferences: `sh:entailment`
 
@@ -913,9 +921,23 @@ curl -X POST http://localhost:7878/api/shaclc/serialize \
      -d 'urn:dataset:my-dataset:shapes'
 ```
 
-### Graceful degradation
+### What the serializer leaves out
 
-Shapes using SPARQL-based constraints or complex property paths that cannot be expressed in SHACLC are serialized as Turtle comments in the SHACLC output.
+`/api/shaclc/serialize` (and `Accept: text/shaclc`) writes only part of a shapes graph, and
+**drops the rest without a warning or a comment** in the output:
+
+- Only subjects typed `sh:NodeShape` are written, each with its first `sh:targetClass` and
+  `sh:closed`; other targets are dropped.
+- Per property shape it writes the path, `sh:datatype`, `sh:nodeKind`, `sh:node`,
+  `sh:minCount`/`sh:maxCount`, `sh:pattern` and `sh:message`. Node-level constraints and
+  `sh:class`, `sh:in`, `sh:hasValue`, value ranges, string lengths, the logical constraints and
+  SPARQL-based constraints are dropped. A property shape without `sh:path` is skipped.
+- A complex property path (sequence, inverse, alternative) comes out as a blank-node label,
+  which the parser cannot read back.
+- `sh:pattern` is written without escaping.
+
+So a SHACL-C export is not a faithful copy of a shapes graph; keep Turtle as the source of
+truth.
 
 ---
 

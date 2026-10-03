@@ -10,8 +10,9 @@
 #                    https://github.com/ad-freiburg/sparql-conformance
 #   4. W3C RDF 1.1 conformance (tests/rdf11_conformance.rs)
 #      Derived from: https://github.com/w3c/rdf-tests
-#   5. OGC GeoSPARQL conformance (tests/geosparql_conformance.rs)
-#      Derived from: https://github.com/SoftwareImpacts/SIMPAC-2021-29
+#   5. GeoSPARQL 1.1 tests (tests/geosparql_conformance.rs)
+#      Hand-written from the OGC GeoSPARQL 1.1 standard; not OGC's
+#      compliance tests and not a certification
 #   6. SPARQL benchmarks (tests/sparql_benchmarks.rs)
 #      Derived from: https://www.w3.org/wiki/SparqlBenchmarks (SP2B + BSBM)
 #   7. sparqloscope functional tests (tests/sparqloscope_conformance.rs)
@@ -115,8 +116,8 @@ fi
 
 # 5. GeoSPARQL conformance
 if [ "$RUN_GEO" = true ]; then
-    echo -e "${BOLD}── 5. OGC GeoSPARQL 1.1 Conformance (from SIMPAC-2021-29) ──${NC}"
-    run_suite "GeoSPARQL conformance" "cargo test --test geosparql_conformance"
+    echo -e "${BOLD}── 5. GeoSPARQL 1.1 tests (project's own, spec-derived) ──${NC}"
+    run_suite "GeoSPARQL tests" "cargo test --test geosparql_conformance"
 fi
 
 # 6. SPARQL benchmarks

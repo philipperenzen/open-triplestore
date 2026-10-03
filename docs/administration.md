@@ -20,7 +20,7 @@ It can be granted by an admin via the user management API, or automatically duri
 { "team-admins": "admin", "team-publishers": "publisher", "staff": "user" }
 ```
 
-The `"publisher"` grant only sets `can_publish`; it does not change the account role. SSO grants the capability non-destructively — it is set on matching sign-ins and never revoked just because a claim is absent. (Group/claim mapping applies on the SAML and resource-server OIDC paths; the interactive ID-token OIDC flow does not yet extract groups.)
+The `"publisher"` grant only sets `can_publish`; it does not change the account role. SSO grants the capability non-destructively — it is set on matching sign-ins and never revoked just because a claim is absent. (Group/claim mapping applies on every SSO path: SAML, resource-server OIDC tokens, and the interactive OIDC sign-in, which reads the ID token's `groups` and `roles` claims.)
 
 ---
 
@@ -187,6 +187,40 @@ curl -X DELETE http://localhost:7878/api/admin/users/<user_id> \
 
 ---
 
+## User feedback
+
+Signed-in users send bug reports, feature requests and questions from the
+**Feedback** button in the sidebar footer, or from the buttons at the end of
+every documentation page. Reports go to the admins of this instance, not to the
+upstream project, and land in **Admin → Feedback** (`/admin/feedback`).
+
+For each report the inbox shows the reporter, the in-app page it was sent from
+and, if the reporter allowed it, their browser. An admin can:
+
+- set the status: **Open**, **In progress**, **Resolved** or **Closed**;
+- write a **reply to the reporter**, which they read next to their report under
+  **My reports** in the dialog;
+- keep an **internal note**, which only admins see;
+- delete the report.
+
+A user may send at most 20 reports in 24 hours, and submissions are rate-limited
+per client address. Read-only API tokens cannot send reports. Deleting a user
+deletes their reports too. The dialog tells users not to report security
+vulnerabilities through it.
+
+```bash
+# The inbox, narrowed to open bug reports
+curl "http://localhost:7878/api/admin/feedback?status=open&kind=bug" \
+  -H "Authorization: Bearer <token>"
+
+# Reply and mark as resolved
+curl -X PATCH http://localhost:7878/api/admin/feedback/<id> \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"status": "resolved", "admin_response": "Fixed in 0.7.1 — thanks!"}'
+```
+
+---
+
 ## Self-service (any authenticated user)
 
 ### Change your own password
@@ -276,12 +310,27 @@ See [rml.md](rml.md) for the full RML guide.
 | `AUTH_DB_PATH` | `<data-dir>/auth.db` | Path to the SQLite identity database |
 | `ACCESS_TOKEN_EXPIRY_MINUTES` | `30` | Access token lifetime |
 | `REFRESH_TOKEN_EXPIRY_DAYS` | `30` | Refresh token lifetime |
+| `OIDC_ISSUER`, `OIDC_AUDIENCE` | *(unset: off)* | Turn on [OIDC resource-server mode](auth.md#oidc-resource-server-mode-idp-access-tokens): access tokens issued by this external IdP are accepted as bearer tokens and linked to (or create) local accounts. The issuer must be `https` (loopback `http` for development); the audience is required, and without it every IdP token is refused. |
+| `OIDC_DEFAULT_ROLE` | `user` | Role for accounts created from an IdP token when no claim maps to one: `user` or `guest`. **Capped at `user`**: `admin` or `super_admin` logs an error at startup and `user` is used, because the default applies to every IdP account; grant admin through `OIDC_ROLE_CLAIM_MAP` or the UI. Read only when the `env-oidc` provider entry is first created; edit that entry later instead (the same cap applies there). |
+| `OTS_OIDC_IDP_TOKEN_POLICY` | `session` | What an [IdP token](auth.md#what-an-idp-token-may-do) may do: `session` reads and writes but cannot create API tokens; `scoped` writes only when the token's `scope`/`scp` claim grants it; `full` also creates API tokens (the behaviour before this setting). Admin accounts' tokens always write. Unknown values mean `session`. Independent of `OTS_OIDC_SESSION_POLICY`. Not to be confused with `OTS_OIDC_SESSION_POLICY` below, which governs the tokens this store issues as an OIDC provider. |
+| `OTS_OIDC_IDP_WRITE_SCOPES` | *(unset)* | Under `OTS_OIDC_IDP_TOKEN_POLICY=scoped`: extra IdP scope values, comma- or space-separated, that count as a write grant besides `write` and `admin`. |
+| `OIDC_ROLE_CLAIMS`, `OIDC_ROLE_CLAIM_MAP`, `OIDC_GROUPS_CLAIM`, `OIDC_ORG_GROUP_PREFIX` | `roles,realm_access.roles,groups`, *(none)*, `groups`, `org:` | Which token claims are mapped, through the JSON claim-value → role map, to a role (capped at `admin`) or to publish permission (`"publisher"`), and which group values (`org:<slug>`) add organisation memberships. A mapped role is rewritten on every request, so the IdP is authoritative. See [auth.md](auth.md#roles-publish-permission-and-organisations). |
+| `ACCEPT_LEGACY_TOKENS` | `true` | `false` refuses this store's own session tokens (the bundled web UI's sign-in included) and every `ots_` API token, leaving only IdP tokens, provider tokens and federation assertions. For API-only deployments behind an IdP. |
+| `OTS_OIDC_SESSION_POLICY` | `session` | What an access token this store issues as an [OIDC provider](oidc-provider.md#what-a-provider-token-may-do) may do: `session` reads and writes but cannot create API tokens; `scoped` writes only with a write scope, which the provider cannot issue today, so its tokens are read-only for non-admins; `full` also creates API tokens. Admin accounts' tokens always write. Unknown values mean `session`. |
+| `OTS_OIDC_WRITE_SCOPES` | *(unset)* | Under `scoped`: extra scope values, comma- or space-separated, that count as a write grant besides `write` and `admin`. |
 | `SECURE_COOKIES` | `false` | Issue auth cookies with the `Secure` attribute (HTTPS only). **Set to `true` in any TLS deployment**; leave `false` for plain-HTTP local development. |
 | `SERVE_FRONTEND` | `true` | Serve the bundled web UI (frontend SPA) at `/`. Set `false` for a headless, API-only server — SPARQL, Graph Store and REST endpoints are unaffected. Also the `--serve-frontend` CLI flag. |
+| `SEED_STANDARDS_DEMO` | `true` | On first start, seed the public *Open Triplestore* demo organisation: one dataset per standards category with saved queries, plus a 3D demo that downloads openly licensed IFC and STL sample files from public URLs (`SEED_IFC_URL=` set to empty skips those downloads; see [operations.md](operations.md)). `false`/`0`/`no`/`off` skips the seed. It runs once: the seed is skipped while the organisation exists, and turning it off later does not remove it. |
 | `CORS_ORIGINS` | *(empty — same-origin only)* | Comma-separated allowed origins, e.g. `https://app.example.com,https://www.example.com` |
-| `TRUSTED_PROXY_CIDRS` | *(empty — direct TCP IP)* | Comma-separated CIDRs of reverse proxies whose `X-Forwarded-For` is honoured for rate limiting, e.g. `10.0.0.0/8,172.16.0.0/12`. Leave empty when not behind a proxy. |
-| `OTS_EXTERNAL_REASONER` | *(unset)* | `konclude` routes `owl2-dl` materialisation through an external tableau reasoner after the native rules (experimental; see [owl2-dl.md](owl2-dl.md)). Unset: native rules only. |
-| `OTS_EXTERNAL_REASONER_BIN` | `Konclude` | Path to the reasoner binary when `OTS_EXTERNAL_REASONER` is set. |
+| `EMBED_FRAME_ANCESTORS` | `*` | CSP `frame-ancestors` source list for the `/embed/*` pages, used verbatim: `https://intranet.example https://*.example.org` restricts embedding to those sites, and `'none'` (or an empty value) disables it. Other pages are never frameable from another site. See [embedding.md](embedding.md#restricting-who-may-embed). |
+| `TRUSTED_PROXY_CIDRS` | *(empty — direct TCP IP)* | Comma-separated CIDRs of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` is believed, e.g. `10.0.0.0/8,172.16.0.0/12`. The client IP derived this way keys the per-IP rate limits and the guest AI budget and is the IP recorded in the audit log. From any other peer the headers are ignored and the TCP peer address is the client. Leave empty when not behind a proxy; behind one, set it, or every client appears as the proxy. |
+| `OTS_DL_BACKEND` | *(unset)* | Backend of the `owl2-dl` regime: `sidecar` (the bundled OWL API + HermiT reasoner, `docker compose --profile reasoner`), `konclude`, or `native` (OWL 2 RL + DL-syntax rules, sound but not complete). Unset: `owl2-dl` answers 503 (see [owl2-dl.md](owl2-dl.md)). |
+| `OTS_KONCLUDE_BIN` | `Konclude` | Konclude binary for `OTS_DL_BACKEND=konclude` (not shipped in the image; LGPL-3.0). |
+| `OTS_REASONER_URL` | *(unset; `http://reasoner:8090` under Docker Compose)* | Base URL of the reasoner sidecar for `OTS_DL_BACKEND=sidecar`. |
+| `OTS_REASONER_TOKEN` | *(unset)* | Bearer token sent to the reasoner sidecar; the bundled sidecar reads the same variable and refuses to start without it. Its own settings are in [owl2-dl.md](owl2-dl.md#running-the-bundled-sidecar). The server reads it as a secret reference (`env:NAME`, `file:/path`, `vault:…`) like `LLM_API_KEY`: a raw value works with a deprecation warning, and `OTS_ENV=production` refuses it. |
+| `OTS_REASONER_TIMEOUT_SECS` | `300` | Time limit of one DL backend call; past it the answer is unknown (504). |
+| `OTS_REASONER_MAX_TRIPLES` | `1000000` | Most triples handed to an external DL backend; more is a 413. |
+| `OTS_DL_DEBOUNCE_MS` | `2000` | Quiet period after the last write before an `owl2-dl` dataset's background run starts. |
 | `DCAT_PROFILE` | `dcat` | Catalogue application profile: `dcat`, `dcat-ap` or `dcat-ap-nl` (see [dcat.md](dcat.md)). |
 | `CATALOG_TITLE` / `CATALOG_DESCRIPTION` | instance defaults | The `dcat:Catalog` metadata. |
 | `CATALOG_PUBLISHER_URI` / `CATALOG_PUBLISHER_NAME` / `CATALOG_PUBLISHER_IDENTIFIER` | `<base>/publisher` | The catalogue's publishing agent. |
@@ -291,13 +340,22 @@ See [rml.md](rml.md) for the full RML guide.
 | `OTS_TRUSTED_ISSUERS` | unset | Comma-separated peer base URLs whose identity assertions are accepted (needs `BASE_URL`). |
 | `OTS_SPARQL_FUNCTION_GRAPHS` | unset | Comma-separated graphs whose `sh:SPARQLFunction`s every query sees, `/sparql` included. Only `urn:system:functions` and graphs under `urn:system:functions:` are accepted (no dataset can hold them, so only an admin can write them); any other entry is ignored with a warning. A function at a reserved IRI (`xsd:` casts, GeoSPARQL and the other built-ins) is skipped with a warning. Without it, a function is callable only in runs of the shapes graph that declares it (see [shacl.md](shacl.md#sparql-functions-shsparqlfunction-shacl-af-5)). |
 | `OTS_MAX_UPLOAD_MB` | 512 (Graph Store), 1024 (bulk import) | Request-body limit for RDF uploads; bodies are buffered and parsed before they replace anything, so this also bounds memory per request. Larger datasets: append in chunks or use the bulk import. |
-| `OTS_REMOTE_ALLOWLIST` | *(unset)* | Comma-separated URLs the server may contact on a user's behalf: SPARQL federation (`SERVICE <endpoint>`) and LDES client sync. Unset or empty: no outbound requests at all (a `SERVICE` clause errors). An entry is matched on its parsed origin, not as a string prefix: the scheme, host (case-insensitive) and port must be equal, the URL may carry no credentials, and the entry's path must be a prefix of the URL's path on segment boundaries. So `https://sparql.example.org` (with or without a trailing slash) admits every path on that origin and nothing else — not `https://sparql.example.org.evil.net/`, not `https://sparql.example.org@evil.net/`, not port 8443 — and `https://h/sparql` admits `/sparql` and `/sparql/…` but not `/sparqlx`. Entries that are not absolute http(s) URLs are ignored with a warning. |
+| `OTS_REMOTE_ALLOWLIST` | *(unset)* | Comma-separated URLs the server may contact on a user's behalf: SPARQL federation (`SERVICE <endpoint>`) and LDES client sync. Unset or empty: no outbound requests at all (a `SERVICE` clause errors). An entry is matched on its parsed origin, not as a string prefix: the scheme, host (case-insensitive) and port must be equal, the URL may carry no credentials, and the entry's path must be a prefix of the URL's path on segment boundaries. So `https://sparql.example.org` (with or without a trailing slash) admits every path on that origin and nothing else — not `https://sparql.example.org.evil.net/`, not `https://sparql.example.org@evil.net/`, not port 8443 — and `https://h/sparql` admits `/sparql` and `/sparql/…` but not `/sparqlx`. Entries that are not absolute http(s) URLs are ignored with a warning. Redirects are followed (at most 10), each hop only if the allowlist covers it too; a hop to another host or port drops the `Authorization` header. |
 | `OTS_REMOTE_TIMEOUT_SECS` | `10` | Timeout per outbound request. |
-| `OTS_SERVICE_MAX_ROWS` | `10000` | Row cap per `SERVICE` call; a larger remote result is truncated. |
+| `OTS_REMOTE_MAX_BYTES` | `67108864` (64 MiB) | Response-body limit per outbound request: `SERVICE` results, virtual-datasource queries and snapshots, LDES pages. The body is read as a stream and the request fails as soon as it passes the limit; a `SERVICE` call then fails as described under `OTS_SERVICE_MAX_ROWS`. |
+| `OTS_LDES_RETRIES` | `4` | LDES sync: how many times a page fetch is retried after `408`, `425`, `429`, `500`, `502`, `503` or `504`, with exponential back-off and jitter or the wait `Retry-After` asks for. `0` turns retrying off. |
+| `OTS_LDES_MAX_RETRY_WAIT_SECS` | `60` | LDES sync: the longest single wait before a retry; a `Retry-After` asking for longer fails the sync instead. |
+| `OTS_SERVICE_MAX_ROWS` | `10000` | Row cap per `SERVICE` call. A remote result with more rows is a failed invocation, never a truncated one: the query errors with a message naming this variable, or under `SERVICE SILENT` the clause yields the single empty solution. See [federation.md](federation.md#service-what-a-call-returns). |
+| `VALIDATION_API_URL` | *(unset)* | Base URL of an external SHACL validation service used by `POST /api/datasets/validate-and-commit`, which calls `<url>/validate`. The request carries the data and shapes to validate **and the caller's `Authorization` header**, so the service receives the user's bearer token (session, API or OIDC). Point it only at a service you trust with that. The URL is not checked against `OTS_REMOTE_ALLOWLIST` and need not be `https`. Unset: the endpoint answers `400`. |
+| `OTS_SERVICE_MAX_ENDPOINTS` | `16` | Distinct `SERVICE` endpoints one query may contact. The call that would contact one more fails like an over-cap result (an error naming this variable, or the empty solution under `SERVICE SILENT`). Matters mostly for `SERVICE ?var`, whose endpoints come from the data. See [federation.md](federation.md#per-query-limits). |
+| `OTS_SERVICE_MAX_CALLS` | `64` | Remote requests one query may make through `SERVICE`. An answer for the same endpoint and pattern is fetched once and reused, and reuse does not count. Over the cap the call fails as above. |
+| `OTS_SERVICE_DEADLINE_SECS` | *(the SPARQL query timeout, `SPARQL_QUERY_TIMEOUT_SECS`: `30`)* | How long after its start a query may still make `SERVICE` requests. A request is cut short at the deadline and the query fails with an error naming this variable, also under `SERVICE SILENT`. |
 | `ENDPOINT_ACL_ENFORCE` | `true` | Enforce endpoint ACL rules. Set to `false` to disable enforcement entirely — an escape hatch for a misfiring rule (see [security.md](security.md#endpoint-acl)), not a normal setting. |
-| `RATE_LIMIT_DISABLED` | `false` | Set to `true`/`1` to switch off per-IP rate limiting (auth, SPARQL and import quotas). For trusted/internal deployments and the test/CI harness only — **never enable on a public server**. Secure by default. |
+| `RATE_LIMIT_DISABLED` | `false` | Set to `true`/`1` to switch off per-IP rate limiting (auth, SPARQL, import and map/3D viewer quotas). For trusted/internal deployments and the test/CI harness only — **never enable on a public server**. Secure by default. |
+| `OTS_TILES3D_MAX_FEATURES` | `10000` | Most features one 3D Tiles GLB carries. The tileset is a single tile until tiling exists; past the cap it serves the first features in IRI order and flags the cut (`asset.extras.truncated`, `X-Tiles3d-Truncated`). See [geo-3d-platform.md](geo-3d-platform.md#4-3d-tiles--the-binding-contract). |
 | `BASE_URL` | `http://localhost:7878` | Base URL used to mint linked-data IRIs (no trailing slash) |
 | `SPARQL_QUERY_TIMEOUT_SECS` | `30` | Per-query/update execution timeout in seconds |
+| `WRITE_TIMEOUT_SECS` | `120` | Execution timeout for Graph Store `PUT`/`POST`/`DELETE`, data-model `PATCH`/`DELETE` and dataset `DELETE`. An elapsed write answers `503`, but the write itself is not cancelled and may still complete, so re-read before retrying. SPARQL Update runs under `SPARQL_QUERY_TIMEOUT_SECS`; bulk import (`/api/import/bulk`) has no timeout. Also the `--write-timeout-secs` CLI flag. |
 | `OTS_CHANGE_CAPTURE` | `off` | `on` records every write in the per-quad change log (`<data-dir>/changes/changes.db`): one row per graph per write with the net delta, exact counts or an honest `unknown`, a sequence number in commit order, and a cursor per consumer. It is what a replication follower tails and what the dataset history and audits read — **turn it on when something reads it**. It is off by default because it is not free and the cost is uneven: a ground `INSERT DATA`/`DELETE DATA` pays 4–13 %, but an `INSERT … WHERE` pays **×2.5** and a `DELETE … WHERE` **×3–4**. A `WHERE` update names its target by pattern, so the only way to know what it changed is to read the target graph before the update, read it again through the transaction, and subtract — a cost proportional to the *graph*, not to the size of the change, so a small `DELETE WHERE` against a large graph is the worst case. A replication leader or cluster member records regardless (its followers tail this log); a follower does not unless set to `on`, since its own log would be partial. Measured table and row format: [versioning.md](versioning.md#what-it-costs). |
 | `OTS_CHANGE_CAPTURE_MAX_SCAN` | `250000` | Quads: a `WHERE` update's target graphs are scanned for a before-image only when their summed counts fit; above it the row says `unknown`. Lower it to bound what capture can cost a single write, at the price of less precise rows. |
 | `OTS_CHANGE_CAPTURE_MAX_PAYLOAD` | `250000` | Quads a `full` row may carry; above it the row keeps exact counts only. |
@@ -318,7 +376,17 @@ See [rml.md](rml.md) for the full RML guide.
 | `OTS_REPLICATION_ELECTION_MS`, `OTS_REPLICATION_HEARTBEAT_MS` | `1500`, a fifth of it | The election timeout's lower bound (the upper is twice it) and the leader's heartbeat. |
 | `OTS_REPLICATION_SYNC_TIMEOUT_MS` | `2000` | How long a write waits for them (50–60000). After it, the write returns degraded — `X-Replication-Ack: degraded` — and the leader recovers by itself when a follower catches up. |
 | `OTS_TELEMETRY_TIMING_STRIDE` | `8` | One query in this many is timed and lands in the latency ring that `GET /api/admin/telemetry` reports percentiles from. The exit counts and the total are exact regardless. Raising it makes the query path cheaper and the percentiles coarser; `1` times every query. The default exists because reading the clock and locking the ring costs about 40 ns, which is 40 % of a cache-hit query. |
+| `OTS_TELEMETRY_QUERY_RING`, `OTS_TELEMETRY_VALIDATION_RING` | `8192`, `1024` | How many recent queries and validation runs the telemetry rings keep for `GET /api/admin/telemetry`. Memory only, nothing is persisted; `0` or an invalid value means the default. |
 | `OTS_COLUMNAR_QUERY` | `on` | The in-memory mirror's third copy: a term dictionary and sorted permutations of the quads with an evaluator of its own, consulted after the shards and before the full copy for the query shapes it implements exactly, declining the rest. `off` leaves the two engine copies. See [performance.md](performance.md#4-the-columnar-copy-opengraphcolumnar). |
+| `OTS_QUERY_CACHE` | `on` | The query-result cache: a repeated SPARQL read is answered from an LRU, and every write invalidates it. `off`/`false`/`0`/`no` disables it, as the benchmarks do. See [performance.md](performance.md). |
+| `OTS_QUERY_CACHE_ENTRIES` | `1024` | Maximum cached query results (`0` or invalid: the default). |
+| `OTS_QUERY_CACHE_MAX_ROWS` | `10000` | Results with more rows than this are not cached. |
+| `OTS_PARALLEL_QUERY` | `on` | The in-memory query mirror (subject-hash shards, a full copy and the columnar copy). `off` answers every query from the persistent store. |
+| `OTS_PARALLEL_QUERY_MAX_TRIPLES` | *(derived from RAM)* | Store size above which the mirror stays off. The default is a quarter of the detected memory limit (the cgroup limit in a container) at about 1 KiB per triple, never below 2 M or above 24 M; 2 M where no limit can be detected. |
+| `OTS_PARALLEL_QUERY_SHARDS` | *(CPU cores)* | Number of subject-hash shards, clamped to 1–16. |
+| `OTS_PARALLEL_QUERY_REBUILD_QUIET_MS` | `500` | After a write, the mirror is rebuilt only once writes have been quiet this long; queries in the meantime are answered by the persistent store. `0` rebuilds eagerly. |
+| `OTS_SHACL_RUN_INDEX_MIN_PROBES` | `20000` | A SHACL validation run builds an in-memory index of the predicates its shapes traverse only when it will make at least this many lookups. |
+| `OTS_SHACL_RUN_INDEX_MAX_QUADS` | *(derived from RAM)* | The most quads that run index may hold. The default is derived from the memory limit, 1 M where none can be detected, and is never below 250 k or above 8 M. Beyond the cap, lookups go to the store. |
 | `S3_ENDPOINT` | *(unset — local filesystem)* | S3/MinIO endpoint URL. If unset, assets are stored in `<data-dir>/assets/` |
 | `S3_BUCKET` | `triplestore-assets` | S3 bucket name |
 | `S3_ACCESS_KEY` | | S3 access key |

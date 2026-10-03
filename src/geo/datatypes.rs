@@ -5,15 +5,24 @@
 //! and `geo:geoJSONLiteral` (RFC 7946 — always CRS84). A plain string is read as
 //! WKT for convenience. GML and GeoJSON are translated to WKT, so every one of
 //! them reaches GEOS by the same path ([`literal_wkt`]).
+//!
+//! A literal's CRS comes from one place, [`literal_crs_uri`]: a WKT literal's
+//! `<crs>` prefix or a GML literal's `srsName`, and CRS84 otherwise. Every
+//! function — topology, constructive, `getSRID`, `transform`, the metric family
+//! and `aggUnion` — reads it there, so they all agree about one literal.
+//!
+//! An empty `geo:wktLiteral`, `geo:gmlLiteral` or `geo:geoJSONLiteral` is the
+//! empty geometry (GeoSPARQL 1.1 Req 17, 21 and 27).
 
 use std::borrow::Cow;
 
 use dashmap::DashMap;
-use geos::{Geom, Geometry as GeosGeometry};
+use geos::{CoordDimensions, Geom, Geometry as GeosGeometry, WKTWriter};
 use oxrdf::{Literal, NamedNode, Term};
 use std::sync::OnceLock;
 use tracing::trace;
 
+use super::crs::{normalise_crs_uri, Crs};
 use super::vocabulary;
 
 // Process-wide WKT → WKB cache. Profiling (callgrind) shows GeoSPARQL relation
@@ -52,6 +61,10 @@ fn parse_wkt_cached(wkt_str: &str) -> Option<GeosGeometry> {
 }
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+const XSD_ANY_URI: &str = "http://www.w3.org/2001/XMLSchema#anyURI";
+
+/// The WKT of the empty geometry.
+const EMPTY_WKT: &str = "GEOMETRYCOLLECTION EMPTY";
 
 /// Parse a geometry literal — `geo:wktLiteral` (optionally CRS-prefixed,
 /// `<http://www.opengis.net/def/crs/EPSG/0/4326> POINT(1.0 2.0)`),
@@ -67,36 +80,56 @@ pub fn parse_wkt_literal(term: &Term) -> Option<GeosGeometry> {
 /// (or plain string) without its CRS prefix, a GML literal translated by
 /// [`super::gml`], a GeoJSON literal translated by [`super::geojson`]. `None`
 /// for a term that is not a geometry literal or does not translate.
+///
+/// An empty WKT, GML or GeoJSON literal (a WKT literal may still carry its
+/// `<crs>`) is the empty geometry. An empty plain string is not a geometry.
 pub fn literal_wkt(term: &Term) -> Option<Cow<'_, str>> {
     let Term::Literal(literal) = term else {
         return None;
     };
     let value = literal.value();
     match literal.datatype().as_str() {
-        vocabulary::WKT_LITERAL | XSD_STRING => Some(Cow::Borrowed(extract_wkt(value))),
+        vocabulary::WKT_LITERAL => match extract_wkt(value) {
+            "" => Some(Cow::Borrowed(EMPTY_WKT)),
+            wkt => Some(Cow::Borrowed(wkt)),
+        },
+        XSD_STRING => Some(Cow::Borrowed(extract_wkt(value))),
+        vocabulary::GML_LITERAL if value.trim().is_empty() => Some(Cow::Borrowed(EMPTY_WKT)),
         vocabulary::GML_LITERAL => super::gml::gml_to_wkt(value).map(Cow::Owned),
+        vocabulary::GEOJSON_LITERAL if value.trim().is_empty() => Some(Cow::Borrowed(EMPTY_WKT)),
         vocabulary::GEOJSON_LITERAL => super::geojson::geojson_to_wkt(value).map(Cow::Owned),
         _ => None,
     }
 }
 
-/// The CRS URI a geometry literal carries as its `<crs>` prefix, if any —
-/// `None` meaning GeoSPARQL's default, CRS84.
+/// The CRS IRI a geometry literal names — `None` meaning GeoSPARQL's default,
+/// CRS84. This is the one place a literal's CRS is read.
 ///
-/// Only `geo:wktLiteral` (and the plain strings accepted for convenience) use
-/// the prefix form. A `geo:gmlLiteral` value also starts with `<` — its opening
-/// tag — so it is excluded, or the tag would be mistaken for a CRS URI; GML
-/// carries its CRS in `srsName`, which this build does not yet read, so it is
-/// treated as unspecified. A `geo:geoJSONLiteral` is CRS84 by definition
-/// (RFC 7946 has no CRS member).
-pub fn literal_crs_uri(term: &Term) -> Option<&str> {
-    match term {
-        Term::Literal(l)
-            if matches!(l.datatype().as_str(), vocabulary::WKT_LITERAL | XSD_STRING) =>
-        {
-            extract_crs(l.value())
-        }
+/// * `geo:wktLiteral` (and the plain strings accepted for convenience): the
+///   `<crs>` prefix, as written.
+/// * `geo:gmlLiteral`: the `srsName` of its geometry, normalised to the
+///   `http://www.opengis.net/def/crs/…` form (`EPSG:28992`,
+///   `urn:ogc:def:crs:EPSG::28992` and the rest name the same CRS). Its axis
+///   order is the CRS's, as for WKT: an EPSG:4326 `gml:pos` is latitude first.
+/// * `geo:geoJSONLiteral`: none — RFC 7946 is CRS84 by definition.
+pub fn literal_crs_uri(term: &Term) -> Option<Cow<'_, str>> {
+    let Term::Literal(l) = term else {
+        return None;
+    };
+    match l.datatype().as_str() {
+        vocabulary::WKT_LITERAL | XSD_STRING => extract_crs(l.value()).map(Cow::Borrowed),
+        vocabulary::GML_LITERAL => super::gml::gml_srs_name(l.value())
+            .map(|name| Cow::Owned(normalise_crs_uri(&name).into_owned())),
         _ => None,
+    }
+}
+
+/// The CRS a geometry literal is written in ([`literal_crs_uri`], CRS84 when it
+/// names none), or `None` for a CRS this build cannot reproject.
+pub fn literal_crs(term: &Term) -> Option<Crs> {
+    match literal_crs_uri(term) {
+        Some(uri) => Crs::from_uri(&uri),
+        None => Some(Crs::Wgs84),
     }
 }
 
@@ -141,7 +174,7 @@ pub fn extract_crs(value: &str) -> Option<&str> {
 /// reported CRS84 — silently relabelling RD New metres as degrees, and making
 /// the result unusable as an operand for anything else.
 pub fn geometry_to_wkt_literal_in(geom: &GeosGeometry, crs_uri: Option<&str>) -> Option<Term> {
-    let wkt = geom.to_wkt().ok()?;
+    let wkt = geometry_wkt(geom)?;
     let lexical = match crs_uri {
         Some(uri) => format!("<{uri}> {wkt}"),
         None => wkt,
@@ -149,6 +182,41 @@ pub fn geometry_to_wkt_literal_in(geom: &GeosGeometry, crs_uri: Option<&str>) ->
     let literal =
         Literal::new_typed_literal(lexical, NamedNode::new_unchecked(vocabulary::WKT_LITERAL));
     Some(Term::Literal(literal))
+}
+
+/// A geometry's WKT, the same on every supported GEOS: trailing zeros trimmed
+/// and Z kept. GEOS 3.12 made both the default; GEOS 3.11 wrote two dimensions
+/// and every digit, so set them when the writer starts out two-dimensional.
+pub fn geometry_wkt(geom: &GeosGeometry) -> Option<String> {
+    let mut writer = WKTWriter::new().ok()?;
+    writer.set_trim(true);
+    if matches!(writer.get_out_dimension(), Ok(CoordDimensions::TwoD)) {
+        writer.set_output_dimension(CoordDimensions::ThreeD);
+    }
+    writer.write(geom).ok()
+}
+
+/// Reproject a geometry from `from` to `to` (Z kept), or `None` when any
+/// coordinate does not transform — it is never copied through unchanged.
+pub fn reproject_geometry(geom: &GeosGeometry, from: Crs, to: Crs) -> Option<GeosGeometry> {
+    if from == to {
+        return Some(Clone::clone(geom));
+    }
+    geom.transform_xy(|x, y| {
+        super::crs::transform_xy(from, to, x, y)
+            .ok_or_else(|| geos::Error::ImpossibleOperation("outside the CRS's domain".into()))
+    })
+    .ok()
+}
+
+/// A term naming an IRI: an IRI, or an `xsd:anyURI` literal (GeoSPARQL types
+/// its CRS and unit arguments as `xsd:anyURI`).
+pub fn iri_arg(term: &Term) -> Option<&str> {
+    match term {
+        Term::NamedNode(nn) => Some(nn.as_str()),
+        Term::Literal(l) if l.datatype().as_str() == XSD_ANY_URI => Some(l.value().trim()),
+        _ => None,
+    }
 }
 
 /// Create an xsd:boolean literal Term.
@@ -167,31 +235,70 @@ pub fn double_literal(value: f64) -> Term {
     ))
 }
 
-/// A units-of-measure IRI (`uom:`) as `geof:distance` and `geof:buffer` use it.
+/// A unit of measure as `geof:distance`, `geof:buffer` and `geof:area` use it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Uom {
     /// A length, as metres per unit (metre 1, kilometre 1000, …).
     Linear(f64),
     /// An angle, as degrees per unit (degree 1, radian 180/π).
     Angular(f64),
+    /// An area, as square metres per unit (square metre 1, hectare 10 000, …).
+    Area(f64),
+    /// `uom:unity`: dimensionless — the geometry's own units stand.
+    Unity,
 }
 
-/// Parse a units-of-measure IRI. `None` for a term that is not one of the
-/// linear or angular OGC units this build converts (`uom:unity` included): the
-/// functions then keep the geometry's native units, as they always have.
+/// Parse a unit-of-measure argument: an IRI or an `xsd:anyURI` literal naming
+/// an OGC unit (`http://www.opengis.net/def/uom/OGC/1.0/…`), a QUDT unit
+/// (`http://qudt.org/vocab/unit/…`, the vocabulary GeoSPARQL 1.1 recommends) or
+/// an EPSG unit (`http://www.opengis.net/def/uom/EPSG/0/…`). `None` for any
+/// other term: the functions then return unbound rather than a number in units
+/// the caller did not ask for.
 pub fn parse_uom(term: &Term) -> Option<Uom> {
-    let Term::NamedNode(nn) = term else {
-        return None;
-    };
-    Some(match nn.as_str() {
+    const QUDT: &str = "http://qudt.org/vocab/unit/";
+    const QUDT_HTTPS: &str = "https://qudt.org/vocab/unit/";
+    const EPSG: &str = "http://www.opengis.net/def/uom/EPSG/0/";
+    const RADIAN_DEGREES: f64 = 180.0 / std::f64::consts::PI;
+    let iri = iri_arg(term)?;
+    if let Some(unit) = iri
+        .strip_prefix(QUDT)
+        .or_else(|| iri.strip_prefix(QUDT_HTTPS))
+    {
+        return Some(match unit {
+            "M" => Uom::Linear(1.0),
+            "KiloM" => Uom::Linear(1000.0),
+            "CentiM" => Uom::Linear(0.01),
+            "MilliM" => Uom::Linear(0.001),
+            "FT" => Uom::Linear(0.3048),
+            "MI" => Uom::Linear(1609.344),
+            "MI_N" => Uom::Linear(1852.0),
+            "DEG" => Uom::Angular(1.0),
+            "RAD" => Uom::Angular(RADIAN_DEGREES),
+            "M2" => Uom::Area(1.0),
+            "KiloM2" => Uom::Area(1.0e6),
+            "HA" => Uom::Area(1.0e4),
+            "UNITLESS" => Uom::Unity,
+            _ => return None,
+        });
+    }
+    if let Some(code) = iri.strip_prefix(EPSG) {
+        return Some(match code {
+            "9001" => Uom::Linear(1.0),
+            "9002" => Uom::Linear(0.3048),
+            "9036" => Uom::Linear(1000.0),
+            "9101" => Uom::Angular(RADIAN_DEGREES),
+            "9102" => Uom::Angular(1.0),
+            _ => return None,
+        });
+    }
+    Some(match iri {
         vocabulary::METRE => Uom::Linear(1.0),
         vocabulary::KILOMETRE => Uom::Linear(1000.0),
         vocabulary::CENTIMETRE => Uom::Linear(0.01),
         vocabulary::MILLIMETRE => Uom::Linear(0.001),
         vocabulary::DEGREE => Uom::Angular(1.0),
-        vocabulary::RADIAN => Uom::Angular(180.0 / std::f64::consts::PI),
-        // Dimensionless: nothing to convert, the native units stand.
-        vocabulary::UNITY => return None,
+        vocabulary::RADIAN => Uom::Angular(RADIAN_DEGREES),
+        vocabulary::UNITY => Uom::Unity,
         _ => return None,
     })
 }
@@ -260,15 +367,25 @@ mod tests {
     }
 
     #[test]
-    fn only_a_wkt_literal_carries_a_crs_prefix() {
+    fn the_crs_comes_from_the_wkt_prefix_or_the_gml_srs_name() {
         let rd = "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(1 2)";
         assert_eq!(
-            literal_crs_uri(&typed(rd, vocabulary::WKT_LITERAL)),
+            literal_crs_uri(&typed(rd, vocabulary::WKT_LITERAL)).as_deref(),
             Some("http://www.opengis.net/def/crs/EPSG/0/28992")
         );
-        // A GML literal's opening tag is not a CRS, and GeoJSON has none.
+        // A GML literal's opening tag is not a CRS: its srsName is, normalised.
         let gml = "<gml:Point srsName='EPSG:28992'><gml:pos>1 2</gml:pos></gml:Point>";
-        assert_eq!(literal_crs_uri(&typed(gml, vocabulary::GML_LITERAL)), None);
+        assert_eq!(
+            literal_crs_uri(&typed(gml, vocabulary::GML_LITERAL)).as_deref(),
+            Some("http://www.opengis.net/def/crs/EPSG/0/28992")
+        );
+        assert_eq!(
+            literal_crs(&typed(gml, vocabulary::GML_LITERAL)),
+            Some(Crs::RdNew)
+        );
+        let bare = "<gml:Point><gml:pos>1 2</gml:pos></gml:Point>";
+        assert_eq!(literal_crs_uri(&typed(bare, vocabulary::GML_LITERAL)), None);
+        // GeoJSON has none.
         let json = r#"{"type":"Point","coordinates":[1,2]}"#;
         assert_eq!(
             literal_crs_uri(&typed(json, vocabulary::GEOJSON_LITERAL)),
@@ -278,6 +395,57 @@ mod tests {
             literal_wkt(&typed(json, vocabulary::GEOJSON_LITERAL)).as_deref(),
             Some("POINT(1 2)")
         );
+    }
+
+    #[test]
+    fn empty_geometry_literals_are_the_empty_geometry() {
+        for (value, datatype) in [
+            ("", vocabulary::WKT_LITERAL),
+            ("  ", vocabulary::WKT_LITERAL),
+            (
+                "<http://www.opengis.net/def/crs/EPSG/0/28992>",
+                vocabulary::WKT_LITERAL,
+            ),
+            ("", vocabulary::GML_LITERAL),
+            ("", vocabulary::GEOJSON_LITERAL),
+        ] {
+            let g = parse_wkt_literal(&typed(value, datatype))
+                .unwrap_or_else(|| panic!("{value:?}^^{datatype} is a geometry"));
+            assert!(g.is_empty().unwrap(), "{value:?}^^{datatype}");
+        }
+        // An empty plain string is still not a geometry.
+        assert!(parse_wkt_literal(&typed("", XSD_STRING)).is_none());
+    }
+
+    #[test]
+    fn units_are_ogc_qudt_or_epsg_iris_and_nothing_else() {
+        let iri = |s: &str| Term::NamedNode(NamedNode::new_unchecked(s));
+        assert_eq!(parse_uom(&iri(vocabulary::METRE)), Some(Uom::Linear(1.0)));
+        assert_eq!(
+            parse_uom(&iri("http://qudt.org/vocab/unit/KiloM")),
+            Some(Uom::Linear(1000.0))
+        );
+        assert_eq!(
+            parse_uom(&iri("http://qudt.org/vocab/unit/HA")),
+            Some(Uom::Area(1.0e4))
+        );
+        assert_eq!(
+            parse_uom(&iri("http://www.opengis.net/def/uom/EPSG/0/9102")),
+            Some(Uom::Angular(1.0))
+        );
+        // xsd:anyURI literals name units too.
+        assert_eq!(
+            parse_uom(&typed("http://qudt.org/vocab/unit/M", XSD_ANY_URI)),
+            Some(Uom::Linear(1.0))
+        );
+        assert_eq!(parse_uom(&iri(vocabulary::UNITY)), Some(Uom::Unity));
+        for unknown in [
+            iri("http://qudt.org/vocab/unit/PARSEC"),
+            iri("http://example.org/furlong"),
+            typed("http://qudt.org/vocab/unit/M", XSD_STRING),
+        ] {
+            assert_eq!(parse_uom(&unknown), None, "{unknown}");
+        }
     }
 
     #[test]
