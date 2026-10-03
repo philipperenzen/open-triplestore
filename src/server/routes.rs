@@ -4873,20 +4873,23 @@ pub async fn browse_triples(
     // accessible graphs.
     let want_count = params.count.unwrap_or(false);
     let probe_limit = limit.saturating_add(1);
+    // The filters sit after the GRAPH group, not inside it: SPARQL does not
+    // bind the GRAPH variable inside the pattern it scopes (§18.6), so a filter
+    // on `?g` (the graph chips, the `q` search) must see it from outside.
     let fc = if filter_clause.is_empty() {
         String::new()
     } else {
-        format!(" . {}", filter_clause)
+        format!(" {}", filter_clause)
     };
 
     let (query, count_query): (String, Option<String>) = if let Some(graph) = exact_graph {
         (
             format!(
-                "SELECT ?s ?p ?o (<{g}> AS ?g) WHERE {{ GRAPH <{g}> {{ {bgp}{fc} }} }} LIMIT {pl} OFFSET {off}",
+                "SELECT ?s ?p ?o ?g WHERE {{ GRAPH <{g}> {{ {bgp} }} BIND(<{g}> AS ?g){fc} }} LIMIT {pl} OFFSET {off}",
                 g = graph, bgp = bgp, fc = fc, pl = probe_limit, off = offset,
             ),
             want_count.then(|| format!(
-                "SELECT (COUNT(*) AS ?count) WHERE {{ SELECT ?s WHERE {{ GRAPH <{g}> {{ {bgp}{fc} }} }} }}",
+                "SELECT (COUNT(*) AS ?count) WHERE {{ SELECT ?s WHERE {{ GRAPH <{g}> {{ {bgp} }} BIND(<{g}> AS ?g){fc} }} }}",
                 g = graph, bgp = bgp, fc = fc,
             )),
         )
@@ -4914,22 +4917,22 @@ pub async fn browse_triples(
         }
         (
             format!(
-                "SELECT ?s ?p ?o ?g WHERE {{ VALUES ?g {{ {v}}} GRAPH ?g {{ {bgp}{fc} }} }} LIMIT {pl} OFFSET {off}",
+                "SELECT ?s ?p ?o ?g WHERE {{ VALUES ?g {{ {v}}} GRAPH ?g {{ {bgp} }}{fc} }} LIMIT {pl} OFFSET {off}",
                 v = values, bgp = bgp, fc = fc, pl = probe_limit, off = offset,
             ),
             want_count.then(|| format!(
-                "SELECT (COUNT(*) AS ?count) WHERE {{ SELECT ?s WHERE {{ VALUES ?g {{ {v}}} GRAPH ?g {{ {bgp}{fc} }} }} }}",
+                "SELECT (COUNT(*) AS ?count) WHERE {{ SELECT ?s WHERE {{ VALUES ?g {{ {v}}} GRAPH ?g {{ {bgp} }}{fc} }} }}",
                 v = values, bgp = bgp, fc = fc,
             )),
         )
     } else if is_admin {
         (
             format!(
-                "SELECT ?s ?p ?o ?g WHERE {{ GRAPH ?g {{ {bgp}{fc} }} }} LIMIT {pl} OFFSET {off}",
+                "SELECT ?s ?p ?o ?g WHERE {{ GRAPH ?g {{ {bgp} }}{fc} }} LIMIT {pl} OFFSET {off}",
                 bgp = bgp, fc = fc, pl = probe_limit, off = offset,
             ),
             want_count.then(|| format!(
-                "SELECT (COUNT(*) AS ?count) WHERE {{ SELECT ?s WHERE {{ GRAPH ?g {{ {bgp}{fc} }} }} }}",
+                "SELECT (COUNT(*) AS ?count) WHERE {{ SELECT ?s WHERE {{ GRAPH ?g {{ {bgp} }}{fc} }} }}",
                 bgp = bgp, fc = fc,
             )),
         )
@@ -4950,11 +4953,11 @@ pub async fn browse_triples(
         }
         (
             format!(
-                "SELECT ?s ?p ?o ?g WHERE {{ VALUES ?g {{ {v}}} GRAPH ?g {{ {bgp}{fc} }} }} LIMIT {pl} OFFSET {off}",
+                "SELECT ?s ?p ?o ?g WHERE {{ VALUES ?g {{ {v}}} GRAPH ?g {{ {bgp} }}{fc} }} LIMIT {pl} OFFSET {off}",
                 v = values, bgp = bgp, fc = fc, pl = probe_limit, off = offset,
             ),
             want_count.then(|| format!(
-                "SELECT (COUNT(*) AS ?count) WHERE {{ SELECT ?s WHERE {{ VALUES ?g {{ {v}}} GRAPH ?g {{ {bgp}{fc} }} }} }}",
+                "SELECT (COUNT(*) AS ?count) WHERE {{ SELECT ?s WHERE {{ VALUES ?g {{ {v}}} GRAPH ?g {{ {bgp} }}{fc} }} }}",
                 v = values, bgp = bgp, fc = fc,
             )),
         )

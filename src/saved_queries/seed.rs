@@ -1171,9 +1171,9 @@ mod tests {
 
         let caps = format!("{}/capabilities/capabilities", seed_data::DEMO_BASE);
         let ots = "https://opentriplestore.org/ns#";
-        let owlrl_grade = |state: &AppState| -> Vec<String> {
+        let shacladv_grade = |state: &AppState| -> Vec<String> {
             let q = format!(
-                "SELECT ?c WHERE {{ GRAPH <{caps}> {{ <{ots}owlrl> <{ots}conformance> ?c }} }}"
+                "SELECT ?c WHERE {{ GRAPH <{caps}> {{ <{ots}shacladv> <{ots}conformance> ?c }} }}"
             );
             match state.store.query(&q).unwrap() {
                 oxigraph::sparql::QueryResults::Solutions(sols) => sols
@@ -1185,14 +1185,14 @@ mod tests {
                 _ => panic!("not a SELECT result"),
             }
         };
-        assert_eq!(owlrl_grade(&state), vec!["Partial".to_string()]);
+        assert_eq!(shacladv_grade(&state), vec!["Partial".to_string()]);
 
         // What a v13 install holds: every standard "Full", version 13 recorded.
         state
             .store
             .graph_store_put(
                 Some(caps.as_str()),
-                &format!("<{ots}owlrl> <{ots}conformance> \"Full\" .\n"),
+                &format!("<{ots}shacladv> <{ots}conformance> \"Full\" .\n"),
                 oxigraph::io::RdfFormat::NTriples,
             )
             .unwrap();
@@ -1209,10 +1209,10 @@ mod tests {
                 oxigraph::io::RdfFormat::NTriples,
             )
             .unwrap();
-        assert_eq!(owlrl_grade(&state), vec!["Full".to_string()]);
+        assert_eq!(shacladv_grade(&state), vec!["Full".to_string()]);
 
         run_seed(&state).await;
-        assert_eq!(owlrl_grade(&state), vec!["Partial".to_string()]);
+        assert_eq!(shacladv_grade(&state), vec!["Partial".to_string()]);
     }
 
     /// A stand-in S3 endpoint on its own runtime, alive for the rest of the test

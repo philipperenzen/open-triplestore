@@ -1072,67 +1072,6 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             "The dataset's provenance trail as one PROV-O document in Turtle: the dataset and its graphs as entities, the commits that changed them as activities, their agents, and the dataset's versions. Graph-level, not per triple.",
             vec![], vec![("200", "PROV-O (text/turtle)"), ("404", "Dataset not found or not visible")], false)),
     ]);
-    mount(paths, "/api/datasets/:dataset_id/properties/state", vec![
-        (M::Post, ob("Datasets", "Record a property state",
-            "Record a new value of a time-evolving property as an `opm:PropertyState` in the dataset's states graph, and set it as the current value in the data graph. Needs write access to the dataset. See docs/datasets.md (Time-evolving properties).",
-            vec![], json_body(ObjectBuilder::new()
-                .property("entity", ObjectBuilder::new().schema_type(Type::String).description(Some("Subject IRI.")))
-                .property("property", ObjectBuilder::new().schema_type(Type::String).description(Some("Property IRI.")))
-                .property("value", ObjectBuilder::new().schema_type(Type::String))
-                .property("datatype", ObjectBuilder::new().schema_type(Type::String).description(Some("XSD datatype (`xsd:decimal` or a full IRI), or `iri` for an IRI value.")))
-                .property("language", ObjectBuilder::new().schema_type(Type::String))
-                .property("graph", ObjectBuilder::new().schema_type(Type::String).description(Some("Data graph holding the current value; defaults to the dataset's instances graph.")))
-                .property("valid_from", ObjectBuilder::new().schema_type(Type::String).description(Some("When the value became true; default now.")))
-                .property("reliability", ObjectBuilder::new().schema_type(Type::String).description(Some("`assumed` | `confirmed` | `derived`.")))
-                .property("note", ObjectBuilder::new().schema_type(Type::String))
-                .required("entity").required("property").required("value"),
-                json!({"entity": "https://example.org/bridge/b1", "property": "https://example.org/loadRating", "value": "45", "valid_from": "2026-01-01", "reliability": "confirmed", "note": "inspection"})),
-            vec![("200", "The recorded state"), ("400", "Invalid body"), ("401", "Authentication required"), ("403", "Write access required")], true)),
-    ]);
-    mount(
-        paths,
-        "/api/datasets/:dataset_id/properties/history",
-        vec![(
-            M::Get,
-            o(
-                "Datasets",
-                "Property history",
-                "Every recorded state of one property of one entity, newest first.",
-                vec![
-                    qp("entity", true, "Subject IRI"),
-                    qp("property", true, "Property IRI"),
-                ],
-                vec![
-                    ("200", "Array of states"),
-                    ("404", "Dataset not found or not visible"),
-                ],
-                false,
-            ),
-        )],
-    );
-    mount(
-        paths,
-        "/api/datasets/:dataset_id/properties/as-of",
-        vec![(
-            M::Get,
-            o(
-                "Datasets",
-                "Property value as of a time",
-                "The state of one property of one entity that was valid at `at`.",
-                vec![
-                    qp("entity", true, "Subject IRI"),
-                    qp("property", true, "Property IRI"),
-                    qp("at", true, "Point in time (xsd:date or xsd:dateTime)"),
-                ],
-                vec![
-                    ("200", "The state valid at that time"),
-                    ("400", "`at` missing or not a date/dateTime"),
-                    ("404", "Dataset not visible, or no state valid at that time"),
-                ],
-                false,
-            ),
-        )],
-    );
     // A container archive as the request body.
     fn zip_body() -> RequestBody {
         RequestBodyBuilder::new()

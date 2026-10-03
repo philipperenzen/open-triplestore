@@ -117,13 +117,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_non_2xx_answer_is_a_rejection_not_success() {
-        use axum::{http::StatusCode, routing::post as route_post, Router};
-        let app = Router::new()
-            .route(
-                "/register",
-                route_post(|| async { StatusCode::UNAUTHORIZED }),
-            )
-            .route("/heartbeat", route_post(|| async { StatusCode::OK }));
+        use axum::{http::StatusCode, http::Uri, Router};
+        // A fallback rather than routes: the OpenAPI parity test reads every
+        // route registered under src/ as a server route.
+        let app = Router::new().fallback(|uri: Uri| async move {
+            if uri.path() == "/register" {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::OK
+            }
+        });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });

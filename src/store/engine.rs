@@ -3489,6 +3489,8 @@ impl TripleStore {
 
         let mut targets = dropped.clone();
         targets.extend(written.iter().cloned());
+        // The text index catches up on the dropped and written graphs.
+        self.touch_graphs(targets.iter().cloned());
         let pre_count = self.pre_count();
         let intent = self
             .changes

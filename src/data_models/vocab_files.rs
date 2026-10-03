@@ -1182,6 +1182,7 @@ mod tests {
                 "pav.ttl",
                 "prov.ttl",
                 "saref.ttl",
+                "sf.ttl",
                 "ssn.ttl",
                 "time.ttl",
                 "vcard.ttl",
