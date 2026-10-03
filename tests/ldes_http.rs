@@ -233,8 +233,25 @@ async fn publishing_captures_every_write_path_and_fragments_the_stream() {
     )
     .await;
     assert!(
-        n1.contains("tree:GreaterThanOrEqualToRelation") && n1.contains("ldes/nodes/2"),
-        "page 1 links to page 2: {n1}"
+        !n1.contains("tree:relation"),
+        "a sealed page links nowhere; the root links every page: {n1}"
+    );
+    let (_, _, root) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/pub/ldes/nodes/0",
+        None,
+        None,
+        Some("text/turtle"),
+        "",
+    )
+    .await;
+    assert!(
+        root.contains("tree:GreaterThanOrEqualToRelation")
+            && root.contains("tree:LessThanOrEqualToRelation")
+            && root.contains("ldes/nodes/1>")
+            && root.contains("ldes/nodes/2>"),
+        "the root bounds page 1 and links on: {root}"
     );
     assert!(
         hdrs1

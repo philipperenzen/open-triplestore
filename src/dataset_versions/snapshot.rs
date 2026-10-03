@@ -36,16 +36,31 @@ fn version_iri(base_url: &str, dataset_id: &str, version: &str) -> String {
     format!("{base_url}/dataset/{dataset_id}/version/{version}")
 }
 
+/// Suffixes a data snapshot may not take. The version's validation-layer graph
+/// is a sibling under the same version IRI, and cutting a version clears it to
+/// write the bindings snapshot: a data snapshot named `validation` was wiped.
+const RESERVED_SUFFIXES: [&str; 1] = [crate::shacl_studio::bindings::VERSION_VALIDATION_SEGMENT];
+
 /// Ensure snapshot suffixes are unique even when two source graphs slugify to
-/// the same value (disambiguate with an index suffix).
+/// the same value (disambiguate with an index suffix), and never a reserved one.
+/// An index can itself clash, as when one source slugifies to `a-1` and two to
+/// `a`, so every candidate is checked. `used` maps each suffix handed out (and
+/// each base seen) to the next index to try for it as a base.
 fn unique_suffix(used: &mut HashMap<String, usize>, base: &str) -> String {
-    let n = used.entry(base.to_string()).or_insert(0);
-    let out = if *n == 0 {
-        base.to_string()
-    } else {
-        format!("{base}-{n}")
+    let mut n = used.get(base).copied().unwrap_or(0);
+    let out = loop {
+        let candidate = if n == 0 {
+            base.to_string()
+        } else {
+            format!("{base}-{n}")
+        };
+        n += 1;
+        if !RESERVED_SUFFIXES.contains(&candidate.as_str()) && !used.contains_key(&candidate) {
+            break candidate;
+        }
     };
-    *n += 1;
+    used.insert(base.to_string(), n);
+    used.entry(out.clone()).or_insert(1);
     out
 }
 
@@ -237,5 +252,56 @@ mod tests {
         assert_eq!(branch[0].source_graph, live);
         assert!(branch[0].snapshot_graph.contains("/version/1.0.0-feature/"));
         assert_eq!(count(&store, &branch[0].snapshot_graph), 1);
+    }
+
+    #[test]
+    fn unique_suffix_skips_reserved_and_taken_names() {
+        let mut used = HashMap::new();
+        let got: Vec<String> = ["a", "a-1", "a", "validation", "validation", "validation-1"]
+            .into_iter()
+            .map(|base| unique_suffix(&mut used, base))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "a",
+                "a-1",
+                "a-2",
+                "validation-1",
+                "validation-2",
+                "validation-1-1"
+            ]
+        );
+    }
+
+    /// A source graph whose last segment is `validation` used to snapshot into
+    /// the version's validation-layer graph, which the bindings step clears.
+    #[test]
+    fn a_graph_named_validation_survives_the_bindings_snapshot() {
+        use crate::shacl_studio::bindings::{snapshot_dataset_bindings, version_validation_graph};
+        let store = TripleStore::in_memory().unwrap();
+        let base = "http://x";
+        let live = "http://x/g/validation";
+        put(&store, live, "http://x/a", "http://x/p", "http://x/b");
+
+        let map = snapshot_graphs(&store, base, "ds1", "1.0.0", &[live.to_string()]).unwrap();
+        assert_eq!(
+            map[0].snapshot_graph,
+            "http://x/dataset/ds1/version/1.0.0/validation-1"
+        );
+        snapshot_dataset_bindings(&store, base, "ds1", "1.0.0", &[live.to_string()]).unwrap();
+        assert_eq!(count(&store, &map[0].snapshot_graph), 1);
+
+        // Branching a version cut before the name was reserved, whose snapshot
+        // took it, moves the branch's copy aside as well.
+        let legacy = [GraphMapping {
+            snapshot_graph: version_validation_graph(base, "ds1", "0.9.0"),
+            source_graph: live.to_string(),
+        }];
+        let branch = clone_version(&store, base, "ds1", &legacy, "0.9.0-b").unwrap();
+        assert_eq!(
+            branch[0].snapshot_graph,
+            "http://x/dataset/ds1/version/0.9.0-b/validation-1"
+        );
     }
 }

@@ -3,7 +3,9 @@
 use super::{Row, RowIter};
 use std::collections::HashMap;
 
-pub fn load(source_data: &str) -> Result<RowIter, String> {
+/// The header and the rows. Every cell is a value, an empty one included:
+/// CSV has no NULL of its own (RML-IO), so only `rml:null` makes one.
+pub fn load(source_data: &str) -> Result<(Vec<String>, RowIter), String> {
     let mut rdr = csv::Reader::from_reader(source_data.as_bytes());
     let headers = rdr
         .headers()
@@ -27,5 +29,5 @@ pub fn load(source_data: &str) -> Result<RowIter, String> {
         }
     }
 
-    Ok(Box::new(rows.into_iter()))
+    Ok((headers, Box::new(rows.into_iter())))
 }

@@ -4,13 +4,14 @@ Beyond dataset visibility and API token scopes, administrators get fine-grained 
 
 ## Single Sign-On (OIDC / Azure AD / SAML)
 
-Register external identity providers so users can sign in with corporate credentials. Three provider types are supported:
+Register external identity providers so users can sign in with corporate credentials. Two provider types are supported:
 
-- **Generic OIDC** — Any OpenID Connect provider. Supply a discovery URL (or explicit authorization, token, and userinfo endpoints), client ID, client secret, and requested scopes.
-- **Azure AD / Entra ID** — Microsoft Entra tenants, configured like OIDC with tenant-specific endpoints.
-- **SAML 2.0** — Enterprise SAML identity providers for browser-based SSO.
+- **OIDC** — Any OpenID Connect provider, Azure AD / Entra ID included. Supply the discovery URL (for Entra, the tenant's `…/v2.0/.well-known/openid-configuration`), client ID, client secret, and requested scopes.
+- **SAML 2.0** — Enterprise SAML identity providers for browser-based SSO. Supply the IdP's entity ID, SSO URL, and signing certificate.
 
-A provider can **auto-provision** accounts on first login and map an incoming claim to a system role: `role_claim` names the claim (e.g. a group attribute), `role_claim_map` maps each claim value to `user`, `admin`, or `super_admin`, and `default_role` applies when nothing matches. Providers can be disabled without deleting them; enabled ones appear automatically on the login page. Configured providers are listed at `GET /api/auth/oauth/providers`; admin CRUD is under `/api/admin/oauth/providers`.
+The client secret and the SAML certificate are never shown again once saved; leave them blank when editing a provider to keep the stored values.
+
+A provider can **auto-provision** accounts on first login and map incoming group or role claims to a grant: `role_claim_map` is a JSON object mapping each value of the token's `groups` or `roles` claim (for SAML, the groups attribute) to `user`, `admin`, or `publisher` (which grants publishing without changing the role), and `default_role` applies when nothing matches. Sign-in through a provider never grants `super_admin`; a mapping to it is capped at `admin`. Providers can be disabled without deleting them; enabled ones appear automatically on the login page once a sign-in can start from them (an OIDC provider needs a client ID, a SAML provider an SSO URL and a build with the `saml` feature). Configured providers are listed at `GET /api/auth/oauth/providers`; admin CRUD is under `/api/admin/oauth/providers`.
 
 ## Endpoint ACL
 

@@ -385,6 +385,20 @@ impl Dt {
             _ => false,
         }
     }
+
+    /// The datatypes directly below `rdfs:Literal`: their value spaces are
+    /// pairwise disjoint (OWL 2 Structural Specification §4: binary data,
+    /// IRIs and strings are separate value spaces).
+    #[cfg_attr(not(feature = "owl2-el"), allow(dead_code))]
+    pub const ROOTS: [Dt; 7] = [
+        Dt::PlainLiteral,
+        Dt::XmlLiteral,
+        Dt::Real,
+        Dt::HexBinary,
+        Dt::Base64Binary,
+        Dt::AnyUri,
+        Dt::DateTime,
+    ];
 }
 
 /// A data value, compared by value: `"1"^^xsd:integer` and `"1.0"^^xsd:decimal`

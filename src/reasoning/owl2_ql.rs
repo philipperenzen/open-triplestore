@@ -1804,6 +1804,7 @@ impl<'a> QLQueryRewriter<'a> {
             target_graph: self.target_graph.clone(),
             ignored_axioms: tbox.ignored.count(),
             ignored_sample: tbox.ignored.sample.clone(),
+            ..Default::default()
         }
     }
 }

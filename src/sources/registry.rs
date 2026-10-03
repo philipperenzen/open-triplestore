@@ -425,6 +425,46 @@ pub fn list_mappings(store: &TripleStore, source_id: Option<&str>) -> Vec<Mappin
         .collect()
 }
 
+/// Record the term-generation rules a frozen mapping version runs under.
+/// Written once, when the version is frozen; the version entity carries it,
+/// not the version's RML graph, so the document a person edits stays theirs.
+pub fn put_version_semantics(
+    store: &TripleStore,
+    id: &str,
+    version: u32,
+    semantics: crate::rml::model::Semantics,
+) -> Result<(), String> {
+    let vi = iri(&mapping_version_iri(id, version));
+    let sparql = format!(
+        "{pfx}DELETE {{ GRAPH <{SOURCES_GRAPH}> {{ {vi} ds:rmlSemantics ?s }} }}\n\
+         WHERE {{ GRAPH <{SOURCES_GRAPH}> {{ {vi} ds:rmlSemantics ?s }} }};\n\
+         INSERT DATA {{ GRAPH <{SOURCES_GRAPH}> {{ {vi} ds:rmlSemantics {} }} }}",
+        lit(semantics.as_str()),
+        pfx = prefixes(),
+    );
+    store.update(&sparql).map_err(|e| e.to_string())
+}
+
+/// The term-generation rules a frozen mapping version runs under. A version
+/// frozen before versions were stamped carries none and keeps the rules it
+/// was written against: [`Semantics::Legacy`](crate::rml::model::Semantics).
+pub fn version_semantics(
+    store: &TripleStore,
+    id: &str,
+    version: u32,
+) -> crate::rml::model::Semantics {
+    let sparql = format!(
+        "{}SELECT ?s WHERE {{ GRAPH <{SOURCES_GRAPH}> {{ {} ds:rmlSemantics ?s }} }}",
+        prefixes(),
+        iri(&mapping_version_iri(id, version))
+    );
+    select(store, &sparql)
+        .first()
+        .and_then(|row| row.get("s"))
+        .and_then(|s| crate::rml::model::Semantics::parse(s))
+        .unwrap_or(crate::rml::model::Semantics::Legacy)
+}
+
 /// Remove a mapping, its version entities and every version graph.
 pub fn delete_mapping(store: &TripleStore, m: &MappingRecord) -> Result<(), String> {
     let graphs: Vec<String> = (1..=m.version)
@@ -508,6 +548,13 @@ pub fn put_run(store: &TripleStore, r: &RunRecord) -> Result<(), String> {
             r.ldes_members
         ));
     }
+    if !r.data_errors.is_empty() {
+        body.push_str(&format!(
+            "    ds:dataErrors \"{}\"^^xsd:integer ;\n    ds:dataErrorRows {} ;\n",
+            r.data_errors.rows,
+            lit(&r.data_errors.first.join("\n"))
+        ));
+    }
     body.push_str(&format!("    dct:created {} .\n", lit(&r.started_at)));
 
     // The graph the run produced is the PROV entity, so provenance can be
@@ -535,7 +582,7 @@ fn run_select(filter: &str) -> String {
     format!(
         "{}SELECT ?id ?source ?mapping ?version ?modelVersion ?status ?mode ?rows ?triples ?duration \
          ?started ?ended ?actor ?conforms ?violations ?error ?previous ?watermark ?members \
-         WHERE {{ GRAPH <{SOURCES_GRAPH}> {{\n\
+         ?dataErrors ?dataErrorRows WHERE {{ GRAPH <{SOURCES_GRAPH}> {{\n\
            ?a a ds:Run ; ds:id ?id ; ds:source ?source ;\n\
               ds:status ?status ; ds:mode ?mode ; prov:startedAtTime ?started .\n\
            OPTIONAL {{ ?a ds:mapping ?mapping . ?a prov:used ?v . ?v a ds:MappingVersion ; ds:version ?version }}\n\
@@ -552,6 +599,8 @@ fn run_select(filter: &str) -> String {
            OPTIONAL {{ ?a ds:previousGraph ?previous }}\n\
            OPTIONAL {{ ?a ds:watermark ?watermark }}\n\
            OPTIONAL {{ ?a ds:ldesMembers ?members }}\n\
+           OPTIONAL {{ ?a ds:dataErrors ?dataErrors }}\n\
+           OPTIONAL {{ ?a ds:dataErrorRows ?dataErrorRows }}\n\
          }} }} ORDER BY DESC(?started)",
         prefixes()
     )
@@ -584,6 +633,12 @@ fn row_to_run(row: &HashMap<String, String>) -> RunRecord {
         error: get("error"),
         watermark: get("watermark"),
         ldes_members: get("members").and_then(|v| v.parse().ok()).unwrap_or(0),
+        data_errors: crate::rml::checks::DataErrors {
+            rows: get("dataErrors").and_then(|v| v.parse().ok()).unwrap_or(0),
+            first: get("dataErrorRows")
+                .map(|s| s.lines().map(str::to_string).collect())
+                .unwrap_or_default(),
+        },
         id,
     }
 }

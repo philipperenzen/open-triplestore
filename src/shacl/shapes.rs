@@ -41,6 +41,13 @@ pub enum Target {
     TargetSubjectsOf(String),
     TargetObjectsOf(String),
     SparqlTarget(String), // SHACL-AF: custom SPARQL target
+    /// SHACL-AF §3.2: a target whose type is a `sh:SPARQLTargetType` — the
+    /// type's `SELECT ?this`, with the target's parameter values bound as
+    /// terms (every parameter variable is projected so it can be bound).
+    SparqlTargetType {
+        query: Box<opengraph::spargebra::Query>,
+        bindings: Vec<(oxigraph::sparql::Variable, Term)>,
+    },
 }
 
 /// A property shape with path and constraints.
@@ -60,6 +67,9 @@ pub struct PropertyShape {
     /// `sh:message` on the property shape itself — overrides the engine's
     /// default result message for results produced by this property shape.
     pub message: Option<String>,
+    /// `sh:deactivated true`: every term conforms (SHACL §2.1.6), so the
+    /// shape's constraints are not evaluated.
+    pub deactivated: bool,
 }
 
 /// SHACL property paths.
@@ -106,6 +116,88 @@ impl PropertyPath {
             other => format!("({})", other.to_sparql()),
         }
     }
+}
+
+const SH_NS: &str = "http://www.w3.org/ns/shacl#";
+
+/// Parse a SHACL property path (SHACL §2.3) starting at `node` into a [`PropertyPath`],
+/// over any graph: `objects(subject, predicate)` returns the objects of a node in
+/// lexical form (an IRI, `_:label` for a blank node, or a literal's value).
+///
+/// Handles a predicate IRI; an RDF-list **sequence** path `( p1 p2 … )`; and the blank-node
+/// path operators `sh:inversePath`, `sh:alternativePath` (an RDF list), `sh:zeroOrMorePath`,
+/// `sh:oneOrMorePath`, `sh:zeroOrOnePath`. Returns `None` for an empty or malformed path so
+/// the caller can skip the property shape rather than mis-bind it.
+///
+/// A node carrying BOTH list cells (`rdf:first`/`rdf:rest`) and a path operator is
+/// interpreted as the sequence path — matching the W3C suite's `path-strange-*`
+/// expectations, which treat the list reading as authoritative.
+pub(crate) fn parse_property_path_with(
+    node: &str,
+    objects: &dyn Fn(&str, &str) -> Vec<String>,
+) -> Option<PropertyPath> {
+    // A predicate path is a plain IRI.
+    if !node.starts_with("_:") {
+        return Some(PropertyPath::Predicate(node.to_string()));
+    }
+    // Blank node: an RDF-list sequence path takes precedence over operators.
+    let seq: Vec<PropertyPath> = rdf_list_elements(node, objects)
+        .iter()
+        .filter_map(|e| parse_property_path_with(e, objects))
+        .collect();
+    if !seq.is_empty() {
+        return Some(PropertyPath::Sequence(seq));
+    }
+    let op =
+        |p: &str| -> Option<String> { objects(node, &format!("{SH_NS}{p}")).into_iter().next() };
+    if let Some(inner) = op("inversePath") {
+        return parse_property_path_with(&inner, objects)
+            .map(|p| PropertyPath::Inverse(Box::new(p)));
+    }
+    if let Some(head) = op("alternativePath") {
+        let parts: Vec<PropertyPath> = rdf_list_elements(&head, objects)
+            .iter()
+            .filter_map(|e| parse_property_path_with(e, objects))
+            .collect();
+        return (!parts.is_empty()).then_some(PropertyPath::Alternative(parts));
+    }
+    if let Some(inner) = op("zeroOrMorePath") {
+        return parse_property_path_with(&inner, objects)
+            .map(|p| PropertyPath::ZeroOrMore(Box::new(p)));
+    }
+    if let Some(inner) = op("oneOrMorePath") {
+        return parse_property_path_with(&inner, objects)
+            .map(|p| PropertyPath::OneOrMore(Box::new(p)));
+    }
+    if let Some(inner) = op("zeroOrOnePath") {
+        return parse_property_path_with(&inner, objects)
+            .map(|p| PropertyPath::ZeroOrOne(Box::new(p)));
+    }
+    None
+}
+
+/// Walk the RDF list whose head is `head`, returning each member's lexical node form
+/// (IRI, `_:label`, or literal value). Empty if `head` is not a list.
+fn rdf_list_elements(head: &str, objects: &dyn Fn(&str, &str) -> Vec<String>) -> Vec<String> {
+    const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
+    const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
+    const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
+    let mut out = Vec::new();
+    let mut current = head.to_string();
+    for _ in 0..10_000 {
+        if current == RDF_NIL {
+            break;
+        }
+        match objects(&current, RDF_FIRST).into_iter().next() {
+            Some(first) => out.push(first),
+            None => break,
+        }
+        match objects(&current, RDF_REST).into_iter().next() {
+            Some(rest) => current = rest,
+            None => break,
+        }
+    }
+    out
 }
 
 /// SHACL constraint components.
@@ -187,6 +279,8 @@ pub enum Constraint {
     // SHACL-AF: SPARQL-based constraint. `severity` is the optional sh:severity declared
     // on the sh:SPARQLConstraint node itself (e.g. sh:Warning), overriding the shape's.
     SparqlConstraint {
+        /// The `sh:sparql` node (an IRI, or `_:label`): `sh:sourceConstraint`.
+        node: String,
         select: String,
         message: Option<String>,
         severity: Option<String>,
@@ -197,12 +291,11 @@ pub enum Constraint {
     // for a shape that carries the component's parameter predicates.
     Custom(Box<CustomConstraint>),
 
-    // SHACL-AF: sh:expression (node expression) — path + comparison subset. The values
-    // reached along `path` from the focus node must satisfy every constraint in `checks`
-    // (e.g. sh:minExclusive); a single violation is reported with `message`.
+    // SHACL-AF §7: sh:expression — a node expression that must produce exactly
+    // `{ true }` with each value node as its focus node. `message` is the
+    // expression node's sh:message.
     Expression {
-        path: PropertyPath,
-        checks: Vec<Constraint>,
+        expr: super::node_expr::NodeExpr,
         message: Option<String>,
     },
 }

@@ -397,6 +397,7 @@ pub async fn bulk_import(
     let archive_ds = meta.dataset_id.clone();
     let archive_creator = format!("{}/users/{}", state.base_url, user.user_id);
     let archive_bump = bump.clone();
+    let archive_user = user.user_id.clone();
     let outcome_w = outcome.clone();
     let before_replace = move |changes: &[GraphChange]| -> Result<(), String> {
         let Some(ds_id) = archive_ds.as_deref() else {
@@ -446,6 +447,12 @@ pub async fn bulk_import(
                     "Archived previous data before replace via import ({archive_bump} bump)"
                 )),
             )?;
+            crate::rdf_patch_log::on_version_cut(
+                &archive_db,
+                &archive_base,
+                &record,
+                Some(&archive_user),
+            );
             out.changed_graphs = changed;
             out.new_version = Some(version);
             out.snapshot_graphs = record.snapshot_graphs;
@@ -466,6 +473,12 @@ pub async fn bulk_import(
                 Some(&archive_creator),
                 Some("Upload identical to current data — saved as draft"),
             )?;
+            crate::rdf_patch_log::on_version_cut(
+                &archive_db,
+                &archive_base,
+                &record,
+                Some(&archive_user),
+            );
             out.draft_version = Some(version);
             out.snapshot_graphs = record.snapshot_graphs;
         }

@@ -74,8 +74,9 @@ open-triplestore = { features = ["owl2-rl"] }
 use open_triplestore::reasoning::common::RDFS_ENTAILMENT_GRAPH;
 use open_triplestore::reasoning::rdfs::RdfsMaterializer;
 use open_triplestore::store::TripleStore;
+use std::path::Path;
 
-let store = TripleStore::open("./data")?;
+let store = TripleStore::open(Path::new("./data"))?;
 let report = RdfsMaterializer::with_target(&store, RDFS_ENTAILMENT_GRAPH).materialize()?;
 
 println!(
@@ -110,6 +111,22 @@ A dataset can select `rdfs` as its regime and keep its own entailment graph up t
 tests; known gaps are in [conformance/entailment.md](conformance/entailment.md). No score is
 published (W3C test-suite policy).
 
+## SPARQL Endpoint
+
+`/sparql` adds the entailment graph to a query when the request sets the `entailment` query
+parameter. There is no header for it and no server-wide setting:
+
+```http
+POST /sparql?entailment=rdfs HTTP/1.1
+Content-Type: application/sparql-query
+
+SELECT * WHERE { ?s rdf:type ?c }
+```
+
+The graph has to be materialised first (`POST /api/reasoning/materialize` with
+`{"regime": "rdfs"}`). A dataset with an entailment regime keeps its own graph; query it with
+`entailment_dataset=<id>` instead (see [Reasoning](reasoning.md)).
+
 ## Entailment Graph
 
 Materialised triples are written to `urn:entailment:rdfs`.  This graph can be inspected,
@@ -119,9 +136,8 @@ cleared, and rebuilt independently of the asserted data:
 # Count entailed triples
 SELECT (COUNT(*) AS ?n) FROM <urn:entailment:rdfs> WHERE { ?s ?p ?o }
 
-# Clear and rebuild
-CLEAR GRAPH <urn:entailment:rdfs>;
--- then call RdfsMaterializer::materialize() again
+# Clear, then call RdfsMaterializer::materialize() again to rebuild
+CLEAR GRAPH <urn:entailment:rdfs>
 ```
 
 ## Performance Notes
@@ -129,4 +145,6 @@ CLEAR GRAPH <urn:entailment:rdfs>;
 - `rdfD2`, `rdfs4a` and `rdfs4b` generate one triple per distinct predicate, subject and
   object, and each scans every triple in scope once per round in which the other patterns
   have reached their fixed point (usually two rounds).
-- The fixed-point loop converges in ≤ `log(depth)` iterations for typical hierarchies.
+- No benchmark of the materialiser is published. Each round re-runs every pattern over the
+  whole scope, so the number of rounds grows with the depth of the class and property
+  hierarchies.

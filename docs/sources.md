@@ -119,14 +119,22 @@ carries the drivers its operator asked for and no others.
 | Dialect | Build feature | Read-only, enforced how | Statement timeout | TLS |
 |---|---|---|---|---|
 | `sqlite` | core | `SQLITE_OPEN_READ_ONLY` | progress handler | — |
-| `postgresql` | `plugin-postgres` | `SET default_transaction_read_only = on` per session | `SET statement_timeout` | rustls; `options.sslrootcert` for a private CA |
-| `mysql` (MariaDB too) | `plugin-mysql` | `SET SESSION TRANSACTION READ ONLY` per session | `max_execution_time` (MySQL) or `max_statement_time` (MariaDB); a server that knows neither is refused | rustls; `options.sslrootcert` |
-| `mssql` | `plugin-mssql` | the account is checked at connect: `sysadmin`, `db_owner`, `db_datawriter` or `db_ddladmin` is refused; only a query the driver can wrap as a derived table runs | the driver bounds every statement and every wait for a next row; `SET LOCK_TIMEOUT` | rustls; `options.sslrootcert` |
+| `postgresql` | `plugin-postgres` | `SET default_transaction_read_only = on` per session | `SET statement_timeout` | rustls over the platform's roots; `options.sslrootcert` adds a private CA bundle |
+| `mysql` (MariaDB too) | `plugin-mysql` | `SET SESSION TRANSACTION READ ONLY` per session | `max_execution_time` (MySQL) or `max_statement_time` (MariaDB); a server that knows neither is refused | rustls over the bundled Mozilla roots; `options.sslrootcert` adds a private CA bundle |
+| `mssql` | `plugin-mssql` | the account is checked at connect: `sysadmin`, `db_owner`, `db_datawriter` or `db_ddladmin` is refused; only a query the driver can wrap as a derived table runs | the driver bounds every statement and every wait for a next row; `SET LOCK_TIMEOUT` | rustls over the platform's roots; `options.sslrootcert` replaces them with one CA certificate (a `.pem`, `.crt` or `.der` file holding exactly one) |
 | `sparql` (virtual; Ontop or any endpoint) | core | a SPARQL endpoint has no write path | the remote timeout (`OTS_REMOTE_TIMEOUT_SECS`) | `tls` picks `https`; the endpoint must be on `OTS_REMOTE_ALLOWLIST` |
+
+The published Docker image carries all three connectors. A build from source
+carries them only when asked, since `full` leaves them out:
 
 ```bash
 cargo build --features full,plugin-postgres,plugin-mysql,plugin-mssql
 ```
+
+An image without them, or with only some, sets the Dockerfile's
+`CARGO_FEATURES` build argument (for example
+`docker build --build-arg CARGO_FEATURES=full,plugin-postgres .`); see
+[build features](build-features.md).
 
 The three networked drivers share one catalogue and one profiler
 ([`plugins/api/src/sources/catalogue.rs`](../plugins/api/src/sources/catalogue.rs)):
@@ -143,7 +151,13 @@ expects (`true` / `false`, `2026-01-01T12:00:00+00:00`, hex for binary).
 
 A datasource in a schema of its own names it in `options.search_path`
 (PostgreSQL). `options.sslrootcert` points at a PEM bundle for a private CA;
-host names are always verified and there is no trust-all switch.
+host names are always verified and there is no trust-all switch. With `tls`
+set, a server that offers no TLS, or a certificate that does not verify, is
+a connection error that says why (`invalid peer certificate: UnknownIssuer`);
+the driver never falls back to cleartext. A driver that fails without
+reporting an error — a panic inside it — is a `driver failure` naming the
+dialect, not a bare 500; the detail goes to the server log, and the
+connection it happened on is not used again.
 
 Two server differences surface in what a profile shows. On SQL Server give
 the reading account `db_datareader` plus `VIEW DEFINITION`: without the
@@ -170,7 +184,13 @@ HTTP through the PostgreSQL plugin (`--features plugin-postgres`). CI's
 `live-sources` job (GitHub and GitLab alike) starts PostgreSQL 16, MySQL 8.4,
 MariaDB 11.4 and SQL Server 2022 as service containers and runs all of them
 with `OTS_TEST_LIVE_REQUIRED=1`, which turns a missing server variable into
-a failure instead of a skip.
+a failure instead of a skip. Each server also gets a certificate from a
+throwaway CA ([`scripts/live-sources-tls.sh`](../scripts/live-sources-tls.sh)
+on GitHub and for local containers; on GitLab each service makes its own as
+it starts), and every driver runs once more with `tls: true`: refused
+without that CA, encrypted and streaming with it in `options.sslrootcert`
+(`OTS_TEST_<DIALECT>_TLS_CA` names where the CA lies on the server; the test
+reads it back).
 
 ---
 
@@ -219,7 +239,8 @@ one `CONSTRUCT`, loaded in one pass so blank nodes keep their identity — as a
 run with `mode: snapshot`: gated against the bound dataset's shapes, swapped
 in atomically, listed with the mapped runs, reviewable and promotable, with
 `prov:used <urn:source:…>` on its trail and no `mapping` on its record. The
-body is fetched whole; a very large virtual graph is better mapped than
+body is fetched whole, up to `OTS_REMOTE_MAX_BYTES` (64 MiB by default; a
+larger body fails the run); a very large virtual graph is better mapped than
 snapshotted.
 
 ```bash
@@ -231,7 +252,29 @@ curl -X POST http://localhost:7878/api/sources/assets-vkg/runs -H "Authorization
 resolves to the source's endpoint with its credential — the query names no
 URL and no secret — so a virtual source is also queryable without
 materialising anything. Federation's own rules apply unchanged: the endpoint
-must be allowlisted, the remote timeout and row cap hold.
+must be allowlisted, and the remote timeout, body limit and row cap hold —
+a result over a cap fails the call rather than being truncated.
+
+Because such a query is sent with the source's account, using it is the
+source's to share. The source resolves for:
+
+- an administrator;
+- the source's owner;
+- a signed-in user who holds a role on the dataset the source is bound to
+  (`dataset` on its record): the dataset's owner, a member of the owning
+  organisation or group, or a grantee — any role, viewer included.
+
+A public dataset's visibility alone does not count: reading the graphs a
+mapping produced is not reading everything the account can reach. An
+anonymous caller never qualifies, and a source bound to no dataset is for
+administrators and its owner only. For anyone else the source does not exist:
+the `SERVICE` fails exactly as one naming an unregistered source does (with
+`SILENT`, it contributes no rows), and the endpoint never sees the account on
+their behalf. The same check applies when the data names the source:
+`SERVICE ?endpoint { … }` with `?endpoint` bound to `<urn:source:…>` (see
+[federation.md](federation.md#service-var-endpoints-named-by-the-data)). Live queries are served by `/sparql` and by SPARQL Update (where
+`SERVICE` is admin-only anyway); a query the store evaluates for any other
+purpose resolves no source.
 
 ---
 
@@ -294,6 +337,55 @@ urn:mapping:products-map:version:2    version 2 — a separate graph
 `PUT /api/mappings/:id` with new RML freezes the next version; the old one is
 never rewritten, because runs reference it. A metadata-only edit (title,
 state, shapes graph) keeps the current version.
+
+### Term-generation rules
+
+Each version is stamped with the term rules it runs under (`ds:rmlSemantics`
+on the version entity, and `semantics` in the API response):
+
+- **`r2rml`** — R2RML's own: a template object map with no `rr:termType` is an
+  IRI (§7.4), a template value is IRI-safe encoded only when it builds an IRI
+  (§7.3), and a blank node is one per value and graph (§11.2). Every new
+  version gets these.
+- **`legacy`** — what the engine did before: template object maps default to
+  literals, every template value has all but its letters and digits
+  percent-encoded (`a-b` becomes `a%2Db`), and blank nodes are minted per row.
+  A version frozen before the stamp existed carries none and runs as `legacy`,
+  so its runs keep producing the IRIs they always did.
+
+An IRI is an identity, so changing a version's rules would rename its
+entities. To fix a mapping without renaming everything it produces, send
+`"semantics": "legacy"` with the new RML; to move to R2RML's rules, send the
+RML without it and expect new IRIs wherever a value held a character such as
+`-`, `.`, `_` or `~`. `semantics` is refused on a metadata-only edit, which
+freezes no version. A dry-run of an unregistered mapping accepts it too.
+
+Under both rules a constant is the term written (`rr:object <IRI>` is an IRI, a
+typed or language-tagged literal keeps its datatype or tag), and SQL
+identifiers are read as SQL (see below).
+
+**Empty values** follow the rules too. Under `r2rml` only a SQL NULL — and a
+value the logical source lists under RML-IO's `rml:null` — generates no term:
+`''` is a string like any other, so a column holding it gives an empty
+literal. Under `legacy` an empty value generates no term, as it always did,
+and `rml:null` is not read. To keep "an empty string is no value" in a new
+version, write it into the logical source:
+
+```turtle
+rml:logicalSource [ rml:source <urn:source:legacy-assets> ; rr:tableName "products" ;
+                    <http://w3id.org/rml/null> "" ] ;
+```
+
+The [legacy converter](#converting-a-legacy-bundle) writes exactly that.
+
+**Checked under both rules:** a non-conforming mapping is refused when the
+version is frozen, with the construct named ([rml.md](rml.md#errors) lists
+the rules); a column the logical table's query does not return is refused
+before the first row — the connector describes the query without running it,
+so a column that is NULL in every row still counts as there; and a **data
+error** (R2RML §4.3: an IRI term map whose value is not a valid IRI, a value
+outside its `rr:datatype`'s lexical space) fails the run — see
+[Runs](#runs).
 
 ```bash
 curl -X POST http://localhost:7878/api/mappings \
@@ -375,8 +467,9 @@ Three rules a mapping must satisfy:
   and one write gate;
 - every triples map reads that datasource (a file source belongs to the
   [RML upload path](rml.md), not here);
-- it declares no `rr:graphMap` — the run graph is the unit the write gate
-  validates and the role swap promotes, so every triple has to land in it.
+- it declares no `rr:graphMap` or `rr:graph`, on any subject map or
+  predicate-object map — the run graph is the unit the write gate validates
+  and the role swap promotes, so every triple has to land in it.
 
 ### Relational logical sources
 
@@ -410,16 +503,18 @@ ex:SuppliersMap a rr:TriplesMap ;
 
 | Construct | Behaviour |
 |---|---|
-| `rr:tableName` | The whole table or view. The identifier is quoted by the dialect, never interpolated |
+| `rr:tableName` | The whole table or view, optionally schema-qualified (`sales.products`). Delimited parts (`"Product Lines"`, `` `x` ``, `[x]`) lose their delimiters and every part is re-quoted by the dialect, never interpolated. A schema-qualified parent is not looked up for a unique key, so its joins are indexed |
 | `rml:query` / `rr:sqlQuery` | Used verbatim; the connection is read-only, so it cannot write |
-| `rr:template`, `rr:column`, `rr:constant` | As in R2RML. A template percent-encodes; `\{` and `\}` are literal braces |
+| `rr:template`, `rr:column`, `rr:constant` | As in R2RML. A delimited column name (`rr:column "\"ID\""`, `{"ID"}` in a template, a join column) reads the column `ID`. An IRI template value is IRI-safe encoded; `\{` and `\}` are literal braces |
 | `rr:parentTriplesMap` + `rr:joinCondition` | The object is the subject the parent map generates for the joined row |
 | `fnml:functionValue` | An enumeration or code-list lookup — see below |
 | A second triples map on the same source | Just another `rr:TriplesMap`; this is how a nested structure is expressed |
 
 **A SQL NULL produces no triple.** It is an absent column, not an empty value,
 so a missing required value surfaces as a `sh:minCount` violation rather than
-as an empty string in the data.
+as an empty string in the data. An empty string is a value — unless the
+logical source lists it under `rml:null`, or the version runs under the
+`legacy` rules (see [Term-generation rules](#term-generation-rules)).
 
 **Natural datatypes.** A bare `rr:column` with no `rr:datatype` takes the XSD
 type its SQL type implies (`integer`, `decimal`, `double`, `boolean`, `date`,
@@ -504,8 +599,8 @@ rr:objectMap [ fnml:functionValue [
                           rr:object "http://example.org/categories/{category_slug}" ] ] ]
 ```
 
-The template's placeholders are `{column}` — the value, percent-encoded as in
-an `rr:template` — or `{column_slug}`: the value as an ASCII slug (lower-case
+The template's placeholders are `{column}` — the value, encoded as in an IRI
+`rr:template` under the version's rules — or `{column_slug}`: the value as an ASCII slug (lower-case
 letters and digits, runs of anything else folded to one hyphen, none at either
 end). A placeholder the row cannot supply, or a value that slugs to nothing,
 yields no term. The template must be absolute, for the same reason as above.
@@ -541,7 +636,13 @@ What a run does, in order:
 
 1. **Materialise** into a fresh graph `urn:run:<id>`. Rows stream in batches;
    nothing is ever held whole. Blank-node labels carry the run id, so two runs
-   never share a node.
+   never share a node. Every triples map's columns are checked against what
+   its query returns first. A **data error** — a row value that cannot become
+   its term (R2RML §4.3) — fails the run by default: the candidate graph is
+   dropped, and the run's `error` names the first ten offending rows with
+   their values. A run started with `"onDataError": "skip"` leaves those
+   terms out instead, goes on, and reports the rows as `dataErrors`
+   (`{"rows": n, "first": [...]}`) on the run record.
 2. **Record** a PROV activity at `urn:run:<id>:activity` — `prov:used` the
    datasource and the mapping *version*, `prov:generated` the graph, the agent,
    the interval, and the row and triple counts.
@@ -797,8 +898,9 @@ each with the shape, path, constraint, message, affected and population
 counts, share and the first focus nodes), the merged validation `report`,
 `entities` — each subject with its types, its own Turtle and the violations
 that name it — what each triples map contributed (`sampledRows`,
-`pulledInRows`, `triples`), the total `rows` and `triples`, and the scratch
-`graph` with its `expiresAt`. The graph is readable through the Graph Store
+`pulledInRows`, `triples`), the total `rows` and `triples`, `dataErrors` —
+sampled rows whose values cannot become their terms, which the sample leaves
+out but a run would fail on — and the scratch `graph` with its `expiresAt`. The graph is readable through the Graph Store
 protocol (admin) until then, and dropped after: `OTS_DRYRUN_TTL_SECS`, default
 fifteen minutes. Scratch graphs an earlier process left behind are dropped at
 start-up.
@@ -868,16 +970,16 @@ Prefixes come from the document's `prefixes` block; `rdf`, `rdfs`, `xsd`,
 `owl`, `skos`, `dct`, `schema`, `foaf`, `prov` and `geo` need no declaration.
 An undeclared one is an error naming the entity, never a guess.
 
-**Empty cells.** The legacy transformer emitted nothing for an empty cell.
-So does this store's engine — a term map over an empty value yields no term —
-so a converted mapping reproduces the legacy output here as it stands, with
-`rr:tableName` sources that keep join pushdown and watermark runs available.
-R2RML proper says an empty cell is an empty literal; a mapping that must
-behave the same under another processor is converted with `"emptyAsNull":
-true`, which turns the logical sources into queries reading each text-valued
-column through `NULLIF(col, '')`. That query is opaque to the catalogue, so
-joins are indexed rather than pushed down and watermark runs are not
-available. Either way the response says which it did in `warnings`.
+**Empty cells.** The legacy transformer emitted nothing for an empty cell,
+where R2RML reads an empty string as a value. Every converted logical source
+therefore carries RML-IO's `rml:null ""`, which says so in the mapping and
+keeps `rr:tableName` sources, so join pushdown and watermark runs stay
+available. A mapping that must behave the same under a processor that does
+not read `rml:null` is converted with `"emptyAsNull": true`, which turns the
+logical sources into queries reading each text-valued column through
+`NULLIF(col, '')`. That query is opaque to the catalogue, so joins are indexed
+rather than pushed down and watermark runs are not available. Either way the
+response says which it did in `warnings`.
 
 The converter's own fixture — the appendix document, over a SQLite table with
 a slugged category, an unmapped status, a NULL price and an empty city —

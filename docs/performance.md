@@ -458,7 +458,7 @@ the only variable is the host hardware.
 | RAM visible to Docker | 54.9 GiB (`MemTotal`, pinned via `.wslconfig`) |
 | Storage | NVMe SSD |
 | GPU | Not used — the triplestore has no GPU code path |
-| Engine | Oxigraph 0.4.11 (oxrdf 0.2.4) · GEOS 11.0.1 · Axum 0.7.9 |
+| Engine | Oxigraph 0.4.11 (oxrdf 0.2.4) · GEOS 11.0.1 · Axum 0.7.9 — as of the 2026-06 run; the project now pins Oxigraph 0.5 |
 | Rust / image | rustc 1.91.1 · `ots-builder` (rust:1.91-bookworm) · `--release` |
 
 > GPUs are listed for completeness only; RDF/SPARQL/GeoSPARQL/SHACL workloads
@@ -511,11 +511,19 @@ per-benchmark `estimates.json` files that can be diffed across runs or machines.
 
 A **full** `cargo bench --bench performance --features full` run on the reference
 system above (Docker/WSL2, release, 24 vCPU), captured 2026-06 — **97 benchmarks**,
-Criterion median shown. Reproduce with the [run command](#reproducible-run-command);
+Criterion median shown.
+
+> **Dated figures.** Every table and chart in this section, down to and including
+> "Extra-large scaling", comes from that **June 2026** run on Oxigraph 0.4.11
+> unless a row says otherwise. It has not been re-run since the Oxigraph 0.5
+> upgrade, the query mirror and the columnar copy, so read the numbers as that
+> build's, not today's. Later measurements are dated where they appear (the 2026-09
+> asset-shaped benchmark and 9M SHACL sections, the CI baseline in
+> `benches/perf_baseline.json`). Reproduce with the [run command](#reproducible-run-command);
 per-benchmark `estimates.json` is written under `target/criterion/`. Charts are
 in [`docs/benchmarks/`](benchmarks/).
 
-#### SPARQL query latency
+#### SPARQL query latency (2026-06 run)
 
 ![SPARQL query latency at 10k persons / 50k triples](benchmarks/query-latency-10k.svg)
 
@@ -528,7 +536,7 @@ in [`docs/benchmarks/`](benchmarks/).
 | FILTER (numeric) | 262 µs | 2.44 ms | — |
 | REGEX filter | 218 µs | 1.80 ms | — |
 | OPTIONAL | 664 µs | 9.70 ms | — |
-| COUNT(*) | 620 µs | 7.09 ms | 66.2 ms |
+| COUNT(*) over all triples | 0.14 µs† | 0.14 µs† | 0.14 µs† |
 | GROUP BY + AVG | 604 µs | 8.84 ms | — |
 | GROUP_CONCAT | 639 µs | 7.71 ms | — |
 | subquery (MAX) | 741 µs | 9.57 ms | — |
@@ -542,7 +550,13 @@ in [`docs/benchmarks/`](benchmarks/).
 `LIMIT` short-circuits: `lookup_with_limit` stays ~17 µs regardless of dataset
 size (early termination), whereas an unbounded scan is O(n).
 
-#### SPARQL operators — pick the cheaper equivalent
+† Not from this run: a whole-store `COUNT(*)` is now answered from the per-graph
+count index instead of a scan, so it costs the same at every size. The figure is
+`query_count_star` in the 2026-09-24 CI baseline (`benches/perf_baseline.json`,
+GitHub runner); this run, made while it still scanned, measured 620 µs, 7.09 ms
+and 66.2 ms. The chart above leaves it out.
+
+#### SPARQL operators — pick the cheaper equivalent (2026-06 run)
 
 ![operator cost at 10k](benchmarks/operators.svg)
 
@@ -550,7 +564,7 @@ size (early termination), whereas an unbounded scan is O(n).
 MINUS hashes the exclusion set once; NOT EXISTS re-evaluates its inner pattern
 per row. `VALUES` (2.03 ms) beats the equivalent 2-pattern join (7.62 ms).
 
-#### Property paths
+#### Property paths (2026-06 run)
 
 | Path | small | mid | large |
 |---|--:|--:|--:|
@@ -564,7 +578,7 @@ per row. `VALUES` (2.03 ms) beats the equivalent 2-pattern join (7.62 ms).
 Inverse paths match forward-scan speed (they use the O-P-S index); `*` adds ~2 %
 over `+` for the identity solutions.
 
-#### Bulk loading & writes
+#### Bulk loading & writes (2026-06 run)
 
 ![bulk-loader throughput vs size](benchmarks/bulk-load-throughput.svg)
 
@@ -580,7 +594,7 @@ Single `INSERT DATA` is 72 µs/triple (~14 K/s); batching 10 triples per stateme
 drops that to 27 µs/triple (~37 K/s, **2.6×**). Use the bulk loader for ingestion
 (~0.5–0.9 M triples/s).
 
-#### GeoSPARQL (GEOS, per candidate binding) — with the WKT→WKB parse cache
+#### GeoSPARQL (GEOS, per candidate binding) — with the WKT→WKB parse cache (2026-06 run)
 
 ![GeoSPARQL points vs polygons](benchmarks/geosparql.svg)
 
@@ -601,7 +615,7 @@ Relation queries drop 35–57% — polygons (more coordinates → more `strtod`)
 benefit most. `buffer` is constructive (builds a new geometry per row), so it is
 compute-bound and the parse cache doesn't help it.
 
-#### SHACL validation
+#### SHACL validation (2026-06 run)
 
 ![SHACL throughput vs focus-node count](benchmarks/shacl-scaling.svg)
 
@@ -616,7 +630,7 @@ nodes is shapes-loading + target resolution, so throughput rises from 85 K to
 286 K nodes/s as that fixed cost amortizes. Violations add negligible overhead
 for this shape.
 
-#### Concurrency
+#### Concurrency (2026-06 run)
 
 ![concurrent read latency vs threads](benchmarks/concurrent-reads.svg)
 
@@ -633,7 +647,7 @@ Writes serialize on the store's write lock. Mixed 4-reader + 1-writer: 5.47 ms.
 > The 7900X3D's 3D V-Cache notably helps the index-scan-heavy paths. GPUs are
 > irrelevant — every path here is CPU/memory-bound.
 
-#### Extra-large scaling — 1M to 100M triples (persistent store)
+#### Extra-large scaling — 1M to 100M triples (persistent store, 2026-06 run)
 
 The criterion figures above are in-memory (tiny→large, ≤500k triples). At 1M–100M
 an in-memory store would exhaust RAM, so this tier uses the **persistent (RocksDB)
@@ -683,11 +697,33 @@ Apple M-series laptop, release build.
 | `COUNT(*)` in `GRAPH` | 237 ms | 2.1 s | —² |
 | SHACL, all assets, 6 shapes | 10.8 s (83k quads/s) | 6.3 s on the mirror, 13.5 s on RocksDB in the 4g container⁴ (118 s before the engine rebuild) | — |
 | 4 writers + 4 readers, 20 s | 46k quads/s written, write p95 71 ms; 10.6k reads/s, read p95 1.6 ms | 34k quads/s written, write p95 122 ms; 5.7k reads/s, read p95 3.1 ms | — |
+| RDF Patch, 1 000 lines (500 `D`, 500 `A`)⁵ | 3.9 s as `POST …/patch` writes it; 15 ms as a repair proposal's apply writes it | — | — |
 
 ⁴ Measured 2026-09-16 with [`tests/scale_shacl_9m.rs`](../tests/scale_shacl_9m.rs)
 (ignored; run on purpose) on the reference system below, in Docker, release
 build; the row's other 9M cells are the laptop figures of the first run. The
 full measurement is under "The 9M SHACL measurement" further down.
+
+⁵ Measured 2026-10-02 with `scale_otl 100000 <dir> --patch` on an Apple M1 Pro
+(16 GB), release build. Each figure is the median of 5 applies, each undone
+before the next. The patch route writes a patch as one SPARQL update, then
+recounts every graph it touches: a scan of all 0.9M quads. A repair proposal's
+apply (`docs/repair.md`) writes the same ground update through
+`update_targeted_delta`, which adjusts the count by the exact delta.
+
+In the same session, `develop` with and without the repair layer ran the
+whole harness alternately, three times each. Medians with the layer against
+without:
+
+- SHACL: 1.07 s against 1.04 s.
+- 4 writers: 61.9k against 61.7k quads/s written, write p95 55 against 54 ms.
+- group by: 1.18 s against 1.12 s.
+- 2-way join: 73 against 70 ms.
+
+Every other row moved less. The largest move, +9 % on the
+sub-millisecond property path, is inside the spread between runs. No row got
+slower by anything near the 20 % the project allows. Those runs are faster
+than the cells above, which come from an earlier engine.
 
 ² The Docker Fuseki image is amd64-only and the webapp distribution needs a
 login; the comparison ran Fuseki *main* (the no-UI jar) natively over HTTP —
@@ -1088,8 +1124,9 @@ shard, **subject-star joins, row-local `FILTER`, `COUNT`/`SUM`/`MIN`/`MAX`/`AVG`
 (global or grouped), `COUNT(DISTINCT)` (global or grouped), `ASK` and `DISTINCT`**
 decompose correctly; anything that could join *across* subjects (object→subject joins,
 property paths, `ORDER BY`/`LIMIT`, `OPTIONAL`/`UNION`/`MINUS`, a mix of distinct and
-non-distinct aggregates) is detected and **not** decomposed — the caller falls back to
-single-store evaluation. Grouped/global `SUM`/`AVG` over `xsd:double`/`float`, and a
+non-distinct aggregates, and any `EXISTS`/`NOT EXISTS` in a `FILTER`, `BIND` or `COUNT`
+argument, which reads triples about other subjects that a shard does not hold) is
+detected and **not** decomposed — the caller falls back to single-store evaluation. Grouped/global `SUM`/`AVG` over `xsd:double`/`float`, and a
 `COUNT(DISTINCT)` over blank nodes, are accepted statically but **declined at runtime**
 (IEEE-754 summation is order-dependent; blank-node labels are store-scoped — neither is
 bit-identical across shards) — `MIN`/`MAX` decompose for every type. The classifier is deliberately
@@ -1189,7 +1226,7 @@ attempt:
 | | |
 |---|---|
 | **Accepted** | `SELECT`, `ASK`, `CONSTRUCT` (templates without blank nodes); basic graph patterns, including a property-path sequence of named nodes, which the parser folds into one; joins, `OPTIONAL` with its filter, `UNION`, `MINUS`, `FILTER`, `BIND`, `VALUES`; `GRAPH` with a constant name, and `GRAPH ?g` when the body surely binds a triple and `?g` is not reused inside it; `FROM` / `FROM NAMED`; `GROUP BY` with `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `GROUP_CONCAT`, `SAMPLE` (and `DISTINCT` within them); `ORDER BY`, `DISTINCT` / `REDUCED`, `LIMIT` / `OFFSET`, subqueries; the logical, comparison and arithmetic operators, `IF`, `COALESCE`, `BOUND`, `IN`, `sameTerm`, and the string, `IRI` and type-test functions |
-| **Declined for fidelity** | property paths the parser cannot fold into a basic graph pattern (an alternative, or a sequence with one), and unbounded or negated paths; `EXISTS`, `SERVICE`, `LATERAL`, `DESCRIBE`, quoted triples; `NOW`, `RAND`, `BNODE`, `UUID`, the hashes, the casts, custom functions and aggregates; `SUBSTR`, `STRLANG`, `STRDT` and the date/time accessors, whose argument validation differs; `GRAPH ?g` over a body that need not bind a triple, or with `?g` reused inside; `CONSTRUCT` templates with blank nodes; and — as the full copy also declines them — `SUM` and `AVG`, whose IEEE-754 summation order a re-ordered copy cannot reproduce |
+| **Declined for fidelity** | property paths the parser cannot fold into a basic graph pattern (an alternative, or a sequence with one), and unbounded or negated paths; `EXISTS`, `SERVICE`, `LATERAL`, `DESCRIBE`, quoted triples; an expression that reads a triple term or a literal with an RDF 1.2 base direction (declined when evaluation reaches one — the decoded value has no room for the direction, so `DATATYPE` would say `rdf:langString` and `"a"@en--ltr` would equal `"a"@en`; matching and returning such terms untouched stays accepted); `NOW`, `RAND`, `BNODE`, `UUID`, the hashes, the casts, custom functions and aggregates; `SUBSTR`, `STRLANG`, `STRDT` and the date/time accessors, whose argument validation differs; `GRAPH ?g` over a body that need not bind a triple, or with `?g` reused inside; `CONSTRUCT` templates with blank nodes; and — as the full copy also declines them — `SUM` and `AVG`, whose IEEE-754 summation order a re-ordered copy cannot reproduce |
 | **Declined for speed** | Four shapes the engine simply answers faster, each measured rather than assumed. `REGEX` and `REPLACE`, whose work is string matching over decoded terms that the engine does against its own storage (3× the engine here). A query that is one unconstrained triple pattern returning more than 50 000 rows, which has no join for the index to accelerate and would only be materialised twice. A `LIMIT` over more than one triple pattern, where the row budget reaches only the last pattern while the engine stops early throughout (`concurrent/reads`, 377 µs against 605 µs). And a `FILTER` over a single triple pattern: finding rows is this copy's advantage, testing them is not, because each candidate goes back through the dictionary to become a term — a cost a join pays for many times over and one pattern has nothing to pay with (`query/filter`, slower on three consecutive gate runs). A filtered *join*, an unfiltered single pattern, and `HAVING` (one test per group, not per solution) all keep the shape. These are a routing policy, not a limit: the parity suites go through `query_semantics`, which skips them, so the evaluator is still held to the engine's answer for every one |
 
 **A `LIMIT` stops the scan.** The evaluator carries a row budget down through the
