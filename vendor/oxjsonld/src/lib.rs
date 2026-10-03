@@ -8,6 +8,7 @@ mod context;
 mod error;
 mod expansion;
 mod from_rdf;
+mod iri;
 mod profile;
 mod to_rdf;
 

@@ -33,9 +33,6 @@ is asserted.
 
 The runner's `KNOWN_FAILURES` list is the authority; in summary:
 
-- **IRI resolution against a base with dot segments** (toRdf `0122`, `0123`,
-  `e062`, `e091`): `./` and `../` segments of the base IRI are kept in the
-  resolved IRI, where RFC 3986 §5.2.4 removes them.
 - **`@direction` under the `rdf-12` build** (toRdf `di02`, `di04`–`di06`): the
   processor writes an RDF 1.2 directional language string (`"…"@en--ltr`);
   JSON-LD 1.1 drops the direction unless `rdfDirection` is set.

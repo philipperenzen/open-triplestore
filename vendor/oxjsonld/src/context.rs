@@ -157,7 +157,7 @@ impl JsonLdContextProcessor {
                 JsonNode::String(context) => {
                     // 5.2.1)
                     let context = match if let Some(base_url) = base_url {
-                        base_url.resolve(&context)
+                        crate::iri::resolve(base_url, &context)
                     } else {
                         Iri::parse(context.clone())
                     } {
@@ -266,7 +266,7 @@ impl JsonLdContextProcessor {
                 };
                 // 5.6.3)
                 let import = match if let Some(base_url) = base_url {
-                    base_url.resolve(&import)
+                    crate::iri::resolve(base_url, &import)
                 } else {
                     Iri::parse(import.clone())
                 } {
@@ -320,13 +320,13 @@ impl JsonLdContextProcessor {
                         JsonNode::String(value) => {
                             if self.lenient {
                                 result.base_iri = Some(if let Some(base_iri) = &result.base_iri {
-                                    base_iri.resolve_unchecked(&value)
+                                    crate::iri::resolve_unchecked(base_iri, &value)
                                 } else {
                                     Iri::parse_unchecked(value.clone())
                                 })
                             } else {
                                 match if let Some(base_iri) = &result.base_iri {
-                                    base_iri.resolve(&value)
+                                    crate::iri::resolve(base_iri, &value)
                                 } else {
                                     Iri::parse(value.clone())
                                 } {
@@ -901,7 +901,7 @@ impl JsonLdContextProcessor {
         } else if term.contains('/') {
             // 16)
             let iri = match if let Some(base_url) = base_url {
-                base_url.resolve(term)
+                crate::iri::resolve(base_url, term)
             } else {
                 Iri::parse(term.to_owned())
             } {
@@ -1365,9 +1365,13 @@ impl JsonLdContextProcessor {
         if document_relative {
             if let Some(base_iri) = &active_context.base_iri {
                 if self.lenient {
-                    return Some(base_iri.resolve_unchecked(&value).into_inner().into());
-                } else if let Ok(value) = base_iri.resolve(&value) {
-                    return Some(base_iri.resolve_unchecked(&value).into_inner().into());
+                    return Some(
+                        crate::iri::resolve_unchecked(base_iri, &value)
+                            .into_inner()
+                            .into(),
+                    );
+                } else if let Ok(value) = crate::iri::resolve(base_iri, &value) {
+                    return Some(value.into_inner().into());
                 }
             }
         }

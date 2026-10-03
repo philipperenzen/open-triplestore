@@ -134,7 +134,8 @@ Vendored source code:
     serializer, the crate as published on crates.io (same repository, path
     lib/oxjsonld, commit 0e81a29d27575ab69e7f85ea9c7f1058b277fcd0) —
     dual-licensed MIT or Apache-2.0, at your option; Copyright (c) 2018
-    Oxigraph developers. Both licence texts are beside it.
+    Oxigraph developers. Both licence texts are beside it. Modified: IRI
+    resolution removes the dot segments of the whole target path.
     vendor/README.md describes every change in these crates, and the
     UPSTREAM-PR*.md files beside them the changes as proposed upstream.
 

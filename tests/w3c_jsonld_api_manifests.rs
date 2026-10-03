@@ -49,10 +49,6 @@ const BASE: &str = "https://w3c.github.io/json-ld-api/tests/";
 /// Entries this processor gets wrong, `(section#id, reason)`. Every one is a
 /// processor (oxjsonld 0.2.6) deviation, not a runner limitation.
 const KNOWN_FAILURES: &[(&str, &str)] = &[
-    ("toRdf#t0122", "relative IRI resolution keeps the dot segments of a base IRI that has them (RFC 3986 §5.2.4 removes them)"),
-    ("toRdf#t0123", "relative IRI resolution keeps the dot segments of a base IRI that has them (RFC 3986 §5.2.4 removes them)"),
-    ("toRdf#te062", "relative IRI resolution keeps the dot segments of a base IRI that has them (RFC 3986 §5.2.4 removes them)"),
-    ("toRdf#te091", "relative IRI resolution keeps the dot segments of a base IRI that has them (RFC 3986 §5.2.4 removes them)"),
     (
         "toRdf#tc013",
         "a type map applies the containing term's scoped context instead of the type's",

@@ -2737,9 +2737,13 @@ impl JsonLdExpansionConverter {
         if document_relative {
             if let Some(base_iri) = &active_context.base_iri {
                 if self.lenient {
-                    return Some(base_iri.resolve_unchecked(&value).into_inner().into());
-                } else if let Ok(value) = base_iri.resolve(&value) {
-                    return Some(base_iri.resolve_unchecked(&value).into_inner().into());
+                    return Some(
+                        crate::iri::resolve_unchecked(base_iri, &value)
+                            .into_inner()
+                            .into(),
+                    );
+                } else if let Ok(value) = crate::iri::resolve(base_iri, &value) {
+                    return Some(value.into_inner().into());
                 }
             }
         }

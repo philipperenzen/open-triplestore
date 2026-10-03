@@ -158,3 +158,9 @@ JSON-LD upload, download and remote-context fetch in the store goes through. It
 was vendored unmodified first, then each fix below went in as its own commit with
 an `UPSTREAM-PR-*.md` draft beside the crate.
 
+1. **IRI resolution removes the dot segments of the whole target path**
+   (`src/iri.rs`, used by `context.rs` and `expansion.rs`;
+   `UPSTREAM-PR-1-iri-dot-segments.md`). `oxiri::Iri::resolve` keeps the `.` and
+   `..` segments of the base path it merges with and of a network-path reference
+   (`//host/../x`); RFC 3986 §5.2.2 removes them. W3C json-ld-api toRdf `0122`,
+   `0123`, `e062`, `e091`.
