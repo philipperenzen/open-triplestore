@@ -114,15 +114,16 @@ behavior and will flip green when the limitation is resolved.
    Code written against the older RDF-star CG model (quoted triples usable in
    subject position) needs updating; see `tests/sparql12_conformance.rs`.
 2. **SPARQL 1.1 Query** is graded *Partial*. The engine is oxigraph 0.5.11 with
-   its SPARQL evaluator and optimizer (spareval 0.2.7, sparopt 0.3.7) vendored
-   and patched for SPARQL 1.1 conformance ([vendor/README.md](../vendor/README.md)):
-   `GRAPH ?g` scoping around non-BGP patterns and the RDF merge of several
-   `FROM` graphs (both backported from oxigraph's main branch), zero-length
-   property paths with a constant endpoint, `GROUP_CONCAT` returning an
-   `xsd:string`, and `BNODE(str)` fresh per solution. Those were the engine gaps
-   that the vendored W3C query and update sections had found (bug tracking only,
-   with no score: [conformance/sparql11.md](conformance/sparql11.md)), and none is
-   open now. What keeps the grade at Partial is in this server:
+   its SPARQL parser, evaluator and optimizer (spargebra 0.4.7, spareval 0.2.7,
+   sparopt 0.3.7) vendored and patched for conformance
+   ([vendor/README.md](../vendor/README.md)): `GRAPH ?g` scoping around non-BGP
+   patterns and the RDF merge of several `FROM` graphs (both backported from
+   oxigraph's main branch), zero-length property paths with a constant endpoint,
+   `GROUP_CONCAT` returning an `xsd:string`, `BNODE(str)` fresh per solution, and
+   nested aggregates refused. Among them are all the engine gaps that the
+   vendored W3C query and update sections had found (bug tracking only, with no
+   score: [conformance/sparql11.md](conformance/sparql11.md)); none is open now.
+   What keeps the grade at Partial is in this server:
    - **The HTTP dataset is rewritten.** `/sparql` intersects a caller's
      `FROM` / `FROM NAMED` graphs with the graphs the caller may read, and every
      graph it keeps becomes both a `FROM` and a `FROM NAMED` graph: `FROM <a>`
