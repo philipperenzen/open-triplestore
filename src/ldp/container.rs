@@ -229,6 +229,23 @@ pub fn add_member(
     store.update(&q).map_err(|e| e.to_string())
 }
 
+/// The containers that list `member_iri` with `ldp:contains`, sorted. The
+/// parent cannot be derived from the member's path alone: POSTing to `/ldp/c`
+/// creates the container `…/ldp/c`, POSTing to `/ldp/c/` creates `…/ldp/c/`,
+/// and both mint members `…/ldp/c/<slug>`.
+pub fn containers_of(store: &TripleStore, member_iri: &str) -> Vec<String> {
+    let q = format!("SELECT ?c WHERE {{ ?c <{LDP_CONTAINS}> <{member_iri}> }} ORDER BY ?c");
+    let mut out = Vec::new();
+    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = store.query(&q) {
+        for sol in sols.flatten() {
+            if let Some(oxigraph::model::Term::NamedNode(nn)) = sol.get("c") {
+                out.push(nn.as_str().to_string());
+            }
+        }
+    }
+    out
+}
+
 /// Remove the `ldp:contains` triple pointing to the deleted member, plus all
 /// triples that have the member as subject (its description graph).
 pub fn remove_member(
