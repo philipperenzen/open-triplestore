@@ -148,13 +148,9 @@ store keeps the datatype you wrote, so `DATATYPE(?n)` in a query still reports
 `xsd:integer` (the value's type) while SHACL `sh:datatype xsd:nonNegativeInteger`
 and a download see `xsd:nonNegativeInteger`.
 
-> **Derived integer types are stored as `xsd:integer`.** The engine keeps the
-> value, not the declared type: `"5"^^xsd:nonNegativeInteger` reads back as
-> `"5"^^xsd:integer`, and an out-of-range `"300"^^xsd:byte` is accepted and reads
-> back as `"300"^^xsd:integer` (`xsd:dateTimeStamp` likewise becomes
-> `xsd:dateTime`). A SHACL `sh:datatype xsd:nonNegativeInteger` constraint
-> therefore fails on such stored data; constrain it with `sh:datatype
-> xsd:integer` plus `sh:minInclusive 0` instead.
+> An out-of-range `"300"^^xsd:byte` is stored as written too: SHACL
+> `sh:datatype xsd:byte` reports it, and OWL 2 RL's `dt-not-type` finds it
+> inconsistent.
 
 > Prefer `xsd:decimal` over `xsd:double` for quantities you compare for equality
 > (`xsd:double` is subject to floating-point rounding).

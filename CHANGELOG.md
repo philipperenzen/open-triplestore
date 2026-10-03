@@ -319,10 +319,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     and requires a time zone on `xsd:dateTimeStamp`; `sh:minInclusive` and
     friends compare `xsd:dateTimeStamp` with `xsd:dateTime`. Activation flags
     take only the literal `true`: `sh:uniqueLang`, `sh:closed`,
-    `sh:qualifiedValueShapesDisjoint` and a shape's `sh:deactivated` written as
-    `"1"^^xsd:boolean` no longer activate. `sh:hasValue`, `sh:in`, `sh:equals`
-    and `sh:disjoint` compare terms as written. W3C SHACL core:
-    `core/property/uniqueLang-002` passes; no core test is a known failure.
+    `sh:qualifiedValueShapesDisjoint`, `sh:deactivated` (on shapes, rules,
+    constraints and validators) and `sh:optional` written as
+    `"1"^^xsd:boolean` no longer activate, so the shapes uploads no longer
+    need to refuse that form and accept it. `sh:hasValue`, `sh:in`,
+    `sh:equals` and `sh:disjoint` compare terms as written. A shape that is an
+    `rdfs:Class` through `rdfs:subClassOf` in the shapes graph is an implicit
+    class target (SHACL §2.1.3.3; a direct `a rdfs:Class` was the only form
+    found). W3C SHACL core: `core/property/uniqueLang-002` passes, so the core
+    section has no known failure at full result-set equality, and **SHACL Core
+    is graded Full** (`docs/standards.md`, the comparison matrix and the
+    in-app capabilities graph, demo content version 16).
   - **OWL**: `dt-not-type` sees the datatype as written (`"300"^^xsd:byte` is
     an inconsistency). `cls-maxc1/2`, `cls-maxqc1–4` and `owl:hasSelf` read
     their number or flag by value, so `owl:maxCardinality 1` and
@@ -331,9 +338,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **Parallel and columnar query paths** keep the term as written wherever
     the engine does (`BIND(?o AS ?x)`, `IF`, `COALESCE`, `sameTerm`,
     `COUNT(DISTINCT ?o)`) and read `xsd:dateTimeStamp` as a dateTime.
-  - **LDES**: member timestamps and sync bookmarks are ordered by instant, not
-    as text, since publishers' time-zone spellings now reach the client as
-    written.
 - **Settings added in this release are named for what they cover.** Before
   release, five new settings were renamed, and the old names are not read:
   `OIDC_TOKEN_POLICY` and `OIDC_WRITE_SCOPES` are now
@@ -769,8 +773,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   regime that materialises only the TBox closure. OWL 2 EL: an unsound CR3 rule.
   OWL 2 RL: `dt-type1` and `dt-not-type` are implemented (the docs and README
   said they were not), and unscoped runs miss joins over two derived premises.
-  SHACL Core: literal canonicalisation, including derived integer datatypes
-  stored as `xsd:integer`. SHACL Advanced: the gaps that remain. GeoSPARQL: the
+  SHACL Advanced: the gaps that remain. GeoSPARQL: the
   functions that answer wrongly today. The RDF Patch and LDES rows are reworded:
   RDF Patch lacks multiple transaction blocks (there are no nested ones), and
   `ldes:versionKey` is not part of LDES 1.0. The in-app capabilities graph (the
@@ -1085,14 +1088,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     (a blank node such as `[ sh:path ex:p ]`) is evaluated as one (see
     *SHACL-AF node expressions* under Added). It wrote the shapes graph's own
     blank node into the data graph.
-  - The dataset `PUT /api/datasets/{id}/shapes` and SHACL Studio create and
-    `PUT …/turtle` refuse (422) an activation flag (`sh:uniqueLang`,
-    `sh:closed`, `sh:deactivated`, `sh:qualifiedValueShapesDisjoint`,
-    `sh:optional`) written as `"1"`/`"0"^^xsd:boolean`: storage reads it back as
-    `true`/`false`, which SHACL does not mean. The derived-datatype deviation
-    (`"5"^^xsd:nonNegativeInteger` reads back as `xsd:integer`, so
-    `sh:datatype xsd:nonNegativeInteger` rejects it) is now documented in
-    `docs/shacl.md` and pinned by tests; it is not fixed.
   - The IDS export reports a second `sh:pattern` or `sh:hasValue` and
     deactivated shapes as losses instead of exporting them with another meaning.
 - **SHACL-SPARQL constraints check blank nodes and follow the spec's result
@@ -1312,8 +1307,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     the reasoner examples passed a string to `TripleStore::open`, which takes a
     `Path`. The OWL 2 DL docs said keys of more than two properties produce no
     `owl:sameAs`; the RL phase merges keys of any length.
-  - `docs/datatypes.md` said XSD literals keep their lexical form; numbers,
-    booleans and dates come back canonical (`"01"^^xsd:integer` → `"1"`).
   - `docs/dcat.md` said VoID statistics are computed per request and never
     cached; they are cached until the next write.
   - `docs/data-modeling.md` said SHACL-on-write covers LDP writes; it covers
