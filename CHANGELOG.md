@@ -14,6 +14,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **OPM calculations; OPM graded Full.** `opm:Calculation`s are defined at
+  `POST /api/datasets/:id/properties/calculations` (inferred property,
+  argument paths such as `?foi ex:partOf/ex:height ?h`, an expression, and
+  optional `opm:foiRestriction` / `opm:pathRestriction`) and run only on
+  request, as OPM's REST guidance describes: `POST …/calculations/:calc`
+  derives the property for every feature of interest that has the arguments
+  and lacks the property, `PUT` recomputes the derived states whose argument
+  states were outdated, and `GET …/:calc/outdated` lists them. A derived state
+  is `opm:Derived` with the `opm:expression` and `prov:wasDerivedFrom` an
+  `rdf:Seq` of the argument states; one run is one commit. Paths,
+  restrictions and expressions are parsed with spargebra and allow-listed (no
+  `SERVICE`, `GRAPH`, `FILTER`, `EXISTS`, subqueries, aggregates or
+  non-deterministic functions), and the queries are built from the parsed
+  form: matching reads only the dataset's own data graphs, capped by
+  `OTS_OPM_CALC_MAX_ROWS` (default 10 000) and the query timeout, and the
+  expression is evaluated in an empty scratch store. Calculations travel
+  through OPM export and import (prefixed names resolve with the document's
+  prefixes). `docs/standards.md` grades OPM *Full* (the project's own
+  assessment; OPM has no test suite).
 - **OPM property lifecycle and exchange.** Property states gain the rest of
   the Ontology for Property Management: `POST /api/datasets/:id/properties/delete`
   records a current `opm:Deleted` state with no value and removes the plain
