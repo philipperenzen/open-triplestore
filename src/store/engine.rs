@@ -2129,6 +2129,79 @@ impl TripleStore {
         }
     }
 
+    /// The SELECT counterpart of [`construct_confined`](Self::construct_confined),
+    /// with caps: the query reads only the union of `scope` (its own `FROM` /
+    /// `FROM NAMED` are replaced, no named graph stays reachable), variables
+    /// in `bindings` are bound as terms, more than `max_rows` solutions is an
+    /// error rather than a silent truncation, and the evaluation is cancelled
+    /// once `timeout` has passed.
+    pub fn select_confined(
+        &self,
+        query: &SpargebraQuery,
+        scope: &[String],
+        bindings: &[(&str, Term)],
+        max_rows: usize,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<QuerySolution>, StoreError> {
+        if !matches!(query, SpargebraQuery::Select { .. }) {
+            return Err(StoreError::Parse(
+                "only a SELECT query can be evaluated by select_confined".to_string(),
+            ));
+        }
+        let token = oxigraph::sparql::CancellationToken::new();
+        let mut prepared = self
+            .query_options()
+            .with_cancellation_token(token.clone())
+            .for_query(query.clone());
+        confine_dataset(prepared.dataset_mut(), scope)?;
+        let mut bound = prepared.on_store(&self.store);
+        for (name, term) in bindings {
+            let var = oxigraph::sparql::Variable::new(*name)
+                .map_err(|e| StoreError::Parse(e.to_string()))?;
+            bound = bound.substitute_variable(var, term.clone());
+        }
+        // A watchdog cancels the evaluation at the deadline; it stops as soon
+        // as the query is done.
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let done = done.clone();
+            let token = token.clone();
+            let deadline = std::time::Instant::now() + timeout;
+            std::thread::spawn(move || {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    if std::time::Instant::now() >= deadline {
+                        token.cancel();
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            });
+        }
+        let result = (|| {
+            let QueryResults::Solutions(solutions) = bound.execute()? else {
+                return Ok(Vec::new());
+            };
+            let mut rows = Vec::new();
+            for solution in solutions {
+                let solution = solution.map_err(|e| match e {
+                    oxigraph::sparql::QueryEvaluationError::Cancelled => StoreError::Other(
+                        format!("query cancelled after {} s", timeout.as_secs_f32()),
+                    ),
+                    other => StoreError::Evaluation(other),
+                })?;
+                if rows.len() >= max_rows {
+                    return Err(StoreError::Other(format!(
+                        "query matched more than {max_rows} rows"
+                    )));
+                }
+                rows.push(solution);
+            }
+            Ok(rows)
+        })();
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        result
+    }
+
     /// As [`Self::bulk_insert_quads`], with the graphs to re-count taken from
     /// the quads themselves — including the unnamed default graph, which a
     /// caller cannot name in `affected_graphs`.

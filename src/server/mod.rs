@@ -1236,8 +1236,36 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         )
         .route("/api/ldes/sync", post(crate::ldes::client::sync_handler))
         .route(
+            "/api/datasets/:dataset_id/properties",
+            get(crate::property_states::list_properties),
+        )
+        .route(
             "/api/datasets/:dataset_id/properties/state",
             post(crate::property_states::set_state),
+        )
+        .route(
+            "/api/datasets/:dataset_id/properties/delete",
+            post(crate::property_states::delete_property),
+        )
+        .route(
+            "/api/datasets/:dataset_id/properties/restore",
+            post(crate::property_states::restore_property),
+        )
+        .route(
+            "/api/datasets/:dataset_id/properties/export",
+            get(crate::property_states::export_states),
+        )
+        .route(
+            "/api/datasets/:dataset_id/properties/import",
+            post(crate::property_states::import_states),
+        )
+        .route(
+            "/api/datasets/:dataset_id/properties/validate",
+            get(crate::property_states::validate_states),
+        )
+        .route(
+            "/api/properties/profile",
+            get(crate::property_states::profile_shapes),
         )
         .route(
             "/api/datasets/:dataset_id/properties/history",

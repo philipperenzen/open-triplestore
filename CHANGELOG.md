@@ -122,6 +122,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Description** (SPARQL 1.1 Service Description §2), scoped to the caller like
   the one at `/`; the catalogue names it as the endpoint's
   `dcat:endpointDescription`.
+- **OPM property lifecycle and exchange.** Property states gain the rest of
+  the Ontology for Property Management: `POST /api/datasets/:id/properties/delete`
+  records a current `opm:Deleted` state with no value and removes the plain
+  triple; `…/restore` brings back the last value (`prov:wasRevisionOf`);
+  `reliability` accepts `required` (`opm:Required`) and states take
+  `opm:documentation` IRIs. `GET /api/datasets/:id/properties` lists the
+  properties of an item, of a property kind or of the whole dataset — latest
+  state, full history or the state at a time (an item snapshot) — filtered by
+  reliability, deletion and derivation. `GET …/properties/export` writes
+  canonical OPM (`<item> <kind> <property>`) in Turtle, N-Triples, JSON-LD or
+  RDF/XML and `POST …/properties/import` reads it back (state IRIs kept,
+  duplicates skipped, states without `prov:generatedAtTime` rejected); every
+  read also accepts canonical OPM loaded straight into a dataset graph, and
+  `schema:value` in both the `http` and `https` scheme. The OPM profile shapes
+  ship as the `opm-profile` seed bundle, at `GET /api/properties/profile`, and
+  run over a states graph at `GET …/properties/validate`. All property routes
+  are in the OpenAPI document.
 - **`OTS_OIDC_IDP_TOKEN_POLICY` and `OTS_OIDC_IDP_WRITE_SCOPES`.** What an access token from
   an external IdP (OIDC resource-server mode) may do is now a setting, with the
   same values as `OTS_OIDC_SESSION_POLICY`: `session` (default), `scoped`
@@ -2021,6 +2038,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a refused response gets a generic error, with the reason in the audit log
   only; request IDs carry 128 random bits. RSA PKCS#1 v1.5 key transport in
   encrypted assertions is refused.
+- **Property states of a private graph stay private.** A state written with
+  `graph` naming a private dataset graph mirrored its value into the states
+  graph, which every viewer of the dataset could read through
+  `…/properties/history` and `…/as-of`. Each state now records its data graph
+  (`ots:dataGraph`), and every property-state read and the export leave out
+  states whose graph the caller may not read.
 - **Audit rows and the guest AI budget record the real client IP.** Both took
   the left-most `X-Forwarded-For` entry (then `X-Real-IP`) from any caller and
   never saw the TCP peer address, so a login failure, a permission denial or an

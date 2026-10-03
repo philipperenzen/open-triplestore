@@ -1,0 +1,192 @@
+# OPM profile — SHACL shapes for a well-formed OPM states graph.
+#
+# Written for this project from the OPM specification (W3C Linked Building
+# Data Community Group draft, https://w3id.org/opm); no OPM file is copied
+# here. The OPM vocabulary itself (opm.ttl, Creative Commons Attribution
+# 1.0, (c) 2018 W3C Linked Building Data Community Group) is not bundled.
+#
+# The server embeds this file (src/property_states.rs, OPM_PROFILE_SHAPES):
+# GET /api/datasets/:id/properties/validate runs it over a dataset's states
+# graph, and GET /api/properties/profile serves it.
+#
+# Values are read with https://schema.org/value, the form the server writes
+# and exports (import also accepts http://schema.org/value).
+
+@prefix sh:     <http://www.w3.org/ns/shacl#> .
+@prefix opm:    <https://w3id.org/opm#> .
+@prefix prov:   <http://www.w3.org/ns/prov#> .
+@prefix schema: <https://schema.org/> .
+@prefix rdf:    <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix xsd:    <http://www.w3.org/2001/XMLSchema#> .
+@prefix ots:    <https://opentriplestore.org/ns#> .
+@prefix opmp:   <https://opentriplestore.org/shapes/opm-profile#> .
+
+# ── Properties ───────────────────────────────────────────────────────────────
+
+opmp:PropertyShape
+    a sh:NodeShape ;
+    sh:targetClass opm:Property ;
+    sh:property [
+        sh:path opm:hasPropertyState ;
+        sh:minCount 1 ;
+        sh:nodeKind sh:BlankNodeOrIRI ;
+        sh:message "An opm:Property has at least one opm:hasPropertyState." ;
+    ] ;
+    sh:property [
+        sh:path opm:hasPropertyState ;
+        sh:qualifiedValueShape [ sh:class opm:CurrentPropertyState ] ;
+        sh:qualifiedMinCount 1 ;
+        sh:qualifiedMaxCount 1 ;
+        sh:message "An opm:Property has exactly one opm:CurrentPropertyState." ;
+    ] .
+
+# Property, PropertyState and Calculation are pairwise disjoint. (One logical
+# constraint per shape: each is checked on its own.)
+opmp:PropertyIsNoStateShape
+    a sh:NodeShape ;
+    sh:targetClass opm:Property ;
+    sh:not [ sh:class opm:PropertyState ] .
+
+opmp:PropertyIsNoCalculationShape
+    a sh:NodeShape ;
+    sh:targetClass opm:Property ;
+    sh:not [ sh:class opm:Calculation ] .
+
+opmp:StateIsNoCalculationShape
+    a sh:NodeShape ;
+    sh:targetClass opm:PropertyState ;
+    sh:not [ sh:class opm:Calculation ] .
+
+# ── States ───────────────────────────────────────────────────────────────────
+
+# Current and outdated are disjoint, and every state is one of them.
+opmp:StateCurrencyShape
+    a sh:NodeShape ;
+    sh:targetObjectsOf opm:hasPropertyState ;
+    sh:targetClass opm:PropertyState ;
+    sh:xone (
+        [ sh:class opm:CurrentPropertyState ]
+        [ sh:class opm:OutdatedPropertyState ]
+    ) .
+
+# Assumed and confirmed are disjoint.
+opmp:StateReliabilityShape
+    a sh:NodeShape ;
+    sh:targetObjectsOf opm:hasPropertyState ;
+    sh:targetClass opm:PropertyState ;
+    sh:not [ sh:and ( [ sh:class opm:Assumed ] [ sh:class opm:Confirmed ] ) ] .
+
+# A deleted state carries no value; any other state exactly one.
+opmp:StateValueShape
+    a sh:NodeShape ;
+    sh:targetObjectsOf opm:hasPropertyState ;
+    sh:targetClass opm:PropertyState ;
+    sh:xone (
+        [ sh:class opm:Deleted ;
+          sh:property [ sh:path schema:value ; sh:maxCount 0 ] ]
+        [ sh:not [ sh:class opm:Deleted ] ;
+          sh:property [ sh:path schema:value ; sh:minCount 1 ; sh:maxCount 1 ] ]
+    ) .
+
+opmp:StateShape
+    a sh:NodeShape ;
+    sh:targetObjectsOf opm:hasPropertyState ;
+    sh:targetClass opm:PropertyState ;
+    sh:property [
+        sh:path prov:generatedAtTime ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:dateTime ;
+        sh:message "A property state has exactly one prov:generatedAtTime (xsd:dateTime)." ;
+    ] ;
+    sh:property [
+        sh:path prov:wasAttributedTo ;
+        sh:nodeKind sh:IRI ;
+        sh:severity sh:Warning ;
+        sh:minCount 1 ;
+        sh:message "A property state should be prov:wasAttributedTo the agent who created it." ;
+    ] ;
+    sh:property [
+        sh:path ots:validFrom ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:dateTime ;
+    ] ;
+    sh:property [
+        sh:path opm:documentation ;
+        sh:nodeKind sh:IRI ;
+    ] .
+
+# ── Derived states ───────────────────────────────────────────────────────────
+
+# A calculated state carries its expression and the states it was derived
+# from, as an rdf:Seq. (A calculation carries an expression too.)
+opmp:CalculatedStateShape
+    a sh:NodeShape ;
+    sh:targetSubjectsOf opm:expression ;
+    sh:or ( [ sh:class opm:Calculation ] opmp:CalculatedState ) .
+
+opmp:CalculatedState
+    a sh:NodeShape ;
+    sh:class opm:Derived ;
+    sh:property [
+        sh:path opm:expression ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:string ;
+    ] ;
+    sh:property [
+        sh:path prov:wasDerivedFrom ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:class rdf:Seq ;
+        sh:message "A calculated state is prov:wasDerivedFrom one rdf:Seq of the argument states." ;
+    ] .
+
+opmp:DerivedStateShape
+    a sh:NodeShape ;
+    sh:targetClass opm:Derived ;
+    sh:property [
+        sh:path prov:wasDerivedFrom ;
+        sh:minCount 1 ;
+        sh:severity sh:Warning ;
+        sh:message "A derived state should name what it was derived from (prov:wasDerivedFrom)." ;
+    ] .
+
+# ── Calculations ─────────────────────────────────────────────────────────────
+
+opmp:CalculationShape
+    a sh:NodeShape ;
+    sh:targetClass opm:Calculation ;
+    sh:property [
+        sh:path opm:argumentPaths ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:message "A calculation has one opm:argumentPaths list." ;
+    ] ;
+    sh:property [
+        sh:path ( opm:argumentPaths [ sh:zeroOrMorePath rdf:rest ] rdf:first ) ;
+        sh:datatype xsd:string ;
+        sh:minCount 1 ;
+    ] ;
+    sh:property [
+        sh:path opm:inferredProperty ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:nodeKind sh:IRI ;
+    ] ;
+    sh:property [
+        sh:path opm:expression ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:string ;
+    ] ;
+    sh:property [
+        sh:path opm:foiRestriction ;
+        sh:maxCount 1 ;
+        sh:nodeKind sh:IRI ;
+    ] ;
+    sh:property [
+        sh:path opm:pathRestriction ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:string ;
+    ] .
