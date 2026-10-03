@@ -174,6 +174,57 @@ mod tests {
         assert!(has(&t.classes, "http://www.opengis.net/ont/gml#Polygon"));
     }
 
+    /// Every class of the SF and GML hierarchies reaches `geo:Geometry`
+    /// through `rdfs:subClassOf`, so a typo in either file cannot leave a
+    /// geometry type outside the hierarchy.
+    #[test]
+    fn every_sf_and_gml_class_is_a_geo_geometry() {
+        use std::collections::HashMap;
+        let geometry = "http://www.opengis.net/ont/geosparql#Geometry";
+        for f in [&vf::SF, &vf::GML_GEOMETRIES] {
+            let quads =
+                crate::data_models::upload::parse_rdf(f.ttl.as_bytes(), "text/turtle", f.path)
+                    .unwrap();
+            let mut supers: HashMap<String, Vec<String>> = HashMap::new();
+            let mut classes = Vec::new();
+            for q in &quads {
+                let oxigraph::model::NamedOrBlankNode::NamedNode(s) = &q.subject else {
+                    continue;
+                };
+                match (q.predicate.as_str(), &q.object) {
+                    (RDF_TYPE, Term::NamedNode(o))
+                        if o.as_str() == "http://www.w3.org/2002/07/owl#Class" =>
+                    {
+                        classes.push(s.as_str().to_string())
+                    }
+                    (RDFS_SUB_CLASS_OF, Term::NamedNode(o)) => supers
+                        .entry(s.as_str().to_string())
+                        .or_default()
+                        .push(o.as_str().to_string()),
+                    _ => {}
+                }
+            }
+            assert!(classes.len() >= 18, "{}: {} classes", f.path, classes.len());
+            for c in &classes {
+                let mut seen = vec![c.clone()];
+                let mut i = 0;
+                while i < seen.len() && !seen.iter().any(|x| x == geometry) {
+                    for up in supers.get(&seen[i]).into_iter().flatten() {
+                        if !seen.contains(up) {
+                            seen.push(up.clone());
+                        }
+                    }
+                    i += 1;
+                }
+                assert!(
+                    seen.iter().any(|x| x == geometry),
+                    "{}: {c} does not reach geo:Geometry",
+                    f.path
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_graph_counts_as_geosparql_data_by_its_terms() {
         let store = TripleStore::in_memory().unwrap();
