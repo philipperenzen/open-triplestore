@@ -124,6 +124,21 @@ struct RemoteMember {
     ntriples: String,
 }
 
+/// Order two member timestamps (the `xsd:dateTime` lexical forms a publisher
+/// wrote, or a stored bookmark) by the instant they name. The store keeps
+/// them as written, so `2026-01-01T10:00:00.5+00:00` and
+/// `2026-01-01T10:00:00Z` must not be compared as text ('.' sorts before
+/// 'Z'). A form that does not parse as RFC 3339 falls back to text order.
+fn created_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    match (
+        chrono::DateTime::parse_from_rfc3339(a),
+        chrono::DateTime::parse_from_rfc3339(b),
+    ) {
+        (Ok(x), Ok(y)) => x.cmp(&y),
+        _ => a.cmp(b),
+    }
+}
+
 fn fetch_into_store(url: &str) -> anyhow::Result<Store> {
     let (ct, body) = crate::remote::get_rdf_blocking(url)?;
     let fmt = parse_rdf_content_type(&ct).unwrap_or(RdfFormat::Turtle);
@@ -318,12 +333,15 @@ pub fn sync(
         }
         for m in members_of(&store, &tp, &vp) {
             report.members_seen += 1;
-            if bookmark.as_deref().is_some_and(|b| m.created.as_str() <= b) {
+            if bookmark
+                .as_deref()
+                .is_some_and(|b| created_cmp(&m.created, b).is_le())
+            {
                 report.members_skipped_older += 1;
                 continue;
             }
             match newest.get(&m.entity) {
-                Some(cur) if cur.created >= m.created => {}
+                Some(cur) if created_cmp(&cur.created, &m.created).is_ge() => {}
                 _ => {
                     newest.insert(m.entity.clone(), m);
                 }
@@ -348,11 +366,8 @@ pub fn sync(
 
     // Materialise: newest version per entity replaces what the graph holds.
     let mut entities: Vec<&RemoteMember> = newest.values().collect();
-    entities.sort_by(|a, b| {
-        a.created
-            .cmp(&b.created)
-            .then_with(|| a.entity.cmp(&b.entity))
-    });
+    entities
+        .sort_by(|a, b| created_cmp(&a.created, &b.created).then_with(|| a.entity.cmp(&b.entity)));
     let mut last_ts = bookmark.clone();
     for m in entities {
         let e = crate::store::escape_sparql_iri(&m.entity);
@@ -370,7 +385,10 @@ pub fn sync(
             }
             report.entities_updated += 1;
         }
-        if last_ts.as_deref().is_none_or(|l| m.created.as_str() > l) {
+        if last_ts
+            .as_deref()
+            .is_none_or(|l| created_cmp(&m.created, l).is_gt())
+        {
             last_ts = Some(m.created.clone());
         }
     }
@@ -470,4 +488,30 @@ pub async fn sync_handler(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(Json(report))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::created_cmp;
+    use std::cmp::Ordering;
+
+    /// Timestamps order by instant, not by text: a fraction of a second
+    /// after a whole second written with `Z` is later, though '.' sorts
+    /// before 'Z', and one instant written two ways is equal.
+    #[test]
+    fn member_timestamps_order_by_instant() {
+        assert_eq!(
+            created_cmp("2026-01-01T10:00:00.5+00:00", "2026-01-01T10:00:00Z"),
+            Ordering::Greater
+        );
+        assert_eq!(
+            created_cmp("2026-01-01T10:00:00+00:00", "2026-01-01T10:00:00Z"),
+            Ordering::Equal
+        );
+        assert_eq!(
+            created_cmp("2026-01-01T11:00:00+02:00", "2026-01-01T10:00:00Z"),
+            Ordering::Less
+        );
+        assert_eq!(created_cmp("not a date", "also not"), Ordering::Greater);
+    }
 }

@@ -249,11 +249,13 @@ impl<'a> Owl2DLReasoner<'a> {
     fn rule_dl_has_self(&self) -> Result<(), ReasoningError> {
         let tg = &self.target_graph;
 
-        // Find all (class, property) pairs with owl:hasSelf true
+        // Find all (class, property) pairs with owl:hasSelf true, by value:
+        // the store keeps "1"^^xsd:boolean as written, a different term.
         let select_q = format!(
             "SELECT DISTINCT ?c ?p WHERE {{ \
                ?c <{OWL_ON_PROPERTY}> ?p . \
-               ?c <{OWL_HAS_SELF}> \"true\"^^<{XSD_BOOLEAN}> . \
+               ?c <{OWL_HAS_SELF}> ?self . \
+               FILTER(?self = \"true\"^^<{XSD_BOOLEAN}>) \
              }}"
         );
 

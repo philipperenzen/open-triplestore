@@ -1847,7 +1847,13 @@ fn compare_terms(a: &Term, b: &Term) -> Option<Ordering> {
         return va.partial_cmp(&vb);
     }
 
-    if dta == format!("{XSD}dateTime") && dtb == format!("{XSD}dateTime") {
+    // xsd:dateTimeStamp is xsd:dateTime with a required time zone: the two
+    // compare as one family (the store keeps the derived type as written).
+    let is_date_time = |dt: &str| {
+        dt.strip_prefix(XSD)
+            .is_some_and(|l| l == "dateTime" || l == "dateTimeStamp")
+    };
+    if is_date_time(&dta) && is_date_time(&dtb) {
         return cmp_temporal(
             parse_xsd_date_time(la.value())?,
             parse_xsd_date_time(lb.value())?,
@@ -2013,6 +2019,7 @@ pub(crate) fn xsd_lexical_valid(lit: &Literal) -> bool {
             matches!(v, "NaN" | "INF" | "-INF" | "+INF") || v.parse::<f64>().is_ok()
         }
         "dateTime" => parse_xsd_date_time(v).is_some(),
+        "dateTimeStamp" => parse_xsd_date_time(v).is_some_and(|(_, has_tz)| has_tz),
         "date" => parse_xsd_date(v).is_some(),
         "time" => {
             let (_, _, body) = split_timezone(v.trim());
