@@ -123,6 +123,14 @@ pub struct DatasetVersion {
     /// A delta whose snapshot graphs are currently built.
     #[serde(default, skip_serializing_if = "is_false")]
     pub materialised: bool,
+    /// The data model this version's instances were pinned to when it was cut
+    /// (the dataset's `conforms_to_model` / `conforms_to_version` at that moment),
+    /// so a published version keeps saying which model version it conformed to
+    /// after the dataset moves on to a newer one.
+    #[serde(default)]
+    pub conforms_to_model: Option<String>,
+    #[serde(default)]
+    pub conforms_to_version: Option<String>,
 }
 
 impl DatasetVersion {
@@ -163,6 +171,8 @@ impl DatasetVersion {
             change_count: None,
             chain_broken: false,
             materialised: false,
+            conforms_to_model: None,
+            conforms_to_version: None,
         }
     }
 

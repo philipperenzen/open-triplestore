@@ -70,6 +70,11 @@ pub struct CutRequest {
     /// Source graphs also registered to another dataset: a delta never covers
     /// them (delta note §8.5 Q5). See [`shared_graphs`].
     pub shared: HashSet<String>,
+    /// The model version the dataset's instances were pinned to when the
+    /// version is cut (`registry::dataset_pin`), recorded on the version so it
+    /// keeps saying which model version it conformed to.
+    pub conforms_to_model: Option<String>,
+    pub conforms_to_version: Option<String>,
 }
 
 /// The cut version, and why it is a checkpoint when it is one.
@@ -265,6 +270,8 @@ fn cut_delta(
         req.branch.clone(),
     );
     record.derived_from = req.derived_from.clone();
+    record.conforms_to_model = req.conforms_to_model.clone();
+    record.conforms_to_version = req.conforms_to_version.clone();
     record.kind = VersionKind::Delta;
     record.base_version = Some(plan.base.version.clone());
     record.patch_range = Some(PatchRange {
@@ -327,6 +334,8 @@ fn cut_checkpoint(
         req.branch.clone(),
     );
     record.derived_from = req.derived_from.clone();
+    record.conforms_to_model = req.conforms_to_model.clone();
+    record.conforms_to_version = req.conforms_to_version.clone();
     record.anchor = anchor;
     record.content_hash = Some(hash.to_hex());
     record.quad_count = Some(quads);
@@ -337,7 +346,8 @@ fn cut_checkpoint(
 /// A branch of `from`: the same content under a new label, so — when `from`
 /// is anchored — a delta on the same base (or on `from` itself when it is a
 /// checkpoint) with no data copied. An unanchored checkpoint is copied as
-/// before (delta note §3.3, `create_branch`).
+/// before (delta note §3.3, `create_branch`). `pin` is the dataset's model
+/// pin now (`registry::dataset_pin`), which the branch records.
 pub fn branch(
     store: &TripleStore,
     base_url: &str,
@@ -345,6 +355,7 @@ pub fn branch(
     target_version: &str,
     branch_name: &str,
     created_by: Option<String>,
+    pin: (Option<String>, Option<String>),
 ) -> Result<DatasetVersion, String> {
     crate::data_models::version_iri::validate_version(target_version)?;
     let graph_iri = version_iri(base_url, &from.dataset_id, target_version);
@@ -365,6 +376,7 @@ pub fn branch(
         Some(branch_name.to_string()),
     );
     record.derived_from = Some(from.version.clone());
+    (record.conforms_to_model, record.conforms_to_version) = pin;
     record.content_hash = from.content_hash.clone();
     record.quad_count = from.quad_count;
     let chainable = from.anchor.is_some()

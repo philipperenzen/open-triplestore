@@ -402,7 +402,7 @@ Branch `feat/delta-versions`: phases 1–4 in `3dcd9c5`, phase 5, the role fixes
 | 4 | two-tier restore (`plan_inverse`, `restore_by_inverse` in `handlers.rs`); LDES capture from rows (`src/ldes/capture.rs`); the Studio write trigger with incremental focus-node validation (`src/shacl_studio/trigger.rs`, `shacl::validate_focused`) |
 | 5 | `src/dataset_settings.rs` (`skolem`, `provenance`), `src/statement_provenance.rs` (the consumer), Skolem IRIs on import (`SkolemImportGuard` in `src/store/engine.rs`), the role fixes, JSON-LD 406 |
 
-Tests: `tests/delta_versions_http.rs` (13), `tests/delta_versions_budget.rs` (1), `tests/change_feed_http.rs` (6), `tests/studio_write_trigger.rs` (2), `tests/statement_provenance_http.rs` (7), additions to `tests/rdf_patch_http.rs`, `tests/change_capture.rs` and `tests/scale_shacl_9m.rs`, and unit tests in `src/store/` and `src/dataset_versions/`. User documentation: `docs/versioning.md`, `docs/datasets.md`, `docs/shacl.md`, `docs/ldes.md`, `docs/api-reference.md`, `docs/administration.md`.
+Tests: `tests/delta_versions_http.rs` (14), `tests/delta_versions_budget.rs` (1), `tests/change_feed_http.rs` (6), `tests/studio_write_trigger.rs` (2), `tests/statement_provenance_http.rs` (7), additions to `tests/rdf_patch_http.rs`, `tests/change_capture.rs` and `tests/scale_shacl_9m.rs`, and unit tests in `src/store/` and `src/dataset_versions/`. User documentation: `docs/versioning.md`, `docs/datasets.md`, `docs/shacl.md`, `docs/ldes.md`, `docs/api-reference.md`, `docs/administration.md`.
 
 ### 9.2 Changed during implementation
 

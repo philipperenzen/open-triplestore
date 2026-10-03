@@ -696,6 +696,8 @@ fn snapshot_affected_versions(
             derived_from: None,
             force_checkpoint: false,
             shared: crate::dataset_versions::cut::shared_graphs(auth_db, &ds_id, &source_graphs),
+            conforms_to_model: None,
+            conforms_to_version: None,
         };
         match crate::dataset_versions::cut::cut(store, base_url, &req) {
             Ok(made) => {

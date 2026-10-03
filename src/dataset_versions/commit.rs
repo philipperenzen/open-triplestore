@@ -372,6 +372,11 @@ pub async fn validate_and_commit(
             &dataset.id,
             &source_graphs,
         ),
+        conforms_to_model: dataset.conforms_to_model.clone().filter(|m| !m.is_empty()),
+        conforms_to_version: dataset
+            .conforms_to_version
+            .clone()
+            .filter(|v| !v.is_empty()),
     };
     let st = state.clone();
     let record: DatasetVersion = tokio::task::spawn_blocking(move || {

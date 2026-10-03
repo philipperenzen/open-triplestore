@@ -46,6 +46,8 @@ pub fn snapshot_as_version(
         derived_from: None,
         force_checkpoint: true,
         shared: Default::default(),
+        conforms_to_model: None,
+        conforms_to_version: None,
     };
     let record = cut::cut(store, base_url, &req)?.record;
     after_cut(store, base_url, &record, source_graphs);

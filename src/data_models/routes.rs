@@ -27,6 +27,7 @@ pub fn data_model_public_routes() -> Router<AppState> {
             get(handlers::list_collaborators),
         )
         .route("/api/models/:id/commits", get(handlers::list_commits))
+        .route("/api/models/:id/dependents", get(handlers::list_dependents))
         .route(
             "/api/models/:id/branches",
             get(handlers::list_branches).post(handlers::create_branch),

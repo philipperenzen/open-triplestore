@@ -285,6 +285,8 @@ pub async fn create_version(
         derived_from: None,
         force_checkpoint: body.checkpoint,
         shared: cut::shared_graphs(&state.auth_db, &id, &source_graphs),
+        conforms_to_model: ds.conforms_to_model.clone().filter(|m| !m.is_empty()),
+        conforms_to_version: ds.conforms_to_version.clone().filter(|v| !v.is_empty()),
     };
     let st = state.clone();
     let made = tokio::task::spawn_blocking(move || {
@@ -924,8 +926,9 @@ pub async fn create_branch(
     let st = state.clone();
     let creator = Some(format!("{}/users/{}", state.base_url, user.user_id));
     let tv = target_ver.clone();
+    let pin = registry::dataset_pin(&state.auth_db, &id);
     let record = tokio::task::spawn_blocking(move || {
-        cut::branch(&st.store, &st.base_url, &from, &tv, &branch, creator)
+        cut::branch(&st.store, &st.base_url, &from, &tv, &branch, creator, pin)
     })
     .await
     .map_err(|e| AppError::Internal(e.to_string()))?

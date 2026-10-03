@@ -764,3 +764,64 @@ async fn the_admin_sweep_removes_only_what_no_version_holds() {
         2
     );
 }
+
+/// A delta records the model version its dataset was pinned to when it was
+/// cut, exactly as a checkpoint does; a branch records the pin as it is when
+/// branched; publishing a delta, which makes it a checkpoint, keeps its pin.
+#[tokio::test]
+async fn a_delta_records_the_model_pin_like_a_checkpoint() {
+    let (state, token) = admin_state_with_store(recording());
+    let app = test_app(state.clone());
+    let ds = dataset(&state, &app, &token, "private").await;
+    state
+        .auth_db
+        .update_dataset_conformance(&ds, Some("m1"), Some("1.0.0"))
+        .unwrap();
+    let v1 = cut(&app, &token, &ds, "1.0.0").await;
+    assert_eq!(v1["kind"], "checkpoint");
+    assert_eq!(v1["conforms_to_model"], "m1");
+    assert_eq!(v1["conforms_to_version"], "1.0.0");
+    edit_after_v1(&state);
+    let v2 = cut(&app, &token, &ds, "1.1.0").await;
+    assert_eq!(v2["kind"], "delta", "{v2}");
+    assert_eq!(v2["conforms_to_model"], "m1");
+    assert_eq!(v2["conforms_to_version"], "1.0.0");
+
+    // The dataset moves on to a newer model version; its versions do not.
+    state
+        .auth_db
+        .update_dataset_conformance(&ds, Some("m1"), Some("2.0.0"))
+        .unwrap();
+    let (st, b, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/{ds}/branches"),
+        Some(&token),
+        json!({ "branch": "fix", "from_version": "1.1.0" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    assert_eq!(b["kind"], "delta");
+    assert_eq!(b["conforms_to_version"], "2.0.0", "the pin when branched");
+
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/{ds}/versions/1.1.0/publish"),
+        Some(&token),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let (_, rec, _) = req(
+        &app,
+        Method::GET,
+        &format!("/api/datasets/{ds}/versions/1.1.0"),
+        Some(&token),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(rec["kind"], "checkpoint", "{rec}");
+    assert_eq!(rec["conforms_to_model"], "m1");
+    assert_eq!(rec["conforms_to_version"], "1.0.0", "{rec}");
+}
