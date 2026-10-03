@@ -769,3 +769,362 @@ async fn gsp_get_fails_closed_when_the_label_table_cannot_be_read() {
         "no graph data may be served when labels cannot be checked"
     );
 }
+
+// ── SPARQL 1.1 Protocol — the RDF dataset of a /sparql query ──────────────────
+//
+// SPARQL 1.1 Query §13 and Protocol §2.1.4: `FROM` / `FROM NAMED` (or the
+// protocol's `default-graph-uri` / `named-graph-uri`, which take precedence)
+// define the dataset; this server confines it to the graphs the caller may read,
+// and only a request that names no dataset gets the union of those graphs.
+
+const DS_A: &str = "http://example.org/ds/a";
+const DS_B: &str = "http://example.org/ds/b";
+const DS_C: &str = "http://example.org/ds/c"; // another tenant's, unreadable
+
+/// `alice` reads `DS_A` and `DS_B` (her private dataset), which share one triple;
+/// `bob`'s private dataset holds `DS_C`. Returns the app, alice's and an admin's
+/// token.
+fn dataset_app() -> (Router, String, String) {
+    use open_triplestore::auth::models::{OwnerType, SystemRole, Visibility};
+    let (state, admin) = admin_state();
+    for user in ["alice", "bob"] {
+        state
+            .auth_db
+            .create_user(user, user, &format!("{user}@test.com"), "hash", SystemRole::User)
+            .unwrap();
+    }
+    for (id, owner, graphs) in [("ds-alice", "alice", vec![DS_A, DS_B]), ("ds-bob", "bob", vec![DS_C])] {
+        let ds = state
+            .auth_db
+            .create_dataset(id, id, None, OwnerType::User, owner, Visibility::Private, None)
+            .unwrap();
+        for g in graphs {
+            state.auth_db.add_dataset_graph(&ds.id, g).unwrap();
+        }
+    }
+    state
+        .store
+        .update(&format!(
+            r#"INSERT DATA {{
+                 GRAPH <{DS_A}> {{ <http://ex/a> <http://ex/v> "a-only" . <http://ex/x> <http://ex/v> "shared" }}
+                 GRAPH <{DS_B}> {{ <http://ex/b> <http://ex/v> "b-only" . <http://ex/x> <http://ex/v> "shared" }}
+                 GRAPH <{DS_C}> {{ <http://ex/c> <http://ex/v> "c-secret" }}
+               }}"#
+        ))
+        .unwrap();
+    (test_app(state), mint_token("alice", "alice", "user"), admin)
+}
+
+/// Run a query (GET, extra URL parameters appended) and return the values of
+/// `?o` (or `?g`, or the ASK boolean as "true"/"false"), sorted.
+async fn values(app: &Router, token: &str, query: &str, extra: &str) -> (StatusCode, Vec<String>) {
+    let uri = format!("/sparql?query={}{extra}", url_encode(query));
+    let (st, body, _) = send(
+        app,
+        Method::GET,
+        uri,
+        Some(token),
+        None,
+        Some("application/sparql-results+json"),
+        "",
+    )
+    .await;
+    let json = body_json_value(&body);
+    let mut out: Vec<String> = if let Some(b) = json.get("boolean") {
+        vec![b.to_string()]
+    } else {
+        json["results"]["bindings"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .map(|r| {
+                        let vars = ["n", "o", "g"];
+                        vars.iter()
+                            .filter_map(|v| r[*v]["value"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("|")
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    out.sort();
+    (st, out)
+}
+
+fn strs(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| s.to_string()).collect()
+}
+
+/// No dataset named: the default graph is the RDF merge of every readable graph
+/// (the triple held in both counts once), and the readable graphs are the named
+/// graphs; another tenant's graph is in neither.
+#[tokio::test]
+async fn sparql_dataset_union_default_only_when_none_is_named() {
+    let (app, alice, _) = dataset_app();
+    let (st, v) = values(&app, &alice, "SELECT ?o WHERE { ?s <http://ex/v> ?o }", "").await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(v, strs(&["a-only", "b-only", "shared"]));
+    let (_, v) = values(
+        &app,
+        &alice,
+        "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/v> ?o }",
+        "",
+    )
+    .await;
+    assert_eq!(v, strs(&["3"]), "the union default graph is a set");
+    let (_, v) = values(
+        &app,
+        &alice,
+        "SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s <http://ex/v> ?o } }",
+        "",
+    )
+    .await;
+    assert_eq!(v, strs(&[DS_A, DS_B]));
+}
+
+/// `FROM <a>` alone: `<a>` is the default graph and there are no named graphs
+/// (it used to become a named graph as well).
+#[tokio::test]
+async fn sparql_dataset_from_alone_names_no_graph() {
+    let (app, alice, _) = dataset_app();
+    let (_, v) = values(
+        &app,
+        &alice,
+        &format!("SELECT ?o FROM <{DS_A}> WHERE {{ ?s <http://ex/v> ?o }}"),
+        "",
+    )
+    .await;
+    assert_eq!(v, strs(&["a-only", "shared"]));
+    let (_, v) = values(
+        &app,
+        &alice,
+        &format!("ASK FROM <{DS_A}> WHERE {{ GRAPH ?g {{ ?s ?p ?o }} }}"),
+        "",
+    )
+    .await;
+    assert_eq!(v, strs(&["false"]));
+    // Two FROM graphs merge as a set.
+    let (_, v) = values(
+        &app,
+        &alice,
+        &format!("SELECT (COUNT(*) AS ?n) FROM <{DS_A}> FROM <{DS_B}> WHERE {{ ?s ?p ?o }}"),
+        "",
+    )
+    .await;
+    assert_eq!(v, strs(&["3"]));
+}
+
+/// `FROM NAMED <b>` alone: an empty default graph, `<b>` the only named graph
+/// (it used to become the default graph as well).
+#[tokio::test]
+async fn sparql_dataset_from_named_alone_leaves_the_default_graph_empty() {
+    let (app, alice, _) = dataset_app();
+    let (_, v) = values(
+        &app,
+        &alice,
+        &format!("SELECT ?o FROM NAMED <{DS_B}> WHERE {{ ?s <http://ex/v> ?o }}"),
+        "",
+    )
+    .await;
+    assert!(v.is_empty(), "{v:?}");
+    let (_, v) = values(
+        &app,
+        &alice,
+        &format!("SELECT ?g ?o FROM NAMED <{DS_B}> WHERE {{ GRAPH ?g {{ ?s <http://ex/v> ?o }} }}"),
+        "",
+    )
+    .await;
+    assert_eq!(v, strs(&[&format!("b-only|{DS_B}"), &format!("shared|{DS_B}")]));
+}
+
+/// A graph the caller may not read is dropped from the dataset it names, as if
+/// it were empty: no rows, no error that would reveal it.
+#[tokio::test]
+async fn sparql_dataset_drops_an_unreadable_graph() {
+    let (app, alice, _) = dataset_app();
+    let (st, v) = values(
+        &app,
+        &alice,
+        &format!("SELECT ?o FROM <{DS_C}> FROM NAMED <{DS_C}> WHERE {{ {{ ?s ?p ?o }} UNION {{ GRAPH ?g {{ ?s ?p ?o }} }} }}"),
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(v.is_empty(), "{v:?}");
+}
+
+/// An admin's `FROM` is the dataset as written: every registered graph is no
+/// longer added to it.
+#[tokio::test]
+async fn sparql_dataset_admin_from_is_not_widened() {
+    let (app, _, admin) = dataset_app();
+    let (_, v) = values(
+        &app,
+        &admin,
+        &format!("SELECT ?o FROM <{DS_C}> WHERE {{ ?s <http://ex/v> ?o }}"),
+        "",
+    )
+    .await;
+    assert_eq!(v, strs(&["c-secret"]));
+    let (_, v) = values(&app, &admin, "SELECT ?o WHERE { ?s <http://ex/v> ?o }", "").await;
+    assert_eq!(v, strs(&["a-only", "b-only", "c-secret", "shared"]));
+}
+
+/// A query whose outermost group has no `WHERE` keyword and holds a sub-select:
+/// the dataset used to be spliced into the sub-select (a 400).
+#[tokio::test]
+async fn sparql_dataset_subquery_without_outer_where() {
+    let (app, alice, _) = dataset_app();
+    let (st, v) = values(
+        &app,
+        &alice,
+        "SELECT ?o { { SELECT ?o WHERE { ?s <http://ex/v> ?o } } }",
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(v, strs(&["a-only", "b-only", "shared"]));
+}
+
+/// `default-graph-uri` / `named-graph-uri` (GET, POST form, POST query body)
+/// define the dataset and take precedence over the query's own `FROM`.
+#[tokio::test]
+async fn sparql_protocol_dataset_parameters_are_honoured() {
+    let (app, alice, _) = dataset_app();
+    let q = "SELECT ?o WHERE { ?s <http://ex/v> ?o }";
+    let dg = |g: &str| format!("&default-graph-uri={}", url_encode(g));
+    let ng = |g: &str| format!("&named-graph-uri={}", url_encode(g));
+    let (_, v) = values(&app, &alice, q, &dg(DS_B)).await;
+    assert_eq!(v, strs(&["b-only", "shared"]));
+    // Precedence over the query's FROM.
+    let (_, v) = values(
+        &app,
+        &alice,
+        &format!("SELECT ?o FROM <{DS_A}> WHERE {{ ?s <http://ex/v> ?o }}"),
+        &dg(DS_B),
+    )
+    .await;
+    assert_eq!(v, strs(&["b-only", "shared"]));
+    // named-graph-uri alone: an empty default graph.
+    let (_, v) = values(&app, &alice, q, &ng(DS_A)).await;
+    assert!(v.is_empty(), "{v:?}");
+    let (_, v) = values(
+        &app,
+        &alice,
+        "SELECT ?g WHERE { GRAPH ?g { <http://ex/a> ?p ?o } }",
+        &format!("{}{}", ng(DS_A), ng(DS_B)),
+    )
+    .await;
+    assert_eq!(v, strs(&[DS_A]));
+    // An unreadable graph is dropped here too.
+    let (st, v) = values(&app, &alice, q, &dg(DS_C)).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(v.is_empty(), "{v:?}");
+    // Not an absolute IRI: 400.
+    let (st, _) = values(&app, &alice, q, "&default-graph-uri=not-an-iri").await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    // POST, form-encoded: the parameters ride in the body.
+    let form = format!(
+        "query={}&default-graph-uri={}",
+        url_encode(q),
+        url_encode(DS_A)
+    );
+    let (st, body, _) = send(
+        &app,
+        Method::POST,
+        "/sparql".to_string(),
+        Some(&alice),
+        Some("application/x-www-form-urlencoded"),
+        Some("application/sparql-results+json"),
+        &form,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert!(body.contains("a-only") && !body.contains("b-only"), "{body}");
+    // POST, query in the body: the parameters ride in the URL.
+    let (st, body, _) = send(
+        &app,
+        Method::POST,
+        format!("/sparql?default-graph-uri={}", url_encode(DS_B)),
+        Some(&alice),
+        Some("application/sparql-query"),
+        Some("application/sparql-results+json"),
+        q,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert!(body.contains("b-only") && !body.contains("a-only"), "{body}");
+}
+
+/// `using-graph-uri` / `using-named-graph-uri` (Protocol §2.2.3) set the dataset
+/// of an update's `WHERE`; combined with the update's own `USING` / `WITH` they
+/// are a 400.
+#[tokio::test]
+async fn sparql_update_protocol_using_parameters() {
+    let (app, _, admin) = dataset_app();
+    let copy = "INSERT { GRAPH <http://ex/out> { ?s <http://ex/copied> ?o } } WHERE { ?s <http://ex/v> ?o }";
+    let (st, body, _) = send(
+        &app,
+        Method::POST,
+        format!("/sparql?using-graph-uri={}", url_encode(DS_A)),
+        Some(&admin),
+        Some("application/sparql-update"),
+        None,
+        copy,
+    )
+    .await;
+    assert!(st.is_success(), "{st}: {body}");
+    let (_, v) = values(
+        &app,
+        &admin,
+        "SELECT ?o FROM NAMED <http://ex/out> WHERE { GRAPH <http://ex/out> { ?s <http://ex/copied> ?o } }",
+        "",
+    )
+    .await;
+    assert_eq!(v, strs(&["a-only", "shared"]));
+
+    // using-named-graph-uri, form-encoded: the WHERE sees DS_B as a named graph.
+    let form = format!(
+        "update={}&using-named-graph-uri={}",
+        url_encode(
+            "INSERT { GRAPH <http://ex/out2> { ?s <http://ex/from> ?g } } WHERE { GRAPH ?g { ?s <http://ex/v> ?o } }"
+        ),
+        url_encode(DS_B)
+    );
+    let (st, body, _) = send(
+        &app,
+        Method::POST,
+        "/sparql".to_string(),
+        Some(&admin),
+        Some("application/x-www-form-urlencoded"),
+        None,
+        &form,
+    )
+    .await;
+    assert!(st.is_success(), "{st}: {body}");
+    let (_, v) = values(
+        &app,
+        &admin,
+        "SELECT DISTINCT ?g FROM NAMED <http://ex/out2> WHERE { GRAPH <http://ex/out2> { ?s <http://ex/from> ?g } }",
+        "",
+    )
+    .await;
+    assert_eq!(v, strs(&[DS_B]));
+
+    // The update's own WITH plus the protocol parameter: 400, nothing written.
+    let (st, body, _) = send(
+        &app,
+        Method::POST,
+        format!("/sparql?using-graph-uri={}", url_encode(DS_A)),
+        Some(&admin),
+        Some("application/sparql-update"),
+        None,
+        &format!("WITH <{DS_B}> INSERT {{ ?s <http://ex/bad> ?o }} WHERE {{ ?s <http://ex/v> ?o }}"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    let (_, v) = values(&app, &admin, "ASK { GRAPH ?g { ?s <http://ex/bad> ?o } }", "").await;
+    assert_eq!(v, strs(&["false"]));
+}

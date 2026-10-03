@@ -43,6 +43,11 @@ pub fn generate(
 ) -> String {
     let mut desc = String::new();
 
+    // `sd:UnionDefaultGraph` holds for `/sparql`: a query that names no dataset
+    // (no FROM / FROM NAMED, no default-graph-uri / named-graph-uri) gets as its
+    // default graph the RDF merge of every named graph the caller may read
+    // (`routes::scope_query_dataset`), a set since the vendored spareval merges
+    // several graphs without duplicates.
     desc.push_str(
         r#"@prefix sd: <http://www.w3.org/ns/sparql-service-description#> .
 @prefix void: <http://rdfs.org/ns/void#> .

@@ -1,15 +1,15 @@
-//! The `/sparql` read boundary holds even when the textual query rewriter is
-//! fooled — through the real router.
+//! The `/sparql` read boundary holds against queries that fooled the old
+//! textual rewriter — through the real router.
 //!
-//! `scope_query_to_authorized` re-scopes a caller's query by rewriting its text:
-//! it strips the `FROM` / `FROM NAMED` clauses it recognises and injects a
-//! prologue naming the graphs the caller may read. Text rewriting cannot be made
-//! perfect — a ` WHERE ` inside a string literal mis-anchors the injection so the
-//! prologue lands inside the literal and the query is left with no dataset clause
-//! (which reads every named graph), and a `FROM NAMED` the scanner does not
-//! recognise (no space before `<`) survives untouched. `ensure_query_within_scope`
-//! backstops it: the query about to reach the engine is parsed and refused with
-//! `403` unless its dataset names only graphs the caller may read.
+//! `/sparql` used to re-scope a caller's query by rewriting its text: strip the
+//! `FROM` / `FROM NAMED` clauses it recognised and inject a prologue naming the
+//! graphs the caller may read. Two tricks beat that rewriter: a ` WHERE ` inside a
+//! string literal mis-anchored the injection, leaving the query with no dataset
+//! clause (which reads every named graph), and a `FROM NAMED` the scanner did
+//! not recognise (no space before `<`) survived untouched. The dataset is now set
+//! on the parsed query (`scope_query_dataset`), so neither trick changes what the
+//! query reads; `ensure_query_within_scope` stays behind it as a backstop, and
+//! its own unit tests pin that it refuses both rewritten texts.
 //!
 //! Here an anonymous caller on a public dataset tries both tricks to read a
 //! private graph and a second tenant's private dataset; neither leaks.
@@ -146,17 +146,18 @@ async fn anonymous_sees_the_public_graph_but_not_the_private_ones() {
 }
 
 /// The prologue-in-a-literal bypass: a ` WHERE ` inside a triple-quoted literal
-/// mis-anchors the rewriter, so the scope prologue lands inside the literal and
-/// the query would otherwise read every named graph. The guard refuses it.
+/// mis-anchored the textual rewriter, so the scope prologue landed inside the
+/// literal and the query would have read every named graph. Scoping the parsed
+/// query is not fooled: it runs over the caller's readable graphs only.
 #[tokio::test]
 async fn literal_spliced_prologue_cannot_read_other_graphs() {
     let app = setup();
     let attack = "SELECT ?g ?o (\"\"\"x WHERE x\"\"\" AS ?z) WHERE { GRAPH ?g { ?s ?p ?o } }";
     let (status, body) = anon_query(&app, attack).await;
-    assert_eq!(
-        status,
-        StatusCode::FORBIDDEN,
-        "the neutralised-scope query must be refused, not run: {body}"
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.contains(PUBLIC_MARKER),
+        "the readable graph answers: {body}"
     );
     assert!(
         !body.contains(PRIVATE_MARKER),
@@ -165,9 +166,11 @@ async fn literal_spliced_prologue_cannot_read_other_graphs() {
     assert!(!body.contains(TENANT_B_MARKER), "tenant B leaked: {body}");
 }
 
-/// The unstripped-`FROM NAMED` bypass: `FROM NAMED<iri>` with no space is not
-/// recognised by the scanner, so the caller's own graph name survives beside the
-/// injected prologue. The guard refuses a name outside the readable scope.
+/// The unstripped-`FROM NAMED` bypass: `FROM NAMED<iri>` with no space was not
+/// recognised by the textual scanner, so the caller's own graph name survived
+/// beside the injected prologue. The parser reads it like any `FROM NAMED`, and
+/// a graph the caller may not read is dropped from the dataset: the query runs
+/// and finds nothing.
 #[tokio::test]
 async fn unstripped_from_named_cannot_name_a_private_graph() {
     let app = setup();
@@ -175,11 +178,7 @@ async fn unstripped_from_named_cannot_name_a_private_graph() {
         "SELECT ?o FROM NAMED<{PRIV_GRAPH}> WHERE {{ GRAPH <{PRIV_GRAPH}> {{ ?s ?p ?o }} }}"
     );
     let (status, body) = anon_query(&app, &attack).await;
-    assert_eq!(
-        status,
-        StatusCode::FORBIDDEN,
-        "naming a private graph in an unstripped FROM NAMED must be refused: {body}"
-    );
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert!(
         !body.contains(PRIVATE_MARKER),
         "private graph leaked: {body}"
@@ -189,6 +188,6 @@ async fn unstripped_from_named_cannot_name_a_private_graph() {
     let attack =
         format!("SELECT ?o FROM NAMED<{B_GRAPH}> WHERE {{ GRAPH <{B_GRAPH}> {{ ?s ?p ?o }} }}");
     let (status, body) = anon_query(&app, &attack).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert!(!body.contains(TENANT_B_MARKER), "tenant B leaked: {body}");
 }
