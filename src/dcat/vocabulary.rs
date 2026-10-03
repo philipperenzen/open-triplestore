@@ -1,4 +1,4 @@
-//! Namespace constants for DCAT 2, VoID, PROV-O, and related vocabularies.
+//! Namespace constants for DCAT 3, VoID, PROV-O, and related vocabularies.
 
 pub const DCAT: &str = "http://www.w3.org/ns/dcat#";
 pub const DCT: &str = "http://purl.org/dc/terms/";

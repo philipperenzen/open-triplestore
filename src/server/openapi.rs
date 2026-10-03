@@ -472,12 +472,12 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     // ═══════════════════════════════════════════════════════════════════════
     mount(paths, "/sparql", vec![
         (M::Get, o("SPARQL", "SPARQL query (GET)",
-            "Execute a read-only SPARQL query (SELECT, CONSTRUCT, ASK, DESCRIBE). The result format is content-negotiated via the Accept header.",
-            vec![qp("query", true, "SPARQL query string"),
+            "Execute a read-only SPARQL query (SELECT, CONSTRUCT, ASK, DESCRIBE). The result format is content-negotiated via the Accept header. Without `query`, returns the SPARQL 1.1 Service Description (Turtle, scoped to the graphs the caller may read), as SPARQL 1.1 Service Description §2 recommends.",
+            vec![qp("query", false, "SPARQL query string; omit it for the service description"),
                  qp("default-graph-uri", false, "A graph of the query's default graph (repeatable). With named-graph-uri it replaces the query's FROM / FROM NAMED; graphs the caller may not read are dropped"),
                  qp("named-graph-uri", false, "A named graph of the query's dataset (repeatable)"),
                  qp("entailment", false, "Entailment regime: rdfs, owl2-rl, owl2-el, owl2-ql, owl2-dl")],
-            vec![("200", "Query results in the negotiated format"), ("400", "Invalid query syntax")], false)),
+            vec![("200", "Query results in the negotiated format, or the service description (text/turtle) without `query`"), ("400", "Invalid query syntax")], false)),
         (M::Post, o("SPARQL", "SPARQL query or update (POST)",
             "Content-Type selects the operation:\n- `application/sparql-query` — query in body\n- `application/sparql-update` — update in body (requires authentication)\n- `application/x-www-form-urlencoded` — `query` or `update` form field\n\nThe dataset parameters ride in the URL, or in the form body for a form-encoded request.",
             vec![qp("default-graph-uri", false, "Query: a graph of the default graph (repeatable); replaces the query's FROM / FROM NAMED"),

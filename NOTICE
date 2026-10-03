@@ -342,6 +342,17 @@ Bundled datasets and vocabularies:
     derived from the Activity Streams 2.0, CSVW, LDP and ODRL 2.2 JSON-LD
     contexts at the URLs above. Copyright © 2023 W3C®. Details and checksums in
     src/jsonld/contexts/PROVENANCE.md.
+  - Controlled-vocabulary labels compiled into the server (src/dcat/authority.rs)
+    and emitted as the skos:prefLabel of the concepts the DCAT catalogue
+    references: the English and Dutch labels of the EU Publications Office
+    authority tables data-theme, dataset-status, access-right and frequency
+    (EU Vocabularies, https://op.europa.eu/en/web/eu-vocabularies), © European
+    Union, reused under Commission Decision 2011/833/EU on the reuse of
+    Commission documents, which licenses them under CC BY 4.0,
+    https://creativecommons.org/licenses/by/4.0/ ; and the English labels of
+    the ADMS status and publisher-type vocabularies (http://purl.org/adms/),
+    © European Union, ISA Open Metadata Licence v1.1
+    (LICENSES/ISA-Open-Metadata-Licence-1.1.txt). Unmodified.
   - Linked Open Vocabularies (LOV): vocabulary catalogue and vocabulary corpus.
     Paths: assets/vocab/lov-catalog.json.gz (compiled into the server binary)
     and assets/vocab/lov-redistributable.txt; in the Docker image

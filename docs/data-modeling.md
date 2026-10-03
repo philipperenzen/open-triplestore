@@ -218,6 +218,6 @@ The validation report shows which instances violate the model's constraints:
 | Formal semantics | OWL 2 | Class & property axioms and reasoning in model/vocabulary versions |
 | Knowledge org | SKOS | Controlled vocabularies in vocabulary versions |
 | Validation | SHACL, ShEx | Shapes in model versions or dataset-specific |
-| Catalog | DCAT 2, VoID | Auto-generated at `/.well-known/void` |
+| Catalog | DCAT 3, VoID | Auto-generated at `/.well-known/void` |
 | Conformance | `dct:conformsTo` | Links datasets to model versions |
 | Query | SPARQL 1.1 | Uniform access to all layers |

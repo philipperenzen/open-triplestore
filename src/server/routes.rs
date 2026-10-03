@@ -148,9 +148,11 @@ async fn sparql_query_get(
             if let Some(resp) = spa_shell_response(&headers) {
                 return Ok(resp);
             }
-            return Err(AppError::BadRequest(
-                "Missing 'query' parameter".to_string(),
-            ));
+            // SPARQL 1.1 Service Description §2: the endpoint, dereferenced
+            // with GET and no query, returns its service description. The
+            // DCAT catalogue names it as the endpoint's
+            // `dcat:endpointDescription`.
+            return service_description_response(&state, user.as_deref());
         }
     };
 
@@ -2397,9 +2399,17 @@ async fn service_description_handler(
     if let Some(resp) = spa_shell_response(&headers) {
         return Ok(resp);
     }
+    service_description_response(&state, user.as_deref())
+}
 
-    let user_id = user.as_deref().map(|u| u.user_id.as_str());
-    let is_admin = user.as_deref().map(|u| u.is_admin()).unwrap_or(false);
+/// The SPARQL 1.1 Service Description (Turtle), scoped to the graphs `user`
+/// may read. Served at `/` and at `GET /sparql` without a query.
+fn service_description_response(
+    state: &AppState,
+    user: Option<&AuthenticatedUser>,
+) -> Result<Response, AppError> {
+    let user_id = user.map(|u| u.user_id.as_str());
+    let is_admin = user.map(|u| u.is_admin()).unwrap_or(false);
 
     // Collect accessible graph IRIs scoped to the caller's permissions.
     let accessible_graph_iris: Vec<String> = if is_admin {

@@ -142,7 +142,7 @@ and the level the router enforces cannot drift apart.
 - `/store` — Graph Store HTTP Protocol (GET/PUT/POST/DELETE, with `?graph=<iri>`)
 - `/api/{datasets|organisations|groups}/{id}/api-services/{slug}/run` — run a saved API service
 - `/resource/<path>` — content-negotiated IRI dereference
-- `/.well-known/void` — DCAT 2 / VoID dataset catalog (content-negotiated RDF)
+- `/.well-known/void` — DCAT 3 / VoID dataset catalog (content-negotiated RDF)
 - `/api/models/{id}/versions` — list model versions
 - `/api/models/{id}/latest/data` — latest published model (content-negotiated RDF)
 

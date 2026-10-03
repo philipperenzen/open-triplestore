@@ -83,6 +83,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tests/shextest_conformance.rs`, a two-way ratchet that skips only tests
   tagged with a ShEx 2.next trait and also checks every validation case
   through the store.
+- **DCAT 3 versions, data services, coverage and catalogue records.** The
+  dataset catalogue (`/.well-known/void`) describes each released (published
+  or deprecated) dataset version as a DCAT 3 §11 `dcat:Dataset` —
+  `dcat:isVersionOf`, `dcat:version`, `dcat:previousVersion`, `dct:issued`,
+  `adms:versionNotes`, a TriG download — linked by `dcat:hasVersion` and, for
+  the newest, `dcat:hasCurrentVersion`. The SPARQL endpoint (and the OGC API
+  when a dataset has geometry) is a `dcat:DataService` with
+  `dcat:servesDataset`, publisher, contact point and access rights. Datasets
+  gain temporal coverage (`temporal_start` / `temporal_end` → `dct:temporal`)
+  and an update frequency (`accrual_periodicity`, a code or IRI of the EU
+  frequency table → `dct:accrualPeriodicity`) in the API, the OpenAPI document
+  and the metadata dialog. Under `dcat-ap` / `dcat-ap-nl` every dataset has a
+  `dcat:CatalogRecord`. New settings `CATALOG_CONTACT_NAME` /
+  `CATALOG_CONTACT_EMAIL` (the contact point of the catalogue and its data
+  services, and the fallback for a dataset with none) and
+  `CATALOG_PUBLISHER_TYPE` (ADMS publisher type). `dcat:DatasetSeries` is not
+  used: the product has no series concept. See `docs/dcat.md`.
+- **`GET /sparql` without a query returns the SPARQL 1.1 Service
+  Description** (SPARQL 1.1 Service Description §2), scoped to the caller like
+  the one at `/`; the catalogue names it as the endpoint's
+  `dcat:endpointDescription`.
 - **`OTS_OIDC_IDP_TOKEN_POLICY` and `OTS_OIDC_IDP_WRITE_SCOPES`.** What an access token from
   an external IdP (OIDC resource-server mode) may do is now a setting, with the
   same values as `OTS_OIDC_SESSION_POLICY`: `session` (default), `scoped`
@@ -611,6 +632,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   thread sized for that depth). ShEx is graded Full in
   `docs/standards.md`, and the comparison's Standards Score is recounted
   15 → 16.
+- **The DCAT catalogues use DCAT terms with their declared semantics.** The
+  model registry's catalogue (`/api/catalog`) is built as RDF terms instead of
+  hand-written Turtle: `dcat:hasVersion` points at version resources (it was a
+  literal), `dcat:mediaType` is an IANA IRI typed `dct:MediaType` (it was a
+  literal), a namespace that is not an IRI is dropped instead of interpolated,
+  and only the serialisations the data endpoint serves are offered (it
+  advertised JSON-LD and RDF/XML, which it answered with N-Quads and TriG).
+  Both catalogues type every object with its DCAT range class
+  (`dct:LicenseDocument`, `dct:LinguisticSystem`, `foaf:Document`, …) and
+  describe themes, statuses and agent types as labelled `skos:Concept`s. A
+  dataset's owner is now its `dct:publisher` and `dct:creator` in every
+  profile. A data-model's void:triples no longer counts version `1.0.1`'s
+  graphs into version `1.0`. The live dataset no longer carries the newest
+  version's `dcat:version`, and a draft version is no longer listed. The
+  SPARQL service's `dcat:endpointDescription` is the service description, not
+  the homepage.
+- **An unknown `DCAT_PROFILE` stops the server at startup** instead of
+  silently publishing plain DCAT; so do an unknown `CATALOG_PUBLISHER_TYPE`, a
+  `CATALOG_LANGUAGE` that is not an ISO 639-3 code, and a
+  `CATALOG_PUBLISHER_URI` / `CATALOG_LICENSE` that is not an IRI.
+- **Profile warnings.** What DCAT-AP-NL requires and the registry does not
+  hold — a dataset's theme, contact point or licence — is logged once as a
+  warning and never invented.
 - **Settings added in this release are named for what they cover.** Before
   release, five new settings were renamed, and the old names are not read:
   `OIDC_TOKEN_POLICY` and `OIDC_WRITE_SCOPES` are now
@@ -1308,6 +1352,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rebuilds the whole index. A timed-out SPARQL Update or Graph Store write no
   longer leaves the index stale either. Default-graph literals are refreshed
   under the same key the full rebuild gives them.
+- **A dataset's governance metadata graph failed to load with an
+  `adms_status` code.** `urn:system:metadata:dataset:{id}` was hand-written
+  Turtle: a status given as a code (`completed`) became a relative IRI, the
+  document failed to parse, and the graph was silently not written. It is now
+  built as RDF terms (the code becomes its EU dataset-status IRI) and also
+  carries access rights, temporal coverage and update frequency.
+- **Dataset version IRIs in the catalogue did not match the version
+  registry's.** The catalogue percent-encoded the version label
+  (`…/version/1%2E0%2E0`); the registry, the version routes and the model
+  conformance links use `…/version/1.0.0`.
 - **More `.env` settings reach the server under Docker Compose.**
   `docker-compose.yml` passes the server an explicit environment list, so a
   setting `.env.example` documents had no effect until it was on that list.
@@ -1800,6 +1854,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `owl:hasValue` are not reported by Konclude and not materialised.
 
 ### Security
+- **A signed-in caller's DCAT catalogue was marked `Cache-Control: public`.**
+  `/.well-known/void` and `/{org}/.well-known/void` are scoped to the caller
+  (their datasets, their readable graphs' statistics), but every response said
+  `public, max-age=60` with `Vary: Accept` only, which lets a shared cache
+  store a response to a request with credentials and serve it to others. A
+  signed-in caller's copy is now `private`, and the responses vary on
+  `Authorization` and `Cookie` too.
 - **Audit rows and the guest AI budget record the real client IP.** Both took
   the left-most `X-Forwarded-For` entry (then `X-Real-IP`) from any caller and
   never saw the TCP peer address, so a login failure, a permission denial or an
