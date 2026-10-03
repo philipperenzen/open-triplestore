@@ -636,7 +636,7 @@ pub fn validate_acl_body(
         .with_base_iri(acl.as_str())
         .map_err(|e| e.to_string())?;
     let mut triples = Vec::new();
-    for quad in parser.for_reader(body.as_bytes()) {
+    for quad in crate::jsonld::with_loader(parser.for_reader(body.as_bytes())) {
         let quad = quad.map_err(|e| e.to_string())?;
         if !matches!(quad.graph_name, GraphName::DefaultGraph) {
             return Err("an ACL body may not name a graph".to_string());
