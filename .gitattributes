@@ -61,3 +61,8 @@ scripts/hooks/* text eol=lf
 *.pdf           binary
 *.gz            binary
 *.zip           binary
+
+# ── Vendored W3C test suites: every file must stay byte-identical to upstream
+#    (a CR inside a test file is test data), so no EOL conversion at all. ──
+tests/fixtures/w3c-sparql12/** -text
+tests/fixtures/w3c-rdf12/** -text
