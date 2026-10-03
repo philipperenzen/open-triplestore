@@ -221,7 +221,7 @@ fn body_confined_to(
     let parser = oxigraph::io::RdfParser::from_format(format)
         .with_base_iri(target)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()).into_response())?;
-    for quad in parser.for_reader(text.as_bytes()) {
+    for quad in crate::jsonld::with_loader(parser.for_reader(text.as_bytes())) {
         let quad = quad.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()).into_response())?;
         if let oxigraph::model::NamedOrBlankNode::NamedNode(s) = &quad.subject {
             if super::patch::other_ldp_subject(s.as_str(), target, &root) {

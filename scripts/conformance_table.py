@@ -15,7 +15,7 @@ runners record, and writes the result between `<!-- conformance-table:start -->`
 
 The *basis* column is the honest part: only the rows marked **vendored** run
 a published test corpus (today the W3C SPARQL 1.1 query/update and federation
-sections, the W3C SHACL core/sparql sections, TopQuadrant's SHACL-AF tests, the
+sections, the W3C JSON-LD API toRdf/fromRdf sections, the W3C SHACL core/sparql sections, TopQuadrant's SHACL-AF tests, the
 approved W3C OWL 2 DL test cases and the OGC GeoSPARQL validator shapes); every
 other suite is hand-written and *derived from* the spec text.
 
@@ -39,6 +39,9 @@ is decided per corpus when it is vendored (`CORPUS_RUNNERS`, `PUBLISH_SCORE`,
   applies: verbatim copies only. The runner uses the OWL 2 DL / Direct
   Semantics cases and needs the reasoner sidecar, so it is a partial run and
   its row, like SPARQL's, publishes no numbers.
+- The JSON-LD API toRdf and fromRdf sections are likewise a subset of a W3C
+  test suite (w3c/json-ld-api, W3C Software and Document License); following
+  W3C's test-suite policy for subsets, the row publishes no numbers either.
 - The SHACL sections are under the W3C Software and Document License, which
   sets no such condition, so that row keeps its counts (`PUBLISH_SCORE`).
 - The SHACL-AF tests are TopQuadrant's, under the Apache License 2.0, which
@@ -79,6 +82,7 @@ SUITES: dict[str, tuple[str, str]] = {
     "shacl_conformance": ("SHACL Core", "spec-derived"),
     "w3c_shacl_conformance": ("SHACL Core", "**vendored W3C corpus** (core + sparql sections, manifest-driven, full report equality)"),
     "w3c_sparql11_manifests": ("SPARQL 1.1 Query/Update", "**vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven)"),
+    "w3c_jsonld_api_manifests": ("JSON-LD 1.1 API", "**vendored W3C test-suite subset** (toRdf + fromRdf sections of w3c/json-ld-api, unmodified; manifest-driven)"),
     "w3c_sparql11_federation": ("SPARQL 1.1 Federated Query", "**vendored W3C test-suite subset** (`service/` + `syntax-fed/` sections of w3c/rdf-tests, unmodified; manifest-driven, local endpoints)"),
     "shacl_rules_conformance": ("SHACL-AF rules", "spec-derived"),
     "shacl_af_corpus": ("SHACL Advanced Features", "**vendored TopQuadrant corpus** (expression, function, rule and target tests of TopQuadrant/shacl, unmodified; dash-driven)"),
@@ -112,11 +116,12 @@ CORPUS_RUNNERS = {
     "w3c_sparql11_manifests": 450,
     "w3c_sparql11_federation": 9,
     "w3c_owl2_dl_manifests": 235,
+    "w3c_jsonld_api_manifests": 470,
 }
 
 # Runners whose score may be published (see the module docstring). A runner
 # missing here is still checked, but its row carries no numbers: the W3C SPARQL
-# 1.1 sections and the OWL 2 DL cases are partial runs of W3C test suites, on
+# 1.1 and JSON-LD API sections and the OWL 2 DL cases are partial runs of W3C test suites, on
 # which W3C allows no public performance claims.
 PUBLISH_SCORE = {"shacl_af_corpus", "w3c_shacl_conformance"}
 
@@ -124,6 +129,10 @@ PUBLISH_SCORE = {"shacl_af_corpus", "w3c_shacl_conformance"}
 # CORPUS_RUNNERS entry outside PUBLISH_SCORE needs one: it says why no score is
 # given and where the known gaps are tracked.
 UNSCORED_NOTES = {
+    "w3c_jsonld_api_manifests": (
+        "runs in CI as a development and regression ratchet; no score is published "
+        "(W3C test-suite policy); known gaps in `docs/conformance/jsonld.md`"
+    ),
     "w3c_sparql11_manifests": (
         "runs in CI as a development and regression ratchet; no score is published "
         "(W3C test-suite policy); known gaps in `docs/conformance/sparql11.md`"
@@ -225,7 +234,8 @@ def render() -> str:
         "A vendored row gives results only where its corpus licence allows performance claims; "
         "those are development and regression results on the vendored sections "
         "(`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C "
-        "SPARQL 1.1 sections (query, update and federation) and the OWL 2 DL test cases are "
+        "SPARQL 1.1 sections (query, update and federation), the JSON-LD API sections and the "
+        "OWL 2 DL test cases are "
         "partial runs of W3C test suites, so they carry no results and are used for development "
         "and bug tracking only."
     )

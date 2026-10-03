@@ -14,6 +14,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **JSON-LD remote contexts.** Every JSON-LD parse — uploads, imports, the
+  Graph Store, LDP, seed bundles, LDES pages — now resolves an `@context` named
+  by IRI through a document loader; before, any such document failed to parse.
+  The W3C contexts of ActivityStreams 2.0, CSVW, LDP and ODRL 2.2 are bundled
+  and resolve offline; any other context is fetched only from a URL in
+  `OTS_REMOTE_ALLOWLIST` (deny by default), following redirects and `Link`
+  alternates inside the allowlist, capped at `OTS_JSONLD_CONTEXT_MAX_BYTES`
+  (1 MiB) and cached for an hour. See `docs/formats.md`.
+- **The W3C json-ld-api toRdf and fromRdf sections run in CI**
+  (`tests/w3c_jsonld_api_manifests.rs`, vendored unmodified under
+  `tests/fixtures/w3c-jsonld-api/`) as a regression ratchet. They are a subset
+  of a W3C test suite, so no score is published; the known gaps are in
+  `docs/conformance/jsonld.md`.
 - **SKOS-aware inferencing and integrity checking.** The standards matrix
   promised SKOS-aware inferencing, and there was none: `skos.ttl` was only a
   bundled vocabulary. A dataset can now select the `skos` entailment regime —
@@ -296,6 +309,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   how to get help.
 
 ### Changed
+- **JSON-LD 1.1 graded *Partial*.** `docs/standards.md` grades it for the
+  first time, on the json-ld-api run: the JSON-LD processor keeps the dot
+  segments of a base IRI, writes `@direction` as an RDF 1.2 directional string
+  in the `rdf-12` build, mis-scopes type-scoped contexts in type maps and
+  serialises invalid `rdf:JSON` literals. The comparison's JSON-LD cell, which
+  marked feature presence, follows (✅ → 🟡), and the standards score is
+  recounted 15 → 14.
 - **Settings added in this release are named for what they cover.** Before
   release, five new settings were renamed, and the old names are not read:
   `OIDC_TOKEN_POLICY` and `OIDC_WRITE_SCOPES` are now
