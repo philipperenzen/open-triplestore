@@ -4572,9 +4572,19 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Auth",
                 "Logout",
-                "Revoke the supplied refresh token.",
+                "Revoke the supplied refresh token (body `refresh_token`, else the cookie). \
+                 For a SAML session the whole refresh-token family is revoked, and when the \
+                 IdP has a Single Logout endpoint the answer carries `saml_logout_url`, \
+                 where the browser goes next. Issued access tokens stay valid until they \
+                 expire.",
                 vec![],
-                vec![("204", "Logged out")],
+                vec![
+                    (
+                        "200",
+                        "Logged out here; `{saml_logout_url}` ends the IdP session",
+                    ),
+                    ("204", "Logged out"),
+                ],
                 false,
             ),
         )],
@@ -5118,9 +5128,14 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Auth",
                 "SAML SP metadata",
-                "Service-provider SAML metadata XML for this provider.",
+                "Service-provider SAML metadata of an active provider: our entity ID (by \
+                 default this URL), the ACS and Single Logout endpoints, the signing and \
+                 encryption keys, the NameID format and the contact.",
                 vec![],
-                vec![("200", "SAML metadata (application/xml)")],
+                vec![
+                    ("200", "SAML metadata (application/samlmetadata+xml)"),
+                    ("404", "No active SAML provider with this slug"),
+                ],
                 false,
             ),
         )],
@@ -5133,17 +5148,55 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Auth",
                 "SAML assertion consumer",
-                "SAML ACS endpoint; accepts a signed response answering the AuthnRequest \
-                 this browser started, once, and redirects to the app with a session.",
+                "SAML ACS endpoint (HTTP-POST). Accepts a response signed with SHA-256 or \
+                 stronger, plain or with an encrypted assertion, that answers the AuthnRequest \
+                 this browser started, once, and redirects to the app with a session. \
+                 IdP-initiated responses only when the provider allows them, each assertion once.",
                 vec![],
                 vec![
                     ("303", "Redirect to /oauth/callback with the session tokens"),
                     ("400", "Bad or missing state binding"),
-                    ("401", "Response rejected"),
+                    ("401", "Response rejected (the reason is in the audit log)"),
                 ],
                 false,
             ),
         )],
+    );
+    mount(
+        paths,
+        "/api/auth/saml/:slug/slo",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Auth",
+                    "SAML Single Logout (redirect)",
+                    "HTTP-Redirect binding. A signed LogoutRequest from the IdP revokes the \
+                     named subject's sessions and answers with a signed LogoutResponse; a \
+                     LogoutResponse to our request lands the browser on the app.",
+                    vec![],
+                    vec![
+                        ("303", "To the IdP with our LogoutResponse, or to the app"),
+                        ("400", "LogoutRequest refused"),
+                    ],
+                    false,
+                ),
+            ),
+            (
+                M::Post,
+                o(
+                    "Auth",
+                    "SAML Single Logout (POST)",
+                    "HTTP-POST binding of the same exchange; the message must carry an XML signature.",
+                    vec![],
+                    vec![
+                        ("303", "To the IdP with our LogoutResponse, or to the app"),
+                        ("400", "LogoutRequest refused"),
+                    ],
+                    false,
+                ),
+            ),
+        ],
     );
 
     mount(paths, "/api/me/dataset-usage", vec![
@@ -6204,6 +6257,103 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 ),
             ),
         ],
+    );
+    mount(
+        paths,
+        "/api/admin/oauth/saml-metadata",
+        vec![(
+            M::Post,
+            o(
+                "Admin",
+                "Read SAML IdP metadata",
+                "Read IdP metadata from `{url}` (https, no redirects) or `{xml}` and return the \
+                 entity ID, SSO and SLO URLs and every signing certificate, to fill in a provider.",
+                vec![],
+                vec![("200", "IdP fields"), ("400", "Not usable IdP metadata")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/oauth/providers/:id/saml",
+        vec![(
+            M::Get,
+            o(
+                "Admin",
+                "SAML provider overview",
+                "Our entity ID, metadata, ACS and SLO URLs, our SP keys and the IdP certificates.",
+                vec![],
+                vec![("200", "Overview"), ("404", "No such SAML provider")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/oauth/providers/:id/saml/metadata",
+        vec![(
+            M::Get,
+            o(
+                "Admin",
+                "SAML SP metadata (admin)",
+                "The SP metadata, also for a provider that is not active yet.",
+                vec![],
+                vec![("200", "SAML metadata"), ("404", "No such SAML provider")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/oauth/providers/:id/saml/keys",
+        vec![(
+            M::Post,
+            o(
+                "Admin",
+                "Add SAML SP key",
+                "Generate a key pair, or import `{private_key, certificate}` (the key as a \
+                 secret reference, or PEM outside production). The first key signs; later \
+                 ones are published and decrypt until activated.",
+                vec![],
+                vec![("201", "Key added"), ("400", "Unusable key or certificate")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/oauth/providers/:id/saml/keys/:kid/activate",
+        vec![(
+            M::Post,
+            o(
+                "Admin",
+                "Activate SAML SP key",
+                "Make this key the one that signs (key rollover).",
+                vec![],
+                vec![("204", "Activated"), ("404", "No such key")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/oauth/providers/:id/saml/keys/:kid",
+        vec![(
+            M::Delete,
+            o(
+                "Admin",
+                "Delete SAML SP key",
+                "Retire a key that no longer signs.",
+                vec![],
+                vec![
+                    ("204", "Deleted"),
+                    ("404", "No such key"),
+                    ("409", "The current key cannot be deleted"),
+                ],
+                true,
+            ),
+        )],
     );
 
     mount(paths, "/api/admin/dataset-usage", vec![

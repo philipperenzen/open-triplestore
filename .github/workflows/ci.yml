@@ -88,7 +88,7 @@ jobs:
       # generator; run it here too, with the image's default CARGO_FEATURES, so
       # a change that breaks it fails a PR, not the next image release.
       - name: Third-party licence notices (server)
-        run: python3 scripts/gen_rust_third_party_licenses.py --features full,plugin-postgres,plugin-mysql,plugin-mssql --output "$RUNNER_TEMP/THIRD-PARTY-LICENSES-server.txt"
+        run: python3 scripts/gen_rust_third_party_licenses.py --features full,saml,plugin-postgres,plugin-mysql,plugin-mssql --output "$RUNNER_TEMP/THIRD-PARTY-LICENSES-server.txt"
 
       # No test is ignored (scripts/no-ignored-tests.sh says why): the source
       # scan catches an `#[ignore]` behind a cfg_attr for another platform,
@@ -447,6 +447,10 @@ jobs:
       # test suites; a stale table (counts that no longer match the code) fails.
       - name: Check the conformance table
         run: python3 scripts/conformance_table.py --check
+      # Every setting the docs tell operators to put in .env must reach the
+      # server under docker compose (env_file, no hard-coded overrides).
+      - name: Check compose forwards the documented settings
+        run: python3 scripts/check_compose_env.py
 
   audit:
     name: Dependency audit
