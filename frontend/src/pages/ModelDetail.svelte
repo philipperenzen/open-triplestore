@@ -793,7 +793,7 @@
         <p>{$t('pages.modelDetail.deleteVersionDependents', { values: { count: deleteBlocked.dependents.count } })}</p>
         <ul>
           {#each deleteBlocked.dependents.datasets as d}
-            <li><a href="/datasets/{d.dataset_id}">{d.name || d.dataset_id}</a> — {dependentReason(d)}</li>
+            <li><a href={withBase(`/datasets/${d.dataset_id}`)}>{d.name || d.dataset_id}</a> — {dependentReason(d)}</li>
           {/each}
           {#if deleteBlocked.dependents.hidden > 0}
             <li>{$t('pages.modelDetail.deleteVersionHidden', { values: { count: deleteBlocked.dependents.hidden } })}</li>
