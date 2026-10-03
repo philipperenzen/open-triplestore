@@ -3,9 +3,10 @@
 // or `/` is the root. Shared by vite.config.js and base-path.test.mjs.
 
 // First path segments the app itself uses (the SPA's routes, the backend's
-// routes, the static directories). The UI tells an app path from one that
-// already carries the base by its first segment (src/lib/basePath.ts), so a
-// base that starts with one of these would make `/api/…` look prefixed.
+// routes, the static directories). The UI leaves a path that already starts
+// with the base alone, so prefixing twice is harmless (withBase in
+// src/lib/basePath.ts); a base such as `/api/` would make every `/api/…` call
+// look prefixed already. Refusing these first segments keeps that unambiguous.
 export const RESERVED_FIRST_SEGMENTS = new Set([
   'admin', 'api', 'api-docs', 'assets', 'browse', 'cesium', 'chat', 'datasets', 'docs', 'embed',
   'files', 'forgot-password', 'graph-viz', 'graphs', 'groups', 'health', 'import', 'ldp', 'livez',
