@@ -44,8 +44,15 @@ pub mod skos;
 #[cfg(feature = "owl2-el")]
 pub mod owl2_el;
 
-/// The OWL 2 datatype map: value spaces and value equality.
-#[cfg(any(feature = "owl2-ql", feature = "owl2-el"))]
+/// The OWL 2 datatype maps (the EL/QL map and the RL map): value spaces,
+/// value equality, value order and datatype-restriction facets. RDFS uses
+/// it for its recognized datatypes.
+#[cfg(any(
+    feature = "owl2-ql",
+    feature = "owl2-el",
+    feature = "owl2-rl",
+    feature = "rdfs-entailment"
+))]
 pub(crate) mod datatypes;
 
 #[cfg(feature = "owl2-ql")]

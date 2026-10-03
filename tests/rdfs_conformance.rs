@@ -305,8 +305,8 @@ fn test_rdfs13_datatype_subclass_literal() {
 
 #[test]
 fn test_rdfs1_xsd_datatypes() {
-    // After materialization xsd:integer should be subClassOf rdfs:Literal (axiomatic rule rdfs1)
-    // Activated by the presence of any typed literal
+    // rdfs1 declares the datatype in use an rdfs:Datatype; rdfs13 makes it a subclass of rdfs:Literal
+    // (the datatype must be recognized and used by a literal in scope)
     let s = store_with("ex:alice ex:age \"30\"^^xsd:integer .");
     materialize(&s);
     assert!(
@@ -476,4 +476,189 @@ fn test_idempotent_double_materialization() {
         _ => 0,
     };
     assert_eq!(count1, count2, "Materialization should be idempotent");
+}
+
+// ─── RDF 1.1 Semantics: rdfD2, rdfs1, axiomatic triples (§8–9) ──────────────
+
+#[test]
+fn rdfd2_every_predicate_is_a_property() {
+    let s = store_with("ex:a ex:p ex:b . ex:a ex:q \"v\" .");
+    materialize(&s);
+    assert!(ask_in_tg(
+        &s,
+        "<http://example.org/p> rdf:type rdf:Property ."
+    ));
+    assert!(ask_in_tg(
+        &s,
+        "<http://example.org/q> rdf:type rdf:Property ."
+    ));
+}
+
+#[test]
+fn rdfs1_declares_recognized_datatypes_only() {
+    let s = store_with("ex:a ex:n 3 ; ex:v \"x\"^^ex:custom .");
+    materialize(&s);
+    assert!(
+        ask_in_tg(&s, "xsd:integer rdf:type rdfs:Datatype ."),
+        "used and recognized"
+    );
+    assert!(
+        ask_in_tg(&s, "xsd:string rdf:type rdfs:Datatype ."),
+        "always in D"
+    );
+    assert!(
+        ask_in_tg(&s, "rdf:langString rdf:type rdfs:Datatype ."),
+        "always in D"
+    );
+    assert!(
+        !ask_in_tg(&s, "<http://example.org/custom> rdf:type rdfs:Datatype ."),
+        "an unrecognized datatype IRI is not declared"
+    );
+    assert!(
+        ask_in_tg(&s, "xsd:integer rdfs:subClassOf rdfs:Literal ."),
+        "rdfs13 follows"
+    );
+}
+
+#[test]
+fn axiomatic_triples_are_present() {
+    let s = store_with("ex:a ex:p ex:b .");
+    materialize(&s);
+    for t in [
+        "rdf:type rdfs:domain rdfs:Resource .",
+        "rdf:type rdfs:range rdfs:Class .",
+        "rdfs:comment rdfs:range rdfs:Literal .",
+        "rdf:rest rdfs:range rdf:List .",
+        "rdf:nil rdf:type rdf:List .",
+        "rdfs:Datatype rdfs:subClassOf rdfs:Class .",
+        "rdfs:isDefinedBy rdfs:subPropertyOf rdfs:seeAlso .",
+        "rdf:Bag rdfs:subClassOf rdfs:Container .",
+    ] {
+        assert!(ask_in_tg(&s, t), "axiom {t}");
+    }
+}
+
+/// The axiomatic triples take part in the fixpoint: a subclass of
+/// rdfs:Resource reaches every resource, and derived classes are classes.
+#[test]
+fn axiomatic_triples_chain_with_the_rules() {
+    let s = store_with("rdfs:Resource rdfs:subClassOf ex:Thing . ex:a ex:p ex:b . ex:x a ex:C .");
+    materialize(&s);
+    assert!(ask_in_tg(
+        &s,
+        "<http://example.org/a> rdf:type <http://example.org/Thing> ."
+    ));
+    assert!(ask_in_tg(
+        &s,
+        "<http://example.org/b> rdf:type <http://example.org/Thing> ."
+    ));
+    assert!(
+        ask_in_tg(&s, "<http://example.org/C> rdfs:subClassOf rdfs:Resource ."),
+        "ex:C is a class by the range of rdf:type, then rdfs8"
+    );
+    assert!(ask_in_tg(
+        &s,
+        "<http://example.org/C> rdfs:subClassOf <http://example.org/C> ."
+    ));
+}
+
+/// D11: the container-membership axioms stop at the largest index used.
+#[test]
+fn container_membership_axioms_are_bounded_by_the_data() {
+    let s = store_with("ex:bag rdf:_3 ex:x .");
+    materialize(&s);
+    for n in 1..=3 {
+        assert!(
+            ask_in_tg(
+                &s,
+                &format!("rdf:_{n} rdf:type rdfs:ContainerMembershipProperty .")
+            ),
+            "rdf:_{n}"
+        );
+    }
+    assert!(
+        ask_in_tg(&s, "rdf:_2 rdfs:subPropertyOf rdfs:member ."),
+        "rdfs12"
+    );
+    assert!(ask_in_tg(
+        &s,
+        "<http://example.org/bag> rdfs:member <http://example.org/x> ."
+    ));
+    assert!(
+        !ask_in_tg(&s, "rdf:_4 ?p ?o ."),
+        "no index beyond the data's"
+    );
+}
+
+#[test]
+fn sub_property_subjects_are_properties() {
+    let s = store_with("ex:p rdfs:subPropertyOf ex:q .");
+    materialize(&s);
+    assert!(ask_in_tg(
+        &s,
+        "<http://example.org/p> rdf:type rdf:Property ."
+    ));
+    assert!(ask_in_tg(
+        &s,
+        "<http://example.org/p> rdfs:subPropertyOf <http://example.org/p> ."
+    ));
+}
+
+fn rdfs_inconsistency(store: &TripleStore) -> Option<String> {
+    match RdfsMaterializer::with_target(store, TG).materialize() {
+        Err(open_triplestore::reasoning::common::ReasoningError::Inconsistency {
+            rule, ..
+        }) => Some(rule),
+        Err(e) => panic!("unexpected error: {e}"),
+        Ok(_) => None,
+    }
+}
+
+/// Recognized datatypes: an ill-typed literal, or a value outside the
+/// datatype its property's range gives it, has no RDFS interpretation.
+#[test]
+fn datatype_clashes_are_inconsistent() {
+    let s = store_with("ex:a ex:n \"ten\"^^xsd:integer .");
+    assert_eq!(rdfs_inconsistency(&s).as_deref(), Some("ill-typed-literal"));
+    let s = store_with("ex:n rdfs:range xsd:integer . ex:a ex:n \"ten\" .");
+    assert_eq!(rdfs_inconsistency(&s).as_deref(), Some("datatype-clash"));
+    let s = store_with("ex:n rdfs:range xsd:string . ex:a ex:n \"tien\"@nl .");
+    assert_eq!(
+        rdfs_inconsistency(&s).as_deref(),
+        Some("datatype-clash"),
+        "a language-tagged string is no xsd:string"
+    );
+    let s = store_with(
+        "ex:m rdfs:subPropertyOf ex:n . ex:n rdfs:range ex:Count . \
+         ex:Count rdfs:subClassOf xsd:nonNegativeInteger . ex:a ex:m -1 .",
+    );
+    assert_eq!(
+        rdfs_inconsistency(&s).as_deref(),
+        Some("datatype-clash"),
+        "through a sub-property and a superclass of the range"
+    );
+    let s = store_with("ex:n rdfs:range xsd:decimal . ex:a ex:n 3 ; ex:v \"x\"^^ex:unknown .");
+    assert_eq!(
+        rdfs_inconsistency(&s),
+        None,
+        "an integer is a decimal value"
+    );
+}
+
+/// A resource typed with two datatypes whose value spaces are disjoint can
+/// denote no value.
+#[test]
+fn a_resource_in_two_disjoint_datatypes_is_inconsistent() {
+    let s = store_with("ex:n rdfs:range xsd:integer, xsd:string . ex:a ex:n ex:b .");
+    assert_eq!(rdfs_inconsistency(&s).as_deref(), Some("datatype-clash"));
+    let s = store_with("ex:n rdfs:range xsd:integer, xsd:decimal . ex:a ex:n ex:b .");
+    assert_eq!(rdfs_inconsistency(&s), None, "every integer is a decimal");
+}
+
+#[test]
+fn a_datatype_below_a_disjoint_datatype_is_inconsistent() {
+    let s = store_with("xsd:integer rdfs:subClassOf xsd:string .");
+    assert_eq!(rdfs_inconsistency(&s).as_deref(), Some("datatype-clash"));
+    let s = store_with("xsd:integer rdfs:subClassOf xsd:decimal .");
+    assert_eq!(rdfs_inconsistency(&s), None);
 }

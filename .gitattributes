@@ -66,3 +66,8 @@ scripts/hooks/* text eol=lf
 #    (a CR inside a test file is test data), so no EOL conversion at all. ──
 tests/fixtures/w3c-sparql12/** -text
 tests/fixtures/w3c-rdf12/** -text
+# ── Vendored third-party test suites: kept byte-identical to upstream (their
+#    PROVENANCE.md records it), so never convert their line endings. ──
+tests/fixtures/w3c-rdf-mt/**             -text
+tests/fixtures/w3c-sparql11/entailment/** -text
+tests/fixtures/w3c-owl2/approved/**      -text

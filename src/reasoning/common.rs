@@ -127,7 +127,11 @@ impl ProfileViolation {
 /// [`ReasoningError::Inconsistency`]. A run of any other regime says nothing
 /// about consistency either way.
 pub fn checks_consistency(regime: &str) -> bool {
-    matches!(regime, "owl2-rl" | "owl2-el" | "owl2-ql" | "owl2-dl")
+    // RDFS checks datatype clashes (RDF 1.1 Semantics, recognized datatypes).
+    matches!(
+        regime,
+        "rdfs" | "owl2-rl" | "owl2-el" | "owl2-ql" | "owl2-dl"
+    )
 }
 
 impl ReasoningError {

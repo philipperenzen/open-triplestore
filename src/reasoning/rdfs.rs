@@ -1,27 +1,31 @@
-//! RDFS entailment via forward-chaining materialization.
+//! RDFS entailment via forward-chaining materialization (RDF 1.1
+//! Semantics §8–9).
 //!
-//! Implements the complete RDFS entailment rule set (rdfs1–rdfs13) as SPARQL
-//! INSERT operations executed in a fixed-point loop.  All inferred triples are
-//! written to the `target_graph` named graph, leaving asserted data untouched.
+//! The entailment patterns `rdfD2` and `rdfs1`–`rdfs13` run as SPARQL INSERT
+//! operations in one fixed-point loop, over the asserted data and the
+//! derivations so far. Every inferred triple is written to the
+//! `target_graph` named graph, leaving asserted data untouched.
 //!
-//! # Rules
+//! The RDF and RDFS axiomatic triples are written to the target graph first,
+//! so they take part in the loop like asserted triples (for example
+//! `rdfs:Resource rdfs:subClassOf ex:C` reaches every resource). Two parts of
+//! the closure are infinite and are bounded by the data instead (decision
+//! D11, documented in `docs/rdfs-entailment.md`):
 //!
-//! | Rule   | Antecedent                                    | Consequent                          |
-//! |--------|-----------------------------------------------|-------------------------------------|
-//! | rdfs1  | ?x ?p ?lit . FILTER(isLiteral(?lit))          | ?lit rdf:type rdfs:Literal          |
-//! | rdfs2  | ?p rdfs:domain ?C . ?x ?p ?y                 | ?x rdf:type ?C                     |
-//! | rdfs3  | ?p rdfs:range  ?C . ?x ?p ?y                 | ?y rdf:type ?C                     |
-//! | rdfs4a | ?x ?p ?y                                      | ?x rdf:type rdfs:Resource           |
-//! | rdfs4b | ?x ?p ?y . FILTER(!isLiteral(?y))             | ?y rdf:type rdfs:Resource           |
-//! | rdfs5  | ?p rdfs:subPropertyOf ?q . ?q … ?r            | ?p rdfs:subPropertyOf ?r            |
-//! | rdfs6  | ?p rdf:type rdf:Property                      | ?p rdfs:subPropertyOf ?p            |
-//! | rdfs7  | ?p rdfs:subPropertyOf ?q . ?x ?p ?y           | ?x ?q ?y                           |
-//! | rdfs8  | ?C rdf:type rdfs:Class                        | ?C rdfs:subClassOf rdfs:Resource    |
-//! | rdfs9  | ?C rdfs:subClassOf ?D . ?x rdf:type ?C        | ?x rdf:type ?D                     |
-//! | rdfs10 | ?C rdf:type rdfs:Class                        | ?C rdfs:subClassOf ?C               |
-//! | rdfs11 | ?C rdfs:subClassOf ?D . ?D … ?E               | ?C rdfs:subClassOf ?E               |
-//! | rdfs12 | ?p rdf:type rdfs:ContainerMembershipProperty  | ?p rdfs:subPropertyOf rdfs:member   |
-//! | rdfs13 | ?D rdf:type rdfs:Datatype                     | ?D rdfs:subClassOf rdfs:Literal     |
+//! - the container-membership axioms are written for `rdf:_1` … `rdf:_n`,
+//!   where `n` is the largest index the graphs in scope use;
+//! - `rdfs1` declares the recognized datatypes ([`recognized_datatypes`])
+//!   that literals in scope use, plus `xsd:string` and `rdf:langString`;
+//! - `rdfD1` (a fresh blank node for each typed literal) is not
+//!   materialized: its conclusions are existential and add nothing a query
+//!   could tell apart from the literal itself.
+//!
+//! Patterns whose conclusion has a literal subject (`rdfs3` / `rdfs4b` on a
+//! literal object) are generalized triples and are not stored; what they
+//! would make unsatisfiable is checked instead: after the fixed point an
+//! ill-typed literal of a recognized datatype, or a literal outside a
+//! recognized datatype its property's range gives it, ends the run in
+//! `ReasoningError::Inconsistency` (the derived triples stay).
 
 use std::time::Instant;
 use tracing::{debug, info};
@@ -31,22 +35,175 @@ use crate::store::TripleStore;
 
 // ─── Namespace constants ──────────────────────────────────────────────────────
 
-const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-const RDF_PROPERTY: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#Property";
-const RDFS_DOMAIN: &str = "http://www.w3.org/2000/01/rdf-schema#domain";
-const RDFS_RANGE: &str = "http://www.w3.org/2000/01/rdf-schema#range";
-const RDFS_SUB_PROPERTY_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subPropertyOf";
-const RDFS_SUB_CLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
-const RDFS_RESOURCE: &str = "http://www.w3.org/2000/01/rdf-schema#Resource";
-const RDFS_LITERAL: &str = "http://www.w3.org/2000/01/rdf-schema#Literal";
-const RDFS_CLASS: &str = "http://www.w3.org/2000/01/rdf-schema#Class";
-const RDFS_DATATYPE: &str = "http://www.w3.org/2000/01/rdf-schema#Datatype";
-const RDFS_MEMBER: &str = "http://www.w3.org/2000/01/rdf-schema#member";
-const RDFS_CONTAINER_MEMBERSHIP_PROPERTY: &str =
-    "http://www.w3.org/2000/01/rdf-schema#ContainerMembershipProperty";
+const RDF_NS: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+const RDFS_NS: &str = "http://www.w3.org/2000/01/rdf-schema#";
 
 /// Maximum fixed-point iterations (safety valve).
 const MAX_ITERATIONS: usize = 500;
+
+/// One entailment pattern: its name, the conclusion and the premises, in
+/// SPARQL with the `rdf:` / `rdfs:` prefixes.
+type Rule = (&'static str, &'static str, &'static str);
+
+/// The patterns that join on schema triples; they run every round.
+const SCHEMA_RULES: &[Rule] = &[
+    ("rdfs2", "?x rdf:type ?c", "?p rdfs:domain ?c . ?x ?p ?y"),
+    // A literal object would be a literal subject: not an RDF triple.
+    (
+        "rdfs3",
+        "?y rdf:type ?c",
+        "?p rdfs:range ?c . ?x ?p ?y . FILTER(!isLiteral(?y))",
+    ),
+    (
+        "rdfs5",
+        "?p rdfs:subPropertyOf ?r",
+        "?p rdfs:subPropertyOf ?q . ?q rdfs:subPropertyOf ?r",
+    ),
+    (
+        "rdfs6",
+        "?p rdfs:subPropertyOf ?p",
+        "?p rdf:type rdf:Property",
+    ),
+    // `?p = ?q` would only restate the premise.
+    (
+        "rdfs7",
+        "?x ?q ?y",
+        "?p rdfs:subPropertyOf ?q . ?x ?p ?y . FILTER(?p != ?q)",
+    ),
+    (
+        "rdfs8",
+        "?c rdfs:subClassOf rdfs:Resource",
+        "?c rdf:type rdfs:Class",
+    ),
+    (
+        "rdfs9",
+        "?x rdf:type ?d",
+        "?c rdfs:subClassOf ?d . ?x rdf:type ?c . FILTER(?c != ?d)",
+    ),
+    ("rdfs10", "?c rdfs:subClassOf ?c", "?c rdf:type rdfs:Class"),
+    (
+        "rdfs11",
+        "?c rdfs:subClassOf ?e",
+        "?c rdfs:subClassOf ?d . ?d rdfs:subClassOf ?e",
+    ),
+    (
+        "rdfs12",
+        "?p rdfs:subPropertyOf rdfs:member",
+        "?p rdf:type rdfs:ContainerMembershipProperty",
+    ),
+    (
+        "rdfs13",
+        "?d rdfs:subClassOf rdfs:Literal",
+        "?d rdf:type rdfs:Datatype",
+    ),
+];
+
+/// The patterns with a single unrestricted premise: each scans every triple
+/// in scope, so they run only when the schema rules have reached their fixed
+/// point, and the loop goes on while they add anything.
+const DATA_RULES: &[Rule] = &[
+    (
+        "rdfD2",
+        "?p rdf:type rdf:Property",
+        "{ SELECT DISTINCT ?p WHERE { ?s ?p ?o } }",
+    ),
+    (
+        "rdfs4a",
+        "?x rdf:type rdfs:Resource",
+        "{ SELECT DISTINCT ?x WHERE { ?x ?p ?y } }",
+    ),
+    (
+        "rdfs4b",
+        "?y rdf:type rdfs:Resource",
+        "{ SELECT DISTINCT ?y WHERE { ?x ?p ?y . FILTER(!isLiteral(?y)) } }",
+    ),
+];
+
+/// `rdf:x` / `rdfs:x` to a full IRI.
+fn expand(curie: &str) -> String {
+    match curie.split_once(':') {
+        Some(("rdf", local)) => format!("{RDF_NS}{local}"),
+        Some(("rdfs", local)) => format!("{RDFS_NS}{local}"),
+        _ => curie.to_string(),
+    }
+}
+
+/// The vocabulary properties with their axiomatic domain and range
+/// (RDF 1.1 Semantics §9.1), as `(property, domain, range)`.
+const DOMAIN_RANGE: &[(&str, &str, &str)] = &[
+    ("rdf:type", "rdfs:Resource", "rdfs:Class"),
+    ("rdfs:domain", "rdf:Property", "rdfs:Class"),
+    ("rdfs:range", "rdf:Property", "rdfs:Class"),
+    ("rdfs:subPropertyOf", "rdf:Property", "rdf:Property"),
+    ("rdfs:subClassOf", "rdfs:Class", "rdfs:Class"),
+    ("rdf:subject", "rdf:Statement", "rdfs:Resource"),
+    ("rdf:predicate", "rdf:Statement", "rdfs:Resource"),
+    ("rdf:object", "rdf:Statement", "rdfs:Resource"),
+    ("rdfs:member", "rdfs:Resource", "rdfs:Resource"),
+    ("rdf:first", "rdf:List", "rdfs:Resource"),
+    ("rdf:rest", "rdf:List", "rdf:List"),
+    ("rdfs:seeAlso", "rdfs:Resource", "rdfs:Resource"),
+    ("rdfs:isDefinedBy", "rdfs:Resource", "rdfs:Resource"),
+    ("rdfs:comment", "rdfs:Resource", "rdfs:Literal"),
+    ("rdfs:label", "rdfs:Resource", "rdfs:Literal"),
+    ("rdf:value", "rdfs:Resource", "rdfs:Resource"),
+];
+
+/// The RDF and RDFS axiomatic triples (RDF 1.1 Semantics §8.1, §9.1), with
+/// the container-membership properties `rdf:_1` … `rdf:_max_member` (D11).
+pub(crate) fn axiomatic_triples(max_member: u32) -> Vec<(String, String, String)> {
+    let t = |s: &str, p: &str, o: &str| (expand(s), expand(p), expand(o));
+    let mut out = Vec::new();
+    // RDF: the vocabulary properties, and rdf:nil.
+    for local in [
+        "type",
+        "subject",
+        "predicate",
+        "object",
+        "first",
+        "rest",
+        "value",
+    ] {
+        out.push(t(&format!("rdf:{local}"), "rdf:type", "rdf:Property"));
+    }
+    out.push(t("rdf:nil", "rdf:type", "rdf:List"));
+    // RDFS: domains and ranges, then the class and property hierarchy.
+    for (p, d, r) in DOMAIN_RANGE {
+        out.push(t(p, "rdfs:domain", d));
+        out.push(t(p, "rdfs:range", r));
+    }
+    for c in ["rdf:Alt", "rdf:Bag", "rdf:Seq"] {
+        out.push(t(c, "rdfs:subClassOf", "rdfs:Container"));
+    }
+    out.push(t(
+        "rdfs:ContainerMembershipProperty",
+        "rdfs:subClassOf",
+        "rdf:Property",
+    ));
+    out.push(t("rdfs:Datatype", "rdfs:subClassOf", "rdfs:Class"));
+    out.push(t("rdfs:isDefinedBy", "rdfs:subPropertyOf", "rdfs:seeAlso"));
+    for n in 1..=max_member {
+        let m = format!("rdf:_{n}");
+        out.push(t(&m, "rdf:type", "rdf:Property"));
+        out.push(t(&m, "rdf:type", "rdfs:ContainerMembershipProperty"));
+        out.push(t(&m, "rdfs:domain", "rdfs:Resource"));
+        out.push(t(&m, "rdfs:range", "rdfs:Resource"));
+    }
+    out
+}
+
+/// The datatypes this store recognizes (the `D` of D-entailment): the
+/// OWL 2 datatype map's types and `rdf:langString`. `rdfs:Literal` is a
+/// class, not a datatype IRI, and is left out.
+pub(crate) fn recognized_datatypes() -> Vec<&'static str> {
+    let mut d: Vec<&'static str> = super::datatypes::Dt::ANY
+        .iter()
+        .map(|dt| dt.iri())
+        .filter(|iri| !iri.ends_with("rdf-schema#Literal"))
+        .collect();
+    d.push("http://www.w3.org/1999/02/22-rdf-syntax-ns#langString");
+    d
+}
 
 // ─── Materializer ─────────────────────────────────────────────────────────────
 
@@ -86,8 +243,30 @@ impl<'a> RdfsMaterializer<'a> {
     fn run_update(&self, sparql: &str) -> Result<(), crate::store::engine::StoreError> {
         match self.scope() {
             Some(scope) => self.store.update_scoped(sparql, &scope),
-            None => self.store.update(sparql),
+            // Unscoped: the unnamed default graph and the target graph, so a
+            // rule sees the previous rounds' derivations.
+            None => self
+                .store
+                .update_over(sparql, std::slice::from_ref(&self.target_graph)),
         }
+    }
+
+    /// The graphs the rules read, for a direct quad scan.
+    fn graphs(&self) -> Vec<oxigraph::model::GraphName> {
+        use oxigraph::model::{GraphName, NamedNode};
+        let mut v: Vec<GraphName> = Vec::new();
+        if self.sources.is_none() {
+            v.push(GraphName::DefaultGraph);
+        }
+        let names = self
+            .scope()
+            .unwrap_or_else(|| vec![self.target_graph.clone()]);
+        v.extend(
+            names
+                .into_iter()
+                .filter_map(|g| NamedNode::new(g).ok().map(GraphName::NamedNode)),
+        );
+        v
     }
 
     /// Create a materializer targeting a named graph (pass [`RDFS_ENTAILMENT_GRAPH`]
@@ -100,40 +279,35 @@ impl<'a> RdfsMaterializer<'a> {
         }
     }
 
-    /// Run all RDFS rules to fixed point and return a summary.
+    /// Run the RDFS patterns to their fixed point and return a summary.
     pub fn materialize(&self) -> Result<ReasoningReport, ReasoningError> {
         let start = Instant::now();
-        let mut iterations = 0usize;
-        // `triples_added` must be the delta this run produced, not the graph's
-        // size afterwards — reporting the size meant a second run that inferred
-        // nothing still claimed thousands of "added" triples.
+        // `triples_added` is the delta this run produced, not the graph's size
+        // afterwards, so a re-run that infers nothing reports 0.
         let initial = count_graph(self.store, &self.target_graph)?;
-
         info!("RDFS materialization → <{}>", self.target_graph);
 
+        // The axiomatic triples and rdfs1 first: no pattern derives a new
+        // container-membership property or a new literal, so one scan of the
+        // data bounds both.
+        self.write_axioms()?;
+
+        let mut iterations = 0usize;
         loop {
             iterations += 1;
             let before = count_graph(self.store, &self.target_graph)?;
-
-            // Core inference rules (produce chained inferences)
-            self.apply_rdfs2()?;
-            self.apply_rdfs3()?;
-            self.apply_rdfs5()?;
-            self.apply_rdfs7()?;
-            self.apply_rdfs9()?;
-            self.apply_rdfs11()?;
-            self.apply_rdfs12()?;
-            self.apply_rdfs13()?;
-
-            let after = count_graph(self.store, &self.target_graph)?;
-            let added_this_round = after.saturating_sub(before);
-
-            debug!(
-                "RDFS iteration {}: +{} triples",
-                iterations, added_this_round
-            );
-
-            if added_this_round == 0 {
+            for rule in SCHEMA_RULES {
+                self.apply(rule)?;
+            }
+            let mut added = count_graph(self.store, &self.target_graph)?.saturating_sub(before);
+            if added == 0 {
+                for rule in DATA_RULES {
+                    self.apply(rule)?;
+                }
+                added = count_graph(self.store, &self.target_graph)?.saturating_sub(before);
+            }
+            debug!("RDFS iteration {}: +{} triples", iterations, added);
+            if added == 0 {
                 break;
             }
             if iterations >= MAX_ITERATIONS {
@@ -144,25 +318,16 @@ impl<'a> RdfsMaterializer<'a> {
             }
         }
 
-        // Axiomatic rules: run once after fixed-point convergence.
-        // These generate many triples but do not produce chained inferences
-        // with the core rules above.
-        self.apply_rdfs1()?;
-        self.apply_rdfs4a()?;
-        self.apply_rdfs4b()?;
-        self.apply_rdfs6()?;
-        self.apply_rdfs8()?;
-        self.apply_rdfs10()?;
+        // The derived triples stay; the report is the inconsistency.
+        self.check_datatypes()?;
 
         let final_count = count_graph(self.store, &self.target_graph)?;
-
         info!(
             "RDFS materialization complete: {} triples in {} iterations ({} ms)",
             final_count,
             iterations,
             start.elapsed().as_millis()
         );
-
         Ok(ReasoningReport {
             regime: "rdfs".to_string(),
             triples_added: final_count.saturating_sub(initial),
@@ -173,219 +338,185 @@ impl<'a> RdfsMaterializer<'a> {
         })
     }
 
-    // ─── Rule rdfs2: domain ───────────────────────────────────────────────────
-
-    fn apply_rdfs2(&self) -> Result<(), ReasoningError> {
-        // Also look in target graph for property triples inferred by rdfs7
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?c }} }}
-               WHERE  {{
-                   ?p <{RDFS_DOMAIN}> ?c .
-                   {{ ?x ?p ?y }} UNION {{ GRAPH <{tg}> {{ ?x ?p ?y }} }}
-               }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
+    /// Write the axiomatic triples (with `rdf:_1` … `rdf:_n` for the largest
+    /// `n` in scope) and the `rdfs1` declarations of the recognized datatypes
+    /// in use, plus `xsd:string` and `rdf:langString`.
+    fn write_axioms(&self) -> Result<(), ReasoningError> {
+        use oxigraph::model::{NamedNode, Quad, Term};
+        let member = |iri: &str| -> u32 {
+            iri.strip_prefix(RDF_NS)
+                .and_then(|l| l.strip_prefix('_'))
+                .filter(|n| !n.starts_with('0'))
+                .and_then(|n| n.parse::<u32>().ok())
+                .unwrap_or(0)
+        };
+        let mut max_member = 0u32;
+        let mut used: std::collections::HashSet<String> = [
+            "http://www.w3.org/2001/XMLSchema#string",
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        for g in self.graphs() {
+            for quad in self
+                .store
+                .store()
+                .quads_for_pattern(None, None, None, Some(g.as_ref()))
+            {
+                let quad = quad.map_err(|e| ReasoningError::Store(e.to_string()))?;
+                if let oxigraph::model::NamedOrBlankNode::NamedNode(n) = &quad.subject {
+                    max_member = max_member.max(member(n.as_str()));
+                }
+                max_member = max_member.max(member(quad.predicate.as_str()));
+                match &quad.object {
+                    Term::NamedNode(n) => max_member = max_member.max(member(n.as_str())),
+                    Term::Literal(l) => {
+                        used.insert(l.datatype().as_str().to_string());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let target = NamedNode::new(self.target_graph.clone())
+            .map_err(|e| ReasoningError::Store(e.to_string()))?;
+        let quad = |s: &str, p: &str, o: &str| {
+            Quad::new(
+                NamedNode::new_unchecked(s),
+                NamedNode::new_unchecked(p),
+                NamedNode::new_unchecked(o),
+                target.clone(),
+            )
+        };
+        let mut quads: Vec<Quad> = axiomatic_triples(max_member)
+            .iter()
+            .map(|(s, p, o)| quad(s, p, o))
+            .collect();
+        // rdfs1: each recognized datatype in use is an rdfs:Datatype.
+        let rdf_type = expand("rdf:type");
+        let datatype = expand("rdfs:Datatype");
+        for d in recognized_datatypes() {
+            if used.contains(d) {
+                quads.push(quad(d, &rdf_type, &datatype));
+            }
+        }
+        self.store.insert_quads(quads)?;
         Ok(())
     }
 
-    // ─── Rule rdfs3: range ────────────────────────────────────────────────────
+    /// A SELECT over the same graphs the patterns read.
+    fn rows(
+        &self,
+        sparql: &str,
+        vars: &[&str],
+    ) -> Result<Vec<Vec<Option<oxigraph::model::Term>>>, ReasoningError> {
+        let res = match self.scope() {
+            Some(scope) => self.store.query_scoped(sparql, &scope),
+            None => self
+                .store
+                .query_over(sparql, std::slice::from_ref(&self.target_graph)),
+        }?;
+        let mut out = Vec::new();
+        if let oxigraph::sparql::QueryResults::Solutions(sols) = res {
+            for sol in sols {
+                let sol = sol.map_err(|e| ReasoningError::Query(e.to_string()))?;
+                out.push(vars.iter().map(|v| sol.get(*v).cloned()).collect());
+            }
+        }
+        Ok(out)
+    }
 
-    fn apply_rdfs3(&self) -> Result<(), ReasoningError> {
-        // Also look in target graph for property triples inferred by rdfs7
+    /// The datatype clashes that make the graph unsatisfiable for an RDFS
+    /// interpretation recognizing [`recognized_datatypes`] (RDF 1.1 Semantics
+    /// §7, §9): an ill-typed literal of a recognized datatype, and a literal
+    /// whose value is outside a recognized datatype its property's range, or
+    /// a superclass of that range, gives it (`rdfs3`, then `rdfs9`).
+    fn check_datatypes(&self) -> Result<(), ReasoningError> {
+        use super::datatypes::{self, Dt};
+        use oxigraph::model::Term;
+        for g in self.graphs() {
+            for quad in self
+                .store
+                .store()
+                .quads_for_pattern(None, None, None, Some(g.as_ref()))
+            {
+                let quad = quad.map_err(|e| ReasoningError::Store(e.to_string()))?;
+                if let Term::Literal(l) = &quad.object {
+                    if Dt::from_any_iri(l.datatype().as_str()).is_some()
+                        && datatypes::literal_value(l).is_none()
+                    {
+                        return Err(ReasoningError::inconsistency(
+                            "ill-typed-literal",
+                            format!("{l} is not in the lexical space of its datatype"),
+                        ));
+                    }
+                }
+            }
+        }
         let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?y <{RDF_TYPE}> ?c }} }}
-               WHERE  {{
-                   ?p <{RDFS_RANGE}> ?c .
-                   {{ ?x ?p ?y }} UNION {{ GRAPH <{tg}> {{ ?x ?p ?y }} }}
-                   FILTER(isIRI(?y) || isBlank(?y))
-               }}"#,
-            tg = self.target_graph
+            "SELECT DISTINCT ?lt ?d WHERE {{ ?p <{RDFS_NS}range> ?c . ?x ?p ?lt . FILTER(isLiteral(?lt)) \
+             {{ BIND(?c AS ?d) }} UNION {{ ?c <{RDFS_NS}subClassOf> ?d }} }}"
         );
-        self.run_update(&q)?;
+        let lang_string = format!("{RDF_NS}langString");
+        for r in self.rows(&q, &["lt", "d"])? {
+            let (Some(Term::Literal(lt)), Some(Term::NamedNode(d))) = (&r[0], &r[1]) else {
+                continue;
+            };
+            let clash = if d.as_str() == lang_string {
+                lt.language().is_none()
+            } else {
+                match (Dt::from_any_iri(d.as_str()), datatypes::literal_value(lt)) {
+                    (Some(dt), Some(v)) => datatypes::in_value_space(&v, dt) == Some(false),
+                    _ => false,
+                }
+            };
+            if clash {
+                return Err(ReasoningError::inconsistency(
+                    "datatype-clash",
+                    format!("{lt} is in the range {d}, which does not hold its value"),
+                ));
+            }
+        }
+        // A resource typed with two recognized datatypes whose value spaces
+        // are disjoint (xsd:integer and xsd:string) can denote no value; nor
+        // can a datatype be a subclass of one disjoint from it (every
+        // datatype here has values).
+        let q = format!(
+            "SELECT DISTINCT ?d1 ?d2 WHERE {{ \
+             {{ ?x <{RDF_NS}type> ?d1 . \
+                FILTER(STRSTARTS(STR(?d1), \"http://www.w3.org/2001/XMLSchema#\")) \
+                ?x <{RDF_NS}type> ?d2 . FILTER(STR(?d1) < STR(?d2)) }} \
+             UNION {{ ?d1 <{RDFS_NS}subClassOf> ?d2 . \
+                FILTER(STRSTARTS(STR(?d1), \"http://www.w3.org/2001/XMLSchema#\")) }} }}"
+        );
+        for r in self.rows(&q, &["d1", "d2"])? {
+            let (Some(Term::NamedNode(a)), Some(Term::NamedNode(b))) = (&r[0], &r[1]) else {
+                continue;
+            };
+            if let (Some(x), Some(y)) = (Dt::from_any_iri(a.as_str()), Dt::from_any_iri(b.as_str()))
+            {
+                if x.disjoint(y) {
+                    return Err(ReasoningError::inconsistency(
+                        "datatype-clash",
+                        format!(
+                            "the disjoint datatypes {a} and {b} share an instance or a subclass"
+                        ),
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
-    // ─── Rule rdfs5: subPropertyOf transitivity ───────────────────────────────
-
-    fn apply_rdfs5(&self) -> Result<(), ReasoningError> {
-        // Both legs must also be read from the target graph — the derived
-        // `subPropertyOf` triples land there, so a rule that only reads the
-        // default graph never sees its own previous round's output. The
-        // fixed-point loop then converged after one step and a chain
-        // p ⊑ q ⊑ r ⊑ s never produced p ⊑ s. Mirrors `apply_rdfs11`, which
-        // already reads both.
+    /// Run one pattern as an INSERT into the target graph.
+    fn apply(&self, (name, head, body): &Rule) -> Result<(), ReasoningError> {
         let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?p <{RDFS_SUB_PROPERTY_OF}> ?r }} }}
-               WHERE  {{
-                   {{ ?p <{RDFS_SUB_PROPERTY_OF}> ?q }}
-                   UNION {{ GRAPH <{tg}> {{ ?p <{RDFS_SUB_PROPERTY_OF}> ?q }} }}
-                   {{ ?q <{RDFS_SUB_PROPERTY_OF}> ?r }}
-                   UNION {{ GRAPH <{tg}> {{ ?q <{RDFS_SUB_PROPERTY_OF}> ?r }} }}
-                   FILTER(?p != ?r)
-               }}"#,
+            "PREFIX rdf: <{RDF_NS}>\nPREFIX rdfs: <{RDFS_NS}>\n\
+             INSERT {{ GRAPH <{tg}> {{ {head} }} }} WHERE {{ {body} }}",
             tg = self.target_graph
         );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ─── Rule rdfs7: subPropertyOf inheritance ────────────────────────────────
-
-    fn apply_rdfs7(&self) -> Result<(), ReasoningError> {
-        // Also look in target graph for subPropertyOf from rdfs5 and property triples from rdfs7
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?x ?q ?y }} }}
-               WHERE  {{
-                   {{ ?p <{RDFS_SUB_PROPERTY_OF}> ?q }} UNION {{ GRAPH <{tg}> {{ ?p <{RDFS_SUB_PROPERTY_OF}> ?q }} }}
-                   {{ ?x ?p ?y }} UNION {{ GRAPH <{tg}> {{ ?x ?p ?y }} }}
-                   FILTER(?p != ?q)
-               }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ─── Rule rdfs9: subClassOf instance propagation ──────────────────────────
-
-    fn apply_rdfs9(&self) -> Result<(), ReasoningError> {
-        // Also look in target graph for types inferred in previous iterations
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?d }} }}
-               WHERE  {{
-                   {{ ?c <{RDFS_SUB_CLASS_OF}> ?d }}
-                   UNION {{ GRAPH <{tg}> {{ ?c <{RDFS_SUB_CLASS_OF}> ?d }} }}
-                   {{ ?x <{RDF_TYPE}> ?c }}
-                   UNION {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?c }} }}
-                   FILTER(?c != ?d)
-               }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ─── Rule rdfs11: subClassOf transitivity ─────────────────────────────────
-
-    fn apply_rdfs11(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?c <{RDFS_SUB_CLASS_OF}> ?e }} }}
-               WHERE  {{
-                   {{ ?c <{RDFS_SUB_CLASS_OF}> ?d }}
-                   UNION {{ GRAPH <{tg}> {{ ?c <{RDFS_SUB_CLASS_OF}> ?d }} }}
-                   {{ ?d <{RDFS_SUB_CLASS_OF}> ?e }}
-                   UNION {{ GRAPH <{tg}> {{ ?d <{RDFS_SUB_CLASS_OF}> ?e }} }}
-                   FILTER(?c != ?e)
-               }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ─── Rule rdfs12: ContainerMembershipProperty → subPropertyOf rdfs:member ─
-
-    fn apply_rdfs12(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?p <{RDFS_SUB_PROPERTY_OF}> <{RDFS_MEMBER}> }} }}
-               WHERE  {{ ?p <{RDF_TYPE}> <{RDFS_CONTAINER_MEMBERSHIP_PROPERTY}> }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ─── Rule rdfs13: rdfs:Datatype → subClassOf rdfs:Literal ────────────────
-
-    fn apply_rdfs13(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?d <{RDFS_SUB_CLASS_OF}> <{RDFS_LITERAL}> }} }}
-               WHERE  {{ ?d <{RDF_TYPE}> <{RDFS_DATATYPE}> }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Axiomatic rules (run once after fixed-point convergence)
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    // ─── Rule rdfs1: datatype → rdfs:Literal ───────────────────────────────
-    // For every typed literal, its datatype IRI is a subclass of rdfs:Literal.
-    // (Literals cannot be subjects in RDF, so the W3C RDFS rule is expressed
-    //  via the datatype rather than the literal value itself.)
-
-    fn apply_rdfs1(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?dt <{RDFS_SUB_CLASS_OF}> <{RDFS_LITERAL}> }} }}
-               WHERE  {{ ?s ?p ?lit . FILTER(isLiteral(?lit))
-                         BIND(DATATYPE(?lit) AS ?dt) FILTER(BOUND(?dt)) }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ─── Rule rdfs4a: every subject is a rdfs:Resource ───────────────────────
-
-    fn apply_rdfs4a(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?s <{RDF_TYPE}> <{RDFS_RESOURCE}> }} }}
-               WHERE  {{ ?s ?p ?o . FILTER(isIRI(?s) || isBlank(?s)) }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ─── Rule rdfs4b: every IRI/bnode object is a rdfs:Resource ──────────────
-
-    fn apply_rdfs4b(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?o <{RDF_TYPE}> <{RDFS_RESOURCE}> }} }}
-               WHERE  {{ ?s ?p ?o . FILTER(isIRI(?o) || isBlank(?o)) }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ─── Rule rdfs6: every property is subPropertyOf itself ──────────────────
-
-    fn apply_rdfs6(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?p <{RDFS_SUB_PROPERTY_OF}> ?p }} }}
-               WHERE  {{ ?p <{RDF_TYPE}> <{RDF_PROPERTY}> }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ─── Rule rdfs8: every class is subClassOf rdfs:Resource ─────────────────
-
-    fn apply_rdfs8(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?c <{RDFS_SUB_CLASS_OF}> <{RDFS_RESOURCE}> }} }}
-               WHERE  {{ ?c <{RDF_TYPE}> <{RDFS_CLASS}> }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ─── Rule rdfs10: every class is subClassOf itself ───────────────────────
-
-    fn apply_rdfs10(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?c <{RDFS_SUB_CLASS_OF}> ?c }} }}
-               WHERE  {{ ?c <{RDF_TYPE}> <{RDFS_CLASS}> }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
+        self.run_update(&q)
+            .map_err(|e| ReasoningError::Query(format!("RDFS pattern {name}: {e}")))
     }
 }
 
@@ -524,7 +655,8 @@ mod tests {
         RdfsMaterializer::with_target(&s, RDFS_ENTAILMENT_GRAPH)
             .materialize()
             .unwrap();
-        // The datatype xsd:integer should be inferred as subClassOf rdfs:Literal
+        // rdfs1 declares xsd:integer an rdfs:Datatype; rdfs13 then makes it a
+        // subclass of rdfs:Literal.
         assert!(ask(
             &s,
             "ASK { GRAPH <urn:entailment:rdfs> \
