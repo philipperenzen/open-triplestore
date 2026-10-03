@@ -605,7 +605,9 @@ async fn execute_query(
 
     // Entailment: a dataset's own entailment graph (`entailment_dataset`, regime
     // from the parameter or the dataset's configuration), else the shared
-    // `urn:entailment:<regime>` graph, joins the default graph via FROM.
+    // `urn:entailment:<regime>` graph, joins the default graph via FROM. Several
+    // FROM graphs make the default graph their RDF merge, a set (vendored
+    // spareval), so a triple both asserted and derived is one answer, not two.
     // Whether the regime is OWL 2 QL: its blank nodes are then rewritten
     // existentially over the TBox (see below).
     let mut ql_existentials = false;

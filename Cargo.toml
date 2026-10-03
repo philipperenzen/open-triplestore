@@ -4,6 +4,11 @@
 # needed here. It still needs an optional dependency entry + feature flag
 # below, and a registration in `src/plugins.rs`, to actually be built in.
 members = [".", "opengraph", "plugins/*", "tools/*"]
+# The vendored Oxigraph SPARQL crates (see vendor/README.md) are path
+# dependencies inside the workspace directory, which would otherwise make them
+# members: they would then be linted, formatted and tested as our own code, and
+# their dev-dependencies would enter Cargo.lock.
+exclude = ["vendor/spargebra", "vendor/spareval", "vendor/sparopt"]
 resolver = "2"
 
 [package]
@@ -403,3 +408,14 @@ debug = false
 # give it the same treatment so `cargo test` / `cargo nextest` link faster too.
 [profile.test.package."*"]
 debug = false
+
+# The SPARQL parser, evaluator and optimizer that oxigraph 0.5.11 pins
+# (spargebra 0.4.7, spareval 0.2.7, sparopt 0.3.7), with SPARQL conformance
+# fixes backported from upstream main or written here (vendor/README.md lists each, with the upstream PR text
+# in vendor/*/UPSTREAM-PR.md). Path patches, not git ones, so cargo-deny's
+# `unknown-git = "deny"` keeps holding; the rest of the oxigraph family still
+# comes from crates.io at the versions oxigraph 0.5.11 pins.
+[patch.crates-io]
+spargebra = { path = "vendor/spargebra" }
+spareval = { path = "vendor/spareval" }
+sparopt = { path = "vendor/sparopt" }

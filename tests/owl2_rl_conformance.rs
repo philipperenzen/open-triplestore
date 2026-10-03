@@ -307,7 +307,7 @@ fn test_cax_adc_inconsistency() {
     );
     assert!(
         check_inconsistency(&s),
-        "cax-adc: AllDisjointClasses expansion + inconsistency"
+        "cax-adc: two members of an AllDisjointClasses share an instance"
     );
 }
 
@@ -672,7 +672,8 @@ fn rule_inventory_is_the_whole_rl_rule_set() {
     for must in ["prp-key", "dt-type1", "dt-not-type", "eq-rep-s", "prp-trp"] {
         assert!(IMPLEMENTED_RULES.contains(&must), "{must} is implemented");
     }
-    assert_eq!(IMPLEMENTED_RULES.len(), 75);
+    assert_eq!(IMPLEMENTED_RULES.len(), 78);
+    assert!(UNIMPLEMENTED_RULES.is_empty(), "every rule runs");
 }
 
 // ─── Joins over two derived premises (unscoped runs) ─────────────────────────
@@ -1031,7 +1032,7 @@ fn blank_node_members_of_intersections_unions_and_disjoint_lists_count() {
     );
     assert_eq!(
         inconsistent_rule(&s).as_deref(),
-        Some("cax-dw"),
+        Some("cax-adc"),
         "cax-adc pairs ex:A with the blank restriction, cls-hv2 types ex:x with it"
     );
 }
@@ -1190,5 +1191,528 @@ fn inverse_property_characteristics_and_domain() {
     assert!(
         ask_tg(&s, "ex:acme owl:sameAs ex:acme2 ."),
         "prp-fp over an inverse (ex:employs is inverse-functional)"
+    );
+}
+
+// ─── Table 8 over data values (dt-type2, dt-eq, dt-diff) ─────────────────────
+//
+// The three rules conclude triples with a literal subject. The engine works
+// out their RDF-representable consequences from the literals' data values.
+
+/// dt-eq + eq-rep-o: equal values written with different datatypes get each
+/// other's triples.
+#[test]
+fn dt_eq_copies_triples_to_equal_valued_literals() {
+    let s = store_with("ex:x ex:p \"1\"^^xsd:integer . ex:y ex:q \"1.0\"^^xsd:decimal .");
+    materialize(&s);
+    assert!(
+        ask_tg(&s, "ex:x ex:p ?o . FILTER(datatype(?o) = xsd:decimal)"),
+        "the integer 1 and the decimal 1.0 are one value"
+    );
+    assert!(
+        ask_tg(&s, "ex:y ex:q ?o . FILTER(datatype(?o) = xsd:integer)"),
+        "and the copy goes both ways"
+    );
+    let s = store_with("ex:x ex:p \"1\"^^xsd:integer . ex:y ex:q \"1.5\"^^xsd:decimal .");
+    materialize(&s);
+    assert!(
+        !ask_tg(&s, "ex:x ex:p ?o . FILTER(datatype(?o) = xsd:decimal)"),
+        "different values are not copied"
+    );
+}
+
+/// cls-hv2 by value: a hasValue restriction matches an equal value written
+/// differently.
+#[test]
+fn has_value_matches_by_value() {
+    let s = store_with(
+        "ex:One owl:onProperty ex:n ; owl:hasValue \"1\"^^xsd:integer . \
+         ex:a ex:n \"1.0\"^^xsd:decimal . ex:b ex:n \"2\"^^xsd:integer .",
+    );
+    materialize(&s);
+    assert!(ask_tg(&s, "ex:a rdf:type ex:One ."), "1.0 is the value 1");
+    assert!(!ask_tg(&s, "ex:b rdf:type ex:One ."), "2 is not");
+}
+
+/// prp-key by value: key values that are one value make the individuals
+/// the same.
+#[test]
+fn has_key_matches_by_value() {
+    let s = store_with(
+        "ex:C owl:hasKey ( ex:id ) . ex:a a ex:C ; ex:id \"7\"^^xsd:integer . \
+         ex:b a ex:C ; ex:id \"7.0\"^^xsd:decimal . ex:c a ex:C ; ex:id \"8\"^^xsd:integer .",
+    );
+    materialize(&s);
+    assert!(
+        ask_tg(&s, "ex:a owl:sameAs ex:b ."),
+        "7 and 7.0 are one key value"
+    );
+    assert!(!ask_tg(&s, "ex:a owl:sameAs ex:c ."), "8 is another");
+}
+
+/// prp-npa2 by value: a negative data assertion is violated by an equal
+/// value written differently.
+#[test]
+fn negative_data_assertion_matches_by_value() {
+    let s = store_with(
+        "[] owl:sourceIndividual ex:i ; owl:assertionProperty ex:n ; \
+            owl:targetValue \"5\"^^xsd:integer . \
+         ex:i ex:n \"5.0\"^^xsd:decimal .",
+    );
+    assert_eq!(inconsistent_rule(&s).as_deref(), Some("prp-npa2"));
+    let s = store_with(
+        "[] owl:sourceIndividual ex:i ; owl:assertionProperty ex:n ; \
+            owl:targetValue \"5\"^^xsd:integer . \
+         ex:i ex:n \"6\"^^xsd:integer .",
+    );
+    assert_eq!(inconsistent_rule(&s), None);
+}
+
+/// dt-diff + eq-diff1: two different values of a functional data property
+/// are an inconsistency; one value written two ways is not.
+#[test]
+fn functional_data_property_with_two_values_is_inconsistent() {
+    let s = store_with("ex:age a owl:FunctionalProperty . ex:x ex:age 41, 42 .");
+    assert_eq!(inconsistent_rule(&s).as_deref(), Some("dt-diff"));
+    let s = store_with(
+        "ex:age a owl:FunctionalProperty . ex:x ex:age \"1\"^^xsd:integer, \"1.0\"^^xsd:decimal .",
+    );
+    assert_eq!(inconsistent_rule(&s), None, "one value, two lexical forms");
+}
+
+/// cls-maxc2 over a data property: a maximum cardinality of one with two
+/// different values is an inconsistency.
+#[test]
+fn max_cardinality_one_with_two_data_values_is_inconsistent() {
+    let s = store_with(
+        "ex:R owl:onProperty ex:code ; owl:maxCardinality \"1\"^^xsd:nonNegativeInteger . \
+         ex:x a ex:R ; ex:code \"a\", \"b\" .",
+    );
+    assert_eq!(inconsistent_rule(&s).as_deref(), Some("dt-diff"));
+}
+
+/// dt-not-type through prp-rng: a value outside its property's datatype
+/// range is an inconsistency.
+#[test]
+fn value_outside_a_datatype_range_is_inconsistent() {
+    let s = store_with("ex:age rdfs:range xsd:integer . ex:x ex:age \"forty\" .");
+    assert_eq!(inconsistent_rule(&s).as_deref(), Some("dt-not-type"));
+    let s = store_with("ex:age rdfs:range xsd:decimal . ex:x ex:age 40 .");
+    assert_eq!(inconsistent_rule(&s), None, "an integer is a decimal value");
+    let s = store_with("ex:age rdfs:range xsd:nonNegativeInteger . ex:x ex:age -1 .");
+    assert_eq!(inconsistent_rule(&s).as_deref(), Some("dt-not-type"));
+}
+
+/// D4, the storage limit: oxigraph keeps `"300"^^xsd:byte` as the integer
+/// 300, so the literal itself is not ill-typed after storage; a range of
+/// `xsd:byte` still rejects the value. (Storage that keeps lexical forms
+/// and datatypes would turn the first case into `dt-not-type`.)
+#[test]
+fn out_of_range_byte_is_caught_by_value_not_by_its_stored_datatype() {
+    let s = store_with("ex:x ex:n \"300\"^^xsd:byte .");
+    assert_eq!(inconsistent_rule(&s), None, "stored as the integer 300");
+    let s = store_with("ex:n rdfs:range xsd:byte . ex:x ex:n 300 .");
+    assert_eq!(inconsistent_rule(&s).as_deref(), Some("dt-not-type"));
+}
+
+/// dt-type2 feeding cls-svf1: a data value types the subject of a
+/// someValuesFrom restriction on a datatype that holds the value.
+#[test]
+fn data_values_type_some_values_from_subjects() {
+    let s = store_with(
+        "ex:HasCount owl:onProperty ex:n ; owl:someValuesFrom xsd:decimal . \
+         ex:Flagged owl:onProperty ex:n ; owl:someValuesFrom xsd:boolean . \
+         ex:a ex:n 3 . ex:b ex:n \"three\" .",
+    );
+    materialize(&s);
+    assert!(
+        ask_tg(&s, "ex:a rdf:type ex:HasCount ."),
+        "3 is a decimal value"
+    );
+    assert!(
+        !ask_tg(&s, "ex:b rdf:type ex:HasCount ."),
+        "a string is not"
+    );
+    assert!(!ask_tg(&s, "ex:a rdf:type ex:Flagged ."), "3 is no boolean");
+}
+
+/// A double is not a decimal: the float/double value spaces are disjoint
+/// from the decimal one.
+#[test]
+fn double_values_are_not_decimal_values() {
+    let s = store_with(
+        "ex:HasDecimal owl:onProperty ex:n ; owl:someValuesFrom xsd:decimal . \
+         ex:a ex:n \"1.0E0\"^^xsd:double .",
+    );
+    materialize(&s);
+    assert!(!ask_tg(&s, "ex:a rdf:type ex:HasDecimal ."));
+    let s = store_with(
+        "ex:age a owl:FunctionalProperty . ex:x ex:age \"1\"^^xsd:integer, \"1.0E0\"^^xsd:double .",
+    );
+    assert_eq!(
+        inconsistent_rule(&s).as_deref(),
+        Some("dt-diff"),
+        "1 and 1.0E0 differ"
+    );
+}
+
+/// cls-nothing2 over a literal: a range of owl:Nothing has no values.
+#[test]
+fn a_literal_in_owl_nothing_is_inconsistent() {
+    let s = store_with("ex:p rdfs:range owl:Nothing . ex:x ex:p \"v\" .");
+    assert_eq!(inconsistent_rule(&s).as_deref(), Some("cls-nothing2"));
+}
+
+// ─── Differential test against a generalized-triple reference evaluator ──────
+//
+// `support/rl_reference.rs` applies the 78 RL/RDF rules naively over
+// generalized triples (literal subjects included). For seeded random graphs
+// the engine must agree with it on consistency and, when consistent, its
+// output must be exactly the RDF-representable part of the reference
+// closure. Reflexive `x owl:sameAs x` triples are left out on both sides:
+// they are eq-ref conclusions, which are opt-in (decision D2).
+//
+// The generator keeps object and data properties apart (as OWL 2's typing
+// does): object properties link individuals, data properties link an
+// individual to a literal. Graphs that use a data property as an object
+// property produce conclusions through literal-subject triples, which the
+// engine does not simulate (see `docs/owl2-rl.md`).
+
+#[path = "support/rl_reference.rs"]
+mod rl_reference;
+
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        // xorshift64*
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+    fn chance(&mut self, pct: u64) -> bool {
+        self.next() % 100 < pct
+    }
+    fn pick<'a>(&mut self, xs: &[&'a str]) -> &'a str {
+        xs[self.below(xs.len())]
+    }
+    /// `k` distinct picks.
+    fn distinct<'a>(&mut self, xs: &[&'a str], k: usize) -> Vec<&'a str> {
+        let mut v: Vec<&'a str> = xs.to_vec();
+        for i in 0..v.len() {
+            let j = i + self.below(v.len() - i);
+            v.swap(i, j);
+        }
+        v.truncate(k.min(xs.len()));
+        v
+    }
+}
+
+const CLASSES: &[&str] = &["ex:C0", "ex:C1", "ex:C2", "ex:C3"];
+const OPROPS: &[&str] = &["ex:P0", "ex:P1", "ex:P2"];
+const DPROPS: &[&str] = &["ex:D0", "ex:D1"];
+const INDS: &[&str] = &["ex:I0", "ex:I1", "ex:I2", "ex:I3"];
+const LITS: &[&str] = &[
+    "\"0\"^^xsd:integer",
+    "\"1\"^^xsd:integer",
+    "\"1.0\"^^xsd:decimal",
+    "\"1.5\"^^xsd:decimal",
+    "\"x1\"",
+    "\"y2\"",
+    "\"true\"^^xsd:boolean",
+];
+const DTYPES: &[&str] = &[
+    "xsd:integer",
+    "xsd:decimal",
+    "xsd:string",
+    "xsd:boolean",
+    "xsd:nonNegativeInteger",
+    "xsd:positiveInteger",
+    "xsd:byte",
+];
+
+fn card(r: &mut Rng) -> &'static str {
+    if r.chance(50) {
+        "\"0\"^^xsd:nonNegativeInteger"
+    } else {
+        "\"1\"^^xsd:nonNegativeInteger"
+    }
+}
+
+/// A restriction, written as an inline blank node.
+fn restriction(r: &mut Rng) -> String {
+    let data = r.chance(40);
+    let p = if data { r.pick(DPROPS) } else { r.pick(OPROPS) };
+    let filler = |r: &mut Rng| -> String {
+        if data {
+            r.pick(DTYPES).to_string()
+        } else if r.chance(20) {
+            "owl:Thing".to_string()
+        } else {
+            r.pick(CLASSES).to_string()
+        }
+    };
+    let body = match r.below(5) {
+        0 => format!("owl:someValuesFrom {}", filler(r)),
+        1 => format!("owl:allValuesFrom {}", filler(r)),
+        2 => {
+            let v = if data { r.pick(LITS) } else { r.pick(INDS) };
+            format!("owl:hasValue {v}")
+        }
+        3 => format!("owl:maxCardinality {}", card(r)),
+        _ => format!(
+            "owl:maxQualifiedCardinality {} ; owl:onClass {}",
+            card(r),
+            filler(r)
+        ),
+    };
+    format!("[ owl:onProperty {p} ; {body} ]")
+}
+
+/// A class expression: mostly named, sometimes a restriction.
+fn class(r: &mut Rng) -> String {
+    if r.chance(35) {
+        restriction(r)
+    } else {
+        r.pick(CLASSES).to_string()
+    }
+}
+
+fn list(xs: &[&str]) -> String {
+    format!("( {} )", xs.join(" "))
+}
+
+/// One random axiom, as Turtle.
+fn axiom(r: &mut Rng) -> String {
+    let c = |r: &mut Rng| r.pick(CLASSES);
+    let p = |r: &mut Rng| r.pick(OPROPS);
+    let d = |r: &mut Rng| r.pick(DPROPS);
+    match r.below(27) {
+        0 => format!("{} rdfs:subClassOf {} .", c(r), class(r)),
+        1 => format!("{} rdfs:subClassOf {} .", class(r), c(r)),
+        2 => format!("{} owl:equivalentClass {} .", c(r), class(r)),
+        3 => format!("{} owl:disjointWith {} .", c(r), c(r)),
+        4 => format!("{} owl:complementOf {} .", c(r), c(r)),
+        5 => format!("{} rdfs:subPropertyOf {} .", p(r), p(r)),
+        6 => format!("{} owl:equivalentProperty {} .", p(r), p(r)),
+        7 => format!("{} owl:inverseOf {} .", p(r), p(r)),
+        8 => format!("{} owl:propertyDisjointWith {} .", p(r), p(r)),
+        9 => {
+            let prop = if r.chance(50) { p(r) } else { d(r) };
+            format!("{prop} rdfs:domain {} .", class(r))
+        }
+        10 => format!("{} rdfs:range {} .", p(r), class(r)),
+        11 => format!("{} rdfs:range {} .", d(r), r.pick(DTYPES)),
+        12 => {
+            let kinds = [
+                "owl:FunctionalProperty",
+                "owl:InverseFunctionalProperty",
+                "owl:SymmetricProperty",
+                "owl:TransitiveProperty",
+                "owl:IrreflexiveProperty",
+                "owl:AsymmetricProperty",
+            ];
+            format!("{} a {} .", p(r), r.pick(&kinds))
+        }
+        13 => {
+            let k = r.pick(&["owl:FunctionalProperty", "owl:InverseFunctionalProperty"]);
+            format!("{} a {k} .", d(r))
+        }
+        14 => {
+            let n = 2 + r.below(2);
+            let chain: Vec<&str> = (0..n).map(|_| p(r)).collect();
+            format!("{} owl:propertyChainAxiom {} .", p(r), list(&chain))
+        }
+        15 => {
+            let rel = r.pick(&["rdfs:subPropertyOf", "owl:equivalentProperty"]);
+            format!("{} {rel} {} .", d(r), d(r))
+        }
+        16 => {
+            let n = 2 + r.below(2);
+            let ms: Vec<String> = (0..n).map(|_| class(r)).collect();
+            format!("{} owl:intersectionOf ( {} ) .", c(r), ms.join(" "))
+        }
+        17 => format!("{} owl:unionOf {} .", c(r), list(&r.distinct(CLASSES, 2))),
+        18 => format!("{} owl:oneOf {} .", c(r), list(&r.distinct(INDS, 2))),
+        19 => {
+            let keys: Vec<&str> = (0..1 + r.below(2))
+                .map(|_| if r.chance(50) { p(r) } else { d(r) })
+                .collect();
+            format!("{} owl:hasKey {} .", c(r), list(&keys))
+        }
+        20 => {
+            let k = 2 + r.below(2);
+            let ms = r.distinct(CLASSES, k);
+            format!("[] a owl:AllDisjointClasses ; owl:members {} .", list(&ms))
+        }
+        21 => format!(
+            "[] a owl:AllDisjointProperties ; owl:members {} .",
+            list(&r.distinct(OPROPS, 2))
+        ),
+        22 => {
+            let pred = r.pick(&["owl:members", "owl:distinctMembers"]);
+            let k = 2 + r.below(2);
+            let ms = r.distinct(INDS, k);
+            format!("[] a owl:AllDifferent ; {pred} {} .", list(&ms))
+        }
+        23 => format!(
+            "[] owl:sourceIndividual {} ; owl:assertionProperty {} ; owl:targetIndividual {} .",
+            r.pick(INDS),
+            p(r),
+            r.pick(INDS)
+        ),
+        24 => format!(
+            "[] owl:sourceIndividual {} ; owl:assertionProperty {} ; owl:targetValue {} .",
+            r.pick(INDS),
+            d(r),
+            r.pick(LITS)
+        ),
+        25 => {
+            let ab = r.distinct(INDS, 2);
+            format!("{} owl:sameAs {} .", ab[0], ab[1])
+        }
+        _ => {
+            let ab = r.distinct(INDS, 2);
+            format!("{} owl:differentFrom {} .", ab[0], ab[1])
+        }
+    }
+}
+
+/// One random fact.
+fn fact(r: &mut Rng) -> String {
+    match r.below(3) {
+        0 => format!("{} a {} .", r.pick(INDS), class(r)),
+        1 => format!("{} {} {} .", r.pick(INDS), r.pick(OPROPS), r.pick(INDS)),
+        _ => format!("{} {} {} .", r.pick(INDS), r.pick(DPROPS), r.pick(LITS)),
+    }
+}
+
+/// A random graph for `seed`, as Turtle (without the prefixes).
+fn random_graph(seed: u64) -> String {
+    let mut r = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    let mut out: Vec<String> = Vec::new();
+    for c in CLASSES {
+        out.push(format!("{c} a owl:Class ."));
+    }
+    for p in OPROPS {
+        out.push(format!("{p} a owl:ObjectProperty ."));
+    }
+    for d in DPROPS {
+        out.push(format!("{d} a owl:DatatypeProperty ."));
+    }
+    for _ in 0..3 + r.below(6) {
+        out.push(axiom(&mut r));
+    }
+    for _ in 0..3 + r.below(7) {
+        out.push(fact(&mut r));
+    }
+    out.join("\n")
+}
+
+/// The triples of the unnamed default graph, or of `graph`.
+fn triples_of(
+    store: &TripleStore,
+    graph: Option<&str>,
+) -> std::collections::HashSet<rl_reference::T> {
+    let q = match graph {
+        Some(g) => format!("SELECT ?s ?p ?o WHERE {{ GRAPH <{g}> {{ ?s ?p ?o }} }}"),
+        None => "SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(),
+    };
+    let mut out = std::collections::HashSet::new();
+    if let oxigraph::sparql::QueryResults::Solutions(rows) = store.query(&q).unwrap() {
+        for row in rows {
+            let row = row.unwrap();
+            out.insert((
+                row.get("s").unwrap().clone(),
+                row.get("p").unwrap().clone(),
+                row.get("o").unwrap().clone(),
+            ));
+        }
+    }
+    out
+}
+
+/// Drop what neither side should be judged on: generalized triples, and
+/// reflexive owl:sameAs (eq-ref, opt-in).
+fn comparable(
+    set: impl IntoIterator<Item = rl_reference::T>,
+) -> std::collections::BTreeSet<String> {
+    let same = rl_reference::owl("sameAs");
+    set.into_iter()
+        .filter(|(s, p, o)| {
+            !matches!(s, oxigraph::model::Term::Literal(_)) && !(p == &same && s == o)
+        })
+        .map(|(s, p, o)| format!("{s} {p} {o}"))
+        .collect()
+}
+
+/// Compare the engine with the reference on one graph; `Err` explains the
+/// disagreement. `Ok(true)` when both found the graph consistent.
+fn differential(seed: u64) -> Result<bool, String> {
+    let ttl = random_graph(seed);
+    let store = store_with(&ttl);
+    let reference = rl_reference::closure(triples_of(&store, None));
+    let engine = Owl2RLReasoner::new(&store).materialize();
+    let ctx = || format!("seed {seed}:\n{ttl}\n");
+    match (reference, engine) {
+        (Err(_), Err(ReasoningError::Inconsistency { .. })) => Ok(false),
+        (Err(rule), Ok(_)) => Err(format!(
+            "{}the reference derives false by {rule}; the engine found it consistent",
+            ctx()
+        )),
+        (Ok(_), Err(e)) => Err(format!(
+            "{}the reference closure is consistent; the engine: {e}",
+            ctx()
+        )),
+        (Err(_), Err(e)) => Err(format!("{}engine error: {e}", ctx())),
+        (Ok(g), Ok(_)) => {
+            let want = comparable(g.set);
+            let mut got_set = triples_of(&store, None);
+            got_set.extend(triples_of(&store, Some(TG)));
+            let got = comparable(got_set);
+            let missing: Vec<&String> = want.difference(&got).take(15).collect();
+            let extra: Vec<&String> = got.difference(&want).take(15).collect();
+            if missing.is_empty() && extra.is_empty() {
+                Ok(true)
+            } else {
+                Err(format!("{}missing (in the reference, not the engine): {missing:#?}\nextra (engine only): {extra:#?}", ctx()))
+            }
+        }
+    }
+}
+
+#[test]
+fn engine_agrees_with_the_reference_evaluator_on_random_graphs() {
+    let seeds: u64 = std::env::var("OTS_RL_DIFF_SEEDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(120);
+    let mut consistent = 0;
+    let mut failures = Vec::new();
+    for seed in 0..seeds {
+        match differential(seed) {
+            Ok(true) => consistent += 1,
+            Ok(false) => {}
+            Err(e) => failures.push(e),
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {seeds} graphs disagree; the first:\n{}",
+        failures.len(),
+        failures
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n---\n")
+    );
+    assert!(
+        consistent * 4 >= seeds,
+        "too few consistent graphs ({consistent} of {seeds}) to compare closures"
     );
 }

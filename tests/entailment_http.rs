@@ -538,3 +538,150 @@ async fn dl_dataset_reruns_in_the_background_after_a_write() {
     }
     assert!(caught_up, "the background owl2-dl run did not finish");
 }
+
+/// The active graph of an entailment query is the RDF merge of the default
+/// graph and the entailment graph: a set. A triple both asserted and derived
+/// sits in both graphs, and used to match twice (rows, `COUNT`) — the bag
+/// semantics of a multi-`FROM` default graph (oxigraph#1919). Checked for a
+/// dataset's own regime graph and for the shared `?entailment=` graphs, as an
+/// admin (every registered graph a `FROM`) and as a plain reader (the graphs
+/// they may read). The named graphs stay apart: `GRAPH ?g` still finds the
+/// triple in each graph that holds it.
+#[cfg(feature = "owl2-rl")]
+#[tokio::test]
+async fn an_asserted_and_derived_triple_is_one_answer() {
+    use oxigraph::model::{NamedNodeRef, QuadRef};
+    const DUP_DATA: &str = "https://example.org/dup/data";
+    let (state, token) = admin_state();
+    state
+        .auth_db
+        .create_dataset(
+            "dup",
+            "Asserted and derived",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    state.auth_db.add_dataset_graph("dup", DUP_DATA).unwrap();
+    // b1 is an Asset twice over: asserted, and derived from Bridge ⊑ Asset.
+    state
+        .store
+        .load_str(
+            &format!(
+                "<{EX}Bridge> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <{EX}Asset> .\n\
+                 <{EX}b1> a <{EX}Bridge> , <{EX}Asset> ."
+            ),
+            RdfFormat::Turtle,
+            Some(DUP_DATA),
+        )
+        .unwrap();
+    state
+        .auth_db
+        .create_user("rita", "rita", "rita@t.com", "h", SystemRole::User)
+        .unwrap();
+    let rita = mint_token("rita", "rita", "user");
+    let app = test_app(state.clone());
+
+    let (st, _, txt) = req(
+        &app,
+        Method::PUT,
+        "/api/datasets/dup/entailment",
+        Some(&token),
+        Some("application/json"),
+        &json!({ "regime": "rdfs", "mode": "materialize" }).to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    for regime in ["rdfs", "owl2-rl"] {
+        let (st, _, txt) = req(
+            &app,
+            Method::POST,
+            "/api/reasoning/materialize",
+            Some(&token),
+            Some("application/json"),
+            &json!({ "regime": regime, "source_graphs": [DUP_DATA] }).to_string(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{regime}: {txt}");
+    }
+
+    let asset_b1 = |g: &'static str| {
+        QuadRef::new(
+            NamedNodeRef::new_unchecked("https://example.org/ent/b1"),
+            NamedNodeRef::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"),
+            NamedNodeRef::new_unchecked("https://example.org/ent/Asset"),
+            NamedNodeRef::new_unchecked(g),
+        )
+    };
+    let select = url_encode(&format!("SELECT ?b WHERE {{ ?b a <{EX}Asset> }}"));
+    let count = url_encode(&format!(
+        "SELECT (COUNT(*) AS ?n) WHERE {{ ?b a <{EX}Asset> }}"
+    ));
+    let graphs = url_encode(&format!(
+        "SELECT ?g WHERE {{ GRAPH ?g {{ <{EX}b1> a <{EX}Asset> }} }}"
+    ));
+    for (param, graph) in [
+        ("entailment_dataset=dup", "urn:entailment:rdfs:dup"),
+        ("entailment=rdfs", "urn:entailment:rdfs"),
+        ("entailment=owl2-rl", "urn:entailment:owl2-rl"),
+    ] {
+        // The premise: the derived copy is in the entailment graph.
+        assert!(
+            state.store.store().contains(asset_b1(graph)).unwrap(),
+            "{graph} holds the derived b1 a Asset"
+        );
+        for (who, tok) in [("admin", &token), ("reader", &rita)] {
+            let (st, v, txt) = req(
+                &app,
+                Method::GET,
+                &format!("/sparql?query={select}&{param}"),
+                Some(tok),
+                None,
+                "",
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{param} {who}: {txt}");
+            assert_eq!(rows(&v), 1, "{param} {who}: one b1, not two: {txt}");
+            let (st, v, txt) = req(
+                &app,
+                Method::POST,
+                &format!("/sparql?{param}"),
+                Some(tok),
+                Some("application/x-www-form-urlencoded"),
+                &format!("query={count}"),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{param} {who}: {txt}");
+            assert_eq!(
+                v["results"]["bindings"][0]["n"]["value"], "1",
+                "{param} {who}: COUNT over the merge: {txt}"
+            );
+            let (st, v, txt) = req(
+                &app,
+                Method::GET,
+                &format!("/sparql?query={graphs}&{param}"),
+                Some(tok),
+                None,
+                "",
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{param} {who}: {txt}");
+            let mut got: Vec<&str> = v["results"]["bindings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|b| b["g"]["value"].as_str())
+                .collect();
+            got.sort_unstable();
+            let mut want = [graph, DUP_DATA];
+            want.sort_unstable();
+            assert_eq!(
+                got, want,
+                "{param} {who}: each named graph keeps its copy: {txt}"
+            );
+        }
+    }
+}

@@ -48,7 +48,7 @@
 | 9 | **Blazegraph** | Legacy Wikidata workloads | Abandoned 2019; Wikimedia migration complete |
 
 **Bottom line for this project:** Open Triplestore covers the most standards of the ten systems
-— **28 of the 29** rows in section 4 at least partially — and grades **15** of them Full
+— **28 of the 29** rows in section 4 at least partially — and grades **16** of them Full
 against its own tests (section 4, recounted 2026-10-03), below Stardog (22) and GraphDB (21) and
 above Virtuoso and RDF4J 5 (14). The other systems' cells mark feature presence, so the
 full-support counts are not like for like. Its **~430,000 t/s** bulk load (section 5.1,
@@ -249,12 +249,13 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >   `SERVICE ?var` is supported; local bindings are not pushed to the remote. The federation
 >   sections of the W3C SPARQL 1.1 test suite run unscored in `tests/w3c_sparql11_federation.rs`.
 >   See [`docs/federation.md`](federation.md).
-> ⁶ Partial in [`docs/standards.md`](standards.md): the oxigraph 0.5 evaluator fails some
->   entries of the W3C query sections (`GRAPH ?g` around non-BGP patterns, zero-length paths with
->   a constant end, `GROUP_CONCAT` language tags, `BNODE(str)`); several `FROM` graphs keep
->   duplicate triples (oxigraph#1919, fixed upstream but not released); `/sparql` rewrites the
->   query's dataset to the caller's readable graphs. Oxigraph's column shows the same engine
->   before this project's HTTP layer.
+> ⁶ Partial in [`docs/standards.md`](standards.md): `/sparql` rewrites the query's dataset to
+>   the caller's readable graphs (`FROM` and `FROM NAMED` collapse into one another, and the
+>   protocol's dataset parameters are ignored). The engine itself is oxigraph 0.5.11 with its
+>   SPARQL evaluator vendored and patched ([`vendor/README.md`](../vendor/README.md)) for the
+>   evaluator gaps tracked in [`docs/conformance/sparql11.md`](conformance/sparql11.md); the
+>   Oxigraph column shows the unpatched 0.5 engine, which has them (among them oxigraph#1905
+>   and #1919, fixed on its main branch but not released).
 
 ### 4.2 Reasoning, Validation & Inference
 
@@ -263,23 +264,26 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 | **RDFS Entailment** | ✅⁷ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ❌ |
 | **OWL 2 EL** | ✅⁸ | ❌ | 🟡 | 🟡 | 🟡 | ✅ | ✅ | 🟡 | ❌ | ❌ |
 | **OWL 2 QL** | ✅⁸ | ❌ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ | ❌ |
-| **OWL 2 RL** | 🟡⁸ | ❌ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ | ❌ |
+| **OWL 2 RL** | ✅⁸ | ❌ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ | ❌ |
 | **OWL 2 DL** | ✅⁹ | ❌ | ❌ | ❌ | ❌ | 🔒 | ✅ | ❌ | ❌ | ❌ |
 | **SHACL Validation** | 🟡¹⁰ | ❌ | 🟡 | ❌ | 🟡 | ✅ | ✅ | ✅ | ❌ | ❌ |
 | **SHACL-AF Inference** | 🟡¹¹ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
 | **ShEx** | 🟡¹² | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
 | **SWRL** | 🟡¹³ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
 
-> ⁷ RDFS entailment (rules rdfs1–rdfs13), graded Full in [`docs/standards.md`](standards.md),
->   in the default `full` build (feature `rdfs-entailment`). See
+> ⁷ RDFS entailment (RDF 1.1 Semantics: `rdfD2`, `rdfs1`–`rdfs13` and the axiomatic triples in
+>   one fixed point, datatype clashes reported; the infinite `rdf:_n` axioms bounded by the data,
+>   decision D11), graded Full in [`docs/standards.md`](standards.md) (footnote 11 there), in the
+>   default `full` build (feature `rdfs-entailment`). See
 >   [`docs/rdfs-entailment.md`](rdfs-entailment.md).
-> ⁸ OWL 2 EL and QL graded Full, OWL 2 RL Partial in [`docs/standards.md`](standards.md)
+> ⁸ OWL 2 EL, QL and RL graded Full in [`docs/standards.md`](standards.md)
 >   (footnote 10 there). EL is a native EL++ saturation engine for the whole profile (nominals,
 >   `hasSelf`, the EL datatypes, keys and equality), with randomised differential tests against
 >   RL. QL covers the whole profile: DL-Lite_R closure, ground materialisation, consistency
 >   checks (data ranges decided on values through the OWL 2 datatype map) and existential
->   rewriting of query blank nodes. RL runs 75 of the 78 RL/RDF rules; `dt-type2`, `dt-eq` and
->   `dt-diff` are not run, so literals are matched as terms, not by value. Feature flags
+>   rewriting of query blank nodes. RL runs all 78 RL/RDF rules, the Table 8 datatype rules
+>   applied to data values (`eq-ref` opt-in, decision D2), checked against a generalized-triple
+>   reference evaluator. Feature flags
 >   `owl2-el`, `owl2-ql`, `owl2-rl`, all in `full`. See [`docs/owl2-el.md`](owl2-el.md),
 >   [`docs/owl2-ql.md`](owl2-ql.md), [`docs/owl2-rl.md`](owl2-rl.md).
 > ⁹ OWL 2 DL, graded Full in [`docs/standards.md`](standards.md) **with the reasoner sidecar
@@ -380,11 +384,17 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > OWL 2 DL (with the reasoner sidecar the project ships) are graded Full in `docs/standards.md`,
 > and their cells follow. RDF Patch and LDES were regraded Full the same day; neither has a row
 > here. 13 rows are 🟡 and the W3C SPARQL 1.1 Tests row is not claimed.
+>
+> Open Triplestore recounted again on 2026-10-03, 15 → 16: OWL 2 RL is graded Full in
+> `docs/standards.md` (all 78 RL/RDF rules, the Table 8 datatype rules over data values) and its
+> cell follows; section 11.1 follows too. RDFS stays ✅, now backed by the RDF 1.1 Semantics
+> patterns and axiomatic triples (footnote 11 there). 12 rows are 🟡 and the W3C SPARQL 1.1 Tests
+> row is not claimed.
 
 ```
 Stardog           ██████████████████████░░░░░░░   22 / 29  (commercial; full OWL DL + ShEx + SWRL; GeoSPARQL 1.1 partial)
 GraphDB           █████████████████████░░░░░░░░   21 / 29  (commercial; OWL DL commercial-only; no ShEx/SWRL/LDP/RML)
-Open Triplestore  ███████████████░░░░░░░░░░░░░░   15 / 29  (own grades, Full only; 13 more rows 🟡 — 28 of 29 at least partial, the most of the ten; W3C tests not claimed)
+Open Triplestore  ████████████████░░░░░░░░░░░░░   16 / 29  (own grades, Full only; 12 more rows 🟡 — 28 of 29 at least partial, the most of the ten; W3C tests not claimed)
 Virtuoso          ██████████████░░░░░░░░░░░░░░░   14 / 29
 RDF4J 5           ██████████████░░░░░░░░░░░░░░░   14 / 29  (improved from v4)
 Jena 5            ████████████░░░░░░░░░░░░░░░░░   12 / 29  (improved from v4)
@@ -799,7 +809,7 @@ Cost is O(n × geometry_complexity): with no spatial index in the query path (fo
 | GraphDB | ✅ | ✅ | ✅ | ✅ | 🔒 | ✅ | ✅ | ❌ |
 | Stardog | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Virtuoso | ✅ | 🟡 | ✅ | ✅ | ❌ | 🟡 | ❌ | ❌ |
-| **Open Triplestore** | ✅ | ✅ | ✅ | 🟡 | ✅ | 🟡 | 🟡 | 🟡 |
+| **Open Triplestore** | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 | 🟡 |
 | Jena 5 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | 🟡 | ❌ | ❌ |
 | RDF4J 5 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ✅ | ❌ | ❌ |
 | Blazegraph | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ❌ | ❌ |

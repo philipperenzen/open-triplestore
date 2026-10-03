@@ -79,6 +79,9 @@ SUITES: dict[str, tuple[str, str]] = {
     "shacl_conformance": ("SHACL Core", "spec-derived"),
     "w3c_shacl_conformance": ("SHACL Core", "**vendored W3C corpus** (core + sparql sections, manifest-driven, full report equality)"),
     "w3c_sparql11_manifests": ("SPARQL 1.1 Query/Update", "**vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven)"),
+    "w3c_sparql11_entailment_manifests": ("SPARQL 1.1 Entailment Regimes", "**vendored W3C test-suite subset** (entailment section of w3c/rdf-tests, unmodified; manifest-driven)"),
+    "w3c_rdf_mt_manifests": ("RDF 1.1 Semantics (RDF/RDFS entailment)", "**vendored W3C test-suite subset** (rdf-mt section of w3c/rdf-tests, unmodified; manifest-driven)"),
+    "w3c_owl2_rl_manifests": ("OWL 2 RL", "**vendored W3C test cases** (approved OWL 2 cases of the RL profile, unmodified; manifest-driven)"),
     "w3c_sparql11_federation": ("SPARQL 1.1 Federated Query", "**vendored W3C test-suite subset** (`service/` + `syntax-fed/` sections of w3c/rdf-tests, unmodified; manifest-driven, local endpoints)"),
     "shacl_rules_conformance": ("SHACL-AF rules", "spec-derived"),
     "shacl_af_corpus": ("SHACL Advanced Features", "**vendored TopQuadrant corpus** (expression, function, rule and target tests of TopQuadrant/shacl, unmodified; dash-driven)"),
@@ -112,6 +115,9 @@ CORPUS_RUNNERS = {
     "w3c_sparql11_manifests": 450,
     "w3c_sparql11_federation": 9,
     "w3c_owl2_dl_manifests": 235,
+    "w3c_sparql11_entailment_manifests": 37,
+    "w3c_rdf_mt_manifests": 41,
+    "w3c_owl2_rl_manifests": 45,
 }
 
 # Runners whose score may be published (see the module docstring). A runner
@@ -136,6 +142,19 @@ UNSCORED_NOTES = {
         "runs in CI against the reasoner sidecar as a development and regression ratchet; "
         "no score is published (W3C licence: no performance claims on a partial run); "
         "known gaps in `docs/conformance/owl2-dl.md`"
+    ),
+    "w3c_sparql11_entailment_manifests": (
+        "runs in CI as a development and regression ratchet; no score is published "
+        "(W3C test-suite policy); known gaps in `docs/conformance/entailment.md`"
+    ),
+    "w3c_rdf_mt_manifests": (
+        "runs in CI as a development and regression ratchet; no score is published "
+        "(W3C test-suite policy); known gaps in `docs/conformance/entailment.md`"
+    ),
+    "w3c_owl2_rl_manifests": (
+        "runs in CI as a development and regression ratchet; no score is published "
+        "(W3C licence: no performance claims on a partial run); known gaps in "
+        "`docs/conformance/owl2-rl.md`"
     ),
 }
 
