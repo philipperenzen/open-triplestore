@@ -1,8 +1,7 @@
 # Improvement log
 
-Running record of the improvement programme in
-[open-triplestore-painpoints.md](open-triplestore-painpoints.md): one entry per
-item, verify-first. An item is either implemented (failing test, then passing,
+Running record of the improvement programme (its brief, the "painpoints"
+document, was never committed): one entry per item, verify-first. An item is either implemented (failing test, then passing,
 plus docs), "already fixed at `<commit>`" (the probe passed before any change),
 or "blocked" with the diagnosis. Branch `feat/improvements` off `develop`;
 build and test environment: the Dockerfile's `chef` stage
@@ -384,9 +383,6 @@ Notes and follow-ups (none blocking):
   `scripts/` is outside this phase's edit scope — a two-constant change
   (`CORPUS` label, `CORPUS_RUNNERS` floor) for the maintainer.
 - Identity policy Settings UI (`frontend/`, out of scope) — see item 1.
-- `docs/notes/open-triplestore-painpoints.md`, which this log links to, is not
-  in the repository (the programme text lives in the session brief); either
-  commit it or drop the link.
 - The reasoning-source filter for linksets lives in `entailment.rs`
   (`reasoning_sources`) because `conformance::resolve` is used by
   non-reasoning callers; a caller that reaches `conformance::resolve(...)
@@ -1308,6 +1304,134 @@ cap's upper range is not free at this size (`src/shacl/view.rs`); and the
 POST/PUT gate benchmark the note also asked for needs the HTTP harness and
 stays open. Recorded in `docs/performance.md` (the table row, and a new
 "The 9M SHACL measurement" section) and in the note's §1.5.
+
+### 4. The repair layer — built (2026-10-02)
+
+The owner approved all four phases of `docs/notes/repair-layer-design.md`
+on 2026-10-01. Built on `feat/repair-layer` off `develop` (`01a1f4f`). User
+documentation: `docs/repair.md`. The note's new section 11 is the full
+account, and this entry is its summary.
+
+**What it is.** `POST /api/datasets/:id/repair` compiles repair rules. It
+compiles the SHACL Core constraints a shape *determines*, the OWL axioms
+that merge or witness, and the `ots:Rule`s a writer authored. It runs them as a
+restricted chase over an in-memory copy of the dataset. The answer is a
+proposal: an RDF Patch whose header is content-derived (so the same state
+and rules give byte-identical text), plus a report that explains every
+line. Nothing is written. A writer keeps a proposal (files under
+`{data_dir}/repair-proposals/`), reviews it, and applies it through
+`…/proposals/:pid/apply`. The apply checks the proposal's base, runs the
+write gates and records one commit that names it. The SHACL assistant's
+`task: "repair"` hands the residual to the model. The model may answer only
+with rules, which run under a heuristic guard and come back as a kept
+proposal.
+
+**Verified first.** The baseline `/infer` behaviour the layer replaces is
+pinned before anything was built. A rule with a blank node in its head mints
+a node on every round: 100 rounds × 3 focus nodes × 2 triples, 300 decks.
+Guarded by its own head it fires once, then never
+(`tests/shacl_rules_conformance.rs`, two tests). Both pass on `develop`
+unchanged: they describe, they do not fix.
+
+**Test first.** 45 unit tests in `src/repair/`: chase, stratification,
+rules, vocabulary, persistence, the patch emitter, the apply helpers, the
+SHACL-AF import, the census. Three more cover the snapshot read. 24 HTTP
+tests in `tests/repair_layer.rs` cover the note's test plan:
+401, 403 for a viewer and for a read-scoped token, 404, 400 for an
+unstratifiable set and a retract cycle, a partial `200` on an exhausted
+budget, 503 on the repair semaphore, byte-identical runs, 409 and 422 on
+the apply, idempotence, a replacement rule feeding a key EGD (unit), and a
+`Rewrite` merge followed by re-materialisation under `sameas-narrow` and
+`sameas-off`, and the assistant against a scripted gateway. Two things the
+tests found: spargebra prints a CONSTRUCT's WHERE clause as a `SELECT *`
+sub-query, which the rule checker refuses, so imported SHACL-AF rules are
+written out by hand; and the chat completion already strips a code fence
+but leaves its `turtle` tag, which the Turtle parser then refused.
+
+**The census of 3.6.** The nine vendored shapes graphs in this checkout hold
+22 `sh:minCount`, and a plain grep agrees. Of those, 14 admit an IRI
+witness, 8 fall to Report, and none is fixed by a sibling. The note's 40
+came from an earlier per-file count that the note already said did not
+reconcile. The IMBOR shapes graph is fetched, not vendored, and its mix is
+still unmeasured.
+
+**Decisions on the eleven open questions** (the note's 11.3 has the
+reasons):
+
+1. Nulls are minted under `{base_url}/.well-known/genid/`, and nothing
+   serves that path.
+2. The engine's targets are unchanged, and the compiler follows them.
+3. The cap is memory ÷ 8 ÷ 512 B. The timeout is the query timeout, capped
+   at 240 s. The endpoint is synchronous.
+4. Proposals are files.
+5. The commit kind is `Sparql` plus `metadata`.
+6. `Rewrite` is opt-in per rule and never heuristic.
+7. No `?validate=true` on the patch route: the owner's D10 for #434 gates
+   every patch.
+8. Compiled rules are `PerGraph`.
+9. `datatype-relabel` stays opt-in.
+10. Not reached.
+11. SHACL→SQL stays deferred.
+
+None of them changes an existing feature, so none needed the owner.
+
+**Where it departs from the note, because of work already open.**
+`src/rdf_patch.rs`, `src/shacl/engine.rs`, `src/shacl/report.rs`,
+`src/shacl_studio/gate.rs` and `src/commit_log.rs` are not touched.
+
+- **PR #434** rewrites the patch module and, by the owner's D10, gates
+  every patch. So the emitter lives in `repair::proposal`, and the apply
+  writes through the public `update_targeted_delta`. The patch route gets
+  only the two preconditions, as a route layer at its mount that never
+  reads the patch: they cover the dataset's graphs, which is what a
+  proposal's base headers mean. No `?validate=true` was added, since it
+  would run #434's gates a second time.
+- **PR #432** adds `source_constraint_component` to `ValidationResult`. The
+  repair layer maps `source_constraint` itself, so it works with and
+  without #432.
+- **PR #436** reworks the SHACL-AF rule types. The import reads `sh:rule`
+  itself.
+- **The unpushed delta-versions branch** builds per-statement provenance
+  keyed by commit. So there is no repair-only provenance graph: the apply
+  stamps its commit on the change-log rows, and the commit names the
+  proposal.
+
+The apply route always runs the write gates. It is new, and a write the
+dataset's own gates refuse on the Graph Store route must not get through
+here.
+
+**Performance.** Nothing on the paths the published rows measure changed.
+The SHACL engine, the gates, `load_str` and `update` are byte-identical. The
+only change on an existing route is the patch route's layer: an uncontended
+lock and a query-string parse. Measured anyway, 2026-10-02, on an M1 Pro:
+`develop` with and without the repair layer ran `scale_otl` at 100k assets
+alternately, three times each, release build. Medians, with against without:
+
+- SHACL: 1.07 s against 1.04 s.
+- 4 writers: 61.9k against 61.7k quads/s written, write p95 55 against 54 ms.
+- group by: 1.18 s against 1.12 s.
+
+The largest move is +9 % on the 0.08 ms property path, inside the spread
+between runs.
+
+The repair run itself at 0.9M (`--repair`, median of 3): seed 5.9 s,
+sandbox validation 0.66 s, compile and chase 1.1 s. That is about 8 s
+against the 30 s default timeout, which settles open question 3 for a host
+of this size. The seed is linear, about 6.5 µs a quad.
+
+The new row (`--patch`, `docs/performance.md`): a 1 000-line patch at 0.9M
+quads takes 3.9 s the way `POST …/patch` writes it today, because `update`
+recounts the graph. It takes 15 ms through `update_targeted_delta`, which
+is how a proposal's apply writes it, about 260 times less. PR #434's
+`apply_quad_ops` is the patch route's own way to the same delta.
+
+**Merge points left for whoever lands second.** These are listed in the
+note's 11.4:
+- #434: none in the code. Only the changelog and table lines conflict.
+- #436: `DataView::new` gains an evaluator.
+- #418: `ip` in `shacl_assist`. It is `Option<String>` on both sides.
+- #427: the `/patch` OpenAPI entry should list the two preconditions.
+- The delta branch: one lock instead of two.
 
 ## Checkpoint (2026-09-16, HEAD `e94d889` + this note)
 

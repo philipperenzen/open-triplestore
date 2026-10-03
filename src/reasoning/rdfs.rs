@@ -133,8 +133,14 @@ impl<'a> RdfsMaterializer<'a> {
                 iterations, added_this_round
             );
 
-            if added_this_round == 0 || iterations >= MAX_ITERATIONS {
+            if added_this_round == 0 {
                 break;
+            }
+            if iterations >= MAX_ITERATIONS {
+                return Err(ReasoningError::NotConverged {
+                    regime: "rdfs".to_string(),
+                    iterations,
+                });
             }
         }
 
@@ -163,6 +169,7 @@ impl<'a> RdfsMaterializer<'a> {
             iterations,
             elapsed_ms: start.elapsed().as_millis() as u64,
             target_graph: self.target_graph.clone(),
+            ..Default::default()
         })
     }
 

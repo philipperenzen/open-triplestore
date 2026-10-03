@@ -2,6 +2,7 @@
 mod account_lifecycle_tests;
 #[cfg(test)]
 mod accounts_introspection_tests;
+pub mod client_ip;
 pub mod content_negotiation;
 pub mod error;
 #[cfg(test)]
@@ -15,6 +16,8 @@ mod oidc_provider_tests;
 pub mod openapi;
 #[cfg(test)]
 mod passkey_tests;
+/// Background reasoning jobs (`?async=true`).
+pub mod reasoning_jobs;
 #[cfg(test)]
 mod role_visibility_tests;
 pub mod routes;
@@ -44,7 +47,7 @@ use crate::prefixes::PrefixRegistry;
 use crate::saved_queries::routes::{saved_query_auth_routes, saved_query_public_routes};
 use crate::storage::ObjectStore;
 use crate::store::TripleStore;
-use axum::extract::{ConnectInfo, DefaultBodyLimit};
+use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::middleware;
 use axum::routing::{delete, get, post, put};
@@ -62,63 +65,22 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
-/// IP key extractor that checks X-Forwarded-For / X-Real-IP headers first (for reverse proxies
-/// and Docker deployments), then falls back to the TCP peer address.
+/// Rate-limiter key: the client IP from [`client_ip::resolve`].
 ///
 /// H-2: XFF/X-Real-IP headers are only trusted when the TCP peer IP falls within one of the
-/// configured `trusted_cidrs`. This prevents attackers from spoofing their IP by injecting
+/// configured trusted proxies. This prevents attackers from spoofing their IP by injecting
 /// an arbitrary X-Forwarded-For header.
 #[derive(Clone)]
 struct SmartIpExtractor {
-    trusted_cidrs: Vec<IpNet>,
+    trusted: client_ip::TrustedProxies,
 }
 
 impl KeyExtractor for SmartIpExtractor {
     type Key = IpAddr;
 
     fn extract<B>(&self, req: &Request<B>) -> Result<IpAddr, GovernorError> {
-        // 3. TCP peer address (available when using into_make_service_with_connect_info)
-        let peer_ip: Option<IpAddr> = req
-            .extensions()
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|ConnectInfo(addr)| addr.ip());
-
-        let peer_is_trusted = peer_ip
-            .map(|ip| self.trusted_cidrs.iter().any(|cidr| cidr.contains(&ip)))
-            .unwrap_or(false);
-
-        if peer_is_trusted {
-            // 1. X-Forwarded-For. Walk the chain RIGHT-to-LEFT, skipping trusted
-            //    proxy hops; the first untrusted address is the real client. The
-            //    left-most entry is fully client-controlled, so trusting it would let
-            //    a client behind the proxy forge `X-Forwarded-For: <victim>` to
-            //    attribute their request load to (and rate-limit-lock-out) another IP,
-            //    or rotate forged IPs to evade their own limit.
-            if let Some(xff) = req.headers().get("x-forwarded-for") {
-                if let Ok(val) = xff.to_str() {
-                    for entry in val.rsplit(',') {
-                        if let Ok(ip) = entry.trim().parse::<IpAddr>() {
-                            let entry_trusted =
-                                self.trusted_cidrs.iter().any(|cidr| cidr.contains(&ip));
-                            if !entry_trusted {
-                                return Ok(ip);
-                            }
-                        }
-                    }
-                }
-            }
-            // 2. X-Real-IP
-            if let Some(xri) = req.headers().get("x-real-ip") {
-                if let Ok(val) = xri.to_str() {
-                    if let Ok(ip) = val.trim().parse::<IpAddr>() {
-                        return Ok(ip);
-                    }
-                }
-            }
-        }
-
-        // Use TCP peer IP directly (not behind a trusted proxy)
-        if let Some(ip) = peer_ip {
+        let peer = client_ip::peer_ip(req.extensions());
+        if let Some(ip) = client_ip::resolve(req.headers(), peer, &self.trusted) {
             return Ok(ip);
         }
         // Fallback: bucket all unidentifiable clients together rather than hard-erroring.
@@ -269,6 +231,10 @@ pub struct AppState {
     /// When true, auth cookies are issued with the `Secure` attribute (HTTPS only).
     /// Disabled by default so plain-HTTP local development still works.
     pub secure_cookies: bool,
+    /// Reverse proxies whose `X-Forwarded-For` is believed (`TRUSTED_PROXY_CIDRS`).
+    /// [`build_router`] sets it from its `trusted_cidrs` argument, so the rate
+    /// limiter, the audit log and the LLM guard all derive the client IP alike.
+    pub trusted_proxies: client_ip::TrustedProxies,
     /// Bounds concurrent browse query execution so a flood of browse requests
     /// cannot monopolise the `spawn_blocking` thread pool and starve other work.
     pub browse_semaphore: Arc<tokio::sync::Semaphore>,
@@ -301,6 +267,8 @@ pub struct AppState {
     /// Vocabulary term search engine (vocab-search feature).
     #[cfg(feature = "vocab-search")]
     pub vocab_engine: Option<Arc<crate::vocab_search::index::VocabSearchEngine>>,
+    /// The OWL 2 DL backend configuration (`OTS_DL_BACKEND`, …).
+    pub dl: Arc<crate::reasoning::dl_config::DlConfig>,
 }
 
 /// Construct a minimal `AppState` for tests (unit and integration).
@@ -336,6 +304,7 @@ impl AppState {
             query_timeout_secs: 30,
             write_timeout_secs: 120,
             secure_cookies: false,
+            trusted_proxies: client_ip::TrustedProxies::default(),
             browse_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BROWSE_QUERIES)),
             expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(expensive_op_capacity())),
             #[cfg(feature = "text-search")]
@@ -349,6 +318,7 @@ impl AppState {
             vocab_catalog: Arc::new(crate::vocab_search::catalog::VocabCatalog::bundled()),
             vocab_registry_dirty: Arc::new(AtomicBool::new(false)),
             vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
+            dl: Default::default(),
             #[cfg(feature = "vocab-search")]
             vocab_engine: None,
         }
@@ -613,6 +583,12 @@ impl axum::extract::FromRef<AppState> for CookieConfig {
     }
 }
 
+impl axum::extract::FromRef<AppState> for client_ip::TrustedProxies {
+    fn from_ref(state: &AppState) -> Self {
+        state.trusted_proxies.clone()
+    }
+}
+
 impl axum::extract::FromRef<AppState> for Arc<AuthDb> {
     fn from_ref(state: &AppState) -> Self {
         state.auth_db.clone()
@@ -738,6 +714,10 @@ async fn mark_vocab_dirty_after_success(
 }
 
 pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNet>) -> Router {
+    let mut state = state;
+    let trusted_proxies = client_ip::TrustedProxies::new(trusted_cidrs);
+    state.trusted_proxies = trusted_proxies.clone();
+
     // The graphs a principal may read include those of the model registry's
     // published versions (a public entry's to everyone). The registry lives
     // in the store, which the identity database cannot see, so it is handed
@@ -794,7 +774,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         Arc::new(
             GovernorConfigBuilder::default()
                 .key_extractor(SmartIpExtractor {
-                    trusted_cidrs: trusted_cidrs.clone(),
+                    trusted: trusted_proxies.clone(),
                 })
                 .per_second(period_secs)
                 .burst_size(burst)
@@ -859,6 +839,18 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // refill is deliberately slow, one token every 10s (6/min), because each import
     // is heavy: a bigger burst than SPARQL, but a tighter sustained rate.
     let bulk_import_rate_conf = make_rate_conf(10, 30);
+
+    // Public map / 3D viewer surface (viewer feed, geo stats, asset download,
+    // 3D Tiles): anonymous-capable and expensive per request, so it carries
+    // the SPARQL quota (60/min sustained, burst 40) in its own bucket — one
+    // viewer open fires a handful of these, and browsing a map must not eat
+    // the caller's SPARQL allowance.
+    let viewer_rate_conf = make_rate_conf(1, 40);
+
+    // Feedback reports: one token a minute with a burst of 5 — enough to send a
+    // few reports back to back, too slow to flood the admins' inbox. A per-user
+    // daily cap in the handler backs this up for users on many addresses.
+    let feedback_rate_conf = make_rate_conf(60, 5);
 
     // Public auth routes (no auth required) — rate-limited against brute force
     let auth_public_routes = Router::new()
@@ -1209,6 +1201,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/ldes/nodes/:n",
             get(crate::ldes::publish::get_node),
         )
+        .route(
+            "/api/datasets/:dataset_id/ldes/members/:member_id",
+            get(crate::ldes::publish::get_member),
+        )
         .route("/api/ldes/sync", post(crate::ldes::client::sync_handler))
         .route(
             "/api/datasets/:dataset_id/properties/state",
@@ -1224,7 +1220,35 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         )
         .route(
             "/api/datasets/:dataset_id/patch",
-            post(crate::rdf_patch::apply_patch_handler),
+            post(crate::rdf_patch::apply_patch_handler).layer(middleware::from_fn_with_state(
+                state.clone(),
+                crate::repair::apply::patch_route_layer,
+            )),
+        )
+        .route(
+            "/api/datasets/:dataset_id/prefixes",
+            get(crate::prefixes::dataset_table::list).put(crate::prefixes::dataset_table::replace),
+        )
+        .route(
+            "/api/datasets/:dataset_id/prefixes/:label",
+            put(crate::prefixes::dataset_table::put_one)
+                .delete(crate::prefixes::dataset_table::delete_one),
+        )
+        .route(
+            "/api/datasets/:dataset_id/log",
+            get(crate::rdf_patch_log::describe_log).post(crate::rdf_patch_log::append_patch),
+        )
+        .route(
+            "/api/datasets/:dataset_id/log/init",
+            get(crate::rdf_patch_log::get_init),
+        )
+        .route(
+            "/api/datasets/:dataset_id/log/current",
+            get(crate::rdf_patch_log::get_current),
+        )
+        .route(
+            "/api/datasets/:dataset_id/log/patch/:reference",
+            get(crate::rdf_patch_log::get_patch),
         )
         .route(
             "/api/datasets/:dataset_id/entailment",
@@ -1407,6 +1431,15 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/banner-preset",
             put(handlers::set_dataset_banner_preset),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
+        .with_state(state.clone());
+
+    // Map / 3D viewer reads, rate-limited (see `viewer_rate_conf`).
+    let viewer_routes = Router::new()
         // Viewer feed: per-element geometry + 3D-file references (map/3D viewers).
         // Optional auth so public datasets are viewable anonymously.
         .route(
@@ -1432,6 +1465,9 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             endpoint_acl_guard,
         ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
+        .route_layer(GovernorLayer {
+            config: viewer_rate_conf.clone(),
+        })
         .with_state(state.clone());
 
     // SHACL validation routes
@@ -1481,6 +1517,16 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         // read that graph, because a token alone would only narrow the leak
         // from everyone to every signed-in user.
         .route("/api/shaclc/serialize", post(routes::shaclc_serialize))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .with_state(state.clone());
+
+    // Repair proposals (docs/repair.md): beside /validate and /infer, behind
+    // the same token and endpoint-ACL gate.
+    let repair_routes = crate::repair::handlers::routes()
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             endpoint_acl_guard,
@@ -1882,6 +1928,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(oauth_handlers::oidc_callback),
         )
         .route(
+            "/api/auth/saml/:slug/login",
+            get(oauth_handlers::saml_login),
+        )
+        .route(
             "/api/auth/saml/:slug/metadata",
             get(oauth_handlers::saml_metadata),
         )
@@ -1906,8 +1956,30 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
+    // Feedback: reporters read back their own reports; the admin inbox is
+    // admin-gated in-handler. Submitting has its own rate limit.
+    let feedback_submit_routes = crate::feedback::submit_routes()
+        .route_layer(GovernorLayer {
+            config: feedback_rate_conf,
+        })
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .with_state(state.clone());
+    let feedback_routes = crate::feedback::routes()
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .with_state(state.clone());
+
     let mut router = Router::new()
         .merge(docs_routes)
+        .merge(feedback_submit_routes)
+        .merge(feedback_routes)
         .merge(auth_public_routes)
         .merge(oidc_provider_public_routes)
         .merge(oidc_provider_authorize_routes)
@@ -1925,11 +1997,13 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(avatar_get_routes)
         .merge(org_image_routes)
         .merge(dataset_image_routes)
+        .merge(viewer_routes)
         .merge(dataset_mixed_routes)
         .merge(dataset_protected_routes)
         .merge(asset_routes)
         .merge(dataset_sparql_routes)
         .merge(shacl_routes)
+        .merge(repair_routes)
         .merge(studio_auth)
         .merge(studio_optional)
         .merge(rml_routes)
@@ -1978,7 +2052,8 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             .with_state(state.clone()),
     );
 
-    // 3D Tiles 1.1 (P5): tileset.json + content.glb, anonymous-capable.
+    // 3D Tiles 1.1 (P5): tileset.json + content.glb, anonymous-capable, in the
+    // viewer rate-limit bucket.
     #[cfg(feature = "geometry3d")]
     {
         let tiles3d_routes = Router::new()
@@ -1988,6 +2063,9 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 endpoint_acl_guard,
             ))
             .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
+            .route_layer(GovernorLayer {
+                config: viewer_rate_conf.clone(),
+            })
             .with_state(state.clone());
         router = router.merge(tiles3d_routes);
     }
@@ -2312,6 +2390,8 @@ pub async fn run(
         Arc<crate::vocab_search::index::VocabSearchEngine>,
     >,
 ) -> anyhow::Result<()> {
+    // The federation deadline defaults to the query timeout.
+    crate::remote::set_query_timeout_secs(query_timeout_secs);
     let audit = Arc::new(crate::auth::audit::AuditLogger::new(auth_db.pool()));
 
     // ── Backup subsystem (optional) ─────────────────────────────────────────
@@ -2403,6 +2483,14 @@ pub async fn run(
     // Declarative OIDC-client seed for infra-as-code deployments (idempotent).
     crate::auth::oidc_provider::seed_clients_from_env(&auth_db, &jwt_config.secret);
 
+    let dl_config = crate::reasoning::dl_config::DlConfig::from_env();
+    match dl_config.backend {
+        Some(kind) => tracing::info!("OWL 2 DL: backend `{}`", kind.as_str()),
+        None => tracing::info!(
+            "OWL 2 DL: no backend configured (OTS_DL_BACKEND) — the owl2-dl regime answers 503"
+        ),
+    }
+
     // Hold a flush handle for graceful shutdown — `store` is moved into AppState below.
     let shutdown_store = store.clone();
     let state = AppState {
@@ -2433,6 +2521,7 @@ pub async fn run(
         query_timeout_secs,
         write_timeout_secs,
         secure_cookies,
+        trusted_proxies: client_ip::TrustedProxies::new(trusted_cidrs.clone()),
         browse_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BROWSE_QUERIES)),
         expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(expensive_op_capacity())),
         #[cfg(feature = "text-search")]
@@ -2453,9 +2542,12 @@ pub async fn run(
         // finishes its own refresh.
         vocab_registry_dirty: Arc::new(AtomicBool::new(true)),
         vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
+        dl: Arc::new(dl_config),
         #[cfg(feature = "vocab-search")]
         vocab_engine,
     };
+    // Repair proposals are kept beside the store (docs/repair.md).
+    crate::repair::configure(&state.store, &data_dir);
     if let Some(keys) = state.oidc_provider.clone() {
         crate::federation::init(keys, &state.base_url);
     }

@@ -25,7 +25,10 @@
 //! string, numeric, dateTime and type-test functions, `REGEX` and `REPLACE`.
 //! Declined: unbounded and negated property paths, `EXISTS`, `SERVICE`,
 //! `LATERAL`, `DESCRIBE`, quoted triples, hash and UUID functions, `NOW`,
-//! `RAND`, `BNODE`, casts and custom functions, custom aggregates.
+//! `RAND`, `BNODE`, casts and custom functions, custom aggregates. A query
+//! whose expressions reach a term the decoded value cannot carry — a literal
+//! with an RDF 1.2 base direction, or a triple term — is declined when
+//! evaluation reaches it; matched and emitted untouched, such terms are fine.
 
 pub mod eval;
 pub mod index;

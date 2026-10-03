@@ -606,6 +606,9 @@ async fn execute_query(
     // Entailment: a dataset's own entailment graph (`entailment_dataset`, regime
     // from the parameter or the dataset's configuration), else the shared
     // `urn:entailment:<regime>` graph, joins the default graph via FROM.
+    // Whether the regime is OWL 2 QL: its blank nodes are then rewritten
+    // existentially over the TBox (see below).
+    let mut ql_existentials = false;
     let entailment_graph: Option<String> = if let Some(ds_id) = entailment_dataset {
         let ds = state
             .auth_db
@@ -635,10 +638,14 @@ async fn execute_query(
                     "unknown entailment regime `{r}`"
                 )));
             }
-            Some(r) => Some(crate::entailment::dataset_entailment_graph(&r, ds_id)),
+            Some(r) => {
+                ql_existentials = r == "owl2-ql";
+                Some(crate::entailment::dataset_entailment_graph(&r, ds_id))
+            }
             None => None,
         }
     } else if let Some(regime) = entailment {
+        ql_existentials = regime == "owl2-ql";
         match regime {
             "rdfs" => Some(crate::reasoning::common::RDFS_ENTAILMENT_GRAPH.to_string()),
             "owl2-rl" => Some(crate::reasoning::common::OWL2_RL_ENTAILMENT_GRAPH.to_string()),
@@ -693,9 +700,32 @@ async fn execute_query(
     let (chunk_tx, chunk_rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(8);
 
     let federated_identity = user.and_then(|u| crate::federation::identity_for(state, &u.user_id));
+    let source_caller =
+        crate::sources::virtual_source::SourceCaller::for_request(&state.auth_db, user);
     tokio::task::spawn_blocking(move || {
         // SERVICE clauses evaluated inside this query act for the caller.
         let _identity = crate::federation::IdentityGuard::set(federated_identity);
+        let _source_caller =
+            crate::sources::virtual_source::SourceCallerGuard::set(Some(source_caller));
+        // OWL 2 QL: the materialised graph answers every atom over named
+        // individuals; blank nodes may also stand for the anonymous elements
+        // the TBox's existentials imply, so those parts are rewritten. The
+        // rewriting reads only the graphs the (already scoped) query reads.
+        #[cfg(feature = "owl2-ql")]
+        let effective_query_str = if ql_existentials {
+            match crate::reasoning::owl2_ql::rewrite_existentials(&store, &effective_query_str) {
+                Ok(Some(rewritten)) => rewritten,
+                Ok(None) => effective_query_str,
+                Err(e) => {
+                    let _ = ct_tx.send(Err(AppError::Internal(e.to_string())));
+                    return;
+                }
+            }
+        } else {
+            effective_query_str
+        };
+        #[cfg(not(feature = "owl2-ql"))]
+        let _ = ql_existentials;
         let results = match store.query(&effective_query_str) {
             Ok(r) => r,
             Err(e) => {
@@ -821,10 +851,16 @@ pub(crate) async fn execute_update(
     // not count toward the timeout.
     let reverify = authorized.writes_unnamed_graphs;
     let st = state.clone();
+    let source_caller =
+        crate::sources::virtual_source::SourceCaller::for_request(&state.auth_db, user);
     let (result_tx, result_rx) = oneshot::channel();
     let write = tokio::task::spawn_blocking(move || {
         let result = {
             let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
+            // A SERVICE in the WHERE clause (admin only, see
+            // `authorize_update`) acts for the caller.
+            let _source_caller =
+                crate::sources::virtual_source::SourceCallerGuard::set(Some(source_caller));
             store.update_targeted_delta(&effective, &affected, requires_admin)
         };
         // A replica refuses every write before anything is written.
@@ -951,8 +987,13 @@ struct UpdateGraphAccess {
 /// variable `GRAPH ?g` block or a `SERVICE` call as unscoped. Default-graph leaf
 /// reads (`Bgp`/`Path`/`Values` outside any `GRAPH`) are harmless here: the store
 /// keeps all data in named graphs and the engine uses a non-union default graph.
+/// The patterns inside `EXISTS` / `NOT EXISTS` expressions are reads too: a
+/// `FILTER EXISTS { GRAPH <g> {…} }` learns whether `<g>` holds a triple.
 fn collect_where_graph_access(p: &spargebra::algebra::GraphPattern, acc: &mut UpdateGraphAccess) {
     use spargebra::algebra::GraphPattern as GP;
+    for inner in crate::sparql::exists_patterns(p) {
+        collect_where_graph_access(inner, acc);
+    }
     match p {
         GP::Graph { name, inner } => {
             match name {
@@ -1213,6 +1254,26 @@ mod update_graph_access_tests {
             assert!(!a.unnamed_write && !a.requires_admin, "{update}");
         }
     }
+    /// A graph named only inside an EXISTS is read like any other, and a
+    /// variable graph or a SERVICE inside one is as unbounded as outside.
+    #[test]
+    fn graphs_inside_exists_are_reads() {
+        let a = access(
+            "INSERT { GRAPH <urn:mine> { <urn:s> <urn:p> 1 } } WHERE { \
+             FILTER NOT EXISTS { GRAPH <urn:secret> { ?s ?p ?o } } }",
+        );
+        assert!(a.read_iris.contains("urn:secret") && !a.unscoped);
+        let a = access(
+            "INSERT { GRAPH <urn:mine> { <urn:s> <urn:p> ?x } } WHERE { \
+             BIND(EXISTS { GRAPH ?g { ?s ?p ?o } } AS ?x) }",
+        );
+        assert!(a.unscoped, "a variable graph inside EXISTS");
+        let a = access(
+            "INSERT { GRAPH <urn:mine> { <urn:s> <urn:p> 1 } } WHERE { \
+             FILTER EXISTS { SERVICE <urn:source:x> { ?s ?p ?o } } }",
+        );
+        assert!(a.unscoped, "a SERVICE inside EXISTS");
+    }
 }
 
 // ─── Batch SPARQL UPDATE ──────────────────────────────────────────────────────
@@ -1267,7 +1328,12 @@ async fn sparql_batch_update(
     // being called unchanged before it runs.
     mark_model_versions_written(&state, &model_versions)?;
 
-    let results = state.store.batch_update(&resolved)?;
+    let results = {
+        let _source_caller = crate::sources::virtual_source::SourceCallerGuard::set(Some(
+            crate::sources::virtual_source::SourceCaller::for_request(&state.auth_db, Some(&user)),
+        ));
+        state.store.batch_update(&resolved)?
+    };
     if writes_unnamed_graphs {
         // In a blocking task of its own, which runs to the end even when the
         // client goes away while this request waits for it.
@@ -1479,6 +1545,25 @@ async fn graph_store_get(
     let registry = state.prefix_registry.clone();
     let graph_iri = params.graph_iri().map(|s| s.to_string());
     let rdf_format = format.to_rdf_format();
+    // A dataset's graph also declares the dataset's own prefix table (what its
+    // applied RDF Patches' `PA` / `PD` rows set), ahead of the registry's.
+    let dataset_prefixes = match graph_iri.as_deref() {
+        Some(g)
+            if matches!(
+                rdf_format,
+                oxigraph::io::RdfFormat::Turtle | oxigraph::io::RdfFormat::TriG
+            ) =>
+        {
+            state
+                .auth_db
+                .find_dataset_by_graph_iri(g)
+                .ok()
+                .flatten()
+                .and_then(|ds| state.auth_db.dataset_prefix_pairs(&ds.id).ok())
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
     let (chunk_tx, chunk_rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(8);
     let (start_tx, start_rx) = oneshot::channel::<Result<(), AppError>>();
 
@@ -1492,9 +1577,13 @@ async fn graph_store_get(
         // full IRIs. The line-based formats fall straight through to the plain
         // dump; they have no header to fill.
         let result = store
-            .dump_prefixed_to_writer(&mut writer, rdf_format, graph_iri.as_deref(), |ns| {
-                registry.declaration_for(ns)
-            })
+            .dump_with_prefixes_to_writer(
+                &mut writer,
+                rdf_format,
+                graph_iri.as_deref(),
+                &dataset_prefixes,
+                |ns| registry.declaration_for(ns),
+            )
             .map_err(|e| e.to_string())
             // Emit the tail of the buffered stream, else the dump is truncated.
             .and_then(|_| writer.finish().map_err(|e| e.to_string()));
@@ -3811,8 +3900,9 @@ fn is_pinned_version(version: &str) -> bool {
     !matches!(version.trim(), "" | "live" | "latest" | "current")
 }
 
-/// The set of SNAPSHOT graph IRIs in `version` of `dataset_id` whose SOURCE
-/// (live) graph is flagged `private`.
+/// The set of SNAPSHOT graph IRIs in `version` of `dataset_id` that a caller who
+/// cannot write the dataset must not read: those whose SOURCE (live) graph is
+/// flagged `private`.
 ///
 /// A version snapshot copies *all* of a dataset's selected graphs — including
 /// private ones — into version-scoped IRIs (`{base}/dataset/{id}/version/{v}/…`).
@@ -3820,46 +3910,184 @@ fn is_pinned_version(version: &str) -> bool {
 /// records the LIVE graphs), so a naive `private.contains(snapshot_iri)` check
 /// never matches and would leak private data to viewers through a pinned-version
 /// read. To filter correctly we map each snapshot graph back to its source via
-/// the version's `source_map` and drop snapshots whose source is private.
+/// the version's `source_map` and drop snapshots whose source is private. A
+/// snapshot the map does not tie to a source is dropped as well, as the version
+/// data and saved-query paths do.
 ///
-/// Returns an empty set for live/unknown versions or when the version has no
-/// recorded source mapping (older snapshots), which is the safe default for the
-/// *writer* fast-path — callers MUST only apply this filter to non-writers.
+/// The label is trimmed exactly as [`version_snapshot_graphs`] trims it, so both
+/// resolve the same version. Returns an empty set for live data and for a dataset
+/// with no private graph. Fails closed: a pinned version that cannot be read, or
+/// private flags that cannot be listed, are an error — an empty set would hide
+/// nothing. Callers MUST only apply this filter to non-writers.
 fn private_snapshot_graphs(
     state: &AppState,
     dataset_id: &str,
     version: &str,
-) -> std::collections::HashSet<String> {
+) -> Result<std::collections::HashSet<String>, AppError> {
+    let version = version.trim();
     if !is_pinned_version(version) {
-        return std::collections::HashSet::new();
+        return Ok(std::collections::HashSet::new());
     }
     // Live graph IRIs the owner marked private for this dataset.
     let private_sources: std::collections::HashSet<String> = state
         .auth_db
         .list_dataset_graph_entries(dataset_id)
-        .unwrap_or_default()
+        .map_err(|e| AppError::Internal(e.to_string()))?
         .into_iter()
         .filter(|e| e.private)
         .map(|e| e.graph_iri)
         .collect();
     if private_sources.is_empty() {
-        return std::collections::HashSet::new();
+        return Ok(std::collections::HashSet::new());
     }
-    // Map snapshot → source via the version's recorded graph map, keeping the
-    // snapshot IRIs whose source is private.
-    match crate::dataset_versions::registry::get_version(
+    let ver = crate::dataset_versions::registry::get_version(
         &state.store,
         state.base_url.as_str(),
         dataset_id,
         version,
-    ) {
-        Some(ver) => ver
+    )
+    .ok_or_else(|| AppError::NotFound(format!("dataset version '{version}' not found")))?;
+    // Map snapshot → source via the version's recorded graph map, keeping the
+    // snapshot IRIs whose source is private, plus any snapshot it leaves unmapped.
+    let mapped: std::collections::HashSet<&str> = ver
+        .source_map
+        .iter()
+        .map(|m| m.snapshot_graph.as_str())
+        .collect();
+    let unmapped: Vec<String> = ver
+        .snapshot_graphs
+        .iter()
+        .filter(|g| !mapped.contains(g.as_str()))
+        .cloned()
+        .collect();
+    Ok(ver
+        .source_map
+        .into_iter()
+        .filter(|m| private_sources.contains(&m.source_graph))
+        .map(|m| m.snapshot_graph)
+        .chain(unmapped)
+        .collect())
+}
+
+#[cfg(test)]
+mod private_snapshot_tests {
+    use super::private_snapshot_graphs;
+    use crate::auth::models::{OwnerType, SystemRole, Visibility};
+    use crate::dataset_versions::models::{DatasetVersion, VersionStatus};
+    use crate::dataset_versions::{registry, snapshot_as_version};
+    use crate::server::error::AppError;
+    use crate::server::AppState;
+    use crate::store::TripleStore;
+
+    const PUB: &str = "http://example.org/g/public";
+    const PRIV: &str = "http://example.org/g/private";
+
+    /// A dataset with a public and a private graph, both snapshotted into
+    /// version `1.0.0`. Returns the state and the private graph's snapshot IRI.
+    fn state_with_version() -> (AppState, String) {
+        let state = AppState::test_default_with_store(TripleStore::in_memory().unwrap());
+        let db = &state.auth_db;
+        db.create_user("owner", "owner", "owner@test.com", "hash", SystemRole::User)
+            .unwrap();
+        db.create_dataset(
+            "ds1",
+            "DS1",
+            None,
+            OwnerType::User,
+            "owner",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+        for g in [PUB, PRIV] {
+            db.add_dataset_graph("ds1", g).unwrap();
+            state
+                .store
+                .update(&format!(
+                    "INSERT DATA {{ GRAPH <{g}> {{ <urn:s> <urn:p> <urn:o> }} }}"
+                ))
+                .unwrap();
+        }
+        db.set_dataset_graph_private("ds1", PRIV, true).unwrap();
+        let ver = snapshot_as_version(
+            &state.store,
+            state.base_url.as_str(),
+            "ds1",
+            "1.0.0",
+            &[PUB.to_string(), PRIV.to_string()],
+            VersionStatus::Published,
+            None,
+            None,
+        )
+        .unwrap();
+        let snap = ver
             .source_map
-            .into_iter()
-            .filter(|m| private_sources.contains(&m.source_graph))
-            .map(|m| m.snapshot_graph)
-            .collect(),
-        None => std::collections::HashSet::new(),
+            .iter()
+            .find(|m| m.source_graph == PRIV)
+            .map(|m| m.snapshot_graph.clone())
+            .unwrap();
+        (state, snap)
+    }
+
+    /// The label is trimmed as `version_snapshot_graphs` trims it, so a padded
+    /// label withholds the same snapshot as the plain one.
+    #[test]
+    fn a_padded_label_withholds_the_same_snapshot() {
+        let (state, priv_snap) = state_with_version();
+        for label in ["1.0.0", " 1.0.0", "1.0.0 ", "\t1.0.0\n"] {
+            let private = private_snapshot_graphs(&state, "ds1", label).unwrap();
+            assert_eq!(
+                private,
+                std::collections::HashSet::from([priv_snap.clone()]),
+                "{label:?}"
+            );
+        }
+        for live in ["", " ", "live", " latest ", "current"] {
+            let private = private_snapshot_graphs(&state, "ds1", live).unwrap();
+            assert!(private.is_empty(), "{live:?}");
+        }
+    }
+
+    /// A pinned label that names no readable version is refused rather than read
+    /// as "nothing private", which would serve every snapshot graph.
+    #[test]
+    fn an_unreadable_pinned_version_fails_closed() {
+        let (state, _) = state_with_version();
+        for label in ["9.9.9", "1.0.0 x", "1.0.0%20"] {
+            assert!(
+                matches!(
+                    private_snapshot_graphs(&state, "ds1", label),
+                    Err(AppError::NotFound(_))
+                ),
+                "{label:?}"
+            );
+        }
+    }
+
+    /// A snapshot graph the version's map does not tie to a source is withheld.
+    #[test]
+    fn an_unmapped_snapshot_is_withheld() {
+        let (state, _) = state_with_version();
+        let base = state.base_url.as_str();
+        let stray = format!("{base}/dataset/ds1/version/2.0.0/stray");
+        let record = DatasetVersion {
+            dataset_id: "ds1".into(),
+            version: "2.0.0".into(),
+            status: VersionStatus::Draft,
+            graph_iri: format!("{base}/dataset/ds1/version/2.0.0"),
+            snapshot_graphs: vec![stray.clone()],
+            source_map: Vec::new(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            created_by: None,
+            derived_from: None,
+            notes: None,
+            branch: None,
+            conforms_to_model: None,
+            conforms_to_version: None,
+        };
+        registry::insert_version(&state.store, base, &record).unwrap();
+        let private = private_snapshot_graphs(&state, "ds1", "2.0.0").unwrap();
+        assert!(private.contains(&stray), "{private:?}");
     }
 }
 
@@ -3991,7 +4219,7 @@ fn scope_dataset_graphs(
                     if can_write {
                         out.extend(snap);
                     } else {
-                        let private = private_snapshot_graphs(state, id, v.as_str());
+                        let private = private_snapshot_graphs(state, id, v.as_str())?;
                         out.extend(snap.into_iter().filter(|g| !private.contains(g)));
                     }
                 }
@@ -4041,7 +4269,7 @@ fn is_authorized_version_graph(
                         // A snapshot of a PRIVATE source graph may only be read by a
                         // caller who can write the dataset — otherwise a viewer could
                         // read private data by drilling straight into the snapshot IRI.
-                        if private_snapshot_graphs(state, ds_id, v.as_str()).contains(graph) {
+                        if private_snapshot_graphs(state, ds_id, v.as_str())?.contains(graph) {
                             let can_write = match user_id {
                                 Some(uid) => {
                                     state.auth_db.can_write_dataset(uid, &d).unwrap_or(false)
@@ -5405,6 +5633,12 @@ async fn execute_dataset_query(
         .filter(|s| s.is_active)
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
 
+    // One normalised label for both version lookups below: the snapshot graphs
+    // and the private filter must resolve the same version. The filter used to
+    // get the raw label, so `?version=1.0.0%20` found the snapshot but no version
+    // to filter by, and served every snapshot graph, private ones included.
+    let version = version.map(str::trim);
+
     // When a version is pinned, scope to that version's snapshot graphs instead of
     // the service's live graphs (dataset access was already checked above, and the
     // version belongs to this dataset). Otherwise use the service graphs, falling
@@ -5455,10 +5689,11 @@ async fn execute_dataset_query(
     let graphs: Vec<String> = if can_write {
         graphs
     } else {
+        // A failed lookup refuses the read rather than counting as "nothing private".
         let mut private: std::collections::HashSet<String> = state
             .auth_db
             .list_dataset_graph_entries(dataset_id)
-            .unwrap_or_default()
+            .map_err(|e| AppError::Internal(e.to_string()))?
             .into_iter()
             .filter(|e| e.private)
             .map(|e| e.graph_iri)
@@ -5469,7 +5704,7 @@ async fn execute_dataset_query(
         // Add the snapshot IRIs whose SOURCE (live) graph is private (no-op for
         // live reads, where `private_snapshot_graphs` returns empty).
         if let Some(v) = version {
-            private.extend(private_snapshot_graphs(state, dataset_id, v));
+            private.extend(private_snapshot_graphs(state, dataset_id, v)?);
         }
         graphs
             .into_iter()
@@ -7953,19 +8188,19 @@ pub async fn linked_data_asset(
 /// Shapes-graph sources for a dataset, in resolution order: the configured
 /// `shapes_graph_iri` (legacy column), SHACL Studio validation-layer bindings,
 /// and dataset graphs carrying the `shapes` role.
-struct DatasetShapesSources {
+pub(crate) struct DatasetShapesSources {
     configured: Option<String>,
     bound: Vec<String>,
     role_graphs: Vec<String>,
 }
 
 impl DatasetShapesSources {
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.configured.is_none() && self.bound.is_empty() && self.role_graphs.is_empty()
     }
 }
 
-fn dataset_shapes_sources(
+pub(crate) fn dataset_shapes_sources(
     state: &AppState,
     dataset: &crate::auth::models::Dataset,
 ) -> DatasetShapesSources {
@@ -8001,7 +8236,7 @@ fn dataset_shapes_sources(
 /// union (rather than first-source-wins) keeps validation consistent with the
 /// dataset page's "Effective shapes" panel: everything the user sees attached
 /// is what actually validates.
-fn resolve_shapes_graphs(sources: DatasetShapesSources) -> Vec<String> {
+pub(crate) fn resolve_shapes_graphs(sources: DatasetShapesSources) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let candidates = sources
         .configured
@@ -8016,10 +8251,12 @@ fn resolve_shapes_graphs(sources: DatasetShapesSources) -> Vec<String> {
     out
 }
 
-const NO_SHAPES_GRAPH_MSG: &str = "No shapes graph found for this dataset. Upload a SHACL \
+pub(crate) const NO_SHAPES_GRAPH_MSG: &str =
+    "No shapes graph found for this dataset. Upload a SHACL \
      shapes file, set a graph's role to 'shapes', or bind a shape graph in SHACL Studio.";
 
-const NO_READABLE_SHAPES_GRAPH_MSG: &str = "No shapes graph of this dataset is one you may read.";
+pub(crate) const NO_READABLE_SHAPES_GRAPH_MSG: &str =
+    "No shapes graph of this dataset is one you may read.";
 
 /// Merge per-shapes-graph validation reports into one: conforms = all conform,
 /// results concatenated, results_count = sum.
@@ -9297,6 +9534,8 @@ pub async fn get_rml_mapping(
 /// Query params:
 /// - `?preview=true` — return generated triples without persisting
 /// - `?graph=<iri>` — override target named graph (default: dataset default graph)
+/// - `?base=<iri>` — the base IRI relative IRIs resolve against (R2RML §11.2);
+///   a triples map's own `rml:baseIRI` wins
 pub async fn execute_rml_mapping(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -9326,6 +9565,7 @@ pub async fn execute_rml_mapping(
     }
 
     let preview = params.get("preview").map(|v| v == "true").unwrap_or(false);
+    let on_data_error = on_data_error_param(&params)?;
     let target_graph = params
         .get("graph")
         .cloned()
@@ -9407,8 +9647,17 @@ pub async fn execute_rml_mapping(
         })?
     };
 
-    let mapping = crate::rml::parse_rml(&mapping_turtle)
+    let mut mapping = crate::rml::parse_rml(&mapping_turtle)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid RML mapping: {e}")))?;
+    if let Some(base) = params.get("base").filter(|b| !b.trim().is_empty()) {
+        oxigraph::model::NamedNode::new(base.trim()).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("base '{base}' is not an absolute IRI: {e}"),
+            )
+        })?;
+        mapping.base_iri = Some(base.trim().to_string());
+    }
 
     if preview {
         // Execute into a temporary in-memory store and return the triples
@@ -9418,20 +9667,30 @@ pub async fn execute_rml_mapping(
                 format!("Temp store error: {e}"),
             )
         })?;
-        let count = crate::rml::execute(&mapping, &source_data, &temp, Some(&target_graph))
-            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        let outcome = crate::rml::execute_with(
+            &mapping,
+            &source_data,
+            &temp,
+            Some(&target_graph),
+            on_data_error,
+            |_| Ok(()),
+        )
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
         let turtle_bytes = temp
             .dump_prefixed(oxigraph::io::RdfFormat::Turtle, Some(&target_graph), |ns| {
                 state.prefix_registry.declaration_for(ns)
             })
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let turtle = String::from_utf8(turtle_bytes).unwrap_or_default();
-        return Ok(Json(serde_json::json!({
+        let mut body = serde_json::json!({
             "preview": true,
-            "triples_count": count,
+            "triples_count": outcome.triples,
             "turtle": turtle,
-        }))
-        .into_response());
+        });
+        if !outcome.data_errors.is_empty() {
+            body["data_errors"] = serde_json::json!(outcome.data_errors);
+        }
+        return Ok(Json(body).into_response());
     }
 
     // Execute into the real store, enforcing the same boundary on every effective
@@ -9448,11 +9707,12 @@ pub async fn execute_rml_mapping(
     let authz_ds = dataset_id.clone();
     let claims = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let authz_claims = claims.clone();
-    let count = crate::rml::execute_authorized(
+    let outcome = crate::rml::execute_with(
         &mapping,
         &source_data,
         &state.store,
         Some(&target_graph),
+        on_data_error,
         move |g: &str| {
             let claim = crate::auth::dataset_graph::gate_dataset_graph_target(
                 &authz_store,
@@ -9505,11 +9765,29 @@ pub async fn execute_rml_mapping(
         );
     }
 
-    Ok(Json(serde_json::json!({
-        "triples_inserted": count,
+    let mut body = serde_json::json!({
+        "triples_inserted": outcome.triples,
         "target_graph": target_graph,
-    }))
-    .into_response())
+    });
+    if !outcome.data_errors.is_empty() {
+        body["data_errors"] = serde_json::json!(outcome.data_errors);
+    }
+    Ok(Json(body).into_response())
+}
+
+/// `?on_data_error=abort|skip` on the file-mapping endpoints.
+fn on_data_error_param(
+    params: &std::collections::HashMap<String, String>,
+) -> Result<crate::rml::checks::OnDataError, (StatusCode, String)> {
+    match params.get("on_data_error") {
+        None => Ok(crate::rml::checks::OnDataError::Abort),
+        Some(v) => crate::rml::checks::OnDataError::parse(v).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("unknown on_data_error '{v}'; expected abort (the default) or skip"),
+            )
+        }),
+    }
 }
 
 /// POST /api/rml/preview — dry-run RML mapping without persisting
@@ -9517,8 +9795,10 @@ pub async fn execute_rml_mapping(
 /// Multipart: `mapping` (Turtle) + named source file parts.
 pub async fn rml_preview(
     State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
     mut multipart: Multipart,
 ) -> Result<Response, (StatusCode, String)> {
+    let on_data_error = on_data_error_param(&params)?;
     let mut mapping_turtle: Option<String> = None;
     let mut source_data: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
@@ -9556,7 +9836,10 @@ pub async fn rml_preview(
             format!("Temp store error: {e}"),
         )
     })?;
-    let count = crate::rml::execute(&mapping, &source_data, &temp, None)
+    let outcome =
+        crate::rml::execute_with(&mapping, &source_data, &temp, None, on_data_error, |_| {
+            Ok(())
+        })
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let turtle_bytes = temp
@@ -9565,11 +9848,14 @@ pub async fn rml_preview(
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(serde_json::json!({
-        "triples_count": count,
+    let mut body = serde_json::json!({
+        "triples_count": outcome.triples,
         "turtle": String::from_utf8(turtle_bytes).unwrap_or_default(),
-    }))
-    .into_response())
+    });
+    if !outcome.data_errors.is_empty() {
+        body["data_errors"] = serde_json::json!(outcome.data_errors);
+    }
+    Ok(Json(body).into_response())
 }
 
 // ─── Helper functions ────────────────────────────────────────────────────────
@@ -9867,6 +10153,8 @@ fn format_sparql_results_as_pairs(
 pub fn reasoning_routes() -> Router<AppState> {
     Router::new()
         .route("/api/reasoning/materialize", post(reasoning_materialize))
+        .route("/api/reasoning/check", post(reasoning_check))
+        .route("/api/reasoning/jobs/:job_id", get(reasoning_job))
         .route("/api/reasoning/status", get(reasoning_status))
         .route("/api/reasoning/rewrite", post(reasoning_rewrite))
         .route("/api/text-search/reindex", post(text_search_reindex))
@@ -9896,19 +10184,188 @@ struct MaterializeRequest {
     /// plus the model version it conforms to (`GET …/conformance`). Any
     /// `source_graphs` are added on top.
     dataset: Option<String>,
+    /// `owl2-rl` only: also run eq-ref, writing `x owl:sameAs x` for every
+    /// term (about one triple per term). Default `false`.
+    #[serde(default)]
+    eq_ref: bool,
+}
+
+/// `?async=true`: queue the run as a job and answer 202 at once.
+#[derive(Debug, Default, serde::Deserialize)]
+struct AsyncParam {
+    #[serde(default, rename = "async")]
+    run_async: bool,
+}
+
+/// The HTTP error for a failed reasoning run. An inconsistent ontology, a
+/// run that did not reach its fixed point, input outside OWL 2 DL and a
+/// request a backend cannot honour are facts about the caller's data, so they
+/// are a 422 whose body says what happened (an inconsistent run keeps the
+/// derived triples in `target`). A DL backend that is not configured or not
+/// reachable is a 503, one that ran out of time a 504 (the answer is
+/// unknown), too much input a 413 and a backend crash a 502.
+pub(crate) fn reasoning_failure(
+    e: crate::reasoning::ReasoningError,
+    regime: &str,
+    target: &str,
+) -> AppError {
+    use crate::reasoning::ReasoningError;
+    match e {
+        ReasoningError::Inconsistency { rule, detail } => {
+            AppError::Unprocessable(serde_json::json!({
+                "error": format!("the ontology is inconsistent ({rule}): {detail}"),
+                "consistent": false,
+                "rule": rule,
+                "detail": detail,
+                "regime": regime,
+                "target_graph": target,
+            }))
+        }
+        ReasoningError::NotConverged { iterations, .. } => {
+            AppError::Unprocessable(serde_json::json!({
+                "error": format!(
+                    "{regime} did not reach a fixed point within {iterations} iterations; \
+                     the target graph holds only part of the closure"
+                ),
+                "converged": false,
+                "iterations": iterations,
+                "regime": regime,
+                "target_graph": target,
+            }))
+        }
+        other => backend_failure(other, regime),
+    }
+}
+
+/// The non-result failures shared by materialisation and checks.
+fn backend_failure(e: crate::reasoning::ReasoningError, regime: &str) -> AppError {
+    use crate::reasoning::ReasoningError;
+    let message = e.to_string();
+    match e {
+        ReasoningError::NotInProfile { violations } => AppError::Unprocessable(serde_json::json!({
+            "error": message,
+            "in_profile": false,
+            "violations": violations,
+            "regime": regime,
+        })),
+        ReasoningError::NotSupported(_) => AppError::Unprocessable(serde_json::json!({
+            "error": message,
+            "regime": regime,
+        })),
+        ReasoningError::Unavailable(_) => AppError::Status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({ "error": message, "regime": regime }),
+        ),
+        ReasoningError::Timeout { backend, seconds } => AppError::Status(
+            StatusCode::GATEWAY_TIMEOUT,
+            serde_json::json!({
+                "error": message,
+                "result": "unknown",
+                "backend": backend,
+                "timeout_secs": seconds,
+                "regime": regime,
+            }),
+        ),
+        ReasoningError::TooLarge {
+            backend,
+            triples,
+            limit,
+        } => AppError::Status(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            serde_json::json!({
+                "error": message,
+                "backend": backend,
+                "triples": triples,
+                "limit": limit,
+                "regime": regime,
+            }),
+        ),
+        ReasoningError::Backend { backend, .. } => {
+            tracing::warn!("reasoning backend failure: {message}");
+            AppError::Status(
+                StatusCode::BAD_GATEWAY,
+                serde_json::json!({ "error": message, "backend": backend, "regime": regime }),
+            )
+        }
+        other => AppError::Internal(other.to_string()),
+    }
+}
+
+/// A successful run: the report, plus what a DL backend adds to it.
+#[derive(Debug, Clone)]
+pub(crate) struct RegimeRun {
+    pub report: crate::reasoning::ReasoningReport,
+    /// `native` | `konclude` | `sidecar` (owl2-dl only).
+    pub backend: Option<String>,
+    pub backend_version: Option<String>,
+    /// `false`: the backend is sound but not complete (owl2-dl native).
+    pub complete: Option<bool>,
+    pub warnings: Vec<String>,
+}
+
+impl RegimeRun {
+    fn plain(report: crate::reasoning::ReasoningReport) -> Self {
+        RegimeRun {
+            report,
+            backend: None,
+            backend_version: None,
+            complete: None,
+            warnings: Vec::new(),
+        }
+    }
 }
 
 /// Run `regime` over `sources` (None = the whole store) into `target`.
 /// Shared by `POST /api/reasoning/materialize` and the per-dataset
-/// materialisation (`crate::entailment`).
+/// materialisation (`crate::entailment`). `Ok(None)`: unknown regime.
 pub(crate) fn run_regime(
     state: &AppState,
     regime: &str,
     sources: Option<Vec<String>>,
     target: &str,
     identity: crate::reasoning::identity::IdentityPolicy,
-) -> Result<Option<crate::reasoning::ReasoningReport>, AppError> {
-    let _sources: Vec<String> = sources.clone().unwrap_or_default();
+    options: RegimeOptions,
+) -> Result<Option<RegimeRun>, AppError> {
+    run_reasoner_with(state, regime, sources, target, identity, options)
+        .map_err(|e| reasoning_failure(e, regime, target))
+}
+
+/// Per-run switches a regime may honour; the defaults are what every
+/// per-dataset run uses.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct RegimeOptions {
+    /// `owl2-rl`: run eq-ref (`Owl2RLReasoner::with_eq_ref`).
+    pub eq_ref: bool,
+}
+
+/// [`run_regime`] with the reasoner's own error, for a caller that records
+/// what the run found (`crate::entailment`).
+pub(crate) fn run_reasoner(
+    state: &AppState,
+    regime: &str,
+    sources: Option<Vec<String>>,
+    target: &str,
+    identity: crate::reasoning::identity::IdentityPolicy,
+) -> Result<Option<RegimeRun>, crate::reasoning::ReasoningError> {
+    run_reasoner_with(
+        state,
+        regime,
+        sources,
+        target,
+        identity,
+        RegimeOptions::default(),
+    )
+}
+
+/// [`run_reasoner`] with explicit [`RegimeOptions`].
+pub(crate) fn run_reasoner_with(
+    state: &AppState,
+    regime: &str,
+    sources: Option<Vec<String>>,
+    target: &str,
+    identity: crate::reasoning::identity::IdentityPolicy,
+    options: RegimeOptions,
+) -> Result<Option<RegimeRun>, crate::reasoning::ReasoningError> {
     // Apply the scope to whichever reasoner the regime selects.
     // Unused when every regime feature is off (`--no-default-features`).
     #[allow(unused_macros)]
@@ -9923,7 +10380,7 @@ pub(crate) fn run_regime(
     }
     // Silence unused-variable warnings for the case where no reasoning feature is
     // compiled in (only the `_ => Err(...)` arm fires, leaving state/target unused).
-    let _ = (&state, target, identity);
+    let _ = (&state, target, identity, &sources, options);
 
     // Match returns Some(report) for a recognised regime or None for an unknown one.
     // Both branches are always present in the match so no unreachable-code warning fires.
@@ -9934,83 +10391,191 @@ pub(crate) fn run_regime(
                 &state.store,
                 target
             ));
-            Some(
-                m.materialize()
-                    .map_err(|e| AppError::Internal(e.to_string()))?,
-            )
+            Some(m.materialize()?)
         }
         #[cfg(feature = "owl2-rl")]
         "owl2-rl" => {
             let m = scoped!(crate::reasoning::owl2_rl::Owl2RLReasoner::new(&state.store)
                 .with_target(target)
-                .with_identity_policy(identity));
-            Some(
-                m.materialize()
-                    .map_err(|e| AppError::Internal(e.to_string()))?,
-            )
+                .with_identity_policy(identity)
+                .with_eq_ref(options.eq_ref));
+            Some(m.materialize()?)
         }
         #[cfg(feature = "owl2-el")]
         "owl2-el" => {
             let m = scoped!(
                 crate::reasoning::owl2_el::El2Classifier::new(&state.store).with_target(target)
             );
-            Some(
-                m.classify()
-                    .map_err(|e| AppError::Internal(e.to_string()))?,
-            )
+            Some(m.classify()?)
         }
         #[cfg(feature = "owl2-ql")]
         "owl2-ql" => {
-            let rw = scoped!(crate::reasoning::owl2_ql::QLQueryRewriter::new(
-                &state.store
-            ));
-            Some(
-                rw.materialize_tbox()
-                    .map_err(|e| AppError::Internal(e.to_string()))?,
-            )
+            let rw = scoped!(
+                crate::reasoning::owl2_ql::QLQueryRewriter::new(&state.store).with_target(target)
+            );
+            Some(rw.materialize()?)
         }
         #[cfg(feature = "owl2-dl")]
         "owl2-dl" => {
-            use crate::reasoning::owl2_dl::{
-                ExternalReasoner, ExternalReasonerBridge, NativeTableauStub,
-            };
-            // The external bridge is reachable only through configuration:
-            // `OTS_EXTERNAL_REASONER=konclude` (binary from
-            // `OTS_EXTERNAL_REASONER_BIN`, else `Konclude` on PATH). Unset means
-            // the native stub — RL plus the DL extension rules. This used to
-            // hard-code the stub, so the documented bridge could not be used over
-            // HTTP no matter how the server was configured.
-            let reasoner: Box<dyn ExternalReasoner> = match std::env::var("OTS_EXTERNAL_REASONER")
-                .unwrap_or_default()
-                .trim()
-                .to_ascii_lowercase()
-                .as_str()
-            {
-                "konclude" => {
-                    let k = crate::reasoning::konclude_bridge::KoncludeReasoner::new();
-                    Box::new(match std::env::var("OTS_EXTERNAL_REASONER_BIN") {
-                        Ok(bin) if !bin.trim().is_empty() => k.with_binary(bin.trim()),
-                        _ => k,
-                    })
-                }
-                _ => Box::new(NativeTableauStub),
-            };
-            let bridge = ExternalReasonerBridge::new(reasoner).with_identity_policy(identity);
-            Some(
-                bridge
-                    .materialize(&state.store, &_sources, target)
-                    .map_err(|e| AppError::Internal(e.to_string()))?,
-            )
+            // The backend `OTS_DL_BACKEND` names — native rules, Konclude or
+            // the reasoner sidecar. None configured is a 503, and a failing
+            // external backend never falls back to the native rules.
+            let run = crate::reasoning::dl_backend::materialize(
+                &state.store,
+                &state.dl,
+                sources.as_deref(),
+                target,
+                identity,
+            )?;
+            return Ok(Some(RegimeRun {
+                report: run.report,
+                backend: Some(run.backend.to_string()),
+                backend_version: run.version,
+                complete: Some(run.complete),
+                warnings: run.warnings,
+            }));
         }
         _ => None,
     };
-    Ok(report)
+    Ok(report.map(RegimeRun::plain))
 }
 
-/// POST /api/reasoning/materialize — run an entailment regime.
+/// The graphs a reasoning request may read: a dataset's conformance layer
+/// (only the graphs the caller can read), explicit `source_graphs` the caller
+/// can read, or — neither given — `None`, the unnamed default graph. Also the
+/// identity policy that applies (the dataset's, else `sameas-full`).
+fn reasoning_scope(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    dataset: Option<&str>,
+    source_graphs: Option<Vec<String>>,
+) -> Result<
+    (
+        Option<Vec<String>>,
+        crate::reasoning::identity::IdentityPolicy,
+    ),
+    AppError,
+> {
+    // A dataset run applies the dataset's identity policy (what owl:sameAs
+    // may do, whether linksets are premises); an unscoped run reads whatever
+    // it is given and keeps the full behaviour.
+    let mut identity = crate::reasoning::identity::IdentityPolicy::Full;
+    let sources: Option<Vec<String>> = if let Some(ds_id) = dataset {
+        let ds = state
+            .auth_db
+            .get_dataset(ds_id)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::NotFound(format!("Dataset '{ds_id}' not found")))?;
+        let visible = state
+            .auth_db
+            .can_access_dataset(Some(&user.user_id), &ds)
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        if !visible {
+            return Err(AppError::NotFound(format!("Dataset '{ds_id}' not found")));
+        }
+        let (layer, effective) = crate::entailment::reasoning_sources(state, &ds);
+        identity = effective.policy;
+        // `reasoning_sources` (via `conformance::resolve`) hands back the
+        // dataset's whole reasoning layer, its private graphs included: it does
+        // not filter on who is asking. But materialisation writes the derived
+        // consequences into a caller-chosen target the caller can read (and a
+        // check reports what follows), so a viewer could launder a private
+        // graph's triples out through it. Keep only the layer graphs the caller
+        // may read — the model registry's own visibility rule still admits model
+        // graphs — exactly as the explicit `source_graphs` below are
+        // read-checked. Admins read every graph.
+        let mut layer: Vec<String> = if user.is_admin() {
+            layer
+        } else {
+            let mut kept = Vec::with_capacity(layer.len());
+            for g in layer {
+                if check_graph_read_access(state, Some(user), &g)
+                    .map_err(|e| AppError::Internal(e.to_string()))?
+                    || crate::conformance::model_graph_readable(state, Some(&user.user_id), &g)
+                {
+                    kept.push(g);
+                }
+            }
+            kept
+        };
+        for g in source_graphs.unwrap_or_default() {
+            if !check_graph_read_access(state, Some(user), &g)
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                && !crate::conformance::model_graph_readable(state, Some(&user.user_id), &g)
+            {
+                return Err(AppError::Forbidden(format!("no read access to <{g}>")));
+            }
+            if !layer.contains(&g) {
+                layer.push(g);
+            }
+        }
+        Some(layer)
+    } else if let Some(explicit) = source_graphs {
+        for g in &explicit {
+            if !check_graph_read_access(state, Some(user), g)
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                && !crate::conformance::model_graph_readable(state, Some(&user.user_id), g)
+            {
+                return Err(AppError::Forbidden(format!("no read access to <{g}>")));
+            }
+        }
+        Some(explicit)
+    } else {
+        None
+    };
+    Ok((sources, identity))
+}
+
+/// Run `work` on the blocking pool under the expensive-operations semaphore —
+/// now, or (`run_async`) as a background job that answers 202 at once.
+async fn run_reasoning_work<F>(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    kind: &'static str,
+    run_async: bool,
+    work: F,
+) -> Result<Response, AppError>
+where
+    F: FnOnce() -> Result<serde_json::Value, AppError> + Send + 'static,
+{
+    if run_async {
+        let id = super::reasoning_jobs::create(&user.user_id, kind);
+        let sem = state.expensive_semaphore.clone();
+        let job = id.clone();
+        tokio::spawn(async move {
+            // Bound concurrent expensive operations, as the synchronous path does.
+            let _permit = sem.acquire_owned().await;
+            super::reasoning_jobs::start(&job);
+            let (status, body) = match tokio::task::spawn_blocking(work).await {
+                Ok(Ok(body)) => (StatusCode::OK, body),
+                Ok(Err(e)) => e.status_and_body(),
+                Err(e) => AppError::Internal(format!("reasoning job: {e}")).status_and_body(),
+            };
+            super::reasoning_jobs::finish(&job, status, body);
+        });
+        return Ok(super::reasoning_jobs::accepted(&id));
+    }
+    // Bound concurrent expensive operations so a burst of reasoning calls can't
+    // occupy every Tokio worker and starve the runtime (held until handler return).
+    let _permit = state
+        .expensive_semaphore
+        .acquire()
+        .await
+        .map_err(|_| AppError::Internal("Server overloaded".to_string()))?;
+    // The rules are synchronous store work that can run for minutes: keep it
+    // off the async workers.
+    let body = tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|e| AppError::Internal(format!("reasoning task: {e}")))??;
+    Ok((StatusCode::OK, Json(body)).into_response())
+}
+
+/// POST /api/reasoning/materialize — run an entailment regime
+/// (`?async=true`: as a background job, `GET /api/reasoning/jobs/{id}`).
 async fn reasoning_materialize(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    Query(params): Query<AsyncParam>,
     Json(body): Json<MaterializeRequest>,
 ) -> Result<Response, AppError> {
     let target = body
@@ -10031,118 +10596,222 @@ async fn reasoning_materialize(
     // an explicit grant or admin).
     require_graph_write(&state, Some(&user), Some(target.as_str()))?;
 
-    // Entailment graphs are derived data and must be rebuilt from scratch each
-    // run. Materialisation only ever INSERTed, so after a source triple was
-    // deleted or edited its stale consequences stayed in `urn:entailment:*`
-    // forever — and were still folded into every `?entailment=` query. Only the
-    // server-owned entailment namespace is cleared: a caller may legitimately
-    // target one of their own graphs, and clearing that would destroy data.
-    if target.starts_with("urn:entailment:") {
-        let clear = format!("CLEAR SILENT GRAPH <{target}>");
-        state
-            .store
-            .update(&clear)
-            .map_err(|e| AppError::Internal(format!("clearing <{target}>: {e}")))?;
-    }
-
-    // Bound concurrent expensive operations so a burst of reasoning calls can't
-    // occupy every Tokio worker and starve the runtime (held until handler return).
-    let _permit = state
-        .expensive_semaphore
-        .acquire()
-        .await
-        .map_err(|_| AppError::Internal("Server overloaded".to_string()))?;
-    // Extract source_graphs unconditionally so the struct field is always read.
     // The graphs the rules may read. `source_graphs` used to be parsed and then
     // ignored — every regime materialised over the unnamed default graph, so a
     // dataset's named graphs were invisible to this endpoint however it was
     // called. Scoped now: a dataset's conformance layer, explicit graphs the
     // caller may read, or (neither given) the default graph as before.
-    // A dataset run applies the dataset's identity policy (what owl:sameAs
-    // may do, whether linksets are premises); an unscoped run reads whatever
-    // it is given and keeps the full behaviour.
-    let mut identity = crate::reasoning::identity::IdentityPolicy::Full;
-    let sources: Option<Vec<String>> = if let Some(ds_id) = body.dataset.as_deref() {
-        let ds = state
-            .auth_db
-            .get_dataset(ds_id)
-            .map_err(|e| AppError::Internal(e.to_string()))?
-            .ok_or_else(|| AppError::NotFound(format!("Dataset '{ds_id}' not found")))?;
-        let visible = state
-            .auth_db
-            .can_access_dataset(Some(&user.user_id), &ds)
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-        if !visible {
-            return Err(AppError::NotFound(format!("Dataset '{ds_id}' not found")));
-        }
-        let (layer, effective) = crate::entailment::reasoning_sources(&state, &ds);
-        identity = effective.policy;
-        // `reasoning_sources` (via `conformance::resolve`) hands back the
-        // dataset's whole reasoning layer, its private graphs included: it does
-        // not filter on who is asking. But materialisation writes the derived
-        // consequences into a caller-chosen target the caller can read, so a
-        // viewer could launder a private graph's triples out through it. Keep
-        // only the layer graphs the caller may read — the model registry's own
-        // visibility rule still admits model graphs — exactly as the explicit
-        // `source_graphs` below are read-checked. Admins read every graph.
-        let mut layer: Vec<String> = if user.is_admin() {
-            layer
-        } else {
-            let mut kept = Vec::with_capacity(layer.len());
-            for g in layer {
-                if check_graph_read_access(&state, Some(&user), &g)
-                    .map_err(|e| AppError::Internal(e.to_string()))?
-                    || crate::conformance::model_graph_readable(&state, Some(&user.user_id), &g)
-                {
-                    kept.push(g);
-                }
-            }
-            kept
-        };
-        for g in body.source_graphs.clone().unwrap_or_default() {
-            if !check_graph_read_access(&state, Some(&user), &g)
-                .map_err(|e| AppError::Internal(e.to_string()))?
-                && !crate::conformance::model_graph_readable(&state, Some(&user.user_id), &g)
-            {
-                return Err(AppError::Forbidden(format!("no read access to <{g}>")));
-            }
-            if !layer.contains(&g) {
-                layer.push(g);
-            }
-        }
-        Some(layer)
-    } else if let Some(explicit) = body.source_graphs.clone() {
-        for g in &explicit {
-            if !check_graph_read_access(&state, Some(&user), g)
-                .map_err(|e| AppError::Internal(e.to_string()))?
-                && !crate::conformance::model_graph_readable(&state, Some(&user.user_id), g)
-            {
-                return Err(AppError::Forbidden(format!("no read access to <{g}>")));
-            }
-        }
-        Some(explicit)
-    } else {
-        None
+    let (sources, identity) = reasoning_scope(
+        &state,
+        &user,
+        body.dataset.as_deref(),
+        body.source_graphs.clone(),
+    )?;
+    let regime = body.regime.clone();
+    let st = state.clone();
+    let options = RegimeOptions {
+        eq_ref: body.eq_ref,
     };
-    let report = run_regime(&state, &body.regime, sources.clone(), &target, identity)?;
+    let work = move || -> Result<serde_json::Value, AppError> {
+        // Entailment graphs are derived data and must be rebuilt from
+        // scratch each run. Materialisation only ever INSERTed, so after a
+        // source triple was deleted or edited its stale consequences stayed
+        // in `urn:entailment:*` forever — and were still folded into every
+        // `?entailment=` query. Only the server-owned entailment namespace
+        // is cleared: a caller may legitimately target one of their own
+        // graphs, and clearing that would destroy data.
+        if target.starts_with("urn:entailment:") {
+            st.store
+                .update(&format!("CLEAR SILENT GRAPH <{target}>"))
+                .map_err(|e| AppError::Internal(format!("clearing <{target}>: {e}")))?;
+        }
+        let run = run_regime(&st, &regime, sources.clone(), &target, identity, options)?
+            .ok_or_else(|| AppError::BadRequest(format!("Unknown reasoning regime: {regime}")))?;
+        let r = &run.report;
+        let mut out = serde_json::json!({
+            "regime": r.regime,
+            "triples_added": r.triples_added,
+            "iterations": r.iterations,
+            "elapsed_ms": r.elapsed_ms,
+            "target_graph": r.target_graph,
+            // The graphs the rules read (null: the unnamed default graph).
+            "sources": sources,
+            // true: the regime checked consistency and found none violated;
+            // null: the regime has no inconsistency rules (an inconsistent
+            // run is a 422, never a 200).
+            "consistent": crate::reasoning::common::checks_consistency(&r.regime).then_some(true),
+            // Axioms outside the regime's profile that were not used.
+            "ignored_axioms": r.ignored_axioms,
+            "ignored_sample": r.ignored_sample,
+        });
+        // Axioms the regime could not use (outside its profile), by
+        // construct; only present when there were any.
+        if !r.ignored.is_empty() {
+            out["ignored"] = serde_json::json!(r.ignored);
+        }
+        if let Some(b) = &run.backend {
+            out["backend"] = serde_json::json!(b);
+            out["backend_version"] = serde_json::json!(run.backend_version);
+            out["complete"] = serde_json::json!(run.complete);
+            out["warnings"] = serde_json::json!(run.warnings);
+        }
+        Ok(out)
+    };
+    run_reasoning_work(&state, &user, "materialize", params.run_async, work).await
+}
 
-    match report {
-        Some(r) => Ok((
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "regime": r.regime,
-                "triples_added": r.triples_added,
-                "iterations": r.iterations,
-                "elapsed_ms": r.elapsed_ms,
-                "target_graph": r.target_graph,
-                // The graphs the rules read (null: the unnamed default graph).
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+struct CheckRequest {
+    /// `consistency` | `entailment` | `satisfiability` | `profile`
+    task: String,
+    /// Reason over this dataset's conformance layer (graphs the caller can read).
+    dataset: Option<String>,
+    /// Graphs to read (each read-checked); with `dataset`, added to its layer.
+    source_graphs: Option<Vec<String>>,
+    /// The premise as Turtle, instead of `dataset` / `source_graphs`.
+    premise: Option<String>,
+    /// `entailment`: the conclusion as Turtle.
+    conclusion: Option<String>,
+    /// `satisfiability`: the class IRI.
+    class: Option<String>,
+}
+
+/// POST /api/reasoning/check — an OWL 2 DL consistency, entailment,
+/// satisfiability or profile check (OWL 2 Conformance §2.2). A check that ran
+/// is a 200 whose `result` is `true`, `false` or `unknown`; an inconsistent
+/// input adds the fields of the materialisation 422 (`consistent: false`,
+/// `rule`, `detail`). `?async=true` runs it as a background job.
+async fn reasoning_check(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Query(params): Query<AsyncParam>,
+    Json(body): Json<CheckRequest>,
+) -> Result<Response, AppError> {
+    #[cfg(not(feature = "owl2-dl"))]
+    {
+        let _ = (&state, &user, &params, &body);
+        Err(AppError::Status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({ "error": "this build has no OWL 2 DL support (feature owl2-dl)" }),
+        ))
+    }
+    #[cfg(feature = "owl2-dl")]
+    {
+        use crate::reasoning::dl_backend::CheckTask;
+        let parse = |what: &str, ttl: &str| -> Result<Vec<oxigraph::model::Triple>, AppError> {
+            oxigraph::io::RdfParser::from_format(oxigraph::io::RdfFormat::Turtle)
+                .for_slice(ttl.as_bytes())
+                .map(|q| q.map(oxigraph::model::Triple::from))
+                .collect::<Result<_, _>>()
+                .map_err(|e| AppError::BadRequest(format!("{what} is not valid Turtle: {e}")))
+        };
+        let task = match body.task.trim().to_ascii_lowercase().as_str() {
+            "consistency" => CheckTask::Consistency,
+            "profile" => CheckTask::Profile,
+            "entailment" => CheckTask::Entailment {
+                conclusion: parse(
+                    "conclusion",
+                    body.conclusion.as_deref().ok_or_else(|| {
+                        AppError::BadRequest(
+                            "an entailment check needs `conclusion` (Turtle)".into(),
+                        )
+                    })?,
+                )?,
+            },
+            "satisfiability" => {
+                let class = body.class.clone().ok_or_else(|| {
+                    AppError::BadRequest("a satisfiability check needs `class` (an IRI)".into())
+                })?;
+                oxigraph::model::NamedNode::new(class.as_str())
+                    .map_err(|e| AppError::BadRequest(format!("class <{class}>: {e}")))?;
+                CheckTask::Satisfiability { class }
+            }
+            other => {
+                return Err(AppError::BadRequest(format!(
+                "unknown task `{other}`; one of consistency, entailment, satisfiability, profile"
+            )))
+            }
+        };
+        let premise = match &body.premise {
+            Some(ttl) => {
+                if body.dataset.is_some() || body.source_graphs.is_some() {
+                    return Err(AppError::BadRequest(
+                        "give either `premise` or `dataset` / `source_graphs`, not both".into(),
+                    ));
+                }
+                Some(parse("premise", ttl)?)
+            }
+            None => None,
+        };
+        let (sources, identity) = if premise.is_some() {
+            (None, crate::reasoning::identity::IdentityPolicy::Full)
+        } else {
+            reasoning_scope(
+                &state,
+                &user,
+                body.dataset.as_deref(),
+                body.source_graphs.clone(),
+            )?
+        };
+        let st = state.clone();
+        let work = move || -> Result<serde_json::Value, AppError> {
+            let task_name = task.name();
+            let (o, backend, complete) = crate::reasoning::dl_backend::check(
+                &st.store,
+                &st.dl,
+                sources.as_deref(),
+                premise,
+                &task,
+                identity,
+            )
+            .map_err(|e| backend_failure(e, "owl2-dl"))?;
+            let mut out = serde_json::json!({
+                "task": task_name,
+                "result": o.result,
+                "regime": "owl2-dl",
+                "backend": backend,
+                "backend_version": o.version,
+                "complete": complete,
                 "sources": sources,
-            })),
-        )
-            .into_response()),
-        None => Err(AppError::BadRequest(format!(
-            "Unknown reasoning regime: {}",
-            body.regime
+                "warnings": o.warnings,
+            });
+            if let Some(d) = &o.detail {
+                out["detail"] = serde_json::json!(d);
+            }
+            if task_name == "profile" {
+                out["in_profile"] = serde_json::json!(o.violations.is_empty());
+                out["violations"] = serde_json::json!(o.violations);
+            }
+            if task_name == "consistency" {
+                out["consistent"] = match o.result {
+                    crate::reasoning::dl_backend::Tri::True => serde_json::json!(true),
+                    crate::reasoning::dl_backend::Tri::False => serde_json::json!(false),
+                    crate::reasoning::dl_backend::Tri::Unknown => serde_json::Value::Null,
+                };
+            }
+            // The same fields as the materialisation 422 for an inconsistent input.
+            if let Some((rule, detail)) = o.inconsistency {
+                out["consistent"] = serde_json::json!(false);
+                out["rule"] = serde_json::json!(rule);
+                out["detail"] = serde_json::json!(detail);
+            }
+            Ok(out)
+        };
+        run_reasoning_work(&state, &user, "check", params.run_async, work).await
+    }
+}
+
+/// GET /api/reasoning/jobs/{job_id} — a background run's status and, once it
+/// finished, the HTTP status and body the synchronous call would have sent.
+/// Visible to the user who started it and to admins; anyone else gets 404.
+async fn reasoning_job(
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(job_id): Path<String>,
+) -> Result<Response, AppError> {
+    match super::reasoning_jobs::get(&job_id, &user.user_id, user.is_admin()) {
+        Some(job) => Ok((StatusCode::OK, Json(job.to_json())).into_response()),
+        None => Err(AppError::NotFound(format!(
+            "reasoning job {job_id} not found"
         ))),
     }
 }
@@ -10171,17 +10840,36 @@ struct RewriteRequest {
 }
 
 /// POST /api/reasoning/rewrite — debug endpoint: return the rewritten query.
+///
+/// The rewriting spells out the TBox it was computed from (every subclass and
+/// sub-property it unions in), so the TBox is read only from graphs the
+/// caller may read — the same set `/sparql` scopes them to. An admin's
+/// rewriting reads the unnamed default graph, as it always did.
 async fn reasoning_rewrite(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
     Json(body): Json<RewriteRequest>,
 ) -> Result<Response, AppError> {
     // Silence unused-variable warning when no reasoning features are compiled in.
-    let _ = &state;
+    let _ = (&state, &user);
     let regime = body.regime.as_deref().unwrap_or("owl2-ql");
     let rewritten = match regime {
         #[cfg(feature = "owl2-ql")]
         "owl2-ql" => {
             let rw = crate::reasoning::owl2_ql::QLQueryRewriter::new(&state.store);
+            let rw = if user.is_admin() {
+                rw
+            } else {
+                let mut readable: Vec<String> = accessible_read_graphs(&state, Some(&user))?
+                    .into_iter()
+                    .collect();
+                readable.sort_unstable();
+                if readable.is_empty() {
+                    // An empty scope must read nothing, not fall back to a default.
+                    readable.push(EMPTY_SCOPE_GRAPH.to_string());
+                }
+                rw.with_sources(readable)
+            };
             rw.rewrite_query(&body.query)
                 .map_err(|e| AppError::Internal(e.to_string()))?
         }
@@ -10370,7 +11058,7 @@ pub fn swrl_routes() -> Router<AppState> {
 struct SwrlExecuteRequest {
     /// SWRL rules in text format (simple) or XML (OWL)
     rules: String,
-    /// Format: "text" (default) or "xml"
+    /// Format: "text" (default) or "xml" (OWL/XML); anything else is refused
     #[serde(default = "default_swrl_format")]
     format: String,
     /// Maximum fixed-point iterations (default: 100)
@@ -10403,6 +11091,12 @@ async fn swrl_execute(
     // the shared `urn:entailment:*` graphs and other tenants'. Mirrors
     // `/api/reasoning/materialize` above; as there, a `None` target means the
     // default graph, which carries the write-scope check but no per-graph ACL.
+    //
+    // The target goes into the generated update as `GRAPH <…>`, so it must be
+    // an IRI before it is used for anything.
+    if let Some(g) = body.target_graph.as_deref() {
+        crate::swrl::engine::validate_target_graph(g).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    }
     require_graph_write(&state, Some(&user), body.target_graph.as_deref()).map_err(|e| {
         let status = match &e {
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
@@ -10412,20 +11106,69 @@ async fn swrl_execute(
     })?;
 
     let rules = match body.format.as_str() {
-        "xml" => crate::swrl::parser::parse_swrl(&body.rules)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e))?,
-        _ => crate::swrl::parser::parse_swrl_text(&body.rules)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e))?,
-    };
+        "xml" => crate::swrl::parser::parse_swrl(&body.rules),
+        "text" => crate::swrl::parser::parse_swrl_text(&body.rules),
+        other => Err(format!(
+            "Unknown SWRL format '{other}': use \"text\" or \"xml\""
+        )),
+    }
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     if rules.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "No valid rules found".to_string()));
     }
 
+    // Every rule is translated before any runs; a rule that cannot run as
+    // written (unsafe, a head built-in, an untranslatable built-in) refuses
+    // the request and nothing is written.
+    let compiled = crate::swrl::compile_rules(&rules, body.target_graph.as_deref())
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    // Rule execution is a store-wide fixed point: bounded like the other
+    // expensive operations, run off the async runtime, and stopped by the
+    // write timeout. The permit moves into the blocking task, so a run that
+    // outlives the HTTP timeout still counts against the bound until it stops
+    // at its next deadline check.
+    let permit = state
+        .expensive_semaphore
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Server overloaded".to_string(),
+            )
+        })?;
     let max_iter = body.max_iterations.min(1000);
-    let result =
-        crate::swrl::execute_rules(&state.store, &rules, max_iter, body.target_graph.as_deref())
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let limit = std::time::Duration::from_secs(state.write_timeout_secs);
+    let deadline = std::time::Instant::now() + limit;
+    let store = state.store.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        crate::swrl::execute_compiled(&store, &compiled, max_iter, Some(deadline))
+    });
+    // The engine stops itself at the deadline between rules and reports
+    // `stop_reason: "timeout"`; this outer limit only fires when a single
+    // rule's update runs far past it.
+    let result = tokio::time::timeout(limit + std::time::Duration::from_secs(10), task)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
+                    "SWRL execution timed out after {}s; triples derived so far stay written",
+                    state.write_timeout_secs
+                ),
+            )
+        })?
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("SWRL execution task failed: {e}"),
+            )
+        })?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(result))
 }
@@ -10628,27 +11371,30 @@ pub async fn viewer_feed(
         q.located.as_deref().map(str::trim),
         Some("true" | "1" | "yes" | "on")
     );
-    let mut elements = crate::geo::viewer_feed::build_viewer_feed_opts(
-        &state.store,
-        &data_graphs,
-        q.root.as_deref(),
-        located,
-        q.lang.as_deref().map(str::trim).filter(|s| !s.is_empty()),
-    );
-    // Hand the browser origin-relative URLs for models this deployment serves
-    // itself, so they resolve against the host the user actually opened — a
-    // LAN IP, a reverse-proxy hostname — and not the origin baked in at seed
-    // time (which is `localhost` on a default install, and therefore dead for
-    // every device except this one).
-    crate::geo::viewer_feed::relativise_self_urls(&mut elements, &state.base_url);
-    // Administrative place path (country → region → city) for the viewer's
-    // "Group by location" lens, inferred from the RDF only.
-    crate::geo::viewer_feed::resolve_places(
-        &state.store,
-        &data_graphs,
-        &mut elements,
-        &state.base_url,
-    );
+    // The feed walks every element of the dataset: CPU- and store-bound work
+    // that belongs on the blocking pool, not on an async worker.
+    let (store, base_url) = (state.store.clone(), state.base_url.clone());
+    let elements = tokio::task::spawn_blocking(move || {
+        let mut elements = crate::geo::viewer_feed::build_viewer_feed_opts(
+            &store,
+            &data_graphs,
+            q.root.as_deref(),
+            located,
+            q.lang.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+        );
+        // Hand the browser origin-relative URLs for models this deployment serves
+        // itself, so they resolve against the host the user actually opened — a
+        // LAN IP, a reverse-proxy hostname — and not the origin baked in at seed
+        // time (which is `localhost` on a default install, and therefore dead for
+        // every device except this one).
+        crate::geo::viewer_feed::relativise_self_urls(&mut elements, &base_url);
+        // Administrative place path (country → region → city) for the viewer's
+        // "Group by location" lens, inferred from the RDF only.
+        crate::geo::viewer_feed::resolve_places(&store, &data_graphs, &mut elements, &base_url);
+        elements
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(serde_json::json!({
         "dataset_id": dataset_id,
         "count": elements.len(),
@@ -10688,8 +11434,20 @@ pub async fn geo_stats(
         .into_iter()
         .filter(|g| !g.ends_with("/ifcowl") && !is_tiles3d_graph(g))
         .collect();
-    let stats = crate::geo::viewer_feed::dataset_geo_stats(&state.store, &data_graphs);
-    Ok(Json(stats))
+    Ok(Json(geo_stats_blocking(&state, data_graphs).await?))
+}
+
+/// `dataset_geo_stats` (four store probes) on the blocking pool.
+async fn geo_stats_blocking(
+    state: &AppState,
+    data_graphs: Vec<String>,
+) -> Result<crate::geo::viewer_feed::GeoStats, (StatusCode, String)> {
+    let store = state.store.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::geo::viewer_feed::dataset_geo_stats(&store, &data_graphs)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 #[derive(Deserialize)]
@@ -10766,8 +11524,7 @@ pub async fn geo_stats_batch(
         return Ok(Json(crate::geo::viewer_feed::GeoStats::default()));
     }
 
-    let stats = crate::geo::viewer_feed::dataset_geo_stats(&state.store, &data_graphs);
-    Ok(Json(stats))
+    Ok(Json(geo_stats_blocking(&state, data_graphs).await?))
 }
 
 #[cfg(test)]

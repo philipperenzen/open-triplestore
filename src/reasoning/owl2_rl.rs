@@ -1,13 +1,27 @@
 //! OWL 2 RL profile — forward-chaining materialization.
 //!
 //! Implements the W3C OWL 2 Profiles §4.3 RL/RDF rules (Tables 4–9) as
-//! SPARQL INSERT operations executed in a fixed-point loop: 63 of the 78
-//! rules run ([`IMPLEMENTED_RULES`]); the 15 that do not are listed with
+//! SPARQL INSERT operations executed in a fixed-point loop: 75 of the 78
+//! rules run ([`IMPLEMENTED_RULES`]); the 3 that do not are listed with
 //! their reason in [`UNIMPLEMENTED_RULES`], and `tests/owl2_rl_conformance.rs`
 //! pins both lists against the specification's inventory.
 //!
 //! Inconsistency-detection rules raise `ReasoningError::Inconsistency` rather
 //! than inserting triples.
+//!
+//! Lists (`owl:intersectionOf`, `owl:propertyChainAxiom`, `owl:hasKey`) are
+//! matched at their exact length, one INSERT per length present, so a member
+//! may be any term, a blank-node class expression included.
+//!
+//! A property position may hold an inverse property expression
+//! `[ owl:inverseOf P ]`, a blank node. No RDF triple has a blank-node
+//! predicate, so a premise `?u PE ?v` also reads `?v P ?u` ([`pe`]) and a
+//! conclusion `(x, [ owl:inverseOf P ], y)` is written as `y P x` ([`pe_head`]).
+//!
+//! `eq-ref` (every term is `owl:sameAs` itself) runs only when asked for
+//! ([`Owl2RLReasoner::with_eq_ref`]): it adds about one triple per term. The
+//! inconsistencies it leads to (`x owl:differentFrom x`, a member listed twice
+//! in `owl:AllDifferent`) are found either way.
 //!
 //! # Usage
 //! ```no_run
@@ -70,7 +84,6 @@ const OWL_OBJECT_PROPERTY: &str = "http://www.w3.org/2002/07/owl#ObjectProperty"
 const OWL_DATATYPE_PROPERTY: &str = "http://www.w3.org/2002/07/owl#DatatypeProperty";
 const OWL_ANNOTATION_PROPERTY: &str = "http://www.w3.org/2002/07/owl#AnnotationProperty";
 const OWL_ON_CLASS: &str = "http://www.w3.org/2002/07/owl#onClass";
-const OWL_NEGATIVE_PROP_ASSERTION: &str = "http://www.w3.org/2002/07/owl#NegativePropertyAssertion";
 const OWL_SOURCE_INDIVIDUAL: &str = "http://www.w3.org/2002/07/owl#sourceIndividual";
 const OWL_ASSERTION_PROPERTY: &str = "http://www.w3.org/2002/07/owl#assertionProperty";
 const OWL_TARGET_INDIVIDUAL: &str = "http://www.w3.org/2002/07/owl#targetIndividual";
@@ -78,6 +91,26 @@ const OWL_TARGET_VALUE: &str = "http://www.w3.org/2002/07/owl#targetValue";
 const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
 const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
 const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
+const OWL_PROP_DISJOINT_WITH: &str = "http://www.w3.org/2002/07/owl#propertyDisjointWith";
+const OWL_ALL_DISJOINT_PROPS: &str = "http://www.w3.org/2002/07/owl#AllDisjointProperties";
+const OWL_ALL_DIFFERENT: &str = "http://www.w3.org/2002/07/owl#AllDifferent";
+const OWL_DISTINCT_MEMBERS: &str = "http://www.w3.org/2002/07/owl#distinctMembers";
+
+/// The annotation properties `prp-ap` declares (OWL 2 Profiles §4.3, Table 5).
+const ANNOTATION_PROPERTIES: &[&str] = &[
+    "http://www.w3.org/2000/01/rdf-schema#label",
+    "http://www.w3.org/2000/01/rdf-schema#comment",
+    "http://www.w3.org/2000/01/rdf-schema#seeAlso",
+    "http://www.w3.org/2000/01/rdf-schema#isDefinedBy",
+    "http://www.w3.org/2002/07/owl#deprecated",
+    "http://www.w3.org/2002/07/owl#versionInfo",
+    "http://www.w3.org/2002/07/owl#priorVersion",
+    "http://www.w3.org/2002/07/owl#backwardCompatibleWith",
+    "http://www.w3.org/2002/07/owl#incompatibleWith",
+];
+
+/// Longest list (intersection, chain, key) the n-ary rules match.
+const MAX_LIST_LEN: usize = 64;
 
 const MAX_ITERATIONS: usize = 500;
 
@@ -87,13 +120,17 @@ const MAX_ITERATIONS: usize = 500;
 /// asserts it, so a rule cannot appear or disappear without the record.
 pub const IMPLEMENTED_RULES: &[&str] = &[
     // Table 4 — equality
+    "eq-ref",
     "eq-sym",
     "eq-trans",
     "eq-rep-s",
     "eq-rep-p",
     "eq-rep-o",
     "eq-diff1",
+    "eq-diff2",
+    "eq-diff3",
     // Table 5 — property axioms
+    "prp-ap",
     "prp-dom",
     "prp-rng",
     "prp-fp",
@@ -104,12 +141,18 @@ pub const IMPLEMENTED_RULES: &[&str] = &[
     "prp-trp",
     "prp-spo1",
     "prp-spo2",
+    "prp-eqp1",
+    "prp-eqp2",
+    "prp-pdw",
+    "prp-adp",
     "prp-inv1",
     "prp-inv2",
     "prp-key",
     "prp-npa1",
     "prp-npa2",
     // Table 6 — classes
+    "cls-thing",
+    "cls-nothing1",
     "cls-nothing2",
     "cls-int1",
     "cls-int2",
@@ -141,6 +184,8 @@ pub const IMPLEMENTED_RULES: &[&str] = &[
     "scm-sco",
     "scm-eqc1",
     "scm-eqc2",
+    "scm-op",
+    "scm-dp",
     "scm-spo",
     "scm-eqp1",
     "scm-eqp2",
@@ -161,21 +206,10 @@ pub const IMPLEMENTED_RULES: &[&str] = &[
 /// next to [`IMPLEMENTED_RULES`] so the two lists together are the whole
 /// specification and the documentation cannot drift from the code.
 pub const UNIMPLEMENTED_RULES: &[(&str, &str)] = &[
-    ("eq-ref", "reflexive owl:sameAs for every term of every triple: it triples the graph and no other rule needs it"),
-    ("eq-diff2", "owl:AllDifferent / owl:members inconsistency: not implemented"),
-    ("eq-diff3", "owl:AllDifferent / owl:distinctMembers inconsistency: not implemented"),
-    ("prp-ap", "the fixed list of annotation-property axiomatic triples: not implemented"),
-    ("prp-eqp1", "subsumed: scm-eqp1 turns owl:equivalentProperty into rdfs:subPropertyOf and prp-spo1 propagates"),
-    ("prp-eqp2", "subsumed: scm-eqp2 turns owl:equivalentProperty into rdfs:subPropertyOf and prp-spo1 propagates"),
-    ("prp-pdw", "owl:propertyDisjointWith inconsistency: not implemented"),
-    ("prp-adp", "owl:AllDisjointProperties inconsistency: not implemented"),
-    ("cls-thing", "typing every individual owl:Thing: one triple per term, no other rule needs it"),
-    ("cls-nothing1", "explicit owl:Nothing membership inconsistency: not implemented"),
+
     ("dt-type2", "typing every literal with its datatype needs literal subjects, which an RDF graph cannot hold"),
-    ("dt-eq", "owl:sameAs between literals with equal values needs literal subjects; every rule compares literals by value already"),
+    ("dt-eq", "owl:sameAs between literals with equal values needs literal subjects, and SPARQL joins compare terms, not values"),
     ("dt-diff", "owl:differentFrom between literals needs literal subjects"),
-    ("scm-op", "reflexive rdfs:subPropertyOf / owl:equivalentProperty for every object property: no other rule needs it"),
-    ("scm-dp", "reflexive rdfs:subPropertyOf / owl:equivalentProperty for every datatype property: no other rule needs it"),
 ];
 
 /// The datatypes of the OWL 2 RL datatype map (OWL 2 Profiles §4.2): what
@@ -216,6 +250,71 @@ const RL_DATATYPES: &[&str] = &[
 ];
 const RDFS_DATATYPE: &str = "http://www.w3.org/2000/01/rdf-schema#Datatype";
 
+// ─── Property expressions and lists ──────────────────────────────────────────
+
+/// A SPARQL variable name made from `parts` (`?p`, `?u` …), for the helper
+/// variables of one [`pe`] / [`pe_head`] use. Distinct arguments give distinct
+/// names, so several uses in one rule do not share their helpers.
+fn helper_var(prefix: &str, parts: &[&str]) -> String {
+    let mut v = format!("?{prefix}");
+    for p in parts {
+        v.push('_');
+        v.extend(p.chars().filter(|c| c.is_ascii_alphanumeric()));
+    }
+    v
+}
+
+/// The premise `{s} PE {o}` for the property expression bound to the
+/// variable `p`: a plain triple, or — when `p` is a blank
+/// `[ owl:inverseOf Q ]` — the triple `{o} Q {s}`. `p` must be bound by the
+/// rest of the rule (the axiom that names it).
+fn pe(p: &str, s: &str, o: &str) -> String {
+    let q = helper_var("inv", &[p, s, o]);
+    format!(
+        "{{ {s} {p} {o} }} UNION \
+         {{ {p} <{OWL_INVERSE_OF}> {q} . FILTER(isBlank({p})) {o} {q} {s} }}"
+    )
+}
+
+/// The conclusion `{s} PE {o}` for the property expression bound to `p`:
+/// returns the WHERE-clause addition and the head triple. A blank
+/// `[ owl:inverseOf Q ]` conclusion is written `{o} Q {s}`; a head that is
+/// still not an RDF triple (a blank predicate without `owl:inverseOf`, a
+/// literal subject) is filtered out rather than left to the store to drop.
+fn pe_head(p: &str, s: &str, o: &str) -> (String, String) {
+    let q = helper_var("hq", &[p, s, o]);
+    let hs = helper_var("hs", &[p, s, o]);
+    let hp = helper_var("hp", &[p, s, o]);
+    let ho = helper_var("ho", &[p, s, o]);
+    let clause = format!(
+        "OPTIONAL {{ {p} <{OWL_INVERSE_OF}> {q} . FILTER(isBlank({p})) }} \
+         BIND(IF(BOUND({q}), {o}, {s}) AS {hs}) \
+         BIND(IF(BOUND({q}), {q}, {p}) AS {hp}) \
+         BIND(IF(BOUND({q}), {s}, {o}) AS {ho}) \
+         FILTER(isIRI({hp}) && !isLiteral({hs}))"
+    );
+    (clause, format!("{hs} {hp} {ho}"))
+}
+
+/// The `rdf:first` / `rdf:rest` pattern of a list of exactly `n` cells
+/// starting at `head`, binding its members to `?{m}0` … `?{m}{n-1}`.
+fn list_n(head: &str, m: &str, n: usize) -> String {
+    let mut out = String::new();
+    let mut cell = head.to_string();
+    for i in 0..n {
+        let next = if i + 1 == n {
+            format!("<{RDF_NIL}>")
+        } else {
+            format!("?{m}_cell{}", i + 1)
+        };
+        out.push_str(&format!(
+            "{cell} <{RDF_FIRST}> ?{m}{i} ; <{RDF_REST}> {next} . "
+        ));
+        cell = next;
+    }
+    out
+}
+
 // ─── Reasoner ─────────────────────────────────────────────────────────────────
 
 /// OWL 2 RL forward-chaining reasoner.
@@ -223,21 +322,26 @@ pub struct Owl2RLReasoner<'a> {
     store: &'a TripleStore,
     target_graph: String,
     /// When set, the rules read ONLY these graphs (plus the target graph).
-    /// Without it they read the unnamed default graph, as they always did.
+    /// Without it they read the unnamed default graph plus the target graph
+    /// (`TripleStore::update_over`), so rules see their own consequences.
     sources: Option<Vec<String>>,
     /// If `true`, inconsistency rules raise `ReasoningError::Inconsistency`.
     pub detect_inconsistency: bool,
+    /// Fixed-point rounds before the run fails with `NotConverged`.
+    max_iterations: usize,
     /// What to do with `owl:sameAs`: `sameas-off` skips the Table 4 equality
     /// rules. The raw engine defaults to `sameas-full`; the per-dataset policy
     /// is applied by the entailment layer (see `crate::entailment`).
     identity: IdentityPolicy,
+    /// Run `eq-ref`: write `x owl:sameAs x` for every term. Off by default.
+    eq_ref: bool,
 }
 
 impl<'a> Owl2RLReasoner<'a> {
     /// Restrict the rules to `sources` (plus the target graph). Without a
-    /// scope the rules read the unnamed default graph only, so a dataset's
-    /// named graphs — and the model version it conforms to — were invisible to
-    /// materialisation; this is what `POST /api/reasoning/materialize` sets
+    /// scope the rules read the unnamed default graph and the target graph, so
+    /// a dataset's named graphs — and the model version it conforms to — are
+    /// invisible to materialisation; this is what `POST /api/reasoning/materialize` sets
     /// from `source_graphs` or the dataset's conformance layer.
     pub fn with_sources(mut self, sources: Vec<String>) -> Self {
         self.sources = Some(sources);
@@ -257,7 +361,9 @@ impl<'a> Owl2RLReasoner<'a> {
     fn run_update(&self, sparql: &str) -> Result<(), crate::store::engine::StoreError> {
         match self.scope() {
             Some(scope) => self.store.update_scoped(sparql, &scope),
-            None => self.store.update(sparql),
+            None => self
+                .store
+                .update_over(sparql, std::slice::from_ref(&self.target_graph)),
         }
     }
 
@@ -267,7 +373,9 @@ impl<'a> Owl2RLReasoner<'a> {
     ) -> Result<oxigraph::sparql::QueryResults<'static>, crate::store::engine::StoreError> {
         match self.scope() {
             Some(scope) => self.store.query_scoped(sparql, &scope),
-            None => self.store.query(sparql),
+            None => self
+                .store
+                .query_over(sparql, std::slice::from_ref(&self.target_graph)),
         }
     }
 
@@ -277,8 +385,26 @@ impl<'a> Owl2RLReasoner<'a> {
             target_graph: OWL2_RL_ENTAILMENT_GRAPH.to_string(),
             sources: None,
             detect_inconsistency: true,
+            max_iterations: MAX_ITERATIONS,
             identity: IdentityPolicy::Full,
+            eq_ref: false,
         }
+    }
+
+    /// Run `eq-ref`: every subject, predicate and non-literal object becomes
+    /// `owl:sameAs` itself. Off by default, because it adds about one triple
+    /// per term and no other rule needs those triples to fire; `sameas-off`
+    /// skips it with the other equality rules.
+    pub fn with_eq_ref(mut self, on: bool) -> Self {
+        self.eq_ref = on;
+        self
+    }
+
+    /// Fail with [`ReasoningError::NotConverged`] after `n` rounds without a
+    /// fixed point (default 500) instead of running on.
+    pub fn with_max_iterations(mut self, n: usize) -> Self {
+        self.max_iterations = n.max(1);
+        self
     }
 
     pub fn with_target(mut self, graph: impl Into<String>) -> Self {
@@ -305,8 +431,10 @@ impl<'a> Owl2RLReasoner<'a> {
 
         info!("OWL 2 RL materialization → <{}>", self.target_graph);
 
-        // Table 8 — dt-type1 is constant (the datatype map), so once per run.
+        // The axiomatic rules have no premises, so they run once per run:
+        // dt-type1 (the datatype map), prp-ap, cls-thing and cls-nothing1.
         self.rule_dt_type1()?;
+        self.rule_axiomatic()?;
 
         loop {
             iterations += 1;
@@ -314,6 +442,8 @@ impl<'a> Owl2RLReasoner<'a> {
 
             // Table 9 — Schema (must run first to populate scm triples)
             self.rule_scm_cls()?;
+            self.rule_scm_op()?;
+            self.rule_scm_dp()?;
             self.rule_scm_sco()?;
             self.rule_scm_spo()?;
             self.rule_scm_eqc1()?;
@@ -345,12 +475,11 @@ impl<'a> Owl2RLReasoner<'a> {
             self.rule_prp_trp()?;
             self.rule_prp_spo1()?;
             self.rule_prp_spo2()?;
+            self.rule_prp_eqp()?;
             self.rule_prp_inv1()?;
             self.rule_prp_inv2()?;
             self.rule_prp_fp()?;
             self.rule_prp_ifp()?;
-            self.rule_prp_hv1()?;
-            self.rule_prp_hv2()?;
             self.rule_prp_key()?;
 
             // Table 6 — Classes
@@ -375,6 +504,9 @@ impl<'a> Owl2RLReasoner<'a> {
             // correspondence (prov:specializationOf, skos:exactMatch, …)
             // is never a premise here, whatever the policy.
             if self.identity.propagates_same_as() {
+                if self.eq_ref {
+                    self.rule_eq_ref()?;
+                }
                 self.rule_eq_sym()?;
                 self.rule_eq_trans()?;
                 self.rule_eq_rep_s()?;
@@ -385,8 +517,14 @@ impl<'a> Owl2RLReasoner<'a> {
             let after = count_graph(self.store, &self.target_graph)?;
             let added = after.saturating_sub(before);
             debug!("OWL 2 RL iteration {}: +{} triples", iterations, added);
-            if added == 0 || iterations >= MAX_ITERATIONS {
+            if added == 0 {
                 break;
+            }
+            if iterations >= self.max_iterations {
+                return Err(ReasoningError::NotConverged {
+                    regime: "owl2-rl".to_string(),
+                    iterations,
+                });
             }
         }
 
@@ -409,6 +547,7 @@ impl<'a> Owl2RLReasoner<'a> {
             iterations,
             elapsed_ms: start.elapsed().as_millis() as u64,
             target_graph: self.target_graph.clone(),
+            ..Default::default()
         })
     }
 
@@ -416,8 +555,11 @@ impl<'a> Owl2RLReasoner<'a> {
     pub fn check_consistency(&self) -> Result<(), ReasoningError> {
         self.rule_dt_not_type()?;
         self.rule_eq_diff1()?;
+        self.rule_eq_diff23()?;
         self.rule_prp_irp()?;
         self.rule_prp_asyp()?;
+        self.rule_prp_pdw()?;
+        self.rule_prp_adp()?;
         self.rule_prp_npa1()?;
         self.rule_prp_npa2()?;
         self.rule_cls_nothing2()?;
@@ -488,13 +630,59 @@ impl<'a> Owl2RLReasoner<'a> {
         Ok(())
     }
 
-    /// eq-diff1: ?x owl:sameAs ?y . ?x owl:differentFrom ?y → INCONSISTENCY
+    /// eq-diff1: ?x owl:sameAs ?y . ?x owl:differentFrom ?y → INCONSISTENCY.
+    /// `?x owl:differentFrom ?x` is caught too: eq-ref makes every term
+    /// `owl:sameAs` itself, whether or not those triples are written.
     fn rule_eq_diff1(&self) -> Result<(), ReasoningError> {
-        let q = format!("ASK {{ ?x <{OWL_SAME_AS}> ?y . ?x <{OWL_DIFFERENT_FROM}> ?y }}");
+        let q = format!(
+            "ASK {{ {{ ?x <{OWL_SAME_AS}> ?y . ?x <{OWL_DIFFERENT_FROM}> ?y }} \
+                    UNION {{ ?x <{OWL_DIFFERENT_FROM}> ?x }} }}"
+        );
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "owl:sameAs and owl:differentFrom on the same pair".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "eq-diff1",
+                "owl:sameAs and owl:differentFrom on the same pair",
             ));
+        }
+        Ok(())
+    }
+
+    /// eq-ref: every term is `owl:sameAs` itself. Literals cannot be
+    /// subjects, so a literal object gets no triple. Opt-in (`with_eq_ref`).
+    fn rule_eq_ref(&self) -> Result<(), ReasoningError> {
+        let q = format!(
+            r#"INSERT {{ GRAPH <{tg}> {{ ?s <{OWL_SAME_AS}> ?s . ?p <{OWL_SAME_AS}> ?p }} }}
+               WHERE  {{ ?s ?p ?o }} ;
+               INSERT {{ GRAPH <{tg}> {{ ?o <{OWL_SAME_AS}> ?o }} }}
+               WHERE  {{ ?s ?p ?o . FILTER(!isLiteral(?o)) }}"#,
+            tg = self.target_graph
+        );
+        self.run_update(&q)?;
+        Ok(())
+    }
+
+    /// eq-diff2 / eq-diff3: `?x a owl:AllDifferent ; owl:members` (eq-diff2)
+    /// or `owl:distinctMembers` (eq-diff3) `(?z1 … ?zn)` with `?zi owl:sameAs
+    /// ?zj` for two different positions → INCONSISTENCY. The same individual
+    /// at two positions counts (eq-ref).
+    fn rule_eq_diff23(&self) -> Result<(), ReasoningError> {
+        for (rule, members) in [
+            ("eq-diff2", OWL_MEMBERS),
+            ("eq-diff3", OWL_DISTINCT_MEMBERS),
+        ] {
+            let q = format!(
+                "ASK {{ ?a <{RDF_TYPE}> <{OWL_ALL_DIFFERENT}> ; <{members}> ?l . \
+                        ?l <{RDF_REST}>* ?ci . ?ci <{RDF_FIRST}> ?zi . \
+                        ?l <{RDF_REST}>* ?cj . ?cj <{RDF_FIRST}> ?zj . \
+                        FILTER(?ci != ?cj) \
+                        FILTER(sameTerm(?zi, ?zj) || EXISTS {{ ?zi <{OWL_SAME_AS}> ?zj }}) }}"
+            );
+            if self.ask(&q)? {
+                return Err(ReasoningError::inconsistency(
+                    rule,
+                    "two members of an owl:AllDifferent are owl:sameAs",
+                ));
+            }
         }
         Ok(())
     }
@@ -505,14 +693,11 @@ impl<'a> Owl2RLReasoner<'a> {
 
     /// prp-dom: ?p rdfs:domain ?c . ?x ?p ?y → ?x rdf:type ?c
     fn rule_prp_dom(&self) -> Result<(), ReasoningError> {
-        // Also look in the target graph for property triples (e.g. inferred via prp-spo1)
         let q = format!(
             r#"INSERT {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?c }} }}
-               WHERE  {{
-                   ?p <{RDFS_DOMAIN}> ?c .
-                   {{ ?x ?p ?y }} UNION {{ GRAPH <{tg}> {{ ?x ?p ?y }} }}
-               }}"#,
-            tg = self.target_graph
+               WHERE  {{ ?p <{RDFS_DOMAIN}> ?c . {xy} }}"#,
+            tg = self.target_graph,
+            xy = pe("?p", "?x", "?y"),
         );
         self.run_update(&q)?;
         Ok(())
@@ -522,8 +707,9 @@ impl<'a> Owl2RLReasoner<'a> {
     fn rule_prp_rng(&self) -> Result<(), ReasoningError> {
         let q = format!(
             r#"INSERT {{ GRAPH <{tg}> {{ ?y <{RDF_TYPE}> ?c }} }}
-               WHERE  {{ ?p <{RDFS_RANGE}> ?c . ?x ?p ?y . FILTER(isIRI(?y) || isBlank(?y)) }}"#,
-            tg = self.target_graph
+               WHERE  {{ ?p <{RDFS_RANGE}> ?c . {xy} FILTER(isIRI(?y) || isBlank(?y)) }}"#,
+            tg = self.target_graph,
+            xy = pe("?p", "?x", "?y"),
         );
         self.run_update(&q)?;
         Ok(())
@@ -534,20 +720,24 @@ impl<'a> Owl2RLReasoner<'a> {
         let q = format!(
             r#"INSERT {{ GRAPH <{tg}> {{ ?y1 <{OWL_SAME_AS}> ?y2 }} }}
                WHERE  {{ ?p <{RDF_TYPE}> <{OWL_FUNCTIONAL_PROP}> .
-                         ?x ?p ?y1 . ?x ?p ?y2 . FILTER(?y1 != ?y2) }}"#,
-            tg = self.target_graph
+                         {a} {b} FILTER(?y1 != ?y2) }}"#,
+            tg = self.target_graph,
+            a = pe("?p", "?x", "?y1"),
+            b = pe("?p", "?x", "?y2"),
         );
         self.run_update(&q)?;
         Ok(())
     }
 
-    /// prp-ifp: ?p InverseFunctionalProperty . ?y p x1 . ?y p x2 → x1 owl:sameAs x2
+    /// prp-ifp: ?p InverseFunctionalProperty . ?x1 ?p ?y . ?x2 ?p ?y → ?x1 owl:sameAs ?x2
     fn rule_prp_ifp(&self) -> Result<(), ReasoningError> {
         let q = format!(
             r#"INSERT {{ GRAPH <{tg}> {{ ?x1 <{OWL_SAME_AS}> ?x2 }} }}
                WHERE  {{ ?p <{RDF_TYPE}> <{OWL_INV_FUNCTIONAL}> .
-                         ?x1 ?p ?y . ?x2 ?p ?y . FILTER(?x1 != ?x2) }}"#,
-            tg = self.target_graph
+                         {a} {b} FILTER(?x1 != ?x2) }}"#,
+            tg = self.target_graph,
+            a = pe("?p", "?x1", "?y"),
+            b = pe("?p", "?x2", "?y"),
         );
         self.run_update(&q)?;
         Ok(())
@@ -555,10 +745,14 @@ impl<'a> Owl2RLReasoner<'a> {
 
     /// prp-irp: ?p IrreflexiveProperty . ?x ?p ?x → INCONSISTENCY
     fn rule_prp_irp(&self) -> Result<(), ReasoningError> {
-        let q = format!("ASK {{ ?p <{RDF_TYPE}> <{OWL_IRREFLEXIVE_PROP}> . ?x ?p ?x }}");
+        let q = format!(
+            "ASK {{ ?p <{RDF_TYPE}> <{OWL_IRREFLEXIVE_PROP}> . {xx} }}",
+            xx = pe("?p", "?x", "?x"),
+        );
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "IrreflexiveProperty has reflexive triple".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "prp-irp",
+                "IrreflexiveProperty has reflexive triple",
             ));
         }
         Ok(())
@@ -566,10 +760,12 @@ impl<'a> Owl2RLReasoner<'a> {
 
     /// prp-symp: ?p SymmetricProperty . ?x ?p ?y → ?y ?p ?x
     fn rule_prp_symp(&self) -> Result<(), ReasoningError> {
+        let (bind, head) = pe_head("?p", "?y", "?x");
         let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?y ?p ?x }} }}
-               WHERE  {{ ?p <{RDF_TYPE}> <{OWL_SYMMETRIC_PROP}> . ?x ?p ?y }}"#,
-            tg = self.target_graph
+            r#"INSERT {{ GRAPH <{tg}> {{ {head} }} }}
+               WHERE  {{ ?p <{RDF_TYPE}> <{OWL_SYMMETRIC_PROP}> . {xy} {bind} }}"#,
+            tg = self.target_graph,
+            xy = pe("?p", "?x", "?y"),
         );
         self.run_update(&q)?;
         Ok(())
@@ -577,35 +773,101 @@ impl<'a> Owl2RLReasoner<'a> {
 
     /// prp-asyp: ?p AsymmetricProperty . ?x ?p ?y . ?y ?p ?x → INCONSISTENCY
     fn rule_prp_asyp(&self) -> Result<(), ReasoningError> {
-        let q = format!("ASK {{ ?p <{RDF_TYPE}> <{OWL_ASYMMETRIC_PROP}> . ?x ?p ?y . ?y ?p ?x }}");
+        let q = format!(
+            "ASK {{ ?p <{RDF_TYPE}> <{OWL_ASYMMETRIC_PROP}> . {xy} {yx} }}",
+            xy = pe("?p", "?x", "?y"),
+            yx = pe("?p", "?y", "?x"),
+        );
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "AsymmetricProperty violation".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "prp-asyp",
+                "AsymmetricProperty violation",
             ));
         }
         Ok(())
     }
 
-    /// prp-trp: ?p TransitiveProperty . ?x ?p ?y . ?y ?p ?z → ?x ?p ?z
+    /// prp-trp: ?p TransitiveProperty . ?x ?p ?y . ?y ?p ?z → ?x ?p ?z.
+    /// A cycle derives the reflexive triple (`a p b . b p a → a p a`).
     fn rule_prp_trp(&self) -> Result<(), ReasoningError> {
+        let (bind, head) = pe_head("?p", "?x", "?z");
         let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?x ?p ?z }} }}
+            r#"INSERT {{ GRAPH <{tg}> {{ {head} }} }}
                WHERE  {{ ?p <{RDF_TYPE}> <{OWL_TRANSITIVE_PROP}> .
-                         ?x ?p ?y . ?y ?p ?z . FILTER(?x != ?z) }}"#,
-            tg = self.target_graph
+                         {xy} {yz} {bind} }}"#,
+            tg = self.target_graph,
+            xy = pe("?p", "?x", "?y"),
+            yz = pe("?p", "?y", "?z"),
         );
         self.run_update(&q)?;
         Ok(())
     }
 
-    /// prp-spo1: ?p1 rdfs:subPropertyOf ?p2 . ?x ?p1 ?y → ?x ?p2 ?y
+    /// prp-spo1: ?p1 rdfs:subPropertyOf ?p2 . ?x ?p1 ?y → ?x ?p2 ?y.
+    /// Either side may be an inverse property expression.
     fn rule_prp_spo1(&self) -> Result<(), ReasoningError> {
+        let (bind, head) = pe_head("?p2", "?x", "?y");
         let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?x ?p2 ?y }} }}
-               WHERE  {{ ?p1 <{RDFS_SUB_PROPERTY_OF}> ?p2 . ?x ?p1 ?y . FILTER(?p1 != ?p2) }}"#,
-            tg = self.target_graph
+            r#"INSERT {{ GRAPH <{tg}> {{ {head} }} }}
+               WHERE  {{ ?p1 <{RDFS_SUB_PROPERTY_OF}> ?p2 . FILTER(?p1 != ?p2)
+                         {xy} {bind} }}"#,
+            tg = self.target_graph,
+            xy = pe("?p1", "?x", "?y"),
         );
         self.run_update(&q)?;
+        Ok(())
+    }
+
+    /// prp-eqp1 / prp-eqp2: ?p1 owl:equivalentProperty ?p2 . ?x ?p1 ?y →
+    /// ?x ?p2 ?y, and ?x ?p2 ?y → ?x ?p1 ?y.
+    fn rule_prp_eqp(&self) -> Result<(), ReasoningError> {
+        for (from, to) in [("?p1", "?p2"), ("?p2", "?p1")] {
+            let (bind, head) = pe_head(to, "?x", "?y");
+            let q = format!(
+                r#"INSERT {{ GRAPH <{tg}> {{ {head} }} }}
+                   WHERE  {{ ?p1 <{OWL_EQUIV_PROP}> ?p2 . FILTER(?p1 != ?p2)
+                             {xy} {bind} }}"#,
+                tg = self.target_graph,
+                xy = pe(from, "?x", "?y"),
+            );
+            self.run_update(&q)?;
+        }
+        Ok(())
+    }
+
+    /// prp-pdw: ?p1 owl:propertyDisjointWith ?p2 . ?x ?p1 ?y . ?x ?p2 ?y → INCONSISTENCY
+    fn rule_prp_pdw(&self) -> Result<(), ReasoningError> {
+        let q = format!(
+            "ASK {{ ?p1 <{OWL_PROP_DISJOINT_WITH}> ?p2 . {a} {b} }}",
+            a = pe("?p1", "?x", "?y"),
+            b = pe("?p2", "?x", "?y"),
+        );
+        if self.ask(&q)? {
+            return Err(ReasoningError::inconsistency(
+                "prp-pdw",
+                "two disjoint properties (owl:propertyDisjointWith) link the same pair",
+            ));
+        }
+        Ok(())
+    }
+
+    /// prp-adp: `?x a owl:AllDisjointProperties ; owl:members (?p1 … ?pn)`
+    /// and `?u ?pi ?y . ?u ?pj ?y` for two different positions → INCONSISTENCY
+    fn rule_prp_adp(&self) -> Result<(), ReasoningError> {
+        let q = format!(
+            "ASK {{ ?a <{RDF_TYPE}> <{OWL_ALL_DISJOINT_PROPS}> ; <{OWL_MEMBERS}> ?l . \
+                    ?l <{RDF_REST}>* ?ci . ?ci <{RDF_FIRST}> ?pi . \
+                    ?l <{RDF_REST}>* ?cj . ?cj <{RDF_FIRST}> ?pj . \
+                    FILTER(?ci != ?cj) {a} {b} }}",
+            a = pe("?pi", "?u", "?y"),
+            b = pe("?pj", "?u", "?y"),
+        );
+        if self.ask(&q)? {
+            return Err(ReasoningError::inconsistency(
+                "prp-adp",
+                "two members of an owl:AllDisjointProperties link the same pair",
+            ));
+        }
         Ok(())
     }
 
@@ -631,126 +893,91 @@ impl<'a> Owl2RLReasoner<'a> {
         Ok(())
     }
 
-    /// prp-spo2: property chain axiom propagation
-    /// ?p owl:propertyChainAxiom (?p1 ?p2) . ?x ?p1 ?y . ?y ?p2 ?z → ?x ?p ?z
+    /// prp-spo2: `?p owl:propertyChainAxiom (?p1 … ?pn) . ?u0 ?p1 ?u1 … ?u(n-1)
+    /// ?pn ?un → ?u0 ?p ?un`, one INSERT per chain length in scope. Each link
+    /// may be an inverse property expression.
     fn rule_prp_spo2(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?x ?p ?z }} }}
-               WHERE {{
-                   ?p <{OWL_PROP_CHAIN_AXIOM}> ?list .
-                   ?list <{RDF_FIRST}> ?p1 ;
-                         <{RDF_REST}>  ?rest .
-                   ?rest <{RDF_FIRST}> ?p2 ;
-                         <{RDF_REST}>  <{RDF_NIL}> .
-                   ?x ?p1 ?y .
-                   ?y ?p2 ?z .
-               }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    /// prp-key: `?c owl:hasKey (?p1 … ?pn) . ?x a ?c . ?y a ?c . ?x ?pi ?vi .
-    /// ?y ?pi ?vi` for every key property → `?x owl:sameAs ?y`.
-    ///
-    /// The keys are read first — class and the property set of each list —
-    /// and one INSERT per key joins every one of its properties. The old
-    /// single pattern matched `rdf:first ?p ; rdf:rest rdf:nil` only, so a
-    /// composite key silently produced no owl:sameAs at all.
-    fn rule_prp_key(&self) -> Result<(), ReasoningError> {
-        for (class, props) in self.has_keys()? {
-            let mut patterns = String::new();
-            for (i, p) in props.iter().enumerate() {
-                patterns.push_str(&format!("?x <{p}> ?v{i} . ?y <{p}> ?v{i} . "));
+        for n in self.list_lengths(OWL_PROP_CHAIN_AXIOM)? {
+            let mut links = String::new();
+            for i in 0..n {
+                links.push_str(&pe(
+                    &format!("?m{i}"),
+                    &format!("?u{i}"),
+                    &format!("?u{}", i + 1),
+                ));
+                links.push(' ');
             }
+            let (bind, head) = pe_head("?p", "?u0", &format!("?u{n}"));
             let q = format!(
-                r#"INSERT {{ GRAPH <{tg}> {{ ?x <{OWL_SAME_AS}> ?y }} }}
-                   WHERE {{
-                       ?x <{RDF_TYPE}> <{class}> .
-                       ?y <{RDF_TYPE}> <{class}> .
-                       {patterns}
-                       FILTER(?x != ?y) FILTER(isIRI(?x)) FILTER(isIRI(?y))
-                   }}"#,
-                tg = self.target_graph
+                r#"INSERT {{ GRAPH <{tg}> {{ {head} }} }}
+                   WHERE {{ ?p <{OWL_PROP_CHAIN_AXIOM}> ?l . {list} {links} {bind} }}"#,
+                tg = self.target_graph,
+                list = list_n("?l", "m", n),
             );
             self.run_update(&q)?;
         }
         Ok(())
     }
 
-    /// `(class IRI, key property IRIs)` for every `owl:hasKey` list in scope,
-    /// read from the quad index (the scoped graphs, or the default graph when
-    /// unscoped) — the `rdf:rest*` walk is done here rather than as a SPARQL
-    /// property path. Blank-node class expressions are skipped; the order of
-    /// a key's properties does not matter.
-    fn has_keys(&self) -> Result<Vec<(String, Vec<String>)>, ReasoningError> {
-        use oxigraph::model::{GraphNameRef, NamedNodeRef, NamedOrBlankNode, Term};
-        let graphs: Vec<Option<String>> = match self.scope() {
-            Some(scope) => scope.into_iter().map(Some).collect(),
-            None => vec![None],
-        };
-        let has_key = NamedNodeRef::new_unchecked(OWL_HAS_KEY);
-        let first = NamedNodeRef::new_unchecked(RDF_FIRST);
-        let rest = NamedNodeRef::new_unchecked(RDF_REST);
-        let mut keys: Vec<(String, Vec<String>)> = Vec::new();
-        for graph in graphs {
-            let graph_ref = match &graph {
-                Some(g) => match NamedNodeRef::new(g) {
-                    Ok(nn) => GraphNameRef::NamedNode(nn),
-                    Err(_) => continue,
-                },
-                None => GraphNameRef::DefaultGraph,
-            };
-            let object_of = |subject: &NamedOrBlankNode, pred: NamedNodeRef<'_>| {
-                self.store
-                    .store()
-                    .quads_for_pattern(Some(subject.as_ref()), Some(pred), None, Some(graph_ref))
-                    .next()
-                    .and_then(|q| q.ok())
-                    .map(|q| q.object)
-            };
-            for quad in
-                self.store
-                    .store()
-                    .quads_for_pattern(None, Some(has_key), None, Some(graph_ref))
-            {
-                let quad = quad.map_err(|e| ReasoningError::Store(e.to_string()))?;
-                let NamedOrBlankNode::NamedNode(class) = quad.subject else {
-                    continue;
-                };
-                let mut props: Vec<String> = Vec::new();
-                let mut cell = match quad.object {
-                    Term::NamedNode(n) => NamedOrBlankNode::NamedNode(n),
-                    Term::BlankNode(b) => NamedOrBlankNode::BlankNode(b),
-                    _ => continue,
-                };
-                // Walk the list; a malformed list simply ends.
-                for _ in 0..64 {
-                    if let NamedOrBlankNode::NamedNode(n) = &cell {
-                        if n.as_str() == RDF_NIL {
-                            break;
+    /// The distinct lengths (1 ..= [`MAX_LIST_LEN`]) of the lists that are
+    /// objects of `predicate` in scope, for the rules that match a list at its
+    /// exact length.
+    fn list_lengths(&self, predicate: &str) -> Result<Vec<usize>, ReasoningError> {
+        let q = format!(
+            "SELECT ?l (COUNT(DISTINCT ?cell) AS ?n) \
+             WHERE {{ ?s <{predicate}> ?l . ?l <{RDF_REST}>* ?cell . ?cell <{RDF_FIRST}> ?f }} \
+             GROUP BY ?l"
+        );
+        let mut lengths = Vec::new();
+        if let oxigraph::sparql::QueryResults::Solutions(rows) = self.run_query(&q)? {
+            for row in rows {
+                let row = row.map_err(|e| ReasoningError::Query(e.to_string()))?;
+                if let Some(oxigraph::model::Term::Literal(n)) = row.get("n") {
+                    if let Ok(n) = n.value().parse::<usize>() {
+                        if (1..=MAX_LIST_LEN).contains(&n) {
+                            lengths.push(n);
                         }
                     }
-                    if let Some(Term::NamedNode(p)) = object_of(&cell, first) {
-                        props.push(p.as_str().to_string());
-                    }
-                    cell = match object_of(&cell, rest) {
-                        Some(Term::NamedNode(n)) => NamedOrBlankNode::NamedNode(n),
-                        Some(Term::BlankNode(b)) => NamedOrBlankNode::BlankNode(b),
-                        _ => break,
-                    };
-                }
-                props.sort();
-                props.dedup();
-                if !props.is_empty() {
-                    keys.push((class.as_str().to_string(), props));
                 }
             }
         }
-        keys.sort();
-        keys.dedup();
-        Ok(keys)
+        lengths.sort_unstable();
+        lengths.dedup();
+        Ok(lengths)
+    }
+
+    /// prp-key: `?c owl:hasKey (?p1 … ?pn) . ?x a ?c . ?y a ?c . ?x ?pi ?zi .
+    /// ?y ?pi ?zi` for every key property → `?x owl:sameAs ?y`, one INSERT per
+    /// key length in scope. The class may be a blank-node expression and a
+    /// key property an inverse property expression; every member is a
+    /// condition, so a key is never weakened by a member it cannot read. As
+    /// before, only named individuals are merged (a key applies to named
+    /// individuals, OWL 2 Structural Specification §9.5).
+    fn rule_prp_key(&self) -> Result<(), ReasoningError> {
+        for n in self.list_lengths(OWL_HAS_KEY)? {
+            let mut keys = String::new();
+            for i in 0..n {
+                let (m, z) = (format!("?m{i}"), format!("?z{i}"));
+                keys.push_str(&pe(&m, "?x", &z));
+                keys.push(' ');
+                keys.push_str(&pe(&m, "?y", &z));
+                keys.push(' ');
+            }
+            let q = format!(
+                r#"INSERT {{ GRAPH <{tg}> {{ ?x <{OWL_SAME_AS}> ?y }} }}
+                   WHERE {{
+                       ?c <{OWL_HAS_KEY}> ?l . {list}
+                       ?x <{RDF_TYPE}> ?c .
+                       {keys}
+                       ?y <{RDF_TYPE}> ?c .
+                       FILTER(?x != ?y) FILTER(isIRI(?x)) FILTER(isIRI(?y))
+                   }}"#,
+                tg = self.target_graph,
+                list = list_n("?l", "m", n),
+            );
+            self.run_update(&q)?;
+        }
+        Ok(())
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -776,15 +1003,15 @@ impl<'a> Owl2RLReasoner<'a> {
     /// Every XSD-typed literal in scope is checked with the same lexical rules
     /// SHACL's `sh:datatype` uses; oxigraph keeps an ill-formed typed literal
     /// as its lexical form plus datatype, so it is found here. The scan reads
-    /// the quad index directly (the scoped graphs, or the default graph when
-    /// unscoped) rather than a SPARQL query: a DISTINCT-over-FILTER query
+    /// the quad index directly (the scoped graphs, or the default and target graphs
+    /// when unscoped) rather than a SPARQL query: a DISTINCT-over-FILTER query
     /// would take the sharded mirror path, and this check must not depend on
     /// it.
     fn rule_dt_not_type(&self) -> Result<(), ReasoningError> {
         use oxigraph::model::{GraphNameRef, NamedNodeRef, Term};
         let graphs: Vec<Option<String>> = match self.scope() {
             Some(scope) => scope.into_iter().map(Some).collect(),
-            None => vec![None],
+            None => vec![None, Some(self.target_graph.clone())],
         };
         for graph in graphs {
             let graph_ref = match &graph {
@@ -807,9 +1034,10 @@ impl<'a> Owl2RLReasoner<'a> {
                         .starts_with("http://www.w3.org/2001/XMLSchema#")
                         && !crate::shacl::constraints::xsd_lexical_valid(lit)
                     {
-                        return Err(ReasoningError::Inconsistency(format!(
-                            "dt-not-type: {lit} is not in the lexical space of its datatype"
-                        )));
+                        return Err(ReasoningError::inconsistency(
+                            "dt-not-type",
+                            format!("{lit} is not in the lexical space of its datatype"),
+                        ));
                     }
                 }
             }
@@ -817,30 +1045,33 @@ impl<'a> Owl2RLReasoner<'a> {
         Ok(())
     }
 
-    /// prp-npa1: NegativePropertyAssertion (object) → INCONSISTENCY
+    /// prp-npa1: `?x owl:sourceIndividual ?i1 ; owl:assertionProperty ?p ;
+    /// owl:targetIndividual ?i2 . ?i1 ?p ?i2` → INCONSISTENCY. The rule has no
+    /// `rdf:type owl:NegativePropertyAssertion` premise.
     fn rule_prp_npa1(&self) -> Result<(), ReasoningError> {
         let q = format!(
             "ASK {{ \
-               ?npa <{RDF_TYPE}> <{OWL_NEGATIVE_PROP_ASSERTION}> . \
                ?npa <{OWL_SOURCE_INDIVIDUAL}> ?s . \
                ?npa <{OWL_ASSERTION_PROPERTY}> ?p . \
                ?npa <{OWL_TARGET_INDIVIDUAL}> ?o . \
-               ?s ?p ?o . \
-             }}"
+               {so} \
+             }}",
+            so = pe("?p", "?s", "?o"),
         );
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "NegativeObjectPropertyAssertion violated".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "prp-npa1",
+                "NegativeObjectPropertyAssertion violated",
             ));
         }
         Ok(())
     }
 
-    /// prp-npa2: NegativePropertyAssertion (data) → INCONSISTENCY
+    /// prp-npa2: `?x owl:sourceIndividual ?i ; owl:assertionProperty ?p ;
+    /// owl:targetValue ?lt . ?i ?p ?lt` → INCONSISTENCY
     fn rule_prp_npa2(&self) -> Result<(), ReasoningError> {
         let q = format!(
             "ASK {{ \
-               ?npa <{RDF_TYPE}> <{OWL_NEGATIVE_PROP_ASSERTION}> . \
                ?npa <{OWL_SOURCE_INDIVIDUAL}> ?s . \
                ?npa <{OWL_ASSERTION_PROPERTY}> ?p . \
                ?npa <{OWL_TARGET_VALUE}> ?v . \
@@ -848,34 +1079,11 @@ impl<'a> Owl2RLReasoner<'a> {
              }}"
         );
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "NegativeDataPropertyAssertion violated".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "prp-npa2",
+                "NegativeDataPropertyAssertion violated",
             ));
         }
-        Ok(())
-    }
-
-    /// prp-hv1: ?x owl:hasValue ?y . ?x owl:onProperty ?p . ?u rdf:type ?x → ?u ?p ?y
-    fn rule_prp_hv1(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?u ?p ?y }} }}
-               WHERE  {{ ?x <{OWL_HAS_VALUE}> ?y . ?x <{OWL_ON_PROPERTY}> ?p .
-                         ?u <{RDF_TYPE}> ?x }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    /// prp-hv2: ?x owl:hasValue ?y . ?x owl:onProperty ?p . ?u ?p ?y → ?u rdf:type ?x
-    fn rule_prp_hv2(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?u <{RDF_TYPE}> ?x }} }}
-               WHERE  {{ ?x <{OWL_HAS_VALUE}> ?y . ?x <{OWL_ON_PROPERTY}> ?p .
-                         ?u ?p ?y }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
         Ok(())
     }
 
@@ -887,32 +1095,29 @@ impl<'a> Owl2RLReasoner<'a> {
     fn rule_cls_nothing2(&self) -> Result<(), ReasoningError> {
         let q = format!("ASK {{ ?x <{RDF_TYPE}> <{OWL_NOTHING}> }}");
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "An individual is an instance of owl:Nothing".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "cls-nothing2",
+                "An individual is an instance of owl:Nothing",
             ));
         }
         Ok(())
     }
 
-    /// cls-int1: ?c owl:intersectionOf list(c1..cn) . ?x type ci for all i → ?x type ?c
+    /// cls-int1: `?c owl:intersectionOf (?c1 … ?cn) . ?x a ?ci` for every
+    /// member → `?x a ?c`, one INSERT per intersection length in scope.
     fn rule_cls_int1(&self) -> Result<(), ReasoningError> {
-        // For two-class intersections (most common case in RL).
-        // Full n-ary intersections require recursive list traversal which is
-        // complex in SPARQL; we handle the two-element case here.
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?c }} }}
-               WHERE {{
-                   ?c <{OWL_INTERSECTION_OF}> ?list .
-                   ?list <{RDF_FIRST}> ?c1 ;
-                         <{RDF_REST}>  ?rest .
-                   ?rest <{RDF_FIRST}> ?c2 ;
-                         <{RDF_REST}>  <{RDF_NIL}> .
-                   ?x <{RDF_TYPE}> ?c1 .
-                   ?x <{RDF_TYPE}> ?c2 .
-               }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
+        for n in self.list_lengths(OWL_INTERSECTION_OF)? {
+            let members: String = (0..n)
+                .map(|i| format!("?x <{RDF_TYPE}> ?m{i} . "))
+                .collect();
+            let q = format!(
+                r#"INSERT {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?c }} }}
+                   WHERE {{ ?c <{OWL_INTERSECTION_OF}> ?l . {list} {members} }}"#,
+                tg = self.target_graph,
+                list = list_n("?l", "m", n),
+            );
+            self.run_update(&q)?;
+        }
         Ok(())
     }
 
@@ -967,8 +1172,9 @@ impl<'a> Owl2RLReasoner<'a> {
         let q = format!(
             r#"INSERT {{ GRAPH <{tg}> {{ ?u <{RDF_TYPE}> ?x }} }}
                WHERE  {{ ?x <{OWL_SOME_VALUES_FROM}> ?y . ?x <{OWL_ON_PROPERTY}> ?p .
-                         ?u ?p ?v . ?v <{RDF_TYPE}> ?y }}"#,
-            tg = self.target_graph
+                         {uv} ?v <{RDF_TYPE}> ?y }}"#,
+            tg = self.target_graph,
+            uv = pe("?p", "?u", "?v"),
         );
         self.run_update(&q)?;
         Ok(())
@@ -978,9 +1184,10 @@ impl<'a> Owl2RLReasoner<'a> {
     fn rule_cls_svf2(&self) -> Result<(), ReasoningError> {
         let q = format!(
             r#"INSERT {{ GRAPH <{tg}> {{ ?u <{RDF_TYPE}> ?x }} }}
-               WHERE  {{ ?x <{OWL_SOME_VALUES_FROM}> <http://www.w3.org/2002/07/owl#Thing> .
-                         ?x <{OWL_ON_PROPERTY}> ?p . ?u ?p ?v }}"#,
-            tg = self.target_graph
+               WHERE  {{ ?x <{OWL_SOME_VALUES_FROM}> <{OWL_THING}> .
+                         ?x <{OWL_ON_PROPERTY}> ?p . {uv} }}"#,
+            tg = self.target_graph,
+            uv = pe("?p", "?u", "?v"),
         );
         self.run_update(&q)?;
         Ok(())
@@ -992,33 +1199,35 @@ impl<'a> Owl2RLReasoner<'a> {
         let q = format!(
             r#"INSERT {{ GRAPH <{tg}> {{ ?v <{RDF_TYPE}> ?y }} }}
                WHERE  {{ ?x <{OWL_ALL_VALUES_FROM}> ?y . ?x <{OWL_ON_PROPERTY}> ?p .
-                         ?u <{RDF_TYPE}> ?x . ?u ?p ?v .
+                         ?u <{RDF_TYPE}> ?x . {uv}
                          FILTER(isIRI(?v) || isBlank(?v)) }}"#,
-            tg = self.target_graph
+            tg = self.target_graph,
+            uv = pe("?p", "?u", "?v"),
         );
         self.run_update(&q)?;
         Ok(())
     }
 
-    /// cls-hv1: hasValue + onProperty + type(x) → triple
+    /// cls-hv1: ?x owl:hasValue ?y . ?x owl:onProperty ?p . ?u rdf:type ?x → ?u ?p ?y
     fn rule_cls_hv1(&self) -> Result<(), ReasoningError> {
+        let (bind, head) = pe_head("?p", "?u", "?y");
         let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?u ?p ?y }} }}
+            r#"INSERT {{ GRAPH <{tg}> {{ {head} }} }}
                WHERE  {{ ?x <{OWL_HAS_VALUE}> ?y . ?x <{OWL_ON_PROPERTY}> ?p .
-                         ?u <{RDF_TYPE}> ?x }}"#,
+                         ?u <{RDF_TYPE}> ?x . {bind} }}"#,
             tg = self.target_graph
         );
         self.run_update(&q)?;
         Ok(())
     }
 
-    /// cls-hv2: hasValue + onProperty + triple → type
+    /// cls-hv2: ?x owl:hasValue ?y . ?x owl:onProperty ?p . ?u ?p ?y → ?u rdf:type ?x
     fn rule_cls_hv2(&self) -> Result<(), ReasoningError> {
         let q = format!(
             r#"INSERT {{ GRAPH <{tg}> {{ ?u <{RDF_TYPE}> ?x }} }}
-               WHERE  {{ ?x <{OWL_HAS_VALUE}> ?y . ?x <{OWL_ON_PROPERTY}> ?p .
-                         ?u ?p ?y }}"#,
-            tg = self.target_graph
+               WHERE  {{ ?x <{OWL_HAS_VALUE}> ?y . ?x <{OWL_ON_PROPERTY}> ?p . {uy} }}"#,
+            tg = self.target_graph,
+            uy = pe("?p", "?u", "?y"),
         );
         self.run_update(&q)?;
         Ok(())
@@ -1033,14 +1242,15 @@ impl<'a> Owl2RLReasoner<'a> {
                 UNION
                 {{ ?x <{OWL_MAX_CARDINALITY}> "0"^^<http://www.w3.org/2001/XMLSchema#integer> }}
                 ?x <{OWL_ON_PROPERTY}> ?p .
-                {{ ?u <{RDF_TYPE}> ?x }} UNION {{ GRAPH <{tg}> {{ ?u <{RDF_TYPE}> ?x }} }}
-                ?u ?p ?y
+                ?u <{RDF_TYPE}> ?x .
+                {uy}
             }}"#,
-            tg = self.target_graph
+            uy = pe("?p", "?u", "?y"),
         );
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "owl:maxCardinality 0 violated".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "cls-maxc1",
+                "owl:maxCardinality 0 violated",
             ));
         }
         Ok(())
@@ -1053,10 +1263,12 @@ impl<'a> Owl2RLReasoner<'a> {
                WHERE {{
                    ?x <{OWL_MAX_CARDINALITY}> "1"^^<http://www.w3.org/2001/XMLSchema#nonNegativeInteger> .
                    ?x <{OWL_ON_PROPERTY}> ?p .
-                   ?u <{RDF_TYPE}> ?x . ?u ?p ?y1 . ?u ?p ?y2 .
+                   ?u <{RDF_TYPE}> ?x . {a} {b}
                    FILTER(?y1 != ?y2)
                }}"#,
-            tg = self.target_graph
+            tg = self.target_graph,
+            a = pe("?p", "?u", "?y1"),
+            b = pe("?p", "?u", "?y2"),
         );
         self.run_update(&q)?;
         Ok(())
@@ -1069,13 +1281,15 @@ impl<'a> Owl2RLReasoner<'a> {
                 ?x <{OWL_MAX_QUAL_CARD}> "0"^^<http://www.w3.org/2001/XMLSchema#nonNegativeInteger> .
                 ?x <{OWL_ON_PROPERTY}> ?p .
                 ?x <{OWL_ON_CLASS}> ?c .
-                ?u <{RDF_TYPE}> ?x . ?u ?p ?y .
+                ?u <{RDF_TYPE}> ?x . {uy}
                 ?y <{RDF_TYPE}> ?c .
-            }}"#
+            }}"#,
+            uy = pe("?p", "?u", "?y"),
         );
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "owl:maxQualifiedCardinality 0 violated".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "cls-maxqc1",
+                "owl:maxQualifiedCardinality 0 violated",
             ));
         }
         Ok(())
@@ -1088,12 +1302,14 @@ impl<'a> Owl2RLReasoner<'a> {
                 ?x <{OWL_MAX_QUAL_CARD}> "0"^^<http://www.w3.org/2001/XMLSchema#nonNegativeInteger> .
                 ?x <{OWL_ON_PROPERTY}> ?p .
                 ?x <{OWL_ON_CLASS}> <{OWL_THING}> .
-                ?u <{RDF_TYPE}> ?x . ?u ?p ?y .
-            }}"#
+                ?u <{RDF_TYPE}> ?x . {uy}
+            }}"#,
+            uy = pe("?p", "?u", "?y"),
         );
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "owl:maxQualifiedCardinality 0 (Thing) violated".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "cls-maxqc2",
+                "owl:maxQualifiedCardinality 0 (Thing) violated",
             ));
         }
         Ok(())
@@ -1108,11 +1324,13 @@ impl<'a> Owl2RLReasoner<'a> {
                    ?x <{OWL_ON_PROPERTY}> ?p .
                    ?x <{OWL_ON_CLASS}> ?c .
                    ?u <{RDF_TYPE}> ?x .
-                   ?u ?p ?y1 . ?y1 <{RDF_TYPE}> ?c .
-                   ?u ?p ?y2 . ?y2 <{RDF_TYPE}> ?c .
+                   {a} ?y1 <{RDF_TYPE}> ?c .
+                   {b} ?y2 <{RDF_TYPE}> ?c .
                    FILTER(?y1 != ?y2)
                }}"#,
-            tg = self.target_graph
+            tg = self.target_graph,
+            a = pe("?p", "?u", "?y1"),
+            b = pe("?p", "?u", "?y2"),
         );
         self.run_update(&q)?;
         Ok(())
@@ -1127,11 +1345,12 @@ impl<'a> Owl2RLReasoner<'a> {
                    ?x <{OWL_ON_PROPERTY}> ?p .
                    ?x <{OWL_ON_CLASS}> <{OWL_THING}> .
                    ?u <{RDF_TYPE}> ?x .
-                   ?u ?p ?y1 .
-                   ?u ?p ?y2 .
+                   {a} {b}
                    FILTER(?y1 != ?y2)
                }}"#,
-            tg = self.target_graph
+            tg = self.target_graph,
+            a = pe("?p", "?u", "?y1"),
+            b = pe("?p", "?u", "?y2"),
         );
         self.run_update(&q)?;
         Ok(())
@@ -1143,8 +1362,9 @@ impl<'a> Owl2RLReasoner<'a> {
             "ASK {{ ?c1 <{OWL_COMPLEMENT_OF}> ?c2 . ?x <{RDF_TYPE}> ?c1 . ?x <{RDF_TYPE}> ?c2 }}"
         );
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "owl:complementOf violated: individual is member of both classes".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "cls-com",
+                "owl:complementOf violated: individual is member of both classes",
             ));
         }
         Ok(())
@@ -1206,16 +1426,18 @@ impl<'a> Owl2RLReasoner<'a> {
         Ok(())
     }
 
-    /// cax-adc: AllDisjointClasses → pairwise owl:disjointWith
+    /// cax-adc: `?x a owl:AllDisjointClasses ; owl:members (?c1 … ?cn)` →
+    /// `?ci owl:disjointWith ?cj` for every two positions. Blank-node class
+    /// expressions are members too.
     fn rule_cax_adc(&self) -> Result<(), ReasoningError> {
         let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?ci <{OWL_DISJOINT_WITH}> ?cj }} }}
+            r#"INSERT {{ GRAPH <{tg}> {{ ?c1 <{OWL_DISJOINT_WITH}> ?c2 }} }}
                WHERE {{
                    ?adc <{RDF_TYPE}> <{OWL_ALL_DISJOINT}> .
-                   ?adc <{OWL_MEMBERS}> ?list .
-                   ?list (<{RDF_FIRST}>|(<{RDF_REST}>+/<{RDF_FIRST}>)) ?ci .
-                   ?list (<{RDF_FIRST}>|(<{RDF_REST}>+/<{RDF_FIRST}>)) ?cj .
-                   FILTER(?ci != ?cj) FILTER(isIRI(?ci)) FILTER(isIRI(?cj))
+                   ?adc <{OWL_MEMBERS}> ?l .
+                   ?l <{RDF_REST}>* ?ci . ?ci <{RDF_FIRST}> ?c1 .
+                   ?l <{RDF_REST}>* ?cj . ?cj <{RDF_FIRST}> ?c2 .
+                   FILTER(?ci != ?cj)
                }}"#,
             tg = self.target_graph
         );
@@ -1225,18 +1447,13 @@ impl<'a> Owl2RLReasoner<'a> {
 
     /// cax-dw: ?c1 owl:disjointWith ?c2 . ?x type ?c1 . ?x type ?c2 → INCONSISTENCY
     fn rule_cax_dw(&self) -> Result<(), ReasoningError> {
-        let tg = &self.target_graph;
-        // Check both default graph and entailment graph for disjointWith and type triples
         let q = format!(
-            "ASK {{ \
-               {{ ?c1 <{OWL_DISJOINT_WITH}> ?c2 }} UNION {{ GRAPH <{tg}> {{ ?c1 <{OWL_DISJOINT_WITH}> ?c2 }} }} \
-               {{ ?x <{RDF_TYPE}> ?c1 }} UNION {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?c1 }} }} \
-               {{ ?x <{RDF_TYPE}> ?c2 }} UNION {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?c2 }} }} \
-             }}"
+            "ASK {{ ?c1 <{OWL_DISJOINT_WITH}> ?c2 . ?x <{RDF_TYPE}> ?c1 . ?x <{RDF_TYPE}> ?c2 }}"
         );
         if self.ask(&q)? {
-            return Err(ReasoningError::Inconsistency(
-                "owl:disjointWith violated".to_string(),
+            return Err(ReasoningError::inconsistency(
+                "cax-dw",
+                "owl:disjointWith violated",
             ));
         }
         Ok(())
@@ -1251,8 +1468,7 @@ impl<'a> Owl2RLReasoner<'a> {
         let q = format!(
             r#"INSERT {{ GRAPH <{tg}> {{ ?c1 <{RDFS_SUB_CLASS_OF}> ?c3 }} }}
                WHERE  {{ ?c1 <{RDFS_SUB_CLASS_OF}> ?c2 .
-                         ?c2 <{RDFS_SUB_CLASS_OF}> ?c3 .
-                         FILTER(?c1 != ?c3) }}"#,
+                         ?c2 <{RDFS_SUB_CLASS_OF}> ?c3 }}"#,
             tg = self.target_graph
         );
         self.run_update(&q)?;
@@ -1275,8 +1491,7 @@ impl<'a> Owl2RLReasoner<'a> {
         let q = format!(
             r#"INSERT {{ GRAPH <{tg}> {{ ?c1 <{OWL_EQUIV_CLASS}> ?c2 }} }}
                WHERE  {{ ?c1 <{RDFS_SUB_CLASS_OF}> ?c2 .
-                         ?c2 <{RDFS_SUB_CLASS_OF}> ?c1 .
-                         FILTER(?c1 != ?c2) }}"#,
+                         ?c2 <{RDFS_SUB_CLASS_OF}> ?c1 }}"#,
             tg = self.target_graph
         );
         self.run_update(&q)?;
@@ -1288,8 +1503,7 @@ impl<'a> Owl2RLReasoner<'a> {
         let q = format!(
             r#"INSERT {{ GRAPH <{tg}> {{ ?p1 <{RDFS_SUB_PROPERTY_OF}> ?p3 }} }}
                WHERE  {{ ?p1 <{RDFS_SUB_PROPERTY_OF}> ?p2 .
-                         ?p2 <{RDFS_SUB_PROPERTY_OF}> ?p3 .
-                         FILTER(?p1 != ?p3) }}"#,
+                         ?p2 <{RDFS_SUB_PROPERTY_OF}> ?p3 }}"#,
             tg = self.target_graph
         );
         self.run_update(&q)?;
@@ -1312,8 +1526,7 @@ impl<'a> Owl2RLReasoner<'a> {
         let q = format!(
             r#"INSERT {{ GRAPH <{tg}> {{ ?p1 <{OWL_EQUIV_PROP}> ?p2 }} }}
                WHERE  {{ ?p1 <{RDFS_SUB_PROPERTY_OF}> ?p2 .
-                         ?p2 <{RDFS_SUB_PROPERTY_OF}> ?p1 .
-                         FILTER(?p1 != ?p2) }}"#,
+                         ?p2 <{RDFS_SUB_PROPERTY_OF}> ?p1 }}"#,
             tg = self.target_graph
         );
         self.run_update(&q)?;
@@ -1371,7 +1584,7 @@ impl<'a> Owl2RLReasoner<'a> {
             r#"INSERT {{ GRAPH <{tg}> {{ ?c1 <{RDFS_SUB_CLASS_OF}> ?c2 }} }}
                WHERE  {{ ?c1 <{OWL_HAS_VALUE}> ?i . ?c1 <{OWL_ON_PROPERTY}> ?p1 .
                          ?c2 <{OWL_HAS_VALUE}> ?i . ?c2 <{OWL_ON_PROPERTY}> ?p2 .
-                         ?p1 <{RDFS_SUB_PROPERTY_OF}> ?p2 . FILTER(?c1 != ?c2) }}"#,
+                         ?p1 <{RDFS_SUB_PROPERTY_OF}> ?p2 . }}"#,
             tg = self.target_graph
         );
         self.run_update(&q)?;
@@ -1385,7 +1598,7 @@ impl<'a> Owl2RLReasoner<'a> {
             r#"INSERT {{ GRAPH <{tg}> {{ ?c1 <{RDFS_SUB_CLASS_OF}> ?c2 }} }}
                WHERE  {{ ?c1 <{OWL_SOME_VALUES_FROM}> ?y1 . ?c1 <{OWL_ON_PROPERTY}> ?p .
                          ?c2 <{OWL_SOME_VALUES_FROM}> ?y2 . ?c2 <{OWL_ON_PROPERTY}> ?p .
-                         ?y1 <{RDFS_SUB_CLASS_OF}> ?y2 . FILTER(?c1 != ?c2) }}"#,
+                         ?y1 <{RDFS_SUB_CLASS_OF}> ?y2 . }}"#,
             tg = self.target_graph
         );
         self.run_update(&q)?;
@@ -1399,7 +1612,7 @@ impl<'a> Owl2RLReasoner<'a> {
             r#"INSERT {{ GRAPH <{tg}> {{ ?c1 <{RDFS_SUB_CLASS_OF}> ?c2 }} }}
                WHERE  {{ ?c1 <{OWL_SOME_VALUES_FROM}> ?y . ?c1 <{OWL_ON_PROPERTY}> ?p1 .
                          ?c2 <{OWL_SOME_VALUES_FROM}> ?y . ?c2 <{OWL_ON_PROPERTY}> ?p2 .
-                         ?p1 <{RDFS_SUB_PROPERTY_OF}> ?p2 . FILTER(?c1 != ?c2) }}"#,
+                         ?p1 <{RDFS_SUB_PROPERTY_OF}> ?p2 . }}"#,
             tg = self.target_graph
         );
         self.run_update(&q)?;
@@ -1413,7 +1626,7 @@ impl<'a> Owl2RLReasoner<'a> {
             r#"INSERT {{ GRAPH <{tg}> {{ ?c1 <{RDFS_SUB_CLASS_OF}> ?c2 }} }}
                WHERE  {{ ?c1 <{OWL_ALL_VALUES_FROM}> ?y1 . ?c1 <{OWL_ON_PROPERTY}> ?p .
                          ?c2 <{OWL_ALL_VALUES_FROM}> ?y2 . ?c2 <{OWL_ON_PROPERTY}> ?p .
-                         ?y1 <{RDFS_SUB_CLASS_OF}> ?y2 . FILTER(?c1 != ?c2) }}"#,
+                         ?y1 <{RDFS_SUB_CLASS_OF}> ?y2 . }}"#,
             tg = self.target_graph
         );
         self.run_update(&q)?;
@@ -1427,19 +1640,22 @@ impl<'a> Owl2RLReasoner<'a> {
             r#"INSERT {{ GRAPH <{tg}> {{ ?c1 <{RDFS_SUB_CLASS_OF}> ?c2 }} }}
                WHERE  {{ ?c1 <{OWL_ALL_VALUES_FROM}> ?y . ?c1 <{OWL_ON_PROPERTY}> ?p1 .
                          ?c2 <{OWL_ALL_VALUES_FROM}> ?y . ?c2 <{OWL_ON_PROPERTY}> ?p2 .
-                         ?p2 <{RDFS_SUB_PROPERTY_OF}> ?p1 . FILTER(?c1 != ?c2) }}"#,
+                         ?p2 <{RDFS_SUB_PROPERTY_OF}> ?p1 . }}"#,
             tg = self.target_graph
         );
         self.run_update(&q)?;
         Ok(())
     }
 
-    /// scm-cls: every owl:Class is subClassOf owl:Thing and subClassOf itself
+    /// scm-cls: ?c a owl:Class → ?c rdfs:subClassOf ?c . ?c owl:equivalentClass ?c .
+    /// ?c rdfs:subClassOf owl:Thing . owl:Nothing rdfs:subClassOf ?c
     fn rule_scm_cls(&self) -> Result<(), ReasoningError> {
         let q = format!(
             r#"INSERT {{ GRAPH <{tg}> {{
-                   ?c <{RDFS_SUB_CLASS_OF}> <{OWL_THING}> .
                    ?c <{RDFS_SUB_CLASS_OF}> ?c .
+                   ?c <{OWL_EQUIV_CLASS}> ?c .
+                   ?c <{RDFS_SUB_CLASS_OF}> <{OWL_THING}> .
+                   <{OWL_NOTHING}> <{RDFS_SUB_CLASS_OF}> ?c .
                }} }}
                WHERE {{ ?c <{RDF_TYPE}> <{OWL_CLASS}> }}"#,
             tg = self.target_graph
@@ -1448,14 +1664,54 @@ impl<'a> Owl2RLReasoner<'a> {
         Ok(())
     }
 
-    /// scm-int: intersection members are superclasses of the intersection
+    /// scm-op: ?p a owl:ObjectProperty → ?p rdfs:subPropertyOf ?p . ?p owl:equivalentProperty ?p
+    fn rule_scm_op(&self) -> Result<(), ReasoningError> {
+        self.reflexive_property_axioms(OWL_OBJECT_PROPERTY)
+    }
+
+    /// scm-dp: ?p a owl:DatatypeProperty → ?p rdfs:subPropertyOf ?p . ?p owl:equivalentProperty ?p
+    fn rule_scm_dp(&self) -> Result<(), ReasoningError> {
+        self.reflexive_property_axioms(OWL_DATATYPE_PROPERTY)
+    }
+
+    fn reflexive_property_axioms(&self, kind: &str) -> Result<(), ReasoningError> {
+        let q = format!(
+            r#"INSERT {{ GRAPH <{tg}> {{
+                   ?p <{RDFS_SUB_PROPERTY_OF}> ?p .
+                   ?p <{OWL_EQUIV_PROP}> ?p .
+               }} }}
+               WHERE {{ ?p <{RDF_TYPE}> <{kind}> }}"#,
+            tg = self.target_graph
+        );
+        self.run_update(&q)?;
+        Ok(())
+    }
+
+    /// prp-ap, cls-thing, cls-nothing1: the axiomatic triples — the built-in
+    /// annotation properties, and `owl:Thing` / `owl:Nothing` as classes.
+    fn rule_axiomatic(&self) -> Result<(), ReasoningError> {
+        let mut triples: String = ANNOTATION_PROPERTIES
+            .iter()
+            .map(|ap| format!("<{ap}> <{RDF_TYPE}> <{OWL_ANNOTATION_PROPERTY}> . "))
+            .collect();
+        triples.push_str(&format!(
+            "<{OWL_THING}> <{RDF_TYPE}> <{OWL_CLASS}> . <{OWL_NOTHING}> <{RDF_TYPE}> <{OWL_CLASS}> . "
+        ));
+        let q = format!(
+            "INSERT DATA {{ GRAPH <{tg}> {{ {triples} }} }}",
+            tg = self.target_graph
+        );
+        self.run_update(&q)?;
+        Ok(())
+    }
+
+    /// scm-int: `?c owl:intersectionOf (?c1 … ?cn)` → `?c rdfs:subClassOf ?ci`
     fn rule_scm_int(&self) -> Result<(), ReasoningError> {
         let q = format!(
             r#"INSERT {{ GRAPH <{tg}> {{ ?c <{RDFS_SUB_CLASS_OF}> ?ci }} }}
                WHERE {{
                    ?c <{OWL_INTERSECTION_OF}> ?list .
-                   ?list (<{RDF_FIRST}>|(<{RDF_REST}>+/<{RDF_FIRST}>)) ?ci .
-                   FILTER(?ci != <{RDF_NIL}>) FILTER(isIRI(?ci))
+                   ?list <{RDF_REST}>*/<{RDF_FIRST}> ?ci .
                }}"#,
             tg = self.target_graph
         );
@@ -1463,14 +1719,13 @@ impl<'a> Owl2RLReasoner<'a> {
         Ok(())
     }
 
-    /// scm-uni: each union member is a subclass of the union
+    /// scm-uni: `?c owl:unionOf (?c1 … ?cn)` → `?ci rdfs:subClassOf ?c`
     fn rule_scm_uni(&self) -> Result<(), ReasoningError> {
         let q = format!(
             r#"INSERT {{ GRAPH <{tg}> {{ ?ci <{RDFS_SUB_CLASS_OF}> ?c }} }}
                WHERE {{
                    ?c <{OWL_UNION_OF}> ?list .
-                   ?list (<{RDF_FIRST}>|(<{RDF_REST}>+/<{RDF_FIRST}>)) ?ci .
-                   FILTER(?ci != <{RDF_NIL}>) FILTER(isIRI(?ci))
+                   ?list <{RDF_REST}>*/<{RDF_FIRST}> ?ci .
                }}"#,
             tg = self.target_graph
         );

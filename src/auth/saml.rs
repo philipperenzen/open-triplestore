@@ -10,10 +10,21 @@
 //! - `idp_certificate` — IdP signing certificate (PEM)
 //!
 //! ## SP metadata
-//! Expose `GET /api/auth/saml/{slug}/metadata` and register the ACS URL
+//! The store's own entity ID for a provider is its metadata URL,
+//! `GET /api/auth/saml/{slug}/metadata`; register that and the ACS URL
 //! `POST /api/auth/saml/{slug}/acs` with the IdP.
+//!
+//! ## Flow (SP-initiated only)
+//! [`begin_saml_flow`] sends the browser to the IdP with an AuthnRequest
+//! (HTTP-Redirect binding, unsigned) and remembers its ID under a one-time
+//! RelayState key. The ACS takes that key back ([`take_pending_request`]) and
+//! accepts only a signed response whose `InResponseTo` is that request's ID, so
+//! an IdP-initiated or replayed response is refused.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
+
+use dashmap::DashMap;
 
 use super::db::AuthDb;
 use super::jwt::JwtConfig;
@@ -26,6 +37,64 @@ pub struct SamlClaims {
     pub email: Option<String>,
     pub display_name: Option<String>,
     pub groups: Vec<String>,
+}
+
+/// The store's entity ID towards a provider's IdP: its SP metadata URL.
+pub fn sp_entity_id(base_url: &str, slug: &str) -> String {
+    format!(
+        "{}/api/auth/saml/{slug}/metadata",
+        base_url.trim_end_matches('/')
+    )
+}
+
+/// The Assertion Consumer Service URL registered with a provider's IdP.
+pub fn acs_url(base_url: &str, slug: &str) -> String {
+    format!(
+        "{}/api/auth/saml/{slug}/acs",
+        base_url.trim_end_matches('/')
+    )
+}
+
+// ─── Pending AuthnRequests ────────────────────────────────────────────────────
+
+/// How long a sign-in may take between the redirect to the IdP and the ACS.
+const PENDING_TTL: Duration = Duration::from_secs(600);
+/// Hard cap on in-flight requests, so flooding the login route cannot grow
+/// memory without bound (the route is also rate-limited).
+const MAX_PENDING: usize = 10_000;
+
+struct PendingRequest {
+    slug: String,
+    request_id: String,
+    created_at: Instant,
+}
+
+/// In-flight AuthnRequests keyed by RelayState. Process-wide: the keys are
+/// random, and a request is only ever answered at the instance that sent it.
+static PENDING: LazyLock<DashMap<String, PendingRequest>> = LazyLock::new(DashMap::new);
+
+fn prune_pending() {
+    PENDING.retain(|_, p| p.created_at.elapsed() < PENDING_TTL);
+    if PENDING.len() >= MAX_PENDING {
+        let mut entries: Vec<(String, Instant)> = PENDING
+            .iter()
+            .map(|e| (e.key().clone(), e.value().created_at))
+            .collect();
+        entries.sort_by_key(|(_, t)| *t); // oldest first
+        let to_remove = entries.len() + 1 - MAX_PENDING;
+        for (k, _) in entries.into_iter().take(to_remove) {
+            PENDING.remove(&k);
+        }
+    }
+}
+
+/// Consume the pending request filed under `relay_state` and return its ID,
+/// if it was sent for `slug` and has not expired. Single use: a second call
+/// with the same key returns `None`.
+pub fn take_pending_request(relay_state: &str, slug: &str) -> Option<String> {
+    let (_, pending) = PENDING.remove(relay_state)?;
+    (pending.slug == slug && pending.created_at.elapsed() < PENDING_TTL)
+        .then_some(pending.request_id)
 }
 
 // ─── Feature-gated implementation ────────────────────────────────────────────
@@ -47,7 +116,11 @@ mod inner {
             .collect::<String>()
     }
 
-    fn build_sp(provider: &OauthProvider, acs_url: &str) -> anyhow::Result<ServiceProvider> {
+    fn build_sp(
+        provider: &OauthProvider,
+        sp_entity_id: &str,
+        acs_url: &str,
+    ) -> anyhow::Result<ServiceProvider> {
         let cert_pem = provider.idp_certificate.as_deref().ok_or_else(|| {
             anyhow::anyhow!("Provider '{}' has no idp_certificate", provider.slug)
         })?;
@@ -79,8 +152,10 @@ mod inner {
             anyhow::anyhow!("Failed to build IdP metadata for '{}': {e}", provider.slug)
         })?;
 
+        // The SP's own entity ID (the audience the IdP must assert), not the
+        // IdP's: that one is the expected `Issuer`, carried in `idp_metadata`.
         let sp = ServiceProviderBuilder::default()
-            .entity_id(entity_id.to_string())
+            .entity_id(sp_entity_id.to_string())
             .acs_url(acs_url.to_string())
             .idp_metadata(idp_metadata)
             .build()
@@ -90,8 +165,12 @@ mod inner {
     }
 
     /// Generate SP metadata XML for registration with the IdP.
-    pub fn generate_sp_metadata(provider: &OauthProvider, acs_url: &str) -> anyhow::Result<String> {
-        let sp = build_sp(provider, acs_url)?;
+    pub fn generate_sp_metadata(
+        provider: &OauthProvider,
+        sp_entity_id: &str,
+        acs_url: &str,
+    ) -> anyhow::Result<String> {
+        let sp = build_sp(provider, sp_entity_id, acs_url)?;
         let metadata = sp
             .metadata()
             .map_err(|e| anyhow::anyhow!("metadata error: {e}"))?;
@@ -100,19 +179,54 @@ mod inner {
             .map_err(|e| anyhow::anyhow!("metadata serialization error: {e}"))
     }
 
-    /// Verify and parse a base64-encoded SAML response from the IdP.
+    /// Build the HTTP-Redirect URL that carries a fresh AuthnRequest to the
+    /// IdP's SSO URL. Returns `(url, request_id)`.
+    pub fn authn_request_url(
+        provider: &OauthProvider,
+        sp_entity_id: &str,
+        acs_url: &str,
+        relay_state: &str,
+    ) -> anyhow::Result<(String, String)> {
+        let sso_url = provider
+            .sso_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Provider '{}' has no sso_url", provider.slug))?;
+        if !crate::auth::oidc_rs::is_secure_idp_url(sso_url) {
+            anyhow::bail!(
+                "SAML provider '{}' sso_url must use https: {sso_url}",
+                provider.slug
+            );
+        }
+        let sp = build_sp(provider, sp_entity_id, acs_url)?;
+        let mut request = sp
+            .make_authentication_request(sso_url)
+            .map_err(|e| anyhow::anyhow!("AuthnRequest error: {e}"))?;
+        // samael's default ID carries 32 random bits; the ACS binds the response
+        // to this ID, so make it unguessable. An xs:ID must not start with a digit.
+        request.id = format!("_{}", uuid::Uuid::new_v4().simple());
+        let url = request
+            .redirect(relay_state)
+            .map_err(|e| anyhow::anyhow!("AuthnRequest encoding error: {e}"))?
+            .ok_or_else(|| anyhow::anyhow!("AuthnRequest has no destination"))?;
+        Ok((url.to_string(), request.id))
+    }
+
+    /// Verify and parse a base64-encoded SAML response from the IdP. The
+    /// response must answer `request_id` (`InResponseTo`); IdP-initiated
+    /// responses are refused.
     pub fn parse_saml_response(
         saml_response_b64: &str,
         provider: &OauthProvider,
+        sp_entity_id: &str,
         acs_url: &str,
+        request_id: &str,
     ) -> anyhow::Result<SamlClaims> {
-        let sp = build_sp(provider, acs_url)?;
+        let sp = build_sp(provider, sp_entity_id, acs_url)?;
 
         let assertion = sp
-            .parse_base64_response(
-                saml_response_b64,
-                Some(&["urn:oasis:names:tc:SAML:2.0:cm:bearer"]),
-            )
+            .parse_base64_response(saml_response_b64, Some(&[request_id]))
             .map_err(|e| anyhow::anyhow!("SAML parse error: {e}"))?;
 
         let name_id = assertion
@@ -166,15 +280,27 @@ mod inner {
 
     pub fn generate_sp_metadata(
         _provider: &OauthProvider,
+        _sp_entity_id: &str,
         _acs_url: &str,
     ) -> anyhow::Result<String> {
+        anyhow::bail!("SAML support is not compiled in (enable the 'saml' feature)")
+    }
+
+    pub fn authn_request_url(
+        _provider: &OauthProvider,
+        _sp_entity_id: &str,
+        _acs_url: &str,
+        _relay_state: &str,
+    ) -> anyhow::Result<(String, String)> {
         anyhow::bail!("SAML support is not compiled in (enable the 'saml' feature)")
     }
 
     pub fn parse_saml_response(
         _saml_response_b64: &str,
         _provider: &OauthProvider,
+        _sp_entity_id: &str,
         _acs_url: &str,
+        _request_id: &str,
     ) -> anyhow::Result<SamlClaims> {
         anyhow::bail!("SAML support is not compiled in (enable the 'saml' feature)")
     }
@@ -182,17 +308,51 @@ mod inner {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-pub use inner::{generate_sp_metadata, parse_saml_response};
+pub use inner::{authn_request_url, generate_sp_metadata, parse_saml_response};
 
-/// Process a SAML ACS POST and return `(access_token, refresh_token)`.
+/// Start an SP-initiated sign-in: build the redirect to the IdP and file the
+/// request under a fresh RelayState key. Returns `(redirect_url, relay_state)`;
+/// the caller binds `relay_state` to the browser.
+pub fn begin_saml_flow(
+    provider: &OauthProvider,
+    base_url: &str,
+) -> anyhow::Result<(String, String)> {
+    let relay_state = uuid::Uuid::new_v4().simple().to_string();
+    let (url, request_id) = authn_request_url(
+        provider,
+        &sp_entity_id(base_url, &provider.slug),
+        &acs_url(base_url, &provider.slug),
+        &relay_state,
+    )?;
+    prune_pending();
+    PENDING.insert(
+        relay_state.clone(),
+        PendingRequest {
+            slug: provider.slug.clone(),
+            request_id,
+            created_at: Instant::now(),
+        },
+    );
+    Ok((url, relay_state))
+}
+
+/// Process a SAML ACS POST answering `request_id` and return
+/// `(access_token, refresh_token)`.
 pub async fn complete_saml_flow(
     saml_response_b64: &str,
+    request_id: &str,
     provider: &OauthProvider,
-    acs_url: &str,
+    base_url: &str,
     auth_db: &Arc<AuthDb>,
     jwt_config: &JwtConfig,
 ) -> anyhow::Result<(String, String)> {
-    let claims = parse_saml_response(saml_response_b64, provider, acs_url)?;
+    let claims = parse_saml_response(
+        saml_response_b64,
+        provider,
+        &sp_entity_id(base_url, &provider.slug),
+        &acs_url(base_url, &provider.slug),
+        request_id,
+    )?;
 
     use super::jwt::{hash_token, issue_access_token, issue_refresh_token};
     use super::models::{map_claims_to_role, SystemRole};
