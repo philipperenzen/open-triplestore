@@ -28,6 +28,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now runs every pin on both read paths and adds `VERSION`, the `LANGDIR`
   family, `~` / `{| |}` in updates and queries, duplicate `VALUES` variables,
   `LATERAL` with a per-row `LIMIT` and `ADJUST`.
+- **SKOS-aware inferencing and integrity checking.** The standards matrix
+  promised SKOS-aware inferencing, and there was none: `skos.ttl` was only a
+  bundled vocabulary. A dataset can now select the `skos` entailment regime —
+  OWL 2 RL over its conformance layer with the bundled W3C SKOS schema as a
+  premise, the schema's own closure pruned — and a built-in *SKOS integrity*
+  shape graph (`urn:system:shapes:skos-integrity`) checks the SKOS Reference's
+  integrity conditions S9, S13, S14, S27, S36, S37 and S46. `docs/standards.md`
+  grades SKOS *Full*; see `docs/reasoning.md#the-skos-regime`.
 - **Full-text search graded as a feature.** `docs/standards.md` grades
   *SPARQL + full-text search (Tantivy)* — not a standard — as *Full*, now that
   the index follows every write (see *Fixed*).
