@@ -81,9 +81,11 @@ pub fn parse_request(
     let dialect = match query.get("dialect").map(String::as_str) {
         None | Some("") | Some("w3c") | Some("W3C") => Dialect::W3c,
         Some("legacy") => Dialect::Legacy,
-        Some(other) => return Err(format!(
+        Some(other) => {
+            return Err(format!(
             "unknown SHACL-C dialect `{other}`: use `w3c` (the default) or `legacy` (deprecated)"
-        )),
+        ))
+        }
     };
     let lenient = query
         .get("lenient")

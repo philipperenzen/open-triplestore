@@ -474,8 +474,7 @@ impl Lexer {
         let mut committed_i = self.i;
         let mut committed_pos = (self.line, self.col);
         let mut first = true;
-        loop {
-            let Some(c) = self.peek(0) else { break };
+        while let Some(c) = self.peek(0) {
             let ok_first = is_pn_chars_u(c) || c == ':' || c.is_ascii_digit();
             let ok_rest = is_pn_chars(c) || c == ':' || c == '.';
             if c == '%' {
@@ -1207,7 +1206,8 @@ impl Parser {
     }
 }
 
-const LEGACY_HINT: &str = " — this looks like the SHACL-C dialect of 0.7 and earlier; write the W3C form \
+const LEGACY_HINT: &str =
+    " — this looks like the SHACL-C dialect of 0.7 and earlier; write the W3C form \
      (`closed=true`, `pattern=\"…\"`, `message=\"…\"`, `a|b`, `!x`, `@ex:Shape`, `.` after each \
      constraint) or pass `?dialect=legacy` (deprecated) to parse the old one";
 

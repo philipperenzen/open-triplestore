@@ -545,7 +545,10 @@ mod http {
             "",
         )
         .await;
-        assert!(txt.contains("sh:class"), "a bare IRI is sh:class: {txt}");
+        assert!(
+            txt.contains("sh:class") || txt.contains("shacl#class>"),
+            "a bare IRI is sh:class: {txt}"
+        );
         let (st, txt, _) = call(
             &app,
             Method::PUT,
@@ -575,7 +578,10 @@ mod http {
             "",
         )
         .await;
-        assert!(txt.contains("sh:node"), "legacy keeps its meaning: {txt}");
+        assert!(
+            txt.contains("sh:node") || txt.contains("shacl#node>"),
+            "legacy keeps its meaning: {txt}"
+        );
     }
 
     #[tokio::test]
