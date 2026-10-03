@@ -20,15 +20,16 @@
   and adds the original notice and the BSD text; this file is ours.
 - Scope: the directories included by `manifest-sparql11-query.ttl` and
   `manifest-sparql11-update.ttl` — query evaluation, query syntax, update
-  evaluation and update syntax. Not vendored: the protocol, service
+  evaluation and update syntax — and, added 2026-10-02 from the same commit,
+  `manifest-sparql11-fed.ttl` with the two directories it includes, the
+  federation sections `service/` and `syntax-fed/` (every file, the
+  `service/README` included). Not vendored: the protocol, service
   description, graph-store-protocol (`graph-store-protocol/`, and its
-  deprecated predecessor `http-rdf-update/`), federation (`service/`,
-  `syntax-fed/`), result-format (`csv-tsv-res/`, `json-res/`) and
-  entailment-regime (`entailment/`) sections, which test surfaces this
-  runner does not cover; the other top-level manifests (`manifest.ttl`,
-  `manifest-all.ttl`, `manifest-sparql11-fed.ttl`,
-  `manifest-sparql11-results.ttl`); and the cover-page template
-  `template.haml`.
+  deprecated predecessor `http-rdf-update/`), result-format (`csv-tsv-res/`,
+  `json-res/`) and entailment-regime (`entailment/`) sections, which test
+  surfaces these runners do not cover; the other top-level manifests
+  (`manifest.ttl`, `manifest-all.ttl`, `manifest-sparql11-results.ttl`); and
+  the cover-page template `template.haml`.
 - Runner: `tests/w3c_sparql11_manifests.rs` — walks the two top-level
   manifests through `mf:include`, loads each entry's `qt:data` /
   `qt:graphData` (`ut:data` / `ut:graphData` for updates) into a fresh store,
@@ -41,3 +42,12 @@
   KNOWN_FAILURES list (two-way ratchet, like the SHACL corpus) and
   summarised in docs/conformance/sparql11.md. The results are development
   and regression results on this subset, not a W3C conformance claim.
+- Federation runner: `tests/w3c_sparql11_federation.rs` — walks
+  `manifest-sparql11-fed.ttl`, gives every `qt:serviceData` endpoint a local
+  listener (a SPARQL endpoint over a `TripleStore` holding that block's
+  `qt:data`), and substitutes the listeners' URLs for the fixed endpoint IRIs
+  in memory — in queries, data and expected results — so the files here stay
+  byte-identical. Evaluation tests compare solution multisets by result-set
+  isomorphism; syntax tests assert that the query parses. Same ratchet
+  (KNOWN_FAILURES, two-way) and the same rule: no pass count or rate is
+  published.

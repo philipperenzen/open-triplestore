@@ -226,6 +226,13 @@ impl Value {
             Term::NamedNode(n) => Value::Iri(n.clone()),
             Term::BlankNode(b) => Value::Blank(b.as_str().to_string()),
             Term::Literal(l) => {
+                // RDF 1.2 base direction: `Lang` has no room for it, and a
+                // literal rebuilt without it would compare equal to its
+                // undirected twin and report `rdf:langString`.
+                #[cfg(feature = "sparql-12")]
+                if l.direction().is_some() {
+                    return Err(Decline("literal with a base direction"));
+                }
                 if let Some(lang) = l.language() {
                     return Ok(Value::Lang(l.value().to_string(), lang.to_string()));
                 }

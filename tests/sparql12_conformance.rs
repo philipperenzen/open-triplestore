@@ -443,3 +443,63 @@ fn star_new_triple_term_syntax_is_supported() {
         "reifying a triple must not assert it, got {asserted:?}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════
+// Base direction survives the in-memory mirror
+// ═══════════════════════════════════════════════════════════
+
+/// A literal's RDF 1.2 base direction is part of the term: `DATATYPE` is
+/// `rdf:dirLangString`, and `"hello"@en--ltr` is not `"hello"@en`. The same
+/// answers must come back when the in-memory mirror (shards, columnar copy,
+/// full copy) serves the read, as it does by default on the server.
+#[test]
+fn base_direction_survives_the_mirror() {
+    let data = "INSERT DATA { :d1 :dlabel \"hello\"@en--ltr ; :label \"hello\"@en . \
+                :d2 :dlabel \"مرحبا\"@ar--rtl ; :label \"مرحبا\"@ar . }";
+    let engine = TripleStore::in_memory()
+        .unwrap()
+        .with_parallel_query(false, 1, usize::MAX);
+    let mirror = TripleStore::in_memory()
+        .unwrap()
+        .with_parallel_query(true, 4, usize::MAX)
+        .with_parallel_rebuild_quiet_ms(0);
+    upd(&engine, data);
+    upd(&mirror, data);
+
+    let datatypes = "SELECT ?s (DATATYPE(?l) AS ?d) WHERE { ?s :dlabel ?l }";
+    let mut want = sel(&engine, datatypes);
+    want.sort();
+    assert_eq!(
+        want,
+        vec![
+            vec![
+                "<http://ex/d1>".to_string(),
+                "<http://www.w3.org/1999/02/22-rdf-syntax-ns#dirLangString>".to_string()
+            ],
+            vec![
+                "<http://ex/d2>".to_string(),
+                "<http://www.w3.org/1999/02/22-rdf-syntax-ns#dirLangString>".to_string()
+            ],
+        ]
+    );
+    for q in [
+        datatypes,
+        "SELECT ?s ?l WHERE { ?s :dlabel ?l }",
+        "SELECT ?a ?b WHERE { ?a :dlabel ?x . ?b :label ?y FILTER(?x = ?y) }",
+        "SELECT ?s WHERE { ?s :dlabel ?l FILTER(LANG(?l) = \"en\") }",
+        "SELECT (COUNT(*) AS ?c) WHERE { ?s :dlabel ?l FILTER(sameTerm(?l, \"hello\"@en)) }",
+    ] {
+        let mut got = sel(&mirror, q);
+        let mut expected = sel(&engine, q);
+        got.sort();
+        expected.sort();
+        assert_eq!(
+            got, expected,
+            "the mirror diverged from the engine for: {q}"
+        );
+    }
+    assert!(
+        mirror.parallel_build_count() > 0,
+        "the mirror must have been built, else this compared the engine with itself"
+    );
+}

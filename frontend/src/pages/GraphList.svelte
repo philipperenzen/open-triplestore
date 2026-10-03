@@ -468,7 +468,7 @@
         <li><strong>{$t('pages.graphList.infoIriIdentifier')}</strong> — {$t('pages.graphList.infoIriIdentifierDesc')}</li>
         <li><strong>{$t('pages.graphList.infoTripleStorage')}</strong> — {$t('pages.graphList.infoTripleStorageDesc')}</li>
         <li><strong>{$t('pages.graphList.infoSparqlQueries')}</strong> — {$t('pages.graphList.infoSparqlQueriesPre')} <code>GRAPH &lt;iri&gt;</code> {$t('pages.graphList.infoSparqlQueriesPost')}</li>
-        <li><strong>{$t('pages.graphList.infoGraphStoreProtocol')}</strong> — {$t('pages.graphList.infoGraphStoreProtocolPre')} <code>/sparql?graph=&lt;iri&gt;</code> {$t('pages.graphList.infoGraphStoreProtocolPost')}</li>
+        <li><strong>{$t('pages.graphList.infoGraphStoreProtocol')}</strong> — {$t('pages.graphList.infoGraphStoreProtocolPre')} <code>/store?graph=&lt;iri&gt;</code> {$t('pages.graphList.infoGraphStoreProtocolPost')}</li>
         <li><strong>{$t('pages.graphList.infoOwnership')}</strong> — {$t('pages.graphList.infoOwnershipDesc')}</li>
       </ul>
       <Link to="/docs/named-graphs" class="info-docs-link">{$t('pages.graphList.viewFullDocs')}</Link>

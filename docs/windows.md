@@ -8,7 +8,7 @@ Open Triplestore runs on Windows three ways. Pick based on what you're doing:
 | **WSL2 (Ubuntu)** | Developing the Rust backend / frontend | ⭐⭐ easy | All (`full`) |
 | **Native MSVC** | Avoiding WSL/Docker entirely | ⭐⭐⭐ advanced / experimental | Partial (no `saml`) |
 
-The native build depends on the **GEOS** C library (for GeoSPARQL) on every OS, and
+The native build depends on the **GEOS** C library, 3.11 or later (for GeoSPARQL), on every OS, and
 on **libxmlsec1** for the optional `saml` feature. Those are trivial to install on
 Debian/Ubuntu/macOS but awkward under MSVC — which is why **Docker or WSL2 are the
 recommended routes on Windows**.
@@ -154,9 +154,10 @@ Windows out of the box.
 
 ## Option 3 — Native Windows (MSVC) — experimental
 
-A fully native build is possible but unsupported. `--features full` won't work because the
-`saml` feature needs libxml2 + xmlsec1 (painful under MSVC), so you build **without `saml`**.
-Every native build also links the **GEOS** C library (GeoSPARQL), which you supply via vcpkg.
+A fully native build is possible but unsupported. Leave out the optional `saml` feature: it
+needs libxml2 + xmlsec1, which are painful under MSVC — and the default build (`full`) does not
+include it anyway. Every native build links the **GEOS** C library (GeoSPARQL), which you supply
+via vcpkg.
 
 ### Prerequisites — none ship with Windows; install these first
 
@@ -198,11 +199,13 @@ $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"   # bindgen -> oxrocksdb-sys / 
 To persist these across shells, set them under *System → Environment Variables* (or with
 `setx`) instead of the per-session `$env:` assignments.
 
-### 3. Build without `saml` and run
+### 3. Build and run
+
+The default features are `full`, which carries no `saml`. Apart from GEOS (above), its other
+features need no library beyond the toolchain from the prerequisites.
 
 ```powershell
-cargo build --release --no-default-features `
-  --features "rdf-12,owl2-rl,owl2-el,owl2-ql,owl2-dl,text-search,ldp,shex,swrl,asset-pdf,asset-exif,asset-media,asset-archive,asset-spreadsheet,asset-thumbnail,asset-clamav"
+cargo build --release
 .\target\release\open-triplestore.exe --port 7878 --data-dir .\data
 curl.exe http://localhost:7878/health    # -> {"status":"ok",...}
 ```

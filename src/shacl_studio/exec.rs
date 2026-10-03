@@ -645,6 +645,7 @@ fn snapshot_affected_versions(
         let _ = crate::dataset_versions::registry::update_latest_draft(
             store, base_url, &ds_id, &version,
         );
+        crate::rdf_patch_log::on_version_cut(auth_db, base_url, &record, None);
     }
 }
 

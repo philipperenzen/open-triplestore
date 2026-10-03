@@ -1,216 +1,544 @@
-//! SWRL XML/OWL parser using quick-xml.
+//! SWRL rule parsers: OWL/XML `DLSafeRule` and an ad-hoc text form.
 //!
-//! Parses SWRL rules embedded in OWL ontologies (XML serialization).
-//! Supports:
-//! - ClassAtom
-//! - ObjectPropertyAtom / DataPropertyAtom
-//! - SameIndividualAtom / DifferentIndividualsAtom
-//! - BuiltinAtom (math, string, comparison)
-//! - Variables and individual references
+//! The OWL/XML reader ([`parse_swrl`]) is a whitelist state machine. Inside a
+//! `DLSafeRule` every element must be one it understands, in the place the
+//! OWL 2 XML serialization (as written by the OWL API and Protégé) puts it, or
+//! the whole document is refused with an error naming the element. A reader
+//! that skips what it does not know drops atoms, and a rule missing one of its
+//! body atoms fires on bindings its author excluded.
+//!
+//! Understood inside `Body` and `Head`:
+//! - `ClassAtom` over a named `Class`
+//! - `ObjectPropertyAtom` over an `ObjectProperty` or `ObjectInverseOf` (the
+//!   arguments are swapped, so `ObjectInverseOf(p)(?x, ?y)` is `p(?y, ?x)`)
+//! - `DataPropertyAtom`
+//! - `SameIndividualAtom` / `DifferentIndividualsAtom`
+//! - `BuiltInAtom` (the OWL API spelling) and `BuiltinAtom`
+//!
+//! Arguments are `Variable`, `NamedIndividual` and `Literal` (typed,
+//! language-tagged or plain), each checked against its position: an
+//! individual where a data value belongs, or a literal where an individual
+//! belongs, is refused. Refused with a message until later work supports them:
+//! class-expression atoms (a `ClassAtom` over anything but a named class),
+//! `DataRangeAtom`, anonymous individuals, `abbreviatedIRI` on anything but a
+//! variable, and the SWRL RDF/XML (`swrl:Imp`) and RuleML XML syntaxes.
+//! Elements outside a `DLSafeRule` (the rest of an ontology) are ignored, and
+//! so is a rule's `Annotation`.
 //!
 //! The ad-hoc text form ([`parse_swrl_text`], `A(?x) ^ B(?x,?y) -> C(?y)`) is a
 //! convenience shorthand, not a second serialization of the same model. Two
 //! limits follow from [`parse_single_atom`]: every predicate is taken verbatim
 //! as an IRI — there are no prefix declarations — so it must be an absolute
 //! IRI (`http://ex/Person(?x)`; bare names are rejected); and every
-//! two-argument atom becomes an ObjectPropertyAtom, so `swrlb:` builtins cannot
-//! be expressed in the text form at all. Use the OWL/XML form for any rule with
-//! a builtin.
+//! two-argument atom becomes a property atom, so `swrlb:` builtins cannot be
+//! expressed in the text form at all. Use the OWL/XML form for any rule with a
+//! builtin. Nor can the text form say whether a property is an object or a
+//! data property: a two-argument atom whose second argument is a variable is
+//! an untyped [`Atom::PropertyAtom`].
 //!
 //! Both forms refuse a class or property predicate that is not an IRI at parse
 //! time ([`validate_predicate_iri`]): the predicate ends up inside the generated
 //! SPARQL Update, and text is not a place for unchecked input.
 
-use quick_xml::events::Event;
+use std::collections::HashMap;
+
+use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::engine::{validate_predicate_iri, Atom, SwrlArg, SwrlRule};
 
+/// `rdf:PlainLiteral`: OWL 2's plain literal, lexical form `text@lang`.
+const RDF_PLAIN_LITERAL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral";
+
 /// Parse SWRL rules from an OWL/XML document.
+///
+/// Strict: any element inside a `DLSafeRule` the reader does not understand,
+/// in the place it occurs, refuses the whole document (see the module docs).
 pub fn parse_swrl(xml: &str) -> Result<Vec<SwrlRule>, String> {
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
+    // Not trimmed: whitespace inside a `<Literal>` is part of its value.
+    reader.config_mut().trim_text(false);
 
-    let mut rules = Vec::new();
+    let mut parser = OwlXmlRuleParser::default();
     let mut buf = Vec::new();
-    let mut current_rule: Option<RuleBuilder> = None;
-    let mut in_body = false;
-    let mut in_head = false;
-    let mut current_atom: Option<AtomBuilder> = None;
-
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Eof) => break,
-            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                let local_name = local_name(e.name().as_ref());
-                let attrs = collect_attrs(e);
-
-                match local_name.as_str() {
-                    "Imp" | "DLSafeRule" | "Rule" => {
-                        current_rule = Some(RuleBuilder::new());
-                        if let Some(name) = attrs.get("rdf:about").or(attrs.get("IRI")) {
-                            if let Some(ref mut r) = current_rule {
-                                r.name = Some(name.clone());
-                            }
-                        }
-                    }
-                    "body" | "Body" => in_body = true,
-                    "head" | "Head" => in_head = true,
-
-                    // Atom types
-                    "ClassAtom" => {
-                        current_atom = Some(AtomBuilder::Class {
-                            class_iri: None,
-                            arg: None,
-                        });
-                    }
-                    "ObjectPropertyAtom" | "DataPropertyAtom" => {
-                        let is_data = local_name == "DataPropertyAtom";
-                        current_atom = Some(AtomBuilder::Property {
-                            property: None,
-                            arg1: None,
-                            arg2: None,
-                            is_data,
-                        });
-                    }
-                    "SameIndividualAtom" => {
-                        current_atom = Some(AtomBuilder::SameIndividual {
-                            arg1: None,
-                            arg2: None,
-                        });
-                    }
-                    "DifferentIndividualsAtom" => {
-                        current_atom = Some(AtomBuilder::DifferentIndividuals {
-                            arg1: None,
-                            arg2: None,
-                        });
-                    }
-                    "BuiltinAtom" => {
-                        let builtin = attrs
-                            .get("IRI")
-                            .or(attrs.get("rdf:resource"))
-                            .cloned()
-                            .unwrap_or_default();
-                        current_atom = Some(AtomBuilder::Builtin {
-                            builtin,
-                            args: Vec::new(),
-                        });
-                    }
-
-                    // Atom components
-                    "Class" | "classPredicate" => {
-                        if let Some(iri) = attrs.get("IRI").or(attrs.get("rdf:resource")) {
-                            if let Some(AtomBuilder::Class {
-                                ref mut class_iri, ..
-                            }) = current_atom
-                            {
-                                *class_iri = Some(iri.clone());
-                            }
-                        }
-                    }
-                    "ObjectProperty" | "DataProperty" | "propertyPredicate" => {
-                        if let Some(iri) = attrs.get("IRI").or(attrs.get("rdf:resource")) {
-                            if let Some(AtomBuilder::Property {
-                                ref mut property, ..
-                            }) = current_atom
-                            {
-                                *property = Some(iri.clone());
-                            }
-                        }
-                    }
-                    "Variable" => {
-                        if let Some(iri) = attrs.get("IRI").or(attrs.get("rdf:about")) {
-                            let var = SwrlArg::Variable(iri.clone());
-                            set_next_arg(&mut current_atom, var);
-                        }
-                    }
-                    "NamedIndividual" | "IndividualID" => {
-                        if let Some(iri) = attrs.get("IRI").or(attrs.get("rdf:about")) {
-                            let ind = SwrlArg::Individual(iri.clone());
-                            set_next_arg(&mut current_atom, ind);
-                        }
-                    }
-                    "Literal" => {
-                        if let Some(dt) = attrs.get("datatypeIRI") {
-                            // Value will come as text content
-                            let val = SwrlArg::Literal {
-                                value: String::new(),
-                                datatype: Some(dt.clone()),
-                            };
-                            set_next_arg(&mut current_atom, val);
-                        }
-                    }
-                    _ => {}
-                }
+            Ok(Event::Start(ref e)) => parser.open(e)?,
+            Ok(Event::Empty(ref e)) => {
+                parser.open(e)?;
+                parser.close()?;
             }
-            Ok(Event::End(ref e)) => {
-                let local_name = local_name(e.name().as_ref());
-                match local_name.as_str() {
-                    "Imp" | "DLSafeRule" | "Rule" => {
-                        if let Some(builder) = current_rule.take() {
-                            match builder.build() {
-                                Ok(rule) => {
-                                    debug!("Parsed SWRL rule: {:?}", rule.name);
-                                    rules.push(rule);
-                                }
-                                Err(e) => warn!("Skipping malformed SWRL rule: {}", e),
-                            }
-                        }
+            Ok(Event::End(_)) => parser.close()?,
+            Ok(Event::Text(ref e)) => parser.text(&e.xml10_content())?,
+            Ok(Event::CData(ref e)) => parser.text(&e.xml10_content())?,
+            Ok(Event::GeneralRef(ref e)) => {
+                let resolved = match e.resolve_char_ref() {
+                    Ok(Some(c)) => c.to_string(),
+                    Ok(None) => {
+                        let name = e.xml10_content();
+                        quick_xml::escape::resolve_predefined_entity(&name)
+                            .ok_or_else(|| format!("XML parse error: unknown entity &{name};"))?
+                            .to_string()
                     }
-                    "body" | "Body" => {
-                        in_body = false;
-                    }
-                    "head" | "Head" => {
-                        in_head = false;
-                    }
-                    "ClassAtom"
-                    | "ObjectPropertyAtom"
-                    | "DataPropertyAtom"
-                    | "SameIndividualAtom"
-                    | "DifferentIndividualsAtom"
-                    | "BuiltinAtom" => {
-                        if let Some(atom_builder) = current_atom.take() {
-                            // A malformed atom fails the document. Dropping it
-                            // and keeping the rule would run the rule with one
-                            // condition fewer — the same unsoundness as the
-                            // untranslatable-builtin case in the engine.
-                            let atom = atom_builder
-                                .build()
-                                .map_err(|e| format!("Malformed SWRL {local_name}: {e}"))?;
-                            if let Some(ref mut rule) = current_rule {
-                                if in_body {
-                                    rule.body.push(atom);
-                                } else if in_head {
-                                    rule.head.push(atom);
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Ok(Event::Text(e)) => {
-                // Handle literal text content
-                if let Ok(text) =
-                    quick_xml::escape::unescape(&e.into_inner()).map(|u| u.into_owned())
-                {
-                    let text = text.to_string();
-                    if !text.trim().is_empty() {
-                        // Update the last literal arg with its value
-                        if let Some(ref mut atom) = current_atom {
-                            update_last_literal(atom, &text);
-                        }
-                    }
-                }
+                    Err(err) => return Err(format!("XML parse error: {err}")),
+                };
+                parser.text(&resolved)?
             }
             Err(e) => return Err(format!("XML parse error: {}", e)),
             _ => {}
         }
         buf.clear();
     }
+    Ok(parser.rules)
+}
 
-    Ok(rules)
+/// What an argument position accepts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArgSort {
+    /// An individual: `Variable` or `NamedIndividual`.
+    Individual,
+    /// A data value: `Variable` or `Literal`.
+    Data,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AtomKind {
+    Class,
+    ObjectProperty,
+    DataProperty,
+    SameIndividual,
+    DifferentIndividuals,
+    Builtin,
+}
+
+impl AtomKind {
+    fn from_element(name: &str) -> Option<Self> {
+        Some(match name {
+            "ClassAtom" => AtomKind::Class,
+            "ObjectPropertyAtom" => AtomKind::ObjectProperty,
+            "DataPropertyAtom" => AtomKind::DataProperty,
+            "SameIndividualAtom" => AtomKind::SameIndividual,
+            "DifferentIndividualsAtom" => AtomKind::DifferentIndividuals,
+            // The OWL API and Protégé write `BuiltInAtom`; `BuiltinAtom` is
+            // accepted as well, as earlier releases of this reader read only it.
+            "BuiltInAtom" | "BuiltinAtom" => AtomKind::Builtin,
+            _ => return None,
+        })
+    }
+
+    /// The sort of argument `index` (0-based), or `None` past the last one.
+    fn arg_sort(self, index: usize) -> Option<ArgSort> {
+        use ArgSort::*;
+        let sorts: &[ArgSort] = match self {
+            AtomKind::Class => &[Individual],
+            AtomKind::ObjectProperty
+            | AtomKind::SameIndividual
+            | AtomKind::DifferentIndividuals => &[Individual, Individual],
+            AtomKind::DataProperty => &[Individual, Data],
+            // Built-in arguments are data values, as many as the built-in takes.
+            AtomKind::Builtin => return Some(Data),
+        };
+        sorts.get(index).copied()
+    }
+
+    /// Whether the atom starts with a predicate element (class or property).
+    fn has_predicate_element(self) -> bool {
+        matches!(
+            self,
+            AtomKind::Class | AtomKind::ObjectProperty | AtomKind::DataProperty
+        )
+    }
+}
+
+struct AtomBuilder {
+    kind: AtomKind,
+    element: String,
+    /// Class or property IRI (from a child element), or the built-in IRI.
+    predicate: Option<String>,
+    /// `ObjectInverseOf(p)`: the arguments are swapped when the atom is built.
+    inverse: bool,
+    args: Vec<SwrlArg>,
+}
+
+impl AtomBuilder {
+    fn build(self) -> Result<Atom, String> {
+        let el = &self.element;
+        if self.kind == AtomKind::Builtin {
+            if self.args.is_empty() {
+                return Err(format!("{el} needs at least one argument"));
+            }
+            return Ok(Atom::BuiltinAtom {
+                builtin: self
+                    .predicate
+                    .ok_or_else(|| format!("{el} missing IRI attribute"))?,
+                args: self.args,
+            });
+        }
+        let wanted = if self.kind == AtomKind::Class { 1 } else { 2 };
+        if self.args.len() != wanted {
+            return Err(format!(
+                "{el} needs {wanted} argument(s), found {}",
+                self.args.len()
+            ));
+        }
+        let mut args = self.args.into_iter();
+        let (a, b) = (args.next(), args.next());
+        let a = a.expect("arity checked above");
+        Ok(match self.kind {
+            AtomKind::Class => {
+                let class_iri = self.predicate.ok_or("ClassAtom missing class IRI")?;
+                validate_predicate_iri(&class_iri, "class")?;
+                Atom::ClassAtom { class_iri, arg: a }
+            }
+            AtomKind::ObjectProperty | AtomKind::DataProperty => {
+                let property = self
+                    .predicate
+                    .ok_or_else(|| format!("{el} missing property IRI"))?;
+                validate_predicate_iri(&property, "property")?;
+                let b = b.expect("arity checked above");
+                // ObjectInverseOf(p)(x, y) holds exactly when p(y, x) does.
+                let (arg1, arg2) = if self.inverse { (b, a) } else { (a, b) };
+                if self.kind == AtomKind::DataProperty {
+                    Atom::DataPropertyAtom {
+                        property,
+                        arg1,
+                        arg2,
+                    }
+                } else {
+                    Atom::ObjectPropertyAtom {
+                        property,
+                        arg1,
+                        arg2,
+                    }
+                }
+            }
+            AtomKind::SameIndividual => Atom::SameIndividualAtom {
+                arg1: a,
+                arg2: b.expect("arity checked above"),
+            },
+            AtomKind::DifferentIndividuals => Atom::DifferentIndividualsAtom {
+                arg1: a,
+                arg2: b.expect("arity checked above"),
+            },
+            AtomKind::Builtin => unreachable!("handled above"),
+        })
+    }
+}
+
+#[derive(Default)]
+struct RuleBuilder {
+    name: Option<String>,
+    body: Option<Vec<Atom>>,
+    head: Option<Vec<Atom>>,
+}
+
+impl RuleBuilder {
+    fn build(self) -> Result<SwrlRule, String> {
+        let body = self.body.ok_or("DLSafeRule has no Body")?;
+        let head = self.head.ok_or("DLSafeRule has no Head")?;
+        if head.is_empty() {
+            return Err("DLSafeRule has an empty Head".to_string());
+        }
+        Ok(SwrlRule {
+            name: self.name,
+            body,
+            head,
+        })
+    }
+}
+
+/// One open element. The stack of these is the parser's state.
+enum Frame {
+    /// An element outside any rule: the rest of the ontology.
+    Outside,
+    /// A subtree inside a rule that carries no rule content (`Annotation`).
+    Skip,
+    Rule(RuleBuilder),
+    Atoms {
+        head: bool,
+    },
+    Atom(AtomBuilder),
+    InverseOf,
+    Literal {
+        value: String,
+        datatype: Option<String>,
+        language: Option<String>,
+    },
+    /// An element that may hold nothing (`Class`, `Variable`, …).
+    Leaf(String),
+}
+
+#[derive(Default)]
+struct OwlXmlRuleParser {
+    stack: Vec<Frame>,
+    rules: Vec<SwrlRule>,
+}
+
+impl OwlXmlRuleParser {
+    fn open(&mut self, e: &BytesStart) -> Result<(), String> {
+        let name = local_name(e.name().as_ref());
+        let attrs = collect_attrs(e)?;
+        let frame = match self.stack.last_mut() {
+            None | Some(Frame::Outside) => match name.as_str() {
+                "DLSafeRule" => Frame::Rule(RuleBuilder {
+                    name: attrs.get("IRI").cloned(),
+                    ..RuleBuilder::default()
+                }),
+                "Imp" | "imp" => {
+                    return Err(format!(
+                        "<{name}> is the SWRL RDF/XML or RuleML XML syntax, which format \
+                         \"xml\" does not read yet; it reads OWL/XML DLSafeRule elements"
+                    ))
+                }
+                _ => Frame::Outside,
+            },
+            Some(Frame::Skip) => Frame::Skip,
+            Some(Frame::Rule(rule)) => match name.as_str() {
+                "Annotation" => Frame::Skip,
+                "Body" | "Head" => {
+                    let head = name == "Head";
+                    let slot = if head { &mut rule.head } else { &mut rule.body };
+                    if slot.is_some() {
+                        return Err(format!("DLSafeRule has more than one <{name}>"));
+                    }
+                    *slot = Some(Vec::new());
+                    Frame::Atoms { head }
+                }
+                _ => return Err(format!("Unexpected element <{name}> in DLSafeRule")),
+            },
+            Some(Frame::Atoms { head }) => {
+                let place = if *head { "Head" } else { "Body" };
+                match AtomKind::from_element(&name) {
+                    Some(kind) => {
+                        let predicate = if kind == AtomKind::Builtin {
+                            Some(iri_attr(&attrs, &name)?)
+                        } else {
+                            None
+                        };
+                        Frame::Atom(AtomBuilder {
+                            kind,
+                            element: name,
+                            predicate,
+                            inverse: false,
+                            args: Vec::new(),
+                        })
+                    }
+                    None if name == "DataRangeAtom" => {
+                        return Err(
+                            "DataRangeAtom is not supported yet; refusing the document rather \
+                             than running its rule without that condition"
+                                .to_string(),
+                        )
+                    }
+                    None => {
+                        return Err(format!(
+                            "Unknown SWRL atom <{name}> in {place}; refusing the document \
+                             rather than running its rule without that atom"
+                        ))
+                    }
+                }
+            }
+            Some(Frame::Atom(atom)) => open_in_atom(atom, &name, &attrs)?,
+            Some(Frame::InverseOf) => {
+                let Some(Frame::Atom(atom)) = self.stack.iter_mut().rev().nth(1) else {
+                    unreachable!("ObjectInverseOf is only opened inside an atom");
+                };
+                match name.as_str() {
+                    "ObjectProperty" if atom.predicate.is_none() => {
+                        atom.predicate = Some(iri_attr(&attrs, &name)?);
+                        Frame::Leaf(name)
+                    }
+                    _ => {
+                        return Err(format!(
+                            "ObjectInverseOf must hold exactly one ObjectProperty, found <{name}>"
+                        ))
+                    }
+                }
+            }
+            Some(Frame::Literal { .. }) => {
+                return Err(format!("Unexpected element <{name}> inside <Literal>"))
+            }
+            Some(Frame::Leaf(parent)) => {
+                return Err(format!("Unexpected element <{name}> inside <{parent}>"))
+            }
+        };
+        self.stack.push(frame);
+        Ok(())
+    }
+
+    fn close(&mut self) -> Result<(), String> {
+        match self.stack.pop() {
+            Some(Frame::Rule(builder)) => {
+                let rule = builder.build()?;
+                debug!("Parsed SWRL rule: {:?}", rule.name);
+                self.rules.push(rule);
+            }
+            Some(Frame::Atom(builder)) => {
+                let element = builder.element.clone();
+                let atom = builder
+                    .build()
+                    .map_err(|e| format!("Malformed SWRL {element}: {e}"))?;
+                let head = match self.stack.last() {
+                    Some(Frame::Atoms { head }) => *head,
+                    _ => unreachable!("atoms are only opened inside Body or Head"),
+                };
+                let Some(Frame::Rule(rule)) = self.stack.iter_mut().rev().nth(1) else {
+                    unreachable!("Body and Head are only opened inside a rule");
+                };
+                let slot = if head { &mut rule.head } else { &mut rule.body };
+                slot.get_or_insert_with(Vec::new).push(atom);
+            }
+            Some(Frame::InverseOf) => {
+                let Some(Frame::Atom(atom)) = self.stack.last() else {
+                    unreachable!("ObjectInverseOf is only opened inside an atom");
+                };
+                if atom.predicate.is_none() {
+                    return Err("ObjectInverseOf must hold exactly one ObjectProperty".to_string());
+                }
+            }
+            Some(Frame::Literal {
+                value,
+                datatype,
+                language,
+            }) => {
+                let Some(Frame::Atom(atom)) = self.stack.last_mut() else {
+                    unreachable!("a Literal is only opened inside an atom");
+                };
+                atom.args.push(literal_arg(value, datatype, language));
+            }
+            Some(_) => {}
+            None => return Err("XML parse error: unbalanced end tag".to_string()),
+        }
+        Ok(())
+    }
+
+    fn text(&mut self, text: &str) -> Result<(), String> {
+        match self.stack.last_mut() {
+            Some(Frame::Literal { value, .. }) => {
+                value.push_str(text);
+                Ok(())
+            }
+            None | Some(Frame::Outside) | Some(Frame::Skip) => Ok(()),
+            Some(_) if text.trim().is_empty() => Ok(()),
+            Some(_) => Err(format!(
+                "Unexpected text '{}' inside a SWRL rule",
+                text.trim()
+            )),
+        }
+    }
+}
+
+/// The child elements an atom may hold: its predicate element first (class or
+/// property), then its arguments, each checked against the sort its position
+/// takes.
+fn open_in_atom(
+    atom: &mut AtomBuilder,
+    name: &str,
+    attrs: &HashMap<String, String>,
+) -> Result<Frame, String> {
+    let el = atom.element.clone();
+    if atom.kind.has_predicate_element() && atom.predicate.is_none() {
+        let expected = match atom.kind {
+            AtomKind::Class => "Class",
+            AtomKind::ObjectProperty => "ObjectProperty",
+            _ => "DataProperty",
+        };
+        if name == expected {
+            atom.predicate = Some(iri_attr(attrs, name)?);
+            return Ok(Frame::Leaf(name.to_string()));
+        }
+        if atom.kind == AtomKind::ObjectProperty && name == "ObjectInverseOf" {
+            atom.inverse = true;
+            return Ok(Frame::InverseOf);
+        }
+        if atom.kind == AtomKind::Class && (name.starts_with("Object") || name.starts_with("Data"))
+        {
+            return Err(format!(
+                "ClassAtom over the class expression <{name}> is not supported yet; only a \
+                 named <Class> is. Refusing the document rather than reading the expression \
+                 as a different condition"
+            ));
+        }
+        return Err(format!("{el} must start with <{expected}>, found <{name}>"));
+    }
+
+    let index = atom.args.len();
+    let sort = atom
+        .kind
+        .arg_sort(index)
+        .ok_or_else(|| format!("{el} takes {index} argument(s); <{name}> would be one more"))?;
+    let position = format!("argument {} of {el}", index + 1);
+    match name {
+        "Variable" => {
+            let var = attrs
+                .get("IRI")
+                .or(attrs.get("abbreviatedIRI"))
+                .filter(|v| !v.is_empty())
+                .ok_or("Variable without an IRI")?;
+            atom.args.push(SwrlArg::Variable(var.clone()));
+            Ok(Frame::Leaf(name.to_string()))
+        }
+        "NamedIndividual" if sort == ArgSort::Individual => {
+            atom.args.push(SwrlArg::Individual(iri_attr(attrs, name)?));
+            Ok(Frame::Leaf(name.to_string()))
+        }
+        "Literal" if sort == ArgSort::Data => Ok(Frame::Literal {
+            value: String::new(),
+            datatype: attrs.get("datatypeIRI").cloned(),
+            language: attrs.get("xml:lang").cloned(),
+        }),
+        "NamedIndividual" => Err(format!(
+            "{position} takes a data value (Variable or Literal), found <NamedIndividual>"
+        )),
+        "Literal" => Err(format!(
+            "{position} takes an individual (Variable or NamedIndividual), found <Literal>"
+        )),
+        "AnonymousIndividual" => Err(format!(
+            "{position} is an AnonymousIndividual, which rules do not support"
+        )),
+        _ => Err(format!("Unexpected element <{name}> as {position}")),
+    }
+}
+
+/// The `IRI` attribute of a class, property, individual or built-in element.
+fn iri_attr(attrs: &HashMap<String, String>, element: &str) -> Result<String, String> {
+    if let Some(iri) = attrs.get("IRI") {
+        return Ok(iri.clone());
+    }
+    if let Some(short) = attrs.get("abbreviatedIRI") {
+        return Err(format!(
+            "<{element} abbreviatedIRI=\"{short}\">: prefixed names are not supported yet; \
+             write the full IRI"
+        ));
+    }
+    Err(format!("<{element}> without an IRI attribute"))
+}
+
+/// An OWL/XML `Literal`: typed, language-tagged, or plain. An
+/// `rdf:PlainLiteral` carries its language after the last `@` of its text.
+fn literal_arg(value: String, datatype: Option<String>, language: Option<String>) -> SwrlArg {
+    match datatype.as_deref() {
+        Some(RDF_PLAIN_LITERAL) => {
+            let (text, lang) = value.rsplit_once('@').unwrap_or((&value, ""));
+            SwrlArg::Literal {
+                value: text.to_string(),
+                datatype: None,
+                language: (!lang.is_empty()).then(|| lang.to_string()),
+            }
+        }
+        _ if language.is_some() => SwrlArg::Literal {
+            value,
+            datatype: None,
+            language,
+        },
+        _ => SwrlArg::Literal {
+            value,
+            datatype,
+            language: None,
+        },
+    }
 }
 
 /// Also parse from a simpler text-based rule format (non-XML):
@@ -277,6 +605,7 @@ fn parse_single_atom(input: &str) -> Result<Atom, String> {
                 SwrlArg::Literal {
                     value: a.trim_matches('"').to_string(),
                     datatype: None,
+                    language: None,
                 }
             } else {
                 SwrlArg::Individual(a.to_string())
@@ -289,151 +618,31 @@ fn parse_single_atom(input: &str) -> Result<Atom, String> {
             class_iri: predicate.to_string(),
             arg: args[0].clone(),
         }),
-        2 => Ok(Atom::ObjectPropertyAtom {
-            property: predicate.to_string(),
-            arg1: args[0].clone(),
-            arg2: args[1].clone(),
-        }),
+        // The text form has no property declarations. A constant second
+        // argument says which kind of property this is; a variable does not,
+        // so the atom stays untyped and matches either kind of value.
+        2 => {
+            let property = predicate.to_string();
+            let (arg1, arg2) = (args[0].clone(), args[1].clone());
+            Ok(match arg2 {
+                SwrlArg::Literal { .. } => Atom::DataPropertyAtom {
+                    property,
+                    arg1,
+                    arg2,
+                },
+                SwrlArg::Individual(_) => Atom::ObjectPropertyAtom {
+                    property,
+                    arg1,
+                    arg2,
+                },
+                SwrlArg::Variable(_) => Atom::PropertyAtom {
+                    property,
+                    arg1,
+                    arg2,
+                },
+            })
+        }
         _ => Err(format!("Unexpected number of arguments in atom: {}", input)),
-    }
-}
-
-// ── Helper types ────────────────────────────────────────────────────────
-
-enum AtomBuilder {
-    Class {
-        class_iri: Option<String>,
-        arg: Option<SwrlArg>,
-    },
-    Property {
-        property: Option<String>,
-        arg1: Option<SwrlArg>,
-        arg2: Option<SwrlArg>,
-        is_data: bool,
-    },
-    SameIndividual {
-        arg1: Option<SwrlArg>,
-        arg2: Option<SwrlArg>,
-    },
-    DifferentIndividuals {
-        arg1: Option<SwrlArg>,
-        arg2: Option<SwrlArg>,
-    },
-    Builtin {
-        builtin: String,
-        args: Vec<SwrlArg>,
-    },
-}
-
-impl AtomBuilder {
-    fn build(self) -> Result<Atom, String> {
-        match self {
-            AtomBuilder::Class { class_iri, arg } => {
-                let class_iri = class_iri.ok_or("ClassAtom missing class IRI")?;
-                validate_predicate_iri(&class_iri, "class")?;
-                Ok(Atom::ClassAtom {
-                    class_iri,
-                    arg: arg.ok_or("ClassAtom missing argument")?,
-                })
-            }
-            AtomBuilder::Property {
-                property,
-                arg1,
-                arg2,
-                is_data,
-            } => {
-                let prop = property.ok_or("PropertyAtom missing property IRI")?;
-                validate_predicate_iri(&prop, "property")?;
-                let a1 = arg1.ok_or("PropertyAtom missing first argument")?;
-                let a2 = arg2.ok_or("PropertyAtom missing second argument")?;
-                if is_data {
-                    Ok(Atom::DataPropertyAtom {
-                        property: prop,
-                        arg1: a1,
-                        arg2: a2,
-                    })
-                } else {
-                    Ok(Atom::ObjectPropertyAtom {
-                        property: prop,
-                        arg1: a1,
-                        arg2: a2,
-                    })
-                }
-            }
-            AtomBuilder::SameIndividual { arg1, arg2 } => Ok(Atom::SameIndividualAtom {
-                arg1: arg1.ok_or("SameIndividualAtom missing first argument")?,
-                arg2: arg2.ok_or("SameIndividualAtom missing second argument")?,
-            }),
-            AtomBuilder::DifferentIndividuals { arg1, arg2 } => {
-                Ok(Atom::DifferentIndividualsAtom {
-                    arg1: arg1.ok_or("DifferentIndividualsAtom missing first argument")?,
-                    arg2: arg2.ok_or("DifferentIndividualsAtom missing second argument")?,
-                })
-            }
-            AtomBuilder::Builtin { builtin, args } => Ok(Atom::BuiltinAtom { builtin, args }),
-        }
-    }
-}
-
-fn set_next_arg(atom: &mut Option<AtomBuilder>, arg: SwrlArg) {
-    match atom {
-        Some(AtomBuilder::Class {
-            arg: ref mut class_arg,
-            ..
-        }) if class_arg.is_none() => *class_arg = Some(arg),
-        Some(AtomBuilder::Property {
-            ref mut arg1,
-            ref mut arg2,
-            ..
-        }) => {
-            if arg1.is_none() {
-                *arg1 = Some(arg);
-            } else if arg2.is_none() {
-                *arg2 = Some(arg);
-            }
-        }
-        Some(AtomBuilder::SameIndividual {
-            ref mut arg1,
-            ref mut arg2,
-            ..
-        })
-        | Some(AtomBuilder::DifferentIndividuals {
-            ref mut arg1,
-            ref mut arg2,
-            ..
-        }) => {
-            if arg1.is_none() {
-                *arg1 = Some(arg);
-            } else if arg2.is_none() {
-                *arg2 = Some(arg);
-            }
-        }
-        Some(AtomBuilder::Builtin { ref mut args, .. }) => {
-            args.push(arg);
-        }
-        _ => {}
-    }
-}
-
-fn update_last_literal(atom: &mut AtomBuilder, text: &str) {
-    let update = |arg: &mut Option<SwrlArg>| {
-        if let Some(SwrlArg::Literal { ref mut value, .. }) = arg {
-            if value.is_empty() {
-                *value = text.to_string();
-            }
-        }
-    };
-    match atom {
-        AtomBuilder::Class { ref mut arg, .. } => update(arg),
-        AtomBuilder::Property { ref mut arg2, .. } => update(arg2),
-        AtomBuilder::Builtin { ref mut args, .. } => {
-            if let Some(SwrlArg::Literal { ref mut value, .. }) = args.last_mut() {
-                if value.is_empty() {
-                    *value = text.to_string();
-                }
-            }
-        }
-        _ => {}
     }
 }
 
@@ -443,42 +652,19 @@ fn local_name(name: &str) -> String {
         .unwrap_or_else(|| name.to_string())
 }
 
-fn collect_attrs(e: &quick_xml::events::BytesStart) -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-    for attr in e.attributes().flatten() {
+/// The element's attributes. A malformed attribute fails the document rather
+/// than vanishing: an `IRI` that silently went missing would change the rule.
+fn collect_attrs(e: &BytesStart) -> Result<HashMap<String, String>, String> {
+    let mut map = HashMap::new();
+    for attr in e.attributes() {
+        let attr = attr.map_err(|err| format!("XML parse error: {err}"))?;
         let key = attr.key.as_ref().to_string();
-        if let Ok(val) = attr.normalized_value(quick_xml::XmlVersion::Explicit1_0) {
-            map.insert(key, val.to_string());
-        }
+        let val = attr
+            .normalized_value(quick_xml::XmlVersion::Explicit1_0)
+            .map_err(|err| format!("XML parse error in attribute {key}: {err}"))?;
+        map.insert(key, val.to_string());
     }
-    map
-}
-
-struct RuleBuilder {
-    name: Option<String>,
-    body: Vec<Atom>,
-    head: Vec<Atom>,
-}
-
-impl RuleBuilder {
-    fn new() -> Self {
-        RuleBuilder {
-            name: None,
-            body: Vec::new(),
-            head: Vec::new(),
-        }
-    }
-
-    fn build(self) -> Result<SwrlRule, String> {
-        if self.body.is_empty() && self.head.is_empty() {
-            return Err("Rule has no body or head".to_string());
-        }
-        Ok(SwrlRule {
-            name: self.name,
-            body: self.body,
-            head: self.head,
-        })
-    }
+    Ok(map)
 }
 
 #[cfg(test)]
@@ -531,7 +717,11 @@ http://ex/Parent(?x) ^ http://ex/hasChild(?x, ?y) -> http://ex/hasParent(?y, ?x)
         assert!(matches!(atom, Atom::ClassAtom { .. }));
 
         let atom = parse_single_atom("http://ex/knows(?x, ?y)").unwrap();
+        assert!(matches!(atom, Atom::PropertyAtom { .. }));
+        let atom = parse_single_atom("http://ex/knows(?x, http://ex/b)").unwrap();
         assert!(matches!(atom, Atom::ObjectPropertyAtom { .. }));
+        let atom = parse_single_atom("http://ex/name(?x, \"Bo\")").unwrap();
+        assert!(matches!(atom, Atom::DataPropertyAtom { .. }));
     }
 
     /// Predicates are validated where they are read. A bare name is a relative
@@ -571,5 +761,119 @@ http://ex/Parent(?x) ^ http://ex/hasChild(?x, ?y) -> http://ex/hasParent(?y, ?x)
 </Ontology>"#;
         let err = parse_swrl(xml).unwrap_err();
         assert!(err.contains("Invalid SWRL property IRI"), "{err}");
+    }
+
+    /// What the OWL API writes around a rule — the ontology's other axioms, a
+    /// rule annotation, an XML-escaped literal — is read or skipped, and every
+    /// literal form keeps its value, datatype or language.
+    #[test]
+    fn xml_form_reads_owl_api_output() {
+        let xml = r#"<?xml version="1.0"?>
+<Ontology xmlns="http://www.w3.org/2002/07/owl#" ontologyIRI="http://ex/o">
+    <Declaration><Class IRI="http://ex/Person"/></Declaration>
+    <DLSafeRule>
+        <Annotation>
+            <AnnotationProperty abbreviatedIRI="rdfs:label"/>
+            <Literal>adults</Literal>
+        </Annotation>
+        <Body>
+            <DataPropertyAtom>
+                <DataProperty IRI="http://ex/name"/>
+                <Variable IRI="urn:swrl#x"/>
+                <Literal xml:lang="en"> A &amp; B </Literal>
+            </DataPropertyAtom>
+            <DataPropertyAtom>
+                <DataProperty IRI="http://ex/code"/>
+                <Variable IRI="urn:swrl#x"/>
+                <Literal datatypeIRI="http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral">x@nl</Literal>
+            </DataPropertyAtom>
+            <DataPropertyAtom>
+                <DataProperty IRI="http://ex/tag"/>
+                <Variable IRI="urn:swrl#x"/>
+                <Literal/>
+            </DataPropertyAtom>
+        </Body>
+        <Head>
+            <ClassAtom>
+                <Class IRI="http://ex/Agent"/>
+                <Variable IRI="urn:swrl#x"/>
+            </ClassAtom>
+        </Head>
+    </DLSafeRule>
+</Ontology>"#;
+        let rules = parse_swrl(xml).unwrap();
+        assert_eq!(rules.len(), 1);
+        let values: Vec<_> = rules[0]
+            .body
+            .iter()
+            .map(|a| match a {
+                Atom::DataPropertyAtom {
+                    arg2:
+                        SwrlArg::Literal {
+                            value,
+                            datatype,
+                            language,
+                        },
+                    ..
+                } => (value.clone(), datatype.clone(), language.clone()),
+                other => panic!("unexpected atom {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            values,
+            vec![
+                (" A & B ".to_string(), None, Some("en".to_string())),
+                ("x".to_string(), None, Some("nl".to_string())),
+                (String::new(), None, None),
+            ]
+        );
+    }
+
+    /// Strictness at the edges: an extra argument, a missing Head, the RDF/XML
+    /// syntax, a prefixed class name and text where none belongs all refuse
+    /// the document.
+    #[test]
+    fn xml_form_refuses_what_it_cannot_read() {
+        let rule = |body: &str, head: &str| {
+            format!(
+                r#"<Ontology xmlns="http://www.w3.org/2002/07/owl#"><DLSafeRule>{body}{head}</DLSafeRule></Ontology>"#
+            )
+        };
+        let head = r#"<Head><ClassAtom><Class IRI="http://ex/B"/><Variable IRI="urn:v#x"/></ClassAtom></Head>"#;
+        let cases = [
+            (
+                rule(
+                    r#"<Body><ClassAtom><Class IRI="http://ex/A"/><Variable IRI="urn:v#x"/><Variable IRI="urn:v#y"/></ClassAtom></Body>"#,
+                    head,
+                ),
+                "one more",
+            ),
+            (
+                rule(r#"<Body/>"#, ""),
+                "no Head",
+            ),
+            (
+                rule(
+                    r#"<Body><ClassAtom><Class abbreviatedIRI="ex:A"/><Variable IRI="urn:v#x"/></ClassAtom></Body>"#,
+                    head,
+                ),
+                "abbreviatedIRI",
+            ),
+            (
+                rule(
+                    r#"<Body><ClassAtom>stray<Class IRI="http://ex/A"/><Variable IRI="urn:v#x"/></ClassAtom></Body>"#,
+                    head,
+                ),
+                "Unexpected text",
+            ),
+            (
+                r#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:swrl="http://www.w3.org/2003/11/swrl#"><swrl:Imp/></rdf:RDF>"#.to_string(),
+                "RDF/XML",
+            ),
+        ];
+        for (xml, wanted) in cases {
+            let err = parse_swrl(&xml).expect_err(&xml);
+            assert!(err.contains(wanted), "expected '{wanted}' in: {err}");
+        }
     }
 }

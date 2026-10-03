@@ -299,6 +299,8 @@ pub async fn create_shape_graph(
         .map(ShapeSource::from_str_or_manual)
         .unwrap_or(ShapeSource::Manual);
     let turtle = body.turtle.unwrap_or_else(|| EMPTY_SHAPES.to_string());
+    crate::shacl::lint::check_activation_flags(&turtle)
+        .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e))?;
     let set = create_shape_graph_from_turtle(
         &state,
         &user,
@@ -587,6 +589,8 @@ pub async fn put_shape_graph_turtle(
     } else {
         raw
     };
+    crate::shacl::lint::check_activation_flags(&turtle)
+        .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e))?;
     // Every history entry used to read "Edited": the note was hard-coded here.
     let note = q.get("message").and_then(|m| revision_note(m));
     let version = write_shapes_revision(

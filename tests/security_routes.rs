@@ -384,3 +384,97 @@ async fn viewer_diff_hides_private_snapshot_graphs() {
         "the owner must still see the private source graph in the diff, body: {json}"
     );
 }
+
+// ─── Padded version labels (CB5, part 3) ─────────────────────────────────────
+//
+// The dataset service trimmed `version` before resolving the snapshot graphs but
+// handed the raw label to the private filter. The registry refuses a label with
+// whitespace, so the filter found no version, withheld nothing, and a viewer read
+// every snapshot graph — private ones included — through `?version=1.0.0%20`.
+// Both lookups now use one trimmed label, and the filter refuses a pinned version
+// it cannot read rather than withholding nothing.
+
+/// `1.0.0` padded with whitespace, spelled as in a URL query or a form body
+/// (where `+` is a space).
+const PADDED_VERSIONS: [&str; 5] = [
+    "1.0.0%20",
+    "%201.0.0",
+    "1.0.0+",
+    "%091.0.0%0A",
+    "%20%201.0.0%20%20",
+];
+
+/// CB5 — dataset-service `?version=` with a padded label: it still pins `1.0.0`
+/// (the public snapshot graph is what gets listed), and the private snapshot
+/// stays withheld from the viewer.
+#[tokio::test]
+async fn viewer_cannot_read_private_snapshot_via_padded_version_param() {
+    let (app, record) = setup();
+    let priv_snap = snapshot_iri_for(&record, PRIV_GRAPH);
+    let pub_snap = snapshot_iri_for(&record, PUB_GRAPH);
+    let select = url_encode("SELECT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } }");
+    let listing = url_encode("SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }");
+
+    for padded in PADDED_VERSIONS {
+        let (status, body) = get(
+            &app,
+            &format!("/api/datasets/ds1/services/default/sparql?query={select}&version={padded}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "version={padded}: {body}");
+        assert!(
+            body.contains(PUBLIC_MARKER),
+            "version={padded}: the public snapshot triple must be visible, body: {body}"
+        );
+        assert!(
+            !body.contains(PRIVATE_MARKER),
+            "version={padded}: the private snapshot triple must NOT leak, body: {body}"
+        );
+
+        let (status, body) = get(
+            &app,
+            &format!("/api/datasets/ds1/services/default/sparql?query={listing}&version={padded}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "version={padded}: {body}");
+        assert!(
+            body.contains(&pub_snap),
+            "version={padded}: the pinned version's public snapshot must be listed, body: {body}"
+        );
+        assert!(
+            !body.contains(&priv_snap),
+            "version={padded}: the private snapshot graph must NOT be listed, body: {body}"
+        );
+    }
+}
+
+/// CB5 — the same through a POST form body, whose `version` overrides the URL's.
+#[tokio::test]
+async fn viewer_cannot_read_private_snapshot_via_padded_form_version() {
+    let (app, _record) = setup();
+    let select = url_encode("SELECT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } }");
+
+    for padded in PADDED_VERSIONS {
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/datasets/ds1/services/default/sparql")
+            .header(
+                axum::http::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(Body::from(format!("query={select}&version={padded}")))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let body = body_text(resp.into_body()).await;
+        assert_eq!(status, StatusCode::OK, "version={padded}: {body}");
+        assert!(
+            body.contains(PUBLIC_MARKER),
+            "version={padded}: the public snapshot triple must be visible, body: {body}"
+        );
+        assert!(
+            !body.contains(PRIVATE_MARKER),
+            "version={padded}: the private snapshot triple must NOT leak, body: {body}"
+        );
+    }
+}

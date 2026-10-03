@@ -344,6 +344,24 @@ impl SourceConnection for MysqlConnection {
         Ok(rows)
     }
 
+    fn columns(&mut self, query: &str) -> Result<Option<Vec<String>>, SourceError> {
+        // A server-side prepare describes the result without running it. Not
+        // every statement can be prepared on every server, and a statement
+        // that cannot is not thereby wrong: the stream will say so if it is.
+        match self.conn.prep(query) {
+            Ok(stmt) => {
+                let names = stmt
+                    .columns()
+                    .iter()
+                    .map(|c| c.name_str().into_owned())
+                    .collect();
+                let _ = self.conn.close(stmt);
+                Ok(Some(names))
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
     fn stream(
         &mut self,
         query: &str,

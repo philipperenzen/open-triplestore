@@ -10,13 +10,16 @@
   import ConfirmHost from './components/ConfirmHost.svelte';
   import SearchBar from './components/SearchBar.svelte';
   import LoadingLogo from './components/LoadingLogo.svelte';
+  import FeedbackDialog from './components/FeedbackDialog.svelte';
+  import { openFeedback } from './lib/feedback.ts';
 
   import {
     Home as HomeIcon, Search as SearchIcon,
     Upload, Database, DatabaseZap, Building2, BookOpen, HelpCircle, Library,
     LogIn, LogOut, UserPlus, Menu, X, Globe, AlertTriangle, RefreshCw,
     Settings as SettingsIcon, Users as UsersIcon, Shield, FolderOpen,
-    Share2, Terminal, CheckCircle2, Network, FileCode, Sparkles, Sun, Moon, Activity, Gauge, Tags
+    Share2, Terminal, CheckCircle2, Network, FileCode, Sparkles, Sun, Moon, Activity, Gauge, Tags,
+    MessageSquarePlus, MessageSquareText
   } from 'lucide-svelte';
   import { isDark, toggleTheme } from './lib/theme.js';
   import { runtimeBranding } from './lib/runtimeConfig.js';
@@ -65,6 +68,7 @@
   const lazyAdminPrefixes       = () => import('./pages/AdminPrefixes.svelte');
   const lazyAdminOperations     = () => import('./pages/AdminOperations.svelte');
   const lazyAdminLlm            = () => import('./pages/AdminLlm.svelte');
+  const lazyAdminFeedback       = () => import('./pages/AdminFeedback.svelte');
   const lazyDocEditor           = () => import('./pages/DocEditor.svelte');
   const lazyModelRegistry       = () => import('./pages/ModelRegistry.svelte');
   const lazyVocabularySearch    = () => import('./pages/VocabularySearch.svelte');
@@ -284,6 +288,7 @@
       ['/admin/llm', 'pages.adminLlm.title', 'pages.adminLlm.detail'],
       ['/admin/operations', 'pages.adminOperations.title', 'pages.adminOperations.detail'],
       ['/admin/prefixes', 'pages.adminPrefixes.title', 'pages.adminPrefixes.detail'],
+      ['/admin/feedback', 'pages.adminFeedback.title', 'pages.adminFeedback.detail'],
       ['/admin', 'pages.admin.title', 'pages.admin.detail'],
       ['/models', 'pages.modelRegistry.title', 'pages.modelRegistry.detail'],
       ['/vocabularies', 'pages.vocabularySearch.title', 'pages.vocabularySearch.detail'],
@@ -477,6 +482,10 @@
                 <Tags size={16} />
                 <span class="nav-item-label">{$t('nav.adminPrefixes')}</span>
               </Link>
+              <Link to="/admin/feedback" class={`nav-item ${currentPath.startsWith('/admin/feedback') ? 'selected' : ''}`} on:click={navClick}>
+                <MessageSquareText size={16} />
+                <span class="nav-item-label">{$t('nav.adminFeedback')}</span>
+              </Link>
               <Link to="/admin/docs" class={`nav-item ${currentPath.startsWith('/admin/docs') ? 'selected' : ''}`} on:click={navClick}>
                 <SettingsIcon size={16} />
                 <span class="nav-item-label">{$t('nav.documentation')}</span>
@@ -532,6 +541,14 @@
               </div>
             {/if}
           </div>
+
+          <button
+            class="foot-btn foot-btn-feedback"
+            on:click={() => { openFeedback(); navClick(); }}
+            title={$t('nav.feedbackHint')}>
+            <MessageSquarePlus size={13} />
+            <span>{$t('nav.feedback')}</span>
+          </button>
 
           <button
             class="foot-btn"
@@ -728,6 +745,9 @@
         <Route path="/admin/prefixes">
           <LazyPage loader={lazyAdminPrefixes} />
         </Route>
+        <Route path="/admin/feedback">
+          <LazyPage loader={lazyAdminFeedback} />
+        </Route>
         <Route path="/admin/docs">
           <LazyPage loader={lazyDocEditor} />
         </Route>
@@ -881,6 +901,7 @@
 
   <Toasts />
   <ConfirmHost />
+  <FeedbackDialog />
 </Router>
 
 <!-- Global 3D-model / geometry preview, requested by RDF terms anywhere

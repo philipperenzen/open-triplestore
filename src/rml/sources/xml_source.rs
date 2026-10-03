@@ -13,13 +13,20 @@ use std::collections::HashMap;
 /// The `iterator` is a simple XPath-like expression such as `/root/item`.
 /// Each matching element is returned as a row where child element names
 /// are columns and their text content is the value.
-pub fn load(source_data: &str, iterator: Option<&str>) -> Result<RowIter, String> {
+///
+/// `empty_is_value`: an empty child element is the value `""` (RML-IO: XML
+/// has no NULL). Off for a legacy mapping version, which read it as no value.
+pub fn load(
+    source_data: &str,
+    iterator: Option<&str>,
+    empty_is_value: bool,
+) -> Result<RowIter, String> {
     let iterator_path = iterator.unwrap_or("/");
-    let rows = parse_xml(source_data, iterator_path)?;
+    let rows = parse_xml(source_data, iterator_path, empty_is_value)?;
     Ok(Box::new(rows.into_iter().map(Ok)))
 }
 
-fn parse_xml(source_data: &str, iterator: &str) -> Result<Vec<Row>, String> {
+fn parse_xml(source_data: &str, iterator: &str, empty_is_value: bool) -> Result<Vec<Row>, String> {
     // Parse the path segments (skip empty leading slash)
     let segments: Vec<&str> = iterator.split('/').filter(|s| !s.is_empty()).collect();
 
@@ -40,9 +47,18 @@ fn parse_xml(source_data: &str, iterator: &str) -> Result<Vec<Row>, String> {
                 // Check if this element matches the iterator path
                 if path_matches(&element_stack, &segments) {
                     current_row = Some(HashMap::new());
-                } else if current_row.is_some() {
+                } else if let Some(row) = current_row.as_mut() {
                     // Inside an iterator element — track field names
+                    if empty_is_value {
+                        row.entry(name.clone()).or_default();
+                    }
                     current_field = Some(name);
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                // `<field/>`: present, and empty.
+                if let Some(row) = current_row.as_mut().filter(|_| empty_is_value) {
+                    row.entry(e.name().0.to_string()).or_default();
                 }
             }
             Ok(Event::Text(e)) => {

@@ -97,6 +97,9 @@ pub struct TriplesMapOut {
     pub subject_mint: bool,
     pub classes: Vec<String>,
     pub poms: Vec<PomOut>,
+    /// Source values that count as NULL, written as RML-IO `rml:null` on the
+    /// logical source.
+    pub nulls: Vec<String>,
 }
 
 /// Namespace the generated triples maps are named under. They are internal
@@ -224,6 +227,9 @@ pub fn render(maps: &[TriplesMapOut]) -> Result<String, String> {
         out.push_str(&format!("{} a rr:TriplesMap ;\n", iri(&map_iri(&m.name))?));
         out.push_str("  rml:logicalSource [\n");
         out.push_str(&format!("    rml:source {} ;\n", iri(&m.source)?));
+        for n in &m.nulls {
+            out.push_str(&format!("    <http://w3id.org/rml/null> {} ;\n", lit(n)));
+        }
         if let Some(q) = &m.query {
             out.push_str(&format!("    rml:query {}\n", lit(q)));
         } else if let Some(t) = &m.table {
@@ -243,7 +249,10 @@ pub fn render(maps: &[TriplesMapOut]) -> Result<String, String> {
                 out.push_str(&format!("    rr:template {} ;\n", lit(&m.subject)));
                 out.push_str("    rr:termType rr:BlankNode ;\n");
             }
-            _ => out.push_str(&format!("    rr:template {} ;\n", lit(&m.subject))),
+            _ => {
+                out.push_str(&format!("    rr:template {} ;\n", lit(&m.subject)));
+                out.push_str("    rr:termType rr:IRI ;\n");
+            }
         }
         for c in &m.classes {
             out.push_str(&format!("    rr:class {} ;\n", iri(&expand_done(c)?)?));
@@ -292,7 +301,12 @@ fn render_object(out: &mut String, object: &ObjectOut) -> Result<(), String> {
             datatype,
             language,
         } => {
-            out.push_str(&format!("    rr:objectMap [ rr:column {}", lit(column)));
+            // Every term map says what it generates, so its meaning never rests
+            // on a default — R2RML's (§7.4) or the one this engine used before.
+            out.push_str(&format!(
+                "    rr:objectMap [ rr:column {} ; rr:termType rr:Literal",
+                lit(column)
+            ));
             if let Some(d) = datatype {
                 out.push_str(&format!(" ; rr:datatype {}", iri(d)?));
             } else if let Some(l) = language {
@@ -510,6 +524,7 @@ mod tests {
                     },
                 },
             ],
+            nulls: Vec::new(),
         }
     }
 
@@ -529,6 +544,73 @@ mod tests {
         assert_eq!(m.datasources(), vec!["urn:source:legacy"]);
         assert_eq!(tm.subject_map.classes, vec!["http://example.org/Product"]);
         assert_eq!(tm.predicate_object_maps.len(), 2);
+    }
+
+    #[test]
+    fn every_template_and_column_term_map_names_its_term_type() {
+        let mut m = sample();
+        m.poms.push(PomOut {
+            predicate: "http://example.org/category".into(),
+            object: ObjectOut::Template {
+                template: "Category {cat}".into(),
+                term_type: TermTypeOut::Literal,
+            },
+        });
+        m.poms.push(PomOut {
+            predicate: "http://example.org/kind".into(),
+            object: ObjectOut::Constant {
+                value: "http://example.org/Kind".into(),
+                is_iri: true,
+            },
+        });
+        let turtle = render(&[m]).unwrap();
+        for map in turtle
+            .split("rr:subjectMap [")
+            .skip(1)
+            .chain(turtle.split("rr:objectMap [").skip(1))
+        {
+            let body = &map[..map.find(']').unwrap()];
+            if body.contains("rr:template") || body.contains("rr:column") {
+                assert!(body.contains("rr:termType"), "no term type in: {body}");
+            }
+        }
+        use crate::rml::model::{ObjectMap, RmlMapping, TermMapKind, TermType};
+        // By predicate: the store hands predicate-object maps back unordered.
+        let types = |m: &RmlMapping| -> Vec<(String, TermType)> {
+            let mut out: Vec<(String, TermType)> = m.triples_maps[0]
+                .predicate_object_maps
+                .iter()
+                .filter_map(|p| match (&p.predicate_maps[0].kind, &p.object_maps[0]) {
+                    (TermMapKind::Constant(pred), ObjectMap::Term(t)) => {
+                        Some((pred.to_string(), t.term_type.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            out.sort_by(|a, b| a.0.cmp(&b.0));
+            out
+        };
+        let parsed = parses(&turtle);
+        let r2rml = types(&parsed);
+        assert_eq!(
+            r2rml.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>(),
+            vec![
+                TermType::Literal, // category: a literal template
+                TermType::IRI,     // kind: a constant IRI
+                TermType::Literal, // name: a column
+                TermType::Literal, // price: a typed column
+            ],
+            "{r2rml:?}"
+        );
+        // The same document means the same thing under the legacy rules.
+        let store = crate::store::TripleStore::in_memory().unwrap();
+        store
+            .load_str(&turtle, oxigraph::io::RdfFormat::Turtle, None)
+            .unwrap();
+        let legacy =
+            crate::rml::parse_from_store_as(&store, None, crate::rml::model::Semantics::Legacy)
+                .unwrap();
+        assert_eq!(types(&legacy), r2rml);
     }
 
     #[test]
@@ -555,9 +637,9 @@ mod tests {
         let pom = child
             .predicate_object_maps
             .iter()
-            .find(|p| matches!(p.object, crate::rml::model::ObjectMap::Ref(_)))
+            .find(|p| matches!(p.object_maps[0], crate::rml::model::ObjectMap::Ref(_)))
             .expect("a referencing object map");
-        let crate::rml::model::ObjectMap::Ref(r) = &pom.object else {
+        let crate::rml::model::ObjectMap::Ref(r) = &pom.object_maps[0] else {
             unreachable!()
         };
         assert_eq!(r.parent_triples_map, map_iri("supplier"));
@@ -583,7 +665,7 @@ mod tests {
         let f = tm
             .predicate_object_maps
             .iter()
-            .find_map(|p| match &p.object {
+            .find_map(|p| match &p.object_maps[0] {
                 crate::rml::model::ObjectMap::Function(f) => Some(f),
                 _ => None,
             })
