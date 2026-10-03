@@ -30,7 +30,7 @@ applies.
 | OWL 2 RL | Profile reasoning (materialised) | Partial¹⁰ |
 | OWL 2 DL | Description-logic expressivity | Full⁴ (with the reasoner sidecar) |
 | GeoSPARQL 1.1 | Spatial RDF, relation/metric functions | Partial⁵ |
-| SHACL Core | Structural constraint validation | Partial⁶ |
+| SHACL Core | Structural constraint validation | Full⁶ |
 | SHACL Advanced (AF / SPARQL) | SPARQL constraints, rules, targets | Partial⁷ |
 | SHACL-C | Compact-syntax parser/serializer | Partial⁸ |
 | OPM (Ontology for Property Management) | Property states with history | Partial — `opm:Property` / `opm:PropertyState` / current-outdated / reliability classes via the property-state API; no `opm:Calculation` or derived-property inference. See [datasets.md](datasets.md#time-evolving-properties-opm-profile). |
@@ -69,7 +69,7 @@ give no score.
 <!-- conformance-table:start -->
 | Standard | Suite | Basis | Tests | Notes |
 |---|---|---|---:|---|
-| SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 17 |  |
+| SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 19 |  |
 | DCAT 3 / DCAT-AP 3 / VoID | `tests/dcat_conformance.rs` | spec-derived | 4 |  |
 | GeoSPARQL 1.1 | `tests/geosparql_conformance.rs` | spec-derived | 143 |  |
 | LDES 1.0 / TREE | `tests/ldes_conformance.rs` | spec-derived | 28 |  |
@@ -80,16 +80,16 @@ give no score.
 | OWL 2 EL | `tests/owl2_el_conformance.rs` | spec-derived | 57 |  |
 | OWL 2 QL | `tests/owl2_ql_conformance.rs` | spec-derived | 45 |  |
 | OWL 2 RL | `tests/owl2_rl_conformance.rs` | spec-derived | 61 |  |
-| RDF 1.1 formats | `tests/rdf11_conformance.rs` | spec-derived | 63 |  |
+| RDF 1.1 formats | `tests/rdf11_conformance.rs` | spec-derived | 69 |  |
 | RDF Patch (RDF Delta) | `tests/rdf_patch_conformance.rs` | spec-derived | 24 |  |
 | RDFS entailment | `tests/rdfs_conformance.rs` | spec-derived | 23 |  |
 | RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 38 |  |
 | SHACL Advanced Features | `tests/shacl_af_corpus.rs` | **vendored TopQuadrant corpus** (expression, function, rule and target tests of TopQuadrant/shacl, unmodified; dash-driven) | 1 | 10 corpus cases: 9 pass, 1 known failure, 0 runner-side skips (floor ≥9 asserted) |
-| SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 58 |  |
+| SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 62 |  |
 | SHACL-AF rules | `tests/shacl_rules_conformance.rs` | spec-derived | 43 |  |
 | SHACL Compact Syntax | `tests/shaclc_conformance.rs` | spec-derived | 11 |  |
 | ShEx | `tests/shex_conformance.rs` | spec-derived | 10 |  |
-| SPARQL 1.2 / RDF-star | `tests/sparql12_conformance.rs` | spec-derived | 15 |  |
+| SPARQL 1.2 / RDF-star | `tests/sparql12_conformance.rs` | spec-derived | 16 |  |
 | SP2B / BSBM query shapes | `tests/sparql_benchmarks.rs` | benchmark-derived | 28 |  |
 | SPARQL 1.1 functions | `tests/sparql_functions_conformance.rs` | spec-derived | 9 |  |
 | SPARQL engine coverage (sparqloscope) | `tests/sparqloscope_conformance.rs` | sparqloscope-derived | 67 |  |
@@ -97,12 +97,12 @@ give no score.
 | SWRL | `tests/swrl_conformance.rs` | spec-derived | 15 |  |
 | JSON-LD 1.1 API | `tests/w3c_jsonld_api_manifests.rs` | **vendored W3C test-suite subset** (toRdf + fromRdf sections of w3c/json-ld-api, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/jsonld.md` |
 | OWL 2 DL | `tests/w3c_owl2_dl_manifests.rs` | **vendored W3C test cases** (approved OWL 2 DL / Direct Semantics cases of the OWL 2 Test Case Repository, unmodified; manifest-driven, against the reasoner sidecar) | 2 | runs in CI against the reasoner sidecar as a development and regression ratchet; no score is published (W3C licence: no performance claims on a partial run); known gaps in `docs/conformance/owl2-dl.md` |
-| SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (core + sparql sections, manifest-driven, full report equality) | 1 | 136 corpus cases: 119 pass, 1 known failure, 1 optional feature unsupported (reported as the failure the spec requires), 15 runner-side skips (floor ≥90 asserted) |
+| SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (core + sparql sections, manifest-driven, full report equality) | 1 | 136 corpus cases: 120 pass, 0 known failures, 1 optional feature unsupported (reported as the failure the spec requires), 15 runner-side skips (floor ≥90 asserted) |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 125 |  |
 | SPARQL 1.1 Federated Query | `tests/w3c_sparql11_federation.rs` | **vendored W3C test-suite subset** (`service/` + `syntax-fed/` sections of w3c/rdf-tests, unmodified; manifest-driven, local endpoints) | 1 | runs in CI as a development and regression ratchet against local endpoints; no score is published (W3C test-suite policy); see `docs/conformance/sparql11.md` §Federation |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 
-1048 conformance tests across 32 suites; a further 802 tests in 107 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 7 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
+1061 conformance tests across 32 suites; a further 802 tests in 107 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 7 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->
@@ -234,20 +234,18 @@ behavior and will flip green when the limitation is resolved.
 6. **SHACL Core** — the Core constraint components are implemented, and
    blank-node property shapes (`sh:property [ … ]`, the standard idiom) are
    enforced (the loader dereferences blank nodes through the raw quad index;
-   this applies to SHACL-on-write too). Graded *Partial* on the results of the
-   W3C SHACL test suite's core section ([conformance/shacl.md](conformance/shacl.md)):
-   one known failure remains, `core/property/uniqueLang-002` (storage reads
-   `"1"^^xsd:boolean` back as `"true"`, so `sh:uniqueLang "1"` activates the
-   constraint). Since 2026-10-02 results are compared at full result-set
+   this applies to SHACL-on-write too). Graded *Full* since 2026-10-03: the
+   W3C SHACL test suite's core section passes with no known failure
+   ([conformance/shacl.md](conformance/shacl.md)), compared at full result-set
    equality — focus node, `sh:resultPath`, `sh:value`, source shape,
    constraint-component IRI, severity and `sh:sourceConstraint`, all but the
-   message — where they used to be compared on `sh:conforms` and the focus
-   nodes only. The same storage canonicalisation is a
-   documented deviation outside the suite: values of the 12 types derived from
-   `xsd:integer` read back as `xsd:integer` and `xsd:dateTimeStamp` as
-   `xsd:dateTime`, so `sh:datatype` with one of those types rejects valid data
-   ([shacl.md](shacl.md#literal-forms-the-engine-cannot-see)); the shapes
-   uploads refuse non-canonical booleans on activation flags. Multi-valued
+   message (since 2026-10-02; it used to be `sh:conforms` and the focus nodes
+   only). The last known failure, `core/property/uniqueLang-002`, passes since
+   the store keeps literals as written: it used to read `"1"^^xsd:boolean` back
+   as `true`, the 12 types derived from `xsd:integer` as `xsd:integer` and
+   `xsd:dateTimeStamp` as `xsd:dateTime`, so `sh:uniqueLang "1"` activated the
+   constraint and `sh:datatype` with a derived type rejected valid data
+   ([shacl.md](shacl.md#literal-forms)). Multi-valued
    parameters, `sh:deactivated` on property and inline shapes, ill-formed paths
    and failing SPARQL targets follow the spec since 2026-10-01 (they used to
    pass data the shapes forbid). A run over several data graphs validates their

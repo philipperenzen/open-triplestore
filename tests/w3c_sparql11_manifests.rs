@@ -33,8 +33,10 @@
 //!   variants: the file must parse / must not parse.
 //!
 //! Numeric literals are compared by value (`"2.0"^^xsd:decimal` equals
-//! `"2"^^xsd:decimal`) because the engine stores numerics natively and writes
-//! them back in canonical form; every other literal by lexical form.
+//! `"2"^^xsd:decimal`): the store returns stored literals as written, but the
+//! engine prints a computed number (an aggregate, arithmetic, a cast) in
+//! Oxigraph's canonical form, where the expected results may spell it
+//! otherwise. Every other literal is compared by lexical form.
 //!
 //! Gap policy (two-way ratchet, as in `w3c_shacl_conformance.rs`): every
 //! entry NOT in `KNOWN_FAILURES` must pass, and every listed entry must still

@@ -547,11 +547,15 @@ fn load_targets(
         targets.push(Target::TargetObjectsOf(p));
     }
 
-    // Implicit class target: if the shape itself is also an rdfs:Class
+    // Implicit class target (SHACL §2.1.3.3): the shape is a SHACL instance of
+    // rdfs:Class in the shapes graph, through rdf:type/rdfs:subClassOf*, so
+    // `ex:Person a owl:Class` counts when the graph says owl:Class is one.
     let is_class = ask(
         store,
         &format!(
-            "ASK {{ GRAPH <{shapes_graph}> {{ <{shape_iri}> a <http://www.w3.org/2000/01/rdf-schema#Class> }} }}"
+            "ASK {{ GRAPH <{shapes_graph}> {{ <{shape_iri}> \
+             <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>/<http://www.w3.org/2000/01/rdf-schema#subClassOf>* \
+             <http://www.w3.org/2000/01/rdf-schema#Class> }} }}"
         ),
     );
     if is_class {
@@ -631,7 +635,7 @@ fn load_target_type(
         let path = single_value(store, shapes_graph, &param, &format!("{SH}path"))
             .ok_or_else(|| format!("type <{target_type}>: a sh:parameter has no sh:path"))?;
         let optional = single_value(store, shapes_graph, &param, &format!("{SH}optional"))
-            .is_some_and(|v| v == "true" || v == "1");
+            .is_some_and(|v| v == "true");
         let name = path.rsplit(['#', '/']).next().unwrap_or(&path).to_string();
         let var = oxigraph::sparql::Variable::new(&name)
             .map_err(|e| format!("type <{target_type}>: parameter `{name}`: {e}"))?;
@@ -1328,7 +1332,7 @@ fn constraint_components(
                 .unwrap_or(path.as_str())
                 .to_string();
             let optional = single_value(store, shapes_graph, &pnode, &format!("{SH}optional"))
-                .is_some_and(|v| v == "true" || v == "1");
+                .is_some_and(|v| v == "true");
             parameters.push(ComponentParameter {
                 path,
                 name,
@@ -2422,18 +2426,17 @@ fn walk_rdf_list(store: &TripleStore, shapes_graph: &str, head: Term) -> Vec<Ter
     values
 }
 
-/// Whether `node` carries `sh:deactivated true` (SHACL §2.1.6). The store
-/// returns `"1"^^xsd:boolean` as `true` (native boolean storage), so that
-/// form deactivates too — a documented deviation, refused at upload by
-/// [`super::lint`].
+/// Whether `node` carries `sh:deactivated true` (SHACL §2.1.6): the literal
+/// `true` only. The store keeps `"1"^^xsd:boolean` as written, and like
+/// every other activation flag (W3C core/property/uniqueLang-002) that form
+/// does not deactivate.
 fn is_deactivated(store: &TripleStore, shapes_graph: &str, node: &str) -> bool {
     store
         .objects_for_subject_in_graph(node, &format!("{SH}deactivated"), Some(shapes_graph))
         .iter()
         .any(|t| {
             matches!(t, Term::Literal(l)
-                if l.datatype() == oxigraph::model::vocab::xsd::BOOLEAN
-                    && matches!(l.value(), "true" | "1"))
+                if l.datatype() == oxigraph::model::vocab::xsd::BOOLEAN && l.value() == "true")
         })
 }
 
