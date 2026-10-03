@@ -11,19 +11,21 @@ W3C SHACL Recommendation, and W3C has not reviewed or endorsed them. The tests a
 redistributed under the W3C Software and Document License — see
 [`PROVENANCE.md`](../../tests/fixtures/w3c-shacl/PROVENANCE.md) there.
 
-## Results (2026-10-02)
+## Results (2026-10-03)
 
 | | core | sparql | total |
 |---|---|---|---|
-| **Pass** (full report equality) | **97** | **22** | **119** |
-| Known-fail (ratcheted) | 1 | 0 | 1 |
+| **Pass** (full report equality) | **98** | **22** | **120** |
+| Known-fail (ratcheted) | 0 | 0 | 0 |
 | Optional feature, unsupported (failure reported as the spec requires) | 0 | 1 | 1 |
 | Skipped (auxiliary `-data`/`-shapes` files, no test entry) | 15 | 0 | 15 |
 | Total files | 113 | 23 | 136 |
 
 *(Until 2026-10-02 the runner compared `sh:conforms` and the focus-node multiset
 only; full report equality, added as a second level, matched it on every case and
-replaced it. Previous baselines: 2026-09-10: 119 pass / 2 known-fail, focus nodes only, with
+replaced it. Previous baselines: 2026-10-02: 119 pass / 1 known-fail
+(`core/property/uniqueLang-002`, until the store kept literals as written; see
+"Lexical forms" below); 2026-09-10: 119 pass / 2 known-fail, focus nodes only, with
 `shapesGraph-001` counted as a failure; 2026-06-11, core only: 97 pass / 1
 known-fail; 2026-06-10: 46 pass / 52 known-fail — see "Typed-term engine refactor"
 below for what closed that gap.)*
@@ -45,12 +47,9 @@ processor. Our side is the RDF report the engine writes
   (`src/shacl_studio/report_rdf.rs`), loaded back into the store, so the RDF
   serialisation is tested as well. Blank nodes of the data graph (focus nodes,
   values) match any blank node; a blank-node shape or `sh:sparql` node must be the
-  very node of the shapes graph. Literals are compared with their datatype and
-  language tag, after the store has read both sides back (see the storage note
-  under the known failures). Because the expected report goes through the same
-  storage, a canonicalisation that changes both sides alike does not show here:
-  `core/property/datatype-ill-formed` passes because its ill-formed literals are
-  stored as written.
+  very node of the shapes graph. Literals are compared with their lexical form,
+  datatype and language tag, as the store holds them, which is as written on
+  both sides.
 
 **Gap policy:** a two-way ratchet. Every test not listed in `KNOWN_FAILURES` must
 pass, and every listed test must still fail — silent regressions *and* silent fixes
@@ -76,20 +75,22 @@ the processor ever produces a report for it instead.
 
 ## Remaining known failures
 
-- **`core/property/uniqueLang-002.ttl`** — the test asserts that
-  `sh:uniqueLang "1"^^xsd:boolean` does **not** activate the constraint (the spec
-  activates it only for the literal `true`). Oxigraph's storage encodes
-  `xsd:boolean` natively and reads the literal back in canonical form (`"1"` →
-  `"true"`), so the distinction is unrecoverable after loading. This is a storage
-  canonicalisation property, not an engine gap; fixing it would require keeping
-  the original lexical form alongside every stored literal. The same storage
-  property makes `sh:datatype` reject valid values of the derived integer types
-  and `xsd:dateTimeStamp`, which read back as `xsd:integer` / `xsd:dateTime`; no
-  suite case covers that (`datatype-ill-formed` passes because its values are
-  ill-formed anyway). Both are pinned by `pinned_*` tests in
-  `tests/shacl_conformance.rs`, and the dataset and SHACL Studio shapes uploads
-  refuse non-canonical booleans on activation flags (see
-  [shacl.md](../shacl.md#literal-forms-the-engine-cannot-see)).
+None in either section.
+
+## Lexical forms (2026-10-03)
+
+**`core/property/uniqueLang-002.ttl`** passes since the store keeps every literal
+as written (the vendored Oxigraph, [`vendor/README.md`](../../vendor/README.md)).
+The test asserts that `sh:uniqueLang "1"^^xsd:boolean` does **not** activate the
+constraint: the spec activates it only for the literal `true`. Oxigraph used to
+store `xsd:boolean` as a value and read `"1"` back as `"true"`, so the shapes
+graph the engine loaded said `true`, and the dataset and SHACL Studio shapes
+uploads refused such flags instead. The same change makes `sh:datatype` accept
+valid values of the types derived from `xsd:integer` and of `xsd:dateTimeStamp`,
+which used to read back as `xsd:integer` / `xsd:dateTime` (no suite case covers
+that; `tests/shacl_conformance.rs` does), and `sh:hasValue` / `sh:in` /
+`sh:equals` compare the terms as written, as SHACL's term equality requires
+([shacl.md](../shacl.md#literal-forms)).
 
 ## SHACL Advanced Features — TopQuadrant's tests (2026-10-02)
 

@@ -1924,8 +1924,9 @@ fn ground(
             members.entry(s.clone()).or_default().push(tbox.exists[r]);
             match q.object {
                 Term::Literal(l) => {
-                    // Decided on the value: a stored `xsd:integer` may have
-                    // been written as any integer-derived type.
+                    // Decided on the value: the same number may be written
+                    // as any integer-derived type (and data loaded before the
+                    // store kept lexical forms holds them as `xsd:integer`).
                     if let Some(v) = datatypes::literal_value(&l) {
                         if range.contains(&v) == Some(false) {
                             note(
