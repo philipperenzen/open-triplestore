@@ -12,13 +12,16 @@
 # track the GitHub jobs, with two intentional differences: (1) the GitLab perf
 # jobs install python3 explicitly, which the GitHub ubuntu-latest runner already
 # ships (see the perf job below); and (2) the rust job here keeps
-# `--all-features`, so — since ci.yml switched to an explicit feature list — this
-# is the only CI that actually compiles the `sfcgal3d` feature (hence the extra
-# libsfcgal-dev native dep in before_script). That feature is also why every
+# `--all-features` where ci.yml names its features, so it also compiles
+# `sfcgal3d` (hence the extra libsfcgal-dev native dep in before_script), which
+# ci.yml builds in a job of its own. That feature is also why every
 # rust job runs on a *trixie*-based image: the `sfcgal`/`sfcgal-sys` crates
 # (0.8.x/0.9.x) need native SFCGAL >= 2.0 at build time, and Debian bookworm
 # only packages libsfcgal 1.4.1 (its headers lack the 2.x API, so the sfcgal
 # crate fails with E0432 unresolved imports); trixie ships 2.0.0.
+# The rust job also runs the S3 storage tests against a MinIO service (ci.yml's
+# backend job starts the same MinIO), and the image-build job mirrors
+# .github/workflows/image.yml.
 
 stages:
   - check
@@ -36,9 +39,20 @@ variables:
 
 # ── Rust: format, lint, build, test ───────────────────────────────────────────
 # `cargo test --all-features` runs the unit, integration, conformance AND
-# security-regression suites (which ci.yml surfaces as separate jobs).
+# security-regression suites (which ci.yml surfaces as separate steps), once.
 rust:
   stage: test
+  # An S3-compatible server for tests/storage_s3_live.rs; the last script line
+  # runs them with OTS_TEST_LIVE_REQUIRED (see ci.yml's "S3 storage against
+  # MinIO" step). Throwaway credentials; MinIO publishes no new community
+  # images, so this tag is the last one.
+  services:
+    - name: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+      alias: minio
+      command: ["server", "/data"]
+  variables:
+    MINIO_ROOT_USER: ots-ci-minio
+    MINIO_ROOT_PASSWORD: ots-ci-minio-secret
   # trixie, not bookworm: `--all-features` pulls in sfcgal-sys, which needs
   # native SFCGAL >= 2.0 (bookworm's libsfcgal-dev 1.4.1 is too old — see the
   # header note). And 1.94, not 1.91: the AWS SDK stack (aws-credential-types
@@ -78,6 +92,9 @@ rust:
     # SHA-256 checked); a failed download fails here instead of skipping.
     - set -o pipefail; OTS_TEST_IDS_CORPUS_REQUIRED=1 cargo test --workspace --all-features --locked 2>&1 | tee test.log
     - if grep -E 'test result:.* [1-9][0-9]* ignored' test.log; then echo "Some tests were ignored"; exit 1; fi
+    # The S3 storage tests skipped in the run above (no endpoint set); this
+    # re-run reuses its binary.
+    - OTS_TEST_LIVE_REQUIRED=1 OTS_TEST_S3_ENDPOINT=http://minio:9000 OTS_TEST_S3_ACCESS_KEY=$MINIO_ROOT_USER OTS_TEST_S3_SECRET_KEY=$MINIO_ROOT_PASSWORD cargo test --all-features --locked --test storage_s3_live
 
 # ── Database connectors against live servers (mirrors ci.yml live-sources) ──
 # Each driver crate's live test skips when its OTS_TEST_<DIALECT>_HOST is
@@ -279,6 +296,9 @@ docs-parity:
   script:
     - python3 scripts/conformance_table.py --check
     - python3 scripts/check_compose_env.py
+    # The env docs (.env.example, docs/administration.md) against what
+    # docker-compose.yml forwards to the triplestore service (see ci.yml).
+    - python3 scripts/check_env_drift.py
 
 # ── Performance-regression GATE (mirrors .github/workflows/perf.yml) ──────────
 # Subset Criterion bench of the merge base and this change on the same runner,
@@ -463,6 +483,55 @@ secret-scan:
     - VER=8.18.4
     - curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz" | tar -xz gitleaks
     - ./gitleaks detect --source . --no-git --redact --verbose --exit-code 1
+
+# ── Container image (mirrors .github/workflows/image.yml) ────────────────────
+# Builds the release image with its default CARGO_FEATURES, without pushing,
+# and starts it until /livez answers. Merge requests that touch the image's
+# build inputs build the fast `release-dev` profile; scheduled pipelines (set
+# one up under CI/CD → Schedules for the nightly run) and manual ones build
+# `release`. Needs a runner that allows privileged Docker-in-Docker.
+image-build:
+  stage: test
+  image: docker:27
+  services:
+    - name: docker:27-dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: "/certs"
+    DOCKER_TLS_VERIFY: "1"
+    DOCKER_CERT_PATH: "/certs/client"
+    CARGO_PROFILE: release
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - Dockerfile
+        - .dockerignore
+        - Cargo.toml
+        - Cargo.lock
+        - "**/Cargo.toml"
+        - ".cargo/**/*"
+        - "vendor/**/*"
+      variables:
+        CARGO_PROFILE: release-dev
+  script:
+    - docker build --build-arg CARGO_PROFILE="$CARGO_PROFILE" -t open-triplestore:ci .
+    - docker run -d --name ots -e SEED_STANDARDS_DEMO=false -e SEED_IFC_URL= open-triplestore:ci
+    # The runtime image ships curl (its HEALTHCHECK uses it); the docker:27
+    # image does not, so the probe runs inside the container.
+    - |
+      for i in $(seq 1 90); do
+        if docker exec ots curl -sf http://localhost:7878/livez; then
+          echo; echo "The image answers /livez after ${i} s."; exit 0
+        fi
+        [ "$(docker inspect -f '{{.State.Running}}' ots)" = true ] || { echo "The container exited."; break; }
+        sleep 1
+      done
+      docker logs ots
+      exit 1
+  after_script:
+    - docker logs ots 2>&1 | tail -n 200 || true
 
 # ── Browser e2e (mirrors e2e.yml). Manual/opt-in: browser e2e is environment-
 # sensitive on self-managed runners, so it does not gate the pipeline. Trigger it

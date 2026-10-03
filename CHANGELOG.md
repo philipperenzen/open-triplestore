@@ -639,6 +639,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   questions for people using the platform: accounts, datasets and access,
   importing, querying, validation, models, Spark, the API, troubleshooting and
   how to get help.
+- **CI covers S3 storage, `sfcgal3d` and the container image.** Both CIs now
+  run the S3 asset store against MinIO (`tests/storage_s3_live.rs`: object and
+  HTTP round trips, overwrite, delete, an absent key reading as absent, wrong
+  credentials refusing to start; skipped unless `OTS_TEST_S3_ENDPOINT` is
+  set). Until now the S3 backend had no test that sent it a byte. GitHub
+  compiles and unit-tests `sfcgal3d` in a Debian trixie job, because Ubuntu's
+  `libsfcgal-dev` is 1.5 and the feature needs SFCGAL 2.x. Before, only GitLab
+  built it. The release image is built and started (`/livez`) on every pull
+  request that touches the Dockerfile, a Cargo manifest, the lock file,
+  `.cargo/` or `vendor/`, and nightly (`.github/workflows/image.yml` and the
+  GitLab `image-build` job). Before, it was first built at release.
+  `scripts/check_env_drift.py` (both docs-parity jobs) fails when
+  `docker-compose.yml` hands the server a variable that neither `.env.example`
+  nor `docs/administration.md` documents, or when `.env.example` sets one that
+  compose never passes on. Documented settings that compose does not forward
+  are listed as a warning. `RUST_LOG` is now in the environment table.
 
 ### Changed
 - **JSON-LD 1.1 graded *Partial*.** `docs/standards.md` grades it for the
@@ -886,6 +902,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`POST /api/reasoning/materialize`, `POST /api/swrl/execute`, the `/ldp`
   routes) instead of only reading seeded triples.
 
+- **The conformance suites run once per CI run.** GitHub's conformance job ran
+  every `*conformance*` test binary that the backend job's `cargo test
+  --workspace` had already run, with fewer features. It now keeps only the
+  reasoner-sidecar and seed-bundle steps.
 - **Settings added in this release are named for what they cover.** Before
   release, five new settings were renamed, and the old names are not read:
   `OIDC_TOKEN_POLICY` and `OIDC_WRITE_SCOPES` are now
