@@ -275,6 +275,7 @@ fn materialise_increment(
     cursor: &str,
     batch_size: usize,
     run_id: &str,
+    on_data_error: crate::rml::checks::OnDataError,
 ) -> Result<(crate::rml::sql::SqlOutcome, Vec<String>, Option<String>), String> {
     let (tables, high) = watermark_state(rml, conn, column)?;
     let scratch = format!("{graph}:delta");
@@ -293,6 +294,7 @@ fn materialise_increment(
         batch_size,
         run_id,
         Some(&filter),
+        on_data_error,
     );
     let outcome = match outcome {
         Ok(o) => o,
@@ -326,6 +328,7 @@ pub fn execute(
     model_version: Option<String>,
     batch_size: usize,
     actor: Option<&str>,
+    on_data_error: crate::rml::checks::OnDataError,
 ) -> Result<RunRecord, RunError> {
     if let Some(mapping) = mapping {
         if mapping.source_id != source.id {
@@ -418,6 +421,7 @@ pub fn execute(
                 &graph,
                 batch_size,
                 &run_id,
+                on_data_error,
             )
             .map(|o| (o, Vec::new(), watermark))
         }
@@ -432,6 +436,7 @@ pub fn execute(
             cursor,
             batch_size,
             &run_id,
+            on_data_error,
         ),
     };
 
@@ -465,6 +470,7 @@ pub fn execute(
     };
     record.rows_extracted = outcome.rows;
     record.triples_produced = outcome.triples;
+    record.data_errors = outcome.data_errors;
     record.watermark = watermark;
 
     // ── The write gate applies to the candidate graph, not to every batch ──

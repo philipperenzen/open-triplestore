@@ -922,7 +922,8 @@ pub struct OauthProviderCreate {
     pub slug: String,
     pub provider_type: String,
     pub client_id: Option<String>,
-    /// Plaintext secret — will be encrypted before storage
+    /// Plaintext secret — will be encrypted before storage. Absent on an
+    /// update keeps the stored secret.
     pub client_secret: Option<String>,
     /// Pre-encrypted secret — used internally when updating without changing the secret
     #[serde(skip)]
@@ -931,12 +932,33 @@ pub struct OauthProviderCreate {
     pub tenant_id: Option<String>,
     pub entity_id: Option<String>,
     pub sso_url: Option<String>,
+    /// SAML IdP signing certificate (PEM). Never returned by a read; absent on
+    /// an update keeps the stored certificate.
     pub idp_certificate: Option<String>,
+    /// Space-separated, e.g. `openid email profile`.
     pub scopes: Option<String>,
+    /// JSON object as a string, claim value → grant (see [`OauthProvider`]).
     pub role_claim_map: Option<String>,
     pub auto_provision: bool,
     pub default_role: Option<String>,
     pub is_active: bool,
+}
+
+impl OauthProvider {
+    /// Whether a browser sign-in can start from this provider, i.e. whether the
+    /// login page should offer it. An OIDC entry needs a client ID: the
+    /// `env-oidc` entry that `OIDC_ISSUER` creates has none (it only anchors
+    /// resource-server accounts), nor does an OIDC entry saved without one. A
+    /// SAML entry needs an SSO URL to send the AuthnRequest to, and a build with
+    /// the `saml` feature.
+    pub fn offers_login(&self) -> bool {
+        let filled = |v: &Option<String>| v.as_deref().is_some_and(|v| !v.trim().is_empty());
+        self.is_active
+            && match self.provider_type.as_str() {
+                "saml" => cfg!(feature = "saml") && filled(&self.sso_url),
+                _ => filled(&self.client_id),
+            }
+    }
 }
 
 impl OauthProviderCreate {
@@ -1019,6 +1041,18 @@ pub struct PrefixOverride {
     /// The administrator who set it; null for one restored from elsewhere.
     pub created_by: Option<String>,
     pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One entry of a dataset's prefix table: part of the dataset's own data,
+/// changed by an applied RDF Patch's `PA` / `PD` rows and declared by the
+/// dataset's Turtle and TriG exports. The label may be empty (`:`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DatasetPrefix {
+    pub label: String,
+    pub namespace: String,
+    /// Who set it last; null when a version restore or the system did.
+    pub updated_by: Option<String>,
     pub updated_at: String,
 }
 

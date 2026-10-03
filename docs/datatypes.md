@@ -148,6 +148,14 @@ store keeps the datatype you wrote, so `DATATYPE(?n)` in a query still reports
 `xsd:integer` (the value's type) while SHACL `sh:datatype xsd:nonNegativeInteger`
 and a download see `xsd:nonNegativeInteger`.
 
+> **Derived integer types are stored as `xsd:integer`.** The engine keeps the
+> value, not the declared type: `"5"^^xsd:nonNegativeInteger` reads back as
+> `"5"^^xsd:integer`, and an out-of-range `"300"^^xsd:byte` is accepted and reads
+> back as `"300"^^xsd:integer` (`xsd:dateTimeStamp` likewise becomes
+> `xsd:dateTime`). A SHACL `sh:datatype xsd:nonNegativeInteger` constraint
+> therefore fails on such stored data; constrain it with `sh:datatype
+> xsd:integer` plus `sh:minInclusive 0` instead.
+
 > Prefer `xsd:decimal` over `xsd:double` for quantities you compare for equality
 > (`xsd:double` is subject to floating-point rounding).
 
@@ -354,11 +362,14 @@ parameter types are: **IRI**, **string**, **integer**, **decimal**, **boolean**,
 
 ## Notes & limits
 
-- **Quoted triples** (`<< ex:a ex:b ex:c >>`, RDF 1.2 / RDF-star) are a *term
-  kind*, not a literal datatype, but they are supported — see the RDF 1.2 row in
-  [Supported Standards](/docs/standards).
-- **Base-direction strings** (`rdf:dirLangString`) are not currently supported;
-  use `rdf:langString` with a plain language tag.
+- **Triple terms** (`<<( ex:a ex:b ex:c )>>`, RDF 1.2) are a *term kind*, not a
+  literal datatype, but they are supported — see the RDF 1.2 row in
+  [Supported Standards](/docs/standards). In RDF 1.2, `<< ex:a ex:b ex:c >>` is
+  shorthand for a reifier that points at such a triple term, not a term itself.
+- **Base-direction strings** (`"text"@ar--rtl`, datatype `rdf:dirLangString`)
+  are stored and queried as RDF 1.2 defines them, with `LANGDIR`, `hasLANGDIR`
+  and `STRLANGDIR`. One known gap: the in-memory columnar copy that answers
+  some queries drops the direction.
 - No literal is rewritten or canonicalised in storage: every one is returned
   byte-for-byte as you stored it. Only values an expression computes are
   printed in canonical form.

@@ -233,16 +233,44 @@ fn fail_clearance_expression() {
     );
     assert!(
         focus_violations(&r, "LowBridge") >= 1,
-        "sh:expression minExclusive violation: {:?}",
+        "sh:expression violation (8.50 m is below 9.10 m): {:?}",
+        r.results
+    );
+    assert!(
+        r.results
+            .iter()
+            .any(|x| x.message.contains("at least 9.10 m")),
+        "the expression's sh:message is reported: {:?}",
         r.results
     );
 }
 
-/// The user-defined sh:SPARQLFunction ex:distanceMetres is callable from SPARQL and
-/// returns the same value as the raw geof:distance it wraps. The points are in RD New
-/// (the reference example's CRS), where `uom:metre` is the plane's own metres: 3-4-5
-/// is 5 m. (The unprefixed CRS84 points POINT(0 0) and POINT(3 4) would be a geodesic
-/// distance in metres, ~554 km.)
+/// The positive half of the expression oracle: `ex:atLeast` over the clearance
+/// path is exactly `{ true }` for a clearance of 9.50 m.
+#[test]
+fn pass_clearance_expression() {
+    let r = validate_case(
+        &[SHAPES_SPARQL, SHAPES_AF],
+        r#"@prefix def:  <https://example.org/def/> .
+           @prefix eb:   <https://example.org/id/example-bridge/> .
+           @prefix qudt: <http://qudt.org/schema/qudt/> .
+           eb:HighBridge a def:NavigableBridge ;
+               def:clearanceHeight [ a qudt:QuantityValue ; qudt:numericValue 9.50 ] ."#,
+    );
+    assert_eq!(
+        focus_violations(&r, "HighBridge"),
+        0,
+        "9.50 m is at least 9.10 m: {:?}",
+        r.results
+    );
+}
+
+/// The user-defined sh:SPARQLFunction ex:distanceMetres is callable from the shapes
+/// graph that declares it and returns the same value as the raw geof:distance it
+/// wraps. The points are in RD New (the reference example's CRS), where `uom:metre`
+/// is the plane's own metres: 3-4-5 is 5 m. (The unprefixed CRS84 points POINT(0 0)
+/// and POINT(3 4) would be a geodesic distance in metres, ~554 km.) A plain query
+/// does not see it: a function belongs to its shapes graph's runs.
 #[test]
 fn sparql_function_distance_metres_callable() {
     let store = TripleStore::in_memory().unwrap();
@@ -253,37 +281,57 @@ fn sparql_function_distance_metres_callable() {
     store
         .load_str(SHAPES_AF, RdfFormat::Turtle, Some("urn:shapes"))
         .unwrap();
-    let q = r#"
-        PREFIX ex:   <https://example.org/shape/def#>
-        PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
-        PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
-        PREFIX uom:  <http://www.opengis.net/def/uom/OGC/1.0/>
-        SELECT (ex:distanceMetres("<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(186000 427000)"^^geo:wktLiteral,
-                                  "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(186003 427004)"^^geo:wktLiteral) AS ?d)
-               (geof:distance("<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(186000 427000)"^^geo:wktLiteral,
-                              "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(186003 427004)"^^geo:wktLiteral,
-                              uom:metre) AS ?ref)
-        WHERE {}
-    "#;
-    let (mut d, mut r) = (None, None);
-    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = store.query(q) {
-        for sol in sols.flatten() {
-            d = sol.get("d").map(|t| t.to_string());
-            r = sol.get("ref").map(|t| t.to_string());
-        }
-    }
-    let d = d.unwrap_or_default();
-    let r = r.unwrap_or_default();
+    let a =
+        r#""<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(186000 427000)"^^geo:wktLiteral"#;
+    let b =
+        r#""<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(186003 427004)"^^geo:wktLiteral"#;
+    // One row, whose value is ex:distanceMetres, exactly when it equals
+    // geof:distance: an unbound function yields no row at all.
+    let probe = format!(
+        r#"@prefix sh: <http://www.w3.org/ns/shacl#> .
+        @prefix ex: <https://example.org/shape/def#> .
+        ex:DistanceProbe a sh:NodeShape ; sh:targetNode ex:probe ;
+          sh:sparql [ sh:prefixes ex:prefixes ; sh:select """
+            SELECT $this ?value WHERE {{
+              BIND(ex:distanceMetres({a}, {b}) AS ?value)
+              BIND(geof:distance({a}, {b}, uom:metre) AS ?ref)
+              FILTER(?value = ?ref)
+            }}""" ] .
+        "#
+    );
+    store
+        .load_str(&probe, RdfFormat::Turtle, Some("urn:shapes"))
+        .unwrap();
+    let r = validate(&store, "urn:shapes", &["urn:data".to_string()]).unwrap();
+    let probe_rows: Vec<_> = r
+        .results
+        .iter()
+        .filter(|x| x.focus_node.ends_with("probe"))
+        .collect();
+    assert_eq!(
+        probe_rows.len(),
+        1,
+        "ex:distanceMetres must equal geof:distance: {:?}",
+        r.results
+    );
+    let d = probe_rows[0].value.clone().unwrap_or_default();
     assert!(
         d.contains('5'),
-        "ex:distanceMetres should return 5, got {:?}",
-        d
+        "ex:distanceMetres should return 5, got {d:?}"
     );
-    assert_eq!(
-        d.split('"').nth(1),
-        r.split('"').nth(1),
-        "ex:distanceMetres must equal geof:distance (d={d:?}, ref={r:?})"
+
+    let q = format!(
+        r#"PREFIX ex: <https://example.org/shape/def#>
+        PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+        SELECT (ex:distanceMetres({a}, {b}) AS ?d) WHERE {{}}"#
     );
+    let leaked = match store.query(&q) {
+        Ok(oxigraph::sparql::QueryResults::Solutions(sols)) => {
+            sols.flatten().any(|sol| sol.get("d").is_some())
+        }
+        _ => false,
+    };
+    assert!(!leaked, "a shapes graph's function reached a plain query");
 }
 
 /// The inspection-priority rule fires on a 5/6 condition (positive) and not on ≤4

@@ -391,6 +391,9 @@ fn mapping_response(state: &AppState, m: &MappingRecord) -> MappingResponse {
         model: m.model.clone(),
         model_version: m.model_version.clone(),
         profile_version: m.profile_version,
+        semantics: registry::version_semantics(&state.store, &m.id, m.version)
+            .as_str()
+            .to_string(),
         triples_maps: rml.as_ref().map(|r| r.triples_maps.len()).unwrap_or(0),
         joins: rml
             .as_ref()
@@ -531,6 +534,7 @@ pub async fn create_mapping(
     let source = registry::get_source(&state.store, &source_id)
         .ok_or_else(|| not_found("datasource", &source_id))?;
     mappings::check(&parsed, &source.id).map_err(bad)?;
+    let semantics = mappings::requested_semantics(body.semantics.as_deref()).map_err(bad)?;
     let state_requested = mapping_state_for(&user, body.state.as_deref(), MappingState::Draft)?;
 
     let now = registry::now();
@@ -550,7 +554,7 @@ pub async fn create_mapping(
         updated_at: now,
         id,
     };
-    mappings::store_version(&state.store, &record.id, 1, &rml).map_err(internal)?;
+    mappings::store_version(&state.store, &record.id, 1, &rml, semantics).map_err(internal)?;
     registry::put_mapping(&state.store, &record).map_err(internal)?;
     commit_mapping(&state, &user, &record, "registered");
     Ok((StatusCode::CREATED, Json(mapping_response(&state, &record))).into_response())
@@ -619,9 +623,16 @@ pub async fn update_mapping(
     if new_rml {
         let rml = rml_of(&body, Some(record.source_id.as_str()))?;
         mappings::validate_rml(&rml, &record.source_id).map_err(bad)?;
+        let semantics = mappings::requested_semantics(body.semantics.as_deref()).map_err(bad)?;
         record.version = existing.version + 1;
-        mappings::store_version(&state.store, &record.id, record.version, &rml)
+        mappings::store_version(&state.store, &record.id, record.version, &rml, semantics)
             .map_err(internal)?;
+    } else if body.semantics.is_some() {
+        // The rules belong to a frozen version; a metadata edit mints none.
+        return Err(bad(
+            "'semantics' applies to the new version a change of 'rml' or 'yarrrml' freezes; \
+             an existing version keeps the rules it was frozen with",
+        ));
     }
     // New RML, or an approval, was written against the profile of the moment:
     // that becomes the drift baseline. A metadata edit keeps the old one.
@@ -775,6 +786,14 @@ pub async fn create_run(
         }
     };
     let batch_size = body.batch_size.unwrap_or(1_000);
+    let on_data_error = match body.on_data_error.as_deref() {
+        None => crate::rml::checks::OnDataError::Abort,
+        Some(v) => crate::rml::checks::OnDataError::parse(v).ok_or_else(|| {
+            bad(format!(
+                "unknown onDataError '{v}'; expected abort (the default) or skip"
+            ))
+        })?,
+    };
     let model_version = body.model_version.clone();
     let actor = actor_iri(&state, &user);
 
@@ -788,6 +807,7 @@ pub async fn create_run(
             model_version,
             batch_size,
             Some(&actor),
+            on_data_error,
         )
     })
     .await

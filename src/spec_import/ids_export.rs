@@ -166,7 +166,17 @@ fn facet_order(f: &Facet) -> u8 {
 /// Build the `<ids:value>` child from the value-restricting constraints, and
 /// note the ones that cannot be expressed.
 fn value_element(constraints: &[Constraint], losses: &mut Vec<String>, indent: &str) -> String {
-    // `sh:hasValue` is a simple value and wins outright.
+    // `sh:hasValue` is a simple value and wins outright. Each value of
+    // sh:hasValue is its own constraint, and IDS has one simple value.
+    let has_values = constraints
+        .iter()
+        .filter(|c| matches!(c, Constraint::HasValue(_)))
+        .count();
+    if has_values > 1 {
+        losses.push(format!(
+            "{has_values} sh:hasValue values must all be present, but an IDS value is a single value — only the first was exported"
+        ));
+    }
     for c in constraints {
         if let Constraint::HasValue(t) = c {
             return format!(
@@ -176,8 +186,16 @@ fn value_element(constraints: &[Constraint], losses: &mut Vec<String>, indent: &
         }
     }
     let mut facets = String::new();
+    // Several sh:pattern values must all match; several xs:pattern facets of
+    // one restriction match when any of them does.
+    let mut pattern_seen = false;
     for c in constraints {
         match c {
+            Constraint::Pattern { pattern, .. } if pattern_seen => {
+                losses.push(format!(
+                    "sh:pattern `{pattern}` must match as well as the first pattern, but xs:pattern facets are alternatives — dropped"
+                ));
+            }
             Constraint::In(terms) => {
                 for t in terms {
                     let _ = writeln!(
@@ -222,6 +240,7 @@ fn value_element(constraints: &[Constraint], losses: &mut Vec<String>, indent: &
                 let _ = writeln!(facets, "{indent}    <xs:maxLength value=\"{n}\"/>\n");
             }
             Constraint::Pattern { pattern, flags } => {
+                pattern_seen = true;
                 // `xs:pattern` is implicitly anchored and has no flags, while
                 // `sh:pattern` is an XPath/SPARQL regex with optional flags.
                 // Exporting a flagged pattern would change its meaning.
@@ -423,6 +442,13 @@ pub fn export(shapes: &[Shape], title: &str) -> anyhow::Result<ExportedSpec> {
         if is_helper(&shape.iri) {
             continue;
         }
+        if shape.deactivated {
+            losses.push(format!(
+                "shape <{}> is deactivated — not exported",
+                shape.iri
+            ));
+            continue;
+        }
         let classes = target_classes(shape);
         if classes.is_empty() {
             for t in &shape.targets {
@@ -430,7 +456,7 @@ pub fn export(shapes: &[Shape], title: &str) -> anyhow::Result<ExportedSpec> {
                     Target::TargetNode(_) => "sh:targetNode",
                     Target::TargetSubjectsOf(_) => "sh:targetSubjectsOf",
                     Target::TargetObjectsOf(_) => "sh:targetObjectsOf",
-                    Target::SparqlTarget(_) => "a SPARQL target",
+                    Target::SparqlTarget(_) | Target::SparqlTargetType { .. } => "a SPARQL target",
                     Target::TargetClass(_) => continue,
                 };
                 losses.push(format!(
@@ -493,6 +519,19 @@ pub fn export(shapes: &[Shape], title: &str) -> anyhow::Result<ExportedSpec> {
         if applies.is_empty() && requires.is_empty() {
             requires.extend(shape.property_shapes.iter());
         }
+        // Every term conforms to a deactivated shape: it requires nothing.
+        for ps in applies
+            .iter()
+            .chain(requires.iter())
+            .filter(|ps| ps.deactivated)
+        {
+            losses.push(format!(
+                "property shape `{}` is deactivated — not exported",
+                ps.path.to_sparql()
+            ));
+        }
+        applies.retain(|ps| !ps.deactivated);
+        requires.retain(|ps| !ps.deactivated);
 
         let mut app_facets: Vec<RenderedFacet> = applies
             .iter()

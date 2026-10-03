@@ -106,9 +106,12 @@
     error = '';
   }
 
-  function beginSso(slug) {
-    // Redirect to server-side OIDC/SAML authorize endpoint
-    window.location.href = `/api/auth/oauth/${slug}/authorize`;
+  function beginSso(provider) {
+    // Hand off to the server, which redirects to the IdP: an AuthnRequest for
+    // SAML, an authorization request for OIDC.
+    window.location.href = provider.provider_type === 'saml'
+      ? `/api/auth/saml/${provider.slug}/login`
+      : `/api/auth/oauth/${provider.slug}/authorize`;
   }
 </script>
 
@@ -185,7 +188,7 @@
           </button>
         {/if}
         {#each ssoProviders as provider}
-          <button class="btn btn-sso" type="button" on:click={() => beginSso(provider.slug)}>
+          <button class="btn btn-sso" type="button" on:click={() => beginSso(provider)}>
             {provider.name}
           </button>
         {/each}
