@@ -201,6 +201,7 @@ impl<'a> Owl2DLReasoner<'a> {
             iterations,
             elapsed_ms: start.elapsed().as_millis() as u64,
             target_graph: self.target_graph.clone(),
+            ..Default::default()
         })
     }
 

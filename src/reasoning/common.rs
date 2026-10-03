@@ -3,7 +3,7 @@
 use thiserror::Error;
 
 /// Describes the outcome of a successful materialization run.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ReasoningReport {
     /// The entailment regime that was applied (e.g. `"rdfs"`, `"owl2-rl"`).
     pub regime: String,
@@ -15,6 +15,49 @@ pub struct ReasoningReport {
     pub elapsed_ms: u64,
     /// IRI of the named graph that received the entailed triples.
     pub target_graph: String,
+    /// How many axioms outside the regime's profile the run did not use
+    /// (reported by OWL 2 QL; omitted when zero).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub ignored_axioms: usize,
+    /// The first few of those axioms (at most [`IGNORED_SAMPLE`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ignored_sample: Vec<IgnoredAxiom>,
+    /// Axioms the regime read but could not use: constructs outside its
+    /// profile, by construct. Empty (and not serialized) for a regime that
+    /// does not report them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored: Vec<IgnoredAxioms>,
+}
+
+/// Axioms of one construct that a reasoning run left out.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IgnoredAxioms {
+    /// The OWL 2 construct, e.g. `ObjectUnionOf` or `FunctionalObjectProperty`.
+    pub construct: String,
+    /// How many axioms or expressions used it.
+    pub count: usize,
+    /// One of them: the subject term of the first one read.
+    pub example: String,
+}
+
+/// How many ignored axioms a [`ReasoningReport`] lists by name.
+pub const IGNORED_SAMPLE: usize = 20;
+
+/// An axiom a reasoner read but did not use because it lies outside the
+/// regime's profile (an `owl:TransitiveProperty` under OWL 2 QL, say).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+pub struct IgnoredAxiom {
+    /// The construct, as a prefixed name (`owl:TransitiveProperty`,
+    /// `rdfs:subClassOf`).
+    pub axiom: String,
+    /// The axiom's subject: an IRI, or `_:` and a blank-node label.
+    pub subject: String,
+    /// Why it was not used.
+    pub reason: String,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// Errors that can occur during reasoning.
@@ -84,7 +127,7 @@ impl ProfileViolation {
 /// [`ReasoningError::Inconsistency`]. A run of any other regime says nothing
 /// about consistency either way.
 pub fn checks_consistency(regime: &str) -> bool {
-    matches!(regime, "owl2-rl" | "owl2-dl")
+    matches!(regime, "owl2-rl" | "owl2-el" | "owl2-ql" | "owl2-dl")
 }
 
 impl ReasoningError {

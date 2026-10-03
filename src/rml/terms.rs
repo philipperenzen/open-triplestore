@@ -7,12 +7,18 @@
 //! them: the **natural datatype** rule (R2RML §10.2 — a column with no
 //! `rr:datatype` takes the XSD type its SQL type implies) and the **FNML
 //! function** used for enumerations.
+//!
+//! How a value becomes a term depends on the mapping's [`Semantics`]: the
+//! encoding of template values and the scope of blank nodes changed when this
+//! engine moved to R2RML's rules, and a mapping version frozen before then
+//! keeps the old ones (see [`Semantics`] for the table).
 
 use std::collections::HashMap;
 
 use ots_plugin_api::sources::ValueKind;
-use oxigraph::model::{Literal, NamedNode};
+use oxigraph::model::{Literal, NamedNode, Term};
 
+use super::iri;
 use super::model::*;
 
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
@@ -53,10 +59,10 @@ pub fn slug(value: &str) -> String {
     out
 }
 
-/// Expand a template whose placeholders may be `{column}` (percent-encoded)
-/// or `{column_slug}` (slugged). A placeholder the row cannot supply yields
-/// `None`, and so no term.
-pub fn expand_slug_template(template: &str, row: &Row) -> Option<String> {
+/// Expand a template whose placeholders may be `{column}` (encoded for an
+/// IRI) or `{column_slug}` (slugged). A placeholder the row cannot supply
+/// yields `None`, and so no term.
+pub fn expand_slug_template(template: &str, row: &Row, semantics: Semantics) -> Option<String> {
     let mut result = String::with_capacity(template.len());
     let mut chars = template.chars().peekable();
     while let Some(c) = chars.next() {
@@ -75,7 +81,7 @@ pub fn expand_slug_template(template: &str, row: &Row) -> Option<String> {
                     name.push(inner);
                 }
                 let piece = match row.get(&name) {
-                    Some(v) => percent_encode(v),
+                    Some(v) => Encoding::iri(semantics).apply(v),
                     None => {
                         let base = name.strip_suffix("_slug")?;
                         let slugged = slug(row.get(base)?);
@@ -92,7 +98,8 @@ pub fn expand_slug_template(template: &str, row: &Row) -> Option<String> {
 }
 
 /// `otsfn:mintIri`: an IRI from `otsfn:template` over the current row.
-fn mint_iri(f: &FunctionMap, row: &Row) -> Result<Option<String>, String> {
+fn mint_iri(f: &FunctionMap, row: &Row, gen: &mut TermGen) -> Result<Option<String>, String> {
+    let semantics = gen.semantics;
     let template = arg_value(f.first(&format!("{FN_NS}template")), row).ok_or_else(|| {
         format!("{FN_LABEL}:mintIri needs {FN_LABEL}:template with an absolute IRI template")
     })?;
@@ -102,39 +109,148 @@ fn mint_iri(f: &FunctionMap, row: &Row) -> Result<Option<String>, String> {
              prefix would put IRIs in a namespace nobody owns"
         ));
     }
-    let Some(filled) = expand_slug_template(&template, row) else {
+    let Some(filled) = expand_slug_template(&template, row, semantics) else {
         return Ok(None);
     };
-    // An IRI the template cannot make well-formed skips the term, as an
-    // `rr:template` does.
-    Ok(NamedNode::new(&filled).ok().map(|n| n.to_string()))
+    // An IRI the template cannot make well-formed is a data error, as it is
+    // for an `rr:template`.
+    match NamedNode::new(&filled) {
+        Ok(n) => Ok(Some(n.to_string())),
+        Err(_) => {
+            gen.data_error(format!(
+                "{FN_LABEL}:mintIri template \"{template}\" generates {}, which is not a valid IRI",
+                quoted(&filled)
+            ));
+            Ok(None)
+        }
+    }
 }
 
-/// One source row: column name → lexical value. A SQL NULL, an empty CSV cell
-/// and an absent JSON key are all "no key", so a term map over one produces
-/// no term and therefore no triple.
+/// One source row: column name → lexical value. A NULL — a SQL NULL, a JSON
+/// `null` or absent key, a value the logical source lists under `rml:null` —
+/// is "no key", so a term map over one produces no term and therefore no
+/// triple. An empty string is a value (RML-IO), except under
+/// [`Semantics::Legacy`], where an empty value produces no term either.
 pub type Row = HashMap<String, String>;
 /// Per-column generic types, when the source reports them (relational only).
 pub type Kinds = HashMap<String, ValueKind>;
 
-/// Blank-node minting state for one execution. Labels are unique across the
-/// whole run, so a document flushed in batches never merges two rows' nodes.
-#[derive(Debug, Default)]
-pub struct BlankNodes {
-    counter: u64,
+/// Term-generation state for one execution: the rules it runs under, and the
+/// blank-node labelling that keeps two runs' nodes apart.
+///
+/// Under [`Semantics::R2rml`] a blank node is unique to its value within a
+/// graph (R2RML §11.2, §9.1), so its label is a hash of the run, the graph and
+/// the value: the same in every batch, and the same whether a join was pushed
+/// down or indexed. Under [`Semantics::Legacy`] a node is minted per row and
+/// value, as this engine did before.
+#[derive(Debug)]
+pub struct TermGen {
+    semantics: Semantics,
     prefix: String,
+    counter: u64,
+    /// Legacy only: the nodes minted for the current row, by value.
+    row: HashMap<String, String>,
+    /// Data errors (R2RML §4.3) met since the caller last took them.
+    errors: Vec<String>,
 }
 
-impl BlankNodes {
-    pub fn new(prefix: impl Into<String>) -> Self {
+impl TermGen {
+    pub fn new(semantics: Semantics, prefix: impl Into<String>) -> Self {
         Self {
-            counter: 0,
+            semantics,
             prefix: prefix.into(),
+            counter: 0,
+            row: HashMap::new(),
+            errors: Vec::new(),
         }
     }
-    fn mint(&mut self) -> String {
-        self.counter += 1;
-        format!("_:{}{}", self.prefix, self.counter)
+
+    /// Record a data error: a value that cannot become the term its map asks
+    /// for. The term is not generated; whether the run goes on is the
+    /// caller's decision ([`OnDataError`]).
+    pub fn data_error(&mut self, message: String) {
+        self.errors.push(message);
+    }
+
+    /// The data errors recorded since the last call.
+    pub fn take_errors(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.errors)
+    }
+
+    /// Drop the cells of `row` that count as NULL in `source`: its
+    /// `rml:null` values. A legacy version ignores `rml:null` and instead
+    /// generates no term from an empty value, as it always did.
+    pub fn apply_nulls(&self, source: &LogicalSource, row: &mut Row) {
+        if self.semantics == Semantics::R2rml && !source.nulls.is_empty() {
+            row.retain(|_, v| !source.nulls.iter().any(|n| n == v));
+        }
+    }
+
+    pub fn semantics(&self) -> Semantics {
+        self.semantics
+    }
+
+    /// A new source row begins. Legacy blank nodes do not outlive it.
+    pub fn start_row(&mut self) {
+        self.row.clear();
+    }
+
+    fn blank_node(&mut self, value: String, graph: Option<&str>) -> String {
+        match self.semantics {
+            Semantics::R2rml => iri::blank_node_label(&self.prefix, graph, &value),
+            Semantics::Legacy => {
+                if let Some(existing) = self.row.get(&value) {
+                    return existing.clone();
+                }
+                self.counter += 1;
+                let label = format!("_:{}{}", self.prefix, self.counter);
+                self.row.insert(value, label.clone());
+                label
+            }
+        }
+    }
+}
+
+/// Where a term is generated: the base IRI a relative IRI resolves against,
+/// and the graph the triple lands in (`None` = the run's target graph), to
+/// which a blank node is scoped.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct At<'a> {
+    pub base: Option<&'a str>,
+    pub graph: Option<&'a str>,
+}
+
+/// How a template value is written into the result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Encoding {
+    /// As it is (R2RML: a template that does not generate an IRI).
+    None,
+    /// The IRI-safe version (R2RML §7.3).
+    IriSafe,
+    /// Every byte but `[A-Za-z0-9]` percent-encoded, in every template — what
+    /// this engine did before, kept for legacy mapping versions.
+    Legacy,
+}
+
+impl Encoding {
+    fn for_term(semantics: Semantics, term_type: &TermType) -> Self {
+        match (semantics, term_type) {
+            (Semantics::Legacy, _) => Encoding::Legacy,
+            (Semantics::R2rml, TermType::IRI) => Encoding::IriSafe,
+            (Semantics::R2rml, _) => Encoding::None,
+        }
+    }
+
+    fn iri(semantics: Semantics) -> Self {
+        Self::for_term(semantics, &TermType::IRI)
+    }
+
+    fn apply(self, value: &str) -> String {
+        match self {
+            Encoding::None => value.to_string(),
+            Encoding::IriSafe => iri::iri_safe(value),
+            Encoding::Legacy => legacy_percent_encode(value),
+        }
     }
 }
 
@@ -163,16 +279,24 @@ pub fn eval_term(
     tm: &TermMap,
     row: &Row,
     kinds: Option<&Kinds>,
-    bnodes: &mut BlankNodes,
-    row_bnodes: &mut HashMap<String, String>,
+    gen: &mut TermGen,
+    at: At<'_>,
 ) -> Option<String> {
     let raw_value = match &tm.kind {
-        TermMapKind::Constant(val) => val.clone(),
-        TermMapKind::Template(template) => expand_template(template, row)?,
+        // A constant is the term the mapping wrote, datatype and language
+        // included (R2RML §7.4).
+        TermMapKind::Constant(term) => return render_constant(term),
+        TermMapKind::Template(template) => expand_template_encoded(
+            template,
+            row,
+            Encoding::for_term(gen.semantics, &tm.term_type),
+        )?,
         TermMapKind::Reference(col) => row.get(col)?.clone(),
     };
 
-    if raw_value.is_empty() {
+    // An empty value is a value (RML-IO: nothing is NULL unless the source
+    // says so). Before, it produced no term, which a legacy version keeps.
+    if raw_value.is_empty() && gen.semantics == Semantics::Legacy {
         return None;
     }
 
@@ -182,17 +306,24 @@ pub fn eval_term(
         // with `rr:termType rr:IRI` went in raw: a value containing a space
         // produced invalid Turtle and failed the WHOLE mapping, and one
         // containing `>` could terminate the IRI and inject further triples.
-        // Only `rr:template` values were percent-encoded.
-        TermType::IRI => NamedNode::new(&raw_value).ok()?.to_string(),
-        TermType::BlankNode => {
-            if let Some(existing) = row_bnodes.get(&raw_value) {
-                existing.clone()
-            } else {
-                let label = bnodes.mint();
-                row_bnodes.insert(raw_value, label.clone());
-                label
+        // A value that is not absolute is appended to the base IRI (§11.2).
+        TermType::IRI => match iri::absolute_iri(&raw_value, at.base) {
+            Some(n) => n.to_string(),
+            None => {
+                gen.data_error(format!(
+                    "{} generates {}, which is not a valid IRI{}",
+                    describe(tm),
+                    quoted(&raw_value),
+                    if at.base.is_some() {
+                        " (relative to the base IRI either)"
+                    } else {
+                        ""
+                    }
+                ));
+                return None;
             }
-        }
+        },
+        TermType::BlankNode => gen.blank_node(raw_value, at.graph),
         // Likewise for literals: hand-escaping only `\` and `"` left raw
         // newlines, carriage returns and tabs in the output, which Turtle's
         // STRING_LITERAL_QUOTE forbids — so one multi-line CSV field made the
@@ -200,23 +331,57 @@ pub fn eval_term(
         // "Failed to load generated triples" rather than skipping a row.
         TermType::Literal => {
             if let Some(ref lang) = tm.language {
-                match Literal::new_language_tagged_literal(&raw_value, lang) {
-                    Ok(l) => l.to_string(),
-                    // An invalid language tag is a mapping error, not a reason
-                    // to emit a broken document.
-                    Err(_) => return None,
+                // The parser has checked the tag, so this cannot fail on it.
+                Literal::new_language_tagged_literal(&raw_value, lang)
+                    .ok()?
+                    .to_string()
+            } else if let Some(dt) = &tm.datatype {
+                // A datatype-override literal that is ill-typed is a data error
+                // (R2RML §10.3); a natural one is well-typed by construction.
+                if let Some(why) = super::xsd::ill_typed(&raw_value, dt) {
+                    gen.data_error(format!(
+                        "{} generates {} as <{dt}>, which is {why}",
+                        describe(tm),
+                        quoted(&raw_value)
+                    ));
+                    return None;
                 }
-            } else if let Some(dt) = tm
-                .datatype
-                .clone()
-                .or_else(|| natural_datatype_for(tm, kinds).map(|d| format!("{XSD}{d}")))
-            {
                 Literal::new_typed_literal(&raw_value, NamedNode::new(dt).ok()?).to_string()
+            } else if let Some(dt) = natural_datatype_for(tm, kinds) {
+                Literal::new_typed_literal(&raw_value, NamedNode::new(format!("{XSD}{dt}")).ok()?)
+                    .to_string()
             } else {
                 Literal::new_simple_literal(&raw_value).to_string()
             }
         }
     })
+}
+
+/// A term map as an error message names it.
+fn describe(tm: &TermMap) -> String {
+    match &tm.kind {
+        TermMapKind::Template(t) => format!("rr:template \"{t}\""),
+        TermMapKind::Reference(c) => format!("column \"{c}\""),
+        TermMapKind::Constant(c) => format!("rr:constant {c}"),
+    }
+}
+
+/// A source value quoted for an error message, shortened past 120 characters.
+fn quoted(value: &str) -> String {
+    const MAX: usize = 120;
+    // Escaped, so a value with a line break stays on the report's one line.
+    match value.char_indices().nth(MAX) {
+        Some((i, _)) => format!("\"{}…\"", value[..i].escape_debug()),
+        None => format!("\"{}\"", value.escape_debug()),
+    }
+}
+
+/// A constant in N-Triples form. The parser admits only IRIs and literals.
+fn render_constant(term: &Term) -> Option<String> {
+    match term {
+        Term::NamedNode(_) | Term::Literal(_) => Some(term.to_string()),
+        _ => None,
+    }
 }
 
 /// The natural datatype for a direct column reference with no declared one.
@@ -229,20 +394,35 @@ fn natural_datatype_for(tm: &TermMap, kinds: Option<&Kinds>) -> Option<&'static 
     natural_datatype(*kinds?.get(col)?)
 }
 
-/// Evaluate a term map that can only produce an IRI, in N-Triples form.
+/// Evaluate a join parent's subject from columns carried on a child row.
 ///
-/// Separate from [`eval_term`] because it needs no blank-node state: the join
-/// planner builds a parent subject out of columns carried along on a child row,
-/// and a blank-node subject there would mint one node per CHILD row instead of
-/// per parent row. Returns `None` for any term map that is not IRI-typed, which
-/// is how the planner declines to push such a join down.
-pub fn eval_iri_term(tm: &TermMap, row: &Row, kinds: Option<&Kinds>) -> Option<String> {
-    if tm.term_type != TermType::IRI {
+/// The join planner builds a parent subject out of columns projected onto a
+/// child row, so the term must not depend on which row computes it. An IRI
+/// never does, and neither does an R2RML blank node, whose label is a function
+/// of its value. A legacy blank node is minted per row — pushed down, two
+/// children of one parent would stop sharing it — so `None` here is how the
+/// planner declines to push such a join down.
+pub fn eval_parent_subject(
+    tm: &TermMap,
+    row: &Row,
+    kinds: Option<&Kinds>,
+    gen: &mut TermGen,
+    base: Option<&str>,
+) -> Option<String> {
+    if !position_independent(tm, gen.semantics) {
         return None;
     }
-    let mut unused = BlankNodes::new("unused");
-    let mut no_bnodes = HashMap::new();
-    eval_term(tm, row, kinds, &mut unused, &mut no_bnodes)
+    eval_term(tm, row, kinds, gen, At { base, graph: None })
+}
+
+/// Whether a subject term map generates the same term for the same values
+/// wherever it is evaluated. See [`eval_parent_subject`].
+pub fn position_independent(tm: &TermMap, semantics: Semantics) -> bool {
+    match tm.term_type {
+        TermType::IRI => true,
+        TermType::BlankNode => semantics == Semantics::R2rml,
+        TermType::Literal => false,
+    }
 }
 
 /// Evaluate a term map that must yield an IRI, returning it without the angle
@@ -251,21 +431,20 @@ pub fn eval_iri(
     tm: &TermMap,
     row: &Row,
     kinds: Option<&Kinds>,
-    bnodes: &mut BlankNodes,
-    row_bnodes: &mut HashMap<String, String>,
+    gen: &mut TermGen,
+    base: Option<&str>,
 ) -> Option<String> {
-    let rendered = eval_term(tm, row, kinds, bnodes, row_bnodes)?;
+    let rendered = eval_term(tm, row, kinds, gen, At { base, graph: None })?;
     rendered
         .strip_prefix('<')
         .and_then(|s| s.strip_suffix('>'))
         .map(str::to_string)
 }
 
-/// Expand an `rr:template`: replace `{column}` with the row's value,
-/// percent-encoded so the result is a well-formed IRI. `\{` and `\}` are
-/// literal braces. A column the row does not supply yields `None`, which
-/// skips the term (and so the triple).
-pub fn expand_template(template: &str, row: &Row) -> Option<String> {
+/// Expand an `rr:template`: replace `{column}` with the row's value, encoded
+/// as `encoding` says. `\{` and `\}` are literal braces. A column the row
+/// does not supply yields `None`, which skips the term (and so the triple).
+fn expand_template_encoded(template: &str, row: &Row, encoding: Encoding) -> Option<String> {
     let mut result = String::with_capacity(template.len());
     let mut chars = template.chars().peekable();
     while let Some(c) = chars.next() {
@@ -283,7 +462,7 @@ pub fn expand_template(template: &str, row: &Row) -> Option<String> {
                     }
                     col.push(inner);
                 }
-                result.push_str(&percent_encode(row.get(&col)?));
+                result.push_str(&encoding.apply(row.get(&col)?));
             }
             _ => result.push(c),
         }
@@ -291,8 +470,9 @@ pub fn expand_template(template: &str, row: &Row) -> Option<String> {
     Some(result)
 }
 
-/// Percent-encoding for IRI template substitutions.
-fn percent_encode(s: &str) -> String {
+/// The percent-encoding this engine applied to every template value before
+/// it followed R2RML §7.3: everything but ASCII letters and digits.
+fn legacy_percent_encode(s: &str) -> String {
     use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
     utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
 }
@@ -316,9 +496,11 @@ pub fn eval_function(
     f: &FunctionMap,
     row: &Row,
     kinds: Option<&Kinds>,
+    gen: &mut TermGen,
 ) -> Result<Option<String>, String> {
+    let semantics = gen.semantics;
     if f.function == FN_MINT_IRI {
-        return mint_iri(f, row);
+        return mint_iri(f, row, gen);
     }
     if f.function != FN_MAP_VALUE {
         return Err(format!(
@@ -330,7 +512,7 @@ pub fn eval_function(
         // No input value (a NULL column) → no triple, like any term map.
         return Ok(None);
     };
-    if raw.is_empty() {
+    if raw.is_empty() && semantics == Semantics::Legacy {
         return Ok(None);
     }
 
@@ -379,11 +561,12 @@ pub fn eval_function(
             Ok(Some(term.to_string()))
         }
         UnmappedPolicy::Template(t) => {
-            let expanded = expand_template(&t, row).unwrap_or_default();
+            let encoding = Encoding::iri(semantics);
+            let expanded = expand_template_encoded(&t, row, encoding).unwrap_or_default();
             let filled = if expanded.contains("{value}") || t.contains("{value}") {
                 expanded
             } else {
-                format!("{expanded}{}", percent_encode(&key))
+                format!("{expanded}{}", encoding.apply(&key))
             };
             let iri = NamedNode::new(&filled).map_err(|_| {
                 format!(
@@ -471,9 +654,12 @@ mod tests {
     }
 
     fn eval(tm: &TermMap, r: &Row, kinds: Option<&Kinds>) -> Option<String> {
-        let mut b = BlankNodes::new("b");
-        let mut rb = HashMap::new();
-        eval_term(tm, r, kinds, &mut b, &mut rb)
+        eval_as(Semantics::R2rml, tm, r, kinds)
+    }
+
+    fn eval_as(s: Semantics, tm: &TermMap, r: &Row, kinds: Option<&Kinds>) -> Option<String> {
+        let mut g = TermGen::new(s, "b");
+        eval_term(tm, r, kinds, &mut g, At::default())
     }
 
     #[test]
@@ -498,15 +684,67 @@ mod tests {
             ),
             None
         );
-        // …and an empty value is treated the same way.
+        // An empty value is a value under R2RML's rules (RML-IO: nothing is
+        // NULL unless `rml:null` says so)…
+        let empty = term(TermMapKind::Reference("e".into()), TermType::Literal);
         assert_eq!(
-            eval(
-                &term(TermMapKind::Reference("e".into()), TermType::Literal),
-                &row(&[("e", "")]),
-                None
+            eval(&empty, &row(&[("e", "")]), None).as_deref(),
+            Some("\"\"")
+        );
+        // …and no term under a legacy version's.
+        assert_eq!(
+            eval_as(Semantics::Legacy, &empty, &row(&[("e", "")]), None),
+            None
+        );
+    }
+
+    #[test]
+    fn rml_null_values_are_dropped_from_the_row_under_r2rml_only() {
+        let source = LogicalSource {
+            source: SourceRef::File("d.csv".into()),
+            reference_formulation: ReferenceFormulation::Csv,
+            iterator: None,
+            query: None,
+            table_name: None,
+            nulls: vec!["".into(), "NULL".into()],
+        };
+        let mut r = row(&[("a", ""), ("b", "NULL"), ("c", "x")]);
+        TermGen::new(Semantics::R2rml, "b").apply_nulls(&source, &mut r);
+        assert_eq!(r, row(&[("c", "x")]));
+        let mut r = row(&[("a", ""), ("b", "NULL")]);
+        TermGen::new(Semantics::Legacy, "b").apply_nulls(&source, &mut r);
+        assert_eq!(r.len(), 2, "a legacy version ignores rml:null");
+    }
+
+    #[test]
+    fn data_errors_are_recorded_not_generated() {
+        let mut g = TermGen::new(Semantics::R2rml, "b");
+        let iri = term(TermMapKind::Reference("t".into()), TermType::IRI);
+        assert_eq!(
+            eval_term(
+                &iri,
+                &row(&[("t", "not an iri")]),
+                None,
+                &mut g,
+                At::default()
             ),
             None
         );
+        let mut typed = term(TermMapKind::Reference("n".into()), TermType::Literal);
+        typed.datatype = Some(format!("{XSD}integer"));
+        assert_eq!(
+            eval_term(&typed, &row(&[("n", "1.5")]), None, &mut g, At::default()),
+            None
+        );
+        assert_eq!(
+            eval_term(&typed, &row(&[("n", "15")]), None, &mut g, At::default()).as_deref(),
+            Some(format!("\"15\"^^<{XSD}integer>").as_str())
+        );
+        let errors = g.take_errors();
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors[0].contains("\"not an iri\"") && errors[0].contains("not a valid IRI"));
+        assert!(errors[1].contains("\"1.5\"") && errors[1].contains("integer"));
+        assert!(g.take_errors().is_empty(), "taking them clears them");
     }
 
     #[test]
@@ -601,24 +839,38 @@ mod tests {
     }
 
     #[test]
-    fn eval_iri_term_refuses_anything_that_is_not_an_iri() {
+    fn a_parent_subject_is_computed_only_when_no_row_can_change_it() {
         let r = row(&[("id", "7")]);
+        let mut legacy = TermGen::new(Semantics::Legacy, "p");
+        let mut r2rml = TermGen::new(Semantics::R2rml, "p");
         let iri = term(TermMapKind::Template("http://x/{id}".into()), TermType::IRI);
-        assert_eq!(eval_iri_term(&iri, &r, None).unwrap(), "<http://x/7>");
-        // A blank-node subject must not be minted from a child row, so the
-        // planner is told "no" rather than handed a fresh node.
+        assert_eq!(
+            eval_parent_subject(&iri, &r, None, &mut legacy, None).unwrap(),
+            "<http://x/7>"
+        );
+        // A legacy blank-node subject is minted per row, so a child row must
+        // not mint the parent's: the planner is told "no".
         let bn = term(TermMapKind::Template("n{id}".into()), TermType::BlankNode);
-        assert_eq!(eval_iri_term(&bn, &r, None), None);
+        assert_eq!(eval_parent_subject(&bn, &r, None, &mut legacy, None), None);
+        // An R2RML blank node is a function of its value: any row agrees.
+        let mut own = TermGen::new(Semantics::R2rml, "p");
+        let own_label = eval_term(&bn, &r, None, &mut own, At::default()).unwrap();
+        assert_eq!(
+            eval_parent_subject(&bn, &r, None, &mut r2rml, None).unwrap(),
+            own_label
+        );
         let lit = term(TermMapKind::Reference("id".into()), TermType::Literal);
-        assert_eq!(eval_iri_term(&lit, &r, None), None);
+        assert_eq!(eval_parent_subject(&lit, &r, None, &mut r2rml, None), None);
         // A column the row does not supply still yields nothing.
         assert_eq!(
-            eval_iri_term(
+            eval_parent_subject(
                 &term(
                     TermMapKind::Template("http://x/{nope}".into()),
                     TermType::IRI
                 ),
                 &r,
+                None,
+                &mut r2rml,
                 None
             ),
             None
@@ -629,24 +881,115 @@ mod tests {
     fn escaped_braces_in_a_template_are_literal() {
         let r = row(&[("c", "v")]);
         assert_eq!(
-            expand_template(r"http://x/\{lit\}/{c}", &r).unwrap(),
+            expand_template_encoded(r"http://x/\{lit\}/{c}", &r, Encoding::IriSafe).unwrap(),
             "http://x/{lit}/v"
         );
     }
 
     #[test]
-    fn blank_nodes_co_refer_in_a_row_and_never_collide_across_rows() {
-        let mut b = BlankNodes::new("r7_");
+    fn legacy_blank_nodes_co_refer_in_a_row_and_never_across_rows() {
+        let mut b = TermGen::new(Semantics::Legacy, "r7_");
         let tm = term(TermMapKind::Reference("k".into()), TermType::BlankNode);
         let r1 = row(&[("k", "same")]);
-        let mut rb = HashMap::new();
-        let a = eval_term(&tm, &r1, None, &mut b, &mut rb).unwrap();
-        let a2 = eval_term(&tm, &r1, None, &mut b, &mut rb).unwrap();
+        b.start_row();
+        let a = eval_term(&tm, &r1, None, &mut b, At::default()).unwrap();
+        let a2 = eval_term(&tm, &r1, None, &mut b, At::default()).unwrap();
         assert_eq!(a, a2, "same value in one row is the same node");
         assert!(a.starts_with("_:r7_"), "labels carry the run prefix: {a}");
-        let mut rb2 = HashMap::new();
-        let c = eval_term(&tm, &r1, None, &mut b, &mut rb2).unwrap();
+        b.start_row();
+        let c = eval_term(&tm, &r1, None, &mut b, At::default()).unwrap();
         assert_ne!(a, c, "a new row mints a new node even for the same value");
+    }
+
+    #[test]
+    fn r2rml_blank_nodes_are_unique_to_their_value_within_a_graph() {
+        // R2RML §11.2: "a blank node that is unique to the natural RDF lexical
+        // form corresponding to value"; §9.1: scoped to one graph.
+        let mut b = TermGen::new(Semantics::R2rml, "r7_");
+        let tm = term(TermMapKind::Reference("k".into()), TermType::BlankNode);
+        let same = row(&[("k", "same")]);
+        b.start_row();
+        let a = eval_term(&tm, &same, None, &mut b, At::default()).unwrap();
+        b.start_row();
+        let again = eval_term(&tm, &same, None, &mut b, At::default()).unwrap();
+        assert_eq!(a, again, "the same value in another row is the same node");
+        assert!(a.starts_with("_:r7_"), "labels carry the run prefix: {a}");
+        let other = eval_term(&tm, &row(&[("k", "other")]), None, &mut b, At::default());
+        assert_ne!(Some(a.clone()), other, "another value is another node");
+        let in_g = eval_term(
+            &tm,
+            &same,
+            None,
+            &mut b,
+            At {
+                base: None,
+                graph: Some("http://g"),
+            },
+        );
+        assert_ne!(Some(a), in_g, "another graph is another node");
+    }
+
+    #[test]
+    fn template_values_are_encoded_per_the_semantics() {
+        let r = row(&[("v", "~A_17.1-2 葉 x/y")]);
+        let iri = term(TermMapKind::Template("http://x/{v}".into()), TermType::IRI);
+        assert_eq!(
+            eval(&iri, &r, None).unwrap(),
+            "<http://x/~A_17.1-2%20葉%20x%2Fy>",
+            "R2RML §7.3: only what is outside iunreserved"
+        );
+        assert_eq!(
+            eval_as(Semantics::Legacy, &iri, &r, None).unwrap(),
+            "<http://x/%7EA%5F17%2E1%2D2%20%E8%91%89%20x%2Fy>",
+            "a legacy version keeps its IRIs"
+        );
+        let lit = term(TermMapKind::Template("Hi {v}!".into()), TermType::Literal);
+        assert_eq!(
+            eval(&lit, &r, None).unwrap(),
+            "\"Hi ~A_17.1-2 葉 x/y!\"",
+            "a literal template is not encoded"
+        );
+        assert_eq!(
+            eval_as(Semantics::Legacy, &lit, &r, None).unwrap(),
+            "\"Hi %7EA%5F17%2E1%2D2%20%E8%91%89%20x%2Fy!\""
+        );
+    }
+
+    #[test]
+    fn a_constant_is_the_term_the_mapping_wrote() {
+        let r = row(&[]);
+        let typed =
+            Literal::new_typed_literal("5", NamedNode::new_unchecked(format!("{XSD}integer")));
+        let tagged = Literal::new_language_tagged_literal("hallo", "nl").unwrap();
+        for (t, expected) in [
+            (Term::from(typed), format!("\"5\"^^<{XSD}integer>")),
+            (Term::from(tagged), "\"hallo\"@nl".to_string()),
+            (
+                Term::from(NamedNode::new_unchecked("http://x/T")),
+                "<http://x/T>".to_string(),
+            ),
+        ] {
+            // rr:termType has no effect on a constant (R2RML §7.4).
+            let tm = term(TermMapKind::Constant(t), TermType::Literal);
+            assert_eq!(eval(&tm, &r, None).unwrap(), expected);
+            assert_eq!(eval_as(Semantics::Legacy, &tm, &r, None).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn a_relative_iri_resolves_against_the_base() {
+        let r = row(&[("id", "10")]);
+        let tm = term(TermMapKind::Template("Student/{id}".into()), TermType::IRI);
+        assert_eq!(eval(&tm, &r, None), None, "no base, no IRI");
+        let mut g = TermGen::new(Semantics::R2rml, "b");
+        let at = At {
+            base: Some("http://example.com/base/"),
+            graph: None,
+        };
+        assert_eq!(
+            eval_term(&tm, &r, None, &mut g, at).unwrap(),
+            "<http://example.com/base/Student/10>"
+        );
     }
 
     fn map_fn(pairs: &[(&str, FunctionArg)]) -> FunctionMap {
@@ -680,17 +1023,27 @@ mod tests {
         ]);
         for raw in ["active", "ACTIVE ", " Active"] {
             assert_eq!(
-                eval_function(&f, &row(&[("status", raw)]), None)
-                    .unwrap()
-                    .unwrap(),
+                eval_function(
+                    &f,
+                    &row(&[("status", raw)]),
+                    None,
+                    &mut TermGen::new(Semantics::R2rml, "t")
+                )
+                .unwrap()
+                .unwrap(),
                 "<http://x/Active>",
                 "{raw}"
             );
         }
         assert_eq!(
-            eval_function(&f, &row(&[("status", "retired")]), None)
-                .unwrap()
-                .unwrap(),
+            eval_function(
+                &f,
+                &row(&[("status", "retired")]),
+                None,
+                &mut TermGen::new(Semantics::R2rml, "t")
+            )
+            .unwrap()
+            .unwrap(),
             "<http://x/Retired>",
             "map keys are normalised too"
         );
@@ -704,14 +1057,28 @@ mod tests {
             ("mapping", FunctionArg::Constant("a=http://x/A".into())),
         ]);
         assert_eq!(
-            eval_function(&f, &row(&[("s", "Weird Value")]), None)
-                .unwrap()
-                .unwrap(),
+            eval_function(
+                &f,
+                &row(&[("s", "Weird Value")]),
+                None,
+                &mut TermGen::new(Semantics::R2rml, "t")
+            )
+            .unwrap()
+            .unwrap(),
             "\"Weird Value\"",
             "the raw value is kept, not the normalised key"
         );
         // NULL in, nothing out.
-        assert_eq!(eval_function(&f, &row(&[]), None).unwrap(), None);
+        assert_eq!(
+            eval_function(
+                &f,
+                &row(&[]),
+                None,
+                &mut TermGen::new(Semantics::R2rml, "t")
+            )
+            .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -722,16 +1089,26 @@ mod tests {
         ]);
         let kinds: Kinds = HashMap::from([("code".to_string(), ValueKind::Integer)]);
         assert_eq!(
-            eval_function(&f, &row(&[("code", "7")]), Some(&kinds))
-                .unwrap()
-                .unwrap(),
+            eval_function(
+                &f,
+                &row(&[("code", "7")]),
+                Some(&kinds),
+                &mut TermGen::new(Semantics::R2rml, "t")
+            )
+            .unwrap()
+            .unwrap(),
             format!("\"7\"^^<{XSD}integer>")
         );
         // A mapped value is still the IRI, whatever the column type.
         assert_eq!(
-            eval_function(&f, &row(&[("code", "1")]), Some(&kinds))
-                .unwrap()
-                .unwrap(),
+            eval_function(
+                &f,
+                &row(&[("code", "1")]),
+                Some(&kinds),
+                &mut TermGen::new(Semantics::R2rml, "t")
+            )
+            .unwrap()
+            .unwrap(),
             "<http://x/One>"
         );
     }
@@ -748,7 +1125,13 @@ mod tests {
             vec![FunctionArg::Constant("omit".into())],
         );
         assert_eq!(
-            eval_function(&omit, &row(&[("s", "zzz")]), None).unwrap(),
+            eval_function(
+                &omit,
+                &row(&[("s", "zzz")]),
+                None,
+                &mut TermGen::new(Semantics::R2rml, "t")
+            )
+            .unwrap(),
             None
         );
 
@@ -762,9 +1145,14 @@ mod tests {
             vec![FunctionArg::Constant("http://x/status/".into())],
         );
         assert_eq!(
-            eval_function(&mint, &row(&[("s", "zz z")]), None)
-                .unwrap()
-                .unwrap(),
+            eval_function(
+                &mint,
+                &row(&[("s", "zz z")]),
+                None,
+                &mut TermGen::new(Semantics::R2rml, "t")
+            )
+            .unwrap()
+            .unwrap(),
             "<http://x/status/zz%20z>"
         );
     }
@@ -780,7 +1168,13 @@ mod tests {
             format!("{FN_NS}unmappedTemplate"),
             vec![FunctionArg::Constant("status/".into())],
         );
-        let err = eval_function(&f, &row(&[("s", "x")]), None).unwrap_err();
+        let err = eval_function(
+            &f,
+            &row(&[("s", "x")]),
+            None,
+            &mut TermGen::new(Semantics::R2rml, "t"),
+        )
+        .unwrap_err();
         assert!(err.contains("not absolute"), "{err}");
     }
 
@@ -788,24 +1182,39 @@ mod tests {
     fn unknown_functions_and_rules_fail_loudly() {
         let mut f = map_fn(&[("value", FunctionArg::Constant("x".into()))]);
         f.function = "http://example.org/nope".into();
-        assert!(eval_function(&f, &row(&[]), None)
-            .unwrap_err()
-            .contains("unsupported function"));
+        assert!(eval_function(
+            &f,
+            &row(&[]),
+            None,
+            &mut TermGen::new(Semantics::R2rml, "t")
+        )
+        .unwrap_err()
+        .contains("unsupported function"));
 
         let bad = map_fn(&[
             ("value", FunctionArg::Constant("x".into())),
             ("normalize", FunctionArg::Constant("sideways".into())),
         ]);
-        assert!(eval_function(&bad, &row(&[]), None)
-            .unwrap_err()
-            .contains("fn:normalize"));
+        assert!(eval_function(
+            &bad,
+            &row(&[]),
+            None,
+            &mut TermGen::new(Semantics::R2rml, "t")
+        )
+        .unwrap_err()
+        .contains("fn:normalize"));
 
         let malformed = map_fn(&[
             ("value", FunctionArg::Constant("x".into())),
             ("mapping", FunctionArg::Constant("no-equals-sign".into())),
         ]);
-        assert!(eval_function(&malformed, &row(&[]), None)
-            .unwrap_err()
-            .contains("fn:mapping"));
+        assert!(eval_function(
+            &malformed,
+            &row(&[]),
+            None,
+            &mut TermGen::new(Semantics::R2rml, "t")
+        )
+        .unwrap_err()
+        .contains("fn:mapping"));
     }
 }

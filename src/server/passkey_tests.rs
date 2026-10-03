@@ -59,6 +59,7 @@ mod tests {
             query_timeout_secs: 30,
             write_timeout_secs: 120,
             secure_cookies: false,
+            trusted_proxies: crate::server::client_ip::TrustedProxies::default(),
             browse_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
             expensive_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
             #[cfg(feature = "text-search")]

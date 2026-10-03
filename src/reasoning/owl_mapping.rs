@@ -276,12 +276,30 @@ impl<'a> Mapper<'a> {
 
     fn run(&mut self) {
         self.skip_swrl();
+        self.owl1_data_ranges();
         self.header();
         self.declarations();
         self.type_by_use();
         self.reifications();
         self.axiom_triples();
         self.ontology_annotations();
+    }
+
+    /// OWL 1's `owl:DataRange` on a blank node is `rdfs:Datatype` (OWL 2
+    /// Mapping to RDF Graphs, Tables 5 and 14, compatibility with OWL 1 DL).
+    fn owl1_data_ranges(&mut self) {
+        let data_range = owl("DataRange");
+        let mut seen = false;
+        for t in self.ts.iter_mut().flatten() {
+            if t.p == RDF_TYPE && t.s.is_blank() && t.o.iri() == Some(data_range.as_str()) {
+                t.o = Node::Iri(RDFS_DATATYPE.to_string());
+                seen = true;
+            }
+        }
+        if seen {
+            self.warnings
+                .insert("owl:DataRange (OWL 1) read as rdfs:Datatype".into());
+        }
     }
 
     /// SWRL rules and everything reachable only from them.
@@ -368,9 +386,14 @@ impl<'a> Mapper<'a> {
             ("", EntityKind::Datatype),
         ];
         let mut decls: Vec<(usize, String, EntityKind)> = Vec::new();
+        let mut blank_named: Vec<usize> = Vec::new();
         for (i, t) in self.ts.iter().enumerate() {
             let Some(t) = t else { continue };
             if t.p != RDF_TYPE {
+                continue;
+            }
+            if t.s.is_blank() && t.o.iri() == Some(owl("NamedIndividual").as_str()) {
+                blank_named.push(i);
                 continue;
             }
             let (Some(s), Some(o)) = (t.s.iri(), t.o.iri()) else {
@@ -391,6 +414,15 @@ impl<'a> Mapper<'a> {
                 self.warnings
                     .insert("rdfs:Class read as owl:Class (typing by use)".into());
             }
+        }
+        // A blank node cannot be declared; it is an anonymous individual,
+        // which needs no declaration, so the typing says nothing.
+        for i in blank_named {
+            self.used[i] = true;
+            self.warnings.insert(
+                "rdf:type owl:NamedIndividual on a blank node ignored (anonymous individuals need no declaration)"
+                    .into(),
+            );
         }
         for (i, iri, kind) in decls {
             self.used[i] = true;
@@ -1044,6 +1076,30 @@ impl<'a> Mapper<'a> {
             if self.is_datatype(&c) {
                 continue;
             }
+            // Table 18: each expression triple on a named class is its own
+            // EquivalentClasses axiom, so a class may carry several.
+            let several: Vec<usize> = ["intersectionOf", "unionOf", "complementOf", "oneOf"]
+                .iter()
+                .flat_map(|l| self.find(&n, &owl(l)))
+                .filter(|&i| !self.used[i])
+                .collect();
+            if several.len() > 1 && self.peek_one(&n, &owl("onProperty")).is_none() {
+                for i in several {
+                    let Some((p, o)) = self.get(i).map(|t| (t.p.clone(), t.o.clone())) else {
+                        continue;
+                    };
+                    if let Some(expr) = self.expression_from(p.trim_start_matches(OWL), &o) {
+                        self.used[i] = true;
+                        self.add_kind(&c, EntityKind::Class);
+                        self.axioms
+                            .push(Axiom::new(AxiomKind::EquivalentClasses(vec![
+                                ClassExpr::Class(c.clone()),
+                                expr,
+                            ])));
+                    }
+                }
+                continue;
+            }
             if let Some(expr) = self.class_expr_structure(&n) {
                 self.add_kind(&c, EntityKind::Class);
                 self.warnings.insert(
@@ -1057,6 +1113,33 @@ impl<'a> Mapper<'a> {
                     ])));
             }
         }
+    }
+
+    /// The class expression one `owl:intersectionOf` / `unionOf` /
+    /// `complementOf` / `oneOf` object stands for.
+    fn expression_from(&mut self, local: &str, o: &Node) -> Option<ClassExpr> {
+        Some(match local {
+            "intersectionOf" => ClassExpr::IntersectionOf(
+                self.list(o)?
+                    .iter()
+                    .map(|x| self.class_expr(x))
+                    .collect::<Option<_>>()?,
+            ),
+            "unionOf" => ClassExpr::UnionOf(
+                self.list(o)?
+                    .iter()
+                    .map(|x| self.class_expr(x))
+                    .collect::<Option<_>>()?,
+            ),
+            "complementOf" => ClassExpr::ComplementOf(Box::new(self.class_expr(o)?)),
+            "oneOf" => ClassExpr::OneOf(
+                self.list(o)?
+                    .iter()
+                    .map(|x| self.individual(x))
+                    .collect::<Option<_>>()?,
+            ),
+            _ => return None,
+        })
     }
 
     fn nary_axioms(&mut self) {
@@ -1550,6 +1633,41 @@ mod tests {
                      @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> . \
                      @prefix xsd: <http://www.w3.org/2001/XMLSchema#> . \
                      @prefix ex: <http://example.org/> . ";
+
+    #[test]
+    fn named_class_with_several_one_of_lists_maps_each() {
+        // OWL 2 Mapping to RDF, Table 18: one EquivalentClasses per triple.
+        let m = map(&format!(
+            "{P} ex:TorF a owl:Class ; owl:oneOf ( ex:t ex:f ) ; owl:oneOf ( ex:p ex:m ) ."
+        ));
+        assert!(m.unmapped.is_empty(), "{:?}", m.unmapped);
+        let n = m
+            .ontology
+            .axioms
+            .iter()
+            .filter(|a| matches!(&a.kind, AxiomKind::EquivalentClasses(v) if matches!(v.get(1), Some(ClassExpr::OneOf(_)))))
+            .count();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn owl1_data_range_reads_as_datatype() {
+        let m = map(&format!(
+            "{P} ex:p a owl:DatatypeProperty ; rdfs:range [ a owl:DataRange ; owl:oneOf ( 1 2 ) ] ."
+        ));
+        assert!(m.unmapped.is_empty(), "{:?}", m.unmapped);
+        assert!(
+            m.warnings.iter().any(|w| w.contains("owl:DataRange")),
+            "{:?}",
+            m.warnings
+        );
+    }
+
+    #[test]
+    fn blank_node_typed_named_individual_is_ignored() {
+        let m = map(&format!("{P} _:b a owl:NamedIndividual , ex:C ."));
+        assert!(m.unmapped.is_empty(), "{:?}", m.unmapped);
+    }
 
     #[test]
     fn restriction_subclass_maps() {

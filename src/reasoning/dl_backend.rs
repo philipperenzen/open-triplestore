@@ -336,6 +336,7 @@ pub fn materialize(
             iterations: 1,
             elapsed_ms: start.elapsed().as_millis() as u64,
             target_graph: target.to_string(),
+            ..Default::default()
         },
         backend: backend.name(),
         version: outcome.version,

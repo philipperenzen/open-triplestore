@@ -552,3 +552,63 @@ fn parity_group_by_avg_inside_graph() {
     );
     assert!(!opengraph::parallel::is_decomposable(&var_graph));
 }
+
+/// `n` persons in `graph`, each with a name and a type and knowing the next one
+/// (`p{n-1}` knows `p0`), so every `knows` object is another subject — and, with
+/// several shards, almost always one held by a different shard.
+fn persons_ring(n: usize, graph: &str) -> String {
+    let mut s = persons(n, graph);
+    for i in 0..n {
+        s.push_str(&format!(
+            "<{EX}p{i}> <{EX}knows> <{EX}p{}> <{graph}> .\n",
+            (i + 1) % n
+        ));
+    }
+    s
+}
+
+/// An `EXISTS` inside FILTER, BIND or an aggregate argument reads triples about
+/// *another* subject. Split by subject, each shard would see only its own
+/// subjects' triples and answer the EXISTS wrongly, so none of these shapes may
+/// be decomposed; the single-store answer must come back.
+#[test]
+fn parity_exists_over_another_subject_is_never_sharded() {
+    let data = persons_ring(600, G);
+    let queries = [
+        // Every object has a name: false on one store, true on any shard that
+        // lacks the neighbour.
+        format!("ASK FROM <{G}> {{ ?s <{EX}knows> ?o FILTER NOT EXISTS {{ ?o <{EX}name> ?x }} }}"),
+        format!("ASK FROM <{G}> {{ ?s <{EX}knows> ?o FILTER EXISTS {{ ?o <{EX}name> \"Person 0\" }} }}"),
+        format!(
+            "SELECT (COUNT(*) AS ?c) FROM <{G}> WHERE {{ ?s <{EX}knows> ?o FILTER EXISTS {{ ?o <{EX}name> ?x }} }}"
+        ),
+        format!(
+            "SELECT (COUNT(*) AS ?c) WHERE {{ GRAPH <{G}> {{ ?s <{EX}knows> ?o FILTER NOT EXISTS {{ ?o <{EX}type> <{EX}Type3> }} }} }}"
+        ),
+        format!(
+            "SELECT (COUNT(*) AS ?c) FROM <{G}> WHERE {{ ?s <{EX}knows> ?o BIND(EXISTS {{ ?o <{EX}name> ?x }} AS ?e) FILTER(?e) }}"
+        ),
+        format!(
+            "SELECT (COUNT(IF(EXISTS {{ ?o <{EX}name> ?x }}, 1, ?unbound)) AS ?c) FROM <{G}> WHERE {{ ?s <{EX}knows> ?o }}"
+        ),
+        format!(
+            "SELECT ?t (COUNT(*) AS ?c) FROM <{G}> WHERE {{ ?s <{EX}type> ?t ; <{EX}knows> ?o FILTER EXISTS {{ ?o <{EX}type> ?t2 }} }} GROUP BY ?t"
+        ),
+        format!(
+            "SELECT ?t (SUM(?a) AS ?sum) FROM <{G}> WHERE {{ ?s <{EX}type> ?t ; <{EX}age> ?a ; <{EX}knows> ?o FILTER EXISTS {{ ?o <{EX}age> ?a2 }} }} GROUP BY ?t"
+        ),
+        format!(
+            "SELECT ?t (COUNT(DISTINCT ?o) AS ?c) FROM <{G}> WHERE {{ ?s <{EX}type> ?t ; <{EX}knows> ?o FILTER EXISTS {{ ?o <{EX}name> ?x }} }} GROUP BY ?t"
+        ),
+        format!(
+            "SELECT ?s ?e FROM <{G}> WHERE {{ ?s <{EX}knows> ?o BIND(EXISTS {{ ?o <{EX}name> ?x }} AS ?e) }}"
+        ),
+    ];
+    for q in &queries {
+        assert!(
+            !opengraph::parallel::is_decomposable(q),
+            "EXISTS must keep the query off the shards: {q}"
+        );
+        assert_parity(&data, q);
+    }
+}

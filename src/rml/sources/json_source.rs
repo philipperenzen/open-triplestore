@@ -6,7 +6,13 @@
 use super::{Row, RowIter};
 use std::collections::HashMap;
 
-pub fn load(source_data: &str, iterator: Option<&str>) -> Result<RowIter, String> {
+/// `null_is_absent`: a JSON `null` is no value (RML-IO). Off for a legacy
+/// mapping version, which read it as `""`.
+pub fn load(
+    source_data: &str,
+    iterator: Option<&str>,
+    null_is_absent: bool,
+) -> Result<RowIter, String> {
     let value: serde_json::Value =
         serde_json::from_str(source_data).map_err(|e| format!("JSON parse error: {e}"))?;
 
@@ -20,7 +26,7 @@ pub fn load(source_data: &str, iterator: Option<&str>) -> Result<RowIter, String
 
     let rows: Vec<Result<Row, String>> = array
         .into_iter()
-        .map(|item| flatten_json_object(&item))
+        .map(|item| flatten_json_object(&item, null_is_absent))
         .collect();
 
     Ok(Box::new(rows.into_iter()))
@@ -47,11 +53,14 @@ fn navigate_path(value: &serde_json::Value, path: &str) -> Result<serde_json::Va
 }
 
 /// Flatten a JSON object to a string map (shallow — nested objects become JSON strings).
-fn flatten_json_object(value: &serde_json::Value) -> Result<Row, String> {
+fn flatten_json_object(value: &serde_json::Value, null_is_absent: bool) -> Result<Row, String> {
     match value {
         serde_json::Value::Object(map) => {
             let mut row = HashMap::new();
             for (k, v) in map {
+                if null_is_absent && v.is_null() {
+                    continue;
+                }
                 let s = match v {
                     serde_json::Value::String(s) => s.clone(),
                     serde_json::Value::Number(n) => n.to_string(),

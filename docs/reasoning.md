@@ -5,10 +5,10 @@ Reasoning can be applied to materialise inferred triples across all named graphs
 | Profile | Best for | Notes |
 |---|---|---|
 | RDFS | Simple schema inference | Lowest overhead. Infers subclass hierarchies, property domains and ranges. |
-| OWL 2 QL | Large read-heavy datasets | No existentials. Uses query rewriting — minimal extra storage. |
+| OWL 2 QL | Large read-heavy datasets | DL-Lite_R closure: materialises ground atoms, checks consistency (disjointness, asymmetric/irreflexive properties, data ranges by value); existentials are answered through query blank nodes on `?entailment=owl2-ql`. No equality, keys or transitivity. |
 | OWL 2 EL | Life sciences (SNOMED-CT, Gene Ontology) | Supports existential restrictions. Polynomial time. |
 | OWL 2 RL | Rule-based integration with RDF | Materialises triples. Most complete; may significantly grow graph size. |
-| OWL 2 DL | Full OWL expressivity | Needs a backend (`OTS_DL_BACKEND`; 503 without one): Konclude or a reasoner sidecar for complete DL reasoning, or the native OWL 2 RL + DL-syntax rules (`hasSelf`, `ReflexiveProperty`, `disjointUnionOf`), which are sound but not complete. Input must be in OWL 2 DL (422 lists the violations). See [owl2-dl.md](owl2-dl.md). |
+| OWL 2 DL | Full OWL expressivity | Needs a backend (`OTS_DL_BACKEND`; 503 without one): the bundled OWL API + HermiT reasoner sidecar (`docker compose --profile reasoner`) or Konclude for complete DL reasoning, or the native OWL 2 RL + DL-syntax rules (`hasSelf`, `ReflexiveProperty`, `disjointUnionOf`), which are sound but not complete. Input must be in OWL 2 DL (422 lists the violations). See [owl2-dl.md](owl2-dl.md). |
 
 Reasoning is triggered via `POST /api/reasoning/materialize` with a JSON body:
 
@@ -38,9 +38,12 @@ the same.
 
 The response reports the run: `triples_added`, `iterations`, `elapsed_ms`,
 `target_graph`, `sources` (null: the unnamed default graph) and `consistent`
-— `true` when the regime checks consistency (`owl2-rl`, `owl2-dl`) and found
-nothing violated, `null` for a regime without inconsistency rules. Query the
-current status of all entailment graphs via `GET /api/reasoning/status`.
+— `true` when the regime checks consistency (`owl2-rl`, `owl2-el`, `owl2-ql`,
+`owl2-dl`) and found nothing violated, `null` for a regime without
+inconsistency rules. A regime that skips axioms outside its profile (OWL 2 QL)
+also reports `ignored_axioms`, their count, and `ignored_sample`, the first 20
+by construct and subject. Query the current status of all entailment graphs
+via `GET /api/reasoning/status`.
 
 **When the run fails.** An inconsistent ontology is a `422` naming the check
 that fired; the consequences derived before the check stay in the target
@@ -87,7 +90,7 @@ premise is a `200` carrying the fields above (`consistent: false`, `rule`,
 `detail`), because the check ran and that is its answer. See
 [owl2-dl.md](owl2-dl.md#check--post-apireasoningcheck).
 
-For OWL 2 QL you can rewrite a query against the schema instead of materialising — `POST /api/reasoning/rewrite` returns the expanded SPARQL. You can also fold an entailment graph into a single query by adding `?entailment=rdfs|owl2-rl|owl2-el|owl2-ql|owl2-dl` to a SPARQL request.
+For OWL 2 QL, `?entailment=owl2-ql` also rewrites the query's blank nodes so they match the anonymous elements the schema's existentials imply ([OWL 2 QL](owl2-ql.md)). `POST /api/reasoning/rewrite` returns a stand-alone rewriting that needs no materialised graph, computed from the schema in the graphs you may read. You can also fold an entailment graph into a single query by adding `?entailment=rdfs|owl2-rl|owl2-el|owl2-ql|owl2-dl` to a SPARQL request.
 
 ## Per-dataset entailment: selectable regime, materialisation toggle
 
@@ -214,3 +217,12 @@ reads whatever graphs it is given.
 ## SWRL rules
 
 Beyond the standard profiles, SWRL (Semantic Web Rule Language) Horn-clause rules derive new triples from custom *antecedent → consequent* patterns — useful for domain logic that doesn't fit an OWL profile. Submit rules to `POST /api/swrl/execute`.
+
+Rules are given as `"format": "text"` (`http://ex/A(?x) ^ http://ex/p(?x, ?y) -> http://ex/B(?y)`; absolute IRIs, no built-ins) or `"format": "xml"` (OWL/XML `DLSafeRule` elements, as written by the OWL API and Protégé). Derived triples go to `target_graph`, an absolute IRI, or to the default graph when it is omitted. Every rule is checked before any runs, and one the server cannot run as written refuses the whole request with `400`, so nothing is written:
+
+- an element the OWL/XML reader does not understand: class-expression atoms, `DataRangeAtom` and prefixed names are not supported yet;
+- an unsafe rule: a head variable the body does not bind, or a built-in variable only a built-in mentions (built-ins check values but cannot bind them);
+- a built-in in the head, or one outside the supported `swrlb:` comparisons, arithmetic, `stringConcat`, `contains` and `matches`;
+- a literal where an individual belongs, or the other way round.
+
+The response reports `iterations`, `triples_inferred` (what this run wrote to the target graph), and `converged` with its `stop_reason`: `fixpoint`, `max_iterations` or `timeout`. Execution counts against the server's limit on concurrent expensive operations and stops at the write timeout.

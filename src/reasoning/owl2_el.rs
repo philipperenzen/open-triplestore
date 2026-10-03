@@ -1,66 +1,135 @@
-//! OWL 2 EL profile — EL++ completion-rule classifier.
+//! OWL 2 EL profile — a native EL++ classifier.
 //!
-//! OWL 2 EL is the profile used for large biomedical ontologies (SNOMED CT,
-//! Gene Ontology).  It supports intersection, existential quantification,
-//! property chains, transitivity, reflexivity, domain/range, and hasKey.
+//! OWL 2 EL is the profile of large biomedical ontologies (SNOMED CT, the
+//! Gene Ontology). This module reads the ontology straight out of the quad
+//! index, normalizes it (`load.rs`), saturates it with the EL++ completion
+//! rules (`saturate.rs`) and writes what follows into the target graph:
 //!
-//! This implementation expresses the EL++ completion rules (CR1–CR6) as
-//! SPARQL INSERT operations executed in a fixed-point loop, writing the
-//! derived subsumption hierarchy into the `target_graph`.
+//! - **classification** — `rdfs:subClassOf` from every class IRI to each
+//!   class IRI and EL class expression that subsumes it, `owl:equivalentClass`
+//!   between equivalent class IRIs, `C rdfs:subClassOf owl:Nothing` for an
+//!   unsatisfiable class, and `owl:Thing rdfs:subClassOf C` when `C` is
+//!   equivalent to `owl:Thing`;
+//! - the **property hierarchy** — `rdfs:subPropertyOf` (and
+//!   `owl:equivalentProperty`) closed under inclusion;
+//! - **realization** — `rdf:type` from every individual to every class IRI
+//!   it belongs to (`owl:Nothing` when it belongs to none consistently);
+//! - the **property-assertion closure** between individuals (and to data
+//!   values): through sub-properties, chains of any length, transitivity,
+//!   reflexivity and self restrictions, and the edges `owl:hasValue` implies;
+//! - **equality** — `owl:sameAs` between individuals that keys, nominals or
+//!   asserted `owl:sameAs` make the same.
 //!
-//! # Completion Rules
+//! Only triples not already in a premise graph are written, through
+//! [`TripleStore::insert_quads`] so the graph index and change capture see
+//! them. The rules read the source graphs (or, unscoped, the unnamed default
+//! graph) plus the target graph itself.
 //!
-//! | Rule | Description                                              |
-//! |------|----------------------------------------------------------|
-//! | CR1  | subClassOf transitivity                                  |
-//! | CR2  | Intersection decomposition and composition               |
-//! | CR3  | Existential introduction (∃P.C ⊑ D → C ⊑ ∀P.D)         |
-//! | CR4  | Existential propagation along subClassOf                 |
-//! | CR5  | Property chains (P1 ∘ P2 ⊑ P)                           |
-//! | CR6  | Bottom propagation (owl:Nothing)                         |
-//! | CR7  | Role domain: ∃P.⊤ ⊑ A + x P y → x type A               |
-//! | CR8  | Role range: ⊤ ⊑ ∀P.A + x P y → y type A                |
-//! | CR9  | Reflexivity: P reflexive + x type C → x P x             |
-//! | CR10 | Arbitrary-length property chains (N-element)             |
+//! # Supported constructs (OWL 2 Profiles §2.2)
+//!
+//! Class expressions: class IRIs, `owl:Thing`, `owl:Nothing`,
+//! `owl:intersectionOf` of any arity, `owl:someValuesFrom`,
+//! `owl:hasValue` and `owl:hasSelf` over object properties, `owl:oneOf` of one
+//! individual; `owl:someValuesFrom` and `owl:hasValue` over data properties.
+//! Data ranges: the nineteen EL datatypes (`datatypes.rs`), datatypes declared
+//! in the ontology (and their definitions), intersections, `owl:oneOf` of one
+//! literal. Axioms: `rdfs:subClassOf`, `owl:equivalentClass`,
+//! `owl:disjointWith`, `owl:AllDisjointClasses`, `rdfs:subPropertyOf`,
+//! `owl:equivalentProperty`, `owl:propertyChainAxiom`, `owl:TransitiveProperty`,
+//! `owl:ReflexiveProperty`, `rdfs:domain`, `rdfs:range` (object and data),
+//! `owl:FunctionalProperty` on data properties, `owl:hasKey`, `owl:sameAs`,
+//! `owl:differentFrom`, `owl:AllDifferent`, `owl:NegativePropertyAssertion`,
+//! class and property assertions. Literals compare by value.
+//!
+//! What the loader cannot use — constructs outside the profile, such as
+//! unions, universals, cardinalities, inverse properties or functional object
+//! properties — is counted per construct in [`ReasoningReport::ignored`].
+//! Leaving an axiom out never adds a wrong consequence, it only loses some.
+//!
+//! # Consistency
+//!
+//! An EL ontology is inconsistent when `owl:Thing ⊑ owl:Nothing`, an
+//! individual is an instance of `owl:Nothing` (directly, through its classes
+//! and successors, by being typed with two disjoint classes, by being the
+//! same as an individual it is different from, or by having a property value
+//! a negative property assertion denies), or a literal is ill-typed or
+//! outside a data range it must be in (a functional data property with two
+//! values, say). An
+//! unsatisfiable *class* without instances is not an inconsistency;
+//! [`El2Classifier::unsatisfiable_classes`] lists those.
+//! [`El2Classifier::classify`] fails with [`ReasoningError::Inconsistency`]
+//! after writing what it derived.
+// The binary re-declares the library's modules; the inspection methods
+// below are used by the library and its tests only.
 #![allow(dead_code)]
 
+mod datatypes;
+mod load;
+mod saturate;
+
 use std::time::Instant;
-use tracing::{debug, info};
 
-use super::common::{count_graph, ReasoningError, ReasoningReport, OWL2_EL_ENTAILMENT_GRAPH};
+use oxigraph::model::{GraphName, NamedNode, NamedOrBlankNode, Quad, Term};
+use tracing::info;
+
+use super::common::{IgnoredAxioms, ReasoningError, ReasoningReport, OWL2_EL_ENTAILMENT_GRAPH};
 use crate::store::TripleStore;
-
-const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-const RDFS_SUB_CLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
-const OWL_INTERSECTION_OF: &str = "http://www.w3.org/2002/07/owl#intersectionOf";
-const OWL_SOME_VALUES_FROM: &str = "http://www.w3.org/2002/07/owl#someValuesFrom";
-const OWL_ON_PROPERTY: &str = "http://www.w3.org/2002/07/owl#onProperty";
-const OWL_PROP_CHAIN_AXIOM: &str = "http://www.w3.org/2002/07/owl#propertyChainAxiom";
-const OWL_NOTHING: &str = "http://www.w3.org/2002/07/owl#Nothing";
-const OWL_THING: &str = "http://www.w3.org/2002/07/owl#Thing";
-const OWL_ALL_VALUES_FROM: &str = "http://www.w3.org/2002/07/owl#allValuesFrom";
-const OWL_REFLEXIVE_PROPERTY: &str = "http://www.w3.org/2002/07/owl#ReflexiveProperty";
-const OWL_HAS_KEY: &str = "http://www.w3.org/2002/07/owl#hasKey";
-const OWL_SAME_AS: &str = "http://www.w3.org/2002/07/owl#sameAs";
-const RDFS_DOMAIN: &str = "http://www.w3.org/2000/01/rdf-schema#domain";
-const RDFS_RANGE: &str = "http://www.w3.org/2000/01/rdf-schema#range";
-const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
-const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
-const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
-
-const MAX_ITERATIONS: usize = 500;
+use load::{Kind, Loaded, Tid, OWL, RDFS};
+use saturate::{Cid, FxMap, FxSet, Saturation, BOTTOM, TOP};
 
 /// OWL 2 EL++ classifier.
 pub struct El2Classifier<'a> {
     store: &'a TripleStore,
     target_graph: String,
     /// When set, the rules read ONLY these graphs (plus the target graph).
-    /// Without it they read the unnamed default graph plus the target graph
-    /// (`TripleStore::update_over`), so rules see their own consequences.
+    /// Without it they read the unnamed default graph (plus the target).
     sources: Option<Vec<String>>,
+    /// Check consistency after saturation and fail with
+    /// [`ReasoningError::Inconsistency`] when the ontology is inconsistent.
+    pub detect_inconsistency: bool,
+}
+
+/// Why an ontology is inconsistent: the rule id and a sentence.
+struct Clash {
+    rule: &'static str,
+    detail: String,
+}
+
+/// A saturated ontology.
+struct Saturated {
+    loaded: Loaded,
+    sat: Saturation,
+    /// Rounds of saturation (keys can merge individuals, which needs another).
+    rounds: usize,
+    /// Subsumers of the classes that needed a hypothetical instance (see
+    /// [`Saturation::hypothetical_subsumers`]); the rest read `sat` directly.
+    hypothetical: FxMap<Cid, FxSet<Cid>>,
+}
+
+impl Saturated {
+    /// The subsumers of class `c`.
+    fn subs(&self, c: Cid) -> Option<&FxSet<Cid>> {
+        self.hypothetical
+            .get(&c)
+            .or_else(|| self.sat.context(c).map(|cx| &cx.subs))
+    }
 }
 
 impl<'a> El2Classifier<'a> {
+    pub fn new(store: &'a TripleStore) -> Self {
+        Self {
+            store,
+            target_graph: OWL2_EL_ENTAILMENT_GRAPH.to_string(),
+            sources: None,
+            detect_inconsistency: true,
+        }
+    }
+
+    pub fn with_target(mut self, graph: impl Into<String>) -> Self {
+        self.target_graph = graph.into();
+        self
+    }
+
     /// Restrict the rules to `sources` (plus the target graph). Without a
     /// scope the rules read the unnamed default graph and the target graph, so
     /// a dataset's named graphs — and the model version it conforms to — are
@@ -71,547 +140,460 @@ impl<'a> El2Classifier<'a> {
         self
     }
 
-    fn scope(&self) -> Option<Vec<String>> {
-        self.sources.as_ref().map(|s| {
-            let mut g = s.clone();
-            if !g.contains(&self.target_graph) {
-                g.push(self.target_graph.clone());
-            }
-            g
-        })
-    }
-
-    fn run_update(&self, sparql: &str) -> Result<(), crate::store::engine::StoreError> {
-        match self.scope() {
-            Some(scope) => self.store.update_scoped(sparql, &scope),
-            None => self
-                .store
-                .update_over(sparql, std::slice::from_ref(&self.target_graph)),
+    /// The graphs the rules read: the sources (or the default graph) and the
+    /// target graph.
+    fn premise_graphs(&self) -> Vec<Option<String>> {
+        let mut graphs: Vec<Option<String>> = match &self.sources {
+            Some(s) => s.iter().cloned().map(Some).collect(),
+            None => vec![None],
+        };
+        let target = Some(self.target_graph.clone());
+        if !graphs.contains(&target) {
+            graphs.push(target);
         }
+        graphs
     }
 
-    fn run_query(
-        &self,
-        sparql: &str,
-    ) -> Result<oxigraph::sparql::QueryResults<'static>, crate::store::engine::StoreError> {
-        match self.scope() {
-            Some(scope) => self.store.query_scoped(sparql, &scope),
-            None => self
-                .store
-                .query_over(sparql, std::slice::from_ref(&self.target_graph)),
+    fn saturate(&self) -> Result<Saturated, ReasoningError> {
+        let mut loaded = load::load(self.store, &self.premise_graphs())?;
+        let mut sat = Saturation::new(std::mem::take(&mut loaded.ax));
+        sat.init(TOP);
+        for &c in &loaded.classes {
+            sat.init(c);
         }
-    }
-
-    pub fn new(store: &'a TripleStore) -> Self {
-        Self {
-            store,
-            target_graph: OWL2_EL_ENTAILMENT_GRAPH.to_string(),
-            sources: None,
+        for &x in &loaded.individuals {
+            sat.init(x);
         }
-    }
-
-    pub fn with_target(mut self, graph: impl Into<String>) -> Self {
-        self.target_graph = graph.into();
-        self
-    }
-
-    /// Classify the ontology and return a report.
-    pub fn classify(&self) -> Result<ReasoningReport, ReasoningError> {
-        let start = Instant::now();
-        let mut iterations = 0usize;
-        // Report the delta this run produced, not the graph's final size.
-        let initial = count_graph(self.store, &self.target_graph)?;
-
-        info!("OWL 2 EL classification → <{}>", self.target_graph);
-
+        for &(x, r, y) in &loaded.edges {
+            sat.add_link(x, r, y);
+        }
+        sat.run();
+        // Keys: individuals that agree on a key are the same, which can make
+        // more individuals agree. Each round merges at least one pair.
+        let mut rounds = 1;
         loop {
-            iterations += 1;
-            let before = count_graph(self.store, &self.target_graph)?;
-
-            self.rule_cr1()?;
-            self.rule_cr2()?;
-            self.rule_cr3()?;
-            self.rule_cr4()?;
-            self.rule_cr5()?;
-            self.rule_cr6()?;
-            self.rule_cr7()?;
-            self.rule_cr8()?;
-            self.rule_cr9()?;
-            self.rule_cr10()?;
-            self.rule_has_key()?;
-            self.rule_abox_typing()?;
-            self.rule_abox_intersection()?;
-            self.rule_abox_existential()?;
-
-            let after = count_graph(self.store, &self.target_graph)?;
-            debug!(
-                "EL iteration {}: +{} triples",
-                iterations,
-                after.saturating_sub(before)
-            );
-            if after == before {
+            let same = key_matches(&loaded, &sat);
+            if same.is_empty() {
                 break;
             }
-            if iterations >= MAX_ITERATIONS {
-                return Err(ReasoningError::NotConverged {
-                    regime: "owl2-el".to_string(),
-                    iterations,
-                });
+            for (x, y) in same {
+                sat.add_sub(x, y);
+                sat.add_sub(y, x);
+            }
+            sat.run();
+            rounds += 1;
+        }
+        // Classes whose subsumers may rest on two reachable contexts being
+        // the same nominal get a hypothetical instance (consistent ontologies
+        // only: in an inconsistent one every subsumption holds).
+        let mut hypothetical: FxMap<Cid, FxSet<Cid>> = FxMap::default();
+        if inconsistency(&loaded, &sat).is_none() && sat.has_unreached_nominal_members() {
+            for &c in &loaded.classes {
+                if sat.needs_hypothesis(c) {
+                    hypothetical.insert(c, sat.hypothetical_subsumers(c));
+                }
             }
         }
-
-        let final_count = count_graph(self.store, &self.target_graph)?;
-        info!(
-            "EL classification complete: {} triples in {} iterations ({} ms)",
-            final_count,
-            iterations,
-            start.elapsed().as_millis()
-        );
-
-        Ok(ReasoningReport {
-            regime: "owl2-el".to_string(),
-            triples_added: final_count.saturating_sub(initial),
-            iterations,
-            elapsed_ms: start.elapsed().as_millis() as u64,
-            target_graph: self.target_graph.clone(),
+        Ok(Saturated {
+            loaded,
+            sat,
+            rounds,
+            hypothetical,
         })
     }
 
-    /// Check whether the ontology is consistent (owl:Nothing has no subclasses
-    /// other than itself).
-    pub fn check_consistency(&self) -> Result<bool, ReasoningError> {
-        let q = format!(
-            "ASK {{ ?c <{RDFS_SUB_CLASS_OF}> <{OWL_NOTHING}> . FILTER(?c != <{OWL_NOTHING}>) }}"
+    /// Classify the ontology, write the consequences into the target graph
+    /// and return a report.
+    ///
+    /// Fails with [`ReasoningError::Inconsistency`] when the ontology is
+    /// inconsistent and `detect_inconsistency` is set; what was derived stays
+    /// in the target graph.
+    pub fn classify(&self) -> Result<ReasoningReport, ReasoningError> {
+        let start = Instant::now();
+        info!("OWL 2 EL classification → <{}>", self.target_graph);
+        let mut s = self.saturate()?;
+        let derived = derived_triples(&mut s);
+        let Saturated {
+            loaded,
+            sat,
+            rounds,
+            ..
+        } = s;
+        let graph = GraphName::NamedNode(
+            NamedNode::new(self.target_graph.as_str())
+                .map_err(|e| ReasoningError::Store(format!("target graph: {e}")))?,
         );
-        match self.run_query(&q)? {
-            oxigraph::sparql::QueryResults::Boolean(b) => Ok(!b),
-            _ => Ok(true),
+        let quads: Vec<Quad> = derived
+            .into_iter()
+            .filter_map(|(s, p, o)| {
+                let subject = match loaded.term(s) {
+                    Term::NamedNode(n) => NamedOrBlankNode::NamedNode(n.clone()),
+                    Term::BlankNode(b) => NamedOrBlankNode::BlankNode(b.clone()),
+                    _ => return None,
+                };
+                let Term::NamedNode(predicate) = loaded.term(p) else {
+                    return None;
+                };
+                Some(Quad::new(
+                    subject,
+                    predicate.clone(),
+                    loaded.term(o).clone(),
+                    graph.clone(),
+                ))
+            })
+            .collect();
+        let added = quads.len();
+        if !quads.is_empty() {
+            self.store.insert_quads(quads)?;
         }
+        info!(
+            "EL classification complete: +{} triples, {} contexts, {} rule steps ({} ms)",
+            added,
+            sat.contexts().count(),
+            sat.steps,
+            start.elapsed().as_millis()
+        );
+        if self.detect_inconsistency {
+            if let Some(clash) = inconsistency(&loaded, &sat) {
+                return Err(ReasoningError::inconsistency(clash.rule, clash.detail));
+            }
+        }
+        Ok(ReasoningReport {
+            regime: "owl2-el".to_string(),
+            triples_added: added,
+            iterations: rounds,
+            elapsed_ms: start.elapsed().as_millis() as u64,
+            target_graph: self.target_graph.clone(),
+            ignored: loaded
+                .ignored
+                .iter()
+                .map(|(construct, (count, example))| IgnoredAxioms {
+                    construct: construct.to_string(),
+                    count: *count,
+                    example: example.clone(),
+                })
+                .collect(),
+            ..Default::default()
+        })
     }
 
-    // ─── CR1: subClassOf transitivity ────────────────────────────────────────
-
-    fn rule_cr1(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?c1 <{RDFS_SUB_CLASS_OF}> ?c3 }} }}
-               WHERE  {{ ?c1 <{RDFS_SUB_CLASS_OF}> ?c2 .
-                         ?c2 <{RDFS_SUB_CLASS_OF}> ?c3 .
-                         FILTER(?c1 != ?c3) }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
+    /// Whether the ontology is consistent: no individual is an instance of
+    /// `owl:Nothing` or of two disjoint classes, and `owl:Thing ⊑ owl:Nothing`
+    /// does not hold. Saturates afresh; writes nothing.
+    ///
+    /// An unsatisfiable class (`C ⊑ owl:Nothing`) is *not* an inconsistency
+    /// on its own — see [`unsatisfiable_classes`](Self::unsatisfiable_classes).
+    pub fn check_consistency(&self) -> Result<bool, ReasoningError> {
+        let s = self.saturate()?;
+        Ok(inconsistency(&s.loaded, &s.sat).is_none())
     }
 
-    // ─── CR2: intersection ───────────────────────────────────────────────────
-    // If A ⊑ B₁ ∩ B₂ and B₁ ∩ B₂ ⊑ D, then A ⊑ D.
-    // Also: if A ⊑ B₁ and A ⊑ B₂ and (B₁ ∩ B₂) ⊑ D, then A ⊑ D.
-
-    fn rule_cr2(&self) -> Result<(), ReasoningError> {
-        // Propagate through intersectionOf: ?c subClassOf each operand
-        let q1 = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?c <{RDFS_SUB_CLASS_OF}> ?op }} }}
-               WHERE {{
-                   ?c <{OWL_INTERSECTION_OF}> ?list .
-                   ?list (<{RDF_FIRST}>|(<{RDF_REST}>+ /<{RDF_FIRST}>)) ?op .
-                   FILTER(?op != <{RDF_NIL}>)
-               }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q1)?;
-
-        // Join: if A ⊑ B1 and A ⊑ B2 and (B1 ∩ B2 exists as a class) → A ⊑ (B1 ∩ B2)
-        let q2 = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?a <{RDFS_SUB_CLASS_OF}> ?c }} }}
-               WHERE {{
-                   ?c <{OWL_INTERSECTION_OF}> ?list .
-                   ?list <{RDF_FIRST}> ?b1 ;
-                         <{RDF_REST}>  ?rest .
-                   ?rest <{RDF_FIRST}> ?b2 ;
-                         <{RDF_REST}>  <{RDF_NIL}> .
-                   ?a <{RDFS_SUB_CLASS_OF}> ?b1 .
-                   ?a <{RDFS_SUB_CLASS_OF}> ?b2 .
-                   FILTER(?a != ?c)
-               }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q2)?;
-        Ok(())
-    }
-
-    // ─── CR3: existential introduction ────────────────────────────────────────
-    // If A ⊑ ∃P.B and B ⊑ C → A ⊑ ∃P.C
-
-    fn rule_cr3(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?restr2 <{RDFS_SUB_CLASS_OF}> ?a }} }}
-               WHERE {{
-                   ?restr1 <{OWL_SOME_VALUES_FROM}> ?b .
-                   ?restr1 <{OWL_ON_PROPERTY}> ?p .
-                   ?restr2 <{OWL_SOME_VALUES_FROM}> ?c .
-                   ?restr2 <{OWL_ON_PROPERTY}> ?p .
-                   ?b <{RDFS_SUB_CLASS_OF}> ?c .
-                   ?a <{RDFS_SUB_CLASS_OF}> ?restr1 .
-                   FILTER(?restr1 != ?restr2) FILTER(?b != ?c)
-               }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ─── CR4: existential propagation ─────────────────────────────────────────
-    // If A ⊑ ∃P.B and ∃P.B ⊑ C → A ⊑ C
-
-    fn rule_cr4(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?a <{RDFS_SUB_CLASS_OF}> ?c }} }}
-               WHERE {{
-                   ?restr <{OWL_SOME_VALUES_FROM}> ?b .
-                   ?restr <{OWL_ON_PROPERTY}> ?p .
-                   ?restr <{RDFS_SUB_CLASS_OF}> ?c .
-                   ?a <{RDFS_SUB_CLASS_OF}> ?restr .
-                   FILTER(?a != ?c)
-               }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ─── CR5: property chains ─────────────────────────────────────────────────
-    // ?p owl:propertyChainAxiom (?p1 ?p2) — propagate instances
-
-    fn rule_cr5(&self) -> Result<(), ReasoningError> {
-        // Two-element chain: p ← p1 ∘ p2
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?x ?p ?z }} }}
-               WHERE {{
-                   ?p <{OWL_PROP_CHAIN_AXIOM}> ?list .
-                   ?list <{RDF_FIRST}> ?p1 ;
-                         <{RDF_REST}>  ?rest .
-                   ?rest <{RDF_FIRST}> ?p2 ;
-                         <{RDF_REST}>  <{RDF_NIL}> .
-                   ?x ?p1 ?y .
-                   ?y ?p2 ?z .
-               }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ─── CR6: bottom propagation ──────────────────────────────────────────────
-    // If A ⊑ owl:Nothing → all descendants of A also ⊑ owl:Nothing
-
-    fn rule_cr6(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?c <{RDFS_SUB_CLASS_OF}> <{OWL_NOTHING}> }} }}
-               WHERE {{
-                   ?c <{RDFS_SUB_CLASS_OF}> ?d .
-                   ?d <{RDFS_SUB_CLASS_OF}> <{OWL_NOTHING}> .
-                   FILTER(?c != <{OWL_NOTHING}>)
-               }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ─── CR7: role domain propagation ────────────────────────────────────────
-    // ∃P.⊤ ⊑ A (expressed as rdfs:domain) + x P y → x type A
-    // This handles the EL pattern where domain constraints imply class membership.
-
-    fn rule_cr7(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?a }} }}
-               WHERE {{ ?p <{RDFS_DOMAIN}> ?a . ?x ?p ?y }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ─── CR8: role range propagation ─────────────────────────────────────────
-    // ⊤ ⊑ ∀P.A (expressed as rdfs:range) + x P y → y type A
-
-    fn rule_cr8(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?y <{RDF_TYPE}> ?a }} }}
-               WHERE {{ ?p <{RDFS_RANGE}> ?a . ?x ?p ?y .
-                        FILTER(isIRI(?y) || isBlank(?y)) }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ─── CR9: reflexivity ────────────────────────────────────────────────────
-    // P is ReflexiveProperty → for every individual x, x P x
-
-    fn rule_cr9(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?x ?p ?x }} }}
-               WHERE {{ ?p <{RDF_TYPE}> <{OWL_REFLEXIVE_PROPERTY}> .
-                        ?x ?p2 ?o . FILTER(isIRI(?x))
-               }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ─── CR10: arbitrary-length property chains ──────────────────────────────
-    // Three-element chains: p ← p1 ∘ p2 ∘ p3
-
-    fn rule_cr10(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?x ?p ?w }} }}
-               WHERE {{
-                   ?p <{OWL_PROP_CHAIN_AXIOM}> ?list .
-                   ?list <{RDF_FIRST}> ?p1 ;
-                         <{RDF_REST}>  ?r1 .
-                   ?r1   <{RDF_FIRST}> ?p2 ;
-                         <{RDF_REST}>  ?r2 .
-                   ?r2   <{RDF_FIRST}> ?p3 ;
-                         <{RDF_REST}>  <{RDF_NIL}> .
-                   ?x ?p1 ?y .
-                   ?y ?p2 ?z .
-                   ?z ?p3 ?w .
-               }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ─── ABox: individual type propagation ──────────────────────────────────
-    // x type C, C subClassOf D → x type D  (applies TBox to individuals)
-
-    fn rule_abox_typing(&self) -> Result<(), ReasoningError> {
-        // Search both the default graph and the target graph for subClassOf,
-        // since CR1 writes transitive closures into the target graph.
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?d }} }}
-               WHERE {{
-                   {{ ?x <{RDF_TYPE}> ?c }}
-                   UNION
-                   {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?c }} }}
-                   {{
-                       {{ ?c <{RDFS_SUB_CLASS_OF}> ?d }}
-                       UNION
-                       {{ GRAPH <{tg}> {{ ?c <{RDFS_SUB_CLASS_OF}> ?d }} }}
-                   }}
-                   FILTER(?c != ?d && isIRI(?x))
-               }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ─── ABox: intersection membership for individuals ───────────────────────
-    // x type A1, x type A2, C intersectionOf (A1 A2) → x type C
-
-    fn rule_abox_intersection(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?c }} }}
-               WHERE {{
-                   ?c <{OWL_INTERSECTION_OF}> ?list .
-                   ?list <{RDF_FIRST}> ?a1 ;
-                         <{RDF_REST}>  ?rest .
-                   ?rest <{RDF_FIRST}> ?a2 ;
-                         <{RDF_REST}>  <{RDF_NIL}> .
-                   {{ ?x <{RDF_TYPE}> ?a1 }} UNION {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?a1 }} }}
-                   {{ ?x <{RDF_TYPE}> ?a2 }} UNION {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?a2 }} }}
-                   FILTER(isIRI(?x))
-               }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ─── ABox: existential restriction membership ────────────────────────────
-    // x P y, y type B, [someValuesFrom B, onProperty P] subClassOf C → x type C
-
-    fn rule_abox_existential(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?c }} }}
-               WHERE {{
-                   ?restr <{OWL_SOME_VALUES_FROM}> ?b ;
-                          <{OWL_ON_PROPERTY}> ?p .
-                   ?restr <{RDFS_SUB_CLASS_OF}> ?c .
-                   ?x ?p ?y .
-                   ?y <{RDF_TYPE}> ?b .
-                   FILTER(isIRI(?x))
-               }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
-    }
-
-    // ─── hasKey for EL ───────────────────────────────────────────────────────
-    // Reuses RL pattern: C hasKey (p) . x type C . y type C . x p v . y p v → x sameAs y
-
-    fn rule_has_key(&self) -> Result<(), ReasoningError> {
-        let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?x <{OWL_SAME_AS}> ?y }} }}
-               WHERE {{
-                   ?c <{OWL_HAS_KEY}> ?list .
-                   ?list <{RDF_FIRST}> ?p ;
-                         <{RDF_REST}>  <{RDF_NIL}> .
-                   ?x <{RDF_TYPE}> ?c .
-                   ?y <{RDF_TYPE}> ?c .
-                   ?x ?p ?v .
-                   ?y ?p ?v .
-                   FILTER(?x != ?y) FILTER(isIRI(?x)) FILTER(isIRI(?y))
-               }}"#,
-            tg = self.target_graph
-        );
-        self.run_update(&q)?;
-        Ok(())
+    /// The class IRIs other than `owl:Nothing` that are subclasses of
+    /// `owl:Nothing`, sorted. Saturates afresh; writes nothing.
+    pub fn unsatisfiable_classes(&self) -> Result<Vec<String>, ReasoningError> {
+        let s = self.saturate()?;
+        let mut out: Vec<String> = s
+            .loaded
+            .classes
+            .iter()
+            .filter(|&&c| s.subs(c).is_some_and(|subs| subs.contains(&BOTTOM)))
+            .filter_map(|&c| match s.loaded.kind(c) {
+                Kind::Class(t) => match s.loaded.term(t) {
+                    Term::NamedNode(n) => Some(n.as_str().to_string()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        Ok(out)
     }
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::store::TripleStore;
-    use oxigraph::io::RdfFormat;
-
-    fn store_with(ttl: &str) -> TripleStore {
-        let s = TripleStore::in_memory().unwrap();
-        let preamble = "@prefix owl:  <http://www.w3.org/2002/07/owl#> .
-                        @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
-                        @prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
-                        @prefix ex:   <http://example.org/> .\n";
-        s.load_str(&format!("{preamble}{ttl}"), RdfFormat::Turtle, None)
-            .unwrap();
-        s
+/// The first reason the saturated ontology is inconsistent, if any. The rule
+/// ids follow the OWL 2 RL names for the same clash where there is one. The
+/// checks go from the most specific cause to the least: an ill-typed
+/// literal, two values of a functional property, a value outside a range,
+/// then an individual's classes.
+fn inconsistency(loaded: &Loaded, sat: &Saturation) -> Option<Clash> {
+    if sat.subsumes(TOP, BOTTOM) {
+        return Some(Clash {
+            rule: "el-top-bottom",
+            detail: "owl:Thing is a subclass of owl:Nothing".to_string(),
+        });
     }
+    let name = |c: Cid| match loaded.kind(c) {
+        Kind::Individual(t) | Kind::Literal(t) | Kind::Class(t) => loaded.term(t).to_string(),
+        _ => "a class expression".to_string(),
+    };
+    for &v in &loaded.ill_typed {
+        if sat.subsumes(v, BOTTOM) {
+            return Some(Clash {
+                rule: "dt-not-type",
+                detail: format!("{} is ill-typed", name(v)),
+            });
+        }
+    }
+    let clashing: Vec<(Cid, &saturate::Context)> = loaded
+        .individuals
+        .iter()
+        .filter_map(|&x| sat.context(x).map(|cx| (x, cx)))
+        .filter(|(_, cx)| cx.subs.contains(&BOTTOM))
+        .collect();
+    for &(x, cx) in &clashing {
+        for &r in &sat.axioms().functional {
+            let values: FxSet<Cid> = cx
+                .succ
+                .get(&r)
+                .into_iter()
+                .flatten()
+                .filter_map(|&y| sat.context(y))
+                .flat_map(|ycx| ycx.noms.iter().copied())
+                .collect();
+            if values.len() > 1 {
+                let p = loaded.role_terms[r as usize]
+                    .map(|t| loaded.term(t).to_string())
+                    .unwrap_or_default();
+                return Some(Clash {
+                    rule: "prp-fp",
+                    detail: format!("{} has two values for the functional property {p}", name(x)),
+                });
+            }
+        }
+    }
+    for &v in loaded.literal_terms.keys() {
+        if sat.subsumes(v, BOTTOM) {
+            return Some(Clash {
+                rule: "dt-not-type",
+                detail: format!(
+                    "{} is outside a data range it is required to be in",
+                    name(v)
+                ),
+            });
+        }
+    }
+    let conj = &sat.axioms().conj;
+    let (x, cx) = *clashing.first()?;
+    let pair = cx.subs.iter().find_map(|&a| {
+        conj.get(&a).and_then(|entries| {
+            entries
+                .iter()
+                .find(|&&(a2, b)| b == BOTTOM && cx.subs.contains(&a2))
+                .map(|&(a2, _)| (a, a2))
+        })
+    });
+    let n = name(x);
+    Some(match pair {
+        Some((a, b)) if sat.is_nominal(a) && sat.is_nominal(b) => Clash {
+            rule: "eq-diff1",
+            detail: format!(
+                "{} and {} are the same individual and different ones",
+                name(a),
+                name(b)
+            ),
+        },
+        Some((a, b))
+            if loaded.negative_assertions.contains(&a)
+                || loaded.negative_assertions.contains(&b) =>
+        {
+            Clash {
+                rule: "prp-npa1",
+                detail: format!("{n} has a property value a negative property assertion denies"),
+            }
+        }
+        Some(_) => Clash {
+            rule: "cax-dw",
+            detail: format!("{n} is an instance of two disjoint classes"),
+        },
+        None => Clash {
+            rule: "cls-nothing2",
+            detail: format!("{n} is an instance of owl:Nothing"),
+        },
+    })
+}
 
-    fn ask(store: &TripleStore, sparql: &str) -> bool {
-        match store.query(sparql).unwrap() {
-            oxigraph::sparql::QueryResults::Boolean(b) => b,
-            _ => false,
+/// Every entailed triple of the output vocabulary not already a premise.
+fn derived_triples(s: &mut Saturated) -> Vec<(Tid, Tid, Tid)> {
+    let v = s.loaded.vocab;
+    let equivalent_class = s.loaded.iri(&format!("{OWL}equivalentClass"));
+    let sub_property_of = s.loaded.iri(&format!("{RDFS}subPropertyOf"));
+    let equivalent_property = s.loaded.iri(&format!("{OWL}equivalentProperty"));
+    let s = &*s;
+    let (loaded, sat) = (&s.loaded, &s.sat);
+    let mut out: Vec<(Tid, Tid, Tid)> = Vec::new();
+    let mut seen: FxSet<(Tid, Tid, Tid)> = FxSet::default();
+    let mut emit = |t: (Tid, Tid, Tid)| {
+        if !loaded.premises.contains(&t) && seen.insert(t) {
+            out.push(t);
+        }
+    };
+
+    // Classification.
+    for &c in &loaded.classes {
+        let (Kind::Class(ct), Some(subs)) = (loaded.kind(c), s.subs(c)) else {
+            continue;
+        };
+        let unsat = subs.contains(&BOTTOM);
+        for &a in subs {
+            if a == c || a == TOP {
+                continue;
+            }
+            if a == BOTTOM {
+                emit((ct, v.sub_class_of, v.nothing));
+                continue;
+            }
+            match loaded.kind(a) {
+                Kind::Class(at) => {
+                    emit((ct, v.sub_class_of, at));
+                    if !unsat && s.subs(a).is_some_and(|sa| sa.contains(&c)) {
+                        emit((ct, equivalent_class, at));
+                    }
+                }
+                Kind::Expr(at) if loaded.defined_exprs.contains(&a) => {
+                    emit((ct, v.sub_class_of, at));
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some(ctx) = sat.context(TOP) {
+        for &a in &ctx.subs {
+            match loaded.kind(a) {
+                Kind::Class(at) => emit((v.thing, v.sub_class_of, at)),
+                _ if a == BOTTOM => emit((v.thing, v.sub_class_of, v.nothing)),
+                _ => {}
+            }
         }
     }
 
-    const TG: &str = OWL2_EL_ENTAILMENT_GRAPH;
-
-    #[test]
-    fn test_el_subclass_transitivity() {
-        let s = store_with(
-            "ex:A rdfs:subClassOf ex:B .
-             ex:B rdfs:subClassOf ex:C .",
-        );
-        El2Classifier::new(&s).classify().unwrap();
-        assert!(ask(
-            &s,
-            &format!(
-                "ASK {{ GRAPH <{TG}> {{ \
-                 <http://example.org/A> <{RDFS_SUB_CLASS_OF}> <http://example.org/C> \
-                 }} }}"
-            )
-        ));
+    // The property hierarchy.
+    for (r, rt) in loaded.role_terms.iter().enumerate() {
+        let Some(rt) = *rt else { continue };
+        for &s in sat.sup_star(r as u32) {
+            if s as usize == r {
+                continue;
+            }
+            let Some(Some(st)) = loaded.role_terms.get(s as usize) else {
+                continue;
+            };
+            emit((rt, sub_property_of, *st));
+            if sat.sup_star(s).contains(&(r as u32)) {
+                emit((rt, equivalent_property, *st));
+            }
+        }
     }
 
-    #[test]
-    fn test_el_consistency_ok() {
-        let s = store_with("ex:A rdfs:subClassOf ex:B .");
-        El2Classifier::new(&s).classify().unwrap();
-        assert!(El2Classifier::new(&s).check_consistency().unwrap());
+    // Realization and the property-assertion closure.
+    for &x in &loaded.individuals {
+        let (Kind::Individual(xt), Some(ctx)) = (loaded.kind(x), sat.context(x)) else {
+            continue;
+        };
+        for &a in &ctx.subs {
+            match loaded.kind(a) {
+                Kind::Class(at) => emit((xt, v.rdf_type, at)),
+                _ if a == BOTTOM => emit((xt, v.rdf_type, v.nothing)),
+                _ => {}
+            }
+        }
+        for (&r, ys) in &ctx.succ {
+            let Some(Some(rt)) = loaded.role_terms.get(r as usize) else {
+                continue;
+            };
+            // An edge to any context that is a nominal — an individual, a
+            // value, or a `hasValue` filler — is an edge to that nominal.
+            let mut targets: FxSet<Cid> = FxSet::default();
+            for &y in ys {
+                if let Some(ycx) = sat.context(y) {
+                    targets.extend(ycx.noms.iter().copied());
+                }
+            }
+            for n in targets {
+                match loaded.kind(n) {
+                    Kind::Individual(yt) => emit((xt, *rt, yt)),
+                    Kind::Literal(yt) => {
+                        // Stated already with an equal value in another form?
+                        let terms = loaded.literal_terms.get(&n);
+                        if !terms.is_some_and(|ts| {
+                            ts.iter().any(|t| loaded.premises.contains(&(xt, *rt, *t)))
+                        }) {
+                            emit((xt, *rt, yt));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Equality: other individuals among x's nominals.
+        for &n in &ctx.noms {
+            if let (true, Kind::Individual(yt)) = (n != x, loaded.kind(n)) {
+                emit((xt, v.same_as, yt));
+            }
+        }
     }
+    out
+}
 
-    #[test]
-    fn test_el_cr7_domain_propagation() {
-        let s = store_with(
-            "ex:knows rdfs:domain ex:Person .
-             ex:alice ex:knows ex:bob .",
-        );
-        El2Classifier::new(&s).classify().unwrap();
-        assert!(ask(
-            &s,
-            &format!(
-                "ASK {{ GRAPH <{TG}> {{ \
-                 <http://example.org/alice> <{RDF_TYPE}> <http://example.org/Person> \
-                 }} }}"
-            )
-        ));
+/// Pairs of distinct named individuals that are both instances of a key's
+/// class and share a value for every key property (OWL 2 keys are
+/// DL-safe: they apply to named individuals only).
+fn key_matches(loaded: &Loaded, sat: &Saturation) -> Vec<(Cid, Cid)> {
+    let mut out: Vec<(Cid, Cid)> = Vec::new();
+    for (class, props) in &loaded.keys {
+        // Each member's values, per key property.
+        let mut members: Vec<(Cid, Vec<FxSet<Cid>>)> = Vec::new();
+        for &x in &loaded.individuals {
+            let Kind::Individual(t) = loaded.kind(x) else {
+                continue;
+            };
+            if !matches!(loaded.term(t), Term::NamedNode(_)) || !sat.subsumes(x, *class) {
+                continue;
+            }
+            let ctx = sat.context(x).expect("individual contexts exist");
+            // The values of a key property: the nominals of its successors
+            // (an individual, a data value, or a filler known to be one).
+            let values: Vec<FxSet<Cid>> = props
+                .iter()
+                .map(|p| {
+                    ctx.succ
+                        .get(p)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|&y| sat.context(y))
+                        .flat_map(|ycx| ycx.noms.iter().copied())
+                        .collect()
+                })
+                .collect();
+            if values.iter().all(|v| !v.is_empty()) {
+                members.push((x, values));
+            }
+        }
+        // Bucket by the first property's values, then check the rest.
+        let mut buckets: FxMap<Cid, Vec<usize>> = FxMap::default();
+        for (i, (_, values)) in members.iter().enumerate() {
+            for &v in &values[0] {
+                buckets.entry(v).or_default().push(i);
+            }
+        }
+        let mut pairs: FxSet<(usize, usize)> = FxSet::default();
+        for idx in buckets.values() {
+            for (k, &i) in idx.iter().enumerate() {
+                for &j in &idx[k + 1..] {
+                    let (i, j) = (i.min(j), i.max(j));
+                    if i == j || !pairs.insert((i, j)) {
+                        continue;
+                    }
+                    let (x, y) = (members[i].0, members[j].0);
+                    if sat.subsumes(x, y) {
+                        continue; // already the same individual
+                    }
+                    let (a, b) = (&members[i].1, &members[j].1);
+                    if a.iter().zip(b).all(|(va, vb)| !va.is_disjoint(vb)) {
+                        out.push((x, y));
+                    }
+                }
+            }
+        }
     }
-
-    #[test]
-    fn test_el_cr8_range_propagation() {
-        let s = store_with(
-            "ex:worksFor rdfs:range ex:Organisation .
-             ex:alice ex:worksFor ex:acme .",
-        );
-        El2Classifier::new(&s).classify().unwrap();
-        assert!(ask(
-            &s,
-            &format!(
-                "ASK {{ GRAPH <{TG}> {{ \
-                 <http://example.org/acme> <{RDF_TYPE}> <http://example.org/Organisation> \
-                 }} }}"
-            )
-        ));
-    }
-
-    #[test]
-    fn test_el_cr9_reflexive_property() {
-        let s = store_with(
-            "ex:knows rdf:type owl:ReflexiveProperty .
-             ex:alice ex:knows ex:bob .",
-        );
-        El2Classifier::new(&s).classify().unwrap();
-        assert!(ask(
-            &s,
-            &format!(
-                "ASK {{ GRAPH <{TG}> {{ \
-                 <http://example.org/alice> <http://example.org/knows> <http://example.org/alice> \
-                 }} }}"
-            )
-        ));
-    }
-
-    #[test]
-    fn test_el_cr10_three_element_chain() {
-        let s = store_with(
-            "ex:grandparent owl:propertyChainAxiom ( ex:parent ex:parent ex:parent ) .
-             ex:a ex:parent ex:b .
-             ex:b ex:parent ex:c .
-             ex:c ex:parent ex:d .",
-        );
-        El2Classifier::new(&s).classify().unwrap();
-        assert!(ask(
-            &s,
-            &format!(
-                "ASK {{ GRAPH <{TG}> {{ \
-                 <http://example.org/a> <http://example.org/grandparent> <http://example.org/d> \
-                 }} }}"
-            )
-        ));
-    }
-
-    #[test]
-    fn test_el_has_key() {
-        let s = store_with(
-            "ex:Person owl:hasKey ( ex:ssn ) .
-             ex:alice rdf:type ex:Person ; ex:ssn \"123\" .
-             ex:bob   rdf:type ex:Person ; ex:ssn \"123\" .",
-        );
-        El2Classifier::new(&s).classify().unwrap();
-        assert!(ask(
-            &s,
-            &format!(
-                "ASK {{ GRAPH <{TG}> {{ \
-                 <http://example.org/alice> <{OWL_SAME_AS}> <http://example.org/bob> \
-                 }} }}"
-            )
-        ));
-    }
+    out
 }

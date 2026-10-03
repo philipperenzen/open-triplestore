@@ -28,13 +28,14 @@ use std::collections::{HashMap, HashSet};
 use ots_plugin_api::sources::{Row as SourceRow, SourceConnection, SourceError};
 use serde::Serialize;
 
+use super::checks::DataErrors;
 use super::model::*;
 use super::sql::{
-    collect_unique_keys, eval_subject, flush, index_key, join_key, plan_triples_map,
-    pushdown_subject, row_triples, sanitise_label, split_row, JoinStrategy, ParentIndex, RefKey,
-    TmPlan,
+    apply_own_nulls, check_relational_columns, collect_unique_keys, eval_subject, flush, index_key,
+    join_key, plan_triples_map, pushdown_subject, row_triples, sanitise_label, split_row,
+    JoinStrategy, ParentIndex, RefKey, TmPlan,
 };
-use super::terms::{BlankNodes, Kinds, Row};
+use super::terms::{At, Kinds, Row, TermGen};
 use crate::store::engine::TripleStore;
 
 /// Most rows one triples map contributes directly. Parents pulled in by key
@@ -85,6 +86,10 @@ pub struct SampleOutcome {
     pub rows: u64,
     pub triples: u64,
     pub maps: Vec<SampledMap>,
+    /// Sampled rows that raised data errors. A sample never aborts on one —
+    /// showing them is its purpose — but a run over the same rows would,
+    /// unless it skips them.
+    pub data_errors: DataErrors,
 }
 
 /// A row with the column types it came with.
@@ -101,6 +106,7 @@ pub fn execute_sample(
     spec: &SampleSpec,
 ) -> Result<SampleOutcome, String> {
     let limit = spec.limit.clamp(1, MAX_SAMPLE_ROWS);
+    check_relational_columns(mapping, conn, quote)?;
     let unique_keys = collect_unique_keys(mapping, conn)?;
     let mut plans: HashMap<String, TmPlan> = HashMap::new();
     for tm in &mapping.triples_maps {
@@ -163,10 +169,7 @@ pub fn execute_sample(
         let tm = mapping
             .find(&tm_iri)
             .ok_or_else(|| format!("unknown TriplesMap <{tm_iri}>"))?;
-        for pom in &tm.predicate_object_maps {
-            let ObjectMap::Ref(r) = &pom.object else {
-                continue;
-            };
+        for r in tm.refs() {
             // A join-less reference over the same logical source resolves to
             // the parent map's own sample; there is no key to pull in by.
             if r.joins.is_empty() {
@@ -220,13 +223,10 @@ pub fn execute_sample(
     // ── 3. Indexes for the references the plan did not push down ──
     // Built from the rows in hand, never from the database: the sample is
     // closed under its joins, so every parent a child row can reach is here.
-    let mut bnodes = BlankNodes::new(format!("d{}_", sanitise_label(run_id)));
+    let mut gen = TermGen::new(mapping.semantics, format!("d{}_", sanitise_label(run_id)));
     let mut indexes: HashMap<RefKey, ParentIndex> = HashMap::new();
     for tm in &mapping.triples_maps {
-        for pom in &tm.predicate_object_maps {
-            let ObjectMap::Ref(r) = &pom.object else {
-                continue;
-            };
+        for r in tm.refs() {
             let key = index_key(r);
             if indexes.contains_key(&key)
                 || !matches!(
@@ -242,17 +242,20 @@ pub fn execute_sample(
             let parent_cols: Vec<String> = r.joins.iter().map(|j| j.parent.clone()).collect();
             let mut index = ParentIndex::new();
             for (row, kinds) in rows_of.get(&parent.iri).map(Vec::as_slice).unwrap_or(&[]) {
+                let mut row = row.clone();
+                gen.apply_nulls(&parent.logical_source, &mut row);
+                let row = &row;
                 let Some(k) = join_key(row, &parent_cols) else {
                     continue;
                 };
-                let mut row_bnodes = HashMap::new();
-                if let Some(subject) = eval_subject(
-                    &parent.subject_map,
-                    row,
-                    Some(kinds),
-                    &mut bnodes,
-                    &mut row_bnodes,
-                )? {
+                gen.start_row();
+                let at = At {
+                    base: mapping.base_for(parent),
+                    graph: None,
+                };
+                if let Some(subject) =
+                    eval_subject(&parent.subject_map, row, Some(kinds), &mut gen, at)?
+                {
                     let entry = index.entry(k).or_default();
                     if !entry.contains(&subject) {
                         entry.push(subject);
@@ -260,30 +263,47 @@ pub fn execute_sample(
                 }
             }
             indexes.insert(key, index);
+            // A parent row's data error is reported by the parent's own rows.
+            gen.take_errors();
         }
     }
 
     // ── 4. Emit, in mapping order ──
     let mut buffer = String::new();
     let mut outcome = SampleOutcome::default();
+    let parent_gen = std::cell::RefCell::new(TermGen::new(
+        mapping.semantics,
+        format!("d{}_", sanitise_label(run_id)),
+    ));
     for tm in &mapping.triples_maps {
         let Some(rows) = rows_of.get(&tm.iri) else {
             continue;
         };
         let plan = &plans[&tm.iri];
         let mut triples = 0u64;
-        for (row, kinds) in rows {
-            let mut row_bnodes = HashMap::new();
+        for (i, (row, kinds)) in rows.iter().enumerate() {
+            let mut row = row.clone();
+            apply_own_nulls(&gen, &tm.logical_source, &mut row);
+            let row = &row;
+            gen.start_row();
             let generated = row_triples(
                 tm,
                 row,
                 Some(kinds),
-                &mut bnodes,
-                &mut row_bnodes,
+                &mut gen,
+                mapping.base_for(tm),
                 &|r, child_row| match plan.strategies.get(&index_key(r)) {
                     Some(JoinStrategy::Pushdown { alias, witness }) => {
                         let parent = mapping.find(&r.parent_triples_map)?;
-                        pushdown_subject(parent, alias, witness, child_row).map(|s| vec![s])
+                        pushdown_subject(
+                            parent,
+                            alias,
+                            witness,
+                            child_row,
+                            &mut parent_gen.borrow_mut(),
+                            mapping.base_for(parent),
+                        )
+                        .map(|s| vec![s])
                     }
                     _ => {
                         let index = indexes.get(&index_key(r))?;
@@ -296,6 +316,10 @@ pub fn execute_sample(
                     }
                 },
             )?;
+            parent_gen.borrow_mut().take_errors();
+            outcome
+                .data_errors
+                .record(&tm.iri, i as u64 + 1, gen.take_errors());
             for t in generated {
                 buffer.push_str(&t.text);
                 buffer.push('\n');
