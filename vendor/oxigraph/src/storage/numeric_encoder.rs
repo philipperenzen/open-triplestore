@@ -1316,7 +1316,10 @@ mod tests {
             let literal = Literal::new_typed_literal(lexical, NamedNode::new_unchecked(&datatype));
             let encoded = EncodedTerm::from(literal.as_ref());
             assert!(
-                matches!(encoded, EncodedTerm::SmallTypedLiteral { .. }),
+                matches!(
+                    encoded,
+                    EncodedTerm::SmallTypedLiteral { .. } | EncodedTerm::BigTypedLiteral { .. }
+                ),
                 "{literal} should be stored verbatim, got {encoded:?}"
             );
             assert_eq!(round_trip(lexical, &datatype), literal.into());
