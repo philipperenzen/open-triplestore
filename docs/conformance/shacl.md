@@ -150,8 +150,9 @@ validation fails with that failure, and fails if a report ever comes back.
   so the shapes graph is ill-formed, and validation fails with "Prefix not found".
 
 Every SHACL-AF feature is covered by `tests/shacl_conformance.rs` and
-`tests/shacl_rules_conformance.rs` as well, including the one these tests do
-not reach: result annotations (§4, `result_annotations_*`).
+`tests/shacl_rules_conformance.rs` as well, including the two these tests do
+not reach: result annotations (§4, `result_annotations_*`) and the `sh:Rules`
+entailment regime (§8.3, below).
 
 ## Beyond the suite: fail-open gaps (2026-10-01)
 
@@ -203,6 +204,32 @@ Also covered by `tests/shacl_conformance.rs` and
   each data graph in turn, so a path crossing graphs found nothing while
   `sh:sparql` and blank-node focus nodes saw the merge. Paths now read the
   merge of the data graphs (SHACL §3.4) for every focus node.
+
+## Beyond the suite: entailment regimes (2026-10-03)
+
+Neither suite declares `sh:entailment`, which SHACL §1.5 and SHACL-AF §8.3
+define: a processor validates under a declared regime it supports and must
+signal a failure for one it does not. The engine used to ignore the
+declaration in both directions — `sh:Rules` shapes graphs were validated
+without running their rules, and every other regime was validated as if
+undeclared. Covered by `tests/shacl_conformance.rs` (`sh_rules_entailment_*`,
+`an_unsupported_entailment_regime_fails_the_shapes_graph`,
+`rdfs_entailment_*`, `rules_and_rdfs_entailment_*`),
+`tests/shacl_rules_conformance.rs`
+(`entailment_rules_validation_matches_infer_then_validate`) and, for a write
+gate, `tests/shacl_studio_gate_authority_http.rs`:
+
+- **`sh:Rules`**: the rules run first, with the `/infer` engine (`sh:order`,
+  `sh:condition`, `sh:deactivated`, to a fixed point), into an inferences graph
+  of a run-local copy of the data; the validation sees the data graphs plus
+  that graph. The store holds the same quads after the run as before, a gate
+  stores only the write, and the run reports the same focus nodes as running
+  `/infer` and then validating without the declaration.
+- **RDFS** (`http://www.w3.org/ns/entailment/RDFS`): the `rdfs-entailment`
+  materialiser's output is validated the same way; with `sh:Rules` as well, the
+  two run in turn until neither adds a triple.
+- **Anything else** — an OWL regime, D, a literal — fails the run with an error
+  naming the value, alone or next to a supported regime.
 
 ## Typed-term engine refactor (2026-06-11)
 

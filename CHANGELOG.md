@@ -50,6 +50,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   JSON result and the write gate's 422 body as `annotations`
   (`[{"property", "value"}]`); a result without annotations has no such key,
   so other JSON is unchanged. An ill-formed annotation fails the shapes graph.
+- **SHACL validation under `sh:entailment sh:Rules` and RDFS.** A shapes graph
+  that declares `sh:entailment sh:Rules` has its SHACL rules run before every
+  validation of it (SHACL-AF §8.3) — on-demand dataset validation, SHACL Studio
+  pipelines, write gates and `shacl::validate` — with the `/infer` engine
+  (`sh:order`, `sh:condition`, `sh:deactivated`, to a fixed point), and the
+  validation sees the data plus what the rules inferred. The inferences go into
+  a graph of a run-local in-memory copy of the data, never into a stored graph:
+  validating writes nothing, and a gate stores only what was written. The RDFS
+  regime (`http://www.w3.org/ns/entailment/RDFS`) uses the `rdfs-entailment`
+  materialiser the same way; declared together, rules and RDFS run in turn
+  until neither adds a triple. See `docs/shacl.md`.
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -103,6 +114,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asks for, and re-pins; the store now tells everyone which datasets that applies to.
 
 ### Changed
+- **A shapes graph that declares an unsupported `sh:entailment` fails
+  validation.** SHACL §1.5 requires a processor to signal a failure for an
+  entailment regime it does not support; such shapes graphs used to be
+  validated as though the declaration were absent. Any value other than
+  `sh:Rules` and the RDFS regime (in a build with `rdfs-entailment`) now fails
+  the run with an error naming the value — a write gate refuses the write
+  (`422`). Shapes graphs declaring `sh:Rules` now report what the rules infer
+  (see Added). SHACL Advanced is graded *Full* in `docs/standards.md`.
 - **SHACL report graphs follow the W3C results vocabulary** (release note for
   anyone who reads `urn:system:reports:*` or a SHACL Studio pipeline's report
   graph). The RDF a validation run writes used to carry display strings; it

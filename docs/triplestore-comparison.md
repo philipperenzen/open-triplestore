@@ -316,6 +316,13 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > row is not claimed (footnote ⁴). The other 🟡 rows are SPARQL 1.2 and RDF 1.2/RDF-star
 > (upstream oxrdf blocker — triple-term evaluation not yet complete). The count is of ✅ cells,
 > which elsewhere in the Open Triplestore column mark feature presence (see §2.3).
+>
+> 2026-10-03: the SHACL-AF Inference row's ✅ for Open Triplestore now follows a *Full* grade
+> for SHACL Advanced in `docs/standards.md` rather than feature presence: validation honours
+> `sh:entailment` (the `sh:Rules` regime runs the shapes graph's rules before validating, RDFS
+> through `rdfs-entailment`, any other regime fails as SHACL §1.5 requires), on top of the
+> SPARQL constraints, components, functions, targets, node expressions and result annotations.
+> The count is unchanged at 23.
 
 ```
 Open Triplestore  ███████████████████████░░░░░░   23 / 29  (#1 open-source; GeoSPARQL, SHACL, SPARQL 1.2, RDF-star 🟡; W3C tests not claimed)
