@@ -14,6 +14,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **GeoSPARQL 1.1: the remaining query functions and spatial aggregates.**
+  `geof:dimension`, `coordinateDimension`, `spatialDimension`, `is3D`,
+  `isMeasured`, `isEmpty`, `isSimple`, `geometryType` (an `sf:` or `gml:` IRI),
+  `numGeometries`, `geometryN` (from 1), `minX` … `maxZ`, `centroid`,
+  `boundingCircle` (Welzl's minimum bounding circle, drawn as a polygon around
+  it), `concaveHull` (GEOS, target 0 to 1, default 0.5), `length` and
+  `perimeter` (with units, geodesic for a linear unit on a geographic CRS), and
+  the aggregates `aggBoundingBox`, `aggBoundingCircle`, `aggCentroid`,
+  `aggConvexHull` and `aggConcaveHull` (one argument, default target 0.5: the
+  SPARQL parser allows one expression per custom aggregate), with
+  `aggUnion`'s CRS, serialisation and error rules. Req 39, 40 and 42.
 - **GeoSPARQL: KML literals, `geof:asWKT`, `geof:asGML` and `geof:asKML`.**
   `geo:kmlLiteral` (KML 2.2 `Point`, `LineString`, `LinearRing`, `Polygon`,
   `MultiGeometry`; always CRS84; an empty literal is the empty geometry) is a
@@ -105,6 +116,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asks for, and re-pins; the store now tells everyone which datasets that applies to.
 
 ### Changed
+- **GeoSPARQL 1.1 is graded Full for every conformance class but DGGS.** The
+  requirement matrix (`docs/conformance/geosparql.md`) has every requirement of
+  OGC 22-047r1 met outside the optional DGGS class; `docs/standards.md` grades
+  1.1 Full with that scope stated, and the comparison matrix follows (Standards
+  Score 24 → 25). The project's own grade, not an OGC certification.
 - **GeoSPARQL 1.0 is graded Full.** With the documented GML profile (R15, R17)
   it meets every requirement of OGC 11-052r4 in the requirement matrix
   (`docs/conformance/geosparql.md`); `docs/standards.md` and the comparison

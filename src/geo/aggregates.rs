@@ -1,4 +1,6 @@
-//! GeoSPARQL 1.1 spatial aggregates — `geof:aggUnion`.
+//! GeoSPARQL 1.1 spatial aggregates (Req 42): `geof:aggUnion`,
+//! `aggBoundingBox`, `aggBoundingCircle`, `aggCentroid`, `aggConvexHull` and
+//! `aggConcaveHull`.
 //!
 //! A custom aggregate is two registrations: the evaluator's
 //! (`SparqlEvaluator::with_custom_aggregate_function`, done in
@@ -9,13 +11,21 @@
 //! different query, a row-local BIND instead of a group. [`register_with_parser`]
 //! declares the aggregates to [`opengraph::sparql_parser`], which all of them use.
 //!
-//! `geof:aggUnion` follows SPARQL's aggregate error rules: a value that is not
+//! Every aggregate follows SPARQL's aggregate error rules: a value that is not
 //! a geometry (or an unbound one) makes the group's result unbound, as a
-//! non-number does to `SUM`. The union of no geometries is the empty geometry —
-//! the identity of the union, as 0 is `SUM`'s. The values are sorted before the
-//! union, so the result is the same whatever order the solutions arrive in: the
-//! in-memory copy and the persistent store iterate differently, and must still
-//! answer byte-identically.
+//! non-number does to `SUM`. The aggregate of no geometries is the empty
+//! geometry — the identity of the union, as 0 is `SUM`'s. The values are sorted
+//! before they are combined, so the result is the same whatever order the
+//! solutions arrive in: the in-memory copy and the persistent store iterate
+//! differently, and must still answer byte-identically. All of them harmonise a
+//! group's CRSs and choose its result serialisation as `aggUnion` does
+//! ([`union_of`]).
+//!
+//! `geof:aggConcaveHull` takes one argument: GeoSPARQL 1.1 gives it a second,
+//! `targetPercent`, but the SPARQL parser (spargebra 0.4) allows one expression
+//! in a custom aggregate call and the evaluator passes the accumulator one value.
+//! It uses [`DEFAULT_CONCAVE_HULL_RATIO`], as `geof:concaveHull` does without a
+//! ratio; `geof:concaveHull(geof:aggUnion(?g), r)` gives any other ratio.
 
 use std::sync::{Arc, Once};
 
@@ -28,6 +38,7 @@ use super::datatypes::{
     geometry_to_literal, literal_crs, literal_crs_uri, parse_wkt_literal, reproject_geometry,
     Serialisation,
 };
+use super::functions::{concave_hull, minimum_bounding_circle, DEFAULT_CONCAVE_HULL_RATIO};
 use super::vocabulary as vocab;
 
 /// A factory for a fresh accumulator, as the evaluator wants it.
@@ -36,12 +47,61 @@ pub type AccumulatorFactory =
 
 /// Every GeoSPARQL aggregate as `(IRI, accumulator factory)`.
 pub fn all_aggregates() -> Vec<(NamedNode, AccumulatorFactory)> {
-    vec![(
-        NamedNode::new_unchecked(vocab::AGG_UNION),
-        Arc::new(|| -> Box<dyn AggregateFunctionAccumulator + Send + Sync> {
-            Box::new(AggUnion::default())
-        }),
-    )]
+    [
+        (vocab::AGG_UNION, Op::Union),
+        (vocab::AGG_BOUNDING_BOX, Op::BoundingBox),
+        (vocab::AGG_BOUNDING_CIRCLE, Op::BoundingCircle),
+        (vocab::AGG_CENTROID, Op::Centroid),
+        (vocab::AGG_CONCAVE_HULL, Op::ConcaveHull),
+        (vocab::AGG_CONVEX_HULL, Op::ConvexHull),
+    ]
+    .into_iter()
+    .map(|(iri, op)| -> (NamedNode, AccumulatorFactory) {
+        (
+            NamedNode::new_unchecked(iri),
+            Arc::new(
+                move || -> Box<dyn AggregateFunctionAccumulator + Send + Sync> {
+                    Box::new(Collect {
+                        op,
+                        values: Vec::new(),
+                    })
+                },
+            ),
+        )
+    })
+    .collect()
+}
+
+/// What an aggregate makes of its group's geometries, gathered into one
+/// geometry collection.
+#[derive(Debug, Clone, Copy)]
+enum Op {
+    /// Their union (GEOS unary union).
+    Union,
+    /// Their envelope.
+    BoundingBox,
+    /// Their minimum bounding circle (see `geof:boundingCircle`).
+    BoundingCircle,
+    /// Their centroid — of the collection, so each geometry counts as often as
+    /// the group holds it, and only the highest dimension counts.
+    Centroid,
+    /// Their concave hull, at [`DEFAULT_CONCAVE_HULL_RATIO`].
+    ConcaveHull,
+    /// Their convex hull.
+    ConvexHull,
+}
+
+impl Op {
+    fn apply(self, collection: GeosGeometry) -> Option<GeosGeometry> {
+        match self {
+            Op::Union => collection.unary_union().ok(),
+            Op::BoundingBox => collection.envelope().ok(),
+            Op::BoundingCircle => minimum_bounding_circle(&collection),
+            Op::Centroid => collection.get_centroid().ok(),
+            Op::ConcaveHull => concave_hull(&collection, DEFAULT_CONCAVE_HULL_RATIO),
+            Op::ConvexHull => collection.convex_hull().ok(),
+        }
+    }
 }
 
 /// Declare the aggregates to the shared SPARQL parser (idempotent, cheap after
@@ -55,19 +115,23 @@ pub fn register_with_parser() {
     });
 }
 
-/// `geof:aggUnion`: collects the group's values, unions them in `finish`.
-#[derive(Default)]
-struct AggUnion {
+/// A spatial aggregate: collects the group's values, combines them in `finish`.
+struct Collect {
+    op: Op,
     values: Vec<Term>,
 }
 
-impl AggregateFunctionAccumulator for AggUnion {
+impl AggregateFunctionAccumulator for Collect {
     fn accumulate(&mut self, element: Term) {
         self.values.push(element);
     }
 
     fn finish(&mut self) -> Option<Term> {
-        union_of(std::mem::take(&mut self.values))
+        let values = std::mem::take(&mut self.values);
+        match self.op {
+            Op::Union => union_of(values),
+            op => aggregate(values, op),
+        }
     }
 }
 
@@ -87,7 +151,13 @@ fn empty_geometry() -> Term {
 /// [`literal_crs_uri`]). Values in different CRSs are unioned in CRS84
 /// (GeoSPARQL's default), each reprojected first; a value in a CRS this build
 /// cannot reproject, or outside its CRS's domain, then makes the result unbound.
-pub fn union_of(mut values: Vec<Term>) -> Option<Term> {
+pub fn union_of(values: Vec<Term>) -> Option<Term> {
+    aggregate(values, Op::Union)
+}
+
+/// A group's geometry literals, harmonised into one CRS as [`union_of`]
+/// describes, gathered into one collection and combined by `op`.
+fn aggregate(mut values: Vec<Term>, op: Op) -> Option<Term> {
     if values.is_empty() {
         return Some(empty_geometry());
     }
@@ -123,10 +193,7 @@ pub fn union_of(mut values: Vec<Term>) -> Option<Term> {
             (geoms, None)
         }
     };
-    let union = GeosGeometry::create_geometry_collection(geoms)
-        .ok()?
-        .unary_union()
-        .ok()?;
+    let result = op.apply(GeosGeometry::create_geometry_collection(geoms).ok()?)?;
     let serialisation = Serialisation::of(&values[0]);
     let shared = values.iter().all(|v| Serialisation::of(v) == serialisation);
     let serialisation = if shared {
@@ -134,7 +201,7 @@ pub fn union_of(mut values: Vec<Term>) -> Option<Term> {
     } else {
         Serialisation::Wkt
     };
-    geometry_to_literal(&union, serialisation, crs_out.as_deref())
+    geometry_to_literal(&result, serialisation, crs_out.as_deref())
 }
 
 /// A geometry literal reprojected into CRS84, as GEOS.
@@ -194,8 +261,57 @@ mod tests {
     }
 
     #[test]
+    fn every_aggregate_is_registered() {
+        let iris: Vec<String> = all_aggregates()
+            .into_iter()
+            .map(|(iri, _)| iri.as_str().to_string())
+            .collect();
+        for iri in [
+            vocab::AGG_UNION,
+            vocab::AGG_BOUNDING_BOX,
+            vocab::AGG_BOUNDING_CIRCLE,
+            vocab::AGG_CENTROID,
+            vocab::AGG_CONCAVE_HULL,
+            vocab::AGG_CONVEX_HULL,
+        ] {
+            assert!(iris.contains(&iri.to_string()), "{iri}");
+        }
+    }
+
+    #[test]
+    fn bounding_box_centroid_and_hulls_of_a_group() {
+        let square = vec![
+            wkt("POINT(0 0)"),
+            wkt("POINT(2 0)"),
+            wkt("POINT(2 2)"),
+            wkt("POINT(0 2)"),
+        ];
+        let bbox = aggregate(square.clone(), Op::BoundingBox).unwrap();
+        assert_eq!(area(&bbox), 4.0);
+        let hull = aggregate(square.clone(), Op::ConvexHull).unwrap();
+        assert_eq!(area(&hull), 4.0);
+        let concave = aggregate(square.clone(), Op::ConcaveHull).unwrap();
+        assert!(area(&concave) <= 4.0 + 1e-12);
+        let centroid =
+            parse_wkt_literal(&aggregate(square.clone(), Op::Centroid).unwrap()).unwrap();
+        assert_eq!(
+            (centroid.get_x().unwrap(), centroid.get_y().unwrap()),
+            (1.0, 1.0)
+        );
+        let circle = parse_wkt_literal(&aggregate(square, Op::BoundingCircle).unwrap()).unwrap();
+        let corner = parse_wkt_literal(&wkt("POINT(2 2)")).unwrap();
+        assert!(
+            circle.covers(&corner).unwrap(),
+            "the circle covers every point"
+        );
+    }
+
+    #[test]
     fn the_accumulator_resets_after_finish() {
-        let mut acc = AggUnion::default();
+        let mut acc = Collect {
+            op: Op::Union,
+            values: Vec::new(),
+        };
         acc.accumulate(wkt("POINT(1 1)"));
         assert!(acc.finish().is_some());
         assert_eq!(acc.finish(), Some(empty_geometry()));
