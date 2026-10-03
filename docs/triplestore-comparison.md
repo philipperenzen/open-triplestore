@@ -260,10 +260,11 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > ²⁰ Partial in [`docs/standards.md`](standards.md) (graded 2026-10-03; the cell used to mark
 >   feature presence). Remote `@context`s now resolve — bundled W3C contexts offline, others from
 >   `OTS_REMOTE_ALLOWLIST` — and the W3C json-ld-api toRdf/fromRdf sections run as a regression
->   ratchet (no published score): the JSON-LD processor keeps base-IRI dot segments, writes
->   `@direction` as an RDF 1.2 directional string in the `rdf-12` build, mis-scopes type-scoped
->   contexts in type maps and serialises invalid `rdf:JSON` literals
->   (`docs/conformance/jsonld.md`).
+>   ratchet (no published score). Every evaluated toRdf entry passes since the JSON-LD processor
+>   is patched in the vendored fork (2026-10-03); three fromRdf entries fail on purpose, because
+>   the serialiser keeps every stored quad (no `@list` folding that drops `rdf:type rdf:List`, no
+>   refusal of an `rdf:JSON` literal that is not JSON), and uploads keep `@direction` as an RDF
+>   1.2 directional string (`docs/conformance/jsonld.md`).
 
 ### 4.2 Reasoning, Validation & Inference
 

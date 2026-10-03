@@ -363,12 +363,20 @@ behavior and will flip green when the limitation is resolved.
     covers them, size-capped and cached ([formats.md](formats.md#json-ld-remote-contexts)).
     Graded *Partial* on the W3C json-ld-api `toRdf` and `fromRdf` sections,
     which run as a regression ratchet with no published score
-    ([conformance/jsonld.md](conformance/jsonld.md)): the processor keeps the
-    dot segments of a base IRI when resolving, writes `@direction` as an RDF
-    1.2 directional string in the `rdf-12` build, mis-scopes type-scoped
-    contexts in type maps, refuses an invalid `@base`, and serialises invalid
-    `rdf:JSON` literals; `rdfDirection`, `expandContext`, `useNativeTypes` /
-    `useRdfType` and generalized RDF are not offered.
+    ([conformance/jsonld.md](conformance/jsonld.md)). Every `toRdf` entry
+    the runner evaluates passes since the JSON-LD processor is patched in
+    the vendored Oxigraph fork (`vendor/oxjsonld/`, 2026-10-03: base-IRI dot
+    segments, an invalid `@base`, type-scoped contexts in type maps, the
+    `rdfDirection` option). Three `fromRdf` entries fail on purpose, because
+    the serialiser writes every stored quad as it is: it does not fold a
+    list whose nodes carry `rdf:type rdf:List` into `@list` (the algorithm
+    drops those quads) and does not refuse an `rdf:JSON` literal that is not
+    valid JSON (the algorithm aborts the whole serialisation). A JSON-LD
+    upload keeps `@direction` as an RDF 1.2 directional language-tagged
+    string, where a JSON-LD 1.1 processor without `rdfDirection` drops it;
+    the runner sets the option each test names. `expandContext`,
+    `useNativeTypes` / `useRdfType`, generalized RDF and the JSON-LD 1.0
+    processing mode are not offered.
 
 Related guides: [OWL Reasoning](/docs/reasoning), [SHACL Validation](/docs/shacl),
 [GeoSPARQL](/docs/geosparql), [Performance](/docs/performance),
