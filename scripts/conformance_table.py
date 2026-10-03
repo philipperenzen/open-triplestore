@@ -92,7 +92,7 @@ SUITES: dict[str, tuple[str, str]] = {
     "w3c_sparql12_manifests": ("SPARQL 1.2", "**vendored W3C test-suite subset** (`sparql/sparql12` of w3c/rdf-tests, unmodified; manifest-driven, engine and mirror paths)"),
     "w3c_rdf12_manifests": ("RDF 1.2 formats", "**vendored W3C test-suite subset** (N-Triples, N-Quads, Turtle, TriG, RDF/XML suites of `rdf/rdf12` + the `rdf/rdf11` suites they include, unmodified; manifest-driven)"),
     "shacl_rules_conformance": ("SHACL-AF rules", "spec-derived"),
-    "shacl_af_corpus": ("SHACL Advanced Features", "**vendored TopQuadrant corpus** (expression, function, rule and target tests of TopQuadrant/shacl, unmodified; dash-driven)"),
+    "shacl_af_corpus": ("SHACL Advanced Features", "**vendored TopQuadrant corpus** (expression, function, rule and target tests of TopQuadrant/shacl, unmodified; dash-driven, full report equality)"),
     "shaclc_conformance": ("SHACL Compact Syntax", "spec-derived"),
     "shex_conformance": ("ShEx", "spec-derived"),
     "swrl_conformance": ("SWRL", "spec-derived"),
@@ -182,25 +182,31 @@ UNSCORED_NOTES = {
 }
 
 
-def corpus(stem: str) -> tuple[int, int, int, int, int]:
-    """(cases, pass, known failures, runner-side skips, optional-unsupported)
-    from the runner's own recorded baseline (`Empirical baseline: N pass /
-    N known-fail / N aux skips [/ N optional unsupported]` in tests/<stem>.rs)
-    and its KNOWN_FAILURES and OPTIONAL_UNSUPPORTED lists. File counts are not
-    used: the corpus directories hold shared/aux files beyond the cases.
+def corpus(stem: str) -> tuple[int, int, int, int, int, int]:
+    """(cases, pass, known failures, runner-side skips, optional-unsupported,
+    non-spec expectations) from the runner's own recorded baseline
+    (`Empirical baseline: N pass / N known-fail / N aux skips [/ N optional
+    unsupported] [/ N non-spec expectations]` in tests/<stem>.rs) and its
+    KNOWN_FAILURES, OPTIONAL_UNSUPPORTED and NON_SPEC_EXPECTATIONS lists. File
+    counts are not used: the corpus directories hold shared/aux files beyond
+    the cases.
 
     Optional-unsupported cases test a feature the specification makes optional
-    and requires a processor without it to report as a failure; the runner
-    passes them only when that failure is reported."""
+    and requires a processor without it to report as a failure; non-spec
+    expectations are cases whose expected outcome rests on another engine's
+    behaviour where the specification requires a failure. The runner passes
+    both only when that failure is reported."""
     src = (TESTS / f"{stem}.rs").read_text(encoding="utf-8")
     m = re.search(
-        r"Empirical baseline: (\d+) pass / (\d+) known-fail / (\d+) aux skips(?: / (\d+) optional unsupported)?",
+        r"Empirical baseline: (\d+) pass / (\d+) known-fail / (\d+) aux skips"
+        r"(?: / (\d+) optional unsupported)?(?: / (\d+) non-spec expectations?)?",
         src,
     )
     if not m:
         raise SystemExit(f"{stem}.rs: baseline comment not found")
     passed, failed, skipped = (int(x) for x in m.groups()[:3])
     optional = int(m.group(4) or 0)
+    non_spec = int(m.group(5) or 0)
 
     def entries(const: str) -> int:
         if f"const {const}" not in src:
@@ -217,7 +223,11 @@ def corpus(stem: str) -> tuple[int, int, int, int, int]:
         raise SystemExit(
             f"{stem}.rs: OPTIONAL_UNSUPPORTED has {entries('OPTIONAL_UNSUPPORTED')} entries but the baseline says {optional}"
         )
-    return passed + failed + skipped + optional, passed, failed, skipped, optional
+    if entries("NON_SPEC_EXPECTATIONS") != non_spec:
+        raise SystemExit(
+            f"{stem}.rs: NON_SPEC_EXPECTATIONS has {entries('NON_SPEC_EXPECTATIONS')} entries but the baseline says {non_spec}"
+        )
+    return passed + failed + skipped + optional + non_spec, passed, failed, skipped, optional, non_spec
 
 
 def render() -> str:
@@ -232,11 +242,16 @@ def render() -> str:
             if stem in CORPUS_RUNNERS:
                 if stem in PUBLISH_SCORE:
                     # Parsed on every run, so a stale baseline fails --check.
-                    cases, passed, failed, skipped, optional = corpus(stem)
+                    cases, passed, failed, skipped, optional, non_spec = corpus(stem)
                     plural = "" if failed == 1 else "s"
                     note = f"{cases} corpus cases: {passed} pass, {failed} known failure{plural}"
                     if optional:
                         note += f", {optional} optional feature unsupported (reported as the failure the spec requires)"
+                    if non_spec:
+                        note += (
+                            f", {non_spec} expecting behaviour outside the spec "
+                            "(reported as the failure the spec requires)"
+                        )
                     note += f", {skipped} runner-side skips (floor ≥{CORPUS_RUNNERS[stem]} asserted)"
                 elif stem in UNSCORED_NOTES:
                     note = UNSCORED_NOTES[stem]

@@ -41,9 +41,9 @@ error, and fails them when a report comes back.
 **Comparison.** The runner's test, `w3c_shacl_full_report_equality`, compares
 `sh:conforms` and the multiset of **results**, each on `sh:focusNode`,
 `sh:resultPath` (as a path structure), `sh:value`, `sh:sourceShape`,
-`sh:sourceConstraintComponent`, `sh:resultSeverity` and `sh:sourceConstraint` —
-everything except `sh:resultMessage`, whose wording the spec leaves to the
-processor. Our side is the RDF report the engine writes
+`sh:sourceConstraintComponent`, `sh:resultSeverity`, `sh:sourceConstraint` and
+any other property of the result node (since 2026-10-03) — everything except
+`sh:resultMessage`, whose wording the spec leaves to the processor. Our side is the RDF report the engine writes
   (`src/shacl_studio/report_rdf.rs`), loaded back into the store, so the RDF
   serialisation is tested as well. Blank nodes of the data graph (focus nodes,
   values) match any blank node; a blank-node shape or `sh:sparql` node must be the
@@ -92,7 +92,7 @@ that; `tests/shacl_conformance.rs` does), and `sh:hasValue` / `sh:in` /
 `sh:equals` compare the terms as written, as SHACL's term equality requires
 ([shacl.md](../shacl.md#literal-forms)).
 
-## SHACL Advanced Features — TopQuadrant's tests (2026-10-02)
+## SHACL Advanced Features — TopQuadrant's tests (2026-10-03)
 
 No W3C test suite covers the SHACL Advanced Features Note (2017), so the
 SHACL-AF tests of TopQuadrant's SHACL API are vendored under
@@ -107,15 +107,26 @@ TopQuadrant has not reviewed them.
 | | expression | function | rules | target | total |
 |---|---|---|---|---|---|
 | **Pass** | **1** | **1** | **7** | 0 | **9** |
-| Known-fail (ratcheted) | 0 | 0 | 0 | 1 | 1 |
+| Expects behaviour outside the spec (failure reported as the spec requires) | 0 | 0 | 0 | 1 | 1 |
+| Known-fail (ratcheted) | 0 | 0 | 0 | 0 | 0 |
 | Cases | 1 | 1 | 7 | 1 | 10 |
+
+*(2026-10-02: 9 pass / 1 known failure, validation cases compared on
+`sh:conforms` and focus nodes only, with `sparqlTarget-001` counted as a
+failure.)*
 
 The tests use TopQuadrant's `dash:` test vocabulary, one self-contained file
 per case (data, shapes and expected outcome in one graph, merged with the
 sibling files it `owl:imports`). Comparison levels:
 
-- **`dash:GraphValidationTestCase`** — `sh:conforms` and the multiset of focus
-  nodes, as for the W3C suite above;
+- **`dash:GraphValidationTestCase`** — `sh:conforms` and the full multiset of
+  results, the same comparison as for the W3C suite above
+  (`tests/common/shacl_report.rs`, shared by both runners): every result
+  property except `sh:resultMessage`, our side being the RDF report the engine
+  writes, data blank nodes as wildcards. The expected report is the
+  `dash:expectedResult` node of the test case, in the file's own graph (the W3C
+  files put it under `mf:result` instead). Any result property beyond the
+  standard ones — a result annotation — is compared too;
 - **`dash:InferencingTestCase`** — the exact set of inferred triples (what the
   rules write, less what the file asserts) against `dash:expectedResult`;
 - **`dash:FunctionTestCase`** — the value of the SPARQL expression in
@@ -123,16 +134,25 @@ sibling files it `owl:imports`). Comparison levels:
   `dash:expectedResult` (term equality).
 
 Same two-way ratchet as above, plus no skips allowed and a floor of 9 passes.
-The one known failure:
+Moving to full report equality found one gap, now fixed: an expression
+constraint's result did not name the node expression as its
+`sh:sourceConstraint`, which SHACL-AF §7 requires (`expression/booleans-001`).
+
+**Expects behaviour outside the spec.** `NON_SPEC_EXPECTATIONS` lists cases
+whose expected outcome rests on TopBraid behaviour the specification does not
+have, where the specification requires a failure. Such a case passes when
+validation fails with that failure, and fails if a report ever comes back.
 
 - **`target/sparqlTarget-001.test.ttl`** — the target's `sh:select` uses the
-  `owl:` prefix, but the ontology its `sh:prefixes` names declares no
-  `sh:declare` for it. TopBraid falls back to the Turtle prefixes of the file
-  it loaded; the SHACL prefix mechanism (SHACL §5.2.1, which SHACL-AF reuses)
-  does not, so the shapes graph fails to load here.
+  `owl:` prefix, but the ontology its `sh:prefixes` names has no `sh:declare`
+  for it. TopBraid falls back to the Turtle prefixes of the file it loaded.
+  The SHACL prefix mechanism (SHACL §5.2.1, which SHACL-AF reuses for targets)
+  has no such fallback: the query does not parse with the declared prefixes,
+  so the shapes graph is ill-formed, and validation fails with "Prefix not found".
 
-Not covered by these tests and still missing: `sh:resultAnnotation` (§4, it
-needs result properties the report model does not have yet).
+Every SHACL-AF feature is covered by `tests/shacl_conformance.rs` and
+`tests/shacl_rules_conformance.rs` as well, including the one these tests do
+not reach: result annotations (§4, `result_annotations_*`).
 
 ## Beyond the suite: fail-open gaps (2026-10-01)
 

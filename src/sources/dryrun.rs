@@ -792,6 +792,7 @@ mod tests {
             source_shape: shape.to_string(),
             source_constraint: "sh:datatype".to_string(),
             source_constraint_component: String::new(),
+            annotations: Vec::new(),
             terms: Default::default(),
             message: "wrong datatype".to_string(),
         }

@@ -217,7 +217,11 @@ pub(crate) fn evaluate_constraint_with_values(
         // ---- SHACL-AF §7: expression constraint ----
         // A result for every value node whose expression, evaluated with the
         // value node as its focus node, does not produce exactly `{ true }`.
-        Constraint::Expression { expr, message } => {
+        Constraint::Expression {
+            node,
+            expr,
+            message,
+        } => {
             for v in values.iter() {
                 let outcome = super::node_expr::eval(view, shapes, expr, v);
                 let detail = match &outcome {
@@ -232,12 +236,13 @@ pub(crate) fn evaluate_constraint_with_values(
                     ),
                     Err(e) => format!("sh:expression could not be evaluated: {e}"),
                 };
-                ctx.push(
+                // The expression is the result's sh:sourceConstraint (§7).
+                ctx.push_expression(
                     &mut results,
                     component,
                     Some(v),
                     path,
-                    "sh:expression".to_string(),
+                    node,
                     message.clone().unwrap_or(detail),
                 );
             }
@@ -480,6 +485,7 @@ impl<'a> ResultCtx<'a> {
             source_constraint,
             source_constraint_component: component.to_string(),
             message,
+            annotations: Vec::new(),
             terms: ResultTerms {
                 focus_node: Some(self.focus_node.clone()),
                 value: value.cloned(),
@@ -487,6 +493,7 @@ impl<'a> ResultCtx<'a> {
                 source_shape: Some(lexical_term(self.shape_iri)),
                 source_constraint: None,
                 severity: None,
+                annotations: Vec::new(),
             },
         }
     }
@@ -502,6 +509,24 @@ impl<'a> ResultCtx<'a> {
         message: String,
     ) {
         results.push(self.result(component, value, path, source_constraint, message));
+    }
+
+    /// [`ResultCtx::push`] for an expression constraint: the node expression
+    /// is the result's `sh:sourceConstraint` (SHACL-AF §7). (Built here rather
+    /// than in the caller, whose frame is the one repeated at every recursion
+    /// level.)
+    fn push_expression(
+        &self,
+        results: &mut Vec<ValidationResult>,
+        component: &str,
+        value: Option<&Term>,
+        path: Option<&PropertyPath>,
+        constraint: &Term,
+        message: String,
+    ) {
+        let mut r = self.result(component, value, path, "sh:expression".into(), message);
+        r.terms.source_constraint = Some(constraint.clone());
+        results.push(r);
     }
 }
 
@@ -807,6 +832,7 @@ fn evaluate_leaf_constraint(
             select,
             message,
             severity: severity_override,
+            annotations,
         } => {
             // A sh:severity on the SPARQLConstraint node overrides the shape's severity.
             let eff_severity = severity_override
@@ -871,6 +897,7 @@ fn evaluate_leaf_constraint(
                         r.value = value.map(|v| v.to_string());
                         r.severity = eff_severity.clone();
                         r.terms.severity = severity_override.clone();
+                        annotate(&mut r, annotations, Some(&solution));
                         results.push(r);
                     }
                 }
@@ -934,7 +961,11 @@ fn evaluate_leaf_constraint(
                                         cc.component
                                     ),
                                 };
-                                results.push(mk(Some(v), path, cc.component.clone(), message));
+                                // No solution to read: only the annotations'
+                                // sh:annotationValue defaults apply.
+                                let mut r = mk(Some(v), path, cc.component.clone(), message);
+                                annotate(&mut r, &cc.annotations, None);
+                                results.push(r);
                             }
                             Ok(_) => {
                                 results.push(unevaluable("sh:ask must be an ASK query".to_string()))
@@ -978,12 +1009,14 @@ fn evaluate_leaf_constraint(
                                             )
                                         });
                                 let row_path = result_path(&solution);
-                                results.push(mk(
+                                let mut r = mk(
                                     value.as_ref(),
                                     row_path.as_ref().or(path),
                                     cc.component.clone(),
                                     message,
-                                ));
+                                );
+                                annotate(&mut r, &cc.annotations, Some(&solution));
+                                results.push(r);
                             }
                         }
                         Ok(_) => results
@@ -1249,6 +1282,31 @@ pub(crate) fn prepare_prebound(
         .map_err(|e| e.to_string())?;
     crate::sparql::prebind::rewrite(&mut parsed, vars)?;
     Ok(parsed)
+}
+
+/// Set the result annotations (SHACL-AF §4) of a result produced by
+/// `solution` — or, for an ASK validator, by no solution: each annotation's
+/// property gets the solution's binding of its variable, else its
+/// `sh:annotationValue` defaults.
+fn annotate(
+    r: &mut ValidationResult,
+    annotations: &[ResultAnnotation],
+    solution: Option<&oxigraph::sparql::QuerySolution>,
+) {
+    for a in annotations {
+        let bound = solution.and_then(|s| s.get(a.var_name.as_str()));
+        let values: Vec<Term> = match bound {
+            Some(t) => vec![t.clone()],
+            None => a.defaults.clone(),
+        };
+        for v in values {
+            r.annotations.push(super::report::ResultAnnotationValue {
+                property: a.property.as_str().to_string(),
+                value: display_term(&v),
+            });
+            r.terms.annotations.push((a.property.clone(), v));
+        }
+    }
 }
 
 /// What a solution binding `?failure` to `true` reports (SHACL §5.3).

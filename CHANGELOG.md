@@ -238,6 +238,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     Without a `target_graph`, a dataset run writes to the dataset's inference
     graph, which only its writers may fill. The response adds `target_graph`
     and `sources`.
+  by `tests/shacl_af_corpus.rs` as a two-way ratchet, validation cases at full
+  report equality like the W3C suite: 9 of 10 cases pass. The tenth,
+  `target/sparqlTarget-001`, expects TopBraid's fallback to the file's Turtle
+  prefixes, which the SHACL prefix mechanism (§5.2.1) does not have; it is
+  counted as expecting behaviour outside the spec, and passes when validation
+  fails as the spec requires (`docs/conformance/shacl.md`).
+- **SHACL-AF result annotations (`sh:resultAnnotation`).** A `sh:sparql`
+  constraint or a component validator can declare properties to add to its
+  results (SHACL-AF §4): the value of a variable of the solution, or the
+  annotation's `sh:annotationValue` when it is unbound. They are written into
+  the RDF report as properties of the result node, typed, and listed in the
+  JSON result and the write gate's 422 body as `annotations`
+  (`[{"property", "value"}]`); a result without annotations has no such key,
+  so other JSON is unchanged. An ill-formed annotation fails the shapes graph.
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -945,6 +959,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (the graphs read, the count or why they cannot be read, the last run). The
   seeded "Rules (SWRL)" demo dataset's rule had atoms without arguments and
   could never run; it is now valid SWRL RDF.
+  `tests/fixtures/example-bridge/shapes-af.ttl` shows the first. In the RDF
+  report each result names the node expression as its `sh:sourceConstraint`
+  (SHACL-AF §7).
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were

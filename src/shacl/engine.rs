@@ -952,11 +952,14 @@ fn load_constraints(
             super::constraints::check_sparql_constraint(&select).map_err(|e| {
                 format!("shape <{shape_iri}>: sh:sparql constraint does not parse: {e}")
             })?;
+            let annotations = load_result_annotations(store, shapes_graph, &sparql_node)
+                .map_err(|e| format!("shape <{shape_iri}>: sh:sparql {e}"))?;
             constraints.push(Constraint::SparqlConstraint {
                 node: sparql_node.clone(),
                 select,
                 message,
                 severity,
+                annotations,
             });
         }
     }
@@ -1042,6 +1045,7 @@ fn load_constraints(
                 validator: validator.query.clone(),
                 // SHACL §5.3.2: the validator's sh:message, else the component's.
                 message: validator.message.clone().or_else(|| comp.message.clone()),
+                annotations: validator.annotations.clone(),
             })));
         }
     }
@@ -1066,7 +1070,11 @@ fn load_constraints(
             ),
             _ => None,
         };
-        constraints.push(Constraint::Expression { expr, message });
+        constraints.push(Constraint::Expression {
+            node: expr_node,
+            expr,
+            message,
+        });
     }
 
     Ok(constraints)
@@ -1245,6 +1253,7 @@ struct ComponentParameter {
 struct ComponentValidator {
     query: CustomValidator,
     message: Option<String>,
+    annotations: Vec<super::shapes::ResultAnnotation>,
 }
 
 /// A `sh:ConstraintComponent` (or an instance of a subclass) declared in the
@@ -1371,7 +1380,16 @@ fn constraint_components(
                     "constraint component <{iri}>: sh:{pred} carries neither sh:ask nor sh:select"
                 ));
                 };
-            Ok((Some(ComponentValidator { query, message }), false))
+            let annotations = load_result_annotations(store, shapes_graph, &vnode)
+                .map_err(|e| format!("constraint component <{iri}>: sh:{pred} {e}"))?;
+            Ok((
+                Some(ComponentValidator {
+                    query,
+                    message,
+                    annotations,
+                }),
+                false,
+            ))
         };
         let (validator, validator_deactivated) = load_validator("validator")?;
         let (node_validator, node_validator_deactivated) = load_validator("nodeValidator")?;
@@ -1394,6 +1412,79 @@ fn constraint_components(
     COMPONENTS.with(|c| {
         *c.borrow_mut() = Some((shapes_graph.to_string(), instance, generation, out.clone()));
     });
+    Ok(out)
+}
+
+/// The `sh:resultAnnotation`s of `node`, the subject of a SPARQL constraint's
+/// or validator's `sh:select` / `sh:ask` (SHACL-AF §4). A declaration that
+/// breaks the Note's syntax rules fails the shapes graph: an annotation that
+/// is not an IRI or blank node, one without exactly one IRI as
+/// `sh:annotationProperty`, or with more than one `sh:annotationVarName` or a
+/// variable name that is not a string.
+fn load_result_annotations(
+    store: &TripleStore,
+    shapes_graph: &str,
+    node: &str,
+) -> Result<Vec<super::shapes::ResultAnnotation>, String> {
+    let mut out = Vec::new();
+    for ann in store.objects_for_subject_in_graph(
+        node,
+        &format!("{SH}resultAnnotation"),
+        Some(shapes_graph),
+    ) {
+        if matches!(ann, Term::Literal(_)) {
+            return Err(format!(
+                "sh:resultAnnotation {ann} is a literal, not an IRI or blank node"
+            ));
+        }
+        let ann = term_to_lexical(&ann);
+        let objects = |p: &str| {
+            store.objects_for_subject_in_graph(&ann, &format!("{SH}{p}"), Some(shapes_graph))
+        };
+        let property = match objects("annotationProperty").as_slice() {
+            [Term::NamedNode(p)] => p.clone(),
+            [] => {
+                return Err(format!(
+                    "sh:resultAnnotation {ann} has no sh:annotationProperty"
+                ))
+            }
+            [_] => {
+                return Err(format!(
+                    "sh:resultAnnotation {ann}: sh:annotationProperty must be an IRI"
+                ))
+            }
+            _ => {
+                return Err(format!(
+                    "sh:resultAnnotation {ann} has more than one sh:annotationProperty"
+                ))
+            }
+        };
+        const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+        let var_name = match objects("annotationVarName").as_slice() {
+            [] => property
+                .as_str()
+                .rsplit(['#', '/', ':'])
+                .next()
+                .unwrap_or_default()
+                .to_string(),
+            [Term::Literal(l)] if l.datatype().as_str() == XSD_STRING => l.value().to_string(),
+            [_] => {
+                return Err(format!(
+                    "sh:resultAnnotation {ann}: sh:annotationVarName must be an xsd:string literal"
+                ))
+            }
+            _ => {
+                return Err(format!(
+                    "sh:resultAnnotation {ann} has more than one sh:annotationVarName"
+                ))
+            }
+        };
+        out.push(super::shapes::ResultAnnotation {
+            property,
+            var_name: var_name.trim_start_matches(['?', '$']).to_string(),
+            defaults: objects("annotationValue"),
+        });
+    }
     Ok(out)
 }
 
