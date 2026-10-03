@@ -739,52 +739,32 @@ fn load_constraints(
         }
     }
 
-    // sh:not
-    if let Some(not_iri) = single_value(store, shapes_graph, shape_iri, &format!("{}not", SH)) {
+    // sh:not, sh:and, sh:or, sh:xone — each may have several values on one
+    // shape (SHACL §4.6.1–4.6.4) and every value is its own constraint. Reading
+    // only the first value silently dropped the others.
+    for not_iri in multi_values(store, shapes_graph, shape_iri, &format!("{}not", SH)) {
         if let Some(not_shape) = load_member_shape(store, shapes_graph, &not_iri)? {
             constraints.push(Constraint::Not(Box::new(not_shape)));
         }
     }
 
-    // sh:and (RDF list of shape IRIs)
-    let and_iris = load_rdf_list(store, shapes_graph, shape_iri, &format!("{}and", SH));
-    if !and_iris.is_empty() {
-        let mut and_shapes = Vec::new();
-        for iri in &and_iris {
-            if let Some(s) = load_member_shape(store, shapes_graph, iri)? {
-                and_shapes.push(s);
+    // sh:and / sh:or / sh:xone — each value is an RDF list of member shapes.
+    for name in ["and", "or", "xone"] {
+        let predicate = format!("{}{}", SH, name);
+        for list in load_rdf_lists(store, shapes_graph, shape_iri, &predicate) {
+            let mut members = Vec::new();
+            for iri in &list {
+                if let Some(s) = load_member_shape(store, shapes_graph, iri)? {
+                    members.push(s);
+                }
             }
-        }
-        if !and_shapes.is_empty() {
-            constraints.push(Constraint::And(and_shapes));
-        }
-    }
-
-    // sh:or (RDF list of shape IRIs)
-    let or_iris = load_rdf_list(store, shapes_graph, shape_iri, &format!("{}or", SH));
-    if !or_iris.is_empty() {
-        let mut or_shapes = Vec::new();
-        for iri in &or_iris {
-            if let Some(s) = load_member_shape(store, shapes_graph, iri)? {
-                or_shapes.push(s);
+            if !members.is_empty() {
+                constraints.push(match name {
+                    "and" => Constraint::And(members),
+                    "or" => Constraint::Or(members),
+                    _ => Constraint::Xone(members),
+                });
             }
-        }
-        if !or_shapes.is_empty() {
-            constraints.push(Constraint::Or(or_shapes));
-        }
-    }
-
-    // sh:xone (RDF list of shape IRIs)
-    let xone_iris = load_rdf_list(store, shapes_graph, shape_iri, &format!("{}xone", SH));
-    if !xone_iris.is_empty() {
-        let mut xone_shapes = Vec::new();
-        for iri in &xone_iris {
-            if let Some(s) = load_member_shape(store, shapes_graph, iri)? {
-                xone_shapes.push(s);
-            }
-        }
-        if !xone_shapes.is_empty() {
-            constraints.push(Constraint::Xone(xone_shapes));
         }
     }
 
@@ -2008,31 +1988,57 @@ fn load_rdf_list(
         .collect()
 }
 
+/// Every RDF list reached from `subject` via `predicate`, one per value — for
+/// parameters such as `sh:and`/`sh:or`/`sh:xone` that may have several values.
+fn load_rdf_lists(
+    store: &TripleStore,
+    shapes_graph: &str,
+    subject: &str,
+    predicate: &str,
+) -> Vec<Vec<String>> {
+    store
+        .objects_for_subject_in_graph(subject, predicate, Some(shapes_graph))
+        .iter()
+        .map(|head| {
+            walk_rdf_list(store, shapes_graph, &term_to_lexical(head))
+                .iter()
+                .map(term_to_lexical)
+                .collect()
+        })
+        .collect()
+}
+
 /// Walk the RDF list reached from `subject` via `predicate`, keeping each
-/// member's *typed* term (sh:in members may be typed literals). In standard
-/// Turtle `( … )` syntax the list cells are blank nodes, which SPARQL surface
-/// syntax cannot re-address (`_:x` in a query is a fresh existential), so cells
-/// are resolved through the raw quad index.
+/// member's *typed* term (sh:in members may be typed literals). Only the first
+/// value of `predicate` is followed; use [`load_rdf_lists`] for parameters that
+/// may have several.
 fn load_rdf_list_terms(
     store: &TripleStore,
     shapes_graph: &str,
     subject: &str,
     predicate: &str,
 ) -> Vec<Term> {
+    match store
+        .objects_for_subject_in_graph(subject, predicate, Some(shapes_graph))
+        .into_iter()
+        .next()
+    {
+        Some(head) => walk_rdf_list(store, shapes_graph, &term_to_lexical(&head)),
+        None => Vec::new(),
+    }
+}
+
+/// Walk the RDF list starting at the cell `head`. In standard Turtle `( … )`
+/// syntax the list cells are blank nodes, which SPARQL surface syntax cannot
+/// re-address (`_:x` in a query is a fresh existential), so cells are resolved
+/// through the raw quad index.
+fn walk_rdf_list(store: &TripleStore, shapes_graph: &str, head: &str) -> Vec<Term> {
     const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
     const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
     const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
 
     let mut values = Vec::new();
-
-    let mut current = match store
-        .objects_for_subject_in_graph(subject, predicate, Some(shapes_graph))
-        .into_iter()
-        .next()
-    {
-        Some(h) => term_to_lexical(&h),
-        None => return values,
-    };
+    let mut current = head.to_string();
 
     for _ in 0..10_000 {
         if current == RDF_NIL {

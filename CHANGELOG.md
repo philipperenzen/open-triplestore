@@ -93,6 +93,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an existing tag. See `docs/release-process.md`.
 
 ### Fixed
+- **SHACL enforces every value of `sh:not`, `sh:and`, `sh:or` and `sh:xone`.**
+  SHACL Core (§4.6.1–4.6.4) lets a shape carry several values of each of these
+  parameters, each a separate constraint. The shape loader read only one
+  `sh:not` value and followed only one list per `sh:and`/`sh:or`/`sh:xone`, so
+  a shape such as `ex:S sh:not [ sh:class ex:A ] ; sh:not [ sh:class ex:B ]`
+  silently enforced one of the two and let data breaking the other validate
+  as conforming. Each value now loads as its own constraint. Shapes graphs
+  that split these constraints over several shapes as a workaround keep
+  working unchanged.
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if

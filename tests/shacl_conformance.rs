@@ -158,6 +158,79 @@ fn shacl_xone_exactly_one() {
     );
 }
 
+// SHACL §4.6.1–4.6.4: sh:not, sh:and, sh:or and sh:xone may each have several
+// values on one shape, and every value is a separate constraint. The loader used
+// to read one sh:not and follow one list per predicate, so the other value was
+// silently dropped. Each `*First`/`*Second` node breaks exactly one of the two
+// values, and both must be reported (the store's object order decides which
+// value the old loader kept, so both sides are checked).
+#[test]
+fn shacl_logical_constraints_with_several_values_each_enforce_every_value() {
+    let shapes = r#"
+      ex:LogicShape a sh:NodeShape ; sh:targetClass ex:T ;
+        sh:not [ sh:class ex:A ] ;
+        sh:not [ sh:class ex:B ] ;
+        sh:and ( [ sh:property [ sh:path ex:a1 ; sh:minCount 1 ] ]
+                 [ sh:property [ sh:path ex:a2 ; sh:minCount 1 ] ] ) ;
+        sh:and ( [ sh:property [ sh:path ex:a3 ; sh:minCount 1 ] ]
+                 [ sh:property [ sh:path ex:a4 ; sh:minCount 1 ] ] ) ;
+        sh:or  ( [ sh:property [ sh:path ex:o1 ; sh:minCount 1 ] ]
+                 [ sh:property [ sh:path ex:o2 ; sh:minCount 1 ] ] ) ;
+        sh:or  ( [ sh:property [ sh:path ex:o3 ; sh:minCount 1 ] ]
+                 [ sh:property [ sh:path ex:o4 ; sh:minCount 1 ] ] ) ;
+        sh:xone ( [ sh:property [ sh:path ex:x1 ; sh:minCount 1 ] ]
+                  [ sh:property [ sh:path ex:x2 ; sh:minCount 1 ] ] ) ;
+        sh:xone ( [ sh:property [ sh:path ex:x3 ; sh:minCount 1 ] ]
+                  [ sh:property [ sh:path ex:x4 ; sh:minCount 1 ] ] ) ."#;
+    // Satisfies all eight constraints: neither class, all four and-properties,
+    // one property per or-list, exactly one per xone-list.
+    let base = "ex:a1 1 ; ex:a2 1 ; ex:a3 1 ; ex:a4 1 ; ex:o1 1 ; ex:o3 1 ; ex:x1 1 ; ex:x3 1";
+    // (node, extra types, properties) — each bad node breaks exactly one value.
+    let nodes: &[(&str, &str, String)] = &[
+        ("ok", "", base.to_string()),
+        ("notFirst", ", ex:A", base.to_string()),
+        ("notSecond", ", ex:B", base.to_string()),
+        ("andFirst", "", base.replace("ex:a1 1 ; ", "")),
+        ("andSecond", "", base.replace("ex:a3 1 ; ", "")),
+        ("orFirst", "", base.replace("ex:o1 1 ; ", "")),
+        ("orSecond", "", base.replace("ex:o3 1 ; ", "")),
+        ("xoneFirst", "", format!("{base} ; ex:x2 1")),
+        ("xoneSecond", "", format!("{base} ; ex:x4 1")),
+    ];
+    let data: String = nodes
+        .iter()
+        .map(|(n, types, props)| format!("ex:{n} a ex:T{types} ; {props} .\n"))
+        .collect();
+    let r = run(shapes, &data);
+
+    let results_for = |node: &str| -> Vec<&str> {
+        let suffix = format!("/{node}");
+        r.results
+            .iter()
+            .filter(|v| v.focus_node.trim_end_matches('>').ends_with(&suffix))
+            .map(|v| v.source_constraint.as_str())
+            .collect()
+    };
+    assert!(results_for("ok").is_empty(), "{:?}", r.results);
+    for (node, component) in [
+        ("notFirst", "sh:not"),
+        ("notSecond", "sh:not"),
+        ("andFirst", "sh:and"),
+        ("andSecond", "sh:and"),
+        ("orFirst", "sh:or"),
+        ("orSecond", "sh:or"),
+        ("xoneFirst", "sh:xone"),
+        ("xoneSecond", "sh:xone"),
+    ] {
+        assert_eq!(
+            results_for(node),
+            vec![component],
+            "{node} breaks one {component} value and must get exactly that one result"
+        );
+    }
+    assert!(!r.conforms);
+}
+
 // hc-01: sh:qualifiedValueShape enforces per-value-shape min/max counts. A valid
 // hand (1 thumb + 4 fingers) conforms; a deficient one violates qualifiedMinCount.
 #[test]
