@@ -233,6 +233,11 @@ pub struct AppState {
     /// When true, auth cookies are issued with the `Secure` attribute (HTTPS only).
     /// Disabled by default so plain-HTTP local development still works.
     pub secure_cookies: bool,
+    /// Whether the bundled web UI is served (`--serve-frontend` /
+    /// `SERVE_FRONTEND`, as clap parsed it). The routes that share a path with
+    /// a client-side route (`/`, `/sparql`) read this rather than the
+    /// environment, so the flag and the variable cannot disagree.
+    pub serve_frontend: bool,
     /// Reverse proxies whose `X-Forwarded-For` is believed (`TRUSTED_PROXY_CIDRS`).
     /// [`build_router`] sets it from its `trusted_cidrs` argument, so the rate
     /// limiter, the audit log and the LLM guard all derive the client IP alike.
@@ -306,6 +311,7 @@ impl AppState {
             query_timeout_secs: 30,
             write_timeout_secs: 120,
             secure_cookies: false,
+            serve_frontend: true,
             trusted_proxies: client_ip::TrustedProxies::default(),
             browse_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BROWSE_QUERIES)),
             expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(expensive_op_capacity())),
@@ -2476,6 +2482,10 @@ pub async fn run(
     jwt_config: Arc<JwtConfig>,
     object_store: Arc<ObjectStore>,
     base_url: &str,
+    // Whether `base_url` was configured (`--base-url` / `BASE_URL`) rather than
+    // the built-in default. Federated identity assertions are audience-checked
+    // against it only then, and refused otherwise.
+    base_url_configured: bool,
     addr: &str,
     cors_origins: &str,
     trusted_cidrs: Vec<IpNet>,
@@ -2504,6 +2514,10 @@ pub async fn run(
     // scheduled backup opened a file that does not exist and failed — after
     // writing the RDF dump, leaving no manifest and only a warn! line.
     db_path: std::path::PathBuf,
+    // Where backups go (`BACKUP_DIR`, else `<data-dir>/backups`), resolved once
+    // by main.rs with [`default_backup_dir`] so restore, store recovery and the
+    // scheduled backups cannot disagree.
+    backup_dir: std::path::PathBuf,
     #[cfg(feature = "text-search")] text_index: Option<Arc<TextIndex>>,
     #[cfg(feature = "vocab-search")] vocab_engine: Option<
         Arc<crate::vocab_search::index::VocabSearchEngine>,
@@ -2515,7 +2529,7 @@ pub async fn run(
 
     // ── Backup subsystem (optional) ─────────────────────────────────────────
     let backup = {
-        let dir = default_backup_dir(&data_dir);
+        let dir = backup_dir;
         let sqlite = db_path.clone();
         let retention: usize = std::env::var("BACKUP_RETENTION_COUNT")
             .ok()
@@ -2553,7 +2567,7 @@ pub async fn run(
             );
         }
         match crate::backup::BackupManager::new(
-            std::path::PathBuf::from(&dir),
+            dir,
             sqlite,
             store.clone(),
             audit.clone(),
@@ -2570,7 +2584,9 @@ pub async fn run(
     };
 
     // OIDC resource-server config from the environment (disabled unless OIDC_ISSUER set).
-    let auth_ext = Arc::new(crate::auth::oidc_rs::AuthExt::from_env());
+    let auth_ext = Arc::new(crate::auth::oidc_rs::AuthExt::from_env_with_base_url(
+        base_url_configured.then_some(base_url),
+    ));
     if let Some(verifier) = auth_ext.oidc.as_ref() {
         match crate::auth::oidc_rs::ensure_env_provider(
             &auth_db,
@@ -2600,7 +2616,9 @@ pub async fn run(
     }
 
     // Declarative OIDC-client seed for infra-as-code deployments (idempotent).
-    crate::auth::oidc_provider::seed_clients_from_env(&auth_db, &jwt_config.secret);
+    // A client secret goes through the secrets module: a raw one is refused
+    // under OTS_ENV=production, like JWT_SECRET, and stops the start.
+    crate::auth::oidc_provider::seed_clients_from_env(&auth_db, &jwt_config.secret)?;
 
     let dl_config = crate::reasoning::dl_config::DlConfig::from_env();
     match dl_config.backend {
@@ -2640,6 +2658,7 @@ pub async fn run(
         query_timeout_secs,
         write_timeout_secs,
         secure_cookies,
+        serve_frontend,
         trusted_proxies: client_ip::TrustedProxies::new(trusted_cidrs.clone()),
         browse_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BROWSE_QUERIES)),
         expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(expensive_op_capacity())),
@@ -3037,25 +3056,39 @@ mod panic_safety_net_tests {
 /// — in the Docker image that is `/app`, root-owned and read-only for the
 /// service user, so unattended backups were silently disabled on every
 /// default deployment ("backup: disabled — init failed: create backup dir").
-pub(crate) fn default_backup_dir(data_dir: &std::path::Path) -> String {
+///
+/// The one place `BACKUP_DIR` is read (main.rs passes the result on): an
+/// empty or blank value counts as unset everywhere.
+pub fn default_backup_dir(data_dir: &std::path::Path) -> std::path::PathBuf {
     std::env::var("BACKUP_DIR")
         .ok()
         .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| data_dir.join("backups").to_string_lossy().into_owned())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("backups"))
 }
 
 #[cfg(test)]
 mod backup_dir_tests {
     #[test]
     fn backup_dir_defaults_under_the_data_dir() {
+        use std::path::{Path, PathBuf};
         std::env::remove_var("BACKUP_DIR");
-        let d = super::default_backup_dir(std::path::Path::new("/data"));
-        assert_eq!(d, "/data/backups");
+        let d = super::default_backup_dir(Path::new("/data"));
+        assert_eq!(d, PathBuf::from("/data/backups"));
         std::env::set_var("BACKUP_DIR", "/mnt/backups");
         assert_eq!(
-            super::default_backup_dir(std::path::Path::new("/data")),
-            "/mnt/backups"
+            super::default_backup_dir(Path::new("/data")),
+            PathBuf::from("/mnt/backups")
         );
+        // Empty and blank mean unset, for every reader (they used to be the
+        // working directory for restore and store recovery).
+        for blank in ["", "  "] {
+            std::env::set_var("BACKUP_DIR", blank);
+            assert_eq!(
+                super::default_backup_dir(Path::new("/data")),
+                PathBuf::from("/data/backups")
+            );
+        }
         std::env::remove_var("BACKUP_DIR");
     }
 }

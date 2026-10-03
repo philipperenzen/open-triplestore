@@ -6,8 +6,7 @@ pub mod graph;
 pub mod vocabulary;
 
 pub use catalog::generate_catalog_bytes;
-// Turtle conveniences kept for library consumers and the conformance tests;
-// the HTTP handlers serialise per negotiated format via `generate_catalog_bytes`.
+// Library surface; the binary's handlers only call `generate_catalog_bytes`.
 #[allow(unused_imports)]
 pub use catalog::{
     build_catalog, build_catalog_report, generate_dcat_catalog, generate_org_dcat_catalog,

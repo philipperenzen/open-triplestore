@@ -1993,6 +1993,19 @@ mod tests {
     use super::*;
     use oxigraph::sparql::QueryResults;
 
+    /// The whole-instance catalogue as Turtle.
+    fn generate_dcat_catalog(
+        base_url: &str,
+        store: &TripleStore,
+        auth_db: &Arc<AuthDb>,
+        user_id: Option<&str>,
+    ) -> String {
+        let bytes =
+            generate_catalog_bytes(base_url, store, auth_db, user_id, None, RdfFormat::Turtle)
+                .expect("catalogue serialises");
+        String::from_utf8(bytes).expect("Turtle is UTF-8")
+    }
+
     fn parse(ttl: &str) -> TripleStore {
         let s = TripleStore::in_memory().unwrap();
         s.load_str(ttl, RdfFormat::Turtle, None)

@@ -145,7 +145,7 @@ async fn sparql_query_get(
             // arrives here with no `query` param. Serve the SPA shell so the
             // workspace renders instead of a JSON error; genuine API clients
             // (no `Accept: text/html`) still get the 400 below.
-            if let Some(resp) = spa_shell_response(&headers) {
+            if let Some(resp) = spa_shell_response(&state, &headers) {
                 return Ok(resp);
             }
             // SPARQL 1.1 Service Description §2: the endpoint, dereferenced
@@ -2349,15 +2349,6 @@ fn prefers_html(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
-/// Mirrors the server's frontend gate (`SERVE_FRONTEND`, default on) so the root
-/// route only serves the SPA shell when the web UI is actually being served.
-fn serve_frontend_enabled() -> bool {
-    !matches!(
-        std::env::var("SERVE_FRONTEND").ok().as_deref(),
-        Some("false") | Some("0") | Some("no")
-    )
-}
-
 /// Returns the SPA shell (`index.html`) as a 200 response when the web UI is
 /// being served and the caller is a browser (`Accept: text/html`).
 ///
@@ -2369,8 +2360,12 @@ fn serve_frontend_enabled() -> bool {
 /// ("Missing 'query' parameter") instead of the page. Handlers call this first
 /// so a browser navigation renders the UI, while genuine API/RDF clients (which
 /// do not send `Accept: text/html`) fall through to the API behaviour.
-fn spa_shell_response(headers: &HeaderMap) -> Option<Response> {
-    if serve_frontend_enabled() && prefers_html(headers) {
+///
+/// The gate is the server's own (`state.serve_frontend`, from
+/// `--serve-frontend` / `SERVE_FRONTEND`), so the root route serves the SPA
+/// shell exactly when the web UI is being served.
+fn spa_shell_response(state: &AppState, headers: &HeaderMap) -> Option<Response> {
+    if state.serve_frontend && prefers_html(headers) {
         if let Ok(html) = std::fs::read_to_string("frontend/dist/index.html") {
             let mut resp = axum::response::Html(html).into_response();
             // Marker for the outermost frame-policy middleware (server::mod):
@@ -2396,7 +2391,7 @@ async fn service_description_handler(
     // Content negotiation: a browser (Accept: text/html) gets the web UI; RDF/SPARQL
     // clients get the service description. The explicit `/` route shadows the SPA
     // fallback, so without this a browser at the root only ever sees Turtle.
-    if let Some(resp) = spa_shell_response(&headers) {
+    if let Some(resp) = spa_shell_response(&state, &headers) {
         return Ok(resp);
     }
     service_description_response(&state, user.as_deref())

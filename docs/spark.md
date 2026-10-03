@@ -210,7 +210,7 @@ Two guards make weaker models useful anyway: a reply that writes the query in a
 query at all gets one explicit nudge to query before answering — the model may
 decline, and its original answer is kept when it does.
 
-Availability is probed at `GET /api/llm/health`. The chat streams over `POST /api/llm/chat/stream` (SSE) so the first tokens appear while the turn is still running; `POST /api/llm/chat` is the buffered fallback.
+Availability is probed at `GET /api/llm/health`. The chat streams over `POST /api/llm/chat/stream` (SSE), so progress (each query and its result) shows while the turn is still running; `POST /api/llm/chat` is the buffered fallback. Whether the answer text itself streams token by token depends on the protocol: on the directive protocol (`LLM_CHAT_TOOLS=off`, or a gateway that rejects native tools) the rounds after the first retrieval stream token by token; with native tools active every completion is a single request and the answer arrives when its round completes.
 
 Besides `reachable`, `gateway`, `chat_model` and `context_tokens`, the health
 response carries:
@@ -245,7 +245,7 @@ calls the gateway.
 
 ## Performance & serving
 
-Replies stream token-by-token, so perceived latency is dominated by the gateway's **time-to-first-token**. Two bundled serving options:
+Perceived latency is dominated by the gateway: its **time-to-first-token** where the answer streams token by token (the directive protocol), and the full completion time per round where it does not (native tools; see `LLM_CHAT_TOOLS` above). Two bundled serving options:
 
 - **Ollama** (`--profile llm`, default) — easiest start, CPU or GPU. The compose file keeps the model resident between chats (`OLLAMA_KEEP_ALIVE=1h`, overridable) so warm questions skip the model-load entirely, and serves a couple of requests in parallel (`OLLAMA_NUM_PARALLEL`).
 - **vLLM** (`--profile llm-vllm`, NVIDIA GPU) — higher throughput with **automatic prefix caching**: Spark's large shared system prompt is computed once and reused across turns and users, which makes time-to-first-token nearly independent of the prompt size. Set `LLM_GATEWAY_URL=http://vllm:8000` and `LLM_MODEL` to the served model (default `Qwen/Qwen2.5-7B-Instruct-AWQ`).

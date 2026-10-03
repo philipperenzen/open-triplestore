@@ -1,5 +1,4 @@
 //! SPARQL 1.2 / RDF-star built-in function registration.
-#![allow(dead_code)]
 //!
 //! Oxigraph 0.5 with its `rdf-12` feature (enabled by this crate's `rdf-12`
 //! feature, which also turns on `spargebra/sparql-12`) handles the native
