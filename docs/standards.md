@@ -17,7 +17,7 @@ applies.
 | Standard | Role | Support |
 |---|---|---|
 | RDF 1.1 | Core triple data model | Full |
-| RDF-star (CG) / RDF 1.2 (WD) | Quoted/nested triples `<< >>` | Partial¹ |
+| RDF 1.2 (CR 2026-04-07) | Triple terms, reifiers and annotations, base direction; N-Triples, N-Quads, Turtle, TriG, RDF/XML 1.2 | Partial¹ |
 | SPARQL 1.1 Query | SELECT, ASK, CONSTRUCT, DESCRIBE | Full² |
 | SPARQL 1.1 Update | INSERT, DELETE, LOAD, CLEAR, COPY, WITH/USING | Full |
 | SPARQL 1.1 Protocol | Query and update over HTTP (`/sparql`) | Full² |
