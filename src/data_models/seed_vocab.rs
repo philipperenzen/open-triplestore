@@ -2654,7 +2654,8 @@ mod tests {
                     &version_iri(&state, v.id, ver.version),
                 );
                 assert_eq!(got, ver.attribution(true), "{} {}", v.id, ver.version);
-                if v.id != "ots" {
+                // Open Triplestore's own vocabularies carry no licence record.
+                if ver.file.third_party {
                     let a = got.unwrap();
                     assert_eq!(a.file, ver.file.path);
                     assert_eq!(a.specification_url.as_deref(), Some(ver.spec_url));
@@ -2906,7 +2907,7 @@ mod tests {
                     v.id,
                     ver.version
                 );
-                if v.id != "ots" {
+                if ver.file.third_party {
                     assert!(record(&state, v.id, ver.version).unchanged);
                 }
             }
@@ -3120,7 +3121,7 @@ mod tests {
                 digest,
                 "{id} {version} was reloaded"
             );
-            if id != "ots" {
+            if vocab(id).versions.iter().any(|v| v.version == version && v.file.third_party) {
                 assert!(record(&state, id, version).unchanged, "{id} {version}");
             }
             assert_eq!(
