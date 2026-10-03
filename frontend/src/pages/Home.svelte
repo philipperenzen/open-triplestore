@@ -3,7 +3,7 @@
   import { Link, navigate } from '../lib/router/index.js';
   import { browseStats, listDatasets } from '../lib/api.js';
   import { formatNumber } from '../lib/rdf-utils.js';
-  import { authInitialized, isAuthenticated } from '../lib/stores.js';
+  import { authInitialized, isAuthenticated, backendHealth } from '../lib/stores.js';
 
   import { t } from 'svelte-i18n';
   import { Upload, Rows3, Terminal, ShieldCheck, ArrowRight } from 'lucide-svelte';
@@ -16,7 +16,10 @@
     { href: '/validation', kickerKey: 'pages.home.workflows.validateKicker', titleKey: 'pages.home.workflows.validateTitle', descKey: 'pages.home.workflows.validateDesc', ctaKey: 'pages.home.workflows.validateCta', icon: ShieldCheck },
   ];
 
-  const CAPABILITIES = ['SPARQL 1.1/1.2', 'RDF-star', 'GeoSPARQL 1.1', 'SHACL', 'SHACL-AF'];
+  // The standards this server build serves, as reported by GET /health (the
+  // shell already fetches it for the backend banner). Empty until it answers,
+  // and against an older server that does not send the list.
+  $: capabilities = $backendHealth?.capabilities ?? [];
 
   let searchQuery = '';
   let stats = null;
@@ -95,11 +98,13 @@
           <button class="btn" type="submit" disabled={!searchQuery.trim()}>{$t('search.open')}</button>
         </form>
 
-        <div class="capability-strip">
-          {#each CAPABILITIES as capability}
-            <span class="capability-pill">{capability}</span>
-          {/each}
-        </div>
+        {#if capabilities.length}
+          <ul class="capability-strip" aria-label={$t('pages.home.capabilitiesLabel')}>
+            {#each capabilities as capability (capability)}
+              <li class="capability-pill">{capability}</li>
+            {/each}
+          </ul>
+        {/if}
       </div>
     </div>
 
@@ -304,6 +309,9 @@
     display: flex;
     flex-wrap: wrap;
     gap: 0.4rem;
+    list-style: none;
+    margin: 0;
+    padding: 0;
   }
 
   .capability-pill {

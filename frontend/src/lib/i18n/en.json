@@ -111,7 +111,10 @@
     "warning": "Warning",
     "info": "Info",
     "selectAll": "Select all",
-    "deselectAll": "Deselect all"
+    "deselectAll": "Deselect all",
+    "areYouSure": "Are you sure?",
+    "restore": "Restore",
+    "discard": "Discard changes"
   },
   "search": {
     "placeholder": "Jump to resource IRI or search…",
@@ -194,7 +197,8 @@
         "validateTitle": "Resolve SHACL issues",
         "validateDesc": "Run conformance reports and inspect failing nodes in one workflow.",
         "validateCta": "Review validation"
-      }
+      },
+      "capabilitiesLabel": "Standards this server supports"
     },
     "tripleBrowser": {
       "title": "Triple Browser",
@@ -886,11 +890,6 @@
       "filterPlaceholder": "Filter datasets…",
       "countOf": "{shown} of {total}",
       "roleAll": "All",
-      "roleInstances": "Instances",
-      "roleModel": "Model",
-      "roleVocabulary": "Vocabulary",
-      "roleShapes": "Shapes",
-      "roleEntailment": "Entailment",
       "roleColumn": "Role",
       "validationColumn": "Validation",
       "selectAllWritable": "Select all writable datasets",
@@ -933,7 +932,11 @@
         "vocabulary": "Vocabulary",
         "shapes": "Shapes",
         "entailment": "Entailment",
-        "system": "System"
+        "system": "System",
+        "domain-values": "Domain values",
+        "linkset": "Linkset",
+        "provenance": "Provenance",
+        "catalog": "Catalog"
       },
       "emptyCta": "Create your first dataset"
     },
@@ -2302,7 +2305,8 @@
       },
       "dependents": "Used by {count} dataset(s)",
       "dependentBehind": "Pinned to an older version — latest published is {latest}",
-      "dependentCurrent": "Pinned to the latest published version"
+      "dependentCurrent": "Pinned to the latest published version",
+      "versionFieldLabel": "Version"
     },
     "modelDiff": {
       "heading": "Diff:",
@@ -2644,7 +2648,7 @@
       "historyButton": "History",
       "editDetailsButton": "Edit details",
       "addShapesHeading": "Add existing shapes",
-      "addShapesHint": "Pick shapes from any graph — including shapes joined with data — to copy into {name}.",
+      "addShapesHint": "Pick shapes from any graph — including shapes joined with data — to copy into <strong>{name}</strong>.",
       "metaValidationHeading": "Meta-validation (SHACL-SHACL)",
       "validatingShapes": "Validating the shapes…",
       "shapesWellFormed": "These shapes are well-formed.",
@@ -3390,6 +3394,12 @@
       "entities": "Entities",
       "violations": "{count} violations",
       "rounds": "Rounds"
+    },
+    "notFound": {
+      "title": "Page not found",
+      "detail": "Nothing lives at this address. The link may be out of date, or the page may have moved.",
+      "home": "Go to the overview",
+      "docs": "Open the documentation"
     }
   },
   "toast": {
@@ -3542,7 +3552,7 @@
     },
     "attachShapesDialog": {
       "title": "Attach shapes",
-      "intro": "Validate {target} with one or more shape graphs. Bindings become part of the data (a queryable validation layer) and",
+      "intro": "Validate <strong>{target}</strong> with one or more shape graphs. Bindings become part of the data (a queryable validation layer) and",
       "introGraphTail": "travel with the graph — any dataset that includes it inherits these shapes.",
       "introDefaultTail": "apply on write and in pipelines.",
       "filterPlaceholder": "Filter shape graphs…",
@@ -4090,7 +4100,7 @@
       "deleteThis": "Delete this organisation",
       "deleteDesc": "Permanently removes the organisation and all its datasets. This cannot be undone.",
       "deleteOrg": "Delete organisation",
-      "deleteConfirmWarn": "This will permanently delete {name} and all its datasets. Type the organisation name to confirm.",
+      "deleteConfirmWarn": "This will permanently delete <strong>{name}</strong> and all its datasets. Type the organisation name to confirm.",
       "deleteConfirmAria": "Type the organisation name to confirm deletion",
       "deleting": "Deleting…",
       "deletePermanently": "Delete permanently",
@@ -4125,14 +4135,6 @@
     },
     "select": {
       "noOptions": "No options"
-    },
-    "shaclShapePanel": {
-      "colPath": "Path",
-      "colCardinality": "Cardinality",
-      "colType": "Type",
-      "colExtra": "Extra",
-      "valuesCount": "{count} values",
-      "noPropertyShapes": "No property shapes declared."
     },
     "shaclStudioNav": {
       "navLabel": "SHACL Studio sections",
@@ -4469,6 +4471,38 @@
       "facts": "{count}{more} facts in the store",
       "clickToOpen": "click to open",
       "notInStore": "No data about this IRI in the store — external link"
+    },
+    "identityPolicy": {
+      "navLabel": "Identity policy",
+      "heading": "Identity policy (owl:sameAs)",
+      "introDataset": "What owl:sameAs may do when this dataset is reasoned over. A setting here overrides the organisation's.",
+      "introOrganisation": "The owl:sameAs policy every dataset of this organisation inherits, unless the dataset sets its own.",
+      "docsLink": "How the identity policy works",
+      "inForce": "In force",
+      "selectLabel": "Setting",
+      "inheritDataset": "Inherit (organisation or default)",
+      "inheritOrganisation": "Built-in default",
+      "option": {
+        "sameas-off": "Off",
+        "sameas-narrow": "Narrow",
+        "sameas-full": "Full"
+      },
+      "description": {
+        "sameas-off": "owl:sameAs never merges two IRIs; it stays plain data.",
+        "sameas-narrow": "owl:sameAs merges IRIs within the dataset's own graphs; linkset graphs are not used as premises.",
+        "sameas-full": "Every owl:sameAs merges, linksets included, and properties flow both ways between the merged IRIs."
+      },
+      "source": {
+        "dataset": "set on this dataset",
+        "organisation": "inherited from the organisation",
+        "default": "built-in default",
+        "organisationOwn": "set on this organisation"
+      },
+      "saved": "Identity policy saved",
+      "rematerialiseHint": "When this dataset materialises its entailments, saving re-runs the reasoner at once.",
+      "orgInheritHint": "Datasets with their own setting keep it. Inheriting datasets that materialise their entailments are re-run.",
+      "readOnly": "Changing it needs write access.",
+      "neverIdentity": "Never treated as identity, whatever the setting:"
     }
   },
   "viewer": {

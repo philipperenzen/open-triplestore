@@ -14,6 +14,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Identity policy in the web UI.** The dataset page and the organisation page
+  have an *Identity policy (owl:sameAs)* card over the existing
+  `GET/PUT/DELETE /api/{datasets|organisations}/:id/identity` routes: it shows
+  the policy in force and where it comes from (the dataset, its organisation,
+  or the built-in default), and lets dataset editors and organisation admins
+  pick `off`, `narrow` or `full`, or go back to inheriting.
+- **A not-found page.** A path no route serves now shows "Page not found" with
+  links back, instead of an empty page shell.
+- **`GET /health` lists the standards the build serves** (`capabilities`, from
+  the compiled feature set). The Home page shows these as its chips instead of
+  a hard-coded list.
+
 - **Seed bundles: `[account]` and `[[groups]]`.** Two optional manifest keys,
   purely additive (a manifest without them behaves exactly as before).
   `[account]` (`username`, `email`, `display_name`, `password_env`) names the
@@ -67,6 +79,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asks for, and re-pins; the store now tells everyone which datasets that applies to.
 
 ### Changed
+- **The app's own dialogs replace the browser's.** The 11 `window.confirm()`,
+  3 `window.prompt()` and 31 `window.alert()` calls in the web UI are now the
+  app's confirmation dialog, a text-entry dialog and error toasts: translated,
+  themed and non-blocking.
+- **Datasets list: badges and filters for all ten graph roles.** The list used
+  its own six-role map, so `domain-values`, `linkset`, `provenance` and
+  `catalog` graphs got no badge; it now follows the canonical role list.
+- **Shape graph revisions open in the history dialog** instead of as raw text
+  in a new browser window.
+- **The "Transitive ancestors" demo service says what it does**: a SPARQL
+  property path, not OWL 2 RL reasoning. The e2e "standards" checks for
+  reasoning, SWRL and LDP now call the engines
+  (`POST /api/reasoning/materialize`, `POST /api/swrl/execute`, the `/ldp`
+  routes) instead of only reading seeded triples.
+
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were
@@ -93,6 +120,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an existing tag. See `docs/release-process.md`.
 
 ### Fixed
+- **`/admin/docs` is admin-only in the UI too.** The docs editor had no guard;
+  like the other `/admin/*` pages it now sends anyone but an admin home before
+  loading anything (the write endpoints were already admin-only).
+- **Translated HTML is escaped and sanitized.** Translations with inline
+  markup were rendered with `{@html}`, most without a sanitizer, and dataset,
+  organisation and shape-graph names were spliced into them as HTML. Values
+  are now escaped and the result keeps only inline formatting tags.
+- **Turning on "Gate writes" asks for confirmation.** The pipeline editor's
+  check ran on the wrong transition (it asked when switching the gate *off*,
+  and could not undo either way).
+- **Untranslated Dutch strings** in the dataset viewer and the release titles.
+- **LDP `DELETE` removes the member from its container.** A container created
+  by POSTing to `/ldp/c` (no trailing slash) is `…/ldp/c`, but `DELETE` looked
+  for the parent at `…/ldp/c/`, so the `ldp:contains` triple survived: the
+  container kept listing the member and `GET` on it still answered 200. The
+  parent is now the container that lists the member. Found by the new e2e
+  check that drives the `/ldp` routes.
+
 - **SHACL result paths no longer render with a stray `>`.** The backend
   serialises a result's `path` in SPARQL path syntax (`<http://ex.org/label>`,
   `^<a>`, `<a>/<b>`, `<a>|<b>`, `<a>*`), and the UI shortened that string as if

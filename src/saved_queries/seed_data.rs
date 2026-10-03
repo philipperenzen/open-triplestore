@@ -155,7 +155,8 @@ pub fn services_for(dataset_slug: &str) -> Vec<CreateSavedQueryRequest> {
             svc(
                 "Transitive ancestors",
                 "transitive-ancestors",
-                "OWL 2 RL — query-time transitive closure over an owl:TransitiveProperty (ex:ancestorOf+).",
+                "SPARQL 1.1 property path ex:ancestorOf+ over an owl:TransitiveProperty — the closure an OWL 2 RL \
+                 reasoner materialises (POST /api/reasoning/materialize), computed here at query time without one.",
                 "PREFIX ex: <https://opentriplestore.org/demo/reasoning#>\n\
                  SELECT ?descendant ?ancestor WHERE { ?descendant ex:ancestorOf+ ?ancestor } ORDER BY ?descendant",
             ),

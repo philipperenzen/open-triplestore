@@ -119,8 +119,10 @@ service"`; a BIM delivery, in the same dataset's linkset graph, says
 
 **Where it is set.** Per organisation (every dataset the organisation owns
 inherits it) and per dataset (overrides the organisation's setting); a dataset
-with neither uses the built-in default. Everything an organisation or dataset
-administrator needs is in the settings endpoints:
+with neither uses the built-in default. In the web UI it is the *Identity
+policy (owl:sameAs)* card on the dataset page (dataset editors change it) and
+on the organisation page (organisation admins change it; members see it). The
+same settings endpoints serve scripts:
 
 ```bash
 # What applies to a dataset, and why (setting on the dataset, its organisation, or the default)

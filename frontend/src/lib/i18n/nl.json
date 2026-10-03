@@ -111,7 +111,10 @@
     "warning": "Waarschuwing",
     "info": "Info",
     "selectAll": "Alles selecteren",
-    "deselectAll": "Selectie opheffen"
+    "deselectAll": "Selectie opheffen",
+    "areYouSure": "Weet je het zeker?",
+    "restore": "Terugzetten",
+    "discard": "Wijzigingen verwerpen"
   },
   "search": {
     "placeholder": "Ga naar bron IRI of zoek…",
@@ -194,7 +197,8 @@
         "validateTitle": "SHACL-problemen oplossen",
         "validateDesc": "Voer conformiteitsrapporten uit en inspecteer falende nodes in één workflow.",
         "validateCta": "Validatie bekijken"
-      }
+      },
+      "capabilitiesLabel": "Standaarden die deze server ondersteunt"
     },
     "tripleBrowser": {
       "title": "Triple-browser",
@@ -886,11 +890,6 @@
       "filterPlaceholder": "Datasets filteren…",
       "countOf": "{shown} van {total}",
       "roleAll": "Alle",
-      "roleInstances": "Instances",
-      "roleModel": "Model",
-      "roleVocabulary": "Vocabulaire",
-      "roleShapes": "Shapes",
-      "roleEntailment": "Entailment",
       "roleColumn": "Rol",
       "validationColumn": "Validatie",
       "selectAllWritable": "Alle beschrijfbare datasets selecteren",
@@ -933,7 +932,11 @@
         "vocabulary": "Vocabulaire",
         "shapes": "Shapes",
         "entailment": "Entailment",
-        "system": "Systeem"
+        "system": "Systeem",
+        "domain-values": "Domeinwaarden",
+        "linkset": "Linkset",
+        "provenance": "Herkomst",
+        "catalog": "Catalogus"
       },
       "emptyCta": "Maak je eerste dataset"
     },
@@ -2302,7 +2305,8 @@
       },
       "dependents": "Gebruikt door {count} dataset(s)",
       "dependentBehind": "Vastgepind op een oudere versie — laatst gepubliceerd is {latest}",
-      "dependentCurrent": "Vastgepind op de laatst gepubliceerde versie"
+      "dependentCurrent": "Vastgepind op de laatst gepubliceerde versie",
+      "versionFieldLabel": "Versie"
     },
     "modelDiff": {
       "heading": "Verschil:",
@@ -2644,7 +2648,7 @@
       "historyButton": "Geschiedenis",
       "editDetailsButton": "Details bewerken",
       "addShapesHeading": "Bestaande shapes toevoegen",
-      "addShapesHint": "Kies shapes uit een willekeurige graaf — inclusief shapes die met data zijn gekoppeld — om te kopiëren naar {name}.",
+      "addShapesHint": "Kies shapes uit een willekeurige graaf — inclusief shapes die met data zijn gekoppeld — om te kopiëren naar <strong>{name}</strong>.",
       "metaValidationHeading": "Meta-validatie (SHACL-SHACL)",
       "validatingShapes": "Shapes valideren…",
       "shapesWellFormed": "Deze shapes zijn goed gevormd.",
@@ -2854,7 +2858,7 @@
       "title": "3D- & kaartviewer",
       "back": "Dataset",
       "elements": "Onderdelen",
-      "openResource": "Open resource",
+      "openResource": "Resource openen",
       "empty": "Geen onderdelen met geometrie of 3D-modellen in deze dataset.",
       "cesium3d": "3D Tiles",
       "cesium3dDesc": "Schakel het canvas naar de CesiumJS 3D Tiles-globe (klik een object voor zijn linked data; de inspector opent gewoon)",
@@ -3390,6 +3394,12 @@
       "entities": "Entiteiten",
       "violations": "{count} overtredingen",
       "rounds": "Rondes"
+    },
+    "notFound": {
+      "title": "Pagina niet gevonden",
+      "detail": "Op dit adres staat niets. De link is misschien verouderd, of de pagina is verplaatst.",
+      "home": "Naar het overzicht",
+      "docs": "Documentatie openen"
     }
   },
   "toast": {
@@ -3542,7 +3552,7 @@
     },
     "attachShapesDialog": {
       "title": "Shapes koppelen",
-      "intro": "Valideer {target} met een of meer shape-grafen. Koppelingen worden onderdeel van de data (een bevraagbare validatielaag) en",
+      "intro": "Valideer <strong>{target}</strong> met een of meer shape-grafen. Koppelingen worden onderdeel van de data (een bevraagbare validatielaag) en",
       "introGraphTail": "reizen mee met de graaf — elke dataset die deze bevat erft deze shapes.",
       "introDefaultTail": "worden toegepast bij het schrijven en in pipelines.",
       "filterPlaceholder": "Shape-grafen filteren…",
@@ -3791,9 +3801,9 @@
       "restoreConfirm": "Versie {version} terugzetten op de live grafen van de dataset? Hiermee wordt de huidige inhoud van die grafen overschreven.",
       "restoreSkipped": "Teruggezet. {count} graaf/grafen die niet meer bij de dataset horen zijn ongemoeid gelaten: {graphs}",
       "versionLabel": "Versie",
-      "majorReleaseTitle": "Major release — {version}",
-      "minorReleaseTitle": "Minor release — {version}",
-      "patchReleaseTitle": "Patch release — {version}",
+      "majorReleaseTitle": "Hoofdversie — {version}",
+      "minorReleaseTitle": "Subversie — {version}",
+      "patchReleaseTitle": "Patchversie — {version}",
       "major": "Major",
       "minor": "Minor",
       "patch": "Patch",
@@ -4090,7 +4100,7 @@
       "deleteThis": "Deze organisatie verwijderen",
       "deleteDesc": "Verwijdert de organisatie en al haar datasets permanent. Dit kan niet ongedaan worden gemaakt.",
       "deleteOrg": "Organisatie verwijderen",
-      "deleteConfirmWarn": "Hiermee worden {name} en al haar datasets permanent verwijderd. Typ de naam van de organisatie om te bevestigen.",
+      "deleteConfirmWarn": "Hiermee worden <strong>{name}</strong> en al haar datasets permanent verwijderd. Typ de naam van de organisatie om te bevestigen.",
       "deleteConfirmAria": "Typ de naam van de organisatie om verwijderen te bevestigen",
       "deleting": "Verwijderen…",
       "deletePermanently": "Permanent verwijderen",
@@ -4125,14 +4135,6 @@
     },
     "select": {
       "noOptions": "Geen opties"
-    },
-    "shaclShapePanel": {
-      "colPath": "Pad",
-      "colCardinality": "Kardinaliteit",
-      "colType": "Type",
-      "colExtra": "Extra",
-      "valuesCount": "{count} waarden",
-      "noPropertyShapes": "Geen property-shapes gedeclareerd."
     },
     "shaclStudioNav": {
       "navLabel": "SHACL Studio-secties",
@@ -4469,6 +4471,38 @@
       "facts": "{count}{more} feiten in de store",
       "clickToOpen": "klik om te openen",
       "notInStore": "Geen data over deze IRI in de store — externe link"
+    },
+    "identityPolicy": {
+      "navLabel": "Identiteitsbeleid",
+      "heading": "Identiteitsbeleid (owl:sameAs)",
+      "introDataset": "Wat owl:sameAs mag doen wanneer over deze dataset wordt geredeneerd. Een instelling hier gaat voor die van de organisatie.",
+      "introOrganisation": "Het owl:sameAs-beleid dat elke dataset van deze organisatie erft, tenzij de dataset een eigen instelling heeft.",
+      "docsLink": "Hoe het identiteitsbeleid werkt",
+      "inForce": "Van kracht",
+      "selectLabel": "Instelling",
+      "inheritDataset": "Overnemen (organisatie of standaard)",
+      "inheritOrganisation": "Ingebouwde standaard",
+      "option": {
+        "sameas-off": "Uit",
+        "sameas-narrow": "Smal",
+        "sameas-full": "Volledig"
+      },
+      "description": {
+        "sameas-off": "owl:sameAs voegt nooit twee IRI's samen; het blijft gewone data.",
+        "sameas-narrow": "owl:sameAs voegt IRI's samen binnen de eigen grafen van de dataset; linkset-grafen tellen niet als premisse.",
+        "sameas-full": "Elke owl:sameAs voegt samen, linksets inbegrepen, en eigenschappen gaan in beide richtingen over tussen de samengevoegde IRI's."
+      },
+      "source": {
+        "dataset": "ingesteld op deze dataset",
+        "organisation": "overgenomen van de organisatie",
+        "default": "ingebouwde standaard",
+        "organisationOwn": "ingesteld op deze organisatie"
+      },
+      "saved": "Identiteitsbeleid opgeslagen",
+      "rematerialiseHint": "Als deze dataset zijn afleidingen materialiseert, draait de redeneerder bij opslaan meteen opnieuw.",
+      "orgInheritHint": "Datasets met een eigen instelling houden die. Erfende datasets die hun afleidingen materialiseren draaien opnieuw.",
+      "readOnly": "Wijzigen vraagt schrijfrechten.",
+      "neverIdentity": "Nooit als identiteit behandeld, ongeacht de instelling:"
     }
   },
   "viewer": {

@@ -1,4 +1,5 @@
 <script>
+  import { toastError } from '../lib/toast';
   import { t } from 'svelte-i18n';
   import { isAdmin, authInitialized } from '../lib/stores.js';
   import { SYSTEM_ROLES, GRAPH_PERMISSIONS } from '../lib/permissions.js';
@@ -26,7 +27,7 @@
   let guestSwept = null;      // last sweep result: { enabled, guests_swept }
 
   async function loadGuestReg() {
-    try { guestReg = await adminGetGuestRegistration(); } catch (e) { alert(e.message); }
+    try { guestReg = await adminGetGuestRegistration(); } catch (e) { toastError(e.message); }
   }
 
   async function toggleGuestReg() {
@@ -36,7 +37,7 @@
       guestSwept = await adminSetGuestRegistration(!guestReg.enabled);
       guestReg = { enabled: guestSwept.enabled };
     } catch (e) {
-      alert(e.message);
+      toastError(e.message);
     }
     guestRegBusy = false;
   }
@@ -48,7 +49,7 @@
   let clientError = '';
 
   async function loadOidcClients() {
-    try { oidcClients = await adminListOauthClients(); } catch (e) { alert(e.message); }
+    try { oidcClients = await adminListOauthClients(); } catch (e) { toastError(e.message); }
   }
 
   async function saveOidcClient() {
@@ -77,7 +78,7 @@
       await adminDeleteOauthClient(id);
       await loadOidcClients();
     } catch (e) {
-      alert(e.message);
+      toastError(e.message);
     }
   }
 
@@ -107,7 +108,7 @@
 
   async function loadProviders() {
     providersLoading = true;
-    try { providers = await adminListOauthProviders(); } catch (e) { alert(e.message); }
+    try { providers = await adminListOauthProviders(); } catch (e) { toastError(e.message); }
     providersLoading = false;
   }
 
@@ -164,7 +165,7 @@
   let deleteProviderTarget = null;
 
   async function doDeleteProvider() {
-    try { await adminDeleteOauthProvider(deleteProviderTarget); await loadProviders(); } catch (e) { alert(e.message); }
+    try { await adminDeleteOauthProvider(deleteProviderTarget); await loadProviders(); } catch (e) { toastError(e.message); }
     deleteProviderTarget = null;
   }
 
@@ -183,7 +184,7 @@
 
   async function loadEndpointRules() {
     endpointLoading = true;
-    try { endpointRules = await listEndpointAclRules(); } catch (e) { alert(e.message); }
+    try { endpointRules = await listEndpointAclRules(); } catch (e) { toastError(e.message); }
     endpointLoading = false;
   }
 
@@ -221,7 +222,7 @@
   let deleteEndpointTarget = null;
 
   async function doDeleteEndpointRule() {
-    try { await deleteEndpointAclRule(deleteEndpointTarget); await loadEndpointRules(); } catch (e) { alert(e.message); }
+    try { await deleteEndpointAclRule(deleteEndpointTarget); await loadEndpointRules(); } catch (e) { toastError(e.message); }
     deleteEndpointTarget = null;
   }
 
@@ -235,7 +236,7 @@
 
   async function loadGraphRules() {
     graphLoading = true;
-    try { graphRules = await listGraphAclRules(); } catch (e) { alert(e.message); }
+    try { graphRules = await listGraphAclRules(); } catch (e) { toastError(e.message); }
     graphLoading = false;
   }
 
@@ -256,7 +257,7 @@
   let revokeGraphTarget = null;
 
   async function doRevokeGraph() {
-    try { await revokeGraphPermission(revokeGraphTarget); await loadGraphRules(); } catch (e) { alert(e.message); }
+    try { await revokeGraphPermission(revokeGraphTarget); await loadGraphRules(); } catch (e) { toastError(e.message); }
     revokeGraphTarget = null;
   }
 
@@ -273,7 +274,7 @@
 
   async function loadTripleLabels() {
     tripleLoading = true;
-    try { tripleLabels = await listTripleSecurityLabels(); } catch (e) { alert(e.message); }
+    try { tripleLabels = await listTripleSecurityLabels(); } catch (e) { toastError(e.message); }
     tripleLoading = false;
   }
 
@@ -294,7 +295,7 @@
   let deleteLabelTarget = null;
 
   async function doDeleteTripleLabel() {
-    try { await deleteTripleSecurityLabel(deleteLabelTarget); await loadTripleLabels(); } catch (e) { alert(e.message); }
+    try { await deleteTripleSecurityLabel(deleteLabelTarget); await loadTripleLabels(); } catch (e) { toastError(e.message); }
     deleteLabelTarget = null;
   }
 

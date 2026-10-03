@@ -2575,6 +2575,65 @@ async fn raft_snapshot(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
+/// The standards this binary can serve, as short display names. The web UI's
+/// Home page shows them as chips; built from the compiled feature set so the UI
+/// never advertises an engine the build left out. Names, not grades: the grades
+/// live in docs/standards.md.
+pub(crate) fn server_capabilities() -> Vec<&'static str> {
+    let mut caps = vec!["SPARQL 1.1"];
+    if cfg!(feature = "rdf-12") {
+        caps.extend(["SPARQL 1.2", "RDF 1.2"]);
+    }
+    caps.extend(["GeoSPARQL 1.1", "SHACL", "SHACL-AF"]);
+    if cfg!(feature = "shex") {
+        caps.push("ShEx");
+    }
+    if cfg!(feature = "rdfs-entailment") {
+        caps.push("RDFS");
+    }
+    if cfg!(feature = "owl2-rl") {
+        caps.push("OWL 2 RL");
+    }
+    if cfg!(feature = "owl2-el") {
+        caps.push("OWL 2 EL");
+    }
+    if cfg!(feature = "owl2-ql") {
+        caps.push("OWL 2 QL");
+    }
+    if cfg!(feature = "owl2-dl") {
+        caps.push("OWL 2 DL");
+    }
+    if cfg!(feature = "swrl") {
+        caps.push("SWRL");
+    }
+    if cfg!(feature = "ldp") {
+        caps.push("LDP");
+    }
+    caps.extend(["DCAT", "LDES", "RDF Patch"]);
+    caps
+}
+
+#[cfg(test)]
+mod server_capabilities_tests {
+    use super::server_capabilities;
+
+    #[test]
+    fn lists_the_compiled_engines_once_each() {
+        let caps = server_capabilities();
+        assert_eq!(caps.first(), Some(&"SPARQL 1.1"));
+        let mut seen = std::collections::HashSet::new();
+        assert!(
+            caps.iter().all(|c| seen.insert(*c)),
+            "duplicate in {caps:?}"
+        );
+        assert_eq!(caps.contains(&"SWRL"), cfg!(feature = "swrl"));
+        assert_eq!(caps.contains(&"LDP"), cfg!(feature = "ldp"));
+        assert_eq!(caps.contains(&"ShEx"), cfg!(feature = "shex"));
+        assert_eq!(caps.contains(&"OWL 2 RL"), cfg!(feature = "owl2-rl"));
+        assert_eq!(caps.contains(&"SPARQL 1.2"), cfg!(feature = "rdf-12"));
+    }
+}
+
 async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
     // Triplestore — read the maintained O(1) count index, NOT store.len() /
     // named_graphs(), which scan RocksDB (O(total quads)) and can block past the
@@ -2607,6 +2666,7 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
     let body = serde_json::json!({
         "status": overall,
         "version": env!("CARGO_PKG_VERSION"),
+        "capabilities": server_capabilities(),
         "services": {
             "triplestore": {
                 "ok": store_ok,

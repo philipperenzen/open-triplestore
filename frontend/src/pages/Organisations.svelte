@@ -1,4 +1,5 @@
 <script>
+  import { tHtml } from '../lib/i18n/html';
   import { onMount } from 'svelte';
   import { listOrganisations, createOrganisation, deleteOrganisation } from '../lib/api.js';
   import { isAdmin, isAuthenticated } from '../lib/stores.js';
@@ -143,17 +144,17 @@
 
   {#if showInfo}
     <div class="info-panel">
-      <!-- eslint-disable-next-line svelte/no-at-html-tags -- trusted static i18n string -->
-      <p>{@html $t('pages.organisations.infoIntro')}</p>
+      <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+      <p>{@html $tHtml('pages.organisations.infoIntro')}</p>
       <ul>
-        <!-- eslint-disable-next-line svelte/no-at-html-tags -- trusted static i18n string -->
-        <li>{@html $t('pages.organisations.infoMembership')}</li>
-        <!-- eslint-disable-next-line svelte/no-at-html-tags -- trusted static i18n string -->
-        <li>{@html $t('pages.organisations.infoOwnership')}</li>
-        <!-- eslint-disable-next-line svelte/no-at-html-tags -- trusted static i18n string -->
-        <li>{@html $t('pages.organisations.infoSlug')}</li>
-        <!-- eslint-disable-next-line svelte/no-at-html-tags -- trusted static i18n string -->
-        <li>{@html $t('pages.organisations.infoScopedSparql')}</li>
+        <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+        <li>{@html $tHtml('pages.organisations.infoMembership')}</li>
+        <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+        <li>{@html $tHtml('pages.organisations.infoOwnership')}</li>
+        <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+        <li>{@html $tHtml('pages.organisations.infoSlug')}</li>
+        <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+        <li>{@html $tHtml('pages.organisations.infoScopedSparql')}</li>
       </ul>
       <Link to="/docs" class="info-docs-link">{$t('pages.organisations.viewFullDocs')}</Link>
     </div>

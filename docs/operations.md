@@ -4,7 +4,7 @@ Endpoints and behaviours that matter when running the triplestore as a service.
 
 ## Health & service description
 
-- **Health probe** — `GET /health` returns the software version and the status of each subsystem (triplestore, database, object storage, backup) as JSON, with a `503` when a core service is down — suitable for load-balancer and container health checks.
+- **Health probe** — `GET /health` returns the software version, the standards the build serves (`capabilities`, from its compiled features; the web UI's Home page shows them) and the status of each subsystem (triplestore, database, object storage, backup) as JSON, with a `503` when a core service is down — suitable for load-balancer and container health checks.
 - **Service description** — `GET /` returns a SPARQL 1.1 Service Description (Turtle) advertising capabilities and the named graphs the caller may access.
 
 ## Bulk import

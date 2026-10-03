@@ -44,6 +44,7 @@
   import PageHeader from '../components/PageHeader.svelte';
   import Select from '../components/Select.svelte';
   import SectionNav from '../components/SectionNav.svelte';
+  import IdentityPolicyCard from '../components/IdentityPolicyCard.svelte';
 
   export let id;
 
@@ -506,6 +507,9 @@
     return acc;
   }, {});
 
+  // Members (and system admins) may read the organisation's identity policy.
+  $: isOrgMember = $isAdmin || members.some((m) => (m.user_id || m.user?.id) === $userStore?.id);
+
   // True if the current user is a system admin OR an admin-role member of this org.
   $: canManageOrg = $isAdmin || members.some(
     m => (m.user_id || m.user?.id) === $userStore?.id && m.role === 'admin'
@@ -596,6 +600,7 @@
     { id: 'datasets', label: $t('pages.orgDetail.datasetsHeading') },
     { id: 'members', label: $t('pages.orgDetail.members'), visible: $isAuthenticated },
     { id: 'groups', label: $t('pages.orgDetail.groups'), visible: $isAuthenticated },
+    { id: 'identity', label: $t('components.identityPolicy.navLabel'), visible: $isAuthenticated && isOrgMember },
     { id: 'about', label: $t('pages.orgDetail.about') },
   ]} />
 {/if}
@@ -944,6 +949,12 @@
     </tbody>
   </table>
 </div>
+{/if}
+
+<!-- Identity policy (owl:sameAs) every dataset of the organisation inherits.
+     Members may read it, organisation admins change it. -->
+{#if $isAuthenticated && isOrgMember}
+  <IdentityPolicyCard scope="organisation" {id} canManage={canManageOrg} />
 {/if}
 
 <!-- About & hierarchy: reference details + where this org sits in the tree.

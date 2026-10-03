@@ -578,7 +578,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Management",
                 "Health check",
-                "Liveness probe with status and version.",
+                "Liveness probe with status, version, store counters and `capabilities` (the standards this build serves).",
                 vec![],
                 vec![("200", "Health status JSON")],
                 false,

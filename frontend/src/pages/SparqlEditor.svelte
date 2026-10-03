@@ -1,4 +1,5 @@
 <script>
+  import { askConfirm } from '../lib/confirm';
   import { onMount, onDestroy } from 'svelte';
   import { sparqlQuery, datasetSparqlQuery, listDatasets, listOrganisations, listServices, listDatasetGraphs, listDatasetVersions, getDataset, getOrganisation, nlToSparql, sendLlmFeedback, llmHealth } from '../lib/api.js';
   import { graphResultsToElements, resultsToCsv, downloadFile, parseNTriplesToBindings, detectGeoBindings, resultsToViewerElements } from '../lib/rdf-utils.js';
@@ -234,8 +235,13 @@ LIMIT 25`;
     history = history.filter((_, i) => i !== idx);
     try { localStorage.setItem(HISTORY_KEY, JSON.stringify(history)); } catch {}
   }
-  function clearHistory() {
-    if (!confirm($i18nT('pages.sparql.clearHistoryConfirm'))) return;
+  async function clearHistory() {
+    const ok = await askConfirm({
+      title: $i18nT('system.areYouSure'),
+      message: $i18nT('pages.sparql.clearHistoryConfirm'),
+      confirmLabel: $i18nT('system.clear'),
+    });
+    if (!ok) return;
     history = [];
     try { localStorage.removeItem(HISTORY_KEY); } catch {}
   }
