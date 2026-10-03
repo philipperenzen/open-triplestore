@@ -2257,10 +2257,20 @@ impl JsonLdExpansionConverter {
                                 JsonEvent::String(key.clone().into_owned().into()),
                             ))
                         } else if container.contains(&"@type") {
-                            Some((
-                                "@type".into(),
-                                JsonEvent::String(key.clone().into_owned().into()),
-                            ))
+                            // 13.8.3.2) The index's type-scoped context applies to the map
+                            // context like any context does (it propagates), not as the
+                            // non-propagating context of a node's own @type.
+                            if let Some(type_scoped_context) =
+                                self.new_scoped_context(&map_context, &key, false, true, errors)
+                            {
+                                map_context = Arc::new(type_scoped_context);
+                            }
+                            // 13.8.3.4) and 13.8.3.7.4) The type is added to the node already
+                            // expanded, so that the node does not apply its scoped context again.
+                            let expanded_index = self
+                                .expand_iri(&active_context, key.as_ref().into(), true, true)
+                                .map_or_else(|| key.clone().into_owned(), Cow::into_owned);
+                            Some(("@type".into(), JsonEvent::String(expanded_index.into())))
                         } else {
                             active_property
                                 .as_ref()

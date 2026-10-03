@@ -172,3 +172,10 @@ an `UPSTREAM-PR-*.md` draft beside the crate.
    quads, as the JSON-LD to RDF algorithm says. A relative `@base` that does not
    resolve and a non-string `@base` still raise `invalid base IRI`. W3C
    json-ld-api toRdf `li12`.
+
+3. **A type map applies the type's scoped context to the map context**
+   (`src/expansion.rs`, `IndexContainer`, expansion steps 13.8.3.2 and
+   13.8.3.7.4; `UPSTREAM-PR-3-type-map-scoped-context.md`). The context
+   propagates into nested nodes, and the node gets the type already expanded, so
+   it does not apply the context a second time as its own non-propagating
+   type-scoped context. W3C json-ld-api toRdf `c013`.

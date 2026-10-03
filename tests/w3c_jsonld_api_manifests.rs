@@ -50,10 +50,6 @@ const BASE: &str = "https://w3c.github.io/json-ld-api/tests/";
 /// Entries this processor gets wrong, `(section#id, reason)`. Every one is a
 /// processor (oxjsonld 0.2.6) deviation, not a runner limitation.
 const KNOWN_FAILURES: &[(&str, &str)] = &[
-    (
-        "toRdf#tc013",
-        "a type map applies the containing term's scoped context instead of the type's",
-    ),
     ("toRdf#tdi02", "built with rdf-12, @direction becomes an RDF 1.2 directional language string; JSON-LD 1.1 drops it unless rdfDirection is set"),
     ("toRdf#tdi04", "built with rdf-12, @direction becomes an RDF 1.2 directional language string; JSON-LD 1.1 drops it unless rdfDirection is set"),
     ("toRdf#tdi05", "built with rdf-12, @direction becomes an RDF 1.2 directional language string; JSON-LD 1.1 drops it unless rdfDirection is set"),

@@ -136,7 +136,8 @@ Vendored source code:
     dual-licensed MIT or Apache-2.0, at your option; Copyright (c) 2018
     Oxigraph developers. Both licence texts are beside it. Modified: IRI
     resolution removes the dot segments of the whole target path; an @base
-    in absolute form is the base even when it is not a valid IRI.
+    in absolute form is the base even when it is not a valid IRI; a type map
+    applies the type's scoped context to the map context.
     vendor/README.md describes every change in these crates, and the
     UPSTREAM-PR*.md files beside them the changes as proposed upstream.
 
