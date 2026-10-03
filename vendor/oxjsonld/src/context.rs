@@ -331,6 +331,13 @@ impl JsonLdContextProcessor {
                                     Iri::parse(value.clone())
                                 } {
                                     Ok(iri) => result.base_iri = Some(iri),
+                                    // 5.7.3) A value in absolute form (it has a scheme) is the
+                                    // base IRI even when it is not a valid IRI, as the W3C tests
+                                    // (toRdf li12) and other processors have it: IRIs resolved
+                                    // against it are not well-formed, so they are not emitted.
+                                    Err(_) if crate::iri::has_scheme(&value) => {
+                                        result.base_iri = Some(Iri::parse_unchecked(value))
+                                    }
                                     Err(e) => errors.push(JsonLdSyntaxError::msg_and_code(
                                         format!("Invalid @base '{value}': {e}"),
                                         JsonLdErrorCode::InvalidBaseIri,

@@ -164,3 +164,11 @@ an `UPSTREAM-PR-*.md` draft beside the crate.
    `..` segments of the base path it merges with and of a network-path reference
    (`//host/../x`); RFC 3986 §5.2.2 removes them. W3C json-ld-api toRdf `0122`,
    `0123`, `e062`, `e091`.
+
+2. **An `@base` in absolute form is the base even when it is not a valid IRI**
+   (`src/context.rs`, context processing step 5.7;
+   `UPSTREAM-PR-2-invalid-base.md`). It used to refuse the document; IRIs
+   resolved against such a base are not well-formed and are left out of the
+   quads, as the JSON-LD to RDF algorithm says. A relative `@base` that does not
+   resolve and a non-string `@base` still raise `invalid base IRI`. W3C
+   json-ld-api toRdf `li12`.

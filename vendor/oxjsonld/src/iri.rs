@@ -82,7 +82,8 @@ fn with_path(iri: &Iri<String>, path: &str) -> String {
     out
 }
 
-fn has_scheme(reference: &str) -> bool {
+/// Whether `reference` starts with a scheme (RFC 3986 §3.1), i.e. is in absolute form.
+pub fn has_scheme(reference: &str) -> bool {
     let mut chars = reference.chars();
     if !chars.next().is_some_and(|c| c.is_ascii_alphabetic()) {
         return false;

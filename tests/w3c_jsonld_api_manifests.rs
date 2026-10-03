@@ -59,10 +59,6 @@ const KNOWN_FAILURES: &[(&str, &str)] = &[
     ("toRdf#tdi05", "built with rdf-12, @direction becomes an RDF 1.2 directional language string; JSON-LD 1.1 drops it unless rdfDirection is set"),
     ("toRdf#tdi06", "built with rdf-12, @direction becomes an RDF 1.2 directional language string; JSON-LD 1.1 drops it unless rdfDirection is set"),
     (
-        "toRdf#tli12",
-        "an invalid @base is a parse error instead of leaving relative IRIs unresolved",
-    ),
-    (
         "fromRdf#t0016",
         "a list whose nodes are typed rdf:List is written as nodes that read back as a different dataset",
     ),
