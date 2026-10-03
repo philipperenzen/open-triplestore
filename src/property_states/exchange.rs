@@ -246,7 +246,8 @@ pub async fn import_states(
     // Parse into a scratch store, every quad in its default graph.
     let scratch = oxigraph::store::Store::new().map_err(e500)?;
     let mut count = 0usize;
-    for quad in RdfParser::from_format(format).for_slice(&body) {
+    let mut parser = RdfParser::from_format(format).for_slice(&body);
+    for quad in parser.by_ref() {
         let quad = quad.map_err(|e| bad(format!("the body does not parse: {e}")))?;
         count += 1;
         if count > MAX_IMPORT_TRIPLES {
@@ -278,11 +279,17 @@ pub async fn import_states(
             _ => Ok(Vec::new()),
         }
     };
+    // The document's own prefixes: OPM tools write argument paths with them.
+    let doc_prefixes: Vec<(String, String)> = parser
+        .prefixes()
+        .map(|(name, ns)| (name.to_string(), ns.to_string()))
+        .collect();
     let found = collect_states(&solutions(&states_select())?);
-    if found.is_empty() {
+    let calcs = super::calc::calcs_in(&scratch, &doc_prefixes).map_err(e500)?;
+    if found.is_empty() && calcs.is_empty() {
         return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
-            "no OPM property states found: expected `<item> <kind> <property>` with `<property> opm:hasPropertyState <state>`".to_string(),
+            "no OPM property states or calculations found: expected `<item> <kind> <property>` with `<property> opm:hasPropertyState <state>`, or an `opm:Calculation`".to_string(),
         ));
     }
     // Derivation sequences, members in order.
@@ -535,6 +542,39 @@ pub async fn import_states(
             statements.push(replace_plain(&data_graph, &e, &p, value.as_deref()));
         }
     }
+    // Calculations: validated like any other definition; a stored one with
+    // the same IRI is kept.
+    let mut imported_calcs = 0usize;
+    let mut rejected_calcs: Vec<serde_json::Value> = Vec::new();
+    let known_calcs: HashSet<String> = super::calc::load_calcs(&state, &states_g, None)?
+        .into_iter()
+        .map(|c| c.iri)
+        .collect();
+    let now = chrono::Utc::now().to_rfc3339();
+    for stored in calcs {
+        match stored.calc {
+            Err(reason) => rejected_calcs.push(serde_json::json!({
+                "calculation": stored.iri,
+                "reason": reason,
+            })),
+            Ok(mut calc) => {
+                if calc.iri.starts_with("_:") {
+                    calc.iri = format!("urn:ots:calculation:{}", uuid::Uuid::new_v4());
+                }
+                if known_calcs.contains(&calc.iri) {
+                    duplicates += 1;
+                    continue;
+                }
+                if let Some(g) = &calc.data_graph {
+                    if registered_data_graph(&state, &dataset_id, g).is_err() {
+                        calc.data_graph = None;
+                    }
+                }
+                statements.push(super::calc::calc_insert(&states_g, &calc, &agent, &now));
+                imported_calcs += 1;
+            }
+        }
+    }
     let properties = by_property.len();
     super::apply_writes(
         &state,
@@ -542,8 +582,10 @@ pub async fn import_states(
         &user.user_id,
         statements,
         touched_graphs,
-        format!("OPM import: {imported} states of {properties} properties"),
-        imported,
+        format!(
+            "OPM import: {imported} states of {properties} properties, {imported_calcs} calculations"
+        ),
+        imported + imported_calcs,
     )
     .await?;
     Ok((
@@ -557,6 +599,8 @@ pub async fn import_states(
             "skipped_duplicates": duplicates,
             "rejected_count": errors,
             "rejected": rejected,
+            "imported_calculations": imported_calcs,
+            "rejected_calculations": rejected_calcs,
         })),
     ))
 }

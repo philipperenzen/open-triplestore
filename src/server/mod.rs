@@ -1264,6 +1264,22 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(crate::property_states::validate_states),
         )
         .route(
+            "/api/datasets/:dataset_id/properties/calculations",
+            get(crate::property_states::list_calculations)
+                .post(crate::property_states::create_calculation),
+        )
+        .route(
+            "/api/datasets/:dataset_id/properties/calculations/:calc",
+            get(crate::property_states::get_calculation)
+                .post(crate::property_states::post_calculation)
+                .put(crate::property_states::put_calculation)
+                .delete(crate::property_states::delete_calculation),
+        )
+        .route(
+            "/api/datasets/:dataset_id/properties/calculations/:calc/outdated",
+            get(crate::property_states::outdated_calculation),
+        )
+        .route(
             "/api/properties/profile",
             get(crate::property_states::profile_shapes),
         )

@@ -2874,6 +2874,123 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             ),
         )],
     );
+    let calc_errors = |extra: Vec<(&'static str, &'static str)>| {
+        let mut r = extra;
+        r.extend([
+            ("401", "Authentication required"),
+            ("403", "Write access required"),
+            ("404", "Dataset or calculation not found"),
+        ]);
+        r
+    };
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/calculations",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Property States",
+                    "List calculations",
+                    "The dataset's `opm:Calculation`s, each re-validated as it is loaded: `{calculation, id, label, inferred_property, argument_paths, arguments, expression, foi_restriction, path_restriction, graph, valid}`, plus `error` when a stored definition no longer passes the allow-list.",
+                    vec![],
+                    vec![("200", "`{dataset_id, calculations}`"), ("404", "Dataset not found or not visible")],
+                    false,
+                ),
+            ),
+            (
+                M::Post,
+                ob(
+                    "Property States",
+                    "Define a calculation",
+                    "Store an `opm:Calculation` in the states graph. Each argument path is triple patterns and property paths from `?foi` binding one argument variable as the object of a last step with a plain predicate; the path restriction may use `?foi` and blank nodes only; the expression may use arithmetic, comparisons, `&&` `||` `!`, `IF`, `COALESCE`, `BOUND`, `IN`, `ABS`, `CEIL`, `FLOOR`, `ROUND`, `isNumeric`, `isLiteral`, `STR`, `DATATYPE` and XSD numeric/boolean/string casts over the arguments. `SERVICE`, `GRAPH`, `FILTER`, `EXISTS`, `OPTIONAL`, `UNION`, `VALUES`, `BIND`, subqueries, aggregates and other functions are refused. Prefixed names resolve with `prefixes`; the definition is stored with full IRIs. Nothing runs until POST or PUT on the calculation.",
+                    vec![],
+                    json_body(
+                        ObjectBuilder::new()
+                            .property("label", ObjectBuilder::new().schema_type(Type::String))
+                            .property("inferred_property", ObjectBuilder::new().schema_type(Type::String).description(Some("`opm:inferredProperty`: the property kind derived.")))
+                            .property("argument_paths", ArrayBuilder::new().items(ObjectBuilder::new().schema_type(Type::String)).description(Some("`opm:argumentPaths`, e.g. `?foi ex:width ?w`.")))
+                            .property("expression", ObjectBuilder::new().schema_type(Type::String).description(Some("`opm:expression` over the arguments, e.g. `?w * ?h`.")))
+                            .property("prefixes", ObjectBuilder::new().description(Some("Prefix → namespace map for the paths, restriction and expression.")))
+                            .property("foi_restriction", ObjectBuilder::new().schema_type(Type::String).description(Some("`opm:foiRestriction`: the one feature of interest to derive for.")))
+                            .property("path_restriction", ObjectBuilder::new().schema_type(Type::String).description(Some("`opm:pathRestriction`: a pattern every feature of interest must match, e.g. `?foi a ex:Window`.")))
+                            .property("graph", ObjectBuilder::new().schema_type(Type::String).description(Some("Data graph for derived values (default: where the property's value is, else the instances graph).")))
+                            .required("inferred_property")
+                            .required("argument_paths")
+                            .required("expression"),
+                        json!({ "label": "Window area", "inferred_property": "ex:area", "argument_paths": ["?foi ex:width ?w", "?foi ex:height ?h"], "expression": "?w * ?h", "path_restriction": "?foi a ex:Window", "prefixes": { "ex": "https://example.org/" } }),
+                    ),
+                    calc_errors(vec![("201", "The stored definition, canonical"), ("400", "A path, restriction or expression outside the allow-list, or a bad IRI")]),
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/calculations/:calc",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Property States",
+                    "Get a calculation",
+                    "One calculation; `calc` is its id or its full IRI, percent-encoded.",
+                    vec![],
+                    vec![("200", "The definition"), ("404", "Dataset or calculation not found")],
+                    false,
+                ),
+            ),
+            (
+                M::Post,
+                o(
+                    "Property States",
+                    "Run a calculation (OPM POST)",
+                    "Derive the inferred property for every feature of interest that has all arguments and does not have the property yet (as a state or a plain value). Matching runs over the dataset's own data graphs only, capped at `OTS_OPM_CALC_MAX_ROWS` rows (default 10 000; more is a 422, nothing derived) and the query timeout; arguments must be current, not deleted and numeric XSD values; the expression is evaluated in an empty scratch store. Each derived state is `opm:Derived` with the `opm:expression` and `prov:wasDerivedFrom` an `rdf:Seq` of the argument states; one commit per run.",
+                    vec![],
+                    calc_errors(vec![("200", "`{calculation, mode, derived_count, derived, skipped_count, skipped}`"), ("422", "The stored definition is invalid, the match exceeds the row cap or timeout, or the expression cannot be evaluated")]),
+                    true,
+                ),
+            ),
+            (
+                M::Put,
+                o(
+                    "Property States",
+                    "Recompute a calculation (OPM PUT)",
+                    "Recompute every current derived state of this calculation one of whose argument states is no longer current. Same rules and report as POST.",
+                    vec![],
+                    calc_errors(vec![("200", "`{calculation, mode, derived_count, derived, skipped_count, skipped}`"), ("422", "The stored definition is invalid, or the run hit a cap")]),
+                    true,
+                ),
+            ),
+            (
+                M::Delete,
+                o(
+                    "Property States",
+                    "Remove a calculation",
+                    "Remove the definition from the states graph. The states it derived stay.",
+                    vec![],
+                    calc_errors(vec![("204", "Removed")]),
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/calculations/:calc/outdated",
+        vec![(
+            M::Get,
+            o(
+                "Property States",
+                "Outdated derived states",
+                "The current derived states of this calculation one of whose argument states has since been outdated (what PUT would recompute): `{foi, state, outdated_arguments}`.",
+                vec![],
+                vec![("200", "`{calculation, outdated_count, outdated}`"), ("404", "Dataset or calculation not found"), ("422", "The stored definition is invalid")],
+                false,
+            ),
+        )],
+    );
     mount(
         paths,
         "/api/properties/profile",

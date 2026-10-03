@@ -115,6 +115,73 @@ states; without `ots:validFrom` the generation time counts as validity).
 Writes manage only the server's own states: import canonical data to extend
 its chains.
 
+**Calculations.** An `opm:Calculation` infers a property from others: the
+property it infers, the argument paths from a feature of interest (`?foi`)
+to each argument, an expression over the arguments and, optionally, one
+feature of interest (`opm:foiRestriction`) or a pattern every feature must
+match (`opm:pathRestriction`):
+
+```bash
+curl -X POST http://localhost:7878/api/datasets/<id>/properties/calculations \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
+  -d '{"label": "Window area", "inferred_property": "ex:area",
+       "argument_paths": ["?foi ex:width ?w", "?foi ex:height ?h"],
+       "expression": "?w * ?h", "path_restriction": "?foi a ex:Window",
+       "prefixes": {"ex": "https://example.org/"}}'
+```
+
+As the OPM specification describes, a calculation runs only when asked —
+writes never trigger it:
+
+```
+POST /api/datasets/<id>/properties/calculations/<calc>           # derive for every feature that lacks the property
+PUT  /api/datasets/<id>/properties/calculations/<calc>           # recompute where an argument state was outdated
+GET  /api/datasets/<id>/properties/calculations/<calc>/outdated  # which derived states are stale
+GET  /api/datasets/<id>/properties/calculations[/<calc>]
+DELETE /api/datasets/<id>/properties/calculations/<calc>         # the definition; derived states stay
+```
+
+`<calc>` is the id the definition returned, or a calculation's full IRI
+(percent-encoded). POST skips a feature of interest that already has the
+property (as a state or a plain value); PUT recomputes exactly the derived
+states of the calculation one of whose argument states is no longer
+current. Each derived state is `opm:Derived`, carries the `opm:expression`
+and `prov:wasDerivedFrom` an `rdf:Seq` of the argument states in path order
+(`ots:calculation` names the calculation), and its value becomes the plain
+triple; one run is one commit. A feature whose arguments are missing,
+deleted, not numeric or ambiguous (a path that reaches several values) is
+skipped and reported with the reason.
+
+Rules for paths and expressions:
+
+- An argument path is triple patterns and property paths from `?foi` that
+  bind exactly one other variable, the argument, as the object of a last
+  step with a plain predicate (`?foi ex:partOf/ex:height ?h` is fine; the
+  derivation then points at the state of the part's `ex:height`). The path
+  restriction may use `?foi` and blank nodes only.
+- An expression uses arithmetic, comparisons, `&&` `||` `!`, `IF`,
+  `COALESCE`, `BOUND`, `IN`, `ABS`, `CEIL`, `FLOOR`, `ROUND`, `isNumeric`,
+  `isLiteral`, `STR`, `DATATYPE` and the XSD numeric, boolean and string
+  casts, over the declared arguments only.
+- Arguments must be numeric XSD values (`xsd:integer`, `xsd:decimal`,
+  `xsd:float`, `xsd:double` and the integer subtypes); arithmetic follows
+  SPARQL's numeric promotion (so `xsd:decimal` stays exact).
+- Every path, restriction and expression is parsed and allow-listed —
+  `SERVICE`, `GRAPH`, `FILTER`, `EXISTS`, `OPTIONAL`, `UNION`, `VALUES`,
+  `BIND`, subqueries, aggregates and any other function are refused — and
+  stored in canonical form with full IRIs. The queries are built from the
+  parsed form, never from the text: matching runs over the dataset's own
+  data graphs only, capped at `OTS_OPM_CALC_MAX_ROWS` rows (default 10 000;
+  more fails the run instead of deriving part of it) and the query timeout;
+  the expression is evaluated over the matched values in an empty scratch
+  store. A stored calculation is validated again whenever it is loaded, so
+  one written into the states graph by other means is listed as invalid and
+  refused when run.
+
+Calculations live in the states graph, so export and import carry them;
+an imported calculation's prefixed names resolve with the document's own
+prefixes (`?foi props:width ?width`, as OPM's examples write them).
+
 **Profile shapes.** `GET /api/datasets/<id>/properties/validate` checks the
 states graph against the OPM profile: one current state per property,
 current/outdated and assumed/confirmed disjoint, one `prov:generatedAtTime`

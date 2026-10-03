@@ -18,6 +18,8 @@
 //! * `GET  /api/datasets/:id/properties/export`  — canonical OPM
 //! * `POST /api/datasets/:id/properties/import`  — canonical OPM in
 //! * `GET  /api/datasets/:id/properties/validate` — the OPM profile shapes
+//! * `/api/datasets/:id/properties/calculations[/:calc]` — `opm:Calculation`
+//!   definitions; POST / PUT on one derive and recompute (see [`calc`])
 //!
 //! **Storage.** A property node is linked to its item with
 //! `ots:propertyOf` / `ots:propertyPredicate`, not with OPM's
@@ -32,8 +34,13 @@
 //! time and attribution. Domain vocabularies (material passports, clinical
 //! records) supply the property IRIs; nothing here knows them.
 
+mod calc;
 mod exchange;
 
+pub use calc::{
+    create_calculation, delete_calculation, get_calculation, list_calculations,
+    outdated_calculation, post_calculation, put_calculation,
+};
 pub use exchange::{export_states, import_states};
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -374,6 +381,8 @@ pub(crate) struct StoredState {
     pub derived_from: Option<String>,
     pub calculation: Option<String>,
     pub revision_of: Option<String>,
+    /// The members of the `prov:wasDerivedFrom` `rdf:Seq`, in order.
+    pub arguments: Vec<String>,
     /// Found through a canonical `<item> <predicate> <property>` link in a
     /// dataset graph rather than the server's own storage.
     pub canonical: bool,
@@ -421,6 +430,7 @@ impl StoredState {
             derived_from: self.derived_from.clone(),
             calculation: self.calculation.clone(),
             revision_of: self.revision_of.clone(),
+            arguments: self.arguments.clone(),
             canonical: self.canonical,
         }
     }
@@ -465,6 +475,9 @@ pub struct StateView {
     pub calculation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision_of: Option<String>,
+    /// A derived state's argument states, in order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub arguments: Vec<String>,
     pub canonical: bool,
 }
 
@@ -528,7 +541,7 @@ PREFIX schemahttp: <{SCHEMA_HTTP}>
 PREFIX prov: <{PROV}>
 PREFIX ots: <{OTS}>
 PREFIX rdfs: <{RDFS}>
-SELECT ?e ?p ?prop ?s ?v ?vf ?rec ?who ?note ?cls ?doc ?dg ?expr ?seq ?calc ?rev ?canon WHERE {{
+SELECT ?e ?p ?prop ?s ?v ?vf ?rec ?who ?note ?cls ?doc ?dg ?expr ?seq ?argn ?arg ?calc ?rev ?canon WHERE {{
   {{ ?prop ots:propertyOf ?e ; ots:propertyPredicate ?p . BIND(false AS ?canon) }}
   UNION
   {{ ?e ?p ?prop . FILTER(!isLiteral(?prop)) FILTER EXISTS {{ ?prop opm:hasPropertyState ?any }} BIND(true AS ?canon) }}
@@ -546,7 +559,8 @@ SELECT ?e ?p ?prop ?s ?v ?vf ?rec ?who ?note ?cls ?doc ?dg ?expr ?seq ?calc ?rev
   OPTIONAL {{ ?s opm:documentation ?doc }}
   OPTIONAL {{ ?s ots:dataGraph ?dg }}
   OPTIONAL {{ ?s opm:expression ?expr }}
-  OPTIONAL {{ ?s prov:wasDerivedFrom ?seq }}
+  OPTIONAL {{ ?s prov:wasDerivedFrom ?seq
+    OPTIONAL {{ ?seq ?argn ?arg FILTER(STRSTARTS(STR(?argn), "{RDF}_")) }} }}
   OPTIONAL {{ ?s ots:calculation ?calc }}
   OPTIONAL {{ ?s prov:wasRevisionOf ?rev }}
 }}"#
@@ -557,6 +571,7 @@ SELECT ?e ?p ?prop ?s ?v ?vf ?rec ?who ?note ?cls ?doc ?dg ?expr ?seq ?calc ?rev
 /// state).
 pub(crate) fn collect_states(rows: &[QuerySolution]) -> Vec<StoredState> {
     let mut by_state: BTreeMap<(String, String), StoredState> = BTreeMap::new();
+    let mut args: BTreeMap<(String, String), BTreeMap<usize, String>> = BTreeMap::new();
     let get = |row: &QuerySolution, k: &str| row.get(k).map(term_string);
     for row in rows {
         let (Some(s), Some(prop), Some(e), Some(p)) = (
@@ -589,6 +604,7 @@ pub(crate) fn collect_states(rows: &[QuerySolution]) -> Vec<StoredState> {
                 derived_from: get(row, "seq"),
                 calculation: get(row, "calc"),
                 revision_of: get(row, "rev"),
+                arguments: Vec::new(),
                 canonical,
             });
         // The server's own link wins over a canonical one for the same node.
@@ -604,6 +620,22 @@ pub(crate) fn collect_states(rows: &[QuerySolution]) -> Vec<StoredState> {
         }
         if let Some(doc) = get(row, "doc") {
             entry.documentation.insert(doc);
+        }
+        if let (Some(Term::NamedNode(n)), Some(arg)) = (row.get("argn"), get(row, "arg")) {
+            if let Some(i) = n
+                .as_str()
+                .strip_prefix(&format!("{RDF}_"))
+                .and_then(|i| i.parse::<usize>().ok())
+            {
+                args.entry((prop.clone(), s.clone()))
+                    .or_default()
+                    .insert(i, arg);
+            }
+        }
+    }
+    for (key, members) in args {
+        if let Some(st) = by_state.get_mut(&key) {
+            st.arguments = members.into_values().collect();
         }
     }
     by_state.into_values().collect()

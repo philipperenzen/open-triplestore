@@ -1260,3 +1260,577 @@ async fn states_of_private_graph_values_stay_private() {
     assert_eq!(st, StatusCode::FORBIDDEN);
     assert_eq!(plain_values(&state, G, E, P), vec!["45".to_string()]);
 }
+
+// ─── OPM calculations (M4) ──────────────────────────────────────────────────
+
+const EX: &str = "https://example.org/calc/";
+
+fn ex(local: &str) -> String {
+    format!("{EX}{local}")
+}
+
+/// A dataset with two windows: w1 has width and height, w2 only a width;
+/// a wall the windows are part of has a height.
+async fn calc_fixture() -> (open_triplestore::server::AppState, String, Router) {
+    let (state, token) = admin_state();
+    dataset(&state, "calc", &ex("instances"), Visibility::Private);
+    state
+        .store
+        .load_str(
+            &format!(
+                "<{w1}> a <{win}> ; <{part}> <{wall}> . <{w2}> a <{win}> . <{wall}> a <{wl}> .",
+                w1 = ex("w1"),
+                w2 = ex("w2"),
+                win = ex("Window"),
+                wl = ex("Wall"),
+                wall = ex("wall"),
+                part = ex("partOf"),
+            ),
+            RdfFormat::Turtle,
+            Some(&ex("instances")),
+        )
+        .unwrap();
+    let app = test_app(state.clone());
+    for (e, p, v) in [
+        ("w1", "width", "1.25"),
+        ("w1", "height", "1.5"),
+        ("w2", "width", "0.8"),
+        ("wall", "height", "3.0"),
+    ] {
+        let (st, _, txt) = post(&app, &token, "/api/datasets/calc/properties/state", json!({
+            "entity": ex(e), "property": ex(p), "value": v, "datatype": "xsd:decimal", "reliability": "confirmed"
+        })).await;
+        assert_eq!(st, StatusCode::CREATED, "{txt}");
+    }
+    (state, token, app)
+}
+
+fn area_calc() -> Value {
+    json!({
+        "label": "Window area",
+        "inferred_property": "ex:area",
+        "argument_paths": ["?foi ex:width ?w", "?foi ex:height ?h"],
+        "expression": "?w * ?h",
+        "prefixes": { "ex": EX },
+    })
+}
+
+async fn define(app: &Router, token: &str, body: Value) -> (StatusCode, Value, String) {
+    post(
+        app,
+        token,
+        "/api/datasets/calc/properties/calculations",
+        body,
+    )
+    .await
+}
+
+async fn run_calc(
+    app: &Router,
+    token: &str,
+    method: Method,
+    id: &str,
+) -> (StatusCode, Value, String) {
+    req(
+        app,
+        method,
+        &format!(
+            "/api/datasets/calc/properties/calculations/{}",
+            url_encode(id)
+        ),
+        Some(token),
+        None,
+    )
+    .await
+}
+
+/// OPM's REST guidance: POST to a calculation derives the property for every
+/// feature of interest that has the arguments; PUT recomputes where an
+/// argument state has been outdated. A derived state carries the expression
+/// and an `rdf:Seq` of the argument states.
+#[tokio::test]
+async fn calculations_derive_on_post_and_recompute_on_put() {
+    let (state, token, app) = calc_fixture().await;
+    let (st, c, txt) = define(&app, &token, area_calc()).await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    let id = c["id"].as_str().unwrap().to_string();
+    assert_eq!(c["inferred_property"], ex("area"));
+    assert_eq!(
+        c["argument_paths"][0],
+        format!("?foi <{}> ?w", ex("width")),
+        "stored with full IRIs: {txt}"
+    );
+    assert_eq!(c["expression"], "(?w * ?h)");
+    let (_, list, _) = get(
+        &app,
+        Some(&token),
+        "/api/datasets/calc/properties/calculations",
+    )
+    .await;
+    assert_eq!(list["calculations"].as_array().unwrap().len(), 1);
+
+    // POST: w1 gets an area; w2 has no height, so no match.
+    let (st, r, txt) = run_calc(&app, &token, Method::POST, &id).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(r["derived_count"], 1, "{txt}");
+    assert_eq!(r["derived"][0]["foi"], ex("w1"));
+    assert_eq!(
+        plain_values(&state, &ex("instances"), &ex("w1"), &ex("area")),
+        vec!["1.875".to_string()]
+    );
+    let (_, w, _) = get(
+        &app,
+        Some(&token),
+        &history_uri("calc", &ex("w1"), &ex("width")),
+    )
+    .await;
+    let (_, h, _) = get(
+        &app,
+        Some(&token),
+        &history_uri("calc", &ex("w1"), &ex("height")),
+    )
+    .await;
+    let (_, a, txt) = get(
+        &app,
+        Some(&token),
+        &history_uri("calc", &ex("w1"), &ex("area")),
+    )
+    .await;
+    let derived = &a["states"][0];
+    assert_eq!(derived["reliability"], "derived", "{txt}");
+    assert_eq!(derived["expression"], "(?w * ?h)");
+    assert_eq!(derived["calculation"], c["calculation"]);
+    assert_eq!(
+        derived["arguments"],
+        json!([w["states"][0]["state"], h["states"][0]["state"]]),
+        "the rdf:Seq names the argument states in order: {txt}"
+    );
+    let seq = derived["derived_from"].as_str().unwrap();
+    assert!(matches!(
+        state.store.query(&format!("ASK {{ GRAPH <urn:ots:property-states:calc> {{ <{seq}> a <http://www.w3.org/1999/02/22-rdf-syntax-ns#Seq> }} }}")),
+        Ok(QueryResults::Boolean(true))
+    ));
+
+    // A second POST leaves w1 alone; nothing is outdated yet.
+    let (_, r, txt) = run_calc(&app, &token, Method::POST, &id).await;
+    assert_eq!(r["derived_count"], 0, "{txt}");
+    assert!(
+        r["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["foi"] == ex("w1")),
+        "{txt}"
+    );
+    let outdated_uri = format!(
+        "/api/datasets/calc/properties/calculations/{}/outdated",
+        url_encode(&id)
+    );
+    let (_, o, _) = get(&app, Some(&token), &outdated_uri).await;
+    assert_eq!(o["outdated_count"], 0);
+
+    // A new width outdates the derived area; PUT recomputes it, POST would not.
+    let (st, _, txt) = post(
+        &app,
+        &token,
+        "/api/datasets/calc/properties/state",
+        json!({
+            "entity": ex("w1"), "property": ex("width"), "value": "1.3", "datatype": "xsd:decimal"
+        }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    let (_, o, txt) = get(&app, Some(&token), &outdated_uri).await;
+    assert_eq!(o["outdated_count"], 1, "{txt}");
+    assert_eq!(o["outdated"][0]["foi"], ex("w1"));
+    assert_eq!(
+        o["outdated"][0]["outdated_arguments"],
+        json!([w["states"][0]["state"]])
+    );
+    let (st, r, txt) = run_calc(&app, &token, Method::PUT, &id).await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(r["derived_count"], 1, "{txt}");
+    assert_eq!(
+        plain_values(&state, &ex("instances"), &ex("w1"), &ex("area")),
+        vec!["1.95".to_string()]
+    );
+    let (_, o, _) = get(&app, Some(&token), &outdated_uri).await;
+    assert_eq!(o["outdated_count"], 0);
+    let (_, a, _) = get(
+        &app,
+        Some(&token),
+        &history_uri("calc", &ex("w1"), &ex("area")),
+    )
+    .await;
+    assert_eq!(
+        a["states"].as_array().unwrap().len(),
+        2,
+        "the old derived state is outdated, not removed"
+    );
+    let (_, r, _) = run_calc(&app, &token, Method::PUT, &id).await;
+    assert_eq!(r["derived_count"], 0, "nothing left to recompute");
+
+    // Parentheses survive storage: (w + 1) * h, not w + (1 * h).
+    let (st, c2, txt) = define(&app, &token, json!({
+        "inferred_property": ex("framedArea"),
+        "argument_paths": [format!("?foi <{}> ?w", ex("width")), format!("?foi <{}> ?h", ex("height"))],
+        "expression": "(?w + 0.1) * ?h",
+    })).await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    let (_, r, txt) = run_calc(&app, &token, Method::POST, c2["id"].as_str().unwrap()).await;
+    assert_eq!(r["derived_count"], 1, "{txt}");
+    assert_eq!(
+        plain_values(&state, &ex("instances"), &ex("w1"), &ex("framedArea")),
+        vec!["2.1".to_string()]
+    );
+
+    // One commit per run; the states graph still fits the OPM profile.
+    let (_, _, commits) = get(&app, Some(&token), "/api/datasets/calc/commits").await;
+    assert!(
+        commits.contains("(POST): 1 derived states") && commits.contains("(PUT): 1 derived states"),
+        "{commits}"
+    );
+    let (_, v, txt) = get(&app, Some(&token), "/api/datasets/calc/properties/validate").await;
+    assert_eq!(v["report"]["conforms"], true, "{txt}");
+
+    // Deleting the definition keeps what it derived.
+    let (st, _, _) = run_calc(&app, &token, Method::DELETE, &id).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    let (st, _, _) = run_calc(&app, &token, Method::GET, &id).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert_eq!(
+        plain_values(&state, &ex("instances"), &ex("w1"), &ex("area")),
+        vec!["1.95".to_string()]
+    );
+}
+
+/// `opm:foiRestriction`, `opm:pathRestriction` and an argument found on
+/// another feature of interest (`?foi ex:partOf/ex:height ?h`): the
+/// derivation points at the wall's height state.
+#[tokio::test]
+async fn calculation_restrictions_and_longer_paths() {
+    let (_state, token, app) = calc_fixture().await;
+    // Only w2.
+    let (st, c, txt) = define(
+        &app,
+        &token,
+        json!({
+            "inferred_property": ex("halfWidth"),
+            "argument_paths": [format!("?foi <{}> ?w", ex("width"))],
+            "expression": "?w / 2",
+            "foi_restriction": ex("w2"),
+        }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    let (_, r, txt) = run_calc(&app, &token, Method::POST, c["id"].as_str().unwrap()).await;
+    assert_eq!(r["derived_count"], 1, "{txt}");
+    assert_eq!(r["derived"][0]["foi"], ex("w2"));
+    assert_eq!(r["derived"][0]["value"], "0.4");
+    // Only windows — the wall has a height but is not a window.
+    let (_, c, txt) = define(
+        &app,
+        &token,
+        json!({
+            "inferred_property": ex("heightCm"),
+            "argument_paths": [format!("?foi <{}> ?h", ex("height"))],
+            "expression": "?h * 100",
+            "path_restriction": format!("?foi a <{}>", ex("Window")),
+        }),
+    )
+    .await;
+    assert_eq!(
+        c["path_restriction"],
+        format!(
+            "?foi <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{}>",
+            ex("Window")
+        ),
+        "{txt}"
+    );
+    let (_, r, txt) = run_calc(&app, &token, Method::POST, c["id"].as_str().unwrap()).await;
+    let fois: Vec<&str> = r["derived"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["foi"].as_str().unwrap())
+        .collect();
+    assert_eq!(fois, vec![ex("w1").as_str()], "{txt}");
+    // The wall's height through partOf.
+    let (st, c, txt) = define(
+        &app,
+        &token,
+        json!({
+            "inferred_property": ex("wallHeight"),
+            "argument_paths": ["?foi ex:partOf/ex:height ?wh"],
+            "expression": "?wh",
+            "prefixes": { "ex": EX },
+        }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    let (_, r, txt) = run_calc(&app, &token, Method::POST, c["id"].as_str().unwrap()).await;
+    assert_eq!(r["derived_count"], 1, "{txt}");
+    let (_, wall, _) = get(
+        &app,
+        Some(&token),
+        &history_uri("calc", &ex("wall"), &ex("height")),
+    )
+    .await;
+    assert_eq!(
+        r["derived"][0]["derived_from"],
+        json!([wall["states"][0]["state"]]),
+        "{txt}"
+    );
+}
+
+/// Paths, restrictions and expressions are parsed and allow-listed; none of
+/// their text reaches the store, nothing is written for a refused one, and a
+/// calculation reads only the dataset's own graphs.
+#[tokio::test]
+async fn calculation_injection_is_refused() {
+    let (state, token, app) = calc_fixture().await;
+    let graphs_before = state.store.store().named_graphs().count();
+    let bad_paths = [
+        "?foi ex:width ?w . SERVICE <http://127.0.0.1:9/sparql> { ?s ?p ?o }",
+        "?foi ex:width ?w } UNION { GRAPH ?g { ?foi ?any ?w }",
+        "?foi ex:width ?w FILTER EXISTS { GRAPH <urn:secret> { ?a ?b ?c } }",
+        "GRAPH <urn:secret> { ?foi ex:width ?w }",
+        "?foi ?pred ?w",
+        "?foi ex:width ?w . ?foi ex:height ?h",
+        "{ SELECT ?foi ?w WHERE { ?foi ex:width ?w } }",
+        "?foi ex:width ?w } ; INSERT DATA { GRAPH <urn:probe> { <urn:a> <urn:b> <urn:c> } } #",
+        "?foi ex:width ?w OPTIONAL { ?foi ex:height ?w }",
+        "?foi ex:width ?w } LIMIT 1 #",
+        "?foi (ex:width|ex:height) ?w",
+        "?foi ex:width ?w VALUES ?w { 1 }",
+        "?foi ex:width ?w . BIND(1 AS ?x)",
+        "?foi ex:width ?__v0",
+        "ex:w1 ex:width ?w",
+        "",
+    ];
+    for path in bad_paths {
+        let (st, _, txt) = define(&app, &token, json!({
+            "inferred_property": "ex:x", "argument_paths": [path], "expression": "?w", "prefixes": { "ex": EX },
+        })).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{path}: {txt}");
+    }
+    let bad_expressions = [
+        "EXISTS { ?s ?p ?o }",
+        "?w * 2) AS ?r) ?x WHERE { ?s ?p ?x } #",
+        "?w } ; DROP ALL #",
+        "?nope + 1",
+        "<http://www.opengis.net/def/function/geosparql/distance>(?w, ?w)",
+        "NOW()",
+        "RAND() * ?w",
+        "SUM(?w)",
+        "IRI(STR(?w))",
+        "REGEX(STR(?w), \"(a+)+$\")",
+        "?w + (SELECT ?x WHERE { ?s ?p ?x })",
+    ];
+    for expr in bad_expressions {
+        let (st, _, txt) = define(&app, &token, json!({
+            "inferred_property": "ex:x", "argument_paths": ["?foi ex:width ?w"], "expression": expr, "prefixes": { "ex": EX },
+        })).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{expr}: {txt}");
+    }
+    for (pr, foi) in [
+        (
+            Some("?foi a ex:Window . GRAPH <urn:secret> { ?foi ?p ?o }"),
+            None,
+        ),
+        (Some("?foi ex:partOf ?wall"), None),
+        (Some("?foi a ex:Window } UNION { ?foi ?p ?o"), None),
+        (None, Some("not an iri")),
+    ] {
+        let (st, _, txt) = define(&app, &token, json!({
+            "inferred_property": "ex:x", "argument_paths": ["?foi ex:width ?w"], "expression": "?w",
+            "prefixes": { "ex": EX }, "path_restriction": pr, "foi_restriction": foi,
+        })).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{pr:?} {foi:?}: {txt}");
+    }
+    // Nothing was stored or written.
+    let (_, list, _) = get(
+        &app,
+        Some(&token),
+        "/api/datasets/calc/properties/calculations",
+    )
+    .await;
+    assert_eq!(list["calculations"].as_array().unwrap().len(), 0, "{list}");
+    assert!(!matches!(
+        state.store.query("ASK { GRAPH <urn:probe> { ?s ?p ?o } }"),
+        Ok(QueryResults::Boolean(true))
+    ));
+    assert_eq!(state.store.store().named_graphs().count(), graphs_before);
+
+    // A calculation written straight into the states graph is re-validated
+    // when it is loaded: listed as invalid, refused when run.
+    state
+        .store
+        .update(&format!(
+            r#"PREFIX opm: <https://w3id.org/opm#> PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            INSERT DATA {{ GRAPH <urn:ots:property-states:calc> {{
+              <urn:ots:calculation:tampered> a opm:Calculation ; opm:inferredProperty <{x}> ; opm:expression "?w" ;
+                opm:argumentPaths ( "?foi <{w}> ?w . SERVICE <http://127.0.0.1:9/> {{ ?s ?p ?o }}" ) .
+            }} }}"#,
+            x = ex("x"),
+            w = ex("width")
+        ))
+        .unwrap();
+    let (_, c, txt) = run_calc(&app, &token, Method::GET, "tampered").await;
+    assert_eq!(c["valid"], false, "{txt}");
+    let (st, _, txt) = run_calc(&app, &token, Method::POST, "tampered").await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{txt}");
+
+    // Another dataset's graph is out of reach: w3's width and height there
+    // match the paths, but nothing is derived for it.
+    let other = "https://example.org/calc/other-dataset";
+    dataset(&state, "other", other, Visibility::Private);
+    state
+        .store
+        .load_str(
+            &format!(
+                "<{w3}> <{w}> 2.0 ; <{h}> 3.0 .",
+                w3 = ex("w3"),
+                w = ex("width"),
+                h = ex("height")
+            ),
+            RdfFormat::Turtle,
+            Some(other),
+        )
+        .unwrap();
+    for p in ["width", "height"] {
+        let (st, _, txt) = post(
+            &app,
+            &token,
+            "/api/datasets/other/properties/state",
+            json!({
+                "entity": ex("w3"), "property": ex(p), "value": "2.0", "datatype": "xsd:decimal"
+            }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{txt}");
+    }
+    let (_, c, _) = define(&app, &token, area_calc()).await;
+    let (_, r, txt) = run_calc(&app, &token, Method::POST, c["id"].as_str().unwrap()).await;
+    let fois: Vec<&str> = r["derived"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["foi"].as_str().unwrap())
+        .collect();
+    assert_eq!(fois, vec![ex("w1").as_str()], "{txt}");
+
+    // Only writers define or run calculations.
+    state
+        .auth_db
+        .create_user("eve", "eve", "eve@t.com", "h", SystemRole::User)
+        .unwrap();
+    let eve = mint_token("eve", "eve", "user");
+    let (st, _, _) = define(&app, &eve, area_calc()).await;
+    assert!(
+        st == StatusCode::NOT_FOUND || st == StatusCode::FORBIDDEN,
+        "{st}"
+    );
+    let (st, _, _) = run_calc(&app, &eve, Method::POST, c["id"].as_str().unwrap()).await;
+    assert!(
+        st == StatusCode::NOT_FOUND || st == StatusCode::FORBIDDEN,
+        "{st}"
+    );
+}
+
+/// Calculations and derived states travel through canonical export and
+/// import; a canonical calculation written with prefixed names imports with
+/// the document's prefixes.
+#[tokio::test]
+async fn calculations_round_trip_through_export_and_import() {
+    let (state, token, app) = calc_fixture().await;
+    let (_, c, _) = define(&app, &token, area_calc()).await;
+    let (_, r, txt) = run_calc(&app, &token, Method::POST, c["id"].as_str().unwrap()).await;
+    assert_eq!(r["derived_count"], 1, "{txt}");
+    let (_, ttl) = export(&app, Some(&token), "calc", "text/turtle").await;
+    assert!(
+        ttl.contains("opm:Calculation") && ttl.contains("opm:argumentPaths"),
+        "{ttl}"
+    );
+    let g2 = ex("copy");
+    dataset(&state, "copy", &g2, Visibility::Private);
+    let (st, txt) = send_raw(
+        &app,
+        Method::POST,
+        "/api/datasets/copy/properties/import",
+        Some(&token),
+        "text/turtle",
+        ttl,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let report: Value = serde_json::from_str(&txt).unwrap();
+    assert_eq!(report["imported_calculations"], 1, "{txt}");
+    let (_, list, _) = get(
+        &app,
+        Some(&token),
+        "/api/datasets/copy/properties/calculations",
+    )
+    .await;
+    assert_eq!(list["calculations"][0]["calculation"], c["calculation"]);
+    assert_eq!(list["calculations"][0]["valid"], true);
+    let (_, a, _) = get(
+        &app,
+        Some(&token),
+        &history_uri("calc", &ex("w1"), &ex("area")),
+    )
+    .await;
+    let (_, b, _) = get(
+        &app,
+        Some(&token),
+        &history_uri("copy", &ex("w1"), &ex("area")),
+    )
+    .await;
+    assert_eq!(a["states"], b["states"]);
+
+    // A calculation as another OPM tool writes it: prefixed names in the
+    // argument paths, resolved with the document's own prefixes.
+    let canonical = format!(
+        r#"@prefix opm: <https://w3id.org/opm#> . @prefix props: <{EX}> .
+        props:volumeCalc a opm:Calculation ;
+            opm:inferredProperty props:volume ;
+            opm:argumentPaths ( "?foi props:width ?width" "?foi props:height ?height" ) ;
+            opm:expression "?width * ?height * 0.1" ."#
+    );
+    let (st, txt) = send_raw(
+        &app,
+        Method::POST,
+        "/api/datasets/calc/properties/import",
+        Some(&token),
+        "text/turtle",
+        canonical,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let report: Value = serde_json::from_str(&txt).unwrap();
+    assert_eq!(report["imported_calculations"], 1, "{txt}");
+    let (_, r, txt) = run_calc(&app, &token, Method::POST, &ex("volumeCalc")).await;
+    assert_eq!(r["derived_count"], 1, "{txt}");
+    assert_eq!(r["derived"][0]["value"], "0.1875");
+    // An invalid canonical calculation is reported, not stored.
+    let evil = r#"@prefix opm: <https://w3id.org/opm#> .
+        <urn:evil> a opm:Calculation ; opm:inferredProperty <urn:x> ;
+            opm:argumentPaths ( "?foi <urn:p> ?a . SERVICE <http://127.0.0.1:9/> { ?s ?p ?o }" ) ; opm:expression "?a" ."#;
+    let (st, txt) = send_raw(
+        &app,
+        Method::POST,
+        "/api/datasets/calc/properties/import",
+        Some(&token),
+        "text/turtle",
+        evil.to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let report: Value = serde_json::from_str(&txt).unwrap();
+    assert_eq!(report["imported_calculations"], 0, "{txt}");
+    assert_eq!(
+        report["rejected_calculations"].as_array().unwrap().len(),
+        1,
+        "{txt}"
+    );
+}

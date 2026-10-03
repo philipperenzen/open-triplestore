@@ -35,7 +35,7 @@ applies.
 | SHACL Core | Structural constraint validation | Full⁶ |
 | SHACL Advanced (AF / SPARQL) | SPARQL constraints, rules, targets | Partial⁷ |
 | SHACL-C | Compact-syntax parser/serializer (W3C CG report) | Full⁸ |
-| OPM (Ontology for Property Management) | Property states with history | Partial — `opm:Property` / `opm:PropertyState` / current-outdated, the reliability classes including `opm:Required`, `opm:documentation`, `opm:Deleted` with restore, per-item and per-property listings and snapshots, canonical OPM export/import and the OPM profile shapes; no `opm:Calculation` or derived-property inference yet. See [datasets.md](datasets.md#time-evolving-properties-opm-profile). |
+| OPM (Ontology for Property Management) | Property states with history, calculations | Full¹⁹ — `opm:Property` / `opm:PropertyState` / current-outdated, the reliability classes including `opm:Required`, `opm:documentation`, `opm:Deleted` with restore, `opm:Calculation` with derived states (POST / PUT / outdated), listings and snapshots, canonical OPM export/import and the OPM profile shapes. See [datasets.md](datasets.md#time-evolving-properties-opm-profile). |
 | buildingSMART IDS 1.0 | Information Delivery Specification → SHACL | Partial — entity, property, attribute, partOf facets with value restrictions and cardinality; classification and material facets target `props:ifcClassification` / `props:ifcMaterial`, which the IFC lift emits; predefinedType by convention only; dataset-level existence not enforced. See [shacl.md](shacl.md#importing-constraint-specifications-ids). Round-trips: export back to IDS 1.0 covers the shared subset, and anything outside the IDS facet model is reported as a loss. |
 | ISO 21597-1 ICDD | Information container for linked document delivery | Partial — Part 1 containers import (documents, linksets, payload triples, ontology resources, index) and export (RDF/XML index); Part 2 not interpreted. See [containers.md](containers.md). |
 | RDF Patch (RDF Delta) | Change log line format; patch logs | Full — the format (`H`, several `TX`/`TC`/`TA` blocks, `PA`/`PD` in keyword or quoted form, `A`/`D` triples and quads) applied atomically per dataset, through the SHACL write gates; blank nodes (`_:x`, `<_:x>`) name the store's own nodes; `PA`/`PD` change the dataset's prefix table, which its Turtle/TriG exports declare; version diffs served as patches with prefix changes, chained through `H prev`. RDF Patch Logs per dataset: append with `H id`/`H prev` checking (409), `init`, `current`, `patch/{version\|id}`; version cuts are journaled, other writes are not. Extensions: prefixed names in `A`/`D` rows, `?graph=` for triples. RDF 1.2 triple terms are refused (RDF Patch has no syntax for them). Spec-derived rules in `tests/rdf_patch_conformance.rs`. See [versioning.md](versioning.md#rdf-patch). |
@@ -121,7 +121,7 @@ gives their source and licence. The shexTest results are in
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 | SPARQL 1.2 | `tests/w3c_sparql12_manifests.rs` | **vendored W3C test-suite subset** (`sparql/sparql12` of w3c/rdf-tests, unmodified; manifest-driven, engine and mirror paths) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql12.md` |
 
-1245 conformance tests across 43 suites; a further 826 tests in 107 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 19 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`, the RML corpora), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only; the same holds for the W3C R2RML test cases, which CI fetches at a pinned commit rather than vendoring.
+1245 conformance tests across 43 suites; a further 830 tests in 107 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 19 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`, the RML corpora), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only; the same holds for the W3C R2RML test cases, which CI fetches at a pinned commit rather than vendoring.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->
@@ -555,6 +555,19 @@ behavior and will flip green when the limitation is resolved.
     `tests/security_federated.rs` (signatures, audience, recipient, destination,
     expiry, replay, DOCTYPE, encryption with key rollover, both logout
     directions), not against a named IdP product in CI.
+
+19. **OPM** is a 2018 W3C Linked Building Data community-group draft with no
+    test suite, so *Full* is this project's own assessment against the
+    specification text (classes, properties and the REST guidance for
+    calculations), pinned by `tests/property_states_http.rs`. Two documented
+    choices: property nodes are linked with `ots:propertyOf` /
+    `ots:propertyPredicate` in storage (the data graph keeps the plain value;
+    export and import use OPM's canonical `<item> <kind> <property>`, and every
+    read accepts it), and calculations run only on an explicit POST or PUT, as
+    the specification describes, never after a write. Arithmetic is on numeric
+    XSD values; argument paths and expressions are restricted to an
+    allow-listed subset of SPARQL (no `SERVICE`, `GRAPH`, `EXISTS`, subqueries
+    or non-deterministic functions).
 
 Related guides: [OWL Reasoning](/docs/reasoning), [SHACL Validation](/docs/shacl),
 [ShEx Validation](/docs/shex),
