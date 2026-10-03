@@ -13,7 +13,10 @@
 //! - Non-topological / constructive functions
 //! - Scalar measurement functions
 //! - Metric functions — metres on the WGS84 ellipsoid (see [`super::geodesic`])
-//! - Serialisation (`geof:asGeoJSON`)
+//! - Serialisation (`geof:asWKT`, `geof:asGML`, `geof:asGeoJSON`, `geof:asKML`)
+//!
+//! A geometry result is a literal of the first operand's serialisation, in its
+//! CRS ([`geometry_to_literal_like`]).
 //!
 //! Units of measure (`geof:distance`, `geof:buffer`, `geof:area`; see
 //! [`parse_uom`] for the OGC, QUDT and EPSG IRIs understood): a linear unit on a
@@ -92,6 +95,9 @@ pub fn all_functions() -> Vec<(NamedNode, FnHandler)> {
         make_fn(vocab::TRANSFORM, fn_transform),
         // ─── Serialisation ───
         make_fn(vocab::AS_GEOJSON, fn_as_geojson),
+        make_fn(vocab::AS_WKT, fn_as_wkt),
+        make_fn(vocab::AS_GML, fn_as_gml),
+        make_fn(vocab::AS_KML, fn_as_kml),
     ]
 }
 
@@ -353,10 +359,8 @@ fn rcc8_eq(args: &[Term]) -> Option<Term> {
 // ═══════════════════════════════════════════════════════════════
 
 fn fn_boundary(args: &[Term]) -> Option<Term> {
-    let crs = args.first().and_then(literal_crs_uri);
-    let g = parse_one_geom(args)?;
-    let result = g.boundary().ok()?;
-    geometry_to_wkt_literal_in(&result, crs.as_deref())
+    let result = parse_one_geom(args)?.boundary().ok()?;
+    geometry_to_literal_like(&result, args.first()?)
 }
 
 /// Whether a CRS is geographic (degrees of longitude and latitude).
@@ -403,67 +407,60 @@ fn fn_buffer(args: &[Term]) -> Option<Term> {
         _ => return None,
     };
     let result = parse_one_geom(args)?.buffer(native_radius, 16).ok()?;
-    geometry_to_wkt_literal_in(&result, literal_crs_uri(term).as_deref())
+    geometry_to_literal_like(&result, term)
 }
 
 /// A geodesic buffer of `radius_m` metres around a geometry literal in `crs`,
-/// as a WKT literal in the same CRS (and with the same prefix spelling).
+/// as a literal of the same serialisation in the same CRS (and with the same
+/// prefix or `srsName` spelling).
 fn metric_buffer_literal(term: &Term, crs: Crs, radius_m: f64) -> Option<Term> {
     use wkt::ToWkt;
     let buffered = geodesic::metric_buffer(&geodesic::literal_to_crs84(term)?, radius_m)?;
     let out = geodesic::reproject(&buffered, Crs::Wgs84, crs)?;
     let geos = GeosGeometry::new_from_wkt(&out.wkt_string()).ok()?;
-    geometry_to_wkt_literal_in(&geos, literal_crs_uri(term).as_deref())
+    geometry_to_literal_like(&geos, term)
 }
 
 fn fn_convex_hull(args: &[Term]) -> Option<Term> {
-    let crs = args.first().and_then(literal_crs_uri);
-    let g = parse_one_geom(args)?;
-    let result = g.convex_hull().ok()?;
-    geometry_to_wkt_literal_in(&result, crs.as_deref())
+    let result = parse_one_geom(args)?.convex_hull().ok()?;
+    geometry_to_literal_like(&result, args.first()?)
 }
 
 fn fn_difference(args: &[Term]) -> Option<Term> {
-    // parse_two_geoms harmonises into the FIRST operand's CRS, so that is the
-    // CRS the result is expressed in.
-    let crs = args.first().and_then(literal_crs_uri);
+    // parse_two_geoms harmonises into the FIRST operand's CRS, so the result is
+    // in that CRS — and in that operand's serialisation.
     let (g1, g2) = parse_two_geoms(args)?;
     let result = g1.difference(&g2).ok()?;
-    geometry_to_wkt_literal_in(&result, crs.as_deref())
+    geometry_to_literal_like(&result, args.first()?)
 }
 
 fn fn_envelope(args: &[Term]) -> Option<Term> {
-    let crs = args.first().and_then(literal_crs_uri);
-    let g = parse_one_geom(args)?;
-    let result = g.envelope().ok()?;
-    geometry_to_wkt_literal_in(&result, crs.as_deref())
+    let result = parse_one_geom(args)?.envelope().ok()?;
+    geometry_to_literal_like(&result, args.first()?)
 }
 
 fn fn_intersection(args: &[Term]) -> Option<Term> {
-    // parse_two_geoms harmonises into the FIRST operand's CRS, so that is the
-    // CRS the result is expressed in.
-    let crs = args.first().and_then(literal_crs_uri);
+    // parse_two_geoms harmonises into the FIRST operand's CRS, so the result is
+    // in that CRS — and in that operand's serialisation.
     let (g1, g2) = parse_two_geoms(args)?;
     let result = g1.intersection(&g2).ok()?;
-    geometry_to_wkt_literal_in(&result, crs.as_deref())
+    geometry_to_literal_like(&result, args.first()?)
 }
 
 fn fn_sym_difference(args: &[Term]) -> Option<Term> {
-    // parse_two_geoms harmonises into the FIRST operand's CRS, so that is the
-    // CRS the result is expressed in.
-    let crs = args.first().and_then(literal_crs_uri);
+    // parse_two_geoms harmonises into the FIRST operand's CRS, so the result is
+    // in that CRS — and in that operand's serialisation.
     let (g1, g2) = parse_two_geoms(args)?;
     let result = g1.sym_difference(&g2).ok()?;
-    geometry_to_wkt_literal_in(&result, crs.as_deref())
+    geometry_to_literal_like(&result, args.first()?)
 }
 
 fn fn_union(args: &[Term]) -> Option<Term> {
-    // parse_two_geoms harmonises into the FIRST operand's CRS, so that is the
-    // CRS the result is expressed in.
-    let crs = args.first().and_then(literal_crs_uri);
+    // parse_two_geoms harmonises into the FIRST operand's CRS, so the result is
+    // in that CRS — and in that operand's serialisation.
     let (g1, g2) = parse_two_geoms(args)?;
     let result = g1.union(&g2).ok()?;
-    geometry_to_wkt_literal_in(&result, crs.as_deref())
+    geometry_to_literal_like(&result, args.first()?)
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -543,19 +540,62 @@ fn fn_metric_buffer(args: &[Term]) -> Option<Term> {
 /// CRS (OGC GeoSPARQL Geometry Extension). The source CRS is the literal's
 /// ([`literal_crs_uri`]: a WKT prefix or a GML `srsName`, else CRS84); the target an
 /// IRI or an `xsd:anyURI` literal. Supported CRS are CRS84 and EPSG:28992 / 4326 /
-/// 3857 (see [`super::crs`]). Returns a `geo:wktLiteral` prefixed with the target
-/// CRS, Z kept, or `None` if either CRS is unsupported, the geometry does not parse,
+/// 3857 (see [`super::crs`]). Returns a literal of the operand's serialisation in
+/// the target CRS — a WKT literal prefixed with it, a GML literal with it as its
+/// `srsName`, GeoJSON or KML when the target is CRS84 (a WKT literal otherwise) —
+/// Z kept, or `None` if either CRS is unsupported, the geometry does not parse,
 /// or any coordinate lies outside a CRS's domain — a coordinate that does not
 /// transform is never copied through.
 fn fn_transform(args: &[Term]) -> Option<Term> {
     let term = args.first()?;
     let source = literal_crs(term)?;
     let target = Crs::from_uri(&super::crs::normalise_crs_uri(iri_arg(args.get(1)?)?))?;
-    // Parsed directly, not through the WKB cache: GEOS 3.11 writes that cache in
-    // two dimensions, and the transform keeps Z.
-    let geom = GeosGeometry::new_from_wkt(&literal_wkt(term)?).ok()?;
-    let out = reproject_geometry(&geom, source, target)?;
-    geometry_to_wkt_literal_in(&out, Some(target.to_uri()))
+    let out = reproject_geometry(&parse_one_geom(args)?, source, target)?;
+    let target_uri =
+        (target != Crs::Wgs84 || !Serialisation::of(term).is_crs84_only()).then(|| target.to_uri());
+    geometry_to_literal(&out, Serialisation::of(term), target_uri)
+}
+
+/// `geof:asWKT(geom)` — the geometry as a `geo:wktLiteral` in its own CRS (a
+/// GML `srsName` becomes the WKT prefix, normalised), Z kept.
+fn fn_as_wkt(args: &[Term]) -> Option<Term> {
+    let term = args.first()?;
+    geometry_to_wkt_literal_in(&parse_wkt_literal(term)?, literal_crs_uri(term).as_deref())
+}
+
+/// `geof:asGML(geom, gmlProfile)` — the geometry as a `geo:gmlLiteral` in its
+/// own CRS, which becomes the `srsName` (CRS84 written out when the operand
+/// names none), with `srsDimension="3"` when it has Z. The profile argument is
+/// optional and every value is accepted: the output is always the GML 3.2
+/// profile this store reads (see [`super::gml`]).
+fn fn_as_gml(args: &[Term]) -> Option<Term> {
+    let term = args.first()?;
+    if args
+        .get(1)
+        .is_some_and(|profile| !matches!(profile, Term::Literal(_)))
+    {
+        return None;
+    }
+    let crs = literal_crs_uri(term);
+    geometry_to_literal(
+        &parse_wkt_literal(term)?,
+        Serialisation::Gml,
+        Some(crs.as_deref().unwrap_or(vocab::CRS84)),
+    )
+}
+
+/// `geof:asKML(geom)` — the geometry as a `geo:kmlLiteral`. KML is CRS84 by
+/// definition, so the geometry is reprojected from its literal's CRS on the
+/// way out; `None` for a CRS this build cannot reproject.
+fn fn_as_kml(args: &[Term]) -> Option<Term> {
+    let term = args.first()?;
+    let source = literal_crs(term)?;
+    let geom = parse_wkt_literal(term)?;
+    let to_crs84 = |x: f64, y: f64| super::crs::transform_xy(source, Crs::Wgs84, x, y);
+    Some(Term::Literal(oxrdf::Literal::new_typed_literal(
+        super::kml::geometry_to_kml(&geom, &to_crs84)?,
+        NamedNode::new_unchecked(vocab::KML_LITERAL),
+    )))
 }
 
 /// `geof:asGeoJSON(geom)` — the geometry as a `geo:geoJSONLiteral` (GeoSPARQL 1.1

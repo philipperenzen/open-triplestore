@@ -5,6 +5,7 @@ pub mod functions;
 pub mod geodesic;
 pub mod geojson;
 pub mod gml;
+pub mod kml;
 pub mod places;
 pub mod premises;
 pub mod query_rewrite;

@@ -25,7 +25,8 @@ use oxrdf::{Literal, NamedNode, Term};
 
 use super::crs::Crs;
 use super::datatypes::{
-    geometry_to_wkt_literal_in, literal_crs, literal_crs_uri, parse_wkt_literal, reproject_geometry,
+    geometry_to_literal, literal_crs, literal_crs_uri, parse_wkt_literal, reproject_geometry,
+    Serialisation,
 };
 use super::vocabulary as vocab;
 
@@ -78,7 +79,9 @@ fn empty_geometry() -> Term {
     ))
 }
 
-/// The union of a group's geometry literals as one `geo:wktLiteral`.
+/// The union of a group's geometry literals as one geometry literal: of the
+/// group's serialisation when every value shares one (a group of GML literals
+/// unions into a GML literal), a `geo:wktLiteral` otherwise.
 ///
 /// One CRS in, the same CRS out — a GML literal's `srsName` included (see
 /// [`literal_crs_uri`]). Values in different CRSs are unioned in CRS84
@@ -124,7 +127,14 @@ pub fn union_of(mut values: Vec<Term>) -> Option<Term> {
         .ok()?
         .unary_union()
         .ok()?;
-    geometry_to_wkt_literal_in(&union, crs_out.as_deref())
+    let serialisation = Serialisation::of(&values[0]);
+    let shared = values.iter().all(|v| Serialisation::of(v) == serialisation);
+    let serialisation = if shared {
+        serialisation
+    } else {
+        Serialisation::Wkt
+    };
+    geometry_to_literal(&union, serialisation, crs_out.as_deref())
 }
 
 /// A geometry literal reprojected into CRS84, as GEOS.

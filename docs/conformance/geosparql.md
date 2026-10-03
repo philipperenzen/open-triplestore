@@ -9,8 +9,9 @@ tests derived from the OGC GeoSPARQL 1.1 standard (count in the
 [generated table](../standards.md#conformance-test-suites)), grouped by the test file's
 own 30-item requirement list, not the OGC conformance classes: Simple Features /
 Egenhofer / RCC8 relation families, constructive and metric functions, `geo:wktLiteral`,
-`geo:gmlLiteral` and `geo:geoJSONLiteral` parsing (every RFC 7946 geometry type, malformed
-input unbound rather than a panic) with `geof:asGeoJSON` round trips, `geof:getSRID`, and
+`geo:gmlLiteral` (the documented GML profile), `geo:geoJSONLiteral` (every RFC 7946
+geometry type, malformed input unbound rather than a panic) and `geo:kmlLiteral` parsing
+with `geof:asWKT`, `geof:asGML`, `geof:asGeoJSON` and `geof:asKML` round trips, `geof:getSRID`, and
 `geof:transform` (EPSG:28992 ↔ 4326 ↔ 3857, pure-Rust closed-form). The GeoSPARQL 1.1
 metric functions (`metricDistance`, `metricLength`, `metricPerimeter`, `metricArea`,
 `metricBuffer`) are checked against published WGS84 geodesic values — GeographicLib's
@@ -27,7 +28,7 @@ The RDFS Entailment Extension (the GeoSPARQL ontology with the Simple Features a
 3.2.1 class hierarchies as premises) and the Query Rewrite Extension (all 24 relations,
 every rule shape and serialisation, set semantics, `GRAPH` scope, update `WHERE` clauses,
 every query path, the switch) are tested too; `tests/standards_conformance.rs` runs both
-over HTTP. What GeoSPARQL 1.1 still lacks here — KML/DGGS literals, the other aggregates
+over HTTP. What GeoSPARQL 1.1 still lacks here — DGGS literals, the other aggregates
 and several non-metric functions — is listed in
 [standards.md](../standards.md#known-limitations--conformance-findings), and section 3
 below maps every requirement to its tests.
@@ -105,9 +106,9 @@ are the standard's own order.
 | R12 | geometry-extension/wkt-axis-order | Met | `geos_cx_axis_order_crs84_within`, `ogc_req20_gml_srs_name_is_harmonised_against_wkt` |
 | R13 | geometry-extension/wkt-literal-empty | Met | `ogc_req17_wkt_literal_empty_is_the_empty_geometry`, `geo_req01_wkt_empty_geometry` |
 | R14 | geometry-extension/geometry-as-wkt-literal | Met | `geo_data_model_feature_geometry_pattern` |
-| R15 | geometry-extension/gml-literal | **Partial** — the GML reader takes a subset of the GM_Object subtypes; a multi-patch `gml:Surface` is misread and arc segments are read as straight lines (card G1) | `geold_gml_literal_supported`, `ogc_req20_*`, `ogc_req41_*` |
+| R15 | geometry-extension/gml-literal | Met — the documented GML profile; arcs, curved patches and solids are outside it and unbound | `geold_gml_literal_supported`, `ogc_req20_gml_profile_elements`, `ogc_req20_gml_outside_the_profile_is_unbound`, `ogc_req20_gml_srs_dimension_3_keeps_z`, `ogc_req20_gml_srs_name_is_harmonised_against_wkt`, `ogc_req41_*` |
 | R16 | geometry-extension/gml-literal-empty | Met | `ogc_req21_gml_literal_empty_is_the_empty_geometry` |
-| R17 | geometry-extension/gml-profile | **Partial** — the supported GML profile is described in one line of [geosparql.md](../geosparql.md#geometry-literals), not documented element by element (card G1) | — |
+| R17 | geometry-extension/gml-profile | Met — [Supported GML profile](../geosparql.md#supported-gml-profile) | `ogc_req22_gml_profile_is_documented` |
 | R18 | geometry-extension/geometry-as-gml-literal | Met | `query_rewrite_reads_every_serialisation`, `geold_gml_literal_supported` |
 | R19 | geometry-extension/query-functions | Met | `geo_req27_*`, `geo_req28_*`, `geo_req29_*`, `ogc_req39_*` |
 | R20 | geometry-extension/srid-function | Met | `geo_req30_*`, `ogc_req41_get_srid_of_a_gml_literal` |
@@ -122,9 +123,8 @@ are the standard's own order.
 | R29 | query-rewrite-extension/eh-query-rewrite | Met | `query_rewrite_req51_eh_relations`, `query_rewrite_every_relation_uses_its_own_function` |
 | R30 | query-rewrite-extension/rcc8-query-rewrite | Met | `query_rewrite_req52_rcc8_relations`, `query_rewrite_every_relation_uses_its_own_function` |
 
-28 of 30 are met. GeoSPARQL 1.0 stays **Partial** in [standards.md](../standards.md) until
-R15 and R17 are; it is graded Full then, as the project's own grade (never an OGC
-certification).
+All 30 are met, and GeoSPARQL 1.0 is graded **Full** in [standards.md](../standards.md) —
+the project's own grade, never an OGC certification.
 
 ### GeoSPARQL 1.1 (22-047r1)
 
@@ -143,20 +143,24 @@ the standard.
 | 12 | geometry-extension/geometry-collection-class | Partial — usable in patterns, not tested | — |
 | 13 | geometry-extension/geometry-properties | Met | `ogc10_r07_r08_r09_geometry_class_and_properties` |
 | 14–18 | wkt-literal, wkt-literal-default-srs, wkt-axis-order, wkt-literal-empty, geometry-as-wkt-literal | Met | as R10–R14 above |
-| 19 | geometry-extension/asWKT-function | Missing (card G1) | — |
-| 20 | geometry-extension/gml-literal | Partial (as R15) | as R15 |
+| 19 | geometry-extension/asWKT-function | Met | `ogc_req19_as_wkt_keeps_the_srs_and_z` |
+| 20 | geometry-extension/gml-literal | Met (as R15) | as R15 |
 | 21 | geometry-extension/gml-literal-empty | Met | `ogc_req21_gml_literal_empty_is_the_empty_geometry` |
-| 22 | geometry-extension/gml-profile | Partial (as R17) | — |
+| 22 | geometry-extension/gml-profile | Met (as R17) | `ogc_req22_gml_profile_is_documented` |
 | 23 | geometry-extension/geometry-as-gml-literal | Met | as R18 |
-| 24 | geometry-extension/asGML-function | Missing (card G1) | — |
-| 25 | geometry-extension/geojson-literal | Partial — altitude is dropped (card G1) | `geojson_*` |
+| 24 | geometry-extension/asGML-function | Met | `ogc_req24_as_gml_round_trips` |
+| 25 | geometry-extension/geojson-literal | Met — altitude kept as Z | `ogc_req25_geojson_literal_keeps_altitude`, `geojson_*`, `malformed_geojson_literal_is_unbound_not_a_panic` |
 | 26 | geometry-extension/geojson-literal-srs | Met | `geof_as_geojson_reprojects_to_crs84`, `geojson_literal_harmonises_with_a_projected_operand` |
 | 27 | geometry-extension/geojson-literal-empty | Met | `ogc_req27_geojson_literal_empty_is_the_empty_geometry` |
 | 28 | geometry-extension/geometry-as-geojson-literal | Met | `query_rewrite_reads_every_serialisation`, `geos_cx_geojson_literal_sfwithin` |
 | 29 | geometry-extension/asGeoJSON-function | Met | `geof_as_geojson_round_trips` |
-| 30–34 | kml-literal, kml-literal-srs, kml-literal-empty, geometry-as-kml-literal, asKML-function | Missing (card G1) | — |
+| 30 | geometry-extension/kml-literal | Met | `ogc_req30_kml_literal_is_a_geometry` |
+| 31 | geometry-extension/kml-literal-srs | Met — always CRS84 | `ogc_req31_kml_literal_is_crs84` |
+| 32 | geometry-extension/kml-literal-empty | Met | `ogc_req32_kml_literal_empty_is_the_empty_geometry` |
+| 33 | geometry-extension/geometry-as-kml-literal | Met | `ogc_req33_geometry_as_kml_literal_is_queryable` |
+| 34 | geometry-extension/asKML-function | Met | `ogc_req34_as_kml_reprojects_and_round_trips` |
 | 35–38 | geometry-extension-dggs (DGGS literals, `asDGGS`) | Missing (owner decision) | — |
-| 39 | geometry-extension/query-functions | Partial — 11 of the 23 functions missing (card G2) | `geo_req27_*` … `geo_req29_*`, `ogc_req39_*` |
+| 39 | geometry-extension/query-functions | Partial — 11 of the 23 functions missing (card G2); results follow the first operand's serialisation and SRS (§10.9.1) | `geo_req27_*` … `geo_req29_*`, `ogc_req39_*`, `ogc_req39_geometry_results_follow_the_first_operand` |
 | 40 | geometry-extension/query-functions-non-sf | Partial — `length`, `perimeter`, `geometryN`, `numGeometries`, min/max X/Y/Z missing (card G2) | `geos_cx_geosparql11_metric_functions`, `ogc_req40_area_with_area_units` |
 | 41 | geometry-extension/srid-function | Partial — the result is an IRI, the signature says `xsd:anyURI` (card G2) | `ogc_req41_get_srid_of_a_gml_literal` |
 | 42 | geometry-extension/sa-functions | Partial — only `aggUnion` (card G2) | `agg_union_*` |

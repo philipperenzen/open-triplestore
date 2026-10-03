@@ -1,20 +1,51 @@
 # GeoSPARQL
 
-OGC GeoSPARQL 1.1 support via the GEOS C++ library. Store geometry data as WKT, GML or GeoJSON literals and query it using standard spatial relation, measurement and aggregate functions. The grade is *Partial* — [Supported Standards](/docs/standards) lists what is not implemented — and this is not an OGC compliance certification.
+OGC GeoSPARQL 1.1 support via the GEOS C++ library. Store geometry data as WKT, GML, GeoJSON or KML literals and query it using standard spatial relation, measurement and aggregate functions. GeoSPARQL 1.0 is graded *Full* and 1.1 *Partial* — [Supported Standards](/docs/standards) lists what is not implemented — and these are the project's own grades, not an OGC compliance certification.
 
 ## Geometry literals
 
-Three serialisations are geometries, and every `geof:` function accepts any of them:
+Four serialisations are geometries, and every `geof:` function accepts any of them:
 
 - `geo:wktLiteral`, with an optional CRS prefix (`"<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(187420 428470)"`); no prefix means CRS84.
-- `geo:gmlLiteral` — the GML 3.2 geometry subset (points, curves, surfaces and their `Multi*` collections). Its CRS is the geometry's `srsName`, in any of the usual spellings (`EPSG:28992`, `urn:ogc:def:crs:EPSG::28992`, `http://www.opengis.net/gml/srs/epsg.xml#28992`, `http://www.opengis.net/def/crs/EPSG/0/28992`); no `srsName` means CRS84.
-- `geo:geoJSONLiteral` — an RFC 7946 geometry object (`Point`, `MultiPoint`, `LineString`, `MultiLineString`, `Polygon`, `MultiPolygon`, `GeometryCollection`), always CRS84 longitude/latitude. A malformed one is not a geometry: functions over it are unbound.
+- `geo:gmlLiteral` — a GML 3.2 geometry of the [supported profile](#supported-gml-profile). Its CRS is the geometry's `srsName`, in any of the usual spellings (`EPSG:28992`, `urn:ogc:def:crs:EPSG::28992`, `http://www.opengis.net/gml/srs/epsg.xml#28992`, `http://www.opengis.net/def/crs/EPSG/0/28992`); no `srsName` means CRS84.
+- `geo:geoJSONLiteral` — an RFC 7946 geometry object (`Point`, `MultiPoint`, `LineString`, `MultiLineString`, `Polygon`, `MultiPolygon`, `GeometryCollection`), always CRS84 longitude/latitude. An altitude on every position is kept as Z. A malformed one is not a geometry: functions over it are unbound.
+- `geo:kmlLiteral` — a KML 2.2 geometry element: `Point`, `LineString`, `LinearRing`, `Polygon` (`outerBoundaryIs`, `innerBoundaryIs`) or `MultiGeometry`, possibly inside a `Placemark`. Coordinates are `lon,lat[,alt]` tuples, always CRS84; an altitude on every tuple is kept as Z. `Model`, `gx:Track` and `gx:MultiTrack` are outside the profile, and malformed KML is not a geometry.
 
 Every function reads a literal's CRS the same way: the WKT prefix or the GML `srsName`. `getSRID` returns it, normalised to the `http://www.opengis.net/def/crs/…` form for GML. Constructive results and `geof:aggUnion` keep it, and binary functions (the sf/eh/rcc8 relations, `geof:relate`, `distance`, the set operations) transform the second operand into the first's CRS. Coordinates are in the CRS's axis order, for WKT and GML alike: EPSG:4326 is latitude first, CRS84 longitude first. An EPSG:4326 `<gml:pos>52 5</gml:pos>` is the same point as `"POINT(5 52)"^^geo:wktLiteral`.
 
 An empty literal is the empty geometry: `""^^geo:wktLiteral` (also with a CRS prefix and nothing after it), `""^^geo:gmlLiteral` and `""^^geo:geoJSONLiteral`. An empty plain string is not a geometry.
 
-`geof:asGeoJSON` serialises any geometry as a `geo:geoJSONLiteral`, reprojecting it to CRS84 on the way.
+### Serialisation functions
+
+| Function | Result |
+|---|---|
+| `geof:asWKT(g)` | A `geo:wktLiteral` in `g`'s CRS (a GML `srsName` becomes the WKT prefix), Z kept |
+| `geof:asGML(g [, profile])` | A `geo:gmlLiteral` of the profile below, with `g`'s CRS as `srsName` (CRS84 written out when `g` names none) and `srsDimension="3"` for Z. Any `profile` string is accepted; the output is always this GML 3.2 profile |
+| `geof:asGeoJSON(g)` | A `geo:geoJSONLiteral`, reprojected to CRS84, Z as altitude |
+| `geof:asKML(g)` | A `geo:kmlLiteral`, reprojected to CRS84, Z as altitude |
+
+A function that returns a geometry (`buffer`, `union`, `envelope`, `transform` and the rest) returns it in the serialisation and CRS of its first operand, as GeoSPARQL 1.1 §10.9.1 says: the buffer of a GML literal in RD New is a GML literal with the same `srsName`. GeoJSON and KML exist only in CRS84, so a GeoJSON or KML operand transformed into another CRS comes back as a WKT literal. `geof:aggUnion` returns the group's serialisation when every value shares one, and a WKT literal otherwise. The empty geometry is an empty `Multi*` element in GML (so it keeps its `srsName`) and the empty literal in KML.
+
+## Supported GML profile
+
+GeoSPARQL 1.1 (Req 22) asks an implementation to document the GML it reads. A `geo:gmlLiteral` is the first GML 3.2 geometry element of its value (GML 2's `outerBoundaryIs`, `innerBoundaryIs`, `coordinates` and `coord` are read too):
+
+| GML element | Read as |
+|---|---|
+| `Point` | `POINT` |
+| `LineString`, a standalone `LinearRing` | `LINESTRING` |
+| `Curve` of `LineStringSegment`s, `OrientableCurve`, `CompositeCurve` | `LINESTRING`: segments and members joined end to start, a reversed (`orientation="-"`) `OrientableCurve` reversed |
+| `Polygon`, `PolygonPatch`, `Triangle`, `Rectangle` | `POLYGON`. A ring is a `LinearRing` or a `Ring` of linear `curveMember`s that meet end to start, closed, with four or more positions |
+| `Surface` | its one patch as a `POLYGON`; several patches as a `MULTIPOLYGON` (each patch a polygon, not a hole) |
+| `PolyhedralSurface`, `Tin`, `TriangulatedSurface`, `CompositeSurface` | `MULTIPOLYGON` of the patches or members |
+| `OrientableSurface` | its base surface |
+| `MultiPoint`, `MultiCurve`/`MultiLineString`, `MultiSurface`/`MultiPolygon` | the `MULTI*` type; one with no members is `MULTI* EMPTY` |
+| `MultiGeometry` | `GEOMETRYCOLLECTION` |
+| `Envelope` | the `POLYGON` between `lowerCorner` and `upperCorner` (a degenerate envelope is its point or line) |
+
+Coordinates come from `gml:pos`, `gml:posList`, `gml:coordinates` (with its `cs`, `ts` and `decimal` attributes), `gml:pointProperty`/`gml:pointRep` and GML 2's `gml:coord`; text in any other element (`gml:name`, `gml:description`) is not a coordinate. `srsDimension="3"`, on the geometry or on a `pos`/`posList`, is kept as Z; a `gml:pos` without one is 2D or 3D by its number count. A `posList` without one is 2D.
+
+Outside the profile, and so not a geometry (functions over it are unbound): arcs and other curved segments (`Arc`, `ArcString`, `Circle`, `ArcByCenterPoint`, splines, clothoids), curved patches (`Cone`, `Cylinder`, `Sphere`), `Solid`, `CompositeSolid`, `MultiSolid`, any `srsDimension` but 2 and 3, a `posList` whose numbers do not divide into positions, a member that does not read (an unresolved `xlink:href` included), and nesting deeper than 32 elements. Arcs are refused rather than read as straight lines between their control points, which would be a different shape.
 
 ## Coordinate reference systems
 
@@ -24,35 +55,13 @@ The built-in CRSs are CRS84, EPSG:4326 (latitude first), RD New (EPSG:28992, and
 
 ## Supported functions
 
-All functions are in the `geof:` namespace (`http://www.opengis.net/def/function/geosparql/`)
-and are called as filter functions; the `geo:sfIntersects`-style *properties* of the Query
-Rewrite Extension are not supported.
+The service description (`GET /sparql` with `Accept: text/turtle`) lists every registered `geof:` function and aggregate; it is generated from the same registry the engine installs.
 
-| Family | Functions |
-|---|---|
-| Simple Features relations | `sfContains` `sfCrosses` `sfDisjoint` `sfEquals` `sfIntersects` `sfOverlaps` `sfTouches` `sfWithin` |
-| Egenhofer relations | `ehContains` `ehCoveredBy` `ehCovers` `ehDisjoint` `ehEquals` `ehInside` `ehMeet` `ehOverlap` |
-| RCC8 relations | `rcc8dc` `rcc8ec` `rcc8eq` `rcc8ntpp` `rcc8ntppi` `rcc8po` `rcc8tpp` `rcc8tppi` |
-| DE-9IM | `relate(g1, g2, pattern)` — its operands are harmonised to one CRS like the relations |
-| Constructive | `boundary` `buffer` `convexHull` `difference` `envelope` `intersection` `symDifference` `union` |
-| Measurement | `distance` and `area`, each with a unit argument ([Units of measure](#units-of-measure)) |
-| Metric (metres on the WGS84 ellipsoid) | `metricDistance` `metricLength` `metricPerimeter` `metricArea` `metricBuffer` ([below](#metres-on-the-ellipsoid)) |
-| CRS | `getSRID` (the CRS IRI, CRS84 by default); `transform(g, crsIRI)` for the built-in CRS set |
-| Serialisation | `asGeoJSON` |
-| Aggregate | `aggUnion` ([below](#the-union-aggregate)) |
-
-The relation functions harmonise the CRS of their operands: the second is reprojected into the
-first's CRS, and a pair this build cannot reproject gives an unbound result. The CRS is read from
-a WKT literal's `<crs>` prefix or a GML literal's `srsName` (CRS84 when neither is given). The
-built-in CRS set is CRS84, EPSG:4326, EPSG:28992 (RD New) and EPSG:3857 (Web Mercator).
-
-Not implemented from GeoSPARQL 1.1: the other non-topological functions (`asWKT`, `asGML`,
-`asKML`, `asDGGS`, `dimension`, `coordinateDimension`, `spatialDimension`, `geometryType`,
-`isEmpty`, `isSimple`, `hasSerialization`, `numGeometries`, `geometryN`, `minX` … `maxZ`,
-`concaveHull`, `centroid`, `boundingCircle` and the rest), the aggregates other than
-`aggUnion`, KML and DGGS literals, and the Query Rewrite and RDFS entailment extensions.
-[Supported Standards](/docs/standards) has the grade. Non-standard 3D functions live in their
-own namespace; see the [3D geometry platform](/docs/geo-3d-platform).
+- Topology: `geof:sfEquals`, `sfDisjoint`, `sfIntersects`, `sfTouches`, `sfCrosses`, `sfWithin`, `sfContains`, `sfOverlaps`; `ehEquals`, `ehDisjoint`, `ehMeet`, `ehOverlap`, `ehCovers`, `ehCoveredBy`, `ehInside`, `ehContains`; `rcc8eq`, `rcc8dc`, `rcc8ec`, `rcc8po`, `rcc8tppi`, `rcc8tpp`, `rcc8ntpp`, `rcc8ntppi`; `geof:relate`.
+- Constructive: `geof:boundary`, `buffer`, `convexHull`, `difference`, `envelope`, `intersection`, `symDifference`, `union`, `transform`.
+- Measures: `geof:distance`, `area`, `getSRID`, and the metric family below.
+- Serialisation: `geof:asWKT`, `asGML`, `asGeoJSON`, `asKML`.
+- Aggregate: `geof:aggUnion`.
 
 ## Metres on the ellipsoid
 
