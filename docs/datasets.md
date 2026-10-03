@@ -34,31 +34,97 @@ Within each dataset, graphs are organized by **role**, indicating their purpose 
 
 A property whose value changes over time — a load rating, a firmware
 version, a measured weight — can be recorded as a chain of states instead
-of overwritten:
+of overwritten, following the W3C Linked Building Data community group's
+[Ontology for Property Management](https://w3id.org/opm) (OPM, 2018 draft):
 
 ```bash
 curl -X POST http://localhost:7878/api/datasets/<id>/properties/state \
   -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
   -d '{"entity": "https://example.org/bridge/b1", "property": "https://example.org/loadRating",
-       "value": "45", "valid_from": "2026-01-01", "reliability": "confirmed", "note": "inspection"}'
+       "value": "45", "valid_from": "2026-01-01", "reliability": "confirmed",
+       "documentation": ["https://example.org/docs/inspection-2026"], "note": "inspection"}'
 ```
 
-The data graph (the dataset's instances graph, or `graph`) always holds the
-current value as a plain triple — SPARQL, SHACL and reasoning see nothing
-new — while the dataset's states graph (`urn:ots:property-states:<id>`,
-registered with the `provenance` role on first use) accumulates
-`opm:PropertyState`s with `schema:value`, `ots:validFrom`,
-`prov:generatedAtTime`, `prov:wasAttributedTo`, an optional OPM reliability
-class (`assumed` / `confirmed` / `derived`) and a note; the newest is
+The data graph (the dataset's instances graph, the graph the current value
+is already in, or `graph`) always holds the current value as a plain triple
+— SPARQL, SHACL and reasoning see nothing new — while the dataset's states
+graph (`urn:ots:property-states:<id>`, registered with the `provenance` role
+on first use) accumulates `opm:PropertyState`s with `schema:value`,
+`ots:validFrom`, `prov:generatedAtTime`, `prov:wasAttributedTo`, an optional
+OPM reliability class (`assumed` / `confirmed` / `derived` / `required`),
+`opm:documentation` links and a note; the newest is
 `opm:CurrentPropertyState`, the rest `opm:OutdatedPropertyState`. Values are
 typed from the string (boolean, integer, decimal, else string) unless
-`datatype` (an XSD type or `iri`) or `language` says otherwise. Each state
-is a commit in the dataset's history.
+`datatype` (an XSD type or `iri`) or `language` says otherwise. Each write is
+a commit in the dataset's history.
+
+**Delete and restore.** OPM deletes a property without removing it: a new
+current state typed `opm:Deleted`, with no value, ends the chain and the
+plain triple leaves the data graph. Restore writes a new current state with
+the value, reliability and documentation of the last state before the
+deletion (`prov:wasRevisionOf` it) and puts the plain triple back.
 
 ```
-GET /api/datasets/<id>/properties/history?entity=…&property=…   # newest first
-GET /api/datasets/<id>/properties/as-of?entity=…&property=…&at=2026-03-01
+POST /api/datasets/<id>/properties/delete    {"entity": …, "property": …, "note": …}
+POST /api/datasets/<id>/properties/restore   {"entity": …, "property": …}
 ```
+
+**Reading.** History and as-of report deletions (`deleted: true`,
+`value: null`). The listing covers one item, one property kind, both or the
+whole dataset, with the latest state, every state or the state at a time —
+with `entity` and `at` that is the item's snapshot:
+
+```
+GET /api/datasets/<id>/properties/history?entity=…&property=…        # newest first
+GET /api/datasets/<id>/properties/as-of?entity=…&property=…&at=2026-03-01
+GET /api/datasets/<id>/properties?entity=…&at=2026-03-01              # item snapshot
+GET /api/datasets/<id>/properties?property=…&reliability=confirmed
+GET /api/datasets/<id>/properties?history=full&derived=true
+```
+
+Filters: `reliability`, `deleted` (`false` by default for latest and
+snapshots, `true`, or `any`), `derived` (`opm:Derived` or with an
+expression), `history` (`latest` | `full`), `at`, `limit` / `offset`. A state
+whose value lives in a graph the caller may not read (a private graph, for
+a viewer) is left out of every read and of the export.
+
+**Canonical OPM.** OPM links a property node to its item as
+`<item> <kind> <property>`. The server keeps the plain value under
+`<item> <kind>` instead and links the node with `ots:propertyOf` /
+`ots:propertyPredicate`, because the SPARQL default graph is the union of
+the dataset's graphs: a canonical link stored anywhere would add the node to
+every answer of `<item> <kind> ?v`. Exchange with other OPM tools goes
+through export and import:
+
+```
+GET  /api/datasets/<id>/properties/export        # Accept: text/turtle | application/n-triples | application/ld+json | application/rdf+xml
+POST /api/datasets/<id>/properties/import?graph=… # Content-Type: an RDF format
+```
+
+Export writes canonical OPM (the server's bookkeeping left out, `ots:validFrom`
+kept). Import reads `<item> <kind> <property>` with `opm:hasPropertyState`,
+`schema:value` in either scheme (`opm.ttl` declares `http://schema.org/`; the
+server writes `https://schema.org/`) and the deprecated `opm:valueAtState`.
+States keep their IRIs, a state already present is skipped, and a state
+without `prov:generatedAtTime` — or without a value, unless it is
+`opm:Deleted` — is rejected and listed in the report. Per property the
+newest-recorded state becomes current ("the most recently defined", as OPM
+puts it) and its value the plain triple. Every read above also accepts
+canonical OPM loaded straight into a dataset graph (`canonical: true` on its
+states; without `ots:validFrom` the generation time counts as validity).
+Writes manage only the server's own states: import canonical data to extend
+its chains.
+
+**Profile shapes.** `GET /api/datasets/<id>/properties/validate` checks the
+states graph against the OPM profile: one current state per property,
+current/outdated and assumed/confirmed disjoint, one `prov:generatedAtTime`
+on every state, one value on every state that is not deleted (none on a
+deleted one), a calculated state's expression and `rdf:Seq` of arguments,
+and a calculation's structure. `GET /api/properties/profile` serves the
+shapes as Turtle for use as a dataset shapes graph; the `opm-profile` seed
+bundle (`examples/seed-bundles/opm-profile/`) ships them with a canonical
+sample. The shapes are this project's own; the OPM vocabulary (`opm.ttl`,
+CC BY 1.0) is not bundled.
 
 Domain vocabularies — a material passport, a clinical record — supply the
 property IRIs; the mechanism knows none of them.

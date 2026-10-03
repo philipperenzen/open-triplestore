@@ -1,0 +1,46 @@
+# OPM profile — the SHACL shapes for a well-formed Ontology for Property
+# Management (OPM) states graph, with a small canonical OPM sample.
+#
+# The shapes are this project's own, written from the OPM specification
+# (W3C Linked Building Data Community Group draft, https://w3id.org/opm).
+# The OPM vocabulary (opm.ttl, CC BY 1.0) is not shipped here. The server
+# embeds shapes.ttl and runs it at GET /api/datasets/:id/properties/validate;
+# this bundle makes the same shapes a dataset's shapes graph, so ordinary
+# dataset validation checks OPM data loaded into it.
+#
+# The sample is canonical OPM, the form GET /api/datasets/:id/properties/export
+# writes: `<item> <kind> <property>`, states with schema:value,
+# prov:generatedAtTime, prov:wasAttributedTo and their OPM classes. The
+# property-state reads accept it as it is; POST …/properties/import turns it
+# into managed states.
+
+id = "opm-profile"
+opt_out_env = "SEED_OPM_PROFILE"
+
+[organisation]
+slug = "opm-profile"
+name = "OPM profile"
+description = "SHACL shapes for well-formed OPM (Ontology for Property Management) property states, with a canonical OPM sample."
+
+[[datasets]]
+slug = "opm-profile-sample"
+name = "OPM profile sample"
+description = "A window whose width, height and fire rating are OPM properties with assumed, confirmed and deleted states, validated by the OPM profile shapes."
+visibility = "public"
+shape_graphs = ["https://example.org/opm-profile/shapes"]
+
+[[datasets.graphs]]
+iri = "https://example.org/opm-profile/instances"
+role = "instances"
+file = "instances.ttl"
+
+[[datasets.graphs]]
+iri = "https://example.org/opm-profile/shapes"
+role = "shapes"
+file = "shapes.ttl"
+
+[[datasets.saved_queries]]
+name = "Current property values"
+slug = "current-property-values"
+description = "Every item, property kind and the value of its current OPM state."
+sparql = "PREFIX opm: <https://w3id.org/opm#>\nPREFIX schema: <https://schema.org/>\nSELECT ?item ?kind ?value WHERE {\n  GRAPH <https://example.org/opm-profile/instances> {\n    ?item ?kind ?property .\n    ?property opm:hasPropertyState ?state .\n    ?state a opm:CurrentPropertyState .\n    OPTIONAL { ?state schema:value ?value }\n  }\n}\nORDER BY ?item ?kind"

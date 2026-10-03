@@ -74,6 +74,7 @@ minted at `POST /api/auth/tokens`. Send it as `Authorization: Bearer <token>`.",
         (name = "LLM", description = "Natural-language → SPARQL assistance and feedback"),
         (name = "Linked Data", description = "IRI dereferencing and VoID/DCAT discovery"),
         (name = "LDP", description = "Linked Data Platform container and resource interaction"),
+        (name = "Property States", description = "Time-evolving properties per the Ontology for Property Management (OPM): states with history, deletion, reliability, canonical OPM exchange and the OPM profile shapes"),
         (name = "Geo", description = "Map and 3D-viewer feeds, geo capability probes and 3D Tiles"),
         (name = "OGC API Features", description = "OGC API – Features Part 1 (Core): each readable dataset with geometry is a collection of GeoJSON features"),
         (name = "OIDC Provider", description = "The built-in OpenID Connect provider for client apps: discovery, keys, token, userinfo and logout"),
@@ -2611,6 +2612,276 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     ("502", "The remote stream could not be read, is not an LDES entry point (LDES 1.0 §3.1), or answered an error status that is not retried"),
                 ],
                 true,
+            ),
+        )],
+    );
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Property states (OPM)
+    // ═══════════════════════════════════════════════════════════════════════
+    let ps_errors_write = || {
+        vec![
+            ("400", "Not an IRI, an unknown reliability, a bad time or language tag, or a graph that is not one of the dataset's data graphs"),
+            ("401", "Authentication required"),
+            ("403", "Write access required"),
+            ("404", "Dataset not found"),
+        ]
+    };
+    let ps_lifecycle_body = |example: Value| {
+        json_body(
+            ObjectBuilder::new()
+                .property(
+                    "entity",
+                    ObjectBuilder::new()
+                        .schema_type(Type::String)
+                        .description(Some("The item (feature of interest) IRI.")),
+                )
+                .property(
+                    "property",
+                    ObjectBuilder::new()
+                        .schema_type(Type::String)
+                        .description(Some("The property kind IRI.")),
+                )
+                .property(
+                    "valid_from",
+                    ObjectBuilder::new()
+                        .schema_type(Type::String)
+                        .description(Some("RFC 3339 or YYYY-MM-DD; default now.")),
+                )
+                .property("note", ObjectBuilder::new().schema_type(Type::String))
+                .property(
+                    "documentation",
+                    ArrayBuilder::new()
+                        .items(ObjectBuilder::new().schema_type(Type::String))
+                        .description(Some("`opm:documentation` IRIs.")),
+                )
+                .property(
+                    "graph",
+                    ObjectBuilder::new()
+                        .schema_type(Type::String)
+                        .description(Some(
+                            "The data graph of the plain value (default: where the value was).",
+                        )),
+                )
+                .required("entity")
+                .required("property"),
+            example,
+        )
+    };
+    let ps_select = || {
+        vec![
+            qp("entity", true, "Item (feature of interest) IRI"),
+            qp("property", true, "Property kind IRI"),
+        ]
+    };
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties",
+        vec![(
+            M::Get,
+            o(
+                "Property States",
+                "List properties and their states",
+                "Every property of the dataset — of one item (`entity`), of one kind (`property`), or both — with its latest state (`history=latest`, default), every state (`history=full`, newest first) or the state valid at a time (`at`; with `entity` this is the item's snapshot). Reads the server's own states and canonical OPM (`<item> <kind> <property>` with `opm:hasPropertyState`) loaded into any graph of the dataset the caller may read; a state whose value lives in a graph withheld from the caller is left out. Each entry is `{entity, property, property_iri, states}`; a state is `{state, value, datatype, language, valid_from, recorded_at, attributed_to, reliability, note, current, deleted, documentation, canonical}`, plus `expression`, `derived_from`, `calculation` and `revision_of` when set. A deleted state has `value: null`.",
+                vec![
+                    qp("entity", false, "Only this item's properties"),
+                    qp("property", false, "Only properties of this kind"),
+                    qp("reliability", false, "assumed | confirmed | derived | required"),
+                    qp("deleted", false, "false (default for latest and `at`) | true (only deleted) | any (default for `history=full`)"),
+                    qp("derived", false, "true: only derived states (opm:Derived or with an expression) | false: none | any (default)"),
+                    qp("history", false, "latest (default) | full"),
+                    qp("at", false, "Snapshot time (RFC 3339 or YYYY-MM-DD)"),
+                    qp("limit", false, "Properties per page, 1–10000 (default 1000)"),
+                    qp("offset", false, "Properties to skip (default 0)"),
+                ],
+                vec![
+                    ("200", "`{dataset_id, history, at, total, offset, limit, properties}`"),
+                    ("400", "Bad filter value or time"),
+                    ("404", "Dataset not found or not visible"),
+                    ("422", "The read matched too many rows; narrow it with `entity` or `property`"),
+                ],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/state",
+        vec![(
+            M::Post,
+            ob(
+                "Property States",
+                "Set a property state",
+                "Record a new current `opm:PropertyState` of (`entity`, `property`) in the dataset's states graph (`urn:ots:property-states:<id>`, role `provenance`, registered on first use); the previous current state becomes `opm:OutdatedPropertyState` and the data graph's plain value is replaced. The value is typed from the string (boolean, integer, decimal, else string) unless `datatype` (an XSD type or `iri`) or `language` says otherwise. One commit.",
+                vec![],
+                json_body(
+                    ObjectBuilder::new()
+                        .property("entity", ObjectBuilder::new().schema_type(Type::String))
+                        .property("property", ObjectBuilder::new().schema_type(Type::String))
+                        .property("value", ObjectBuilder::new().schema_type(Type::String))
+                        .property("datatype", ObjectBuilder::new().schema_type(Type::String).description(Some("`xsd:…`, a datatype IRI, or `iri`.")))
+                        .property("language", ObjectBuilder::new().schema_type(Type::String))
+                        .property("graph", ObjectBuilder::new().schema_type(Type::String).description(Some("Data graph for the plain value (default: where the current value is, else the instances graph).")))
+                        .property("valid_from", ObjectBuilder::new().schema_type(Type::String))
+                        .property("reliability", ObjectBuilder::new().schema_type(Type::String).description(Some("assumed | confirmed | derived | required")))
+                        .property("note", ObjectBuilder::new().schema_type(Type::String))
+                        .property("documentation", ArrayBuilder::new().items(ObjectBuilder::new().schema_type(Type::String)).description(Some("`opm:documentation` IRIs.")))
+                        .required("entity")
+                        .required("property")
+                        .required("value"),
+                    json!({ "entity": "https://example.org/bridge/b1", "property": "https://example.org/loadRating", "value": "45", "valid_from": "2026-01-01", "reliability": "confirmed", "documentation": ["https://example.org/docs/inspection-2026"] }),
+                ),
+                {
+                    let mut r = vec![("201", "`{state, property_iri, value, valid_from, recorded_at, data_graph, states_graph, reliability, documentation}`")];
+                    r.extend(ps_errors_write());
+                    r
+                },
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/delete",
+        vec![(
+            M::Post,
+            ob(
+                "Property States",
+                "Delete a property (opm:Deleted)",
+                "OPM deletes a property without removing it: a new current state typed `opm:Deleted`, with no value, ends the chain and the plain triple leaves the data graph. History and as-of report it; restore undoes it.",
+                vec![],
+                ps_lifecycle_body(json!({ "entity": "https://example.org/bridge/b1", "property": "https://example.org/loadRating", "note": "superseded by the new design" })),
+                {
+                    let mut r = vec![("201", "`{state, property_iri, deleted: true, valid_from, recorded_at, data_graph}`"), ("409", "Already deleted")];
+                    r.extend(ps_errors_write());
+                    r.push(("404", "Dataset not found, or nothing to delete"));
+                    r
+                },
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/restore",
+        vec![(
+            M::Post,
+            ob(
+                "Property States",
+                "Restore a deleted property",
+                "A new current state carrying the value, reliability and documentation of the last state before the deletion (`prov:wasRevisionOf` it), and the plain triple back in the data graph.",
+                vec![],
+                ps_lifecycle_body(json!({ "entity": "https://example.org/bridge/b1", "property": "https://example.org/loadRating" })),
+                {
+                    let mut r = vec![("201", "`{state, restored_from, value, datatype, language, valid_from, recorded_at, data_graph}`"), ("409", "Not deleted, or no earlier value")];
+                    r.extend(ps_errors_write());
+                    r.push(("404", "Dataset not found, or the property has no recorded state"));
+                    r
+                },
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/history",
+        vec![(
+            M::Get,
+            o(
+                "Property States",
+                "Property history",
+                "Every state of (`entity`, `property`), newest first by validity then recording time, including deletions (`deleted: true`, `value: null`) and canonical OPM states found in the dataset's graphs.",
+                ps_select(),
+                vec![("200", "`{entity, property, property_iri, states}`"), ("404", "Dataset not found or not visible")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/as-of",
+        vec![(
+            M::Get,
+            o(
+                "Property States",
+                "Property state at a time",
+                "The state of (`entity`, `property`) valid at `at`: the latest `ots:validFrom` (for canonical data without one, `prov:generatedAtTime`) not after it. A property deleted by then answers with its `opm:Deleted` state.",
+                {
+                    let mut v = ps_select();
+                    v.push(qp("at", true, "RFC 3339 or YYYY-MM-DD"));
+                    v
+                },
+                vec![("200", "`{entity, property, at, state}`"), ("400", "Missing or malformed `at`"), ("404", "No state valid at that time, or dataset not visible")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/export",
+        vec![(
+            M::Get,
+            o(
+                "Property States",
+                "Export as canonical OPM",
+                "The dataset's property states as canonical OPM — `<item> <kind> <property>`, `<property> a opm:Property ; opm:hasPropertyState <state>`, each state with `schema:value`, `prov:generatedAtTime`, `prov:wasAttributedTo`, its OPM classes, `opm:documentation`, notes, derivations and `ots:validFrom` — in Turtle (default), N-Triples, JSON-LD or RDF/XML by `Accept`. The server's own `ots:propertyOf` bookkeeping is left out. States whose value lives in a graph withheld from the caller are omitted.",
+                vec![],
+                vec![("200", "OPM document"), ("404", "Dataset not found or not visible")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/import",
+        vec![(
+            M::Post,
+            o(
+                "Property States",
+                "Import canonical OPM",
+                "Body: RDF (Turtle by default; N-Triples, TriG, N-Quads, RDF/XML or JSON-LD by `Content-Type`; named graphs are merged), at most 500 000 triples. Every `<item> <kind> <property>` whose property has `opm:hasPropertyState` (and the server's own `ots:propertyOf` form) is read. States keep their IRIs (a blank node gets one); a state already in the dataset is skipped; a state without `prov:generatedAtTime`, or without a value unless it is `opm:Deleted`, is rejected and listed. Per property the newest-recorded state becomes current and its value the plain triple in the data graph. One commit.",
+                vec![qp("graph", false, "Data graph for the current values (default: the dataset's instances graph)")],
+                {
+                    let mut r = vec![
+                        ("200", "`{properties, imported_states, skipped_duplicates, rejected_count, rejected, data_graph, states_graph}`"),
+                        ("413", "More than 500 000 triples"),
+                        ("415", "Not an RDF media type"),
+                        ("422", "No OPM property states in the body"),
+                    ];
+                    r.extend(ps_errors_write());
+                    r
+                },
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/properties/validate",
+        vec![(
+            M::Get,
+            o(
+                "Property States",
+                "Validate against the OPM profile",
+                "Run the OPM profile shapes (`GET /api/properties/profile`) over the dataset's states graph, in a scratch store: one current state per property, current/outdated and assumed/confirmed disjoint, a `prov:generatedAtTime` on every state, a value on every state that is not deleted, the structure of derived states and calculations.",
+                vec![],
+                vec![("200", "`{dataset_id, states_graph, report}` — a SHACL validation report"), ("404", "Dataset not found or not visible")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/properties/profile",
+        vec![(
+            M::Get,
+            o(
+                "Property States",
+                "OPM profile shapes",
+                "The SHACL shapes of the OPM profile as Turtle, for use as a dataset shapes graph. Also shipped as the `opm-profile` seed bundle.",
+                vec![],
+                vec![("200", "Shapes graph (text/turtle)")],
+                false,
             ),
         )],
     );
