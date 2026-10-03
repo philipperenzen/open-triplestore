@@ -33,7 +33,8 @@
 //! an option this processor does not offer: JSON-LD 1.0-only behaviour
 //! (`specVersion` / `processingMode` `json-ld-1.0`), generalized RDF,
 //! `rdfDirection`, `expandContext`, and the `useNativeTypes` / `useRdfType`
-//! serialisation options.
+//! serialisation options. A manifest input that is missing from the vendored
+//! files fails the run instead of counting as a parse error.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -101,9 +102,11 @@ fn loader(url: &str) -> Result<LoadedDocument, Box<dyn std::error::Error + Send 
     })
 }
 
-fn parse_json_ld(path: &Path, base: &str) -> Result<Dataset, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    parse_json_ld_bytes(&bytes, base)
+/// A vendored file the manifest names; a missing one is a broken vendoring,
+/// not a test result.
+fn read_fixture(rel: &str) -> Vec<u8> {
+    let path = Path::new(ROOT).join(rel);
+    std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
 fn parse_json_ld_bytes(bytes: &[u8], base: &str) -> Result<Dataset, String> {
@@ -206,7 +209,7 @@ fn run_to_rdf(tally: &mut Tally) {
             .as_str()
             .map(str::to_string)
             .unwrap_or_else(|| format!("{BASE}{input}"));
-        let result = parse_json_ld(&Path::new(ROOT).join(input), &base);
+        let result = parse_json_ld_bytes(&read_fixture(input), &base);
         let types = types(&entry);
         let outcome: Result<(), String> = if types.iter().any(|t| t == "jld:NegativeEvaluationTest")
         {
@@ -221,9 +224,7 @@ fn run_to_rdf(tally: &mut Tally) {
             result.map(|_| ())
         } else {
             let expect = entry["expect"].as_str().unwrap();
-            let expected = std::fs::read(Path::new(ROOT).join(expect))
-                .map_err(|e| e.to_string())
-                .and_then(|b| parse_nquads(&b));
+            let expected = parse_nquads(&read_fixture(expect));
             match (result, expected) {
                 (Ok(actual), Ok(expected)) => {
                     if isomorphic(actual.clone(), expected.clone()) {
@@ -256,8 +257,7 @@ fn run_from_rdf(tally: &mut Tally) {
         }
         let input = entry["input"].as_str().unwrap();
         let serialised = (|| -> Result<Vec<u8>, String> {
-            let input = std::fs::read(Path::new(ROOT).join(input)).map_err(|e| e.to_string())?;
-            let source = parse_nquads(&input)?;
+            let source = parse_nquads(&read_fixture(input))?;
             let mut out = RdfSerializer::from_format(json_ld()).for_writer(Vec::new());
             for q in source.iter() {
                 out.serialize_quad(q).map_err(|e| e.to_string())?;
@@ -296,7 +296,7 @@ fn run_from_rdf(tally: &mut Tally) {
                         String::from_utf8_lossy(&written)
                     )
                 })?;
-            let expected = parse_json_ld(&Path::new(ROOT).join(expect), &format!("{BASE}{expect}"))
+            let expected = parse_json_ld_bytes(&read_fixture(expect), &format!("{BASE}{expect}"))
                 .map_err(|e| format!("expected output unreadable: {e}"))?;
             if isomorphic(round_trip, expected) {
                 Ok(())
