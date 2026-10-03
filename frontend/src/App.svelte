@@ -1,6 +1,6 @@
 <script>
   import { stripBase } from './lib/basePath';
-  import { Router, Route, Link, navigate } from './lib/router/index.js';
+  import { Router, Route, Link, Fallback, navigate } from './lib/router/index.js';
   import { onMount, tick } from 'svelte';
   import { t, locale, isLoading } from 'svelte-i18n';
   import { isAuthenticated, user, isAdmin, refreshUser, backendHealth, checkBackend } from './lib/stores.js';
@@ -8,6 +8,7 @@
   import { llmServiceHealthView } from './lib/llmServiceHealth.js';
   import { location } from './lib/locationStore.js';
   import Toasts from './components/Toasts.svelte';
+  import ConfirmHost from './components/ConfirmHost.svelte';
   import SearchBar from './components/SearchBar.svelte';
   import LoadingLogo from './components/LoadingLogo.svelte';
   import FeedbackDialog from './components/FeedbackDialog.svelte';
@@ -42,6 +43,7 @@
   import PreviewOverlay from './components/viewer/PreviewOverlay.svelte';
   import ResourceHoverCard from './components/ResourceHoverCard.svelte';
   import Validation from './pages/Validation.svelte';
+  import NotFound from './pages/NotFound.svelte';
 
   // W4-20: Heavy pages use dynamic imports so their vendor chunks (CodeMirror,
   // Cytoscape, etc.) are only fetched when the route is first visited.
@@ -707,7 +709,7 @@
         <Route path="/shacl/pipelines/:id" let:params>
           <LazyPage loader={lazyPipelineEditor} id={params.id} />
         </Route>
-        <!-- Phase 4 Results dashboard: combines pipeline + dataset runs. -->
+        <!-- Results dashboard: combines pipeline + dataset runs. -->
         <Route path="/shacl/results">
           <LazyPage loader={lazyShaclResults} />
         </Route>
@@ -784,6 +786,10 @@
         <Route path="/graph-viz">
           <LazyPage loader={lazyGraphVisualizer} />
         </Route>
+        <!-- Catch-all: keep last, after every Route has registered its path. -->
+        <Fallback>
+          <NotFound />
+        </Fallback>
         </div>
         {/key}
       </section>
@@ -899,6 +905,7 @@
   {/if}
 
   <Toasts />
+  <ConfirmHost />
   <FeedbackDialog />
 </Router>
 

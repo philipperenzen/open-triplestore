@@ -1,4 +1,6 @@
 <script>
+  import { askConfirm } from '../lib/confirm';
+  import { toastError, toastInfo } from '../lib/toast';
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
   import {
@@ -141,7 +143,7 @@
       showNew = false; newVersion = ''; newNotes = ''; newSelected = new Set();
       await load();
     } catch (e) {
-      alert(e?.message || String(e));
+      toastError(e?.message || String(e));
     }
     creating = false;
   }
@@ -153,18 +155,24 @@
       else if (action === 'publish') await publishDatasetVersion(id, ver);
       else if (action === 'deprecate') await deprecateDatasetVersion(id, ver);
       else if (action === 'restore') {
-        if (!confirm($t('components.datasetVersions.restoreConfirm', { values: { version: ver } }))) { actionKey = ''; return; }
+        const ok = await askConfirm({
+          title: $t('system.areYouSure'),
+          message: $t('components.datasetVersions.restoreConfirm', { values: { version: ver } }),
+          confirmLabel: $t('system.restore'),
+          variant: 'warning',
+        });
+        if (!ok) { actionKey = ''; return; }
         const res = await restoreDatasetVersion(id, ver);
         // Graphs that have left the dataset since the snapshot are not restored.
         if (res?.skipped?.length) {
-          alert($t('components.datasetVersions.restoreSkipped', {
+          toastInfo($t('components.datasetVersions.restoreSkipped', {
             values: { count: res.skipped.length, graphs: res.skipped.map((s) => s.graph).join(', ') },
-          }));
+          }), 10000);
         }
       }
       await load();
     } catch (e) {
-      alert(e?.message || String(e));
+      toastError(e?.message || String(e));
     }
     actionKey = '';
   }
@@ -177,7 +185,7 @@
       branchFrom = null; branchName = '';
       await load();
     } catch (e) {
-      alert(e?.message || String(e));
+      toastError(e?.message || String(e));
     }
     branchBusy = false;
   }

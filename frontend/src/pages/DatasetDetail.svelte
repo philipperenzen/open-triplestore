@@ -76,6 +76,7 @@
   import CommitHistory from '../components/CommitHistory.svelte';
   import DatasetVersions from '../components/DatasetVersions.svelte';
   import SectionNav from '../components/SectionNav.svelte';
+  import IdentityPolicyCard from '../components/IdentityPolicyCard.svelte';
   import Select from '../components/Select.svelte';
   import PartialRunNote from '../components/PartialRunNote.svelte';
   import { findLicense, LICENSE_CATEGORY_LABEL } from '../lib/vocab/licenses';
@@ -1260,6 +1261,7 @@
     { id: 'dataset-versions', label: $i18nT('pages.datasetDetail.historyTitle') },
     { id: 'services', label: $i18nT('pages.datasetDetail.sparqlServices') },
     { id: 'validation', label: $i18nT('pages.datasetDetail.validation'), visible: $isAuthenticated },
+    { id: 'identity', label: $i18nT('components.identityPolicy.navLabel'), visible: $isAuthenticated },
     { id: 'access', label: $i18nT('pages.datasetDetail.access'), visible: canManage },
   ]} />
 {/if}
@@ -1957,6 +1959,12 @@
     </div>
   {/if}
 </div>
+{/if}
+
+<!-- Identity policy (owl:sameAs) for reasoning — every identity route needs a
+     sign-in; the card hides itself when the server will not show the setting. -->
+{#if $isAuthenticated}
+  <IdentityPolicyCard scope="dataset" {id} canManage={canWrite} />
 {/if}
 
 <!-- Access management (users + teams, role-based) -->

@@ -1,4 +1,6 @@
 <script>
+  import { tHtml } from '../lib/i18n/html';
+  import { toastError } from '../lib/toast';
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
   import { navigate, Link } from '../lib/router/index.js';
@@ -116,7 +118,7 @@
     try {
       await deleteDataModel(id);
     } catch (e) {
-      alert(e.message);
+      toastError(e.message);
     }
     deleteTarget = null;
     deleteLoading = false;
@@ -174,17 +176,17 @@
 
   {#if showInfo}
     <div class="info-panel">
-      <!-- eslint-disable-next-line svelte/no-at-html-tags -- trusted static i18n string -->
-      <p>{@html $t('pages.modelRegistry.infoIntro')}</p>
+      <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+      <p>{@html $tHtml('pages.modelRegistry.infoIntro')}</p>
       <ul>
-        <!-- eslint-disable-next-line svelte/no-at-html-tags -- trusted static i18n string -->
-        <li>{@html $t('pages.modelRegistry.infoUpload')}</li>
-        <!-- eslint-disable-next-line svelte/no-at-html-tags -- trusted static i18n string -->
-        <li>{@html $t('pages.modelRegistry.infoDraft')}</li>
-        <!-- eslint-disable-next-line svelte/no-at-html-tags -- trusted static i18n string -->
-        <li>{@html $t('pages.modelRegistry.infoDiff')}</li>
-        <!-- eslint-disable-next-line svelte/no-at-html-tags -- trusted static i18n string -->
-        <li>{@html $t('pages.modelRegistry.infoPublished')}</li>
+        <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+        <li>{@html $tHtml('pages.modelRegistry.infoUpload')}</li>
+        <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+        <li>{@html $tHtml('pages.modelRegistry.infoDraft')}</li>
+        <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+        <li>{@html $tHtml('pages.modelRegistry.infoDiff')}</li>
+        <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+        <li>{@html $tHtml('pages.modelRegistry.infoPublished')}</li>
       </ul>
       <Link to="/docs" class="docs-link">{$t('pages.modelRegistry.viewDocs')}</Link>
     </div>

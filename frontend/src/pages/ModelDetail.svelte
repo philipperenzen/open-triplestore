@@ -1,5 +1,7 @@
 <script>
   import { withBase, absoluteUrl } from '../lib/basePath';
+  import { askText } from '../lib/confirm';
+  import { toastError } from '../lib/toast';
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
   import { navigate } from '../lib/router/index.js';
@@ -123,7 +125,7 @@
       editingNotes = '';
       await load();
     } catch (e) {
-      alert(e.message);
+      toastError(e.message);
     }
     notesSaving = false;
   }
@@ -203,7 +205,7 @@
       if (e.status === 409 && e.body?.reasons) {
         deleteBlocked = blockedFrom(ver, e.body);
       } else {
-        alert(e.message);
+        toastError(e.message);
       }
     }
     deleteLoading = '';
@@ -216,14 +218,19 @@
   }
 
   async function handleCreateDraft(fromVer) {
-    const targetVer = prompt($t('pages.modelDetail.createDraftPrompt', { values: { version: fromVer } }));
+    const targetVer = await askText({
+      title: $t('pages.modelDetail.newDraft'),
+      message: $t('pages.modelDetail.createDraftPrompt', { values: { version: fromVer } }),
+      label: $t('pages.modelDetail.versionFieldLabel'),
+      confirmLabel: $t('system.create'),
+    });
     if (!targetVer) return;
     draftLoading = fromVer;
     try {
       await createDataModelDraft(id, fromVer, targetVer.trim());
       await load();
     } catch (e) {
-      alert(e.message);
+      toastError(e.message);
     }
     draftLoading = '';
   }
@@ -234,7 +241,7 @@
       await stageDataModelVersion(id, ver);
       await load();
     } catch (e) {
-      alert(e.message);
+      toastError(e.message);
     }
     stageLoading = '';
   }
@@ -276,7 +283,7 @@
       await subgraphActionDataModel(id, ver, action, graph);
       await load();
     } catch (e) {
-      alert(e.message);
+      toastError(e.message);
     }
     subgraphLoading = '';
   }

@@ -1451,7 +1451,14 @@ pub async fn ldp_delete(
     if let Err(r) = require_mode(&state, &agent, &iri, wac::Mode::Write) {
         return r;
     }
-    let container = container_iri_for(base, &path);
+    // The container that actually lists this member: `container_iri_for`
+    // assumes the slash form (`…/ldp/c/`), but a container created by POSTing
+    // to `/ldp/c` is `…/ldp/c`, and deleting against the wrong IRI left the
+    // `ldp:contains` triple behind, so the container kept listing the member.
+    let container = container::containers_of(&state.store, &iri)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| container_iri_for(base, &path));
 
     // REVIEW: a DELETE to the bare root container `/ldp/` (empty path) wipes the
     // root's own triples like any other container delete (it does not cascade to

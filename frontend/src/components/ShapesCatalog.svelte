@@ -1,4 +1,5 @@
 <script>
+  import { askText } from '../lib/confirm';
   // The "Shapes" catalog: graph-first discovery of every SHACL shape in the
   // store (dedicated shape graphs AND shapes joined with instance data/models).
   // Real stores hold tens of thousands of shapes, so we list the source graphs
@@ -165,7 +166,11 @@
 
   async function createFromSelection() {
     if (!selected.size) return;
-    const name = (prompt($t('components.shapesCatalog.newGraphPrompt'), $t('components.shapesCatalog.newGraphDefault')) || '').trim();
+    const name = await askText({
+      title: $t('components.shapesCatalog.newGraphPrompt'),
+      defaultValue: $t('components.shapesCatalog.newGraphDefault'),
+      confirmLabel: $t('system.create'),
+    });
     if (!name) return;
     busy = true;
     try {
@@ -188,7 +193,11 @@
   }
 
   async function registerGraph(g) {
-    const name = (prompt($t('components.shapesCatalog.registerPrompt'), shortenIRI(g.graph)) || '').trim();
+    const name = await askText({
+      title: $t('components.shapesCatalog.registerPrompt'),
+      defaultValue: shortenIRI(g.graph),
+      confirmLabel: $t('system.confirm'),
+    });
     if (!name) return;
     busy = true;
     try {

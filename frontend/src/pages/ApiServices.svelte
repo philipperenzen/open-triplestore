@@ -1,5 +1,6 @@
 <script>
   import { withBase, stripBase, absoluteUrl } from '../lib/basePath';
+  import { askConfirm } from '../lib/confirm';
   import { onMount } from 'svelte';
   import {
     listSavedQueries, getSavedQuery, createSavedQuery, updateSavedQuery, deleteSavedQuery,
@@ -354,7 +355,13 @@
     c.revRev = c.revRev === r.revision ? null : r.revision; cards = cards;
   }
   async function restoreRevision(q, r) {
-    if (!confirm($i18nT('pages.apiServices.restoreConfirm', { values: { revision: r.revision } }))) return;
+    const ok = await askConfirm({
+      title: $i18nT('system.areYouSure'),
+      message: $i18nT('pages.apiServices.restoreConfirm', { values: { revision: r.revision } }),
+      confirmLabel: $i18nT('system.restore'),
+      variant: 'warning',
+    });
+    if (!ok) return;
     try {
       await updateSavedQuery(qScope(q), qOwner(q), q.slug, {
         sparql: formatSparql(r.sparql),
@@ -372,7 +379,12 @@
   }
 
   async function remove(q) {
-    if (!confirm($i18nT('pages.apiServices.deleteConfirm', { values: { name: q.name } }))) return;
+    const ok = await askConfirm({
+      title: $i18nT('system.areYouSure'),
+      message: $i18nT('pages.apiServices.deleteConfirm', { values: { name: q.name } }),
+      confirmLabel: $i18nT('system.delete'),
+    });
+    if (!ok) return;
     try {
       await deleteSavedQuery(qScope(q), qOwner(q), q.slug);
       toastSuccess($i18nT('pages.apiServices.deleted'));
