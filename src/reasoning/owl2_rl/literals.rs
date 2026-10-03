@@ -215,7 +215,10 @@ impl ClassAxioms {
             if hit.len() > 1 {
                 return Some((
                     "cax-adc".into(),
-                    format!("the literal {lit} is in the disjoint classes {} and {}", hit[0], hit[1]),
+                    format!(
+                        "the literal {lit} is in the disjoint classes {} and {}",
+                        hit[0], hit[1]
+                    ),
                 ));
             }
         }
@@ -251,10 +254,7 @@ impl Owl2RLReasoner<'_> {
     }
 
     /// Every literal object in scope, once per quad.
-    fn each_literal(
-        &self,
-        mut f: impl FnMut(&Literal),
-    ) -> Result<(), ReasoningError> {
+    fn each_literal(&self, mut f: impl FnMut(&Literal)) -> Result<(), ReasoningError> {
         for g in self.literal_graphs() {
             for quad in self
                 .store
@@ -327,7 +327,11 @@ impl Owl2RLReasoner<'_> {
     }
 
     /// Rows of a SELECT in scope, each as the values of `vars` in order.
-    fn select(&self, sparql: &str, vars: &[&str]) -> Result<Vec<Vec<Option<Term>>>, ReasoningError> {
+    fn select(
+        &self,
+        sparql: &str,
+        vars: &[&str],
+    ) -> Result<Vec<Vec<Option<Term>>>, ReasoningError> {
         let mut out = Vec::new();
         if let oxigraph::sparql::QueryResults::Solutions(rows) = self.run_query(sparql)? {
             for row in rows {
@@ -343,7 +347,10 @@ impl Owl2RLReasoner<'_> {
         let mut ax = ClassAxioms::default();
         let pairs = |p: &str| -> Result<Vec<(Term, Term)>, ReasoningError> {
             Ok(self
-                .select(&format!("SELECT DISTINCT ?a ?b WHERE {{ ?a <{p}> ?b }}"), &["a", "b"])?
+                .select(
+                    &format!("SELECT DISTINCT ?a ?b WHERE {{ ?a <{p}> ?b }}"),
+                    &["a", "b"],
+                )?
                 .into_iter()
                 .filter_map(|r| match (&r[0], &r[1]) {
                     (Some(a), Some(b)) => Some((a.clone(), b.clone())),
@@ -529,9 +536,9 @@ impl Owl2RLReasoner<'_> {
                     continue;
                 };
                 let Some(v) = known_value(lt) else { continue };
-                let classes = memo.entry(lt.clone()).or_insert_with(|| {
-                    ax.closure(&v, seeds.get(lt).cloned().unwrap_or_default())
-                });
+                let classes = memo
+                    .entry(lt.clone())
+                    .or_insert_with(|| ax.closure(&v, seeds.get(lt).cloned().unwrap_or_default()));
                 if !classes.contains(y) {
                     continue;
                 }
@@ -541,7 +548,12 @@ impl Owl2RLReasoner<'_> {
                     _ => continue,
                 };
                 if !self.in_scope(&subject, &rdf_type, class) {
-                    new.insert(Quad::new(subject, rdf_type.clone(), class.clone(), target.clone()));
+                    new.insert(Quad::new(
+                        subject,
+                        rdf_type.clone(),
+                        class.clone(),
+                        target.clone(),
+                    ));
                 }
             }
         }
@@ -655,7 +667,9 @@ impl Owl2RLReasoner<'_> {
             else {
                 continue;
             };
-            let (Some(va), Some(vb)) = (known_value(a), known_value(b)) else { continue };
+            let (Some(va), Some(vb)) = (known_value(a), known_value(b)) else {
+                continue;
+            };
             if va == vb {
                 continue;
             }
@@ -681,7 +695,9 @@ impl Owl2RLReasoner<'_> {
                 if classes_of(lt).is_some_and(|s| s.contains(c)) {
                     return Err(ReasoningError::inconsistency(
                         "cls-maxqc1",
-                        format!("{lt} is a qualifying value of a maximum qualified cardinality of 0"),
+                        format!(
+                            "{lt} is a qualifying value of a maximum qualified cardinality of 0"
+                        ),
                     ));
                 }
             }

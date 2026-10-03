@@ -65,7 +65,9 @@ pub fn value_key(l: &Literal) -> Option<String> {
 /// The RL datatypes whose value space holds the literal's value
 /// (`dt-type2`), for the generator's alphabet.
 pub fn types_of(l: &Literal) -> Vec<Term> {
-    let Some(key) = value_key(l) else { return Vec::new() };
+    let Some(key) = value_key(l) else {
+        return Vec::new();
+    };
     let mut v = vec![rdfs("Literal")];
     if let Some(num) = key.strip_prefix("num:") {
         let f: f64 = num.parse().unwrap();
@@ -100,7 +102,11 @@ pub fn types_of(l: &Literal) -> Vec<Term> {
         v.push(rdf("PlainLiteral"));
         // The alphabet's strings are single NCName-like words with no
         // leading letter-only subtag, so not xsd:language.
-        assert!(s.starts_with(|c: char| c.is_ascii_alphabetic()) && s.chars().all(|c| c.is_ascii_alphanumeric()) && s.chars().any(|c| c.is_ascii_digit()));
+        assert!(
+            s.starts_with(|c: char| c.is_ascii_alphabetic())
+                && s.chars().all(|c| c.is_ascii_alphanumeric())
+                && s.chars().any(|c| c.is_ascii_digit())
+        );
         for d in ["normalizedString", "token", "Name", "NCName", "NMTOKEN"] {
             v.push(xsd(d));
         }
@@ -120,7 +126,9 @@ impl G {
     pub fn new(set: HashSet<T>) -> Self {
         let mut by_p: HashMap<Term, Vec<(Term, Term)>> = HashMap::new();
         for (s, p, o) in &set {
-            by_p.entry(p.clone()).or_default().push((s.clone(), o.clone()));
+            by_p.entry(p.clone())
+                .or_default()
+                .push((s.clone(), o.clone()));
         }
         G { set, by_p }
     }
@@ -134,10 +142,18 @@ impl G {
         self.set.contains(&(s.clone(), p.clone(), o.clone()))
     }
     pub fn objs(&self, s: &Term, p: &Term) -> Vec<Term> {
-        self.pairs(p).iter().filter(|(a, _)| a == s).map(|(_, o)| o.clone()).collect()
+        self.pairs(p)
+            .iter()
+            .filter(|(a, _)| a == s)
+            .map(|(_, o)| o.clone())
+            .collect()
     }
     pub fn subs(&self, p: &Term, o: &Term) -> Vec<Term> {
-        self.pairs(p).iter().filter(|(_, b)| b == o).map(|(s, _)| s.clone()).collect()
+        self.pairs(p)
+            .iter()
+            .filter(|(_, b)| b == o)
+            .map(|(s, _)| s.clone())
+            .collect()
     }
     pub fn one(&self, s: &Term, p: &Term) -> Option<Term> {
         self.objs(s, p).into_iter().next()
@@ -214,7 +230,13 @@ fn table5(g: &G, out: &mut Vec<T>) {
     for p in ["label", "comment", "seeAlso", "isDefinedBy"] {
         out.push(t(&rdfs(p), &ty, &owl("AnnotationProperty")));
     }
-    for p in ["deprecated", "versionInfo", "priorVersion", "backwardCompatibleWith", "incompatibleWith"] {
+    for p in [
+        "deprecated",
+        "versionInfo",
+        "priorVersion",
+        "backwardCompatibleWith",
+        "incompatibleWith",
+    ] {
         out.push(t(&owl(p), &ty, &owl("AnnotationProperty")));
     }
     for (p, c) in g.pairs(&rdfs("domain")) {
@@ -291,9 +313,9 @@ fn table5(g: &G, out: &mut Vec<T>) {
         let xs = g.instances(&c);
         for x in &xs {
             for y in &xs {
-                let all = keys.iter().all(|p| {
-                    g.objs(x, p).iter().any(|z| g.has(y, p, z))
-                });
+                let all = keys
+                    .iter()
+                    .all(|p| g.objs(x, p).iter().any(|z| g.has(y, p, z)));
                 if all {
                     out.push(t(x, &same, y)); // prp-key
                 }
@@ -603,7 +625,10 @@ pub fn clash(g: &G) -> Option<&'static str> {
     }
     for (x, i1) in g.pairs(&owl("sourceIndividual")) {
         for p in g.objs(x, &owl("assertionProperty")) {
-            for (pred, rule) in [("targetIndividual", "prp-npa1"), ("targetValue", "prp-npa2")] {
+            for (pred, rule) in [
+                ("targetIndividual", "prp-npa1"),
+                ("targetValue", "prp-npa2"),
+            ] {
                 if g.objs(x, &owl(pred)).iter().any(|i2| g.has(i1, &p, i2)) {
                     return Some(rule);
                 }
@@ -630,11 +655,16 @@ pub fn clash(g: &G) -> Option<&'static str> {
             continue;
         }
         for c in g.objs(&x, &owl("onClass")) {
-            let hit = g.instances(&x).iter().any(|u| {
-                g.objs(u, &p).iter().any(|y| c == thing || g.typed(y, &c))
-            });
+            let hit = g
+                .instances(&x)
+                .iter()
+                .any(|u| g.objs(u, &p).iter().any(|y| c == thing || g.typed(y, &c)));
             if hit {
-                return Some(if c == thing { "cls-maxqc2" } else { "cls-maxqc1" });
+                return Some(if c == thing {
+                    "cls-maxqc2"
+                } else {
+                    "cls-maxqc1"
+                });
             }
         }
     }
@@ -642,7 +672,11 @@ pub fn clash(g: &G) -> Option<&'static str> {
         for l in g.objs(&x, &owl("members")) {
             let cs = g.list(&l).unwrap_or_default();
             for (i, a) in cs.iter().enumerate() {
-                if cs.iter().skip(i + 1).any(|b| g.instances(a).iter().any(|z| g.typed(z, b))) {
+                if cs
+                    .iter()
+                    .skip(i + 1)
+                    .any(|b| g.instances(a).iter().any(|z| g.typed(z, b)))
+                {
                     return Some("cax-adc");
                 }
             }
@@ -655,7 +689,10 @@ pub fn clash(g: &G) -> Option<&'static str> {
         }
         let lt: Term = l.clone().into();
         let types = types_of(&l);
-        if g.objs(&lt, &ty).iter().any(|d| map.contains(d) && !types.contains(d)) {
+        if g.objs(&lt, &ty)
+            .iter()
+            .any(|d| map.contains(d) && !types.contains(d))
+        {
             return Some("dt-not-type");
         }
     }

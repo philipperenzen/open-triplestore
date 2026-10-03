@@ -66,7 +66,7 @@ const KNOWN_FAILURES: &[(&str, &str)] = &[
 
 /// Pass floor: a loader regression that turns passes into skips must not go
 /// unnoticed. It sits a little below the current count.
-const PASS_FLOOR: usize = 999;
+const PASS_FLOOR: usize = 45;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -216,7 +216,11 @@ enum Outcome {
 /// The SPARQL form of a term, blank nodes as variables.
 fn pattern_term(t: &Term) -> String {
     match t {
-        Term::BlankNode(b) => format!("?b{}", b.as_str().replace(|c: char| !c.is_ascii_alphanumeric(), "_")),
+        Term::BlankNode(b) => format!(
+            "?b{}",
+            b.as_str()
+                .replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+        ),
         other => other.to_string(),
     }
 }
@@ -303,7 +307,12 @@ fn run(c: &Case) -> Outcome {
                 };
                 match entails(&store, &graph) {
                     Ok(got) if got == want => true,
-                    Ok(_) => return Outcome::Fail(format!("{kind:?} does not hold{}", unmatched(&store, &graph))),
+                    Ok(_) => {
+                        return Outcome::Fail(format!(
+                            "{kind:?} does not hold{}",
+                            unmatched(&store, &graph)
+                        ))
+                    }
                     Err(e) => return Outcome::Fail(e),
                 }
             }
@@ -324,7 +333,10 @@ fn w3c_owl2_rl_manifest_selection() {
     assert_eq!(cases.len(), SELECTED, "approved RL-profile cases");
     for (id, why) in KNOWN_FAILURES {
         assert!(!why.is_empty(), "{id} needs a reason");
-        assert!(cases.iter().any(|c| &c.id == id), "{id} is not a selected case");
+        assert!(
+            cases.iter().any(|c| &c.id == id),
+            "{id} is not a selected case"
+        );
     }
 }
 

@@ -1243,7 +1243,10 @@ fn has_key_matches_by_value() {
          ex:b a ex:C ; ex:id \"7.0\"^^xsd:decimal . ex:c a ex:C ; ex:id \"8\"^^xsd:integer .",
     );
     materialize(&s);
-    assert!(ask_tg(&s, "ex:a owl:sameAs ex:b ."), "7 and 7.0 are one key value");
+    assert!(
+        ask_tg(&s, "ex:a owl:sameAs ex:b ."),
+        "7 and 7.0 are one key value"
+    );
     assert!(!ask_tg(&s, "ex:a owl:sameAs ex:c ."), "8 is another");
 }
 
@@ -1322,8 +1325,14 @@ fn data_values_type_some_values_from_subjects() {
          ex:a ex:n 3 . ex:b ex:n \"three\" .",
     );
     materialize(&s);
-    assert!(ask_tg(&s, "ex:a rdf:type ex:HasCount ."), "3 is a decimal value");
-    assert!(!ask_tg(&s, "ex:b rdf:type ex:HasCount ."), "a string is not");
+    assert!(
+        ask_tg(&s, "ex:a rdf:type ex:HasCount ."),
+        "3 is a decimal value"
+    );
+    assert!(
+        !ask_tg(&s, "ex:b rdf:type ex:HasCount ."),
+        "a string is not"
+    );
     assert!(!ask_tg(&s, "ex:a rdf:type ex:Flagged ."), "3 is no boolean");
 }
 
@@ -1340,7 +1349,11 @@ fn double_values_are_not_decimal_values() {
     let s = store_with(
         "ex:age a owl:FunctionalProperty . ex:x ex:age \"1\"^^xsd:integer, \"1.0E0\"^^xsd:double .",
     );
-    assert_eq!(inconsistent_rule(&s).as_deref(), Some("dt-diff"), "1 and 1.0E0 differ");
+    assert_eq!(
+        inconsistent_rule(&s).as_deref(),
+        Some("dt-diff"),
+        "1 and 1.0E0 differ"
+    );
 }
 
 /// cls-nothing2 over a literal: a range of owl:Nothing has no values.
@@ -1601,7 +1614,10 @@ fn random_graph(seed: u64) -> String {
 }
 
 /// The triples of the unnamed default graph, or of `graph`.
-fn triples_of(store: &TripleStore, graph: Option<&str>) -> std::collections::HashSet<rl_reference::T> {
+fn triples_of(
+    store: &TripleStore,
+    graph: Option<&str>,
+) -> std::collections::HashSet<rl_reference::T> {
     let q = match graph {
         Some(g) => format!("SELECT ?s ?p ?o WHERE {{ GRAPH <{g}> {{ ?s ?p ?o }} }}"),
         None => "SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(),
@@ -1622,10 +1638,14 @@ fn triples_of(store: &TripleStore, graph: Option<&str>) -> std::collections::Has
 
 /// Drop what neither side should be judged on: generalized triples, and
 /// reflexive owl:sameAs (eq-ref, opt-in).
-fn comparable(set: impl IntoIterator<Item = rl_reference::T>) -> std::collections::BTreeSet<String> {
+fn comparable(
+    set: impl IntoIterator<Item = rl_reference::T>,
+) -> std::collections::BTreeSet<String> {
     let same = rl_reference::owl("sameAs");
     set.into_iter()
-        .filter(|(s, p, o)| !matches!(s, oxigraph::model::Term::Literal(_)) && !(p == &same && s == o))
+        .filter(|(s, p, o)| {
+            !matches!(s, oxigraph::model::Term::Literal(_)) && !(p == &same && s == o)
+        })
         .map(|(s, p, o)| format!("{s} {p} {o}"))
         .collect()
 }
@@ -1640,8 +1660,14 @@ fn differential(seed: u64) -> Result<bool, String> {
     let ctx = || format!("seed {seed}:\n{ttl}\n");
     match (reference, engine) {
         (Err(_), Err(ReasoningError::Inconsistency { .. })) => Ok(false),
-        (Err(rule), Ok(_)) => Err(format!("{}the reference derives false by {rule}; the engine found it consistent", ctx())),
-        (Ok(_), Err(e)) => Err(format!("{}the reference closure is consistent; the engine: {e}", ctx())),
+        (Err(rule), Ok(_)) => Err(format!(
+            "{}the reference derives false by {rule}; the engine found it consistent",
+            ctx()
+        )),
+        (Ok(_), Err(e)) => Err(format!(
+            "{}the reference closure is consistent; the engine: {e}",
+            ctx()
+        )),
         (Err(_), Err(e)) => Err(format!("{}engine error: {e}", ctx())),
         (Ok(g), Ok(_)) => {
             let want = comparable(g.set);
@@ -1678,7 +1704,12 @@ fn engine_agrees_with_the_reference_evaluator_on_random_graphs() {
         failures.is_empty(),
         "{} of {seeds} graphs disagree; the first:\n{}",
         failures.len(),
-        failures.iter().take(3).cloned().collect::<Vec<_>>().join("\n---\n")
+        failures
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n---\n")
     );
     assert!(
         consistent * 4 >= seeds,

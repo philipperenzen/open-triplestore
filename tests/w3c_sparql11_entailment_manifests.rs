@@ -41,6 +41,9 @@ const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 
 /// `(entry IRI fragment, why)`: cases that fail today. See docs/conformance/entailment.md.
 const KNOWN_FAILURES: &[(&str, &str)] = &[
+    ("paper-sparqldl-Q1", "as rdfs05: duplicate solutions"),
+    ("paper-sparqldl-Q1-rdfs", "as rdfs05: duplicate solutions"),
+    ("paper-sparqldl-Q4", "as rdfs05: duplicate solutions"),
     ("rdfs05", "duplicate solutions: a triple both asserted and derived is in the default graph and in the entailment graph, and a query over their union counts it twice"),
     ("rdfs11", "duplicate solutions: a triple both asserted and derived is in the default graph and in the entailment graph, and a query over their union counts it twice"),
     ("sparqldl-10", "the expected answers need OWL reasoning beyond the RL/RDF rules (RL is a partial axiomatization of the RDF-Based Semantics)"),
@@ -85,12 +88,17 @@ fn parse(iri: &str) -> Result<Vec<Triple>, String> {
         .with_base_iri(format!("{BASE}{}", local(iri)))
         .map_err(|e| e.to_string())?
         .for_slice(read(iri)?.as_bytes())
-        .map(|q| q.map(Triple::from).map_err(|e| format!("{}: {e}", local(iri))))
+        .map(|q| {
+            q.map(Triple::from)
+                .map_err(|e| format!("{}: {e}", local(iri)))
+        })
         .collect()
 }
 
 fn objects(g: &Graph, s: &NamedOrBlankNode, p: &NamedNode) -> Vec<Term> {
-    g.objects_for_subject_predicate(s, p).map(|o| o.into_owned()).collect()
+    g.objects_for_subject_predicate(s, p)
+        .map(|o| o.into_owned())
+        .collect()
 }
 
 fn node(t: &Term) -> Option<NamedOrBlankNode> {
@@ -106,10 +114,16 @@ fn members(g: &Graph, t: Term) -> Vec<Term> {
     let mut out = Vec::new();
     let mut cur = t;
     loop {
-        let Some(n) = node(&cur) else { return vec![cur] };
+        let Some(n) = node(&cur) else {
+            return vec![cur];
+        };
         let first = objects(g, &n, &nn(RDF, "first"));
         let Some(f) = first.into_iter().next() else {
-            return if out.is_empty() && cur.to_string() != format!("<{RDF}nil>") { vec![cur] } else { out };
+            return if out.is_empty() && cur.to_string() != format!("<{RDF}nil>") {
+                vec![cur]
+            } else {
+                out
+            };
         };
         out.push(f);
         match objects(g, &n, &nn(RDF, "rest")).into_iter().next() {
@@ -137,7 +151,9 @@ fn cases() -> Vec<Case> {
     for s in tests {
         // The entry's IRI fragment (`bind01`): short and unique.
         let name = match &s {
-            NamedOrBlankNode::NamedNode(n) => n.as_str().rsplit('#').next().unwrap_or("").to_string(),
+            NamedOrBlankNode::NamedNode(n) => {
+                n.as_str().rsplit('#').next().unwrap_or("").to_string()
+            }
             NamedOrBlankNode::BlankNode(_) => continue,
         };
         let Some(action) = objects(&g, &s, &nn(MF, "action")).first().and_then(node) else {
@@ -160,8 +176,14 @@ fn cases() -> Vec<Case> {
         out.push(Case {
             name,
             query: one(nn(QT, "query")).unwrap_or_default(),
-            data: objects(&g, &action, &nn(QT, "data")).iter().filter_map(iri_of).collect(),
-            result: objects(&g, &s, &nn(MF, "result")).first().and_then(iri_of).unwrap_or_default(),
+            data: objects(&g, &action, &nn(QT, "data"))
+                .iter()
+                .filter_map(iri_of)
+                .collect(),
+            result: objects(&g, &s, &nn(MF, "result"))
+                .first()
+                .and_then(iri_of)
+                .unwrap_or_default(),
             engine,
         });
     }
@@ -197,7 +219,9 @@ fn expected(iri: &str) -> Result<Answer, String> {
             let mut rows = Vec::new();
             for sol in it {
                 let sol = sol.map_err(|e| e.to_string())?;
-                rows.push(row(sol.iter().map(|(v, t)| (v.as_str().to_string(), t.clone()))));
+                rows.push(row(sol
+                    .iter()
+                    .map(|(v, t)| (v.as_str().to_string(), t.clone()))));
             }
             rows.sort();
             Ok(Answer::Rows(rows))
@@ -233,7 +257,9 @@ fn run(c: &Case) -> Result<(), String> {
             let mut rows = Vec::new();
             for sol in sols {
                 let sol = sol.map_err(|e| e.to_string())?;
-                rows.push(row(sol.iter().map(|(v, t)| (v.as_str().to_string(), t.clone()))));
+                rows.push(row(sol
+                    .iter()
+                    .map(|(v, t)| (v.as_str().to_string(), t.clone()))));
             }
             rows.sort();
             Answer::Rows(rows)
@@ -248,11 +274,19 @@ fn run(c: &Case) -> Result<(), String> {
             // With OTS_TEST_W3C_ENTAILMENT_EXPLAIN set: up to five rows each way.
             if std::env::var_os("OTS_TEST_W3C_ENTAILMENT_EXPLAIN").is_some() {
                 let only = |x: &[Vec<String>], y: &[Vec<String>]| -> Vec<String> {
-                    x.iter().filter(|r| !y.contains(r)).take(5).map(|r| r.join(" ")).collect()
+                    x.iter()
+                        .filter(|r| !y.contains(r))
+                        .take(5)
+                        .map(|r| r.join(" "))
+                        .collect()
                 };
                 detail = format!("; missing {:?}; extra {:?}", only(&a, &b), only(&b, &a));
             }
-            Err(format!("{} expected rows, {} got ({engine:?}){detail}", a.len(), b.len()))
+            Err(format!(
+                "{} expected rows, {} got ({engine:?}){detail}",
+                a.len(),
+                b.len()
+            ))
         }
         _ => Err(format!("the answer differs ({engine:?})")),
     }
@@ -287,7 +321,14 @@ fn w3c_sparql11_entailment_suite() {
             Err(_) => {}
         }
     }
-    assert!(unexpected.is_empty(), "cases outside KNOWN_FAILURES fail:\n{}", unexpected.join("\n"));
-    assert!(fixed.is_empty(), "KNOWN_FAILURES entries now pass, remove them: {fixed:?}");
+    assert!(
+        unexpected.is_empty(),
+        "cases outside KNOWN_FAILURES fail:\n{}",
+        unexpected.join("\n")
+    );
+    assert!(
+        fixed.is_empty(),
+        "KNOWN_FAILURES entries now pass, remove them: {fixed:?}"
+    );
     assert!(passed >= PASS_FLOOR, "pass floor: {passed} < {PASS_FLOOR}");
 }

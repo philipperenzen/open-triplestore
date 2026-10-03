@@ -34,10 +34,19 @@ const TG: &str = "urn:entailment:rdfs";
 
 /// `(entry local name, why)`: cases that fail today. See
 /// docs/conformance/entailment.md.
-const KNOWN_FAILURES: &[(&str, &str)] = &[];
+const KNOWN_FAILURES: &[(&str, &str)] = &[
+    ("datatypes-non-well-formed-literal-1", "the case recognizes no datatypes; this store always recognizes its datatype map, so the ill-typed xsd:integer literal is an inconsistency here"),
+    ("datatypes-semantic-equivalence-between-datatypes", "D-entailment between equal values of different datatypes (an integer and a decimal) is not materialized by the RDFS engine"),
+    ("literal-type", "rdfD1, exempt by decision D11: the result has a blank node standing for a typed literal's value, which is not materialized"),
+    ("pfps-10-non-well-formed-literal-1", "rdfD1, exempt by decision D11: the result has a blank node standing for a typed literal's value, which is not materialized"),
+    ("rdfs-entailment-test001", "the lexical forms of rdf:XMLLiteral are not checked, so an ill-formed one is not reported"),
+    ("xmlsch-02-whitespace-facet-2", "an xsd:int lexical form with whitespace around it is ill-typed in RDF 1.1 but is not reported: integer-derived types are stored as xsd:integer values (decision D4)"),
+    ("xmlsch-02-whitespace-facet-3", "rdfD1, exempt by decision D11: the result has a blank node standing for a typed literal's value, which is not materialized"),
+    ("xmlsch-02-whitespace-facet-4", "an xsd:int lexical form with whitespace around it is ill-typed in RDF 1.1 but is not reported: integer-derived types are stored as xsd:integer values (decision D4)"),
+];
 
 /// Pass floor, a little below the current count.
-const PASS_FLOOR: usize = 0;
+const PASS_FLOOR: usize = 999;
 
 #[derive(Debug)]
 struct Entry {
@@ -88,7 +97,9 @@ fn entries() -> Vec<Entry> {
     }
     let mut out = Vec::new();
     for s in subjects {
-        let ty = object(&g, &s, &nn(RDF, "type")).map(|t| t.to_string()).unwrap_or_default();
+        let ty = object(&g, &s, &nn(RDF, "type"))
+            .map(|t| t.to_string())
+            .unwrap_or_default();
         let positive = ty.contains("PositiveEntailmentTest");
         let lexical = |p: &str| match object(&g, &s, &nn(MF, p)) {
             Some(Term::Literal(l)) => l.value().to_string(),
@@ -100,7 +111,9 @@ fn entries() -> Vec<Entry> {
             _ => None,
         };
         let name = match &s {
-            NamedOrBlankNode::NamedNode(n) => n.as_str().rsplit('#').next().unwrap_or("").to_string(),
+            NamedOrBlankNode::NamedNode(n) => {
+                n.as_str().rsplit('#').next().unwrap_or("").to_string()
+            }
             NamedOrBlankNode::BlankNode(_) => lexical("name"),
         };
         out.push(Entry {
@@ -118,7 +131,11 @@ fn entries() -> Vec<Entry> {
 /// The SPARQL form of a term, blank nodes as variables.
 fn pattern_term(t: &Term) -> String {
     match t {
-        Term::BlankNode(b) => format!("?b{}", b.as_str().replace(|c: char| !c.is_ascii_alphanumeric(), "_")),
+        Term::BlankNode(b) => format!(
+            "?b{}",
+            b.as_str()
+                .replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+        ),
         other => other.to_string(),
     }
 }
@@ -129,7 +146,12 @@ fn entails(store: &TripleStore, graph: &[Triple]) -> Result<bool, String> {
         .iter()
         .map(|t| {
             let s: Term = t.subject.clone().into();
-            format!("{} {} {} .\n", pattern_term(&s), t.predicate, pattern_term(&t.object))
+            format!(
+                "{} {} {} .\n",
+                pattern_term(&s),
+                t.predicate,
+                pattern_term(&t.object)
+            )
         })
         .collect();
     match store
@@ -169,7 +191,9 @@ fn run(e: &Entry) -> Result<(), String> {
         let mut detail = String::new();
         // With OTS_TEST_W3C_RDF_MT_EXPLAIN set: the result triples that do not
         // match one by one (at most five).
-        if let (Some(result), Some(_)) = (&e.result, std::env::var_os("OTS_TEST_W3C_RDF_MT_EXPLAIN")) {
+        if let (Some(result), Some(_)) =
+            (&e.result, std::env::var_os("OTS_TEST_W3C_RDF_MT_EXPLAIN"))
+        {
             let graph = parse(result)?;
             let missing: Vec<String> = graph
                 .iter()
@@ -179,9 +203,15 @@ fn run(e: &Entry) -> Result<(), String> {
                 .collect();
             detail = format!(": unmatched {missing:?}");
         }
-        Err(format!("{} regime: the result is not entailed{detail}", e.regime))
+        Err(format!(
+            "{} regime: the result is not entailed{detail}",
+            e.regime
+        ))
     } else {
-        Err(format!("{} regime: the result is entailed but must not be", e.regime))
+        Err(format!(
+            "{} regime: the result is entailed but must not be",
+            e.regime
+        ))
     }
 }
 
@@ -194,7 +224,10 @@ fn w3c_rdf_mt_manifest_entries() {
     assert_eq!(entries.len(), ENTRIES);
     for (id, why) in KNOWN_FAILURES {
         assert!(!why.is_empty(), "{id} needs a reason");
-        assert!(entries.iter().any(|e| &e.name == id), "{id} is not an entry");
+        assert!(
+            entries.iter().any(|e| &e.name == id),
+            "{id} is not an entry"
+        );
     }
 }
 
@@ -211,7 +244,14 @@ fn w3c_rdf_mt_suite() {
             Err(_) => {}
         }
     }
-    assert!(unexpected.is_empty(), "cases outside KNOWN_FAILURES fail:\n{}", unexpected.join("\n"));
-    assert!(fixed.is_empty(), "KNOWN_FAILURES entries now pass, remove them: {fixed:?}");
+    assert!(
+        unexpected.is_empty(),
+        "cases outside KNOWN_FAILURES fail:\n{}",
+        unexpected.join("\n")
+    );
+    assert!(
+        fixed.is_empty(),
+        "KNOWN_FAILURES entries now pass, remove them: {fixed:?}"
+    );
     assert!(passed >= PASS_FLOOR, "pass floor: {passed} < {PASS_FLOOR}");
 }

@@ -32,4 +32,17 @@ prints the conclusion triples a failing case does not match.
 
 ## Known gaps
 
-<!-- filled from the runner's KNOWN_FAILURES -->
+Every known failure of the OWL 2 corpus is a positive entailment case whose conclusion the
+RL/RDF rules do not derive; the engine computes the rules' closure exactly (the differential
+test), so these are limits of the rule set rather than of the implementation. The runner's
+`KNOWN_FAILURES` list gives each case its reason; they fall into these groups:
+
+| Group | Cases | Why the rules do not derive it |
+|---|---|---|
+| `owl:differentFrom` / `owl:AllDifferent` conclusions | `owl2-rl-rules-fp-differentFrom`, `owl2-rl-rules-ifp-differentFrom`, `WebOnt-differentFrom-001`, `New-Feature-DisjointObjectProperties-001/002`, `New-Feature-DisjointDataProperties-002` | no RL/RDF rule concludes `owl:differentFrom` (not even its symmetry) or `owl:AllDifferent` |
+| New class expressions | `DisjointClasses-001/003`, `New-Feature-ObjectQCR-002`, `WebOnt-I5.5-005` | the conclusion uses a complement or union the premise does not contain; the rules introduce no class expressions (Theorem PR1 covers assertions) |
+| Schema conclusions outside the rules | `chain2trans1` (`owl:TransitiveProperty` from a chain), `WebOnt-I5.26-010` (an `owl:minCardinality` restriction), `WebOnt-I5.8-006/008/009` (datatype ranges from datatype intersections) | no rule concludes these axioms |
+| Outside the profile | `New-Feature-ReflexiveProperty-001` | `owl:ReflexiveProperty` is not OWL 2 RL |
+| Annotations in the conclusion | `WebOnt-I4.6-005-Direct`, `WebOnt-equivalentClass-008-Direct` | the conclusion carries an annotation the premise lacks; annotations have no Direct Semantics meaning, but the runner matches triples |
+
+Cases without an RDF/XML premise or conclusion are skipped by the runner.

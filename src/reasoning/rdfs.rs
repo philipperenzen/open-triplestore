@@ -49,29 +49,69 @@ type Rule = (&'static str, &'static str, &'static str);
 const SCHEMA_RULES: &[Rule] = &[
     ("rdfs2", "?x rdf:type ?c", "?p rdfs:domain ?c . ?x ?p ?y"),
     // A literal object would be a literal subject: not an RDF triple.
-    ("rdfs3", "?y rdf:type ?c", "?p rdfs:range ?c . ?x ?p ?y . FILTER(!isLiteral(?y))"),
-    ("rdfs5", "?p rdfs:subPropertyOf ?r", "?p rdfs:subPropertyOf ?q . ?q rdfs:subPropertyOf ?r"),
-    ("rdfs6", "?p rdfs:subPropertyOf ?p", "?p rdf:type rdf:Property"),
+    (
+        "rdfs3",
+        "?y rdf:type ?c",
+        "?p rdfs:range ?c . ?x ?p ?y . FILTER(!isLiteral(?y))",
+    ),
+    (
+        "rdfs5",
+        "?p rdfs:subPropertyOf ?r",
+        "?p rdfs:subPropertyOf ?q . ?q rdfs:subPropertyOf ?r",
+    ),
+    (
+        "rdfs6",
+        "?p rdfs:subPropertyOf ?p",
+        "?p rdf:type rdf:Property",
+    ),
     // `?p = ?q` would only restate the premise.
-    ("rdfs7", "?x ?q ?y", "?p rdfs:subPropertyOf ?q . ?x ?p ?y . FILTER(?p != ?q)"),
-    ("rdfs8", "?c rdfs:subClassOf rdfs:Resource", "?c rdf:type rdfs:Class"),
-    ("rdfs9", "?x rdf:type ?d", "?c rdfs:subClassOf ?d . ?x rdf:type ?c . FILTER(?c != ?d)"),
+    (
+        "rdfs7",
+        "?x ?q ?y",
+        "?p rdfs:subPropertyOf ?q . ?x ?p ?y . FILTER(?p != ?q)",
+    ),
+    (
+        "rdfs8",
+        "?c rdfs:subClassOf rdfs:Resource",
+        "?c rdf:type rdfs:Class",
+    ),
+    (
+        "rdfs9",
+        "?x rdf:type ?d",
+        "?c rdfs:subClassOf ?d . ?x rdf:type ?c . FILTER(?c != ?d)",
+    ),
     ("rdfs10", "?c rdfs:subClassOf ?c", "?c rdf:type rdfs:Class"),
-    ("rdfs11", "?c rdfs:subClassOf ?e", "?c rdfs:subClassOf ?d . ?d rdfs:subClassOf ?e"),
+    (
+        "rdfs11",
+        "?c rdfs:subClassOf ?e",
+        "?c rdfs:subClassOf ?d . ?d rdfs:subClassOf ?e",
+    ),
     (
         "rdfs12",
         "?p rdfs:subPropertyOf rdfs:member",
         "?p rdf:type rdfs:ContainerMembershipProperty",
     ),
-    ("rdfs13", "?d rdfs:subClassOf rdfs:Literal", "?d rdf:type rdfs:Datatype"),
+    (
+        "rdfs13",
+        "?d rdfs:subClassOf rdfs:Literal",
+        "?d rdf:type rdfs:Datatype",
+    ),
 ];
 
 /// The patterns with a single unrestricted premise: each scans every triple
 /// in scope, so they run only when the schema rules have reached their fixed
 /// point, and the loop goes on while they add anything.
 const DATA_RULES: &[Rule] = &[
-    ("rdfD2", "?p rdf:type rdf:Property", "{ SELECT DISTINCT ?p WHERE { ?s ?p ?o } }"),
-    ("rdfs4a", "?x rdf:type rdfs:Resource", "{ SELECT DISTINCT ?x WHERE { ?x ?p ?y } }"),
+    (
+        "rdfD2",
+        "?p rdf:type rdf:Property",
+        "{ SELECT DISTINCT ?p WHERE { ?s ?p ?o } }",
+    ),
+    (
+        "rdfs4a",
+        "?x rdf:type rdfs:Resource",
+        "{ SELECT DISTINCT ?x WHERE { ?x ?p ?y } }",
+    ),
     (
         "rdfs4b",
         "?y rdf:type rdfs:Resource",
@@ -115,7 +155,15 @@ pub(crate) fn axiomatic_triples(max_member: u32) -> Vec<(String, String, String)
     let t = |s: &str, p: &str, o: &str| (expand(s), expand(p), expand(o));
     let mut out = Vec::new();
     // RDF: the vocabulary properties, and rdf:nil.
-    for local in ["type", "subject", "predicate", "object", "first", "rest", "value"] {
+    for local in [
+        "type",
+        "subject",
+        "predicate",
+        "object",
+        "first",
+        "rest",
+        "value",
+    ] {
         out.push(t(&format!("rdf:{local}"), "rdf:type", "rdf:Property"));
     }
     out.push(t("rdf:nil", "rdf:type", "rdf:List"));
@@ -127,7 +175,11 @@ pub(crate) fn axiomatic_triples(max_member: u32) -> Vec<(String, String, String)
     for c in ["rdf:Alt", "rdf:Bag", "rdf:Seq"] {
         out.push(t(c, "rdfs:subClassOf", "rdfs:Container"));
     }
-    out.push(t("rdfs:ContainerMembershipProperty", "rdfs:subClassOf", "rdf:Property"));
+    out.push(t(
+        "rdfs:ContainerMembershipProperty",
+        "rdfs:subClassOf",
+        "rdf:Property",
+    ));
     out.push(t("rdfs:Datatype", "rdfs:subClassOf", "rdfs:Class"));
     out.push(t("rdfs:isDefinedBy", "rdfs:subPropertyOf", "rdfs:seeAlso"));
     for n in 1..=max_member {
@@ -353,7 +405,11 @@ impl<'a> RdfsMaterializer<'a> {
     }
 
     /// A SELECT over the same graphs the patterns read.
-    fn rows(&self, sparql: &str, vars: &[&str]) -> Result<Vec<Vec<Option<oxigraph::model::Term>>>, ReasoningError> {
+    fn rows(
+        &self,
+        sparql: &str,
+        vars: &[&str],
+    ) -> Result<Vec<Vec<Option<oxigraph::model::Term>>>, ReasoningError> {
         let res = match self.scope() {
             Some(scope) => self.store.query_scoped(sparql, &scope),
             None => self
@@ -422,21 +478,29 @@ impl<'a> RdfsMaterializer<'a> {
             }
         }
         // A resource typed with two recognized datatypes whose value spaces
-        // are disjoint (xsd:integer and xsd:string) can denote no value.
+        // are disjoint (xsd:integer and xsd:string) can denote no value; nor
+        // can a datatype be a subclass of one disjoint from it (every
+        // datatype here has values).
         let q = format!(
-            "SELECT DISTINCT ?d1 ?d2 WHERE {{ ?x <{RDF_NS}type> ?d1 . \
-             FILTER(STRSTARTS(STR(?d1), \"http://www.w3.org/2001/XMLSchema#\")) \
-             ?x <{RDF_NS}type> ?d2 . FILTER(STR(?d1) < STR(?d2)) }}"
+            "SELECT DISTINCT ?d1 ?d2 WHERE {{ \
+             {{ ?x <{RDF_NS}type> ?d1 . \
+                FILTER(STRSTARTS(STR(?d1), \"http://www.w3.org/2001/XMLSchema#\")) \
+                ?x <{RDF_NS}type> ?d2 . FILTER(STR(?d1) < STR(?d2)) }} \
+             UNION {{ ?d1 <{RDFS_NS}subClassOf> ?d2 . \
+                FILTER(STRSTARTS(STR(?d1), \"http://www.w3.org/2001/XMLSchema#\")) }} }}"
         );
         for r in self.rows(&q, &["d1", "d2"])? {
             let (Some(Term::NamedNode(a)), Some(Term::NamedNode(b))) = (&r[0], &r[1]) else {
                 continue;
             };
-            if let (Some(x), Some(y)) = (Dt::from_any_iri(a.as_str()), Dt::from_any_iri(b.as_str())) {
+            if let (Some(x), Some(y)) = (Dt::from_any_iri(a.as_str()), Dt::from_any_iri(b.as_str()))
+            {
                 if x.disjoint(y) {
                     return Err(ReasoningError::inconsistency(
                         "datatype-clash",
-                        format!("a resource is typed with the disjoint datatypes {a} and {b}"),
+                        format!(
+                            "the disjoint datatypes {a} and {b} share an instance or a subclass"
+                        ),
                     ));
                 }
             }
@@ -451,9 +515,8 @@ impl<'a> RdfsMaterializer<'a> {
              INSERT {{ GRAPH <{tg}> {{ {head} }} }} WHERE {{ {body} }}",
             tg = self.target_graph
         );
-        self.run_update(&q).map_err(|e| {
-            ReasoningError::Query(format!("RDFS pattern {name}: {e}"))
-        })
+        self.run_update(&q)
+            .map_err(|e| ReasoningError::Query(format!("RDFS pattern {name}: {e}")))
     }
 }
 
