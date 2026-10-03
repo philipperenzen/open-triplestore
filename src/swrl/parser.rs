@@ -18,6 +18,10 @@
 //! - `DataPropertyAtom`
 //! - `SameIndividualAtom` / `DifferentIndividualsAtom`
 //! - `BuiltInAtom` (the OWL API spelling) and `BuiltinAtom`
+//! - `ClassAtom` over any OWL 2 class expression (`ObjectIntersectionOf`,
+//!   `ObjectSomeValuesFrom`, `DataHasValue`, …) and `DataRangeAtom` over any
+//!   data range (`Datatype`, `DataOneOf`, `DatatypeRestriction`, …), read as
+//!   expression trees
 //!
 //! Arguments are `Variable`, `NamedIndividual` and `Literal` (typed,
 //! language-tagged or plain), each checked against its position: an
@@ -25,9 +29,9 @@
 //! belongs, is refused. IRIs are given as `IRI` (relative ones resolve against
 //! `xml:base`) or `abbreviatedIRI` (expanded with the document's `Prefix`
 //! declarations; `rdf:`, `rdfs:`, `xsd:`, `owl:`, `swrl:` and `swrlb:` are
-//! predeclared). Refused with a message until later work supports them:
-//! class-expression atoms (a `ClassAtom` over anything but a named class),
-//! `DataRangeAtom` and anonymous individuals. Elements outside a `DLSafeRule`
+//! predeclared). Anonymous individuals are refused with a message, and so is
+//! any element of an expression the reader does not know. Elements outside a
+//! `DLSafeRule`
 //! (the rest of an ontology) are ignored, and so is a rule's `Annotation`;
 //! an `Imp` element is pointed at the reader for its syntax.
 //!
@@ -52,7 +56,8 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 use tracing::debug;
 
-use super::engine::{validate_predicate_iri, Atom, SwrlArg, SwrlRule};
+use super::engine::{constant_term, validate_predicate_iri, Atom, SwrlArg, SwrlRule};
+use super::expr::{CardKind, ClassExpr, DataRange, PropExpr};
 use super::names::Names;
 
 /// `rdf:PlainLiteral`: OWL 2's plain literal, lexical form `text@lang`.
@@ -106,6 +111,7 @@ enum AtomKind {
     SameIndividual,
     DifferentIndividuals,
     Builtin,
+    DataRange,
 }
 
 impl AtomKind {
@@ -119,6 +125,7 @@ impl AtomKind {
             // The OWL API and Protégé write `BuiltInAtom`; `BuiltinAtom` is
             // accepted as well, as earlier releases of this reader read only it.
             "BuiltInAtom" | "BuiltinAtom" => AtomKind::Builtin,
+            "DataRangeAtom" => AtomKind::DataRange,
             _ => return None,
         })
     }
@@ -128,6 +135,7 @@ impl AtomKind {
         use ArgSort::*;
         let sorts: &[ArgSort] = match self {
             AtomKind::Class => &[Individual],
+            AtomKind::DataRange => &[Data],
             AtomKind::ObjectProperty
             | AtomKind::SameIndividual
             | AtomKind::DifferentIndividuals => &[Individual, Individual],
@@ -154,6 +162,10 @@ struct AtomBuilder {
     predicate: Option<String>,
     /// `ObjectInverseOf(p)`: the arguments are swapped when the atom is built.
     inverse: bool,
+    /// A `ClassAtom`'s class expression (other than a named class).
+    expr: Option<ClassExpr>,
+    /// A `DataRangeAtom`'s data range.
+    range: Option<DataRange>,
     args: Vec<SwrlArg>,
 }
 
@@ -171,7 +183,11 @@ impl AtomBuilder {
                 args: self.args,
             });
         }
-        let wanted = if self.kind == AtomKind::Class { 1 } else { 2 };
+        let wanted = if matches!(self.kind, AtomKind::Class | AtomKind::DataRange) {
+            1
+        } else {
+            2
+        };
         if self.args.len() != wanted {
             return Err(format!(
                 "{el} needs {wanted} argument(s), found {}",
@@ -182,6 +198,14 @@ impl AtomBuilder {
         let (a, b) = (args.next(), args.next());
         let a = a.expect("arity checked above");
         Ok(match self.kind {
+            AtomKind::Class if self.expr.is_some() => Atom::ClassExpressionAtom {
+                expr: self.expr.expect("checked"),
+                arg: a,
+            },
+            AtomKind::DataRange => Atom::DataRangeAtom {
+                range: self.range.ok_or("DataRangeAtom missing its data range")?,
+                arg: a,
+            },
             AtomKind::Class => {
                 let class_iri = self.predicate.ok_or("ClassAtom missing class IRI")?;
                 validate_predicate_iri(&class_iri, "class")?;
@@ -263,6 +287,18 @@ enum Frame {
     },
     /// An element that may hold nothing (`Class`, `Variable`, …).
     Leaf(String),
+    /// An element of a class expression or data range, read whole and
+    /// converted when it closes.
+    Tree(XmlNode),
+}
+
+/// An element read as a tree.
+#[derive(Debug, Clone, Default)]
+pub(super) struct XmlNode {
+    pub(super) name: String,
+    pub(super) attrs: HashMap<String, String>,
+    pub(super) children: Vec<XmlNode>,
+    pub(super) text: String,
 }
 
 #[derive(Default)]
@@ -340,15 +376,10 @@ impl OwlXmlRuleParser {
                             element: name,
                             predicate,
                             inverse: false,
+                            expr: None,
+                            range: None,
                             args: Vec::new(),
                         })
-                    }
-                    None if name == "DataRangeAtom" => {
-                        return Err(
-                            "DataRangeAtom is not supported yet; refusing the document rather \
-                             than running its rule without that condition"
-                                .to_string(),
-                        )
                     }
                     None => {
                         return Err(format!(
@@ -381,6 +412,11 @@ impl OwlXmlRuleParser {
             Some(Frame::Leaf(parent)) => {
                 return Err(format!("Unexpected element <{name}> inside <{parent}>"))
             }
+            Some(Frame::Tree(_)) => Frame::Tree(XmlNode {
+                name: name.clone(),
+                attrs: attrs.clone(),
+                ..XmlNode::default()
+            }),
         };
         self.stack.push(frame);
         Ok(())
@@ -416,6 +452,18 @@ impl OwlXmlRuleParser {
                     return Err("ObjectInverseOf must hold exactly one ObjectProperty".to_string());
                 }
             }
+            Some(Frame::Tree(node)) => match self.stack.last_mut() {
+                Some(Frame::Tree(parent)) => parent.children.push(node),
+                Some(Frame::Atom(atom)) => {
+                    let names = &self.names;
+                    if atom.kind == AtomKind::DataRange {
+                        atom.range = Some(xml_range(names, &node)?);
+                    } else {
+                        atom.expr = Some(xml_class(names, &node)?);
+                    }
+                }
+                _ => unreachable!("an expression tree is only opened inside an atom"),
+            },
             Some(Frame::Literal {
                 value,
                 datatype,
@@ -438,6 +486,10 @@ impl OwlXmlRuleParser {
                 value.push_str(text);
                 Ok(())
             }
+            Some(Frame::Tree(node)) => {
+                node.text.push_str(text);
+                Ok(())
+            }
             None | Some(Frame::Outside) | Some(Frame::Skip) => Ok(()),
             Some(_) if text.trim().is_empty() => Ok(()),
             Some(_) => Err(format!(
@@ -458,7 +510,27 @@ fn open_in_atom(
     attrs: &HashMap<String, String>,
 ) -> Result<Frame, String> {
     let el = atom.element.clone();
-    if atom.kind.has_predicate_element() && atom.predicate.is_none() {
+    // A DataRangeAtom's range, or a ClassAtom's class expression, is read as
+    // a tree.
+    if atom.kind == AtomKind::DataRange && atom.range.is_none() && atom.args.is_empty() {
+        return Ok(Frame::Tree(XmlNode {
+            name: name.to_string(),
+            attrs: attrs.clone(),
+            ..XmlNode::default()
+        }));
+    }
+    if atom.kind == AtomKind::Class
+        && atom.predicate.is_none()
+        && atom.expr.is_none()
+        && (name.starts_with("Object") || name.starts_with("Data"))
+    {
+        return Ok(Frame::Tree(XmlNode {
+            name: name.to_string(),
+            attrs: attrs.clone(),
+            ..XmlNode::default()
+        }));
+    }
+    if atom.kind.has_predicate_element() && atom.predicate.is_none() && atom.expr.is_none() {
         let expected = match atom.kind {
             AtomKind::Class => "Class",
             AtomKind::ObjectProperty => "ObjectProperty",
@@ -471,14 +543,6 @@ fn open_in_atom(
         if atom.kind == AtomKind::ObjectProperty && name == "ObjectInverseOf" {
             atom.inverse = true;
             return Ok(Frame::InverseOf);
-        }
-        if atom.kind == AtomKind::Class && (name.starts_with("Object") || name.starts_with("Data"))
-        {
-            return Err(format!(
-                "ClassAtom over the class expression <{name}> is not supported yet; only a \
-                 named <Class> is. Refusing the document rather than reading the expression \
-                 as a different condition"
-            ));
         }
         return Err(format!("{el} must start with <{expected}>, found <{name}>"));
     }
@@ -524,6 +588,227 @@ fn open_in_atom(
         )),
         _ => Err(format!("Unexpected element <{name}> as {position}")),
     }
+}
+
+/// The children of `node` that are elements, refusing more or fewer than
+/// `n` (when given).
+fn kids(node: &XmlNode, n: Option<usize>) -> Result<&[XmlNode], String> {
+    if let Some(n) = n {
+        if node.children.len() != n {
+            return Err(format!(
+                "<{}> takes {n} element(s), found {}",
+                node.name,
+                node.children.len()
+            ));
+        }
+    }
+    Ok(&node.children)
+}
+
+fn xml_iri(names: &Names, node: &XmlNode, element: &str) -> Result<String, String> {
+    if node.name != element {
+        return Err(format!("expected <{element}>, found <{}>", node.name));
+    }
+    iri_attr(names, &node.attrs, element)
+}
+
+fn xml_prop(names: &Names, node: &XmlNode) -> Result<PropExpr, String> {
+    match node.name.as_str() {
+        "ObjectProperty" => Ok(PropExpr::Named(iri_attr(
+            names,
+            &node.attrs,
+            "ObjectProperty",
+        )?)),
+        "ObjectInverseOf" => {
+            let k = kids(node, Some(1))?;
+            Ok(PropExpr::Inverse(xml_iri(names, &k[0], "ObjectProperty")?))
+        }
+        other => Err(format!("expected an object property, found <{other}>")),
+    }
+}
+
+fn xml_literal(names: &Names, node: &XmlNode) -> Result<oxigraph::model::Literal, String> {
+    if node.name != "Literal" {
+        return Err(format!("expected <Literal>, found <{}>", node.name));
+    }
+    let arg = literal_arg(
+        node.text.clone(),
+        node.attrs.get("datatypeIRI").map(|d| names.resolve(d)),
+        node.attrs.get("xml:lang").cloned(),
+    );
+    match constant_term(&arg)? {
+        oxigraph::model::Term::Literal(l) => Ok(l),
+        _ => unreachable!("a literal argument is a literal"),
+    }
+}
+
+fn xml_cardinality(node: &XmlNode) -> Result<u64, String> {
+    node.attrs
+        .get("cardinality")
+        .and_then(|c| c.trim().parse().ok())
+        .ok_or_else(|| format!("<{}> needs a cardinality attribute", node.name))
+}
+
+/// An OWL/XML class expression.
+fn xml_class(names: &Names, node: &XmlNode) -> Result<ClassExpr, String> {
+    let name = node.name.as_str();
+    let card = |prefix: &str| match &name[prefix.len()..name.len() - "Cardinality".len()] {
+        "Min" => CardKind::Min,
+        "Max" => CardKind::Max,
+        _ => CardKind::Exact,
+    };
+    Ok(match name {
+        "Class" => ClassExpr::Named(iri_attr(names, &node.attrs, "Class")?),
+        "ObjectIntersectionOf" | "ObjectUnionOf" => {
+            let xs = kids(node, None)?
+                .iter()
+                .map(|k| xml_class(names, k))
+                .collect::<Result<Vec<_>, _>>()?;
+            if name == "ObjectIntersectionOf" {
+                ClassExpr::IntersectionOf(xs)
+            } else {
+                ClassExpr::UnionOf(xs)
+            }
+        }
+        "ObjectComplementOf" => {
+            ClassExpr::ComplementOf(Box::new(xml_class(names, &kids(node, Some(1))?[0])?))
+        }
+        "ObjectOneOf" => ClassExpr::OneOf(
+            kids(node, None)?
+                .iter()
+                .map(|k| xml_iri(names, k, "NamedIndividual"))
+                .collect::<Result<_, _>>()?,
+        ),
+        "ObjectSomeValuesFrom" | "ObjectAllValuesFrom" => {
+            let k = kids(node, Some(2))?;
+            let p = xml_prop(names, &k[0])?;
+            let c = Box::new(xml_class(names, &k[1])?);
+            if name == "ObjectSomeValuesFrom" {
+                ClassExpr::SomeValuesFrom(p, c)
+            } else {
+                ClassExpr::AllValuesFrom(p, c)
+            }
+        }
+        "ObjectHasValue" => {
+            let k = kids(node, Some(2))?;
+            ClassExpr::HasValue(
+                xml_prop(names, &k[0])?,
+                xml_iri(names, &k[1], "NamedIndividual")?,
+            )
+        }
+        "ObjectHasSelf" => ClassExpr::HasSelf(xml_prop(names, &kids(node, Some(1))?[0])?),
+        "ObjectMinCardinality" | "ObjectMaxCardinality" | "ObjectExactCardinality" => {
+            let k = kids(node, None)?;
+            if k.is_empty() || k.len() > 2 {
+                return Err(format!("<{name}> takes a property and an optional class"));
+            }
+            ClassExpr::Cardinality {
+                kind: card("Object"),
+                n: xml_cardinality(node)?,
+                prop: xml_prop(names, &k[0])?,
+                filler: k
+                    .get(1)
+                    .map(|c| xml_class(names, c).map(Box::new))
+                    .transpose()?,
+            }
+        }
+        "DataSomeValuesFrom" | "DataAllValuesFrom" => {
+            let k = kids(node, Some(2))
+                .map_err(|_| format!("<{name}> over several data properties is not supported"))?;
+            let p = xml_iri(names, &k[0], "DataProperty")?;
+            let r = xml_range(names, &k[1])?;
+            if name == "DataSomeValuesFrom" {
+                ClassExpr::DataSomeValuesFrom(p, r)
+            } else {
+                ClassExpr::DataAllValuesFrom(p, r)
+            }
+        }
+        "DataHasValue" => {
+            let k = kids(node, Some(2))?;
+            ClassExpr::DataHasValue(
+                xml_iri(names, &k[0], "DataProperty")?,
+                xml_literal(names, &k[1])?,
+            )
+        }
+        "DataMinCardinality" | "DataMaxCardinality" | "DataExactCardinality" => {
+            let k = kids(node, None)?;
+            if k.is_empty() || k.len() > 2 {
+                return Err(format!(
+                    "<{name}> takes a property and an optional data range"
+                ));
+            }
+            ClassExpr::DataCardinality {
+                kind: card("Data"),
+                n: xml_cardinality(node)?,
+                prop: xml_iri(names, &k[0], "DataProperty")?,
+                range: k.get(1).map(|r| xml_range(names, r)).transpose()?,
+            }
+        }
+        other => {
+            return Err(format!(
+                "Unknown class expression <{other}> in a ClassAtom; refusing the document \
+                 rather than reading the expression as a different condition"
+            ))
+        }
+    })
+}
+
+/// An OWL/XML data range.
+fn xml_range(names: &Names, node: &XmlNode) -> Result<DataRange, String> {
+    let name = node.name.as_str();
+    Ok(match name {
+        "Datatype" => DataRange::Datatype(iri_attr(names, &node.attrs, "Datatype")?),
+        "DataIntersectionOf" | "DataUnionOf" => {
+            let xs = kids(node, None)?
+                .iter()
+                .map(|k| xml_range(names, k))
+                .collect::<Result<Vec<_>, _>>()?;
+            if name == "DataIntersectionOf" {
+                DataRange::IntersectionOf(xs)
+            } else {
+                DataRange::UnionOf(xs)
+            }
+        }
+        "DataComplementOf" => {
+            DataRange::ComplementOf(Box::new(xml_range(names, &kids(node, Some(1))?[0])?))
+        }
+        "DataOneOf" => DataRange::OneOf(
+            kids(node, None)?
+                .iter()
+                .map(|k| xml_literal(names, k))
+                .collect::<Result<_, _>>()?,
+        ),
+        "DatatypeRestriction" => {
+            let k = kids(node, None)?;
+            let Some((dt, facets)) = k.split_first() else {
+                return Err("<DatatypeRestriction> needs a <Datatype>".to_string());
+            };
+            let dt = xml_iri(names, dt, "Datatype")?;
+            let facets = facets
+                .iter()
+                .map(|f| {
+                    if f.name != "FacetRestriction" {
+                        return Err(format!("expected <FacetRestriction>, found <{}>", f.name));
+                    }
+                    let facet = f
+                        .attrs
+                        .get("facet")
+                        .map(|i| names.resolve(i))
+                        .ok_or("<FacetRestriction> needs a facet attribute")?;
+                    Ok((facet, xml_literal(names, &kids(f, Some(1))?[0])?))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            if facets.is_empty() {
+                return Err("<DatatypeRestriction> without a <FacetRestriction>".to_string());
+            }
+            DataRange::Restriction(dt, facets)
+        }
+        other => {
+            return Err(format!(
+                "Unknown data range <{other}> in a DataRangeAtom; refusing the document"
+            ))
+        }
+    })
 }
 
 /// The IRI of a class, property, individual or built-in element: its `IRI`

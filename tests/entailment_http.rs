@@ -858,3 +858,103 @@ async fn swrl_and_rl_reach_joint_fixpoint() {
     // Queries opting in see the joint closure.
     assert_eq!(assets_inspected(&app, &token, "joint").await, 1);
 }
+
+/// Stored rules use built-ins and class expressions like any other rule:
+/// `swrlb:add` binds a value, and a class-expression body atom
+/// (`ObjectSomeValuesFrom(ex:inspectedBy ex:Engineer)`) becomes an auxiliary
+/// class the dataset's OWL 2 RL regime materialises, to one joint fixed point.
+/// Without a regime the class-expression rule is reported, not skipped.
+#[cfg(feature = "swrl")]
+#[tokio::test]
+async fn dataset_rules_with_builtins_and_class_expressions() {
+    let (state, token) = admin_state();
+    rules_dataset(&state, "blt");
+    state
+        .store
+        .load_str(
+            &format!(
+                "<{EX}b1> <{EX}age> 40 ; <{EX}inspectedBy> <{EX}eve> . \
+                 <{EX}eve> a <{EX}Engineer> . <{EX}b2> <{EX}age> 3 ."
+            ),
+            RdfFormat::Turtle,
+            Some(DATA),
+        )
+        .unwrap();
+    let rules = format!(
+        "{SWRL_TTL_PREFIXES} @prefix swrlb: <http://www.w3.org/2003/11/swrlb#> . \
+         @prefix owl: <http://www.w3.org/2002/07/owl#> . \
+         ex:x a swrl:Variable . ex:a a swrl:Variable . ex:n a swrl:Variable . \
+         ex:next a swrl:Imp ; \
+           swrl:body ( [ a swrl:DatavaluedPropertyAtom ; swrl:propertyPredicate ex:age ; \
+                         swrl:argument1 ex:x ; swrl:argument2 ex:a ] \
+                       [ a swrl:BuiltinAtom ; swrl:builtin swrlb:add ; \
+                         swrl:arguments ( ex:n ex:a 1 ) ] ) ; \
+           swrl:head ( [ a swrl:DatavaluedPropertyAtom ; swrl:propertyPredicate ex:nextAge ; \
+                         swrl:argument1 ex:x ; swrl:argument2 ex:n ] ) . \
+         ex:checked a swrl:Imp ; \
+           swrl:body ( [ a swrl:ClassAtom ; swrl:argument1 ex:x ; \
+                         swrl:classPredicate [ a owl:Restriction ; owl:onProperty ex:inspectedBy ; \
+                                               owl:someValuesFrom ex:Engineer ] ] ) ; \
+           swrl:head ( [ a swrl:ClassAtom ; swrl:classPredicate ex:Inspected ; swrl:argument1 ex:x ] ) ."
+    );
+    state
+        .store
+        .load_str(&rules, RdfFormat::Turtle, Some(RULES))
+        .unwrap();
+    let app = test_app(state.clone());
+
+    let (st, v, txt) = req(
+        &app,
+        Method::PUT,
+        "/api/datasets/blt/entailment",
+        Some(&token),
+        Some("application/json"),
+        &json!({ "regime": "owl2-rl", "mode": "materialize" }).to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(v["rules"]["converged"], true, "{txt}");
+    let graph = "urn:entailment:owl2-rl:blt";
+    let holds = |q: String| {
+        matches!(
+            state.store.query(&q),
+            Ok(oxigraph::sparql::QueryResults::Boolean(true))
+        )
+    };
+    assert!(
+        holds(format!(
+            "ASK {{ GRAPH <{graph}> {{ <{EX}b1> <{EX}nextAge> ?n FILTER(?n = 41) }} }}"
+        )),
+        "swrlb:add binds ?n: {txt}"
+    );
+    assert!(
+        holds(format!(
+            "ASK {{ GRAPH <{graph}> {{ <{EX}b1> a <{EX}Inspected> }} }}"
+        )),
+        "b1 is inspected by an Engineer, which RL derives through the auxiliary class: {txt}"
+    );
+    assert!(
+        !holds(format!(
+            "ASK {{ GRAPH <{graph}> {{ <{EX}b2> a <{EX}Inspected> }} }}"
+        )),
+        "{txt}"
+    );
+
+    // With the regime off, the class-expression rule cannot run: reported.
+    let (st, v, txt) = req(
+        &app,
+        Method::PUT,
+        "/api/datasets/blt/entailment",
+        Some(&token),
+        Some("application/json"),
+        &json!({ "regime": "owl2-rl", "mode": "off" }).to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert!(
+        v["rules"]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("regime")),
+        "{txt}"
+    );
+}

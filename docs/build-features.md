@@ -16,7 +16,7 @@ image no matter what the docs say about its knobs.
 | `owl2-rl`, `owl2-el`, `owl2-ql`, `owl2-dl` | OWL 2 profile reasoners; `owl2-dl` adds the DL backends (native rules, Konclude, the client for the bundled OWL API + HermiT reasoner sidecar), the OWL 2 DL profile check and `POST /api/reasoning/check` | yes | GitHub, GitLab |
 | `text-search`, `vocab-search` | Tantivy full-text index; vocabulary index | yes | GitHub, GitLab |
 | `ldp` | Linked Data Platform 1.0 at `/ldp/` | yes | GitHub, GitLab |
-| `shex`, `swrl` | ShEx validation; SWRL rule execution (both graded *Partial*, see [standards](standards.md)) | yes | GitHub, GitLab |
+| `shex`, `swrl` | ShEx validation (graded *Partial*); SWRL rule execution (graded *Full*), see [standards](standards.md) | yes | GitHub, GitLab |
 | `geometry3d` | 3D geometry (parry3d) for the viewer and OGC API endpoints | yes | GitHub, GitLab |
 | `sfcgal3d` | SFCGAL-backed 3D operations (needs native SFCGAL ≥ 2.0) | **no** | GitLab only (`--all-features`); not in the image |
 | `backup-encrypt` | age-encrypted backups (`BACKUP_ENCRYPT`) | yes | GitHub, GitLab |

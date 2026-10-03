@@ -201,6 +201,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   most that many features, the first in IRI order. A capped tileset reports
   `asset.extras.truncated` (`served`, `total`, `maxFeatures`), the GLB an
   `X-Tiles3d-Truncated: served/total` header, and the server logs a warning.
+- **SWRL: every §8 built-in, data ranges and class expressions — graded Full.**
+  - **Built-ins.** All 79 `swrlb:` built-ins of the SWRL submission §8
+    (comparisons, math, boolean, strings, dates/times/durations, URIs, lists)
+    are evaluated natively, and they bind variables: `swrlb:add(?z, ?x, 1)`
+    computes `?z`, the date/duration/URI constructors split a bound value
+    into its components, `tokenize`, `member` and `sublist` bind one value
+    per solution, and `add`/`subtract`/`unaryPlus`/`unaryMinus`/`booleanNot`/
+    `equal` solve for one unbound operand. A pattern with infinitely many
+    solutions is refused with `400`, naming the built-in. Constructed lists
+    are minted as deterministic `urn:ots:swrl:list:<hash>` nodes.
+  - **`DataRangeAtom`** is evaluated natively: datatypes by value space,
+    facets, `DataOneOf` (which also enumerates), union, intersection,
+    complement. Every syntax reads it (`xsd:integer(?v)` in SWRLAPI).
+  - **Class-expression atoms** become auxiliary classes
+    `urn:ots:swrl:aux:<hash>` equivalent to the expression, which the regime
+    the rules run with materialises. `POST /api/swrl/execute` takes a
+    `regime` that runs the rules and the regime to one joint fixed point
+    (response adds `regime`, `rounds`, `regime_triples`); stored dataset rules
+    use the dataset's regime.
+  - New reference page `docs/swrl.md` (`/docs/swrl`); the demo rules dataset
+    gains a rule with a binding built-in.
 - **SWRL reads five more rule syntaxes and runs over datasets.**
   - **Syntaxes.** `POST /api/swrl/execute` now takes every `format` below.
     - `rdf`: the SWRL RDF syntax (`swrl:Imp` with argument lists), in any
@@ -902,6 +923,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   SPARQL 1.2 suite passes except `grouping#group01`, which needs numeric lexical
   forms kept in storage. SPARQL 1.2 stays *Partial* in `docs/standards.md`, now
   waiting only on that change (`docs/conformance/sparql12.md`).
+- **SWRL results change.** Rules that were refused now run: a built-in
+  variable bound only by a built-in (`swrlb:add(?z, ?x, 1)` → `?z` in the
+  head), any §8 built-in beyond the comparisons, arithmetic, `stringConcat`,
+  `contains` and `matches`, `DataRangeAtom`s, and class-expression atoms when
+  a regime runs with them. A rule with built-ins runs as a `SELECT` plus
+  native evaluation, so its `rule_results[].sparql` shows the `SELECT` and the
+  built-ins as comments. Comparisons now compare literals by value across
+  types (`1 = 1.0`). `docs/standards.md` grades SWRL Full (was Partial).
 - **SWRL rules stored with a dataset always run with it.** `swrl:Imp` rules
   in a dataset's `entailment`- and `model`-role graphs, and in the model
   version it conforms to, re-run after every write to one of the dataset's

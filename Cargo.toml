@@ -140,8 +140,9 @@ libc = "0.2"
 # (a mismatch splits e.g. oxrdf and breaks rdf-star feature unification).
 oxigraph = "0.5"
 oxrdf = "0.3"
-# XSD value types, the version Oxigraph itself uses: lexical-space checks for
-# R2RML's ill-typed literals, and the form an older store wrote typed literals in
+# XSD/XPath value types (numbers, dates, durations), the version Oxigraph
+# itself uses: the SWRL built-ins, lexical-space checks for R2RML's ill-typed
+# literals, and the form an older store wrote typed literals in
 # (data_models::content_digest).
 oxsdatatypes = "0.2"
 # Needed only to name `Iri` in the federation service-handler trait; already in the tree.

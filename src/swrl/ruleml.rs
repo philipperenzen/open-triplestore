@@ -19,18 +19,25 @@
 //! (`swrlx:builtin`). Arguments: `ruleml:var`, `owlx:Individual owlx:name`,
 //! `owlx:DataValue owlx:datatype`. Names resolve against `xml:base` when they
 //! are relative. Elements are matched by local name, as the namespace
-//! prefixes vary. A class description instead of a named `owlx:Class`, a
-//! `dataRangeAtom`, an unknown element, or a DTD entity (`&swrlb;`) refuses
-//! the document with a message naming it.
+//! prefixes vary.
+//!
+//! A `classAtom` may hold any class description of the OWL XML presentation
+//! syntax (`owlx:IntersectionOf`, `owlx:UnionOf`, `owlx:ComplementOf`,
+//! `owlx:OneOf`, `owlx:ObjectRestriction` and `owlx:DataRestriction` with
+//! `someValuesFrom`, `allValuesFrom`, `hasValue`, `cardinality`,
+//! `minCardinality`, `maxCardinality`), and a `datarangeAtom` an
+//! `owlx:Datatype` or an `owlx:OneOf` of data values. An unknown element, or a
+//! DTD entity (`&swrlb;`), refuses the document with a message naming it.
 
 use std::collections::HashMap;
 
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
-use super::engine::{Atom, SwrlArg, SwrlRule};
+use super::engine::{constant_term, Atom, SwrlArg, SwrlRule};
+use super::expr::{CardKind, ClassExpr, DataRange, PropExpr};
 use super::names::Names;
-use super::parser::{collect_attrs, local_name, resolve_general_ref};
+use super::parser::{collect_attrs, local_name, resolve_general_ref, XmlNode};
 
 /// Parse SWRL §4 RuleML XML rules.
 pub fn parse_swrl_ruleml(xml: &str) -> Result<Vec<SwrlRule>, String> {
@@ -66,6 +73,7 @@ enum Kind {
     SameIndividual,
     DifferentIndividuals,
     Builtin,
+    DataRange,
 }
 
 impl Kind {
@@ -77,6 +85,7 @@ impl Kind {
             "sameIndividualAtom" => Kind::SameIndividual,
             "differentIndividualsAtom" => Kind::DifferentIndividuals,
             "builtinAtom" => Kind::Builtin,
+            "datarangeAtom" | "dataRangeAtom" => Kind::DataRange,
             _ => return None,
         })
     }
@@ -86,6 +95,10 @@ struct AtomState {
     kind: Kind,
     element: String,
     predicate: Option<String>,
+    /// A class description other than a named class.
+    expr: Option<ClassExpr>,
+    /// A `datarangeAtom`'s range.
+    range: Option<DataRange>,
     args: Vec<SwrlArg>,
 }
 
@@ -108,6 +121,8 @@ enum Frame {
         datatype: Option<String>,
     },
     Leaf(String),
+    /// A class description or data range, read whole.
+    Tree(XmlNode),
 }
 
 #[derive(Default)]
@@ -190,15 +205,10 @@ impl RuleMlParser {
                             kind,
                             element: name,
                             predicate,
+                            expr: None,
+                            range: None,
                             args: Vec::new(),
                         })
-                    }
-                    None if name == "dataRangeAtom" => {
-                        return Err(
-                            "dataRangeAtom is not supported yet; refusing the document rather \
-                             than running its rule without that condition"
-                                .to_string(),
-                        )
                     }
                     None => {
                         return Err(format!(
@@ -209,15 +219,20 @@ impl RuleMlParser {
                 }
             }
             Some(Frame::Atom(atom)) => {
-                if atom.kind == Kind::Class && atom.predicate.is_none() {
-                    if name != "Class" {
-                        return Err(format!(
-                            "classAtom over the class description <{name}> is not supported \
-                             yet; only a named owlx:Class is"
-                        ));
-                    }
+                let slot_open = match atom.kind {
+                    Kind::Class => atom.predicate.is_none() && atom.expr.is_none(),
+                    Kind::DataRange => atom.range.is_none(),
+                    _ => false,
+                };
+                if slot_open && atom.args.is_empty() && name == "Class" {
                     atom.predicate = Some(named("name", &name)?);
                     Frame::Leaf(name)
+                } else if slot_open && atom.args.is_empty() {
+                    Frame::Tree(XmlNode {
+                        name: name.clone(),
+                        attrs: attrs.clone(),
+                        ..XmlNode::default()
+                    })
                 } else {
                     match name.as_str() {
                         "var" => Frame::Var(String::new()),
@@ -244,6 +259,11 @@ impl RuleMlParser {
             Some(Frame::Var(_)) | Some(Frame::DataValue { .. }) => {
                 return Err(format!("Unexpected element <{name}> inside a value"))
             }
+            Some(Frame::Tree(_)) => Frame::Tree(XmlNode {
+                name: name.clone(),
+                attrs: attrs.clone(),
+                ..XmlNode::default()
+            }),
         };
         self.stack.push(frame);
         Ok(())
@@ -280,6 +300,18 @@ impl RuleMlParser {
                 }
                 self.push_arg(SwrlArg::Variable(format!("?{name}")))?;
             }
+            Some(Frame::Tree(node)) => match self.stack.last_mut() {
+                Some(Frame::Tree(parent)) => parent.children.push(node),
+                Some(Frame::Atom(atom)) => {
+                    let names = &self.names;
+                    if atom.kind == Kind::DataRange {
+                        atom.range = Some(owlx_range(names, &node)?);
+                    } else {
+                        atom.expr = Some(owlx_class(names, &node)?);
+                    }
+                }
+                _ => unreachable!("a description is only opened inside an atom"),
+            },
             Some(Frame::DataValue { value, datatype }) => {
                 self.push_arg(SwrlArg::Literal {
                     value,
@@ -313,6 +345,10 @@ impl RuleMlParser {
                 value.push_str(text);
                 Ok(())
             }
+            Some(Frame::Tree(node)) => {
+                node.text.push_str(text);
+                Ok(())
+            }
             None | Some(Frame::Outside) => Ok(()),
             Some(_) if text.trim().is_empty() => Ok(()),
             Some(_) => Err(format!("Unexpected text '{}' inside a rule", text.trim())),
@@ -322,7 +358,7 @@ impl RuleMlParser {
 
 fn build(atom: AtomState) -> Result<Atom, String> {
     let wanted = match atom.kind {
-        Kind::Class => 1,
+        Kind::Class | Kind::DataRange => 1,
         Kind::Builtin => atom.args.len().max(1),
         _ => 2,
     };
@@ -335,6 +371,14 @@ fn build(atom: AtomState) -> Result<Atom, String> {
     let mut args = atom.args.into_iter();
     let mut next = move || args.next();
     Ok(match atom.kind {
+        Kind::Class if atom.expr.is_some() => Atom::ClassExpressionAtom {
+            expr: atom.expr.expect("checked"),
+            arg: next().expect("arity checked"),
+        },
+        Kind::DataRange => Atom::DataRangeAtom {
+            range: atom.range.ok_or("missing its data range")?,
+            arg: next().expect("arity checked"),
+        },
         Kind::Class => Atom::ClassAtom {
             class_iri: atom.predicate.ok_or("missing owlx:Class")?,
             arg: next().expect("arity checked"),
@@ -366,6 +410,159 @@ fn build(atom: AtomState) -> Result<Atom, String> {
                 builtin: atom.predicate.expect("read at open"),
                 args: all,
             }
+        }
+    })
+}
+
+/// An attribute of a tree node, by local name, resolved as a name.
+fn node_name(names: &Names, node: &XmlNode, what: &str) -> Result<String, String> {
+    attr(&node.attrs, what)
+        .map(|v| names.resolve(v))
+        .ok_or_else(|| format!("<{}> needs a {what} attribute", node.name))
+}
+
+fn data_value(names: &Names, node: &XmlNode) -> Result<oxigraph::model::Literal, String> {
+    if node.name != "DataValue" {
+        return Err(format!("expected <owlx:DataValue>, found <{}>", node.name));
+    }
+    let arg = SwrlArg::Literal {
+        value: node.text.clone(),
+        datatype: attr(&node.attrs, "datatype").map(|d| names.resolve(d)),
+        language: None,
+    };
+    match constant_term(&arg)? {
+        oxigraph::model::Term::Literal(l) => Ok(l),
+        _ => unreachable!("a literal argument is a literal"),
+    }
+}
+
+fn only_child(node: &XmlNode) -> Result<&XmlNode, String> {
+    match node.children.as_slice() {
+        [one] => Ok(one),
+        other => Err(format!(
+            "<{}> takes one element, found {}",
+            node.name,
+            other.len()
+        )),
+    }
+}
+
+fn restriction_count(node: &XmlNode) -> Result<u64, String> {
+    attr(&node.attrs, "value")
+        .and_then(|v| v.trim().parse().ok())
+        .ok_or_else(|| format!("<{}> needs a non-negative owlx:value", node.name))
+}
+
+/// An OWL XML presentation syntax class description.
+fn owlx_class(names: &Names, node: &XmlNode) -> Result<ClassExpr, String> {
+    let all = |n: &XmlNode| -> Result<Vec<ClassExpr>, String> {
+        n.children.iter().map(|c| owlx_class(names, c)).collect()
+    };
+    Ok(match node.name.as_str() {
+        "Class" => ClassExpr::Named(node_name(names, node, "name")?),
+        "IntersectionOf" => ClassExpr::IntersectionOf(all(node)?),
+        "UnionOf" => ClassExpr::UnionOf(all(node)?),
+        "ComplementOf" => ClassExpr::ComplementOf(Box::new(owlx_class(names, only_child(node)?)?)),
+        "OneOf" => ClassExpr::OneOf(
+            node.children
+                .iter()
+                .map(|c| {
+                    if c.name == "Individual" {
+                        node_name(names, c, "name")
+                    } else {
+                        Err(format!("expected <owlx:Individual>, found <{}>", c.name))
+                    }
+                })
+                .collect::<Result<_, _>>()?,
+        ),
+        "ObjectRestriction" => {
+            let p = node_name(names, node, "property")?;
+            let r = only_child(node)?;
+            match r.name.as_str() {
+                "someValuesFrom" => ClassExpr::SomeValuesFrom(
+                    PropExpr::Named(p),
+                    Box::new(owlx_class(names, only_child(r)?)?),
+                ),
+                "allValuesFrom" => ClassExpr::AllValuesFrom(
+                    PropExpr::Named(p),
+                    Box::new(owlx_class(names, only_child(r)?)?),
+                ),
+                "hasValue" => {
+                    let i = only_child(r)?;
+                    ClassExpr::HasValue(PropExpr::Named(p), node_name(names, i, "name")?)
+                }
+                k @ ("cardinality" | "minCardinality" | "maxCardinality") => {
+                    ClassExpr::Cardinality {
+                        kind: card(k),
+                        n: restriction_count(r)?,
+                        prop: PropExpr::Named(p),
+                        filler: None,
+                    }
+                }
+                other => {
+                    return Err(format!(
+                        "Unknown restriction <{other}> in an ObjectRestriction"
+                    ))
+                }
+            }
+        }
+        "DataRestriction" => {
+            let p = node_name(names, node, "property")?;
+            let r = only_child(node)?;
+            match r.name.as_str() {
+                "someValuesFrom" => {
+                    ClassExpr::DataSomeValuesFrom(p, owlx_range(names, only_child(r)?)?)
+                }
+                "allValuesFrom" => {
+                    ClassExpr::DataAllValuesFrom(p, owlx_range(names, only_child(r)?)?)
+                }
+                "hasValue" => ClassExpr::DataHasValue(p, data_value(names, only_child(r)?)?),
+                k @ ("cardinality" | "minCardinality" | "maxCardinality") => {
+                    ClassExpr::DataCardinality {
+                        kind: card(k),
+                        n: restriction_count(r)?,
+                        prop: p,
+                        range: None,
+                    }
+                }
+                other => {
+                    return Err(format!(
+                        "Unknown restriction <{other}> in a DataRestriction"
+                    ))
+                }
+            }
+        }
+        other => {
+            return Err(format!(
+                "Unknown class description <{other}> in a classAtom; refusing the document \
+                 rather than reading it as a different condition"
+            ))
+        }
+    })
+}
+
+fn card(k: &str) -> CardKind {
+    match k {
+        "minCardinality" => CardKind::Min,
+        "maxCardinality" => CardKind::Max,
+        _ => CardKind::Exact,
+    }
+}
+
+/// An `owlx:Datatype` or an `owlx:OneOf` of data values.
+fn owlx_range(names: &Names, node: &XmlNode) -> Result<DataRange, String> {
+    Ok(match node.name.as_str() {
+        "Datatype" => DataRange::Datatype(node_name(names, node, "name")?),
+        "OneOf" => DataRange::OneOf(
+            node.children
+                .iter()
+                .map(|c| data_value(names, c))
+                .collect::<Result<_, _>>()?,
+        ),
+        other => {
+            return Err(format!(
+                "Unknown data range <{other}> in a datarangeAtom; refusing the document"
+            ))
         }
     })
 }
@@ -421,6 +618,42 @@ mod tests {
     }
 
     #[test]
+    fn reads_class_descriptions_and_data_ranges() {
+        let doc = r#"<r xmlns:swrlx="s" xmlns:ruleml="r" xmlns:owlx="o"><ruleml:imp><ruleml:_body>
+            <swrlx:classAtom>
+              <owlx:ObjectRestriction owlx:property="http://ex/knows">
+                <owlx:someValuesFrom><owlx:Class owlx:name="http://ex/Person"/></owlx:someValuesFrom>
+              </owlx:ObjectRestriction>
+              <ruleml:var>x</ruleml:var>
+            </swrlx:classAtom>
+            <swrlx:datavaluedPropertyAtom swrlx:property="http://ex/age">
+              <ruleml:var>x</ruleml:var><ruleml:var>a</ruleml:var>
+            </swrlx:datavaluedPropertyAtom>
+            <swrlx:datarangeAtom>
+              <owlx:Datatype owlx:name="http://www.w3.org/2001/XMLSchema#integer"/>
+              <ruleml:var>a</ruleml:var>
+            </swrlx:datarangeAtom>
+          </ruleml:_body>
+          <ruleml:_head><swrlx:classAtom><owlx:Class owlx:name="http://ex/B"/><ruleml:var>x</ruleml:var></swrlx:classAtom></ruleml:_head></ruleml:imp></r>"#;
+        let rules = parse_swrl_ruleml(doc).unwrap();
+        let body = &rules[0].body;
+        assert!(matches!(
+            &body[0],
+            Atom::ClassExpressionAtom {
+                expr: ClassExpr::SomeValuesFrom(..),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &body[2],
+            Atom::DataRangeAtom {
+                range: DataRange::Datatype(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn refuses_what_it_cannot_read() {
         let wrap = |body: &str| {
             format!(
@@ -431,11 +664,11 @@ mod tests {
         let cases = [
             (
                 wrap(
-                    r#"<swrlx:classAtom><owlx:IntersectionOf/><ruleml:var>x</ruleml:var></swrlx:classAtom>"#,
+                    r#"<swrlx:classAtom><owlx:FancyOf/><ruleml:var>x</ruleml:var></swrlx:classAtom>"#,
                 ),
                 "class description",
             ),
-            (wrap(r#"<swrlx:dataRangeAtom/>"#), "dataRangeAtom"),
+            (wrap(r#"<swrlx:datarangeAtom/>"#), "needs 1 argument"),
             (wrap(r#"<swrlx:fancyAtom/>"#), "Unknown SWRL atom"),
             (
                 wrap(

@@ -258,13 +258,13 @@ reads whatever graphs it is given.
 
 ## SWRL rules
 
-Beyond the standard profiles, SWRL (Semantic Web Rule Language) Horn-clause rules derive new triples from custom *antecedent → consequent* patterns — useful for domain logic that doesn't fit an OWL profile. Submit rules to `POST /api/swrl/execute`.
+Beyond the standard profiles, SWRL (Semantic Web Rule Language) Horn-clause rules derive new triples from custom *antecedent → consequent* patterns — useful for domain logic that doesn't fit an OWL profile. Submit rules to `POST /api/swrl/execute`. [SWRL Rules](/docs/swrl) has the full reference: every atom, the §8 built-ins and their binding modes, data ranges, class expressions and the semantics.
 
 Rules come in six syntaxes, chosen with `format`:
 
 | `format` | Syntax | Notes |
 |---|---|---|
-| `text` (default) | `http://ex/A(?x) ^ http://ex/p(?x, ?y) -> http://ex/B(?y)` | Absolute IRIs only, no built-ins. |
+| `text` (default) | `http://ex/A(?x) ^ http://ex/p(?x, ?y) -> http://ex/B(?y)` | Absolute IRIs only; no built-ins, data ranges or class expressions. |
 | `xml` (or `owlxml`) | OWL/XML `DLSafeRule`, as the OWL API and Protégé write it | `Prefix` declarations, `abbreviatedIRI`, `xml:base`, every `Literal` form. |
 | `rdf` | The SWRL RDF syntax (`swrl:Imp`, `swrl:body`/`swrl:head` lists) | Any RDF serialisation: `rdf_format` is `turtle` (default), `ntriples`, `nquads`, `trig`, `rdfxml`, `jsonld`, `n3` or a media type. `base_iri` resolves relative IRIs. |
 | `functional` | OWL 2 functional-syntax `DLSafeRule`, inside an `Ontology(…)` or on its own | `Prefix(…)` declarations; other axioms are skipped. |
@@ -277,12 +277,16 @@ Rule bodies read the unnamed default graph, unless the request names a `dataset`
 
 Every rule is checked before any runs, and one the server cannot run as written refuses the whole request with `400`, so nothing is written:
 
-- an element or atom the reader does not understand: class-expression atoms, `DataRangeAtom` and anonymous individuals are not supported yet;
-- an unsafe rule: a head variable the body does not bind, or a built-in variable only a built-in mentions (built-ins check values but cannot bind them);
-- a built-in in the head, or one outside the supported `swrlb:` comparisons, arithmetic, `stringConcat`, `contains` and `matches`;
+- an element or atom the reader does not understand, or an anonymous individual;
+- an unsafe rule: a head variable that occurs nowhere in the body;
+- a built-in in the head, a built-in outside the `swrlb:` built-ins of SWRL §8 (all of which are supported), or one whose unbound arguments have infinitely many solutions (`swrlb:add(?z, ?x, ?y)` with two unbound operands);
+- a data range over a datatype the server does not know, or in the head;
+- a class-expression atom without a `regime` to compute its members;
 - a literal where an individual belongs, or the other way round.
 
-The response reports `iterations`, `triples_inferred` (what this run wrote to the target graph), `converged` with its `stop_reason` (`fixpoint`, `max_iterations` or `timeout`), `target_graph`, and `sources`, the graphs rule bodies read (`null` for the default graph). Execution counts against the server's limit on concurrent expensive operations and stops at the write timeout.
+Built-ins bind variables: `swrlb:add(?next, ?age, 1)` computes `?next`, constructors such as `swrlb:dateTime` split a value into its components, and `swrlb:tokenize` or `swrlb:member` bind one value per solution. A `regime` field runs the rules and that regime to one joint fixed point in the target graph; class-expression atoms need it, since the regime materialises who belongs to the expression.
+
+The response reports `iterations`, `triples_inferred` (what this run wrote to the target graph), `converged` with its `stop_reason` (`fixpoint`, `max_iterations` or `timeout`), `target_graph`, and `sources`, the graphs rule bodies read (`null` for the default graph); with a `regime`, also `rounds` and `regime_triples`. Execution counts against the server's limit on concurrent expensive operations and stops at the write timeout.
 
 ### Rules stored with a dataset
 

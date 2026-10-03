@@ -9,8 +9,10 @@
 //! server's prefix registry; `rdf:`, `rdfs:`, `xsd:`, `owl:`, `swrl:` and
 //! `swrlb:` are always known. A predicate in the `swrlb:` namespace (or
 //! another SWRLAPI built-in library) is a built-in; `sameAs` and
-//! `differentFrom` are the identity atoms; otherwise one argument makes a
-//! class atom and two a property atom. Without an ontology the syntax cannot
+//! `differentFrom` are the identity atoms; a datatype with one argument
+//! (`xsd:integer(?v)`, also `rdfs:Literal`, `rdf:PlainLiteral`,
+//! `rdf:langString`, `owl:real`, `owl:rational`) is a data range atom;
+//! otherwise one argument makes a class atom and two a property atom. Without an ontology the syntax cannot
 //! say whether a property is an object or a data property, so a property atom
 //! whose second argument is a variable stays untyped
 //! ([`Atom::PropertyAtom`]); a literal second argument makes it a data
@@ -22,6 +24,7 @@
 //! rule ends where its head's last atom is not followed by `^`.
 
 use super::engine::{Atom, SwrlArg, SwrlRule};
+use super::expr::DataRange;
 use super::lexer::{Tok, Tokens};
 use super::names::Names;
 
@@ -115,6 +118,10 @@ fn atom(toks: &mut Tokens, names: &Names) -> Result<Atom, String> {
         _ if is_same || is_different => {
             return Err(toks.error(format!("{pred_tok} takes two arguments")))
         }
+        (Some(arg), None, None) if is_datatype(&predicate) => Atom::DataRangeAtom {
+            range: DataRange::Datatype(predicate),
+            arg,
+        },
         (Some(arg), None, None) => Atom::ClassAtom {
             class_iri: predicate,
             arg,
@@ -143,6 +150,19 @@ fn atom(toks: &mut Tokens, names: &Names) -> Result<Atom, String> {
             )))
         }
     })
+}
+
+/// Whether `iri` names a datatype: a unary atom over it is a data range atom.
+fn is_datatype(iri: &str) -> bool {
+    iri.starts_with(XSD)
+        || matches!(
+            iri,
+            "http://www.w3.org/2000/01/rdf-schema#Literal"
+                | "http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral"
+                | "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"
+                | "http://www.w3.org/2002/07/owl#real"
+                | "http://www.w3.org/2002/07/owl#rational"
+        )
 }
 
 fn arg(toks: &mut Tokens, names: &Names) -> Result<SwrlArg, String> {
@@ -235,6 +255,12 @@ mod tests {
             Atom::DifferentIndividualsAtom { .. }
         ));
         assert!(rules[2].body.is_empty());
+        let rules =
+            parse_swrlapi("ex:age(?p, ?a) ^ xsd:integer(?a) -> ex:Aged(?p)", &names()).unwrap();
+        assert!(
+            matches!(&rules[0].body[1], Atom::DataRangeAtom { range: DataRange::Datatype(d), .. }
+            if d.ends_with("#integer"))
+        );
     }
 
     #[test]

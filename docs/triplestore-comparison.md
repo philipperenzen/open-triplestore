@@ -856,7 +856,9 @@ Cost is O(n × geometry_complexity): with no spatial index in the query path (fo
 | QLever | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 
 > Open Triplestore: the cells follow the grades in [`docs/standards.md`](standards.md), as in
-> §4.2. RDFS, OWL 2 EL/QL/RL/DL, SWRL and ShEx are feature flags of the default `full` build.
+> §4.2. RDFS, OWL 2 EL/QL/RL/DL, SWRL and ShEx are feature flags of the default `full` build. SWRL is
+> graded Full: all §8 built-ins, data-range and class-expression atoms, rules run jointly with a
+> regime ([`docs/swrl.md`](swrl.md)).
 > OWL 2 DL is Full with the OWL API + HermiT reasoner sidecar the project ships
 > (`docker compose --profile reasoner`; footnote ⁹); without it, the RL rules plus DL-syntax rules
 > run in process, sound but not complete.

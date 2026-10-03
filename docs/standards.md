@@ -45,7 +45,7 @@ applies.
 | JWT / OAuth 2.0 / OIDC | Authentication | Full |
 | SAML 2.0 | Authentication | Experimental — not in the `full` feature or the published image. SP-initiated Web Browser SSO (HTTP-Redirect AuthnRequest, HTTP-POST response bound to the request, signed by the configured IdP certificate); no IdP-initiated SSO, signed AuthnRequests, encrypted assertions or Single Logout. Tested against a simulated IdP only. See [auth.md](auth.md#saml-20). |
 | ShEx | Shape Expressions (ShExC) | Partial — node kinds, datatypes with lexical checks, string/numeric facets, value sets, cardinalities, EachOf/OneOf, inverse constraints, CLOSED/EXTRA, shape references; no semantic actions, imports or annotations. Semantics pinned by `tests/shex_conformance.rs`. |
-| SWRL | Horn-clause rules | Partial — class/property atoms and the built-ins in `src/swrl`; an unsupported built-in is a hard error rather than a silently dropped filter. Semantics pinned by `tests/swrl_conformance.rs`. |
+| SWRL | Horn-clause rules | Full¹⁵ — every atom (class expressions via the regime, data ranges natively), all §8 built-ins with binding, six syntaxes, rules stored with a dataset. See [swrl.md](swrl.md). |
 | SPARQL + full-text search (Tantivy) | A feature, not a standard: the `ft:search` / `text:search` magic property and `CONTAINS` / `STRSTARTS` push-down | Full¹¹ |
 | SKOS | Simple Knowledge Organization System: SKOS-aware inferencing and integrity checking | Full¹² |
 | JSON-LD 1.1 | JSON-based RDF syntax: parsing (toRdf), serialisation (fromRdf), remote contexts | Partial¹³ |
@@ -96,7 +96,7 @@ give no score.
 | SPARQL 1.1 functions | `tests/sparql_functions_conformance.rs` | spec-derived | 9 |  |
 | SPARQL engine coverage (sparqloscope) | `tests/sparqloscope_conformance.rs` | sparqloscope-derived | 67 |  |
 | Cross-standard HTTP smoke | `tests/standards_conformance.rs` | spec-derived | 26 |  |
-| SWRL | `tests/swrl_conformance.rs` | spec-derived | 22 |  |
+| SWRL | `tests/swrl_conformance.rs` | spec-derived | 33 |  |
 | JSON-LD 1.1 API | `tests/w3c_jsonld_api_manifests.rs` | **vendored W3C test-suite subset** (toRdf + fromRdf sections of w3c/json-ld-api, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/jsonld.md` |
 | OWL 2 DL | `tests/w3c_owl2_dl_manifests.rs` | **vendored W3C test cases** (approved OWL 2 DL / Direct Semantics cases of the OWL 2 Test Case Repository, unmodified; manifest-driven, against the reasoner sidecar) | 2 | runs in CI against the reasoner sidecar as a development and regression ratchet; no score is published (W3C licence: no performance claims on a partial run); known gaps in `docs/conformance/owl2-dl.md` |
 | OWL 2 RL | `tests/w3c_owl2_rl_manifests.rs` | **vendored W3C test cases** (approved OWL 2 cases of the RL profile, unmodified; manifest-driven) | 2 | runs in CI as a development and regression ratchet; no score is published (W3C licence: no performance claims on a partial run); known gaps in `docs/conformance/owl2-rl.md` |
@@ -109,7 +109,7 @@ give no score.
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 | SPARQL 1.2 | `tests/w3c_sparql12_manifests.rs` | **vendored W3C test-suite subset** (`sparql/sparql12` of w3c/rdf-tests, unmodified; manifest-driven, engine and mirror paths) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql12.md` |
 
-1117 conformance tests across 37 suites; a further 804 tests in 107 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 12 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
+1128 conformance tests across 37 suites; a further 805 tests in 107 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 12 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->
@@ -437,6 +437,19 @@ behavior and will flip green when the limitation is resolved.
     use, and `rdfD1` (a blank node per typed literal) is not materialised. Checked by
     `tests/rdfs_conformance.rs` and the W3C RDF 1.1 Semantics and SPARQL 1.1 entailment-regime
     cases (no score published; [conformance/entailment.md](conformance/entailment.md)).
+
+15. **SWRL** is graded Full against the SWRL Member Submission: class, property,
+    identity, data-range and built-in atoms; all 79 `swrlb:` built-ins of §8 with check,
+    bind, split and enumerate modes, infinite binding patterns refused by name; lists as
+    RDF lists with deterministic minted nodes for constructed ones; the §4 XML, §5 RDF,
+    OWL/XML, functional and SWRLAPI syntaxes. Two things it depends on or leaves out:
+    class-expression atoms are materialised by the entailment regime the rules run with
+    (OWL 2 RL natively, beyond RL only with a DL backend), and rules are evaluated over
+    the regime's materialisation, so conclusions that need reasoning by cases under
+    disjunctive DL semantics are not derived. XPath-only regular-expression constructs
+    (`\i`, `\c`, class subtraction) are refused. There is no W3C SWRL test suite; the
+    semantics are pinned by `tests/swrl_conformance.rs` (one table-driven test per §8
+    subsection) and `tests/entailment_http.rs`.
 
 Related guides: [OWL Reasoning](/docs/reasoning), [SHACL Validation](/docs/shacl),
 [GeoSPARQL](/docs/geosparql), [Performance](/docs/performance),
