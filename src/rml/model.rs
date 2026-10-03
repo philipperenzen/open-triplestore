@@ -5,10 +5,61 @@
 
 use std::collections::BTreeMap;
 
+use oxigraph::model::Term;
+
 /// A complete RML mapping document containing one or more TriplesMap entries.
 #[derive(Debug, Clone)]
 pub struct RmlMapping {
     pub triples_maps: Vec<TriplesMap>,
+    /// Which term-generation rules the mapping runs under. A frozen mapping
+    /// version keeps the rules it was frozen with; see [`Semantics`].
+    pub semantics: Semantics,
+    /// The base IRI the processor resolves relative IRIs against (R2RML
+    /// §11.2), supplied by the run. A triples map's own `rml:baseIRI` wins.
+    pub base_iri: Option<String>,
+}
+
+/// The term-generation rules a mapping runs under.
+///
+/// Fixing this engine's R2RML deviations changed the IRIs and blank nodes an
+/// existing mapping produces, and an IRI is an identity: a run that renamed
+/// every entity would look like a delete and a re-add of all of them. So a
+/// frozen mapping version records the rules it was written against, and a
+/// version frozen before the fix runs under [`Semantics::Legacy`]:
+///
+/// | rule                                   | `Legacy`                         | `R2rml` (R2RML §7.3, §7.4, §11) |
+/// |----------------------------------------|----------------------------------|---------------------------------|
+/// | template object map, no `rr:termType`  | literal                          | IRI                             |
+/// | template value encoding                | everything but `[A-Za-z0-9]`, in every template | outside RFC 3987 `iunreserved`, IRI templates only |
+/// | blank node                             | one per row and value            | one per value and graph         |
+///
+/// Everything else — constant term types, graph maps, base IRI, SQL
+/// identifiers — follows the specification under both: the old behaviour
+/// there produced wrong terms or failing SQL rather than different names.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Semantics {
+    /// What this engine did before the R2RML term-semantics fix.
+    Legacy,
+    /// R2RML's own rules. What every newly written mapping gets.
+    #[default]
+    R2rml,
+}
+
+impl Semantics {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Semantics::Legacy => "legacy",
+            Semantics::R2rml => "r2rml",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "legacy" => Some(Semantics::Legacy),
+            "r2rml" => Some(Semantics::R2rml),
+            _ => None,
+        }
+    }
 }
 
 impl RmlMapping {
@@ -36,6 +87,23 @@ impl RmlMapping {
             .iter()
             .any(|tm| matches!(tm.logical_source.source, SourceRef::Datasource(_)))
     }
+
+    /// The base IRI `tm`'s relative IRIs resolve against: its own
+    /// `rml:baseIRI`, else the run's.
+    pub fn base_for<'a>(&'a self, tm: &'a TriplesMap) -> Option<&'a str> {
+        tm.base_iri.as_deref().or(self.base_iri.as_deref())
+    }
+
+    /// Whether any subject map or predicate-object map declares a graph map.
+    pub fn has_graph_maps(&self) -> bool {
+        self.triples_maps.iter().any(|tm| {
+            !tm.subject_map.graph_maps.is_empty()
+                || tm
+                    .predicate_object_maps
+                    .iter()
+                    .any(|pom| !pom.graph_maps.is_empty())
+        })
+    }
 }
 
 /// An rml:TriplesMap — the unit of mapping from a logical source to RDF triples.
@@ -45,7 +113,8 @@ pub struct TriplesMap {
     pub logical_source: LogicalSource,
     pub subject_map: SubjectMap,
     pub predicate_object_maps: Vec<PredicateObjectMap>,
-    pub graph_map: Option<TermMap>,
+    /// `rml:baseIRI` on the triples map (RML-Core), overriding the run's.
+    pub base_iri: Option<String>,
 }
 
 /// rml:LogicalSource — describes the source data (file, inline, database).
@@ -58,18 +127,35 @@ pub struct LogicalSource {
     pub query: Option<String>,
     /// `rr:tableName` — a whole table or view as the logical source.
     pub table_name: Option<String>,
+    /// `rml:null` (RML-IO): source values that count as NULL, besides the
+    /// source's own NULL (a SQL NULL, a JSON `null`). CSV and XML have none,
+    /// so there nothing is NULL unless listed here. Honoured under
+    /// [`Semantics::R2rml`]; a legacy version treats every empty value as
+    /// NULL instead.
+    pub nulls: Vec<String>,
 }
 
 impl LogicalSource {
     /// The SQL this logical source selects, with the table name quoted by the
-    /// dialect's own rules. `None` when the source is not relational.
+    /// dialect's own rules — part by part when it is schema-qualified, and
+    /// without the delimiters the mapping wrote it with. `None` when the
+    /// source is not relational.
     pub fn sql(&self, quote: &dyn Fn(&str) -> String) -> Option<String> {
         if let Some(q) = &self.query {
             return Some(q.clone());
         }
         self.table_name
             .as_ref()
-            .map(|t| format!("SELECT * FROM {}", quote(t)))
+            .map(|t| format!("SELECT * FROM {}", super::sqlident::table_sql(t, quote)))
+    }
+
+    /// The table a catalogue lookup (unique keys) can answer for: a named
+    /// table, read whole, and not qualified by a schema.
+    pub fn catalogue_table(&self) -> Option<String> {
+        if self.query.is_some() {
+            return None;
+        }
+        super::sqlident::catalogue_table(self.table_name.as_deref()?)
     }
 }
 
@@ -128,14 +214,42 @@ pub struct SubjectMap {
     /// join parent — the planner cannot project its columns — and resolves
     /// through the index instead.
     pub function: Option<FunctionMap>,
+    /// `rr:graphMap` / `rr:graph`: the graphs every triple of this subject
+    /// goes to, `rr:class` triples included (R2RML §9, §11.1).
+    pub graph_maps: Vec<TermMap>,
 }
 
 /// rr:PredicateObjectMap — maps source rows to predicate-object pairs.
+///
+/// A map generates one triple for every predicate map × every object map
+/// (R2RML §6.3, §11.1); `rr:predicate` and `rr:object` shortcuts count as
+/// maps of their own.
 #[derive(Debug, Clone)]
 pub struct PredicateObjectMap {
-    pub predicate_map: TermMap,
-    pub object: ObjectMap,
-    pub graph_map: Option<TermMap>,
+    /// Never empty.
+    pub predicate_maps: Vec<TermMap>,
+    /// Never empty.
+    pub object_maps: Vec<ObjectMap>,
+    /// Graphs this map's triples go to *as well as* the subject's: R2RML
+    /// takes the union, it does not override.
+    pub graph_maps: Vec<TermMap>,
+}
+
+impl PredicateObjectMap {
+    /// The referencing object maps among this map's objects.
+    pub fn refs(&self) -> impl Iterator<Item = &RefObjectMap> {
+        self.object_maps.iter().filter_map(|o| match o {
+            ObjectMap::Ref(r) => Some(r),
+            _ => None,
+        })
+    }
+}
+
+impl TriplesMap {
+    /// Every referencing object map of every predicate-object map.
+    pub fn refs(&self) -> impl Iterator<Item = &RefObjectMap> {
+        self.predicate_object_maps.iter().flat_map(|p| p.refs())
+    }
 }
 
 /// How a predicate-object map produces its object.
@@ -248,8 +362,10 @@ impl TermMap {
 /// How the term value is produced.
 #[derive(Debug, Clone)]
 pub enum TermMapKind {
-    /// `rr:constant` — a fixed IRI or literal
-    Constant(String),
+    /// `rr:constant` — a fixed IRI or literal, exactly as the mapping wrote
+    /// it: its datatype and language tag are part of it, and its kind is the
+    /// term type (R2RML §7.4: `rr:termType` has no effect on a constant).
+    Constant(Term),
     /// `rr:template` — e.g. `"http://example.org/{column}"`
     Template(String),
     /// `rml:reference` or `rr:column` — a direct column/JSONPath/XPath reference
@@ -315,9 +431,11 @@ mod tests {
             tm(TermMapKind::Reference("c".into())).referenced_columns(),
             vec!["c"]
         );
-        assert!(tm(TermMapKind::Constant("http://x/c".into()))
-            .referenced_columns()
-            .is_empty());
+        assert!(tm(TermMapKind::Constant(
+            oxigraph::model::NamedNode::new_unchecked("http://x/c").into()
+        ))
+        .referenced_columns()
+        .is_empty());
     }
 
     #[test]
@@ -329,6 +447,7 @@ mod tests {
             iterator: None,
             query: None,
             table_name: Some("products".into()),
+            nulls: Vec::new(),
         };
         assert_eq!(table.sql(&quote).unwrap(), "SELECT * FROM \"products\"");
         let query = LogicalSource {
@@ -347,6 +466,7 @@ mod tests {
             iterator: None,
             query: None,
             table_name: None,
+            nulls: Vec::new(),
         };
         assert_eq!(file.sql(&quote), None);
     }

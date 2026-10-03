@@ -12,7 +12,10 @@
 //! password/PAT auth is unaffected until an IdP is wired up:
 //! - `OIDC_ISSUER` — issuer URL, e.g. `https://idp/realms/example` (enables this)
 //! - `OIDC_AUDIENCE` — expected `aud` (REQUIRED once `OIDC_ISSUER` is set; tokens are rejected until it is configured)
-//! - `OIDC_DEFAULT_ROLE` — role for newly provisioned users (default `user`)
+//! - `OIDC_DEFAULT_ROLE` — role for newly provisioned users (default `user`;
+//!   capped at `user`, see [`capped_default_role`])
+//! - `OTS_OIDC_IDP_TOKEN_POLICY` — what an IdP token may do (default `session`: read
+//!   and write, but no API-token minting); see [`super::policy::idp_token_policy`]
 //! - `ACCEPT_LEGACY_TOKENS` — keep accepting password-session JWTs + `ots_` PATs (default true)
 
 use std::sync::Arc;
@@ -85,6 +88,20 @@ impl AuthExt {
         let default_role = std::env::var("OIDC_DEFAULT_ROLE")
             .ok()
             .filter(|s| !s.trim().is_empty())
+            .map(|raw| {
+                let role = capped_default_role(&raw);
+                if SystemRole::from_str(&raw.trim().to_ascii_lowercase())
+                    .is_some_and(|r| r.is_admin())
+                {
+                    tracing::error!(
+                        "OIDC_DEFAULT_ROLE={raw:?} would make every IdP account an \
+                         administrator; using '{}' instead. Grant admin through \
+                         OIDC_ROLE_CLAIM_MAP or in the UI.",
+                        role.as_str()
+                    );
+                }
+                role.as_str().to_string()
+            })
             .unwrap_or_else(|| "user".to_string());
         // Default ON; only "false"/"0" disables (transition safety).
         let accept_legacy_tokens = std::env::var("ACCEPT_LEGACY_TOKENS")
@@ -170,6 +187,17 @@ impl AuthExt {
     }
 }
 
+/// The role an IdP account gets when no claim maps to one: the configured
+/// value, but never above `user`. An admin default would make every account
+/// the IdP knows an administrator; admin is granted per account, through the
+/// claim map or the UI. A lower role (`guest`) is kept, an unknown one is `user`.
+pub fn capped_default_role(raw: &str) -> SystemRole {
+    match SystemRole::from_str(&raw.trim().to_ascii_lowercase()) {
+        Some(role) if role.level() <= SystemRole::User.level() => role,
+        _ => SystemRole::User,
+    }
+}
+
 fn default_role_claims() -> Vec<String> {
     // Cover the common shapes: flat `roles`, Keycloak `realm_access.roles`, `groups`.
     vec![
@@ -231,6 +259,25 @@ impl ExternalClaims {
             .or_else(|| self.preferred_username.clone())
             .or_else(|| self.email.clone())
             .unwrap_or_else(|| self.sub.clone())
+    }
+
+    /// The token's granted scopes as one space-separated string, from the
+    /// `scope` claim (RFC 9068, Keycloak) and the `scp` claim (Entra ID as a
+    /// string, Okta as an array). Empty when the token carries neither.
+    pub fn scope(&self) -> String {
+        ["scope", "scp"]
+            .iter()
+            .filter_map(|name| self.extra.get(*name))
+            .flat_map(|v| match v {
+                Value::String(s) => vec![s.clone()],
+                Value::Array(arr) => arr
+                    .iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// Collect string values from the named claims. Each name may be a dotted
@@ -327,6 +374,18 @@ impl OidcVerifier {
         &self.issuer
     }
 
+    /// A verifier whose JWKS is already cached, so `verify` runs without
+    /// discovery or network I/O.
+    #[cfg(test)]
+    fn with_jwks(issuer: &str, audience: &str, jwks: JwkSet) -> Self {
+        let v = Self::new(issuer.to_string(), Some(audience.to_string()));
+        *v.cache.try_write().expect("fresh verifier cache") = Some(CachedJwks {
+            jwks,
+            fetched_at: Instant::now(),
+        });
+        v
+    }
+
     /// Fetch (and cache) the issuer's JWKS via OIDC discovery.
     async fn jwks(&self, force: bool) -> anyhow::Result<JwkSet> {
         if !force {
@@ -411,7 +470,13 @@ impl OidcVerifier {
 
         let key = DecodingKey::from_jwk(&jwk)?;
         let mut validation = Validation::new(header.alg);
-        validation.set_issuer(&[self.issuer.as_str()]);
+        // The issuer is configured without a trailing `/` (`from_env` and
+        // `OTS_TRUSTED_ISSUERS` trim it), but some IdPs put one in `iss`
+        // (Auth0: `https://tenant.auth0.com/`). Accept exactly these two
+        // spellings of the configured issuer and nothing else.
+        let iss_bare = self.issuer.trim_end_matches('/');
+        let iss_slash = format!("{iss_bare}/");
+        validation.set_issuer(&[iss_bare, iss_slash.as_str()]);
         // Audience validation is MANDATORY. With no configured `aud` we would
         // accept any token the IdP minted for *any* client of the same issuer
         // (audience-confusion / token-redirection). Fail closed instead of
@@ -483,7 +548,9 @@ pub fn provision_from_claims(
 
     // New users get the mapped role, else the configured default. SSO must never
     // confer super_admin (instance ownership is provisioned out-of-band), so any
-    // claim that maps to super_admin is capped at admin.
+    // claim that maps to super_admin is capped at admin. The default applies to
+    // every account the IdP knows, so it is capped at user — also when the
+    // provider row was created with, or later edited to, an admin default.
     let cap_role = |r: SystemRole| {
         if r == SystemRole::SuperAdmin {
             SystemRole::Admin
@@ -491,7 +558,7 @@ pub fn provision_from_claims(
             r
         }
     };
-    let default_role = SystemRole::from_str(&provider.default_role).unwrap_or(SystemRole::User);
+    let default_role = capped_default_role(&provider.default_role);
     let mapped_role = mapped.role.map(cap_role);
 
     // Honour the IdP's `email_verified` claim (bool, or "true"/"false" string).
@@ -554,6 +621,40 @@ mod tests {
         assert!(ext.oidc.is_none());
         assert!(ext.accept_legacy_tokens);
         assert_eq!(ext.default_role, "user");
+    }
+
+    #[test]
+    fn default_role_is_capped_at_user() {
+        for (raw, expected) in [
+            ("admin", SystemRole::User),
+            ("super_admin", SystemRole::User),
+            (" Admin ", SystemRole::User),
+            ("user", SystemRole::User),
+            ("publisher", SystemRole::User),
+            ("guest", SystemRole::Guest),
+            ("banana", SystemRole::User),
+        ] {
+            assert_eq!(capped_default_role(raw), expected, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn scope_reads_scope_and_scp_claims() {
+        let c = |extra| claims("s", "s@example.com", extra);
+        assert_eq!(c(serde_json::json!({})).scope(), "");
+        assert_eq!(
+            c(serde_json::json!({"scope": "openid write"})).scope(),
+            "openid write"
+        );
+        assert_eq!(
+            c(serde_json::json!({"scp": "ots.read ots.write"})).scope(),
+            "ots.read ots.write"
+        );
+        assert_eq!(
+            c(serde_json::json!({"scp": ["ots.read", "ots.write"]})).scope(),
+            "ots.read ots.write"
+        );
+        assert_eq!(c(serde_json::json!({"scp": 7})).scope(), "");
     }
 
     fn claims(sub: &str, email: &str, extra: serde_json::Value) -> ExternalClaims {
@@ -749,5 +850,79 @@ mod tests {
             msg.contains("https") || msg.contains("insecure"),
             "the error must explain the https requirement, got: {msg}"
         );
+    }
+
+    // ─── `iss` with or without a trailing slash ───────────────────────────────
+    // Auth0 (and others) issue `iss: "https://tenant.example/"`, while the
+    // configured issuer is stored trimmed. Both spellings must verify; any
+    // other issuer, a wrong audience or an expired token must still fail.
+
+    fn signed_token(
+        keys: &crate::auth::oidc_provider::ProviderKeys,
+        iss: &str,
+        aud: &str,
+        exp_offset: i64,
+    ) -> String {
+        let now = chrono::Utc::now().timestamp();
+        keys.sign_claims(&serde_json::json!({
+            "iss": iss, "aud": aud, "sub": "subject-1",
+            "iat": now, "exp": now + exp_offset,
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn verify_accepts_issuer_with_or_without_trailing_slash() {
+        let db = AuthDb::in_memory().unwrap();
+        let keys =
+            crate::auth::oidc_provider::ProviderKeys::load_or_generate(&db, "test-secret").unwrap();
+        let jwks: JwkSet =
+            serde_json::from_value(serde_json::json!({ "keys": [keys.public_jwk] })).unwrap();
+
+        // As configured from the environment (trimmed), and as constructed
+        // directly with the slash kept.
+        for configured in ["https://idp.example", "https://idp.example/"] {
+            let verifier = OidcVerifier::with_jwks(configured, "my-api", jwks.clone());
+            for iss in ["https://idp.example", "https://idp.example/"] {
+                let claims = verifier
+                    .verify(&signed_token(&keys, iss, "my-api", 300))
+                    .await
+                    .unwrap_or_else(|e| panic!("configured {configured}, iss {iss}: {e}"));
+                assert_eq!(claims.sub, "subject-1");
+            }
+            for iss in [
+                "https://idp.example//",
+                "https://idp.example/other",
+                "https://idp.example.evil",
+                "http://idp.example",
+            ] {
+                assert!(
+                    verifier
+                        .verify(&signed_token(&keys, iss, "my-api", 300))
+                        .await
+                        .is_err(),
+                    "configured {configured}: iss {iss} must be refused"
+                );
+            }
+            assert!(
+                verifier
+                    .verify(&signed_token(
+                        &keys,
+                        "https://idp.example/",
+                        "other-api",
+                        300
+                    ))
+                    .await
+                    .is_err(),
+                "a wrong audience must still be refused"
+            );
+            assert!(
+                verifier
+                    .verify(&signed_token(&keys, "https://idp.example/", "my-api", -600))
+                    .await
+                    .is_err(),
+                "an expired token must still be refused"
+            );
+        }
     }
 }

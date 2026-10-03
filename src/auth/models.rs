@@ -1234,6 +1234,18 @@ pub struct PrefixOverride {
     pub updated_at: String,
 }
 
+/// One entry of a dataset's prefix table: part of the dataset's own data,
+/// changed by an applied RDF Patch's `PA` / `PD` rows and declared by the
+/// dataset's Turtle and TriG exports. The label may be empty (`:`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DatasetPrefix {
+    pub label: String,
+    pub namespace: String,
+    /// Who set it last; null when a version restore or the system did.
+    pub updated_by: Option<String>,
+    pub updated_at: String,
+}
+
 /// An asset (non-RDF file) stored in S3.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Asset {

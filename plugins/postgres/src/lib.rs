@@ -289,6 +289,18 @@ impl SourceConnection for PostgresConnection {
         Ok(rows)
     }
 
+    fn columns(&mut self, query: &str) -> Result<Option<Vec<String>>, SourceError> {
+        // Preparing describes the result without running the statement.
+        let statement = self.client.prepare(query).map_err(|e| self.error(e))?;
+        Ok(Some(
+            statement
+                .columns()
+                .iter()
+                .map(|c| c.name().to_string())
+                .collect(),
+        ))
+    }
+
     fn stream(
         &mut self,
         query: &str,

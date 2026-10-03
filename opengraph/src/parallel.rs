@@ -645,7 +645,9 @@ fn plan_select(pattern: &GraphPattern, distinct: bool) -> Option<Merge> {
         // `(COUNT(*) AS ?c)` parses to Extend(Group, ?c, Variable(internal)). A
         // pure variable alias over a global COUNT is sum-safe; a *computed*
         // expression over an aggregate (e.g. COUNT(*)+1) is not, so reject it.
-        // Over a plain row stream, Extend (BIND) is row-local → still concat-safe.
+        // Over a plain row stream, Extend (BIND) is row-local → still concat-safe,
+        // unless it binds an EXISTS, which reads other subjects' triples.
+        GraphPattern::Extend { expression, .. } if has_exists(expression) => None,
         GraphPattern::Extend {
             inner, expression, ..
         } => match plan_select(inner, distinct) {
@@ -756,15 +758,15 @@ fn plan_group_count(proj_vars: &[Variable], inner: &GraphPattern) -> Option<Merg
 }
 
 fn is_nondistinct_count(agg: &AggregateExpression) -> bool {
-    matches!(
-        agg,
-        AggregateExpression::CountSolutions { distinct: false }
-            | AggregateExpression::FunctionCall {
-                name: AggregateFunction::Count,
-                distinct: false,
-                ..
-            }
-    )
+    match agg {
+        AggregateExpression::CountSolutions { distinct: false } => true,
+        AggregateExpression::FunctionCall {
+            name: AggregateFunction::Count,
+            distinct: false,
+            expr,
+        } => !has_exists(expr),
+        _ => false,
+    }
 }
 
 /// True iff `pattern` produces a shard-local row stream: only BGP / FILTER /
@@ -781,9 +783,17 @@ fn collect_rowable(pattern: &GraphPattern, out: &mut Vec<TriplePattern>) -> bool
             out.extend(patterns.iter().cloned());
             true
         }
-        GraphPattern::Filter { inner, .. }
-        | GraphPattern::Project { inner, .. }
-        | GraphPattern::Extend { inner, .. }
+        // An `EXISTS` reads triples about other subjects (`FILTER NOT EXISTS
+        // { ?o :q ?x }`), which a subject shard does not hold: evaluated per
+        // shard it would see only its own subjects and answer wrongly.
+        GraphPattern::Filter {
+            inner,
+            expr: expression,
+        }
+        | GraphPattern::Extend {
+            inner, expression, ..
+        } => !has_exists(expression) && collect_rowable(inner, out),
+        GraphPattern::Project { inner, .. }
         | GraphPattern::Distinct { inner }
         | GraphPattern::Reduced { inner } => collect_rowable(inner, out),
         // `GRAPH <g> { … }` with a constant graph: every shard holds full quads,
@@ -798,6 +808,35 @@ fn collect_rowable(pattern: &GraphPattern, out: &mut Vec<TriplePattern>) -> bool
                 && collect_rowable(inner, out)
         }
         _ => false,
+    }
+}
+
+/// True iff `expr` contains an `EXISTS` / `NOT EXISTS` anywhere.
+fn has_exists(expr: &Expression) -> bool {
+    match expr {
+        Expression::Exists(_) => true,
+        Expression::NamedNode(_)
+        | Expression::Literal(_)
+        | Expression::Variable(_)
+        | Expression::Bound(_) => false,
+        Expression::Or(a, b)
+        | Expression::And(a, b)
+        | Expression::Equal(a, b)
+        | Expression::SameTerm(a, b)
+        | Expression::Greater(a, b)
+        | Expression::GreaterOrEqual(a, b)
+        | Expression::Less(a, b)
+        | Expression::LessOrEqual(a, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b) => has_exists(a) || has_exists(b),
+        Expression::UnaryPlus(e) | Expression::UnaryMinus(e) | Expression::Not(e) => has_exists(e),
+        Expression::If(a, b, c) => has_exists(a) || has_exists(b) || has_exists(c),
+        Expression::In(a, list) => has_exists(a) || list.iter().any(has_exists),
+        Expression::Coalesce(list) | Expression::FunctionCall(_, list) => {
+            list.iter().any(has_exists)
+        }
     }
 }
 
@@ -1601,6 +1640,29 @@ mod tests {
             ps.query(&trap).unwrap().is_none(),
             "declined, not merged across shards"
         );
+    }
+
+    /// `EXISTS` reads triples about other subjects, which a subject shard lacks,
+    /// so a FILTER, BIND or COUNT argument holding one is never decomposed.
+    #[test]
+    fn exists_is_never_decomposed() {
+        let ex = "http://example.org/";
+        for q in [
+            format!("ASK {{ ?s <{ex}age> ?o FILTER NOT EXISTS {{ ?o <{ex}name> ?x }} }}"),
+            format!("SELECT (COUNT(*) AS ?c) WHERE {{ ?s <{ex}age> ?o FILTER(!EXISTS {{ ?o <{ex}name> ?x }} || false) }}"),
+            format!("SELECT (COUNT(*) AS ?c) WHERE {{ ?s <{ex}age> ?o BIND(EXISTS {{ ?o <{ex}name> ?x }} AS ?e) }}"),
+            format!("SELECT (COUNT(IF(EXISTS {{ ?o <{ex}name> ?x }}, 1, ?u)) AS ?c) WHERE {{ ?s <{ex}age> ?o }}"),
+            format!("SELECT ?t (COUNT(*) AS ?c) WHERE {{ ?s <{ex}type> ?t FILTER EXISTS {{ ?t <{ex}name> ?x }} }} GROUP BY ?t"),
+            format!("SELECT ?t (MAX(?o) AS ?m) WHERE {{ ?s <{ex}type> ?t ; <{ex}age> ?o FILTER EXISTS {{ ?t <{ex}name> ?x }} }} GROUP BY ?t"),
+            format!("SELECT (COUNT(DISTINCT ?o) AS ?c) WHERE {{ ?s <{ex}age> ?o FILTER EXISTS {{ ?o <{ex}name> ?x }} }}"),
+            format!("SELECT ?s ?e WHERE {{ ?s <{ex}age> ?o BIND(EXISTS {{ ?o <{ex}name> ?x }} AS ?e) }}"),
+        ] {
+            assert_eq!(classify(&q), None, "{q}");
+            assert!(!is_decomposable(&q), "{q}");
+            let ps = ParallelStore::new(4);
+            ps.load_quads(persons(50)).unwrap();
+            assert!(ps.query(&q).unwrap().is_none(), "declined: {q}");
+        }
     }
 
     #[test]

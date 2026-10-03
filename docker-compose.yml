@@ -26,6 +26,11 @@ services:
         required: false
     environment:
       - RUST_LOG=${RUST_LOG:-info}
+      # Deployment posture (empty = development). `production` refuses a raw
+      # secret value at startup, and this file passes JWT_SECRET and
+      # S3_SECRET_KEY raw: give each a reference that resolves inside the
+      # container (e.g. file: on a mounted secret, via an override file) first.
+      - OTS_ENV=${OTS_ENV:-}
       # Serve the bundled web UI at /. Set SERVE_FRONTEND=false in .env for an
       # API-only container (SPARQL / Graph Store / REST are unaffected).
       - SERVE_FRONTEND=${SERVE_FRONTEND:-true}
@@ -47,8 +52,12 @@ services:
       - OIDC_AUDIENCE=${OIDC_AUDIENCE:-}
       - OIDC_DEFAULT_ROLE=${OIDC_DEFAULT_ROLE:-user}
       - ACCEPT_LEGACY_TOKENS=${ACCEPT_LEGACY_TOKENS:-true}
+      # What an IdP token may do (session | scoped | full; default session:
+      # read and write, but no API-token minting) — see .env.example.
+      - OTS_OIDC_IDP_TOKEN_POLICY=${OTS_OIDC_IDP_TOKEN_POLICY:-}
+      - OTS_OIDC_IDP_WRITE_SCOPES=${OTS_OIDC_IDP_WRITE_SCOPES:-}
       # Claims-driven roles & org membership (all optional):
-      #   OIDC_ROLE_CLAIM_MAP: JSON '{"<claim value>":"super_admin|admin|user"}'
+      #   OIDC_ROLE_CLAIM_MAP: JSON '{"<claim value>":"admin|user|guest|publisher"}' (super_admin is capped at admin)
       #   OIDC_ROLE_CLAIMS:    comma-sep claim names (default roles,realm_access.roles,groups)
       #   OIDC_GROUPS_CLAIM:   claim holding org groups (default groups)
       #   OIDC_ORG_GROUP_PREFIX: marks an org-membership group, e.g. org: → org:gis-team
@@ -56,6 +65,11 @@ services:
       - OIDC_ROLE_CLAIMS=${OIDC_ROLE_CLAIMS:-}
       - OIDC_GROUPS_CLAIM=${OIDC_GROUPS_CLAIM:-}
       - OIDC_ORG_GROUP_PREFIX=${OIDC_ORG_GROUP_PREFIX:-}
+      # What an access token this store issues as an OIDC provider may do
+      # (session | scoped | full), and what guests may do beyond reading — see .env.example.
+      - OTS_OIDC_SESSION_POLICY=${OTS_OIDC_SESSION_POLICY:-}
+      - OTS_OIDC_WRITE_SCOPES=${OTS_OIDC_WRITE_SCOPES:-}
+      - OTS_GUEST_CAPABILITIES=${OTS_GUEST_CAPABILITIES:-}
       # Outbound account email (verification, password reset, reminders). With
       # SMTP_HOST unset every message — including its action link — goes to the
       # server log instead (fine for dev). For real delivery either enable the
@@ -85,6 +99,9 @@ services:
       # "*" reflects any origin with credentials (mirror mode) — lets a browser client
       # on an arbitrary host connect. Prefer an explicit list in prod.
       - CORS_ORIGINS=${CORS_ORIGINS:-}
+      # Who may frame the /embed/* pages (CSP frame-ancestors). Keep the "*" fallback:
+      # an EMPTY value disables embedding.
+      - EMBED_FRAME_ANCESTORS=${EMBED_FRAME_ANCESTORS:-*}
       # External validation service base URL, used by /api/datasets/validate-and-commit.
       - VALIDATION_API_URL=${VALIDATION_API_URL:-}
       # Cross-app service discovery (opt-in, off by default). Set LD_DISCOVERY=true to self-register
@@ -103,6 +120,23 @@ services:
       - LLM_GATEWAY_URL=${LLM_GATEWAY_URL:-http://ollama:11434}
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:7b}
       - LLM_API_KEY=${LLM_API_KEY:-}
+      # Per-task model overrides; empty falls back to LLM_MODEL.
+      - LLM_SPARQL_MODEL=${LLM_SPARQL_MODEL:-}
+      - LLM_SHACL_MODEL=${LLM_SHACL_MODEL:-}
+      - LLM_CHAT_MODEL=${LLM_CHAT_MODEL:-}
+      # LLM guard, rate limits and request log; empty keeps each default
+      # (see .env.example).
+      - LLM_RATE_LIMIT_PER_MIN=${LLM_RATE_LIMIT_PER_MIN:-}
+      - LLM_RATE_LIMIT_ANON_PER_MIN=${LLM_RATE_LIMIT_ANON_PER_MIN:-}
+      - LLM_GUARD_INJECTION_ACTION=${LLM_GUARD_INJECTION_ACTION:-}
+      - LLM_GUARD_BLOCKLIST=${LLM_GUARD_BLOCKLIST:-}
+      - LLM_GUARD_MAX_MESSAGE_CHARS=${LLM_GUARD_MAX_MESSAGE_CHARS:-}
+      - LLM_GUARD_MAX_MESSAGES=${LLM_GUARD_MAX_MESSAGES:-}
+      - LLM_GUARD_MAX_TOTAL_CHARS=${LLM_GUARD_MAX_TOTAL_CHARS:-}
+      - LLM_LOG_PREVIEW_DISABLED=${LLM_LOG_PREVIEW_DISABLED:-}
+      - LLM_LOG_RETENTION_DAYS=${LLM_LOG_RETENTION_DAYS:-}
+      # ClamAV daemon (host:port) for upload scanning; empty disables it.
+      - CLAMAV_ADDR=${CLAMAV_ADDR:-}
       # In-memory query accelerator cap. Above this triple count the store keeps
       # TWO full RAM copies OFF and answers from RocksDB (correct, just slower for
       # large joins). By default the cap auto-sizes to mem_limit below; set this
@@ -111,6 +145,15 @@ services:
       # naming this var whenever a store is over the cap, so an off accelerator is
       # never silent.
       - OTS_PARALLEL_QUERY_MAX_TRIPLES=${OTS_PARALLEL_QUERY_MAX_TRIPLES:-}
+      # OWL 2 DL reasoning (docs/owl2-dl.md). Unset OTS_DL_BACKEND: the `owl2-dl`
+      # regime answers 503. With the bundled reasoner (`--profile reasoner`, below)
+      # set OTS_DL_BACKEND=sidecar and OTS_REASONER_TOKEN in .env.
+      - OTS_DL_BACKEND=${OTS_DL_BACKEND:-}
+      - OTS_REASONER_URL=${OTS_REASONER_URL:-http://reasoner:8090}
+      - OTS_REASONER_TOKEN=${OTS_REASONER_TOKEN:-}
+      - OTS_REASONER_TIMEOUT_SECS=${OTS_REASONER_TIMEOUT_SECS:-}
+      - OTS_REASONER_MAX_TRIPLES=${OTS_REASONER_MAX_TRIPLES:-}
+      - OTS_DL_DEBOUNCE_MS=${OTS_DL_DEBOUNCE_MS:-}
     # Make `host.docker.internal` (used by LD_REGISTRY_URL above) resolve on every
     # platform. Docker Desktop (Windows/macOS) provides it automatically; this mapping
     # adds the same hostname on plain Linux Docker so the config stays portable.
@@ -348,6 +391,30 @@ services:
       # First start downloads + loads the model; give it plenty of room.
       start_period: 600s
       retries: 10
+
+  # OWL 2 DL reasoner sidecar: OWL API + HermiT (LGPL-3.0, shipped unmodified;
+  # sidecars/reasoner/). Start it with `--profile reasoner` and set in .env:
+  #   OTS_DL_BACKEND=sidecar
+  #   OTS_REASONER_TOKEN=<openssl rand -hex 32>   # shared by both services
+  # It publishes no host port: only the triplestore reaches it, over the compose
+  # network. Without a token it refuses to start.
+  reasoner:
+    build:
+      context: .
+      dockerfile: sidecars/reasoner/Dockerfile
+    # Pull the published image instead of building (needs no Java toolchain):
+    # image: ghcr.io/philipperenzen/open-triplestore-reasoner:latest
+    profiles: ["reasoner"]
+    environment:
+      - OTS_REASONER_TOKEN=${OTS_REASONER_TOKEN:-}
+      # Reasoning runs at once; more requests wait up to OTS_REASONER_QUEUE_WAIT_MS, then 503.
+      - OTS_REASONER_CONCURRENCY=${OTS_REASONER_CONCURRENCY:-2}
+      # Inconsistency explanations (a minimal inconsistent subset) up to this many axioms; 0 = off.
+      - OTS_REASONER_EXPLAIN_MAX_AXIOMS=${OTS_REASONER_EXPLAIN_MAX_AXIOMS:-2000}
+      - JAVA_OPTS=${REASONER_JAVA_OPTS:--XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError}
+    restart: unless-stopped
+    # HermiT keeps the whole ontology and its tableau in memory; the heap is 75% of this.
+    mem_limit: ${REASONER_MEM_LIMIT:-4g}
 
 volumes:
   triplestore_data:

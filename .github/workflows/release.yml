@@ -8,6 +8,9 @@
 #    and publishes a GitHub Release with those notes.
 # 2. publish-image — builds the 3-stage Dockerfile (its default CARGO_FEATURES:
 #    `full`, `saml` and the SQL connectors) and pushes it to GHCR (ghcr.io/philipperenzen/open-triplestore).
+# 3. publish-reasoner-image — builds the OWL 2 DL reasoner sidecar
+#    (sidecars/reasoner/Dockerfile: OWL API + HermiT) and pushes it to GHCR
+#    (ghcr.io/philipperenzen/open-triplestore-reasoner), same tags.
 name: Release
 
 on:
@@ -159,6 +162,45 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  publish-reasoner-image:
+    name: Build & push reasoner sidecar image
+    runs-on: ubuntu-latest
+    needs: release-notes
+    if: github.repository == 'philipperenzen/open-triplestore'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+
+      # As for the main image, the first push creates the package as *private*.
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags & labels
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/philipperenzen/open-triplestore-reasoner
+          tags: |
+            type=semver,pattern={{version}},value=${{ env.TAG }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.TAG }}
+            type=raw,value=latest,enable=${{ needs.release-notes.outputs.latest == 'true' }}
+
+      # The build context is the repository root (the image ships LICENSES/ and
+      # NOTICE); sidecars/reasoner/Dockerfile.dockerignore narrows it.
+      - name: Build and push image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: sidecars/reasoner/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

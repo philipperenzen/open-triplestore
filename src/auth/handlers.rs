@@ -19,6 +19,7 @@ use super::middleware::AuthenticatedUser;
 use super::models::*;
 use super::password;
 use super::{dataset_graph, secret, totp, user_graph, validate};
+use crate::server::client_ip::ClientIp;
 use crate::server::{AppState, CookieConfig};
 
 /// Runtime admin toggle (app_settings key): allow public self-registration of
@@ -848,16 +849,18 @@ fn dummy_password_hash() -> &'static str {
 }
 
 /// POST /api/auth/login
+#[allow(clippy::too_many_arguments)] // axum extractors, one per capability
 pub async fn login(
     State(db): State<Arc<AuthDb>>,
     State(jwt_config): State<Arc<JwtConfig>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(cookie_config): State<CookieConfig>,
     State(state): State<AppState>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> Result<Response, (StatusCode, String)> {
-    let ip = audit::client_ip(&headers, None);
+    let ip = client_ip.as_string();
     let ua = audit::user_agent(&headers);
     let req_id = audit::request_id_from_headers(&headers);
 
@@ -1012,6 +1015,7 @@ pub async fn verify_2fa(
     State(jwt_config): State<Arc<JwtConfig>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(cookie_config): State<CookieConfig>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<MfaVerifyRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -1028,7 +1032,7 @@ pub async fn verify_2fa(
         ));
     }
 
-    let ip = audit::client_ip(&headers, None);
+    let ip = client_ip.as_string();
     let ua = audit::user_agent(&headers);
     let req_id = audit::request_id_from_headers(&headers);
 
@@ -1110,7 +1114,7 @@ pub async fn verify_2fa(
         let mut b = AuditEventBuilder::new(AuditEventType::LoginSuccess, AuditOutcome::Success)
             .actor(&user.id, &user.username, user.role.as_str())
             .details(serde_json::json!({ "mfa": mfa_method }));
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -1310,6 +1314,7 @@ pub async fn logout(
     State(audit_log): State<Arc<AuditLogger>>,
     State(cookie_config): State<CookieConfig>,
     State(base_url): State<crate::server::BaseUrl>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
@@ -1369,7 +1374,7 @@ pub async fn logout(
                 "idp_logout": saml_logout_url.is_some(),
             }));
         }
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -1526,6 +1531,7 @@ pub async fn change_password(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -1567,7 +1573,7 @@ pub async fn change_password(
     {
         let mut b = AuditEventBuilder::new(AuditEventType::PasswordChanged, AuditOutcome::Success)
             .actor(&current_user.user_id, &user.username, user.role.as_str());
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -1621,6 +1627,7 @@ pub async fn admin_set_guest_registration(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     headers: axum::http::HeaderMap,
     Json(req): Json<GuestRegistrationRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -1647,7 +1654,7 @@ pub async fn admin_set_guest_registration(
         .actor_id(&current_user.user_id)
         .resource("setting", GUEST_SELF_REGISTRATION_SETTING)
         .details(serde_json::json!({ "enabled": req.enabled, "guests_swept": swept }));
-    b.ip_address = audit::client_ip(&headers, None);
+    b.ip_address = client_ip.as_string();
     b.user_agent = audit::user_agent(&headers);
     b.request_id = audit::request_id_from_headers(&headers);
     audit_log.log(b);
@@ -1666,6 +1673,7 @@ pub async fn verify_email(
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(state): State<AppState>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<VerifyEmailRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -1722,7 +1730,7 @@ pub async fn verify_email(
         let mut b = AuditEventBuilder::new(event, AuditOutcome::Success)
             .actor(&user.id, &user.username, user.role.as_str())
             .details(serde_json::json!({ "email": email_now }));
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -1787,6 +1795,7 @@ pub async fn forgot_password(
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(state): State<AppState>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<ForgotPasswordRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -1817,7 +1826,7 @@ pub async fn forgot_password(
                     )
                     .actor_username(user.username.clone());
                     b.actor_id = Some(user.id.clone());
-                    b.ip_address = audit::client_ip(&headers, None);
+                    b.ip_address = client_ip.as_string();
                     b.user_agent = audit::user_agent(&headers);
                     b.request_id = audit::request_id_from_headers(&headers);
                     audit_log.log(b);
@@ -1836,6 +1845,7 @@ pub async fn forgot_password(
 pub async fn reset_password(
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<ResetPasswordRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -1880,7 +1890,7 @@ pub async fn reset_password(
         let mut b = AuditEventBuilder::new(AuditEventType::PasswordChanged, AuditOutcome::Success)
             .actor(&user.id, &user.username, user.role.as_str())
             .details(serde_json::json!({ "via": "reset_token" }));
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -1895,6 +1905,7 @@ pub async fn forgot_username(
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(state): State<AppState>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<ForgotUsernameRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -1912,7 +1923,7 @@ pub async fn forgot_username(
                 )
                 .actor_username(user.username.clone());
                 b.actor_id = Some(user.id.clone());
-                b.ip_address = audit::client_ip(&headers, None);
+                b.ip_address = client_ip.as_string();
                 b.user_agent = audit::user_agent(&headers);
                 b.request_id = audit::request_id_from_headers(&headers);
                 audit_log.log(b);
@@ -1934,6 +1945,7 @@ pub async fn change_email(
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(state): State<AppState>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<ChangeEmailRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -1994,7 +2006,7 @@ pub async fn change_email(
                 AuditEventBuilder::new(AuditEventType::EmailChangeRequested, AuditOutcome::Success)
                     .actor(&user.id, &user.username, user.role.as_str())
                     .details(serde_json::json!({ "new_email": new_email }));
-            b.ip_address = audit::client_ip(&headers, None);
+            b.ip_address = client_ip.as_string();
             b.user_agent = audit::user_agent(&headers);
             b.request_id = audit::request_id_from_headers(&headers);
             audit_log.log(b);
@@ -2021,7 +2033,7 @@ pub async fn change_email(
             let mut b = AuditEventBuilder::new(AuditEventType::EmailChanged, AuditOutcome::Success)
                 .actor(&user.id, &user.username, user.role.as_str())
                 .details(serde_json::json!({ "email": new_email, "direct": true }));
-            b.ip_address = audit::client_ip(&headers, None);
+            b.ip_address = client_ip.as_string();
             b.user_agent = audit::user_agent(&headers);
             b.request_id = audit::request_id_from_headers(&headers);
             audit_log.log(b);
@@ -2077,6 +2089,7 @@ pub async fn totp_enable(
     State(db): State<Arc<AuthDb>>,
     State(jwt_config): State<Arc<JwtConfig>>,
     State(audit_log): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<TotpEnableRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -2121,7 +2134,7 @@ pub async fn totp_enable(
     {
         let mut b = AuditEventBuilder::new(AuditEventType::TwoFactorEnabled, AuditOutcome::Success)
             .actor(&user.id, &user.username, user.role.as_str());
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -2140,6 +2153,7 @@ pub async fn totp_disable(
     State(db): State<Arc<AuthDb>>,
     State(jwt_config): State<Arc<JwtConfig>>,
     State(audit_log): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<TotpDisableRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -2201,7 +2215,7 @@ pub async fn totp_disable(
             AuditOutcome::Success,
         )
         .actor(&user.id, &user.username, user.role.as_str());
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -2230,6 +2244,7 @@ pub async fn create_api_token(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<CreateApiTokenRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -2301,7 +2316,7 @@ pub async fn create_api_token(
             .actor_id(&current_user.user_id)
             .resource("api_token", &token.id)
             .details(serde_json::json!({ "name": token.name, "scopes": token.scopes }));
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -2325,6 +2340,7 @@ pub async fn revoke_api_token(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Path(token_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -2344,7 +2360,7 @@ pub async fn revoke_api_token(
         let mut b = AuditEventBuilder::new(AuditEventType::TokenRevoked, AuditOutcome::Success)
             .actor_id(&current_user.user_id)
             .resource("api_token", &token_id);
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -2386,6 +2402,7 @@ pub async fn admin_create_user(
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(state): State<AppState>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Json(req): Json<AdminCreateUserRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -2451,7 +2468,7 @@ pub async fn admin_create_user(
             .actor_id(&current_user.user_id)
             .resource("user", &user.id)
             .details(serde_json::json!({ "username": user.username, "role": role.as_str() }));
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -2495,11 +2512,13 @@ pub async fn admin_list_user_identities(
 }
 
 /// PUT /api/admin/users/:user_id
+#[allow(clippy::too_many_arguments)] // axum extractors, one per capability
 pub async fn admin_update_user(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(state): State<AppState>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Path(user_id): Path<String>,
     Json(req): Json<AdminUpdateUserRequest>,
@@ -2583,7 +2602,7 @@ pub async fn admin_update_user(
                 "from": target.role.as_str(),
                 "to": new_role.as_str(),
             }));
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -2620,7 +2639,7 @@ pub async fn admin_update_user(
         let mut b = AuditEventBuilder::new(evt, AuditOutcome::Success)
             .actor_id(&current_user.user_id)
             .resource("user", &user_id);
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -2647,6 +2666,7 @@ pub async fn admin_delete_user(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Path(user_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -2683,7 +2703,7 @@ pub async fn admin_delete_user(
             .actor_id(&current_user.user_id)
             .resource("user", &user_id)
             .details(serde_json::json!({ "via": "admin_delete_user" }));
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -2697,6 +2717,7 @@ pub async fn admin_reset_password(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Path(user_id): Path<String>,
     Json(req): Json<AdminResetPasswordRequest>,
@@ -2739,7 +2760,7 @@ pub async fn admin_reset_password(
             AuditEventBuilder::new(AuditEventType::PasswordResetForced, AuditOutcome::Success)
                 .actor_id(&current_user.user_id)
                 .resource("user", &user_id);
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
@@ -2754,6 +2775,7 @@ pub async fn admin_purge_user(
     State(db): State<Arc<AuthDb>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(state): State<AppState>,
+    client_ip: ClientIp,
     headers: HeaderMap,
     Path(user_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -2789,7 +2811,7 @@ pub async fn admin_purge_user(
             .actor_id(&current_user.user_id)
             .resource("user", &user_id)
             .details(serde_json::json!({ "username": target.username }));
-        b.ip_address = audit::client_ip(&headers, None);
+        b.ip_address = client_ip.as_string();
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);

@@ -13,7 +13,7 @@ image no matter what the docs say about its knobs.
 |---|---|---|---|
 | `rdf-12` | RDF 1.2 triple terms and SPARQL 1.2 accessor functions | yes | GitHub, GitLab |
 | `rdfs-entailment` | RDFS materialisation | yes (via the OWL features) | GitHub, GitLab |
-| `owl2-rl`, `owl2-el`, `owl2-ql`, `owl2-dl` | OWL 2 profile reasoners; `owl2-dl` adds the DL extension rules and the external-reasoner bridge | yes | GitHub, GitLab |
+| `owl2-rl`, `owl2-el`, `owl2-ql`, `owl2-dl` | OWL 2 profile reasoners; `owl2-dl` adds the DL backends (native rules, Konclude, the client for the bundled OWL API + HermiT reasoner sidecar), the OWL 2 DL profile check and `POST /api/reasoning/check` | yes | GitHub, GitLab |
 | `text-search`, `vocab-search` | Tantivy full-text index; vocabulary index | yes | GitHub, GitLab |
 | `ldp` | Linked Data Platform 1.0 at `/ldp/` | yes | GitHub, GitLab |
 | `shex`, `swrl` | ShEx validation; SWRL rule execution (both graded *Partial*, see [standards](standards.md)) | yes | GitHub, GitLab |
