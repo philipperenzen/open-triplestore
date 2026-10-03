@@ -263,8 +263,10 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >   hasKey, cardinality annotations) run in-process; full tableau via optional Konclude subprocess
 >   bridge (`KoncludeReasoner` in `src/reasoning/konclude_bridge.rs`).
 >   See [`docs/owl2-dl.md`](owl2-dl.md).
-> ⁸ ShEx (Shape Expressions) support via `shex` feature flag. ShExC parser, recursive descent
->   validator with cardinality checking, CLOSED/EXTRA, inverse constraints, and value sets.
+> ⁸ ShEx 2.1 via the `shex` feature flag, graded Full in [`docs/standards.md`](standards.md)
+>   (footnote 12): ShExC, ShExJ, ShExR and the ShapeMap language; partitions, recursion as a
+>   greatest fixpoint, stratified negation, store-only `IMPORT`. Passes the 2.1 part of the
+>   vendored shexTest suite; ShEx 2.next (EXTENDS/ABSTRACT) is not implemented.
 > ⁹ SWRL rule engine via `swrl` feature flag. Supports OWL/XML and text-based rule formats.
 >   Rules are translated to SPARQL INSERT WHERE and executed in a fixed-point loop.
 > ¹⁰ SHACL Core is graded Partial in [`docs/standards.md`](standards.md): one known failure in
@@ -316,6 +318,10 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > row is not claimed (footnote ⁴). The other 🟡 rows are SPARQL 1.2 and RDF 1.2/RDF-star
 > (upstream oxrdf blocker — triple-term evaluation not yet complete). The count is of ✅ cells,
 > which elsewhere in the Open Triplestore column mark feature presence (see §2.3).
+>
+> 2026-10-03: ShEx is graded Full in `docs/standards.md` (ShEx 2.1 engine, the 2.1 part of the
+> shexTest suite passes). Its row already carried a ✅, so the count does not change; the cell
+> now follows the grade rather than overstating it.
 
 ```
 Open Triplestore  ███████████████████████░░░░░░   23 / 29  (#1 open-source; GeoSPARQL, SHACL, SPARQL 1.2, RDF-star 🟡; W3C tests not claimed)

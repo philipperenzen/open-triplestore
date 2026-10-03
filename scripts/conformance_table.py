@@ -33,6 +33,9 @@ Which corpus results are published is a licence question, not a style one:
   from it.
 - The SHACL sections are under the W3C Software and Document License, which
   sets no such condition, so that row keeps its counts (`PUBLISH_SCORE`).
+- The shexTest suite (ShEx Community Group) carries the same W3C Software and
+  Document License in its own LICENSE file, and is not a W3C test suite, so
+  its row keeps its counts too.
 - The OGC validator shapes are under the Apache License 2.0; only the OGC
   authorises compliance marks for its standards, so no row claims compliance.
 """
@@ -69,6 +72,7 @@ SUITES: dict[str, tuple[str, str]] = {
     "shacl_rules_conformance": ("SHACL-AF rules", "spec-derived"),
     "shaclc_conformance": ("SHACL Compact Syntax", "spec-derived"),
     "shex_conformance": ("ShEx", "spec-derived"),
+    "shextest_conformance": ("ShEx 2.1", "**vendored shexTest corpus** (validation, representation, negative syntax/structure; manifest-driven)"),
     "swrl_conformance": ("SWRL", "spec-derived"),
     "ldp_conformance": ("LDP 1.0 (store level)", "spec-derived"),
     "ldp_http_conformance": ("LDP 1.0 (HTTP)", "spec-derived"),
@@ -91,6 +95,7 @@ def count(path: Path) -> tuple[int, int]:
 # above its KNOWN_FAILURES list, which this script reads and cross-checks.
 CORPUS_RUNNERS = {
     "w3c_shacl_conformance": 90,
+    "shextest_conformance": 1795,
     "w3c_sparql11_manifests": 450,
 }
 
@@ -98,7 +103,7 @@ CORPUS_RUNNERS = {
 # missing here is still checked, but its row carries no numbers: the W3C SPARQL
 # 1.1 sections are a subset of a W3C test suite, on which W3C's test-suite
 # policy allows no public performance claims.
-PUBLISH_SCORE = {"w3c_shacl_conformance"}
+PUBLISH_SCORE = {"w3c_shacl_conformance", "shextest_conformance"}
 
 # The note for a corpus runner whose score is not published.
 UNSCORED_NOTE = (
@@ -163,8 +168,8 @@ def render() -> str:
         "regression suites under `tests/`, plus the crate's unit tests. Only the "
         f"{len([r for r in rows if 'vendored' in r[2]])} **vendored** rows run a published "
         "corpus; every other suite is hand-written and derived from the specification text. "
-        "The SHACL and GeoSPARQL corpus results are development and regression results on the "
-        "vendored sections (`docs/conformance/`), not W3C or OGC conformance claims. The SPARQL "
+        "The SHACL, ShEx and GeoSPARQL corpus results are development and regression results on the "
+        "vendored sections (`docs/conformance/`, `docs/shex.md`), not W3C or OGC conformance claims. The SPARQL "
         "1.1 sections are a subset of a W3C test suite, so under W3C's test-suite licence policy "
         "they are used for development and bug tracking only, and no score is published for them."
     )
