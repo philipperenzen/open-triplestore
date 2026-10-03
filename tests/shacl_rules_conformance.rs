@@ -1187,9 +1187,8 @@ ex:S a sh:NodeShape ; sh:targetClass ex:Thing ;
 
 /// `?v = $this` compares values: a literal focus node `1` equals `1.0`. When
 /// `$this` occurs in the expression only, the optimizer turned `=` into
-/// `sameTerm`, which compares the terms. (Two lexical forms of one `xsd:int`
-/// would not show it: the store keeps derived integer types as canonical
-/// `xsd:integer`.)
+/// `sameTerm`, which compares the terms. The inferred triple carries the focus
+/// node as written, `"1"^^xsd:int`.
 #[test]
 fn sparql_rule_compares_a_literal_focus_node_by_value() {
     let shapes = r#"
@@ -1202,8 +1201,15 @@ ex:b ex:alt "1.0"^^xsd:decimal .
 ex:c ex:alt "2"^^xsd:int ."#;
     let store = store_with(shapes, data);
     infer(&store, "urn:shapes", &[]).unwrap();
-    assert!(ask(&store, "ASK { ex:b ex:sameCode 1 }"), "1.0 = 1");
-    assert!(!ask(&store, "ASK { ex:c ex:sameCode 1 }"), "2 != 1");
+    let one = "\"1\"^^<http://www.w3.org/2001/XMLSchema#int>";
+    assert!(
+        ask(&store, &format!("ASK {{ ex:b ex:sameCode {one} }}")),
+        "1.0 = 1"
+    );
+    assert!(
+        !ask(&store, &format!("ASK {{ ex:c ex:sameCode {one} }}")),
+        "2 != 1"
+    );
 }
 
 /// A triple-term focus node has no constant form in an expression; the rule

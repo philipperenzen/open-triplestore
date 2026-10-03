@@ -2147,3 +2147,26 @@ fn an_implicit_class_target_follows_subclass_of_rdfs_class() {
     let r = run(shapes, "ex:p a ex:Person .");
     assert!(violates(&r, "/p"), "{:?}", r.results);
 }
+
+/// A literal focus node is pre-bound as the term it is: `$this` =
+/// `"5"^^xsd:int` (kept as written) finds the triple that holds it, so the
+/// `sh:sparql` constraint reports it. Bound through its value instead, it
+/// would be `5`, find nothing and let the node pass.
+#[test]
+fn a_sparql_constraint_sees_a_literal_focus_node_as_written() {
+    let shapes = r#"
+      ex:S a sh:NodeShape ; sh:targetObjectsOf ex:code ;
+        sh:sparql [ sh:select """
+          SELECT $this WHERE { <http://example.org/a> <http://example.org/code> $this }
+        """ ] ."#;
+    let r = run(
+        shapes,
+        r#"ex:a ex:code "5"^^xsd:int , "05"^^xsd:integer . ex:b ex:code 7 ."#,
+    );
+    let flagged: Vec<&str> = r.results.iter().map(|v| v.focus_node.as_str()).collect();
+    assert_eq!(
+        flagged.len(),
+        2,
+        "both of ex:a's codes violate: {flagged:?}"
+    );
+}
