@@ -759,8 +759,13 @@ impl TripleStore {
     /// store then computes what the same run would compute in `main`.
     pub fn inherit_registered_functions(&self, main: &TripleStore) {
         let fns = main.registered_functions();
+        let graphs = main
+            .user_functions
+            .lock()
+            .map(|r| r.designated_graphs())
+            .unwrap_or_default();
         if let Ok(mut registry) = self.user_functions.lock() {
-            registry.inherit(fns);
+            registry.inherit(fns, graphs);
         }
         self.query_cache.invalidate();
     }

@@ -963,7 +963,7 @@ const CAPABILITIES_JSONLD: &str = r#"{
     { "@id": "ots:owldl",          "@type": "Standard", "title": "OWL 2 DL",                               "conformance": "Full" },
     { "@id": "ots:geosparql",      "@type": "Standard", "title": "GeoSPARQL 1.1",                          "conformance": "Partial" },
     { "@id": "ots:shaclcore",      "@type": "Standard", "title": "SHACL Core",                             "conformance": "Partial" },
-    { "@id": "ots:shacladv",       "@type": "Standard", "title": "SHACL Advanced (AF / SPARQL)",           "conformance": "Partial" },
+    { "@id": "ots:shacladv",       "@type": "Standard", "title": "SHACL Advanced (AF / SPARQL)",           "conformance": "Full" },
     { "@id": "ots:shaclc",         "@type": "Standard", "title": "SHACL-C",                                "conformance": "Partial" },
     { "@id": "ots:opm",            "@type": "Standard", "title": "OPM (Ontology for Property Management)", "conformance": "Partial" },
     { "@id": "ots:ids",            "@type": "Standard", "title": "buildingSMART IDS 1.0",                  "conformance": "Partial" },

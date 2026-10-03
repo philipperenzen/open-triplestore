@@ -266,7 +266,7 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 | **OWL 2 RL** | 🟡⁸ | ❌ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ | ❌ |
 | **OWL 2 DL** | ✅⁹ | ❌ | ❌ | ❌ | ❌ | 🔒 | ✅ | ❌ | ❌ | ❌ |
 | **SHACL Validation** | 🟡¹⁰ | ❌ | 🟡 | ❌ | 🟡 | ✅ | ✅ | ✅ | ❌ | ❌ |
-| **SHACL-AF Inference** | 🟡¹¹ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| **SHACL-AF Inference** | ✅¹¹ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
 | **ShEx** | 🟡¹² | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
 | **SWRL** | 🟡¹³ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
 
@@ -292,12 +292,14 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >   focus nodes rather than full result-set equality, and stored literals in canonical form
 >   (derived integer datatypes read back as `xsd:integer`); see
 >   [`docs/conformance/shacl.md`](conformance/shacl.md).
-> ¹¹ SHACL Advanced Features, graded Partial: SPARQL targets (including
+> ¹¹ SHACL Advanced Features, graded Full (2026-10-03): SPARQL targets (including
 >   `sh:SPARQLTargetType`) and constraints with terms pre-bound in every scope (blank-node focus
 >   nodes included), custom constraint components, `sh:SPARQLFunction` bodies that read the
->   run's data, all seven node expressions, and SPARQL and triple rules with `sh:condition` and
->   `sh:order` work; `sh:resultAnnotation` is missing, and the optional `$shapesGraph` /
->   `$currentShape` are not supported (footnote 7 of [`docs/standards.md`](standards.md)).
+>   run's data, all seven node expressions, SPARQL and triple rules with `sh:condition` and
+>   `sh:order`, `sh:resultAnnotation`, and validation under `sh:entailment` (`sh:Rules` runs the
+>   rules before validating, RDFS through `rdfs-entailment`, any other regime fails as SHACL
+>   §1.5 requires). The optional `$shapesGraph` / `$currentShape` are not supported, which the
+>   spec allows (footnote 7 of [`docs/standards.md`](standards.md)).
 > ¹² ShEx (Shape Expressions) via the `shex` feature flag, graded Partial: ShExC parser,
 >   recursive descent validator with cardinality checking, CLOSED/EXTRA, inverse constraints, and
 >   value sets; no semantic actions, imports or annotations.
@@ -380,11 +382,15 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > OWL 2 DL (with the reasoner sidecar the project ships) are graded Full in `docs/standards.md`,
 > and their cells follow. RDF Patch and LDES were regraded Full the same day; neither has a row
 > here. 13 rows are 🟡 and the W3C SPARQL 1.1 Tests row is not claimed.
+>
+> Open Triplestore recounted on 2026-10-03, 15 → 16: SHACL Advanced is graded Full in
+> `docs/standards.md` once validation honours `sh:entailment` (the `sh:Rules` and RDFS regimes,
+> every other regime a failure), and the SHACL-AF Inference cell follows. 12 rows are 🟡.
 
 ```
 Stardog           ██████████████████████░░░░░░░   22 / 29  (commercial; full OWL DL + ShEx + SWRL; GeoSPARQL 1.1 partial)
 GraphDB           █████████████████████░░░░░░░░   21 / 29  (commercial; OWL DL commercial-only; no ShEx/SWRL/LDP/RML)
-Open Triplestore  ███████████████░░░░░░░░░░░░░░   15 / 29  (own grades, Full only; 13 more rows 🟡 — 28 of 29 at least partial, the most of the ten; W3C tests not claimed)
+Open Triplestore  ████████████████░░░░░░░░░░░░░   16 / 29  (own grades, Full only; 12 more rows 🟡 — 28 of 29 at least partial, the most of the ten; W3C tests not claimed)
 Virtuoso          ██████████████░░░░░░░░░░░░░░░   14 / 29
 RDF4J 5           ██████████████░░░░░░░░░░░░░░░   14 / 29  (improved from v4)
 Jena 5            ████████████░░░░░░░░░░░░░░░░░   12 / 29  (improved from v4)

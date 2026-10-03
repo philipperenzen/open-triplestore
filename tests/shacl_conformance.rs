@@ -2289,3 +2289,269 @@ fn expression_results_name_the_expression() {
         Some("<http://www.w3.org/ns/shacl#this>".to_string())
     );
 }
+
+// ─── Entailment regimes (SHACL §1.5, SHACL-AF §8.3) ─────────────────────────
+
+/// Rules that type every `ex:age` subject `ex:Person`, and a shape that wants
+/// every `ex:Person` named. Only the inferred type makes `ex:a` a focus node.
+const ENTAILED_PERSON_SHAPES: &str = r#"
+  ex:RuleShape a sh:NodeShape ; sh:targetSubjectsOf ex:age ;
+    sh:rule [ a sh:TripleRule ; sh:subject sh:this ; sh:predicate rdf:type ; sh:object ex:Person ] .
+  ex:PersonShape a sh:NodeShape ; sh:targetClass ex:Person ;
+    sh:property [ sh:path ex:name ; sh:minCount 1 ] ."#;
+
+const ENTAILED_PERSON_DATA: &str = r#"
+  ex:a ex:age 5 .
+  ex:b ex:age 6 ; ex:name "B" ."#;
+
+/// Every quad of `store`, sorted, for before/after comparisons.
+fn all_quads(store: &TripleStore) -> Vec<String> {
+    let mut quads: Vec<String> = store
+        .store()
+        .iter()
+        .map(|q| q.unwrap().to_string())
+        .collect();
+    quads.sort();
+    quads
+}
+
+/// `sh:entailment sh:Rules`: the shapes graph's rules run first and the
+/// validation sees what they infer (SHACL-AF §8.3) — while the stored data
+/// stays exactly as it was (the inferences live in a run-local graph).
+#[test]
+fn sh_rules_entailment_validates_the_inferred_triples() {
+    let store = TripleStore::in_memory().unwrap();
+    store
+        .load_str(
+            &format!("{PFX}<urn:shapes> sh:entailment sh:Rules .\n{ENTAILED_PERSON_SHAPES}"),
+            RdfFormat::Turtle,
+            Some("urn:shapes"),
+        )
+        .unwrap();
+    store
+        .load_str(
+            &format!("{PFX}{ENTAILED_PERSON_DATA}"),
+            RdfFormat::Turtle,
+            Some("urn:data"),
+        )
+        .unwrap();
+    let before = all_quads(&store);
+
+    let r = validate(&store, "urn:shapes", &["urn:data".to_string()]).unwrap();
+    assert!(!r.conforms, "{:?}", r.results);
+    assert_eq!(
+        flagged(&r),
+        ["a".to_string()].into_iter().collect(),
+        "only the inferred, unnamed ex:Person violates: {:?}",
+        r.results
+    );
+    assert_eq!(
+        all_quads(&store),
+        before,
+        "no inferred triple reaches any stored graph"
+    );
+
+    // The same shapes without the declaration: the rules do not run.
+    let plain = run(ENTAILED_PERSON_SHAPES, ENTAILED_PERSON_DATA);
+    assert!(plain.conforms, "{:?}", plain.results);
+}
+
+/// The regime holds for a run over the unnamed default graph too.
+#[test]
+fn sh_rules_entailment_over_the_default_graph() {
+    let store = TripleStore::in_memory().unwrap();
+    store
+        .load_str(
+            &format!("{PFX}[] sh:entailment sh:Rules .\n{ENTAILED_PERSON_SHAPES}"),
+            RdfFormat::Turtle,
+            Some("urn:shapes"),
+        )
+        .unwrap();
+    store
+        .load_str(
+            &format!("{PFX}{ENTAILED_PERSON_DATA}"),
+            RdfFormat::Turtle,
+            None,
+        )
+        .unwrap();
+    let before = all_quads(&store);
+    let r = validate(&store, "urn:shapes", &[]).unwrap();
+    assert_eq!(
+        flagged(&r),
+        ["a".to_string()].into_iter().collect(),
+        "{:?}",
+        r.results
+    );
+    assert_eq!(all_quads(&store), before);
+}
+
+/// SHACL-AF §8.4 execution: rules run in `sh:order`, each seeing what the
+/// earlier ones inferred; `sh:condition` and `sh:deactivated` apply. The
+/// validation sees the end result of the chain.
+#[test]
+fn sh_rules_entailment_follows_the_rule_execution_order() {
+    let shapes = r#"
+      <urn:shapes> sh:entailment sh:Rules .
+      ex:R a sh:NodeShape ; sh:targetSubjectsOf ex:age ;
+        sh:rule [ a sh:SPARQLRule ; sh:order 2 ;
+          sh:construct "PREFIX ex: <http://example.org/> CONSTRUCT { $this a ex:Adult } WHERE { $this a ex:Person ; ex:age ?a . FILTER(?a >= 18) }" ] ;
+        sh:rule [ a sh:TripleRule ; sh:order 1 ;
+          sh:subject sh:this ; sh:predicate rdf:type ; sh:object ex:Person ] ;
+        sh:rule [ a sh:TripleRule ; sh:deactivated true ;
+          sh:subject sh:this ; sh:predicate rdf:type ; sh:object ex:Ghost ] ;
+        sh:rule [ a sh:TripleRule ; sh:condition [ sh:property [ sh:path ex:vip ; sh:minCount 1 ] ] ;
+          sh:subject sh:this ; sh:predicate rdf:type ; sh:object ex:Vip ] .
+      ex:AdultShape a sh:NodeShape ; sh:targetClass ex:Adult ;
+        sh:property [ sh:path ex:licence ; sh:minCount 1 ] .
+      ex:VipShape a sh:NodeShape ; sh:targetClass ex:Vip ;
+        sh:property [ sh:path ex:lounge ; sh:minCount 1 ] .
+      ex:GhostShape a sh:NodeShape ; sh:targetClass ex:Ghost ;
+        sh:property [ sh:path rdf:type ; sh:maxCount 0 ] ."#;
+    let data = r#"
+      ex:kid ex:age 9 .
+      ex:adult ex:age 30 .
+      ex:licensed ex:age 40 ; ex:licence "L" .
+      ex:star ex:age 10 ; ex:vip true ."#;
+    let r = try_run(shapes, data).unwrap();
+    assert_eq!(
+        flagged(&r),
+        ["adult", "star"].iter().map(|s| s.to_string()).collect(),
+        "{:?}",
+        r.results
+    );
+}
+
+/// A rule body reads the run's data graphs only: under the regime, as in
+/// `/infer`, a `GRAPH` clause in a rule cannot pull another graph's triples
+/// into the validated data.
+#[test]
+fn sh_rules_entailment_rules_read_only_the_run_data_graphs() {
+    let store = TripleStore::in_memory().unwrap();
+    store
+        .load_str(
+            &format!(
+                "{PFX}<urn:shapes> sh:entailment sh:Rules .\n\
+                 ex:R a sh:NodeShape ; sh:targetSubjectsOf ex:age ;\n\
+                   sh:rule [ a sh:SPARQLRule ;\n\
+                     sh:construct \"PREFIX ex: <http://example.org/> CONSTRUCT {{ $this ex:leak ?v }} WHERE {{ GRAPH ?g {{ ?s ex:secret ?v }} }}\" ] .\n\
+                 ex:NoLeak a sh:NodeShape ; sh:targetSubjectsOf ex:age ;\n\
+                   sh:property [ sh:path ex:leak ; sh:maxCount 0 ] ."
+            ),
+            RdfFormat::Turtle,
+            Some("urn:shapes"),
+        )
+        .unwrap();
+    store
+        .load_str(
+            &format!("{PFX}ex:a ex:age 1 ."),
+            RdfFormat::Turtle,
+            Some("urn:data"),
+        )
+        .unwrap();
+    store
+        .load_str(
+            &format!("{PFX}ex:x ex:secret \"s\" ."),
+            RdfFormat::Turtle,
+            Some("urn:secret"),
+        )
+        .unwrap();
+    let r = validate(&store, "urn:shapes", &["urn:data".to_string()]).unwrap();
+    assert!(r.conforms, "a rule saw another graph: {:?}", r.results);
+}
+
+/// Any regime the processor does not support fails the shapes graph, naming
+/// the regime (SHACL §1.5) — it is never validated as if undeclared.
+#[test]
+fn an_unsupported_entailment_regime_fails_the_shapes_graph() {
+    for (regime, needle) in [
+        (
+            "<http://www.w3.org/ns/entailment/OWL-RDF-Based>",
+            "http://www.w3.org/ns/entailment/OWL-RDF-Based",
+        ),
+        (
+            "<http://www.w3.org/ns/entailment/D>",
+            "http://www.w3.org/ns/entailment/D",
+        ),
+        ("\"sh:Rules\"", "\"sh:Rules\""),
+    ] {
+        let shapes = format!("<urn:shapes> sh:entailment {regime} .\n{ENTAILED_PERSON_SHAPES}");
+        match try_run(&shapes, ENTAILED_PERSON_DATA) {
+            Err(e) => {
+                assert!(e.contains(needle), "{regime}: the error names it: {e}");
+                assert!(e.contains("sh:entailment"), "{regime}: {e}");
+            }
+            Ok(r) => panic!("{regime}: expected a failure, got conforms={}", r.conforms),
+        }
+    }
+    // One unsupported regime next to a supported one still fails.
+    let shapes = format!(
+        "<urn:shapes> sh:entailment sh:Rules, <http://www.w3.org/ns/entailment/OWL-Direct> .\n\
+         {ENTAILED_PERSON_SHAPES}"
+    );
+    assert!(try_run(&shapes, ENTAILED_PERSON_DATA).is_err());
+}
+
+/// The RDFS regime (owner decision 2026-10-03): the data graph is validated
+/// with its RDFS entailments, computed by the `rdfs-entailment`
+/// materialiser into the run-local inferences graph.
+#[cfg(feature = "rdfs-entailment")]
+#[test]
+fn rdfs_entailment_validates_the_entailed_graph() {
+    let shapes = r#"
+      <urn:shapes> sh:entailment <http://www.w3.org/ns/entailment/RDFS> .
+      ex:PersonShape a sh:NodeShape ; sh:targetClass ex:Person ;
+        sh:property [ sh:path ex:name ; sh:minCount 1 ] ;
+        sh:property [ sh:path ex:knows ; sh:minCount 1 ] ."#;
+    let data = r#"
+      ex:worksFor rdfs:domain ex:Employee .
+      ex:Employee rdfs:subClassOf ex:Person .
+      ex:friendOf rdfs:subPropertyOf ex:knows .
+      ex:a ex:worksFor ex:acme .
+      ex:b ex:worksFor ex:acme ; ex:name "B" ; ex:friendOf ex:a ."#;
+    let store = TripleStore::in_memory().unwrap();
+    store
+        .load_str(
+            &format!("{PFX}{shapes}"),
+            RdfFormat::Turtle,
+            Some("urn:shapes"),
+        )
+        .unwrap();
+    store
+        .load_str(&format!("{PFX}{data}"), RdfFormat::Turtle, Some("urn:data"))
+        .unwrap();
+    let before = all_quads(&store);
+    let r = validate(&store, "urn:shapes", &["urn:data".to_string()]).unwrap();
+    assert_eq!(
+        flagged(&r),
+        ["a".to_string()].into_iter().collect(),
+        "ex:a is an ex:Person by domain + subclass, ex:b knows by subproperty: {:?}",
+        r.results
+    );
+    assert_eq!(all_quads(&store), before);
+}
+
+/// Both regimes together: rule output feeds RDFS and RDFS output feeds the
+/// rules, until neither adds anything.
+#[cfg(feature = "rdfs-entailment")]
+#[test]
+fn rules_and_rdfs_entailment_feed_each_other() {
+    let shapes = r#"
+      <urn:shapes> sh:entailment sh:Rules, <http://www.w3.org/ns/entailment/RDFS> .
+      ex:R1 a sh:NodeShape ; sh:targetSubjectsOf ex:age ;
+        sh:rule [ a sh:TripleRule ; sh:subject sh:this ; sh:predicate ex:employedBy ; sh:object ex:acme ] .
+      ex:R2 a sh:NodeShape ; sh:targetClass ex:Person ;
+        sh:rule [ a sh:TripleRule ; sh:subject sh:this ; sh:predicate rdf:type ; sh:object ex:Checked ] .
+      ex:CheckedShape a sh:NodeShape ; sh:targetClass ex:Checked ;
+        sh:property [ sh:path ex:name ; sh:minCount 1 ] ."#;
+    let data = r#"
+      ex:employedBy rdfs:domain ex:Person .
+      ex:a ex:age 30 .
+      ex:b ex:age 31 ; ex:name "B" ."#;
+    let r = try_run(shapes, data).unwrap();
+    assert_eq!(
+        flagged(&r),
+        ["a".to_string()].into_iter().collect(),
+        "rule → RDFS domain → rule → shape: {:?}",
+        r.results
+    );
+}

@@ -568,6 +568,52 @@ that of the store.
   `BIND ($this AS ?x)` copies it, `BOUND ($this)` is true, and `?v = $this`
   compares values (a literal focus node `1` equals `1.0`).
 
+### Validating with the rules' inferences: `sh:entailment`
+
+A shapes graph can ask for its rules to run before every validation of it
+(SHACL-AF §8.3) by declaring the `sh:Rules` entailment regime, on any node:
+
+```turtle
+<urn:example:shapes> sh:entailment sh:Rules .
+
+ex:AgeRule a sh:NodeShape ; sh:targetSubjectsOf ex:age ;
+  sh:rule [ a sh:TripleRule ; sh:subject sh:this ; sh:predicate rdf:type ; sh:object ex:Person ] .
+ex:PersonShape a sh:NodeShape ; sh:targetClass ex:Person ;
+  sh:property [ sh:path ex:name ; sh:minCount 1 ] .
+```
+
+Validated with this shapes graph, `ex:a ex:age 5 .` violates `ex:PersonShape`:
+the rule makes it an `ex:Person`, and it has no name. Without the declaration
+the rule does not run during validation and the data conforms.
+
+* **Every validation run** of the shapes graph does this: on-demand dataset
+  validation, SHACL Studio pipelines, write gates (Studio gates and the
+  dataset's validate-on-write) and the engine's `shacl::validate`. The rules run
+  with the engine `/infer` uses — `sh:order`, `sh:condition`, `sh:deactivated`,
+  to a fixed point — and the validation sees the data graphs plus everything
+  they inferred.
+* **Nothing is written.** The run copies its data graphs and the shapes graph
+  into a run-local in-memory store, materialises the inferences into a graph of
+  its own there, validates the data plus that graph, and drops the store
+  (SHACL-AF §8.4 allows exactly this split: the original data plus a dedicated
+  inferences graph). The stored data graphs are unchanged after the run, a gate
+  stores only what was written, and the regime needs no write access. `/infer`
+  is not affected by the declaration: it still materialises, as above.
+* **The rules read what they read under `/infer`:** the run's data graphs (and,
+  here, the inferences graph), nothing else — see the previous section.
+* **Cost:** the copy. A run under a regime holds its data graphs in memory a
+  second time, so it suits shapes graphs that validate datasets of moderate
+  size. Shapes graphs without the declaration are unaffected.
+
+**Other regimes.** SHACL §1.5 makes every `sh:entailment` value either a regime
+the processor validates under or a failure:
+
+| `sh:entailment` value | Behaviour |
+|---|---|
+| `sh:Rules` | The shapes graph's SHACL rules, as above. |
+| `<http://www.w3.org/ns/entailment/RDFS>` | The data's RDFS entailments (rdfs1–rdfs13, the [`rdfs-entailment`](rdfs-entailment.md) materialiser; in `full` through the OWL features) are computed into the same run-local graph. With `sh:Rules` declared too, RDFS and the rules run in turn until neither adds a triple (at most 16 rounds). A build without the feature fails the run, as below. |
+| anything else (OWL, D, a literal, …) | The run fails with an error naming the value — the dataset validation route answers with that error, a write gate refuses the write (`422`) — never a report computed as if the declaration were not there. |
+
 ---
 
 ## SPARQL-based constraints and constraint components
