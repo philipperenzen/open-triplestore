@@ -505,7 +505,7 @@ Response (JSON):
     { "graph_iri": "urn:shapes:…",
       "target_classes": ["https://example.org/ont/Book", …],
       "turtle":  "@prefix sh: <…> .\n…",
-      "shaclc":  "shape <…> { … }"      // best-effort SHACL Compact Syntax
+      "shaclc":  "shape <…> { … }"      // W3C SHACL Compact Syntax; null when it cannot carry the graph losslessly
     }
   ],
   "target_classes": [ /* union across all attached shapes */ ],

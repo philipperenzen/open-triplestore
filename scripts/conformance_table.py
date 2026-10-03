@@ -94,6 +94,7 @@ SUITES: dict[str, tuple[str, str]] = {
     "shacl_rules_conformance": ("SHACL-AF rules", "spec-derived"),
     "shacl_af_corpus": ("SHACL Advanced Features", "**vendored TopQuadrant corpus** (expression, function, rule and target tests of TopQuadrant/shacl, unmodified; dash-driven, full report equality)"),
     "shaclc_conformance": ("SHACL Compact Syntax", "spec-derived"),
+    "w3c_shaclc_conformance": ("SHACL Compact Syntax", "**vendored W3C CG test cases** (SHACL-C report, line endings normalised; parse + round trip)"),
     "shex_conformance": ("ShEx", "spec-derived"),
     "swrl_conformance": ("SWRL", "spec-derived"),
     "ldp_conformance": ("LDP 1.0 (store level)", "spec-derived"),
@@ -120,6 +121,7 @@ def count(path: Path) -> tuple[int, int]:
 CORPUS_RUNNERS = {
     "shacl_af_corpus": 9,
     "w3c_shacl_conformance": 90,
+    "w3c_shaclc_conformance": 32,
     "w3c_sparql11_manifests": 450,
     "w3c_sparql11_federation": 9,
     "w3c_owl2_dl_manifests": 235,
@@ -135,7 +137,7 @@ CORPUS_RUNNERS = {
 # missing here is still checked, but its row carries no numbers: the W3C SPARQL
 # 1.1 and JSON-LD API sections and the OWL 2 DL cases are partial runs of W3C test suites, on
 # which W3C allows no public performance claims.
-PUBLISH_SCORE = {"shacl_af_corpus", "w3c_shacl_conformance"}
+PUBLISH_SCORE = {"shacl_af_corpus", "w3c_shacl_conformance", "w3c_shaclc_conformance"}
 
 # The note for each corpus runner whose score is not published. Every
 # CORPUS_RUNNERS entry outside PUBLISH_SCORE needs one: it says why no score is

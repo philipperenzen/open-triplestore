@@ -492,6 +492,40 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   outside the datatype its property's range names) now ends an RDFS run in an
   inconsistency (422 over HTTP) instead of being ignored, and a clean RDFS run
   reports `"consistent": true` (it was `null`).
+- **SHACL-C is the W3C SHACL Compact Syntax.** The parser behind
+  `Content-Type: text/shaclc` (`PUT /api/datasets/{id}/shapes`,
+  `PUT /api/shacl/shape-graphs/{id}/turtle`, `POST /api/shaclc/parse`) now
+  implements the whole grammar and production rules of the SHACL Community
+  Group report and builds the RDF graph directly: `BASE`/`IMPORTS`/`PREFIX`,
+  `shapeClass`, several target classes after `->`, `param=value` node and
+  property parameters, `|` and `!`, `@shape` references, nested `{ }` bodies,
+  `[ … ]` arrays, full property paths, every Turtle literal form, and `.` after
+  every constraint. **Results change:** a bare non-XSD IRI after a path is now
+  `sh:class` (it was `sh:node`; write `@ex:Shape` for a shape reference), and
+  the old dialect's keywords (`closed` in the header, `pattern "x"`,
+  `// "msg"`, `or( … )`, `;`) are a `400` naming the line and column, with a
+  pointer to the dialect switch. The 32 test cases of the report are vendored
+  under `tests/fixtures/w3c-shaclc/` (W3C Software and Document License) and
+  pass, each also round-tripped through the serializer
+  (`tests/w3c_shaclc_conformance.rs`); `docs/standards.md` grades SHACL-C
+  **Full** (was Partial). Bugs of the old parser that made its Turtle invalid
+  (an undeclared `owl:` for `imports`, unescaped line breaks in messages and
+  patterns, bare `urn:` IRIs) are fixed in the legacy dialect too.
+- **SHACL-C downloads are lossless or a 422.** `GET …/shapes?format=shaclc`,
+  the Studio's `GET /api/shacl/shape-graphs/{id}/turtle?format=shaclc` and
+  `POST /api/shaclc/serialize` wrote only node shapes' first target class,
+  paths, datatypes, node kinds, counts, patterns and messages, and dropped
+  everything else without a word (`sh:class`, `sh:in`, `sh:hasValue`, ranges,
+  lengths, logical constraints, node-level constraints; complex paths came out
+  as an unparseable `_:b…`). The serializer now writes everything the syntax
+  can express, checks that its output parses back to exactly the triples it
+  wrote, and answers `422` with a `losses` list (subject, predicate, object,
+  reason) when anything is left over. Three implied triples are omitted without
+  counting as losses: `rdf:type sh:PropertyShape` and blank-node
+  `rdf:type sh:NodeShape` on shapes it writes, and `sh:minCount 0`
+  (docs/shacl.md, "Implied triples"); `?lossy=true` returns the partial
+  document with an `X-SHACLC-Losses` count and a `# INCOMPLETE:` comment block.
+  The form manifest's `shaclc` field is `null` for such a graph.
 - **Settings added in this release are named for what they cover.** Before
   release, five new settings were renamed, and the old names are not read:
   `OIDC_TOKEN_POLICY` and `OIDC_WRITE_SCOPES` are now
@@ -1122,6 +1156,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an area unit for a distance. `geof:area` takes an area unit: geodesic on a
   geographic CRS, planar on a projected one. No unit, or `uom:unity`, still
   means the CRS's own units.
+
+### Deprecated
+- **The SHACL-C dialect of 0.7 and earlier** is parsed only when a request passes
+  `?dialect=legacy`, logs a deprecation warning each time, and is accepted for
+  one more release only; `?lenient=true` now applies to it alone. The migration
+  table is in `docs/shacl.md` ("Migrating from the legacy dialect").
 
 ### Fixed
 - **Triple terms and base direction no longer get lost.** The canonical and

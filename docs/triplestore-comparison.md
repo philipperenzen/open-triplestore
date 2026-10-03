@@ -109,7 +109,8 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
   graded Full as a feature (footnote ¹⁵), SKOS as SKOS-aware inferencing (footnote ¹⁹);
   JSON-LD 1.1 is graded Partial (footnote ²⁰). One row has
   no grade there (N-Quads/TriG); its ✅
-  marks feature presence, as in the other columns.
+  marks feature presence, as in the other columns. SHACL-C, graded Full since 2026-10-03, has no
+  matrix row.
   The W3C SPARQL tests are not claimed. The other systems' cells were compiled from their documentation and
   mark feature presence, so a column-by-column count favours them. GeoSPARQL 1.1 lacks
   KML/DGGS literals and the Query Rewrite Extension (it has the geodesic `metric*` family,

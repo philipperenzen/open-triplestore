@@ -54,6 +54,10 @@ mod seed_bundles;
 mod server;
 mod shacl;
 mod shacl_studio;
+// The server serves SHACL-C through `parse_request` and the store-level
+// serializers; `parse`, `Document::base` and the graph-level entry points are
+// the library surface the conformance suites use.
+#[allow(dead_code, unused_imports)]
 mod shaclc;
 #[cfg(feature = "shex")]
 mod shex;
