@@ -2976,11 +2976,12 @@ impl TripleStore {
                 ))
             }
         }
-        let mut sparql: String = graph_iris
-            .iter()
-            .map(|iri| format!("DROP SILENT GRAPH <{iri}> ;\n"))
-            .collect();
-        sparql.push_str(update);
+        // The update first: it may open with a prologue (`PREFIX`), which the
+        // parser accepts only at the start of the request, not after a `;`.
+        let mut sparql = update.to_string();
+        for iri in graph_iris {
+            sparql.push_str(&format!(" ;\nDROP SILENT GRAPH <{iri}>"));
+        }
 
         let mut targets = dropped.clone();
         targets.extend(written.iter().cloned());
@@ -4331,7 +4332,7 @@ mod tests {
         store
             .drop_graphs_with_update(
                 &["urn:v1"],
-                "DELETE WHERE { GRAPH <urn:reg> { <urn:s0> ?p ?o } }",
+                "PREFIX ex: <urn:> DELETE WHERE { GRAPH <urn:reg> { ex:s0 ?p ?o } }",
                 &["urn:reg"],
             )
             .unwrap();
