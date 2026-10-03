@@ -130,8 +130,13 @@ Vendored source code:
     Apache-2.0, at your option; Copyright (c) 2018 Oxigraph developers. Both
     licence texts are beside it. Modified: it rebuilds triple terms without
     reading their literals as values.
-    vendor/README.md describes every change in both crates, and
-    vendor/oxigraph/UPSTREAM-PR.md the changes as proposed upstream.
+  - oxjsonld 0.2.6 (vendor/oxjsonld/), Oxigraph's JSON-LD parser and
+    serializer, the crate as published on crates.io (same repository, path
+    lib/oxjsonld, commit 0e81a29d27575ab69e7f85ea9c7f1058b277fcd0) —
+    dual-licensed MIT or Apache-2.0, at your option; Copyright (c) 2018
+    Oxigraph developers. Both licence texts are beside it.
+    vendor/README.md describes every change in these crates, and the
+    UPSTREAM-PR*.md files beside them the changes as proposed upstream.
 
 OWL 2 DL reasoner sidecar image (sidecars/reasoner/; published separately as
 ghcr.io/philipperenzen/open-triplestore-reasoner, started by docker-compose.yml

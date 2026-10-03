@@ -1,12 +1,15 @@
 # Vendored crates
 
-Two crates of the Oxigraph family are vendored, each changed in one place so that
-the store keeps typed literals exactly as written:
+Three crates of the Oxigraph family are vendored. Two are changed in one place each
+so that the store keeps typed literals exactly as written; the third, the JSON-LD
+processor, carries fixes for defects the W3C JSON-LD 1.1 API test suite exposes
+(see [oxjsonld](#oxjsonld) below):
 
 | Directory | Crate | Upstream (repository `oxigraph/oxigraph`) | Change |
 | --- | --- | --- | --- |
 | `oxigraph/` | `oxigraph` 0.5.11 | `lib/oxigraph` at `df37a5c98e2497135cdd4cfce01a049b78ca6740` | the literal encoder keeps lexical forms and datatypes |
 | `spareval/` | `spareval` 0.2.7 | `lib/spareval` at `0e81a29d27575ab69e7f85ea9c7f1058b277fcd0` | triple terms are rebuilt without reading their literals as values |
+| `oxjsonld/` | `oxjsonld` 0.2.6 | `lib/oxjsonld` at `0e81a29d27575ab69e7f85ea9c7f1058b277fcd0` | JSON-LD 1.1 API fixes (see [oxjsonld](#oxjsonld)) |
 
 Each directory is the crate exactly as published on crates.io (the upstream commit
 is recorded in its `.cargo_vcs_info.json`), plus the change. The workspace
@@ -15,14 +18,15 @@ is recorded in its `.cargo_vcs_info.json`), plus the change. The workspace
 ```toml
 [patch.crates-io]
 oxigraph = { path = "vendor/oxigraph" }
+oxjsonld = { path = "vendor/oxjsonld" }
 spareval = { path = "vendor/spareval" }
 ```
 
 and lists them under `[workspace] exclude`, so they are not linted, formatted or
 tested as part of this project. Every other crate of the family (`oxrdf`, `oxrdfio`,
-`oxsdatatypes`, `spargebra`, `sparopt`, `sparesults`, `oxrocksdb-sys`) still comes
+`oxsdatatypes`, `spargebra`, `sparopt`, `sparesults`, `oxrdfio`, `oxrocksdb-sys`) still comes
 from crates.io at the exact versions oxigraph 0.5.11 pins, and `Cargo.lock` only
-loses the `source`/`checksum` lines of the two entries. Path patches are used rather
+loses the `source`/`checksum` lines of the three entries. Path patches are used rather
 than git ones because `deny.toml` denies unknown git sources.
 
 ## Why
@@ -104,30 +108,37 @@ Each fork diff is its own commit, after the commit that vendored the crate
 unmodified. To see them against the published crates:
 
 ```sh
-for c in oxigraph-0.5.11:oxigraph spareval-0.2.7:spareval; do
+for c in oxigraph-0.5.11:oxigraph spareval-0.2.7:spareval oxjsonld-0.2.6:oxjsonld; do
   diff -ru ~/.cargo/registry/src/index.crates.io-*/"${c%%:*}" "vendor/${c##*:}" \
-    -x .cargo-ok -x LICENSE-MIT -x LICENSE-APACHE -x UPSTREAM-PR.md
+    -x .cargo-ok -x LICENSE-MIT -x LICENSE-APACHE -x 'UPSTREAM-PR*.md'
 done
 ```
 
 `LICENSE-MIT` and `LICENSE-APACHE` are the Oxigraph project's licence texts
 (identical to the files at the root of the upstream repository; the crates.io
 packages do not ship them). `oxigraph/UPSTREAM-PR.md` is the description of the
-changes as proposed to upstream.
+changes as proposed to upstream; `oxjsonld/UPSTREAM-PR-*.md` hold one draft per
+JSON-LD fix. None of them has been posted upstream.
+
+The `oxjsonld` crate was checked against `Cargo.lock` when it was vendored: the
+published `oxjsonld-0.2.6.crate` has the SHA-256 the lock recorded
+(`86a3e89e005662e60327027f45ec7cefd0472404e01831b5d83a3ac522cfabe0`), and the
+directory is that archive unpacked, `.cargo-ok` aside.
 
 ## Rebasing onto a new upstream release
 
 1. Bump `oxigraph` in the workspace `Cargo.toml` (and `opengraph/Cargo.toml`) and run
    `cargo fetch` with the patch section commented out, so the new crates land in
    `~/.cargo/registry/src/` (`spareval` at the version the new `oxigraph` pins).
-2. Replace `vendor/oxigraph/` and `vendor/spareval/` with the new crates, keeping
-   `LICENSE-MIT`, `LICENSE-APACHE` and `UPSTREAM-PR.md`; drop `.cargo-ok`. Commit
+2. Replace `vendor/oxigraph/`, `vendor/spareval/` and `vendor/oxjsonld/` with the
+   new crates (`oxjsonld` at the version the new `oxrdfio` pins), keeping
+   `LICENSE-MIT`, `LICENSE-APACHE` and the `UPSTREAM-PR*.md` files; drop `.cargo-ok`. Commit
    that alone. `cargo metadata` re-resolves the patched crates' dependencies; if the
    lock entries of their dependencies move to other versions than the registry
    crates had, set them back by hand and check with `cargo metadata --locked`.
 3. Re-apply each change (`git show <fork commit> -- vendor/<crate>/src` and apply it,
-   or redo it by hand: one function and a helper in each crate) in its own commit,
-   and update the commit hashes above.
+   or redo it by hand: one function and a helper in each crate; the `oxjsonld`
+   fixes are listed below) in its own commit, and update the commit hashes above.
 4. If upstream has merged an equivalent change, delete the directory, its
    `[patch.crates-io]` line, its `exclude` entry and (when both are gone) the
    `COPY vendor/` lines in the `Dockerfile` and the `vendor/**` path filters in
@@ -136,4 +147,14 @@ changes as proposed to upstream.
    `rdf11_expressions_*`, `rdf11_a_store_written_before_*` in
    `tests/rdf11_conformance.rs`, the `star_*literal*` tests in
    `tests/sparql12_conformance.rs`), the SHACL, SPARQL and RDF conformance runners,
-   and the parallel/columnar parity tests.
+   and the parallel/columnar parity tests. For `oxjsonld`: `tests/w3c_jsonld_api_manifests.rs`
+   (its known-failure list is exact, so a fix upstream shows up as an unexpected
+   pass), `tests/jsonld_document_loader_http.rs` and the lib `jsonld::` tests.
+
+## oxjsonld
+
+`oxjsonld` is the JSON-LD 1.1 parser and serializer behind `oxrdfio`, which every
+JSON-LD upload, download and remote-context fetch in the store goes through. It
+was vendored unmodified first, then each fix below went in as its own commit with
+an `UPSTREAM-PR-*.md` draft beside the crate.
+

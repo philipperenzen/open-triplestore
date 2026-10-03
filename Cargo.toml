@@ -8,7 +8,7 @@ members = [".", "opengraph", "plugins/*", "tools/*"]
 # inside the workspace directory, which would otherwise make them members: they
 # would then be linted, formatted and tested as our own code, and their
 # dev-dependencies would enter Cargo.lock.
-exclude = ["vendor/oxigraph", "vendor/spareval"]
+exclude = ["vendor/oxigraph", "vendor/oxjsonld", "vendor/spareval"]
 resolver = "2"
 
 [package]
@@ -420,4 +420,5 @@ debug = false
 # pins.
 [patch.crates-io]
 oxigraph = { path = "vendor/oxigraph" }
+oxjsonld = { path = "vendor/oxjsonld" }
 spareval = { path = "vendor/spareval" }
