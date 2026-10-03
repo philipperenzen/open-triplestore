@@ -152,13 +152,16 @@ fn esc(s: &str) -> String {
     crate::store::escape_sparql_literal(s)
 }
 
+/// The plain value of a commit-log field: an IRI's string, a literal's
+/// lexical form, a blank node's label. A triple term (RDF 1.2) has no plain
+/// value, so it keeps its N-Triples form `<<( s p o )>>` instead of vanishing.
 fn term_to_string(t: &Term) -> String {
     match t {
         Term::NamedNode(nn) => nn.as_str().to_string(),
         Term::Literal(lit) => lit.value().to_string(),
         Term::BlankNode(bn) => bn.as_str().to_string(),
         #[cfg(feature = "rdf-12")]
-        Term::Triple(_) => String::new(),
+        Term::Triple(_) => t.to_string(),
     }
 }
 
@@ -502,6 +505,22 @@ mod tests {
         r.revision = Some("bbb".into());
         r.metadata = Some(serde_json::json!({"source": "import"}));
         r
+    }
+
+    /// A triple term used to render as an empty string, which made every one
+    /// of them read back as the same (empty) value.
+    #[cfg(feature = "rdf-12")]
+    #[test]
+    fn triple_term_values_keep_their_form() {
+        let t = Term::Triple(Box::new(Triple::new(
+            NamedNode::new_unchecked("http://x/s"),
+            NamedNode::new_unchecked("http://x/p"),
+            NamedNode::new_unchecked("http://x/o"),
+        )));
+        assert_eq!(
+            term_to_string(&t),
+            "<<( <http://x/s> <http://x/p> <http://x/o> )>>"
+        );
     }
 
     #[test]

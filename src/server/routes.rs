@@ -10296,6 +10296,11 @@ fn format_term(term: &Term) -> serde_json::Value {
                 obj["xml:lang"] = serde_json::json!(lang);
                 obj["language"] = serde_json::json!(lang);
             }
+            // RDF 1.2 base direction, keyed as in the SPARQL 1.2 JSON results.
+            #[cfg(feature = "rdf-12")]
+            if let Some(dir) = lit.direction() {
+                obj["its:dir"] = serde_json::json!(dir.to_string());
+            }
             let dt = lit.datatype();
             if dt.as_str() != "http://www.w3.org/2001/XMLSchema#string" {
                 obj["datatype"] = serde_json::json!(dt.as_str());
@@ -10306,6 +10311,47 @@ fn format_term(term: &Term) -> serde_json::Value {
         ModelTerm::Triple(t) => crate::sparql::rdf12_functions::triple_term_to_json(t),
         #[cfg(not(feature = "rdf-12"))]
         _ => serde_json::json!({"type": "unknown", "value": term.to_string()}),
+    }
+}
+
+#[cfg(all(test, feature = "rdf-12"))]
+mod format_term_tests {
+    use super::format_term;
+    use oxigraph::model::{BaseDirection, Literal, NamedNode, Term, Triple};
+
+    /// The RDF 1.2 base direction is part of the literal: without `its:dir`
+    /// `"مرحبا"@ar--rtl` would read back as the different term `"مرحبا"@ar`.
+    #[test]
+    fn directional_literal_keeps_its_direction() {
+        let lit =
+            Literal::new_directional_language_tagged_literal("مرحبا", "ar", BaseDirection::Rtl)
+                .unwrap();
+        let json = format_term(&Term::Literal(lit));
+        assert_eq!(json["xml:lang"], "ar");
+        assert_eq!(json["its:dir"], "rtl");
+        assert!(json.get("datatype").is_none() || json["datatype"].is_string());
+        let plain = format_term(&Term::Literal(
+            Literal::new_language_tagged_literal_unchecked("hi", "en"),
+        ));
+        assert!(plain.get("its:dir").is_none(), "{plain}");
+    }
+
+    /// A triple term nests its components, direction included.
+    #[test]
+    fn triple_term_keeps_components_and_direction() {
+        let lit =
+            Literal::new_directional_language_tagged_literal("hello", "en", BaseDirection::Ltr)
+                .unwrap();
+        let t = Triple::new(
+            NamedNode::new_unchecked("http://ex/s"),
+            NamedNode::new_unchecked("http://ex/p"),
+            lit,
+        );
+        let json = format_term(&Term::Triple(Box::new(t)));
+        assert_eq!(json["type"], "triple");
+        assert_eq!(json["value"]["subject"]["value"], "http://ex/s");
+        assert_eq!(json["value"]["object"]["xml:lang"], "en");
+        assert_eq!(json["value"]["object"]["its:dir"], "ltr");
     }
 }
 

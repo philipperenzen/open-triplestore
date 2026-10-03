@@ -233,14 +233,14 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 | **SPARQL 1.2** (W3C WD) | 🟡² | 🟡² | 🟡 | ❌ | ❌ | 🟡 | 🟡 | 🟡 | ❌ | 🟡 |
 | **Graph Store Protocol** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
 | **RDF 1.1** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **RDF 1.2 / RDF-star** | 🟡³ | 🟡³ | 🟡 | ❌ | ❌ | 🟡 | 🟡 | 🟡 | ❌ | ❌ |
+| **RDF 1.2** (W3C CR) | 🟡³ | 🟡³ | 🟡 | ❌ | ❌ | 🟡 | 🟡 | 🟡 | ❌ | ❌ |
 | **JSON-LD 1.1** | ✅ | ✅ | ✅ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ |
 | **N-Quads / TriG** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **W3C SPARQL 1.1 Tests** | —⁴ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 > ¹ Neptune added full SPARQL Update support in v1.4 (2024).
-> ² `rdf-12` feature flag; open-triplestore and Oxigraph track the SPARQL-star draft.
-> ³ `rdf-12` / `rdf-star` feature flag in oxrdf; triple terms parseable but not fully evaluated.
+> ² Open Triplestore: *Partial* in [`docs/standards.md`](standards.md), graded against the Working Draft of 2026-10-01. The W3C SPARQL 1.2 suite runs in CI (vendored, unscored); four parser entries and one that needs numeric lexical forms kept fail, none of them blocked by an open Working Group issue ([`docs/conformance/sparql12.md`](conformance/sparql12.md)). Oxigraph runs the same engine.
+> ³ Open Triplestore: *Partial* in [`docs/standards.md`](standards.md), graded against the Candidate Recommendations of 2026-04-07. Triple terms, reifiers, annotations and base direction parse, store, query and serialize, and the W3C RDF 1.2 syntax suites run in CI (vendored, unscored); what fails is numeric literals whose lexical form storage rewrites, and four `rdf:XMLLiteral` entries under an open W3C issue ([`docs/conformance/rdf12.md`](conformance/rdf12.md)). Oxigraph has the same parsers and storage.
 > ⁴ Not claimed. Open Triplestore runs a hand-written, spec-derived SPARQL 1.1 suite (`tests/w3c_sparql11_conformance.rs`) and, for development and bug tracking, the query and update sections of the W3C SPARQL 1.1 test suite from w3c/rdf-tests, vendored unmodified (`tests/w3c_sparql11_manifests.rs`). Those sections are a subset of a W3C test suite, on which W3C's test-suite licence policy (https://www.w3.org/copyright/test-suites-licenses/) allows no performance claims, so no result is given here; the known evaluator gaps are tracked in `docs/conformance/sparql11.md`. The other systems' cells are as they were compiled for this comparison.
 > ⁵ Full in [`docs/standards.md`](standards.md), deny-by-default (footnote 3 there): `SERVICE`
 >   reaches only the endpoints an operator lists in `OTS_REMOTE_ALLOWLIST`, and a refused, failed
@@ -390,6 +390,11 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > (the vendored, patched SPARQL evaluator and the SPARQL dataset semantics on `/sparql`), and
 > SPARQL 1.1 Protocol, until then ungraded feature presence, is graded Full too (its cell
 > stays ✅). Four rows remain ungraded.
+>
+> SPARQL 1.2 and RDF 1.2 recounted on 2026-10-03, no change (15): both rows now run the vendored
+> W3C suites and stay 🟡, because entries other than ones blocked by an open W3C issue still
+> fail (footnotes ² ³). The "upstream oxrdf blocker" named on 2026-09-23 no longer applies:
+> triple terms are evaluated end to end.
 
 ```
 Stardog           ██████████████████████░░░░░░░   22 / 29  (commercial; full OWL DL + ShEx + SWRL; GeoSPARQL 1.1 partial)
@@ -618,15 +623,18 @@ key features:
 | Feature | Open Triplestore | Jena 5 | GraphDB 11 | Stardog 10 | QLever | Notes |
 |---------|:-----------:|:------:|:----------:|:----------:|:------:|-------|
 | Triple terms (RDF-star WHERE) | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | Natively via `rdf-12` feature; `TRIPLE()`, `SUBJECT()` etc. built-in |
-| Triple terms (annotation syntax) | ❌ | ❌ | ❌ | ❌ | ❌ | Not yet in any production system |
-| `LATERAL` join | 🟡 | 🟡 | ❌ | ❌ | ❌ | Planned for opengraph fork; parse error today. See [SPARQL 1.2 docs](sparql-12.md) for workaround |
-| `ADJUST` function | ✅ | ❌ | ❌ | ❌ | ❌ | Implemented; timezone + duration arithmetic on xsd:dateTime |
-| `CALL` expression | ❌ | ❌ | ❌ | ❌ | ❌ | Draft-only |
+| Triple terms (annotation syntax) | ✅ | ❌ | ❌ | ❌ | ❌ | `~ reifier` and `{\| \|}` in SPARQL, Turtle and TriG |
+| `LATERAL` join | ✅ | 🟡 | ❌ | ❌ | ❌ | SEP-0006, compiled into the engine; not part of the 1.2 Working Draft. See [SPARQL 1.2 docs](sparql-12.md#lateral-joins) |
+| `ADJUST` function | ✅ | ❌ | ❌ | ❌ | ❌ | SEP-0002, not part of the 1.2 Working Draft; the timezone is an `xsd:dayTimeDuration` |
+| `CALL` expression | ❌ | ❌ | ❌ | ❌ | ❌ | Not in the 1.2 Working Draft; the parser rejects it |
 | Directives (`BASE`, `PREFIX`) | ✅ | ✅ | ✅ | ✅ | ✅ | Already in SPARQL 1.1 |
 | SPARQL Results triple-term JSON | ✅ | 🟡 | 🟡 | 🟡 | ❌ | `{"type":"triple","value":{...}}` per WD spec |
 
-The `rdf-12` feature enables full RDF-star triple term parsing, querying, and
-result serialization. `LATERAL` is planned for the opengraph fork. See
+The `rdf-12` feature (part of `full`) enables RDF 1.2 triple-term parsing,
+storage, querying and result serialization. The W3C SPARQL 1.2 and RDF 1.2
+suites run in CI; the entries that still fail are listed in
+[conformance/sparql12.md](conformance/sparql12.md) and
+[conformance/rdf12.md](conformance/rdf12.md). See
 [docs/sparql-12.md](sparql-12.md) for full details and configuration.
 
 ### 7.4 ESWC 2023 Wikidata Results (relative ranking)
@@ -1107,7 +1115,7 @@ security patches not applied. Any existing deployment should migrate to QLever o
 
 | Gap | Severity | Current Workaround |
 |-----|----------|--------------------|
-| No SPARQL 1.2 full support | Medium | `rdf-12` flag + `ADJUST` function; LATERAL/CALL await Oxigraph upstream |
+| SPARQL 1.2 / RDF 1.2 graded Partial | Low | Triple terms, reifiers, base direction work end to end; the failing W3C entries (parser and numeric lexical forms, both in oxigraph) are listed in `docs/conformance/sparql12.md` and `rdf12.md` |
 | One writer: every write goes through the leader, and data is replicated in full, not sharded | Medium at very large scale | Leader–follower replication and a Raft-elected cluster give read scaling and failover ([operations.md](operations.md#replication)) |
 | Write-lock degrades readers | Medium under write load | Bulk-load then read-only |
 

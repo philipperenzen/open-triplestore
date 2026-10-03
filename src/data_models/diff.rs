@@ -283,23 +283,51 @@ fn sparql_spo(store: &TripleStore, q: &str) -> Vec<(String, String, String)> {
     results
 }
 
+/// N-Triples rendering of a term: IRIs in `<>`, escaped literals with their
+/// language tag, RDF 1.2 base direction (`"x"@ar--rtl`) or datatype, and
+/// triple terms as `<<( s p o )>>` with their components rendered the same
+/// way, so two different terms never render alike.
 fn term_str(t: Option<&oxigraph::model::Term>) -> Option<String> {
-    t.map(|t| match t {
-        oxigraph::model::Term::NamedNode(nn) => format!("<{}>", nn.as_str()),
-        oxigraph::model::Term::Literal(lit) => {
-            if let Some(lang) = lit.language() {
-                format!("\"{}\"@{}", lit.value(), lang)
-            } else {
-                let dt = lit.datatype().as_str();
-                if dt == "http://www.w3.org/2001/XMLSchema#string" {
-                    format!("\"{}\"", lit.value())
-                } else {
-                    format!("\"{}\"^^<{}>", lit.value(), dt)
-                }
-            }
-        }
-        oxigraph::model::Term::BlankNode(bn) => format!("_:{}", bn.as_str()),
-        #[cfg(feature = "rdf-12")]
-        oxigraph::model::Term::Triple(_) => "<< >>".to_string(),
-    })
+    t.map(|t| t.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::term_str;
+    use oxigraph::model::{Literal, NamedNode, Term};
+
+    /// Quotes and newlines are escaped, so a literal cannot be mistaken for
+    /// another term and two different literals never render alike.
+    #[test]
+    fn literals_are_escaped() {
+        let t = Term::Literal(Literal::new_simple_literal("say \"hi\"\nnow"));
+        assert_eq!(term_str(Some(&t)).unwrap(), r#""say \"hi\"\nnow""#);
+    }
+
+    #[cfg(feature = "rdf-12")]
+    #[test]
+    fn triple_terms_and_direction_are_kept() {
+        use oxigraph::model::{BaseDirection, Triple};
+        let dir = Literal::new_directional_language_tagged_literal("x", "ar", BaseDirection::Rtl)
+            .unwrap();
+        assert_eq!(
+            term_str(Some(&Term::Literal(dir.clone()))).unwrap(),
+            r#""x"@ar--rtl"#
+        );
+        let a = Term::Triple(Box::new(Triple::new(
+            NamedNode::new_unchecked("http://ex/s"),
+            NamedNode::new_unchecked("http://ex/p"),
+            dir,
+        )));
+        let b = Term::Triple(Box::new(Triple::new(
+            NamedNode::new_unchecked("http://ex/s"),
+            NamedNode::new_unchecked("http://ex/p"),
+            NamedNode::new_unchecked("http://ex/o"),
+        )));
+        assert_eq!(
+            term_str(Some(&a)).unwrap(),
+            r#"<<( <http://ex/s> <http://ex/p> "x"@ar--rtl )>>"#
+        );
+        assert_ne!(term_str(Some(&a)), term_str(Some(&b)));
+    }
 }

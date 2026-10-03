@@ -17,8 +17,8 @@
 //! [`skolemize`] is the forward transform; [`deskolemize`] restores blank nodes
 //! for standards-compliant blank-node output.
 
-use crate::canonical;
-use oxrdf::{BlankNode, GraphName, NamedNode, NamedOrBlankNode, Quad, Term};
+use crate::canonical::{self, map_object, map_subject};
+use oxrdf::{BlankNode, GraphName, NamedNode, NamedOrBlankNode, NamedOrBlankNodeRef, Quad};
 use std::collections::BTreeMap;
 
 /// Default base IRI under which Skolem IRIs are minted when the caller does not
@@ -56,15 +56,17 @@ pub fn skolemize(quads: &[Quad], base: &str) -> (Vec<Quad>, BTreeMap<String, Str
     (out, map)
 }
 
+/// Blank nodes inside RDF 1.2 triple terms are skolemized too, with the same
+/// IRI as the node outside the triple term, so co-reference survives.
 fn skolemize_quad(q: &Quad, m: &BTreeMap<String, String>) -> Quad {
-    let subject = match &q.subject {
-        NamedOrBlankNode::BlankNode(b) => NamedOrBlankNode::NamedNode(named(&m[b.as_str()])),
-        other => other.clone(),
+    let skolem = |n: NamedOrBlankNodeRef<'_>| match n {
+        NamedOrBlankNodeRef::BlankNode(b) => {
+            Some(NamedOrBlankNode::NamedNode(named(&m[b.as_str()])))
+        }
+        NamedOrBlankNodeRef::NamedNode(_) => None,
     };
-    let object = match &q.object {
-        Term::BlankNode(b) => Term::NamedNode(named(&m[b.as_str()])),
-        other => other.clone(),
-    };
+    let subject = map_subject(&q.subject, &skolem);
+    let object = map_object(&q.object, &skolem);
     let graph_name = match &q.graph_name {
         GraphName::BlankNode(b) => GraphName::NamedNode(named(&m[b.as_str()])),
         other => other.clone(),
@@ -91,20 +93,14 @@ fn de_iri(iri: &str, prefix: &str) -> Option<BlankNode> {
 }
 
 fn deskolemize_quad(q: &Quad, prefix: &str) -> Quad {
-    let subject = match &q.subject {
-        NamedOrBlankNode::NamedNode(n) => match de_iri(n.as_str(), prefix) {
-            Some(b) => NamedOrBlankNode::BlankNode(b),
-            None => q.subject.clone(),
-        },
-        other => other.clone(),
+    let deskolem = |n: NamedOrBlankNodeRef<'_>| match n {
+        NamedOrBlankNodeRef::NamedNode(nn) => {
+            de_iri(nn.as_str(), prefix).map(NamedOrBlankNode::BlankNode)
+        }
+        NamedOrBlankNodeRef::BlankNode(_) => None,
     };
-    let object = match &q.object {
-        Term::NamedNode(n) => match de_iri(n.as_str(), prefix) {
-            Some(b) => Term::BlankNode(b),
-            None => q.object.clone(),
-        },
-        other => other.clone(),
-    };
+    let subject = map_subject(&q.subject, &deskolem);
+    let object = map_object(&q.object, &deskolem);
     let graph_name = match &q.graph_name {
         GraphName::NamedNode(n) => match de_iri(n.as_str(), prefix) {
             Some(b) => GraphName::BlankNode(b),
@@ -118,7 +114,7 @@ fn deskolemize_quad(q: &Quad, prefix: &str) -> Quad {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxrdf::{Literal, NamedNode};
+    use oxrdf::{Literal, NamedNode, Term};
 
     fn iri(s: &str) -> NamedNode {
         NamedNode::new(s).unwrap()
@@ -260,5 +256,54 @@ mod tests {
             m1.values().collect::<std::collections::BTreeSet<_>>(),
             m2.values().collect::<std::collections::BTreeSet<_>>()
         );
+    }
+
+    /// `_:x :name "Alice" . :r rdf:reifies <<( _:x :knows :bob )>>`
+    #[cfg(feature = "sparql-12")]
+    fn reified() -> Vec<Quad> {
+        vec![
+            Quad::new(
+                NamedOrBlankNode::BlankNode(bnode("x")),
+                iri("http://ex/name"),
+                Term::Literal(Literal::new_simple_literal("Alice")),
+                GraphName::DefaultGraph,
+            ),
+            Quad::new(
+                NamedOrBlankNode::NamedNode(iri("http://ex/r")),
+                iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies"),
+                Term::Triple(Box::new(oxrdf::Triple::new(
+                    NamedOrBlankNode::BlankNode(bnode("x")),
+                    iri("http://ex/knows"),
+                    Term::NamedNode(iri("http://ex/bob")),
+                ))),
+                GraphName::DefaultGraph,
+            ),
+        ]
+    }
+
+    /// A blank node inside a triple term gets the same Skolem IRI as the node
+    /// outside it, and de-skolemizing restores the shared blank node.
+    #[cfg(feature = "sparql-12")]
+    #[test]
+    fn triple_term_blank_nodes_are_skolemized_with_coreference() {
+        let (out, map) = skolemize(&reified(), DEFAULT_SKOLEM_BASE);
+        assert_eq!(map.len(), 1);
+        let x = &map["x"];
+        let joined: String = out.iter().map(|q| format!("{q}\n")).collect();
+        assert!(!joined.contains("_:"), "no blank node survives: {joined}");
+        assert!(
+            joined.contains(&format!("<<( <{x}> <http://ex/knows> <http://ex/bob> )>>")),
+            "{joined}"
+        );
+
+        let back = deskolemize(&out, DEFAULT_SKOLEM_BASE);
+        let set = |qs: &[Quad]| {
+            canonical::canonicalize(qs)
+                .quads
+                .iter()
+                .map(|q| q.to_string())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(set(&back), set(&reified()));
     }
 }

@@ -717,6 +717,8 @@ fn seed_bag_buildings(state: &AppState) {
 // importer emits from TrueNorth, so the feed parses one datatype.
 // v16: the capabilities graph follows SHACL Core's regrade to Full (the store
 // keeps literals as written, so the W3C core section has no known failure).
+// v16: the capabilities graph names RDF 1.2 and SPARQL 1.2 by the dated drafts
+// docs/standards.md grades them against.
 // v15: the capabilities graph follows the 2026-10-03 regrades in
 // docs/standards.md: SPARQL 1.1 federation, OWL 2 QL, EL and DL (with the
 // reasoner sidecar), RDF Patch and LDES are Full.

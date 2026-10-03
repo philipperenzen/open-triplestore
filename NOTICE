@@ -654,6 +654,32 @@ Bundled test data:
     bug tracking only: no results are published for these tests, because a
     subset of a W3C test suite does not allow claims of performance or the use
     of the name W3C (https://www.w3.org/copyright/test-suites-licenses/).
+  - W3C SPARQL 1.2 test suite — tests/fixtures/w3c-sparql12/ (360 test
+    files: manifest.ttl, README.md and the ten directories it includes).
+    Copyright © 2010 W3C® (MIT, ERCIM, Keio), All Rights Reserved; Copyright
+    © 2015 W3C® (MIT, ERCIM, Keio, Beihang); from the W3C RDF & SPARQL
+    Working Group. From https://github.com/w3c/rdf-tests (sparql/sparql12),
+    commit 5e5da96bb06c551ae3ac57d30fec8116f7161b9b. An unmodified subset:
+    every file is byte-identical to upstream; the implementation reports and
+    the cover-page template are not included. Redistributed under the W3C
+    3-clause BSD License, https://www.w3.org/copyright/3-clause-bsd-license-2008/.
+    The original notice, disclaimer and licence text are in
+    tests/fixtures/w3c-sparql12/LICENSE.md. Used for development and bug
+    tracking only: no results are published for these tests.
+  - W3C RDF 1.2 and RDF 1.1 syntax test suites — tests/fixtures/w3c-rdf12/
+    (1901 test files: rdf/rdf12/manifest.ttl and the N-Triples, N-Quads,
+    Turtle, TriG and RDF/XML suites of rdf/rdf12 and of rdf/rdf11).
+    Copyright © 2004-2026 World Wide Web Consortium; some files carry their
+    own W3C copyright comment, kept unchanged. From
+    https://github.com/w3c/rdf-tests (rdf/rdf12, rdf/rdf11), commit
+    5e5da96bb06c551ae3ac57d30fec8116f7161b9b. An unmodified subset: every file
+    is byte-identical to upstream; the semantics (entailment) suites, the
+    implementation reports, templates and archives are not included.
+    Redistributed under the W3C 3-clause BSD License,
+    https://www.w3.org/copyright/3-clause-bsd-license-2008/. The original
+    notice, disclaimer and licence text are in
+    tests/fixtures/w3c-rdf12/LICENSE.md. Used for development and bug tracking
+    only: no results are published for these tests.
   - W3C OWL 2 test cases, approved — tests/fixtures/w3c-owl2/approved/all.rdf,
     byte-identical to https://www.w3.org/2009/11/owl-test/approved/all.rdf
     (Last-Modified 18 Nov 2009; SHA-256 in
