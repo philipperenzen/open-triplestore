@@ -310,6 +310,37 @@ type VoidScopedCache = std::collections::HashMap<Vec<String>, (u64, VoidStats)>;
 /// Graph sets whose statistics are kept at once; one more clears them all.
 const VOID_SCOPED_CACHE_CAP: usize = 64;
 
+/// VoID class and property partitions of a set of graphs (see
+/// [`TripleStore::void_partitions_over`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VoidPartitions {
+    /// `(class IRI, distinct instances)`, most instances first.
+    pub classes: Vec<(String, usize)>,
+    /// `(property IRI, triples)`, most triples first.
+    pub properties: Vec<(String, usize)>,
+    /// Distinct classes in all (`void:classes`), not only the listed ones.
+    pub class_count: usize,
+    /// A few subject IRIs (`void:exampleResource`).
+    pub examples: Vec<String>,
+    /// True when a list was cut at the limit.
+    pub truncated: bool,
+}
+
+/// What a linkset graph links (see [`TripleStore::void_linkset`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VoidLinkset {
+    /// `(link predicate, triples)`, most triples first: the predicates whose
+    /// objects are IRIs.
+    pub predicates: Vec<(String, usize)>,
+    /// The namespace most link objects share (up to the last `/` or `#`).
+    pub object_space: Option<String>,
+}
+
+/// [`TripleStore::void_partitions_over`]'s cache: (sorted graph set, limit) →
+/// (write generation, partitions).
+type VoidPartitionCache =
+    std::collections::HashMap<(Vec<String>, usize), (u64, std::sync::Arc<VoidPartitions>)>;
+
 fn next_instance_id() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -355,6 +386,9 @@ pub struct TripleStore {
     /// keyed by the sorted set and stamped with the write generation (see
     /// [`TripleStore::void_stats_over`]).
     void_scoped_cache: std::sync::Arc<std::sync::Mutex<VoidScopedCache>>,
+    /// VoID partitions over a set of graphs, cached like `void_scoped_cache`
+    /// (see [`TripleStore::void_partitions_over`]).
+    void_partition_cache: std::sync::Arc<std::sync::Mutex<VoidPartitionCache>>,
     /// Blank-node durability policy applied on import. Defaults to
     /// [`BlankNodeMode::Preserve`] (opt into durability via
     /// [`TripleStore::with_blank_node_mode`]).
@@ -545,6 +579,9 @@ impl TripleStore {
             void_scoped_cache: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            void_partition_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             blank_node_mode: BlankNodeMode::default(),
             cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             changes: Arc::new(changes),
@@ -579,6 +616,9 @@ impl TripleStore {
             instance_id: next_instance_id(),
             void_stats_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             void_scoped_cache: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            void_partition_cache: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
             blank_node_mode: BlankNodeMode::default(),
@@ -1086,6 +1126,147 @@ impl TripleStore {
             guard.insert(key, (generation, stats));
         }
         stats
+    }
+
+    /// VoID class and property partitions over the named graphs in `graphs`:
+    /// each class with its distinct instances, each property with its triples,
+    /// at most `limit` of each (most frequent first), the distinct class count
+    /// and up to three example subjects. Cached per graph set until the next
+    /// write.
+    ///
+    /// Partitions name the classes and predicates in the data, so callers
+    /// compute them over graphs the reader may read — a dataset's readable
+    /// graphs — and never over a store-wide aggregate, which would name the
+    /// vocabulary of graphs the reader may not see.
+    pub fn void_partitions_over(
+        &self,
+        graphs: &std::collections::HashSet<String>,
+        limit: usize,
+    ) -> std::sync::Arc<VoidPartitions> {
+        let mut key: Vec<String> = graphs.iter().cloned().collect();
+        key.sort_unstable();
+        let key = (key, limit);
+        let generation = self.write_generation();
+        if let Ok(guard) = self.void_partition_cache.lock() {
+            if let Some((g, parts)) = guard.get(&key) {
+                if *g == generation {
+                    return std::sync::Arc::clone(parts);
+                }
+            }
+        }
+        let values: String = key
+            .0
+            .iter()
+            .filter_map(|g| oxigraph::model::NamedNode::new(g.as_str()).ok())
+            .map(|g| g.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut parts = VoidPartitions::default();
+        if !values.is_empty() {
+            let rows = |q: &str| -> Vec<(String, usize)> {
+                match self.query(q) {
+                    Ok(oxigraph::sparql::QueryResults::Solutions(sols)) => sols
+                        .flatten()
+                        .filter_map(|r| {
+                            let iri = match r.get(0) {
+                                Some(oxigraph::model::Term::NamedNode(n)) => n.as_str().to_string(),
+                                _ => return None,
+                            };
+                            let n = match r.get(1) {
+                                Some(oxigraph::model::Term::Literal(l)) => {
+                                    l.value().parse().ok()?
+                                }
+                                _ => 0,
+                            };
+                            Some((iri, n))
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                }
+            };
+            let take = limit.saturating_add(1);
+            parts.classes = rows(&format!(
+                "SELECT ?c (COUNT(DISTINCT ?s) AS ?n) WHERE {{ VALUES ?g {{ {values} }} \
+                 GRAPH ?g {{ ?s a ?c }} FILTER(isIRI(?c)) }} GROUP BY ?c ORDER BY DESC(?n) ?c LIMIT {take}"
+            ));
+            parts.properties = rows(&format!(
+                "SELECT ?p (COUNT(*) AS ?n) WHERE {{ VALUES ?g {{ {values} }} \
+                 GRAPH ?g {{ ?s ?p ?o }} }} GROUP BY ?p ORDER BY DESC(?n) ?p LIMIT {take}"
+            ));
+            parts.truncated = parts.classes.len() > limit || parts.properties.len() > limit;
+            parts.classes.truncate(limit);
+            parts.properties.truncate(limit);
+            parts.class_count = match self.query(&format!(
+                "SELECT (COUNT(DISTINCT ?c) AS ?n) WHERE {{ VALUES ?g {{ {values} }} \
+                 GRAPH ?g {{ ?s a ?c }} FILTER(isIRI(?c)) }}"
+            )) {
+                Ok(oxigraph::sparql::QueryResults::Solutions(mut sols)) => sols
+                    .next()
+                    .and_then(|r| r.ok())
+                    .and_then(|r| match r.get(0) {
+                        Some(oxigraph::model::Term::Literal(l)) => l.value().parse().ok(),
+                        _ => None,
+                    })
+                    .unwrap_or(0),
+                _ => 0,
+            };
+            parts.examples = rows(&format!(
+                "SELECT DISTINCT ?s WHERE {{ VALUES ?g {{ {values} }} \
+                 GRAPH ?g {{ ?s ?p ?o }} FILTER(isIRI(?s)) }} LIMIT 3"
+            ))
+            .into_iter()
+            .map(|(s, _)| s)
+            .collect();
+        }
+        let parts = std::sync::Arc::new(parts);
+        if let Ok(mut guard) = self.void_partition_cache.lock() {
+            if guard.len() >= VOID_SCOPED_CACHE_CAP && !guard.contains_key(&key) {
+                guard.clear();
+            }
+            guard.insert(key, (generation, std::sync::Arc::clone(&parts)));
+        }
+        parts
+    }
+
+    /// What the linkset graph `graph` links: its link predicates (those with
+    /// IRI objects), at most `limit`, and the namespace most link objects
+    /// share. Not cached: a linkset is one graph, and the catalogue asks only
+    /// for linksets the reader may read.
+    pub fn void_linkset(&self, graph: &str, limit: usize) -> VoidLinkset {
+        let Ok(g) = oxigraph::model::NamedNode::new(graph) else {
+            return VoidLinkset::default();
+        };
+        let mut out = VoidLinkset::default();
+        if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = self.query(&format!(
+            "SELECT ?p (COUNT(*) AS ?n) WHERE {{ GRAPH {g} {{ ?s ?p ?o FILTER(isIRI(?o)) }} }} \
+             GROUP BY ?p ORDER BY DESC(?n) ?p LIMIT {limit}"
+        )) {
+            for r in sols.flatten() {
+                if let (
+                    Some(oxigraph::model::Term::NamedNode(p)),
+                    Some(oxigraph::model::Term::Literal(n)),
+                ) = (r.get(0), r.get(1))
+                {
+                    out.predicates
+                        .push((p.as_str().to_string(), n.value().parse().unwrap_or(0)));
+                }
+            }
+        }
+        if let Ok(oxigraph::sparql::QueryResults::Solutions(mut sols)) = self.query(&format!(
+            "SELECT ?ns (COUNT(*) AS ?n) WHERE {{ GRAPH {g} {{ ?s ?p ?o FILTER(isIRI(?o)) }} \
+             BIND(REPLACE(STR(?o), \"[^/#]*$\", \"\") AS ?ns) }} GROUP BY ?ns ORDER BY DESC(?n) ?ns LIMIT 1"
+        )) {
+            out.object_space = sols
+                .next()
+                .and_then(|r| r.ok())
+                .and_then(|r| match r.get(0) {
+                    Some(oxigraph::model::Term::Literal(l)) if !l.value().is_empty() => {
+                        Some(l.value().to_string())
+                    }
+                    _ => None,
+                });
+        }
+        out
     }
 
     /// Query options for every query of this store: the server's own

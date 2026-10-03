@@ -1,9 +1,10 @@
-//! DCAT-AP-NL catalogue (7.2): under `DCAT_PROFILE=dcat-ap-nl` the catalogue
-//! carries the application profile's mandatory properties — proven by
-//! validating the served document against a SHACL shape set that encodes
-//! the DCAT-AP 3 / DCAT-AP-NL 3 mandatory-property tables — is negotiable in
-//! JSON-LD and RDF/XML, advertises LDES streams, counts named-graph data in
-//! its VoID statistics, and cannot be corrupted by hostile metadata.
+//! DCAT-AP-NL catalogue (7.2): under `DCAT_PROFILE=dcat-ap-nl` the served
+//! catalogue satisfies SEMIC's published DCAT-AP 3.0.1 shapes (validated
+//! through a SHACL Studio pipeline over the served document; the Geonovum
+//! DCAT-AP-NL 3 shapes are checked in `tests/dcat_conformance.rs`), is
+//! negotiable in JSON-LD and RDF/XML, advertises LDES streams, counts
+//! named-graph data in its VoID statistics, and cannot be corrupted by hostile
+//! metadata.
 //!
 //! Own binary: `DCAT_PROFILE` and `CATALOG_*` are process-wide.
 
@@ -20,43 +21,31 @@ use oxigraph::sparql::QueryResults;
 use serde_json::{json, Value};
 use tower::ServiceExt as _;
 
-/// The mandatory-property tables of DCAT-AP 3 (Catalogue, Dataset,
-/// Distribution, Agent, Data Service) plus DCAT-AP-NL 3's additions on
-/// Dataset (publisher, identifier, language) and Distribution (format,
-/// media type, licence).
-const AP_NL_SHAPES: &str = r#"
-@prefix sh: <http://www.w3.org/ns/shacl#> .
-@prefix dcat: <http://www.w3.org/ns/dcat#> .
-@prefix dct: <http://purl.org/dc/terms/> .
-@prefix foaf: <http://xmlns.com/foaf/0.1/> .
-@prefix ex: <urn:dcat-ap-nl:> .
-ex:Catalog a sh:NodeShape ; sh:targetClass dcat:Catalog ;
-  sh:property [ sh:path dct:title ; sh:minCount 1 ] ,
-              [ sh:path dct:description ; sh:minCount 1 ] ,
-              [ sh:path dct:publisher ; sh:minCount 1 ; sh:class foaf:Agent ] ,
-              [ sh:path dcat:dataset ; sh:minCount 1 ] ,
-              [ sh:path dct:language ; sh:minCount 1 ; sh:nodeKind sh:IRI ] ,
-              [ sh:path dct:modified ; sh:minCount 1 ] ,
-              [ sh:path foaf:homepage ; sh:minCount 1 ] .
-ex:Dataset a sh:NodeShape ; sh:targetClass dcat:Dataset ;
-  sh:property [ sh:path dct:title ; sh:minCount 1 ] ,
-              [ sh:path dct:description ; sh:minCount 1 ] ,
-              [ sh:path dct:publisher ; sh:minCount 1 ; sh:class foaf:Agent ] ,
-              [ sh:path dct:identifier ; sh:minCount 1 ] ,
-              [ sh:path dct:language ; sh:minCount 1 ; sh:nodeKind sh:IRI ] ,
-              [ sh:path dct:accessRights ; sh:minCount 1 ; sh:nodeKind sh:IRI ] ,
-              [ sh:path dcat:distribution ; sh:minCount 1 ] .
-ex:Distribution a sh:NodeShape ; sh:targetClass dcat:Distribution ;
-  sh:property [ sh:path dcat:accessURL ; sh:minCount 1 ; sh:nodeKind sh:IRI ] ,
-              [ sh:path dct:format ; sh:minCount 1 ; sh:nodeKind sh:IRI ] ,
-              [ sh:path dcat:mediaType ; sh:minCount 1 ; sh:nodeKind sh:IRI ] ,
-              [ sh:path dct:license ; sh:minCount 1 ; sh:nodeKind sh:IRI ] .
-ex:Agent a sh:NodeShape ; sh:targetClass foaf:Agent ;
-  sh:property [ sh:path foaf:name ; sh:minCount 1 ] .
-ex:DataService a sh:NodeShape ; sh:targetClass dcat:DataService ;
-  sh:property [ sh:path dct:title ; sh:minCount 1 ] ,
-              [ sh:path dcat:endpointURL ; sh:minCount 1 ; sh:nodeKind sh:IRI ] .
-"#;
+/// SEMIC's published DCAT-AP 3.0.1 shapes (mandatory properties,
+/// cardinalities, node kinds and ranges), vendored unmodified in
+/// `tests/fixtures/semic-dcat-ap-3.0.1/` (CC BY 4.0, see its LICENSE.md).
+fn dcat_ap_shapes() -> String {
+    let dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/semic-dcat-ap-3.0.1"
+    );
+    let g = "urn:test:shapes";
+    let s = TripleStore::in_memory().unwrap();
+    for f in ["dcat-ap-SHACL.ttl", "ranges.ttl"] {
+        let ttl = std::fs::read_to_string(format!("{dir}/{f}")).unwrap();
+        s.load_str(&ttl, RdfFormat::Turtle, Some(g)).unwrap();
+    }
+    // The two files link five property shapes neither defines (no `sh:path`):
+    // an ill-formed shapes graph the engine refuses whole. Drop those links,
+    // which constrain nothing (see tests/fixtures/semic-dcat-ap-3.0.1/PROVENANCE.md).
+    s.update(&format!(
+        "DELETE {{ GRAPH <{g}> {{ ?s <http://www.w3.org/ns/shacl#property> ?ps }} }} \
+         WHERE {{ GRAPH <{g}> {{ ?s <http://www.w3.org/ns/shacl#property> ?ps \
+         FILTER NOT EXISTS {{ ?ps <http://www.w3.org/ns/shacl#path> ?p }} }} }}"
+    ))
+    .unwrap();
+    String::from_utf8(s.graph_store_get(Some(g), RdfFormat::Turtle).unwrap()).unwrap()
+}
 
 async fn fetch(
     app: &Router,
@@ -224,7 +213,7 @@ async fn dcat_ap_nl_catalogue_validates_negotiates_and_survives_hostile_metadata
         Method::POST,
         "/api/shacl/shape-graphs",
         &token,
-        json!({ "name": "dcat-ap-nl", "visibility": "private", "turtle": AP_NL_SHAPES }),
+        json!({ "name": "dcat-ap-3.0.1", "visibility": "private", "turtle": dcat_ap_shapes() }),
     )
     .await;
     assert_eq!(st, StatusCode::CREATED, "{txt}");
@@ -243,7 +232,7 @@ async fn dcat_ap_nl_catalogue_validates_negotiates_and_survives_hostile_metadata
     assert_eq!(st, StatusCode::OK, "{txt}");
     assert_eq!(
         run["conforms"], true,
-        "the catalogue satisfies the DCAT-AP-NL mandatory properties: {txt}"
+        "the served catalogue satisfies the DCAT-AP 3.0.1 shapes: {txt}"
     );
 
     // 3. VoID statistics see the named graph.

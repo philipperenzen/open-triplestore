@@ -103,7 +103,7 @@ SUITES: dict[str, tuple[str, str]] = {
     "swrl_conformance": ("SWRL", "spec-derived"),
     "ldp_conformance": ("LDP 1.0 (store level)", "spec-derived"),
     "ldp_http_conformance": ("LDP 1.0 (HTTP)", "spec-derived"),
-    "dcat_conformance": ("DCAT 3 / DCAT-AP 3 / VoID", "spec-derived"),
+    "dcat_conformance": ("DCAT 3 / DCAT-AP 3 / VoID", "spec-derived + **vendored SEMIC DCAT-AP 3.0.1 shapes** (unmodified; Geonovum DCAT-AP-NL 3 shapes fetched in CI)"),
     "ldes_conformance": ("LDES 1.0 / TREE", "spec-derived"),
     "rml_conformance": ("RML / R2RML", "spec-derived"),
     "rdf_patch_conformance": ("RDF Patch (RDF Delta)", "spec-derived"),

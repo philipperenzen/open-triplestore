@@ -778,6 +778,14 @@ Bundled test data:
     the OGC Document License Agreement
     (https://www.ogc.org/about/policies/document-license-agreement/). Test
     results are not an OGC compliance certification.
+  - SEMIC DCAT-AP 3.0.1 SHACL shapes — tests/fixtures/semic-dcat-ap-3.0.1/
+    dcat-ap-SHACL.ttl and ranges.ttl. © European Union, SEMIC, from
+    https://github.com/SEMICeu/DCAT-AP (releases/3.0.1/shacl/), commit
+    4470b8ea907b7eb9ec55ab22befd1ecd2210ff32. Licensed under CC BY 4.0,
+    https://creativecommons.org/licenses/by/4.0/ ; the licence text is in
+    tests/fixtures/semic-dcat-ap-3.0.1/LICENSE-CC-BY-4.0.txt, details in its
+    LICENSE.md and PROVENANCE.md. Unmodified. Test results are not a
+    certification by SEMIC or the European Commission.
 
 Demo content (seeded datasets):
 
@@ -846,6 +854,12 @@ Fetched at run time, not redistributed:
   - GWSW (examples/seed-bundles/gwsw) — © Stichting RIONED. The ontology states
     no licence (RIONED's CC0 covers the data on the GWSW Server) and quotes
     definitions from NEN and EN standards, so it is downloaded by fetch.sh and
+    not redistributed.
+  - DCAT-AP-NL 3 SHACL shapes (tests/fixtures/geonovum-dcat-ap-nl-3/) — by
+    Geonovum, https://github.com/Geonovum/DCAT-AP-NL30 (shapes/), commit
+    5106d18720fbe6ad56905f43e87fa9fe544104a7. The specification is published
+    under CC BY 4.0, but the repository has no licence file, so the shapes are
+    downloaded by that folder's fetch.sh for a test run (sha256-checked) and
     not redistributed.
 
 The licenses of bundled and dependency components are unaffected by the Commons

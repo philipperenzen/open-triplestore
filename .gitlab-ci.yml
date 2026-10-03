@@ -239,6 +239,8 @@ plugins:
 # NEN 2660-2, IMBOR and GWSW are not vendored (NEN 2660-2 carries no licence
 # that allows redistributing it), so each bundle's fetch.sh downloads them from
 # the publisher and OTS_TEST_SEED_PAYLOADS_REQUIRED fails a missing payload.
+# Geonovum's DCAT-AP-NL 3 shapes are fetched the same way (no LICENSE file
+# upstream) for the DCAT conformance suite.
 seed-bundles:
   stage: test
   image: rust:1.94-trixie
@@ -258,7 +260,9 @@ seed-bundles:
     - examples/seed-bundles/nen2660-imbor/fetch.sh
     - examples/seed-bundles/nen2660-relations/fetch.sh
     - examples/seed-bundles/gwsw/fetch.sh
+    - tests/fixtures/geonovum-dcat-ap-nl-3/fetch.sh
     - cargo test --all-features --locked --test nen2660_imbor_bundle --test nen2660_relations_bundle --test gwsw_bundle
+    - OTS_TEST_DCAT_AP_NL_REQUIRED=1 cargo test --all-features --locked --test dcat_conformance
 
 # ── Conformance table parity (mirrors the GitHub docs-parity job) ────────────
 # README.md / docs/standards.md carry a table generated from the test suites;
