@@ -146,6 +146,45 @@ the run catches up. A `PUT` of the setting still runs at once. The global `?enta
 `urn:entailment:<regime>` graphs filled by `POST /api/reasoning/materialize`)
 keeps working unchanged.
 
+### The `skos` regime
+
+`{"regime": "skos"}` is SKOS-aware inferencing: the OWL 2 RL rules run over
+the dataset's conformance layer with the SKOS RDF schema (the W3C file,
+bundled as `vocab/skos.ttl` and loaded into `urn:system:entailment:skos-premise`)
+as an extra premise. The dataset's entailment graph `urn:entailment:skos:<id>`
+then holds what the SKOS data model implies for the dataset's concepts:
+
+- `skos:narrower` for every `skos:broader` (and back), the same for
+  `skos:broadMatch` / `skos:narrowMatch` and `skos:topConceptOf` /
+  `skos:hasTopConcept`;
+- `skos:broaderTransitive` / `skos:narrowerTransitive` closures of the
+  hierarchy;
+- the symmetric `skos:related`, `skos:relatedMatch`, `skos:closeMatch` and
+  `skos:exactMatch`, and `skos:exactMatch`'s transitivity;
+- the super-properties: `rdfs:label` for every `skos:prefLabel`,
+  `skos:altLabel` and `skos:hiddenLabel`, `skos:semanticRelation`,
+  `skos:mappingRelation`, `skos:note`, `skos:inScheme`.
+
+What the schema implies about itself (`skos:broader rdfs:subPropertyOf
+skos:semanticRelation` and the like) is true of every SKOS dataset, so it is
+pruned from the dataset's graph. Query it like any other regime:
+
+```
+GET /sparql?query=…&entailment_dataset=<id>
+```
+
+The integrity conditions of the SKOS Reference are checked by the built-in
+**SKOS integrity** shape graph (`urn:system:shapes:skos-integrity`, in the
+SHACL Library): S9 and S37 (concept schemes, concepts and collections are
+disjoint), S13 (`skos:prefLabel`, `skos:altLabel` and `skos:hiddenLabel` are
+pairwise disjoint), S14 (one `skos:prefLabel` per language tag; two untagged
+ones count as a clash too), S27 (`skos:related` is disjoint with
+`skos:broaderTransitive`), S36 (every item of a `skos:memberList` is a
+`skos:member`) and S46 (`skos:exactMatch` is disjoint with `skos:broadMatch`
+and `skos:relatedMatch`). The checks follow inverse and symmetric forms
+themselves, so they hold without materialising first; select the shape graph
+in a validation pipeline, or bind it to the dataset, to use it as a profile.
+
 ## Identity policy — what happens with `owl:sameAs`
 
 `owl:sameAs` says two IRIs name **one** thing, and the OWL 2 RL equality

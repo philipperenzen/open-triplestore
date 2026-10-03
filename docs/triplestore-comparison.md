@@ -106,8 +106,8 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
   row it grades **Partial** shows 🟡 — SPARQL 1.1 Query, SPARQL 1.2 and RDF 1.2, OWL 2 RL,
   SHACL Core and Advanced, ShEx, SWRL, GeoSPARQL, DCAT and VoID, and RML. OWL 2 DL is graded
   Full with the reasoner sidecar the project ships (footnote ⁹), and full-text search is
-  graded Full as a feature (footnote ¹⁵). Four rows have
-  no grade there (SPARQL 1.1 Protocol, JSON-LD 1.1, N-Quads/TriG, SKOS); their ✅
+  graded Full as a feature (footnote ¹⁵), SKOS as SKOS-aware inferencing (footnote ¹⁹). Three rows have
+  no grade there (SPARQL 1.1 Protocol, JSON-LD 1.1, N-Quads/TriG); their ✅
   marks feature presence, as in the other columns — note that `/sparql`
   ignores the protocol's `default-graph-uri` / `named-graph-uri` parameters (footnote ⁶).
   The W3C SPARQL tests are not claimed. The other systems' cells were compiled from their documentation and
@@ -353,6 +353,9 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >   (`rr:parentTriplesMap`) run on datasources only, and the RML-Core / RML-IO vocabulary beyond
 >   `rml:baseIRI` and `rml:null` is not implemented.
 > ¹⁹ SKOS is a vocabulary; all systems store SKOS triples — "support" means SKOS-aware inferencing.
+>   Open Triplestore: graded *Full* in `docs/standards.md` since 2026-10-03 — the `skos` dataset
+>   entailment regime (OWL 2 RL over the W3C SKOS schema) and the built-in SKOS integrity shapes
+>   for all seven integrity conditions; the cell used to mark only that SKOS triples are stored.
 
 ### Standards Score (count of full ✅ across all 29 rows above)
 
