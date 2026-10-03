@@ -42,8 +42,15 @@ bounded by the data:
   `xsd:string` and `rdf:langString`, which every RDF 1.1 interpretation recognizes.
 - **`rdfD1`** (a typed literal entails a blank node of its datatype) is not materialised: its
   conclusions are existential and no query can tell them from the literal itself.
-- Datatype inconsistencies (an ill-typed literal of a recognized datatype) are not reported by
-  the RDFS engine; the OWL 2 RL engine reports them (`dt-not-type`).
+
+### Datatype clashes
+
+A graph with an ill-typed literal of a recognized datatype (`"ten"^^xsd:integer`), or with a
+literal whose property's range (or a superclass of it) is a recognized datatype that does not
+hold the literal's value (`ex:n rdfs:range xsd:integer . ex:a ex:n "ten"`), has no RDFS
+interpretation. The run then ends in an inconsistency (`ill-typed-literal`,
+`datatype-clash`; HTTP 422 from `POST /api/reasoning/materialize`); the triples derived up to
+that point stay in the entailment graph.
 
 ## Configuration
 

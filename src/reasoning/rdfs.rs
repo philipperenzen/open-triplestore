@@ -21,7 +21,11 @@
 //!   could tell apart from the literal itself.
 //!
 //! Patterns whose conclusion has a literal subject (`rdfs3` / `rdfs4b` on a
-//! literal object) are generalized triples and are not stored.
+//! literal object) are generalized triples and are not stored; what they
+//! would make unsatisfiable is checked instead: after the fixed point an
+//! ill-typed literal of a recognized datatype, or a literal outside a
+//! recognized datatype its property's range gives it, ends the run in
+//! `ReasoningError::Inconsistency` (the derived triples stay).
 
 use std::time::Instant;
 use tracing::{debug, info};
@@ -262,6 +266,9 @@ impl<'a> RdfsMaterializer<'a> {
             }
         }
 
+        // The derived triples stay; the report is the inconsistency.
+        self.check_datatypes()?;
+
         let final_count = count_graph(self.store, &self.target_graph)?;
         info!(
             "RDFS materialization complete: {} triples in {} iterations ({} ms)",
@@ -342,6 +349,78 @@ impl<'a> RdfsMaterializer<'a> {
             }
         }
         self.store.insert_quads(quads)?;
+        Ok(())
+    }
+
+    /// A SELECT over the same graphs the patterns read.
+    fn rows(&self, sparql: &str, vars: &[&str]) -> Result<Vec<Vec<Option<oxigraph::model::Term>>>, ReasoningError> {
+        let res = match self.scope() {
+            Some(scope) => self.store.query_scoped(sparql, &scope),
+            None => self
+                .store
+                .query_over(sparql, std::slice::from_ref(&self.target_graph)),
+        }?;
+        let mut out = Vec::new();
+        if let oxigraph::sparql::QueryResults::Solutions(sols) = res {
+            for sol in sols {
+                let sol = sol.map_err(|e| ReasoningError::Query(e.to_string()))?;
+                out.push(vars.iter().map(|v| sol.get(*v).cloned()).collect());
+            }
+        }
+        Ok(out)
+    }
+
+    /// The datatype clashes that make the graph unsatisfiable for an RDFS
+    /// interpretation recognizing [`recognized_datatypes`] (RDF 1.1 Semantics
+    /// §7, §9): an ill-typed literal of a recognized datatype, and a literal
+    /// whose value is outside a recognized datatype its property's range, or
+    /// a superclass of that range, gives it (`rdfs3`, then `rdfs9`).
+    fn check_datatypes(&self) -> Result<(), ReasoningError> {
+        use super::datatypes::{self, Dt};
+        use oxigraph::model::Term;
+        for g in self.graphs() {
+            for quad in self
+                .store
+                .store()
+                .quads_for_pattern(None, None, None, Some(g.as_ref()))
+            {
+                let quad = quad.map_err(|e| ReasoningError::Store(e.to_string()))?;
+                if let Term::Literal(l) = &quad.object {
+                    if Dt::from_any_iri(l.datatype().as_str()).is_some()
+                        && datatypes::literal_value(l).is_none()
+                    {
+                        return Err(ReasoningError::inconsistency(
+                            "ill-typed-literal",
+                            format!("{l} is not in the lexical space of its datatype"),
+                        ));
+                    }
+                }
+            }
+        }
+        let q = format!(
+            "SELECT DISTINCT ?lt ?d WHERE {{ ?p <{RDFS_NS}range> ?c . ?x ?p ?lt . FILTER(isLiteral(?lt)) \
+             {{ BIND(?c AS ?d) }} UNION {{ ?c <{RDFS_NS}subClassOf> ?d }} }}"
+        );
+        let lang_string = format!("{RDF_NS}langString");
+        for r in self.rows(&q, &["lt", "d"])? {
+            let (Some(Term::Literal(lt)), Some(Term::NamedNode(d))) = (&r[0], &r[1]) else {
+                continue;
+            };
+            let clash = if d.as_str() == lang_string {
+                lt.language().is_none()
+            } else {
+                match (Dt::from_any_iri(d.as_str()), datatypes::literal_value(lt)) {
+                    (Some(dt), Some(v)) => datatypes::in_value_space(&v, dt) == Some(false),
+                    _ => false,
+                }
+            };
+            if clash {
+                return Err(ReasoningError::inconsistency(
+                    "datatype-clash",
+                    format!("{lt} is in the range {d}, which does not hold its value"),
+                ));
+            }
+        }
         Ok(())
     }
 

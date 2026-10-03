@@ -307,7 +307,7 @@ fn test_cax_adc_inconsistency() {
     );
     assert!(
         check_inconsistency(&s),
-        "cax-adc: AllDisjointClasses expansion + inconsistency"
+        "cax-adc: two members of an AllDisjointClasses share an instance"
     );
 }
 
@@ -1032,7 +1032,7 @@ fn blank_node_members_of_intersections_unions_and_disjoint_lists_count() {
     );
     assert_eq!(
         inconsistent_rule(&s).as_deref(),
-        Some("cax-dw"),
+        Some("cax-adc"),
         "cax-adc pairs ex:A with the blank restriction, cls-hv2 types ex:x with it"
     );
 }

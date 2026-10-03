@@ -561,3 +561,40 @@ fn sub_property_subjects_are_properties() {
     assert!(ask_in_tg(&s, "<http://example.org/p> rdf:type rdf:Property ."));
     assert!(ask_in_tg(&s, "<http://example.org/p> rdfs:subPropertyOf <http://example.org/p> ."));
 }
+
+fn rdfs_inconsistency(store: &TripleStore) -> Option<String> {
+    match RdfsMaterializer::with_target(store, TG).materialize() {
+        Err(open_triplestore::reasoning::common::ReasoningError::Inconsistency { rule, .. }) => {
+            Some(rule)
+        }
+        Err(e) => panic!("unexpected error: {e}"),
+        Ok(_) => None,
+    }
+}
+
+/// Recognized datatypes: an ill-typed literal, or a value outside the
+/// datatype its property's range gives it, has no RDFS interpretation.
+#[test]
+fn datatype_clashes_are_inconsistent() {
+    let s = store_with("ex:a ex:n \"ten\"^^xsd:integer .");
+    assert_eq!(rdfs_inconsistency(&s).as_deref(), Some("ill-typed-literal"));
+    let s = store_with("ex:n rdfs:range xsd:integer . ex:a ex:n \"ten\" .");
+    assert_eq!(rdfs_inconsistency(&s).as_deref(), Some("datatype-clash"));
+    let s = store_with("ex:n rdfs:range xsd:string . ex:a ex:n \"tien\"@nl .");
+    assert_eq!(
+        rdfs_inconsistency(&s).as_deref(),
+        Some("datatype-clash"),
+        "a language-tagged string is no xsd:string"
+    );
+    let s = store_with(
+        "ex:m rdfs:subPropertyOf ex:n . ex:n rdfs:range ex:Count . \
+         ex:Count rdfs:subClassOf xsd:nonNegativeInteger . ex:a ex:m -1 .",
+    );
+    assert_eq!(
+        rdfs_inconsistency(&s).as_deref(),
+        Some("datatype-clash"),
+        "through a sub-property and a superclass of the range"
+    );
+    let s = store_with("ex:n rdfs:range xsd:decimal . ex:a ex:n 3 ; ex:v \"x\"^^ex:unknown .");
+    assert_eq!(rdfs_inconsistency(&s), None, "an integer is a decimal value");
+}

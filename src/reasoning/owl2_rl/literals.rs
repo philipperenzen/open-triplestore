@@ -76,6 +76,8 @@ struct ClassAxioms {
     /// and the facets; `None` when the base or a facet cannot be read.
     restrictions: HashMap<Term, Option<(Dt, Vec<Facet>)>>,
     disjoint: Vec<(Term, Term)>,
+    /// The member lists of `owl:AllDisjointClasses` (`cax-adc`).
+    all_disjoint: Vec<Vec<Term>>,
     complements: Vec<(Term, Term)>,
 }
 
@@ -205,6 +207,15 @@ impl ClassAxioms {
                 return Some((
                     "cax-dw".into(),
                     format!("the literal {lit} is in the disjoint classes {a} and {b}"),
+                ));
+            }
+        }
+        for members in &self.all_disjoint {
+            let hit: Vec<&Term> = members.iter().filter(|m| classes.contains(*m)).collect();
+            if hit.len() > 1 {
+                return Some((
+                    "cax-adc".into(),
+                    format!("the literal {lit} is in the disjoint classes {} and {}", hit[0], hit[1]),
                 ));
             }
         }
@@ -349,6 +360,19 @@ impl Owl2RLReasoner<'_> {
         }
         ax.disjoint = pairs(OWL_DISJOINT_WITH)?;
         ax.complements = pairs(OWL_COMPLEMENT_OF)?;
+        let mut adc: HashMap<Term, Vec<Term>> = HashMap::new();
+        for r in self.select(
+            &format!(
+                "SELECT ?x ?m WHERE {{ ?x <{RDF_TYPE}> <{OWL_ALL_DISJOINT}> . \
+                 ?x <{OWL_MEMBERS}> ?l . ?l <{RDF_REST}>*/<{RDF_FIRST}> ?m }}"
+            ),
+            &["x", "m"],
+        )? {
+            if let (Some(x), Some(m)) = (&r[0], &r[1]) {
+                adc.entry(x.clone()).or_default().push(m.clone());
+            }
+        }
+        ax.all_disjoint = adc.into_values().collect();
         let mut inter: HashMap<Term, Vec<Term>> = HashMap::new();
         for r in self.select(
             &format!(

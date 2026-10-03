@@ -7,8 +7,7 @@
 //! rules). A positive / negative entailment test then passes when the
 //! result graph, its blank nodes read as variables, does / does not match
 //! the asserted and derived triples. A result of `false` stands for an
-//! inconsistent action; the RDFS engine reports no inconsistencies, so a
-//! negative test with that result passes and a positive one fails.
+//! inconsistent action: the RDFS engine must report a datatype clash.
 //!
 //! The `RDF` regime runs the RDFS closure too (the engine has no RDF-only
 //! mode), so a negative `RDF` case whose result only RDFS entails fails;
@@ -21,6 +20,7 @@
 
 #![cfg(feature = "rdfs-entailment")]
 
+use open_triplestore::reasoning::common::ReasoningError;
 use open_triplestore::reasoning::rdfs::RdfsMaterializer;
 use open_triplestore::store::TripleStore;
 use oxigraph::io::{RdfFormat, RdfParser};
@@ -74,40 +74,20 @@ fn object(g: &Graph, s: &NamedOrBlankNode, p: &NamedNode) -> Option<Term> {
     g.object_for_subject_predicate(s, p).map(|o| o.into_owned())
 }
 
-fn list(g: &Graph, head: Term) -> Vec<Term> {
-    let mut out = Vec::new();
-    let mut node = head;
-    while let Some(n) = match &node {
-        Term::NamedNode(n) if n.as_str() == format!("{RDF}nil") => None,
-        Term::NamedNode(n) => Some(NamedOrBlankNode::NamedNode(n.clone())),
-        Term::BlankNode(b) => Some(NamedOrBlankNode::BlankNode(b.clone())),
-        _ => None,
-    } {
-        match (object(g, &n, &nn(RDF, "first")), object(g, &n, &nn(RDF, "rest"))) {
-            (Some(f), Some(r)) => {
-                out.push(f);
-                node = r;
-            }
-            _ => break,
-        }
-    }
-    out
-}
-
 fn entries() -> Vec<Entry> {
     let g: Graph = parse(&format!("{BASE}manifest.ttl"))
         .expect("the vendored rdf-mt manifest")
         .into_iter()
         .collect();
-    let manifest = NamedOrBlankNode::NamedNode(NamedNode::new_unchecked(format!("{BASE}manifest.ttl")));
-    let head = object(&g, &manifest, &nn(MF, "entries")).expect("mf:entries");
+    let mut subjects: Vec<NamedOrBlankNode> = Vec::new();
+    for kind in ["PositiveEntailmentTest", "NegativeEntailmentTest"] {
+        subjects.extend(
+            g.subjects_for_predicate_object(&nn(RDF, "type"), &nn(MF, kind))
+                .map(|s| s.into_owned()),
+        );
+    }
     let mut out = Vec::new();
-    for e in list(&g, head) {
-        let s = match e {
-            Term::NamedNode(n) => NamedOrBlankNode::NamedNode(n),
-            Term::BlankNode(b) => NamedOrBlankNode::BlankNode(b),
-            _ => continue,
-        };
+    for s in subjects {
         let ty = object(&g, &s, &nn(RDF, "type")).map(|t| t.to_string()).unwrap_or_default();
         let positive = ty.contains("PositiveEntailmentTest");
         let lexical = |p: &str| match object(&g, &s, &nn(MF, p)) {
@@ -131,6 +111,7 @@ fn entries() -> Vec<Entry> {
             result,
         });
     }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
     out
 }
 
@@ -168,14 +149,18 @@ fn run(e: &Entry) -> Result<(), String> {
     store
         .load_str(&nt, RdfFormat::NTriples, None)
         .map_err(|e| e.to_string())?;
+    let mut inconsistent = false;
     if e.regime != "simple" {
-        RdfsMaterializer::with_target(&store, TG)
-            .materialize()
-            .map_err(|e| e.to_string())?;
+        match RdfsMaterializer::with_target(&store, TG).materialize() {
+            Ok(_) => {}
+            Err(ReasoningError::Inconsistency { .. }) => inconsistent = true,
+            Err(err) => return Err(err.to_string()),
+        }
     }
+    // An inconsistent graph entails everything, `false` included.
     let got = match &e.result {
-        // The engine reports no inconsistency: the action is consistent.
-        None => false,
+        None => inconsistent,
+        Some(_) if inconsistent => true,
         Some(result) => entails(&store, &parse(result)?)?,
     };
     if got == e.positive {

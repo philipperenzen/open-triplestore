@@ -236,11 +236,17 @@ fn run(c: &Case) -> Result<(), String> {
     match (expected(&c.result)?, got) {
         (Answer::Bool(a), Answer::Bool(b)) if a == b => Ok(()),
         (Answer::Rows(a), Answer::Rows(b)) if a == b => Ok(()),
-        (Answer::Rows(a), Answer::Rows(b)) => Err(format!(
-            "{} expected rows, {} got ({engine:?})",
-            a.len(),
-            b.len()
-        )),
+        (Answer::Rows(a), Answer::Rows(b)) => {
+            let mut detail = String::new();
+            // With OTS_TEST_W3C_ENTAILMENT_EXPLAIN set: up to five rows each way.
+            if std::env::var_os("OTS_TEST_W3C_ENTAILMENT_EXPLAIN").is_some() {
+                let only = |x: &[Vec<String>], y: &[Vec<String>]| -> Vec<String> {
+                    x.iter().filter(|r| !y.contains(r)).take(5).map(|r| r.join(" ")).collect()
+                };
+                detail = format!("; missing {:?}; extra {:?}", only(&a, &b), only(&b, &a));
+            }
+            Err(format!("{} expected rows, {} got ({engine:?}){detail}", a.len(), b.len()))
+        }
         _ => Err(format!("the answer differs ({engine:?})")),
     }
 }

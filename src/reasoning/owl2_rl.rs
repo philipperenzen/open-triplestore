@@ -476,7 +476,6 @@ impl<'a> Owl2RLReasoner<'a> {
             self.rule_cax_sco()?;
             self.rule_cax_eqc1()?;
             self.rule_cax_eqc2()?;
-            self.rule_cax_adc()?;
 
             // Table 5 — Property axioms
             self.rule_prp_dom()?;
@@ -580,6 +579,7 @@ impl<'a> Owl2RLReasoner<'a> {
         self.rule_cls_maxc1()?;
         self.rule_cls_com()?;
         self.rule_cax_dw()?;
+        self.rule_cax_adc()?;
         Ok(())
     }
 
@@ -1393,22 +1393,22 @@ impl<'a> Owl2RLReasoner<'a> {
         Ok(())
     }
 
-    /// cax-adc: `?x a owl:AllDisjointClasses ; owl:members (?c1 … ?cn)` →
-    /// `?ci owl:disjointWith ?cj` for every two positions. Blank-node class
-    /// expressions are members too.
+    /// cax-adc: `?x a owl:AllDisjointClasses ; owl:members (… ?c1 … ?c2 …)`
+    /// and `?z` typed with two different members → INCONSISTENCY. (No
+    /// pairwise `owl:disjointWith` is written: the rule set concludes none.)
     fn rule_cax_adc(&self) -> Result<(), ReasoningError> {
         let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?c1 <{OWL_DISJOINT_WITH}> ?c2 }} }}
-               WHERE {{
-                   ?adc <{RDF_TYPE}> <{OWL_ALL_DISJOINT}> .
-                   ?adc <{OWL_MEMBERS}> ?l .
-                   ?l <{RDF_REST}>* ?ci . ?ci <{RDF_FIRST}> ?c1 .
-                   ?l <{RDF_REST}>* ?cj . ?cj <{RDF_FIRST}> ?c2 .
-                   FILTER(?ci != ?cj)
-               }}"#,
-            tg = self.target_graph
+            "ASK {{ ?adc <{RDF_TYPE}> <{OWL_ALL_DISJOINT}> . ?adc <{OWL_MEMBERS}> ?l . \
+               ?l <{RDF_REST}>* ?ci . ?ci <{RDF_FIRST}> ?c1 . \
+               ?l <{RDF_REST}>* ?cj . ?cj <{RDF_FIRST}> ?c2 . FILTER(?ci != ?cj) \
+               ?z <{RDF_TYPE}> ?c1 . ?z <{RDF_TYPE}> ?c2 }}"
         );
-        self.run_update(&q)?;
+        if self.ask(&q)? {
+            return Err(ReasoningError::inconsistency(
+                "cax-adc",
+                "owl:AllDisjointClasses violated",
+            ));
+        }
         Ok(())
     }
 

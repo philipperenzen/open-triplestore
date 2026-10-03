@@ -190,7 +190,8 @@ fn triples(rdfxml: &str, id: &str) -> Result<Vec<Triple>, String> {
 enum Outcome {
     Pass,
     Fail(String),
-    Skip(&'static str),
+    /// No RDF/XML document to run.
+    Skip,
 }
 
 /// The SPARQL form of a term, blank nodes as variables.
@@ -226,9 +227,24 @@ fn entails(store: &TripleStore, graph: &[Triple]) -> Result<bool, String> {
     }
 }
 
+/// With `OTS_TEST_W3C_OWL2_RL_EXPLAIN` set: the conclusion triples that do
+/// not match one by one (at most five), to diagnose a failing case.
+fn unmatched(store: &TripleStore, graph: &[Triple]) -> String {
+    if std::env::var_os("OTS_TEST_W3C_OWL2_RL_EXPLAIN").is_none() {
+        return String::new();
+    }
+    let missing: Vec<String> = graph
+        .iter()
+        .filter(|t| !entails(store, std::slice::from_ref(*t)).unwrap_or(false))
+        .take(5)
+        .map(|t| t.to_string())
+        .collect();
+    format!(": unmatched {missing:?}")
+}
+
 fn run(c: &Case) -> Outcome {
     let Some(premise) = &c.premise else {
-        return Outcome::Skip("no RDF/XML premise");
+        return Outcome::Skip;
     };
     let store = TripleStore::in_memory().expect("store");
     let mut docs = vec![premise.clone()];
@@ -260,14 +276,15 @@ fn run(c: &Case) -> Outcome {
                     _ => (&c.non_conclusion, false),
                 };
                 let Some(doc) = doc else {
-                    return Outcome::Skip("no RDF/XML conclusion");
+                    return Outcome::Skip;
                 };
                 let graph = match triples(doc, &c.id) {
                     Ok(g) => g,
                     Err(e) => return Outcome::Fail(format!("conclusion: {e}")),
                 };
                 match entails(&store, &graph) {
-                    Ok(got) => got == want,
+                    Ok(got) if got == want => true,
+                    Ok(_) => return Outcome::Fail(format!("{kind:?} does not hold{}", unmatched(&store, &graph))),
                     Err(e) => return Outcome::Fail(e),
                 }
             }
@@ -303,7 +320,7 @@ fn w3c_owl2_rl_suite() {
             Outcome::Pass if known => fixed.push(c.id.clone()),
             Outcome::Pass => passed += 1,
             Outcome::Fail(why) if !known => unexpected.push(format!("{}: {why}", c.id)),
-            Outcome::Fail(_) | Outcome::Skip(_) => {}
+            Outcome::Fail(_) | Outcome::Skip => {}
         }
     }
     assert!(
