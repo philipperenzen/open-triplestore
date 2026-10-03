@@ -349,6 +349,12 @@ fn what_is_not_implemented_is_declined() {
         "SELECT ?a ?b WHERE { ?a ex:knows* ?b }",
         "SELECT ?s WHERE { ?s ex:name ?n FILTER EXISTS { ?s ex:nick ?k } }",
         "SELECT ?s WHERE { ?s ex:name ?n FILTER NOT EXISTS { ?s ex:nick ?k } }",
+        // `GRAPH ?g` around an operator SPARQL evaluates per graph, with `?g`
+        // out of scope inside (W3C negation#graph-minus): carrying `?g` into
+        // both sides of the MINUS would make them share it.
+        "SELECT ?s WHERE { GRAPH ?g { ?s ex:city ?c MINUS { ?x ex:city ?c } } }",
+        "SELECT ?g ?n WHERE { GRAPH ?g { SELECT (COUNT(*) AS ?n) WHERE { ?s ex:city ?c } } }",
+        "SELECT ?g ?s WHERE { GRAPH ?g { SELECT ?s WHERE { ?s ex:city ?c } LIMIT 1 } }",
         "SELECT ?s (NOW() AS ?t) WHERE { ?s ex:name ?n }",
         "SELECT ?s (MD5(?n) AS ?h) WHERE { ?s ex:name ?n }",
         "SELECT ?s (xsd:integer(?a) AS ?i) WHERE { ?s ex:age ?a }",
