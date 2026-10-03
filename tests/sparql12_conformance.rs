@@ -837,3 +837,48 @@ fn triple_term_expression_subject_is_iri_or_var() {
         );
     }
 }
+
+/// SPARQL 1.2 (w3c/sparql-query PR #380; W3C sparql12 test
+/// `select-variable-reuse`): in an aggregating query a SELECT expression may
+/// use the variable an earlier SELECT expression binds. spargebra 0.4.7
+/// refused it; the vendored copy accepts it. A variable used before it is
+/// bound, or neither grouped nor bound by the SELECT, is still refused.
+#[test]
+fn select_expression_reuses_an_earlier_select_variable() {
+    for s in stores() {
+        let r = sel(
+            &s,
+            "SELECT (COUNT(?v) AS ?c) (?c * 2 AS ?d) (?d + ?c AS ?e) WHERE { VALUES ?v { 0 1 2 3 } }",
+        );
+        assert_eq!(
+            r,
+            vec![vec![
+                typed("4", "integer"),
+                typed("8", "integer"),
+                typed("12", "integer")
+            ]]
+        );
+        let grouped = sel(
+            &s,
+            "SELECT ?k (SUM(?v) AS ?t) (?t + 1 AS ?u) WHERE { VALUES (?k ?v) { (1 1) (1 2) } } GROUP BY ?k",
+        );
+        assert_eq!(
+            grouped,
+            vec![vec![
+                typed("1", "integer"),
+                typed("3", "integer"),
+                typed("4", "integer")
+            ]]
+        );
+        for q in [
+            "SELECT (?x + 1 AS ?y) (COUNT(?v) AS ?x) WHERE { VALUES ?v { 0 1 } }",
+            "SELECT (COUNT(?v) AS ?c) (?w AS ?d) WHERE { VALUES (?v ?w) { (0 1) } }",
+            "SELECT (COUNT(?v) AS ?c) (?c + 1 AS ?c) WHERE { VALUES ?v { 0 1 } }",
+        ] {
+            assert!(
+                s.query(&format!("{PFX}{q}")).is_err(),
+                "must not parse: {q}"
+            );
+        }
+    }
+}

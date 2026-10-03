@@ -100,6 +100,14 @@ One commit each, in this order:
    `ExprTripleTermSubject ::= iri | Var`; oxigraph's `main` already parses it so
    in its rewritten parser. Fixes `tripleterm-subject-03` and `-06` of the
    SPARQL 1.2 suite. Draft: `spargebra/UPSTREAM-PR-triple-term-expression-subject.md`.
+9. **SELECT-expression variable reuse** (`spargebra` parser). In an
+   aggregating query, `build_select` checked each SELECT expression against the
+   variables in scope after the grouping only, so
+   `(COUNT(?v) AS ?count) (?count + 1 AS ?countPlusOne)` was refused. SPARQL 1.2
+   allows it (w3c/sparql-query PR #380); each expression is now also allowed the
+   variables of the SELECT expressions before it, which the `Extend` chain
+   already binds. Fixes `grouping#select-variable-reuse` of the SPARQL 1.2
+   suite. Draft: `spargebra/UPSTREAM-PR-select-variable-reuse.md`.
 
 ### Verifying the fork
 

@@ -664,6 +664,11 @@ fn build_select(
             p.on_in_scope_variable(|v| {
                 visible.insert(v.clone());
             });
+            // SPARQL 1.2 (w3c/sparql-query PR #380): in an aggregating query, a
+            // SELECT expression may use the variable of an earlier SELECT
+            // expression, `(COUNT(?v) AS ?c) (?c + 1 AS ?d)`. The expressions are
+            // evaluated in order (one `Extend` each), so it is bound there.
+            let mut bound_by_select = visible.clone();
             for sel_item in sel_items {
                 let v = match sel_item {
                     SelectionMember::Variable(v) => {
@@ -680,7 +685,7 @@ fn build_select(
                                 "The SELECT overrides an existing variable using an expression",
                             );
                         }
-                        if with_aggregate && !are_variables_bound(&expression, &visible) {
+                        if with_aggregate && !are_variables_bound(&expression, &bound_by_select) {
                             // We validate projection variables if there is an aggregate
                             return Err(
                                 "The SELECT contains an expression with a variable that is unbound",
@@ -691,6 +696,7 @@ fn build_select(
                             variable: variable.clone(),
                             expression,
                         };
+                        bound_by_select.insert(variable.clone());
                         variable
                     }
                 };
