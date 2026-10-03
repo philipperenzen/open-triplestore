@@ -16,22 +16,30 @@ The rows follow the normative changes in Appendix A of the Working Draft.
 |---------|--------|-------|
 | Triple terms, reifiers, reified triples, annotation syntax | ✅ | `<<( s p o )>>` triple terms, `<< s p o >>` reified triples, `~ reifier`, `{\| \|}` annotations — see below |
 | `TRIPLE`, `isTRIPLE`, `SUBJECT`, `PREDICATE`, `OBJECT` | ✅ | Native built-ins |
-| Literal base direction (`"text"@ar--rtl`) | ✅ | Parsed, stored and returned by the engine. Known gap: the [columnar copy](performance.md#4-the-columnar-copy-opengraphcolumnar) that answers some queries drops the direction, so `DATATYPE` there returns `rdf:langString` |
+| Literal base direction (`"text"@ar--rtl`) | ✅ | Parsed, stored and returned on every read path (the [columnar copy](performance.md#4-the-columnar-copy-opengraphcolumnar) hands queries over directional literals to the engine) |
 | `LANGDIR`, `hasLANG`, `hasLANGDIR`, `STRLANGDIR` | ✅ | Native built-ins |
 | `VERSION` declaration | ✅ | Accepted by the parser |
 | Duplicate variables in `VALUES` are an error | ✅ | Rejected at parse time |
 | `!!` (double negation) | ✅ | Accepted by the parser |
-| `ORDER BY` with triple terms, the formal `EXISTS` definition, `sameValue` | Engine | Oxigraph's evaluation; no test in this repository pins them |
-| SPARQL Results JSON for triple terms | ✅ | `{"type":"triple","value":{...}}` serialization |
+| `ORDER BY` with triple terms, the formal `EXISTS` definition, `sameValue` | ✅ | Oxigraph's evaluation, run against the W3C suite |
+| SPARQL Results JSON for triple terms and base direction | ✅ | `{"type":"triple","value":{...}}`; a directional literal carries `"its:dir"` |
 
 The remaining changes in Appendix A (XSD 1.1 and XPath 3.1 references, the
 removal of simple literals, escape processing, the algebra rewrites) change how
 the specification is written rather than what a query returns.
 
-**Evidence.** `tests/sparql12_conformance.rs` pins triple-term semantics
-(quoting, referential opacity, reifiers, `TRIPLE()`, nested and per-graph
-cases). The W3C SPARQL 1.2 test suite is not vendored or run here, and the
-other rows above have no test of their own yet.
+**Evidence.** The W3C SPARQL 1.2 test suite (`sparql/sparql12` of
+w3c/rdf-tests) is vendored unmodified and runs in CI through
+`tests/w3c_sparql12_manifests.rs`, every query-evaluation entry on the engine
+and again through the in-memory mirror; [conformance/sparql12.md](conformance/sparql12.md)
+describes the run and lists the entries that wait on an open W3C Working
+Group issue (no score is published: the copy is a subset of a W3C test suite).
+`tests/sparql12_conformance.rs` pins, on both read paths, triple-term
+semantics (quoting, referential opacity, reifiers, `TRIPLE()`, nested and
+per-graph cases), `VERSION`, the `LANGDIR` family and base direction, `~` and
+`{| |}` in updates and queries, the rejection of duplicate `VALUES`
+variables, and the two SEP extensions below. The RDF 1.2 syntax suites run
+through `tests/w3c_rdf12_manifests.rs` ([conformance/rdf12.md](conformance/rdf12.md)).
 
 ## SEP extensions (not part of SPARQL 1.2)
 
@@ -53,7 +61,7 @@ for older client tooling, and `<http://www.w3.org/ns/sparql#adjust>` (see
 below). No W3C specification defines these as functions (`rdf:subject`,
 `rdf:predicate` and `rdf:object` are RDF's reification properties).
 
-## Enabling SPARQL 1.2 / RDF-star
+## Enabling SPARQL 1.2 / RDF 1.2
 
 Enable via the `rdf-12` feature flag:
 
@@ -208,7 +216,11 @@ includes them using the extended representation:
 }
 ```
 
-This matches the SPARQL 1.2 Working Draft results format extension.
+A literal with a base direction carries it as `"its:dir"` next to
+`"xml:lang"` (`{"type":"literal","value":"مرحبا","xml:lang":"ar","its:dir":"rtl"}`),
+both in `/sparql` results and in the JSON the browse endpoints (triples,
+suggestions, blank-node views) return. This matches the SPARQL 1.2 Query
+Results JSON Format Working Draft.
 
 ## Conformance Notes
 
