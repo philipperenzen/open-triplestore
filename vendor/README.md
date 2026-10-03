@@ -1,9 +1,10 @@
 # Vendored crates
 
-Four crates of the Oxigraph family are vendored. `oxigraph` and `spareval` carry the
+Five crates of the Oxigraph family are vendored. `oxigraph` and `spareval` carry the
 changes that keep typed literals exactly as written (first section); `spargebra`,
-`spareval` and `sparopt` carry SPARQL conformance fixes (second section). `spareval`
-therefore has both sets of changes.
+`spareval` and `sparopt` carry SPARQL conformance fixes (second section), so
+`spareval` has both sets of changes; `oxjsonld`, the JSON-LD processor, carries
+fixes for defects the W3C JSON-LD 1.1 API test suite exposes (third section).
 
 | Directory | Crate | Upstream (repository `oxigraph/oxigraph`) | Changes |
 | --- | --- | --- | --- |
@@ -11,12 +12,14 @@ therefore has both sets of changes.
 | `spareval/` | `spareval` 0.2.7 | `lib/spareval` at `0e81a29d27575ab69e7f85ea9c7f1058b277fcd0` | triple terms are rebuilt without reading their literals as values; SPARQL 1.1 conformance fixes 1–5 |
 | `spargebra/` | `spargebra` 0.4.7 | `lib/spargebra` at `0e81a29d27575ab69e7f85ea9c7f1058b277fcd0` | SPARQL conformance fix 6 |
 | `sparopt/` | `sparopt` 0.3.7 | `lib/sparopt` at `0e81a29d27575ab69e7f85ea9c7f1058b277fcd0` | SPARQL conformance fix 1 |
+| `oxjsonld/` | `oxjsonld` 0.2.6 | `lib/oxjsonld` at `0e81a29d27575ab69e7f85ea9c7f1058b277fcd0` | JSON-LD 1.1 API fixes (see [oxjsonld](#oxjsonld)) |
 
-The workspace `Cargo.toml` swaps all four in for the crates.io packages:
+The workspace `Cargo.toml` swaps all five in for the crates.io packages:
 
 ```toml
 [patch.crates-io]
 oxigraph = { path = "vendor/oxigraph" }
+oxjsonld = { path = "vendor/oxjsonld" }
 spargebra = { path = "vendor/spargebra" }
 spareval = { path = "vendor/spareval" }
 sparopt = { path = "vendor/sparopt" }
@@ -293,3 +296,44 @@ commit above (the crates.io packages do not ship them).
 5. Run `tests/w3c_sparql11_manifests.rs`, `tests/w3c_sparql11_conformance.rs`,
    `tests/w3c_sparql12_manifests.rs`, `tests/sparql12_conformance.rs`, the
    parallel/columnar parity tests and the perf gate.
+
+## oxjsonld
+
+`oxjsonld` is the JSON-LD 1.1 parser and serializer behind `oxrdfio`, which every
+JSON-LD upload, download and remote-context fetch in the store goes through. It
+was vendored unmodified first, then each fix below went in as its own commit with
+an `UPSTREAM-PR-*.md` draft beside the crate.
+
+1. **IRI resolution removes the dot segments of the whole target path**
+   (`src/iri.rs`, used by `context.rs` and `expansion.rs`;
+   `UPSTREAM-PR-1-iri-dot-segments.md`). `oxiri::Iri::resolve` keeps the `.` and
+   `..` segments of the base path it merges with and of a network-path reference
+   (`//host/../x`); RFC 3986 §5.2.2 removes them. W3C json-ld-api toRdf `0122`,
+   `0123`, `e062`, `e091`.
+
+2. **An `@base` in absolute form is the base even when it is not a valid IRI**
+   (`src/context.rs`, context processing step 5.7;
+   `UPSTREAM-PR-2-invalid-base.md`). It used to refuse the document; IRIs
+   resolved against such a base are not well-formed and are left out of the
+   quads, as the JSON-LD to RDF algorithm says. A relative `@base` that does not
+   resolve and a non-string `@base` still raise `invalid base IRI`. W3C
+   json-ld-api toRdf `li12`.
+
+3. **A type map applies the type's scoped context to the map context**
+   (`src/expansion.rs`, `IndexContainer`, expansion steps 13.8.3.2 and
+   13.8.3.7.4; `UPSTREAM-PR-3-type-map-scoped-context.md`). The context
+   propagates into nested nodes, and the node gets the type already expanded, so
+   it does not apply the context a second time as its own non-propagating
+   type-scoped context. W3C json-ld-api toRdf `c013`.
+
+4. **The `rdfDirection` option** (`src/to_rdf.rs`, `JsonLdRdfDirection` and
+   `JsonLdParser::with_rdf_direction`, exported from `src/lib.rs`;
+   `UPSTREAM-PR-4-rdf-direction.md`): `Ignore` (JSON-LD 1.1's `null`, the
+   direction is dropped), `I18nDatatype`, `CompoundLiteral`, and
+   `DirectionalLanguageTaggedString` (RDF 1.2 `"abc"@ar--rtl`). The default is
+   unchanged — the RDF 1.2 directional string in the `rdf-12` build this server
+   uses, so every upload, import and Graph Store parse keeps the direction as
+   before. `oxrdfio`'s `RdfParser` has no setting for it; the W3C runner calls
+   `JsonLdParser` directly with the option each test names (absent = `null`).
+   W3C json-ld-api toRdf `di02`, `di04`–`di06`, and the non-normative
+   `di09`–`di12` that the runner used to skip.

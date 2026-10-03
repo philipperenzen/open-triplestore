@@ -323,6 +323,33 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   how to get help.
 
 ### Changed
+- **JSON-LD 1.1 graded *Partial*.** `docs/standards.md` grades it for the
+  first time, on the json-ld-api run: three `fromRdf` entries fail because the
+  serialiser writes every stored quad as it is, where the algorithm folds a
+  list typed `rdf:List` into `@list` (dropping the type quads) or refuses an
+  `rdf:JSON` literal that is not JSON; and uploads keep `@direction` as an RDF
+  1.2 directional string, where a JSON-LD 1.1 processor drops it by default.
+  The comparison's JSON-LD cell, which marked feature presence, follows
+  (✅ → 🟡), and the standards score is recounted 15 → 14.
+- **The JSON-LD processor is vendored with four fixes** (`oxjsonld` 0.2.6 in
+  `vendor/oxjsonld/`, one commit and one upstream draft each, see
+  `vendor/README.md`), and every `toRdf` entry of the W3C json-ld-api run now
+  passes (`docs/conformance/jsonld.md`). What changes for uploads:
+  - **Relative IRIs resolve as RFC 3986 says** when the base IRI or the
+    reference has `.` or `..` segments: `"@base": "http://a/b/./c"` with
+    `"@id": "../d"` now gives `http://a/d`, not `http://a/b/d`, and
+    `//host/../x` gives `http://host/x`. Documents whose base has no dot
+    segments are unaffected.
+  - **An `@base` that is not a valid IRI** but has a scheme
+    (`"http://invalid/<>/"`) no longer refuses the document: relative IRIs
+    resolved against it are not well-formed and are left out, as the JSON-LD
+    to RDF algorithm leaves out any such IRI.
+  - **A type map applies the type's scoped context to the nodes inside it,
+    nested ones included** (`"@container": "@type"`); nested nodes used to
+    fall back to the definitions without it.
+  - `@direction` is kept as an RDF 1.2 directional string as before; the
+    processor now also offers JSON-LD 1.1's `rdfDirection` modes, which the
+    W3C runner uses.
 - **The store keeps every literal exactly as written.** Typed literals used to
   be stored as values and read back in a canonical form: `"1"^^xsd:boolean` as
   `true`, `"05"^^xsd:integer` as `"5"`, a `+00:00` time zone as `Z`, every type

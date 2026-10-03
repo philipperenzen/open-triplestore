@@ -24,4 +24,9 @@ A JSON-LD document may name its `@context` by IRI instead of spelling it out. Ev
 
 The Schema.org context is not bundled (it is licensed CC BY-SA 3.0); to use documents that name it, allowlist `https://schema.org/`.
 
+## JSON-LD direction and downloads
+
+- A string with `@language` and `@direction` is stored as an RDF 1.2 directional language-tagged string (`"…"@ar--rtl`) and downloaded back with both keys. A JSON-LD 1.1 processor without its `rdfDirection` option would drop the direction.
+- A JSON-LD download writes every quad of the graph as it is, so it reads back as the same graph as the Turtle or N-Quads download: lists stay `rdf:first` / `rdf:rest` nodes rather than `@list`, and an `rdf:JSON` literal stays a typed literal, even one whose text is not valid JSON.
+
 See also: [Import Auto-Detection](/docs/import) and [Supported Standards](/docs/standards).

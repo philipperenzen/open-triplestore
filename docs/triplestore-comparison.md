@@ -48,9 +48,9 @@
 | 9 | **Blazegraph** | Legacy Wikidata workloads | Abandoned 2019; Wikimedia migration complete |
 
 **Bottom line for this project:** Open Triplestore covers the most standards of the ten systems
-— **28 of the 29** rows in section 4 at least partially — and grades **14** of them Full
+— **28 of the 29** rows in section 4 at least partially — and grades **15** of them Full
 against its own tests (section 4, recounted 2026-10-03), below Stardog (22) and GraphDB (21) and
-level with Virtuoso and RDF4J 5 (14). The other systems' cells mark feature presence, so the
+above Virtuoso and RDF4J 5 (14). The other systems' cells mark feature presence, so the
 full-support counts are not like for like. Its **~430,000 t/s** bulk load (section 5.1,
 re-measured) beats every Java competitor by 1.1–2.9×. GeoSPARQL 1.1, SHACL-AF, DCAT 3, VoID
 and RML, all graded Partial, are still rare in open-source stores. The primary gap vs. QLever and Virtuoso is scale: those
@@ -104,7 +104,7 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
   The **Open Triplestore** columns in the matrices below follow those grades on every row
   (since 2026-10-01): a ✅ means `docs/standards.md` grades the standard **Full**, and every
   row it grades **Partial** shows 🟡 — SPARQL 1.2 and RDF 1.2, OWL 2 RL,
-  SHACL Core and Advanced, ShEx, SWRL, GeoSPARQL, DCAT and VoID, and RML. OWL 2 DL is graded
+  SHACL Advanced, ShEx, SWRL, GeoSPARQL, DCAT and VoID, and RML. OWL 2 DL is graded
   Full with the reasoner sidecar the project ships (footnote ⁹), and full-text search is
   graded Full as a feature (footnote ¹⁵), SKOS as SKOS-aware inferencing (footnote ¹⁹);
   JSON-LD 1.1 is graded Partial (footnote ²⁰). One row has
@@ -262,10 +262,11 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > ²⁰ Partial in [`docs/standards.md`](standards.md) (graded 2026-10-03; the cell used to mark
 >   feature presence). Remote `@context`s now resolve — bundled W3C contexts offline, others from
 >   `OTS_REMOTE_ALLOWLIST` — and the W3C json-ld-api toRdf/fromRdf sections run as a regression
->   ratchet (no published score): the JSON-LD processor keeps base-IRI dot segments, writes
->   `@direction` as an RDF 1.2 directional string in the `rdf-12` build, mis-scopes type-scoped
->   contexts in type maps and serialises invalid `rdf:JSON` literals
->   (`docs/conformance/jsonld.md`).
+>   ratchet (no published score). Every evaluated toRdf entry passes since the JSON-LD processor
+>   is patched in the vendored fork (2026-10-03); three fromRdf entries fail on purpose, because
+>   the serialiser keeps every stored quad (no `@list` folding that drops `rdf:type rdf:List`, no
+>   refusal of an `rdf:JSON` literal that is not JSON), and uploads keep `@direction` as an RDF
+>   1.2 directional string (`docs/conformance/jsonld.md`).
 
 ### 4.2 Reasoning, Validation & Inference
 

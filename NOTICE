@@ -134,7 +134,16 @@ Vendored source code:
     (LICENSE-MIT and LICENSE-APACHE). Modified: SPARQL 1.1 and SPARQL 1.2
     conformance fixes, some backported from upstream Oxigraph; spareval also
     rebuilds triple terms without reading their literals as values.
-    vendor/README.md describes every change in the four crates, and
+  - oxjsonld 0.2.6 (vendor/oxjsonld/), Oxigraph's JSON-LD parser and
+    serializer, the crate as published on crates.io (same repository, path
+    lib/oxjsonld, commit 0e81a29d27575ab69e7f85ea9c7f1058b277fcd0) —
+    dual-licensed MIT or Apache-2.0, at your option; Copyright (c) 2018
+    Oxigraph developers. Both licence texts are beside it. Modified: IRI
+    resolution removes the dot segments of the whole target path; an @base
+    in absolute form is the base even when it is not a valid IRI; a type map
+    applies the type's scoped context to the map context; the parser takes
+    the JSON-LD 1.1 rdfDirection option.
+    vendor/README.md describes every change in the five crates, and
     vendor/*/UPSTREAM-PR*.md the changes as proposed upstream.
 
 OWL 2 DL reasoner sidecar image (sidecars/reasoner/; published separately as
