@@ -1216,7 +1216,7 @@ pub(crate) fn prebind(
                     i += 2;
                     continue;
                 }
-                if text[i..].starts_with(&delim) {
+                if bytes[i..].starts_with(delim.as_bytes()) {
                     i += delim.len();
                     break;
                 }
@@ -1351,7 +1351,7 @@ pub(crate) fn mentions_variable(query: &str, name: &str) -> bool {
                 q.to_string()
             };
             i += delim.len();
-            while i < bytes.len() && !query[i..].starts_with(&delim) {
+            while i < bytes.len() && !bytes[i..].starts_with(delim.as_bytes()) {
                 i += if bytes[i] as char == '\\' { 2 } else { 1 };
             }
             i = (i + delim.len()).min(query.len());
@@ -1409,7 +1409,7 @@ pub(crate) fn prebinding_violation(query: &str, vars: &[&str]) -> Option<String>
                     i += 2;
                     continue;
                 }
-                if query[i..].starts_with(&delim) {
+                if bytes[i..].starts_with(delim.as_bytes()) {
                     i += delim.len();
                     break;
                 }

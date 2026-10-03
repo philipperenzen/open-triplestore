@@ -16,8 +16,9 @@
 //! which turns a failed download into a failure.
 //!
 //! Each case runs the path a user takes: the IFC file through the built-in IFC
-//! lift, the IDS through the IDS importer (`POST /api/shacl/import/ids`), and
-//! the resulting shapes through the SHACL validator over the lifted graph. The
+//! lift's IDS projection (the graph an IFC import writes to `{building}/ids`),
+//! the IDS through the IDS importer (`POST /api/shacl/import/ids`), and the
+//! resulting shapes through the SHACL validator over the projection. The
 //! outcome is satisfied when
 //!
 //! - `pass-`: the importer accepts the IDS and the lifted model conforms;
@@ -34,7 +35,7 @@
 //! be unsatisfied, so silent regressions and silent fixes both turn the suite
 //! red. Run with `OTS_IDS_PRINT_FAILURES=1` to print the current list.
 
-use open_triplestore::ifc::{convert, ConvertOptions};
+use open_triplestore::ifc::{convert_layers, ConvertOptions};
 use open_triplestore::shacl::validate;
 use open_triplestore::spec_import::importer;
 use open_triplestore::store::TripleStore;
@@ -61,195 +62,9 @@ const DATA_GRAPH: &str = "http://example.org/ids-corpus/model/";
 /// With typed values, negated prohibited facets and the existence check: 147,
 /// and no longer vacuous — a required specification now fails when the
 /// building-topology layer has none of the model's applicable elements.
-const KNOWN_FAILURES: &[(&str, &str)] = &[
-    ("attribute/pass-a_required_facet_checks_all_parameters_as_normal", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-an_optional_attribute_passes_if_null", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-an_optional_attribute_passes_if_specified", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-attributes_referencing_an_object_should_pass", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-attributes_should_check_strings_case_sensitively_1_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-attributes_with_a_boolean_false_should_pass", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-attributes_with_a_boolean_true_should_pass", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-attributes_with_a_select_referencing_a_primitive_should_pass", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-attributes_with_a_select_referencing_an_object_should_pass", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-attributes_with_a_string_value_should_pass", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-attributes_with_a_zero_duration_should_pass", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-attributes_with_a_zero_number_have_meaning_and_should_pass", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-booleans_must_be_specified_as_lowercase_strings_3_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-dates_are_treated_as_strings_2_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-durations_are_treated_as_strings_1_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-globalids_are_treated_as_strings_and_not_expanded", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-integers_follow_the_same_rules_as_numbers", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-name_restrictions_will_match_any_result_1_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-name_restrictions_will_match_any_result_2_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-name_restrictions_will_match_any_result_3_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-non_ascii_characters_are_treated_without_encoding", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-numeric_values_are_checked_using_type_casting_1_4", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-numeric_values_are_checked_using_type_casting_2_4", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-numeric_values_are_checked_using_type_casting_3_4", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-only_specifically_formatted_numbers_are_allowed_3_4", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-only_specifically_formatted_numbers_are_allowed_4_4", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-strict_numeric_checking_may_be_done_with_a_bounds_restriction", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-typecast_checking_may_also_occur_within_enumeration_restrictions", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-value_restrictions_may_be_used_1_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("attribute/pass-value_restrictions_may_be_used_2_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("classification/pass-a_classification_facet_with_no_data_matches_any_classification_2_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("classification/pass-a_required_facet_checks_all_parameters_as_normal", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("classification/pass-an_optional_classification_value_passes_if_null", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("classification/pass-an_optional_classification_value_passes_if_specified", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("classification/pass-both_system_and_value_must_match__all__not_any__if_specified_1_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("classification/pass-non_rooted_resources_that_have_external_classification_references_should_also_pass", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("classification/pass-occurrences_override_the_type_classification_per_system_1_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("classification/pass-occurrences_override_the_type_classification_per_system_3_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("classification/pass-restrictions_can_be_used_for_systems_2_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("classification/pass-restrictions_can_be_used_for_values_1_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("classification/pass-restrictions_can_be_used_for_values_2_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("classification/pass-systems_should_match_exactly_1_5", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("classification/pass-systems_should_match_exactly_3_5", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("classification/pass-systems_should_match_exactly_4_5", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("classification/pass-systems_should_match_exactly_5_5", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("classification/pass-values_match_subreferences_if_full_classifications_are_used__e_g__ef_25_10_should_match_ef_25_10_25__ef_25_10_30__etc_", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("classification/pass-values_should_match_exactly_if_lightweight_classifications_are_used", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("entity/pass-a_matching_entity_should_pass", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("entity/pass-a_matching_predefined_type_should_pass", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("entity/pass-a_predefined_type_may_specify_a_user_defined_element_type", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("entity/pass-a_predefined_type_may_specify_a_user_defined_object_type", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("entity/pass-a_predefined_type_may_specify_a_user_defined_process_type", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("entity/pass-an_matching_entity_should_pass_regardless_of_predefined_type", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("entity/pass-entities_can_be_specified_as_a_xsd_regex_pattern_2_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("entity/pass-entities_can_be_specified_as_an_enumeration_1_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("entity/pass-entities_can_be_specified_as_an_enumeration_2_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("entity/pass-in_ifc2x3_a_user_defined_airterminal_predefined_type_resolves_via_the_type_mapping_table_1_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("entity/pass-in_ifc2x3_an_airterminal_can_be_checked_by_name_via_the_type_mapping_table_1_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("entity/pass-in_ifc2x3_an_airterminal_predefined_type_resolves_via_the_type_mapping_table_1_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("entity/pass-in_ifc2x3_there_must_be_an_airterminal_per_the_type_mapping_table_1_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("entity/pass-inherited_predefined_types_should_pass", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("entity/pass-overridden_predefined_types_should_pass", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("entity/pass-restrictions_can_be_specified_for_the_predefined_type_1_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("entity/pass-restrictions_can_be_specified_for_the_predefined_type_2_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("entity/pass-userdefined_predefined_types_may_be_specified", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("ids/fail-a_minimal_ids_can_check_a_minimal_ifc_1_2", "an optional specification over an uncontained wall: nothing is targeted, so nothing fails"),
-    ("ids/fail-a_specification_passes_only_if_all_requirements_pass_1_2", "an optional specification over an uncontained wall: nothing is targeted, so nothing fails"),
-    ("ids/fail-prohibited_specifications_fails_if_the_applicability_matches", "the prohibited wall is uncontained, so the building-topology layer does not carry it"),
-    ("ids/pass-required_specifications_need_at_least_one_applicable_entity_1_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-a_layer_set_name_will_pass_a_value_check", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-a_material_category_may_pass_the_value_check", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-a_material_name_may_pass_the_value_check", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-a_required_facet_checks_all_parameters_as_normal", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-an_optional_material_passes_if_null", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-an_optional_material_passes_if_specified", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-any_constituent_category_in_a_constituent_set_will_pass_a_value_check", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-any_constituent_name_in_a_constituent_set_will_pass_a_value_check", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-any_layer_category_in_a_layer_set_will_pass_a_value_check", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-any_layer_name_in_a_layer_set_will_pass_a_value_check", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-any_material_category_in_a_constituent_set_will_pass_a_value_check", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-any_material_category_in_a_layer_set_will_pass_a_value_check", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-any_material_category_in_a_list_will_pass_a_value_check", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-any_material_category_in_a_profile_set_will_pass_a_value_check", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-any_material_name_in_a_constituent_set_will_pass_a_value_check", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-any_material_name_in_a_layer_set_will_pass_a_value_check", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-any_material_name_in_a_list_will_pass_a_value_check", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-any_material_name_in_a_profile_set_will_pass_a_value_check", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-any_profile_category_in_a_profile_set_will_pass_a_value_check", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-any_profile_name_in_a_profile_set_will_pass_a_value_check", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-elements_with_any_material_will_pass_an_empty_material_facet", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-occurrences_can_inherit_materials_from_their_types", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("material/pass-occurrences_can_override_materials_from_their_types", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("partof/fail-a_prohibited_facet_returns_the_opposite_of_a_required_facet", "aggregation of elements into elements is not visible as a containing class here"),
-    ("partof/fail-the_container_must_be_related_using_specified_relation_2_2", "the building-topology layer writes aggregation as bot:containsElement too, so containment and aggregation are not told apart"),
-    ("partof/pass-a_group_entity_must_match_exactly_2_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("partof/pass-a_group_predefined_type_must_match_exactly_2_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("partof/pass-a_grouped_element_passes_a_group_relationship", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("partof/pass-a_required_facet_checks_all_parameters_as_normal", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("partof/pass-an_aggregate_entity_may_pass_any_ancestral_whole_passes", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("partof/pass-an_aggregate_may_specify_the_entity_of_the_whole_1_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("partof/pass-an_aggregate_may_specify_the_predefined_type_of_the_whole_1_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("partof/pass-any_contained_element_passes_a_containment_relationship_2_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("partof/pass-any_nested_part_passes_a_nest_relationship", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("partof/pass-nesting_may_be_indirect", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("partof/pass-the_aggregated_part_passes_an_aggregate_relationship", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("partof/pass-the_container_entity_must_match_exactly_2_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("partof/pass-the_container_predefined_type_must_match_exactly_2_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("partof/pass-the_containment_can_be_indirect_1_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("partof/pass-the_nest_entity_must_match_exactly_2_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("partof/pass-the_nest_predefined_type_must_match_exactly_2_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/fail-properties_can_be_associated_to_relevant_object_types", "type objects are not in the building-topology layer"),
-    ("property/pass-a_name_check_will_match_any_property_with_any_string_value", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-a_name_check_will_match_any_quantity_with_any_value", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-a_number_specified_as_a_string_is_treated_as_a_string", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-a_property_set_to_false_is_still_considered_a_value_and_will_pass_a_name_check", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-a_property_set_to_true_will_pass_a_name_check", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-a_required_facet_checks_all_parameters_as_normal", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-a_zero_duration_will_pass", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-all_matching_properties_must_satisfy_requirements_1_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-all_matching_properties_must_satisfy_requirements_2_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-all_matching_property_sets_must_satisfy_requirements_1_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-all_matching_property_sets_must_satisfy_requirements_3_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-an_optional_facet_always_passes_regardless_of_outcome_1_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-an_optional_facet_always_passes_regardless_of_outcome_2_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-any_matching_value_in_a_bounded_property_will_pass_1_4", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-any_matching_value_in_a_bounded_property_will_pass_2_4", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-any_matching_value_in_a_bounded_property_will_pass_3_4", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-any_matching_value_in_a_list_property_will_pass_1_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-any_matching_value_in_a_list_property_will_pass_2_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-any_matching_value_in_a_table_property_will_pass_1_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-any_matching_value_in_a_table_property_will_pass_2_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-any_matching_value_in_an_enumerated_property_will_pass_1_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-any_matching_value_in_an_enumerated_property_will_pass_2_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-booleans_must_be_specified_as_lowercase_strings_2_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-dates_are_treated_as_strings_1_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-durations_are_treated_as_strings_2_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-if_multiple_properties_are_matched__all_values_must_satisfy_requirements_1_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-integer_values_are_checked_using_type_casting_1_4", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-material_properties_are_supported_under_ifc2x3_via_extendedmaterialproperties", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-material_properties_are_supported_under_ifc4_via_ifcmaterialproperties", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-measures_are_used_to_specify_an_ifc_data_type_2_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-non_ascii_characters_are_treated_without_encoding", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-only_specifically_formatted_numbers_are_allowed_3_4", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-only_specifically_formatted_numbers_are_allowed_4_4", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-predefined_properties_are_supported_but_discouraged_1_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-project_properties_are_supported_under_ifc2x3_via_ifcobject", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-project_properties_are_supported_under_ifc4_via_ifccontext", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-properties_can_be_inherited_from_the_type_1_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-properties_can_be_inherited_from_the_type_2_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-properties_can_be_overriden_by_an_occurrence_1_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-real_values_are_checked_using_type_casting_1_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-real_values_are_checked_using_type_casting_2_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-real_values_are_checked_using_type_casting_3_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-specifying_a_value_performs_a_case_sensitive_match_1_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("property/pass-unit_conversions_shall_take_place_to_ids_nominated_standard_units_2_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("restriction/invalid-patterns_always_fail_on_any_number", "no IDS audit: a pattern on a number is accepted"),
-    ("restriction/pass-a_bound_can_be_exclusive_2_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("restriction/pass-a_bound_can_be_inclusive_1_4", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("restriction/pass-a_bound_can_be_inclusive_2_4", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("restriction/pass-a_bound_can_be_inclusive_3_4", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("restriction/pass-an_enumeration_matches_case_sensitively_1_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("restriction/pass-an_enumeration_matches_case_sensitively_2_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("restriction/pass-length_checks_can_be_used_2_2", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("restriction/pass-max_and_min_length_checks_can_be_used_2_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("restriction/pass-max_and_min_length_checks_can_be_used_3_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("restriction/pass-regex_patterns_can_be_used_1_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("restriction/pass-regex_patterns_can_be_used_2_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("restriction/pass-regex_patterns_work_in_OR_1_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("restriction/pass-regex_patterns_work_in_OR_2_3", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("tolerance/pass-comparison_tolerance_for_floating_point_negative_high_number_lower_bound", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("tolerance/pass-comparison_tolerance_for_floating_point_negative_high_number_upper_bound", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("tolerance/pass-comparison_tolerance_for_floating_point_negative_low_number_lower_bound", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("tolerance/pass-comparison_tolerance_for_floating_point_negative_low_number_upper_bound", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("tolerance/pass-comparison_tolerance_for_floating_point_negative_one_lower_bound", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("tolerance/pass-comparison_tolerance_for_floating_point_negative_one_upper_bound", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("tolerance/pass-comparison_tolerance_for_floating_point_one_lower_bound", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("tolerance/pass-comparison_tolerance_for_floating_point_one_upper_bound", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("tolerance/pass-comparison_tolerance_for_floating_point_positive_high_number_lower_bound", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("tolerance/pass-comparison_tolerance_for_floating_point_positive_high_number_upper_bound", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("tolerance/pass-comparison_tolerance_for_floating_point_positive_low_number_lower_bound", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("tolerance/pass-comparison_tolerance_for_floating_point_positive_low_number_upper_bound", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("tolerance/pass-comparison_tolerance_for_floating_point_range_greater_than_zero_exclusive", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("tolerance/pass-comparison_tolerance_for_floating_point_range_greater_than_zero_inclusive", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("tolerance/pass-comparison_tolerance_for_floating_point_range_lower_than_zero_exclusive", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("tolerance/pass-comparison_tolerance_for_floating_point_range_lower_than_zero_inclusive", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("tolerance/pass-comparison_tolerance_for_floating_point_zero_lower_bound", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-    ("tolerance/pass-comparison_tolerance_for_floating_point_zero_upper_bound", "the required specification's existence check fails: the building-topology lift does not carry this model's uncontained elements, attributes or type objects"),
-];
+/// With the IDS projection, the SHACL-SPARQL converter and the IDS audit: all
+/// 334, and the list is empty — keep it that way.
+const KNOWN_FAILURES: &[(&str, &str)] = &[];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Expect {
@@ -429,16 +244,19 @@ fn run_case(case: &Case) -> Result<Verdict, String> {
         Err(e) => return Ok(Verdict::Rejected(e.to_string())),
     };
     let store = TripleStore::in_memory().map_err(|e| format!("store: {e}"))?;
+    // The IDS projection is the data an IDS is checked against; the
+    // building-topology and ifcOWL outputs are not needed here.
     let mut data = String::new();
-    let mut owl = String::new();
-    convert(
+    convert_layers(
         &ifc,
         &ConvertOptions {
             inst_base: DATA_GRAPH.to_string(),
+            include_ids: true,
             ..Default::default()
         },
+        &mut |_| {},
+        &mut |_| {},
         &mut |c| data.push_str(c),
-        &mut |c| owl.push_str(c),
     )
     .map_err(|e| format!("ifc lift: {e}"))?;
     store
@@ -487,7 +305,11 @@ fn buildingsmart_ids_corpus() {
     let mut still_failing = Vec::new();
     let mut seen_known = 0usize;
     let mut satisfied_count = 0usize;
+    let trace = std::env::var_os("OTS_IDS_TRACE").is_some();
     for case in &all {
+        if trace {
+            eprintln!("case {}", case.key);
+        }
         let known = KNOWN_FAILURES.iter().find(|(k, _)| *k == case.key);
         if known.is_some() {
             seen_known += 1;

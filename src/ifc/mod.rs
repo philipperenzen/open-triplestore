@@ -14,6 +14,12 @@
 //!   CRS-qualified geometry — all under the lift's own namespace,
 //!   `{base_url}/ns/ifc-lift#`, whose ontology ships as the `ifc-lift` seed
 //!   bundle.
+//! * **IDS projection** (optional, [`ids_projection`]) — the facts an IDS 1.0
+//!   checker reads: every instance with its exact, schema-qualified class and
+//!   all its explicit attributes, resolved predefined types, property and
+//!   quantity sets with type inheritance and SI values, part-of edges per
+//!   relation, materials and classifications. A separate output, so the BOT
+//!   layer above stays exactly as it was.
 //! * **ifcOWL layer** (optional) — a complete instance-level lift of the STEP
 //!   file: every instance typed in the schema's ifcOWL namespace with all its
 //!   attributes. Encoding is the pragmatic "direct" style (literals attached
@@ -24,6 +30,7 @@
 //! The parser tolerates the formatting quirks of real exporters (ArchiCAD,
 //! Synchro, Revit): see [`step`].
 
+pub mod ids_projection;
 pub mod names;
 pub mod rdf;
 pub mod schema;
@@ -47,6 +54,9 @@ pub struct ConvertOptions {
     pub anchor_wkt: Option<String>,
     /// Also produce the full ifcOWL-style lift (large!).
     pub include_ifcowl: bool,
+    /// Also produce the IDS projection ([`ids_projection`]), for checking the
+    /// model against IDS specifications.
+    pub include_ids: bool,
     /// Authored `ots:modelHeading` (degrees clockwise from north for the model's
     /// +X axis), stamped on every element file-link node when set.
     pub model_heading: Option<f64>,
@@ -100,16 +110,36 @@ pub struct IfcStats {
     /// lifted (its CRS may still be unrecognised).
     #[serde(default)]
     pub map_conversion: bool,
+    /// Triples in the IDS projection (0 when it was not requested).
+    #[serde(default)]
+    pub ids_triples: usize,
 }
 
 /// Parse `input` and emit RDF. `bot_sink` / `ifcowl_sink` receive N-Triples
 /// chunks (several MB each) suitable for `graph_store_post` into two graphs.
+#[allow(dead_code)] // the library entry point; the binary goes through `convert_layers`
 pub fn convert(
     input: &str,
     opts: &ConvertOptions,
     bot_sink: &mut dyn FnMut(&str),
     ifcowl_sink: &mut dyn FnMut(&str),
 ) -> Result<IfcStats, String> {
+    convert_layers(input, opts, bot_sink, ifcowl_sink, &mut |_| {})
+}
+
+/// [`convert`] with the IDS projection: when `opts.include_ids` is set,
+/// `ids_sink` receives its N-Triples chunks (for a graph of its own).
+pub fn convert_layers(
+    input: &str,
+    opts: &ConvertOptions,
+    bot_sink: &mut dyn FnMut(&str),
+    ifcowl_sink: &mut dyn FnMut(&str),
+    ids_sink: &mut dyn FnMut(&str),
+) -> Result<IfcStats, String> {
     let file = step::parse(input)?;
-    rdf::emit(&file, opts, bot_sink, ifcowl_sink)
+    let mut stats = rdf::emit(&file, opts, bot_sink, ifcowl_sink)?;
+    if opts.include_ids {
+        stats.ids_triples = ids_projection::emit(&file, opts, ids_sink)?.triples;
+    }
+    Ok(stats)
 }

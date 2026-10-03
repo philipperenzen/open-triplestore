@@ -3,7 +3,7 @@
 The following W3C and OGC standards are implemented. Support levels are this
 project's own grades, from its test suites and a conformance review of the
 engine and high-complexity edge cases. They are not W3C or OGC conformance
-claims, and nothing here is OGC-certified:
+claims, and nothing here is OGC-certified or buildingSMART-certified:
 
 - **Full** — the normative core plus tested edge cases pass.
 - **Partial** — core works; specific features are unimplemented or deviate (see
@@ -29,7 +29,7 @@ claims, and nothing here is OGC-certified:
 | SHACL Advanced (AF / SPARQL) | SPARQL constraints, rules, targets | Partial⁷ |
 | SHACL-C | Compact-syntax parser/serializer | Partial⁸ |
 | OPM (Ontology for Property Management) | Property states with history | Partial — `opm:Property` / `opm:PropertyState` / current-outdated / reliability classes via the property-state API; no `opm:Calculation` or derived-property inference. See [datasets.md](datasets.md#time-evolving-properties-opm-profile). |
-| buildingSMART IDS 1.0 | Information Delivery Specification → SHACL | Partial — entity, property, attribute, partOf facets with typed value restrictions (IDS tolerance for doubles, anchored XSD patterns), cardinality (prohibited as negation) and every listed `ifcVersion`; existence of an applicable entity is checked by class; classification and material facets target `props:ifcClassification` / `props:ifcMaterial`, which the IFC lift emits; predefinedType not checked, and the building-topology lift leaves out elements outside the spatial tree and attributes beyond Name/GlobalId. The buildingSMART test corpus runs in CI as a ratchet ([conformance/ids.md](conformance/ids.md)); development results, not a certification. See [shacl.md](shacl.md#importing-constraint-specifications-ids). Round-trips: export back to IDS 1.0 covers the shared subset, and anything outside the IDS facet model is reported as a loss. |
+| buildingSMART IDS 1.0 | Information Delivery Specification → SHACL | Full — every facet (entity with predefined type, attribute, property and quantity, classification, material, partOf), value restrictions with the IDS tolerance and XSD patterns, required/optional/prohibited cardinality and specifications, checked over the IFC lift's IDS projection; documents validated against the IDS 1.0 XSD and the IDS audit rules (not the standard `Pset_` templates); lossless export of imported specifications. All 334 cases of the buildingSMART IDS test corpus pass in CI ([conformance/ids.md](conformance/ids.md)) — a development result, not a buildingSMART certification. See [shacl.md](shacl.md#importing-constraint-specifications-ids). |
 | ISO 21597-1 ICDD | Information container for linked document delivery | Partial — Part 1 containers import (documents, linksets, payload triples, ontology resources, index) and export (RDF/XML index); Part 2 not interpreted. See [containers.md](containers.md). |
 | RDF Patch (RDF Delta) | Change log line format | Partial — version diffs served as patches; patches applied atomically per dataset (`H`, one `TX`/`TC`/`TA`, `PA`/`PD`, `A`/`D` quads); no blank-node deletes, no nested transactions. See [versioning.md](versioning.md#rdf-patch). |
 | LDES / TREE | Event streams of version objects; hypermedia fragmentation | Partial — time-ordered fixed-size fragments with `GreaterThanOrEqualToRelation`, frozen once full; entity-level version objects, tombstones; retention policies (`fullLogDuration`, `versionAmount`, `versionDuration`, `versionDeleteDuration`, `startingFrom`) enforced inside frozen pages with `410 Gone` for a compacted node; an incremental client that treats 410 as an empty page. No `tree:shape`, `ldes:versionKey` or spatial/substring fragmentations. Spec-derived rules in `tests/ldes_conformance.rs` (no external corpus exists). See [ldes.md](ldes.md). |
@@ -56,7 +56,9 @@ and [conformance/geosparql.md](conformance/geosparql.md).
 [conformance/sparql11.md](conformance/sparql11.md) describes the SPARQL run and
 tracks its known gaps; it publishes no score, because the vendored SPARQL
 sections are a subset of a W3C test suite and W3C's test-suite licence policy
-allows no performance claims on a subset.
+allows no performance claims on a subset. The buildingSMART IDS test corpus is
+not vendored (CC BY-ND 4.0): its runner fetches it from a pinned commit and
+checks every file's SHA-256 ([conformance/ids.md](conformance/ids.md)).
 
 <!-- conformance-table:start -->
 | Standard | Suite | Basis | Tests | Notes |
@@ -89,7 +91,7 @@ allows no performance claims on a subset.
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 125 |  |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 
-754 conformance tests across 27 suites; a further 712 tests in 104 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 3 **vendored** rows and the buildingSMART IDS row run a published corpus; every other suite is hand-written and derived from the specification text. The SHACL, GeoSPARQL and IDS corpus results are development and regression results (`docs/conformance/`), not W3C or OGC conformance claims or a buildingSMART certification. The SPARQL 1.1 sections are a subset of a W3C test suite, so under W3C's test-suite licence policy they are used for development and bug tracking only, and no score is published for them.
+754 conformance tests across 27 suites; a further 715 tests in 104 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 3 **vendored** rows and the buildingSMART IDS row run a published corpus; every other suite is hand-written and derived from the specification text. The SHACL, GeoSPARQL and IDS corpus results are development and regression results (`docs/conformance/`), not W3C or OGC conformance claims or a buildingSMART certification. The SPARQL 1.1 sections are a subset of a W3C test suite, so under W3C's test-suite licence policy they are used for development and bug tracking only, and no score is published for them.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->

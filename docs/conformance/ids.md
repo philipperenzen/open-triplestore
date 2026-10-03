@@ -33,10 +33,12 @@ failure.
 
 Each case takes the path a user takes:
 
-1. the IFC file through the built-in IFC lift (`ifc::convert`, the same code
-   the IFC import endpoint runs), into a fresh in-memory store;
-2. the IDS file through the IDS importer (`POST /api/shacl/import/ids`);
-3. the resulting shapes through the SHACL validator over the lifted graph.
+1. the IFC file through the built-in IFC lift's **IDS projection**
+   (`ifc::convert_layers` with `include_ids`, the graph an IFC import writes to
+   `…/building/ids`), into a fresh in-memory store;
+2. the IDS file through the IDS importer (`POST /api/shacl/import/ids`), which
+   checks it against the IDS 1.0 XSD and the IDS audit rules first;
+3. the resulting shapes through the SHACL validator over the projection.
 
 A case is satisfied when
 
@@ -53,23 +55,38 @@ red. `OTS_IDS_PRINT_FAILURES=1` prints the current list.
 
 ## Known gaps
 
-The list was measured first against the converter and lift as they were
-(develop @ 570a7a3), before any IDS work, to set the baseline:
+None: every case of the pinned corpus is satisfied, and the runner's
+`KNOWN_FAILURES` list is empty. How the list got there:
 
-- **The building-topology layer is the wrong data for IDS.** It lifts spatial
-  elements and the elements contained in or aggregated into them, so a lone
-  `IFCWALL` — most corpus models — is not in the graph at all. Nothing is
-  targeted, every specification conforms vacuously, and every `fail-` and
-  `invalid-` case is unsatisfied. The `pass-` cases mostly "pass" the same
-  vacuous way.
-- **No IDS audit.** An invalid IDS is accepted.
-- **Bounds untyped.** A `0.` bound became invalid Turtle (four `pass-` cases).
+1. **Baseline** (develop @ 570a7a3): the converter wrote SHACL Core over the
+   building-topology layer, which lifts only the spatial tree, so a lone
+   `IFCWALL` — most corpus models — was not in the graph. Nothing was
+   targeted, every specification conformed vacuously, every `fail-` and
+   `invalid-` case was unsatisfied (151 entries), and an untyped `0.` bound
+   was invalid Turtle.
+2. **Value, tolerance and cardinality mapping** (typed values, the IDS
+   tolerance, anchored patterns, prohibited facets as negation, the existence
+   check, every listed `ifcVersion`): the satisfied cases stopped being
+   vacuous, and the list grew to 187 entries — what the building-topology
+   layer cannot carry.
+3. **The IDS projection, the SHACL-SPARQL converter and the IDS audit**: all
+   334 cases satisfied.
 
-After the converter's value, tolerance and cardinality mapping was fixed
-(typed values, the IDS tolerance, anchored patterns, prohibited facets as
-negation, the existence check, every listed `ifcVersion`), the satisfied
-cases are no longer vacuous, and the list shows what the building-topology
-layer cannot carry: a required specification now fails when the layer holds
-none of the model's applicable elements, which is most `pass-` cases. The
-next step adds an IDS-oriented projection to the IFC lift beside the
-building-topology output, with IDS document validation.
+Three behaviours the corpus settles, beyond the prose of the IDS
+documentation:
+
+- **A value exactly on the tolerance bound is equal.** `tolerance.md` writes
+  the range with strict inequalities, but the corpus's `pass-` tolerance cases
+  sit exactly on `v ± (|v|·1e-6 + 1e-6)`; the range is closed (and widened by a
+  few ulps for binary rounding), and the `fail-` cases, just outside it, still
+  fail.
+- **`ifcVersion` does not exclude a model of another schema.** Several `ids/`
+  cases run an `IFC2X3` specification against an IFC4 model and expect it to
+  be checked. The list decides which names the audit accepts; the checks
+  apply to a model of any schema.
+- **An invalid document is refused at import** when the XSD or audit checks
+  catch it, which counts as unsatisfiable.
+
+The runner checks behaviour, not reports: it compares the conforms/violates
+verdict per case, not the violation messages. The standard property-set
+templates (the audit tool's `Pset_` checks) are not part of the audit here.

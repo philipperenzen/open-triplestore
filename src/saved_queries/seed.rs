@@ -575,6 +575,7 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
             Some(bot_graph),
             true,
             true,
+            false,
             Some(url.clone()),
             b.anchor.map(str::to_string),
             crate::imports::ifc::IfcImportBranding {

@@ -15,8 +15,14 @@
 //! SHACL-to-IDS translator, and shapes produced by other tools will mostly
 //! land in the loss list.
 //!
-//! Round-tripping an imported document is the design target: import → export
-//! → import reaches a fixpoint on the subset both directions share.
+//! Round-tripping an imported document is the design target. The IDS importer
+//! records each specification's source on its shape (`ots:idsSpecification`)
+//! with a fingerprint of the constraints it generated from it; while the
+//! shapes are unchanged, [`export_graph`] writes that source back, so an
+//! imported IDS exports losslessly. A specification whose shapes were edited
+//! after import is not exported from its stale source; it is reported. Shapes
+//! that did not come from an IDS import go through [`export`], which reads the
+//! older `props:`/`bot:` SHACL Core form.
 
 use std::fmt::Write as _;
 
@@ -42,6 +48,15 @@ impl SpecExporter for IdsExporter {
     }
     fn export(&self, shapes: &[Shape], title: &str) -> anyhow::Result<ExportedSpec> {
         export(shapes, title)
+    }
+    fn export_graph(
+        &self,
+        store: &crate::store::TripleStore,
+        graph: &str,
+        shapes: &[Shape],
+        title: &str,
+    ) -> anyhow::Result<ExportedSpec> {
+        export_graph(store, graph, shapes, title)
     }
 }
 
@@ -711,10 +726,169 @@ pub fn export(shapes: &[Shape], title: &str) -> anyhow::Result<ExportedSpec> {
     })
 }
 
+/// One recorded specification: (shape IRI, specification XML, fingerprint).
+type RecordedSpec = (String, String, Option<String>);
+
+/// The IDS sources an import recorded in a shape graph: the document's info
+/// and each specification shape's source.
+fn recorded_sources(
+    store: &crate::store::TripleStore,
+    graph: &str,
+) -> (Option<String>, Vec<RecordedSpec>) {
+    use oxigraph::sparql::QueryResults;
+    const OTS: &str = "https://opentriplestore.org/ns#";
+    let mut info = None;
+    if let Ok(QueryResults::Solutions(sols)) = store.query(&format!(
+        "SELECT ?info WHERE {{ GRAPH <{graph}> {{ ?d <{OTS}idsInfo> ?info }} }} LIMIT 1"
+    )) {
+        for s in sols.flatten() {
+            if let Some(oxigraph::model::Term::Literal(l)) = s.get("info") {
+                info = Some(l.value().to_string());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if let Ok(QueryResults::Solutions(sols)) = store.query(&format!(
+        "SELECT ?s ?xml ?fp WHERE {{ GRAPH <{graph}> {{ ?s <{OTS}idsSpecification> ?xml . OPTIONAL {{ ?s <{OTS}idsFingerprint> ?fp }} }} }}"
+    )) {
+        for s in sols.flatten() {
+            let (Some(oxigraph::model::Term::NamedNode(iri)), Some(oxigraph::model::Term::Literal(xml))) =
+                (s.get("s"), s.get("xml"))
+            else {
+                continue;
+            };
+            let fp = match s.get("fp") {
+                Some(oxigraph::model::Term::Literal(l)) => Some(l.value().to_string()),
+                _ => None,
+            };
+            out.push((iri.as_str().to_string(), xml.value().to_string(), fp));
+        }
+    }
+    out.sort();
+    (info, out)
+}
+
+/// The fingerprint of a loaded specification shape and its existence shape,
+/// computed the way the importer computed it when it wrote them.
+fn loaded_fingerprint(shape: &Shape, all: &[Shape]) -> String {
+    let targets: Vec<String> = shape
+        .targets
+        .iter()
+        .filter_map(|t| match t {
+            Target::TargetClass(c) => Some(c.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut selects: Vec<String> = Vec::new();
+    let mut collect = |s: &Shape| {
+        for c in &s.constraints {
+            if let Constraint::SparqlConstraint { select, .. } = c {
+                selects.push(select.clone());
+            }
+        }
+    };
+    collect(shape);
+    if let Some(e) = all
+        .iter()
+        .find(|s| s.iri == format!("{}-exists", shape.iri))
+    {
+        collect(e);
+    }
+    super::ids::fingerprint(&targets, &selects)
+}
+
+/// Export a shape graph: specifications the IDS importer wrote are written
+/// back from the source it recorded, as long as their shapes are unchanged;
+/// every other shape goes through [`export`].
+pub fn export_graph(
+    store: &crate::store::TripleStore,
+    graph: &str,
+    shapes: &[Shape],
+    title: &str,
+) -> anyhow::Result<ExportedSpec> {
+    let (info, sources) = recorded_sources(store, graph);
+    if sources.is_empty() {
+        return export(shapes, title);
+    }
+    let mut losses = Vec::new();
+    let mut specs = String::new();
+    let mut count = 0usize;
+    let mut handled: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (iri, xml, fp) in &sources {
+        handled.insert(iri.clone());
+        handled.insert(format!("{iri}-exists"));
+        let Some(shape) = shapes.iter().find(|s| &s.iri == iri) else {
+            continue;
+        };
+        let name = shape.name.clone().unwrap_or_else(|| iri.clone());
+        match fp {
+            Some(fp) if *fp == loaded_fingerprint(shape, shapes) => {
+                for line in xml.lines() {
+                    let _ = writeln!(specs, "    {line}");
+                }
+                count += 1;
+            }
+            _ => losses.push(format!(
+                "specification `{name}` was changed after it was imported, so the IDS it came from no longer describes it — not exported"
+            )),
+        }
+    }
+    // Shapes that did not come from an IDS import.
+    let rest: Vec<Shape> = shapes
+        .iter()
+        .filter(|s| !handled.contains(&s.iri))
+        .cloned()
+        .collect();
+    if !rest.is_empty() {
+        if let Ok(other) = export(&rest, title) {
+            losses.extend(other.losses);
+            count += other.specification_count;
+            if let (Some(a), Some(b)) = (
+                other.document.find("<ids:specifications>\n"),
+                other.document.rfind("  </ids:specifications>"),
+            ) {
+                specs.push_str(&other.document[a + "<ids:specifications>\n".len()..b]);
+            }
+        }
+    }
+    if count == 0 {
+        anyhow::bail!(
+            "no shape could be expressed as an IDS specification: {}",
+            losses.join("; ")
+        );
+    }
+    let info = info.unwrap_or_else(|| {
+        format!(
+            "<ids:info>\n  <ids:title>{}</ids:title>\n</ids:info>\n",
+            esc(title)
+        )
+    });
+    let mut info_block = String::new();
+    for line in info.lines() {
+        let _ = writeln!(info_block, "  {line}");
+    }
+    let document = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <ids:ids xmlns:ids=\"http://standards.buildingsmart.org/IDS\" \
+         xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" \
+         xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" \
+         xsi:schemaLocation=\"http://standards.buildingsmart.org/IDS http://standards.buildingsmart.org/IDS/1.0/ids.xsd\">\n\
+         {info_block}\
+         \x20 <ids:specifications>\n{specs}  </ids:specifications>\n\
+         </ids:ids>\n"
+    );
+    Ok(ExportedSpec {
+        document,
+        specification_count: count,
+        losses,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::shacl::engine::load_shapes;
+    use crate::spec_import::SpecImporter as _;
     use crate::store::TripleStore;
     use oxigraph::io::RdfFormat;
 
@@ -726,37 +900,71 @@ mod tests {
         load_shapes(&store, "urn:shapes").unwrap()
     }
 
-    /// The importer's own sample round-trips: import → export puts the entity,
-    /// the applicability property and the requirement back.
+    /// The importer's own sample round-trips: the exported document carries
+    /// the recorded specifications, validates as IDS 1.0, and imports to the
+    /// same shapes again.
     #[test]
     fn the_importers_own_sample_exports_its_specifications_back() {
-        let imported = super::super::ids::convert(
-            &super::super::ids::parse_xml(super::super::ids::tests_sample().as_bytes()).unwrap(),
-        )
-        .unwrap();
-        let shapes = shapes_of(&imported.turtle);
-        let out = export(&shapes, "Wall fire ratings").expect("exports");
-        assert!(
-            out.specification_count >= 2,
-            "the sample has two specifications: {}",
-            out.document
+        let imported = super::super::ids::IdsImporter
+            .import(super::super::ids::tests_sample().as_bytes())
+            .unwrap();
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(&imported.turtle, RdfFormat::Turtle, Some("urn:shapes"))
+            .unwrap();
+        let shapes = load_shapes(&store, "urn:shapes").unwrap();
+        let out = export_graph(&store, "urn:shapes", &shapes, "ignored").expect("exports");
+        assert_eq!(out.specification_count, 2, "{}", out.document);
+        assert!(out.losses.is_empty(), "{:?}", out.losses);
+        for needle in [
+            "IFCWALL",
+            "Pset_WallCommon",
+            "IFCRELCONTAINEDINSPATIALSTRUCTURE",
+            "REI60",
+            "IFC2X3 IFC4",
+            "Wall fire ratings",
+        ] {
+            assert!(
+                out.document.contains(needle),
+                "`{needle}`: {}",
+                out.document
+            );
+        }
+        assert!(!out.document.contains("-applies"), "{}", out.document);
+        // Valid IDS 1.0, and a fixpoint: re-importing gives the same shapes.
+        let again = super::super::ids::IdsImporter
+            .import(out.document.as_bytes())
+            .expect("the export is a valid IDS document");
+        assert_eq!(again.turtle, imported.turtle);
+    }
+
+    /// A specification edited after import is not exported from its stale
+    /// source.
+    #[test]
+    fn an_edited_specification_is_reported_not_exported_from_its_source() {
+        let imported = super::super::ids::IdsImporter
+            .import(super::super::ids::tests_sample().as_bytes())
+            .unwrap();
+        let edited = imported.turtle.replacen(
+            "sh:targetClass <https://opentriplestore.org/ns/ifc-ids/IFC4#IFCWALL> ;",
+            "",
+            1,
         );
-        assert!(out.document.contains("IFCWALL"), "{}", out.document);
+        assert_ne!(edited, imported.turtle);
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(&edited, RdfFormat::Turtle, Some("urn:shapes"))
+            .unwrap();
+        let shapes = load_shapes(&store, "urn:shapes").unwrap();
+        let out =
+            export_graph(&store, "urn:shapes", &shapes, "t").expect("the unedited one exports");
+        assert_eq!(out.specification_count, 1, "{}", out.document);
         assert!(
-            out.document.contains("Pset_WallCommon"),
-            "the property set survives: {}",
-            out.document
-        );
-        assert!(
-            out.document.contains("IFCRELCONTAINEDINSPATIALSTRUCTURE"),
-            "the partOf relation survives: {}",
-            out.document
-        );
-        // The helper shapes must not become specifications of their own.
-        assert!(
-            !out.document.contains("-applies"),
-            "helper shapes are not specifications: {}",
-            out.document
+            out.losses
+                .iter()
+                .any(|l| l.contains("changed after it was imported")),
+            "{:?}",
+            out.losses
         );
     }
 
