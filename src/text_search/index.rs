@@ -502,11 +502,18 @@ impl TextIndex {
 
         let mut count = 0usize;
         for graph in graphs {
-            let Ok(g) = NamedNodeRef::new(graph) else {
-                continue;
+            // The default graph is keyed by its stand-in IRI, as the full
+            // rebuild keys it.
+            let name = if graph == DEFAULT_GRAPH_IRI {
+                GraphNameRef::DefaultGraph
+            } else {
+                let Ok(g) = NamedNodeRef::new(graph) else {
+                    continue;
+                };
+                GraphNameRef::NamedNode(g)
             };
             let quads = store
-                .quads_for_graph(GraphNameRef::NamedNode(g))
+                .quads_for_graph(name)
                 .map_err(|e| TextSearchError::Store(e.to_string()))?;
             for q in quads {
                 let oxigraph::model::NamedOrBlankNode::NamedNode(s) = &q.subject else {
@@ -526,6 +533,124 @@ impl TextIndex {
             graphs.len(),
             count
         );
+        Ok(count)
+    }
+
+    /// Bring the index in step with `touched` — what the store's writes since
+    /// the last sync touched (see [`crate::store::search_journal`]): every
+    /// touched graph is refreshed, and every touched quad outside those
+    /// graphs is reconciled against the store's current state. The caller
+    /// handles `touched.all` with [`Self::reindex_from_store`].
+    pub fn apply_touched(
+        &self,
+        store: &TripleStore,
+        touched: &crate::store::search_journal::Touched,
+    ) -> Result<usize, TextSearchError> {
+        let graphs: Vec<String> = touched
+            .graphs
+            .iter()
+            .map(|g| g.clone().unwrap_or_else(|| DEFAULT_GRAPH_IRI.to_string()))
+            .collect();
+        let mut count = self.refresh_graphs(store, &graphs)?;
+        let rest: Vec<&oxigraph::model::Quad> = touched
+            .quads
+            .iter()
+            .filter(|q| {
+                !touched
+                    .graphs
+                    .contains(&crate::store::search_journal::graph_key(q))
+            })
+            .collect();
+        if !rest.is_empty() {
+            count += self.reconcile_quads(store, &rest)?;
+            self.commit()?;
+        }
+        Ok(count)
+    }
+
+    /// Make the documents of each quad's `(subject, predicate, graph, text)`
+    /// key match what the store holds now: remove them, then index every
+    /// stored literal with that key. Idempotent and independent of order, so
+    /// the journal can hand over inserts and deletes of concurrent writes in
+    /// any order. Keyed on the literal's text (not its datatype or language)
+    /// like the documents themselves, so `"a"@en` and `"a"@nl` on one
+    /// subject and predicate stay two documents.
+    fn reconcile_quads(
+        &self,
+        store: &TripleStore,
+        quads: &[&oxigraph::model::Quad],
+    ) -> Result<usize, TextSearchError> {
+        use oxigraph::model::{GraphNameRef, NamedOrBlankNode, NamedOrBlankNodeRef, Term};
+        use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
+        use tantivy::schema::IndexRecordOption;
+
+        let mut keys = std::collections::HashSet::new();
+        for q in quads {
+            let (NamedOrBlankNode::NamedNode(s), Term::Literal(lit)) = (&q.subject, &q.object)
+            else {
+                continue;
+            };
+            keys.insert((
+                s.clone(),
+                q.predicate.clone(),
+                q.graph_name.clone(),
+                lit.value().to_string(),
+            ));
+        }
+        let mut count = 0usize;
+        for (s, p, g, text) in keys {
+            let graph = match &g {
+                oxigraph::model::GraphName::NamedNode(n) => n.as_str().to_string(),
+                oxigraph::model::GraphName::DefaultGraph => DEFAULT_GRAPH_IRI.to_string(),
+                oxigraph::model::GraphName::BlankNode(_) => continue,
+            };
+            {
+                let must = |field, value: &str| -> (Occur, Box<dyn Query>) {
+                    (
+                        Occur::Must,
+                        Box::new(TermQuery::new(
+                            tantivy::Term::from_field_text(field, value),
+                            IndexRecordOption::Basic,
+                        )),
+                    )
+                };
+                // `text_raw` is absent for an over-long literal; match those
+                // on the stored key fields alone (removing a few more of the
+                // subject's documents is harmless: they are re-added below
+                // only if stored, so the over-long one is re-indexed too).
+                let mut clauses = vec![
+                    must(self.uri_field, s.as_str()),
+                    must(self.predicate_field, p.as_str()),
+                    must(self.graph_field, &graph),
+                ];
+                if text.len() <= MAX_TOKEN_LEN {
+                    clauses.push(must(self.text_raw_field, &text));
+                }
+                let writer = self.writer.lock().expect("index writer lock poisoned");
+                writer.delete_query(Box::new(BooleanQuery::new(clauses)))?;
+            }
+            let graph_ref = match &g {
+                oxigraph::model::GraphName::NamedNode(n) => GraphNameRef::NamedNode(n.as_ref()),
+                _ => GraphNameRef::DefaultGraph,
+            };
+            let stored = store.store().quads_for_pattern(
+                Some(NamedOrBlankNodeRef::NamedNode(s.as_ref())),
+                Some(p.as_ref()),
+                None,
+                Some(graph_ref),
+            );
+            for stored in stored {
+                let stored = stored.map_err(|e| TextSearchError::Store(e.to_string()))?;
+                let Term::Literal(lit) = &stored.object else {
+                    continue;
+                };
+                if text.len() <= MAX_TOKEN_LEN && lit.value() != text {
+                    continue;
+                }
+                self.index_triple(s.as_str(), p.as_str(), &graph, lit.value())?;
+                count += 1;
+            }
+        }
         Ok(count)
     }
 

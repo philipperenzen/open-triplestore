@@ -850,28 +850,39 @@ pub(crate) async fn execute_update(
     // did. The result is handed over before the re-check, which therefore does
     // not count toward the timeout.
     let reverify = authorized.writes_unnamed_graphs;
+    // Writer-pays text-index maintenance (below) for an update whose graphs
+    // are named: the write runs under a claim, so the store's search journal
+    // leaves it to this handler — and gets it back if the handler never gets
+    // that far (a timeout drops the claim, which then publishes the write).
+    // Any other update is left to the journal outright.
+    let claim_index = !(requires_admin || graph_iris.is_empty());
     let st = state.clone();
     let source_caller =
         crate::sources::virtual_source::SourceCaller::for_request(&state.auth_db, user);
     let (result_tx, result_rx) = oneshot::channel();
     let write = tokio::task::spawn_blocking(move || {
+        let claim = claim_index.then(|| store.claim_search_index());
         let result = {
             let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
             // A SERVICE in the WHERE clause (admin only, see
             // `authorize_update`) acts for the caller.
             let _source_caller =
                 crate::sources::virtual_source::SourceCallerGuard::set(Some(source_caller));
-            store.update_targeted_delta(&effective, &affected, requires_admin)
+            let run = || store.update_targeted_delta(&effective, &affected, requires_admin);
+            match &claim {
+                Some(claim) => claim.run(run),
+                None => run(),
+            }
         };
         // A replica refuses every write before anything is written.
         let may_have_written =
             !matches!(result, Err(crate::store::engine::StoreError::ReadOnly(_)));
-        let _ = result_tx.send(result);
+        let _ = result_tx.send((result, claim));
         if reverify && may_have_written {
             reverify_model_copies_after_write(&st);
         }
     });
-    let delta = tokio::time::timeout(timeout, result_rx)
+    let (result, claim) = tokio::time::timeout(timeout, result_rx)
         .await
         .map_err(|_| {
             // Only the wait ends here: the write cannot be cancelled.
@@ -882,12 +893,12 @@ pub(crate) async fn execute_update(
                     .to_string(),
             )
         })?
-        .map_err(|_| AppError::Internal("the update task ended without a result".to_string()))?
-        .map_err(|e| match e {
-            // A replica refuses every write: 503, not a client error.
-            crate::store::engine::StoreError::ReadOnly(_) => AppError::from(e),
-            other => AppError::BadRequest(other.to_string()),
-        })?;
+        .map_err(|_| AppError::Internal("the update task ended without a result".to_string()))?;
+    let delta = result.map_err(|e| match e {
+        // A replica refuses every write: 503, not a client error.
+        crate::store::engine::StoreError::ReadOnly(_) => AppError::from(e),
+        other => AppError::BadRequest(other.to_string()),
+    })?;
     if reverify {
         // Answer once the re-check is done, so a read right after this
         // response sees the records it marked.
@@ -895,24 +906,27 @@ pub(crate) async fn execute_update(
     }
     // Writer-pays text-index maintenance: a ground update (INSERT DATA /
     // DELETE DATA) knows its exact quads, so just those documents change;
-    // any other update with known target graphs refreshes exactly those; a
-    // variable-graph / default-graph / admin wildcard update falls back to
-    // the whole-index dirty flag (repaired by the background sync) because its
-    // touched set can't be enumerated here.
+    // any other update with known target graphs refreshes exactly those. A
+    // variable-graph / default-graph / admin wildcard update ran unclaimed:
+    // the store's search journal recorded what it touched, and the next
+    // search catches up on it.
     #[cfg(feature = "text-search")]
-    if requires_admin || graph_iris.is_empty() {
-        state.mark_text_dirty();
-    } else {
+    if let Some(claim) = claim {
         let st = state.clone();
         let graphs = graph_iris.clone();
-        let _ = tokio::task::spawn_blocking(move || match delta {
-            Some((inserted, deleted)) => st.text_index_apply_delta(&inserted, &deleted, &graphs),
-            None => st.refresh_text_index_graphs(&graphs),
+        let _ = tokio::task::spawn_blocking(move || {
+            match delta {
+                Some((inserted, deleted)) => {
+                    st.text_index_apply_delta(&inserted, &deleted, &graphs)
+                }
+                None => st.refresh_text_index_graphs(&graphs),
+            }
+            claim.handled();
         })
         .await;
     }
     #[cfg(not(feature = "text-search"))]
-    let _ = delta;
+    let _ = (delta, claim);
 
     {
         let st = state.clone();
@@ -1993,12 +2007,16 @@ async fn graph_store_put(
         user.as_deref(),
         crate::commit_log::CommitKind::GraphStore,
     );
-    run_store_write(&state, "graph store PUT", move || {
+    let claim = run_store_write(&state, "graph store PUT", move || {
         let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
-        store.graph_store_put(graph.as_deref(), &data, format)
+        let claim = store.claim_search_index();
+        claim
+            .run(|| store.graph_store_put(graph.as_deref(), &data, format))
+            .map(|()| claim)
     })
     .await?;
     sync_text_index_after_graph_write(&state, touched).await;
+    claim.handled();
     {
         let st = state.clone();
         let ent_graphs: Vec<String> = commit_graph.iter().cloned().collect();
@@ -2085,9 +2103,12 @@ async fn graph_store_post(
         user.as_deref(),
         crate::commit_log::CommitKind::GraphStore,
     );
-    let inserted = run_store_write(&state, "graph store POST", move || {
+    let (inserted, claim) = run_store_write(&state, "graph store POST", move || {
         let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
-        store.graph_store_post_delta(graph.as_deref(), &data, format)
+        let claim = store.claim_search_index();
+        claim
+            .run(|| store.graph_store_post_delta(graph.as_deref(), &data, format))
+            .map(|inserted| (inserted, claim))
     })
     .await?;
     // The appended quads are known exactly: index just those documents
@@ -2102,6 +2123,7 @@ async fn graph_store_post(
         }
         None => sync_text_index_after_graph_write(&state, None).await,
     }
+    claim.handled();
     {
         let st = state.clone();
         let ent_graphs: Vec<String> = commit_graph.iter().cloned().collect();
@@ -2166,15 +2188,19 @@ async fn graph_store_delete(
         user.as_deref(),
         crate::commit_log::CommitKind::GraphStore,
     );
-    run_store_write(&state, "graph store DELETE", move || {
+    let claim = run_store_write(&state, "graph store DELETE", move || {
         let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
-        store.graph_store_delete(graph.as_deref())
+        let claim = store.claim_search_index();
+        claim
+            .run(|| store.graph_store_delete(graph.as_deref()))
+            .map(|()| claim)
     })
     .await?;
     // Previously nothing invalidated the text index here, so a deleted graph's
     // literals kept turning up in search results until an unrelated write
     // forced a rebuild.
     sync_text_index_after_graph_write(&state, touched).await;
+    claim.handled();
     {
         let st = state.clone();
         let ent_graphs: Vec<String> = commit_graph.iter().cloned().collect();
@@ -10919,6 +10945,8 @@ async fn text_search_reindex(
                 // having its mark erased (mirrors sync_text_index_if_dirty).
                 st.text_dirty
                     .store(false, std::sync::atomic::Ordering::Relaxed);
+                // The rebuild covers every write recorded so far.
+                let _ = st.store.search_journal().take();
                 let res = idx.reindex_from_store(&st.store);
                 if res.is_err() {
                     st.text_dirty

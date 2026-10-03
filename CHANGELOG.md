@@ -14,6 +14,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Full-text search graded as a feature.** `docs/standards.md` grades
+  *SPARQL + full-text search (Tantivy)* — not a standard — as *Full*, now that
+  the index follows every write (see *Fixed*).
 - **`OTS_OIDC_IDP_TOKEN_POLICY` and `OTS_OIDC_IDP_WRITE_SCOPES`.** What an access token from
   an external IdP (OIDC resource-server mode) may do is now a setting, with the
   same values as `OTS_OIDC_SESSION_POLICY`: `session` (default), `scoped`
@@ -838,6 +841,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   means the CRS's own units.
 
 ### Fixed
+- **The full-text index follows every write.** It used to be kept in step only
+  by SPARQL Update, Graph Store writes, imports, version restores and seeds, so
+  literals written through LDP, RDF Patch, RML runs, SHACL rule output,
+  entailment materialisation, replication, LDES sync or repair stayed
+  unsearchable until an unrelated write forced a rebuild. Every mutating store
+  operation now records what it is about to change in the store's search
+  journal, and the index catches up on it before it answers a text query —
+  touched graphs re-indexed, touched quads reconciled; only an unbounded write
+  rebuilds the whole index. A timed-out SPARQL Update or Graph Store write no
+  longer leaves the index stale either. Default-graph literals are refreshed
+  under the same key the full rebuild gives them.
 - **More `.env` settings reach the server under Docker Compose.**
   `docker-compose.yml` passes the server an explicit environment list, so a
   setting `.env.example` documents had no effect until it was on that list.
