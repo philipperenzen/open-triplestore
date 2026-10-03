@@ -1,6 +1,6 @@
 # 3D Linked-Data Geospatial Platform
 
-Open Triplestore extends its **GeoSPARQL 1.1** implementation (2D/2.5D; partial, not OGC-certified) with
+Open Triplestore extends its **GeoSPARQL 1.1** implementation (2D/2.5D; graded Full except the optional DGGS class, not OGC-certified) with
 an **additive, namespaced 3D layer** — volumetric geometry, an OGC API – Features
 facade, a 3D Tiles tiling plane, and a CesiumJS viewer with click-to-SPARQL.
 

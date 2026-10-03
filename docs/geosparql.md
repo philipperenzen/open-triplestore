@@ -1,6 +1,6 @@
 # GeoSPARQL
 
-OGC GeoSPARQL 1.1 support via the GEOS C++ library. Store geometry data as WKT, GML, GeoJSON or KML literals and query it using standard spatial relation, measurement and aggregate functions. GeoSPARQL 1.0 is graded *Full* and 1.1 *Partial* — [Supported Standards](/docs/standards) lists what is not implemented — and these are the project's own grades, not an OGC compliance certification.
+OGC GeoSPARQL 1.1 support via the GEOS C++ library. Store geometry data as WKT, GML, GeoJSON or KML literals and query it using standard spatial relation, measurement and aggregate functions. GeoSPARQL 1.0 is graded *Full*, and 1.1 *Full* for every conformance class but the optional DGGS class (no DGGS literals) — see [Supported Standards](/docs/standards). These are the project's own grades, not an OGC compliance certification.
 
 ## Geometry literals
 
@@ -58,10 +58,30 @@ The built-in CRSs are CRS84, EPSG:4326 (latitude first), RD New (EPSG:28992, and
 The service description (`GET /sparql` with `Accept: text/turtle`) lists every registered `geof:` function and aggregate; it is generated from the same registry the engine installs.
 
 - Topology: `geof:sfEquals`, `sfDisjoint`, `sfIntersects`, `sfTouches`, `sfCrosses`, `sfWithin`, `sfContains`, `sfOverlaps`; `ehEquals`, `ehDisjoint`, `ehMeet`, `ehOverlap`, `ehCovers`, `ehCoveredBy`, `ehInside`, `ehContains`; `rcc8eq`, `rcc8dc`, `rcc8ec`, `rcc8po`, `rcc8tppi`, `rcc8tpp`, `rcc8ntpp`, `rcc8ntppi`; `geof:relate`.
-- Constructive: `geof:boundary`, `buffer`, `convexHull`, `difference`, `envelope`, `intersection`, `symDifference`, `union`, `transform`.
-- Measures: `geof:distance`, `area`, `getSRID`, and the metric family below.
+- Constructive: `geof:boundary`, `buffer`, `convexHull`, `concaveHull`, `boundingCircle`, `centroid`, `difference`, `envelope`, `intersection`, `symDifference`, `union`, `transform`, `geometryN`.
+- Measures: `geof:distance`, `area`, `length`, `perimeter`, `getSRID`, `minX`, `maxX`, `minY`, `maxY`, `minZ`, `maxZ`, and the metric family below.
+- Geometry properties: `geof:dimension`, `coordinateDimension`, `spatialDimension`, `is3D`, `isMeasured`, `isEmpty`, `isSimple`, `geometryType`, `numGeometries`.
 - Serialisation: `geof:asWKT`, `asGML`, `asGeoJSON`, `asKML`.
-- Aggregate: `geof:aggUnion`.
+- Aggregates: `geof:aggUnion`, `aggBoundingBox`, `aggBoundingCircle`, `aggCentroid`, `aggConvexHull`, `aggConcaveHull`.
+
+### Geometry properties and the other non-topological functions
+
+| Function | Result |
+|---|---|
+| `geof:dimension(g)` | Topological dimension (`xsd:integer`): 0 points, 1 curves, 2 surfaces, a collection's largest; unbound for an empty collection |
+| `geof:coordinateDimension(g)` | Numbers per position: 2, 3 with Z or M, 4 with both |
+| `geof:spatialDimension(g)` | 2, or 3 with Z |
+| `geof:is3D(g)`, `geof:isMeasured(g)` | Whether positions have Z, M. M is read from the WKT (`POINT M`, `POINT ZM`); GML, GeoJSON and KML have none |
+| `geof:isEmpty(g)`, `geof:isSimple(g)` | Empty; free of self-intersection and self-tangency |
+| `geof:geometryType(g)` | The class as an IRI: the GML element for a GML literal (`gml:Surface`, `gml:Envelope`, in `http://www.opengis.net/ont/gml#`), the Simple Features class otherwise (`sf:Polygon`, in `http://www.opengis.net/ont/sf#`) |
+| `geof:numGeometries(g)`, `geof:geometryN(g, n)` | A collection's member count, and its `n`th member counting from 1 (a geometry that is not a collection is its own first member); `geometryN` is unbound out of range |
+| `geof:minX(g)` … `geof:maxZ(g)` | The extreme ordinate (`xsd:double`) in the literal's CRS; unbound for the empty geometry, and for Z on a 2D geometry |
+| `geof:centroid(g)` | The centroid (the empty point for the empty geometry) |
+| `geof:boundingCircle(g)` | The minimum bounding circle of the positions (Welzl's algorithm), as a 64-segment polygon drawn *around* the circle so it covers every position; a single position is its own point |
+| `geof:concaveHull(g, targetPercent)` | A concave hull without holes (GEOS 3.11 `GEOSConcaveHull`). `targetPercent` runs from 0, the most concave hull, to 1, the convex hull, as in GEOS and PostGIS 3.3+; outside that range the result is unbound. **Default 0.5** when it is left out |
+| `geof:length(g, unit)`, `geof:perimeter(g, unit)` | The length of the lines and a polygon's rings; a non-areal geometry's perimeter is its length, so the two agree, as `metricLength` and `metricPerimeter` do. Units as for `geof:distance` below |
+
+`getSRID` and `geometryType` return IRIs, not `xsd:anyURI` literals.
 
 ## Metres on the ellipsoid
 
@@ -102,9 +122,20 @@ An unknown unit is unbound, and so is an area unit for a distance. The function 
 
 `geof:ehCoveredBy` uses the DE-9IM mask GeoSPARQL gives it, `TFF*TFT**`, the exact inverse of `ehCovers`. A geometry strictly inside another, not touching its boundary, is `ehInside`, not `ehCoveredBy`. A line along a polygon's boundary is neither.
 
-## The union aggregate
+## Aggregates
 
-`geof:aggUnion` is a SPARQL aggregate: it folds the geometries of a group into their union, one `geo:wktLiteral`, with or without `GROUP BY` (and in `HAVING`, sub-selects and the `WHERE` of an update):
+The six GeoSPARQL 1.1 spatial aggregates are SPARQL aggregates, with or without `GROUP BY` (and in `HAVING`, sub-selects and the `WHERE` of an update). Each folds the geometries of a group into one geometry:
+
+| Aggregate | Result |
+|---|---|
+| `geof:aggUnion(?g)` | The union |
+| `geof:aggBoundingBox(?g)` | The envelope of all of them |
+| `geof:aggBoundingCircle(?g)` | Their minimum bounding circle, as `geof:boundingCircle` |
+| `geof:aggCentroid(?g)` | The centroid of the group as one collection: a geometry the group holds twice counts twice, and only the highest dimension counts |
+| `geof:aggConvexHull(?g)` | The convex hull |
+| `geof:aggConcaveHull(?g)` | The concave hull at the **default target 0.5**, as `geof:concaveHull` without a target |
+
+`geof:aggConcaveHull` takes one argument. GeoSPARQL 1.1 gives it a second, `targetPercent`, but the SPARQL parser this store uses allows one expression in a custom aggregate call. For another target, use `geof:concaveHull(geof:aggUnion(?g), 0.2)`.
 
 ```sparql
 PREFIX geo: <http://www.opengis.net/ont/geosparql#>
@@ -116,7 +147,7 @@ SELECT ?municipality (geof:aggUnion(?geom) AS ?footprint) WHERE {
 } GROUP BY ?municipality
 ```
 
-A group in one CRS keeps it; a group mixing CRSs is unioned in CRS84, each geometry reprojected first. It follows SPARQL's aggregate error rules — a value that is not a geometry makes that group's union unbound, as a non-number does to `SUM` — and the union of no geometries is the empty geometry, `GEOMETRYCOLLECTION EMPTY`. `geof:aggUnion(DISTINCT ?g)` is a syntax error (the SPARQL parser takes no `DISTINCT` in a custom aggregate's call); it would change nothing, since a union absorbs duplicates.
+A group in one CRS keeps it; a group mixing CRSs is combined in CRS84, each geometry reprojected first. The result has the group's serialisation when every value shares one, and is a `geo:wktLiteral` otherwise. Every aggregate follows SPARQL's aggregate error rules — a value that is not a geometry makes that group's result unbound, as a non-number does to `SUM` — and the aggregate of no geometries is the empty geometry, `GEOMETRYCOLLECTION EMPTY`. The result does not depend on the order the solutions arrive in.
 
 ## Example query
 

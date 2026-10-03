@@ -112,10 +112,8 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
   marks feature presence, as in the other columns. SHACL-C, graded Full since 2026-10-03, has no
   matrix row.
   The W3C SPARQL tests are not claimed. The other systems' cells were compiled from their documentation and
-  mark feature presence, so a column-by-column count favours them. GeoSPARQL 1.0 is graded Full; GeoSPARQL 1.1 lacks
-  DGGS literals, most aggregates and several functions (it has the geodesic `metric*` family,
-  `aggUnion`, WKT/GML/GeoJSON/KML literals and the RDFS Entailment and Query Rewrite
-  extensions). SPARQL 1.2 / RDF 1.2 follows the RDF 1.2
+  mark feature presence, so a column-by-column count favours them. GeoSPARQL 1.0 is graded Full, and GeoSPARQL 1.1 Full
+  for every conformance class but the optional DGGS class (no DGGS literals). SPARQL 1.2 / RDF 1.2 follows the RDF 1.2
   triple-term model in object position only.
 - **Reference system.** Open Triplestore performance figures in this document were measured on an
   **Apple M3 Pro**. Reproducible numbers for the documented reference system (AMD Ryzen 9
@@ -328,15 +326,17 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 | Standard | Open Triplestore | Oxigraph | Jena 5 | Blazegraph | Virtuoso | GraphDB | Stardog | RDF4J 5 | Neptune | QLever |
 |----------|-------|----------|--------|------------|----------|---------|---------|---------|---------|--------|
 | **GeoSPARQL 1.0** | ✅¹⁴ | ❌ | 🟡 | ❌ | 🟡 | ✅ | ✅ | 🟡 | ✅ | 🟡 |
-| **GeoSPARQL 1.1** | 🟡¹⁴ | ❌ | ❌ | ❌ | ❌ | ✅ | 🟡 | ❌ | 🟡 | ❌ |
+| **GeoSPARQL 1.1** | ✅¹⁴ | ❌ | ❌ | ❌ | ❌ | ✅ | 🟡 | ❌ | 🟡 | ❌ |
 | **SPARQL+Text Search** | ✅¹⁵ | ❌ | 🟡 | ❌ | ✅ | ✅ | ✅ | 🟡 | ❌ | ✅ |
 
 > ¹⁴ The project's own grades, not OGC-certified (only the OGC authorises compliance marks for its standards):
 >   the topology families, `geof:relate`, the constructive and geodesic metric functions,
 >   `geof:aggUnion`, WKT, GML (a documented profile), GeoJSON and KML literals with their
 >   serialisation functions, CRS transforms, and the RDFS Entailment and Query Rewrite
->   extensions are implemented. GeoSPARQL 1.0 meets all 30 of its requirements and is graded
->   Full (✅). GeoSPARQL 1.1 still lacks DGGS literals, most aggregates and several functions.
+>   extensions are implemented, with every GeoSPARQL 1.1 query function and all six spatial
+>   aggregates. GeoSPARQL 1.0 meets all 30 of its requirements and is graded Full (✅).
+>   GeoSPARQL 1.1 is graded Full (✅) for all of its conformance classes except the optional
+>   DGGS class (`/conf/geometry-extension-dggs`): DGGS literals are not implemented.
 >   Requirement matrix:
 >   [`docs/conformance/geosparql.md`](conformance/geosparql.md#3-requirement-matrix); grades:
 >   [`docs/standards.md`](standards.md).
@@ -793,7 +793,7 @@ From BSBM and published benchmarks at concurrency factor 16, 32 GB RAM:
 | Feature | Open Triplestore | Jena 5 | GraphDB 11 | Stardog | Virtuoso | Neptune | QLever |
 |---------|:-----------:|:------:|:----------:|:-------:|:--------:|:-------:|:------:|
 | WKT Literals | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 |
-| GML Literals | 🟡 | 🟡 | ✅ | ✅ | 🟡 | 🟡 | ❌ |
+| GML Literals | ✅ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | ❌ |
 | `geof:sfContains` | ✅ | 🟡 | ✅ | ✅ | 🟡 | ✅ | ❌ |
 | `geof:sfIntersects` | ✅ | 🟡 | ✅ | ✅ | ✅ | ✅ | ❌ |
 | `geof:sfTouches` | ✅ | ❌ | ✅ | ✅ | 🟡 | 🟡 | ❌ |
@@ -1085,7 +1085,7 @@ security patches not applied. Any existing deployment should migrate to QLever o
 
 ```
 1. GraphDB 11         — full GeoSPARQL 1.1, spatial index, OGC member
-2. Open Triplestore  — GeoSPARQL 1.1 (partial) + GEOS; all DE-9IM relations + constructive funcs
+2. Open Triplestore  — GeoSPARQL 1.0 + 1.1 (no DGGS) + GEOS; all functions and aggregates
 3. Stardog 10         — good GeoSPARQL; commercial
 4. Neptune            — spatial support but proprietary; AWS lock-in
 ```
@@ -1138,9 +1138,10 @@ security patches not applied. Any existing deployment should migrate to QLever o
 
 2. **GeoSPARQL 1.1:** Broad GeoSPARQL 1.1 coverage via the GEOS C++ library: all DE-9IM
    relations, the constructive and geodesic metric functions, `aggUnion`, WKT/GML/GeoJSON/KML
-   literals and the RDFS Entailment and Query Rewrite extensions. GeoSPARQL 1.0 is graded Full;
-   1.1 is Partial (no DGGS literals, most aggregates; see [`docs/standards.md`](standards.md)).
-   Neither is OGC-certified.
+   literals, every GeoSPARQL 1.1 query function and aggregate, and the RDFS Entailment and
+   Query Rewrite extensions. GeoSPARQL 1.0 is graded Full, and 1.1 Full for every conformance
+   class but the optional DGGS class (see [`docs/standards.md`](standards.md)). Neither is
+   OGC-certified.
 
 3. **SHACL + SHACL-AF:** Combined validation and inference in a single lightweight binary is rare.
    Only GraphDB and Stardog match this in a server-grade product.

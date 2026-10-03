@@ -28,10 +28,12 @@ The RDFS Entailment Extension (the GeoSPARQL ontology with the Simple Features a
 3.2.1 class hierarchies as premises) and the Query Rewrite Extension (all 24 relations,
 every rule shape and serialisation, set semantics, `GRAPH` scope, update `WHERE` clauses,
 every query path, the switch) are tested too; `tests/standards_conformance.rs` runs both
-over HTTP. What GeoSPARQL 1.1 still lacks here — DGGS literals, the other aggregates
-and several non-metric functions — is listed in
-[standards.md](../standards.md#known-limitations--conformance-findings), and section 3
-below maps every requirement to its tests.
+over HTTP. The other GeoSPARQL 1.1 query functions (geometry properties, `centroid`,
+`boundingCircle`, `concaveHull`, `length`, `perimeter`, `geometryN`, the min/max ordinates)
+are tested on WKT, GML, GeoJSON and KML operands, and the five other aggregates with
+`aggUnion`'s rules (empty group, non-geometry, order independence, CRS, query paths). What
+GeoSPARQL 1.1 still lacks here is the optional DGGS conformance class; section 3 below
+maps every requirement to its tests.
 
 ## 2. OGC GeoSPARQL 1.1 SHACL validator (vendored) — the round-trip
 
@@ -135,12 +137,12 @@ the standard.
 |---|---|---|---|
 | 1 | core/sparql-protocol | Met | as R1 above |
 | 2, 3 | core/spatial-object-class, feature-class | Met | `ogc10_r02_r03_spatial_object_and_feature_classes` |
-| 4, 5 | core/spatial-object-collection-class, feature-collection-class | Partial — usable in patterns, not tested | — |
-| 6 | core/spatial-object-properties | Partial — usable in patterns, not tested | — |
-| 7 | core/feature-properties | Met for `hasGeometry`/`hasDefaultGeometry`; `hasCentroid`, `hasBoundingBox` untested | `ogc10_r07_r08_r09_geometry_class_and_properties` |
+| 4, 5 | core/spatial-object-collection-class, feature-collection-class | Met | `ogc_req04_05_spatial_object_and_feature_collections` |
+| 6 | core/spatial-object-properties | Met | `ogc_req06_spatial_object_properties` |
+| 7 | core/feature-properties | Met | `ogc_req07_feature_properties`, `ogc10_r07_r08_r09_geometry_class_and_properties` |
 | 8–10 | topology-vocab-extension/sf, eh, rcc8-spatial-relations | Met | as R4–R6 above |
 | 11 | geometry-extension/geometry-class | Met | `ogc10_r07_r08_r09_geometry_class_and_properties` |
-| 12 | geometry-extension/geometry-collection-class | Partial — usable in patterns, not tested | — |
+| 12 | geometry-extension/geometry-collection-class | Met | `ogc_req12_geometry_collection_class` |
 | 13 | geometry-extension/geometry-properties | Met | `ogc10_r07_r08_r09_geometry_class_and_properties` |
 | 14–18 | wkt-literal, wkt-literal-default-srs, wkt-axis-order, wkt-literal-empty, geometry-as-wkt-literal | Met | as R10–R14 above |
 | 19 | geometry-extension/asWKT-function | Met | `ogc_req19_as_wkt_keeps_the_srs_and_z` |
@@ -160,12 +162,17 @@ the standard.
 | 33 | geometry-extension/geometry-as-kml-literal | Met | `ogc_req33_geometry_as_kml_literal_is_queryable` |
 | 34 | geometry-extension/asKML-function | Met | `ogc_req34_as_kml_reprojects_and_round_trips` |
 | 35–38 | geometry-extension-dggs (DGGS literals, `asDGGS`) | Missing (owner decision) | — |
-| 39 | geometry-extension/query-functions | Partial — 11 of the 23 functions missing (card G2); results follow the first operand's serialisation and SRS (§10.9.1) | `geo_req27_*` … `geo_req29_*`, `ogc_req39_*`, `ogc_req39_geometry_results_follow_the_first_operand` |
-| 40 | geometry-extension/query-functions-non-sf | Partial — `length`, `perimeter`, `geometryN`, `numGeometries`, min/max X/Y/Z missing (card G2) | `geos_cx_geosparql11_metric_functions`, `ogc_req40_area_with_area_units` |
-| 41 | geometry-extension/srid-function | Partial — the result is an IRI, the signature says `xsd:anyURI` (card G2) | `ogc_req41_get_srid_of_a_gml_literal` |
-| 42 | geometry-extension/sa-functions | Partial — only `aggUnion` (card G2) | `agg_union_*` |
+| 39 | geometry-extension/query-functions | Met — all 23 functions; results follow the first operand's serialisation and SRS (§10.9.1); `geometryType` returns an IRI; `concaveHull`'s default target is 0.5 | `geo_req27_*` … `geo_req29_*`, `ogc_req39_*` (`ogc_req39_geometry_property_functions`, `ogc_req39_geometry_type_is_an_iri`, `ogc_req39_centroid_bounding_circle_and_concave_hull`, `ogc_req39_geometry_results_follow_the_first_operand`, `ogc_req39_40_functions_over_a_non_geometry_are_unbound`) |
+| 40 | geometry-extension/query-functions-non-sf | Met — all 14 functions | `geos_cx_geosparql11_metric_functions`, `ogc_req40_*` (`ogc_req40_length_and_perimeter_with_units`, `ogc_req40_area_on_every_serialisation`, `ogc_req40_area_with_area_units`, `ogc_req40_num_geometries_and_geometry_n`, `ogc_req40_min_and_max_ordinates`) |
+| 41 | geometry-extension/srid-function | Met — the result is the CRS as an IRI term (owner decision: IRIs, not `xsd:anyURI` literals) | `ogc_req41_get_srid_of_a_gml_literal`, `geos_cx_get_srid` |
+| 42 | geometry-extension/sa-functions | Met — all six aggregates; `aggConcaveHull` takes one argument (the parser allows one expression per custom aggregate) with the default target 0.5 | `agg_union_*`, `ogc_req42_*` |
 | 43 | geometry-topology-extension/relate-query-function | Met | as R21 |
 | 44–46 | geometry-topology-extension/sf, eh, rcc8-query-functions | Met | as R22–R24 |
 | 47–49 | rdfs-entailment-extension/bgp-rdfs-ent, wkt-geometry-types, gml-geometry-types | Met | as R25–R27 |
 | 50–52 | query-rewrite-extension/sf, eh, rcc8-query-rewrite | Met | as R28–R30 |
 | DGGS 39–42 | the DGGS versions of query-functions, query-functions-non-sf, srid-function, sa-functions | Missing (owner decision) | — |
+
+Every requirement outside the DGGS conformance class (`/conf/geometry-extension-dggs`:
+Req 35–38 and the DGGS versions of Req 39–42) is met, and GeoSPARQL 1.1 is graded **Full**
+in [standards.md](../standards.md) with that scope stated. DGGS is a separate, optional
+conformance class of OGC 22-047r1; the project's own grade, never an OGC certification.

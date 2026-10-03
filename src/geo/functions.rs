@@ -11,7 +11,9 @@
 //! - Egenhofer topological relations
 //! - RCC8 topological relations
 //! - Non-topological / constructive functions
-//! - Scalar measurement functions
+//! - Scalar measurement functions, and the geometry properties and other
+//!   non-topological functions of GeoSPARQL 1.1 (`dimension`, `centroid`,
+//!   `boundingCircle`, `concaveHull`, `length`, `geometryN`, `minX`, …)
 //! - Metric functions — metres on the WGS84 ellipsoid (see [`super::geodesic`])
 //! - Serialisation (`geof:asWKT`, `geof:asGML`, `geof:asGeoJSON`, `geof:asKML`)
 //!
@@ -98,6 +100,28 @@ pub fn all_functions() -> Vec<(NamedNode, FnHandler)> {
         make_fn(vocab::AS_WKT, fn_as_wkt),
         make_fn(vocab::AS_GML, fn_as_gml),
         make_fn(vocab::AS_KML, fn_as_kml),
+        // ─── Geometry properties and the other non-topological functions ───
+        make_fn(vocab::BOUNDING_CIRCLE, fn_bounding_circle),
+        make_fn(vocab::CENTROID, fn_centroid),
+        make_fn(vocab::CONCAVE_HULL, fn_concave_hull),
+        make_fn(vocab::COORDINATE_DIMENSION, fn_coordinate_dimension),
+        make_fn(vocab::DIMENSION, fn_dimension),
+        make_fn(vocab::GEOMETRY_TYPE, fn_geometry_type),
+        make_fn(vocab::IS_3D, fn_is_3d),
+        make_fn(vocab::IS_EMPTY, fn_is_empty),
+        make_fn(vocab::IS_MEASURED, fn_is_measured),
+        make_fn(vocab::IS_SIMPLE, fn_is_simple),
+        make_fn(vocab::SPATIAL_DIMENSION, fn_spatial_dimension),
+        make_fn(vocab::LENGTH, fn_length),
+        make_fn(vocab::PERIMETER, fn_perimeter),
+        make_fn(vocab::GEOMETRY_N, fn_geometry_n),
+        make_fn(vocab::NUM_GEOMETRIES, fn_num_geometries),
+        make_fn(vocab::MAX_X, fn_max_x),
+        make_fn(vocab::MAX_Y, fn_max_y),
+        make_fn(vocab::MAX_Z, fn_max_z),
+        make_fn(vocab::MIN_X, fn_min_x),
+        make_fn(vocab::MIN_Y, fn_min_y),
+        make_fn(vocab::MIN_Z, fn_min_z),
     ]
 }
 
@@ -649,6 +673,379 @@ fn fn_get_srid(args: &[Term]) -> Option<Term> {
         }
         _ => None,
     }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Geometry properties and the other non-topological functions
+// (GeoSPARQL 1.1 Req 39 and 40)
+// ═══════════════════════════════════════════════════════════════
+
+/// Create an `xsd:integer` literal.
+fn integer_literal(value: i64) -> Term {
+    Term::Literal(oxrdf::Literal::new_typed_literal(
+        value.to_string(),
+        NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#integer"),
+    ))
+}
+
+/// An integer argument: an integer-valued numeric literal.
+fn integer_arg(term: Option<&Term>) -> Option<i64> {
+    let Some(Term::Literal(l)) = term else {
+        return None;
+    };
+    let v = l.value().trim();
+    v.parse::<i64>().ok().or_else(|| {
+        let f = v.parse::<f64>().ok()?;
+        (f.fract() == 0.0 && f.abs() < 9.0e15).then_some(f as i64)
+    })
+}
+
+/// `geof:dimension(geom)` — the topological dimension: 0 for points, 1 for
+/// curves, 2 for surfaces, the largest of a collection's members. Unbound for
+/// an empty collection, which has none.
+fn fn_dimension(args: &[Term]) -> Option<Term> {
+    let d = match parse_one_geom(args)?.get_dimension().ok()? {
+        geos::DimensionType::Point => 0,
+        geos::DimensionType::Curve => 1,
+        geos::DimensionType::Surface => 2,
+    };
+    Some(integer_literal(d))
+}
+
+/// `geof:coordinateDimension(geom)` — numbers per position: 2, 3 with Z or M,
+/// 4 with both.
+fn fn_coordinate_dimension(args: &[Term]) -> Option<Term> {
+    let (z, m) = literal_dimensions(args.first()?)?;
+    Some(integer_literal(2 + i64::from(z) + i64::from(m)))
+}
+
+/// `geof:spatialDimension(geom)` — spatial ordinates per position: 2, or 3 with Z.
+fn fn_spatial_dimension(args: &[Term]) -> Option<Term> {
+    let (z, _) = literal_dimensions(args.first()?)?;
+    Some(integer_literal(2 + i64::from(z)))
+}
+
+/// `geof:is3D(geom)` — whether its positions have Z.
+fn fn_is_3d(args: &[Term]) -> Option<Term> {
+    let (z, _) = literal_dimensions(args.first()?)?;
+    Some(boolean_literal(z))
+}
+
+/// `geof:isMeasured(geom)` — whether its positions have M. Read from the
+/// literal (`POINT M`, `POINT ZM`); GML, GeoJSON and KML have no M.
+fn fn_is_measured(args: &[Term]) -> Option<Term> {
+    let (_, m) = literal_dimensions(args.first()?)?;
+    Some(boolean_literal(m))
+}
+
+/// `geof:isEmpty(geom)`.
+fn fn_is_empty(args: &[Term]) -> Option<Term> {
+    Some(boolean_literal(parse_one_geom(args)?.is_empty().ok()?))
+}
+
+/// `geof:isSimple(geom)` — no anomalous points (self-intersection, self-tangency).
+fn fn_is_simple(args: &[Term]) -> Option<Term> {
+    Some(boolean_literal(parse_one_geom(args)?.is_simple().ok()?))
+}
+
+/// `geof:geometryType(geom)` — the geometry's class, as an IRI: the GML element
+/// of a GML literal (`gml:Surface`, `gml:Envelope`, …, in the GeoSPARQL GML
+/// namespace), the Simple Features class otherwise (`sf:Point`,
+/// `sf:MultiPolygon`, …).
+fn fn_geometry_type(args: &[Term]) -> Option<Term> {
+    let term = args.first()?;
+    let g = parse_wkt_literal(term)?;
+    if let (Serialisation::Gml, Term::Literal(l)) = (Serialisation::of(term), term) {
+        if let Some(name) = super::gml::gml_root_name(l.value()) {
+            return Some(Term::NamedNode(NamedNode::new_unchecked(format!(
+                "{}{name}",
+                vocab::GML_NS
+            ))));
+        }
+    }
+    use geos::GeometryTypes as T;
+    let class = match g.geometry_type().ok()? {
+        T::Point => "Point",
+        T::LineString => "LineString",
+        T::LinearRing => "LinearRing",
+        T::Polygon => "Polygon",
+        T::MultiPoint => "MultiPoint",
+        T::MultiLineString => "MultiLineString",
+        T::MultiPolygon => "MultiPolygon",
+        T::GeometryCollection => "GeometryCollection",
+        #[allow(unreachable_patterns)] // curve types, with GEOS >= 3.13 features
+        _ => return None,
+    };
+    Some(Term::NamedNode(NamedNode::new_unchecked(format!(
+        "{}{class}",
+        vocab::SF_NS
+    ))))
+}
+
+/// `geof:numGeometries(geom)` — the members of a collection; 1 for a
+/// geometry that is not one.
+fn fn_num_geometries(args: &[Term]) -> Option<Term> {
+    let n = parse_one_geom(args)?.get_num_geometries().ok()?;
+    Some(integer_literal(i64::try_from(n).ok()?))
+}
+
+/// `geof:geometryN(geom, n)` — the `n`th member of a collection, counting from
+/// 1 as Simple Features Access does; a geometry that is not a collection is its
+/// own first member. Unbound out of range. The member keeps the operand's
+/// serialisation and CRS.
+fn fn_geometry_n(args: &[Term]) -> Option<Term> {
+    let g = parse_one_geom(args)?;
+    let n = integer_arg(args.get(1))?;
+    let count = g.get_num_geometries().ok()?;
+    let index = usize::try_from(n.checked_sub(1)?).ok()?;
+    if index >= count {
+        return None;
+    }
+    let member: GeosGeometry = match g.geometry_type().ok()? {
+        geos::GeometryTypes::MultiPoint
+        | geos::GeometryTypes::MultiLineString
+        | geos::GeometryTypes::MultiPolygon
+        | geos::GeometryTypes::GeometryCollection => {
+            Geom::clone(&g.get_geometry_n(index).ok()?).ok()?
+        }
+        _ => g,
+    };
+    geometry_to_literal_like(&member, args.first()?)
+}
+
+/// Every position of a geometry as `(x, y, z)`, `z` `None` without Z.
+fn positions(geom: &impl Geom, out: &mut Vec<(f64, f64, Option<f64>)>) -> Option<()> {
+    use geos::GeometryTypes as T;
+    if geom.is_empty().ok()? {
+        return Some(());
+    }
+    match geom.geometry_type().ok()? {
+        T::Point | T::LineString | T::LinearRing => {
+            let cs = geom.get_coord_seq().ok()?;
+            let z = geom.has_z().ok()?;
+            for i in 0..cs.size().ok()? {
+                let pz = if z {
+                    cs.get_z(i).ok().filter(|v| v.is_finite())
+                } else {
+                    None
+                };
+                out.push((cs.get_x(i).ok()?, cs.get_y(i).ok()?, pz));
+            }
+        }
+        T::Polygon => {
+            positions(&geom.get_exterior_ring().ok()?, out)?;
+            for i in 0..geom.get_num_interior_rings().ok()? {
+                positions(&geom.get_interior_ring_n(i).ok()?, out)?;
+            }
+        }
+        _ => {
+            for i in 0..geom.get_num_geometries().ok()? {
+                positions(&geom.get_geometry_n(i).ok()?, out)?;
+            }
+        }
+    }
+    Some(())
+}
+
+/// The minimum or maximum of one ordinate over a geometry's positions; unbound
+/// for the empty geometry, and for Z when a position has none.
+fn ordinate_extreme(args: &[Term], ordinate: usize, max: bool) -> Option<Term> {
+    let mut ps = Vec::new();
+    positions(&parse_one_geom(args)?, &mut ps)?;
+    let values = ps
+        .iter()
+        .map(|&(x, y, z)| match ordinate {
+            0 => Some(x),
+            1 => Some(y),
+            _ => z,
+        })
+        .collect::<Option<Vec<f64>>>()?;
+    let pick = |a: f64, b: f64| if max { a.max(b) } else { a.min(b) };
+    let v = values.into_iter().reduce(pick)?;
+    Some(double_literal(v))
+}
+
+fn fn_min_x(args: &[Term]) -> Option<Term> {
+    ordinate_extreme(args, 0, false)
+}
+fn fn_max_x(args: &[Term]) -> Option<Term> {
+    ordinate_extreme(args, 0, true)
+}
+fn fn_min_y(args: &[Term]) -> Option<Term> {
+    ordinate_extreme(args, 1, false)
+}
+fn fn_max_y(args: &[Term]) -> Option<Term> {
+    ordinate_extreme(args, 1, true)
+}
+fn fn_min_z(args: &[Term]) -> Option<Term> {
+    ordinate_extreme(args, 2, false)
+}
+fn fn_max_z(args: &[Term]) -> Option<Term> {
+    ordinate_extreme(args, 2, true)
+}
+
+/// `geof:centroid(geom)` — the centroid, as a point in the operand's
+/// serialisation and CRS (the empty point for the empty geometry).
+fn fn_centroid(args: &[Term]) -> Option<Term> {
+    let c = parse_one_geom(args)?.get_centroid().ok()?;
+    geometry_to_literal_like(&c, args.first()?)
+}
+
+/// GEOS buffer segments per quarter circle for a bounding circle, as `geof:buffer`.
+const CIRCLE_QUADRANT_SEGMENTS: i32 = 16;
+
+/// The minimum bounding circle of a geometry's positions (Welzl's algorithm)
+/// as a polygon of 64 segments that *circumscribes* that circle, so every
+/// position lies inside or on it (a polygon through points on the circle would
+/// cut corners off it). A single position is its own bounding circle, a point;
+/// the empty geometry's is the empty polygon. Z is not considered.
+pub(super) fn minimum_bounding_circle(geom: &impl Geom) -> Option<GeosGeometry> {
+    let mut ps = Vec::new();
+    positions(geom, &mut ps)?;
+    let mut pts: Vec<(f64, f64)> = ps.into_iter().map(|(x, y, _)| (x, y)).collect();
+    pts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    pts.dedup();
+    if pts.is_empty() {
+        return GeosGeometry::create_empty_polygon().ok();
+    }
+    let (cx, cy, r) = welzl(&mut pts);
+    let centre = GeosGeometry::new_from_wkt(&format!("POINT({cx} {cy})")).ok()?;
+    if r == 0.0 {
+        return Some(centre);
+    }
+    let segments = f64::from(4 * CIRCLE_QUADRANT_SEGMENTS);
+    let circumscribed = r / (std::f64::consts::PI / segments).cos();
+    centre.buffer(circumscribed, CIRCLE_QUADRANT_SEGMENTS).ok()
+}
+
+/// Welzl's minimum enclosing circle, iteratively, over a deterministic shuffle
+/// of the points (expected linear time). `(centre x, centre y, radius)`.
+fn welzl(pts: &mut [(f64, f64)]) -> (f64, f64, f64) {
+    // A fixed-seed LCG shuffle: deterministic results, no adversarial order.
+    let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+    for i in (1..pts.len()).rev() {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let j = (seed >> 33) as usize % (i + 1);
+        pts.swap(i, j);
+    }
+    let scale = pts
+        .iter()
+        .fold(1.0f64, |m, &(x, y)| m.max(x.abs()).max(y.abs()));
+    let eps = 1e-12 * scale;
+    let inside = |c: (f64, f64, f64), p: (f64, f64)| (p.0 - c.0).hypot(p.1 - c.1) <= c.2 + eps;
+    let two = |a: (f64, f64), b: (f64, f64)| {
+        (
+            (a.0 + b.0) / 2.0,
+            (a.1 + b.1) / 2.0,
+            (a.0 - b.0).hypot(a.1 - b.1) / 2.0,
+        )
+    };
+    let three = |a: (f64, f64), b: (f64, f64), c: (f64, f64)| {
+        let (bx, by) = (b.0 - a.0, b.1 - a.1);
+        let (cx, cy) = (c.0 - a.0, c.1 - a.1);
+        let d = 2.0 * (bx * cy - by * cx);
+        if d.abs() <= f64::EPSILON * scale * scale {
+            // Collinear: the circle on the two farthest apart.
+            let candidates = [two(a, b), two(a, c), two(b, c)];
+            return candidates
+                .into_iter()
+                .fold((0.0, 0.0, -1.0), |m, c| if c.2 > m.2 { c } else { m });
+        }
+        let (b2, c2) = (bx * bx + by * by, cx * cx + cy * cy);
+        let ux = (cy * b2 - by * c2) / d;
+        let uy = (bx * c2 - cx * b2) / d;
+        (a.0 + ux, a.1 + uy, ux.hypot(uy))
+    };
+    let mut c = (pts[0].0, pts[0].1, 0.0);
+    for (i, &pi) in pts.iter().enumerate().skip(1) {
+        if inside(c, pi) {
+            continue;
+        }
+        c = (pi.0, pi.1, 0.0);
+        for (j, &pj) in pts[..i].iter().enumerate() {
+            if inside(c, pj) {
+                continue;
+            }
+            c = two(pi, pj);
+            for &pk in &pts[..j] {
+                if !inside(c, pk) {
+                    c = three(pi, pj, pk);
+                }
+            }
+        }
+    }
+    c
+}
+
+/// `geof:boundingCircle(geom)` — see [`minimum_bounding_circle`].
+fn fn_bounding_circle(args: &[Term]) -> Option<Term> {
+    let circle = minimum_bounding_circle(&parse_one_geom(args)?)?;
+    geometry_to_literal_like(&circle, args.first()?)
+}
+
+/// The target ratio `geof:concaveHull` and `geof:aggConcaveHull` use when none
+/// is given: halfway between the most concave hull (0) and the convex hull (1).
+pub const DEFAULT_CONCAVE_HULL_RATIO: f64 = 0.5;
+
+/// A concave hull (GEOS 3.11's `GEOSConcaveHull`, no holes): `ratio` 1 is the
+/// convex hull, 0 the most concave hull of the positions.
+pub(super) fn concave_hull(geom: &impl Geom, ratio: f64) -> Option<GeosGeometry> {
+    geom.concave_hull(ratio, false).ok()
+}
+
+/// `geof:concaveHull(geom, targetPercent)` — a concave hull enclosing the
+/// geometry. `targetPercent` is a number from 0 (the most concave hull, every
+/// edge as short as it can be) to 1 (the convex hull), as in PostGIS 3.3+ and
+/// GEOS; outside that range the result is unbound. Without it the ratio is
+/// [`DEFAULT_CONCAVE_HULL_RATIO`]. Holes are not allowed.
+fn fn_concave_hull(args: &[Term]) -> Option<Term> {
+    let ratio = match args.get(1) {
+        None => DEFAULT_CONCAVE_HULL_RATIO,
+        Some(t) => radius_arg(Some(t)).filter(|r| (0.0..=1.0).contains(r))?,
+    };
+    let hull = concave_hull(&parse_one_geom(args)?, ratio)?;
+    geometry_to_literal_like(&hull, args.first()?)
+}
+
+/// A planar measure (length or perimeter) in `units`, following `geof:distance`'s
+/// unit rules; `metric` is the geodesic measure in metres for a linear unit on a
+/// geographic CRS.
+fn planar_measure(
+    args: &[Term],
+    planar: fn(&GeosGeometry) -> Option<f64>,
+    metric: fn(&geo::Geometry<f64>) -> f64,
+) -> Option<Term> {
+    let term = args.first()?;
+    let units = units_arg(args.get(1))?;
+    let crs = literal_crs(term);
+    let geographic = crs.is_some_and(is_geographic);
+    if let (Some(Uom::Linear(metres)), true) = (units, geographic) {
+        let g = geodesic::literal_to_crs84(term)?;
+        return Some(double_literal(metric(&g) / metres));
+    }
+    let per_unit = match units {
+        None | Some(Uom::Unity) => 1.0,
+        Some(Uom::Linear(metres)) if crs.is_some() => metres,
+        Some(Uom::Angular(degrees)) if geographic => degrees,
+        _ => return None,
+    };
+    Some(double_literal(planar(&parse_one_geom(args)?)? / per_unit))
+}
+
+/// `geof:length(geom, units)` — the length of the lines and of a polygon's
+/// rings (0 for points), in `units` as `geof:distance` reads them: geodesic for
+/// a linear unit on a geographic CRS, planar on a projected one.
+fn fn_length(args: &[Term]) -> Option<Term> {
+    planar_measure(args, |g| g.length().ok(), geodesic::metric_length)
+}
+
+/// `geof:perimeter(geom, units)` — the length of a polygon's rings, holes
+/// included; for a non-areal geometry its length (GeoSPARQL 1.1), so the same
+/// number as `geof:length`, as `geof:metricPerimeter` is `geof:metricLength`'s.
+fn fn_perimeter(args: &[Term]) -> Option<Term> {
+    planar_measure(args, |g| g.length().ok(), geodesic::metric_length)
 }
 
 #[cfg(test)]

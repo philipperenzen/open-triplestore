@@ -4807,3 +4807,665 @@ fn ogc10_r07_r08_r09_geometry_class_and_properties() {
     );
     assert!(ask_geo(&s, "ASK { ex:g2 geo:hasSerialization ?l }"));
 }
+
+// ─── GeoSPARQL 1.1 non-topological functions and aggregates (Req 39, 40, 42) ─────
+
+fn int_of(r: Option<String>) -> i64 {
+    r.as_deref()
+        .and_then(|t| t.split('"').nth(1))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(i64::MIN)
+}
+
+/// The same geometry in each serialisation the store reads: WKT, GML, GeoJSON, KML.
+fn square_in_every_serialisation() -> [String; 4] {
+    [
+        wkt("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))"),
+        gml_lit(&format!(
+            "<gml:Polygon><gml:exterior>{}</gml:exterior></gml:Polygon>",
+            ring("0 0 2 0 2 2 0 2 0 0")
+        )),
+        gj(r#"{"type":"Polygon","coordinates":[[[0,0],[2,0],[2,2],[0,2],[0,0]]]}"#),
+        kml_lit("<Polygon><outerBoundaryIs><LinearRing><coordinates>0,0 2,0 2,2 0,2 0,0</coordinates></LinearRing></outerBoundaryIs></Polygon>"),
+    ]
+}
+
+// Req 39 /req/geometry-extension/query-functions: dimension, coordinateDimension,
+// spatialDimension, is3D, isMeasured, isEmpty and isSimple — on every serialisation.
+#[test]
+fn ogc_req39_geometry_property_functions() {
+    let s = ts();
+    for sq in square_in_every_serialisation() {
+        assert_eq!(
+            int_of(geof_opt(&s, &format!("geof:dimension({sq})"))),
+            2,
+            "{sq}"
+        );
+        assert_eq!(
+            int_of(geof_opt(&s, &format!("geof:coordinateDimension({sq})"))),
+            2,
+            "{sq}"
+        );
+        assert_eq!(
+            int_of(geof_opt(&s, &format!("geof:spatialDimension({sq})"))),
+            2,
+            "{sq}"
+        );
+        assert!(is_false(geof_opt(&s, &format!("geof:is3D({sq})"))), "{sq}");
+        assert!(
+            is_false(geof_opt(&s, &format!("geof:isMeasured({sq})"))),
+            "{sq}"
+        );
+        assert!(
+            is_false(geof_opt(&s, &format!("geof:isEmpty({sq})"))),
+            "{sq}"
+        );
+        assert!(
+            is_true(geof_opt(&s, &format!("geof:isSimple({sq})"))),
+            "{sq}"
+        );
+    }
+    for (g, dim) in [
+        (wkt("POINT(1 2)"), 0),
+        (wkt("LINESTRING(0 0, 1 1)"), 1),
+        (
+            wkt("GEOMETRYCOLLECTION(POINT(0 0), LINESTRING(0 0, 1 1))"),
+            1,
+        ),
+    ] {
+        assert_eq!(
+            int_of(geof_opt(&s, &format!("geof:dimension({g})"))),
+            dim,
+            "{g}"
+        );
+    }
+    let z = wkt("POINT Z (1 2 3)");
+    let m = wkt("POINT M (1 2 4)");
+    let zm = wkt("POINT ZM (1 2 3 4)");
+    assert!(is_true(geof_opt(&s, &format!("geof:is3D({z})"))));
+    assert_eq!(
+        int_of(geof_opt(&s, &format!("geof:spatialDimension({z})"))),
+        3
+    );
+    assert_eq!(
+        int_of(geof_opt(&s, &format!("geof:coordinateDimension({z})"))),
+        3
+    );
+    assert!(is_true(geof_opt(&s, &format!("geof:isMeasured({m})"))));
+    assert!(is_false(geof_opt(&s, &format!("geof:is3D({m})"))));
+    assert_eq!(
+        int_of(geof_opt(&s, &format!("geof:coordinateDimension({m})"))),
+        3
+    );
+    assert_eq!(
+        int_of(geof_opt(&s, &format!("geof:coordinateDimension({zm})"))),
+        4
+    );
+    assert_eq!(
+        int_of(geof_opt(&s, &format!("geof:spatialDimension({zm})"))),
+        3
+    );
+    // Z from GML and GeoJSON too.
+    let gml3 = gml_lit("<gml:Point srsDimension='3'><gml:pos>1 2 3</gml:pos></gml:Point>");
+    assert!(is_true(geof_opt(&s, &format!("geof:is3D({gml3})"))));
+    let gj3 = gj(r#"{"type":"Point","coordinates":[1,2,3]}"#);
+    assert!(is_true(geof_opt(&s, &format!("geof:is3D({gj3})"))));
+    // isEmpty, and isSimple on a self-intersecting bow tie.
+    for empty in [
+        wkt("POINT EMPTY"),
+        "\"\"^^geo:gmlLiteral".to_string(),
+        "\"\"^^geo:kmlLiteral".to_string(),
+    ] {
+        assert!(
+            is_true(geof_opt(&s, &format!("geof:isEmpty({empty})"))),
+            "{empty}"
+        );
+    }
+    assert!(is_false(geof_opt(
+        &s,
+        &format!("geof:isSimple({})", wkt("LINESTRING(0 0, 2 2, 2 0, 0 2)"))
+    )));
+}
+
+// Req 39: geometryType returns the class as an IRI — the GML element for GML, the
+// Simple Features class otherwise.
+#[test]
+fn ogc_req39_geometry_type_is_an_iri() {
+    let s = ts();
+    let [w, g, j, k] = square_in_every_serialisation();
+    for t in [w, j, k] {
+        assert_eq!(
+            geof_opt(&s, &format!("geof:geometryType({t})")).as_deref(),
+            Some("<http://www.opengis.net/ont/sf#Polygon>"),
+            "{t}"
+        );
+    }
+    assert_eq!(
+        geof_opt(&s, &format!("geof:geometryType({g})")).as_deref(),
+        Some("<http://www.opengis.net/ont/gml#Polygon>")
+    );
+    let env = gml_lit("<gml:Envelope><gml:lowerCorner>0 0</gml:lowerCorner><gml:upperCorner>1 1</gml:upperCorner></gml:Envelope>");
+    assert_eq!(
+        geof_opt(&s, &format!("geof:geometryType({env})")).as_deref(),
+        Some("<http://www.opengis.net/ont/gml#Envelope>")
+    );
+    assert_eq!(
+        geof_opt(
+            &s,
+            &format!("geof:geometryType({})", wkt("MULTIPOINT((0 0), (1 1))"))
+        )
+        .as_deref(),
+        Some("<http://www.opengis.net/ont/sf#MultiPoint>")
+    );
+}
+
+// Req 39: centroid, boundingCircle and concaveHull, in the operand's serialisation.
+#[test]
+fn ogc_req39_centroid_bounding_circle_and_concave_hull() {
+    let s = ts();
+    for sq in square_in_every_serialisation() {
+        let c = geof_opt(&s, &format!("geof:asWKT(geof:centroid({sq}))")).unwrap_or_default();
+        assert_eq!(point_body(&c).replace(' ', ""), "11", "{sq}: {c}");
+        assert!(
+            is_true(geof_opt(
+                &s,
+                &format!("geof:sfContains(geof:boundingCircle({sq}), {sq})")
+            )),
+            "{sq}"
+        );
+        assert!(
+            datatype_of(&geof_opt(&s, &format!("geof:boundingCircle({sq})")))
+                == datatype_of(&geof_opt(&s, &format!("geof:envelope({sq})")))
+        );
+    }
+    // The minimum bounding circle of a 2×2 square has radius √2: area ≈ 2π.
+    let a = geof_num(
+        &s,
+        &format!(
+            "geof:area(geof:boundingCircle({}))",
+            wkt("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))")
+        ),
+    );
+    assert!((a - 2.0 * std::f64::consts::PI).abs() < 0.02, "{a}");
+    // Three collinear points: the circle on the two outer ones.
+    let a = geof_num(
+        &s,
+        &format!(
+            "geof:area(geof:boundingCircle({}))",
+            wkt("MULTIPOINT((0 0), (1 0), (4 0))")
+        ),
+    );
+    assert!((a - 4.0 * std::f64::consts::PI).abs() < 0.05, "{a}");
+    // One point is its own bounding circle.
+    let p =
+        geof_opt(&s, &format!("geof:boundingCircle({})", wkt("POINT(3 4)"))).unwrap_or_default();
+    assert_eq!(point_body(&p).replace(' ', ""), "34", "{p}");
+    // A concave hull of an L of points: smaller than the convex hull, never larger.
+    let l = wkt(
+        "MULTIPOINT((0 0), (1 0), (2 0), (3 0), (3 1), (0 1), (0 2), (0 3), (1 3), (1 1), (1 2))",
+    );
+    let convex = geof_num(&s, &format!("geof:area(geof:convexHull({l}))"));
+    let concave = geof_num(&s, &format!("geof:area(geof:concaveHull({l}, 0.1))"));
+    let one = geof_num(&s, &format!("geof:area(geof:concaveHull({l}, 1))"));
+    let default = geof_num(&s, &format!("geof:area(geof:concaveHull({l}))"));
+    assert!(concave < convex, "{concave} < {convex}");
+    assert!((one - convex).abs() < 1e-9, "ratio 1 is the convex hull");
+    assert!(default <= convex + 1e-9, "{default}");
+    for bad in ["-0.1", "1.5", "\"x\""] {
+        assert!(
+            geof_opt(&s, &format!("geof:concaveHull({l}, {bad})")).is_none(),
+            "{bad}"
+        );
+    }
+}
+
+// Req 40 /req/geometry-extension/query-functions-non-sf: length and perimeter, in
+// units — geodesic for a linear unit on a geographic CRS, planar on a projected CRS.
+#[test]
+fn ogc_req40_length_and_perimeter_with_units() {
+    let s = ts();
+    for sq in square_in_every_serialisation() {
+        assert_eq!(geof_num(&s, &format!("geof:perimeter({sq})")), 8.0, "{sq}");
+        assert_eq!(geof_num(&s, &format!("geof:length({sq})")), 8.0, "{sq}");
+    }
+    let line = rd("LINESTRING(155000 463000, 155300 463400)");
+    assert_eq!(
+        geof_num(&s, &format!("geof:length({line}, uom:metre)")),
+        500.0
+    );
+    assert_eq!(
+        geof_num(
+            &s,
+            &format!("geof:length({line}, <http://qudt.org/vocab/unit/KiloM>)")
+        ),
+        0.5
+    );
+    assert_eq!(
+        geof_num(&s, &format!("geof:perimeter({line}, uom:metre)")),
+        500.0
+    );
+    // The equatorial degree, geodesic: 111 319.49 m.
+    let eq = wkt("LINESTRING(0 0, 1 0)");
+    let m = geof_num(&s, &format!("geof:length({eq}, uom:metre)"));
+    assert!((m - 111_319.49).abs() < 0.01, "{m}");
+    assert_eq!(geof_num(&s, &format!("geof:length({eq}, uom:degree)")), 1.0);
+    // An angular unit on a projected CRS, and an unknown unit, are unbound.
+    for expr in [
+        format!("geof:length({line}, uom:degree)"),
+        format!("geof:perimeter({eq}, <http://example.org/furlong>)"),
+    ] {
+        assert!(geof_opt(&s, &expr).is_none(), "{expr}");
+    }
+    // A point has no length.
+    assert_eq!(
+        geof_num(&s, &format!("geof:length({})", wkt("POINT(1 1)"))),
+        0.0
+    );
+}
+
+// Req 40 area(geom, units) on every serialisation.
+#[test]
+fn ogc_req40_area_on_every_serialisation() {
+    let s = ts();
+    for sq in square_in_every_serialisation() {
+        assert_eq!(geof_num(&s, &format!("geof:area({sq})")), 4.0, "{sq}");
+        let m2 = geof_num(
+            &s,
+            &format!("geof:area({sq}, <http://qudt.org/vocab/unit/M2>)"),
+        );
+        assert!(
+            m2 > 4.9e10 && m2 < 5.0e10,
+            "geodesic 2°×2° at the equator: {m2}"
+        );
+    }
+}
+
+// Req 40: numGeometries and geometryN (1-based).
+#[test]
+fn ogc_req40_num_geometries_and_geometry_n() {
+    let s = ts();
+    let multi = wkt("MULTIPOINT((1 1), (2 2), (3 3))");
+    assert_eq!(
+        int_of(geof_opt(&s, &format!("geof:numGeometries({multi})"))),
+        3
+    );
+    assert_eq!(
+        int_of(geof_opt(
+            &s,
+            &format!("geof:numGeometries({})", wkt("POINT(0 0)"))
+        )),
+        1
+    );
+    assert_eq!(
+        int_of(geof_opt(
+            &s,
+            &format!("geof:numGeometries({})", wkt("GEOMETRYCOLLECTION EMPTY"))
+        )),
+        0
+    );
+    let second = geof_opt(&s, &format!("geof:geometryN({multi}, 2)")).unwrap_or_default();
+    assert_eq!(point_body(&second).replace(' ', ""), "22", "{second}");
+    for n in ["0", "4", "-1", "1.5"] {
+        assert!(
+            geof_opt(&s, &format!("geof:geometryN({multi}, {n})")).is_none(),
+            "{n}"
+        );
+    }
+    let point = wkt("POINT(5 6)");
+    assert!(is_true(geof_opt(
+        &s,
+        &format!("geof:sfEquals(geof:geometryN({point}, 1), {point})")
+    )));
+    // A GML collection's member is GML, with the collection's srsName.
+    let gml = gml_lit("<gml:MultiPoint srsName='EPSG:28992'><gml:pointMember><gml:Point><gml:pos>155000 463000</gml:pos></gml:Point></gml:pointMember><gml:pointMember><gml:Point><gml:pos>155010 463000</gml:pos></gml:Point></gml:pointMember></gml:MultiPoint>");
+    let m = geof_opt(&s, &format!("geof:geometryN({gml}, 2)"));
+    assert_eq!(datatype_of(&m), "gmlLiteral");
+    let srid = geof_opt(&s, &format!("geof:getSRID(geof:geometryN({gml}, 2))")).unwrap_or_default();
+    assert!(srid.contains("EPSG/0/28992"), "{srid}");
+}
+
+// Req 40: minX … maxZ; unbound for the empty geometry, and for Z without Z.
+#[test]
+fn ogc_req40_min_and_max_ordinates() {
+    let s = ts();
+    let line = wkt("LINESTRING Z (1 5 -2, 4 2 7, 3 3 1)");
+    for (f, v) in [
+        ("minX", 1.0),
+        ("maxX", 4.0),
+        ("minY", 2.0),
+        ("maxY", 5.0),
+        ("minZ", -2.0),
+        ("maxZ", 7.0),
+    ] {
+        assert_eq!(geof_num(&s, &format!("geof:{f}({line})")), v, "{f}");
+    }
+    for sq in square_in_every_serialisation() {
+        assert_eq!(geof_num(&s, &format!("geof:maxX({sq})")), 2.0, "{sq}");
+        assert!(
+            geof_opt(&s, &format!("geof:maxZ({sq})")).is_none(),
+            "2D has no Z: {sq}"
+        );
+    }
+    for f in ["minX", "maxY", "minZ"] {
+        assert!(
+            geof_opt(&s, &format!("geof:{f}({})", wkt("POINT EMPTY"))).is_none(),
+            "{f}"
+        );
+    }
+    // A GML literal's ordinates are in its CRS (RD New metres here).
+    let rd_gml = gml_point("EPSG:28992", "155000 463000");
+    assert_eq!(geof_num(&s, &format!("geof:minX({rd_gml})")), 155000.0);
+}
+
+// Req 39/40: a function over a value that is not a geometry is unbound, not a panic.
+#[test]
+fn ogc_req39_40_functions_over_a_non_geometry_are_unbound() {
+    let s = ts();
+    for f in [
+        "dimension",
+        "coordinateDimension",
+        "spatialDimension",
+        "is3D",
+        "isMeasured",
+        "isEmpty",
+        "isSimple",
+        "geometryType",
+        "numGeometries",
+        "centroid",
+        "boundingCircle",
+        "concaveHull",
+        "length",
+        "perimeter",
+        "minX",
+        "maxX",
+        "minY",
+        "maxY",
+        "minZ",
+        "maxZ",
+    ] {
+        for v in ["\"hello\"^^geo:wktLiteral", "42", "<http://example.org/x>"] {
+            assert!(
+                geof_opt(&s, &format!("geof:{f}({v})")).is_none(),
+                "{f}({v})"
+            );
+        }
+    }
+}
+
+// ─── Req 42 /req/geometry-extension/sa-functions: the spatial aggregates ──────────
+
+fn agg_data(s: &open_triplestore::store::TripleStore) {
+    load(
+        s,
+        r#"
+        ex:a ex:in ex:north ; geo:hasGeometry [ geo:asWKT "POINT(0 0)"^^geo:wktLiteral ] .
+        ex:b ex:in ex:north ; geo:hasGeometry [ geo:asWKT "POINT(4 0)"^^geo:wktLiteral ] .
+        ex:c ex:in ex:north ; geo:hasGeometry [ geo:asWKT "POINT(4 4)"^^geo:wktLiteral ] .
+        ex:d ex:in ex:north ; geo:hasGeometry [ geo:asWKT "POINT(0 4)"^^geo:wktLiteral ] .
+        ex:e ex:in ex:south ; geo:hasGeometry [ geo:asWKT "POLYGON((10 10, 12 10, 12 12, 10 12, 10 10))"^^geo:wktLiteral ] .
+    "#,
+    );
+}
+
+fn agg_one(
+    s: &open_triplestore::store::TripleStore,
+    outer: &str,
+    agg: &str,
+) -> Vec<(String, String)> {
+    let r = sel(
+        s,
+        &format!(
+            "SELECT ?r ({outer}(geof:{agg}(?g)) AS ?v) WHERE {{
+                ?f ex:in ?r ; geo:hasGeometry/geo:asWKT ?g }} GROUP BY ?r ORDER BY ?r"
+        ),
+    );
+    r.into_iter()
+        .map(|row| (row[0].clone(), row[1].clone()))
+        .collect()
+}
+
+#[test]
+fn ogc_req42_agg_bounding_box_convex_hull_and_centroid() {
+    let s = ts();
+    agg_data(&s);
+    let areas = |agg: &str| -> Vec<f64> {
+        agg_one(&s, "geof:area", agg)
+            .into_iter()
+            .map(|(_, v)| extract_f64(&v))
+            .collect()
+    };
+    assert_eq!(areas("aggBoundingBox"), vec![16.0, 4.0]);
+    assert_eq!(areas("aggConvexHull"), vec![16.0, 4.0]);
+    let centroids = agg_one(&s, "geof:asWKT", "aggCentroid");
+    assert_eq!(
+        point_body(&centroids[0].1).replace(' ', ""),
+        "22",
+        "{centroids:?}"
+    );
+    assert_eq!(
+        point_body(&centroids[1].1).replace(' ', ""),
+        "1111",
+        "{centroids:?}"
+    );
+    // Without GROUP BY: one group over everything.
+    let r = sel(
+        &s,
+        "SELECT (geof:area(geof:aggBoundingBox(?g)) AS ?a) WHERE { ?f geo:hasGeometry/geo:asWKT ?g }",
+    );
+    assert_eq!(extract_f64(&r[0][0]), 144.0, "{r:?}");
+}
+
+#[test]
+fn ogc_req42_agg_bounding_circle_and_concave_hull() {
+    let s = ts();
+    agg_data(&s);
+    let circles = agg_one(&s, "geof:area", "aggBoundingCircle");
+    // The four corners of a 4×4 square: radius 2√2, area 8π.
+    let north = extract_f64(&circles[0].1);
+    assert!(
+        (north - 8.0 * std::f64::consts::PI).abs() < 0.1,
+        "{circles:?}"
+    );
+    let hulls = agg_one(&s, "geof:area", "aggConcaveHull");
+    let north_hull = extract_f64(&hulls[0].1);
+    assert!(north_hull > 0.0 && north_hull <= 16.0 + 1e-9, "{hulls:?}");
+    // Every point lies in its group's bounding circle.
+    assert!(ask_geo(
+        &s,
+        "ASK { { SELECT (geof:aggBoundingCircle(?g) AS ?c) WHERE { ?f ex:in ex:north ; geo:hasGeometry/geo:asWKT ?g } }
+               ex:c geo:hasGeometry/geo:asWKT ?p FILTER(geof:sfIntersects(?c, ?p)) }"
+    ));
+}
+
+// Every aggregate follows aggUnion's rules: the empty group is the empty geometry, a
+// non-geometry makes the group unbound, and the answer does not depend on the order
+// the solutions arrive in.
+#[test]
+fn ogc_req42_aggregates_follow_sparql_aggregate_rules() {
+    let s = ts();
+    load(
+        &s,
+        r#"
+        ex:a ex:v "POINT(0 0)"^^geo:wktLiteral .
+        ex:b ex:v "POINT(4 0)"^^geo:wktLiteral .
+        ex:c ex:v "POINT(4 3)"^^geo:wktLiteral .
+        ex:x ex:bad "not a geometry" .
+        ex:x ex:bad "POINT(1 1)"^^geo:wktLiteral .
+    "#,
+    );
+    for agg in [
+        "aggBoundingBox",
+        "aggBoundingCircle",
+        "aggCentroid",
+        "aggConcaveHull",
+        "aggConvexHull",
+    ] {
+        let empty = sel(
+            &s,
+            &format!("SELECT (geof:{agg}(?g) AS ?r) WHERE {{ ?f ex:none ?g }}"),
+        );
+        assert!(
+            empty[0][0].contains("EMPTY"),
+            "{agg} of no geometries is the empty geometry: {empty:?}"
+        );
+        let bad = sel(
+            &s,
+            &format!("SELECT (geof:{agg}(?g) AS ?r) WHERE {{ ?f ex:bad ?g }}"),
+        );
+        assert_eq!(
+            bad[0][0], "",
+            "{agg} over a non-geometry is unbound: {bad:?}"
+        );
+        let forward = sel(
+            &s,
+            &format!("SELECT (geof:{agg}(?g) AS ?r) WHERE {{ ?f ex:v ?g }}"),
+        );
+        let backward = sel(
+            &s,
+            &format!("SELECT (geof:{agg}(?g) AS ?r) WHERE {{ {{ SELECT ?g WHERE {{ ?f ex:v ?g }} ORDER BY DESC(?f) }} }}"),
+        );
+        assert_eq!(forward, backward, "{agg} is order-independent");
+        assert!(!forward[0][0].is_empty(), "{agg}: {forward:?}");
+    }
+}
+
+// The aggregates keep the group's CRS and serialisation like aggUnion, and every query
+// path (accelerated, engine-only, scoped, update) answers alike.
+#[test]
+fn ogc_req42_aggregates_keep_crs_and_take_every_query_path() {
+    let data = "@prefix geo: <http://www.opengis.net/ont/geosparql#> .\n\
+        @prefix ex: <http://example.org/> .\n\
+        ex:a ex:v \"<gml:Point srsName='EPSG:28992'><gml:pos>155000 463000</gml:pos></gml:Point>\"^^geo:gmlLiteral .\n\
+        ex:b ex:v \"<gml:Point srsName='EPSG:28992'><gml:pos>155010 463010</gml:pos></gml:Point>\"^^geo:gmlLiteral .\n";
+    let q = format!(
+        "{GEO_PFX}\nSELECT (geof:getSRID(geof:aggBoundingBox(?g)) AS ?srid) (geof:area(geof:aggBoundingBox(?g)) AS ?a)
+           (geof:aggCentroid(?g) AS ?c) WHERE {{ ?f ex:v ?g }}"
+    );
+    let mut answers = Vec::new();
+    for s in [accelerated(), engine_only()] {
+        s.load_str(data, RdfFormat::Turtle, None).unwrap();
+        let rows = solutions(s.query(&q).unwrap());
+        answers.push(rows);
+    }
+    assert_eq!(answers[0], answers[1], "accelerated and engine-only agree");
+    let row = &answers[0][0];
+    assert!(
+        row[0].as_deref().unwrap_or("").contains("EPSG/0/28992"),
+        "{row:?}"
+    );
+    assert_eq!(
+        extract_f64(row[1].as_deref().unwrap_or("")),
+        100.0,
+        "{row:?}"
+    );
+    assert!(
+        row[2].as_deref().unwrap_or("").contains("gmlLiteral"),
+        "{row:?}"
+    );
+}
+
+// ─── Core and geometry vocabulary of GeoSPARQL 1.1 (Req 4–7, 12) ───────────────
+
+const COLLECTIONS: &str = r#"
+ex:fc a geo:FeatureCollection ; rdfs:member ex:f1 , ex:f2 .
+ex:soc a geo:SpatialObjectCollection ; rdfs:member ex:f1 , ex:g1 .
+ex:gc a geo:GeometryCollection ; rdfs:member ex:g1 , ex:g2 .
+ex:f1 a geo:Feature ; geo:hasGeometry ex:g1 ; geo:hasDefaultGeometry ex:g1 ;
+    geo:hasCentroid ex:c1 ; geo:hasBoundingBox ex:b1 ;
+    geo:hasSize "4"^^xsd:double ; geo:hasMetricSize "4"^^xsd:double ;
+    geo:hasArea "4"^^xsd:double ; geo:hasMetricArea "4"^^xsd:double ;
+    geo:hasLength "0"^^xsd:double ; geo:hasMetricLength "0"^^xsd:double ;
+    geo:hasPerimeterLength "8"^^xsd:double ; geo:hasMetricPerimeterLength "8"^^xsd:double ;
+    geo:hasVolume "0"^^xsd:double ; geo:hasMetricVolume "0"^^xsd:double .
+ex:f2 a geo:Feature .
+ex:g1 a geo:Geometry ; geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POLYGON((155000 463000, 155002 463000, 155002 463002, 155000 463002, 155000 463000))"^^geo:wktLiteral .
+ex:g2 a geo:Geometry ; geo:asWKT "POINT(5 52)"^^geo:wktLiteral .
+ex:c1 geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(155001 463001)"^^geo:wktLiteral .
+ex:b1 geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POLYGON((155000 463000, 155002 463000, 155002 463002, 155000 463002, 155000 463000))"^^geo:wktLiteral .
+"#;
+
+fn collections_store() -> open_triplestore::store::TripleStore {
+    let s = ts();
+    load(
+        &s,
+        &format!("@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n{COLLECTIONS}"),
+    );
+    s
+}
+
+// Req 4 /req/core/spatial-object-collection-class and Req 5
+// /req/core/feature-collection-class: collections and their members.
+#[test]
+fn ogc_req04_05_spatial_object_and_feature_collections() {
+    let s = collections_store();
+    let r = sel(
+        &s,
+        "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+         SELECT ?m WHERE { ?c a geo:FeatureCollection ; rdfs:member ?m } ORDER BY ?m",
+    );
+    assert_eq!(
+        r,
+        vec![
+            vec!["<http://example.org/f1>".to_string()],
+            vec!["<http://example.org/f2>".to_string()]
+        ]
+    );
+    assert!(ask_geo(
+        &s,
+        "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+         ASK { ex:soc a geo:SpatialObjectCollection ; rdfs:member ex:g1 , ex:f1 }"
+    ));
+}
+
+// Req 6 /req/core/spatial-object-properties: the size properties, which agree with
+// what the functions compute from the geometry.
+#[test]
+fn ogc_req06_spatial_object_properties() {
+    let s = collections_store();
+    let r = sel(
+        &s,
+        "SELECT ?size ?area ?perimeter ?computedArea ?computedPerimeter WHERE {
+           ex:f1 geo:hasSize ?size ; geo:hasMetricSize ?ms ; geo:hasArea ?area ; geo:hasMetricArea ?ma ;
+                 geo:hasLength ?l ; geo:hasMetricLength ?ml ;
+                 geo:hasPerimeterLength ?perimeter ; geo:hasMetricPerimeterLength ?mp ;
+                 geo:hasVolume ?v ; geo:hasMetricVolume ?mv ;
+                 geo:hasDefaultGeometry/geo:asWKT ?w .
+           BIND(geof:area(?w) AS ?computedArea)
+           BIND(geof:perimeter(?w) AS ?computedPerimeter) }",
+    );
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(extract_f64(&r[0][1]), extract_f64(&r[0][3]), "{r:?}");
+    assert_eq!(extract_f64(&r[0][2]), extract_f64(&r[0][4]), "{r:?}");
+}
+
+// Req 7 /req/core/feature-properties: hasGeometry, hasDefaultGeometry, hasCentroid and
+// hasBoundingBox — the centroid and box agree with geof:centroid and geof:envelope.
+#[test]
+fn ogc_req07_feature_properties() {
+    let s = collections_store();
+    assert!(ask_geo(
+        &s,
+        "ASK { ex:f1 geo:hasGeometry ?g ; geo:hasDefaultGeometry ?g ;
+                     geo:hasCentroid/geo:asWKT ?c ; geo:hasBoundingBox/geo:asWKT ?b .
+               ?g geo:asWKT ?w .
+               FILTER(geof:sfEquals(?c, geof:centroid(?w)) && geof:sfEquals(?b, geof:envelope(?w))) }"
+    ));
+}
+
+// Req 12 /req/geometry-extension/geometry-collection-class: a geo:GeometryCollection
+// and its member geometries, which aggregate like any group.
+#[test]
+fn ogc_req12_geometry_collection_class() {
+    let s = collections_store();
+    let r = sel(
+        &s,
+        "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+         SELECT (COUNT(?g) AS ?n) (geof:aggBoundingBox(?w) AS ?box) WHERE {
+           ex:gc a geo:GeometryCollection ; rdfs:member ?g . ?g geo:asWKT ?w }",
+    );
+    assert!(r[0][0].contains('2'), "{r:?}");
+    assert!(
+        r[0][1].contains("POLYGON"),
+        "two CRSs harmonised into CRS84: {r:?}"
+    );
+}

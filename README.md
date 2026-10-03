@@ -33,7 +33,7 @@
 
 > **Status:** current release **`0.7.0`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
 
-**Open Triplestore** is a modern, high-performance RDF triple store with **SPARQL 1.1** and **LDP 1.0** support, plus partial support for **SPARQL 1.2 / RDF 1.2**, **GeoSPARQL 1.1** (not OGC-certified) and **OWL 2** reasoning (RL natively + DL extension rules; no complete DL reasoner ships) — grades and known gaps per standard in [docs/standards.md](docs/standards.md) — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
+**Open Triplestore** is a modern, high-performance RDF triple store with **SPARQL 1.1** and **LDP 1.0** support, **GeoSPARQL 1.0 and 1.1** (1.1 without the optional DGGS class; the project's own grades, not OGC-certified), plus partial support for **SPARQL 1.2 / RDF 1.2** and **OWL 2** reasoning (RL natively + DL extension rules; no complete DL reasoner ships) — grades and known gaps per standard in [docs/standards.md](docs/standards.md) — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
 
 ## Demo
 
@@ -69,7 +69,7 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | **SPARQL 1.1** | SELECT, CONSTRUCT, ASK, DESCRIBE, UPDATE (INSERT/DELETE) |
 | **SPARQL 1.2** | Triple terms `<<( )>>`, reifiers and `{\| \|}` annotations (RDF 1.2 model), the triple-term and base-direction functions, `VERSION`; plus Oxigraph's `LATERAL` and `ADJUST` extensions, which are not part of SPARQL 1.2 ([docs](docs/sparql-12.md)) |
 | **SPARQL federation** | `SERVICE` is off by default (SSRF mitigation) and enabled per endpoint with `OTS_REMOTE_ALLOWLIST`; calls are timed out, size- and row-capped (a result over a cap fails the call rather than being truncated), a query's calls share endpoint, request and deadline limits, `SERVICE ?var` takes its endpoint from the data, and the service description advertises federation only when an allowlist exists |
-| **GeoSPARQL 1.1** | Simple Features, Egenhofer and RCC8 relations, DE-9IM `relate`, distance/area/buffer and the constructive functions, the geodesic metric family (metres on the WGS84 ellipsoid), the `aggUnion` aggregate, WKT, GML (documented profile), GeoJSON and KML literals (`asWKT`, `asGML`, `asGeoJSON`, `asKML`), CRS transform for the built-in CRS set, the RDFS Entailment and Query Rewrite extensions. GeoSPARQL 1.0 is graded Full. Not implemented: DGGS literals, the other aggregates ([grades & gaps](docs/standards.md#known-limitations--conformance-findings)) |
+| **GeoSPARQL 1.1** | Simple Features, Egenhofer and RCC8 relations, DE-9IM `relate`, distance/area/buffer and the constructive functions, the geodesic metric family (metres on the WGS84 ellipsoid), the `aggUnion` aggregate, WKT, GML (documented profile), GeoJSON and KML literals (`asWKT`, `asGML`, `asGeoJSON`, `asKML`), CRS transform for the built-in CRS set, the RDFS Entailment and Query Rewrite extensions. every GeoSPARQL 1.1 query function and all six spatial aggregates. GeoSPARQL 1.0 graded Full; 1.1 Full for every conformance class but the optional DGGS class ([grades & gaps](docs/standards.md#known-limitations--conformance-findings)) |
 | **OWL 2 EL** | Native EL++ saturation engine for the whole profile: classification, realization and the property closure, with nominals, `hasSelf`, keys, equality and the EL datatypes; axioms outside the profile are reported ([docs](docs/owl2-el.md)) |
 | **OWL 2 DL** | Backend chosen with `OTS_DL_BACKEND`: `sidecar` (the bundled OWL API + HermiT reasoner, `docker compose --profile reasoner`, checked in CI against the W3C OWL 2 DL test cases), `konclude`, or `native` RL + DL-syntax rules, sound but incomplete; OWL 2 DL profile check; `POST /api/reasoning/check` for consistency, entailment, satisfiability; background runs ([docs](docs/owl2-dl.md)) |
 | **Federated access control** | Signed identity assertions between instances (`SERVICE`, LDES sync); verified against the peer's JWKS, authorised locally ([docs](docs/federation.md)) |
@@ -526,12 +526,13 @@ relation (the Query Rewrite Extension, on by default), and RDFS entailment over 
 dataset with GeoSPARQL data reasons over the GeoSPARQL ontology and the Simple
 Features and GML geometry hierarchies.
 
-GeoSPARQL 1.0 is graded Full (the project's own grade, not an OGC certification).
-**Not implemented:** DGGS literals, the other
-GeoSPARQL 1.1 aggregates and several of its non-metric functions. (Earlier versions of this
-README claimed "all 30 OGC requirements" — that number was the test file's own
-numbering, not the OGC conformance classes. The honest grade is *Partial*; see
-[docs/standards.md](docs/standards.md).)
+Every GeoSPARQL 1.1 query function (geometry properties, `centroid`,
+`boundingCircle`, `concaveHull`, `length`, `perimeter`, `geometryN`, `minX` … `maxZ`)
+and all six spatial aggregates are implemented. GeoSPARQL 1.0 is graded Full, and 1.1
+Full for every conformance class but the optional DGGS class — DGGS literals are not
+implemented. These are the project's own grades against a
+[requirement matrix](docs/conformance/geosparql.md#3-requirement-matrix), not an OGC
+certification; see [docs/standards.md](docs/standards.md).
 
 ```sparql
 PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
@@ -551,7 +552,9 @@ SELECT ?feature WHERE {
 | Constructive | `boundary` `buffer` `convexHull` `difference` `envelope` `intersection` `symDifference` `union` `transform` |
 | Measures | `distance` `area` `getSRID` `metricDistance` `metricLength` `metricPerimeter` `metricArea` `metricBuffer` |
 | Serialisation | `asWKT` `asGML` `asGeoJSON` `asKML` |
-| Aggregate | `aggUnion` |
+| Geometry properties | `dimension` `coordinateDimension` `spatialDimension` `is3D` `isMeasured` `isEmpty` `isSimple` `geometryType` `numGeometries` `geometryN` |
+| Other non-topological | `centroid` `boundingCircle` `concaveHull` `length` `perimeter` `minX` `maxX` `minY` `maxY` `minZ` `maxZ` |
+| Aggregates | `aggUnion` `aggBoundingBox` `aggBoundingCircle` `aggCentroid` `aggConvexHull` `aggConcaveHull` |
 
 ---
 
@@ -895,7 +898,7 @@ licence policy allows no performance claims on a subset.
 |---|---|---|---:|---|
 | SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 27 |  |
 | DCAT 3 / DCAT-AP 3 / VoID | `tests/dcat_conformance.rs` | spec-derived | 4 |  |
-| GeoSPARQL 1.1 | `tests/geosparql_conformance.rs` | spec-derived | 176 |  |
+| GeoSPARQL 1.1 | `tests/geosparql_conformance.rs` | spec-derived | 192 |  |
 | LDES 1.0 / TREE | `tests/ldes_conformance.rs` | spec-derived | 28 |  |
 | LDP 1.0 (store level) | `tests/ldp_conformance.rs` | spec-derived | 43 |  |
 | LDP 1.0 (HTTP) | `tests/ldp_http_conformance.rs` | spec-derived | 13 |  |
@@ -933,7 +936,7 @@ licence policy allows no performance claims on a subset.
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 | SPARQL 1.2 | `tests/w3c_sparql12_manifests.rs` | **vendored W3C test-suite subset** (`sparql/sparql12` of w3c/rdf-tests, unmodified; manifest-driven, engine and mirror paths) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql12.md` |
 
-1192 conformance tests across 39 suites; a further 806 tests in 107 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 14 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
+1208 conformance tests across 39 suites; a further 806 tests in 107 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 14 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`, `docs/shex.md`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites, the JSON-LD API sections and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->

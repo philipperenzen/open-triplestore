@@ -308,6 +308,15 @@ pub fn gml_srs_name(gml: &str) -> Option<String> {
     }
 }
 
+/// The local name of a GML literal's geometry element (`Surface`, `Envelope`,
+/// …), when it reads as a geometry.
+pub fn gml_root_name(gml: &str) -> Option<String> {
+    let doc = Doc::parse(gml)?;
+    let root = doc.first(is_geometry)?;
+    Reader2 { doc: &doc }.geometry(root, None, 0)?;
+    doc.start(root).map(|(name, _)| name.to_string())
+}
+
 /// Convert a GML geometry document to a WKT string, or `None` if it is not a
 /// geometry of the supported profile (see the module docs).
 pub fn gml_to_wkt(gml: &str) -> Option<String> {
