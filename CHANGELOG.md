@@ -14,6 +14,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **ShEx 2.1.** The ShEx engine is rewritten to the ShEx 2.1 specification
+  (`src/shex/`). ShExC is parsed to the full 2.1 grammar (imports, start and
+  start actions, `EXTERNAL`, node constraints combined with shapes, value-set
+  stems, ranges and exclusions for IRIs, literals and languages, `/regex/`
+  patterns, triple-expression labels and inclusions, bracketed groups with
+  cardinalities, annotations, semantic actions); ShExJ (2.1 and `ShapeDecl`
+  layouts) and ShExR are read too. Validation partitions each node's
+  neighbourhood between the triple constraints and the remainder, decides
+  recursion as a greatest fixpoint per strongly connected component and
+  negation by strata, and checks typed terms (XSD lexical forms and ranges,
+  exact decimals, code-point lengths, XPath regular expressions). The
+  endpoints accept the ShapeMap language (`<n>@<S>`, `{FOCUS p o}@<S>`,
+  `@START`) and ShapeMap JSON as well as the original map, and ShExJ
+  schemas (`schema_format`, `base`). `IMPORT <g>` is resolved only from a
+  named graph the caller may read, holding ShExR — never over the network.
+  Semantic actions run only the shexTest Test extension; no action code is
+  executed. ShEx 2.next (`EXTENDS`, `ABSTRACT`) is refused. Guide:
+  `docs/shex.md`.
+- **shexTest suite, vendored.** `tests/fixtures/shextest/` (validation,
+  schemas, negative syntax and structure, pinned at shexTest fc784a95, W3C
+  Software and Document License, see its `PROVENANCE.md`) and the runner
+  `tests/shextest_conformance.rs`, a two-way ratchet that skips only tests
+  tagged with a ShEx 2.next trait and also checks every validation case
+  through the store.
 - **`OTS_OIDC_IDP_TOKEN_POLICY` and `OTS_OIDC_IDP_WRITE_SCOPES`.** What an access token from
   an external IdP (OIDC resource-server mode) may do is now a setting, with the
   same values as `OTS_OIDC_SESSION_POLICY`: `session` (default), `scoped`
@@ -285,6 +309,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   how to get help.
 
 ### Changed
+- **ShEx semantics corrected** (results change). A triple whose predicate a
+  shape constrains but whose value fails the constraint now fails the shape
+  instead of being ignored (unless the predicate is `EXTRA`); one triple no
+  longer satisfies two constraints; `CLOSED {}` closes; `{m,}` is unbounded
+  (it meant exactly m); recursion is no longer assumed to succeed; string
+  lengths count code points, not bytes; numeric facets compare exactly.
+  Schemas whose references cycle through a negation, and malformed shape
+  maps, are now a `400`; a validation whose references nest deeper than
+  20 000 levels is a `422` (validation runs off the async runtime on a
+  thread sized for that depth). ShEx is graded Full in
+  `docs/standards.md`, and the comparison's Standards Score is recounted
+  15 → 16.
 - **Settings added in this release are named for what they cover.** Before
   release, five new settings were renamed, and the old names are not read:
   `OIDC_TOKEN_POLICY` and `OIDC_WRITE_SCOPES` are now

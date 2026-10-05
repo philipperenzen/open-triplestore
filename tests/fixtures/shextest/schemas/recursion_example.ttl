@@ -1,0 +1,14 @@
+PREFIX sx: <http://www.w3.org/ns/shex#>
+
+<http://schema.example/IssueShape> a sx:ShapeDecl ; sx:shapeExpr [ a sx:Shape;
+   sx:expression [
+     a sx:TripleConstraint;
+     sx:max -1;
+     sx:min 0;
+     sx:predicate <http://schema.example/related>;
+     sx:valueExpr <http://schema.example/IssueShape>
+   ] ] .
+
+[]
+     a sx:Schema;
+     sx:shapes (<http://schema.example/IssueShape>) .

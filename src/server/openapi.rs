@@ -2412,19 +2412,21 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Validate dataset (ShEx)",
-                "Validate the dataset against a ShEx schema.",
+                "Validate the dataset's graphs the caller may read against a ShEx 2.1 schema. Body: `schema` (ShExC or ShExJ text, or a ShExJ object), optional `schema_format` (`shexc`|`shexj`), `base`, and `shape_map` (ShapeMap language string, `[{node, shape}]`, or `{shape: [nodes]}`; absent: every shape on the nodes using its predicates). `IMPORT` reads ShExR from readable named graphs, never the network.",
                 vec![],
                 vec![
                     ("200", "ShEx validation result"),
+                    ("400", "Invalid schema, import or shape map"),
                     ("401", "Authentication required"),
+                    ("422", "Validation stopped: references nest deeper than the engine allows"),
                 ],
                 true,
             ),
         )],
     );
     mount(paths, "/api/shex/validate", vec![
-        (M::Post, o("Validation", "Validate (ShEx, inline)", "Validate inline data against an inline ShEx schema. Body carries data, schema and a shape map.",
-            vec![], vec![("200", "ShEx validation result"), ("400", "Invalid schema or data")], false)),
+        (M::Post, o("Validation", "Validate (ShEx, inline)", "Validate the graphs the caller may read (as `/sparql` would) against a ShEx 2.1 schema. Body: `schema` (ShExC or ShExJ text, or a ShExJ object), optional `schema_format` (`shexc`|`shexj`), `base`, and `shape_map` (ShapeMap language string, `[{node, shape}]`, or `{shape: [nodes]}`; absent: every shape on the nodes using its predicates). `IMPORT` reads ShExR from readable named graphs, never the network.",
+            vec![], vec![("200", "ShEx validation result"), ("400", "Invalid schema, import or shape map"), ("422", "Validation stopped: references nest deeper than the engine allows")], false)),
     ]);
 
     // Constraint-specification import/export (buildingSMART IDS today).

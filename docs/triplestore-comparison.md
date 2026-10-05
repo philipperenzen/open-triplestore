@@ -104,7 +104,7 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
   The **Open Triplestore** columns in the matrices below follow those grades on every row
   (since 2026-10-01): a ✅ means `docs/standards.md` grades the standard **Full**, and every
   row it grades **Partial** shows 🟡 — SPARQL 1.1 Query, SPARQL 1.2 and RDF 1.2, OWL 2 RL,
-  SHACL Core and Advanced, ShEx, SWRL, GeoSPARQL, DCAT and VoID, and RML. OWL 2 DL is graded
+  SHACL Core and Advanced, SWRL, GeoSPARQL, DCAT and VoID, and RML. OWL 2 DL is graded
   Full with the reasoner sidecar the project ships (footnote ⁹). Five rows have
   no grade there (SPARQL 1.1 Protocol, JSON-LD 1.1, N-Quads/TriG, text search, SKOS); their ✅
   marks feature presence, as in the other columns — note that `/sparql`
@@ -267,7 +267,7 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 | **OWL 2 DL** | ✅⁹ | ❌ | ❌ | ❌ | ❌ | 🔒 | ✅ | ❌ | ❌ | ❌ |
 | **SHACL Validation** | 🟡¹⁰ | ❌ | 🟡 | ❌ | 🟡 | ✅ | ✅ | ✅ | ❌ | ❌ |
 | **SHACL-AF Inference** | 🟡¹¹ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| **ShEx** | 🟡¹² | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
+| **ShEx** | ✅¹² | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
 | **SWRL** | 🟡¹³ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
 
 > ⁷ RDFS entailment (rules rdfs1–rdfs13), graded Full in [`docs/standards.md`](standards.md),
@@ -298,9 +298,11 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >   run's data, all seven node expressions, and SPARQL and triple rules with `sh:condition` and
 >   `sh:order` work; `sh:resultAnnotation` is missing, and the optional `$shapesGraph` /
 >   `$currentShape` are not supported (footnote 7 of [`docs/standards.md`](standards.md)).
-> ¹² ShEx (Shape Expressions) via the `shex` feature flag, graded Partial: ShExC parser,
->   recursive descent validator with cardinality checking, CLOSED/EXTRA, inverse constraints, and
->   value sets; no semantic actions, imports or annotations.
+> ¹² ShEx 2.1 via the `shex` feature flag, graded Full in [`docs/standards.md`](standards.md)
+>   (footnote 11 there): ShExC, ShExJ, ShExR and the ShapeMap language; neighbourhood partitions,
+>   recursion as a greatest fixpoint, stratified negation, typed terms, store-only `IMPORT`.
+>   Passes the 2.1 part of the vendored shexTest suite; ShEx 2.next (EXTENDS/ABSTRACT) is not
+>   implemented. See [`docs/shex.md`](shex.md).
 > ¹³ SWRL rule engine via the `swrl` feature flag, graded Partial: OWL/XML and text-based rule
 >   formats, class and property atoms and the built-ins in `src/swrl` (an unsupported built-in is
 >   an error). Rules are translated to SPARQL INSERT WHERE and executed in a fixed-point loop.
@@ -380,11 +382,15 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > OWL 2 DL (with the reasoner sidecar the project ships) are graded Full in `docs/standards.md`,
 > and their cells follow. RDF Patch and LDES were regraded Full the same day; neither has a row
 > here. 13 rows are 🟡 and the W3C SPARQL 1.1 Tests row is not claimed.
+>
+> Open Triplestore recounted again on 2026-10-03, 15 → 16: ShEx is graded Full in
+> `docs/standards.md` (a ShEx 2.1 engine; the 2.1 part of the shexTest suite passes), and its
+> cell follows. 12 rows are 🟡 and the W3C SPARQL 1.1 Tests row is not claimed.
 
 ```
 Stardog           ██████████████████████░░░░░░░   22 / 29  (commercial; full OWL DL + ShEx + SWRL; GeoSPARQL 1.1 partial)
 GraphDB           █████████████████████░░░░░░░░   21 / 29  (commercial; OWL DL commercial-only; no ShEx/SWRL/LDP/RML)
-Open Triplestore  ███████████████░░░░░░░░░░░░░░   15 / 29  (own grades, Full only; 13 more rows 🟡 — 28 of 29 at least partial, the most of the ten; W3C tests not claimed)
+Open Triplestore  ████████████████░░░░░░░░░░░░░   16 / 29  (own grades, Full only; 12 more rows 🟡 — 28 of 29 at least partial, the most of the ten; W3C tests not claimed)
 Virtuoso          ██████████████░░░░░░░░░░░░░░░   14 / 29
 RDF4J 5           ██████████████░░░░░░░░░░░░░░░   14 / 29  (improved from v4)
 Jena 5            ████████████░░░░░░░░░░░░░░░░░   12 / 29  (improved from v4)

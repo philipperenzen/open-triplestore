@@ -10961,11 +10961,91 @@ pub fn shex_routes() -> Router<AppState> {
 #[cfg(feature = "shex")]
 #[derive(Debug, Deserialize)]
 struct ShExValidateRequest {
-    /// ShExC schema text
-    schema: String,
-    /// Shape map: shape IRI → list of focus node IRIs
+    /// The schema: ShExC text, ShExJ text, or a ShExJ object.
+    schema: serde_json::Value,
+    /// `shexc`, `shexj`, or absent to detect it (JSON object → ShExJ).
     #[serde(default)]
-    shape_map: std::collections::HashMap<String, Vec<String>>,
+    schema_format: Option<String>,
+    /// Base IRI for relative IRIs in the schema and the shape map.
+    #[serde(default)]
+    base: Option<String>,
+    /// Which nodes to validate against which shapes: the ShapeMap language
+    /// (`"<n>@<S>, {FOCUS a ex:T}@START"`), ShapeMap JSON
+    /// (`[{"node": …, "shape": …}]`), or `{shape: [nodes]}`. Absent or empty:
+    /// every shape is checked on the nodes that use one of its predicates.
+    #[serde(default)]
+    shape_map: Option<ShExShapeMap>,
+}
+
+#[cfg(feature = "shex")]
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ShExShapeMap {
+    Text(String),
+    Pairs(Vec<ShExPair>),
+    Legacy(std::collections::HashMap<String, Vec<String>>),
+}
+
+#[cfg(feature = "shex")]
+#[derive(Debug, Deserialize)]
+struct ShExPair {
+    node: String,
+    shape: String,
+}
+
+/// Parse, import and check the request's schema, and read its shape map.
+/// Imports come only from graphs `import_scope` reads.
+#[cfg(feature = "shex")]
+fn shex_prepare(
+    state: &AppState,
+    body: &ShExValidateRequest,
+    import_scope: &crate::shex::GraphScope,
+) -> Result<(crate::shex::ResolvedSchema, crate::shex::ShapeMapInput), (StatusCode, String)> {
+    let bad = |e: String| (StatusCode::BAD_REQUEST, e);
+    let format = crate::shex::SchemaFormat::parse(body.schema_format.as_deref()).map_err(bad)?;
+    let base = body.base.as_deref();
+    let schema = match &body.schema {
+        serde_json::Value::String(text) => crate::shex::parse_schema(text, format, base),
+        v @ serde_json::Value::Object(_) => crate::shex::shexj::from_value(v, base),
+        _ => Err("'schema' must be ShExC or ShExJ text, or a ShExJ object".to_string()),
+    }
+    .map_err(bad)?;
+    let imports = crate::shex::StoreImports {
+        store: &state.store,
+        scope: import_scope,
+    };
+    let resolved = crate::shex::check::resolve(schema, base, &imports).map_err(bad)?;
+    let map = match &body.shape_map {
+        None => crate::shex::ShapeMapInput::Discover,
+        Some(ShExShapeMap::Text(t)) if t.trim().is_empty() => crate::shex::ShapeMapInput::Discover,
+        Some(ShExShapeMap::Text(t)) => crate::shex::ShapeMapInput::Text(t.clone()),
+        Some(ShExShapeMap::Pairs(p)) if p.is_empty() => crate::shex::ShapeMapInput::Discover,
+        Some(ShExShapeMap::Pairs(p)) => crate::shex::ShapeMapInput::Pairs(
+            p.iter()
+                .map(|x| (x.node.clone(), x.shape.clone()))
+                .collect(),
+        ),
+        Some(ShExShapeMap::Legacy(m)) if m.is_empty() => crate::shex::ShapeMapInput::Discover,
+        Some(ShExShapeMap::Legacy(m)) => crate::shex::ShapeMapInput::Legacy(m.clone()),
+    };
+    crate::shex::check_shape_map(&map, &resolved).map_err(bad)?;
+    Ok((resolved, map))
+}
+
+/// What the caller may read: the `/sparql` rule ([`accessible_read_graphs`]);
+/// an admin reads the whole store.
+#[cfg(feature = "shex")]
+fn shex_readable_scope(
+    state: &AppState,
+    user: &AuthenticatedUser,
+) -> Result<crate::shex::GraphScope, (StatusCode, String)> {
+    if user.is_admin() {
+        return Ok(crate::shex::GraphScope::All);
+    }
+    Ok(crate::shex::GraphScope::named(
+        accessible_read_graphs(state, Some(user))
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.message()))?,
+    ))
 }
 
 /// POST /api/datasets/:dataset_id/shex/validate — validate dataset using ShEx
@@ -10973,7 +11053,8 @@ struct ShExValidateRequest {
 /// Reads the dataset's own graphs that the caller may read (the `/sparql`
 /// rule, [`accessible_read_graphs`]; admins read them all) and nothing else:
 /// a report names its focus nodes, and a verdict answers a question about the
-/// data. Stored SHACL report graphs are no part of the data.
+/// data. Stored SHACL report graphs are no part of the data. `IMPORT`s are
+/// read (as ShExR) from graphs the caller may read, never fetched.
 #[cfg(feature = "shex")]
 async fn shex_validate(
     Extension(current_user): Extension<AuthenticatedUser>,
@@ -10995,53 +11076,55 @@ async fn shex_validate(
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
     }
 
-    let schema =
-        crate::shex::parse_shexc(&body.schema).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-
-    let readable = if current_user.is_admin() {
-        None
-    } else {
-        Some(
-            accessible_read_graphs(&state, Some(&current_user))
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.message()))?,
-        )
-    };
+    let readable = shex_readable_scope(&state, &current_user)?;
+    let (schema, map) = shex_prepare(&state, &body, &readable)?;
     let graphs: Vec<String> = state
         .auth_db
         .list_dataset_graphs(&dataset_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .into_iter()
         .filter(|g| !g.starts_with("urn:system:reports:"))
-        .filter(|g| readable.as_ref().is_none_or(|r| r.contains(g)))
+        .filter(|g| readable.includes(g))
         .collect();
     let scope = crate::shex::GraphScope::named(graphs);
-
-    let report = crate::shex::validate_in(&state.store, &scope, &schema, &body.shape_map);
+    let report = shex_run(&state, scope, schema, map).await?;
     Ok(Json(report))
+}
+
+/// Validate off the async runtime, on a thread with the stack the engine's
+/// recursion needs. A validation that goes deeper than the engine allows is
+/// a 422, not a verdict.
+#[cfg(feature = "shex")]
+async fn shex_run(
+    state: &AppState,
+    scope: crate::shex::GraphScope,
+    schema: crate::shex::ResolvedSchema,
+    map: crate::shex::ShapeMapInput,
+) -> Result<crate::shex::ShExReport, (StatusCode, String)> {
+    let store = state.store.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::shex::validate_on_large_stack(|| {
+            crate::shex::validate_in(&store, &scope, &schema, &map)
+        })
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e))
 }
 
 /// POST /api/shex/validate — validate inline (no dataset context)
 ///
 /// Reads what `/sparql` would let the caller read ([`accessible_read_graphs`]);
-/// an admin reads the whole store.
+/// an admin reads the whole store. `IMPORT`s likewise.
 #[cfg(feature = "shex")]
 async fn shex_validate_inline(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
     Json(body): Json<ShExValidateRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let schema =
-        crate::shex::parse_shexc(&body.schema).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-
-    let scope = if current_user.is_admin() {
-        crate::shex::GraphScope::All
-    } else {
-        crate::shex::GraphScope::named(
-            accessible_read_graphs(&state, Some(&current_user))
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.message()))?,
-        )
-    };
-    let report = crate::shex::validate_in(&state.store, &scope, &schema, &body.shape_map);
+    let scope = shex_readable_scope(&state, &current_user)?;
+    let (schema, map) = shex_prepare(&state, &body, &scope)?;
+    let report = shex_run(&state, scope, schema, map).await?;
     Ok(Json(report))
 }
 
