@@ -1,0 +1,10 @@
+{
+ "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+ "python": "3.13.2",
+ "cpu": "Apple M1 Pro",
+ "mem_bytes": "17179869184",
+ "ncpu": "10",
+ "macos": "26.6.2",
+ "docker": "29.6.2",
+ "docker_vm": "10 CPUs, 16747835392 bytes, kernel 6.12.76-linuxkit"
+}

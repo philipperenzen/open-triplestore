@@ -256,6 +256,10 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >   query's dataset to the caller's readable graphs. Oxigraph's column shows the same engine
 >   before this project's HTTP layer.
 
+> **Measured performance.** Open Triplestore against Oxigraph, Apache Jena Fuseki, QLever,
+> Virtuoso and RDF4J — one machine, the same container limits, the same data and queries, result
+> counts cross-checked: [performance-comparison.md](performance-comparison.md).
+
 ### 4.2 Reasoning, Validation & Inference
 
 | Standard | Open Triplestore | Oxigraph | Jena 5 | Blazegraph | Virtuoso | GraphDB | Stardog | RDF4J 5 | Neptune | QLever |

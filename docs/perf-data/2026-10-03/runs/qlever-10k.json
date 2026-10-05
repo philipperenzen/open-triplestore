@@ -1,0 +1,76 @@
+{
+ "store": "qlever",
+ "scale": "10k",
+ "limits": {
+  "memory": "4g",
+  "cpus": 4
+ },
+ "load_method": "`qlever-index` (offline index build)",
+ "phases": {
+  "load": {
+   "seconds": 7.49,
+   "peak_mem_bytes": 658505728.0,
+   "load_after": [
+    2.330078125,
+    2.8662109375,
+    2.94140625
+   ],
+   "method": "`qlever-index` (offline index build)"
+  },
+  "explore": {
+   "seconds": 186.064,
+   "peak_mem_bytes": 714814259.2,
+   "load_after": [
+    1.68310546875,
+    2.14599609375,
+    2.5888671875
+   ]
+  },
+  "features": {
+   "seconds": 7.85,
+   "peak_mem_bytes": 697093324.8,
+   "load_after": [
+    1.81787109375,
+    2.15771484375,
+    2.58740234375
+   ]
+  },
+  "concurrent": {
+   "seconds": 206.111,
+   "peak_mem_bytes": 755918438.4,
+   "load_after": [
+    5.92236328125,
+    3.724609375,
+    3.1181640625
+   ]
+  }
+ },
+ "commands": [
+  "docker compose -f <repo>/scripts/bench-compare/compose/qlever.yml -p benchcmp --profile load down -v --remove-orphans",
+  "docker compose -f <repo>/scripts/bench-compare/compose/qlever.yml -p benchcmp --profile load run --rm --name benchcmp-loader load",
+  "docker compose -f <repo>/scripts/bench-compare/compose/qlever.yml -p benchcmp up -d qlever",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/qlever/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store qlever --workload explore --out /out/explore.json --endpoint http://qlever:7001/ --params /bench/params.json",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/qlever/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store qlever --workload features --out /out/features.json --endpoint http://qlever:7001/ --features /h/queries/features --feature-runs 10",
+  "docker run --rm --network benchcmp_default --cpus 2 -m 2g -v <repo>/scripts/bench-compare:/h:ro -v $WORK/data/bsbm-10k:/bench:ro -v $WORK/results/raw/qlever/10k:/out python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea python /h/bench.py client --store qlever --workload concurrent --out /out/concurrent.json --endpoint http://qlever:7001/ --params /bench/params.json --clients 1,4,8 --seconds 60",
+  "docker compose -f <repo>/scripts/bench-compare/compose/qlever.yml -p benchcmp --profile load down -v --remove-orphans"
+ ],
+ "quiet": {
+  "load_before": [
+   2.18505859375,
+   2.84716796875,
+   2.935546875
+  ],
+  "waited_s": 0,
+  "free_gib": 22.0,
+  "swap": "total = 9216.00M  used = 8674.31M  free = 541.69M  (encrypted)"
+ },
+ "started": "2026-10-03T17:08:04+0200",
+ "db_bytes_after_load": 146616320,
+ "image": "sha256:2b3e28a54915832558320112d2c2d9ca132994ac35501c2f22b4dbd59f5a105a adfreiburg/qlever:commit-caba7eb0d1@sha256:64ad83b43341548f7e8bedaadeb09ef4f2aa50acc7686778e1e9bb830ae1e0ab",
+ "finished": "2026-10-03T17:15:52+0200",
+ "load_after": [
+  5.92236328125,
+  3.724609375,
+  3.1181640625
+ ]
+}

@@ -590,6 +590,14 @@ const BUILTINS: &[Builtin] = &[
         sort: 134,
     },
     Builtin {
+        slug: "performance-comparison",
+        title: "Performance Comparison with Other Triplestores",
+        category: "Reference",
+        body: include_str!("../../docs/performance-comparison.md"),
+        admin_only: false,
+        sort: 135,
+    },
+    Builtin {
         slug: "development",
         title: "Development & build performance",
         category: "Reference",

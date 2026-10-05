@@ -1,0 +1,44 @@
+{
+ "store": "ots",
+ "scale": "10k",
+ "memory_limit": "4g",
+ "chunk_mb": 100,
+ "attempts": [
+  {
+   "when": "2026-10-03T16:43",
+   "via": "campaign",
+   "result": "OOM-killed during chunk 7 (exit 137)",
+   "peak_mem_mib_sampled": 3907
+  },
+  {
+   "when": "2026-10-03T17:37",
+   "via": "diagnostic rerun",
+   "result": "loaded in 89.6 s",
+   "peak_mem_mib_sampled": 3575
+  },
+  {
+   "when": "2026-10-03T17:40",
+   "via": "diagnostic rerun",
+   "result": "OOM-killed (docker inspect: OOMKilled=true, exit 137)"
+  },
+  {
+   "when": "2026-10-03T17:42",
+   "via": "diagnostic rerun, LOV corpus download off",
+   "result": "loaded in 78.4 s; server log: accelerator OFF at 2,268,709 triples (over the 2,000,000 cap)",
+   "peak_mem_mib_sampled": 2816
+  },
+  {
+   "when": "2026-10-03T17:51",
+   "via": "benchmark re-run (the reported 10k run)",
+   "result": "loaded in 82.1 s",
+   "peak_mem_mib_sampled": 3019
+  },
+  {
+   "when": "2026-10-03T18:05",
+   "via": "diagnostic probe (diagnostics.json)",
+   "result": "loaded in 79.0 s",
+   "peak_mem_mib_sampled": 2930
+  }
+ ],
+ "note": "The campaign attempt was the only one whose chunk log was kept: it died on chunk 7 of 9 (after about 2.3 M triples)."
+}
