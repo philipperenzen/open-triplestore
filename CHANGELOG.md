@@ -14,6 +14,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **W3C SPARQL 1.2 and RDF 1.2 test suites run in CI.** `sparql/sparql12`
+  and the N-Triples, N-Quads, Turtle, TriG and RDF/XML suites of `rdf/rdf12`
+  (with the `rdf/rdf11` suites they include) from w3c/rdf-tests are vendored
+  unmodified under `tests/fixtures/w3c-sparql12/` and
+  `tests/fixtures/w3c-rdf12/`, and run by `tests/w3c_sparql12_manifests.rs`
+  (every query on the engine and again through the in-memory mirror) and
+  `tests/w3c_rdf12_manifests.rs` (every file through the upload path) as
+  two-way ratchets. They are subsets of W3C test suites, used under the W3C
+  3-clause BSD licence for development and bug tracking, so no score is
+  published; `docs/conformance/sparql12.md` and `docs/conformance/rdf12.md`
+  describe the runs and list the known gaps. `tests/sparql12_conformance.rs`
+  now runs every pin on both read paths and adds `VERSION`, the `LANGDIR`
+  family, `~` / `{| |}` in updates and queries, duplicate `VALUES` variables,
+  `LATERAL` with a per-row `LIMIT` and `ADJUST`.
 - **`OTS_OIDC_IDP_TOKEN_POLICY` and `OTS_OIDC_IDP_WRITE_SCOPES`.** What an access token from
   an external IdP (OIDC resource-server mode) may do is now a setting, with the
   same values as `OTS_OIDC_SESSION_POLICY`: `session` (default), `scoped`
@@ -838,6 +852,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   means the CRS's own units.
 
 ### Fixed
+- **Triple terms and base direction no longer get lost.** The canonical and
+  Skolem blank-node modes now walk into RDF 1.2 triple terms: a blank node
+  inside `<<( … )>>` is relabelled or skolemized with the same label as the
+  node outside it (it kept its input label before, breaking co-reference), and
+  two different triple terms no longer hash alike. Model version diffs render
+  terms in N-Triples form (escaped literals, `"x"@ar--rtl`, `<<( s p o )>>`;
+  every triple term rendered as `<< >>` before, so different ones compared
+  equal), the commit log keeps a triple-term value instead of an empty
+  string, and the browse endpoints' JSON carries a literal's `"its:dir"`, also
+  inside triple terms. Because diffs now escape quotes and newlines, the
+  draft revision token (`ETag`) of a version holding such a literal changes
+  once.
 - **More `.env` settings reach the server under Docker Compose.**
   `docker-compose.yml` passes the server an explicit environment list, so a
   setting `.env.example` documents had no effect until it was on that list.

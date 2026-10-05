@@ -15,15 +15,17 @@ runners record, and writes the result between `<!-- conformance-table:start -->`
 
 The *basis* column is the honest part: only the rows marked **vendored** run
 a published test corpus (today the W3C SPARQL 1.1 query/update and federation
-sections, the W3C SHACL core/sparql sections, TopQuadrant's SHACL-AF tests, the
-approved W3C OWL 2 DL test cases and the OGC GeoSPARQL validator shapes); every
-other suite is hand-written and *derived from* the spec text.
+sections, the W3C SPARQL 1.2 suite, the W3C RDF 1.2 (+ included RDF 1.1)
+syntax suites, the W3C SHACL core/sparql sections, TopQuadrant's SHACL-AF tests,
+the approved W3C OWL 2 DL test cases and the OGC GeoSPARQL validator shapes);
+every other suite is hand-written and *derived from* the spec text.
 
 Which corpus results are published is a licence question, not a style one, and
 is decided per corpus when it is vendored (`CORPUS_RUNNERS`, `PUBLISH_SCORE`,
 `UNSCORED_NOTES`). The current ones:
 
-- The SPARQL 1.1 sections come from a W3C test suite, which W3C licenses under
+- The SPARQL 1.1 sections, the SPARQL 1.2 suite and the RDF 1.2 / RDF 1.1
+  syntax suites come from W3C test suites, which W3C licenses under
   its 3-clause BSD licence for "software development, bug tracking, and other
   applications that do not require assertions of performance to the public",
   and a subset of such a suite "does not allow claims of performance and the use
@@ -62,7 +64,7 @@ TARGETS = [ROOT / "README.md", ROOT / "docs" / "standards.md"]
 # suite file stem -> (standard, basis)
 SUITES: dict[str, tuple[str, str]] = {
     "w3c_sparql11_conformance": ("SPARQL 1.1 Query/Update", "spec-derived (+ cx01–cx15 high-complexity)"),
-    "sparql12_conformance": ("SPARQL 1.2 / RDF-star", "spec-derived"),
+    "sparql12_conformance": ("SPARQL 1.2 / RDF 1.2", "spec-derived"),
     "sparql_functions_conformance": ("SPARQL 1.1 functions", "spec-derived"),
     "sparqloscope_conformance": ("SPARQL engine coverage (sparqloscope)", "sparqloscope-derived"),
     "sparql_benchmarks": ("SP2B / BSBM query shapes", "benchmark-derived"),
@@ -80,6 +82,8 @@ SUITES: dict[str, tuple[str, str]] = {
     "w3c_shacl_conformance": ("SHACL Core", "**vendored W3C corpus** (core + sparql sections, manifest-driven, full report equality)"),
     "w3c_sparql11_manifests": ("SPARQL 1.1 Query/Update", "**vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven)"),
     "w3c_sparql11_federation": ("SPARQL 1.1 Federated Query", "**vendored W3C test-suite subset** (`service/` + `syntax-fed/` sections of w3c/rdf-tests, unmodified; manifest-driven, local endpoints)"),
+    "w3c_sparql12_manifests": ("SPARQL 1.2", "**vendored W3C test-suite subset** (`sparql/sparql12` of w3c/rdf-tests, unmodified; manifest-driven, engine and mirror paths)"),
+    "w3c_rdf12_manifests": ("RDF 1.2 formats", "**vendored W3C test-suite subset** (N-Triples, N-Quads, Turtle, TriG, RDF/XML suites of `rdf/rdf12` + the `rdf/rdf11` suites they include, unmodified; manifest-driven)"),
     "shacl_rules_conformance": ("SHACL-AF rules", "spec-derived"),
     "shacl_af_corpus": ("SHACL Advanced Features", "**vendored TopQuadrant corpus** (expression, function, rule and target tests of TopQuadrant/shacl, unmodified; dash-driven)"),
     "shaclc_conformance": ("SHACL Compact Syntax", "spec-derived"),
@@ -112,6 +116,8 @@ CORPUS_RUNNERS = {
     "w3c_sparql11_manifests": 450,
     "w3c_sparql11_federation": 9,
     "w3c_owl2_dl_manifests": 235,
+    "w3c_sparql12_manifests": 250,
+    "w3c_rdf12_manifests": 1250,
 }
 
 # Runners whose score may be published (see the module docstring). A runner
@@ -136,6 +142,14 @@ UNSCORED_NOTES = {
         "runs in CI against the reasoner sidecar as a development and regression ratchet; "
         "no score is published (W3C licence: no performance claims on a partial run); "
         "known gaps in `docs/conformance/owl2-dl.md`"
+    ),
+    "w3c_sparql12_manifests": (
+        "runs in CI as a development and regression ratchet; no score is published "
+        "(W3C test-suite policy); known gaps in `docs/conformance/sparql12.md`"
+    ),
+    "w3c_rdf12_manifests": (
+        "runs in CI as a development and regression ratchet; no score is published "
+        "(W3C test-suite policy); known gaps in `docs/conformance/rdf12.md`"
     ),
 }
 
@@ -225,9 +239,9 @@ def render() -> str:
         "A vendored row gives results only where its corpus licence allows performance claims; "
         "those are development and regression results on the vendored sections "
         "(`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C "
-        "SPARQL 1.1 sections (query, update and federation) and the OWL 2 DL test cases are "
-        "partial runs of W3C test suites, so they carry no results and are used for development "
-        "and bug tracking only."
+        "SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 "
+        "syntax suites and the OWL 2 DL test cases are partial runs of W3C test suites, so they "
+        "carry no results and are used for development and bug tracking only."
     )
     lines.append("")
     lines.append("_Generated by `scripts/conformance_table.py` — edit the suites, not the table._")
