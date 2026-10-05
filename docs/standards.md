@@ -17,13 +17,13 @@ applies.
 | Standard | Role | Support |
 |---|---|---|
 | RDF 1.1 | Core triple data model | Full |
-| RDF-star (CG) / RDF 1.2 (WD) | Quoted/nested triples `<< >>` | Partial¹ |
+| RDF 1.2 (CR 2026-04-07) | Triple terms, reifiers and annotations, base direction; N-Triples, N-Quads, Turtle, TriG, RDF/XML 1.2 | Partial¹ |
 | SPARQL 1.1 Query | SELECT, ASK, CONSTRUCT, DESCRIBE | Partial² |
 | SPARQL 1.1 Update | INSERT, DELETE, LOAD, CLEAR, COPY, WITH/USING | Full |
 | SPARQL 1.1 Graph Store HTTP | Named-graph CRUD over HTTP | Full |
 | SPARQL 1.1 Federated Query (`SERVICE`) | Remote query | Full³ — deny-by-default: off until endpoints are allowlisted |
 | SPARQL 1.1 Service Description | Capability advertisement | Full |
-| SPARQL 1.2 (WD) | Triple terms, accessor functions | Partial¹ |
+| SPARQL 1.2 (WD 2026-10-01) | Triple terms and reified triples, `LANGDIR` family, `VERSION` | Partial¹ |
 | RDFS | subClass/subProperty/domain/range inference | Full |
 | OWL 2 QL | Profile reasoning (materialised) | Full¹⁰ |
 | OWL 2 EL | Profile reasoning (materialised) | Full¹⁰ |
@@ -57,10 +57,11 @@ community corpus — and the counts are generated from the suites themselves, so
 they cannot drift from the code. Whether a vendored corpus's results are
 published depends on its licence: each corpus has its own page under
 [conformance/](conformance/) (for example [shacl.md](conformance/shacl.md),
-[geosparql.md](conformance/geosparql.md) and [sparql11.md](conformance/sparql11.md)).
-The SPARQL sections, for one, are a subset of a W3C test suite, and W3C's
+[geosparql.md](conformance/geosparql.md), [sparql11.md](conformance/sparql11.md),
+[sparql12.md](conformance/sparql12.md) and [rdf12.md](conformance/rdf12.md)).
+The SPARQL and RDF files, for one, are subsets of W3C test suites, and W3C's
 test-suite licence policy allows no performance claims on a subset, so their
-page tracks known gaps but gives no score.
+pages track known gaps but give no score.
 
 <!-- conformance-table:start -->
 | Standard | Suite | Basis | Tests | Notes |
@@ -85,19 +86,21 @@ page tracks known gaps but gives no score.
 | SHACL-AF rules | `tests/shacl_rules_conformance.rs` | spec-derived | 43 |  |
 | SHACL Compact Syntax | `tests/shaclc_conformance.rs` | spec-derived | 11 |  |
 | ShEx | `tests/shex_conformance.rs` | spec-derived | 10 |  |
-| SPARQL 1.2 / RDF-star | `tests/sparql12_conformance.rs` | spec-derived | 15 |  |
+| SPARQL 1.2 / RDF 1.2 | `tests/sparql12_conformance.rs` | spec-derived | 26 |  |
 | SP2B / BSBM query shapes | `tests/sparql_benchmarks.rs` | benchmark-derived | 28 |  |
 | SPARQL 1.1 functions | `tests/sparql_functions_conformance.rs` | spec-derived | 9 |  |
 | SPARQL engine coverage (sparqloscope) | `tests/sparqloscope_conformance.rs` | sparqloscope-derived | 67 |  |
 | Cross-standard HTTP smoke | `tests/standards_conformance.rs` | spec-derived | 26 |  |
 | SWRL | `tests/swrl_conformance.rs` | spec-derived | 15 |  |
 | OWL 2 DL | `tests/w3c_owl2_dl_manifests.rs` | **vendored W3C test cases** (approved OWL 2 DL / Direct Semantics cases of the OWL 2 Test Case Repository, unmodified; manifest-driven, against the reasoner sidecar) | 2 | runs in CI against the reasoner sidecar as a development and regression ratchet; no score is published (W3C licence: no performance claims on a partial run); known gaps in `docs/conformance/owl2-dl.md` |
+| RDF 1.2 formats | `tests/w3c_rdf12_manifests.rs` | **vendored W3C test-suite subset** (N-Triples, N-Quads, Turtle, TriG, RDF/XML suites of `rdf/rdf12` + the `rdf/rdf11` suites they include, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/rdf12.md` |
 | SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (core + sparql sections, manifest-driven, full report equality) | 1 | 136 corpus cases: 119 pass, 1 known failure, 1 optional feature unsupported (reported as the failure the spec requires), 15 runner-side skips (floor ≥90 asserted) |
-| SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 125 |  |
+| SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 126 |  |
 | SPARQL 1.1 Federated Query | `tests/w3c_sparql11_federation.rs` | **vendored W3C test-suite subset** (`service/` + `syntax-fed/` sections of w3c/rdf-tests, unmodified; manifest-driven, local endpoints) | 1 | runs in CI as a development and regression ratchet against local endpoints; no score is published (W3C test-suite policy); see `docs/conformance/sparql11.md` §Federation |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
+| SPARQL 1.2 | `tests/w3c_sparql12_manifests.rs` | **vendored W3C test-suite subset** (`sparql/sparql12` of w3c/rdf-tests, unmodified; manifest-driven, engine and mirror paths) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql12.md` |
 
-1047 conformance tests across 31 suites; a further 795 tests in 106 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 6 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation) and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
+1061 conformance tests across 33 suites; a further 795 tests in 106 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 8 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation), the SPARQL 1.2 suite, the RDF 1.2 syntax suites and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->
@@ -114,44 +117,64 @@ docker run --rm -v "$PWD:/app" -v ots_target:/app/target -w /app ots-builder \
 These were surfaced by the conformance suites above. Tracked tests pin current
 behavior and will flip green when the limitation is resolved.
 
-1. **RDF 1.2, not RDF-star CG.** The engine (oxigraph 0.5) implements the
-   **RDF 1.2 / SPARQL 1.2** model: a *triple term* `<<( s p o )>>` in **object
-   position only**, attached through `rdf:reifies`, plus `{| |}` annotation
-   syntax. `<< s p o >>` is reifier shorthand — it mints a reifier and does not
+1. **RDF 1.2 and SPARQL 1.2.** The labels carry the date of the draft they
+   are graded against: the RDF 1.2 Candidate Recommendations of 2026-04-07 and
+   the SPARQL 1.2 Query Working Draft of 2026-10-01. The engine (oxigraph 0.5)
+   implements the RDF 1.2 model, not the older RDF-star CG one: a *triple
+   term* `<<( s p o )>>` in **object position only**, attached through
+   `rdf:reifies`, plus `~ reifier` and `{| |}` annotation syntax.
+   `<< s p o >>` is reifier shorthand — it mints a reifier and does not
    assert the base triple. The reifier is an ordinary IRI/blank node, so
    `isTRIPLE` is false for it and true for the triple term it points at.
-   Code written against the older RDF-star CG model (quoted triples usable in
-   subject position) needs updating; see `tests/sparql12_conformance.rs`.
+   Code written against the RDF-star CG model (quoted triples usable in
+   subject position) needs updating. The W3C `sparql/sparql12` suite and the
+   N-Triples, N-Quads, Turtle, TriG and RDF/XML suites of `rdf/rdf12` (with
+   the RDF 1.1 suites they include) run in CI as two-way ratchets, every
+   SPARQL entry also through the in-memory mirror; they publish no score (a
+   subset of a W3C test suite), and
+   [conformance/sparql12.md](conformance/sparql12.md) and
+   [conformance/rdf12.md](conformance/rdf12.md) list every entry that fails,
+   with its cause. Every RDF 1.2 and RDF 1.1 syntax entry passes except
+   those whose literal is a non-canonical number or an `rdf:XMLLiteral`, and
+   triple terms and base direction survive the canonical and Skolem
+   blank-node modes, version diffs, the commit log and the JSON term views. Both rows stay *Partial*
+   because entries fail for reasons other than an open W3C Working Group
+   issue (checked 2026-10-03; the issues the plan expected to block SPARQL
+   1.2, w3c/sparql-query#282 and #283, closed on 2025-12-26):
+   - **RDF 1.2:** storage keeps numeric literals as values (the oxigraph 0.5
+     literal encoder), so `1.0`, `1e0`, `+1` or `01` read back in canonical
+     form — 22 Turtle and TriG evaluation entries (20 of them from the RDF
+     1.1 suites the RDF 1.2 manifests include). The lexical-form storage
+     change fixes them, and with it the row becomes *Full*. Four
+     `rdf:parseType="Literal"` entries wait on the open issue
+     [w3c/rdf-xml#97](https://github.com/w3c/rdf-xml/issues/97) (opened
+     2026-04-20) and do not count against the grade.
+   - **SPARQL 1.2:** the row waits only on lexical-form storage. The one
+     entry that fails, `grouping#group01`, needs numeric lexical forms kept
+     (`"001"^^xsd:integer` must not group with `"1"`); the lexical-form
+     storage change fixes it, and with it the row becomes *Full*. The parser
+     and evaluator gaps the suite found are fixed in the vendored copy of
+     spargebra and spareval ([vendor/README.md](../vendor/README.md)): a
+     literal or triple term as the subject of a triple-term expression and an
+     aggregate inside an aggregate are refused, an aggregating query's SELECT
+     expression may reuse an earlier SELECT expression's variable, and `=`
+     between two literals that both carry a base direction answers instead of
+     panicking (a server error before).
+   `LATERAL` (SEP-0006) and `ADJUST` (SEP-0002) are extensions oxigraph
+   compiles in; they are not part of SPARQL 1.2 and are pinned separately.
 2. **SPARQL 1.1 Query** is graded *Partial*. The engine is oxigraph 0.5.11 with
-   spareval 0.2.7, the latest release; the first two groups below sit there, the
-   last one in this server. (Parallel shards no longer evaluate `EXISTS` per
-   shard: since 2026-10-02 a query with `EXISTS` / `NOT EXISTS` is not split.)
-   - **Entries of the W3C SPARQL 1.1 query sections that fail** (tracked, with no
-     score, in [conformance/sparql11.md](conformance/sparql11.md)):
-     - `bindings#graph`, `aggregates#agg-empty-group-count-graph` and
-       `negation#graph-minus`: `GRAPH ?g` around a non-BGP inner pattern
-       (`VALUES`, a sub-select, `MINUS`) loses the graph variable
-       ([oxigraph#1905](https://github.com/oxigraph/oxigraph/issues/1905),
-       fixed on oxigraph's main branch for its next major release; upstream
-       ties `graph-minus` to the same cause);
-     - `property-path#zero_or_more_set_start`, `…_set_end`,
-       `zero_or_one_set_start` and `…_set_end`: a zero-length path (`*`, `?`)
-       whose constant end is absent from the data yields no solution, where the
-       spec's path semantics include the start term (`ASK { :x :p* :x }` is
-       false on an empty graph);
-     - `aggregates#agg-groupconcat-04` and `-06`: `GROUP_CONCAT` keeps a
-       language tag that every input shares; SPARQL 1.1, and the SPARQL 1.2
-       draft too, return a plain `xsd:string`;
-     - `functions#bnode01`: `BNODE(str)` returns the same blank node for the
-       same string in every solution (and across requests), and no node when
-       the string is not a legal blank-node label.
-   - **Several `FROM` graphs keep duplicates.** A triple present in two `FROM`
-     graphs matches twice, which inflates rows, `COUNT` and `SUM`
-     ([oxigraph#1919](https://github.com/oxigraph/oxigraph/issues/1919), fixed by
-     [#1920](https://github.com/oxigraph/oxigraph/pull/1920) on main, not yet
-     released). `/sparql` scopes every non-admin query with one `FROM` /
-     `FROM NAMED` pair per readable graph, so a triple held in two readable
-     graphs counts twice there; the columnar copy matches this on purpose.
+   its SPARQL parser, evaluator and optimizer (spargebra 0.4.7, spareval 0.2.7,
+   sparopt 0.3.7) vendored and patched for conformance
+   ([vendor/README.md](../vendor/README.md)): `GRAPH ?g` scoping around non-BGP
+   patterns and the RDF merge of several `FROM` graphs (both backported from
+   oxigraph's main branch), zero-length property paths with a constant endpoint,
+   `GROUP_CONCAT` returning an `xsd:string`, `BNODE(str)` fresh per solution, and
+   nested aggregates refused. Among them are all the engine gaps that the
+   vendored W3C query and update sections had found (bug tracking only, with no
+   score: [conformance/sparql11.md](conformance/sparql11.md)); none is open now.
+   (Parallel shards no longer evaluate `EXISTS` per shard either: since
+   2026-10-02 a query with `EXISTS` / `NOT EXISTS` is not split.) What keeps
+   the grade at Partial is in this server:
    - **The HTTP dataset is rewritten.** `/sparql` intersects a caller's
      `FROM` / `FROM NAMED` graphs with the graphs the caller may read, and every
      graph it keeps becomes both a `FROM` and a `FROM NAMED` graph: `FROM <a>`

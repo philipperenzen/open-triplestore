@@ -715,6 +715,8 @@ fn seed_bag_buildings(state: &AppState) {
 // bridge on its side.
 // v5: those headings are explicitly `^^xsd:double`, matching what the IFC
 // importer emits from TrueNorth, so the feed parses one datatype.
+// v16: the capabilities graph names RDF 1.2 and SPARQL 1.2 by the dated drafts
+// docs/standards.md grades them against.
 // v15: the capabilities graph follows the 2026-10-03 regrades in
 // docs/standards.md: SPARQL 1.1 federation, OWL 2 QL, EL and DL (with the
 // reasoner sidecar), RDF Patch and LDES are Full.
@@ -749,7 +751,7 @@ fn seed_bag_buildings(state: &AppState) {
 // existing store on whatever landmarks.ttl shipped when its volume was first
 // created — neither v4 nor v5 could reach it. That is why the Dragon Bridge
 // stayed on its side and no bearing ever appeared.
-const DEMO_CONTENT_VERSION: u32 = 15;
+const DEMO_CONTENT_VERSION: u32 = 16;
 
 /// Wipe demo graphs whose content is stale relative to [`DEMO_CONTENT_VERSION`]
 /// so this boot's seeders re-fill them. Runs BEFORE the bundle engine, which

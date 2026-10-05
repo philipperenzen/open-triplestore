@@ -14,6 +14,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **W3C SPARQL 1.2 and RDF 1.2 test suites run in CI.** `sparql/sparql12`
+  and the N-Triples, N-Quads, Turtle, TriG and RDF/XML suites of `rdf/rdf12`
+  (with the `rdf/rdf11` suites they include) from w3c/rdf-tests are vendored
+  unmodified under `tests/fixtures/w3c-sparql12/` and
+  `tests/fixtures/w3c-rdf12/`, and run by `tests/w3c_sparql12_manifests.rs`
+  (every query on the engine and again through the in-memory mirror) and
+  `tests/w3c_rdf12_manifests.rs` (every file through the upload path) as
+  two-way ratchets. They are subsets of W3C test suites, used under the W3C
+  3-clause BSD licence for development and bug tracking, so no score is
+  published; `docs/conformance/sparql12.md` and `docs/conformance/rdf12.md`
+  describe the runs and list the known gaps. `tests/sparql12_conformance.rs`
+  now runs every pin on both read paths and adds `VERSION`, the `LANGDIR`
+  family, `~` / `{| |}` in updates and queries, duplicate `VALUES` variables,
+  `LATERAL` with a per-row `LIMIT` and `ADJUST`.
 - **`OTS_OIDC_IDP_TOKEN_POLICY` and `OTS_OIDC_IDP_WRITE_SCOPES`.** What an access token from
   an external IdP (OIDC resource-server mode) may do is now a setting, with the
   same values as `OTS_OIDC_SESSION_POLICY`: `session` (default), `scoped`
@@ -675,6 +689,45 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/build-features.md` lists the three features, `docs/sources.md` says
   what the image carries, and GitHub CI's backend job compiles the main crate
   with all three (it built only `plugin-postgres`, in the live-sources job).
+- **SPARQL query results follow the specification in six more places.** The
+  engine's SPARQL parser, evaluator and optimizer (Oxigraph's `spargebra` 0.4.7,
+  `spareval` 0.2.7 and `sparopt` 0.3.7) are now vendored under `vendor/` and patched, one commit per fix, each with a
+  draft upstream PR (`vendor/README.md`):
+  - `GRAPH ?g { … }` no longer puts `?g` in scope inside the pattern: around a
+    `VALUES`, an aggregate sub-select or a `MINUS` it now enumerates the named
+    graphs as SPARQL defines (backport of oxigraph `fdc32b5`, issue #1905).
+  - A default graph made of several `FROM` (or `USING`) graphs is their RDF merge:
+    a triple held in two of them matches once, so `COUNT` and `SUM` over it no
+    longer double-count (backport of oxigraph #1920, issue #1919). The columnar
+    query copy deduplicates the same way.
+  - A zero-length property path (`*`, `?`) with a constant endpoint matches that
+    term even when the graph does not hold it (`ASK { :x :p* :x }` is true on an
+    empty graph).
+  - `GROUP_CONCAT` returns a plain `xsd:string`, never a language-tagged string.
+  - `BNODE("label")` returns a fresh blank node per solution (the same one within
+    a solution), accepts any string, and no longer returns the same node in every
+    later request.
+  - An aggregate nested in another one's argument (`SUM(COUNT(?x))`) is a syntax
+    error (400), as SPARQL requires; it used to be accepted (the vendored
+    `spargebra` 0.4.7 parser).
+  The vendored W3C SPARQL 1.1 query and update sections have no open known
+  failures left (`docs/conformance/sparql11.md`).
+- **SPARQL 1.2: three more fixes in the vendored engine; the W3C suite is down
+  to one known failure.** One commit each in `vendor/`, each with a draft
+  upstream PR:
+  - `=`, `!=` and `IN` between two literals that both carry a base direction
+    (`"abc"@en--ltr = "abc"@en--rtl`) answer by RDF 1.2 term equality; they used
+    to panic in the evaluator, a 500 over HTTP.
+  - A literal or a triple term as the subject of a triple-term expression
+    (`BIND(<<( "x" :p :o )>> AS ?t)`) is a syntax error (400), as the SPARQL 1.2
+    grammar requires (`ExprTripleTermSubject ::= iri | Var`).
+  - In an aggregating query a SELECT expression may use the variable of an
+    earlier SELECT expression, `SELECT (COUNT(?v) AS ?n) (?n + 1 AS ?m)`, as
+    SPARQL 1.2 allows; it used to be refused as an unbound variable.
+  With the nested-aggregate refusal above, every entry of the vendored W3C
+  SPARQL 1.2 suite passes except `grouping#group01`, which needs numeric lexical
+  forms kept in storage. SPARQL 1.2 stays *Partial* in `docs/standards.md`, now
+  waiting only on that change (`docs/conformance/sparql12.md`).
 - **DOAP is the upstream Apache-2.0 file.** The bundled `vocab/doap.ttl` was
   LOV's re-serialization of the old DOAP namespace document (2009-2015). That
   file stated no licence, and its 97 Japanese-language labels and comments were
@@ -838,6 +891,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   means the CRS's own units.
 
 ### Fixed
+- **Triple terms and base direction no longer get lost.** The canonical and
+  Skolem blank-node modes now walk into RDF 1.2 triple terms: a blank node
+  inside `<<( … )>>` is relabelled or skolemized with the same label as the
+  node outside it (it kept its input label before, breaking co-reference), and
+  two different triple terms no longer hash alike. Model version diffs render
+  terms in N-Triples form (escaped literals, `"x"@ar--rtl`, `<<( s p o )>>`;
+  every triple term rendered as `<< >>` before, so different ones compared
+  equal), the commit log keeps a triple-term value instead of an empty
+  string, and the browse endpoints' JSON carries a literal's `"its:dir"`, also
+  inside triple terms. Because diffs now escape quotes and newlines, the
+  draft revision token (`ETag`) of a version holding such a literal changes
+  once.
 - **More `.env` settings reach the server under Docker Compose.**
   `docker-compose.yml` passes the server an explicit environment list, so a
   setting `.env.example` documents had no effect until it was on that list.

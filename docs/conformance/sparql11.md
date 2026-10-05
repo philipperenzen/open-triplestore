@@ -31,7 +31,11 @@ path `/sparql` uses — against a fresh in-memory store with the result cache
 and the parallel mirror off. `qt:data` loads into the default graph, each
 `qt:graphData` into the named graph of its resolved IRI; the query runs with
 `BASE <query IRI>`. Update tests load `ut:data`/`ut:graphData`, run the
-request, and compare the whole resulting dataset.
+request, and compare the whole resulting dataset. Every query-evaluation entry
+then runs a second time on a store with the in-memory mirror built (the
+parallel shards, the columnar copy and the full copy) and must end the same
+way; a floor on the number of entries that ran with the mirror built keeps that
+check from passing vacuously.
 
 **Comparison level:** ASK by boolean; SELECT by result-set isomorphism (both
 sides are encoded as an RDF graph in the DAWG result-set vocabulary and
@@ -57,17 +61,27 @@ into skips.
 
 ## Known failures (bug tracking)
 
-Each entry below is a behaviour of the oxigraph 0.5 evaluator; none is in the
-platform layer. They are listed here so the engine question can be revisited
-with evidence rather than re-derived.
+None is open, on the engine path or through the in-memory mirror.
 
-| Entry | Gap |
-|---|---|
-| `aggregates#agg-empty-group-count-graph`, `bindings#graph` | `GRAPH ?g { … }` around a pattern that binds no quads (an aggregate sub-select, a `VALUES` with `UNDEF`) does not enumerate the named graphs, so `?g` stays unbound. |
-| `aggregates#agg-groupconcat-04`, `#agg-groupconcat-06` | `GROUP_CONCAT` keeps a language tag shared by every input (`"1 2"@en`); the 1.1 suite expects the plain literal. An evaluator defect (spareval's `GroupConcatAccumulator`), not a spec-version divergence: the SPARQL 1.2 draft also defines `GroupConcat` as returning an `xsd:string`, built with `CONCAT("", L1)`. On oxigraph's own known-failures list. |
-| `functions#bnode01` | `BNODE(str)` returns one blank node per string for the whole query (and across requests), and none for a string that is not a legal blank-node label; SPARQL 1.1 §17.4.2.9 requires a fresh node per solution. Not on oxigraph's own known-failures list. |
-| `negation#graph-minus` | The outer `GRAPH ?g` variable is implied on both sides of an inner `MINUS`, so the sides share `?g` and are not disjoint. |
-| `property-path#zero_or_more_set_start/end`, `#zero_or_one_set_start/end` | A zero-length path whose constant start or end is absent from the dataset yields no solution; the spec's zero-length path matches any term. |
+The last ten failures were all in Oxigraph 0.5's SPARQL evaluator and optimizer
+(spareval 0.2.7, sparopt 0.3.7), which this project now carries as a vendored,
+patched copy ([`vendor/README.md`](../../vendor/README.md), one commit per fix,
+each with a draft upstream PR in `vendor/spareval/UPSTREAM-PR-*.md`). They are
+listed here so the history is not re-derived:
+
+| Entry | Gap | Fix |
+|---|---|---|
+| `aggregates#agg-empty-group-count-graph`, `bindings#graph`, `negation#graph-minus` | `GRAPH ?g { … }` pushed `?g` into the patterns inside it, so around a pattern that binds no quads (an aggregate sub-select, a `VALUES` with `UNDEF`) the named graphs were not enumerated, and both sides of an inner `MINUS` shared `?g`. | Backport of upstream commit `fdc32b5` ([oxigraph#1905](https://github.com/oxigraph/oxigraph/issues/1905)), on oxigraph's main branch only. |
+| `aggregates#agg-groupconcat-04`, `#agg-groupconcat-06` | `GROUP_CONCAT` kept a language tag shared by every input (`"1 2"@en`). An evaluator defect, not a spec-version divergence: SPARQL 1.1 §18.5.1.7 and the SPARQL 1.2 draft (§18.6.1.7, `CONCAT("", L1)`) both return an `xsd:string`. It was on oxigraph's own known-failures list. | `GroupConcatAccumulator` returns a simple literal. |
+| `functions#bnode01` | `BNODE(str)` returned one blank node per string for the whole query (and across requests), and none for a string that is not a legal blank-node label; SPARQL 1.1 §17.4.2.9 requires a fresh node per solution. Not on oxigraph's own known-failures list. | A keyed hash of the string and the solution, with keys drawn per evaluation. |
+| `property-path#zero_or_more_set_start/end`, `#zero_or_one_set_start/end` | A zero-length path whose constant start or end is absent from the dataset yielded no solution; the spec's zero-length path matches a term endpoint whatever the graph holds. | The path evaluator skips the graph-membership check for a constant endpoint. |
+
+The same fork also makes a default graph built from several `FROM` graphs their
+RDF merge, as SPARQL 1.1 §13.2 defines it: before, a triple held in two of them
+matched twice ([oxigraph#1919](https://github.com/oxigraph/oxigraph/issues/1919),
+backport of [#1920](https://github.com/oxigraph/oxigraph/pull/1920)). No entry of
+the vendored sections exercises that; `tests/w3c_sparql11_conformance.rs`
+(`dataset_from_graphs_merge_as_a_set`) pins it.
 
 ## Federation
 
