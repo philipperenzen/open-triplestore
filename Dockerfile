@@ -79,6 +79,16 @@ COPY plugins/ plugins/
 # load the workspace at all ("failed to read tools/*/Cargo.toml"). The image
 # does not build the tools; they only have to be present.
 COPY tools/ tools/
+# Cargo.toml declares `[[test]]` targets (to give them required-features), and
+# cargo refuses to load a manifest whose declared target file is missing — even
+# for `cargo build`, which never compiles tests ("can't find `ldp_conformance`
+# test at `tests/ldp_conformance.rs`"). With tests/ here the recipe records the
+# test targets and `cargo chef cook` stubs them; without it the cook fails.
+COPY tests/ tests/
+# `cargo chef prepare` does not check that declared target files exist, so a
+# directory missing above passes here and fails only in the builder. CI's
+# docker-manifests job builds this stage on every PR and loads its tree and the
+# cook skeleton with cargo; the builder takes its manifest tree from this stage.
 RUN cargo chef prepare --recipe-path recipe.json
 
 # Stage 2b: cook dependencies (cached unless recipe.json changes), then build.
@@ -109,12 +119,11 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN --mount=type=cache,id=cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git,sharing=locked,target=/usr/local/cargo/git \
     cargo chef cook --profile ${CARGO_PROFILE} --features "${CARGO_FEATURES}" --recipe-path recipe.json
-COPY Cargo.toml Cargo.lock* ./
-COPY src/ src/
-COPY benches/ benches/
-COPY opengraph/ opengraph/
-COPY plugins/ plugins/
-COPY tools/ tools/
+# The manifests and every tree they reference (src/, benches/, opengraph/,
+# plugins/, tools/, tests/), taken from the planner rather than copied again
+# from the context, so the two stages cannot drift apart: the tree CI's
+# docker-manifests job loads is exactly the tree this build loads.
+COPY --from=planner /app/ ./
 # The binary embeds the user-facing docs at compile time — src/docs/mod.rs uses
 # include_str!("../../docs/*.md") — so the docs/ tree must be present for the build.
 # (.dockerignore's `*.md` only excludes root-level markdown, not docs/.)

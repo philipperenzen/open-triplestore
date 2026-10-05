@@ -426,6 +426,31 @@ jobs:
       - name: Check the conformance table
         run: python3 scripts/conformance_table.py --check
 
+  docker-manifests:
+    name: Docker image loads the Cargo manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The release image is only built when a tag is pushed (release.yml), after
+      # the GitHub Release is already published. Cargo refuses to load a manifest
+      # whose declared target file is missing (a [[test]], bench or workspace
+      # member the Dockerfile does not copy), but `cargo chef prepare` does not
+      # check, so the planner stage alone passes. Load what the image builds with
+      # cargo instead: the planner's tree (which the builder stage copies) and
+      # the skeleton `cargo chef cook` compiles the dependencies in. `cargo
+      # metadata --no-deps` skips the target check; `cargo fetch` does not.
+      - name: Build the Dockerfile's planner stage
+        run: docker build --target planner -t ots-planner .
+      - name: Cargo loads the builder's tree and the cook skeleton
+        run: |
+          docker run --rm ots-planner sh -euc '
+            cargo fetch --locked --target x86_64-unknown-linux-gnu
+            mkdir /tmp/cook && cp recipe.json /tmp/cook/ && cd /tmp/cook
+            cargo chef cook --no-build --recipe-path recipe.json
+            cargo fetch --locked --offline --target x86_64-unknown-linux-gnu
+          '
+
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest
