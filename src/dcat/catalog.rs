@@ -427,40 +427,6 @@ pub fn generate_catalog_bytes(
     serialize_catalog(&triples, format)
 }
 
-/// The whole-instance catalogue as Turtle.
-#[allow(dead_code)]
-pub fn generate_dcat_catalog(
-    base_url: &str,
-    store: &TripleStore,
-    auth_db: &Arc<AuthDb>,
-    user_id: Option<&str>,
-) -> String {
-    generate_catalog_bytes(base_url, store, auth_db, user_id, None, RdfFormat::Turtle)
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
-        .unwrap_or_else(|e| format!("# catalogue serialisation failed: {e}\n"))
-}
-
-/// One organisation's catalogue as Turtle.
-#[allow(dead_code)]
-pub fn generate_org_dcat_catalog(
-    org: &Organisation,
-    base_url: &str,
-    store: &TripleStore,
-    auth_db: &Arc<AuthDb>,
-    user_id: Option<&str>,
-) -> String {
-    generate_catalog_bytes(
-        base_url,
-        store,
-        auth_db,
-        user_id,
-        Some(org),
-        RdfFormat::Turtle,
-    )
-    .map(|b| String::from_utf8_lossy(&b).into_owned())
-    .unwrap_or_else(|e| format!("# catalogue serialisation failed: {e}\n"))
-}
-
 // ── agents ──────────────────────────────────────────────────────────────────
 
 fn catalog_publisher(g: &mut G, opts: &CatalogOptions) -> NamedNode {
@@ -1173,6 +1139,19 @@ fn dataset_entry(
 mod tests {
     use super::*;
     use oxigraph::sparql::QueryResults;
+
+    /// The whole-instance catalogue as Turtle.
+    fn generate_dcat_catalog(
+        base_url: &str,
+        store: &TripleStore,
+        auth_db: &Arc<AuthDb>,
+        user_id: Option<&str>,
+    ) -> String {
+        let bytes =
+            generate_catalog_bytes(base_url, store, auth_db, user_id, None, RdfFormat::Turtle)
+                .expect("catalogue serialises");
+        String::from_utf8(bytes).expect("Turtle is UTF-8")
+    }
 
     fn parse(ttl: &str) -> TripleStore {
         let s = TripleStore::in_memory().unwrap();

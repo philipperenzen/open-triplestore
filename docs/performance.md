@@ -741,8 +741,9 @@ no-UI jar, TDB2, `-Xmx4g`, started by
 [`scripts/scale_compare_fuseki.sh`](../scripts/scale_compare_fuseki.sh) with
 `FUSEKI_JAR`); Open Triplestore is the release binary with `OTS_QUERY_CACHE=false`.
 Same machine, same file, one server at a time. SHACL is Jena's `shacl validate`
-command line against the same shapes and data, and the platform's Studio
-pipeline over HTTP.
+command line against the same shapes and data (split out of the dump by
+[`scripts/scale_split_dump.py`](../scripts/scale_split_dump.py), since that
+command takes them as two files), and the platform's Studio pipeline over HTTP.
 
 | 100k assets, 0.9M quads, over HTTP | Open Triplestore 0.6 | Fuseki 6.2 main (TDB2) |
 |---|--:|--:|

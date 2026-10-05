@@ -27,16 +27,11 @@ pub const AS_GML_PROPERTY: &str = "http://www.opengis.net/ont/geosparql#asGML";
 pub const AS_GEOJSON_PROPERTY: &str = "http://www.opengis.net/ont/geosparql#asGeoJSON";
 
 // ─── 3D / volumetric datatypes (additive; spec §3.3) ───
-// Canonical datatype IRIs the platform defines and advertises; emitted by the
-// CityJSON converter (which inlines the same string) and consumed by external
-// clients, so they are allow(dead_code) for internal-usage analysis.
+// The datatype IRI the platform defines for embedded CityJSON; the CityJSON
+// converter emits it.
 
 /// A CityJSON geometry object embedded as a JSON literal (loss-free 3D BAG).
-#[allow(dead_code)]
 pub const CITYJSON_LITERAL: &str = "https://open-triplestore.org/def/cityjsonGeometryLiteral";
-/// A base64 glTF/GLB fragment or a URI to one (render-ready).
-#[allow(dead_code)]
-pub const GLTF_LITERAL: &str = "https://open-triplestore.org/def/gltfGeometryLiteral";
 
 // ─── ots-geof: 3D function IRIs (additive; spec §3.4) ───
 // Namespace https://open-triplestore.org/def/function/geo3d/ — never collides

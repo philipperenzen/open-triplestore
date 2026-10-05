@@ -14,6 +14,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`ALERT_SMTP_TLS`, and alerting falls back to the account-email relay.**
+  Alert email can now choose its transport security (`none`, `starttls` or
+  `implicit`, as for `SMTP_TLS`); unset, it stays implicit TLS. When
+  `ALERT_SMTP_HOST` is unset, alerting uses the `SMTP_*` relay as a whole
+  (host, port, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_TLS`) and never mixes
+  it with `ALERT_SMTP_*`, so the account relay's credentials are not sent to a
+  separate alert host. The sender falls back from `ALERT_SMTP_FROM` to
+  `SMTP_FROM`. Ops alerts still go only to `ALERT_SMTP_TO`. Saved-query
+  breakage notices to dataset owners use the same relay, so a deployment with
+  only `SMTP_*` set now delivers them.
 - **`OTS_OIDC_IDP_TOKEN_POLICY` and `OTS_OIDC_IDP_WRITE_SCOPES`.** What an access token from
   an external IdP (OIDC resource-server mode) may do is now a setting, with the
   same values as `OTS_OIDC_SESSION_POLICY`: `session` (default), `scoped`
@@ -285,6 +295,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   how to get help.
 
 ### Changed
+- **`OAUTH_CLIENTS_JSON` client secrets accept secret references.** A
+  `secret` may be `env:NAME`, `file:/path` or `vault:…`, resolved at boot like
+  `JWT_SECRET`. Under `OTS_ENV=production` a raw secret now stops the server at
+  startup, as do the other raw-secret settings, and so does a reference that
+  does not resolve; no client from the variable is seeded until every secret
+  in it has resolved. Development still accepts a raw value, with a one-time
+  warning.
+- **Settings read in two places now come from one parsed value.**
+  `--serve-frontend false` now also stops `/` and `/sparql` from serving the
+  web UI to a browser; they used to read `SERVE_FRONTEND` from the environment
+  on their own. Federated identity assertions (`OTS_TRUSTED_ISSUERS`) are
+  checked against `--base-url` as well as `BASE_URL`; the built-in default
+  still counts as unset. `BACKUP_DIR` is read once: an empty value now means
+  `<data-dir>/backups` for `--restore` and store auto-recovery too, which used
+  to take it as the working directory.
+- **Library: `dcat::generate_dcat_catalog` and `generate_org_dcat_catalog`
+  removed.** Only tests called them. Use `dcat::generate_catalog_bytes` with
+  `RdfFormat::Turtle`.
 - **Settings added in this release are named for what they cover.** Before
   release, five new settings were renamed, and the old names are not read:
   `OIDC_TOKEN_POLICY` and `OIDC_WRITE_SCOPES` are now
@@ -838,6 +866,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   means the CRS's own units.
 
 ### Fixed
+- **AI assistant calls time out.** NL→SPARQL (`/api/llm/sparql`), the SHACL
+  assistant, saved-query repair, SQL-source review suggestions and
+  `/api/llm/feedback` had only a connect
+  timeout, so a gateway that accepted the connection and stalled held the
+  request indefinitely. They now share the chat's per-completion budget
+  (`LLM_TIMEOUT_SECONDS`, default 120).
+- **Spark's `vocab_term_search` tool says when it cannot search.** Without the
+  vocabulary term index it answered that no installed vocabulary defines the
+  term; it now says the search is not available, as `text_search` does.
+- **The service registry's refusals are logged.** A 401 or 500 from the
+  registry (`LD_DISCOVERY`) passed as a successful registration. The first
+  rejection, and each change of status, is now a warning that names the status
+  (and `LD_REGISTRY_TOKEN` for a 401 or 403).
+- **Docs.** `docs/spark.md` no longer says both that tool rounds are not
+  streamed and that every reply streams token by token: the answer streams on
+  the directive protocol and arrives per round with native tools. Two broken
+  `sources.md#secret-references` links now point at the section on secret
+  references.
 - **More `.env` settings reach the server under Docker Compose.**
   `docker-compose.yml` passes the server an explicit environment list, so a
   setting `.env.example` documents had no effect until it was on that list.
@@ -1340,6 +1386,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `owl:hasValue` are not reported by Konclude and not materialised.
 
 ### Security
+- **Spark's streaming endpoint no longer sends internal error text.** On
+  `POST /api/llm/chat/stream` a server fault reached the browser verbatim in
+  the `error` event and in a failed query's result; it is now "Internal server
+  error", with the detail in the server log, as on the JSON endpoints.
+- **Backup manifests cannot point outside their backup.** `verify` and the S3
+  upload joined the manifest's file names onto the backup directory without
+  the check restore makes, so an edited manifest with an absolute or `..` path
+  could have the server hash, or upload to S3, any file it can read. All three
+  now refuse such a manifest.
 - **Audit rows and the guest AI budget record the real client IP.** Both took
   the left-most `X-Forwarded-For` entry (then `X-Real-IP`) from any caller and
   never saw the TCP peer address, so a login failure, a permission denial or an

@@ -57,6 +57,20 @@ impl AppError {
             AppError::ValidationFailed(_) => "SHACL validation failed".to_string(),
         }
     }
+
+    /// The message a client may see, for a channel that is not an HTTP error
+    /// response (a server-sent event, a field in a JSON reply). A server fault
+    /// keeps its detail in the log and answers the generic text, as
+    /// `into_response` does; every other error answers its own message.
+    pub fn client_message(&self) -> String {
+        match self {
+            AppError::Internal(m) => {
+                tracing::error!("Internal server error: {}", m);
+                "Internal server error".to_string()
+            }
+            other => other.message(),
+        }
+    }
 }
 
 impl IntoResponse for AppError {
@@ -185,5 +199,24 @@ impl From<crate::store::engine::StoreError> for AppError {
             }
             other => AppError::Internal(other.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppError;
+
+    /// The message for a channel that is not an HTTP error response (the
+    /// chat's SSE stream) masks a server fault exactly as the response does,
+    /// and passes every client-facing message through.
+    #[test]
+    fn client_message_masks_only_server_faults() {
+        let internal = AppError::Internal("rocksdb: IO error at /data/store/000123.sst".into());
+        assert_eq!(internal.client_message(), "Internal server error");
+        assert!(internal.message().contains("rocksdb"), "the log keeps it");
+        let bad = AppError::BadRequest("SPARQL syntax error: expected '}'".into());
+        assert_eq!(bad.client_message(), bad.message());
+        let down = AppError::ServiceUnavailable("LLM gateway returned 502".into());
+        assert_eq!(down.client_message(), "LLM gateway returned 502");
     }
 }

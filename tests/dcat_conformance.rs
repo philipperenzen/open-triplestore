@@ -1,6 +1,6 @@
 //! DCAT 2 catalog conformance tests.
 //!
-//! Exercises `dcat::generate_dcat_catalog`, which produces a W3C DCAT 2 catalogue
+//! Exercises `dcat::generate_catalog_bytes`, which produces a W3C DCAT 2 catalogue
 //! (dcat:Catalog / dcat:Dataset / dcat:Distribution) with VoID statistics and
 //! Dublin Core metadata, then validates the emitted RDF structurally.
 
@@ -8,10 +8,22 @@ use std::sync::Arc;
 
 use open_triplestore::auth::db::AuthDb;
 use open_triplestore::auth::models::{OwnerType, Visibility};
-use open_triplestore::dcat::generate_dcat_catalog;
+use open_triplestore::dcat::generate_catalog_bytes;
 use open_triplestore::store::TripleStore;
 use oxigraph::io::RdfFormat;
 use oxigraph::sparql::QueryResults;
+
+/// The whole-instance catalogue as Turtle.
+fn generate_dcat_catalog(
+    base_url: &str,
+    store: &TripleStore,
+    auth_db: &Arc<AuthDb>,
+    user_id: Option<&str>,
+) -> String {
+    let bytes = generate_catalog_bytes(base_url, store, auth_db, user_id, None, RdfFormat::Turtle)
+        .expect("catalogue serialises");
+    String::from_utf8(bytes).expect("Turtle is UTF-8")
+}
 
 const DCAT: &str = "http://www.w3.org/ns/dcat#";
 const DCT: &str = "http://purl.org/dc/terms/";

@@ -45,6 +45,15 @@ Confidential clients authenticate with `client_secret` (stored AES-GCM
 encrypted, like SSO provider secrets). Redirect URIs are an exact-match
 allowlist.
 
+In `OAUTH_CLIENTS_JSON`, a `secret` may be a secret reference (`env:NAME`,
+`file:/run/secrets/name`, `vault:…`; see
+[sources.md](sources.md#credentials-are-references-never-values)) instead of the value. The reference
+is resolved at boot and the value stored, so a rotated secret is picked up on
+the next restart. A raw value is accepted in development with a one-time
+warning and **refused at startup under `OTS_ENV=production`**, as for
+`JWT_SECRET`; a reference that does not resolve also stops the start, and no
+client from the variable is seeded until every secret in it has resolved.
+
 ## Tokens
 
 - **Access token** — ES256 JWT, 1 hour: `iss` (= `BASE_URL`), `sub` (account
