@@ -4377,6 +4377,40 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                         true,
                     ),
                 ),
+                (
+                    M::Delete,
+                    o(
+                        tag,
+                        &format!("Delete version ({tag})"),
+                        "Delete one version: its graphs and its registry record, in one \
+                         transaction (a graph another version record also names is kept). \
+                         Admins, and publishers who may write the entry. A published version \
+                         (or one with a published subgraph) answers 409 unless `force=true`. \
+                         While datasets depend on the version (pinned to it, floating on it as \
+                         the latest published one, or a dataset version that is not deprecated \
+                         records it) the answer is 409 whatever `force` says, with `reasons`: \
+                         each `{code, message}`, the dependents one listing the datasets the \
+                         caller may read and counting the rest (`hidden_datasets`); \
+                         `force_allowed` says whether repeating with `force=true` would \
+                         succeed. Recorded on the entry's commit log and in the audit log.",
+                        vec![qp(
+                            "force",
+                            false,
+                            "Delete a published version too (never overrides dependents)",
+                        )],
+                        vec![
+                            ("200", "Deleted: graphs dropped and kept, triples removed"),
+                            ("401", "Authentication required"),
+                            (
+                                "403",
+                                "Not an admin, or a publisher who may write the entry",
+                            ),
+                            ("404", "Entry or version not found"),
+                            ("409", "Published (without force) or datasets depend on it"),
+                        ],
+                        true,
+                    ),
+                ),
             ],
         );
         mount(

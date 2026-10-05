@@ -82,6 +82,7 @@ Three facts worth knowing before an instance is exposed:
 | `POST` | `/api/datasets/{dataset_id}/log` | **token** | Append a patch to the log (writers only): `H prev` must name the latest entry (`409` otherwise). |
 | `GET` | `/api/models` | **none** | The model-registry entries the caller may see; anonymously, the public ones. |
 | `GET` | `/api/models/{id}/versions/{ver}/data` | **none** | A published version's graphs as RDF, to whoever may see the entry: a public model anonymously, a private one to its owner, the owner organisation's members and admins (`404` to everyone else, so the entry cannot be discovered). |
+| `DELETE` | `/api/models/{id}/versions/{ver}` | **token** | Delete one version, its graphs and its registry record: admins, and publishers who may write the entry (`403` otherwise). `409` for a published version without `?force=true`, and while datasets depend on it whatever `force` says; see [models.md](models.md#deleting-a-version). |
 | `GET` | `/api/models/{id}/versions/{ver}/profile` | **none** | The version flattened for a mapping proposer (classes, properties, shapes, enumerations). Read by exactly who may read `/data`; it used to sit behind the admin-gated sources router and answer `401` for a public model. |
 | `GET` | `/api/organisations` | **none** | Anonymously, only organisations that own something public. |
 | `POST` | `/api/organisations` | **admin** | Provisioning an organisation is an operator action. |
