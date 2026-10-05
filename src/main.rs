@@ -27,6 +27,7 @@ mod feedback;
 mod geo;
 mod ifc;
 mod imports;
+mod jsonld;
 mod kind_detector;
 mod ldes;
 #[cfg(feature = "ldp")]

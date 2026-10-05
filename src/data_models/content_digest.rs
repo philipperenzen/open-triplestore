@@ -11,10 +11,15 @@
 //!   ([`graphs_digest`] for content spread over several graphs).
 //! * [`same_triples`]: whether two triple sets are the same graph, blank nodes
 //!   compared up to renaming (a fresh parse names them anew).
-//! * [`as_stored`]: a file's triples as the store holds them. Oxigraph keeps
-//!   typed literals in a canonical form (`"1"^^xsd:nonNegativeInteger` becomes
-//!   `"1"^^xsd:integer`, a `+00:00` time zone becomes `Z`), so no stored copy
-//!   is closer to a file than this, and a copy is compared with it.
+//! * [`as_stored`]: a file's triples as the store holds them, the form a copy
+//!   is compared in. The store keeps every literal as written (the vendored
+//!   Oxigraph, `vendor/README.md`), so this is the file's own triples.
+//! * [`compare_copy`]: whether a stored copy is a file's triples, either
+//!   exactly or in the form an older store wrote them ([`earlier_store_form`]:
+//!   before the store kept lexical forms it wrote typed literals in a
+//!   canonical form, so `"1"^^xsd:nonNegativeInteger` read back as
+//!   `"1"^^xsd:integer` and a `+00:00` time zone as `Z`). The seeders use it
+//!   to recognise, and restore, copies an older version stored.
 //!
 //! All of them feed registry metadata; nothing is written into a graph.
 
@@ -41,7 +46,9 @@ pub fn graph_triples(store: &TripleStore, graph_iri: &str) -> Result<Vec<Triple>
 }
 
 /// `triples` as this store holds them: loaded into a throw-away in-memory
-/// store and read back, so typed literals take the store's canonical form.
+/// store and read back. The store keeps literals as written, so this returns
+/// the same triples; comparing in this form keeps every check right should
+/// the store ever write a term differently from how it was given.
 pub fn as_stored(triples: &[Triple]) -> Result<Vec<Triple>, StoreError> {
     let tmp = oxigraph::store::Store::new()?;
     tmp.extend(
@@ -52,6 +59,98 @@ pub fn as_stored(triples: &[Triple]) -> Result<Vec<Triple>, StoreError> {
     tmp.iter()
         .map(|q| q.map(Triple::from).map_err(StoreError::from))
         .collect()
+}
+
+/// `triples` in the form the store wrote them before it kept lexical forms
+/// (Oxigraph 0.5.11 unpatched; `vendor/README.md`): every literal of a
+/// datatype it stored as a value — `xsd:boolean`, the numeric types, the
+/// twelve types derived from `xsd:integer`, the date, time and duration types
+/// and `xsd:dateTimeStamp` — in the canonical form of its value under the
+/// primitive type. A lexical form that does not parse stays as it is, as it
+/// did then.
+pub fn earlier_store_form(triples: &[Triple]) -> Vec<Triple> {
+    triples
+        .iter()
+        .map(|t| {
+            Triple::new(
+                t.subject.clone(),
+                t.predicate.clone(),
+                earlier_term(&t.object),
+            )
+        })
+        .collect()
+}
+
+fn earlier_term(term: &Term) -> Term {
+    match term {
+        Term::Literal(l) => earlier_literal(l).map_or_else(|| term.clone(), Term::Literal),
+        #[cfg(feature = "rdf-12")]
+        Term::Triple(t) => Term::Triple(Box::new(Triple::new(
+            t.subject.clone(),
+            t.predicate.clone(),
+            earlier_term(&t.object),
+        ))),
+        _ => term.clone(),
+    }
+}
+
+/// The canonical literal the earlier store held for `l`, or `None` when it
+/// held `l` itself.
+fn earlier_literal(l: &oxigraph::model::Literal) -> Option<oxigraph::model::Literal> {
+    use oxigraph::model::Literal;
+    use oxsdatatypes::*;
+    const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+    let local = l.datatype().as_str().strip_prefix(XSD)?;
+    let v = l.value();
+    let canonical = match local {
+        "boolean" => Literal::from(v.parse::<Boolean>().ok()?),
+        "float" => Literal::from(v.parse::<Float>().ok()?),
+        "double" => Literal::from(v.parse::<Double>().ok()?),
+        "integer" | "byte" | "short" | "int" | "long" | "unsignedByte" | "unsignedShort"
+        | "unsignedInt" | "unsignedLong" | "positiveInteger" | "negativeInteger"
+        | "nonPositiveInteger" | "nonNegativeInteger" => Literal::from(v.parse::<Integer>().ok()?),
+        "decimal" => Literal::from(v.parse::<Decimal>().ok()?),
+        "dateTime" | "dateTimeStamp" => Literal::from(v.parse::<DateTime>().ok()?),
+        "time" => Literal::from(v.parse::<Time>().ok()?),
+        "date" => Literal::from(v.parse::<Date>().ok()?),
+        "gYearMonth" => Literal::from(v.parse::<GYearMonth>().ok()?),
+        "gYear" => Literal::from(v.parse::<GYear>().ok()?),
+        "gMonthDay" => Literal::from(v.parse::<GMonthDay>().ok()?),
+        "gDay" => Literal::from(v.parse::<GDay>().ok()?),
+        "gMonth" => Literal::from(v.parse::<GMonth>().ok()?),
+        "duration" => Literal::from(v.parse::<Duration>().ok()?),
+        "yearMonthDuration" => Literal::from(v.parse::<YearMonthDuration>().ok()?),
+        "dayTimeDuration" => Literal::from(v.parse::<DayTimeDuration>().ok()?),
+        _ => return None,
+    };
+    (canonical != *l).then_some(canonical)
+}
+
+/// How a stored copy relates to the triples of the file it was loaded from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyForm {
+    /// Exactly the file's triples.
+    Exact,
+    /// The file's triples in the form an older store wrote them
+    /// ([`earlier_store_form`]), and not exactly: the copy is the file's
+    /// content, loaded before the store kept lexical forms, and loading the
+    /// file again makes it exact.
+    EarlierStore,
+    /// Other triples: an edit, another file, a partial load.
+    Differs,
+}
+
+/// Compare a stored copy with a file's triples (see [`CopyForm`]).
+pub fn compare_copy(stored: &[Triple], file: &[Triple]) -> CopyForm {
+    if same_triples(stored, file) {
+        return CopyForm::Exact;
+    }
+    let earlier = earlier_store_form(file);
+    if earlier != file && same_triples(stored, &earlier) {
+        CopyForm::EarlierStore
+    } else {
+        CopyForm::Differs
+    }
 }
 
 /// The triples of parsed quads, graph names dropped (the seeder merges a
@@ -179,29 +278,59 @@ mod tests {
         );
     }
 
-    /// The store writes some typed literals in canonical form; `as_stored`
-    /// predicts exactly what it holds.
+    /// The store keeps typed literals as written: `as_stored` is the file's
+    /// own triples, and a stored copy is exactly the file.
     #[test]
-    fn as_stored_predicts_the_stores_literal_forms() {
+    fn the_store_keeps_typed_literals_as_written() {
         let ttl = "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
                    <http://ex.org/a> <http://ex.org/n> \"1\"^^xsd:nonNegativeInteger ;\n\
                    <http://ex.org/t> \"2014-08-28T15:00:00+00:00\"^^xsd:dateTime ;\n\
                    <http://ex.org/s> \"x\"@nl .\n";
         let parsed = parse(ttl);
-        let predicted = as_stored(&parsed).unwrap();
-        assert!(
-            !same_triples(&parsed, &predicted),
-            "the store changes the form"
-        );
+        assert!(same_triples(&parsed, &as_stored(&parsed).unwrap()));
         let store = TripleStore::in_memory().unwrap();
         let quads = upload::parse_rdf(ttl.as_bytes(), "text/turtle", "t.ttl").unwrap();
         let loaded =
             upload::load_parsed_verbatim(&store, "http://base", "m", "1", quads, true).unwrap();
         let stored = graph_triples(&store, &loaded.sub_graphs[0]).unwrap();
-        assert!(same_triples(&stored, &predicted));
+        assert_eq!(compare_copy(&stored, &parsed), CopyForm::Exact);
         assert!(stored.iter().any(|t| t
             .to_string()
-            .ends_with("\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>")));
+            .ends_with("\"1\"^^<http://www.w3.org/2001/XMLSchema#nonNegativeInteger>")));
+    }
+
+    /// A copy an older store wrote (typed literals in canonical form) is
+    /// recognised as the file's content; any other difference is not.
+    #[test]
+    fn a_copy_in_the_earlier_store_form_is_recognised() {
+        let ttl = "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+                   <http://ex.org/a> <http://ex.org/n> \"1\"^^xsd:nonNegativeInteger ;\n\
+                   <http://ex.org/t> \"2014-08-28T15:00:00+00:00\"^^xsd:dateTime ;\n\
+                   <http://ex.org/b> \"1\"^^xsd:boolean ;\n\
+                   <http://ex.org/x> \"not a number\"^^xsd:integer ;\n\
+                   <http://ex.org/s> \"x\"@nl .\n";
+        let file = parse(ttl);
+        let earlier = earlier_store_form(&file);
+        let lines: Vec<String> = earlier.iter().map(Triple::to_string).collect();
+        for want in [
+            "\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>",
+            "\"2014-08-28T15:00:00Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime>",
+            "\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>",
+            "\"not a number\"^^<http://www.w3.org/2001/XMLSchema#integer>",
+            "\"x\"@nl",
+        ] {
+            assert!(lines.iter().any(|l| l.ends_with(want)), "{want}: {lines:?}");
+        }
+        assert_eq!(compare_copy(&earlier, &file), CopyForm::EarlierStore);
+        assert_eq!(compare_copy(&file, &file), CopyForm::Exact);
+        let edited = parse(&ttl.replace("\"x\"@nl", "\"y\"@nl"));
+        assert_eq!(
+            compare_copy(&earlier_store_form(&edited), &file),
+            CopyForm::Differs
+        );
+        // A file without such literals has no earlier form to match.
+        let plain = parse(TTL);
+        assert_eq!(compare_copy(&plain, &plain), CopyForm::Exact);
     }
 
     #[test]

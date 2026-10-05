@@ -104,9 +104,11 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
   The **Open Triplestore** columns in the matrices below follow those grades on every row
   (since 2026-10-01): a ✅ means `docs/standards.md` grades the standard **Full**, and every
   row it grades **Partial** shows 🟡 — SPARQL 1.1 Query, SPARQL 1.2 and RDF 1.2, OWL 2 RL,
-  SHACL Core and Advanced, ShEx, SWRL, GeoSPARQL, DCAT and VoID, and RML. OWL 2 DL is graded
-  Full with the reasoner sidecar the project ships (footnote ⁹). Five rows have
-  no grade there (SPARQL 1.1 Protocol, JSON-LD 1.1, N-Quads/TriG, text search, SKOS); their ✅
+  SHACL Advanced, ShEx, SWRL, GeoSPARQL, DCAT and VoID, and RML. OWL 2 DL is graded
+  Full with the reasoner sidecar the project ships (footnote ⁹), and full-text search is
+  graded Full as a feature (footnote ¹⁵), SKOS as SKOS-aware inferencing (footnote ¹⁹);
+  JSON-LD 1.1 is graded Partial (footnote ²⁰). Two rows have
+  no grade there (SPARQL 1.1 Protocol, N-Quads/TriG); their ✅
   marks feature presence, as in the other columns — note that `/sparql`
   ignores the protocol's `default-graph-uri` / `named-graph-uri` parameters (footnote ⁶).
   The W3C SPARQL tests are not claimed. The other systems' cells were compiled from their documentation and
@@ -235,7 +237,7 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 | **Graph Store Protocol** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
 | **RDF 1.1** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **RDF 1.2 / RDF-star** | 🟡³ | 🟡³ | 🟡 | ❌ | ❌ | 🟡 | 🟡 | 🟡 | ❌ | ❌ |
-| **JSON-LD 1.1** | ✅ | ✅ | ✅ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ |
+| **JSON-LD 1.1** | 🟡²⁰ | ✅ | ✅ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ |
 | **N-Quads / TriG** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **W3C SPARQL 1.1 Tests** | —⁴ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
@@ -255,6 +257,14 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >   duplicate triples (oxigraph#1919, fixed upstream but not released); `/sparql` rewrites the
 >   query's dataset to the caller's readable graphs. Oxigraph's column shows the same engine
 >   before this project's HTTP layer.
+> ²⁰ Partial in [`docs/standards.md`](standards.md) (graded 2026-10-03; the cell used to mark
+>   feature presence). Remote `@context`s now resolve — bundled W3C contexts offline, others from
+>   `OTS_REMOTE_ALLOWLIST` — and the W3C json-ld-api toRdf/fromRdf sections run as a regression
+>   ratchet (no published score). Every evaluated toRdf entry passes since the JSON-LD processor
+>   is patched in the vendored fork (2026-10-03); three fromRdf entries fail on purpose, because
+>   the serialiser keeps every stored quad (no `@list` folding that drops `rdf:type rdf:List`, no
+>   refusal of an `rdf:JSON` literal that is not JSON), and uploads keep `@direction` as an RDF
+>   1.2 directional string (`docs/conformance/jsonld.md`).
 
 ### 4.2 Reasoning, Validation & Inference
 
@@ -265,7 +275,7 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 | **OWL 2 QL** | ✅⁸ | ❌ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ | ❌ |
 | **OWL 2 RL** | 🟡⁸ | ❌ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ | ❌ |
 | **OWL 2 DL** | ✅⁹ | ❌ | ❌ | ❌ | ❌ | 🔒 | ✅ | ❌ | ❌ | ❌ |
-| **SHACL Validation** | 🟡¹⁰ | ❌ | 🟡 | ❌ | 🟡 | ✅ | ✅ | ✅ | ❌ | ❌ |
+| **SHACL Validation** | ✅¹⁰ | ❌ | 🟡 | ❌ | 🟡 | ✅ | ✅ | ✅ | ❌ | ❌ |
 | **SHACL-AF Inference** | 🟡¹¹ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
 | **ShEx** | 🟡¹² | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
 | **SWRL** | 🟡¹³ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
@@ -287,10 +297,9 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >   against the approved W3C OWL 2 DL test cases. Without it, the in-process RL + DL-syntax rules
 >   are sound but not complete, and Konclude is bring-your-own. An OWL 2 DL profile check
 >   precedes every run. See [`docs/owl2-dl.md`](owl2-dl.md).
-> ¹⁰ SHACL Core is graded Partial in [`docs/standards.md`](standards.md): one known failure in
->   the core section of the W3C SHACL test suite, results compared on `sh:conforms` and
->   focus nodes rather than full result-set equality, and stored literals in canonical form
->   (derived integer datatypes read back as `xsd:integer`); see
+> ¹⁰ SHACL Core is graded Full in [`docs/standards.md`](standards.md) since 2026-10-03: the
+>   core section of the W3C SHACL test suite passes with no known failure at full result-set
+>   equality, and stored literals keep their lexical form and datatype; see
 >   [`docs/conformance/shacl.md`](conformance/shacl.md).
 > ¹¹ SHACL Advanced Features, graded Partial: SPARQL targets (including
 >   `sh:SPARQLTargetType`) and constraints with terms pre-bound in every scope (blank-node focus
@@ -319,8 +328,12 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >   built-in CRSs are implemented. Not implemented: KML/DGGS literals, the Query Rewrite
 >   Extension, the other GeoSPARQL 1.1 aggregates and most of its new non-topological
 >   functions. See [`docs/standards.md`](standards.md) (footnote 5).
-> ¹⁵ Tantivy full-text search via `text-search` feature flag with automatic index
->   sync on every SPARQL UPDATE / Graph Store write (lazy dirty-flag pattern).
+> ¹⁵ Tantivy full-text search via the `text-search` feature flag, graded *Full* as a feature
+>   (not a standard) in `docs/standards.md` since 2026-10-03. The index follows every store
+>   write — SPARQL Update, Graph Store, imports, LDP, RDF Patch, RML runs, SHACL rule output,
+>   entailment, replication, LDES sync and repair — through the store's search journal, and
+>   catches up before the next text query; before, only SPARQL Update, Graph Store and import
+>   writes reached it.
 
 ### 4.4 Protocols, Catalogs & Mapping
 
@@ -348,6 +361,9 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 >   (`rr:parentTriplesMap`) run on datasources only, and the RML-Core / RML-IO vocabulary beyond
 >   `rml:baseIRI` and `rml:null` is not implemented.
 > ¹⁹ SKOS is a vocabulary; all systems store SKOS triples — "support" means SKOS-aware inferencing.
+>   Open Triplestore: graded *Full* in `docs/standards.md` since 2026-10-03 — the `skos` dataset
+>   entailment regime (OWL 2 RL over the W3C SKOS schema) and the built-in SKOS integrity shapes
+>   for all seven integrity conditions; the cell used to mark only that SKOS triples are stored.
 
 ### Standards Score (count of full ✅ across all 29 rows above)
 
@@ -380,6 +396,15 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > OWL 2 DL (with the reasoner sidecar the project ships) are graded Full in `docs/standards.md`,
 > and their cells follow. RDF Patch and LDES were regraded Full the same day; neither has a row
 > here. 13 rows are 🟡 and the W3C SPARQL 1.1 Tests row is not claimed.
+>
+> Open Triplestore recounted later on 2026-10-03, 15 → 14: JSON-LD 1.1, until then counted on
+> feature presence, is graded *Partial* in `docs/standards.md` on the W3C json-ld-api run
+> (footnote ²⁰). Full-text search and SKOS, the other presence rows touched that day, are graded
+> *Full* (footnotes ¹⁵ and ¹⁹), so their ✅ now rests on a grade. 14 rows are 🟡.
+>
+> Open Triplestore recounted again later on 2026-10-03, 14 → 15: SHACL Core is graded Full
+> (the W3C core section passes at full result-set equality with no known failure once the
+> store keeps literals as written), so the SHACL Validation cell follows. 13 rows are 🟡.
 
 ```
 Stardog           ██████████████████████░░░░░░░   22 / 29  (commercial; full OWL DL + ShEx + SWRL; GeoSPARQL 1.1 partial)

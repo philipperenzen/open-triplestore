@@ -4357,6 +4357,7 @@ dependencies = [
  "ots-plugin-postgres",
  "oxigraph",
  "oxiri",
+ "oxjsonld",
  "oxrdf",
  "oxsdatatypes",
  "parry3d-f64",
@@ -4660,8 +4661,6 @@ dependencies = [
 [[package]]
 name = "oxigraph"
 version = "0.5.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f6632dd080bd07676f06e70254ff5862c9943e9483d700fa7258df73a3f9a6a"
 dependencies = [
  "dashmap 6.2.1",
  "getrandom 0.3.4",
@@ -4698,8 +4697,6 @@ checksum = "54b4ed3a7192fa19f5f48f99871f2755047fabefd7f222f12a1df1773796a102"
 [[package]]
 name = "oxjsonld"
 version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86a3e89e005662e60327027f45ec7cefd0472404e01831b5d83a3ac522cfabe0"
 dependencies = [
  "json-event-parser",
  "oxiri",
@@ -6576,8 +6573,6 @@ dependencies = [
 [[package]]
 name = "spareval"
 version = "0.2.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85b51144836ff9ca2f792b7a2422c4170ff04460d86cd8f2f764cf53e339cbec"
 dependencies = [
  "hex",
  "json-event-parser",

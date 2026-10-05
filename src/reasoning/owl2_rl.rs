@@ -1235,12 +1235,12 @@ impl<'a> Owl2RLReasoner<'a> {
 
     /// cls-maxc1: maxCardinality "0"^^xsd:nonNegativeInteger . type ?x . ?u ?p ?y → INCONSISTENCY
     fn rule_cls_maxc1(&self) -> Result<(), ReasoningError> {
-        // Handle both xsd:nonNegativeInteger (OWL standard) and xsd:integer (common Turtle)
+        // By value: "0"^^xsd:nonNegativeInteger (OWL's form) and the Turtle
+        // shorthand 0 (xsd:integer) are the same number but different terms,
+        // and the store keeps each as written.
         let q = format!(
             r#"ASK {{
-                {{ ?x <{OWL_MAX_CARDINALITY}> "0"^^<http://www.w3.org/2001/XMLSchema#nonNegativeInteger> }}
-                UNION
-                {{ ?x <{OWL_MAX_CARDINALITY}> "0"^^<http://www.w3.org/2001/XMLSchema#integer> }}
+                ?x <{OWL_MAX_CARDINALITY}> ?card . FILTER(?card = 0)
                 ?x <{OWL_ON_PROPERTY}> ?p .
                 ?u <{RDF_TYPE}> ?x .
                 {uy}
@@ -1261,7 +1261,7 @@ impl<'a> Owl2RLReasoner<'a> {
         let q = format!(
             r#"INSERT {{ GRAPH <{tg}> {{ ?y1 <{OWL_SAME_AS}> ?y2 }} }}
                WHERE {{
-                   ?x <{OWL_MAX_CARDINALITY}> "1"^^<http://www.w3.org/2001/XMLSchema#nonNegativeInteger> .
+                   ?x <{OWL_MAX_CARDINALITY}> ?card . FILTER(?card = 1)
                    ?x <{OWL_ON_PROPERTY}> ?p .
                    ?u <{RDF_TYPE}> ?x . {a} {b}
                    FILTER(?y1 != ?y2)
@@ -1278,7 +1278,7 @@ impl<'a> Owl2RLReasoner<'a> {
     fn rule_cls_maxqc1(&self) -> Result<(), ReasoningError> {
         let q = format!(
             r#"ASK {{
-                ?x <{OWL_MAX_QUAL_CARD}> "0"^^<http://www.w3.org/2001/XMLSchema#nonNegativeInteger> .
+                ?x <{OWL_MAX_QUAL_CARD}> ?card . FILTER(?card = 0)
                 ?x <{OWL_ON_PROPERTY}> ?p .
                 ?x <{OWL_ON_CLASS}> ?c .
                 ?u <{RDF_TYPE}> ?x . {uy}
@@ -1299,7 +1299,7 @@ impl<'a> Owl2RLReasoner<'a> {
     fn rule_cls_maxqc2(&self) -> Result<(), ReasoningError> {
         let q = format!(
             r#"ASK {{
-                ?x <{OWL_MAX_QUAL_CARD}> "0"^^<http://www.w3.org/2001/XMLSchema#nonNegativeInteger> .
+                ?x <{OWL_MAX_QUAL_CARD}> ?card . FILTER(?card = 0)
                 ?x <{OWL_ON_PROPERTY}> ?p .
                 ?x <{OWL_ON_CLASS}> <{OWL_THING}> .
                 ?u <{RDF_TYPE}> ?x . {uy}
@@ -1320,7 +1320,7 @@ impl<'a> Owl2RLReasoner<'a> {
         let q = format!(
             r#"INSERT {{ GRAPH <{tg}> {{ ?y1 <{OWL_SAME_AS}> ?y2 }} }}
                WHERE {{
-                   ?x <{OWL_MAX_QUAL_CARD}> "1"^^<http://www.w3.org/2001/XMLSchema#nonNegativeInteger> .
+                   ?x <{OWL_MAX_QUAL_CARD}> ?card . FILTER(?card = 1)
                    ?x <{OWL_ON_PROPERTY}> ?p .
                    ?x <{OWL_ON_CLASS}> ?c .
                    ?u <{RDF_TYPE}> ?x .
@@ -1341,7 +1341,7 @@ impl<'a> Owl2RLReasoner<'a> {
         let q = format!(
             r#"INSERT {{ GRAPH <{tg}> {{ ?y1 <{OWL_SAME_AS}> ?y2 }} }}
                WHERE {{
-                   ?x <{OWL_MAX_QUAL_CARD}> "1"^^<http://www.w3.org/2001/XMLSchema#nonNegativeInteger> .
+                   ?x <{OWL_MAX_QUAL_CARD}> ?card . FILTER(?card = 1)
                    ?x <{OWL_ON_PROPERTY}> ?p .
                    ?x <{OWL_ON_CLASS}> <{OWL_THING}> .
                    ?u <{RDF_TYPE}> ?x .

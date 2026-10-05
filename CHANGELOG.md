@@ -14,6 +14,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **JSON-LD remote contexts.** Every JSON-LD parse — uploads, imports, the
+  Graph Store, LDP, seed bundles, LDES pages — now resolves an `@context` named
+  by IRI through a document loader; before, any such document failed to parse.
+  The W3C contexts of ActivityStreams 2.0, CSVW, LDP and ODRL 2.2 are bundled
+  and resolve offline; any other context is fetched only from a URL in
+  `OTS_REMOTE_ALLOWLIST` (deny by default), following redirects and `Link`
+  alternates inside the allowlist, capped at `OTS_JSONLD_CONTEXT_MAX_BYTES`
+  (1 MiB) and cached for an hour. See `docs/formats.md`.
+- **The W3C json-ld-api toRdf and fromRdf sections run in CI**
+  (`tests/w3c_jsonld_api_manifests.rs`, vendored unmodified under
+  `tests/fixtures/w3c-jsonld-api/`) as a regression ratchet. They are a subset
+  of a W3C test suite, so no score is published; the known gaps are in
+  `docs/conformance/jsonld.md`.
+- **SKOS-aware inferencing and integrity checking.** The standards matrix
+  promised SKOS-aware inferencing, and there was none: `skos.ttl` was only a
+  bundled vocabulary. A dataset can now select the `skos` entailment regime —
+  OWL 2 RL over its conformance layer with the bundled W3C SKOS schema as a
+  premise, the schema's own closure pruned — and a built-in *SKOS integrity*
+  shape graph (`urn:system:shapes:skos-integrity`) checks the SKOS Reference's
+  integrity conditions S9, S13, S14, S27, S36, S37 and S46. `docs/standards.md`
+  grades SKOS *Full*; see `docs/reasoning.md#the-skos-regime`.
+- **Full-text search graded as a feature.** `docs/standards.md` grades
+  *SPARQL + full-text search (Tantivy)* — not a standard — as *Full*, now that
+  the index follows every write (see *Fixed*).
 - **`OTS_OIDC_IDP_TOKEN_POLICY` and `OTS_OIDC_IDP_WRITE_SCOPES`.** What an access token from
   an external IdP (OIDC resource-server mode) may do is now a setting, with the
   same values as `OTS_OIDC_SESSION_POLICY`: `session` (default), `scoped`
@@ -285,6 +309,86 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   how to get help.
 
 ### Changed
+- **JSON-LD 1.1 graded *Partial*.** `docs/standards.md` grades it for the
+  first time, on the json-ld-api run: three `fromRdf` entries fail because the
+  serialiser writes every stored quad as it is, where the algorithm folds a
+  list typed `rdf:List` into `@list` (dropping the type quads) or refuses an
+  `rdf:JSON` literal that is not JSON; and uploads keep `@direction` as an RDF
+  1.2 directional string, where a JSON-LD 1.1 processor drops it by default.
+  The comparison's JSON-LD cell, which marked feature presence, follows
+  (✅ → 🟡), and the standards score is recounted 15 → 14.
+- **The JSON-LD processor is vendored with four fixes** (`oxjsonld` 0.2.6 in
+  `vendor/oxjsonld/`, one commit and one upstream draft each, see
+  `vendor/README.md`), and every `toRdf` entry of the W3C json-ld-api run now
+  passes (`docs/conformance/jsonld.md`). What changes for uploads:
+  - **Relative IRIs resolve as RFC 3986 says** when the base IRI or the
+    reference has `.` or `..` segments: `"@base": "http://a/b/./c"` with
+    `"@id": "../d"` now gives `http://a/d`, not `http://a/b/d`, and
+    `//host/../x` gives `http://host/x`. Documents whose base has no dot
+    segments are unaffected.
+  - **An `@base` that is not a valid IRI** but has a scheme
+    (`"http://invalid/<>/"`) no longer refuses the document: relative IRIs
+    resolved against it are not well-formed and are left out, as the JSON-LD
+    to RDF algorithm leaves out any such IRI.
+  - **A type map applies the type's scoped context to the nodes inside it,
+    nested ones included** (`"@container": "@type"`); nested nodes used to
+    fall back to the definitions without it.
+  - `@direction` is kept as an RDF 1.2 directional string as before; the
+    processor now also offers JSON-LD 1.1's `rdfDirection` modes, which the
+    W3C runner uses.
+- **The store keeps every literal exactly as written.** Typed literals used to
+  be stored as values and read back in a canonical form: `"1"^^xsd:boolean` as
+  `true`, `"05"^^xsd:integer` as `"5"`, a `+00:00` time zone as `Z`, every type
+  derived from `xsd:integer` (`xsd:int`, `xsd:nonNegativeInteger`, …) as
+  `xsd:integer` and `xsd:dateTimeStamp` as `xsd:dateTime`. They now come back
+  with the lexical form and datatype they were written with, from SPARQL, the
+  Graph Store Protocol and downloads (RDF 1.1 Concepts §3.3). Oxigraph 0.5.11
+  and its evaluator spareval 0.2.7 are vendored with this change
+  (`vendor/README.md`; the on-disk format is unchanged and existing stores open
+  as they are). What changes for queries:
+  - **Graph patterns, joins, `DISTINCT`, `GROUP BY`, `sameTerm` and
+    `DELETE DATA` match terms, not values.** `{ ?s ex:n 1 }` no longer finds
+    `"01"^^xsd:integer` or `"1"^^xsd:int`, `true` no longer finds
+    `"1"^^xsd:boolean`, a join between `"5"^^xsd:int` and `5` no longer
+    matches, and `SELECT DISTINCT` returns both. Use a `FILTER` to match by
+    value: `FILTER`, `ORDER BY`, arithmetic and aggregates still compare
+    values as before. The same holds inside RDF 1.2 triple terms.
+  - **Data loaded before this version keeps its canonical form**, so a query
+    constant written as in the source file may no longer match it
+    (`"05"^^xsd:integer` against a stored `"5"`), and appending the same file
+    again adds the as-written literals beside the old ones. Reload such data
+    with a replace (`PUT`, or `DROP` then load) rather than an append.
+  - **Seeded vocabularies and seed-bundle models** are checked once on the first
+    start and, where a copy holds its file's triples in the old canonical form,
+    replaced by the file's triples (nobody's edit, so nothing is kept aside);
+    their licence records then say "unchanged" without the canonical-form
+    caveat. LOV installs record the copy exactly as installed.
+  - **SHACL**: `sh:datatype` accepts valid data of the derived integer types
+    and `xsd:dateTimeStamp` (it used to report every stored
+    `"5"^^xsd:nonNegativeInteger` as a violation, which made write gates answer
+    422 on valid data), checks their ranges (`"300"^^xsd:byte` is a violation),
+    and requires a time zone on `xsd:dateTimeStamp`; `sh:minInclusive` and
+    friends compare `xsd:dateTimeStamp` with `xsd:dateTime`. Activation flags
+    take only the literal `true`: `sh:uniqueLang`, `sh:closed`,
+    `sh:qualifiedValueShapesDisjoint`, `sh:deactivated` (on shapes, rules,
+    constraints and validators) and `sh:optional` written as
+    `"1"^^xsd:boolean` no longer activate, so the shapes uploads no longer
+    need to refuse that form and accept it. `sh:hasValue`, `sh:in`,
+    `sh:equals` and `sh:disjoint` compare terms as written. A shape that is an
+    `rdfs:Class` through `rdfs:subClassOf` in the shapes graph is an implicit
+    class target (SHACL §2.1.3.3; a direct `a rdfs:Class` was the only form
+    found). W3C SHACL core: `core/property/uniqueLang-002` passes, so the core
+    section has no known failure at full result-set equality, and **SHACL Core
+    is graded Full** (`docs/standards.md`, the comparison matrix and the
+    in-app capabilities graph, demo content version 16).
+  - **OWL**: `dt-not-type` sees the datatype as written (`"300"^^xsd:byte` is
+    an inconsistency). `cls-maxc1/2`, `cls-maxqc1–4` and `owl:hasSelf` read
+    their number or flag by value, so `owl:maxCardinality 1` and
+    `"1"^^xsd:nonNegativeInteger` both apply. Rules that join on a literal
+    match it as written.
+  - **Parallel and columnar query paths** keep the term as written wherever
+    the engine does (`BIND(?o AS ?x)`, `IF`, `COALESCE`, `sameTerm`,
+    `COUNT(DISTINCT ?o)`) and read `xsd:dateTimeStamp` as a dateTime.
 - **Settings added in this release are named for what they cover.** Before
   release, five new settings were renamed, and the old names are not read:
   `OIDC_TOKEN_POLICY` and `OIDC_WRITE_SCOPES` are now
@@ -720,8 +824,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   regime that materialises only the TBox closure. OWL 2 EL: an unsound CR3 rule.
   OWL 2 RL: `dt-type1` and `dt-not-type` are implemented (the docs and README
   said they were not), and unscoped runs miss joins over two derived premises.
-  SHACL Core: literal canonicalisation, including derived integer datatypes
-  stored as `xsd:integer`. SHACL Advanced: the gaps that remain. GeoSPARQL: the
+  SHACL Advanced: the gaps that remain. GeoSPARQL: the
   functions that answer wrongly today. The RDF Patch and LDES rows are reworded:
   RDF Patch lacks multiple transaction blocks (there are no nested ones), and
   `ldes:versionKey` is not part of LDES 1.0. The in-app capabilities graph (the
@@ -838,6 +941,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   means the CRS's own units.
 
 ### Fixed
+- **The full-text index follows every write.** It used to be kept in step only
+  by SPARQL Update, Graph Store writes, imports, version restores and seeds, so
+  literals written through LDP, RDF Patch, RML runs, SHACL rule output,
+  entailment materialisation, replication, LDES sync or repair stayed
+  unsearchable until an unrelated write forced a rebuild. Every mutating store
+  operation now records what it is about to change in the store's search
+  journal, and the index catches up on it before it answers a text query —
+  touched graphs re-indexed, touched quads reconciled; only an unbounded write
+  rebuilds the whole index. A timed-out SPARQL Update or Graph Store write no
+  longer leaves the index stale either. Default-graph literals are refreshed
+  under the same key the full rebuild gives them.
 - **More `.env` settings reach the server under Docker Compose.**
   `docker-compose.yml` passes the server an explicit environment list, so a
   setting `.env.example` documents had no effect until it was on that list.
@@ -1036,14 +1150,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     (a blank node such as `[ sh:path ex:p ]`) is evaluated as one (see
     *SHACL-AF node expressions* under Added). It wrote the shapes graph's own
     blank node into the data graph.
-  - The dataset `PUT /api/datasets/{id}/shapes` and SHACL Studio create and
-    `PUT …/turtle` refuse (422) an activation flag (`sh:uniqueLang`,
-    `sh:closed`, `sh:deactivated`, `sh:qualifiedValueShapesDisjoint`,
-    `sh:optional`) written as `"1"`/`"0"^^xsd:boolean`: storage reads it back as
-    `true`/`false`, which SHACL does not mean. The derived-datatype deviation
-    (`"5"^^xsd:nonNegativeInteger` reads back as `xsd:integer`, so
-    `sh:datatype xsd:nonNegativeInteger` rejects it) is now documented in
-    `docs/shacl.md` and pinned by tests; it is not fixed.
   - The IDS export reports a second `sh:pattern` or `sh:hasValue` and
     deactivated shapes as losses instead of exporting them with another meaning.
 - **SHACL-SPARQL constraints check blank nodes and follow the spec's result
@@ -1263,8 +1369,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     the reasoner examples passed a string to `TripleStore::open`, which takes a
     `Path`. The OWL 2 DL docs said keys of more than two properties produce no
     `owl:sameAs`; the RL phase merges keys of any length.
-  - `docs/datatypes.md` said XSD literals keep their lexical form; numbers,
-    booleans and dates come back canonical (`"01"^^xsd:integer` → `"1"`).
   - `docs/dcat.md` said VoID statistics are computed per request and never
     cached; they are cached until the next write.
   - `docs/data-modeling.md` said SHACL-on-write covers LDP writes; it covers

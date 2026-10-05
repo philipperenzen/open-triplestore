@@ -64,6 +64,15 @@ _:n2 ex:name "Anon" ; ex:tag "t" .
 
 ex:s1 ex:text "Hello World" ; ex:num 3 .
 ex:s2 ex:text "a.b" ; ex:num 1 .
+
+# Lexical forms the store keeps as written: value-equal, different terms.
+ex:l1 ex:lex "05"^^xsd:integer ; ex:link "5"^^xsd:int .
+ex:l2 ex:lex 5 ; ex:link 5 .
+ex:l3 ex:lex "5"^^xsd:int ; ex:link "05"^^xsd:integer .
+ex:l4 ex:lex "+5"^^xsd:integer .
+ex:l5 ex:lex "1.50"^^xsd:decimal .
+ex:l6 ex:lex "1"^^xsd:boolean .
+ex:l7 ex:lex "2020-04-02T10:30:00+00:00"^^xsd:dateTime .
 "#;
 
 const NAMED: &str = r#"
@@ -663,6 +672,91 @@ fn construct_and_blank_nodes() {
             "bnode",
             "SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE { ?s ex:tag ?t }",
             false,
+        ),
+    ]);
+}
+
+/// The store keeps lexical forms and derived datatypes, so a term passed
+/// through (BIND, IF, COALESCE, sameTerm, joins, DISTINCT, GROUP BY) must stay
+/// the exact term, while expressions still compare values.
+#[test]
+fn lexical_forms_and_derived_datatypes() {
+    check(&[
+        ("bind", "SELECT ?s ?x WHERE { ?s ex:lex ?o BIND(?o AS ?x) }", false),
+        (
+            "bind",
+            "SELECT ?s ?x WHERE { ?s ex:lex ?o BIND(IF(BOUND(?o), ?o, 0) AS ?x) }",
+            false,
+        ),
+        (
+            "bind",
+            "SELECT ?s ?x WHERE { ?s ex:lex ?o BIND(COALESCE(?missing, ?o) AS ?x) }",
+            false,
+        ),
+        (
+            "bind",
+            "SELECT ?x WHERE { BIND(\"05\"^^xsd:integer AS ?x) }",
+            false,
+        ),
+        ("bind", "SELECT ?s ?x WHERE { ?s ex:lex ?o BIND(?o + 0 AS ?x) }", false),
+        (
+            "sameterm",
+            "SELECT ?s WHERE { ?s ex:lex ?o FILTER(sameTerm(?o, 5)) }",
+            false,
+        ),
+        (
+            "sameterm",
+            "SELECT ?s WHERE { ?s ex:lex ?o FILTER(sameTerm(?o, \"05\"^^xsd:integer)) }",
+            false,
+        ),
+        (
+            "sameterm",
+            "SELECT ?s WHERE { ?s ex:lex ?o FILTER(sameTerm(?o + 0, 5)) }",
+            false,
+        ),
+        ("value", "SELECT ?s WHERE { ?s ex:lex ?o FILTER(?o = 5) }", false),
+        ("value", "SELECT ?s WHERE { ?s ex:lex ?o FILTER(?o = true) }", false),
+        (
+            "value",
+            "SELECT ?s WHERE { ?s ex:lex ?o FILTER(?o = \"2020-04-02T10:30:00Z\"^^xsd:dateTime) }",
+            false,
+        ),
+        (
+            "value",
+            "SELECT ?s WHERE { ?s ex:when ?w FILTER(?w = \"2020-04-02T10:30:00Z\"^^xsd:dateTime) }",
+            false,
+        ),
+        ("pattern", "SELECT ?s WHERE { ?s ex:lex 5 }", false),
+        ("pattern", "SELECT ?s WHERE { ?s ex:lex \"05\"^^xsd:integer }", false),
+        ("pattern", "SELECT ?s WHERE { ?s ex:lex true }", false),
+        ("join", "SELECT ?a ?b WHERE { ?a ex:lex ?v . ?b ex:link ?v }", false),
+        ("distinct", "SELECT DISTINCT ?o WHERE { ?s ex:lex ?o }", false),
+        (
+            "group",
+            "SELECT ?o (COUNT(*) AS ?n) WHERE { ?s ex:lex ?o } GROUP BY ?o",
+            false,
+        ),
+        (
+            "aggregate",
+            "SELECT (COUNT(DISTINCT ?o) AS ?n) (MIN(?o) AS ?lo) (MAX(?o) AS ?hi) WHERE { ?s ex:lex ?o FILTER(isNumeric(?o)) }",
+            false,
+        ),
+        (
+            "order",
+            "SELECT ?s ?o WHERE { ?s ex:lex ?o FILTER(isNumeric(?o)) } ORDER BY ?o ?s",
+            true,
+        ),
+        ("type", "SELECT ?s ?d WHERE { ?s ex:lex ?o BIND(DATATYPE(?o) AS ?d) }", false),
+        ("type", "SELECT ?s ?t WHERE { ?s ex:lex ?o BIND(STR(?o) AS ?t) }", false),
+        (
+            "datetimestamp",
+            "SELECT ?s ?y WHERE { ?s ex:when ?w BIND(YEAR(?w) AS ?y) }",
+            false,
+        ),
+        (
+            "datetimestamp",
+            "SELECT ?s WHERE { ?s ex:when ?w } ORDER BY ?w ?s",
+            true,
         ),
     ]);
 }

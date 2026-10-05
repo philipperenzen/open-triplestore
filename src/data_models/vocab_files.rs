@@ -54,11 +54,6 @@ pub struct BundledFile {
     pub remarks: Option<&'static str>,
     /// The rights holder allows no altered copies.
     pub no_derivatives: bool,
-    /// How the store's canonical form of typed literals makes some of this
-    /// file's triples read differently from the file (the values are the
-    /// same), starting with how many triples it touches; `None` when it
-    /// touches none. A test checks it against a round-trip through the store.
-    pub store_form: Option<&'static str>,
 }
 
 const DEFAULTS: BundledFile = BundledFile {
@@ -73,7 +68,6 @@ const DEFAULTS: BundledFile = BundledFile {
     changes: None,
     remarks: None,
     no_derivatives: false,
-    store_form: None,
 };
 
 /// `bundled!("rdf.ttl", { field: value, … })`: a [`BundledFile`] whose `ttl` is
@@ -213,7 +207,6 @@ pub const PROV: BundledFile = bundled!("prov.ttl", {
     status: Some("Defined in PROV-O: The PROV Ontology, W3C Recommendation 30 April 2013, \
                   https://www.w3.org/TR/2013/REC-prov-o-20130430/"),
     source: "https://www.w3.org/ns/prov-o.ttl",
-    store_form: Some("1 xsd:nonNegativeInteger literal (an OWL cardinality) reads as xsd:integer"),
 });
 
 pub const SKOS: BundledFile = bundled!("skos.ttl", {
@@ -261,7 +254,6 @@ pub const VCARD: BundledFile = bundled!("vcard.ttl", {
                   Interest Group Note 22 May 2014, \
                   https://www.w3.org/TR/2014/NOTE-vcard-rdf-20140522/"),
     source: "http://www.w3.org/2006/vcard/ns",
-    store_form: Some("12 xsd:nonNegativeInteger literals (OWL cardinalities) read as xsd:integer"),
 });
 
 pub const VS: BundledFile = bundled!("vs.ttl", {
@@ -384,7 +376,6 @@ pub const SSN: BundledFile = bundled!("ssn.ttl", {
                   2017, by the joint W3C/OGC Spatial Data on the Web Working Group, \
                   https://www.w3.org/TR/2017/REC-vocab-ssn-20171019/"),
     source: "https://github.com/w3c/sdw/blob/gh-pages/ssn/integrated/ssn.ttl",
-    store_form: Some("25 xsd:nonNegativeInteger literals (OWL cardinalities) read as xsd:integer"),
 });
 
 // ─── Creative Commons Attribution 4.0 ──────────────────────────────────────────
@@ -395,7 +386,6 @@ pub const DCAT: BundledFile = bundled!("dcat.ttl", {
     status: Some("Defined in Data Catalog Vocabulary (DCAT) - Version 3, W3C Recommendation \
                   22 August 2024, https://www.w3.org/TR/2024/REC-vocab-dcat-3-20240822/"),
     source: "https://www.w3.org/ns/dcat.ttl",
-    store_form: Some("1 xsd:nonNegativeInteger literal (an OWL cardinality) reads as xsd:integer"),
 });
 
 pub const DCAT_2: BundledFile = bundled!("dcat/2.0.0.ttl", {
@@ -404,7 +394,6 @@ pub const DCAT_2: BundledFile = bundled!("dcat/2.0.0.ttl", {
     status: Some("Defined in Data Catalog Vocabulary (DCAT) - Version 2, W3C Recommendation \
                   04 February 2020, https://www.w3.org/TR/2020/REC-vocab-dcat-2-20200204/"),
     source: "https://www.w3.org/ns/dcat2.ttl",
-    store_form: Some("1 xsd:nonNegativeInteger literal (an OWL cardinality) reads as xsd:integer"),
 });
 
 pub const TIME: BundledFile = bundled!("time.ttl", {
@@ -415,7 +404,6 @@ pub const TIME: BundledFile = bundled!("time.ttl", {
                   joint W3C/OGC Spatial Data on the Web Working Group, \
                   https://www.w3.org/TR/2017/REC-owl-time-20171019/"),
     source: "https://www.w3.org/2006/time.ttl",
-    store_form: Some("32 xsd:nonNegativeInteger literals (OWL cardinalities) read as xsd:integer"),
 });
 
 pub const DCTERMS: BundledFile = bundled!("dcterms.ttl", {
@@ -447,7 +435,6 @@ pub const BIBO: BundledFile = bundled!("bibo.ttl", {
     source: "http://purl.org/ontology/bibo/",
     remarks: Some("The original Structured Dynamics specification was licensed CC BY 1.0 and \
                    stated that its copyright does not apply to the ontology terms."),
-    store_form: Some("10 xsd:nonNegativeInteger literals (OWL cardinalities) read as xsd:integer"),
 });
 
 pub const CC: BundledFile = bundled!("cc.ttl", {
@@ -567,7 +554,6 @@ pub const PAV: BundledFile = bundled!("pav.ttl", {
     copyright: &["Copyright 2008-2014 Massachusetts General Hospital; Harvard Medical School; \
                   Balboa Systems; University of Manchester."],
     source: "http://purl.org/pav/",
-    store_form: Some("2 xsd:dateTime literals read with the time zone Z instead of +00:00"),
 });
 
 /// The upstream repository's own file, converted from RDF/XML (it replaced
@@ -627,7 +613,6 @@ pub const SAREF: BundledFile = bundled!("saref.ttl", {
     source: "https://saref.etsi.org/core/v3.1.1/saref.ttl",
     remarks: Some("The licence's conditions and disclaimer, with ETSI's copyright notice, are in \
                    the full notice."),
-    store_form: Some("12 xsd:nonNegativeInteger literals (OWL cardinalities) read as xsd:integer"),
 });
 
 // ─── ISA Open Metadata Licence v1.1 ────────────────────────────────────────────
@@ -651,7 +636,6 @@ pub const LOCN: BundledFile = bundled!("locn.ttl", {
     source: "http://www.w3.org/ns/locn",
     remarks: Some("The notice above is the licence's \"No Warranty\" disclaimer, which every \
                    distribution must keep."),
-    store_form: Some("2 xsd:nonNegativeInteger literals (VOAF term counts) read as xsd:integer"),
 });
 
 // ─── IMBOR (Stichting CROW) ────────────────────────────────────────────────────
@@ -782,8 +766,7 @@ impl BundledFile {
         if !self.third_party {
             return None;
         }
-        let stored_copy =
-            seeded_stored_copy(self.path, self.no_derivatives, unchanged, self.store_form);
+        let stored_copy = seeded_stored_copy(self.path, self.no_derivatives, unchanged);
         Some(ContentAttribution {
             file: self.path.to_string(),
             licenses: self
@@ -810,33 +793,27 @@ impl BundledFile {
     }
 }
 
+/// The sentence a record's `stored_copy` carried, before the store kept
+/// lexical forms, for a copy whose typed literals the store had rewritten in a
+/// canonical form (" The store writes typed literals in its canonical form,
+/// the same values, so …"). The seeder checks such a copy again and restores
+/// it to the file's triples (`seed_vocab::check_copy`).
+pub const EARLIER_STORE_FORM_TEXT: &str = " The store writes typed literals in its canonical form";
+
 /// How a seeded copy of the bundled file `file` relates to that file, as its
 /// record's `stored_copy` says it: "unchanged" only for a copy the seeder has
 /// checked; otherwise that it may have been modified and is not the file.
-/// `store_form` is [`BundledFile::store_form`].
-pub fn seeded_stored_copy(
-    file: &str,
-    no_derivatives: bool,
-    unchanged: bool,
-    store_form: Option<&str>,
-) -> String {
-    let form = store_form
-        .map(|f| {
-            format!(
-                " The store writes typed literals in its canonical form, the same values, so {f}."
-            )
-        })
-        .unwrap_or_default();
+pub fn seeded_stored_copy(file: &str, no_derivatives: bool, unchanged: bool) -> String {
     match (unchanged, no_derivatives) {
         (true, true) => format!(
             "The store holds the triples of the bundled file vocab/{file}, unchanged: the seeder \
-             checked them against the file.{form} API downloads are serialized anew from them, a \
+             checked them against the file. API downloads are serialized anew from them, a \
              change of format only, and carry no added notice: the licence and attribution \
              travel in their HTTP Link headers and in this record."
         ),
         (true, false) => format!(
             "The store holds the triples of the bundled file vocab/{file}, unchanged: the seeder \
-             checked them against the file.{form} It keeps no comments, so this record carries \
+             checked them against the file. It keeps no comments, so this record carries \
              the file's header; API downloads are serialized anew from the triples and start \
              with that header as a comment."
         ),
@@ -877,7 +854,7 @@ pub fn source_phrase(file: &str) -> String {
 /// modified, so it is not its source.
 pub fn edited_stored_copy(a: &ContentAttribution) -> String {
     if is_bundled_path(&a.file) {
-        return seeded_stored_copy(&a.file, a.no_derivatives, false, None);
+        return seeded_stored_copy(&a.file, a.no_derivatives, false);
     }
     let withheld = if a.no_derivatives {
         " The licence allows no altered copies, so the registry serves this copy to no one \
@@ -967,7 +944,7 @@ pub fn download_preamble(a: &ContentAttribution, notice_url: &str) -> Option<Str
     if a.unchanged {
         out.push_str(&format!(
             "# ---- Served by Open Triplestore: the triples of {source}, unchanged, serialized \
-             anew from the store (which writes typed literals in their canonical form). ----\n"
+             anew from the store. ----\n"
         ));
     } else {
         out.push_str(&format!(
@@ -1148,42 +1125,49 @@ mod tests {
         assert!(!old.unchanged);
     }
 
-    /// `store_form` names every file whose triples the store writes in
-    /// another form, with the number of triples it touches.
+    /// The store holds every bundled file exactly: a round trip through it
+    /// changes no triple (it used to rewrite typed literals in a canonical
+    /// form, which ten of the files have).
     #[test]
-    fn store_form_matches_a_round_trip_through_the_store() {
+    fn every_file_round_trips_through_the_store_exactly() {
         use crate::data_models::{content_digest as cd, upload};
+        let mut earlier_form = Vec::new();
         for f in ALL {
             let parsed = cd::quads_as_triples(
                 &upload::parse_rdf(f.ttl.as_bytes(), "text/turtle", f.path).unwrap(),
             );
-            let stored: std::collections::HashSet<String> = cd::as_stored(&parsed)
-                .unwrap()
-                .iter()
-                .map(|t| t.to_string())
-                .collect();
-            let touched = parsed
-                .iter()
-                .map(|t| t.to_string())
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .filter(|t| !stored.contains(t))
-                .count();
-            match f.store_form {
-                None => assert_eq!(
-                    touched, 0,
-                    "{}: the store rewrites {touched} triples",
-                    f.path
-                ),
-                Some(text) => {
-                    let n: usize = text.split(' ').next().unwrap().parse().unwrap();
-                    assert_eq!(n, touched, "{}: {text}", f.path);
-                }
+            let stored = cd::as_stored(&parsed).unwrap();
+            assert_eq!(
+                cd::compare_copy(&stored, &parsed),
+                cd::CopyForm::Exact,
+                "{}: the store rewrites triples",
+                f.path
+            );
+            if cd::earlier_store_form(&parsed) != parsed {
+                earlier_form.push(f.path);
             }
         }
+        // The files a copy of which an older store held differently, and
+        // which the seeder therefore checks once and restores.
+        earlier_form.sort_unstable();
+        assert_eq!(
+            earlier_form,
+            [
+                "bibo.ttl",
+                "dcat.ttl",
+                "dcat/2.0.0.ttl",
+                "locn.ttl",
+                "pav.ttl",
+                "prov.ttl",
+                "saref.ttl",
+                "ssn.ttl",
+                "time.ttl",
+                "vcard.ttl",
+            ]
+        );
         assert!(
-            IMBOR.store_form.is_none(),
-            "IMBOR is held exactly as CROW wrote it"
+            !earlier_form.contains(&IMBOR.path),
+            "IMBOR was always held exactly as CROW wrote it"
         );
     }
 

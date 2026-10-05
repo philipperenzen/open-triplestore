@@ -741,9 +741,12 @@ fn fetch(url: &str, etag: Option<&str>, report: &mut SyncReport) -> anyhow::Resu
     let parser = RdfParser::from_format(fmt)
         .with_base_iri(&doc.url)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    store
-        .load_from_reader(parser, body.as_bytes())
+    // Parsed here rather than by the store's loader so a JSON-LD page's
+    // remote @context goes through the document loader.
+    let quads = crate::jsonld::with_loader(parser.for_reader(body.as_bytes()))
+        .collect::<Result<Vec<_>, _>>()
         .map_err(|e| anyhow::anyhow!("<{}> is not valid RDF: {e}", doc.url))?;
+    store.extend(quads)?;
     Ok(Fetched::Page(Page {
         url: doc.url,
         store,

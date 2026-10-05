@@ -50,12 +50,13 @@ const FIXTURES: &str = "tests/fixtures/w3c-shacl";
 /// Removing an entry requires the test to actually pass (the ratchet asserts
 /// both directions). Keys are `<suite>/<path within the suite>`.
 ///
-/// Empirical baseline: 119 pass / 1 known-fail / 15 aux skips / 1 optional unsupported
+/// Empirical baseline: 120 pass / 0 known-fail / 15 aux skips / 1 optional unsupported
 const KNOWN_FAILURES: &[(&str, &str)] = &[
-    // core: 97 pass / 1 known-fail / 15 aux skips (was 46/52/15 before the
+    // core: 98 pass / 0 known-fail / 15 aux skips (was 46/52/15 before the
     // typed-term engine refactor — focus and value nodes are now oxigraph
-    // Terms end-to-end). See docs/conformance/shacl.md.
-    ("core/property/uniqueLang-002.ttl", "oxigraph's storage canonicalises \"1\"^^xsd:boolean to \"true\" (native value encoding), so the spec's literal-\"true\"-only activation of sh:uniqueLang is indistinguishable post-load"),
+    // Terms end-to-end — and 97/1/15 until the store kept literals as
+    // written: uniqueLang-002's "1"^^xsd:boolean read back as true). See
+    // docs/conformance/shacl.md.
     // sparql: 22 pass / 0 known-fail / 0 skips / 1 optional unsupported.
 ];
 
@@ -581,7 +582,7 @@ fn w3c_shacl_full_report_equality() {
     // A floor as well as a ratchet. The runner turns an unreadable or
     // unparseable file into a silent skip, so a Turtle-parser regression
     // would have turned every file into a skip and still passed the
-    // asserts above. 119 pass today (97 core + 22 sparql); 110 leaves
+    // asserts above. 120 pass today (98 core + 22 sparql); 110 leaves
     // headroom for suite churn.
     assert!(
         t.pass >= 110,

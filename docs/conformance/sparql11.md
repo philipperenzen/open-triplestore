@@ -38,9 +38,10 @@ sides are encoded as an RDF graph in the DAWG result-set vocabulary and
 canonicalised, so blank nodes are matched structurally; order is asserted only
 when the query has an outer `ORDER BY`); CONSTRUCT/DESCRIBE by graph
 isomorphism; updates by dataset isomorphism. Numeric literals are compared by
-value (`"2.0"^^xsd:decimal` equals `"2"^^xsd:decimal`), because the engine
-stores numerics natively and writes them back in canonical form; every other
-literal by lexical form. Syntax tests assert parse success or failure only.
+value (`"2.0"^^xsd:decimal` equals `"2"^^xsd:decimal`): stored literals come
+back as written, but the engine prints a computed number in its canonical form,
+which the expected results may spell otherwise; every other literal by lexical
+form. Syntax tests assert parse success or failure only.
 
 **Not vendored:** the protocol, service-description, graph-store-protocol,
 result-format (`csv-tsv-res/`, `json-res/`) and entailment-regime

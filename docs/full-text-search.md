@@ -43,9 +43,13 @@ The rewrite only ever *prunes* candidates — the original `FILTER` still decide
 
 ## Index maintenance
 
-The index is built at startup, after the boot seed chain, and rebuilt lazily after writes: any import, SPARQL Update or Graph Store Protocol write marks it stale, and the next query that can actually use the index rebuilds it first. Rebuilds are whole-store and serialised, so concurrent queries share one rebuild rather than racing.
+The index is built at startup, after the boot seed chain, and then follows **every** write to the store, whichever feature made it: SPARQL Update, the Graph Store Protocol, imports, LDP, RDF Patch, RML runs, SHACL rule output, entailment materialisation, replication, LDES sync, repair and the rest.
 
-A rebuild runs on a background thread pool, so the query that triggers it waits but the rest of the server keeps serving. On a large store the first text query after a big import can therefore be slow — trigger a reindex explicitly after bulk loading if that matters.
+- SPARQL Update, Graph Store Protocol writes and imports update the index as part of the write (the writer pays): the exact quads of an `INSERT DATA` / `DELETE DATA` or a Graph Store `POST`, otherwise the graphs written.
+- Every other write is recorded by the store itself: each mutating store operation notes what it is about to change — its exact quads when it holds them, otherwise the graphs it writes — in the store's *search journal*. Before the index answers a query it catches up on the journal: touched graphs are re-indexed, touched quads are reconciled against the store. Nothing has to remember the index, so a new write path cannot leave it stale.
+- Only a write that cannot say what it changed (`CLEAR ALL`, an update whose template graph is a variable, a streamed default-graph load) makes the next text query rebuild the whole index.
+
+`text:search` / `ft:search` waits for the catch-up, so it always sees the writes that preceded it. A `CONTAINS` / `STRSTARTS` push-down does not wait: while the index lags it is skipped for that query (the query is still answered correctly, just without the accelerator) and a background thread catches up. Rebuilds and catch-ups are serialised, so concurrent queries share one rather than racing. On a large store the first text query after an unbounded write can be slow — trigger a reindex explicitly after such a write if that matters.
 
 An admin can force a rebuild with `POST /api/text-search/reindex`.
 

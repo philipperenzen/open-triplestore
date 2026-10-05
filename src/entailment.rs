@@ -1,7 +1,8 @@
 //! Selectable entailment regimes per dataset, with a materialisation toggle.
 //!
 //! A dataset picks a regime (`rdfs`, `owl2-rl`, `owl2-el`, `owl2-ql`,
-//! `owl2-dl`) and a mode:
+//! `owl2-dl`, `skos`) and a mode. `skos` is OWL 2 RL with the bundled SKOS
+//! schema as an extra premise (see [`crate::reasoning::skos`]):
 //!
 //! * `materialize` — after every write to one of the dataset's graphs, the
 //!   regime is re-run over the dataset's conformance layer (its instance,
@@ -30,7 +31,7 @@ use crate::reasoning::identity::IdentityPolicy;
 use crate::server::error::AppError;
 use crate::server::AppState;
 
-pub const REGIMES: &[&str] = &["rdfs", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl"];
+pub const REGIMES: &[&str] = &["rdfs", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl", "skos"];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EntailmentConfig {
@@ -244,6 +245,7 @@ pub fn run_for_dataset_with(
         .map_err(|e| AppError::Internal(e.to_string()))?
         .ok_or_else(|| AppError::NotFound(format!("dataset {dataset_id} not found")))?;
     let (sources, identity) = reasoning_sources(state, &ds);
+    let (sources, engine) = skos_premise(state, regime, sources)?;
     let target = dataset_entailment_graph(regime, dataset_id);
     if !extend {
         state
@@ -252,7 +254,17 @@ pub fn run_for_dataset_with(
             .map_err(|e| AppError::Internal(format!("clearing <{target}>: {e}")))?;
     }
     let outcome =
-        crate::server::routes::run_reasoner(state, regime, Some(sources), &target, identity.policy);
+        crate::server::routes::run_reasoner(state, engine, Some(sources), &target, identity.policy);
+    // What the run derived about the SKOS schema itself is pruned — after an
+    // inconsistent run too, whose consequences stay in the graph.
+    #[cfg(feature = "owl2-rl")]
+    if regime == crate::reasoning::skos::REGIME {
+        crate::reasoning::skos::prune_schema_closure(&state.store, &target).map_err(|e| {
+            AppError::Internal(format!(
+                "pruning the SKOS schema closure from <{target}>: {e}"
+            ))
+        })?;
+    }
     let n = state.store.graph_count_cached(Some(&target)).unwrap_or(0) as i64;
     // Which backend ran is known only from a successful run; a failed DL run
     // names the configured one.
@@ -261,7 +273,7 @@ pub fn run_for_dataset_with(
         .flatten();
     match outcome {
         Ok(run) => {
-            let consistent = crate::reasoning::common::checks_consistency(regime).then_some(true);
+            let consistent = crate::reasoning::common::checks_consistency(engine).then_some(true);
             let (backend, complete) = match &run {
                 Some(r) => (r.backend.clone(), r.complete),
                 None => (None, None),
@@ -438,6 +450,27 @@ pub fn schedule_background_run(state: &AppState, dataset_id: &str) {
             }
         }
     });
+}
+
+/// The sources and the engine regime a dataset regime runs as: `skos` is
+/// OWL 2 RL with the bundled SKOS schema loaded and added as a premise;
+/// every other regime runs as itself.
+fn skos_premise<'r>(
+    state: &AppState,
+    regime: &'r str,
+    sources: Vec<String>,
+) -> Result<(Vec<String>, &'r str), AppError> {
+    #[cfg(feature = "owl2-rl")]
+    if regime == crate::reasoning::skos::REGIME {
+        use crate::reasoning::skos;
+        skos::ensure_premise(&state.store)
+            .map_err(|e| AppError::Internal(format!("loading the SKOS schema premise: {e}")))?;
+        let mut sources = sources;
+        sources.push(skos::PREMISE_GRAPH.to_string());
+        return Ok((sources, skos::ENGINE_REGIME));
+    }
+    let _ = state;
+    Ok((sources, regime))
 }
 
 /// After a write to `graphs`: re-materialise every dataset in `materialize`

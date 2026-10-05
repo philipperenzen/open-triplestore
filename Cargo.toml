@@ -4,6 +4,11 @@
 # needed here. It still needs an optional dependency entry + feature flag
 # below, and a registration in `src/plugins.rs`, to actually be built in.
 members = [".", "opengraph", "plugins/*", "tools/*"]
+# The vendored Oxigraph crates (see vendor/README.md) are path dependencies
+# inside the workspace directory, which would otherwise make them members: they
+# would then be linted, formatted and tested as our own code, and their
+# dev-dependencies would enter Cargo.lock.
+exclude = ["vendor/oxigraph", "vendor/oxjsonld", "vendor/spareval"]
 resolver = "2"
 
 [package]
@@ -135,7 +140,9 @@ libc = "0.2"
 # (a mismatch splits e.g. oxrdf and breaks rdf-star feature unification).
 oxigraph = "0.5"
 oxrdf = "0.3"
-# XSD lexical-space checks for R2RML's ill-typed literals; the version Oxigraph itself uses.
+# XSD value types, the version Oxigraph itself uses: lexical-space checks for
+# R2RML's ill-typed literals, and the form an older store wrote typed literals in
+# (data_models::content_digest).
 oxsdatatypes = "0.2"
 # Needed only to name `Iri` in the federation service-handler trait; already in the tree.
 # Must stay on the oxiri line Oxigraph itself uses (0.2 as of oxigraph 0.5.11): the
@@ -347,6 +354,11 @@ percent-encoding = "2"
 # Software FIDO2 authenticator for passkey integration tests (no hardware).
 webauthn-authenticator-rs = { version = "0.5", features = ["softpasskey"] }
 webauthn-rs-proto = "0.5"
+# The JSON-LD processor behind oxigraph's RdfParser (vendored, see
+# vendor/README.md), called directly by tests/w3c_jsonld_api_manifests.rs for
+# the `rdfDirection` option RdfParser does not expose. No features here: its
+# `rdf-12` comes with ours through oxigraph.
+oxjsonld = "0.2.6"
 
 # Test targets that use probes the library only exports with `test-utils`
 # (`InProcessLeader`, `AppState::test_default_with_store`, `query_cache_len`).
@@ -403,3 +415,15 @@ debug = false
 # give it the same treatment so `cargo test` / `cargo nextest` link faster too.
 [profile.test.package."*"]
 debug = false
+
+# Oxigraph 0.5.11 and its SPARQL evaluator spareval 0.2.7, changed so typed
+# literals keep their lexical form and exact datatype (vendor/README.md has the
+# why, the diffs and how to rebase onto a new upstream release). Path patches,
+# not git ones, so cargo-deny's `unknown-git = "deny"` keeps holding; every
+# other crate of the oxigraph family (oxrdf, spargebra, sparopt, sparesults,
+# oxrocksdb-sys...) still comes from crates.io at the versions oxigraph 0.5.11
+# pins.
+[patch.crates-io]
+oxigraph = { path = "vendor/oxigraph" }
+oxjsonld = { path = "vendor/oxjsonld" }
+spareval = { path = "vendor/spareval" }

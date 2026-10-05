@@ -513,7 +513,14 @@ pub async fn bulk_import(
                     .map_err(|r| crate::shacl_studio::gate::summarize_report(&r, 5))
             }),
         };
-        let res = parse_and_load_bulk_gated(&store, inputs, authorize, before_replace, Some(&gate));
+        // Writer-pays (below): the import's writes are claimed, so the store's
+        // search journal does not hand them to the next search as well. A
+        // failed import drops the claim unhandled, which publishes whatever
+        // it may have written.
+        let claim = store.claim_search_index();
+        let res = claim.run(|| {
+            parse_and_load_bulk_gated(&store, inputs, authorize, before_replace, Some(&gate))
+        });
         if let Ok(ref r) = res {
             // Writer-pays text-index maintenance: refresh exactly the graphs
             // this import wrote (replace targets included — the delete+re-add
@@ -531,6 +538,7 @@ pub async fn bulk_import(
                     .name("import-archive-index".to_string())
                     .spawn(move || bg.refresh_text_index_graphs(&snapshots));
             }
+            claim.handled();
         }
         res
     })

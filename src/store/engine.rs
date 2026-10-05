@@ -20,6 +20,7 @@ use crate::store::changes::{self, ChangeLog, GraphDelta};
 use crate::store::parallel_mirror::ParallelMirror;
 use crate::store::query_cache::QueryCache;
 use crate::store::replication::{self, Replication, ReplicationConfig};
+use crate::store::search_journal::{self, SearchClaim, SearchJournal, Touched};
 use crate::store::telemetry::{QueryShape, Served, Telemetry};
 use opengraph::parallel::{self, ParClass};
 
@@ -374,17 +375,25 @@ pub struct TripleStore {
     /// large SHACL run's CPU). Shared by clones. See
     /// [`crate::shacl::sparql_functions`] for why nothing else is registered.
     user_functions: std::sync::Arc<std::sync::Mutex<crate::shacl::sparql_functions::Registry>>,
+    /// What each write touched, for the full-text index kept outside the
+    /// store. Shared by clones. See [`super::search_journal`].
+    search_journal: Arc<SearchJournal>,
 }
 
 /// Brackets one write to the store (see [`TripleStore::begin_write`]). Dropping
 /// it records the write's end on every return path, including errors.
-pub(crate) struct WriteGuard<'a>(&'a TripleStore, i64);
+pub(crate) struct WriteGuard<'a>(&'a TripleStore, i64, bool);
 
 impl Drop for WriteGuard<'_> {
     fn drop(&mut self) {
         self.0.parallel_mirror.write_finished();
         self.0.query_cache.invalidate();
         changes::leave_write();
+        // After the commit: the record reaches the text index's journal only
+        // once the data it describes is readable.
+        if self.2 {
+            search_journal::leave(&self.0.search_journal);
+        }
         // The outermost guard of a synchronous leader waits for its
         // followers' acknowledgement of what this write recorded.
         if self.0.parallel_mirror.writes_in_flight() == 0 {
@@ -541,6 +550,7 @@ impl TripleStore {
             user_functions: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::shacl::sparql_functions::Registry::from_env(),
             )),
+            search_journal: Arc::new(SearchJournal::default()),
         })
         .inspect(replication::spawn_follower_if_configured)
     }
@@ -575,6 +585,7 @@ impl TripleStore {
             user_functions: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::shacl::sparql_functions::Registry::from_env(),
             )),
+            search_journal: Arc::new(SearchJournal::default()),
         })
         .inspect(replication::spawn_follower_if_configured)
     }
@@ -671,7 +682,150 @@ impl TripleStore {
         self.parallel_mirror.write_started();
         self.query_cache.invalidate();
         changes::enter_write();
-        Ok(WriteGuard(self, self.changes.last_seq()))
+        let tracked = search_journal::enter(&self.search_journal);
+        Ok(WriteGuard(self, self.changes.last_seq(), tracked))
+    }
+
+    /// What the writes since the text index last looked touched (see
+    /// [`super::search_journal`]). Recording starts with
+    /// [`SearchJournal::enable`].
+    pub fn search_journal(&self) -> &Arc<SearchJournal> {
+        &self.search_journal
+    }
+
+    /// A claim for a writer that keeps the text index in step with its own
+    /// writes (see [`SearchClaim`]).
+    pub fn claim_search_index(&self) -> SearchClaim {
+        SearchClaim::new(self.search_journal.clone())
+    }
+
+    /// Record that the open write may change `graphs` (`None` = default graph).
+    fn touch_graphs(&self, graphs: impl IntoIterator<Item = Option<String>>) {
+        if !self.search_journal.enabled() {
+            return;
+        }
+        search_journal::record(
+            &self.search_journal,
+            Touched {
+                graphs: graphs.into_iter().collect(),
+                ..Touched::default()
+            },
+        );
+    }
+
+    /// Record that the open write may insert or delete `quads`.
+    fn touch_quads<'q>(&self, quads: impl IntoIterator<Item = &'q Quad>) {
+        if !self.search_journal.enabled() {
+            return;
+        }
+        // Past the per-write cap only the graphs are kept, so a bulk load
+        // never copies its quads for this.
+        let mut touched = Touched::default();
+        for q in quads {
+            if touched.quads.len() < search_journal::MAX_WRITE_QUADS {
+                touched.quads.push(q.clone());
+            } else {
+                touched.graphs.insert(search_journal::graph_key(q));
+            }
+        }
+        if !touched.graphs.is_empty() {
+            let spilled = std::mem::take(&mut touched.quads);
+            touched
+                .graphs
+                .extend(spilled.iter().map(search_journal::graph_key));
+        }
+        search_journal::record(&self.search_journal, touched);
+    }
+
+    /// Record that the open write cannot bound what it changes.
+    fn touch_all(&self) {
+        if !self.search_journal.enabled() {
+            return;
+        }
+        search_journal::record(
+            &self.search_journal,
+            Touched {
+                all: true,
+                ..Touched::default()
+            },
+        );
+    }
+
+    /// Record an update's effect: its exact quads when known, else its
+    /// statically known target graphs (whole-graph operations on named
+    /// graphs included), else everything.
+    fn touch_update(
+        &self,
+        sparql: &str,
+        exact: Option<(&[Quad], &[Quad])>,
+        targets: Option<&[Option<String>]>,
+    ) {
+        if !self.search_journal.enabled() {
+            return;
+        }
+        match (exact, targets) {
+            (Some((ins, del)), _) => self.touch_quads(ins.iter().chain(del)),
+            (None, Some(targets)) => self.touch_graphs(targets.iter().cloned()),
+            (None, None) => match Self::search_update_targets(sparql) {
+                Some(targets) => self.touch_graphs(targets),
+                None => self.touch_all(),
+            },
+        }
+    }
+
+    /// The graphs an update may change, as the search journal needs them:
+    /// [`Self::static_update_targets`] plus `CLEAR` / `DROP` / `LOAD` of one
+    /// graph (an entailment re-run clears its graph every time, which must
+    /// not cost a whole-store text rebuild). `None` for `ALL` / `NAMED`
+    /// targets, a variable template graph or a parse miss.
+    fn search_update_targets(sparql: &str) -> Option<Vec<Option<String>>> {
+        use opengraph::spargebra::algebra::GraphTarget;
+        use opengraph::spargebra::term::{GraphName, GraphNamePattern};
+        use opengraph::spargebra::GraphUpdateOperation;
+
+        let parsed = crate::sparql::parser().parse_update(sparql).ok()?;
+        let ground = |g: &GraphName| match g {
+            GraphName::NamedNode(nn) => Some(nn.as_str().to_string()),
+            GraphName::DefaultGraph => None,
+        };
+        let mut targets: Vec<Option<String>> = Vec::new();
+        for op in &parsed.operations {
+            match op {
+                GraphUpdateOperation::InsertData { data } => {
+                    targets.extend(data.iter().map(|q| ground(&q.graph_name)));
+                }
+                GraphUpdateOperation::DeleteData { data } => {
+                    targets.extend(data.iter().map(|q| ground(&q.graph_name)));
+                }
+                GraphUpdateOperation::DeleteInsert { delete, insert, .. } => {
+                    for g in delete
+                        .iter()
+                        .map(|q| &q.graph_name)
+                        .chain(insert.iter().map(|q| &q.graph_name))
+                    {
+                        match g {
+                            GraphNamePattern::NamedNode(nn) => {
+                                targets.push(Some(nn.as_str().to_string()))
+                            }
+                            GraphNamePattern::DefaultGraph => targets.push(None),
+                            GraphNamePattern::Variable(_) => return None,
+                        }
+                    }
+                }
+                GraphUpdateOperation::Clear { graph, .. }
+                | GraphUpdateOperation::Drop { graph, .. } => match graph {
+                    GraphTarget::NamedNode(nn) => targets.push(Some(nn.as_str().to_string())),
+                    GraphTarget::DefaultGraph => targets.push(None),
+                    GraphTarget::NamedGraphs | GraphTarget::AllGraphs => return None,
+                },
+                GraphUpdateOperation::Load { destination, .. } => targets.push(ground(destination)),
+                // An empty graph has no literals.
+                GraphUpdateOperation::Create { .. } => {}
+            }
+        }
+        targets.sort();
+        targets.dedup();
+        Some(targets)
     }
 
     /// Writes currently in progress (between `begin_write` and its guard's drop).
@@ -1228,12 +1382,23 @@ impl TripleStore {
         let targets = Self::static_update_targets(sparql);
         // A ground update is simulated first (probes, not a scan), so its
         // row is the exact net delta; anything else is scanned or unknown.
-        let exact = if self.changes.enabled() && targets.is_some() {
+        // The text index wants the same delta for a small update (a commit
+        // record, a registry row): reconciling its quads is far cheaper than
+        // re-reading the graph it lands in.
+        let for_search = self.search_journal.enabled() && sparql.len() <= 64 * 1024;
+        let exact = if (self.changes.enabled() || for_search) && targets.is_some() {
             self.ground_update_delta(sparql)
         } else {
             None
         };
         let prepared = self.query_options().parse_update(sparql)?;
+        self.touch_update(
+            sparql,
+            exact
+                .as_ref()
+                .map(|(_, ins, del)| (ins.as_slice(), del.as_slice())),
+            targets.as_deref(),
+        );
         self.execute_update_captured(
             "update",
             prepared,
@@ -1555,6 +1720,7 @@ impl TripleStore {
         }
         let targets = Self::static_update_targets(sparql);
         let prepared = self.query_options().for_update(parsed);
+        self.touch_update(sparql, None, targets.as_deref());
         self.execute_update_captured("update_scoped", prepared, targets.as_deref(), None)?;
         match targets {
             Some(targets) => self
@@ -1642,6 +1808,7 @@ impl TripleStore {
                 dataset.set_default_graph(default.clone());
             }
         }
+        self.touch_update(sparql, None, targets.as_deref());
         self.execute_update_captured("update_over", prepared, targets.as_deref(), None)?;
         match targets {
             Some(targets) => self
@@ -1810,6 +1977,21 @@ impl TripleStore {
             Self::static_update_targets(sparql)
         };
         let prepared = self.query_options().parse_update(sparql)?;
+        if self.search_journal.enabled() {
+            match &exact {
+                Some((_, ins, del)) => self.touch_quads(ins.iter().chain(del)),
+                None => match Self::search_update_targets(sparql) {
+                    Some(t) => self.touch_graphs(
+                        t.into_iter()
+                            .chain(affected_iris.iter().map(|g| Some(g.clone()))),
+                    ),
+                    None if !full_rebuild && !affected_iris.is_empty() => {
+                        self.touch_graphs(affected_iris.iter().map(|g| Some(g.clone())))
+                    }
+                    None => self.touch_all(),
+                },
+            }
+        }
         self.execute_update_captured(
             "update_targeted",
             prepared,
@@ -2022,6 +2204,10 @@ impl TripleStore {
         let exact = ground
             .as_ref()
             .map(|(_, ins, del)| (ins.as_slice(), del.as_slice()));
+        if self.search_journal.enabled() {
+            let joined = statements.join(" ;\n");
+            self.touch_update(&joined, exact, targets.as_deref());
+        }
         let pre_count = self.pre_count();
         let intent = self
             .changes
@@ -2086,12 +2272,19 @@ impl TripleStore {
     ) -> Result<(), StoreError> {
         let _w = self.begin_write()?;
         // Fast path: nothing to rewrite and no forced graph → stream directly.
-        if self.blank_node_mode == BlankNodeMode::Preserve && to_graph.is_none() {
+        // JSON-LD takes the parse below: the bulk loader parses by itself and
+        // has no document loader for remote contexts.
+        if self.blank_node_mode == BlankNodeMode::Preserve
+            && to_graph.is_none()
+            && !matches!(format, RdfFormat::JsonLd { .. })
+        {
             // oxigraph 0.5: the bulk loader stages batches and only persists them on
             // an explicit `commit()` — dropping it without committing loses the data.
             // Streamed straight into the store: the delta is never
             // materialised, so the row is an honest store-scoped unknown.
             let parser = Self::parser_for(format, base_iri)?;
+            // Streamed: the graphs are only known once the data is in.
+            self.touch_all();
             let intent = self.changes.begin("load_reader", None, &|_| None);
             let mut loader = self.store.bulk_loader();
             if let Err(e) = loader.load_from_reader(parser, reader) {
@@ -2142,10 +2335,10 @@ impl TripleStore {
     ) -> Result<Vec<Quad>, StoreError> {
         // Embedded graph names from NQuads/TriG are preserved; triple formats
         // land in the default graph. Parse errors are propagated.
-        let mut quads: Vec<Quad> = Self::parser_for(format, base_iri)?
-            .for_reader(reader)
-            .map(|r| r.map_err(|e| StoreError::Parse(e.to_string())))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut quads: Vec<Quad> =
+            crate::jsonld::with_loader(Self::parser_for(format, base_iri)?.for_reader(reader))
+                .map(|r| r.map_err(|e| StoreError::Parse(e.to_string())))
+                .collect::<Result<Vec<_>, _>>()?;
 
         // Force everything into the target graph if one was requested.
         if let Some(graph_iri) = to_graph {
@@ -2221,6 +2414,10 @@ impl TripleStore {
                 (graphs, deltas)
             }
         };
+        match &new_quads {
+            Some(fresh) => self.touch_quads(fresh),
+            None => self.touch_graphs(targets.iter().cloned()),
+        }
         let pre_count = self.pre_count();
         let intent = self.changes.begin("load", Some(&targets), &pre_count);
         let mut loader = self.store.bulk_loader();
@@ -2686,6 +2883,7 @@ impl TripleStore {
         if graph_iri.is_none() {
             Self::reject_named_graphs(&quads)?;
         }
+        self.touch_graphs([graph_iri.map(str::to_string)]);
 
         // An empty target (a first PUT, the boot-time seed) has nothing a
         // reader could observe half-replaced and nothing a crash could lose,
@@ -2834,6 +3032,7 @@ impl TripleStore {
             .quads_for_pattern(None, None, None, Some(graph_name))
             .collect::<Result<_, _>>()?;
         let target = graph_iri.map(str::to_string);
+        self.touch_graphs([target.clone()]);
         let pre_count = self.pre_count();
         let intent = self.changes.begin(
             "graph_store_delete",
@@ -2885,6 +3084,8 @@ impl TripleStore {
             NamedNodeRef::new(iri)
                 .map_err(|e| StoreError::Parse(format!("Invalid IRI '{}': {}", iri, e)))?;
         }
+
+        self.touch_graphs(graph_iris.iter().map(|g| Some(g.to_string())));
 
         // Build a single SPARQL UPDATE with all DROP SILENT GRAPH statements.
         let sparql: String = graph_iris
@@ -2955,6 +3156,7 @@ impl TripleStore {
             graphs.sort();
             graphs.dedup();
             let pre_count = self.pre_count();
+            self.touch_quads(&quads);
             let intent = self
                 .changes
                 .begin("bulk_insert_quads", Some(&graphs), &pre_count);
@@ -3043,6 +3245,7 @@ impl TripleStore {
     ) -> Result<(), StoreError> {
         let _apply = replication::ApplyGuard::enter();
         let _w = self.begin_write()?;
+        self.touch_quads(added.iter().chain(removed));
         let mut tx = self.store.start_transaction()?;
         let (mut fresh, mut gone) = (0i64, 0i64);
         for q in added {
@@ -3087,6 +3290,7 @@ impl TripleStore {
                 graphs.push(g);
             }
         }
+        self.touch_quads(ops.iter().map(QuadOp::quad));
         let pre_count = self.pre_count();
         let intent = self.changes.begin("patch", Some(&graphs), &pre_count);
         let mut tx = self.store.start_transaction()?;
@@ -3157,6 +3361,7 @@ impl TripleStore {
 
     pub fn store_quad(&self, quad: Quad) -> Result<(), StoreError> {
         let _w = self.begin_write()?;
+        self.touch_quads([&quad]);
         let graph = Self::graph_key_of(&quad);
         let pre_count = self.pre_count();
         let intent =

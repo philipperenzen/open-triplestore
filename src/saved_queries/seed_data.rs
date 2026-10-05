@@ -962,7 +962,7 @@ const CAPABILITIES_JSONLD: &str = r#"{
     { "@id": "ots:owlrl",          "@type": "Standard", "title": "OWL 2 RL",                               "conformance": "Partial" },
     { "@id": "ots:owldl",          "@type": "Standard", "title": "OWL 2 DL",                               "conformance": "Full" },
     { "@id": "ots:geosparql",      "@type": "Standard", "title": "GeoSPARQL 1.1",                          "conformance": "Partial" },
-    { "@id": "ots:shaclcore",      "@type": "Standard", "title": "SHACL Core",                             "conformance": "Partial" },
+    { "@id": "ots:shaclcore",      "@type": "Standard", "title": "SHACL Core",                             "conformance": "Full" },
     { "@id": "ots:shacladv",       "@type": "Standard", "title": "SHACL Advanced (AF / SPARQL)",           "conformance": "Partial" },
     { "@id": "ots:shaclc",         "@type": "Standard", "title": "SHACL-C",                                "conformance": "Partial" },
     { "@id": "ots:opm",            "@type": "Standard", "title": "OPM (Ontology for Property Management)", "conformance": "Partial" },
@@ -975,6 +975,9 @@ const CAPABILITIES_JSONLD: &str = r#"{
     { "@id": "ots:rml",            "@type": "Standard", "title": "RML / R2RML",                            "conformance": "Partial" },
     { "@id": "ots:shex",           "@type": "Standard", "title": "ShEx",                                   "conformance": "Partial" },
     { "@id": "ots:swrl",           "@type": "Standard", "title": "SWRL",                                   "conformance": "Partial" },
+    { "@id": "ots:textsearch",     "@type": "Standard", "title": "SPARQL + full-text search (Tantivy)",    "conformance": "Full" },
+    { "@id": "ots:skos",           "@type": "Standard", "title": "SKOS",                                   "conformance": "Full" },
+    { "@id": "ots:jsonld",         "@type": "Standard", "title": "JSON-LD 1.1",                            "conformance": "Partial" },
     { "@id": "ots:jwt",        "@type": "AuthMethod", "title": "JSON Web Tokens (JWT)" },
     { "@id": "ots:oauth",      "@type": "AuthMethod", "title": "OAuth 2.0 / OIDC" },
     { "@id": "ots:saml",       "@type": "AuthMethod", "title": "SAML 2.0 SSO" }
