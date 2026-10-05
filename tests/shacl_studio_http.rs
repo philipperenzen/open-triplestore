@@ -536,3 +536,83 @@ async fn a_database_error_finding_the_gates_refuses_the_write() {
         "a refused PUT must not land in the graph"
     );
 }
+
+// ─── Upload lint: non-canonical booleans on activation flags ─────────────────
+
+/// The store keeps booleans as values, so `"1"^^xsd:boolean` reads back as
+/// `true` — but SHACL activates `sh:uniqueLang`, `sh:closed`, `sh:deactivated`
+/// … only for the literal `true` (W3C core/property/uniqueLang-002). The
+/// engine cannot tell the forms apart once stored, so the shapes uploads
+/// refuse them: Studio create and PUT, and the dataset's `PUT /shapes`.
+#[tokio::test]
+async fn a_non_canonical_boolean_on_an_activation_flag_is_refused_at_upload() {
+    use open_triplestore::auth::models::{OwnerType, Visibility};
+    let (state, token) = admin_state();
+    let app = test_app(state.clone());
+    let ambiguous = SHAPES.replace(
+        "sh:targetClass ex:Person ;",
+        "sh:targetClass ex:Person ; sh:closed \"1\"^^<http://www.w3.org/2001/XMLSchema#boolean> ;",
+    );
+
+    // Studio create.
+    let (st, _, txt) = json_req(
+        &app,
+        Method::POST,
+        "/api/shacl/shape-graphs",
+        &token,
+        json!({ "name": "people", "visibility": "private", "turtle": ambiguous }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "create: {txt}");
+    assert!(txt.contains("sh:closed"), "{txt}");
+
+    // Studio PUT: refused, and the stored shapes are unchanged.
+    let id = create_shape_graph(&app, &token, SHAPES).await;
+    let uri = format!("/api/shacl/shape-graphs/{id}/turtle");
+    let (st, _, txt) = send(&app, Method::PUT, &uri, &token, "text/turtle", &ambiguous).await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "PUT: {txt}");
+    let canonical = ambiguous.replace("\"1\"^^<http://www.w3.org/2001/XMLSchema#boolean>", "true");
+    let (st, _, txt) = send(&app, Method::PUT, &uri, &token, "text/turtle", &canonical).await;
+    assert!(
+        st.is_success(),
+        "the canonical form is accepted: {st} {txt}"
+    );
+
+    // The dataset's own shapes graph.
+    state
+        .auth_db
+        .create_organisation("o1", "Acme", "acme", None, None)
+        .unwrap();
+    state
+        .auth_db
+        .create_dataset(
+            "d1",
+            "DS",
+            None,
+            OwnerType::Organisation,
+            "o1",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    let (st, _, txt) = send(
+        &app,
+        Method::PUT,
+        "/api/datasets/d1/shapes",
+        &token,
+        "text/turtle",
+        &ambiguous,
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "dataset PUT: {txt}");
+    let (st, _, txt) = send(
+        &app,
+        Method::PUT,
+        "/api/datasets/d1/shapes",
+        &token,
+        "text/turtle",
+        &canonical,
+    )
+    .await;
+    assert!(st.is_success(), "dataset PUT, canonical: {st} {txt}");
+}

@@ -356,6 +356,14 @@ const BUILTINS: &[Builtin] = &[
         admin_only: false,
         sort: 82,
     },
+    Builtin {
+        slug: "repair",
+        title: "Repair Proposals",
+        category: "Reasoning & Validation",
+        body: include_str!("../../docs/repair.md"),
+        admin_only: false,
+        sort: 83,
+    },
     // ── Security ──
     Builtin {
         slug: "auth",

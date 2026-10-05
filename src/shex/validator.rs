@@ -6,33 +6,113 @@
 
 use std::collections::{HashMap, HashSet};
 
-use oxigraph::model::NamedNodeRef;
+use oxigraph::model::{
+    GraphNameRef, NamedNode, NamedNodeRef, NamedOrBlankNodeRef, Quad, TermRef, Triple,
+};
 use tracing::debug;
 
 use super::report::{ShExReport, ShExResult, ShExStatus};
 use super::schema::*;
 use crate::store::TripleStore;
 
-/// Validate focus nodes against shapes in a ShEx schema.
-///
-/// `shape_map` maps shape IRIs to lists of focus node IRIs to validate.
-/// If `shape_map` is empty, uses the schema's `start` shape (if any) and
-/// validates all nodes that match the relevant triple patterns.
+/// The graphs a validation reads.
+#[derive(Debug, Clone)]
+pub enum GraphScope {
+    /// Every graph, the default graph included: an admin's view of the store.
+    All,
+    /// These named graphs, merged, and nothing else.
+    Graphs(Vec<NamedNode>),
+}
+
+impl GraphScope {
+    /// The named graphs among `iris`, in a stable order. A name that is not an
+    /// IRI can hold no quads and is dropped.
+    pub fn named(iris: impl IntoIterator<Item = String>) -> Self {
+        let mut graphs: Vec<NamedNode> = iris
+            .into_iter()
+            .filter_map(|g| NamedNode::new(g).ok())
+            .collect();
+        graphs.sort();
+        graphs.dedup();
+        GraphScope::Graphs(graphs)
+    }
+}
+
+/// The store as one validation reads it: the triples of its scope's graphs.
+struct Data<'a> {
+    store: &'a TripleStore,
+    scope: &'a GraphScope,
+}
+
+impl Data<'_> {
+    /// The distinct triples matching the pattern in the scope's graphs (a
+    /// triple held by two graphs is one triple of the merged data).
+    fn triples(
+        &self,
+        subject: Option<NamedOrBlankNodeRef<'_>>,
+        predicate: Option<NamedNodeRef<'_>>,
+        object: Option<TermRef<'_>>,
+    ) -> Vec<Triple> {
+        let quads: Box<dyn Iterator<Item = Quad> + '_> = match self.scope {
+            GraphScope::All => Box::new(
+                self.store
+                    .store()
+                    .quads_for_pattern(subject, predicate, object, None)
+                    .flatten(),
+            ),
+            GraphScope::Graphs(graphs) => Box::new(graphs.iter().flat_map(move |g| {
+                self.store
+                    .store()
+                    .quads_for_pattern(
+                        subject,
+                        predicate,
+                        object,
+                        Some(GraphNameRef::NamedNode(g.as_ref())),
+                    )
+                    .flatten()
+            })),
+        };
+        let mut seen = HashSet::new();
+        quads
+            .map(Triple::from)
+            .filter(|t| seen.insert(t.clone()))
+            .collect()
+    }
+}
+
+/// [`validate_in`] over the whole store.
 pub fn validate(
     store: &TripleStore,
     schema: &ShExSchema,
     shape_map: &HashMap<String, Vec<String>>,
 ) -> ShExReport {
+    validate_in(store, &GraphScope::All, schema, shape_map)
+}
+
+/// Validate focus nodes against shapes in a ShEx schema, reading only the
+/// graphs of `scope`: focus nodes are found, and triples matched, there and
+/// nowhere else.
+///
+/// `shape_map` maps shape IRIs to lists of focus node IRIs to validate.
+/// If `shape_map` is empty, uses the schema's `start` shape (if any) and
+/// validates all nodes that match the relevant triple patterns.
+pub fn validate_in(
+    store: &TripleStore,
+    scope: &GraphScope,
+    schema: &ShExSchema,
+    shape_map: &HashMap<String, Vec<String>>,
+) -> ShExReport {
+    let data = &Data { store, scope };
     let mut results = Vec::new();
     let mut visited = HashSet::new();
 
     if shape_map.is_empty() {
         // If no explicit shape map, validate all shapes against nodes found via patterns
         for shape_decl in &schema.shapes {
-            let focus_nodes = find_candidate_nodes(store, &shape_decl.shape_expr);
+            let focus_nodes = find_candidate_nodes(data, &shape_decl.shape_expr);
             for node in &focus_nodes {
                 let status =
-                    evaluate_shape_expr(store, schema, node, &shape_decl.shape_expr, &mut visited);
+                    evaluate_shape_expr(data, schema, node, &shape_decl.shape_expr, &mut visited);
                 results.push(ShExResult {
                     focus_node: node.clone(),
                     shape: shape_decl.id.clone(),
@@ -61,7 +141,7 @@ pub fn validate(
             for node in nodes {
                 visited.clear();
                 let status =
-                    evaluate_shape_expr(store, schema, node, &shape_decl.shape_expr, &mut visited);
+                    evaluate_shape_expr(data, schema, node, &shape_decl.shape_expr, &mut visited);
                 results.push(ShExResult {
                     focus_node: node.clone(),
                     shape: shape_iri.clone(),
@@ -81,7 +161,7 @@ pub fn validate(
 
 /// Find candidate focus nodes for a shape expression by looking at its
 /// triple constraints' predicates.
-fn find_candidate_nodes(store: &TripleStore, expr: &ShapeExpr) -> Vec<String> {
+fn find_candidate_nodes(data: &Data<'_>, expr: &ShapeExpr) -> Vec<String> {
     let mut predicates = Vec::new();
     collect_predicates(expr, &mut predicates);
 
@@ -92,12 +172,8 @@ fn find_candidate_nodes(store: &TripleStore, expr: &ShapeExpr) -> Vec<String> {
     let mut nodes = HashSet::new();
     for pred in &predicates {
         if let Ok(pred_ref) = NamedNodeRef::new(pred.as_str()) {
-            for q in store
-                .store()
-                .quads_for_pattern(None, Some(pred_ref), None, None)
-                .flatten()
-            {
-                nodes.insert(q.subject.to_string());
+            for t in data.triples(None, Some(pred_ref), None) {
+                nodes.insert(t.subject.to_string());
             }
         }
     }
@@ -137,27 +213,27 @@ fn collect_predicates_from_te(te: &TripleExpr, predicates: &mut Vec<String>) {
 
 /// Evaluate a shape expression against a focus node.
 fn evaluate_shape_expr(
-    store: &TripleStore,
+    data: &Data<'_>,
     schema: &ShExSchema,
     focus_node: &str,
     expr: &ShapeExpr,
     visited: &mut HashSet<(String, String)>,
 ) -> ShExStatus {
     match expr {
-        ShapeExpr::NodeConstraint(nc) => evaluate_node_constraint(store, focus_node, nc),
+        ShapeExpr::NodeConstraint(nc) => evaluate_node_constraint(focus_node, nc),
 
         ShapeExpr::Shape {
             expression,
             closed,
             extra,
         } => evaluate_shape(
-            store, schema, focus_node, expression, *closed, extra, visited,
+            data, schema, focus_node, expression, *closed, extra, visited,
         ),
 
         ShapeExpr::ShapeAnd(exprs) => {
             let mut errors = Vec::new();
             for e in exprs {
-                match evaluate_shape_expr(store, schema, focus_node, e, visited) {
+                match evaluate_shape_expr(data, schema, focus_node, e, visited) {
                     ShExStatus::Conformant => {}
                     ShExStatus::NonConformant(msg) => errors.push(msg),
                 }
@@ -172,7 +248,7 @@ fn evaluate_shape_expr(
         ShapeExpr::ShapeOr(exprs) => {
             for e in exprs {
                 if matches!(
-                    evaluate_shape_expr(store, schema, focus_node, e, visited),
+                    evaluate_shape_expr(data, schema, focus_node, e, visited),
                     ShExStatus::Conformant
                 ) {
                     return ShExStatus::Conformant;
@@ -182,7 +258,7 @@ fn evaluate_shape_expr(
         }
 
         ShapeExpr::ShapeNot(inner) => {
-            match evaluate_shape_expr(store, schema, focus_node, inner, visited) {
+            match evaluate_shape_expr(data, schema, focus_node, inner, visited) {
                 ShExStatus::Conformant => {
                     ShExStatus::NonConformant("NOT constraint violated: shape matched".to_string())
                 }
@@ -204,7 +280,7 @@ fn evaluate_shape_expr(
 
             match schema.find_shape(iri) {
                 Some(decl) => {
-                    evaluate_shape_expr(store, schema, focus_node, &decl.shape_expr, visited)
+                    evaluate_shape_expr(data, schema, focus_node, &decl.shape_expr, visited)
                 }
                 None => ShExStatus::NonConformant(format!("Referenced shape <{}> not found", iri)),
             }
@@ -216,7 +292,7 @@ fn evaluate_shape_expr(
 
 /// Evaluate a Shape body (triple expression + CLOSED/EXTRA).
 fn evaluate_shape(
-    store: &TripleStore,
+    data: &Data<'_>,
     schema: &ShExSchema,
     focus_node: &str,
     expression: &Option<TripleExpr>,
@@ -225,13 +301,13 @@ fn evaluate_shape(
     visited: &mut HashSet<(String, String)>,
 ) -> ShExStatus {
     // Get all outgoing triples for the focus node
-    let outgoing = get_outgoing_triples(store, focus_node);
+    let outgoing = get_outgoing_triples(data, focus_node);
 
     if let Some(te) = expression {
         // Track which triples are consumed by the triple expression
         let mut consumed = HashSet::new();
         let result = evaluate_triple_expr(
-            store,
+            data,
             schema,
             focus_node,
             te,
@@ -265,7 +341,7 @@ fn evaluate_shape(
 }
 
 /// Get outgoing triples (predicate, object) for a focus node.
-fn get_outgoing_triples(store: &TripleStore, focus_node: &str) -> Vec<(String, String)> {
+fn get_outgoing_triples(data: &Data<'_>, focus_node: &str) -> Vec<(String, String)> {
     let clean_node = focus_node
         .trim_start_matches('<')
         .trim_end_matches('>')
@@ -273,12 +349,8 @@ fn get_outgoing_triples(store: &TripleStore, focus_node: &str) -> Vec<(String, S
 
     let mut triples = Vec::new();
     if let Ok(subj) = NamedNodeRef::new(clean_node.as_str()) {
-        for q in store
-            .store()
-            .quads_for_pattern(Some(subj.into()), None, None, None)
-            .flatten()
-        {
-            triples.push((q.predicate.to_string(), q.object.to_string()));
+        for t in data.triples(Some(subj.into()), None, None) {
+            triples.push((t.predicate.to_string(), t.object.to_string()));
         }
     }
     triples
@@ -286,7 +358,7 @@ fn get_outgoing_triples(store: &TripleStore, focus_node: &str) -> Vec<(String, S
 
 /// Evaluate a triple expression against outgoing triples.
 fn evaluate_triple_expr(
-    store: &TripleStore,
+    data: &Data<'_>,
     schema: &ShExSchema,
     focus_node: &str,
     te: &TripleExpr,
@@ -306,7 +378,7 @@ fn evaluate_triple_expr(
             if *inverse {
                 // Inverse: check incoming triples
                 return evaluate_inverse_constraint(
-                    store, schema, focus_node, predicate, value_expr, *min, max, visited,
+                    data, schema, focus_node, predicate, value_expr, *min, max, visited,
                 );
             }
 
@@ -327,7 +399,7 @@ fn evaluate_triple_expr(
                 if p_clean == pred_bare || *p == pred_str || *p == *predicate {
                     // Check value constraint if present
                     if let Some(ve) = value_expr {
-                        let obj_status = evaluate_shape_expr(store, schema, obj, ve, visited);
+                        let obj_status = evaluate_shape_expr(data, schema, obj, ve, visited);
                         if matches!(obj_status, ShExStatus::Conformant) {
                             match_count += 1;
                             consumed.insert(i);
@@ -364,7 +436,7 @@ fn evaluate_triple_expr(
         TripleExpr::EachOf(exprs) => {
             for e in exprs {
                 let status =
-                    evaluate_triple_expr(store, schema, focus_node, e, outgoing, consumed, visited);
+                    evaluate_triple_expr(data, schema, focus_node, e, outgoing, consumed, visited);
                 if let ShExStatus::NonConformant(msg) = status {
                     return ShExStatus::NonConformant(msg);
                 }
@@ -376,7 +448,7 @@ fn evaluate_triple_expr(
             for e in exprs {
                 let mut local_consumed = consumed.clone();
                 let status = evaluate_triple_expr(
-                    store,
+                    data,
                     schema,
                     focus_node,
                     e,
@@ -397,7 +469,7 @@ fn evaluate_triple_expr(
 /// Evaluate an inverse triple constraint (^ prefix).
 #[allow(clippy::too_many_arguments)] // cohesive constraint inputs; a struct adds churn
 fn evaluate_inverse_constraint(
-    store: &TripleStore,
+    data: &Data<'_>,
     schema: &ShExSchema,
     focus_node: &str,
     predicate: &str,
@@ -418,15 +490,11 @@ fn evaluate_inverse_constraint(
         NamedNodeRef::new(pred_clean),
         NamedNodeRef::new(clean_node.as_str()),
     ) {
-        for q in store
-            .store()
-            .quads_for_pattern(None, Some(pred_ref), Some(obj_ref.into()), None)
-            .flatten()
-        {
+        for t in data.triples(None, Some(pred_ref), Some(obj_ref.into())) {
             if let Some(ve) = value_expr {
-                let subj_str = q.subject.to_string();
+                let subj_str = t.subject.to_string();
                 if matches!(
-                    evaluate_shape_expr(store, schema, &subj_str, ve, visited),
+                    evaluate_shape_expr(data, schema, &subj_str, ve, visited),
                     ShExStatus::Conformant
                 ) {
                     match_count += 1;
@@ -454,11 +522,7 @@ fn evaluate_inverse_constraint(
 }
 
 /// Evaluate a node constraint against a focus node value.
-fn evaluate_node_constraint(
-    _store: &TripleStore,
-    focus_node: &str,
-    nc: &NodeConstraint,
-) -> ShExStatus {
+fn evaluate_node_constraint(focus_node: &str, nc: &NodeConstraint) -> ShExStatus {
     // Node kind check
     if let Some(ref nk) = nc.node_kind {
         let is_iri = focus_node.starts_with('<') || focus_node.starts_with("http");
@@ -722,34 +786,32 @@ mod tests {
 
     #[test]
     fn test_node_constraint_iri() {
-        let store = TripleStore::in_memory().unwrap();
         let nc = NodeConstraint {
             node_kind: Some(NodeKind::IRI),
             ..Default::default()
         };
         assert!(matches!(
-            evaluate_node_constraint(&store, "<http://example.org/foo>", &nc),
+            evaluate_node_constraint("<http://example.org/foo>", &nc),
             ShExStatus::Conformant
         ));
         assert!(matches!(
-            evaluate_node_constraint(&store, "\"hello\"", &nc),
+            evaluate_node_constraint("\"hello\"", &nc),
             ShExStatus::NonConformant(_)
         ));
     }
 
     #[test]
     fn test_node_constraint_literal() {
-        let store = TripleStore::in_memory().unwrap();
         let nc = NodeConstraint {
             node_kind: Some(NodeKind::Literal),
             ..Default::default()
         };
         assert!(matches!(
-            evaluate_node_constraint(&store, "\"hello\"", &nc),
+            evaluate_node_constraint("\"hello\"", &nc),
             ShExStatus::Conformant
         ));
         assert!(matches!(
-            evaluate_node_constraint(&store, "<http://example.org/foo>", &nc),
+            evaluate_node_constraint("<http://example.org/foo>", &nc),
             ShExStatus::NonConformant(_)
         ));
     }
@@ -770,21 +832,20 @@ mod tests {
     /// does not occur inside the value), and `^abc` ACCEPTED "xxabcxx".
     #[test]
     fn pattern_facet_is_a_real_regex() {
-        let store = TripleStore::in_memory().unwrap();
         let anchored = NodeConstraint {
             string_facets: vec![StringFacet::Pattern("^[0-9]{4}$".to_string(), None)],
             ..Default::default()
         };
         assert!(
             matches!(
-                evaluate_node_constraint(&store, "\"1234\"", &anchored),
+                evaluate_node_constraint("\"1234\"", &anchored),
                 ShExStatus::Conformant
             ),
             "a conforming value must match its anchored pattern"
         );
         assert!(
             matches!(
-                evaluate_node_constraint(&store, "\"12345\"", &anchored),
+                evaluate_node_constraint("\"12345\"", &anchored),
                 ShExStatus::NonConformant(_)
             ),
             "anchoring must be honoured"
@@ -796,7 +857,7 @@ mod tests {
         };
         assert!(
             matches!(
-                evaluate_node_constraint(&store, "\"xxabcxx\"", &prefix),
+                evaluate_node_constraint("\"xxabcxx\"", &prefix),
                 ShExStatus::NonConformant(_)
             ),
             "a leading anchor must reject a mid-string occurrence"
@@ -806,7 +867,6 @@ mod tests {
     /// The `i` flag was parsed and then discarded.
     #[test]
     fn pattern_flags_are_applied() {
-        let store = TripleStore::in_memory().unwrap();
         let nc = NodeConstraint {
             string_facets: vec![StringFacet::Pattern(
                 "^abc$".to_string(),
@@ -815,7 +875,7 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(
-            evaluate_node_constraint(&store, "\"ABC\"", &nc),
+            evaluate_node_constraint("\"ABC\"", &nc),
             ShExStatus::Conformant
         ));
     }
@@ -824,13 +884,12 @@ mod tests {
     /// every value.
     #[test]
     fn an_invalid_pattern_does_not_accept_everything() {
-        let store = TripleStore::in_memory().unwrap();
         let nc = NodeConstraint {
             string_facets: vec![StringFacet::Pattern("[unclosed".to_string(), None)],
             ..Default::default()
         };
         assert!(matches!(
-            evaluate_node_constraint(&store, "\"anything\"", &nc),
+            evaluate_node_constraint("\"anything\"", &nc),
             ShExStatus::NonConformant(_)
         ));
     }
@@ -839,7 +898,6 @@ mod tests {
     /// evaluated nowhere — so a range constraint accepted any value.
     #[test]
     fn numeric_facets_are_enforced() {
-        let store = TripleStore::in_memory().unwrap();
         let nc = NodeConstraint {
             numeric_facets: vec![
                 NumericFacet::MinInclusive(0.0),
@@ -848,19 +906,19 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(
-            evaluate_node_constraint(&store, "\"42\"", &nc),
+            evaluate_node_constraint("\"42\"", &nc),
             ShExStatus::Conformant
         ));
         assert!(
             matches!(
-                evaluate_node_constraint(&store, "\"-5\"", &nc),
+                evaluate_node_constraint("\"-5\"", &nc),
                 ShExStatus::NonConformant(_)
             ),
             "a value below minInclusive must be rejected"
         );
         assert!(
             matches!(
-                evaluate_node_constraint(&store, "\"200\"", &nc),
+                evaluate_node_constraint("\"200\"", &nc),
                 ShExStatus::NonConformant(_)
             ),
             "a value above maxInclusive must be rejected"
@@ -869,17 +927,16 @@ mod tests {
 
     #[test]
     fn fraction_and_total_digits_are_enforced() {
-        let store = TripleStore::in_memory().unwrap();
         let nc = NodeConstraint {
             numeric_facets: vec![NumericFacet::FractionDigits(2)],
             ..Default::default()
         };
         assert!(matches!(
-            evaluate_node_constraint(&store, "\"1.25\"", &nc),
+            evaluate_node_constraint("\"1.25\"", &nc),
             ShExStatus::Conformant
         ));
         assert!(matches!(
-            evaluate_node_constraint(&store, "\"1.2345\"", &nc),
+            evaluate_node_constraint("\"1.2345\"", &nc),
             ShExStatus::NonConformant(_)
         ));
     }

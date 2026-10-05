@@ -115,6 +115,49 @@ Bundled binaries and frontend libraries:
     them all, with each package's licence and the verbatim text of every
     LICENSE, COPYING and NOTICE file it ships.
 
+OWL 2 DL reasoner sidecar image (sidecars/reasoner/; published separately as
+ghcr.io/philipperenzen/open-triplestore-reasoner, started by docker-compose.yml
+only under the `reasoner` profile; nothing below is linked into the
+Open Triplestore server binary or copied into its image):
+
+  The sidecar's own code (sidecars/reasoner/src) is part of Open Triplestore
+  and under its licence. It runs these components, shipped unmodified as
+  separate jar files in /app/lib/ of the image, so that a recipient can
+  replace any of them with a modified version (LGPL-3.0 section 4). The image
+  lists every jar with the licence its POM declares in /app/THIRD-PARTY.txt
+  (generated at build time by the license-maven-plugin), and carries the
+  licence texts in /app/LICENSES/. Most jars also carry their own LICENSE and
+  NOTICE files inside META-INF/.
+
+  - HermiT 1.4.5.519 (net.sourceforge.owlapi:org.semanticweb.hermit) — OWL 2
+    reasoner by the HermiT team, University of Oxford. GNU LGPL-3.0
+    (LICENSES/LGPL-3.0.txt, which incorporates LICENSES/GPL-3.0.txt).
+    Corresponding source: the sources jar published next to the binary on
+    Maven Central,
+    https://repo.maven.apache.org/maven2/net/sourceforge/owlapi/org.semanticweb.hermit/1.4.5.519/org.semanticweb.hermit-1.4.5.519-sources.jar
+    (project: https://github.com/phillord/hermit-reasoner).
+  - OWL API 5.1.9 (net.sourceforge.owlapi:owlapi-*), the version HermiT
+    1.4.5.519 is built against — The University of Manchester and the OWL API
+    contributors. Offered under the GNU LGPL-3.0 or the Apache License 2.0;
+    used under the Apache License 2.0 (LICENSES/Apache-2.0.txt). Source:
+    https://github.com/owlcs/owlapi, tag owlapi-parent-5.1.9 (commit
+    c92e9b4fd691da55283290234b9a11bfa4eff69c).
+  - GNU Trove 3.0.3 (net.sf.trove4j:trove4j) — GNU LGPL-2.1
+    (LICENSES/LGPL-2.1.txt). Corresponding source:
+    https://repo.maven.apache.org/maven2/net/sf/trove4j/trove4j/3.0.3/trove4j-3.0.3-sources.jar
+  - Eclipse RDF4J 2.3.2 (org.eclipse.rdf4j:rdf4j-*), Jakarta XML Binding API
+    2.3.3 and Jakarta Activation API 1.2.2 — Eclipse Distribution License 1.0
+    (LICENSES/EDL-1.0.txt), © Eclipse Foundation, Inc. and its licensors.
+  - Guava, Caffeine, Jackson, Apache Commons, Apache HttpComponents, Apache
+    Axiom, Apache Geronimo specs, Woodstox and the other jars in /app/lib/ —
+    Apache License 2.0 (LICENSES/Apache-2.0.txt); jsonld-java, dk.brics
+    automaton, jaxen, OBO Format — BSD-style (LICENSES/BSD-3-Clause.txt);
+    SLF4J and Checker Qual — MIT (LICENSES/MIT.txt); XZ for Java — public
+    domain. /app/THIRD-PARTY.txt is the complete list.
+  - The Java runtime in /opt/java: a jlink image of Eclipse Temurin 21
+    (OpenJDK) — GNU GPL-2.0 with the Classpath Exception; its licence and
+    notices are in /opt/java/legal/.
+
 Bundled datasets and vocabularies:
 
   - Vocabularies bundled in frontend/public/vocab/. The web UI serves them at
@@ -589,6 +632,18 @@ Bundled test data:
     bug tracking only: no results are published for these tests, because a
     subset of a W3C test suite does not allow claims of performance or the use
     of the name W3C (https://www.w3.org/copyright/test-suites-licenses/).
+  - W3C OWL 2 test cases, approved — tests/fixtures/w3c-owl2/approved/all.rdf,
+    byte-identical to https://www.w3.org/2009/11/owl-test/approved/all.rdf
+    (Last-Modified 18 Nov 2009; SHA-256 in
+    tests/fixtures/w3c-owl2/PROVENANCE.md), the approved test cases of the
+    OWL 2 Test Case Repository of the W3C OWL Working Group; each case names
+    its creator. Copyright © 2009 World Wide Web Consortium
+    <https://www.w3.org/>. https://www.w3.org/copyright/document-license-2023/
+    The file states no licence, so the W3C site's default applies: the W3C
+    Document License (LICENSES/W3C-Document-License-2023.txt), which permits
+    unmodified copies; details in tests/fixtures/w3c-owl2/LICENSE.md. Unmodified.
+    Used for development and regression testing only: the runner uses part of
+    the suite, so no results are published for it.
   - W3C SHACL test suite, core and sparql sections —
     tests/fixtures/w3c-shacl/core/ (121 files) and tests/fixtures/w3c-shacl/sparql/
     (28 files), from the W3C RDF Data Shapes Working Group; authors per
@@ -605,6 +660,16 @@ Bundled test data:
     core and 10 sparql files; the suite's root tests/manifest.ttl is not
     included; otherwise unmodified. The notice of changes is in
     tests/fixtures/w3c-shacl/PROVENANCE.md.
+  - TopQuadrant SHACL API, SHACL Advanced Features tests —
+    tests/fixtures/shacl-af-topquadrant/{expression,function,rules,target}/
+    (11 files). TopBraid SHACL API; original commit content Copyright
+    2015-2017 TopQuadrant Inc. (upstream NOTICE, copied unchanged as
+    tests/fixtures/shacl-af-topquadrant/NOTICE). From
+    https://github.com/TopQuadrant/shacl (src/test/resources/sh/tests),
+    commit 6687b48bd2c81eda369f224598061f87dce0d425. Unmodified. Apache-2.0;
+    upstream LICENSE in tests/fixtures/shacl-af-topquadrant/LICENSE-Apache-2.0.txt,
+    licence text also in LICENSES/Apache-2.0.txt; details in
+    tests/fixtures/shacl-af-topquadrant/LICENSE.md and PROVENANCE.md.
   - OGC GeoSPARQL 1.1 SHACL validator and example corpus —
     tests/fixtures/ogc-geosparql/validator.ttl and
     tests/fixtures/ogc-geosparql/examples/*.ttl (48 files). © Open Geospatial

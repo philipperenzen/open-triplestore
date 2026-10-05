@@ -20,6 +20,9 @@ pub enum AppError {
     UnsupportedMediaType(String),
     /// 422 Unprocessable Entity — SHACL validation failed
     ValidationFailed(crate::shacl::report::ValidationReport),
+    /// 422 Unprocessable Entity — the request was well-formed but its data
+    /// cannot be processed (an inconsistent ontology, say); the body says why
+    Unprocessable(serde_json::Value),
     /// 429 Too Many Requests — carries the Retry-After hint in seconds
     RateLimited {
         retry_after_secs: u64,
@@ -31,6 +34,9 @@ pub enum AppError {
     /// signals orchestration/clients that the request was aborted to protect the runtime,
     /// not that the input was malformed.
     ServiceUnavailable(String),
+    /// Any other status with a JSON body that says what happened (a reasoning
+    /// backend that is down, timed out or got too much input).
+    Status(StatusCode, serde_json::Value),
 }
 
 impl AppError {
@@ -44,7 +50,9 @@ impl AppError {
             | AppError::UnsupportedMediaType(m)
             | AppError::Internal(m)
             | AppError::ServiceUnavailable(m) => m.clone(),
-            AppError::Conflict(v) => v.to_string(),
+            AppError::Conflict(v) | AppError::Unprocessable(v) | AppError::Status(_, v) => {
+                v.to_string()
+            }
             AppError::RateLimited { message, .. } => message.clone(),
             AppError::ValidationFailed(_) => "SHACL validation failed".to_string(),
         }
@@ -67,12 +75,17 @@ impl IntoResponse for AppError {
                             "message": r.message,
                             "sourceShape": r.source_shape,
                             "sourceConstraint": r.source_constraint,
+                            "sourceConstraintComponent": r.source_constraint_component,
                         })
                     }).collect::<Vec<_>>(),
                 });
                 (StatusCode::UNPROCESSABLE_ENTITY, axum::Json(body)).into_response()
             }
             AppError::Conflict(body) => (StatusCode::CONFLICT, axum::Json(body)).into_response(),
+            AppError::Unprocessable(body) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, axum::Json(body)).into_response()
+            }
+            AppError::Status(status, body) => (status, axum::Json(body)).into_response(),
             AppError::RateLimited {
                 retry_after_secs,
                 message,
@@ -107,9 +120,43 @@ impl IntoResponse for AppError {
                     }
                     AppError::ValidationFailed(_)
                     | AppError::Conflict(_)
+                    | AppError::Unprocessable(_)
+                    | AppError::Status(..)
                     | AppError::RateLimited { .. } => unreachable!(),
                 };
                 (status, message).into_response()
+            }
+        }
+    }
+}
+
+impl AppError {
+    /// The status and JSON body this error answers with — for a background
+    /// job that stores the response instead of sending it. A server fault
+    /// keeps its message server-side, as over HTTP.
+    pub fn status_and_body(self) -> (StatusCode, serde_json::Value) {
+        let plain = |status: StatusCode, m: String| (status, serde_json::json!({ "error": m }));
+        match self {
+            AppError::Unprocessable(v) => (StatusCode::UNPROCESSABLE_ENTITY, v),
+            AppError::Conflict(v) => (StatusCode::CONFLICT, v),
+            AppError::Status(s, v) => (s, v),
+            AppError::BadRequest(m) => plain(StatusCode::BAD_REQUEST, m),
+            AppError::Unauthorized(m) => plain(StatusCode::UNAUTHORIZED, m),
+            AppError::Forbidden(m) => plain(StatusCode::FORBIDDEN, m),
+            AppError::NotFound(m) => plain(StatusCode::NOT_FOUND, m),
+            AppError::UnsupportedMediaType(m) => plain(StatusCode::UNSUPPORTED_MEDIA_TYPE, m),
+            AppError::ServiceUnavailable(m) => plain(StatusCode::SERVICE_UNAVAILABLE, m),
+            AppError::RateLimited { message, .. } => plain(StatusCode::TOO_MANY_REQUESTS, message),
+            AppError::ValidationFailed(_) => plain(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "SHACL validation failed".to_string(),
+            ),
+            AppError::Internal(m) => {
+                tracing::error!("Internal server error: {}", m);
+                plain(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".to_string(),
+                )
             }
         }
     }

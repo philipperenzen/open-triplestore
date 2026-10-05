@@ -78,19 +78,27 @@ System libraries (Debian/Ubuntu names; see [`.github/workflows/ci.yml`](.github/
 for the exact list): `libgeos-dev` (GeoSPARQL), and `libxmlsec1-dev` if you build the
 optional `saml` feature.
 
-```bash
-# Fast compile check (no binary)
-cargo check --all-features
+CI builds one explicit feature set, not `--all-features`: that would also turn on
+`sfcgal3d`, which needs the native SFCGAL ≥ 2.0 library (see
+[`docs/build-features.md`](docs/build-features.md)). Use the same set locally:
 
-# Build & run the server with all features enabled
-cargo build --features full
+```bash
+FEATURES=full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard
+
+# Fast compile check (no binary)
+cargo check --features "$FEATURES"
+
+# Build & run the server (the default features are `full`)
+cargo build
 ./target/debug/open-triplestore --bind 127.0.0.1 --port 7878 --data-dir ./data
 
-# Lint, format, test (these must pass in CI)
+# Format, lint, test — what CI runs; clippy warnings fail the build
 cargo fmt --all
-cargo clippy --all-features --all-targets
-cargo test --all-features
+cargo clippy --workspace --all-targets --features "$FEATURES" -- -D warnings
+cargo test --workspace --features "$FEATURES"
 ```
+
+Drop `saml` from the set if you have no `libxmlsec1`.
 
 > The optimised release build (`cargo build --release`) uses fat LTO and is slow.
 > For day-to-day work use `cargo check` / a debug build; use
@@ -116,6 +124,7 @@ cd frontend
 npm ci
 npm run dev      # dev server on :5173, proxies /api, /sparql, /store to :7878
 npm run lint
+npm run typecheck
 npm run test
 npm run build
 npm run e2e      # Playwright end-to-end (boots backend + frontend)
@@ -141,9 +150,9 @@ change.
 
 Before opening a PR, please make sure:
 
-- [ ] `cargo fmt --all` is clean and `cargo clippy --all-features --all-targets` passes.
-- [ ] `cargo test --all-features` passes (add/adjust tests for your change).
-- [ ] Frontend changes pass `npm run lint`, `npm run test`, and `npm run build`.
+- [ ] `cargo fmt --all` is clean and the clippy command above passes with `-D warnings`.
+- [ ] `cargo test --workspace` with the CI feature set passes (add/adjust tests for your change).
+- [ ] Frontend changes pass `npm run lint`, `npm run typecheck`, `npm run test`, and `npm run build`.
 - [ ] Docs are updated when behaviour or APIs change.
 - [ ] Commits are signed off (`-s`) for the DCO.
 - [ ] No secrets, `.env` files, or local data are committed (CI runs a secret scan).

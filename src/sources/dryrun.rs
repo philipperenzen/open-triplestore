@@ -144,6 +144,10 @@ pub struct DryRunRequest {
     /// proposal, and what the Studio editor sends between saves.
     pub rml: Option<String>,
     pub yarrrml: Option<String>,
+    /// The term-generation rules an unregistered mapping is previewed under:
+    /// `r2rml` (the default) or `legacy` — what it would be frozen with. A
+    /// registered version always runs under its own.
+    pub semantics: Option<String>,
     /// The shapes to validate against. Explicit, else the registered
     /// mapping's, else the model version's. Only a graph the caller may read
     /// applies (the rule `/sparql` applies, a Library entry they are shown, a
@@ -235,6 +239,11 @@ pub struct DryRunResponse {
     pub classification: Classification,
     pub entities: Vec<Entity>,
     pub warnings: Vec<String>,
+    /// Sampled rows whose values cannot become the terms the mapping asks for
+    /// (R2RML §4.3). The sample leaves those terms out; a run over the same
+    /// rows fails unless it runs with `onDataError: "skip"`. Absent when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_errors: Option<crate::rml::checks::DataErrors>,
 }
 
 // ───────────────────────────── Classification ─────────────────────────────
@@ -488,7 +497,10 @@ fn choose(
             .map_err(|e| bad(mappings::MappingError::Yarrrml(e.to_string()).to_string()))?,
         _ => unreachable!("counted above"),
     };
-    let rml = mappings::validate_rml(&turtle, &source.id).map_err(|e| bad(e.to_string()))?;
+    let semantics =
+        mappings::requested_semantics(body.semantics.as_deref()).map_err(|e| bad(e.to_string()))?;
+    let rml = mappings::validate_rml_as(&turtle, &source.id, semantics)
+        .map_err(|e| bad(e.to_string()))?;
     Ok(Chosen {
         rml,
         record: None,
@@ -749,6 +761,7 @@ pub async fn dry_run(
         rows: outcome.rows,
         triples: outcome.triples,
         maps: outcome.maps,
+        data_errors: (!outcome.data_errors.is_empty()).then_some(outcome.data_errors),
         shapes_graphs,
         report: report.map(|r| ReportSummary {
             conforms: r.conforms,
@@ -778,6 +791,8 @@ mod tests {
             value: None,
             source_shape: shape.to_string(),
             source_constraint: "sh:datatype".to_string(),
+            source_constraint_component: String::new(),
+            terms: Default::default(),
             message: "wrong datatype".to_string(),
         }
     }

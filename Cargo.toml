@@ -71,12 +71,10 @@ geometry3d      = ["dep:parry3d-f64"]
 ## .gitlab-ci.yml).
 sfcgal3d        = ["geometry3d", "dep:sfcgal"]
 ## SAML 2.0 SSO support (requires libxml2 + openssl via samael's xmlsec feature).
-## EXPERIMENTAL and deliberately NOT in `full`: the ACS handler has never been
-## verified against a real IdP and has a known request-ID validation defect
-## (`parse_base64_response` is handed a confirmation-method URN where samael
-## expects request IDs, with IdP-initiated responses disallowed), so no login
-## can currently succeed. Kept compiling — CI enables it explicitly — for
-## whoever picks it up; see docs/auth.md.
+## EXPERIMENTAL and deliberately NOT in `full`: the SP-initiated flow (login
+## route → AuthnRequest → ACS bound to that request) is covered by tests against
+## a simulated IdP (tests/security_federated.rs) but has not been verified
+## against a real one. CI enables it explicitly; see docs/auth.md.
 saml            = ["dep:samael", "samael/xmlsec"]
 ## Test helpers (AppState::test_default_with_store etc.)
 test-utils      = []
@@ -86,7 +84,8 @@ plugin-hello    = ["dep:ots-plugin-hello"]
 ## Accounts dashboard: users/orgs/entitlements + merged LLM usage at /ext/accounts-dashboard
 plugin-accounts-dashboard = ["dep:ots-plugin-accounts-dashboard"]
 ## Datasource connectors (docs/sources.md "Dialects"): PostgreSQL (`postgresql`),
-## MySQL / MariaDB (`mysql`) and SQL Server (`mssql`). Off by default.
+## MySQL / MariaDB (`mysql`) and SQL Server (`mssql`). Off by default and not in
+## `full`, but the Dockerfile's default CARGO_FEATURES puts all three in the image.
 plugin-postgres = ["dep:ots-plugin-postgres"]
 plugin-mysql    = ["dep:ots-plugin-mysql"]
 plugin-mssql    = ["dep:ots-plugin-mssql"]
@@ -136,6 +135,8 @@ libc = "0.2"
 # (a mismatch splits e.g. oxrdf and breaks rdf-star feature unification).
 oxigraph = "0.5"
 oxrdf = "0.3"
+# XSD lexical-space checks for R2RML's ill-typed literals; the version Oxigraph itself uses.
+oxsdatatypes = "0.2"
 # Needed only to name `Iri` in the federation service-handler trait; already in the tree.
 # Must stay on the oxiri line Oxigraph itself uses (0.2 as of oxigraph 0.5.11): the
 # `DefaultServiceHandler::handle` signature and `spargebra::Query::Select { base_iri }`
@@ -157,7 +158,8 @@ tower_governor = { version = "0.4", features = ["axum"] }
 
 # GeoSPARQL spatial operations
 geo = "0.28"
-geos = "11.0"
+# v3_11_0: `transform_xy` (geof:transform keeps Z and fails cleanly). GEOS >= 3.11.
+geos = { version = "11.0", features = ["v3_11_0"] }
 wkt = { version = "0.14", features = ["geo-types"] }
 
 # Serialization

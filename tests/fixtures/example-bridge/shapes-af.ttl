@@ -1,5 +1,5 @@
 # Reference example: a fictional arch bridge — SHACL Advanced Features
-# (SPARQL function, rule, custom target, node expression).
+# (SPARQL functions, rule, custom target, node expression).
 # Note: the rule/target/function bodies use the ex:prefixes declaration from shapes-sparql.ttl,
 # so load both shapes files together (or include the declaration alongside this one).
 @prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
@@ -45,10 +45,22 @@ ex:InspectionPriorityRule a sh:NodeShape ;
             }
         """ ] .
 
-### Expression constraint (node expression) — clearance height must be ≥ 9.10 m
+### SPARQL-based function with an ASK body — ex:atLeast(value, minimum)
+ex:atLeast a sh:SPARQLFunction ;
+    rdfs:comment "True when the value is at least the minimum."@en ;
+    sh:parameter [ sh:path ex:value ; sh:order 1 ] ;
+    sh:parameter [ sh:path ex:minimum ; sh:order 2 ] ;
+    sh:returnType xsd:boolean ;
+    sh:ask "ASK { FILTER ( $value >= $minimum ) }" .
+
+### Expression constraint (node expression) — clearance height must be ≥ 9.10 m.
+### A function expression over a path expression: the expression must produce
+### exactly { true } for each focus node (SHACL-AF §7).
 ex:ClearanceRequirementShape a sh:NodeShape ;
     sh:targetClass def:NavigableBridge ;
     sh:expression [
         sh:message "Clearance height must be at least 9.10 m."@en ;
-        sh:minExclusive 9.09 ;
-        sh:path ( def:clearanceHeight qudt:numericValue ) ] .
+        ex:atLeast (
+            [ sh:path ( def:clearanceHeight qudt:numericValue ) ]
+            9.10
+        ) ] .

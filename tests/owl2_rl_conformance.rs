@@ -55,7 +55,7 @@ fn ask_tg(store: &TripleStore, pattern: &str) -> bool {
 fn check_inconsistency(store: &TripleStore) -> bool {
     matches!(
         Owl2RLReasoner::new(store).materialize(),
-        Err(ReasoningError::Inconsistency(_))
+        Err(ReasoningError::Inconsistency { .. })
     )
 }
 
@@ -672,5 +672,523 @@ fn rule_inventory_is_the_whole_rl_rule_set() {
     for must in ["prp-key", "dt-type1", "dt-not-type", "eq-rep-s", "prp-trp"] {
         assert!(IMPLEMENTED_RULES.contains(&must), "{must} is implemented");
     }
-    assert_eq!(IMPLEMENTED_RULES.len(), 63);
+    assert_eq!(IMPLEMENTED_RULES.len(), 75);
+}
+
+// ─── Joins over two derived premises (unscoped runs) ─────────────────────────
+//
+// Without `with_sources` the rules used to read the unnamed default graph only,
+// while every consequence goes to the target graph. A rule whose premises are
+// both consequences therefore never fired. The rules now read the default
+// graph together with the target graph.
+
+/// The rule an inconsistent run names, or `None` if the run was consistent.
+fn inconsistent_rule(store: &TripleStore) -> Option<String> {
+    match Owl2RLReasoner::new(store).materialize() {
+        Err(ReasoningError::Inconsistency { rule, .. }) => Some(rule),
+        Err(e) => panic!("expected an inconsistency or success, got {e}"),
+        Ok(_) => None,
+    }
+}
+
+#[test]
+fn prp_trp_closes_a_three_hop_chain() {
+    let s = store_with(
+        "ex:partOf rdf:type owl:TransitiveProperty . \
+         ex:a ex:partOf ex:b . ex:b ex:partOf ex:c . ex:c ex:partOf ex:d .",
+    );
+    materialize(&s);
+    assert!(
+        ask_tg(&s, "ex:a ex:partOf ex:d ."),
+        "prp-trp: a→d joins two derived links (a→c, b→d) or a derived and an asserted one"
+    );
+}
+
+#[test]
+fn eq_trans_closes_a_three_link_same_as_chain() {
+    let s = store_with("ex:a owl:sameAs ex:b . ex:b owl:sameAs ex:c . ex:c owl:sameAs ex:d .");
+    materialize(&s);
+    assert!(ask_tg(&s, "ex:a owl:sameAs ex:d ."), "eq-trans: a = d");
+    assert!(
+        ask_tg(&s, "ex:d owl:sameAs ex:a ."),
+        "eq-sym over a derived a = d"
+    );
+}
+
+/// prp-eqp1/2 are listed as subsumed by scm-eqp1/2 + prp-spo1: that only holds
+/// when prp-spo1 sees the sub-property axioms scm-eqp derived.
+#[test]
+fn equivalent_property_propagates_both_ways() {
+    let s = store_with(
+        "ex:p owl:equivalentProperty ex:q . \
+         ex:x ex:p ex:y . ex:u ex:q ex:v .",
+    );
+    materialize(&s);
+    assert!(ask_tg(&s, "ex:x ex:q ex:y ."), "prp-eqp1");
+    assert!(ask_tg(&s, "ex:u ex:p ex:v ."), "prp-eqp2");
+}
+
+#[test]
+fn range_applies_through_a_sub_property() {
+    let s = store_with(
+        "ex:hasMother rdfs:subPropertyOf ex:hasParent . \
+         ex:hasParent rdfs:range ex:Person . \
+         ex:sam ex:hasMother ex:ann .",
+    );
+    materialize(&s);
+    assert!(
+        ask_tg(&s, "ex:ann rdf:type ex:Person ."),
+        "prp-rng over the derived ex:sam ex:hasParent ex:ann (or scm-rng2's derived range)"
+    );
+}
+
+#[test]
+fn derived_membership_of_owl_nothing_is_inconsistent() {
+    let s = store_with(
+        "ex:Unicorn rdfs:subClassOf ex:Impossible . \
+         ex:Impossible rdfs:subClassOf owl:Nothing . \
+         ex:u rdf:type ex:Unicorn .",
+    );
+    assert_eq!(
+        inconsistent_rule(&s).as_deref(),
+        Some("cls-nothing2"),
+        "ex:u rdf:type owl:Nothing is derived by cax-sco, and cls-nothing2 must see it"
+    );
+}
+
+#[test]
+fn derived_same_as_against_different_from_is_inconsistent() {
+    let s = store_with(
+        "ex:hasBirthMother rdf:type owl:FunctionalProperty . \
+         ex:kim ex:hasBirthMother ex:m1 . ex:kim ex:hasBirthMother ex:m2 . \
+         ex:m1 owl:differentFrom ex:m2 .",
+    );
+    assert_eq!(
+        inconsistent_rule(&s).as_deref(),
+        Some("eq-diff1"),
+        "prp-fp derives ex:m1 owl:sameAs ex:m2, and eq-diff1 must see it"
+    );
+}
+
+/// A run that reaches its iteration limit before the fixed point is an error,
+/// not a silently partial graph.
+#[test]
+fn hitting_the_iteration_limit_is_an_error() {
+    let s = store_with(
+        "ex:partOf rdf:type owl:TransitiveProperty . \
+         ex:a ex:partOf ex:b . ex:b ex:partOf ex:c . ex:c ex:partOf ex:d . ex:d ex:partOf ex:e .",
+    );
+    match Owl2RLReasoner::new(&s).with_max_iterations(1).materialize() {
+        Err(ReasoningError::NotConverged { iterations, .. }) => assert_eq!(iterations, 1),
+        other => panic!("expected NotConverged, got {other:?}"),
+    }
+    // With room to finish, the same input converges.
+    let r = Owl2RLReasoner::new(&s).materialize().unwrap();
+    assert!(r.iterations > 1, "{r:?}");
+    assert!(ask_tg(&s, "ex:a ex:partOf ex:e ."));
+}
+
+// ─── Remaining non-datatype rules (Tables 4–7, 9) ────────────────────────────
+
+#[test]
+fn eq_diff2_all_different_members_with_a_same_as_pair_is_inconsistent() {
+    let s = store_with(
+        "[] rdf:type owl:AllDifferent ; owl:members ( ex:a ex:b ex:c ) . \
+         ex:a owl:sameAs ex:c .",
+    );
+    assert_eq!(inconsistent_rule(&s).as_deref(), Some("eq-diff2"));
+}
+
+#[test]
+fn eq_diff3_distinct_members_with_a_derived_same_as_is_inconsistent() {
+    let s = store_with(
+        "[] rdf:type owl:AllDifferent ; owl:distinctMembers ( ex:a ex:b ex:c ) . \
+         ex:mother rdf:type owl:FunctionalProperty . \
+         ex:k ex:mother ex:b . ex:k ex:mother ex:c .",
+    );
+    assert_eq!(
+        inconsistent_rule(&s).as_deref(),
+        Some("eq-diff3"),
+        "prp-fp derives ex:b owl:sameAs ex:c"
+    );
+}
+
+/// An individual listed twice in owl:AllDifferent is different from itself:
+/// eq-ref makes it owl:sameAs itself whether or not those triples are written.
+#[test]
+fn eq_diff2_a_member_listed_twice_is_inconsistent() {
+    let s = store_with("[] rdf:type owl:AllDifferent ; owl:members ( ex:a ex:b ex:a ) .");
+    assert_eq!(inconsistent_rule(&s).as_deref(), Some("eq-diff2"));
+}
+
+#[test]
+fn all_different_members_without_same_as_are_consistent() {
+    let s = store_with(
+        "[] rdf:type owl:AllDifferent ; owl:members ( ex:a ex:b ex:c ) . \
+         ex:a ex:knows ex:b .",
+    );
+    assert_eq!(inconsistent_rule(&s), None);
+}
+
+#[test]
+fn different_from_itself_is_inconsistent() {
+    let s = store_with("ex:a owl:differentFrom ex:a .");
+    assert_eq!(inconsistent_rule(&s).as_deref(), Some("eq-diff1"));
+}
+
+#[test]
+fn prp_pdw_shared_pair_is_inconsistent() {
+    let s = store_with(
+        "ex:likes owl:propertyDisjointWith ex:hates . \
+         ex:sam ex:likes ex:kale . ex:sam ex:hates ex:kale .",
+    );
+    assert_eq!(inconsistent_rule(&s).as_deref(), Some("prp-pdw"));
+    let ok = store_with(
+        "ex:likes owl:propertyDisjointWith ex:hates . \
+         ex:sam ex:likes ex:kale . ex:sam ex:hates ex:beet .",
+    );
+    assert_eq!(inconsistent_rule(&ok), None);
+}
+
+#[test]
+fn prp_adp_shared_pair_is_inconsistent() {
+    let s = store_with(
+        "[] rdf:type owl:AllDisjointProperties ; owl:members ( ex:p ex:q ex:r ) . \
+         ex:sub rdfs:subPropertyOf ex:r . \
+         ex:x ex:q ex:y . ex:x ex:sub ex:y .",
+    );
+    assert_eq!(
+        inconsistent_rule(&s).as_deref(),
+        Some("prp-adp"),
+        "ex:x ex:r ex:y is derived by prp-spo1 and clashes with ex:q"
+    );
+    let ok = store_with(
+        "[] rdf:type owl:AllDisjointProperties ; owl:members ( ex:p ex:q ex:r ) . \
+         ex:x ex:p ex:y . ex:x ex:q ex:z .",
+    );
+    assert_eq!(inconsistent_rule(&ok), None);
+}
+
+#[test]
+fn prp_ap_declares_the_built_in_annotation_properties() {
+    let s = store_with("");
+    materialize(&s);
+    for ap in [
+        "rdfs:label",
+        "rdfs:comment",
+        "rdfs:seeAlso",
+        "rdfs:isDefinedBy",
+        "owl:deprecated",
+        "owl:versionInfo",
+        "owl:priorVersion",
+        "owl:backwardCompatibleWith",
+        "owl:incompatibleWith",
+    ] {
+        assert!(
+            ask_tg(&s, &format!("{ap} rdf:type owl:AnnotationProperty .")),
+            "prp-ap: {ap}"
+        );
+    }
+}
+
+#[test]
+fn cls_thing_and_cls_nothing1_declare_the_two_built_in_classes() {
+    let s = store_with("");
+    materialize(&s);
+    assert!(ask_tg(&s, "owl:Thing rdf:type owl:Class ."), "cls-thing");
+    assert!(
+        ask_tg(&s, "owl:Nothing rdf:type owl:Class ."),
+        "cls-nothing1"
+    );
+    // scm-cls then applies to both.
+    assert!(ask_tg(&s, "owl:Nothing rdfs:subClassOf owl:Thing ."));
+}
+
+#[test]
+fn scm_cls_derives_all_four_consequents() {
+    let s = store_with("ex:Person rdf:type owl:Class .");
+    materialize(&s);
+    assert!(ask_tg(&s, "ex:Person rdfs:subClassOf ex:Person ."));
+    assert!(ask_tg(&s, "ex:Person owl:equivalentClass ex:Person ."));
+    assert!(ask_tg(&s, "ex:Person rdfs:subClassOf owl:Thing ."));
+    assert!(ask_tg(&s, "owl:Nothing rdfs:subClassOf ex:Person ."));
+}
+
+#[test]
+fn scm_op_and_scm_dp_make_properties_their_own_sub_and_equivalent() {
+    let s =
+        store_with("ex:knows rdf:type owl:ObjectProperty . ex:age rdf:type owl:DatatypeProperty .");
+    materialize(&s);
+    for p in ["ex:knows", "ex:age"] {
+        assert!(
+            ask_tg(&s, &format!("{p} rdfs:subPropertyOf {p} .")),
+            "{p} ⊑ {p}"
+        );
+        assert!(
+            ask_tg(&s, &format!("{p} owl:equivalentProperty {p} .")),
+            "{p} ≡ {p}"
+        );
+    }
+}
+
+/// D2: eq-ref (every term owl:sameAs itself) is opt-in — it adds about one
+/// triple per term — and `sameas-off` skips it like the other equality rules.
+#[test]
+fn eq_ref_is_opt_in() {
+    let s = store_with("ex:x ex:p ex:y . ex:x ex:age 7 .");
+    materialize(&s);
+    assert!(
+        !ask_tg(&s, "ex:x owl:sameAs ex:x ."),
+        "eq-ref is off by default"
+    );
+
+    let s = store_with("ex:x ex:p ex:y . ex:x ex:age 7 .");
+    Owl2RLReasoner::new(&s)
+        .with_eq_ref(true)
+        .materialize()
+        .unwrap();
+    for t in ["ex:x", "ex:p", "ex:y", "ex:age"] {
+        assert!(ask_tg(&s, &format!("{t} owl:sameAs {t} .")), "eq-ref: {t}");
+    }
+
+    let s = store_with("ex:x ex:p ex:y .");
+    Owl2RLReasoner::new(&s)
+        .with_eq_ref(true)
+        .with_identity_policy(open_triplestore::reasoning::identity::IdentityPolicy::Off)
+        .materialize()
+        .unwrap();
+    assert!(
+        !ask_tg(&s, "ex:x owl:sameAs ex:x ."),
+        "sameas-off skips eq-ref"
+    );
+}
+
+#[test]
+fn cls_int1_matches_an_intersection_of_three() {
+    let s = store_with(
+        "ex:C owl:intersectionOf ( ex:A ex:B ex:D ) . \
+         ex:x rdf:type ex:A , ex:B , ex:D . \
+         ex:y rdf:type ex:A , ex:B .",
+    );
+    materialize(&s);
+    assert!(
+        ask_tg(&s, "ex:x rdf:type ex:C ."),
+        "cls-int1 over three members"
+    );
+    assert!(!ask_tg(&s, "ex:y rdf:type ex:C ."), "ex:y lacks ex:D");
+}
+
+#[test]
+fn prp_spo2_follows_a_chain_of_three() {
+    let s = store_with(
+        "ex:greatGrandParent owl:propertyChainAxiom ( ex:parent ex:parent ex:parent ) . \
+         ex:a ex:parent ex:b . ex:b ex:parent ex:c . ex:c ex:parent ex:d .",
+    );
+    materialize(&s);
+    assert!(ask_tg(&s, "ex:a ex:greatGrandParent ex:d ."));
+    assert!(!ask_tg(&s, "ex:a ex:greatGrandParent ex:c ."));
+}
+
+/// Blank-node class expressions are members like any other: scm-int, scm-uni
+/// and cax-adc used to keep IRI members only.
+#[test]
+fn blank_node_members_of_intersections_unions_and_disjoint_lists_count() {
+    let s = store_with(
+        "ex:C owl:intersectionOf ( ex:A [ owl:onProperty ex:p ; owl:someValuesFrom ex:B ] ) . \
+         ex:U owl:unionOf ( ex:A [ owl:onProperty ex:q ; owl:hasValue ex:v ] ) .",
+    );
+    materialize(&s);
+    // The consequence is in the target graph; the restriction it names is
+    // the asserted blank node in the default graph.
+    let ex = "http://example.org/";
+    let owl = "http://www.w3.org/2002/07/owl#";
+    let sco = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+    assert!(
+        ask(
+            &s,
+            &format!(
+                "ASK {{ GRAPH <{TG}> {{ <{ex}C> <{sco}> ?r }} \
+                 ?r <{owl}someValuesFrom> <{ex}B> . FILTER(isBlank(?r)) }}"
+            )
+        ),
+        "scm-int"
+    );
+    assert!(
+        ask(
+            &s,
+            &format!(
+                "ASK {{ GRAPH <{TG}> {{ ?r <{sco}> <{ex}U> }} \
+                 ?r <{owl}hasValue> <{ex}v> . FILTER(isBlank(?r)) }}"
+            )
+        ),
+        "scm-uni"
+    );
+
+    let s = store_with(
+        "[] rdf:type owl:AllDisjointClasses ; \
+            owl:members ( ex:A [ owl:onProperty ex:p ; owl:hasValue ex:v ] ) . \
+         ex:x rdf:type ex:A ; ex:p ex:v .",
+    );
+    assert_eq!(
+        inconsistent_rule(&s).as_deref(),
+        Some("cax-dw"),
+        "cax-adc pairs ex:A with the blank restriction, cls-hv2 types ex:x with it"
+    );
+}
+
+/// The spec's prp-npa rules have no `rdf:type owl:NegativePropertyAssertion`
+/// premise: the three NPA properties alone are enough.
+#[test]
+fn prp_npa_needs_no_type_triple() {
+    let s = store_with(
+        "[] owl:sourceIndividual ex:alice ; owl:assertionProperty ex:knows ; \
+            owl:targetIndividual ex:bob . \
+         ex:alice ex:knows ex:bob .",
+    );
+    assert_eq!(inconsistent_rule(&s).as_deref(), Some("prp-npa1"));
+    let s = store_with(
+        "[] owl:sourceIndividual ex:alice ; owl:assertionProperty ex:age ; \
+            owl:targetValue 30 . \
+         ex:alice ex:age 30 .",
+    );
+    assert_eq!(inconsistent_rule(&s).as_deref(), Some("prp-npa2"));
+}
+
+/// prp-trp on a cycle derives the reflexive triple; it used to be filtered out.
+#[test]
+fn prp_trp_closes_a_cycle() {
+    let s = store_with(
+        "ex:near rdf:type owl:TransitiveProperty . ex:a ex:near ex:b . ex:b ex:near ex:a .",
+    );
+    materialize(&s);
+    assert!(ask_tg(&s, "ex:a ex:near ex:a ."));
+    assert!(ask_tg(&s, "ex:b ex:near ex:b ."));
+}
+
+/// cls-hv1/2 run once (the duplicate prp-hv1/2 copies are gone): both
+/// directions still hold.
+#[test]
+fn has_value_types_and_fills_in_both_directions() {
+    let s = store_with(
+        "ex:Dutch owl:equivalentClass [ owl:onProperty ex:nationality ; owl:hasValue ex:NL ] . \
+         ex:a rdf:type ex:Dutch . ex:b ex:nationality ex:NL .",
+    );
+    materialize(&s);
+    assert!(ask_tg(&s, "ex:a ex:nationality ex:NL ."), "cls-hv1");
+    assert!(ask_tg(&s, "ex:b rdf:type ex:Dutch ."), "cls-hv2 + cax-eqc");
+}
+
+// ─── Inverse property expressions ([ owl:inverseOf P ]) ──────────────────────
+//
+// An inverse property expression is a blank node, and no RDF triple can have
+// a blank-node predicate. A premise `?u PE ?v` therefore reads `?v P ?u`, and
+// a conclusion `(x, [inverseOf P], y)` is written as `y P x`.
+
+#[test]
+fn inverse_in_a_some_values_from_restriction() {
+    let s = store_with(
+        "[ owl:onProperty [ owl:inverseOf ex:hasParent ] ; owl:someValuesFrom ex:Person ] \
+             rdfs:subClassOf ex:Parent . \
+         ex:kid ex:hasParent ex:mum . ex:kid rdf:type ex:Person .",
+    );
+    materialize(&s);
+    assert!(
+        ask_tg(&s, "ex:mum rdf:type ex:Parent ."),
+        "cls-svf1 over an inverse"
+    );
+}
+
+#[test]
+fn inverse_in_all_values_from_and_has_value_restrictions() {
+    let s = store_with(
+        "ex:Pet rdfs:subClassOf [ owl:onProperty [ owl:inverseOf ex:owns ] ; owl:allValuesFrom ex:Owner ] . \
+         ex:rex rdf:type ex:Pet . ex:ann ex:owns ex:rex . \
+         ex:AcmeAsset owl:equivalentClass \
+             [ owl:onProperty [ owl:inverseOf ex:owns ] ; owl:hasValue ex:acme ] . \
+         ex:truck rdf:type ex:AcmeAsset . ex:acme ex:owns ex:van .",
+    );
+    materialize(&s);
+    assert!(
+        ask_tg(&s, "ex:ann rdf:type ex:Owner ."),
+        "cls-avf over an inverse"
+    );
+    assert!(
+        ask_tg(&s, "ex:acme ex:owns ex:truck ."),
+        "cls-hv1 writes the inverse head"
+    );
+    assert!(
+        ask_tg(&s, "ex:van rdf:type ex:AcmeAsset ."),
+        "cls-hv2 over an inverse"
+    );
+}
+
+#[test]
+fn inverse_in_a_property_chain() {
+    let s = store_with(
+        "ex:sibling owl:propertyChainAxiom ( ex:hasParent [ owl:inverseOf ex:hasParent ] ) . \
+         ex:a ex:hasParent ex:m . ex:b ex:hasParent ex:m .",
+    );
+    materialize(&s);
+    assert!(
+        ask_tg(&s, "ex:a ex:sibling ex:b ."),
+        "prp-spo2 over an inverse link"
+    );
+    assert!(ask_tg(&s, "ex:b ex:sibling ex:a ."));
+}
+
+#[test]
+fn inverse_as_sub_and_super_property() {
+    let s = store_with(
+        "[ owl:inverseOf ex:hasParent ] rdfs:subPropertyOf ex:hasChild . \
+         ex:hasGuardian rdfs:subPropertyOf [ owl:inverseOf ex:guards ] . \
+         ex:kid ex:hasParent ex:mum . ex:kid ex:hasGuardian ex:aunt .",
+    );
+    materialize(&s);
+    assert!(
+        ask_tg(&s, "ex:mum ex:hasChild ex:kid ."),
+        "inverse sub-property"
+    );
+    assert!(
+        ask_tg(&s, "ex:aunt ex:guards ex:kid ."),
+        "inverse super-property"
+    );
+}
+
+/// A key member that is an inverse expression is a real condition. It used to
+/// be dropped, which made the key weaker and merged individuals it must not.
+#[test]
+fn inverse_in_a_key() {
+    let s = store_with(
+        "ex:Account owl:hasKey ( ex:bank [ owl:inverseOf ex:holds ] ) . \
+         ex:a1 rdf:type ex:Account ; ex:bank ex:b . ex:alice ex:holds ex:a1 . \
+         ex:a2 rdf:type ex:Account ; ex:bank ex:b . ex:alice ex:holds ex:a2 . \
+         ex:a3 rdf:type ex:Account ; ex:bank ex:b . ex:bob ex:holds ex:a3 .",
+    );
+    materialize(&s);
+    assert!(
+        ask_tg(&s, "ex:a1 owl:sameAs ex:a2 ."),
+        "same bank and holder"
+    );
+    assert!(
+        !ask_tg(&s, "ex:a1 owl:sameAs ex:a3 ."),
+        "same bank, different holder: the inverse key member must count"
+    );
+}
+
+#[test]
+fn inverse_property_characteristics_and_domain() {
+    let s = store_with(
+        "[ owl:inverseOf ex:employs ] rdf:type owl:FunctionalProperty . \
+         [ owl:inverseOf ex:employs ] rdfs:domain ex:Employee . \
+         ex:acme ex:employs ex:kim . ex:acme2 ex:employs ex:kim .",
+    );
+    materialize(&s);
+    assert!(
+        ask_tg(&s, "ex:kim rdf:type ex:Employee ."),
+        "prp-dom over an inverse"
+    );
+    assert!(
+        ask_tg(&s, "ex:acme owl:sameAs ex:acme2 ."),
+        "prp-fp over an inverse (ex:employs is inverse-functional)"
+    );
 }
