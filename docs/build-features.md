@@ -18,7 +18,7 @@ image no matter what the docs say about its knobs.
 | `ldp` | Linked Data Platform 1.0 at `/ldp/` | yes | GitHub, GitLab |
 | `shex`, `swrl` | ShEx validation; SWRL rule execution (both graded *Partial*, see [standards](standards.md)) | yes | GitHub, GitLab |
 | `geometry3d` | 3D geometry (parry3d) for the viewer and OGC API endpoints | yes | GitHub, GitLab |
-| `sfcgal3d` | SFCGAL-backed 3D operations (needs native SFCGAL ≥ 2.0) | **no** | GitLab only (`--all-features`); not in the image |
+| `sfcgal3d` | SFCGAL-backed 3D operations (needs native SFCGAL ≥ 2.0) | **no** | GitHub (`sfcgal3d` job, on Debian trixie for SFCGAL 2.x), GitLab (`--all-features`); not in the image |
 | `backup-encrypt` | age-encrypted backups (`BACKUP_ENCRYPT`) | yes | GitHub, GitLab |
 | `alerting` | Ops alert dispatch (`ALERT_*`) | yes | GitHub, GitLab |
 | `asset-pdf`, `asset-exif`, `asset-media`, `asset-archive`, `asset-spreadsheet`, `asset-thumbnail`, `asset-clamav` | Asset metadata extraction, thumbnails, ClamAV scanning | yes | GitHub, GitLab |
@@ -40,7 +40,13 @@ Notes:
   repeats the connector list in its `CARGO_FEATURES`, since the argument
   replaces the default rather than adding to it.
 - GitHub CI compiles `full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard,plugin-postgres,plugin-mysql,plugin-mssql`
-  and, separately, `--no-default-features`; GitLab compiles `--all-features`
-  (the only pipeline that builds `sfcgal3d`, which needs `libsfcgal-dev`).
+  and, separately, `--no-default-features`; GitLab compiles `--all-features`.
+  `sfcgal3d` needs `libsfcgal-dev` 2.x, which Ubuntu 24.04 lacks, so GitHub
+  builds it in a job of its own on the Debian trixie Rust image GitLab uses.
+- The image itself is built (not pushed) with its default `CARGO_FEATURES` by
+  `.github/workflows/image.yml` and the GitLab `image-build` job: on every pull
+  or merge request that touches `Dockerfile`, `.dockerignore`, a `Cargo.toml`,
+  `Cargo.lock`, `.cargo/` or `vendor/`, and nightly. The build is then started
+  and must answer `/livez`, so a broken image fails before a release does.
 - The conformance table in [standards](standards.md) is generated from the test
   suites, so feature claims and test coverage are checked together in CI.

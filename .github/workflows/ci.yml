@@ -50,6 +50,18 @@ jobs:
           sudo docker image prune --all --force > /dev/null 2>&1 || true
           df -h /
 
+      # An S3-compatible server for tests/storage_s3_live.rs (the step after
+      # the security tests). Started here, before the build, so it is up long
+      # before the tests run. A plain `docker run` rather than a service
+      # container: GitHub cannot pass MinIO the `server /data` arguments it
+      # needs. The credentials are throwaway values for this container. MinIO
+      # publishes no new community images; this tag is the last one.
+      - name: Start MinIO
+        run: >-
+          docker run -d --name minio -p 127.0.0.1:9000:9000
+          -e MINIO_ROOT_USER=ots-ci-minio -e MINIO_ROOT_PASSWORD=ots-ci-minio-secret
+          quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+
       - name: Install system dependencies (GEOS for GeoSPARQL, xmlsec1 for SAML)
         run: |
           sudo apt-get update
@@ -144,6 +156,65 @@ jobs:
             echo "::error::Expected at least 40 security-named tests to run, but only $named_passed did — the 'security' filter may be broken (tests renamed/moved). Failing to avoid a silent skip."
             exit 1
           fi
+
+      # The S3 asset store against the MinIO started above: object and HTTP
+      # round trips, absent keys, wrong credentials. The Test step ran these
+      # without OTS_TEST_S3_ENDPOINT, so they skipped there; this re-run uses
+      # the binary it built. OTS_TEST_LIVE_REQUIRED turns a missing or renamed
+      # variable into a failure instead of a skip.
+      - name: S3 storage against MinIO
+        env:
+          OTS_TEST_LIVE_REQUIRED: '1'
+          OTS_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+          OTS_TEST_S3_ACCESS_KEY: ots-ci-minio
+          OTS_TEST_S3_SECRET_KEY: ots-ci-minio-secret
+        run: cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard,plugin-postgres,plugin-mysql,plugin-mssql --locked --test storage_s3_live
+
+      - name: MinIO log
+        if: always()
+        run: docker logs minio || true
+
+  # `sfcgal3d` (certified CSG and volumeExact through native SFCGAL) is in no
+  # other job's feature list: the sfcgal 0.8 / sfcgal-sys 0.9 crates need
+  # SFCGAL >= 2.0, and Ubuntu 24.04's libsfcgal-dev is 1.5. So this job runs in
+  # the Debian trixie Rust image the GitLab jobs use (SFCGAL 2.0, and Rust 1.94
+  # like the Dockerfile) and builds the library's unit tests with the feature
+  # on, warnings denied, then runs the 3D function tests. The runner's
+  # preinstalled tooling is mounted in so the "Free up disk space" step can
+  # delete it from inside the container.
+  sfcgal3d:
+    name: sfcgal3d (native SFCGAL 2.x)
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1.94-trixie
+      volumes:
+        - /usr/share/dotnet:/host/dotnet
+        - /usr/local/lib/android:/host/android
+        - /opt/ghc:/host/ghc
+        - /opt/hostedtoolcache:/host/toolcache
+    env:
+      # RUSTFLAGS replaces the linker flag in .cargo/config.toml, so it is
+      # repeated here. Dependencies keep their capped lints.
+      RUSTFLAGS: -D warnings -C link-arg=-fuse-ld=lld
+    steps:
+      - name: Free up disk space
+        run: |
+          df -h /
+          rm -rf /host/dotnet/* /host/android/* /host/ghc/* /host/toolcache/*
+          df -h /
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install system dependencies (GEOS, SFCGAL 2.x)
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq libgeos-dev libsfcgal-dev cmake pkg-config libclang-dev libssl-dev lld
+          dpkg -s libsfcgal-dev | grep '^Version'
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+
+      - name: Build and test the 3D functions with sfcgal3d
+        run: cargo test --lib --features full,test-utils,sfcgal3d --locked -- geo::functions3d
 
   # `default = ["full"]` makes the README's plain `cargo build` produce the
   # binary its Highlights table describes. The minimal configuration then has no
@@ -302,8 +373,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Reclaim ~25 GB of preinstalled tooling so the `--features full,saml,test-utils,backup-encrypt,alerting` conformance
-      # test binaries don't run the disk out (see the backend job).
+      # Reclaim ~25 GB of preinstalled tooling so the `--features full,saml,test-utils,backup-encrypt,alerting`
+      # test binaries below don't run the disk out (see the backend job).
       - name: Free up disk space
         run: |
           df -h /
@@ -321,10 +392,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
 
-      # W3C / GeoSPARQL / OWL2 / LDP conformance tests. Enabling all features
-      # exercises the optional reasoning, ldp, shex, swrl and text-search paths.
-      - name: Run conformance tests
-        run: cargo test --features full,saml,test-utils,backup-encrypt,alerting --locked --test '*conformance*'
+      # The W3C / GeoSPARQL / OWL 2 / LDP conformance binaries are not run
+      # here: the backend job's `cargo test --workspace` runs every one of them
+      # with a superset of these features, and running them again here doubled
+      # their CI time for nothing. This job keeps what the backend job cannot
+      # do: the live reasoner sidecar and the seed bundles on fetched data.
 
       # OWL 2 DL against the reasoner sidecar the project ships
       # (sidecars/reasoner: OWL API + HermiT). Its live tests and the W3C OWL 2
@@ -425,6 +497,13 @@ jobs:
       # test suites; a stale table (counts that no longer match the code) fails.
       - name: Check the conformance table
         run: python3 scripts/conformance_table.py --check
+      # The variables .env.example and docs/administration.md document against
+      # what docker-compose.yml hands the triplestore service: a forwarded
+      # variable neither documents, or an .env.example entry compose never
+      # passes on, fails; documented settings compose does not forward are
+      # listed as a warning.
+      - name: Check the env docs against docker-compose.yml
+        run: python3 scripts/check_env_drift.py
 
   audit:
     name: Dependency audit
