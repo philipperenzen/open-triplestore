@@ -1,4 +1,5 @@
 <script>
+  import { askConfirm } from '../lib/confirm';
   import { onMount } from 'svelte';
   import { autofocus } from '../lib/actions/autofocus.js';
   import { listShapeGraphs, createShapeGraph, deleteShapeGraph, cloneShapeGraph, listOrganisations } from '../lib/api.js';
@@ -161,7 +162,12 @@
   }
 
   async function doDelete(set) {
-    if (!confirm($t('pages.shapeLibrary.confirmDelete', { values: { name: set.name } }))) return;
+    const ok = await askConfirm({
+      title: $t('system.areYouSure'),
+      message: $t('pages.shapeLibrary.confirmDelete', { values: { name: set.name } }),
+      confirmLabel: $t('system.delete'),
+    });
+    if (!ok) return;
     try {
       await deleteShapeGraph(set.id);
       sets = sets.filter((s) => s.id !== set.id);

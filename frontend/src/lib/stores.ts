@@ -23,6 +23,8 @@ export interface ServiceStatus {
 export interface HealthStatus {
   status: 'ok' | 'degraded' | null;
   version?: string;
+  /** Standards this server build serves (display names, from `GET /health`). */
+  capabilities?: string[];
   services: {
     triplestore: ServiceStatus & { triples?: number; graphs?: number };
     database: ServiceStatus;
@@ -46,6 +48,7 @@ export async function checkBackend(): Promise<void> {
     backendHealth.set({
       status: data.status === 'ok' ? 'ok' : 'degraded',
       version: data.version,
+      capabilities: Array.isArray(data.capabilities) ? data.capabilities.filter((c) => typeof c === 'string') : undefined,
       services: data.services ?? null,
     });
   } catch {

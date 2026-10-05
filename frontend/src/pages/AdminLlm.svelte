@@ -1,4 +1,5 @@
 <script>
+  import { toastError } from '../lib/toast';
   import { t } from 'svelte-i18n';
   import { isAdmin, authInitialized } from '../lib/stores.js';
   import { navigate } from '../lib/router/index.js';
@@ -37,7 +38,7 @@
       requests = res.requests || [];
       hasMore = requests.length >= LIMIT;
     } catch (e) {
-      alert(e.message);
+      toastError(e.message);
     }
     loading = false;
   }
@@ -50,7 +51,7 @@
       requests = [...requests, ...page];
       hasMore = page.length >= LIMIT;
     } catch (e) {
-      alert(e.message);
+      toastError(e.message);
     }
     loadingMore = false;
   }

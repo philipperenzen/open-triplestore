@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, request as pwRequest, type APIRequestContext, type Page } from '@playwright/test';
 
 // Standards-conformance smoke tests driven through the real browser.
 //
@@ -12,8 +12,13 @@ import { test, expect, type Page } from '@playwright/test';
 // playwright.config.ts + global-setup.ts; the demo org is public, so no sign-in
 // is needed. demo.spec.ts already covers GeoSPARQL (the spatial dataset) and the
 // capabilities "Supported standards" service, so this file broadens coverage to
-// SPARQL SELECT, RDFS/OWL reasoning, SHACL, DCAT and SKOS. The exact service
+// SPARQL SELECT, SPARQL property paths, SHACL, DCAT and SKOS. The exact service
 // names and the asserted values come from src/saved_queries/seed_data.rs.
+//
+// A saved query only reads the seeded triples, so it cannot show that a
+// reasoner works. The OWL 2 RL test at the end calls the engine itself
+// (POST /api/reasoning/materialize) over the seeded ontology and asks for a
+// triple that only the reasoner can produce.
 
 /** Open `dataset` → API Services, expand `service`, and click Run. */
 async function runService(page: Page, dataset: string, service: string): Promise<void> {
@@ -37,9 +42,9 @@ test('SPARQL 1.1 SELECT returns the seeded RDF statements', async ({ page }) => 
   await expect(page.getByText(/Ada Lovelace/).first()).toBeVisible();
 });
 
-test('RDFS/OWL reasoning expands a transitive-property closure', async ({ page }) => {
-  // ex:ancestorOf is an owl:TransitiveProperty with Alice→Bob→Carol→Dave, so the
-  // property-path closure (ex:ancestorOf+) must reach Dave from an earlier ancestor.
+test('SPARQL property paths compute a transitive closure at query time', async ({ page }) => {
+  // ex:ancestorOf links Alice→Bob→Carol→Dave; the property path ex:ancestorOf+
+  // (plain SPARQL 1.1, no reasoner) must reach Dave from an earlier ancestor.
   await runService(page, 'Reasoning & Ontologies', 'Transitive ancestors');
   await expect(page.getByText(/Dave/).first()).toBeVisible();
 });
@@ -60,4 +65,57 @@ test('SKOS exposes the controlled-vocabulary concepts', async ({ page }) => {
   // skos:Concept prefLabels include the graph roles and conformance levels.
   await runService(page, 'Open Triplestore Ontology & Vocabulary', 'Vocabulary concepts');
   await expect(page.getByText(/Instances|Model|Full/).first()).toBeVisible();
+});
+
+// ── The OWL 2 RL engine ─────────────────────────────────────────────────────────
+
+const BACKEND = process.env.OTS_BACKEND_URL ?? 'http://localhost:7878';
+const ADMIN = { username: 'e2e-admin', password: 'e2e-password-123' };
+const OWL_RL_GRAPH = 'https://opentriplestore.org/demo/reasoning/owl-rl';
+const EX = 'https://opentriplestore.org/demo/reasoning#';
+
+test.describe('OWL 2 RL materialisation', () => {
+  let api: APIRequestContext;
+  let auth: Record<string, string>;
+
+  test.beforeAll(async () => {
+    api = await pwRequest.newContext({ baseURL: BACKEND });
+    const res = await api.post('/api/auth/login', { data: ADMIN });
+    expect(res.ok(), `login failed: ${res.status()}`).toBeTruthy();
+    auth = { authorization: `Bearer ${(await res.json()).access_token}` };
+  });
+
+  test.afterAll(async () => {
+    await api.dispose();
+  });
+
+  /** ASK over /sparql as the admin, optionally with an entailment regime. */
+  async function ask(query: string, entailment?: string): Promise<boolean> {
+    const params: Record<string, string> = { query };
+    if (entailment) params.entailment = entailment;
+    const res = await api.get('/sparql', { params, headers: { ...auth, accept: 'application/sparql-results+json' } });
+    expect(res.ok(), `ASK failed: ${res.status()} ${await res.text()}`).toBeTruthy();
+    return (await res.json()).boolean === true;
+  }
+
+  test('derives what the seeded ontology entails but does not assert', async () => {
+    // Seeded (seed_data.rs OWL_RL_TTL): ex:ancestorOf is an owl:TransitiveProperty
+    // with Alice→Bob→Carol→Dave, and ex:William owl:sameAs ex:Bill, Bill→Erin.
+    const aliceDave = `ASK { <${EX}Alice> <${EX}ancestorOf> <${EX}Dave> }`;
+    const williamErin = `ASK { <${EX}William> <${EX}ancestorOf> <${EX}Erin> }`;
+    // Neither is asserted in the graph the reasoner reads.
+    expect(await ask(`ASK { GRAPH <${OWL_RL_GRAPH}> { <${EX}Alice> <${EX}ancestorOf> <${EX}Dave> } }`)).toBe(false);
+    expect(await ask(`ASK { GRAPH <${OWL_RL_GRAPH}> { <${EX}William> <${EX}ancestorOf> <${EX}Erin> } }`)).toBe(false);
+
+    const run = await api.post('/api/reasoning/materialize', {
+      headers: auth,
+      data: { regime: 'owl2-rl', source_graphs: [OWL_RL_GRAPH] },
+    });
+    expect(run.ok(), `materialize failed: ${run.status()} ${await run.text()}`).toBeTruthy();
+
+    // prp-trp (transitivity) and eq-rep-s (sameAs substitution), read through
+    // the regime's entailment graph.
+    expect(await ask(aliceDave, 'owl2-rl')).toBe(true);
+    expect(await ask(williamErin, 'owl2-rl')).toBe(true);
+  });
 });

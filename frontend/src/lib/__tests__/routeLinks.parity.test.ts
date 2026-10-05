@@ -3,8 +3,9 @@
  *
  * The bug this caught: the dataset page linked its effective shape graphs to
  * `/shacl/shape-graphs/{id}` — the *API* path — while the declared route is
- * `/shacl/shapes/:id`. App.svelte has no catch-all Route, so the click landed
- * on a silently blank page. Nothing in the type system or the linter can see
+ * `/shacl/shapes/:id`. App.svelte had no catch-all then, so the click landed
+ * on a silently blank page (it now lands on the not-found page, which is
+ * still a broken link). Nothing in the type system or the linter can see
  * that mismatch, and it is the kind that reappears whenever someone copies a
  * path out of lib/api.ts, so assert it from the source.
  */
@@ -57,8 +58,15 @@ describe('router link ↔ route parity', () => {
     expect(linkTargets.length).toBeGreaterThan(20);
   });
 
-  it('has no catch-all route, so an unmatched path renders nothing', () => {
+  it('ends with a <Fallback> catch-all, after the last Route', () => {
+    // The not-found page is a <Fallback>, not a wildcard Route (the router has
+    // no wildcards); it must come after every Route it stands in for.
+    const app = readFileSync(join(SRC, 'App.svelte'), 'utf8');
     expect(declaredRoutes.filter((p) => p === '*' || p === '/*')).toEqual([]);
+    const fallbackAt = app.indexOf('<Fallback>');
+    expect(fallbackAt).toBeGreaterThan(-1);
+    expect(app.lastIndexOf('<Route ')).toBeLessThan(fallbackAt);
+    expect(app.slice(fallbackAt, app.indexOf('</Fallback>'))).toContain('<NotFound');
   });
 
   it('routes every <Link to> target', () => {

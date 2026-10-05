@@ -45,7 +45,7 @@ Three facts worth knowing before an instance is exposed:
 | Method | Path | Auth | Notes |
 |---|---|---|---|
 | `GET` | `/` | **none** | SPARQL 1.1 Service Description of this node. |
-| `GET` | `/health` | **none** | Liveness plus store counters. |
+| `GET` | `/health` | **none** | Liveness plus store counters and the build's `capabilities` (standards it serves). |
 | `GET` | `/livez` | **none** | Liveness only; never touches the store. |
 | `GET` | `/sparql` | **none** | Query over the graphs the caller may read — anonymously, the public ones: the graphs of public datasets and of every published version of a public model-registry entry (the bundled vocabularies included). A private entry's version graphs are read by its owner, the owner organisation's members and admins, exactly as `/api/models/{id}/versions/{ver}/data` serves them. |
 | `POST` | `/sparql` | **none** | The same query endpoint in the protocol's POST form. A body sent as `application/sparql-update` is a write and needs a **token**; writing a model-registry graph is refused unless the caller may write the entry, whether or not they may read it. |

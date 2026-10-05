@@ -1,7 +1,7 @@
 <script>
+  import { tHtml } from '../lib/i18n/html';
   import { createEventDispatcher, onMount } from 'svelte';
   import { t } from 'svelte-i18n';
-  import { sanitizeHtml } from '../lib/ontology/sanitizeHtml.js';
   import { Loader2, X, Search, Globe, Users, Lock, ShieldCheck } from 'lucide-svelte';
   import { listShapeGraphs, listBindingsForTarget, createBinding, deleteBinding } from '../lib/api.js';
   import { toastError } from '../lib/toast.ts';
@@ -78,8 +78,8 @@
       </button>
     </div>
     <p class="text-sm text-[var(--ink-500)] mb-3">
-      <!-- eslint-disable-next-line svelte/no-at-html-tags -- DOMPurify-sanitized -->
-      {@html sanitizeHtml($t('components.attachShapesDialog.intro', { values: { target: `<strong>${targetLabel || targetId}</strong>` } }))}{#if targetKind === 'graph'} {$t('components.attachShapesDialog.introGraphTail')}{:else} {$t('components.attachShapesDialog.introDefaultTail')}{/if}
+      <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+      {@html $tHtml('components.attachShapesDialog.intro', { values: { target: targetLabel || targetId } })}{#if targetKind === 'graph'} {$t('components.attachShapesDialog.introGraphTail')}{:else} {$t('components.attachShapesDialog.introDefaultTail')}{/if}
     </p>
 
     <div class="search-wrap mb-3">

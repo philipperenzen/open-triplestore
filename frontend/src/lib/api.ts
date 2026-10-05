@@ -1973,3 +1973,35 @@ export interface ResolvedPrefixLookup {
   namespace: string;
   source: string;
 }
+
+// ─── Identity policy (owl:sameAs) — docs/reasoning.md "Identity policy" ─────────
+
+export type IdentityPolicyName = 'sameas-off' | 'sameas-narrow' | 'sameas-full';
+export type IdentityScope = 'dataset' | 'organisation';
+
+/** `GET/PUT/DELETE /api/{datasets|organisations}/:id/identity`. */
+export interface IdentityPolicyState {
+  scope: IdentityScope;
+  id: string;
+  /** The policy in force. */
+  policy: IdentityPolicyName;
+  /** Where it comes from: this resource's own setting, its organisation, or the built-in default. */
+  source: 'dataset' | 'organisation' | 'default';
+  /** This resource's own setting; null when it inherits. */
+  setting: IdentityPolicyName | null;
+  description: string;
+  /** Correspondence predicates that are never identity, whatever the policy. */
+  never_identity: string[];
+  options: { policy: IdentityPolicyName; description: string }[];
+}
+
+const identityPath = (scope: IdentityScope, id: string) =>
+  `/api/${scope === 'dataset' ? 'datasets' : 'organisations'}/${encodeURIComponent(id)}/identity`;
+
+export const getIdentityPolicy = (scope: IdentityScope, id: string): Promise<IdentityPolicyState> =>
+  request('GET', identityPath(scope, id));
+export const setIdentityPolicy = (scope: IdentityScope, id: string, policy: IdentityPolicyName): Promise<IdentityPolicyState> =>
+  request('PUT', identityPath(scope, id), { policy });
+/** Drop the resource's own setting: back to the organisation's or the default. */
+export const clearIdentityPolicy = (scope: IdentityScope, id: string): Promise<IdentityPolicyState> =>
+  request('DELETE', identityPath(scope, id));

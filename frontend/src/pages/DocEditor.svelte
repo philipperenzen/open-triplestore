@@ -1,6 +1,8 @@
 <script>
-  import { onMount } from 'svelte';
+  import { askConfirm } from '../lib/confirm';
   import { t } from 'svelte-i18n';
+  import { isAdmin, authInitialized } from '../lib/stores.js';
+  import { navigate } from '../lib/router/index.js';
   import { listDocs, getDoc, saveDoc, deleteDoc } from '../lib/api.js';
 
   let docs = [];
@@ -30,7 +32,14 @@
     }
   }
 
-  onMount(refresh);
+  // Admin-only page, like the other /admin/* pages: wait for the session, then
+  // send anyone else home before anything is fetched or shown.
+  let _guardChecked = false;
+  $: if ($authInitialized && !_guardChecked) {
+    _guardChecked = true;
+    if (!$isAdmin) navigate('/');
+    else refresh();
+  }
 
   async function edit(d) {
     status = '';
@@ -89,7 +98,12 @@
 
   async function remove() {
     if (!slug || isNew) return;
-    if (!confirm($t('pages.docEditor.deleteConfirm', { values: { slug } }))) return;
+    const ok = await askConfirm({
+      title: $t('system.areYouSure'),
+      message: $t('pages.docEditor.deleteConfirm', { values: { slug } }),
+      confirmLabel: $t('system.delete'),
+    });
+    if (!ok) return;
     error = '';
     try {
       await deleteDoc(slug);
@@ -102,6 +116,7 @@
   }
 </script>
 
+{#if $authInitialized && $isAdmin}
 <div class="doc-editor">
   <h1>{$t('pages.docEditor.heading')}</h1>
   <p class="hint">
@@ -168,6 +183,7 @@
     </section>
   </div>
 </div>
+{/if}
 
 <style>
   .doc-editor { padding: 1.5rem; max-width: 1100px; margin: 0 auto; }
