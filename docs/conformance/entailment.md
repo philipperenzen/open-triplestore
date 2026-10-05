@@ -29,9 +29,10 @@ positive case does not match.
 |---|---|
 | `literal-type`, `pfps-10-non-well-formed-literal-1`, `xmlsch-02-whitespace-facet-3` | `rdfD1`, exempt by decision D11: the result has a blank node standing for a typed literal's value, which is not materialized |
 | `datatypes-semantic-equivalence-between-datatypes` | equal values of different datatypes (an integer and a decimal) are not made interchangeable by the RDFS engine (the OWL 2 RL engine does this, `dt-eq`) |
+| `datatypes-semantic-equivalence-within-type-1`, `-2`, `double-infinity`, `double-round-same`, `float-infinity`, `float-round-same` | value-equal literals of one datatype in different lexical forms: the store keeps literals as written (since 2026-10-03), and the RDFS engine does not materialize the other forms; before, storage made them one term |
 | `datatypes-non-well-formed-literal-1` | the case recognizes no datatypes; this store always recognizes its datatype map, so the ill-typed literal is an inconsistency here |
 | `rdfs-entailment-test001` | the lexical forms of `rdf:XMLLiteral` are not checked |
-| `xmlsch-02-whitespace-facet-2`, `xmlsch-02-whitespace-facet-4` | an `xsd:int` lexical form with surrounding whitespace is ill-typed but not reported: integer-derived types are stored as `xsd:integer` values (decision D4) |
+| `xmlsch-02-whitespace-facet-2`, `xmlsch-02-whitespace-facet-4` | an `xsd:int` lexical form with surrounding whitespace is ill-typed but not reported (the whitespace facet is not applied) |
 
 
 ## SPARQL 1.1 entailment-regime cases
@@ -45,6 +46,5 @@ the queried graph. `OTS_TEST_W3C_ENTAILMENT_EXPLAIN=1` prints the differing rows
 
 | Cases | Why they fail |
 |---|---|
-| `rdfs05`, `rdfs11`, `sparqldl-13`, `paper-sparqldl-Q1`, `paper-sparqldl-Q1-rdfs`, `paper-sparqldl-Q4` | duplicate solutions: a triple both asserted and derived sits in the default graph and in the entailment graph, and a query over their union counts it twice |
 | `sparqldl-10`, `sparqldl-11` | the expected answers need OWL reasoning beyond the RL/RDF rules |
 | `sparqldl-12` | an answer binds a blank-node class (a restriction); the regime answers only with terms that name things in the queried graph |

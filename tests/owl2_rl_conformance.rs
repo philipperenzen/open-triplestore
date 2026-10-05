@@ -1303,14 +1303,17 @@ fn value_outside_a_datatype_range_is_inconsistent() {
     assert_eq!(inconsistent_rule(&s).as_deref(), Some("dt-not-type"));
 }
 
-/// D4, the storage limit: oxigraph keeps `"300"^^xsd:byte` as the integer
-/// 300, so the literal itself is not ill-typed after storage; a range of
-/// `xsd:byte` still rejects the value. (Storage that keeps lexical forms
-/// and datatypes would turn the first case into `dt-not-type`.)
+/// The store keeps `"300"^^xsd:byte` as written (since lexical forms), so
+/// the literal itself is ill-typed: `dt-not-type`. A range of `xsd:byte`
+/// rejects an out-of-range value as before.
 #[test]
 fn out_of_range_byte_is_caught_by_value_not_by_its_stored_datatype() {
     let s = store_with("ex:x ex:n \"300\"^^xsd:byte .");
-    assert_eq!(inconsistent_rule(&s), None, "stored as the integer 300");
+    assert_eq!(
+        inconsistent_rule(&s).as_deref(),
+        Some("dt-not-type"),
+        "kept as an xsd:byte, which 300 is not"
+    );
     let s = store_with("ex:n rdfs:range xsd:byte . ex:x ex:n 300 .");
     assert_eq!(inconsistent_rule(&s).as_deref(), Some("dt-not-type"));
 }
@@ -1636,17 +1639,71 @@ fn triples_of(
     out
 }
 
+/// A typed literal in the canonical form of its value: integers and decimals
+/// as one decimal value, doubles, floats and booleans in their
+/// canonical lexical form. The reference evaluator was written against a
+/// store that kept literals that way; the store now keeps them as written, so
+/// value-equal literals that used to be one term are two, and the engine's
+/// value-based equality rules then relate them. Comparing canonical forms
+/// keeps the differential test about the rules, not about storage.
+fn canonical(t: &oxigraph::model::Term) -> String {
+    use oxigraph::model::{Literal, Term};
+    const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+    let Term::Literal(l) = t else {
+        return t.to_string();
+    };
+    let Some(local) = l.datatype().as_str().strip_prefix(XSD) else {
+        return t.to_string();
+    };
+    let v = l.value().trim();
+    let typed = |lex: String, dt: &str| {
+        Literal::new_typed_literal(
+            lex,
+            oxigraph::model::NamedNode::new_unchecked(format!("{XSD}{dt}")),
+        )
+        .to_string()
+    };
+    match local {
+        "integer" | "nonNegativeInteger" | "positiveInteger" | "negativeInteger"
+        | "nonPositiveInteger" | "long" | "int" | "short" | "byte" | "unsignedLong"
+        | "unsignedInt" | "unsignedShort" | "unsignedByte" | "decimal" => {
+            // One value space (OWL 2 owl:real): an integer and a decimal of
+            // equal value compare equal, as the engine's dt-eq treats them.
+            match v.parse::<oxsdatatypes::Decimal>() {
+                Ok(d) => typed(d.to_string(), "decimal"),
+                Err(_) => t.to_string(),
+            }
+        }
+        "double" => match v.parse::<oxsdatatypes::Double>() {
+            Ok(d) => typed(d.to_string(), "double"),
+            Err(_) => t.to_string(),
+        },
+        "float" => match v.parse::<oxsdatatypes::Float>() {
+            Ok(d) => typed(d.to_string(), "float"),
+            Err(_) => t.to_string(),
+        },
+        "boolean" => match v {
+            "1" | "true" => typed("true".into(), "boolean"),
+            "0" | "false" => typed("false".into(), "boolean"),
+            _ => t.to_string(),
+        },
+        _ => t.to_string(),
+    }
+}
+
 /// Drop what neither side should be judged on: generalized triples, and
-/// reflexive owl:sameAs (eq-ref, opt-in).
+/// reflexive owl:sameAs (eq-ref, opt-in). Literals compare in canonical form
+/// (see [`canonical`]).
 fn comparable(
     set: impl IntoIterator<Item = rl_reference::T>,
 ) -> std::collections::BTreeSet<String> {
     let same = rl_reference::owl("sameAs");
     set.into_iter()
         .filter(|(s, p, o)| {
-            !matches!(s, oxigraph::model::Term::Literal(_)) && !(p == &same && s == o)
+            !matches!(s, oxigraph::model::Term::Literal(_))
+                && !(p == &same && canonical(s) == canonical(o))
         })
-        .map(|(s, p, o)| format!("{s} {p} {o}"))
+        .map(|(s, p, o)| format!("{} {p} {}", canonical(&s), canonical(&o)))
         .collect()
 }
 

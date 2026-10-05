@@ -1273,7 +1273,7 @@ impl TripleStore {
     /// functions plus the `sh:SPARQLFunction`s of the admin-designated function
     /// graphs. A function a shapes graph declares is not here; it belongs to
     /// that graph's runs ([`Self::query_options_for_shapes`]).
-    pub(crate) fn query_options(&self) -> SparqlEvaluator {
+    pub fn query_options(&self) -> SparqlEvaluator {
         self.query_options_with_budget().0
     }
 

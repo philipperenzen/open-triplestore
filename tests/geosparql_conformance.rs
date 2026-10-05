@@ -4690,9 +4690,9 @@ fn query_rewrite_on_scoped_and_confined_paths() {
             "{GEO_PFX}\nCONSTRUCT {{ ?p geo:sfWithin ex:city }} WHERE {{ ?p a ex:Park . ?p geo:sfWithin ex:city }}"
         ))
         .unwrap();
-    // The default evaluator: the query names no custom function.
+    // The store's evaluator: the rewrite expands to geof: functions.
     let triples = s
-        .construct_confined(oxigraph::sparql::SparqlEvaluator::new(), &q, &scope, &[])
+        .construct_confined(s.query_options(), &q, &scope, &[])
         .unwrap();
     assert_eq!(triples.len(), 1, "{triples:?}");
     assert_eq!(triples[0].subject.to_string(), "<http://example.org/park>");
