@@ -105,7 +105,7 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
   (since 2026-10-01): a ✅ means `docs/standards.md` grades the standard **Full**, and every
   row it grades **Partial** shows 🟡 — SPARQL 1.1 Query, SPARQL 1.2 and RDF 1.2, OWL 2 RL,
   SHACL Core and Advanced, ShEx, SWRL, GeoSPARQL, DCAT and VoID, and RML. OWL 2 DL is graded
-  Full with the reasoner sidecar the project ships (footnote ⁹). Five rows have
+  Full with the reasoner sidecar the project ships (footnote ⁹). SHACL-C, graded Full since 2026-10-03, has no matrix row. Five rows have
   no grade there (SPARQL 1.1 Protocol, JSON-LD 1.1, N-Quads/TriG, text search, SKOS); their ✅
   marks feature presence, as in the other columns — note that `/sparql`
   ignores the protocol's `default-graph-uri` / `named-graph-uri` parameters (footnote ⁶).

@@ -8948,8 +8948,9 @@ pub async fn list_latest_validation_runs(
 
 /// GET /api/datasets/:dataset_id/shapes — get shapes graph
 ///
-/// Supports `Accept: text/shaclc` or `?format=shaclc` to return SHACLC compact syntax.
-/// Default is Turtle. A shapes graph some dataset holds as private is served
+/// Supports `Accept: text/shaclc` or `?format=shaclc` to return the W3C SHACL
+/// Compact Syntax (422 with a `losses` list when the syntax cannot carry the
+/// whole graph; `?lossy=true` for the partial document). Default is Turtle. A shapes graph some dataset holds as private is served
 /// only to who may read it, by the rule a `/sparql` query is scoped to; 404
 /// when that leaves none.
 pub async fn get_shapes(
@@ -9018,9 +9019,7 @@ pub async fn get_shapes(
                     .to_string(),
             ));
         }
-        let shaclc = crate::shaclc::serialize(&state.store, &shapes_graphs[0])
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-        return Ok((StatusCode::OK, [(CONTENT_TYPE, "text/shaclc")], shaclc).into_response());
+        return Ok(shaclc_response(&state, &shapes_graphs[0], &fmt_params));
     }
 
     // Merge the Turtle of every resolved shapes graph (Turtle allows repeated
@@ -9156,18 +9155,12 @@ pub async fn put_shapes(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("text/turtle");
     let data = if content_type.contains("shaclc") {
-        // Strict by default: unrecognised SHACLC is a 400, never an emptied
-        // shapes graph. `?lenient=true` restores the drop-what-you-cannot-parse
-        // behaviour for callers that want it.
-        let lenient = query
-            .get("lenient")
-            .is_some_and(|v| v == "true" || v == "1");
-        let parsed = if lenient {
-            crate::shaclc::parse_lenient(&raw)
-        } else {
-            crate::shaclc::parse(&raw)
-        };
-        parsed.map_err(|e| (StatusCode::BAD_REQUEST, e))?
+        // The W3C SHACL Compact Syntax, parsed strictly: unrecognised input is
+        // a 400, never an emptied shapes graph. `?dialect=legacy` (deprecated)
+        // parses the pre-W3C dialect, with `lenient=true` its old
+        // drop-what-you-cannot-parse behaviour.
+        crate::shaclc::parse_request(&raw, &query, "PUT /api/datasets/{id}/shapes")
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?
     } else {
         raw
     };
@@ -9365,25 +9358,19 @@ pub async fn infer_dataset(
 
 // ─── SHACLC standalone endpoints ─────────────────────────────────────────────
 
-/// POST /api/shaclc/parse — convert SHACLC text → Turtle
+/// POST /api/shaclc/parse — convert SHACL-C text → Turtle
 ///
-/// Body: SHACLC text (Content-Type: text/shaclc or text/plain)
-/// Response: Turtle (Content-Type: text/turtle)
+/// Body: W3C SHACL Compact Syntax (Content-Type: text/shaclc or text/plain).
+/// `?base=<iri>` sets the initial base IRI; `?dialect=legacy` (deprecated)
+/// parses the pre-W3C dialect instead. Response: Turtle.
 pub async fn shaclc_parse(
     Query(query): Query<std::collections::HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Response, (StatusCode, String)> {
     let input = String::from_utf8(body.to_vec())
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid UTF-8".to_string()))?;
-    let lenient = query
-        .get("lenient")
-        .is_some_and(|v| v == "true" || v == "1");
-    let turtle = if lenient {
-        crate::shaclc::parse_lenient(&input)
-    } else {
-        crate::shaclc::parse(&input)
-    }
-    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let turtle = crate::shaclc::parse_request(&input, &query, "POST /api/shaclc/parse")
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     Ok((StatusCode::OK, [(CONTENT_TYPE, "text/turtle")], turtle).into_response())
 }
 
@@ -9396,6 +9383,7 @@ pub async fn shaclc_parse(
 pub async fn shaclc_serialize(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Response, (StatusCode, String)> {
     let body_str = String::from_utf8(body.to_vec())
@@ -9431,9 +9419,52 @@ pub async fn shaclc_serialize(
         ));
     }
 
-    let shaclc = crate::shaclc::serialize(&state.store, &shapes_iri)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok((StatusCode::OK, [(CONTENT_TYPE, "text/shaclc")], shaclc).into_response())
+    Ok(shaclc_response(&state, &shapes_iri, &query))
+}
+
+/// A shapes graph as SHACL-C: `200 text/shaclc` when the compact syntax can
+/// carry every triple, else `422` with the `losses` list (subject,
+/// predicate, object, reason per triple). `?lossy=true` asks for the partial
+/// document instead: `200` with an `X-SHACLC-Losses` count header and the
+/// losses named in a comment block at the top. The caller has checked that
+/// the graph is readable.
+pub(crate) fn shaclc_response(
+    state: &AppState,
+    graph_iri: &str,
+    query: &std::collections::HashMap<String, String>,
+) -> Response {
+    use crate::shaclc::SerializeError;
+    let resolve = |ns: &str| state.prefix_registry.declaration_for(ns);
+    let lossy = query.get("lossy").is_some_and(|v| v == "true" || v == "1");
+    let result = if lossy {
+        crate::shaclc::serialize_lossy_with(&state.store, graph_iri, resolve)
+    } else {
+        crate::shaclc::serialize_with(&state.store, graph_iri, resolve).map(|t| (t, Vec::new()))
+    };
+    match result {
+        Ok((text, losses)) => {
+            let mut resp = (StatusCode::OK, [(CONTENT_TYPE, "text/shaclc")], text).into_response();
+            if lossy {
+                resp.headers_mut()
+                    .insert("x-shaclc-losses", losses.len().into());
+            }
+            resp
+        }
+        Err(SerializeError::Losses(losses)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": format!(
+                    "this shapes graph cannot be written in SHACL Compact Syntax without losing {} triple{}; \
+                     request Turtle, or pass lossy=true for the partial document",
+                    losses.len(),
+                    if losses.len() == 1 { "" } else { "s" }
+                ),
+                "losses": losses,
+            })),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 // ─── RML endpoints ───────────────────────────────────────────────────────────

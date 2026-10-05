@@ -32,7 +32,7 @@ applies.
 | GeoSPARQL 1.1 | Spatial RDF, relation/metric functions | Partial⁵ |
 | SHACL Core | Structural constraint validation | Partial⁶ |
 | SHACL Advanced (AF / SPARQL) | SPARQL constraints, rules, targets | Partial⁷ |
-| SHACL-C | Compact-syntax parser/serializer | Partial⁸ |
+| SHACL-C | Compact-syntax parser/serializer (W3C CG report) | Full⁸ |
 | OPM (Ontology for Property Management) | Property states with history | Partial — `opm:Property` / `opm:PropertyState` / current-outdated / reliability classes via the property-state API; no `opm:Calculation` or derived-property inference. See [datasets.md](datasets.md#time-evolving-properties-opm-profile). |
 | buildingSMART IDS 1.0 | Information Delivery Specification → SHACL | Partial — entity, property, attribute, partOf facets with value restrictions and cardinality; classification and material facets target `props:ifcClassification` / `props:ifcMaterial`, which the IFC lift emits; predefinedType by convention only; dataset-level existence not enforced. See [shacl.md](shacl.md#importing-constraint-specifications-ids). Round-trips: export back to IDS 1.0 covers the shared subset, and anything outside the IDS facet model is reported as a loss. |
 | ISO 21597-1 ICDD | Information container for linked document delivery | Partial — Part 1 containers import (documents, linksets, payload triples, ontology resources, index) and export (RDF/XML index); Part 2 not interpreted. See [containers.md](containers.md). |
@@ -61,6 +61,9 @@ published depends on its licence: each corpus has its own page under
 The SPARQL sections, for one, are a subset of a W3C test suite, and W3C's
 test-suite licence policy allows no performance claims on a subset, so their
 page tracks known gaps but gives no score.
+The SHACL Compact Syntax Community Group test cases (W3C Software and Document
+License) are vendored under `tests/fixtures/w3c-shaclc/`, whose `PROVENANCE.md`
+gives their source and licence.
 
 <!-- conformance-table:start -->
 | Standard | Suite | Basis | Tests | Notes |
@@ -83,7 +86,7 @@ page tracks known gaps but gives no score.
 | SHACL Advanced Features | `tests/shacl_af_corpus.rs` | **vendored TopQuadrant corpus** (expression, function, rule and target tests of TopQuadrant/shacl, unmodified; dash-driven) | 1 | 10 corpus cases: 9 pass, 1 known failure, 0 runner-side skips (floor ≥9 asserted) |
 | SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 58 |  |
 | SHACL-AF rules | `tests/shacl_rules_conformance.rs` | spec-derived | 43 |  |
-| SHACL Compact Syntax | `tests/shaclc_conformance.rs` | spec-derived | 11 |  |
+| SHACL Compact Syntax | `tests/shaclc_conformance.rs` | spec-derived | 17 |  |
 | ShEx | `tests/shex_conformance.rs` | spec-derived | 10 |  |
 | SPARQL 1.2 / RDF-star | `tests/sparql12_conformance.rs` | spec-derived | 15 |  |
 | SP2B / BSBM query shapes | `tests/sparql_benchmarks.rs` | benchmark-derived | 28 |  |
@@ -93,11 +96,12 @@ page tracks known gaps but gives no score.
 | SWRL | `tests/swrl_conformance.rs` | spec-derived | 15 |  |
 | OWL 2 DL | `tests/w3c_owl2_dl_manifests.rs` | **vendored W3C test cases** (approved OWL 2 DL / Direct Semantics cases of the OWL 2 Test Case Repository, unmodified; manifest-driven, against the reasoner sidecar) | 2 | runs in CI against the reasoner sidecar as a development and regression ratchet; no score is published (W3C licence: no performance claims on a partial run); known gaps in `docs/conformance/owl2-dl.md` |
 | SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (core + sparql sections, manifest-driven, full report equality) | 1 | 136 corpus cases: 119 pass, 1 known failure, 1 optional feature unsupported (reported as the failure the spec requires), 15 runner-side skips (floor ≥90 asserted) |
+| SHACL Compact Syntax | `tests/w3c_shaclc_conformance.rs` | **vendored W3C CG test cases** (SHACL-C report, line endings normalised; parse + round trip) | 2 | 32 corpus cases: 32 pass, 0 known failures, 0 runner-side skips (floor ≥32 asserted) |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 125 |  |
 | SPARQL 1.1 Federated Query | `tests/w3c_sparql11_federation.rs` | **vendored W3C test-suite subset** (`service/` + `syntax-fed/` sections of w3c/rdf-tests, unmodified; manifest-driven, local endpoints) | 1 | runs in CI as a development and regression ratchet against local endpoints; no score is published (W3C test-suite policy); see `docs/conformance/sparql11.md` §Federation |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 
-1047 conformance tests across 31 suites; a further 795 tests in 106 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 6 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation) and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
+1055 conformance tests across 32 suites; a further 795 tests in 106 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 7 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation) and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->
@@ -274,9 +278,21 @@ behavior and will flip green when the limitation is resolved.
    [conformance/shacl.md](conformance/shacl.md)); TopQuadrant's SHACL-AF tests:
    9 of 10 cases pass ([conformance/shacl.md](conformance/shacl.md)). **Not
    implemented:** `sh:resultAnnotation`.
-8. **SHACL-C** is a pragmatic subset: `[min..max]` counts, `closed`, and `// "msg"`
-   messages. The parser rejects unrecognized trailing input (it used to discard it
-   silently, which could empty a shape graph on upload with a 200).
+8. **SHACL-C** — graded against the SHACL Community Group report
+   [SHACL Compact Syntax](https://w3c.github.io/shacl/shacl-compact-syntax/)
+   (not the SHACL 1.2 Compact Syntax draft). The parser implements the report's
+   whole grammar and production rules and builds the RDF graph directly; all 32
+   of the report's test cases (vendored under `tests/fixtures/w3c-shaclc/`, W3C
+   Software and Document License) parse to the expected graph, and the
+   serializer writes each expected graph back and parses it again to the same
+   graph (`tests/w3c_shaclc_conformance.rs`, two-way ratchet). The serializer is
+   lossless or loud: a shapes graph with triples the compact syntax cannot
+   express is a `422` listing them (`?lossy=true` for the partial document).
+   The proprietary dialect of 0.7 and earlier is accepted for one release behind
+   `?dialect=legacy` (deprecated, logged); see
+   [shacl.md](shacl.md#migrating-from-the-legacy-dialect). Updated 2026-10-03
+   (was Partial: a different dialect, and a serializer that dropped most
+   constraints silently).
 9. **RML / R2RML** — CSV/JSON/XML *file* sources with template/reference/constant
    term maps, datatype and language tags, `rr:class`, and inline blank-node term
    maps ([rml.md](rml.md)); relational logical sources (`rr:tableName`,
