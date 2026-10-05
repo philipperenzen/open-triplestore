@@ -297,6 +297,7 @@ fn ensure_federated_provider(
         auto_provision: true,
         default_role: Some(SystemRole::User.as_str().to_string()),
         is_active: false,
+        saml_config: None,
     })
 }
 

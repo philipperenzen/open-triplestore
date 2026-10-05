@@ -423,11 +423,20 @@ MAIL_SENDER_DOMAINS=example.com
 MAIL_HOSTNAME=mail.example.com
 ```
 
-Pass to Docker Compose:
+Put it next to `docker-compose.yml` as `.env` and start the stack:
 
 ```bash
-docker compose --env-file .env up -d
+docker compose up -d
 ```
+
+Compose reads `.env` twice: to fill the `${…}` values in `docker-compose.yml`,
+and through the service's `env_file`, which hands **every** variable in it to the
+server — including settings the compose file does not list by name, such as
+`SECURE_COOKIES`, `TRUSTED_PROXY_CIDRS` or `OTS_REMOTE_ALLOWLIST`. A few entries are
+wired by compose itself and ignore `.env`: `AUTH_DB_PATH` and `BACKUP_DIR` (the `/data`
+volume) and the `S3_ENDPOINT` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` link to the bundled
+MinIO. `env_file` with `required: false` needs Docker Compose 2.24 or later. CI runs
+`scripts/check_compose_env.py` to keep the compose file and these docs in step.
 
 ---
 

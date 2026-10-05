@@ -252,7 +252,11 @@
   });
 
   async function logout() {
-    try { await apiLogout(); } catch { /* best effort */ }
+    let samlLogoutUrl = null;
+    try { samlLogoutUrl = await apiLogout(); } catch { /* best effort */ }
+    // A SAML session continues at the IdP, which ends its own session and
+    // sends the browser back here.
+    if (samlLogoutUrl) { window.location.href = samlLogoutUrl; return; }
     refreshUser();
     navigate('/');
     sidebarOpen = false;

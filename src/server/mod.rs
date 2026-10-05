@@ -105,9 +105,11 @@ impl KeyExtractor for SmartIpExtractor {
 /// **is** a real ambient credential. What keeps mirror mode safe is that both session
 /// cookies (`access_token`, `refresh_token`) are `SameSite=Strict`, so the browser
 /// withholds them on every cross-site request — even a credentialed `fetch` to a
-/// mirrored origin. (The lone `SameSite=Lax` cookie, `oauth_state`, is a short-lived
-/// CSRF nonce that is never sent on `fetch`/XHR and confers no access; there is no HTTP
-/// Basic auth.) A hostile origin therefore cannot make the browser attach a usable
+/// mirrored origin. (Two short-lived sign-in nonces are not `Strict`: `oauth_state`
+/// (`SameSite=Lax`, path `/api/auth/oauth`) and `saml_state` (`SameSite=None; Secure`
+/// over HTTPS, because the IdP returns to the ACS with a cross-site POST; path
+/// `/api/auth/saml`). Each only binds a pending sign-in to the browser that started it,
+/// is consumed once, and confers no access; there is no HTTP Basic auth.) A hostile origin therefore cannot make the browser attach a usable
 /// credential, and cannot forge the bearer header — so it gains nothing it could not
 /// already reach unauthenticated. **Load-bearing invariant:** if any auth cookie is ever
 /// downgraded to `SameSite=Lax`/`None`, mirror mode becomes a credentialed-CORS / CSRF
@@ -1905,6 +1907,30 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 .put(oauth_handlers::admin_update_provider)
                 .delete(oauth_handlers::admin_delete_provider),
         )
+        .route(
+            "/api/admin/oauth/saml-metadata",
+            post(oauth_handlers::admin_read_saml_metadata),
+        )
+        .route(
+            "/api/admin/oauth/providers/:id/saml",
+            get(oauth_handlers::admin_saml_overview),
+        )
+        .route(
+            "/api/admin/oauth/providers/:id/saml/metadata",
+            get(oauth_handlers::admin_saml_metadata),
+        )
+        .route(
+            "/api/admin/oauth/providers/:id/saml/keys",
+            post(oauth_handlers::admin_create_saml_key),
+        )
+        .route(
+            "/api/admin/oauth/providers/:id/saml/keys/:kid/activate",
+            post(oauth_handlers::admin_activate_saml_key),
+        )
+        .route(
+            "/api/admin/oauth/providers/:id/saml/keys/:kid",
+            delete(oauth_handlers::admin_delete_saml_key),
+        )
         .route_layer(middleware::from_fn(require_admin))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -1936,6 +1962,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(oauth_handlers::saml_metadata),
         )
         .route("/api/auth/saml/:slug/acs", post(oauth_handlers::saml_acs))
+        .route(
+            "/api/auth/saml/:slug/slo",
+            get(oauth_handlers::saml_slo_redirect).post(oauth_handlers::saml_slo_post),
+        )
         // Inject the OAuth session store as a layer extension
         .layer(axum::Extension(state.oauth_sessions.clone()))
         // Brute-force / DoS limiter on the unauthenticated SSO surface: `authorize`
@@ -2590,6 +2620,8 @@ pub async fn run(
             loop {
                 tokio::time::sleep(interval).await;
                 crate::auth::oauth::prune_sessions(&sessions);
+                // In-flight SAML requests and the assertion replay cache.
+                crate::auth::saml::prune_state();
             }
         });
     }

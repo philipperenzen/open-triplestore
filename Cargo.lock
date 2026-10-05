@@ -4349,6 +4349,7 @@ dependencies = [
  "opengraph",
  "openidconnect",
  "openraft",
+ "openssl",
  "ots-plugin-accounts-dashboard",
  "ots-plugin-api",
  "ots-plugin-hello",
