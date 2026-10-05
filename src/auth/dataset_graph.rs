@@ -1,7 +1,6 @@
 use crate::auth::middleware::AuthenticatedUser;
 use crate::auth::models::{Dataset, DatasetGraphEntry, GraphKind};
 use crate::store::engine::TripleStore;
-use crate::store::escape_sparql_iri;
 use oxigraph::io::RdfFormat;
 
 /// Named graph IRI for a dataset's DCAT metadata.
@@ -777,190 +776,188 @@ pub fn write_dataset_metadata_graph_checked(
 }
 
 /// Build the DCAT/ADMS/VoID/VCARD metadata Turtle for a dataset (no I/O).
+///
+/// Written through the catalogue's triple builder ([`crate::dcat::graph::G`]),
+/// with the same DCAT 3 semantics as the catalogue: a status code becomes its
+/// EU dataset-status IRI, a malformed IRI is dropped rather than breaking the
+/// document (which, as hand-built Turtle, used to make the whole graph fail
+/// to load), and objects carry their DCAT range classes.
 pub fn build_dataset_metadata_ttl(
     base_url: &str,
     dataset: &Dataset,
     graph_entries: &[DatasetGraphEntry],
 ) -> String {
+    use crate::dcat::authority;
+    use crate::dcat::graph::{nn, p, Range, G, OTS};
+    use crate::dcat::vocabulary::{ADMS, DCAT, DCT, VCARD, VOID};
+    use oxigraph::model::BlankNode;
+
     // Canonical dataset IRI per the styleguide (§3.3): `{base}/dataset/{id}`
     // (singular). This MUST match the catalogue (`dcat/catalog.rs`), the version
     // registry and the API-service registry, otherwise a dataset's descriptive
     // metadata splits across two IRIs and its node renders incomplete when browsed.
-    let dataset_iri = dataset_iri(base_url, &dataset.id);
-    let mut ttl = String::new();
+    let iri = dataset_iri(base_url, &dataset.id);
+    let mut g = G::new("en");
+    let Some(s) = g.iri(&iri, "dataset IRI") else {
+        return String::new();
+    };
+    let nonempty = |v: &Option<String>| {
+        v.as_deref()
+            .map(str::trim)
+            .filter(|x| !x.is_empty())
+            .map(str::to_string)
+    };
+    let list = |v: &Option<String>| -> Vec<String> {
+        v.as_deref()
+            .and_then(|j| serde_json::from_str::<Vec<String>>(j).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect()
+    };
 
-    ttl.push_str("@prefix dcat: <http://www.w3.org/ns/dcat#> .\n");
-    ttl.push_str("@prefix dct:  <http://purl.org/dc/terms/> .\n");
-    ttl.push_str("@prefix void: <http://rdfs.org/ns/void#> .\n");
-    ttl.push_str("@prefix adms: <http://www.w3.org/ns/adms#> .\n");
-    ttl.push_str("@prefix vcard: <http://www.w3.org/2006/vcard/ns#> .\n");
-    ttl.push_str("@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .\n");
-    ttl.push_str("@prefix ots:  <https://opentriplestore.org/ns#> .\n\n");
-
-    ttl.push_str(&format!(
-        "<{}> a dcat:Dataset, void:Dataset ;\n",
-        dataset_iri
-    ));
-    ttl.push_str(&format!(
-        "    dct:title \"{}\" ;\n",
-        escape_ttl_string(&dataset.name)
-    ));
+    g.typ(s.clone(), &p(DCAT, "Dataset"));
+    g.typ(s.clone(), &p(VOID, "Dataset"));
+    g.lit(s.clone(), &p(DCT, "title"), &dataset.name);
     // Required by the dataset-structure SHACL model: stable identity + visibility.
-    ttl.push_str(&format!(
-        "    dct:identifier \"{}\" ;\n",
-        escape_ttl_string(&dataset.id)
-    ));
-    ttl.push_str(&format!(
-        "    ots:visibility \"{}\" ;\n",
-        dataset.visibility.as_str()
-    ));
-
-    if let Some(desc) = &dataset.description {
-        ttl.push_str(&format!(
-            "    dct:description \"{}\" ;\n",
-            escape_ttl_string(desc)
-        ));
+    g.lit(s.clone(), &p(DCT, "identifier"), &dataset.id);
+    g.lit(
+        s.clone(),
+        &p(OTS, "visibility"),
+        dataset.visibility.as_str(),
+    );
+    if let Some(d) = nonempty(&dataset.description) {
+        g.lit(s.clone(), &p(DCT, "description"), &d);
     }
-    if let Some(lic) = &dataset.license {
-        if !lic.is_empty() {
-            ttl.push_str(&format!("    dct:license <{}> ;\n", escape_sparql_iri(lic)));
+    let access = match dataset.visibility {
+        crate::auth::models::Visibility::Public => "PUBLIC",
+        crate::auth::models::Visibility::Members => "RESTRICTED",
+        crate::auth::models::Visibility::Private => "NON_PUBLIC",
+    };
+    g.ranged(
+        s.clone(),
+        &p(DCT, "accessRights"),
+        &format!("{}{access}", authority::EU_ACCESS),
+        Range::RightsStatement,
+        "access rights",
+    );
+    if let Some(l) = nonempty(&dataset.license) {
+        g.ranged(
+            s.clone(),
+            &p(DCT, "license"),
+            &l,
+            Range::LicenseDocument,
+            "licence",
+        );
+    }
+    for t in list(&dataset.themes) {
+        g.concept(s.clone(), &p(DCAT, "theme"), &t, "theme");
+    }
+    for k in list(&dataset.keywords) {
+        g.lit(s.clone(), &p(DCAT, "keyword"), &k);
+    }
+    if let Some(st) = nonempty(&dataset.adms_status).and_then(|x| authority::status_iri(&x)) {
+        g.concept(s.clone(), &p(ADMS, "status"), &st, "adms:status");
+    }
+    if let Some(n) = nonempty(&dataset.version_notes) {
+        g.lit(s.clone(), &p(ADMS, "versionNotes"), &n);
+    }
+    if let Some(sp) = nonempty(&dataset.spatial) {
+        g.ranged(
+            s.clone(),
+            &p(DCT, "spatial"),
+            &sp,
+            Range::Location,
+            "spatial",
+        );
+    }
+    let start = nonempty(&dataset.temporal_start);
+    let end = nonempty(&dataset.temporal_end);
+    if start.is_some() || end.is_some() {
+        let t = BlankNode::default();
+        g.add(s.clone(), &p(DCT, "temporal"), t.clone());
+        g.typ(t.clone(), &p(DCT, "PeriodOfTime"));
+        if let Some(v) = &start {
+            g.when(t.clone(), &p(DCAT, "startDate"), v);
         }
-    }
-
-    // Themes (stored as JSON array of IRI strings)
-    if let Some(themes_json) = &dataset.themes {
-        if let Ok(themes) = serde_json::from_str::<Vec<String>>(themes_json) {
-            for theme in &themes {
-                if !theme.is_empty() {
-                    ttl.push_str(&format!(
-                        "    dcat:theme <{}> ;\n",
-                        escape_sparql_iri(theme)
-                    ));
-                }
-            }
-        }
-    }
-
-    // Keywords (stored as JSON array of plain strings)
-    if let Some(kw_json) = &dataset.keywords {
-        if let Ok(keywords) = serde_json::from_str::<Vec<String>>(kw_json) {
-            for kw in &keywords {
-                if !kw.is_empty() {
-                    ttl.push_str(&format!(
-                        "    dcat:keyword \"{}\"@en ;\n",
-                        escape_ttl_string(kw)
-                    ));
-                }
-            }
-        }
-    }
-
-    if let Some(status) = &dataset.adms_status {
-        if !status.is_empty() {
-            ttl.push_str(&format!(
-                "    adms:status <{}> ;\n",
-                escape_sparql_iri(status)
-            ));
-        }
-    }
-    if let Some(notes) = &dataset.version_notes {
-        if !notes.is_empty() {
-            ttl.push_str(&format!(
-                "    adms:versionNotes \"{}\" ;\n",
-                escape_ttl_string(notes)
-            ));
-        }
-    }
-    if let Some(spatial) = &dataset.spatial {
-        if !spatial.is_empty() {
-            ttl.push_str(&format!(
-                "    dct:spatial <{}> ;\n",
-                escape_sparql_iri(spatial)
-            ));
+        if let Some(v) = &end {
+            g.when(t.clone(), &p(DCAT, "endDate"), v);
         }
     }
+    if let Some(f) = nonempty(&dataset.accrual_periodicity) {
+        g.ranged(
+            s.clone(),
+            &p(DCT, "accrualPeriodicity"),
+            &f,
+            Range::Frequency,
+            "accrual periodicity",
+        );
+    }
+    let landing = nonempty(&dataset.landing_page).unwrap_or_else(|| iri.clone());
+    if !g.ranged(
+        s.clone(),
+        &p(DCAT, "landingPage"),
+        &landing,
+        Range::Document,
+        "landing page",
+    ) {
+        g.ranged(
+            s.clone(),
+            &p(DCAT, "landingPage"),
+            &iri,
+            Range::Document,
+            "landing page",
+        );
+    }
+    g.when(s.clone(), &p(DCT, "issued"), &dataset.created_at);
+    g.when(s.clone(), &p(DCT, "modified"), &dataset.updated_at);
+    g.add(
+        s.clone(),
+        &p(VOID, "sparqlEndpoint"),
+        nn(&format!("{}/sparql", base_url.trim_end_matches('/'))),
+    );
 
-    let landing = dataset
-        .landing_page
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&dataset_iri);
-    ttl.push_str(&format!(
-        "    dcat:landingPage <{}> ;\n",
-        escape_sparql_iri(landing)
-    ));
-
-    ttl.push_str(&format!(
-        "    dct:issued \"{}\"^^xsd:dateTime ;\n",
-        dataset.created_at
-    ));
-    ttl.push_str(&format!(
-        "    dct:modified \"{}\"^^xsd:dateTime ;\n",
-        dataset.updated_at
-    ));
-    ttl.push_str(&format!(
-        "    void:sparqlEndpoint <{}/sparql> ;\n",
-        base_url
-    ));
-
-    // Contact point as blank node
-    let has_contact = dataset
-        .contact_name
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .is_some()
-        || dataset
-            .contact_email
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .is_some()
-        || dataset
-            .contact_url
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .is_some();
-
-    if has_contact {
-        ttl.push_str("    dcat:contactPoint _:cp .\n\n");
-        ttl.push_str("_:cp a vcard:Organization ;\n");
-        if let Some(name) = dataset.contact_name.as_deref().filter(|s| !s.is_empty()) {
-            ttl.push_str(&format!("    vcard:fn \"{}\" ;\n", escape_ttl_string(name)));
+    let name = nonempty(&dataset.contact_name);
+    let email = nonempty(&dataset.contact_email);
+    let url = nonempty(&dataset.contact_url);
+    if name.is_some() || email.is_some() || url.is_some() {
+        let cp = BlankNode::default();
+        g.add(s.clone(), &p(DCAT, "contactPoint"), cp.clone());
+        g.typ(cp.clone(), &p(VCARD, "Kind"));
+        g.typ(cp.clone(), &p(VCARD, "Organization"));
+        if let Some(n) = &name {
+            g.lit(cp.clone(), &p(VCARD, "fn"), n);
         }
-        if let Some(email) = dataset.contact_email.as_deref().filter(|s| !s.is_empty()) {
-            ttl.push_str(&format!(
-                "    vcard:hasEmail <mailto:{}> ;\n",
-                escape_sparql_iri(email)
-            ));
+        if let Some(e) = &email {
+            g.link(
+                cp.clone(),
+                &p(VCARD, "hasEmail"),
+                &format!("mailto:{e}"),
+                "contact e-mail",
+            );
         }
-        if let Some(url) = dataset.contact_url.as_deref().filter(|s| !s.is_empty()) {
-            ttl.push_str(&format!(
-                "    vcard:hasURL <{}> ;\n",
-                escape_sparql_iri(url)
-            ));
+        if let Some(u) = &url {
+            g.link(cp.clone(), &p(VCARD, "hasURL"), u, "contact URL");
         }
-        ttl.push_str("    .\n");
-    } else {
-        ttl.push_str("    .\n");
     }
 
     // Per-graph role triples: void:subset + ots:graphRole for each registered graph.
     for entry in graph_entries {
-        if !entry.graph_iri.starts_with("urn:system:") {
-            ttl.push_str(&format!(
-                "<{}> void:subset <{}> .\n",
-                dataset_iri, entry.graph_iri
-            ));
+        if entry.graph_iri.starts_with("urn:system:") {
+            continue;
+        }
+        if let Some(gi) = g.iri(&entry.graph_iri, "graph IRI") {
+            g.add(s.clone(), &p(VOID, "subset"), gi.clone());
             if let Some(role) = entry.graph_role {
-                let role_iri = graph_role_iri(role);
-                ttl.push_str(&format!(
-                    "<{}> ots:graphRole <{}> .\n",
-                    entry.graph_iri, role_iri
-                ));
+                g.add(gi, &p(OTS, "graphRole"), nn(graph_role_iri(role)));
             }
         }
     }
 
-    ttl
+    crate::dcat::graph::serialize(&g.triples, RdfFormat::Turtle)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default()
 }
 
 /// Rewrite every dataset's DCAT metadata graph so pre-existing datasets adopt the
@@ -1168,13 +1165,6 @@ fn graph_has_subject(store: &TripleStore, graph_iri: &str, subject_iri: &str) ->
         )
         .next()
         .is_some()
-}
-
-fn escape_ttl_string(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
 }
 
 /// The IRI of a graph-role individual in the Open Triplestore vocabulary

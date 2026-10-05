@@ -52,3 +52,32 @@ export const ADMS_STATUSES: AdmsStatusOption[] = [
 export function findAdmsStatus(iri: string): AdmsStatusOption | null {
   return ADMS_STATUSES.find(s => s.iri === iri) || null;
 }
+
+export interface FrequencyOption {
+  iri: string;
+  label: string;
+}
+
+const FREQ = 'http://publications.europa.eu/resource/authority/frequency/';
+
+/** Update frequencies from the EU frequency vocabulary (`dct:accrualPeriodicity`). */
+export const FREQUENCIES: FrequencyOption[] = [
+  { iri: FREQ + 'UPDATE_CONT', label: 'Continuously updated' },
+  { iri: FREQ + 'HOURLY', label: 'Hourly' },
+  { iri: FREQ + 'DAILY', label: 'Daily' },
+  { iri: FREQ + 'WEEKLY', label: 'Weekly' },
+  { iri: FREQ + 'BIWEEKLY', label: 'Biweekly' },
+  { iri: FREQ + 'MONTHLY', label: 'Monthly' },
+  { iri: FREQ + 'QUARTERLY', label: 'Quarterly' },
+  { iri: FREQ + 'ANNUAL_2', label: 'Semiannual' },
+  { iri: FREQ + 'ANNUAL', label: 'Annual' },
+  { iri: FREQ + 'BIENNIAL', label: 'Biennial' },
+  { iri: FREQ + 'IRREG', label: 'Irregular' },
+  { iri: FREQ + 'AS_NEEDED', label: 'As needed' },
+  { iri: FREQ + 'NEVER', label: 'Never' },
+  { iri: FREQ + 'UNKNOWN', label: 'Unknown' },
+];
+
+export function findFrequency(iri: string): FrequencyOption | null {
+  return FREQUENCIES.find(f => f.iri === iri) || null;
+}

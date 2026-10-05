@@ -400,3 +400,62 @@ async fn the_aggregate_statistics_count_only_what_the_caller_may_read() {
     assert!(stat(&cat, "triples") >= 9, "{ttl}");
     assert!(stat(&cat, "distinctSubjects") >= 9, "{ttl}");
 }
+
+/// SPARQL 1.1 Service Description §2: `GET /sparql` without a query returns
+/// the service description — the document the catalogue names as the
+/// endpoint's `dcat:endpointDescription`. A browser still gets the web UI.
+#[tokio::test]
+async fn the_sparql_endpoint_describes_itself() {
+    let (state, _) = admin_state();
+    let app = test_app(state);
+    let (st, ct, body) = fetch(&app, "/sparql", "text/turtle", None).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert!(ct.starts_with("text/turtle"), "{ct}");
+    // The description's IRIs are relative to the request (`<>`, `<sparql>`).
+    let sd = TripleStore::in_memory().unwrap();
+    sd.load_str_with_base(
+        &body,
+        RdfFormat::Turtle,
+        "http://localhost:7878/sparql",
+        None,
+    )
+    .unwrap_or_else(|e| panic!("{e}\n{body}"));
+    assert!(
+        matches!(
+            sd.query("ASK { ?s a <http://www.w3.org/ns/sparql-service-description#Service> ; <http://www.w3.org/ns/sparql-service-description#endpoint> ?e }"),
+            Ok(QueryResults::Boolean(true))
+        ),
+        "{body}"
+    );
+    let (_, _, cat) = fetch(&app, "/.well-known/void", "text/turtle", None).await;
+    let cat = parse(&cat, RdfFormat::Turtle);
+    assert!(ask(&cat, "<http://localhost:7878/sparql> <http://www.w3.org/ns/dcat#endpointDescription> <http://localhost:7878/sparql>"));
+}
+
+/// The catalogue is scoped to its caller, so a signed-in caller's copy is
+/// `Cache-Control: private` — a shared cache must not serve it to anyone else —
+/// while the anonymous one stays `public`.
+#[tokio::test]
+async fn a_signed_in_callers_catalogue_is_not_shared_cacheable() {
+    let (state, token) = admin_state();
+    let app = test_app(state);
+    for (auth, expected) in [(None, "public"), (Some(token.as_str()), "private")] {
+        let mut b = Request::builder()
+            .method(Method::GET)
+            .uri("/.well-known/void")
+            .header(header::ACCEPT, "text/turtle");
+        if let Some(t) = auth {
+            b = b.header(header::AUTHORIZATION, format!("Bearer {t}"));
+        }
+        let resp = app
+            .clone()
+            .oneshot(b.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cc = resp.headers()[header::CACHE_CONTROL].to_str().unwrap();
+        assert!(cc.starts_with(expected), "{auth:?}: {cc}");
+        let vary = resp.headers()[header::VARY].to_str().unwrap();
+        assert!(vary.contains("Authorization"), "{vary}");
+    }
+}

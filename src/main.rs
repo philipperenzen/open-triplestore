@@ -327,6 +327,12 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Starting open-triplestore v{}", env!("CARGO_PKG_VERSION"));
 
+    // The catalogue settings are read per request; refuse a value that would
+    // silently publish under another profile or with a dropped field.
+    if let Err(e) = dcat::catalog::check_env() {
+        anyhow::bail!("Refusing to start: invalid catalogue settings: {e}");
+    }
+
     // Create data directory if it doesn't exist
     std::fs::create_dir_all(&cli.data_dir)?;
 
