@@ -39,7 +39,8 @@ applies.
 | RDF Patch (RDF Delta) | Change log line format; patch logs | Full — the format (`H`, several `TX`/`TC`/`TA` blocks, `PA`/`PD` in keyword or quoted form, `A`/`D` triples and quads) applied atomically per dataset, through the SHACL write gates; blank nodes (`_:x`, `<_:x>`) name the store's own nodes; `PA`/`PD` change the dataset's prefix table, which its Turtle/TriG exports declare; version diffs served as patches with prefix changes, chained through `H prev`. RDF Patch Logs per dataset: append with `H id`/`H prev` checking (409), `init`, `current`, `patch/{version\|id}`; version cuts are journaled, other writes are not. Extensions: prefixed names in `A`/`D` rows, `?graph=` for triples. RDF 1.2 triple terms are refused (RDF Patch has no syntax for them). Spec-derived rules in `tests/rdf_patch_conformance.rs`. See [versioning.md](versioning.md#rdf-patch). |
 | LDES / TREE | Event streams of version objects; hypermedia fragmentation | Full — publisher: time-ordered fixed-size fragments under one root node with `GreaterThanOrEqualToRelation` / `LessThanOrEqualToRelation` bounds, frozen once full; monotonic timestamps; entity-level version objects with declared delete path and object; `tree:shape`, `ldes:pollingInterval`, ETag / `304`, `429` when busy, dereferenceable members; retention policies (`fullLogDuration`, `versionAmount`, `versionDuration`, `versionDeleteDuration`, `startingFrom`) enforced inside frozen pages with `410 Gone` for a compacted node. Client (unordered mode): §3.1 initialisation, allowlisted redirects, retries with back-off, every listed RDF format, §3.4 member extraction with named graphs, SHACL-path version semantics, a bookmark on `xsd:dateTime` values, immutable pages fetched once, legacy retention classes. Optional and not implemented: spatial and substring fragmentations, search forms, transactions, ordered mode, scheduled polling. Spec-derived rules in `tests/ldes_conformance.rs` (no external corpus exists). See [ldes.md](ldes.md). |
 | LDP (Linked Data Platform) 1.0 | Basic/Direct/Indirect Containers; NonRDFSource; per-resource access control with Web Access Control (`.acl` resources, `acl:` vocabulary, `Link rel="acl"`, `WAC-Allow`) | Full — WAC agents are this store's principals; no WebID-TLS / Solid-OIDC, no `acl:origin`. See [ldp.md](ldp.md#access-control). |
-| DCAT 3 / DCAT-AP 3 / DCAT-AP-NL 3 | Dataset catalogue description; EU / NL application profiles | Partial — DCAT 3 catalogue with VoID statistics; `DCAT_PROFILE` adds the AP/AP-NL mandatory properties (typed agents, identifiers, language, file types, data services, EU-authority statuses); no `dcat:CatalogRecord`, no temporal coverage, and the official DCAT-AP SHACL suite is not run in CI. See [dcat.md](dcat.md). |
+| DCAT 3 / DCAT-AP 3 / DCAT-AP-NL 3 | Dataset catalogue description; EU / NL application profiles | Full¹¹ — DCAT 3 catalogue: DCAT 3 §11 versions, data services with `dcat:servesDataset`, temporal coverage, update frequency, DCAT range typing; `DCAT_PROFILE` adds the AP/AP-NL properties (identifiers, language, file types, catalogue records). CI validates it against SEMIC's DCAT-AP 3.0.1 shapes and Geonovum's DCAT-AP-NL 3 shapes. See [dcat.md](dcat.md). |
+| VoID | Dataset statistics, partitions and linksets | Full¹¹ — per dataset, over the graphs the caller may read: statistics, class and property partitions, vocabularies, example resources, features, data dumps, SPARQL endpoint; linkset-role graphs as `void:Linkset`s; store-wide counts only, never partitions. See [dcat.md](dcat.md#void-statistics). |
 | RML / R2RML | CSV/JSON/XML files and SQL / SPARQL datasources → RDF | Partial⁹ |
 | JWT / OAuth 2.0 / OIDC | Authentication | Full |
 | SAML 2.0 | Authentication | Experimental — not in the `full` feature or the published image. SP-initiated Web Browser SSO (HTTP-Redirect AuthnRequest, HTTP-POST response bound to the request, signed by the configured IdP certificate); no IdP-initiated SSO, signed AuthnRequests, encrypted assertions or Single Logout. Tested against a simulated IdP only. See [auth.md](auth.md#saml-20). |
@@ -66,7 +67,7 @@ page tracks known gaps but gives no score.
 | Standard | Suite | Basis | Tests | Notes |
 |---|---|---|---:|---|
 | SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 17 |  |
-| DCAT 3 / DCAT-AP 3 / VoID | `tests/dcat_conformance.rs` | spec-derived | 4 |  |
+| DCAT 3 / DCAT-AP 3 / VoID | `tests/dcat_conformance.rs` | spec-derived + **vendored SEMIC DCAT-AP 3.0.1 shapes** (unmodified; Geonovum DCAT-AP-NL 3 shapes fetched in CI) | 18 |  |
 | GeoSPARQL 1.1 | `tests/geosparql_conformance.rs` | spec-derived | 143 |  |
 | LDES 1.0 / TREE | `tests/ldes_conformance.rs` | spec-derived | 28 |  |
 | LDP 1.0 (store level) | `tests/ldp_conformance.rs` | spec-derived | 43 |  |
@@ -97,7 +98,7 @@ page tracks known gaps but gives no score.
 | SPARQL 1.1 Federated Query | `tests/w3c_sparql11_federation.rs` | **vendored W3C test-suite subset** (`service/` + `syntax-fed/` sections of w3c/rdf-tests, unmodified; manifest-driven, local endpoints) | 1 | runs in CI as a development and regression ratchet against local endpoints; no score is published (W3C test-suite policy); see `docs/conformance/sparql11.md` §Federation |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 
-1047 conformance tests across 31 suites; a further 795 tests in 106 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 6 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation) and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
+1061 conformance tests across 31 suites; a further 797 tests in 106 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 7 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation) and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->
@@ -325,6 +326,23 @@ behavior and will flip green when the limitation is resolved.
 
     See [owl2-rl.md](owl2-rl.md), [owl2-el.md](owl2-el.md) and
     [owl2-ql.md](owl2-ql.md).
+
+11. **DCAT 3 / DCAT-AP / DCAT-AP-NL and VoID.** `tests/dcat_conformance.rs` builds the
+    catalogue per profile over a fixture that takes every branch of the generator
+    (organisation-, user- and group-owned datasets, geometry, an LDES stream, released and
+    draft versions, a linkset and a private graph) and asserts no violation of SEMIC's
+    DCAT-AP 3.0.1 shapes (`dcat-ap-SHACL.ttl` + `ranges.ttl`, vendored unmodified, CC BY
+    4.0) and of Geonovum's DCAT-AP-NL 3 shapes (fetched at a pinned commit and
+    sha256-checked in CI; the repository has no licence file, so they are not vendored).
+    The shapes run on this repo's SHACL engine, itself graded Partial (6); the SEMIC
+    files link five property shapes they never define, which the runner drops before
+    validating (the engine refuses an ill-formed shapes graph whole). DCAT-AP-NL 3.0.1
+    is still a working version upstream. What a profile requires and a registry entry does
+    not hold — a theme, a contact point, a licence — is logged as a profile warning and
+    never invented. `dcat:DatasetSeries` is not applicable: the product has no series
+    concept. VoID's optional `void:uriLookupEndpoint` is not offered (there is no RDF
+    lookup endpoint for arbitrary IRIs), and partitions are skipped on datasets larger than
+    `OTS_VOID_PARTITION_MAX_TRIPLES`.
 
 Related guides: [OWL Reasoning](/docs/reasoning), [SHACL Validation](/docs/shacl),
 [GeoSPARQL](/docs/geosparql), [Performance](/docs/performance),

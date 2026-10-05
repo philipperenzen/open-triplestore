@@ -331,10 +331,14 @@ See [rml.md](rml.md) for the full RML guide.
 | `OTS_REASONER_TIMEOUT_SECS` | `300` | Time limit of one DL backend call; past it the answer is unknown (504). |
 | `OTS_REASONER_MAX_TRIPLES` | `1000000` | Most triples handed to an external DL backend; more is a 413. |
 | `OTS_DL_DEBOUNCE_MS` | `2000` | Quiet period after the last write before an `owl2-dl` dataset's background run starts. |
-| `DCAT_PROFILE` | `dcat` | Catalogue application profile: `dcat`, `dcat-ap` or `dcat-ap-nl` (see [dcat.md](dcat.md)). |
+| `DCAT_PROFILE` | `dcat` | Catalogue application profile: `dcat`, `dcat-ap` or `dcat-ap-nl` (see [dcat.md](dcat.md)). Any other value stops the server at startup. |
 | `CATALOG_TITLE` / `CATALOG_DESCRIPTION` | instance defaults | The `dcat:Catalog` metadata. |
 | `CATALOG_PUBLISHER_URI` / `CATALOG_PUBLISHER_NAME` / `CATALOG_PUBLISHER_IDENTIFIER` | `<base>/publisher` | The catalogue's publishing agent. |
+| `CATALOG_PUBLISHER_TYPE` | unset | The publisher's ADMS publisher type: a code (`LocalAuthority`, `NationalAuthority`, `Company`, …) or an IRI. An unknown code stops the server at startup. |
+| `CATALOG_CONTACT_NAME` / `CATALOG_CONTACT_EMAIL` | unset | Contact point of the catalogue and its data services, and the fallback for datasets without one under a profile (DCAT-AP-NL requires a contact point on each). |
 | `CATALOG_LANGUAGE` | `ENG` (`NLD` under dcat-ap-nl) | ISO 639-3 code for the catalogue language. |
+| `OTS_VOID_PARTITION_LIMIT` | `100` | Class and property partitions listed per dataset in the catalogue's VoID (most frequent first). |
+| `OTS_VOID_PARTITION_MAX_TRIPLES` | `5000000` | Datasets larger than this get VoID counts but no partitions (those take a grouping scan). |
 | `CATALOG_LICENSE` | unset | Licence IRI for the catalogue and for distributions of datasets without one. |
 | `OTS_REMOTE_AUTH` | unset | `assert` mints a signed identity assertion for allowlisted peers when acting for a user (see [federation.md](federation.md)). |
 | `OTS_TRUSTED_ISSUERS` | unset | Comma-separated peer base URLs whose identity assertions are accepted (needs `BASE_URL`). |

@@ -734,6 +734,18 @@ pub struct Dataset {
     pub version_notes: Option<String>,
     pub spatial: Option<String>,
     pub landing_page: Option<String>,
+    /// Start of the period the data covers (`dct:temporal`): an `xsd:date`
+    /// (`2020-01-01`) or `xsd:dateTime`.
+    #[serde(default)]
+    pub temporal_start: Option<String>,
+    /// End of the period the data covers; same forms as `temporal_start`.
+    #[serde(default)]
+    pub temporal_end: Option<String>,
+    /// How often the dataset is updated (`dct:accrualPeriodicity`): an IRI of
+    /// the EU frequency table, e.g.
+    /// `http://publications.europa.eu/resource/authority/frequency/ANNUAL`.
+    #[serde(default)]
+    pub accrual_periodicity: Option<String>,
 }
 
 /// A persisted SHACL validation run, including the full report.

@@ -172,7 +172,7 @@ const USER_COLS_LEN: usize = 18;
 ///   image_key(10), graph_role(11), created_at(12), updated_at(13),
 ///   license(14), themes(15), keywords(16), contact_name(17), contact_email(18),
 ///   contact_url(19), adms_status(20), version_notes(21), spatial(22), landing_page(23),
-///   banner_key(24).
+///   banner_key(24), temporal_start(25), temporal_end(26), accrual_periodicity(27).
 fn read_dataset_row(row: &rusqlite::Row) -> rusqlite::Result<Dataset> {
     let owner_type_str: String = row.get(3)?;
     let vis_str: String = row.get(5)?;
@@ -203,6 +203,9 @@ fn read_dataset_row(row: &rusqlite::Row) -> rusqlite::Result<Dataset> {
         version_notes: row.get(21)?,
         spatial: row.get(22)?,
         landing_page: row.get(23)?,
+        temporal_start: row.get(25)?,
+        temporal_end: row.get(26)?,
+        accrual_periodicity: row.get(27)?,
     })
 }
 
@@ -1430,6 +1433,10 @@ impl AuthDb {
             "ALTER TABLE datasets ADD COLUMN version_notes TEXT",
             "ALTER TABLE datasets ADD COLUMN spatial TEXT",
             "ALTER TABLE datasets ADD COLUMN landing_page TEXT",
+            // DCAT 3 temporal coverage and update frequency.
+            "ALTER TABLE datasets ADD COLUMN temporal_start TEXT",
+            "ALTER TABLE datasets ADD COLUMN temporal_end TEXT",
+            "ALTER TABLE datasets ADD COLUMN accrual_periodicity TEXT",
             // Triple security labels were stored as callers sent them (bare
             // `http://ex/s`) while the filter matches N-Triples terms
             // (`<http://ex/s>`), so no label ever matched. Canonicalise the
@@ -3851,13 +3858,16 @@ impl AuthDb {
             version_notes: None,
             spatial: None,
             landing_page: None,
+            temporal_start: None,
+            temporal_end: None,
+            accrual_periodicity: None,
         })
     }
 
     pub fn get_dataset(&self, id: &str) -> anyhow::Result<Option<Dataset>> {
         let conn = self.pool.get()?;
         conn.query_row(
-            "SELECT id, name, description, owner_type, owner_id, visibility, shacl_on_write, shapes_graph_iri, conforms_to_model, conforms_to_version, image_key, graph_role, created_at, updated_at, license, themes, keywords, contact_name, contact_email, contact_url, adms_status, version_notes, spatial, landing_page, banner_key FROM datasets WHERE id = ?1",
+            "SELECT id, name, description, owner_type, owner_id, visibility, shacl_on_write, shapes_graph_iri, conforms_to_model, conforms_to_version, image_key, graph_role, created_at, updated_at, license, themes, keywords, contact_name, contact_email, contact_url, adms_status, version_notes, spatial, landing_page, banner_key, temporal_start, temporal_end, accrual_periodicity FROM datasets WHERE id = ?1",
             params![id],
             read_dataset_row,
         )
@@ -3868,7 +3878,7 @@ impl AuthDb {
     pub fn list_datasets(&self) -> anyhow::Result<Vec<Dataset>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, owner_type, owner_id, visibility, shacl_on_write, shapes_graph_iri, conforms_to_model, conforms_to_version, image_key, graph_role, created_at, updated_at, license, themes, keywords, contact_name, contact_email, contact_url, adms_status, version_notes, spatial, landing_page, banner_key FROM datasets ORDER BY name",
+            "SELECT id, name, description, owner_type, owner_id, visibility, shacl_on_write, shapes_graph_iri, conforms_to_model, conforms_to_version, image_key, graph_role, created_at, updated_at, license, themes, keywords, contact_name, contact_email, contact_url, adms_status, version_notes, spatial, landing_page, banner_key, temporal_start, temporal_end, accrual_periodicity FROM datasets ORDER BY name",
         )?;
         let datasets = stmt
             .query_map([], read_dataset_row)?
@@ -3879,7 +3889,7 @@ impl AuthDb {
     pub fn list_datasets_by_org(&self, org_id: &str) -> anyhow::Result<Vec<Dataset>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, owner_type, owner_id, visibility, shacl_on_write, shapes_graph_iri, conforms_to_model, conforms_to_version, image_key, graph_role, created_at, updated_at, license, themes, keywords, contact_name, contact_email, contact_url, adms_status, version_notes, spatial, landing_page, banner_key FROM datasets WHERE owner_type='organisation' AND owner_id = ?1 ORDER BY name",
+            "SELECT id, name, description, owner_type, owner_id, visibility, shacl_on_write, shapes_graph_iri, conforms_to_model, conforms_to_version, image_key, graph_role, created_at, updated_at, license, themes, keywords, contact_name, contact_email, contact_url, adms_status, version_notes, spatial, landing_page, banner_key, temporal_start, temporal_end, accrual_periodicity FROM datasets WHERE owner_type='organisation' AND owner_id = ?1 ORDER BY name",
         )?;
         let datasets = stmt
             .query_map(params![org_id], read_dataset_row)?
@@ -3891,7 +3901,7 @@ impl AuthDb {
     pub fn find_dataset_by_graph_iri(&self, graph_iri: &str) -> anyhow::Result<Option<Dataset>> {
         let conn = self.pool.get()?;
         conn.query_row(
-            "SELECT d.id, d.name, d.description, d.owner_type, d.owner_id, d.visibility, d.shacl_on_write, d.shapes_graph_iri, d.conforms_to_model, d.conforms_to_version, d.image_key, d.graph_role, d.created_at, d.updated_at, d.license, d.themes, d.keywords, d.contact_name, d.contact_email, d.contact_url, d.adms_status, d.version_notes, d.spatial, d.landing_page, d.banner_key
+            "SELECT d.id, d.name, d.description, d.owner_type, d.owner_id, d.visibility, d.shacl_on_write, d.shapes_graph_iri, d.conforms_to_model, d.conforms_to_version, d.image_key, d.graph_role, d.created_at, d.updated_at, d.license, d.themes, d.keywords, d.contact_name, d.contact_email, d.contact_url, d.adms_status, d.version_notes, d.spatial, d.landing_page, d.banner_key, d.temporal_start, d.temporal_end, d.accrual_periodicity
              FROM datasets d JOIN dataset_graphs dg ON d.id = dg.dataset_id
              WHERE dg.graph_iri = ?1 LIMIT 1",
             params![graph_iri],
@@ -4275,6 +4285,24 @@ impl AuthDb {
         conn.execute(
             "UPDATE datasets SET license=?1, themes=?2, keywords=?3, contact_name=?4, contact_email=?5, contact_url=?6, adms_status=?7, version_notes=?8, spatial=?9, landing_page=?10, updated_at=?11 WHERE id=?12",
             params![license, themes, keywords, contact_name, contact_email, contact_url, adms_status, version_notes, spatial, landing_page, now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Set a dataset's DCAT temporal coverage and update frequency
+    /// (`dct:temporal`, `dct:accrualPeriodicity`). `None` clears a field.
+    pub fn update_dataset_coverage(
+        &self,
+        id: &str,
+        temporal_start: Option<&str>,
+        temporal_end: Option<&str>,
+        accrual_periodicity: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE datasets SET temporal_start=?1, temporal_end=?2, accrual_periodicity=?3, updated_at=?4 WHERE id=?5",
+            params![temporal_start, temporal_end, accrual_periodicity, now, id],
         )?;
         Ok(())
     }

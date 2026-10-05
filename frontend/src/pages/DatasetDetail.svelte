@@ -78,7 +78,7 @@
   import Select from '../components/Select.svelte';
   import PartialRunNote from '../components/PartialRunNote.svelte';
   import { findLicense, LICENSE_CATEGORY_LABEL } from '../lib/vocab/licenses';
-  import { findTheme, findAdmsStatus } from '../lib/vocab/themes';
+  import { findTheme, findAdmsStatus, findFrequency } from '../lib/vocab/themes';
 
   // Ontology registry removed — detection/linking no longer available
 
@@ -441,6 +441,7 @@
   // Whether there is any rich metadata worth showing beyond the basics.
   $: hasRichMetadata = !!(dataset && (dataset.license || mdThemes.length || mdKeywords.length
     || dataset.adms_status || dataset.version_notes || dataset.spatial || dataset.landing_page
+    || dataset.temporal_start || dataset.temporal_end || dataset.accrual_periodicity
     || hasContact || dataset.conforms_to_model));
 
   // Breadcrumb: org name when dataset is org-owned
@@ -1657,6 +1658,20 @@
       <div class="meta-item">
         <dt>{$i18nT('pages.datasetDetail.spatialCoverage')}</dt>
         <dd><a href={safeExternalUrl(dataset.spatial)} target="_blank" rel="noopener" class="md-link">{dataset.spatial}</a></dd>
+      </div>
+    {/if}
+
+    {#if dataset.temporal_start || dataset.temporal_end}
+      <div class="meta-item">
+        <dt>{$i18nT('pages.datasetDetail.temporalCoverage')}</dt>
+        <dd>{dataset.temporal_start || $i18nT('pages.datasetDetail.openEnded')} – {dataset.temporal_end || $i18nT('pages.datasetDetail.openEnded')}</dd>
+      </div>
+    {/if}
+
+    {#if dataset.accrual_periodicity}
+      <div class="meta-item">
+        <dt>{$i18nT('pages.datasetDetail.updateFrequency')}</dt>
+        <dd>{findFrequency(dataset.accrual_periodicity)?.label || dataset.accrual_periodicity}</dd>
       </div>
     {/if}
 

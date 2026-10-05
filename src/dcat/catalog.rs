@@ -1,56 +1,81 @@
 //! DCAT 3 catalogue generation — plain DCAT, DCAT-AP 3 or DCAT-AP-NL 3 —
 //! from the dataset registry and the store.
 //!
-//! The catalogue is built as an RDF graph (a `Vec<Triple>`) and serialised
-//! per request in whatever format was negotiated. Every user-supplied value
-//! becomes a real RDF term: a title with a quote or a description with a `>`
-//! cannot corrupt the document, and a malformed IRI (a theme, a licence, a
-//! homepage) is dropped with a warning instead of being interpolated.
+//! The catalogue is built as an RDF graph (a `Vec<Triple>`, through
+//! [`super::graph::G`]) and serialised per request in whatever format was
+//! negotiated. Every user-supplied value becomes a real RDF term: a title with
+//! a quote or a description with a `>` cannot corrupt the document, and a
+//! malformed IRI (a theme, a licence, a homepage) is dropped with a warning
+//! instead of being interpolated.
 //!
 //! What is emitted:
-//! - the `dcat:Catalog` (title, description, publisher agent, language,
-//!   licence, issued/modified, homepage, theme taxonomy, the SPARQL endpoint
-//!   as `dcat:service`) and its datasets;
+//! - the `dcat:Catalog` (title, description, publisher agent, contact point,
+//!   language, licence, issued/modified, homepage, theme taxonomy, its data
+//!   services) and its datasets;
 //! - a `dcat:Dataset` + `void:Dataset` per registered dataset the caller may
-//!   see: Dublin Core, access rights, publisher/creator agents, PROV
-//!   attribution, model and shapes conformance, per-graph `void:subset`s with
-//!   roles, VoID counts, and distributions (SPARQL as a `dcat:DataService`,
-//!   Graph Store, one download per graph, LDES when published, OGC API –
-//!   Features / 3D Tiles / viewer feed when there is geometry);
-//! - under an application profile, the properties DCAT-AP 3 and DCAT-AP-NL 3
-//!   make mandatory: typed `foaf:Agent` publishers with names,
-//!   `dct:identifier` + `adms:identifier`, `dct:language`, `dct:format`
-//!   (EU file-type authority) and `dcat:mediaType` on every distribution,
-//!   `adms:status` on the EU dataset-status authority, licences repeated on
-//!   distributions (NL);
-//! - the aggregate `void:Dataset` for the whole store with statistics that
-//!   cover default and named graphs alike, cached until the next write.
+//!   see: Dublin Core, access rights, publisher and creator agents, contact
+//!   point, temporal coverage, update frequency, PROV attribution, model and
+//!   shapes conformance, per-graph `void:subset`s with roles, VoID counts, and
+//!   distributions (SPARQL, Graph Store, one download per graph, LDES when
+//!   published, OGC API – Features / 3D Tiles / viewer feed when there is
+//!   geometry);
+//! - its released versions (published or deprecated) as DCAT 3 §11 versions:
+//!   each a `dcat:Dataset` with `dcat:isVersionOf`, `dcat:version`,
+//!   `dcat:previousVersion`, `dct:issued` and `adms:versionNotes`, linked from
+//!   the dataset by `dcat:hasVersion`, the newest by `dcat:hasCurrentVersion`;
+//! - the SPARQL endpoint (and the OGC API when a dataset has geometry) as a
+//!   `dcat:DataService` with `dcat:servesDataset`, its endpoint description,
+//!   publisher, contact point, access rights and licence;
+//! - DCAT range typing on every object (a licence is a `dct:LicenseDocument`,
+//!   a theme a labelled `skos:Concept`, …; see [`super::graph`]);
+//! - under an application profile, what DCAT-AP 3 and DCAT-AP-NL 3 make
+//!   mandatory or recommend: `dct:identifier` + `adms:identifier`,
+//!   `dct:language`, `dct:format` (EU file-type authority) on every
+//!   distribution, licences repeated on distributions, and a
+//!   `dcat:CatalogRecord` per dataset;
+//! - VoID per dataset, over the dataset's graphs the caller may read:
+//!   statistics, class and property partitions, vocabularies, example
+//!   resources, features, data dumps, and its linkset-role graphs as
+//!   `void:Linkset`s with their link predicates and targets;
+//! - the aggregate `void:Dataset` for the whole store with statistics over the
+//!   graphs the caller may read, cached until the next write — counts only,
+//!   never partitions.
+//!
+//! `dcat:DatasetSeries` is not emitted: the product has no series concept (a
+//! dataset's versions are versions, DCAT 3 §11, not members of a series).
+//!
+//! Nothing is invented to satisfy a profile. What a profile requires that the
+//! registry does not hold — a theme, a contact point, a licence — is left out
+//! and reported in [`CatalogReport::warnings`] (logged once per message).
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use oxigraph::io::{RdfFormat, RdfSerializer};
-use oxigraph::model::{BlankNode, Literal, NamedNode, NamedOrBlankNode, Term, Triple};
+use oxigraph::io::RdfFormat;
+use oxigraph::model::{BlankNode, NamedNode, NamedOrBlankNode, Triple};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
 use crate::auth::db::AuthDb;
 use crate::auth::models::{Dataset, Organisation, OwnerType, Visibility};
+use crate::dataset_versions::models::{DatasetVersion, VersionStatus};
 use crate::store::engine::TripleStore;
 
+use super::authority;
+use super::graph::{nn, p, Range, G, OTS, SKOS};
 use super::vocabulary::*;
 
-const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-const SKOS: &str = "http://www.w3.org/2004/02/skos/core#";
-const OTS: &str = "https://opentriplestore.org/ns#";
 const EU_LANG: &str = "http://publications.europa.eu/resource/authority/language/";
 const EU_FILETYPE: &str = "http://publications.europa.eu/resource/authority/file-type/";
-const EU_STATUS: &str = "http://publications.europa.eu/resource/authority/dataset-status/";
-const EU_ACCESS: &str = "http://publications.europa.eu/resource/authority/access-right/";
-const EU_THEMES: &str = "http://publications.europa.eu/resource/authority/data-theme";
 const IANA: &str = "https://www.iana.org/assignments/media-types/";
 const SPARQL_PROTOCOL: &str = "https://www.w3.org/TR/sparql11-protocol/";
 const GSP_PROTOCOL: &str = "https://www.w3.org/TR/sparql11-http-rdf-update/";
 const LDES_SPEC: &str = "https://w3id.org/ldes/specification";
+const OGC_FEATURES: &str = "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/core";
+const TILES3D: &str = "https://docs.ogc.org/cs/22-025r4/22-025r4.html";
+/// The DCAT-AP 3.0.1 release, as its SHACL shapes name it.
+pub const DCAT_AP_301: &str = "https://semiceu.github.io/DCAT-AP/releases/3.0.1";
+/// The DCAT-AP-NL 3 specification.
+pub const DCAT_AP_NL_3: &str = "https://geonovum.github.io/DCAT-AP-NL30/";
 
 // ── profile & options ───────────────────────────────────────────────────────
 
@@ -66,24 +91,102 @@ pub enum Profile {
 }
 
 impl Profile {
-    pub fn from_env() -> Self {
-        match std::env::var("DCAT_PROFILE")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "dcat-ap" | "dcat_ap" | "dcatap" => Profile::DcatAp,
-            "dcat-ap-nl" | "dcat_ap_nl" | "dcatapnl" => Profile::DcatApNl,
-            _ => Profile::Dcat,
+    /// Parse a `DCAT_PROFILE` value; empty means `dcat`.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "dcat" | "dcat3" | "dcat-3" => Ok(Profile::Dcat),
+            "dcat-ap" | "dcat_ap" | "dcatap" => Ok(Profile::DcatAp),
+            "dcat-ap-nl" | "dcat_ap_nl" | "dcatapnl" => Ok(Profile::DcatApNl),
+            other => Err(format!(
+                "DCAT_PROFILE `{other}` is not a catalogue profile: use dcat, dcat-ap or dcat-ap-nl"
+            )),
         }
+    }
+    /// The profile `DCAT_PROFILE` names. An invalid value is refused at
+    /// startup ([`check_env`]); should one reach here anyway, it is `dcat`.
+    pub fn from_env() -> Self {
+        Self::parse(&std::env::var("DCAT_PROFILE").unwrap_or_default()).unwrap_or(Profile::Dcat)
     }
     pub fn is_ap(self) -> bool {
         !matches!(self, Profile::Dcat)
     }
+    fn is_nl(self) -> bool {
+        matches!(self, Profile::DcatApNl)
+    }
+    /// The application profile a catalogue record declares (`dct:conformsTo`).
+    fn standard(self) -> Option<&'static str> {
+        match self {
+            Profile::Dcat => None,
+            Profile::DcatAp => Some(DCAT_AP_301),
+            Profile::DcatApNl => Some(DCAT_AP_NL_3),
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Profile::Dcat => "DCAT 3",
+            Profile::DcatAp => "DCAT-AP 3",
+            Profile::DcatApNl => "DCAT-AP-NL 3",
+        }
+    }
 }
 
-/// Catalogue-level metadata, from the environment.
+/// Validate the catalogue settings at startup, reporting every problem at
+/// once: an unknown `DCAT_PROFILE`, a `CATALOG_PUBLISHER_TYPE` outside the
+/// ADMS publisher types, a `CATALOG_LANGUAGE` that is not an ISO 639-3 code,
+/// and IRIs that are not IRIs.
+pub fn check_env() -> Result<(), String> {
+    let mut errors = Vec::new();
+    if let Err(e) = Profile::parse(&std::env::var("DCAT_PROFILE").unwrap_or_default()) {
+        errors.push(e);
+    }
+    if let Some(t) = env_nonempty("CATALOG_PUBLISHER_TYPE") {
+        if authority::publisher_type_iri(&t)
+            .and_then(|i| NamedNode::new(i).ok())
+            .is_none()
+        {
+            errors.push(format!(
+                "CATALOG_PUBLISHER_TYPE `{t}` is not an ADMS publisher type (e.g. LocalAuthority, \
+                 NationalAuthority, Company) or an IRI"
+            ));
+        }
+    }
+    if let Some(l) = env_nonempty("CATALOG_LANGUAGE") {
+        if l.len() != 3 || !l.chars().all(|c| c.is_ascii_alphabetic()) {
+            errors.push(format!(
+                "CATALOG_LANGUAGE `{l}` is not an ISO 639-3 code (ENG, NLD, …)"
+            ));
+        }
+    }
+    for k in ["CATALOG_PUBLISHER_URI", "CATALOG_LICENSE"] {
+        if let Some(v) = env_nonempty(k) {
+            if NamedNode::new(v.as_str()).is_err() {
+                errors.push(format!("{k} `{v}` is not an absolute IRI"));
+            }
+        }
+    }
+    for k in ["OTS_VOID_PARTITION_LIMIT", "OTS_VOID_PARTITION_MAX_TRIPLES"] {
+        if let Some(v) = env_nonempty(k) {
+            if v.parse::<usize>().is_err() {
+                errors.push(format!("{k} `{v}` is not a whole number"));
+            }
+        }
+    }
+    if let Some(e) = env_nonempty("CATALOG_CONTACT_EMAIL") {
+        if !e.contains('@') || NamedNode::new(format!("mailto:{e}")).is_err() {
+            errors.push(format!(
+                "CATALOG_CONTACT_EMAIL `{e}` is not an e-mail address"
+            ));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+/// Catalogue-level metadata, from the environment ([`CatalogOptions::from_env`])
+/// or set explicitly ([`CatalogOptions::new`] plus field updates).
 #[derive(Debug, Clone)]
 pub struct CatalogOptions {
     pub base_url: String,
@@ -93,9 +196,15 @@ pub struct CatalogOptions {
     pub publisher_iri: String,
     pub publisher_name: String,
     pub publisher_identifier: Option<String>,
+    /// ADMS publisher type of the catalogue's publisher (an IRI).
+    pub publisher_type: Option<String>,
     /// ISO 639-3, upper case (`ENG`, `NLD`).
     pub language: String,
     pub license: Option<String>,
+    /// The catalogue's and its data services' contact point (`vcard:fn`).
+    pub contact_name: Option<String>,
+    /// The catalogue's and its data services' contact e-mail (`vcard:hasEmail`).
+    pub contact_email: Option<String>,
 }
 
 fn env_nonempty(k: &str) -> Option<String> {
@@ -105,43 +214,67 @@ fn env_nonempty(k: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+fn host_of(base: &str) -> String {
+    base.split("://")
+        .nth(1)
+        .unwrap_or(base)
+        .trim_end_matches('/')
+        .to_string()
+}
+
 impl CatalogOptions {
-    pub fn from_env(base_url: &str) -> Self {
+    /// The defaults for `base_url` under `profile`, reading no environment.
+    pub fn new(base_url: &str, profile: Profile) -> Self {
         let base = base_url.trim_end_matches('/').to_string();
-        let profile = Profile::from_env();
-        let host = base
-            .split("://")
-            .nth(1)
-            .unwrap_or(&base)
-            .trim_end_matches('/')
-            .to_string();
+        let host = host_of(&base);
         Self {
             profile,
-            title: env_nonempty("CATALOG_TITLE")
-                .unwrap_or_else(|| "Open Triplestore Catalog".into()),
-            description: env_nonempty("CATALOG_DESCRIPTION").unwrap_or_else(|| {
-                format!("Datasets published by the Open Triplestore instance at {host}.")
-            }),
-            publisher_iri: env_nonempty("CATALOG_PUBLISHER_URI")
-                .unwrap_or_else(|| format!("{base}/publisher")),
-            publisher_name: env_nonempty("CATALOG_PUBLISHER_NAME")
-                .unwrap_or_else(|| format!("Open Triplestore instance at {host}")),
-            publisher_identifier: env_nonempty("CATALOG_PUBLISHER_IDENTIFIER"),
-            language: env_nonempty("CATALOG_LANGUAGE")
-                .map(|l| l.to_ascii_uppercase())
-                .unwrap_or_else(|| {
-                    if profile == Profile::DcatApNl {
-                        "NLD".into()
-                    } else {
-                        "ENG".into()
-                    }
-                }),
-            license: env_nonempty("CATALOG_LICENSE"),
+            title: "Open Triplestore Catalog".into(),
+            description: format!("Datasets published by the Open Triplestore instance at {host}."),
+            publisher_iri: format!("{base}/publisher"),
+            publisher_name: format!("Open Triplestore instance at {host}"),
+            publisher_identifier: None,
+            publisher_type: None,
+            language: if profile == Profile::DcatApNl {
+                "NLD".into()
+            } else {
+                "ENG".into()
+            },
+            license: None,
+            contact_name: None,
+            contact_email: None,
             base_url: base,
         }
     }
 
-    fn lang_tag(&self) -> &'static str {
+    /// The options `DCAT_PROFILE` and the `CATALOG_*` settings describe.
+    pub fn from_env(base_url: &str) -> Self {
+        let mut o = Self::new(base_url, Profile::from_env());
+        if let Some(v) = env_nonempty("CATALOG_TITLE") {
+            o.title = v;
+        }
+        if let Some(v) = env_nonempty("CATALOG_DESCRIPTION") {
+            o.description = v;
+        }
+        if let Some(v) = env_nonempty("CATALOG_PUBLISHER_URI") {
+            o.publisher_iri = v;
+        }
+        if let Some(v) = env_nonempty("CATALOG_PUBLISHER_NAME") {
+            o.publisher_name = v;
+        }
+        o.publisher_identifier = env_nonempty("CATALOG_PUBLISHER_IDENTIFIER");
+        o.publisher_type =
+            env_nonempty("CATALOG_PUBLISHER_TYPE").and_then(|t| authority::publisher_type_iri(&t));
+        if let Some(v) = env_nonempty("CATALOG_LANGUAGE") {
+            o.language = v.to_ascii_uppercase();
+        }
+        o.license = env_nonempty("CATALOG_LICENSE");
+        o.contact_name = env_nonempty("CATALOG_CONTACT_NAME");
+        o.contact_email = env_nonempty("CATALOG_CONTACT_EMAIL");
+        o
+    }
+
+    pub(crate) fn lang_tag(&self) -> &'static str {
         match self.language.as_str() {
             "NLD" => "nl",
             "DEU" => "de",
@@ -157,79 +290,40 @@ impl CatalogOptions {
             _ => "en",
         }
     }
-    fn language_iri(&self) -> String {
+    pub(crate) fn language_iri(&self) -> String {
         format!("{EU_LANG}{}", self.language)
     }
-}
-
-// ── graph builder ───────────────────────────────────────────────────────────
-
-struct G {
-    triples: Vec<Triple>,
-    agents: HashSet<String>,
-}
-
-fn nn(s: &str) -> NamedNode {
-    NamedNode::new_unchecked(s)
-}
-
-impl G {
-    fn new() -> Self {
-        Self {
-            triples: Vec::with_capacity(256),
-            agents: HashSet::new(),
-        }
-    }
-    /// A user-supplied IRI, or none (with a warning) when it is not one.
-    fn iri(&self, s: &str, what: &str) -> Option<NamedNode> {
-        match NamedNode::new(s.trim()) {
-            Ok(n) => Some(n),
-            Err(e) => {
-                tracing::warn!("dcat: dropping {what} `{s}`: not an IRI ({e})");
-                None
-            }
-        }
-    }
-    fn add(&mut self, s: impl Into<NamedOrBlankNode>, p: &str, o: impl Into<Term>) {
-        self.triples.push(Triple::new(s, nn(p), o));
-    }
-    fn typ(&mut self, s: impl Into<NamedOrBlankNode>, class: &str) {
-        self.add(s, RDF_TYPE, nn(class));
-    }
-    fn lit(&mut self, s: impl Into<NamedOrBlankNode>, p: &str, text: &str) {
-        self.add(s, p, Literal::new_simple_literal(text));
-    }
-    fn lang(&mut self, s: impl Into<NamedOrBlankNode>, p: &str, text: &str, lang: &str) {
-        match Literal::new_language_tagged_literal(text, lang) {
-            Ok(l) => self.add(s, p, l),
-            Err(_) => self.lit(s, p, text),
-        }
-    }
-    fn typed(&mut self, s: impl Into<NamedOrBlankNode>, p: &str, text: &str, dt: &str) {
-        self.add(s, p, Literal::new_typed_literal(text, nn(dt)));
-    }
-    fn int(&mut self, s: impl Into<NamedOrBlankNode>, p: &str, n: usize) {
-        self.add(s, p, Literal::from(n as i64));
-    }
-    /// Add `s p <o>` when `o` is a valid IRI.
-    fn link(&mut self, s: impl Into<NamedOrBlankNode>, p: &str, o: &str, what: &str) -> bool {
-        match self.iri(o, what) {
-            Some(n) => {
-                self.add(s, p, n);
-                true
-            }
-            None => false,
-        }
+    fn contact(&self) -> Option<Contact> {
+        Contact::new(
+            self.contact_name.as_deref(),
+            self.contact_email.as_deref(),
+            None,
+        )
     }
 }
 
-fn dt(s: &str) -> &'static str {
-    let _ = s;
-    "http://www.w3.org/2001/XMLSchema#dateTime"
+/// A contact point's fields; at least one is set.
+#[derive(Debug, Clone)]
+struct Contact {
+    name: Option<String>,
+    email: Option<String>,
+    url: Option<String>,
 }
 
-fn p(ns: &str, local: &str) -> String {
-    format!("{ns}{local}")
+impl Contact {
+    fn new(name: Option<&str>, email: Option<&str>, url: Option<&str>) -> Option<Self> {
+        let f = |v: Option<&str>| {
+            v.map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        let c = Contact {
+            name: f(name),
+            email: f(email),
+            url: f(url),
+        };
+        (c.name.is_some() || c.email.is_some() || c.url.is_some()).then_some(c)
+    }
 }
 
 fn enc(s: &str) -> String {
@@ -238,7 +332,17 @@ fn enc(s: &str) -> String {
 
 // ── public API ──────────────────────────────────────────────────────────────
 
+/// A built catalogue and the profile warnings met while building it.
+#[derive(Debug, Clone)]
+pub struct CatalogReport {
+    pub triples: Vec<Triple>,
+    /// What the profile asks for that the registry does not hold (a theme, a
+    /// contact point, a licence, a concept label), one message each.
+    pub warnings: Vec<String>,
+}
+
 /// The catalogue as triples: the whole instance, or one organisation's slice.
+#[allow(dead_code)] // library and test entry point; the server uses the report
 pub fn build_catalog(
     opts: &CatalogOptions,
     store: &TripleStore,
@@ -246,8 +350,37 @@ pub fn build_catalog(
     user_id: Option<&str>,
     scope: Option<&Organisation>,
 ) -> Vec<Triple> {
+    build_catalog_report(opts, store, auth_db, user_id, scope).triples
+}
+
+/// What a data service serves: the datasets and their themes.
+#[derive(Default)]
+struct Served {
+    datasets: Vec<NamedNode>,
+    themes: Vec<String>,
+}
+
+impl Served {
+    fn add(&mut self, ds: NamedNode, themes: &[String]) {
+        self.datasets.push(ds);
+        for t in themes {
+            if !self.themes.contains(t) {
+                self.themes.push(t.clone());
+            }
+        }
+    }
+}
+
+/// The catalogue and its profile warnings.
+pub fn build_catalog_report(
+    opts: &CatalogOptions,
+    store: &TripleStore,
+    auth_db: &Arc<AuthDb>,
+    user_id: Option<&str>,
+    scope: Option<&Organisation>,
+) -> CatalogReport {
     let base = opts.base_url.as_str();
-    let mut g = G::new();
+    let mut g = G::new(opts.lang_tag());
 
     let datasets: Vec<Dataset> = match scope {
         Some(org) => auth_db.list_datasets_by_org(&org.id).unwrap_or_default(),
@@ -287,25 +420,54 @@ pub fn build_catalog(
         None => catalog_publisher(&mut g, opts),
     };
     g.add(catalog.clone(), &p(DCT, "publisher"), publisher.clone());
-    g.link(
+    g.ranged(
         catalog.clone(),
         &p(DCT, "language"),
         &opts.language_iri(),
+        Range::LinguisticSystem,
         "language",
     );
     if let Some(l) = &opts.license {
-        g.link(catalog.clone(), &p(DCT, "license"), l, "catalogue licence");
+        g.ranged(
+            catalog.clone(),
+            &p(DCT, "license"),
+            l,
+            Range::LicenseDocument,
+            "catalogue licence",
+        );
     }
-    g.link(
+    g.ranged(
         catalog.clone(),
         &p(FOAF, "homepage"),
         &match scope {
             Some(org) => format!("{base}/{}/", org.slug),
             None => format!("{base}/"),
         },
+        Range::Document,
         "homepage",
     );
-    g.add(catalog.clone(), &p(DCAT, "themeTaxonomy"), nn(EU_THEMES));
+    let themes = nn(authority::EU_THEME_SCHEME);
+    g.add(catalog.clone(), &p(DCAT, "themeTaxonomy"), themes.clone());
+    g.typ(themes.clone(), &p(SKOS, "ConceptScheme"));
+    g.lang(themes, &p(DCT, "title"), "Data theme", "en");
+    let catalog_contact = match scope {
+        Some(org) => Contact::new(
+            org.contact_name.as_deref(),
+            org.contact_email.as_deref(),
+            org.contact_url.as_deref(),
+        )
+        .or_else(|| opts.contact()),
+        None => opts.contact(),
+    };
+    match &catalog_contact {
+        Some(c) => contact_point(&mut g, catalog.clone(), c),
+        None if opts.profile.is_nl() => g.warn(
+            "the catalogue has no contact point (DCAT-AP-NL requires one): set \
+             CATALOG_CONTACT_NAME and CATALOG_CONTACT_EMAIL"
+                .into(),
+        ),
+        None => {}
+    }
     let now = chrono::Utc::now().to_rfc3339();
     let issued = datasets
         .iter()
@@ -319,21 +481,15 @@ pub fn build_catalog(
         .max()
         .unwrap_or(now.as_str())
         .to_string();
-    g.typed(catalog.clone(), &p(DCT, "issued"), &issued, dt(&issued));
-    g.typed(
-        catalog.clone(),
-        &p(DCT, "modified"),
-        &modified,
-        dt(&modified),
-    );
+    g.when(catalog.clone(), &p(DCT, "issued"), &issued);
+    g.when(catalog.clone(), &p(DCT, "modified"), &modified);
     let sparql = nn(&format!("{base}/sparql"));
     g.add(catalog.clone(), &p(DCAT, "service"), sparql.clone());
+    let mut served = Served::default();
     if scope.is_none() {
-        g.add(
-            catalog.clone(),
-            &p(DCAT, "dataset"),
-            nn(&format!("{base}/dataset")),
-        );
+        let root = nn(&format!("{base}/dataset"));
+        g.add(catalog.clone(), &p(DCAT, "dataset"), root.clone());
+        served.add(root, &[]);
     }
     for ds in &datasets {
         g.add(
@@ -345,72 +501,78 @@ pub fn build_catalog(
 
     // ── the aggregate dataset (whole store) ──
     if scope.is_none() {
-        aggregate_dataset(&mut g, opts, store, readable.as_ref(), &publisher);
+        // Everything the instance serves covers its datasets' themes.
+        let mut themes: Vec<String> = Vec::new();
+        for t in datasets.iter().flat_map(|d| json_list(d.themes.as_deref())) {
+            if !themes.contains(&t) {
+                themes.push(t);
+            }
+        }
+        aggregate_dataset(&mut g, opts, store, readable.as_ref(), &publisher, &themes);
     }
 
     // ── per-dataset entries ──
+    let mut geo_served = Served::default();
     for ds in &datasets {
-        dataset_entry(&mut g, opts, store, auth_db, readable.as_ref(), ds);
+        let entry = dataset_entry(&mut g, opts, store, auth_db, readable.as_ref(), ds);
+        let iri = nn(&format!("{base}/dataset/{}", ds.id));
+        served.add(iri.clone(), &entry.themes);
+        if entry.geo {
+            geo_served.add(iri.clone(), &entry.themes);
+        }
+        if opts.profile.is_ap() {
+            catalog_record(&mut g, opts, &catalog, &iri, ds);
+        }
     }
 
-    // ── the SPARQL service ──
-    g.typ(sparql.clone(), &p(SD, "Service"));
-    g.typ(sparql.clone(), &p(DCAT, "DataService"));
-    g.add(sparql.clone(), &p(SD, "endpoint"), sparql.clone());
-    g.add(
-        sparql.clone(),
-        &p(SD, "supportedLanguage"),
-        nn(&p(SD, "SPARQL11Query")),
+    // ── the data services ──
+    let service_contact = opts.contact().or(catalog_contact);
+    sparql_service(
+        &mut g,
+        opts,
+        &sparql,
+        &publisher,
+        service_contact.as_ref(),
+        &served,
     );
-    g.add(
-        sparql.clone(),
-        &p(SD, "supportedLanguage"),
-        nn(&p(SD, "SPARQL11Update")),
-    );
-    g.lang(sparql.clone(), &p(DCT, "title"), "SPARQL endpoint", "en");
-    g.add(sparql.clone(), &p(DCAT, "endpointURL"), sparql.clone());
-    g.add(
-        sparql.clone(),
-        &p(DCAT, "endpointDescription"),
-        nn(&format!("{base}/")),
-    );
-    g.add(sparql.clone(), &p(DCT, "conformsTo"), nn(SPARQL_PROTOCOL));
-    if opts.profile.is_ap() {
-        g.add(sparql.clone(), &p(DCT, "publisher"), publisher);
+    if !geo_served.datasets.is_empty() {
+        let ogc = nn(&format!("{base}/api/ogc"));
+        g.add(catalog.clone(), &p(DCAT, "service"), ogc.clone());
+        ogc_service(
+            &mut g,
+            opts,
+            &ogc,
+            &publisher,
+            service_contact.as_ref(),
+            &geo_served,
+        );
     }
 
-    g.triples
+    CatalogReport {
+        triples: g.triples,
+        warnings: g.warnings,
+    }
 }
 
 /// Serialise the catalogue in `format` (Turtle gets the usual prefixes).
 pub fn serialize_catalog(triples: &[Triple], format: RdfFormat) -> Result<Vec<u8>, String> {
-    let mut ser = RdfSerializer::from_format(format);
-    if matches!(format, RdfFormat::Turtle | RdfFormat::TriG) {
-        for (pfx, ns) in [
-            ("dcat", DCAT),
-            ("dct", DCT),
-            ("void", VOID),
-            ("foaf", FOAF),
-            ("prov", PROV),
-            ("org", ORG),
-            ("adms", ADMS),
-            ("schema", SCHEMA),
-            ("vcard", VCARD),
-            ("xsd", XSD),
-            ("sd", SD),
-            ("skos", SKOS),
-            ("ots", OTS),
-        ] {
-            ser = ser.with_prefix(pfx, ns).map_err(|e| e.to_string())?;
+    super::graph::serialize(triples, format)
+}
+
+/// Log each profile warning once per process, so a catalogue requested every
+/// minute does not repeat itself.
+fn log_warnings(profile: Profile, warnings: &[String]) {
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
+    let Ok(mut seen) = seen.lock() else {
+        return;
+    };
+    for w in warnings {
+        if seen.len() < 10_000 && seen.insert(w.clone()) {
+            tracing::warn!("dcat ({}): {w}", profile.name());
         }
     }
-    let mut buf = Vec::with_capacity(triples.len() * 96);
-    let mut w = ser.for_writer(&mut buf);
-    for t in triples {
-        w.serialize_triple(t.as_ref()).map_err(|e| e.to_string())?;
-    }
-    w.finish().map_err(|e| e.to_string())?;
-    Ok(buf)
 }
 
 /// The catalogue (whole instance, or `org`'s slice) in `format`.
@@ -423,8 +585,9 @@ pub fn generate_catalog_bytes(
     format: RdfFormat,
 ) -> Result<Vec<u8>, String> {
     let opts = CatalogOptions::from_env(base_url);
-    let triples = build_catalog(&opts, store, auth_db, user_id, org);
-    serialize_catalog(&triples, format)
+    let report = build_catalog_report(&opts, store, auth_db, user_id, org);
+    log_warnings(opts.profile, &report.warnings);
+    serialize_catalog(&report.triples, format)
 }
 
 /// The whole-instance catalogue as Turtle.
@@ -461,9 +624,65 @@ pub fn generate_org_dcat_catalog(
     .unwrap_or_else(|e| format!("# catalogue serialisation failed: {e}\n"))
 }
 
+/// A dataset's temporal coverage and update frequency, checked and
+/// normalised for storage.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Coverage {
+    pub temporal_start: Option<String>,
+    pub temporal_end: Option<String>,
+    /// An IRI (a code of the EU frequency table becomes its IRI).
+    pub accrual_periodicity: Option<String>,
+}
+
+/// Check the coverage fields of a dataset update: dates are `YYYY-MM-DD` or
+/// RFC 3339, the end is not before the start, and the frequency is a code of
+/// the EU frequency table or an absolute IRI.
+pub fn check_coverage(
+    start: Option<&str>,
+    end: Option<&str>,
+    periodicity: Option<&str>,
+) -> Result<Coverage, String> {
+    let date = |field: &str, v: Option<&str>| -> Result<Option<String>, String> {
+        match v.map(str::trim).filter(|s| !s.is_empty()) {
+            None => Ok(None),
+            Some(s) => super::graph::temporal_literal(s)
+                .map(|(v, _)| Some(v))
+                .ok_or_else(|| {
+                    format!("{field} must be a date (YYYY-MM-DD) or an RFC 3339 date-time")
+                }),
+        }
+    };
+    let start = date("temporal_start", start)?;
+    let end = date("temporal_end", end)?;
+    if let (Some(s), Some(e)) = (&start, &end) {
+        // Compare on the date part: both forms start with YYYY-MM-DD.
+        if e.get(..10) < s.get(..10) {
+            return Err("temporal_end must not be before temporal_start".into());
+        }
+    }
+    let periodicity = match periodicity.map(str::trim).filter(|s| !s.is_empty()) {
+        None => None,
+        Some(v) => Some(authority::frequency_iri(v).ok_or_else(|| {
+            format!(
+                "accrual_periodicity `{v}` is not a code of the EU frequency table \
+                 (ANNUAL, MONTHLY, …) or an IRI"
+            )
+        })?),
+    };
+    if let Some(i) = &periodicity {
+        NamedNode::new(i.as_str())
+            .map_err(|_| format!("accrual_periodicity `{i}` is not an absolute IRI"))?;
+    }
+    Ok(Coverage {
+        temporal_start: start,
+        temporal_end: end,
+        accrual_periodicity: periodicity,
+    })
+}
+
 // ── agents ──────────────────────────────────────────────────────────────────
 
-fn catalog_publisher(g: &mut G, opts: &CatalogOptions) -> NamedNode {
+pub(crate) fn catalog_publisher(g: &mut G, opts: &CatalogOptions) -> NamedNode {
     let iri = g
         .iri(&opts.publisher_iri, "CATALOG_PUBLISHER_URI")
         .unwrap_or_else(|| nn(&format!("{}/publisher", opts.base_url)));
@@ -474,17 +693,21 @@ fn catalog_publisher(g: &mut G, opts: &CatalogOptions) -> NamedNode {
         if let Some(id) = &opts.publisher_identifier {
             g.lit(iri.clone(), &p(DCT, "identifier"), id);
         }
-        g.link(
+        if let Some(t) = &opts.publisher_type {
+            g.concept(iri.clone(), &p(DCT, "type"), t, "CATALOG_PUBLISHER_TYPE");
+        }
+        g.ranged(
             iri.clone(),
             &p(FOAF, "homepage"),
             &format!("{}/", opts.base_url),
+            Range::Document,
             "homepage",
         );
     }
     iri
 }
 
-fn org_agent(g: &mut G, opts: &CatalogOptions, org: &Organisation) -> NamedNode {
+pub(crate) fn org_agent(g: &mut G, opts: &CatalogOptions, org: &Organisation) -> NamedNode {
     let iri = nn(&format!("{}/org/{}", opts.base_url, org.id));
     if !g.agents.insert(iri.as_str().to_string()) {
         return iri;
@@ -501,29 +724,33 @@ fn org_agent(g: &mut G, opts: &CatalogOptions, org: &Organisation) -> NamedNode 
         g.lang(iri.clone(), &p(DCT, "description"), d, opts.lang_tag());
     }
     if let Some(h) = &org.homepage {
-        g.link(
+        g.ranged(
             iri.clone(),
             &p(FOAF, "homepage"),
             h,
+            Range::Document,
             "organisation homepage",
         );
     }
     if let Some(id) = &org.identifier {
         g.lit(iri.clone(), &p(DCT, "identifier"), id);
     }
-    if org.contact_name.is_some() || org.contact_email.is_some() || org.contact_url.is_some() {
-        contact_point(
-            g,
-            iri.clone(),
-            org.contact_name.as_deref(),
-            org.contact_email.as_deref(),
-            org.contact_url.as_deref(),
-        );
+    if let Some(c) = Contact::new(
+        org.contact_name.as_deref(),
+        org.contact_email.as_deref(),
+        org.contact_url.as_deref(),
+    ) {
+        contact_point(g, iri.clone(), &c);
     }
     iri
 }
 
-fn user_agent(g: &mut G, opts: &CatalogOptions, auth_db: &Arc<AuthDb>, user_id: &str) -> NamedNode {
+pub(crate) fn user_agent(
+    g: &mut G,
+    opts: &CatalogOptions,
+    auth_db: &Arc<AuthDb>,
+    user_id: &str,
+) -> NamedNode {
     let iri = nn(&format!("{}/user/{}", opts.base_url, user_id));
     if g.agents.insert(iri.as_str().to_string()) {
         g.typ(iri.clone(), &p(FOAF, "Agent"));
@@ -535,6 +762,12 @@ fn user_agent(g: &mut G, opts: &CatalogOptions, auth_db: &Arc<AuthDb>, user_id: 
             .map(|u| u.username)
             .unwrap_or_else(|| user_id.to_string());
         g.lit(iri.clone(), &p(FOAF, "name"), &name);
+        g.concept(
+            iri.clone(),
+            &p(DCT, "type"),
+            authority::PRIVATE_INDIVIDUAL,
+            "publisher type",
+        );
     }
     iri
 }
@@ -560,27 +793,15 @@ fn group_agent(
     iri
 }
 
-fn contact_point(
-    g: &mut G,
-    subject: impl Into<NamedOrBlankNode>,
-    name: Option<&str>,
-    email: Option<&str>,
-    url: Option<&str>,
-) {
-    let name = name.map(str::trim).filter(|s| !s.is_empty());
-    let email = email.map(str::trim).filter(|s| !s.is_empty());
-    let url = url.map(str::trim).filter(|s| !s.is_empty());
-    if name.is_none() && email.is_none() && url.is_none() {
-        return;
-    }
+fn contact_point(g: &mut G, subject: impl Into<NamedOrBlankNode>, c: &Contact) {
     let cp = BlankNode::default();
     g.add(subject, &p(DCAT, "contactPoint"), cp.clone());
     g.typ(cp.clone(), &p(VCARD, "Kind"));
     g.typ(cp.clone(), &p(VCARD, "Organization"));
-    if let Some(n) = name {
+    if let Some(n) = &c.name {
         g.lit(cp.clone(), &p(VCARD, "fn"), n);
     }
-    if let Some(e) = email {
+    if let Some(e) = &c.email {
         g.link(
             cp.clone(),
             &p(VCARD, "hasEmail"),
@@ -588,7 +809,7 @@ fn contact_point(
             "contact e-mail",
         );
     }
-    if let Some(u) = url {
+    if let Some(u) = &c.url {
         g.link(cp.clone(), &p(VCARD, "hasURL"), u, "contact URL");
     }
 }
@@ -616,6 +837,7 @@ fn aggregate_dataset(
     store: &TripleStore,
     readable: Option<&HashSet<String>>,
     publisher: &NamedNode,
+    themes: &[String],
 ) {
     let base = opts.base_url.as_str();
     let root = nn(&format!("{base}/dataset"));
@@ -625,6 +847,9 @@ fn aggregate_dataset(
     };
     g.typ(root.clone(), &p(VOID, "Dataset"));
     g.typ(root.clone(), &p(DCAT, "Dataset"));
+    if opts.profile.is_ap() {
+        g.typ(root.clone(), &p(DCAT, "Resource"));
+    }
     g.lang(root.clone(), &p(DCT, "title"), &opts.title, opts.lang_tag());
     g.lang(
         root.clone(),
@@ -659,30 +884,239 @@ fn aggregate_dataset(
         stats.distinct_predicates,
     );
     g.int(root.clone(), &p(VOID, "documents"), stats.named_graphs);
+    g.add(root.clone(), &p(DCT, "publisher"), publisher.clone());
+    g.add(root.clone(), &p(DCT, "creator"), publisher.clone());
+    access_rights(g, root.clone(), "PUBLIC");
     if opts.profile.is_ap() {
-        g.add(root.clone(), &p(DCT, "publisher"), publisher.clone());
         g.lit(
             root.clone(),
             &p(DCT, "identifier"),
             &format!("{base}/dataset"),
         );
-        g.link(
+        g.ranged(
             root.clone(),
             &p(DCT, "language"),
             &opts.language_iri(),
+            Range::LinguisticSystem,
             "language",
         );
-        g.add(
-            root.clone(),
-            &p(DCT, "accessRights"),
-            nn(&format!("{EU_ACCESS}PUBLIC")),
+        if let Some(l) = &opts.license {
+            g.ranged(
+                root.clone(),
+                &p(DCT, "license"),
+                l,
+                Range::LicenseDocument,
+                "catalogue licence",
+            );
+        }
+    }
+    match opts.contact() {
+        Some(c) => contact_point(g, root.clone(), &c),
+        None if opts.profile.is_nl() => g.warn(
+            "the aggregate dataset has no contact point (DCAT-AP-NL requires one): set \
+             CATALOG_CONTACT_NAME and CATALOG_CONTACT_EMAIL"
+                .into(),
+        ),
+        None => {}
+    }
+    if opts.license.is_none() && opts.profile.is_nl() {
+        g.warn(
+            "the aggregate dataset's distribution has no licence (DCAT-AP-NL requires one): \
+             set CATALOG_LICENSE"
+                .into(),
+        );
+    }
+    for t in themes {
+        g.concept(root.clone(), &p(DCAT, "theme"), t, "dataset theme");
+    }
+    if themes.is_empty() && opts.profile.is_nl() {
+        g.warn(
+            "the aggregate dataset has no dcat:theme (DCAT-AP-NL requires one): none of the \
+             datasets declares a theme"
+                .into(),
         );
     }
     sparql_distribution(g, opts, root.clone(), opts.license.as_deref());
-    g.add(
+    g.ranged(
         root.clone(),
         &p(DCAT, "landingPage"),
-        nn(&format!("{base}/")),
+        &format!("{base}/"),
+        Range::Document,
+        "landing page",
+    );
+}
+
+fn access_rights(g: &mut G, s: impl Into<NamedOrBlankNode>, code: &str) {
+    g.ranged(
+        s,
+        &p(DCT, "accessRights"),
+        &format!("{}{code}", authority::EU_ACCESS),
+        Range::RightsStatement,
+        "access rights",
+    );
+}
+
+// ── data services ───────────────────────────────────────────────────────────
+
+/// What both data services carry: title, description, identifier, publisher,
+/// contact point, access rights, licence, language, the datasets they serve
+/// and those datasets' themes.
+#[allow(clippy::too_many_arguments)]
+fn service_common(
+    g: &mut G,
+    opts: &CatalogOptions,
+    svc: &NamedNode,
+    title: &str,
+    description: &str,
+    publisher: &NamedNode,
+    contact: Option<&Contact>,
+    served: &Served,
+) {
+    g.typ(svc.clone(), &p(DCAT, "DataService"));
+    g.lang(svc.clone(), &p(DCT, "title"), title, "en");
+    g.lang(svc.clone(), &p(DCT, "description"), description, "en");
+    g.add(svc.clone(), &p(DCT, "publisher"), publisher.clone());
+    g.ranged(
+        svc.clone(),
+        &p(DCAT, "endpointURL"),
+        svc.as_str(),
+        Range::Resource,
+        "endpoint URL",
+    );
+    // The endpoint serves the public datasets anonymously and more to a
+    // signed-in caller; the service itself is open to everyone.
+    access_rights(g, svc.clone(), "PUBLIC");
+    for d in &served.datasets {
+        g.add(svc.clone(), &p(DCAT, "servesDataset"), d.clone());
+    }
+    for t in &served.themes {
+        g.concept(svc.clone(), &p(DCAT, "theme"), t, "service theme");
+    }
+    match contact {
+        Some(c) => contact_point(g, svc.clone(), c),
+        None if opts.profile.is_nl() => g.warn(format!(
+            "the data service <{}> has no contact point (DCAT-AP-NL requires one): set \
+             CATALOG_CONTACT_NAME and CATALOG_CONTACT_EMAIL",
+            svc.as_str()
+        )),
+        None => {}
+    }
+    if opts.profile.is_ap() {
+        g.lit(svc.clone(), &p(DCT, "identifier"), svc.as_str());
+        g.ranged(
+            svc.clone(),
+            &p(DCT, "language"),
+            &opts.language_iri(),
+            Range::LinguisticSystem,
+            "language",
+        );
+        match &opts.license {
+            Some(l) => {
+                g.ranged(
+                    svc.clone(),
+                    &p(DCT, "license"),
+                    l,
+                    Range::LicenseDocument,
+                    "catalogue licence",
+                );
+            }
+            None if opts.profile.is_nl() => g.warn(format!(
+                "the data service <{}> has no licence (DCAT-AP-NL requires one): set \
+                 CATALOG_LICENSE",
+                svc.as_str()
+            )),
+            None => {}
+        }
+        if served.themes.is_empty() && opts.profile.is_nl() {
+            g.warn(format!(
+                "the data service <{}> has no dcat:theme (DCAT-AP-NL requires one): none of \
+                 the datasets it serves declares a theme",
+                svc.as_str()
+            ));
+        }
+    }
+}
+
+fn sparql_service(
+    g: &mut G,
+    opts: &CatalogOptions,
+    sparql: &NamedNode,
+    publisher: &NamedNode,
+    contact: Option<&Contact>,
+    served: &Served,
+) {
+    service_common(
+        g,
+        opts,
+        sparql,
+        "SPARQL endpoint",
+        "SPARQL 1.1 query and update over the datasets of this catalogue.",
+        publisher,
+        contact,
+        served,
+    );
+    g.typ(sparql.clone(), &p(SD, "Service"));
+    g.add(sparql.clone(), &p(SD, "endpoint"), sparql.clone());
+    g.add(
+        sparql.clone(),
+        &p(SD, "supportedLanguage"),
+        nn(&p(SD, "SPARQL11Query")),
+    );
+    g.add(
+        sparql.clone(),
+        &p(SD, "supportedLanguage"),
+        nn(&p(SD, "SPARQL11Update")),
+    );
+    // The SPARQL 1.1 Service Description, which `GET /sparql` without a query
+    // returns (SPARQL 1.1 Service Description §2).
+    g.ranged(
+        sparql.clone(),
+        &p(DCAT, "endpointDescription"),
+        sparql.as_str(),
+        Range::Resource,
+        "endpoint description",
+    );
+    g.ranged(
+        sparql.clone(),
+        &p(DCT, "conformsTo"),
+        SPARQL_PROTOCOL,
+        Range::Standard,
+        "standard",
+    );
+}
+
+fn ogc_service(
+    g: &mut G,
+    opts: &CatalogOptions,
+    svc: &NamedNode,
+    publisher: &NamedNode,
+    contact: Option<&Contact>,
+    served: &Served,
+) {
+    service_common(
+        g,
+        opts,
+        svc,
+        "OGC API – Features",
+        "The features of the datasets with geometry, as GeoJSON over OGC API – Features.",
+        publisher,
+        contact,
+        served,
+    );
+    // The OGC API landing page links the API definition and conformance.
+    g.ranged(
+        svc.clone(),
+        &p(DCAT, "endpointDescription"),
+        svc.as_str(),
+        Range::Resource,
+        "endpoint description",
+    );
+    g.ranged(
+        svc.clone(),
+        &p(DCT, "conformsTo"),
+        OGC_FEATURES,
+        Range::Standard,
+        "standard",
     );
 }
 
@@ -699,8 +1133,34 @@ fn distribution_common(
     g.lang(d.clone(), &p(DCT, "title"), title, "en");
     if opts.profile.is_ap() {
         if let Some(l) = license {
-            g.link(d.clone(), &p(DCT, "license"), l, "distribution licence");
+            g.ranged(
+                d.clone(),
+                &p(DCT, "license"),
+                l,
+                Range::LicenseDocument,
+                "distribution licence",
+            );
         }
+    }
+}
+
+/// `dcat:mediaType` (IANA) and, under a profile, `dct:format` (EU file type).
+pub(crate) fn media(g: &mut G, opts: &CatalogOptions, d: &BlankNode, mime: &str, filetype: &str) {
+    g.ranged(
+        d.clone(),
+        &p(DCAT, "mediaType"),
+        &format!("{IANA}{mime}"),
+        Range::MediaType,
+        "media type",
+    );
+    if opts.profile.is_ap() {
+        g.ranged(
+            d.clone(),
+            &p(DCT, "format"),
+            &format!("{EU_FILETYPE}{filetype}"),
+            Range::MediaTypeOrExtent,
+            "file type",
+        );
     }
 }
 
@@ -719,23 +1179,18 @@ fn sparql_distribution(g: &mut G, opts: &CatalogOptions, ds: NamedNode, license:
         &p(DCAT, "accessService"),
         nn(&format!("{base}/sparql")),
     );
-    g.add(d.clone(), &p(DCT, "conformsTo"), nn(SPARQL_PROTOCOL));
-    g.add(
+    g.ranged(
         d.clone(),
-        &p(DCAT, "mediaType"),
-        nn(&format!("{IANA}application/sparql-results+json")),
+        &p(DCT, "conformsTo"),
+        SPARQL_PROTOCOL,
+        Range::Standard,
+        "standard",
     );
-    if opts.profile.is_ap() {
-        g.add(
-            d.clone(),
-            &p(DCT, "format"),
-            nn(&format!("{EU_FILETYPE}SPARQLQ")),
-        );
-    }
+    media(g, opts, &d, "application/sparql-results+json", "SPARQLQ");
 }
 
 #[allow(clippy::too_many_arguments)]
-fn turtle_distribution(
+fn rdf_distribution(
     g: &mut G,
     opts: &CatalogOptions,
     ds: NamedNode,
@@ -744,6 +1199,7 @@ fn turtle_distribution(
     download_url: Option<&str>,
     conforms_to: Option<&str>,
     license: Option<&str>,
+    trig: bool,
 ) {
     let d = BlankNode::default();
     g.add(ds, &p(DCAT, "distribution"), d.clone());
@@ -752,36 +1208,122 @@ fn turtle_distribution(
     if let Some(u) = download_url {
         g.add(d.clone(), &p(DCAT, "downloadURL"), nn(u));
     }
-    g.add(
-        d.clone(),
-        &p(DCAT, "mediaType"),
-        nn(&format!("{IANA}text/turtle")),
-    );
-    if opts.profile.is_ap() {
-        g.add(
-            d.clone(),
-            &p(DCT, "format"),
-            nn(&format!("{EU_FILETYPE}RDF_TURTLE")),
-        );
+    if trig {
+        media(g, opts, &d, "application/trig", "RDF_TRIG");
+    } else {
+        media(g, opts, &d, "text/turtle", "RDF_TURTLE");
     }
     if let Some(c) = conforms_to {
-        g.add(d.clone(), &p(DCT, "conformsTo"), nn(c));
+        g.ranged(
+            d.clone(),
+            &p(DCT, "conformsTo"),
+            c,
+            Range::Standard,
+            "standard",
+        );
     }
 }
 
 // ── per-dataset entry ───────────────────────────────────────────────────────
 
-fn status_iri(g: &G, s: &str) -> Option<NamedNode> {
-    let t = s.trim();
-    if t.is_empty() {
-        return None;
+/// What a dataset and each of its versions share: who publishes it, what
+/// covers it and under which terms.
+struct Shared {
+    access: &'static str,
+    agent: NamedNode,
+    license: Option<String>,
+    themes: Vec<String>,
+    keywords: Vec<String>,
+    contact: Option<Contact>,
+    spatial: Option<String>,
+    temporal: (Option<String>, Option<String>),
+    periodicity: Option<String>,
+}
+
+fn json_list(v: Option<&str>) -> Vec<String> {
+    v.and_then(|j| serde_json::from_str::<Vec<String>>(j).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn nonempty(v: Option<&str>) -> Option<String> {
+    v.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn describe_shared(g: &mut G, opts: &CatalogOptions, s: &NamedNode, sh: &Shared) {
+    let ap = opts.profile.is_ap();
+    access_rights(g, s.clone(), sh.access);
+    g.add(s.clone(), &p(DCT, "publisher"), sh.agent.clone());
+    // DCAT-AP-NL asks for a creator; the owner both created and publishes it.
+    g.add(s.clone(), &p(DCT, "creator"), sh.agent.clone());
+    g.add(s.clone(), &p(PROV, "wasAttributedTo"), sh.agent.clone());
+    if ap {
+        g.ranged(
+            s.clone(),
+            &p(DCT, "language"),
+            &opts.language_iri(),
+            Range::LinguisticSystem,
+            "language",
+        );
     }
-    let key = t.to_ascii_uppercase().replace([' ', '-'], "_");
-    match key.as_str() {
-        "COMPLETED" | "DEPRECATED" | "UNDER_DEVELOPMENT" | "WITHDRAWN" | "DEVELOP"
-        | "DISCONTINUED" => Some(nn(&format!("{EU_STATUS}{key}"))),
-        _ => g.iri(t, "adms:status"),
+    if let Some(l) = &sh.license {
+        g.ranged(
+            s.clone(),
+            &p(DCT, "license"),
+            l,
+            Range::LicenseDocument,
+            "dataset licence",
+        );
     }
+    for t in &sh.themes {
+        g.concept(s.clone(), &p(DCAT, "theme"), t, "dataset theme");
+    }
+    for k in &sh.keywords {
+        g.lang(s.clone(), &p(DCAT, "keyword"), k, opts.lang_tag());
+    }
+    if let Some(c) = &sh.contact {
+        contact_point(g, s.clone(), c);
+    }
+    if let Some(sp) = &sh.spatial {
+        g.ranged(
+            s.clone(),
+            &p(DCT, "spatial"),
+            sp,
+            Range::Location,
+            "dct:spatial",
+        );
+    }
+    if sh.temporal.0.is_some() || sh.temporal.1.is_some() {
+        let t = BlankNode::default();
+        g.add(s.clone(), &p(DCT, "temporal"), t.clone());
+        g.typ(t.clone(), &p(DCT, "PeriodOfTime"));
+        if let Some(v) = &sh.temporal.0 {
+            g.when(t.clone(), &p(DCAT, "startDate"), v);
+        }
+        if let Some(v) = &sh.temporal.1 {
+            g.when(t.clone(), &p(DCAT, "endDate"), v);
+        }
+    }
+    if let Some(f) = &sh.periodicity {
+        g.ranged(
+            s.clone(),
+            &p(DCT, "accrualPeriodicity"),
+            f,
+            Range::Frequency,
+            "accrual periodicity",
+        );
+    }
+}
+
+/// What the catalogue needs to know about a dataset entry once written.
+struct EntryInfo {
+    themes: Vec<String>,
+    geo: bool,
 }
 
 fn dataset_entry(
@@ -791,47 +1333,24 @@ fn dataset_entry(
     auth_db: &Arc<AuthDb>,
     readable: Option<&HashSet<String>>,
     ds: &Dataset,
-) {
+) -> EntryInfo {
     let base = opts.base_url.as_str();
     let ap = opts.profile.is_ap();
-    let ds_iri = nn(&format!("{base}/dataset/{}", ds.id));
-    let s = ds_iri.clone();
+    let nl = opts.profile.is_nl();
+    let s = nn(&format!("{base}/dataset/{}", ds.id));
 
     g.typ(s.clone(), &p(DCAT, "Dataset"));
     g.typ(s.clone(), &p(VOID, "Dataset"));
+    if ap {
+        g.typ(s.clone(), &p(DCAT, "Resource"));
+    }
     g.lang(s.clone(), &p(DCT, "title"), &ds.name, opts.lang_tag());
-    let description = ds
-        .description
-        .as_deref()
-        .map(str::trim)
-        .filter(|d| !d.is_empty())
-        .map(str::to_string)
-        .or_else(|| if ap { Some(ds.name.clone()) } else { None });
+    let description = nonempty(ds.description.as_deref()).or_else(|| ap.then(|| ds.name.clone()));
     if let Some(d) = description {
         g.lang(s.clone(), &p(DCT, "description"), &d, opts.lang_tag());
     }
-    g.typed(
-        s.clone(),
-        &p(DCT, "issued"),
-        &ds.created_at,
-        dt(&ds.created_at),
-    );
-    g.typed(
-        s.clone(),
-        &p(DCT, "modified"),
-        &ds.updated_at,
-        dt(&ds.updated_at),
-    );
-    let access = match ds.visibility {
-        Visibility::Public => "PUBLIC",
-        Visibility::Members => "RESTRICTED",
-        Visibility::Private => "NON_PUBLIC",
-    };
-    g.add(
-        s.clone(),
-        &p(DCT, "accessRights"),
-        nn(&format!("{EU_ACCESS}{access}")),
-    );
+    g.when(s.clone(), &p(DCT, "issued"), &ds.created_at);
+    g.when(s.clone(), &p(DCT, "modified"), &ds.updated_at);
     if ap {
         g.lit(s.clone(), &p(DCT, "identifier"), &ds.id);
         let id = BlankNode::default();
@@ -842,33 +1361,84 @@ fn dataset_entry(
             &p(SKOS, "notation"),
             &format!("{base}/dataset/{}", ds.id),
         );
-        g.link(
-            s.clone(),
-            &p(DCT, "language"),
-            &opts.language_iri(),
-            "language",
-        );
     }
 
-    // Publisher / creator agents.
-    let agent = match ds.owner_type {
+    // Publisher / creator agent: the owner.
+    let (agent, owner_org) = match ds.owner_type {
         OwnerType::Organisation => match auth_db.get_organisation(&ds.owner_id) {
-            Ok(Some(org)) => org_agent(g, opts, &org),
-            _ => nn(&format!("{base}/org/{}", ds.owner_id)),
+            Ok(Some(org)) => (org_agent(g, opts, &org), Some(org)),
+            _ => (nn(&format!("{base}/org/{}", ds.owner_id)), None),
         },
-        OwnerType::User => user_agent(g, opts, auth_db, &ds.owner_id),
-        OwnerType::Group => group_agent(g, opts, auth_db, &ds.owner_id),
+        OwnerType::User => (user_agent(g, opts, auth_db, &ds.owner_id), None),
+        OwnerType::Group => (group_agent(g, opts, auth_db, &ds.owner_id), None),
     };
-    match ds.owner_type {
-        OwnerType::User => {
-            g.add(s.clone(), &p(DCT, "creator"), agent.clone());
-            if ap {
-                g.add(s.clone(), &p(DCT, "publisher"), agent.clone());
-            }
+
+    let license =
+        nonempty(ds.license.as_deref()).or_else(|| ap.then(|| opts.license.clone()).flatten());
+    let themes = json_list(ds.themes.as_deref());
+    // A dataset without its own contact point is answered for by its owning
+    // organisation, else by the catalogue's contact (the profiles require one).
+    let contact = Contact::new(
+        ds.contact_name.as_deref(),
+        ds.contact_email.as_deref(),
+        ds.contact_url.as_deref(),
+    )
+    .or_else(|| {
+        if !ap {
+            return None;
         }
-        _ => g.add(s.clone(), &p(DCT, "publisher"), agent.clone()),
+        owner_org
+            .as_ref()
+            .and_then(|o| {
+                Contact::new(
+                    o.contact_name.as_deref(),
+                    o.contact_email.as_deref(),
+                    o.contact_url.as_deref(),
+                )
+            })
+            .or_else(|| opts.contact())
+    });
+    if nl {
+        if themes.is_empty() {
+            g.warn(format!(
+                "dataset `{}` has no dcat:theme (DCAT-AP-NL requires one): set its themes",
+                ds.id
+            ));
+        }
+        if contact.is_none() {
+            g.warn(format!(
+                "dataset `{}` has no contact point (DCAT-AP-NL requires one): set its contact, \
+                 its organisation's, or CATALOG_CONTACT_NAME / CATALOG_CONTACT_EMAIL",
+                ds.id
+            ));
+        }
+        if license.is_none() {
+            g.warn(format!(
+                "dataset `{}` has no licence, so neither have its distributions (DCAT-AP-NL \
+                 requires one): set its licence or CATALOG_LICENSE",
+                ds.id
+            ));
+        }
     }
-    g.add(s.clone(), &p(PROV, "wasAttributedTo"), agent.clone());
+    let shared = Shared {
+        access: match ds.visibility {
+            Visibility::Public => "PUBLIC",
+            Visibility::Members => "RESTRICTED",
+            Visibility::Private => "NON_PUBLIC",
+        },
+        agent,
+        license: license.clone(),
+        themes: themes.clone(),
+        keywords: json_list(ds.keywords.as_deref()),
+        contact,
+        spatial: nonempty(ds.spatial.as_deref()),
+        temporal: (
+            nonempty(ds.temporal_start.as_deref()),
+            nonempty(ds.temporal_end.as_deref()),
+        ),
+        periodicity: nonempty(ds.accrual_periodicity.as_deref()),
+    };
+    describe_shared(g, opts, &s, &shared);
 
     // Graphs, roles, counts, provenance — of the graphs the caller may read:
     // a private graph is its dataset's writers' only.
@@ -886,10 +1456,13 @@ fn dataset_entry(
         },
     );
     if let Some(c) = latest.first() {
-        g.add(
+        let commit = format!("{base}/commit/{}", c.commit_id);
+        g.ranged(
             s.clone(),
             &p(PROV, "wasGeneratedBy"),
-            nn(&format!("{base}/commit/{}", c.commit_id)),
+            &commit,
+            Range::Activity,
+            "commit",
         );
     }
     let mut total = 0usize;
@@ -910,107 +1483,47 @@ fn dataset_entry(
         }
     }
     g.int(s.clone(), &p(VOID, "triples"), total);
+    void_description(g, opts, store, &s, &entries, total);
 
     // Conformance.
     if ds.shacl_on_write {
         if let Some(shapes) = &ds.shapes_graph_iri {
-            g.link(s.clone(), &p(DCT, "conformsTo"), shapes, "shapes graph");
+            g.ranged(
+                s.clone(),
+                &p(DCT, "conformsTo"),
+                shapes,
+                Range::Standard,
+                "shapes graph",
+            );
         }
     }
-    if let Some(model) = &ds.conforms_to_model {
-        let target = match &ds.conforms_to_version {
-            Some(v) => format!("{base}/data-model/{model}/version/{v}"),
-            None => format!("{base}/data-model/{model}"),
-        };
-        g.add(s.clone(), &p(DCT, "conformsTo"), nn(&target));
-    }
-
-    // DCAT metadata.
-    let license = ds
-        .license
-        .as_deref()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
-        .or_else(|| if ap { opts.license.clone() } else { None });
-    if let Some(l) = &license {
-        g.link(s.clone(), &p(DCT, "license"), l, "dataset licence");
-    }
-    if let Some(themes) = ds
-        .themes
-        .as_deref()
-        .and_then(|j| serde_json::from_str::<Vec<String>>(j).ok())
-    {
-        for t in themes.iter().filter(|t| !t.trim().is_empty()) {
-            g.link(s.clone(), &p(DCAT, "theme"), t, "dataset theme");
-        }
-    }
-    if let Some(kws) = ds
-        .keywords
-        .as_deref()
-        .and_then(|j| serde_json::from_str::<Vec<String>>(j).ok())
-    {
-        for k in kws.iter().filter(|k| !k.trim().is_empty()) {
-            g.lang(s.clone(), &p(DCAT, "keyword"), k.trim(), opts.lang_tag());
-        }
-    }
-    if let Some(st) = ds.adms_status.as_deref().and_then(|x| status_iri(g, x)) {
-        g.add(s.clone(), &p(ADMS, "status"), st);
-    }
-    if let Some(n) = ds
-        .version_notes
-        .as_deref()
-        .map(str::trim)
-        .filter(|n| !n.is_empty())
-    {
-        g.lang(s.clone(), &p(ADMS, "versionNotes"), n, opts.lang_tag());
-    }
-    if let Some(sp) = ds
-        .spatial
-        .as_deref()
-        .map(str::trim)
-        .filter(|x| !x.is_empty())
-    {
-        g.link(s.clone(), &p(DCT, "spatial"), sp, "dct:spatial");
-    }
-    contact_point(
-        g,
-        s.clone(),
-        ds.contact_name.as_deref(),
-        ds.contact_email.as_deref(),
-        ds.contact_url.as_deref(),
-    );
-
-    // Versions (DCAT 3): the newest published version, and every version as a
-    // dcat:hasVersion link.
-    let versions = crate::dataset_versions::registry::list_versions(store, base, &ds.id);
-    for v in &versions {
-        g.add(
+    if let Some(target) = model_target(
+        base,
+        ds.conforms_to_model.as_deref(),
+        ds.conforms_to_version.as_deref(),
+    ) {
+        g.ranged(
             s.clone(),
-            &p(DCAT, "hasVersion"),
-            nn(&format!(
-                "{base}/dataset/{}/version/{}",
-                ds.id,
-                enc(&v.version)
-            )),
+            &p(DCT, "conformsTo"),
+            &target,
+            Range::Standard,
+            "data model",
         );
     }
-    if let Some(v) = versions
-        .iter()
-        .filter(|v| {
-            matches!(
-                v.status,
-                crate::dataset_versions::models::VersionStatus::Published
-            )
-        })
-        .max_by(|a, b| a.created_at.cmp(&b.created_at))
-    {
-        g.lit(s.clone(), &p(DCAT, "version"), &v.version);
+
+    if let Some(st) = ds.adms_status.as_deref().and_then(authority::status_iri) {
+        g.concept(s.clone(), &p(ADMS, "status"), &st, "adms:status");
     }
+    if let Some(n) = nonempty(ds.version_notes.as_deref()) {
+        g.lang(s.clone(), &p(ADMS, "versionNotes"), &n, opts.lang_tag());
+    }
+
+    // Versions (DCAT 3 §11).
+    versions(g, opts, store, ds, &s, &shared);
 
     // Distributions.
     sparql_distribution(g, opts, s.clone(), license.as_deref());
-    turtle_distribution(
+    rdf_distribution(
         g,
         opts,
         s.clone(),
@@ -1019,6 +1532,7 @@ fn dataset_entry(
         None,
         Some(GSP_PROTOCOL),
         license.as_deref(),
+        false,
     );
     for e in entries
         .iter()
@@ -1028,7 +1542,7 @@ fn dataset_entry(
             continue;
         }
         let url = format!("{base}/store?graph={}", enc(&e.graph_iri));
-        turtle_distribution(
+        rdf_distribution(
             g,
             opts,
             s.clone(),
@@ -1037,10 +1551,11 @@ fn dataset_entry(
             Some(&url),
             None,
             license.as_deref(),
+            false,
         );
     }
     if matches!(crate::ldes::store::stream(auth_db, &ds.id), Ok(Some(cfg)) if cfg.enabled) {
-        turtle_distribution(
+        rdf_distribution(
             g,
             opts,
             s.clone(),
@@ -1049,6 +1564,7 @@ fn dataset_entry(
             None,
             Some(LDES_SPEC),
             license.as_deref(),
+            false,
         );
     }
 
@@ -1063,7 +1579,8 @@ fn dataset_entry(
         .map(|e| e.graph_iri.clone())
         .collect();
     let geo = crate::geo::viewer_feed::dataset_geo_stats(store, &data_graphs);
-    if geo.has_coordinates || geo.has_3d {
+    let has_geo = geo.has_coordinates || geo.has_3d;
+    if has_geo {
         let d = BlankNode::default();
         g.add(s.clone(), &p(DCAT, "distribution"), d.clone());
         distribution_common(
@@ -1078,32 +1595,18 @@ fn dataset_entry(
             &p(DCAT, "accessURL"),
             nn(&format!("{base}/api/ogc/collections/{}/items", ds.id)),
         );
-        g.add(
-            d.clone(),
-            &p(DCAT, "mediaType"),
-            nn(&format!("{IANA}application/geo+json")),
-        );
-        if ap {
-            g.add(
-                d.clone(),
-                &p(DCT, "format"),
-                nn(&format!("{EU_FILETYPE}GEOJSON")),
-            );
-        }
-        g.add(
+        media(g, opts, &d, "application/geo+json", "GEOJSON");
+        g.ranged(
             d.clone(),
             &p(DCT, "conformsTo"),
-            nn("http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/core"),
+            OGC_FEATURES,
+            Range::Standard,
+            "standard",
         );
-        let svc = nn(&format!("{base}/api/ogc"));
-        g.add(d.clone(), &p(DCAT, "accessService"), svc.clone());
-        g.typ(svc.clone(), &p(DCAT, "DataService"));
-        g.lang(svc.clone(), &p(DCT, "title"), "OGC API – Features", "en");
-        g.add(svc.clone(), &p(DCAT, "endpointURL"), svc.clone());
         g.add(
-            svc.clone(),
-            &p(DCT, "conformsTo"),
-            nn("http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/core"),
+            d.clone(),
+            &p(DCAT, "accessService"),
+            nn(&format!("{base}/api/ogc")),
         );
         if geo.has_3d {
             let d = BlankNode::default();
@@ -1117,22 +1620,13 @@ fn dataset_entry(
                     ds.id
                 )),
             );
-            g.add(
-                d.clone(),
-                &p(DCAT, "mediaType"),
-                nn(&format!("{IANA}application/json")),
-            );
-            if ap {
-                g.add(
-                    d.clone(),
-                    &p(DCT, "format"),
-                    nn(&format!("{EU_FILETYPE}JSON")),
-                );
-            }
-            g.add(
+            media(g, opts, &d, "application/json", "JSON");
+            g.ranged(
                 d.clone(),
                 &p(DCT, "conformsTo"),
-                nn("https://docs.ogc.org/cs/22-025r4/22-025r4.html"),
+                TILES3D,
+                Range::Standard,
+                "standard",
             );
         }
         let d = BlankNode::default();
@@ -1143,32 +1637,357 @@ fn dataset_entry(
             &p(DCAT, "accessURL"),
             nn(&format!("{base}/api/datasets/{}/viewer-feed", ds.id)),
         );
-        g.add(
-            d.clone(),
-            &p(DCAT, "mediaType"),
-            nn(&format!("{IANA}application/json")),
-        );
-        if ap {
-            g.add(
-                d.clone(),
-                &p(DCT, "format"),
-                nn(&format!("{EU_FILETYPE}JSON")),
-            );
-        }
+        media(g, opts, &d, "application/json", "JSON");
     }
 
-    let landing = ds
-        .landing_page
-        .as_deref()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("{base}/"));
-    if !g.link(s.clone(), &p(DCAT, "landingPage"), &landing, "landing page") {
-        g.add(s.clone(), &p(DCAT, "landingPage"), nn(&format!("{base}/")));
+    let landing = nonempty(ds.landing_page.as_deref()).unwrap_or_else(|| format!("{base}/"));
+    if !g.ranged(
+        s.clone(),
+        &p(DCAT, "landingPage"),
+        &landing,
+        Range::Document,
+        "landing page",
+    ) {
+        g.ranged(
+            s.clone(),
+            &p(DCAT, "landingPage"),
+            &format!("{base}/"),
+            Range::Document,
+            "landing page",
+        );
+    }
+
+    EntryInfo {
+        themes,
+        geo: has_geo,
     }
 }
 
+/// The formats the Graph Store and the downloads serve (`void:feature`).
+const FORMATS_NS: &str = "http://www.w3.org/ns/formats/";
+const VOID_FEATURES: &[&str] = &[
+    "Turtle",
+    "N-Triples",
+    "RDF_XML",
+    "JSON-LD",
+    "TriG",
+    "N-Quads",
+];
+
+/// Partitions listed per kind unless `OTS_VOID_PARTITION_LIMIT` says otherwise.
+const DEFAULT_PARTITION_LIMIT: usize = 100;
+/// Datasets larger than this (`OTS_VOID_PARTITION_MAX_TRIPLES`) get counts but
+/// no partitions: those take a grouping scan of the data.
+const DEFAULT_PARTITION_MAX_TRIPLES: usize = 5_000_000;
+
+fn env_usize(k: &str, default: usize) -> usize {
+    env_nonempty(k)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// A dataset's VoID description beyond `void:triples`: statistics, class and
+/// property partitions, vocabularies, example resources, features, data dumps,
+/// its SPARQL endpoint and its linksets — all over `entries`, the dataset's
+/// graphs the caller may read. Nothing here is computed over a store-wide
+/// aggregate: a partition names classes and predicates, and an aggregate
+/// would name those of graphs the caller may not read.
+fn void_description(
+    g: &mut G,
+    opts: &CatalogOptions,
+    store: &TripleStore,
+    s: &NamedNode,
+    entries: &[crate::auth::models::DatasetGraphEntry],
+    total: usize,
+) {
+    let base = opts.base_url.as_str();
+    let graphs: HashSet<String> = entries.iter().map(|e| e.graph_iri.clone()).collect();
+    g.add(
+        s.clone(),
+        &p(VOID, "sparqlEndpoint"),
+        nn(&format!("{base}/sparql")),
+    );
+    for f in VOID_FEATURES {
+        g.add(
+            s.clone(),
+            &p(VOID, "feature"),
+            nn(&format!("{FORMATS_NS}{f}")),
+        );
+    }
+    for e in entries
+        .iter()
+        .filter(|e| !e.graph_iri.starts_with("urn:system:"))
+    {
+        if g.iri(&e.graph_iri, "graph IRI").is_some() {
+            g.add(
+                s.clone(),
+                &p(VOID, "dataDump"),
+                nn(&format!("{base}/store?graph={}", enc(&e.graph_iri))),
+            );
+        }
+    }
+    if graphs.is_empty() {
+        return;
+    }
+    let stats = store.void_stats_over(&graphs);
+    g.int(
+        s.clone(),
+        &p(VOID, "distinctSubjects"),
+        stats.distinct_subjects,
+    );
+    g.int(
+        s.clone(),
+        &p(VOID, "distinctObjects"),
+        stats.distinct_objects,
+    );
+    g.int(s.clone(), &p(VOID, "properties"), stats.distinct_predicates);
+    g.int(s.clone(), &p(VOID, "documents"), stats.named_graphs);
+
+    if total
+        <= env_usize(
+            "OTS_VOID_PARTITION_MAX_TRIPLES",
+            DEFAULT_PARTITION_MAX_TRIPLES,
+        )
+    {
+        let limit = env_usize("OTS_VOID_PARTITION_LIMIT", DEFAULT_PARTITION_LIMIT);
+        let parts = store.void_partitions_over(&graphs, limit);
+        g.int(s.clone(), &p(VOID, "classes"), parts.class_count);
+        let mut vocabularies: Vec<String> = Vec::new();
+        let mut vocab = |iri: &str| {
+            let ns = namespace_of(iri);
+            if !ns.is_empty() && !vocabularies.iter().any(|v| v == ns) {
+                vocabularies.push(ns.to_string());
+            }
+        };
+        for (class, n) in &parts.classes {
+            let cp = BlankNode::default();
+            g.add(s.clone(), &p(VOID, "classPartition"), cp.clone());
+            g.add(cp.clone(), &p(VOID, "class"), nn(class));
+            g.int(cp, &p(VOID, "entities"), *n);
+            vocab(class);
+        }
+        for (property, n) in &parts.properties {
+            let pp = BlankNode::default();
+            g.add(s.clone(), &p(VOID, "propertyPartition"), pp.clone());
+            g.add(pp.clone(), &p(VOID, "property"), nn(property));
+            g.int(pp, &p(VOID, "triples"), *n);
+            vocab(property);
+        }
+        for v in vocabularies.iter().take(limit) {
+            g.link(s.clone(), &p(VOID, "vocabulary"), v, "vocabulary");
+        }
+        for e in &parts.examples {
+            g.add(s.clone(), &p(VOID, "exampleResource"), nn(e));
+        }
+    }
+
+    // Linksets: the dataset's graphs whose role is `linkset`.
+    for e in entries
+        .iter()
+        .filter(|e| e.graph_role == Some(crate::auth::models::GraphKind::Linkset))
+    {
+        let Some(ls) = g.iri(&e.graph_iri, "linkset graph") else {
+            continue;
+        };
+        let links = store.void_linkset(
+            &e.graph_iri,
+            env_usize("OTS_VOID_PARTITION_LIMIT", DEFAULT_PARTITION_LIMIT),
+        );
+        g.typ(ls.clone(), &p(VOID, "Linkset"));
+        g.add(ls.clone(), &p(VOID, "subjectsTarget"), s.clone());
+        if let Some(space) = &links.object_space {
+            let target = BlankNode::default();
+            g.add(ls.clone(), &p(VOID, "objectsTarget"), target.clone());
+            g.typ(target.clone(), &p(VOID, "Dataset"));
+            g.lit(target, &p(VOID, "uriSpace"), space);
+        }
+        for (pred, _) in &links.predicates {
+            g.add(ls.clone(), &p(VOID, "linkPredicate"), nn(pred));
+        }
+        g.int(
+            ls,
+            &p(VOID, "triples"),
+            store.graph_count_cached(Some(&e.graph_iri)).unwrap_or(0),
+        );
+    }
+}
+
+/// An IRI's namespace: up to and including its last `#` or `/`.
+fn namespace_of(iri: &str) -> &str {
+    match iri.rfind(['#', '/']) {
+        Some(i) if i + 1 < iri.len() => &iri[..=i],
+        _ => "",
+    }
+}
+
+/// The model (version) a dataset or a version conforms to.
+fn model_target(base: &str, model: Option<&str>, version: Option<&str>) -> Option<String> {
+    let model = model.map(str::trim).filter(|m| !m.is_empty())?;
+    Some(match version.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(v) => format!("{base}/data-model/{model}/version/{v}"),
+        None => format!("{base}/data-model/{model}"),
+    })
+}
+
+/// The dataset's released versions (published or deprecated) as DCAT 3 §11
+/// versions. A draft or staged version is work in progress, not a release,
+/// and is not catalogued.
+fn versions(
+    g: &mut G,
+    opts: &CatalogOptions,
+    store: &TripleStore,
+    ds: &Dataset,
+    live: &NamedNode,
+    shared: &Shared,
+) {
+    let base = opts.base_url.as_str();
+    let mut released: Vec<DatasetVersion> =
+        crate::dataset_versions::registry::list_versions(store, base, &ds.id)
+            .into_iter()
+            .filter(|v| {
+                matches!(
+                    v.status,
+                    VersionStatus::Published | VersionStatus::Deprecated
+                )
+            })
+            .collect();
+    released.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    let iri_of =
+        |v: &DatasetVersion| -> Option<NamedNode> { NamedNode::new(v.graph_iri.as_str()).ok() };
+
+    for (i, v) in released.iter().enumerate() {
+        let Some(vi) = iri_of(v) else {
+            continue;
+        };
+        g.add(live.clone(), &p(DCAT, "hasVersion"), vi.clone());
+        g.typ(vi.clone(), &p(DCAT, "Dataset"));
+        if opts.profile.is_ap() {
+            g.typ(vi.clone(), &p(DCAT, "Resource"));
+        }
+        g.add(vi.clone(), &p(DCAT, "isVersionOf"), live.clone());
+        g.lit(vi.clone(), &p(DCAT, "version"), &v.version);
+        g.lang(
+            vi.clone(),
+            &p(DCT, "title"),
+            &format!("{} {}", ds.name, v.version),
+            opts.lang_tag(),
+        );
+        let notes = nonempty(v.notes.as_deref());
+        g.lang(
+            vi.clone(),
+            &p(DCT, "description"),
+            notes
+                .as_deref()
+                .unwrap_or(&format!("Version {} of {}.", v.version, ds.name)),
+            opts.lang_tag(),
+        );
+        if let Some(n) = &notes {
+            g.lang(vi.clone(), &p(ADMS, "versionNotes"), n, opts.lang_tag());
+        }
+        g.when(vi.clone(), &p(DCT, "issued"), &v.created_at);
+        let status = match v.status {
+            VersionStatus::Deprecated => "DEPRECATED",
+            _ => "COMPLETED",
+        };
+        g.concept(
+            vi.clone(),
+            &p(ADMS, "status"),
+            &format!("{}{status}", authority::EU_STATUS),
+            "adms:status",
+        );
+        if opts.profile.is_ap() {
+            g.lit(vi.clone(), &p(DCT, "identifier"), vi.as_str());
+        }
+        if let Some(target) = model_target(
+            base,
+            v.conforms_to_model.as_deref(),
+            v.conforms_to_version.as_deref(),
+        ) {
+            g.ranged(
+                vi.clone(),
+                &p(DCT, "conformsTo"),
+                &target,
+                Range::Standard,
+                "data model",
+            );
+        }
+        describe_shared(g, opts, &vi, shared);
+        // The previous version: the one it was derived from when that is a
+        // release, else the release before it on the same branch.
+        let prev = v
+            .derived_from
+            .as_deref()
+            .and_then(|d| released[..i].iter().rev().find(|o| o.version == d))
+            .or_else(|| released[..i].iter().rev().find(|o| o.branch == v.branch));
+        if let Some(pv) = prev.and_then(iri_of) {
+            g.add(vi.clone(), &p(DCAT, "previousVersion"), pv);
+        }
+        let url = format!(
+            "{base}/api/datasets/{}/versions/{}/data",
+            ds.id,
+            // Validated on insert to IRI-safe characters; the route takes it as is.
+            v.version
+        );
+        rdf_distribution(
+            g,
+            opts,
+            vi.clone(),
+            &format!("{} {} (TriG)", ds.name, v.version),
+            &url,
+            Some(&url),
+            None,
+            shared.license.as_deref(),
+            true,
+        );
+    }
+    // The current version: the newest published release on the main line,
+    // else the newest published one on any branch.
+    let published = |main: bool| {
+        released
+            .iter()
+            .rev()
+            .find(|v| matches!(v.status, VersionStatus::Published) && (!main || v.branch.is_none()))
+    };
+    if let Some(cur) = published(true)
+        .or_else(|| published(false))
+        .and_then(iri_of)
+    {
+        g.add(live.clone(), &p(DCAT, "hasCurrentVersion"), cur);
+    }
+}
+
+/// The dataset's `dcat:CatalogRecord` (DCAT-AP 3 §4.1, optional; DCAT-AP-NL
+/// asks the record for a language).
+fn catalog_record(
+    g: &mut G,
+    opts: &CatalogOptions,
+    catalog: &NamedNode,
+    ds_iri: &NamedNode,
+    ds: &Dataset,
+) {
+    let r = nn(&format!("{}/catalog/record/{}", opts.base_url, ds.id));
+    g.add(catalog.clone(), &p(DCAT, "record"), r.clone());
+    g.typ(r.clone(), &p(DCAT, "CatalogRecord"));
+    g.add(r.clone(), &p(FOAF, "primaryTopic"), ds_iri.clone());
+    g.when(r.clone(), &p(DCT, "issued"), &ds.created_at);
+    g.when(r.clone(), &p(DCT, "modified"), &ds.updated_at);
+    if let Some(profile) = opts.profile.standard() {
+        g.ranged(
+            r.clone(),
+            &p(DCT, "conformsTo"),
+            profile,
+            Range::Standard,
+            "application profile",
+        );
+    }
+    g.ranged(
+        r,
+        &p(DCT, "language"),
+        &opts.language_iri(),
+        Range::LinguisticSystem,
+        "language",
+    );
+}
 #[cfg(test)]
 mod tests {
     use super::*;
