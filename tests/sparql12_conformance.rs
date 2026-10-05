@@ -150,27 +150,106 @@ fn star_referential_opacity_cross_datatype() {
     );
 }
 
-// Documented oxigraph behavior: same-datatype xsd:integer lexical forms ARE
-// canonicalized ("030" == "30"), so they DO match inside a quoted triple. Strict
-// RDF-1.2 triple-term opacity would keep them distinct; oxigraph normalizes the
-// integer lexical form per its RDF 1.1 term handling.
+// Triple terms are opaque (RDF 1.2 Concepts §3.4): a literal inside one keeps
+// its lexical form and datatype, so "030"^^xsd:integer and "30"^^xsd:integer
+// are different triple terms. (Before the store kept lexical forms, both read
+// as "30" and matched.)
 #[test]
-fn star_integer_lexical_canonicalization_in_quoted_triple() {
+fn star_integer_lexical_forms_are_distinct_in_quoted_triple() {
     let s = ts();
     upd(
         &s,
-        r#"INSERT DATA { << :alice :age "30"^^xsd:integer >> :source :HR }"#,
+        r#"INSERT DATA { << :alice :age "30"^^xsd:integer >> :source :HR .
+                         << :bob :age "030"^^xsd:integer >> :source :Payroll .
+                         << :carol :age "41"^^xsd:int >> :source :Survey }"#,
     );
-    let r = sel(
-        &s,
-        r#"SELECT ?src WHERE { << :alice :age "030"^^xsd:integer >> :source ?src }"#,
+    let src = |pattern: &str| {
+        sel(
+            &s,
+            &format!("SELECT ?src WHERE {{ << {pattern} >> :source ?src }}"),
+        )
+        .into_iter()
+        .map(|row| row[0].clone())
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        src(r#":alice :age "30"^^xsd:integer"#),
+        vec!["<http://ex/HR>"]
+    );
+    assert!(
+        src(r#":alice :age "030"^^xsd:integer"#).is_empty(),
+        "030 is not 30"
     );
     assert_eq!(
-        r.len(),
-        1,
-        "oxigraph canonicalizes xsd:integer lexical forms; 030 == 30"
+        src(r#":bob :age "030"^^xsd:integer"#),
+        vec!["<http://ex/Payroll>"]
     );
-    assert!(r[0][0].contains("HR"));
+    assert!(
+        src(r#":bob :age "30"^^xsd:integer"#).is_empty(),
+        "30 is not 030"
+    );
+    assert_eq!(
+        src(r#":carol :age "41"^^xsd:int"#),
+        vec!["<http://ex/Survey>"]
+    );
+    assert!(
+        src(":carol :age 41").is_empty(),
+        "xsd:int is not xsd:integer"
+    );
+}
+
+// A triple term read back, bound to variables, or matched against the asserted
+// triple keeps the literal exactly as written, whichever way the join runs.
+#[test]
+fn star_literal_in_triple_term_round_trips_and_joins_the_asserted_triple() {
+    let s = ts();
+    upd(
+        &s,
+        r#"INSERT DATA { :carol :age "41"^^xsd:int {| :source :Survey |} .
+                         :x :flag <<( :a :b "1"^^xsd:boolean )>> }"#,
+    );
+    let r = sel(&s, "SELECT ?t WHERE { ?r rdf:reifies ?t }");
+    assert_eq!(
+        r,
+        vec![vec![
+            "<<( <http://ex/carol> <http://ex/age> \"41\"^^<http://www.w3.org/2001/XMLSchema#int> )>>"
+                .to_string()
+        ]]
+    );
+    let r = sel(&s, "SELECT ?o WHERE { ?r rdf:reifies <<( ?s ?p ?o )>> }");
+    assert_eq!(
+        r,
+        vec![vec![
+            "\"41\"^^<http://www.w3.org/2001/XMLSchema#int>".to_string()
+        ]]
+    );
+    // The annotation syntax joins the asserted triple with its reifier.
+    let r = sel(
+        &s,
+        "SELECT ?src WHERE { :carol :age ?age {| :source ?src |} }",
+    );
+    assert_eq!(r, vec![vec!["<http://ex/Survey>".to_string()]]);
+    let r = sel(
+        &s,
+        "SELECT ?src WHERE { ?r rdf:reifies <<( :carol :age ?age )>> ; :source ?src . :carol :age ?age }",
+    );
+    assert_eq!(r, vec![vec!["<http://ex/Survey>".to_string()]]);
+    assert_eq!(
+        sel(
+            &s,
+            r#"SELECT ?x WHERE { ?x :flag <<( :a :b "1"^^xsd:boolean )>> }"#
+        )
+        .len(),
+        1
+    );
+    assert!(sel(&s, "SELECT ?x WHERE { ?x :flag <<( :a :b true )>> }").is_empty());
+    // Expressions still compare values: OBJECT() returns the value, and `=`
+    // on triple terms compares the components by value.
+    let r = sel(
+        &s,
+        "SELECT ?x WHERE { ?x :flag ?t . FILTER(?t = <<( :a :b true )>>) }",
+    );
+    assert_eq!(r.len(), 1);
 }
 
 // ═══════════════════════════════════════════════════════════

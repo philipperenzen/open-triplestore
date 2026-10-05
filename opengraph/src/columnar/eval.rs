@@ -884,9 +884,12 @@ fn eval(
             }
             let mut rows = Vec::with_capacity(t.rows.len());
             for mut row in t.rows {
-                let v = eval_expr(expression, &row, &t.vars, ctx)
-                    .ok()
-                    .map(|v| ctx.intern_value(&v));
+                let v = match eval_term_expr(expression, &row, &t.vars, ctx) {
+                    Some(term) => term.ok(),
+                    None => eval_expr(expression, &row, &t.vars, ctx)
+                        .ok()
+                        .map(|v| ctx.intern_value(&v)),
+                };
                 match existing {
                     Some(c) => row[c] = v,
                     None => row.push(v),
@@ -1612,11 +1615,25 @@ fn aggregate(
             let mut values: Vec<Value> = Vec::new();
             let mut errored = false;
             let mut seen: HashSet<Term> = HashSet::new();
+            // COUNT(DISTINCT ?v) counts distinct terms, like the engine (its
+            // internal-term accumulator): "05"^^xsd:integer and 5 are two.
+            // The other aggregates de-duplicate values.
+            let mut seen_terms: HashSet<Id> = HashSet::new();
+            let distinct_terms = matches!(name, AggregateFunction::Count) && is_term_expr(expr);
             for i in members {
                 match eval_expr(expr, &t.rows[*i], &t.vars, ctx) {
                     Ok(v) => {
-                        if *distinct && !seen.insert(v.to_term()) {
-                            continue;
+                        if *distinct {
+                            let fresh = match distinct_terms
+                                .then(|| eval_term_expr(expr, &t.rows[*i], &t.vars, ctx))
+                                .flatten()
+                            {
+                                Some(Ok(id)) => seen_terms.insert(id),
+                                _ => seen.insert(v.to_term()),
+                            };
+                            if !fresh {
+                                continue;
+                            }
                         }
                         values.push(v);
                     }
@@ -1727,6 +1744,63 @@ fn aggregate(
 
 // ─── Expressions ────────────────────────────────────────────────────────────
 
+/// The exact term an expression that passes a term through yields: a
+/// variable, an IRI or literal constant, and `IF` / `COALESCE` over those.
+/// `None` for an expression that computes a value.
+///
+/// The engine keeps such a result as the stored term (spareval's
+/// `try_build_internal_expression_evaluator`), so `BIND(?o AS ?x)` binds
+/// `"05"^^xsd:integer` or `"5"^^xsd:int` as written. Decoding it to a
+/// [`Value`] and printing that back would give the canonical `"5"^^xsd:integer`.
+fn eval_term_expr(
+    e: &Expression,
+    row: &IdRow,
+    vars: &[Variable],
+    ctx: &mut Ctx<'_>,
+) -> Option<Result<Id, EvalError>> {
+    Some(match e {
+        Expression::NamedNode(n) => Ok(ctx.intern(&Term::NamedNode(n.clone()))),
+        Expression::Literal(l) => Ok(ctx.intern(&Term::Literal(l.clone()))),
+        Expression::Variable(v) => vars
+            .iter()
+            .position(|x| x == v)
+            .and_then(|c| row[c])
+            .ok_or(EvalError),
+        Expression::If(c, a, b) => {
+            if !is_term_expr(a) || !is_term_expr(b) {
+                return None;
+            }
+            match eval_expr(c, row, vars, ctx).and_then(|v| v.ebv()) {
+                Ok(true) => eval_term_expr(a, row, vars, ctx)?,
+                Ok(false) => eval_term_expr(b, row, vars, ctx)?,
+                Err(e) => Err(e),
+            }
+        }
+        Expression::Coalesce(list) => {
+            if !list.iter().all(is_term_expr) {
+                return None;
+            }
+            for x in list {
+                if let Some(Ok(id)) = eval_term_expr(x, row, vars, ctx) {
+                    return Some(Ok(id));
+                }
+            }
+            Err(EvalError)
+        }
+        _ => return None,
+    })
+}
+
+/// Whether [`eval_term_expr`] yields a term for `e`.
+fn is_term_expr(e: &Expression) -> bool {
+    match e {
+        Expression::NamedNode(_) | Expression::Literal(_) | Expression::Variable(_) => true,
+        Expression::If(_, a, b) => is_term_expr(a) && is_term_expr(b),
+        Expression::Coalesce(list) => list.iter().all(is_term_expr),
+        _ => false,
+    }
+}
+
 fn eval_expr(
     e: &Expression,
     row: &IdRow,
@@ -1765,9 +1839,24 @@ fn eval_expr(
             l.equals(&r).map(Value::Bool)
         }
         Expression::SameTerm(a, b) => {
-            let l = eval_expr(a, row, vars, ctx)?;
-            let r = eval_expr(b, row, vars, ctx)?;
-            Ok(Value::Bool(l.same_term(&r)))
+            // Like the engine: a side that passes a term through compares as
+            // that exact term, a computed side as the term its value prints
+            // as (so `sameTerm("05"^^xsd:integer, 5)` is false).
+            let l = match eval_term_expr(a, row, vars, ctx) {
+                Some(id) => id?,
+                None => {
+                    let v = eval_expr(a, row, vars, ctx)?;
+                    ctx.intern_value(&v)
+                }
+            };
+            let r = match eval_term_expr(b, row, vars, ctx) {
+                Some(id) => id?,
+                None => {
+                    let v = eval_expr(b, row, vars, ctx)?;
+                    ctx.intern_value(&v)
+                }
+            };
+            Ok(Value::Bool(l == r))
         }
         Expression::Greater(a, b) => cmp(a, b, row, vars, ctx, |o| o.is_gt()),
         Expression::GreaterOrEqual(a, b) => cmp(a, b, row, vars, ctx, |o| o.is_ge()),

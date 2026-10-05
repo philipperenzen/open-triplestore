@@ -278,7 +278,9 @@ impl Value {
                         Ok(b) => Value::Bool(b.into()),
                         Err(_) => Value::Typed(v.to_string(), dt.into_owned()),
                     }
-                } else if dt == xsd::DATE_TIME {
+                } else if dt == xsd::DATE_TIME || dt == xsd::DATE_TIME_STAMP {
+                    // xsd:dateTimeStamp is a dateTime with a required time
+                    // zone; the engine evaluates it as a dateTime too.
                     match v.parse::<DateTime>() {
                         Ok(d) => Value::DateTime(d),
                         Err(_) => Value::Typed(v.to_string(), dt.into_owned()),
@@ -493,6 +495,7 @@ fn is_known_datatype(dt: NamedNodeRef<'_>) -> bool {
     is_numeric_datatype(dt)
         || dt == xsd::BOOLEAN
         || dt == xsd::DATE_TIME
+        || dt == xsd::DATE_TIME_STAMP
         || dt == xsd::DATE
         || dt == xsd::TIME
 }

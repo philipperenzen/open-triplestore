@@ -42,12 +42,10 @@ curl -X PUT http://localhost:7878/api/datasets/<dataset_id>/shapes \
      --data-binary @shapes.ttl
 ```
 
-Write the boolean flags `sh:uniqueLang`, `sh:closed`, `sh:deactivated`,
-`sh:qualifiedValueShapesDisjoint` and `sh:optional` as `true` or `false`. An
-upload that writes one as another `xsd:boolean` form (`"1"^^xsd:boolean`,
-`"0"^^xsd:boolean`) is refused with 422 naming the triples, here and in SHACL
-Studio (create and `PUT …/turtle`); see
-[Literal forms the engine cannot see](#literal-forms-the-engine-cannot-see).
+The boolean flags `sh:uniqueLang`, `sh:closed`, `sh:deactivated`,
+`sh:qualifiedValueShapesDisjoint` and `sh:optional` take effect only when
+written as the literal `true`, as SHACL specifies: `"1"^^xsd:boolean` is stored
+as written and activates nothing; see [Literal forms](#literal-forms).
 
 ### SHACL Compact Syntax (SHACLC)
 
@@ -179,35 +177,30 @@ validation after writes that a cross-graph path depends on.
   no path); and a SPARQL target (`sh:target [ sh:select … ]`) that does not
   parse, does not project `?this`, or errors when it runs.
 
-### Literal forms the engine cannot see
+### Literal forms
 
-The store keeps `xsd:boolean`, the numeric types and the date/time types as
-values, not as the text that was written. What comes back is the canonical
-form of that value, and validation only ever sees what comes back:
+The store keeps every literal as written, its lexical form and its datatype
+([datatypes.md](datatypes.md)), so validation sees exactly the data and the
+shapes you stored:
 
-| Written | Read back |
-|---|---|
-| `"5"^^xsd:nonNegativeInteger` (any of the 12 types derived from `xsd:integer`: `xsd:int`, `xsd:byte`, `xsd:positiveInteger`, …) | `"5"^^xsd:integer` |
-| `"2026-10-01T12:00:00Z"^^xsd:dateTimeStamp` | `"2026-10-01T12:00:00Z"^^xsd:dateTime` |
-| `"1"^^xsd:boolean`, `"0"^^xsd:boolean` | `true`, `false` |
+- **`sh:datatype` checks the datatype as written.** A
+  `"5"^^xsd:nonNegativeInteger` conforms to `sh:datatype
+  xsd:nonNegativeInteger` and violates `sh:datatype xsd:integer`; the range of
+  the 12 types derived from `xsd:integer` is checked (`"300"^^xsd:byte` is
+  ill-formed), and `xsd:dateTimeStamp` needs a time zone.
+- **Flags take the literal `true` only.** `sh:uniqueLang "1"^^xsd:boolean`
+  does not activate the constraint (W3C test `core/property/uniqueLang-002`),
+  and the same holds for `sh:closed`, `sh:deactivated`,
+  `sh:qualifiedValueShapesDisjoint` and `sh:optional`.
+- **`sh:hasValue`, `sh:in`, `sh:equals` and `sh:disjoint` compare terms.**
+  `sh:hasValue 5` does not match `"05"^^xsd:integer` or `"5"^^xsd:int`;
+  `sh:minInclusive` and the other range constraints compare values.
 
-Two consequences for SHACL:
-
-- **`sh:datatype` with a derived integer type or `xsd:dateTimeStamp` reports
-  every stored value as a violation**, valid ones included, and a write gate
-  answers 422 on valid data. Until storage keeps the written datatype, use
-  `sh:datatype xsd:integer` with `sh:minInclusive` / `sh:maxInclusive` for
-  the range (or `xsd:dateTime`).
-- **A boolean flag written as `"1"` acts as `true`.** SHACL activates
-  `sh:uniqueLang`, `sh:closed`, `sh:deactivated` and the other flags only for
-  the literal `true` (W3C test `core/property/uniqueLang-002`, the one known
-  core failure), but once stored the two cannot be told apart. The dataset
-  `PUT …/shapes` and SHACL Studio uploads refuse such flags instead of storing
-  a meaning the author may not have intended; the other write paths (Graph
-  Store Protocol, SPARQL Update, imports) store them as given.
-
-Both are pinned by tests (`tests/shacl_conformance.rs`, `pinned_*`), which
-will flip when storage keeps lexical forms.
+Until the store kept lexical forms (see the changelog), it read the derived
+integer types back as `xsd:integer`, `xsd:dateTimeStamp` as `xsd:dateTime` and
+`"1"^^xsd:boolean` as `true`, so `sh:datatype` with a derived type rejected
+valid data and a `"1"` flag acted as `true`. Data stored then still reads that
+way; reload it (`PUT`) to have it checked as written.
 
 ## On-Demand Validation
 

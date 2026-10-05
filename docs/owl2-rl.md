@@ -91,15 +91,17 @@ blank-node class expressions included.
 distinguish literals *as subjects*, which an RDF graph cannot hold.
 
 **Literals are matched as terms, not values.** Every rule joins literals with
-SPARQL graph patterns, which compare RDF terms. The store canonicalises numbers,
-booleans and dates within one datatype, so `"01"^^xsd:integer` and
-`"1"^^xsd:integer` are the same term, but `"1"^^xsd:integer` and
-`"1.0"^^xsd:decimal` are not, and neither are an `xsd:string` and an
-`xsd:token` with the same text. `hasValue`, `hasKey`, `prp-npa2` and the
-functional and cardinality rules therefore miss values that are equal but
-written in different datatypes. Derived integer types (`xsd:byte`,
-`xsd:nonNegativeInteger`, …) are stored as `xsd:integer`, so `dt-not-type`
-never sees an out-of-range `"300"^^xsd:byte`.
+SPARQL graph patterns, which compare RDF terms, and the store keeps every
+literal as written: `"01"^^xsd:integer` and `"1"^^xsd:integer` are different
+terms, and so are `"1"^^xsd:integer`, `"1"^^xsd:int` and `"1.0"^^xsd:decimal`,
+or an `xsd:string` and an `xsd:token` with the same text. `hasValue`, `hasKey`,
+`prp-npa2` and the functional rules therefore miss values that are equal but
+written differently. The cardinality rules (`cls-maxc1/2`, `cls-maxqc1–4`) and
+`owl:hasSelf` read their number or flag by value, so `owl:maxCardinality 1`
+(Turtle's `xsd:integer`) and `"1"^^xsd:nonNegativeInteger` both apply. Derived
+integer types keep their datatype, so `dt-not-type` sees an out-of-range
+`"300"^^xsd:byte` (until the store kept lexical forms it was stored as the
+integer 300).
 
 ### Schema Rules (scm-*)
 

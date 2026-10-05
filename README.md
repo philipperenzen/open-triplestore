@@ -882,7 +882,7 @@ licence policy allows no performance claims on a subset.
 <!-- conformance-table:start -->
 | Standard | Suite | Basis | Tests | Notes |
 |---|---|---|---:|---|
-| SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 17 |  |
+| SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 19 |  |
 | DCAT 3 / DCAT-AP 3 / VoID | `tests/dcat_conformance.rs` | spec-derived | 4 |  |
 | GeoSPARQL 1.1 | `tests/geosparql_conformance.rs` | spec-derived | 143 |  |
 | LDES 1.0 / TREE | `tests/ldes_conformance.rs` | spec-derived | 28 |  |
@@ -893,28 +893,28 @@ licence policy allows no performance claims on a subset.
 | OWL 2 EL | `tests/owl2_el_conformance.rs` | spec-derived | 57 |  |
 | OWL 2 QL | `tests/owl2_ql_conformance.rs` | spec-derived | 45 |  |
 | OWL 2 RL | `tests/owl2_rl_conformance.rs` | spec-derived | 61 |  |
-| RDF 1.1 formats | `tests/rdf11_conformance.rs` | spec-derived | 63 |  |
+| RDF 1.1 formats | `tests/rdf11_conformance.rs` | spec-derived | 69 |  |
 | RDF Patch (RDF Delta) | `tests/rdf_patch_conformance.rs` | spec-derived | 24 |  |
 | RDFS entailment | `tests/rdfs_conformance.rs` | spec-derived | 23 |  |
 | RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 38 |  |
 | SHACL Advanced Features | `tests/shacl_af_corpus.rs` | **vendored TopQuadrant corpus** (expression, function, rule and target tests of TopQuadrant/shacl, unmodified; dash-driven) | 1 | 10 corpus cases: 9 pass, 1 known failure, 0 runner-side skips (floor ≥9 asserted) |
-| SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 58 |  |
+| SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 62 |  |
 | SHACL-AF rules | `tests/shacl_rules_conformance.rs` | spec-derived | 43 |  |
 | SHACL Compact Syntax | `tests/shaclc_conformance.rs` | spec-derived | 11 |  |
 | ShEx | `tests/shex_conformance.rs` | spec-derived | 10 |  |
-| SPARQL 1.2 / RDF-star | `tests/sparql12_conformance.rs` | spec-derived | 15 |  |
+| SPARQL 1.2 / RDF-star | `tests/sparql12_conformance.rs` | spec-derived | 16 |  |
 | SP2B / BSBM query shapes | `tests/sparql_benchmarks.rs` | benchmark-derived | 28 |  |
 | SPARQL 1.1 functions | `tests/sparql_functions_conformance.rs` | spec-derived | 9 |  |
 | SPARQL engine coverage (sparqloscope) | `tests/sparqloscope_conformance.rs` | sparqloscope-derived | 67 |  |
 | Cross-standard HTTP smoke | `tests/standards_conformance.rs` | spec-derived | 26 |  |
 | SWRL | `tests/swrl_conformance.rs` | spec-derived | 15 |  |
 | OWL 2 DL | `tests/w3c_owl2_dl_manifests.rs` | **vendored W3C test cases** (approved OWL 2 DL / Direct Semantics cases of the OWL 2 Test Case Repository, unmodified; manifest-driven, against the reasoner sidecar) | 2 | runs in CI against the reasoner sidecar as a development and regression ratchet; no score is published (W3C licence: no performance claims on a partial run); known gaps in `docs/conformance/owl2-dl.md` |
-| SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (core + sparql sections, manifest-driven, full report equality) | 1 | 136 corpus cases: 119 pass, 1 known failure, 1 optional feature unsupported (reported as the failure the spec requires), 15 runner-side skips (floor ≥90 asserted) |
+| SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (core + sparql sections, manifest-driven, full report equality) | 1 | 136 corpus cases: 120 pass, 0 known failures, 1 optional feature unsupported (reported as the failure the spec requires), 15 runner-side skips (floor ≥90 asserted) |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 125 |  |
 | SPARQL 1.1 Federated Query | `tests/w3c_sparql11_federation.rs` | **vendored W3C test-suite subset** (`service/` + `syntax-fed/` sections of w3c/rdf-tests, unmodified; manifest-driven, local endpoints) | 1 | runs in CI as a development and regression ratchet against local endpoints; no score is published (W3C test-suite policy); see `docs/conformance/sparql11.md` §Federation |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 
-1047 conformance tests across 31 suites; a further 795 tests in 106 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 6 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation) and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
+1060 conformance tests across 31 suites; a further 795 tests in 106 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 6 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation) and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->

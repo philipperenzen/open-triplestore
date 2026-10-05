@@ -10,11 +10,12 @@
 //! `xsd:language`, facets) is still to come; until then a value of one of
 //! those types is known only as far as [`in_value_space`] says.
 //!
-//! Storage note: oxigraph stores every integer-derived XSD type as
-//! `xsd:integer` and `xsd:dateTimeStamp` as `xsd:dateTime`, so
-//! `"-5"^^xsd:nonNegativeInteger` reaches the reasoner as the integer −5.
-//! Membership is decided on the *value*, which gives the right answer for
-//! every literal that was well-typed when written.
+//! Storage note: the store keeps every literal as written, its derived
+//! integer types and `xsd:dateTimeStamp` included (vendor/README.md), so
+//! `"-5"^^xsd:nonNegativeInteger` reaches the reasoner as the ill-typed
+//! literal it is. Data loaded before the store kept lexical forms holds them
+//! as `xsd:integer` / `xsd:dateTime`. Membership is decided on the *value*,
+//! which gives the same answer for both.
 
 use chrono::NaiveDateTime;
 use oxigraph::model::Literal;
