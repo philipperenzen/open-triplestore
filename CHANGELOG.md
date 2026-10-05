@@ -14,6 +14,42 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **OPM calculations; OPM graded Full.** `opm:Calculation`s are defined at
+  `POST /api/datasets/:id/properties/calculations` (inferred property,
+  argument paths such as `?foi ex:partOf/ex:height ?h`, an expression, and
+  optional `opm:foiRestriction` / `opm:pathRestriction`) and run only on
+  request, as OPM's REST guidance describes: `POST …/calculations/:calc`
+  derives the property for every feature of interest that has the arguments
+  and lacks the property, `PUT` recomputes the derived states whose argument
+  states were outdated, and `GET …/:calc/outdated` lists them. A derived state
+  is `opm:Derived` with the `opm:expression` and `prov:wasDerivedFrom` an
+  `rdf:Seq` of the argument states; one run is one commit. Paths,
+  restrictions and expressions are parsed with spargebra and allow-listed (no
+  `SERVICE`, `GRAPH`, `FILTER`, `EXISTS`, subqueries, aggregates or
+  non-deterministic functions), and the queries are built from the parsed
+  form: matching reads only the dataset's own data graphs, capped by
+  `OTS_OPM_CALC_MAX_ROWS` (default 10 000) and the query timeout, and the
+  expression is evaluated in an empty scratch store. Calculations travel
+  through OPM export and import (prefixed names resolve with the document's
+  prefixes). `docs/standards.md` grades OPM *Full* (the project's own
+  assessment; OPM has no test suite).
+- **OPM property lifecycle and exchange.** Property states gain the rest of
+  the Ontology for Property Management: `POST /api/datasets/:id/properties/delete`
+  records a current `opm:Deleted` state with no value and removes the plain
+  triple; `…/restore` brings back the last value (`prov:wasRevisionOf`);
+  `reliability` accepts `required` (`opm:Required`) and states take
+  `opm:documentation` IRIs. `GET /api/datasets/:id/properties` lists the
+  properties of an item, of a property kind or of the whole dataset — latest
+  state, full history or the state at a time (an item snapshot) — filtered by
+  reliability, deletion and derivation. `GET …/properties/export` writes
+  canonical OPM (`<item> <kind> <property>`) in Turtle, N-Triples, JSON-LD or
+  RDF/XML and `POST …/properties/import` reads it back (state IRIs kept,
+  duplicates skipped, states without `prov:generatedAtTime` rejected); every
+  read also accepts canonical OPM loaded straight into a dataset graph, and
+  `schema:value` in both the `http` and `https` scheme. The OPM profile shapes
+  ship as the `opm-profile` seed bundle, at `GET /api/properties/profile`, and
+  run over a states graph at `GET …/properties/validate`. All property routes
+  are in the OpenAPI document.
 - **`OTS_OIDC_IDP_TOKEN_POLICY` and `OTS_OIDC_IDP_WRITE_SCOPES`.** What an access token from
   an external IdP (OIDC resource-server mode) may do is now a setting, with the
   same values as `OTS_OIDC_SESSION_POLICY`: `session` (default), `scoped`
@@ -1340,6 +1376,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `owl:hasValue` are not reported by Konclude and not materialised.
 
 ### Security
+- **Property states of a private graph stay private.** A state written with
+  `graph` naming a private dataset graph mirrored its value into the states
+  graph, which every viewer of the dataset could read through
+  `…/properties/history` and `…/as-of`. Each state now records its data graph
+  (`ots:dataGraph`), and every property-state read and the export leave out
+  states whose graph the caller may not read.
 - **Audit rows and the guest AI budget record the real client IP.** Both took
   the left-most `X-Forwarded-For` entry (then `X-Real-IP`) from any caller and
   never saw the TCP peer address, so a login failure, a permission denial or an
