@@ -24,10 +24,10 @@ applies.
 | SPARQL 1.1 Federated Query (`SERVICE`) | Remote query | Full³ — deny-by-default: off until endpoints are allowlisted |
 | SPARQL 1.1 Service Description | Capability advertisement | Full |
 | SPARQL 1.2 (WD) | Triple terms, accessor functions | Partial¹ |
-| RDFS | subClass/subProperty/domain/range inference | Full |
+| RDFS | subClass/subProperty/domain/range inference | Full¹¹ |
 | OWL 2 QL | Profile reasoning (materialised) | Full¹⁰ |
 | OWL 2 EL | Profile reasoning (materialised) | Full¹⁰ |
-| OWL 2 RL | Profile reasoning (materialised) | Partial¹⁰ |
+| OWL 2 RL | Profile reasoning (materialised) | Full¹⁰ |
 | OWL 2 DL | Description-logic expressivity | Full⁴ (with the reasoner sidecar) |
 | GeoSPARQL 1.1 | Spatial RDF, relation/metric functions | Partial⁵ |
 | SHACL Core | Structural constraint validation | Partial⁶ |
@@ -75,10 +75,10 @@ page tracks known gaps but gives no score.
 | OWL 2 DL | `tests/owl2_dl_conformance.rs` | spec-derived (+ live tests against the reasoner sidecar) | 73 |  |
 | OWL 2 EL | `tests/owl2_el_conformance.rs` | spec-derived | 57 |  |
 | OWL 2 QL | `tests/owl2_ql_conformance.rs` | spec-derived | 45 |  |
-| OWL 2 RL | `tests/owl2_rl_conformance.rs` | spec-derived | 61 |  |
+| OWL 2 RL | `tests/owl2_rl_conformance.rs` | spec-derived | 73 |  |
 | RDF 1.1 formats | `tests/rdf11_conformance.rs` | spec-derived | 63 |  |
 | RDF Patch (RDF Delta) | `tests/rdf_patch_conformance.rs` | spec-derived | 24 |  |
-| RDFS entailment | `tests/rdfs_conformance.rs` | spec-derived | 23 |  |
+| RDFS entailment | `tests/rdfs_conformance.rs` | spec-derived | 32 |  |
 | RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 38 |  |
 | SHACL Advanced Features | `tests/shacl_af_corpus.rs` | **vendored TopQuadrant corpus** (expression, function, rule and target tests of TopQuadrant/shacl, unmodified; dash-driven) | 1 | 10 corpus cases: 9 pass, 1 known failure, 0 runner-side skips (floor ≥9 asserted) |
 | SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 58 |  |
@@ -92,12 +92,15 @@ page tracks known gaps but gives no score.
 | Cross-standard HTTP smoke | `tests/standards_conformance.rs` | spec-derived | 26 |  |
 | SWRL | `tests/swrl_conformance.rs` | spec-derived | 15 |  |
 | OWL 2 DL | `tests/w3c_owl2_dl_manifests.rs` | **vendored W3C test cases** (approved OWL 2 DL / Direct Semantics cases of the OWL 2 Test Case Repository, unmodified; manifest-driven, against the reasoner sidecar) | 2 | runs in CI against the reasoner sidecar as a development and regression ratchet; no score is published (W3C licence: no performance claims on a partial run); known gaps in `docs/conformance/owl2-dl.md` |
+| OWL 2 RL | `tests/w3c_owl2_rl_manifests.rs` | **vendored W3C test cases** (approved OWL 2 cases of the RL profile, unmodified; manifest-driven) | 2 | runs in CI as a development and regression ratchet; no score is published (W3C licence: no performance claims on a partial run); known gaps in `docs/conformance/owl2-rl.md` |
+| RDF 1.1 Semantics (RDF/RDFS entailment) | `tests/w3c_rdf_mt_manifests.rs` | **vendored W3C test-suite subset** (rdf-mt section of w3c/rdf-tests, unmodified; manifest-driven) | 2 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/entailment.md` |
 | SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (core + sparql sections, manifest-driven, full report equality) | 1 | 136 corpus cases: 119 pass, 1 known failure, 1 optional feature unsupported (reported as the failure the spec requires), 15 runner-side skips (floor ≥90 asserted) |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 125 |  |
+| SPARQL 1.1 Entailment Regimes | `tests/w3c_sparql11_entailment_manifests.rs` | **vendored W3C test-suite subset** (entailment section of w3c/rdf-tests, unmodified; manifest-driven) | 2 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/entailment.md` |
 | SPARQL 1.1 Federated Query | `tests/w3c_sparql11_federation.rs` | **vendored W3C test-suite subset** (`service/` + `syntax-fed/` sections of w3c/rdf-tests, unmodified; manifest-driven, local endpoints) | 1 | runs in CI as a development and regression ratchet against local endpoints; no score is published (W3C test-suite policy); see `docs/conformance/sparql11.md` §Federation |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C test-suite subset** (query + update sections of w3c/rdf-tests, unmodified; manifest-driven) | 1 | runs in CI as a development and regression ratchet; no score is published (W3C test-suite policy); known gaps in `docs/conformance/sparql11.md` |
 
-1047 conformance tests across 31 suites; a further 795 tests in 106 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 6 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation) and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
+1074 conformance tests across 34 suites; a further 795 tests in 106 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 9 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text. A vendored row gives results only where its corpus licence allows performance claims; those are development and regression results on the vendored sections (`docs/conformance/`), not W3C, TopQuadrant, OGC or other conformance claims. The W3C SPARQL 1.1 sections (query, update and federation) and the OWL 2 DL test cases are partial runs of W3C test suites, so they carry no results and are used for development and bug tracking only.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->
@@ -299,10 +302,21 @@ behavior and will flip green when the limitation is resolved.
    on file sources (the mapping is refused), and the RML-Core / RML-IO
    vocabulary beyond `rml:baseIRI` and `rml:null`.
 10. **OWL 2 RL / EL / QL.**
-    - **RL** runs 75 of the 78 RL/RDF rules, lists of any length and inverse
-      property expressions included (`eq-ref` on request); the Table 8 rules
-      `dt-type2`, `dt-eq` and `dt-diff` are not run, so literals are matched as
-      terms, not by value.
+    - **RL** runs all 78 RL/RDF rules (OWL 2 Profiles §4.3), lists of any
+      length and inverse property expressions included. The Table 8 rules with
+      literal subjects (`dt-type2`, `dt-eq`, `dt-diff`) are applied to data
+      values through the 32-type RL datatype map, so `hasValue`, keys and
+      negative data assertions match by value, data values type
+      `someValuesFrom` subjects, and out-of-range or conflicting values are
+      inconsistencies. `eq-ref` is off by default and on with `eq_ref: true`
+      (decision D2); without it the closure lacks only the reflexive
+      `owl:sameAs` triples. Not simulated: conclusions reached through a
+      literal-subject triple when a data property is used as an object
+      property, which OWL 2's typing rules out. Checked by a differential test
+      against a generalized-triple reference evaluator and by the approved W3C
+      OWL 2 RL-profile and SPARQL entailment-regime cases (no score
+      published); every known failure there is outside Theorem PR1's scope
+      ([conformance/owl2-rl.md](conformance/owl2-rl.md)).
     - **EL** is a native EL++ saturation engine covering the whole profile —
       intersections, existentials, `owl:hasValue`, one-individual `owl:oneOf`,
       `owl:hasSelf`, the role hierarchy, property chains, transitivity,
@@ -325,6 +339,15 @@ behavior and will flip green when the limitation is resolved.
 
     See [owl2-rl.md](owl2-rl.md), [owl2-el.md](owl2-el.md) and
     [owl2-ql.md](owl2-ql.md).
+
+11. **RDFS:** the RDF 1.1 Semantics patterns `rdfD2` and `rdfs1`–`rdfs13` with the RDF and RDFS
+    axiomatic triples, in one fixed-point loop, and datatype clashes reported as
+    inconsistencies ([RDFS Entailment](/docs/rdfs-entailment)). Exempt by decision D11, as the
+    closure is infinite: the container-membership axioms are written for `rdf:_1` … `rdf:_n` up
+    to the largest index the data uses, `rdfs1` declares the recognized datatypes that are in
+    use, and `rdfD1` (a blank node per typed literal) is not materialised. Checked by
+    `tests/rdfs_conformance.rs` and the W3C RDF 1.1 Semantics and SPARQL 1.1 entailment-regime
+    cases (no score published; [conformance/entailment.md](conformance/entailment.md)).
 
 Related guides: [OWL Reasoning](/docs/reasoning), [SHACL Validation](/docs/shacl),
 [GeoSPARQL](/docs/geosparql), [Performance](/docs/performance),

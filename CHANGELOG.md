@@ -14,6 +14,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **W3C entailment corpora.** The RDF 1.1 Semantics test cases (`rdf-mt`) and the
+  SPARQL 1.1 entailment-regime section are vendored unmodified
+  (`tests/fixtures/w3c-rdf-mt/`, `tests/fixtures/w3c-sparql11/entailment/`) with
+  runners (`tests/w3c_rdf_mt_manifests.rs`,
+  `tests/w3c_sparql11_entailment_manifests.rs`), and the approved OWL 2 test cases
+  of the RL profile run through `tests/w3c_owl2_rl_manifests.rs`. Each is a
+  two-way known-failure ratchet; no score is published (W3C test-suite policy).
 - **`OTS_OIDC_IDP_TOKEN_POLICY` and `OTS_OIDC_IDP_WRITE_SCOPES`.** What an access token from
   an external IdP (OIDC resource-server mode) may do is now a setting, with the
   same values as `OTS_OIDC_SESSION_POLICY`: `session` (default), `scoped`
@@ -285,6 +292,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   how to get help.
 
 ### Changed
+- **OWL 2 RL runs all 78 RL/RDF rules; graded Full.** The Table 8 rules with
+  literal subjects (`dt-type2`, `dt-eq`, `dt-diff`) are applied to data values
+  through the 32-type RL datatype map: a literal written two ways
+  (`"1"^^xsd:integer`, `"1.0"^^xsd:decimal`) gets the other's triples, so
+  `owl:hasValue`, `owl:hasKey` and negative data assertions match by value; data
+  values type the subjects of `owl:someValuesFrom` restrictions; a value outside
+  its property's datatype range is a `dt-not-type` inconsistency, and two
+  different values of a functional data property (or under a maximum cardinality
+  of one) a `dt-diff` one. Runs that used to succeed on such data now report the
+  inconsistency. A differential test checks the engine against a
+  generalized-triple reference evaluator. `eq-ref` stays opt-in (decision D2).
+- **RDFS follows RDF 1.1 Semantics; graded Full.** New: `rdfD2` (every predicate
+  is an `rdf:Property`), the RDF and RDFS axiomatic triples, and RDF 1.1 `rdfs1`
+  (recognized datatypes in use are `rdfs:Datatype`), replacing a non-standard
+  rule that made every literal's datatype a subclass of `rdfs:Literal` directly.
+  All patterns, axiomatic ones included, now run in one fixed-point loop over the
+  data and the derivations, so `rdfs:Resource rdfs:subClassOf ex:C` reaches
+  every resource. The infinite `rdf:_n` axioms stop at the largest index the data
+  uses and `rdfD1` is not materialised (decision D11). Every run now writes the
+  axiomatic triples, so the entailment graph holds more triples than before. A
+  datatype clash (an ill-typed literal such as `"ten"^^xsd:integer`, or a value
+  outside the datatype its property's range names) now ends an RDFS run in an
+  inconsistency (422 over HTTP) instead of being ignored, and a clean RDFS run
+  reports `"consistent": true` (it was `null`).
 - **Settings added in this release are named for what they cover.** Before
   release, five new settings were renamed, and the old names are not read:
   `OIDC_TOKEN_POLICY` and `OIDC_WRITE_SCOPES` are now

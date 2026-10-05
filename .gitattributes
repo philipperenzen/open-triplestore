@@ -61,3 +61,9 @@ scripts/hooks/* text eol=lf
 *.pdf           binary
 *.gz            binary
 *.zip           binary
+
+# ── Vendored third-party test suites: kept byte-identical to upstream (their
+#    PROVENANCE.md records it), so never convert their line endings. ──
+tests/fixtures/w3c-rdf-mt/**             -text
+tests/fixtures/w3c-sparql11/entailment/** -text
+tests/fixtures/w3c-owl2/approved/**      -text
