@@ -1208,6 +1208,7 @@ mod tests {
             table_name: None,
             nulls: vec!["".into(), "NULL".into()],
             access: Access::default(),
+            identifiers: None,
         };
         let mut r = row(&[("a", ""), ("b", "NULL"), ("c", "x")]);
         TermGen::new(Semantics::R2rml, "b").apply_nulls(&source, &mut r);

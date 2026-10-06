@@ -218,16 +218,16 @@ impl Ctx<'_> {
             None => None,
         };
 
-        let mut tm = TriplesMap {
+        let tm = TriplesMap {
             iri: tm_iri.to_string(),
             logical_source,
             subject_map,
             predicate_object_maps,
             base_iri,
         };
-        if tm.logical_source.reference_formulation == ReferenceFormulation::Sql {
-            normalise_sql_columns(&mut tm);
-        }
+        // A relational map keeps its column names as written: they are SQL
+        // identifiers, resolved against the database the run connects to
+        // (`sql::prepare_relational`), which parsing does not know.
         Ok(tm)
     }
 
@@ -383,6 +383,7 @@ impl Ctx<'_> {
             table_name,
             nulls,
             access,
+            identifiers: None,
         })
     }
 
@@ -1260,54 +1261,64 @@ fn term_value(t: &Term) -> String {
     }
 }
 
-/// Column names in a relational triples map as the result set reports them:
-/// `rr:column "\"ID\""` and a template's `{"ID"}` read column `ID`. R2RML
-/// takes column names from SQL, where the quotes are spelling, not name.
-fn normalise_sql_columns(tm: &mut TriplesMap) {
-    use super::sqlident::column_name;
-    fn fix(m: &mut TermMap) {
+/// Rewrite every column name a triples map reads: through `own` for its own
+/// rows (term maps, templates, function parameters, the child side of its
+/// joins), and through `parent` — given the parent triples map's IRI — for
+/// the parent side of its joins. How a relational run resolves the SQL
+/// identifiers a mapping writes to the columns its database reports.
+pub(crate) fn rewrite_columns(
+    tm: &mut TriplesMap,
+    own: &dyn Fn(&str) -> String,
+    parent: &dyn Fn(&str, &str) -> String,
+) {
+    fn fix(m: &mut TermMap, own: &dyn Fn(&str) -> String) {
         match &mut m.kind {
-            TermMapKind::Reference(c) => *c = column_name(c),
-            TermMapKind::Template(t) => *t = map_template_columns(t, &column_name),
+            TermMapKind::Reference(c) => *c = own(c),
+            TermMapKind::Template(t) => *t = map_template_columns(t, own),
             TermMapKind::Constant(_) | TermMapKind::Fresh => {}
         }
         if let Some(lm) = &mut m.language_map {
-            fix(lm);
+            fix(lm, own);
         }
         if let Some(dm) = &mut m.datatype_map {
-            fix(dm);
+            fix(dm, own);
         }
     }
-    let fix_side = |side: &mut JoinSide| match side {
-        JoinSide::Reference(c) => *c = column_name(c),
-        JoinSide::Template(t) => *t = map_template_columns(t, &column_name),
+    let fix_side = |side: &mut JoinSide, f: &dyn Fn(&str) -> String| match side {
+        JoinSide::Reference(c) => *c = f(c),
+        JoinSide::Template(t) => *t = map_template_columns(t, f),
         JoinSide::Constant(_) => {}
     };
     let fix_function = |f: &mut FunctionMap| {
         for args in f.params.values_mut() {
             for a in args {
                 if let FunctionArg::Reference(c) = a {
-                    *c = column_name(c);
+                    *c = own(c);
                 }
             }
         }
     };
-    fix(&mut tm.subject_map.term_map);
-    tm.subject_map.graph_maps.iter_mut().for_each(fix);
+    fix(&mut tm.subject_map.term_map, own);
+    tm.subject_map
+        .graph_maps
+        .iter_mut()
+        .for_each(|g| fix(g, own));
     if let Some(f) = &mut tm.subject_map.function {
         fix_function(f);
     }
     for pom in &mut tm.predicate_object_maps {
-        pom.predicate_maps.iter_mut().for_each(fix);
-        pom.graph_maps.iter_mut().for_each(fix);
+        pom.predicate_maps.iter_mut().for_each(|p| fix(p, own));
+        pom.graph_maps.iter_mut().for_each(|g| fix(g, own));
         for object in &mut pom.object_maps {
             match object {
-                ObjectMap::Term(t) => fix(t),
+                ObjectMap::Term(t) => fix(t, own),
                 ObjectMap::Function(f) => fix_function(f),
                 ObjectMap::Ref(r) => {
+                    let parent_iri = r.parent_triples_map.clone();
+                    let of_parent = |c: &str| parent(&parent_iri, c);
                     for j in &mut r.joins {
-                        fix_side(&mut j.child);
-                        fix_side(&mut j.parent);
+                        fix_side(&mut j.child, own);
+                        fix_side(&mut j.parent, &of_parent);
                     }
                 }
             }
@@ -1710,7 +1721,7 @@ mod tests {
     }
 
     #[test]
-    fn sql_column_names_lose_their_delimiters() {
+    fn sql_column_names_keep_their_spelling_until_a_run_resolves_them() {
         let m = parse_rml(&format!(
             "{PFX}
              ex:C a rr:TriplesMap ;
@@ -1727,7 +1738,8 @@ mod tests {
         .unwrap();
         let c = m.find("http://example.org/C").unwrap();
         assert!(
-            matches!(&c.subject_map.term_map.kind, TermMapKind::Template(t) if t == "http://x/{ID}/{plain}")
+            matches!(&c.subject_map.term_map.kind, TermMapKind::Template(t) if t == "http://x/{\"ID\"}/{plain}"),
+            "a delimited identifier is not a regular one, so parsing keeps the difference"
         );
         assert_eq!(
             c.logical_source.table_name.as_deref(),
@@ -1742,7 +1754,7 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        assert!(matches!(&n.kind, TermMapKind::Reference(r) if r == "Name"));
+        assert!(matches!(&n.kind, TermMapKind::Reference(r) if r == "`Name`"));
         let r = c
             .predicate_object_maps
             .iter()
@@ -1751,7 +1763,7 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        assert_eq!(r.joins, vec![JoinCondition::columns("PID", "ID")]);
+        assert_eq!(r.joins, vec![JoinCondition::columns("[PID]", "\"ID\"")]);
     }
 
     #[test]

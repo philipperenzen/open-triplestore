@@ -28,8 +28,8 @@ use mysql::prelude::Queryable;
 use mysql::{Column, Conn, Opts, OptsBuilder, SslOpts, Value as MyValue};
 use ots_plugin_api::sources::catalogue::{self, canonical, Dialect, Executor};
 use ots_plugin_api::sources::{
-    BatchSink, ConnectParams, Row, SourceConnection, SourceConnector, SourceError, TableInfo,
-    TableProfile, Value, ValueKind, PROFILE_SAMPLE_ROWS,
+    BatchSink, ConnectParams, IdentifierRules, Row, SourceConnection, SourceConnector, SourceError,
+    TableInfo, TableProfile, Value, ValueKind, PROFILE_SAMPLE_ROWS,
 };
 use ots_plugin_api::Plugin;
 
@@ -421,6 +421,12 @@ impl SourceConnection for MysqlConnection {
 
     fn unique_keys(&mut self, table: &str) -> Result<Vec<Vec<String>>, SourceError> {
         catalogue::unique_keys(self, &MysqlDialect, table)
+    }
+
+    /// MySQL and MariaDB compare column names without regard to case,
+    /// delimited or not, and keep them as written.
+    fn identifier_rules(&mut self) -> Result<IdentifierRules, SourceError> {
+        Ok(IdentifierRules::CASE_INSENSITIVE)
     }
 
     fn server_version(&mut self) -> Result<Option<String>, SourceError> {

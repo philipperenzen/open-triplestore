@@ -140,11 +140,21 @@ fn watermark_state(
     conn: &mut dyn ots_plugin_api::sources::SourceConnection,
     column: &str,
 ) -> Result<(HashSet<String>, Option<String>), String> {
+    // The catalogue names the mapping's tables stand for, by the
+    // connection's identifier rules (R2RML §5).
+    let rules = conn
+        .identifier_rules()
+        .map_err(|e| format!("reading the datasource's identifier rules: {e}"))?;
     let wanted: HashSet<String> = mapping
         .triples_maps
         .iter()
         .filter(|tm| tm.logical_source.query.is_none())
-        .filter_map(|tm| tm.logical_source.table_name.clone())
+        .filter_map(|tm| {
+            crate::rml::sqlident::catalogue_table(
+                tm.logical_source.table_name.as_deref()?,
+                Some(&rules),
+            )
+        })
         .collect();
     let tables = conn
         .introspect()
