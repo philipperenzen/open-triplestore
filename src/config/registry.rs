@@ -170,12 +170,15 @@ fn sha256_hex(v: &str) -> Result<(), String> {
     }
 }
 
-/// Empty (an explicit "off") or an absolute http(s) URL.
-fn url_or_empty(v: &str) -> Result<(), String> {
-    if v.is_empty() {
+/// An LLM request budget: requests per minute, `0` (AI refused), or
+/// `unlimited`.
+fn llm_budget(v: &str) -> Result<(), String> {
+    if v.eq_ignore_ascii_case("unlimited") || v.parse::<u32>().is_ok() {
         Ok(())
     } else {
-        super::parse::http_url(v)
+        Err(format!(
+            "`{v}` is not a budget (a number of requests per minute, 0 to refuse, or unlimited)"
+        ))
     }
 }
 
@@ -482,8 +485,17 @@ settings! {
         .doc("A change-log cursor idle this long is dropped.");
 
     // ── outbound ──
-    REMOTE_ALLOWLIST: Vec<String> = Spec::new("OTS_REMOTE_ALLOWLIST", Kind::Custom { what: "URL list", check: allow_list }, "outbound")
-        .doc("URLs SERVICE, LDES sync and datasources may contact; empty: none.");
+    SERVICE_ALLOWLIST: Vec<String> = Spec::new("OTS_SERVICE_ALLOWLIST", Kind::Custom { what: "URL list", check: allow_list }, "outbound")
+        .doc("URLs a SPARQL `SERVICE` clause may contact (any /sparql caller); empty: none.");
+    LDES_ALLOWLIST: Vec<String> = Spec::new("OTS_LDES_ALLOWLIST", Kind::Custom { what: "URL list", check: allow_list }, "outbound")
+        .doc("URLs an LDES client sync may read (admin); empty: none.");
+    SOURCES_ALLOWLIST: Vec<String> = Spec::new("OTS_SOURCES_ALLOWLIST", Kind::Custom { what: "URL list", check: allow_list }, "outbound")
+        .doc("Endpoints SQL and SPARQL datasources may reach (admin); empty: none.");
+    JSONLD_CONTEXT_ALLOWLIST: Vec<String> = Spec::new("OTS_JSONLD_CONTEXT_ALLOWLIST", Kind::Custom { what: "URL list", check: allow_list }, "outbound")
+        .doc("Remote JSON-LD `@context` URLs an upload may load (the bundled W3C contexts need none); empty: none.");
+    OFFLINE: bool = Spec::new("OTS_OFFLINE", Kind::Bool, "outbound")
+        .profile(Some("false"), Some("true"))
+        .doc("Make no download at startup (the LOV corpus, the demo IFC and STL models).");
     REMOTE_TIMEOUT: Duration = Spec::new("OTS_REMOTE_TIMEOUT_SECS", at_least(1), "outbound")
         .default("10")
         .doc("Timeout of one outbound request.");
@@ -629,15 +641,13 @@ settings! {
     SEED_STANDARD_VOCABS: bool = Spec::new("SEED_STANDARD_VOCABS", Kind::Bool, "seed")
         .default("true")
         .doc("Seed the standard vocabularies at boot.");
-    SEED_IFC_URL: Option<String> = Spec::new("SEED_IFC_URL", Kind::Custom { what: "URL", check: url_or_empty }, "seed")
-        .empty_is_value()
-        .doc("Override the headline IFC demo model; empty turns the IFC and STL demo downloads off.");
+    SEED_IFC_URL: Option<String> = Spec::new("SEED_IFC_URL", Kind::Url, "seed")
+        .doc("Override the headline IFC demo model (downloaded at boot unless OTS_OFFLINE).");
     VOCAB_CORPUS_PATH: Option<PathBuf> = Spec::new("VOCAB_CORPUS_PATH", Kind::Path, "seed")
         .doc("A local LOV corpus file.");
-    VOCAB_CORPUS_URL: String = Spec::new("VOCAB_CORPUS_URL", Kind::Custom { what: "URL", check: url_or_empty }, "seed")
-        .empty_is_value()
+    VOCAB_CORPUS_URL: String = Spec::new("VOCAB_CORPUS_URL", Kind::Url, "seed")
         .default(crate::vocab_search::corpus::DEFAULT_CORPUS_URL)
-        .doc("Where the LOV corpus is downloaded from; empty turns the download off.");
+        .doc("Where the LOV corpus is downloaded from at boot (unless OTS_OFFLINE).");
     VOCAB_CORPUS_SHA256: Option<String> = Spec::new("VOCAB_CORPUS_SHA256", Kind::Custom { what: "SHA-256", check: sha256_hex }, "seed")
         .doc("Expected digest of a custom LOV corpus.");
     VOCAB_LOCAL_METRICS: bool = Spec::new("VOCAB_LOCAL_METRICS", Kind::Bool, "seed")
@@ -646,7 +656,7 @@ settings! {
 
     // ── LLM ──
     LLM_GATEWAY_URL: Option<String> = Spec::new("LLM_GATEWAY_URL", Kind::Url, "llm")
-        .doc("OpenAI-compatible endpoint for the AI features (unset: http://127.0.0.1:8000).");
+        .doc("OpenAI-compatible endpoint for the AI features; unset: the AI features are off.");
     LLM_MODEL: String = Spec::new("LLM_MODEL", Kind::Text, "llm")
         .default("default")
         .doc("Model sent with every completion.");
@@ -686,12 +696,15 @@ settings! {
         .doc("What a prompt-injection heuristic hit does.");
     LLM_GUARD_BLOCKLIST: Vec<String> = Spec::new("LLM_GUARD_BLOCKLIST", Kind::List, "llm")
         .doc("Phrases that always block, comma-separated.");
-    LLM_RATE_LIMIT_PER_MIN: u32 = Spec::new("LLM_RATE_LIMIT_PER_MIN", at_least(0), "llm")
+    LLM_RATE_LIMIT_PER_MIN: String = Spec::new("LLM_RATE_LIMIT_PER_MIN", Kind::Custom { what: "budget", check: llm_budget }, "llm")
         .default("20")
-        .doc("LLM requests per signed-in user per minute; 0: unlimited.");
-    LLM_RATE_LIMIT_ANON_PER_MIN: u32 = Spec::new("LLM_RATE_LIMIT_ANON_PER_MIN", at_least(0), "llm")
+        .doc("LLM requests per signed-in user per minute; `0` refuses AI to signed-in users, `unlimited` lifts the limit.");
+    LLM_RATE_LIMIT_ANON_PER_MIN: String = Spec::new("LLM_RATE_LIMIT_ANON_PER_MIN", Kind::Custom { what: "budget", check: llm_budget }, "llm")
         .default("5")
-        .doc("LLM requests per anonymous client IP per minute; 0: unlimited.");
+        .doc("LLM requests per anonymous client IP per minute; `0` refuses AI to anonymous callers, `unlimited` lifts the limit.");
+    LLM_ANONYMOUS_ENABLED: bool = Spec::new("LLM_ANONYMOUS_ENABLED", Kind::Bool, "llm")
+        .profile(Some("true"), Some("false"))
+        .doc("Let anonymous callers use the AI features (within their budget).");
     LLM_LOG_RETENTION_DAYS: u64 = Spec::new("LLM_LOG_RETENTION_DAYS", at_least(1), "llm")
         .default("90")
         .doc("LLM request log rows kept this long.");
@@ -789,22 +802,11 @@ pub static RETIRED: &[(&str, &str)] = &[
         "renamed BACKUP_SCHEDULE_SECS (seconds)",
     ),
     ("LLM_TIMEOUT_SECONDS", "renamed LLM_TIMEOUT_SECS"),
-    (
-        "OTS_MAX_UPLOAD_MB",
-        "renamed OTS_MAX_UPLOAD_BYTES (bytes; 512MiB is accepted)",
-    ),
-    (
-        "SMTP_STARTTLS",
-        "removed: use SMTP_TLS=starttls|implicit|none",
-    ),
-    (
-        "OTS_EXTERNAL_REASONER",
-        "removed: set OTS_DL_BACKEND=konclude and OTS_KONCLUDE_BIN",
-    ),
-    (
-        "OTS_EXTERNAL_REASONER_BIN",
-        "removed: set OTS_DL_BACKEND=konclude and OTS_KONCLUDE_BIN",
-    ),
+    ("OTS_MAX_UPLOAD_MB", "renamed OTS_MAX_UPLOAD_BYTES (bytes; 512MiB is accepted)"),
+    ("OTS_REMOTE_ALLOWLIST", "split by purpose: OTS_SERVICE_ALLOWLIST (SPARQL SERVICE), OTS_LDES_ALLOWLIST, OTS_SOURCES_ALLOWLIST (datasources) and OTS_JSONLD_CONTEXT_ALLOWLIST; there is no shared list"),
+    ("SMTP_STARTTLS", "removed: use SMTP_TLS=starttls|implicit|none"),
+    ("OTS_EXTERNAL_REASONER", "removed: set OTS_DL_BACKEND=konclude and OTS_KONCLUDE_BIN"),
+    ("OTS_EXTERNAL_REASONER_BIN", "removed: set OTS_DL_BACKEND=konclude and OTS_KONCLUDE_BIN"),
 ];
 
 /// Checks across settings, run once every setting has validated on its own.

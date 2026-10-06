@@ -41,7 +41,7 @@ struct Mock {
     authorised_hits: AtomicUsize,
 }
 
-/// `OTS_REMOTE_ALLOWLIST` is process-wide and each test's mock listens on its
+/// `OTS_SOURCES_ALLOWLIST` is process-wide and each test's mock listens on its
 /// own port: the tests that set it take turns.
 static ALLOWLIST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -267,7 +267,7 @@ async fn a_sparql_endpoint_is_a_datasource_a_snapshot_and_a_service() {
     let _env = ALLOWLIST.lock().await;
     let (port, _) = start_mock().await;
     let origin = format!("http://127.0.0.1:{port}");
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", &origin);
+    std::env::set_var("OTS_SOURCES_ALLOWLIST", &origin);
     std::env::set_var("OTS_VKG_TEST_PASSWORD", REMOTE_PASSWORD);
     let (state, admin) = admin_state();
     let app = test_app(state);
@@ -614,7 +614,7 @@ fn make_user(state: &open_triplestore::server::AppState, id: &str) -> String {
 async fn a_source_credential_serves_only_callers_the_source_is_shared_with() {
     let _env = ALLOWLIST.lock().await;
     let (port, mock) = start_mock().await;
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("http://127.0.0.1:{port}"));
+    std::env::set_var("OTS_SOURCES_ALLOWLIST", format!("http://127.0.0.1:{port}"));
     std::env::set_var("OTS_VKG_TEST_PASSWORD", REMOTE_PASSWORD);
     let (state, admin) = admin_state();
     let owner = make_user(&state, "ds-owner");
@@ -674,7 +674,7 @@ async fn a_source_credential_serves_only_callers_the_source_is_shared_with() {
 async fn a_public_dataset_does_not_share_its_source_credential() {
     let _env = ALLOWLIST.lock().await;
     let (port, mock) = start_mock().await;
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("http://127.0.0.1:{port}"));
+    std::env::set_var("OTS_SOURCES_ALLOWLIST", format!("http://127.0.0.1:{port}"));
     std::env::set_var("OTS_VKG_TEST_PASSWORD", REMOTE_PASSWORD);
     let (state, admin) = admin_state();
     make_user(&state, "pub-owner");

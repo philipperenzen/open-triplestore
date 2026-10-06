@@ -246,7 +246,7 @@ The matrix has 28 rows. A 29th, "W3C SPARQL 1.1 Tests", was retired for every sy
 > ³ Open Triplestore: *Full* in [`docs/standards.md`](standards.md) since 2026-10-03, graded against the Candidate Recommendations of 2026-04-07. Triple terms, reifiers, annotations and base direction parse, store, query and serialize, and the W3C RDF 1.2 syntax suites run in CI (vendored, unscored); every entry passes, non-canonical numbers included now that the store keeps literals as written, except four `rdf:XMLLiteral` entries blocked on the open W3C issue [w3c/rdf-xml#97](https://github.com/w3c/rdf-xml/issues/97), which the project's Full rubric does not count against the grade ([`docs/conformance/rdf12.md`](conformance/rdf12.md)). Oxigraph stores numerics in canonical form.
 > ⁴ The "W3C SPARQL 1.1 Tests" row was retired for every system on 2026-10-03, by owner decision: the W3C test-suite licence (https://www.w3.org/copyright/test-suites-licenses/) allows no performance claims on a subset of a suite, so the row could not be graded for Open Triplestore, and a row only the other systems could fill skewed the count. Open Triplestore still runs a hand-written, spec-derived SPARQL 1.1 suite (`tests/w3c_sparql11_conformance.rs`) and, for development and bug tracking, the query, update and federation sections of the W3C suite (`docs/conformance/sparql11.md`). Measured comparisons with other stores are in [Performance comparison](performance-comparison.md).
 > ⁵ Full in [`docs/standards.md`](standards.md), deny-by-default (footnote 3 there): `SERVICE`
->   reaches only the endpoints an operator lists in `OTS_REMOTE_ALLOWLIST`, and a refused, failed
+>   reaches only the endpoints an operator lists in `OTS_SERVICE_ALLOWLIST`, and a refused, failed
 >   or over-cap call is a failed invocation (an error, or the empty solution under `SILENT`).
 >   `SERVICE ?var` is supported; local bindings are not pushed to the remote. The federation
 >   sections of the W3C SPARQL 1.1 test suite run unscored in `tests/w3c_sparql11_federation.rs`.
@@ -262,7 +262,7 @@ The matrix has 28 rows. A 29th, "W3C SPARQL 1.1 Tests", was retired for every sy
 >   but not released).
 > ²⁰ Partial in [`docs/standards.md`](standards.md) (graded 2026-10-03; the cell used to mark
 >   feature presence). Remote `@context`s now resolve — bundled W3C contexts offline, others from
->   `OTS_REMOTE_ALLOWLIST` — and the W3C json-ld-api toRdf/fromRdf sections run as a regression
+>   `OTS_JSONLD_CONTEXT_ALLOWLIST` — and the W3C json-ld-api toRdf/fromRdf sections run as a regression
 >   ratchet (no published score). Every evaluated toRdf entry passes since the JSON-LD processor
 >   is patched in the vendored fork (2026-10-03); three fromRdf entries fail on purpose, because
 >   the serialiser keeps every stored quad (no `@list` folding that drops `rdf:type rdf:List`, no

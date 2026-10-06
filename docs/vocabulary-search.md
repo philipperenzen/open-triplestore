@@ -436,7 +436,7 @@ catalog vocabularies the corpus in use holds) and, in `engine`,
 | Variable | Default | Meaning |
 |---|---|---|
 | `VOCAB_CORPUS_PATH` | unset | Explicit path to a `lov.nq.gz` file |
-| `VOCAB_CORPUS_URL` | pinned archive snapshot | Download URL; `""` disables the download |
+| `VOCAB_CORPUS_URL` | pinned archive snapshot | Download URL; `OTS_OFFLINE=true` turns the download off |
 | `VOCAB_CORPUS_SHA256` | pinned digest | Expected checksum for a custom URL |
 | `VOCAB_LOCAL_METRICS` | on | `off` skips the local-usage ranking signal |
 | `PREFIX_CC_FALLBACK` | off | `true` re-enables live prefix.cc fallback |

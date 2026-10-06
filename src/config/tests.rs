@@ -138,7 +138,7 @@ fn the_defaults_load() {
     assert!(!c.get(&SECURE_COOKIES));
     assert!(c.get(&SERVE_FRONTEND));
     assert_eq!(c.get(&REMOTE_MAX_BYTES), 64 * 1024 * 1024);
-    assert_eq!(c.get(&REMOTE_ALLOWLIST), Vec::<String>::new());
+    assert_eq!(c.get(&SERVICE_ALLOWLIST), Vec::<String>::new());
     assert_eq!(c.entry(BASE_URL.name()).source, Source::Default);
     assert!(!c.production());
 }
@@ -149,14 +149,14 @@ fn every_problem_is_reported_at_once() {
         ("SPARQL_QUERY_TIMEOUT_SECS", "thirty"),
         ("SECURE_COOKIES", "maybe"),
         ("DCAT_PROFILE", "dcat-ap-be"),
-        ("OTS_REMOTE_ALLOWLIST", "https://ok.example/, not a url"),
+        ("OTS_SERVICE_ALLOWLIST", "https://ok.example/, not a url"),
     ]);
     let names: Vec<&str> = errors.iter().map(|e| e.name.as_str()).collect();
     for n in [
         "SPARQL_QUERY_TIMEOUT_SECS",
         "SECURE_COOKIES",
         "DCAT_PROFILE",
-        "OTS_REMOTE_ALLOWLIST",
+        "OTS_SERVICE_ALLOWLIST",
     ] {
         assert!(names.contains(&n), "{n} missing from {names:?}");
     }

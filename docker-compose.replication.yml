@@ -63,11 +63,9 @@ services:
       - BASE_URL=${LEADER_BASE_URL:-http://localhost:7878}
       # The first boot seeds the same demo organisation as any install —
       # IFC buildings, files and all: downloads from GitHub and a few
-      # minutes of lifting. For an offline or quicker stack, uncomment the
-      # next line on both services: an empty SEED_IFC_URL leaves the IFC
-      # building demos out. (It is not a .env variable: an unset one must
-      # stay unset, and compose cannot pass "unset" through a default.)
-      # - SEED_IFC_URL=
+      # minutes of lifting. For an offline or quicker stack, set
+      # OTS_OFFLINE=true on both services (or in .env): no download at startup.
+      # - OTS_OFFLINE=true
       # The leader keeps change capture on whatever OTS_CHANGE_CAPTURE says
       # (docs/versioning.md, "Change log") and serves its manifest, its rows
       # and whole graphs to followers under an admin token.
@@ -88,7 +86,7 @@ services:
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set (no default) — see .env.example}
       - AUTH_DB_PATH=/data/auth.db
       - BASE_URL=${FOLLOWER_BASE_URL:-http://localhost:7879}
-      # - SEED_IFC_URL=
+      # - OTS_OFFLINE=true
       # A follower's store is read-only: every write answers 503 and names
       # the leader. Reads, SPARQL, the web UI and SHACL validation all work.
       - OTS_REPLICATION_ROLE=follower

@@ -910,8 +910,14 @@ pub fn sync(
     graph_iri: &str,
 ) -> anyhow::Result<SyncReport> {
     NamedNode::new(graph_iri).map_err(|e| anyhow::anyhow!("graph IRI: {e}"))?;
-    if !crate::remote::is_allowed(url) {
-        anyhow::bail!("{}", RemoteError::NotAllowed(url.to_string()));
+    if !crate::remote::is_allowed(crate::remote::Purpose::Ldes, url) {
+        anyhow::bail!(
+            "{}",
+            RemoteError::NotAllowed {
+                url: url.to_string(),
+                purpose: crate::remote::Purpose::Ldes,
+            }
+        );
     }
     let prev = super::store::sync_state(&state.auth_db, dataset_id, url)?;
     let mut report = SyncReport {
@@ -1342,10 +1348,14 @@ pub async fn sync_handler(
         &user,
     )
     .map_err(|m| (StatusCode::FORBIDDEN, m))?;
-    if !crate::remote::is_allowed(&body.url) {
+    if !crate::remote::is_allowed(crate::remote::Purpose::Ldes, &body.url) {
         return Err((
             StatusCode::FORBIDDEN,
-            RemoteError::NotAllowed(body.url.clone()).to_string(),
+            RemoteError::NotAllowed {
+                url: body.url.clone(),
+                purpose: crate::remote::Purpose::Ldes,
+            }
+            .to_string(),
         ));
     }
     // The target graph belongs to the dataset (registered if it is new), so

@@ -785,16 +785,22 @@ export interface LlmHealth {
   /** Set only by `llmHealth()`'s own fallback: the request failed, so nothing
    *  is known about the gateway (never sent by the server). */
   error?: true;
-  /** Gateway base URL the server talks to. */
-  gateway?: string;
+  /** Gateway base URL the server talks to; `null` when none is configured. */
+  gateway?: string | null;
+  /** Why the gateway probe failed, when it did (connection or HTTP error). */
+  unreachable_reason?: string | null;
+  /** `false`: AI is turned off for this caller (a `0` budget, or an anonymous
+   *  caller with anonymous AI off). */
+  available_to_caller?: boolean;
   /** Body of the gateway's `/v1/models` (or `/health`) response. */
   detail?: unknown;
-  rate_limit_per_min?: number;
-  rate_limit_anon_per_min?: number;
+  /** Requests per minute: `0` = refused, `null` = unlimited. */
+  rate_limit_per_min?: number | null;
+  rate_limit_anon_per_min?: number | null;
   caller?: 'user' | 'guest';
   chat_model?: string;
   context_tokens?: number | null;
-  /** `LLM_GATEWAY_URL` is set and not blank; `false` = the server falls back to its built-in default. */
+  /** `LLM_GATEWAY_URL` is set; `false` = the AI features are off. */
   configured?: boolean;
   services?: LlmServiceStatus[];
 }

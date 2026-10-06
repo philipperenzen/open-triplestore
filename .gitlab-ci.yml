@@ -516,7 +516,7 @@ image-build:
         CARGO_PROFILE: release-dev
   script:
     - docker build --build-arg CARGO_PROFILE="$CARGO_PROFILE" -t open-triplestore:ci .
-    - docker run -d --name ots -e SEED_STANDARDS_DEMO=false -e SEED_IFC_URL= open-triplestore:ci
+    - docker run -d --name ots -e SEED_STANDARDS_DEMO=false -e OTS_OFFLINE=true open-triplestore:ci
     # The runtime image ships curl (its HEALTHCHECK uses it); the docker:27
     # image does not, so the probe runs inside the container.
     - |

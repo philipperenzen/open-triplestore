@@ -2392,7 +2392,7 @@ fn service_description_response(
         default_graph_count,
         &named_graph_counts,
         &dataset_descs,
-        crate::remote::enabled(),
+        crate::remote::enabled(crate::remote::Purpose::Service),
     );
 
     Ok((StatusCode::OK, [(CONTENT_TYPE, "text/turtle")], desc).into_response())

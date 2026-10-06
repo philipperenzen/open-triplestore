@@ -111,10 +111,10 @@ fn seeded() -> (AppState, String, String) {
     )
     .unwrap();
 
-    // Tests must never reach the network: an empty SEED_IFC_URL makes the
-    // seeder skip the Schependomlaan IFC download (same pattern as the
+    // Tests must never reach the network: OTS_OFFLINE makes the
+    // seeder skip the IFC downloads (same pattern as the
     // role-visibility tests).
-    std::env::set_var("SEED_IFC_URL", "");
+    std::env::set_var("OTS_OFFLINE", "true");
     seed_open_triplestore(&state);
 
     let org = state
@@ -143,7 +143,7 @@ async fn concurrent_seeders_serialise_into_one_clean_seed() {
             SystemRole::SuperAdmin,
         )
         .unwrap();
-    std::env::set_var("SEED_IFC_URL", "");
+    std::env::set_var("OTS_OFFLINE", "true");
     let (a, b) = (state.clone(), state.clone());
     let race = tokio::join!(
         tokio::task::spawn_blocking(move || seed_open_triplestore(&a)),

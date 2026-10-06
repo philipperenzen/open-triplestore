@@ -6,7 +6,7 @@
 //! path, `/sparql` by default) with `tls` choosing the scheme; `username`
 //! and the credential reference become HTTP Basic, resolved at the moment
 //! of use like every other credential. The endpoint must be covered by
-//! `OTS_REMOTE_ALLOWLIST`: every request goes through [`crate::remote`],
+//! `OTS_SOURCES_ALLOWLIST`: every request goes through [`crate::remote`],
 //! the same door SPARQL federation and LDES sync use, so a virtual source is
 //! never a way around the allowlist.
 //!
@@ -324,11 +324,10 @@ impl SourceConnector for SparqlConnector {
             params.tls,
         )
         .map_err(SourceError::Config)?;
-        if !remote::is_allowed(&endpoint) {
+        if !remote::is_allowed(remote::Purpose::Sources, &endpoint) {
             return Err(SourceError::Config(format!(
-                "the endpoint is not covered by {}; a virtual source is reached through the \
-                 same allowlist as SPARQL federation",
-                remote::ALLOWLIST_ENV
+                "the endpoint is not covered by {}",
+                remote::Purpose::Sources.setting()
             )));
         }
         let conn = SparqlConnection {
@@ -443,17 +442,22 @@ impl SparqlConnection {
     }
 
     fn text(&self, query: &str, accept: &str) -> Result<String, SourceError> {
-        remote::post_sparql_blocking(&self.endpoint, query, accept, self.auth()).map_err(
-            |e| match e {
-                RemoteError::NotAllowed(_) | RemoteError::RedirectNotAllowed { .. } => {
-                    SourceError::Config(e.to_string())
-                }
-                RemoteError::Request { reason, .. } if reason.contains("timed out") => {
-                    SourceError::Timeout
-                }
-                other => SourceError::Query(other.to_string()),
-            },
+        remote::post_sparql_blocking(
+            remote::Purpose::Sources,
+            &self.endpoint,
+            query,
+            accept,
+            self.auth(),
         )
+        .map_err(|e| match e {
+            RemoteError::NotAllowed { .. } | RemoteError::RedirectNotAllowed { .. } => {
+                SourceError::Config(e.to_string())
+            }
+            RemoteError::Request { reason, .. } if reason.contains("timed out") => {
+                SourceError::Timeout
+            }
+            other => SourceError::Query(other.to_string()),
+        })
     }
 
     /// A SELECT's solutions, as `variable → cell` rows.
@@ -717,6 +721,7 @@ pub fn snapshot(source: &SqlSource, store: &TripleStore, graph: &str) -> Result<
         _ => Auth::None,
     };
     let body = remote::post_sparql_blocking(
+        remote::Purpose::Sources,
         &endpoint,
         "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }",
         "application/n-triples",

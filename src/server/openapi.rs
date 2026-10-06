@@ -2561,7 +2561,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             ob(
                 "Datasets",
                 "Sync a remote event stream",
-                "Replicate a remote LDES (LDES 1.0 consumer, unordered mode) into `graph_iri` of `dataset_id`. `url` is the event stream, its root node, a redirect to either, or a page with exactly one `tree:view`; its origin, and every redirect hop, must be in `OTS_REMOTE_ALLOWLIST`. Members are extracted with their named graphs, versions ordered and deletes recognised by the stream's declared (SHACL) paths, and the newest version of each entity replaces what the previous one wrote. State per `(dataset, url)` makes later runs incremental: a bookmark on `xsd:dateTime` values with the members at its own timestamp, immutable pages (not fetched again), ETags of mutable pages (`If-None-Match`). 408/425/429/5xx are retried with back-off; `410 Gone` is an empty page. The report carries the publisher's declared retention policy and warns when the bookmark predates its window.",
+                "Replicate a remote LDES (LDES 1.0 consumer, unordered mode) into `graph_iri` of `dataset_id`. `url` is the event stream, its root node, a redirect to either, or a page with exactly one `tree:view`; its origin, and every redirect hop, must be in `OTS_LDES_ALLOWLIST`. Members are extracted with their named graphs, versions ordered and deletes recognised by the stream's declared (SHACL) paths, and the newest version of each entity replaces what the previous one wrote. State per `(dataset, url)` makes later runs incremental: a bookmark on `xsd:dateTime` values with the members at its own timestamp, immutable pages (not fetched again), ETags of mutable pages (`If-None-Match`). 408/425/429/5xx are retried with back-off; `410 Gone` is an empty page. The report carries the publisher's declared retention policy and warns when the bookmark predates its window.",
                 vec![],
                 json_body(
                     ObjectBuilder::new()
@@ -6844,9 +6844,9 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "LLM",
                 "LLM health",
-                "Reachability of the LLM gateway, whether LLM_GATEWAY_URL is configured, and per AI feature (chat, sparql, shacl) the configured model and whether the gateway's /v1/models list serves it (listed: true/false, or null when there is no list to judge by). Makes no request beyond the gateway probe.",
+                "Reachability of the LLM gateway, whether LLM_GATEWAY_URL is configured (unset: the AI features are off and nothing is probed), why an unreachable gateway failed, whether this caller may use AI at all, the request budgets (0 = refused, null = unlimited), and per AI feature (chat, sparql, shacl) the configured model and whether the gateway's /v1/models list serves it (listed: true/false, or null when there is no list to judge by). Makes no request beyond the gateway probe.",
                 vec![],
-                vec![("200", "{ gateway, configured, reachable, detail, chat_model, context_tokens, services: [{ id, model, listed }], … }")],
+                vec![("200", "{ gateway, configured, reachable, unreachable_reason, available_to_caller, rate_limit_per_min, rate_limit_anon_per_min, detail, chat_model, context_tokens, services: [{ id, model, listed }], … }")],
                 false,
             ),
         )],

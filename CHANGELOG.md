@@ -746,6 +746,31 @@ ignored):
 - `docker-compose.yml` passes `S3_SECRET_KEY=env:MINIO_ROOT_PASSWORD` (a
   reference) and forwards `MINIO_ROOT_PASSWORD`, so the production profile can
   start under compose once `JWT_SECRET` is a reference too.
+- **One outbound allowlist per purpose.** `OTS_REMOTE_ALLOWLIST` is retired
+  (setting it stops the start) and split into `OTS_SERVICE_ALLOWLIST` (SPARQL
+  `SERVICE`, which any query user can trigger), `OTS_LDES_ALLOWLIST` (LDES
+  client sync), `OTS_SOURCES_ALLOWLIST` (SQL and SPARQL datasources, including
+  `SERVICE <urn:source:…>`) and `OTS_JSONLD_CONTEXT_ALLOWLIST` (remote JSON-LD
+  contexts). There is no shared fallback: a host allowlisted for an admin's
+  LDES sync is no longer a `SERVICE` target for every query user. Redirects
+  are checked against the same purpose's list.
+- **`OTS_OFFLINE`** (on in production) stops every startup download: the LOV
+  corpus and the demo IFC and STL models. It replaces the empty-value kill
+  switches `SEED_IFC_URL=` and `VOCAB_CORPUS_URL=` (an empty value now means
+  the default, like every other setting).
+- **LLM budgets: `0` turns AI off, `unlimited` lifts the limit.**
+  `LLM_RATE_LIMIT_PER_MIN=0` / `LLM_RATE_LIMIT_ANON_PER_MIN=0` used to mean
+  "no limit"; they now refuse AI to that kind of caller (`403`). The new
+  `LLM_ANONYMOUS_ENABLED` (default on, off in production) turns AI off for
+  anonymous callers. `/api/llm/health` reports `0` for off and `null` for
+  unlimited, plus `available_to_caller`.
+- **No built-in LLM gateway.** With `LLM_GATEWAY_URL` unset the AI features
+  are off: nothing is probed (the server used to probe `127.0.0.1:8000`) and
+  AI requests answer `503` naming the setting. `/api/llm/health` reports
+  `gateway: null`, and for a configured but unreachable gateway (the compose
+  default without `--profile llm`) the probe's error as
+  `unreachable_reason`. In compose, `LLM_GATEWAY_URL=` (empty) in `.env` now
+  turns the AI features off.
 
 ### Changed
 - **`image` Cargo feature.** `image` is an alias for the published image's

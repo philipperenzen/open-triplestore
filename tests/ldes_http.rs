@@ -521,7 +521,7 @@ fn publisher() -> (AppState, String, String) {
 #[tokio::test]
 async fn sync_mirrors_a_remote_stream_and_its_increments() {
     let (remote_state, remote_token, origin) = publisher();
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    std::env::set_var("OTS_LDES_ALLOWLIST", format!("{origin}/"));
     let remote_app = test_app(remote_state.clone());
 
     let (local, token) = admin_state();
@@ -630,7 +630,7 @@ async fn sync_mirrors_a_remote_stream_and_its_increments() {
     assert!(commits.contains("LDES sync"), "{commits}");
 
     // Not allowlisted: refused before any request.
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", "");
+    std::env::set_var("OTS_LDES_ALLOWLIST", "");
     let (st, _, _) = req(
         &app,
         Method::POST,

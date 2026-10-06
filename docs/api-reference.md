@@ -214,7 +214,7 @@ stream). Streams without a policy never answer 410. Full fragments also carry
 event stream, its root node, a redirect to either, or a page with exactly one
 `tree:view`. Anything else (several views, none at all) is a **`502`** whose
 body names §3.1; it used to crawl whatever links it found. Redirects are
-followed within `OTS_REMOTE_ALLOWLIST`, `408`/`425`/`429`/`5xx` are retried
+followed within `OTS_LDES_ALLOWLIST`, `408`/`425`/`429`/`5xx` are retried
 with back-off, and any other error status is a `502`. The report gains
 `stream`, `root_node`, `polling_interval`, `shapes`, `nodes_not_modified`,
 `nodes_skipped_immutable`, `nodes_pruned`, `retries` and

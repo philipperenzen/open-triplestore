@@ -220,7 +220,7 @@ behavior and will flip green when the limitation is resolved.
      status codes; `tests/sparql_scope_boundary_http.rs` the read boundary.
      The W3C protocol test section is not vendored.
 3. **Federation/`SERVICE` is deny-by-default.** It is off as an SSRF mitigation
-   until `OTS_REMOTE_ALLOWLIST` lists the URL prefixes the server may contact; a
+   until `OTS_SERVICE_ALLOWLIST` lists the URL prefixes the server may contact; a
    `SERVICE` naming anything else is a failed invocation — an error, or under
    `SERVICE SILENT` the single empty solution — which is the spec's own failure
    semantics, so the posture does not lower the grade. The §3.2 semantics
@@ -481,7 +481,7 @@ behavior and will flip green when the limitation is resolved.
 13. **JSON-LD 1.1** — every JSON-LD parse resolves a remote `@context`
     through the server's document loader (since 2026-10-03; until then any
     context named by IRI failed): the bundled W3C contexts of ActivityStreams,
-    CSVW, LDP and ODRL offline, other URLs only when `OTS_REMOTE_ALLOWLIST`
+    CSVW, LDP and ODRL offline, other URLs only when `OTS_JSONLD_CONTEXT_ALLOWLIST`
     covers them, size-capped and cached ([formats.md](formats.md#json-ld-remote-contexts)).
     Graded *Partial* on the W3C json-ld-api `toRdf` and `fromRdf` sections,
     which run as a regression ratchet with no published score

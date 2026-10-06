@@ -18,7 +18,7 @@ services:
     # `environment:` below (those add defaults and compose-only wiring, and win
     # over .env only where they name a fixed value). Without this, documented
     # settings such as SECURE_COOKIES, TRUSTED_PROXY_CIDRS or
-    # OTS_REMOTE_ALLOWLIST were silently dropped. `required: false` (Compose
+    # OTS_SERVICE_ALLOWLIST were silently dropped. `required: false` (Compose
     # 2.24+) keeps `docker compose up` working without a .env file.
     # scripts/check_compose_env.py (CI) keeps the two in step.
     env_file:
@@ -119,8 +119,11 @@ services:
       # to the bundled `ollama` service below — start it with `--profile llm` (and
       # the GPU override on an NVIDIA host: see docker-compose.gpu.yml). Prefer an
       # external OpenAI-compatible API? Set LLM_GATEWAY_URL + LLM_API_KEY in .env and
-      # don't enable the `llm` profile. Unreachable endpoint = AI features just hide.
-      - LLM_GATEWAY_URL=${LLM_GATEWAY_URL:-http://ollama:11434}
+      # don't enable the `llm` profile. Without the profile the default endpoint does
+      # not exist, and /api/llm/health says so: configured, unreachable, and why.
+      # `LLM_GATEWAY_URL=` (empty) in .env turns the AI features off instead; the
+      # default below applies only when the variable is not set at all.
+      - LLM_GATEWAY_URL=${LLM_GATEWAY_URL-http://ollama:11434}
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:7b}
       - LLM_API_KEY=${LLM_API_KEY:-}
       # Per-task model overrides; empty falls back to LLM_MODEL.

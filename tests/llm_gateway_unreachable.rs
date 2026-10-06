@@ -97,6 +97,15 @@ async fn chat_without_a_gateway_is_a_503_that_names_the_knob() {
         v["configured"], true,
         "set explicitly, just not reachable: {v}"
     );
+    // Unreachable is said honestly, with why: the probe's error names the
+    // gateway (a compose stack whose `ollama` service was never started
+    // reads the same way).
+    assert!(
+        v["unreachable_reason"]
+            .as_str()
+            .is_some_and(|r| r.contains(DEAD_GATEWAY)),
+        "{v}"
+    );
     // Every AI feature is still reported, in order, with its model — but
     // `listed` is unknown (null), not "not served": there is no list to judge by.
     let services = v["services"].as_array().expect("services array");

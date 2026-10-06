@@ -20,6 +20,8 @@ export interface LlmGatewayRow {
   detailKey: string;
   /** Gateway base URL for a tooltip, when the server reported one. */
   address: string | null;
+  /** Why the gateway is unreachable, for the tooltip (when the server says). */
+  reason?: string;
 }
 
 export interface LlmServiceRow {
@@ -87,7 +89,12 @@ export function llmServiceHealthView(status: LlmHealth | null | undefined): LlmS
   }
   if (status.configured === true) {
     return {
-      gateway: { state: 'warn', detailKey: 'nav.llmUnreachable', address },
+      gateway: {
+        state: 'warn',
+        detailKey: 'nav.llmUnreachable',
+        address,
+        reason: typeof status.unreachable_reason === 'string' ? status.unreachable_reason : undefined,
+      },
       services: serviceRows(status, () => ['warn', null]),
     };
   }

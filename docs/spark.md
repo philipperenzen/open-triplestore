@@ -148,8 +148,9 @@ rather than the per-principal LLM budget below.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LLM_RATE_LIMIT_PER_MIN` | `20` | Signed-in per-user request budget per minute, separate from the global rate limiter. `0` disables. |
-| `LLM_RATE_LIMIT_ANON_PER_MIN` | `5` | Guest (per-IP) request budget per minute — deliberately tighter than the signed-in budget. Both limits are surfaced to the UI via `GET /api/llm/health`. `0` disables. |
+| `LLM_RATE_LIMIT_PER_MIN` | `20` | Signed-in per-user request budget per minute, separate from the global rate limiter. `0` turns AI off for signed-in users (`403`); `unlimited` lifts the limit. |
+| `LLM_RATE_LIMIT_ANON_PER_MIN` | `5` | Guest (per-IP) request budget per minute — deliberately tighter than the signed-in budget. `0` turns AI off for anonymous callers; `unlimited` lifts the limit. Both are surfaced to the UI via `GET /api/llm/health` (`0` = off, `null` = unlimited). |
+| `LLM_ANONYMOUS_ENABLED` | `true` (`false` in production) | Whether anonymous callers may use the AI features at all; off, they get a `403` and the chat says to sign in. |
 | `LLM_GUARD_MAX_MESSAGE_CHARS` | `8000` | Per-message size cap. |
 | `LLM_GUARD_MAX_MESSAGES` / `LLM_GUARD_MAX_TOTAL_CHARS` | `40` / `64000` | Whole-conversation caps — start a new chat past them. |
 | `LLM_GUARD_INJECTION_ACTION` | `block` | What a prompt-injection heuristic hit does: `block`, `flag` (allow but log), or `off`. |
@@ -159,7 +160,7 @@ Final answers are additionally screened for verbatim system-prompt leaks (redact
 
 ## Admin telemetry
 
-Admins see every LLM request under **Admin → AI Requests** (`/admin/llm`): timestamp, user, endpoint, model, outcome (`ok` / `error` / `blocked` with the guard rule that fired), latency, time-to-first-token, prompt/answer sizes and query rounds. Message *contents* are not logged — only a short question preview (disable even that with `LLM_LOG_PREVIEW_DISABLED=1`). Rows are pruned after `LLM_LOG_RETENTION_DAYS` (default 90).
+Admins see every LLM request under **Admin → AI Requests** (`/admin/llm`): timestamp, user, endpoint, model, outcome (`ok` / `error` / `blocked` with the guard rule that fired), latency, time-to-first-token, prompt/answer sizes and query rounds. Message *contents* are not logged — only a short question preview (disable even that with `LLM_LOG_PREVIEW_DISABLED=true`). Rows are pruned after `LLM_LOG_RETENTION_DAYS` (default 90).
 
 ## Configuration
 
@@ -167,7 +168,7 @@ Spark uses the same bring-your-own-LLM gateway as the platform's other AI featur
 
 | Variable | Purpose |
 | --- | --- |
-| `LLM_GATEWAY_URL` | Base URL of any OpenAI-compatible `/v1/chat/completions` endpoint — OpenAI, OpenRouter, Azure OpenAI, Ollama, LM Studio, vLLM, llama.cpp, or a self-hosted gateway. Defaults to `http://127.0.0.1:8000` when unset or blank. |
+| `LLM_GATEWAY_URL` | Base URL of any OpenAI-compatible `/v1/chat/completions` endpoint — OpenAI, OpenRouter, Azure OpenAI, Ollama, LM Studio, vLLM, llama.cpp, or a self-hosted gateway. Unset: the AI features are off — nothing is probed, and every AI request answers `503` naming this setting. |
 | `LLM_MODEL` | Model name sent on every completion (an OpenAI model id, an Ollama tag, a vLLM-served name, …). |
 | `LLM_CHAT_MODEL` | Model for Spark specifically; falls back to `LLM_MODEL`. |
 | `LLM_API_KEY` | Optional bearer token for the endpoint. Required by hosted APIs; leave unset for local servers. |
@@ -215,12 +216,18 @@ Availability is probed at `GET /api/llm/health`. The chat streams over `POST /ap
 Besides `reachable`, `gateway`, `chat_model` and `context_tokens`, the health
 response carries:
 
-- `configured` — whether `LLM_GATEWAY_URL` is set to a non-blank value.
-  `false` means nobody configured an endpoint (unset or blank) and the server
-  is probing its built-in default, `http://127.0.0.1:8000`. The bundled
-  `docker-compose.yml` always sets it (to the `ollama` service unless `.env`
-  says otherwise), so a compose deployment reports `configured: true` even
-  when the `llm` profile was never started.
+- `configured` — whether `LLM_GATEWAY_URL` is set. `false` means the AI
+  features are off: `gateway` is `null` and nothing is probed. The bundled
+  `docker-compose.yml` sets it to the `ollama` service unless `.env` says
+  otherwise, so a compose deployment whose `llm` profile was never started
+  reports `configured: true`, `reachable: false` and why.
+- `unreachable_reason` — when the probe failed, the error it got (a refused
+  connection, a host that does not resolve, an HTTP status), naming the URL.
+- `available_to_caller` — `false` when this caller may not use the AI
+  features at all: their budget is `0`, or they are anonymous and
+  `LLM_ANONYMOUS_ENABLED` is off.
+- `rate_limit_per_min` / `rate_limit_anon_per_min` — the budgets; `0` is off
+  and `null` is unlimited.
 - `services` — always three entries, in this order: `chat` (Spark,
   `LLM_CHAT_MODEL`), `sparql` (NL→SPARQL and saved-query repair,
   `LLM_SPARQL_MODEL`) and `shacl` (the SHACL Studio assistant,

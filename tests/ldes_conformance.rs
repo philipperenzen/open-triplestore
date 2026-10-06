@@ -936,7 +936,7 @@ async fn the_client_treats_a_gone_node_as_empty_and_keeps_the_publisher_policy()
     .await;
     assert_eq!(st, StatusCode::GONE, "the publisher compacted page 1");
 
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    std::env::set_var("OTS_LDES_ALLOWLIST", format!("{origin}/"));
     let (local, token) = admin_state();
     local
         .auth_db
@@ -1747,7 +1747,7 @@ async fn an_overloaded_stream_answers_429_with_retry_after() {
 
 // ─── Client MUSTs and SHOULDs (LDES 1.0 §3, §4.3, §4.4) ─────────────────────
 
-/// Client tests point the process-wide `OTS_REMOTE_ALLOWLIST` at their own
+/// Client tests point the process-wide `OTS_LDES_ALLOWLIST` at their own
 /// listeners, so they take turns.
 static REMOTE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -1916,7 +1916,7 @@ async fn the_client_follows_allowlisted_redirects_and_resolves_against_the_final
     let _turn = REMOTE.lock().await;
     let (remote, origin) = Mock::start();
     let (outside, outside_origin) = Mock::start();
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    std::env::set_var("OTS_LDES_ALLOWLIST", format!("{origin}/"));
     remote.on(
         "/start",
         vec![Reply::status(301).header("location", "/hop")],
@@ -1976,7 +1976,7 @@ async fn the_client_follows_allowlisted_redirects_and_resolves_against_the_final
 async fn the_client_retries_with_back_off_and_aborts_on_other_errors() {
     let _turn = REMOTE.lock().await;
     let (remote, origin) = Mock::start();
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    std::env::set_var("OTS_LDES_ALLOWLIST", format!("{origin}/"));
     let root = || {
         Reply::turtle(
             "<#es> a ldes:EventStream ; tree:view <> ; tree:member <m1> .
@@ -2033,7 +2033,7 @@ async fn the_client_retries_with_back_off_and_aborts_on_other_errors() {
 async fn the_client_reads_trig_and_n_quads_and_extracts_a_members_named_graph() {
     let _turn = REMOTE.lock().await;
     let (remote, origin) = Mock::start();
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    std::env::set_var("OTS_LDES_ALLOWLIST", format!("{origin}/"));
     remote.on(
         "/root",
         vec![Reply::rdf(
@@ -2102,7 +2102,7 @@ async fn the_client_reads_trig_and_n_quads_and_extracts_a_members_named_graph() 
 async fn a_stream_without_version_paths_yields_its_members() {
     let _turn = REMOTE.lock().await;
     let (remote, origin) = Mock::start();
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    std::env::set_var("OTS_LDES_ALLOWLIST", format!("{origin}/"));
     remote.on(
         "/root",
         vec![Reply::turtle(
@@ -2132,7 +2132,7 @@ async fn a_stream_without_version_paths_yields_its_members() {
 async fn members_that_share_the_bookmark_timestamp_are_each_emitted_once() {
     let _turn = REMOTE.lock().await;
     let (remote, origin) = Mock::start();
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    std::env::set_var("OTS_LDES_ALLOWLIST", format!("{origin}/"));
     let page = |members: &[(&str, &str)]| {
         let list: Vec<String> = members.iter().map(|(m, _)| format!("ex:{m}")).collect();
         let mut doc = format!(
@@ -2188,7 +2188,7 @@ async fn members_that_share_the_bookmark_timestamp_are_each_emitted_once() {
 async fn versions_follow_the_declared_paths_objects_and_version_timestamps() {
     let _turn = REMOTE.lock().await;
     let (remote, origin) = Mock::start();
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    std::env::set_var("OTS_LDES_ALLOWLIST", format!("{origin}/"));
     let doc = |extra_members: &str, extra: &str| {
         Reply::turtle(format!(
             "<#es> a ldes:EventStream ; ldes:timestampPath dct:created ;
@@ -2266,7 +2266,7 @@ async fn versions_follow_the_declared_paths_objects_and_version_timestamps() {
 async fn declared_paths_are_evaluated_as_shacl_property_paths() {
     let _turn = REMOTE.lock().await;
     let (remote, origin) = Mock::start();
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    std::env::set_var("OTS_LDES_ALLOWLIST", format!("{origin}/"));
     remote.on(
         "/root",
         vec![Reply::turtle(
@@ -2303,7 +2303,7 @@ async fn declared_paths_are_evaluated_as_shacl_property_paths() {
 async fn initialisation_finds_the_root_and_refuses_ambiguous_views() {
     let _turn = REMOTE.lock().await;
     let (remote, origin) = Mock::start();
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    std::env::set_var("OTS_LDES_ALLOWLIST", format!("{origin}/"));
     remote.on(
         "/es",
         vec![Reply::turtle(
@@ -2385,7 +2385,7 @@ async fn immutable_nodes_are_fetched_once_and_mutable_nodes_revalidate() {
     assert_eq!(st, StatusCode::OK, "{txt}");
     // b1 and b2 fill node 1; b3 starts node 2, which seals node 1.
     post_entity(&remote_app, &remote_token, "b3", "three").await;
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    std::env::set_var("OTS_LDES_ALLOWLIST", format!("{origin}/"));
     let (local, token, app) = mirror();
     let url = format!("{origin}/api/datasets/pub/ldes");
 
@@ -2423,7 +2423,7 @@ async fn immutable_nodes_are_fetched_once_and_mutable_nodes_revalidate() {
 async fn a_node_bounded_below_the_bookmark_is_not_fetched() {
     let _turn = REMOTE.lock().await;
     let (remote, origin) = Mock::start();
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    std::env::set_var("OTS_LDES_ALLOWLIST", format!("{origin}/"));
     remote.on(
         "/root",
         vec![Reply::turtle(
@@ -2469,7 +2469,7 @@ async fn a_node_bounded_below_the_bookmark_is_not_fetched() {
 async fn the_legacy_point_in_time_policy_is_read() {
     let _turn = REMOTE.lock().await;
     let (remote, origin) = Mock::start();
-    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin}/"));
+    std::env::set_var("OTS_LDES_ALLOWLIST", format!("{origin}/"));
     remote.on(
         "/root",
         vec![Reply::turtle(

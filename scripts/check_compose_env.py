@@ -7,7 +7,7 @@ the `triplestore` container. Two things break that silently:
 
 * no `env_file: .env` on the service, so a variable compose does not list by
   name never arrives (this is how `SECURE_COOKIES`, `TRUSTED_PROXY_CIDRS` and
-  `OTS_REMOTE_ALLOWLIST` were lost);
+  the outbound allowlists were lost);
 * an `environment:` entry that hard-codes a documented variable
   (`BACKUP_RETENTION_COUNT=7`), which overrides whatever `.env` says.
 

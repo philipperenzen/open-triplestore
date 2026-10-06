@@ -1,13 +1,21 @@
-//! Outbound HTTP from the store, behind an operator allowlist.
+//! Outbound HTTP from the store, behind per-purpose operator allowlists.
 //!
-//! Two features reach out to other servers on a user's behalf: SPARQL
-//! federation (`SERVICE <endpoint> { … }`) and LDES client sync. Both are
-//! server-side request forgery vectors if any URL may be named, so neither
-//! may contact an endpoint unless it is covered by an entry in
-//! `OTS_REMOTE_ALLOWLIST` (comma-separated URLs; empty or unset means "no
-//! remote access at all", which is the default). An entry covers a URL when
-//! the parsed origins agree — scheme, host and port — and the entry's path is
-//! a segment-boundary prefix of the URL's path; the URL may not carry
+//! Four features reach out to other servers on a user's behalf, each a
+//! server-side request forgery vector if any URL may be named, and each with
+//! its own allowlist ([`Purpose`]):
+//!
+//! | Purpose | Setting | Who triggers it |
+//! |---|---|---|
+//! | SPARQL federation (`SERVICE <endpoint>`) | `OTS_SERVICE_ALLOWLIST` | any `/sparql` caller |
+//! | LDES client sync | `OTS_LDES_ALLOWLIST` | an admin |
+//! | SQL and SPARQL datasources | `OTS_SOURCES_ALLOWLIST` | an admin |
+//! | remote JSON-LD `@context` | `OTS_JSONLD_CONTEXT_ALLOWLIST` | anyone who uploads JSON-LD |
+//!
+//! There is no shared fallback list: a host allowlisted for an admin's LDES
+//! sync must not thereby become a `SERVICE` target for every query user.
+//! Every list is empty by default ("no remote access"). An entry covers a URL
+//! when the parsed origins agree — scheme, host and port — and the entry's
+//! path is a segment-boundary prefix of the URL's path; the URL may not carry
 //! credentials. Matching is never on the raw string, so an entry of
 //! `https://sparql.example.org` admits neither
 //! `https://sparql.example.org.evil.net/` nor
@@ -18,12 +26,14 @@
 //! stall or flood a local query. One query may contact at most
 //! `OTS_SERVICE_MAX_ENDPOINTS` endpoints (16) with at most
 //! `OTS_SERVICE_MAX_CALLS` requests (64), all within
-//! `OTS_SERVICE_DEADLINE_SECS` (default: the SPARQL query timeout) of its start (`crate::sparql::federation`). Exceeding a limit fails the request; nothing
-//! is ever cut short and passed on as if it were the whole answer.
+//! `OTS_SERVICE_DEADLINE_SECS` (default: the SPARQL query timeout) of its
+//! start (`crate::sparql::federation`). Exceeding a limit fails the request;
+//! nothing is ever cut short and passed on as if it were the whole answer.
 //!
 //! Redirects are followed (LDES 1.0 §3.3 and TREE require it), at most
 //! [`MAX_REDIRECTS`] hops, and **every hop is checked against the allowlist
-//! again**: an allowlisted host cannot bounce a request to one that is not.
+//! again** (the same purpose's list): an allowlisted host cannot bounce a
+//! request to one that is not.
 //! A hop to another host or port also loses the `Authorization` header
 //! (reqwest strips sensitive headers there), so an identity assertion minted
 //! for one peer is never shown to another.
@@ -35,21 +45,65 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-pub const ALLOWLIST_ENV: &str = crate::config::REMOTE_ALLOWLIST.name();
 pub const MAX_ROWS_ENV: &str = crate::config::SERVICE_MAX_ROWS.name();
 pub const MAX_BYTES_ENV: &str = crate::config::REMOTE_MAX_BYTES.name();
 pub const MAX_ENDPOINTS_ENV: &str = crate::config::SERVICE_MAX_ENDPOINTS.name();
 pub const MAX_CALLS_ENV: &str = crate::config::SERVICE_MAX_CALLS.name();
 pub const DEADLINE_ENV: &str = crate::config::SERVICE_DEADLINE.name();
 
-/// The allowlist entries, trimmed, empty entries dropped.
-pub fn allowlist() -> Vec<String> {
-    crate::config::REMOTE_ALLOWLIST.get()
+/// What an outbound request is for; each purpose has its own allowlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    /// SPARQL federation: `SERVICE <endpoint>` in any query.
+    Service,
+    /// LDES client sync (admin).
+    Ldes,
+    /// SQL and SPARQL datasources (admin).
+    Sources,
+    /// Remote JSON-LD `@context` documents.
+    JsonldContext,
 }
 
-/// Whether remote access is configured at all.
-pub fn enabled() -> bool {
-    !allowlist().is_empty()
+impl Purpose {
+    const ALL: [Purpose; 4] = [
+        Purpose::Service,
+        Purpose::Ldes,
+        Purpose::Sources,
+        Purpose::JsonldContext,
+    ];
+
+    fn key(self) -> &'static crate::config::Key<Vec<String>> {
+        match self {
+            Purpose::Service => &crate::config::SERVICE_ALLOWLIST,
+            Purpose::Ldes => &crate::config::LDES_ALLOWLIST,
+            Purpose::Sources => &crate::config::SOURCES_ALLOWLIST,
+            Purpose::JsonldContext => &crate::config::JSONLD_CONTEXT_ALLOWLIST,
+        }
+    }
+
+    /// The setting that holds this purpose's allowlist.
+    pub const fn setting(self) -> &'static str {
+        match self {
+            Purpose::Service => crate::config::SERVICE_ALLOWLIST.name(),
+            Purpose::Ldes => crate::config::LDES_ALLOWLIST.name(),
+            Purpose::Sources => crate::config::SOURCES_ALLOWLIST.name(),
+            Purpose::JsonldContext => crate::config::JSONLD_CONTEXT_ALLOWLIST.name(),
+        }
+    }
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|p| *p == self).unwrap_or(0)
+    }
+}
+
+/// `purpose`'s allowlist entries, trimmed, empty entries dropped.
+pub fn allowlist(purpose: Purpose) -> Vec<String> {
+    purpose.key().get()
+}
+
+/// Whether remote access is configured for `purpose` at all.
+pub fn enabled(purpose: Purpose) -> bool {
+    !allowlist(purpose).is_empty()
 }
 
 /// One allowlist entry, parsed. A URL is covered when its scheme, host and
@@ -112,20 +166,21 @@ fn has_userinfo(u: &url::Url) -> bool {
     !u.username().is_empty() || u.password().is_some()
 }
 
-/// The allowlist, parsed. Every entry parses: the registry refuses one that
-/// is not an absolute http(s) URL without credentials.
-fn parsed_allowlist() -> Vec<AllowEntry> {
-    allowlist()
+/// `purpose`'s allowlist, parsed. Every entry parses: the registry refuses
+/// one that is not an absolute http(s) URL without credentials.
+fn parsed_allowlist(purpose: Purpose) -> Vec<AllowEntry> {
+    allowlist(purpose)
         .iter()
         .filter_map(|e| AllowEntry::parse(e))
         .collect()
 }
 
-/// Whether `url` may be contacted: an absolute http(s) URL, without
-/// credentials, on the exact origin of one of the allowlisted entries and
-/// under that entry's path. See the module docs for what that rules out.
-pub fn is_allowed(url: &str) -> bool {
-    allowed_by(&parsed_allowlist(), url)
+/// Whether `url` may be contacted for `purpose`: an absolute http(s) URL,
+/// without credentials, on the exact origin of one of that purpose's
+/// allowlisted entries and under that entry's path. See the module docs for
+/// what that rules out.
+pub fn is_allowed(purpose: Purpose, url: &str) -> bool {
+    allowed_by(&parsed_allowlist(purpose), url)
 }
 
 fn allowed_by(entries: &[AllowEntry], url: &str) -> bool {
@@ -174,10 +229,17 @@ pub const MAX_REDIRECTS: usize = 10;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RemoteError {
-    #[error("remote access to <{0}> is not allowed: it is not in {ALLOWLIST_ENV}")]
-    NotAllowed(String),
-    #[error("remote <{from}> redirected to <{to}>, which is not in {ALLOWLIST_ENV}")]
-    RedirectNotAllowed { from: String, to: String },
+    #[error("remote access to <{url}> is not allowed: it is not in {}", purpose.setting())]
+    NotAllowed { url: String, purpose: Purpose },
+    #[error(
+        "remote <{from}> redirected to <{to}>, which is not in {}",
+        purpose.setting()
+    )]
+    RedirectNotAllowed {
+        from: String,
+        to: String,
+        purpose: Purpose,
+    },
     #[error("remote request to <{url}> failed: {reason}")]
     Request { url: String, reason: String },
     #[error("remote <{url}> answered {status}")]
@@ -236,13 +298,13 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 #[error("redirect to <{0}> is not in the remote allowlist")]
 struct RefusedRedirect(String);
 
-/// Follow a redirect only to a URL the allowlist covers, re-checked on every
-/// hop (the allowlist is read afresh, like everywhere else in this module).
-fn redirect_policy() -> reqwest::redirect::Policy {
-    reqwest::redirect::Policy::custom(|attempt| {
+/// Follow a redirect only to a URL `purpose`'s allowlist covers, re-checked
+/// on every hop.
+fn redirect_policy(purpose: Purpose) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() > MAX_REDIRECTS {
             attempt.error(format!("more than {MAX_REDIRECTS} redirects"))
-        } else if is_allowed(attempt.url().as_str()) {
+        } else if is_allowed(purpose, attempt.url().as_str()) {
             attempt.follow()
         } else {
             let to = attempt.url().to_string();
@@ -251,12 +313,19 @@ fn redirect_policy() -> reqwest::redirect::Policy {
     })
 }
 
-fn client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
+/// One client per purpose: each follows redirects only within its own
+/// allowlist.
+fn client(purpose: Purpose) -> &'static reqwest::Client {
+    static CLIENTS: [OnceLock<reqwest::Client>; 4] = [
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+    ];
+    CLIENTS[purpose.index()].get_or_init(|| {
         reqwest::Client::builder()
             .user_agent(concat!("open-triplestore/", env!("CARGO_PKG_VERSION")))
-            .redirect(redirect_policy())
+            .redirect(redirect_policy(purpose))
             .build()
             .expect("reqwest client")
     })
@@ -264,13 +333,14 @@ fn client() -> &'static reqwest::Client {
 
 /// A transport error as a [`RemoteError`]: a redirect the allowlist refused
 /// is reported as such, anything else as a failed request.
-fn request_error(url: &str, e: reqwest::Error) -> RemoteError {
+fn request_error(purpose: Purpose, url: &str, e: reqwest::Error) -> RemoteError {
     let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&e);
     while let Some(err) = source {
         if let Some(RefusedRedirect(to)) = err.downcast_ref::<RefusedRedirect>() {
             return RemoteError::RedirectNotAllowed {
                 from: url.to_string(),
                 to: to.clone(),
+                purpose,
             };
         }
         source = err.source();
@@ -312,25 +382,30 @@ pub(crate) enum Auth<'a> {
 /// a CONSTRUCT. Behind the allowlist, with the module's timeout and body
 /// limit.
 pub(crate) fn post_sparql_blocking(
+    purpose: Purpose,
     endpoint: &str,
     query: &str,
     accept: &str,
     auth: Auth<'_>,
 ) -> Result<String, RemoteError> {
-    post_sparql_blocking_within(endpoint, query, accept, auth, timeout())
+    post_sparql_blocking_within(purpose, endpoint, query, accept, auth, timeout())
 }
 
 /// As [`post_sparql_blocking`], with an explicit timeout (a `SERVICE` call
 /// gets what is left of its query's deadline when that is shorter).
 pub(crate) fn post_sparql_blocking_within(
+    purpose: Purpose,
     endpoint: &str,
     query: &str,
     accept: &str,
     auth: Auth<'_>,
     timeout: Duration,
 ) -> Result<String, RemoteError> {
-    if !is_allowed(endpoint) {
-        return Err(RemoteError::NotAllowed(endpoint.to_string()));
+    if !is_allowed(purpose, endpoint) {
+        return Err(RemoteError::NotAllowed {
+            url: endpoint.to_string(),
+            purpose,
+        });
     }
     let endpoint = endpoint.to_string();
     let query = query.to_string();
@@ -341,7 +416,7 @@ pub(crate) fn post_sparql_blocking_within(
         Auth::Basic(u, p) => Some((u.to_string(), Some(p.to_string()))),
     };
     blocking(async move {
-        let mut req = client().post(&endpoint).timeout(timeout);
+        let mut req = client(purpose).post(&endpoint).timeout(timeout);
         match &auth {
             Some((bearer, None)) => req = req.bearer_auth(bearer),
             Some((user, Some(password))) => req = req.basic_auth(user, Some(password)),
@@ -353,7 +428,7 @@ pub(crate) fn post_sparql_blocking_within(
             .body(query)
             .send()
             .await
-            .map_err(|e| request_error(&endpoint, e))?;
+            .map_err(|e| request_error(purpose, &endpoint, e))?;
         let status = resp.status();
         if !status.is_success() {
             return Err(RemoteError::Status {
@@ -427,7 +502,7 @@ pub struct RdfDocument {
 pub const RDF_ACCEPT: &str = "application/trig, application/n-quads, text/turtle;q=0.9, \
      application/n-triples;q=0.8, application/ld+json;q=0.7";
 
-/// `GET` an RDF document (LDES client), behind the allowlist, following
+/// `GET` an RDF document (LDES client), behind `OTS_LDES_ALLOWLIST`, following
 /// allowlisted redirects. `if_none_match` is an ETag kept from an earlier
 /// fetch; a `304` comes back as a document without a body. A retryable
 /// status ([`RETRYABLE_STATUSES`]) is retried up to [`retries`] times,
@@ -448,8 +523,11 @@ pub fn get_rdf_blocking_with_auth(
     if_none_match: Option<&str>,
     bearer: Option<&str>,
 ) -> Result<RdfDocument, RemoteError> {
-    if !is_allowed(url) {
-        return Err(RemoteError::NotAllowed(url.to_string()));
+    if !is_allowed(Purpose::Ldes, url) {
+        return Err(RemoteError::NotAllowed {
+            url: url.to_string(),
+            purpose: Purpose::Ldes,
+        });
     }
     let url = url.to_string();
     let bearer = bearer.map(str::to_string);
@@ -458,7 +536,7 @@ pub fn get_rdf_blocking_with_auth(
     blocking(async move {
         let mut attempt = 0u32;
         loop {
-            let mut req = client()
+            let mut req = client(Purpose::Ldes)
                 .get(&url)
                 .timeout(timeout())
                 .header("Accept", RDF_ACCEPT);
@@ -468,7 +546,10 @@ pub fn get_rdf_blocking_with_auth(
             if let Some(tag) = &if_none_match {
                 req = req.header("If-None-Match", tag);
             }
-            let resp = req.send().await.map_err(|e| request_error(&url, e))?;
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| request_error(Purpose::Ldes, &url, e))?;
             let status = resp.status().as_u16();
             if RETRYABLE_STATUSES.contains(&status) && attempt < max_retries {
                 let wait = retry_after(resp.headers()).unwrap_or_else(|| backoff(attempt));
@@ -533,18 +614,35 @@ mod tests {
 
     #[test]
     fn allowlist_is_origin_based_and_scheme_checked() {
-        std::env::set_var(
-            ALLOWLIST_ENV,
-            "https://sparql.example.org/, http://127.0.0.1:9999/",
+        let e = entries("https://sparql.example.org/, http://127.0.0.1:9999/");
+        assert!(allowed_by(&e, "https://sparql.example.org/query"));
+        assert!(allowed_by(&e, "http://127.0.0.1:9999/sparql"));
+        assert!(!allowed_by(&e, "https://sparql.example.org.evil.net/"));
+        assert!(!allowed_by(&e, "ftp://sparql.example.org/"));
+        assert!(!allowed_by(&e, "https://other.example.org/"));
+        assert!(!allowed_by(&[], "https://sparql.example.org/query"));
+    }
+
+    /// Each purpose reads its own list: a host allowlisted for LDES sync is
+    /// no SERVICE target, and nothing falls back to a shared list.
+    #[test]
+    fn each_purpose_has_its_own_list() {
+        let ldes = Purpose::Ldes.setting();
+        std::env::set_var(ldes, "https://ldes.example.org/");
+        assert!(is_allowed(Purpose::Ldes, "https://ldes.example.org/feed"));
+        for other in [Purpose::Service, Purpose::Sources, Purpose::JsonldContext] {
+            assert!(
+                !is_allowed(other, "https://ldes.example.org/feed"),
+                "{other:?} must not inherit the LDES list"
+            );
+        }
+        std::env::remove_var(ldes);
+        assert!(!enabled(Purpose::Ldes));
+        assert_eq!(Purpose::Service.setting(), "OTS_SERVICE_ALLOWLIST");
+        assert_eq!(
+            Purpose::JsonldContext.setting(),
+            "OTS_JSONLD_CONTEXT_ALLOWLIST"
         );
-        assert!(is_allowed("https://sparql.example.org/query"));
-        assert!(is_allowed("http://127.0.0.1:9999/sparql"));
-        assert!(!is_allowed("https://sparql.example.org.evil.net/"));
-        assert!(!is_allowed("ftp://sparql.example.org/"));
-        assert!(!is_allowed("https://other.example.org/"));
-        std::env::set_var(ALLOWLIST_ENV, "");
-        assert!(!is_allowed("https://sparql.example.org/query"));
-        assert!(!enabled());
     }
 
     /// The matcher used to be `url.starts_with(entry)` on the raw string, so an

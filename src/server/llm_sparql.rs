@@ -57,13 +57,16 @@ the parts that are still correct, instead of starting from scratch.\n\
 /// a truncated query is invalid and would only force the repair round-trip.
 const SPARQL_MAX_TOKENS: u32 = 1024;
 
-/// Base URL of the OpenAI-compatible LLM endpoint (`LLM_GATEWAY_URL`, trimmed).
-/// Unset or blank, it defaults to a local server on :8000; if nothing runs there,
-/// the AI features show as unavailable.
-pub(crate) fn gateway_base() -> String {
+/// Base URL of the OpenAI-compatible LLM endpoint (`LLM_GATEWAY_URL`). Unset,
+/// the AI features are off: nothing is probed or sent, and every AI request
+/// answers 503 naming the setting.
+pub(crate) fn gateway_base() -> Result<String, AppError> {
     crate::config::LLM_GATEWAY_URL
         .get()
-        .unwrap_or_else(|| "http://127.0.0.1:8000".to_string())
+        .map(|u| u.trim_end_matches('/').to_string())
+        .ok_or_else(|| {
+            AppError::ServiceUnavailable(format!("no LLM gateway is configured — {GATEWAY_HINT}"))
+        })
 }
 
 /// Model name sent on every completion. Configure with `LLM_MODEL` (an OpenAI model
@@ -153,10 +156,7 @@ pub(crate) async fn chat_completion(
             {"role": "user", "content": user},
         ],
     });
-    let url = format!(
-        "{}/v1/chat/completions",
-        gateway_base().trim_end_matches('/')
-    );
+    let url = format!("{}/v1/chat/completions", gateway_base()?);
     let mut rb = http()
         .post(&url)
         .json(&payload)
@@ -212,10 +212,7 @@ pub(crate) async fn chat_completion_messages(
         "max_tokens": max_tokens,
         "messages": messages,
     });
-    let url = format!(
-        "{}/v1/chat/completions",
-        gateway_base().trim_end_matches('/')
-    );
+    let url = format!("{}/v1/chat/completions", gateway_base()?);
     let mut rb = http()
         .post(&url)
         .json(&payload)
@@ -388,10 +385,7 @@ async fn chat_completion_messages_stream(
         "messages": messages,
         "stream": true,
     });
-    let url = format!(
-        "{}/v1/chat/completions",
-        gateway_base().trim_end_matches('/')
-    );
+    let url = format!("{}/v1/chat/completions", gateway_base()?);
     let mut rb = http()
         .post(&url)
         .json(&payload)
@@ -812,20 +806,31 @@ fn strip_turtle_fence(s: &str) -> String {
 
 #[derive(Serialize)]
 pub struct LlmHealth {
-    /// The LLM endpoint this instance is configured to use (`LLM_GATEWAY_URL`).
-    gateway: String,
-    /// Whether `LLM_GATEWAY_URL` holds a non-empty value. `false` = no endpoint
-    /// was configured (unset or blank): `gateway` is the built-in local default.
+    /// The LLM endpoint this instance is configured to use (`LLM_GATEWAY_URL`);
+    /// `null` when none is.
+    gateway: Option<String>,
+    /// Whether `LLM_GATEWAY_URL` is set. `false`: the AI features are off and
+    /// nothing is probed.
     configured: bool,
     /// Whether that endpoint answered within the timeout.
     reachable: bool,
+    /// Why the probe failed (the connection or HTTP error), when it did: a
+    /// compose stack whose `ollama` service was never started reads
+    /// "unreachable" with the reason, not "configured".
+    unreachable_reason: Option<String>,
+    /// Whether this caller may use the AI features at all: `false` when
+    /// their budget is `0`, or they are anonymous and `LLM_ANONYMOUS_ENABLED`
+    /// is off.
+    available_to_caller: bool,
     /// The endpoint's payload when reachable (e.g. the `/v1/models` list, or a
     /// gateway's own `/health` detail).
     detail: Option<Value>,
-    /// AI requests per minute for signed-in users (0 = unlimited).
-    rate_limit_per_min: u32,
-    /// AI requests per minute for guests, keyed by IP (0 = unlimited).
-    rate_limit_anon_per_min: u32,
+    /// AI requests per minute for signed-in users: `0` = refused, `null` =
+    /// unlimited.
+    rate_limit_per_min: Option<u32>,
+    /// AI requests per minute for guests, keyed by IP: `0` = refused (also
+    /// when anonymous AI is off), `null` = unlimited.
+    rate_limit_anon_per_min: Option<u32>,
     /// The budget that applies to THIS caller: "user" or "guest".
     caller: &'static str,
     /// The model Spark chat completions use (`LLM_CHAT_MODEL` → `LLM_MODEL`).
@@ -855,12 +860,6 @@ pub struct LlmServiceHealth {
     /// by: the gateway is unreachable, or answered without one (a `/health`
     /// fallback).
     listed: Option<bool>,
-}
-
-/// Whether `LLM_GATEWAY_URL` holds a non-empty value (after trimming). When it
-/// is unset or blank, [`gateway_base`] falls back to its built-in local default.
-fn gateway_configured() -> bool {
-    crate::config::LLM_GATEWAY_URL.get().is_some()
 }
 
 /// The model ids in an OpenAI-style model list: a top-level `data` array of
@@ -912,8 +911,9 @@ fn service_health(
 /// for OpenAI, Ollama, LM Studio, vLLM, …), then a gateway `/health` for servers
 /// that expose one. Returns whether either answered 2xx within the timeout, and
 /// that answer's JSON payload.
-async fn probe_gateway(base: &str) -> (bool, Option<Value>) {
+async fn probe_gateway(base: &str) -> Result<Option<Value>, String> {
     let client = http();
+    let mut reason = String::new();
     for path in ["/v1/models", "/health"] {
         let mut rb = client
             .get(format!("{base}{path}"))
@@ -921,13 +921,15 @@ async fn probe_gateway(base: &str) -> (bool, Option<Value>) {
         if let Some(key) = api_key() {
             rb = rb.bearer_auth(key);
         }
-        if let Ok(resp) = rb.send().await {
-            if resp.status().is_success() {
-                return (true, resp.json::<Value>().await.ok());
+        match rb.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                return Ok(resp.json::<Value>().await.ok());
             }
+            Ok(resp) => reason = format!("{base}{path} answered {}", resp.status()),
+            Err(e) => reason = format!("{base}{path}: {e}"),
         }
     }
-    (false, None)
+    Err(reason)
 }
 
 /// GET /api/llm/health — is an LLM endpoint reachable from this server, and
@@ -937,11 +939,23 @@ async fn llm_health(
     user: Option<Extension<AuthenticatedUser>>,
     State(_state): State<AppState>,
 ) -> Json<LlmHealth> {
-    let gateway = gateway_base();
+    let gateway = gateway_base().ok();
     let cfg = llm_guard::config();
     let chat_model = chat_model();
     let context_tokens = resolve_context_tokens(&chat_model).await;
-    let (reachable, detail) = probe_gateway(gateway.trim_end_matches('/')).await;
+    // Nothing configured: nothing to probe, and nothing is claimed reachable.
+    let (reachable, detail, unreachable_reason) = match gateway.as_deref() {
+        None => (false, None, None),
+        Some(base) => match probe_gateway(base).await {
+            Ok(detail) => (true, detail, None),
+            Err(reason) => (false, None, Some(reason)),
+        },
+    };
+    let budget = if user.is_some() {
+        cfg.rate_per_min
+    } else {
+        cfg.rate_per_min_anon
+    };
     // Judged from the payload the probe already fetched — no request per model.
     let services = service_health(
         [
@@ -952,12 +966,14 @@ async fn llm_health(
         listed_model_ids(detail.as_ref()).as_deref(),
     );
     Json(LlmHealth {
+        configured: gateway.is_some(),
         gateway,
-        configured: gateway_configured(),
         reachable,
+        unreachable_reason,
+        available_to_caller: budget != llm_guard::Budget::Refused,
         detail,
-        rate_limit_per_min: cfg.rate_per_min,
-        rate_limit_anon_per_min: cfg.rate_per_min_anon,
+        rate_limit_per_min: cfg.rate_per_min.per_minute(),
+        rate_limit_anon_per_min: cfg.rate_per_min_anon.per_minute(),
         caller: if user.is_some() { "user" } else { "guest" },
         chat_model,
         context_tokens,
@@ -1388,7 +1404,7 @@ async fn forward_feedback(
         preview,
     )?;
 
-    let url = format!("{}/v1/signals", gateway_base().trim_end_matches('/'));
+    let url = format!("{}/v1/signals", gateway_base()?);
     let mut rb = http()
         .post(&url)
         .json(&signal)
@@ -1753,7 +1769,7 @@ async fn resolve_context_tokens(model: &str) -> Option<usize> {
     if let Some(n) = llm_context_tokens() {
         return Some(n);
     }
-    let base = gateway_base().trim_end_matches('/').to_string();
+    let base = gateway_base().ok()?;
     let key = format!("{base}|{model}");
     if let Some(cached) = detected_ctx_cache().lock().unwrap().get(&key) {
         return *cached;
@@ -1914,7 +1930,7 @@ fn tools_support_cache() -> &'static Mutex<HashMap<String, bool>> {
 }
 
 fn tools_cache_key(model: &str) -> String {
-    format!("{}|{model}", gateway_base().trim_end_matches('/'))
+    format!("{}|{model}", gateway_base().unwrap_or_default())
 }
 
 /// A completion attempt's failure, split so tool fallback can tell "the
@@ -1946,7 +1962,7 @@ async fn chat_completion_full(
     }
     let url = format!(
         "{}/v1/chat/completions",
-        gateway_base().trim_end_matches('/')
+        gateway_base().map_err(CompletionFailure::Fatal)?
     );
     let mut rb = http()
         .post(&url)
@@ -2158,19 +2174,34 @@ pub(crate) fn guard_gate<'a>(
             cfg.rate_per_min_anon,
         ),
     };
-    if let Err(retry_after_secs) = llm_guard::check_rate_with(&rate_key, per_min) {
-        let message = if user.is_some() {
-            format!("Too many AI requests — the signed-in budget is {per_min}/min. Try again in a moment.")
-        } else {
-            format!("Too many AI requests — guests get {per_min}/min. Sign in for a higher budget, or try again in a moment.")
-        };
-        return Err(blocked(
-            "rate_limited".into(),
-            AppError::RateLimited {
-                retry_after_secs,
-                message,
-            },
-        ));
+    match llm_guard::check_rate_with(&rate_key, per_min) {
+        Ok(()) => {}
+        Err(llm_guard::RateRefusal::Refused) => {
+            let message = if user.is_some() {
+                "AI assistance is turned off for signed-in users on this server."
+            } else {
+                "AI assistance is turned off for anonymous visitors on this server. Sign in to use it."
+            };
+            return Err(blocked(
+                "ai_disabled".into(),
+                AppError::Forbidden(message.to_string()),
+            ));
+        }
+        Err(llm_guard::RateRefusal::RetryAfter(retry_after_secs)) => {
+            let n = per_min.per_minute().unwrap_or(0);
+            let message = if user.is_some() {
+                format!("Too many AI requests — the signed-in budget is {n}/min. Try again in a moment.")
+            } else {
+                format!("Too many AI requests — guests get {n}/min. Sign in for a higher budget, or try again in a moment.")
+            };
+            return Err(blocked(
+                "rate_limited".into(),
+                AppError::RateLimited {
+                    retry_after_secs,
+                    message,
+                },
+            ));
+        }
     }
 
     let verdict = llm_guard::screen_messages(texts);

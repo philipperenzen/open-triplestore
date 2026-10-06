@@ -12,7 +12,7 @@
 //!    unchanged; see `PROVENANCE.md` there) and served offline, whatever the
 //!    allowlist says.
 //! 2. **Cached** — a context fetched before is reused for [`CACHE_TTL`].
-//! 3. **Fetched** — only from a URL covered by `OTS_REMOTE_ALLOWLIST`, the
+//! 3. **Fetched** — only from a URL covered by `OTS_JSONLD_CONTEXT_ALLOWLIST`, the
 //!    same operator allowlist SPARQL federation and LDES sync use (unset means
 //!    no outbound requests, so remote contexts are denied by default). The
 //!    request follows at most [`MAX_HOPS`] redirects, each to an allowlisted
@@ -158,7 +158,7 @@ fn not_allowed(url: &str) -> LoadError {
     format!(
         "the JSON-LD context <{url}> is neither bundled with this server nor allowed by {}; \
          ask the operator to add it there (bundled: ActivityStreams, CSVW, LDP, ODRL)",
-        crate::remote::ALLOWLIST_ENV
+        crate::remote::Purpose::JsonldContext.setting()
     )
     .into()
 }
@@ -203,7 +203,7 @@ fn fetch(url: &str) -> Result<LoadedDocument, LoadError> {
     let limit = max_bytes();
     let mut current = url.trim().to_string();
     for _ in 0..=MAX_HOPS {
-        if !crate::remote::is_allowed(&current) {
+        if !crate::remote::is_allowed(crate::remote::Purpose::JsonldContext, &current) {
             return Err(not_allowed(&current));
         }
         let target = current.clone();

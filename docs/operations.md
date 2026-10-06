@@ -204,8 +204,9 @@ leader also goes on seeding for several minutes after it is up —
 vocabularies, shapes, the demo datasets, and the IFC buildings it
 downloads and lifts; a follower started during that applies the seed's
 rows as they land, at the same pace, and `applied_rows` climbs until the
-seed is done. Uncommenting `SEED_IFC_URL=` on both services in the compose
-file leaves the IFC demos out, for a quicker, offline stack.
+seed is done. Setting `OTS_OFFLINE=true` on both services (the compose file
+has the line commented out) leaves the IFC demos out, for a quicker, offline
+stack.
 
 **3. A write on the leader shows up on the follower.** Capture is on
 because the leader role turns it on; the follower applies the row within a

@@ -514,6 +514,8 @@
       "badgeOnline": "● LLM online",
       "badgeOffline": "○ LLM offline",
       "clearChat": "Chat wissen",
+      "aiOffBanner": "AI-hulp staat op deze server uit voor je account.",
+      "aiOffGuestBanner": "AI-hulp staat op deze server uit voor anonieme bezoekers. Log in om het te gebruiken.",
       "offlineBanner": "De LLM-endpoint is niet bereikbaar vanaf de server, dus antwoorden zijn niet beschikbaar. Configureer LLM_GATEWAY_URL (en start uw endpoint) en herlaad de pagina.",
       "welcomeTitle": "Wat wilt u weten?",
       "welcomeIntro": "Ik kan de datasets, API-services en grafen zien waartoe u toegang hebt. Probeer een van deze:",

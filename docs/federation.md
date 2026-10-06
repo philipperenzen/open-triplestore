@@ -16,8 +16,8 @@ the remote: `P` goes out as written.
 A call either returns the remote's complete answer or **fails**. It fails
 when:
 
-- the endpoint is not covered by `OTS_REMOTE_ALLOWLIST` (or no allowlist is
-  set);
+- the endpoint is not covered by `OTS_SERVICE_ALLOWLIST` (or no allowlist is
+  set; the LDES, datasource and JSON-LD lists do not count);
 - the request errors, the remote answers a non-2xx status, or the response
   is not a SPARQL results document with solutions;
 - it takes longer than `OTS_REMOTE_TIMEOUT_SECS` (default 10);
@@ -82,7 +82,7 @@ The calls one query makes share a budget:
 ## Outbound: acting for a user at a peer
 
 ```
-OTS_REMOTE_ALLOWLIST=https://peer.example.org/
+OTS_SERVICE_ALLOWLIST=https://peer.example.org/
 OTS_REMOTE_AUTH=assert
 ```
 

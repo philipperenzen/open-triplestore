@@ -514,6 +514,8 @@
       "badgeOnline": "● LLM online",
       "badgeOffline": "○ LLM offline",
       "clearChat": "Clear chat",
+      "aiOffBanner": "AI assistance is turned off for your account on this server.",
+      "aiOffGuestBanner": "AI assistance is turned off for anonymous visitors on this server. Sign in to use it.",
       "offlineBanner": "The LLM endpoint isn't reachable from the server, so answers are unavailable. Configure LLM_GATEWAY_URL (and start your endpoint), then reload.",
       "welcomeTitle": "What would you like to know?",
       "welcomeIntro": "I can see the datasets, API services and graphs you have access to. Try one of these:",

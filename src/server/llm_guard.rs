@@ -59,14 +59,48 @@ pub struct GuardConfig {
     /// Case-insensitive phrases that always block (`LLM_GUARD_BLOCKLIST`,
     /// comma-separated, empty by default).
     pub blocklist: Vec<String>,
-    /// LLM requests per principal per minute (`LLM_RATE_LIMIT_PER_MIN`,
-    /// default 20; 0 disables).
-    pub rate_per_min: u32,
+    /// LLM requests per signed-in principal per minute
+    /// (`LLM_RATE_LIMIT_PER_MIN`, default 20).
+    pub rate_per_min: Budget,
     /// LLM requests per minute for ANONYMOUS callers, keyed by client IP
-    /// (`LLM_RATE_LIMIT_ANON_PER_MIN`, default 5; 0 disables). Guests share a
-    /// GPU with everyone else and have no account to attribute cost to, so
-    /// their budget is deliberately tighter than a signed-in user's.
-    pub rate_per_min_anon: u32,
+    /// (`LLM_RATE_LIMIT_ANON_PER_MIN`, default 5; refused outright when
+    /// `LLM_ANONYMOUS_ENABLED` is off). Guests share a GPU with everyone else
+    /// and have no account to attribute cost to, so their budget is
+    /// deliberately tighter than a signed-in user's.
+    pub rate_per_min_anon: Budget,
+}
+
+/// An LLM request budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Budget {
+    /// No AI for this kind of caller (`0`).
+    Refused,
+    /// At most this many requests per minute.
+    PerMinute(u32),
+    /// No limit (`unlimited`).
+    Unlimited,
+}
+
+impl Budget {
+    /// A validated budget setting: a count, `0` or `unlimited`.
+    pub fn parse(v: &str) -> Budget {
+        if v.eq_ignore_ascii_case("unlimited") {
+            return Budget::Unlimited;
+        }
+        match v.trim().parse::<u32>() {
+            Ok(0) | Err(_) => Budget::Refused,
+            Ok(n) => Budget::PerMinute(n),
+        }
+    }
+
+    /// The per-minute limit, `None` for unlimited (`Some(0)`: refused).
+    pub fn per_minute(self) -> Option<u32> {
+        match self {
+            Budget::Refused => Some(0),
+            Budget::PerMinute(n) => Some(n),
+            Budget::Unlimited => None,
+        }
+    }
 }
 
 pub fn config() -> &'static GuardConfig {
@@ -86,8 +120,12 @@ pub fn config() -> &'static GuardConfig {
             .into_iter()
             .map(|s| s.to_lowercase())
             .collect(),
-        rate_per_min: c::LLM_RATE_LIMIT_PER_MIN.get(),
-        rate_per_min_anon: c::LLM_RATE_LIMIT_ANON_PER_MIN.get(),
+        rate_per_min: Budget::parse(&c::LLM_RATE_LIMIT_PER_MIN.get()),
+        rate_per_min_anon: if c::LLM_ANONYMOUS_ENABLED.get() {
+            Budget::parse(&c::LLM_RATE_LIMIT_ANON_PER_MIN.get())
+        } else {
+            Budget::Refused
+        },
     })
 }
 
@@ -274,14 +312,24 @@ fn rate_buckets() -> &'static Mutex<HashMap<String, Vec<Instant>>> {
     BUCKETS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Why [`check_rate_with`] turned a request away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateRefusal {
+    /// The budget is `0`: no AI for this kind of caller.
+    Refused,
+    /// Over budget; retry after this many seconds.
+    RetryAfter(u64),
+}
+
 /// Count this request against `key` (user id, or `ip:<addr>` for guests) with
-/// an explicit per-minute budget — callers pass the anonymous budget for guests
-/// and the signed-in budget for users. Returns the suggested Retry-After
-/// seconds when over budget.
-pub fn check_rate_with(key: &str, limit: u32) -> Result<(), u64> {
-    if limit == 0 {
-        return Ok(());
-    }
+/// an explicit budget — callers pass the anonymous budget for guests and the
+/// signed-in budget for users.
+pub fn check_rate_with(key: &str, budget: Budget) -> Result<(), RateRefusal> {
+    let limit = match budget {
+        Budget::Unlimited => return Ok(()),
+        Budget::Refused => return Err(RateRefusal::Refused),
+        Budget::PerMinute(n) => n,
+    };
     let window = Duration::from_secs(60);
     let now = Instant::now();
     let mut buckets = rate_buckets().lock().unwrap();
@@ -292,7 +340,7 @@ pub fn check_rate_with(key: &str, limit: u32) -> Result<(), u64> {
     if hits.len() >= limit as usize {
         let oldest = hits.iter().min().copied().unwrap_or(now);
         let retry = window.saturating_sub(now.duration_since(oldest)).as_secs() + 1;
-        return Err(retry);
+        return Err(RateRefusal::RetryAfter(retry));
     }
     hits.push(now);
     Ok(())
@@ -615,20 +663,35 @@ mod tests {
     fn rate_limit_sliding_window() {
         // Key is test-unique: the bucket map is process-global.
         let key = "test-rate-user";
-        let limit = config().rate_per_min;
-        for _ in 0..limit {
+        let limit = Budget::PerMinute(20);
+        for _ in 0..20 {
             assert!(check_rate_with(key, limit).is_ok());
         }
-        let retry = check_rate_with(key, limit).expect_err("over budget must be rejected");
-        assert!((1..=61).contains(&retry));
-        // The anonymous budget is a separate, tighter default.
-        assert!(config().rate_per_min_anon <= limit);
-        let anon_key = "test-rate-anon-ip";
-        let anon = config().rate_per_min_anon;
-        for _ in 0..anon {
-            assert!(check_rate_with(anon_key, anon).is_ok());
+        match check_rate_with(key, limit) {
+            Err(RateRefusal::RetryAfter(retry)) => assert!((1..=61).contains(&retry)),
+            other => panic!("over budget must be rejected: {other:?}"),
         }
-        assert!(check_rate_with(anon_key, anon).is_err());
+        let anon_key = "test-rate-anon-ip";
+        for _ in 0..5 {
+            assert!(check_rate_with(anon_key, Budget::PerMinute(5)).is_ok());
+        }
+        assert!(check_rate_with(anon_key, Budget::PerMinute(5)).is_err());
+    }
+
+    #[test]
+    fn zero_refuses_and_unlimited_never_limits() {
+        assert_eq!(Budget::parse("0"), Budget::Refused);
+        assert_eq!(Budget::parse("unlimited"), Budget::Unlimited);
+        assert_eq!(Budget::parse("UNLIMITED"), Budget::Unlimited);
+        assert_eq!(Budget::parse("7"), Budget::PerMinute(7));
+        assert_eq!(
+            check_rate_with("test-rate-refused", Budget::Refused),
+            Err(RateRefusal::Refused),
+            "0 means no AI, not no limit"
+        );
+        for _ in 0..1000 {
+            assert!(check_rate_with("test-rate-unlimited", Budget::Unlimited).is_ok());
+        }
     }
 
     #[test]

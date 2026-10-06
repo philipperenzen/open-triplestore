@@ -479,11 +479,11 @@ mod tests {
             )
             .unwrap();
 
-        // Unit tests must never reach the network: an empty SEED_IFC_URL makes the
-        // seeder skip the Schependomlaan IFC download (the static demo graphs still
+        // Unit tests must never reach the network: OTS_OFFLINE makes the
+        // seeder skip the IFC downloads (the static demo graphs still
         // seed). Run on the blocking pool exactly like production boot does — the
         // seeder uses block_on internally, which panics on an async worker.
-        std::env::set_var("SEED_IFC_URL", "");
+        std::env::set_var("OTS_OFFLINE", "true");
         let seed_state = state.clone();
         tokio::task::spawn_blocking(move || {
             crate::saved_queries::seed::seed_open_triplestore(&seed_state)

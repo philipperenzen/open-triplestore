@@ -72,18 +72,18 @@ pub fn find_corpus(data_dir: &Path) -> Option<PathBuf> {
 
 /// Download the corpus to `{data_dir}/vocab/lov.nq.gz` if configured.
 ///
-/// Returns the corpus path when available afterwards.  `VOCAB_CORPUS_URL=""`
-/// disables the download; a custom URL skips checksum verification unless
-/// `VOCAB_CORPUS_SHA256` is provided.
+/// Returns the corpus path when available afterwards. `OTS_OFFLINE` (on in
+/// production) disables the download; a custom `VOCAB_CORPUS_URL` skips
+/// checksum verification unless `VOCAB_CORPUS_SHA256` is provided.
 pub async fn ensure_corpus(data_dir: &Path) -> Option<PathBuf> {
     if let Some(existing) = find_corpus(data_dir) {
         return Some(existing);
     }
-    let url = crate::config::VOCAB_CORPUS_URL.get();
-    if url.is_empty() {
-        info!("LOV corpus not present and download disabled (VOCAB_CORPUS_URL=\"\")");
+    if crate::config::OFFLINE.get() {
+        info!("LOV corpus not present and OTS_OFFLINE is on: not downloading it");
         return None;
     }
+    let url = crate::config::VOCAB_CORPUS_URL.get();
     let expected_sha = match crate::config::VOCAB_CORPUS_SHA256.get() {
         Some(s) => Some(s),
         None if url == DEFAULT_CORPUS_URL => Some(DEFAULT_CORPUS_SHA256.to_string()),

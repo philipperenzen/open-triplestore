@@ -873,7 +873,7 @@
                 class:h-pending={llmView.gateway.state === 'pending'}
               ></span>
               <span class="health-label">{$t('nav.llmGateway')}</span>
-              <span class="health-detail" title={llmView.gateway.address ?? undefined}>{$t(llmView.gateway.detailKey)}</span>
+              <span class="health-detail" title={[llmView.gateway.address, llmView.gateway.reason].filter(Boolean).join(' — ') || undefined}>{$t(llmView.gateway.detailKey)}</span>
             </div>
             {#each llmView.services as svc (svc.id)}
               <div class="health-row">

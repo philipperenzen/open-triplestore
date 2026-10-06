@@ -408,7 +408,11 @@ as a reference shows the reference.
 | `OTS_TRUSTED_ISSUERS` | unset | Comma-separated peer base URLs whose identity assertions are accepted (needs `BASE_URL`). |
 | `OTS_SPARQL_FUNCTION_GRAPHS` | unset | Comma-separated graphs whose `sh:SPARQLFunction`s every query sees, `/sparql` included. Only `urn:system:functions` and graphs under `urn:system:functions:` are accepted (no dataset can hold them, so only an admin can write them); any other entry stops the start. A function at a reserved IRI (`xsd:` casts, GeoSPARQL and the other built-ins) is skipped with a warning. Without it, a function is callable only in runs of the shapes graph that declares it (see [shacl.md](shacl.md#sparql-functions-shsparqlfunction-shacl-af-5)). |
 | `OTS_MAX_UPLOAD_BYTES` | 512 MiB (Graph Store, container import/validate), 1 GiB (bulk import) | Request-body limit in bytes (`512MiB`, `2GiB` are accepted) for RDF uploads and container archives; bodies are buffered and parsed before they replace anything, so this also bounds memory per request. Larger datasets: append in chunks or use the bulk import. |
-| `OTS_REMOTE_ALLOWLIST` | *(unset)* | Comma-separated URLs the server may contact on a user's behalf: SPARQL federation (`SERVICE <endpoint>`), LDES client sync and remote JSON-LD contexts ([formats.md](formats.md#json-ld-remote-contexts); the bundled W3C contexts need no entry). Unset or empty: no outbound requests at all (a `SERVICE` clause errors). An entry is matched on its parsed origin, not as a string prefix: the scheme, host (case-insensitive) and port must be equal, the URL may carry no credentials, and the entry's path must be a prefix of the URL's path on segment boundaries. So `https://sparql.example.org` (with or without a trailing slash) admits every path on that origin and nothing else — not `https://sparql.example.org.evil.net/`, not `https://sparql.example.org@evil.net/`, not port 8443 — and `https://h/sparql` admits `/sparql` and `/sparql/…` but not `/sparqlx`. An entry that is not an absolute http(s) URL without credentials stops the start. Redirects are followed (at most 10), each hop only if the allowlist covers it too; a hop to another host or port drops the `Authorization` header. |
+| `OTS_SERVICE_ALLOWLIST` | *(unset)* | URLs a SPARQL `SERVICE` clause may contact, comma-separated. Any `/sparql` caller can name a `SERVICE` endpoint, so keep this to endpoints every query user may reach. Unset: `SERVICE` errors. |
+| `OTS_LDES_ALLOWLIST` | *(unset)* | URLs an admin's [LDES client sync](ldes.md) may read. |
+| `OTS_SOURCES_ALLOWLIST` | *(unset)* | Endpoints [SQL and SPARQL datasources](sources.md) may reach (also `SERVICE <urn:source:…>`, which uses a registered source's endpoint). |
+| `OTS_JSONLD_CONTEXT_ALLOWLIST` | *(unset)* | Remote JSON-LD `@context` URLs an upload may load ([formats.md](formats.md#json-ld-remote-contexts)); the bundled W3C contexts need no entry. |
+| `OTS_OFFLINE` | `false` (`true` in production) | No download at startup: the LOV corpus (`VOCAB_CORPUS_URL`) and the demo IFC and STL models are not fetched. See [outbound requests](#outbound-requests). |
 | `OTS_ICDD_ONTOLOGY_DIR` | *(unset)* | Directory holding ISO's `Container.rdf` and `Linkset.rdf` (download them from <https://standards.iso.org/iso/21597/-1/ed-1/en/>; this project does not ship them). ICDD exports embed both unchanged in `Ontology resources/`; without them an export carries the `ontology-resource-missing` warning and is not ISO 21597-1 Part 1-conformant. See [containers.md](containers.md). |
 | `OTS_JSONLD_CONTEXT_MAX_BYTES` | `1048576` | Largest remote JSON-LD context the document loader reads; a bigger one fails the parse. |
 | `OTS_REMOTE_TIMEOUT_SECS` | `10` | Timeout per outbound request. |
@@ -416,7 +420,7 @@ as a reference shows the reference.
 | `OTS_LDES_RETRIES` | `4` | LDES sync: how many times a page fetch is retried after `408`, `425`, `429`, `500`, `502`, `503` or `504`, with exponential back-off and jitter or the wait `Retry-After` asks for. `0` turns retrying off. |
 | `OTS_LDES_MAX_RETRY_WAIT_SECS` | `60` | LDES sync: the longest single wait before a retry; a `Retry-After` asking for longer fails the sync instead. |
 | `OTS_SERVICE_MAX_ROWS` | `10000` | Row cap per `SERVICE` call. A remote result with more rows is a failed invocation, never a truncated one: the query errors with a message naming this variable, or under `SERVICE SILENT` the clause yields the single empty solution. See [federation.md](federation.md#service-what-a-call-returns). |
-| `VALIDATION_API_URL` | *(unset)* | Base URL of an external SHACL validation service used by `POST /api/datasets/validate-and-commit`, which calls `<url>/validate`. The request carries the data and shapes to validate **and the caller's `Authorization` header**, so the service receives the user's bearer token (session, API or OIDC). Point it only at a service you trust with that. The URL is not checked against `OTS_REMOTE_ALLOWLIST` and need not be `https`. Unset: the endpoint answers `400`. |
+| `VALIDATION_API_URL` | *(unset)* | Base URL of an external SHACL validation service used by `POST /api/datasets/validate-and-commit`, which calls `<url>/validate`. The request carries the data and shapes to validate **and the caller's `Authorization` header**, so the service receives the user's bearer token (session, API or OIDC). Point it only at a service you trust with that. The URL is not checked against any outbound allowlist and need not be `https`. Unset: the endpoint answers `400`. |
 | `OTS_SERVICE_MAX_ENDPOINTS` | `16` | Distinct `SERVICE` endpoints one query may contact. The call that would contact one more fails like an over-cap result (an error naming this variable, or the empty solution under `SERVICE SILENT`). Matters mostly for `SERVICE ?var`, whose endpoints come from the data. See [federation.md](federation.md#per-query-limits). |
 | `OTS_SERVICE_MAX_CALLS` | `64` | Remote requests one query may make through `SERVICE`. An answer for the same endpoint and pattern is fetched once and reused, and reuse does not count. Over the cap the call fails as above. |
 | `OTS_SERVICE_DEADLINE_SECS` | *(the SPARQL query timeout, `SPARQL_QUERY_TIMEOUT_SECS`: `30`)* | How long after its start a query may still make `SERVICE` requests. A request is cut short at the deadline and the query fails with an error naming this variable, also under `SERVICE SILENT`. |
@@ -476,6 +480,41 @@ as a reference shows the reference.
 | `SMTP_HOST` / `SMTP_*` | *(unset — account email is written to the server log)* | Outbound account email (verification, password reset, reminders) — see [auth.md](auth.md#email-delivery-configuration); the compose stack bundles an optional Postfix relay (`--profile mail`) |
 | `ALERT_WEBHOOK_URL` / `ALERT_SMTP_*` | *(unset — alerting off)* | Optional webhook / SMTP alerting (requires the `alerting` build feature); without `ALERT_SMTP_HOST` the SMTP channel uses the `SMTP_*` relay — see [Alerting](#alerting) |
 
+### Outbound requests
+
+Four allowlists govern the requests the server makes **on a user's behalf**,
+one per purpose: `OTS_SERVICE_ALLOWLIST` (SPARQL `SERVICE`, which any query
+user can trigger), `OTS_LDES_ALLOWLIST` (LDES client sync, admin),
+`OTS_SOURCES_ALLOWLIST` (datasources, admin) and
+`OTS_JSONLD_CONTEXT_ALLOWLIST` (remote JSON-LD contexts in uploads). They are
+separate on purpose and none falls back to another: a host an admin
+allowlists for LDES sync must not thereby become a `SERVICE` target for every
+query user. Every list is empty by default.
+
+Each entry is matched on its parsed origin, not as a string prefix: the
+scheme, host (case-insensitive) and port must be equal, the URL may carry no
+credentials, and the entry's path must be a prefix of the URL's path on
+segment boundaries. So `https://sparql.example.org` (with or without a
+trailing slash) admits every path on that origin and nothing else — not
+`https://sparql.example.org.evil.net/`, not
+`https://sparql.example.org@evil.net/`, not port 8443 — and `https://h/sparql`
+admits `/sparql` and `/sparql/…` but not `/sparqlx`. An entry that is not an
+absolute http(s) URL without credentials stops the start. Redirects are
+followed (at most 10), each hop only if the same list covers it too; a hop to
+another host or port drops the `Authorization` header.
+
+Empty allowlists do **not** mean the server makes no outbound requests. It
+also contacts what an operator configures directly, which no allowlist
+covers: the startup downloads (the LOV corpus and the demo IFC and STL models,
+all off with `OTS_OFFLINE`, which production turns on), the LLM gateway
+(`LLM_GATEWAY_URL`), SMTP relays (`SMTP_HOST`, `ALERT_SMTP_HOST`) and the alert
+webhook (`ALERT_WEBHOOK_URL`), the OIDC issuer's discovery and keys
+(`OIDC_ISSUER`) and configured OAuth and SAML providers, Vault (`VAULT_ADDR`),
+S3 (`S3_ENDPOINT`), ClamAV (`CLAMAV_ADDR`), the service registry
+(`LD_REGISTRY_URL` with `LD_DISCOVERY`), the external validator
+(`VALIDATION_API_URL`), the DL reasoner sidecar (`OTS_REASONER_URL`),
+replication peers, and prefix.cc when `PREFIX_CC_FALLBACK` is on.
+
 ### Recommended production `.env`
 
 ```dotenv
@@ -522,7 +561,7 @@ docker compose up -d
 Compose reads `.env` twice: to fill the `${…}` values in `docker-compose.yml`,
 and through the service's `env_file`, which hands **every** variable in it to the
 server — including settings the compose file does not list by name, such as
-`SECURE_COOKIES`, `TRUSTED_PROXY_CIDRS` or `OTS_REMOTE_ALLOWLIST`. A few entries are
+`SECURE_COOKIES`, `TRUSTED_PROXY_CIDRS` or `OTS_SERVICE_ALLOWLIST`. A few entries are
 wired by compose itself and ignore `.env`: `AUTH_DB_PATH` and `BACKUP_DIR` (the `/data`
 volume) and the `S3_ENDPOINT` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` link to the bundled
 MinIO. `env_file` with `required: false` needs Docker Compose 2.24 or later. CI runs

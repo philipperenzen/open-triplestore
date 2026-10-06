@@ -90,11 +90,12 @@ jobs:
           # Keep the boot seed chain short on the 2-core runner: skip the
           # standard-vocabulary registry seed (55+ versions incl. the 66k-triple
           # IMBOR vocabulaire — minutes in a debug build, and its store/SQLite
-          # writes contend with the tests' own imports) and the one-off LOV
-          # corpus download. No e2e spec depends on either; the demo datasets
-          # and saved queries the specs use are seeded regardless.
+          # writes contend with the tests' own imports) and, through
+          # OTS_OFFLINE, every startup download (the LOV corpus, the demo IFC
+          # models). No e2e spec depends on either; the demo datasets and saved
+          # queries the specs use are seeded regardless.
           SEED_STANDARD_VOCABS: 'false'
-          VOCAB_CORPUS_URL: ''
+          OTS_OFFLINE: 'true'
         run: npm run e2e
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
