@@ -167,7 +167,7 @@ test('imports an IDS (audit report on refusal), exports it losslessly and checks
   await dialog.getByRole('button', { name: 'Check' }).click();
   const audit = dialog.getByTestId('ids-audit-report');
   await expect(audit).toContainText('Fails the IDS audit rules');
-  await expect(audit.locator('li').first()).toContainText('IFCWALLL');
+  await expect(audit.locator('li').filter({ hasText: 'IFCWALLL' })).toHaveCount(1);
 
   // A good one is checked, then created.
   await dialog.getByTestId('ids-file').setInputFiles({ name: 'fire.ids', mimeType: 'application/xml', buffer: Buffer.from(IDS) });
