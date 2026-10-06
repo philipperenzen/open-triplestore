@@ -149,6 +149,22 @@ describe('datasetContentKind (facet-derived summary)', () => {
     (browseFacets as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ classes, properties, graphs: [] });
   }
 
+  it('counts stored SWRL rules as entailment, not their atoms as instance data', async () => {
+    const SWRL = 'http://www.w3.org/2003/11/swrl#';
+    mockFacets([
+      { iri: 'http://ex.org/Dog', count: 3 },
+      { iri: SWRL + 'Imp', count: 2 },
+      { iri: SWRL + 'ClassAtom', count: 4 },
+      { iri: SWRL + 'Variable', count: 3 },
+      { iri: SWRL + 'BuiltinAtom', count: 1 },
+      { iri: 'https://opentriplestore.org/ns#RuleSet', count: 1 },
+    ]);
+    const r = await datasetContentKind('ds1');
+    expect(r.entailmentCount).toBe(2);
+    expect(r.instanceCount).toBe(3);
+    expect(r.sampleTypes.map((t) => t.cls)).toEqual(['http://ex.org/Dog']);
+  });
+
   it('buckets meta-types into signals and everything else into instances', async () => {
     mockFacets(
       [
