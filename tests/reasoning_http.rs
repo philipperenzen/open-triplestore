@@ -1562,13 +1562,29 @@ mod owl2_dl_backend {
 /// the match stays by term; a double never equals a decimal.
 #[tokio::test]
 async fn entailment_matches_literals_by_value() {
+    use open_triplestore::auth::models::{OwnerType, Visibility};
+    const DATA: &str = "http://example.org/g/values";
     let (state, token) = admin_state();
+    // `/sparql` reads registered graphs (plus the entailment graph).
+    state
+        .auth_db
+        .create_dataset(
+            "valds",
+            "Values",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    state.auth_db.add_dataset_graph("valds", DATA).unwrap();
     state
         .store
         .load_str(
             "<urn:e:s> <urn:e:p> \"010\"^^<http://www.w3.org/2001/XMLSchema#integer> .",
             oxigraph::io::RdfFormat::Turtle,
-            None,
+            Some(DATA),
         )
         .unwrap();
     let ask = |query: &str, regime: Option<&str>| {
@@ -1600,7 +1616,13 @@ async fn entailment_matches_literals_by_value() {
         }
     };
     let x = "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
-    assert!(ask(&format!("{x}ASK {{ <urn:e:s> <urn:e:p> 10 }}"), Some("rdfs")).await);
+    assert!(
+        ask(
+            &format!("{x}ASK {{ <urn:e:s> <urn:e:p> 10 }}"),
+            Some("rdfs")
+        )
+        .await
+    );
     assert!(
         ask(
             &format!("{x}ASK {{ <urn:e:s> <urn:e:p> \"10.0\"^^xsd:decimal }}"),
@@ -1616,6 +1638,14 @@ async fn entailment_matches_literals_by_value() {
         .await
     );
     assert!(!ask(&format!("{x}ASK {{ <urn:e:s> <urn:e:p> 10 }}"), None).await);
+    assert!(
+        ask(
+            &format!("{x}ASK {{ <urn:e:s> <urn:e:p> \"010\"^^xsd:integer }}"),
+            None
+        )
+        .await,
+        "the data is visible as written"
+    );
 }
 
 /// `"rdfd1": true` writes a blank node for a typed literal's value, typed
