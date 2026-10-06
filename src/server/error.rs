@@ -184,7 +184,8 @@ impl AppError {
 impl From<crate::store::engine::StoreError> for AppError {
     fn from(err: crate::store::engine::StoreError) -> Self {
         match err {
-            crate::store::engine::StoreError::Parse(msg) => AppError::BadRequest(msg),
+            crate::store::engine::StoreError::Parse(msg)
+            | crate::store::engine::StoreError::IllTypedLiteral(msg) => AppError::BadRequest(msg),
             crate::store::engine::StoreError::UnsupportedFormat(msg) => {
                 AppError::UnsupportedMediaType(msg)
             }

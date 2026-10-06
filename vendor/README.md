@@ -8,7 +8,7 @@ fixes for defects the W3C JSON-LD 1.1 API test suite exposes (third section).
 
 | Directory | Crate | Upstream (repository `oxigraph/oxigraph`) | Changes |
 | --- | --- | --- | --- |
-| `oxigraph/` | `oxigraph` 0.5.11 | `lib/oxigraph` at `df37a5c98e2497135cdd4cfce01a049b78ca6740` | the literal encoder keeps lexical forms and datatypes |
+| `oxigraph/` | `oxigraph` 0.5.11 | `lib/oxigraph` at `df37a5c98e2497135cdd4cfce01a049b78ca6740` | the literal encoder keeps lexical forms and datatypes; SPARQL UPDATE refuses ill-typed `rdf:JSON` literals |
 | `spareval/` | `spareval` 0.2.7 | `lib/spareval` at `0e81a29d27575ab69e7f85ea9c7f1058b277fcd0` | triple terms are rebuilt without reading their literals as values; SPARQL 1.1 conformance fixes 1–5 |
 | `spargebra/` | `spargebra` 0.4.7 | `lib/spargebra` at `0e81a29d27575ab69e7f85ea9c7f1058b277fcd0` | SPARQL conformance fix 6 |
 | `sparopt/` | `sparopt` 0.3.7 | `lib/sparopt` at `0e81a29d27575ab69e7f85ea9c7f1058b277fcd0` | SPARQL conformance fix 1 |
@@ -82,6 +82,16 @@ literal. With literals kept as written that turned a stored
 triple term could not be found by its own constant, and a join between a reifier and
 its asserted triple depended on join order. It now goes through `Term`, which keeps
 the literal (`internalize_triple_term`, `encode_triple`, `put_pattern_value`).
+
+**`oxigraph/src/sparql/update.rs`** and **`error.rs`**: SPARQL UPDATE refuses to
+insert an ill-typed `rdf:JSON` literal — one whose lexical form is not a JSON text
+(JSON-LD 1.1 §10.2, RFC 8259 §2) — with the new
+`UpdateEvaluationError::IllTypedLiteral`, before the operation writes anything
+(`INSERT DATA`, the instantiated `INSERT` template of `DELETE/INSERT`, `LOAD`).
+The store refuses such literals on every other write path itself
+(`src/store/literals.rs`, the same `json-event-parser` check); this is the one
+path whose inserted quads only the evaluator knows. Draft:
+`oxigraph/UPSTREAM-PR-json-literals.md`.
 
 What does not change:
 
