@@ -64,13 +64,6 @@ const KNOWN_FAILURES: &[(&str, &str, &str)] = &[
          non-compliance",
     ),
     (
-        "mysql",
-        "R2RMLTC0018a",
-        "engine limit: MySQL strips the padding of CHAR values unless the session sets the \
-         deprecated PAD_CHAR_TO_FULL_LENGTH SQL mode; the suite lists this case as MySQL \
-         non-compliance",
-    ),
-    (
         "sqlite",
         "R2RMLTC0018a",
         "engine limit (#512): SQLite has no fixed-length CHAR, so \"Venus\" comes back without \

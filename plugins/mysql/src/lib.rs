@@ -10,6 +10,9 @@
 //!   neither is refused at connect, because a budget that is not enforced
 //!   is not a budget. A killed statement (`3024` / `1969`) is reported as a
 //!   timeout.
+//! * **`CHAR` values as SQL defines them.** Each session sets
+//!   `PAD_CHAR_TO_FULL_LENGTH`, so a `CHAR(n)` value comes back padded to `n`
+//!   characters, as on PostgreSQL, where MySQL would strip the padding.
 //! * **Streaming.** Rows come off the text protocol one at a time and are
 //!   delivered in batches; a table is never held whole.
 //! * **TLS through rustls**, with the bundled roots and, when a datasource
@@ -161,6 +164,16 @@ impl MysqlConnection {
         self.conn
             .query_drop("SET SESSION TRANSACTION READ ONLY")
             .map_err(|e| SourceError::Connect(describe(&e)))?;
+        // SQL 2008: a CHAR(n) value is n characters, padded with spaces, as
+        // PostgreSQL returns it (R2RML maps the value the database returns,
+        // W3C R2RMLTC0018a). MySQL and MariaDB strip the padding on retrieval
+        // unless the session sets PAD_CHAR_TO_FULL_LENGTH — deprecated since
+        // MySQL 8.0.13, still honoured by 8.4 and MariaDB. A server that no
+        // longer knows the mode keeps its own behaviour.
+        let _ = self.conn.query_drop(
+            "SET SESSION sql_mode = CONCAT_WS(',', NULLIF(@@SESSION.sql_mode, ''), \
+             'PAD_CHAR_TO_FULL_LENGTH')",
+        );
         // MySQL counts milliseconds, MariaDB seconds; a server that knows
         // neither variable cannot enforce the budget and is refused.
         let mysql_form = format!("SET SESSION max_execution_time = {}", self.timeout_ms);
