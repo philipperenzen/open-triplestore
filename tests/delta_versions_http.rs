@@ -312,6 +312,98 @@ async fn a_diff_between_versions_on_one_chain_comes_from_the_change_log() {
     assert!(state.store.changes().materialisations(None).is_empty());
 }
 
+/// A chain diff is the same patch the snapshot comparison writes: the
+/// name-based `H id` (so asking twice gives one id) and the version headers.
+/// And the dataset's patch log, whose version entries used to be rendered
+/// from snapshot graphs — empty for an unbuilt delta, so the entry would
+/// have deleted everything — renders the delta's entry from the change log,
+/// building nothing.
+#[tokio::test]
+async fn chain_diffs_and_patch_log_entries_over_a_delta_need_no_build() {
+    let (state, token) = admin_state_with_store(recording());
+    let app = test_app(state.clone());
+    let ds = dataset(&state, &app, &token, "private").await;
+    cut(&app, &token, &ds, "1.0.0").await;
+    edit_after_v1(&state);
+    let v2 = cut(&app, &token, &ds, "1.1.0").await;
+    assert_eq!(v2["kind"], "delta", "{v2}");
+
+    let mut patches = Vec::new();
+    for _ in 0..2 {
+        let (_, _, patch) = req(
+            &app,
+            Method::GET,
+            &format!("/api/datasets/{ds}/versions/1.0.0/diff/1.1.0?format=rdf-patch"),
+            Some(&token),
+            Value::Null,
+        )
+        .await;
+        patches.push(patch);
+    }
+    let (first, second) = (&patches[0], &patches[1]);
+    let id = |p: &str| {
+        p.lines()
+            .find(|l| l.starts_with("H id "))
+            .map(str::to_string)
+            .unwrap_or_default()
+    };
+    assert!(id(first).starts_with("H id <urn:uuid:"), "{first}");
+    assert_eq!(id(first), id(second), "a name-based id");
+    assert!(first.contains("H from \"1.0.0\" ."), "{first}");
+    assert!(first.contains("H to \"1.1.0\" ."), "{first}");
+
+    // The log: the checkpoint's entry adds both triples, the delta's entry
+    // is the change between the two cuts.
+    let (st, log, txt) = req(
+        &app,
+        Method::GET,
+        &format!("/api/datasets/{ds}/log"),
+        Some(&token),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let entries = log["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2, "{log}");
+    assert_eq!(entries[1]["dataset_version"], "1.1.0");
+    let (st, _, entry) = req(
+        &app,
+        Method::GET,
+        &format!("/api/datasets/{ds}/log/patch/2"),
+        Some(&token),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{entry}");
+    assert!(entry.contains("D <urn:dv:a> <urn:dv:p> \"one\""), "{entry}");
+    assert!(
+        entry.contains("A <urn:dv:c> <urn:dv:p> \"three\""),
+        "{entry}"
+    );
+    assert!(!entry.contains("<urn:dv:b>"), "unchanged: {entry}");
+    assert!(state.store.changes().materialisations(None).is_empty());
+
+    // Deleting the delta writes its entry out first; it reads the same.
+    let (st, _, txt) = req(
+        &app,
+        Method::DELETE,
+        &format!("/api/datasets/{ds}/versions/1.1.0"),
+        Some(&token),
+        Value::Null,
+    )
+    .await;
+    assert!(st.is_success(), "{txt}");
+    let (_, _, after) = req(
+        &app,
+        Method::GET,
+        &format!("/api/datasets/{ds}/log/patch/2"),
+        Some(&token),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(after, entry);
+}
+
 #[tokio::test]
 async fn a_branch_of_a_delta_copies_nothing_and_reads_the_same() {
     let (state, token) = admin_state_with_store(recording());
