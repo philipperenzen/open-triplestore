@@ -406,7 +406,7 @@ See [rml.md](rml.md) for the full RML guide.
 | `BACKUP_SCHEDULE_HOURS` | `24` | Hours between scheduled backups |
 | `BACKUP_ENCRYPT` | `false` | Encrypt backups with `age` X25519 (requires the `backup-encrypt` build feature) |
 | `BACKUP_ENCRYPT_KEY_PATH` | `<data-dir>/backup_key.age` | File holding the `age` X25519 **recipient** (public `age1…` line). Operator-supplied — the server refuses to start if `BACKUP_ENCRYPT=true` and this is absent. |
-| `BACKUP_DECRYPT_IDENTITY_PATH` | *(unset)* | `age-keygen` identity file, used only by `--restore` to decrypt an encrypted backup. Never needed by the running server. |
+| `BACKUP_DECRYPT_IDENTITY_PATH` | *(unset)* | `age-keygen` identity file, used only to decrypt an encrypted backup on restore (`--restore`, or a restore staged from the admin page and applied at the next start). |
 | `AUDIT_PSEUDONYMISE_AFTER_DAYS` | `365` | GDPR/AVG: pseudonymise audit rows older than this |
 | `TEXT_SEARCH_DIR` | `<data-dir>/tantivy` | Tantivy full-text index directory (requires the `text-search` build feature) |
 | `SMTP_HOST` / `SMTP_*` | *(unset — account email is written to the server log)* | Outbound account email (verification, password reset, reminders) — see [auth.md](auth.md#email-delivery-configuration); the compose stack bundles an optional Postfix relay (`--profile mail`) |
@@ -509,23 +509,41 @@ The backup subsystem produces a snapshot every `BACKUP_SCHEDULE_HOURS` hours
 | `BACKUP_SCHEDULE_HOURS` | `24` | Cron interval |
 | `BACKUP_ENCRYPT` | `false` | Enable `age` X25519 encryption (requires `--features backup-encrypt`) |
 | `BACKUP_ENCRYPT_KEY_PATH` | `<data-dir>/backup_key.age` | File containing one X25519 recipient. Required when `BACKUP_ENCRYPT=true` — never auto-generated |
-| `BACKUP_DECRYPT_IDENTITY_PATH` | — | Identity file for `--restore` of an encrypted backup |
-| `BACKUP_S3_ENABLED` | `false` | Mirror each snapshot to the configured ObjectStore |
+| `BACKUP_DECRYPT_IDENTITY_PATH` | — | Identity file for restoring an encrypted backup (`--restore`, or a restore staged from the admin page) |
+| `BACKUP_S3_ENABLED` | `false` | Copy each snapshot (scheduled or taken from the admin page) to the configured ObjectStore |
 
-**Admin endpoints** (`super_admin` only):
-- `POST /api/admin/backup` — trigger immediately
+**Admin page and endpoints** (`super_admin` only). **Admin → Backups & index**
+shows the configuration, the S3 copy, every backup, and any staged or last
+restore; it drives these endpoints:
+- `GET /api/admin/backup/status` — configured or not, directory, retention,
+  encryption, schedule, the S3 copy (`enabled`, `object_store_configured`,
+  `last_upload`), `pending_restore` and `last_restore`
+- `POST /api/admin/backup` — take a backup now; with `BACKUP_S3_ENABLED=true`
+  it is copied to S3 like a scheduled one (`s3: {uploaded, error?}` in the answer)
 - `GET /api/admin/backup` — list manifests
 - `POST /api/admin/backup/{id}/verify` — recompute and compare checksums
+- `POST /api/admin/backup/{id}/restore` — stage a restore for the next start
+- `DELETE /api/admin/backup/restore` — withdraw the staged restore
 
-Restore is **out of scope for the API** — it is destructive and replaces the
-identity DB file, so it runs offline through the CLI with the server stopped:
+A restore is destructive and replaces the identity DB file the running server
+holds open, so it never runs while the server serves. Staging one (in the page,
+after typing the backup's id in the confirmation dialog) verifies the
+checksums at once — and refuses an encrypted backup when
+`BACKUP_DECRYPT_IDENTITY_PATH` is not set — then writes
+`<BACKUP_DIR>/restore-pending.json`. The next start applies it before the store
+and the identity DB are opened, exactly as the CLI does, and records the
+outcome in `restore-last.json`, which the page shows. A staged backup is kept
+from retention until it is applied or withdrawn. Restart the server to apply it.
+
+The CLI does the same offline, with the server stopped:
 
 ```bash
 open-triplestore --restore <backup-id> --data-dir ./data
 ```
 
-Checksums are verified before anything is touched, so a corrupt backup aborts
-without destroying the live store.
+Checksums are verified (and an encrypted backup decrypted) before anything is
+touched, so a corrupt backup or a wrong key aborts without destroying the live
+store.
 
 #### Encrypted backups
 

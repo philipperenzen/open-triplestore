@@ -1097,6 +1097,11 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             zip_body(),
             vec![("201", "Import summary with the validation report"), ("400", "Empty body or not a readable archive"), ("401", "Authentication required"), ("403", "Write access required"), ("404", "Dataset not found, or unknown profile"), ("422", "No profile recognises the archive, the index is unreadable or has several container descriptions, or (strict=true) the container is not conformant — `{error, validation}`"), ("503", "The container carries documents but no object storage is configured")], true)),
     ]);
+    mount(paths, "/api/containers/profiles", vec![
+        (M::Get, o("Import", "Container profiles",
+            "The container profiles this server imports and exports: `{profiles: [{id, label, ontology_resources?}]}`. For `icdd`, `ontology_resources` is `{env, configured, complete, missing[]}`: whether the operator set `OTS_ICDD_ONTOLOGY_DIR` and which of ISO's `Container.rdf` / `Linkset.rdf` it lacks. Without them an export carries the `ontology-resource-missing` warning and is not Part 1-conformant. File names only, never the directory.",
+            vec![], vec![("200", "Profiles"), ("401", "Authentication required")], true)),
+    ]);
     mount(paths, "/api/containers/validate", vec![
         (M::Post, ob("Import", "Validate a linked-document container",
             "Validate an archive against a container profile without storing anything. For ICDD: Open Triplestore's own SHACL shapes for the Part 1 index and linksets (container description, documents, parties, links, link elements, identifiers — derived from the ontology restrictions, not ISO's annexes) plus structural checks (the root `Index.rdf`, the three folders, `Container.rdf` / `Linkset.rdf` in `Ontology resources/`, every listed file present at its path, duplicate names, path traversal, checksums, link elements naming listed documents, and no extension of the ICDD classes in a Part 1 container). Returns `{profile, conforms, violations, warnings, findings[]}`; `conforms` means no violation.",
@@ -2422,7 +2427,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     ("400", "Empty body"),
                     ("401", "Authentication required"),
                     ("404", "Unknown format (the known ids are named)"),
-                    ("422", "The document could not be imported"),
+                    ("422", "The document could not be imported. An IDS that is not well-formed XML, fails the IDS 1.0 XSD or fails the IDS audit rules answers `{error, stage, problems}`: `stage` is `xml`, `schema` or `audit`, `problems` lists every problem found"),
                 ],
                 true,
             ),
@@ -2440,7 +2445,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Validation",
                 "Export shapes to a constraint specification",
-                "Body is a shapes graph in Turtle. The default response is a JSON report `{format, document, specification_count, losses}` — `losses` names every constraint the target format cannot express, which for IDS is most of SHACL beyond a facet, a required/prohibited cardinality and one value restriction. `?raw=true` returns the bare document with the format's media type. A shapes graph from which nothing can be expressed is a 422, not an empty document.",
+                "Body is a shapes graph in Turtle. The default response is a JSON report `{format, document, specification_count, verbatim_specifications, losses}` — `verbatim_specifications` counts the specifications written back unchanged from the IDS an import recorded (a lossless re-export while the shapes are unedited) — `losses` names every constraint the target format cannot express, which for IDS is most of SHACL beyond a facet, a required/prohibited cardinality and one value restriction. `?raw=true` returns the bare document with the format's media type. A shapes graph from which nothing can be expressed is a 422, not an empty document.",
                 vec![
                     qp("raw", false, "`true` returns the document itself instead of the report (default: false)."),
                     qp("title", false, "Title written into the document (default: `Exported shapes`)."),
@@ -2514,6 +2519,21 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     );
     mount(
         paths,
+        "/api/datasets/:dataset_id/ldes/config",
+        vec![(
+            M::Get,
+            o(
+                "Datasets",
+                "Event stream settings",
+                "The stream's settings as JSON, for a settings form: `{dataset_id, enabled, configured, page_size, polling_interval, retention, members, sealed_nodes, created_at, stream, can_write}`. `page_size` is the fragmentation (members per page; a full page is sealed and immutable); `retention` is the declared policy or null; `can_write` says whether the caller may change them with PUT on the stream. A dataset that never enabled a stream answers its defaults with `enabled: false`. Readable by everyone who can see the dataset.",
+                vec![],
+                vec![("200", "Stream settings"), ("404", "Dataset not found or not visible")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
         "/api/datasets/:dataset_id/ldes/nodes/:n",
         vec![(
             M::Get,
@@ -2583,6 +2603,38 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 true,
             ),
         )],
+    );
+
+    mount(
+        paths,
+        "/api/admin/ldes/syncs",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Admin",
+                    "LDES sync jobs",
+                    "Every `(dataset, source)` sync `POST /api/ldes/sync` has run: `[{dataset_id, dataset_name, source_url, graph_iri, created_by, last_timestamp, members_applied, synced_at, last_run_at, last_status, last_error, last_report}]`, most recently run first. `last_status` is `ok` or `error`; a failed run keeps the previous bookmark and report, so the next run resumes. Admin only.",
+                    vec![],
+                    vec![("200", "Sync jobs"), ("401", "Authentication required"), ("403", "Admin role required")],
+                    true,
+                ),
+            ),
+            (
+                M::Delete,
+                o(
+                    "Admin",
+                    "Forget an LDES sync job",
+                    "Remove a sync job and its client state (bookmark, pages, applied versions). The mirrored graph is left as it is; the next sync from that source reads the whole stream again. Admin only.",
+                    vec![
+                        qp("dataset_id", true, "The dataset the job writes to"),
+                        qp("url", true, "The job's source URL, as it was synced"),
+                    ],
+                    vec![("204", "Forgotten"), ("401", "Authentication required"), ("403", "Admin role required"), ("404", "No such sync job")],
+                    true,
+                ),
+            ),
+        ],
     );
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -4884,11 +4936,33 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Search",
                 "Rebuild full-text index",
-                "Rebuild the full-text search index over literals. Requires authentication.",
+                "Rebuild the full-text search index over literals from the store, synchronously: `{indexed}` is the number of literals indexed. Admin only; the outcome is kept for `GET /api/text-search/status`.",
                 vec![],
                 vec![
-                    ("200", "Reindex started/completed"),
+                    ("200", "`{indexed}`"),
                     ("401", "Authentication required"),
+                    ("403", "Admin role required"),
+                    ("500", "The rebuild failed"),
+                    ("503", "No full-text index on this server"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/text-search/status",
+        vec![(
+            M::Get,
+            o(
+                "Search",
+                "Full-text index status",
+                "`{available, documents, stale, substring_pushdown, reindexing, last_reindex}`: whether the index is open, how many literals it holds, whether writes are waiting to reach it, whether substring push-down is usable, whether a reindex is running, and the latest reindex this process ran (`started_at`, `finished_at`, `duration_ms`, `indexed` or `error`, `by`). Without an index: `{available: false, reason}`. Admin only.",
+                vec![],
+                vec![
+                    ("200", "Index status"),
+                    ("401", "Authentication required"),
+                    ("403", "Admin role required"),
                 ],
                 true,
             ),
@@ -6538,9 +6612,9 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 o(
                     "Admin",
                     "List backups",
-                    "Available store backups.",
+                    "The backups in the backup directory, newest first: `[{id, created_at, software_version, rdf_path, rdf_sha256, rdf_quad_count, sqlite_path, sqlite_sha256, encrypted}]`. super_admin only.",
                     vec![],
-                    vec![("200", "Array of backups"), ("403", "Admin role required")],
+                    vec![("200", "Array of backups"), ("403", "super_admin role required"), ("503", "Backups are not configured")],
                     true,
                 ),
             ),
@@ -6549,9 +6623,9 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 o(
                     "Admin",
                     "Create backup",
-                    "Trigger a new store backup.",
+                    "Take a backup now (the RDF store as gzipped N-Quads and the identity DB, with SHA-256 checksums; age-encrypted when `BACKUP_ENCRYPT=true`). With `BACKUP_S3_ENABLED=true` and object storage configured it is also copied to S3, as scheduled backups are: `s3` is `{uploaded, error?}`, or null when S3 is off. Returns the manifest plus `s3`. super_admin only.",
                     vec![],
-                    vec![("201", "Backup created"), ("403", "Admin role required")],
+                    vec![("200", "The new backup's manifest and `s3`"), ("403", "super_admin role required"), ("500", "The backup failed"), ("503", "Backups are not configured")],
                     true,
                 ),
             ),
@@ -6565,11 +6639,67 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Admin",
                 "Verify backup",
-                "Verify the integrity of a backup.",
+                "Recompute the SHA-256 of a backup's files and compare them with its manifest: `{id, verified}`. super_admin only.",
                 vec![],
                 vec![
                     ("200", "Verification result"),
-                    ("403", "Admin role required"),
+                    ("403", "super_admin role required"),
+                    ("503", "Backups are not configured"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/backup/status",
+        vec![(
+            M::Get,
+            o(
+                "Admin",
+                "Backup status",
+                "`{configured, dir, retention, encrypted, decrypt_identity_configured, schedule_hours, count, latest, s3: {enabled, object_store_configured, last_upload}, pending_restore, last_restore}`. Without a backup subsystem: `{configured: false, s3}`. super_admin only.",
+                vec![],
+                vec![("200", "Backup status"), ("403", "super_admin role required")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/backup/:id/restore",
+        vec![(
+            M::Post,
+            o(
+                "Admin",
+                "Stage a restore",
+                "Stage a restore of backup `id` for the next start: a restore replaces the identity DB the running server holds open, so it runs when the server restarts, before anything is opened (as `--restore` does). The checksums are verified now, and an encrypted backup is refused unless `BACKUP_DECRYPT_IDENTITY_PATH` is set. Staging another backup replaces the earlier choice. The outcome is reported by `GET /api/admin/backup/status` (`last_restore`) after the restart. super_admin only.",
+                vec![],
+                vec![
+                    ("200", "`{id, requested_by, requested_at}`"),
+                    ("403", "super_admin role required"),
+                    ("422", "No such backup, a checksum mismatch, or an encrypted backup without a decryption identity"),
+                    ("503", "Backups are not configured"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/backup/restore",
+        vec![(
+            M::Delete,
+            o(
+                "Admin",
+                "Cancel a staged restore",
+                "Withdraw the restore staged for the next start. super_admin only.",
+                vec![],
+                vec![
+                    ("204", "Cancelled"),
+                    ("403", "super_admin role required"),
+                    ("404", "No restore is staged"),
+                    ("503", "Backups are not configured"),
                 ],
                 true,
             ),

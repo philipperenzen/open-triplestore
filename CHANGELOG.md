@@ -14,6 +14,35 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Web UI for the exchange formats and maintenance tasks that were API-only.**
+  The dataset page has an **Exchange** section: the LDES stream's settings
+  (publishing, members per page, polling interval, retention policy, with the
+  stream URL and member and sealed-page counts); ICDD container import with a
+  strict toggle and the validator's report, validate-only, and export with the
+  export's own `X-Container-*` validation shown, warning up front when
+  `OTS_ICDD_ONTOLOGY_DIR` is not set; CityJSON ingest with preview, upload
+  progress and the result; and an **IDS check** that runs an IDS-imported shape
+  graph over a building's `{building}/ids` projection in a pipeline made for
+  that pair, with results per specification. The shape library imports an IDS
+  (showing the audit report of a refused document item by item) and exports a
+  shape graph to IDS (saying when it is a lossless re-export and listing every
+  loss). Two admin pages: **Backups & index** (backup status with the S3 copy,
+  list, create, verify, a restore staged after typing the backup's id in the
+  app's dialog, and the full-text index's status and rebuild) and **Event
+  stream sync** (every LDES sync job with its last run, status and error; add,
+  run now, forget). `/ldp/*` and `/api/ogc/*` stay protocol-only.
+- **New endpoints behind those pages.** `GET /api/datasets/:id/ldes/config`
+  (the stream's settings as JSON); `GET` / `DELETE /api/admin/ldes/syncs`
+  (sync jobs, each with `last_status`, `last_error` and `last_report`; every
+  run of `POST /api/ldes/sync` is now recorded, a failed one too);
+  `GET /api/containers/profiles` (profiles, and for ICDD whether the ontology
+  files are configured, by file name only); `GET /api/admin/backup/status`;
+  `POST /api/admin/backup/:id/restore` and `DELETE /api/admin/backup/restore`
+  (a restore staged for the next start: checksums verified when staged, the
+  backup kept from retention while it waits, applied before the store and the
+  identity DB open, outcome reported in the status); `GET
+  /api/text-search/status` (size, freshness, substring push-down and the last
+  rebuild).
 - **W3C SPARQL 1.2 and RDF 1.2 test suites run in CI.** `sparql/sparql12`
   and the N-Triples, N-Quads, Turtle, TriG and RDF/XML suites of `rdf/rdf12`
   (with the `rdf/rdf11` suites they include) from w3c/rdf-tests are vendored
@@ -657,6 +686,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are listed as a warning. `RUST_LOG` is now in the environment table.
 
 ### Changed
+- **A refused IDS import answers JSON.** `POST /api/shacl/import/ids` answers
+  a document that is not well-formed, fails the IDS 1.0 XSD or fails the IDS
+  audit rules with `422 {error, stage, problems}` (`stage`: `xml`, `schema`,
+  `audit`) instead of one plain-text sentence, so clients can list the audit
+  report. The export report gains `verbatim_specifications`: how many
+  specifications were written back unchanged from the imported IDS.
+- **A backup taken from the admin API is copied to S3** when
+  `BACKUP_S3_ENABLED=true`, as scheduled backups always were; the answer adds
+  `s3: {uploaded, error?}` (null when S3 is off). The OpenAPI document now says
+  it answers 200, as it always did.
 
 - **Standards Score recounted once for the second merge train: 25 of 28.**
   The "W3C SPARQL 1.1 Tests" row of `docs/triplestore-comparison.md` is

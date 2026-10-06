@@ -552,7 +552,7 @@ e2e:
     - curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
     - apt-get install -y -qq nodejs
   script:
-    - cargo build --features "rdf-12,owl2-rl,owl2-el,owl2-ql,owl2-dl,text-search,ldp,shex,swrl"
+    - cargo build --features "rdf-12,owl2-rl,owl2-el,owl2-ql,owl2-dl,text-search,ldp,shex,swrl,asset-archive"
     - cd frontend
     - npm ci
     - npx playwright install --with-deps chromium

@@ -20,7 +20,7 @@
     LogIn, LogOut, UserPlus, Menu, X, Globe, AlertTriangle, RefreshCw,
     Settings as SettingsIcon, Users as UsersIcon, Shield, FolderOpen,
     Share2, Terminal, CheckCircle2, Network, FileCode, Sparkles, Sun, Moon, Activity, Gauge, Tags,
-    MessageSquarePlus, MessageSquareText
+    MessageSquarePlus, MessageSquareText, HardDrive, Rss
   } from 'lucide-svelte';
   import { isDark, toggleTheme } from './lib/theme.js';
   import { runtimeBranding } from './lib/runtimeConfig.js';
@@ -68,6 +68,8 @@
   const lazyAdminSecurity       = () => import('./pages/AdminSecurity.svelte');
   const lazyAdminPrefixes       = () => import('./pages/AdminPrefixes.svelte');
   const lazyAdminOperations     = () => import('./pages/AdminOperations.svelte');
+  const lazyAdminMaintenance    = () => import('./pages/AdminMaintenance.svelte');
+  const lazyAdminLdes           = () => import('./pages/AdminLdes.svelte');
   const lazyAdminLlm            = () => import('./pages/AdminLlm.svelte');
   const lazyAdminFeedback       = () => import('./pages/AdminFeedback.svelte');
   const lazyDocEditor           = () => import('./pages/DocEditor.svelte');
@@ -292,6 +294,8 @@
       ['/settings', 'pages.settings.title', 'pages.settings.detail'],
       ['/admin/llm', 'pages.adminLlm.title', 'pages.adminLlm.detail'],
       ['/admin/operations', 'pages.adminOperations.title', 'pages.adminOperations.detail'],
+      ['/admin/maintenance', 'pages.adminMaintenance.title', 'pages.adminMaintenance.detail'],
+      ['/admin/ldes', 'pages.adminLdes.title', 'pages.adminLdes.detail'],
       ['/admin/prefixes', 'pages.adminPrefixes.title', 'pages.adminPrefixes.detail'],
       ['/admin/feedback', 'pages.adminFeedback.title', 'pages.adminFeedback.detail'],
       ['/admin', 'pages.admin.title', 'pages.admin.detail'],
@@ -482,6 +486,14 @@
               <Link to="/admin/operations" class={`nav-item ${currentPath.startsWith('/admin/operations') ? 'selected' : ''}`} on:click={navClick}>
                 <Gauge size={16} />
                 <span class="nav-item-label">{$t('nav.adminOperations')}</span>
+              </Link>
+              <Link to="/admin/maintenance" class={`nav-item ${currentPath.startsWith('/admin/maintenance') ? 'selected' : ''}`} on:click={navClick}>
+                <HardDrive size={16} />
+                <span class="nav-item-label">{$t('nav.adminMaintenance')}</span>
+              </Link>
+              <Link to="/admin/ldes" class={`nav-item ${currentPath.startsWith('/admin/ldes') ? 'selected' : ''}`} on:click={navClick}>
+                <Rss size={16} />
+                <span class="nav-item-label">{$t('nav.adminLdes')}</span>
               </Link>
               <Link to="/admin/prefixes" class={`nav-item ${currentPath.startsWith('/admin/prefixes') ? 'selected' : ''}`} on:click={navClick}>
                 <Tags size={16} />
@@ -746,6 +758,12 @@
         </Route>
         <Route path="/admin/operations">
           <LazyPage loader={lazyAdminOperations} />
+        </Route>
+        <Route path="/admin/maintenance">
+          <LazyPage loader={lazyAdminMaintenance} />
+        </Route>
+        <Route path="/admin/ldes">
+          <LazyPage loader={lazyAdminLdes} />
         </Route>
         <Route path="/admin/prefixes">
           <LazyPage loader={lazyAdminPrefixes} />

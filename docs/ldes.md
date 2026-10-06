@@ -9,6 +9,15 @@ publish a stream, and any dataset can sync one from elsewhere.
 
 ## Publishing a dataset as a stream
 
+In the web UI, the dataset page's **Exchange** section has the stream's
+settings: publishing on or off, members per page (the fragmentation),
+the polling interval and the retention policy, with the stream URL, the member
+count and the number of sealed pages. Readers see the settings; writers can
+change them. The form reads `GET /api/datasets/<id>/ldes/config`, a JSON view
+of the same settings (`enabled`, `configured`, `page_size`,
+`polling_interval`, `retention`, `members`, `sealed_nodes`, `created_at`,
+`stream`, `can_write`), and saves with the `PUT` below.
+
 Enable the stream (write access on the dataset):
 
 ```bash
@@ -189,6 +198,17 @@ curl -X POST http://localhost:7878/api/ldes/sync \
   -d '{"url": "https://other.example.org/api/datasets/roads/ldes",
        "dataset_id": "roads-mirror", "graph_iri": "https://example.org/roads-mirror/instances"}'
 ```
+
+Admins manage these sync jobs in **Admin → Event stream sync**: every
+`(dataset, url)` sync with its target graph, bookmark, members applied, the
+last run's time and status, its error when it failed, and its last report; a
+form adds a stream (and runs it), and each job can be run again or forgotten.
+`GET /api/admin/ldes/syncs` lists the jobs (`last_status` `ok` or `error`,
+`last_error`, `last_report`); a failed run is recorded too and keeps the
+previous bookmark, so the next run resumes from it. `DELETE
+/api/admin/ldes/syncs?dataset_id=…&url=…` forgets a job and its client state;
+the mirrored graph stays, and the next sync from that source reads the whole
+stream again.
 
 The `url` may be the event stream, its root node, a redirect to either, or a
 page with exactly one `tree:view` (LDES 1.0 §3.1); the report names the

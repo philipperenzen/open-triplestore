@@ -51,7 +51,7 @@ The index is built at startup, after the boot seed chain, and then follows **eve
 
 `text:search` / `ft:search` waits for the catch-up, so it always sees the writes that preceded it. A `CONTAINS` / `STRSTARTS` push-down does not wait: while the index lags it is skipped for that query (the query is still answered correctly, just without the accelerator) and a background thread catches up. Rebuilds and catch-ups are serialised, so concurrent queries share one rather than racing. On a large store the first text query after an unbounded write can be slow — trigger a reindex explicitly after such a write if that matters.
 
-An admin can force a rebuild with `POST /api/text-search/reindex`.
+An admin can force a rebuild with `POST /api/text-search/reindex`, or from **Admin → Backups & index**, which also shows the index's status from `GET /api/text-search/status`: how many literals it holds, whether writes are waiting to reach it, whether substring push-down is usable, and the last rebuild (when, how many literals, how long, or its error).
 
 The index is a derived cache: it is safe to delete the directory (`{data_dir}/tantivy/`) while the server is stopped, and an index left behind by an older schema is discarded and rebuilt automatically.
 

@@ -10764,6 +10764,7 @@ pub fn reasoning_routes() -> Router<AppState> {
         .route("/api/reasoning/status", get(reasoning_status))
         .route("/api/reasoning/rewrite", post(reasoning_rewrite))
         .route("/api/text-search/reindex", post(text_search_reindex))
+        .route("/api/text-search/status", get(text_search_status))
         // Identity policy (owl:sameAs) — per dataset and per organisation.
         .route(
             "/api/datasets/:dataset_id/identity",
@@ -11531,7 +11532,10 @@ async fn text_search_reindex(
             // reindex could run concurrently with the background auto-sync and the
             // two would delete each other's documents.
             let st = state.clone();
-            let count = tokio::task::spawn_blocking(move || {
+            let started = std::time::Instant::now();
+            let started_at = chrono::Utc::now().to_rfc3339();
+            REINDEX_RUNNING.store(true, std::sync::atomic::Ordering::Relaxed);
+            let result = tokio::task::spawn_blocking(move || {
                 let idx = st.text_index.as_ref().expect("checked above");
                 let _guard = st
                     .text_sync_lock
@@ -11551,9 +11555,22 @@ async fn text_search_reindex(
                 }
                 res
             })
-            .await
-            .map_err(|e| AppError::Internal(format!("reindex task panicked: {e}")))?
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+            .await;
+            REINDEX_RUNNING.store(false, std::sync::atomic::Ordering::Relaxed);
+            let result = match result {
+                Ok(r) => r.map_err(|e| e.to_string()),
+                Err(e) => Err(format!("reindex task panicked: {e}")),
+            };
+            let record = ReindexRecord {
+                started_at,
+                finished_at: chrono::Utc::now().to_rfc3339(),
+                duration_ms: started.elapsed().as_millis() as u64,
+                indexed: result.as_ref().ok().copied(),
+                error: result.as_ref().err().cloned(),
+                by: Some(user.user_id.clone()),
+            };
+            *last_reindex().lock().unwrap_or_else(|p| p.into_inner()) = Some(record);
+            let count = result.map_err(AppError::Internal)?;
             return Ok((
                 StatusCode::OK,
                 Json(serde_json::json!({ "indexed": count })),
@@ -11568,6 +11585,74 @@ async fn text_search_reindex(
         })),
     )
         .into_response())
+}
+
+/// The latest full reindex this process ran, for the status endpoint.
+#[cfg_attr(not(feature = "text-search"), allow(dead_code))]
+#[derive(Debug, Clone, serde::Serialize)]
+struct ReindexRecord {
+    started_at: String,
+    finished_at: String,
+    duration_ms: u64,
+    indexed: Option<usize>,
+    error: Option<String>,
+    by: Option<String>,
+}
+
+#[cfg_attr(not(feature = "text-search"), allow(dead_code))]
+static REINDEX_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg_attr(not(feature = "text-search"), allow(dead_code))]
+fn last_reindex() -> &'static std::sync::Mutex<Option<ReindexRecord>> {
+    static LAST: std::sync::OnceLock<std::sync::Mutex<Option<ReindexRecord>>> =
+        std::sync::OnceLock::new();
+    LAST.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// GET /api/text-search/status — whether the full-text index exists, how many
+/// literals it holds, whether writes are waiting to reach it, and the latest
+/// reindex (its time, count, duration or error). Admin only, like reindex.
+async fn text_search_status(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> Result<Response, AppError> {
+    if !user.is_admin() {
+        return Err(AppError::Forbidden(
+            "Admin access required for the text index status".to_string(),
+        ));
+    }
+    let _ = &state;
+    #[cfg(feature = "text-search")]
+    if let Some(idx) = state.text_index.clone() {
+        let st = state.clone();
+        let (docs, stale, substring) = tokio::task::spawn_blocking(move || {
+            (
+                idx.num_docs(),
+                st.text_index_stale(),
+                idx.substring_pushdown_available(),
+            )
+        })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+        return Ok(Json(serde_json::json!({
+            "available": true,
+            "documents": docs,
+            "stale": stale,
+            "substring_pushdown": substring,
+            "reindexing": REINDEX_RUNNING.load(std::sync::atomic::Ordering::Relaxed),
+            "last_reindex": last_reindex().lock().unwrap_or_else(|p| p.into_inner()).clone(),
+        }))
+        .into_response());
+    }
+    Ok(Json(serde_json::json!({
+        "available": false,
+        "reason": if cfg!(feature = "text-search") {
+            "the full-text index is not open on this server"
+        } else {
+            "this server was built without the text-search feature"
+        },
+    }))
+    .into_response())
 }
 
 // ─── ShEx validation routes ─────────────────────────────────────────────
