@@ -261,6 +261,15 @@ One commit each, in this order:
    already binds. Fixes `grouping#select-variable-reuse` of the SPARQL 1.2
    suite. Draft: `spargebra/UPSTREAM-PR-select-variable-reuse.md`.
 
+10. **`EXISTS` patterns are optimized** (`sparopt` optimizer). The join
+   reordering and filter pushing passes stopped at expressions, so the pattern of
+   an `EXISTS` kept its written order, its joins were cartesian products and its
+   filters stayed on top; evaluated once per outer row, a correlated
+   `FILTER NOT EXISTS { ?r :reviewFor ?p ; :rating ?x }` read every `:rating`
+   triple for each row (store comparison F10, issue #471). A last pass now
+   reorders each `EXISTS` pattern knowing which variables the outer pattern
+   binds, and `Optimizer::optimize_for_standalone_evaluation` plans one with no
+   input. Draft: `sparopt/UPSTREAM-PR-exists-join-order.md`.
 ### Verifying the fork
 
 The fork diff is every commit after the one that added this directory. To see it

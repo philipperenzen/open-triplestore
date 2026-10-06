@@ -17,7 +17,254 @@ impl Optimizer {
         let pattern = Self::normalize_pattern(pattern, &input_types);
         let pattern = Self::push_graph(pattern, None, &input_types);
         let pattern = Self::reorder_joins(pattern, &input_types);
+        let pattern = Self::push_filters(pattern, Vec::new(), &input_types);
+        Self::optimize_exists(pattern, &input_types)
+    }
+
+    /// Reorders the joins of `pattern` and pushes its filters down as if it were
+    /// evaluated on its own, with no input binding.
+    ///
+    /// The evaluator uses it for the pattern of an `EXISTS` it evaluates once for
+    /// all the solutions of the outer pattern (a hash semi-join) instead of once
+    /// per solution: the plan [`Self::optimize_graph_pattern`] gave that pattern
+    /// assumes the variables the outer pattern binds are bound, so a join between
+    /// two parts that only share such a variable is a cartesian product there.
+    /// `pattern` must come out of [`Self::optimize_graph_pattern`].
+    pub fn optimize_for_standalone_evaluation(pattern: GraphPattern) -> GraphPattern {
+        let input_types = VariableTypes::default();
+        let pattern = Self::unnest_pattern_laterals(pattern);
+        let pattern = Self::reorder_joins(pattern, &input_types);
         Self::push_filters(pattern, Vec::new(), &input_types)
+    }
+
+    /// Turns every `Lateral(L, R)` whose `R` is a triple or path pattern back
+    /// into `Join(L, R)`, which it is equal to: such an `R` evaluated with a
+    /// solution of `L` as input yields exactly its solutions compatible with
+    /// it. The per-row plan of an `EXISTS` is a chain of such laterals driven
+    /// from the outer bindings; evaluated with no input, one index probe per
+    /// solution of `L` is slower than the hash join `reorder_joins` picks.
+    fn unnest_pattern_laterals(pattern: GraphPattern) -> GraphPattern {
+        match pattern {
+            #[cfg(feature = "sep-0006")]
+            GraphPattern::Lateral { left, right } => {
+                let left = Self::unnest_pattern_laterals(*left);
+                let right = Self::unnest_pattern_laterals(*right);
+                if matches!(
+                    right,
+                    GraphPattern::QuadPattern { .. } | GraphPattern::Path { .. }
+                ) {
+                    GraphPattern::join(left, right, JoinAlgorithm::default())
+                } else {
+                    GraphPattern::lateral(left, right)
+                }
+            }
+            GraphPattern::Join {
+                left,
+                right,
+                algorithm,
+            } => GraphPattern::join(
+                Self::unnest_pattern_laterals(*left),
+                Self::unnest_pattern_laterals(*right),
+                algorithm,
+            ),
+            GraphPattern::Filter { inner, expression } => {
+                GraphPattern::filter(Self::unnest_pattern_laterals(*inner), expression)
+            }
+            GraphPattern::Graph { graph_name, inner } => {
+                GraphPattern::graph(Self::unnest_pattern_laterals(*inner), graph_name)
+            }
+            GraphPattern::Union { inner } => GraphPattern::union_all(
+                inner.into_iter().map(Self::unnest_pattern_laterals),
+            ),
+            GraphPattern::LeftJoin {
+                left,
+                right,
+                expression,
+                algorithm,
+            } => GraphPattern::left_join(
+                Self::unnest_pattern_laterals(*left),
+                Self::unnest_pattern_laterals(*right),
+                expression,
+                algorithm,
+            ),
+            other => other,
+        }
+    }
+
+    /// Optimizes the pattern of every `EXISTS` in `pattern`.
+    ///
+    /// The other passes stop at expressions, so an `EXISTS` pattern used to keep
+    /// the order it was written in, every join in it a cartesian product
+    /// (`JoinAlgorithm` keys are only computed by [`Self::reorder_joins`]) and
+    /// every filter at the top. Evaluated once per outer solution, that made a
+    /// correlated `FILTER NOT EXISTS { ?r :reviewFor ?p ; :rating ?x }` read
+    /// every `:rating` triple for each outer row. The pattern is now reordered
+    /// with the variables the outer pattern binds known to be bound, so the part
+    /// that uses them comes first and the rest is a lateral (for-loop) join.
+    fn optimize_exists(pattern: GraphPattern, input_types: &VariableTypes) -> GraphPattern {
+        match pattern {
+            GraphPattern::QuadPattern { .. }
+            | GraphPattern::Path { .. }
+            | GraphPattern::Values { .. }
+            | GraphPattern::Service { .. } => pattern,
+            GraphPattern::Graph { graph_name, inner } => {
+                GraphPattern::graph(Self::optimize_exists(*inner, input_types), graph_name)
+            }
+            GraphPattern::Join {
+                left,
+                right,
+                algorithm,
+            } => GraphPattern::join(
+                Self::optimize_exists(*left, input_types),
+                Self::optimize_exists(*right, input_types),
+                algorithm,
+            ),
+            GraphPattern::LeftJoin {
+                left,
+                right,
+                expression,
+                algorithm,
+            } => {
+                let left = Self::optimize_exists(*left, input_types);
+                let right = Self::optimize_exists(*right, input_types);
+                let mut inner_types = infer_graph_pattern_types(&left, input_types.clone());
+                inner_types.intersect_with(infer_graph_pattern_types(&right, input_types.clone()));
+                GraphPattern::left_join(
+                    left,
+                    right,
+                    Self::optimize_exists_in_expression(expression, &inner_types),
+                    algorithm,
+                )
+            }
+            #[cfg(feature = "sep-0006")]
+            GraphPattern::Lateral { left, right } => {
+                let left = Self::optimize_exists(*left, input_types);
+                let left_types = infer_graph_pattern_types(&left, input_types.clone());
+                GraphPattern::lateral(left, Self::optimize_exists(*right, &left_types))
+            }
+            GraphPattern::Filter { inner, expression } => {
+                let inner = Self::optimize_exists(*inner, input_types);
+                let inner_types = infer_graph_pattern_types(&inner, input_types.clone());
+                GraphPattern::filter(
+                    inner,
+                    Self::optimize_exists_in_expression(expression, &inner_types),
+                )
+            }
+            GraphPattern::Union { inner } => GraphPattern::union_all(
+                inner
+                    .into_iter()
+                    .map(|c| Self::optimize_exists(c, input_types)),
+            ),
+            GraphPattern::Extend {
+                inner,
+                variable,
+                expression,
+            } => {
+                let inner = Self::optimize_exists(*inner, input_types);
+                let inner_types = infer_graph_pattern_types(&inner, input_types.clone());
+                GraphPattern::extend(
+                    inner,
+                    variable,
+                    Self::optimize_exists_in_expression(expression, &inner_types),
+                )
+            }
+            GraphPattern::Minus {
+                left,
+                right,
+                algorithm,
+            } => GraphPattern::minus(
+                Self::optimize_exists(*left, input_types),
+                Self::optimize_exists(*right, input_types),
+                algorithm,
+            ),
+            GraphPattern::OrderBy { inner, expression } => {
+                let inner = Self::optimize_exists(*inner, input_types);
+                let inner_types = infer_graph_pattern_types(&inner, input_types.clone());
+                GraphPattern::order_by(
+                    inner,
+                    expression
+                        .into_iter()
+                        .map(|e| match e {
+                            OrderExpression::Asc(e) => OrderExpression::Asc(
+                                Self::optimize_exists_in_expression(e, &inner_types),
+                            ),
+                            OrderExpression::Desc(e) => OrderExpression::Desc(
+                                Self::optimize_exists_in_expression(e, &inner_types),
+                            ),
+                        })
+                        .collect(),
+                )
+            }
+            GraphPattern::Project { inner, variables } => {
+                GraphPattern::project(Self::optimize_exists(*inner, input_types), variables)
+            }
+            GraphPattern::Distinct { inner } => {
+                GraphPattern::distinct(Self::optimize_exists(*inner, input_types))
+            }
+            GraphPattern::Reduced { inner } => {
+                GraphPattern::reduced(Self::optimize_exists(*inner, input_types))
+            }
+            GraphPattern::Slice {
+                inner,
+                start,
+                length,
+            } => GraphPattern::slice(Self::optimize_exists(*inner, input_types), start, length),
+            GraphPattern::Group {
+                inner,
+                variables,
+                aggregates,
+            } => GraphPattern::group(
+                Self::optimize_exists(*inner, input_types),
+                variables,
+                aggregates,
+            ),
+        }
+    }
+
+    /// [`Self::optimize_exists`] for the `EXISTS` inside `expression`, whose
+    /// variables have the `types` of the pattern the expression is evaluated on.
+    fn optimize_exists_in_expression(expression: Expression, types: &VariableTypes) -> Expression {
+        if !does_contain_exists(&expression) {
+            return expression;
+        }
+        let map = |e: Expression| Self::optimize_exists_in_expression(e, types);
+        let map_box = |e: Box<Expression>| Box::new(Self::optimize_exists_in_expression(*e, types));
+        match expression {
+            Expression::Exists(inner) => {
+                // The other passes already ran on `inner` as a pattern of its own
+                // (normalization); only the join order and the filter placement,
+                // which depend on what the outer pattern binds, are missing.
+                let inner = Self::reorder_joins(*inner, types);
+                let inner = Self::push_filters(inner, Vec::new(), types);
+                Expression::Exists(Box::new(Self::optimize_exists(inner, types)))
+            }
+            Expression::Or(inner) => Expression::Or(inner.into_iter().map(map).collect()),
+            Expression::And(inner) => Expression::And(inner.into_iter().map(map).collect()),
+            Expression::Coalesce(inner) => {
+                Expression::Coalesce(inner.into_iter().map(map).collect())
+            }
+            Expression::FunctionCall(name, args) => {
+                Expression::FunctionCall(name, args.into_iter().map(map).collect())
+            }
+            Expression::Equal(a, b) => Expression::Equal(map_box(a), map_box(b)),
+            Expression::SameTerm(a, b) => Expression::SameTerm(map_box(a), map_box(b)),
+            Expression::Greater(a, b) => Expression::Greater(map_box(a), map_box(b)),
+            Expression::GreaterOrEqual(a, b) => Expression::GreaterOrEqual(map_box(a), map_box(b)),
+            Expression::Less(a, b) => Expression::Less(map_box(a), map_box(b)),
+            Expression::LessOrEqual(a, b) => Expression::LessOrEqual(map_box(a), map_box(b)),
+            Expression::Add(a, b) => Expression::Add(map_box(a), map_box(b)),
+            Expression::Subtract(a, b) => Expression::Subtract(map_box(a), map_box(b)),
+            Expression::Multiply(a, b) => Expression::Multiply(map_box(a), map_box(b)),
+            Expression::Divide(a, b) => Expression::Divide(map_box(a), map_box(b)),
+            Expression::UnaryPlus(e) => Expression::UnaryPlus(map_box(e)),
+            Expression::UnaryMinus(e) => Expression::UnaryMinus(map_box(e)),
+            Expression::Not(e) => Expression::Not(map_box(e)),
+            Expression::If(a, b, c) => Expression::If(map_box(a), map_box(b), map_box(c)),
+            Expression::NamedNode(_)
+            | Expression::Literal(_)
+            | Expression::Variable(_)
+            | Expression::Bound(_) => expression,
+        }
     }
 
     /// Normalize the pattern, discarding any join ordering information
