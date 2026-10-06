@@ -167,7 +167,7 @@ async fn register_source(app: &Router, token: &str, id: &str, db: &Path) {
         token,
         json!({
             "id": id, "name": id, "dialect": "sqlite",
-            "database": db.to_string_lossy(), "readOnly": true, "statementTimeoutMs": 5000,
+            "database": db.to_string_lossy(), "read_only": true, "statement_timeout_ms": 5000,
         }),
     )
     .await;
@@ -180,7 +180,7 @@ async fn register_mapping(app: &Router, token: &str, id: &str, _source_id: &str,
         Method::POST,
         "/api/mappings",
         token,
-        json!({ "id": id, "title": id, "rml": rml, "shapesGraph": SHAPES_GRAPH }),
+        json!({ "id": id, "title": id, "rml": rml, "shapes_graph": SHAPES_GRAPH }),
     )
     .await;
     assert_eq!(st, StatusCode::CREATED, "register mapping {id}: {txt}");
@@ -207,7 +207,7 @@ fn map_entry<'a>(v: &'a Value, local: &str) -> &'a Value {
         .as_array()
         .expect("maps")
         .iter()
-        .find(|m| m["triplesMap"] == format!("http://example.org/products/ontology#{local}"))
+        .find(|m| m["triples_map"] == format!("http://example.org/products/ontology#{local}"))
         .unwrap_or_else(|| panic!("no entry for {local}: {v}"))
 }
 
@@ -234,44 +234,44 @@ async fn one_row_of_a_child_table_pulls_in_its_parent_and_a_sound_mapping_has_no
         &app,
         &token,
         "sound",
-        json!({ "mapping": "sound-map", "table": "products", "sampleSize": 1 }),
+        json!({ "mapping": "sound-map", "table": "products", "sample_size": 1 }),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
 
     // One product row was sampled; the supplier it references came with it,
     // even though the supplier table was not sampled at all.
-    assert_eq!(v["sampleSize"], 1, "{txt}");
-    assert_eq!(map_entry(&v, "ProductsMap")["sampledRows"], 1, "{txt}");
-    assert_eq!(map_entry(&v, "SuppliersMap")["sampledRows"], 0, "{txt}");
-    assert_eq!(map_entry(&v, "SuppliersMap")["pulledInRows"], 1, "{txt}");
+    assert_eq!(v["sample_size"], 1, "{txt}");
+    assert_eq!(map_entry(&v, "ProductsMap")["sampled_rows"], 1, "{txt}");
+    assert_eq!(map_entry(&v, "SuppliersMap")["sampled_rows"], 0, "{txt}");
+    assert_eq!(map_entry(&v, "SuppliersMap")["pulled_in_rows"], 1, "{txt}");
     assert_eq!(v["rows"], 2, "{txt}");
     assert!(v["triples"].as_u64().unwrap() >= 6, "{txt}");
 
     // Validated against the mapping's shapes graph: the `sh:class ex:Supplier`
     // on the reference holds because the parent is there.
-    assert_eq!(v["shapesGraphs"], json!([SHAPES_GRAPH]), "{txt}");
+    assert_eq!(v["shapes_graphs"], json!([SHAPES_GRAPH]), "{txt}");
     assert_eq!(v["report"]["conforms"], true, "{txt}");
-    assert_eq!(v["report"]["resultsCount"], 0, "{txt}");
+    assert_eq!(v["report"]["results_count"], 0, "{txt}");
     assert!(
-        v["classification"]["mappingDefects"]
+        v["classification"]["mapping_defects"]
             .as_array()
             .unwrap()
             .is_empty(),
         "{txt}"
     );
     assert!(
-        v["classification"]["dataIssues"]
+        v["classification"]["data_issues"]
             .as_array()
             .unwrap()
             .is_empty(),
         "{txt}"
     );
     assert_eq!(
-        v["classification"]["systematicShare"], 0.9,
+        v["classification"]["systematic_share"], 0.9,
         "the rule applied: {txt}"
     );
-    assert_eq!(v["classification"]["systematicMinSubjects"], 2, "{txt}");
+    assert_eq!(v["classification"]["systematic_min_subjects"], 2, "{txt}");
 
     // Per-entity Turtle, with the entity's types and its (absent) violations.
     let entities = v["entities"].as_array().expect("entities");
@@ -301,7 +301,7 @@ async fn one_row_of_a_child_table_pulls_in_its_parent_and_a_sound_mapping_has_no
     let graph = v["graph"].as_str().unwrap();
     assert!(graph.starts_with("urn:dryrun:"), "{txt}");
     assert!(
-        v["expiresAt"].as_str().is_some_and(|s| s.contains('T')),
+        v["expires_at"].as_str().is_some_and(|s| s.contains('T')),
         "{txt}"
     );
     let (st, ttl) = get_graph(&app, &token, graph).await;
@@ -336,13 +336,13 @@ async fn a_wrong_datatype_is_a_mapping_defect_not_a_set_of_data_issues() {
         &app,
         &token,
         "wrong",
-        json!({ "mapping": "wrong-map", "sampleSize": 3 }),
+        json!({ "mapping": "wrong-map", "sample_size": 3 }),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
     assert_eq!(v["report"]["conforms"], false, "{txt}");
 
-    let defects = v["classification"]["mappingDefects"].as_array().unwrap();
+    let defects = v["classification"]["mapping_defects"].as_array().unwrap();
     assert_eq!(defects.len(), 1, "one kind of defect: {txt}");
     let d = &defects[0];
     assert!(
@@ -356,9 +356,9 @@ async fn a_wrong_datatype_is_a_mapping_defect_not_a_set_of_data_issues() {
         d["constraint"].as_str().unwrap().starts_with("sh:datatype"),
         "{txt}"
     );
-    assert_eq!(d["focusNodes"].as_array().unwrap().len(), 3, "{txt}");
+    assert_eq!(d["focus_nodes"].as_array().unwrap().len(), 3, "{txt}");
     assert!(
-        v["classification"]["dataIssues"]
+        v["classification"]["data_issues"]
             .as_array()
             .unwrap()
             .is_empty(),
@@ -393,23 +393,23 @@ async fn a_violation_on_one_row_is_a_data_issue_and_the_split_follows_the_gates(
 
     // Product 2 points at a supplier that does not exist: no reference is
     // produced, so `sh:minCount 1` fails for that one product.
-    let body = json!({ "mapping": "sparse-map", "sampleSize": 3 });
+    let body = json!({ "mapping": "sparse-map", "sample_size": 3 });
     let (st, v, txt) = dry_run(&app, &token, "sparse", body.clone()).await;
     assert_eq!(st, StatusCode::OK, "{txt}");
     assert_eq!(v["report"]["conforms"], false, "{txt}");
     assert!(
-        v["classification"]["mappingDefects"]
+        v["classification"]["mapping_defects"]
             .as_array()
             .unwrap()
             .is_empty(),
         "{txt}"
     );
-    let issues = v["classification"]["dataIssues"].as_array().unwrap();
+    let issues = v["classification"]["data_issues"].as_array().unwrap();
     assert_eq!(issues.len(), 1, "{txt}");
     assert_eq!(issues[0]["affected"], 1, "{txt}");
     assert_eq!(issues[0]["population"], 3, "{txt}");
     assert_eq!(
-        issues[0]["focusNodes"],
+        issues[0]["focus_nodes"],
         json!(["http://example.org/products/product_2"]),
         "{txt}"
     );
@@ -420,19 +420,22 @@ async fn a_violation_on_one_row_is_a_data_issue_and_the_split_follows_the_gates(
         Method::PUT,
         "/api/sources/gates",
         &token,
-        json!({ "systematicShare": 0.3, "systematicMinSubjects": 1 }),
+        json!({ "systematic_share": 0.3, "systematic_min_subjects": 1 }),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
     assert_eq!(g["source"], "configured", "{txt}");
-    assert_eq!(g["systematicShare"], 0.3, "{txt}");
-    assert_eq!(g["autoThreshold"], 0.9, "the rest keeps its default: {txt}");
+    assert_eq!(g["systematic_share"], 0.3, "{txt}");
+    assert_eq!(
+        g["auto_threshold"], 0.9,
+        "the rest keeps its default: {txt}"
+    );
 
     let (st, v, txt) = dry_run(&app, &token, "sparse", body).await;
     assert_eq!(st, StatusCode::OK, "{txt}");
-    assert_eq!(v["classification"]["systematicShare"], 0.3, "{txt}");
+    assert_eq!(v["classification"]["systematic_share"], 0.3, "{txt}");
     assert_eq!(
-        v["classification"]["mappingDefects"]
+        v["classification"]["mapping_defects"]
             .as_array()
             .unwrap()
             .len(),
@@ -440,7 +443,7 @@ async fn a_violation_on_one_row_is_a_data_issue_and_the_split_follows_the_gates(
         "{txt}"
     );
     assert!(
-        v["classification"]["dataIssues"]
+        v["classification"]["data_issues"]
             .as_array()
             .unwrap()
             .is_empty(),
@@ -474,7 +477,7 @@ mappings:
         &app,
         &token,
         "inline",
-        json!({ "yarrrml": yarrrml, "shapesGraph": SHAPES_GRAPH, "sampleSize": 2 }),
+        json!({ "yarrrml": yarrrml, "shapes_graph": SHAPES_GRAPH, "sample_size": 2 }),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
@@ -484,7 +487,7 @@ mappings:
     // fails for both rows — systematic, and correctly so: the mapping lacks
     // the property.
     assert_eq!(
-        v["classification"]["mappingDefects"]
+        v["classification"]["mapping_defects"]
             .as_array()
             .unwrap()
             .len(),
@@ -503,7 +506,7 @@ mappings:
         &app,
         &token,
         "inline",
-        json!({ "rml": mapping_for("inline", "xsd:decimal"), "shapesGraph": SHAPES_GRAPH }),
+        json!({ "rml": mapping_for("inline", "xsd:decimal"), "shapes_graph": SHAPES_GRAPH }),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
@@ -561,7 +564,7 @@ async fn the_request_is_checked_and_the_endpoint_is_admin_only() {
     assert!(txt.contains("no triples map reads"), "{txt}");
 
     // A field the request does not have is refused (axum's JSON rejection),
-    // never ignored: a misspelled `sampleSize` silently meaning the default
+    // never ignored: a misspelled `sample_size` silently meaning the default
     // is the kind of surprise this exists to prevent.
     let (st, _, txt) = dry_run(
         &app,
@@ -585,7 +588,7 @@ async fn the_request_is_checked_and_the_endpoint_is_admin_only() {
         &app,
         &token,
         "checked",
-        json!({ "mappingGraph": "urn:mapping:checked-map:version:1", "sampleSize": 1 }),
+        json!({ "mapping_graph": "urn:mapping:checked-map:version:1", "sample_size": 1 }),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
@@ -623,9 +626,9 @@ async fn the_gates_default_until_configured_and_are_served_as_a_graph() {
     assert_eq!(st, StatusCode::OK, "{txt}");
     assert_eq!(g["source"], "default", "{txt}");
     assert_eq!(g["graph"], "urn:config:mapping-gates", "{txt}");
-    assert_eq!(g["autoThreshold"], 0.9, "{txt}");
-    assert_eq!(g["reviewThreshold"], 0.7, "{txt}");
-    assert_eq!(g["lexical"]["nameWeight"], 0.6, "{txt}");
+    assert_eq!(g["auto_threshold"], 0.9, "{txt}");
+    assert_eq!(g["review_threshold"], 0.7, "{txt}");
+    assert_eq!(g["lexical"]["name_weight"], 0.6, "{txt}");
 
     // A misspelled gate is refused (axum's JSON rejection) rather than ignored.
     let (st, _, txt) = req(
@@ -644,25 +647,25 @@ async fn the_gates_default_until_configured_and_are_served_as_a_graph() {
         Method::PUT,
         "/api/sources/gates",
         &token,
-        json!({ "reviewThreshold": 0.95 }),
+        json!({ "review_threshold": 0.95 }),
     )
     .await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
-    assert!(txt.contains("reviewThreshold"), "{txt}");
+    assert!(txt.contains("review_threshold"), "{txt}");
 
     let (st, g, txt) = req(
         &app,
         Method::PUT,
         "/api/sources/gates",
         &token,
-        json!({ "autoThreshold": 0.85, "lexical": { "minimumScore": 0.5 } }),
+        json!({ "auto_threshold": 0.85, "lexical": { "minimum_score": 0.5 } }),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
     assert_eq!(g["source"], "configured", "{txt}");
-    assert_eq!(g["autoThreshold"], 0.85, "{txt}");
-    assert_eq!(g["lexical"]["minimumScore"], 0.5, "{txt}");
-    assert_eq!(g["lexical"]["nameWeight"], 0.6, "untouched: {txt}");
+    assert_eq!(g["auto_threshold"], 0.85, "{txt}");
+    assert_eq!(g["lexical"]["minimum_score"], 0.5, "{txt}");
+    assert_eq!(g["lexical"]["name_weight"], 0.6, "untouched: {txt}");
 
     // The graph itself, for a reader that wants RDF.
     let resp = app
@@ -799,7 +802,7 @@ async fn a_private_dataset_graph_shapes_no_dry_run_of_who_may_not_read_it() {
 
     let body = json!({
         "rml": mapping_for("private-shapes", "xsd:decimal"),
-        "shapesGraph": PRIVATE_SHAPES_GRAPH, "table": "products", "sampleSize": 1,
+        "shapes_graph": PRIVATE_SHAPES_GRAPH, "table": "products", "sample_size": 1,
     });
     let (st, v, txt) = dry_run(&app, &proposer, "private-shapes", body.clone()).await;
     assert_eq!(st, StatusCode::OK, "{txt}");
@@ -807,7 +810,7 @@ async fn a_private_dataset_graph_shapes_no_dry_run_of_who_may_not_read_it() {
         !txt.contains("SECRET-RULE-7") && !txt.contains("secretCode"),
         "{txt}"
     );
-    assert_eq!(v["shapesGraphs"], json!([]), "{txt}");
+    assert_eq!(v["shapes_graphs"], json!([]), "{txt}");
     assert!(
         txt.contains("not one you may read"),
         "a warning says so: {txt}"
@@ -906,7 +909,7 @@ async fn a_dry_run_is_shaped_only_by_graphs_its_caller_may_read() {
 
     let sample = |shapes: Value| {
         let mut b = json!({ "rml": mapping_for("read-rule", "xsd:decimal"), "table": "products",
-                            "sampleSize": 1 });
+                            "sample_size": 1 });
         b.as_object_mut()
             .unwrap()
             .extend(shapes.as_object().unwrap().clone());
@@ -920,11 +923,11 @@ async fn a_dry_run_is_shaped_only_by_graphs_its_caller_may_read() {
         (library_graph.as_str(), "RULE-LIBRARY", true),
     ];
     for (g, rule, readable) in cases {
-        let body = sample(json!({ "shapesGraph": g }));
+        let body = sample(json!({ "shapes_graph": g }));
         let (st, v, txt) = dry_run(&app, &proposer, "read-rule", body.clone()).await;
         assert_eq!(st, StatusCode::OK, "{g}: {txt}");
         assert_eq!(txt.contains(rule), readable, "<{g}> to the proposer: {txt}");
-        let applied = v["shapesGraphs"] == json!([g]);
+        let applied = v["shapes_graphs"] == json!([g]);
         assert_eq!(applied, readable, "<{g}>: {txt}");
         if !readable {
             assert!(txt.contains("not one you may read"), "<{g}>: {txt}");
@@ -943,7 +946,7 @@ async fn a_dry_run_is_shaped_only_by_graphs_its_caller_may_read() {
         "/api/mappings",
         &proposer,
         json!({ "id": "proposal", "title": "proposal", "rml": mapping_for("read-rule", "xsd:decimal"),
-                "shapesGraph": "http://priv.example/shapes", "state": "proposed" }),
+                "shapes_graph": "http://priv.example/shapes", "state": "proposed" }),
     )
     .await;
     assert_eq!(st, StatusCode::CREATED, "{txt}");
@@ -951,7 +954,7 @@ async fn a_dry_run_is_shaped_only_by_graphs_its_caller_may_read() {
         &app,
         &proposer,
         "read-rule",
-        json!({ "mapping": "proposal", "table": "products", "sampleSize": 1 }),
+        json!({ "mapping": "proposal", "table": "products", "sample_size": 1 }),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
@@ -1001,7 +1004,7 @@ async fn a_dry_run_is_shaped_only_by_graphs_its_caller_may_read() {
             Some(&model_shapes),
         )
         .unwrap();
-    let body = sample(json!({ "model": "m-priv", "modelVersion": "1.0.0" }));
+    let body = sample(json!({ "model": "m-priv", "model_version": "1.0.0" }));
     let (st, _, txt) = dry_run(&app, &proposer, "read-rule", body.clone()).await;
     assert_eq!(st, StatusCode::OK, "{txt}");
     assert!(

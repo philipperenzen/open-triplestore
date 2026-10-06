@@ -110,7 +110,6 @@ fn lex(row: &oxigraph::sparql::QuerySolution, var: &str) -> Option<String> {
 
 /// One validation result on the item's subject.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct Violation {
     /// The constraint as the engine names it: `sh:minInclusive 0`,
     /// `sh:maxInclusive 1000`, `sh:minCount 1`, `sh:datatype <…>`.
@@ -148,7 +147,6 @@ fn plain_iri(path: &str) -> String {
 
 /// A change the fixer made, or would make.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct Fix {
     /// `sign-typo` or `clamp`.
     pub rule: String,
@@ -159,7 +157,6 @@ pub struct Fix {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct ReviewItem {
     pub id: String,
     pub iri: String,
@@ -465,7 +462,6 @@ pub fn delete_for_source(store: &TripleStore, source_id: &str) -> Result<(), Str
 
 /// What the fixer would do to an item.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct FixPlan {
     pub fixes: Vec<Fix>,
     /// The change as an RDF Patch against the candidate graph.
@@ -793,7 +789,7 @@ pub async fn get_item(
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct StatusRequest {
     pub status: String,
     pub note: Option<String>,
@@ -831,7 +827,7 @@ pub async fn set_status(
 }
 
 #[derive(Debug, Default, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct AutofixRequest {
     /// `false` previews the patch; `true` applies it to the candidate graph.
     #[serde(default)]
@@ -839,7 +835,6 @@ pub struct AutofixRequest {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct AutofixResponse {
     pub item: String,
     pub applied: bool,
@@ -888,14 +883,13 @@ pub async fn autofix(
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct Suggestion {
     pub item: String,
     pub model: String,
     /// Always false: a suggestion is never applied by this endpoint.
     pub applied: bool,
     /// Whether the offending values went to the model (the datasource's
-    /// `allowModelAssist`), or only the constraints.
+    /// `allow_model_assist`), or only the constraints.
     pub values_shared: bool,
     /// The model's answer: `{explanation, replacement?}` when it answered as
     /// asked, else its text under `text`.
@@ -918,7 +912,7 @@ Never invent data. Answer with JSON only: {\"explanation\": string, \"replacemen
 /// nothing; a suggestion is applied by a human through the status and
 /// patch paths.
 ///
-/// What leaves the deployment follows the datasource's `allowModelAssist`:
+/// What leaves the deployment follows the datasource's `allow_model_assist`:
 /// with it, the constraint, the path and the offending value; without it,
 /// the constraint and the path only, the value withheld — the same rule the
 /// proposer is held to.
@@ -984,7 +978,7 @@ pub async fn suggest(
 
 /// Items awaiting someone across every datasource: opened, gathering or
 /// corrected but not yet decided or promoted. The metrics endpoint's
-/// `reviewQueueDepth`.
+/// `review_queue_depth`.
 pub fn queue_depth(store: &TripleStore) -> u64 {
     let closed = ["valid", "approved", "rejected", "promoted"]
         .iter()

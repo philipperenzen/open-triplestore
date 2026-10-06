@@ -31,7 +31,7 @@
 //! `rml:null ""` (RML-IO), which keeps `rr:tableName` logical sources, and so
 //! join pushdown and watermark runs. A mapping that has to behave the same
 //! under a processor without `rml:null` can be converted with
-//! `emptyAsNull=true`: the logical source then becomes a query reading each
+//! `empty_as_null=true`: the logical source then becomes a query reading each
 //! text-valued column through `NULLIF(col, '')`, which is opaque to the
 //! catalogue, so joins are indexed rather than pushed down and watermark runs
 //! are not available. Either way the choice is reported back as a warning.
@@ -75,7 +75,6 @@ fn e_err(entity: &str, reason: impl Into<String>) -> LegacyError {
 
 /// What a conversion produced.
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct Converted {
     pub rml: String,
     pub triples_maps: usize,
@@ -160,12 +159,12 @@ pub fn convert(yaml: &str, source_id: &str, empty_as_null: bool) -> Result<Conve
         "logical sources are queries reading text columns through NULLIF(col, ''), so an empty \
          cell produces no triple under any RML processor; a query is opaque to the catalogue, \
          so joins are indexed rather than pushed down and watermark runs are not available — \
-         convert with emptyAsNull=false to keep rr:tableName"
+         convert with empty_as_null=false to keep rr:tableName"
             .to_string()
     } else {
         "logical sources are rr:tableName with rml:null \"\" (RML-IO), so an empty cell \
          produces no triple, as the legacy transformer did; a processor that does not read \
-         rml:null would emit an empty literal instead — convert with emptyAsNull=true for a \
+         rml:null would emit an empty literal instead — convert with empty_as_null=true for a \
          mapping that behaves the same everywhere"
             .to_string()
     });
@@ -720,7 +719,7 @@ fn quote(ident: &str) -> String {
 // ─────────────────────────────── HTTP ───────────────────────────────
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ConvertRequest {
     /// `sql2rdf` — the only legacy format there is.
     pub format: String,

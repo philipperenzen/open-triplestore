@@ -1250,7 +1250,7 @@ pub async fn patch_version_data(
             return Err(AppError::Conflict(json!({
                 "error": "stale_revision",
                 "message": "This draft was modified since you loaded it. Reload or start a branch.",
-                "currentRevision": current_revision,
+                "current_revision": current_revision,
             })));
         }
     }
@@ -1331,7 +1331,7 @@ pub async fn patch_version_data(
     use axum::http::HeaderValue;
     use axum::response::Response;
     let mut resp = Response::new(axum::body::Body::from(
-        json!({ "currentRevision": new_revision }).to_string(),
+        json!({ "current_revision": new_revision }).to_string(),
     ));
     *resp.status_mut() = StatusCode::OK;
     resp.headers_mut().insert(
@@ -2455,7 +2455,7 @@ pub async fn publish_version(
     Ok(Json(json!({
         "status": "published",
         "version": ver,
-        "versionIRI": version_iri,
+        "version_iri": version_iri,
     })))
 }
 

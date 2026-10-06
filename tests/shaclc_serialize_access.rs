@@ -41,7 +41,7 @@ async fn serialize(app: &axum::Router, token: Option<&str>, graph: &str) -> (Sta
     if let Some(t) = token {
         b = b.header(header::AUTHORIZATION, format!("Bearer {t}"));
     }
-    let body = format!(r#"{{"shapesGraphIri":"{graph}"}}"#);
+    let body = format!(r#"{{"shapes_graph_iri":"{graph}"}}"#);
     let resp = app
         .clone()
         .oneshot(b.body(Body::from(body)).unwrap())

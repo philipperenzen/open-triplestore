@@ -162,7 +162,7 @@ async fn register_source(app: &Router, token: &str, id: &str, db: &Path) {
         token,
         json!({
             "id": id, "name": id, "dialect": "sqlite",
-            "database": db.to_string_lossy(), "readOnly": true, "statementTimeoutMs": 5000,
+            "database": db.to_string_lossy(), "read_only": true, "statement_timeout_ms": 5000,
             "credential": "env:OTS_REVIEW_TEST_SECRET",
         }),
     )
@@ -176,7 +176,7 @@ async fn register_mapping(app: &Router, token: &str, id: &str, source_id: &str) 
         Method::POST,
         "/api/mappings",
         token,
-        json!({ "id": id, "title": id, "rml": mapping_for(source_id), "shapesGraph": SHAPES_GRAPH }),
+        json!({ "id": id, "title": id, "rml": mapping_for(source_id), "shapes_graph": SHAPES_GRAPH }),
     )
     .await;
     assert_eq!(st, StatusCode::CREATED, "register mapping {id}: {txt}");
@@ -275,7 +275,7 @@ async fn a_scoped_service_token_reads_profiles_and_proposes_but_never_approves()
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
-    assert_eq!(g["autoThreshold"], 0.9);
+    assert_eq!(g["auto_threshold"], 0.9);
     // …but not the admin's view of the same datasource.
     let (st, src, _) = req(
         &app,
@@ -295,7 +295,7 @@ async fn a_scoped_service_token_reads_profiles_and_proposes_but_never_approves()
         "/api/mappings",
         &proposer,
         json!({ "id": "proposal", "title": "Proposed by the service", "rml": mapping_for("proposer"),
-                "shapesGraph": SHAPES_GRAPH, "state": "proposed" }),
+                "shapes_graph": SHAPES_GRAPH, "state": "proposed" }),
     )
     .await;
     assert_eq!(st, StatusCode::CREATED, "{txt}");
@@ -340,7 +340,7 @@ async fn a_scoped_service_token_reads_profiles_and_proposes_but_never_approves()
         Method::POST,
         "/api/sources/proposer/dry-run",
         &proposer,
-        json!({ "mapping": "proposal", "sampleSize": 3 }),
+        json!({ "mapping": "proposal", "sample_size": 3 }),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
@@ -369,7 +369,7 @@ async fn a_scoped_service_token_reads_profiles_and_proposes_but_never_approves()
         Method::PUT,
         "/api/sources/gates",
         &proposer,
-        json!({ "autoThreshold": 0.5 }),
+        json!({ "auto_threshold": 0.5 }),
     )
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
@@ -433,7 +433,7 @@ async fn decisions_are_distinct_prov_outcomes_and_reviews_list_them() {
         decide(json!({ "decision": "reject", "confidence": 0.42, "note": "wrong table" })).await;
     assert_eq!(st, StatusCode::CREATED, "{txt}");
     assert_eq!(d["outcome"], "reject", "{txt}");
-    assert_eq!(d["mappingVersion"], 1, "{txt}");
+    assert_eq!(d["mapping_version"], 1, "{txt}");
     let (_, m, _) = req(
         &app,
         Method::GET,

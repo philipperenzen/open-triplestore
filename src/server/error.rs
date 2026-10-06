@@ -83,13 +83,13 @@ impl IntoResponse for AppError {
                     "results": report.results.iter().map(|r| {
                         let mut result = serde_json::json!({
                             "severity": format!("{:?}", r.severity),
-                            "focusNode": r.focus_node,
+                            "focus_node": r.focus_node,
                             "path": r.path,
                             "value": r.value,
                             "message": r.message,
-                            "sourceShape": r.source_shape,
-                            "sourceConstraint": r.source_constraint,
-                            "sourceConstraintComponent": r.source_constraint_component,
+                            "source_shape": r.source_shape,
+                            "source_constraint": r.source_constraint,
+                            "source_constraint_component": r.source_constraint_component,
                         });
                         // SHACL-AF result annotations, only where declared.
                         if !r.annotations.is_empty() {

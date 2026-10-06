@@ -3578,7 +3578,7 @@ fn browse_blank_node_scan(
         .collect();
     let mut body = serde_json::json!({
         "triples": triples,
-        "hasMore": total > offset.saturating_add(limit),
+        "has_more": total > offset.saturating_add(limit),
         "limit": limit,
         "offset": offset,
     });
@@ -3906,7 +3906,7 @@ pub struct BrowseTripleParams {
     pub object: Option<String>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
-    /// Opt-in exact row count. When omitted, the response returns `hasMore`
+    /// Opt-in exact row count. When omitted, the response returns `has_more`
     /// via a cheap LIMIT+1 probe instead of a full COUNT.
     pub count: Option<bool>,
     /// Filter mode: `"exact"` (default — match IRIs/literals verbatim) or
@@ -4034,7 +4034,7 @@ pub async fn browse_graphs(
 fn empty_browse_body(limit: usize, offset: usize, want_count: bool) -> serde_json::Value {
     let mut body = serde_json::json!({
         "triples": [],
-        "hasMore": false,
+        "has_more": false,
         "limit": limit,
         "offset": offset,
     });
@@ -4865,7 +4865,7 @@ pub async fn browse_triples(
     // caused 20s client timeouts. Pagination still works via stable OFFSET/LIMIT.
     //
     // By default we now skip the COUNT query entirely and issue a LIMIT+1 probe
-    // to derive `hasMore`. The exact total is opt-in via ?count=true — the
+    // to derive `has_more`. The exact total is opt-in via ?count=true — the
     // previous unconditional COUNT(*) was the main reason /browse took >1 min.
     //
     // Multi-graph scoping uses VALUES ?g { ... } rather than one FROM NAMED per
@@ -5013,7 +5013,7 @@ pub async fn browse_triples(
 
     let mut body = serde_json::json!({
         "triples": triples,
-        "hasMore": has_more,
+        "has_more": has_more,
         "limit": limit,
         "offset": offset,
     });
@@ -9895,7 +9895,7 @@ pub async fn shaclc_parse(
 
 /// POST /api/shaclc/serialize — convert a shapes graph (by IRI) from the store → SHACLC
 ///
-/// Body: JSON `{"shapesGraphIri": "urn:..."}` or the IRI directly as plain text.
+/// Body: JSON `{"shapes_graph_iri": "urn:..."}` or the IRI directly as plain text.
 /// Requires a token, and the caller must be allowed to read the graph they
 /// name: the handler reads whatever IRI it is given straight out of the
 /// store, so without that check any caller could read any graph.
@@ -9908,16 +9908,16 @@ pub async fn shaclc_serialize(
     let body_str = String::from_utf8(body.to_vec())
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid UTF-8".to_string()))?;
 
-    // Accept both plain IRI text and JSON {"shapesGraphIri": "..."}
+    // Accept both plain IRI text and JSON {"shapes_graph_iri": "..."}
     let shapes_iri = if body_str.trim().starts_with('{') {
         let v: serde_json::Value = serde_json::from_str(&body_str)
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid JSON: {e}")))?;
-        v["shapesGraphIri"]
+        v["shapes_graph_iri"]
             .as_str()
             .ok_or_else(|| {
                 (
                     StatusCode::BAD_REQUEST,
-                    "Missing shapesGraphIri field".to_string(),
+                    "Missing shapes_graph_iri field".to_string(),
                 )
             })?
             .to_string()

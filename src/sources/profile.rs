@@ -641,7 +641,7 @@ fn internal(message: impl std::fmt::Display) -> (StatusCode, String) {
 /// silently defaulting to the empty list would profile the whole replica,
 /// which is the one thing a narrowing request must never turn into.
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ProfileRequest {
     /// Tables and views to profile. Omitted or empty profiles everything the
     /// catalogue lists — narrow it when a replica holds one table nobody
@@ -683,7 +683,6 @@ impl ProfileRequest {
 /// A profiling run's answer. Counts and hashes only: the values live in the
 /// profile graph, where the code-list rule applies to them.
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ProfileResponse {
     pub source: String,
     pub version: u32,
@@ -698,7 +697,6 @@ pub struct ProfileResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct TableSummary {
     pub table: String,
     pub kind: &'static str,

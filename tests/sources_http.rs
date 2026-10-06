@@ -188,10 +188,10 @@ fn source_body(id: &str, db: &Path, credential: &str, dataset: Option<&str>) -> 
         "dialect": "sqlite",
         "database": db.to_string_lossy(),
         "credential": credential,
-        "readOnly": true,
-        "statementTimeoutMs": 5000,
-        "watermarkColumn": "updated_at",
-        "allowModelAssist": false,
+        "read_only": true,
+        "statement_timeout_ms": 5000,
+        "watermark_column": "updated_at",
+        "allow_model_assist": false,
     });
     if let Some(ds) = dataset {
         b["dataset"] = json!(ds);
@@ -244,7 +244,7 @@ async fn register_mapping(
 ) -> Value {
     let mut body = json!({ "id": id, "title": "Products mapping", "rml": mapping_for(source_id) });
     if let Some(s) = shapes {
-        body["shapesGraph"] = json!(s);
+        body["shapes_graph"] = json!(s);
     }
     let (st, v, txt) = req(app, Method::POST, "/api/mappings", token, body).await;
     assert_eq!(st, StatusCode::CREATED, "register mapping: {txt}");
@@ -310,7 +310,7 @@ async fn env_and_file_references_connect_and_are_never_expanded() {
             "response carries the reference: {txt}"
         );
         assert_eq!(v["iri"], format!("urn:source:{id}"));
-        assert_eq!(v["readOnly"], true);
+        assert_eq!(v["read_only"], true);
         assert!(
             !txt.contains(DB_PASSWORD),
             "registration response leaked the secret: {txt}"
@@ -355,8 +355,11 @@ async fn env_and_file_references_connect_and_are_never_expanded() {
             .find(|t| t["name"] == "products")
             .unwrap();
         assert!(products["columns"].as_array().unwrap().len() >= 5, "{txt}");
-        assert_eq!(products["primaryKey"], json!(["product_id"]), "{txt}");
-        assert_eq!(products["foreignKeys"][0]["refTable"], "suppliers", "{txt}");
+        assert_eq!(products["primary_key"], json!(["product_id"]), "{txt}");
+        assert_eq!(
+            products["foreign_keys"][0]["ref_table"], "suppliers",
+            "{txt}"
+        );
     }
 
     // The list carries references only.
@@ -449,7 +452,7 @@ async fn malformed_or_unresolvable_references_are_rejected() {
     }
     // A read-write account is refused: read-only is not optional.
     let mut body = source_body("src-rw", &db, "env:OTS_TEST_DB_PASSWORD", None);
-    body["readOnly"] = json!(false);
+    body["read_only"] = json!(false);
     let (st, _, txt) = req(&app, Method::POST, "/api/sources", &token, body).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "read-write source: {txt}");
     // An unknown dialect is refused with the list of what is compiled in.
@@ -558,8 +561,8 @@ async fn run_materialises_swaps_and_rolls_back_without_rerunning() {
     let run1_id = run1["id"].as_str().unwrap().to_string();
     let graph1 = run1["graph"].as_str().unwrap().to_string();
     assert_eq!(graph1, format!("urn:run:{run1_id}"));
-    assert_eq!(run1["rowsExtracted"], 5, "3 products + 2 suppliers: {txt}");
-    let triples1 = run1["triplesProduced"].as_u64().unwrap();
+    assert_eq!(run1["rows_extracted"], 5, "3 products + 2 suppliers: {txt}");
+    let triples1 = run1["triples_produced"].as_u64().unwrap();
     assert!(triples1 >= 12, "{txt}");
     let (_, detail1, _) = req(
         &app,
@@ -570,7 +573,7 @@ async fn run_materialises_swaps_and_rolls_back_without_rerunning() {
     )
     .await;
     assert_eq!(
-        detail1["graphTriples"].as_u64().unwrap(),
+        detail1["graph_triples"].as_u64().unwrap(),
         triples1,
         "the run graph holds what it produced"
     );
@@ -677,7 +680,7 @@ async fn run_materialises_swaps_and_rolls_back_without_rerunning() {
     let run2_id = run2["id"].as_str().unwrap().to_string();
     let graph2 = run2["graph"].as_str().unwrap().to_string();
     assert_ne!(graph2, graph1);
-    assert_eq!(run2["previousGraph"], graph1, "{txt}");
+    assert_eq!(run2["previous_graph"], graph1, "{txt}");
     let (_, src, _) = req(
         &app,
         Method::GET,
@@ -697,7 +700,7 @@ async fn run_materialises_swaps_and_rolls_back_without_rerunning() {
     )
     .await;
     assert_eq!(
-        demoted["graphTriples"].as_u64().unwrap(),
+        demoted["graph_triples"].as_u64().unwrap(),
         triples1,
         "demoted graph is kept: {txt}"
     );
@@ -814,7 +817,7 @@ async fn run_materialises_swaps_and_rolls_back_without_rerunning() {
     .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
     assert!(m["runs"]["total"].as_u64().unwrap() >= 2, "{txt}");
-    assert!(m["rowsExtracted"].as_u64().unwrap() >= 10, "{txt}");
+    assert!(m["rows_extracted"].as_u64().unwrap() >= 10, "{txt}");
 
     // Run details are readable, and a run that is not production can be deleted.
     let (st, detail, txt) = req(
@@ -1011,7 +1014,7 @@ async fn failing_shacl_gate_leaves_production_untouched_and_keeps_candidate() {
     assert_eq!(detail["status"], "rejected");
     assert_eq!(detail["shacl"]["conforms"], false, "{txt}");
     assert!(
-        detail["graphTriples"].as_u64().unwrap() > 0,
+        detail["graph_triples"].as_u64().unwrap() > 0,
         "the candidate graph is kept for inspection: {txt}"
     );
     let (_, graphs, _) = req(
@@ -1131,12 +1134,12 @@ ex:SuppliersMap a rr:TriplesMap ;
     )
     .await;
     assert_eq!(st, StatusCode::CREATED, "{txt}");
-    assert_eq!(full["rowsExtracted"], 5, "3 products + 2 suppliers");
+    assert_eq!(full["rows_extracted"], 5, "3 products + 2 suppliers");
     assert_eq!(
         full["watermark"], "2026-01-03",
         "a full run records the cursor an incremental one resumes from: {txt}"
     );
-    let full_triples = full["triplesProduced"].as_u64().unwrap();
+    let full_triples = full["triples_produced"].as_u64().unwrap();
 
     // One row changes and one appears, both past the cursor.
     {
@@ -1160,7 +1163,7 @@ ex:SuppliersMap a rr:TriplesMap ;
     assert_eq!(inc["status"], "succeeded");
     assert_eq!(inc["mode"], "watermark");
     assert_eq!(
-        inc["rowsExtracted"], 4,
+        inc["rows_extracted"], 4,
         "2 changed products + 2 suppliers, which carry no watermark column: {txt}"
     );
     assert_eq!(inc["watermark"], "2026-02-02", "the cursor advanced: {txt}");
@@ -1226,7 +1229,7 @@ ex:SuppliersMap a rr:TriplesMap ;
     )
     .await;
     assert!(
-        detail["graphTriples"].as_u64().unwrap() > full_triples,
+        detail["graph_triples"].as_u64().unwrap() > full_triples,
         "the increment added an entity to the whole graph, it did not replace it: {detail}"
     );
     let (_, src, _) = req(&app, Method::GET, "/api/sources/inc", &token, Value::Null).await;
@@ -1254,7 +1257,7 @@ async fn a_watermark_run_needs_a_watermark_column() {
     let app = test_app(state);
     let db = fresh_sqlite("nocursor");
     let mut body = source_body("nocursor", &db, "env:OTS_TEST_DB_PASSWORD", None);
-    body.as_object_mut().unwrap().remove("watermarkColumn");
+    body.as_object_mut().unwrap().remove("watermark_column");
     let (st, _, txt) = req(&app, Method::POST, "/api/sources", &token, body).await;
     assert_eq!(st, StatusCode::CREATED, "{txt}");
     register_mapping(&app, &token, "nocursor-map", "nocursor", None).await;
@@ -1277,7 +1280,7 @@ async fn a_watermark_run_needs_a_watermark_column() {
     )
     .await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
-    assert!(txt.contains("watermarkColumn"), "{txt}");
+    assert!(txt.contains("watermark_column"), "{txt}");
 }
 
 /// A frozen version records the term-generation rules it runs under. A new

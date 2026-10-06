@@ -281,7 +281,7 @@ pub async fn test_source(
     Ok(Json(match probe {
         Ok((version, tables)) => json!({
             "ok": true,
-            "serverVersion": version,
+            "server_version": version,
             "tables": tables,
             "allowlisted": true,
         }),
@@ -790,7 +790,7 @@ pub async fn create_run(
         None => crate::rml::checks::OnDataError::Abort,
         Some(v) => crate::rml::checks::OnDataError::parse(v).ok_or_else(|| {
             bad(format!(
-                "unknown onDataError '{v}'; expected abort (the default) or skip"
+                "unknown on_data_error '{v}'; expected abort (the default) or skip"
             ))
         })?,
     };

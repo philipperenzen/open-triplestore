@@ -155,7 +155,7 @@ async fn a_postgresql_datasource_is_profiled_mapped_and_materialised_over_http()
         json!({
             "id": "pgsrc", "name": "A PostgreSQL source", "dialect": "postgresql",
             "host": t.host, "port": t.port, "database": t.db, "username": t.user,
-            "credential": "env:OTS_PG_HTTP_TEST_PASSWORD", "statementTimeoutMs": 5000,
+            "credential": "env:OTS_PG_HTTP_TEST_PASSWORD", "statement_timeout_ms": 5000,
             "options": { "search_path": schema },
         }),
     )
@@ -179,15 +179,15 @@ async fn a_postgresql_datasource_is_profiled_mapped_and_materialised_over_http()
         .iter()
         .find(|tb| tb["name"] == "products")
         .unwrap_or_else(|| panic!("{txt}"));
-    assert_eq!(products["primaryKey"][0], "product_id");
+    assert_eq!(products["primary_key"][0], "product_id");
     let price = products["columns"]
         .as_array()
         .unwrap()
         .iter()
         .find(|c| c["name"] == "price")
         .unwrap();
-    assert_eq!(price["genericType"], "decimal");
-    assert_eq!(price["nativeType"], "numeric(10,2)");
+    assert_eq!(price["generic_type"], "decimal");
+    assert_eq!(price["native_type"], "numeric(10,2)");
 
     let (st, profile, txt) = req(
         &app,
@@ -229,7 +229,7 @@ async fn a_postgresql_datasource_is_profiled_mapped_and_materialised_over_http()
         Method::POST,
         "/api/sources/pgsrc/dry-run",
         &admin,
-        json!({ "mapping": "pg-products", "sampleSize": 2 }),
+        json!({ "mapping": "pg-products", "sample_size": 2 }),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
@@ -245,7 +245,7 @@ async fn a_postgresql_datasource_is_profiled_mapped_and_materialised_over_http()
     .await;
     assert_eq!(st, StatusCode::CREATED, "{txt}");
     assert_eq!(run["status"], "succeeded");
-    assert_eq!(run["rowsExtracted"], 3);
+    assert_eq!(run["rows_extracted"], 3);
     let graph = run["graph"].as_str().unwrap().to_string();
 
     let resp = app

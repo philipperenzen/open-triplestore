@@ -87,7 +87,7 @@ impl Outcome {
 }
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct DecisionRequest {
     /// `approve`, `edit` or `reject`.
     pub decision: String,
@@ -100,7 +100,6 @@ pub struct DecisionRequest {
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct Decision {
     pub id: String,
     pub iri: String,
@@ -300,7 +299,7 @@ pub fn provenance_turtle(store: &TripleStore, mapping_id: &str) -> String {
 // ───────────────────────────── Calibration ─────────────────────────────
 
 #[derive(Debug, Clone, Copy, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct CalibrationPoint {
     /// The confidence the proposal carried, in `0..=1`.
     pub confidence: f64,
@@ -309,7 +308,7 @@ pub struct CalibrationPoint {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct CalibrationRequest {
     /// Points to fit. Absent: every recorded decision that carries a
     /// confidence, an approval counting as accepted.
@@ -317,7 +316,6 @@ pub struct CalibrationRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct CurvePoint {
     pub confidence: f64,
     /// The acceptance rate the fit assigns to this confidence.
@@ -325,7 +323,6 @@ pub struct CurvePoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct Calibration {
     /// `body` or `decisions`.
     pub source: &'static str,
@@ -342,7 +339,6 @@ pub struct Calibration {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct BrierScore {
     pub raw: f64,
     pub calibrated: f64,

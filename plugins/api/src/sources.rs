@@ -141,7 +141,6 @@ pub enum TableKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ColumnInfo {
     pub name: String,
     /// The dialect's own type name (`character varying(120)`, `INTEGER`).
@@ -154,7 +153,6 @@ pub struct ColumnInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ForeignKey {
     pub columns: Vec<String>,
     pub ref_table: String,
@@ -162,7 +160,6 @@ pub struct ForeignKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct IndexInfo {
     pub name: String,
     pub columns: Vec<String>,
@@ -170,7 +167,6 @@ pub struct IndexInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct TableInfo {
     pub schema: Option<String>,
     pub name: String,
@@ -442,7 +438,6 @@ pub struct NumericSummary {
 /// emitted only for a code-list column ([`is_low_cardinality`]) — a code list
 /// with its values withheld would be useless to the reader it exists for.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ColumnProfile {
     pub name: String,
     /// 1-based position in the table.
@@ -477,7 +472,6 @@ pub struct ColumnProfile {
 /// [`sampled_rows`](Self::sampled_rows) before trusting a detection, and read
 /// [`DetectedPattern`] before reading anything into one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct TableProfile {
     pub table: String,
     pub kind: TableKind,
