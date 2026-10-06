@@ -356,3 +356,15 @@ an `UPSTREAM-PR-*.md` draft beside the crate.
    typed `rdf:JSON`, because `@json` reads back as the canonical form, which is
    another literal. A lexical form that is not JSON fails the serialization with
    `invalid JSON literal`. W3C json-ld-api fromRdf `js08`, `js09`.
+
+6. **Well-formed RDF collections become `@list`** (`src/from_rdf.rs`,
+   `ListState` / `ListConversion`, Serialize RDF as JSON-LD steps 5.7.6–5.7.8
+   and 6.4; `UPSTREAM-PR-6-list-conversion.md`). The streaming writer holds back
+   the quads a list conversion can rewrite or drop — those whose object is a
+   blank node or `rdf:nil`, and the `rdf:first`, `rdf:rest` and
+   `rdf:type rdf:List` quads of blank nodes — and converts at `finish`; every
+   other quad is written as it arrives. A list node's `rdf:type rdf:List` goes
+   with it, as the algorithm says (the triple is entailed by the RDF Schema
+   axiom `rdf:first rdfs:domain rdf:List`); a list node with any other property,
+   used twice, or used in two graphs stays a node object with every quad.
+   `finish` now returns `io::Result`. W3C json-ld-api fromRdf `0016`.

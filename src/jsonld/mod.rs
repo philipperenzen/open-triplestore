@@ -434,4 +434,95 @@ mod tests {
             }
         }
     }
+
+    const FIRST: &str = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#first>";
+    const REST: &str = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#rest>";
+    const NIL: &str = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#nil>";
+    const TYPE: &str = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>";
+    const LIST: &str = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#List>";
+
+    /// fromRdf 0016: a well-formed list becomes @list, and the
+    /// `rdf:type rdf:List` of its nodes goes with them (§8.4.2 step 6.4).
+    #[test]
+    fn a_well_formed_list_is_written_as_a_list_object() {
+        let doc = serialise(&format!(
+            "<http://e/s> <http://e/list> _:a .\n\
+             _:a {TYPE} {LIST} .\n_:a {FIRST} \"A\" .\n_:a {REST} _:b .\n\
+             _:b {FIRST} \"B\" .\n_:b {REST} {NIL} .\n_:b {TYPE} {LIST} .\n"
+        ))
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        let nodes = v.as_array().unwrap();
+        assert_eq!(nodes.len(), 1, "the list nodes are gone: {doc}");
+        assert_eq!(
+            nodes[0]["http://e/list"][0]["@list"],
+            serde_json::json!([{"@value": "A"}, {"@value": "B"}]),
+            "{doc}"
+        );
+        assert!(!doc.contains("22-rdf-syntax-ns#List"), "{doc}");
+    }
+
+    /// A list node with a property of its own is not well-formed: the list
+    /// stays node objects, with every quad.
+    #[test]
+    fn a_list_with_an_extra_property_keeps_every_quad() {
+        let nq = format!(
+            "<http://e/s> <http://e/list> _:a .\n\
+             _:a {FIRST} \"A\" .\n_:a {REST} {NIL} .\n_:a {TYPE} {LIST} .\n\
+             _:a <http://e/note> \"kept\" .\n"
+        );
+        let doc = serialise(&nq).unwrap();
+        assert!(!doc.contains("@list\":[{"), "{doc}");
+        assert_eq!(read_back(&doc).len(), 5, "{doc}");
+    }
+
+    /// A list node used twice, or in two graphs, is not referenced once.
+    #[test]
+    fn a_shared_list_node_is_not_folded() {
+        for nq in [
+            format!(
+                "<http://e/s> <http://e/p> _:a .\n<http://e/t> <http://e/p> _:a .\n\
+                 _:a {FIRST} \"A\" .\n_:a {REST} {NIL} .\n"
+            ),
+            format!(
+                "<http://e/s> <http://e/p> _:a <http://e/g1> .\n\
+                 <http://e/s> <http://e/p> _:a <http://e/g2> .\n\
+                 _:a {FIRST} \"A\" <http://e/g1> .\n_:a {REST} {NIL} <http://e/g1> .\n"
+            ),
+        ] {
+            let doc = serialise(&nq).unwrap();
+            assert!(doc.contains(FIRST.trim_matches(['<', '>'])), "{doc}");
+            assert_eq!(read_back(&doc).len(), 4, "{doc}");
+        }
+    }
+
+    /// A list that holds itself has no tree form: it stays node objects.
+    #[test]
+    fn a_self_containing_list_stays_node_objects() {
+        let nq = format!("_:a {FIRST} _:a .\n_:a {REST} {NIL} .\n");
+        let doc = serialise(&nq).unwrap();
+        assert_eq!(read_back(&doc).len(), 2, "{doc}");
+    }
+
+    /// Lists of lists nest; a bare rdf:nil object is the empty list; a stream
+    /// with no blank node is written as it comes.
+    #[test]
+    fn nested_and_empty_lists_round_trip() {
+        let nq = format!(
+            "<http://e/s> <http://e/p> _:o .\n\
+             _:o {FIRST} _:i .\n_:o {REST} {NIL} .\n\
+             _:i {FIRST} \"x\" .\n_:i {REST} {NIL} .\n\
+             <http://e/s> <http://e/empty> {NIL} .\n\
+             <http://e/s> <http://e/name> \"n\" <http://e/g> .\n"
+        );
+        let doc = serialise(&nq).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        let text = v.to_string();
+        assert!(
+            text.contains(r#"{"@list":[{"@list":[{"@value":"x"}]}]}"#),
+            "{doc}"
+        );
+        assert!(text.contains(r#"{"@list":[]}"#), "{doc}");
+        assert_eq!(read_back(&doc).len(), 7, "{doc}");
+    }
 }
