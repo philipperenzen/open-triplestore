@@ -1712,6 +1712,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   table is in `docs/shacl.md` ("Migrating from the legacy dialect").
 
 ### Fixed
+- **R2RML: SQL values take their datatype's canonical lexical form.** The
+  natural mapping (R2RML §10.2) writes a `DOUBLE` 30 as `"3.0E1"^^xsd:double`,
+  a decimal as `1.5` / `2.0`, an integer without a sign or leading zeros, and
+  a timestamp or time with a timezone in UTC (`Z`) with no trailing zeros in
+  its seconds; it wrote the value as the database printed it (`30.0`). The
+  store used to canonicalise numeric literals on the way in, which hid this;
+  since it keeps literals as written, five W3C R2RML cases (`R2RMLTC0005a`,
+  `0005b`, `0012a`, `0012e`, `0016b`) failed on every database. Templates
+  get the same form, as §7.3 asks. JSON numbers read under RML-Core, which
+  carry the same natural datatypes, follow the same rule (`1.5` → `1.5E0`).
 - **Triple terms and base direction no longer get lost.** The canonical and
   Skolem blank-node modes now walk into RDF 1.2 triple terms: a blank node
   inside `<<( … )>>` is relabelled or skolemized with the same label as the
