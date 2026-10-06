@@ -272,7 +272,7 @@ futures = "0.3"
 # the UI needs utoipa-swagger-ui's axum integration, and every release of that
 # crate since 8.x targets axum 0.8, whose `Router` cannot be merged into our
 # axum 0.7 one. Adding it back only makes sense as part of an axum 0.8 migration.
-utoipa = { version = "5", features = ["axum_extras"] }
+utoipa = { version = "6", features = ["axum_extras"] }
 
 # SHACL Compact Syntax parser
 nom = "7"
@@ -286,7 +286,7 @@ rstar = "0.13"
 # Exact 3D solid kernel (geometry3d feature). Pure Rust — no native dependency.
 # parry3d-f64 wraps its own glam-backed math types (`parry3d_f64::math::Vector3`);
 # we use that rather than adding a separate `glam`/`nalgebra` dependency, to avoid version skew.
-parry3d-f64 = { version = "0.30", optional = true }
+parry3d-f64 = { version = "0.31", optional = true }
 # Certified constructive solid geometry (sfcgal3d feature only). Wraps the native
 # libSFCGAL C library, so it is excluded from `full` and the default CI build.
 sfcgal = { version = "0.8", optional = true }
@@ -313,7 +313,10 @@ toml = "1"
 # YARRRML and the legacy sql2rdf mapping format are YAML (src/sources/yarrrml).
 # A parser, not a serde data format: those documents have variable shape, so
 # they are walked as a tree rather than deserialised into fixed structs.
-yaml-rust2 = "0.13"
+# Default features off: `encoding` (byte-input decoding) is unused, since
+# documents arrive as `&str`, and it pins `encoding_rs` below 0.8.40, which
+# resolves to a second, 2017 `encoding_rs` 0.7 beside everyone else's 0.8.
+yaml-rust2 = { version = "0.13", default-features = false }
 
 # Compile-time plugin architecture (src/plugins.rs). The API crate is always
 # present (the registry/mount code needs its types); individual plugin crates
