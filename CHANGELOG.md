@@ -2349,6 +2349,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unsatisfiable) are unchanged. See `docs/owl2-dl.md`.
 
 ### Security
+- **Frontend dependencies: DOMPurify 3.4.16 and source-map-js 1.2.2.**
+  DOMPurify up to 3.4.15 could leave event handlers armed in a removed
+  subtree, or return markup that runs on reparse, in `IN_PLACE` mode
+  (GHSA-p98j-92pf-mc4p, GHSA-6688-9rhm-gjv2); source-map-js 1.0.0–1.2.1
+  allowed an event-loop denial of service through section offsets
+  (GHSA-68fv-2mgg-jv7q, high). `package.json` now requires DOMPurify 3.4.16
+  or later.
 - **A signed-in caller's DCAT catalogue was marked `Cache-Control: public`.**
   `/.well-known/void` and `/{org}/.well-known/void` are scoped to the caller
   (their datasets, their readable graphs' statistics), but every response said
