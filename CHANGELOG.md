@@ -657,6 +657,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are listed as a warning. `RUST_LOG` is now in the environment table.
 
 ### Changed
+- **SHACL write gates run in one pass with a defined order.** A Graph Store
+  `PUT`/`POST` and validate-and-commit used to run the Studio gates
+  (`gate_writes` pipelines, validation-layer bindings) and then, separately,
+  the dataset's `shacl_on_write` shapes, staging the graph twice. Every write
+  path now runs all three in one pass over one staged graph, in a documented
+  order — pipelines (own threshold), bindings (`Violation`), then the
+  dataset's `shacl_on_write` shapes (any result refuses) — and answers with
+  the first failing gate's report; the write lands only when all pass. A
+  malformed body on a gated Graph Store write now gets the same answer as on
+  an ungated one. See `docs/shacl.md` "How the write gates combine".
 - **One surface for the identity policy; `eq_ref` in the dataset setting**
   (breaking). `PUT /api/datasets/{id}/identity` is now the only way to set a
   dataset's `owl:sameAs` policy: `PUT …/entailment` no longer takes

@@ -1781,14 +1781,16 @@ fn apply_triple_label_filter(
     Ok(result)
 }
 
-/// If the target graph belongs to a dataset with `shacl_on_write` enabled,
-/// load the incoming data into an in-memory store and validate it against
-/// the dataset's shapes graph. Returns `Err(AppError::ValidationFailed)` if
-/// validation fails. Also enforces SHACL Studio write-gates (pipelines +
-/// validation-layer bindings). Shared with the validate-and-commit path so a
+/// The SHACL write gates of a write to `graph_iri`, in one pass
+/// ([`crate::shacl_studio::gate`]): `gate_writes` pipelines, then
+/// validation-layer bindings, then the owning dataset's `shacl_on_write`
+/// shapes graph. Returns `Err(AppError::ValidationFailed)` with the first
+/// failing gate's report. Shared with the validate-and-commit path so a
 /// commit cannot bypass the dataset's effective shapes. A refusal's report
 /// goes to `writer` (`None`: anonymous) less the shapes they may not read
-/// ([`crate::shacl_studio::gate::report_for_writer`]).
+/// ([`crate::shacl_studio::gate::report_for_writer`]). Every run of the
+/// dataset gate, passing or not, is kept in the dataset's report history as
+/// an `on-write` report.
 pub(crate) fn validate_on_write(
     state: &AppState,
     writer: Option<&AuthenticatedUser>,
@@ -1801,131 +1803,39 @@ pub(crate) fn validate_on_write(
         Some(iri) => iri,
         None => return Ok(()), // default graph — no dataset association
     };
-
-    // SHACL Studio write-gating: consult any pipelines with `gate_writes=true`
-    // whose scope covers this graph. Rejection produces 422 + report via
-    // `AppError::ValidationFailed`. Runs before — and independently of — the
-    // legacy per-dataset `shacl_on_write` gate below, so both can coexist
-    // during the transition.
-    {
-        let studio = crate::shacl_studio::store::ShaclStudioStore::new(state.auth_db.pool());
-        let ctx = crate::shacl_studio::gate::GateContext {
-            main_store: &state.store,
-            auth_db: &state.auth_db,
-            studio: &studio,
-            base_url: &state.base_url,
-            writer,
-        };
-        if let Err(report) =
-            crate::shacl_studio::gate::check_write_gates(ctx, iri, data, format, mode)
-        {
-            return Err(AppError::ValidationFailed(report));
-        }
-    }
-
-    let dataset = match state.auth_db.find_dataset_by_graph_iri(iri) {
-        Ok(Some(ds)) => ds,
-        Ok(None) => return Ok(()), // no owning dataset — no dataset gate
-        // A failed lookup is not "no dataset": it would skip the gate.
-        Err(e) => {
-            return Err(AppError::ValidationFailed(
-                crate::shacl_studio::gate::gate_error(format!(
-                    "looking up the dataset holding <{iri}>: {e}"
-                )),
-            ))
-        }
+    let studio = crate::shacl_studio::store::ShaclStudioStore::new(state.auth_db.pool());
+    let ctx = crate::shacl_studio::gate::GateContext {
+        main_store: &state.store,
+        auth_db: &state.auth_db,
+        studio: &studio,
+        base_url: &state.base_url,
+        writer,
     };
-
-    if !dataset.shacl_on_write {
-        return Ok(());
-    }
-
-    let shapes_graph_iri = match &dataset.shapes_graph_iri {
-        Some(iri) if !iri.is_empty() => iri.clone(),
-        _ => {
-            // Fallback: ontology version fallback no longer supported
-            return Ok(()); // no shapes graph configured
-        }
+    // Continuous mode: record a report for the dataset gate so it shares the
+    // on-demand report history. Best-effort — a storage hiccup must never
+    // block or fail a legitimate write. The report body is data-free, so
+    // there is no Turtle-escaping risk here.
+    let record = |dataset_id: &str,
+                  shapes_graph: &str,
+                  report: &crate::shacl::report::ValidationReport| {
+        let report_ttl = format!(
+            "@prefix sh: <http://www.w3.org/ns/shacl#> .\n[] a sh:ValidationReport ; sh:conforms {} . # {} result(s)\n",
+            report.conforms, report.results_count
+        );
+        let _ = crate::dataset_versions::reports::persist_report(
+            state,
+            dataset_id,
+            None,
+            report.conforms,
+            &report_ttl,
+            Some(iri),
+            Some(shapes_graph),
+            "on-write",
+            None,
+        );
     };
-
-    // Stage the graph's FUTURE contents in a temporary store. For a merge that
-    // is the existing graph plus the payload: validating the payload alone let
-    // a POST adding a second `ex:name` pass `sh:maxCount 1`, and rejected a POST
-    // that supplied one property with `sh:minCount 1` on all the others.
-    let temp = crate::store::TripleStore::in_memory()
-        .map_err(|e| AppError::Internal(format!("Failed to create temp store: {e}")))?;
-    // The functions every query of the live store sees, so the gate computes
-    // what the same run computes outside it.
-    temp.inherit_registered_functions(&state.store);
-    if mode == crate::shacl_studio::gate::WriteMode::Merge {
-        let existing = state
-            .store
-            .dump(oxigraph::io::RdfFormat::Turtle, Some(iri))
-            .map_err(|e| AppError::Internal(format!("Failed to read existing graph: {e}")))?;
-        let existing = String::from_utf8(existing)
-            .map_err(|_| AppError::Internal("Existing graph is not valid UTF-8".to_string()))?;
-        temp.load_str(&existing, oxigraph::io::RdfFormat::Turtle, graph_iri)
-            .map_err(|e| AppError::Internal(format!("Failed to stage existing graph: {e}")))?;
-    }
-    temp.load_str(data, format, graph_iri)
-        .map_err(|e| AppError::BadRequest(format!("Failed to parse incoming data: {e}")))?;
-
-    // Also load the shapes into the temp store from the main store
-    let shapes_data = state
-        .store
-        .dump(oxigraph::io::RdfFormat::Turtle, Some(&shapes_graph_iri))
-        .map_err(|e| AppError::Internal(format!("Failed to load shapes graph: {e}")))?;
-    let shapes_turtle = String::from_utf8(shapes_data)
-        .map_err(|_| AppError::Internal("Shapes graph is not valid UTF-8".to_string()))?;
-    temp.load_str(
-        &shapes_turtle,
-        oxigraph::io::RdfFormat::Turtle,
-        Some(&shapes_graph_iri),
-    )
-    .map_err(|e| AppError::Internal(format!("Failed to load shapes into temp store: {e}")))?;
-
-    let data_graphs = vec![iri.to_string()];
-    // Fail closed: a shapes graph the engine cannot evaluate (an ill-formed
-    // shape, a `sh:sparql` that does not parse) refuses the write with the
-    // same 422 report the Studio gates use, not a 500 and never a 204.
-    let report = crate::shacl::validate(&temp, &shapes_graph_iri, &data_graphs).map_err(|e| {
-        AppError::ValidationFailed(crate::shacl_studio::gate::gate_error(format!(
-            "dataset shapes graph <{shapes_graph_iri}>: {e}"
-        )))
-    })?;
-
-    // Continuous mode (Phase 5): record a report for this validate-on-write so it
-    // shares the on-demand report history. Best-effort — a storage hiccup (or a
-    // minimal report graph) must never block or fail a legitimate write. The
-    // report body is data-free so there is no Turtle-escaping risk here.
-    let report_ttl = format!(
-        "@prefix sh: <http://www.w3.org/ns/shacl#> .\n[] a sh:ValidationReport ; sh:conforms {} . # {} result(s)\n",
-        report.conforms, report.results_count
-    );
-    let _ = crate::dataset_versions::reports::persist_report(
-        state,
-        &dataset.id,
-        None,
-        report.conforms,
-        &report_ttl,
-        Some(iri),
-        Some(&shapes_graph_iri),
-        "on-write",
-        None,
-    );
-
-    if !report.conforms {
-        return Err(AppError::ValidationFailed(
-            crate::shacl_studio::gate::report_for_writer(
-                &state.auth_db,
-                writer,
-                report,
-                &[shapes_graph_iri],
-            ),
-        ));
-    }
-
-    Ok(())
+    crate::shacl_studio::gate::check_write_gates(ctx, iri, data, format, mode, Some(&record))
+        .map_err(AppError::ValidationFailed)
 }
 
 /// Check graph-level write permission for a caller, for a write that runs

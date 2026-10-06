@@ -457,8 +457,9 @@ A shape graph belongs in the Library, not glued to a single dataset. The
   **rejects** writes that meet or exceed the threshold with HTTP **422** and the
   SHACL `ValidationReport` as the body. A binding alone gates (at the default
   `Violation` threshold) — no pipeline required — so graph-attached shapes are
-  enforced wherever the graph is mounted. The legacy per-dataset
-  `shacl_on_write` boolean still works for back-compat and runs alongside.
+  enforced wherever the graph is mounted. The per-dataset `shacl_on_write`
+  flag runs in the same pass, after the pipelines and the bindings (see
+  [How the write gates combine](shacl.md#how-the-write-gates-combine)).
 - **Versioning & branching.** Shape graphs carry a lifecycle and a commit history
   (logged with a `Shapes` commit kind). When a dataset version is snapshotted,
   the dataset's effective bindings are captured into a version-scoped
