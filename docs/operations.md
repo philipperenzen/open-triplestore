@@ -73,7 +73,7 @@ location /ots/ {
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_http_version 1.1;
     proxy_buffering    off;                     # streamed answers (assistant chat, exports)
-    client_max_body_size 1024m;                 # bulk import (OTS_MAX_UPLOAD_MB)
+    client_max_body_size 1024m;                 # bulk import (OTS_MAX_UPLOAD_BYTES)
 }
 ```
 

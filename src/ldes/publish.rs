@@ -208,13 +208,6 @@ fn gate() -> &'static Mutex<Gate> {
     })
 }
 
-fn limit(var: &str, default: usize) -> usize {
-    std::env::var(var)
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(default)
-}
-
 /// A slot in the load gate, released on drop.
 pub struct InFlight {
     dataset_id: String,
@@ -236,8 +229,8 @@ impl Drop for InFlight {
 /// Take a slot for rendering one of `dataset_id`'s stream documents, or
 /// `None` when the server or that stream is at its limit.
 pub fn try_enter(dataset_id: &str) -> Option<InFlight> {
-    let total_limit = limit("OTS_LDES_MAX_IN_FLIGHT", 64);
-    let stream_limit = limit("OTS_LDES_MAX_IN_FLIGHT_PER_STREAM", 16);
+    let total_limit = crate::config::LDES_MAX_IN_FLIGHT.get();
+    let stream_limit = crate::config::LDES_MAX_IN_FLIGHT_PER_STREAM.get();
     let mut g = gate().lock().unwrap_or_else(|p| p.into_inner());
     let current = g.per_stream.get(dataset_id).copied().unwrap_or(0);
     if g.total >= total_limit || current >= stream_limit {

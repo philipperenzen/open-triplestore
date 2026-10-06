@@ -61,24 +61,30 @@ const SPARQL_MAX_TOKENS: u32 = 1024;
 /// Unset or blank, it defaults to a local server on :8000; if nothing runs there,
 /// the AI features show as unavailable.
 pub(crate) fn gateway_base() -> String {
-    env_nonempty("LLM_GATEWAY_URL").unwrap_or_else(|| "http://127.0.0.1:8000".to_string())
+    crate::config::LLM_GATEWAY_URL
+        .get()
+        .unwrap_or_else(|| "http://127.0.0.1:8000".to_string())
 }
 
 /// Model name sent on every completion. Configure with `LLM_MODEL` (an OpenAI model
 /// id, an Ollama tag, a vLLM-served name, …). The per-task overrides `LLM_SPARQL_MODEL`
 /// and `LLM_SHACL_MODEL` fall back to this.
 pub(crate) fn default_model() -> String {
-    env_nonempty("LLM_MODEL").unwrap_or_else(|| "default".to_string())
+    crate::config::LLM_MODEL.get()
 }
 
 /// Model for NL→SPARQL generation and saved-query repair.
 pub(crate) fn sparql_model() -> String {
-    env_nonempty("LLM_SPARQL_MODEL").unwrap_or_else(default_model)
+    crate::config::LLM_SPARQL_MODEL
+        .get()
+        .unwrap_or_else(default_model)
 }
 
 /// Model for the SHACL Studio assistant.
 fn shacl_model() -> String {
-    env_nonempty("LLM_SHACL_MODEL").unwrap_or_else(default_model)
+    crate::config::LLM_SHACL_MODEL
+        .get()
+        .unwrap_or_else(default_model)
 }
 
 /// Model for the Spark chat assistant (`LLM_CHAT_MODEL`).
@@ -88,7 +94,9 @@ fn shacl_model() -> String {
 /// that runs a small local model for cheap NL→SPARQL often wants a stronger one
 /// here. Falls back to `LLM_MODEL` like the other per-task overrides.
 pub(crate) fn chat_model() -> String {
-    env_nonempty("LLM_CHAT_MODEL").unwrap_or_else(default_model)
+    crate::config::LLM_CHAT_MODEL
+        .get()
+        .unwrap_or_else(default_model)
 }
 
 /// Optional bearer token for the endpoint (`LLM_API_KEY`). Required by hosted APIs
@@ -101,13 +109,6 @@ pub(crate) fn chat_model() -> String {
 /// literal `vault:…` string as a bearer token.
 fn api_key() -> Option<String> {
     crate::secrets::env_secret_opt("LLM_API_KEY")
-}
-
-fn env_nonempty(key: &str) -> Option<String> {
-    std::env::var(key)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
 }
 
 /// Shared HTTP client for every gateway call. A fresh `Client::new()` per call
@@ -190,18 +191,11 @@ pub(crate) async fn chat_completion(
 /// platform context can legitimately take more than a minute per completion.
 /// Hosted APIs answer in seconds and are unaffected.
 ///
-/// Raise it with `LLM_TIMEOUT_SECONDS` when serving a large model from local
+/// Raise it with `LLM_TIMEOUT_SECS` when serving a large model from local
 /// hardware: past this budget the turn fails outright, so a 20B+ model on CPU
 /// needs a bigger one to answer at all.
-const CHAT_COMPLETION_TIMEOUT_DEFAULT_SECS: u64 = 120;
-
 fn chat_completion_timeout() -> Duration {
-    Duration::from_secs(
-        env_nonempty("LLM_TIMEOUT_SECONDS")
-            .and_then(|v| v.parse::<u64>().ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(CHAT_COMPLETION_TIMEOUT_DEFAULT_SECS),
-    )
+    crate::config::LLM_TIMEOUT.get()
 }
 
 /// Send a full multi-turn conversation to the gateway and return the assistant's
@@ -866,7 +860,7 @@ pub struct LlmServiceHealth {
 /// Whether `LLM_GATEWAY_URL` holds a non-empty value (after trimming). When it
 /// is unset or blank, [`gateway_base`] falls back to its built-in local default.
 fn gateway_configured() -> bool {
-    env_nonempty("LLM_GATEWAY_URL").is_some()
+    crate::config::LLM_GATEWAY_URL.get().is_some()
 }
 
 /// The model ids in an OpenAI-style model list: a top-level `data` array of
@@ -1590,10 +1584,10 @@ const ANCHOR_LINE_LIMIT: usize = 8;
 const ORIENTATION_GRAPH_LIMIT: usize = 6;
 /// Cap rows returned from a chat-issued SPARQL query (both to the model and the UI).
 const MAX_CHAT_QUERY_ROWS: usize = 50;
-/// How many `SPARQL:` rounds the model may use within one user turn. Feeding rows
-/// (or the error, for self-repair) back after each round lets it e.g. count first
-/// and then fetch geometry for a map, while keeping latency and tokens bounded.
-const MAX_CHAT_QUERY_ROUNDS: usize = 3;
+// How many `SPARQL:` rounds the model may use within one user turn
+// (`LLM_CHAT_MAX_ROUNDS`, default 3). Feeding rows (or the error, for
+// self-repair) back after each round lets it e.g. count first and then fetch
+// geometry for a map, while keeping latency and tokens bounded.
 /// Per-cell character budgets when rendering result rows into the follow-up prompt.
 /// WKT geometry cells get a larger budget so small geometries survive verbatim into
 /// a ```map widget; anything longer is truncated with '…' and the system prompt
@@ -1620,34 +1614,26 @@ const CHAT_TABLE_MAX_CHARS: usize = 6000;
 /// — after which the model "answers" from whatever fragments survive. Unset or
 /// 0 disables client-side budgeting (the right choice for large-context APIs).
 fn llm_context_tokens() -> Option<usize> {
-    env_nonempty("LLM_CONTEXT_TOKENS")
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n > 0)
+    crate::config::LLM_CONTEXT_TOKENS.get().filter(|&n| n > 0)
 }
 
 /// How many `SPARQL:` rounds one turn may use (`LLM_CHAT_MAX_ROUNDS`, default
-/// [`MAX_CHAT_QUERY_ROUNDS`], clamped 1..=8). Three is right for a small local
+/// 3, 1..=8). Three is right for a small local
 /// model — more rounds mostly buy more failed repairs — but a capable model
 /// answering multi-part questions (labels + relations + counts across two
 /// vocabularies) makes good use of four or five.
 fn chat_max_rounds() -> usize {
-    env_nonempty("LLM_CHAT_MAX_ROUNDS")
-        .and_then(|v| v.parse::<usize>().ok())
-        .map(|n| n.clamp(1, 8))
-        .unwrap_or(MAX_CHAT_QUERY_ROUNDS)
+    crate::config::LLM_CHAT_MAX_ROUNDS.get()
 }
 
 /// Per-round query cap in seconds (`LLM_CHAT_QUERY_MAX_SECS`, default
-/// [`CHAT_QUERY_MAX_SECS`], clamped 5..=600). The effective bound is the
+/// 30, 5..=600). The effective bound is the
 /// smaller of this and the endpoint's own query timeout — see
 /// [`run_chat_query_timed`] for why chat rounds get a tighter cap than the
 /// SPARQL endpoint. Raise it on instances where legitimate analytical
 /// questions (property paths over a large ontology) need more than 30s.
 fn chat_query_max_secs() -> u64 {
-    env_nonempty("LLM_CHAT_QUERY_MAX_SECS")
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(|n| n.clamp(5, 600))
-        .unwrap_or(CHAT_QUERY_MAX_SECS)
+    crate::config::LLM_CHAT_QUERY_MAX.get().as_secs()
 }
 
 // ─── Context-window discovery ──────────────────────────────────────────────────
@@ -1825,13 +1811,7 @@ fn history_within_budget(history: &[ChatMessage], budget: usize) -> &[ChatMessag
 /// `LLM_CHAT_TOOLS`: "auto" (default — offer native tools, fall back
 /// transparently) or "off" (directive protocol only).
 fn chat_tools_enabled() -> bool {
-    !matches!(
-        env_nonempty("LLM_CHAT_TOOLS")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str(),
-        "off" | "0" | "false" | "none"
-    )
+    crate::config::LLM_CHAT_TOOLS.get() != "off"
 }
 
 /// Cap on tool calls executed from one assistant turn — parallel calls beyond
@@ -4659,18 +4639,17 @@ struct ChatQueryResult {
     truncated: bool,
 }
 
-/// Upper bound on ONE chat retrieval round, whatever the endpoint's own timeout
-/// is. A turn gets [`MAX_CHAT_QUERY_ROUNDS`] attempts and a human is waiting on
-/// all of them, so a model-written query that is going nowhere has to fail while
-/// there is still time to repair it. Deployments raise the endpoint timeout for
-/// legitimately long analytical queries (a constrained box needs 120s for an
-/// aggregate over a few million triples); inheriting that here meant a single
-/// hallucinated pattern could spend the entire turn — observed: 120s of a 222s
-/// turn burned on round 1, leaving two rounds that the user never waited for.
-const CHAT_QUERY_MAX_SECS: u64 = 30;
+// Upper bound on ONE chat retrieval round (`LLM_CHAT_QUERY_MAX_SECS`, default
+// 30), whatever the endpoint's own timeout is. A turn gets
+// `LLM_CHAT_MAX_ROUNDS` attempts and a human is waiting on all of them, so a model-written query that is going nowhere has to fail while
+// there is still time to repair it. Deployments raise the endpoint timeout for
+// legitimately long analytical queries (a constrained box needs 120s for an
+// aggregate over a few million triples); inheriting that here meant a single
+// hallucinated pattern could spend the entire turn — observed: 120s of a 222s
+// turn burned on round 1, leaving two rounds that the user never waited for.
 
 /// [`run_chat_query`] bounded by the smaller of the endpoint timeout and
-/// [`CHAT_QUERY_MAX_SECS`], so a pathological model-written query cannot stall
+/// `LLM_CHAT_QUERY_MAX_SECS`, so a pathological model-written query cannot stall
 /// the chat. The timeout message feeds back to the model for self-repair.
 async fn run_chat_query_timed(
     state: &AppState,

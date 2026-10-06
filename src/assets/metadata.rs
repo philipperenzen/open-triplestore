@@ -277,10 +277,7 @@ impl ScanVerdict {
 /// feature stays self-contained behind `asset-clamav` without touching `AppState`.
 #[cfg(feature = "asset-clamav")]
 pub fn clamav_addr() -> String {
-    std::env::var("CLAMAV_ADDR")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
+    crate::config::CLAMAV_ADDR.get().unwrap_or_default()
 }
 
 /// Scan asset bytes for malware via a ClamAV daemon at `clamd_addr` (host:port,

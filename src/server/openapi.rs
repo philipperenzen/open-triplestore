@@ -6749,6 +6749,11 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             vec![qp("since", false, "Only usage after this timestamp"), qp("limit", false, "Max rows")],
             vec![("200", "Array of usage rows"), ("401", "Authentication required"), ("403", "super_admin required")], true)),
     ]);
+    mount(paths, "/api/admin/config", vec![
+        (M::Get, o("Admin", "Effective configuration",
+            "Every setting the server reads, with its effective value, its default, its kind and where the value came from (`cli`, `env`, `file`, `profile` or `default`). Secret values are redacted; a secret given as a reference (`env:`, `file:`, `vault:`) shows the reference.",
+            vec![], vec![("200", "The profile and every setting"), ("401", "Authentication required"), ("403", "Admin role required")], true)),
+    ]);
     mount(paths, "/api/admin/settings/guest-registration", vec![
         (M::Get, o("Admin", "Guest registration setting",
             "Whether guest self-registration is on, with the current guest counts.",

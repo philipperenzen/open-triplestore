@@ -84,6 +84,7 @@ fn test_state() -> AppState {
         vocab_registry_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
         dl: Default::default(),
+        config: open_triplestore::config::current().clone(),
         #[cfg(feature = "vocab-search")]
         vocab_engine: None,
     }

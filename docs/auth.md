@@ -105,10 +105,9 @@ Account email (verification, resets, reminders) is sent through SMTP when config
 | `SMTP_PORT` | Relay port (default 587) |
 | `SMTP_USERNAME` / `SMTP_PASSWORD` | Optional credentials |
 | `SMTP_TLS` | `none` \| `starttls` \| `implicit` (default: implicit TLS on 465, STARTTLS otherwise). `none` is plaintext — only for a relay on a trusted private network, like the bundled compose relay |
-| `SMTP_STARTTLS` | Legacy switch: force STARTTLS on/off; ignored when `SMTP_TLS` is set |
 | `SMTP_FROM` | From mailbox, e.g. `Open Triplestore <no-reply@example.org>` |
 | `PUBLIC_BASE_URL` | Base URL minted into emailed links (defaults to the server base URL) |
-| `OTS_REQUIRE_VERIFIED_EMAIL` | `1` → password login requires a verified address (a fresh link is auto-resent on blocked logins) |
+| `OTS_REQUIRE_VERIFIED_EMAIL` | `true` → password login requires a verified address (a fresh link is auto-resent on blocked logins) |
 
 All of these are wired through `docker-compose.yml`, so setting them in `.env` is enough.
 
@@ -280,7 +279,7 @@ or POST binding) revokes the sessions it names (by SessionIndex when it lists
 any), is accepted once, and is answered with a signed LogoutResponse.
 
 **Limit:** access tokens are stateless JWTs. One issued before the logout
-stays valid until it expires (`ACCESS_TOKEN_EXPIRY_MINUTES`, default 30); only
+stays valid until it expires (`ACCESS_TOKEN_EXPIRY_SECS`, default 1800); only
 the refresh token is revoked. Shorten the access-token lifetime if that window
 matters.
 
@@ -321,12 +320,12 @@ environment variables and stays off unless `OIDC_ISSUER` is set.
 |---|---|---|
 | `OIDC_ISSUER` | *(unset: mode off)* | The IdP's issuer URL, e.g. `https://idp.example.org/realms/example`. Must be `https`; plain `http` is accepted only for `localhost` and loopback addresses. If you give a cleartext issuer, startup logs an error and leaves the mode off, because a man in the middle could otherwise serve forged keys. A trailing `/` is removed. |
 | `OIDC_AUDIENCE` | *(unset)* | The `aud` value a token must carry for this store. **Required.** If `OIDC_ISSUER` is set without it, startup logs a warning and every IdP token is refused. |
-| `OIDC_DEFAULT_ROLE` | `user` | The system role an account created from a token gets when no claim maps to a role: `user` or `guest`. The value is **capped at `user`**, because it applies to every account the IdP knows: `admin` or `super_admin` logs an error at startup and `user` is used instead. Grant admin per account, through `OIDC_ROLE_CLAIM_MAP` or the UI. An unknown value means `user`. It is read only once (see [changing settings later](#changing-settings-later)). |
+| `OIDC_DEFAULT_ROLE` | `user` | The system role an account created from a token gets when no claim maps to a role: `user` or `guest`. Any other value (`admin`, `super_admin`, a typo) **stops the start**, because it applies to every account the IdP knows. Grant admin per account, through `OIDC_ROLE_CLAIM_MAP` or the UI. It is read only once (see [changing settings later](#changing-settings-later)). |
 | `OIDC_ROLE_CLAIMS` | `roles,realm_access.roles,groups` | Comma-separated claim names to check for role mapping. A dotted name reaches into a nested object (`realm_access.roles` is Keycloak's shape). String and string-array values are read. |
 | `OIDC_ROLE_CLAIM_MAP` | *(unset: no mapping)* | A JSON object from claim value to role, e.g. `{"idp-admins": "admin", "idp-editors": "publisher", "staff": "user"}`. Invalid JSON is ignored without a warning, which disables mapping. |
 | `OIDC_GROUPS_CLAIM` | `groups` | The claim holding group names. Its values are matched against the role map and used for organisation membership. |
 | `OIDC_ORG_GROUP_PREFIX` | `org:` | The prefix that marks a group as an organisation membership: `org:example-gis` makes the account a member of the organisation whose slug is `example-gis`. |
-| `OTS_OIDC_IDP_TOKEN_POLICY` | `session` | What an IdP token may do: `session` reads and writes but cannot create API tokens; `scoped` writes only when the token's `scope` or `scp` claim grants it; `full` also creates API tokens. Unknown values mean `session`. See [what an IdP token may do](#what-an-idp-token-may-do). |
+| `OTS_OIDC_IDP_TOKEN_POLICY` | `session` | What an IdP token may do: `session` reads and writes but cannot create API tokens; `scoped` writes only when the token's `scope` or `scp` claim grants it; `full` also creates API tokens. Any other value stops the start. See [what an IdP token may do](#what-an-idp-token-may-do). |
 | `OTS_OIDC_IDP_WRITE_SCOPES` | *(unset)* | Under `scoped`: extra scope values, comma- or space-separated, that count as a write grant besides `write` and `admin`, e.g. `ots.write` or `api://open-triplestore/write`. |
 | `ACCEPT_LEGACY_TOKENS` | `true` | Keep accepting this store's own session tokens and `ots_` API tokens. `false` or `0` refuses them; see [below](#turning-off-the-stores-own-tokens). |
 
@@ -485,7 +484,7 @@ What a guest may do beyond reading is set by the environment variable
 datasets the guest holds a grant on), `create_datasets`, `api_tokens`,
 `publish`, or `all` (everything a `user` may do). Unset, guests are read-only. The clamp applies on
 every path a guest arrives by — session cookie, API token or OIDC token — and
-an unknown word is ignored with a warning rather than granting anything.
+an unknown word stops the start rather than being silently dropped.
 
 ## Introspection for resource servers
 

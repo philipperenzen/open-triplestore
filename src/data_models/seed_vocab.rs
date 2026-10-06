@@ -1229,15 +1229,7 @@ enum Mode {
 /// made earlier of a vocabulary whose licence allows no altered copies are
 /// still checked and repaired.
 pub fn seed_standard_vocabularies(state: &AppState) -> usize {
-    let disabled = std::env::var("SEED_STANDARD_VOCABS")
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "false" | "0" | "no" | "off"
-            )
-        })
-        .unwrap_or(false);
-    seed_standard_vocabularies_with(state, !disabled)
+    seed_standard_vocabularies_with(state, crate::config::SEED_STANDARD_VOCABS.get())
 }
 
 /// [`seed_standard_vocabularies`], with the opt-out given (`seeding: false`

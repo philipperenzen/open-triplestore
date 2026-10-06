@@ -589,13 +589,13 @@ pub fn restore_backup(
 }
 
 /// Upload a backup directory's files to S3 under `backups/<id>/...`. No-op
-/// if `BACKUP_S3_ENABLED` is not "true" or the ObjectStore is not configured.
+/// unless `BACKUP_S3_ENABLED` is on, or if the ObjectStore is not configured.
 pub async fn maybe_upload_to_s3(
     obj: &crate::storage::ObjectStore,
     mgr: &BackupManager,
     id: &str,
 ) -> anyhow::Result<()> {
-    if std::env::var("BACKUP_S3_ENABLED").unwrap_or_default() != "true" {
+    if !crate::config::BACKUP_S3_ENABLED.get() {
         return Ok(());
     }
     if !obj.is_configured() {
@@ -616,10 +616,10 @@ pub async fn maybe_upload_to_s3(
     Ok(())
 }
 
-/// Spawn a Tokio task that runs the backup every `interval_hours` hours.
+/// Spawn a Tokio task that runs the backup every `interval` (`BACKUP_SCHEDULE_SECS`).
 pub fn spawn_scheduler(
     mgr: Arc<BackupManager>,
-    interval_hours: u64,
+    interval: std::time::Duration,
     object_store: Option<Arc<crate::storage::ObjectStore>>,
 ) {
     tokio::spawn(async move {
@@ -632,7 +632,8 @@ pub fn spawn_scheduler(
             crate::alerting::AlertConfig::from_env(),
             mgr.audit.clone(),
         );
-        let interval = std::time::Duration::from_secs(interval_hours.max(1) * 3600);
+        // The registry refuses an interval under a minute.
+        let interval = interval.max(std::time::Duration::from_secs(60));
         loop {
             tokio::time::sleep(interval).await;
             let mgr_inner = mgr.clone();

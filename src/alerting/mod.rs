@@ -56,14 +56,15 @@ impl AlertConfig {
     ///   `ALERT_SMTP_PASS` and `ALERT_SMTP_TLS` (`none`|`starttls`|`implicit`,
     ///   default implicit TLS, as before);
     /// - otherwise from the account-email relay: `SMTP_HOST`, `SMTP_PORT`,
-    ///   `SMTP_USERNAME`, `SMTP_PASSWORD` and `SMTP_TLS`/`SMTP_STARTTLS`,
+    ///   `SMTP_USERNAME`, `SMTP_PASSWORD` and `SMTP_TLS`,
     ///   resolved exactly as the mailer resolves them.
     ///
     /// The sender is `ALERT_SMTP_FROM`, else `SMTP_FROM`, else (on the
     /// account relay) the mailer's default. Recipients are only ever
     /// `ALERT_SMTP_TO`, so the fallback alone sends no ops alert anywhere.
     pub fn from_env() -> Self {
-        Self::from_lookup(|name| std::env::var(name).ok(), env_secret_opt)
+        // Every value read here was validated by the configuration registry.
+        Self::from_lookup(|name| crate::config::current().value(name), env_secret_opt)
     }
 
     /// [`Self::from_env`] over an arbitrary lookup: `var` reads a plain
@@ -108,7 +109,6 @@ impl AlertConfig {
             cfg.smtp_tls = Some(crate::email::resolve_tls(
                 p.unwrap_or(587),
                 var("SMTP_TLS").as_deref(),
-                var("SMTP_STARTTLS").as_deref(),
             ));
             cfg.smtp_host = Some(host);
             cfg.smtp_port = p;

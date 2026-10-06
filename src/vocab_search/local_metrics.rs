@@ -25,13 +25,7 @@ fn is_system_graph(graph: &str, base_url: &str) -> bool {
 }
 
 pub fn enabled() -> bool {
-    !matches!(
-        std::env::var("VOCAB_LOCAL_METRICS")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str(),
-        "off" | "false" | "0" | "no"
-    )
+    crate::config::VOCAB_LOCAL_METRICS.get()
 }
 
 /// Count term usage across the given **publicly accessible** data graphs:

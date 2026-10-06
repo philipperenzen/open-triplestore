@@ -106,14 +106,7 @@ fn message_indicates_corruption(msg: &str) -> bool {
 }
 
 fn auto_recover_enabled() -> bool {
-    !matches!(
-        std::env::var("STORE_AUTO_RECOVER")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "false" | "0" | "no" | "off"
-    )
+    crate::config::STORE_AUTO_RECOVER.get()
 }
 
 /// Names/patterns of the RocksDB files that make up the triple store. Used to

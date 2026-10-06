@@ -14,6 +14,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **One configuration registry, validated at startup.** Every setting the
+  server reads is declared once (`src/config/registry.rs`) with its kind,
+  default, flag and documentation, and read through a typed key. The server
+  validates every setting together before it starts and refuses to start on
+  any problem, listing all of them: a number that does not parse or is out of
+  range, a boolean that is not `true/false/1/0/yes/no/on/off` (any case), an
+  unknown choice, a malformed secret reference, an outbound allowlist entry
+  that is not an absolute http(s) URL, settings that need each other (a
+  follower without a leader URL, `OTS_DL_BACKEND=sidecar` without
+  `OTS_REASONER_URL`, `OIDC_ISSUER` without `OIDC_AUDIENCE`). Nothing falls
+  back to a default silently any more. The parsed configuration is carried in
+  `AppState`, and the command-line flags are generated from the registry.
+- **`GET /api/admin/config`** (admin only): every setting with its effective
+  value, default, kind, documentation and source (`cli`, `env`, `file`,
+  `profile` or `default`). Secret values are redacted; a secret given as a
+  reference shows the reference.
 - **W3C SPARQL 1.2 and RDF 1.2 test suites run in CI.** `sparql/sparql12`
   and the N-Triples, N-Quads, Turtle, TriG and RDF/XML suites of `rdf/rdf12`
   (with the `rdf/rdf11` suites they include) from w3c/rdf-tests are vendored
@@ -655,6 +671,51 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nor `docs/administration.md` documents, or when `.env.example` sets one that
   compose never passes on. Documented settings that compose does not forward
   are listed as a warning. `RUST_LOG` is now in the environment table.
+
+### Changed (breaking)
+
+Configuration (no aliases: every renamed or removed name below **stops the
+start** with the name to use instead, so an old `.env` is never silently
+ignored):
+
+- `LLM_TIMEOUT_SECONDS` → `LLM_TIMEOUT_SECS`.
+- `BACKUP_SCHEDULE_HOURS` → `BACKUP_SCHEDULE_SECS` (seconds; default
+  `86400`, at least 60). The unit rule is now `_MS`, `_SECS` or `_DAYS` for a
+  duration and `_BYTES` for a size.
+- `ACCESS_TOKEN_EXPIRY_MINUTES` → `ACCESS_TOKEN_EXPIRY_SECS` (default
+  `1800`); the flag is `--access-token-expiry-secs`.
+- `OTS_MAX_UPLOAD_MB` → `OTS_MAX_UPLOAD_BYTES` (bytes; `512MiB` is accepted).
+- `SMTP_STARTTLS` is removed: set `SMTP_TLS=starttls|implicit|none`.
+  `OTS_EXTERNAL_REASONER` and `OTS_EXTERNAL_REASONER_BIN` now stop the start
+  (they were removed in favour of `OTS_DL_BACKEND=konclude`).
+- Booleans accept exactly `true/false`, `1/0`, `yes/no`, `on/off` (any case)
+  everywhere; `SECURE_COOKIES=yes` and `OTS_DISABLE_REGISTRATION=on` now work,
+  and `SECURE_COOKIES=maybe` stops the start instead of being ignored.
+  `--secure-cookies`, `--port-fallback` and `--discovery` take an optional
+  value (`--secure-cookies=false`).
+- Aliases are gone: `OTS_OIDC_*_POLICY=legacy` (use `full`),
+  `OTS_REMOTE_AUTH=forward|identity` (use `assert`), `DCAT_PROFILE=dcat3`,
+  `dcat_ap`, `dcatapnl` and the like (use `dcat`, `dcat-ap`, `dcat-ap-nl`),
+  `SMTP_TLS=off|plain|tls|smtps`, `OTS_REPLICATION_ROLE=primary|replica`,
+  `LLM_CHAT_TOOLS=0|false|none` (use `off`), and the hyphenated guest
+  capabilities `create-datasets` / `api-tokens`.
+- Values that used to be clamped or dropped now stop the start:
+  `LLM_CHAT_MAX_ROUNDS` outside 1–8, `LLM_CHAT_QUERY_MAX_SECS` outside 5–600,
+  `OTS_PARALLEL_QUERY_SHARDS` outside 1–16, `OTS_LDES_RETRIES` above 16, an
+  unknown `OTS_GUEST_CAPABILITIES` word, `OIDC_DEFAULT_ROLE=admin` (it was
+  capped to `user`), a non-https `OIDC_ISSUER` (OIDC used to be disabled), an
+  invalid `TRUSTED_PROXY_CIDRS`, `CORS_ORIGINS` or `OTS_REMOTE_ALLOWLIST`
+  entry, a function graph `OTS_SPARQL_FUNCTION_GRAPHS` may not name, and
+  invalid `OAUTH_CLIENTS_JSON`.
+- Empty means unset for every setting, so `EMBED_FRAME_ANCESTORS=` gives the
+  default; disable embedding with `'none'`. (`SEED_IFC_URL=` and
+  `VOCAB_CORPUS_URL=` still turn their downloads off.)
+- `OTS_REPLICATION_ROLE=cluster` now configures the Raft member from the
+  environment (the role was parsed as `none`, so the cluster settings were
+  never read), and `OTS_REPLICATION_CLUSTER_SECRET` goes through the secrets
+  module (a raw value is refused under `OTS_ENV=production`).
+- A seed bundle's opt-out variable that is not a boolean skips the bundle with
+  an error, and its `password_env` goes through the secrets module.
 
 ### Changed
 

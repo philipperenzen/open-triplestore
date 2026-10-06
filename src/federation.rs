@@ -37,24 +37,18 @@ pub enum OutboundAuth {
 }
 
 pub fn outbound_auth() -> OutboundAuth {
-    match std::env::var("OTS_REMOTE_AUTH")
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "assert" | "forward" | "identity" => OutboundAuth::Assert,
+    match crate::config::REMOTE_AUTH.get().as_str() {
+        "assert" => OutboundAuth::Assert,
         _ => OutboundAuth::None,
     }
 }
 
 /// Issuers whose assertions this instance accepts.
 pub fn trusted_issuers() -> Vec<String> {
-    std::env::var("OTS_TRUSTED_ISSUERS")
-        .unwrap_or_default()
-        .split(',')
-        .map(|s| s.trim().trim_end_matches('/').to_string())
-        .filter(|s| !s.is_empty())
+    crate::config::TRUSTED_ISSUERS
+        .get()
+        .into_iter()
+        .map(|s| s.trim_end_matches('/').to_string())
         .collect()
 }
 

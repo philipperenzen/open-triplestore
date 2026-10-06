@@ -88,57 +88,21 @@ impl AuthExt {
     /// server parsed it), or `None` when only the built-in default applies; it
     /// is the audience federated identity assertions are checked against.
     pub fn from_env_with_base_url(base_url: Option<&str>) -> Self {
-        let issuer = std::env::var("OIDC_ISSUER")
-            .ok()
-            .map(|s| s.trim().trim_end_matches('/').to_string())
-            .filter(|s| !s.is_empty());
-        let audience = std::env::var("OIDC_AUDIENCE")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        let default_role = std::env::var("OIDC_DEFAULT_ROLE")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .map(|raw| {
-                let role = capped_default_role(&raw);
-                if SystemRole::from_str(&raw.trim().to_ascii_lowercase())
-                    .is_some_and(|r| r.is_admin())
-                {
-                    tracing::error!(
-                        "OIDC_DEFAULT_ROLE={raw:?} would make every IdP account an \
-                         administrator; using '{}' instead. Grant admin through \
-                         OIDC_ROLE_CLAIM_MAP or in the UI.",
-                        role.as_str()
-                    );
-                }
-                role.as_str().to_string()
-            })
-            .unwrap_or_else(|| "user".to_string());
-        // Default ON; only "false"/"0" disables (transition safety).
-        let accept_legacy_tokens = std::env::var("ACCEPT_LEGACY_TOKENS")
-            .map(|v| !matches!(v.trim(), "false" | "0"))
-            .unwrap_or(true);
-        let role_claims = std::env::var("OIDC_ROLE_CLAIMS")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| {
-                s.split(',')
-                    .map(|x| x.trim().to_string())
-                    .filter(|x| !x.is_empty())
-                    .collect()
-            })
-            .unwrap_or_else(default_role_claims);
-        let groups_claim = std::env::var("OIDC_GROUPS_CLAIM")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "groups".to_string());
-        let org_group_prefix = std::env::var("OIDC_ORG_GROUP_PREFIX")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "org:".to_string());
-        let role_claim_map = std::env::var("OIDC_ROLE_CLAIM_MAP")
-            .ok()
-            .filter(|s| !s.trim().is_empty());
+        use crate::config as c;
+        let issuer = c::OIDC_ISSUER
+            .get()
+            .map(|s| s.trim_end_matches('/').to_string());
+        let audience = c::OIDC_AUDIENCE.get();
+        // Only `user` or `guest` validate (an admin default would make every
+        // IdP account an administrator); the cap stays as a second line.
+        let default_role = capped_default_role(&c::OIDC_DEFAULT_ROLE.get())
+            .as_str()
+            .to_string();
+        let accept_legacy_tokens = c::ACCEPT_LEGACY_TOKENS.get();
+        let role_claims = c::OIDC_ROLE_CLAIMS.get();
+        let groups_claim = c::OIDC_GROUPS_CLAIM.get();
+        let org_group_prefix = c::OIDC_ORG_GROUP_PREFIX.get();
+        let role_claim_map = c::OIDC_ROLE_CLAIM_MAP.get();
 
         if issuer.is_some() && audience.is_none() {
             tracing::warn!(

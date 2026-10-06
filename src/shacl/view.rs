@@ -145,21 +145,18 @@ pub(crate) struct IndexPolicy {
     pub max_quads: usize,
 }
 
+/// The memory-derived default of `OTS_SHACL_RUN_INDEX_MAX_QUADS`.
+pub(crate) fn default_index_max_quads() -> usize {
+    crate::store::parallel_mirror::detect_memory_limit_bytes()
+        .map(|b| (b / 8 / 300) as usize)
+        .unwrap_or(1_000_000)
+        .clamp(250_000, 8_000_000)
+}
+
 impl IndexPolicy {
     pub(crate) fn from_env() -> Self {
-        let min_probes = std::env::var("OTS_SHACL_RUN_INDEX_MIN_PROBES")
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(20_000);
-        let max_quads = std::env::var("OTS_SHACL_RUN_INDEX_MAX_QUADS")
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or_else(|| {
-                crate::store::parallel_mirror::detect_memory_limit_bytes()
-                    .map(|b| (b / 8 / 300) as usize)
-                    .unwrap_or(1_000_000)
-                    .clamp(250_000, 8_000_000)
-            });
+        let min_probes = crate::config::SHACL_RUN_INDEX_MIN_PROBES.get();
+        let max_quads = crate::config::SHACL_RUN_INDEX_MAX_QUADS.get();
         Self {
             min_probes,
             max_quads,

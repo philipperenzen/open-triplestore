@@ -184,9 +184,9 @@ impl ProviderKeys {
 /// or unresolvable secret is a startup error, and nothing is seeded until
 /// every entry's secret has resolved. Invalid JSON is still only a warning.
 pub fn seed_clients_from_env(db: &AuthDb, jwt_secret: &str) -> anyhow::Result<()> {
-    match std::env::var("OAUTH_CLIENTS_JSON") {
-        Ok(v) if !v.trim().is_empty() => seed_clients_from_json(db, jwt_secret, &v),
-        _ => Ok(()),
+    match crate::config::OAUTH_CLIENTS_JSON.get() {
+        Some(v) => seed_clients_from_json(db, jwt_secret, &v),
+        None => Ok(()),
     }
 }
 

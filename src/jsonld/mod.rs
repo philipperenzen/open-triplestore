@@ -30,8 +30,7 @@ use std::time::{Duration, Instant};
 
 use oxigraph::io::{JsonLdProfileSet, LoadedDocument, RdfFormat, ReaderQuadParser};
 
-pub const MAX_BYTES_ENV: &str = "OTS_JSONLD_CONTEXT_MAX_BYTES";
-const DEFAULT_MAX_BYTES: usize = 1024 * 1024;
+pub const MAX_BYTES_ENV: &str = crate::config::JSONLD_CONTEXT_MAX_BYTES.name();
 /// How long a fetched context is reused.
 pub const CACHE_TTL: Duration = Duration::from_secs(3600);
 const CACHE_CAPACITY: usize = 128;
@@ -72,11 +71,7 @@ pub const BUNDLED: &[BundledContext] = &[
 ];
 
 fn max_bytes() -> usize {
-    std::env::var(MAX_BYTES_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(DEFAULT_MAX_BYTES)
+    crate::config::JSONLD_CONTEXT_MAX_BYTES.get() as usize
 }
 
 fn json_ld() -> RdfFormat {

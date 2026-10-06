@@ -675,20 +675,9 @@ fn enforce_write_scope_for_mutation(
     Ok(())
 }
 
-/// Whether the endpoint ACL is enforced. `ENDPOINT_ACL_ENFORCE=false` (or `0`)
-/// turns it off. Read once — this sits on every request.
+/// Whether the endpoint ACL is enforced (`ENDPOINT_ACL_ENFORCE`, default on).
 fn endpoint_acl_enforced() -> bool {
-    static ENFORCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENFORCED.get_or_init(|| {
-        !matches!(
-            std::env::var("ENDPOINT_ACL_ENFORCE")
-                .unwrap_or_default()
-                .trim()
-                .to_ascii_lowercase()
-                .as_str(),
-            "false" | "0" | "no" | "off"
-        )
-    })
+    crate::config::ENDPOINT_ACL_ENFORCE.get()
 }
 
 /// Middleware that checks endpoint-level ACL rules from the `endpoint_acl` table.

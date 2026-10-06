@@ -57,11 +57,7 @@ const MAX_CALCULATIONS: usize = 1000;
 /// Most rows a matching query may produce (`OTS_OPM_CALC_MAX_ROWS`, default
 /// 10 000); more fails the run rather than deriving part of it.
 fn max_rows() -> usize {
-    std::env::var("OTS_OPM_CALC_MAX_ROWS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|n: &usize| *n > 0)
-        .unwrap_or(10_000)
+    crate::config::OPM_CALC_MAX_ROWS.get()
 }
 
 const NUMERIC: [&str; 16] = [

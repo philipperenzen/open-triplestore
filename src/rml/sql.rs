@@ -49,14 +49,10 @@ use crate::store::engine::TripleStore;
 
 /// Flush the N-Triples buffer once it exceeds this many bytes.
 const FLUSH_BYTES: usize = 4 * 1024 * 1024;
-const JOIN_MAX_ROWS_ENV: &str = "OTS_SOURCES_JOIN_MAX_ROWS";
+const JOIN_MAX_ROWS_ENV: &str = crate::config::SOURCES_JOIN_MAX_ROWS.name();
 
 fn join_max_rows() -> usize {
-    std::env::var(JOIN_MAX_ROWS_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(1_000_000)
+    crate::config::SOURCES_JOIN_MAX_ROWS.get()
 }
 
 /// One generated triple, with the named graph it belongs in (`None` = the

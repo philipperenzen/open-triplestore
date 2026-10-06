@@ -209,16 +209,12 @@ impl Bundle {
         })
     }
 
-    /// True when the bundle's opt-out env var disables it.
-    pub fn is_disabled(&self) -> bool {
-        std::env::var(self.opt_out_env_name())
-            .map(|v| {
-                matches!(
-                    v.trim().to_ascii_lowercase().as_str(),
-                    "false" | "0" | "no" | "off"
-                )
-            })
-            .unwrap_or(false)
+    /// True when the bundle's opt-out variable turns it off. The variable is
+    /// a boolean like every other setting (`false`/`0`/`no`/`off` turns the
+    /// bundle off); a value that is not one is an error, and the bundle is
+    /// skipped rather than loaded against what the operator may have meant.
+    pub fn is_disabled(&self) -> Result<bool, String> {
+        crate::config::dynamic_bool(&self.opt_out_env_name()).map(|v| v == Some(false))
     }
 }
 
@@ -773,11 +769,18 @@ fn ensure_account(
     let user = match db.get_user_by_username(&spec.username) {
         Ok(Some(existing)) => existing,
         Ok(None) => {
-            let password = spec
-                .password_env
-                .as_deref()
-                .and_then(|var| std::env::var(var).ok())
-                .filter(|p| !p.trim().is_empty());
+            // A password variable is a secret like any other: a reference
+            // resolves, a raw value is refused under OTS_ENV=production.
+            let password = match spec.password_env.as_deref() {
+                Some(var) => match crate::secrets::env_secret(var) {
+                    Ok(secret) => secret.map(|s| s.expose().to_string()),
+                    Err(e) => {
+                        tracing::warn!(bundle = %bundle.id, account = %spec.username, error = %e, "the account's password variable could not be resolved; no account created");
+                        return None;
+                    }
+                },
+                None => None,
+            };
             let hash = match &password {
                 Some(p) => crate::auth::password::hash_password(p),
                 None => unusable_password_hash(),
@@ -1349,7 +1352,14 @@ pub fn load_seed_dir(state: &AppState, dir: &Path) {
                 continue;
             }
         };
-        if bundle.is_disabled() {
+        let disabled = match bundle.is_disabled() {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::error!("seed bundles: '{}' skipped: {e}", bundle.id);
+                continue;
+            }
+        };
+        if disabled {
             tracing::info!(
                 "seed bundles: '{}' disabled via {} — skipping",
                 bundle.id,
@@ -1529,11 +1539,13 @@ mod tests {
     fn opt_out_env_var_disables_bundle() {
         let b = tiny_bundle("optout");
         assert_eq!(b.opt_out_env_name(), "SEED_BUNDLE_OPTOUT");
-        assert!(!b.is_disabled());
+        assert_eq!(b.is_disabled(), Ok(false));
         std::env::set_var("SEED_BUNDLE_OPTOUT", "false");
-        assert!(b.is_disabled());
+        assert_eq!(b.is_disabled(), Ok(true));
         std::env::set_var("SEED_BUNDLE_OPTOUT", "true");
-        assert!(!b.is_disabled());
+        assert_eq!(b.is_disabled(), Ok(false));
+        std::env::set_var("SEED_BUNDLE_OPTOUT", "maybe");
+        assert!(b.is_disabled().is_err(), "not a boolean");
         std::env::remove_var("SEED_BUNDLE_OPTOUT");
     }
 

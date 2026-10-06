@@ -88,10 +88,7 @@ async fn run_validation(
     bearer: &str,
     body: &ValidateAndCommitRequest,
 ) -> Result<ValidatorResponse, AppError> {
-    let base = std::env::var("VALIDATION_API_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| {
+    let base = crate::config::VALIDATION_API_URL.get().ok_or_else(|| {
             AppError::BadRequest(
                 "External validation service not configured (set VALIDATION_API_URL)".to_string(),
             )

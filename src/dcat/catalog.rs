@@ -94,18 +94,18 @@ impl Profile {
     /// Parse a `DCAT_PROFILE` value; empty means `dcat`.
     pub fn parse(value: &str) -> Result<Self, String> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "" | "dcat" | "dcat3" | "dcat-3" => Ok(Profile::Dcat),
-            "dcat-ap" | "dcat_ap" | "dcatap" => Ok(Profile::DcatAp),
-            "dcat-ap-nl" | "dcat_ap_nl" | "dcatapnl" => Ok(Profile::DcatApNl),
+            "" | "dcat" => Ok(Profile::Dcat),
+            "dcat-ap" => Ok(Profile::DcatAp),
+            "dcat-ap-nl" => Ok(Profile::DcatApNl),
             other => Err(format!(
                 "DCAT_PROFILE `{other}` is not a catalogue profile: use dcat, dcat-ap or dcat-ap-nl"
             )),
         }
     }
-    /// The profile `DCAT_PROFILE` names. An invalid value is refused at
-    /// startup ([`check_env`]); should one reach here anyway, it is `dcat`.
+    /// The profile `DCAT_PROFILE` names (validated by the configuration
+    /// registry at startup).
     pub fn from_env() -> Self {
-        Self::parse(&std::env::var("DCAT_PROFILE").unwrap_or_default()).unwrap_or(Profile::Dcat)
+        Self::parse(&crate::config::DCAT_PROFILE.get()).unwrap_or(Profile::Dcat)
     }
     pub fn is_ap(self) -> bool {
         !matches!(self, Profile::Dcat)
@@ -130,61 +130,6 @@ impl Profile {
     }
 }
 
-/// Validate the catalogue settings at startup, reporting every problem at
-/// once: an unknown `DCAT_PROFILE`, a `CATALOG_PUBLISHER_TYPE` outside the
-/// ADMS publisher types, a `CATALOG_LANGUAGE` that is not an ISO 639-3 code,
-/// and IRIs that are not IRIs.
-pub fn check_env() -> Result<(), String> {
-    let mut errors = Vec::new();
-    if let Err(e) = Profile::parse(&std::env::var("DCAT_PROFILE").unwrap_or_default()) {
-        errors.push(e);
-    }
-    if let Some(t) = env_nonempty("CATALOG_PUBLISHER_TYPE") {
-        if authority::publisher_type_iri(&t)
-            .and_then(|i| NamedNode::new(i).ok())
-            .is_none()
-        {
-            errors.push(format!(
-                "CATALOG_PUBLISHER_TYPE `{t}` is not an ADMS publisher type (e.g. LocalAuthority, \
-                 NationalAuthority, Company) or an IRI"
-            ));
-        }
-    }
-    if let Some(l) = env_nonempty("CATALOG_LANGUAGE") {
-        if l.len() != 3 || !l.chars().all(|c| c.is_ascii_alphabetic()) {
-            errors.push(format!(
-                "CATALOG_LANGUAGE `{l}` is not an ISO 639-3 code (ENG, NLD, …)"
-            ));
-        }
-    }
-    for k in ["CATALOG_PUBLISHER_URI", "CATALOG_LICENSE"] {
-        if let Some(v) = env_nonempty(k) {
-            if NamedNode::new(v.as_str()).is_err() {
-                errors.push(format!("{k} `{v}` is not an absolute IRI"));
-            }
-        }
-    }
-    for k in ["OTS_VOID_PARTITION_LIMIT", "OTS_VOID_PARTITION_MAX_TRIPLES"] {
-        if let Some(v) = env_nonempty(k) {
-            if v.parse::<usize>().is_err() {
-                errors.push(format!("{k} `{v}` is not a whole number"));
-            }
-        }
-    }
-    if let Some(e) = env_nonempty("CATALOG_CONTACT_EMAIL") {
-        if !e.contains('@') || NamedNode::new(format!("mailto:{e}")).is_err() {
-            errors.push(format!(
-                "CATALOG_CONTACT_EMAIL `{e}` is not an e-mail address"
-            ));
-        }
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("; "))
-    }
-}
-
 /// Catalogue-level metadata, from the environment ([`CatalogOptions::from_env`])
 /// or set explicitly ([`CatalogOptions::new`] plus field updates).
 #[derive(Debug, Clone)]
@@ -205,13 +150,6 @@ pub struct CatalogOptions {
     pub contact_name: Option<String>,
     /// The catalogue's and its data services' contact e-mail (`vcard:hasEmail`).
     pub contact_email: Option<String>,
-}
-
-fn env_nonempty(k: &str) -> Option<String> {
-    std::env::var(k)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
 }
 
 fn host_of(base: &str) -> String {
@@ -247,30 +185,33 @@ impl CatalogOptions {
         }
     }
 
-    /// The options `DCAT_PROFILE` and the `CATALOG_*` settings describe.
+    /// The options `DCAT_PROFILE` and the `CATALOG_*` settings describe
+    /// (each validated by the configuration registry at startup).
     pub fn from_env(base_url: &str) -> Self {
+        use crate::config as c;
         let mut o = Self::new(base_url, Profile::from_env());
-        if let Some(v) = env_nonempty("CATALOG_TITLE") {
+        if let Some(v) = c::CATALOG_TITLE.get() {
             o.title = v;
         }
-        if let Some(v) = env_nonempty("CATALOG_DESCRIPTION") {
+        if let Some(v) = c::CATALOG_DESCRIPTION.get() {
             o.description = v;
         }
-        if let Some(v) = env_nonempty("CATALOG_PUBLISHER_URI") {
+        if let Some(v) = c::CATALOG_PUBLISHER_URI.get() {
             o.publisher_iri = v;
         }
-        if let Some(v) = env_nonempty("CATALOG_PUBLISHER_NAME") {
+        if let Some(v) = c::CATALOG_PUBLISHER_NAME.get() {
             o.publisher_name = v;
         }
-        o.publisher_identifier = env_nonempty("CATALOG_PUBLISHER_IDENTIFIER");
-        o.publisher_type =
-            env_nonempty("CATALOG_PUBLISHER_TYPE").and_then(|t| authority::publisher_type_iri(&t));
-        if let Some(v) = env_nonempty("CATALOG_LANGUAGE") {
+        o.publisher_identifier = c::CATALOG_PUBLISHER_IDENTIFIER.get();
+        o.publisher_type = c::CATALOG_PUBLISHER_TYPE
+            .get()
+            .and_then(|t| authority::publisher_type_iri(&t));
+        if let Some(v) = c::CATALOG_LANGUAGE.get() {
             o.language = v.to_ascii_uppercase();
         }
-        o.license = env_nonempty("CATALOG_LICENSE");
-        o.contact_name = env_nonempty("CATALOG_CONTACT_NAME");
-        o.contact_email = env_nonempty("CATALOG_CONTACT_EMAIL");
+        o.license = c::CATALOG_LICENSE.get();
+        o.contact_name = c::CATALOG_CONTACT_NAME.get();
+        o.contact_email = c::CATALOG_CONTACT_EMAIL.get();
         o
     }
 
@@ -1674,17 +1615,9 @@ const VOID_FEATURES: &[&str] = &[
     "N-Quads",
 ];
 
-/// Partitions listed per kind unless `OTS_VOID_PARTITION_LIMIT` says otherwise.
-const DEFAULT_PARTITION_LIMIT: usize = 100;
-/// Datasets larger than this (`OTS_VOID_PARTITION_MAX_TRIPLES`) get counts but
-/// no partitions: those take a grouping scan of the data.
-const DEFAULT_PARTITION_MAX_TRIPLES: usize = 5_000_000;
-
-fn env_usize(k: &str, default: usize) -> usize {
-    env_nonempty(k)
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
+// Partitions are listed per kind up to `OTS_VOID_PARTITION_LIMIT` (100), and
+// datasets larger than `OTS_VOID_PARTITION_MAX_TRIPLES` (5 000 000) get counts
+// but no partitions: those take a grouping scan of the data.
 
 /// A dataset's VoID description beyond `void:triples`: statistics, class and
 /// property partitions, vocabularies, example resources, features, data dumps,
@@ -1743,13 +1676,8 @@ fn void_description(
     g.int(s.clone(), &p(VOID, "properties"), stats.distinct_predicates);
     g.int(s.clone(), &p(VOID, "documents"), stats.named_graphs);
 
-    if total
-        <= env_usize(
-            "OTS_VOID_PARTITION_MAX_TRIPLES",
-            DEFAULT_PARTITION_MAX_TRIPLES,
-        )
-    {
-        let limit = env_usize("OTS_VOID_PARTITION_LIMIT", DEFAULT_PARTITION_LIMIT);
+    if total <= crate::config::VOID_PARTITION_MAX_TRIPLES.get() {
+        let limit = crate::config::VOID_PARTITION_LIMIT.get();
         let parts = store.void_partitions_over(&graphs, limit);
         g.int(s.clone(), &p(VOID, "classes"), parts.class_count);
         let mut vocabularies: Vec<String> = Vec::new();
@@ -1791,7 +1719,7 @@ fn void_description(
         };
         let links = store.void_linkset(
             &e.graph_iri,
-            env_usize("OTS_VOID_PARTITION_LIMIT", DEFAULT_PARTITION_LIMIT),
+            crate::config::VOID_PARTITION_LIMIT.get(),
         );
         g.typ(ls.clone(), &p(VOID, "Linkset"));
         g.add(ls.clone(), &p(VOID, "subjectsTarget"), s.clone());

@@ -848,8 +848,8 @@ on separate graphs, if that is a concern.
 | 4 writers + 4 readers, 20 s: quads written | 365 500 (18.3k/s), write p95 139 ms | 31 500 (1.6k/s), write p95 1.6 s |
 | same phase: reads | 2 623/s, read p95 2.4 ms | 421/s, read p95 21 ms |
 
-² The Graph Store routes accept bodies up to `OTS_MAX_UPLOAD_MB` (default
-512 MB); the 226 MB file was appended in five 45 MB chunks (`POST`,
+² The Graph Store routes accept bodies up to `OTS_MAX_UPLOAD_BYTES` (default
+512 MiB); the 226 MB file was appended in five 45 MB chunks (`POST`,
 incremental index maintenance), which is also how a client would stream a
 large import. Both tables were taken after a settle (60 s and 150 s) so the
 in-memory query accelerator had been rebuilt — a background tick does that

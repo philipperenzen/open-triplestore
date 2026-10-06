@@ -26,11 +26,7 @@ pub const KEEP_PER_DATASET: usize = 20;
 pub const DEFAULT_TTL_DAYS: i64 = 30;
 
 fn ttl_days() -> i64 {
-    std::env::var("OTS_REPAIR_PROPOSAL_TTL_DAYS")
-        .ok()
-        .and_then(|v| v.trim().parse::<i64>().ok())
-        .filter(|d| *d > 0)
-        .unwrap_or(DEFAULT_TTL_DAYS)
+    crate::config::REPAIR_PROPOSAL_TTL_DAYS.get() as i64
 }
 
 /// A stored proposal.

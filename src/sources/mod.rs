@@ -61,11 +61,7 @@ pub fn hex_upper(bytes: &[u8]) -> String {
 
 /// The configured sources directory, if any.
 pub fn sources_dir() -> Option<PathBuf> {
-    std::env::var(SOURCES_DIR_ENV)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
+    crate::config::SOURCES_DIR.get()
 }
 
 /// Whether a source's endpoint may be contacted. A file-backed dialect has no

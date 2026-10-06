@@ -97,15 +97,7 @@ const DATASET_BRANDS: &[DatasetBrand] = &[
 
 /// Entry point — best-effort, never panics out of startup.
 pub fn seed_open_triplestore(state: &AppState) {
-    let disabled = std::env::var("SEED_STANDARDS_DEMO")
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "false" | "0" | "no" | "off"
-            )
-        })
-        .unwrap_or(false);
-    if disabled {
+    if !crate::config::SEED_STANDARDS_DEMO.get() {
         return;
     }
     // Two seeders can run concurrently on a fresh install: the boot task only
@@ -441,7 +433,7 @@ fn seed_stl_landmarks(state: &AppState, owner_id: &str) {
         return;
     }
     // Same network kill-switch as the IFC demo (tests set SEED_IFC_URL="").
-    if std::env::var("SEED_IFC_URL").ok().as_deref().map(str::trim) == Some("") {
+    if crate::config::SEED_IFC_URL.get().as_deref() == Some("") {
         return;
     }
     for (id, filename, url) in STL_LANDMARKS.iter() {
@@ -511,8 +503,8 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
     // An explicitly empty SEED_IFC_URL disables the whole IFC demo (also used by
     // tests, which must never reach out to the network). A custom value overrides
     // only the headline (Esplanades) building.
-    let env_url = std::env::var("SEED_IFC_URL").ok();
-    if env_url.as_deref().map(str::trim) == Some("") {
+    let env_url = crate::config::SEED_IFC_URL.get();
+    if env_url.as_deref() == Some("") {
         tracing::info!("SEED_IFC_URL is empty — skipping the IFC building demos");
         return;
     }

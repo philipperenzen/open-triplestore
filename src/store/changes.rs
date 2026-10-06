@@ -34,10 +34,13 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::StoreError;
 
+/// The defaults of `OTS_CHANGE_CAPTURE_MAX_SCAN` and
+/// `OTS_CHANGE_CAPTURE_MAX_PAYLOAD`, for callers that build a log by hand
+/// (the server reads the configuration).
+#[allow(dead_code)]
 pub const DEFAULT_MAX_SCAN: usize = 250_000;
+#[allow(dead_code)]
 pub const DEFAULT_MAX_PAYLOAD: usize = 250_000;
-pub const DEFAULT_RETENTION_DAYS: u64 = 90;
-pub const DEFAULT_CURSOR_TTL_DAYS: u64 = 30;
 /// Payloads above this many bytes of N-Quads are stored gzipped.
 const GZIP_ABOVE: usize = 64 * 1024;
 /// Rows between retention sweeps on the write path.
@@ -45,31 +48,6 @@ const SWEEP_EVERY_ROWS: u64 = 1_000;
 
 /// `(row, extent, added, removed, scope)` of a row left pending.
 type PendingRow = (i64, String, Option<Vec<u8>>, Option<Vec<u8>>, String);
-
-fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(default)
-}
-
-fn env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(default)
-}
-
-fn env_on(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "on" | "yes"
-            )
-        })
-        .unwrap_or(false)
-}
 
 /// How much of the delta a row carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -462,7 +440,7 @@ impl ChangeLog {
         } else {
             // Off unless asked — on a follower too, whose own log would be
             // partial. See the cost table above.
-            env_on("OTS_CHANGE_CAPTURE")
+            crate::config::CHANGE_CAPTURE.get()
         };
         if !on {
             return Ok(Self::disabled());
@@ -527,10 +505,10 @@ impl ChangeLog {
             epoch,
             next_seq: AtomicI64::new(meta_next.max(max_seq + 1)),
             section: Mutex::new(()),
-            max_scan: env_usize("OTS_CHANGE_CAPTURE_MAX_SCAN", DEFAULT_MAX_SCAN),
-            max_payload: env_usize("OTS_CHANGE_CAPTURE_MAX_PAYLOAD", DEFAULT_MAX_PAYLOAD),
-            retention_days: env_u64("OTS_CHANGE_RETENTION_DAYS", DEFAULT_RETENTION_DAYS),
-            cursor_ttl_days: env_u64("OTS_CURSOR_TTL_DAYS", DEFAULT_CURSOR_TTL_DAYS),
+            max_scan: crate::config::CHANGE_CAPTURE_MAX_SCAN.get(),
+            max_payload: crate::config::CHANGE_CAPTURE_MAX_PAYLOAD.get(),
+            retention_days: crate::config::CHANGE_RETENTION_DAYS.get(),
+            cursor_ttl_days: crate::config::CURSOR_TTL_DAYS.get(),
             rows_since_sweep: AtomicU64::new(0),
             path,
             rows_notify: tokio::sync::Notify::new(),

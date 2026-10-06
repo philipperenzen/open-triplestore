@@ -75,9 +75,7 @@ const TOTP_ISSUER: &str = "Open Triplestore";
 /// (`OTS_REQUIRE_VERIFIED_EMAIL=1`). Off by default so existing deployments
 /// and local development keep working without an SMTP relay.
 pub(crate) fn require_verified_email() -> bool {
-    std::env::var("OTS_REQUIRE_VERIFIED_EMAIL")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    crate::config::REQUIRE_VERIFIED_EMAIL.get()
 }
 
 // ─── Request / Response types ─────────────────────────────────────────────────
@@ -660,7 +658,7 @@ pub(crate) fn issue_tokens(
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let expires_in = jwt_config.access_expiry_minutes * 60;
+    let expires_in = jwt_config.access_expiry_secs;
     Ok((access_token, refresh_token, expires_in))
 }
 
@@ -738,9 +736,7 @@ pub async fn register(
     // toggle `guest_self_registration` (default OFF) may still open a low-privilege
     // path — public registration then creates `guest` accounts (no publish/design/
     // admin rights; client apps decide what guests may fill).
-    let registration_disabled = std::env::var("OTS_DISABLE_REGISTRATION")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let registration_disabled = crate::config::DISABLE_REGISTRATION.get();
     let existing_users = db
         .count_users()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1663,10 +1659,8 @@ pub async fn auth_features(
     State(db): State<Arc<AuthDb>>,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let registration_disabled = std::env::var("OTS_DISABLE_REGISTRATION")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-        && db.count_users().unwrap_or(0) > 0;
+    let registration_disabled =
+        crate::config::DISABLE_REGISTRATION.get() && db.count_users().unwrap_or(0) > 0;
     Ok(Json(serde_json::json!({
         "email_delivery": state.mailer.smtp_configured(),
         "require_verified_email": require_verified_email(),

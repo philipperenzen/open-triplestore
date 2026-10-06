@@ -40,7 +40,7 @@ services:
       - AUTH_DB_PATH=/data/auth.db
       - BACKUP_DIR=/data/backups
       - BACKUP_RETENTION_COUNT=${BACKUP_RETENTION_COUNT:-7}
-      - BACKUP_SCHEDULE_HOURS=${BACKUP_SCHEDULE_HOURS:-24}
+      - BACKUP_SCHEDULE_SECS=${BACKUP_SCHEDULE_SECS:-86400}
       - S3_ENDPOINT=http://minio:9000
       - S3_BUCKET=${S3_BUCKET:-triplestore-assets}
       - S3_ACCESS_KEY=${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set (no minioadmin default)}
@@ -82,7 +82,6 @@ services:
       # none | starttls | implicit (default: implicit TLS on 465, else STARTTLS).
       # `none` is ONLY for a relay on the private compose network, like `mail` below.
       - SMTP_TLS=${SMTP_TLS:-}
-      - SMTP_STARTTLS=${SMTP_STARTTLS:-}
       - SMTP_FROM=${SMTP_FROM:-}
       # Public base URL of the deployment (linked-data IRIs, WebAuthn/passkey
       # relying party, default base for emailed links). Set it to the

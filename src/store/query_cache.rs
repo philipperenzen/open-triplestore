@@ -39,8 +39,6 @@ use oxigraph::sparql::{
     QueryEvaluationError, QueryResults, QuerySolution, QuerySolutionIter, Variable,
 };
 
-const DEFAULT_MAX_ENTRIES: usize = 1024;
-const DEFAULT_MAX_ROWS: usize = 10_000;
 
 /// A materialised, cheaply-cloneable query result.
 #[derive(Clone)]
@@ -98,29 +96,16 @@ struct Inner {
 }
 
 impl QueryCache {
-    /// Build from environment configuration:
-    ///   * `OTS_QUERY_CACHE`           — `0`/`false`/`off`/`no` disables it (default on)
-    ///   * `OTS_QUERY_CACHE_ENTRIES`   — max cached queries (default 1024)
-    ///   * `OTS_QUERY_CACHE_MAX_ROWS`  — max rows per cached result (default 10000)
+    /// Build from the configuration: `OTS_QUERY_CACHE` (on/off),
+    /// `OTS_QUERY_CACHE_ENTRIES` (max cached queries) and
+    /// `OTS_QUERY_CACHE_MAX_ROWS` (max rows per cached result).
     pub fn from_env() -> Self {
-        let enabled = std::env::var("OTS_QUERY_CACHE")
-            .map(|v| {
-                !matches!(
-                    v.trim().to_ascii_lowercase().as_str(),
-                    "0" | "false" | "off" | "no"
-                )
-            })
-            .unwrap_or(true);
-        let entries = std::env::var("OTS_QUERY_CACHE_ENTRIES")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_MAX_ENTRIES);
-        let max_rows = std::env::var("OTS_QUERY_CACHE_MAX_ROWS")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .unwrap_or(DEFAULT_MAX_ROWS);
-        Self::new(enabled, entries, max_rows)
+        use crate::config as c;
+        Self::new(
+            c::QUERY_CACHE.get(),
+            c::QUERY_CACHE_ENTRIES.get(),
+            c::QUERY_CACHE_MAX_ROWS.get(),
+        )
     }
 
     pub fn new(enabled: bool, max_entries: usize, max_rows: usize) -> Self {

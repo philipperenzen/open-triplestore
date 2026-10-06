@@ -28,30 +28,23 @@
 //! (reqwest strips sensitive headers there), so an identity assertion minted
 //! for one peer is never shown to another.
 //!
-//! The allowlist is read on every call rather than cached: tests and operators
-//! change it at runtime, and the cost is one environment read.
+//! Every limit and the allowlist come from the configuration registry
+//! ([`crate::config`]), validated at startup: an entry that is not an
+//! absolute http(s) URL without credentials stops the start.
 
-use std::collections::HashSet;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::Duration;
 
-pub const ALLOWLIST_ENV: &str = "OTS_REMOTE_ALLOWLIST";
-pub const TIMEOUT_ENV: &str = "OTS_REMOTE_TIMEOUT_SECS";
-pub const MAX_ROWS_ENV: &str = "OTS_SERVICE_MAX_ROWS";
-pub const MAX_BYTES_ENV: &str = "OTS_REMOTE_MAX_BYTES";
-pub const MAX_ENDPOINTS_ENV: &str = "OTS_SERVICE_MAX_ENDPOINTS";
-pub const MAX_CALLS_ENV: &str = "OTS_SERVICE_MAX_CALLS";
-pub const DEADLINE_ENV: &str = "OTS_SERVICE_DEADLINE_SECS";
+pub const ALLOWLIST_ENV: &str = crate::config::REMOTE_ALLOWLIST.name();
+pub const MAX_ROWS_ENV: &str = crate::config::SERVICE_MAX_ROWS.name();
+pub const MAX_BYTES_ENV: &str = crate::config::REMOTE_MAX_BYTES.name();
+pub const MAX_ENDPOINTS_ENV: &str = crate::config::SERVICE_MAX_ENDPOINTS.name();
+pub const MAX_CALLS_ENV: &str = crate::config::SERVICE_MAX_CALLS.name();
+pub const DEADLINE_ENV: &str = crate::config::SERVICE_DEADLINE.name();
 
-/// The raw allowlist entries, trimmed, empty entries dropped.
+/// The allowlist entries, trimmed, empty entries dropped.
 pub fn allowlist() -> Vec<String> {
-    std::env::var(ALLOWLIST_ENV)
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
+    crate::config::REMOTE_ALLOWLIST.get()
 }
 
 /// Whether remote access is configured at all.
@@ -119,34 +112,12 @@ fn has_userinfo(u: &url::Url) -> bool {
     !u.username().is_empty() || u.password().is_some()
 }
 
-/// Warn about an entry that cannot be used, once per distinct entry: the
-/// allowlist is re-read on every call, and a bad entry should not flood the
-/// log every time a query runs.
-fn warn_bad_entry(entry: &str) {
-    static REPORTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    let mut seen = REPORTED
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if seen.insert(entry.to_string()) {
-        tracing::warn!(
-            entry,
-            "{ALLOWLIST_ENV}: ignoring an entry that is not an absolute http(s) URL \
-             without credentials"
-        );
-    }
-}
-
+/// The allowlist, parsed. Every entry parses: the registry refuses one that
+/// is not an absolute http(s) URL without credentials.
 fn parsed_allowlist() -> Vec<AllowEntry> {
     allowlist()
         .iter()
-        .filter_map(|e| {
-            let parsed = AllowEntry::parse(e);
-            if parsed.is_none() {
-                warn_bad_entry(e);
-            }
-            parsed
-        })
+        .filter_map(|e| AllowEntry::parse(e))
         .collect()
 }
 
@@ -168,40 +139,22 @@ fn allowed_by(entries: &[AllowEntry], url: &str) -> bool {
 }
 
 pub fn timeout() -> Duration {
-    let secs = std::env::var(TIMEOUT_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .filter(|s| *s > 0)
-        .unwrap_or(10);
-    Duration::from_secs(secs)
+    crate::config::REMOTE_TIMEOUT.get()
 }
 
 pub fn max_rows() -> usize {
-    std::env::var(MAX_ROWS_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(10_000)
+    crate::config::SERVICE_MAX_ROWS.get()
 }
 
 /// Distinct `SERVICE` endpoints one query may contact (default 16).
 pub fn max_endpoints() -> usize {
-    positive_env(MAX_ENDPOINTS_ENV).unwrap_or(16)
+    crate::config::SERVICE_MAX_ENDPOINTS.get()
 }
 
 /// Remote requests one query may make through `SERVICE` (default 64);
 /// answers reused within the query do not count.
 pub fn max_calls() -> usize {
-    positive_env(MAX_CALLS_ENV).unwrap_or(64)
-}
-
-/// The server's SPARQL query timeout (`SPARQL_QUERY_TIMEOUT_SECS`), recorded
-/// at startup by [`set_query_timeout_secs`]; 0 until then.
-static QUERY_TIMEOUT_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Record the server's SPARQL query timeout, which [`deadline`] defaults to.
-pub fn set_query_timeout_secs(secs: u64) {
-    QUERY_TIMEOUT_SECS.store(secs, std::sync::atomic::Ordering::Relaxed);
+    crate::config::SERVICE_MAX_CALLS.get()
 }
 
 /// How long after it starts a query may still make `SERVICE` requests:
@@ -209,24 +162,11 @@ pub fn set_query_timeout_secs(secs: u64) {
 /// (`SPARQL_QUERY_TIMEOUT_SECS`, default 30 s), so raising the query timeout
 /// raises the federation deadline with it.
 pub fn deadline() -> Duration {
-    let query_timeout = QUERY_TIMEOUT_SECS.load(std::sync::atomic::Ordering::Relaxed);
-    let default = if query_timeout > 0 { query_timeout } else { 30 };
-    Duration::from_secs(positive_env(DEADLINE_ENV).map_or(default, |n| n as u64))
-}
-
-fn positive_env(name: &str) -> Option<usize> {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|n| *n > 0)
+    crate::config::SERVICE_DEADLINE.get()
 }
 
 pub fn max_bytes() -> usize {
-    std::env::var(MAX_BYTES_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(64 * 1024 * 1024)
+    crate::config::REMOTE_MAX_BYTES.get() as usize
 }
 
 /// The most redirects one request follows before it fails.
@@ -425,30 +365,19 @@ pub(crate) fn post_sparql_blocking_within(
     })
 }
 
-pub const RETRIES_ENV: &str = "OTS_LDES_RETRIES";
-pub const MAX_RETRY_WAIT_ENV: &str = "OTS_LDES_MAX_RETRY_WAIT_SECS";
-
 /// The statuses LDES 1.0 §3.3 says a client retries with back-off.
 pub const RETRYABLE_STATUSES: [u16; 7] = [408, 425, 429, 500, 502, 503, 504];
 
 /// How many times a document fetch is retried after a retryable status
 /// (default 4, so five attempts at most; 0 turns retrying off).
 pub fn retries() -> u32 {
-    std::env::var(RETRIES_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .unwrap_or(4)
-        .min(16)
+    crate::config::LDES_RETRIES.get()
 }
 
 /// The longest single wait before a retry (default 60 s). A `Retry-After`
 /// asking for longer fails the fetch instead of holding the sync that long.
 pub fn max_retry_wait() -> Duration {
-    let secs = std::env::var(MAX_RETRY_WAIT_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(60);
-    Duration::from_secs(secs)
+    crate::config::LDES_MAX_RETRY_WAIT.get()
 }
 
 /// The wait a `Retry-After` header asks for: delay-seconds or an HTTP-date

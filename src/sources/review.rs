@@ -77,15 +77,8 @@ pub const STATUSES: [&str; 7] = [
 /// Cap on the items one refused run opens. A refusal over a whole table with
 /// a systematic defect is a mapping problem — the dry-run classifier's
 /// territory — not a queue for a human to work through subject by subject.
-pub const MAX_ITEMS_ENV: &str = "OTS_REVIEW_MAX_ITEMS";
-const DEFAULT_MAX_ITEMS: usize = 500;
-
 fn max_items() -> usize {
-    std::env::var(MAX_ITEMS_ENV)
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(DEFAULT_MAX_ITEMS)
+    crate::config::REVIEW_MAX_ITEMS.get()
 }
 
 pub fn review_graph_iri(source_id: &str) -> String {

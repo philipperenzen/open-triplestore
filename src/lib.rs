@@ -36,6 +36,7 @@ pub mod auth;
 pub mod backup;
 pub mod catalog;
 pub mod commit_log;
+pub mod config;
 pub mod conformance;
 pub mod containers;
 pub mod data_models;

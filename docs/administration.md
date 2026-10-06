@@ -304,19 +304,52 @@ See [rml.md](rml.md) for the full RML guide.
 
 ## Environment Variables
 
+### How settings are read
+
+Every setting is an environment variable; some also have a command-line flag
+(`--help` lists them, each with its variable), and a flag wins over the
+variable. The server reads them all once at startup, validates them together,
+and **refuses to start on any problem, listing every one**:
+
+- **Booleans** take `true`/`false`, `1`/`0`, `yes`/`no` or `on`/`off`, in any
+  case. Anything else is an error, never a default.
+- **Numbers** must be whole numbers within the setting's range. A value that
+  does not parse, or is out of range, is an error; nothing is clamped or
+  replaced by the default.
+- **Choices** (`OTS_ENV`, `DCAT_PROFILE`, `SMTP_TLS`, the token policies, …)
+  take only the listed words, in any case. There are no aliases.
+- **Units** are in the name: a duration ends in `_MS`, `_SECS` or `_DAYS`, a
+  size in `_BYTES` (which also takes `KiB`, `MiB` or `GiB`, e.g. `512MiB`).
+- **Empty means unset.** `NAME=` (what compose passes for `${NAME:-}`) gives
+  the default.
+- **Renamed or removed names stop the start** with the name to use instead
+  (for example `LLM_TIMEOUT_SECONDS` → `LLM_TIMEOUT_SECS`), so an old `.env`
+  can never be silently ignored. An `OTS_*` variable no setting reads is
+  logged as a warning (a typo, or a secret reference's target).
+- **Secrets** (`JWT_SECRET`, `LLM_API_KEY`, `SMTP_PASSWORD`, …) take a
+  reference (`env:NAME`, `file:/path`, `vault:…`); a malformed reference is an
+  error.
+
+`GET /api/admin/config` (admin only) answers every setting with its effective
+value, default, kind, documentation and source — `cli`, `env`, `file` (a
+secret given as a `file:` reference), `profile` (the production profile's
+default) or `default`. Secret values are shown as `[redacted]`; a secret given
+as a reference shows the reference.
+
+
 | Variable | Default | Description |
 |---|---|---|
 | `JWT_SECRET` | *(random, saved to `data/jwt_secret`)* | JWT signing secret, as a raw value or a secret reference (`env:NAME`, `file:/path`, `vault:…`; see [sources.md](sources.md#credentials-are-references-never-values)). Under `OTS_ENV=production` a raw value is **refused at startup**; in development it is accepted with a one-time warning. Set explicitly in production so tokens survive restarts. The on-disk file is written `0600`. The server **refuses to start** if this is a well-known default/placeholder (e.g. `change-me-in-production`), naming the fix — leave it unset to auto-generate a strong one. |
 | `AUTH_DB_PATH` | `<data-dir>/auth.db` | Path to the SQLite identity database |
-| `ACCESS_TOKEN_EXPIRY_MINUTES` | `30` | Access token lifetime |
+| `ACCESS_TOKEN_EXPIRY_SECS` | `1800` | Access token lifetime, in seconds (at least 60) |
 | `REFRESH_TOKEN_EXPIRY_DAYS` | `30` | Refresh token lifetime |
 | `OIDC_ISSUER`, `OIDC_AUDIENCE` | *(unset: off)* | Turn on [OIDC resource-server mode](auth.md#oidc-resource-server-mode-idp-access-tokens): access tokens issued by this external IdP are accepted as bearer tokens and linked to (or create) local accounts. The issuer must be `https` (loopback `http` for development); the audience is required, and without it every IdP token is refused. |
-| `OIDC_DEFAULT_ROLE` | `user` | Role for accounts created from an IdP token when no claim maps to one: `user` or `guest`. **Capped at `user`**: `admin` or `super_admin` logs an error at startup and `user` is used, because the default applies to every IdP account; grant admin through `OIDC_ROLE_CLAIM_MAP` or the UI. Read only when the `env-oidc` provider entry is first created; edit that entry later instead (the same cap applies there). |
-| `OTS_OIDC_IDP_TOKEN_POLICY` | `session` | What an [IdP token](auth.md#what-an-idp-token-may-do) may do: `session` reads and writes but cannot create API tokens; `scoped` writes only when the token's `scope`/`scp` claim grants it; `full` also creates API tokens (the behaviour before this setting). Admin accounts' tokens always write. Unknown values mean `session`. Independent of `OTS_OIDC_SESSION_POLICY`. Not to be confused with `OTS_OIDC_SESSION_POLICY` below, which governs the tokens this store issues as an OIDC provider. |
+| `OIDC_DEFAULT_ROLE` | `user` | Role for accounts created from an IdP token when no claim maps to one: `user` or `guest`. Any other value (`admin`, `super_admin`) **stops the start**, because the default applies to every IdP account; grant admin through `OIDC_ROLE_CLAIM_MAP` or the UI. Read only when the `env-oidc` provider entry is first created; edit that entry later instead (the same cap applies there). |
+| `OTS_OIDC_IDP_TOKEN_POLICY` | `session` | What an [IdP token](auth.md#what-an-idp-token-may-do) may do: `session` reads and writes but cannot create API tokens; `scoped` writes only when the token's `scope`/`scp` claim grants it; `full` also creates API tokens (the behaviour before this setting). Admin accounts' tokens always write. Any other value stops the start. Independent of `OTS_OIDC_SESSION_POLICY`. Not to be confused with `OTS_OIDC_SESSION_POLICY` below, which governs the tokens this store issues as an OIDC provider. |
 | `OTS_OIDC_IDP_WRITE_SCOPES` | *(unset)* | Under `OTS_OIDC_IDP_TOKEN_POLICY=scoped`: extra IdP scope values, comma- or space-separated, that count as a write grant besides `write` and `admin`. |
 | `OIDC_ROLE_CLAIMS`, `OIDC_ROLE_CLAIM_MAP`, `OIDC_GROUPS_CLAIM`, `OIDC_ORG_GROUP_PREFIX` | `roles,realm_access.roles,groups`, *(none)*, `groups`, `org:` | Which token claims are mapped, through the JSON claim-value → role map, to a role (capped at `admin`) or to publish permission (`"publisher"`), and which group values (`org:<slug>`) add organisation memberships. A mapped role is rewritten on every request, so the IdP is authoritative. See [auth.md](auth.md#roles-publish-permission-and-organisations). |
 | `ACCEPT_LEGACY_TOKENS` | `true` | `false` refuses this store's own session tokens (the bundled web UI's sign-in included) and every `ots_` API token, leaving only IdP tokens, provider tokens and federation assertions. For API-only deployments behind an IdP. |
-| `OTS_OIDC_SESSION_POLICY` | `session` | What an access token this store issues as an [OIDC provider](oidc-provider.md#what-a-provider-token-may-do) may do: `session` reads and writes but cannot create API tokens; `scoped` writes only with a write scope, which the provider cannot issue today, so its tokens are read-only for non-admins; `full` also creates API tokens. Admin accounts' tokens always write. Unknown values mean `session`. |
+| `OTS_OIDC_SESSION_POLICY` | `session` | What an access token this store issues as an [OIDC provider](oidc-provider.md#what-a-provider-token-may-do) may do: `session` reads and writes but cannot create API tokens; `scoped` writes only with a write scope, which the provider cannot issue today, so its tokens are read-only for non-admins; `full` also creates API tokens. Admin accounts' tokens always write. Any other value stops the start. |
 | `OTS_OIDC_WRITE_SCOPES` | *(unset)* | Under `scoped`: extra scope values, comma- or space-separated, that count as a write grant besides `write` and `admin`. |
 | `SECURE_COOKIES` | `false` | Issue auth cookies with the `Secure` attribute (HTTPS only). **Set to `true` in any TLS deployment**; leave `false` for plain-HTTP local development. |
 | `SERVE_FRONTEND` | `true` | Serve the bundled web UI (frontend SPA) at `/`. Set `false` for a headless, API-only server — SPARQL, Graph Store and REST endpoints are unaffected. Also the `--serve-frontend` CLI flag. |
@@ -342,9 +375,9 @@ See [rml.md](rml.md) for the full RML guide.
 | `CATALOG_LICENSE` | unset | Licence IRI for the catalogue and for distributions of datasets without one. |
 | `OTS_REMOTE_AUTH` | unset | `assert` mints a signed identity assertion for allowlisted peers when acting for a user (see [federation.md](federation.md)). |
 | `OTS_TRUSTED_ISSUERS` | unset | Comma-separated peer base URLs whose identity assertions are accepted (needs `BASE_URL`). |
-| `OTS_SPARQL_FUNCTION_GRAPHS` | unset | Comma-separated graphs whose `sh:SPARQLFunction`s every query sees, `/sparql` included. Only `urn:system:functions` and graphs under `urn:system:functions:` are accepted (no dataset can hold them, so only an admin can write them); any other entry is ignored with a warning. A function at a reserved IRI (`xsd:` casts, GeoSPARQL and the other built-ins) is skipped with a warning. Without it, a function is callable only in runs of the shapes graph that declares it (see [shacl.md](shacl.md#sparql-functions-shsparqlfunction-shacl-af-5)). |
-| `OTS_MAX_UPLOAD_MB` | 512 (Graph Store, container import/validate), 1024 (bulk import) | Request-body limit for RDF uploads and container archives; bodies are buffered and parsed before they replace anything, so this also bounds memory per request. Larger datasets: append in chunks or use the bulk import. |
-| `OTS_REMOTE_ALLOWLIST` | *(unset)* | Comma-separated URLs the server may contact on a user's behalf: SPARQL federation (`SERVICE <endpoint>`), LDES client sync and remote JSON-LD contexts ([formats.md](formats.md#json-ld-remote-contexts); the bundled W3C contexts need no entry). Unset or empty: no outbound requests at all (a `SERVICE` clause errors). An entry is matched on its parsed origin, not as a string prefix: the scheme, host (case-insensitive) and port must be equal, the URL may carry no credentials, and the entry's path must be a prefix of the URL's path on segment boundaries. So `https://sparql.example.org` (with or without a trailing slash) admits every path on that origin and nothing else — not `https://sparql.example.org.evil.net/`, not `https://sparql.example.org@evil.net/`, not port 8443 — and `https://h/sparql` admits `/sparql` and `/sparql/…` but not `/sparqlx`. Entries that are not absolute http(s) URLs are ignored with a warning. Redirects are followed (at most 10), each hop only if the allowlist covers it too; a hop to another host or port drops the `Authorization` header. |
+| `OTS_SPARQL_FUNCTION_GRAPHS` | unset | Comma-separated graphs whose `sh:SPARQLFunction`s every query sees, `/sparql` included. Only `urn:system:functions` and graphs under `urn:system:functions:` are accepted (no dataset can hold them, so only an admin can write them); any other entry stops the start. A function at a reserved IRI (`xsd:` casts, GeoSPARQL and the other built-ins) is skipped with a warning. Without it, a function is callable only in runs of the shapes graph that declares it (see [shacl.md](shacl.md#sparql-functions-shsparqlfunction-shacl-af-5)). |
+| `OTS_MAX_UPLOAD_BYTES` | 512 MiB (Graph Store, container import/validate), 1 GiB (bulk import) | Request-body limit in bytes (`512MiB`, `2GiB` are accepted) for RDF uploads and container archives; bodies are buffered and parsed before they replace anything, so this also bounds memory per request. Larger datasets: append in chunks or use the bulk import. |
+| `OTS_REMOTE_ALLOWLIST` | *(unset)* | Comma-separated URLs the server may contact on a user's behalf: SPARQL federation (`SERVICE <endpoint>`), LDES client sync and remote JSON-LD contexts ([formats.md](formats.md#json-ld-remote-contexts); the bundled W3C contexts need no entry). Unset or empty: no outbound requests at all (a `SERVICE` clause errors). An entry is matched on its parsed origin, not as a string prefix: the scheme, host (case-insensitive) and port must be equal, the URL may carry no credentials, and the entry's path must be a prefix of the URL's path on segment boundaries. So `https://sparql.example.org` (with or without a trailing slash) admits every path on that origin and nothing else — not `https://sparql.example.org.evil.net/`, not `https://sparql.example.org@evil.net/`, not port 8443 — and `https://h/sparql` admits `/sparql` and `/sparql/…` but not `/sparqlx`. An entry that is not an absolute http(s) URL without credentials stops the start. Redirects are followed (at most 10), each hop only if the allowlist covers it too; a hop to another host or port drops the `Authorization` header. |
 | `OTS_ICDD_ONTOLOGY_DIR` | *(unset)* | Directory holding ISO's `Container.rdf` and `Linkset.rdf` (download them from <https://standards.iso.org/iso/21597/-1/ed-1/en/>; this project does not ship them). ICDD exports embed both unchanged in `Ontology resources/`; without them an export carries the `ontology-resource-missing` warning and is not ISO 21597-1 Part 1-conformant. See [containers.md](containers.md). |
 | `OTS_JSONLD_CONTEXT_MAX_BYTES` | `1048576` | Largest remote JSON-LD context the document loader reads; a bigger one fails the parse. |
 | `OTS_REMOTE_TIMEOUT_SECS` | `10` | Timeout per outbound request. |
@@ -391,7 +424,7 @@ See [rml.md](rml.md) for the full RML guide.
 | `OTS_QUERY_CACHE_MAX_ROWS` | `10000` | Results with more rows than this are not cached. |
 | `OTS_PARALLEL_QUERY` | `on` | The in-memory query mirror (subject-hash shards, a full copy and the columnar copy). `off` answers every query from the persistent store. |
 | `OTS_PARALLEL_QUERY_MAX_TRIPLES` | *(derived from RAM)* | Store size above which the mirror stays off. The default is a quarter of the detected memory limit (the cgroup limit in a container) at about 1 KiB per triple, never below 2 M or above 24 M; 2 M where no limit can be detected. |
-| `OTS_PARALLEL_QUERY_SHARDS` | *(CPU cores)* | Number of subject-hash shards, clamped to 1–16. |
+| `OTS_PARALLEL_QUERY_SHARDS` | *(CPU cores)* | Number of subject-hash shards, 1–16 (another value stops the start). |
 | `OTS_PARALLEL_QUERY_REBUILD_QUIET_MS` | `500` | After a write, the mirror is rebuilt only once writes have been quiet this long; queries in the meantime are answered by the persistent store. `0` rebuilds eagerly. |
 | `OTS_SHACL_RUN_INDEX_MIN_PROBES` | `20000` | A SHACL validation run builds an in-memory index of the predicates its shapes traverse only when it will make at least this many lookups. |
 | `OTS_SHACL_RUN_INDEX_MAX_QUADS` | *(derived from RAM)* | The most quads that run index may hold. The default is derived from the memory limit, 1 M where none can be detected, and is never below 250 k or above 8 M. Beyond the cap, lookups go to the store. |
@@ -403,7 +436,7 @@ See [rml.md](rml.md) for the full RML guide.
 | `S3_REGION` | `us-east-1` | S3 region |
 | `BACKUP_DIR` | `data/backups` | Directory for scheduled backups |
 | `BACKUP_RETENTION_COUNT` | `7` | Number of backups to retain |
-| `BACKUP_SCHEDULE_HOURS` | `24` | Hours between scheduled backups |
+| `BACKUP_SCHEDULE_SECS` | `86400` | Seconds between scheduled backups (at least 60) |
 | `BACKUP_ENCRYPT` | `false` | Encrypt backups with `age` X25519 (requires the `backup-encrypt` build feature) |
 | `BACKUP_ENCRYPT_KEY_PATH` | `<data-dir>/backup_key.age` | File holding the `age` X25519 **recipient** (public `age1…` line). Operator-supplied — the server refuses to start if `BACKUP_ENCRYPT=true` and this is absent. |
 | `BACKUP_DECRYPT_IDENTITY_PATH` | *(unset)* | `age-keygen` identity file, used only by `--restore` to decrypt an encrypted backup. Never needed by the running server. |
@@ -496,8 +529,8 @@ required by Article 5(1)(e) AVG / GDPR.
 
 ### Backups
 
-The backup subsystem produces a snapshot every `BACKUP_SCHEDULE_HOURS` hours
-(default `24`) containing:
+The backup subsystem produces a snapshot every `BACKUP_SCHEDULE_SECS` seconds
+(default `86400`, a day) containing:
 - `rdf.nq.gz` — gzipped N-Quads dump of every named graph
 - `auth.sqlite` — online `rusqlite::backup::Backup` snapshot of the auth DB
 - `manifest.json` — SHA-256 checksums + software version
@@ -506,7 +539,7 @@ The backup subsystem produces a snapshot every `BACKUP_SCHEDULE_HOURS` hours
 |---|---|---|
 | `BACKUP_DIR` | `data/backups` | Local backup directory (mode 0o700) |
 | `BACKUP_RETENTION_COUNT` | `7` | Number of snapshots to keep |
-| `BACKUP_SCHEDULE_HOURS` | `24` | Cron interval |
+| `BACKUP_SCHEDULE_SECS` | `86400` | Interval |
 | `BACKUP_ENCRYPT` | `false` | Enable `age` X25519 encryption (requires `--features backup-encrypt`) |
 | `BACKUP_ENCRYPT_KEY_PATH` | `<data-dir>/backup_key.age` | File containing one X25519 recipient. Required when `BACKUP_ENCRYPT=true` — never auto-generated |
 | `BACKUP_DECRYPT_IDENTITY_PATH` | — | Identity file for `--restore` of an encrypted backup |

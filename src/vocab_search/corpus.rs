@@ -55,10 +55,8 @@ pub const DEFAULT_CORPUS_SHA256: &str =
 /// Candidate corpus locations, in order.
 pub fn corpus_candidates(data_dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Ok(p) = std::env::var("VOCAB_CORPUS_PATH") {
-        if !p.is_empty() {
-            out.push(PathBuf::from(p));
-        }
+    if let Some(p) = crate::config::VOCAB_CORPUS_PATH.get() {
+        out.push(p);
     }
     out.push(data_dir.join("vocab").join("lov.nq.gz"));
     out.push(PathBuf::from("assets/vocab/lov.nq.gz"));
@@ -81,16 +79,15 @@ pub async fn ensure_corpus(data_dir: &Path) -> Option<PathBuf> {
     if let Some(existing) = find_corpus(data_dir) {
         return Some(existing);
     }
-    let url = std::env::var("VOCAB_CORPUS_URL").unwrap_or_else(|_| DEFAULT_CORPUS_URL.to_string());
+    let url = crate::config::VOCAB_CORPUS_URL.get();
     if url.is_empty() {
         info!("LOV corpus not present and download disabled (VOCAB_CORPUS_URL=\"\")");
         return None;
     }
-    let expected_sha = match std::env::var("VOCAB_CORPUS_SHA256") {
-        Ok(s) if !s.is_empty() => Some(s),
-        Ok(_) => None,
-        Err(_) if url == DEFAULT_CORPUS_URL => Some(DEFAULT_CORPUS_SHA256.to_string()),
-        Err(_) => None,
+    let expected_sha = match crate::config::VOCAB_CORPUS_SHA256.get() {
+        Some(s) => Some(s),
+        None if url == DEFAULT_CORPUS_URL => Some(DEFAULT_CORPUS_SHA256.to_string()),
+        None => None,
     };
 
     info!("Downloading LOV corpus from {} (one-off, ~18 MB)", url);

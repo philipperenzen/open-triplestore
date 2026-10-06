@@ -69,43 +69,25 @@ pub struct GuardConfig {
     pub rate_per_min_anon: u32,
 }
 
-fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(default)
-}
-
 pub fn config() -> &'static GuardConfig {
+    use crate::config as c;
     static CONFIG: OnceLock<GuardConfig> = OnceLock::new();
     CONFIG.get_or_init(|| GuardConfig {
-        max_message_chars: env_usize("LLM_GUARD_MAX_MESSAGE_CHARS", 8_000),
-        max_messages: env_usize("LLM_GUARD_MAX_MESSAGES", 40),
-        max_total_chars: env_usize("LLM_GUARD_MAX_TOTAL_CHARS", 64_000),
-        injection_action: match std::env::var("LLM_GUARD_INJECTION_ACTION")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
+        max_message_chars: c::LLM_GUARD_MAX_MESSAGE_CHARS.get(),
+        max_messages: c::LLM_GUARD_MAX_MESSAGES.get(),
+        max_total_chars: c::LLM_GUARD_MAX_TOTAL_CHARS.get(),
+        injection_action: match c::LLM_GUARD_INJECTION_ACTION.get().as_str() {
             "off" => InjectionAction::Off,
             "flag" => InjectionAction::Flag,
             _ => InjectionAction::Block,
         },
-        blocklist: std::env::var("LLM_GUARD_BLOCKLIST")
-            .unwrap_or_default()
-            .split(',')
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
+        blocklist: c::LLM_GUARD_BLOCKLIST
+            .get()
+            .into_iter()
+            .map(|s| s.to_lowercase())
             .collect(),
-        rate_per_min: std::env::var("LLM_RATE_LIMIT_PER_MIN")
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(20),
-        rate_per_min_anon: std::env::var("LLM_RATE_LIMIT_ANON_PER_MIN")
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(5),
+        rate_per_min: c::LLM_RATE_LIMIT_PER_MIN.get(),
+        rate_per_min_anon: c::LLM_RATE_LIMIT_ANON_PER_MIN.get(),
     })
 }
 
@@ -320,17 +302,11 @@ pub fn check_rate_with(key: &str, limit: u32) -> Result<(), u64> {
 
 /// Keep log rows for this many days (`LLM_LOG_RETENTION_DAYS`, default 90).
 fn retention_days() -> i64 {
-    std::env::var("LLM_LOG_RETENTION_DAYS")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(90)
+    crate::config::LLM_LOG_RETENTION_DAYS.get() as i64
 }
 
 fn preview_enabled() -> bool {
-    !matches!(
-        std::env::var("LLM_LOG_PREVIEW_DISABLED").as_deref(),
-        Ok("1") | Ok("true")
-    )
+    !crate::config::LLM_LOG_PREVIEW_DISABLED.get()
 }
 
 /// A short preview of the question for the admin log — or None when previews

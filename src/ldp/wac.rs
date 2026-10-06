@@ -791,12 +791,7 @@ pub enum RootAclPolicy {
 impl RootAclPolicy {
     /// `LDP_ROOT_ACL=open|owners`, default `open`.
     pub fn from_env() -> Self {
-        match std::env::var("LDP_ROOT_ACL")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
+        match crate::config::LDP_ROOT_ACL.get().as_str() {
             "owners" => RootAclPolicy::Owners,
             _ => RootAclPolicy::Open,
         }

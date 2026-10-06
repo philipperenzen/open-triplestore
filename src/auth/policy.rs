@@ -64,8 +64,8 @@ pub fn parse_guest_capabilities(raw: &str) -> GuestCapabilities {
         match word.as_str() {
             "all" => return GuestCapabilities::all(),
             "write" => caps.write = true,
-            "create_datasets" | "create-datasets" => caps.create_datasets = true,
-            "api_tokens" | "api-tokens" => caps.api_tokens = true,
+            "create_datasets" => caps.create_datasets = true,
+            "api_tokens" => caps.api_tokens = true,
             "publish" => caps.publish = true,
             "read" | "none" => {}
             other => tracing::warn!(
@@ -77,12 +77,38 @@ pub fn parse_guest_capabilities(raw: &str) -> GuestCapabilities {
     caps
 }
 
+/// The words [`parse_guest_capabilities`] knows.
+const GUEST_CAPABILITY_WORDS: &[&str] = &[
+    "read",
+    "none",
+    "write",
+    "create_datasets",
+    "api_tokens",
+    "publish",
+    "all",
+];
+
+/// Validate an `OTS_GUEST_CAPABILITIES` value (the configuration registry
+/// refuses an unknown word at startup, so a typo is never silently dropped).
+pub fn check_guest_capabilities(raw: &str) -> Result<(), String> {
+    for word in raw
+        .split([',', ' ', '\t'])
+        .map(|w| w.trim().to_ascii_lowercase())
+        .filter(|w| !w.is_empty())
+    {
+        if !GUEST_CAPABILITY_WORDS.contains(&word.as_str()) {
+            return Err(format!(
+                "`{word}` is not a guest capability (known: read, write, create_datasets, \
+                 api_tokens, publish, all)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Capabilities granted to the `Guest` role in this deployment (default: read only).
 pub fn guest_capabilities() -> GuestCapabilities {
-    match std::env::var("OTS_GUEST_CAPABILITIES") {
-        Ok(raw) => parse_guest_capabilities(&raw),
-        Err(_) => GuestCapabilities::default(),
-    }
+    parse_guest_capabilities(&crate::config::GUEST_CAPABILITIES.get())
 }
 
 /// How much authority a delegated OIDC access token carries: one issued by
@@ -110,13 +136,19 @@ impl OidcSessionPolicy {
     /// Whether a provider token carrying `scope` may write. Extra write
     /// scopes come from `OTS_OIDC_WRITE_SCOPES`.
     pub fn allows_write(self, scope: &str) -> bool {
-        self.allows_write_with(scope, || env_or_empty("OTS_OIDC_WRITE_SCOPES"))
+        self.allows_write_with(scope, || {
+            crate::config::OIDC_WRITE_SCOPES.get().unwrap_or_default()
+        })
     }
 
     /// Whether an IdP token carrying `scope` may write. Extra write scopes
     /// come from `OTS_OIDC_IDP_WRITE_SCOPES`.
     pub fn allows_idp_write(self, scope: &str) -> bool {
-        self.allows_write_with(scope, || env_or_empty("OTS_OIDC_IDP_WRITE_SCOPES"))
+        self.allows_write_with(scope, || {
+            crate::config::OIDC_IDP_WRITE_SCOPES
+                .get()
+                .unwrap_or_default()
+        })
     }
 
     fn allows_write_with(self, scope: &str, extra_scopes: impl FnOnce() -> String) -> bool {
@@ -130,10 +162,6 @@ impl OidcSessionPolicy {
     pub fn allows_api_token_minting(self) -> bool {
         matches!(self, OidcSessionPolicy::Full)
     }
-}
-
-fn env_or_empty(var: &str) -> String {
-    std::env::var(var).unwrap_or_default()
 }
 
 /// Scope values understood as granting write. `admin` implies write.
@@ -167,7 +195,7 @@ pub fn parse_idp_token_policy(raw: &str) -> OidcSessionPolicy {
 fn parse_policy(var: &str, raw: &str) -> OidcSessionPolicy {
     match raw.trim().to_ascii_lowercase().as_str() {
         "scoped" => OidcSessionPolicy::Scoped,
-        "full" | "legacy" => OidcSessionPolicy::Full,
+        "full" => OidcSessionPolicy::Full,
         "session" | "" => OidcSessionPolicy::Session,
         other => {
             tracing::warn!(
@@ -181,19 +209,13 @@ fn parse_policy(var: &str, raw: &str) -> OidcSessionPolicy {
 /// The policy for access tokens this server issues as an OIDC provider
 /// (default: `session`).
 pub fn oidc_session_policy() -> OidcSessionPolicy {
-    match std::env::var("OTS_OIDC_SESSION_POLICY") {
-        Ok(raw) => parse_oidc_session_policy(&raw),
-        Err(_) => OidcSessionPolicy::Session,
-    }
+    parse_oidc_session_policy(&crate::config::OIDC_SESSION_POLICY.get())
 }
 
 /// The policy for access tokens the external IdP issues for this store's
 /// audience (default: `session`). Independent of [`oidc_session_policy`].
 pub fn idp_token_policy() -> OidcSessionPolicy {
-    match std::env::var("OTS_OIDC_IDP_TOKEN_POLICY") {
-        Ok(raw) => parse_idp_token_policy(&raw),
-        Err(_) => OidcSessionPolicy::Session,
-    }
+    parse_idp_token_policy(&crate::config::OIDC_IDP_TOKEN_POLICY.get())
 }
 
 #[cfg(test)]
@@ -282,7 +304,9 @@ mod tests {
         assert_eq!(parse_idp_token_policy(""), OidcSessionPolicy::Session);
         assert!(!parse_idp_token_policy("").allows_api_token_minting());
         assert_eq!(parse_idp_token_policy("Scoped"), OidcSessionPolicy::Scoped);
-        assert_eq!(parse_idp_token_policy("legacy"), OidcSessionPolicy::Full);
+        assert_eq!(parse_idp_token_policy("full"), OidcSessionPolicy::Full);
+        // No aliases: the registry refuses `legacy` at startup.
+        assert_eq!(parse_idp_token_policy("legacy"), OidcSessionPolicy::Session);
         assert_eq!(parse_idp_token_policy("banana"), OidcSessionPolicy::Session);
     }
 }
