@@ -657,6 +657,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are listed as a warning. `RUST_LOG` is now in the environment table.
 
 ### Changed
+- **`image` Cargo feature.** `image` is an alias for the published image's
+  feature set — `full`, `saml` and the three SQL connector plugins — and the
+  Dockerfile's default `CARGO_FEATURES` is now `image`, so
+  `cargo build --release --features image` builds the image's binary
+  natively. The `full` and `default` comments in `Cargo.toml` no longer claim
+  "all extensions" or SAML, and `docs/build-features.md` lists both aliases.
 - **SHACL write gates run in one pass with a defined order.** A Graph Store
   `PUT`/`POST` and validate-and-commit used to run the Studio gates
   (`gate_writes` pipelines, validation-layer bindings) and then, separately,

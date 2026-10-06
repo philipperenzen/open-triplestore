@@ -4,8 +4,8 @@ Open Triplestore has optional Cargo features. This page says, per feature,
 whether it is in the default `full` set (and therefore in a plain `cargo build`),
 whether the published Docker image has it, and which CI pipeline compiles it.
 The image builds with the Dockerfile's `CARGO_FEATURES`, which defaults to
-`full,saml,plugin-postgres,plugin-mysql,plugin-mssql`: everything in `full`,
-SAML 2.0 sign-in and the three SQL connectors. A feature that no pipeline compiles can break without
+`image`, an alias for `full,saml,plugin-postgres,plugin-mysql,plugin-mssql`:
+everything in `full`, SAML 2.0 sign-in and the three SQL connectors. A feature that no pipeline compiles can break without
 anyone noticing; a feature in neither `full` nor that list is absent from the
 image no matter what the docs say about its knobs.
 
@@ -26,20 +26,22 @@ image no matter what the docs say about its knobs.
 | `plugin-postgres`, `plugin-mysql`, `plugin-mssql` | SQL datasource connectors for PostgreSQL, MySQL / MariaDB and SQL Server ([sources](sources.md)); pure Rust over rustls, no system libraries | not in `full`; **yes** in the image | GitHub (backend job; `live-sources` runs each against a live server), GitLab |
 | `plugin-hello`, `plugin-accounts-dashboard` | Example / accounts-dashboard plugins mounted at `/ext` | **no** | GitHub, GitLab |
 | `test-utils` | Test-only helpers | no | GitHub, GitLab (tests) |
+| `full` | Alias: every feature above marked "yes" — the standards, search, LDP, 3D geometry, encrypted backups, alerting and the asset extractors. Not `saml`, `sfcgal3d` or any `plugin-*` | the `default` | GitHub, GitLab |
+| `image` | Alias: `full`, `saml`, `plugin-postgres`, `plugin-mysql`, `plugin-mssql` — exactly the published image | **is** the image | GitHub (contained in the backend feature list; the licence-notice step builds with it), GitLab, and the image build jobs |
 
 Notes:
 
 - `default = ["full"]`, so `cargo build --release` produces the image's feature
-  set without SAML and the SQL connectors; add
-  `--features full,saml,plugin-postgres,plugin-mysql,plugin-mssql` to match the
-  image exactly (SAML then needs libxml2, libxmlsec1, pkg-config and libclang;
+  set without SAML and the SQL connectors; `cargo build --release --features
+  image` matches the image exactly (SAML then needs libxml2, libxmlsec1, pkg-config and libclang;
   on macOS see the libxml2 note in [development](development.md)). Before this default existed, a plain build produced a binary with
   none of the optional standards compiled in.
 - The connectors stay out of `full` so a source build carries only the drivers
   its operator asks for, and `saml` stays out so a native build never needs the
   C XML libraries. An image without them builds with
   `docker build --build-arg CARGO_FEATURES=full .`; an image with more plugins
-  repeats `saml` and the connector list in its `CARGO_FEATURES`, since the
+  names `image` plus the extra plugins, e.g.
+  `--build-arg CARGO_FEATURES=image,plugin-accounts-dashboard`, since the
   argument replaces the default rather than adding to it.
 - GitHub CI compiles `full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard,plugin-postgres,plugin-mysql,plugin-mssql`
   and, separately, `--no-default-features`; GitLab compiles `--all-features`.

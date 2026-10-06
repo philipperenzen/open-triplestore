@@ -199,8 +199,10 @@ Docker image, not in `full`; see docs/build-features.md). On Debian/Ubuntu:
 ```bash
 # macOS · Linux · WSL
 # The default feature set is `full` — every capability in the Highlights table
-# above. `cargo build --release --no-default-features` gives the minimal core
-# (SPARQL 1.1 + GeoSPARQL 2D) if you want a smaller binary.
+# above except SAML sign-in and the SQL datasource connectors. `--features image`
+# builds exactly what the Docker image has (adds those; SAML needs the libraries
+# above). `--no-default-features` gives the minimal core (SPARQL 1.1 +
+# GeoSPARQL 2D) if you want a smaller binary.
 cargo build --release
 ./target/release/open-triplestore --port 7878 --data-dir ./data
 ```
