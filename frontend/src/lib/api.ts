@@ -490,7 +490,7 @@ export const listSavedQueryTests = (scope: SavedQueryScope, ownerId: string, slu
   request('GET', `${sqBase(scope, ownerId)}/${encodeURIComponent(slug)}/tests`);
 export const acknowledgeSavedQueryTest = (scope: SavedQueryScope, ownerId: string, slug: string, testId: string) =>
   request('POST', `${sqBase(scope, ownerId)}/${encodeURIComponent(slug)}/tests/${encodeURIComponent(testId)}/ack`);
-export const repairSavedQuery = (scope: SavedQueryScope, ownerId: string, slug: string, data): Promise<{ sparql: string; model: string; savedRevision: number | null }> =>
+export const repairSavedQuery = (scope: SavedQueryScope, ownerId: string, slug: string, data): Promise<{ sparql: string; model: string; valid: boolean; parse_error: string | null; saved_revision: number | null }> =>
   request('POST', `${sqBase(scope, ownerId)}/${encodeURIComponent(slug)}/repair`, data);
 export const savedQueryOpenApiUrl = (scope: SavedQueryScope, ownerId: string) =>
   withBase(`/api/${scope}/${encodeURIComponent(ownerId)}/openapi.json`);
