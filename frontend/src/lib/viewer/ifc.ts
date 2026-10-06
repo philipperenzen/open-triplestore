@@ -25,6 +25,7 @@
 import * as THREE from 'three';
 import { MeshBVH, acceleratedRaycast } from 'three-mesh-bvh';
 import { writable } from 'svelte/store';
+import { withBase } from '../basePath';
 
 // Route every mesh raycast through three-mesh-bvh: meshes whose geometry has a
 // `boundsTree` use the BVH; all others fall through to three's stock raycast.
@@ -75,7 +76,7 @@ async function engine(): Promise<any> {
     enginePromise = (async () => {
       const WebIFC = await import('web-ifc');
       const api = new WebIFC.IfcAPI();
-      api.SetWasmPath('/wasm/', true);
+      api.SetWasmPath(withBase('/wasm/'), true);
       await api.Init();
       return api;
     })();
@@ -303,7 +304,7 @@ async function parseIfc(url: string): Promise<ParsedIfc> {
  *  runs, so it is only used when the worker cannot start). */
 async function parseIfcOnMainThread(url: string): Promise<ParsedIfc> {
   return (async () => {
-      const [api, res] = await Promise.all([engine(), fetch(url)]);
+      const [api, res] = await Promise.all([engine(), fetch(withBase(url))]);
       if (!res.ok) throw new Error(`IFC fetch failed: ${res.status}`);
       const buffer = new Uint8Array(await res.arrayBuffer());
       const modelID = api.OpenModel(buffer, { COORDINATE_TO_ORIGIN: true });

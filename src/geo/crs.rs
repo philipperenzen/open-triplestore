@@ -21,7 +21,14 @@
 //! distinct CRS so a literal carrying the `EPSG/0/4326` prefix is read and
 //! written as lat/lon; earlier versions treated both as lon/lat, which
 //! transposed every authority-ordered geometry.
+//!
+//! **Domains.** A transform outside a CRS's domain fails (`None`) rather than
+//! returning plausible numbers: a latitude beyond ±90°, Web Mercator beyond its
+//! ±85.06° latitude limit, and RD New outside the Netherlands. The RD New
+//! polynomials are a local fit around Amersfoort; [`RD_LON`]/[`RD_LAT`] and
+//! [`RD_X`]/[`RD_Y`] are EPSG:28992's area of use with about 50 km to spare.
 
+use std::borrow::Cow;
 use std::f64::consts::PI;
 
 /// A supported coordinate reference system.
@@ -75,9 +82,68 @@ impl Crs {
     }
 }
 
+/// The canonical `http://www.opengis.net/def/crs/{authority}/{version}/{code}`
+/// form of a CRS name as GML writes `srsName`: `EPSG:28992`,
+/// `urn:ogc:def:crs:EPSG::28992`, `urn:ogc:def:crs:OGC:1.3:CRS84`,
+/// `http://www.opengis.net/gml/srs/epsg.xml#28992`, or the https spelling of the
+/// canonical IRI. Anything else is returned as it is.
+///
+/// Every EPSG spelling names the EPSG CRS, axis order included: `EPSG:4326` is
+/// latitude first, like the canonical IRI.
+pub fn normalise_crs_uri(name: &str) -> Cow<'_, str> {
+    const BASE: &str = "http://www.opengis.net/def/crs/";
+    let name = name.trim();
+    let canonical = |authority: &str, version: &str, code: &str| {
+        let version = if version.is_empty() { "0" } else { version };
+        Cow::Owned(format!("{BASE}{authority}/{version}/{code}"))
+    };
+    let urn = name
+        .strip_prefix("urn:ogc:def:crs:")
+        .or_else(|| name.strip_prefix("urn:x-ogc:def:crs:"));
+    if let Some(rest) = urn {
+        // authority:version:code, the version often empty.
+        let parts: Vec<&str> = rest.split(':').collect();
+        return match parts.as_slice() {
+            [authority, version, code] if !code.is_empty() => canonical(authority, version, code),
+            [authority, code] if !code.is_empty() => canonical(authority, "", code),
+            _ => Cow::Borrowed(name),
+        };
+    }
+    if let Some(code) = name
+        .strip_prefix("EPSG:")
+        .or_else(|| name.strip_prefix("epsg:"))
+    {
+        if !code.is_empty() && code.bytes().all(|b| b.is_ascii_digit()) {
+            return canonical("EPSG", "0", code);
+        }
+    }
+    if let Some(code) = name.strip_prefix("http://www.opengis.net/gml/srs/epsg.xml#") {
+        return canonical("EPSG", "0", code);
+    }
+    if let Some(rest) = name.strip_prefix("https://www.opengis.net/def/crs/") {
+        return Cow::Owned(format!("{BASE}{rest}"));
+    }
+    Cow::Borrowed(name)
+}
+
+/// RD New's domain: EPSG:28992's area of use (3.2°–7.22° E, 50.75°–53.7° N)
+/// with about 50 km to spare, in CRS84 degrees and in RD metres.
+const RD_LON: (f64, f64) = (2.5, 8.0);
+const RD_LAT: (f64, f64) = (50.3, 54.2);
+const RD_X: (f64, f64) = (-50_000.0, 350_000.0);
+const RD_Y: (f64, f64) = (250_000.0, 700_000.0);
+
+/// Web Mercator's latitude limit (the square world map ends at ±85.0511°).
+const MERCATOR_MAX_LAT: f64 = 85.06;
+
+fn within(v: f64, (lo, hi): (f64, f64)) -> bool {
+    (lo..=hi).contains(&v)
+}
+
 /// Transform a single coordinate `(x, y)` from `from` to `to`. Coordinates are in
-/// each CRS's natural WKT axis order (geographic = lon/lat). Returns `None` only if
-/// an intermediate value is non-finite.
+/// each CRS's natural WKT axis order (geographic = lon/lat). `None` when the
+/// coordinate is outside either CRS's domain (see the module docs) or a value is
+/// not finite — never the coordinate passed through.
 pub fn transform_xy(from: Crs, to: Crs, x: f64, y: f64) -> Option<(f64, f64)> {
     if from == to {
         return finite(x, y);
@@ -87,14 +153,21 @@ pub fn transform_xy(from: Crs, to: Crs, x: f64, y: f64) -> Option<(f64, f64)> {
     let (lon, lat) = match from {
         Crs::Wgs84 => (x, y),
         Crs::Epsg4326 => (y, x),
-        Crs::RdNew => rd_to_wgs84(x, y),
+        Crs::RdNew if within(x, RD_X) && within(y, RD_Y) => rd_to_wgs84(x, y),
+        Crs::RdNew => return None,
         Crs::WebMercator => webmercator_to_wgs84(x, y),
     };
+    if !finite(lon, lat).is_some_and(|_| lat.abs() <= 90.0) {
+        return None;
+    }
     let (ox, oy) = match to {
         Crs::Wgs84 => (lon, lat),
         Crs::Epsg4326 => (lat, lon),
-        Crs::RdNew => wgs84_to_rd(lon, lat),
-        Crs::WebMercator => wgs84_to_webmercator(lon, lat),
+        Crs::RdNew if within(lon, RD_LON) && within(lat, RD_LAT) => wgs84_to_rd(lon, lat),
+        Crs::WebMercator if lat.abs() <= MERCATOR_MAX_LAT && lon.abs() <= 180.0 => {
+            wgs84_to_webmercator(lon, lat)
+        }
+        Crs::RdNew | Crs::WebMercator => return None,
     };
     finite(ox, oy)
 }
@@ -104,16 +177,20 @@ fn finite(x: f64, y: f64) -> Option<(f64, f64)> {
 }
 
 /// Reproject the WKT body of a geometry literal from `source` to `target`,
-/// returning the bare transformed WKT (no CRS prefix). `wkt_body` must not carry
-/// a `<crs>` prefix — strip it first (see `datatypes::extract_crs`/`extract_wkt`).
+/// returning the bare transformed WKT (no CRS prefix), or `None` when any
+/// coordinate does not transform. `wkt_body` must not carry a `<crs>` prefix —
+/// strip it first (see `datatypes::extract_crs`/`extract_wkt`).
 pub fn reproject_wkt(wkt_body: &str, source: Crs, target: Crs) -> Option<String> {
     use geo::MapCoords;
     use wkt::{ToWkt, TryFromWkt};
     let geom: geo::Geometry<f64> = geo::Geometry::try_from_wkt_str(wkt_body.trim()).ok()?;
-    let out = geom.map_coords(|c| {
-        let (x, y) = transform_xy(source, target, c.x, c.y).unwrap_or((c.x, c.y));
-        geo::Coord { x, y }
-    });
+    let out = geom
+        .try_map_coords(|c| {
+            transform_xy(source, target, c.x, c.y)
+                .map(|(x, y)| geo::Coord { x, y })
+                .ok_or(())
+        })
+        .ok()?;
     Some(out.wkt_string())
 }
 
@@ -288,6 +365,55 @@ mod tests {
         // The forward/inverse approximations agree to well under a metre.
         assert!((x1 - x0).abs() < 1.0, "x {x0} -> {x1}");
         assert!((y1 - y0).abs() < 1.0, "y {y0} -> {y1}");
+    }
+
+    #[test]
+    fn gml_srs_names_normalise_to_the_canonical_iri() {
+        let rd = "http://www.opengis.net/def/crs/EPSG/0/28992";
+        for name in [
+            "EPSG:28992",
+            "urn:ogc:def:crs:EPSG::28992",
+            "urn:x-ogc:def:crs:EPSG:28992",
+            "http://www.opengis.net/gml/srs/epsg.xml#28992",
+            "https://www.opengis.net/def/crs/EPSG/0/28992",
+            rd,
+        ] {
+            assert_eq!(normalise_crs_uri(name), rd, "{name}");
+        }
+        assert_eq!(
+            normalise_crs_uri("urn:ogc:def:crs:OGC:1.3:CRS84"),
+            "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
+        );
+        assert_eq!(
+            normalise_crs_uri("urn:example:my-crs"),
+            "urn:example:my-crs"
+        );
+    }
+
+    #[test]
+    fn rd_new_outside_the_netherlands_does_not_transform() {
+        // Paris and a point 1000 km off the RD origin: no RD New coordinates.
+        assert_eq!(transform_xy(Crs::Wgs84, Crs::RdNew, 2.35, 48.85), None);
+        assert_eq!(
+            transform_xy(Crs::RdNew, Crs::Wgs84, 1_155_000.0, 463_000.0),
+            None
+        );
+        // Just inside the area of use still works.
+        assert!(transform_xy(Crs::Wgs84, Crs::RdNew, 3.3, 51.4).is_some());
+    }
+
+    #[test]
+    fn coordinates_off_the_globe_do_not_transform() {
+        assert_eq!(transform_xy(Crs::Wgs84, Crs::WebMercator, 0.0, 90.0), None);
+        assert_eq!(transform_xy(Crs::Wgs84, Crs::WebMercator, 0.0, -86.0), None);
+        assert_eq!(transform_xy(Crs::Wgs84, Crs::Epsg4326, 0.0, 91.0), None);
+        // An EPSG:4326 literal written lon-first by mistake: latitude 120.
+        assert_eq!(transform_xy(Crs::Epsg4326, Crs::Wgs84, 120.0, 30.0), None);
+        // reproject_wkt fails the whole geometry, it does not copy coordinates.
+        assert_eq!(
+            reproject_wkt("LINESTRING(0 0, 0 89.9)", Crs::Wgs84, Crs::WebMercator),
+            None
+        );
     }
 
     #[test]

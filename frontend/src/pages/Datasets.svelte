@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { tHtml } from '../lib/i18n/html';
   import { onMount } from 'svelte';
   import { listDatasets, createDataset, deleteDataset, listOrganisations, adminListUsers } from '../lib/api.js';
   import { user as userStore, isAdmin, isAuthenticated } from '../lib/stores.js';
   import { Link, navigate } from '../lib/router/index.js';
+  import { GRAPH_ROLE_LABELS, normalizeGraphRole, type GraphRole } from '../lib/rdf-utils';
   import { t } from 'svelte-i18n';
   import { Plus, Trash2, X, User, Building2, Search, Database, Info, ChevronDown, Tag, ShieldCheck } from 'lucide-svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
@@ -22,14 +24,11 @@
   let search = '';
   let roleFilter: string = 'all';
 
-  const ROLE_LABELS: Record<string, { label: string; short: string; cls: string }> = {
-    instances:  { label: 'Instances',            short: 'Instances',  cls: 'role-instances' },
-    model:      { label: 'Model (OWL/RDFS)',      short: 'Model',      cls: 'role-model' },
-    vocabulary: { label: 'Vocabulary (SKOS)',    short: 'Vocabulary', cls: 'role-vocabulary' },
-    shapes:     { label: 'SHACL Shapes',         short: 'Shapes',     cls: 'role-shapes' },
-    entailment: { label: 'Entailment',           short: 'Entailment', cls: 'role-entailment' },
-    system:     { label: 'System',               short: 'System',     cls: 'role-system' },
-  };
+  // Badges and filter tabs follow the canonical graph roles (lib/rdf-utils.ts,
+  // which mirrors the backend's GraphKind), in that order. The five everyday
+  // roles always have a tab; the others get one when a listed dataset has them.
+  const CANONICAL_ROLES = Object.keys(GRAPH_ROLE_LABELS) as GraphRole[];
+  const ALWAYS_TABS: GraphRole[] = ['instances', 'model', 'vocabulary', 'shapes', 'entailment'];
   let showInfo = false;
   let error = '';
   // True only until the FIRST list load resolves. A page must never assert "you
@@ -156,14 +155,20 @@
 
   // Distinct roles present in a dataset. Prefer the per-graph `roles` array
   // returned by the API; fall back to the single dataset-level `graph_role`.
-  function datasetRoles(d) {
-    if (Array.isArray(d.roles) && d.roles.length) return d.roles;
-    return d.graph_role ? [d.graph_role] : [];
+  // Legacy spellings ('instance', 'ontology', …) fold onto the canonical token.
+  function datasetRoles(d): GraphRole[] {
+    const raw = Array.isArray(d.roles) && d.roles.length ? d.roles : d.graph_role ? [d.graph_role] : [];
+    const present = new Set(raw.map(normalizeGraphRole).filter(Boolean));
+    return CANONICAL_ROLES.filter((r) => present.has(r));
   }
+
+  $: roleTabs = CANONICAL_ROLES.filter(
+    (r) => ALWAYS_TABS.includes(r) || datasets.some((d) => datasetRoles(d).includes(r)),
+  );
 
   $: filtered = datasets.filter(d => {
     if (search && !d.name.toLowerCase().includes(search.toLowerCase())) return false;
-    if (roleFilter !== 'all' && !datasetRoles(d).includes(roleFilter)) return false;
+    if (roleFilter !== 'all' && !(datasetRoles(d) as string[]).includes(roleFilter)) return false;
     return true;
   });
 </script>
@@ -190,17 +195,17 @@
 
   {#if showInfo}
     <div class="info-panel">
-      <!-- eslint-disable-next-line svelte/no-at-html-tags -- trusted static i18n string -->
-      <p>{@html $t('pages.datasets.infoIntro')}</p>
+      <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+      <p>{@html $tHtml('pages.datasets.infoIntro')}</p>
       <ul>
-        <!-- eslint-disable-next-line svelte/no-at-html-tags -- trusted static i18n string -->
-        <li>{@html $t('pages.datasets.infoVisibility')}</li>
-        <!-- eslint-disable-next-line svelte/no-at-html-tags -- trusted static i18n string -->
-        <li>{@html $t('pages.datasets.infoSparql')}</li>
-        <!-- eslint-disable-next-line svelte/no-at-html-tags -- trusted static i18n string -->
-        <li>{@html $t('pages.datasets.infoShacl')}</li>
-        <!-- eslint-disable-next-line svelte/no-at-html-tags -- trusted static i18n string -->
-        <li>{@html $t('pages.datasets.infoOwnership')}</li>
+        <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+        <li>{@html $tHtml('pages.datasets.infoVisibility')}</li>
+        <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+        <li>{@html $tHtml('pages.datasets.infoSparql')}</li>
+        <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+        <li>{@html $tHtml('pages.datasets.infoShacl')}</li>
+        <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+        <li>{@html $tHtml('pages.datasets.infoOwnership')}</li>
       </ul>
       <Link to="/docs" class="info-docs-link">{$t('pages.datasets.viewDocs')}</Link>
     </div>
@@ -230,11 +235,9 @@
   <!-- Role filter tabs -->
   <div class="role-tabs">
     <button class="role-tab" class:active={roleFilter === 'all'} on:click={() => roleFilter = 'all'}>{$t('pages.datasets.roleAll')}</button>
-    <button class="role-tab role-tab-instances"  class:active={roleFilter === 'instances'}  on:click={() => roleFilter = 'instances'}>{$t('pages.datasets.roleInstances')}</button>
-    <button class="role-tab role-tab-model"      class:active={roleFilter === 'model'}      on:click={() => roleFilter = 'model'}>{$t('pages.datasets.roleModel')}</button>
-    <button class="role-tab role-tab-vocabulary" class:active={roleFilter === 'vocabulary'} on:click={() => roleFilter = 'vocabulary'}>{$t('pages.datasets.roleVocabulary')}</button>
-    <button class="role-tab role-tab-shapes"     class:active={roleFilter === 'shapes'}     on:click={() => roleFilter = 'shapes'}>{$t('pages.datasets.roleShapes')}</button>
-    <button class="role-tab role-tab-entailment" class:active={roleFilter === 'entailment'} on:click={() => roleFilter = 'entailment'}>{$t('pages.datasets.roleEntailment')}</button>
+    {#each roleTabs as r (r)}
+      <button class="role-tab role-tab-{r}" class:active={roleFilter === r} on:click={() => roleFilter = r}>{$t(`pages.datasets.roleShort.${r}`)}</button>
+    {/each}
   </div>
 
   <div class="card overflow-x-auto">
@@ -294,10 +297,10 @@
             {#if ds.description}<span class="ds-desc-line" title={ds.description}>{ds.description}</span>{/if}
           </td>
           <td class="col-role">
-            {#if datasetRoles(ds).filter(r => ROLE_LABELS[r]).length}
+            {#if datasetRoles(ds).length}
               <span class="role-badges">
-                {#each datasetRoles(ds).filter(r => ROLE_LABELS[r]) as r}
-                  <span class="role-badge {ROLE_LABELS[r].cls}">
+                {#each datasetRoles(ds) as r}
+                  <span class="role-badge role-{r}">
                     <Tag size={10} />
                     {$t(`pages.datasets.roleShort.${r}`)}
                   </span>
@@ -629,6 +632,11 @@
   .role-tab-vocabulary.active { background: #fce7f3; border-color: #ec4899; color: #9d174d; }
   .role-tab-shapes.active     { background: #fef9c3; border-color: #eab308; color: #854d0e; }
   .role-tab-entailment.active { background: #ede9fe; border-color: #8b5cf6; color: #5b21b6; }
+  .role-tab-domain-values.active { background: #ffedd5; border-color: #f97316; color: #9a3412; }
+  .role-tab-linkset.active    { background: #cffafe; border-color: #06b6d4; color: #155e75; }
+  .role-tab-provenance.active { background: #e0e7ff; border-color: #6366f1; color: #3730a3; }
+  .role-tab-catalog.active    { background: #f5f5f4; border-color: #a8a29e; color: #44403c; }
+  .role-tab-system.active     { background: #f1f5f9; border-color: #94a3b8; color: #475569; }
 
   /* Role badges */
   .role-badges {
@@ -651,6 +659,10 @@
   .role-shapes     { background: #fef9c3; color: #854d0e; }
   .role-entailment { background: #ede9fe; color: #5b21b6; }
   .role-system     { background: #f1f5f9; color: #475569; }
+  .role-domain-values { background: #ffedd5; color: #9a3412; }
+  .role-linkset    { background: #cffafe; color: #155e75; }
+  .role-provenance { background: #e0e7ff; color: #3730a3; }
+  .role-catalog    { background: #f5f5f4; color: #44403c; }
 
   /* Multi-select */
   .th-check, .td-check {
@@ -842,7 +854,16 @@
   :global(:is([data-theme="dark"], .dark)) .role-tab-entailment.active,
   :global(:is([data-theme="dark"], .dark)) .role-entailment { background: rgba(139,92,246,0.2); color: #c4b5fd; }
   :global(:is([data-theme="dark"], .dark)) .role-tab-entailment.active { border-color: rgba(139,92,246,0.6); }
+  :global(:is([data-theme="dark"], .dark)) .role-tab-system.active,
   :global(:is([data-theme="dark"], .dark)) .role-system { background: rgba(255,255,255,0.06); color: var(--ink-600); }
+  :global(:is([data-theme="dark"], .dark)) .role-tab-domain-values.active,
+  :global(:is([data-theme="dark"], .dark)) .role-domain-values { background: rgba(249,115,22,0.2); color: #fdba74; }
+  :global(:is([data-theme="dark"], .dark)) .role-tab-linkset.active,
+  :global(:is([data-theme="dark"], .dark)) .role-linkset { background: rgba(6,182,212,0.2); color: #67e8f9; }
+  :global(:is([data-theme="dark"], .dark)) .role-tab-provenance.active,
+  :global(:is([data-theme="dark"], .dark)) .role-provenance { background: rgba(99,102,241,0.2); color: #c7d2fe; }
+  :global(:is([data-theme="dark"], .dark)) .role-tab-catalog.active,
+  :global(:is([data-theme="dark"], .dark)) .role-catalog { background: rgba(168,162,158,0.2); color: #d6d3d1; }
 
   :global(:is([data-theme="dark"], .dark)) .row-selected { background: rgba(126,214,208,0.1) !important; }
   :global(:is([data-theme="dark"], .dark)) .ds-modal-box { background: var(--bg-strong); }

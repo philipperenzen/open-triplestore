@@ -1,4 +1,5 @@
 <script>
+  import { toastError } from '../lib/toast';
   import { t } from 'svelte-i18n';
   import { isAdmin, authInitialized } from '../lib/stores.js';
   import { SYSTEM_ROLES, GRAPH_PERMISSIONS } from '../lib/permissions.js';
@@ -15,7 +16,12 @@
     browseGraphs, adminListUsers, listOrganisations,
     adminGetGuestRegistration, adminSetGuestRegistration,
     adminListOauthClients, adminUpsertOauthClient, adminDeleteOauthClient,
+    adminReadSamlMetadata, adminSamlOverview, adminCreateSamlKey, adminActivateSamlKey, adminDeleteSamlKey,
   } from '../lib/api.js';
+  import {
+    emptyProviderForm, providerToForm, formToBody, applyIdpMetadata, ProviderFormError, ENV_OIDC_SLUG,
+    NAMEID_PERSISTENT, NAMEID_EMAIL, NAMEID_UNSPECIFIED, NAMEID_TRANSIENT,
+  } from '../lib/oauthProviderForm';
 
   // ── Tab state ────────────────────────────────────────────────────────────────
   let activeTab = 'providers'; // 'providers' | 'endpoint-acl' | 'graph-acl' | 'triple-labels' | 'registration'
@@ -26,7 +32,7 @@
   let guestSwept = null;      // last sweep result: { enabled, guests_swept }
 
   async function loadGuestReg() {
-    try { guestReg = await adminGetGuestRegistration(); } catch (e) { alert(e.message); }
+    try { guestReg = await adminGetGuestRegistration(); } catch (e) { toastError(e.message); }
   }
 
   async function toggleGuestReg() {
@@ -36,7 +42,7 @@
       guestSwept = await adminSetGuestRegistration(!guestReg.enabled);
       guestReg = { enabled: guestSwept.enabled };
     } catch (e) {
-      alert(e.message);
+      toastError(e.message);
     }
     guestRegBusy = false;
   }
@@ -48,7 +54,7 @@
   let clientError = '';
 
   async function loadOidcClients() {
-    try { oidcClients = await adminListOauthClients(); } catch (e) { alert(e.message); }
+    try { oidcClients = await adminListOauthClients(); } catch (e) { toastError(e.message); }
   }
 
   async function saveOidcClient() {
@@ -77,7 +83,7 @@
       await adminDeleteOauthClient(id);
       await loadOidcClients();
     } catch (e) {
-      alert(e.message);
+      toastError(e.message);
     }
   }
 
@@ -90,24 +96,11 @@
   let providerError = '';
   let providerLoading = false;
 
-  const ROLE_CLAIM_MAP_PLACEHOLDER = '{"Administrators": "admin", "Publishers": "user"}';
-
-  function emptyProviderForm() {
-    return {
-      name: '', slug: '', provider_type: 'oidc',
-      client_id: '', client_secret: '',
-      discovery_url: '', authorization_endpoint: '',
-      token_endpoint: '', userinfo_endpoint: '',
-      scopes: 'openid email profile',
-      role_claim: '', default_role: 'user',
-      role_claim_map: '{}',
-      auto_provision: true, enabled: true,
-    };
-  }
+  const ROLE_CLAIM_MAP_PLACEHOLDER = '{"Administrators": "admin", "Publishers": "publisher"}';
 
   async function loadProviders() {
     providersLoading = true;
-    try { providers = await adminListOauthProviders(); } catch (e) { alert(e.message); }
+    try { providers = await adminListOauthProviders(); } catch (e) { toastError(e.message); }
     providersLoading = false;
   }
 
@@ -116,42 +109,82 @@
     providerForm = emptyProviderForm();
     providerError = '';
     showProviderForm = true;
+    samlImportUrl = '';
+    samlImportXml = '';
+    samlImportMsg = '';
+    samlOverview = null;
   }
 
   function openEditProvider(p) {
     editingProvider = p;
-    providerForm = {
-      name: p.name, slug: p.slug, provider_type: p.provider_type,
-      client_id: p.client_id, client_secret: '',
-      discovery_url: p.discovery_url || '',
-      authorization_endpoint: p.authorization_endpoint || '',
-      token_endpoint: p.token_endpoint || '',
-      userinfo_endpoint: p.userinfo_endpoint || '',
-      scopes: (p.scopes || []).join(' '),
-      role_claim: p.role_claim || '',
-      default_role: p.default_role || 'user',
-      role_claim_map: p.role_claim_map ? JSON.stringify(p.role_claim_map, null, 2) : '{}',
-      auto_provision: p.auto_provision !== false,
-      enabled: p.enabled !== false,
-    };
+    providerForm = providerToForm(p);
     providerError = '';
     showProviderForm = true;
+    samlImportUrl = '';
+    samlImportXml = '';
+    samlImportMsg = '';
+    loadSamlOverview(p);
+  }
+
+  // ── SAML: metadata import and SP keys ────────────────────────────────────────
+  let samlImportUrl = '';
+  let samlImportXml = '';
+  let samlImportMsg = '';
+  let samlImporting = false;
+  let samlOverview = null;
+  let samlKeysBusy = false;
+
+  async function importSamlMetadata() {
+    providerError = '';
+    samlImportMsg = '';
+    const url = samlImportUrl.trim();
+    const xml = samlImportXml.trim();
+    if (!url && !xml) return;
+    samlImporting = true;
+    try {
+      const md = await adminReadSamlMetadata(url ? { url } : { xml });
+      providerForm = applyIdpMetadata(providerForm, md, url || undefined);
+      samlImportMsg = $t('pages.adminSecurity.samlImported', { values: { count: md.certificates.length } });
+    } catch (e) {
+      providerError = e.message;
+    }
+    samlImporting = false;
+  }
+
+  async function loadSamlOverview(p) {
+    samlOverview = null;
+    if (p?.provider_type !== 'saml') return;
+    try { samlOverview = await adminSamlOverview(p.id); } catch { samlOverview = null; }
+  }
+
+  async function samlKeyAction(action) {
+    if (!editingProvider) return;
+    samlKeysBusy = true;
+    providerError = '';
+    try {
+      await action();
+      await loadSamlOverview(editingProvider);
+    } catch (e) {
+      providerError = e.message;
+    }
+    samlKeysBusy = false;
   }
 
   async function submitProvider() {
     providerError = '';
+    let body;
+    try {
+      body = formToBody(providerForm);
+    } catch (e) {
+      providerError = e instanceof ProviderFormError ? $t(e.key) : e.message;
+      return;
+    }
     providerLoading = true;
     try {
-      const payload = {
-        ...providerForm,
-        scopes: providerForm.scopes.split(/\s+/).filter(Boolean),
-        role_claim_map: JSON.parse(providerForm.role_claim_map || '{}'),
-      };
-      if (!payload.client_secret) delete payload.client_secret;
       if (editingProvider) {
-        await adminUpdateOauthProvider(editingProvider.id, payload);
+        await adminUpdateOauthProvider(editingProvider.id, body);
       } else {
-        await adminCreateOauthProvider(payload);
+        await adminCreateOauthProvider(body);
       }
       showProviderForm = false;
       await loadProviders();
@@ -164,7 +197,7 @@
   let deleteProviderTarget = null;
 
   async function doDeleteProvider() {
-    try { await adminDeleteOauthProvider(deleteProviderTarget); await loadProviders(); } catch (e) { alert(e.message); }
+    try { await adminDeleteOauthProvider(deleteProviderTarget); await loadProviders(); } catch (e) { toastError(e.message); }
     deleteProviderTarget = null;
   }
 
@@ -183,7 +216,7 @@
 
   async function loadEndpointRules() {
     endpointLoading = true;
-    try { endpointRules = await listEndpointAclRules(); } catch (e) { alert(e.message); }
+    try { endpointRules = await listEndpointAclRules(); } catch (e) { toastError(e.message); }
     endpointLoading = false;
   }
 
@@ -221,7 +254,7 @@
   let deleteEndpointTarget = null;
 
   async function doDeleteEndpointRule() {
-    try { await deleteEndpointAclRule(deleteEndpointTarget); await loadEndpointRules(); } catch (e) { alert(e.message); }
+    try { await deleteEndpointAclRule(deleteEndpointTarget); await loadEndpointRules(); } catch (e) { toastError(e.message); }
     deleteEndpointTarget = null;
   }
 
@@ -235,7 +268,7 @@
 
   async function loadGraphRules() {
     graphLoading = true;
-    try { graphRules = await listGraphAclRules(); } catch (e) { alert(e.message); }
+    try { graphRules = await listGraphAclRules(); } catch (e) { toastError(e.message); }
     graphLoading = false;
   }
 
@@ -256,7 +289,7 @@
   let revokeGraphTarget = null;
 
   async function doRevokeGraph() {
-    try { await revokeGraphPermission(revokeGraphTarget); await loadGraphRules(); } catch (e) { alert(e.message); }
+    try { await revokeGraphPermission(revokeGraphTarget); await loadGraphRules(); } catch (e) { toastError(e.message); }
     revokeGraphTarget = null;
   }
 
@@ -273,7 +306,7 @@
 
   async function loadTripleLabels() {
     tripleLoading = true;
-    try { tripleLabels = await listTripleSecurityLabels(); } catch (e) { alert(e.message); }
+    try { tripleLabels = await listTripleSecurityLabels(); } catch (e) { toastError(e.message); }
     tripleLoading = false;
   }
 
@@ -294,7 +327,7 @@
   let deleteLabelTarget = null;
 
   async function doDeleteTripleLabel() {
-    try { await deleteTripleSecurityLabel(deleteLabelTarget); await loadTripleLabels(); } catch (e) { alert(e.message); }
+    try { await deleteTripleSecurityLabel(deleteLabelTarget); await loadTripleLabels(); } catch (e) { toastError(e.message); }
     deleteLabelTarget = null;
   }
 
@@ -500,25 +533,25 @@
             </div>
             <div class="form-group">
               <label for="prov-slug">{$t('pages.adminSecurity.slug')} <span class="hint-sm">{$t('pages.adminSecurity.slugHint')}</span></label>
-              <input id="prov-slug" bind:value={providerForm.slug} placeholder="azure-ad" required />
+              <input id="prov-slug" bind:value={providerForm.slug} placeholder="azure-ad" required
+                disabled={editingProvider?.slug === ENV_OIDC_SLUG} />
             </div>
             <div class="form-group">
               <label for="prov-type">{$t('pages.adminSecurity.providerType')}</label>
               <Select id="prov-type" bind:value={providerForm.provider_type} options={[
                 { value: 'oidc', label: $t('pages.adminSecurity.providerTypeOidc') },
-                { value: 'azure_ad', label: $t('pages.adminSecurity.providerTypeAzure') },
                 { value: 'saml', label: $t('pages.adminSecurity.providerTypeSaml') },
               ]} />
             </div>
-            <div class="form-group">
-              <label for="prov-client-id">{$t('pages.adminSecurity.clientId')}</label>
-              <input id="prov-client-id" bind:value={providerForm.client_id} placeholder={$t('pages.adminSecurity.clientIdPlaceholder')} />
-            </div>
-            <div class="form-group">
-              <label for="prov-client-secret">{$t('pages.adminSecurity.clientSecret')} {editingProvider ? $t('pages.adminSecurity.clientSecretKeep') : ''}</label>
-              <input id="prov-client-secret" type="password" bind:value={providerForm.client_secret} placeholder="••••••••" />
-            </div>
             {#if providerForm.provider_type !== 'saml'}
+              <div class="form-group">
+                <label for="prov-client-id">{$t('pages.adminSecurity.clientId')}</label>
+                <input id="prov-client-id" bind:value={providerForm.client_id} placeholder={$t('pages.adminSecurity.clientIdPlaceholder')} />
+              </div>
+              <div class="form-group">
+                <label for="prov-client-secret">{$t('pages.adminSecurity.clientSecret')} {editingProvider ? $t('pages.adminSecurity.clientSecretKeep') : ''}</label>
+                <input id="prov-client-secret" type="password" bind:value={providerForm.client_secret} placeholder="••••••••" />
+              </div>
               <div class="form-group full">
                 <label for="prov-discovery-url">{$t('pages.adminSecurity.discoveryUrl')} <span class="hint-sm">{$t('pages.adminSecurity.discoveryUrlHint')}</span></label>
                 <input id="prov-discovery-url" bind:value={providerForm.discovery_url}
@@ -530,21 +563,147 @@
               </div>
             {/if}
             {#if providerForm.provider_type === 'saml'}
-              <div class="form-group full">
-                <label for="prov-idp-metadata">{$t('pages.adminSecurity.idpMetadata')}</label>
-                <input id="prov-idp-metadata" bind:value={providerForm.discovery_url} placeholder="https://login.microsoftonline.com/[TENANT_ID]/federationmetadata/2007-06/federationmetadata.xml" />
+              <div class="form-group full saml-import">
+                <span class="toggle-label">{$t('pages.adminSecurity.samlImportTitle')}</span>
+                <span class="hint-sm">{$t('pages.adminSecurity.samlImportHint')}</span>
+                <label for="prov-saml-md-url">{$t('pages.adminSecurity.samlImportUrl')}</label>
+                <input id="prov-saml-md-url" bind:value={samlImportUrl} placeholder="https://idp.example.org/saml/metadata" />
+                <label for="prov-saml-md-xml">{$t('pages.adminSecurity.samlImportXml')}</label>
+                <textarea id="prov-saml-md-xml" bind:value={samlImportXml} rows="2" placeholder="<md:EntityDescriptor …>"></textarea>
+                <div>
+                  <button type="button" class="btn btn-sm btn-ghost" on:click={importSamlMetadata}
+                    disabled={samlImporting || (!samlImportUrl.trim() && !samlImportXml.trim())}>
+                    {#if samlImporting}<Loader2 size={14} class="spin" />{/if}
+                    {$t('pages.adminSecurity.samlImportButton')}
+                  </button>
+                  {#if samlImportMsg}<span class="hint-sm">{samlImportMsg}</span>{/if}
+                </div>
               </div>
+              <div class="form-group">
+                <label for="prov-entity-id">{$t('pages.adminSecurity.samlEntityId')}</label>
+                <input id="prov-entity-id" bind:value={providerForm.entity_id} placeholder="https://idp.example.org/saml" />
+              </div>
+              <div class="form-group">
+                <label for="prov-sso-url">{$t('pages.adminSecurity.samlSsoUrl')}</label>
+                <input id="prov-sso-url" bind:value={providerForm.sso_url} placeholder="https://idp.example.org/saml/sso" />
+              </div>
+              <div class="form-group full">
+                <label for="prov-idp-cert">{$t('pages.adminSecurity.samlCertificate')} <span class="hint-sm">{editingProvider ? $t('pages.adminSecurity.samlCertificateKeep') : $t('pages.adminSecurity.samlCertificateHint')}</span></label>
+                <textarea id="prov-idp-cert" bind:value={providerForm.idp_certificate} rows="3"
+                  placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+              </div>
+              <div class="form-group full">
+                <label for="prov-saml-slo">{$t('pages.adminSecurity.samlSloUrl')} <span class="hint-sm">{$t('pages.adminSecurity.samlSloUrlHint')}</span></label>
+                <input id="prov-saml-slo" bind:value={providerForm.saml.idp_slo_url} placeholder="https://idp.example.org/saml/slo" />
+              </div>
+              <div class="form-group">
+                <label for="prov-saml-nameid">{$t('pages.adminSecurity.samlNameIdFormat')}</label>
+                <Select id="prov-saml-nameid" bind:value={providerForm.saml.name_id_format} options={[
+                  { value: NAMEID_PERSISTENT, label: $t('pages.adminSecurity.samlNameIdPersistent') },
+                  { value: NAMEID_EMAIL, label: $t('pages.adminSecurity.samlNameIdEmail') },
+                  { value: NAMEID_UNSPECIFIED, label: $t('pages.adminSecurity.samlNameIdUnspecified') },
+                  { value: NAMEID_TRANSIENT, label: $t('pages.adminSecurity.samlNameIdTransient') },
+                ]} />
+              </div>
+              <div class="form-group">
+                <label for="prov-saml-subject">{$t('pages.adminSecurity.samlSubjectAttribute')} <span class="hint-sm">{$t('pages.adminSecurity.samlSubjectAttributeHint')}</span></label>
+                <input id="prov-saml-subject" bind:value={providerForm.saml.subject_attribute} />
+              </div>
+              <div class="form-group">
+                <label for="prov-saml-email-attrs">{$t('pages.adminSecurity.samlEmailAttributes')} <span class="hint-sm">{$t('pages.adminSecurity.samlAttributesHint')}</span></label>
+                <textarea id="prov-saml-email-attrs" bind:value={providerForm.saml.email_attributes} rows="2"></textarea>
+              </div>
+              <div class="form-group">
+                <label for="prov-saml-name-attrs">{$t('pages.adminSecurity.samlNameAttributes')}</label>
+                <textarea id="prov-saml-name-attrs" bind:value={providerForm.saml.name_attributes} rows="2"></textarea>
+              </div>
+              <div class="form-group">
+                <label for="prov-saml-group-attrs">{$t('pages.adminSecurity.samlGroupAttributes')}</label>
+                <textarea id="prov-saml-group-attrs" bind:value={providerForm.saml.group_attributes} rows="2"></textarea>
+              </div>
+              <div class="form-group">
+                <label for="prov-saml-skew">{$t('pages.adminSecurity.samlClockSkew')} <span class="hint-sm">{$t('pages.adminSecurity.samlClockSkewHint')}</span></label>
+                <input id="prov-saml-skew" bind:value={providerForm.saml.clock_skew_seconds} inputmode="numeric" placeholder="180" />
+              </div>
+              <div class="form-group">
+                <label for="prov-saml-sp-entity">{$t('pages.adminSecurity.samlSpEntityId')} <span class="hint-sm">{$t('pages.adminSecurity.samlSpEntityIdHint')}</span></label>
+                <input id="prov-saml-sp-entity" bind:value={providerForm.saml.sp_entity_id} />
+              </div>
+              <div class="form-group">
+                <label for="prov-saml-contact">{$t('pages.adminSecurity.samlContactEmail')}</label>
+                <input id="prov-saml-contact" type="email" bind:value={providerForm.saml.contact_email} placeholder="it@example.org" />
+              </div>
+              <div class="form-group full toggles-section">
+                {#each [
+                  ['allow_idp_initiated', 'samlAllowIdpInitiated', 'samlAllowIdpInitiatedDesc'],
+                  ['sign_authn_requests', 'samlSignRequests', 'samlSignRequestsDesc'],
+                  ['require_encrypted_assertions', 'samlRequireEncrypted', 'samlRequireEncryptedDesc'],
+                ] as [key, label, desc]}
+                  <div class="toggle-row">
+                    <div class="toggle-info">
+                      <span class="toggle-label">{$t(`pages.adminSecurity.${label}`)}</span>
+                      <span class="toggle-desc">{$t(`pages.adminSecurity.${desc}`)}</span>
+                    </div>
+                    <button
+                      type="button"
+                      class="ios-toggle"
+                      class:ios-toggle-on={providerForm.saml[key]}
+                      role="switch"
+                      aria-checked={providerForm.saml[key]}
+                      aria-label={$t(`pages.adminSecurity.${label}`)}
+                      on:click={() => providerForm.saml[key] = !providerForm.saml[key]}
+                    ><span class="ios-thumb"></span></button>
+                  </div>
+                {/each}
+              </div>
+              {#if editingProvider && samlOverview}
+                <div class="form-group full saml-sp">
+                  <span class="toggle-label">{$t('pages.adminSecurity.samlSpTitle')}</span>
+                  <span class="hint-sm">{$t('pages.adminSecurity.samlSpHint')}</span>
+                  {#if !samlOverview.transport_ok}<p class="error">{$t('pages.adminSecurity.samlTransportWarning')}</p>{/if}
+                  <dl class="saml-urls">
+                    <dt>{$t('pages.adminSecurity.samlSpEntity')}</dt><dd><code>{samlOverview.entity_id}</code></dd>
+                    <dt>{$t('pages.adminSecurity.samlMetadataUrl')}</dt><dd><code>{samlOverview.metadata_url}</code></dd>
+                    <dt>{$t('pages.adminSecurity.samlAcsUrl')}</dt><dd><code>{samlOverview.acs_url}</code></dd>
+                    <dt>{$t('pages.adminSecurity.samlSloEndpoint')}</dt><dd><code>{samlOverview.slo_url}</code></dd>
+                  </dl>
+                  <span class="toggle-label">{$t('pages.adminSecurity.samlKeys')}</span>
+                  <span class="hint-sm">{$t('pages.adminSecurity.samlKeysHint')}</span>
+                  {#if !samlOverview.sp_keys?.length}
+                    <p class="hint-sm">{$t('pages.adminSecurity.samlKeysNone')}</p>
+                  {:else}
+                    <ul class="saml-keys">
+                      {#each samlOverview.sp_keys as k (k.kid)}
+                        <li>
+                          <code>{k.kid}</code>
+                          {#if k.is_current}<span class="badge">{$t('pages.adminSecurity.samlKeyCurrent')}</span>{/if}
+                          {#if k.certificate?.not_after}<span class="hint-sm">{$t('pages.adminSecurity.samlKeyExpires')} {k.certificate.not_after}</span>{/if}
+                          {#if k.certificate?.sha256_fingerprint}<span class="hint-sm fingerprint">{k.certificate.sha256_fingerprint}</span>{/if}
+                          {#if !k.is_current}
+                            <button type="button" class="btn btn-sm btn-ghost" disabled={samlKeysBusy}
+                              on:click={() => samlKeyAction(() => adminActivateSamlKey(editingProvider.id, k.kid))}>{$t('pages.adminSecurity.samlKeyActivate')}</button>
+                            <button type="button" class="btn btn-sm btn-ghost" disabled={samlKeysBusy}
+                              on:click={() => samlKeyAction(() => adminDeleteSamlKey(editingProvider.id, k.kid))}>{$t('pages.adminSecurity.samlKeyDelete')}</button>
+                          {/if}
+                        </li>
+                      {/each}
+                    </ul>
+                  {/if}
+                  <div>
+                    <button type="button" class="btn btn-sm btn-ghost" disabled={samlKeysBusy}
+                      on:click={() => samlKeyAction(() => adminCreateSamlKey(editingProvider.id))}>
+                      {#if samlKeysBusy}<Loader2 size={14} class="spin" />{/if}
+                      {$t('pages.adminSecurity.samlKeyAdd')}
+                    </button>
+                  </div>
+                </div>
+              {/if}
             {/if}
-            <div class="form-group">
-              <label for="prov-role-claim">{$t('pages.adminSecurity.roleClaimKey')} <span class="hint-sm">{$t('pages.adminSecurity.roleClaimKeyHint')}</span></label>
-              <input id="prov-role-claim" bind:value={providerForm.role_claim} placeholder="roles" />
-            </div>
             <div class="form-group">
               <label for="prov-default-role">{$t('pages.adminSecurity.defaultRole')}</label>
               <Select id="prov-default-role" bind:value={providerForm.default_role} options={[
                 { value: 'user', label: $t('pages.adminSecurity.roleUser') },
                 { value: 'admin', label: $t('pages.adminSecurity.roleAdmin') },
-                { value: 'super_admin', label: $t('pages.adminSecurity.roleSuperAdmin') },
               ]} />
             </div>
             <div class="form-group full">
@@ -576,11 +735,11 @@
                 <button
                   type="button"
                   class="ios-toggle"
-                  class:ios-toggle-on={providerForm.enabled}
+                  class:ios-toggle-on={providerForm.is_active}
                   role="switch"
-                  aria-checked={providerForm.enabled}
+                  aria-checked={providerForm.is_active}
                   aria-label={$t('pages.adminSecurity.enabled')}
-                  on:click={() => providerForm.enabled = !providerForm.enabled}
+                  on:click={() => providerForm.is_active = !providerForm.is_active}
                 ><span class="ios-thumb"></span></button>
               </div>
             </div>
@@ -620,8 +779,8 @@
                   {/if}
                 </td>
                 <td>
-                  <span class="status-badge {p.enabled ? 'badge-green' : 'badge-gray'}">
-                    <span class="status-dot"></span>{p.enabled ? $t('pages.adminSecurity.statusEnabled') : $t('pages.adminSecurity.statusDisabled')}
+                  <span class="status-badge {p.is_active ? 'badge-green' : 'badge-gray'}">
+                    <span class="status-dot"></span>{p.is_active ? $t('pages.adminSecurity.statusEnabled') : $t('pages.adminSecurity.statusDisabled')}
                   </span>
                 </td>
                 <td class="actions">
@@ -942,6 +1101,13 @@
   .panel-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
   .hint { color: var(--color-muted, #666); font-size: 0.85rem; margin: 0; }
   .hint-sm { color: var(--color-muted, #888); font-size: 0.78rem; font-weight: normal; }
+  .saml-import, .saml-sp { display: flex; flex-direction: column; gap: 0.35rem; }
+  .saml-urls { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 0.75rem; margin: 0.25rem 0 0.5rem; font-size: 0.85rem; }
+  .saml-urls dt { color: var(--color-muted, #888); }
+  .saml-urls dd { margin: 0; overflow-wrap: anywhere; }
+  .saml-keys { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.35rem; }
+  .saml-keys li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+  .saml-keys .fingerprint { overflow-wrap: anywhere; font-family: var(--font-mono, monospace); }
 
   .form-card {
     background: var(--color-surface, #fff);

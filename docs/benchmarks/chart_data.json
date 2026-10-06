@@ -25,7 +25,6 @@
       {"label": "simple lookup", "value": 2.73},
       {"label": "MINUS", "value": 3.11},
       {"label": "named graph", "value": 3.46},
-      {"label": "COUNT(*)", "value": 7.09},
       {"label": "2-way join", "value": 7.62},
       {"label": "NOT EXISTS", "value": 8.06},
       {"label": "GROUP BY", "value": 8.84},

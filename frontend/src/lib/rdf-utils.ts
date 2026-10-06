@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store';
+import { withBase } from './basePath';
 
 // In-memory store: namespace → prefix label, filled from the platform's own
 // prefix service (bundled prefix.cc + LOV snapshot; no third-party calls).
@@ -28,7 +29,7 @@ let _prefixLoad: Promise<void> | null = null;
 export function loadPrefixCcPrefixes(): Promise<void> {
   if (_prefixLoad) return _prefixLoad;
   const load = (async () => {
-    const res = await fetch('/api/prefixes/all?format=json');
+    const res = await fetch(withBase('/api/prefixes/all?format=json'));
     if (!res.ok) throw new Error(`prefix service responded ${res.status}`);
     const map: unknown = await res.json();
     // Treated as a failure, not a quiet success: an outcome that leaves the

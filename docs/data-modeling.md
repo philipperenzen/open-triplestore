@@ -101,7 +101,7 @@ This means you can:
 
 ### On-Write Validation
 
-When `shacl_on_write` is enabled on a dataset, every `PUT`/`POST` to the Graph Store or LDP endpoints validates incoming data before committing. The same shape resolution order applies: dataset-specific shapes first, then linked model shapes.
+When `shacl_on_write` is enabled on a dataset, every Graph Store `PUT`/`POST` to one of the dataset's graphs validates incoming data before committing. The same shape resolution order applies: dataset-specific shapes first, then linked model shapes. LDP writes (LDP resources live in the default graph, outside any dataset) and SPARQL Update are not validated — see [SHACL](shacl.md).
 
 ---
 
@@ -218,6 +218,6 @@ The validation report shows which instances violate the model's constraints:
 | Formal semantics | OWL 2 | Class & property axioms and reasoning in model/vocabulary versions |
 | Knowledge org | SKOS | Controlled vocabularies in vocabulary versions |
 | Validation | SHACL, ShEx | Shapes in model versions or dataset-specific |
-| Catalog | DCAT 2, VoID | Auto-generated at `/.well-known/void` |
+| Catalog | DCAT 3, VoID | Auto-generated at `/.well-known/void` |
 | Conformance | `dct:conformsTo` | Links datasets to model versions |
 | Query | SPARQL 1.1 | Uniform access to all layers |

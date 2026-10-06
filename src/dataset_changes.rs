@@ -176,7 +176,7 @@ pub async fn change(
     let iri = dataset_iri(&state, &dataset_id);
     let patch = crate::rdf_patch::change_patch(&row, Some(&iri))
         .ok_or_else(|| AppError::Internal("a full row without a patch".into()))?;
-    Ok(patch_response(patch.render()))
+    Ok(patch_response(patch.to_text()))
 }
 
 /// GET /api/datasets/:dataset_id/changes/:seq/inverse
@@ -189,7 +189,7 @@ pub async fn change_inverse(
     let iri = dataset_iri(&state, &dataset_id);
     let patch = crate::rdf_patch::change_inverse_patch(&row, Some(&iri))
         .ok_or_else(|| AppError::Internal("a full row without a patch".into()))?;
-    Ok(patch_response(patch.render()))
+    Ok(patch_response(patch.to_text()))
 }
 
 /// The cursor table is shared by every consumer; a dataset's cursors are

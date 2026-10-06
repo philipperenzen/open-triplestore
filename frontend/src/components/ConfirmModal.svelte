@@ -1,6 +1,6 @@
 <script>
   import { createEventDispatcher, onMount, onDestroy } from 'svelte';
-  import { AlertTriangle, Trash2, Loader2 } from 'lucide-svelte';
+  import { AlertTriangle, Trash2, Loader2, PenLine } from 'lucide-svelte';
 
   /** Modal heading */
   export let title = 'Are you sure?';
@@ -8,10 +8,13 @@
   export let message = '';
   /** Label on the confirm button */
   export let confirmLabel = 'Delete';
+  /** Label on the cancel button */
+  export let cancelLabel = 'Cancel';
   /**
    * Visual style for the confirm button.
    * 'danger'  → red (default, for destructive deletes)
    * 'warning' → amber (for revoke / deactivate actions)
+   * 'primary' → brand colour (for non-destructive questions, e.g. asking for a name)
    */
   export let confirmVariant = 'danger';
   /** When true, shows a spinner on the confirm button and disables both buttons */
@@ -69,6 +72,8 @@
     <div class="confirm-icon confirm-icon-{confirmVariant}">
       {#if confirmVariant === 'warning'}
         <AlertTriangle size={22} />
+      {:else if confirmVariant === 'primary'}
+        <PenLine size={22} />
       {:else}
         <Trash2 size={22} />
       {/if}
@@ -111,7 +116,7 @@
         {confirmLabel}
       </button>
       <button class="confirm-btn confirm-btn-ghost modal-cancel" on:click={cancel} disabled={loading}>
-        Cancel
+        {cancelLabel}
       </button>
     </div>
   </div>
@@ -152,6 +157,7 @@
   }
   .confirm-icon-danger  { background: #fee2e2; color: #dc2626; }
   .confirm-icon-warning { background: #fef3c7; color: #d97706; }
+  .confirm-icon-primary { background: var(--brand-100, #e0f2fe); color: var(--brand-700, #0369a1); }
 
   .confirm-title {
     font-size: 1.05rem;
@@ -165,6 +171,7 @@
     color: var(--ink-500, #6b7280);
     margin: 0.25rem 0 0;
     line-height: 1.5;
+    white-space: pre-line;
   }
 
   /* Extra slot content — e.g. resource name code block */
@@ -206,6 +213,9 @@
 
   .confirm-btn-warning { background: #f59e0b; color: white; }
   .confirm-btn-warning:hover { background: #d97706; }
+
+  .confirm-btn-primary { background: var(--brand-600, #0284c7); color: white; }
+  .confirm-btn-primary:hover { background: var(--brand-700, #0369a1); }
 
   .confirm-btn-ghost {
     background: transparent;

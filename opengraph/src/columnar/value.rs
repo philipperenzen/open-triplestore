@@ -226,6 +226,13 @@ impl Value {
             Term::NamedNode(n) => Value::Iri(n.clone()),
             Term::BlankNode(b) => Value::Blank(b.as_str().to_string()),
             Term::Literal(l) => {
+                // RDF 1.2 base direction: `Lang` has no room for it, and a
+                // literal rebuilt without it would compare equal to its
+                // undirected twin and report `rdf:langString`.
+                #[cfg(feature = "sparql-12")]
+                if l.direction().is_some() {
+                    return Err(Decline("literal with a base direction"));
+                }
                 if let Some(lang) = l.language() {
                     return Ok(Value::Lang(l.value().to_string(), lang.to_string()));
                 }
@@ -271,7 +278,9 @@ impl Value {
                         Ok(b) => Value::Bool(b.into()),
                         Err(_) => Value::Typed(v.to_string(), dt.into_owned()),
                     }
-                } else if dt == xsd::DATE_TIME {
+                } else if dt == xsd::DATE_TIME || dt == xsd::DATE_TIME_STAMP {
+                    // xsd:dateTimeStamp is a dateTime with a required time
+                    // zone; the engine evaluates it as a dateTime too.
                     match v.parse::<DateTime>() {
                         Ok(d) => Value::DateTime(d),
                         Err(_) => Value::Typed(v.to_string(), dt.into_owned()),
@@ -486,6 +495,7 @@ fn is_known_datatype(dt: NamedNodeRef<'_>) -> bool {
     is_numeric_datatype(dt)
         || dt == xsd::BOOLEAN
         || dt == xsd::DATE_TIME
+        || dt == xsd::DATE_TIME_STAMP
         || dt == xsd::DATE
         || dt == xsd::TIME
 }

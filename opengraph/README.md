@@ -58,7 +58,8 @@ let restored = skolem::deskolemize(&skolemized, "https://data.example.org");
   full refinement — rare in real ontology/SHACL/list data) fall back to a
   deterministic input-label tie-break. Full RDFC-1.0 "Hash N-Degree Quads" is a
   planned addition.
-- RDF-star triple terms are not traversed (the `rdf-star` feature is off).
+- RDF 1.2 triple terms are walked (with the `sparql-12` feature): blank nodes inside them
+  are labelled, relabelled and skolemized like any other occurrence.
 
 ## Query & storage optimisation (planning-stage)
 

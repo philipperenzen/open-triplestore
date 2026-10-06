@@ -15,6 +15,8 @@
  * renders, just not as a working link.
  */
 
+import { withBase } from './basePath';
+
 // Schemes allowed in an <a href>. `mailto:` covers contact links; relative
 // references (which carry no scheme of their own) resolve against the current
 // document's http(s) origin and so pass through.
@@ -34,7 +36,9 @@ function safeUrl(value: string | null | undefined, allowed: Set<string>): string
     // parser also strips embedded tabs/newlines, defeating `java\tscript:` style
     // obfuscation, and lower-cases the scheme so the allowlist check is robust.
     const { protocol } = new URL(url, window.location.href);
-    return allowed.has(protocol) ? url : undefined;
+    // A root-absolute reference is an app path (`/api/…/download` from the
+    // viewer feed, `/samples/…`): it gets the sub-path deploy's base.
+    return allowed.has(protocol) ? withBase(url) : undefined;
   } catch {
     // Malformed input (a bare `:`, stray control bytes, …) is not safe.
     return undefined;

@@ -23,8 +23,15 @@ pub const TREE: &str = "https://w3id.org/tree#";
 pub const DCT: &str = "http://purl.org/dc/terms/";
 pub const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 pub const OTS: &str = "https://opentriplestore.org/ns#";
-/// The type of a member that records an entity's disappearance.
+pub const SH: &str = "http://www.w3.org/ns/shacl#";
+pub const AS: &str = "https://www.w3.org/ns/activitystreams#";
+/// The type of a member that records an entity's disappearance. Tombstones
+/// carry it alongside [`AS_DELETE`], the `ldes:versionDeleteObject` the
+/// stream declares, so generic LDES clients and existing consumers that
+/// match this type both recognise a delete.
 pub const TOMBSTONE: &str = "https://opentriplestore.org/ns#Tombstone";
+/// `as:Delete`: the declared `ldes:versionDeleteObject` (LDES 1.0 §4.3).
+pub const AS_DELETE: &str = "https://www.w3.org/ns/activitystreams#Delete";
 
 /// `{base}/api/datasets/{id}/ldes` — the stream, node and member IRIs are
 /// the URLs that serve them, so a client can follow every link it is given.
@@ -34,6 +41,7 @@ pub fn stream_iri(base_url: &str, dataset_id: &str) -> String {
         base_url.trim_end_matches('/')
     )
 }
+/// Node 0 is the root (the `tree:view`); fragments are numbered from 1.
 pub fn node_iri(base_url: &str, dataset_id: &str, page: u64) -> String {
     format!("{}/nodes/{page}", stream_iri(base_url, dataset_id))
 }

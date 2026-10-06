@@ -47,11 +47,13 @@
 | 8 | **Apache Jena 5 Fuseki** | Teaching, prototyping | Improved in v5 but still slow at scale |
 | 9 | **Blazegraph** | Legacy Wikidata workloads | Abandoned 2019; Wikimedia migration complete |
 
-**Bottom line for this project:** Open Triplestore ranks **1st among open-source single-binary
-deployments** on standards breadth — **23 of 29** rows in section 4, recounted, against 14 for
-the next open-source store — and its **~430,000 t/s** bulk load (section 5.1, re-measured) beats
-every Java competitor by 1.1–2.9×. GeoSPARQL 1.1, SHACL-AF, DCAT 2, VoID and RML are standout
-features rare in open-source stores. The primary gap vs. QLever and Virtuoso is scale: those
+**Bottom line for this project:** Open Triplestore covers the most standards of the ten systems
+— all **28** rows in section 4 at least partially — and grades **25** of them Full
+against its own tests (section 4, recounted 2026-10-03), ahead of Stardog (21) and GraphDB (20)
+and of Virtuoso and RDF4J 5 (13). The other systems' cells mark feature presence, so the
+full-support counts are not like for like. Its **~430,000 t/s** bulk load (section 5.1,
+re-measured) beats every Java competitor by 1.1–2.9×. DCAT 3, VoID and GeoSPARQL 1.1,
+graded Full, and SHACL-AF and RML, graded Partial, are still rare in open-source stores. The primary gap vs. QLever and Virtuoso is scale: those
 systems are engineered specifically for datasets in the tens-of-billions to trillion range.
 
 > The overall ranking above is a judgement carried from April 2026, not a re-run: reordering it
@@ -99,15 +101,19 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
 - **Verified conformance status (read this first).** The grades in
   [`docs/standards.md`](standards.md) are the source of truth for Open Triplestore; they are
   the project's own grades, not W3C or OGC conformance claims, and nothing is OGC-certified.
-  The **Open Triplestore** columns in the matrices below follow those grades for GeoSPARQL,
-  SHACL and the W3C SPARQL tests; elsewhere a ✅ marks *feature presence*, and
-  `docs/standards.md` grades several of those rows **Partial**: SPARQL 1.1 federation (off by
-  default, per-endpoint allowlist), OWL 2 EL, RL and DL (DL runs RL+extension rules in
-  process, with a full tableau only via the optional Konclude bridge), SHACL Advanced and
-  SHACL-C, ShEx, SWRL, RML and DCAT. GeoSPARQL 1.1 lacks KML/DGGS literals and the Query
-  Rewrite Extension (it has the geodesic `metric*` family, `aggUnion` and WKT/GML/GeoJSON
-  literals). SPARQL 1.2 /
-  RDF 1.2 follows the RDF 1.2 triple-term model in object position only.
+  The **Open Triplestore** columns in the matrices below follow those grades on every row
+  (since 2026-10-01): a ✅ means `docs/standards.md` grades the standard **Full**, and every
+  row it grades **Partial** shows 🟡 — JSON-LD 1.1 (footnote ²⁰), SHACL Advanced (the
+  SHACL-AF inference row, footnote ¹¹) and RML (footnote ¹⁸). OWL 2 DL is graded Full with the
+  reasoner sidecar the project ships (footnote ⁹), full-text search as a feature (footnote ¹⁵)
+  and SKOS as SKOS-aware inferencing (footnote ¹⁹). One row has no grade there
+  (N-Quads/TriG); its ✅ marks feature presence, as in the other columns. SHACL-C, OPM,
+  buildingSMART IDS, SAML, RDF Patch and LDES, graded Full, have no matrix row. The W3C SPARQL
+  1.1 Tests row was retired on 2026-10-03 (footnote ⁴). The other systems' cells were compiled
+  from their documentation and
+  mark feature presence, so a column-by-column count favours them. GeoSPARQL 1.0 is graded Full, and GeoSPARQL 1.1 Full
+  for every conformance class but the optional DGGS class (no DGGS literals). SPARQL 1.2 / RDF 1.2 follows the RDF 1.2
+  triple-term model in object position only.
 - **Reference system.** Open Triplestore performance figures in this document were measured on an
   **Apple M3 Pro**. Reproducible numbers for the documented reference system (AMD Ryzen 9
   7900X3D, Docker/WSL2) and the exact `cargo bench` command live in
@@ -214,97 +220,172 @@ number.
 
 ## 4. Standards Compliance Matrix
 
-Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 🔒 Commercial only · — Not claimed (see footnote)
+Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 🔒 Commercial only
+
+The matrix has 28 rows. A 29th, "W3C SPARQL 1.1 Tests", was retired for every system on
+2026-10-03 (footnote ⁴); performance comparisons take its place in
+[Performance comparison](performance-comparison.md).
 
 ### 4.1 Core RDF & SPARQL Standards
 
 | Standard | Open Triplestore | Oxigraph | Jena 5 | Blazegraph | Virtuoso | GraphDB | Stardog | RDF4J 5 | Neptune | QLever |
 |----------|-------|----------|--------|------------|----------|---------|---------|---------|---------|--------|
-| **SPARQL 1.1 Query** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **SPARQL 1.1 Query** | ✅⁶ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **SPARQL 1.1 Update** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅¹ | 🟡 |
-| **SPARQL 1.1 Federation** | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | ✅ | 🟡 | ❌ |
+| **SPARQL 1.1 Federation** | ✅⁵ | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | ✅ | 🟡 | ❌ |
 | **SPARQL 1.1 Service Desc.** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | 🟡 |
-| **SPARQL 1.1 Protocol** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **SPARQL 1.2** (W3C WD) | 🟡² | 🟡² | 🟡 | ❌ | ❌ | 🟡 | 🟡 | 🟡 | ❌ | 🟡 |
+| **SPARQL 1.1 Protocol** | ✅⁶ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **SPARQL 1.2** (W3C WD) | ✅² | 🟡² | 🟡 | ❌ | ❌ | 🟡 | 🟡 | 🟡 | ❌ | 🟡 |
 | **Graph Store Protocol** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
 | **RDF 1.1** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **RDF 1.2 / RDF-star** | 🟡³ | 🟡³ | 🟡 | ❌ | ❌ | 🟡 | 🟡 | 🟡 | ❌ | ❌ |
-| **JSON-LD 1.1** | ✅ | ✅ | ✅ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ |
+| **RDF 1.2** (W3C CR) | ✅³ | 🟡³ | 🟡 | ❌ | ❌ | 🟡 | 🟡 | 🟡 | ❌ | ❌ |
+| **JSON-LD 1.1** | 🟡²⁰ | ✅ | ✅ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ |
 | **N-Quads / TriG** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **W3C SPARQL 1.1 Tests** | —⁴ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 > ¹ Neptune added full SPARQL Update support in v1.4 (2024).
-> ² `rdf-12` feature flag; open-triplestore and Oxigraph track the SPARQL-star draft.
-> ³ `rdf-12` / `rdf-star` feature flag in oxrdf; triple terms parseable but not fully evaluated.
-> ⁴ Not claimed. Open Triplestore runs a hand-written, spec-derived SPARQL 1.1 suite (`tests/w3c_sparql11_conformance.rs`) and, for development and bug tracking, the query and update sections of the W3C SPARQL 1.1 test suite from w3c/rdf-tests, vendored unmodified (`tests/w3c_sparql11_manifests.rs`). Those sections are a subset of a W3C test suite, on which W3C's test-suite licence policy (https://www.w3.org/copyright/test-suites-licenses/) allows no performance claims, so no result is given here; the known evaluator gaps are tracked in `docs/conformance/sparql11.md`. The other systems' cells are as they were compiled for this comparison.
+> ² Open Triplestore: *Full* in [`docs/standards.md`](standards.md) since 2026-10-03, graded against the Working Draft of 2026-10-01. The W3C SPARQL 1.2 suite runs in CI (vendored, unscored) and every entry passes: `grouping#group01` since the store keeps numeric lexical forms, and the parser and evaluator gaps the suite found are fixed in this project's vendored copy of Oxigraph's SPARQL crates ([`docs/conformance/sparql12.md`](conformance/sparql12.md)). Oxigraph's column shows the unpatched engine.
+> ³ Open Triplestore: *Full* in [`docs/standards.md`](standards.md) since 2026-10-03, graded against the Candidate Recommendations of 2026-04-07. Triple terms, reifiers, annotations and base direction parse, store, query and serialize, and the W3C RDF 1.2 syntax suites run in CI (vendored, unscored); every entry passes, non-canonical numbers included now that the store keeps literals as written, except four `rdf:XMLLiteral` entries blocked on the open W3C issue [w3c/rdf-xml#97](https://github.com/w3c/rdf-xml/issues/97), which the project's Full rubric does not count against the grade ([`docs/conformance/rdf12.md`](conformance/rdf12.md)). Oxigraph stores numerics in canonical form.
+> ⁴ The "W3C SPARQL 1.1 Tests" row was retired for every system on 2026-10-03, by owner decision: the W3C test-suite licence (https://www.w3.org/copyright/test-suites-licenses/) allows no performance claims on a subset of a suite, so the row could not be graded for Open Triplestore, and a row only the other systems could fill skewed the count. Open Triplestore still runs a hand-written, spec-derived SPARQL 1.1 suite (`tests/w3c_sparql11_conformance.rs`) and, for development and bug tracking, the query, update and federation sections of the W3C suite (`docs/conformance/sparql11.md`). Measured comparisons with other stores are in [Performance comparison](performance-comparison.md).
+> ⁵ Full in [`docs/standards.md`](standards.md), deny-by-default (footnote 3 there): `SERVICE`
+>   reaches only the endpoints an operator lists in `OTS_REMOTE_ALLOWLIST`, and a refused, failed
+>   or over-cap call is a failed invocation (an error, or the empty solution under `SILENT`).
+>   `SERVICE ?var` is supported; local bindings are not pushed to the remote. The federation
+>   sections of the W3C SPARQL 1.1 test suite run unscored in `tests/w3c_sparql11_federation.rs`.
+>   See [`docs/federation.md`](federation.md).
+> ⁶ Full in [`docs/standards.md`](standards.md) since 2026-10-03, Query and Protocol both:
+>   the engine is oxigraph 0.5.11 with its SPARQL evaluator vendored and patched
+>   ([`vendor/README.md`](../vendor/README.md)) for the evaluator gaps tracked in
+>   [`docs/conformance/sparql11.md`](conformance/sparql11.md), and `/sparql` gives a query the
+>   dataset SPARQL defines (`FROM` / `FROM NAMED` and the protocol's `default-graph-uri` /
+>   `named-graph-uri` keep their meaning, confined to the caller's readable graphs; the union of
+>   those graphs only when no dataset is named). The Oxigraph column shows the unpatched 0.5
+>   engine, which has those gaps (among them oxigraph#1905 and #1919, fixed on its main branch
+>   but not released).
+> ²⁰ Partial in [`docs/standards.md`](standards.md) (graded 2026-10-03; the cell used to mark
+>   feature presence). Remote `@context`s now resolve — bundled W3C contexts offline, others from
+>   `OTS_REMOTE_ALLOWLIST` — and the W3C json-ld-api toRdf/fromRdf sections run as a regression
+>   ratchet (no published score). Every evaluated toRdf entry passes since the JSON-LD processor
+>   is patched in the vendored fork (2026-10-03); three fromRdf entries fail on purpose, because
+>   the serialiser keeps every stored quad (no `@list` folding that drops `rdf:type rdf:List`, no
+>   refusal of an `rdf:JSON` literal that is not JSON), and uploads keep `@direction` as an RDF
+>   1.2 directional string (`docs/conformance/jsonld.md`). These deliberate deviations keep the
+>   row Partial under the project's Full rubric.
 
 ### 4.2 Reasoning, Validation & Inference
 
 | Standard | Open Triplestore | Oxigraph | Jena 5 | Blazegraph | Virtuoso | GraphDB | Stardog | RDF4J 5 | Neptune | QLever |
 |----------|-------|----------|--------|------------|----------|---------|---------|---------|---------|--------|
-| **RDFS Entailment** | ✅⁵ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ❌ |
-| **OWL 2 EL** | ✅⁶ | ❌ | 🟡 | 🟡 | 🟡 | ✅ | ✅ | 🟡 | ❌ | ❌ |
-| **OWL 2 QL** | ✅⁶ | ❌ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ | ❌ |
-| **OWL 2 RL** | ✅⁶ | ❌ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ | ❌ |
-| **OWL 2 DL** | ✅⁷ | ❌ | ❌ | ❌ | ❌ | 🔒 | ✅ | ❌ | ❌ | ❌ |
-| **SHACL Validation** | 🟡¹⁰ | ❌ | 🟡 | ❌ | 🟡 | ✅ | ✅ | ✅ | ❌ | ❌ |
-| **SHACL-AF Inference** | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| **ShEx** | ✅⁸ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
-| **SWRL** | ✅⁹ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| **RDFS Entailment** | ✅⁷ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ❌ |
+| **OWL 2 EL** | ✅⁸ | ❌ | 🟡 | 🟡 | 🟡 | ✅ | ✅ | 🟡 | ❌ | ❌ |
+| **OWL 2 QL** | ✅⁸ | ❌ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ | ❌ |
+| **OWL 2 RL** | ✅⁸ | ❌ | 🟡 | 🟡 | ✅ | ✅ | ✅ | 🟡 | ❌ | ❌ |
+| **OWL 2 DL** | ✅⁹ | ❌ | ❌ | ❌ | ❌ | 🔒 | ✅ | ❌ | ❌ | ❌ |
+| **SHACL Validation** | ✅¹⁰ | ❌ | 🟡 | ❌ | 🟡 | ✅ | ✅ | ✅ | ❌ | ❌ |
+| **SHACL-AF Inference** | 🟡¹¹ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| **ShEx** | ✅¹² | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ |
+| **SWRL** | ✅¹³ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
 
-> ⁵ Full RDFS entailment (all 13 rules rdfs1–rdfs13) via `rdfs-entailment` feature flag.
->   See [`docs/rdfs-entailment.md`](rdfs-entailment.md).
-> ⁶ OWL 2 EL (CR1–CR10 + hasKey + reflexivity), OWL 2 QL (AST-level PerfectRef query rewriting
->   with full TBox closure), and OWL 2 RL (~80 forward-chaining rules including maxCardinality,
->   qualified cardinality, AllDisjointClasses, property chains, and hasKey) are all fully
->   implemented via feature flags (`owl2-el`, `owl2-ql`, `owl2-rl`).
->   See [`docs/owl2-el.md`](owl2-el.md), [`docs/owl2-ql.md`](owl2-ql.md), [`docs/owl2-rl.md`](owl2-rl.md).
-> ⁷ OWL 2 DL: native RL+DL-extension rules (hasSelf, disjointUnion, negativePropertyAssertion,
->   hasKey, cardinality annotations) run in-process; full tableau via optional Konclude subprocess
->   bridge (`KoncludeReasoner` in `src/reasoning/konclude_bridge.rs`).
->   See [`docs/owl2-dl.md`](owl2-dl.md).
-> ⁸ ShEx (Shape Expressions) support via `shex` feature flag. ShExC parser, recursive descent
->   validator with cardinality checking, CLOSED/EXTRA, inverse constraints, and value sets.
-> ⁹ SWRL rule engine via `swrl` feature flag. Supports OWL/XML and text-based rule formats.
->   Rules are translated to SPARQL INSERT WHERE and executed in a fixed-point loop.
-> ¹⁰ SHACL Core is graded Partial in [`docs/standards.md`](standards.md): one known failure in
->   the core section of the W3C SHACL test suite, and results compared on `sh:conforms` and
->   focus nodes rather than full result-set equality; see
+> ⁷ RDFS entailment (RDF 1.1 Semantics: `rdfD2`, `rdfs1`–`rdfs13` and the axiomatic triples in
+>   one fixed point, datatype clashes reported; the infinite `rdf:_n` axioms bounded by the data,
+>   decision D11), graded Full in [`docs/standards.md`](standards.md) (footnote 14 there), in the
+>   default `full` build (feature `rdfs-entailment`). See
+>   [`docs/rdfs-entailment.md`](rdfs-entailment.md).
+> ⁸ OWL 2 EL, QL and RL graded Full in [`docs/standards.md`](standards.md)
+>   (footnote 10 there). EL is a native EL++ saturation engine for the whole profile (nominals,
+>   `hasSelf`, the EL datatypes, keys and equality), with randomised differential tests against
+>   RL. QL covers the whole profile: DL-Lite_R closure, ground materialisation, consistency
+>   checks (data ranges decided on values through the OWL 2 datatype map) and existential
+>   rewriting of query blank nodes. RL runs all 78 RL/RDF rules, the Table 8 datatype rules
+>   applied to data values (`eq-ref` opt-in, decision D2), checked against a generalized-triple
+>   reference evaluator. Feature flags
+>   `owl2-el`, `owl2-ql`, `owl2-rl`, all in `full`. See [`docs/owl2-el.md`](owl2-el.md),
+>   [`docs/owl2-ql.md`](owl2-ql.md), [`docs/owl2-rl.md`](owl2-rl.md).
+> ⁹ OWL 2 DL, graded Full in [`docs/standards.md`](standards.md) **with the reasoner sidecar
+>   the project ships** (OWL API + HermiT, `docker compose --profile reasoner`), which CI runs
+>   against the approved W3C OWL 2 DL test cases. Without it, the in-process RL + DL-syntax rules
+>   are sound but not complete, and Konclude is bring-your-own. An OWL 2 DL profile check
+>   precedes every run. See [`docs/owl2-dl.md`](owl2-dl.md).
+> ¹⁰ SHACL Core is graded Full in [`docs/standards.md`](standards.md) since 2026-10-03: the
+>   core section of the W3C SHACL test suite passes with no known failure at full result-set
+>   equality, and stored literals keep their lexical form and datatype; see
 >   [`docs/conformance/shacl.md`](conformance/shacl.md).
+> ¹¹ SHACL Advanced Features, graded Partial: SPARQL targets (including
+>   `sh:SPARQLTargetType`) and constraints with terms pre-bound in every scope (blank-node focus
+>   nodes included), custom constraint components, `sh:SPARQLFunction` bodies that read the
+>   run's data, all seven node expressions, and SPARQL and triple rules with `sh:condition` and
+>   `sh:order` work, and so do result annotations (`sh:resultAnnotation`). Not implemented:
+>   `sh:entailment`, which keeps the row Partial; the optional `$shapesGraph` /
+>   `$currentShape` are not supported (footnote 7 of [`docs/standards.md`](standards.md)).
+> ¹² ShEx 2.1 via the `shex` feature flag, graded Full in [`docs/standards.md`](standards.md)
+>   (footnote 16 there): ShExC, ShExJ, ShExR and the ShapeMap language; neighbourhood partitions,
+>   recursion as a greatest fixpoint, stratified negation, typed terms, store-only `IMPORT`.
+>   Passes the 2.1 part of the vendored shexTest suite; ShEx 2.next (EXTENDS/ABSTRACT) is not
+>   implemented. See [`docs/shex.md`](shex.md).
+> ¹³ SWRL via the `swrl` feature flag, graded Full in [`docs/standards.md`](standards.md) since
+>   2026-10-03: six rule syntaxes (§4 XML, §5 RDF, OWL/XML, functional, SWRLAPI, a text form),
+>   all 79 §8 built-ins evaluated natively with binding, data-range atoms natively,
+>   class-expression atoms through the entailment regime the rules run with, and rules stored
+>   with a dataset running to a joint fixed point with its regime. See [`docs/swrl.md`](swrl.md).
 
 ### 4.3 Geospatial & Text Standards
 
 | Standard | Open Triplestore | Oxigraph | Jena 5 | Blazegraph | Virtuoso | GraphDB | Stardog | RDF4J 5 | Neptune | QLever |
 |----------|-------|----------|--------|------------|----------|---------|---------|---------|---------|--------|
-| **GeoSPARQL 1.0** | 🟡¹¹ | ❌ | 🟡 | ❌ | 🟡 | ✅ | ✅ | 🟡 | ✅ | 🟡 |
-| **GeoSPARQL 1.1** | 🟡¹¹ | ❌ | ❌ | ❌ | ❌ | ✅ | 🟡 | ❌ | 🟡 | ❌ |
-| **SPARQL+Text Search** | ✅⁷ | ❌ | 🟡 | ❌ | ✅ | ✅ | ✅ | 🟡 | ❌ | ✅ |
+| **GeoSPARQL 1.0** | ✅¹⁴ | ❌ | 🟡 | ❌ | 🟡 | ✅ | ✅ | 🟡 | ✅ | 🟡 |
+| **GeoSPARQL 1.1** | ✅¹⁴ | ❌ | ❌ | ❌ | ❌ | ✅ | 🟡 | ❌ | 🟡 | ❌ |
+| **SPARQL+Text Search** | ✅¹⁵ | ❌ | 🟡 | ❌ | ✅ | ✅ | ✅ | 🟡 | ❌ | ✅ |
 
-> ⁷ Tantivy full-text search via `text-search` feature flag with automatic index
->   sync on every SPARQL UPDATE / Graph Store write (lazy dirty-flag pattern).
-> ¹¹ Partial, not OGC-certified (only the OGC authorises compliance marks for its standards):
->   the topology families, `geof:relate`, the constructive functions, WKT and GML literals and
->   CRS transforms are implemented; the geodesic metric family, `geof:aggUnion`,
->   GeoJSON/KML/DGGS literals and the Query Rewrite Extension are not. See
+> ¹⁴ The project's own grades, not OGC-certified (only the OGC authorises compliance marks for its standards):
+>   the topology families, `geof:relate`, the constructive and geodesic metric functions,
+>   `geof:aggUnion`, WKT, GML (a documented profile), GeoJSON and KML literals with their
+>   serialisation functions, CRS transforms, and the RDFS Entailment and Query Rewrite
+>   extensions are implemented, with every GeoSPARQL 1.1 query function and all six spatial
+>   aggregates. GeoSPARQL 1.0 meets all 30 of its requirements and is graded Full (✅).
+>   GeoSPARQL 1.1 is graded Full (✅) for all of its conformance classes except the optional
+>   DGGS class (`/conf/geometry-extension-dggs`): DGGS literals are not implemented.
+>   Requirement matrix:
+>   [`docs/conformance/geosparql.md`](conformance/geosparql.md#3-requirement-matrix); grades:
 >   [`docs/standards.md`](standards.md).
+> ¹⁵ Tantivy full-text search via the `text-search` feature flag, graded *Full* as a feature
+>   (not a standard) in `docs/standards.md` since 2026-10-03. The index follows every store
+>   write — SPARQL Update, Graph Store, imports, LDP, RDF Patch, RML runs, SHACL rule output,
+>   entailment, replication, LDES sync and repair — through the store's search journal, and
+>   catches up before the next text query; before, only SPARQL Update, Graph Store and import
+>   writes reached it.
 
 ### 4.4 Protocols, Catalogs & Mapping
 
 | Standard | Open Triplestore | Oxigraph | Jena 5 | Blazegraph | Virtuoso | GraphDB | Stardog | RDF4J 5 | Neptune | QLever |
 |----------|-------|----------|--------|------------|----------|---------|---------|---------|---------|--------|
-| **LDP (Linked Data Plat.)** | ✅⁸ | ❌ | ❌ | ❌ | 🟡 | ❌ | ❌ | 🟡 | ❌ | ❌ |
-| **DCAT 2.0** | ✅ | ❌ | ❌ | ❌ | ❌ | 🟡 | ❌ | ❌ | ❌ | ❌ |
-| **VoID** | ✅ | ❌ | ❌ | ❌ | 🟡 | ✅ | 🟡 | ❌ | ❌ | ❌ |
-| **RML** | ✅ | ❌ | ❌ | ❌ | ❌ | 🟡 | ❌ | ❌ | ❌ | ❌ |
-| **SKOS** | ✅⁹ | ✅⁹ | ✅⁹ | ✅⁹ | ✅⁹ | ✅ | ✅ | ✅⁹ | ✅⁹ | ✅⁹ |
+| **LDP (Linked Data Plat.)** | ✅¹⁶ | ❌ | ❌ | ❌ | 🟡 | ❌ | ❌ | 🟡 | ❌ | ❌ |
+| **DCAT 3** | ✅¹⁷ | ❌ | ❌ | ❌ | ❌ | 🟡 | ❌ | ❌ | ❌ | ❌ |
+| **VoID** | ✅¹⁷ | ❌ | ❌ | ❌ | 🟡 | ✅ | 🟡 | ❌ | ❌ | ❌ |
+| **RML** | 🟡¹⁸ | ❌ | ❌ | ❌ | ❌ | 🟡 | ❌ | ❌ | ❌ | ❌ |
+| **SKOS** | ✅¹⁹ | ✅¹⁹ | ✅¹⁹ | ✅¹⁹ | ✅¹⁹ | ✅ | ✅ | ✅¹⁹ | ✅¹⁹ | ✅¹⁹ |
 
-> ⁸ Full LDP 1.0 support via `ldp` feature flag: Basic/Direct/Indirect containers, NonRDFSource,
->   ETag/If-Match conditional requests, OPTIONS with Allow+Accept-Post, PATCH (SPARQL Update),
->   content negotiation (Turtle, N-Triples, RDF/XML, JSON-LD), and Prefer include/omit headers.
->   All 39 conformance tests pass (`tests/ldp_conformance.rs`).
-> ⁹ SKOS is a vocabulary; all systems store SKOS triples — "support" means SKOS-aware inferencing.
+> ¹⁶ LDP 1.0 via the `ldp` feature flag, graded Full: Basic/Direct/Indirect containers,
+>   NonRDFSource, ETag/If-Match conditional requests, OPTIONS with Allow+Accept-Post, PATCH
+>   (SPARQL Update), content negotiation (Turtle, N-Triples, RDF/XML, JSON-LD), Prefer
+>   include/omit headers and per-resource Web Access Control. Spec-derived suites
+>   `tests/ldp_conformance.rs` and `tests/ldp_http_conformance.rs`.
+> ¹⁷ DCAT 3 and VoID, each graded Full in [`docs/standards.md`](standards.md) (item 17 of its
+>   known limitations): a DCAT 3 catalogue with DCAT 3 §11 versions, data services, temporal
+>   coverage, update frequency, range typing and, under the profiles, catalogue records, which
+>   CI validates against SEMIC's DCAT-AP 3.0.1 and Geonovum's DCAT-AP-NL 3 SHACL shapes; and VoID
+>   per dataset with statistics, class and property partitions and linksets. The other systems'
+>   cells in the DCAT row were compiled against DCAT 2.
+> ¹⁸ RML, graded Partial in [`docs/standards.md`](standards.md) (footnote 9): RML-Core /
+>   RML-IO, legacy RML and R2RML over CSV/JSON/XML files and registered SQL and SPARQL
+>   datasources, joins on both. Graded on the W3C R2RML test cases (SQLite, PostgreSQL, MySQL;
+>   no score published) and the vendored RML-Core and RML-IO source test cases; one remaining
+>   failure, R2RMLTC0002f (SQL identifier case-folding), is a deliberate deviation, which keeps
+>   the row Partial. RML-FNML, RML-CC, RML-LV, RML-star and RML-IO targets are not implemented.
+> ¹⁹ SKOS is a vocabulary; all systems store SKOS triples — "support" means SKOS-aware inferencing.
+>   Open Triplestore: graded *Full* in `docs/standards.md` since 2026-10-03 — the `skos` dataset
+>   entailment regime (OWL 2 RL over the W3C SKOS schema) and the built-in SKOS integrity shapes
+>   for all seven integrity conditions; the cell used to mark only that SKOS triples are stored.
 
-### Standards Score (count of full ✅ across all 29 rows above)
+### Standards Score (count of full ✅ across all 28 rows above)
 
 > **Recounted 2026-09-18** directly from the 29 rows in sections 4.1–4.4 rather than
 > carried forward. Three had drifted since April, where a row was edited without the
@@ -316,18 +397,55 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > row is not claimed (footnote ⁴). The other 🟡 rows are SPARQL 1.2 and RDF 1.2/RDF-star
 > (upstream oxrdf blocker — triple-term evaluation not yet complete). The count is of ✅ cells,
 > which elsewhere in the Open Triplestore column mark feature presence (see §2.3).
+>
+> Open Triplestore recounted again on 2026-10-01, 23 → 16: SPARQL 1.1 federation, OWL 2 EL, RL
+> and DL, ShEx, SWRL and RML now follow their Partial grades in `docs/standards.md` as well.
+> SHACL-AF inference and DCAT 2.0 still count as feature presence (see §2.3).
+>
+> Open Triplestore recounted again later on 2026-10-01, 16 → 11: every row of its column that
+> `docs/standards.md` grades now follows that grade, with no ✅ for feature presence; the five
+> rows it does not grade keep theirs (see §2.3). SPARQL 1.1 Query and OWL 2 QL were regraded
+> Partial that day, and SHACL-AF inference, DCAT and VoID now follow their Partial grades. The
+> other systems' cells are as they were compiled for this comparison from each system's
+> documentation, so they mark feature presence and the totals are not like for like: on a
+> graded row, a ✅ here means this project grades the standard Full against its own tests.
+>
+> Open Triplestore recounted on 2026-10-03, 11 → 15, when the standards-completion pull requests
+> landed together: SPARQL 1.1 federation (deny-by-default, `SERVICE ?var`, W3C federation
+> sections), OWL 2 EL (native EL++ engine), OWL 2 QL (DL-Lite_R with the OWL 2 datatype map) and
+> OWL 2 DL (with the reasoner sidecar the project ships) are graded Full in `docs/standards.md`,
+> and their cells follow. RDF Patch and LDES were regraded Full the same day; neither has a row
+> here. 13 rows are 🟡 and the W3C SPARQL 1.1 Tests row is not claimed.
+>
+> **Recounted 2026-10-03, once, from the merged matrix** after the second standards-completion
+> merge train (round 2), from 15 of 29 to **25 of 28**. The "W3C SPARQL 1.1 Tests" row is
+> retired for every system by owner decision (footnote ⁴), so every column loses one row: the
+> other systems' counts drop by one each, as they all had ✅ there, and the chart below is out
+> of 28. Eleven Open Triplestore rows follow new Full grades in `docs/standards.md`: SPARQL 1.1
+> Query (the vendored, patched SPARQL evaluator and the dataset SPARQL defines on `/sparql`),
+> SPARQL 1.2 and RDF 1.2 (literals kept as written and the vendored SPARQL fork fixes; RDF 1.2's
+> four remaining `rdf:XMLLiteral` entries wait on the open issue w3c/rdf-xml#97), OWL 2 RL (all
+> 78 RL/RDF rules and the Table 8 datatype rules), SHACL Validation (SHACL Core), ShEx (a ShEx
+> 2.1 engine), SWRL (every §8 built-in), GeoSPARQL 1.0 and 1.1 (1.1 without the optional DGGS
+> class), DCAT 3 and VoID. JSON-LD 1.1, until then a ✅ for feature presence, is now graded and
+> shows 🟡; SPARQL 1.1 Protocol, full-text search and SKOS keep their ✅, which now rests on a
+> Full grade. Three rows are 🟡: JSON-LD 1.1 and RML, each kept Partial by a deliberate
+> deviation that the project's Full rubric does not accept (footnotes ²⁰ and ¹⁸), and SHACL-AF
+> inference (`sh:entailment` is not implemented, footnote ¹¹). One row,
+> N-Quads/TriG, is ungraded feature presence. The per-change recounts written while the
+> branches were open counted from baselines that no longer held and are replaced by this one.
 
 ```
-Open Triplestore  ███████████████████████░░░░░░   23 / 29  (#1 open-source; GeoSPARQL, SHACL, SPARQL 1.2, RDF-star 🟡; W3C tests not claimed)
-Stardog           ██████████████████████░░░░░░░   22 / 29  (commercial; full OWL DL + ShEx + SWRL; GeoSPARQL 1.1 partial)
-GraphDB           █████████████████████░░░░░░░░   21 / 29  (commercial; OWL DL commercial-only; no ShEx/SWRL/LDP/RML)
-Virtuoso          ██████████████░░░░░░░░░░░░░░░   14 / 29
-RDF4J 5           ██████████████░░░░░░░░░░░░░░░   14 / 29  (improved from v4)
-Jena 5            ████████████░░░░░░░░░░░░░░░░░   12 / 29  (improved from v4)
-Oxigraph          ███████████░░░░░░░░░░░░░░░░░░   11 / 29  (lean standalone; open-triplestore extends it)
-Blazegraph        ██████████░░░░░░░░░░░░░░░░░░░   10 / 29  (abandoned 2019)
-Neptune           █████████░░░░░░░░░░░░░░░░░░░░    9 / 29
-QLever            ███████░░░░░░░░░░░░░░░░░░░░░░    7 / 29  (query speed over breadth)
+Open Triplestore  █████████████████████████░░░   25 / 28  (own grades, Full only; 3 more rows 🟡 — all 28 at least partial, the most of the ten)
+Stardog           █████████████████████░░░░░░░   21 / 28  (commercial; full OWL DL + ShEx + SWRL; GeoSPARQL 1.1 partial)
+GraphDB           ████████████████████░░░░░░░░   20 / 28  (commercial; OWL DL commercial-only; no ShEx/SWRL/LDP/RML)
+Virtuoso          █████████████░░░░░░░░░░░░░░░   13 / 28
+RDF4J 5           █████████████░░░░░░░░░░░░░░░   13 / 28  (improved from v4)
+Jena 5            ███████████░░░░░░░░░░░░░░░░░   11 / 28  (improved from v4)
+Oxigraph          ██████████░░░░░░░░░░░░░░░░░░   10 / 28  (lean standalone; open-triplestore extends it)
+Blazegraph        █████████░░░░░░░░░░░░░░░░░░░    9 / 28  (abandoned 2019)
+Neptune           ████████░░░░░░░░░░░░░░░░░░░░    8 / 28
+QLever            ██████░░░░░░░░░░░░░░░░░░░░░░    6 / 28  (query speed over breadth)
 ```
 
 ---
@@ -544,15 +662,18 @@ key features:
 | Feature | Open Triplestore | Jena 5 | GraphDB 11 | Stardog 10 | QLever | Notes |
 |---------|:-----------:|:------:|:----------:|:----------:|:------:|-------|
 | Triple terms (RDF-star WHERE) | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | Natively via `rdf-12` feature; `TRIPLE()`, `SUBJECT()` etc. built-in |
-| Triple terms (annotation syntax) | ❌ | ❌ | ❌ | ❌ | ❌ | Not yet in any production system |
-| `LATERAL` join | 🟡 | 🟡 | ❌ | ❌ | ❌ | Planned for opengraph fork; parse error today. See [SPARQL 1.2 docs](sparql-12.md) for workaround |
-| `ADJUST` function | ✅ | ❌ | ❌ | ❌ | ❌ | Implemented; timezone + duration arithmetic on xsd:dateTime |
-| `CALL` expression | ❌ | ❌ | ❌ | ❌ | ❌ | Draft-only |
+| Triple terms (annotation syntax) | ✅ | ❌ | ❌ | ❌ | ❌ | `~ reifier` and `{\| \|}` in SPARQL, Turtle and TriG |
+| `LATERAL` join | ✅ | 🟡 | ❌ | ❌ | ❌ | SEP-0006, compiled into the engine; not part of the 1.2 Working Draft. See [SPARQL 1.2 docs](sparql-12.md#lateral-joins) |
+| `ADJUST` function | ✅ | ❌ | ❌ | ❌ | ❌ | SEP-0002, not part of the 1.2 Working Draft; the timezone is an `xsd:dayTimeDuration` |
+| `CALL` expression | ❌ | ❌ | ❌ | ❌ | ❌ | Not in the 1.2 Working Draft; the parser rejects it |
 | Directives (`BASE`, `PREFIX`) | ✅ | ✅ | ✅ | ✅ | ✅ | Already in SPARQL 1.1 |
 | SPARQL Results triple-term JSON | ✅ | 🟡 | 🟡 | 🟡 | ❌ | `{"type":"triple","value":{...}}` per WD spec |
 
-The `rdf-12` feature enables full RDF-star triple term parsing, querying, and
-result serialization. `LATERAL` is planned for the opengraph fork. See
+The `rdf-12` feature (part of `full`) enables RDF 1.2 triple-term parsing,
+storage, querying and result serialization. The W3C SPARQL 1.2 and RDF 1.2
+suites run in CI; the entries that still fail are listed in
+[conformance/sparql12.md](conformance/sparql12.md) and
+[conformance/rdf12.md](conformance/rdf12.md). See
 [docs/sparql-12.md](sparql-12.md) for full details and configuration.
 
 ### 7.4 ESWC 2023 Wikidata Results (relative ranking)
@@ -669,7 +790,7 @@ From BSBM and published benchmarks at concurrency factor 16, 32 GB RAM:
 | Feature | Open Triplestore | Jena 5 | GraphDB 11 | Stardog | Virtuoso | Neptune | QLever |
 |---------|:-----------:|:------:|:----------:|:-------:|:--------:|:-------:|:------:|
 | WKT Literals | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 |
-| GML Literals | 🟡 | 🟡 | ✅ | ✅ | 🟡 | 🟡 | ❌ |
+| GML Literals | ✅ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | ❌ |
 | `geof:sfContains` | ✅ | 🟡 | ✅ | ✅ | 🟡 | ✅ | ❌ |
 | `geof:sfIntersects` | ✅ | 🟡 | ✅ | ✅ | ✅ | ✅ | ❌ |
 | `geof:sfTouches` | ✅ | ❌ | ✅ | ✅ | 🟡 | 🟡 | ❌ |
@@ -679,16 +800,20 @@ From BSBM and published benchmarks at concurrency factor 16, 32 GB RAM:
 | `geof:buffer` | ✅ | ❌ | ✅ | ✅ | ❌ | 🟡 | ❌ |
 | `geof:envelope` | ✅ | ❌ | ✅ | ✅ | ❌ | 🟡 | ❌ |
 | `geof:convexHull` | ✅ | ❌ | ✅ | ✅ | ❌ | 🟡 | ❌ |
-| Spatial R-tree index | ✅¹ | ❌ | ✅ | ✅ | ✅ | ✅ | N/A |
-| GeoSPARQL 1.1 rules | ❌³ | ❌ | ✅ | 🟡 | ❌ | 🟡 | ❌ |
+| Spatial R-tree index | ❌¹ | ❌ | ✅ | ✅ | ✅ | ✅ | N/A |
+| GeoSPARQL 1.1 rules | ✅³ | ❌ | ✅ | 🟡 | ❌ | 🟡 | ❌ |
 | Conformance tests | 🟡² | ❌ | ✅ | 🟡 | ❌ | 🟡 | N/A |
 
-> ¹ Spatial R-tree index (`rstar` crate) over `geo:asWKT` bounding boxes. Lazily rebuilt
-> on writes. Used for GeoSPARQL pre-filtering (~100× speedup at scale).
+> ¹ Not used by queries. A 2D R-tree (`rstar`) over `geo:asWKT` bounding boxes exists in
+> `src/geo/spatial_index.rs` and is built when the store opens, but no query plan consults it,
+> so every GeoSPARQL filter evaluates each candidate geometry (the 3D Tiles feed uses a
+> separate 3D index).
 > ² Open Triplestore runs a hand-written, spec-derived suite (`tests/geosparql_conformance.rs`)
 > and the OGC GeoSPARQL 1.1 validator shapes (`tests/ogc_geosparql_shacl_roundtrip.rs`) in CI;
 > these are development results, not an OGC compliance test or certification.
-> ³ The GeoSPARQL Query Rewrite Extension (the RIF rules) is not implemented.
+> ³ The GeoSPARQL Query Rewrite Extension (the RIF rules, all 24 sf/eh/rcc8 relations) rewrites
+> relation patterns in queries and update `WHERE` clauses, on by default
+> (`OTS_GEOSPARQL_QUERY_REWRITE=off` turns it off); see [`docs/geosparql.md`](geosparql.md#query-rewrite).
 
 ### 10.2 GeoSPARQL Performance (measured — see section 2.4 for the system)
 
@@ -719,8 +844,8 @@ GeoSPARQL — geof:buffer constructive function (lower = better)
 200 points  14.5 ms  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
 ```
 
-Cost is O(n × geometry_complexity). For >1,000 candidates, a bounding-box pre-filter
-reduces GEOS calls by ~90%.
+Cost is O(n × geometry_complexity): with no spatial index in the query path (footnote ¹ of
+§10.1), every candidate geometry is parsed and tested.
 
 ---
 
@@ -733,16 +858,20 @@ reduces GEOS calls by ~90%.
 | GraphDB | ✅ | ✅ | ✅ | ✅ | 🔒 | ✅ | ✅ | ❌ |
 | Stardog | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Virtuoso | ✅ | 🟡 | ✅ | ✅ | ❌ | 🟡 | ❌ | ❌ |
-| **Open Triplestore** | 🟡 | 🟡 | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ✅ |
+| **Open Triplestore** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🟡 | ✅ |
 | Jena 5 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | 🟡 | ❌ | ❌ |
 | RDF4J 5 | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ✅ | ❌ | ❌ |
 | Blazegraph | ✅ | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ❌ | ❌ |
 | Neptune | 🟡 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | QLever | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 
-> Open Triplestore: RDFS and OWL 2 EL/QL/RL are available via feature flags (`rdfs-entailment`,
-> `owl2-el`, `owl2-ql`, `owl2-rl`). Not enabled by default. OWL 2 DL requires a full HermiT/Pellet-
-> class reasoner, which is out of scope for this project.
+> Open Triplestore: the cells follow the grades in [`docs/standards.md`](standards.md), as in
+> §4.2. RDFS, OWL 2 EL/QL/RL/DL, SWRL and ShEx are feature flags of the default `full` build. SWRL is
+> graded Full: all §8 built-ins, data-range and class-expression atoms, rules run jointly with a
+> regime ([`docs/swrl.md`](swrl.md)).
+> OWL 2 DL is Full with the OWL API + HermiT reasoner sidecar the project ships
+> (`docker compose --profile reasoner`; footnote ⁹); without it, the RL rules plus DL-syntax rules
+> run in process, sound but not complete.
 
 ### 11.2 Reasoning Approaches Compared
 
@@ -752,8 +881,10 @@ even after updates. Best OWL DL implementation available.
 **GraphDB** uses forward-chaining (materialisation) — fast reads; requires re-inference after
 updates. OWL DL requires the commercial edition.
 
-**Open Triplestore** has no OWL reasoning but supports **SHACL-AF** (rule-based inference
-via SHACL Advanced Features), which covers many practical derivation needs:
+**Open Triplestore** materialises RDFS and the OWL 2 EL, QL and RL profiles in process (RL graded
+Partial, see §4.2), reasons over OWL 2 DL through its HermiT sidecar, and also supports
+**SHACL-AF** rules (rule-based inference via SHACL Advanced Features), which cover many
+derivations an ontology does not state:
 
 | OWL RL Pattern | SHACL-AF Equivalent | Coverage |
 |----------------|---------------------|----------|
@@ -765,7 +896,8 @@ via SHACL Advanced Features), which covers many practical derivation needs:
 | FunctionalProperty | `sh:maxCount 1` + validation | ✅ (validation only) |
 | Full OWL DL | Not applicable | ❌ |
 
-SHACL-AF covers ~70% of common OWL RL derivation use cases without full reasoner overhead.
+SHACL-AF rules suit derivations that are specific to one dataset; OWL 2 RL suits those an
+ontology states.
 
 ### 11.3 SHACL Validation Performance (measured — see section 2.4 for the system)
 
@@ -807,7 +939,7 @@ yield 4–8× improvement (see Optimisation Roadmap).
 
 | System | Built-in Auth | JWT | RBAC | TLS | OAuth / OIDC | SAML |
 |--------|:------------:|:---:|:----:|:---:|:------------:|:----:|
-| **Open Triplestore** | ✅ | ✅ | ✅ | 🟡¹ | ✅² | 🟡² |
+| **Open Triplestore** | ✅ | ✅ | ✅ | 🟡¹ | ✅² | ✅² |
 | Jena 5 Fuseki | ✅ (Shiro) | ❌ | 🟡 | ✅ | ❌ | ❌ |
 | GraphDB | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Stardog | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -819,7 +951,13 @@ yield 4–8× improvement (see Optimisation Roadmap).
 
 > ¹ TLS termination handled by a reverse proxy (nginx/Caddy); open-triplestore does not
 > terminate TLS natively (intentional, standard for 12-factor apps).
-> ² OAuth 2.0 / OIDC via `openidconnect` crate; SAML 2.0 via `samael` crate (optional).
+> ² OAuth 2.0 / OIDC via `openidconnect` crate. SAML 2.0 (service provider: SP- and
+> IdP-initiated sign-in, encrypted assertions, signed requests, Single Logout) via the
+> `samael` crate plus the store's own decryption and logout handling; the `saml` feature
+> is in the published image but not in `full`. Graded Full in
+> [`docs/standards.md`](standards.md) on 2026-10-03 (was 🟡: experimental, SP-initiated
+> only). SAML is not one of the 28 rows the Standards Score counts, so the score is
+> unchanged.
 
 ### 12.3 Ecosystem & Language Bindings
 
@@ -901,11 +1039,11 @@ Blazegraph                                  ████████            
 
 ### 13.3 Notes by System
 
-**Open Triplestore (22/30):**
+**Open Triplestore (23/30):**
 Rust runtime is the strongest future-proofing factor — no GC pauses, stable binary, trivially
 cross-compiled. Oxigraph upstream is active and tracking SPARQL 1.1 conformance closely.
 The `rdf-12` feature flag and Oxigraph's rdf-star support place it ahead of most Java stores
-on SPARQL 1.2 readiness. Auth (JWT + OAuth + SAML), DCAT 2, VoID, and RML put it well
+on SPARQL 1.2 readiness. Auth (JWT + OAuth + SAML), DCAT 3, VoID, and RML put it well
 ahead of Oxigraph standalone. Gaps: no serverless/cloud-native story, smaller community
 than Jena/GraphDB. The architectural choices (Rust + RocksDB) are sound for the next decade.
 
@@ -950,7 +1088,7 @@ security patches not applied. Any existing deployment should migrate to QLever o
 
 ```
 1. GraphDB 11         — full GeoSPARQL 1.1, spatial index, OGC member
-2. Open Triplestore  — GeoSPARQL 1.1 (partial) + GEOS; all DE-9IM relations + constructive funcs
+2. Open Triplestore  — GeoSPARQL 1.0 + 1.1 (no DGGS) + GEOS; all functions and aggregates
 3. Stardog 10         — good GeoSPARQL; commercial
 4. Neptune            — spatial support but proprietary; AWS lock-in
 ```
@@ -1002,8 +1140,11 @@ security patches not applied. Any existing deployment should migrate to QLever o
    Neptune (Graviton4 cloud bulk loader) match this.
 
 2. **GeoSPARQL 1.1:** Broad GeoSPARQL 1.1 coverage via the GEOS C++ library: all DE-9IM
-   relations and the constructive functions. Partial overall (no geodesic metrics, `aggUnion`
-   or GeoJSON literals; see [`docs/standards.md`](standards.md)), and not OGC-certified.
+   relations, the constructive and geodesic metric functions, `aggUnion`, WKT/GML/GeoJSON/KML
+   literals, every GeoSPARQL 1.1 query function and aggregate, and the RDFS Entailment and
+   Query Rewrite extensions. GeoSPARQL 1.0 is graded Full, and 1.1 Full for every conformance
+   class but the optional DGGS class (see [`docs/standards.md`](standards.md)). Neither is
+   OGC-certified.
 
 3. **SHACL + SHACL-AF:** Combined validation and inference in a single lightweight binary is rare.
    Only GraphDB and Stardog match this in a server-grade product.
@@ -1011,11 +1152,12 @@ security patches not applied. Any existing deployment should migrate to QLever o
 4. **Rust runtime:** No JVM, no GC pauses, predictable latency tail, small binary. Embeds into
    any environment without a container.
 
-5. **Built-in auth:** JWT + SQLite auth with role hierarchy + OAuth/OIDC + optional SAML — unique
+5. **Built-in auth:** JWT + SQLite auth with role hierarchy + OAuth/OIDC + SAML 2.0 (in the image) — unique
    among the open-source options (Jena/RDF4J/QLever require separate auth infrastructure).
 
-6. **DCAT 2 + VoID + RML:** Data catalog vocabulary, linked-data statistics, and RDF mapping
-   language built-in — rare in any store outside commercial GraphDB.
+6. **DCAT 3 + VoID + RML:** Data catalog vocabulary, linked-data statistics, and RDF mapping
+   language built in — DCAT 3 and VoID graded Full, RML Partial — rare in any store outside
+   commercial GraphDB.
 
 7. **Concurrent reads:** 6.23× speedup at 8 threads — near-linear scaling on modern multi-core
    hardware.
@@ -1024,9 +1166,9 @@ security patches not applied. Any existing deployment should migrate to QLever o
 
 | Gap | Severity | Current Workaround |
 |-----|----------|--------------------|
-| No SPARQL 1.2 full support | Medium | `rdf-12` flag + `ADJUST` function; LATERAL/CALL await Oxigraph upstream |
-| No OWL DL reasoning | Low for typical use | SHACL-AF covers ~70% of OWL RL |
-| Single-node only | Medium for HA | RocksDB read-replica snapshot copy |
+| JSON-LD 1.1 and RML graded Partial | Low | Each keeps one deliberate deviation (JSON-LD `fromRdf`: every stored quad is written; R2RML: no SQL identifier case-folding), listed in `docs/conformance/jsonld.md` and `docs/standards.md` footnote 9 |
+| SHACL Advanced graded Partial | Low | `sh:entailment` is not implemented: run the rules (or an entailment regime) before validating |
+| One writer: every write goes through the leader, and data is replicated in full, not sharded | Medium at very large scale | Leader–follower replication and a Raft-elected cluster give read scaling and failover ([operations.md](operations.md#replication)) |
 | Write-lock degrades readers | Medium under write load | Bulk-load then read-only |
 
 ### Optimisation Roadmap
@@ -1035,13 +1177,13 @@ The following improvements are ordered by estimated impact:
 
 | Priority | Optimisation | Est. Impact | Complexity | Status |
 |----------|-------------|-------------|------------|--------|
-| 1 | **Spatial R-tree** (`rstar` over WKT bbox) | ~100× GeoSPARQL at scale | Medium | ✅ Done |
+| 1 | **Spatial R-tree** (`rstar` over WKT bbox) | Fewer GEOS calls on constant-operand filters | Medium | 🟡 Index built, not used by queries |
 | 2 | **Predicate index** (`quads_for_predicate()`) | 10–50× predicate-selective scans | Low | ✅ Done |
 | 3 | **Parallel SHACL** (Rayon over shapes) | 4–8× validation throughput | Low | ✅ Done |
 | 4 | **REGEX → Tantivy push-down** | ~100× text queries (needs `text-search`) | High | ✅ Done |
 | 5 | **Named-graph index** (O(1) enumeration) | Constant-time GRAPH enumeration | Low | ✅ Done |
 | 6 | **COUNT(*) fast path** (no row materialisation) | 3–5× aggregation | Medium | ✅ Done |
-| 7 | **Property path memoisation** | 2–5× repeated path queries | Medium | ✅ Module ready |
+| 7 | **Property path memoisation** | 2–5× repeated path queries | Medium | ❌ Not built (the query-result cache answers exact repeats) |
 | 8 | **HTTP UPDATE batching** (`/sparql/batch`) | 3–7× UPDATE throughput | Low | ✅ Done |
 
 ---

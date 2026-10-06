@@ -140,8 +140,11 @@ const MAPPING: &str = r#"
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 @prefix ex:  <http://example.org/products/ontology#> .
 
+# `name` is NOT NULL, so the fixture writes a missing name as ''. R2RML reads
+# '' as a value; rml:null (RML-IO) says that here it is not one.
 ex:ProductsMap a rr:TriplesMap ;
-  rml:logicalSource [ rml:source <urn:source:SOURCE> ; rml:referenceFormulation ql:SQL2008 ; rr:tableName "products" ] ;
+  rml:logicalSource [ rml:source <urn:source:SOURCE> ; rml:referenceFormulation ql:SQL2008 ; rr:tableName "products" ;
+                      <http://w3id.org/rml/null> "" ] ;
   rr:subjectMap [ rr:template "http://example.org/products/product_{product_id}" ; rr:class ex:Product ] ;
   rr:predicateObjectMap [ rr:predicate ex:name ; rr:objectMap [ rr:column "name" ] ] ;
   rr:predicateObjectMap [ rr:predicate ex:hasPrice ; rr:objectMap [ rr:column "price" ; rr:datatype xsd:decimal ] ] .

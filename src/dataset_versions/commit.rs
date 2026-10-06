@@ -392,6 +392,12 @@ pub async fn validate_and_commit(
     .await
     .map_err(|e| AppError::Internal(e.to_string()))?
     .map_err(AppError::Internal)?;
+    crate::rdf_patch_log::on_version_cut(
+        &state.auth_db,
+        &state.base_url,
+        &record,
+        Some(&user.user_id),
+    );
     drop(_held);
     // Re-test this dataset's saved queries against the freshly committed version.
     crate::saved_queries::testing::spawn_version_tests(&state, &dataset.id, &version);

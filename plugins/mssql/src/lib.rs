@@ -373,6 +373,16 @@ impl SourceConnection for MssqlConnection {
         Ok(rows)
     }
 
+    fn columns(&mut self, query: &str) -> Result<Option<Vec<String>>, SourceError> {
+        self.check_usable()?;
+        Ok(Some(
+            self.describe_query(query)?
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect(),
+        ))
+    }
+
     fn stream(
         &mut self,
         query: &str,

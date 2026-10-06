@@ -45,7 +45,7 @@ function sourceFiles(dir: string, acc: string[] = []): string[] {
 }
 
 /**
- * Literal key references: `$t('a.b')`, `$i18nT("a.b")`, `t('a.b')`.
+ * Literal key references: `$t('a.b')`, `$i18nT("a.b")`, `t('a.b')`, `$tHtml('a.b')`.
  *
  * Deliberately only single/double-quoted literals — a template literal or a
  * variable cannot be checked without running the app. The trailing `[,)]` is
@@ -53,7 +53,7 @@ function sourceFiles(dir: string, acc: string[] = []): string[] {
  * a literal that is not itself a key, and matching it reported two bugs that
  * were not there.
  */
-const CALL = /\$?(?:i18nT|t)\(\s*(['"])([a-zA-Z][\w.]*\.[\w.]+)\1\s*[,)]/g;
+const CALL = /\$?(?:i18nT|tHtml|t)\(\s*(['"])([a-zA-Z][\w.]*\.[\w.]+)\1\s*[,)]/g;
 
 describe('every literal translation key resolves', () => {
   const enKeys = leaves(en);

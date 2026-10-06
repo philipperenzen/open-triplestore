@@ -36,7 +36,7 @@ use crate::server::error::AppError;
 use crate::server::AppState;
 use crate::store::changes::{self, Materialisation, NetDelta};
 use crate::store::set_hash::SetHash;
-use crate::store::TripleStore;
+use crate::store::{QuadOp, TripleStore};
 
 pub const DEFAULT_MAX_QUADS: i64 = 2_000_000;
 pub const DEFAULT_TTL_SECS: u64 = 3600;
@@ -115,8 +115,9 @@ fn apply_into(store: &TripleStore, target: &str, net: &NetDelta) -> Result<(), B
     let g = target_of(target)?;
     let added: Vec<Quad> = net.added.iter().map(|q| retarget(q, &g)).collect();
     let removed: Vec<Quad> = net.removed.iter().map(|q| retarget(q, &g)).collect();
+    // Chunked: the target is unobservable until the build is recorded.
     store
-        .apply_delta(&added, &removed, false)
+        .apply_quad_ops_chunked(&QuadOp::from_delta(added, removed))
         .map(|_| ())
         .map_err(store_err)
 }

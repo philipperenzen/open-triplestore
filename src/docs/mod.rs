@@ -349,12 +349,36 @@ const BUILTINS: &[Builtin] = &[
         sort: 80,
     },
     Builtin {
+        slug: "swrl",
+        title: "SWRL Rules",
+        category: "Reasoning & Validation",
+        body: include_str!("../../docs/swrl.md"),
+        admin_only: false,
+        sort: 81,
+    },
+    Builtin {
         slug: "shacl",
         title: "SHACL Validation",
         category: "Reasoning & Validation",
         body: include_str!("../../docs/shacl.md"),
         admin_only: false,
         sort: 82,
+    },
+    Builtin {
+        slug: "shex",
+        title: "ShEx Validation",
+        category: "Reasoning & Validation",
+        body: include_str!("../../docs/shex.md"),
+        admin_only: false,
+        sort: 82,
+    },
+    Builtin {
+        slug: "repair",
+        title: "Repair Proposals",
+        category: "Reasoning & Validation",
+        body: include_str!("../../docs/repair.md"),
+        admin_only: false,
+        sort: 83,
     },
     // ── Security ──
     Builtin {

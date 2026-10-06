@@ -317,16 +317,22 @@ services:
       - ./config.json:/app/frontend/dist/config.json:ro
 ```
 
-### Base path (static sub-path deploys)
+### Base path (sub-path deploys)
 
-If the built frontend is published under a sub-path (e.g.
-`https://example.gitlab.io/ld-suite/`), set `OTS_BASE_PATH` at **build** time:
+If the web UI is published under a sub-path (e.g. `https://example.org/ots/`),
+set `OTS_BASE_PATH` at **build** time:
 
 ```bash
-OTS_BASE_PATH=/ld-suite/ npm run build
+OTS_BASE_PATH=/ots/ npm run build
 ```
 
-Defaults to `/`, so every existing deployment is unaffected.
+The router, links, API calls, `config.json` and `/embed/*` then all live below
+`/ots/`; `config.json` itself is fetched from `/ots/config.json`, and a
+root-relative `branding.logoUrl` resolves below the prefix too. Defaults to `/`,
+so every existing deployment is unaffected. Serving the whole instance under a
+prefix also needs `BASE_URL` and the reverse proxy set up to match: see
+[Serving under a path prefix](operations.md#serving-under-a-path-prefix) for the
+nginx and Traefik configuration.
 
 ---
 
@@ -393,6 +399,21 @@ dependency on this project's internal types:
   drivers, built on the shared `INFORMATION_SCHEMA` catalogue and profiler in
   `ots_plugin_api::sources::catalogue`; a driver for another dialect
   implements `Executor` and `Dialect` there and owns only its wire protocol.
+
+### Plugin settings
+
+Plugins read their settings from the environment. The shipped plugins use
+these:
+
+| Plugin | Variable | Default | Meaning |
+|---|---|---|---|
+| `accounts-dashboard` | `ACCOUNTS_DASHBOARD_APP_GROUPS` | *(unset)* | Comma-separated `app=group` pairs, e.g. `validation=data-stewards,forms-design=form-designers`. The dashboard lists them under *Per-app entitlements* exactly as configured; it does not work out which accounts belong to each group. Malformed pairs are skipped. |
+| `accounts-dashboard` | `ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL` | *(unset)* | Base URL of an external LLM gateway whose usage ledger is merged into the dashboard's LLM section. The plugin calls `GET <url>/v1/usage?group_by=user` with a 5-second timeout on each dashboard load. If the gateway is unreachable or answers with an error, that part is marked unavailable with the reason and the rest of the dashboard still loads. |
+| `accounts-dashboard` | `ACCOUNTS_DASHBOARD_GATEWAY_KEY` | *(unset)* | Bearer token for that call, read through the host's secrets module: a reference such as `env:NAME` or `file:/path`. A raw value is refused under `OTS_ENV=production`. |
+| SQL connectors | *(none)* | | `plugin-postgres`, `plugin-mysql` and `plugin-mssql` take their connection settings per source, not from the environment; see [sources.md](sources.md). |
+
+The `plugin-*` features are not part of `full`, so the published image
+contains none of these plugins. Build with the feature to use one.
 
 ### Writing a new plugin (cookiecutter flow)
 

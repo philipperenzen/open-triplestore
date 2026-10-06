@@ -1,8 +1,9 @@
 //! Change capture for LDES publishing.
 //!
 //! A write to a graph that belongs to a stream-enabled dataset is bracketed:
-//! [`before`] indexes the graph's entities (IRI subject → hash of its direct
-//! triples) and [`after`] re-indexes and diffs. Every entity whose hash
+//! [`before`] indexes the graph's entities (IRI subject → hash of the
+//! description a member would carry: direct triples plus blank-node closure)
+//! and [`after`] re-indexes and diffs. Every entity whose hash
 //! changed or appeared becomes a member carrying its current description
 //! (direct triples plus blank-node closure); every entity that vanished
 //! becomes a tombstone. Graphs of datasets without a stream are never indexed,
@@ -21,7 +22,7 @@ use oxigraph::model::{GraphNameRef, NamedNodeRef, NamedOrBlankNode, Quad, Term};
 use crate::server::AppState;
 use crate::store::TripleStore;
 
-/// entity IRI → order-independent hash of its `(predicate, object)` pairs
+/// entity IRI → order-independent hash of its description
 pub type SubjectIndex = HashMap<String, u64>;
 
 /// What [`before`] captured: one index per tracked `(graph, dataset)`.
@@ -30,18 +31,80 @@ pub struct Before {
     pub graphs: Vec<(String, String, SubjectIndex)>,
 }
 
-fn hash_pair(p: &str, o: &str) -> u64 {
+fn hash_of<T: Hash + ?Sized>(v: &T) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    p.hash(&mut h);
-    o.hash(&mut h);
+    v.hash(&mut h);
     h.finish()
 }
 
-/// Index the IRI-subject entities of `graph`.
+fn hash_pair(p: &str, o: u64) -> u64 {
+    hash_of(&(p, o))
+}
+
+/// Hashes the blank nodes of one graph by content, so an edit anywhere in an
+/// entity's blank-node closure changes the entity's hash — and re-writing
+/// the same structure under fresh blank-node labels does not.
+struct ClosureHasher<'a> {
+    store: &'a TripleStore,
+    graph: NamedNodeRef<'a>,
+    memo: HashMap<String, u64>,
+    open: HashSet<String>,
+}
+
+impl ClosureHasher<'_> {
+    fn term(&mut self, t: &Term) -> u64 {
+        match t {
+            Term::BlankNode(b) => self.blank(b.as_str()),
+            other => hash_of(&other.to_string()),
+        }
+    }
+
+    /// The pairs of `label` summed (wrapping), so the result is independent
+    /// of quad order. A cycle back into a node being hashed contributes a
+    /// constant.
+    fn blank(&mut self, label: &str) -> u64 {
+        if let Some(h) = self.memo.get(label) {
+            return *h;
+        }
+        if !self.open.insert(label.to_string()) {
+            return hash_of("ots:blank-node-cycle");
+        }
+        let node = oxigraph::model::BlankNode::new_unchecked(label);
+        let quads: Vec<Quad> = self
+            .store
+            .store()
+            .quads_for_pattern(
+                Some(node.as_ref().into()),
+                None,
+                None,
+                Some(GraphNameRef::NamedNode(self.graph)),
+            )
+            .flatten()
+            .collect();
+        let mut h = hash_of("ots:blank-node");
+        for q in &quads {
+            let o = self.term(&q.object);
+            h = h.wrapping_add(hash_pair(q.predicate.as_str(), o));
+        }
+        self.open.remove(label);
+        self.memo.insert(label.to_string(), h);
+        h
+    }
+}
+
+/// Index the IRI-subject entities of `graph`: each entity's hash covers its
+/// direct triples and, through [`ClosureHasher`], the blank nodes they reach
+/// — the same description [`describe_entity`] publishes.
 pub fn subject_index(store: &TripleStore, graph: &str) -> SubjectIndex {
     let mut idx: SubjectIndex = HashMap::new();
     let Ok(g) = NamedNodeRef::new(graph) else {
         return idx;
+    };
+    let mut hasher = ClosureHasher {
+        store,
+        graph: g,
+        memo: HashMap::new(),
+        open: HashSet::new(),
     };
     for q in store
         .store()
@@ -49,9 +112,9 @@ pub fn subject_index(store: &TripleStore, graph: &str) -> SubjectIndex {
         .flatten()
     {
         if let NamedOrBlankNode::NamedNode(s) = &q.subject {
-            let h = hash_pair(q.predicate.as_str(), &q.object.to_string());
+            let h = hash_pair(q.predicate.as_str(), hasher.term(&q.object));
             let e = idx.entry(s.as_str().to_string()).or_insert(0);
-            *e = e.wrapping_add(h).rotate_left(1);
+            *e = e.wrapping_add(h);
         }
     }
     idx

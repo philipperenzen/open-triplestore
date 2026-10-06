@@ -58,6 +58,7 @@
 //!   is required in the Docker runtime image.
 
 pub mod dataset;
+pub mod dataset_table;
 pub mod routes;
 
 use std::collections::{HashMap, HashSet};

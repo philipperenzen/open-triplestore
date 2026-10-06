@@ -1,0 +1,47 @@
+{
+  "@context": "http://www.w3.org/ns/shex.jsonld",
+  "type": "Schema",
+  "shapes": [
+    { "type": "ShapeDecl",
+    "id": "http://a.example/vc1",
+    "shapeExpr": {
+      "type": "NodeConstraint",
+      "nodeKind": "literal",
+      "minlength": 4
+    } },
+    { "type": "ShapeDecl",
+    "id": "http://a.example/vc2",
+    "shapeExpr": {
+      "type": "NodeConstraint",
+      "nodeKind": "literal",
+      "maxlength": 5
+    } },
+    { "type": "ShapeDecl",
+    "id": "http://a.example/vc3",
+    "shapeExpr": {
+      "type": "NodeConstraint",
+      "nodeKind": "literal",
+      "pattern": "^(ab)+$"
+    } },
+    { "type": "ShapeDecl",
+    "id": "http://a.example/vc4",
+    "shapeExpr": {
+      "type": "ShapeAnd",
+      "shapeExprs": [
+        "http://a.example/vc1",
+        "http://a.example/vc2",
+        "http://a.example/vc3"
+      ]
+    } },
+    { "type": "ShapeDecl",
+    "id": "http://a.example/S1",
+    "shapeExpr": {
+      "type": "Shape",
+      "expression": {
+        "type": "TripleConstraint",
+        "predicate": "http://a.example/p1",
+        "valueExpr": "http://a.example/vc4"
+      }
+    } }
+  ]
+}

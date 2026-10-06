@@ -4,13 +4,20 @@
 //! `OTS_TEST_POSTGRES_DB` (postgres) complete the address. The account is
 //! expected to own the database: the test creates its own schema.
 //!
+//! The TLS test runs when `OTS_TEST_POSTGRES_TLS_CA` names, on the server,
+//! the CA that signed the server's certificate; `scripts/live-sources-tls.sh`
+//! sets one up in a container.
+//!
 //! ```bash
 //! docker run -d --rm --name ots-pg -e POSTGRES_PASSWORD=pw -p 5499:5432 postgres:16
+//! scripts/live-sources-tls.sh ots-pg - - -
 //! OTS_TEST_POSTGRES_HOST=127.0.0.1 OTS_TEST_POSTGRES_PORT=5499 OTS_TEST_POSTGRES_PASSWORD=pw \
+//!   OTS_TEST_POSTGRES_TLS_CA=/var/lib/postgresql/ots-tls/ca.pem \
 //!   cargo test -p ots-plugin-postgres --test live
 //! ```
 
 use std::collections::BTreeMap;
+use std::sync::{Mutex, MutexGuard};
 
 use ots_plugin_api::sources::{
     ConnectParams, SecretString, SourceConnector, SourceError, TableKind, ValueKind,
@@ -78,15 +85,47 @@ fn params(t: &Target, timeout_ms: u64, schema: &str) -> ConnectParams {
     }
 }
 
-/// A schema of its own, so a shared server can host several runs.
-fn fixture(t: &Target) -> String {
-    let schema = format!("ots_live_{}", std::process::id());
+/// The tests share one fixture schema, so they take turns.
+fn turn() -> MutexGuard<'static, ()> {
+    static TURN: Mutex<()> = Mutex::new(());
+    TURN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The administrator's connection, in cleartext.
+fn admin(t: &Target) -> postgres::Client {
     let mut admin = postgres::Config::new();
     admin.host(&t.host).port(t.port).user(&t.user).dbname(&t.db);
     if let Some(p) = &t.password {
         admin.password(p);
     }
-    let mut client = patiently(|| admin.connect(postgres::NoTls));
+    patiently(|| admin.connect(postgres::NoTls))
+}
+
+/// The CA that signed the server's certificate, read back over the
+/// administrator's connection from where `OTS_TEST_POSTGRES_TLS_CA` says it
+/// lies on the server, and written to a local file for `sslrootcert`.
+fn tls_ca(t: &Target) -> Option<String> {
+    let Ok(on_server) = std::env::var("OTS_TEST_POSTGRES_TLS_CA") else {
+        assert!(
+            std::env::var_os("OTS_TEST_LIVE_REQUIRED").is_none(),
+            "OTS_TEST_LIVE_REQUIRED is set but OTS_TEST_POSTGRES_TLS_CA is not"
+        );
+        return None;
+    };
+    let pem: String = admin(t)
+        .query_one("SELECT pg_read_file($1)", &[&on_server])
+        .unwrap_or_else(|e| panic!("reading {on_server} on the server: {e}"))
+        .get(0);
+    let local =
+        std::env::temp_dir().join(format!("ots-live-postgres-ca-{}.pem", std::process::id()));
+    std::fs::write(&local, pem).expect("write the CA");
+    Some(local.display().to_string())
+}
+
+/// A schema of its own, so a shared server can host several runs.
+fn fixture(t: &Target) -> String {
+    let schema = format!("ots_live_{}", std::process::id());
+    let mut client = admin(t);
     client
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}; \
@@ -121,6 +160,7 @@ fn fixture(t: &Target) -> String {
 
 #[test]
 fn a_real_server_is_introspected_profiled_and_streamed_read_only() {
+    let _turn = turn();
     let Some(t) = target() else {
         eprintln!("OTS_TEST_POSTGRES_HOST unset; skipping the live test");
         return;
@@ -303,4 +343,55 @@ fn a_real_server_is_introspected_profiled_and_streamed_read_only() {
         Err(SourceError::Connect(m)) => assert!(!m.contains("definitely-not"), "{m}"),
         other => panic!("expected a connection error, got {:?}", other.map(|_| ())),
     }
+}
+
+#[test]
+fn tls_trusts_the_named_ca_and_nothing_less() {
+    let _turn = turn();
+    let Some(t) = target() else {
+        eprintln!("OTS_TEST_POSTGRES_HOST unset; skipping the TLS test");
+        return;
+    };
+    let Some(ca) = tls_ca(&t) else {
+        eprintln!("OTS_TEST_POSTGRES_TLS_CA unset; skipping the TLS test");
+        return;
+    };
+    let schema = fixture(&t);
+    let mut p = params(&t, 5_000, &schema);
+    p.tls = true;
+
+    // The platform roots do not know the private CA: the handshake fails,
+    // and the connector does not fall back to cleartext.
+    match PostgresConnector.connect(&p) {
+        Err(SourceError::Connect(m)) => assert!(m.contains("UnknownIssuer"), "{m}"),
+        other => panic!(
+            "an unknown issuer must be refused, got {:?}",
+            other.map(|_| ())
+        ),
+    }
+
+    p.options.insert("sslrootcert".to_string(), ca);
+    let mut conn = PostgresConnector.connect(&p).expect("connect over TLS");
+    let mut session = Vec::new();
+    conn.stream(
+        "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+        1,
+        &mut |b| {
+            session.extend(b);
+            Ok(())
+        },
+    )
+    .expect("the session's TLS state");
+    assert_eq!(
+        session[0]["ssl"].lexical, "true",
+        "the session is encrypted"
+    );
+    assert_eq!(
+        conn.table_names().unwrap(),
+        vec!["child", "child_v", "parent"]
+    );
+    let rows = conn
+        .stream("SELECT * FROM child", 10, &mut |_| Ok(()))
+        .expect("stream over TLS");
+    assert_eq!(rows, 4);
 }

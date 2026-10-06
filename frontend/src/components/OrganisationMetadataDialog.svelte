@@ -1,7 +1,7 @@
 <script>
+  import { tHtml } from '../lib/i18n/html';
   import { createEventDispatcher, tick } from 'svelte';
   import { t } from 'svelte-i18n';
-  import { sanitizeHtml } from '../lib/ontology/sanitizeHtml.js';
   import { Check, X as XIcon, Loader2, Info, Image as ImageIcon, ImagePlus, Trash2, AlertTriangle } from 'lucide-svelte';
   import Select from './Select.svelte';
   import BannerPicker from './BannerPicker.svelte';
@@ -310,8 +310,8 @@
           {:else}
             <div class="danger-confirm">
               <p class="danger-warn">
-                <!-- eslint-disable-next-line svelte/no-at-html-tags -- DOMPurify-sanitized -->
-                {@html sanitizeHtml($t('components.organisationMetadataDialog.deleteConfirmWarn', { values: { name: `<strong>${deleteName}</strong>` } }))}
+                <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+                {@html $tHtml('components.organisationMetadataDialog.deleteConfirmWarn', { values: { name: deleteName } })}
               </p>
               <input
                 class="danger-input"

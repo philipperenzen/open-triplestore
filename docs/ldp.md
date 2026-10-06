@@ -173,7 +173,7 @@ curl -X PATCH http://localhost:7878/ldp/my-resource \
       WHERE {}'
 ```
 
-The update is confined to the resource: it may be `INSERT DATA`, `DELETE DATA` or `DELETE/INSERT … WHERE` on the default graph (no `GRAPH`, `LOAD`, `CLEAR`, `CREATE`, `DROP`, `SERVICE`, `WITH`, `USING`), it is evaluated against the resource's own triples only (the `WHERE` clause sees nothing else in the store), and the result may not describe another resource under `/ldp/` or touch a server-managed triple (`ldp:*`, `rdf:type ldp:*`). Anything else is refused with `403` and nothing changes; a syntax error is a `400`. Triples about subjects outside `/ldp/` are allowed, as they are in a `PUT` body. Triples whose object is a blank node are not visible to a `PATCH` and cannot be removed by one; replace the resource with `PUT` instead. A relative `<>` in the body is the resource.
+The update is confined to the resource: it may be `INSERT DATA`, `DELETE DATA` or `DELETE/INSERT … WHERE` on the default graph (no `GRAPH`, `LOAD`, `CLEAR`, `CREATE`, `DROP`, `SERVICE`, `WITH`, `USING`, nor a `GRAPH` or `SERVICE` inside an `EXISTS`), it is evaluated against the resource's own triples only (the `WHERE` clause sees nothing else in the store), and the result may not describe another resource under `/ldp/` or touch a server-managed triple (`ldp:*`, `rdf:type ldp:*`). Anything else is refused with `403` and nothing changes; a syntax error is a `400`. Triples about subjects outside `/ldp/` are allowed, as they are in a `PUT` body. Triples whose object is a blank node are not visible to a `PATCH` and cannot be removed by one; replace the resource with `PUT` instead. A relative `<>` in the body is the resource.
 
 ---
 

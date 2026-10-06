@@ -238,7 +238,11 @@ pub fn tick(state: &AppState) -> usize {
             tracing::warn!("statement provenance: graph of {ds} not registered: {e}");
             continue;
         }
-        match state.store.apply_delta(&quads, &[], false) {
+        // Chunked: an annotation set can be large, and re-applying one is a
+        // no-op (the reifiers are named), so a retry completes a part-write.
+        let ops: Vec<crate::store::QuadOp> =
+            quads.into_iter().map(crate::store::QuadOp::Add).collect();
+        match state.store.apply_quad_ops_chunked(&ops) {
             Ok((inserted, _)) => written += inserted.len(),
             Err(e) => {
                 tracing::warn!("statement provenance for {ds} not written: {e}");

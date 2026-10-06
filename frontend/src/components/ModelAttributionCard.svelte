@@ -5,6 +5,7 @@
   // bundled file's own notice header lives on in this record; this component is
   // where the model pages show it. `variant='full'` is the entry's card;
   // `variant='compact'` is the one-line credit under a version.
+  import { withBase } from '../lib/basePath';
   import { t } from 'svelte-i18n';
   import { Scale } from 'lucide-svelte';
   import type { ModelAttribution } from '../lib/api';
@@ -38,7 +39,9 @@
   const noticeHref = $derived(
     attribution?.notice_url?.endsWith('/vocab/NOTICE.md')
       ? `${uiBase()}vocab/NOTICE.md`
-      : attribution?.notice_url || `${uiBase()}vocab/NOTICE.md`,
+      : attribution?.notice_url
+        ? withBase(attribution.notice_url)
+        : `${uiBase()}vocab/NOTICE.md`,
   );
 </script>
 

@@ -1,4 +1,7 @@
 <script>
+  import { withBase, absoluteUrl } from '../lib/basePath';
+  import { askText } from '../lib/confirm';
+  import { toastError } from '../lib/toast';
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
   import { navigate } from '../lib/router/index.js';
@@ -122,7 +125,7 @@
       editingNotes = '';
       await load();
     } catch (e) {
-      alert(e.message);
+      toastError(e.message);
     }
     notesSaving = false;
   }
@@ -169,29 +172,65 @@
   }
 
   let deleteVersionTarget = null;
+  // A delete the server refused with 409: { version, published, forceAllowed,
+  // dependents: { datasets, hidden, count } | null }. A published version can
+  // be deleted anyway (force); dependent datasets have to be re-pinned first.
+  let deleteBlocked = null;
 
-  async function doDeleteVersion() {
-    const ver = deleteVersionTarget;
+  function blockedFrom(ver, body) {
+    const reasons = Array.isArray(body?.reasons) ? body.reasons : [];
+    const deps = reasons.find((r) => r.code === 'dependents');
+    return {
+      version: ver,
+      published: reasons.some((r) => r.code === 'published'),
+      forceAllowed: !!body?.force_allowed,
+      dependents: deps
+        ? {
+            datasets: deps.datasets || [],
+            hidden: deps.hidden_datasets || 0,
+            count: (deps.datasets || []).length + (deps.hidden_datasets || 0),
+          }
+        : null,
+    };
+  }
+
+  async function doDeleteVersion(ver = deleteVersionTarget, force = false) {
     deleteVersionTarget = null;
+    deleteBlocked = null;
     deleteLoading = ver;
     try {
-      await deleteDataModelVersion(id, ver);
+      await deleteDataModelVersion(id, ver, force);
       await load();
     } catch (e) {
-      alert(e.message);
+      if (e.status === 409 && e.body?.reasons) {
+        deleteBlocked = blockedFrom(ver, e.body);
+      } else {
+        toastError(e.message);
+      }
     }
     deleteLoading = '';
   }
 
+  function dependentReason(d) {
+    if (d.reason === 'pinned') return $t('pages.modelDetail.deleteVersionReasonPinned');
+    if (d.reason === 'floating') return $t('pages.modelDetail.deleteVersionReasonFloating');
+    return $t('pages.modelDetail.deleteVersionReasonDatasetVersion', { values: { version: d.dataset_version } });
+  }
+
   async function handleCreateDraft(fromVer) {
-    const targetVer = prompt($t('pages.modelDetail.createDraftPrompt', { values: { version: fromVer } }));
+    const targetVer = await askText({
+      title: $t('pages.modelDetail.newDraft'),
+      message: $t('pages.modelDetail.createDraftPrompt', { values: { version: fromVer } }),
+      label: $t('pages.modelDetail.versionFieldLabel'),
+      confirmLabel: $t('system.create'),
+    });
     if (!targetVer) return;
     draftLoading = fromVer;
     try {
       await createDataModelDraft(id, fromVer, targetVer.trim());
       await load();
     } catch (e) {
-      alert(e.message);
+      toastError(e.message);
     }
     draftLoading = '';
   }
@@ -202,7 +241,7 @@
       await stageDataModelVersion(id, ver);
       await load();
     } catch (e) {
-      alert(e.message);
+      toastError(e.message);
     }
     stageLoading = '';
   }
@@ -218,7 +257,7 @@
   }
 
   function diffUrl(from, to) {
-    return `/models/${id}/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+    return withBase(`/models/${id}/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
   }
 
   function statusBadge(status) {
@@ -244,7 +283,7 @@
       await subgraphActionDataModel(id, ver, action, graph);
       await load();
     } catch (e) {
-      alert(e.message);
+      toastError(e.message);
     }
     subgraphLoading = '';
   }
@@ -351,7 +390,7 @@
         <span class="api-method">GET</span>
         <code class="api-url">/api/models/{id}/versions</code>
         <button class="btn btn-xs btn-ghost copy-btn" title={$t('system.copy')}
-          on:click={() => copyApiUrl('versions', `${window.location.origin}/api/models/${id}/versions`)}>
+          on:click={() => copyApiUrl('versions', absoluteUrl(`/api/models/${id}/versions`))}>
           {#if copiedApi === 'versions'}<CheckCheck size={12} />{:else}<Copy size={12} />{/if}
         </button>
         <span class="api-note">{$t('pages.modelDetail.listAllVersions')}</span>
@@ -360,7 +399,7 @@
         <span class="api-method">GET</span>
         <code class="api-url">/api/models/{id}/latest/data</code>
         <button class="btn btn-xs btn-ghost copy-btn" title={$t('system.copy')}
-          on:click={() => copyApiUrl('latest', `${window.location.origin}/api/models/${id}/latest/data`)}>
+          on:click={() => copyApiUrl('latest', absoluteUrl(`/api/models/${id}/latest/data`))}>
           {#if copiedApi === 'latest'}<CheckCheck size={12} />{:else}<Copy size={12} />{/if}
         </button>
         <span class="api-note">{$t('pages.modelDetail.latestPublishedData')} (<code>Accept</code>)</span>
@@ -391,7 +430,7 @@
         </div>
         <div class="ownership-body">
           {#if model.owner_type === 'organisation' && ownerOrg}
-            <a href="/organisations/{model.owner_id}" class="ownership-name">{ownerOrg.name}</a>
+            <a href={withBase(`/organisations/${model.owner_id}`)} class="ownership-name">{ownerOrg.name}</a>
             {#if ownerOrg.description}
               <p class="ownership-desc">{ownerOrg.description}</p>
             {/if}
@@ -425,7 +464,7 @@
         <div class="ownership-body">
           <div class="members-list">
             {#each dependents.datasets as d}
-              <a class="member-chip" href="/datasets/{d.dataset_id}"
+              <a class="member-chip" href={withBase(`/datasets/${d.dataset_id}`)}
                  title={d.update_available ? $t('pages.modelDetail.dependentBehind', { values: { latest: dependents.latest_published } }) : $t('pages.modelDetail.dependentCurrent')}>
                 {d.name} · v{d.effective_version || '—'}
                 {#if d.update_available}<span class="dep-behind">⬆ {dependents.latest_published}</span>{:else}<span class="dep-ok">✓</span>{/if}
@@ -533,7 +572,7 @@
                   <button
                     class="ver-btn"
                     title={$t('pages.modelDetail.copyEndpointUrl')}
-                    on:click={() => copyApiUrl(`ver-${ver.version}`, `${window.location.origin}/api/models/${id}/versions/${ver.version}/data`)}
+                    on:click={() => copyApiUrl(`ver-${ver.version}`, absoluteUrl(`/api/models/${id}/versions/${ver.version}/data`))}
                   >
                     {#if copiedApi === `ver-${ver.version}`}
                       <CheckCheck size={13} class="text-green-600" /> {$t('system.copied')}
@@ -603,8 +642,8 @@
                     </button>
                   {/if}
 
-                  <!-- Delete -->
-                  {#if $isAdmin}
+                  <!-- Delete (the server allows admins and publishers who may write the entry) -->
+                  {#if $isAdmin || isPublisher}
                     <button
                       class="ver-btn ver-btn-danger"
                       title={$t('pages.modelDetail.deleteVersion')}
@@ -733,12 +772,43 @@
     title={$t('pages.modelDetail.deleteVersionConfirmTitle', { values: { version: deleteVersionTarget } })}
     message={$t('pages.modelDetail.deleteVersionConfirmMessage')}
     confirmLabel={$t('pages.modelDetail.deleteVersion')}
-    on:confirm={doDeleteVersion}
+    on:confirm={() => doDeleteVersion()}
     on:cancel={() => deleteVersionTarget = null}
   />
 {/if}
 
+{#if deleteBlocked}
+  <ConfirmModal
+    title={$t('pages.modelDetail.deleteVersionBlockedTitle', { values: { version: deleteBlocked.version } })}
+    confirmVariant="warning"
+    confirmLabel={deleteBlocked.forceAllowed ? $t('pages.modelDetail.deleteVersionForce') : $t('pages.modelDetail.deleteVersionClose')}
+    on:confirm={() => deleteBlocked.forceAllowed ? doDeleteVersion(deleteBlocked.version, true) : (deleteBlocked = null)}
+    on:cancel={() => deleteBlocked = null}
+  >
+    <div class="delete-blocked" data-testid="delete-version-blocked">
+      {#if deleteBlocked.published}
+        <p>{$t('pages.modelDetail.deleteVersionPublished')}</p>
+      {/if}
+      {#if deleteBlocked.dependents}
+        <p>{$t('pages.modelDetail.deleteVersionDependents', { values: { count: deleteBlocked.dependents.count } })}</p>
+        <ul>
+          {#each deleteBlocked.dependents.datasets as d}
+            <li><a href={withBase(`/datasets/${d.dataset_id}`)}>{d.name || d.dataset_id}</a> — {dependentReason(d)}</li>
+          {/each}
+          {#if deleteBlocked.dependents.hidden > 0}
+            <li>{$t('pages.modelDetail.deleteVersionHidden', { values: { count: deleteBlocked.dependents.hidden } })}</li>
+          {/if}
+        </ul>
+      {/if}
+    </div>
+  </ConfirmModal>
+{/if}
+
 <style>
+  .delete-blocked { width: 100%; text-align: left; font-size: 0.875rem; color: var(--ink-600, #475569); }
+  .delete-blocked p { margin: 0.25rem 0; line-height: 1.5; }
+  .delete-blocked ul { margin: 0.25rem 0 0; padding-left: 1.25rem; }
+  .delete-blocked li { margin: 0.125rem 0; }
   .btn { display: inline-flex; align-items: center; gap: 0.375rem; padding: 0.5rem 1rem; border-radius: 0.75rem; font-size: 0.875rem; font-weight: 500; cursor: pointer; border: none; transition: all 0.15s; text-decoration: none; }
   .btn-primary { background: var(--brand-500, #6366f1); color: white; }
   .btn-primary:hover { background: var(--brand-600, #4f46e5); }

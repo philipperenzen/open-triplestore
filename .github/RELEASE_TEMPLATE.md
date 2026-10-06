@@ -1,53 +1,37 @@
 <!--
 Release-notes template for Open Triplestore.
 
-The release automation (.github/workflows/release.yml) normally builds the GitHub
-Release body from the matching `## [X.Y.Z]` section of CHANGELOG.md. Use this
-template as the shape for that changelog section and for any hand-written notes, so
-every release carries the same headings — including `## Deprecated` and
-`## Security`, which are always present (write "- None." when empty).
+A GitHub Release body is the matching `## [X.Y.Z]` section of CHANGELOG.md,
+copied by .github/workflows/release.yml (a section over 120,000 characters
+becomes a digest: each entry's bold title under its group, with `### Security`
+and `### Deprecated` kept whole). So this is the shape of a changelog section:
+the version heading is H2 and the groups are H3, in the order Added, Changed,
+Deprecated, Removed, Fixed, Security. `### Deprecated` and `### Security` are
+always present — write "None." when there is nothing to report. The Prepare
+release workflow adds either one a section lacks, and release.yml warns when a
+published section has none. See docs/release-process.md.
 -->
 
-# Open Triplestore vX.Y.Z
+## [X.Y.Z] — YYYY-MM-DD
 
-One-line summary of what this release is about.
+One paragraph on what this release is about, and what to read before upgrading.
 
-## Added
+### Added
+- **Short title.** What it does and why it matters.
 
-- ...
+### Changed
+- **Short title.** What behaves differently, and who has to act.
 
-## Changed
+### Deprecated
+None.
 
-- ...
+### Removed
+- **Short title.** What is gone and what replaces it.
 
-## Removed
+### Fixed
+- **Short title.** What was wrong and what happens now.
 
-- ...
-
-## Fixed
-
-- ...
-
-## Deprecated
-
-- None.
-
-## Security
-
-- None.
-<!-- When there is a security-relevant change, replace "- None." above, e.g.:
-- Fixes CVE-YYYY-NNNNN (high): short summary of the issue and impact. Affected: <=0.2.0. -->
-
-## Supported versions
-
-See [SECURITY.md](../SECURITY.md) for the supported-version table, lifecycle legend,
-and how to report a vulnerability.
-
-## Artifacts
-
-Container image on GHCR (the `v` prefix is dropped from image tags):
-
-```bash
-docker pull ghcr.io/philipperenzen/open-triplestore:X.Y.Z
-# also tagged: ghcr.io/philipperenzen/open-triplestore:{X.Y, latest}
-```
+### Security
+None.
+<!-- When there is a security-relevant change, replace "None." above, e.g.:
+- **Fixes CVE-YYYY-NNNNN (high).** Short summary of the issue and impact. Affected: <=0.2.0. -->

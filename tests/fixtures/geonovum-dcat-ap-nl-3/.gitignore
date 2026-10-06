@@ -1,0 +1,3 @@
+# fetched shapes (run ./fetch.sh); never committed — see README.md
+*.ttl
+*.part

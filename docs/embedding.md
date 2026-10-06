@@ -121,7 +121,9 @@ standard SPARQL JSON — feed it to any charting/table library:
 </script>
 ```
 
-Per-dataset scoped endpoint: `POST {BASE}/api/datasets/{dataset}/sparql`.
+Per-dataset scoped endpoint: `POST {BASE}/api/datasets/{dataset}/services/{service}/sparql`,
+where `{service}` is the slug of a SPARQL service defined on the dataset (it
+answers `GET ?query=` too). A dataset has no `/sparql` of its own.
 Saved queries can also be published as parameterised GET APIs — see *API
 Services* in these docs.
 

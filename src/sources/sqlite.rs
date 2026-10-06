@@ -480,6 +480,20 @@ impl SourceConnection for SqliteConnection {
         Ok(rows)
     }
 
+    fn columns(&mut self, query: &str) -> Result<Option<Vec<String>>, SourceError> {
+        self.arm_timeout();
+        let names = match self.conn.prepare(query) {
+            Ok(stmt) => Ok(stmt
+                .column_names()
+                .into_iter()
+                .map(str::to_string)
+                .collect()),
+            Err(e) => Err(self.query_error(e)),
+        };
+        self.disarm();
+        names.map(Some)
+    }
+
     fn stream(
         &mut self,
         query: &str,

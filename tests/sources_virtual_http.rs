@@ -12,6 +12,7 @@
 
 mod common;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -22,6 +23,7 @@ use axum::routing::post;
 use axum::Router;
 use base64::Engine as _;
 use common::*;
+use open_triplestore::auth::models::{OwnerType, ResourceRole, SystemRole, Visibility};
 use open_triplestore::store::TripleStore;
 use oxigraph::io::RdfFormat;
 use oxigraph::sparql::results::{QueryResultsFormat, QueryResultsSerializer};
@@ -35,7 +37,13 @@ const REMOTE_PASSWORD: &str = "vkg-reader-pa55";
 struct Mock {
     store: TripleStore,
     basic: String,
+    /// Requests that carried the source's account.
+    authorised_hits: AtomicUsize,
 }
+
+/// `OTS_REMOTE_ALLOWLIST` is process-wide and each test's mock listens on its
+/// own port: the tests that set it take turns.
+static ALLOWLIST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The endpoint: the query's own result form, behind Basic auth.
 async fn sparql(State(mock): State<Arc<Mock>>, headers: HeaderMap, body: String) -> Response {
@@ -46,6 +54,7 @@ async fn sparql(State(mock): State<Arc<Mock>>, headers: HeaderMap, body: String)
     if !authorised {
         return (StatusCode::UNAUTHORIZED, "who are you").into_response();
     }
+    mock.authorised_hits.fetch_add(1, Ordering::SeqCst);
     match mock.store.query(&body) {
         Ok(QueryResults::Graph(triples)) => {
             let mut out = Vec::new();
@@ -94,8 +103,8 @@ async fn sparql(State(mock): State<Arc<Mock>>, headers: HeaderMap, body: String)
     }
 }
 
-/// Start the mock on a free port and return its port.
-async fn start_mock() -> u16 {
+/// Start the mock on a free port and return its port and its state.
+async fn start_mock() -> (u16, Arc<Mock>) {
     let store = TripleStore::in_memory().unwrap();
     store
         .load_str(
@@ -115,15 +124,20 @@ async fn start_mock() -> u16 {
         "Basic {}",
         base64::engine::general_purpose::STANDARD.encode(format!("reader:{REMOTE_PASSWORD}"))
     );
+    let mock = Arc::new(Mock {
+        store,
+        basic,
+        authorised_hits: AtomicUsize::new(0),
+    });
     let app = Router::new()
         .route("/sparql", post(sparql))
-        .with_state(Arc::new(Mock { store, basic }));
+        .with_state(mock.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    port
+    (port, mock)
 }
 
 async fn req(
@@ -171,21 +185,20 @@ async fn local_sparql(app: &Router, token: &str, query: &str) -> (StatusCode, Va
 }
 
 /// A local query whose SERVICE may fail mid-stream: `None` when the store
-/// refused it, in the status or in the body.
-async fn local_sparql_lenient(app: &Router, token: &str, query: &str) -> Option<Value> {
+/// refused it, in the status or in the body. No token is an anonymous call.
+async fn local_sparql_lenient(app: &Router, token: Option<&str>, query: &str) -> Option<Value> {
     use http_body_util::BodyExt as _;
+    let mut b = Request::builder()
+        .method(Method::POST)
+        .uri("/sparql")
+        .header(header::CONTENT_TYPE, "application/sparql-query")
+        .header(header::ACCEPT, "application/sparql-results+json");
+    if let Some(token) = token {
+        b = b.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/sparql")
-                .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                .header(header::CONTENT_TYPE, "application/sparql-query")
-                .header(header::ACCEPT, "application/sparql-results+json")
-                .body(Body::from(query.to_string()))
-                .unwrap(),
-        )
+        .oneshot(b.body(Body::from(query.to_string())).unwrap())
         .await
         .unwrap();
     if !resp.status().is_success() {
@@ -193,6 +206,25 @@ async fn local_sparql_lenient(app: &Router, token: &str, query: &str) -> Option<
     }
     let bytes = resp.into_body().collect().await.ok()?.to_bytes();
     serde_json::from_slice(&bytes).ok()
+}
+
+/// The `?name` values a SERVICE query answered, `None` when it was refused
+/// (or answered nothing, which these tests treat the same way).
+async fn service_names(app: &Router, token: Option<&str>, source: &str) -> Option<Vec<String>> {
+    let rows = local_sparql_lenient(
+        app,
+        token,
+        &format!(
+            "SELECT ?name WHERE {{ SERVICE <urn:source:{source}> {{ ?s a <{EX}Product> ; <{EX}name> ?name }} }} ORDER BY ?name"
+        ),
+    )
+    .await?;
+    let names: Vec<String> = rows["results"]["bindings"]
+        .as_array()?
+        .iter()
+        .filter_map(|b| b["name"]["value"].as_str().map(str::to_string))
+        .collect();
+    (!names.is_empty()).then_some(names)
 }
 
 fn query_mapping() -> String {
@@ -232,7 +264,8 @@ out:CategoriesMap a rr:TriplesMap ;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_sparql_endpoint_is_a_datasource_a_snapshot_and_a_service() {
-    let port = start_mock().await;
+    let _env = ALLOWLIST.lock().await;
+    let (port, _) = start_mock().await;
     let origin = format!("http://127.0.0.1:{port}");
     std::env::set_var("OTS_REMOTE_ALLOWLIST", &origin);
     std::env::set_var("OTS_VKG_TEST_PASSWORD", REMOTE_PASSWORD);
@@ -485,7 +518,7 @@ async fn a_sparql_endpoint_is_a_datasource_a_snapshot_and_a_service() {
     // unknown endpoint would be.
     let none = local_sparql_lenient(
         &app,
-        &admin,
+        Some(&admin),
         "SELECT ?x WHERE { SERVICE <urn:source:nope> { ?x ?p ?o } }",
     )
     .await;
@@ -533,7 +566,7 @@ async fn a_sparql_endpoint_is_a_datasource_a_snapshot_and_a_service() {
     assert_eq!(st, StatusCode::NO_CONTENT, "{txt}");
     let gone = local_sparql_lenient(
         &app,
-        &admin,
+        Some(&admin),
         &format!("SELECT ?name WHERE {{ SERVICE <urn:source:vkg> {{ ?s <{EX}name> ?name }} }}"),
     )
     .await;
@@ -543,4 +576,127 @@ async fn a_sparql_endpoint_is_a_datasource_a_snapshot_and_a_service() {
             .is_none_or(|b| b.is_empty())),
         "{gone:?}"
     );
+}
+
+/// Register `id` as a virtual source over the mock, bound to `dataset`.
+async fn register_source(app: &Router, admin: &str, id: &str, port: u16, dataset: &str) {
+    let (st, _, txt) = req(
+        app,
+        Method::POST,
+        "/api/sources",
+        admin,
+        json!({
+            "id": id, "dialect": "sparql", "host": "127.0.0.1", "port": port,
+            "database": "/sparql", "username": "reader",
+            "credential": "env:OTS_VKG_TEST_PASSWORD", "statementTimeoutMs": 5000,
+            "dataset": dataset,
+        }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+}
+
+fn make_user(state: &open_triplestore::server::AppState, id: &str) -> String {
+    state
+        .auth_db
+        .create_user(id, id, &format!("{id}@test.com"), "hash", SystemRole::User)
+        .unwrap();
+    mint_token(id, id, "user")
+}
+
+/// `SERVICE <urn:source:id>` sends the source's stored account, so it is the
+/// source's to share: an administrator, the source's owner and whoever holds
+/// a role on the dataset the source is bound to may use it. A signed-in
+/// caller without one, and an anonymous caller, find the source as if it
+/// were not registered, and the endpoint never sees the account on their
+/// behalf.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_source_credential_serves_only_callers_the_source_is_shared_with() {
+    let _env = ALLOWLIST.lock().await;
+    let (port, mock) = start_mock().await;
+    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("http://127.0.0.1:{port}"));
+    std::env::set_var("OTS_VKG_TEST_PASSWORD", REMOTE_PASSWORD);
+    let (state, admin) = admin_state();
+    let owner = make_user(&state, "ds-owner");
+    let viewer = make_user(&state, "ds-viewer");
+    let stranger = make_user(&state, "stranger");
+    state
+        .auth_db
+        .create_dataset(
+            "vkg-ds",
+            "Products",
+            None,
+            OwnerType::User,
+            "ds-owner",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    state
+        .auth_db
+        .set_resource_grant(
+            "dataset",
+            "vkg-ds",
+            "user",
+            "ds-viewer",
+            ResourceRole::Viewer,
+            "adm",
+        )
+        .unwrap();
+    let app = test_app(state);
+    register_source(&app, &admin, "vkg", port, "vkg-ds").await;
+    let all = Some(vec![
+        "Bolt".to_string(),
+        "Nut".to_string(),
+        "Washer".to_string(),
+    ]);
+
+    // The administrator, the dataset's owner and a viewer of the dataset.
+    assert_eq!(service_names(&app, Some(&admin), "vkg").await, all);
+    assert_eq!(service_names(&app, Some(&owner), "vkg").await, all);
+    assert_eq!(service_names(&app, Some(&viewer), "vkg").await, all);
+
+    // Nobody else: the account never leaves the store for them.
+    let hits = mock.authorised_hits.load(Ordering::SeqCst);
+    assert_eq!(service_names(&app, Some(&stranger), "vkg").await, None);
+    assert_eq!(service_names(&app, None, "vkg").await, None);
+    assert_eq!(
+        mock.authorised_hits.load(Ordering::SeqCst),
+        hits,
+        "a refused caller must not reach the endpoint with the source's account"
+    );
+}
+
+/// A public dataset lets anyone read its graphs, but reading is not using the
+/// source's account: the live endpoint can hold more than the mapped graphs.
+/// Public visibility alone does not open `SERVICE <urn:source:id>`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_public_dataset_does_not_share_its_source_credential() {
+    let _env = ALLOWLIST.lock().await;
+    let (port, mock) = start_mock().await;
+    std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("http://127.0.0.1:{port}"));
+    std::env::set_var("OTS_VKG_TEST_PASSWORD", REMOTE_PASSWORD);
+    let (state, admin) = admin_state();
+    make_user(&state, "pub-owner");
+    let stranger = make_user(&state, "passer-by");
+    state
+        .auth_db
+        .create_dataset(
+            "pub-ds",
+            "Open products",
+            None,
+            OwnerType::User,
+            "pub-owner",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    let app = test_app(state);
+    register_source(&app, &admin, "vkg-pub", port, "pub-ds").await;
+
+    let hits = mock.authorised_hits.load(Ordering::SeqCst);
+    assert_eq!(service_names(&app, Some(&stranger), "vkg-pub").await, None);
+    assert_eq!(service_names(&app, None, "vkg-pub").await, None);
+    assert_eq!(mock.authorised_hits.load(Ordering::SeqCst), hits);
+    assert!(service_names(&app, Some(&admin), "vkg-pub").await.is_some());
 }

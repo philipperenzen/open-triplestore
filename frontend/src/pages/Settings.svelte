@@ -1,4 +1,5 @@
 <script>
+  import { toastError } from '../lib/toast';
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
   import { getMe, updateMe, changePassword, changeEmail, resendVerification, totpSetup, totpEnable, totpDisable, listPasskeys, passkeyRegisterStart, passkeyRegisterFinish, deletePasskey, listApiTokens, createApiToken, revokeApiToken, uploadUserAvatar, getUserAvatarUrl, selfDeactivate, selfPurge, logout } from '../lib/api.js';
@@ -255,7 +256,7 @@
       totpQrSvg = renderSVG(res.otpauth_url);
       totpModal = 'setup';
     } catch (e) {
-      alert(e.message);
+      toastError(e.message);
     } finally {
       totpLoading = false;
     }
@@ -396,7 +397,7 @@
       tokenExpiryDays = '';
       await loadTokens();
     } catch (e) {
-      alert(e.message);
+      toastError(e.message);
     }
     createTokenLoading = false;
   }
@@ -410,7 +411,7 @@
       await loadTokens();
     } catch (e) {
       revokeTokenId = null;
-      alert(e.message);
+      toastError(e.message);
     }
   }
 

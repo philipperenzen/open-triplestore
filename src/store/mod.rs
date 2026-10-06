@@ -1,14 +1,16 @@
 pub mod changes;
 pub mod consensus;
 pub mod engine;
+pub mod graph_snapshot;
 pub mod parallel_mirror;
 pub mod query_cache;
 pub mod recovery;
 pub mod replication;
+pub mod search_journal;
 pub mod set_hash;
 pub mod telemetry;
 
-pub use engine::{StoreError, TripleStore};
+pub use engine::{QuadOp, StoreError, TripleStore};
 
 /// Percent-encode the characters that are illegal inside a SPARQL `IRIREF`
 /// (the `<...>` form): `<>"{}|^`\` plus any control/space char (≤ 0x20).

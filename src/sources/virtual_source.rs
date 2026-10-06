@@ -25,10 +25,13 @@
 //!
 //! **Federation.** `SERVICE <urn:source:id>` in a local query resolves to
 //! the source's endpoint with its credential, so a virtual source is also
-//! queryable live, without materialising anything.
+//! queryable live, without materialising anything. The credential is the
+//! source's to share: it resolves only for a caller who may use it (see
+//! [`SourceCaller`]); for anyone else the source does not exist.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use ots_plugin_api::sources::{
     BatchSink, ColumnInfo, ConnectParams, Row, SecretString, SourceConnection, SourceConnector,
@@ -37,6 +40,7 @@ use ots_plugin_api::sources::{
 use oxigraph::io::RdfFormat;
 use serde_json::Value as Json;
 
+use crate::auth::db::AuthDb;
 use crate::remote::{self, Auth, RemoteError};
 use crate::secrets::{self, Secret, SecretRef};
 use crate::store::TripleStore;
@@ -103,12 +107,15 @@ pub fn is_virtual(source: &SqlSource) -> bool {
 
 // ───────────────────────── Federation resolution ─────────────────────────
 
-/// What `SERVICE <urn:source:id>` needs: the endpoint, and the account.
+/// What `SERVICE <urn:source:id>` needs: the endpoint, and the account —
+/// and who may have it used on their behalf.
 #[derive(Debug, Clone)]
 struct Target {
     endpoint: String,
     username: Option<String>,
     credential: Option<SecretRef>,
+    owner: Option<String>,
+    dataset: Option<String>,
 }
 
 fn targets() -> &'static RwLock<HashMap<String, Target>> {
@@ -128,6 +135,8 @@ pub fn remember(source: &SqlSource) {
                     endpoint,
                     username: source.username.clone(),
                     credential: source.credential.clone(),
+                    owner: source.owner.clone(),
+                    dataset: source.dataset.clone(),
                 },
             );
         }
@@ -151,6 +160,104 @@ pub fn load_all(store: &TripleStore) {
     }
 }
 
+/// Who a query acts for, as far as a source's account is concerned.
+///
+/// `SERVICE <urn:source:id>` sends the account the source was registered
+/// with, so using it is the source's to share: an administrator may, so may
+/// the source's owner, and so may a signed-in user who holds a role on the
+/// dataset the source is bound to (as its owner, a member or through a
+/// grant). A public dataset's visibility alone does not count: reading the
+/// graphs a mapping produced is not reading everything the account can
+/// reach. An anonymous caller never may.
+///
+/// A request handler that evaluates a caller's query sets one for the query's
+/// thread ([`SourceCallerGuard`]); evaluation without one — any path that
+/// does not say whom it acts for — resolves no source at all.
+pub struct SourceCaller {
+    pub user_id: Option<String>,
+    pub is_admin: bool,
+    pub auth_db: Arc<AuthDb>,
+}
+
+impl std::fmt::Debug for SourceCaller {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourceCaller")
+            .field("user_id", &self.user_id)
+            .field("is_admin", &self.is_admin)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SourceCaller {
+    /// The caller of an HTTP request (`None`: anonymous).
+    pub fn for_request(
+        auth_db: &Arc<AuthDb>,
+        user: Option<&crate::auth::middleware::AuthenticatedUser>,
+    ) -> Arc<Self> {
+        Arc::new(SourceCaller {
+            user_id: user.map(|u| u.user_id.clone()),
+            is_admin: user.is_some_and(|u| u.is_admin()),
+            auth_db: auth_db.clone(),
+        })
+    }
+
+    fn may_use(&self, target: &Target) -> bool {
+        if self.is_admin {
+            return true;
+        }
+        let Some(user_id) = self.user_id.as_deref() else {
+            return false;
+        };
+        // The owner is recorded as the user's id or as their actor IRI
+        // (`{base}/users/{id}`).
+        let owns = target.owner.as_deref().is_some_and(|o| {
+            o == user_id
+                || o.rsplit_once("/users/")
+                    .is_some_and(|(_, id)| id == user_id)
+        });
+        if owns {
+            return true;
+        }
+        let Some(dataset_id) = target.dataset.as_deref() else {
+            return false;
+        };
+        match self.auth_db.get_dataset(dataset_id) {
+            Ok(Some(dataset)) => self
+                .auth_db
+                .held_dataset_role(user_id, &dataset)
+                .ok()
+                .flatten()
+                .is_some(),
+            _ => false,
+        }
+    }
+}
+
+thread_local! {
+    static CALLER: RefCell<Option<Arc<SourceCaller>>> = const { RefCell::new(None) };
+}
+
+/// Sets the caller for queries evaluated on this thread until dropped.
+pub struct SourceCallerGuard(Option<Arc<SourceCaller>>);
+
+impl SourceCallerGuard {
+    pub fn set(caller: Option<Arc<SourceCaller>>) -> Self {
+        SourceCallerGuard(CALLER.with(|c| c.replace(caller)))
+    }
+}
+
+impl Drop for SourceCallerGuard {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        CALLER.with(|c| *c.borrow_mut() = previous);
+    }
+}
+
+/// The caller set on this thread, if any.
+pub fn current_caller() -> Option<Arc<SourceCaller>> {
+    CALLER.with(|c| c.borrow().clone())
+}
+
 /// A resolved `SERVICE` target: the endpoint, and Basic credentials when the
 /// source has an account — resolved now, dropped with the request.
 pub struct Resolved {
@@ -159,15 +266,24 @@ pub struct Resolved {
     pub secret: Option<Secret>,
 }
 
-/// `urn:source:<id>` → its endpoint, for a registered virtual source.
-/// Anything else is not a source IRI and resolves to nothing.
-pub fn resolve(service_iri: &str) -> Option<Result<Resolved, String>> {
+/// `urn:source:<id>` → its endpoint, for a registered virtual source that
+/// `caller` may use. Anything else is not a source IRI and resolves to
+/// nothing — and so does a source the caller may not use, or any source when
+/// no caller is known: it is refused exactly like an IRI that names no
+/// source, so a refusal does not tell a caller which sources exist.
+pub fn resolve(
+    service_iri: &str,
+    caller: Option<&SourceCaller>,
+) -> Option<Result<Resolved, String>> {
     let id = service_iri.strip_prefix("urn:source:")?;
     let target = targets()
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .get(id)
         .cloned()?;
+    if !caller.is_some_and(|c| c.may_use(&target)) {
+        return None;
+    }
     let secret = match &target.credential {
         Some(r) => match secrets::resolve(r) {
             Ok(s) => Some(s),
@@ -329,7 +445,9 @@ impl SparqlConnection {
     fn text(&self, query: &str, accept: &str) -> Result<String, SourceError> {
         remote::post_sparql_blocking(&self.endpoint, query, accept, self.auth()).map_err(
             |e| match e {
-                RemoteError::NotAllowed(_) => SourceError::Config(e.to_string()),
+                RemoteError::NotAllowed(_) | RemoteError::RedirectNotAllowed { .. } => {
+                    SourceError::Config(e.to_string())
+                }
                 RemoteError::Request { reason, .. } if reason.contains("timed out") => {
                     SourceError::Timeout
                 }
@@ -664,8 +782,18 @@ mod tests {
         );
     }
 
+    fn caller(auth_db: &Arc<AuthDb>, user_id: Option<&str>, is_admin: bool) -> SourceCaller {
+        SourceCaller {
+            user_id: user_id.map(str::to_string),
+            is_admin,
+            auth_db: auth_db.clone(),
+        }
+    }
+
     #[test]
     fn a_virtual_source_is_remembered_for_federation_and_forgotten_on_delete() {
+        let auth_db = Arc::new(AuthDb::in_memory().unwrap());
+        let admin = caller(&auth_db, Some("adm"), true);
         let source = SqlSource {
             id: "vkg".into(),
             dialect: "sparql".into(),
@@ -675,20 +803,88 @@ mod tests {
             ..Default::default()
         };
         remember(&source);
-        let r = resolve("urn:source:vkg").unwrap().unwrap();
+        let r = resolve("urn:source:vkg", Some(&admin)).unwrap().unwrap();
         assert_eq!(r.endpoint, "http://kg.example/sparql");
         assert_eq!(r.username.as_deref(), Some("reader"));
         assert!(r.secret.is_none());
-        assert!(resolve("urn:source:nope").is_none());
-        assert!(resolve("http://kg.example/sparql").is_none());
+        assert!(resolve("urn:source:nope", Some(&admin)).is_none());
+        assert!(resolve("http://kg.example/sparql", Some(&admin)).is_none());
         // A SQL source under the same id is not a federation target.
         remember(&SqlSource {
             dialect: "sqlite".into(),
             ..source.clone()
         });
-        assert!(resolve("urn:source:vkg").is_none());
+        assert!(resolve("urn:source:vkg", Some(&admin)).is_none());
         remember(&source);
         forget("vkg");
-        assert!(resolve("urn:source:vkg").is_none());
+        assert!(resolve("urn:source:vkg", Some(&admin)).is_none());
+    }
+
+    /// The account resolves for an administrator, the source's owner and a
+    /// holder of a role on its dataset; for nobody else, and never without a
+    /// caller.
+    #[test]
+    fn a_source_resolves_only_for_callers_it_is_shared_with() {
+        use crate::auth::models::{OwnerType, SystemRole, Visibility};
+        let auth_db = Arc::new(AuthDb::in_memory().unwrap());
+        for id in ["owner", "member", "stranger"] {
+            auth_db
+                .create_user(id, id, &format!("{id}@t.example"), "h", SystemRole::User)
+                .unwrap();
+        }
+        auth_db
+            .create_dataset(
+                "ds",
+                "DS",
+                None,
+                OwnerType::User,
+                "member",
+                Visibility::Private,
+                None,
+            )
+            .unwrap();
+        auth_db
+            .create_dataset(
+                "open",
+                "Open",
+                None,
+                OwnerType::User,
+                "member",
+                Visibility::Public,
+                None,
+            )
+            .unwrap();
+        let source = SqlSource {
+            id: "vkg-shared".into(),
+            dialect: "sparql".into(),
+            host: Some("kg.example".into()),
+            database: "/sparql".into(),
+            owner: Some("https://store.example/users/owner".into()),
+            dataset: Some("ds".into()),
+            ..Default::default()
+        };
+        remember(&source);
+        let iri = "urn:source:vkg-shared";
+        let may = |user: Option<&str>, admin: bool| {
+            resolve(iri, Some(&caller(&auth_db, user, admin))).is_some()
+        };
+        assert!(may(Some("adm"), true));
+        assert!(may(Some("owner"), false), "the source's owner");
+        assert!(may(Some("member"), false), "a role on the bound dataset");
+        assert!(!may(Some("stranger"), false));
+        assert!(!may(None, false), "anonymous");
+        assert!(resolve(iri, None).is_none(), "no caller, no source");
+
+        // A public dataset is readable by all, and shares the account with
+        // nobody on that account.
+        remember(&SqlSource {
+            owner: None,
+            dataset: Some("open".into()),
+            ..source.clone()
+        });
+        assert!(!may(Some("stranger"), false));
+        assert!(!may(None, false));
+        assert!(may(Some("member"), false));
+        forget("vkg-shared");
     }
 }

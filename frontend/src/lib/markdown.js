@@ -11,6 +11,7 @@
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { highlightRdf, highlightJson, highlightXml } from './resultHighlight.js';
+import { withBase } from './basePath';
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -105,7 +106,8 @@ export function renderMarkdown(md, opts = {}) {
   // link that opens a new tab.
   doc.querySelectorAll('a[href]').forEach((a) => {
     const href = a.getAttribute('href');
-    const rewritten = rewriteDocHref(href);
+    // Root-absolute links are app paths: they get the sub-path base.
+    const rewritten = withBase(rewriteDocHref(href));
     if (rewritten !== href) a.setAttribute('href', rewritten);
     if (a.getAttribute('target') === '_blank') a.setAttribute('rel', 'noopener noreferrer');
   });

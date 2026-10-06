@@ -436,7 +436,7 @@ async fn a_restore_applies_the_inverse_of_the_chain_in_one_transaction() {
     assert_eq!(live_subjects(&state), vec!["<urn:dv:b>", "<urn:dv:c>"]);
     // The restore is in the change log, and the commit points at it.
     let rows = state.store.changes().rows_after(0, 1000);
-    assert!(rows.iter().any(|r| r.origin == "apply_delta"));
+    assert!(rows.iter().any(|r| r.origin == "patch"));
     let (_, commits, _) = req(
         &app,
         Method::GET,

@@ -13,7 +13,11 @@
 //! `manifest-sparql11-update.ttl` — are walked through `mf:include`; every
 //! entry runs through `TripleStore` (the evaluation path `/sparql` uses, with
 //! the result cache and the parallel mirror off so each case is one plain
-//! evaluation against a fresh in-memory store):
+//! evaluation against a fresh in-memory store). Every query-evaluation entry
+//! then runs a second time with the in-memory mirror on (four subject shards,
+//! the columnar copy, the full copy; no rebuild debounce) and must end the same
+//! way: the mirror answers the server's reads by default, so the corpus has to
+//! hold for it too.
 //!
 //! - `mf:QueryEvaluationTest`: `qt:data` into the default graph, each
 //!   `qt:graphData` into the named graph of its resolved IRI, the query run
@@ -29,8 +33,10 @@
 //!   variants: the file must parse / must not parse.
 //!
 //! Numeric literals are compared by value (`"2.0"^^xsd:decimal` equals
-//! `"2"^^xsd:decimal`) because the engine stores numerics natively and writes
-//! them back in canonical form; every other literal by lexical form.
+//! `"2"^^xsd:decimal`): the store returns stored literals as written, but the
+//! engine prints a computed number (an aggregate, arithmetic, a cast) in
+//! Oxigraph's canonical form, where the expected results may spell it
+//! otherwise. Every other literal is compared by lexical form.
 //!
 //! Gap policy (two-way ratchet, as in `w3c_shacl_conformance.rs`): every
 //! entry NOT in `KNOWN_FAILURES` must pass, and every listed entry must still
@@ -71,25 +77,21 @@ const RS: &str = "http://www.w3.org/2001/sw/DataAccess/tests/result-set#";
 
 /// Entries that currently fail, with the engine gap they sit behind. Keep
 /// sorted. Removing an entry requires the entry to actually pass (the ratchet
-/// asserts both directions). Each is an oxigraph 0.5 evaluator behaviour,
-/// reproduced against the raw engine; none is in the platform layer.
-const KNOWN_FAILURES: &[(&str, &str)] = &[
-    ("aggregates/manifest#agg-empty-group-count-graph", "oxigraph 0.5: `GRAPH ?g { <aggregate sub-select> }` does not enumerate the named graphs when the inner pattern binds no quads, so ?g stays unbound and the empty-group count is one row instead of one per graph"),
-    ("aggregates/manifest#agg-groupconcat-04", "oxigraph 0.5 implements the SPARQL 1.2 GROUP_CONCAT (a language tag shared by every input is kept: \"1 2\"@en); the 1.1 suite expects the plain literal \"1 2\""),
-    ("aggregates/manifest#agg-groupconcat-06", "as agg-groupconcat-04: a single @en input yields \"1\"@en, the 1.1 suite expects \"1\""),
-    ("bindings/manifest#graph", "oxigraph 0.5: `GRAPH ?g { VALUES (?g ?t) { (UNDEF …) } }` does not enumerate the named graphs for the UNDEF row, so ?g stays unbound"),
-    ("functions/manifest#bnode01", "oxigraph 0.5: BNODE(str) returns one blank node per string for the whole query; SPARQL 1.1 §17.4.2.9 requires a fresh node per solution (same string → same node only within a solution)"),
-    ("negation/manifest#graph-minus", "oxigraph 0.5: the outer `GRAPH ?g` variable is implied on both sides of an inner MINUS, so the sides share ?g and are not disjoint; the suite expects the outer graph variable to be ignored for the disjointness check"),
-    ("property-path/manifest#zero_or_more_set_end", "oxigraph 0.5: a zero-length path (`*`) whose constant end is absent from the dataset yields no solution; the spec's zero-length path matches any term, so `?s :p* :o` on an empty dataset binds ?s = :o"),
-    ("property-path/manifest#zero_or_more_set_start", "as zero_or_more_set_end, constant start"),
-    ("property-path/manifest#zero_or_one_set_end", "as zero_or_more_set_end, for `?`"),
-    ("property-path/manifest#zero_or_one_set_start", "as zero_or_more_set_end, for `?` with a constant start"),
-];
+/// asserts both directions). Empty since the vendored spareval/sparopt fork
+/// (`vendor/README.md`) fixed the last ten, all oxigraph 0.5 evaluator gaps:
+/// `GRAPH ?g` scoping, zero-length paths with a constant endpoint,
+/// `GROUP_CONCAT` language tags and `BNODE(str)`.
+const KNOWN_FAILURES: &[(&str, &str)] = &[];
 
 /// Pass floor: a loader or parser regression turns passes into skips or
 /// failures; the two ratchet asserts alone would not notice a wholesale skip.
 /// It sits below the current count, with headroom for corpus churn.
 const PASS_FLOOR: usize = 450;
+
+/// Mirror floor: query-evaluation entries that must run with the in-memory
+/// mirror actually built, so the parity check cannot pass by never building
+/// it. Below the current count, with the same headroom.
+const MIRROR_FLOOR: usize = 180;
 
 #[derive(Debug, PartialEq)]
 enum Outcome {
@@ -255,12 +257,33 @@ fn entries(manifest_iri: &str) -> Result<(Graph, Vec<Entry>), String> {
     Ok((g, out))
 }
 
+/// Which evaluation path a store answers queries through.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Route {
+    /// The engine alone: the in-memory mirror is off.
+    Engine,
+    /// The in-memory mirror in front of the engine, as the server runs it:
+    /// subject shards, the columnar copy and the full copy, each answering
+    /// what it accepts. Four shards, and no debounce, so the first query after
+    /// the load builds the mirror instead of falling through to the engine.
+    Mirror,
+}
+
 fn fresh_store() -> TripleStore {
-    TripleStore::in_memory()
+    fresh_store_on(Route::Engine)
+}
+
+fn fresh_store_on(route: Route) -> TripleStore {
+    let store = TripleStore::in_memory()
         .unwrap()
         .with_blank_node_mode(BlankNodeMode::Preserve)
-        .with_parallel_query(false, 1, usize::MAX)
-        .with_query_cache(false, 1, 1)
+        .with_query_cache(false, 1, 1);
+    match route {
+        Route::Engine => store.with_parallel_query(false, 1, usize::MAX),
+        Route::Mirror => store
+            .with_parallel_query(true, 4, usize::MAX)
+            .with_parallel_rebuild_quiet_ms(0),
+    }
 }
 
 /// Prepend `BASE <iri>` unless the text declares its own base, so relative
@@ -666,6 +689,18 @@ fn is_ordered(query: &Query) -> bool {
 // ─── Entry runners ────────────────────────────────────────────────────────────
 
 fn run_query_evaluation(g: &Graph, entry: &Entry) -> Outcome {
+    run_query_evaluation_on(g, entry, Route::Engine).0
+}
+
+/// Run a query-evaluation entry on a store taking `route`; also says whether
+/// the in-memory mirror was built (an empty dataset never builds one).
+fn run_query_evaluation_on(g: &Graph, entry: &Entry, route: Route) -> (Outcome, bool) {
+    let store = fresh_store_on(route);
+    let outcome = evaluate_entry(g, entry, &store);
+    (outcome, store.parallel_build_count() > 0)
+}
+
+fn evaluate_entry(g: &Graph, entry: &Entry, store: &TripleStore) -> Outcome {
     let Some(action) = as_node(entry.action.as_ref()) else {
         return Outcome::Skip("action is not a node".into());
     };
@@ -691,17 +726,16 @@ fn run_query_evaluation(g: &Graph, entry: &Entry) -> Outcome {
     let query_is_graph = matches!(parsed, Query::Construct { .. } | Query::Describe { .. });
     let ordered = is_ordered(&parsed);
 
-    let store = fresh_store();
     for d in objects(g, action, &nn(QT, "data")) {
         if let Some(iri) = iri_of(d.as_ref()) {
-            if let Err(e) = load_into(&store, &iri, None) {
+            if let Err(e) = load_into(store, &iri, None) {
                 return Outcome::Skip(e);
             }
         }
     }
     for d in objects(g, action, &nn(QT, "graphData")) {
         if let Some(iri) = iri_of(d.as_ref()) {
-            if let Err(e) = load_into(&store, &iri, Some(&iri)) {
+            if let Err(e) = load_into(store, &iri, Some(&iri)) {
                 return Outcome::Skip(e);
             }
         }
@@ -928,6 +962,10 @@ struct Tally {
     skips: Vec<String>,
     unexpected_failures: Vec<String>,
     unexpected_passes: Vec<String>,
+    /// Query-evaluation entries answered with the in-memory mirror built.
+    mirror_built: usize,
+    /// Entries whose outcome through the mirror differs from the engine's.
+    mirror_divergences: Vec<String>,
 }
 
 fn run_manifest(top: &str, tally: &mut Tally) {
@@ -948,7 +986,21 @@ fn run_manifest(top: &str, tally: &mut Tally) {
         for entry in &entries {
             tally.total += 1;
             let known = KNOWN_FAILURES.iter().find(|(k, _)| *k == entry.id);
-            match run_entry(&g, entry) {
+            let outcome = run_entry(&g, entry);
+            // Mirror parity: the same entry through the shards, the columnar
+            // copy and the full copy must end the way it ends on the engine —
+            // a pass stays a pass, a known failure stays a failure.
+            if entry.kind == "QueryEvaluationTest" {
+                let (mirrored, built) = run_query_evaluation_on(&g, entry, Route::Mirror);
+                tally.mirror_built += usize::from(built);
+                if std::mem::discriminant(&mirrored) != std::mem::discriminant(&outcome) {
+                    tally.mirror_divergences.push(format!(
+                        "{}: engine {outcome:?}, mirror {mirrored:?}",
+                        entry.id
+                    ));
+                }
+            }
+            match outcome {
                 Outcome::Pass => {
                     tally.pass += 1;
                     if let Some((k, why)) = known {
@@ -996,6 +1048,10 @@ fn w3c_sparql11_query_and_update_suites() {
         tally.skips.len(),
         tally.total
     );
+    println!(
+        "Mirror parity: {} query-evaluation entries ran with the mirror built",
+        tally.mirror_built
+    );
 
     // Every KNOWN_FAILURES id must exist in the corpus, else the list is stale.
     let listed_seen = tally.known_fail + tally.unexpected_passes.len();
@@ -1015,6 +1071,18 @@ fn w3c_sparql11_query_and_update_suites() {
         tally.unexpected_passes.is_empty(),
         "KNOWN_FAILURES entries now pass — remove them to ratchet forward:\n  {}",
         tally.unexpected_passes.join("\n  ")
+    );
+    assert!(
+        tally.mirror_divergences.is_empty(),
+        "{} entries end differently through the in-memory mirror than on the engine:\n  {}",
+        tally.mirror_divergences.len(),
+        tally.mirror_divergences.join("\n  ")
+    );
+    // A mirror that never builds would make the parity check vacuous.
+    assert!(
+        tally.mirror_built >= MIRROR_FLOOR,
+        "only {} entries ran with the mirror built (floor {MIRROR_FLOOR})",
+        tally.mirror_built
     );
     assert!(
         tally.pass >= PASS_FLOOR,

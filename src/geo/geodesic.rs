@@ -40,28 +40,11 @@ use oxrdf::Term;
 use wkt::{ToWkt, TryFromWkt};
 
 use super::crs::{transform_xy, Crs};
-use super::datatypes::{literal_crs_uri, literal_wkt, parse_wkt_literal};
-use super::gml::gml_srs_name;
-use super::vocabulary as vocab;
+pub use super::datatypes::literal_crs;
+use super::datatypes::{literal_wkt, parse_wkt_literal};
 
 /// GEOS buffer segments per quarter circle — the same as `geof:buffer`.
 const QUADRANT_SEGMENTS: i32 = 16;
-
-/// The CRS a geometry literal is written in: a WKT literal's `<crs>` prefix, a
-/// GML literal's `srsName`, or CRS84 when there is none (GeoSPARQL's default,
-/// and always the case for GeoJSON). `None` for a CRS this build cannot
-/// reproject. (The topology functions do not read `srsName` yet; measuring in
-/// metres has to, or RD New coordinates would be taken for degrees.)
-pub fn literal_crs(term: &Term) -> Option<Crs> {
-    let uri = match term {
-        Term::Literal(l) if l.datatype().as_str() == vocab::GML_LITERAL => gml_srs_name(l.value()),
-        _ => literal_crs_uri(term).map(str::to_string),
-    };
-    match uri {
-        Some(uri) => Crs::from_uri(&uri),
-        None => Some(Crs::Wgs84),
-    }
-}
 
 /// A geometry literal of any serialisation as a `geo` geometry in CRS84, or
 /// `None` when it does not parse, its CRS cannot be reprojected, or it does not
@@ -354,6 +337,7 @@ fn wraps_around(geom: &Geometry<f64>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geo::vocabulary as vocab;
     use geo::{line_string, point, polygon};
 
     #[test]

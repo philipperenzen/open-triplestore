@@ -155,7 +155,8 @@ pub fn services_for(dataset_slug: &str) -> Vec<CreateSavedQueryRequest> {
             svc(
                 "Transitive ancestors",
                 "transitive-ancestors",
-                "OWL 2 RL — query-time transitive closure over an owl:TransitiveProperty (ex:ancestorOf+).",
+                "SPARQL 1.1 property path ex:ancestorOf+ over an owl:TransitiveProperty — the closure an OWL 2 RL \
+                 reasoner materialises (POST /api/reasoning/materialize), computed here at query time without one.",
                 "PREFIX ex: <https://opentriplestore.org/demo/reasoning#>\n\
                  SELECT ?descendant ?ancestor WHERE { ?descendant ex:ancestorOf+ ?ancestor } ORDER BY ?descendant",
             ),
@@ -652,12 +653,16 @@ otso:visibility a owl:DatatypeProperty ;
     rdfs:comment "Access level of a dataset (public, members, private)." ;
     rdfs:range xsd:string .
 
-otso:Instances  a otso:GraphRole ; rdfs:label "Instances"  ; rdfs:comment "Instance data (A-Box)." .
-otso:Model      a otso:GraphRole ; rdfs:label "Model"      ; rdfs:comment "OWL/RDFS terminology (T-Box)." .
-otso:Vocabulary a otso:GraphRole ; rdfs:label "Vocabulary" ; rdfs:comment "SKOS concept schemes." .
-otso:Shapes     a otso:GraphRole ; rdfs:label "Shapes"     ; rdfs:comment "SHACL shape graphs." .
-otso:Entailment a otso:GraphRole ; rdfs:label "Entailment" ; rdfs:comment "Materialised inferred triples." .
-otso:System     a otso:GraphRole ; rdfs:label "System"     ; rdfs:comment "Internal system metadata." .
+otso:Instances    a otso:GraphRole ; rdfs:label "Instances"     ; rdfs:comment "Instance data (A-Box)." .
+otso:Model        a otso:GraphRole ; rdfs:label "Model"         ; rdfs:comment "OWL/RDFS class definitions and class axioms (T-Box)." .
+otso:Vocabulary   a otso:GraphRole ; rdfs:label "Vocabulary"    ; rdfs:comment "Property definitions and SKOS concept schemes (R-Box)." .
+otso:Shapes       a otso:GraphRole ; rdfs:label "Shapes"        ; rdfs:comment "SHACL shape graphs." .
+otso:Entailment   a otso:GraphRole ; rdfs:label "Entailment"    ; rdfs:comment "Materialised inferred triples." .
+otso:DomainValues a otso:GraphRole ; rdfs:label "Domain values" ; rdfs:comment "Code lists and enumerations an instance property may take." .
+otso:Linkset      a otso:GraphRole ; rdfs:label "Linkset"       ; rdfs:comment "Alignments between sources (owl:sameAs, skos:*Match)." .
+otso:Provenance   a otso:GraphRole ; rdfs:label "Provenance"    ; rdfs:comment "PROV-O records of who produced what, when and from what." .
+otso:Catalog      a otso:GraphRole ; rdfs:label "Catalog"       ; rdfs:comment "DCAT / VoID descriptions of datasets and distributions." .
+otso:System       a otso:GraphRole ; rdfs:label "System"        ; rdfs:comment "Internal system metadata." .
 "#;
 
 /// SKOS controlled vocabulary for the codebase's value sets (graph roles,
@@ -674,8 +679,12 @@ otsv:role-instances  a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel
 otsv:role-model      a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Model"@en .
 otsv:role-vocabulary a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Vocabulary"@en .
 otsv:role-shapes     a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Shapes"@en .
-otsv:role-entailment a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Entailment"@en .
-otsv:role-system     a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "System"@en .
+otsv:role-entailment    a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Entailment"@en .
+otsv:role-domain-values a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Domain values"@en .
+otsv:role-linkset       a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Linkset"@en .
+otsv:role-provenance    a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Provenance"@en .
+otsv:role-catalog       a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Catalog"@en .
+otsv:role-system        a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "System"@en .
 
 otsv:conf-full    a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Full"@en .
 otsv:conf-partial a skos:Concept ; skos:inScheme otsv:scheme ; skos:prefLabel "Partial"@en .
@@ -877,22 +886,54 @@ ex:carol a ex:User ; ex:email "carol@example.org" .
 "#;
 
 const SWRL_TTL: &str = r#"
-@prefix ex:   <https://opentriplestore.org/demo/rules#> .
-@prefix swrl: <http://www.w3.org/2003/11/swrl#> .
-@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix ex:    <https://opentriplestore.org/demo/rules#> .
+@prefix swrl:  <http://www.w3.org/2003/11/swrl#> .
+@prefix swrlb: <http://www.w3.org/2003/11/swrlb#> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
 
 ex:hasParent      a rdfs:Property .
 ex:hasGrandparent a rdfs:Property .
 
-# SWRL: hasParent(?x,?y) ∧ hasParent(?y,?z) ⇒ hasGrandparent(?x,?z)
+# SWRL: hasParent(?x,?y) ∧ hasParent(?y,?z) ⇒ hasGrandparent(?x,?z), in the
+# SWRL RDF syntax. Stored with the dataset, the rule runs after every write;
+# its conclusions are in the dataset's inference graph
+# (?entailment_dataset=<id> on /sparql).
+ex:x a swrl:Variable .
+ex:y a swrl:Variable .
+ex:z a swrl:Variable .
+
 ex:GrandparentRule a swrl:Imp ;
     rdfs:comment "hasParent(?x,?y) ^ hasParent(?y,?z) -> hasGrandparent(?x,?z)" ;
-    swrl:body ( [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasParent ]
-                [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasParent ] ) ;
-    swrl:head ( [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasGrandparent ] ) .
+    swrl:body ( [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasParent ;
+                  swrl:argument1 ex:x ; swrl:argument2 ex:y ]
+                [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasParent ;
+                  swrl:argument1 ex:y ; swrl:argument2 ex:z ] ) ;
+    swrl:head ( [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasGrandparent ;
+                  swrl:argument1 ex:x ; swrl:argument2 ex:z ] ) .
 
-ex:Tom   ex:hasParent ex:Mary .
-ex:Mary  ex:hasParent ex:Sophie .
+# A rule with a built-in that binds a value: swrlb:subtract computes the
+# age gap between a person and their parent.
+ex:p a swrl:Variable .
+ex:a a swrl:Variable .
+ex:b a swrl:Variable .
+ex:gap a swrl:Variable .
+
+ex:AgeGapRule a swrl:Imp ;
+    rdfs:comment "hasParent(?x,?p) ^ age(?x,?a) ^ age(?p,?b) ^ subtract(?gap,?b,?a) -> parentAgeGap(?x,?gap)" ;
+    swrl:body ( [ a swrl:IndividualPropertyAtom ; swrl:propertyPredicate ex:hasParent ;
+                  swrl:argument1 ex:x ; swrl:argument2 ex:p ]
+                [ a swrl:DatavaluedPropertyAtom ; swrl:propertyPredicate ex:age ;
+                  swrl:argument1 ex:x ; swrl:argument2 ex:a ]
+                [ a swrl:DatavaluedPropertyAtom ; swrl:propertyPredicate ex:age ;
+                  swrl:argument1 ex:p ; swrl:argument2 ex:b ]
+                [ a swrl:BuiltinAtom ; swrl:builtin swrlb:subtract ;
+                  swrl:arguments ( ex:gap ex:b ex:a ) ] ) ;
+    swrl:head ( [ a swrl:DatavaluedPropertyAtom ; swrl:propertyPredicate ex:parentAgeGap ;
+                  swrl:argument1 ex:x ; swrl:argument2 ex:gap ] ) .
+
+ex:Tom   ex:hasParent ex:Mary ; ex:age 12 .
+ex:Mary  ex:hasParent ex:Sophie ; ex:age 41 .
+ex:Sophie ex:age 70 .
 "#;
 
 const LDP_TTL: &str = r#"
@@ -940,27 +981,117 @@ const CAPABILITIES_JSONLD: &str = r#"{
     "AuthMethod": "ots:AuthMethod"
   },
   "@graph": [
-    { "@id": "ots:rdf11",      "@type": "Standard", "title": "RDF 1.1",                 "conformance": "Full" },
-    { "@id": "ots:rdf12",      "@type": "Standard", "title": "RDF-star / RDF 1.2",      "conformance": "Full" },
-    { "@id": "ots:sparql11",   "@type": "Standard", "title": "SPARQL 1.1 Query & Update","conformance": "Full" },
-    { "@id": "ots:sparql12",   "@type": "Standard", "title": "SPARQL 1.2",              "conformance": "Full" },
-    { "@id": "ots:gsp",        "@type": "Standard", "title": "SPARQL Graph Store HTTP", "conformance": "Full" },
-    { "@id": "ots:sd",         "@type": "Standard", "title": "SPARQL Service Description","conformance": "Full" },
-    { "@id": "ots:rdfs",       "@type": "Standard", "title": "RDFS",                    "conformance": "Full" },
-    { "@id": "ots:owlql",      "@type": "Standard", "title": "OWL 2 QL",                "conformance": "Full" },
-    { "@id": "ots:owlel",      "@type": "Standard", "title": "OWL 2 EL",                "conformance": "Full" },
-    { "@id": "ots:owlrl",      "@type": "Standard", "title": "OWL 2 RL",                "conformance": "Full" },
-    { "@id": "ots:owldl",      "@type": "Standard", "title": "OWL 2 DL",                "conformance": "Full" },
-    { "@id": "ots:geosparql",  "@type": "Standard", "title": "GeoSPARQL 1.1",           "conformance": "Full" },
-    { "@id": "ots:shaclcore",  "@type": "Standard", "title": "SHACL Core",              "conformance": "Full" },
-    { "@id": "ots:shacladv",   "@type": "Standard", "title": "SHACL Advanced",          "conformance": "Full" },
-    { "@id": "ots:shaclc",     "@type": "Standard", "title": "SHACL Compact Syntax",    "conformance": "Full" },
-    { "@id": "ots:shex",       "@type": "Standard", "title": "ShEx",                    "conformance": "Full" },
-    { "@id": "ots:swrl",       "@type": "Standard", "title": "SWRL",                    "conformance": "Full" },
-    { "@id": "ots:ldp",        "@type": "Standard", "title": "Linked Data Platform 1.0","conformance": "Full" },
-    { "@id": "ots:dcat",       "@type": "Standard", "title": "DCAT 2 / VoID",           "conformance": "Full" },
+    { "@id": "ots:rdf11",          "@type": "Standard", "title": "RDF 1.1",                                "conformance": "Full" },
+    { "@id": "ots:rdf12",          "@type": "Standard", "title": "RDF 1.2 (CR 2026-04-07)",                "conformance": "Full" },
+    { "@id": "ots:sparql11",       "@type": "Standard", "title": "SPARQL 1.1 Query",                       "conformance": "Full" },
+    { "@id": "ots:sparql11update", "@type": "Standard", "title": "SPARQL 1.1 Update",                      "conformance": "Full" },
+    { "@id": "ots:sparqlprotocol", "@type": "Standard", "title": "SPARQL 1.1 Protocol",                    "conformance": "Full" },
+    { "@id": "ots:gsp",            "@type": "Standard", "title": "SPARQL 1.1 Graph Store HTTP",            "conformance": "Full" },
+    { "@id": "ots:sparqlfed",      "@type": "Standard", "title": "SPARQL 1.1 Federated Query (SERVICE)",   "conformance": "Full" },
+    { "@id": "ots:sd",             "@type": "Standard", "title": "SPARQL 1.1 Service Description",         "conformance": "Full" },
+    { "@id": "ots:sparql12",       "@type": "Standard", "title": "SPARQL 1.2 (WD 2026-10-01)",             "conformance": "Full" },
+    { "@id": "ots:rdfs",           "@type": "Standard", "title": "RDFS",                                   "conformance": "Full" },
+    { "@id": "ots:owlql",          "@type": "Standard", "title": "OWL 2 QL",                               "conformance": "Full" },
+    { "@id": "ots:owlel",          "@type": "Standard", "title": "OWL 2 EL",                               "conformance": "Full" },
+    { "@id": "ots:owlrl",          "@type": "Standard", "title": "OWL 2 RL",                               "conformance": "Full" },
+    { "@id": "ots:owldl",          "@type": "Standard", "title": "OWL 2 DL",                               "conformance": "Full" },
+    { "@id": "ots:geosparql10",    "@type": "Standard", "title": "GeoSPARQL 1.0",                          "conformance": "Full" },
+    { "@id": "ots:geosparql",      "@type": "Standard", "title": "GeoSPARQL 1.1",                          "conformance": "Full" },
+    { "@id": "ots:shaclcore",      "@type": "Standard", "title": "SHACL Core",                             "conformance": "Full" },
+    { "@id": "ots:shacladv",       "@type": "Standard", "title": "SHACL Advanced (AF / SPARQL)",           "conformance": "Partial" },
+    { "@id": "ots:shaclc",         "@type": "Standard", "title": "SHACL-C",                                "conformance": "Full" },
+    { "@id": "ots:opm",            "@type": "Standard", "title": "OPM (Ontology for Property Management)", "conformance": "Full" },
+    { "@id": "ots:ids",            "@type": "Standard", "title": "buildingSMART IDS 1.0",                  "conformance": "Full" },
+    { "@id": "ots:icdd",           "@type": "Standard", "title": "ISO 21597-1 ICDD",                       "conformance": "Partial" },
+    { "@id": "ots:rdfpatch",       "@type": "Standard", "title": "RDF Patch (RDF Delta)",                  "conformance": "Full" },
+    { "@id": "ots:ldes",           "@type": "Standard", "title": "LDES / TREE",                            "conformance": "Full" },
+    { "@id": "ots:ldp",            "@type": "Standard", "title": "LDP (Linked Data Platform) 1.0",         "conformance": "Full" },
+    { "@id": "ots:dcat",           "@type": "Standard", "title": "DCAT 3 / DCAT-AP 3 / DCAT-AP-NL 3",      "conformance": "Full" },
+    { "@id": "ots:void",           "@type": "Standard", "title": "VoID",                                   "conformance": "Full" },
+    { "@id": "ots:rml",            "@type": "Standard", "title": "RML / R2RML",                            "conformance": "Partial" },
+    { "@id": "ots:shex",           "@type": "Standard", "title": "ShEx 2.1",                               "conformance": "Full" },
+    { "@id": "ots:swrl",           "@type": "Standard", "title": "SWRL",                                   "conformance": "Full" },
+    { "@id": "ots:textsearch",     "@type": "Standard", "title": "SPARQL + full-text search (Tantivy)",    "conformance": "Full" },
+    { "@id": "ots:skos",           "@type": "Standard", "title": "SKOS",                                   "conformance": "Full" },
+    { "@id": "ots:jsonld",         "@type": "Standard", "title": "JSON-LD 1.1",                            "conformance": "Partial" },
     { "@id": "ots:jwt",        "@type": "AuthMethod", "title": "JSON Web Tokens (JWT)" },
     { "@id": "ots:oauth",      "@type": "AuthMethod", "title": "OAuth 2.0 / OIDC" },
     { "@id": "ots:saml",       "@type": "AuthMethod", "title": "SAML 2.0 SSO" }
   ]
 }"#;
+
+#[cfg(test)]
+mod tests {
+    use super::CAPABILITIES_JSONLD;
+
+    /// The grades table of `docs/standards.md` as (standard, grade) pairs: the
+    /// first column with code marks removed, and the first word of the Support
+    /// column without its footnote marks ("Partial² — …" → "Partial").
+    fn standards_md_grades() -> Vec<(String, String)> {
+        let doc = include_str!("../../docs/standards.md");
+        let mut rows = Vec::new();
+        let mut in_table = false;
+        for line in doc.lines() {
+            if line.starts_with("| Standard | Role | Support |") {
+                in_table = true;
+                continue;
+            }
+            if !in_table || line.starts_with("|---") {
+                continue;
+            }
+            if !line.starts_with('|') {
+                break;
+            }
+            let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+            let standard = cells[1].replace('`', "");
+            let grade: String = cells[3]
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .filter(|c| c.is_ascii_alphabetic())
+                .collect();
+            rows.push((standard, grade));
+        }
+        rows
+    }
+
+    /// The in-app capabilities graph advertises the grades `docs/standards.md`
+    /// gives, row for row: every Standard in the seed names a row there with
+    /// the same grade, and every row except the authentication ones (seeded as
+    /// AuthMethods, which carry no grade) is in the seed.
+    #[test]
+    fn capabilities_seed_matches_standards_md() {
+        let grades = standards_md_grades();
+        assert!(grades.len() > 20, "grades table not found: {grades:?}");
+        let caps: serde_json::Value = serde_json::from_str(CAPABILITIES_JSONLD).unwrap();
+        let seeded: Vec<(String, String)> = caps["@graph"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| n["@type"] == "Standard")
+            .map(|n| {
+                (
+                    n["title"].as_str().unwrap().to_string(),
+                    n["conformance"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        for (title, level) in &seeded {
+            let row = grades.iter().find(|(s, _)| s == title);
+            let Some((_, grade)) = row else {
+                panic!("seeded standard {title:?} has no row in docs/standards.md");
+            };
+            assert_eq!(level, grade, "conformance of {title:?}");
+        }
+        for (standard, _) in &grades {
+            if standard.starts_with("JWT") || standard.starts_with("SAML") {
+                continue;
+            }
+            assert!(
+                seeded.iter().any(|(t, _)| t == standard),
+                "docs/standards.md row {standard:?} is missing from the capabilities seed"
+            );
+        }
+    }
+}

@@ -1,7 +1,7 @@
 <script>
+  import { tHtml } from '../lib/i18n/html';
   import { createEventDispatcher } from 'svelte';
   import { t } from 'svelte-i18n';
-  import { sanitizeHtml } from '../lib/ontology/sanitizeHtml.js';
   import { Loader2, Upload, X, FileText, Eye, EyeOff, AlertCircle, CheckCircle2, Globe, Lock } from 'lucide-svelte';
 
   export let id;
@@ -130,8 +130,8 @@
         <div class="version-banner" class:version-found={!!detectedVersion} class:version-missing={!detectedVersion}>
           {#if detectedVersion}
             <CheckCircle2 size={15} class="shrink-0" />
-            <!-- eslint-disable-next-line svelte/no-at-html-tags -- DOMPurify-sanitized -->
-            <span>{@html sanitizeHtml($t('components.uploadVersionDialog.versionDetected', { values: { version: detectedVersion } }))}</span>
+            <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+            <span>{@html $tHtml('components.uploadVersionDialog.versionDetected', { values: { version: detectedVersion } })}</span>
           {:else}
             <AlertCircle size={15} class="shrink-0" />
             <span>{$t('components.uploadVersionDialog.versionNotDetected')}</span>
@@ -179,8 +179,8 @@
             {#if detectedVersion}
               {$t('components.uploadVersionDialog.versionHintDetected')}
             {:else}
-              <!-- eslint-disable-next-line svelte/no-at-html-tags -- trusted static i18n string -->
-              {@html $t('components.uploadVersionDialog.versionHintRequired')}
+              <!-- eslint-disable-next-line svelte/no-at-html-tags -- $tHtml escapes values, sanitizes markup -->
+              {@html $tHtml('components.uploadVersionDialog.versionHintRequired')}
             {/if}
           </p>
         </div>

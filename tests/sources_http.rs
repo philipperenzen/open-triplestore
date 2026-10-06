@@ -1279,3 +1279,74 @@ async fn a_watermark_run_needs_a_watermark_column() {
     assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
     assert!(txt.contains("watermarkColumn"), "{txt}");
 }
+
+/// A frozen version records the term-generation rules it runs under. A new
+/// version gets R2RML's unless the request pins the legacy ones; a
+/// metadata-only edit freezes nothing, so it cannot name rules.
+#[tokio::test]
+async fn a_mapping_version_is_stamped_with_its_term_rules() {
+    sources_dir();
+    let (state, token) = admin_state();
+    let app = test_app(state);
+    let db = fresh_sqlite("stamp");
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/sources",
+        &token,
+        source_body("stamp", &db, "env:OTS_TEST_DB_PASSWORD", None),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/mappings",
+        &token,
+        json!({ "id": "stamp-bad", "rml": mapping_for("stamp"), "semantics": "newest" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
+    assert!(txt.contains("'newest'"), "{txt}");
+
+    let (st, v, txt) = req(
+        &app,
+        Method::POST,
+        "/api/mappings",
+        &token,
+        json!({ "id": "stamp-map", "rml": mapping_for("stamp"), "semantics": "legacy" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    assert_eq!(v["semantics"], "legacy", "{v}");
+
+    let (st, _, txt) = req(
+        &app,
+        Method::PUT,
+        "/api/mappings/stamp-map",
+        &token,
+        json!({ "title": "Renamed", "semantics": "r2rml" }),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::BAD_REQUEST,
+        "a metadata edit freezes no version: {txt}"
+    );
+
+    let (st, v, txt) = req(
+        &app,
+        Method::PUT,
+        "/api/mappings/stamp-map",
+        &token,
+        json!({ "rml": mapping_for("stamp") }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(v["version"], 2, "{v}");
+    assert_eq!(
+        v["semantics"], "r2rml",
+        "a new version defaults to R2RML's rules"
+    );
+}

@@ -6,6 +6,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { otherBundledMaterial, thirdPartyLicenses } from './scripts/third-party-licenses.mjs';
+import { normaliseBasePath } from './scripts/base-path.mjs';
 
 // ── Cesium runtime assets, served from this origin ────────────────────────────
 //
@@ -18,6 +19,49 @@ import { otherBundledMaterial, thirdPartyLicenses } from './scripts/third-party-
 // runtime directories under /cesium/ in dev, and copies them into dist/cesium
 // at build time, so the assets always match the engine and work air-gapped.
 const CESIUM_RUNTIME_DIRS = ['Workers', 'Assets', 'ThirdParty', 'Widgets'];
+
+// ── Sub-path deploys ─────────────────────────────────────────────────────────
+//
+// OTS_BASE_PATH publishes the UI under a path prefix (`/ots/` →
+// https://example.org/ots/…; see docs/operations.md). Vite wants it with a
+// leading and a trailing slash, so `ots`, `/ots` and `/ots/` all mean the same.
+// The app reads it back as import.meta.env.BASE_URL (src/lib/basePath.ts).
+const BASE = normaliseBasePath(process.env.OTS_BASE_PATH);
+// `/ots` (no trailing slash), or '' at the root: the prefix dev-server paths get.
+const BASE_PREFIX = BASE.replace(/\/$/, '');
+
+// The dev server under a base: every proxied backend path moves below the
+// prefix too, and the prefix is cut off again before the request reaches the
+// backend, the same as the production reverse proxy does.
+function proxyUnderBase(proxy) {
+  if (!BASE_PREFIX) return proxy;
+  const out = {};
+  for (const [key, value] of Object.entries(proxy)) {
+    const opts = typeof value === 'string' ? { target: value } : { ...value };
+    const inner = opts.rewrite;
+    opts.rewrite = (p) => {
+      const stripped = p.startsWith(BASE_PREFIX) ? p.slice(BASE_PREFIX.length) || '/' : p;
+      return inner ? inner(stripped) : stripped;
+    };
+    if (opts.bypass) {
+      const bypass = opts.bypass;
+      // The bypass rules are written against app paths (`/api-docs`): show
+      // them the request without the prefix, and put it back on a rewrite.
+      opts.bypass = (req, res, o) => {
+        const url = req.url || '';
+        req.url = url.startsWith(BASE_PREFIX) ? url.slice(BASE_PREFIX.length) || '/' : url;
+        try {
+          const r = bypass(req, res, o);
+          return typeof r === 'string' ? `${BASE_PREFIX}${r}` : r;
+        } finally {
+          req.url = url;
+        }
+      };
+    }
+    out[`${BASE_PREFIX}${key}`] = opts;
+  }
+  return out;
+}
 const CESIUM_MIME = {
   '.js': 'text/javascript',
   '.mjs': 'text/javascript',
@@ -40,10 +84,16 @@ function cesiumBuildDir() {
 
 function cesiumAssets() {
   const buildDir = cesiumBuildDir();
+  let outDir = path.resolve('dist');
   return {
     name: 'ots-cesium-assets',
+    configResolved(config) {
+      // `vite build --outDir …` (the sub-path smoke build) must get its own copy.
+      outDir = path.resolve(config.root, config.build.outDir);
+    },
     configureServer(server) {
-      server.middlewares.use('/cesium', (req, res, next) => {
+      // Plugin middlewares run before Vite strips the base, so mount below it.
+      server.middlewares.use(`${BASE_PREFIX}/cesium`, (req, res, next) => {
         const rel = decodeURIComponent((req.url || '/').split('?')[0]);
         const file = path.normalize(path.join(buildDir, rel));
         // Containment + only the runtime directories, never the whole package.
@@ -60,9 +110,8 @@ function cesiumAssets() {
       });
     },
     closeBundle() {
-      const outDir = path.resolve('dist', 'cesium');
       for (const d of CESIUM_RUNTIME_DIRS) {
-        fs.cpSync(path.join(buildDir, d), path.join(outDir, d), { recursive: true });
+        fs.cpSync(path.join(buildDir, d), path.join(outDir, 'cesium', d), { recursive: true });
       }
     },
   };
@@ -123,11 +172,11 @@ export default defineConfig(async () => {
   // The triplestore backend ("triplestore" in the registry); defaults to the local dev port.
   const TS = reg.triplestore || (process.env.OTS_BACKEND_URL ?? 'http://localhost:7878');
   return {
-    // Serve/build under a sub-path (e.g. a static host like GitLab Pages that
+    // Serve/build under a sub-path (a reverse proxy or a static host that
     // publishes this app at https://host/some-project/). Defaults to root, so
-    // every existing deployment is unaffected. Set OTS_BASE_PATH="/my-path/"
-    // (leading AND trailing slash) at build time to change it.
-    base: process.env.OTS_BASE_PATH || '/',
+    // every existing deployment is unaffected. Set OTS_BASE_PATH=/my-path/ at
+    // build time to change it (see BASE above and docs/operations.md).
+    base: BASE,
     // Expose the opt-in flag to the browser bundle so serviceRegistry.ts only contacts the
     // registry when discovery is on (otherwise no /registry/events SSE reconnect loop, no noise).
     define: { __LD_DISCOVERY__: JSON.stringify(DISCOVERY) },
@@ -138,7 +187,7 @@ export default defineConfig(async () => {
       // --no-reload (LD_NO_HMR=1) turns off hot module reload while keeping the dev server + proxy.
       hmr: process.env.LD_NO_HMR === '1' ? false : undefined,
       port: 5173,
-      proxy: {
+      proxy: proxyUnderBase({
         '/health': TS,
         // `/api-docs` must precede `/api`: Vite matches proxy keys by prefix in
         // insertion order, so `/api` would otherwise swallow `/api-docs` and send
@@ -185,7 +234,7 @@ export default defineConfig(async () => {
               },
             }
           : {}),
-      },
+      }),
     },
     build: {
       outDir: 'dist',

@@ -210,10 +210,10 @@ The installed version also gets a **licence record** (`attribution` on
 `/api/models/{id}/versions`), like the bundled vocabularies: its licences
 with their URIs, the required notice, the source, whether the store holds
 LOV's copy unchanged (checked after the load) and a link to
-`/api/vocab/notice`. The check compares with LOV's copy as the store holds
-it: the store writes some typed literals in its canonical form, with the same
-values (`"1"^^xsd:nonNegativeInteger` as `"1"^^xsd:integer`, a `+00:00` time
-zone as `Z`), and the record says so when that applies to the vocabulary. Downloads of the version carry the licences in their
+`/api/vocab/notice`. The store keeps every literal as written, so the check
+compares with LOV's copy exactly. (A record written before the store kept
+lexical forms may say that some typed literals were held in a canonical form;
+that is true of that copy.) Downloads of the version carry the licences in their
 `Link` headers. A vocabulary whose every licence allows only unaltered copies
 (`no_derivatives`: CC BY-ND, the OGC Document Notice) gets
 `no_derivatives: true` in that record, so the registry refuses to copy it

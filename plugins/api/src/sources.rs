@@ -509,6 +509,10 @@ pub enum SourceError {
     Unsupported(String),
     /// The statement timeout elapsed.
     Timeout,
+    /// The driver failed without reporting an error: the host caught a panic
+    /// inside it. The message names the dialect, never the panic's text, which
+    /// goes to the server log only.
+    Driver(String),
 }
 
 impl fmt::Display for SourceError {
@@ -519,6 +523,7 @@ impl fmt::Display for SourceError {
             SourceError::Query(m) => write!(f, "query failed: {m}"),
             SourceError::Unsupported(m) => write!(f, "unsupported: {m}"),
             SourceError::Timeout => f.write_str("statement timeout elapsed"),
+            SourceError::Driver(m) => write!(f, "driver failure: {m}"),
         }
     }
 }
@@ -558,6 +563,21 @@ pub trait SourceConnection: Send {
         batch_size: usize,
         sink: BatchSink<'_>,
     ) -> Result<u64, SourceError>;
+
+    /// The names of the columns `query` returns, in order, without reading a
+    /// row — what a prepared statement describes. `None` when the connector
+    /// cannot say.
+    ///
+    /// A row leaves out its NULL columns, so rows alone cannot tell a column
+    /// that is always NULL from one that does not exist. An R2RML mapping
+    /// that names a column its logical table lacks is in error (R2RML §6),
+    /// and this is how the host finds out before it streams anything rather
+    /// than running the mapping into silence. The default answers `None`; a
+    /// connector that can prepare a statement overrides it.
+    fn columns(&mut self, query: &str) -> Result<Option<Vec<String>>, SourceError> {
+        let _ = query;
+        Ok(None)
+    }
 
     /// `MAX(column)` of `table`, as a lexical value, for incremental runs.
     fn max_watermark(&mut self, table: &str, column: &str) -> Result<Option<String>, SourceError>;

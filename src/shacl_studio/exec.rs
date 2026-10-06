@@ -701,7 +701,8 @@ fn snapshot_affected_versions(
         };
         match crate::dataset_versions::cut::cut(store, base_url, &req) {
             Ok(made) => {
-                crate::dataset_versions::after_cut(store, base_url, &made.record, &source_graphs)
+                crate::dataset_versions::after_cut(store, base_url, &made.record, &source_graphs);
+                crate::rdf_patch_log::on_version_cut(auth_db, base_url, &made.record, None);
             }
             Err(e) => tracing::warn!("pipeline {} version of {ds_id} failed: {e}", pipeline.id),
         }

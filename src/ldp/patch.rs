@@ -75,6 +75,14 @@ fn managed_static(predicate: &str, object_iri: Option<&str>) -> Result<(), Strin
 
 fn pattern_forbidden(p: &GraphPattern) -> Option<&'static str> {
     use GraphPattern as GP;
+    // `FILTER EXISTS { GRAPH … }` / `{ SERVICE … }` reach as far as the bare
+    // pattern would.
+    if let Some(kw) = crate::sparql::exists_patterns(p)
+        .into_iter()
+        .find_map(pattern_forbidden)
+    {
+        return Some(kw);
+    }
     match p {
         GP::Graph { .. } => Some("GRAPH"),
         GP::Service { .. } => Some("SERVICE"),
@@ -441,6 +449,9 @@ mod tests {
             format!("DELETE {{ <{R}> <http://example.org/p> ?o }} WHERE {{ GRAPH <http://victim/> {{ ?s ?p ?o }} }}"),
             format!("INSERT {{ <{R}> <http://example.org/p> ?o }} WHERE {{ GRAPH ?g {{ ?s ?p ?o }} }}"),
             format!("INSERT {{ <{R}> <http://example.org/p> ?o }} WHERE {{ SERVICE <http://x/sparql> {{ ?s ?p ?o }} }}"),
+            // The same reach from inside an EXISTS expression.
+            format!("INSERT {{ <{R}> <http://example.org/p> \"hit\" }} WHERE {{ FILTER EXISTS {{ GRAPH <http://victim/> {{ ?s ?p ?o }} }} }}"),
+            format!("INSERT {{ <{R}> <http://example.org/p> ?x }} WHERE {{ BIND(NOT EXISTS {{ SERVICE <http://x/sparql> {{ ?s ?p ?o }} }} AS ?x) }}"),
             "WITH <http://victim/> DELETE { ?s ?p ?o } WHERE { ?s ?p ?o }".to_string(),
             format!("DELETE {{ <{R}> ?p ?o }} USING <http://victim/> WHERE {{ ?s ?p ?o }}"),
             "CLEAR ALL".to_string(),

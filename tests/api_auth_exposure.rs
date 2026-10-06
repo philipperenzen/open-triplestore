@@ -227,7 +227,7 @@ async fn the_admin_user_directory_is_unchanged() {
 const SHACLC: &str = "PREFIX ex: <http://example.org/>\n\
                       PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n\n\
                       shape ex:PersonShape -> ex:Person {\n\
-                      \tex:name xsd:string [1..1] ;\n\
+                      \tex:name xsd:string [1..1] .\n\
                       }\n";
 
 const RML_BOUNDARY: &str = "ots-auth-exposure-boundary";

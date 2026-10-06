@@ -397,6 +397,7 @@ pub async fn bulk_import(
     let archive_ds = meta.dataset_id.clone();
     let archive_creator = format!("{}/users/{}", state.base_url, user.user_id);
     let archive_bump = bump.clone();
+    let archive_user = user.user_id.clone();
     let outcome_w = outcome.clone();
     let before_replace = move |changes: &[GraphChange]| -> Result<(), String> {
         let Some(ds_id) = archive_ds.as_deref() else {
@@ -446,6 +447,12 @@ pub async fn bulk_import(
                     "Archived previous data before replace via import ({archive_bump} bump)"
                 )),
             )?;
+            crate::rdf_patch_log::on_version_cut(
+                &archive_db,
+                &archive_base,
+                &record,
+                Some(&archive_user),
+            );
             out.changed_graphs = changed;
             out.new_version = Some(version);
             out.snapshot_graphs = record.snapshot_graphs;
@@ -466,6 +473,12 @@ pub async fn bulk_import(
                 Some(&archive_creator),
                 Some("Upload identical to current data — saved as draft"),
             )?;
+            crate::rdf_patch_log::on_version_cut(
+                &archive_db,
+                &archive_base,
+                &record,
+                Some(&archive_user),
+            );
             out.draft_version = Some(version);
             out.snapshot_graphs = record.snapshot_graphs;
         }
@@ -506,7 +519,14 @@ pub async fn bulk_import(
                     .map_err(|r| crate::shacl_studio::gate::summarize_report(&r, 5))
             }),
         };
-        let res = parse_and_load_bulk_gated(&store, inputs, authorize, before_replace, Some(&gate));
+        // Writer-pays (below): the import's writes are claimed, so the store's
+        // search journal does not hand them to the next search as well. A
+        // failed import drops the claim unhandled, which publishes whatever
+        // it may have written.
+        let claim = store.claim_search_index();
+        let res = claim.run(|| {
+            parse_and_load_bulk_gated(&store, inputs, authorize, before_replace, Some(&gate))
+        });
         if let Ok(ref r) = res {
             // Writer-pays text-index maintenance: refresh exactly the graphs
             // this import wrote (replace targets included — the delete+re-add
@@ -524,6 +544,7 @@ pub async fn bulk_import(
                     .name("import-archive-index".to_string())
                     .spawn(move || bg.refresh_text_index_graphs(&snapshots));
             }
+            claim.handled();
         }
         res
     })
@@ -559,6 +580,7 @@ pub async fn bulk_import(
         // graph `{target}/ifcowl` next to the target, which the dataset takes
         // up like any other new graph (see `gate_dataset_graph_target`).
         let mut ifcowl_claim = None;
+        let mut ids_claim = None;
         if let Some(t) = target.as_deref().filter(|t| !t.trim().is_empty()) {
             dataset_graph::authorize_dataset_write_target(
                 &state.store,
@@ -582,6 +604,20 @@ pub async fn bulk_import(
                 .map_err(AppError::Forbidden)?,
                 ifcowl,
             ));
+            // And the IDS projection `{target}/ids`, the same way.
+            let ids = format!("{t}/ids");
+            ids_claim = Some((
+                dataset_graph::gate_dataset_graph_target(
+                    &state.store,
+                    &state.auth_db,
+                    &state.base_url,
+                    ds_id,
+                    &ids,
+                    &user,
+                )
+                .map_err(AppError::Forbidden)?,
+                ids,
+            ));
         }
         match crate::imports::ifc::import_ifc_bytes(
             &state,
@@ -592,6 +628,7 @@ pub async fn bulk_import(
             target,
             false,
             true,
+            true,
             None,
             None,
             crate::imports::ifc::IfcImportBranding::default(),
@@ -600,16 +637,15 @@ pub async fn bulk_import(
         {
             Ok(outcome) => {
                 result.success_count += 1;
-                if let Some((claim, ifcowl)) = &ifcowl_claim {
-                    let _ = dataset_graph::register_claimed_graph(
-                        &state.auth_db,
-                        ds_id,
-                        ifcowl,
-                        *claim,
-                    );
+                for (claim, graph) in ifcowl_claim.iter().chain(ids_claim.iter()) {
+                    let _ =
+                        dataset_graph::register_claimed_graph(&state.auth_db, ds_id, graph, *claim);
                 }
                 let mut graphs = vec![outcome.bot_graph.clone()];
                 if let Some(g) = &outcome.ifcowl_graph {
+                    graphs.push(g.clone());
+                }
+                if let Some(g) = &outcome.ids_graph {
                     graphs.push(g.clone());
                 }
                 result.file_results.push(crate::imports::bulk::FileResult {
@@ -617,7 +653,11 @@ pub async fn bulk_import(
                     status: "ok",
                     error: None,
                     graph_iris: graphs,
-                    quad_count: Some(outcome.stats.bot_triples + outcome.stats.ifcowl_triples),
+                    quad_count: Some(
+                        outcome.stats.bot_triples
+                            + outcome.stats.ifcowl_triples
+                            + outcome.stats.ids_triples,
+                    ),
                 });
             }
             Err(e) => {

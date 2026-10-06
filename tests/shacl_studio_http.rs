@@ -536,3 +536,70 @@ async fn a_database_error_finding_the_gates_refuses_the_write() {
         "a refused PUT must not land in the graph"
     );
 }
+
+// ─── Non-canonical booleans on activation flags ──────────────────────────────
+
+/// SHACL activates `sh:uniqueLang`, `sh:closed`, `sh:deactivated` … only for
+/// the literal `true` (W3C core/property/uniqueLang-002). The store keeps
+/// `"1"^^xsd:boolean` as written, so the engine sees the difference and the
+/// shapes uploads accept the form (they used to refuse it with 422, when the
+/// store read it back as `true`): Studio create and PUT, and the dataset's
+/// `PUT /shapes`. The stored Turtle keeps it.
+#[tokio::test]
+async fn a_non_canonical_boolean_on_an_activation_flag_is_stored_as_written() {
+    use open_triplestore::auth::models::{OwnerType, Visibility};
+    let (state, token) = admin_state();
+    let app = test_app(state.clone());
+    let one = SHAPES.replace(
+        "sh:targetClass ex:Person ;",
+        "sh:targetClass ex:Person ; sh:closed \"1\"^^<http://www.w3.org/2001/XMLSchema#boolean> ;",
+    );
+
+    // Studio create.
+    let (st, _, txt) = json_req(
+        &app,
+        Method::POST,
+        "/api/shacl/shape-graphs",
+        &token,
+        json!({ "name": "people", "visibility": "private", "turtle": one }),
+    )
+    .await;
+    assert!(st.is_success(), "create: {st} {txt}");
+
+    // Studio PUT, then GET: the literal comes back as written.
+    let id = create_shape_graph(&app, &token, SHAPES).await;
+    let uri = format!("/api/shacl/shape-graphs/{id}/turtle");
+    let (st, _, txt) = send(&app, Method::PUT, &uri, &token, "text/turtle", &one).await;
+    assert!(st.is_success(), "PUT: {st} {txt}");
+    let (st, _, txt) = send(&app, Method::GET, &uri, &token, "text/turtle", "").await;
+    assert!(st.is_success(), "GET: {st} {txt}");
+    assert!(txt.contains("\"1\"^^"), "{txt}");
+
+    // The dataset's own shapes graph.
+    state
+        .auth_db
+        .create_organisation("o1", "Acme", "acme", None, None)
+        .unwrap();
+    state
+        .auth_db
+        .create_dataset(
+            "d1",
+            "DS",
+            None,
+            OwnerType::Organisation,
+            "o1",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    let (st, _, txt) = send(
+        &app,
+        Method::PUT,
+        "/api/datasets/d1/shapes",
+        &token,
+        "text/turtle",
+        &one,
+    )
+    .await;
+    assert!(st.is_success(), "dataset PUT: {st} {txt}");
+}

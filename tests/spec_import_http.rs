@@ -1,6 +1,6 @@
 //! Constraint-specification import (6.3): an IDS document becomes a SHACL
 //! Studio shape graph over HTTP, and the generated shapes catch a violating
-//! wall in IFC-shaped RDF while passing a conforming one.
+//! wall in the IDS projection of an IFC model while passing a conforming one.
 
 mod common;
 
@@ -30,17 +30,47 @@ const IDS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
 const DATA_GRAPH: &str = "urn:ids:data";
 
-/// IFC-shaped RDF as the built-in importer emits it: an external wall with a
-/// valid rating, an external wall without one, and an internal wall (out of
-/// scope of the requirement).
-const DATA: &str = r#"
-@prefix ifc: <https://standards.buildingsmart.org/IFC/DEV/IFC4/ADD2_TC1/OWL#> .
-@prefix props: <https://w3id.org/props#> .
-@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
-<urn:w:1> a ifc:IfcWall ; props:ifcName "W1" ; props:Pset_WallCommon_IsExternal true ; props:Pset_WallCommon_FireRating "REI60" .
-<urn:w:2> a ifc:IfcWall ; props:ifcName "W2" ; props:Pset_WallCommon_IsExternal true .
-<urn:w:3> a ifc:IfcWall ; props:ifcName "W3" ; props:Pset_WallCommon_IsExternal false .
-"#;
+/// An IFC4 model: an external wall with a valid rating, an external wall
+/// without one, and an internal wall (out of scope of the requirement). It is
+/// lifted through the IFC lift's IDS projection, the graph an IFC import
+/// writes beside the building topology.
+const STEP: &str = "ISO-10303-21;
+HEADER;
+FILE_SCHEMA(('IFC4'));
+ENDSEC;
+DATA;
+#1=IFCWALL('0W1AAAAAAAAAAAAAAAAAAA',$,'W1',$,$,$,$,$,$);
+#2=IFCWALL('0W2AAAAAAAAAAAAAAAAAAA',$,'W2',$,$,$,$,$,$);
+#3=IFCWALL('0W3AAAAAAAAAAAAAAAAAAA',$,'W3',$,$,$,$,$,$);
+#10=IFCPROPERTYSET('0P1AAAAAAAAAAAAAAAAAAA',$,'Pset_WallCommon',$,(#11,#12));
+#11=IFCPROPERTYSINGLEVALUE('IsExternal',$,IFCBOOLEAN(.T.),$);
+#12=IFCPROPERTYSINGLEVALUE('FireRating',$,IFCLABEL('REI60'),$);
+#13=IFCRELDEFINESBYPROPERTIES('0R1AAAAAAAAAAAAAAAAAAA',$,$,$,(#1),#10);
+#20=IFCPROPERTYSET('0P2AAAAAAAAAAAAAAAAAAA',$,'Pset_WallCommon',$,(#11));
+#21=IFCRELDEFINESBYPROPERTIES('0R2AAAAAAAAAAAAAAAAAAA',$,$,$,(#2),#20);
+#30=IFCPROPERTYSET('0P3AAAAAAAAAAAAAAAAAAA',$,'Pset_WallCommon',$,(#31));
+#31=IFCPROPERTYSINGLEVALUE('IsExternal',$,IFCBOOLEAN(.F.),$);
+#32=IFCRELDEFINESBYPROPERTIES('0R3AAAAAAAAAAAAAAAAAAA',$,$,$,(#3),#30);
+ENDSEC;
+END-ISO-10303-21;
+";
+
+fn projection() -> String {
+    let mut ids = String::new();
+    open_triplestore::ifc::convert_layers(
+        STEP,
+        &open_triplestore::ifc::ConvertOptions {
+            inst_base: "http://example.org/model/".into(),
+            include_ids: true,
+            ..Default::default()
+        },
+        &mut |_| {},
+        &mut |_| {},
+        &mut |c| ids.push_str(c),
+    )
+    .expect("lifts");
+    ids
+}
 
 async fn send(
     app: &Router,
@@ -68,7 +98,7 @@ async fn ids_import_creates_a_shape_graph_whose_shapes_validate_ifc_rdf() {
     let (state, token) = admin_state();
     state
         .store
-        .load_str(DATA, RdfFormat::Turtle, Some(DATA_GRAPH))
+        .load_str(&projection(), RdfFormat::NTriples, Some(DATA_GRAPH))
         .unwrap();
     let app = test_app(state);
 
@@ -127,7 +157,7 @@ async fn ids_import_creates_a_shape_graph_whose_shapes_validate_ifc_rdf() {
         v["turtle"]
             .as_str()
             .unwrap()
-            .contains("sh:targetClass ifc:IfcWall"),
+            .contains("sh:targetClass <https://opentriplestore.org/ns/ifc-ids/IFC4#IFCWALL>"),
         "{txt}"
     );
     assert!(v["shape_graph"].is_null());
@@ -190,11 +220,11 @@ async fn ids_import_creates_a_shape_graph_whose_shapes_validate_ifc_rdf() {
     );
     let report = run.to_string();
     assert!(
-        report.contains("urn:w:2"),
+        report.contains("0W2AAAAAAAAAAAAAAAAAAA"),
         "the report names the violating wall: {txt}"
     );
     assert!(
-        !report.contains("urn:w:3"),
+        !report.contains("0W3AAAAAAAAAAAAAAAAAAA"),
         "the internal wall is out of scope: {txt}"
     );
 }
