@@ -26,10 +26,11 @@ services:
         required: false
     environment:
       - RUST_LOG=${RUST_LOG:-info}
-      # Deployment posture (empty = development). `production` refuses a raw
-      # secret value at startup, and this file passes JWT_SECRET and
-      # S3_SECRET_KEY raw: give each a reference that resolves inside the
-      # container (e.g. file: on a mounted secret, via an override file) first.
+      # Deployment profile (empty = development). `production` refuses a raw
+      # secret value at startup and hardens the defaults (docs/administration.md,
+      # "Production profile"). JWT_SECRET then needs a reference that resolves
+      # inside the container (file: on a mounted secret, via an override file);
+      # S3_SECRET_KEY below already is one.
       - OTS_ENV=${OTS_ENV:-}
       # Serve the bundled web UI at /. Set SERVE_FRONTEND=false in .env for an
       # API-only container (SPARQL / Graph Store / REST are unaffected).
@@ -44,7 +45,10 @@ services:
       - S3_ENDPOINT=http://minio:9000
       - S3_BUCKET=${S3_BUCKET:-triplestore-assets}
       - S3_ACCESS_KEY=${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set (no minioadmin default)}
-      - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set (no minioadmin default)}
+      # A reference to the MinIO password forwarded on the next line, so the
+      # production profile (which refuses raw secrets) works with this file.
+      - S3_SECRET_KEY=env:MINIO_ROOT_PASSWORD
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set (no minioadmin default)}
       - S3_REGION=${S3_REGION:-us-east-1}
       # OIDC resource server (optional). Set OIDC_ISSUER to
       # enable verifying IdP-issued access tokens; leave blank to keep password/PAT only.

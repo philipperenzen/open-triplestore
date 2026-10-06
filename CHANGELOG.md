@@ -729,6 +729,23 @@ ignored):
   module (a raw value is refused under `OTS_ENV=production`).
 - A seed bundle's opt-out variable that is not a boolean skips the bundle with
   an error, and its `password_env` goes through the secrets module.
+- **Production profile.** `OTS_ENV=production` now hardens the defaults:
+  secure cookies on, self-registration closed (`OTS_DISABLE_REGISTRATION`
+  defaults to `true`; the first account can still register), `LDP_ROOT_ACL`
+  defaults to `owners`, `EMBED_FRAME_ANCESTORS` to `'none'`,
+  `SEED_STANDARDS_DEMO` to `false`, `OTS_OIDC_SESSION_POLICY` to `scoped`, and
+  `STORE_AUTO_RECOVER` to `false` (a corrupt store fails the start instead of
+  coming back empty). Each can be set explicitly. Production refuses to start
+  with `SECURE_COOKIES=false`, `RATE_LIMIT_DISABLED=true`, `*` in
+  `CORS_ORIGINS`, or a raw value in any secret setting.
+- `SECURE_COOKIES` defaults to on whenever `BASE_URL` is https, in every
+  profile; set it to `false` explicitly for plain-HTTP development behind an
+  https base URL.
+- The startup log lists the profile and every setting not at its built-in
+  default, with its source (secrets redacted).
+- `docker-compose.yml` passes `S3_SECRET_KEY=env:MINIO_ROOT_PASSWORD` (a
+  reference) and forwards `MINIO_ROOT_PASSWORD`, so the production profile can
+  start under compose once `JWT_SECRET` is a reference too.
 
 ### Changed
 - **`image` Cargo feature.** `image` is an alias for the published image's

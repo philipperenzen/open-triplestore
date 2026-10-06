@@ -331,3 +331,113 @@ fn the_live_view_panics_on_a_malformed_value_instead_of_defaulting() {
     let c = Config::live_from(|n| (n == "OTS_SERVICE_MAX_ROWS").then(|| "lots".to_string()));
     let _ = c.get(&SERVICE_MAX_ROWS);
 }
+
+const PROD: (&str, &str) = ("OTS_ENV", "production");
+
+#[test]
+fn the_production_profile_hardens_the_defaults() {
+    let c = load(&[PROD]).unwrap();
+    assert!(c.production());
+    assert!(c.get(&SECURE_COOKIES), "secure cookies");
+    assert!(c.get(&DISABLE_REGISTRATION), "registration closed");
+    assert_eq!(c.get(&LDP_ROOT_ACL), "owners");
+    assert_eq!(c.get(&EMBED_FRAME_ANCESTORS), "'none'");
+    assert!(!c.get(&SEED_STANDARDS_DEMO), "no demo seeding");
+    assert_eq!(c.get(&OIDC_SESSION_POLICY), "scoped");
+    assert!(!c.get(&STORE_AUTO_RECOVER), "fail fast on a corrupt store");
+    assert!(!c.get(&RATE_LIMIT_DISABLED));
+    assert_eq!(c.entry(LDP_ROOT_ACL.name()).source, Source::Profile);
+    // Development keeps the open defaults.
+    let d = load(&[]).unwrap();
+    assert!(!d.get(&DISABLE_REGISTRATION));
+    assert_eq!(d.get(&LDP_ROOT_ACL), "open");
+    assert_eq!(d.get(&EMBED_FRAME_ANCESTORS), "*");
+    assert!(d.get(&STORE_AUTO_RECOVER));
+    assert_eq!(d.get(&OIDC_SESSION_POLICY), "session");
+}
+
+#[test]
+fn production_defaults_can_be_overridden_explicitly() {
+    let c = load(&[
+        PROD,
+        ("OTS_DISABLE_REGISTRATION", "false"),
+        ("LDP_ROOT_ACL", "open"),
+        ("EMBED_FRAME_ANCESTORS", "https://portal.example.org"),
+        ("SEED_STANDARDS_DEMO", "true"),
+        ("OTS_OIDC_SESSION_POLICY", "session"),
+        ("STORE_AUTO_RECOVER", "true"),
+    ])
+    .unwrap();
+    assert!(!c.get(&DISABLE_REGISTRATION));
+    assert_eq!(c.get(&LDP_ROOT_ACL), "open");
+    assert_eq!(c.get(&EMBED_FRAME_ANCESTORS), "https://portal.example.org");
+    assert!(c.get(&SEED_STANDARDS_DEMO));
+    assert_eq!(c.get(&OIDC_SESSION_POLICY), "session");
+    assert!(c.get(&STORE_AUTO_RECOVER));
+    assert_eq!(c.entry(LDP_ROOT_ACL.name()).source, Source::Env);
+}
+
+#[test]
+fn production_refuses_what_it_must_not_run_with() {
+    let names = |vars: &[(&str, &str)]| -> Vec<String> {
+        errors_of(vars).into_iter().map(|e| e.name).collect()
+    };
+    assert_eq!(
+        names(&[PROD, ("SECURE_COOKIES", "false")]),
+        ["SECURE_COOKIES"]
+    );
+    assert_eq!(
+        names(&[PROD, ("RATE_LIMIT_DISABLED", "true")]),
+        ["RATE_LIMIT_DISABLED"]
+    );
+    assert_eq!(
+        names(&[PROD, ("CORS_ORIGINS", "https://app.example.org, *")]),
+        ["CORS_ORIGINS"]
+    );
+    assert_eq!(
+        names(&[PROD, ("LLM_API_KEY", "sk-raw-value")]),
+        ["LLM_API_KEY"]
+    );
+    // All at once.
+    assert_eq!(
+        errors_of(&[
+            PROD,
+            ("SECURE_COOKIES", "off"),
+            ("RATE_LIMIT_DISABLED", "1"),
+            ("CORS_ORIGINS", "*"),
+        ])
+        .len(),
+        3
+    );
+    // The same values are fine in development.
+    assert!(load(&[
+        ("SECURE_COOKIES", "false"),
+        ("RATE_LIMIT_DISABLED", "true"),
+        ("CORS_ORIGINS", "*"),
+        ("LLM_API_KEY", "sk-raw-value"),
+    ])
+    .is_ok());
+    // A reference is fine in production.
+    assert!(load(&[PROD, ("LLM_API_KEY", "file:/run/secrets/llm")]).is_ok());
+}
+
+#[test]
+fn secure_cookies_follow_an_https_base_url() {
+    let c = load(&[("BASE_URL", "https://data.example.org")]).unwrap();
+    assert!(c.get(&SECURE_COOKIES));
+    let c = load(&[("BASE_URL", "http://localhost:7878")]).unwrap();
+    assert!(!c.get(&SECURE_COOKIES));
+    // Development may still turn them off explicitly behind https.
+    let c = load(&[
+        ("BASE_URL", "https://data.example.org"),
+        ("SECURE_COOKIES", "false"),
+    ])
+    .unwrap();
+    assert!(!c.get(&SECURE_COOKIES));
+}
+
+#[test]
+fn an_unknown_profile_stops_the_start() {
+    let e = errors_of(&[("OTS_ENV", "prod")]);
+    assert_eq!(e[0].name, "OTS_ENV");
+}

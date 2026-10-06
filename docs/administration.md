@@ -330,6 +330,37 @@ and **refuses to start on any problem, listing every one**:
   reference (`env:NAME`, `file:/path`, `vault:…`); a malformed reference is an
   error.
 
+### Production profile
+
+`OTS_ENV=production` refuses raw secret values (every secret setting must be a
+`env:`, `file:` or `vault:` reference) and changes these defaults:
+
+| Setting | Development | Production |
+|---|---|---|
+| `SECURE_COOKIES` | on when `BASE_URL` is https | on; an explicit `false` **stops the start** |
+| `OTS_DISABLE_REGISTRATION` | `false` | `true` (the first account can still register, to bootstrap) |
+| `LDP_ROOT_ACL` | `open` | `owners` |
+| `EMBED_FRAME_ANCESTORS` | `*` | `'none'` |
+| `SEED_STANDARDS_DEMO` | `true` | `false` (no demo datasets, no demo IFC/STL downloads) |
+| `OTS_OIDC_SESSION_POLICY` | `session` | `scoped` |
+| `STORE_AUTO_RECOVER` | `true` | `false`: a corrupt store fails the start |
+
+Each default can be overridden by setting the variable. Two settings are
+refused outright in production: `RATE_LIMIT_DISABLED=true`, and `*` in
+`CORS_ORIGINS` (it reflects any origin with credentials). At startup the
+server logs the profile and every setting that is not at its built-in
+default, with its source; secrets are redacted.
+
+Why a corrupt store fails the start in production: the automatic rebuild
+quarantines the store and restores the newest *unencrypted* backup — up to
+one backup interval old, with the identity database untouched — and starts
+empty when there is none, so the service can come back empty and healthy. A
+failed start is visible to the orchestrator and the operator, keeps the data
+directory as it was, and serves nothing wrong. (Starting read-only instead
+would serve nothing either: a corrupt store cannot be opened.) Restore a
+backup with `--restore`, or set `STORE_AUTO_RECOVER=true` to accept the
+rebuild.
+
 `GET /api/admin/config` (admin only) answers every setting with its effective
 value, default, kind, documentation and source — `cli`, `env`, `file` (a
 secret given as a `file:` reference), `profile` (the production profile's
@@ -351,11 +382,11 @@ as a reference shows the reference.
 | `ACCEPT_LEGACY_TOKENS` | `true` | `false` refuses this store's own session tokens (the bundled web UI's sign-in included) and every `ots_` API token, leaving only IdP tokens, provider tokens and federation assertions. For API-only deployments behind an IdP. |
 | `OTS_OIDC_SESSION_POLICY` | `session` | What an access token this store issues as an [OIDC provider](oidc-provider.md#what-a-provider-token-may-do) may do: `session` reads and writes but cannot create API tokens; `scoped` writes only with a write scope, which the provider cannot issue today, so its tokens are read-only for non-admins; `full` also creates API tokens. Admin accounts' tokens always write. Any other value stops the start. |
 | `OTS_OIDC_WRITE_SCOPES` | *(unset)* | Under `scoped`: extra scope values, comma- or space-separated, that count as a write grant besides `write` and `admin`. |
-| `SECURE_COOKIES` | `false` | Issue auth cookies with the `Secure` attribute (HTTPS only). **Set to `true` in any TLS deployment**; leave `false` for plain-HTTP local development. |
+| `SECURE_COOKIES` | on when `BASE_URL` is https or `OTS_ENV=production`, else off | Issue auth cookies with the `Secure` attribute (HTTPS only). Production refuses `false`; set `false` only for plain-HTTP local development behind an https `BASE_URL`. |
 | `SERVE_FRONTEND` | `true` | Serve the bundled web UI (frontend SPA) at `/`. Set `false` for a headless, API-only server — SPARQL, Graph Store and REST endpoints are unaffected. Also the `--serve-frontend` CLI flag. |
-| `SEED_STANDARDS_DEMO` | `true` | On first start, seed the public *Open Triplestore* demo organisation: one dataset per standards category with saved queries, plus a 3D demo that downloads openly licensed IFC and STL sample files from public URLs (`SEED_IFC_URL=` set to empty skips those downloads; see [operations.md](operations.md)). `false`/`0`/`no`/`off` skips the seed. It runs once: the seed is skipped while the organisation exists, and turning it off later does not remove it. |
+| `SEED_STANDARDS_DEMO` | `true` (`false` in production) | On first start, seed the public *Open Triplestore* demo organisation: one dataset per standards category with saved queries, plus a 3D demo that downloads openly licensed IFC and STL sample files from public URLs (`SEED_IFC_URL=` set to empty skips those downloads; see [operations.md](operations.md)). `false` skips the seed. It runs once: the seed is skipped while the organisation exists, and turning it off later does not remove it. |
 | `CORS_ORIGINS` | *(empty — same-origin only)* | Comma-separated allowed origins, e.g. `https://app.example.com,https://www.example.com` |
-| `EMBED_FRAME_ANCESTORS` | `*` | CSP `frame-ancestors` source list for the `/embed/*` pages, used verbatim: `https://intranet.example https://*.example.org` restricts embedding to those sites, and `'none'` (or an empty value) disables it. Other pages are never frameable from another site. See [embedding.md](embedding.md#restricting-who-may-embed). |
+| `EMBED_FRAME_ANCESTORS` | `*` (`'none'` in production) | CSP `frame-ancestors` source list for the `/embed/*` pages, used verbatim: `https://intranet.example https://*.example.org` restricts embedding to those sites, and `'none'` disables it. Other pages are never frameable from another site. See [embedding.md](embedding.md#restricting-who-may-embed). |
 | `TRUSTED_PROXY_CIDRS` | *(empty — direct TCP IP)* | Comma-separated CIDRs of reverse proxies whose `X-Forwarded-For` / `X-Real-IP` is believed, e.g. `10.0.0.0/8,172.16.0.0/12`. The client IP derived this way keys the per-IP rate limits and the guest AI budget and is the IP recorded in the audit log. From any other peer the headers are ignored and the TCP peer address is the client. Leave empty when not behind a proxy; behind one, set it, or every client appears as the proxy. |
 | `OTS_DL_BACKEND` | *(unset)* | Backend of the `owl2-dl` regime: `sidecar` (the bundled OWL API + HermiT reasoner, `docker compose --profile reasoner`), `konclude`, or `native` (OWL 2 RL + DL-syntax rules, sound but not complete). Unset: `owl2-dl` answers 503 (see [owl2-dl.md](owl2-dl.md)). |
 | `OTS_KONCLUDE_BIN` | `Konclude` | Konclude binary for `OTS_DL_BACKEND=konclude` (not shipped in the image; LGPL-3.0). |
@@ -390,7 +421,7 @@ as a reference shows the reference.
 | `OTS_SERVICE_MAX_CALLS` | `64` | Remote requests one query may make through `SERVICE`. An answer for the same endpoint and pattern is fetched once and reused, and reuse does not count. Over the cap the call fails as above. |
 | `OTS_SERVICE_DEADLINE_SECS` | *(the SPARQL query timeout, `SPARQL_QUERY_TIMEOUT_SECS`: `30`)* | How long after its start a query may still make `SERVICE` requests. A request is cut short at the deadline and the query fails with an error naming this variable, also under `SERVICE SILENT`. |
 | `ENDPOINT_ACL_ENFORCE` | `true` | Enforce endpoint ACL rules. Set to `false` to disable enforcement entirely — an escape hatch for a misfiring rule (see [security.md](security.md#endpoint-acl)), not a normal setting. |
-| `RATE_LIMIT_DISABLED` | `false` | Set to `true`/`1` to switch off per-IP rate limiting (auth, SPARQL, import and map/3D viewer quotas). For trusted/internal deployments and the test/CI harness only — **never enable on a public server**. Secure by default. |
+| `RATE_LIMIT_DISABLED` | `false` | Set to `true` to switch off per-IP rate limiting (auth, SPARQL, import and map/3D viewer quotas). For trusted/internal deployments and the test/CI harness only. **Refused under `OTS_ENV=production`.** |
 | `OTS_TILES3D_MAX_FEATURES` | `10000` | Most features one 3D Tiles GLB carries. The tileset is a single tile until tiling exists; past the cap it serves the first features in IRI order and flags the cut (`asset.extras.truncated`, `X-Tiles3d-Truncated`). See [geo-3d-platform.md](geo-3d-platform.md#4-3d-tiles--the-binding-contract). |
 | `RUST_LOG` | *(unset: the `--log-level` flag, `info`)* | Log filter in `tracing` `EnvFilter` syntax: a level (`debug`), or per-module directives such as `info,open_triplestore::shacl=debug`. Overrides `--log-level` when set; Docker Compose sets `info`. |
 | `BASE_URL` | `http://localhost:7878` | Base URL used to mint linked-data IRIs (no trailing slash). Behind a reverse proxy that serves the instance under a path, include the path (`https://example.org/ots`); see [Serving under a path prefix](operations.md#serving-under-a-path-prefix). |
@@ -448,9 +479,10 @@ as a reference shows the reference.
 ### Recommended production `.env`
 
 ```dotenv
-JWT_SECRET=<64-char random string>
+OTS_ENV=production
+# A reference that resolves inside the container (a mounted secret file):
+JWT_SECRET=file:/run/secrets/jwt_secret
 CORS_ORIGINS=https://www.example.com
-SECURE_COOKIES=true
 BASE_URL=https://www.example.com
 MINIO_ROOT_USER=triplestore
 MINIO_ROOT_PASSWORD=<strong password>
@@ -463,6 +495,23 @@ SMTP_FROM=Open Triplestore <no-reply@example.com>
 MAIL_SENDER_DOMAINS=example.com
 MAIL_HOSTNAME=mail.example.com
 ```
+
+`JWT_SECRET` must be a reference in production. A file reference needs the
+file inside the container; with Compose, mount it as a secret in a
+`docker-compose.override.yml`:
+
+```yaml
+services:
+  triplestore:
+    secrets: [jwt_secret]
+secrets:
+  jwt_secret:
+    file: ./secrets/jwt_secret   # openssl rand -hex 32 > secrets/jwt_secret
+```
+
+The MinIO credential needs nothing: compose hands the server
+`S3_SECRET_KEY=env:MINIO_ROOT_PASSWORD`, a reference to the variable it also
+forwards.
 
 Put it next to `docker-compose.yml` as `.env` and start the stack:
 

@@ -9,8 +9,15 @@
 //! dir, never deleted), reopens a fresh store, and best-effort restores the newest
 //! unencrypted backup; the normal startup seeds then repopulate demo content.
 //!
-//! Opt out with `STORE_AUTO_RECOVER=false` — then a corrupt store fails fast with a
-//! remediation message instead of being rebuilt.
+//! `STORE_AUTO_RECOVER=false` — the default under `OTS_ENV=production` — makes a
+//! corrupt store fail fast with a remediation message instead of being rebuilt.
+//! Production fails fast because the rebuild can bring the service back *empty
+//! and healthy*: it restores only an unencrypted backup (up to one backup
+//! interval old, with the identity database untouched), and with none it starts
+//! fresh. A crash loop is visible to the orchestrator and the operator, keeps
+//! the data directory exactly as it was, and serves nothing wrong; a quietly
+//! emptied store is none of those. (Starting read-only instead would serve
+//! nothing either — a corrupt store cannot be opened at all.)
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -34,8 +41,9 @@ pub fn open_store_with_recovery(data_dir: &Path, backup_dir: &Path) -> anyhow::R
                     "the triple store at {} is corrupt ({e}). Auto-recovery is disabled \
                      (STORE_AUTO_RECOVER=false). To recover manually: stop the service, move the \
                      RocksDB files in that directory aside (or restore a backup from {}), then \
-                     restart. Set STORE_AUTO_RECOVER=true (the default) to let the server \
-                     quarantine the corrupt files and rebuild automatically.",
+                     restart. Set STORE_AUTO_RECOVER=true to let the server quarantine the \
+                     corrupt files and rebuild automatically (it restores only an unencrypted \
+                     backup and otherwise starts empty).",
                     data_dir.display(),
                     backup_dir.display(),
                 );

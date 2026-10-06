@@ -215,6 +215,15 @@ fn cluster_members(v: &str) -> Result<(), String> {
 
 // ── derived defaults ───────────────────────────────────────────────────────
 
+/// Secure cookies whenever the browser reaches the store over https, and
+/// always in production.
+fn secure_cookies(ctx: &Ctx) -> Option<String> {
+    let https = ctx
+        .value(BASE_URL.name())
+        .is_some_and(|u| u.to_ascii_lowercase().starts_with("https://"));
+    Some((https || ctx.production()).to_string())
+}
+
 fn query_timeout_secs(ctx: &Ctx) -> Option<String> {
     ctx.value(SPARQL_QUERY_TIMEOUT.name())
 }
@@ -286,14 +295,14 @@ settings! {
         .cli("trusted-proxy-cidrs")
         .doc("Reverse proxies whose X-Forwarded-For is believed, as CIDR blocks.");
     SECURE_COOKIES: bool = Spec::new("SECURE_COOKIES", Kind::Bool, "http")
-        .default("false")
+        .derived("true when BASE_URL is https or OTS_ENV=production", secure_cookies)
         .cli("secure-cookies")
-        .doc("Issue auth cookies with the `Secure` attribute (HTTPS only).");
+        .doc("Issue auth cookies with the `Secure` attribute (HTTPS only); production refuses `false`.");
     RATE_LIMIT_DISABLED: bool = Spec::new("RATE_LIMIT_DISABLED", Kind::Bool, "http")
         .default("false")
-        .doc("Turn per-IP rate limiting off (trusted or test deployments only).");
+        .doc("Turn per-IP rate limiting off (trusted or test deployments only); production refuses it.");
     EMBED_FRAME_ANCESTORS: String = Spec::new("EMBED_FRAME_ANCESTORS", Kind::Custom { what: "CSP sources", check: frame_ancestors }, "http")
-        .default("*")
+        .profile(Some("*"), Some("'none'"))
         .doc("Who may frame the `/embed/*` pages (CSP frame-ancestors); `'none'` disables embedding.");
     MAX_UPLOAD_BYTES: Option<u64> = Spec::new("OTS_MAX_UPLOAD_BYTES", Kind::Bytes { min: 1 }, "http")
         .doc("Request-body limit for RDF uploads (default 512 MiB for the Graph Store, 1 GiB for bulk import).");
@@ -325,7 +334,7 @@ settings! {
         .cli("refresh-token-expiry-days")
         .doc("Lifetime of a refresh token.");
     DISABLE_REGISTRATION: bool = Spec::new("OTS_DISABLE_REGISTRATION", Kind::Bool, "auth")
-        .default("false")
+        .profile(Some("false"), Some("true"))
         .doc("Close public self-registration (the first account can always register).");
     REQUIRE_VERIFIED_EMAIL: bool = Spec::new("OTS_REQUIRE_VERIFIED_EMAIL", Kind::Bool, "auth")
         .default("false")
@@ -334,7 +343,7 @@ settings! {
         .default("read")
         .doc("What the guest role may do beyond reading: write, create_datasets, api_tokens, publish, all.");
     OIDC_SESSION_POLICY: String = Spec::new("OTS_OIDC_SESSION_POLICY", Kind::Enum(&["session", "scoped", "full"]), "auth")
-        .default("session")
+        .profile(Some("session"), Some("scoped"))
         .doc("What an access token this store issues as an OIDC provider may do.");
     OIDC_WRITE_SCOPES: Option<String> = Spec::new("OTS_OIDC_WRITE_SCOPES", Kind::Custom { what: "scopes", check: scope_words }, "auth")
         .doc("Extra scope values that grant write to a provider token under the `scoped` policy.");
@@ -369,7 +378,7 @@ settings! {
     TRUSTED_ISSUERS: Vec<String> = Spec::new("OTS_TRUSTED_ISSUERS", Kind::Custom { what: "issuer URLs", check: idp_url_list }, "auth")
         .doc("Peer instances whose identity assertions this store accepts.");
     LDP_ROOT_ACL: String = Spec::new("LDP_ROOT_ACL", Kind::Enum(&["open", "owners"]), "auth")
-        .default("open")
+        .profile(Some("open"), Some("owners"))
         .doc("What the LDP root ACL is seeded with on first start: `open` (every user reads and writes) or `owners` (admins only).");
     REMOTE_AUTH: String = Spec::new("OTS_REMOTE_AUTH", Kind::Enum(&["none", "assert"]), "auth")
         .default("none")
@@ -394,8 +403,8 @@ settings! {
         .cli("s3-region")
         .doc("S3 region.");
     STORE_AUTO_RECOVER: bool = Spec::new("STORE_AUTO_RECOVER", Kind::Bool, "storage")
-        .default("true")
-        .doc("On a corrupt store at startup, quarantine it and restore the newest unencrypted backup.");
+        .profile(Some("true"), Some("false"))
+        .doc("On a corrupt store at startup, quarantine it and restore the newest unencrypted backup; off, the start fails with a remediation message (the production default).");
     CLAMAV_ADDR: Option<String> = Spec::new("CLAMAV_ADDR", Kind::Custom { what: "host:port", check: host_port }, "storage")
         .doc("ClamAV daemon that scans uploads; unset disables scanning.");
 
@@ -615,7 +624,7 @@ settings! {
 
     // ── seeding ──
     SEED_STANDARDS_DEMO: bool = Spec::new("SEED_STANDARDS_DEMO", Kind::Bool, "seed")
-        .default("true")
+        .profile(Some("true"), Some("false"))
         .doc("Seed the standards demo datasets at boot.");
     SEED_STANDARD_VOCABS: bool = Spec::new("SEED_STANDARD_VOCABS", Kind::Bool, "seed")
         .default("true")
@@ -808,6 +817,48 @@ pub(super) fn checks(config: &super::Config) -> Vec<ConfigError> {
         })
     };
     let value = |k: &str| config.value(k);
+
+    // The production profile's refusals: settings production must not run
+    // with, whatever else is configured.
+    if config.production() {
+        if value(SECURE_COOKIES.name()).as_deref() == Some("false") {
+            fail(
+                SECURE_COOKIES.name(),
+                "production refuses `false`: session cookies would travel over plain HTTP. \
+                 Serve the store over https (BASE_URL https://…) behind a TLS proxy",
+            );
+        }
+        if value(RATE_LIMIT_DISABLED.name()).as_deref() == Some("true") {
+            fail(
+                RATE_LIMIT_DISABLED.name(),
+                "production refuses turning rate limiting off",
+            );
+        }
+        if super::parse::list(&value(CORS_ORIGINS.name()).unwrap_or_default())
+            .iter()
+            .any(|o| o == "*")
+        {
+            fail(
+                CORS_ORIGINS.name(),
+                "production refuses `*`: it reflects any origin with credentials; list the \
+                 trusted origins",
+            );
+        }
+        for spec in super::SPECS {
+            if !matches!(spec.kind, Kind::Secret) {
+                continue;
+            }
+            if let Some(v) = value(spec.name) {
+                if !crate::secrets::looks_like_ref(&v) {
+                    fail(
+                        spec.name,
+                        "production refuses a raw secret value: give a reference \
+                         (env:NAME, file:/path or vault:…)",
+                    );
+                }
+            }
+        }
+    }
 
     if value(OIDC_ISSUER.name()).is_some() && value(OIDC_AUDIENCE.name()).is_none() {
         fail(

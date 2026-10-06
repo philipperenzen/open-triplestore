@@ -77,8 +77,9 @@ the pick hit an IFC sub-element such as a wall or beam).
 
 ### Restricting who may embed
 
-By default `/embed/*` allows any origin. Operators can restrict or disable this
-with the `EMBED_FRAME_ANCESTORS` environment variable on the server:
+By default `/embed/*` allows any origin; under `OTS_ENV=production` the default
+is `'none'`, so embedding is off until an operator names the sites. Restrict or
+disable it with the `EMBED_FRAME_ANCESTORS` environment variable on the server:
 
 ```bash
 EMBED_FRAME_ANCESTORS="https://intranet.example https://*.example.org"  # allowlist

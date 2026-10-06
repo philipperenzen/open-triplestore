@@ -3163,7 +3163,15 @@ pub fn run_boot_seed(
             Ok(None) => {}
             Err(e) => tracing::warn!("ldp: seeding the root ACL failed: {e}"),
         }
-        if wac::root_acl_is_open(store, base).unwrap_or(false) {
+        let open = wac::root_acl_is_open(store, base).unwrap_or(false);
+        if open && crate::config::LDP_ROOT_ACL.get() == "owners" {
+            // The root ACL is seeded once; the setting does not rewrite it.
+            tracing::warn!(
+                "ldp: LDP_ROOT_ACL=owners, but the root ACL seeded on an earlier start is open: \
+                 every signed-in user may write under /ldp/. Tighten it with PUT \
+                 {base}/ldp/.acl (see docs/ldp.md)"
+            );
+        } else if open {
             tracing::info!(
                 "ldp: the root ACL is open: every signed-in user may read, write and append \
                  under /ldp/; tighten it with PUT {base}/ldp/.acl (see docs/ldp.md)"

@@ -263,6 +263,27 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     print_banner();
+    // The effective configuration: the profile, and every setting that is not
+    // at its built-in default, with where it came from. Secrets are redacted.
+    info!(
+        "configuration: {} profile",
+        if settings.production() {
+            "production"
+        } else {
+            "development"
+        }
+    );
+    for d in settings.describe() {
+        if d.source == config::Source::Default {
+            continue;
+        }
+        info!(
+            "  {} = {} ({})",
+            d.name,
+            d.value.as_deref().unwrap_or("(unset)"),
+            d.source.as_str()
+        );
+    }
     for name in config::unknown_names(std::env::vars().map(|(k, _)| k)) {
         tracing::warn!("{name} is set but is not a setting this version reads (a typo?)");
     }

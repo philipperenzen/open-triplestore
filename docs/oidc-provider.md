@@ -84,11 +84,11 @@ tokens and `ots_` API tokens are not affected.
 
 | Policy | Read | Write | Create API tokens |
 |---|---|---|---|
-| `session` *(default)* | yes | yes | no |
-| `scoped` | yes | only if the token's `scope` grants it (see below) | no |
-| `full` (`legacy` is accepted too) | yes | yes | yes |
+| `session` *(default in development)* | yes | yes | no |
+| `scoped` *(default under `OTS_ENV=production`)* | yes | only if the token's `scope` grants it (see below) | no |
+| `full` | yes | yes | yes |
 
-- Under the default, **every registered client's tokens can write** wherever
+- Under `session`, **every registered client's tokens can write** wherever
   the user can, whatever scopes the client asked for. Writes are still subject
   to the user's dataset and graph permissions, but a client the user signed
   into with `openid profile email` can change their data. Register only
