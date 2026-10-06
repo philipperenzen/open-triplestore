@@ -38,7 +38,7 @@ applies.
 | GeoSPARQL 1.0 | Spatial RDF, topology functions, RDFS entailment and query rewrite | Full⁵ |
 | GeoSPARQL 1.1 | Spatial RDF, relation/metric functions | Full⁵ (all conformance classes but the optional DGGS class) |
 | SHACL Core | Structural constraint validation | Full⁶ |
-| SHACL Advanced (AF / SPARQL) | SPARQL constraints, rules, targets | Partial⁷ |
+| SHACL Advanced (AF / SPARQL) | SPARQL constraints, rules, targets | Full⁷ |
 | SHACL-C | Compact-syntax parser/serializer (W3C CG report) | Full⁸ |
 | OPM (Ontology for Property Management) | Property states with history, calculations | Full¹⁹ — `opm:Property` / `opm:PropertyState` / current-outdated, the reliability classes including `opm:Required`, `opm:documentation`, `opm:Deleted` with restore, `opm:Calculation` with derived states (POST / PUT / outdated), listings and snapshots, canonical OPM export/import and the OPM profile shapes. See [datasets.md](datasets.md#time-evolving-properties-opm-profile). |
 | buildingSMART IDS 1.0 | Information Delivery Specification → SHACL | Full — every facet (entity with predefined type, attribute, property and quantity, classification, material, partOf), value restrictions with the IDS tolerance and XSD patterns, required/optional/prohibited cardinality and specifications, checked over the IFC lift's IDS projection; documents validated against the IDS 1.0 XSD and the IDS audit rules (not the standard `Pset_` templates); lossless export of imported specifications. All 334 cases of the buildingSMART IDS test corpus pass in CI ([conformance/ids.md](conformance/ids.md)) — a development result, not a buildingSMART certification. See [shacl.md](shacl.md#importing-constraint-specifications-ids). |
@@ -329,25 +329,33 @@ behavior and will flip green when the limitation is resolved.
    (`sh:SPARQLTarget` and `sh:SPARQLTargetType`, parameters bound as terms);
    `sh:SPARQLFunction` (`sh:select` or `sh:ask` bodies, arguments bound as
    terms, bodies reading the run's data graphs, scoped to the declaring shapes
-   graph); all seven node expressions of the 2017 Note; expression constraints
-   (`sh:expression`, with the Note's semantics since 2026-10-02); and triple and
-   SPARQL rules with `sh:condition` and `sh:order`; and result annotations
-   (`sh:resultAnnotation`, since 2026-10-03, in the RDF report and the JSON)
-   ([shacl.md](shacl.md)). Results name their constraint component IRI, and
-   SPARQL and expression constraints' results their `sh:sourceConstraint`.
+   graph); all seven node expressions of the 2017 Note and expression
+   constraints (`sh:expression`, with the Note's semantics since 2026-10-02);
+   triple and SPARQL rules with `sh:order`, `sh:condition` and `sh:deactivated`;
+   and result annotations (`sh:resultAnnotation`, since 2026-10-03, in the RDF
+   report and the JSON) ([shacl.md](shacl.md)). Results name their constraint
+   component IRI, and SPARQL and expression constraints' results their
+   `sh:sourceConstraint`. **Entailment regimes** (SHACL §1.5; SHACL-AF §8.3,
+   since 2026-10-03): a shapes graph that declares `sh:entailment sh:Rules` has
+   its rules run before every validation of it, into a run-local inferences
+   graph that is validated with the data and never stored; the RDFS regime is
+   supported the same way through the `rdfs-entailment` materialiser; any other
+   regime fails the run, naming it, which is the failure the spec requires.
    **Optional, not supported:** `$shapesGraph` and `$currentShape` (SHACL
    §5.3.1). A constraint that uses them fails the shapes graph at load, which
    is the failure the spec requires of a processor without them; the W3C test
    `shapesGraph-001` is counted as "optional, unsupported", not as a pass or a
-   known failure (w3c/data-shapes#426). **Not implemented:** `sh:entailment`
-   (SHACL §1.5; SHACL-AF §8.3): a shapes graph that declares the `sh:Rules`
-   regime is validated without running its rules first, and one that declares
-   any regime gets neither that regime nor the failure the specs require of a
-   processor without it. TopQuadrant's SHACL-AF tests: 9 of 10 cases pass at
-   full report equality, and the tenth expects TopBraid behaviour outside the
-   spec, where we report the failure the spec requires
-   ([conformance/shacl.md](conformance/shacl.md)); the W3C corpus is compared
-   at full result-set equality (all but `sh:resultMessage`).
+   known failure (w3c/data-shapes#426). Graded *Full* (2026-10-06, round-2
+   merge train) against the SHACL-AF 2017 Note and SHACL-SPARQL (SHACL 1.0
+   §5–6); SHACL-JS, a separate Note, is out of scope, and the SHACL 1.2 drafts
+   are not part of this grade. TopQuadrant's SHACL-AF tests: 9 of 10 cases pass
+   at full report equality. The tenth, `target/sparqlTarget-001`, is a defect in
+   the test suite, which the Full rubric accepts: it expects TopBraid's fallback
+   to the file's Turtle prefixes, which the SHACL prefix mechanism (§5.2.1) does
+   not have, and we report the failure the spec requires
+   ([#502](https://github.com/philipperenzen/open-triplestore/issues/502);
+   [conformance/shacl.md](conformance/shacl.md)). The W3C corpus is compared at
+   full result-set equality (all but `sh:resultMessage`).
 8. **SHACL-C** — graded against the SHACL Community Group report
    [SHACL Compact Syntax](https://w3c.github.io/shacl/shacl-compact-syntax/)
    (not the SHACL 1.2 Compact Syntax draft). The parser implements the report's

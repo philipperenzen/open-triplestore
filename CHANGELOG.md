@@ -300,6 +300,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `6687b48`) are vendored under `tests/fixtures/shacl-af-topquadrant/` and run
   by `tests/shacl_af_corpus.rs` as a two-way ratchet: 9 of 10 cases pass
   (`docs/conformance/shacl.md`).
+- **SHACL validation under `sh:entailment sh:Rules` and RDFS.** A shapes graph
+  that declares `sh:entailment sh:Rules` has its SHACL rules run before every
+  validation of it (SHACL-AF §8.3) — on-demand dataset validation, SHACL Studio
+  pipelines, write gates and `shacl::validate` — with the `/infer` engine
+  (`sh:order`, `sh:condition`, `sh:deactivated`, to a fixed point), and the
+  validation sees the data plus what the rules inferred. The inferences go into
+  a graph of a run-local in-memory copy of the data, never into a stored graph:
+  validating writes nothing, and a gate stores only what was written. The RDFS
+  regime (`http://www.w3.org/ns/entailment/RDFS`) uses the `rdfs-entailment`
+  materialiser the same way; declared together, rules and RDFS run in turn
+  until neither adds a triple. See `docs/shacl.md`.
 - **RDF Patch logs per dataset.** Each dataset has an
   [RDF Patch log](https://afs.github.io/rdf-delta/rdf-patch-logs.html) at
   `/api/datasets/{id}/log`: `POST` appends a patch (exactly one `H id`, at
@@ -658,17 +669,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **Standards Score recounted once for the second merge train: 25 of 28.**
+- **Standards Score recounted once for the second merge train: 26 of 28.**
   The "W3C SPARQL 1.1 Tests" row of `docs/triplestore-comparison.md` is
   retired for every system (owner decision, 2026-10-03): the W3C test-suite
   licence allows no performance claims on a subset of a suite, so the row
   could not be graded for this project; measured comparisons take its place in
   `docs/performance-comparison.md`. The matrix has 28 rows, and every other
   system's count drops by one. Open Triplestore's column, recounted from the
-  merged matrix, is 25 of 28 (it was 15 of 29): SPARQL 1.1 Query, SPARQL 1.2,
-  RDF 1.2, OWL 2 RL, SHACL Validation, ShEx, SWRL, GeoSPARQL 1.0 and 1.1, DCAT
-  3 and VoID follow new Full grades, and JSON-LD 1.1 now shows its Partial
-  grade. `docs/standards.md` states the Full rubric: a row is Full only when
+  merged matrix, is 26 of 28 (it was 15 of 29): SPARQL 1.1 Query, SPARQL 1.2,
+  RDF 1.2, OWL 2 RL, SHACL Validation, SHACL-AF inference (SHACL Advanced,
+  now validated under `sh:entailment`), ShEx, SWRL, GeoSPARQL 1.0 and 1.1,
+  DCAT 3 and VoID follow new Full grades, and JSON-LD 1.1 now shows its
+  Partial grade. `docs/standards.md` states the Full rubric: a row is Full only when
   every remaining failure is a test-suite defect, blocked on an open external
   specification issue, or a limit of an external database engine, and a
   deliberate deviation keeps it Partial (JSON-LD 1.1 and RML for now).
@@ -921,6 +933,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every `*conformance*` test binary that the backend job's `cargo test
   --workspace` had already run, with fewer features. It now keeps only the
   reasoner-sidecar and seed-bundle steps.
+- **A shapes graph that declares an unsupported `sh:entailment` fails
+  validation.** SHACL §1.5 requires a processor to signal a failure for an
+  entailment regime it does not support; such shapes graphs used to be
+  validated as though the declaration were absent. Any value other than
+  `sh:Rules` and the RDFS regime (in a build with `rdfs-entailment`) now fails
+  the run with an error naming the value — a write gate refuses the write
+  (`422`). Shapes graphs declaring `sh:Rules` now report what the rules infer
+  (see Added). SHACL Advanced is graded *Full* in `docs/standards.md`.
 - **Settings added in this release are named for what they cover.** Before
   release, five new settings were renamed, and the old names are not read:
   `OIDC_TOKEN_POLICY` and `OIDC_WRITE_SCOPES` are now
