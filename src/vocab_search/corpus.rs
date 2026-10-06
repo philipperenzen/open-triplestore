@@ -94,7 +94,7 @@ pub async fn ensure_corpus(data_dir: &Path) -> Option<PathBuf> {
     };
 
     info!("Downloading LOV corpus from {} (one-off, ~18 MB)", url);
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::builder()
         .timeout(std::time::Duration::from_secs(600))
         .user_agent(concat!("open-triplestore/", env!("CARGO_PKG_VERSION")))
         .build()

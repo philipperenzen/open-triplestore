@@ -25,6 +25,7 @@ mod entailment;
 mod federation;
 mod feedback;
 mod geo;
+mod http_client;
 mod ifc;
 mod imports;
 mod jsonld;
@@ -318,6 +319,9 @@ fn parse_lenient_bool(s: &str) -> Result<bool, String> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // First, before anything can open a TLS connection: ring as the rustls
+    // provider (see http_client.rs for why it must be installed explicitly).
+    http_client::install_crypto_provider();
     let matches = <Cli as clap::CommandFactory>::command().get_matches();
     let cli =
         <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());

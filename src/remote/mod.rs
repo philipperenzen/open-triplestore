@@ -314,7 +314,7 @@ fn redirect_policy() -> reqwest::redirect::Policy {
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
+        crate::http_client::builder()
             .user_agent(concat!("open-triplestore/", env!("CARGO_PKG_VERSION")))
             .redirect(redirect_policy())
             .build()

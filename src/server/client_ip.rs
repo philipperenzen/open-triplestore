@@ -94,7 +94,6 @@ impl ClientIp {
     }
 }
 
-#[axum::async_trait]
 impl<S> FromRequestParts<S> for ClientIp
 where
     TrustedProxies: FromRef<S>,

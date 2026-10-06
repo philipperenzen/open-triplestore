@@ -630,9 +630,9 @@ pub async fn calibration(
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/api/mappings/:id/decisions", post(decide))
-        .route("/api/mappings/:id/reviews", get(list_reviews))
-        .route("/api/mappings/:id/provenance", get(mapping_provenance))
+        .route("/api/mappings/{id}/decisions", post(decide))
+        .route("/api/mappings/{id}/reviews", get(list_reviews))
+        .route("/api/mappings/{id}/provenance", get(mapping_provenance))
         .route("/api/sources/calibration", post(calibration))
 }
 

@@ -10,31 +10,31 @@ use crate::server::AppState;
 pub fn dataset_version_public_routes() -> Router<AppState> {
     Router::new()
         .route(
-            "/api/datasets/:dataset_id/versions",
+            "/api/datasets/{dataset_id}/versions",
             get(handlers::list_versions),
         )
         .route(
-            "/api/datasets/:dataset_id/versions/:ver",
+            "/api/datasets/{dataset_id}/versions/{ver}",
             get(handlers::get_version),
         )
         .route(
-            "/api/datasets/:dataset_id/versions/:ver/data",
+            "/api/datasets/{dataset_id}/versions/{ver}/data",
             get(handlers::get_version_data),
         )
         .route(
-            "/api/datasets/:dataset_id/branches",
+            "/api/datasets/{dataset_id}/branches",
             get(handlers::list_branches),
         )
         .route(
-            "/api/datasets/:dataset_id/versions/:ver/diff/:other",
+            "/api/datasets/{dataset_id}/versions/{ver}/diff/{other}",
             get(handlers::diff_versions),
         )
         .route(
-            "/api/datasets/:dataset_id/validation-reports",
+            "/api/datasets/{dataset_id}/validation-reports",
             get(reports::list_reports),
         )
         .route(
-            "/api/datasets/:dataset_id/validation-reports/:rid",
+            "/api/datasets/{dataset_id}/validation-reports/{rid}",
             get(reports::get_report),
         )
         // Redeeming a share link is intentionally public (anonymous) — that is the point.
@@ -52,41 +52,41 @@ pub fn dataset_version_auth_routes() -> Router<AppState> {
             post(commit::validate_and_commit),
         )
         .route(
-            "/api/datasets/:dataset_id/share-links",
+            "/api/datasets/{dataset_id}/share-links",
             post(share_links::mint_share_link),
         )
         .route(
-            "/api/datasets/:dataset_id/versions",
+            "/api/datasets/{dataset_id}/versions",
             post(handlers::create_version),
         )
         .route(
-            "/api/datasets/:dataset_id/versions/:ver",
+            "/api/datasets/{dataset_id}/versions/{ver}",
             axum::routing::patch(handlers::update_version_notes).delete(handlers::delete_version),
         )
         // Retention. The static segment wins over `:ver`, so a version can
         // not be called `gc` (a version label is semver-ish anyway).
         .route(
-            "/api/datasets/:dataset_id/versions/gc",
+            "/api/datasets/{dataset_id}/versions/gc",
             post(handlers::gc_versions),
         )
         .route(
-            "/api/datasets/:dataset_id/versions/:ver/stage",
+            "/api/datasets/{dataset_id}/versions/{ver}/stage",
             post(handlers::stage_version),
         )
         .route(
-            "/api/datasets/:dataset_id/versions/:ver/publish",
+            "/api/datasets/{dataset_id}/versions/{ver}/publish",
             post(handlers::publish_version),
         )
         .route(
-            "/api/datasets/:dataset_id/versions/:ver/deprecate",
+            "/api/datasets/{dataset_id}/versions/{ver}/deprecate",
             post(handlers::deprecate_version),
         )
         .route(
-            "/api/datasets/:dataset_id/versions/:ver/restore",
+            "/api/datasets/{dataset_id}/versions/{ver}/restore",
             post(handlers::restore_version),
         )
         .route(
-            "/api/datasets/:dataset_id/branches",
+            "/api/datasets/{dataset_id}/branches",
             post(handlers::create_branch),
         )
 }

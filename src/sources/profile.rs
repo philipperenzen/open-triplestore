@@ -891,7 +891,7 @@ pub async fn get_profile(
 
 pub fn routes() -> Router<AppState> {
     Router::new().route(
-        "/api/sources/:id/profile",
+        "/api/sources/{id}/profile",
         get(get_profile).post(create_profile),
     )
 }

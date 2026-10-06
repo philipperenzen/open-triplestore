@@ -997,7 +997,7 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
+        crate::http_client::builder()
             .user_agent(concat!(
                 "open-triplestore-replica/",
                 env!("CARGO_PKG_VERSION")

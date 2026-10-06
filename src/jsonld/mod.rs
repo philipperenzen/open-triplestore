@@ -193,7 +193,7 @@ fn alternate_link(link: &str) -> Option<String> {
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
+        crate::http_client::builder()
             .user_agent(concat!("open-triplestore/", env!("CARGO_PKG_VERSION")))
             // Redirects are followed by hand, each checked against the
             // allowlist: an allowlisted host must not bounce a request to

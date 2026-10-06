@@ -218,11 +218,11 @@ fn with_gltf_copyright(glb: Vec<u8>, copyright: &str) -> Vec<u8> {
 pub fn tiles3d_routes() -> Router<AppState> {
     Router::new()
         .route(
-            "/api/datasets/:dataset_id/3dtiles/tileset.json",
+            "/api/datasets/{dataset_id}/3dtiles/tileset.json",
             get(tileset_json),
         )
         .route(
-            "/api/datasets/:dataset_id/3dtiles/content.glb",
+            "/api/datasets/{dataset_id}/3dtiles/content.glb",
             get(content_glb),
         )
 }

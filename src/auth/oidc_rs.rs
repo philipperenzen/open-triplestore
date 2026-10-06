@@ -375,7 +375,7 @@ impl OidcVerifier {
         Self {
             issuer,
             audience,
-            http: reqwest::Client::new(),
+            http: crate::http_client::client(),
             cache: RwLock::new(None),
         }
     }

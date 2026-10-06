@@ -70,6 +70,9 @@ impl SourceConnector for MssqlConnector {
     }
 
     fn connect(&self, params: &ConnectParams) -> Result<Box<dyn SourceConnection>, SourceError> {
+        // Before any TLS: make ring the process-wide rustls provider. Two
+        // providers (ring + tiberius's aws-lc-rs) and no default would panic.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         if !params.read_only {
             return Err(SourceError::Config(
                 "this store only opens datasources read-only".to_string(),

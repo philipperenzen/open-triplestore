@@ -37,7 +37,7 @@ pub fn prefix_routes() -> Router<AppState> {
         .route("/api/prefixes/reverse", get(reverse_lookup))
         .route("/api/prefixes/expand", get(expand_curie))
         .route("/api/prefixes/shrink", get(shrink_iri))
-        .route("/api/prefixes/:label", get(lookup_label))
+        .route("/api/prefixes/{label}", get(lookup_label))
 }
 
 // ─── Search ──────────────────────────────────────────────────────────────────
@@ -395,7 +395,7 @@ pub fn prefix_admin_routes() -> Router<AppState> {
             get(list_overrides).post(create_override),
         )
         .route(
-            "/api/admin/prefixes/:label",
+            "/api/admin/prefixes/{label}",
             axum::routing::put(put_override).delete(delete_override),
         )
 }

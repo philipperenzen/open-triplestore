@@ -56,7 +56,7 @@ mod vault {
         static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
         CLIENT
             .get_or_init(|| {
-                let mut b = reqwest::Client::builder()
+                let mut b = crate::http_client::builder()
                     .user_agent(concat!("open-triplestore/", env!("CARGO_PKG_VERSION")))
                     .redirect(reqwest::redirect::Policy::none())
                     .timeout(crate::remote::timeout());

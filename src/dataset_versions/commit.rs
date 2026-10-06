@@ -101,7 +101,7 @@ async fn run_validation(
         shapes: &body.shapes,
         inference: body.inference.as_deref().unwrap_or("none"),
     };
-    let resp = reqwest::Client::new()
+    let resp = crate::http_client::client()
         .post(format!("{}/validate", base.trim_end_matches('/')))
         .header(header::AUTHORIZATION, bearer)
         .json(&req)

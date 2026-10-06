@@ -12,5 +12,5 @@ publish = false
 # form a package-level dependency cycle with the crate that depends on THEM).
 # See docs/plugins.md "Why a context object, not `&AppState`".
 [dependencies]
-axum = "0.7"
+axum = "0.8"
 serde = { version = "1", features = ["derive"] }

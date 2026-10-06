@@ -207,7 +207,7 @@ impl PrefixRegistry {
             CacheData::default()
         };
 
-        let client = reqwest::Client::builder()
+        let client = crate::http_client::builder()
             .timeout(HTTP_TIMEOUT)
             .user_agent(concat!(
                 "open-triplestore/",
@@ -253,7 +253,7 @@ impl PrefixRegistry {
     pub fn empty() -> Self {
         Self {
             cache_path: std::path::PathBuf::new(),
-            client: reqwest::Client::new(),
+            client: crate::http_client::client(),
             state: Mutex::new(RuntimeState::default()),
             dataset: PrefixDataset::empty(),
             platform: RwLock::new(PlatformPrefixes::default()),
@@ -268,7 +268,7 @@ impl PrefixRegistry {
     pub fn bundled_only() -> Self {
         let registry = Self {
             cache_path: std::path::PathBuf::new(),
-            client: reqwest::Client::new(),
+            client: crate::http_client::client(),
             state: Mutex::new(RuntimeState::default()),
             dataset: PrefixDataset::bundled(),
             platform: RwLock::new(PlatformPrefixes::default()),

@@ -49,12 +49,12 @@ pub fn llm_history_routes() -> Router<AppState> {
             get(list_conversations).post(create_conversation),
         )
         .route(
-            "/api/llm/conversations/:id",
+            "/api/llm/conversations/{id}",
             get(get_conversation)
                 .patch(rename_conversation)
                 .delete(delete_conversation),
         )
-        .route("/api/llm/conversations/:id/messages", post(append_message))
+        .route("/api/llm/conversations/{id}/messages", post(append_message))
         .route("/api/llm/memory", get(get_memory).put(put_memory))
 }
 

@@ -24,22 +24,22 @@ pub fn source_routes() -> Router<AppState> {
             get(handlers::list_sources).post(handlers::create_source),
         )
         .route(
-            "/api/sources/:id",
+            "/api/sources/{id}",
             get(handlers::get_source)
                 .put(handlers::update_source)
                 .delete(handlers::delete_source),
         )
         .route(
-            "/api/sources/:id/introspect",
+            "/api/sources/{id}/introspect",
             get(handlers::introspect_source),
         )
-        .route("/api/sources/:id/preview", get(handlers::preview_source))
+        .route("/api/sources/{id}/preview", get(handlers::preview_source))
         .route(
-            "/api/sources/:id/provenance",
+            "/api/sources/{id}/provenance",
             get(handlers::source_provenance),
         )
         .route(
-            "/api/sources/:id/runs",
+            "/api/sources/{id}/runs",
             get(handlers::list_source_runs).post(handlers::create_run),
         )
         .route(
@@ -47,18 +47,18 @@ pub fn source_routes() -> Router<AppState> {
             get(handlers::list_mappings).post(handlers::create_mapping),
         )
         .route(
-            "/api/mappings/:id",
+            "/api/mappings/{id}",
             get(handlers::get_mapping)
                 .put(handlers::update_mapping)
                 .delete(handlers::delete_mapping),
         )
-        .route("/api/mappings/:id/rml", get(handlers::get_mapping_rml))
+        .route("/api/mappings/{id}/rml", get(handlers::get_mapping_rml))
         .route(
-            "/api/runs/:id",
+            "/api/runs/{id}",
             get(handlers::get_run).delete(handlers::delete_run),
         )
-        .route("/api/runs/:id/provenance", get(handlers::run_provenance))
-        .route("/api/runs/:id/rollback", post(handlers::rollback_run))
+        .route("/api/runs/{id}/provenance", get(handlers::run_provenance))
+        .route("/api/runs/{id}/rollback", post(handlers::rollback_run))
         // Each feature owns its own router, so adding one is a change to that
         // module rather than to this list.
         .merge(super::profile::routes())

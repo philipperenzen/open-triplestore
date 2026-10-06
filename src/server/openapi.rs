@@ -259,14 +259,22 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
         SecurityRequirement::new("bearer_auth", Vec::<String>::new())
     }
 
-    /// Convert an axum path (`/a/:id/*rest`) to OpenAPI (`/a/{id}/{rest}`) and
-    /// return the collected path-parameter names.
+    /// Convert a route path to OpenAPI (`/a/{id}/{rest}`) and return the
+    /// collected path-parameter names. The mounts below spell parameters
+    /// `:id` / `*rest`, the router's (axum 0.8) `{id}` / `{*rest}`; both work.
     fn convert_path(axum: &str) -> (String, Vec<String>) {
         let mut names = Vec::new();
         let segs: Vec<String> = axum
             .split('/')
             .map(|s| {
-                if let Some(n) = s.strip_prefix(':') {
+                let braced = s
+                    .strip_prefix('{')
+                    .and_then(|s| s.strip_suffix('}'))
+                    .map(|s| s.strip_prefix('*').unwrap_or(s));
+                if let Some(n) = braced {
+                    names.push(n.to_string());
+                    format!("{{{n}}}")
+                } else if let Some(n) = s.strip_prefix(':') {
                     names.push(n.to_string());
                     format!("{{{n}}}")
                 } else if let Some(n) = s.strip_prefix('*') {
@@ -7559,7 +7567,7 @@ mod tests {
         }
     }
 
-    /// `/a/:id/*rest` and `/a/{id}/{rest}` both become `/a/{}/{}`: the parity
+    /// `/a/:id/*rest` and `/a/{id}/{*rest}` both become `/a/{}/{}`: the parity
     /// check is about which operations exist, not what a parameter is called.
     fn shape(path: &str) -> String {
         path.split('/')

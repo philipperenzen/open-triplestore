@@ -132,7 +132,7 @@ fn ensure_corpus(dir: &Path) -> Result<(), String> {
         .map_err(|e| format!("runtime: {e}"))?;
     let dir = dir.to_path_buf();
     rt.block_on(async move {
-        let client = reqwest::Client::builder()
+        let client = open_triplestore::http_client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()
             .map_err(|e| format!("http client: {e}"))?;
