@@ -19,6 +19,12 @@ It fails on undocumented drift:
   of compose's own variables, and the service loads no `.env` through
   `env_file`. Setting it does nothing.
 
+It also fails on a **retired** name — one the server's configuration registry
+(`src/config/registry.rs`, `RETIRED`) lists as renamed or removed — set in
+`.env.example` or any `docker-compose*.yml`: the server refuses to start with
+one, so a template that still carries it would hand every new deployment a
+broken start.
+
 It also lists, without failing, the variables `docs/administration.md` documents
 that compose does not forward to the server. With an `env_file` that loads
 `.env` the list is empty: every setting in `.env` reaches the container. Without
@@ -45,6 +51,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 COMPOSE = ROOT / "docker-compose.yml"
 ENV_EXAMPLE = ROOT / ".env.example"
 ADMIN_DOC = ROOT / "docs" / "administration.md"
+REGISTRY = ROOT / "src" / "config" / "registry.rs"
 SERVICE = "triplestore"
 
 NAME = r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+"
@@ -188,6 +195,27 @@ def admin_doc_names() -> tuple[dict[str, int], dict[str, int]]:
     return found, families
 
 
+def retired_names() -> set[str]:
+    """The names the registry's `RETIRED` list refuses at startup."""
+    text = REGISTRY.read_text() if REGISTRY.is_file() else ""
+    m = re.search(r"pub static RETIRED: &\[\(&str, &str\)\] = &\[(.*?)\n\];", text, re.S)
+    if not m:
+        return set()
+    return set(re.findall(r'\(\s*"([A-Z][A-Z0-9_]*)"', m.group(1)))
+
+
+def retired_in_templates(retired: set[str]) -> list[str]:
+    """`file:line NAME` for every retired name a template still sets."""
+    rows: list[str] = []
+    files = [ENV_EXAMPLE, *sorted(ROOT.glob("docker-compose*.yml"))]
+    for path in files:
+        for no, line in enumerate(path.read_text().splitlines(), start=1):
+            for name in re.findall(rf"(?<![A-Z0-9_])({NAME})(?=\s*[=:]|\}}|:-)", line):
+                if name in retired:
+                    rows.append(f"{name}  ({path.relative_to(ROOT)}:{no})")
+    return rows
+
+
 def report(kind: str, title: str, rows: list[str]) -> None:
     gh = os.environ.get("GITHUB_ACTIONS") == "true"
     print(f"\n{title} ({len(rows)}):")
@@ -239,6 +267,14 @@ def main() -> int:
     )
 
     failed = False
+    retired = retired_in_templates(retired_names())
+    if retired:
+        failed = True
+        report(
+            "error",
+            "Retired names the server refuses at startup (src/config/registry.rs RETIRED)",
+            retired,
+        )
     if undocumented:
         failed = True
         report(
