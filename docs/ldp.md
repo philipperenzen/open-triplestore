@@ -32,6 +32,21 @@ Every resource is also typed as `ldp:Resource`.  RDF resources additionally carr
 | `DELETE` | Remove the resource and its `ldp:contains` triple from the parent container.  Also removes the membership triple from Direct/Indirect Containers. |
 | `OPTIONS` | Advertise `Allow`, `Accept-Post`, `Accept-Patch`, and `Link` headers. |
 
+### Resources that do not exist
+
+A resource exists once an LDP write created it (`PUT`, `POST`, or the
+container a `PUT` lands in); the root container `/ldp/` always exists. A `GET`
+or `HEAD` on any other path — never created, deleted, an intermediate path
+such as `/ldp/a/` when only `/ldp/a/b/c` was written, or an IRI that other
+triples merely mention — answers `404 Not Found`. The 404 still carries the
+discovery headers: `Link: <…/path.acl>; rel="acl"`, the `constrainedBy` link
+and `WAC-Allow` with the modes the caller would hold on that path (inherited
+from the nearest container ACL), so a client can find the ACL that governs the
+path and tell whether it may create it with `PUT`. A caller without
+`acl:Read` on the path gets `403` whether or not the resource exists, so a 404
+never tells a stranger what is there. `GET` on an ACL a resource does not have
+is a 404 that links the ACL to itself, which is where a `PUT` creates it.
+
 ---
 
 ## Headers reference
@@ -52,7 +67,7 @@ Every resource is also typed as `ldp:Resource`.  RDF resources additionally carr
 | `ETag` | GET, HEAD, PUT, PATCH | SHA-256-based content hash, quoted string (e.g. `"a3f8…"`). |
 | `Location` | POST | Full IRI of the newly created member resource. |
 | `Link` | All | LDP type annotations (`rel="type"`), the `constrainedBy` rel (see below) and the resource's access control list (`rel="acl"`, see [Access control](#access-control)). |
-| `WAC-Allow` | GET, HEAD | `user="read write append control", public="read"` — the access modes the caller and the public hold on the resource. |
+| `WAC-Allow` | GET, HEAD | `user="read write append control", public="read"` — the access modes the caller and the public hold on the resource, on a `404` too (see [Resources that do not exist](#resources-that-do-not-exist)). |
 | `Preference-Applied` | GET | Echoes `return=minimal` or `return=representation` to confirm the server processed the `Prefer` header. |
 | `Vary` | GET | `Accept, Prefer` — tells caches the response varies on these headers. |
 | `Allow` | OPTIONS | `GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS` |

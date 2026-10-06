@@ -434,9 +434,18 @@ pub fn is_non_rdf_source(store: &TripleStore, iri: &str) -> bool {
 // ─── Resource existence and description ───────────────────────────────────────
 
 /// Check whether an IRI exists as an LDP Resource in the store.
+/// Whether `iri` is an LDP resource: something an LDP write created, which
+/// types it with one of the LDP interaction models. Triples that merely
+/// mention the IRI — another resource linking to it, a container that still
+/// lists a member, data written through SPARQL or the Graph Store — do not
+/// make it one, so a deleted, never-created or intermediate path is absent
+/// (GET answers 404).
 pub fn resource_exists(store: &TripleStore, iri: &str) -> bool {
-    // A resource exists if it has outgoing triples OR is referenced by the container via ldp:contains.
-    let q = format!("ASK {{ {{ <{iri}> ?p ?o }} UNION {{ ?s ?p <{iri}> }} }}");
+    let q = format!(
+        "ASK {{ <{iri}> <{RDF_TYPE}> ?t . VALUES ?t {{ <{LDP_RESOURCE}> <{LDP_RDF_SOURCE}> \
+         <{LDP_NON_RDF_SOURCE}> <{LDP_BASIC_CONTAINER}> <{LDP_DIRECT_CONTAINER}> \
+         <{LDP_INDIRECT_CONTAINER}> }} }}"
+    );
     match store.query(&q) {
         Ok(oxigraph::sparql::QueryResults::Boolean(b)) => b,
         _ => false,
