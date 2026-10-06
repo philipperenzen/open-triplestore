@@ -20,12 +20,13 @@ use oxrdf::{BaseDirection, NamedOrBlankNode};
 use oxrdf::{BlankNode, GraphName, Literal, NamedNode, Term, Triple, Variable};
 use oxsdatatypes::{DateTime, DayTimeDuration, Decimal, Double, Float, Integer};
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
-use spargebra::algebra::{AggregateFunction, PropertyPathExpression};
+use spargebra::algebra::{AggregateFunction, Function, PropertyPathExpression};
 #[cfg(feature = "sparql-12")]
 use spargebra::term::GroundTriple;
 use spargebra::term::{
     GroundTerm, GroundTermPattern, NamedNodePattern, TermPattern, TriplePattern,
 };
+use sparopt::Optimizer;
 use sparopt::algebra::{
     AggregateExpression, Expression, GraphPattern, JoinAlgorithm, LeftJoinAlgorithm,
     MinusAlgorithm, OrderExpression,
@@ -431,6 +432,9 @@ pub struct SimpleEvaluator<'a, D: QueryableDataset<'a>> {
     custom_aggregate_functions: Rc<CustomAggregateFunctionRegistry>,
     run_stats: bool,
     blank_node_labels: Rc<BlankNodeLabels>,
+    /// Whether an `EXISTS` may be evaluated as a hash semi-join (see
+    /// [`ExistsSemiJoin`]); off when the query runs without optimizations.
+    optimize_exists: bool,
 }
 
 /// Per-evaluation state of `BNODE(label)` (SPARQL 1.1 §17.4.2.9).
@@ -488,6 +492,7 @@ impl<'a, D: QueryableDataset<'a>> SimpleEvaluator<'a, D> {
         cancellation_token: CancellationToken,
         dataset_spec: QueryDatasetSpecification,
         run_stats: bool,
+        optimize_exists: bool,
     ) -> Result<Self, QueryEvaluationError> {
         Ok(Self {
             dataset: EvalDataset::new(dataset, dataset_spec, cancellation_token)?,
@@ -498,6 +503,7 @@ impl<'a, D: QueryableDataset<'a>> SimpleEvaluator<'a, D> {
             custom_aggregate_functions,
             run_stats,
             blank_node_labels: Rc::new(BlankNodeLabels::new()),
+            optimize_exists,
         })
     }
 
@@ -2017,6 +2023,7 @@ impl<'a, D: QueryableDataset<'a>> Clone for SimpleEvaluator<'a, D> {
             custom_aggregate_functions: Rc::clone(&self.custom_aggregate_functions),
             run_stats: self.run_stats,
             blank_node_labels: Rc::clone(&self.blank_node_labels),
+            optimize_exists: self.optimize_exists,
         }
     }
 }
@@ -2059,7 +2066,23 @@ impl<'a, D: QueryableDataset<'a>> ExpressionEvaluatorContext<'a>
             .graph_pattern_evaluator(plan, self.encoded_variables);
         self.stat_children.push(stats);
         let eval = eval?;
-        Ok(move |tuple: &InternalTuple<D::InternalTerm>| eval(tuple.clone()).next().is_some())
+        let semi_join = match exists_semi_join_slots(plan, self.encoded_variables) {
+            Some(slots) if self.evaluator.optimize_exists => {
+                // The plan evaluated once for every outer solution: the same
+                // pattern, its joins reordered as if nothing were bound.
+                let standalone = Optimizer::optimize_for_standalone_evaluation(plan.clone());
+                let (standalone, standalone_stats) = self
+                    .evaluator
+                    .graph_pattern_evaluator(&standalone, self.encoded_variables);
+                self.stat_children.push(standalone_stats);
+                Some(ExistsSemiJoin::new(standalone?, slots))
+            }
+            _ => None,
+        };
+        Ok(move |tuple: &InternalTuple<D::InternalTerm>| match &semi_join {
+            Some(semi_join) => semi_join.exists(tuple, &eval),
+            None => eval(tuple.clone()).next().is_some(),
+        })
     }
 
     fn internalize_named_node(
@@ -4265,6 +4288,387 @@ fn format_list<T: ToString>(values: impl IntoIterator<Item = T>) -> String {
         .map(|v| v.to_string())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Outer solutions an `EXISTS` evaluates one by one before it also starts
+/// evaluating its pattern once for all of them (see [`ExistsSemiJoin`]).
+const SEMI_JOIN_MIN_ROWS: usize = 8;
+/// Distinct key tuples a semi-join table may hold. Past it the table is dropped
+/// and the `EXISTS` stays a per-solution evaluation, so memory stays bounded.
+const SEMI_JOIN_MAX_KEYS: usize = 1 << 21;
+
+/// A monotonic clock. `wasm32-unknown-unknown` has none that works in `std`, so
+/// there the semi-join is not used ([`exists_semi_join_slots`] returns `None`).
+type SemiJoinClock = std::time::Instant;
+
+/// `EXISTS { P }` (and `NOT EXISTS`) evaluated as a hash semi-join.
+///
+/// The SPARQL definition evaluates `P` once per solution of the outer pattern,
+/// with that solution's bindings substituted. For a correlated
+/// `FILTER NOT EXISTS { ?r :reviewFor ?p ; :rating ?x }` over many `?p` that is
+/// one evaluation of `P` per outer row. When `P` only uses the outer bindings to
+/// restrict its own solutions (see [`exists_semi_join_slots`]), the answer for a
+/// row is "does `P`, evaluated with no input, have a solution that agrees with
+/// the row on the variables they share" — so `P` can be evaluated once, its
+/// solutions hashed on those variables, and every row answered with one lookup.
+///
+/// Which plan is cheaper depends on data the planner cannot see: one row and a
+/// large `P` favour the per-row evaluation, many rows the table. So both run:
+/// after [`SEMI_JOIN_MIN_ROWS`] rows, every per-row evaluation is followed by
+/// as much time spent filling the table as the row took, and once the table is
+/// complete it answers every later row. The work done is at most about twice
+/// that of the better plan, and a table that would pass
+/// [`SEMI_JOIN_MAX_KEYS`] keys, or whose evaluation fails, is given up.
+///
+/// The table is keyed by the outer variables the row binds and its active graph
+/// (`GRAPH ?g { FILTER EXISTS { … } }`); one table is built, for the first such
+/// signature, and rows with another signature are evaluated one by one.
+struct ExistsSemiJoin<'a, T> {
+    /// `P` planned to run with no input binding.
+    standalone: InternalTupleEvaluator<'a, T>,
+    /// The slot of every variable `P` mentions, and whether a row that binds it
+    /// may be answered from the table.
+    slots: Vec<(usize, bool)>,
+    state: RefCell<SemiJoinState<'a, T>>,
+}
+
+struct SemiJoinState<'a, T> {
+    rows: usize,
+    /// Set when the table was given up: every row is evaluated on its own.
+    disabled: bool,
+    /// Bitmask over `slots` and active graph of the table being built or built.
+    signature: Option<(u64, Option<T>)>,
+    building: Option<InternalTuplesIterator<'a, T>>,
+    table: FxHashSet<Vec<T>>,
+    complete: bool,
+    key: Vec<T>,
+}
+
+impl<'a, T: Clone + Eq + Hash + 'a> ExistsSemiJoin<'a, T> {
+    fn new(standalone: InternalTupleEvaluator<'a, T>, slots: Vec<(usize, bool)>) -> Self {
+        Self {
+            standalone,
+            slots,
+            state: RefCell::new(SemiJoinState {
+                rows: 0,
+                disabled: false,
+                signature: None,
+                building: None,
+                table: FxHashSet::default(),
+                complete: false,
+                key: Vec::new(),
+            }),
+        }
+    }
+
+    fn exists(&self, tuple: &InternalTuple<T>, per_row: &InternalTupleEvaluator<'a, T>) -> bool {
+        let Ok(mut state) = self.state.try_borrow_mut() else {
+            // Re-entered (an EXISTS inside its own pattern): per row.
+            return per_row(tuple.clone()).next().is_some();
+        };
+        if state.disabled {
+            drop(state);
+            return per_row(tuple.clone()).next().is_some();
+        }
+        let mut mask = 0_u64;
+        for (i, (slot, allowed)) in self.slots.iter().enumerate() {
+            if tuple.contains(*slot) {
+                if !allowed {
+                    drop(state);
+                    return per_row(tuple.clone()).next().is_some();
+                }
+                mask |= 1 << i;
+            }
+        }
+        let same_signature = state
+            .signature
+            .as_ref()
+            .is_some_and(|(m, g)| *m == mask && *g == tuple.graph_name);
+        if state.complete && same_signature {
+            let SemiJoinState { key, table, .. } = &mut *state;
+            key.clear();
+            for (i, (slot, _)) in self.slots.iter().enumerate() {
+                if mask & (1 << i) != 0 {
+                    if let Some(value) = tuple.get(*slot) {
+                        key.push(value.clone());
+                    }
+                }
+            }
+            return table.contains(key.as_slice());
+        }
+        state.rows += 1;
+        let start_building = state.signature.is_none() && state.rows >= SEMI_JOIN_MIN_ROWS;
+        drop(state);
+        let start = SemiJoinClock::now();
+        let result = per_row(tuple.clone()).next().is_some();
+        let spent = start.elapsed();
+        let mut state = self.state.borrow_mut();
+        if start_building && state.signature.is_none() && !state.disabled {
+            let mut from = InternalTuple::with_capacity(0);
+            from.graph_name.clone_from(&tuple.graph_name);
+            state.signature = Some((mask, tuple.graph_name.clone()));
+            state.building = Some((self.standalone)(from));
+        }
+        if same_signature || start_building {
+            self.advance(&mut state, mask, spent);
+        }
+        result
+    }
+
+    /// Adds solutions of the standalone plan to the table for about `budget`.
+    fn advance(&self, state: &mut SemiJoinState<'a, T>, mask: u64, budget: std::time::Duration) {
+        let Some(mut iter) = state.building.take() else {
+            return;
+        };
+        let start = SemiJoinClock::now();
+        let mut n = 0_usize;
+        loop {
+            let Some(solution) = iter.next() else {
+                state.complete = true;
+                state.table.shrink_to_fit();
+                return;
+            };
+            let Ok(solution) = solution else {
+                // An error the per-row evaluation would report on its own row.
+                return Self::give_up(state);
+            };
+            let mut key = Vec::with_capacity(mask.count_ones() as usize);
+            for (i, (slot, _)) in self.slots.iter().enumerate() {
+                if mask & (1 << i) != 0 {
+                    let Some(value) = solution.get(*slot) else {
+                        return Self::give_up(state);
+                    };
+                    key.push(value.clone());
+                }
+            }
+            state.table.insert(key);
+            if state.table.len() > SEMI_JOIN_MAX_KEYS {
+                return Self::give_up(state);
+            }
+            n += 1;
+            if n % 16 == 0 && start.elapsed() >= budget {
+                state.building = Some(iter);
+                return;
+            }
+        }
+    }
+
+    fn give_up(state: &mut SemiJoinState<'a, T>) {
+        state.disabled = true;
+        state.building = None;
+        state.table = FxHashSet::default();
+    }
+}
+
+/// The variables of `pattern` with, for each, whether an outer solution that
+/// binds it may be answered by the semi-join of [`ExistsSemiJoin`]; `None`
+/// when the pattern's shape is not supported at all.
+///
+/// Evaluating `P` with the outer solution `μ` as input gives the solutions of
+/// `P` compatible with `μ` when every variable `μ` binds is bound in every
+/// solution of `P` (so compatibility pins it) and is only read where the
+/// pattern binds it itself: a filter or an `OPTIONAL` that reads an outer
+/// variable its own inner pattern does not bind sees it bound in the per-row
+/// evaluation and unbound in the standalone one. Only basic graph patterns,
+/// property paths, joins, lateral joins, `OPTIONAL`, `FILTER`, `UNION`,
+/// `GRAPH` and `VALUES` are accepted; filters that contain `EXISTS` or a
+/// function whose value depends on the solution or is random (`BNODE`, `RAND`,
+/// `UUID`, `STRUUID`) are not.
+fn exists_semi_join_slots(
+    pattern: &GraphPattern,
+    encoded_variables: &mut Vec<Variable>,
+) -> Option<Vec<(usize, bool)>> {
+    if cfg!(all(target_family = "wasm", target_os = "unknown")) {
+        return None;
+    }
+    let certain = certainly_bound_variables(pattern)?;
+    let mut unsafe_variables = FxHashSet::default();
+    collect_unsafe_exists_variables(pattern, &mut unsafe_variables)?;
+    let mut mentioned = Vec::new();
+    pattern.lookup_used_variables(&mut |v| {
+        if !mentioned.contains(v) {
+            mentioned.push(v.clone());
+        }
+    });
+    if mentioned.len() > 64 {
+        return None;
+    }
+    Some(
+        mentioned
+            .iter()
+            .map(|v| {
+                (
+                    encode_variable(encoded_variables, v),
+                    certain.contains(v) && !unsafe_variables.contains(v),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// The variables bound in every solution of `pattern`, or `None` if the
+/// pattern holds a construct [`exists_semi_join_slots`] does not support.
+fn certainly_bound_variables(pattern: &GraphPattern) -> Option<FxHashSet<Variable>> {
+    Some(match pattern {
+        GraphPattern::QuadPattern { .. } | GraphPattern::Path { .. } => {
+            let mut set = FxHashSet::default();
+            pattern.lookup_used_variables(&mut |v| {
+                set.insert(v.clone());
+            });
+            set
+        }
+        GraphPattern::Join { left, right, .. } => {
+            let mut set = certainly_bound_variables(left)?;
+            set.extend(certainly_bound_variables(right)?);
+            set
+        }
+        #[cfg(feature = "sep-0006")]
+        GraphPattern::Lateral { left, right } => {
+            let mut set = certainly_bound_variables(left)?;
+            set.extend(certainly_bound_variables(right)?);
+            set
+        }
+        GraphPattern::LeftJoin { left, right, .. } => {
+            certainly_bound_variables(right)?;
+            certainly_bound_variables(left)?
+        }
+        GraphPattern::Filter { inner, .. } => certainly_bound_variables(inner)?,
+        GraphPattern::Union { inner } => {
+            let mut sets = inner
+                .iter()
+                .map(certainly_bound_variables)
+                .collect::<Option<Vec<_>>>()?
+                .into_iter();
+            let mut set = sets.next().unwrap_or_default();
+            for other in sets {
+                set.retain(|v| other.contains(v));
+            }
+            set
+        }
+        GraphPattern::Graph { graph_name, inner } => {
+            let mut set = certainly_bound_variables(inner)?;
+            if let NamedNodePattern::Variable(v) = graph_name {
+                set.insert(v.clone());
+            }
+            set
+        }
+        GraphPattern::Values {
+            variables,
+            bindings,
+        } => variables
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| bindings.iter().all(|row| row[*i].is_some()))
+            .map(|(_, v)| v.clone())
+            .collect(),
+        _ => return None,
+    })
+}
+
+/// Adds to `out` the variables an expression of `pattern` reads where its own
+/// inner pattern may leave them unbound (see [`exists_semi_join_slots`]).
+fn collect_unsafe_exists_variables(
+    pattern: &GraphPattern,
+    out: &mut FxHashSet<Variable>,
+) -> Option<()> {
+    match pattern {
+        GraphPattern::QuadPattern { .. } | GraphPattern::Path { .. } | GraphPattern::Values { .. } => {}
+        GraphPattern::Join { left, right, .. } => {
+            collect_unsafe_exists_variables(left, out)?;
+            collect_unsafe_exists_variables(right, out)?;
+        }
+        #[cfg(feature = "sep-0006")]
+        GraphPattern::Lateral { left, right } => {
+            collect_unsafe_exists_variables(left, out)?;
+            collect_unsafe_exists_variables(right, out)?;
+        }
+        GraphPattern::LeftJoin {
+            left,
+            right,
+            expression,
+            ..
+        } => {
+            collect_unsafe_exists_variables(left, out)?;
+            collect_unsafe_exists_variables(right, out)?;
+            if !is_semi_join_safe_expression(expression) {
+                return None;
+            }
+            let bound = certainly_bound_variables(left)?;
+            right.lookup_used_variables(&mut |v| {
+                if !bound.contains(v) {
+                    out.insert(v.clone());
+                }
+            });
+            expression.lookup_used_variables(&mut |v| {
+                if !bound.contains(v) {
+                    out.insert(v.clone());
+                }
+            });
+        }
+        GraphPattern::Filter { inner, expression } => {
+            collect_unsafe_exists_variables(inner, out)?;
+            if !is_semi_join_safe_expression(expression) {
+                return None;
+            }
+            let bound = certainly_bound_variables(inner)?;
+            expression.lookup_used_variables(&mut |v| {
+                if !bound.contains(v) {
+                    out.insert(v.clone());
+                }
+            });
+        }
+        GraphPattern::Union { inner } => {
+            for child in inner {
+                collect_unsafe_exists_variables(child, out)?;
+            }
+        }
+        GraphPattern::Graph { inner, .. } => collect_unsafe_exists_variables(inner, out)?,
+        _ => return None,
+    }
+    Some(())
+}
+
+/// Whether `expression` gives the same value in the per-row and the standalone
+/// evaluation of an `EXISTS` pattern once its variables have the same values:
+/// no nested `EXISTS`, no `BNODE` (its node depends on the whole solution) and
+/// no random function.
+fn is_semi_join_safe_expression(expression: &Expression) -> bool {
+    match expression {
+        Expression::NamedNode(_)
+        | Expression::Literal(_)
+        | Expression::Variable(_)
+        | Expression::Bound(_) => true,
+        Expression::Exists(_) => false,
+        Expression::Or(inner) | Expression::And(inner) | Expression::Coalesce(inner) => {
+            inner.iter().all(is_semi_join_safe_expression)
+        }
+        Expression::FunctionCall(function, args) => {
+            !matches!(
+                function,
+                Function::BNode | Function::Rand | Function::Uuid | Function::StrUuid
+            ) && args.iter().all(is_semi_join_safe_expression)
+        }
+        Expression::Equal(a, b)
+        | Expression::SameTerm(a, b)
+        | Expression::Greater(a, b)
+        | Expression::GreaterOrEqual(a, b)
+        | Expression::Less(a, b)
+        | Expression::LessOrEqual(a, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b) => {
+            is_semi_join_safe_expression(a) && is_semi_join_safe_expression(b)
+        }
+        Expression::UnaryPlus(e) | Expression::UnaryMinus(e) | Expression::Not(e) => {
+            is_semi_join_safe_expression(e)
+        }
+        Expression::If(a, b, c) => {
+            is_semi_join_safe_expression(a)
+                && is_semi_join_safe_expression(b)
+                && is_semi_join_safe_expression(c)
+        }
+    }
 }
 
 pub struct Timer {

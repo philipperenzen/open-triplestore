@@ -106,6 +106,16 @@ residual: a triple term written as a constant *inside an expression*
 spareval's expression evaluator, so `sameTerm` against a stored triple term with a
 non-canonical literal is false. Graph patterns are not affected.
 
+11. **A correlated `EXISTS` becomes a hash semi-join** (`spareval` evaluator).
+   When the pattern only uses the outer bindings to restrict its own solutions
+   (checked on the plan: every shared variable bound in all its solutions, and
+   read by a `FILTER` or `OPTIONAL` only where that operator binds it), the
+   evaluator also evaluates the pattern once, standalone, into a hash table on
+   the shared variables, interleaved with the per-row evaluations so the work
+   stays within about twice the better plan's, and answers every later row with
+   one lookup. Bounded at 2^21 keys; off without optimizations and on
+   `wasm32-unknown-unknown`. Draft: `spareval/UPSTREAM-PR-exists-semi-join.md`.
+
 ### Verifying the fork
 
 Each fork diff is its own commit, after the commit that vendored the crate
