@@ -10760,6 +10760,7 @@ pub fn reasoning_routes() -> Router<AppState> {
     Router::new()
         .route("/api/reasoning/materialize", post(reasoning_materialize))
         .route("/api/reasoning/check", post(reasoning_check))
+        .route("/api/reasoning/jobs", get(reasoning_jobs_list))
         .route("/api/reasoning/jobs/:job_id", get(reasoning_job))
         .route("/api/reasoning/status", get(reasoning_status))
         .route("/api/reasoning/rewrite", post(reasoning_rewrite))
@@ -11155,6 +11156,7 @@ async fn run_reasoning_work<F>(
     state: &AppState,
     user: &AuthenticatedUser,
     kind: &'static str,
+    dataset: Option<String>,
     run_async: bool,
     work: F,
 ) -> Result<Response, AppError>
@@ -11162,7 +11164,7 @@ where
     F: FnOnce() -> Result<serde_json::Value, AppError> + Send + 'static,
 {
     if run_async {
-        let id = super::reasoning_jobs::create(&user.user_id, kind);
+        let id = super::reasoning_jobs::create(&user.user_id, kind, dataset);
         let sem = state.expensive_semaphore.clone();
         let job = id.clone();
         tokio::spawn(async move {
@@ -11201,23 +11203,66 @@ async fn reasoning_materialize(
     Query(params): Query<AsyncParam>,
     Json(body): Json<MaterializeRequest>,
 ) -> Result<Response, AppError> {
-    let target = body
-        .target_graph
-        .unwrap_or_else(|| match body.regime.as_str() {
-            "rdfs" => crate::reasoning::common::RDFS_ENTAILMENT_GRAPH.to_string(),
-            "owl2-rl" => crate::reasoning::common::OWL2_RL_ENTAILMENT_GRAPH.to_string(),
-            "owl2-el" => crate::reasoning::common::OWL2_EL_ENTAILMENT_GRAPH.to_string(),
-            "owl2-ql" => crate::reasoning::common::OWL2_QL_ENTAILMENT_GRAPH.to_string(),
-            "owl2-dl" => crate::reasoning::common::OWL2_DL_ENTAILMENT_GRAPH.to_string(),
-            _ => format!("urn:entailment:{}", body.regime),
-        });
+    let job_dataset = body.dataset.clone();
+    // A dataset run with no target writes the dataset's own entailment graph
+    // for the regime, `urn:entailment:<regime>:<dataset>`, which the
+    // dataset's writers may fill (as `PUT …/entailment` and a dataset-scoped
+    // `/api/swrl/execute` do). Otherwise the shared graph of the regime.
+    let dataset_target = match (&body.target_graph, body.dataset.as_deref()) {
+        (None, Some(ds_id)) => {
+            if !crate::entailment::REGIMES.contains(&body.regime.as_str()) {
+                return Err(AppError::BadRequest(format!(
+                    "Unknown reasoning regime: {}",
+                    body.regime
+                )));
+            }
+            let ds = state
+                .auth_db
+                .get_dataset(ds_id)
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .ok_or_else(|| AppError::NotFound(format!("Dataset '{ds_id}' not found")))?;
+            let can_write = user.is_admin()
+                || (user.write_access
+                    && state
+                        .auth_db
+                        .can_write_dataset(&user.user_id, &ds)
+                        .map_err(|e| AppError::Internal(e.to_string()))?);
+            if !can_write {
+                return Err(AppError::Forbidden(format!(
+                    "writing dataset '{ds_id}''s entailment graph needs write access to the \
+                     dataset; pass a target_graph you may write instead"
+                )));
+            }
+            Some(crate::entailment::dataset_entailment_graph(
+                &body.regime,
+                ds_id,
+            ))
+        }
+        _ => None,
+    };
+    let target = match dataset_target.clone() {
+        Some(t) => t,
+        None => body
+            .target_graph
+            .clone()
+            .unwrap_or_else(|| match body.regime.as_str() {
+                "rdfs" => crate::reasoning::common::RDFS_ENTAILMENT_GRAPH.to_string(),
+                "owl2-rl" => crate::reasoning::common::OWL2_RL_ENTAILMENT_GRAPH.to_string(),
+                "owl2-el" => crate::reasoning::common::OWL2_EL_ENTAILMENT_GRAPH.to_string(),
+                "owl2-ql" => crate::reasoning::common::OWL2_QL_ENTAILMENT_GRAPH.to_string(),
+                "owl2-dl" => crate::reasoning::common::OWL2_DL_ENTAILMENT_GRAPH.to_string(),
+                _ => format!("urn:entailment:{}", body.regime),
+            }),
+    };
 
     // Materialization writes derived triples into `target` — previously with NO
     // authorization, so any authenticated caller could write arbitrary (incl.
     // shared entailment / other tenants') graphs. Require write permission on the
     // target graph (admins bypass; server-owned entailment graphs therefore need
-    // an explicit grant or admin).
-    require_graph_write(&state, Some(&user), Some(target.as_str()))?;
+    // an explicit grant or admin). The dataset's own graph was checked above.
+    if dataset_target.is_none() {
+        require_graph_write(&state, Some(&user), Some(target.as_str()))?;
+    }
 
     // The graphs the rules may read. `source_graphs` used to be parsed and then
     // ignored — every regime materialised over the unnamed default graph, so a
@@ -11280,7 +11325,15 @@ async fn reasoning_materialize(
         }
         Ok(out)
     };
-    run_reasoning_work(&state, &user, "materialize", params.run_async, work).await
+    run_reasoning_work(
+        &state,
+        &user,
+        "materialize",
+        job_dataset,
+        params.run_async,
+        work,
+    )
+    .await
 }
 
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
@@ -11420,7 +11473,8 @@ async fn reasoning_check(
             }
             Ok(out)
         };
-        run_reasoning_work(&state, &user, "check", params.run_async, work).await
+        let job_dataset = body.dataset.clone();
+        run_reasoning_work(&state, &user, "check", job_dataset, params.run_async, work).await
     }
 }
 
@@ -11439,7 +11493,29 @@ async fn reasoning_job(
     }
 }
 
-/// GET /api/reasoning/status — counts of entailed triples per graph.
+#[derive(Debug, Default, serde::Deserialize)]
+struct JobsQuery {
+    /// Only the jobs run over this dataset.
+    dataset: Option<String>,
+}
+
+/// GET /api/reasoning/jobs — the caller's background runs (an admin's view
+/// holds everyone's), newest first; `?dataset=` narrows them to one dataset.
+async fn reasoning_jobs_list(
+    Extension(user): Extension<AuthenticatedUser>,
+    Query(q): Query<JobsQuery>,
+) -> Result<Response, AppError> {
+    let jobs: Vec<serde_json::Value> =
+        super::reasoning_jobs::list(&user.user_id, user.is_admin(), q.dataset.as_deref())
+            .iter()
+            .map(|j| j.to_json())
+            .collect();
+    Ok((StatusCode::OK, Json(serde_json::json!({ "jobs": jobs }))).into_response())
+}
+
+/// GET /api/reasoning/status — counts of entailed triples per shared
+/// entailment graph, and the server's OWL 2 DL backend (`null`: `owl2-dl` is
+/// unavailable).
 async fn reasoning_status(State(state): State<AppState>) -> Result<Response, AppError> {
     let graphs = [
         crate::reasoning::common::RDFS_ENTAILMENT_GRAPH,
@@ -11448,11 +11524,15 @@ async fn reasoning_status(State(state): State<AppState>) -> Result<Response, App
         crate::reasoning::common::OWL2_QL_ENTAILMENT_GRAPH,
         crate::reasoning::common::OWL2_DL_ENTAILMENT_GRAPH,
     ];
-    let mut result = serde_json::json!({});
+    let mut counts = serde_json::json!({});
     for g in &graphs {
         let count = crate::reasoning::common::count_graph(&state.store, g).unwrap_or(0);
-        result[*g] = serde_json::json!(count);
+        counts[*g] = serde_json::json!(count);
     }
+    let result = serde_json::json!({
+        "graphs": counts,
+        "dl_backend": state.dl.backend.map(|b| b.as_str()),
+    });
     Ok((StatusCode::OK, Json(result)).into_response())
 }
 

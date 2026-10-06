@@ -14,6 +14,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Web UI for reasoning, SWRL, ShEx, RDF Patch and version diff/GC**, which
+  were API-only. A dataset's **Reasoning** page sets its entailment regime
+  (SKOS included), mode and identity policy and shows the last run, its
+  consistency and the server's OWL 2 DL backend; materialises a regime now
+  (with `eq_ref` for OWL 2 RL), runs OWL 2 DL checks, lists their background
+  jobs with their status, shows the ignored-axioms report, manages the stored
+  SWRL rules, runs rules once with a regime (rounds, regime triples, the
+  message naming a refused built-in) and shows the OWL 2 QL rewriting of a
+  query. **ShEx validation** (sidebar and dataset page) takes a ShExC or ShExJ
+  schema and a shape map; a dataset's **RDF Patch** page applies a patch (or
+  records it in the patch log) and browses, shows and downloads the log; the
+  version list compares versions (counts and the changes from the RDF Patch)
+  and cleans up old ones after the app's confirmation dialog. A sidebar
+  **Reasoning** page runs SWRL, DL checks and rewriting outside a dataset.
+- **Stored SWRL rules over HTTP**: `GET/POST /api/datasets/{id}/rules`,
+  `PUT/DELETE …/rules/{set}` and `POST …/rules/run` keep rule sets written in
+  any SWRL syntax in the dataset's managed `entailment`-role graph
+  `urn:ots:rules:<id>` (as `swrl:Imp` triples, with their source), check every
+  rule before anything is written, and run the rules again after each change.
+- **`GET /api/reasoning/jobs`** lists the caller's background reasoning jobs
+  (an admin's: everyone's), each with the dataset it ran over; `?dataset=`
+  narrows the list.
 - **W3C SPARQL 1.2 and RDF 1.2 test suites run in CI.** `sparql/sparql12`
   and the N-Triples, N-Quads, Turtle, TriG and RDF/XML suites of `rdf/rdf12`
   (with the `rdf/rdf11` suites they include) from w3c/rdf-tests are vendored
@@ -657,6 +679,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are listed as a warning. `RUST_LOG` is now in the environment table.
 
 ### Changed
+- **`POST /api/reasoning/materialize` with a `dataset` and no `target_graph`**
+  writes the dataset's own graph for the regime, `urn:entailment:<regime>:<id>`,
+  which the dataset's writers may fill; it used to write the shared
+  `urn:entailment:<regime>` graph, which only an admin could.
+- **`GET /api/reasoning/status`** answers `{graphs, dl_backend}`: the counts per
+  shared entailment graph moved under `graphs`, and the server's OWL 2 DL backend
+  is reported beside them.
 
 - **Standards Score recounted once for the second merge train: 25 of 28.**
   The "W3C SPARQL 1.1 Tests" row of `docs/triplestore-comparison.md` is

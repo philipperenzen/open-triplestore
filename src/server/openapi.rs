@@ -3041,7 +3041,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     ]);
     mount(paths, "/api/reasoning/materialize", vec![
         (M::Post, o("Reasoning", "Materialise entailments",
-            "Materialise inferred triples for an entailment regime (rdfs, owl2-rl, owl2-el, owl2-ql, owl2-dl). Body `{regime, target_graph?, dataset?, source_graphs?, eq_ref?}` (`eq_ref`, `owl2-rl` only, default false: also write `x owl:sameAs x` for every term): without `dataset` or `source_graphs` the rules read the unnamed default graph; they always read the target graph too, so they see their own consequences. The report carries `triples_added`, `iterations`, `elapsed_ms`, `target_graph`, `sources` and `consistent` (`true` for every regime: `rdfs` checks datatype clashes, the OWL regimes their inconsistency rules); `owl2-ql` also reports `ignored_axioms` and `ignored_sample` (the first 20 axioms outside the profile that were not used), omitted when there are none; `owl2-el` adds `ignored` — `[{construct, count, example}]`, the axioms outside the EL profile it left out — when there are any; an `owl2-dl` run adds `backend` (`native`, `konclude` or `sidecar`, from `OTS_DL_BACKEND`), `backend_version`, `complete` (`false` for the native rules) and `warnings`. `owl2-dl` with no backend configured is a 503 — there is no default and no silent fallback. `?async=true` answers 202 with a job (`GET /api/reasoning/jobs/{job_id}`).",
+            "Materialise inferred triples for an entailment regime (rdfs, owl2-rl, owl2-el, owl2-ql, owl2-dl). Body `{regime, target_graph?, dataset?, source_graphs?, eq_ref?}`; with a `dataset` and no `target_graph` the triples go to the dataset's own graph for the regime, `urn:entailment:<regime>:<dataset>`, which the dataset's writers may fill (any other target needs write access to that graph) (`eq_ref`, `owl2-rl` only, default false: also write `x owl:sameAs x` for every term): without `dataset` or `source_graphs` the rules read the unnamed default graph; they always read the target graph too, so they see their own consequences. The report carries `triples_added`, `iterations`, `elapsed_ms`, `target_graph`, `sources` and `consistent` (`true` for every regime: `rdfs` checks datatype clashes, the OWL regimes their inconsistency rules); `owl2-ql` also reports `ignored_axioms` and `ignored_sample` (the first 20 axioms outside the profile that were not used), omitted when there are none; `owl2-el` adds `ignored` — `[{construct, count, example}]`, the axioms outside the EL profile it left out — when there are any; an `owl2-dl` run adds `backend` (`native`, `konclude` or `sidecar`, from `OTS_DL_BACKEND`), `backend_version`, `complete` (`false` for the native rules) and `warnings`. `owl2-dl` with no backend configured is a 503 — there is no default and no silent fallback. `?async=true` answers 202 with a job (`GET /api/reasoning/jobs/{job_id}`).",
             vec![qp("async", false, "`true`: run as a background job and answer 202 with its id")],
             vec![("200", "Reasoning report"), ("202", "Queued as a job: `{job_id, status, location}`"), ("400", "Unknown regime"), ("401", "Authentication required"), ("403", "No write access to the target graph or no read access to a source graph"), ("404", "Dataset not found"), ("413", "More triples than the DL backend accepts (`OTS_REASONER_MAX_TRIPLES`)"), ("422", "The ontology is inconsistent — `{consistent: false, rule, detail, regime, target_graph}`, the derived triples stay in the target graph — or the run did not reach its fixed point within 500 iterations (`{converged: false, iterations, regime, target_graph}`), or (`owl2-dl`) the input is not in OWL 2 DL (`{in_profile: false, violations: [{rule, detail}]}`) or the identity policy cannot be honoured"), ("502", "The DL backend failed"), ("503", "`owl2-dl`: no DL backend configured, or it cannot be reached"), ("504", "The DL backend did not answer in time; the result is unknown (`{result: \"unknown\"}`)")], true)),
     ]);
@@ -3050,6 +3050,33 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             "Consistency, entailment, satisfiability or OWL 2 DL profile check (OWL 2 Conformance §2.2), through the configured DL backend. Body `{task: consistency|entailment|satisfiability|profile, dataset?, source_graphs?, premise?, conclusion?, class?}`: the premise is a dataset's readable conformance layer, readable `source_graphs`, Turtle in `premise`, or (none given) the unnamed default graph; `conclusion` is Turtle (entailment), `class` an IRI (satisfiability). A check that ran answers 200 `{task, result: \"true\"|\"false\"|\"unknown\", backend, backend_version, complete, regime, sources, warnings}`; an inconsistent premise adds the materialisation 422's `consistent: false`, `rule` and `detail`; a profile check adds `in_profile` and `violations` and needs no backend. The native backend answers `false` (sound) or `unknown`, never a `true` it cannot prove. `?async=true` answers 202 with a job.",
             vec![qp("async", false, "`true`: run as a background job and answer 202 with its id")],
             vec![("200", "The check's result"), ("202", "Queued as a job"), ("400", "Unknown task, missing conclusion/class, invalid Turtle, or both premise and graphs"), ("401", "Authentication required"), ("403", "No read access to a source graph"), ("404", "Dataset not found"), ("413", "More triples than the DL backend accepts"), ("422", "The premise is not in OWL 2 DL (`{in_profile: false, violations}`)"), ("502", "The DL backend failed"), ("503", "No DL backend configured, or it cannot be reached"), ("504", "The DL backend did not answer in time (`{result: \"unknown\"}`)")], true)),
+    ]);
+    mount(paths, "/api/reasoning/jobs", vec![
+        (M::Get, o("Reasoning", "Reasoning jobs",
+            "The caller's background runs (`?async=true`), newest first; an admin sees every user's. Each as `GET /api/reasoning/jobs/{job_id}` answers it, plus `dataset` (the dataset the run reasons over, or `null`). `?dataset=` narrows the list to one dataset. Jobs live in process memory for an hour after they finish.",
+            vec![qp("dataset", false, "Only the jobs over this dataset")],
+            vec![("200", "`{jobs: [...]}`"), ("401", "Authentication required")], true)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/rules", vec![
+        (M::Get, o("Reasoning", "Stored SWRL rules",
+            "The dataset's stored SWRL rules. `sets`: the rule sets this API keeps in the dataset's managed rules graph `urn:ots:rules:<dataset>` (an `entailment`-role graph), each `{id, iri, label, format, source, options, updated_at, updated_by, rules: [{iri, functional}]}` — the source as written and every rule in OWL 2 functional syntax. `other`: the rules in the dataset's other `entailment`- and `model`-role graphs and its model version, read-only, per graph (`{graph, rules, error}`; a private graph only for the dataset's writers). Also `can_write`, `inference_graph`, `last_run` and `formats`.",
+            vec![pp("dataset_id")], vec![("200", "The stored rules"), ("404", "Dataset not found"), ("503", "No SWRL support in this build")], false)),
+        (M::Post, o("Reasoning", "Add a rule set",
+            "Body `{label?, rules, format?, rdf_format?, base_iri?, prefixes?}`: rules in any syntax `POST /api/swrl/execute` reads (`format`, default `swrlapi`). Every rule is checked as a run checks it, against the regime the dataset runs its rules with (class-expression atoms need one), and a property atom the text or SWRLAPI syntax leaves open must be settled by the rule (a literal, a class atom, …); a refused rule writes nothing. The rules are stored in the SWRL RDF syntax with their source, and the dataset's rules (with its regime in `materialize` mode) run again at once. Response: `{id, rules, run}`, `run` as `POST …/rules/run` answers. Requires write access to the dataset.",
+            vec![pp("dataset_id")], vec![("201", "Stored"), ("400", "Rules refused (the message names the rule, atom or built-in)"), ("401", "Authentication required"), ("403", "Write access required"), ("404", "Dataset not found")], true)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/rules/run", vec![
+        (M::Post, o("Reasoning", "Run the stored rules",
+            "Run the dataset's stored rules now: with its regime when it is in `materialize` mode (an `owl2-dl` run is queued: `queued: true`), else alone into `urn:entailment:swrl:<dataset>`. Response `{regime, queued, report, error}`, `report` the rules report `GET …/entailment` shows (`rule_graphs`, `rules`, `target_graph`, `triples_inferred`, `rounds`, `converged`, `error`, `ran_at`). Requires write access to the dataset.",
+            vec![pp("dataset_id")], vec![("200", "What the run did"), ("401", "Authentication required"), ("403", "Write access required"), ("404", "Dataset not found")], true)),
+    ]);
+    mount(paths, "/api/datasets/:dataset_id/rules/:set_id", vec![
+        (M::Put, o("Reasoning", "Replace a rule set",
+            "Body as `POST …/rules`; replaces the set's rules, source and label, then runs the rules again. Requires write access to the dataset.",
+            vec![pp("dataset_id"), pp("set_id")], vec![("200", "Replaced"), ("400", "Rules refused"), ("401", "Authentication required"), ("403", "Write access required"), ("404", "Dataset or rule set not found")], true)),
+        (M::Delete, o("Reasoning", "Remove a rule set",
+            "Removes the set and its rules, then runs the remaining rules again (their consequences go with them). Requires write access to the dataset.",
+            vec![pp("dataset_id"), pp("set_id")], vec![("200", "`{deleted, run}`"), ("401", "Authentication required"), ("403", "Write access required"), ("404", "Dataset or rule set not found")], true)),
     ]);
     mount(paths, "/api/reasoning/jobs/:job_id", vec![
         (M::Get, o("Reasoning", "Reasoning job",
@@ -3064,10 +3091,10 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Reasoning",
                 "Reasoning status",
-                "Counts of entailed triples per entailment graph.",
+                "`{graphs, dl_backend}`: the number of entailed triples in each shared entailment graph (`urn:entailment:<regime>`), and the server's OWL 2 DL backend (`native`, `konclude` or `sidecar` from `OTS_DL_BACKEND`; `null`: `owl2-dl` is unavailable).",
                 vec![],
                 vec![
-                    ("200", "Triple counts per graph"),
+                    ("200", "Triple counts per graph and the DL backend"),
                     ("401", "Authentication required"),
                 ],
                 true,

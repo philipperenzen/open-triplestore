@@ -42,8 +42,9 @@ The response reports the run: `triples_added`, `iterations`, `elapsed_ms`,
 `owl2-dl`) and found nothing violated, `null` for a regime without
 inconsistency rules. A regime that skips axioms outside its profile (OWL 2 QL)
 also reports `ignored_axioms`, their count, and `ignored_sample`, the first 20
-by construct and subject. Query the current status of all entailment graphs
-via `GET /api/reasoning/status`.
+by construct and subject. `GET /api/reasoning/status` answers
+`{graphs, dl_backend}`: the triples in each shared entailment graph and the
+server's OWL 2 DL backend (`null` when `owl2-dl` is unavailable).
 
 **When the run fails.** An inconsistent ontology is a `422` naming the check
 that fired; the consequences derived before the check stay in the target
@@ -94,7 +95,12 @@ For OWL 2 QL, `?entailment=owl2-ql` also rewrites the query's blank nodes so the
 
 ## Per-dataset entailment: selectable regime, materialisation toggle
 
-A dataset can select its own regime and keep it materialised:
+A dataset can select its own regime and keep it materialised. In the web UI
+this is the dataset's **Reasoning** page (**Reasoning & rules** on the dataset
+page, `/datasets/<id>/reasoning`): the regime, mode and identity policy with the
+last run and the server's DL backend; *Materialise now*, the OWL 2 DL checks and
+their background jobs; the stored SWRL rules; one-off SWRL runs with a regime;
+and the OWL 2 QL rewriting of a query. Over HTTP:
 
 ```bash
 curl -X PUT http://localhost:7878/api/datasets/<id>/entailment \
@@ -148,6 +154,14 @@ the regime's fixed point (see
 [Rules stored with a dataset](#rules-stored-with-a-dataset)). The global `?entailment=<regime>` (the shared
 `urn:entailment:<regime>` graphs filled by `POST /api/reasoning/materialize`)
 keeps working unchanged.
+
+**A run on request.** `POST /api/reasoning/materialize` with a `dataset` and no
+`target_graph` writes the dataset's own graph for the regime,
+`urn:entailment:<regime>:<id>`, which the dataset's writers may fill (any other
+target needs write access to that graph). With `?async=true` it, and
+`POST /api/reasoning/check`, answer `202` with a job; `GET /api/reasoning/jobs`
+lists the caller's jobs, newest first (an admin sees everyone's), each with the
+`dataset` it ran over, and `?dataset=<id>` narrows the list to one dataset.
 
 ### The `skos` regime
 
@@ -296,5 +310,21 @@ The response reports `iterations`, `triples_inferred` (what this run wrote to th
 
 - **The dataset has a regime in `materialize` mode.** The rules and the regime run to one joint fixed point in the regime's graph (`urn:entailment:<regime>:<dataset>`). Each sees what the other derives.
 - **It has none.** The rules run on their own into `urn:entailment:swrl:<dataset>`.
+
+**Managing them.** `/api/datasets/{id}/rules` keeps the rules a user writes, in any of
+the [six SWRL syntaxes](swrl.md#syntaxes), in one server-managed graph,
+`urn:ots:rules:<id>`, registered with the dataset in the `entailment` role on the
+first write (the dataset's **Reasoning** page edits them). `POST` stores a *rule set*
+(`{label?, rules, format, prefixes?, rdf_format?, base_iri?}`): every rule is checked
+as a run checks it, against the regime the dataset runs its rules with, and a refused
+rule writes nothing; the rules are written in the SWRL RDF syntax with their source,
+and the dataset's rules run again at once. `PUT …/rules/{set}` replaces a set,
+`DELETE` removes it (and, at the next run, what it derived), `POST …/rules/run` runs
+them now. `GET` lists the sets (source, format and each rule in OWL 2 functional
+syntax) and, read-only, the rules in the dataset's other rule graphs. The text and
+SWRLAPI syntaxes cannot say whether a property is an object or a data property, which
+the RDF syntax must: the rule decides (a literal, a class atom, a data range, a
+built-in argument), and a property atom nothing in the rule settles is refused,
+naming the property.
 
 Either graph is the dataset's inference graph, which `?entailment_dataset=<id>` adds to a query. `GET /api/datasets/{id}/entailment` reports it as `inference_graph`, along with `rules`: the graphs read, the number of rules (or why they cannot be read), and the last run (`rounds`, `triples_inferred`, `converged`). The rule-reading needs the `swrl` feature.

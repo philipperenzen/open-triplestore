@@ -61,7 +61,7 @@
   // eagerly-imported page would otherwise drag it into.
   import RdfTerm from '../components/RdfTerm.svelte';
   import ContextMenu from '../components/ContextMenu.svelte';
-  import { Plus, Trash2, Check, X as XIcon, Loader2, ShieldCheck, LayoutGrid, Terminal, Network, Bookmark, Boxes, MapPin, Rows3, Activity, Copy, CheckCheck, Edit2, Power, Upload, Link as LinkIcon, Globe, Lock, Database, Info, Tag, ChevronLeft, ChevronRight, Unlink, Users, UserPlus, History, FolderOpen, Maximize2 } from 'lucide-svelte';
+  import { Plus, Trash2, Check, X as XIcon, Loader2, ShieldCheck, LayoutGrid, Terminal, Network, Bookmark, Boxes, MapPin, Rows3, Activity, Copy, CheckCheck, Edit2, Power, Upload, Link as LinkIcon, Globe, Lock, Database, Info, Tag, ChevronLeft, ChevronRight, Unlink, Users, UserPlus, History, FolderOpen, Maximize2, Brain, FileDiff } from 'lucide-svelte';
   import { Parser as N3Parser } from 'n3';
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import AttachShapesDialog from '../components/AttachShapesDialog.svelte';
@@ -1357,6 +1357,23 @@
       <strong>{$i18nT('pages.datasetDetail.namedGraphs')}</strong>
       <span>{$i18nT('pages.datasetDetail.namedGraphsDesc')}</span>
     </Link>
+    <Link to="/datasets/{id}/reasoning" class="action-tile">
+      <Brain size={22} />
+      <strong>{$i18nT('pages.datasetDetail.reasoningTile')}</strong>
+      <span>{$i18nT('pages.datasetDetail.reasoningTileDesc')}</span>
+    </Link>
+    {#if $isAuthenticated}
+      <Link to="/datasets/{id}/shex" class="action-tile">
+        <ShieldCheck size={22} />
+        <strong>{$i18nT('pages.datasetDetail.shexTile')}</strong>
+        <span>{$i18nT('pages.datasetDetail.shexTileDesc')}</span>
+      </Link>
+    {/if}
+    <Link to="/datasets/{id}/patch" class="action-tile">
+      <FileDiff size={22} />
+      <strong>{$i18nT('pages.datasetDetail.patchTile')}</strong>
+      <span>{$i18nT('pages.datasetDetail.patchTileDesc')}</span>
+    </Link>
   </div>
 </div>
 
@@ -1866,6 +1883,9 @@
       <div class="flex items-center gap-2">
         <Link to="/validation?dataset={id}" class="btn btn-sm btn-ghost">
           {$i18nT('pages.datasetDetail.openValidationStudio')}
+        </Link>
+        <Link to="/datasets/{id}/shex" class="btn btn-sm btn-ghost">
+          {$i18nT('pages.datasetDetail.openShex')}
         </Link>
         <button class="btn btn-sm btn-ghost" title={$i18nT('pages.datasetDetail.attachShapesDatasetTitle')} on:click={() => attachTarget = { kind: 'dataset', id, label: dataset?.name || id }}>
           <ShieldCheck size={13} /> {$i18nT('pages.datasetDetail.attachShapes')}
