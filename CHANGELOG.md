@@ -658,6 +658,45 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **RML / R2RML and JSON-LD 1.1 are graded Full; the Standards Score is 27
+  of 28** (`docs/standards.md` footnotes 9 and 13,
+  `docs/triplestore-comparison.md`). Each row had kept one deliberate
+  deviation, which the Full rubric does not accept; both are fixed (below),
+  and every failure that remains is footnoted with its issue: an engine limit
+  of SQLite and MySQL, or a defect in a test suite.
+- **SQL column and table names in mappings are SQL identifiers** (R2RML §5).
+  A regular (unquoted) name stands for its folded form and a delimited one
+  (`"Name"`, `` `Name` ``, `[Name]`) is exactly its text, compared the way the
+  datasource's engine does: PostgreSQL folds to lower case (and honours SQL
+  2008's upper case), SQLite and MySQL compare without regard to case, SQL
+  Server follows the database collation, SQL 2008 (the default) folds to upper
+  case; a virtual SPARQL source takes names verbatim. **Breaking:** on
+  PostgreSQL a mixed-case column created delimited (`"StudentId"`) must now be
+  written delimited (`rr:column "\"StudentId\""`); a regular `StudentId`
+  names `studentid`. A column name that is not one SQL identifier
+  (`rr:column "Unit Price"`) is refused, with the delimited spelling to use;
+  one that differs from a column only in case is refused before the first row
+  with that hint. `rr:tableName` parts fold the same way. Connectors report
+  their rules through the new `SourceConnection::identifier_rules`
+  (`plugins/api`); a connector that does not is read as SQL 2008. W3C
+  R2RMLTC0002f now passes on PostgreSQL. See `docs/sources.md`.
+- **A JSON-LD download follows the JSON-LD 1.1 serialisation algorithm.** A
+  well-formed RDF list is written as `@list`, without the `rdf:type rdf:List`
+  quads of its nodes (the algorithm drops them; RDF Schema entails them); an
+  `rdf:JSON` literal is written as its `@json` value, or typed with its text
+  when that is not the canonical form `@json` reads back as. W3C json-ld-api
+  fromRdf `0016`, `js08` and `js09` now pass; the runner's known-failure list
+  is empty. The vendored `oxjsonld` carries both changes, each with an
+  upstream draft (`vendor/oxjsonld/UPSTREAM-PR-5-json-literals.md`,
+  `UPSTREAM-PR-6-list-conversion.md`).
+- **An `rdf:JSON` literal that is not JSON is refused with 400** on every write
+  path — uploads and imports, SPARQL UPDATE (constants and computed values
+  alike, through the vendored Oxigraph's update evaluator), the Graph Store
+  Protocol, LDP and RDF Patch — and nothing of the request is written. Such a
+  literal is ill-typed (JSON-LD 1.1 §10.2), and no JSON-LD download could hold
+  it. An RML run that would generate one reports a data error. See
+  `docs/datatypes.md`.
+
 - **Standards Score recounted once for the second merge train: 25 of 28.**
   The "W3C SPARQL 1.1 Tests" row of `docs/triplestore-comparison.md` is
   retired for every system (owner decision, 2026-10-03): the W3C test-suite
