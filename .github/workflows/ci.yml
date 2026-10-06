@@ -52,15 +52,18 @@ jobs:
 
       # An S3-compatible server for tests/storage_s3_live.rs (the step after
       # the security tests). Started here, before the build, so it is up long
-      # before the tests run. A plain `docker run` rather than a service
-      # container: GitHub cannot pass MinIO the `server /data` arguments it
-      # needs. The credentials are throwaway values for this container. MinIO
-      # publishes no new community images; this tag is the last one.
-      - name: Start MinIO
+      # before the tests run. Versity S3 Gateway (Apache-2.0) over a POSIX
+      # directory in the container, pinned by tag and digest; it checks request
+      # signatures, so the wrong-credentials test means something. MinIO
+      # stopped publishing community images, and its old tags no longer pull.
+      # A plain `docker run` rather than a service container, because GitHub
+      # cannot pass a service its command-line arguments. The credentials are
+      # throwaway values for this container.
+      - name: Start the S3 server
         run: >-
-          docker run -d --name minio -p 127.0.0.1:9000:9000
-          -e MINIO_ROOT_USER=ots-ci-minio -e MINIO_ROOT_PASSWORD=ots-ci-minio-secret
-          quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+          docker run -d --name s3 -p 127.0.0.1:7070:7070
+          versity/versitygw:v1.8.0@sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499
+          --access ots-ci-s3 --secret ots-ci-s3-secret posix /tmp
 
       - name: Install system dependencies (GEOS for GeoSPARQL, xmlsec1 for SAML)
         run: |
@@ -157,22 +160,22 @@ jobs:
             exit 1
           fi
 
-      # The S3 asset store against the MinIO started above: object and HTTP
-      # round trips, absent keys, wrong credentials. The Test step ran these
-      # without OTS_TEST_S3_ENDPOINT, so they skipped there; this re-run uses
-      # the binary it built. OTS_TEST_LIVE_REQUIRED turns a missing or renamed
-      # variable into a failure instead of a skip.
-      - name: S3 storage against MinIO
+      # The S3 asset store against the S3 server started above: object and
+      # HTTP round trips, absent keys, wrong credentials. The Test step ran
+      # these without OTS_TEST_S3_ENDPOINT, so they skipped there; this re-run
+      # uses the binary it built. OTS_TEST_LIVE_REQUIRED turns a missing or
+      # renamed variable into a failure instead of a skip.
+      - name: S3 storage against Versity S3 Gateway
         env:
           OTS_TEST_LIVE_REQUIRED: '1'
-          OTS_TEST_S3_ENDPOINT: http://127.0.0.1:9000
-          OTS_TEST_S3_ACCESS_KEY: ots-ci-minio
-          OTS_TEST_S3_SECRET_KEY: ots-ci-minio-secret
+          OTS_TEST_S3_ENDPOINT: http://127.0.0.1:7070
+          OTS_TEST_S3_ACCESS_KEY: ots-ci-s3
+          OTS_TEST_S3_SECRET_KEY: ots-ci-s3-secret
         run: cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard,plugin-postgres,plugin-mysql,plugin-mssql --locked --test storage_s3_live
 
-      - name: MinIO log
+      - name: S3 server log
         if: always()
-        run: docker logs minio || true
+        run: docker logs s3 || true
 
   # `sfcgal3d` (certified CSG and volumeExact through native SFCGAL) is in no
   # other job's feature list: the sfcgal 0.8 / sfcgal-sys 0.9 crates need
