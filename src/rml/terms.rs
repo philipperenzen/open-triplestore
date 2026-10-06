@@ -476,22 +476,33 @@ pub fn eval_terms<R: Record + ?Sized>(
     }
 }
 
-/// The natural RDF lexical form of a typed source value (R2RML §10.2): an
-/// SQL timestamp's space becomes the `T` of `xsd:dateTime`, and an SQL
-/// boolean written as a number or a letter becomes `true` / `false`. Every
-/// other value is already its own lexical form.
+/// The natural RDF lexical form of a typed source value (R2RML §10.2): the
+/// canonical lexical representation of its natural datatype
+/// ([`super::xsd::canonical`]), so a `DOUBLE` 30 is `3.0E1`. An SQL
+/// timestamp's space becomes the `T` of `xsd:dateTime`, and an SQL boolean
+/// written as a letter becomes `true` / `false`, first. A value outside its
+/// datatype's lexical space, and an untyped one, stays as the source wrote
+/// it. The store keeps literals as written, so this is the one place the
+/// canonical form is made.
 fn natural_lexical(value: &str, kind: Option<ValueKind>) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
-    match kind {
-        Some(ValueKind::DateTime) if value.len() > 10 && value.as_bytes()[10] == b' ' => {
+    let Some(kind) = kind else {
+        return Cow::Borrowed(value);
+    };
+    let value: Cow<'_, str> = match kind {
+        ValueKind::DateTime if value.len() > 10 && value.as_bytes()[10] == b' ' => {
             Cow::Owned(format!("{}T{}", &value[..10], &value[11..]))
         }
-        Some(ValueKind::Boolean) => match value {
-            "1" | "t" | "T" | "TRUE" | "True" => Cow::Borrowed("true"),
-            "0" | "f" | "F" | "FALSE" | "False" => Cow::Borrowed("false"),
+        ValueKind::Boolean => match value {
+            "t" | "T" | "TRUE" | "True" => Cow::Borrowed("true"),
+            "f" | "F" | "FALSE" | "False" => Cow::Borrowed("false"),
             _ => Cow::Borrowed(value),
         },
         _ => Cow::Borrowed(value),
+    };
+    match super::xsd::canonical(&value, kind) {
+        Some(canonical) if canonical != value => Cow::Owned(canonical),
+        _ => value,
     }
 }
 
