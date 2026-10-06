@@ -14,6 +14,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **D-entailment by value under every regime, and `rdfD1` on request.**
+  Under `?entailment=` (and `entailment_dataset=` with a regime) a literal
+  constant in a triple pattern matches every literal of the same value:
+  `"010"^^xsd:integer`, `"10"^^xsd:integer` and `"10.0"^^xsd:decimal` match
+  one another, `"1E400"^^xsd:double` matches `"INF"^^xsd:double`, while
+  `"1"^^xsd:integer` and `"1"^^xsd:double` do not (disjoint value spaces).
+  Strings and booleans are matched through a `VALUES` table of their forms,
+  other values through the server's `sameValue` function
+  (`https://open-triplestore.org/def/function/rdf/sameValue`). The RDFS
+  materialiser applies `rdfD1` when asked (`"rdfd1": true` on
+  `POST /api/reasoning/materialize`, `RdfsMaterializer::with_rdfd1`): one blank
+  node per data value, typed with its datatypes, takes the literal's place in
+  a copy of each triple. `RdfsMaterializer::with_recognized_datatypes` sets
+  the `D` of a run. Every W3C RDF 1.1 Semantics case now passes
+  (`docs/conformance/entailment.md`).
 - **W3C SPARQL 1.2 and RDF 1.2 test suites run in CI.** `sparql/sparql12`
   and the N-Triples, N-Quads, Turtle, TriG and RDF/XML suites of `rdf/rdf12`
   (with the `rdf/rdf11` suites they include) from w3c/rdf-tests are vendored
@@ -657,6 +672,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are listed as a warning. `RUST_LOG` is now in the environment table.
 
 ### Changed
+
+- **Lexical forms take no whitespace normalization.** The OWL 2 / RDFS
+  datatype map reads a literal's lexical form as written, as RDF 1.1 does:
+  `" 3 "^^xsd:int`, `" false"^^xsd:boolean` and `" abc "^^xsd:token` are
+  ill-typed (an inconsistency for RDFS and the OWL 2 reasoners), where the
+  XML Schema whitespace facet used to be applied first. `rdf:XMLLiteral`
+  lexical forms are checked: content that is not well-balanced,
+  namespace-well-formed XML (`"<"`) is ill-typed.
+- **A `sh:pattern` the engine cannot evaluate fails the shapes graph.** A
+  pattern that is not a regular expression, or `sh:flags` that SPARQL `REGEX`
+  does not have, used to make every value pass; the shapes graph is now
+  refused at load, naming the shape (422 from a gate).
+- **Rubric sweep of the graded rows (2026-10-06).** Every known failure of the
+  vendored suites is classified under the Full rubric and the rest are filed:
+  #504 (RDF 1.2, waiting on w3c/rdf-xml#97), #505 and #506 (OWL 2 DL test
+  defects and a HermiT limit), #507 and #508 (SHACL test defects), #509
+  (GeoSPARQL DGGS) and #510 (GeoSPARQL `getSRID` / `geometryType` return type,
+  back with the owner). No grade changed; the Standards Score stays 25 of 28.
+  The W3C OWL 2 DL runner takes its per-check budget from
+  `OTS_TEST_W3C_OWL2_TIMEOUT_SECS`.
 
 - **Standards Score recounted once for the second merge train: 25 of 28.**
   The "W3C SPARQL 1.1 Tests" row of `docs/triplestore-comparison.md` is
@@ -1690,6 +1725,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   table is in `docs/shacl.md` ("Migrating from the legacy dialect").
 
 ### Fixed
+- **Braces in `REGEX` and `sh:pattern`.** XPath regular expressions are XML
+  Schema 1.0 ones, where `{` and `}` outside a quantifier are ordinary
+  characters; the engine refused them, so `REGEX(?s, "^({)(.*)(})$")` was an
+  error and the OGC GeoSPARQL validator's S18 shape passed a GML literal given
+  as GeoJSON. Both the SHACL engine and the vendored SPARQL evaluator now
+  escape them before compiling (`vendor/README.md`, change 10); the OGC
+  validator corpus matches its oracle on all 48 examples.
 - **Triple terms and base direction no longer get lost.** The canonical and
   Skolem blank-node modes now walk into RDF 1.2 triple terms: a blank node
   inside `<<( … )>>` is relabelled or skolemized with the same label as the

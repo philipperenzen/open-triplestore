@@ -607,6 +607,9 @@ async fn execute_query(
     // Whether the regime is OWL 2 QL: its blank nodes are then rewritten
     // existentially over the TBox (see below).
     let mut ql_existentials = false;
+    // Whether a regime applies: its literal constants then match by value
+    // (D-entailment, `reasoning::value_match`).
+    let mut match_values = false;
     let entailment_graph: Option<String> = if let Some(ds_id) = entailment_dataset {
         let ds = state
             .auth_db
@@ -640,6 +643,7 @@ async fn execute_query(
             }
             Some(r) => {
                 ql_existentials = r == "owl2-ql";
+                match_values = true;
                 Some(crate::entailment::dataset_entailment_graph(&r, ds_id))
             }
             None => {
@@ -654,6 +658,7 @@ async fn execute_query(
         }
     } else if let Some(regime) = entailment {
         ql_existentials = regime == "owl2-ql";
+        match_values = crate::entailment::REGIMES.contains(&regime);
         match regime {
             "rdfs" => Some(crate::reasoning::common::RDFS_ENTAILMENT_GRAPH.to_string()),
             "owl2-rl" => Some(crate::reasoning::common::OWL2_RL_ENTAILMENT_GRAPH.to_string()),
@@ -668,6 +673,7 @@ async fn execute_query(
     } else {
         None
     };
+    let match_values = match_values && entailment_graph.is_some();
     let resolved = resolve_prefixes(state, query).await;
     let query = resolved.as_deref().unwrap_or(query);
 
@@ -761,6 +767,15 @@ async fn execute_query(
         };
         #[cfg(not(feature = "owl2-ql"))]
         let _ = ql_existentials;
+        #[cfg(feature = "rdfs-entailment")]
+        let effective_query_str = if match_values {
+            crate::reasoning::value_match::rewrite(&effective_query_str, None)
+                .unwrap_or(effective_query_str)
+        } else {
+            effective_query_str
+        };
+        #[cfg(not(feature = "rdfs-entailment"))]
+        let _ = match_values;
         let results = match store.query(&effective_query_str) {
             Ok(r) => r,
             Err(e) => {
@@ -10794,6 +10809,11 @@ struct MaterializeRequest {
     /// term (about one triple per term). Default `false`.
     #[serde(default)]
     eq_ref: bool,
+    /// `rdfs` only: also apply `rdfD1`, writing a blank node for each typed
+    /// literal's value (about two triples per literal-valued triple).
+    /// Default `false`.
+    #[serde(default)]
+    rdfd1: bool,
 }
 
 /// `?async=true`: queue the run as a job and answer 202 at once.
@@ -10942,6 +10962,8 @@ pub(crate) fn run_regime(
 pub(crate) struct RegimeOptions {
     /// `owl2-rl`: run eq-ref (`Owl2RLReasoner::with_eq_ref`).
     pub eq_ref: bool,
+    /// `rdfs`: apply rdfD1 (`RdfsMaterializer::with_rdfd1`).
+    pub rdfd1: bool,
 }
 
 /// [`run_regime`] with the reasoner's own error, for a caller that records
@@ -10996,7 +11018,8 @@ pub(crate) fn run_reasoner_with(
             let m = scoped!(crate::reasoning::rdfs::RdfsMaterializer::with_target(
                 &state.store,
                 target
-            ));
+            )
+            .with_rdfd1(options.rdfd1));
             Some(m.materialize()?)
         }
         #[cfg(feature = "owl2-rl")]
@@ -11234,6 +11257,7 @@ async fn reasoning_materialize(
     let st = state.clone();
     let options = RegimeOptions {
         eq_ref: body.eq_ref,
+        rdfd1: body.rdfd1,
     };
     let work = move || -> Result<serde_json::Value, AppError> {
         // Entailment graphs are derived data and must be rebuilt from

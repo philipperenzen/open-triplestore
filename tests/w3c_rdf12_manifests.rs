@@ -73,7 +73,7 @@ const RDFT: &str = "http://www.w3.org/ns/rdftest#";
 /// (w3c/rdf-xml#97). The numeric lexical-form entries listed here before pass
 /// now that the store keeps literals as written (vendor/README.md).
 const KNOWN_FAILURES: &[(&str, &str)] = &[
-    ("rdf11/rdf-xml/manifest.ttl#xml-canon-test001", "`rdf:parseType=\"Literal\"`: oxrdfxml 0.2.4 keeps the in-scope namespace declarations on the literal's root element; the suite expects `\"<br></br>\"` again since rdf-tests d974697 (2026-04-20). The canonical form of `rdf:XMLLiteral` is open W3C issue w3c/rdf-xml#97 (opened 2026-04-20)"),
+    ("rdf11/rdf-xml/manifest.ttl#xml-canon-test001", "`rdf:parseType=\"Literal\"`: oxrdfxml 0.2.4 keeps the in-scope namespace declarations on the literal's root element; the suite expects `\"<br></br>\"` again since rdf-tests d974697 (2026-04-20). The canonical form of `rdf:XMLLiteral` is open W3C issue w3c/rdf-xml#97 (opened 2026-04-20); tracked in #504"),
     ("rdf11/rdf-xml/manifest.ttl#xml-canon-test002", "as xml-canon-test001"),
     ("rdf12/rdf-xml/eval#rdf12-xml-an-13", "as rdf11 xml-canon-test001, inside a triple term (rdf-tests 7633586, 2026-05-31; w3c/rdf-xml#97)"),
     ("rdf12/rdf-xml/eval#rdf12-xml-an-14", "as rdf12-xml-an-13"),

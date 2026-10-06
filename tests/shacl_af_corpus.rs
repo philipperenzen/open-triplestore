@@ -67,7 +67,8 @@ const NON_SPEC_EXPECTATIONS: &[(&str, &str, &str)] = &[(
     "the target's sh:select uses the owl: prefix, which the ontology its sh:prefixes names \
      does not declare; TopBraid falls back to the Turtle prefixes of the file it loaded, the \
      SHACL prefix mechanism (SHACL §5.2.1, which SHACL-AF reuses for targets) does not, and a \
-     query that does not parse with the declared prefixes makes the shapes graph ill-formed",
+     query that does not parse with the declared prefixes makes the shapes graph ill-formed \
+     (a test-suite defect, #507)",
 )];
 
 #[derive(Debug, PartialEq)]

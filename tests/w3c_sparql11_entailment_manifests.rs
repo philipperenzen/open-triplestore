@@ -41,9 +41,9 @@ const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 
 /// `(entry IRI fragment, why)`: cases that fail today. See docs/conformance/entailment.md.
 const KNOWN_FAILURES: &[(&str, &str)] = &[
-    ("sparqldl-10", "the expected answers need OWL reasoning beyond the RL/RDF rules (RL is a partial axiomatization of the RDF-Based Semantics)"),
-    ("sparqldl-11", "as sparqldl-10"),
-    ("sparqldl-12", "an answer binds a blank-node class (a restriction); the regime answers only with terms that name things in the queried graph"),
+    ("sparqldl-10", "outside the OWL 2 RL profile: the case's sd:EntailmentProfile is DL, EL and Full, and its answers need the OWL 2 Direct or RDF-Based Semantics beyond the RL/RDF rules (OWL 2 Profiles §4.3: Theorem PR1 bounds RL completeness), so the RL engine this runner uses for OWL-RDF-Based cases cannot be complete for it"),
+    ("sparqldl-11", "as sparqldl-10: profile DL and Full only"),
+    ("sparqldl-12", "as sparqldl-10: profile DL and Full only (an answer also binds a blank-node class, a restriction, where the regime answers only with terms that name things in the queried graph)"),
 ];
 
 /// Pass floor, a little below the current count.

@@ -260,6 +260,17 @@ One commit each, in this order:
    variables of the SELECT expressions before it, which the `Extend` chain
    already binds. Fixes `grouping#select-variable-reuse` of the SPARQL 1.2
    suite. Draft: `spargebra/UPSTREAM-PR-select-variable-reuse.md`.
+10. **Braces in `REGEX` patterns** (`spareval` `compile_pattern`). SPARQL's
+    `REGEX` takes XPath regular expressions, which are XML Schema 1.0 ones:
+    `{` and `}` are ordinary characters wherever they do not make a quantifier
+    `{n}`, `{n,}` or `{n,m}`. The `regex` crate refuses an unescaped `{` that
+    starts no repetition, so `REGEX(?s, "^({)(.*)(})$")` was an error (the
+    filter dropped every row). Those braces are now escaped before the pattern
+    is compiled. No W3C entry reaches it; the OGC GeoSPARQL validator's S18
+    shape does (through `sh:pattern`, `tests/ogc_geosparql_shacl_roundtrip.rs`),
+    and `regex_braces_are_ordinary_characters` in
+    `tests/sparql_functions_conformance.rs` pins it. Draft:
+    `spareval/UPSTREAM-PR-regex-braces.md`.
 
 ### Verifying the fork
 

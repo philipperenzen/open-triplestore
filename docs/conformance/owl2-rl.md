@@ -47,6 +47,12 @@ test), so these are limits of the rule set rather than of the implementation. Th
 
 Cases without an RDF/XML premise or conclusion are skipped by the runner.
 
+Under the Full rubric of [standards.md](../standards.md) (checked again on 2026-10-06), none of
+these is a failure of the RL grade: RL is graded against Theorem PR1, and every case above is
+outside its scope (below), so each stays listed with that reason and needs no issue. The three
+`sparqldl-*` cases of the SPARQL 1.1 entailment-regime runner are outside the profile too: their
+`sd:EntailmentProfile` does not name RL ([entailment.md](entailment.md)).
+
 ### Theorem PR1
 
 OWL 2 Profiles §4.3, Theorem PR1, is the completeness the RL/RDF rules promise: for an OWL 2 RL

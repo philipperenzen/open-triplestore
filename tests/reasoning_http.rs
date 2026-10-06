@@ -1555,3 +1555,136 @@ mod owl2_dl_backend {
         assert_eq!(st, StatusCode::NOT_FOUND);
     }
 }
+
+/// Under a regime, a literal constant matches every literal of its value
+/// (D-entailment): the store keeps `"010"^^xsd:integer` as written, and
+/// `?entailment=rdfs` still answers `10` and `10.0` for it. Without a regime
+/// the match stays by term; a double never equals a decimal.
+#[tokio::test]
+async fn entailment_matches_literals_by_value() {
+    use open_triplestore::auth::models::{OwnerType, Visibility};
+    const DATA: &str = "http://example.org/g/values";
+    let (state, token) = admin_state();
+    // `/sparql` reads registered graphs (plus the entailment graph).
+    state
+        .auth_db
+        .create_dataset(
+            "valds",
+            "Values",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    state.auth_db.add_dataset_graph("valds", DATA).unwrap();
+    state
+        .store
+        .load_str(
+            "<urn:e:s> <urn:e:p> \"010\"^^<http://www.w3.org/2001/XMLSchema#integer> .",
+            oxigraph::io::RdfFormat::Turtle,
+            Some(DATA),
+        )
+        .unwrap();
+    let ask = |query: &str, regime: Option<&str>| {
+        let app = test_app(state.clone());
+        let token = token.clone();
+        let q = url_encode(query);
+        let uri = match regime {
+            Some(r) => format!("/sparql?query={q}&entailment={r}"),
+            None => format!("/sparql?query={q}"),
+        };
+        async move {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .header(header::ACCEPT, "application/sparql-results+json")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let v = body_json(resp.into_body()).await;
+            v["boolean"]
+                .as_bool()
+                .unwrap_or_else(|| panic!("not an ASK result: {v}"))
+        }
+    };
+    let x = "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
+    assert!(
+        ask(
+            &format!("{x}ASK {{ <urn:e:s> <urn:e:p> 10 }}"),
+            Some("rdfs")
+        )
+        .await
+    );
+    assert!(
+        ask(
+            &format!("{x}ASK {{ <urn:e:s> <urn:e:p> \"10.0\"^^xsd:decimal }}"),
+            Some("rdfs")
+        )
+        .await
+    );
+    assert!(
+        !ask(
+            &format!("{x}ASK {{ <urn:e:s> <urn:e:p> \"10\"^^xsd:double }}"),
+            Some("rdfs")
+        )
+        .await
+    );
+    assert!(!ask(&format!("{x}ASK {{ <urn:e:s> <urn:e:p> 10 }}"), None).await);
+    assert!(
+        ask(
+            &format!("{x}ASK {{ <urn:e:s> <urn:e:p> \"010\"^^xsd:integer }}"),
+            None
+        )
+        .await,
+        "the data is visible as written"
+    );
+}
+
+/// `"rdfd1": true` writes a blank node for a typed literal's value, typed
+/// with its datatype and reasoned about like any resource (rdfs3 range,
+/// rdfs13 `rdfs:Literal`); without it nothing of the kind is written.
+#[tokio::test]
+async fn rdfd1_is_applied_on_request() {
+    let (state, token) = admin_state();
+    state
+        .store
+        .load_str(
+            "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> . \
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> . \
+             <urn:e:age> rdfs:range <urn:e:Age> . \
+             <urn:e:a> <urn:e:age> \"42\"^^xsd:integer .",
+            oxigraph::io::RdfFormat::Turtle,
+            None,
+        )
+        .unwrap();
+    let pattern = "<urn:e:a> <urn:e:age> ?v . FILTER(isBlank(?v)) \
+                   ?v a <http://www.w3.org/2001/XMLSchema#integer> , <urn:e:Age> , \
+                   <http://www.w3.org/2000/01/rdf-schema#Literal>";
+    let (st, _) = materialize(&state, &token, "rdfs").await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(!entailed(&state, pattern), "rdfD1 is off by default");
+    let resp = test_app(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/reasoning/materialize")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(
+                    json!({ "regime": "rdfs", "rdfd1": true }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(entailed(&state, pattern), "rdfD1 on request");
+}

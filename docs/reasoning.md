@@ -17,9 +17,16 @@ Reasoning is triggered via `POST /api/reasoning/materialize` with a JSON body:
   "regime": "rdfs|owl2-rl|owl2-el|owl2-ql|owl2-dl",
   "target_graph": "<optional IRI>",
   "dataset": "<optional dataset id>",
-  "source_graphs": ["<optional graph IRIs>"]
+  "source_graphs": ["<optional graph IRIs>"],
+  "eq_ref": false,
+  "rdfd1": false
 }
 ```
+
+`eq_ref` (`owl2-rl` only) also writes `x owl:sameAs x` for every term
+([owl2-rl.md](owl2-rl.md)); `rdfd1` (`rdfs` only) also applies `rdfD1`, a blank
+node for each typed literal's value ([rdfs-entailment.md](rdfs-entailment.md#rdfd1-literal-values-as-resources)).
+Both are off by default.
 
 **What the rules read.** With `dataset`, the reasoner works on that dataset's
 *conformance layer* — its data-bearing graphs (instances, model, vocabulary,

@@ -34,6 +34,10 @@ pub mod identity;
 #[cfg(feature = "rdfs-entailment")]
 pub mod rdfs;
 
+/// D-entailment at query time: literal constants matched by value.
+#[cfg(feature = "rdfs-entailment")]
+pub mod value_match;
+
 #[cfg(feature = "owl2-rl")]
 pub mod owl2_rl;
 

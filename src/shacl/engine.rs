@@ -728,6 +728,20 @@ fn load_constraints(
     // allows it; only sh:flags is at-most-one), and every one must match.
     let flags = single_value(store, shapes_graph, shape_iri, &format!("{}flags", SH));
     for pattern in multi_values(store, shapes_graph, shape_iri, &format!("{}pattern", SH)) {
+        // Fail closed at load time: a pattern this processor cannot evaluate
+        // (not a regular expression, or flags REGEX does not have) is an
+        // ill-formed shapes graph (SHACL §4.4.1: the values are valid REGEX
+        // pattern arguments), never a constraint every value passes.
+        if pattern.len() <= 1000
+            && super::constraints::compile_pattern(&pattern, flags.as_deref().unwrap_or(""))
+                .is_none()
+        {
+            return Err(format!(
+                "shape <{shape_iri}>: sh:pattern \"{pattern}\" with flags \"{}\" is not a \
+                 regular expression this processor evaluates",
+                flags.as_deref().unwrap_or("")
+            ));
+        }
         constraints.push(Constraint::Pattern {
             pattern,
             flags: flags.clone(),
