@@ -116,6 +116,14 @@ non-canonical literal is false. Graph patterns are not affected.
    one lookup. Bounded at 2^21 keys; off without optimizations and on
    `wasm32-unknown-unknown`. Draft: `spareval/UPSTREAM-PR-exists-semi-join.md`.
 
+12. **A merged default graph streams when one graph matches** (`spareval`
+   dataset). The default `internal_triples_for_pattern` of change 2 kept a hash
+   set of every match of every pattern over a multi-graph default graph. It now
+   drops the graphs with no match first (one probe each) and streams the matches
+   untouched when only one graph is left — a dataset service whose default graph
+   is a data graph plus its shapes graph, in the store comparison. Draft:
+   `spareval/UPSTREAM-PR-merged-default-graph-single-match.md`.
+
 ### Verifying the fork
 
 Each fork diff is its own commit, after the commit that vendored the crate
