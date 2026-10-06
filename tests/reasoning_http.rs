@@ -1039,11 +1039,16 @@ async fn owl2_ql_materialises_ground_atoms_and_rewrites_blank_nodes() {
     let st = resp.status();
     let body = body_json(resp.into_body()).await;
     assert_eq!(st, StatusCode::OK, "{body}");
-    assert_eq!(body["ignored_axioms"], 1, "{body}");
     assert_eq!(
-        body["ignored_sample"][0]["axiom"], "owl:TransitiveProperty",
+        body["ignored"],
+        json!([{
+            "construct": "TransitiveObjectProperty",
+            "count": 1,
+            "example": "http://example.org/ancestorOf"
+        }]),
         "{body}"
     );
+    assert!(body.get("ignored_axioms").is_none(), "{body}");
     assert!(matches!(
         state.store.query(
             "ASK { GRAPH <urn:entailment:owl2-ql> \

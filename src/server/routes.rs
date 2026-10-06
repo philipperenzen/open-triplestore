@@ -11263,12 +11263,10 @@ async fn reasoning_materialize(
             // null: the regime has no inconsistency rules (an inconsistent
             // run is a 422, never a 200).
             "consistent": crate::reasoning::common::checks_consistency(&r.regime).then_some(true),
-            // Axioms outside the regime's profile that were not used.
-            "ignored_axioms": r.ignored_axioms,
-            "ignored_sample": r.ignored_sample,
         });
         // Axioms the regime could not use (outside its profile), by
-        // construct; only present when there were any.
+        // construct (D9: `owl2-el`, `owl2-ql`); only present when there were
+        // any.
         if !r.ignored.is_empty() {
             out["ignored"] = serde_json::json!(r.ignored);
         }

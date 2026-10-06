@@ -68,18 +68,24 @@ loaded before it did holds them as `xsd:integer` and `xsd:dateTime`, which reads
 
 Axioms outside the profile are not used, for example `owl:TransitiveProperty`, functional
 properties, `owl:hasKey`, property chains, `owl:sameAs`, unions, cardinalities, and datatypes
-outside the QL map (`xsd:boolean`, `xsd:double`, `xsd:int`, …). Each run lists them in its report:
+outside the QL map (`xsd:boolean`, `xsd:double`, `xsd:int`, …). Each run counts them per
+construct, with the first axiom subject read as the example. The report has the same shape as the
+OWL 2 EL one:
 
 ```json
-{ "regime": "owl2-ql", "triples_added": 12, "ignored_axioms": 2,
-  "ignored_sample": [
-    { "axiom": "owl:TransitiveProperty", "subject": "http://example.org/ancestorOf",
-      "reason": "outside OWL 2 QL" },
-    { "axiom": "rdfs:subClassOf", "subject": "http://example.org/Pet",
-      "reason": "a class expression outside OWL 2 QL" } ] }
+{ "regime": "owl2-ql", "triples_added": 12,
+  "ignored": [
+    { "construct": "TransitiveObjectProperty", "count": 1, "example": "http://example.org/ancestorOf" },
+    { "construct": "ObjectUnionOf", "count": 1, "example": "http://example.org/Pet" } ] }
 ```
 
-`ignored_sample` lists the first 20. Both fields are omitted when nothing was ignored.
+A construct is named as in the OWL 2 Structural Specification where one name fits
+(`ObjectUnionOf`, `SameIndividual`, `FunctionalDataProperty`, `HasKey`), and described otherwise
+(`qualified ObjectSomeValuesFrom as a subclass expression`, `datatype outside the OWL 2 QL datatype
+map`). An axiom whose expression is outside the profile is counted under the constructor that put
+it there, not under the axiom (`ex:Pet rdfs:subClassOf [ owl:unionOf (…) ]` counts as
+`ObjectUnionOf`). The most frequent construct comes first. `ignored` is omitted when nothing was
+ignored.
 
 ## Closure and consistency
 
