@@ -112,18 +112,25 @@ asset-clamav      = []                        # ClamAV INSTREAM virus scan on up
 ## The feature set a plain `cargo build` produces.
 ##
 ## `full`, so the README's native build path yields the binary its Highlights
-## table describes. With no `default` key at all — the previous state — a plain
-## `cargo build --release` compiled none of RDF 1.2, the OWL 2 profiles, LDP,
-## ShEx, SWRL, text/vocab search, SAML or 3D geometry, while the README told
-## users to build exactly that way and then start the server. Docker and CI pass
-## explicit feature lists, so only the documented native path was affected.
+## table describes, minus what needs extra system libraries (SAML) or is a
+## deployment's choice (the SQL connectors, plugins); `image` adds those. With
+## no `default` key at all — the previous state — a plain `cargo build
+## --release` compiled none of RDF 1.2, the OWL 2 profiles, LDP, ShEx, SWRL,
+## text/vocab search or 3D geometry, while the README told users to build
+## exactly that way and then start the server.
 ##
 ## `--no-default-features` gets the minimal core (SPARQL 1.1 + GeoSPARQL 2D over
 ## the Oxigraph engine); CI compiles that configuration so its `#[cfg(not(...))]`
 ## fallbacks keep building.
 default         = ["full"]
 
-## All extensions enabled.
+## Every standard and operational extension that builds with no system
+## library beyond what the core already links (GEOS): RDF 1.2, the OWL 2
+## profiles, full-text and vocabulary search, LDP, ShEx, SWRL, 3D geometry,
+## encrypted backups, alerting and the asset extractors. NOT in it: `saml`
+## (libxml2 + libxmlsec1), `sfcgal3d` (native SFCGAL >= 2.0), the SQL connector
+## plugins and the other `plugin-*` features — see `image` and
+## docs/build-features.md.
 ##
 ## `backup-encrypt` and `alerting` are included: docs/administration.md
 ## documents BACKUP_ENCRYPT and ALERT_WEBHOOK_URL / ALERT_SMTP_* as ordinary
@@ -133,6 +140,13 @@ default         = ["full"]
 ## Rust; lettre is already a core dependency — the `alerting` flag only gates
 ## the module), so there is no build-portability cost.
 full            = ["rdf-12", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl", "text-search", "vocab-search", "ldp", "shex", "swrl", "geometry3d", "backup-encrypt", "alerting", "asset-pdf", "asset-exif", "asset-media", "asset-archive", "asset-spreadsheet", "asset-thumbnail", "asset-clamav"]
+
+## The published Docker image's feature set: `full`, SAML 2.0 sign-in and the
+## three SQL datasource connectors. The Dockerfile builds with it
+## (`CARGO_FEATURES=image`), so `cargo build --release --features image` gives
+## the image's binary natively (SAML then needs libxml2, libxmlsec1,
+## pkg-config and libclang; see docs/build-features.md).
+image           = ["full", "saml", "plugin-postgres", "plugin-mysql", "plugin-mssql"]
 
 [dependencies]
 libc = "0.2"
