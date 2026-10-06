@@ -17,6 +17,8 @@
   export let canWrite = false;
   /** Poll interval while a background run is queued or running (ms). */
   export let pollMs = 2000;
+  /** Bump to reload the state (the stored rules changed) without resetting the form. */
+  export let refreshKey = 0;
 
   const dispatch = createEventDispatcher<{ loaded: EntailmentState }>();
   const REGIMES: EntailmentRegime[] = ['rdfs', 'owl2-rl', 'owl2-el', 'owl2-ql', 'owl2-dl', 'skos'];
@@ -63,6 +65,7 @@
   onDestroy(() => { if (timer) clearTimeout(timer); });
 
   $: load(true, datasetId);
+  $: if (refreshKey) load(false);
 
   $: dlUnavailable = !!state && !state.dl_backend;
   $: regimeOptions = REGIMES.map((r) => ({

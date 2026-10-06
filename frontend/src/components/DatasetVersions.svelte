@@ -11,7 +11,7 @@
   import {
     listDatasetVersions, getDatasetBranches, createDatasetVersion, stageDatasetVersion,
     publishDatasetVersion, deprecateDatasetVersion, restoreDatasetVersion, createDatasetBranch,
-    getDatasetVersionDataUrl, gcDatasetVersions,
+    getDatasetVersionDataUrl, gcDatasetVersions, getDatasetPatchLog,
   } from '../lib/api.js';
 
   export let id;
@@ -94,6 +94,10 @@
     : '';
   $: canCreate = !!trimmedVersion && !versionError && !graphsError && !creating;
 
+  // The version the dataset's RDF Patch log starts from (its version 0), if a
+  // version holds it: deleting that one makes the log's version 0 answer 410.
+  let logInitVersion = null;
+
   async function load() {
     loading = true; error = '';
     try {
@@ -103,6 +107,11 @@
       ]);
     } catch (e) {
       error = e?.message || String(e);
+    }
+    try {
+      logInitVersion = (await getDatasetPatchLog(id, { limit: 1 }))?.init?.version ?? null;
+    } catch {
+      logInitVersion = null;
     }
     loading = false;
   }
@@ -185,6 +194,7 @@
   let gcKeep = 10;
   let gcBusy = false;
   $: gcDoomed = gcPreview(versions, Number(gcKeep) || 0);
+  $: gcHitsLog = !!logInitVersion && gcDoomed.some((v) => v.version === logInitVersion);
 
   async function runGc() {
     const keep = Math.max(0, Math.floor(Number(gcKeep) || 0));
@@ -192,7 +202,8 @@
     if (!doomed.length) return;
     const ok = await askConfirm({
       title: $t('components.datasetVersions.gcConfirmTitle'),
-      message: $t('components.datasetVersions.gcConfirmMessage', { values: { count: doomed.length, versions: doomed.map((v) => v.version).join(', ') } }),
+      message: $t('components.datasetVersions.gcConfirmMessage', { values: { count: doomed.length, versions: doomed.map((v) => v.version).join(', ') } })
+        + (logInitVersion && doomed.some((v) => v.version === logInitVersion) ? ` ${$t('components.datasetVersions.gcLogInit', { values: { version: logInitVersion } })}` : ''),
       confirmLabel: $t('components.datasetVersions.gcConfirm'),
       variant: 'danger',
     });
@@ -259,6 +270,9 @@
           {#each gcDoomed as v (v.version)}<code class="gc-ver">{v.version}</code>{/each}</span>
       {:else}
         <span class="field-hint">{$t('components.datasetVersions.gcNothing')}</span>
+      {/if}
+      {#if gcHitsLog}
+        <span class="field-err">{$t('components.datasetVersions.gcLogInit', { values: { version: logInitVersion } })}</span>
       {/if}
       <div class="row end">
         <button class="btn-sm ghost" on:click={() => (showGc = false)}>{$t('system.cancel')}</button>

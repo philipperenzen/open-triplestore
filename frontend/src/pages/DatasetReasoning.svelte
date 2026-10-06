@@ -25,6 +25,7 @@
   let error = '';
   let entailment: EntailmentState | null = null;
   let jobsKey = 0;
+  let settingsKey = 0;
 
   onMount(async () => {
     try {
@@ -61,16 +62,16 @@
   ]} />
 
   <div class="stack">
-    <EntailmentSettings datasetId={id} {canWrite} on:loaded={(e) => (entailment = e.detail)} />
+    <EntailmentSettings datasetId={id} {canWrite} refreshKey={settingsKey} on:loaded={(e) => (entailment = e.detail)} />
     {#if $isAuthenticated}
       <MaterialisePanel datasetId={id} {canWrite} {dlBackend} on:queued={queued} />
       <ConsistencyCheck datasetId={id} {dlBackend} on:queued={queued} />
       <ReasoningJobs datasetId={id} refreshKey={jobsKey} />
     {/if}
-    <DatasetRules datasetId={id} {canWrite} />
+    <DatasetRules datasetId={id} {canWrite} on:changed={() => (settingsKey += 1)} />
     {#if $isAuthenticated}
       <SwrlRunner datasetId={id} {canWrite} inferenceGraph={entailment?.inference_graph ?? ''} />
-      <QlRewrite />
+      <QlRewrite datasetId={id} />
     {:else}
       <p class="signin"><Lock size={13} /> {$t('pages.datasetReasoning.signIn')}</p>
     {/if}

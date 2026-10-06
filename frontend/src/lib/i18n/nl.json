@@ -3534,11 +3534,13 @@
       "navStatus": "Status",
       "statusHeading": "Gedeelde entailment-grafen",
       "graph": "Graaf",
-      "triples": "Triples"
+      "triples": "Triples",
+      "detail": "SWRL-regels, OWL 2 DL-controles en queryherschrijving"
     },
     "shex": {
       "title": "ShEx-validatie",
-      "signIn": "Meld u aan om met ShEx te valideren."
+      "signIn": "Meld u aan om met ShEx te valideren.",
+      "detail": "Valideer de data die u mag lezen tegen een ShEx 2.1-schema"
     },
     "datasetPatch": {
       "title": "RDF Patch"
@@ -4021,7 +4023,8 @@
       "gcConfirmTitle": "Oude versies verwijderen?",
       "gcConfirmMessage": "{count, plural, one {Versie {versions} en haar snapshot worden verwijderd.} other {Versies {versions} en hun snapshots worden verwijderd.}} Dit kan niet ongedaan worden gemaakt.",
       "gcConfirm": "Versies verwijderen",
-      "gcDone": "{count, plural, =0 {Geen versies verwijderd} one {# versie verwijderd} other {# versies verwijderd}}"
+      "gcDone": "{count, plural, =0 {Geen versies verwijderd} one {# versie verwijderd} other {# versies verwijderd}}",
+      "gcLogInit": "Versie {version} is versie 0 van het RDF Patch-logboek van de dataset: is die verwijderd, dan is versie 0 van het logboek niet meer te downloaden."
     },
     "diagnosticsPanel": {
       "errorsCount": "{count} fouten",
@@ -4903,7 +4906,8 @@
       "rewrite": "Herschrijven",
       "rewritten": "Herschreven query",
       "copy": "De herschreven query kopiëren",
-      "copied": "Gekopieerd"
+      "copied": "Gekopieerd",
+      "rewriteIntroDataset": "Zie wat een query wordt onder OWL 2 QL: de TBox uit de redeneerbronnen van deze dataset wordt erin uitgevouwen. De query wordt niet uitgevoerd."
     },
     "swrl": {
       "storedHeading": "Opgeslagen SWRL-regels",
@@ -4995,7 +4999,7 @@
         "pairs": "Node en shape"
       },
       "discoverHint": "Elke shape wordt gecontroleerd op de nodes die een van zijn predicaten gebruiken.",
-      "textHint": "De ShapeMap-taal: node@shape-paren en '{FOCUS …}'@shape-patronen, gescheiden door komma's.",
+      "textHint": "De ShapeMap-taal: node@shape-paren en FOCUS-patronen (een tripelpatroon met FOCUS erin, tussen accolades) @shape, gescheiden door komma's. De voorbeeldtekst toont beide.",
       "node": "Node",
       "shape": "Shape",
       "nodeN": "Node {n}",

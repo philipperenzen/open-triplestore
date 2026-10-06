@@ -33,7 +33,8 @@
 
   $: needsBackend = task !== 'profile';
   $: options = TASKS.map((x) => ({ value: x, label: $t(`components.reasoning.task.${x}`), disabled: x !== 'profile' && !dlBackend }));
-  $: if (!dlBackend && task !== 'profile') task = 'profile';
+  // The backend may be learnt after mount (the page loads it), so the choice
+  // is not forced here: a task that needs one is disabled until it is known.
 
   async function run() {
     running = true;

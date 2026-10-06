@@ -1702,6 +1702,29 @@ async fn dataset_runs_write_the_dataset_graph_and_jobs_list_by_dataset() {
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["jobs"].as_array().unwrap().len(), 0, "{v}");
 
+    // QL rewriting over the dataset reads its TBox (Dog ⊑ Animal) from the
+    // dataset's sources, whoever asks.
+    #[cfg(feature = "owl2-ql")]
+    {
+        let (st, v) = call(
+            "/api/reasoning/rewrite",
+            writer.clone(),
+            Some(json!({
+                "query": "SELECT ?x WHERE { ?x a <http://example.org/Animal> }",
+                "dataset": "jobsds",
+            })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert!(
+            v["rewritten"]
+                .as_str()
+                .unwrap()
+                .contains("http://example.org/Dog"),
+            "{v}"
+        );
+    }
+
     // The status names the shared graphs and the DL backend (none configured).
     let (st, v) = call("/api/reasoning/status", writer, None).await;
     assert_eq!(st, StatusCode::OK, "{v}");

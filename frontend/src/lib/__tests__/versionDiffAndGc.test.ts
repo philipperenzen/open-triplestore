@@ -20,6 +20,7 @@ const api = vi.hoisted(() => ({
   createDatasetBranch: vi.fn(),
   getDatasetVersionDataUrl: () => '/x',
   gcDatasetVersions: vi.fn(),
+  getDatasetPatchLog: vi.fn(),
 }));
 vi.mock('../api', () => api);
 vi.mock('../api.js', () => api);
@@ -67,6 +68,7 @@ describe('DatasetVersionDiff', () => {
 
 describe('DatasetVersions retention', () => {
   it('previews what goes and deletes only after the app dialog confirms', async () => {
+    api.getDatasetPatchLog.mockResolvedValue({ name: 'ds1', init: null, latest: null, entries: [] });
     api.listDatasetVersions.mockResolvedValue(VERSIONS);
     api.getDatasetBranches.mockResolvedValue([]);
     api.gcDatasetVersions.mockResolvedValue({ kept: 1, deleted: ['1.1.0'] });
@@ -85,7 +87,22 @@ describe('DatasetVersions retention', () => {
     await waitFor(() => expect(api.gcDatasetVersions).toHaveBeenCalledWith('ds1', 1));
   });
 
+  it('warns when the patch log starts from a version that would go', async () => {
+    api.getDatasetPatchLog.mockResolvedValue({ name: 'ds1', init: { version: '1.1.0', graphs: [], prefixes: 0 }, latest: null, entries: [] });
+    api.listDatasetVersions.mockResolvedValue(VERSIONS);
+    api.getDatasetBranches.mockResolvedValue([]);
+    confirm.askConfirm.mockResolvedValue(false);
+    const view = render(DatasetVersions, { id: 'ds1', canWrite: true, graphs: [] });
+    await fireEvent.click(await view.findByRole('button', { name: /Clean up/ }));
+    await fireEvent.input(view.getByLabelText('Unpublished versions to keep'), { target: { value: '1' } });
+    expect(view.getByTestId('version-gc').textContent).toContain("version 0 of the dataset's RDF Patch log");
+    const buttons = view.getAllByRole('button', { name: /Clean up/ });
+    await fireEvent.click(buttons[buttons.length - 1]);
+    await waitFor(() => expect(confirm.askConfirm).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('RDF Patch log') })));
+  });
+
   it('does not delete when the dialog is cancelled, and offers a diff link per version', async () => {
+    api.getDatasetPatchLog.mockRejectedValue(new Error('no log'));
     api.listDatasetVersions.mockResolvedValue(VERSIONS);
     api.getDatasetBranches.mockResolvedValue([]);
     confirm.askConfirm.mockResolvedValue(false);

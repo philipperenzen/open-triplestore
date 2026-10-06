@@ -11540,9 +11540,14 @@ async fn reasoning_status(State(state): State<AppState>) -> Result<Response, App
 struct RewriteRequest {
     query: String,
     regime: Option<String>,
+    /// Read the TBox from this dataset's reasoning sources (as far as the
+    /// caller may read them) instead of every graph the caller may read.
+    #[serde(default)]
+    dataset: Option<String>,
 }
 
 /// POST /api/reasoning/rewrite — debug endpoint: return the rewritten query.
+/// With `dataset` the TBox comes from that dataset's reasoning sources.
 ///
 /// The rewriting spells out the TBox it was computed from (every subclass and
 /// sub-property it unions in), so the TBox is read only from graphs the
@@ -11560,7 +11565,15 @@ async fn reasoning_rewrite(
         #[cfg(feature = "owl2-ql")]
         "owl2-ql" => {
             let rw = crate::reasoning::owl2_ql::QLQueryRewriter::new(&state.store);
-            let rw = if user.is_admin() {
+            let rw = if let Some(ds) = body.dataset.as_deref() {
+                // The dataset's layer, read-checked as a materialisation's is.
+                let (sources, _) = reasoning_scope(&state, &user, Some(ds), None)?;
+                let mut sources = sources.unwrap_or_default();
+                if sources.is_empty() {
+                    sources.push(EMPTY_SCOPE_GRAPH.to_string());
+                }
+                rw.with_sources(sources)
+            } else if user.is_admin() {
                 rw
             } else {
                 let mut readable: Vec<String> = accessible_read_graphs(&state, Some(&user))?

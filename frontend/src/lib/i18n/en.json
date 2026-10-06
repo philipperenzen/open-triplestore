@@ -3534,11 +3534,13 @@
       "navStatus": "Status",
       "statusHeading": "Shared entailment graphs",
       "graph": "Graph",
-      "triples": "Triples"
+      "triples": "Triples",
+      "detail": "SWRL rules, OWL 2 DL checks and query rewriting"
     },
     "shex": {
       "title": "ShEx validation",
-      "signIn": "Sign in to validate with ShEx."
+      "signIn": "Sign in to validate with ShEx.",
+      "detail": "Validate the data you may read against a ShEx 2.1 schema"
     },
     "datasetPatch": {
       "title": "RDF Patch"
@@ -4021,7 +4023,8 @@
       "gcConfirmTitle": "Delete old versions?",
       "gcConfirmMessage": "{count, plural, one {Version {versions} and its snapshot will be deleted.} other {Versions {versions} and their snapshots will be deleted.}} This cannot be undone.",
       "gcConfirm": "Delete versions",
-      "gcDone": "{count, plural, =0 {No versions deleted} one {# version deleted} other {# versions deleted}}"
+      "gcDone": "{count, plural, =0 {No versions deleted} one {# version deleted} other {# versions deleted}}",
+      "gcLogInit": "Version {version} is version 0 of the dataset's RDF Patch log: once it is deleted the log's version 0 can no longer be downloaded."
     },
     "diagnosticsPanel": {
       "errorsCount": "{count} errors",
@@ -4903,7 +4906,8 @@
       "rewrite": "Rewrite",
       "rewritten": "Rewritten query",
       "copy": "Copy the rewritten query",
-      "copied": "Copied"
+      "copied": "Copied",
+      "rewriteIntroDataset": "See what a query becomes under OWL 2 QL: the TBox of this dataset's reasoning sources is unfolded into it. The query is not run."
     },
     "swrl": {
       "storedHeading": "Stored SWRL rules",
@@ -4995,7 +4999,7 @@
         "pairs": "Node and shape"
       },
       "discoverHint": "Each shape is checked on the nodes that use one of its predicates.",
-      "textHint": "The ShapeMap language: node@shape pairs and '{FOCUS …}'@shape patterns, separated by commas.",
+      "textHint": "The ShapeMap language: node@shape pairs and FOCUS patterns (a triple pattern with FOCUS in it, in braces) @shape, separated by commas. The placeholder shows both.",
       "node": "Node",
       "shape": "Shape",
       "nodeN": "Node {n}",

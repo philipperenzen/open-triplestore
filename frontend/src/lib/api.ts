@@ -2179,8 +2179,8 @@ export const getReasoningJob = (jobId: string): Promise<ReasoningJob> =>
 export const getReasoningStatus = (): Promise<{ graphs: Record<string, number>; dl_backend: string | null }> =>
   request('GET', '/api/reasoning/status');
 /** The OWL 2 QL rewriting of a query (not run). */
-export const rewriteQuery = (query: string, regime = 'owl2-ql'): Promise<{ rewritten: string }> =>
-  request('POST', '/api/reasoning/rewrite', { query, regime });
+export const rewriteQuery = (query: string, regime = 'owl2-ql', dataset?: string): Promise<{ rewritten: string }> =>
+  request('POST', '/api/reasoning/rewrite', dataset ? { query, regime, dataset } : { query, regime });
 
 // ─── SWRL — docs/swrl.md ─────────────────────────────────────────────────────────
 

@@ -66,3 +66,10 @@ details.rz-details > summary { cursor: pointer; font-size: 0.82rem; color: var(-
 :is([data-theme="dark"], .dark) .rz-msg-warn { background: rgba(245,158,11,0.12); color: #fcd34d; border-color: rgba(245,158,11,0.3); }
 :is([data-theme="dark"], .dark) .rz-add { color: #86efac; }
 :is([data-theme="dark"], .dark) .rz-del { color: #fca5a5; }
+
+/* Narrow screens: one column for label/value lists, icon buttons keep their size. */
+.rz-head > .btn, .rz-head .rz-row > .btn { flex: 0 0 auto; width: auto; }
+@media (max-width: 560px) {
+  .rz-dl { grid-template-columns: 1fr; gap: 0.1rem; }
+  .rz-dl dt { margin-top: 0.45rem; }
+}

@@ -3,6 +3,7 @@
   // the rule sets kept in its managed rules graph, editable by its writers,
   // and the rules in its other rule graphs, read-only. Every change runs the
   // rules again; the report of that run is shown.
+  import { createEventDispatcher } from 'svelte';
   import { t } from 'svelte-i18n';
   import { Loader2, Pencil, Play, Plus, ScrollText, Trash2 } from 'lucide-svelte';
   import SwrlRuleEditor from './SwrlRuleEditor.svelte';
@@ -18,6 +19,9 @@
 
   export let datasetId: string;
   export let canWrite = false;
+
+  /** `changed`: the stored rules (and what they derive) changed. */
+  const dispatch = createEventDispatcher<{ changed: void }>();
 
   let data: DatasetRules | null = null;
   let loading = true; // until the first answer
@@ -96,6 +100,7 @@
       lastRun = res.run;
       toastSuccess($t('components.swrl.saved', { values: { count: res.rules } }));
       editing = null;
+      dispatch('changed');
       await load();
     } catch (e) {
       formError = (e as Error)?.message || String(e);
@@ -116,6 +121,7 @@
       const res = await deleteDatasetRules(datasetId, set.id);
       lastRun = res.run;
       toastSuccess($t('components.swrl.deleted'));
+      dispatch('changed');
       await load();
     } catch (e) {
       toastError((e as Error)?.message || String(e));
@@ -127,6 +133,7 @@
     try {
       lastRun = await runDatasetRules(datasetId);
       if (lastRun.queued) toastInfo($t('components.reasoning.queued'));
+      dispatch('changed');
       await load();
     } catch (e) {
       toastError((e as Error)?.message || String(e));
@@ -198,7 +205,7 @@
           <div>
             <span class="rz-set-title">{set.label || $t('components.swrl.untitled')}</span>
             <span class="rz-badge">{set.format ? $t(`components.swrl.format.${set.format}`) : '—'}</span>
-            <span class="rz-muted">{$t('components.swrl.ruleCount', { values: { count: set.rules.length } })}{#if set.updated_by} · {set.updated_by}{/if}{#if set.updated_at} · {fmt(set.updated_at)}{/if}</span>
+            <span class="rz-muted">{[$t('components.swrl.ruleCount', { values: { count: set.rules.length } }), set.updated_by, fmt(set.updated_at)].filter(Boolean).join(' · ')}</span>
           </div>
           {#if writable}
             <div class="rz-row">

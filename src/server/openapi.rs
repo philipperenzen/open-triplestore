@@ -3109,7 +3109,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Reasoning",
                 "Debug query rewriting",
-                "Return the rewritten query for a given reasoning regime (no execution).",
+                "Body `{query, regime?, dataset?}`: the query rewritten under OWL 2 QL (the default regime; any other regime returns it unchanged), not run. The TBox is read from the graphs the caller may read (an admin: the unnamed default graph), or with `dataset` from that dataset's reasoning sources, read-checked as a materialisation's are.",
                 vec![],
                 vec![
                     ("200", "Rewritten query"),

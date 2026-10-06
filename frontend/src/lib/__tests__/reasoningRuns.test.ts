@@ -86,6 +86,11 @@ describe('ConsistencyCheck', () => {
     api.reasoningCheck.mockResolvedValue({ task: 'profile', result: 'false', regime: 'owl2-dl', backend: 'native', complete: true, sources: ['g'], in_profile: false, violations: [{ rule: 'DL-1', detail: 'a reflexive role in a cardinality' }] });
     const view = render(ConsistencyCheck, { datasetId: 'ds1', dlBackend: null });
     expect(view.getByText(/only the OWL 2 DL profile check/)).toBeTruthy();
+    // Consistency needs a backend: it cannot run, and it cannot be picked again.
+    expect((view.getByRole('button', { name: 'Run check' }) as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.click(view.getByRole('button', { name: 'Check' }));
+    expect((await view.findByRole('option', { name: 'Entailment' })).getAttribute('aria-disabled')).toBe('true');
+    await fireEvent.click(view.getByRole('option', { name: 'OWL 2 DL profile' }));
     await fireEvent.click(view.getByRole('button', { name: 'Run check' }));
     await waitFor(() => expect(api.reasoningCheck).toHaveBeenCalledWith({ task: 'profile', dataset: 'ds1' }, false));
     const result = await view.findByTestId('check-result');
@@ -131,9 +136,9 @@ describe('ReasoningJobs', () => {
 describe('QlRewrite', () => {
   it('shows the rewritten query', async () => {
     api.rewriteQuery.mockResolvedValue({ rewritten: 'SELECT ?x WHERE { { ?x a <A> } UNION { ?x a <B> } }' });
-    const view = render(QlRewrite);
+    const view = render(QlRewrite, { datasetId: 'ds1' });
     await fireEvent.click(view.getByRole('button', { name: 'Rewrite' }));
     expect((await view.findByTestId('rewritten-query')).textContent).toContain('UNION');
-    expect(api.rewriteQuery).toHaveBeenCalledWith(expect.stringContaining('SELECT ?x'), 'owl2-ql');
+    expect(api.rewriteQuery).toHaveBeenCalledWith(expect.stringContaining('SELECT ?x'), 'owl2-ql', 'ds1');
   });
 });

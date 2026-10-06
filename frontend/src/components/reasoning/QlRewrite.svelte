@@ -9,6 +9,9 @@
   import { toastSuccess } from '../../lib/toast';
   import './reasoning.css';
 
+  /** Read the TBox from this dataset's reasoning sources; null: every readable graph. */
+  export let datasetId: string | null = null;
+
   let query = 'SELECT ?x WHERE {\n  ?x a <https://example.org/Asset> .\n}';
   let rewritten = '';
   let running = false;
@@ -19,7 +22,7 @@
     error = '';
     rewritten = '';
     try {
-      rewritten = (await rewriteQuery(query, 'owl2-ql')).rewritten;
+      rewritten = (await rewriteQuery(query, 'owl2-ql', datasetId ?? undefined)).rewritten;
     } catch (e) {
       error = (e as Error)?.message || String(e);
     } finally {
@@ -36,7 +39,7 @@
   <div class="rz-head">
     <div class="rz-head-left"><Wand2 size={15} /><h3>{$t('components.reasoning.rewriteHeading')}</h3></div>
   </div>
-  <p class="rz-intro">{$t('components.reasoning.rewriteIntro')}</p>
+  <p class="rz-intro">{datasetId ? $t('components.reasoning.rewriteIntroDataset') : $t('components.reasoning.rewriteIntro')}</p>
   <div class="rz-field">
     <label for="ql-query">{$t('components.reasoning.rewriteQuery')}</label>
     <textarea id="ql-query" class="rz-code" bind:value={query} disabled={running}></textarea>

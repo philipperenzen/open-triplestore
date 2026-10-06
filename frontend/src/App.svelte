@@ -291,6 +291,8 @@
       ['/import', 'pages.import.title', 'pages.import.detail'],
       ['/validation', 'pages.validation.title', 'pages.validation.detail'],
       ['/shacl', 'pages.shaclStudio.title', 'pages.shaclStudio.detail'],
+      ['/shex', 'pages.shex.title', 'pages.shex.detail'],
+      ['/reasoning', 'pages.reasoning.title', 'pages.reasoning.detail'],
       ['/graphs', 'pages.graphList.title', 'pages.graphList.detail'],
       ['/datasets', 'pages.datasets.title', 'pages.datasets.detail'],
       ['/files', 'pages.files.title', 'pages.files.detail'],
