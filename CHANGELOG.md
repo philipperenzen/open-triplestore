@@ -657,6 +657,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are listed as a warning. `RUST_LOG` is now in the environment table.
 
 ### Changed
+- **LDP: a resource that does not exist is a 404 with its discovery
+  headers.** `GET`/`HEAD` on an LDP path nothing created — never written,
+  deleted, an intermediate path, or an IRI another resource only links to —
+  used to answer `200` with an empty body whenever any triple mentioned the
+  IRI, and a bare `404` otherwise. It now answers `404` carrying
+  `Link: <…acl>; rel="acl"`, the `constrainedBy` link and the caller's
+  `WAC-Allow` for that path, so ACL discovery and creating with `PUT` keep
+  working; a resource exists when an LDP write typed it, and the root
+  container always does. `PUT`, `PATCH` and `DELETE` use the same test, so a
+  `PUT` to a merely-mentioned IRI is a create (Append on the container, the
+  caller becomes owner). A caller without Read still gets `403` either way.
+  A `PUT` whose body does not parse or describes another resource is now
+  refused before anything is removed; it used to delete the resource's
+  triples first, so a refused `PUT` wiped the resource. See `docs/ldp.md`.
 - **Every JSON field of the HTTP API is snake_case** (breaking). The
   datasource, mapping, run, gates, dry-run, drift, profile, review,
   calibration and legacy-convert bodies (`/api/sources/*`, `/api/mappings/*`,

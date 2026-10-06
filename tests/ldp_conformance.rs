@@ -785,7 +785,10 @@ mod http_tests {
         let (router, store) = make_router();
         store
             .load_str(
-                "<http://localhost/ldp/etag-test> <http://example.org/p> \"v\" .",
+                // Typed as an LDP write would: only an LDP resource exists.
+                "<http://localhost/ldp/etag-test> <http://example.org/p> \"v\" .\n\
+                 <http://localhost/ldp/etag-test> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> \
+                 <http://www.w3.org/ns/ldp#RDFSource> .",
                 oxigraph::io::RdfFormat::NTriples,
                 None,
             )
@@ -873,7 +876,10 @@ mod http_tests {
         let (router, store) = make_router();
         store
             .load_str(
-                "<http://localhost/ldp/head-me> <http://example.org/p> \"v\" .",
+                // Typed as an LDP write would: only an LDP resource exists.
+                "<http://localhost/ldp/head-me> <http://example.org/p> \"v\" .\n\
+                 <http://localhost/ldp/head-me> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> \
+                 <http://www.w3.org/ns/ldp#RDFSource> .",
                 oxigraph::io::RdfFormat::NTriples,
                 None,
             )
@@ -915,6 +921,13 @@ mod http_tests {
             "http://localhost/ldp/del-dc/item",
         )
         .unwrap();
+        // Typed as a POST would: only an LDP resource exists to be deleted.
+        store
+            .update(
+                "INSERT DATA { <http://localhost/ldp/del-dc/item> \
+                 <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/ldp#RDFSource> }",
+            )
+            .unwrap();
         container::add_direct_membership_triple(
             &store,
             "http://localhost/ldp/del-dc/",
