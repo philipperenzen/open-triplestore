@@ -75,13 +75,13 @@ What this buys you:
   credential, the database name or path, the host and the account before it
   reaches a caller.
 
-The same references configure `OIDC` client secrets, `LLM_API_KEY`,
-`SMTP_PASSWORD`, `ALERT_SMTP_PASS`, `S3_SECRET_KEY`, the JWT signing secret
-`JWT_SECRET`, the service-registry bearer `LD_REGISTRY_TOKEN`, a replication
+The same references configure `OIDC` client secrets, `OTS_LLM_API_KEY`,
+`OTS_SMTP_PASSWORD`, `OTS_ALERT_SMTP_PASSWORD`, `OTS_S3_SECRET_KEY`, the JWT signing secret
+`OTS_JWT_SECRET`, the service-registry bearer `OTS_REGISTRY_TOKEN`, a replication
 follower's `OTS_REPLICATION_TOKEN` and a plugin's credentials (the accounts
-dashboard's `ACCOUNTS_DASHBOARD_GATEWAY_KEY`). A raw value in any of those is
+dashboard's `OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY`). A raw value in any of those is
 accepted outside the production posture with a deprecation warning, and
-refused inside it: a raw `JWT_SECRET` or `LD_REGISTRY_TOKEN` stops the server
+refused inside it: a raw `OTS_JWT_SECRET` or `OTS_REGISTRY_TOKEN` stops the server
 at startup, a raw replication token or gateway key is dropped with an error in
 the log.
 

@@ -347,7 +347,7 @@ fn the_off_switch_records_nothing_and_changes_nothing_else() {
 /// bypassed the log (the raw oxigraph store) is caught by the count check.
 #[test]
 fn reopening_resolves_pending_rows_and_reconciles_counts() {
-    std::env::set_var("OTS_CHANGE_CAPTURE", "on");
+    std::env::set_var("OTS_CHANGE_CAPTURE_ENABLED", "on");
     let dir = tempfile::tempdir().unwrap();
     {
         let s = TripleStore::open(dir.path()).unwrap();
@@ -460,7 +460,7 @@ async fn call(
 
 #[tokio::test]
 async fn the_change_log_is_read_and_bookmarked_through_the_admin_api() {
-    std::env::set_var("OTS_CHANGE_CAPTURE", "on");
+    std::env::set_var("OTS_CHANGE_CAPTURE_ENABLED", "on");
     let (state, token) = admin_state();
     state
         .store

@@ -167,7 +167,7 @@ def env_example_names() -> dict[str, int]:
 def admin_doc_names() -> tuple[dict[str, int], dict[str, int]]:
     """Names docs/administration.md documents, name → line: every backticked
     `NAME` or `NAME=...`, and every `NAME=` line inside a fenced block. Also
-    the families it documents as a backticked `PREFIX_*` (`SMTP_*`), prefix →
+    the families it documents as a backticked `PREFIX_*` (`OTS_SMTP_*`), prefix →
     line."""
     found: dict[str, int] = {}
     families: dict[str, int] = {}

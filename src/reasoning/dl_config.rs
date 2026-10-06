@@ -95,7 +95,7 @@ impl DlConfig {
             debounce: cfg::DL_DEBOUNCE.get(),
             ..DlConfig::default()
         };
-        // A secret reference (`env:`, `file:`, `vault:`) like `LLM_API_KEY`: a
+        // A secret reference (`env:`, `file:`, `vault:`) like `OTS_LLM_API_KEY`: a
         // raw token is accepted with a warning outside the production posture
         // and refused in it; one that does not resolve leaves the sidecar
         // without a token (it then refuses the call) rather than sending the

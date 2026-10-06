@@ -271,9 +271,9 @@ impl ScanVerdict {
     }
 }
 
-/// Address of the ClamAV daemon (`CLAMAV_ADDR`, `host:port`, INSTREAM protocol).
+/// Address of the ClamAV daemon (`OTS_CLAMAV_ADDR`, `host:port`, INSTREAM protocol).
 /// Unset/empty disables scanning (uploads proceed unscanned → `Skipped`), mirroring
-/// the optional `LLM_GATEWAY_URL` env knob. Read at the upload call-site so the
+/// the optional `OTS_LLM_GATEWAY_URL` env knob. Read at the upload call-site so the
 /// feature stays self-contained behind `asset-clamav` without touching `AppState`.
 #[cfg(feature = "asset-clamav")]
 pub fn clamav_addr() -> String {

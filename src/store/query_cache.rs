@@ -95,13 +95,13 @@ struct Inner {
 }
 
 impl QueryCache {
-    /// Build from the configuration: `OTS_QUERY_CACHE` (on/off),
+    /// Build from the configuration: `OTS_QUERY_CACHE_ENABLED` (on/off),
     /// `OTS_QUERY_CACHE_ENTRIES` (max cached queries) and
     /// `OTS_QUERY_CACHE_MAX_ROWS` (max rows per cached result).
     pub fn from_env() -> Self {
         use crate::config as c;
         Self::new(
-            c::QUERY_CACHE.get(),
+            c::QUERY_CACHE_ENABLED.get(),
             c::QUERY_CACHE_ENTRIES.get(),
             c::QUERY_CACHE_MAX_ROWS.get(),
         )
@@ -126,7 +126,7 @@ impl QueryCache {
     /// store's public write generation (`TripleStore::write_generation`), which
     /// keys the VoID statistics and the SHACL run state. Gating it on `enabled`
     /// (as this used to) froze every one of those caches at generation 0 under
-    /// `OTS_QUERY_CACHE=false`, so they served stale data across writes.
+    /// `OTS_QUERY_CACHE_ENABLED=false`, so they served stale data across writes.
     pub fn invalidate(&self) {
         self.inner.generation.fetch_add(1, Ordering::Release);
     }

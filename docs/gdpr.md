@@ -99,7 +99,7 @@ graphs); account/identity data lives in a local metadata database.
 - **Data minimisation (Art. 5(1)(c)).** Because RDF content is operator-defined,
   minimisation is largely in your modelling choices: avoid loading personal data
   you do not need; pseudonymise where possible; restrict optional profile fields;
-  scope `LLM_GATEWAY_URL` usage (prefer a local model) so personal data is not
+  scope `OTS_LLM_GATEWAY_URL` usage (prefer a local model) so personal data is not
   unnecessarily sent to a third-party LLM (see [PRIVACY.md](../PRIVACY.md) §5).
 - **Storage limitation (Art. 5(1)(e)).** Define and enforce retention periods for
   RDF data, accounts, audit logs (which include IP/user-agent), the private
@@ -118,7 +118,7 @@ operating them correctly is the operator's responsibility** (see
   keys** stored only as **SHA-256 hashes** with scopes/expiry/revocation;
   optional **OIDC / SAML / OAuth** SSO.
 - **Session hardening:** `HttpOnly`, `SameSite=Strict` cookies; `Secure` when
-  `SECURE_COOKIES=true`; the server warns on / refuses weak default `JWT_SECRET`
+  `OTS_SECURE_COOKIES_ENABLED=true`; the server warns on / refuses weak default `OTS_JWT_SECRET`
   values for production cookies.
 - **Authorisation (RBAC + ACLs):** system roles (`super_admin`/`admin`/`user`,
   plus a publisher permission); org/group membership roles; endpoint and
@@ -178,7 +178,7 @@ an appropriate transfer mechanism (e.g. adequacy, SCCs) — or self-host the ass
       end users, **end-user terms** ([TERMS.md](../TERMS.md)).
 - [ ] Decide which **external integrations** to enable, assess each, and put Art.
       28 DPAs in place where needed.
-- [ ] Set a strong `JWT_SECRET`; enable `SECURE_COOKIES`; terminate **TLS** at a
+- [ ] Set a strong `OTS_JWT_SECRET`; enable `OTS_SECURE_COOKIES_ENABLED`; terminate **TLS** at a
       reverse proxy; review bind addresses and CORS.
 - [ ] Configure **roles, ACLs, and dataset visibility**; apply least privilege.
 - [ ] Define **retention periods** (RDF data, accounts, audit logs, usage events,

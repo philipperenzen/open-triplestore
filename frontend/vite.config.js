@@ -122,9 +122,9 @@ function cesiumAssets() {
 const REGISTRY_URL = (process.env.LD_REGISTRY_URL || 'http://localhost:8500').replace(/\/+$/, '');
 
 // Cross-app service discovery is OPT-IN. Off by default so a registry that isn't running can't
-// spam the dev console with proxy ECONNREFUSED (/resolve, /events). Enable with LD_DISCOVERY=1
+// spam the dev console with proxy ECONNREFUSED (/resolve, /events). Enable with OTS_DISCOVERY_ENABLED=true
 // (see README / .env.example) to mount the /registry proxy and let the UI resolve sibling apps.
-const DISCOVERY = /^(1|true|yes|on)$/i.test((process.env.LD_DISCOVERY || '').trim());
+const DISCOVERY = /^(1|true|yes|on)$/i.test((process.env.OTS_DISCOVERY_ENABLED || '').trim());
 
 async function resolveRegistry() {
   try {
@@ -222,7 +222,7 @@ export default defineConfig(async () => {
         '/store': TS,
         '/resource/': TS,
         '/.well-known': TS,
-        // Optional cross-app registry proxy — only mounted when LD_DISCOVERY is set, so a registry
+        // Optional cross-app registry proxy — only mounted when OTS_DISCOVERY_ENABLED is set, so a registry
         // that isn't running can't spam the console. The browser serviceRegistry client uses this
         // same-origin path (no CORS); SSE (/registry/events) passes through unbuffered.
         ...(DISCOVERY

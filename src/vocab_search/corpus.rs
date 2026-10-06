@@ -3,9 +3,9 @@
 //! Two corpora feed the index:
 //!
 //! * **LOV corpus** — a `lov.nq.gz` N-Quads dump (one named graph per
-//!   vocabulary).  Located via `VOCAB_CORPUS_PATH`, `{data_dir}/vocab/`, or
+//!   vocabulary).  Located via `OTS_VOCAB_CORPUS_PATH`, `{data_dir}/vocab/`, or
 //!   the image-baked `assets/vocab/` copy; optionally downloaded once at boot
-//!   (`VOCAB_CORPUS_URL`, sha256-verified) when absent.  The image-baked copy
+//!   (`OTS_VOCAB_CORPUS_URL`, sha256-verified) when absent.  The image-baked copy
 //!   is filtered to the vocabularies this project may redistribute
 //!   (`assets/vocab/lov-redistributable.txt`); the full dump an operator
 //!   downloads or mounts also holds vocabularies whose licence does not
@@ -73,8 +73,8 @@ pub fn find_corpus(data_dir: &Path) -> Option<PathBuf> {
 /// Download the corpus to `{data_dir}/vocab/lov.nq.gz` if configured.
 ///
 /// Returns the corpus path when available afterwards. `OTS_OFFLINE` (on in
-/// production) disables the download; a custom `VOCAB_CORPUS_URL` skips
-/// checksum verification unless `VOCAB_CORPUS_SHA256` is provided.
+/// production) disables the download; a custom `OTS_VOCAB_CORPUS_URL` skips
+/// checksum verification unless `OTS_VOCAB_CORPUS_SHA256` is provided.
 pub async fn ensure_corpus(data_dir: &Path) -> Option<PathBuf> {
     if let Some(existing) = find_corpus(data_dir) {
         return Some(existing);

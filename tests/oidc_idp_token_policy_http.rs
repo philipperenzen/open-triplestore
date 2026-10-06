@@ -3,10 +3,10 @@
 //!
 //! - By default (`OTS_OIDC_IDP_TOKEN_POLICY=session`) it reads and writes like an
 //!   interactive session but may not mint a long-lived `ots_` API token, the
-//!   same rule `OTS_OIDC_SESSION_POLICY` sets for this store's own provider.
+//!   same rule `OTS_OIDC_PROVIDER_TOKEN_POLICY` sets for this store's own provider.
 //! - `scoped` takes write from the token's `scope`/`scp` claim; `full` is the
 //!   legacy escape hatch that restores minting.
-//! - `OIDC_DEFAULT_ROLE` never makes an IdP account an administrator.
+//! - `OTS_OIDC_DEFAULT_ROLE` never makes an IdP account an administrator.
 //!
 //! Own binary: the policy settings are process-wide environment variables.
 
@@ -34,7 +34,7 @@ fn clear_policy_env() {
     for var in [
         "OTS_OIDC_IDP_TOKEN_POLICY",
         "OTS_OIDC_IDP_WRITE_SCOPES",
-        "OIDC_DEFAULT_ROLE",
+        "OTS_OIDC_DEFAULT_ROLE",
     ] {
         std::env::remove_var(var);
     }
@@ -208,9 +208,9 @@ async fn idp_tokens_write_but_cannot_mint_api_tokens_by_default() {
     // The provider-token policy does not reach IdP tokens: `full` there keeps
     // IdP tokens at the default.
     std::env::remove_var("OTS_OIDC_IDP_TOKEN_POLICY");
-    std::env::set_var("OTS_OIDC_SESSION_POLICY", "full");
+    std::env::set_var("OTS_OIDC_PROVIDER_TOKEN_POLICY", "full");
     let (status, body) = mint(&app, &token).await;
-    std::env::remove_var("OTS_OIDC_SESSION_POLICY");
+    std::env::remove_var("OTS_OIDC_PROVIDER_TOKEN_POLICY");
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
 }
 
@@ -279,20 +279,20 @@ async fn oidc_default_role_never_makes_an_administrator() {
     // As configured: an admin default stops the start, a lower one is kept.
     for raw in ["admin", "super_admin", "SUPER_ADMIN"] {
         let refused = open_triplestore::config::Config::load(
-            &|n| (n == "OIDC_DEFAULT_ROLE").then(|| raw.to_string()),
+            &|n| (n == "OTS_OIDC_DEFAULT_ROLE").then(|| raw.to_string()),
             &Default::default(),
         );
         assert!(
             refused.is_err(),
-            "OIDC_DEFAULT_ROLE={raw} must stop the start"
+            "OTS_OIDC_DEFAULT_ROLE={raw} must stop the start"
         );
     }
     for (raw, expected) in [("guest", "guest"), ("user", "user"), ("GUEST", "guest")] {
-        std::env::set_var("OIDC_DEFAULT_ROLE", raw);
+        std::env::set_var("OTS_OIDC_DEFAULT_ROLE", raw);
         assert_eq!(
             AuthExt::from_env().default_role,
             expected,
-            "OIDC_DEFAULT_ROLE={raw}"
+            "OTS_OIDC_DEFAULT_ROLE={raw}"
         );
     }
     clear_policy_env();

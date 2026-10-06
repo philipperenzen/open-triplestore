@@ -308,8 +308,8 @@ Every node must be named under the ACL resource (`<#name>`), be typed `acl:Autho
 
 **The root ACL.** At first start (or at the first LDP request, whichever comes first) the server seeds `/ldp/.acl`, recorded with a `dcterms:created` so it is seeded once, with:
 
-- `LDP_ROOT_ACL=open` (the default in development): `acl:AuthenticatedAgent` gets `acl:Read`, `acl:Write` and `acl:Append` on `/ldp/` and, through `acl:default`, on everything under it; the `admin` and `super_admin` roles get every mode. This is the behaviour of releases before WAC, written where an admin can change it; the server logs one line at start while the root is open this way, and a warning when `LDP_ROOT_ACL=owners` is configured but the root seeded on an earlier start is still open (the setting never rewrites a seeded ACL).
-- `LDP_ROOT_ACL=owners` (the default under `OTS_ENV=production`): only the two admin roles. Users reach only what they create or are granted.
+- `OTS_LDP_ROOT_ACL=open` (the default in development): `acl:AuthenticatedAgent` gets `acl:Read`, `acl:Write` and `acl:Append` on `/ldp/` and, through `acl:default`, on everything under it; the `admin` and `super_admin` roles get every mode. This is the behaviour of releases before WAC, written where an admin can change it; the server logs one line at start while the root is open this way, and a warning when `OTS_LDP_ROOT_ACL=owners` is configured but the root seeded on an earlier start is still open (the setting never rewrites a seeded ACL).
+- `OTS_LDP_ROOT_ACL=owners` (the default under `OTS_ENV=production`): only the two admin roles. Users reach only what they create or are granted.
 
 To tighten an open install, an admin `PUT`s `/ldp/.acl` without the `#authenticated` node (keep the admin nodes, or an equivalent). Owners keep what they created; anything else becomes unreachable for non-admins until it is granted.
 

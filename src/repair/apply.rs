@@ -153,7 +153,8 @@ fn check_preconditions(
             return Err(Box::new(
                 (
                     StatusCode::BAD_REQUEST,
-                    "if-base-sequence needs the change log (OTS_CHANGE_CAPTURE=on)".to_string(),
+                    "if-base-sequence needs the change log (OTS_CHANGE_CAPTURE_ENABLED=on)"
+                        .to_string(),
                 )
                     .into_response(),
             ));

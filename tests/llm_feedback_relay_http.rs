@@ -6,7 +6,7 @@
 //! caps; a signal nested past a bound depth, or larger as a whole than a
 //! conversation may be, is refused before anything reaches the gateway.
 //!
-//! Own test binary on purpose: `LLM_GATEWAY_URL` is process-wide.
+//! Own test binary on purpose: `OTS_LLM_GATEWAY_URL` is process-wide.
 
 mod common;
 
@@ -32,7 +32,7 @@ async fn signals(State(gw): State<&'static Gateway>, Json(body): Json<Value>) ->
 }
 
 /// One gateway for the whole binary (its own runtime thread, so it outlives
-/// every per-test runtime), pointed at by `LLM_GATEWAY_URL` before any request.
+/// every per-test runtime), pointed at by `OTS_LLM_GATEWAY_URL` before any request.
 fn gateway() -> &'static Gateway {
     static GW: OnceLock<&'static Gateway> = OnceLock::new();
     GW.get_or_init(|| {
@@ -52,8 +52,8 @@ fn gateway() -> &'static Gateway {
             });
         });
         let addr = rx.recv().unwrap();
-        std::env::set_var("LLM_GATEWAY_URL", format!("http://{addr}"));
-        std::env::set_var("RATE_LIMIT_DISABLED", "1");
+        std::env::set_var("OTS_LLM_GATEWAY_URL", format!("http://{addr}"));
+        std::env::set_var("OTS_RATE_LIMIT_ENABLED", "false");
         gw
     })
 }

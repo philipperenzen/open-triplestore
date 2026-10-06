@@ -229,7 +229,7 @@ version 0 leaves those graphs out.
 
 Every write records what it did, per graph, in a small SQLite log beside
 the store (`{data_dir}/changes/changes.db`; in memory for an in-memory
-store). Capture is **off by default** — `OTS_CHANGE_CAPTURE=on` turns it on,
+store). Capture is **off by default** — `OTS_CHANGE_CAPTURE_ENABLED=on` turns it on,
 and a replication leader keeps it on regardless. It is off because a
 `WHERE` update pays ×2.5–4 for it (see [What it costs](#what-it-costs)),
 which is not a price a store with no consumer for the log should pay.
@@ -244,7 +244,7 @@ One row per graph per write. `seq` is the position in commit order — the
 order the repo's own commit calls ran in, taken inside a critical section
 around the commit — so a consumer applying rows in `seq` order reproduces
 the store. `epoch` names the store's lineage: a store rebuilt after a
-quarantine (`STORE_AUTO_RECOVER`, see `docs/administration.md`) mints a new
+quarantine (`OTS_STORE_AUTO_RECOVER_ENABLED`, see `docs/administration.md`) mints a new
 one, and a consumer holding rows of another epoch must resynchronise rather
 than apply them.
 
@@ -343,7 +343,7 @@ less; the scan cost does not shrink.
   scan; `OTS_CHANGE_CAPTURE_MAX_PAYLOAD` (250 000) bounds the quads a
   `full` row may carry — above it the row is `counts`.
 - **Off by default.** A node records only when asked
-  (`OTS_CHANGE_CAPTURE=on`); a replication leader or cluster member records
+  (`OTS_CHANGE_CAPTURE_ENABLED=on`); a replication leader or cluster member records
   regardless, because its followers read this log and the role means nothing
   without it; a replication follower does not unless asked, because its own
   log would hold only the graphs it fetched whole — a partial log, worse than

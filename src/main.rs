@@ -81,18 +81,6 @@ mod vocab_search;
 #[command(about = "A modern RDF triple store with SPARQL 1.1/1.2 and GeoSPARQL support")]
 #[command(version)]
 struct Cli {
-    /// Storage directory for persistent data
-    #[arg(short, long, default_value = "./data")]
-    data_dir: PathBuf,
-
-    /// HTTP port to listen on
-    #[arg(short, long, default_value_t = 7878)]
-    port: u16,
-
-    /// Bind address
-    #[arg(short, long, default_value = "0.0.0.0")]
-    bind: String,
-
     /// Load an RDF file on startup (Turtle, N-Triples, RDF/XML, N-Quads, TriG)
     #[arg(long)]
     load: Option<PathBuf>,
@@ -105,9 +93,9 @@ struct Cli {
     #[arg(long)]
     promote_super_admin: Option<String>,
 
-    /// Restore the store + identity DB from a backup id (in BACKUP_DIR, default
+    /// Restore the store + identity DB from a backup id (in OTS_BACKUP_DIR, default
     /// {data-dir}/backups), REPLACING current data, then exit. For an encrypted
-    /// backup, set BACKUP_DECRYPT_IDENTITY_PATH to your `age-keygen` identity
+    /// backup, set OTS_BACKUP_DECRYPTION_IDENTITY_PATH to your `age-keygen` identity
     /// file — the server stores only the recipient, never the identity.
     #[arg(long, value_name = "BACKUP_ID")]
     restore: Option<String>,
@@ -250,9 +238,10 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     config::install(settings.clone());
+    let data_dir = config::DATA_DIR.get();
     // Where backups live, read once: the restore path, store auto-recovery and
-    // the backup subsystem all use this value (an empty BACKUP_DIR means unset).
-    let backup_dir = server::default_backup_dir(&cli.data_dir);
+    // the backup subsystem all use this value (an empty OTS_BACKUP_DIR means unset).
+    let backup_dir = server::default_backup_dir(&data_dir);
 
     // Initialize tracing
     tracing_subscriber::fmt()
@@ -291,19 +280,19 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting open-triplestore v{}", env!("CARGO_PKG_VERSION"));
 
     // Create data directory if it doesn't exist
-    std::fs::create_dir_all(&cli.data_dir)?;
+    std::fs::create_dir_all(&data_dir)?;
 
     // Handle --restore: rebuild the store + identity DB from a backup, then exit.
     // Runs before the identity DB is opened so its SQLite file can be replaced.
     if let Some(ref id) = cli.restore {
         let target_sqlite = config::AUTH_DB_PATH
             .get()
-            .unwrap_or_else(|| cli.data_dir.join("auth.db"));
+            .unwrap_or_else(|| data_dir.join("auth.db"));
         // Only needed for an age-encrypted backup; the server never holds this
         // identity, so restoring one is an explicit operator action.
-        let identity = config::BACKUP_DECRYPT_IDENTITY_PATH.get();
+        let identity = config::BACKUP_DECRYPTION_IDENTITY_PATH.get();
         info!("Restoring backup {id} from {}…", backup_dir.display());
-        let store = store::TripleStore::open(&cli.data_dir)?;
+        let store = store::TripleStore::open(&data_dir)?;
         let manifest =
             backup::restore_backup(&backup_dir, id, &store, &target_sqlite, identity.as_deref())?;
         info!(
@@ -317,7 +306,7 @@ async fn main() -> anyhow::Result<()> {
     // Opened before the RocksDB store so admin operations can run while the server is live.
     let db_path = config::AUTH_DB_PATH
         .get()
-        .unwrap_or_else(|| cli.data_dir.join("auth.db"));
+        .unwrap_or_else(|| data_dir.join("auth.db"));
     let auth_db = Arc::new(auth::db::AuthDb::open(&db_path)?);
 
     // Handle --promote-super-admin: only needs the auth DB, exits immediately.
@@ -336,8 +325,8 @@ async fn main() -> anyhow::Result<()> {
     // Initialize the store, auto-recovering from RocksDB corruption (e.g. an
     // unclean shutdown that left "SST file is ahead of WALs") so the service comes
     // back instead of crash-looping. See store::recovery.
-    let store = store::recovery::open_store_with_recovery(&cli.data_dir, &backup_dir)?;
-    info!("Store opened at {:?}", cli.data_dir);
+    let store = store::recovery::open_store_with_recovery(&data_dir, &backup_dir)?;
+    info!("Store opened at {:?}", data_dir);
 
     // Load initial data if specified
     if let Some(ref load_path) = cli.load {
@@ -348,28 +337,28 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize the prefix registry: bundled prefix.cc/LOV snapshot +
     // persisted lookup cache.  Live prefix.cc is only contacted when the
-    // operator opts in with PREFIX_CC_FALLBACK=true.
-    let prefix_cc_fallback = config::PREFIX_CC_FALLBACK.get();
+    // operator opts in with OTS_PREFIX_CC_FALLBACK_ENABLED=true.
+    let prefix_cc_fallback = config::PREFIX_CC_FALLBACK_ENABLED.get();
     let prefix_registry = Arc::new(prefixes::PrefixRegistry::open(
-        cli.data_dir.join("prefix_cache.json"),
+        data_dir.join("prefix_cache.json"),
         prefix_cc_fallback,
     )?);
     info!(
         "Prefix registry ready ({} bundled prefixes, cache at {:?}, prefix.cc fallback {})",
         prefix_registry.dataset_len(),
-        cli.data_dir.join("prefix_cache.json"),
+        data_dir.join("prefix_cache.json"),
         if prefix_cc_fallback { "on" } else { "off" }
     );
 
     // Initialize JWT config — prefer explicit secret, then file-backed persistent secret,
     // then a newly-generated secret written to disk so tokens survive restarts.
-    let jwt_secret_path = cli.data_dir.join("jwt_secret");
+    let jwt_secret_path = data_dir.join("jwt_secret");
     // Track where the secret came from so a weak-secret failure can name the exact input to fix.
     // An auto-generated secret is 64 random chars and can never be weak, so reaching the weak
     // check below always means the value was explicitly configured (env/CLI or the on-disk file).
     // A configured secret goes through the secrets module: a reference
     // (env:/file:/vault:) resolves, a raw value is refused in the production
-    // posture and warned about once in development — as S3_SECRET_KEY is.
+    // posture and warned about once in development — as OTS_S3_SECRET_KEY is.
     let (jwt_secret, jwt_secret_from_file) = if let Some(s) = config::JWT_SECRET.get() {
         (auth::jwt::configured_jwt_secret(&s)?, false)
     } else {
@@ -388,7 +377,7 @@ async fn main() -> anyhow::Result<()> {
                 if let Err(e) = std::fs::write(&jwt_secret_path, &secret) {
                     tracing::warn!(
                         "JWT secret auto-generated but could not be saved to {:?}: {}. \
-                        Tokens will be invalidated on restart. Set JWT_SECRET env var for production.",
+                        Tokens will be invalidated on restart. Set OTS_JWT_SECRET env var for production.",
                         jwt_secret_path, e
                     );
                 } else {
@@ -419,8 +408,8 @@ async fn main() -> anyhow::Result<()> {
                 path = jwt_secret_path.display(),
             )
         } else {
-            "It came from the JWT_SECRET environment variable (or --jwt-secret). Set it to a strong, \
-             unique value — e.g. `export JWT_SECRET=$(openssl rand -hex 32)` — or unset it to have \
+            "It came from the OTS_JWT_SECRET environment variable (or --jwt-secret). Set it to a strong, \
+             unique value — e.g. `export OTS_JWT_SECRET=$(openssl rand -hex 32)` — or unset it to have \
              one generated automatically."
                 .to_string()
         };
@@ -437,10 +426,10 @@ async fn main() -> anyhow::Result<()> {
 
     // The service-registry bearer, likewise: a reference resolves here, a raw
     // value is refused under OTS_ENV=production.
-    let registry_token = match config::LD_REGISTRY_TOKEN.get() {
+    let registry_token = match config::REGISTRY_TOKEN.get() {
         None => String::new(),
-        Some(v) => secrets::resolve_configured("LD_REGISTRY_TOKEN", &v)
-            .map_err(|e| anyhow::anyhow!("LD_REGISTRY_TOKEN: {e}"))?
+        Some(v) => secrets::resolve_configured("OTS_REGISTRY_TOKEN", &v)
+            .map_err(|e| anyhow::anyhow!("OTS_REGISTRY_TOKEN: {e}"))?
             .expose()
             .to_string(),
     };
@@ -452,8 +441,8 @@ async fn main() -> anyhow::Result<()> {
         // A secret reference (env:/file:/vault:) is resolved here; a raw value
         // is refused in the production posture and warned about elsewhere.
         let secret_key = match config::S3_SECRET_KEY.get() {
-            Some(v) => secrets::resolve_configured("S3_SECRET_KEY", &v)
-                .map_err(|e| anyhow::anyhow!("S3_SECRET_KEY: {e}"))?
+            Some(v) => secrets::resolve_configured("OTS_S3_SECRET_KEY", &v)
+                .map_err(|e| anyhow::anyhow!("OTS_S3_SECRET_KEY: {e}"))?
                 .expose()
                 .to_string(),
             None => String::new(),
@@ -472,7 +461,7 @@ async fn main() -> anyhow::Result<()> {
         );
         Arc::new(obj_store)
     } else {
-        let assets_dir = cli.data_dir.join("assets");
+        let assets_dir = data_dir.join("assets");
         let obj_store = storage::ObjectStore::local(assets_dir.clone())?;
         info!("Asset storage: local filesystem ({:?})", assets_dir);
         Arc::new(obj_store)
@@ -484,7 +473,7 @@ async fn main() -> anyhow::Result<()> {
         use std::sync::Arc;
         let tantivy_dir = config::TEXT_SEARCH_DIR
             .get()
-            .unwrap_or_else(|| cli.data_dir.join("tantivy"));
+            .unwrap_or_else(|| data_dir.join("tantivy"));
         match text_search::TextIndex::open(&tantivy_dir) {
             Ok(idx) => {
                 info!("Text search index opened at {:?}", tantivy_dir);
@@ -501,19 +490,19 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Start the HTTP server
-    let addr = format!("{}:{}", cli.bind, cli.port);
+    let addr = format!("{}:{}", config::BIND.get(), config::PORT.get());
     info!("SPARQL endpoint available at http://{}/sparql", addr);
     info!("Graph Store Protocol at http://{}/store", addr);
     info!("API at http://{}/api", addr);
     info!("Service description at http://{}/", addr);
 
-    // Cross-app service discovery is opt-in (LD_DISCOVERY); self-registration is
+    // Cross-app service discovery is opt-in (OTS_DISCOVERY_ENABLED); self-registration is
     // handled inside `server::run`, AFTER the listener is bound, so that when
     // `--port-fallback` moves the bind off the requested port the registry sees
     // the base URL rewritten to the port actually in use, not the stale one.
-    if !config::LD_DISCOVERY.get() {
+    if !config::DISCOVERY_ENABLED.get() {
         info!(
-            "service discovery disabled (set LD_DISCOVERY=true to self-register with the registry)"
+            "service discovery disabled (set OTS_DISCOVERY_ENABLED=true to self-register with the registry)"
         );
     }
 
@@ -526,14 +515,14 @@ async fn main() -> anyhow::Result<()> {
         settings,
         &addr,
         registry_token,
-        cli.data_dir.clone(),
+        data_dir.clone(),
         db_path.clone(),
         backup_dir,
         #[cfg(feature = "text-search")]
         text_index,
         #[cfg(feature = "vocab-search")]
         Some(Arc::new(vocab_search::index::VocabSearchEngine::new(
-            cli.data_dir.clone(),
+            data_dir.clone(),
         ))),
     )
     .await?;

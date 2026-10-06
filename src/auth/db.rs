@@ -1264,7 +1264,7 @@ impl AuthDb {
             -- who, which endpoint/model, outcome (ok|error|blocked), latency,
             -- time-to-first-token for streamed turns, size metrics and the guard
             -- rule that fired, if any. Message *contents* are not stored — only
-            -- an optional short preview of the question (LLM_LOG_PREVIEW_DISABLED
+            -- an optional short preview of the question (OTS_LLM_LOG_PREVIEW_ENABLED=false
             -- turns that off too).
             CREATE TABLE IF NOT EXISTS llm_request_log (
                 id TEXT PRIMARY KEY,
@@ -1569,7 +1569,7 @@ impl AuthDb {
         // One-time upgrade: add users.email_verified, grandfathering every
         // EXISTING account as verified — they predate verification, and
         // retroactively unverifying them could lock people out when the
-        // OTS_REQUIRE_VERIFIED_EMAIL gate is enabled. Detected via
+        // OTS_LOGIN_EMAIL_VERIFICATION_ENABLED gate is enabled. Detected via
         // pragma_table_info so the backfill runs exactly once (fresh databases
         // get the column from CREATE TABLE above and skip this path).
         let has_email_verified = conn
@@ -2824,6 +2824,13 @@ impl AuthDb {
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
             rusqlite::params![key, value, chrono::Utc::now().to_rfc3339()],
         )?;
+        Ok(())
+    }
+
+    /// Remove one instance setting (it falls back to its default).
+    pub fn delete_app_setting(&self, key: &str) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute("DELETE FROM app_settings WHERE key = ?1", [key])?;
         Ok(())
     }
 

@@ -6,7 +6,7 @@
 //! 1. **Input guard** — size caps, a configurable phrase blocklist, and
 //!    prompt-injection heuristics on what the user typed. The heuristics flag
 //!    imperative override phrases ("ignore previous instructions", "reveal your
-//!    system prompt", …) — `LLM_GUARD_INJECTION_ACTION` decides whether a hit
+//!    system prompt", …) — `OTS_LLM_GUARD_INJECTION_ACTION` decides whether a hit
 //!    blocks the request (default) or just logs it.
 //! 2. **Per-principal rate limit** — a sliding 60s window per user (or per IP
 //!    for guests), separate from the global per-IP governor, because one chat
@@ -19,7 +19,7 @@
 //! Every LLM-backed request lands one row in `llm_request_log` (status
 //! ok|error|blocked, latency, time-to-first-token, sizes, the guard flag that
 //! fired). Message contents are NOT stored — only a short question preview,
-//! and `LLM_LOG_PREVIEW_DISABLED=1` turns that off too.
+//! and `OTS_LLM_LOG_PREVIEW_ENABLED=false` turns that off too.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -47,27 +47,46 @@ pub enum InjectionAction {
 }
 
 pub struct GuardConfig {
-    /// Per-message character cap (`LLM_GUARD_MAX_MESSAGE_CHARS`, default 8000).
+    /// Per-message character cap (`OTS_LLM_GUARD_MAX_MESSAGE_CHARS`, default 8000).
     pub max_message_chars: usize,
-    /// Conversation length cap (`LLM_GUARD_MAX_MESSAGES`, default 40).
+    /// Conversation length cap (`OTS_LLM_GUARD_MAX_MESSAGES`, default 40).
     pub max_messages: usize,
-    /// Whole-conversation character cap (`LLM_GUARD_MAX_TOTAL_CHARS`, default 64000).
+    /// Whole-conversation character cap (`OTS_LLM_GUARD_MAX_TOTAL_CHARS`, default 64000).
     pub max_total_chars: usize,
-    /// What an injection-heuristic hit does (`LLM_GUARD_INJECTION_ACTION`:
+    /// What an injection-heuristic hit does (`OTS_LLM_GUARD_INJECTION_ACTION`:
     /// off | flag | block, default block).
     pub injection_action: InjectionAction,
-    /// Case-insensitive phrases that always block (`LLM_GUARD_BLOCKLIST`,
+    /// Case-insensitive phrases that always block (`OTS_LLM_GUARD_BLOCKLIST`,
     /// comma-separated, empty by default).
     pub blocklist: Vec<String>,
+}
+
+/// The AI request budgets, read per request: they are runtime settings an
+/// administrator can change without a restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budgets {
     /// LLM requests per signed-in principal per minute
-    /// (`LLM_RATE_LIMIT_PER_MIN`, default 20).
-    pub rate_per_min: Budget,
+    /// (`OTS_LLM_RATE_LIMIT_PER_MIN`, default 20).
+    pub per_min: Budget,
     /// LLM requests per minute for ANONYMOUS callers, keyed by client IP
-    /// (`LLM_RATE_LIMIT_ANON_PER_MIN`, default 5; refused outright when
-    /// `LLM_ANONYMOUS_ENABLED` is off). Guests share a GPU with everyone else
+    /// (`OTS_LLM_RATE_LIMIT_ANON_PER_MIN`, default 5; refused outright when
+    /// `OTS_LLM_ANONYMOUS_ENABLED` is off). Guests share a GPU with everyone else
     /// and have no account to attribute cost to, so their budget is
     /// deliberately tighter than a signed-in user's.
-    pub rate_per_min_anon: Budget,
+    pub per_min_anon: Budget,
+}
+
+/// The budgets in force now.
+pub fn budgets(db: &crate::auth::db::AuthDb) -> Budgets {
+    use crate::config::{self as c, runtime};
+    Budgets {
+        per_min: Budget::parse(&runtime::get(db, &c::LLM_RATE_LIMIT_PER_MIN)),
+        per_min_anon: if runtime::get(db, &c::LLM_ANONYMOUS_ENABLED) {
+            Budget::parse(&runtime::get(db, &c::LLM_RATE_LIMIT_ANON_PER_MIN))
+        } else {
+            Budget::Refused
+        },
+    }
 }
 
 /// An LLM request budget.
@@ -120,12 +139,6 @@ pub fn config() -> &'static GuardConfig {
             .into_iter()
             .map(|s| s.to_lowercase())
             .collect(),
-        rate_per_min: Budget::parse(&c::LLM_RATE_LIMIT_PER_MIN.get()),
-        rate_per_min_anon: if c::LLM_ANONYMOUS_ENABLED.get() {
-            Budget::parse(&c::LLM_RATE_LIMIT_ANON_PER_MIN.get())
-        } else {
-            Budget::Refused
-        },
     })
 }
 
@@ -348,13 +361,13 @@ pub fn check_rate_with(key: &str, budget: Budget) -> Result<(), RateRefusal> {
 
 // ─── Request log ─────────────────────────────────────────────────────────────
 
-/// Keep log rows for this many days (`LLM_LOG_RETENTION_DAYS`, default 90).
+/// Keep log rows for this many days (`OTS_LLM_LOG_RETENTION_DAYS`, default 90).
 fn retention_days() -> i64 {
     crate::config::LLM_LOG_RETENTION_DAYS.get() as i64
 }
 
 fn preview_enabled() -> bool {
-    !crate::config::LLM_LOG_PREVIEW_DISABLED.get()
+    crate::config::LLM_LOG_PREVIEW_ENABLED.get()
 }
 
 /// A short preview of the question for the admin log — or None when previews

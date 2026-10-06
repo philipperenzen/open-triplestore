@@ -800,7 +800,7 @@ export interface LlmHealth {
   caller?: 'user' | 'guest';
   chat_model?: string;
   context_tokens?: number | null;
-  /** `LLM_GATEWAY_URL` is set; `false` = the AI features are off. */
+  /** `OTS_LLM_GATEWAY_URL` is set; `false` = the AI features are off. */
   configured?: boolean;
   services?: LlmServiceStatus[];
 }
@@ -965,6 +965,15 @@ export const adminDeleteOauthClient = (clientId) =>
   request('DELETE', `/api/admin/oauth-clients/${encodeURIComponent(clientId)}`);
 
 // ─── Admin: instance settings (admin only; server enforces) ──────────────────
+// The effective configuration: every setting with its value and source
+// (secrets redacted). Returns { profile, settings, warnings }.
+export const adminGetConfig = () => request('GET', '/api/admin/config');
+// Runtime settings an admin can change without a restart. Returns { settings }.
+export const adminListSettings = () => request('GET', '/api/admin/settings');
+// Override one (validated like its environment variable), or reset it with
+// value null. Returns { setting }.
+export const adminSetSetting = (name: string, value: string | null) =>
+  request('PUT', `/api/admin/settings/${encodeURIComponent(name)}`, { value });
 export const adminGetGuestRegistration = () =>
   request('GET', '/api/admin/settings/guest-registration'); // { enabled }
 // Flipping OFF bulk-disables guest accounts (with a clear sign-in message);

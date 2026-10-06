@@ -10,7 +10,7 @@
 //! * PUT /api/admin/oauth/providers/:id accepts the body the admin form sends
 //!   and keeps the redacted client secret and SAML certificate when absent.
 //! * [P1-2] The client IP in audit rows and in the LLM guard's guest budget is
-//!   the TCP peer; `X-Forwarded-For` counts only from a `TRUSTED_PROXY_CIDRS`
+//!   the TCP peer; `X-Forwarded-For` counts only from a `OTS_TRUSTED_PROXY_CIDRS`
 //!   peer. The peer is injected as `ConnectInfo`, as the real server does.
 //!
 //! Driven through the real Axum router via `tower::ServiceExt::oneshot` (no socket).
@@ -554,7 +554,7 @@ fn anonymous_nl_sparql(peer: &str, forwarded_for: &str) -> Request<Body> {
 async fn llm_guest_budget_cannot_be_reset_with_a_forged_header() {
     // Nothing listens on port 1: a request the guard lets through fails fast
     // with 503 at the gateway; one the guard refuses is a 429.
-    std::env::set_var("LLM_GATEWAY_URL", "http://127.0.0.1:1");
+    std::env::set_var("OTS_LLM_GATEWAY_URL", "http://127.0.0.1:1");
     let app = test_app(test_state());
 
     // The guest budget defaults to 5 per minute per client IP.

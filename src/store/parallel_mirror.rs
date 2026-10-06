@@ -115,7 +115,7 @@ struct Inner {
     /// (`opengraph::columnar`): consulted first for the queries it accepts.
     /// `None` before the first build, over the cap, or when switched off.
     columnar: RwLock<Option<Arc<Columnar>>>,
-    /// `OTS_COLUMNAR_QUERY` (default on): build and consult the columnar copy.
+    /// `OTS_COLUMNAR_QUERY_ENABLED` (default on): build and consult the columnar copy.
     columnar_enabled: bool,
     /// Set on every write; the next query rebuilds before using either copy.
     dirty: AtomicBool,
@@ -181,14 +181,14 @@ impl Inner {
 }
 
 impl ParallelMirror {
-    /// Build from the configuration: `OTS_PARALLEL_QUERY` (on/off),
+    /// Build from the configuration: `OTS_PARALLEL_QUERY_ENABLED` (on/off),
     /// `OTS_PARALLEL_QUERY_MAX_TRIPLES` (memory cap in triples, default from
     /// the memory limit) and `OTS_PARALLEL_QUERY_SHARDS` (default the core
     /// count, at most 16).
     pub fn from_env() -> Self {
         use crate::config as c;
         Self::new(
-            c::PARALLEL_QUERY.get(),
+            c::PARALLEL_QUERY_ENABLED.get(),
             c::PARALLEL_QUERY_SHARDS.get(),
             c::PARALLEL_QUERY_MAX_TRIPLES.get(),
         )
@@ -201,7 +201,7 @@ impl ParallelMirror {
                 shards: RwLock::new(None),
                 full: RwLock::new(None),
                 columnar: RwLock::new(None),
-                columnar_enabled: crate::config::COLUMNAR_QUERY.get(),
+                columnar_enabled: crate::config::COLUMNAR_QUERY_ENABLED.get(),
                 dirty: AtomicBool::new(true),
                 build_lock: Mutex::new(()),
                 built_len: AtomicUsize::new(0),

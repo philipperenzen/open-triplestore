@@ -510,7 +510,7 @@ loader for initial loading — it is another ~7× faster again.
 > tolerance for that reason — so read these as a band, not a point.
 
 Both figures are with the per-quad [change log](versioning.md#change-log) **off**, which is the
-shipped default. Turning it on (`OTS_CHANGE_CAPTURE=on`, for replication, history or audits)
+shipped default. Turning it on (`OTS_CHANGE_CAPTURE_ENABLED=on`, for replication, history or audits)
 costs a ground write 4–13 % and a `WHERE` update ×2.5–4 — see
 [versioning.md](versioning.md#what-it-costs).
 (`insert/sparql_update/single_triple`, `insert/sparql_update_batch/10_triples`.)
@@ -814,7 +814,7 @@ From BSBM and published benchmarks at concurrency factor 16, 32 GB RAM:
 > these are development results, not an OGC compliance test or certification.
 > ³ The GeoSPARQL Query Rewrite Extension (the RIF rules, all 24 sf/eh/rcc8 relations) rewrites
 > relation patterns in queries and update `WHERE` clauses, on by default
-> (`OTS_GEOSPARQL_QUERY_REWRITE=off` turns it off); see [`docs/geosparql.md`](geosparql.md#query-rewrite).
+> (`OTS_GEOSPARQL_QUERY_REWRITE_ENABLED=off` turns it off); see [`docs/geosparql.md`](geosparql.md#query-rewrite).
 
 ### 10.2 GeoSPARQL Performance (measured — see section 2.4 for the system)
 

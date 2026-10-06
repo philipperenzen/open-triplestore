@@ -49,12 +49,12 @@ export default defineConfig({
       stdout: 'pipe',
       stderr: 'pipe',
       env: {
-        JWT_SECRET: process.env.JWT_SECRET ?? 'e2e_jwt_secret_must_be_32_chars_xx',
+        OTS_JWT_SECRET: process.env.OTS_JWT_SECRET ?? 'e2e_jwt_secret_must_be_32_chars_xx',
         // The suite drives many requests from one IP (repeated logins in
         // beforeEach, browsing + running saved queries), which would otherwise
         // trip the per-IP auth/SPARQL rate limiters and cause spurious 429s.
         // Relax them for the test backend only (secure-by-default in production).
-        RATE_LIMIT_DISABLED: process.env.RATE_LIMIT_DISABLED ?? '1',
+        OTS_RATE_LIMIT_ENABLED: process.env.OTS_RATE_LIMIT_ENABLED ?? 'false',
         // Hermetic e2e: OTS_OFFLINE skips every startup download — the IFC
         // demo models (~49 MB plus a multi-minute debug-build import whose
         // store write locks starve the suite) and the LOV corpus. No spec

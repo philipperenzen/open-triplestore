@@ -720,7 +720,7 @@ pub async fn import_container(
     if carries_files && !state.object_store.is_configured() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
-            "the container carries documents but no object storage is configured (S3_* or a local store)".to_string(),
+            "the container carries documents but no object storage is configured (OTS_S3_* or a local store)".to_string(),
         ));
     }
     let _ = state.auth_db.create_asset_folder(&dataset_id, &folder);

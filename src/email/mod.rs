@@ -1,37 +1,37 @@
 //! Transactional email for account lifecycle flows (address verification,
 //! password reset, username reminders, email-change confirmation).
 //!
-//! Configured from the environment. When `SMTP_HOST` is unset the mailer falls
+//! Configured from the environment. When `OTS_SMTP_HOST` is unset the mailer falls
 //! back to a log-only backend: every message is written to the server log at
 //! INFO level (including any action link), so development and test
 //! deployments can exercise the full flows without an SMTP relay.
 //!
 //! Environment variables:
-//! - `SMTP_HOST` — SMTP relay host. Unset → log-only backend.
-//! - `SMTP_PORT` — relay port (default 587).
-//! - `SMTP_USERNAME` / `SMTP_PASSWORD` — optional credentials. The password is
+//! - `OTS_SMTP_HOST` — SMTP relay host. Unset → log-only backend.
+//! - `OTS_SMTP_PORT` — relay port (default 587).
+//! - `OTS_SMTP_USERNAME` / `OTS_SMTP_PASSWORD` — optional credentials. The password is
 //!   read as a secret reference (`env:`, `file:`, `vault:`) and resolved at
 //!   startup; a raw value is accepted outside the production posture with a
 //!   deprecation warning.
-//! - `SMTP_TLS` — transport security: `none` (plaintext — only for a relay on a
+//! - `OTS_SMTP_TLS` — transport security: `none` (plaintext — only for a relay on a
 //!   trusted private network, e.g. the bundled compose `mail` service),
 //!   `starttls`, or `implicit` (TLS-wrapped/SMTPS). Default: implicit TLS on
 //!   port 465, STARTTLS otherwise.
-//! - `SMTP_FROM` — From mailbox (default `Open Triplestore <no-reply@localhost>`).
-//! - `PUBLIC_BASE_URL` — base URL minted into email links (default: the
+//! - `OTS_SMTP_FROM` — From mailbox (default `Open Triplestore <no-reply@localhost>`).
+//! - `OTS_PUBLIC_BASE_URL` — base URL minted into email links (default: the
 //!   server's linked-data base URL).
 //!
 //! Note: the ops alerting module (`alerting` feature) has its own
-//! `ALERT_SMTP_*` configuration, and falls back to this relay (`SMTP_HOST`,
-//! `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_TLS`, `SMTP_FROM`)
-//! when `ALERT_SMTP_HOST` is unset; this mailer is for user-facing account
+//! `OTS_ALERT_SMTP_*` configuration, and falls back to this relay (`OTS_SMTP_HOST`,
+//! `OTS_SMTP_PORT`, `OTS_SMTP_USERNAME`, `OTS_SMTP_PASSWORD`, `OTS_SMTP_TLS`, `OTS_SMTP_FROM`)
+//! when `OTS_ALERT_SMTP_HOST` is unset; this mailer is for user-facing account
 //! email.
 
 use crate::secrets::env_secret_opt;
 
 use std::sync::Arc;
 
-/// The From mailbox when `SMTP_FROM` is unset.
+/// The From mailbox when `OTS_SMTP_FROM` is unset.
 pub(crate) const DEFAULT_FROM: &str = "Open Triplestore <no-reply@localhost>";
 
 /// How long (seconds) an email send may take before it is abandoned.
@@ -50,9 +50,9 @@ pub enum SmtpTls {
     Implicit,
 }
 
-/// Resolve the transport security mode: an explicit `SMTP_TLS` wins, else
+/// Resolve the transport security mode: an explicit `OTS_SMTP_TLS` wins, else
 /// the port convention (465 ⇒ implicit TLS, anything else ⇒ STARTTLS). The
-/// configuration registry refuses any other `SMTP_TLS` value at startup.
+/// configuration registry refuses any other `OTS_SMTP_TLS` value at startup.
 pub(crate) fn resolve_tls(port: u16, tls: Option<&str>) -> SmtpTls {
     match tls.and_then(parse_tls) {
         Some(mode) => mode,
@@ -61,7 +61,7 @@ pub(crate) fn resolve_tls(port: u16, tls: Option<&str>) -> SmtpTls {
     }
 }
 
-/// One `SMTP_TLS`-style value (`none`, `starttls` or `implicit`, any case),
+/// One `OTS_SMTP_TLS`-style value (`none`, `starttls` or `implicit`, any case),
 /// or `None` when it is not one of them.
 pub(crate) fn parse_tls(value: &str) -> Option<SmtpTls> {
     match value.trim().to_ascii_lowercase().as_str() {
@@ -120,8 +120,8 @@ pub(crate) fn rfc5322_message_id(from_domain: &str) -> String {
 }
 
 impl Mailer {
-    /// Build the mailer from `SMTP_*` env vars. `default_link_base` is used for
-    /// action links unless `PUBLIC_BASE_URL` overrides it.
+    /// Build the mailer from `OTS_SMTP_*` env vars. `default_link_base` is used for
+    /// action links unless `OTS_PUBLIC_BASE_URL` overrides it.
     pub fn from_env(default_link_base: &str) -> Self {
         use crate::config as c;
         let link_base = c::PUBLIC_BASE_URL
@@ -141,7 +141,7 @@ impl Mailer {
                     host,
                     port,
                     username: c::SMTP_USERNAME.get(),
-                    password: env_secret_opt("SMTP_PASSWORD"),
+                    password: env_secret_opt("OTS_SMTP_PASSWORD"),
                     tls,
                 }
             }
@@ -187,7 +187,7 @@ impl Mailer {
         let from_mbox: Mailbox = self
             .from
             .parse()
-            .map_err(|e| format!("bad SMTP_FROM address: {e}"))?;
+            .map_err(|e| format!("bad OTS_SMTP_FROM address: {e}"))?;
         let to_mbox: Mailbox = to.parse().map_err(|e| format!("invalid recipient: {e}"))?;
         let message_id = rfc5322_message_id(from_mbox.email.domain());
         lettre::Message::builder()

@@ -10,7 +10,7 @@
 //! system graphs (the model registry and version graphs, `urn:` graphs) are
 //! excluded so vocabulary *definitions* don't count as vocabulary *usage*.
 //!
-//! Disable with `VOCAB_LOCAL_METRICS=off` (e.g. for very large stores).
+//! Disable with `OTS_VOCAB_LOCAL_METRICS_ENABLED=off` (e.g. for very large stores).
 
 use std::collections::HashMap;
 
@@ -25,7 +25,7 @@ fn is_system_graph(graph: &str, base_url: &str) -> bool {
 }
 
 pub fn enabled() -> bool {
-    crate::config::VOCAB_LOCAL_METRICS.get()
+    crate::config::VOCAB_LOCAL_METRICS_ENABLED.get()
 }
 
 /// Count term usage across the given **publicly accessible** data graphs:

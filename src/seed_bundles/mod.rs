@@ -7,7 +7,7 @@
 //! * **Built-in** — the bundled standards demo ([`crate::saved_queries::seed`])
 //!   constructs its [`Bundle`] programmatically from embedded data, so this code
 //!   path is exercised on every boot and in CI.
-//! * **On disk** — `--seed-dir` / `SEED_DIR` points at a directory whose
+//! * **On disk** — `--seed-dir` / `OTS_SEED_DIR` points at a directory whose
 //!   subdirectories each hold a `manifest.toml` plus RDF payload files
 //!   (Turtle / N-Triples / RDF/XML / JSON-LD per graph, TriG / N-Quads for
 //!   multi-graph payloads). See [`manifest`] and `docs/plugins.md`; a reference
@@ -179,8 +179,8 @@ pub struct Bundle {
     /// Unique bundle id (used in logs and the default opt-out env var name).
     pub id: String,
     /// Env var that disables this bundle when set to `false`/`0`/`no`/`off`
-    /// (same convention as `SEED_STANDARDS_DEMO`). `None` ⇒ derived as
-    /// `SEED_BUNDLE_<ID>` (uppercased, `-` → `_`).
+    /// (same convention as `OTS_SEED_STANDARDS_DEMO_ENABLED`). `None` ⇒ derived as
+    /// `OTS_SEED_BUNDLE_<ID>_ENABLED` (uppercased, `-` → `_`).
     pub opt_out_env: Option<String>,
     pub org: OrgSpec,
     pub datasets: Vec<BundleDataset>,
@@ -203,7 +203,7 @@ impl Bundle {
     pub fn opt_out_env_name(&self) -> String {
         self.opt_out_env.clone().unwrap_or_else(|| {
             format!(
-                "SEED_BUNDLE_{}",
+                "OTS_SEED_BUNDLE_{}_ENABLED",
                 self.id.to_ascii_uppercase().replace('-', "_")
             )
         })
@@ -1538,15 +1538,15 @@ mod tests {
     #[test]
     fn opt_out_env_var_disables_bundle() {
         let b = tiny_bundle("optout");
-        assert_eq!(b.opt_out_env_name(), "SEED_BUNDLE_OPTOUT");
+        assert_eq!(b.opt_out_env_name(), "OTS_SEED_BUNDLE_OPTOUT_ENABLED");
         assert_eq!(b.is_disabled(), Ok(false));
-        std::env::set_var("SEED_BUNDLE_OPTOUT", "false");
+        std::env::set_var("OTS_SEED_BUNDLE_OPTOUT_ENABLED", "false");
         assert_eq!(b.is_disabled(), Ok(true));
-        std::env::set_var("SEED_BUNDLE_OPTOUT", "true");
+        std::env::set_var("OTS_SEED_BUNDLE_OPTOUT_ENABLED", "true");
         assert_eq!(b.is_disabled(), Ok(false));
-        std::env::set_var("SEED_BUNDLE_OPTOUT", "maybe");
+        std::env::set_var("OTS_SEED_BUNDLE_OPTOUT_ENABLED", "maybe");
         assert!(b.is_disabled().is_err(), "not a boolean");
-        std::env::remove_var("SEED_BUNDLE_OPTOUT");
+        std::env::remove_var("OTS_SEED_BUNDLE_OPTOUT_ENABLED");
     }
 
     /// The reference bundle shipped in `examples/seed-bundles/` parses and

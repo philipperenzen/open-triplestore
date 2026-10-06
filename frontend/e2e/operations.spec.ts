@@ -92,7 +92,7 @@ test('the sidebar offers Node status to an admin and the page matches the API', 
     await expect(log).toContainText('Cursors');
   } else {
     await expect(log.locator('.state-badge')).toHaveText('Off');
-    await expect(log).toContainText('OTS_CHANGE_CAPTURE=on');
+    await expect(log).toContainText('OTS_CHANGE_CAPTURE_ENABLED=on');
     await expect(log).toContainText('×2.5–4');
   }
   await expect(log).toContainText(`${changes.retention_days} days`);

@@ -14,6 +14,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Runtime settings, editable under Admin → Settings.** Self-registration
+  (`OTS_REGISTRATION_ENABLED`), guest capabilities, embed framing, the AI
+  budgets and the OIDC token policies can be changed without a restart, on the
+  new `/admin/settings` page or with `PUT /api/admin/settings/{name}`
+  (`GET /api/admin/settings` lists them). The environment variable stays the
+  default: an override is stored in `app_settings` only when an administrator
+  sets one, is validated like the variable, applies on the next request (on
+  followers too), is audit-logged as `setting_changed`, and **Reset** removes
+  it. The page also shows the effective configuration of every setting with its
+  source, `admin` for an override.
 - **One configuration registry, validated at startup.** Every setting the
   server reads is declared once (`src/config/registry.rs`) with its kind,
   default, flag and documentation, and read through a typed key. The server
@@ -23,7 +33,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unknown choice, a malformed secret reference, an outbound allowlist entry
   that is not an absolute http(s) URL, settings that need each other (a
   follower without a leader URL, `OTS_DL_BACKEND=sidecar` without
-  `OTS_REASONER_URL`, `OIDC_ISSUER` without `OIDC_AUDIENCE`). Nothing falls
+  `OTS_REASONER_URL`, `OTS_OIDC_ISSUER` without `OTS_OIDC_AUDIENCE`). Nothing falls
   back to a default silently any more. The parsed configuration is carried in
   `AppState`, and the command-line flags are generated from the registry.
 - **`GET /api/admin/config`** (admin only): every setting with its effective
@@ -691,38 +701,172 @@ Configuration (no aliases: every renamed or removed name below **stops the
 start** with the name to use instead, so an old `.env` is never silently
 ignored):
 
-- `LLM_TIMEOUT_SECONDS` → `LLM_TIMEOUT_SECS`.
-- `BACKUP_SCHEDULE_HOURS` → `BACKUP_SCHEDULE_SECS` (seconds; default
+- **Every setting is `OTS_…`, and every switch ends in `_ENABLED`.** The
+  renames, which apply to the command line's environment names, `.env`,
+  compose and the docs alike:
+
+  | Old | New |
+  |---|---|
+  | `ACCEPT_LEGACY_TOKENS` | `OTS_SESSION_AND_API_TOKENS_ENABLED` |
+  | `ACCESS_TOKEN_EXPIRY_SECS` | `OTS_ACCESS_TOKEN_EXPIRY_SECS` |
+  | `ACCOUNTS_DASHBOARD_APP_GROUPS` | `OTS_ACCOUNTS_DASHBOARD_APP_GROUPS` |
+  | `ACCOUNTS_DASHBOARD_GATEWAY_KEY` | `OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY` |
+  | `ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL` | `OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL` |
+  | `ALERT_SMTP_FROM` | `OTS_ALERT_SMTP_FROM` |
+  | `ALERT_SMTP_HOST` | `OTS_ALERT_SMTP_HOST` |
+  | `ALERT_SMTP_PASS` | `OTS_ALERT_SMTP_PASSWORD` |
+  | `ALERT_SMTP_PORT` | `OTS_ALERT_SMTP_PORT` |
+  | `ALERT_SMTP_TLS` | `OTS_ALERT_SMTP_TLS` |
+  | `ALERT_SMTP_TO` | `OTS_ALERT_SMTP_TO` |
+  | `ALERT_SMTP_USER` | `OTS_ALERT_SMTP_USERNAME` |
+  | `ALERT_WEBHOOK_URL` | `OTS_ALERT_WEBHOOK_URL` |
+  | `AUDIT_PSEUDONYMISE_AFTER_DAYS` | `OTS_AUDIT_PSEUDONYMISE_AFTER_DAYS` |
+  | `AUTH_DB_PATH` | `OTS_AUTH_DB_PATH` |
+  | `BACKUP_DECRYPT_IDENTITY_PATH` | `OTS_BACKUP_DECRYPTION_IDENTITY_PATH` |
+  | `BACKUP_DIR` | `OTS_BACKUP_DIR` |
+  | `BACKUP_ENCRYPT` | `OTS_BACKUP_ENCRYPTION_ENABLED` |
+  | `BACKUP_ENCRYPT_KEY_PATH` | `OTS_BACKUP_ENCRYPTION_KEY_PATH` |
+  | `BACKUP_RETENTION_COUNT` | `OTS_BACKUP_RETENTION_COUNT` |
+  | `BACKUP_S3_ENABLED` | `OTS_BACKUP_S3_ENABLED` |
+  | `BACKUP_SCHEDULE_SECS` | `OTS_BACKUP_SCHEDULE_SECS` |
+  | `BASE_URL` | `OTS_BASE_URL` |
+  | `CATALOG_CONTACT_EMAIL` | `OTS_CATALOG_CONTACT_EMAIL` |
+  | `CATALOG_CONTACT_NAME` | `OTS_CATALOG_CONTACT_NAME` |
+  | `CATALOG_DESCRIPTION` | `OTS_CATALOG_DESCRIPTION` |
+  | `CATALOG_LANGUAGE` | `OTS_CATALOG_LANGUAGE` |
+  | `CATALOG_LICENSE` | `OTS_CATALOG_LICENSE` |
+  | `CATALOG_PUBLISHER_IDENTIFIER` | `OTS_CATALOG_PUBLISHER_IDENTIFIER` |
+  | `CATALOG_PUBLISHER_NAME` | `OTS_CATALOG_PUBLISHER_NAME` |
+  | `CATALOG_PUBLISHER_TYPE` | `OTS_CATALOG_PUBLISHER_TYPE` |
+  | `CATALOG_PUBLISHER_URI` | `OTS_CATALOG_PUBLISHER_URI` |
+  | `CATALOG_TITLE` | `OTS_CATALOG_TITLE` |
+  | `CLAMAV_ADDR` | `OTS_CLAMAV_ADDR` |
+  | `CORS_ORIGINS` | `OTS_CORS_ORIGINS` |
+  | `DCAT_PROFILE` | `OTS_DCAT_PROFILE` |
+  | `EMBED_FRAME_ANCESTORS` | `OTS_EMBED_FRAME_ANCESTORS` |
+  | `ENDPOINT_ACL_ENFORCE` | `OTS_ENDPOINT_ACL_ENABLED` |
+  | `JWT_SECRET` | `OTS_JWT_SECRET` |
+  | `LDP_ROOT_ACL` | `OTS_LDP_ROOT_ACL` |
+  | `LD_DISCOVERY` | `OTS_DISCOVERY_ENABLED` |
+  | `LD_REGISTRY_TOKEN` | `OTS_REGISTRY_TOKEN` |
+  | `LD_REGISTRY_URL` | `OTS_REGISTRY_URL` |
+  | `LLM_ANONYMOUS_ENABLED` | `OTS_LLM_ANONYMOUS_ENABLED` |
+  | `LLM_API_KEY` | `OTS_LLM_API_KEY` |
+  | `LLM_CHAT_MAX_ROUNDS` | `OTS_LLM_CHAT_MAX_ROUNDS` |
+  | `LLM_CHAT_MODEL` | `OTS_LLM_CHAT_MODEL` |
+  | `LLM_CHAT_QUERY_MAX_SECS` | `OTS_LLM_CHAT_QUERY_MAX_SECS` |
+  | `LLM_CHAT_TOOLS` | `OTS_LLM_CHAT_TOOLS` |
+  | `LLM_CONTEXT_TOKENS` | `OTS_LLM_CONTEXT_TOKENS` |
+  | `LLM_GATEWAY_URL` | `OTS_LLM_GATEWAY_URL` |
+  | `LLM_GUARD_BLOCKLIST` | `OTS_LLM_GUARD_BLOCKLIST` |
+  | `LLM_GUARD_INJECTION_ACTION` | `OTS_LLM_GUARD_INJECTION_ACTION` |
+  | `LLM_GUARD_MAX_MESSAGES` | `OTS_LLM_GUARD_MAX_MESSAGES` |
+  | `LLM_GUARD_MAX_MESSAGE_CHARS` | `OTS_LLM_GUARD_MAX_MESSAGE_CHARS` |
+  | `LLM_GUARD_MAX_TOTAL_CHARS` | `OTS_LLM_GUARD_MAX_TOTAL_CHARS` |
+  | `LLM_LOG_PREVIEW_ENABLED` | `OTS_LLM_LOG_PREVIEW_ENABLED` |
+  | `LLM_LOG_RETENTION_DAYS` | `OTS_LLM_LOG_RETENTION_DAYS` |
+  | `LLM_MODEL` | `OTS_LLM_MODEL` |
+  | `LLM_RATE_LIMIT_ANON_PER_MIN` | `OTS_LLM_RATE_LIMIT_ANON_PER_MIN` |
+  | `LLM_RATE_LIMIT_PER_MIN` | `OTS_LLM_RATE_LIMIT_PER_MIN` |
+  | `LLM_SHACL_MODEL` | `OTS_LLM_SHACL_MODEL` |
+  | `LLM_SPARQL_MODEL` | `OTS_LLM_SPARQL_MODEL` |
+  | `LLM_TIMEOUT_SECS` | `OTS_LLM_TIMEOUT_SECS` |
+  | `OAUTH_CLIENTS_JSON` | `OTS_OAUTH_CLIENTS_JSON` |
+  | `OIDC_AUDIENCE` | `OTS_OIDC_AUDIENCE` |
+  | `OIDC_DEFAULT_ROLE` | `OTS_OIDC_DEFAULT_ROLE` |
+  | `OIDC_GROUPS_CLAIM` | `OTS_OIDC_GROUPS_CLAIM` |
+  | `OIDC_ISSUER` | `OTS_OIDC_ISSUER` |
+  | `OIDC_ORG_GROUP_PREFIX` | `OTS_OIDC_ORG_GROUP_PREFIX` |
+  | `OIDC_ROLE_CLAIMS` | `OTS_OIDC_ROLE_CLAIMS` |
+  | `OIDC_ROLE_CLAIM_MAP` | `OTS_OIDC_ROLE_CLAIM_MAP` |
+  | `OTS_CHANGE_CAPTURE` | `OTS_CHANGE_CAPTURE_ENABLED` |
+  | `OTS_COLUMNAR_QUERY` | `OTS_COLUMNAR_QUERY_ENABLED` |
+  | `OTS_GEOSPARQL_QUERY_REWRITE` | `OTS_GEOSPARQL_QUERY_REWRITE_ENABLED` |
+  | `OTS_OIDC_SESSION_POLICY` | `OTS_OIDC_PROVIDER_TOKEN_POLICY` |
+  | `OTS_OIDC_WRITE_SCOPES` | `OTS_OIDC_PROVIDER_WRITE_SCOPES` |
+  | `OTS_PARALLEL_QUERY` | `OTS_PARALLEL_QUERY_ENABLED` |
+  | `OTS_QUERY_CACHE` | `OTS_QUERY_CACHE_ENABLED` |
+  | `OTS_REQUIRE_VERIFIED_EMAIL` | `OTS_LOGIN_EMAIL_VERIFICATION_ENABLED` |
+  | `PORT_FALLBACK` | `OTS_PORT_FALLBACK_ENABLED` |
+  | `PREFIX_CC_FALLBACK` | `OTS_PREFIX_CC_FALLBACK_ENABLED` |
+  | `PUBLIC_BASE_URL` | `OTS_PUBLIC_BASE_URL` |
+  | `REFRESH_TOKEN_EXPIRY_DAYS` | `OTS_REFRESH_TOKEN_EXPIRY_DAYS` |
+  | `S3_ACCESS_KEY` | `OTS_S3_ACCESS_KEY` |
+  | `S3_BUCKET` | `OTS_S3_BUCKET` |
+  | `S3_ENDPOINT` | `OTS_S3_ENDPOINT` |
+  | `S3_REGION` | `OTS_S3_REGION` |
+  | `S3_SECRET_KEY` | `OTS_S3_SECRET_KEY` |
+  | `SECURE_COOKIES` | `OTS_SECURE_COOKIES_ENABLED` |
+  | `SEED_DIR` | `OTS_SEED_DIR` |
+  | `SEED_IFC_URL` | `OTS_SEED_IFC_URL` |
+  | `SEED_STANDARDS_DEMO` | `OTS_SEED_STANDARDS_DEMO_ENABLED` |
+  | `SEED_STANDARD_VOCABS` | `OTS_SEED_STANDARD_VOCABS_ENABLED` |
+  | `SERVE_FRONTEND` | `OTS_FRONTEND_ENABLED` |
+  | `SMTP_FROM` | `OTS_SMTP_FROM` |
+  | `SMTP_HOST` | `OTS_SMTP_HOST` |
+  | `SMTP_PASSWORD` | `OTS_SMTP_PASSWORD` |
+  | `SMTP_PORT` | `OTS_SMTP_PORT` |
+  | `SMTP_TLS` | `OTS_SMTP_TLS` |
+  | `SMTP_USERNAME` | `OTS_SMTP_USERNAME` |
+  | `SPARQL_QUERY_TIMEOUT_SECS` | `OTS_SPARQL_QUERY_TIMEOUT_SECS` |
+  | `STORE_AUTO_RECOVER` | `OTS_STORE_AUTO_RECOVER_ENABLED` |
+  | `TEXT_SEARCH_DIR` | `OTS_TEXT_SEARCH_DIR` |
+  | `TRUSTED_PROXY_CIDRS` | `OTS_TRUSTED_PROXY_CIDRS` |
+  | `VALIDATION_API_URL` | `OTS_VALIDATION_API_URL` |
+  | `VOCAB_CORPUS_PATH` | `OTS_VOCAB_CORPUS_PATH` |
+  | `VOCAB_CORPUS_SHA256` | `OTS_VOCAB_CORPUS_SHA256` |
+  | `VOCAB_CORPUS_URL` | `OTS_VOCAB_CORPUS_URL` |
+  | `VOCAB_LOCAL_METRICS` | `OTS_VOCAB_LOCAL_METRICS_ENABLED` |
+  | `WRITE_TIMEOUT_SECS` | `OTS_WRITE_TIMEOUT_SECS` |
+  | `RATE_LIMIT_DISABLED=true` | `OTS_RATE_LIMIT_ENABLED=false` (opposite sense) |
+  | `OTS_DISABLE_REGISTRATION=true` | `OTS_REGISTRATION_ENABLED=false` (opposite sense) |
+  | `LLM_LOG_PREVIEW_DISABLED=true` | `OTS_LLM_LOG_PREVIEW_ENABLED=false` (opposite sense) |
+  | `SEED_BUNDLE_<ID>` (a bundle's derived opt-out) | `OTS_SEED_BUNDLE_<ID>_ENABLED` |
+
+  `ACCEPT_LEGACY_TOKENS` is now `OTS_SESSION_AND_API_TOKENS_ENABLED`, which
+  says what it covers (this store's own session and `ots_` API tokens), and
+  `OTS_OIDC_SESSION_POLICY` / `OTS_OIDC_WRITE_SCOPES` are
+  `OTS_OIDC_PROVIDER_TOKEN_POLICY` / `OTS_OIDC_PROVIDER_WRITE_SCOPES`, the
+  counterparts of `OTS_OIDC_IDP_TOKEN_POLICY` / `OTS_OIDC_IDP_WRITE_SCOPES`.
+  The example seed bundles' opt-out variables are `OTS_SEED_<NAME>_ENABLED`.
+  The secrets module's own Vault variables (`VAULT_ADDR`, `VAULT_TOKEN`, …)
+  and `RUST_LOG` keep their ecosystem names.
+- The storage directory, port and bind address have environment variables:
+  `OTS_DATA_DIR`, `OTS_PORT` and `OTS_BIND` (flags `-d`, `-p`, `-b`).
+- `OTS_EMBED_FRAME_ANCESTORS` takes only `'none'` (with its quotes) to turn
+  embedding off; a bare `none` stops the start.
+- `LLM_TIMEOUT_SECONDS` → `OTS_LLM_TIMEOUT_SECS`.
+- `BACKUP_SCHEDULE_HOURS` → `OTS_BACKUP_SCHEDULE_SECS` (seconds; default
   `86400`, at least 60). The unit rule is now `_MS`, `_SECS` or `_DAYS` for a
   duration and `_BYTES` for a size.
-- `ACCESS_TOKEN_EXPIRY_MINUTES` → `ACCESS_TOKEN_EXPIRY_SECS` (default
+- `ACCESS_TOKEN_EXPIRY_MINUTES` → `OTS_ACCESS_TOKEN_EXPIRY_SECS` (default
   `1800`); the flag is `--access-token-expiry-secs`.
 - `OTS_MAX_UPLOAD_MB` → `OTS_MAX_UPLOAD_BYTES` (bytes; `512MiB` is accepted).
-- `SMTP_STARTTLS` is removed: set `SMTP_TLS=starttls|implicit|none`.
+- `SMTP_STARTTLS` is removed: set `OTS_SMTP_TLS=starttls|implicit|none`.
   `OTS_EXTERNAL_REASONER` and `OTS_EXTERNAL_REASONER_BIN` now stop the start
   (they were removed in favour of `OTS_DL_BACKEND=konclude`).
 - Booleans accept exactly `true/false`, `1/0`, `yes/no`, `on/off` (any case)
-  everywhere; `SECURE_COOKIES=yes` and `OTS_DISABLE_REGISTRATION=on` now work,
-  and `SECURE_COOKIES=maybe` stops the start instead of being ignored.
+  everywhere; `OTS_SECURE_COOKIES_ENABLED=yes` and `OTS_REGISTRATION_ENABLED=off`
+  now work, and `OTS_SECURE_COOKIES_ENABLED=maybe` stops the start instead of
+  being ignored.
   `--secure-cookies`, `--port-fallback` and `--discovery` take an optional
   value (`--secure-cookies=false`).
 - Aliases are gone: `OTS_OIDC_*_POLICY=legacy` (use `full`),
-  `OTS_REMOTE_AUTH=forward|identity` (use `assert`), `DCAT_PROFILE=dcat3`,
+  `OTS_REMOTE_AUTH=forward|identity` (use `assert`), `OTS_DCAT_PROFILE=dcat3`,
   `dcat_ap`, `dcatapnl` and the like (use `dcat`, `dcat-ap`, `dcat-ap-nl`),
-  `SMTP_TLS=off|plain|tls|smtps`, `OTS_REPLICATION_ROLE=primary|replica`,
-  `LLM_CHAT_TOOLS=0|false|none` (use `off`), and the hyphenated guest
+  `OTS_SMTP_TLS=off|plain|tls|smtps`, `OTS_REPLICATION_ROLE=primary|replica`,
+  `OTS_LLM_CHAT_TOOLS=0|false|none` (use `off`), and the hyphenated guest
   capabilities `create-datasets` / `api-tokens`.
 - Values that used to be clamped or dropped now stop the start:
-  `LLM_CHAT_MAX_ROUNDS` outside 1–8, `LLM_CHAT_QUERY_MAX_SECS` outside 5–600,
+  `OTS_LLM_CHAT_MAX_ROUNDS` outside 1–8, `OTS_LLM_CHAT_QUERY_MAX_SECS` outside 5–600,
   `OTS_PARALLEL_QUERY_SHARDS` outside 1–16, `OTS_LDES_RETRIES` above 16, an
-  unknown `OTS_GUEST_CAPABILITIES` word, `OIDC_DEFAULT_ROLE=admin` (it was
-  capped to `user`), a non-https `OIDC_ISSUER` (OIDC used to be disabled), an
-  invalid `TRUSTED_PROXY_CIDRS`, `CORS_ORIGINS` or `OTS_REMOTE_ALLOWLIST`
+  unknown `OTS_GUEST_CAPABILITIES` word, `OTS_OIDC_DEFAULT_ROLE=admin` (it was
+  capped to `user`), a non-https `OTS_OIDC_ISSUER` (OIDC used to be disabled), an
+  invalid `OTS_TRUSTED_PROXY_CIDRS`, `OTS_CORS_ORIGINS` or `OTS_REMOTE_ALLOWLIST`
   entry, a function graph `OTS_SPARQL_FUNCTION_GRAPHS` may not name, and
-  invalid `OAUTH_CLIENTS_JSON`.
-- Empty means unset for every setting, so `EMBED_FRAME_ANCESTORS=` gives the
-  default; disable embedding with `'none'`. (`SEED_IFC_URL=` and
-  `VOCAB_CORPUS_URL=` still turn their downloads off.)
+  invalid `OTS_OAUTH_CLIENTS_JSON`.
+- Empty means unset for every setting, so `OTS_EMBED_FRAME_ANCESTORS=` gives the
+  default; disable embedding with `'none'`.
 - `OTS_REPLICATION_ROLE=cluster` now configures the Raft member from the
   environment (the role was parsed as `none`, so the cluster settings were
   never read), and `OTS_REPLICATION_CLUSTER_SECRET` goes through the secrets
@@ -730,22 +874,22 @@ ignored):
 - A seed bundle's opt-out variable that is not a boolean skips the bundle with
   an error, and its `password_env` goes through the secrets module.
 - **Production profile.** `OTS_ENV=production` now hardens the defaults:
-  secure cookies on, self-registration closed (`OTS_DISABLE_REGISTRATION`
-  defaults to `true`; the first account can still register), `LDP_ROOT_ACL`
-  defaults to `owners`, `EMBED_FRAME_ANCESTORS` to `'none'`,
-  `SEED_STANDARDS_DEMO` to `false`, `OTS_OIDC_SESSION_POLICY` to `scoped`, and
-  `STORE_AUTO_RECOVER` to `false` (a corrupt store fails the start instead of
+  secure cookies on, self-registration closed (`OTS_REGISTRATION_ENABLED`
+  defaults to `false`; the first account can still register), `OTS_LDP_ROOT_ACL`
+  defaults to `owners`, `OTS_EMBED_FRAME_ANCESTORS` to `'none'`,
+  `OTS_SEED_STANDARDS_DEMO_ENABLED` to `false`, `OTS_OIDC_PROVIDER_TOKEN_POLICY` to `scoped`, and
+  `OTS_STORE_AUTO_RECOVER_ENABLED` to `false` (a corrupt store fails the start instead of
   coming back empty). Each can be set explicitly. Production refuses to start
-  with `SECURE_COOKIES=false`, `RATE_LIMIT_DISABLED=true`, `*` in
-  `CORS_ORIGINS`, or a raw value in any secret setting.
-- `SECURE_COOKIES` defaults to on whenever `BASE_URL` is https, in every
+  with `OTS_SECURE_COOKIES_ENABLED=false`, `OTS_RATE_LIMIT_ENABLED=false`, `*` in
+  `OTS_CORS_ORIGINS`, or a raw value in any secret setting.
+- `OTS_SECURE_COOKIES_ENABLED` defaults to on whenever `OTS_BASE_URL` is https, in every
   profile; set it to `false` explicitly for plain-HTTP development behind an
   https base URL.
 - The startup log lists the profile and every setting not at its built-in
   default, with its source (secrets redacted).
-- `docker-compose.yml` passes `S3_SECRET_KEY=env:MINIO_ROOT_PASSWORD` (a
+- `docker-compose.yml` passes `OTS_S3_SECRET_KEY=env:MINIO_ROOT_PASSWORD` (a
   reference) and forwards `MINIO_ROOT_PASSWORD`, so the production profile can
-  start under compose once `JWT_SECRET` is a reference too.
+  start under compose once `OTS_JWT_SECRET` is a reference too.
 - **One outbound allowlist per purpose.** `OTS_REMOTE_ALLOWLIST` is retired
   (setting it stops the start) and split into `OTS_SERVICE_ALLOWLIST` (SPARQL
   `SERVICE`, which any query user can trigger), `OTS_LDES_ALLOWLIST` (LDES
@@ -756,20 +900,21 @@ ignored):
   are checked against the same purpose's list.
 - **`OTS_OFFLINE`** (on in production) stops every startup download: the LOV
   corpus and the demo IFC and STL models. It replaces the empty-value kill
-  switches `SEED_IFC_URL=` and `VOCAB_CORPUS_URL=` (an empty value now means
-  the default, like every other setting).
+  switches `SEED_IFC_URL=` and `VOCAB_CORPUS_URL=` (an empty
+  `OTS_SEED_IFC_URL` or `OTS_VOCAB_CORPUS_URL` now means the default, like
+  every other setting).
 - **LLM budgets: `0` turns AI off, `unlimited` lifts the limit.**
-  `LLM_RATE_LIMIT_PER_MIN=0` / `LLM_RATE_LIMIT_ANON_PER_MIN=0` used to mean
+  `OTS_LLM_RATE_LIMIT_PER_MIN=0` / `OTS_LLM_RATE_LIMIT_ANON_PER_MIN=0` used to mean
   "no limit"; they now refuse AI to that kind of caller (`403`). The new
-  `LLM_ANONYMOUS_ENABLED` (default on, off in production) turns AI off for
+  `OTS_LLM_ANONYMOUS_ENABLED` (default on, off in production) turns AI off for
   anonymous callers. `/api/llm/health` reports `0` for off and `null` for
   unlimited, plus `available_to_caller`.
-- **No built-in LLM gateway.** With `LLM_GATEWAY_URL` unset the AI features
+- **No built-in LLM gateway.** With `OTS_LLM_GATEWAY_URL` unset the AI features
   are off: nothing is probed (the server used to probe `127.0.0.1:8000`) and
   AI requests answer `503` naming the setting. `/api/llm/health` reports
   `gateway: null`, and for a configured but unreachable gateway (the compose
   default without `--profile llm`) the probe's error as
-  `unreachable_reason`. In compose, `LLM_GATEWAY_URL=` (empty) in `.env` now
+  `unreachable_reason`. In compose, `OTS_LLM_GATEWAY_URL=` (empty) in `.env` now
   turns the AI features off.
 
 ### Changed

@@ -200,7 +200,7 @@ What is left alone: a variable predicate (`?a ?p ?b`, as the standard allows), p
 
 Cost: a query that names no relation is not parsed again. A relation pattern with both sides unbound compares every pair of geometries in scope, so bind one side (by type or by IRI) on large data.
 
-`OTS_GEOSPARQL_QUERY_REWRITE=off` (or `0`, `false`, `no`) turns the rewrite off for the server. Relation patterns then match asserted triples only.
+`OTS_GEOSPARQL_QUERY_REWRITE_ENABLED=off` (or `0`, `false`, `no`) turns the rewrite off for the server. Relation patterns then match asserted triples only.
 
 ## RDFS entailment
 

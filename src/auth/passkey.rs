@@ -121,13 +121,13 @@ fn build_webauthn(base_url: &str) -> Result<Webauthn, (StatusCode, String)> {
     let origin = url::Url::parse(base_url).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Invalid PUBLIC_BASE_URL for WebAuthn: {e}"),
+            format!("Invalid OTS_PUBLIC_BASE_URL for WebAuthn: {e}"),
         )
     })?;
     let rp_id = origin.host_str().map(str::to_string).ok_or_else(|| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            "PUBLIC_BASE_URL has no host — cannot derive WebAuthn RP id".to_string(),
+            "OTS_PUBLIC_BASE_URL has no host — cannot derive WebAuthn RP id".to_string(),
         )
     })?;
     let mut builder = WebauthnBuilder::new(&rp_id, &origin)

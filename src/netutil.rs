@@ -1,4 +1,4 @@
-//! Networking helpers backing the opt-in `--port-fallback` / `PORT_FALLBACK`
+//! Networking helpers backing the opt-in `--port-fallback` / `OTS_PORT_FALLBACK_ENABLED`
 //! flag (default off — see `server::run`'s listener-bind step).
 //!
 //! The default behaviour is to refuse to start when the requested port

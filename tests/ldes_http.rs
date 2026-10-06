@@ -497,7 +497,7 @@ async fn private_graphs_are_never_published_to_the_stream() {
 
 /// A second instance on a local listener publishes; this instance syncs.
 /// The publisher's base URL is the listener's origin, as a deployment's
-/// BASE_URL is its public origin — the stream's node IRIs are built from it.
+/// OTS_BASE_URL is its public origin — the stream's node IRIs are built from it.
 fn publisher() -> (AppState, String, String) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();

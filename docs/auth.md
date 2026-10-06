@@ -101,13 +101,13 @@ Account email (verification, resets, reminders) is sent through SMTP when config
 
 | Variable | Meaning |
 |---|---|
-| `SMTP_HOST` | SMTP relay host (unset → log-only mode) |
-| `SMTP_PORT` | Relay port (default 587) |
-| `SMTP_USERNAME` / `SMTP_PASSWORD` | Optional credentials |
-| `SMTP_TLS` | `none` \| `starttls` \| `implicit` (default: implicit TLS on 465, STARTTLS otherwise). `none` is plaintext — only for a relay on a trusted private network, like the bundled compose relay |
-| `SMTP_FROM` | From mailbox, e.g. `Open Triplestore <no-reply@example.org>` |
-| `PUBLIC_BASE_URL` | Base URL minted into emailed links (defaults to the server base URL) |
-| `OTS_REQUIRE_VERIFIED_EMAIL` | `true` → password login requires a verified address (a fresh link is auto-resent on blocked logins) |
+| `OTS_SMTP_HOST` | SMTP relay host (unset → log-only mode) |
+| `OTS_SMTP_PORT` | Relay port (default 587) |
+| `OTS_SMTP_USERNAME` / `OTS_SMTP_PASSWORD` | Optional credentials |
+| `OTS_SMTP_TLS` | `none` \| `starttls` \| `implicit` (default: implicit TLS on 465, STARTTLS otherwise). `none` is plaintext — only for a relay on a trusted private network, like the bundled compose relay |
+| `OTS_SMTP_FROM` | From mailbox, e.g. `Open Triplestore <no-reply@example.org>` |
+| `OTS_PUBLIC_BASE_URL` | Base URL minted into emailed links (defaults to the server base URL) |
+| `OTS_LOGIN_EMAIL_VERIFICATION_ENABLED` | `true` → password login requires a verified address (a fresh link is auto-resent on blocked logins) |
 
 All of these are wired through `docker-compose.yml`, so setting them in `.env` is enough.
 
@@ -117,11 +117,11 @@ The compose stack ships a send-only [Postfix relay](https://github.com/bokysan/d
 
 ```bash
 COMPOSE_PROFILES=mail
-SMTP_HOST=mail
-SMTP_TLS=none          # the hop to the relay stays on the private compose network
-SMTP_FROM=Open Triplestore <no-reply@example.org>
+OTS_SMTP_HOST=mail
+OTS_SMTP_TLS=none          # the hop to the relay stays on the private compose network
+OTS_SMTP_FROM=Open Triplestore <no-reply@example.org>
 MAIL_SENDER_DOMAINS=example.org
-BASE_URL=https://data.example.org   # browser-facing origin — the base for emailed links
+OTS_BASE_URL=https://data.example.org   # browser-facing origin — the base for emailed links
 ```
 
 The relay listens only on the compose network (no host port is published, so it cannot be abused as an open relay) and persists its queue, so deferred mail keeps retrying across restarts. By default it delivers straight to each recipient's MX — that only lands when the host can egress port 25 and `MAIL_HOSTNAME` has matching forward/reverse DNS plus an SPF record. From a laptop or an IP without mail reputation, set `MAIL_RELAYHOST` (+ `MAIL_RELAYHOST_USERNAME` / `MAIL_RELAYHOST_PASSWORD`) to route through a provider smarthost instead. See `.env.example` for the full variable list.
@@ -231,7 +231,7 @@ accepted once (replay cache), and one that carries an `InResponseTo` is refused.
 
 Each provider gets its own SP key pair (RSA-3072, self-signed certificate) the
 first time it is needed. The private key is stored like an OAuth client secret
-(`auth::secret`): encrypted with a key derived from `JWT_SECRET`, or, for a key
+(`auth::secret`): encrypted with a key derived from `OTS_JWT_SECRET`, or, for a key
 you import, as a secret reference (`env:`, `file:`, `vault:`). The metadata
 publishes every key with `use="signing"` and with `use="encryption"`.
 
@@ -279,16 +279,16 @@ or POST binding) revokes the sessions it names (by SessionIndex when it lists
 any), is accepted once, and is answered with a signed LogoutResponse.
 
 **Limit:** access tokens are stateless JWTs. One issued before the logout
-stays valid until it expires (`ACCESS_TOKEN_EXPIRY_SECS`, default 1800); only
+stays valid until it expires (`OTS_ACCESS_TOKEN_EXPIRY_SECS`, default 1800); only
 the refresh token is revoked. Shorten the access-token lifetime if that window
 matters.
 
 #### Transport
 
 The IdP returns the browser to the ACS with a cross-site POST, which only a
-`SameSite=None; Secure` cookie survives, so SAML needs an `https` `BASE_URL`.
-The `saml_state` cookie is `SameSite=None; Secure` whenever `BASE_URL` is
-https, whatever `SECURE_COOKIES` says. With a plain-http `BASE_URL` the login
+`SameSite=None; Secure` cookie survives, so SAML needs an `https` `OTS_BASE_URL`.
+The `saml_state` cookie is `SameSite=None; Secure` whenever `OTS_BASE_URL` is
+https, whatever `OTS_SECURE_COOKIES_ENABLED` says. With a plain-http `OTS_BASE_URL` the login
 route refuses to start, except on `localhost`, where the cookie is
 `SameSite=Lax` and an IdP on the same site works.
 
@@ -314,20 +314,20 @@ Keycloak or Entra ID and then calls this store's API directly. The client
 sends the IdP's token as `Authorization: Bearer <token>`. The store checks the
 signature against the IdP's published keys, then links the token's subject to
 a local account, creating one if needed. The mode is configured only through
-environment variables and stays off unless `OIDC_ISSUER` is set.
+environment variables and stays off unless `OTS_OIDC_ISSUER` is set.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `OIDC_ISSUER` | *(unset: mode off)* | The IdP's issuer URL, e.g. `https://idp.example.org/realms/example`. Must be `https`; plain `http` is accepted only for `localhost` and loopback addresses. If you give a cleartext issuer, startup logs an error and leaves the mode off, because a man in the middle could otherwise serve forged keys. A trailing `/` is removed. |
-| `OIDC_AUDIENCE` | *(unset)* | The `aud` value a token must carry for this store. **Required.** If `OIDC_ISSUER` is set without it, startup logs a warning and every IdP token is refused. |
-| `OIDC_DEFAULT_ROLE` | `user` | The system role an account created from a token gets when no claim maps to a role: `user` or `guest`. Any other value (`admin`, `super_admin`, a typo) **stops the start**, because it applies to every account the IdP knows. Grant admin per account, through `OIDC_ROLE_CLAIM_MAP` or the UI. It is read only once (see [changing settings later](#changing-settings-later)). |
-| `OIDC_ROLE_CLAIMS` | `roles,realm_access.roles,groups` | Comma-separated claim names to check for role mapping. A dotted name reaches into a nested object (`realm_access.roles` is Keycloak's shape). String and string-array values are read. |
-| `OIDC_ROLE_CLAIM_MAP` | *(unset: no mapping)* | A JSON object from claim value to role, e.g. `{"idp-admins": "admin", "idp-editors": "publisher", "staff": "user"}`. Invalid JSON is ignored without a warning, which disables mapping. |
-| `OIDC_GROUPS_CLAIM` | `groups` | The claim holding group names. Its values are matched against the role map and used for organisation membership. |
-| `OIDC_ORG_GROUP_PREFIX` | `org:` | The prefix that marks a group as an organisation membership: `org:example-gis` makes the account a member of the organisation whose slug is `example-gis`. |
+| `OTS_OIDC_ISSUER` | *(unset: mode off)* | The IdP's issuer URL, e.g. `https://idp.example.org/realms/example`. Must be `https`; plain `http` is accepted only for `localhost` and loopback addresses. If you give a cleartext issuer, startup logs an error and leaves the mode off, because a man in the middle could otherwise serve forged keys. A trailing `/` is removed. |
+| `OTS_OIDC_AUDIENCE` | *(unset)* | The `aud` value a token must carry for this store. **Required.** If `OTS_OIDC_ISSUER` is set without it, startup logs a warning and every IdP token is refused. |
+| `OTS_OIDC_DEFAULT_ROLE` | `user` | The system role an account created from a token gets when no claim maps to a role: `user` or `guest`. Any other value (`admin`, `super_admin`, a typo) **stops the start**, because it applies to every account the IdP knows. Grant admin per account, through `OTS_OIDC_ROLE_CLAIM_MAP` or the UI. It is read only once (see [changing settings later](#changing-settings-later)). |
+| `OTS_OIDC_ROLE_CLAIMS` | `roles,realm_access.roles,groups` | Comma-separated claim names to check for role mapping. A dotted name reaches into a nested object (`realm_access.roles` is Keycloak's shape). String and string-array values are read. |
+| `OTS_OIDC_ROLE_CLAIM_MAP` | *(unset: no mapping)* | A JSON object from claim value to role, e.g. `{"idp-admins": "admin", "idp-editors": "publisher", "staff": "user"}`. Invalid JSON is ignored without a warning, which disables mapping. |
+| `OTS_OIDC_GROUPS_CLAIM` | `groups` | The claim holding group names. Its values are matched against the role map and used for organisation membership. |
+| `OTS_OIDC_ORG_GROUP_PREFIX` | `org:` | The prefix that marks a group as an organisation membership: `org:example-gis` makes the account a member of the organisation whose slug is `example-gis`. |
 | `OTS_OIDC_IDP_TOKEN_POLICY` | `session` | What an IdP token may do: `session` reads and writes but cannot create API tokens; `scoped` writes only when the token's `scope` or `scp` claim grants it; `full` also creates API tokens. Any other value stops the start. See [what an IdP token may do](#what-an-idp-token-may-do). |
 | `OTS_OIDC_IDP_WRITE_SCOPES` | *(unset)* | Under `scoped`: extra scope values, comma- or space-separated, that count as a write grant besides `write` and `admin`, e.g. `ots.write` or `api://open-triplestore/write`. |
-| `ACCEPT_LEGACY_TOKENS` | `true` | Keep accepting this store's own session tokens and `ots_` API tokens. `false` or `0` refuses them; see [below](#turning-off-the-stores-own-tokens). |
+| `OTS_SESSION_AND_API_TOKENS_ENABLED` | `true` | Keep accepting this store's own session tokens and `ots_` API tokens. `false` or `0` refuses them; see [below](#turning-off-the-stores-own-tokens). |
 
 The Docker Compose file passes all ten through from `.env`.
 
@@ -336,13 +336,13 @@ The Docker Compose file passes all ten through from `.env`.
 - It is signed with an asymmetric algorithm (RS…, PS…, ES…, EdDSA). HMAC
   (`HS256` and the other HS variants) is refused.
 - Its header has a `kid` that names a key in the IdP's key set. The store reads
-  `jwks_uri` from `<OIDC_ISSUER>/.well-known/openid-configuration`
+  `jwks_uri` from `<OTS_OIDC_ISSUER>/.well-known/openid-configuration`
   (`jwks_uri` must be `https` too) and caches the keys for an hour. An unknown
   `kid` triggers an immediate re-fetch, so key rotation needs no restart.
-- `iss` equals `OIDC_ISSUER`, with or without one trailing slash:
+- `iss` equals `OTS_OIDC_ISSUER`, with or without one trailing slash:
   `https://tenant.example` and `https://tenant.example/` both match, and
   nothing else does.
-- `aud` contains `OIDC_AUDIENCE`, `exp` is in the future, and `nbf` (if
+- `aud` contains `OTS_OIDC_AUDIENCE`, `exp` is in the future, and `nbf` (if
   present) is in the past.
 - `sub` is present. `email`, `email_verified`, `name` and
   `preferred_username` are read when present.
@@ -375,8 +375,8 @@ deactivated account is refused.
 
 ### Roles, publish permission and organisations
 
-On **every** request, the values of the `OIDC_ROLE_CLAIMS` claims and of the
-`OIDC_GROUPS_CLAIM` claim are looked up in `OIDC_ROLE_CLAIM_MAP`:
+On **every** request, the values of the `OTS_OIDC_ROLE_CLAIMS` claims and of the
+`OTS_OIDC_GROUPS_CLAIM` claim are looked up in `OTS_OIDC_ROLE_CLAIM_MAP`:
 
 - The highest mapped role wins. `super_admin` is capped at `admin`, so a token
   can never make an account a super admin through the map.
@@ -384,12 +384,12 @@ On **every** request, the values of the `OIDC_ROLE_CLAIMS` claims and of the
   it is lower than the account's current role. The IdP is authoritative: a
   role an admin set in the UI is overwritten on the next request. When nothing
   maps, an existing account keeps its role, and a new account gets
-  `OIDC_DEFAULT_ROLE`.
+  `OTS_OIDC_DEFAULT_ROLE`.
 - The special value `"publisher"` grants the
   [publish permission](administration.md#the-can_publish-capability). It is
   never taken away just because the claim is absent.
 
-Each group value that starts with `OIDC_ORG_GROUP_PREFIX` names an
+Each group value that starts with `OTS_OIDC_ORG_GROUP_PREFIX` names an
 organisation slug. If that organisation exists, the account is added to it as
 a `member`. Organisations are never created this way, and memberships are only
 added: one stays after the group disappears from the token.
@@ -426,7 +426,7 @@ reaches:
   every policy.
 - An unknown value logs a warning and falls back to `session`, never to `full`.
 
-This setting is independent of `OTS_OIDC_SESSION_POLICY`, which governs only
+This setting is independent of `OTS_OIDC_PROVIDER_TOKEN_POLICY`, which governs only
 the tokens this store issues as an
 [OIDC provider](oidc-provider.md#what-a-provider-token-may-do). The two are
 issued to different clients, so tightening one must not change the other.
@@ -436,7 +436,7 @@ whichever way they authenticate.
 
 ### Turning off the store's own tokens
 
-`ACCEPT_LEGACY_TOKENS=false` refuses every session token this store issues,
+`OTS_SESSION_AND_API_TOKENS_ENABLED=false` refuses every session token this store issues,
 including the one the bundled web UI receives after a password, passkey or SSO
 sign-in. Every `ots_` API token is refused too, with
 `401 Legacy tokens are disabled`. What still works: IdP tokens, access tokens
@@ -447,13 +447,13 @@ sign-in stops working.
 ### Changing settings later
 
 The *Environment OIDC* entry is created once, the first time the server starts
-with `OIDC_ISSUER` set. It records `OIDC_DEFAULT_ROLE` and has
-auto-provisioning on. Changing `OIDC_DEFAULT_ROLE` afterwards does not update
+with `OTS_OIDC_ISSUER` set. It records `OTS_OIDC_DEFAULT_ROLE` and has
+auto-provisioning on. Changing `OTS_OIDC_DEFAULT_ROLE` afterwards does not update
 the entry. Edit it under **Security & Access Control → Identity providers**
 (or `PUT /api/admin/oauth/providers/:id`) instead. There you can also turn
 auto-provisioning off, so that only accounts that already exist (linked by
 verified email) can use IdP tokens. The entry's default role is capped at
-`user` like `OIDC_DEFAULT_ROLE`: an `admin` value set there, or recorded by an
+`user` like `OTS_OIDC_DEFAULT_ROLE`: an `admin` value set there, or recorded by an
 earlier version, creates `user` accounts. The entry's own role claim map and
 its enabled switch do not affect this path; the environment variables above do.
 
@@ -462,7 +462,7 @@ login page lists only providers a browser sign-in can start from.
 
 ## Guest self-registration (admin toggle)
 
-With normal self-registration closed (`OTS_DISABLE_REGISTRATION=1`), an admin
+With normal self-registration closed (`OTS_REGISTRATION_ENABLED=false`), an admin
 can still open a low-privilege path from **Security → Registration**: the
 public register page then creates accounts with the `guest` system role (no
 publish/design/admin rights — client apps decide what guests may fill, e.g.

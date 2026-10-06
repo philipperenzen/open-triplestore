@@ -84,7 +84,7 @@ jobs:
         working-directory: frontend
         env:
           CI: 'true'
-          JWT_SECRET: e2e_jwt_secret_must_be_32_chars_xx
+          OTS_JWT_SECRET: e2e_jwt_secret_must_be_32_chars_xx
           # Reuse the binary built above instead of `cargo run` (faster startup).
           OTS_BACKEND_CMD: ../target/debug/open-triplestore --bind 127.0.0.1 --port 7878 --data-dir ./e2e-data --log-level warn
           # Keep the boot seed chain short on the 2-core runner: skip the
@@ -94,7 +94,7 @@ jobs:
           # OTS_OFFLINE, every startup download (the LOV corpus, the demo IFC
           # models). No e2e spec depends on either; the demo datasets and saved
           # queries the specs use are seeded regardless.
-          SEED_STANDARD_VOCABS: 'false'
+          OTS_SEED_STANDARD_VOCABS_ENABLED: 'false'
           OTS_OFFLINE: 'true'
         run: npm run e2e
 

@@ -18,4 +18,4 @@ IMBOR_ZIP="${IMBOR_ZIP:-https://github.com/Stichting-CROW/imbor/releases/downloa
 echo "→ IMBOR release zip"; curl -fsSL "$IMBOR_ZIP" -o imbor.zip
 unzip -o -q imbor.zip -d imbor-release
 ls -1 imbor-release
-echo "done — the bundle loads at boot from --seed-dir (SEED_DIR) pointing at examples/seed-bundles"
+echo "done — the bundle loads at boot from --seed-dir (OTS_SEED_DIR) pointing at examples/seed-bundles"

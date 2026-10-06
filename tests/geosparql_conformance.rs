@@ -4732,7 +4732,7 @@ fn query_rewrite_takes_every_query_path() {
     assert!(first.len() >= 4, "{first:?}");
 }
 
-/// `OTS_GEOSPARQL_QUERY_REWRITE=off` (here the store's builder): only
+/// `OTS_GEOSPARQL_QUERY_REWRITE_ENABLED=off` (here the store's builder): only
 /// asserted relations match.
 #[test]
 fn query_rewrite_can_be_switched_off() {

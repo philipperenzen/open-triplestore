@@ -42,7 +42,7 @@
 //! graph pattern, so the pattern still joins with its neighbours.
 //!
 //! It applies to queries and to the `WHERE` clause of `DELETE`/`INSERT`
-//! updates. It is on by default; `OTS_GEOSPARQL_QUERY_REWRITE=off` (or `0`,
+//! updates. It is on by default; `OTS_GEOSPARQL_QUERY_REWRITE_ENABLED=off` (or `0`,
 //! `false`, `no`) turns it off for a server ([`enabled_from_env`]).
 //!
 //! Cost: a query that names no relation pays one substring scan
@@ -99,9 +99,9 @@ pub const RELATIONS: [&str; 24] = [
 const SERIALISATIONS: [&str; 4] = ["asWKT", "asGML", "asGeoJSON", "asKML"];
 
 /// Whether the rewrite is on for this process: on unless
-/// `OTS_GEOSPARQL_QUERY_REWRITE` is false (the configuration's boolean).
+/// `OTS_GEOSPARQL_QUERY_REWRITE_ENABLED` is false.
 pub fn enabled_from_env() -> bool {
-    crate::config::GEOSPARQL_QUERY_REWRITE.get()
+    crate::config::GEOSPARQL_QUERY_REWRITE_ENABLED.get()
 }
 
 /// A cheap test on the query text: whether it can contain a relation

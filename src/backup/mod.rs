@@ -6,7 +6,7 @@
 //! verified later without trusting filesystem mtime.
 //!
 //! Optional `age` X25519 encryption is applied to both files when the
-//! `backup-encrypt` feature is enabled and `BACKUP_ENCRYPT=true`.
+//! `backup-encrypt` feature is enabled and `OTS_BACKUP_ENCRYPTION_ENABLED=true`.
 
 use anyhow::Context;
 use chrono::Utc;
@@ -37,7 +37,7 @@ pub struct BackupManifest {
 
 /// Resolve the age recipient used to encrypt backups.
 ///
-/// The recipient must be supplied by the operator at `BACKUP_ENCRYPT_KEY_PATH`.
+/// The recipient must be supplied by the operator at `OTS_BACKUP_ENCRYPTION_KEY_PATH`.
 /// This deliberately does NOT generate one: it used to, by calling
 /// `Identity::generate()`, writing only `to_public()` and letting the identity
 /// drop at the end of the scope. The private half was never printed or
@@ -51,10 +51,10 @@ pub fn init_backup_encryption(key_path: &Path) -> anyhow::Result<Option<PathBuf>
     {
         if !key_path.exists() {
             anyhow::bail!(
-                "BACKUP_ENCRYPT=true but no age recipient exists at {}. Generate a keypair with \
+                "OTS_BACKUP_ENCRYPTION_ENABLED=true but no age recipient exists at {}. Generate a keypair with \
                  `age-keygen -o backup-identity.txt`, store that identity file somewhere safe and \
                  OUTSIDE the data directory, then write its public line (age1…) to {}. Set \
-                 BACKUP_DECRYPT_IDENTITY_PATH to the identity file to allow automated restore.",
+                 OTS_BACKUP_DECRYPTION_IDENTITY_PATH to the identity file to allow automated restore.",
                 key_path.display(),
                 key_path.display()
             );
@@ -77,7 +77,7 @@ pub fn init_backup_encryption(key_path: &Path) -> anyhow::Result<Option<PathBuf>
     {
         let _ = key_path;
         tracing::error!(
-            "BACKUP_ENCRYPT=true but binary was compiled without `backup-encrypt` feature"
+            "OTS_BACKUP_ENCRYPTION_ENABLED=true but binary was compiled without `backup-encrypt` feature"
         );
         anyhow::bail!("backup encryption not available: recompile with --features backup-encrypt")
     }
@@ -271,7 +271,7 @@ impl BackupManager {
         #[cfg(feature = "backup-encrypt")]
         {
             let key_path = self.encrypt_key_path.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("BACKUP_ENCRYPT=true but BACKUP_ENCRYPT_KEY_PATH is unset")
+                anyhow::anyhow!("OTS_BACKUP_ENCRYPTION_ENABLED=true but OTS_BACKUP_ENCRYPTION_KEY_PATH is unset")
             })?;
             let pubkey_str = fs::read_to_string(key_path)
                 .with_context(|| format!("read age recipient key {}", key_path.display()))?;
@@ -294,14 +294,14 @@ impl BackupManager {
         {
             let _ = data;
             anyhow::bail!(
-                "BACKUP_ENCRYPT=true but binary was built without `backup-encrypt` feature"
+                "OTS_BACKUP_ENCRYPTION_ENABLED=true but binary was built without `backup-encrypt` feature"
             );
         }
     }
 }
 
 /// Decrypt both halves of an age-encrypted backup with the operator's identity
-/// from `BACKUP_DECRYPT_IDENTITY_PATH`.
+/// from `OTS_BACKUP_DECRYPTION_IDENTITY_PATH`.
 fn decrypt_backup_pair(
     id: &str,
     rdf_raw: &[u8],
@@ -314,7 +314,7 @@ fn decrypt_backup_pair(
 
         let identity_path = identity_path.ok_or_else(|| {
             anyhow::anyhow!(
-                "backup {id} is age-encrypted; set BACKUP_DECRYPT_IDENTITY_PATH to the age \
+                "backup {id} is age-encrypted; set OTS_BACKUP_DECRYPTION_IDENTITY_PATH to the age \
                  identity file (the private half from `age-keygen`) to restore it. The server \
                  stores only the recipient, never the identity."
             )
@@ -513,7 +513,7 @@ fn read_manifest(dir: &Path, id: &str) -> anyhow::Result<BackupManifest> {
 ///
 /// An age-encrypted backup is decrypted in-process when `identity_path` names
 /// the age identity file (the private half produced by `age-keygen`); the
-/// `--restore` CLI passes `BACKUP_DECRYPT_IDENTITY_PATH`. The server never
+/// `--restore` CLI passes `OTS_BACKUP_DECRYPTION_IDENTITY_PATH`. The server never
 /// stores that identity — only the recipient it encrypts to — so restoring an
 /// encrypted backup is an explicit operator action with the key they kept.
 ///
@@ -589,7 +589,7 @@ pub fn restore_backup(
 }
 
 /// Upload a backup directory's files to S3 under `backups/<id>/...`. No-op
-/// unless `BACKUP_S3_ENABLED` is on, or if the ObjectStore is not configured.
+/// unless `OTS_BACKUP_S3_ENABLED` is on, or if the ObjectStore is not configured.
 pub async fn maybe_upload_to_s3(
     obj: &crate::storage::ObjectStore,
     mgr: &BackupManager,
@@ -616,7 +616,7 @@ pub async fn maybe_upload_to_s3(
     Ok(())
 }
 
-/// Spawn a Tokio task that runs the backup every `interval` (`BACKUP_SCHEDULE_SECS`).
+/// Spawn a Tokio task that runs the backup every `interval` (`OTS_BACKUP_SCHEDULE_SECS`).
 pub fn spawn_scheduler(
     mgr: Arc<BackupManager>,
     interval: std::time::Duration,
@@ -626,7 +626,7 @@ pub fn spawn_scheduler(
         // A silently failing backup is the worst kind: nothing looks wrong
         // until a restore is needed. Every failure below therefore raises an
         // operational alert as well as logging — `AlertConfig::from_env` is a
-        // no-op when neither ALERT_WEBHOOK_URL nor ALERT_SMTP_* is configured,
+        // no-op when neither OTS_ALERT_WEBHOOK_URL nor OTS_ALERT_SMTP_* is configured,
         // so this costs nothing when alerting is off.
         let alerts = crate::alerting::AlertManager::new(
             crate::alerting::AlertConfig::from_env(),
@@ -766,7 +766,7 @@ mod tests {
     /// `to_public()` and dropped the identity, so backups were encrypted to a
     /// key that existed nowhere — and `restore_backup` refused encrypted
     /// archives outright. Both halves are fixed here: the recipient must be
-    /// supplied, and restore decrypts with `BACKUP_DECRYPT_IDENTITY_PATH`.
+    /// supplied, and restore decrypts with `OTS_BACKUP_DECRYPTION_IDENTITY_PATH`.
     #[cfg(feature = "backup-encrypt")]
     #[test]
     fn encrypted_backup_round_trips_with_the_operator_identity() {

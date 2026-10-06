@@ -1283,7 +1283,7 @@ impl TripleStore {
         let manifest = source.manifest().map_err(StoreError::Other)?;
         if !manifest.capture_enabled || manifest.epoch.is_empty() {
             return Err(StoreError::Other(
-                "the leader has change capture off (set OTS_REPLICATION_ROLE=leader or OTS_CHANGE_CAPTURE=on there)"
+                "the leader has change capture off (set OTS_REPLICATION_ROLE=leader or OTS_CHANGE_CAPTURE_ENABLED=on there)"
                     .to_string(),
             ));
         }

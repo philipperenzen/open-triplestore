@@ -19,8 +19,8 @@ image no matter what the docs say about its knobs.
 | `shex`, `swrl` | ShEx 2.1 validation (graded *Full*); SWRL rule execution (graded *Full*); see [standards](standards.md) | yes | GitHub, GitLab |
 | `geometry3d` | 3D geometry (parry3d) for the viewer and OGC API endpoints | yes | GitHub, GitLab |
 | `sfcgal3d` | SFCGAL-backed 3D operations (needs native SFCGAL ≥ 2.0) | **no** | GitHub (`sfcgal3d` job, on Debian trixie for SFCGAL 2.x), GitLab (`--all-features`); not in the image |
-| `backup-encrypt` | age-encrypted backups (`BACKUP_ENCRYPT`) | yes | GitHub, GitLab |
-| `alerting` | Ops alert dispatch (`ALERT_*`) | yes | GitHub, GitLab |
+| `backup-encrypt` | age-encrypted backups (`OTS_BACKUP_ENCRYPTION_ENABLED`) | yes | GitHub, GitLab |
+| `alerting` | Ops alert dispatch (`OTS_ALERT_*`) | yes | GitHub, GitLab |
 | `asset-pdf`, `asset-exif`, `asset-media`, `asset-archive`, `asset-spreadsheet`, `asset-thumbnail`, `asset-clamav` | Asset metadata extraction, thumbnails, ClamAV scanning | yes | GitHub, GitLab |
 | `saml` | SAML 2.0 sign-in with this store as the service provider: SP- and IdP-initiated sign-in, encrypted assertions, signed requests, Single Logout ([auth](auth.md#saml-20)). Links libxml2 and libxmlsec1; needs pkg-config and libclang to build | not in `full`; **yes** in the image | GitHub (explicit `saml` in the feature list), GitLab |
 | `plugin-postgres`, `plugin-mysql`, `plugin-mssql` | SQL datasource connectors for PostgreSQL, MySQL / MariaDB and SQL Server ([sources](sources.md)); pure Rust over rustls, no system libraries | not in `full`; **yes** in the image | GitHub (backend job; `live-sources` runs each against a live server), GitLab |

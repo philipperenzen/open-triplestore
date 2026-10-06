@@ -214,7 +214,7 @@ pub fn max_calls() -> usize {
 
 /// How long after it starts a query may still make `SERVICE` requests:
 /// `OTS_SERVICE_DEADLINE_SECS`, else the server's SPARQL query timeout
-/// (`SPARQL_QUERY_TIMEOUT_SECS`, default 30 s), so raising the query timeout
+/// (`OTS_SPARQL_QUERY_TIMEOUT_SECS`, default 30 s), so raising the query timeout
 /// raises the federation deadline with it.
 pub fn deadline() -> Duration {
     crate::config::SERVICE_DEADLINE.get()

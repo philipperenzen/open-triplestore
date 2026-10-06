@@ -9,7 +9,7 @@
 //! dir, never deleted), reopens a fresh store, and best-effort restores the newest
 //! unencrypted backup; the normal startup seeds then repopulate demo content.
 //!
-//! `STORE_AUTO_RECOVER=false` — the default under `OTS_ENV=production` — makes a
+//! `OTS_STORE_AUTO_RECOVER_ENABLED=false` — the default under `OTS_ENV=production` — makes a
 //! corrupt store fail fast with a remediation message instead of being rebuilt.
 //! Production fails fast because the rebuild can bring the service back *empty
 //! and healthy*: it restores only an unencrypted backup (up to one backup
@@ -39,9 +39,9 @@ pub fn open_store_with_recovery(data_dir: &Path, backup_dir: &Path) -> anyhow::R
             if !auto_recover_enabled() {
                 anyhow::bail!(
                     "the triple store at {} is corrupt ({e}). Auto-recovery is disabled \
-                     (STORE_AUTO_RECOVER=false). To recover manually: stop the service, move the \
+                     (OTS_STORE_AUTO_RECOVER_ENABLED=false). To recover manually: stop the service, move the \
                      RocksDB files in that directory aside (or restore a backup from {}), then \
-                     restart. Set STORE_AUTO_RECOVER=true to let the server quarantine the \
+                     restart. Set OTS_STORE_AUTO_RECOVER_ENABLED=true to let the server quarantine the \
                      corrupt files and rebuild automatically (it restores only an unencrypted \
                      backup and otherwise starts empty).",
                     data_dir.display(),
@@ -50,7 +50,7 @@ pub fn open_store_with_recovery(data_dir: &Path, backup_dir: &Path) -> anyhow::R
             }
             warn!("triple store at {} is corrupt: {e}", data_dir.display());
             warn!(
-                "STORE_AUTO_RECOVER is on — quarantining the corrupt store and rebuilding \
+                "OTS_STORE_AUTO_RECOVER_ENABLED is on — quarantining the corrupt store and rebuilding \
                  (the corrupt files are preserved, never deleted)"
             );
             let quarantine = quarantine_store_files(data_dir)?;
@@ -78,7 +78,7 @@ pub fn open_store_with_recovery(data_dir: &Path, backup_dir: &Path) -> anyhow::R
                              (rdf.nq.gz.age) exist in {} but cannot be auto-restored (the age \
                              private key is held off-box). Restore manually — decrypt the newest \
                              backup with your age identity and load it, or recover the quarantined \
-                             RocksDB files. Set STORE_AUTO_RECOVER=false to fail fast instead.",
+                             RocksDB files. Set OTS_STORE_AUTO_RECOVER_ENABLED=false to fail fast instead.",
                             quarantine.display(),
                             backup_dir.display(),
                         );
@@ -114,7 +114,7 @@ fn message_indicates_corruption(msg: &str) -> bool {
 }
 
 fn auto_recover_enabled() -> bool {
-    crate::config::STORE_AUTO_RECOVER.get()
+    crate::config::STORE_AUTO_RECOVER_ENABLED.get()
 }
 
 /// Names/patterns of the RocksDB files that make up the triple store. Used to

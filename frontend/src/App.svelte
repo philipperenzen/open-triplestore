@@ -20,7 +20,7 @@
     LogIn, LogOut, UserPlus, Menu, X, Globe, AlertTriangle, RefreshCw,
     Settings as SettingsIcon, Users as UsersIcon, Shield, FolderOpen,
     Share2, Terminal, CheckCircle2, Network, FileCode, Sparkles, Sun, Moon, Activity, Gauge, Tags,
-    MessageSquarePlus, MessageSquareText
+    MessageSquarePlus, MessageSquareText, SlidersHorizontal
   } from 'lucide-svelte';
   import { isDark, toggleTheme } from './lib/theme.js';
   import { runtimeBranding } from './lib/runtimeConfig.js';
@@ -70,6 +70,7 @@
   const lazyAdminOperations     = () => import('./pages/AdminOperations.svelte');
   const lazyAdminLlm            = () => import('./pages/AdminLlm.svelte');
   const lazyAdminFeedback       = () => import('./pages/AdminFeedback.svelte');
+  const lazyAdminSettings       = () => import('./pages/AdminSettings.svelte');
   const lazyDocEditor           = () => import('./pages/DocEditor.svelte');
   const lazyModelRegistry       = () => import('./pages/ModelRegistry.svelte');
   const lazyVocabularySearch    = () => import('./pages/VocabularySearch.svelte');
@@ -294,6 +295,7 @@
       ['/admin/operations', 'pages.adminOperations.title', 'pages.adminOperations.detail'],
       ['/admin/prefixes', 'pages.adminPrefixes.title', 'pages.adminPrefixes.detail'],
       ['/admin/feedback', 'pages.adminFeedback.title', 'pages.adminFeedback.detail'],
+      ['/admin/settings', 'pages.adminSettings.title', 'pages.adminSettings.detail'],
       ['/admin', 'pages.admin.title', 'pages.admin.detail'],
       ['/models', 'pages.modelRegistry.title', 'pages.modelRegistry.detail'],
       ['/vocabularies', 'pages.vocabularySearch.title', 'pages.vocabularySearch.detail'],
@@ -490,6 +492,10 @@
               <Link to="/admin/feedback" class={`nav-item ${currentPath.startsWith('/admin/feedback') ? 'selected' : ''}`} on:click={navClick}>
                 <MessageSquareText size={16} />
                 <span class="nav-item-label">{$t('nav.adminFeedback')}</span>
+              </Link>
+              <Link to="/admin/settings" class={`nav-item ${currentPath.startsWith('/admin/settings') ? 'selected' : ''}`} on:click={navClick}>
+                <SlidersHorizontal size={16} />
+                <span class="nav-item-label">{$t('nav.adminSettings')}</span>
               </Link>
               <Link to="/admin/docs" class={`nav-item ${currentPath.startsWith('/admin/docs') ? 'selected' : ''}`} on:click={navClick}>
                 <SettingsIcon size={16} />
@@ -752,6 +758,9 @@
         </Route>
         <Route path="/admin/feedback">
           <LazyPage loader={lazyAdminFeedback} />
+        </Route>
+        <Route path="/admin/settings">
+          <LazyPage loader={lazyAdminSettings} />
         </Route>
         <Route path="/admin/docs">
           <LazyPage loader={lazyDocEditor} />

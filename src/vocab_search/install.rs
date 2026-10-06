@@ -10,7 +10,7 @@
 //!
 //! Visibility follows that licence.  The Docker image's corpus holds only
 //! redistributable vocabularies, but an operator may mount the full dump
-//! (`VOCAB_CORPUS_PATH`), which also holds NonCommercial, copyleft and
+//! (`OTS_VOCAB_CORPUS_PATH`), which also holds NonCommercial, copyleft and
 //! unlicensed ones, and ones withheld because LOV's copy cannot be shipped
 //! under their licence.  A public registry entry would re-serve such a
 //! vocabulary to anyone, so a vocabulary that is not redistributable is
@@ -80,7 +80,7 @@ pub enum InstallError {
     #[error(
         "Vocabulary {0:?} is not in this instance's LOV corpus: the Docker image ships only \
          vocabularies whose licence lets this project redistribute them. Point \
-         VOCAB_CORPUS_PATH at the full LOV dump to install it"
+         OTS_VOCAB_CORPUS_PATH at the full LOV dump to install it"
     )]
     NotRedistributed(String),
     #[error("The LOV corpus file is not available on this instance")]
@@ -1100,7 +1100,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, InstallError::NotRedistributed(_)), "{err}");
-        assert!(err.to_string().contains("VOCAB_CORPUS_PATH"));
+        assert!(err.to_string().contains("OTS_VOCAB_CORPUS_PATH"));
     }
 
     #[test]

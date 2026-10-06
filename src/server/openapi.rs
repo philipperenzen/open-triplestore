@@ -4244,7 +4244,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "Vocabularies",
                 "Install vocabulary",
-                "Copy a vocabulary from this instance's LOV corpus into the model registry (admin only, fully offline). Body: {vocab}. A vocabulary this platform may redistribute becomes a public entry; any other (from a full dump mounted with VOCAB_CORPUS_PATH) is installed private, owned by the installing admin, so the instance does not re-serve it publicly (is_public: false). The outcome (license, license_status, license_source, license_source_url, license_notice, redistributable, no_derivatives, redistribution_withheld, is_public, note) and the version notes record the licence, the notice it requires and the visibility. The installed version also gets a licence record (attribution on /api/models/{id}/versions): its licences with their URIs, the notice, where the copy comes from and whether the store holds LOV's copy unchanged. A vocabulary whose every licence allows only unaltered copies (no_derivatives: CC BY-ND, the OGC Document Notice) cannot then be copied into a draft or branch or otherwise edited (403). 503 when the corpus lacks the vocabulary — the image's corpus holds only vocabularies this platform may redistribute.",
+                "Copy a vocabulary from this instance's LOV corpus into the model registry (admin only, fully offline). Body: {vocab}. A vocabulary this platform may redistribute becomes a public entry; any other (from a full dump mounted with OTS_VOCAB_CORPUS_PATH) is installed private, owned by the installing admin, so the instance does not re-serve it publicly (is_public: false). The outcome (license, license_status, license_source, license_source_url, license_notice, redistributable, no_derivatives, redistribution_withheld, is_public, note) and the version notes record the licence, the notice it requires and the visibility. The installed version also gets a licence record (attribution on /api/models/{id}/versions): its licences with their URIs, the notice, where the copy comes from and whether the store holds LOV's copy unchanged. A vocabulary whose every licence allows only unaltered copies (no_derivatives: CC BY-ND, the OGC Document Notice) cannot then be copied into a draft or branch or otherwise edited (403). 503 when the corpus lacks the vocabulary — the image's corpus holds only vocabularies this platform may redistribute.",
                 vec![],
                 vec![
                     ("200", "Install outcome"),
@@ -6755,6 +6755,19 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             "Every setting the server reads, with its effective value, its default, its kind and where the value came from (`cli`, `env`, `file`, `profile` or `default`). Secret values are redacted; a secret given as a reference (`env:`, `file:`, `vault:`) shows the reference.",
             vec![], vec![("200", "The profile and every setting"), ("401", "Authentication required"), ("403", "Admin role required")], true)),
     ]);
+    mount(paths, "/api/admin/settings", vec![
+        (M::Get, o("Admin", "Runtime settings",
+            "The settings an administrator can change without a restart (self-registration, guest capabilities, embed framing, AI budgets, OIDC token policies), each with its effective value, the configured value it overrides (environment, profile or default) and whether an override is set.",
+            vec![], vec![("200", "The runtime settings"), ("401", "Authentication required"), ("403", "Admin role required")], true)),
+    ]);
+    mount(paths, "/api/admin/settings/:name", vec![
+        (M::Put, ob("Admin", "Change a runtime setting",
+            "Override a runtime setting, validated exactly as its environment variable would be, or remove the override with `{\"value\": null}` so the configured value applies again. Audit-logged as `setting_changed`.",
+            vec![pp("name")], json_body(ObjectBuilder::new()
+                .property("value", ObjectBuilder::new().schema_type(Type::String).description(Some("The new value; null removes the override."))),
+                json!({"value": "false"})),
+            vec![("200", "The setting after the change"), ("400", "The value does not validate"), ("401", "Authentication required"), ("403", "Admin role required"), ("404", "No runtime setting of that name")], true)),
+    ]);
     mount(paths, "/api/admin/settings/guest-registration", vec![
         (M::Get, o("Admin", "Guest registration setting",
             "Whether guest self-registration is on, with the current guest counts.",
@@ -6844,7 +6857,7 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             o(
                 "LLM",
                 "LLM health",
-                "Reachability of the LLM gateway, whether LLM_GATEWAY_URL is configured (unset: the AI features are off and nothing is probed), why an unreachable gateway failed, whether this caller may use AI at all, the request budgets (0 = refused, null = unlimited), and per AI feature (chat, sparql, shacl) the configured model and whether the gateway's /v1/models list serves it (listed: true/false, or null when there is no list to judge by). Makes no request beyond the gateway probe.",
+                "Reachability of the LLM gateway, whether OTS_LLM_GATEWAY_URL is configured (unset: the AI features are off and nothing is probed), why an unreachable gateway failed, whether this caller may use AI at all, the request budgets (0 = refused, null = unlimited), and per AI feature (chat, sparql, shacl) the configured model and whether the gateway's /v1/models list serves it (listed: true/false, or null when there is no list to judge by). Makes no request beyond the gateway probe.",
                 vec![],
                 vec![("200", "{ gateway, configured, reachable, unreachable_reason, available_to_caller, rate_limit_per_min, rate_limit_anon_per_min, detail, chat_model, context_tokens, services: [{ id, model, listed }], … }")],
                 false,

@@ -1,6 +1,6 @@
 # Reference seed bundle — the template a downstream operator copies to add an
 # org-owned dataset to their instance without patching any source file. Point
-# `--seed-dir` / `SEED_DIR` at a directory containing one or more folders like
+# `--seed-dir` / `OTS_SEED_DIR` at a directory containing one or more folders like
 # this one; see docs/plugins.md for the full manifest reference.
 #
 # This exact bundle is also loaded by `src/seed_bundles::tests::
@@ -10,8 +10,8 @@
 id = "bridge-reference"
 
 # Optional — set to disable this bundle without removing it from --seed-dir.
-# Defaults to SEED_BUNDLE_<ID> (uppercased, `-` -> `_`) when omitted.
-opt_out_env = "SEED_BRIDGE_REFERENCE"
+# Defaults to OTS_SEED_BUNDLE_<ID>_ENABLED (uppercased, `-` -> `_`) when omitted.
+opt_out_env = "OTS_SEED_BRIDGE_REFERENCE_ENABLED"
 
 [organisation]
 slug = "seed-bundles-reference"

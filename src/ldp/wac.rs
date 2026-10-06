@@ -778,7 +778,7 @@ pub fn replace_client_acl(
 
 // ─── Root ACL ──────────────────────────────────────────────────────────────────
 
-/// What the root ACL is seeded with on first start (`LDP_ROOT_ACL`).
+/// What the root ACL is seeded with on first start (`OTS_LDP_ROOT_ACL`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootAclPolicy {
     /// Today's behaviour: every signed-in user may read, write and append
@@ -789,7 +789,7 @@ pub enum RootAclPolicy {
 }
 
 impl RootAclPolicy {
-    /// `LDP_ROOT_ACL=open|owners`, default `open`.
+    /// `OTS_LDP_ROOT_ACL=open|owners`, default `open`.
     pub fn from_env() -> Self {
         match crate::config::LDP_ROOT_ACL.get().as_str() {
             "owners" => RootAclPolicy::Owners,
@@ -815,7 +815,7 @@ pub fn root_acl_seeded(store: &TripleStore, base_url: &str) -> Result<bool, Stri
     }
 }
 
-/// Seed the root ACL under the `LDP_ROOT_ACL` policy unless it is there
+/// Seed the root ACL under the `OTS_LDP_ROOT_ACL` policy unless it is there
 /// already or the store is a read-only replica (the leader's arrives through
 /// replication). Returns the policy applied when something was written.
 ///

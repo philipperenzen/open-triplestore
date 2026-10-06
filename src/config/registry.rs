@@ -82,7 +82,22 @@ fn host_port(v: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn bind_address(v: &str) -> Result<(), String> {
+    let ok = v.parse::<std::net::IpAddr>().is_ok()
+        || (!v.is_empty()
+            && v.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'));
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("`{v}` is not an IP address or host name"))
+    }
+}
+
 fn frame_ancestors(v: &str) -> Result<(), String> {
+    if v.eq_ignore_ascii_case("none") {
+        return Err("write the CSP keyword with its quotes: 'none'".to_string());
+    }
     axum::http::HeaderValue::from_str(&format!("frame-ancestors {v}"))
         .map(|_| ())
         .map_err(|_| format!("`{v}` cannot be sent in a CSP header"))
@@ -251,136 +266,158 @@ fn repair_max_quads(_: &Ctx) -> Option<String> {
 
 settings! {
     // ── server ──
+    DATA_DIR: PathBuf = Spec::new("OTS_DATA_DIR", Kind::Path, "server")
+        .default("./data")
+        .cli("data-dir")
+        .short('d')
+        .doc("Storage directory: the store, the identity database, keys and caches.");
+    PORT: u16 = Spec::new("OTS_PORT", Kind::Int { min: 1, max: 65535 }, "server")
+        .default("7878")
+        .cli("port")
+        .short('p')
+        .doc("HTTP port to listen on.");
+    BIND: String = Spec::new("OTS_BIND", Kind::Custom { what: "address", check: bind_address }, "server")
+        .default("0.0.0.0")
+        .cli("bind")
+        .short('b')
+        .doc("Address to listen on (an IP address or a host name).");
     /// The deployment profile.
     ENV: String = Spec::new("OTS_ENV", Kind::Enum(&["development", "production"]), "server")
         .default("development")
         .doc("Deployment profile. `production` refuses raw secret values and applies the production defaults.");
-    BASE_URL: String = Spec::new("BASE_URL", Kind::Url, "server")
+    BASE_URL: String = Spec::new("OTS_BASE_URL", Kind::Url, "server")
         .default("http://localhost:7878")
         .cli("base-url")
         .doc("Public base URL: linked-data IRIs, the passkey relying party, emailed links.");
-    PUBLIC_BASE_URL: Option<String> = Spec::new("PUBLIC_BASE_URL", Kind::Url, "server")
+    PUBLIC_BASE_URL: Option<String> = Spec::new("OTS_PUBLIC_BASE_URL", Kind::Url, "server")
         .doc("Base URL for emailed action links only, when the UI is on another origin.");
-    SERVE_FRONTEND: bool = Spec::new("SERVE_FRONTEND", Kind::Bool, "server")
+    FRONTEND_ENABLED: bool = Spec::new("OTS_FRONTEND_ENABLED", Kind::Bool, "server")
         .default("true")
         .cli("serve-frontend")
         .doc("Serve the bundled web UI at `/`; off for an API-only server.");
-    PORT_FALLBACK: bool = Spec::new("PORT_FALLBACK", Kind::Bool, "server")
+    PORT_FALLBACK_ENABLED: bool = Spec::new("OTS_PORT_FALLBACK_ENABLED", Kind::Bool, "server")
         .default("false")
         .cli("port-fallback")
         .doc("Bind the next free port when the configured one is in use, instead of refusing to start.");
-    LD_DISCOVERY: bool = Spec::new("LD_DISCOVERY", Kind::Bool, "server")
+    DISCOVERY_ENABLED: bool = Spec::new("OTS_DISCOVERY_ENABLED", Kind::Bool, "server")
         .default("false")
         .cli("discovery")
-        .doc("Self-register with the service registry at `LD_REGISTRY_URL`.");
-    LD_REGISTRY_URL: String = Spec::new("LD_REGISTRY_URL", Kind::Url, "server")
+        .doc("Self-register with the service registry at `OTS_REGISTRY_URL`.");
+    REGISTRY_URL: String = Spec::new("OTS_REGISTRY_URL", Kind::Url, "server")
         .default("http://localhost:8500")
         .cli("registry-url")
-        .doc("Service registry base URL, used only with `LD_DISCOVERY`.");
-    LD_REGISTRY_TOKEN: Option<String> = Spec::new("LD_REGISTRY_TOKEN", Kind::Secret, "server")
+        .doc("Service registry base URL, used only with `OTS_DISCOVERY_ENABLED`.");
+    REGISTRY_TOKEN: Option<String> = Spec::new("OTS_REGISTRY_TOKEN", Kind::Secret, "server")
         .cli("registry-token")
         .doc("Bearer token for the service registry (a secret reference).");
-    TEXT_SEARCH_DIR: Option<PathBuf> = Spec::new("TEXT_SEARCH_DIR", Kind::Path, "server")
+    TEXT_SEARCH_DIR: Option<PathBuf> = Spec::new("OTS_TEXT_SEARCH_DIR", Kind::Path, "server")
         .cli("text-search-dir")
         .doc("Full-text index directory (default `<data dir>/tantivy`).");
-    SEED_DIR: Option<PathBuf> = Spec::new("SEED_DIR", Kind::Path, "server")
+    SEED_DIR: Option<PathBuf> = Spec::new("OTS_SEED_DIR", Kind::Path, "server")
         .cli("seed-dir")
         .doc("Directory of seed bundles loaded at boot.");
-    PREFIX_CC_FALLBACK: bool = Spec::new("PREFIX_CC_FALLBACK", Kind::Bool, "server")
+    PREFIX_CC_FALLBACK_ENABLED: bool = Spec::new("OTS_PREFIX_CC_FALLBACK_ENABLED", Kind::Bool, "server")
         .default("false")
         .doc("Ask prefix.cc for prefixes the bundled snapshot does not know.");
 
     // ── http ──
-    CORS_ORIGINS: Vec<String> = Spec::new("CORS_ORIGINS", Kind::Custom { what: "origin list", check: origin_list }, "http")
+    CORS_ORIGINS: Vec<String> = Spec::new("OTS_CORS_ORIGINS", Kind::Custom { what: "origin list", check: origin_list }, "http")
         .cli("cors-origins")
         .doc("Origins allowed to call the API with credentials, comma-separated; `*` mirrors any origin.");
-    TRUSTED_PROXY_CIDRS: Vec<String> = Spec::new("TRUSTED_PROXY_CIDRS", Kind::Custom { what: "CIDR list", check: cidr_list }, "http")
+    TRUSTED_PROXY_CIDRS: Vec<String> = Spec::new("OTS_TRUSTED_PROXY_CIDRS", Kind::Custom { what: "CIDR list", check: cidr_list }, "http")
         .cli("trusted-proxy-cidrs")
         .doc("Reverse proxies whose X-Forwarded-For is believed, as CIDR blocks.");
-    SECURE_COOKIES: bool = Spec::new("SECURE_COOKIES", Kind::Bool, "http")
-        .derived("true when BASE_URL is https or OTS_ENV=production", secure_cookies)
+    SECURE_COOKIES_ENABLED: bool = Spec::new("OTS_SECURE_COOKIES_ENABLED", Kind::Bool, "http")
+        .derived("true when OTS_BASE_URL is https or OTS_ENV=production", secure_cookies)
         .cli("secure-cookies")
         .doc("Issue auth cookies with the `Secure` attribute (HTTPS only); production refuses `false`.");
-    RATE_LIMIT_DISABLED: bool = Spec::new("RATE_LIMIT_DISABLED", Kind::Bool, "http")
-        .default("false")
-        .doc("Turn per-IP rate limiting off (trusted or test deployments only); production refuses it.");
-    EMBED_FRAME_ANCESTORS: String = Spec::new("EMBED_FRAME_ANCESTORS", Kind::Custom { what: "CSP sources", check: frame_ancestors }, "http")
+    RATE_LIMIT_ENABLED: bool = Spec::new("OTS_RATE_LIMIT_ENABLED", Kind::Bool, "http")
+        .default("true")
+        .doc("Per-IP rate limiting; `false` is for trusted or test deployments only, and production refuses it.");
+    EMBED_FRAME_ANCESTORS: String = Spec::new("OTS_EMBED_FRAME_ANCESTORS", Kind::Custom { what: "CSP sources", check: frame_ancestors }, "http")
         .profile(Some("*"), Some("'none'"))
-        .doc("Who may frame the `/embed/*` pages (CSP frame-ancestors); `'none'` disables embedding.");
+        .doc("Who may frame the `/embed/*` pages (CSP frame-ancestors); `'none'` disables embedding.")
+        .runtime();
     MAX_UPLOAD_BYTES: Option<u64> = Spec::new("OTS_MAX_UPLOAD_BYTES", Kind::Bytes { min: 1 }, "http")
         .doc("Request-body limit for RDF uploads (default 512 MiB for the Graph Store, 1 GiB for bulk import).");
-    ENDPOINT_ACL_ENFORCE: bool = Spec::new("ENDPOINT_ACL_ENFORCE", Kind::Bool, "http")
+    ENDPOINT_ACL_ENABLED: bool = Spec::new("OTS_ENDPOINT_ACL_ENABLED", Kind::Bool, "http")
         .default("true")
         .doc("Enforce the endpoint ACL rules.");
-    SPARQL_QUERY_TIMEOUT: Duration = Spec::new("SPARQL_QUERY_TIMEOUT_SECS", at_least(1), "http")
+    SPARQL_QUERY_TIMEOUT: Duration = Spec::new("OTS_SPARQL_QUERY_TIMEOUT_SECS", at_least(1), "http")
         .default("30")
         .cli("query-timeout-secs")
         .doc("SPARQL query and update timeout.");
-    WRITE_TIMEOUT: Duration = Spec::new("WRITE_TIMEOUT_SECS", at_least(1), "http")
+    WRITE_TIMEOUT: Duration = Spec::new("OTS_WRITE_TIMEOUT_SECS", at_least(1), "http")
         .default("120")
         .cli("write-timeout-secs")
         .doc("Timeout for Graph Store and dataset writes (bulk import is exempt).");
 
     // ── auth ──
-    JWT_SECRET: Option<String> = Spec::new("JWT_SECRET", Kind::Secret, "auth")
+    JWT_SECRET: Option<String> = Spec::new("OTS_JWT_SECRET", Kind::Secret, "auth")
         .cli("jwt-secret")
         .doc("JWT signing secret (a secret reference); generated and kept under the data dir when unset.");
-    AUTH_DB_PATH: Option<PathBuf> = Spec::new("AUTH_DB_PATH", Kind::Path, "auth")
+    AUTH_DB_PATH: Option<PathBuf> = Spec::new("OTS_AUTH_DB_PATH", Kind::Path, "auth")
         .cli("db-path")
         .doc("The identity database (default `<data dir>/auth.db`).");
-    ACCESS_TOKEN_EXPIRY: Duration = Spec::new("ACCESS_TOKEN_EXPIRY_SECS", at_least(60), "auth")
+    ACCESS_TOKEN_EXPIRY: Duration = Spec::new("OTS_ACCESS_TOKEN_EXPIRY_SECS", at_least(60), "auth")
         .default("1800")
         .cli("access-token-expiry-secs")
         .doc("Lifetime of a session access token.");
-    REFRESH_TOKEN_EXPIRY: Duration = Spec::new("REFRESH_TOKEN_EXPIRY_DAYS", at_least(1), "auth")
+    REFRESH_TOKEN_EXPIRY: Duration = Spec::new("OTS_REFRESH_TOKEN_EXPIRY_DAYS", at_least(1), "auth")
         .default("30")
         .cli("refresh-token-expiry-days")
         .doc("Lifetime of a refresh token.");
-    DISABLE_REGISTRATION: bool = Spec::new("OTS_DISABLE_REGISTRATION", Kind::Bool, "auth")
-        .profile(Some("false"), Some("true"))
-        .doc("Close public self-registration (the first account can always register).");
-    REQUIRE_VERIFIED_EMAIL: bool = Spec::new("OTS_REQUIRE_VERIFIED_EMAIL", Kind::Bool, "auth")
+    REGISTRATION_ENABLED: bool = Spec::new("OTS_REGISTRATION_ENABLED", Kind::Bool, "auth")
+        .profile(Some("true"), Some("false"))
+        .doc("Open public self-registration (the first account can always register, to bootstrap).")
+        .runtime();
+    LOGIN_EMAIL_VERIFICATION_ENABLED: bool = Spec::new("OTS_LOGIN_EMAIL_VERIFICATION_ENABLED", Kind::Bool, "auth")
         .default("false")
         .doc("Password login requires a verified e-mail address.");
     GUEST_CAPABILITIES: String = Spec::new("OTS_GUEST_CAPABILITIES", Kind::Custom { what: "capabilities", check: guest_capabilities }, "auth")
         .default("read")
-        .doc("What the guest role may do beyond reading: write, create_datasets, api_tokens, publish, all.");
-    OIDC_SESSION_POLICY: String = Spec::new("OTS_OIDC_SESSION_POLICY", Kind::Enum(&["session", "scoped", "full"]), "auth")
+        .doc("What the guest role may do beyond reading: write, create_datasets, api_tokens, publish, all.")
+        .runtime();
+    OIDC_PROVIDER_TOKEN_POLICY: String = Spec::new("OTS_OIDC_PROVIDER_TOKEN_POLICY", Kind::Enum(&["session", "scoped", "full"]), "auth")
         .profile(Some("session"), Some("scoped"))
-        .doc("What an access token this store issues as an OIDC provider may do.");
-    OIDC_WRITE_SCOPES: Option<String> = Spec::new("OTS_OIDC_WRITE_SCOPES", Kind::Custom { what: "scopes", check: scope_words }, "auth")
-        .doc("Extra scope values that grant write to a provider token under the `scoped` policy.");
+        .doc("What an access token this store issues as an OIDC provider may do.")
+        .runtime();
+    OIDC_PROVIDER_WRITE_SCOPES: Option<String> = Spec::new("OTS_OIDC_PROVIDER_WRITE_SCOPES", Kind::Custom { what: "scopes", check: scope_words }, "auth")
+        .doc("Extra scope values that grant write to a provider token under the `scoped` policy.")
+        .runtime();
     OIDC_IDP_TOKEN_POLICY: String = Spec::new("OTS_OIDC_IDP_TOKEN_POLICY", Kind::Enum(&["session", "scoped", "full"]), "auth")
         .default("session")
-        .doc("What an access token the external IdP issues may do.");
+        .doc("What an access token the external IdP issues may do.")
+        .runtime();
     OIDC_IDP_WRITE_SCOPES: Option<String> = Spec::new("OTS_OIDC_IDP_WRITE_SCOPES", Kind::Custom { what: "scopes", check: scope_words }, "auth")
-        .doc("Extra scope values that grant write to an IdP token under the `scoped` policy.");
-    OIDC_ISSUER: Option<String> = Spec::new("OIDC_ISSUER", Kind::Custom { what: "issuer URL", check: idp_url }, "auth")
+        .doc("Extra scope values that grant write to an IdP token under the `scoped` policy.")
+        .runtime();
+    OIDC_ISSUER: Option<String> = Spec::new("OTS_OIDC_ISSUER", Kind::Custom { what: "issuer URL", check: idp_url }, "auth")
         .doc("External IdP whose access tokens this store accepts (https).");
-    OIDC_AUDIENCE: Option<String> = Spec::new("OIDC_AUDIENCE", Kind::Text, "auth")
-        .doc("The audience IdP tokens must carry (required with `OIDC_ISSUER`).");
-    OIDC_DEFAULT_ROLE: String = Spec::new("OIDC_DEFAULT_ROLE", Kind::Enum(&["user", "guest"]), "auth")
+    OIDC_AUDIENCE: Option<String> = Spec::new("OTS_OIDC_AUDIENCE", Kind::Text, "auth")
+        .doc("The audience IdP tokens must carry (required with `OTS_OIDC_ISSUER`).");
+    OIDC_DEFAULT_ROLE: String = Spec::new("OTS_OIDC_DEFAULT_ROLE", Kind::Enum(&["user", "guest"]), "auth")
         .default("user")
-        .doc("Role of an account first seen through an IdP token (admin comes only from `OIDC_ROLE_CLAIM_MAP`).");
-    ACCEPT_LEGACY_TOKENS: bool = Spec::new("ACCEPT_LEGACY_TOKENS", Kind::Bool, "auth")
+        .doc("Role of an account first seen through an IdP token (admin comes only from `OTS_OIDC_ROLE_CLAIM_MAP`).");
+    SESSION_AND_API_TOKENS_ENABLED: bool = Spec::new("OTS_SESSION_AND_API_TOKENS_ENABLED", Kind::Bool, "auth")
         .default("true")
         .doc("With an IdP configured, keep accepting this store's own session and API tokens.");
-    OIDC_ROLE_CLAIMS: Vec<String> = Spec::new("OIDC_ROLE_CLAIMS", Kind::List, "auth")
+    OIDC_ROLE_CLAIMS: Vec<String> = Spec::new("OTS_OIDC_ROLE_CLAIMS", Kind::List, "auth")
         .default("roles,realm_access.roles,groups")
         .doc("Claims a role is read from, in order.");
-    OIDC_GROUPS_CLAIM: String = Spec::new("OIDC_GROUPS_CLAIM", Kind::Text, "auth")
+    OIDC_GROUPS_CLAIM: String = Spec::new("OTS_OIDC_GROUPS_CLAIM", Kind::Text, "auth")
         .default("groups")
         .doc("Claim holding organisation groups.");
-    OIDC_ORG_GROUP_PREFIX: String = Spec::new("OIDC_ORG_GROUP_PREFIX", Kind::Text, "auth")
+    OIDC_ORG_GROUP_PREFIX: String = Spec::new("OTS_OIDC_ORG_GROUP_PREFIX", Kind::Text, "auth")
         .default("org:")
         .doc("Prefix marking an organisation-membership group.");
-    OIDC_ROLE_CLAIM_MAP: Option<String> = Spec::new("OIDC_ROLE_CLAIM_MAP", Kind::Custom { what: "JSON object", check: json_object }, "auth")
+    OIDC_ROLE_CLAIM_MAP: Option<String> = Spec::new("OTS_OIDC_ROLE_CLAIM_MAP", Kind::Custom { what: "JSON object", check: json_object }, "auth")
         .doc("JSON map from a claim value to a role (admin, user, guest, publisher).");
-    OAUTH_CLIENTS_JSON: Option<String> = Spec::new("OAUTH_CLIENTS_JSON", Kind::Custom { what: "JSON array", check: json_array }, "auth")
+    OAUTH_CLIENTS_JSON: Option<String> = Spec::new("OTS_OAUTH_CLIENTS_JSON", Kind::Custom { what: "JSON array", check: json_array }, "auth")
         .doc("OIDC clients seeded at boot (JSON array; secrets as references).");
     TRUSTED_ISSUERS: Vec<String> = Spec::new("OTS_TRUSTED_ISSUERS", Kind::Custom { what: "issuer URLs", check: idp_url_list }, "auth")
         .doc("Peer instances whose identity assertions this store accepts.");
-    LDP_ROOT_ACL: String = Spec::new("LDP_ROOT_ACL", Kind::Enum(&["open", "owners"]), "auth")
+    LDP_ROOT_ACL: String = Spec::new("OTS_LDP_ROOT_ACL", Kind::Enum(&["open", "owners"]), "auth")
         .profile(Some("open"), Some("owners"))
         .doc("What the LDP root ACL is seeded with on first start: `open` (every user reads and writes) or `owners` (admins only).");
     REMOTE_AUTH: String = Spec::new("OTS_REMOTE_AUTH", Kind::Enum(&["none", "assert"]), "auth")
@@ -388,54 +425,54 @@ settings! {
         .doc("`assert`: send an identity assertion with SERVICE and LDES requests to peers.");
 
     // ── storage ──
-    S3_ENDPOINT: Option<String> = Spec::new("S3_ENDPOINT", Kind::Url, "storage")
+    S3_ENDPOINT: Option<String> = Spec::new("OTS_S3_ENDPOINT", Kind::Url, "storage")
         .cli("s3-endpoint")
         .doc("S3-compatible endpoint for assets; local files when unset.");
-    S3_BUCKET: String = Spec::new("S3_BUCKET", Kind::Text, "storage")
+    S3_BUCKET: String = Spec::new("OTS_S3_BUCKET", Kind::Text, "storage")
         .default("triplestore-assets")
         .cli("s3-bucket")
         .doc("S3 bucket for assets.");
-    S3_ACCESS_KEY: Option<String> = Spec::new("S3_ACCESS_KEY", Kind::Text, "storage")
+    S3_ACCESS_KEY: Option<String> = Spec::new("OTS_S3_ACCESS_KEY", Kind::Text, "storage")
         .cli("s3-access-key")
         .doc("S3 access key id.");
-    S3_SECRET_KEY: Option<String> = Spec::new("S3_SECRET_KEY", Kind::Secret, "storage")
+    S3_SECRET_KEY: Option<String> = Spec::new("OTS_S3_SECRET_KEY", Kind::Secret, "storage")
         .cli("s3-secret-key")
         .doc("S3 secret key (a secret reference).");
-    S3_REGION: String = Spec::new("S3_REGION", Kind::Text, "storage")
+    S3_REGION: String = Spec::new("OTS_S3_REGION", Kind::Text, "storage")
         .default("us-east-1")
         .cli("s3-region")
         .doc("S3 region.");
-    STORE_AUTO_RECOVER: bool = Spec::new("STORE_AUTO_RECOVER", Kind::Bool, "storage")
+    STORE_AUTO_RECOVER_ENABLED: bool = Spec::new("OTS_STORE_AUTO_RECOVER_ENABLED", Kind::Bool, "storage")
         .profile(Some("true"), Some("false"))
         .doc("On a corrupt store at startup, quarantine it and restore the newest unencrypted backup; off, the start fails with a remediation message (the production default).");
-    CLAMAV_ADDR: Option<String> = Spec::new("CLAMAV_ADDR", Kind::Custom { what: "host:port", check: host_port }, "storage")
+    CLAMAV_ADDR: Option<String> = Spec::new("OTS_CLAMAV_ADDR", Kind::Custom { what: "host:port", check: host_port }, "storage")
         .doc("ClamAV daemon that scans uploads; unset disables scanning.");
 
     // ── backup ──
-    BACKUP_DIR: Option<PathBuf> = Spec::new("BACKUP_DIR", Kind::Path, "backup")
+    BACKUP_DIR: Option<PathBuf> = Spec::new("OTS_BACKUP_DIR", Kind::Path, "backup")
         .doc("Backup directory (default `<data dir>/backups`).");
-    BACKUP_RETENTION_COUNT: usize = Spec::new("BACKUP_RETENTION_COUNT", at_least(1), "backup")
+    BACKUP_RETENTION_COUNT: usize = Spec::new("OTS_BACKUP_RETENTION_COUNT", at_least(1), "backup")
         .default("7")
         .doc("Backups kept.");
-    BACKUP_SCHEDULE: Duration = Spec::new("BACKUP_SCHEDULE_SECS", at_least(60), "backup")
+    BACKUP_SCHEDULE: Duration = Spec::new("OTS_BACKUP_SCHEDULE_SECS", at_least(60), "backup")
         .default("86400")
         .doc("Time between scheduled backups.");
-    BACKUP_ENCRYPT: bool = Spec::new("BACKUP_ENCRYPT", Kind::Bool, "backup")
+    BACKUP_ENCRYPTION_ENABLED: bool = Spec::new("OTS_BACKUP_ENCRYPTION_ENABLED", Kind::Bool, "backup")
         .default("false")
         .doc("Encrypt backups with age.");
-    BACKUP_ENCRYPT_KEY_PATH: Option<PathBuf> = Spec::new("BACKUP_ENCRYPT_KEY_PATH", Kind::Path, "backup")
+    BACKUP_ENCRYPTION_KEY_PATH: Option<PathBuf> = Spec::new("OTS_BACKUP_ENCRYPTION_KEY_PATH", Kind::Path, "backup")
         .doc("The age recipient file (default `<data dir>/backup_key.age`).");
-    BACKUP_DECRYPT_IDENTITY_PATH: Option<PathBuf> = Spec::new("BACKUP_DECRYPT_IDENTITY_PATH", Kind::Path, "backup")
+    BACKUP_DECRYPTION_IDENTITY_PATH: Option<PathBuf> = Spec::new("OTS_BACKUP_DECRYPTION_IDENTITY_PATH", Kind::Path, "backup")
         .doc("The age identity `--restore` decrypts an encrypted backup with.");
-    BACKUP_S3_ENABLED: bool = Spec::new("BACKUP_S3_ENABLED", Kind::Bool, "backup")
+    BACKUP_S3_ENABLED: bool = Spec::new("OTS_BACKUP_S3_ENABLED", Kind::Bool, "backup")
         .default("false")
         .doc("Copy every backup to the S3 bucket.");
-    AUDIT_PSEUDONYMISE_AFTER_DAYS: u64 = Spec::new("AUDIT_PSEUDONYMISE_AFTER_DAYS", at_least(1), "backup")
+    AUDIT_PSEUDONYMISE_AFTER_DAYS: u64 = Spec::new("OTS_AUDIT_PSEUDONYMISE_AFTER_DAYS", at_least(1), "backup")
         .default("365")
         .doc("Audit rows older than this are pseudonymised.");
 
     // ── query engine ──
-    PARALLEL_QUERY: bool = Spec::new("OTS_PARALLEL_QUERY", Kind::Bool, "query")
+    PARALLEL_QUERY_ENABLED: bool = Spec::new("OTS_PARALLEL_QUERY_ENABLED", Kind::Bool, "query")
         .default("true")
         .doc("The in-memory query accelerator.");
     PARALLEL_QUERY_MAX_TRIPLES: usize = Spec::new("OTS_PARALLEL_QUERY_MAX_TRIPLES", at_least(1), "query")
@@ -447,10 +484,10 @@ settings! {
     PARALLEL_QUERY_REBUILD_QUIET: Duration = Spec::new("OTS_PARALLEL_QUERY_REBUILD_QUIET_MS", at_least(0), "query")
         .default("500")
         .doc("Quiet period after a write before the accelerator rebuilds; 0 rebuilds eagerly.");
-    COLUMNAR_QUERY: bool = Spec::new("OTS_COLUMNAR_QUERY", Kind::Bool, "query")
+    COLUMNAR_QUERY_ENABLED: bool = Spec::new("OTS_COLUMNAR_QUERY_ENABLED", Kind::Bool, "query")
         .default("true")
         .doc("The columnar aggregate engine.");
-    QUERY_CACHE: bool = Spec::new("OTS_QUERY_CACHE", Kind::Bool, "query")
+    QUERY_CACHE_ENABLED: bool = Spec::new("OTS_QUERY_CACHE_ENABLED", Kind::Bool, "query")
         .default("true")
         .doc("The query result cache.");
     QUERY_CACHE_ENTRIES: usize = Spec::new("OTS_QUERY_CACHE_ENTRIES", at_least(1), "query")
@@ -468,7 +505,7 @@ settings! {
     TELEMETRY_TIMING_STRIDE: usize = Spec::new("OTS_TELEMETRY_TIMING_STRIDE", at_least(1), "query")
         .default("8")
         .doc("Time one query in this many.");
-    CHANGE_CAPTURE: bool = Spec::new("OTS_CHANGE_CAPTURE", Kind::Bool, "query")
+    CHANGE_CAPTURE_ENABLED: bool = Spec::new("OTS_CHANGE_CAPTURE_ENABLED", Kind::Bool, "query")
         .default("false")
         .doc("Keep the change log (always on for a replication leader).");
     CHANGE_CAPTURE_MAX_SCAN: usize = Spec::new("OTS_CHANGE_CAPTURE_MAX_SCAN", at_least(0), "query")
@@ -512,7 +549,7 @@ settings! {
         .default("64")
         .doc("SERVICE requests one query may make.");
     SERVICE_DEADLINE: Duration = Spec::new("OTS_SERVICE_DEADLINE_SECS", at_least(1), "outbound")
-        .derived("SPARQL_QUERY_TIMEOUT_SECS", query_timeout_secs)
+        .derived("OTS_SPARQL_QUERY_TIMEOUT_SECS", query_timeout_secs)
         .doc("How long after it starts a query may still make SERVICE requests.");
     LDES_RETRIES: u32 = Spec::new("OTS_LDES_RETRIES", Kind::Int { min: 0, max: 16 }, "outbound")
         .default("4")
@@ -520,7 +557,7 @@ settings! {
     LDES_MAX_RETRY_WAIT: Duration = Spec::new("OTS_LDES_MAX_RETRY_WAIT_SECS", at_least(0), "outbound")
         .default("60")
         .doc("Longest wait before an LDES retry.");
-    VALIDATION_API_URL: Option<String> = Spec::new("VALIDATION_API_URL", Kind::Url, "outbound")
+    VALIDATION_API_URL: Option<String> = Spec::new("OTS_VALIDATION_API_URL", Kind::Url, "outbound")
         .doc("External validation service for validate-and-commit.");
     JSONLD_CONTEXT_MAX_BYTES: u64 = Spec::new("OTS_JSONLD_CONTEXT_MAX_BYTES", Kind::Bytes { min: 1 }, "outbound")
         .default("1048576")
@@ -572,7 +609,7 @@ settings! {
     DL_DEBOUNCE: Duration = Spec::new("OTS_DL_DEBOUNCE_MS", at_least(0), "reasoning")
         .default("2000")
         .doc("Quiet period after a write before a dataset's DL run starts.");
-    GEOSPARQL_QUERY_REWRITE: bool = Spec::new("OTS_GEOSPARQL_QUERY_REWRITE", Kind::Bool, "reasoning")
+    GEOSPARQL_QUERY_REWRITE_ENABLED: bool = Spec::new("OTS_GEOSPARQL_QUERY_REWRITE_ENABLED", Kind::Bool, "reasoning")
         .default("true")
         .doc("GeoSPARQL query rewrite of relation patterns.");
     REPAIR_CONCURRENCY: usize = Spec::new("OTS_REPAIR_CONCURRENCY", at_least(1), "reasoning")
@@ -604,28 +641,28 @@ settings! {
         .doc("Features one 3D tileset carries.");
     ICDD_ONTOLOGY_DIR: Option<PathBuf> = Spec::new("OTS_ICDD_ONTOLOGY_DIR", Kind::Path, "data")
         .doc("Directory holding ISO 21597 Container.rdf and Linkset.rdf for ICDD exports.");
-    DCAT_PROFILE: String = Spec::new("DCAT_PROFILE", Kind::Enum(&["dcat", "dcat-ap", "dcat-ap-nl"]), "data")
+    DCAT_PROFILE: String = Spec::new("OTS_DCAT_PROFILE", Kind::Enum(&["dcat", "dcat-ap", "dcat-ap-nl"]), "data")
         .default("dcat")
         .doc("The catalogue's application profile.");
-    CATALOG_TITLE: Option<String> = Spec::new("CATALOG_TITLE", Kind::Text, "data")
+    CATALOG_TITLE: Option<String> = Spec::new("OTS_CATALOG_TITLE", Kind::Text, "data")
         .doc("Catalogue title.");
-    CATALOG_DESCRIPTION: Option<String> = Spec::new("CATALOG_DESCRIPTION", Kind::Text, "data")
+    CATALOG_DESCRIPTION: Option<String> = Spec::new("OTS_CATALOG_DESCRIPTION", Kind::Text, "data")
         .doc("Catalogue description.");
-    CATALOG_PUBLISHER_URI: Option<String> = Spec::new("CATALOG_PUBLISHER_URI", Kind::Custom { what: "IRI", check: iri }, "data")
+    CATALOG_PUBLISHER_URI: Option<String> = Spec::new("OTS_CATALOG_PUBLISHER_URI", Kind::Custom { what: "IRI", check: iri }, "data")
         .doc("Catalogue publisher IRI.");
-    CATALOG_PUBLISHER_NAME: Option<String> = Spec::new("CATALOG_PUBLISHER_NAME", Kind::Text, "data")
+    CATALOG_PUBLISHER_NAME: Option<String> = Spec::new("OTS_CATALOG_PUBLISHER_NAME", Kind::Text, "data")
         .doc("Catalogue publisher name.");
-    CATALOG_PUBLISHER_IDENTIFIER: Option<String> = Spec::new("CATALOG_PUBLISHER_IDENTIFIER", Kind::Text, "data")
+    CATALOG_PUBLISHER_IDENTIFIER: Option<String> = Spec::new("OTS_CATALOG_PUBLISHER_IDENTIFIER", Kind::Text, "data")
         .doc("Catalogue publisher identifier (e.g. an OIN).");
-    CATALOG_PUBLISHER_TYPE: Option<String> = Spec::new("CATALOG_PUBLISHER_TYPE", Kind::Custom { what: "publisher type", check: publisher_type }, "data")
+    CATALOG_PUBLISHER_TYPE: Option<String> = Spec::new("OTS_CATALOG_PUBLISHER_TYPE", Kind::Custom { what: "publisher type", check: publisher_type }, "data")
         .doc("ADMS publisher type.");
-    CATALOG_LANGUAGE: Option<String> = Spec::new("CATALOG_LANGUAGE", Kind::Custom { what: "ISO 639-3", check: iso639_3 }, "data")
+    CATALOG_LANGUAGE: Option<String> = Spec::new("OTS_CATALOG_LANGUAGE", Kind::Custom { what: "ISO 639-3", check: iso639_3 }, "data")
         .doc("Catalogue language (ISO 639-3).");
-    CATALOG_LICENSE: Option<String> = Spec::new("CATALOG_LICENSE", Kind::Custom { what: "IRI", check: iri }, "data")
+    CATALOG_LICENSE: Option<String> = Spec::new("OTS_CATALOG_LICENSE", Kind::Custom { what: "IRI", check: iri }, "data")
         .doc("Catalogue licence IRI.");
-    CATALOG_CONTACT_NAME: Option<String> = Spec::new("CATALOG_CONTACT_NAME", Kind::Text, "data")
+    CATALOG_CONTACT_NAME: Option<String> = Spec::new("OTS_CATALOG_CONTACT_NAME", Kind::Text, "data")
         .doc("Catalogue contact name.");
-    CATALOG_CONTACT_EMAIL: Option<String> = Spec::new("CATALOG_CONTACT_EMAIL", Kind::Custom { what: "e-mail", check: email }, "data")
+    CATALOG_CONTACT_EMAIL: Option<String> = Spec::new("OTS_CATALOG_CONTACT_EMAIL", Kind::Custom { what: "e-mail", check: email }, "data")
         .doc("Catalogue contact e-mail.");
     VOID_PARTITION_LIMIT: usize = Spec::new("OTS_VOID_PARTITION_LIMIT", at_least(0), "data")
         .default("100")
@@ -635,113 +672,116 @@ settings! {
         .doc("Datasets larger than this get VoID counts but no partitions.");
 
     // ── seeding ──
-    SEED_STANDARDS_DEMO: bool = Spec::new("SEED_STANDARDS_DEMO", Kind::Bool, "seed")
+    SEED_STANDARDS_DEMO_ENABLED: bool = Spec::new("OTS_SEED_STANDARDS_DEMO_ENABLED", Kind::Bool, "seed")
         .profile(Some("true"), Some("false"))
         .doc("Seed the standards demo datasets at boot.");
-    SEED_STANDARD_VOCABS: bool = Spec::new("SEED_STANDARD_VOCABS", Kind::Bool, "seed")
+    SEED_STANDARD_VOCABS_ENABLED: bool = Spec::new("OTS_SEED_STANDARD_VOCABS_ENABLED", Kind::Bool, "seed")
         .default("true")
         .doc("Seed the standard vocabularies at boot.");
-    SEED_IFC_URL: Option<String> = Spec::new("SEED_IFC_URL", Kind::Url, "seed")
+    SEED_IFC_URL: Option<String> = Spec::new("OTS_SEED_IFC_URL", Kind::Url, "seed")
         .doc("Override the headline IFC demo model (downloaded at boot unless OTS_OFFLINE).");
-    VOCAB_CORPUS_PATH: Option<PathBuf> = Spec::new("VOCAB_CORPUS_PATH", Kind::Path, "seed")
+    VOCAB_CORPUS_PATH: Option<PathBuf> = Spec::new("OTS_VOCAB_CORPUS_PATH", Kind::Path, "seed")
         .doc("A local LOV corpus file.");
-    VOCAB_CORPUS_URL: String = Spec::new("VOCAB_CORPUS_URL", Kind::Url, "seed")
+    VOCAB_CORPUS_URL: String = Spec::new("OTS_VOCAB_CORPUS_URL", Kind::Url, "seed")
         .default(crate::vocab_search::corpus::DEFAULT_CORPUS_URL)
         .doc("Where the LOV corpus is downloaded from at boot (unless OTS_OFFLINE).");
-    VOCAB_CORPUS_SHA256: Option<String> = Spec::new("VOCAB_CORPUS_SHA256", Kind::Custom { what: "SHA-256", check: sha256_hex }, "seed")
+    VOCAB_CORPUS_SHA256: Option<String> = Spec::new("OTS_VOCAB_CORPUS_SHA256", Kind::Custom { what: "SHA-256", check: sha256_hex }, "seed")
         .doc("Expected digest of a custom LOV corpus.");
-    VOCAB_LOCAL_METRICS: bool = Spec::new("VOCAB_LOCAL_METRICS", Kind::Bool, "seed")
+    VOCAB_LOCAL_METRICS_ENABLED: bool = Spec::new("OTS_VOCAB_LOCAL_METRICS_ENABLED", Kind::Bool, "seed")
         .default("true")
         .doc("Rank vocabulary search with this store's own usage.");
 
     // ── LLM ──
-    LLM_GATEWAY_URL: Option<String> = Spec::new("LLM_GATEWAY_URL", Kind::Url, "llm")
+    LLM_GATEWAY_URL: Option<String> = Spec::new("OTS_LLM_GATEWAY_URL", Kind::Url, "llm")
         .doc("OpenAI-compatible endpoint for the AI features; unset: the AI features are off.");
-    LLM_MODEL: String = Spec::new("LLM_MODEL", Kind::Text, "llm")
+    LLM_MODEL: String = Spec::new("OTS_LLM_MODEL", Kind::Text, "llm")
         .default("default")
         .doc("Model sent with every completion.");
-    LLM_SPARQL_MODEL: Option<String> = Spec::new("LLM_SPARQL_MODEL", Kind::Text, "llm")
-        .doc("Model for NL→SPARQL (default `LLM_MODEL`).");
-    LLM_SHACL_MODEL: Option<String> = Spec::new("LLM_SHACL_MODEL", Kind::Text, "llm")
-        .doc("Model for the SHACL assistant (default `LLM_MODEL`).");
-    LLM_CHAT_MODEL: Option<String> = Spec::new("LLM_CHAT_MODEL", Kind::Text, "llm")
-        .doc("Model for the chat assistant (default `LLM_MODEL`).");
-    LLM_API_KEY: Option<String> = Spec::new("LLM_API_KEY", Kind::Secret, "llm")
+    LLM_SPARQL_MODEL: Option<String> = Spec::new("OTS_LLM_SPARQL_MODEL", Kind::Text, "llm")
+        .doc("Model for NL→SPARQL (default `OTS_LLM_MODEL`).");
+    LLM_SHACL_MODEL: Option<String> = Spec::new("OTS_LLM_SHACL_MODEL", Kind::Text, "llm")
+        .doc("Model for the SHACL assistant (default `OTS_LLM_MODEL`).");
+    LLM_CHAT_MODEL: Option<String> = Spec::new("OTS_LLM_CHAT_MODEL", Kind::Text, "llm")
+        .doc("Model for the chat assistant (default `OTS_LLM_MODEL`).");
+    LLM_API_KEY: Option<String> = Spec::new("OTS_LLM_API_KEY", Kind::Secret, "llm")
         .doc("Bearer token for the endpoint (a secret reference).");
-    LLM_TIMEOUT: Duration = Spec::new("LLM_TIMEOUT_SECS", at_least(1), "llm")
+    LLM_TIMEOUT: Duration = Spec::new("OTS_LLM_TIMEOUT_SECS", at_least(1), "llm")
         .default("120")
         .doc("Timeout of one completion.");
-    LLM_CONTEXT_TOKENS: Option<usize> = Spec::new("LLM_CONTEXT_TOKENS", at_least(0), "llm")
+    LLM_CONTEXT_TOKENS: Option<usize> = Spec::new("OTS_LLM_CONTEXT_TOKENS", at_least(0), "llm")
         .doc("The model's context window; 0 or unset: no client-side budgeting.");
-    LLM_CHAT_MAX_ROUNDS: usize = Spec::new("LLM_CHAT_MAX_ROUNDS", Kind::Int { min: 1, max: 8 }, "llm")
+    LLM_CHAT_MAX_ROUNDS: usize = Spec::new("OTS_LLM_CHAT_MAX_ROUNDS", Kind::Int { min: 1, max: 8 }, "llm")
         .default("3")
         .doc("Query rounds one chat turn may use.");
-    LLM_CHAT_QUERY_MAX: Duration = Spec::new("LLM_CHAT_QUERY_MAX_SECS", Kind::Int { min: 5, max: 600 }, "llm")
+    LLM_CHAT_QUERY_MAX: Duration = Spec::new("OTS_LLM_CHAT_QUERY_MAX_SECS", Kind::Int { min: 5, max: 600 }, "llm")
         .default("30")
         .doc("Per-round query cap of a chat turn.");
-    LLM_CHAT_TOOLS: String = Spec::new("LLM_CHAT_TOOLS", Kind::Enum(&["auto", "off"]), "llm")
+    LLM_CHAT_TOOLS: String = Spec::new("OTS_LLM_CHAT_TOOLS", Kind::Enum(&["auto", "off"]), "llm")
         .default("auto")
         .doc("Offer native tool calling to the model (`auto`) or not (`off`).");
-    LLM_GUARD_MAX_MESSAGE_CHARS: usize = Spec::new("LLM_GUARD_MAX_MESSAGE_CHARS", at_least(1), "llm")
+    LLM_GUARD_MAX_MESSAGE_CHARS: usize = Spec::new("OTS_LLM_GUARD_MAX_MESSAGE_CHARS", at_least(1), "llm")
         .default("8000")
         .doc("Longest single chat message.");
-    LLM_GUARD_MAX_MESSAGES: usize = Spec::new("LLM_GUARD_MAX_MESSAGES", at_least(1), "llm")
+    LLM_GUARD_MAX_MESSAGES: usize = Spec::new("OTS_LLM_GUARD_MAX_MESSAGES", at_least(1), "llm")
         .default("40")
         .doc("Most messages in one conversation.");
-    LLM_GUARD_MAX_TOTAL_CHARS: usize = Spec::new("LLM_GUARD_MAX_TOTAL_CHARS", at_least(1), "llm")
+    LLM_GUARD_MAX_TOTAL_CHARS: usize = Spec::new("OTS_LLM_GUARD_MAX_TOTAL_CHARS", at_least(1), "llm")
         .default("64000")
         .doc("Longest conversation.");
-    LLM_GUARD_INJECTION_ACTION: String = Spec::new("LLM_GUARD_INJECTION_ACTION", Kind::Enum(&["off", "flag", "block"]), "llm")
+    LLM_GUARD_INJECTION_ACTION: String = Spec::new("OTS_LLM_GUARD_INJECTION_ACTION", Kind::Enum(&["off", "flag", "block"]), "llm")
         .default("block")
         .doc("What a prompt-injection heuristic hit does.");
-    LLM_GUARD_BLOCKLIST: Vec<String> = Spec::new("LLM_GUARD_BLOCKLIST", Kind::List, "llm")
+    LLM_GUARD_BLOCKLIST: Vec<String> = Spec::new("OTS_LLM_GUARD_BLOCKLIST", Kind::List, "llm")
         .doc("Phrases that always block, comma-separated.");
-    LLM_RATE_LIMIT_PER_MIN: String = Spec::new("LLM_RATE_LIMIT_PER_MIN", Kind::Custom { what: "budget", check: llm_budget }, "llm")
+    LLM_RATE_LIMIT_PER_MIN: String = Spec::new("OTS_LLM_RATE_LIMIT_PER_MIN", Kind::Custom { what: "budget", check: llm_budget }, "llm")
         .default("20")
-        .doc("LLM requests per signed-in user per minute; `0` refuses AI to signed-in users, `unlimited` lifts the limit.");
-    LLM_RATE_LIMIT_ANON_PER_MIN: String = Spec::new("LLM_RATE_LIMIT_ANON_PER_MIN", Kind::Custom { what: "budget", check: llm_budget }, "llm")
+        .doc("LLM requests per signed-in user per minute; `0` refuses AI to signed-in users, `unlimited` lifts the limit.")
+        .runtime();
+    LLM_RATE_LIMIT_ANON_PER_MIN: String = Spec::new("OTS_LLM_RATE_LIMIT_ANON_PER_MIN", Kind::Custom { what: "budget", check: llm_budget }, "llm")
         .default("5")
-        .doc("LLM requests per anonymous client IP per minute; `0` refuses AI to anonymous callers, `unlimited` lifts the limit.");
-    LLM_ANONYMOUS_ENABLED: bool = Spec::new("LLM_ANONYMOUS_ENABLED", Kind::Bool, "llm")
+        .doc("LLM requests per anonymous client IP per minute; `0` refuses AI to anonymous callers, `unlimited` lifts the limit.")
+        .runtime();
+    LLM_ANONYMOUS_ENABLED: bool = Spec::new("OTS_LLM_ANONYMOUS_ENABLED", Kind::Bool, "llm")
         .profile(Some("true"), Some("false"))
-        .doc("Let anonymous callers use the AI features (within their budget).");
-    LLM_LOG_RETENTION_DAYS: u64 = Spec::new("LLM_LOG_RETENTION_DAYS", at_least(1), "llm")
+        .doc("Let anonymous callers use the AI features (within their budget).")
+        .runtime();
+    LLM_LOG_RETENTION_DAYS: u64 = Spec::new("OTS_LLM_LOG_RETENTION_DAYS", at_least(1), "llm")
         .default("90")
         .doc("LLM request log rows kept this long.");
-    LLM_LOG_PREVIEW_DISABLED: bool = Spec::new("LLM_LOG_PREVIEW_DISABLED", Kind::Bool, "llm")
-        .default("false")
-        .doc("Keep no question preview in the LLM request log.");
+    LLM_LOG_PREVIEW_ENABLED: bool = Spec::new("OTS_LLM_LOG_PREVIEW_ENABLED", Kind::Bool, "llm")
+        .default("true")
+        .doc("Keep a short question preview in the LLM request log.");
 
     // ── e-mail ──
-    SMTP_HOST: Option<String> = Spec::new("SMTP_HOST", Kind::Text, "email")
+    SMTP_HOST: Option<String> = Spec::new("OTS_SMTP_HOST", Kind::Text, "email")
         .doc("SMTP relay for account e-mail; unset: messages go to the log.");
-    SMTP_PORT: Option<u16> = Spec::new("SMTP_PORT", Kind::Int { min: 1, max: 65535 }, "email")
+    SMTP_PORT: Option<u16> = Spec::new("OTS_SMTP_PORT", Kind::Int { min: 1, max: 65535 }, "email")
         .doc("SMTP port (default 587).");
-    SMTP_USERNAME: Option<String> = Spec::new("SMTP_USERNAME", Kind::Text, "email")
+    SMTP_USERNAME: Option<String> = Spec::new("OTS_SMTP_USERNAME", Kind::Text, "email")
         .doc("SMTP user.");
-    SMTP_PASSWORD: Option<String> = Spec::new("SMTP_PASSWORD", Kind::Secret, "email")
+    SMTP_PASSWORD: Option<String> = Spec::new("OTS_SMTP_PASSWORD", Kind::Secret, "email")
         .doc("SMTP password (a secret reference).");
-    SMTP_TLS: Option<String> = Spec::new("SMTP_TLS", Kind::Enum(&["none", "starttls", "implicit"]), "email")
+    SMTP_TLS: Option<String> = Spec::new("OTS_SMTP_TLS", Kind::Enum(&["none", "starttls", "implicit"]), "email")
         .doc("SMTP transport security (default: implicit on 465, else STARTTLS).");
-    SMTP_FROM: Option<String> = Spec::new("SMTP_FROM", Kind::Text, "email")
+    SMTP_FROM: Option<String> = Spec::new("OTS_SMTP_FROM", Kind::Text, "email")
         .doc("Sender of account e-mail.");
 
     // ── alerting ──
-    ALERT_WEBHOOK_URL: Option<String> = Spec::new("ALERT_WEBHOOK_URL", Kind::Url, "alerting")
+    ALERT_WEBHOOK_URL: Option<String> = Spec::new("OTS_ALERT_WEBHOOK_URL", Kind::Url, "alerting")
         .doc("Webhook operational alerts are posted to.");
-    ALERT_SMTP_HOST: Option<String> = Spec::new("ALERT_SMTP_HOST", Kind::Text, "alerting")
+    ALERT_SMTP_HOST: Option<String> = Spec::new("OTS_ALERT_SMTP_HOST", Kind::Text, "alerting")
         .doc("SMTP relay for alerts (default: the account relay).");
-    ALERT_SMTP_PORT: Option<u16> = Spec::new("ALERT_SMTP_PORT", Kind::Int { min: 1, max: 65535 }, "alerting")
+    ALERT_SMTP_PORT: Option<u16> = Spec::new("OTS_ALERT_SMTP_PORT", Kind::Int { min: 1, max: 65535 }, "alerting")
         .doc("Alert SMTP port.");
-    ALERT_SMTP_USER: Option<String> = Spec::new("ALERT_SMTP_USER", Kind::Text, "alerting")
+    ALERT_SMTP_USERNAME: Option<String> = Spec::new("OTS_ALERT_SMTP_USERNAME", Kind::Text, "alerting")
         .doc("Alert SMTP user.");
-    ALERT_SMTP_PASS: Option<String> = Spec::new("ALERT_SMTP_PASS", Kind::Secret, "alerting")
+    ALERT_SMTP_PASSWORD: Option<String> = Spec::new("OTS_ALERT_SMTP_PASSWORD", Kind::Secret, "alerting")
         .doc("Alert SMTP password (a secret reference).");
-    ALERT_SMTP_TLS: Option<String> = Spec::new("ALERT_SMTP_TLS", Kind::Enum(&["none", "starttls", "implicit"]), "alerting")
+    ALERT_SMTP_TLS: Option<String> = Spec::new("OTS_ALERT_SMTP_TLS", Kind::Enum(&["none", "starttls", "implicit"]), "alerting")
         .doc("Alert SMTP transport security.");
-    ALERT_SMTP_FROM: Option<String> = Spec::new("ALERT_SMTP_FROM", Kind::Text, "alerting")
-        .doc("Sender of alerts (default `SMTP_FROM`).");
-    ALERT_SMTP_TO: Vec<String> = Spec::new("ALERT_SMTP_TO", Kind::List, "alerting")
+    ALERT_SMTP_FROM: Option<String> = Spec::new("OTS_ALERT_SMTP_FROM", Kind::Text, "alerting")
+        .doc("Sender of alerts (default `OTS_SMTP_FROM`).");
+    ALERT_SMTP_TO: Vec<String> = Spec::new("OTS_ALERT_SMTP_TO", Kind::List, "alerting")
         .doc("Alert recipients, comma-separated.");
 
     // ── replication ──
@@ -793,18 +833,126 @@ settings! {
 /// Names that no longer mean anything: setting one stops the start, with
 /// the name to use instead. (They are not aliases: the old name is refused.)
 pub static RETIRED: &[(&str, &str)] = &[
-    (
-        "ACCESS_TOKEN_EXPIRY_MINUTES",
-        "renamed ACCESS_TOKEN_EXPIRY_SECS (seconds)",
-    ),
-    (
-        "BACKUP_SCHEDULE_HOURS",
-        "renamed BACKUP_SCHEDULE_SECS (seconds)",
-    ),
-    ("LLM_TIMEOUT_SECONDS", "renamed LLM_TIMEOUT_SECS"),
+    ("BASE_URL", "renamed OTS_BASE_URL"),
+    ("PUBLIC_BASE_URL", "renamed OTS_PUBLIC_BASE_URL"),
+    ("SERVE_FRONTEND", "renamed OTS_FRONTEND_ENABLED"),
+    ("PORT_FALLBACK", "renamed OTS_PORT_FALLBACK_ENABLED"),
+    ("LD_DISCOVERY", "renamed OTS_DISCOVERY_ENABLED"),
+    ("LD_REGISTRY_URL", "renamed OTS_REGISTRY_URL"),
+    ("LD_REGISTRY_TOKEN", "renamed OTS_REGISTRY_TOKEN"),
+    ("TEXT_SEARCH_DIR", "renamed OTS_TEXT_SEARCH_DIR"),
+    ("SEED_DIR", "renamed OTS_SEED_DIR"),
+    ("PREFIX_CC_FALLBACK", "renamed OTS_PREFIX_CC_FALLBACK_ENABLED"),
+    ("CORS_ORIGINS", "renamed OTS_CORS_ORIGINS"),
+    ("TRUSTED_PROXY_CIDRS", "renamed OTS_TRUSTED_PROXY_CIDRS"),
+    ("SECURE_COOKIES", "renamed OTS_SECURE_COOKIES_ENABLED"),
+    ("EMBED_FRAME_ANCESTORS", "renamed OTS_EMBED_FRAME_ANCESTORS"),
+    ("ENDPOINT_ACL_ENFORCE", "renamed OTS_ENDPOINT_ACL_ENABLED"),
+    ("SPARQL_QUERY_TIMEOUT_SECS", "renamed OTS_SPARQL_QUERY_TIMEOUT_SECS"),
+    ("WRITE_TIMEOUT_SECS", "renamed OTS_WRITE_TIMEOUT_SECS"),
+    ("JWT_SECRET", "renamed OTS_JWT_SECRET"),
+    ("AUTH_DB_PATH", "renamed OTS_AUTH_DB_PATH"),
+    ("ACCESS_TOKEN_EXPIRY_SECS", "renamed OTS_ACCESS_TOKEN_EXPIRY_SECS"),
+    ("REFRESH_TOKEN_EXPIRY_DAYS", "renamed OTS_REFRESH_TOKEN_EXPIRY_DAYS"),
+    ("OTS_REQUIRE_VERIFIED_EMAIL", "renamed OTS_LOGIN_EMAIL_VERIFICATION_ENABLED"),
+    ("OTS_OIDC_SESSION_POLICY", "renamed OTS_OIDC_PROVIDER_TOKEN_POLICY"),
+    ("OTS_OIDC_WRITE_SCOPES", "renamed OTS_OIDC_PROVIDER_WRITE_SCOPES"),
+    ("OIDC_ISSUER", "renamed OTS_OIDC_ISSUER"),
+    ("OIDC_AUDIENCE", "renamed OTS_OIDC_AUDIENCE"),
+    ("OIDC_DEFAULT_ROLE", "renamed OTS_OIDC_DEFAULT_ROLE"),
+    ("ACCEPT_LEGACY_TOKENS", "renamed OTS_SESSION_AND_API_TOKENS_ENABLED"),
+    ("OIDC_ROLE_CLAIMS", "renamed OTS_OIDC_ROLE_CLAIMS"),
+    ("OIDC_GROUPS_CLAIM", "renamed OTS_OIDC_GROUPS_CLAIM"),
+    ("OIDC_ORG_GROUP_PREFIX", "renamed OTS_OIDC_ORG_GROUP_PREFIX"),
+    ("OIDC_ROLE_CLAIM_MAP", "renamed OTS_OIDC_ROLE_CLAIM_MAP"),
+    ("OAUTH_CLIENTS_JSON", "renamed OTS_OAUTH_CLIENTS_JSON"),
+    ("LDP_ROOT_ACL", "renamed OTS_LDP_ROOT_ACL"),
+    ("S3_ENDPOINT", "renamed OTS_S3_ENDPOINT"),
+    ("S3_BUCKET", "renamed OTS_S3_BUCKET"),
+    ("S3_ACCESS_KEY", "renamed OTS_S3_ACCESS_KEY"),
+    ("S3_SECRET_KEY", "renamed OTS_S3_SECRET_KEY"),
+    ("S3_REGION", "renamed OTS_S3_REGION"),
+    ("STORE_AUTO_RECOVER", "renamed OTS_STORE_AUTO_RECOVER_ENABLED"),
+    ("CLAMAV_ADDR", "renamed OTS_CLAMAV_ADDR"),
+    ("BACKUP_DIR", "renamed OTS_BACKUP_DIR"),
+    ("BACKUP_RETENTION_COUNT", "renamed OTS_BACKUP_RETENTION_COUNT"),
+    ("BACKUP_SCHEDULE_SECS", "renamed OTS_BACKUP_SCHEDULE_SECS"),
+    ("BACKUP_ENCRYPT", "renamed OTS_BACKUP_ENCRYPTION_ENABLED"),
+    ("BACKUP_ENCRYPT_KEY_PATH", "renamed OTS_BACKUP_ENCRYPTION_KEY_PATH"),
+    ("BACKUP_DECRYPT_IDENTITY_PATH", "renamed OTS_BACKUP_DECRYPTION_IDENTITY_PATH"),
+    ("BACKUP_S3_ENABLED", "renamed OTS_BACKUP_S3_ENABLED"),
+    ("AUDIT_PSEUDONYMISE_AFTER_DAYS", "renamed OTS_AUDIT_PSEUDONYMISE_AFTER_DAYS"),
+    ("OTS_PARALLEL_QUERY", "renamed OTS_PARALLEL_QUERY_ENABLED"),
+    ("OTS_COLUMNAR_QUERY", "renamed OTS_COLUMNAR_QUERY_ENABLED"),
+    ("OTS_QUERY_CACHE", "renamed OTS_QUERY_CACHE_ENABLED"),
+    ("OTS_CHANGE_CAPTURE", "renamed OTS_CHANGE_CAPTURE_ENABLED"),
+    ("OTS_GEOSPARQL_QUERY_REWRITE", "renamed OTS_GEOSPARQL_QUERY_REWRITE_ENABLED"),
+    ("VALIDATION_API_URL", "renamed OTS_VALIDATION_API_URL"),
+    ("DCAT_PROFILE", "renamed OTS_DCAT_PROFILE"),
+    ("CATALOG_TITLE", "renamed OTS_CATALOG_TITLE"),
+    ("CATALOG_DESCRIPTION", "renamed OTS_CATALOG_DESCRIPTION"),
+    ("CATALOG_PUBLISHER_URI", "renamed OTS_CATALOG_PUBLISHER_URI"),
+    ("CATALOG_PUBLISHER_NAME", "renamed OTS_CATALOG_PUBLISHER_NAME"),
+    ("CATALOG_PUBLISHER_IDENTIFIER", "renamed OTS_CATALOG_PUBLISHER_IDENTIFIER"),
+    ("CATALOG_PUBLISHER_TYPE", "renamed OTS_CATALOG_PUBLISHER_TYPE"),
+    ("CATALOG_LANGUAGE", "renamed OTS_CATALOG_LANGUAGE"),
+    ("CATALOG_LICENSE", "renamed OTS_CATALOG_LICENSE"),
+    ("CATALOG_CONTACT_NAME", "renamed OTS_CATALOG_CONTACT_NAME"),
+    ("CATALOG_CONTACT_EMAIL", "renamed OTS_CATALOG_CONTACT_EMAIL"),
+    ("SEED_STANDARDS_DEMO", "renamed OTS_SEED_STANDARDS_DEMO_ENABLED"),
+    ("SEED_STANDARD_VOCABS", "renamed OTS_SEED_STANDARD_VOCABS_ENABLED"),
+    ("SEED_IFC_URL", "renamed OTS_SEED_IFC_URL"),
+    ("VOCAB_CORPUS_PATH", "renamed OTS_VOCAB_CORPUS_PATH"),
+    ("VOCAB_CORPUS_URL", "renamed OTS_VOCAB_CORPUS_URL"),
+    ("VOCAB_CORPUS_SHA256", "renamed OTS_VOCAB_CORPUS_SHA256"),
+    ("VOCAB_LOCAL_METRICS", "renamed OTS_VOCAB_LOCAL_METRICS_ENABLED"),
+    ("LLM_GATEWAY_URL", "renamed OTS_LLM_GATEWAY_URL"),
+    ("LLM_MODEL", "renamed OTS_LLM_MODEL"),
+    ("LLM_SPARQL_MODEL", "renamed OTS_LLM_SPARQL_MODEL"),
+    ("LLM_SHACL_MODEL", "renamed OTS_LLM_SHACL_MODEL"),
+    ("LLM_CHAT_MODEL", "renamed OTS_LLM_CHAT_MODEL"),
+    ("LLM_API_KEY", "renamed OTS_LLM_API_KEY"),
+    ("LLM_TIMEOUT_SECS", "renamed OTS_LLM_TIMEOUT_SECS"),
+    ("LLM_CONTEXT_TOKENS", "renamed OTS_LLM_CONTEXT_TOKENS"),
+    ("LLM_CHAT_MAX_ROUNDS", "renamed OTS_LLM_CHAT_MAX_ROUNDS"),
+    ("LLM_CHAT_QUERY_MAX_SECS", "renamed OTS_LLM_CHAT_QUERY_MAX_SECS"),
+    ("LLM_CHAT_TOOLS", "renamed OTS_LLM_CHAT_TOOLS"),
+    ("LLM_GUARD_MAX_MESSAGE_CHARS", "renamed OTS_LLM_GUARD_MAX_MESSAGE_CHARS"),
+    ("LLM_GUARD_MAX_MESSAGES", "renamed OTS_LLM_GUARD_MAX_MESSAGES"),
+    ("LLM_GUARD_MAX_TOTAL_CHARS", "renamed OTS_LLM_GUARD_MAX_TOTAL_CHARS"),
+    ("LLM_GUARD_INJECTION_ACTION", "renamed OTS_LLM_GUARD_INJECTION_ACTION"),
+    ("LLM_GUARD_BLOCKLIST", "renamed OTS_LLM_GUARD_BLOCKLIST"),
+    ("LLM_RATE_LIMIT_PER_MIN", "renamed OTS_LLM_RATE_LIMIT_PER_MIN"),
+    ("LLM_RATE_LIMIT_ANON_PER_MIN", "renamed OTS_LLM_RATE_LIMIT_ANON_PER_MIN"),
+    ("LLM_ANONYMOUS_ENABLED", "renamed OTS_LLM_ANONYMOUS_ENABLED"),
+    ("LLM_LOG_RETENTION_DAYS", "renamed OTS_LLM_LOG_RETENTION_DAYS"),
+    ("LLM_LOG_PREVIEW_ENABLED", "renamed OTS_LLM_LOG_PREVIEW_ENABLED"),
+    ("SMTP_HOST", "renamed OTS_SMTP_HOST"),
+    ("SMTP_PORT", "renamed OTS_SMTP_PORT"),
+    ("SMTP_USERNAME", "renamed OTS_SMTP_USERNAME"),
+    ("SMTP_PASSWORD", "renamed OTS_SMTP_PASSWORD"),
+    ("SMTP_TLS", "renamed OTS_SMTP_TLS"),
+    ("SMTP_FROM", "renamed OTS_SMTP_FROM"),
+    ("ALERT_WEBHOOK_URL", "renamed OTS_ALERT_WEBHOOK_URL"),
+    ("ALERT_SMTP_HOST", "renamed OTS_ALERT_SMTP_HOST"),
+    ("ALERT_SMTP_PORT", "renamed OTS_ALERT_SMTP_PORT"),
+    ("ALERT_SMTP_USER", "renamed OTS_ALERT_SMTP_USERNAME"),
+    ("ALERT_SMTP_PASS", "renamed OTS_ALERT_SMTP_PASSWORD"),
+    ("ALERT_SMTP_TLS", "renamed OTS_ALERT_SMTP_TLS"),
+    ("ALERT_SMTP_FROM", "renamed OTS_ALERT_SMTP_FROM"),
+    ("ALERT_SMTP_TO", "renamed OTS_ALERT_SMTP_TO"),
+    ("ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL", "renamed OTS_ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL"),
+    ("ACCOUNTS_DASHBOARD_GATEWAY_KEY", "renamed OTS_ACCOUNTS_DASHBOARD_GATEWAY_KEY"),
+    ("ACCOUNTS_DASHBOARD_APP_GROUPS", "renamed OTS_ACCOUNTS_DASHBOARD_APP_GROUPS"),
+    ("RATE_LIMIT_DISABLED", "renamed OTS_RATE_LIMIT_ENABLED, with the opposite sense: set OTS_RATE_LIMIT_ENABLED=false"),
+    ("OTS_DISABLE_REGISTRATION", "renamed OTS_REGISTRATION_ENABLED, with the opposite sense: set OTS_REGISTRATION_ENABLED=false"),
+    ("LLM_LOG_PREVIEW_DISABLED", "renamed OTS_LLM_LOG_PREVIEW_ENABLED, with the opposite sense: set OTS_LLM_LOG_PREVIEW_ENABLED=false"),
+    ("ACCESS_TOKEN_EXPIRY_MINUTES", "renamed OTS_ACCESS_TOKEN_EXPIRY_SECS (seconds)"),
+    ("BACKUP_SCHEDULE_HOURS", "renamed OTS_BACKUP_SCHEDULE_SECS (seconds)"),
+    ("LLM_TIMEOUT_SECONDS", "renamed OTS_LLM_TIMEOUT_SECS"),
     ("OTS_MAX_UPLOAD_MB", "renamed OTS_MAX_UPLOAD_BYTES (bytes; 512MiB is accepted)"),
     ("OTS_REMOTE_ALLOWLIST", "split by purpose: OTS_SERVICE_ALLOWLIST (SPARQL SERVICE), OTS_LDES_ALLOWLIST, OTS_SOURCES_ALLOWLIST (datasources) and OTS_JSONLD_CONTEXT_ALLOWLIST; there is no shared list"),
-    ("SMTP_STARTTLS", "removed: use SMTP_TLS=starttls|implicit|none"),
+    ("SMTP_STARTTLS", "removed: use OTS_SMTP_TLS=starttls|implicit|none"),
     ("OTS_EXTERNAL_REASONER", "removed: set OTS_DL_BACKEND=konclude and OTS_KONCLUDE_BIN"),
     ("OTS_EXTERNAL_REASONER_BIN", "removed: set OTS_DL_BACKEND=konclude and OTS_KONCLUDE_BIN"),
 ];
@@ -823,16 +971,16 @@ pub(super) fn checks(config: &super::Config) -> Vec<ConfigError> {
     // The production profile's refusals: settings production must not run
     // with, whatever else is configured.
     if config.production() {
-        if value(SECURE_COOKIES.name()).as_deref() == Some("false") {
+        if value(SECURE_COOKIES_ENABLED.name()).as_deref() == Some("false") {
             fail(
-                SECURE_COOKIES.name(),
+                SECURE_COOKIES_ENABLED.name(),
                 "production refuses `false`: session cookies would travel over plain HTTP. \
-                 Serve the store over https (BASE_URL https://…) behind a TLS proxy",
+                 Serve the store over https (OTS_BASE_URL https://…) behind a TLS proxy",
             );
         }
-        if value(RATE_LIMIT_DISABLED.name()).as_deref() == Some("true") {
+        if value(RATE_LIMIT_ENABLED.name()).as_deref() == Some("false") {
             fail(
-                RATE_LIMIT_DISABLED.name(),
+                RATE_LIMIT_ENABLED.name(),
                 "production refuses turning rate limiting off",
             );
         }
@@ -865,7 +1013,7 @@ pub(super) fn checks(config: &super::Config) -> Vec<ConfigError> {
     if value(OIDC_ISSUER.name()).is_some() && value(OIDC_AUDIENCE.name()).is_none() {
         fail(
             OIDC_AUDIENCE.name(),
-            "is required with OIDC_ISSUER (without it every IdP token is refused)",
+            "is required with OTS_OIDC_ISSUER (without it every IdP token is refused)",
         );
     }
     if value(DL_BACKEND.name()).as_deref() == Some("sidecar")

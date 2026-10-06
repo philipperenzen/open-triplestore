@@ -3,7 +3,7 @@
 //! set — not a bare 500 "Internal server error", which is what they returned
 //! (every "endpoint unreachable" mapping was `AppError::Internal`).
 //!
-//! Own test binary on purpose: `LLM_GATEWAY_URL` is process-wide, and the
+//! Own test binary on purpose: `OTS_LLM_GATEWAY_URL` is process-wide, and the
 //! orientation suite points it at a mock gateway for its whole process.
 
 mod common;
@@ -19,7 +19,7 @@ const DEAD_GATEWAY: &str = "http://127.0.0.1:1";
 
 #[tokio::test]
 async fn chat_without_a_gateway_is_a_503_that_names_the_knob() {
-    std::env::set_var("LLM_GATEWAY_URL", DEAD_GATEWAY);
+    std::env::set_var("OTS_LLM_GATEWAY_URL", DEAD_GATEWAY);
     let (state, token) = admin_state();
     let app = test_app(state);
 
@@ -47,7 +47,7 @@ async fn chat_without_a_gateway_is_a_503_that_names_the_knob() {
         "an unreachable gateway is a 503, not a crash: {body}"
     );
     assert!(
-        body.contains("LLM_GATEWAY_URL") && body.contains("127.0.0.1:1"),
+        body.contains("OTS_LLM_GATEWAY_URL") && body.contains("127.0.0.1:1"),
         "the error names the endpoint it tried and the knob to fix it: {body}"
     );
 
@@ -73,7 +73,7 @@ async fn chat_without_a_gateway_is_a_503_that_names_the_knob() {
     let body = body_text(resp.into_body()).await;
     assert!(
         st == StatusCode::SERVICE_UNAVAILABLE
-            || (st == StatusCode::OK && body.contains("LLM_GATEWAY_URL")),
+            || (st == StatusCode::OK && body.contains("OTS_LLM_GATEWAY_URL")),
         "stream: {st} {body}"
     );
 

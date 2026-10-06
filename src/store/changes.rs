@@ -423,7 +423,7 @@ impl ChangeLog {
     /// graph, not to the size of the change, and a small `DELETE WHERE`
     /// against a large graph is the worst case.
     ///
-    /// Turn it on (`OTS_CHANGE_CAPTURE=on`) when something reads it: a
+    /// Turn it on (`OTS_CHANGE_CAPTURE_ENABLED=on`) when something reads it: a
     /// replication follower, the dataset history, an audit. A replication
     /// leader or cluster member keeps it on regardless — its followers tail
     /// this log and the role means nothing without it. A follower keeps it
@@ -440,7 +440,7 @@ impl ChangeLog {
         } else {
             // Off unless asked — on a follower too, whose own log would be
             // partial. See the cost table above.
-            crate::config::CHANGE_CAPTURE.get()
+            crate::config::CHANGE_CAPTURE_ENABLED.get()
         };
         if !on {
             return Ok(Self::disabled());
@@ -1647,15 +1647,15 @@ mod tests {
         // Off is the default, an explicit off is off, and `on` turns it on:
         // the cost of a `WHERE` update's before-image scan is not something a
         // store with no consumer for the log should pay (see `open`).
-        std::env::remove_var("OTS_CHANGE_CAPTURE");
+        std::env::remove_var("OTS_CHANGE_CAPTURE_ENABLED");
         std::env::remove_var("OTS_REPLICATION_ROLE");
         let log = ChangeLog::open(None).unwrap();
         assert!(!log.enabled(), "capture is off unless asked for");
-        std::env::set_var("OTS_CHANGE_CAPTURE", "on");
+        std::env::set_var("OTS_CHANGE_CAPTURE_ENABLED", "on");
         assert!(ChangeLog::open(None).unwrap().enabled());
-        std::env::set_var("OTS_CHANGE_CAPTURE", "off");
+        std::env::set_var("OTS_CHANGE_CAPTURE_ENABLED", "off");
         let log = ChangeLog::open(None).unwrap();
-        std::env::remove_var("OTS_CHANGE_CAPTURE");
+        std::env::remove_var("OTS_CHANGE_CAPTURE_ENABLED");
         assert!(!log.enabled());
         assert!(log.begin("test", Some(&[None]), &|_| None).is_none());
         leave_write();

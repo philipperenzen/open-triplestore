@@ -1,4 +1,4 @@
-//! `OAUTH_CLIENTS_JSON` client secrets go through the secrets module like
+//! `OTS_OAUTH_CLIENTS_JSON` client secrets go through the secrets module like
 //! every other credential: a reference (`file:/path`, `env:NAME`) resolves to
 //! the stored secret, and a raw value is refused under `OTS_ENV=production`
 //! with the module's `RawSecretRefused` message — the error the server stops
@@ -79,7 +79,7 @@ fn a_reference_seeds_and_a_raw_secret_is_refused_in_production() {
         .expect_err("a raw client secret is refused")
         .to_string();
     assert!(
-        err.contains("OAUTH_CLIENTS_JSON client 'prod-raw' secret")
+        err.contains("OTS_OAUTH_CLIENTS_JSON client 'prod-raw' secret")
             && err.contains("holds a raw secret value")
             && err.contains("OTS_ENV=production"),
         "the RawSecretRefused message, naming the client: {err}"

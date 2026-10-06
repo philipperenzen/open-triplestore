@@ -85,7 +85,7 @@ async function createDataset(name: string): Promise<string> {
 
 // Bulk-import one Turtle file into the dataset's own namespaced graph
 // '{dataset_iri}/graphs/data'. The dataset IRI comes from the API (the server's
-// BASE_URL may differ from the URL the tests reach it on).
+// OTS_BASE_URL may differ from the URL the tests reach it on).
 async function bulkImport(
   datasetId: string,
   filename: string,

@@ -8,4 +8,4 @@ set -euo pipefail
 cd "$(dirname "$0")"
 NEN="${NEN_BASE_URL:-https://raw.githubusercontent.com/NEN-Nederlands-Normalisatie-Instituut/nen2660/gh-pages/data}"
 echo "→ nen2660-rdfs.ttl"; curl -fsSL "$NEN/nen2660-rdfs.ttl" -o nen2660-rdfs.ttl
-echo "done — the bundle loads at boot from --seed-dir (SEED_DIR) pointing at examples/seed-bundles"
+echo "done — the bundle loads at boot from --seed-dir (OTS_SEED_DIR) pointing at examples/seed-bundles"

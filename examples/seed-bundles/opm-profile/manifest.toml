@@ -15,7 +15,7 @@
 # into managed states.
 
 id = "opm-profile"
-opt_out_env = "SEED_OPM_PROFILE"
+opt_out_env = "OTS_SEED_OPM_PROFILE_ENABLED"
 
 [organisation]
 slug = "opm-profile"

@@ -53,7 +53,7 @@ use oxigraph::sparql::QueryResults;
 fn fresh_store() -> TripleStore {
     // Result cache OFF: a benchmark that repeats one query on an unchanged store
     // must measure evaluation, not a cache hit (see the module docs). The
-    // runners also export OTS_QUERY_CACHE=off, but the bench must not depend on
+    // runners also export OTS_QUERY_CACHE_ENABLED=off, but the bench must not depend on
     // the environment.
     TripleStore::in_memory()
         .unwrap()
@@ -1555,12 +1555,12 @@ fn bench_shacl_validate_snapshot(c: &mut Criterion) {
     // The accelerator would publish a RAM mirror after the first queries and
     // move the run onto the mirror source; it reads its switch at open time,
     // so turn it off for this store only and put the environment back.
-    let prev = std::env::var_os("OTS_PARALLEL_QUERY");
-    std::env::set_var("OTS_PARALLEL_QUERY", "off");
+    let prev = std::env::var_os("OTS_PARALLEL_QUERY_ENABLED");
+    std::env::set_var("OTS_PARALLEL_QUERY_ENABLED", "off");
     let store = TripleStore::open(dir.path()).unwrap();
     match prev {
-        Some(v) => std::env::set_var("OTS_PARALLEL_QUERY", v),
-        None => std::env::remove_var("OTS_PARALLEL_QUERY"),
+        Some(v) => std::env::set_var("OTS_PARALLEL_QUERY_ENABLED", v),
+        None => std::env::remove_var("OTS_PARALLEL_QUERY_ENABLED"),
     }
     let n = 5_000_usize;
     store

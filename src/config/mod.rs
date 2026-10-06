@@ -9,7 +9,7 @@
 //! start on any of them. Nothing falls back silently.
 //!
 //! Reading a setting goes through its typed [`Key`]: `SPARQL_QUERY_TIMEOUT.get()`
-//! is a `Duration`, `RATE_LIMIT_DISABLED.get()` a `bool`. In the server the
+//! is a `Duration`, `RATE_LIMIT_ENABLED.get()` a `bool`. In the server the
 //! value comes from the snapshot `main` validated and [`install`]ed (the
 //! same `Arc` sits in `AppState::config`); a process that installed none
 //! (the library's tests, an embedding) reads the environment afresh on each
@@ -27,6 +27,7 @@
 pub mod admin;
 pub mod parse;
 mod registry;
+pub mod runtime;
 
 pub use registry::*;
 
@@ -48,6 +49,8 @@ pub enum Source {
     File,
     /// The production profile's default (`OTS_ENV=production`).
     Profile,
+    /// An administrator's runtime override (`/api/admin/settings`).
+    Admin,
     /// The built-in default.
     Default,
 }
@@ -59,6 +62,7 @@ impl Source {
             Source::Env => "env",
             Source::File => "file",
             Source::Profile => "profile",
+            Source::Admin => "admin",
             Source::Default => "default",
         }
     }
@@ -147,6 +151,9 @@ pub struct Spec {
     /// An explicitly empty value is a value (most settings treat empty as
     /// unset, so that compose's `NAME=${NAME:-}` means "not configured").
     pub empty_is_value: bool,
+    /// An administrator may override it at runtime ([`runtime`]); the
+    /// environment then gives only the default.
+    pub runtime: bool,
 }
 
 impl Spec {
@@ -160,7 +167,12 @@ impl Spec {
             group,
             doc: "",
             empty_is_value: false,
+            runtime: false,
         }
+    }
+    pub const fn runtime(mut self) -> Self {
+        self.runtime = true;
+        self
     }
     pub const fn doc(mut self, doc: &'static str) -> Self {
         self.doc = doc;
@@ -617,11 +629,24 @@ impl Config {
     /// Every setting, in registry order, as the admin view and the startup
     /// log show it: secrets redacted (a reference is shown, it is no secret).
     pub fn describe(&self) -> Vec<Described> {
+        self.describe_with(|_| None)
+    }
+
+    /// [`Self::describe`], with the runtime overrides `overlay` gives (a
+    /// setting's stored value, see [`runtime`]) in place of the configured
+    /// ones.
+    pub fn describe_with(&self, overlay: impl Fn(&Spec) -> Option<String>) -> Vec<Described> {
         let production = self.production();
         SPECS
             .iter()
             .map(|spec| {
-                let entry = self.entry(spec.name);
+                let entry = match overlay(spec) {
+                    Some(v) => Entry {
+                        value: Some(v),
+                        source: Source::Admin,
+                    },
+                    None => self.entry(spec.name),
+                };
                 Described {
                     name: spec.name,
                     group: spec.group,
@@ -630,6 +655,7 @@ impl Config {
                     default: spec.default_label(production),
                     source: entry.source,
                     secret: matches!(spec.kind, Kind::Secret),
+                    runtime: spec.runtime,
                     doc: spec.doc,
                     choices: match spec.kind {
                         Kind::Enum(c) => Some(c),
@@ -660,6 +686,8 @@ pub struct Described {
     pub default: Option<String>,
     pub source: Source,
     pub secret: bool,
+    /// An administrator may change it at runtime.
+    pub runtime: bool,
     pub doc: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub choices: Option<&'static [&'static str]>,

@@ -491,7 +491,7 @@ mod tests {
         .await
         .unwrap();
 
-        // If the demo seed was disabled (SEED_STANDARDS_DEMO=off), there is nothing
+        // If the demo seed was disabled (OTS_SEED_STANDARDS_DEMO_ENABLED=off), there is nothing
         // to assert — don't manufacture a false failure.
         let datasets = state.auth_db.list_datasets().unwrap();
         if datasets.is_empty() {

@@ -11,7 +11,7 @@
 //! * **Inbound** (`OTS_TRUSTED_ISSUERS=https://peer-a,https://peer-b`): a
 //!   bearer whose `iss` is a trusted peer is verified against that peer's
 //!   JWKS (discovery at `<iss>/.well-known/openid-configuration`), must name
-//!   this instance (`BASE_URL`) as its audience, and is provisioned as a
+//!   this instance (`OTS_BASE_URL`) as its audience, and is provisioned as a
 //!   local federated user — read-only, with organisation memberships synced
 //!   from the `org:` groups when an organisation of that slug exists here.
 //!   Every local rule then applies unchanged: dataset visibility, grants,

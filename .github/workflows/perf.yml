@@ -67,7 +67,7 @@ env:
   # numbers measure the cache, not the engine (63 of the 68 read benchmarks did,
   # until 2026-09). The bench file disables the cache in code; this makes the
   # merge-base side honest too while that fix is not yet on the base commit.
-  OTS_QUERY_CACHE: "off"
+  OTS_QUERY_CACHE_ENABLED: "off"
 
 jobs:
   perf:

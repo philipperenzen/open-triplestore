@@ -91,18 +91,18 @@ pub enum Profile {
 }
 
 impl Profile {
-    /// Parse a `DCAT_PROFILE` value; empty means `dcat`.
+    /// Parse a `OTS_DCAT_PROFILE` value; empty means `dcat`.
     pub fn parse(value: &str) -> Result<Self, String> {
         match value.trim().to_ascii_lowercase().as_str() {
             "" | "dcat" => Ok(Profile::Dcat),
             "dcat-ap" => Ok(Profile::DcatAp),
             "dcat-ap-nl" => Ok(Profile::DcatApNl),
             other => Err(format!(
-                "DCAT_PROFILE `{other}` is not a catalogue profile: use dcat, dcat-ap or dcat-ap-nl"
+                "OTS_DCAT_PROFILE `{other}` is not a catalogue profile: use dcat, dcat-ap or dcat-ap-nl"
             )),
         }
     }
-    /// The profile `DCAT_PROFILE` names (validated by the configuration
+    /// The profile `OTS_DCAT_PROFILE` names (validated by the configuration
     /// registry at startup).
     pub fn from_env() -> Self {
         Self::parse(&crate::config::DCAT_PROFILE.get()).unwrap_or(Profile::Dcat)
@@ -185,7 +185,7 @@ impl CatalogOptions {
         }
     }
 
-    /// The options `DCAT_PROFILE` and the `CATALOG_*` settings describe
+    /// The options `OTS_DCAT_PROFILE` and the `OTS_CATALOG_*` settings describe
     /// (each validated by the configuration registry at startup).
     pub fn from_env(base_url: &str) -> Self {
         use crate::config as c;
@@ -404,7 +404,7 @@ pub fn build_catalog_report(
         Some(c) => contact_point(&mut g, catalog.clone(), c),
         None if opts.profile.is_nl() => g.warn(
             "the catalogue has no contact point (DCAT-AP-NL requires one): set \
-             CATALOG_CONTACT_NAME and CATALOG_CONTACT_EMAIL"
+             OTS_CATALOG_CONTACT_NAME and OTS_CATALOG_CONTACT_EMAIL"
                 .into(),
         ),
         None => {}
@@ -625,7 +625,7 @@ pub fn check_coverage(
 
 pub(crate) fn catalog_publisher(g: &mut G, opts: &CatalogOptions) -> NamedNode {
     let iri = g
-        .iri(&opts.publisher_iri, "CATALOG_PUBLISHER_URI")
+        .iri(&opts.publisher_iri, "OTS_CATALOG_PUBLISHER_URI")
         .unwrap_or_else(|| nn(&format!("{}/publisher", opts.base_url)));
     if g.agents.insert(iri.as_str().to_string()) {
         g.typ(iri.clone(), &p(FOAF, "Agent"));
@@ -635,7 +635,12 @@ pub(crate) fn catalog_publisher(g: &mut G, opts: &CatalogOptions) -> NamedNode {
             g.lit(iri.clone(), &p(DCT, "identifier"), id);
         }
         if let Some(t) = &opts.publisher_type {
-            g.concept(iri.clone(), &p(DCT, "type"), t, "CATALOG_PUBLISHER_TYPE");
+            g.concept(
+                iri.clone(),
+                &p(DCT, "type"),
+                t,
+                "OTS_CATALOG_PUBLISHER_TYPE",
+            );
         }
         g.ranged(
             iri.clone(),
@@ -855,7 +860,7 @@ fn aggregate_dataset(
         Some(c) => contact_point(g, root.clone(), &c),
         None if opts.profile.is_nl() => g.warn(
             "the aggregate dataset has no contact point (DCAT-AP-NL requires one): set \
-             CATALOG_CONTACT_NAME and CATALOG_CONTACT_EMAIL"
+             OTS_CATALOG_CONTACT_NAME and OTS_CATALOG_CONTACT_EMAIL"
                 .into(),
         ),
         None => {}
@@ -863,7 +868,7 @@ fn aggregate_dataset(
     if opts.license.is_none() && opts.profile.is_nl() {
         g.warn(
             "the aggregate dataset's distribution has no licence (DCAT-AP-NL requires one): \
-             set CATALOG_LICENSE"
+             set OTS_CATALOG_LICENSE"
                 .into(),
         );
     }
@@ -937,7 +942,7 @@ fn service_common(
         Some(c) => contact_point(g, svc.clone(), c),
         None if opts.profile.is_nl() => g.warn(format!(
             "the data service <{}> has no contact point (DCAT-AP-NL requires one): set \
-             CATALOG_CONTACT_NAME and CATALOG_CONTACT_EMAIL",
+             OTS_CATALOG_CONTACT_NAME and OTS_CATALOG_CONTACT_EMAIL",
             svc.as_str()
         )),
         None => {}
@@ -963,7 +968,7 @@ fn service_common(
             }
             None if opts.profile.is_nl() => g.warn(format!(
                 "the data service <{}> has no licence (DCAT-AP-NL requires one): set \
-                 CATALOG_LICENSE",
+                 OTS_CATALOG_LICENSE",
                 svc.as_str()
             )),
             None => {}
@@ -1349,14 +1354,14 @@ fn dataset_entry(
         if contact.is_none() {
             g.warn(format!(
                 "dataset `{}` has no contact point (DCAT-AP-NL requires one): set its contact, \
-                 its organisation's, or CATALOG_CONTACT_NAME / CATALOG_CONTACT_EMAIL",
+                 its organisation's, or OTS_CATALOG_CONTACT_NAME / OTS_CATALOG_CONTACT_EMAIL",
                 ds.id
             ));
         }
         if license.is_none() {
             g.warn(format!(
                 "dataset `{}` has no licence, so neither have its distributions (DCAT-AP-NL \
-                 requires one): set its licence or CATALOG_LICENSE",
+                 requires one): set its licence or OTS_CATALOG_LICENSE",
                 ds.id
             ));
         }

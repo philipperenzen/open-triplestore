@@ -6,10 +6,10 @@ and examples in `docs/*.md`) only reach the server if compose passes them into
 the `triplestore` container. Two things break that silently:
 
 * no `env_file: .env` on the service, so a variable compose does not list by
-  name never arrives (this is how `SECURE_COOKIES`, `TRUSTED_PROXY_CIDRS` and
+  name never arrives (this is how `OTS_SECURE_COOKIES_ENABLED`, `OTS_TRUSTED_PROXY_CIDRS` and
   the outbound allowlists were lost);
 * an `environment:` entry that hard-codes a documented variable
-  (`BACKUP_RETENTION_COUNT=7`), which overrides whatever `.env` says.
+  (`OTS_BACKUP_RETENTION_COUNT=7`), which overrides whatever `.env` says.
 
 So: the service must load `.env`, and every documented variable the server
 reads (its name appears as a string literal under `src/`) is either absent from
@@ -33,11 +33,11 @@ SERVICE = "triplestore"
 # Entries compose sets on purpose, whatever `.env` says: paths inside the
 # container's data volume and the wiring to the bundled MinIO service.
 WIRED = {
-    "AUTH_DB_PATH": "the auth database lives on the /data volume",
-    "BACKUP_DIR": "backups live on the /data volume",
-    "S3_ENDPOINT": "the bundled MinIO service",
-    "S3_ACCESS_KEY": "the bundled MinIO credentials (MINIO_ROOT_USER)",
-    "S3_SECRET_KEY": "the bundled MinIO credentials (MINIO_ROOT_PASSWORD)",
+    "OTS_AUTH_DB_PATH": "the auth database lives on the /data volume",
+    "OTS_BACKUP_DIR": "backups live on the /data volume",
+    "OTS_S3_ENDPOINT": "the bundled MinIO service",
+    "OTS_S3_ACCESS_KEY": "the bundled MinIO credentials (MINIO_ROOT_USER)",
+    "OTS_S3_SECRET_KEY": "the bundled MinIO credentials (MINIO_ROOT_PASSWORD)",
 }
 
 NAME = r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+"

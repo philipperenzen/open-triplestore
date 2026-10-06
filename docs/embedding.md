@@ -79,11 +79,11 @@ the pick hit an IFC sub-element such as a wall or beam).
 
 By default `/embed/*` allows any origin; under `OTS_ENV=production` the default
 is `'none'`, so embedding is off until an operator names the sites. Restrict or
-disable it with the `EMBED_FRAME_ANCESTORS` environment variable on the server:
+disable it with the `OTS_EMBED_FRAME_ANCESTORS` environment variable on the server:
 
 ```bash
-EMBED_FRAME_ANCESTORS="https://intranet.example https://*.example.org"  # allowlist
-EMBED_FRAME_ANCESTORS="'none'"                                          # disable embedding
+OTS_EMBED_FRAME_ANCESTORS="https://intranet.example https://*.example.org"  # allowlist
+OTS_EMBED_FRAME_ANCESTORS="'none'"                                          # disable embedding
 ```
 
 The value is used verbatim as the CSP `frame-ancestors` source list.
@@ -217,11 +217,11 @@ Load them straight into three.js, `<model-viewer>`, IFC.js, etc.:
 ## CORS
 
 Iframe embeds need **no** CORS setup. Direct `fetch()` calls from another
-origin do: set the server's `CORS_ORIGINS` environment variable to the
+origin do: set the server's `OTS_CORS_ORIGINS` environment variable to the
 origins of your webapps (comma-separated), or `*` to reflect any origin:
 
 ```bash
-CORS_ORIGINS="https://myapp.example,https://dashboard.example"
+OTS_CORS_ORIGINS="https://myapp.example,https://dashboard.example"
 ```
 
 ## Authentication for private data

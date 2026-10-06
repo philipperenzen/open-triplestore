@@ -6,10 +6,10 @@
 //! the caller is authorized to see. Keeping generation and (scoped) execution separate is the
 //! security-critical design choice here.
 //!
-//! **Bring your own LLM.** Point `LLM_GATEWAY_URL` at any server that speaks the OpenAI
+//! **Bring your own LLM.** Point `OTS_LLM_GATEWAY_URL` at any server that speaks the OpenAI
 //! `/v1/chat/completions` API — OpenAI, OpenRouter, Azure OpenAI, Ollama, LM Studio, vLLM,
-//! llama.cpp, or a self-hosted gateway. Choose the model with `LLM_MODEL`, and set
-//! `LLM_API_KEY` if the endpoint requires a bearer token. Nothing here is tied to a specific
+//! llama.cpp, or a self-hosted gateway. Choose the model with `OTS_LLM_MODEL`, and set
+//! `OTS_LLM_API_KEY` if the endpoint requires a bearer token. Nothing here is tied to a specific
 //! provider or model. When no endpoint is reachable the UI hides the AI features.
 
 use std::collections::{HashMap, HashSet};
@@ -57,7 +57,7 @@ the parts that are still correct, instead of starting from scratch.\n\
 /// a truncated query is invalid and would only force the repair round-trip.
 const SPARQL_MAX_TOKENS: u32 = 1024;
 
-/// Base URL of the OpenAI-compatible LLM endpoint (`LLM_GATEWAY_URL`). Unset,
+/// Base URL of the OpenAI-compatible LLM endpoint (`OTS_LLM_GATEWAY_URL`). Unset,
 /// the AI features are off: nothing is probed or sent, and every AI request
 /// answers 503 naming the setting.
 pub(crate) fn gateway_base() -> Result<String, AppError> {
@@ -69,9 +69,9 @@ pub(crate) fn gateway_base() -> Result<String, AppError> {
         })
 }
 
-/// Model name sent on every completion. Configure with `LLM_MODEL` (an OpenAI model
-/// id, an Ollama tag, a vLLM-served name, …). The per-task overrides `LLM_SPARQL_MODEL`
-/// and `LLM_SHACL_MODEL` fall back to this.
+/// Model name sent on every completion. Configure with `OTS_LLM_MODEL` (an OpenAI model
+/// id, an Ollama tag, a vLLM-served name, …). The per-task overrides `OTS_LLM_SPARQL_MODEL`
+/// and `OTS_LLM_SHACL_MODEL` fall back to this.
 pub(crate) fn default_model() -> String {
     crate::config::LLM_MODEL.get()
 }
@@ -90,19 +90,19 @@ fn shacl_model() -> String {
         .unwrap_or_else(default_model)
 }
 
-/// Model for the Spark chat assistant (`LLM_CHAT_MODEL`).
+/// Model for the Spark chat assistant (`OTS_LLM_CHAT_MODEL`).
 ///
 /// Chat is by far the most demanding task here — a long system prompt, an
 /// execution protocol to follow and strict-JSON widget specs — so an instance
 /// that runs a small local model for cheap NL→SPARQL often wants a stronger one
-/// here. Falls back to `LLM_MODEL` like the other per-task overrides.
+/// here. Falls back to `OTS_LLM_MODEL` like the other per-task overrides.
 pub(crate) fn chat_model() -> String {
     crate::config::LLM_CHAT_MODEL
         .get()
         .unwrap_or_else(default_model)
 }
 
-/// Optional bearer token for the endpoint (`LLM_API_KEY`). Required by hosted APIs
+/// Optional bearer token for the endpoint (`OTS_LLM_API_KEY`). Required by hosted APIs
 /// (OpenAI, OpenRouter, …); leave unset for local servers (Ollama, LM Studio).
 ///
 /// Read as a secret reference (`env:`, `file:`, `vault:`) and resolved per
@@ -111,7 +111,7 @@ pub(crate) fn chat_model() -> String {
 /// warning; an unresolvable reference disables the key rather than sending a
 /// literal `vault:…` string as a bearer token.
 fn api_key() -> Option<String> {
-    crate::secrets::env_secret_opt("LLM_API_KEY")
+    crate::secrets::env_secret_opt("OTS_LLM_API_KEY")
 }
 
 /// Shared HTTP client for every gateway call. A fresh `Client::new()` per call
@@ -125,7 +125,7 @@ fn api_key() -> Option<String> {
 // error" for the same condition, which read as a crash rather than "no gateway".
 /// What to do about an unreachable gateway; appended to every 503.
 const GATEWAY_HINT: &str =
-    "set LLM_GATEWAY_URL to a reachable OpenAI-compatible endpoint (see docs/spark.md)";
+    "set OTS_LLM_GATEWAY_URL to a reachable OpenAI-compatible endpoint (see docs/spark.md)";
 
 fn http() -> &'static reqwest::Client {
     static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
@@ -191,7 +191,7 @@ pub(crate) async fn chat_completion(
 /// platform context can legitimately take more than a minute per completion.
 /// Hosted APIs answer in seconds and are unaffected.
 ///
-/// Raise it with `LLM_TIMEOUT_SECS` when serving a large model from local
+/// Raise it with `OTS_LLM_TIMEOUT_SECS` when serving a large model from local
 /// hardware: past this budget the turn fails outright, so a 20B+ model on CPU
 /// needs a bigger one to answer at all.
 fn chat_completion_timeout() -> Duration {
@@ -479,7 +479,7 @@ pub struct ShaclAssistRequest {
     /// IRIs from the user's data, not `ex:someProperty` placeholders.
     #[serde(default)]
     pub model_context: Option<Value>,
-    /// Optional model override (defaults to the configured model — see `LLM_SHACL_MODEL` / `LLM_MODEL`).
+    /// Optional model override (defaults to the configured model — see `OTS_LLM_SHACL_MODEL` / `OTS_LLM_MODEL`).
     #[serde(default)]
     pub model: Option<String>,
     /// task=repair: the dataset whose residual violations the assistant
@@ -806,10 +806,10 @@ fn strip_turtle_fence(s: &str) -> String {
 
 #[derive(Serialize)]
 pub struct LlmHealth {
-    /// The LLM endpoint this instance is configured to use (`LLM_GATEWAY_URL`);
+    /// The LLM endpoint this instance is configured to use (`OTS_LLM_GATEWAY_URL`);
     /// `null` when none is.
     gateway: Option<String>,
-    /// Whether `LLM_GATEWAY_URL` is set. `false`: the AI features are off and
+    /// Whether `OTS_LLM_GATEWAY_URL` is set. `false`: the AI features are off and
     /// nothing is probed.
     configured: bool,
     /// Whether that endpoint answered within the timeout.
@@ -819,7 +819,7 @@ pub struct LlmHealth {
     /// "unreachable" with the reason, not "configured".
     unreachable_reason: Option<String>,
     /// Whether this caller may use the AI features at all: `false` when
-    /// their budget is `0`, or they are anonymous and `LLM_ANONYMOUS_ENABLED`
+    /// their budget is `0`, or they are anonymous and `OTS_LLM_ANONYMOUS_ENABLED`
     /// is off.
     available_to_caller: bool,
     /// The endpoint's payload when reachable (e.g. the `/v1/models` list, or a
@@ -833,10 +833,10 @@ pub struct LlmHealth {
     rate_limit_anon_per_min: Option<u32>,
     /// The budget that applies to THIS caller: "user" or "guest".
     caller: &'static str,
-    /// The model Spark chat completions use (`LLM_CHAT_MODEL` → `LLM_MODEL`).
+    /// The model Spark chat completions use (`OTS_LLM_CHAT_MODEL` → `OTS_LLM_MODEL`).
     chat_model: String,
     /// The context window the chat budgets its prompt against: the declared
-    /// `LLM_CONTEXT_TOKENS`, else a best-effort probe of the gateway (vLLM
+    /// `OTS_LLM_CONTEXT_TOKENS`, else a best-effort probe of the gateway (vLLM
     /// `max_model_len`, Ollama Modelfile `num_ctx`). `null` = no budgeting —
     /// fine for large-context hosted APIs, risky on local runtimes.
     context_tokens: Option<usize>,
@@ -852,8 +852,8 @@ pub struct LlmServiceHealth {
     /// generation and saved-query repair) or `shacl` (the SHACL Studio
     /// assistant).
     id: &'static str,
-    /// The model that feature sends: its per-task override (`LLM_CHAT_MODEL`,
-    /// `LLM_SPARQL_MODEL`, `LLM_SHACL_MODEL`), else `LLM_MODEL`.
+    /// The model that feature sends: its per-task override (`OTS_LLM_CHAT_MODEL`,
+    /// `OTS_LLM_SPARQL_MODEL`, `OTS_LLM_SHACL_MODEL`), else `OTS_LLM_MODEL`.
     model: String,
     /// Whether the gateway's model list includes that model (exact id, or
     /// Ollama's implicit `:latest` tag). `null` when there is no list to judge
@@ -937,10 +937,10 @@ async fn probe_gateway(base: &str) -> Result<Option<Value>, String> {
 /// AI availability alongside its other service health (see [`probe_gateway`]).
 async fn llm_health(
     user: Option<Extension<AuthenticatedUser>>,
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> Json<LlmHealth> {
     let gateway = gateway_base().ok();
-    let cfg = llm_guard::config();
+    let cfg = llm_guard::budgets(&state.auth_db);
     let chat_model = chat_model();
     let context_tokens = resolve_context_tokens(&chat_model).await;
     // Nothing configured: nothing to probe, and nothing is claimed reachable.
@@ -952,9 +952,9 @@ async fn llm_health(
         },
     };
     let budget = if user.is_some() {
-        cfg.rate_per_min
+        cfg.per_min
     } else {
-        cfg.rate_per_min_anon
+        cfg.per_min_anon
     };
     // Judged from the payload the probe already fetched — no request per model.
     let services = service_health(
@@ -972,8 +972,8 @@ async fn llm_health(
         unreachable_reason,
         available_to_caller: budget != llm_guard::Budget::Refused,
         detail,
-        rate_limit_per_min: cfg.rate_per_min.per_minute(),
-        rate_limit_anon_per_min: cfg.rate_per_min_anon.per_minute(),
+        rate_limit_per_min: cfg.per_min.per_minute(),
+        rate_limit_anon_per_min: cfg.per_min_anon.per_minute(),
         caller: if user.is_some() { "user" } else { "guest" },
         chat_model,
         context_tokens,
@@ -991,7 +991,7 @@ pub struct NlSparqlRequest {
     /// place (a refinement) rather than always generating a brand-new query.
     #[serde(default)]
     pub current_query: Option<String>,
-    /// Override the model; defaults to the configured model (see `LLM_SPARQL_MODEL` / `LLM_MODEL`).
+    /// Override the model; defaults to the configured model (see `OTS_LLM_SPARQL_MODEL` / `OTS_LLM_MODEL`).
     #[serde(default)]
     pub model: Option<String>,
 }
@@ -1601,7 +1601,7 @@ const ORIENTATION_GRAPH_LIMIT: usize = 6;
 /// Cap rows returned from a chat-issued SPARQL query (both to the model and the UI).
 const MAX_CHAT_QUERY_ROWS: usize = 50;
 // How many `SPARQL:` rounds the model may use within one user turn
-// (`LLM_CHAT_MAX_ROUNDS`, default 3). Feeding rows (or the error, for
+// (`OTS_LLM_CHAT_MAX_ROUNDS`, default 3). Feeding rows (or the error, for
 // self-repair) back after each round lets it e.g. count first and then fetch
 // geometry for a map, while keeping latency and tokens bounded.
 /// Per-cell character budgets when rendering result rows into the follow-up prompt.
@@ -1623,7 +1623,7 @@ const CHAT_PROMPT_MARGIN: usize = 2048;
 /// to a prompt that must fit the model's context window.
 const CHAT_TABLE_MAX_CHARS: usize = 6000;
 
-/// The serving model's context window in tokens (`LLM_CONTEXT_TOKENS`), if the
+/// The serving model's context window in tokens (`OTS_LLM_CONTEXT_TOKENS`), if the
 /// operator declared one. Local runtimes (Ollama, llama.cpp, vLLM with a small
 /// `max_model_len`) silently truncate an over-long prompt, and what falls off
 /// first is the system prompt — the execution protocol and the graph vocabulary
@@ -1633,7 +1633,7 @@ fn llm_context_tokens() -> Option<usize> {
     crate::config::LLM_CONTEXT_TOKENS.get().filter(|&n| n > 0)
 }
 
-/// How many `SPARQL:` rounds one turn may use (`LLM_CHAT_MAX_ROUNDS`, default
+/// How many `SPARQL:` rounds one turn may use (`OTS_LLM_CHAT_MAX_ROUNDS`, default
 /// 3, 1..=8). Three is right for a small local
 /// model — more rounds mostly buy more failed repairs — but a capable model
 /// answering multi-part questions (labels + relations + counts across two
@@ -1642,7 +1642,7 @@ fn chat_max_rounds() -> usize {
     crate::config::LLM_CHAT_MAX_ROUNDS.get()
 }
 
-/// Per-round query cap in seconds (`LLM_CHAT_QUERY_MAX_SECS`, default
+/// Per-round query cap in seconds (`OTS_LLM_CHAT_QUERY_MAX_SECS`, default
 /// 30, 5..=600). The effective bound is the
 /// smaller of this and the endpoint's own query timeout — see
 /// [`run_chat_query_timed`] for why chat rounds get a tighter cap than the
@@ -1654,14 +1654,14 @@ fn chat_query_max_secs() -> u64 {
 
 // ─── Context-window discovery ──────────────────────────────────────────────────
 //
-// `LLM_CONTEXT_TOKENS` is the single most consequential knob on a local
+// `OTS_LLM_CONTEXT_TOKENS` is the single most consequential knob on a local
 // runtime, and the one operators forget: without it the runtime truncates an
 // over-long prompt from the top — deleting the execution protocol — and the
 // failure reads as "the assistant fabricates". When it is unset, ask the
 // gateway itself, best-effort: vLLM publishes `max_model_len` on `/v1/models`,
 // and Ollama's native `/api/show` reveals a Modelfile `num_ctx`. Detection can
 // only ever *enable* budgeting that would otherwise be off, and a declared
-// `LLM_CONTEXT_TOKENS` always wins.
+// `OTS_LLM_CONTEXT_TOKENS` always wins.
 
 /// The window advertised for `model` in an OpenAI-style `/v1/models` payload.
 /// vLLM ships `max_model_len`; some gateways use `context_window` /
@@ -1751,7 +1751,7 @@ async fn detect_context_tokens(base: &str, model: &str) -> Option<usize> {
                         model,
                         "Ollama serves this model without a Modelfile num_ctx — its context \
                          window (often 4096) is invisible over the API and the prompt may be \
-                         truncated silently; set LLM_CONTEXT_TOKENS to the real \
+                         truncated silently; set OTS_LLM_CONTEXT_TOKENS to the real \
                          OLLAMA_CONTEXT_LENGTH"
                     );
                 }
@@ -1763,7 +1763,7 @@ async fn detect_context_tokens(base: &str, model: &str) -> Option<usize> {
 }
 
 /// The context window to budget this turn against: the declared
-/// `LLM_CONTEXT_TOKENS` when set, else a cached best-effort probe of the
+/// `OTS_LLM_CONTEXT_TOKENS` when set, else a cached best-effort probe of the
 /// gateway. `None` disables budgeting, exactly as before.
 async fn resolve_context_tokens(model: &str) -> Option<usize> {
     if let Some(n) = llm_context_tokens() {
@@ -1824,7 +1824,7 @@ fn history_within_budget(history: &[ChatMessage], budget: usize) -> &[ChatMessag
 // model that ignores the tools loses nothing. A gateway that rejects the
 // `tools` parameter outright is remembered and never offered them again.
 
-/// `LLM_CHAT_TOOLS`: "auto" (default — offer native tools, fall back
+/// `OTS_LLM_CHAT_TOOLS`: "auto" (default — offer native tools, fall back
 /// transparently) or "off" (directive protocol only).
 fn chat_tools_enabled() -> bool {
     crate::config::LLM_CHAT_TOOLS.get() != "off"
@@ -2166,12 +2166,12 @@ pub(crate) fn guard_gate<'a>(
     // Per-principal budget: a user id when logged in, the client IP otherwise.
     // Guests get the (tighter) anonymous budget — they share the same GPU with
     // no account to attribute the cost to.
-    let cfg = llm_guard::config();
+    let budgets = llm_guard::budgets(&state.auth_db);
     let (rate_key, per_min) = match user {
-        Some(u) => (u.user_id.clone(), cfg.rate_per_min),
+        Some(u) => (u.user_id.clone(), budgets.per_min),
         None => (
             format!("ip:{}", ip.unwrap_or("unknown")),
-            cfg.rate_per_min_anon,
+            budgets.per_min_anon,
         ),
     };
     match llm_guard::check_rate_with(&rate_key, per_min) {
@@ -2588,7 +2588,7 @@ async fn run_chat_turn(
         tracing::warn!(
             prompt_tokens = estimate_tokens(&system_content),
             "no LLM context window declared or detectable — a local runtime may \
-             truncate this prompt silently; set LLM_CONTEXT_TOKENS"
+             truncate this prompt silently; set OTS_LLM_CONTEXT_TOKENS"
         );
     }
 
@@ -4670,9 +4670,9 @@ struct ChatQueryResult {
     truncated: bool,
 }
 
-// Upper bound on ONE chat retrieval round (`LLM_CHAT_QUERY_MAX_SECS`, default
+// Upper bound on ONE chat retrieval round (`OTS_LLM_CHAT_QUERY_MAX_SECS`, default
 // 30), whatever the endpoint's own timeout is. A turn gets
-// `LLM_CHAT_MAX_ROUNDS` attempts and a human is waiting on all of them, so a model-written query that is going nowhere has to fail while
+// `OTS_LLM_CHAT_MAX_ROUNDS` attempts and a human is waiting on all of them, so a model-written query that is going nowhere has to fail while
 // there is still time to repair it. Deployments raise the endpoint timeout for
 // legitimately long analytical queries (a constrained box needs 120s for an
 // aggregate over a few million triples); inheriting that here meant a single
@@ -4680,7 +4680,7 @@ struct ChatQueryResult {
 // turn burned on round 1, leaving two rounds that the user never waited for.
 
 /// [`run_chat_query`] bounded by the smaller of the endpoint timeout and
-/// `LLM_CHAT_QUERY_MAX_SECS`, so a pathological model-written query cannot stall
+/// `OTS_LLM_CHAT_QUERY_MAX_SECS`, so a pathological model-written query cannot stall
 /// the chat. The timeout message feeds back to the model for self-repair.
 async fn run_chat_query_timed(
     state: &AppState,
