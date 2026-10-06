@@ -364,4 +364,74 @@ mod tests {
         assert!(is_json("application/activity+json"));
         assert!(!is_json("text/html"));
     }
+
+    /// N-Quads in, JSON-LD out through the serializer every download uses.
+    fn serialise(nquads: &str) -> std::io::Result<String> {
+        use oxigraph::io::{RdfParser, RdfSerializer};
+        let mut out = RdfSerializer::from_format(json_ld()).for_writer(Vec::new());
+        for q in RdfParser::from_format(RdfFormat::NQuads).for_reader(nquads.as_bytes()) {
+            out.serialize_quad(&q.unwrap())?;
+        }
+        Ok(String::from_utf8(out.finish()?).unwrap())
+    }
+
+    /// The quads a JSON-LD document reads as, as sorted N-Quads lines with
+    /// blank-node labels canonicalised.
+    fn read_back(doc: &str) -> Vec<String> {
+        use oxigraph::io::RdfParser;
+        use oxigraph::model::dataset::CanonicalizationAlgorithm;
+        use oxigraph::model::Dataset;
+        let mut ds = Dataset::new();
+        for q in RdfParser::from_format(json_ld()).for_reader(doc.as_bytes()) {
+            ds.insert(&q.unwrap());
+        }
+        ds.canonicalize(CanonicalizationAlgorithm::Unstable);
+        let mut lines: Vec<String> = ds.iter().map(|q| q.to_string()).collect();
+        lines.sort();
+        lines
+    }
+
+    const JSON: &str = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON>";
+
+    /// fromRdf: an rdf:JSON literal is its JSON value, typed @json (JSON-LD
+    /// 1.1 API §8.5.2 step 2.4).
+    #[test]
+    fn a_json_literal_is_written_as_its_json_value() {
+        let doc = serialise(&format!(
+            "<http://e/s> <http://e/p> \"{{\\\"a\\\":[1,true,null]}}\"^^{JSON} .\n"
+        ))
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        let value = &v[0]["http://e/p"][0];
+        assert_eq!(value["@type"], "@json", "{doc}");
+        assert_eq!(value["@value"], serde_json::json!({"a": [1, true, null]}));
+    }
+
+    /// `@json` reads back as the canonical (JCS) lexical form, which is
+    /// another literal than a non-canonical one: that one keeps its form.
+    #[test]
+    fn a_json_literal_not_in_canonical_form_keeps_its_lexical_form() {
+        let nq = format!("<http://e/s> <http://e/p> \"{{ \\\"a\\\" : 1.0 }}\"^^{JSON} .\n");
+        let doc = serialise(&nq).unwrap();
+        assert!(!doc.contains("@json"), "{doc}");
+        assert_eq!(
+            read_back(&doc),
+            vec![nq.trim_end().trim_end_matches(" .").to_string()]
+        );
+    }
+
+    /// fromRdf js08 / js09: an rdf:JSON literal that is not JSON aborts the
+    /// serialisation (`invalid JSON literal`) — wherever it sits.
+    #[test]
+    fn a_json_literal_that_is_not_json_is_an_error() {
+        for bad in ["bareword", "[{]"] {
+            for nq in [
+                format!("<http://e/s> <http://e/p> \"{bad}\"^^{JSON} .\n"),
+                format!("_:b <http://e/p> \"{bad}\"^^{JSON} .\n<http://e/s> <http://e/q> _:b .\n"),
+            ] {
+                let e = serialise(&nq).unwrap_err();
+                assert!(e.to_string().contains("invalid JSON literal"), "{e}");
+            }
+        }
+    }
 }

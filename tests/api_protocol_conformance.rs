@@ -1433,7 +1433,8 @@ async fn an_ill_typed_json_literal_is_refused_on_every_protocol_write() {
         "nothing of a refused write may have been stored"
     );
 
-    // Valid JSON is stored, and the graph downloads as JSON-LD.
+    // Valid JSON is stored, and the graph downloads as JSON-LD with the value
+    // as a @json value.
     let (st, text, _) = send(
         &app,
         Method::PUT,
@@ -1456,5 +1457,6 @@ async fn an_ill_typed_json_literal_is_refused_on_every_protocol_write() {
     )
     .await;
     assert!(st.is_success(), "{st}: {body}");
-    assert!(body.contains("ok"), "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.to_string().contains(r#""@type":"@json""#), "{body}");
 }

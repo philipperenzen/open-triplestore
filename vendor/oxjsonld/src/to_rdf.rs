@@ -1617,7 +1617,7 @@ fn canonicalize_xsd_number(value: &str, always_double: bool) -> Option<RdfJsonNu
     })
 }
 
-fn serialize_canonical_json(
+pub(crate) fn serialize_canonical_json(
     events: Vec<JsonEvent<'static>>,
     writer: &mut WriterJsonSerializer<Vec<u8>>,
 ) {

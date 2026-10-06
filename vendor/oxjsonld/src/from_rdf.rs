@@ -1,7 +1,7 @@
 use crate::context::has_keyword_form;
 #[cfg(feature = "async-tokio")]
 use json_event_parser::TokioAsyncWriterJsonSerializer;
-use json_event_parser::{JsonEvent, WriterJsonSerializer};
+use json_event_parser::{JsonEvent, SliceJsonParser, WriterJsonSerializer};
 use oxiri::{Iri, IriParseError};
 #[cfg(feature = "rdf-12")]
 use oxrdf::BaseDirection;
@@ -22,7 +22,8 @@ use tokio::io::AsyncWrite;
 ///
 /// It does not implement exactly the [RDF as JSON-LD Algorithm](https://www.w3.org/TR/json-ld-api/#serialize-rdf-as-json-ld-algorithm)
 /// to be a streaming serializer but aims at being close to it.
-/// Features like `@json` and `@list` generation are not implemented.
+/// `@json` values are generated as the algorithm does; `@list` generation is
+/// not implemented.
 ///
 /// ```
 /// use oxrdf::{GraphNameRef, LiteralRef, NamedNodeRef, QuadRef};
@@ -501,6 +502,27 @@ impl InnerJsonLdWriter {
                             .into(),
                         ));
                     }
+                } else if literal.datatype().as_str() == RDF_JSON {
+                    // RDF to Object Conversion, step 2.4: an rdf:JSON literal
+                    // becomes its JSON value, typed @json; one that is not
+                    // JSON aborts the serialization (invalid JSON literal).
+                    let value = json_literal_value(literal.value())?;
+                    if canonical_json(&value) == literal.value() {
+                        output.push(JsonEvent::ObjectKey("@type".into()));
+                        output.push(JsonEvent::String("@json".into()));
+                        output.push(JsonEvent::ObjectKey("@value".into()));
+                        output.extend(value);
+                    } else {
+                        // @json reads back as the canonical form (JCS) of the
+                        // value, which is another literal than this one: keep
+                        // the lexical form as written, as a value typed rdf:JSON.
+                        output.push(JsonEvent::ObjectKey("@type".into()));
+                        output.push(JsonEvent::String(RDF_JSON.into()));
+                        output.push(JsonEvent::ObjectKey("@value".into()));
+                        output.push(JsonEvent::String(literal.value().into()));
+                    }
+                    output.push(JsonEvent::EndObject);
+                    return Ok(());
                 } else if literal.datatype() != xsd::STRING {
                     output.push(JsonEvent::ObjectKey("@type".into()));
                     output.push(JsonEvent::String(Self::type_value(
@@ -572,4 +594,77 @@ impl InnerJsonLdWriter {
             output.push(JsonEvent::EndObject);
         }
     }
+}
+
+/// `rdf:JSON`.
+const RDF_JSON: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON";
+
+/// The JSON value the lexical form of an `rdf:JSON` literal denotes, as events:
+/// the lexical-to-value mapping of the JSON datatype (JSON-LD 1.1 §10.2). An
+/// error (the `invalid JSON literal` of the API, §8.5.2 step 2.4) when the
+/// form is not exactly one JSON value.
+fn json_literal_value(lexical: &str) -> io::Result<Vec<JsonEvent<'_>>> {
+    let invalid = |why: String| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid JSON literal: {lexical:?} is not JSON ({why})"),
+        )
+    };
+    let mut parser = SliceJsonParser::new(lexical.as_bytes());
+    let mut events = Vec::new();
+    let mut depth = 0_usize;
+    let mut values = 0_usize;
+    loop {
+        let event = parser.parse_next().map_err(|e| invalid(e.to_string()))?;
+        match &event {
+            JsonEvent::Eof => break,
+            JsonEvent::StartArray | JsonEvent::StartObject => {
+                if depth == 0 {
+                    values += 1;
+                }
+                depth += 1;
+            }
+            JsonEvent::EndArray | JsonEvent::EndObject => depth = depth.saturating_sub(1),
+            JsonEvent::ObjectKey(_) => {}
+            JsonEvent::String(_) | JsonEvent::Number(_) | JsonEvent::Boolean(_) | JsonEvent::Null => {
+                if depth == 0 {
+                    values += 1;
+                }
+            }
+        }
+        events.push(event);
+    }
+    if values == 1 {
+        Ok(events)
+    } else {
+        Err(invalid("no JSON value".into()))
+    }
+}
+
+/// The canonical form (JCS, RFC 8785) of a JSON value: what a JSON-LD
+/// processor writes as the lexical form of the `rdf:JSON` literal of a `@json`
+/// value (§8.6.1 step 6.1.1).
+fn canonical_json(value: &[JsonEvent<'_>]) -> String {
+    let owned = value
+        .iter()
+        .map(|e| match e {
+            JsonEvent::String(s) => JsonEvent::String(s.clone().into_owned().into()),
+            JsonEvent::Number(n) => JsonEvent::Number(n.clone().into_owned().into()),
+            JsonEvent::ObjectKey(k) => JsonEvent::ObjectKey(k.clone().into_owned().into()),
+            JsonEvent::Boolean(b) => JsonEvent::Boolean(*b),
+            JsonEvent::Null => JsonEvent::Null,
+            JsonEvent::StartArray => JsonEvent::StartArray,
+            JsonEvent::EndArray => JsonEvent::EndArray,
+            JsonEvent::StartObject => JsonEvent::StartObject,
+            JsonEvent::EndObject => JsonEvent::EndObject,
+            JsonEvent::Eof => JsonEvent::Eof,
+        })
+        .collect();
+    let mut writer = WriterJsonSerializer::new(Vec::new());
+    crate::to_rdf::serialize_canonical_json(owned, &mut writer);
+    writer
+        .finish()
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok())
+        .unwrap_or_default()
 }

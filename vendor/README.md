@@ -347,3 +347,12 @@ an `UPSTREAM-PR-*.md` draft beside the crate.
    `JsonLdParser` directly with the option each test names (absent = `null`).
    W3C json-ld-api toRdf `di02`, `di04`–`di06`, and the non-normative
    `di09`–`di12` that the runner used to skip.
+
+5. **`rdf:JSON` literals are serialized as `@json` values, and an invalid one
+   is an error** (`src/from_rdf.rs`, RDF to Object Conversion step 2.4;
+   `UPSTREAM-PR-5-json-literals.md`). A literal whose lexical form is the
+   canonical (JCS) form of its JSON value is written `{"@type": "@json",
+   "@value": <the value>}`; one in another form (`"{ \"a\" : 1 }"`) keeps it,
+   typed `rdf:JSON`, because `@json` reads back as the canonical form, which is
+   another literal. A lexical form that is not JSON fails the serialization with
+   `invalid JSON literal`. W3C json-ld-api fromRdf `js08`, `js09`.
