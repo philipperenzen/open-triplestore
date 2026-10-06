@@ -120,6 +120,9 @@ Three facts worth knowing before an instance is exposed:
 | `DELETE` | `/api/admin/changes/cursors/{name}` | **admin** | Drop a bookmark. |
 | `GET` | `/api/admin/users` | **admin** | The account directory. |
 | `GET` | `/api/admin/audit` | **admin** | The audit trail. |
+| `GET` | `/api/admin/config` | **admin** | Every setting with its effective value, default and source; secrets redacted. |
+| `GET` | `/api/admin/settings` | **admin** | The runtime settings an admin can change without a restart. |
+| `PUT` | `/api/admin/settings/{name}` | **admin** | Override a runtime setting, or reset it with `{"value": null}`; audit-logged. |
 | `GET` | `/api/replication/status` | **none** | This node's role and lag; a health signal, beside `/livez`. |
 | `GET` | `/api/replication/manifest` | **admin** | What a follower needs to bootstrap. |
 | `GET` | `/api/replication/identity` | **admin** | The identity database, whole. |
