@@ -35,6 +35,8 @@
 
 **Open Triplestore** is a modern, high-performance RDF triple store with **SPARQL 1.1** and **LDP 1.0** support, **SPARQL 1.2 / RDF 1.2**, **GeoSPARQL 1.0 and 1.1** (1.1 without the optional DGGS class; the project's own grades, not OGC-certified), **SHACL Core**, **ShEx 2.1** and **OWL 2** reasoning (RL, EL and QL natively; DL with the bundled OWL API + HermiT reasoner sidecar) — grades and known gaps per standard in [docs/standards.md](docs/standards.md) — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
 
+How it performs against Oxigraph, Apache Jena Fuseki, QLever, Virtuoso and RDF4J — same machine, same container limits, same data and queries, including where it is slower — is measured in [docs/performance-comparison.md](docs/performance-comparison.md).
+
 ## Demo
 
 The web UI is **served by the binary itself** at `http://localhost:7878/` — there's no separate frontend to deploy. At a glance:

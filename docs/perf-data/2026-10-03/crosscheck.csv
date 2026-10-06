@@ -1,0 +1,17 @@
+scale,store,query,kind,instances
+1k,rdf4j,Q9,describe-differs,1192
+1k,virtuoso,Q10,inconsistent,1
+1k,virtuoso,Q11,inconsistent,1
+1k,virtuoso,Q2,inconsistent,13
+1k,virtuoso,Q7,inconsistent,6
+1k,virtuoso,Q8,inconsistent,3
+1k,virtuoso,Q9,describe-differs,1192
+10k,rdf4j,Q9,describe-differs,715
+10k,virtuoso,Q1,inconsistent,2
+10k,virtuoso,Q10,inconsistent,1
+10k,virtuoso,Q2,inconsistent,9
+10k,virtuoso,Q3,inconsistent,1
+10k,virtuoso,Q5,inconsistent,2
+10k,virtuoso,Q7,inconsistent,8
+10k,virtuoso,Q8,inconsistent,1
+10k,virtuoso,Q9,describe-differs,1197
