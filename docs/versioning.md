@@ -43,6 +43,11 @@ once `OTS_CHECKPOINT_EVERY` (100) deltas chain from the same base, or when
 the changes since the base exceed `OTS_CHECKPOINT_FRACTION` (0.25) of its
 size (and more than 1 000 quads).
 
+**Backups.** A backup holds the store and the identity database, not the
+change log, so an unpublished delta is not in it: after a restore it answers
+`410`. Publish a version, or cut it with `"checkpoint": true`, before a
+backup it must survive.
+
 **Building a delta.** The first read of a delta's data — `…/versions/:ver/data`,
 a `versions=` pin in browse, a dataset service's `?version=`, a saved query
 pinned to it, its tests — builds its graphs, forward from the base checkpoint

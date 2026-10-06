@@ -4390,21 +4390,17 @@ mod private_snapshot_tests {
         let (state, _) = state_with_version();
         let base = state.base_url.as_str();
         let stray = format!("{base}/dataset/ds1/version/2.0.0/stray");
-        let record = DatasetVersion {
-            dataset_id: "ds1".into(),
-            version: "2.0.0".into(),
-            status: VersionStatus::Draft,
-            graph_iri: format!("{base}/dataset/ds1/version/2.0.0"),
-            snapshot_graphs: vec![stray.clone()],
-            source_map: Vec::new(),
-            created_at: "2026-01-01T00:00:00Z".into(),
-            created_by: None,
-            derived_from: None,
-            notes: None,
-            branch: None,
-            conforms_to_model: None,
-            conforms_to_version: None,
-        };
+        let mut record = DatasetVersion::checkpoint(
+            "ds1",
+            "2.0.0",
+            VersionStatus::Draft,
+            format!("{base}/dataset/ds1/version/2.0.0"),
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
+        record.snapshot_graphs = vec![stray.clone()];
         registry::insert_version(&state.store, base, &record).unwrap();
         let private = private_snapshot_graphs(&state, "ds1", "2.0.0").unwrap();
         assert!(private.contains(&stray), "{private:?}");

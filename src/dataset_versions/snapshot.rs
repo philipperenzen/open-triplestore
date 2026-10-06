@@ -329,7 +329,8 @@ mod tests {
         let live = "http://x/g/validation";
         put(&store, live, "http://x/a", "http://x/p", "http://x/b");
 
-        let map = snapshot_graphs(&store, base, "ds1", "1.0.0", &[live.to_string()]).unwrap();
+        let mut map = mapping(base, "ds1", "1.0.0", &[live.to_string()]);
+        copy_into(&store, &mut map).unwrap();
         assert_eq!(
             map[0].snapshot_graph,
             "http://x/dataset/ds1/version/1.0.0/validation-1"
@@ -339,10 +340,10 @@ mod tests {
 
         // Branching a version cut before the name was reserved, whose snapshot
         // took it, moves the branch's copy aside as well.
-        let legacy = [GraphMapping {
-            snapshot_graph: version_validation_graph(base, "ds1", "0.9.0"),
-            source_graph: live.to_string(),
-        }];
+        let legacy = [GraphMapping::new(
+            version_validation_graph(base, "ds1", "0.9.0"),
+            live.to_string(),
+        )];
         let branch = clone_version(&store, base, "ds1", &legacy, "0.9.0-b").unwrap();
         assert_eq!(
             branch[0].snapshot_graph,
